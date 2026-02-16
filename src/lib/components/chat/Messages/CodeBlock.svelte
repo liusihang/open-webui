@@ -14,7 +14,7 @@
 
 	// svelte-highlight imports
 	import { HighlightAuto } from 'svelte-highlight';
-	import atomOneDark from 'svelte-highlight/styles/atom-one-dark';
+	import vs2015 from 'svelte-highlight/styles/vs2015';
 
 	import CodeEditor from '$lib/components/common/CodeEditor.svelte';
 	import SvgPanZoom from '$lib/components/common/SVGPanZoom.svelte';
@@ -308,12 +308,12 @@
 </script>
 
 <svelte:head>
-	{@html atomOneDark}
+	{@html vs2015}
 </svelte:head>
 
 <div class="my-2 group">
 	<div
-		class="relative {className} flex flex-col rounded-xl border border-gray-200 dark:border-gray-800/60 shadow-sm overflow-hidden bg-white dark:bg-[#0d1117]"
+		class="relative {className} flex flex-col rounded-xl border border-gray-200 dark:border-[#3c3c3c] shadow-sm overflow-hidden bg-white dark:bg-[#1e1e1e]"
 		dir="ltr"
 	>
 		{#if ['mermaid', 'vega', 'vega-lite'].includes(lang)}
@@ -338,13 +338,24 @@
 		{:else}
 			<!-- Mac-style Header -->
 			<div
-				class="flex items-center justify-between bg-gray-50/50 dark:bg-[#161b22]/80 px-4 py-2 border-b border-gray-200 dark:border-gray-800/60 text-gray-500 dark:text-gray-400 select-none backdrop-blur-sm"
+				class="flex items-center justify-between bg-gray-50/50 dark:bg-[#252526] px-4 py-2 border-b border-gray-200 dark:border-[#3c3c3c] text-gray-500 dark:text-[#c5c5c5] select-none"
 			>
-				<span class="text-xs font-mono font-medium lowercase opacity-75">
+				<span class="text-xs font-medium lowercase opacity-75 macos-code-font">
 					{lang || 'text'}
 				</span>
 
 				<div class="flex items-center gap-2 opacity-0 group-hover:opacity-100 transition-opacity duration-200">
+					<button
+						class="flex items-center gap-1.5 px-2 py-1 rounded-md hover:bg-gray-200 dark:hover:bg-gray-800 transition text-xs font-medium"
+						on:click={collapseCodeBlock}
+						title={collapsed ? $i18n.t('Expand') : $i18n.t('Collapse')}
+					>
+						<ChevronUpDown className="size-3.5" />
+						<span class="hidden sm:inline">
+							{collapsed ? $i18n.t('Expand') : $i18n.t('Collapse')}
+						</span>
+					</button>
+
 					{#if ($config?.features?.enable_code_execution ?? true) && (lang.toLowerCase() === 'python' || lang.toLowerCase() === 'py' || (lang === '' && checkPythonCode(code)))}
 						{#if executing}
 							<div class="flex items-center gap-1.5 px-2 py-1 rounded-md bg-gray-100 dark:bg-gray-800 text-xs">
@@ -421,31 +432,33 @@
 			</div>
 
 			<!-- Code Area -->
-			<div class="relative bg-white dark:bg-[#0d1117] overflow-hidden">
+			<div class="relative bg-[#1e1e1e] text-[#d4d4d4] overflow-hidden">
 				{#if !collapsed}
 					{#if edit}
-						<CodeEditor
-							value={code}
-							{id}
-							{lang}
-							onSave={() => {
-								saveCode();
-							}}
-							onChange={(value) => {
-								_code = value;
-							}}
-						/>
+						<div class="code-editor-no-gutters">
+							<CodeEditor
+								value={code}
+								{id}
+								{lang}
+								onSave={() => {
+									saveCode();
+								}}
+								onChange={(value) => {
+									_code = value;
+								}}
+							/>
+						</div>
 					{:else}
 						<div class="overflow-x-auto">
 							<HighlightAuto 
 								{code} 
-								class="!bg-transparent !p-4 text-sm font-mono"
+								class="!bg-transparent !p-4 text-sm macos-code-font"
 							/>
 						</div>
 					{/if}
 				{:else}
 					<div
-						class="bg-white dark:bg-[#0d1117] dark:text-white py-2 px-4 flex items-center justify-center cursor-pointer hover:bg-gray-100 dark:hover:bg-gray-900 transition"
+						class="bg-[#1e1e1e] text-[#d4d4d4] py-2 px-4 flex items-center justify-center cursor-pointer hover:bg-[#252526] transition"
 						on:click={collapseCodeBlock}
 					>
 						<span class="text-gray-500 italic text-xs">
@@ -456,9 +469,16 @@
 				{/if}
 			</div>
 
+			{#if !collapsed}
+				<div
+					id="plt-canvas-{id}"
+					class="bg-gray-50 dark:bg-black dark:text-white max-w-full overflow-x-auto scrollbar-hidden"
+				/>
+			{/if}
+
 			<!-- Output Area -->
 			{#if !collapsed && (executing || stdout || stderr || result || files)}
-				<div class="border-t border-gray-200 dark:border-gray-800/60 bg-gray-50 dark:bg-black dark:text-white p-4 text-sm font-mono overflow-x-auto">
+				<div class="border-t border-gray-200 dark:border-gray-800/60 bg-gray-50 dark:bg-black dark:text-white p-4 text-sm macos-code-font overflow-x-auto">
 					{#if executing}
 						<div class="text-gray-500">{$i18n.t('Running...')}</div>
 					{:else}
@@ -493,6 +513,38 @@
 </div>
 
 <style>
+	.macos-code-font {
+		font-family:
+			'SF Mono',
+			'SFMono-Regular',
+			Menlo,
+			Monaco,
+			Consolas,
+			'Liberation Mono',
+			'Courier New',
+			monospace;
+	}
+
+	.code-editor-no-gutters :global(.cm-gutters) {
+		display: none !important;
+	}
+
+	.code-editor-no-gutters :global(.cm-editor) {
+		font-family:
+			'SF Mono',
+			'SFMono-Regular',
+			Menlo,
+			Monaco,
+			Consolas,
+			'Liberation Mono',
+			'Courier New',
+			monospace;
+	}
+
+	.code-editor-no-gutters :global(.cm-content) {
+		padding-left: 0.75rem;
+	}
+
 	/* Refined scrollbar */
 	:global(::-webkit-scrollbar) {
 		width: 8px;
