@@ -56,7 +56,8 @@ export const DEFAULT_PERMISSIONS = {
 		web_search: true,
 		image_generation: true,
 		code_interpreter: true,
-		memories: true
+		memories: true,
+		deep_research: true
 	},
 	settings: {
 		interface: true

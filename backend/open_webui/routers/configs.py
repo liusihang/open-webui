@@ -461,6 +461,59 @@ async def set_code_execution_config(
 
 
 ############################
+# DeepResearchConfig
+############################
+class DeepResearchConfigForm(BaseModel):
+    ENABLE_DEEP_RESEARCH: bool
+    DEERFLOW_BASE_URL: Optional[str]
+    DEERFLOW_API_KEY: Optional[str]
+    DEERFLOW_MODEL: Optional[str]
+    DEERFLOW_CONNECT_TIMEOUT_SECS: int
+    DEERFLOW_REQUEST_TIMEOUT_SECS: int
+    DEERFLOW_REUSE_THREADS: bool
+
+
+@router.get("/deep_research", response_model=DeepResearchConfigForm)
+async def get_deep_research_config(request: Request, user=Depends(get_admin_user)):
+    return {
+        "ENABLE_DEEP_RESEARCH": request.app.state.config.ENABLE_DEEP_RESEARCH,
+        "DEERFLOW_BASE_URL": request.app.state.config.DEERFLOW_BASE_URL,
+        "DEERFLOW_API_KEY": request.app.state.config.DEERFLOW_API_KEY,
+        "DEERFLOW_MODEL": request.app.state.config.DEERFLOW_MODEL,
+        "DEERFLOW_CONNECT_TIMEOUT_SECS": request.app.state.config.DEERFLOW_CONNECT_TIMEOUT_SECS,
+        "DEERFLOW_REQUEST_TIMEOUT_SECS": request.app.state.config.DEERFLOW_REQUEST_TIMEOUT_SECS,
+        "DEERFLOW_REUSE_THREADS": request.app.state.config.DEERFLOW_REUSE_THREADS,
+    }
+
+
+@router.post("/deep_research", response_model=DeepResearchConfigForm)
+async def set_deep_research_config(
+    request: Request, form_data: DeepResearchConfigForm, user=Depends(get_admin_user)
+):
+    request.app.state.config.ENABLE_DEEP_RESEARCH = form_data.ENABLE_DEEP_RESEARCH
+    request.app.state.config.DEERFLOW_BASE_URL = form_data.DEERFLOW_BASE_URL
+    request.app.state.config.DEERFLOW_API_KEY = form_data.DEERFLOW_API_KEY
+    request.app.state.config.DEERFLOW_MODEL = form_data.DEERFLOW_MODEL
+    request.app.state.config.DEERFLOW_CONNECT_TIMEOUT_SECS = max(
+        1, int(form_data.DEERFLOW_CONNECT_TIMEOUT_SECS or 10)
+    )
+    request.app.state.config.DEERFLOW_REQUEST_TIMEOUT_SECS = max(
+        5, int(form_data.DEERFLOW_REQUEST_TIMEOUT_SECS or 900)
+    )
+    request.app.state.config.DEERFLOW_REUSE_THREADS = form_data.DEERFLOW_REUSE_THREADS
+
+    return {
+        "ENABLE_DEEP_RESEARCH": request.app.state.config.ENABLE_DEEP_RESEARCH,
+        "DEERFLOW_BASE_URL": request.app.state.config.DEERFLOW_BASE_URL,
+        "DEERFLOW_API_KEY": request.app.state.config.DEERFLOW_API_KEY,
+        "DEERFLOW_MODEL": request.app.state.config.DEERFLOW_MODEL,
+        "DEERFLOW_CONNECT_TIMEOUT_SECS": request.app.state.config.DEERFLOW_CONNECT_TIMEOUT_SECS,
+        "DEERFLOW_REQUEST_TIMEOUT_SECS": request.app.state.config.DEERFLOW_REQUEST_TIMEOUT_SECS,
+        "DEERFLOW_REUSE_THREADS": request.app.state.config.DEERFLOW_REUSE_THREADS,
+    }
+
+
+############################
 # SetDefaultModels
 ############################
 class ModelsConfigForm(BaseModel):
