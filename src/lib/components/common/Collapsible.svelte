@@ -1,7 +1,4 @@
 <script lang="ts">
-	import { decode } from 'html-entities';
-	import { v4 as uuidv4 } from 'uuid';
-
 	import { getContext } from 'svelte';
 	const i18n = getContext('i18n');
 
@@ -34,6 +31,7 @@
 
 	import ChevronUp from '../icons/ChevronUp.svelte';
 	import ChevronDown from '../icons/ChevronDown.svelte';
+	import LightBulb from '../icons/LightBulb.svelte';
 	import Spinner from './Spinner.svelte';
 
 	export let open = false;
@@ -55,8 +53,11 @@
 	export let onChange: Function = () => {};
 
 	$: onChange(open);
-
-	const collapsibleId = uuidv4();
+	$: attributeType = attributes?.type ?? null;
+	$: isReasoning = attributeType === 'reasoning';
+	$: isCodeInterpreter = attributeType === 'code_interpreter';
+	$: isDone = String(attributes?.done ?? 'false') === 'true';
+	$: isStreaming = attributes?.done !== undefined && !isDone;
 </script>
 
 <div {id} class={className}>
@@ -72,44 +73,48 @@
 			}}
 		>
 			<div
-				class=" w-full font-medium flex items-center justify-between gap-2 {attributes?.done &&
-				attributes?.done !== 'true'
-					? 'shimmer'
-					: ''}
-			"
+				class="w-full font-medium flex items-center justify-between gap-2 {isReasoning
+					? 'rounded-xl border border-amber-200/70 bg-amber-50/60 px-3 py-2 text-base leading-6 text-amber-900 dark:border-amber-700/50 dark:bg-gray-850/60 dark:text-amber-100'
+					: ''}"
 			>
-				{#if attributes?.done && attributes?.done !== 'true'}
-					<div>
-						<Spinner className="size-4" />
-					</div>
-				{/if}
+				<div class="flex min-w-0 items-center gap-2">
+					{#if isReasoning}
+						<div class="rounded-md bg-amber-100/80 p-1 text-amber-700 dark:bg-amber-900/40 dark:text-amber-300">
+							<LightBulb className="size-3.5" />
+						</div>
+					{:else if isStreaming}
+						<div>
+							<Spinner className="size-4" />
+						</div>
+					{/if}
 
-				<div class="">
-					{#if attributes?.type === 'reasoning'}
-						{#if attributes?.done === 'true' && attributes?.duration}
-							{#if attributes.duration < 1}
-								{$i18n.t('Thought for less than a second')}
-							{:else if attributes.duration < 60}
-								{$i18n.t('Thought for {{DURATION}} seconds', {
-									DURATION: attributes.duration
-								})}
+					<div class="min-w-0 line-clamp-1 {isReasoning && isStreaming ? 'shimmer' : ''}">
+						{#if isReasoning}
+							{#if isDone && attributes?.duration}
+								{#if attributes.duration < 1}
+									{$i18n.t('Thought for less than a second')}
+								{:else if attributes.duration < 60}
+									{$i18n.t('Thought for {{DURATION}} seconds', {
+										DURATION: attributes.duration
+									})}
+								{:else}
+									{$i18n.t('Thought for {{DURATION}}', {
+										DURATION: dayjs.duration(attributes.duration, 'seconds').humanize()
+									})}
+								{/if}
 							{:else}
-								{$i18n.t('Thought for {{DURATION}}', {
-									DURATION: dayjs.duration(attributes.duration, 'seconds').humanize()
-								})}
+								{$i18n.t('Thinking...')}
+							{/if}
+						{:else if isCodeInterpreter}
+							{#if isDone}
+								{$i18n.t('Analyzed')}
+							{:else}
+								{$i18n.t('Analyzing...')}
 							{/if}
 						{:else}
-							{$i18n.t('Thinking...')}
+							{title}
 						{/if}
-					{:else if attributes?.type === 'code_interpreter'}
-						{#if attributes?.done === 'true'}
-							{$i18n.t('Analyzed')}
-						{:else}
-							{$i18n.t('Analyzing...')}
-						{/if}
-					{:else}
-						{title}
-					{/if}
+					</div>
 				</div>
 
 				{#if !disabled}

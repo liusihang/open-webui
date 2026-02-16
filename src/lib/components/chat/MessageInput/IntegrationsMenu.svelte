@@ -19,6 +19,7 @@
 	import GlobeAlt from '$lib/components/icons/GlobeAlt.svelte';
 	import Photo from '$lib/components/icons/Photo.svelte';
 	import Terminal from '$lib/components/icons/Terminal.svelte';
+	import BookOpen from '$lib/components/icons/BookOpen.svelte';
 	import ChevronRight from '$lib/components/icons/ChevronRight.svelte';
 	import ChevronLeft from '$lib/components/icons/ChevronLeft.svelte';
 
@@ -39,6 +40,8 @@
 	export let imageGenerationEnabled = false;
 	export let showCodeInterpreterButton = false;
 	export let codeInterpreterEnabled = false;
+	export let showDeepResearchButton = false;
+	export let deepResearchEnabled = false;
 
 	export let onShowValves: Function;
 	export let onClose: Function;
@@ -219,6 +222,9 @@
 								class="flex w-full justify-between gap-2 items-center px-3 py-1.5 text-sm cursor-pointer rounded-xl hover:bg-gray-50 dark:hover:bg-gray-800/50"
 								on:click={() => {
 									webSearchEnabled = !webSearchEnabled;
+									if (webSearchEnabled) {
+										deepResearchEnabled = false;
+									}
 								}}
 							>
 								<div class="flex-1 truncate">
@@ -250,6 +256,9 @@
 								class="flex w-full justify-between gap-2 items-center px-3 py-1.5 text-sm cursor-pointer rounded-xl hover:bg-gray-50 dark:hover:bg-gray-800/50"
 								on:click={() => {
 									imageGenerationEnabled = !imageGenerationEnabled;
+									if (imageGenerationEnabled) {
+										deepResearchEnabled = false;
+									}
 								}}
 							>
 								<div class="flex-1 truncate">
@@ -285,6 +294,9 @@
 									: $i18n.t('Enable Code Interpreter')}
 								on:click={() => {
 									codeInterpreterEnabled = !codeInterpreterEnabled;
+									if (codeInterpreterEnabled) {
+										deepResearchEnabled = false;
+									}
 								}}
 							>
 								<div class="flex-1 truncate">
@@ -300,6 +312,46 @@
 								<div class=" shrink-0">
 									<Switch
 										state={codeInterpreterEnabled}
+										on:change={async (e) => {
+											const state = e.detail;
+											await tick();
+										}}
+									/>
+								</div>
+							</button>
+						</Tooltip>
+					{/if}
+
+					{#if showDeepResearchButton}
+						<Tooltip content={$i18n.t('Run deep research with DeerFlow')} placement="top-start">
+							<button
+								class="flex w-full justify-between gap-2 items-center px-3 py-1.5 text-sm cursor-pointer rounded-xl hover:bg-gray-50 dark:hover:bg-gray-800/50"
+								aria-pressed={deepResearchEnabled}
+								aria-label={deepResearchEnabled
+									? $i18n.t('Disable Deep Research')
+									: $i18n.t('Enable Deep Research')}
+								on:click={() => {
+									deepResearchEnabled = !deepResearchEnabled;
+									if (deepResearchEnabled) {
+										webSearchEnabled = false;
+										imageGenerationEnabled = false;
+										codeInterpreterEnabled = false;
+									}
+								}}
+							>
+								<div class="flex-1 truncate">
+									<div class="flex flex-1 gap-2 items-center">
+										<div class="shrink-0">
+											<BookOpen className="size-4" strokeWidth="1.7" />
+										</div>
+
+										<div class=" truncate">{$i18n.t('Deep Research')}</div>
+									</div>
+								</div>
+
+								<div class=" shrink-0">
+									<Switch
+										state={deepResearchEnabled}
 										on:change={async (e) => {
 											const state = e.detail;
 											await tick();

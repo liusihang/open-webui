@@ -149,6 +149,13 @@ from open_webui.config import (
     CODE_INTERPRETER_JUPYTER_AUTH_PASSWORD,
     CODE_INTERPRETER_JUPYTER_TIMEOUT,
     ENABLE_MEMORIES,
+    ENABLE_DEEP_RESEARCH,
+    DEERFLOW_BASE_URL,
+    DEERFLOW_API_KEY,
+    DEERFLOW_MODEL,
+    DEERFLOW_CONNECT_TIMEOUT_SECS,
+    DEERFLOW_REQUEST_TIMEOUT_SECS,
+    DEERFLOW_REUSE_THREADS,
     # Image
     AUTOMATIC1111_API_AUTH,
     AUTOMATIC1111_BASE_URL,
@@ -513,6 +520,7 @@ from open_webui.utils.chat import (
 )
 from open_webui.utils.actions import chat_action as chat_action_handler
 from open_webui.utils.embeddings import generate_embeddings
+from open_webui.utils.deerflow import create_deerflow_research_stream_response
 from open_webui.utils.middleware import (
     build_chat_response_context,
     process_chat_payload,
@@ -1178,6 +1186,13 @@ app.state.config.IMAGE_GENERATION_ENGINE = IMAGE_GENERATION_ENGINE
 app.state.config.ENABLE_IMAGE_GENERATION = ENABLE_IMAGE_GENERATION
 app.state.config.ENABLE_IMAGE_PROMPT_GENERATION = ENABLE_IMAGE_PROMPT_GENERATION
 app.state.config.ENABLE_MEMORIES = ENABLE_MEMORIES
+app.state.config.ENABLE_DEEP_RESEARCH = ENABLE_DEEP_RESEARCH
+app.state.config.DEERFLOW_BASE_URL = DEERFLOW_BASE_URL
+app.state.config.DEERFLOW_API_KEY = DEERFLOW_API_KEY
+app.state.config.DEERFLOW_MODEL = DEERFLOW_MODEL
+app.state.config.DEERFLOW_CONNECT_TIMEOUT_SECS = DEERFLOW_CONNECT_TIMEOUT_SECS
+app.state.config.DEERFLOW_REQUEST_TIMEOUT_SECS = DEERFLOW_REQUEST_TIMEOUT_SECS
+app.state.config.DEERFLOW_REUSE_THREADS = DEERFLOW_REUSE_THREADS
 
 app.state.config.IMAGE_GENERATION_MODEL = IMAGE_GENERATION_MODEL
 app.state.config.IMAGE_SIZE = IMAGE_SIZE
@@ -1737,6 +1752,33 @@ async def chat_completion(
             },
         }
 
+        deep_research_requested = bool(
+            (metadata.get("features") or {}).get("deep_research", False)
+        )
+        if deep_research_requested:
+            if not request.app.state.config.ENABLE_DEEP_RESEARCH:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail="Deep research is disabled on this server.",
+                )
+
+            user_permissions = {}
+            if getattr(user, "permissions", None):
+                if isinstance(user.permissions, dict):
+                    user_permissions = user.permissions
+                elif hasattr(user.permissions, "model_dump"):
+                    user_permissions = user.permissions.model_dump()
+
+            feature_permissions = user_permissions.get("features", {})
+            if (
+                user.role != "admin"
+                and not bool(feature_permissions.get("deep_research", True))
+            ):
+                raise HTTPException(
+                    status_code=status.HTTP_403_FORBIDDEN,
+                    detail="You do not have permission to use deep research.",
+                )
+
         if metadata.get("chat_id") and user:
             if not metadata["chat_id"].startswith(
                 "local:"
@@ -1772,6 +1814,8 @@ async def chat_completion(
         request.state.metadata = metadata
         form_data["metadata"] = metadata
 
+    except HTTPException:
+        raise
     except Exception as e:
         log.debug(f"Error processing chat metadata: {e}")
         raise HTTPException(
@@ -1785,7 +1829,15 @@ async def chat_completion(
                 request, form_data, user, metadata, model
             )
 
-            response = await chat_completion_handler(request, form_data, user)
+            if bool((metadata.get("features") or {}).get("deep_research", False)):
+                response = await create_deerflow_research_stream_response(
+                    request=request,
+                    form_data=form_data,
+                    metadata=metadata,
+                    model=model,
+                )
+            else:
+                response = await chat_completion_handler(request, form_data, user)
             if metadata.get("chat_id") and metadata.get("message_id"):
                 try:
                     if not metadata["chat_id"].startswith("local:"):
@@ -2032,6 +2084,7 @@ async def get_app_config(request: Request):
                     "enable_code_execution": app.state.config.ENABLE_CODE_EXECUTION,
                     "enable_code_interpreter": app.state.config.ENABLE_CODE_INTERPRETER,
                     "enable_image_generation": app.state.config.ENABLE_IMAGE_GENERATION,
+                    "enable_deep_research": app.state.config.ENABLE_DEEP_RESEARCH,
                     "enable_autocomplete_generation": app.state.config.ENABLE_AUTOCOMPLETE_GENERATION,
                     "enable_community_sharing": app.state.config.ENABLE_COMMUNITY_SHARING,
                     "enable_message_rating": app.state.config.ENABLE_MESSAGE_RATING,

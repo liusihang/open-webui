@@ -182,16 +182,22 @@ def convert_output_to_messages(output: list, raw: bool = False) -> list[dict]:
             # Ensure arguments is always a JSON string
             if not isinstance(arguments, str):
                 arguments = json.dumps(arguments)
-            pending_tool_calls.append(
-                {
-                    "id": item.get("call_id", ""),
-                    "type": "function",
-                    "function": {
-                        "name": item.get("name", ""),
-                        "arguments": arguments,
-                    },
-                }
-            )
+            thought_sig = item.get("thoughtSignature") or item.get("thought_signature")
+            tool_call_item = {
+                "id": item.get("call_id", ""),
+                "type": "function",
+                "function": {
+                    "name": item.get("name", ""),
+                    "arguments": arguments,
+                },
+            }
+            if isinstance(thought_sig, str) and thought_sig:
+                # Keep both casings for cross-provider compatibility.
+                tool_call_item["thoughtSignature"] = thought_sig
+                tool_call_item["thought_signature"] = thought_sig
+                tool_call_item["function"]["thoughtSignature"] = thought_sig
+                tool_call_item["function"]["thought_signature"] = thought_sig
+            pending_tool_calls.append(tool_call_item)
 
         elif item_type == "function_call_output":
             # Flush any pending content/tool_calls before adding tool result

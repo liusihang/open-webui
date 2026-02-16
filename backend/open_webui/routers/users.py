@@ -229,6 +229,7 @@ class FeaturesPermissions(BaseModel):
     image_generation: bool = True
     code_interpreter: bool = True
     memories: bool = True
+    deep_research: bool = True
 
 
 class SettingsPermissions(BaseModel):
