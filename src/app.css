@@ -381,7 +381,7 @@ html.dark #sidebar-chat-item-menu .sidebar-chat-menu-trigger:hover {
 }
 
 html.deerflow-light #sidebar-chat-item-menu .sidebar-chat-menu-trigger {
-	background-color: inherit;
+	background-color: var(--deerflow-hover) !important;
 	border: 1px solid transparent;
 	border-radius: 999px;
 	color: var(--deerflow-text-muted);
@@ -389,20 +389,31 @@ html.deerflow-light #sidebar-chat-item-menu .sidebar-chat-menu-trigger {
 }
 
 html.deerflow-light #sidebar-chat-item-menu .sidebar-chat-menu-trigger:hover {
-	background-color: inherit;
+	background-color: var(--deerflow-hover) !important;
 	color: var(--deerflow-text);
 }
 
 html.deerflow-light #sidebar-chat-item-menu {
 	--tw-gradient-from: var(--deerflow-hover) !important;
-	--tw-gradient-to: transparent !important;
+	--tw-gradient-to: var(--deerflow-hover) !important;
 	--tw-gradient-stops: var(--tw-gradient-from), var(--tw-gradient-to) !important;
-	background-image: linear-gradient(to left, var(--deerflow-hover) 80%, transparent) !important;
+	background-image: linear-gradient(
+		to left,
+		var(--deerflow-hover) 100%,
+		var(--deerflow-hover) 100%
+	) !important;
+	background-color: var(--deerflow-hover) !important;
 }
 
 html.deerflow-light #sidebar-chat-item-menu.selected {
 	--tw-gradient-from: var(--deerflow-hover) !important;
-	background-image: linear-gradient(to left, var(--deerflow-hover) 80%, transparent) !important;
+	--tw-gradient-to: var(--deerflow-hover) !important;
+	background-image: linear-gradient(
+		to left,
+		var(--deerflow-hover) 100%,
+		var(--deerflow-hover) 100%
+	) !important;
+	background-color: var(--deerflow-hover) !important;
 }
 
 html.deerflow-light #message-input-container {
