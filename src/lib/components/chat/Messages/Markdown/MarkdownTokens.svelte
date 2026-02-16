@@ -349,7 +349,10 @@
 					: 'w-fit text-gray-500 hover:text-gray-700 dark:hover:text-gray-300 transition'}
 				dir="auto"
 			>
-				<div class="mb-1.5 {isReasoningDetails ? 'text-base leading-6' : ''}" slot="content">
+				<div
+					class="mb-1.5 {isReasoningDetails ? 'reasoning-content text-base' : ''}"
+					slot="content"
+				>
 					<svelte:self
 						id={`${id}-${tokenIdx}-d`}
 						tokens={marked.lexer(decode(token.text))}
@@ -449,3 +452,14 @@
 		{console.log('Unknown token', token)}
 	{/if}
 {/each}
+
+<style>
+	.reasoning-content {
+		padding-top: 0.5rem;
+	}
+
+	.reasoning-content :global(p),
+	.reasoning-content :global(li) {
+		line-height: 1.75;
+	}
+</style>
