@@ -3498,6 +3498,17 @@ async def streaming_chat_response_handler(response, ctx):
                                                     delta_tool_call[
                                                         "function"
                                                     ].setdefault("arguments", "")
+                                                    delta_tool_call_thought_sig = (
+                                                        delta_tool_call.get("thoughtSignature")
+                                                        or delta_tool_call.get("thought_signature")
+                                                        or delta_tool_call.get("function", {}).get("thoughtSignature")
+                                                        or delta_tool_call.get("function", {}).get("thought_signature")
+                                                    )
+                                                    if delta_tool_call_thought_sig:
+                                                        delta_tool_call["thoughtSignature"] = delta_tool_call_thought_sig
+                                                        delta_tool_call["thought_signature"] = delta_tool_call_thought_sig
+                                                        delta_tool_call["function"]["thoughtSignature"] = delta_tool_call_thought_sig
+                                                        delta_tool_call["function"]["thought_signature"] = delta_tool_call_thought_sig
                                                     response_tool_calls.append(
                                                         delta_tool_call
                                                     )
@@ -3524,6 +3535,18 @@ async def streaming_chat_response_handler(response, ctx):
                                                             "arguments"
                                                         ] += delta_arguments
 
+                                                    delta_thought_sig = (
+                                                        delta_tool_call.get("thoughtSignature")
+                                                        or delta_tool_call.get("thought_signature")
+                                                        or delta_tool_call.get("function", {}).get("thoughtSignature")
+                                                        or delta_tool_call.get("function", {}).get("thought_signature")
+                                                    )
+                                                    if delta_thought_sig:
+                                                        current_response_tool_call["thoughtSignature"] = delta_thought_sig
+                                                        current_response_tool_call["thought_signature"] = delta_thought_sig
+                                                        current_response_tool_call["function"]["thoughtSignature"] = delta_thought_sig
+                                                        current_response_tool_call["function"]["thought_signature"] = delta_thought_sig
+
                                         # Emit pending tool calls in real-time
                                         if response_tool_calls:
                                             # Flush any pending text first
@@ -3534,6 +3557,12 @@ async def streaming_chat_response_handler(response, ctx):
                                             for tc in response_tool_calls:
                                                 call_id = tc.get("id", "")
                                                 func = tc.get("function", {})
+                                                tc_thought_sig = (
+                                                    tc.get("thoughtSignature")
+                                                    or tc.get("thought_signature")
+                                                    or func.get("thoughtSignature")
+                                                    or func.get("thought_signature")
+                                                )
                                                 pending_fc_items.append(
                                                     {
                                                         "type": "function_call",
@@ -3545,6 +3574,16 @@ async def streaming_chat_response_handler(response, ctx):
                                                             "arguments", "{}"
                                                         ),
                                                         "status": "in_progress",
+                                                        **(
+                                                            {"thoughtSignature": tc_thought_sig}
+                                                            if tc_thought_sig
+                                                            else {}
+                                                        ),
+                                                        **(
+                                                            {"thought_signature": tc_thought_sig}
+                                                            if tc_thought_sig
+                                                            else {}
+                                                        ),
                                                     }
                                                 )
                                             pending_output = output + pending_fc_items
@@ -3898,6 +3937,12 @@ async def streaming_chat_response_handler(response, ctx):
                     for tc in response_tool_calls:
                         call_id = tc.get("id", "")
                         func = tc.get("function", {})
+                        tc_thought_sig = (
+                            tc.get("thoughtSignature")
+                            or tc.get("thought_signature")
+                            or func.get("thoughtSignature")
+                            or func.get("thought_signature")
+                        )
                         output.append(
                             {
                                 "type": "function_call",
@@ -3906,6 +3951,16 @@ async def streaming_chat_response_handler(response, ctx):
                                 "name": func.get("name", ""),
                                 "arguments": func.get("arguments", "{}"),
                                 "status": "in_progress",
+                                **(
+                                    {"thoughtSignature": tc_thought_sig}
+                                    if tc_thought_sig
+                                    else {}
+                                ),
+                                **(
+                                    {"thought_signature": tc_thought_sig}
+                                    if tc_thought_sig
+                                    else {}
+                                ),
                             }
                         )
 
@@ -4075,6 +4130,15 @@ async def streaming_chat_response_handler(response, ctx):
                                 item["arguments"] = tc.get("function", {}).get(
                                     "arguments", "{}"
                                 )
+                                tc_thought_sig = (
+                                    tc.get("thoughtSignature")
+                                    or tc.get("thought_signature")
+                                    or tc.get("function", {}).get("thoughtSignature")
+                                    or tc.get("function", {}).get("thought_signature")
+                                )
+                                if tc_thought_sig:
+                                    item["thoughtSignature"] = tc_thought_sig
+                                    item["thought_signature"] = tc_thought_sig
                                 break
 
                     for result in results:
