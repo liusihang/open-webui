@@ -63,7 +63,12 @@
 				} else if (localStorage.theme === 'light') {
 					document.documentElement.classList.add('light');
 					metaThemeColorTag.setAttribute('content', '#ffffff');
+				} else if (localStorage.theme === 'deerflow-light') {
+					document.documentElement.classList.add('light');
+					document.documentElement.classList.add('deerflow-light');
+					metaThemeColorTag.setAttribute('content', '#efece4');
 				} else if (localStorage.theme === 'her') {
+					document.documentElement.classList.add('light');
 					document.documentElement.classList.add('her');
 					metaThemeColorTag.setAttribute('content', '#983724');
 				} else {
@@ -191,6 +196,10 @@
 
 		html.her #splash-screen {
 			background: #983724;
+		}
+
+		html.deerflow-light #splash-screen {
+			background: #efece4;
 		}
 
 		#logo-her {

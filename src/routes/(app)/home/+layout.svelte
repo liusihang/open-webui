@@ -17,7 +17,7 @@
 </svelte:head>
 
 <div
-	class=" flex flex-col w-full h-screen max-h-[100dvh] transition-width duration-200 ease-in-out {$showSidebar
+	class="deerflow-main-shell flex flex-col w-full h-screen max-h-[100dvh] transition-width duration-200 ease-in-out {$showSidebar
 		? 'md:max-w-[calc(100%-var(--sidebar-width))]'
 		: ''} max-w-full"
 >
