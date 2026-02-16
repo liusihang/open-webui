@@ -336,16 +336,16 @@ html.deerflow-light #sidebar-workspace-button:hover {
 	background-color: var(--deerflow-hover) !important;
 }
 
-#sidebar-chat-item-menu > button {
+#sidebar-chat-item-menu button {
 	background-color: transparent !important;
 	border: none !important;
-	border-radius: 0 !important;
+	border-radius: 999px !important;
 	padding: 0 !important;
 	box-shadow: none !important;
 }
 
-#sidebar-chat-item-menu > button:focus,
-#sidebar-chat-item-menu > button:focus-visible {
+#sidebar-chat-item-menu button:focus,
+#sidebar-chat-item-menu button:focus-visible {
 	outline: none !important;
 	box-shadow: none !important;
 }
@@ -387,6 +387,10 @@ html.deerflow-light #sidebar-chat-item-menu .sidebar-chat-menu-trigger {
 html.deerflow-light #sidebar-chat-item-menu .sidebar-chat-menu-trigger:hover {
 	background-color: var(--deerflow-bg-input);
 	color: var(--deerflow-text);
+}
+
+html.deerflow-light #sidebar-chat-item-menu {
+	background-image: linear-gradient(to left, var(--deerflow-hover) 80%, transparent) !important;
 }
 
 html.deerflow-light #message-input-container {
