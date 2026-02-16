@@ -1,5 +1,4 @@
 <script lang="ts">
-	import hljs from 'highlight.js';
 	import { toast } from 'svelte-sonner';
 	import { getContext, onMount, tick, onDestroy } from 'svelte';
 	import { config } from '$lib/stores';
@@ -13,15 +12,13 @@
 		renderVegaVisualization
 	} from '$lib/utils';
 
-	import 'highlight.js/styles/github-dark.min.css';
+	// svelte-highlight imports
+	import { HighlightAuto } from 'svelte-highlight';
+	import atomOneDark from 'svelte-highlight/styles/atom-one-dark';
 
 	import CodeEditor from '$lib/components/common/CodeEditor.svelte';
 	import SvgPanZoom from '$lib/components/common/SVGPanZoom.svelte';
-
-	import ChevronUp from '$lib/components/icons/ChevronUp.svelte';
 	import ChevronUpDown from '$lib/components/icons/ChevronUpDown.svelte';
-	import CommandLine from '$lib/components/icons/CommandLine.svelte';
-	import Cube from '$lib/components/icons/Cube.svelte';
 
 	const i18n = getContext('i18n');
 
@@ -62,7 +59,6 @@
 	let renderHTML = null;
 	let renderError = null;
 
-	let highlightedCode = null;
 	let executing = false;
 
 	let stdout = null;
@@ -79,10 +75,8 @@
 
 	const saveCode = () => {
 		saved = true;
-
 		code = _code;
 		onSave(code);
-
 		setTimeout(() => {
 			saved = false;
 		}, 1000);
@@ -91,7 +85,6 @@
 	const copyCode = async () => {
 		copied = true;
 		await copyToClipboard(_code);
-
 		setTimeout(() => {
 			copied = false;
 		}, 1000);
@@ -102,37 +95,14 @@
 	};
 
 	const checkPythonCode = (str) => {
-		// Check if the string contains typical Python syntax characters
 		const pythonSyntax = [
-			'def ',
-			'else:',
-			'elif ',
-			'try:',
-			'except:',
-			'finally:',
-			'yield ',
-			'lambda ',
-			'assert ',
-			'nonlocal ',
-			'del ',
-			'True',
-			'False',
-			'None',
-			' and ',
-			' or ',
-			' not ',
-			' in ',
-			' is ',
-			' with '
+			'def ', 'else:', 'elif ', 'try:', 'except:', 'finally:', 'yield ',
+			'lambda ', 'assert ', 'nonlocal ', 'del ', 'True', 'False', 'None',
+			' and ', ' or ', ' not ', ' in ', ' is ', ' with '
 		];
-
 		for (let syntax of pythonSyntax) {
-			if (str.includes(syntax)) {
-				return true;
-			}
+			if (str.includes(syntax)) return true;
 		}
-
-		// If none of the above conditions met, it's probably not Python code
 		return false;
 	};
 
@@ -140,7 +110,6 @@
 		result = null;
 		stdout = null;
 		stderr = null;
-
 		executing = true;
 
 		if ($config?.code?.engine === 'jupyter') {
@@ -153,64 +122,31 @@
 				if (output['stdout']) {
 					stdout = output['stdout'];
 					const stdoutLines = stdout.split('\n');
-
 					for (const [idx, line] of stdoutLines.entries()) {
 						if (line.startsWith('data:image/png;base64')) {
-							if (files) {
-								files.push({
-									type: 'image/png',
-									data: line
-								});
-							} else {
-								files = [
-									{
-										type: 'image/png',
-										data: line
-									}
-								];
-							}
-
-							if (stdout.includes(`${line}\n`)) {
-								stdout = stdout.replace(`${line}\n`, ``);
-							} else if (stdout.includes(`${line}`)) {
-								stdout = stdout.replace(`${line}`, ``);
-							}
+							if (files) files.push({ type: 'image/png', data: line });
+							else files = [{ type: 'image/png', data: line }];
+							
+							if (stdout.includes(`${line}\n`)) stdout = stdout.replace(`${line}\n`, ``);
+							else if (stdout.includes(`${line}`)) stdout = stdout.replace(`${line}`, ``);
 						}
 					}
 				}
-
 				if (output['result']) {
 					result = output['result'];
 					const resultLines = result.split('\n');
-
 					for (const [idx, line] of resultLines.entries()) {
 						if (line.startsWith('data:image/png;base64')) {
-							if (files) {
-								files.push({
-									type: 'image/png',
-									data: line
-								});
-							} else {
-								files = [
-									{
-										type: 'image/png',
-										data: line
-									}
-								];
-							}
+							if (files) files.push({ type: 'image/png', data: line });
+							else files = [{ type: 'image/png', data: line }];
 
-							if (result.includes(`${line}\n`)) {
-								result = result.replace(`${line}\n`, ``);
-							} else if (result.includes(`${line}`)) {
-								result = result.replace(`${line}`, ``);
-							}
+							if (result.includes(`${line}\n`)) result = result.replace(`${line}\n`, ``);
+							else if (result.includes(`${line}`)) result = result.replace(`${line}`, ``);
 						}
 					}
 				}
-
 				output['stderr'] && (stderr = output['stderr']);
 			}
-
 			executing = false;
 		} else {
 			executePythonAsWorker(code);
@@ -237,12 +173,7 @@
 		console.log(packages);
 
 		pyodideWorker = new PyodideWorker();
-
-		pyodideWorker.postMessage({
-			id: id,
-			code: code,
-			packages: packages
-		});
+		pyodideWorker.postMessage({ id: id, code: code, packages: packages });
 
 		setTimeout(() => {
 			if (executing) {
@@ -255,34 +186,18 @@
 		pyodideWorker.onmessage = (event) => {
 			console.log('pyodideWorker.onmessage', event);
 			const { id, ...data } = event.data;
-
 			console.log(id, data);
 
 			if (data['stdout']) {
 				stdout = data['stdout'];
 				const stdoutLines = stdout.split('\n');
-
 				for (const [idx, line] of stdoutLines.entries()) {
 					if (line.startsWith('data:image/png;base64')) {
-						if (files) {
-							files.push({
-								type: 'image/png',
-								data: line
-							});
-						} else {
-							files = [
-								{
-									type: 'image/png',
-									data: line
-								}
-							];
-						}
+						if (files) files.push({ type: 'image/png', data: line });
+						else files = [{ type: 'image/png', data: line }];
 
-						if (stdout.includes(`${line}\n`)) {
-							stdout = stdout.replace(`${line}\n`, ``);
-						} else if (stdout.includes(`${line}`)) {
-							stdout = stdout.replace(`${line}`, ``);
-						}
+						if (stdout.includes(`${line}\n`)) stdout = stdout.replace(`${line}\n`, ``);
+						else if (stdout.includes(`${line}`)) stdout = stdout.replace(`${line}`, ``);
 					}
 				}
 			}
@@ -290,35 +205,19 @@
 			if (data['result']) {
 				result = data['result'];
 				const resultLines = result.split('\n');
-
 				for (const [idx, line] of resultLines.entries()) {
 					if (line.startsWith('data:image/png;base64')) {
-						if (files) {
-							files.push({
-								type: 'image/png',
-								data: line
-							});
-						} else {
-							files = [
-								{
-									type: 'image/png',
-									data: line
-								}
-							];
-						}
+						if (files) files.push({ type: 'image/png', data: line });
+						else files = [{ type: 'image/png', data: line }];
 
-						if (result.startsWith(`${line}\n`)) {
-							result = result.replace(`${line}\n`, ``);
-						} else if (result.startsWith(`${line}`)) {
-							result = result.replace(`${line}`, ``);
-						}
+						if (result.startsWith(`${line}\n`)) result = result.replace(`${line}\n`, ``);
+						else if (result.startsWith(`${line}`)) result = result.replace(`${line}`, ``);
 					}
 				}
 			}
 
 			data['stderr'] && (stderr = data['stderr']);
 			data['result'] && (result = data['result']);
-
 			executing = false;
 		};
 
@@ -378,21 +277,14 @@
 
 	const onAttributesUpdate = () => {
 		if (attributes?.output) {
-			// Create a helper function to unescape HTML entities
 			const unescapeHtml = (html) => {
 				const textArea = document.createElement('textarea');
 				textArea.innerHTML = html;
 				return textArea.value;
 			};
-
 			try {
-				// Unescape the HTML-encoded string
 				const unescapedOutput = unescapeHtml(attributes.output);
-
-				// Parse the unescaped string into JSON
 				const output = JSON.parse(unescapedOutput);
-
-				// Assign the parsed values to variables
 				stdout = output.stdout;
 				stderr = output.stderr;
 				result = output.result;
@@ -415,23 +307,27 @@
 	});
 </script>
 
-<div>
+<svelte:head>
+	{@html atomOneDark}
+</svelte:head>
+
+<div class="my-2 group">
 	<div
-		class="relative {className} flex flex-col rounded-3xl border border-gray-100/30 dark:border-gray-850/30 my-0.5"
+		class="relative {className} flex flex-col rounded-xl border border-gray-200 dark:border-gray-800/60 shadow-sm overflow-hidden bg-white dark:bg-[#0d1117]"
 		dir="ltr"
 	>
 		{#if ['mermaid', 'vega', 'vega-lite'].includes(lang)}
 			{#if renderHTML}
 				<SvgPanZoom
-					className=" rounded-3xl max-h-fit overflow-hidden"
+					className=" rounded-xl max-h-fit overflow-hidden bg-white"
 					svg={renderHTML}
 					content={_token.text}
 				/>
 			{:else}
-				<div class="p-3">
+				<div class="p-3 bg-white">
 					{#if renderError}
 						<div
-							class="flex gap-2.5 border px-4 py-3 border-red-600/10 bg-red-600/10 rounded-2xl mb-2"
+							class="flex gap-2.5 border px-4 py-3 border-red-600/10 bg-red-600/10 rounded-xl mb-2"
 						>
 							{renderError}
 						</div>
@@ -440,88 +336,92 @@
 				</div>
 			{/if}
 		{:else}
+			<!-- Mac-style Header -->
 			<div
-				class="absolute left-0 right-0 py-2.5 pr-3 text-text-300 pl-4.5 text-xs font-medium dark:text-white"
+				class="flex items-center justify-between bg-gray-50/50 dark:bg-[#161b22]/80 px-4 py-2 border-b border-gray-200 dark:border-gray-800/60 text-gray-500 dark:text-gray-400 select-none backdrop-blur-sm"
 			>
-				{lang}
-			</div>
+				<span class="text-xs font-mono font-medium lowercase opacity-75">
+					{lang || 'text'}
+				</span>
 
-			<div
-				class="sticky {stickyButtonsClassName} left-0 right-0 py-2 pr-3 flex items-center justify-end w-full z-10 text-xs text-black dark:text-white"
-			>
-				<div class="flex items-center gap-0.5">
-					<button
-						class="flex gap-1 items-center bg-none border-none transition rounded-md px-1.5 py-0.5 bg-white dark:bg-black"
-						on:click={collapseCodeBlock}
-					>
-						<div class=" -translate-y-[0.5px]">
-							<ChevronUpDown className="size-3" />
-						</div>
-
-						<div>
-							{collapsed ? $i18n.t('Expand') : $i18n.t('Collapse')}
-						</div>
-					</button>
-
+				<div class="flex items-center gap-2 opacity-0 group-hover:opacity-100 transition-opacity duration-200">
 					{#if ($config?.features?.enable_code_execution ?? true) && (lang.toLowerCase() === 'python' || lang.toLowerCase() === 'py' || (lang === '' && checkPythonCode(code)))}
 						{#if executing}
-							<div
-								class="run-code-button bg-none border-none p-0.5 cursor-not-allowed bg-white dark:bg-black"
-							>
-								{$i18n.t('Running')}
+							<div class="flex items-center gap-1.5 px-2 py-1 rounded-md bg-gray-100 dark:bg-gray-800 text-xs">
+								<svg class="animate-spin h-3 w-3 text-gray-500" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
+									<circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
+									<path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+								</svg>
+								<span>{$i18n.t('Running')}</span>
 							</div>
 						{:else if run}
 							<button
-								class="flex gap-1 items-center run-code-button bg-none border-none transition rounded-md px-1.5 py-0.5 bg-white dark:bg-black"
+								class="flex items-center gap-1.5 px-2 py-1 rounded-md hover:bg-gray-200 dark:hover:bg-gray-800 transition text-xs font-medium"
 								on:click={async () => {
 									code = _code;
 									await tick();
 									executePython(code);
 								}}
+								title={$i18n.t('Run Code')}
 							>
-								<div>
-									{$i18n.t('Run')}
-								</div>
+								<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="currentColor" class="size-3.5">
+									<path fill-rule="evenodd" d="M4.5 5.653c0-1.426 1.529-2.33 2.779-1.643l11.54 6.348c1.295.712 1.295 2.573 0 3.285L7.28 19.991c-1.25.687-2.779-.217-2.779-1.643V5.653z" clip-rule="evenodd" />
+								</svg>
 							</button>
 						{/if}
 					{/if}
 
 					{#if save}
 						<button
-							class="save-code-button bg-none border-none transition rounded-md px-1.5 py-0.5 bg-white dark:bg-black"
+							class="flex items-center gap-1.5 px-2 py-1 rounded-md hover:bg-gray-200 dark:hover:bg-gray-800 transition text-xs font-medium"
 							on:click={saveCode}
+							title={$i18n.t('Save')}
 						>
-							{saved ? $i18n.t('Saved') : $i18n.t('Save')}
+							{#if saved}
+								<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor" class="size-3.5 text-green-500">
+									<path fill-rule="evenodd" d="M16.707 5.293a1 1 0 010 1.414l-8 8a1 1 0 01-1.414 0l-4-4a1 1 0 011.414-1.414L8 12.586l7.293-7.293a1 1 0 011.414 0z" clip-rule="evenodd" />
+								</svg>
+							{:else}
+								<svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor" class="size-3.5">
+									<path stroke-linecap="round" stroke-linejoin="round" d="M3 16.5v2.25A2.25 2.25 0 005.25 21h13.5A2.25 2.25 0 0021 18.75V16.5M16.5 12L12 16.5m0 0L7.5 12m4.5 4.5V3" />
+								</svg>
+							{/if}
 						</button>
 					{/if}
 
 					<button
-						class="copy-code-button bg-none border-none transition rounded-md px-1.5 py-0.5 bg-white dark:bg-black"
-						on:click={copyCode}>{copied ? $i18n.t('Copied') : $i18n.t('Copy')}</button
+						class="flex items-center gap-1.5 px-2 py-1 rounded-md hover:bg-gray-200 dark:hover:bg-gray-800 transition text-xs font-medium"
+						on:click={copyCode}
+						title={$i18n.t('Copy')}
 					>
+						{#if copied}
+							<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor" class="size-3.5 text-green-500">
+								<path fill-rule="evenodd" d="M16.707 5.293a1 1 0 010 1.414l-8 8a1 1 0 01-1.414 0l-4-4a1 1 0 011.414-1.414L8 12.586l7.293-7.293a1 1 0 011.414 0z" clip-rule="evenodd" />
+							</svg>
+						{:else}
+							<svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor" class="size-3.5">
+								<path stroke-linecap="round" stroke-linejoin="round" d="M15.666 3.888A2.25 2.25 0 0 0 13.5 2.25h-3c-1.03 0-1.9.693-2.166 1.638m7.332 0c.055.194.084.4.084.612v0a.75.75 0 0 1-.75.75H9a.75.75 0 0 1-.75-.75v0c0-.212.03-.418.084-.612m7.332 0c.646.049 1.288.11 1.927.184 1.1.128 1.907 1.077 1.907 2.185V19.5a2.25 2.25 0 0 1-2.25 2.25H6.75A2.25 2.25 0 0 1 4.5 19.5V6.257c0-1.108.806-2.057 1.907-2.185a48.208 48.208 0 0 1 1.927-.184" />
+							</svg>
+						{/if}
+					</button>
 
 					{#if preview && ['html', 'svg'].includes(lang)}
 						<button
-							class="flex gap-1 items-center run-code-button bg-none border-none transition rounded-md px-1.5 py-0.5 bg-white dark:bg-black"
+							class="flex items-center gap-1.5 px-2 py-1 rounded-md hover:bg-gray-200 dark:hover:bg-gray-800 transition text-xs font-medium"
 							on:click={previewCode}
+							title={$i18n.t('Preview')}
 						>
-							<div>
-								{$i18n.t('Preview')}
-							</div>
+							<svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor" class="size-3.5">
+								<path stroke-linecap="round" stroke-linejoin="round" d="M2.036 12.322a1.012 1.012 0 010-.639C3.423 7.51 7.36 4.5 12 4.5c4.638 0 8.573 3.007 9.963 7.178.07.207.07.431 0 .639C20.577 16.49 16.64 19.5 12 19.5c-4.638 0-8.573-3.007-9.963-7.178z" />
+								<path stroke-linecap="round" stroke-linejoin="round" d="M15 12a3 3 0 11-6 0 3 3 0 016 0z" />
+							</svg>
 						</button>
 					{/if}
 				</div>
 			</div>
 
-			<div
-				class="language-{lang} rounded-t-3xl -mt-9 {editorClassName
-					? editorClassName
-					: executing || stdout || stderr || result
-						? ''
-						: 'rounded-b-3xl'} overflow-hidden"
-			>
-				<div class=" pt-8 bg-white dark:bg-black"></div>
-
+			<!-- Code Area -->
+			<div class="relative bg-white dark:bg-[#0d1117] overflow-hidden">
 				{#if !collapsed}
 					{#if edit}
 						<CodeEditor
@@ -536,80 +436,76 @@
 							}}
 						/>
 					{:else}
-						<pre
-							class=" hljs p-4 px-5 overflow-x-auto"
-							style="border-top-left-radius: 0px; border-top-right-radius: 0px; {(executing ||
-								stdout ||
-								stderr ||
-								result) &&
-								'border-bottom-left-radius: 0px; border-bottom-right-radius: 0px;'}"><code
-								class="language-{lang} rounded-t-none whitespace-pre text-sm"
-								>{@html hljs.highlightAuto(code, hljs.getLanguage(lang)?.aliases).value ||
-									code}</code
-							></pre>
+						<div class="overflow-x-auto">
+							<HighlightAuto 
+								{code} 
+								class="!bg-transparent !p-4 text-sm font-mono"
+							/>
+						</div>
 					{/if}
 				{:else}
 					<div
-						class="bg-white dark:bg-black dark:text-white rounded-b-3xl! pt-0.5 pb-3 px-4 flex flex-col gap-2 text-xs"
+						class="bg-white dark:bg-[#0d1117] dark:text-white py-2 px-4 flex items-center justify-center cursor-pointer hover:bg-gray-100 dark:hover:bg-gray-900 transition"
+						on:click={collapseCodeBlock}
 					>
-						<span class="text-gray-500 italic">
-							{$i18n.t('{{COUNT}} hidden lines', {
-								COUNT: code.split('\n').length
-							})}
+						<span class="text-gray-500 italic text-xs">
+							{$i18n.t('{{COUNT}} hidden lines', { COUNT: code.split('\n').length })}
 						</span>
+						<ChevronUpDown className="size-3 ml-2 text-gray-500" />
 					</div>
 				{/if}
 			</div>
 
-			{#if !collapsed}
-				<div
-					id="plt-canvas-{id}"
-					class="bg-gray-50 dark:bg-black dark:text-white max-w-full overflow-x-auto scrollbar-hidden"
-				/>
-
-				{#if executing || stdout || stderr || result || files}
-					<div
-						class="bg-gray-50 dark:bg-black dark:text-white rounded-b-3xl! py-4 px-4 flex flex-col gap-2"
-					>
-						{#if executing}
-							<div class=" ">
-								<div class=" text-gray-500 text-sm mb-1">{$i18n.t('STDOUT/STDERR')}</div>
-								<div class="text-sm">{$i18n.t('Running...')}</div>
+			<!-- Output Area -->
+			{#if !collapsed && (executing || stdout || stderr || result || files)}
+				<div class="border-t border-gray-200 dark:border-gray-800/60 bg-gray-50 dark:bg-black dark:text-white p-4 text-sm font-mono overflow-x-auto">
+					{#if executing}
+						<div class="text-gray-500">{$i18n.t('Running...')}</div>
+					{:else}
+						{#if stdout || stderr}
+							<div class="mb-2">
+								<div class="text-xs text-gray-400 uppercase tracking-wider mb-1">{$i18n.t('STDOUT/STDERR')}</div>
+								<div class="whitespace-pre-wrap {stdout?.split('\n')?.length > 100 ? `max-h-96 overflow-y-auto` : ''}">{stdout || stderr}</div>
 							</div>
-						{:else}
-							{#if stdout || stderr}
-								<div class=" ">
-									<div class=" text-gray-500 text-sm mb-1">{$i18n.t('STDOUT/STDERR')}</div>
-									<div
-										class="text-sm font-mono whitespace-pre-wrap {stdout?.split('\n')?.length > 100
-											? `max-h-96`
-											: ''}  overflow-y-auto"
-									>
-										{stdout || stderr}
-									</div>
-								</div>
-							{/if}
-							{#if result || files}
-								<div class=" ">
-									<div class=" text-gray-500 text-sm mb-1">{$i18n.t('RESULT')}</div>
-									{#if result}
-										<div class="text-sm">{`${JSON.stringify(result)}`}</div>
-									{/if}
-									{#if files}
-										<div class="flex flex-col gap-2">
-											{#each files as file}
-												{#if file.type.startsWith('image')}
-													<img src={file.data} alt="Output" class=" w-full max-w-[36rem]" />
-												{/if}
-											{/each}
-										</div>
-									{/if}
-								</div>
-							{/if}
 						{/if}
-					</div>
-				{/if}
+						{#if result || files}
+							<div>
+								<div class="text-xs text-gray-400 uppercase tracking-wider mb-1">{$i18n.t('RESULT')}</div>
+								{#if result}
+									<div class="whitespace-pre-wrap">{`${JSON.stringify(result)}`}</div>
+								{/if}
+								{#if files}
+									<div class="flex flex-col gap-2 mt-2">
+										{#each files as file}
+											{#if file.type.startsWith('image')}
+												<img src={file.data} alt="Output" class="w-full max-w-lg rounded-lg border border-gray-200 dark:border-gray-800" />
+											{/if}
+										{/each}
+									</div>
+								{/if}
+							</div>
+						{/if}
+					{/if}
+				</div>
 			{/if}
 		{/if}
 	</div>
 </div>
+
+<style>
+	/* Refined scrollbar */
+	:global(::-webkit-scrollbar) {
+		width: 8px;
+		height: 8px;
+	}
+	:global(::-webkit-scrollbar-track) {
+		background: transparent;
+	}
+	:global(::-webkit-scrollbar-thumb) {
+		background: rgba(156, 163, 175, 0.5);
+		border-radius: 4px;
+	}
+	:global(::-webkit-scrollbar-thumb:hover) {
+		background: rgba(156, 163, 175, 0.8);
+	}
+</style>
