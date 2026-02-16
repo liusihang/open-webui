@@ -381,15 +381,15 @@ html.dark #sidebar-chat-item-menu .sidebar-chat-menu-trigger:hover {
 }
 
 html.deerflow-light #sidebar-chat-item-menu .sidebar-chat-menu-trigger {
-	background-color: var(--deerflow-hover);
-	border: 1px solid var(--deerflow-border-soft);
+	background-color: inherit;
+	border: 1px solid transparent;
 	border-radius: 999px;
 	color: var(--deerflow-text-muted);
 	padding: 0.125rem 0.375rem;
 }
 
 html.deerflow-light #sidebar-chat-item-menu .sidebar-chat-menu-trigger:hover {
-	background-color: var(--deerflow-bg-input);
+	background-color: inherit;
 	color: var(--deerflow-text);
 }
 
@@ -401,8 +401,8 @@ html.deerflow-light #sidebar-chat-item-menu {
 }
 
 html.deerflow-light #sidebar-chat-item-menu.selected {
-	--tw-gradient-from: var(--deerflow-bg-input) !important;
-	background-image: linear-gradient(to left, var(--deerflow-bg-input) 80%, transparent) !important;
+	--tw-gradient-from: var(--deerflow-hover) !important;
+	background-image: linear-gradient(to left, var(--deerflow-hover) 80%, transparent) !important;
 }
 
 html.deerflow-light #message-input-container {
