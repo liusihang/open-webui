@@ -10,6 +10,8 @@
 
 	import ChevronUp from '../icons/ChevronUp.svelte';
 	import ChevronDown from '../icons/ChevronDown.svelte';
+	import CheckCircle from '../icons/CheckCircle.svelte';
+	import Wrench from '../icons/Wrench.svelte';
 	import Spinner from './Spinner.svelte';
 	import Markdown from '../chat/Messages/Markdown.svelte';
 	import Image from './Image.svelte';
@@ -29,8 +31,7 @@
 
 	export let open = false;
 	export let className = '';
-	export let buttonClassName =
-		'w-fit text-gray-500 hover:text-gray-700 dark:hover:text-gray-300 transition';
+	export let buttonClassName = 'w-full transition';
 
 	const componentId = id || uuidv4();
 
@@ -64,16 +65,45 @@
 	$: files = parseJSONString(decode(attributes?.files ?? ''));
 	$: embeds = parseJSONString(decode(attributes?.embeds ?? ''));
 	$: isDone = attributes?.done === 'true';
-	$: isExecuting = attributes?.done && attributes?.done !== 'true';
+	$: isExecuting = !!attributes?.done && attributes?.done !== 'true';
+	$: toolName = attributes?.name ?? 'tool';
+	$: formattedArgs = formatJSONString(args);
+	$: formattedResult = formatJSONString(result);
+	$: hasResult = String(result ?? '').trim() !== '';
+	$: headerToneClass = isExecuting
+		? 'border-sky-300/70 bg-sky-50/70 text-sky-900 dark:border-sky-700/60 dark:bg-sky-900/15 dark:text-sky-100'
+		: 'border-gray-200/70 bg-gray-50/70 text-gray-700 dark:border-gray-800/70 dark:bg-gray-900/30 dark:text-gray-200';
+	$: iconToneClass = isExecuting
+		? 'bg-sky-100/80 text-sky-700 dark:bg-sky-900/40 dark:text-sky-300'
+		: 'bg-emerald-100/80 text-emerald-700 dark:bg-emerald-900/40 dark:text-emerald-300';
+	$: doneContent = hasResult
+		? `${$i18n.t('Arguments')}
+\`\`\`json
+${formattedArgs}
+\`\`\`
+
+${$i18n.t('Result')}
+\`\`\`json
+${formattedResult}
+\`\`\``
+		: `${$i18n.t('Arguments')}
+\`\`\`json
+${formattedArgs}
+\`\`\``;
 </script>
 
 <div {id} class={className}>
 	{#if embeds && Array.isArray(embeds) && embeds.length > 0}
 		<!-- Embed Mode: Show iframes without collapsible behavior -->
-		<div class="py-1 w-full cursor-pointer">
-			<div class="w-full text-xs text-gray-500">
-				<div class="">
-					{attributes.name}
+		<div class="py-1 w-full">
+			<div class="w-full rounded-xl border border-gray-200/70 bg-gray-50/70 px-3 py-2 text-[13px] leading-5 text-gray-700 dark:border-gray-800/70 dark:bg-gray-900/30 dark:text-gray-200">
+				<div class="flex items-center gap-2">
+					<div class="rounded-md bg-gray-100 p-1 text-gray-600 dark:bg-gray-850 dark:text-gray-300">
+						<Wrench className="size-3.5" />
+					</div>
+					<div class="line-clamp-1">
+						{$i18n.t('Embedded Result from {{NAME}}', { NAME: toolName })}
+					</div>
 				</div>
 			</div>
 
@@ -99,60 +129,51 @@
 			}}
 		>
 			<div
-				class="w-full font-medium flex items-center justify-between gap-2 {isExecuting
-					? 'shimmer'
-					: ''}"
+				class="w-full rounded-xl border px-3 py-2 font-medium flex items-center justify-between gap-2 {headerToneClass}"
 			>
-				{#if isExecuting}
-					<div>
-						<Spinner className="size-4" />
+				<div class="flex min-w-0 items-center gap-2">
+					<div class="rounded-md p-1 {iconToneClass}">
+						{#if isExecuting}
+							<Spinner className="size-3.5" />
+						{:else}
+							<CheckCircle className="size-3.5" />
+						{/if}
 					</div>
-				{/if}
 
-				<div class="">
-					{#if isDone}
-						<Markdown
-							id={`${componentId}-tool-call-title`}
-							content={$i18n.t('View Result from **{{NAME}}**', {
-								NAME: attributes.name
-							})}
-						/>
-					{:else}
-						<Markdown
-							id={`${componentId}-tool-call-executing`}
-							content={$i18n.t('Executing **{{NAME}}**...', {
-								NAME: attributes.name
-							})}
-						/>
-					{/if}
+					<div class="min-w-0 text-[13px] leading-5 line-clamp-1 {isExecuting ? 'shimmer' : ''}">
+						{#if isDone}
+							{$i18n.t('View Result from {{NAME}}', { NAME: toolName })}
+						{:else}
+							{$i18n.t('Executing {{NAME}}...', { NAME: toolName })}
+						{/if}
+					</div>
 				</div>
 
 				<div class="flex self-center translate-y-[1px]">
-					{#if open}
-						<ChevronUp strokeWidth="3.5" className="size-3.5" />
+					{#if isDone}
+						<ChevronDown strokeWidth="3.5" className="size-3.5 {open ? 'rotate-180' : ''} transition-transform" />
 					{:else}
-						<ChevronDown strokeWidth="3.5" className="size-3.5" />
+						{#if open}
+							<ChevronUp strokeWidth="3.5" className="size-3.5" />
+						{:else}
+							<ChevronDown strokeWidth="3.5" className="size-3.5" />
+						{/if}
 					{/if}
 				</div>
 			</div>
 		</div>
 
 		{#if open}
-			<div transition:slide={{ duration: 300, easing: quintOut, axis: 'y' }}>
+			<div class="mt-1 px-1" transition:slide={{ duration: 300, easing: quintOut, axis: 'y' }}>
 				{#if isDone}
-					<Markdown
-						id={`${componentId}-tool-call-result`}
-						content={`> \`\`\`json
-> ${formatJSONString(args)}
-> ${formatJSONString(result)}
-> \`\`\``}
-					/>
+					<Markdown id={`${componentId}-tool-call-result`} content={doneContent} />
 				{:else}
 					<Markdown
 						id={`${componentId}-tool-call-args`}
-						content={`> \`\`\`json
-> ${formatJSONString(args)}
-> \`\`\``}
+						content={`${$i18n.t('Arguments')}
+\`\`\`json
+${formattedArgs}
+\`\`\``}
 					/>
 				{/if}
 			</div>
