@@ -336,15 +336,15 @@
 				</div>
 			{/if}
 		{:else}
-			<!-- Mac-style Header -->
-			<div
-				class="flex items-center justify-between bg-gray-50/50 dark:bg-[#252526] px-4 py-2 border-b border-gray-200 dark:border-[#3c3c3c] text-gray-500 dark:text-[#c5c5c5] select-none"
-			>
+				<!-- Mac-style Header -->
+				<div
+					class="flex items-center justify-between bg-gray-50/50 dark:bg-[#252526] px-4 py-2 border-b border-gray-200 dark:border-[#3c3c3c] text-gray-500 dark:text-[#c5c5c5] select-none {stickyButtonsClassName}"
+				>
 				<span class="text-xs font-medium lowercase opacity-75 macos-code-font">
 					{lang || 'text'}
 				</span>
 
-				<div class="flex items-center gap-2 opacity-0 group-hover:opacity-100 transition-opacity duration-200">
+					<div class="flex items-center gap-2 opacity-100 sm:opacity-0 sm:group-hover:opacity-100 sm:group-focus-within:opacity-100 transition-opacity duration-200">
 					<button
 						class="flex items-center gap-1.5 px-2 py-1 rounded-md hover:bg-gray-200 dark:hover:bg-gray-800 transition text-xs font-medium"
 						on:click={collapseCodeBlock}
@@ -432,7 +432,7 @@
 			</div>
 
 			<!-- Code Area -->
-			<div class="relative bg-[#1e1e1e] text-[#d4d4d4] overflow-hidden">
+				<div class="relative bg-[#1e1e1e] text-[#d4d4d4] overflow-hidden {editorClassName}">
 				{#if !collapsed}
 					{#if edit}
 						<div class="code-editor-no-gutters">
@@ -449,45 +449,46 @@
 							/>
 						</div>
 					{:else}
-						<div class="overflow-x-auto">
-							<HighlightAuto 
-								{code} 
-								class="!bg-transparent !p-4 text-sm macos-code-font"
-							/>
+							<div class="overflow-x-auto codeblock-scroll">
+								<HighlightAuto
+									{code}
+									class="!bg-transparent !p-4 text-sm macos-code-font"
+								/>
 						</div>
 					{/if}
-				{:else}
-					<div
-						class="bg-[#1e1e1e] text-[#d4d4d4] py-2 px-4 flex items-center justify-center cursor-pointer hover:bg-[#252526] transition"
-						on:click={collapseCodeBlock}
-					>
-						<span class="text-gray-500 italic text-xs">
-							{$i18n.t('{{COUNT}} hidden lines', { COUNT: code.split('\n').length })}
-						</span>
-						<ChevronUpDown className="size-3 ml-2 text-gray-500" />
-					</div>
-				{/if}
-			</div>
+					{:else}
+						<button
+							type="button"
+							class="w-full bg-[#1e1e1e] text-[#d4d4d4] py-2 px-4 flex items-center justify-center hover:bg-[#252526] transition"
+							on:click={collapseCodeBlock}
+						>
+							<span class="text-gray-500 italic text-xs">
+								{$i18n.t('{{COUNT}} hidden lines', { COUNT: code.split('\n').length })}
+							</span>
+							<ChevronUpDown className="size-3 ml-2 text-gray-500" />
+						</button>
+					{/if}
+				</div>
 
-			{#if !collapsed}
-				<div
-					id="plt-canvas-{id}"
-					class="bg-gray-50 dark:bg-black dark:text-white max-w-full overflow-x-auto scrollbar-hidden"
-				/>
-			{/if}
+				{#if !collapsed}
+					<div
+						id="plt-canvas-{id}"
+						class="bg-gray-50 dark:bg-black dark:text-white max-w-full overflow-x-auto scrollbar-hidden"
+					></div>
+				{/if}
 
 			<!-- Output Area -->
 			{#if !collapsed && (executing || stdout || stderr || result || files)}
-				<div class="border-t border-gray-200 dark:border-gray-800/60 bg-gray-50 dark:bg-black dark:text-white p-4 text-sm macos-code-font overflow-x-auto">
-					{#if executing}
-						<div class="text-gray-500">{$i18n.t('Running...')}</div>
-					{:else}
-						{#if stdout || stderr}
-							<div class="mb-2">
-								<div class="text-xs text-gray-400 uppercase tracking-wider mb-1">{$i18n.t('STDOUT/STDERR')}</div>
-								<div class="whitespace-pre-wrap {stdout?.split('\n')?.length > 100 ? `max-h-96 overflow-y-auto` : ''}">{stdout || stderr}</div>
-							</div>
-						{/if}
+					<div class="border-t border-gray-200 dark:border-gray-800/60 bg-gray-50 dark:bg-black dark:text-white p-4 text-sm macos-code-font overflow-x-auto codeblock-scroll">
+						{#if executing}
+							<div class="text-gray-500">{$i18n.t('Running...')}</div>
+						{:else}
+							{#if stdout || stderr}
+								<div class="mb-2">
+									<div class="text-xs text-gray-400 uppercase tracking-wider mb-1">{$i18n.t('STDOUT/STDERR')}</div>
+									<div class="whitespace-pre-wrap codeblock-scroll {stdout?.split('\n')?.length > 100 ? `max-h-96 overflow-y-auto` : ''}">{stdout || stderr}</div>
+								</div>
+							{/if}
 						{#if result || files}
 							<div>
 								<div class="text-xs text-gray-400 uppercase tracking-wider mb-1">{$i18n.t('RESULT')}</div>
@@ -546,18 +547,18 @@
 	}
 
 	/* Refined scrollbar */
-	:global(::-webkit-scrollbar) {
+	:global(.codeblock-scroll::-webkit-scrollbar) {
 		width: 8px;
 		height: 8px;
 	}
-	:global(::-webkit-scrollbar-track) {
+	:global(.codeblock-scroll::-webkit-scrollbar-track) {
 		background: transparent;
 	}
-	:global(::-webkit-scrollbar-thumb) {
+	:global(.codeblock-scroll::-webkit-scrollbar-thumb) {
 		background: rgba(156, 163, 175, 0.5);
 		border-radius: 4px;
 	}
-	:global(::-webkit-scrollbar-thumb:hover) {
+	:global(.codeblock-scroll::-webkit-scrollbar-thumb:hover) {
 		background: rgba(156, 163, 175, 0.8);
 	}
 </style>

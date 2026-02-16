@@ -12,12 +12,70 @@ from open_webui.env import AIOHTTP_CLIENT_SESSION_SSL
 log = logging.getLogger(__name__)
 
 
-_THREAD_MAP: dict[str, str] = {}
+_THREAD_CACHE_TTL_SECS = 6 * 60 * 60
+_THREAD_CACHE_MAX_SIZE = 2048
+_THREAD_MAP: dict[str, dict[str, Any]] = {}
 _THREAD_MAP_LOCK = asyncio.Lock()
 
 
 def _sse_data(payload: dict) -> str:
     return f"data: {json.dumps(payload, ensure_ascii=False)}\n\n"
+
+
+def _thread_cache_key(metadata: dict) -> str | None:
+    chat_id = str(metadata.get("chat_id") or "").strip()
+    if not chat_id:
+        return None
+
+    user_id = str(metadata.get("user_id") or "anon").strip() or "anon"
+    return f"{user_id}:{chat_id}"
+
+
+def _prune_thread_cache(now: float) -> None:
+    expired_keys = [
+        cache_key
+        for cache_key, cached in _THREAD_MAP.items()
+        if float(cached.get("expires_at", 0)) <= now
+    ]
+    for cache_key in expired_keys:
+        _THREAD_MAP.pop(cache_key, None)
+
+    overflow = len(_THREAD_MAP) - _THREAD_CACHE_MAX_SIZE
+    if overflow <= 0:
+        return
+
+    oldest_items = sorted(
+        _THREAD_MAP.items(),
+        key=lambda item: float(item[1].get("updated_at", 0)),
+    )
+    for cache_key, _ in oldest_items[:overflow]:
+        _THREAD_MAP.pop(cache_key, None)
+
+
+async def _cache_thread(cache_key: str, thread_id: str) -> None:
+    now = time.time()
+    async with _THREAD_MAP_LOCK:
+        _prune_thread_cache(now)
+        _THREAD_MAP[cache_key] = {
+            "thread_id": thread_id,
+            "updated_at": now,
+            "expires_at": now + _THREAD_CACHE_TTL_SECS,
+        }
+
+
+async def _drop_cached_thread(cache_key: str | None, thread_id: str | None = None) -> None:
+    if not cache_key:
+        return
+
+    async with _THREAD_MAP_LOCK:
+        cached = _THREAD_MAP.get(cache_key)
+        if not cached:
+            return
+
+        if thread_id and str(cached.get("thread_id") or "") != thread_id:
+            return
+
+        _THREAD_MAP.pop(cache_key, None)
 
 
 def _normalize_model_id(model_id: str | None, fallback: str) -> str:
@@ -372,25 +430,27 @@ async def _resolve_thread_id(
     headers: dict,
     metadata: dict,
     reuse_threads: bool,
-) -> tuple[str, bool]:
-    chat_id = str(metadata.get("chat_id") or "").strip()
-    user_id = str(metadata.get("user_id") or "anon").strip() or "anon"
-    if not chat_id or not reuse_threads:
-        return await _create_thread(session, base_url, headers, metadata), False
+) -> tuple[str, bool, str | None]:
+    cache_key = _thread_cache_key(metadata)
+    if not reuse_threads or not cache_key:
+        thread_id = await _create_thread(session, base_url, headers, metadata)
+        return thread_id, False, None
 
-    cache_key = f"{user_id}:{chat_id}"
-
+    now = time.time()
     async with _THREAD_MAP_LOCK:
+        _prune_thread_cache(now)
         cached = _THREAD_MAP.get(cache_key)
         if cached:
-            return cached, True
+            cached_thread_id = str(cached.get("thread_id") or "").strip()
+            if cached_thread_id:
+                cached["updated_at"] = now
+                cached["expires_at"] = now + _THREAD_CACHE_TTL_SECS
+                return cached_thread_id, True, cache_key
+            _THREAD_MAP.pop(cache_key, None)
 
     thread_id = await _create_thread(session, base_url, headers, metadata)
-
-    async with _THREAD_MAP_LOCK:
-        _THREAD_MAP[cache_key] = thread_id
-
-    return thread_id, False
+    await _cache_thread(cache_key, thread_id)
+    return thread_id, False, cache_key
 
 
 async def create_deerflow_research_stream_response(
@@ -456,31 +516,6 @@ async def create_deerflow_research_stream_response(
             )
 
             async with aiohttp.ClientSession(timeout=timeout, trust_env=True) as session:
-                thread_id, reused = await _resolve_thread_id(
-                    session=session,
-                    base_url=base_url,
-                    headers=headers,
-                    metadata=metadata,
-                    reuse_threads=reuse_threads,
-                )
-
-                yield _sse_data(
-                    {
-                        "event": {
-                            "type": "status",
-                            "data": {
-                                "action": "deep_research",
-                                "description": (
-                                    "Reusing DeerFlow research thread"
-                                    if reused
-                                    else "Created DeerFlow research thread"
-                                ),
-                                "done": False,
-                            },
-                        }
-                    }
-                )
-
                 run_payload: dict[str, Any] = {
                     "input": {"messages": deerflow_messages},
                     "stream_mode": ["messages", "values"],
@@ -493,76 +528,134 @@ async def create_deerflow_research_stream_response(
                         }
                     }
 
-                stream_url = f"{base_url}/api/langgraph/threads/{thread_id}/runs/stream"
-                async with session.post(
-                    stream_url,
-                    headers=headers,
-                    json=run_payload,
-                    ssl=AIOHTTP_CLIENT_SESSION_SSL,
-                ) as response:
-                    if response.status >= 400:
-                        error_body = (await response.text()).strip()
-                        raise RuntimeError(
-                            f"DeerFlow stream failed HTTP {response.status}: {error_body[:800]}"
-                        )
+                max_stream_attempts = 2 if reuse_threads else 1
+                stream_started = False
+                for stream_attempt in range(max_stream_attempts):
+                    thread_id, reused, cache_key = await _resolve_thread_id(
+                        session=session,
+                        base_url=base_url,
+                        headers=headers,
+                        metadata=metadata,
+                        reuse_threads=reuse_threads,
+                    )
 
-                    async for event_name, data_str in _iter_sse_events(response):
-                        if not data_str:
-                            continue
-                        if data_str == "[DONE]":
-                            break
-                        if (event_name or "").strip().lower() == "end":
-                            break
+                    yield _sse_data(
+                        {
+                            "event": {
+                                "type": "status",
+                                "data": {
+                                    "action": "deep_research",
+                                    "description": (
+                                        "Reusing DeerFlow research thread"
+                                        if reused
+                                        else "Created DeerFlow research thread"
+                                    ),
+                                    "done": False,
+                                },
+                            }
+                        }
+                    )
 
-                        parsed: Any = data_str
-                        is_json = False
-                        try:
-                            parsed = json.loads(data_str)
-                            is_json = True
-                        except Exception:
-                            is_json = False
-
-                        if is_json and (event_name or "").strip().lower() == "values":
-                            last_values_payload = parsed
-
-                        status_updates = _infer_status_updates(
-                            event_name, parsed if is_json else data_str
-                        )
-                        for status_update in status_updates:
-                            status_signature = json.dumps(
-                                status_update, ensure_ascii=False, sort_keys=True
-                            )
-                            if status_signature in emitted_status_signatures:
-                                continue
-
-                            emitted_status_signatures.add(status_signature)
-                            yield _sse_data(
-                                {
-                                    "event": {
-                                        "type": "status",
-                                        "data": status_update,
-                                    }
-                                }
+                    stream_url = f"{base_url}/api/langgraph/threads/{thread_id}/runs/stream"
+                    async with session.post(
+                        stream_url,
+                        headers=headers,
+                        json=run_payload,
+                        ssl=AIOHTTP_CLIENT_SESSION_SSL,
+                    ) as response:
+                        if response.status >= 400:
+                            error_body = (await response.text()).strip()
+                            should_retry_with_new_thread = (
+                                reused
+                                and stream_attempt + 1 < max_stream_attempts
+                                and response.status in {400, 404, 409, 410, 422}
                             )
 
-                        chunks = _extract_stream_chunks(parsed if is_json else data_str)
-                        for chunk in chunks:
-                            text = str(chunk)
-                            if not text:
-                                continue
-
-                            emitted_content = True
-                            yield _sse_data(
-                                {
-                                    "choices": [
-                                        {
-                                            "delta": {
-                                                "content": text,
-                                            }
+                            if should_retry_with_new_thread:
+                                await _drop_cached_thread(cache_key, thread_id)
+                                yield _sse_data(
+                                    {
+                                        "event": {
+                                            "type": "status",
+                                            "data": {
+                                                "action": "deep_research",
+                                                "description": "Cached DeerFlow thread expired; retrying with a new thread",
+                                                "done": False,
+                                            },
                                         }
-                                    ]
-                                }
+                                    }
+                                )
+                                continue
+
+                            raise RuntimeError(
+                                f"DeerFlow stream failed HTTP {response.status}: {error_body[:800]}"
                             )
+
+                        stream_started = True
+                        async for event_name, data_str in _iter_sse_events(response):
+                            if not data_str:
+                                continue
+                            if data_str == "[DONE]":
+                                break
+                            if (event_name or "").strip().lower() == "end":
+                                break
+
+                            parsed: Any = data_str
+                            is_json = False
+                            try:
+                                parsed = json.loads(data_str)
+                                is_json = True
+                            except Exception:
+                                is_json = False
+
+                            if is_json and (event_name or "").strip().lower() == "values":
+                                last_values_payload = parsed
+
+                            status_updates = _infer_status_updates(
+                                event_name, parsed if is_json else data_str
+                            )
+                            for status_update in status_updates:
+                                status_signature = json.dumps(
+                                    status_update, ensure_ascii=False, sort_keys=True
+                                )
+                                if status_signature in emitted_status_signatures:
+                                    continue
+
+                                emitted_status_signatures.add(status_signature)
+                                yield _sse_data(
+                                    {
+                                        "event": {
+                                            "type": "status",
+                                            "data": status_update,
+                                        }
+                                    }
+                                )
+
+                            chunks = _extract_stream_chunks(
+                                parsed if is_json else data_str
+                            )
+                            for chunk in chunks:
+                                text = str(chunk)
+                                if not text:
+                                    continue
+
+                                emitted_content = True
+                                yield _sse_data(
+                                    {
+                                        "choices": [
+                                            {
+                                                "delta": {
+                                                    "content": text,
+                                                }
+                                            }
+                                        ]
+                                    }
+                                )
+
+                    break
+
+                if not stream_started:
+                    raise RuntimeError("DeerFlow stream could not be started.")
 
             if not emitted_content and last_values_payload is not None:
                 fallback_text = _extract_final_assistant_text(last_values_payload)
