@@ -25,7 +25,7 @@
 		status?.action === 'web_search_queries_generated' ||
 		status?.action === 'queries_generated'
 			? Search
-			: status?.action === 'knowledge_search'
+			: status?.action === 'knowledge_search' || status?.action === 'deep_research'
 				? BookOpen
 				: Wrench;
 

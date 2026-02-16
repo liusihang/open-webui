@@ -138,6 +138,7 @@
 	let imageGenerationEnabled = false;
 	let webSearchEnabled = false;
 	let codeInterpreterEnabled = false;
+	let deepResearchEnabled = false;
 
 	let showCommands = false;
 
@@ -184,6 +185,8 @@
 		selectedFilterIds = [];
 		webSearchEnabled = false;
 		imageGenerationEnabled = false;
+		codeInterpreterEnabled = false;
+		deepResearchEnabled = false;
 
 		const storageChatInput = sessionStorage.getItem(
 			`chat-input${chatIdProp ? `-${chatIdProp}` : ''}`
@@ -232,6 +235,7 @@
 						webSearchEnabled = input.webSearchEnabled;
 						imageGenerationEnabled = input.imageGenerationEnabled;
 						codeInterpreterEnabled = input.codeInterpreterEnabled;
+						deepResearchEnabled = input.deepResearchEnabled ?? false;
 					}
 				} catch (e) {}
 			} else {
@@ -292,6 +296,7 @@
 		webSearchEnabled = false;
 		imageGenerationEnabled = false;
 		codeInterpreterEnabled = false;
+		deepResearchEnabled = false;
 
 		if (selectedModelIds.filter((id) => id).length > 0) {
 			setDefaults();
@@ -340,6 +345,8 @@
 				if (model.info?.meta?.capabilities?.['code_interpreter']) {
 					codeInterpreterEnabled = model.info.meta.defaultFeatureIds.includes('code_interpreter');
 				}
+
+				deepResearchEnabled = model.info.meta.defaultFeatureIds.includes('deep_research');
 			}
 		}
 	};
@@ -617,6 +624,7 @@
 			webSearchEnabled = false;
 			imageGenerationEnabled = false;
 			codeInterpreterEnabled = false;
+			deepResearchEnabled = false;
 
 			try {
 				const input = JSON.parse(storageChatInput);
@@ -629,6 +637,7 @@
 					webSearchEnabled = input.webSearchEnabled;
 					imageGenerationEnabled = input.imageGenerationEnabled;
 					codeInterpreterEnabled = input.codeInterpreterEnabled;
+					deepResearchEnabled = input.deepResearchEnabled ?? false;
 				}
 			} catch (e) {}
 		}
@@ -1063,6 +1072,10 @@
 
 		if ($page.url.searchParams.get('code-interpreter') === 'true') {
 			codeInterpreterEnabled = true;
+		}
+
+		if ($page.url.searchParams.get('deep-research') === 'true') {
+			deepResearchEnabled = true;
 		}
 
 		if ($page.url.searchParams.get('tools')) {
@@ -1888,11 +1901,26 @@
 					$config?.features?.enable_web_search &&
 					($user?.role === 'admin' || $user?.permissions?.features?.web_search)
 						? webSearchEnabled
+						: false,
+				deep_research:
+					$config?.features?.enable_deep_research &&
+					($user?.role === 'admin' || ($user?.permissions?.features?.deep_research ?? true))
+						? deepResearchEnabled
 						: false
 			};
 
+		if (features.deep_research) {
+			features = {
+				...features,
+				web_search: false,
+				image_generation: false,
+				code_interpreter: false
+			};
+		}
+
 		const currentModels = atSelectedModel?.id ? [atSelectedModel.id] : selectedModels;
 		if (
+			!features.deep_research &&
 			currentModels.filter(
 				(model) => $models.find((m) => m.id === model)?.info?.meta?.capabilities?.web_search ?? true
 			).length === currentModels.length
@@ -2663,6 +2691,7 @@
 									bind:imageGenerationEnabled
 									bind:codeInterpreterEnabled
 									bind:webSearchEnabled
+									bind:deepResearchEnabled
 									bind:atSelectedModel
 									bind:showCommands
 									toolServers={$toolServers}
@@ -2733,6 +2762,7 @@
 									bind:imageGenerationEnabled
 									bind:codeInterpreterEnabled
 									bind:webSearchEnabled
+									bind:deepResearchEnabled
 									bind:atSelectedModel
 									bind:showCommands
 									toolServers={$toolServers}

@@ -1514,6 +1514,11 @@ USER_PERMISSIONS_FEATURES_MEMORIES = (
     os.environ.get("USER_PERMISSIONS_FEATURES_MEMORIES", "True").lower() == "true"
 )
 
+USER_PERMISSIONS_FEATURES_DEEP_RESEARCH = (
+    os.environ.get("USER_PERMISSIONS_FEATURES_DEEP_RESEARCH", "True").lower()
+    == "true"
+)
+
 
 USER_PERMISSIONS_SETTINGS_INTERFACE = (
     os.environ.get("USER_PERMISSIONS_SETTINGS_INTERFACE", "True").lower() == "true"
@@ -1579,6 +1584,7 @@ DEFAULT_USER_PERMISSIONS = {
         "image_generation": USER_PERMISSIONS_FEATURES_IMAGE_GENERATION,
         "code_interpreter": USER_PERMISSIONS_FEATURES_CODE_INTERPRETER,
         "memories": USER_PERMISSIONS_FEATURES_MEMORIES,
+        "deep_research": USER_PERMISSIONS_FEATURES_DEEP_RESEARCH,
     },
     "settings": {
         "interface": USER_PERMISSIONS_SETTINGS_INTERFACE,
@@ -2139,6 +2145,48 @@ ENABLE_MEMORIES = PersistentConfig(
     "ENABLE_MEMORIES",
     "memories.enable",
     os.environ.get("ENABLE_MEMORIES", "True").lower() == "true",
+)
+
+ENABLE_DEEP_RESEARCH = PersistentConfig(
+    "ENABLE_DEEP_RESEARCH",
+    "deep_research.enable",
+    os.environ.get("ENABLE_DEEP_RESEARCH", "False").lower() == "true",
+)
+
+DEERFLOW_BASE_URL = PersistentConfig(
+    "DEERFLOW_BASE_URL",
+    "deep_research.deerflow.base_url",
+    os.environ.get("DEERFLOW_BASE_URL", ""),
+)
+
+DEERFLOW_API_KEY = PersistentConfig(
+    "DEERFLOW_API_KEY",
+    "deep_research.deerflow.api_key",
+    os.environ.get("DEERFLOW_API_KEY", ""),
+)
+
+DEERFLOW_MODEL = PersistentConfig(
+    "DEERFLOW_MODEL",
+    "deep_research.deerflow.model",
+    os.environ.get("DEERFLOW_MODEL", ""),
+)
+
+DEERFLOW_CONNECT_TIMEOUT_SECS = PersistentConfig(
+    "DEERFLOW_CONNECT_TIMEOUT_SECS",
+    "deep_research.deerflow.connect_timeout_secs",
+    int(os.environ.get("DEERFLOW_CONNECT_TIMEOUT_SECS", "10")),
+)
+
+DEERFLOW_REQUEST_TIMEOUT_SECS = PersistentConfig(
+    "DEERFLOW_REQUEST_TIMEOUT_SECS",
+    "deep_research.deerflow.request_timeout_secs",
+    int(os.environ.get("DEERFLOW_REQUEST_TIMEOUT_SECS", "900")),
+)
+
+DEERFLOW_REUSE_THREADS = PersistentConfig(
+    "DEERFLOW_REUSE_THREADS",
+    "deep_research.deerflow.reuse_threads",
+    os.environ.get("DEERFLOW_REUSE_THREADS", "True").lower() == "true",
 )
 
 CODE_INTERPRETER_ENGINE = PersistentConfig(
