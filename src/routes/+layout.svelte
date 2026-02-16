@@ -629,6 +629,15 @@
 	};
 
 	onMount(async () => {
+		// Allow isolated UI previews without requiring a running backend.
+		if ($page.url.pathname === '/style-preview') {
+			initI18n(localStorage?.locale ?? 'en-US');
+			WEBUI_NAME.set('Open WebUI');
+			document.getElementById('splash-screen')?.remove();
+			loaded = true;
+			return;
+		}
+
 		window.addEventListener('message', windowMessageEventHandler);
 
 		let touchstartY = 0;

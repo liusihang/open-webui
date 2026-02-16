@@ -323,6 +323,8 @@
 		{@const textContent = decode(token.text || '')
 			.replace(/<summary>.*?<\/summary>/gi, '')
 			.trim()}
+		{@const isReasoningDetails = token?.attributes?.type === 'reasoning'}
+		{@const reasoningDone = String(token?.attributes?.done ?? 'false') === 'true'}
 
 		{#if token?.attributes?.type === 'tool_calls'}
 			<!-- Tool calls have dedicated handling with ToolCallDisplay component -->
@@ -335,12 +337,16 @@
 		{:else if textContent.length > 0}
 			<Collapsible
 				title={token.summary}
-				open={$settings?.expandDetails ?? false}
+				open={isReasoningDetails
+					? reasoningDone
+						? ($settings?.expandDetails ?? false)
+						: true
+					: ($settings?.expandDetails ?? false)}
 				attributes={token?.attributes}
 				className="w-full space-y-1"
 				dir="auto"
 			>
-				<div class=" mb-1.5" slot="content">
+				<div class="mb-1.5 {isReasoningDetails ? 'text-[13px] leading-5' : ''}" slot="content">
 					<svelte:self
 						id={`${id}-${tokenIdx}-d`}
 						tokens={marked.lexer(decode(token.text))}
