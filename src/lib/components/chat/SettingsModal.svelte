@@ -580,8 +580,12 @@
 	});
 </script>
 
-<Modal size="2xl" bind:show>
-	<div class="text-gray-700 dark:text-gray-100 mx-1">
+<Modal
+	size="2xl"
+	bind:show
+	className="settings-modal-shell bg-white/95 dark:bg-gray-900/95 backdrop-blur-sm rounded-4xl"
+>
+	<div id="chat-settings-panel" class="text-gray-700 dark:text-gray-100 mx-1">
 		<div class=" flex justify-between dark:text-gray-300 px-4 md:px-4.5 pt-4.5 pb-0.5 md:pb-2.5">
 			<div class=" text-lg font-medium self-center">{$i18n.t('Settings')}</div>
 			<button

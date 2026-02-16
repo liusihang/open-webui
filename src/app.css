@@ -327,6 +327,10 @@ html.deerflow-light #sidebar-chat-item {
 	color: #575148;
 }
 
+html.deerflow-light #sidebar-chat-group:hover #sidebar-chat-item:not(.selected) {
+	background-color: var(--deerflow-hover) !important;
+}
+
 html.deerflow-light #sidebar-chat-item:hover,
 html.deerflow-light #sidebar-chat-item.selected,
 html.deerflow-light #sidebar-new-chat-button:hover,
@@ -390,7 +394,15 @@ html.deerflow-light #sidebar-chat-item-menu .sidebar-chat-menu-trigger:hover {
 }
 
 html.deerflow-light #sidebar-chat-item-menu {
+	--tw-gradient-from: var(--deerflow-hover) !important;
+	--tw-gradient-to: transparent !important;
+	--tw-gradient-stops: var(--tw-gradient-from), var(--tw-gradient-to) !important;
 	background-image: linear-gradient(to left, var(--deerflow-hover) 80%, transparent) !important;
+}
+
+html.deerflow-light #sidebar-chat-item-menu.selected {
+	--tw-gradient-from: var(--deerflow-bg-input) !important;
+	background-image: linear-gradient(to left, var(--deerflow-bg-input) 80%, transparent) !important;
 }
 
 html.deerflow-light #message-input-container {
@@ -405,6 +417,95 @@ html.deerflow-light #chat-input {
 
 html.deerflow-light #chat-input::placeholder {
 	color: var(--deerflow-text-muted) !important;
+}
+
+html.deerflow-light .admin-shell,
+html.deerflow-light #chat-settings-panel {
+	color: var(--deerflow-text) !important;
+}
+
+html.deerflow-light .settings-modal-shell {
+	background-color: var(--deerflow-bg-content) !important;
+	border-color: var(--deerflow-border-soft) !important;
+	color: var(--deerflow-text) !important;
+}
+
+html.deerflow-light #chat-settings-panel #settings-search,
+html.deerflow-light .admin-shell #settings-search {
+	background-color: var(--deerflow-bg-input) !important;
+	border: 1px solid var(--deerflow-border-soft) !important;
+}
+
+html.deerflow-light .admin-shell [class~='bg-white'],
+html.deerflow-light .admin-shell [class~='bg-white/95'],
+html.deerflow-light .admin-shell [class~='bg-white/90'],
+html.deerflow-light .admin-shell [class~='bg-white/80'],
+html.deerflow-light .admin-shell [class~='bg-white/70'],
+html.deerflow-light .admin-shell [class~='bg-white/60'],
+html.deerflow-light .admin-shell [class~='bg-white/50'],
+html.deerflow-light #chat-settings-panel [class~='bg-white'],
+html.deerflow-light #chat-settings-panel [class~='bg-white/95'],
+html.deerflow-light #chat-settings-panel [class~='bg-white/90'],
+html.deerflow-light #chat-settings-panel [class~='bg-white/80'],
+html.deerflow-light #chat-settings-panel [class~='bg-white/70'],
+html.deerflow-light #chat-settings-panel [class~='bg-white/60'],
+html.deerflow-light #chat-settings-panel [class~='bg-white/50'] {
+	background-color: var(--deerflow-bg-content) !important;
+	color: var(--deerflow-text) !important;
+}
+
+html.deerflow-light .admin-shell [class~='bg-gray-50'],
+html.deerflow-light .admin-shell [class~='bg-gray-50/70'],
+html.deerflow-light .admin-shell [class~='bg-gray-50/80'],
+html.deerflow-light .admin-shell [class~='bg-gray-100'],
+html.deerflow-light .admin-shell [class~='bg-gray-100/70'],
+html.deerflow-light .admin-shell [class~='bg-gray-100/80'],
+html.deerflow-light #chat-settings-panel [class~='bg-gray-50'],
+html.deerflow-light #chat-settings-panel [class~='bg-gray-50/70'],
+html.deerflow-light #chat-settings-panel [class~='bg-gray-50/80'],
+html.deerflow-light #chat-settings-panel [class~='bg-gray-100'],
+html.deerflow-light #chat-settings-panel [class~='bg-gray-100/70'],
+html.deerflow-light #chat-settings-panel [class~='bg-gray-100/80'] {
+	background-color: var(--deerflow-bg-input) !important;
+	color: var(--deerflow-text) !important;
+}
+
+html.deerflow-light .admin-shell [class~='hover:bg-gray-50']:hover,
+html.deerflow-light .admin-shell [class~='hover:bg-gray-100']:hover,
+html.deerflow-light .admin-shell [class~='hover:bg-black/5']:hover,
+html.deerflow-light #chat-settings-panel [class~='hover:bg-gray-50']:hover,
+html.deerflow-light #chat-settings-panel [class~='hover:bg-gray-100']:hover,
+html.deerflow-light #chat-settings-panel [class~='hover:bg-black/5']:hover {
+	background-color: var(--deerflow-hover) !important;
+}
+
+html.deerflow-light .admin-shell input[class*='bg-gray-'],
+html.deerflow-light .admin-shell textarea[class*='bg-gray-'],
+html.deerflow-light .admin-shell select[class*='bg-gray-'],
+html.deerflow-light #chat-settings-panel input[class*='bg-gray-'],
+html.deerflow-light #chat-settings-panel textarea[class*='bg-gray-'],
+html.deerflow-light #chat-settings-panel select[class*='bg-gray-'] {
+	background-color: var(--deerflow-bg-input) !important;
+	border-color: var(--deerflow-border-soft) !important;
+	color: var(--deerflow-text) !important;
+}
+
+html.deerflow-light .admin-shell input::placeholder,
+html.deerflow-light .admin-shell textarea::placeholder,
+html.deerflow-light #chat-settings-panel input::placeholder,
+html.deerflow-light #chat-settings-panel textarea::placeholder {
+	color: var(--deerflow-text-muted) !important;
+}
+
+html.deerflow-light .admin-shell [class*='border-gray-100'],
+html.deerflow-light .admin-shell [class*='border-gray-200'],
+html.deerflow-light .admin-shell [class*='border-gray-800'],
+html.deerflow-light .admin-shell [class*='border-gray-850'],
+html.deerflow-light #chat-settings-panel [class*='border-gray-100'],
+html.deerflow-light #chat-settings-panel [class*='border-gray-200'],
+html.deerflow-light #chat-settings-panel [class*='border-gray-800'],
+html.deerflow-light #chat-settings-panel [class*='border-gray-850'] {
+	border-color: var(--deerflow-border-soft) !important;
 }
 
 html.light .code-block-container {

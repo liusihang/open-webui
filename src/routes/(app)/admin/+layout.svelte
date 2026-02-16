@@ -28,7 +28,7 @@
 
 {#if loaded}
 	<div
-		class="deerflow-main-shell flex flex-col h-screen max-h-[100dvh] flex-1 transition-width duration-200 ease-in-out {$showSidebar
+		class="admin-shell deerflow-main-shell flex flex-col h-screen max-h-[100dvh] flex-1 transition-width duration-200 ease-in-out {$showSidebar
 			? 'md:max-w-[calc(100%-var(--sidebar-width))]'
 			: ' md:max-w-[calc(100%-49px)]'}  w-full max-w-full"
 	>
