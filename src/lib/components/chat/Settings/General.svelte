@@ -15,7 +15,7 @@
 
 	// General
 	const themeClasses = ['dark', 'light', 'oled-dark', 'her', 'deerflow-light'];
-	let selectedTheme = 'system';
+	let selectedTheme = 'deerflow-light';
 
 	let languages: Awaited<ReturnType<typeof getLanguages>> = [];
 	let lang = $i18n.language;
@@ -108,7 +108,7 @@
 	};
 
 	onMount(async () => {
-		selectedTheme = localStorage.theme ?? 'system';
+		selectedTheme = localStorage.theme ?? 'deerflow-light';
 
 		languages = await getLanguages();
 

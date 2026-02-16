@@ -23,7 +23,9 @@
 	}}
 	typeahead={false}
 >
-	<DropdownMenu.Trigger>
+	<DropdownMenu.Trigger
+		class="p-0 m-0 bg-transparent border-none shadow-none text-inherit focus:outline-hidden"
+	>
 		<slot />
 	</DropdownMenu.Trigger>
 
