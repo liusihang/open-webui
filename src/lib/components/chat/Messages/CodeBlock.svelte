@@ -96,9 +96,26 @@
 
 	const checkPythonCode = (str) => {
 		const pythonSyntax = [
-			'def ', 'else:', 'elif ', 'try:', 'except:', 'finally:', 'yield ',
-			'lambda ', 'assert ', 'nonlocal ', 'del ', 'True', 'False', 'None',
-			' and ', ' or ', ' not ', ' in ', ' is ', ' with '
+			'def ',
+			'else:',
+			'elif ',
+			'try:',
+			'except:',
+			'finally:',
+			'yield ',
+			'lambda ',
+			'assert ',
+			'nonlocal ',
+			'del ',
+			'True',
+			'False',
+			'None',
+			' and ',
+			' or ',
+			' not ',
+			' in ',
+			' is ',
+			' with '
 		];
 		for (let syntax of pythonSyntax) {
 			if (str.includes(syntax)) return true;
@@ -126,7 +143,7 @@
 						if (line.startsWith('data:image/png;base64')) {
 							if (files) files.push({ type: 'image/png', data: line });
 							else files = [{ type: 'image/png', data: line }];
-							
+
 							if (stdout.includes(`${line}\n`)) stdout = stdout.replace(`${line}\n`, ``);
 							else if (stdout.includes(`${line}`)) stdout = stdout.replace(`${line}`, ``);
 						}
@@ -313,18 +330,18 @@
 
 <div class="my-2 group">
 	<div
-		class="relative {className} flex flex-col rounded-xl border border-gray-200 dark:border-[#3c3c3c] shadow-sm overflow-hidden bg-white dark:bg-[#1e1e1e]"
+		class="code-block-container relative {className} flex flex-col rounded-xl border border-gray-200 dark:border-[#3c3c3c] shadow-sm overflow-hidden"
 		dir="ltr"
 	>
 		{#if ['mermaid', 'vega', 'vega-lite'].includes(lang)}
 			{#if renderHTML}
 				<SvgPanZoom
-					className=" rounded-xl max-h-fit overflow-hidden bg-white"
+					className="code-block-surface rounded-xl max-h-fit overflow-hidden"
 					svg={renderHTML}
 					content={_token.text}
 				/>
 			{:else}
-				<div class="p-3 bg-white">
+				<div class="code-block-surface p-3">
 					{#if renderError}
 						<div
 							class="flex gap-2.5 border px-4 py-3 border-red-600/10 bg-red-600/10 rounded-xl mb-2"
@@ -336,17 +353,19 @@
 				</div>
 			{/if}
 		{:else}
-				<!-- Mac-style Header -->
-				<div
-					class="flex items-center justify-between bg-gray-50/50 dark:bg-[#252526] px-4 py-2 border-b border-gray-200 dark:border-[#3c3c3c] text-gray-500 dark:text-[#c5c5c5] select-none {stickyButtonsClassName}"
-				>
+			<!-- Mac-style Header -->
+			<div
+				class="code-block-surface flex items-center justify-between px-4 py-2 border-b border-gray-200 dark:border-[#3c3c3c] text-gray-500 dark:text-[#c5c5c5] select-none {stickyButtonsClassName}"
+			>
 				<span class="text-xs font-medium lowercase opacity-75 macos-code-font">
 					{lang || 'text'}
 				</span>
 
-					<div class="flex items-center gap-2 opacity-100 sm:opacity-0 sm:group-hover:opacity-100 sm:group-focus-within:opacity-100 transition-opacity duration-200">
+				<div
+					class="flex items-center gap-2 opacity-100 sm:opacity-0 sm:group-hover:opacity-100 sm:group-focus-within:opacity-100 transition-opacity duration-200"
+				>
 					<button
-						class="flex items-center gap-1.5 px-2 py-1 rounded-md hover:bg-gray-200 dark:hover:bg-gray-800 transition text-xs font-medium"
+						class="code-block-action-btn flex items-center gap-1.5 px-2 py-1 rounded-md transition text-xs font-medium"
 						on:click={collapseCodeBlock}
 						title={collapsed ? $i18n.t('Expand') : $i18n.t('Collapse')}
 					>
@@ -358,16 +377,34 @@
 
 					{#if ($config?.features?.enable_code_execution ?? true) && (lang.toLowerCase() === 'python' || lang.toLowerCase() === 'py' || (lang === '' && checkPythonCode(code)))}
 						{#if executing}
-							<div class="flex items-center gap-1.5 px-2 py-1 rounded-md bg-gray-100 dark:bg-gray-800 text-xs">
-								<svg class="animate-spin h-3 w-3 text-gray-500" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
-									<circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
-									<path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+							<div
+								class="code-block-action-btn flex items-center gap-1.5 px-2 py-1 rounded-md text-xs"
+							>
+								<svg
+									class="animate-spin h-3 w-3 text-gray-500"
+									xmlns="http://www.w3.org/2000/svg"
+									fill="none"
+									viewBox="0 0 24 24"
+								>
+									<circle
+										class="opacity-25"
+										cx="12"
+										cy="12"
+										r="10"
+										stroke="currentColor"
+										stroke-width="4"
+									></circle>
+									<path
+										class="opacity-75"
+										fill="currentColor"
+										d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"
+									></path>
 								</svg>
 								<span>{$i18n.t('Running')}</span>
 							</div>
 						{:else if run}
 							<button
-								class="flex items-center gap-1.5 px-2 py-1 rounded-md hover:bg-gray-200 dark:hover:bg-gray-800 transition text-xs font-medium"
+								class="code-block-action-btn flex items-center gap-1.5 px-2 py-1 rounded-md transition text-xs font-medium"
 								on:click={async () => {
 									code = _code;
 									await tick();
@@ -375,8 +412,17 @@
 								}}
 								title={$i18n.t('Run Code')}
 							>
-								<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="currentColor" class="size-3.5">
-									<path fill-rule="evenodd" d="M4.5 5.653c0-1.426 1.529-2.33 2.779-1.643l11.54 6.348c1.295.712 1.295 2.573 0 3.285L7.28 19.991c-1.25.687-2.779-.217-2.779-1.643V5.653z" clip-rule="evenodd" />
+								<svg
+									xmlns="http://www.w3.org/2000/svg"
+									viewBox="0 0 24 24"
+									fill="currentColor"
+									class="size-3.5"
+								>
+									<path
+										fill-rule="evenodd"
+										d="M4.5 5.653c0-1.426 1.529-2.33 2.779-1.643l11.54 6.348c1.295.712 1.295 2.573 0 3.285L7.28 19.991c-1.25.687-2.779-.217-2.779-1.643V5.653z"
+										clip-rule="evenodd"
+									/>
 								</svg>
 							</button>
 						{/if}
@@ -384,47 +430,102 @@
 
 					{#if save}
 						<button
-							class="flex items-center gap-1.5 px-2 py-1 rounded-md hover:bg-gray-200 dark:hover:bg-gray-800 transition text-xs font-medium"
+							class="code-block-action-btn flex items-center gap-1.5 px-2 py-1 rounded-md transition text-xs font-medium"
 							on:click={saveCode}
 							title={$i18n.t('Save')}
 						>
 							{#if saved}
-								<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor" class="size-3.5 text-green-500">
-									<path fill-rule="evenodd" d="M16.707 5.293a1 1 0 010 1.414l-8 8a1 1 0 01-1.414 0l-4-4a1 1 0 011.414-1.414L8 12.586l7.293-7.293a1 1 0 011.414 0z" clip-rule="evenodd" />
+								<svg
+									xmlns="http://www.w3.org/2000/svg"
+									viewBox="0 0 20 20"
+									fill="currentColor"
+									class="size-3.5 text-green-500"
+								>
+									<path
+										fill-rule="evenodd"
+										d="M16.707 5.293a1 1 0 010 1.414l-8 8a1 1 0 01-1.414 0l-4-4a1 1 0 011.414-1.414L8 12.586l7.293-7.293a1 1 0 011.414 0z"
+										clip-rule="evenodd"
+									/>
 								</svg>
 							{:else}
-								<svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor" class="size-3.5">
-									<path stroke-linecap="round" stroke-linejoin="round" d="M3 16.5v2.25A2.25 2.25 0 005.25 21h13.5A2.25 2.25 0 0021 18.75V16.5M16.5 12L12 16.5m0 0L7.5 12m4.5 4.5V3" />
+								<svg
+									xmlns="http://www.w3.org/2000/svg"
+									fill="none"
+									viewBox="0 0 24 24"
+									stroke-width="1.5"
+									stroke="currentColor"
+									class="size-3.5"
+								>
+									<path
+										stroke-linecap="round"
+										stroke-linejoin="round"
+										d="M3 16.5v2.25A2.25 2.25 0 005.25 21h13.5A2.25 2.25 0 0021 18.75V16.5M16.5 12L12 16.5m0 0L7.5 12m4.5 4.5V3"
+									/>
 								</svg>
 							{/if}
 						</button>
 					{/if}
 
 					<button
-						class="flex items-center gap-1.5 px-2 py-1 rounded-md hover:bg-gray-200 dark:hover:bg-gray-800 transition text-xs font-medium"
+						class="code-block-action-btn flex items-center gap-1.5 px-2 py-1 rounded-md transition text-xs font-medium"
 						on:click={copyCode}
 						title={$i18n.t('Copy')}
 					>
 						{#if copied}
-							<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor" class="size-3.5 text-green-500">
-								<path fill-rule="evenodd" d="M16.707 5.293a1 1 0 010 1.414l-8 8a1 1 0 01-1.414 0l-4-4a1 1 0 011.414-1.414L8 12.586l7.293-7.293a1 1 0 011.414 0z" clip-rule="evenodd" />
+							<svg
+								xmlns="http://www.w3.org/2000/svg"
+								viewBox="0 0 20 20"
+								fill="currentColor"
+								class="size-3.5 text-green-500"
+							>
+								<path
+									fill-rule="evenodd"
+									d="M16.707 5.293a1 1 0 010 1.414l-8 8a1 1 0 01-1.414 0l-4-4a1 1 0 011.414-1.414L8 12.586l7.293-7.293a1 1 0 011.414 0z"
+									clip-rule="evenodd"
+								/>
 							</svg>
 						{:else}
-							<svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor" class="size-3.5">
-								<path stroke-linecap="round" stroke-linejoin="round" d="M15.666 3.888A2.25 2.25 0 0 0 13.5 2.25h-3c-1.03 0-1.9.693-2.166 1.638m7.332 0c.055.194.084.4.084.612v0a.75.75 0 0 1-.75.75H9a.75.75 0 0 1-.75-.75v0c0-.212.03-.418.084-.612m7.332 0c.646.049 1.288.11 1.927.184 1.1.128 1.907 1.077 1.907 2.185V19.5a2.25 2.25 0 0 1-2.25 2.25H6.75A2.25 2.25 0 0 1 4.5 19.5V6.257c0-1.108.806-2.057 1.907-2.185a48.208 48.208 0 0 1 1.927-.184" />
+							<svg
+								xmlns="http://www.w3.org/2000/svg"
+								fill="none"
+								viewBox="0 0 24 24"
+								stroke-width="1.5"
+								stroke="currentColor"
+								class="size-3.5"
+							>
+								<path
+									stroke-linecap="round"
+									stroke-linejoin="round"
+									d="M15.666 3.888A2.25 2.25 0 0 0 13.5 2.25h-3c-1.03 0-1.9.693-2.166 1.638m7.332 0c.055.194.084.4.084.612v0a.75.75 0 0 1-.75.75H9a.75.75 0 0 1-.75-.75v0c0-.212.03-.418.084-.612m7.332 0c.646.049 1.288.11 1.927.184 1.1.128 1.907 1.077 1.907 2.185V19.5a2.25 2.25 0 0 1-2.25 2.25H6.75A2.25 2.25 0 0 1 4.5 19.5V6.257c0-1.108.806-2.057 1.907-2.185a48.208 48.208 0 0 1 1.927-.184"
+								/>
 							</svg>
 						{/if}
 					</button>
 
 					{#if preview && ['html', 'svg'].includes(lang)}
 						<button
-							class="flex items-center gap-1.5 px-2 py-1 rounded-md hover:bg-gray-200 dark:hover:bg-gray-800 transition text-xs font-medium"
+							class="code-block-action-btn flex items-center gap-1.5 px-2 py-1 rounded-md transition text-xs font-medium"
 							on:click={previewCode}
 							title={$i18n.t('Preview')}
 						>
-							<svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor" class="size-3.5">
-								<path stroke-linecap="round" stroke-linejoin="round" d="M2.036 12.322a1.012 1.012 0 010-.639C3.423 7.51 7.36 4.5 12 4.5c4.638 0 8.573 3.007 9.963 7.178.07.207.07.431 0 .639C20.577 16.49 16.64 19.5 12 19.5c-4.638 0-8.573-3.007-9.963-7.178z" />
-								<path stroke-linecap="round" stroke-linejoin="round" d="M15 12a3 3 0 11-6 0 3 3 0 016 0z" />
+							<svg
+								xmlns="http://www.w3.org/2000/svg"
+								fill="none"
+								viewBox="0 0 24 24"
+								stroke-width="1.5"
+								stroke="currentColor"
+								class="size-3.5"
+							>
+								<path
+									stroke-linecap="round"
+									stroke-linejoin="round"
+									d="M2.036 12.322a1.012 1.012 0 010-.639C3.423 7.51 7.36 4.5 12 4.5c4.638 0 8.573 3.007 9.963 7.178.07.207.07.431 0 .639C20.577 16.49 16.64 19.5 12 19.5c-4.638 0-8.573-3.007-9.963-7.178z"
+								/>
+								<path
+									stroke-linecap="round"
+									stroke-linejoin="round"
+									d="M15 12a3 3 0 11-6 0 3 3 0 016 0z"
+								/>
 							</svg>
 						</button>
 					{/if}
@@ -432,7 +533,7 @@
 			</div>
 
 			<!-- Code Area -->
-				<div class="relative bg-[#1e1e1e] text-[#d4d4d4] overflow-hidden {editorClassName}">
+			<div class="code-block-surface relative overflow-hidden {editorClassName}">
 				{#if !collapsed}
 					{#if edit}
 						<div class="code-editor-no-gutters">
@@ -449,49 +550,58 @@
 							/>
 						</div>
 					{:else}
-							<div class="overflow-x-auto codeblock-scroll">
-								<HighlightAuto
-									{code}
-									class="!bg-transparent !p-4 text-sm macos-code-font"
-								/>
+						<div class="code-block-pre overflow-x-auto codeblock-scroll">
+							<HighlightAuto {code} class="!bg-transparent !p-4 text-sm macos-code-font" />
 						</div>
 					{/if}
-					{:else}
-						<button
-							type="button"
-							class="w-full bg-[#1e1e1e] text-[#d4d4d4] py-2 px-4 flex items-center justify-center hover:bg-[#252526] transition"
-							on:click={collapseCodeBlock}
-						>
-							<span class="text-gray-500 italic text-xs">
-								{$i18n.t('{{COUNT}} hidden lines', { COUNT: code.split('\n').length })}
-							</span>
-							<ChevronUpDown className="size-3 ml-2 text-gray-500" />
-						</button>
-					{/if}
-				</div>
-
-				{#if !collapsed}
-					<div
-						id="plt-canvas-{id}"
-						class="bg-gray-50 dark:bg-black dark:text-white max-w-full overflow-x-auto scrollbar-hidden"
-					></div>
+				{:else}
+					<button
+						type="button"
+						class="code-block-surface w-full py-2 px-4 flex items-center justify-center hover:opacity-90 transition"
+						on:click={collapseCodeBlock}
+					>
+						<span class="text-gray-500 italic text-xs">
+							{$i18n.t('{{COUNT}} hidden lines', { COUNT: code.split('\n').length })}
+						</span>
+						<ChevronUpDown className="size-3 ml-2 text-gray-500" />
+					</button>
 				{/if}
+			</div>
+
+			{#if !collapsed}
+				<div
+					id="plt-canvas-{id}"
+					class="code-block-output-surface max-w-full overflow-x-auto scrollbar-hidden"
+				></div>
+			{/if}
 
 			<!-- Output Area -->
 			{#if !collapsed && (executing || stdout || stderr || result || files)}
-					<div class="border-t border-gray-200 dark:border-gray-800/60 bg-gray-50 dark:bg-black dark:text-white p-4 text-sm macos-code-font overflow-x-auto codeblock-scroll">
-						{#if executing}
-							<div class="text-gray-500">{$i18n.t('Running...')}</div>
-						{:else}
-							{#if stdout || stderr}
-								<div class="mb-2">
-									<div class="text-xs text-gray-400 uppercase tracking-wider mb-1">{$i18n.t('STDOUT/STDERR')}</div>
-									<div class="whitespace-pre-wrap codeblock-scroll {stdout?.split('\n')?.length > 100 ? `max-h-96 overflow-y-auto` : ''}">{stdout || stderr}</div>
+				<div
+					class="code-block-output-surface border-t border-gray-200 dark:border-gray-800/60 p-4 text-sm macos-code-font overflow-x-auto codeblock-scroll"
+				>
+					{#if executing}
+						<div class="text-gray-500">{$i18n.t('Running...')}</div>
+					{:else}
+						{#if stdout || stderr}
+							<div class="mb-2">
+								<div class="text-xs text-gray-400 uppercase tracking-wider mb-1">
+									{$i18n.t('STDOUT/STDERR')}
 								</div>
-							{/if}
+								<div
+									class="whitespace-pre-wrap codeblock-scroll {stdout?.split('\n')?.length > 100
+										? `max-h-96 overflow-y-auto`
+										: ''}"
+								>
+									{stdout || stderr}
+								</div>
+							</div>
+						{/if}
 						{#if result || files}
 							<div>
-								<div class="text-xs text-gray-400 uppercase tracking-wider mb-1">{$i18n.t('RESULT')}</div>
+								<div class="text-xs text-gray-400 uppercase tracking-wider mb-1">
+									{$i18n.t('RESULT')}
+								</div>
 								{#if result}
 									<div class="whitespace-pre-wrap">{`${JSON.stringify(result)}`}</div>
 								{/if}
@@ -499,7 +609,11 @@
 									<div class="flex flex-col gap-2 mt-2">
 										{#each files as file}
 											{#if file.type.startsWith('image')}
-												<img src={file.data} alt="Output" class="w-full max-w-lg rounded-lg border border-gray-200 dark:border-gray-800" />
+												<img
+													src={file.data}
+													alt="Output"
+													class="w-full max-w-lg rounded-lg border border-gray-200 dark:border-gray-800"
+												/>
 											{/if}
 										{/each}
 									</div>
@@ -515,15 +629,8 @@
 
 <style>
 	.macos-code-font {
-		font-family:
-			'SF Mono',
-			'SFMono-Regular',
-			Menlo,
-			Monaco,
-			Consolas,
-			'Liberation Mono',
-			'Courier New',
-			monospace;
+		font-family: 'SF Mono', 'SFMono-Regular', Menlo, Monaco, Consolas, 'Liberation Mono',
+			'Courier New', monospace;
 	}
 
 	.code-editor-no-gutters :global(.cm-gutters) {
@@ -531,15 +638,15 @@
 	}
 
 	.code-editor-no-gutters :global(.cm-editor) {
-		font-family:
-			'SF Mono',
-			'SFMono-Regular',
-			Menlo,
-			Monaco,
-			Consolas,
-			'Liberation Mono',
-			'Courier New',
-			monospace;
+		font-family: 'SF Mono', 'SFMono-Regular', Menlo, Monaco, Consolas, 'Liberation Mono',
+			'Courier New', monospace;
+		background: transparent !important;
+		color: inherit !important;
+	}
+
+	.code-editor-no-gutters :global(.cm-scroller) {
+		background: transparent !important;
+		color: inherit !important;
 	}
 
 	.code-editor-no-gutters :global(.cm-content) {

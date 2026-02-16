@@ -79,7 +79,9 @@
 	$: dividerToneClass = isExecuting
 		? 'border-sky-200/70 dark:border-sky-800/60'
 		: 'border-gray-200/70 dark:border-gray-800/70';
-	$: bodyToneClass = isExecuting ? 'bg-sky-50/25 dark:bg-sky-900/5' : 'bg-white/90 dark:bg-gray-950/20';
+	$: bodyToneClass = isExecuting
+		? 'bg-sky-50/25 dark:bg-sky-900/5'
+		: 'bg-gray-50/70 dark:bg-gray-900/30';
 	$: iconToneClass = isExecuting
 		? 'bg-sky-100/80 text-sky-700 dark:bg-sky-900/40 dark:text-sky-300'
 		: 'bg-emerald-100/80 text-emerald-700 dark:bg-emerald-900/40 dark:text-emerald-300';
@@ -103,7 +105,9 @@ ${formattedArgs}
 	{#if embeds && Array.isArray(embeds) && embeds.length > 0}
 		<!-- Embed Mode: Show iframes without collapsible behavior -->
 		<div class="py-1 w-full">
-			<div class="w-full rounded-xl border border-gray-200/70 bg-gray-50/70 px-3 py-2 text-[13px] leading-5 text-gray-700 dark:border-gray-800/70 dark:bg-gray-900/30 dark:text-gray-200">
+			<div
+				class="tool-call-container w-full rounded-xl border border-gray-200/70 bg-gray-50/70 px-3 py-2 text-[13px] leading-5 text-gray-700 dark:border-gray-800/70 dark:bg-gray-900/30 dark:text-gray-200"
+			>
 				<div class="flex items-center gap-2">
 					<div class="rounded-md bg-gray-100 p-1 text-gray-600 dark:bg-gray-850 dark:text-gray-300">
 						<Wrench className="size-3.5" />
@@ -130,10 +134,12 @@ ${formattedArgs}
 	{:else}
 		<!-- Standard collapsible tool call display -->
 		<div class={buttonClassName}>
-			<div class="w-full overflow-hidden rounded-xl border {containerToneClass}">
+			<div
+				class="tool-call-container w-full overflow-hidden rounded-xl border {containerToneClass}"
+			>
 				<button
 					type="button"
-					class="w-full cursor-pointer px-3 py-2 text-left font-medium flex items-center justify-between gap-2 {headerToneClass}"
+					class="tool-call-header w-full cursor-pointer px-3 py-2 text-left font-medium flex items-center justify-between gap-2 {headerToneClass}"
 					on:click={() => {
 						open = !open;
 					}}
@@ -162,23 +168,25 @@ ${formattedArgs}
 								strokeWidth="3.5"
 								className="size-3.5 {open ? 'rotate-180' : ''} transition-transform"
 							/>
+						{:else if open}
+							<ChevronUp strokeWidth="3.5" className="size-3.5" />
 						{:else}
-							{#if open}
-								<ChevronUp strokeWidth="3.5" className="size-3.5" />
-							{:else}
-								<ChevronDown strokeWidth="3.5" className="size-3.5" />
-							{/if}
+							<ChevronDown strokeWidth="3.5" className="size-3.5" />
 						{/if}
 					</div>
 				</button>
 
 				{#if open}
 					<div
-						class="border-t px-3 py-2 {dividerToneClass} {bodyToneClass}"
+						class="tool-call-body border-t px-3 py-2 {dividerToneClass} {bodyToneClass}"
 						transition:slide={{ duration: 300, easing: quintOut, axis: 'y' }}
 					>
 						{#if isDone}
-							<Markdown id={`${componentId}-tool-call-result`} content={doneContent} />
+							<Markdown
+								id={`${componentId}-tool-call-result`}
+								content={doneContent}
+								editCodeBlock={false}
+							/>
 						{:else}
 							<Markdown
 								id={`${componentId}-tool-call-args`}
@@ -186,6 +194,7 @@ ${formattedArgs}
 \`\`\`json
 ${formattedArgs}
 \`\`\``}
+								editCodeBlock={false}
 							/>
 						{/if}
 					</div>

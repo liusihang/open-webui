@@ -439,6 +439,31 @@ html.deerflow-light .code-block-container .code-block-pre code {
 	color: var(--deerflow-text);
 }
 
+html.light .tool-call-container .tool-call-body {
+	background-color: #f2f4f7;
+	color: #1f2937;
+}
+
+html.dark .tool-call-container .tool-call-body {
+	background-color: #111827;
+	color: #e5e7eb;
+}
+
+html.deerflow-light .tool-call-container .tool-call-body {
+	background-color: var(--deerflow-bg-content);
+	color: var(--deerflow-text);
+}
+
+html.light .tool-call-container .tool-call-body .code-block-pre pre,
+html.light .tool-call-container .tool-call-body .code-block-pre pre code,
+html.dark .tool-call-container .tool-call-body .code-block-pre pre,
+html.dark .tool-call-container .tool-call-body .code-block-pre pre code,
+html.deerflow-light .tool-call-container .tool-call-body .code-block-pre pre,
+html.deerflow-light .tool-call-container .tool-call-body .code-block-pre pre code {
+	background-color: transparent !important;
+	color: inherit !important;
+}
+
 input::-webkit-outer-spin-button,
 input::-webkit-inner-spin-button {
 	/* display: none; <- Crashes Chrome on hover */
