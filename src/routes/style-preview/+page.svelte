@@ -34,9 +34,24 @@
 			done: true
 		},
 		{
-			action: 'knowledge_search',
-			description: 'Searching Knowledge for "{{searchQuery}}"',
-			query: 'status timeline visual design',
+			action: 'deep_research',
+			description: 'Executing research steps',
+			children: [
+				{
+					title: 'planner',
+					markdown: 'Break problem into milestones and define success criteria.'
+				},
+				{
+					title: 'researcher',
+					markdown:
+						'- Compare OpenWebUI status timeline implementation.\n- Inspect DeerFlow step rendering behavior.\n- Identify UI parity gaps.'
+				},
+				{
+					title: 'synthesizer',
+					markdown:
+						'Draft migration guidance:\n\n1. Keep status cards compact.\n2. Render step children in markdown.\n3. Avoid exposing local file paths.'
+				}
+			],
 			done: false
 		}
 	];
@@ -111,13 +126,23 @@
 		<h2 class="text-sm font-semibold uppercase tracking-wide text-gray-500 dark:text-gray-400">
 			Tool Call (Running)
 		</h2>
-		<ToolCallDisplay id="preview-tool-running" attributes={toolCallRunning} open={true} className="w-full" />
+		<ToolCallDisplay
+			id="preview-tool-running"
+			attributes={toolCallRunning}
+			open={true}
+			className="w-full"
+		/>
 	</section>
 
 	<section class="rounded-2xl border border-gray-200/70 dark:border-gray-800/80 p-4 space-y-4">
 		<h2 class="text-sm font-semibold uppercase tracking-wide text-gray-500 dark:text-gray-400">
 			Tool Call (Done)
 		</h2>
-		<ToolCallDisplay id="preview-tool-done" attributes={toolCallDone} open={false} className="w-full" />
+		<ToolCallDisplay
+			id="preview-tool-done"
+			attributes={toolCallDone}
+			open={false}
+			className="w-full"
+		/>
 	</section>
 </div>

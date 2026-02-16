@@ -332,7 +332,7 @@
 				id={`${id}-${tokenIdx}-tc`}
 				attributes={token.attributes}
 				open={false}
-				className="w-full space-y-1"
+				className="w-full my-1"
 			/>
 		{:else if textContent.length > 0}
 			<Collapsible
@@ -343,10 +343,13 @@
 						: true
 					: ($settings?.expandDetails ?? false)}
 				attributes={token?.attributes}
-				className="w-full space-y-1"
+				className="w-full my-1"
+				buttonClassName={isReasoningDetails
+					? 'w-full transition'
+					: 'w-fit text-gray-500 hover:text-gray-700 dark:hover:text-gray-300 transition'}
 				dir="auto"
 			>
-				<div class="mb-1.5 {isReasoningDetails ? 'text-[13px] leading-5' : ''}" slot="content">
+				<div class="mb-1.5 {isReasoningDetails ? 'text-base leading-6' : ''}" slot="content">
 					<svelte:self
 						id={`${id}-${tokenIdx}-d`}
 						tokens={marked.lexer(decode(token.text))}
@@ -365,7 +368,7 @@
 				open={false}
 				disabled={true}
 				attributes={token?.attributes}
-				className="w-full space-y-1"
+				className="w-full my-1"
 				dir="auto"
 			/>
 		{/if}

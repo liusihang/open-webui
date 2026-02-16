@@ -183,19 +183,116 @@ def _extract_final_assistant_text(payload: Any) -> str:
     return ""
 
 
-def _infer_status_description(event_name: str, payload: Any) -> str | None:
+def _format_step_name(raw_name: str) -> str:
+    name = str(raw_name or "").strip()
+    if not name:
+        return "step"
+
+    name = name.replace("_", " ").replace("-", " ")
+    return " ".join(name.split())
+
+
+def _extract_markdown_chunks(
+    payload: Any, max_items: int = 8, max_chars: int = 1800
+) -> str | None:
+    chunks = _extract_stream_chunks(payload)
+    if not chunks:
+        return None
+
+    unique_chunks: list[str] = []
+    seen: set[str] = set()
+    current_chars = 0
+
+    for chunk in chunks:
+        text = str(chunk or "").strip()
+        if not text:
+            continue
+
+        if text in seen:
+            continue
+        seen.add(text)
+
+        if current_chars + len(text) > max_chars and unique_chunks:
+            break
+
+        unique_chunks.append(text)
+        current_chars += len(text)
+
+        if len(unique_chunks) >= max_items:
+            break
+
+    if not unique_chunks:
+        return None
+
+    markdown = "\n\n".join(unique_chunks).strip()
+    if len(markdown) > max_chars:
+        markdown = markdown[:max_chars].rstrip() + "\n\n..."
+
+    return markdown or None
+
+
+def _build_step_children_from_updates_payload(payload: Any) -> list[dict]:
+    children: list[dict] = []
+
+    if not isinstance(payload, dict):
+        markdown = _extract_markdown_chunks(payload)
+        if markdown:
+            children.append({"title": "Step details", "markdown": markdown})
+        return children
+
+    ignored_keys = {"messages", "output", "result", "values", "state"}
+
+    for key, value in payload.items():
+        if key in ignored_keys:
+            continue
+
+        child: dict[str, Any] = {"title": _format_step_name(key)}
+        markdown = _extract_markdown_chunks(value)
+        if markdown:
+            child["markdown"] = markdown
+        children.append(child)
+
+    if not children:
+        markdown = _extract_markdown_chunks(payload)
+        if markdown:
+            children.append({"title": "Step details", "markdown": markdown})
+
+    return children
+
+
+def _infer_status_updates(event_name: str, payload: Any) -> list[dict]:
     lowered = (event_name or "").strip().lower()
+    updates: list[dict] = []
+
     if lowered == "updates":
-        if isinstance(payload, dict):
-            for key in payload.keys():
-                if key not in {"messages", "output", "result", "values", "state"}:
-                    return f"Running step: {key}"
-        return "Executing research steps"
+        children = _build_step_children_from_updates_payload(payload)
+        status_data: dict[str, Any] = {
+            "action": "deep_research",
+            "description": "Executing research steps",
+            "done": False,
+        }
+        if children:
+            status_data["children"] = children
+        updates.append(status_data)
+        return updates
 
     if lowered == "values":
-        return "Aggregating intermediate results"
+        status_data: dict[str, Any] = {
+            "action": "deep_research",
+            "description": "Aggregating intermediate results",
+            "done": False,
+        }
 
-    return None
+        summary_text = _extract_final_assistant_text(payload) or _extract_markdown_chunks(
+            payload
+        )
+        if summary_text:
+            status_data["children"] = [
+                {"title": "Intermediate summary", "markdown": summary_text}
+            ]
+        updates.append(status_data)
+
+    return updates
 
 
 async def _iter_sse_events(response: aiohttp.ClientResponse):
@@ -342,7 +439,7 @@ async def create_deerflow_research_stream_response(
     async def stream():
         emitted_content = False
         last_values_payload = None
-        emitted_statuses: set[str] = set()
+        emitted_status_signatures: set[str] = set()
 
         try:
             yield _sse_data(
@@ -428,18 +525,22 @@ async def create_deerflow_research_stream_response(
                         if is_json and (event_name or "").strip().lower() == "values":
                             last_values_payload = parsed
 
-                        status_description = _infer_status_description(event_name, parsed)
-                        if status_description and status_description not in emitted_statuses:
-                            emitted_statuses.add(status_description)
+                        status_updates = _infer_status_updates(
+                            event_name, parsed if is_json else data_str
+                        )
+                        for status_update in status_updates:
+                            status_signature = json.dumps(
+                                status_update, ensure_ascii=False, sort_keys=True
+                            )
+                            if status_signature in emitted_status_signatures:
+                                continue
+
+                            emitted_status_signatures.add(status_signature)
                             yield _sse_data(
                                 {
                                     "event": {
                                         "type": "status",
-                                        "data": {
-                                            "action": "deep_research",
-                                            "description": status_description,
-                                            "done": False,
-                                        },
+                                        "data": status_update,
                                     }
                                 }
                             )

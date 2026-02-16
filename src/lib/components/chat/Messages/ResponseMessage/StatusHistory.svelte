@@ -42,14 +42,18 @@
 			}}
 		>
 			<div class="flex items-start gap-2">
-				<StatusItem status={latestStatus} />
-			</div>
-
-			{#if canExpand}
-				<div class="mt-1 flex justify-end text-gray-500 dark:text-gray-400">
-					<ChevronUp className="size-3.5 transition-transform {showHistory ? '' : 'rotate-180'}" strokeWidth="3" />
+				<div class="min-w-0 flex-1">
+					<StatusItem status={latestStatus} />
 				</div>
-			{/if}
+				{#if canExpand}
+					<div class="mt-1 shrink-0 text-gray-500 dark:text-gray-400">
+						<ChevronUp
+							className="size-3.5 transition-transform {showHistory ? '' : 'rotate-180'}"
+							strokeWidth="3"
+						/>
+					</div>
+				{/if}
+			</div>
 		</button>
 
 		{#if showHistory && canExpand}

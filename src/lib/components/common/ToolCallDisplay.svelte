@@ -38,7 +38,7 @@
 	function parseJSONString(str: string) {
 		try {
 			return parseJSONString(JSON.parse(str));
-		} catch (e) {
+		} catch {
 			return str;
 		}
 	}
@@ -53,7 +53,7 @@
 				// It's a primitive value like a number, boolean, etc.
 				return `${JSON.stringify(String(parsed))}`;
 			}
-		} catch (e) {
+		} catch {
 			// Not valid JSON, return as-is
 			return str;
 		}
@@ -70,9 +70,16 @@
 	$: formattedArgs = formatJSONString(args);
 	$: formattedResult = formatJSONString(result);
 	$: hasResult = String(result ?? '').trim() !== '';
+	$: containerToneClass = isExecuting
+		? 'border-sky-300/70 dark:border-sky-700/60'
+		: 'border-gray-200/70 dark:border-gray-800/70';
 	$: headerToneClass = isExecuting
-		? 'border-sky-300/70 bg-sky-50/70 text-sky-900 dark:border-sky-700/60 dark:bg-sky-900/15 dark:text-sky-100'
-		: 'border-gray-200/70 bg-gray-50/70 text-gray-700 dark:border-gray-800/70 dark:bg-gray-900/30 dark:text-gray-200';
+		? 'bg-sky-50/70 text-sky-900 dark:bg-sky-900/15 dark:text-sky-100'
+		: 'bg-gray-50/70 text-gray-700 dark:bg-gray-900/30 dark:text-gray-200';
+	$: dividerToneClass = isExecuting
+		? 'border-sky-200/70 dark:border-sky-800/60'
+		: 'border-gray-200/70 dark:border-gray-800/70';
+	$: bodyToneClass = isExecuting ? 'bg-sky-50/25 dark:bg-sky-900/5' : 'bg-white/90 dark:bg-gray-950/20';
 	$: iconToneClass = isExecuting
 		? 'bg-sky-100/80 text-sky-700 dark:bg-sky-900/40 dark:text-sky-300'
 		: 'bg-emerald-100/80 text-emerald-700 dark:bg-emerald-900/40 dark:text-emerald-300';
@@ -122,62 +129,69 @@ ${formattedArgs}
 		</div>
 	{:else}
 		<!-- Standard collapsible tool call display -->
-		<div
-			class="{buttonClassName} cursor-pointer"
-			on:pointerup={() => {
-				open = !open;
-			}}
-		>
-			<div
-				class="w-full rounded-xl border px-3 py-2 font-medium flex items-center justify-between gap-2 {headerToneClass}"
-			>
-				<div class="flex min-w-0 items-center gap-2">
-					<div class="rounded-md p-1 {iconToneClass}">
-						{#if isExecuting}
-							<Spinner className="size-3.5" />
-						{:else}
-							<CheckCircle className="size-3.5" />
-						{/if}
+		<div class={buttonClassName}>
+			<div class="w-full overflow-hidden rounded-xl border {containerToneClass}">
+				<button
+					type="button"
+					class="w-full cursor-pointer px-3 py-2 text-left font-medium flex items-center justify-between gap-2 {headerToneClass}"
+					on:click={() => {
+						open = !open;
+					}}
+				>
+					<div class="flex min-w-0 items-center gap-2">
+						<div class="rounded-md p-1 {iconToneClass}">
+							{#if isExecuting}
+								<Spinner className="size-3.5" />
+							{:else}
+								<CheckCircle className="size-3.5" />
+							{/if}
+						</div>
+
+						<div class="min-w-0 text-base leading-6 line-clamp-1 {isExecuting ? 'shimmer' : ''}">
+							{#if isDone}
+								{$i18n.t('View Result from {{NAME}}', { NAME: toolName })}
+							{:else}
+								{$i18n.t('Executing {{NAME}}...', { NAME: toolName })}
+							{/if}
+						</div>
 					</div>
 
-					<div class="min-w-0 text-[13px] leading-5 line-clamp-1 {isExecuting ? 'shimmer' : ''}">
+					<div class="flex self-center translate-y-[1px]">
 						{#if isDone}
-							{$i18n.t('View Result from {{NAME}}', { NAME: toolName })}
+							<ChevronDown
+								strokeWidth="3.5"
+								className="size-3.5 {open ? 'rotate-180' : ''} transition-transform"
+							/>
 						{:else}
-							{$i18n.t('Executing {{NAME}}...', { NAME: toolName })}
+							{#if open}
+								<ChevronUp strokeWidth="3.5" className="size-3.5" />
+							{:else}
+								<ChevronDown strokeWidth="3.5" className="size-3.5" />
+							{/if}
 						{/if}
 					</div>
-				</div>
+				</button>
 
-				<div class="flex self-center translate-y-[1px]">
-					{#if isDone}
-						<ChevronDown strokeWidth="3.5" className="size-3.5 {open ? 'rotate-180' : ''} transition-transform" />
-					{:else}
-						{#if open}
-							<ChevronUp strokeWidth="3.5" className="size-3.5" />
+				{#if open}
+					<div
+						class="border-t px-3 py-2 {dividerToneClass} {bodyToneClass}"
+						transition:slide={{ duration: 300, easing: quintOut, axis: 'y' }}
+					>
+						{#if isDone}
+							<Markdown id={`${componentId}-tool-call-result`} content={doneContent} />
 						{:else}
-							<ChevronDown strokeWidth="3.5" className="size-3.5" />
-						{/if}
-					{/if}
-				</div>
-			</div>
-		</div>
-
-		{#if open}
-			<div class="mt-1 px-1" transition:slide={{ duration: 300, easing: quintOut, axis: 'y' }}>
-				{#if isDone}
-					<Markdown id={`${componentId}-tool-call-result`} content={doneContent} />
-				{:else}
-					<Markdown
-						id={`${componentId}-tool-call-args`}
-						content={`${$i18n.t('Arguments')}
+							<Markdown
+								id={`${componentId}-tool-call-args`}
+								content={`${$i18n.t('Arguments')}
 \`\`\`json
 ${formattedArgs}
 \`\`\``}
-					/>
+							/>
+						{/if}
+					</div>
 				{/if}
 			</div>
-		{/if}
+		</div>
 	{/if}
 
 	<!-- Files display (images etc.) when done -->

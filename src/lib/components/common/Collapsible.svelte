@@ -74,13 +74,13 @@
 		>
 			<div
 				class="w-full font-medium flex items-center justify-between gap-2 {isReasoning
-					? 'rounded-xl border border-amber-200/70 bg-amber-50/60 px-3 py-2 text-[13px] leading-5 text-amber-900 dark:border-amber-700/50 dark:bg-gray-850/60 dark:text-amber-100'
+					? 'rounded-xl border border-amber-200/70 bg-amber-50/60 px-3 py-2 text-base leading-6 text-amber-900 dark:border-amber-700/50 dark:bg-gray-850/60 dark:text-amber-100'
 					: ''}"
 			>
 				<div class="flex min-w-0 items-center gap-2">
 					{#if isReasoning}
 						<div class="rounded-md bg-amber-100/80 p-1 text-amber-700 dark:bg-amber-900/40 dark:text-amber-300">
-							<LightBulb className="size-3" />
+							<LightBulb className="size-3.5" />
 						</div>
 					{:else if isStreaming}
 						<div>
