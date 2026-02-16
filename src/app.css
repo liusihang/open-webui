@@ -336,17 +336,57 @@ html.deerflow-light #sidebar-workspace-button:hover {
 	background-color: var(--deerflow-hover) !important;
 }
 
-html.deerflow-light #sidebar-chat-item-menu button {
-	background-color: var(--deerflow-bg-input) !important;
-	border: 1px solid var(--deerflow-border-soft) !important;
-	border-radius: 999px;
-	color: var(--deerflow-text-muted) !important;
-	padding: 0.125rem 0.25rem;
+#sidebar-chat-item-menu > button {
+	background-color: transparent !important;
+	border: none !important;
+	border-radius: 0 !important;
+	padding: 0 !important;
+	box-shadow: none !important;
 }
 
-html.deerflow-light #sidebar-chat-item-menu button:hover {
-	background-color: var(--deerflow-hover) !important;
-	color: var(--deerflow-text) !important;
+#sidebar-chat-item-menu > button:focus,
+#sidebar-chat-item-menu > button:focus-visible {
+	outline: none !important;
+	box-shadow: none !important;
+}
+
+html.light #sidebar-chat-item-menu .sidebar-chat-menu-trigger {
+	background-color: #ebeef3;
+	border: 1px solid #d6dde8;
+	border-radius: 999px;
+	color: #586375;
+	padding: 0.125rem 0.375rem;
+}
+
+html.light #sidebar-chat-item-menu .sidebar-chat-menu-trigger:hover {
+	background-color: #dde4ef;
+	color: #3b4656;
+}
+
+html.dark #sidebar-chat-item-menu .sidebar-chat-menu-trigger {
+	background-color: #1f2937;
+	border: 1px solid #374151;
+	border-radius: 999px;
+	color: #d1d5db;
+	padding: 0.125rem 0.375rem;
+}
+
+html.dark #sidebar-chat-item-menu .sidebar-chat-menu-trigger:hover {
+	background-color: #374151;
+	color: #f3f4f6;
+}
+
+html.deerflow-light #sidebar-chat-item-menu .sidebar-chat-menu-trigger {
+	background-color: var(--deerflow-hover);
+	border: 1px solid var(--deerflow-border-soft);
+	border-radius: 999px;
+	color: var(--deerflow-text-muted);
+	padding: 0.125rem 0.375rem;
+}
+
+html.deerflow-light #sidebar-chat-item-menu .sidebar-chat-menu-trigger:hover {
+	background-color: var(--deerflow-bg-input);
+	color: var(--deerflow-text);
 }
 
 html.deerflow-light #message-input-container {
