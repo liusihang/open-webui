@@ -259,6 +259,93 @@ select {
 	scrollbar-width: none; /* Firefox */
 }
 
+html.deerflow-light {
+	--deerflow-bg-app: #f3f1eb;
+	--deerflow-bg-sidebar: #ebe7df;
+	--deerflow-bg-main: #f7f5f0;
+	--deerflow-bg-content: #fbf9f4;
+	--deerflow-bg-input: #f3efe6;
+	--deerflow-border-soft: #d8d1c4;
+	--deerflow-border: #cec5b5;
+	--deerflow-hover: #ded8ca;
+	--deerflow-text: #38352f;
+	--deerflow-text-muted: #6c665d;
+}
+
+html.deerflow-light body {
+	background-color: var(--deerflow-bg-app);
+	color: var(--deerflow-text);
+}
+
+html.deerflow-light .app-shell {
+	background-color: var(--deerflow-bg-main) !important;
+	color: var(--deerflow-text) !important;
+}
+
+html.deerflow-light .deerflow-main-shell,
+html.deerflow-light #chat-container {
+	background-color: var(--deerflow-bg-main);
+}
+
+html.deerflow-light nav.backdrop-blur-xl {
+	background: rgba(247, 245, 240, 0.88);
+	border-bottom: 1px solid var(--deerflow-border-soft);
+}
+
+html.deerflow-light #messages-container {
+	background-color: var(--deerflow-bg-content);
+}
+
+html.deerflow-light #sidebar {
+	background-color: var(--deerflow-bg-sidebar) !important;
+	border-right: 1px solid var(--deerflow-border-soft);
+	color: var(--deerflow-text) !important;
+}
+
+html.deerflow-light #sidebar .sidebar {
+	background-color: var(--deerflow-bg-sidebar) !important;
+	color: var(--deerflow-text-muted) !important;
+}
+
+html.deerflow-light #sidebar .sidebar-bg-gradient-to-b {
+	background: linear-gradient(to bottom, var(--deerflow-bg-sidebar) 55%, transparent) !important;
+}
+
+html.deerflow-light #sidebar .sidebar-bg-gradient-to-t {
+	background: linear-gradient(to top, var(--deerflow-bg-sidebar) 55%, transparent) !important;
+}
+
+html.deerflow-light #sidebar-webui-name {
+	color: var(--deerflow-text) !important;
+}
+
+html.deerflow-light #sidebar-chat-item {
+	color: #575148;
+}
+
+html.deerflow-light #sidebar-chat-item:hover,
+html.deerflow-light #sidebar-chat-item.selected,
+html.deerflow-light #sidebar-new-chat-button:hover,
+html.deerflow-light #sidebar-search-button:hover,
+html.deerflow-light #sidebar-notes-button:hover,
+html.deerflow-light #sidebar-workspace-button:hover {
+	background-color: var(--deerflow-hover) !important;
+}
+
+html.deerflow-light #message-input-container {
+	background-color: var(--deerflow-bg-input) !important;
+	border-color: var(--deerflow-border) !important;
+	box-shadow: 0 8px 24px rgba(64, 55, 41, 0.08);
+}
+
+html.deerflow-light #chat-input {
+	color: var(--deerflow-text) !important;
+}
+
+html.deerflow-light #chat-input::placeholder {
+	color: var(--deerflow-text-muted) !important;
+}
+
 input::-webkit-outer-spin-button,
 input::-webkit-inner-spin-button {
 	/* display: none; <- Crashes Chrome on hover */
