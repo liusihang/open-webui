@@ -59,6 +59,25 @@
 		}
 	}
 
+	function parseArguments(str: string): Record<string, unknown> | null {
+		try {
+			const parsed = parseJSONString(str);
+			if (typeof parsed === 'object' && parsed !== null && !Array.isArray(parsed)) {
+				return parsed as Record<string, unknown>;
+			}
+			return null;
+		} catch {
+			return null;
+		}
+	}
+
+	function formatArgumentValue(value: unknown) {
+		if (typeof value === 'object' && value !== null) {
+			return JSON.stringify(value);
+		}
+		return String(value);
+	}
+
 	// Decode and parse attributes
 	$: args = decode(attributes?.arguments ?? '');
 	$: result = decode(attributes?.result ?? '');
@@ -70,6 +89,7 @@
 	$: formattedArgs = formatJSONString(args);
 	$: formattedResult = formatJSONString(result);
 	$: hasResult = String(result ?? '').trim() !== '';
+	$: parsedArgs = parseArguments(args);
 	$: containerToneClass = isExecuting
 		? 'border-sky-300/70 dark:border-sky-700/60'
 		: 'border-gray-200/70 dark:border-gray-800/70';
@@ -85,20 +105,6 @@
 	$: iconToneClass = isExecuting
 		? 'bg-sky-100/80 text-sky-700 dark:bg-sky-900/40 dark:text-sky-300'
 		: 'bg-emerald-100/80 text-emerald-700 dark:bg-emerald-900/40 dark:text-emerald-300';
-	$: doneContent = hasResult
-		? `${$i18n.t('Arguments')}
-\`\`\`json
-${formattedArgs}
-\`\`\`
-
-${$i18n.t('Result')}
-\`\`\`json
-${formattedResult}
-\`\`\``
-		: `${$i18n.t('Arguments')}
-\`\`\`json
-${formattedArgs}
-\`\`\``;
 </script>
 
 <div {id} class={className}>
@@ -181,12 +187,26 @@ ${formattedArgs}
 						class="tool-call-body border-t px-3 py-2 {dividerToneClass} {bodyToneClass}"
 						transition:slide={{ duration: 300, easing: quintOut, axis: 'y' }}
 					>
-						{#if isDone}
-							<Markdown
-								id={`${componentId}-tool-call-result`}
-								content={doneContent}
-								editCodeBlock={false}
-							/>
+						{#if parsedArgs}
+							<div class="space-y-2">
+								<div class="text-xs font-semibold tracking-wide text-gray-500 dark:text-gray-400">
+									{$i18n.t('Arguments')}
+								</div>
+								<div class="space-y-1">
+									{#each Object.entries(parsedArgs) as [key, value]}
+										<div class="flex gap-2 text-xs leading-5">
+											<div
+												class="font-medium text-gray-600 dark:text-gray-300 shrink-0 max-w-[45%] break-all"
+											>
+												{key}
+											</div>
+											<div class="text-gray-800 dark:text-gray-100 break-all">
+												{formatArgumentValue(value)}
+											</div>
+										</div>
+									{/each}
+								</div>
+							</div>
 						{:else}
 							<Markdown
 								id={`${componentId}-tool-call-args`}
@@ -196,6 +216,19 @@ ${formattedArgs}
 \`\`\``}
 								editCodeBlock={false}
 							/>
+						{/if}
+
+						{#if isDone && hasResult}
+							<div class="mt-3">
+								<Markdown
+									id={`${componentId}-tool-call-result`}
+									content={`${$i18n.t('Result')}
+\`\`\`json
+${formattedResult}
+\`\`\``}
+									editCodeBlock={false}
+								/>
+							</div>
 						{/if}
 					</div>
 				{/if}
