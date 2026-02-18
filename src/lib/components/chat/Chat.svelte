@@ -2113,7 +2113,11 @@
 				),
 				features: getFeatures(),
 				variables: {
-					...getPromptVariables($user?.name, $settings?.userLocation ? userLocation : undefined)
+					...getPromptVariables(
+						$user?.name,
+						$settings?.userLocation ? userLocation : undefined,
+						$user?.email
+					)
 				},
 				model_item: $models.find((m) => m.id === model.id),
 
