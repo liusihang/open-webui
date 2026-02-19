@@ -996,6 +996,18 @@ async def get_admin_config(request: Request, user=Depends(get_admin_user)):
         "FOLDER_MAX_FILE_COUNT": request.app.state.config.FOLDER_MAX_FILE_COUNT,
         "ENABLE_CHANNELS": request.app.state.config.ENABLE_CHANNELS,
         "ENABLE_MEMORIES": request.app.state.config.ENABLE_MEMORIES,
+        "MEMORY_RETRIEVAL_MODE": request.app.state.config.MEMORY_RETRIEVAL_MODE,
+        "MEMORY_RETRIEVAL_QUERY_K": request.app.state.config.MEMORY_RETRIEVAL_QUERY_K,
+        "MEMORY_NEED_STRONG_THRESHOLD": request.app.state.config.MEMORY_NEED_STRONG_THRESHOLD,
+        "MEMORY_NEED_SOFT_THRESHOLD": request.app.state.config.MEMORY_NEED_SOFT_THRESHOLD,
+        "MEMORY_MIN_TOP1_SIMILARITY": request.app.state.config.MEMORY_MIN_TOP1_SIMILARITY,
+        "MEMORY_INJECTION_STRONG_TOP_N": request.app.state.config.MEMORY_INJECTION_STRONG_TOP_N,
+        "MEMORY_INJECTION_SOFT_TOP_N": request.app.state.config.MEMORY_INJECTION_SOFT_TOP_N,
+        "MEMORY_MAX_CONTEXT_CHARS": request.app.state.config.MEMORY_MAX_CONTEXT_CHARS,
+        "MEMORY_NEED_INTENT_WEIGHT": request.app.state.config.MEMORY_NEED_INTENT_WEIGHT,
+        "MEMORY_NEED_RELEVANCE_WEIGHT": request.app.state.config.MEMORY_NEED_RELEVANCE_WEIGHT,
+        "MEMORY_NEED_CONTINUITY_WEIGHT": request.app.state.config.MEMORY_NEED_CONTINUITY_WEIGHT,
+        "MEMORY_STATELESS_PENALTY": request.app.state.config.MEMORY_STATELESS_PENALTY,
         "ENABLE_NOTES": request.app.state.config.ENABLE_NOTES,
         "ENABLE_USER_WEBHOOKS": request.app.state.config.ENABLE_USER_WEBHOOKS,
         "ENABLE_USER_STATUS": request.app.state.config.ENABLE_USER_STATUS,
@@ -1022,6 +1034,18 @@ class AdminConfig(BaseModel):
     FOLDER_MAX_FILE_COUNT: Optional[int | str] = None
     ENABLE_CHANNELS: bool
     ENABLE_MEMORIES: bool
+    MEMORY_RETRIEVAL_MODE: Optional[str] = "balanced"
+    MEMORY_RETRIEVAL_QUERY_K: Optional[int | str] = None
+    MEMORY_NEED_STRONG_THRESHOLD: Optional[float | int | str] = None
+    MEMORY_NEED_SOFT_THRESHOLD: Optional[float | int | str] = None
+    MEMORY_MIN_TOP1_SIMILARITY: Optional[float | int | str] = None
+    MEMORY_INJECTION_STRONG_TOP_N: Optional[int | str] = None
+    MEMORY_INJECTION_SOFT_TOP_N: Optional[int | str] = None
+    MEMORY_MAX_CONTEXT_CHARS: Optional[int | str] = None
+    MEMORY_NEED_INTENT_WEIGHT: Optional[float | int | str] = None
+    MEMORY_NEED_RELEVANCE_WEIGHT: Optional[float | int | str] = None
+    MEMORY_NEED_CONTINUITY_WEIGHT: Optional[float | int | str] = None
+    MEMORY_STATELESS_PENALTY: Optional[float | int | str] = None
     ENABLE_NOTES: bool
     ENABLE_USER_WEBHOOKS: bool
     ENABLE_USER_STATUS: bool
@@ -1034,6 +1058,37 @@ class AdminConfig(BaseModel):
 async def update_admin_config(
     request: Request, form_data: AdminConfig, user=Depends(get_admin_user)
 ):
+    def parse_int_or_default(value, default: int, minimum: Optional[int] = None) -> int:
+        try:
+            if value in [None, ""]:
+                return default
+            parsed = int(value)
+            if minimum is not None:
+                parsed = max(minimum, parsed)
+            return parsed
+        except (TypeError, ValueError):
+            return default
+
+    def parse_float_or_default(
+        value,
+        default: float,
+        minimum: Optional[float] = None,
+        maximum: Optional[float] = None,
+    ) -> float:
+        try:
+            if value in [None, ""]:
+                parsed = default
+            else:
+                parsed = float(value)
+        except (TypeError, ValueError):
+            parsed = default
+
+        if minimum is not None:
+            parsed = max(minimum, parsed)
+        if maximum is not None:
+            parsed = min(maximum, parsed)
+        return parsed
+
     request.app.state.config.SHOW_ADMIN_DETAILS = form_data.SHOW_ADMIN_DETAILS
     request.app.state.config.ADMIN_EMAIL = form_data.ADMIN_EMAIL
     request.app.state.config.WEBUI_URL = form_data.WEBUI_URL
@@ -1053,6 +1108,77 @@ async def update_admin_config(
     )
     request.app.state.config.ENABLE_CHANNELS = form_data.ENABLE_CHANNELS
     request.app.state.config.ENABLE_MEMORIES = form_data.ENABLE_MEMORIES
+
+    retrieval_mode = (form_data.MEMORY_RETRIEVAL_MODE or "balanced").lower()
+    if retrieval_mode not in {"aggressive", "balanced", "conservative"}:
+        retrieval_mode = "balanced"
+
+    soft_threshold = parse_float_or_default(
+        form_data.MEMORY_NEED_SOFT_THRESHOLD,
+        float(request.app.state.config.MEMORY_NEED_SOFT_THRESHOLD),
+        minimum=0.0,
+        maximum=1.0,
+    )
+    strong_threshold = parse_float_or_default(
+        form_data.MEMORY_NEED_STRONG_THRESHOLD,
+        float(request.app.state.config.MEMORY_NEED_STRONG_THRESHOLD),
+        minimum=0.0,
+        maximum=1.0,
+    )
+    if strong_threshold <= soft_threshold:
+        strong_threshold = min(1.0, soft_threshold + 0.01)
+
+    request.app.state.config.MEMORY_RETRIEVAL_MODE = retrieval_mode
+    request.app.state.config.MEMORY_RETRIEVAL_QUERY_K = parse_int_or_default(
+        form_data.MEMORY_RETRIEVAL_QUERY_K,
+        int(request.app.state.config.MEMORY_RETRIEVAL_QUERY_K),
+        minimum=1,
+    )
+    request.app.state.config.MEMORY_NEED_SOFT_THRESHOLD = soft_threshold
+    request.app.state.config.MEMORY_NEED_STRONG_THRESHOLD = strong_threshold
+    request.app.state.config.MEMORY_MIN_TOP1_SIMILARITY = parse_float_or_default(
+        form_data.MEMORY_MIN_TOP1_SIMILARITY,
+        float(request.app.state.config.MEMORY_MIN_TOP1_SIMILARITY),
+        minimum=0.0,
+        maximum=1.0,
+    )
+    request.app.state.config.MEMORY_INJECTION_STRONG_TOP_N = parse_int_or_default(
+        form_data.MEMORY_INJECTION_STRONG_TOP_N,
+        int(request.app.state.config.MEMORY_INJECTION_STRONG_TOP_N),
+        minimum=1,
+    )
+    request.app.state.config.MEMORY_INJECTION_SOFT_TOP_N = parse_int_or_default(
+        form_data.MEMORY_INJECTION_SOFT_TOP_N,
+        int(request.app.state.config.MEMORY_INJECTION_SOFT_TOP_N),
+        minimum=1,
+    )
+    request.app.state.config.MEMORY_MAX_CONTEXT_CHARS = parse_int_or_default(
+        form_data.MEMORY_MAX_CONTEXT_CHARS,
+        int(request.app.state.config.MEMORY_MAX_CONTEXT_CHARS),
+        minimum=300,
+    )
+    request.app.state.config.MEMORY_NEED_INTENT_WEIGHT = parse_float_or_default(
+        form_data.MEMORY_NEED_INTENT_WEIGHT,
+        float(request.app.state.config.MEMORY_NEED_INTENT_WEIGHT),
+        minimum=0.0,
+    )
+    request.app.state.config.MEMORY_NEED_RELEVANCE_WEIGHT = parse_float_or_default(
+        form_data.MEMORY_NEED_RELEVANCE_WEIGHT,
+        float(request.app.state.config.MEMORY_NEED_RELEVANCE_WEIGHT),
+        minimum=0.0,
+    )
+    request.app.state.config.MEMORY_NEED_CONTINUITY_WEIGHT = parse_float_or_default(
+        form_data.MEMORY_NEED_CONTINUITY_WEIGHT,
+        float(request.app.state.config.MEMORY_NEED_CONTINUITY_WEIGHT),
+        minimum=0.0,
+    )
+    request.app.state.config.MEMORY_STATELESS_PENALTY = parse_float_or_default(
+        form_data.MEMORY_STATELESS_PENALTY,
+        float(request.app.state.config.MEMORY_STATELESS_PENALTY),
+        minimum=0.0,
+        maximum=1.0,
+    )
+
     request.app.state.config.ENABLE_NOTES = form_data.ENABLE_NOTES
 
     if form_data.DEFAULT_USER_ROLE in ["pending", "user", "admin"]:
@@ -1100,6 +1226,18 @@ async def update_admin_config(
         "FOLDER_MAX_FILE_COUNT": request.app.state.config.FOLDER_MAX_FILE_COUNT,
         "ENABLE_CHANNELS": request.app.state.config.ENABLE_CHANNELS,
         "ENABLE_MEMORIES": request.app.state.config.ENABLE_MEMORIES,
+        "MEMORY_RETRIEVAL_MODE": request.app.state.config.MEMORY_RETRIEVAL_MODE,
+        "MEMORY_RETRIEVAL_QUERY_K": request.app.state.config.MEMORY_RETRIEVAL_QUERY_K,
+        "MEMORY_NEED_STRONG_THRESHOLD": request.app.state.config.MEMORY_NEED_STRONG_THRESHOLD,
+        "MEMORY_NEED_SOFT_THRESHOLD": request.app.state.config.MEMORY_NEED_SOFT_THRESHOLD,
+        "MEMORY_MIN_TOP1_SIMILARITY": request.app.state.config.MEMORY_MIN_TOP1_SIMILARITY,
+        "MEMORY_INJECTION_STRONG_TOP_N": request.app.state.config.MEMORY_INJECTION_STRONG_TOP_N,
+        "MEMORY_INJECTION_SOFT_TOP_N": request.app.state.config.MEMORY_INJECTION_SOFT_TOP_N,
+        "MEMORY_MAX_CONTEXT_CHARS": request.app.state.config.MEMORY_MAX_CONTEXT_CHARS,
+        "MEMORY_NEED_INTENT_WEIGHT": request.app.state.config.MEMORY_NEED_INTENT_WEIGHT,
+        "MEMORY_NEED_RELEVANCE_WEIGHT": request.app.state.config.MEMORY_NEED_RELEVANCE_WEIGHT,
+        "MEMORY_NEED_CONTINUITY_WEIGHT": request.app.state.config.MEMORY_NEED_CONTINUITY_WEIGHT,
+        "MEMORY_STATELESS_PENALTY": request.app.state.config.MEMORY_STATELESS_PENALTY,
         "ENABLE_NOTES": request.app.state.config.ENABLE_NOTES,
         "ENABLE_USER_WEBHOOKS": request.app.state.config.ENABLE_USER_WEBHOOKS,
         "ENABLE_USER_STATUS": request.app.state.config.ENABLE_USER_STATUS,

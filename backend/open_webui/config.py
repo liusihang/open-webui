@@ -2161,6 +2161,78 @@ ENABLE_MEMORIES = PersistentConfig(
     os.environ.get("ENABLE_MEMORIES", "True").lower() == "true",
 )
 
+MEMORY_RETRIEVAL_MODE = PersistentConfig(
+    "MEMORY_RETRIEVAL_MODE",
+    "memories.retrieval_mode",
+    os.environ.get("MEMORY_RETRIEVAL_MODE", "balanced"),
+)
+
+MEMORY_RETRIEVAL_QUERY_K = PersistentConfig(
+    "MEMORY_RETRIEVAL_QUERY_K",
+    "memories.query_k",
+    int(os.environ.get("MEMORY_RETRIEVAL_QUERY_K", "8")),
+)
+
+MEMORY_NEED_STRONG_THRESHOLD = PersistentConfig(
+    "MEMORY_NEED_STRONG_THRESHOLD",
+    "memories.need.strong_threshold",
+    float(os.environ.get("MEMORY_NEED_STRONG_THRESHOLD", "0.70")),
+)
+
+MEMORY_NEED_SOFT_THRESHOLD = PersistentConfig(
+    "MEMORY_NEED_SOFT_THRESHOLD",
+    "memories.need.soft_threshold",
+    float(os.environ.get("MEMORY_NEED_SOFT_THRESHOLD", "0.45")),
+)
+
+MEMORY_MIN_TOP1_SIMILARITY = PersistentConfig(
+    "MEMORY_MIN_TOP1_SIMILARITY",
+    "memories.need.min_top1_similarity",
+    float(os.environ.get("MEMORY_MIN_TOP1_SIMILARITY", "0.35")),
+)
+
+MEMORY_INJECTION_STRONG_TOP_N = PersistentConfig(
+    "MEMORY_INJECTION_STRONG_TOP_N",
+    "memories.injection.strong_top_n",
+    int(os.environ.get("MEMORY_INJECTION_STRONG_TOP_N", "2")),
+)
+
+MEMORY_INJECTION_SOFT_TOP_N = PersistentConfig(
+    "MEMORY_INJECTION_SOFT_TOP_N",
+    "memories.injection.soft_top_n",
+    int(os.environ.get("MEMORY_INJECTION_SOFT_TOP_N", "1")),
+)
+
+MEMORY_MAX_CONTEXT_CHARS = PersistentConfig(
+    "MEMORY_MAX_CONTEXT_CHARS",
+    "memories.injection.max_context_chars",
+    int(os.environ.get("MEMORY_MAX_CONTEXT_CHARS", "1400")),
+)
+
+MEMORY_NEED_INTENT_WEIGHT = PersistentConfig(
+    "MEMORY_NEED_INTENT_WEIGHT",
+    "memories.need.intent_weight",
+    float(os.environ.get("MEMORY_NEED_INTENT_WEIGHT", "0.45")),
+)
+
+MEMORY_NEED_RELEVANCE_WEIGHT = PersistentConfig(
+    "MEMORY_NEED_RELEVANCE_WEIGHT",
+    "memories.need.relevance_weight",
+    float(os.environ.get("MEMORY_NEED_RELEVANCE_WEIGHT", "0.45")),
+)
+
+MEMORY_NEED_CONTINUITY_WEIGHT = PersistentConfig(
+    "MEMORY_NEED_CONTINUITY_WEIGHT",
+    "memories.need.continuity_weight",
+    float(os.environ.get("MEMORY_NEED_CONTINUITY_WEIGHT", "0.10")),
+)
+
+MEMORY_STATELESS_PENALTY = PersistentConfig(
+    "MEMORY_STATELESS_PENALTY",
+    "memories.need.stateless_penalty",
+    float(os.environ.get("MEMORY_STATELESS_PENALTY", "0.15")),
+)
+
 ENABLE_DEEP_RESEARCH = PersistentConfig(
     "ENABLE_DEEP_RESEARCH",
     "deep_research.enable",

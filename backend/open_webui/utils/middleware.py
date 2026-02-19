@@ -151,6 +151,71 @@ DEFAULT_REASONING_TAGS = [
 DEFAULT_SOLUTION_TAGS = [("<|begin_of_solution|>", "<|end_of_solution|>")]
 DEFAULT_CODE_INTERPRETER_TAGS = [("<code_interpreter>", "</code_interpreter>")]
 
+MEMORY_EXPLICIT_CUES = (
+    "remember",
+    "what do you remember",
+    "do you remember",
+    "as i said",
+    "i told you",
+    "my preference",
+    "my preferences",
+    "we discussed",
+    "last time",
+    "previously",
+    "继续",
+    "还记得",
+    "记得",
+    "上次",
+    "之前说过",
+    "我的偏好",
+)
+
+MEMORY_CONTINUITY_CUES = (
+    "continue",
+    "pick up where we left off",
+    "same as before",
+    "the previous",
+    "that plan",
+    "this plan",
+    "same project",
+    "接着",
+    "继续这个",
+    "延续",
+    "按照之前",
+    "上一个方案",
+)
+
+MEMORY_PERSONAL_CUES = (
+    "i prefer",
+    "i like",
+    "my style",
+    "my workflow",
+    "for me",
+    "about me",
+    "我喜欢",
+    "我偏好",
+    "我的习惯",
+    "我的风格",
+    "对我来说",
+)
+
+STATELESS_QUERY_PREFIXES = (
+    "what is",
+    "what are",
+    "who is",
+    "when is",
+    "where is",
+    "define",
+    "explain",
+    "translate",
+    "summarize",
+    "计算",
+    "解释",
+    "翻译",
+    "总结",
+    "是什么",
+)
+
 
 def output_id(prefix: str) -> str:
     """Generate OR-style ID: prefix + 24-char hex UUID."""
@@ -1226,37 +1291,418 @@ async def chat_completion_tools_handler(
 async def chat_memory_handler(
     request: Request, form_data: dict, extra_params: dict, user
 ):
+    event_emitter = extra_params.get("__event_emitter__")
+
+    async def emit_memory_status(status_data: dict) -> None:
+        if not event_emitter:
+            return
+
+        try:
+            await event_emitter(
+                {
+                    "type": "status",
+                    "data": {
+                        "action": "memory_retrieval",
+                        **status_data,
+                    },
+                }
+            )
+        except Exception as e:
+            log.debug(f"Failed to emit memory status: {e}")
+
+    def clamp(value: float, minimum: float = 0.0, maximum: float = 1.0) -> float:
+        return max(minimum, min(maximum, value))
+
+    def safe_float(value: Any, default: float) -> float:
+        try:
+            return float(value)
+        except (TypeError, ValueError):
+            return default
+
+    def safe_int(value: Any, default: int) -> int:
+        try:
+            return int(value)
+        except (TypeError, ValueError):
+            return default
+
+    def normalize_text(value: Optional[str]) -> str:
+        return re.sub(r"\s+", " ", (value or "")).strip()
+
+    def tokenize_for_overlap(value: str) -> set[str]:
+        return set(re.findall(r"[a-z0-9_]+|[\u4e00-\u9fff]", value.lower()))
+
+    def contains_any_cue(value: str, cues: tuple[str, ...]) -> bool:
+        return any(cue in value for cue in cues)
+
+    def estimate_memory_intent_score(last_user_message: str, messages: list[dict]) -> float:
+        normalized = normalize_text(last_user_message)
+        if not normalized:
+            return 0.0
+
+        text = normalized.lower()
+        explicit = 1.0 if contains_any_cue(text, MEMORY_EXPLICIT_CUES) else 0.0
+        continuity = 1.0 if contains_any_cue(text, MEMORY_CONTINUITY_CUES) else 0.0
+        personal = 1.0 if contains_any_cue(text, MEMORY_PERSONAL_CUES) else 0.0
+
+        token_count = len(tokenize_for_overlap(normalized))
+        user_turn_count = len([msg for msg in messages if msg.get("role") == "user"])
+        short_follow_up = 1.0 if user_turn_count >= 2 and token_count <= 14 else 0.0
+        question_boost = 1.0 if normalized.endswith("?") or normalized.endswith("？") else 0.0
+
+        score = (
+            0.55 * explicit
+            + 0.20 * continuity
+            + 0.20 * personal
+            + 0.05 * question_boost
+            + 0.10 * short_follow_up
+        )
+        return clamp(score)
+
+    def estimate_session_continuity_score(messages: list[dict]) -> float:
+        user_messages = [
+            normalize_text(get_content_from_message(msg))
+            for msg in messages
+            if msg.get("role") == "user"
+        ]
+        user_messages = [msg for msg in user_messages if msg]
+        if len(user_messages) < 2:
+            return 0.0
+
+        current = user_messages[-1]
+        previous = user_messages[-2]
+        current_tokens = tokenize_for_overlap(current)
+        previous_tokens = tokenize_for_overlap(previous)
+
+        overlap = 0.0
+        union = current_tokens | previous_tokens
+        if union:
+            overlap = len(current_tokens & previous_tokens) / len(union)
+
+        short_follow_up = 1.0 if len(current_tokens) <= 14 else 0.0
+        pronoun_reference = 1.0 if re.match(r"^(this|that|it|these|those)\b", current.lower()) else 0.0
+        pronoun_reference = max(
+            pronoun_reference,
+            1.0 if current.startswith(("这个", "那个", "它", "这", "那")) else 0.0,
+        )
+
+        score = 0.20 + (0.55 * overlap) + (0.15 * short_follow_up) + (0.10 * pronoun_reference)
+        return clamp(score)
+
+    def is_stateless_query(last_user_message: str) -> bool:
+        normalized = normalize_text(last_user_message)
+        if not normalized:
+            return False
+
+        text = normalized.lower()
+        if (
+            contains_any_cue(text, MEMORY_EXPLICIT_CUES)
+            or contains_any_cue(text, MEMORY_CONTINUITY_CUES)
+            or contains_any_cue(text, MEMORY_PERSONAL_CUES)
+        ):
+            return False
+
+        return any(text.startswith(prefix) for prefix in STATELESS_QUERY_PREFIXES)
+
+    def normalize_similarity(raw_similarity: Any) -> float:
+        score = safe_float(raw_similarity, 0.0)
+        if score <= 0:
+            return 0.0
+        if score <= 1:
+            return score
+        if score <= 2:
+            return score / 2.0
+        return 1.0
+
+    def recency_score(timestamp: Optional[int]) -> float:
+        if not timestamp:
+            return 0.5
+
+        age_days = max((time.time() - timestamp) / 86400, 0)
+        return clamp(1.0 / (1.0 + (age_days / 30.0)))
+
+    def extract_memory_candidates(results: Any) -> list[dict]:
+        if not results or not hasattr(results, "documents") or not results.documents:
+            return []
+
+        documents = results.documents[0] if results.documents else []
+        metadatas = results.metadatas[0] if getattr(results, "metadatas", None) else []
+        ids = results.ids[0] if getattr(results, "ids", None) else []
+        distances = (
+            results.distances[0] if getattr(results, "distances", None) else []
+        )
+
+        candidates = []
+        seen_keys = set()
+
+        for index, raw_doc in enumerate(documents):
+            content = normalize_text(raw_doc)
+            if not content:
+                continue
+
+            dedupe_key = content.lower()
+            if dedupe_key in seen_keys:
+                continue
+            seen_keys.add(dedupe_key)
+
+            metadata = (
+                metadatas[index]
+                if index < len(metadatas) and isinstance(metadatas[index], dict)
+                else {}
+            )
+            similarity = normalize_similarity(
+                distances[index] if index < len(distances) else None
+            )
+            created_at = safe_int(metadata.get("created_at"), 0)
+            updated_at = safe_int(metadata.get("updated_at"), 0)
+            freshness = recency_score(updated_at or created_at)
+            rank_score = clamp((0.80 * similarity) + (0.20 * freshness))
+
+            candidates.append(
+                {
+                    "id": ids[index] if index < len(ids) else None,
+                    "content": content,
+                    "created_at": created_at,
+                    "updated_at": updated_at,
+                    "similarity": similarity,
+                    "freshness": freshness,
+                    "rank_score": rank_score,
+                }
+            )
+
+        candidates.sort(key=lambda item: item["rank_score"], reverse=True)
+        return candidates
+
+    def compute_relevance_score(
+        candidates: list[dict], min_top1_similarity: float
+    ) -> float:
+        if not candidates:
+            return 0.0
+
+        top1_similarity = candidates[0]["similarity"]
+        top_candidates = candidates[:3]
+
+        avg_similarity = sum(c["similarity"] for c in top_candidates) / len(top_candidates)
+        avg_rank_score = sum(c["rank_score"] for c in top_candidates) / len(top_candidates)
+
+        score = (0.55 * top1_similarity) + (0.25 * avg_similarity) + (0.20 * avg_rank_score)
+        if top1_similarity < min_top1_similarity:
+            score = min(score, 0.25 + (0.35 * top1_similarity))
+
+        return clamp(score)
+
+    def build_memory_context(
+        candidates: list[dict], level: str, top_n: int, max_context_chars: int
+    ) -> str:
+        if not candidates:
+            return ""
+
+        selected_candidates = candidates[: max(1, top_n)]
+        date_fallback = "Unknown Date"
+        lines = []
+
+        for idx, candidate in enumerate(selected_candidates):
+            timestamp = candidate.get("updated_at") or candidate.get("created_at")
+            date_label = (
+                time.strftime("%Y-%m-%d", time.localtime(timestamp))
+                if timestamp
+                else date_fallback
+            )
+            lines.append(f"{idx + 1}. [{date_label}] {candidate['content']}")
+
+        if not lines:
+            return ""
+
+        if level == "strong":
+            header = "User Memory Context (high confidence):"
+            guidance = (
+                "Use these facts when they materially improve personalization or continuity."
+            )
+        else:
+            header = "User Memory Context (possible match):"
+            guidance = (
+                "Use these only if directly relevant to the current request."
+            )
+
+        context = f"{header}\n{guidance}\n" + "\n".join(lines) + "\n"
+        if len(context) > max_context_chars:
+            context = context[: max_context_chars - 3].rstrip() + "..."
+        return context
+
+    def resolve_mode_config(config: Any) -> tuple[str, dict]:
+        raw_mode = str(getattr(config, "MEMORY_RETRIEVAL_MODE", "balanced") or "balanced")
+        mode = raw_mode.lower()
+
+        presets = {
+            "aggressive": {
+                "bias": 0.08,
+                "soft_delta": -0.05,
+                "strong_delta": -0.05,
+                "query_k_delta": 2,
+            },
+            "balanced": {
+                "bias": 0.0,
+                "soft_delta": 0.0,
+                "strong_delta": 0.0,
+                "query_k_delta": 0,
+            },
+            "conservative": {
+                "bias": -0.06,
+                "soft_delta": 0.05,
+                "strong_delta": 0.05,
+                "query_k_delta": -2,
+            },
+        }
+
+        if mode not in presets:
+            mode = "balanced"
+
+        return mode, presets[mode]
+
+    query = normalize_text(get_last_user_message(form_data.get("messages", [])))
+    if not query:
+        return form_data
+
+    await emit_memory_status(
+        {
+            "description": "Searching memories",
+            "done": False,
+        }
+    )
+
+    config = request.app.state.config
+    mode, mode_preset = resolve_mode_config(config)
+
+    query_k = max(1, safe_int(getattr(config, "MEMORY_RETRIEVAL_QUERY_K", 8), 8))
+    query_k = max(1, query_k + mode_preset["query_k_delta"])
+
+    strong_threshold_base = clamp(
+        safe_float(getattr(config, "MEMORY_NEED_STRONG_THRESHOLD", 0.70), 0.70)
+    )
+    soft_threshold_base = clamp(
+        safe_float(getattr(config, "MEMORY_NEED_SOFT_THRESHOLD", 0.45), 0.45)
+    )
+    soft_threshold = clamp(soft_threshold_base + mode_preset["soft_delta"])
+    strong_threshold = clamp(strong_threshold_base + mode_preset["strong_delta"])
+    strong_threshold = max(strong_threshold, min(1.0, soft_threshold + 0.01))
+
+    min_top1_similarity = clamp(
+        safe_float(getattr(config, "MEMORY_MIN_TOP1_SIMILARITY", 0.35), 0.35)
+    )
+    strong_top_n = max(
+        1, safe_int(getattr(config, "MEMORY_INJECTION_STRONG_TOP_N", 2), 2)
+    )
+    soft_top_n = max(
+        1, safe_int(getattr(config, "MEMORY_INJECTION_SOFT_TOP_N", 1), 1)
+    )
+    max_context_chars = max(
+        300, safe_int(getattr(config, "MEMORY_MAX_CONTEXT_CHARS", 1400), 1400)
+    )
+
+    intent_weight = max(
+        0.0, safe_float(getattr(config, "MEMORY_NEED_INTENT_WEIGHT", 0.45), 0.45)
+    )
+    relevance_weight = max(
+        0.0, safe_float(getattr(config, "MEMORY_NEED_RELEVANCE_WEIGHT", 0.45), 0.45)
+    )
+    continuity_weight = max(
+        0.0, safe_float(getattr(config, "MEMORY_NEED_CONTINUITY_WEIGHT", 0.10), 0.10)
+    )
+    total_weight = intent_weight + relevance_weight + continuity_weight
+    if total_weight <= 0:
+        intent_weight, relevance_weight, continuity_weight = 0.45, 0.45, 0.10
+    else:
+        intent_weight /= total_weight
+        relevance_weight /= total_weight
+        continuity_weight /= total_weight
+
+    stateless_penalty = clamp(
+        safe_float(getattr(config, "MEMORY_STATELESS_PENALTY", 0.15), 0.15)
+    )
+
+    intent_score = estimate_memory_intent_score(query, form_data.get("messages", []))
+    continuity_score = estimate_session_continuity_score(form_data.get("messages", []))
+
+    memory_retrieval_error = False
     try:
         results = await query_memory(
             request,
-            QueryMemoryForm(
-                **{
-                    "content": get_last_user_message(form_data["messages"]) or "",
-                    "k": 3,
-                }
-            ),
+            QueryMemoryForm(content=query, k=query_k),
             user,
         )
     except Exception as e:
         log.debug(e)
         results = None
+        memory_retrieval_error = True
+
+    candidates = extract_memory_candidates(results)
+    relevance_score = compute_relevance_score(candidates, min_top1_similarity)
+
+    penalty = stateless_penalty if is_stateless_query(query) else 0.0
+    need_memory_score = clamp(
+        (intent_weight * intent_score)
+        + (relevance_weight * relevance_score)
+        + (continuity_weight * continuity_score)
+        + mode_preset["bias"]
+        - penalty
+    )
+
+    memory_level = None
+    memory_top_n = 0
+    if candidates and relevance_score > 0:
+        if need_memory_score >= strong_threshold:
+            memory_level = "strong"
+            memory_top_n = strong_top_n
+        elif need_memory_score >= soft_threshold:
+            memory_level = "soft"
+            memory_top_n = soft_top_n
 
     user_context = ""
-    if results and hasattr(results, "documents"):
-        if results.documents and len(results.documents) > 0:
-            for doc_idx, doc in enumerate(results.documents[0]):
-                created_at_date = "Unknown Date"
+    if memory_level:
+        user_context = build_memory_context(
+            candidates, memory_level, memory_top_n, max_context_chars
+        )
 
-                if results.metadatas[0][doc_idx].get("created_at"):
-                    created_at_timestamp = results.metadatas[0][doc_idx]["created_at"]
-                    created_at_date = time.strftime(
-                        "%Y-%m-%d", time.localtime(created_at_timestamp)
-                    )
+    if user_context:
+        form_data["messages"] = add_or_update_system_message(
+            user_context, form_data["messages"], append=True
+        )
 
-                user_context += f"{doc_idx + 1}. [{created_at_date}] {doc}\n"
+    retrieved_count = len(candidates)
+    injected_count = min(memory_top_n, retrieved_count) if user_context else 0
 
-    form_data["messages"] = add_or_update_system_message(
-        f"User Context:\n{user_context}\n", form_data["messages"], append=True
+    if memory_retrieval_error:
+        memory_description = "An error occurred while retrieving memories"
+    elif retrieved_count == 0:
+        memory_description = "No matching memories found"
+    elif injected_count > 0:
+        memory_description = (
+            f"Retrieved {retrieved_count} memories and injected {injected_count}"
+        )
+    else:
+        memory_description = (
+            f"Retrieved {retrieved_count} memories but did not inject context"
+        )
+
+    await emit_memory_status(
+        {
+            "description": memory_description,
+            "done": True,
+            "error": memory_retrieval_error,
+            "count": retrieved_count,
+            "injected_count": injected_count,
+            "level": memory_level,
+            "query_k": query_k,
+            "need_score": round(need_memory_score, 4),
+            "relevance_score": round(relevance_score, 4),
+        }
+    )
+
+    log.debug(
+        "memory_orchestrator: "
+        f"mode={mode} intent={intent_score:.3f} continuity={continuity_score:.3f} "
+        f"relevance={relevance_score:.3f} need={need_memory_score:.3f} "
+        f"thresholds=(soft={soft_threshold:.3f},strong={strong_threshold:.3f}) "
+        f"candidates={len(candidates)} injected={bool(user_context)} level={memory_level}"
     )
 
     return form_data
@@ -1932,7 +2378,7 @@ def load_messages_from_db(chat_id: str, message_id: str) -> Optional[list[dict]]
         return None
 
     return [
-        {k: v for k, v in msg.items() if k in ("role", "content", "output", "files")}
+        {k: v for k, v in msg.items() if k in ("role", "content", "output")}
         for msg in db_messages
     ]
 
@@ -1981,31 +2427,6 @@ async def process_chat_payload(request, form_data, user, metadata, model):
             form_data["messages"] = (
                 [system_message, *db_messages] if system_message else db_messages
             )
-
-            # Inject image files into content as image_url parts (mirrors frontend logic)
-            for message in form_data["messages"]:
-                image_files = [
-                    f
-                    for f in message.get("files", [])
-                    if f.get("type") == "image"
-                    or (f.get("content_type") or "").startswith("image/")
-                ]
-                if message.get("role") == "user" and image_files:
-                    text_content = message.get("content", "")
-                    if isinstance(text_content, str):
-                        message["content"] = [
-                            {"type": "text", "text": text_content},
-                            *[
-                                {
-                                    "type": "image_url",
-                                    "image_url": {"url": f["url"]},
-                                }
-                                for f in image_files
-                                if f.get("url")
-                            ],
-                        ]
-                # Strip files field — it's been incorporated into content
-                message.pop("files", None)
 
     # Process messages with OR-aligned output items for clean LLM messages
     form_data["messages"] = process_messages_with_output(form_data.get("messages", []))
@@ -2160,11 +2581,11 @@ async def process_chat_payload(request, form_data, user, metadata, model):
                 )
 
         if "memory" in features and features["memory"]:
-            # Skip forced memory injection when native FC is enabled - model can use memory tools
-            if metadata.get("params", {}).get("function_calling") != "native":
-                form_data = await chat_memory_handler(
-                    request, form_data, extra_params, user
-                )
+            # Hybrid memory orchestration runs in both default and native FC modes.
+            # Native FC still receives memory tools; this step only injects high-confidence context.
+            form_data = await chat_memory_handler(
+                request, form_data, extra_params, user
+            )
 
         if "web_search" in features and features["web_search"]:
             # Skip forced RAG web search when native FC is enabled - model can use web_search tool

@@ -149,6 +149,18 @@ from open_webui.config import (
     CODE_INTERPRETER_JUPYTER_AUTH_PASSWORD,
     CODE_INTERPRETER_JUPYTER_TIMEOUT,
     ENABLE_MEMORIES,
+    MEMORY_RETRIEVAL_MODE,
+    MEMORY_RETRIEVAL_QUERY_K,
+    MEMORY_NEED_STRONG_THRESHOLD,
+    MEMORY_NEED_SOFT_THRESHOLD,
+    MEMORY_MIN_TOP1_SIMILARITY,
+    MEMORY_INJECTION_STRONG_TOP_N,
+    MEMORY_INJECTION_SOFT_TOP_N,
+    MEMORY_MAX_CONTEXT_CHARS,
+    MEMORY_NEED_INTENT_WEIGHT,
+    MEMORY_NEED_RELEVANCE_WEIGHT,
+    MEMORY_NEED_CONTINUITY_WEIGHT,
+    MEMORY_STATELESS_PENALTY,
     ENABLE_DEEP_RESEARCH,
     DEERFLOW_BASE_URL,
     DEERFLOW_API_KEY,
@@ -647,28 +659,25 @@ async def lifespan(app: FastAPI):
     asyncio.create_task(periodic_session_pool_cleanup())
 
     if app.state.config.ENABLE_BASE_MODELS_CACHE:
-        try:
-            await get_all_models(
-                Request(
-                    # Creating a mock request object to pass to get_all_models
-                    {
-                        "type": "http",
-                        "asgi.version": "3.0",
-                        "asgi.spec_version": "2.0",
-                        "method": "GET",
-                        "path": "/internal",
-                        "query_string": b"",
-                        "headers": Headers({}).raw,
-                        "client": ("127.0.0.1", 12345),
-                        "server": ("127.0.0.1", 80),
-                        "scheme": "http",
-                        "app": app,
-                    }
-                ),
-                None,
-            )
-        except Exception as e:
-            log.warning(f"Failed to pre-fetch models at startup: {e}")
+        await get_all_models(
+            Request(
+                # Creating a mock request object to pass to get_all_models
+                {
+                    "type": "http",
+                    "asgi.version": "3.0",
+                    "asgi.spec_version": "2.0",
+                    "method": "GET",
+                    "path": "/internal",
+                    "query_string": b"",
+                    "headers": Headers({}).raw,
+                    "client": ("127.0.0.1", 12345),
+                    "server": ("127.0.0.1", 80),
+                    "scheme": "http",
+                    "app": app,
+                }
+            ),
+            None,
+        )
 
     # Pre-fetch tool server specs so the first request doesn't pay the latency cost
     if len(app.state.config.TOOL_SERVER_CONNECTIONS) > 0:
@@ -1189,6 +1198,18 @@ app.state.config.IMAGE_GENERATION_ENGINE = IMAGE_GENERATION_ENGINE
 app.state.config.ENABLE_IMAGE_GENERATION = ENABLE_IMAGE_GENERATION
 app.state.config.ENABLE_IMAGE_PROMPT_GENERATION = ENABLE_IMAGE_PROMPT_GENERATION
 app.state.config.ENABLE_MEMORIES = ENABLE_MEMORIES
+app.state.config.MEMORY_RETRIEVAL_MODE = MEMORY_RETRIEVAL_MODE
+app.state.config.MEMORY_RETRIEVAL_QUERY_K = MEMORY_RETRIEVAL_QUERY_K
+app.state.config.MEMORY_NEED_STRONG_THRESHOLD = MEMORY_NEED_STRONG_THRESHOLD
+app.state.config.MEMORY_NEED_SOFT_THRESHOLD = MEMORY_NEED_SOFT_THRESHOLD
+app.state.config.MEMORY_MIN_TOP1_SIMILARITY = MEMORY_MIN_TOP1_SIMILARITY
+app.state.config.MEMORY_INJECTION_STRONG_TOP_N = MEMORY_INJECTION_STRONG_TOP_N
+app.state.config.MEMORY_INJECTION_SOFT_TOP_N = MEMORY_INJECTION_SOFT_TOP_N
+app.state.config.MEMORY_MAX_CONTEXT_CHARS = MEMORY_MAX_CONTEXT_CHARS
+app.state.config.MEMORY_NEED_INTENT_WEIGHT = MEMORY_NEED_INTENT_WEIGHT
+app.state.config.MEMORY_NEED_RELEVANCE_WEIGHT = MEMORY_NEED_RELEVANCE_WEIGHT
+app.state.config.MEMORY_NEED_CONTINUITY_WEIGHT = MEMORY_NEED_CONTINUITY_WEIGHT
+app.state.config.MEMORY_STATELESS_PENALTY = MEMORY_STATELESS_PENALTY
 app.state.config.ENABLE_DEEP_RESEARCH = ENABLE_DEEP_RESEARCH
 app.state.config.DEERFLOW_BASE_URL = DEERFLOW_BASE_URL
 app.state.config.DEERFLOW_API_KEY = DEERFLOW_API_KEY
