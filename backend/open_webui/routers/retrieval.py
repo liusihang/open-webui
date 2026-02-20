@@ -461,6 +461,11 @@ async def get_rag_config(request: Request, user=Depends(get_admin_user)):
         "TOP_K": request.app.state.config.TOP_K,
         "BYPASS_EMBEDDING_AND_RETRIEVAL": request.app.state.config.BYPASS_EMBEDDING_AND_RETRIEVAL,
         "RAG_FULL_CONTEXT": request.app.state.config.RAG_FULL_CONTEXT,
+        "ADAPTIVE_FILE_CONTEXT_ENABLED": request.app.state.config.ADAPTIVE_FILE_CONTEXT_ENABLED,
+        "ADAPTIVE_FILE_CONTEXT_DEFAULT_MODE": request.app.state.config.ADAPTIVE_FILE_CONTEXT_DEFAULT_MODE,
+        "ADAPTIVE_FILE_CONTEXT_MAX_TOKENS_PER_FILE": request.app.state.config.ADAPTIVE_FILE_CONTEXT_MAX_TOKENS_PER_FILE,
+        "ADAPTIVE_FILE_CONTEXT_MAX_TOKENS_PER_REQUEST": request.app.state.config.ADAPTIVE_FILE_CONTEXT_MAX_TOKENS_PER_REQUEST,
+        "ADAPTIVE_FILE_CONTEXT_DEBUG": request.app.state.config.ADAPTIVE_FILE_CONTEXT_DEBUG,
         # Hybrid search settings
         "ENABLE_RAG_HYBRID_SEARCH": request.app.state.config.ENABLE_RAG_HYBRID_SEARCH,
         "ENABLE_RAG_HYBRID_SEARCH_ENRICHED_TEXTS": request.app.state.config.ENABLE_RAG_HYBRID_SEARCH_ENRICHED_TEXTS,
@@ -657,6 +662,11 @@ class ConfigForm(BaseModel):
     TOP_K: Optional[int] = None
     BYPASS_EMBEDDING_AND_RETRIEVAL: Optional[bool] = None
     RAG_FULL_CONTEXT: Optional[bool] = None
+    ADAPTIVE_FILE_CONTEXT_ENABLED: Optional[bool] = None
+    ADAPTIVE_FILE_CONTEXT_DEFAULT_MODE: Optional[str] = None
+    ADAPTIVE_FILE_CONTEXT_MAX_TOKENS_PER_FILE: Optional[int] = None
+    ADAPTIVE_FILE_CONTEXT_MAX_TOKENS_PER_REQUEST: Optional[int] = None
+    ADAPTIVE_FILE_CONTEXT_DEBUG: Optional[bool] = None
 
     # Hybrid search settings
     ENABLE_RAG_HYBRID_SEARCH: Optional[bool] = None
@@ -755,6 +765,31 @@ async def update_rag_config(
         form_data.RAG_FULL_CONTEXT
         if form_data.RAG_FULL_CONTEXT is not None
         else request.app.state.config.RAG_FULL_CONTEXT
+    )
+    request.app.state.config.ADAPTIVE_FILE_CONTEXT_ENABLED = (
+        form_data.ADAPTIVE_FILE_CONTEXT_ENABLED
+        if form_data.ADAPTIVE_FILE_CONTEXT_ENABLED is not None
+        else request.app.state.config.ADAPTIVE_FILE_CONTEXT_ENABLED
+    )
+    request.app.state.config.ADAPTIVE_FILE_CONTEXT_DEFAULT_MODE = (
+        form_data.ADAPTIVE_FILE_CONTEXT_DEFAULT_MODE
+        if form_data.ADAPTIVE_FILE_CONTEXT_DEFAULT_MODE in ["full", "retrieval"]
+        else request.app.state.config.ADAPTIVE_FILE_CONTEXT_DEFAULT_MODE
+    )
+    request.app.state.config.ADAPTIVE_FILE_CONTEXT_MAX_TOKENS_PER_FILE = (
+        form_data.ADAPTIVE_FILE_CONTEXT_MAX_TOKENS_PER_FILE
+        if form_data.ADAPTIVE_FILE_CONTEXT_MAX_TOKENS_PER_FILE is not None
+        else request.app.state.config.ADAPTIVE_FILE_CONTEXT_MAX_TOKENS_PER_FILE
+    )
+    request.app.state.config.ADAPTIVE_FILE_CONTEXT_MAX_TOKENS_PER_REQUEST = (
+        form_data.ADAPTIVE_FILE_CONTEXT_MAX_TOKENS_PER_REQUEST
+        if form_data.ADAPTIVE_FILE_CONTEXT_MAX_TOKENS_PER_REQUEST is not None
+        else request.app.state.config.ADAPTIVE_FILE_CONTEXT_MAX_TOKENS_PER_REQUEST
+    )
+    request.app.state.config.ADAPTIVE_FILE_CONTEXT_DEBUG = (
+        form_data.ADAPTIVE_FILE_CONTEXT_DEBUG
+        if form_data.ADAPTIVE_FILE_CONTEXT_DEBUG is not None
+        else request.app.state.config.ADAPTIVE_FILE_CONTEXT_DEBUG
     )
 
     # Hybrid search settings

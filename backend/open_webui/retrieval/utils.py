@@ -961,6 +961,18 @@ async def get_sources_from_items(
     query_results = []
 
     for item in items:
+        if not isinstance(item, dict):
+            log.warning("Skipping malformed retrieval item: non-dict payload")
+            continue
+
+        if item.get("_adaptive_excluded") is True:
+            log.debug(
+                "Skipping adaptive-excluded item id=%s reason=%s",
+                item.get("id"),
+                item.get("_adaptive_reason"),
+            )
+            continue
+
         query_result = None
         collection_names = []
 
@@ -1052,6 +1064,28 @@ async def get_sources_from_items(
                     "metadatas": [[{"url": item.get("url"), "name": item.get("url")}]],
                 }
         elif item.get("type") == "file":
+            can_access_file = True
+            file_id = item.get("id")
+
+            if file_id and user and user.role != "admin":
+                file_object = Files.get_file_by_id(file_id)
+                can_access_file = bool(
+                    file_object
+                    and (
+                        file_object.user_id == user.id
+                        or AccessGrants.has_access(
+                            user_id=user.id,
+                            resource_type="file",
+                            resource_id=str(file_id),
+                            permission="read",
+                        )
+                    )
+                )
+
+            if not can_access_file:
+                log.warning("Skipping inaccessible file item id=%s", file_id)
+                continue
+
             if (
                 item.get("context") == "full"
                 or request.app.state.config.BYPASS_EMBEDDING_AND_RETRIEVAL
