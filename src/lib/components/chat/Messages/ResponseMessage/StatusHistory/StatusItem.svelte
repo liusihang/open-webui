@@ -26,7 +26,9 @@
 		status?.action === 'web_search_queries_generated' ||
 		status?.action === 'queries_generated'
 			? Search
-			: status?.action === 'knowledge_search' || status?.action === 'deep_research'
+			: status?.action === 'knowledge_search' ||
+				  status?.action === 'deep_research' ||
+				  status?.action === 'memory_retrieval'
 				? BookOpen
 				: Wrench;
 
@@ -212,6 +214,31 @@
 						{:else}
 							{$i18n.t('Retrieved {{count}} sources', {
 								count: status.count
+							})}
+						{/if}
+					</div>
+				</div>
+			{:else if status?.action === 'memory_retrieval'}
+				<div class="flex flex-col justify-center -space-y-0.5">
+					<div
+						class="{isRunning
+							? 'shimmer'
+							: ''} text-gray-500 dark:text-gray-400 text-sm line-clamp-1 text-wrap"
+					>
+						{#if isRunning}
+							{$i18n.t('Searching memories')}
+						{:else if status?.error === true}
+							{$i18n.t('Failed to retrieve memories')}
+						{:else if status?.count === 0}
+							{$i18n.t('No matching memories found')}
+						{:else if (status?.injected_count ?? 0) > 0}
+							{$i18n.t('Retrieved {{count}} memories, injected {{injectedCount}}', {
+								count: status?.count ?? 0,
+								injectedCount: status?.injected_count ?? 0
+							})}
+						{:else}
+							{$i18n.t('Retrieved {{count}} memories, no context injected', {
+								count: status?.count ?? 0
 							})}
 						{/if}
 					</div>
