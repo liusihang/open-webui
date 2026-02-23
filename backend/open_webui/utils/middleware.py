@@ -2276,14 +2276,18 @@ async def process_chat_payload(request, form_data, user, metadata, model):
                 )
 
         if "code_interpreter" in features and features["code_interpreter"]:
-            form_data["messages"] = add_or_update_user_message(
-                (
-                    request.app.state.config.CODE_INTERPRETER_PROMPT_TEMPLATE
-                    if request.app.state.config.CODE_INTERPRETER_PROMPT_TEMPLATE != ""
-                    else DEFAULT_CODE_INTERPRETER_PROMPT
-                ),
-                form_data["messages"],
-            )
+            # Skip XML-tag prompt injection when native FC is enabled —
+            # execute_code will be injected as a builtin tool instead
+            if metadata.get("params", {}).get("function_calling") != "native":
+                form_data["messages"] = add_or_update_user_message(
+                    (
+                        request.app.state.config.CODE_INTERPRETER_PROMPT_TEMPLATE
+                        if request.app.state.config.CODE_INTERPRETER_PROMPT_TEMPLATE
+                        != ""
+                        else DEFAULT_CODE_INTERPRETER_PROMPT
+                    ),
+                    form_data["messages"],
+                )
 
     tool_ids = form_data.pop("tool_ids", None)
     files = form_data.pop("files", None)
@@ -2296,7 +2300,7 @@ async def process_chat_payload(request, form_data, user, metadata, model):
     user_skill_ids = set(form_data.pop("skill_ids", None) or [])
     model_skill_ids = set(model.get("info", {}).get("meta", {}).get("skillIds", []))
 
-    all_skill_ids = list(set(user_skill_ids + model_skill_ids))
+    all_skill_ids = user_skill_ids | model_skill_ids
     available_skills = []
     if all_skill_ids:
         from open_webui.models.skills import Skills as SkillsModel
@@ -2312,13 +2316,24 @@ async def process_chat_payload(request, form_data, user, metadata, model):
             and s.is_active
         ]
 
-        if available_skills:
-            manifest = "<available_skills>\n"
-            for skill in available_skills:
-                manifest += f"<skill>\n<name>{skill.name}</name>\n<description>{skill.description or ''}</description>\n</skill>\n"
-            manifest += "</available_skills>"
+        skill_descriptions = ""
+        for skill in available_skills:
+            if skill.id in user_skill_ids:
+                # User-selected: inject full content
+                form_data["messages"] = add_or_update_system_message(
+                    f'<skill name="{skill.name}">\n{skill.content}\n</skill>',
+                    form_data["messages"],
+                    append=True,
+                )
+            else:
+                # Model-attached: name+description only
+                skill_descriptions += f"<skill>\n<name>{skill.name}</name>\n<description>{skill.description or ''}</description>\n</skill>\n"
+
+        if skill_descriptions:
             form_data["messages"] = add_or_update_system_message(
-                manifest, form_data["messages"], append=True
+                f"<available_skills>\n{skill_descriptions}</available_skills>",
+                form_data["messages"],
+                append=True,
             )
 
     prompt = get_last_user_message(form_data["messages"])
