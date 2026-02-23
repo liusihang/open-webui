@@ -65,7 +65,9 @@
 							class="absolute left-[5px] top-[9px] size-1.5 rounded-full bg-gray-400 dark:bg-gray-500"
 						></span>
 						{#if idx !== historyWithoutLatest.length - 1}
-							<span class="absolute left-[7px] top-[14px] h-[calc(100%-2px)] w-px bg-gray-200 dark:bg-gray-700"></span>
+							<span
+								class="absolute left-[7px] top-[14px] h-[calc(100%-2px)] w-px bg-gray-200 dark:bg-gray-700"
+							></span>
 						{/if}
 
 						<StatusItem {status} done={true} />

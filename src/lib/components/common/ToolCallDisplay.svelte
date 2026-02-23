@@ -16,6 +16,7 @@
 	import Markdown from '../chat/Messages/Markdown.svelte';
 	import Image from './Image.svelte';
 	import FullHeightIframe from './FullHeightIframe.svelte';
+	import { settings } from '$lib/stores';
 
 	export let id: string = '';
 	export let attributes: {
@@ -50,8 +51,7 @@
 			if (typeof parsed === 'object') {
 				return JSON.stringify(parsed, null, 2);
 			} else {
-				// It's a primitive value like a number, boolean, etc.
-				return `${JSON.stringify(String(parsed))}`;
+				return String(parsed);
 			}
 		} catch {
 			// Not valid JSON, return as-is
@@ -130,8 +130,8 @@
 						src={embed}
 						{args}
 						allowScripts={true}
-						allowForms={true}
-						allowSameOrigin={true}
+						allowForms={$settings?.iframeSandboxAllowForms ?? false}
+						allowSameOrigin={$settings?.iframeSandboxAllowSameOrigin ?? false}
 						allowPopups={true}
 					/>
 				</div>
