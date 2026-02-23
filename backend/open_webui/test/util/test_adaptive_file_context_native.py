@@ -4,9 +4,13 @@ import types
 from pathlib import Path
 
 
-ROOT = Path(__file__).resolve().parents[5]
-ADAPTIVE_PATH = ROOT / "open-webui-latest" / "backend" / "open_webui" / "utils" / "adaptive_file_context.py"
-MIGRATION_PATH = ROOT / "open-webui-latest" / "backend" / "open_webui" / "utils" / "adaptive_file_context_migration.py"
+ROOT = Path(__file__).resolve().parents[4]
+ADAPTIVE_PATH = (
+    ROOT / "backend" / "open_webui" / "utils" / "adaptive_file_context.py"
+)
+MIGRATION_PATH = (
+    ROOT / "backend" / "open_webui" / "utils" / "adaptive_file_context_migration.py"
+)
 
 
 def _load_module(path: Path, name: str):
