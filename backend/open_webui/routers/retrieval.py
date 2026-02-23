@@ -77,6 +77,7 @@ from open_webui.retrieval.web.sougou import search_sougou
 from open_webui.retrieval.web.firecrawl import search_firecrawl
 from open_webui.retrieval.web.external import search_external
 from open_webui.retrieval.web.yandex import search_yandex
+from open_webui.retrieval.web.ydc import search_youcom
 
 from open_webui.retrieval.utils import (
     get_content_from_url,
@@ -270,6 +271,7 @@ async def get_status(request: Request):
         "RAG_RERANKING_MODEL": request.app.state.config.RAG_RERANKING_MODEL,
         "RAG_EMBEDDING_BATCH_SIZE": request.app.state.config.RAG_EMBEDDING_BATCH_SIZE,
         "ENABLE_ASYNC_EMBEDDING": request.app.state.config.ENABLE_ASYNC_EMBEDDING,
+        "RAG_EMBEDDING_CONCURRENT_REQUESTS": request.app.state.config.RAG_EMBEDDING_CONCURRENT_REQUESTS,
     }
 
 
@@ -281,6 +283,7 @@ async def get_embedding_config(request: Request, user=Depends(get_admin_user)):
         "RAG_EMBEDDING_MODEL": request.app.state.config.RAG_EMBEDDING_MODEL,
         "RAG_EMBEDDING_BATCH_SIZE": request.app.state.config.RAG_EMBEDDING_BATCH_SIZE,
         "ENABLE_ASYNC_EMBEDDING": request.app.state.config.ENABLE_ASYNC_EMBEDDING,
+        "RAG_EMBEDDING_CONCURRENT_REQUESTS": request.app.state.config.RAG_EMBEDDING_CONCURRENT_REQUESTS,
         "openai_config": {
             "url": request.app.state.config.RAG_OPENAI_API_BASE_URL,
             "key": request.app.state.config.RAG_OPENAI_API_KEY,
@@ -321,6 +324,7 @@ class EmbeddingModelUpdateForm(BaseModel):
     RAG_EMBEDDING_MODEL: str
     RAG_EMBEDDING_BATCH_SIZE: Optional[int] = 1
     ENABLE_ASYNC_EMBEDDING: Optional[bool] = True
+    RAG_EMBEDDING_CONCURRENT_REQUESTS: Optional[int] = 0
 
 
 def unload_embedding_model(request: Request):
@@ -354,6 +358,9 @@ async def update_embedding_config(
         )
         request.app.state.config.ENABLE_ASYNC_EMBEDDING = (
             form_data.ENABLE_ASYNC_EMBEDDING
+        )
+        request.app.state.config.RAG_EMBEDDING_CONCURRENT_REQUESTS = (
+            form_data.RAG_EMBEDDING_CONCURRENT_REQUESTS
         )
 
         if request.app.state.config.RAG_EMBEDDING_ENGINE in [
@@ -422,6 +429,7 @@ async def update_embedding_config(
                 else None
             ),
             enable_async=request.app.state.config.ENABLE_ASYNC_EMBEDDING,
+            concurrent_requests=request.app.state.config.RAG_EMBEDDING_CONCURRENT_REQUESTS,
         )
 
         return {
@@ -430,6 +438,7 @@ async def update_embedding_config(
             "RAG_EMBEDDING_MODEL": request.app.state.config.RAG_EMBEDDING_MODEL,
             "RAG_EMBEDDING_BATCH_SIZE": request.app.state.config.RAG_EMBEDDING_BATCH_SIZE,
             "ENABLE_ASYNC_EMBEDDING": request.app.state.config.ENABLE_ASYNC_EMBEDDING,
+            "RAG_EMBEDDING_CONCURRENT_REQUESTS": request.app.state.config.RAG_EMBEDDING_CONCURRENT_REQUESTS,
             "openai_config": {
                 "url": request.app.state.config.RAG_OPENAI_API_BASE_URL,
                 "key": request.app.state.config.RAG_OPENAI_API_KEY,
@@ -461,6 +470,11 @@ async def get_rag_config(request: Request, user=Depends(get_admin_user)):
         "TOP_K": request.app.state.config.TOP_K,
         "BYPASS_EMBEDDING_AND_RETRIEVAL": request.app.state.config.BYPASS_EMBEDDING_AND_RETRIEVAL,
         "RAG_FULL_CONTEXT": request.app.state.config.RAG_FULL_CONTEXT,
+        "ADAPTIVE_FILE_CONTEXT_ENABLED": request.app.state.config.ADAPTIVE_FILE_CONTEXT_ENABLED,
+        "ADAPTIVE_FILE_CONTEXT_DEFAULT_MODE": request.app.state.config.ADAPTIVE_FILE_CONTEXT_DEFAULT_MODE,
+        "ADAPTIVE_FILE_CONTEXT_MAX_TOKENS_PER_FILE": request.app.state.config.ADAPTIVE_FILE_CONTEXT_MAX_TOKENS_PER_FILE,
+        "ADAPTIVE_FILE_CONTEXT_MAX_TOKENS_PER_REQUEST": request.app.state.config.ADAPTIVE_FILE_CONTEXT_MAX_TOKENS_PER_REQUEST,
+        "ADAPTIVE_FILE_CONTEXT_DEBUG": request.app.state.config.ADAPTIVE_FILE_CONTEXT_DEBUG,
         # Hybrid search settings
         "ENABLE_RAG_HYBRID_SEARCH": request.app.state.config.ENABLE_RAG_HYBRID_SEARCH,
         "ENABLE_RAG_HYBRID_SEARCH_ENRICHED_TEXTS": request.app.state.config.ENABLE_RAG_HYBRID_SEARCH_ENRICHED_TEXTS,
@@ -583,6 +597,7 @@ async def get_rag_config(request: Request, user=Depends(get_admin_user)):
             "YANDEX_WEB_SEARCH_URL": request.app.state.config.YANDEX_WEB_SEARCH_URL,
             "YANDEX_WEB_SEARCH_API_KEY": request.app.state.config.YANDEX_WEB_SEARCH_API_KEY,
             "YANDEX_WEB_SEARCH_CONFIG": request.app.state.config.YANDEX_WEB_SEARCH_CONFIG,
+            "YOUCOM_API_KEY": request.app.state.config.YOUCOM_API_KEY,
         },
     }
 
@@ -649,6 +664,7 @@ class WebConfig(BaseModel):
     YANDEX_WEB_SEARCH_URL: Optional[str] = None
     YANDEX_WEB_SEARCH_API_KEY: Optional[str] = None
     YANDEX_WEB_SEARCH_CONFIG: Optional[str] = None
+    YOUCOM_API_KEY: Optional[str] = None
 
 
 class ConfigForm(BaseModel):
@@ -657,6 +673,11 @@ class ConfigForm(BaseModel):
     TOP_K: Optional[int] = None
     BYPASS_EMBEDDING_AND_RETRIEVAL: Optional[bool] = None
     RAG_FULL_CONTEXT: Optional[bool] = None
+    ADAPTIVE_FILE_CONTEXT_ENABLED: Optional[bool] = None
+    ADAPTIVE_FILE_CONTEXT_DEFAULT_MODE: Optional[str] = None
+    ADAPTIVE_FILE_CONTEXT_MAX_TOKENS_PER_FILE: Optional[int] = None
+    ADAPTIVE_FILE_CONTEXT_MAX_TOKENS_PER_REQUEST: Optional[int] = None
+    ADAPTIVE_FILE_CONTEXT_DEBUG: Optional[bool] = None
 
     # Hybrid search settings
     ENABLE_RAG_HYBRID_SEARCH: Optional[bool] = None
@@ -755,6 +776,31 @@ async def update_rag_config(
         form_data.RAG_FULL_CONTEXT
         if form_data.RAG_FULL_CONTEXT is not None
         else request.app.state.config.RAG_FULL_CONTEXT
+    )
+    request.app.state.config.ADAPTIVE_FILE_CONTEXT_ENABLED = (
+        form_data.ADAPTIVE_FILE_CONTEXT_ENABLED
+        if form_data.ADAPTIVE_FILE_CONTEXT_ENABLED is not None
+        else request.app.state.config.ADAPTIVE_FILE_CONTEXT_ENABLED
+    )
+    request.app.state.config.ADAPTIVE_FILE_CONTEXT_DEFAULT_MODE = (
+        form_data.ADAPTIVE_FILE_CONTEXT_DEFAULT_MODE
+        if form_data.ADAPTIVE_FILE_CONTEXT_DEFAULT_MODE in ["full", "retrieval"]
+        else request.app.state.config.ADAPTIVE_FILE_CONTEXT_DEFAULT_MODE
+    )
+    request.app.state.config.ADAPTIVE_FILE_CONTEXT_MAX_TOKENS_PER_FILE = (
+        form_data.ADAPTIVE_FILE_CONTEXT_MAX_TOKENS_PER_FILE
+        if form_data.ADAPTIVE_FILE_CONTEXT_MAX_TOKENS_PER_FILE is not None
+        else request.app.state.config.ADAPTIVE_FILE_CONTEXT_MAX_TOKENS_PER_FILE
+    )
+    request.app.state.config.ADAPTIVE_FILE_CONTEXT_MAX_TOKENS_PER_REQUEST = (
+        form_data.ADAPTIVE_FILE_CONTEXT_MAX_TOKENS_PER_REQUEST
+        if form_data.ADAPTIVE_FILE_CONTEXT_MAX_TOKENS_PER_REQUEST is not None
+        else request.app.state.config.ADAPTIVE_FILE_CONTEXT_MAX_TOKENS_PER_REQUEST
+    )
+    request.app.state.config.ADAPTIVE_FILE_CONTEXT_DEBUG = (
+        form_data.ADAPTIVE_FILE_CONTEXT_DEBUG
+        if form_data.ADAPTIVE_FILE_CONTEXT_DEBUG is not None
+        else request.app.state.config.ADAPTIVE_FILE_CONTEXT_DEBUG
     )
 
     # Hybrid search settings
@@ -1205,6 +1251,7 @@ async def update_rag_config(
         request.app.state.config.YANDEX_WEB_SEARCH_CONFIG = (
             form_data.web.YANDEX_WEB_SEARCH_CONFIG
         )
+        request.app.state.config.YOUCOM_API_KEY = form_data.web.YOUCOM_API_KEY
 
     return {
         "status": True,
@@ -1332,6 +1379,7 @@ async def update_rag_config(
             "YANDEX_WEB_SEARCH_URL": request.app.state.config.YANDEX_WEB_SEARCH_URL,
             "YANDEX_WEB_SEARCH_API_KEY": request.app.state.config.YANDEX_WEB_SEARCH_API_KEY,
             "YANDEX_WEB_SEARCH_CONFIG": request.app.state.config.YANDEX_WEB_SEARCH_CONFIG,
+            "YOUCOM_API_KEY": request.app.state.config.YOUCOM_API_KEY,
         },
     }
 
@@ -1589,6 +1637,7 @@ def save_docs_to_vector_db(
                 else None
             ),
             enable_async=request.app.state.config.ENABLE_ASYNC_EMBEDDING,
+            concurrent_requests=request.app.state.config.RAG_EMBEDDING_CONCURRENT_REQUESTS,
         )
 
         # Run async embedding in sync context using the main event loop
@@ -1746,6 +1795,7 @@ def process_file(
                         DOCLING_API_KEY=request.app.state.config.DOCLING_API_KEY,
                         DOCLING_PARAMS=request.app.state.config.DOCLING_PARAMS,
                         PDF_EXTRACT_IMAGES=request.app.state.config.PDF_EXTRACT_IMAGES,
+                        PDF_LOADER_MODE=request.app.state.config.PDF_LOADER_MODE,
                         DOCUMENT_INTELLIGENCE_ENDPOINT=request.app.state.config.DOCUMENT_INTELLIGENCE_ENDPOINT,
                         DOCUMENT_INTELLIGENCE_KEY=request.app.state.config.DOCUMENT_INTELLIGENCE_KEY,
                         DOCUMENT_INTELLIGENCE_MODEL=request.app.state.config.DOCUMENT_INTELLIGENCE_MODEL,
@@ -1933,6 +1983,9 @@ async def process_web(
     request: Request,
     form_data: ProcessUrlForm,
     process: bool = Query(True, description="Whether to process and save the content"),
+    overwrite: bool = Query(
+        True, description="Whether to overwrite existing collection"
+    ),
     user=Depends(get_verified_user),
 ):
     try:
@@ -1952,7 +2005,7 @@ async def process_web(
                     request,
                     docs,
                     collection_name,
-                    overwrite=True,
+                    overwrite=overwrite,
                     user=user,
                 )
             else:
@@ -2288,6 +2341,13 @@ def search_web(
             request.app.state.config.WEB_SEARCH_DOMAIN_FILTER_LIST,
             user=user,
         )
+    elif engine == "youcom":
+        return search_youcom(
+            request.app.state.config.YOUCOM_API_KEY,
+            query,
+            request.app.state.config.WEB_SEARCH_RESULT_COUNT,
+            request.app.state.config.WEB_SEARCH_DOMAIN_FILTER_LIST,
+        )
     else:
         raise Exception("No search engine API key found in environment variables")
 
@@ -2327,7 +2387,7 @@ async def process_web_search(
             # Limited concurrency with semaphore
             semaphore = asyncio.Semaphore(concurrent_limit)
 
-            async def search_with_limit(query):
+            async def search_query_with_semaphore(query):
                 async with semaphore:
                     return await run_in_threadpool(
                         search_web,
@@ -2337,7 +2397,9 @@ async def process_web_search(
                         user,
                     )
 
-            search_tasks = [search_with_limit(query) for query in form_data.queries]
+            search_tasks = [
+                search_query_with_semaphore(query) for query in form_data.queries
+            ]
         else:
             # Unlimited parallel execution (previous behavior)
             search_tasks = [

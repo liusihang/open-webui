@@ -573,6 +573,20 @@ ENABLE_OAUTH_GROUP_CREATION = PersistentConfig(
 )
 
 
+oauth_group_default_share = (
+    os.environ.get("OAUTH_GROUP_DEFAULT_SHARE", "true").strip().lower()
+)
+OAUTH_GROUP_DEFAULT_SHARE = PersistentConfig(
+    "OAUTH_GROUP_DEFAULT_SHARE",
+    "oauth.group_default_share",
+    (
+        "members"
+        if oauth_group_default_share == "members"
+        else oauth_group_default_share == "true"
+    ),
+)
+
+
 OAUTH_BLOCKED_GROUPS = PersistentConfig(
     "OAUTH_BLOCKED_GROUPS",
     "oauth.blocked_groups",
@@ -1249,6 +1263,18 @@ MODEL_ORDER_LIST = PersistentConfig(
     [],
 )
 
+DEFAULT_MODEL_METADATA = PersistentConfig(
+    "DEFAULT_MODEL_METADATA",
+    "models.default_metadata",
+    {},
+)
+
+DEFAULT_MODEL_PARAMS = PersistentConfig(
+    "DEFAULT_MODEL_PARAMS",
+    "models.default_params",
+    {},
+)
+
 DEFAULT_USER_ROLE = PersistentConfig(
     "DEFAULT_USER_ROLE",
     "ui.default_user_role",
@@ -1385,18 +1411,6 @@ USER_PERMISSIONS_WORKSPACE_TOOLS_ALLOW_PUBLIC_SHARING = (
     == "true"
 )
 
-USER_PERMISSIONS_WORKSPACE_SKILLS_ALLOW_SHARING = (
-    os.environ.get("USER_PERMISSIONS_WORKSPACE_SKILLS_ALLOW_SHARING", "False").lower()
-    == "true"
-)
-
-USER_PERMISSIONS_WORKSPACE_SKILLS_ALLOW_PUBLIC_SHARING = (
-    os.environ.get(
-        "USER_PERMISSIONS_WORKSPACE_SKILLS_ALLOW_PUBLIC_SHARING", "False"
-    ).lower()
-    == "true"
-)
-
 
 USER_PERMISSIONS_NOTES_ALLOW_SHARING = (
     os.environ.get("USER_PERMISSIONS_NOTES_ALLOW_SHARING", "False").lower() == "true"
@@ -1426,6 +1440,10 @@ USER_PERMISSIONS_CHAT_PARAMS = (
 
 USER_PERMISSIONS_CHAT_FILE_UPLOAD = (
     os.environ.get("USER_PERMISSIONS_CHAT_FILE_UPLOAD", "True").lower() == "true"
+)
+
+USER_PERMISSIONS_CHAT_WEB_UPLOAD = (
+    os.environ.get("USER_PERMISSIONS_CHAT_WEB_UPLOAD", "True").lower() == "true"
 )
 
 USER_PERMISSIONS_CHAT_DELETE = (
@@ -1526,11 +1544,6 @@ USER_PERMISSIONS_FEATURES_MEMORIES = (
     os.environ.get("USER_PERMISSIONS_FEATURES_MEMORIES", "True").lower() == "true"
 )
 
-USER_PERMISSIONS_FEATURES_DEEP_RESEARCH = (
-    os.environ.get("USER_PERMISSIONS_FEATURES_DEEP_RESEARCH", "True").lower()
-    == "true"
-)
-
 
 USER_PERMISSIONS_SETTINGS_INTERFACE = (
     os.environ.get("USER_PERMISSIONS_SETTINGS_INTERFACE", "True").lower() == "true"
@@ -1560,8 +1573,6 @@ DEFAULT_USER_PERMISSIONS = {
         "public_prompts": USER_PERMISSIONS_WORKSPACE_PROMPTS_ALLOW_PUBLIC_SHARING,
         "tools": USER_PERMISSIONS_WORKSPACE_TOOLS_ALLOW_SHARING,
         "public_tools": USER_PERMISSIONS_WORKSPACE_TOOLS_ALLOW_PUBLIC_SHARING,
-        "skills": USER_PERMISSIONS_WORKSPACE_SKILLS_ALLOW_SHARING,
-        "public_skills": USER_PERMISSIONS_WORKSPACE_SKILLS_ALLOW_PUBLIC_SHARING,
         "notes": USER_PERMISSIONS_NOTES_ALLOW_SHARING,
         "public_notes": USER_PERMISSIONS_NOTES_ALLOW_PUBLIC_SHARING,
     },
@@ -1571,6 +1582,7 @@ DEFAULT_USER_PERMISSIONS = {
         "system_prompt": USER_PERMISSIONS_CHAT_SYSTEM_PROMPT,
         "params": USER_PERMISSIONS_CHAT_PARAMS,
         "file_upload": USER_PERMISSIONS_CHAT_FILE_UPLOAD,
+        "web_upload": USER_PERMISSIONS_CHAT_WEB_UPLOAD,
         "delete": USER_PERMISSIONS_CHAT_DELETE,
         "delete_message": USER_PERMISSIONS_CHAT_DELETE_MESSAGE,
         "continue_response": USER_PERMISSIONS_CHAT_CONTINUE_RESPONSE,
@@ -1598,7 +1610,6 @@ DEFAULT_USER_PERMISSIONS = {
         "image_generation": USER_PERMISSIONS_FEATURES_IMAGE_GENERATION,
         "code_interpreter": USER_PERMISSIONS_FEATURES_CODE_INTERPRETER,
         "memories": USER_PERMISSIONS_FEATURES_MEMORIES,
-        "deep_research": USER_PERMISSIONS_FEATURES_DEEP_RESEARCH,
     },
     "settings": {
         "interface": USER_PERMISSIONS_SETTINGS_INTERFACE,
@@ -1682,6 +1693,10 @@ BYPASS_ADMIN_ACCESS_CONTROL = (
 
 ENABLE_ADMIN_CHAT_ACCESS = (
     os.environ.get("ENABLE_ADMIN_CHAT_ACCESS", "True").lower() == "true"
+)
+
+ENABLE_ADMIN_ANALYTICS = (
+    os.environ.get("ENABLE_ADMIN_ANALYTICS", "True").lower() == "true"
 )
 
 ENABLE_COMMUNITY_SHARING = PersistentConfig(
@@ -2159,48 +2174,6 @@ ENABLE_MEMORIES = PersistentConfig(
     "ENABLE_MEMORIES",
     "memories.enable",
     os.environ.get("ENABLE_MEMORIES", "True").lower() == "true",
-)
-
-ENABLE_DEEP_RESEARCH = PersistentConfig(
-    "ENABLE_DEEP_RESEARCH",
-    "deep_research.enable",
-    os.environ.get("ENABLE_DEEP_RESEARCH", "False").lower() == "true",
-)
-
-DEERFLOW_BASE_URL = PersistentConfig(
-    "DEERFLOW_BASE_URL",
-    "deep_research.deerflow.base_url",
-    os.environ.get("DEERFLOW_BASE_URL", ""),
-)
-
-DEERFLOW_API_KEY = PersistentConfig(
-    "DEERFLOW_API_KEY",
-    "deep_research.deerflow.api_key",
-    os.environ.get("DEERFLOW_API_KEY", ""),
-)
-
-DEERFLOW_MODEL = PersistentConfig(
-    "DEERFLOW_MODEL",
-    "deep_research.deerflow.model",
-    os.environ.get("DEERFLOW_MODEL", ""),
-)
-
-DEERFLOW_CONNECT_TIMEOUT_SECS = PersistentConfig(
-    "DEERFLOW_CONNECT_TIMEOUT_SECS",
-    "deep_research.deerflow.connect_timeout_secs",
-    int(os.environ.get("DEERFLOW_CONNECT_TIMEOUT_SECS", "10")),
-)
-
-DEERFLOW_REQUEST_TIMEOUT_SECS = PersistentConfig(
-    "DEERFLOW_REQUEST_TIMEOUT_SECS",
-    "deep_research.deerflow.request_timeout_secs",
-    int(os.environ.get("DEERFLOW_REQUEST_TIMEOUT_SECS", "900")),
-)
-
-DEERFLOW_REUSE_THREADS = PersistentConfig(
-    "DEERFLOW_REUSE_THREADS",
-    "deep_research.deerflow.reuse_threads",
-    os.environ.get("DEERFLOW_REUSE_THREADS", "True").lower() == "true",
 )
 
 CODE_INTERPRETER_ENGINE = PersistentConfig(
@@ -2871,6 +2844,55 @@ RAG_FILE_MAX_SIZE = PersistentConfig(
     ),
 )
 
+# Adaptive File Context Configuration
+ADAPTIVE_FILE_CONTEXT_ENABLED = PersistentConfig(
+    "ADAPTIVE_FILE_CONTEXT_ENABLED",
+    "adaptive_file_context.enabled",
+    os.getenv("ADAPTIVE_FILE_CONTEXT_ENABLED", "False").lower() == "true",
+)
+
+ADAPTIVE_FILE_CONTEXT_DEFAULT_MODE = PersistentConfig(
+    "ADAPTIVE_FILE_CONTEXT_DEFAULT_MODE",
+    "adaptive_file_context.default_mode",
+    os.getenv("ADAPTIVE_FILE_CONTEXT_DEFAULT_MODE", "retrieval"),
+)
+
+ADAPTIVE_FILE_CONTEXT_MAX_TOKENS_PER_FILE = PersistentConfig(
+    "ADAPTIVE_FILE_CONTEXT_MAX_TOKENS_PER_FILE",
+    "adaptive_file_context.max_tokens_per_file",
+    (
+        int(os.environ.get("ADAPTIVE_FILE_CONTEXT_MAX_TOKENS_PER_FILE", "8000"))
+        if os.environ.get("ADAPTIVE_FILE_CONTEXT_MAX_TOKENS_PER_FILE")
+        else 8000
+    ),
+)
+
+ADAPTIVE_FILE_CONTEXT_MAX_TOKENS_PER_REQUEST = PersistentConfig(
+    "ADAPTIVE_FILE_CONTEXT_MAX_TOKENS_PER_REQUEST",
+    "adaptive_file_context.max_tokens_per_request",
+    (
+        int(os.environ.get("ADAPTIVE_FILE_CONTEXT_MAX_TOKENS_PER_REQUEST", "32000"))
+        if os.environ.get("ADAPTIVE_FILE_CONTEXT_MAX_TOKENS_PER_REQUEST")
+        else 32000
+    ),
+)
+
+ADAPTIVE_FILE_CONTEXT_DEBUG = PersistentConfig(
+    "ADAPTIVE_FILE_CONTEXT_DEBUG",
+    "adaptive_file_context.debug",
+    os.getenv("ADAPTIVE_FILE_CONTEXT_DEBUG", "False").lower() == "true",
+)
+
+ADAPTIVE_FILE_CONTEXT_MIGRATION_VERSION = PersistentConfig(
+    "ADAPTIVE_FILE_CONTEXT_MIGRATION_VERSION",
+    "adaptive_file_context.migration_version",
+    (
+        int(os.environ.get("ADAPTIVE_FILE_CONTEXT_MIGRATION_VERSION", "0"))
+        if os.environ.get("ADAPTIVE_FILE_CONTEXT_MIGRATION_VERSION")
+        else 0
+    ),
+)
+
 FILE_IMAGE_COMPRESSION_WIDTH = PersistentConfig(
     "FILE_IMAGE_COMPRESSION_WIDTH",
     "file.image_compression_width",
@@ -2949,6 +2971,12 @@ ENABLE_ASYNC_EMBEDDING = PersistentConfig(
     "ENABLE_ASYNC_EMBEDDING",
     "rag.enable_async_embedding",
     os.environ.get("ENABLE_ASYNC_EMBEDDING", "True").lower() == "true",
+)
+
+RAG_EMBEDDING_CONCURRENT_REQUESTS = PersistentConfig(
+    "RAG_EMBEDDING_CONCURRENT_REQUESTS",
+    "rag.embedding_concurrent_requests",
+    int(os.getenv("RAG_EMBEDDING_CONCURRENT_REQUESTS", "0")),
 )
 
 RAG_EMBEDDING_QUERY_PREFIX = os.environ.get("RAG_EMBEDDING_QUERY_PREFIX", None)
@@ -3531,6 +3559,12 @@ YANDEX_WEB_SEARCH_CONFIG = PersistentConfig(
     "YANDEX_WEB_SEARCH_CONFIG",
     "rag.web.search.yandex_web_search_config",
     os.environ.get("YANDEX_WEB_SEARCH_CONFIG", ""),
+)
+
+YOUCOM_API_KEY = PersistentConfig(
+    "YOUCOM_API_KEY",
+    "rag.web.search.youcom_api_key",
+    os.environ.get("YOUCOM_API_KEY", ""),
 )
 
 ####################################

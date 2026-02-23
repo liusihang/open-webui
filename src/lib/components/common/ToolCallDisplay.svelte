@@ -16,6 +16,7 @@
 	import Markdown from '../chat/Messages/Markdown.svelte';
 	import Image from './Image.svelte';
 	import FullHeightIframe from './FullHeightIframe.svelte';
+	import { settings } from '$lib/stores';
 
 	export let id: string = '';
 	export let attributes: {
@@ -50,8 +51,7 @@
 			if (typeof parsed === 'object') {
 				return JSON.stringify(parsed, null, 2);
 			} else {
-				// It's a primitive value like a number, boolean, etc.
-				return `${JSON.stringify(String(parsed))}`;
+				return String(parsed);
 			}
 		} catch {
 			// Not valid JSON, return as-is
@@ -87,9 +87,8 @@
 	$: isExecuting = !!attributes?.done && attributes?.done !== 'true';
 	$: toolName = attributes?.name ?? 'tool';
 	$: formattedArgs = formatJSONString(args);
-	$: formattedResult = formatJSONString(result);
-	$: hasResult = String(result ?? '').trim() !== '';
 	$: parsedArgs = parseArguments(args);
+	$: parsedResult = parseJSONString(result);
 	$: containerToneClass = isExecuting
 		? 'border-sky-300/70 dark:border-sky-700/60'
 		: 'border-gray-200/70 dark:border-gray-800/70';
@@ -104,7 +103,9 @@
 		: 'bg-gray-50/70 dark:bg-gray-900/30';
 	$: iconToneClass = isExecuting
 		? 'bg-sky-100/80 text-sky-700 dark:bg-sky-900/40 dark:text-sky-300'
-		: 'bg-emerald-100/80 text-emerald-700 dark:bg-emerald-900/40 dark:text-emerald-300';
+		: isDone
+			? 'bg-emerald-100/80 text-emerald-700 dark:bg-emerald-900/40 dark:text-emerald-300'
+			: 'bg-gray-100/80 text-gray-600 dark:bg-gray-800/70 dark:text-gray-300';
 </script>
 
 <div {id} class={className}>
@@ -130,8 +131,8 @@
 						src={embed}
 						{args}
 						allowScripts={true}
-						allowForms={true}
-						allowSameOrigin={true}
+						allowForms={$settings?.iframeSandboxAllowForms ?? false}
+						allowSameOrigin={$settings?.iframeSandboxAllowSameOrigin ?? false}
 						allowPopups={true}
 					/>
 				</div>
@@ -154,8 +155,10 @@
 						<div class="rounded-md p-1 {iconToneClass}">
 							{#if isExecuting}
 								<Spinner className="size-3.5" />
-							{:else}
+							{:else if isDone}
 								<CheckCircle className="size-3.5" />
+							{:else}
+								<Wrench className="size-3.5" />
 							{/if}
 						</div>
 
@@ -187,47 +190,59 @@
 						class="tool-call-body border-t px-3 py-2 {dividerToneClass} {bodyToneClass}"
 						transition:slide={{ duration: 300, easing: quintOut, axis: 'y' }}
 					>
-						{#if parsedArgs}
-							<div class="space-y-2">
-								<div class="text-xs font-semibold tracking-wide text-gray-500 dark:text-gray-400">
-									{$i18n.t('Arguments')}
-								</div>
-								<div class="space-y-1">
-									{#each Object.entries(parsedArgs) as [key, value]}
-										<div class="flex gap-2 text-xs leading-5">
-											<div
-												class="font-medium text-gray-600 dark:text-gray-300 shrink-0 max-w-[45%] break-all"
-											>
-												{key}
+						{#if args}
+							{#if parsedArgs}
+								<div class="space-y-2">
+									<div class="text-xs font-semibold tracking-wide text-gray-500 dark:text-gray-400">
+										{$i18n.t('Arguments')}
+									</div>
+									<div class="space-y-1">
+										{#each Object.entries(parsedArgs) as [key, value]}
+											<div class="flex gap-2 text-xs leading-5">
+												<div
+													class="font-medium text-gray-600 dark:text-gray-300 shrink-0 max-w-[45%] break-all"
+												>
+													{key}
+												</div>
+												<div class="text-gray-800 dark:text-gray-100 break-all">
+													{formatArgumentValue(value)}
+												</div>
 											</div>
-											<div class="text-gray-800 dark:text-gray-100 break-all">
-												{formatArgumentValue(value)}
-											</div>
-										</div>
-									{/each}
+										{/each}
+									</div>
 								</div>
-							</div>
-						{:else}
-							<Markdown
-								id={`${componentId}-tool-call-args`}
-								content={`${$i18n.t('Arguments')}
+							{:else}
+								<Markdown
+									id={`${componentId}-tool-call-args`}
+									content={`${$i18n.t('Arguments')}
 \`\`\`json
 ${formattedArgs}
 \`\`\``}
-								editCodeBlock={false}
-							/>
-						{/if}
-
-						{#if isDone && hasResult}
-							<div class="mt-3">
-								<Markdown
-									id={`${componentId}-tool-call-result`}
-									content={`${$i18n.t('Result')}
-\`\`\`json
-${formattedResult}
-\`\`\``}
 									editCodeBlock={false}
 								/>
+							{/if}
+						{/if}
+
+						{#if isDone && result}
+							<div class="mt-3">
+								{#if typeof parsedResult === 'object' && parsedResult !== null}
+									<Markdown
+										id={`${componentId}-tool-call-result`}
+										content={`${$i18n.t('Result')}
+\`\`\`json
+${JSON.stringify(parsedResult, null, 2)}
+\`\`\``}
+										editCodeBlock={false}
+									/>
+								{:else}
+									<div class="text-xs font-semibold tracking-wide text-gray-500 dark:text-gray-400">
+										{$i18n.t('Result')}
+									</div>
+									<pre
+										class="mt-1 text-xs text-gray-700 dark:text-gray-300 whitespace-pre-wrap break-words font-mono">{String(
+											parsedResult
+										)}</pre>
+								{/if}
 							</div>
 						{/if}
 					</div>
