@@ -1411,18 +1411,6 @@ USER_PERMISSIONS_WORKSPACE_TOOLS_ALLOW_PUBLIC_SHARING = (
     == "true"
 )
 
-USER_PERMISSIONS_WORKSPACE_SKILLS_ALLOW_SHARING = (
-    os.environ.get("USER_PERMISSIONS_WORKSPACE_SKILLS_ALLOW_SHARING", "False").lower()
-    == "true"
-)
-
-USER_PERMISSIONS_WORKSPACE_SKILLS_ALLOW_PUBLIC_SHARING = (
-    os.environ.get(
-        "USER_PERMISSIONS_WORKSPACE_SKILLS_ALLOW_PUBLIC_SHARING", "False"
-    ).lower()
-    == "true"
-)
-
 
 USER_PERMISSIONS_NOTES_ALLOW_SHARING = (
     os.environ.get("USER_PERMISSIONS_NOTES_ALLOW_SHARING", "False").lower() == "true"
@@ -1556,11 +1544,6 @@ USER_PERMISSIONS_FEATURES_MEMORIES = (
     os.environ.get("USER_PERMISSIONS_FEATURES_MEMORIES", "True").lower() == "true"
 )
 
-USER_PERMISSIONS_FEATURES_DEEP_RESEARCH = (
-    os.environ.get("USER_PERMISSIONS_FEATURES_DEEP_RESEARCH", "True").lower()
-    == "true"
-)
-
 
 USER_PERMISSIONS_SETTINGS_INTERFACE = (
     os.environ.get("USER_PERMISSIONS_SETTINGS_INTERFACE", "True").lower() == "true"
@@ -1590,8 +1573,6 @@ DEFAULT_USER_PERMISSIONS = {
         "public_prompts": USER_PERMISSIONS_WORKSPACE_PROMPTS_ALLOW_PUBLIC_SHARING,
         "tools": USER_PERMISSIONS_WORKSPACE_TOOLS_ALLOW_SHARING,
         "public_tools": USER_PERMISSIONS_WORKSPACE_TOOLS_ALLOW_PUBLIC_SHARING,
-        "skills": USER_PERMISSIONS_WORKSPACE_SKILLS_ALLOW_SHARING,
-        "public_skills": USER_PERMISSIONS_WORKSPACE_SKILLS_ALLOW_PUBLIC_SHARING,
         "notes": USER_PERMISSIONS_NOTES_ALLOW_SHARING,
         "public_notes": USER_PERMISSIONS_NOTES_ALLOW_PUBLIC_SHARING,
     },
@@ -1629,7 +1610,6 @@ DEFAULT_USER_PERMISSIONS = {
         "image_generation": USER_PERMISSIONS_FEATURES_IMAGE_GENERATION,
         "code_interpreter": USER_PERMISSIONS_FEATURES_CODE_INTERPRETER,
         "memories": USER_PERMISSIONS_FEATURES_MEMORIES,
-        "deep_research": USER_PERMISSIONS_FEATURES_DEEP_RESEARCH,
     },
     "settings": {
         "interface": USER_PERMISSIONS_SETTINGS_INTERFACE,
@@ -2194,48 +2174,6 @@ ENABLE_MEMORIES = PersistentConfig(
     "ENABLE_MEMORIES",
     "memories.enable",
     os.environ.get("ENABLE_MEMORIES", "True").lower() == "true",
-)
-
-ENABLE_DEEP_RESEARCH = PersistentConfig(
-    "ENABLE_DEEP_RESEARCH",
-    "deep_research.enable",
-    os.environ.get("ENABLE_DEEP_RESEARCH", "False").lower() == "true",
-)
-
-DEERFLOW_BASE_URL = PersistentConfig(
-    "DEERFLOW_BASE_URL",
-    "deep_research.deerflow.base_url",
-    os.environ.get("DEERFLOW_BASE_URL", ""),
-)
-
-DEERFLOW_API_KEY = PersistentConfig(
-    "DEERFLOW_API_KEY",
-    "deep_research.deerflow.api_key",
-    os.environ.get("DEERFLOW_API_KEY", ""),
-)
-
-DEERFLOW_MODEL = PersistentConfig(
-    "DEERFLOW_MODEL",
-    "deep_research.deerflow.model",
-    os.environ.get("DEERFLOW_MODEL", ""),
-)
-
-DEERFLOW_CONNECT_TIMEOUT_SECS = PersistentConfig(
-    "DEERFLOW_CONNECT_TIMEOUT_SECS",
-    "deep_research.deerflow.connect_timeout_secs",
-    int(os.environ.get("DEERFLOW_CONNECT_TIMEOUT_SECS", "10")),
-)
-
-DEERFLOW_REQUEST_TIMEOUT_SECS = PersistentConfig(
-    "DEERFLOW_REQUEST_TIMEOUT_SECS",
-    "deep_research.deerflow.request_timeout_secs",
-    int(os.environ.get("DEERFLOW_REQUEST_TIMEOUT_SECS", "900")),
-)
-
-DEERFLOW_REUSE_THREADS = PersistentConfig(
-    "DEERFLOW_REUSE_THREADS",
-    "deep_research.deerflow.reuse_threads",
-    os.environ.get("DEERFLOW_REUSE_THREADS", "True").lower() == "true",
 )
 
 CODE_INTERPRETER_ENGINE = PersistentConfig(
@@ -2903,6 +2841,55 @@ RAG_FILE_MAX_SIZE = PersistentConfig(
         int(os.environ.get("RAG_FILE_MAX_SIZE"))
         if os.environ.get("RAG_FILE_MAX_SIZE")
         else None
+    ),
+)
+
+# Adaptive File Context Configuration
+ADAPTIVE_FILE_CONTEXT_ENABLED = PersistentConfig(
+    "ADAPTIVE_FILE_CONTEXT_ENABLED",
+    "adaptive_file_context.enabled",
+    os.getenv("ADAPTIVE_FILE_CONTEXT_ENABLED", "False").lower() == "true",
+)
+
+ADAPTIVE_FILE_CONTEXT_DEFAULT_MODE = PersistentConfig(
+    "ADAPTIVE_FILE_CONTEXT_DEFAULT_MODE",
+    "adaptive_file_context.default_mode",
+    os.getenv("ADAPTIVE_FILE_CONTEXT_DEFAULT_MODE", "retrieval"),
+)
+
+ADAPTIVE_FILE_CONTEXT_MAX_TOKENS_PER_FILE = PersistentConfig(
+    "ADAPTIVE_FILE_CONTEXT_MAX_TOKENS_PER_FILE",
+    "adaptive_file_context.max_tokens_per_file",
+    (
+        int(os.environ.get("ADAPTIVE_FILE_CONTEXT_MAX_TOKENS_PER_FILE", "8000"))
+        if os.environ.get("ADAPTIVE_FILE_CONTEXT_MAX_TOKENS_PER_FILE")
+        else 8000
+    ),
+)
+
+ADAPTIVE_FILE_CONTEXT_MAX_TOKENS_PER_REQUEST = PersistentConfig(
+    "ADAPTIVE_FILE_CONTEXT_MAX_TOKENS_PER_REQUEST",
+    "adaptive_file_context.max_tokens_per_request",
+    (
+        int(os.environ.get("ADAPTIVE_FILE_CONTEXT_MAX_TOKENS_PER_REQUEST", "32000"))
+        if os.environ.get("ADAPTIVE_FILE_CONTEXT_MAX_TOKENS_PER_REQUEST")
+        else 32000
+    ),
+)
+
+ADAPTIVE_FILE_CONTEXT_DEBUG = PersistentConfig(
+    "ADAPTIVE_FILE_CONTEXT_DEBUG",
+    "adaptive_file_context.debug",
+    os.getenv("ADAPTIVE_FILE_CONTEXT_DEBUG", "False").lower() == "true",
+)
+
+ADAPTIVE_FILE_CONTEXT_MIGRATION_VERSION = PersistentConfig(
+    "ADAPTIVE_FILE_CONTEXT_MIGRATION_VERSION",
+    "adaptive_file_context.migration_version",
+    (
+        int(os.environ.get("ADAPTIVE_FILE_CONTEXT_MIGRATION_VERSION", "0"))
+        if os.environ.get("ADAPTIVE_FILE_CONTEXT_MIGRATION_VERSION")
+        else 0
     ),
 )
 

@@ -28,6 +28,8 @@ from open_webui.utils.misc import is_string_allowed
 from open_webui.models.oauth_sessions import OAuthSessions
 from open_webui.models.chats import Chats
 from open_webui.models.folders import Folders
+from open_webui.models.files import Files
+from open_webui.models.access_grants import AccessGrants
 from open_webui.models.users import Users
 from open_webui.socket.main import (
     get_event_call,
@@ -71,6 +73,10 @@ from open_webui.models.functions import Functions
 from open_webui.models.models import Models
 
 from open_webui.retrieval.utils import get_sources_from_items
+from open_webui.utils.adaptive_file_context import (
+    apply_adaptive_context_to_items,
+    resolve_adaptive_config,
+)
 
 
 from open_webui.utils.sanitize import sanitize_code
@@ -117,6 +123,11 @@ from open_webui.config import (
     DEFAULT_TOOLS_FUNCTION_CALLING_PROMPT_TEMPLATE,
     DEFAULT_CODE_INTERPRETER_PROMPT,
     CODE_INTERPRETER_BLOCKED_MODULES,
+    ADAPTIVE_FILE_CONTEXT_ENABLED,
+    ADAPTIVE_FILE_CONTEXT_DEFAULT_MODE,
+    ADAPTIVE_FILE_CONTEXT_MAX_TOKENS_PER_FILE,
+    ADAPTIVE_FILE_CONTEXT_MAX_TOKENS_PER_REQUEST,
+    ADAPTIVE_FILE_CONTEXT_DEBUG,
 )
 from open_webui.env import (
     GLOBAL_LOG_LEVEL,
@@ -1742,7 +1753,119 @@ async def chat_completion_files_handler(
     __event_emitter__ = extra_params["__event_emitter__"]
     sources = []
 
-    if files := body.get("metadata", {}).get("files", None):
+    metadata = body.get("metadata", {})
+    files = metadata.get("files", None)
+
+    if files and not isinstance(files, list):
+        files = []
+
+    if files:
+        sanitized_files: list[dict] = []
+        for candidate in files:
+            if not isinstance(candidate, dict):
+                sanitized_files.append({"type": "file", "context": "retrieval"})
+                continue
+
+            item = dict(candidate)
+            if str(item.get("type") or "file").lower() == "file" and item.get("id"):
+                file_id = str(item.get("id"))
+                has_access = False
+                if user.role == "admin":
+                    has_access = True
+                else:
+                    file_obj = Files.get_file_by_id(file_id)
+                    if file_obj and file_obj.user_id == user.id:
+                        has_access = True
+                    elif AccessGrants.has_access(
+                        user_id=user.id,
+                        resource_type="file",
+                        resource_id=file_id,
+                        permission="read",
+                    ):
+                        has_access = True
+
+                if not has_access:
+                    item["_adaptive_excluded"] = True
+                    item["_adaptive_reason"] = "scope_denied"
+
+            sanitized_files.append(item)
+
+        files = sanitized_files
+        metadata["files"] = files
+        body["metadata"] = metadata
+
+        adaptive_enabled = getattr(
+            request.app.state.config,
+            "ADAPTIVE_FILE_CONTEXT_ENABLED",
+            ADAPTIVE_FILE_CONTEXT_ENABLED,
+        )
+        adaptive_debug = getattr(
+            request.app.state.config,
+            "ADAPTIVE_FILE_CONTEXT_DEBUG",
+            ADAPTIVE_FILE_CONTEXT_DEBUG,
+        )
+
+        if adaptive_enabled:
+            prompt = get_last_user_message(body.get("messages", []))
+            adaptive_config = resolve_adaptive_config(
+                {
+                    "default_mode": getattr(
+                        request.app.state.config,
+                        "ADAPTIVE_FILE_CONTEXT_DEFAULT_MODE",
+                        ADAPTIVE_FILE_CONTEXT_DEFAULT_MODE,
+                    ),
+                    "max_tokens_per_file": getattr(
+                        request.app.state.config,
+                        "ADAPTIVE_FILE_CONTEXT_MAX_TOKENS_PER_FILE",
+                        ADAPTIVE_FILE_CONTEXT_MAX_TOKENS_PER_FILE,
+                    ),
+                    "max_tokens_per_request": getattr(
+                        request.app.state.config,
+                        "ADAPTIVE_FILE_CONTEXT_MAX_TOKENS_PER_REQUEST",
+                        ADAPTIVE_FILE_CONTEXT_MAX_TOKENS_PER_REQUEST,
+                    ),
+                }
+            )
+
+            files, decisions = apply_adaptive_context_to_items(
+                query=prompt or "",
+                items=files,
+                config=adaptive_config,
+            )
+
+            if adaptive_debug:
+                payload = []
+                for item, decision in zip(files, decisions):
+                    payload.append(
+                        {
+                            "id": item.get("id"),
+                            "type": item.get("type", "file"),
+                            "context": item.get("context", "retrieval"),
+                            "reason": decision.reason,
+                            "estimated_tokens": decision.estimated_tokens,
+                            "applied": decision.applied,
+                        }
+                    )
+                await __event_emitter__(
+                    {
+                        "type": "status",
+                        "data": {
+                            "action": "adaptive_file_context",
+                            "decisions": payload,
+                            "config": {
+                                "default_mode": adaptive_config["default_mode"],
+                                "max_tokens_per_file": adaptive_config[
+                                    "max_tokens_per_file"
+                                ],
+                                "max_tokens_per_request": adaptive_config[
+                                    "max_tokens_per_request"
+                                ],
+                            },
+                            "done": False,
+                        },
+                    }
+                )
+
         # Check if all files are in full context mode
         all_full_context = all(item.get("context") == "full" for item in files)
 
@@ -1946,25 +2069,6 @@ async def convert_url_images_to_base64(form_data):
     return form_data
 
 
-def load_messages_from_db(chat_id: str, message_id: str) -> Optional[list[dict]]:
-    """
-    Load the message chain from DB up to message_id,
-    keeping only LLM-relevant fields (role, content, output).
-    """
-    messages_map = Chats.get_messages_map_by_chat_id(chat_id)
-    if not messages_map:
-        return None
-
-    db_messages = get_message_list(messages_map, message_id)
-    if not db_messages:
-        return None
-
-    return [
-        {k: v for k, v in msg.items() if k in ("role", "content", "output", "files")}
-        for msg in db_messages
-    ]
-
-
 def process_messages_with_output(messages: list[dict]) -> list[dict]:
     """
     Process messages with OR-aligned output items for LLM consumption.
@@ -1996,44 +2100,6 @@ async def process_chat_payload(request, form_data, user, metadata, model):
 
     form_data = apply_params_to_form_data(form_data, model)
     log.debug(f"form_data: {form_data}")
-
-    # Load messages from DB when available — DB preserves structured 'output' items
-    # which the frontend strips, causing tool calls to be merged into content.
-    chat_id = metadata.get("chat_id")
-    parent_message_id = metadata.get("parent_message_id")
-
-    if chat_id and parent_message_id and not chat_id.startswith("local:"):
-        db_messages = load_messages_from_db(chat_id, parent_message_id)
-        if db_messages:
-            system_message = get_system_message(form_data.get("messages", []))
-            form_data["messages"] = (
-                [system_message, *db_messages] if system_message else db_messages
-            )
-
-            # Inject image files into content as image_url parts (mirrors frontend logic)
-            for message in form_data["messages"]:
-                image_files = [
-                    f
-                    for f in message.get("files", [])
-                    if f.get("type") == "image"
-                    or (f.get("content_type") or "").startswith("image/")
-                ]
-                if message.get("role") == "user" and image_files:
-                    text_content = message.get("content", "")
-                    if isinstance(text_content, str):
-                        message["content"] = [
-                            {"type": "text", "text": text_content},
-                            *[
-                                {
-                                    "type": "image_url",
-                                    "image_url": {"url": f["url"]},
-                                }
-                                for f in image_files
-                                if f.get("url")
-                            ],
-                        ]
-                # Strip files field — it's been incorporated into content
-                message.pop("files", None)
 
     # Process messages with OR-aligned output items for clean LLM messages
     form_data["messages"] = process_messages_with_output(form_data.get("messages", []))
@@ -2210,18 +2276,14 @@ async def process_chat_payload(request, form_data, user, metadata, model):
                 )
 
         if "code_interpreter" in features and features["code_interpreter"]:
-            # Skip XML-tag prompt injection when native FC is enabled —
-            # execute_code will be injected as a builtin tool instead
-            if metadata.get("params", {}).get("function_calling") != "native":
-                form_data["messages"] = add_or_update_user_message(
-                    (
-                        request.app.state.config.CODE_INTERPRETER_PROMPT_TEMPLATE
-                        if request.app.state.config.CODE_INTERPRETER_PROMPT_TEMPLATE
-                        != ""
-                        else DEFAULT_CODE_INTERPRETER_PROMPT
-                    ),
-                    form_data["messages"],
-                )
+            form_data["messages"] = add_or_update_user_message(
+                (
+                    request.app.state.config.CODE_INTERPRETER_PROMPT_TEMPLATE
+                    if request.app.state.config.CODE_INTERPRETER_PROMPT_TEMPLATE != ""
+                    else DEFAULT_CODE_INTERPRETER_PROMPT
+                ),
+                form_data["messages"],
+            )
 
     tool_ids = form_data.pop("tool_ids", None)
     files = form_data.pop("files", None)
@@ -2234,7 +2296,7 @@ async def process_chat_payload(request, form_data, user, metadata, model):
     user_skill_ids = set(form_data.pop("skill_ids", None) or [])
     model_skill_ids = set(model.get("info", {}).get("meta", {}).get("skillIds", []))
 
-    all_skill_ids = user_skill_ids | model_skill_ids
+    all_skill_ids = list(set(user_skill_ids + model_skill_ids))
     available_skills = []
     if all_skill_ids:
         from open_webui.models.skills import Skills as SkillsModel
@@ -2250,24 +2312,13 @@ async def process_chat_payload(request, form_data, user, metadata, model):
             and s.is_active
         ]
 
-        skill_descriptions = ""
-        for skill in available_skills:
-            if skill.id in user_skill_ids:
-                # User-selected: inject full content
-                form_data["messages"] = add_or_update_system_message(
-                    f'<skill name="{skill.name}">\n{skill.content}\n</skill>',
-                    form_data["messages"],
-                    append=True,
-                )
-            else:
-                # Model-attached: name+description only
-                skill_descriptions += f"<skill>\n<name>{skill.name}</name>\n<description>{skill.description or ''}</description>\n</skill>\n"
-
-        if skill_descriptions:
+        if available_skills:
+            manifest = "<available_skills>\n"
+            for skill in available_skills:
+                manifest += f"<skill>\n<name>{skill.name}</name>\n<description>{skill.description or ''}</description>\n</skill>\n"
+            manifest += "</available_skills>"
             form_data["messages"] = add_or_update_system_message(
-                f"<available_skills>\n{skill_descriptions}</available_skills>",
-                form_data["messages"],
-                append=True,
+                manifest, form_data["messages"], append=True
             )
 
     prompt = get_last_user_message(form_data["messages"])
