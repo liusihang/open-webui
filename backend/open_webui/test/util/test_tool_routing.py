@@ -1,5 +1,6 @@
 import asyncio
 import importlib.util
+import json
 from pathlib import Path
 import sys
 
@@ -129,6 +130,43 @@ def test_route_tools_prefers_semantic_candidate_set():
     assert "summarize_text" in decision.selected_keys
 
 
+def test_build_tool_routing_config_normalizes_mode():
+    mod = _load_module()
+
+    class FakeConfig:
+        TOOL_ROUTING_ENABLE = True
+        TOOL_ROUTING_MODE = "semantic"
+        TOOL_ROUTING_SEMANTIC_TOP_N = 12
+        TOOL_ROUTING_FINAL_TOP_K = 6
+        TOOL_ROUTING_MIN_CONFIDENCE = 0.12
+        TOOL_ROUTING_LEXICAL_WEIGHT = 0.7
+        TOOL_ROUTING_RULE_WEIGHT = 0.3
+        TOOL_ROUTING_MAX_INJECTED_TOOLS = 6
+        TOOL_ROUTING_MAX_SCHEMA_CHARS = 200000
+        TOOL_ROUTING_KEYWORD_FALLBACK_ENABLE = True
+        TOOL_ROUTING_KEYWORD_FALLBACK_MODE_PATTERNS = {
+            "search": ["search"],
+            "analyze": ["analyze"],
+            "chat": [],
+        }
+
+    cfg = mod.build_tool_routing_config(FakeConfig())
+
+    assert cfg.mode == "hybrid"
+
+
+def test_route_tools_respects_configured_mode():
+    mod = _load_module()
+    tools = _tools()
+    decision = mod.route_tools(
+        "please search web for python",
+        tools,
+        _cfg(mod, mode="chat", min_confidence=0.0),
+    )
+
+    assert decision.mode == "chat"
+
+
 def test_manifest_id_scope_stable():
     mod = _load_module()
     assert mod.get_manifest_id("u1", "search_web") == "tool::u1::search_web"
@@ -208,6 +246,33 @@ def test_bump_tool_routing_manifest_marker_handles_redis_failure():
     assert marker > 0
 
 
+def test_bump_tool_routing_manifest_marker_is_monotonic():
+    mod = _load_module()
+
+    class FakeRedis:
+        async def set(self, key, value):
+            return None
+
+    class FakeState:
+        def __init__(self):
+            self.redis = FakeRedis()
+            self.TOOL_ROUTING_MANIFEST_VERSION = 0
+
+    class FakeApp:
+        def __init__(self):
+            self.state = FakeState()
+
+    class FakeRequest:
+        def __init__(self):
+            self.app = FakeApp()
+
+    request = FakeRequest()
+    first = asyncio.run(mod.bump_tool_routing_manifest_marker(request))
+    second = asyncio.run(mod.bump_tool_routing_manifest_marker(request))
+
+    assert second > first
+
+
 def test_semantic_retrieve_candidates_uses_metadata_key_mapping():
     mod = _load_module()
 
@@ -241,3 +306,62 @@ def test_semantic_retrieve_candidates_uses_metadata_key_mapping():
     assert keys == ["summarize_text", "search_web"]
     assert scores["summarize_text"] == 1.0
     assert scores["search_web"] == 0.5
+
+
+def test_semantic_retrieve_candidates_filters_scope_by_metadata_or_id():
+    mod = _load_module()
+
+    class SearchResult:
+        def __init__(self):
+            self.metadatas = [[{"key": "search_web"}, {"key": "search_web"}]]
+            self.ids = [["tool::other::search_web", "tool::u1::search_web"]]
+
+    class FakeVectorClient:
+        def search(self, collection_name, vectors, limit):
+            return SearchResult()
+
+    async def fake_embedding(text, prefix=None):
+        return [0.1, 0.2, 0.3]
+
+    manifests = mod.build_tool_manifests(_tools(), scope_id="u1")
+    keys, scores = asyncio.run(
+        mod.semantic_retrieve_candidates(
+            "search this page",
+            manifests,
+            fake_embedding,
+            query_prefix="",
+            top_n=2,
+            vector_client=FakeVectorClient(),
+            scope_id="u1",
+        )
+    )
+
+    assert keys == ["search_web"]
+    assert scores["search_web"] == 0.5
+
+
+def test_materialize_native_tools_preserves_ranked_order():
+    mod = _load_module()
+    tools = {
+        "z_top": {
+            "spec": {
+                "name": "z_top",
+                "description": "high-priority",
+                "parameters": {"properties": {}},
+            }
+        },
+        "a_low": {
+            "spec": {
+                "name": "a_low",
+                "description": "low-priority",
+                "parameters": {"properties": {}},
+            }
+        },
+    }
+
+    payload_size = len(
+        json.dumps({"type": "function", "function": tools["z_top"]["spec"]})
+    )
+    result = mod.materialize_native_tools(tools, max_schema_chars=payload_size)
+
+    assert [item["function"]["name"] for item in result] == ["z_top"]

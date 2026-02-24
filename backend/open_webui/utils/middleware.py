@@ -2656,20 +2656,39 @@ async def process_chat_payload(request, form_data, user, metadata, model):
 
             request.app.state.TOOL_ROUTING_MANIFEST_VERSION = marker
 
-            manifests = build_tool_manifests(tools_dict=tools_dict, scope_id=user.id)
+            scope_id = str(user.id)
+            manifests = build_tool_manifests(tools_dict=tools_dict, scope_id=scope_id)
             manifest_version = compute_manifest_version(manifests)
 
             manifest_cache = request.app.state.TOOL_ROUTING_MANIFEST_CACHE
+            if not isinstance(manifest_cache, dict):
+                manifest_cache = {}
+            elif manifest_cache and any(
+                not isinstance(value, dict) for value in manifest_cache.values()
+            ):
+                # Reset legacy cache shape {tool_key: fingerprint}; v2 cache is scoped by user id.
+                manifest_cache = {}
+
+            request.app.state.TOOL_ROUTING_MANIFEST_CACHE = manifest_cache
+            scope_manifest_cache = manifest_cache.get(scope_id)
+            if not isinstance(scope_manifest_cache, dict):
+                scope_manifest_cache = {}
+                manifest_cache[scope_id] = scope_manifest_cache
+
             changed_keys = {
                 key
                 for key, manifest in manifests.items()
-                if manifest_cache.get(key) != manifest.fingerprint
+                if scope_manifest_cache.get(key) != manifest.fingerprint
             }
-            removed_keys = [key for key in manifest_cache.keys() if key not in manifests]
+            removed_keys = [
+                key for key in scope_manifest_cache.keys() if key not in manifests
+            ]
 
             force_reconcile = marker != int(request.app.state.TOOL_ROUTING_LAST_SYNC_VERSION)
             upsert_keys = set(manifests.keys()) if force_reconcile else changed_keys
-            delete_ids = [get_manifest_id(scope_id=user.id, key=key) for key in removed_keys]
+            delete_ids = [
+                get_manifest_id(scope_id=scope_id, key=key) for key in removed_keys
+            ]
 
             sync_status = {"status": "skipped", "upserted": 0, "deleted": 0}
             if upsert_keys or delete_ids:
@@ -2683,9 +2702,9 @@ async def process_chat_payload(request, form_data, user, metadata, model):
                 if sync_status.get("status") == "ok":
                     for key in upsert_keys:
                         if key in manifests:
-                            manifest_cache[key] = manifests[key].fingerprint
+                            scope_manifest_cache[key] = manifests[key].fingerprint
                     for key in removed_keys:
-                        manifest_cache.pop(key, None)
+                        scope_manifest_cache.pop(key, None)
 
             request.app.state.TOOL_ROUTING_LAST_SYNC_VERSION = marker
 
@@ -2695,6 +2714,7 @@ async def process_chat_payload(request, form_data, user, metadata, model):
                 embedding_function=request.app.state.EMBEDDING_FUNCTION,
                 query_prefix=RAG_EMBEDDING_QUERY_PREFIX,
                 top_n=routing_cfg.semantic_top_n,
+                scope_id=scope_id,
             )
 
             routing_decision = route_tools(

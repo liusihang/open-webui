@@ -10,6 +10,7 @@ from typing import Any
 log = logging.getLogger(__name__)
 
 TOOL_ROUTING_COLLECTION = "tool-manifests-v1"
+SUPPORTED_TOOL_ROUTING_MODES = {"hybrid", "chat", "search", "analyze"}
 
 
 @dataclass
@@ -69,6 +70,13 @@ def _clamp_float(value: Any, default: float, minimum: float, maximum: float) -> 
     return max(minimum, min(maximum, parsed))
 
 
+def _normalize_routing_mode(value: Any) -> str:
+    mode = _normalize_text(value)
+    if mode in SUPPORTED_TOOL_ROUTING_MODES:
+        return mode
+    return "hybrid"
+
+
 def build_tool_routing_config(app_config: Any) -> ToolRoutingConfig:
     mode_patterns = app_config.TOOL_ROUTING_KEYWORD_FALLBACK_MODE_PATTERNS
     if not isinstance(mode_patterns, dict):
@@ -76,7 +84,7 @@ def build_tool_routing_config(app_config: Any) -> ToolRoutingConfig:
 
     return ToolRoutingConfig(
         enable=bool(app_config.TOOL_ROUTING_ENABLE),
-        mode=(str(app_config.TOOL_ROUTING_MODE or "hybrid")).lower(),
+        mode=_normalize_routing_mode(app_config.TOOL_ROUTING_MODE or "hybrid"),
         semantic_top_n=_clamp_int(app_config.TOOL_ROUTING_SEMANTIC_TOP_N, 12, 1, 200),
         final_top_k=_clamp_int(app_config.TOOL_ROUTING_FINAL_TOP_K, 6, 1, 100),
         min_confidence=_clamp_float(
@@ -307,6 +315,7 @@ async def semantic_retrieve_candidates(
     query_prefix: str,
     top_n: int,
     *,
+    scope_id: str | None = None,
     vector_client: Any = None,
     collection_name: str = TOOL_ROUTING_COLLECTION,
 ) -> tuple[list[str], dict[str, float]]:
@@ -338,10 +347,37 @@ async def semantic_retrieve_candidates(
     candidate_keys: list[str] = []
     semantic_scores: dict[str, float] = {}
     manifest_keys = set(manifests.keys())
+    expected_scope = scope_id or (
+        str(next(iter(manifests.values())).metadata.get("scope_id", "") or "")
+        if manifests
+        else ""
+    )
+    result_ids_attr = getattr(result, "ids", None)
+    result_ids = (
+        result_ids_attr[0]
+        if result_ids_attr
+        and isinstance(result_ids_attr, list)
+        and result_ids_attr
+        and isinstance(result_ids_attr[0], list)
+        else []
+    )
 
     for idx, metadata in enumerate(result.metadatas[0]):
         if not isinstance(metadata, dict):
             continue
+
+        metadata_scope = str(metadata.get("scope_id", "") or "")
+        result_id = str(result_ids[idx]) if idx < len(result_ids) else ""
+        if expected_scope:
+            if metadata_scope and metadata_scope != expected_scope:
+                continue
+            if (
+                not metadata_scope
+                and result_id
+                and not result_id.startswith(f"tool::{expected_scope}::")
+            ):
+                continue
+
         key = metadata.get("key", "")
         if key not in manifest_keys or key in semantic_scores:
             continue
@@ -363,7 +399,7 @@ def route_tools(
     if not tools_dict:
         return ToolRoutingDecision([], [], {}, "chat", "no_candidates")
 
-    mode = _detect_mode(prompt, cfg)
+    mode = _detect_mode(prompt, cfg) if cfg.mode == "hybrid" else cfg.mode
     prompt_normalized = _normalize_text(prompt)
     prompt_tokens = _tokenize(prompt_normalized)
 
@@ -458,12 +494,14 @@ def materialize_native_tools(
 ) -> list[dict[str, Any]]:
     out: list[dict[str, Any]] = []
     used_chars = 0
-    for key in sorted(selected_tools.keys()):
-        spec = selected_tools[key].get("spec", {})
+    for selected_tool in selected_tools.values():
+        spec = selected_tool.get("spec", {})
+        if not isinstance(spec, dict):
+            continue
         payload = {"type": "function", "function": spec}
         payload_len = len(json.dumps(payload, ensure_ascii=True))
         if used_chars + payload_len > max_schema_chars:
-            break
+            continue
         used_chars += payload_len
         out.append(payload)
     return out
@@ -490,7 +528,10 @@ def select_expand_candidate(
 
 
 async def bump_tool_routing_manifest_marker(request: Any) -> int:
-    marker = int(time.time())
+    previous_marker = int(
+        getattr(request.app.state, "TOOL_ROUTING_MANIFEST_VERSION", 0) or 0
+    )
+    marker = max(time.time_ns(), previous_marker + 1)
     request.app.state.TOOL_ROUTING_MANIFEST_VERSION = marker
 
     redis_client = getattr(request.app.state, "redis", None)
