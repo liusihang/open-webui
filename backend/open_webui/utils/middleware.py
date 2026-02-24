@@ -111,10 +111,22 @@ from open_webui.utils.filter import (
     get_sorted_filter_ids,
     process_filter_functions,
 )
+from open_webui.utils.access_control import has_permission
 from open_webui.utils.code_interpreter import execute_code_jupyter
 from open_webui.utils.payload import apply_system_prompt_to_body
 from open_webui.utils.response import normalize_usage
 from open_webui.utils.mcp.client import MCPClient
+from open_webui.utils.tool_routing import (
+    build_tool_routing_config,
+    build_tool_manifests,
+    compute_manifest_version,
+    get_manifest_id,
+    route_tools,
+    semantic_retrieve_candidates,
+    sync_manifest_index,
+    materialize_native_tools,
+    select_expand_candidate,
+)
 
 
 from open_webui.config import (
@@ -128,6 +140,8 @@ from open_webui.config import (
     ADAPTIVE_FILE_CONTEXT_MAX_TOKENS_PER_FILE,
     ADAPTIVE_FILE_CONTEXT_MAX_TOKENS_PER_REQUEST,
     ADAPTIVE_FILE_CONTEXT_DEBUG,
+    RAG_EMBEDDING_QUERY_PREFIX,
+    RAG_EMBEDDING_CONTENT_PREFIX,
 )
 from open_webui.env import (
     GLOBAL_LOG_LEVEL,
@@ -1130,7 +1144,57 @@ async def chat_completion_tools_handler(
 
                 tool_function_name = tool_call.get("name", None)
                 if tool_function_name not in tools:
-                    return body, {}
+                    expand_on_unknown = bool(
+                        request.app.state.config.TOOL_ROUTING_EXPAND_ON_UNKNOWN
+                    )
+                    max_expansion_rounds = int(
+                        request.app.state.config.TOOL_ROUTING_MAX_EXPANSION_ROUNDS
+                    )
+                    current_expansion_round = int(
+                        metadata.get("_tool_routing_expansion_round", 0)
+                    )
+                    dropped_tools = metadata.get("_tool_routing_dropped_tools", {})
+
+                    recovered = None
+                    if (
+                        expand_on_unknown
+                        and isinstance(dropped_tools, dict)
+                        and current_expansion_round < max_expansion_rounds
+                    ):
+                        recovered = select_expand_candidate(tool_function_name, dropped_tools)
+
+                    if recovered is not None:
+                        recovered_key, recovered_tool = recovered
+                        tools[recovered_key] = recovered_tool
+                        dropped_tools.pop(recovered_key, None)
+                        metadata["_tool_routing_expansion_round"] = (
+                            current_expansion_round + 1
+                        )
+                        metadata["_tool_routing_dropped_tools"] = dropped_tools
+                        tool_function_name = recovered_key
+                    else:
+                        error_payload = {
+                            "error": {
+                                "code": "unknown_tool",
+                                "tool": tool_function_name,
+                            }
+                        }
+                        sources.append(
+                            {
+                                "source": {
+                                    "name": f"unknown_tool/{tool_function_name}",
+                                },
+                                "document": [json.dumps(error_payload)],
+                                "metadata": [
+                                    {
+                                        "source": f"unknown_tool/{tool_function_name}",
+                                        "parameters": tool_call.get("parameters", {}),
+                                    }
+                                ],
+                                "tool_result": True,
+                            }
+                        )
+                        return body, {"sources": sources}
 
                 tool_function_params = tool_call.get("parameters", {})
 
@@ -2376,6 +2440,21 @@ async def process_chat_payload(request, form_data, user, metadata, model):
         # Client side tools
         direct_tool_servers = metadata.get("tool_servers", None)
 
+        if (
+            direct_tool_servers
+            and user.role != "admin"
+            and not has_permission(
+                user.id,
+                "features.direct_tool_servers",
+                request.app.state.config.USER_PERMISSIONS,
+            )
+        ):
+            log.warning(
+                "Ignoring direct_tool_servers from user %s due to missing permission",
+                user.id,
+            )
+            direct_tool_servers = []
+
         log.debug(f"{tool_ids=}")
         log.debug(f"{direct_tool_servers=}")
 
@@ -2555,6 +2634,125 @@ async def process_chat_payload(request, form_data, user, metadata, model):
                         "server": tool_server,
                     }
 
+        routing_cfg = build_tool_routing_config(request.app.state.config)
+        if tools_dict and routing_cfg.enable:
+            if not hasattr(request.app.state, "TOOL_ROUTING_MANIFEST_CACHE"):
+                request.app.state.TOOL_ROUTING_MANIFEST_CACHE = {}
+            if not hasattr(request.app.state, "TOOL_ROUTING_MANIFEST_VERSION"):
+                request.app.state.TOOL_ROUTING_MANIFEST_VERSION = 0
+            if not hasattr(request.app.state, "TOOL_ROUTING_LAST_SYNC_VERSION"):
+                request.app.state.TOOL_ROUTING_LAST_SYNC_VERSION = 0
+
+            marker = int(request.app.state.TOOL_ROUTING_MANIFEST_VERSION or 0)
+            if request.app.state.redis is not None:
+                try:
+                    redis_marker_raw = await request.app.state.redis.get(
+                        "tool_routing:manifest_version"
+                    )
+                    if redis_marker_raw is not None:
+                        marker = max(marker, int(redis_marker_raw))
+                except Exception as e:
+                    log.debug("Failed to read tool routing marker from Redis: %s", e)
+
+            request.app.state.TOOL_ROUTING_MANIFEST_VERSION = marker
+
+            manifests = build_tool_manifests(tools_dict=tools_dict, scope_id=user.id)
+            manifest_version = compute_manifest_version(manifests)
+
+            manifest_cache = request.app.state.TOOL_ROUTING_MANIFEST_CACHE
+            changed_keys = {
+                key
+                for key, manifest in manifests.items()
+                if manifest_cache.get(key) != manifest.fingerprint
+            }
+            removed_keys = [key for key in manifest_cache.keys() if key not in manifests]
+
+            force_reconcile = marker != int(request.app.state.TOOL_ROUTING_LAST_SYNC_VERSION)
+            upsert_keys = set(manifests.keys()) if force_reconcile else changed_keys
+            delete_ids = [get_manifest_id(scope_id=user.id, key=key) for key in removed_keys]
+
+            sync_status = {"status": "skipped", "upserted": 0, "deleted": 0}
+            if upsert_keys or delete_ids:
+                sync_status = await sync_manifest_index(
+                    manifests=manifests,
+                    embedding_function=request.app.state.EMBEDDING_FUNCTION,
+                    query_prefix=RAG_EMBEDDING_CONTENT_PREFIX,
+                    upsert_keys=upsert_keys,
+                    delete_ids=delete_ids,
+                )
+                if sync_status.get("status") == "ok":
+                    for key in upsert_keys:
+                        if key in manifests:
+                            manifest_cache[key] = manifests[key].fingerprint
+                    for key in removed_keys:
+                        manifest_cache.pop(key, None)
+
+            request.app.state.TOOL_ROUTING_LAST_SYNC_VERSION = marker
+
+            semantic_candidates, semantic_scores = await semantic_retrieve_candidates(
+                prompt=prompt or "",
+                manifests=manifests,
+                embedding_function=request.app.state.EMBEDDING_FUNCTION,
+                query_prefix=RAG_EMBEDDING_QUERY_PREFIX,
+                top_n=routing_cfg.semantic_top_n,
+            )
+
+            routing_decision = route_tools(
+                prompt=prompt or "",
+                tools_dict=tools_dict,
+                cfg=routing_cfg,
+                semantic_candidates=semantic_candidates,
+                semantic_scores=semantic_scores,
+            )
+
+            selected_set = set(routing_decision.selected_keys)
+            dropped_tools = {
+                key: tools_dict[key]
+                for key in routing_decision.dropped_keys
+                if key in tools_dict
+            }
+
+            tools_dict = {
+                key: tools_dict[key]
+                for key in routing_decision.selected_keys
+                if key in selected_set and key in tools_dict
+            }
+
+            metadata["tool_routing"] = {
+                "enabled": True,
+                "mode": routing_cfg.mode,
+                "detected_mode": routing_decision.mode,
+                "selected": list(routing_decision.selected_keys),
+                "dropped": list(routing_decision.dropped_keys),
+                "scores": routing_decision.scores,
+                "fallback_reason": routing_decision.fallback_reason,
+                "manifest_version": manifest_version,
+                "sync_status": sync_status.get("status"),
+                "semantic_hits": len(semantic_candidates),
+            }
+            metadata["_tool_routing_dropped_tools"] = dropped_tools
+            metadata["_tool_routing_expansion_round"] = 0
+
+            log.info(
+                "tool_routing enabled mode=%s selected=%s dropped=%s semantic_hits=%s sync=%s",
+                routing_decision.mode,
+                len(routing_decision.selected_keys),
+                len(routing_decision.dropped_keys),
+                len(semantic_candidates),
+                sync_status.get("status"),
+            )
+        elif tools_dict:
+            metadata["tool_routing"] = {
+                "enabled": False,
+                "selected": list(tools_dict.keys()),
+                "dropped": [],
+            }
+            metadata["_tool_routing_dropped_tools"] = {}
+            metadata["_tool_routing_expansion_round"] = 0
+        else:
+            metadata["_tool_routing_dropped_tools"] = {}
+            metadata["_tool_routing_expansion_round"] = 0
+
         if mcp_clients:
             metadata["mcp_clients"] = mcp_clients
 
@@ -2592,10 +2790,16 @@ async def process_chat_payload(request, form_data, user, metadata, model):
             if metadata.get("params", {}).get("function_calling") == "native":
                 # If the function calling is native, then call the tools function calling handler
                 metadata["tools"] = tools_dict
-                form_data["tools"] = [
-                    {"type": "function", "function": tool.get("spec", {})}
-                    for tool in tools_dict.values()
-                ]
+                if routing_cfg.enable:
+                    form_data["tools"] = materialize_native_tools(
+                        tools_dict,
+                        routing_cfg.max_schema_chars,
+                    )
+                else:
+                    form_data["tools"] = [
+                        {"type": "function", "function": tool.get("spec", {})}
+                        for tool in tools_dict.values()
+                    ]
 
         else:
             # If the function calling is not native, then call the tools function calling handler
@@ -4168,6 +4372,7 @@ async def streaming_chat_response_handler(response, ctx):
                         tool_args = tool_call.get("function", {}).get("arguments", "{}")
 
                         tool_function_params = {}
+                        parse_error_payload = None
                         try:
                             # json.loads cannot be used because some models do not produce valid JSON
                             tool_function_params = ast.literal_eval(tool_args)
@@ -4180,6 +4385,23 @@ async def streaming_chat_response_handler(response, ctx):
                                 log.error(
                                     f"Error parsing tool call arguments: {tool_args}"
                                 )
+                                parse_error_payload = {
+                                    "error": {
+                                        "code": "invalid_arguments",
+                                        "tool": tool_function_name,
+                                        "raw": str(tool_args),
+                                    }
+                                }
+
+                        if not isinstance(tool_function_params, dict):
+                            parse_error_payload = {
+                                "error": {
+                                    "code": "invalid_arguments",
+                                    "tool": tool_function_name,
+                                    "raw": str(tool_args),
+                                }
+                            }
+                            tool_function_params = {}
 
                         # Ensure arguments are valid JSON for downstream LLM integrations
                         log.debug(
@@ -4194,7 +4416,9 @@ async def streaming_chat_response_handler(response, ctx):
                         tool_type = None
                         direct_tool = False
 
-                        if tool_function_name in tools:
+                        if parse_error_payload is not None:
+                            tool_result = json.dumps(parse_error_payload)
+                        elif tool_function_name in tools:
                             tool = tools[tool_function_name]
                             spec = tool.get("spec", {})
 
@@ -4247,6 +4471,99 @@ async def streaming_chat_response_handler(response, ctx):
 
                             except Exception as e:
                                 tool_result = str(e)
+                        else:
+                            expand_on_unknown = bool(
+                                request.app.state.config.TOOL_ROUTING_EXPAND_ON_UNKNOWN
+                            )
+                            max_expansion_rounds = int(
+                                request.app.state.config.TOOL_ROUTING_MAX_EXPANSION_ROUNDS
+                            )
+
+                            current_expansion_round = int(
+                                metadata.get("_tool_routing_expansion_round", 0)
+                            )
+                            dropped_tools = metadata.get(
+                                "_tool_routing_dropped_tools", {}
+                            )
+
+                            recovered = None
+                            if (
+                                expand_on_unknown
+                                and isinstance(dropped_tools, dict)
+                                and current_expansion_round < max_expansion_rounds
+                            ):
+                                recovered = select_expand_candidate(
+                                    tool_function_name, dropped_tools
+                                )
+
+                            if recovered is not None:
+                                recovered_key, recovered_tool = recovered
+                                tool_function_name = recovered_key
+                                tools[recovered_key] = recovered_tool
+                                dropped_tools.pop(recovered_key, None)
+                                metadata["_tool_routing_expansion_round"] = (
+                                    current_expansion_round + 1
+                                )
+                                metadata["_tool_routing_dropped_tools"] = dropped_tools
+
+                                tool = recovered_tool
+                                tool_type = tool.get("type", "")
+                                direct_tool = tool.get("direct", False)
+
+                                try:
+                                    spec = tool.get("spec", {})
+                                    allowed_params = (
+                                        spec.get("parameters", {})
+                                        .get("properties", {})
+                                        .keys()
+                                    )
+
+                                    tool_function_params = {
+                                        k: v
+                                        for k, v in tool_function_params.items()
+                                        if k in allowed_params
+                                    }
+
+                                    if direct_tool:
+                                        tool_result = await event_caller(
+                                            {
+                                                "type": "execute:tool",
+                                                "data": {
+                                                    "id": str(uuid4()),
+                                                    "name": recovered_key,
+                                                    "params": tool_function_params,
+                                                    "server": tool.get("server", {}),
+                                                    "session_id": metadata.get(
+                                                        "session_id", None
+                                                    ),
+                                                },
+                                            }
+                                        )
+                                    else:
+                                        tool_function = get_updated_tool_function(
+                                            function=tool["callable"],
+                                            extra_params={
+                                                "__messages__": form_data.get(
+                                                    "messages", []
+                                                ),
+                                                "__files__": metadata.get("files", []),
+                                            },
+                                        )
+
+                                        tool_result = await tool_function(
+                                            **tool_function_params
+                                        )
+                                except Exception as e:
+                                    tool_result = str(e)
+                            else:
+                                tool_result = json.dumps(
+                                    {
+                                        "error": {
+                                            "code": "unknown_tool",
+                                            "tool": tool_function_name,
+                                        }
+                                    }
+                                )
 
                         tool_result, tool_result_files, tool_result_embeds = (
                             process_tool_result(

@@ -205,21 +205,24 @@ async def get_tools(
                 )
 
             for spec in tool.specs:
+                normalized_spec = copy.deepcopy(spec)
                 # TODO: Fix hack for OpenAI API
                 # Some times breaks OpenAI but others don't. Leaving the comment
-                for val in spec.get("parameters", {}).get("properties", {}).values():
+                for val in (
+                    normalized_spec.get("parameters", {}).get("properties", {}).values()
+                ):
                     if val.get("type") == "str":
                         val["type"] = "string"
 
                 # Remove internal reserved parameters (e.g. __id__, __user__)
-                spec["parameters"]["properties"] = {
+                normalized_spec["parameters"]["properties"] = {
                     key: val
-                    for key, val in spec["parameters"]["properties"].items()
+                    for key, val in normalized_spec["parameters"]["properties"].items()
                     if not key.startswith("__")
                 }
 
                 # convert to function that takes only model params and inserts custom params
-                function_name = spec["name"]
+                function_name = normalized_spec["name"]
                 tool_function = getattr(module, function_name)
                 callable = get_async_tool_function_and_apply_extra_params(
                     tool_function,
@@ -233,14 +236,14 @@ async def get_tools(
                 # TODO: Support Pydantic models as parameters
                 if callable.__doc__ and callable.__doc__.strip() != "":
                     s = re.split(":(param|return)", callable.__doc__, 1)
-                    spec["description"] = s[0]
+                    normalized_spec["description"] = s[0]
                 else:
-                    spec["description"] = function_name
+                    normalized_spec["description"] = function_name
 
                 tool_dict = {
                     "tool_id": tool_id,
                     "callable": callable,
-                    "spec": spec,
+                    "spec": normalized_spec,
                     # Misc info
                     "metadata": {
                         "file_handler": hasattr(module, "file_handler")
@@ -256,6 +259,8 @@ async def get_tools(
                     )
                     # Prepend tool ID to function name
                     function_name = f"{tool_id}_{function_name}"
+
+                normalized_spec["name"] = function_name
 
                 tools_dict[function_name] = tool_dict
         else:
@@ -311,7 +316,8 @@ async def get_tools(
                         function_name_filter_list = function_name_filter_list.split(",")
 
                     for spec in specs:
-                        function_name = spec["name"]
+                        normalized_spec = copy.deepcopy(spec)
+                        function_name = normalized_spec["name"]
                         if function_name_filter_list:
                             if not is_string_allowed(
                                 function_name, function_name_filter_list
@@ -391,7 +397,7 @@ async def get_tools(
                         tool_dict = {
                             "tool_id": tool_id,
                             "callable": callable,
-                            "spec": spec,
+                            "spec": normalized_spec,
                             # Misc info
                             "type": "external",
                         }
@@ -403,6 +409,8 @@ async def get_tools(
                             )
                             # Prepend server ID to function name
                             function_name = f"{server_id}_{function_name}"
+
+                        normalized_spec["name"] = function_name
 
                         tools_dict[function_name] = tool_dict
 

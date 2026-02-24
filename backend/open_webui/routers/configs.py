@@ -16,6 +16,7 @@ from open_webui.utils.tools import (
     get_tool_server_url,
     set_tool_servers,
 )
+from open_webui.utils.tool_routing import bump_tool_routing_manifest_marker
 from open_webui.utils.mcp.client import MCPClient
 from open_webui.models.oauth_sessions import OAuthSessions
 
@@ -187,6 +188,7 @@ async def set_tool_servers_config(
     ]
 
     await set_tool_servers(request)
+    await bump_tool_routing_manifest_marker(request)
 
     for connection in request.app.state.config.TOOL_SERVER_CONNECTIONS:
         server_type = connection.get("type", "openapi")

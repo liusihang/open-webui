@@ -2893,6 +2893,121 @@ ADAPTIVE_FILE_CONTEXT_MIGRATION_VERSION = PersistentConfig(
     ),
 )
 
+
+def _get_tool_routing_mode_patterns() -> dict:
+    raw = os.environ.get("TOOL_ROUTING_KEYWORD_FALLBACK_MODE_PATTERNS", "")
+    if not raw:
+        return {
+            "search": ["search", "find", "lookup", "query", "retrieve"],
+            "analyze": [
+                "analyze",
+                "analysis",
+                "inspect",
+                "debug",
+                "diagnose",
+            ],
+            "chat": [],
+        }
+
+    try:
+        parsed = json.loads(raw)
+        if isinstance(parsed, dict):
+            return parsed
+    except Exception:
+        pass
+
+    return {
+        "search": ["search", "find", "lookup", "query", "retrieve"],
+        "analyze": [
+            "analyze",
+            "analysis",
+            "inspect",
+            "debug",
+            "diagnose",
+        ],
+        "chat": [],
+    }
+
+
+TOOL_ROUTING_ENABLE = PersistentConfig(
+    "TOOL_ROUTING_ENABLE",
+    "tool_routing.enable",
+    os.environ.get("TOOL_ROUTING_ENABLE", "False").lower() == "true",
+)
+
+TOOL_ROUTING_MODE = PersistentConfig(
+    "TOOL_ROUTING_MODE",
+    "tool_routing.mode",
+    os.environ.get("TOOL_ROUTING_MODE", "hybrid"),
+)
+
+TOOL_ROUTING_SEMANTIC_TOP_N = PersistentConfig(
+    "TOOL_ROUTING_SEMANTIC_TOP_N",
+    "tool_routing.semantic_top_n",
+    int(os.environ.get("TOOL_ROUTING_SEMANTIC_TOP_N", "12")),
+)
+
+TOOL_ROUTING_FINAL_TOP_K = PersistentConfig(
+    "TOOL_ROUTING_FINAL_TOP_K",
+    "tool_routing.final_top_k",
+    int(os.environ.get("TOOL_ROUTING_FINAL_TOP_K", "6")),
+)
+
+TOOL_ROUTING_MIN_CONFIDENCE = PersistentConfig(
+    "TOOL_ROUTING_MIN_CONFIDENCE",
+    "tool_routing.min_confidence",
+    float(os.environ.get("TOOL_ROUTING_MIN_CONFIDENCE", "0.12")),
+)
+
+TOOL_ROUTING_LEXICAL_WEIGHT = PersistentConfig(
+    "TOOL_ROUTING_LEXICAL_WEIGHT",
+    "tool_routing.lexical_weight",
+    float(os.environ.get("TOOL_ROUTING_LEXICAL_WEIGHT", "0.7")),
+)
+
+TOOL_ROUTING_RULE_WEIGHT = PersistentConfig(
+    "TOOL_ROUTING_RULE_WEIGHT",
+    "tool_routing.rule_weight",
+    float(os.environ.get("TOOL_ROUTING_RULE_WEIGHT", "0.3")),
+)
+
+TOOL_ROUTING_MAX_INJECTED_TOOLS = PersistentConfig(
+    "TOOL_ROUTING_MAX_INJECTED_TOOLS",
+    "tool_routing.max_injected_tools",
+    int(os.environ.get("TOOL_ROUTING_MAX_INJECTED_TOOLS", "6")),
+)
+
+TOOL_ROUTING_MAX_SCHEMA_CHARS = PersistentConfig(
+    "TOOL_ROUTING_MAX_SCHEMA_CHARS",
+    "tool_routing.max_schema_chars",
+    int(os.environ.get("TOOL_ROUTING_MAX_SCHEMA_CHARS", "200000")),
+)
+
+TOOL_ROUTING_EXPAND_ON_UNKNOWN = PersistentConfig(
+    "TOOL_ROUTING_EXPAND_ON_UNKNOWN",
+    "tool_routing.expand_on_unknown",
+    os.environ.get("TOOL_ROUTING_EXPAND_ON_UNKNOWN", "True").lower() == "true",
+)
+
+TOOL_ROUTING_MAX_EXPANSION_ROUNDS = PersistentConfig(
+    "TOOL_ROUTING_MAX_EXPANSION_ROUNDS",
+    "tool_routing.max_expansion_rounds",
+    int(os.environ.get("TOOL_ROUTING_MAX_EXPANSION_ROUNDS", "1")),
+)
+
+TOOL_ROUTING_KEYWORD_FALLBACK_ENABLE = PersistentConfig(
+    "TOOL_ROUTING_KEYWORD_FALLBACK_ENABLE",
+    "tool_routing.keyword_fallback.enable",
+    os.environ.get("TOOL_ROUTING_KEYWORD_FALLBACK_ENABLE", "True").lower()
+    == "true",
+)
+
+TOOL_ROUTING_KEYWORD_FALLBACK_MODE_PATTERNS = PersistentConfig(
+    "TOOL_ROUTING_KEYWORD_FALLBACK_MODE_PATTERNS",
+    "tool_routing.keyword_fallback.mode_patterns",
+    _get_tool_routing_mode_patterns(),
+)
+
 FILE_IMAGE_COMPRESSION_WIDTH = PersistentConfig(
     "FILE_IMAGE_COMPRESSION_WIDTH",
     "file.image_compression_width",

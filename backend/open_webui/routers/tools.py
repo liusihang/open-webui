@@ -32,6 +32,7 @@ from open_webui.utils.tools import get_tool_specs
 from open_webui.utils.auth import get_admin_user, get_verified_user
 from open_webui.utils.access_control import has_access, has_permission
 from open_webui.utils.tools import get_tool_servers
+from open_webui.utils.tool_routing import bump_tool_routing_manifest_marker
 
 from open_webui.config import CACHE_DIR, BYPASS_ADMIN_ACCESS_CONTROL
 from open_webui.constants import ERROR_MESSAGES
@@ -398,6 +399,7 @@ async def create_new_tools(
             tool_cache_dir.mkdir(parents=True, exist_ok=True)
 
             if tools:
+                await bump_tool_routing_manifest_marker(request)
                 return tools
             else:
                 raise HTTPException(
@@ -522,6 +524,7 @@ async def update_tools_by_id(
         tools = Tools.update_tool_by_id(id, updated, db=db)
 
         if tools:
+            await bump_tool_routing_manifest_marker(request)
             return tools
         else:
             raise HTTPException(
@@ -640,6 +643,7 @@ async def delete_tools_by_id(
         TOOLS = request.app.state.TOOLS
         if id in TOOLS:
             del TOOLS[id]
+        await bump_tool_routing_manifest_marker(request)
 
     return result
 
