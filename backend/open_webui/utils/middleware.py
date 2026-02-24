@@ -2634,6 +2634,38 @@ async def process_chat_payload(request, form_data, user, metadata, model):
                         "server": tool_server,
                     }
 
+        if mcp_clients:
+            metadata["mcp_clients"] = mcp_clients
+
+        # Inject builtin tools before routing so builtin and user tools share the same pruning path.
+        builtin_tools_enabled = (
+            model.get("info", {}).get("meta", {}).get("capabilities") or {}
+        ).get("builtin_tools", True)
+        if (
+            metadata.get("params", {}).get("function_calling") == "native"
+            and builtin_tools_enabled
+        ):
+            # Add file context to user messages
+            chat_id = metadata.get("chat_id")
+            form_data["messages"] = add_file_context(
+                form_data.get("messages", []), chat_id, user
+            )
+            builtin_tools = get_builtin_tools(
+                request,
+                {
+                    **extra_params,
+                    "__event_emitter__": event_emitter,
+                    "__skill_ids__": [
+                        s.id for s in available_skills if s.id not in user_skill_ids
+                    ],
+                },
+                features,
+                model,
+            )
+            for name, tool_dict in builtin_tools.items():
+                if name not in tools_dict:
+                    tools_dict[name] = tool_dict
+
         routing_cfg = build_tool_routing_config(request.app.state.config)
         if tools_dict and routing_cfg.enable:
             if not hasattr(request.app.state, "TOOL_ROUTING_MANIFEST_CACHE"):
@@ -2772,39 +2804,6 @@ async def process_chat_payload(request, form_data, user, metadata, model):
         else:
             metadata["_tool_routing_dropped_tools"] = {}
             metadata["_tool_routing_expansion_round"] = 0
-
-        if mcp_clients:
-            metadata["mcp_clients"] = mcp_clients
-
-        # Inject builtin tools for native function calling based on enabled features and model capability
-        # Check if builtin_tools capability is enabled for this model (defaults to True if not specified)
-        builtin_tools_enabled = (
-            model.get("info", {}).get("meta", {}).get("capabilities") or {}
-        ).get("builtin_tools", True)
-        if (
-            metadata.get("params", {}).get("function_calling") == "native"
-            and builtin_tools_enabled
-        ):
-            # Add file context to user messages
-            chat_id = metadata.get("chat_id")
-            form_data["messages"] = add_file_context(
-                form_data.get("messages", []), chat_id, user
-            )
-            builtin_tools = get_builtin_tools(
-                request,
-                {
-                    **extra_params,
-                    "__event_emitter__": event_emitter,
-                    "__skill_ids__": [
-                        s.id for s in available_skills if s.id not in user_skill_ids
-                    ],
-                },
-                features,
-                model,
-            )
-            for name, tool_dict in builtin_tools.items():
-                if name not in tools_dict:
-                    tools_dict[name] = tool_dict
 
         if tools_dict:
             if metadata.get("params", {}).get("function_calling") == "native":
