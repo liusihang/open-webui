@@ -2983,6 +2983,42 @@ TOOL_ROUTING_MAX_SCHEMA_CHARS = PersistentConfig(
     int(os.environ.get("TOOL_ROUTING_MAX_SCHEMA_CHARS", "200000")),
 )
 
+TOOL_ROUTING_BM25_WEIGHT = PersistentConfig(
+    "TOOL_ROUTING_BM25_WEIGHT",
+    "tool_routing.bm25_weight",
+    float(os.environ.get("TOOL_ROUTING_BM25_WEIGHT", "0.45")),
+)
+
+TOOL_ROUTING_INTENT_QUERY_ENABLE = PersistentConfig(
+    "TOOL_ROUTING_INTENT_QUERY_ENABLE",
+    "tool_routing.intent_query.enable",
+    os.environ.get("TOOL_ROUTING_INTENT_QUERY_ENABLE", "True").lower() == "true",
+)
+
+TOOL_ROUTING_INTENT_MAX_CLAUSES = PersistentConfig(
+    "TOOL_ROUTING_INTENT_MAX_CLAUSES",
+    "tool_routing.intent_query.max_clauses",
+    int(os.environ.get("TOOL_ROUTING_INTENT_MAX_CLAUSES", "2")),
+)
+
+TOOL_ROUTING_INTENT_MAX_CHARS = PersistentConfig(
+    "TOOL_ROUTING_INTENT_MAX_CHARS",
+    "tool_routing.intent_query.max_chars",
+    int(os.environ.get("TOOL_ROUTING_INTENT_MAX_CHARS", "256")),
+)
+
+TOOL_ROUTING_CHAT_FLOOR_ENABLE = PersistentConfig(
+    "TOOL_ROUTING_CHAT_FLOOR_ENABLE",
+    "tool_routing.chat_floor.enable",
+    os.environ.get("TOOL_ROUTING_CHAT_FLOOR_ENABLE", "True").lower() == "true",
+)
+
+TOOL_ROUTING_CHAT_FLOOR_MIN_KEEP = PersistentConfig(
+    "TOOL_ROUTING_CHAT_FLOOR_MIN_KEEP",
+    "tool_routing.chat_floor.min_keep",
+    int(os.environ.get("TOOL_ROUTING_CHAT_FLOOR_MIN_KEEP", "1")),
+)
+
 TOOL_ROUTING_EXPAND_ON_UNKNOWN = PersistentConfig(
     "TOOL_ROUTING_EXPAND_ON_UNKNOWN",
     "tool_routing.expand_on_unknown",

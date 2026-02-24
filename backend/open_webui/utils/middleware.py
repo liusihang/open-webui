@@ -120,6 +120,7 @@ from open_webui.utils.tool_routing import (
     build_tool_routing_config,
     build_tool_manifests,
     compute_manifest_version,
+    extract_tool_intent_query,
     get_manifest_id,
     route_tools,
     semantic_retrieve_candidates,
@@ -2740,8 +2741,13 @@ async def process_chat_payload(request, form_data, user, metadata, model):
 
             request.app.state.TOOL_ROUTING_LAST_SYNC_VERSION = marker
 
+            routing_query, clause_debug = extract_tool_intent_query(
+                prompt or "",
+                tools_dict,
+                routing_cfg,
+            )
             semantic_candidates, semantic_scores = await semantic_retrieve_candidates(
-                prompt=prompt or "",
+                prompt=routing_query,
                 manifests=manifests,
                 embedding_function=request.app.state.EMBEDDING_FUNCTION,
                 query_prefix=RAG_EMBEDDING_QUERY_PREFIX,
@@ -2755,6 +2761,8 @@ async def process_chat_payload(request, form_data, user, metadata, model):
                 cfg=routing_cfg,
                 semantic_candidates=semantic_candidates,
                 semantic_scores=semantic_scores,
+                routing_query=routing_query,
+                clause_debug=clause_debug,
             )
 
             selected_set = set(routing_decision.selected_keys)
@@ -2777,6 +2785,9 @@ async def process_chat_payload(request, form_data, user, metadata, model):
                 "selected": list(routing_decision.selected_keys),
                 "dropped": list(routing_decision.dropped_keys),
                 "scores": routing_decision.scores,
+                "score_breakdown": routing_decision.score_breakdown,
+                "routing_query": routing_decision.routing_query,
+                "clause_debug": routing_decision.clause_debug,
                 "fallback_reason": routing_decision.fallback_reason,
                 "manifest_version": manifest_version,
                 "sync_status": sync_status.get("status"),

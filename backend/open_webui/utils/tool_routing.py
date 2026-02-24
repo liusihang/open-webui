@@ -1,8 +1,10 @@
 import hashlib
 import json
 import logging
+import math
 import re
 import time
+from collections import Counter
 from dataclasses import dataclass
 from typing import Any
 
@@ -24,6 +26,12 @@ class ToolRoutingConfig:
     rule_weight: float
     max_injected_tools: int
     max_schema_chars: int
+    bm25_weight: float
+    intent_query_enable: bool
+    intent_max_clauses: int
+    intent_max_chars: int
+    chat_floor_enable: bool
+    chat_floor_min_keep: int
     keyword_fallback_enable: bool
     mode_patterns: dict[str, list[str]]
 
@@ -33,8 +41,11 @@ class ToolRoutingDecision:
     selected_keys: list[str]
     dropped_keys: list[str]
     scores: dict[str, float]
+    score_breakdown: dict[str, dict[str, float]]
     mode: str
     fallback_reason: str | None
+    routing_query: str
+    clause_debug: dict[str, Any]
 
 
 @dataclass
@@ -100,6 +111,36 @@ def build_tool_routing_config(app_config: Any) -> ToolRoutingConfig:
         max_schema_chars=_clamp_int(
             app_config.TOOL_ROUTING_MAX_SCHEMA_CHARS, 200000, 2000, 2000000
         ),
+        bm25_weight=_clamp_float(
+            getattr(app_config, "TOOL_ROUTING_BM25_WEIGHT", 0.45),
+            0.45,
+            0.0,
+            1.0,
+        ),
+        intent_query_enable=bool(
+            getattr(app_config, "TOOL_ROUTING_INTENT_QUERY_ENABLE", True)
+        ),
+        intent_max_clauses=_clamp_int(
+            getattr(app_config, "TOOL_ROUTING_INTENT_MAX_CLAUSES", 2),
+            2,
+            1,
+            6,
+        ),
+        intent_max_chars=_clamp_int(
+            getattr(app_config, "TOOL_ROUTING_INTENT_MAX_CHARS", 256),
+            256,
+            64,
+            2048,
+        ),
+        chat_floor_enable=bool(
+            getattr(app_config, "TOOL_ROUTING_CHAT_FLOOR_ENABLE", True)
+        ),
+        chat_floor_min_keep=_clamp_int(
+            getattr(app_config, "TOOL_ROUTING_CHAT_FLOOR_MIN_KEEP", 1),
+            1,
+            1,
+            5,
+        ),
         keyword_fallback_enable=bool(app_config.TOOL_ROUTING_KEYWORD_FALLBACK_ENABLE),
         mode_patterns=mode_patterns,
     )
@@ -130,12 +171,278 @@ def _sanitize_metadata_text(value: Any) -> str:
 
 
 def _tokenize(value: str) -> set[str]:
+    return set(_tokenize_terms(value))
+
+
+def _tokenize_terms(value: str) -> list[str]:
     if not value:
-        return set()
-    return {
+        return []
+
+    text = value.lower()
+    tokens = [
         token
-        for token in re.findall(r"[\w\-]+", value.lower())
+        for token in re.findall(r"[a-z0-9_]+(?:-[a-z0-9_]+)?", text)
         if len(token) > 1
+    ]
+
+    for chunk in re.findall(r"[\u3400-\u9fff]+", text):
+        if len(chunk) == 1:
+            tokens.append(chunk)
+        else:
+            tokens.extend(chunk[idx : idx + 2] for idx in range(0, len(chunk) - 1))
+
+    return tokens
+
+
+def _squash_whitespace(value: Any) -> str:
+    return re.sub(r"\s+", " ", str(value or "")).strip()
+
+
+def _truncate_query(value: str, max_chars: int) -> str:
+    if max_chars <= 0:
+        return _squash_whitespace(value)
+    text = _squash_whitespace(value)
+    if len(text) <= max_chars:
+        return text
+    return text[:max_chars].rstrip()
+
+
+def _compute_bm25_scores(
+    query_terms: list[str],
+    docs: dict[str, list[str]],
+    *,
+    k1: float = 1.2,
+    b: float = 0.75,
+) -> dict[str, float]:
+    if not docs:
+        return {}
+
+    normalized_default = {key: 0.0 for key in docs.keys()}
+    filtered_query_terms = [term for term in query_terms if term]
+    if not filtered_query_terms:
+        return normalized_default
+
+    doc_keys = sorted(docs.keys())
+    total_docs = len(doc_keys)
+    avg_doc_len = (
+        sum(max(1, len(docs[key])) for key in doc_keys) / max(1, total_docs)
+    ) or 1.0
+
+    query_term_set = set(filtered_query_terms)
+    doc_freq: dict[str, int] = {term: 0 for term in query_term_set}
+    doc_counters: dict[str, Counter[str]] = {}
+    doc_lengths: dict[str, int] = {}
+
+    for key in doc_keys:
+        terms = docs.get(key, [])
+        counter = Counter(terms)
+        doc_counters[key] = counter
+        doc_lengths[key] = max(1, len(terms))
+        for term in query_term_set:
+            if counter.get(term, 0) > 0:
+                doc_freq[term] += 1
+
+    raw_scores: dict[str, float] = {}
+    for key in doc_keys:
+        score = 0.0
+        counter = doc_counters[key]
+        doc_len = doc_lengths[key]
+        norm = k1 * (1 - b + b * (doc_len / avg_doc_len))
+
+        for term in filtered_query_terms:
+            term_freq = counter.get(term, 0)
+            if term_freq <= 0:
+                continue
+            df = doc_freq.get(term, 0)
+            idf = math.log(((total_docs - df + 0.5) / (df + 0.5)) + 1.0)
+            score += idf * ((term_freq * (k1 + 1.0)) / (term_freq + norm))
+
+        raw_scores[key] = score
+
+    if not raw_scores:
+        return normalized_default
+
+    min_score = min(raw_scores.values())
+    max_score = max(raw_scores.values())
+    if max_score <= min_score:
+        return normalized_default
+
+    span = max_score - min_score
+    return {
+        key: round((value - min_score) / span, 6) for key, value in raw_scores.items()
+    }
+
+
+def extract_tool_intent_query(
+    prompt: str,
+    tools_dict: dict[str, dict[str, Any]],
+    cfg: ToolRoutingConfig,
+) -> tuple[str, dict[str, Any]]:
+    raw_prompt = _squash_whitespace(prompt)
+    if not raw_prompt:
+        return "", {"enabled": bool(cfg.intent_query_enable), "reason": "empty_prompt"}
+
+    fallback_query = _truncate_query(raw_prompt, cfg.intent_max_chars)
+    if not cfg.intent_query_enable:
+        return fallback_query, {
+            "enabled": False,
+            "reason": "disabled",
+            "selected_clauses": [],
+            "clauses": [],
+        }
+
+    clause_candidates = [
+        _squash_whitespace(chunk)
+        for chunk in re.split(r"[\n\r]+|[。！？!?；;]+|[,，]+", raw_prompt)
+    ]
+    clauses = [clause for clause in clause_candidates if clause]
+    if not clauses:
+        return fallback_query, {
+            "enabled": True,
+            "reason": "no_clauses",
+            "selected_clauses": [],
+            "clauses": [],
+        }
+
+    explicit_patterns: set[str] = set()
+    for key, entry in tools_dict.items():
+        explicit_patterns.add(_normalize_text(key))
+        spec = entry.get("spec", {})
+        if isinstance(spec, dict):
+            explicit_patterns.add(_normalize_text(spec.get("name", "")))
+
+    explicit_patterns = {pattern for pattern in explicit_patterns if pattern}
+
+    mode_patterns = {
+        mode: [
+            _normalize_text(pattern)
+            for pattern in cfg.mode_patterns.get(mode, [])
+            if _normalize_text(pattern)
+        ]
+        for mode in ("search", "analyze", "chat")
+    }
+
+    action_patterns = [
+        "search",
+        "find",
+        "lookup",
+        "query",
+        "retrieve",
+        "inspect",
+        "debug",
+        "summarize",
+        "analyze",
+        "analysis",
+        "diagnose",
+        "use tool",
+        "调用",
+        "工具",
+        "搜索",
+        "查询",
+        "检索",
+        "分析",
+        "排查",
+        "调试",
+        "总结",
+        "提取",
+        "读取",
+        "查看",
+        "帮我",
+    ]
+    noise_patterns = [
+        "背景",
+        "上下文",
+        "补充",
+        "顺便",
+        "另外",
+        "之前",
+        "假设",
+        "for reference",
+        "background",
+        "context",
+    ]
+
+    scored_clauses: list[dict[str, Any]] = []
+    clause_count = len(clauses)
+    for idx, clause in enumerate(clauses):
+        normalized_clause = _normalize_text(clause)
+        if not normalized_clause:
+            continue
+
+        explicit_hits = sum(
+            1 for pattern in explicit_patterns if pattern in normalized_clause
+        )
+        action_hits = sum(
+            1 for pattern in action_patterns if pattern in normalized_clause
+        )
+        mode_hits = 0
+        for patterns in mode_patterns.values():
+            mode_hits += sum(1 for pattern in patterns if pattern in normalized_clause)
+        noise_hits = sum(1 for pattern in noise_patterns if pattern in normalized_clause)
+
+        score = 0.0
+        if explicit_hits:
+            score += 3.0 + min(1.5, 0.5 * max(0, explicit_hits - 1))
+        if action_hits:
+            score += min(2.0, 0.7 * action_hits)
+        if mode_hits:
+            score += min(1.2, 0.4 * mode_hits)
+        if len(normalized_clause) > 120:
+            score -= 1.0
+        if noise_hits:
+            score -= min(1.5, 0.5 * noise_hits)
+
+        tail_boost = (idx / max(1, clause_count - 1)) * 0.2
+        score += tail_boost
+
+        scored_clauses.append(
+            {
+                "index": idx,
+                "clause": clause,
+                "score": round(score, 6),
+                "signals": {
+                    "explicit_hits": explicit_hits,
+                    "action_hits": action_hits,
+                    "mode_hits": mode_hits,
+                    "noise_hits": noise_hits,
+                    "tail_boost": round(tail_boost, 6),
+                },
+            }
+        )
+
+    ranked = sorted(scored_clauses, key=lambda item: (-item["score"], item["index"]))
+    selected = [
+        clause
+        for clause in ranked
+        if clause["score"] > 0
+        and (
+            clause["signals"].get("explicit_hits", 0) > 0
+            or clause["signals"].get("action_hits", 0) > 0
+            or clause["signals"].get("mode_hits", 0) > 0
+        )
+    ][: cfg.intent_max_clauses]
+
+    if not selected:
+        return fallback_query, {
+            "enabled": True,
+            "reason": "score_below_threshold",
+            "selected_clauses": [],
+            "clauses": scored_clauses,
+        }
+
+    selected_by_order = sorted(selected, key=lambda item: item["index"])
+    routing_query = _truncate_query(
+        " ".join(item["clause"] for item in selected_by_order),
+        cfg.intent_max_chars,
+    )
+    if not routing_query:
+        routing_query = fallback_query
+
+    return routing_query, {
+        "enabled": True,
+        "reason": "ok",
+        "selected_clauses": selected_by_order,
+        "clauses": scored_clauses,
     }
 
 
@@ -395,13 +702,27 @@ def route_tools(
     *,
     semantic_candidates: list[str] | None = None,
     semantic_scores: dict[str, float] | None = None,
+    routing_query: str | None = None,
+    clause_debug: dict[str, Any] | None = None,
 ) -> ToolRoutingDecision:
     if not tools_dict:
-        return ToolRoutingDecision([], [], {}, "chat", "no_candidates")
+        return ToolRoutingDecision(
+            [],
+            [],
+            {},
+            {},
+            "chat",
+            "no_candidates",
+            _truncate_query(routing_query or prompt, cfg.intent_max_chars),
+            clause_debug or {},
+        )
 
     mode = _detect_mode(prompt, cfg) if cfg.mode == "hybrid" else cfg.mode
+    routing_query_text = _truncate_query(routing_query or prompt, cfg.intent_max_chars)
     prompt_normalized = _normalize_text(prompt)
-    prompt_tokens = _tokenize(prompt_normalized)
+    scoring_normalized = _normalize_text(routing_query_text)
+    scoring_tokens = _tokenize(scoring_normalized)
+    scoring_terms = _tokenize_terms(scoring_normalized)
 
     key_set = set(tools_dict.keys())
     candidate_keys = sorted(key_set)
@@ -421,6 +742,21 @@ def route_tools(
     semantic_scores = semantic_scores or {}
     scored: list[tuple[str, float]] = []
     scores: dict[str, float] = {}
+    score_breakdown: dict[str, dict[str, float]] = {}
+    candidate_terms_map: dict[str, list[str]] = {}
+    candidate_token_map: dict[str, set[str]] = {}
+
+    for key in candidate_keys:
+        entry = tools_dict[key]
+        spec = entry.get("spec", {})
+        if not isinstance(spec, dict):
+            continue
+        candidate_text = _build_candidate_text(spec)
+        terms = _tokenize_terms(candidate_text)
+        candidate_terms_map[key] = terms
+        candidate_token_map[key] = set(terms)
+
+    bm25_scores = _compute_bm25_scores(scoring_terms, candidate_terms_map)
 
     for key in candidate_keys:
         entry = tools_dict[key]
@@ -429,13 +765,17 @@ def route_tools(
             continue
 
         candidate_text = _build_candidate_text(spec)
-        candidate_tokens = _tokenize(candidate_text)
+        candidate_tokens = candidate_token_map.get(key, set())
 
-        lexical_score = 0.0
-        if prompt_tokens and candidate_tokens:
-            lexical_score = len(prompt_tokens.intersection(candidate_tokens)) / max(
-                1, len(prompt_tokens)
+        lexical_overlap = 0.0
+        if scoring_tokens and candidate_tokens:
+            lexical_overlap = len(scoring_tokens.intersection(candidate_tokens)) / max(
+                1, len(scoring_tokens)
             )
+        bm25_score = bm25_scores.get(key, 0.0)
+        lexical_mix = ((1.0 - cfg.bm25_weight) * lexical_overlap) + (
+            cfg.bm25_weight * bm25_score
+        )
 
         explicit_boost = 0.0
         name = _normalize_text(spec.get("name", ""))
@@ -454,15 +794,24 @@ def route_tools(
         ):
             mode_boost += 0.1
 
-        semantic_score = semantic_scores.get(key, lexical_score)
+        semantic_score = semantic_scores.get(key, lexical_mix)
         combined_score = (
             (semantic_score * (1.0 - cfg.lexical_weight))
-            + (lexical_score * cfg.lexical_weight)
+            + (lexical_mix * cfg.lexical_weight)
             + (explicit_boost * cfg.rule_weight)
             + mode_boost
         )
 
         scores[key] = round(combined_score, 6)
+        score_breakdown[key] = {
+            "semantic": round(semantic_score, 6),
+            "lexical_overlap": round(lexical_overlap, 6),
+            "bm25": round(bm25_score, 6),
+            "lexical_mix": round(lexical_mix, 6),
+            "explicit_boost": round(explicit_boost, 6),
+            "mode_boost": round(mode_boost, 6),
+            "combined": round(combined_score, 6),
+        }
         scored.append((key, combined_score))
 
     scored.sort(key=lambda item: (-item[1], item[0]))
@@ -476,8 +825,15 @@ def route_tools(
     if not selected and mode in ("search", "analyze") and scored:
         selected = [scored[0][0]]
         fallback_reason = "keyword_mode_floor"
+    elif not selected and mode == "chat" and cfg.chat_floor_enable and scored:
+        keep_count = max(
+            1,
+            min(cfg.chat_floor_min_keep, final_cap, len(scored)),
+        )
+        selected = [key for key, _ in scored[:keep_count]]
+        fallback_reason = "chat_mode_floor"
 
-    if mode == "chat" and selected:
+    if mode == "chat" and selected and fallback_reason != "chat_mode_floor":
         explicit_selected = [key for key in selected if key in explicit_keys]
         if not explicit_selected:
             selected = selected[:1]
@@ -485,7 +841,16 @@ def route_tools(
 
     selected_set = set(selected)
     dropped = [key for key, _ in scored if key not in selected_set]
-    return ToolRoutingDecision(selected, dropped, scores, mode, fallback_reason)
+    return ToolRoutingDecision(
+        selected,
+        dropped,
+        scores,
+        score_breakdown,
+        mode,
+        fallback_reason,
+        routing_query_text,
+        clause_debug or {},
+    )
 
 
 def materialize_native_tools(
