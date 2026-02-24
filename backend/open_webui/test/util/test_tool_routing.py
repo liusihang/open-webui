@@ -365,3 +365,41 @@ def test_materialize_native_tools_preserves_ranked_order():
     result = mod.materialize_native_tools(tools, max_schema_chars=payload_size)
 
     assert [item["function"]["name"] for item in result] == ["z_top"]
+
+
+def test_sync_manifest_index_upserts_dict_items_for_vector_backends():
+    mod = _load_module()
+    manifests = mod.build_tool_manifests(_tools(), scope_id="u1")
+
+    class FakeVectorClient:
+        def __init__(self):
+            self.upsert_args = None
+
+        def upsert(self, collection_name, items):
+            self.upsert_args = {"collection_name": collection_name, "items": items}
+
+        def delete(self, collection_name, ids):
+            return None
+
+    async def fake_embedding(texts, prefix=None):
+        assert isinstance(texts, list)
+        return [[0.1, 0.2, 0.3] for _ in texts]
+
+    client = FakeVectorClient()
+    result = asyncio.run(
+        mod.sync_manifest_index(
+            manifests=manifests,
+            embedding_function=fake_embedding,
+            query_prefix="",
+            vector_client=client,
+            upsert_keys={"search_web"},
+        )
+    )
+
+    assert result["status"] == "ok"
+    assert result["upserted"] == 1
+    assert client.upsert_args is not None
+    assert client.upsert_args["collection_name"] == mod.TOOL_ROUTING_COLLECTION
+    assert isinstance(client.upsert_args["items"][0], dict)
+    assert "id" in client.upsert_args["items"][0]
+    assert "vector" in client.upsert_args["items"][0]

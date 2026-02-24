@@ -282,15 +282,15 @@ async def sync_manifest_index(
         if not isinstance(embeddings, list) or len(embeddings) != len(to_upsert):
             return {"upserted": 0, "deleted": 0, "status": "embedding_failed"}
 
-        from open_webui.retrieval.vector.main import VectorItem
-
+        # Vector DB backends in this codebase operate on dict payloads
+        # (item["id"], item["vector"], ...). Keep this format for compatibility.
         vector_items = [
-            VectorItem(
-                id=manifest.manifest_id,
-                text=manifest.text,
-                vector=embedding,
-                metadata=manifest.metadata,
-            )
+            {
+                "id": manifest.manifest_id,
+                "text": manifest.text,
+                "vector": embedding,
+                "metadata": manifest.metadata,
+            }
             for manifest, embedding in zip(to_upsert, embeddings)
         ]
         vector_client.upsert(collection_name=collection_name, items=vector_items)
