@@ -17,6 +17,7 @@
 	import KatexRenderer from './KatexRenderer.svelte';
 	import AlertRenderer, { alertComponent } from './AlertRenderer.svelte';
 	import Collapsible from '$lib/components/common/Collapsible.svelte';
+	import SequentialThinkingTimeline from '$lib/components/common/SequentialThinkingTimeline.svelte';
 	import ToolCallDisplay from '$lib/components/common/ToolCallDisplay.svelte';
 	import Tooltip from '$lib/components/common/Tooltip.svelte';
 	import Download from '$lib/components/icons/Download.svelte';
@@ -50,6 +51,195 @@
 	const headerComponent = (depth: number) => {
 		return 'h' + depth;
 	};
+
+	type ToolCallTokenAttributes = {
+		type?: string;
+		id?: string;
+		name?: string;
+		arguments?: string;
+		result?: string;
+		done?: string;
+	};
+
+	type SequentialThinkingEntry = {
+		callId?: string;
+		toolName?: string;
+		thoughtNumber?: number | null;
+		totalThoughts?: number | null;
+		thought?: string;
+		nextThoughtNeeded?: boolean | null;
+		branchId?: string | null;
+		branchFromThought?: number | null;
+		isRevision?: boolean;
+		revisesThought?: number | null;
+		thoughtHistoryLength?: number | null;
+		rawArguments?: string;
+		rawResult?: string;
+		parsedArguments?: unknown;
+		parsedResult?: unknown;
+	};
+
+	type RenderItem =
+		| {
+				type: 'token';
+				token: Token;
+		  }
+		| {
+				type: 'sequentialthinking_group';
+				entries: SequentialThinkingEntry[];
+		  };
+
+	const SEQUENTIAL_THINKING_NAME_REGEX = /sequential[\s_-]*thinking|sequentialthinking/i;
+
+	function parseNestedJson(value: unknown): unknown {
+		let parsed = value;
+		let iteration = 0;
+
+		while (typeof parsed === 'string' && iteration < 6) {
+			const trimmed = parsed.trim();
+			if (!trimmed) {
+				return '';
+			}
+
+			try {
+				parsed = JSON.parse(trimmed);
+				iteration += 1;
+			} catch {
+				break;
+			}
+		}
+
+		return parsed;
+	}
+
+	function toObject(value: unknown): Record<string, unknown> | null {
+		if (value && typeof value === 'object' && !Array.isArray(value)) {
+			return value as Record<string, unknown>;
+		}
+		return null;
+	}
+
+	function toNumber(value: unknown): number | null {
+		if (typeof value === 'number' && Number.isFinite(value)) {
+			return value;
+		}
+		if (typeof value === 'string' && value.trim() !== '') {
+			const parsed = Number(value);
+			return Number.isFinite(parsed) ? parsed : null;
+		}
+		return null;
+	}
+
+	function toBoolean(value: unknown): boolean | null {
+		if (typeof value === 'boolean') {
+			return value;
+		}
+		if (typeof value === 'string') {
+			const normalized = value.trim().toLowerCase();
+			if (normalized === 'true') {
+				return true;
+			}
+			if (normalized === 'false') {
+				return false;
+			}
+		}
+		return null;
+	}
+
+	function getSequentialThinkingEntry(token: Token): SequentialThinkingEntry | null {
+		const detailsToken = token as Token & { attributes?: ToolCallTokenAttributes };
+		const tokenAttributes = detailsToken?.attributes;
+
+		if (detailsToken?.type !== 'details' || tokenAttributes?.type !== 'tool_calls') {
+			return null;
+		}
+
+		const toolName = tokenAttributes?.name ?? '';
+		if (!SEQUENTIAL_THINKING_NAME_REGEX.test(toolName)) {
+			return null;
+		}
+
+		const rawArguments = decode(tokenAttributes?.arguments ?? '');
+		const rawResult = decode(tokenAttributes?.result ?? '');
+		const parsedArguments = parseNestedJson(rawArguments);
+		const parsedResult = parseNestedJson(rawResult);
+
+		const argumentObject = toObject(parsedArguments);
+		const resultObject = toObject(parsedResult);
+
+		const thoughtNumber = toNumber(argumentObject?.thoughtNumber ?? resultObject?.thoughtNumber);
+		const totalThoughts = toNumber(argumentObject?.totalThoughts ?? resultObject?.totalThoughts);
+		const nextThoughtNeeded = toBoolean(
+			argumentObject?.nextThoughtNeeded ?? resultObject?.nextThoughtNeeded
+		);
+		const branchFromThought = toNumber(argumentObject?.branchFromThought);
+		const revisesThought = toNumber(argumentObject?.revisesThought);
+		const thoughtHistoryLength = toNumber(resultObject?.thoughtHistoryLength);
+		const thought = typeof argumentObject?.thought === 'string' ? argumentObject.thought : '';
+		const branchId =
+			typeof argumentObject?.branchId === 'string' && argumentObject.branchId.trim()
+				? argumentObject.branchId
+				: null;
+
+		return {
+			callId: tokenAttributes?.id,
+			toolName,
+			thoughtNumber,
+			totalThoughts,
+			thought,
+			nextThoughtNeeded,
+			branchId,
+			branchFromThought,
+			isRevision: toBoolean(argumentObject?.isRevision) === true,
+			revisesThought,
+			thoughtHistoryLength,
+			rawArguments,
+			rawResult,
+			parsedArguments,
+			parsedResult
+		};
+	}
+
+	function getRenderItems(tokenList: Token[] = []): RenderItem[] {
+		const items: RenderItem[] = [];
+		let idx = 0;
+
+		while (idx < tokenList.length) {
+			const token = tokenList[idx];
+			const firstEntry = getSequentialThinkingEntry(token);
+
+			if (!firstEntry) {
+				items.push({ type: 'token', token });
+				idx += 1;
+				continue;
+			}
+
+			const entries: SequentialThinkingEntry[] = [firstEntry];
+			const groupBranchId = firstEntry.branchId;
+			idx += 1;
+
+			while (idx < tokenList.length) {
+				const nextEntry = getSequentialThinkingEntry(tokenList[idx]);
+				if (!nextEntry) {
+					break;
+				}
+
+				// Keep branch-specific traces grouped separately to avoid mixing parallel branches.
+				if (groupBranchId && nextEntry.branchId && groupBranchId !== nextEntry.branchId) {
+					break;
+				}
+
+				entries.push(nextEntry);
+				idx += 1;
+			}
+
+			items.push({ type: 'sequentialthinking_group', entries });
+		}
+
+		return items;
+	}
+
+	$: renderItems = getRenderItems(tokens ?? []);
 
 	const exportTableToCSVHandler = (token, tokenIdx = 0) => {
 		console.log('Exporting table to CSV');
@@ -91,10 +281,18 @@
 </script>
 
 <!-- {JSON.stringify(tokens)} -->
-{#each tokens as token, tokenIdx (tokenIdx)}
-	{#if token.type === 'hr'}
+{#each renderItems as item, tokenIdx (tokenIdx)}
+	{#if item.type === 'sequentialthinking_group'}
+		<SequentialThinkingTimeline
+			id={`${id}-${tokenIdx}-st`}
+			entries={item.entries}
+			className="w-full my-1"
+		/>
+	{:else}
+		{@const token = item.token}
+		{#if token.type === 'hr'}
 		<hr class=" border-gray-100/30 dark:border-gray-850/30" />
-	{:else if token.type === 'heading'}
+		{:else if token.type === 'heading'}
 		<svelte:element this={headerComponent(token.depth)} dir="auto">
 			<MarkdownInlineTokens
 				id={`${id}-${tokenIdx}-h`}
@@ -104,7 +302,7 @@
 				{onSourceClick}
 			/>
 		</svelte:element>
-	{:else if token.type === 'code'}
+		{:else if token.type === 'code'}
 		{#if token.raw.includes('```')}
 			<CodeBlock
 				id={`${id}-${tokenIdx}`}
@@ -130,7 +328,7 @@
 		{:else}
 			{token.text}
 		{/if}
-	{:else if token.type === 'table'}
+		{:else if token.type === 'table'}
 		<div class="relative w-full group mb-2">
 			<div class="scrollbar-hidden relative overflow-x-auto max-w-full">
 				<table
@@ -217,7 +415,7 @@
 				</Tooltip>
 			</div>
 		</div>
-	{:else if token.type === 'blockquote'}
+		{:else if token.type === 'blockquote'}
 		{@const alert = alertComponent(token)}
 		{#if alert}
 			<AlertRenderer {token} {alert} />
@@ -234,7 +432,7 @@
 				/>
 			</blockquote>
 		{/if}
-	{:else if token.type === 'list'}
+		{:else if token.type === 'list'}
 		{#if token.ordered}
 			<ol start={token.start || 1} dir="auto">
 				{#each token.items as item, itemIdx}
@@ -319,7 +517,7 @@
 				{/each}
 			</ul>
 		{/if}
-	{:else if token.type === 'details'}
+		{:else if token.type === 'details'}
 		{@const textContent = decode(token.text || '')
 			.replace(/<summary>.*?<\/summary>/gi, '')
 			.trim()}
@@ -375,9 +573,9 @@
 				dir="auto"
 			/>
 		{/if}
-	{:else if token.type === 'html'}
+		{:else if token.type === 'html'}
 		<HtmlToken {id} {token} {onSourceClick} />
-	{:else if token.type === 'iframe'}
+		{:else if token.type === 'iframe'}
 		<iframe
 			src="{WEBUI_BASE_URL}/api/v1/files/{token.fileId}/content"
 			title={token.fileId}
@@ -390,7 +588,7 @@
 				} catch {}
 			}}
 		></iframe>
-	{:else if token.type === 'paragraph'}
+		{:else if token.type === 'paragraph'}
 		{#if paragraphTag == 'span'}
 			<span dir="auto">
 				<MarkdownInlineTokens
@@ -412,7 +610,7 @@
 				/>
 			</p>
 		{/if}
-	{:else if token.type === 'text'}
+		{:else if token.type === 'text'}
 		{#if top}
 			<p>
 				{#if token.tokens}
@@ -438,18 +636,19 @@
 		{:else}
 			{unescapeHtml(token.text)}
 		{/if}
-	{:else if token.type === 'inlineKatex'}
+		{:else if token.type === 'inlineKatex'}
 		{#if token.text}
 			<KatexRenderer content={token.text} displayMode={token?.displayMode ?? false} />
 		{/if}
-	{:else if token.type === 'blockKatex'}
+		{:else if token.type === 'blockKatex'}
 		{#if token.text}
 			<KatexRenderer content={token.text} displayMode={token?.displayMode ?? false} />
 		{/if}
-	{:else if token.type === 'space'}
-		<div class="my-2" />
-	{:else}
+			{:else if token.type === 'space'}
+			<div class="my-2"></div>
+		{:else}
 		{console.log('Unknown token', token)}
+		{/if}
 	{/if}
 {/each}
 
