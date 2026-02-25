@@ -41,6 +41,26 @@
 
 	let banners: Banner[] = [];
 
+	const withMemoryConfigDefaults = (config) => {
+		if (!config) return config;
+
+		return {
+			...config,
+			MEMORY_RETRIEVAL_MODE: config.MEMORY_RETRIEVAL_MODE ?? 'balanced',
+			MEMORY_RETRIEVAL_QUERY_K: config.MEMORY_RETRIEVAL_QUERY_K ?? 8,
+			MEMORY_NEED_STRONG_THRESHOLD: config.MEMORY_NEED_STRONG_THRESHOLD ?? 0.7,
+			MEMORY_NEED_SOFT_THRESHOLD: config.MEMORY_NEED_SOFT_THRESHOLD ?? 0.45,
+			MEMORY_MIN_TOP1_SIMILARITY: config.MEMORY_MIN_TOP1_SIMILARITY ?? 0.35,
+			MEMORY_INJECTION_STRONG_TOP_N: config.MEMORY_INJECTION_STRONG_TOP_N ?? 2,
+			MEMORY_INJECTION_SOFT_TOP_N: config.MEMORY_INJECTION_SOFT_TOP_N ?? 1,
+			MEMORY_MAX_CONTEXT_CHARS: config.MEMORY_MAX_CONTEXT_CHARS ?? 1400,
+			MEMORY_NEED_INTENT_WEIGHT: config.MEMORY_NEED_INTENT_WEIGHT ?? 0.45,
+			MEMORY_NEED_RELEVANCE_WEIGHT: config.MEMORY_NEED_RELEVANCE_WEIGHT ?? 0.45,
+			MEMORY_NEED_CONTINUITY_WEIGHT: config.MEMORY_NEED_CONTINUITY_WEIGHT ?? 0.1,
+			MEMORY_STATELESS_PENALTY: config.MEMORY_STATELESS_PENALTY ?? 0.15
+		};
+	};
+
 	// LDAP
 	let ENABLE_LDAP = false;
 	let LDAP_SERVER = {
@@ -112,7 +132,7 @@
 
 		await Promise.all([
 			(async () => {
-				adminConfig = await getAdminConfig(localStorage.token);
+				adminConfig = withMemoryConfigDefaults(await getAdminConfig(localStorage.token));
 			})(),
 
 			(async () => {
@@ -764,6 +784,164 @@
 
 						<Switch bind:state={adminConfig.ENABLE_MEMORIES} />
 					</div>
+
+					{#if adminConfig.ENABLE_MEMORIES}
+						<div class="mb-2.5 w-full justify-between">
+							<div class="flex w-full justify-between">
+								<div class=" self-center text-xs font-medium">
+									{$i18n.t('Memory Retrieval Mode')}
+								</div>
+							</div>
+
+							<div class="flex mt-2 space-x-2">
+								<select
+									class="dark:bg-gray-900 rounded-lg px-3 py-2 text-sm bg-gray-50 dark:text-gray-300 dark:bg-gray-850 outline-hidden"
+									bind:value={adminConfig.MEMORY_RETRIEVAL_MODE}
+								>
+									<option value="aggressive">{$i18n.t('Aggressive')}</option>
+									<option value="balanced">{$i18n.t('Balanced')}</option>
+									<option value="conservative">{$i18n.t('Conservative')}</option>
+								</select>
+							</div>
+
+							<div class="mt-2 text-xs text-gray-400 dark:text-gray-500">
+								{$i18n.t(
+									'Aggressive injects memory more often, balanced is default, conservative injects only with stronger confidence.'
+								)}
+							</div>
+						</div>
+
+						<div class="mb-2.5 grid grid-cols-1 md:grid-cols-2 gap-2">
+							<div class="w-full">
+								<div class="text-xs font-medium">{$i18n.t('Memory Query Top K')}</div>
+								<input
+									class="w-full mt-2 rounded-lg py-2 px-4 text-sm bg-gray-50 dark:text-gray-300 dark:bg-gray-850 outline-hidden"
+									type="number"
+									min="1"
+									step="1"
+									bind:value={adminConfig.MEMORY_RETRIEVAL_QUERY_K}
+								/>
+							</div>
+
+							<div class="w-full">
+								<div class="text-xs font-medium">{$i18n.t('Strong Injection Top N')}</div>
+								<input
+									class="w-full mt-2 rounded-lg py-2 px-4 text-sm bg-gray-50 dark:text-gray-300 dark:bg-gray-850 outline-hidden"
+									type="number"
+									min="1"
+									step="1"
+									bind:value={adminConfig.MEMORY_INJECTION_STRONG_TOP_N}
+								/>
+							</div>
+
+							<div class="w-full">
+								<div class="text-xs font-medium">{$i18n.t('Soft Injection Top N')}</div>
+								<input
+									class="w-full mt-2 rounded-lg py-2 px-4 text-sm bg-gray-50 dark:text-gray-300 dark:bg-gray-850 outline-hidden"
+									type="number"
+									min="1"
+									step="1"
+									bind:value={adminConfig.MEMORY_INJECTION_SOFT_TOP_N}
+								/>
+							</div>
+
+							<div class="w-full">
+								<div class="text-xs font-medium">{$i18n.t('Max Memory Context Chars')}</div>
+								<input
+									class="w-full mt-2 rounded-lg py-2 px-4 text-sm bg-gray-50 dark:text-gray-300 dark:bg-gray-850 outline-hidden"
+									type="number"
+									min="300"
+									step="10"
+									bind:value={adminConfig.MEMORY_MAX_CONTEXT_CHARS}
+								/>
+							</div>
+						</div>
+
+						<div class="mb-2.5 grid grid-cols-1 md:grid-cols-2 gap-2">
+							<div class="w-full">
+								<div class="text-xs font-medium">{$i18n.t('Strong Threshold (0-1)')}</div>
+								<input
+									class="w-full mt-2 rounded-lg py-2 px-4 text-sm bg-gray-50 dark:text-gray-300 dark:bg-gray-850 outline-hidden"
+									type="number"
+									min="0"
+									max="1"
+									step="0.01"
+									bind:value={adminConfig.MEMORY_NEED_STRONG_THRESHOLD}
+								/>
+							</div>
+
+							<div class="w-full">
+								<div class="text-xs font-medium">{$i18n.t('Soft Threshold (0-1)')}</div>
+								<input
+									class="w-full mt-2 rounded-lg py-2 px-4 text-sm bg-gray-50 dark:text-gray-300 dark:bg-gray-850 outline-hidden"
+									type="number"
+									min="0"
+									max="1"
+									step="0.01"
+									bind:value={adminConfig.MEMORY_NEED_SOFT_THRESHOLD}
+								/>
+							</div>
+
+							<div class="w-full">
+								<div class="text-xs font-medium">{$i18n.t('Minimum Top-1 Similarity (0-1)')}</div>
+								<input
+									class="w-full mt-2 rounded-lg py-2 px-4 text-sm bg-gray-50 dark:text-gray-300 dark:bg-gray-850 outline-hidden"
+									type="number"
+									min="0"
+									max="1"
+									step="0.01"
+									bind:value={adminConfig.MEMORY_MIN_TOP1_SIMILARITY}
+								/>
+							</div>
+
+							<div class="w-full">
+								<div class="text-xs font-medium">{$i18n.t('Stateless Penalty (0-1)')}</div>
+								<input
+									class="w-full mt-2 rounded-lg py-2 px-4 text-sm bg-gray-50 dark:text-gray-300 dark:bg-gray-850 outline-hidden"
+									type="number"
+									min="0"
+									max="1"
+									step="0.01"
+									bind:value={adminConfig.MEMORY_STATELESS_PENALTY}
+								/>
+							</div>
+						</div>
+
+						<div class="mb-2.5 grid grid-cols-1 md:grid-cols-3 gap-2">
+							<div class="w-full">
+								<div class="text-xs font-medium">{$i18n.t('Intent Weight')}</div>
+								<input
+									class="w-full mt-2 rounded-lg py-2 px-4 text-sm bg-gray-50 dark:text-gray-300 dark:bg-gray-850 outline-hidden"
+									type="number"
+									min="0"
+									step="0.01"
+									bind:value={adminConfig.MEMORY_NEED_INTENT_WEIGHT}
+								/>
+							</div>
+
+							<div class="w-full">
+								<div class="text-xs font-medium">{$i18n.t('Relevance Weight')}</div>
+								<input
+									class="w-full mt-2 rounded-lg py-2 px-4 text-sm bg-gray-50 dark:text-gray-300 dark:bg-gray-850 outline-hidden"
+									type="number"
+									min="0"
+									step="0.01"
+									bind:value={adminConfig.MEMORY_NEED_RELEVANCE_WEIGHT}
+								/>
+							</div>
+
+							<div class="w-full">
+								<div class="text-xs font-medium">{$i18n.t('Continuity Weight')}</div>
+								<input
+									class="w-full mt-2 rounded-lg py-2 px-4 text-sm bg-gray-50 dark:text-gray-300 dark:bg-gray-850 outline-hidden"
+									type="number"
+									min="0"
+									step="0.01"
+									bind:value={adminConfig.MEMORY_NEED_CONTINUITY_WEIGHT}
+								/>
+							</div>
+						</div>
+					{/if}
 
 					<div class="mb-2.5 flex w-full items-center justify-between pr-2">
 						<div class=" self-center text-xs font-medium">
