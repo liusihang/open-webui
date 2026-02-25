@@ -45,6 +45,18 @@
 		typeof lastEntry?.thoughtNumber === 'number' && typeof lastEntry?.totalThoughts === 'number'
 			? Math.min(100, Math.max(0, (lastEntry.thoughtNumber / lastEntry.totalThoughts) * 100))
 			: 0;
+	$: nextThoughtLabel =
+		lastEntry?.nextThoughtNeeded === true
+			? 'true'
+			: lastEntry?.nextThoughtNeeded === false
+				? 'false'
+				: 'unknown';
+	$: nextThoughtToneClass =
+		lastEntry?.nextThoughtNeeded === true
+			? 'bg-sky-100 text-sky-700 dark:bg-sky-900/40 dark:text-sky-300'
+			: lastEntry?.nextThoughtNeeded === false
+				? 'bg-emerald-100 text-emerald-700 dark:bg-emerald-900/40 dark:text-emerald-300'
+				: 'bg-gray-100 text-gray-600 dark:bg-gray-850 dark:text-gray-300';
 
 	$: if (!initialized) {
 		open = isInProgress;
@@ -231,30 +243,39 @@ ${result}
 					{/each}
 				</div>
 
-				<div class="mt-2 flex items-center gap-2 text-xs text-gray-500 dark:text-gray-400">
-					{#if typeof lastEntry?.thoughtHistoryLength === 'number'}
-						<span>History: {lastEntry.thoughtHistoryLength}</span>
-					{/if}
-					<span>
-						nextThoughtNeeded: {lastEntry?.nextThoughtNeeded ? 'true' : 'false'}
-					</span>
-				</div>
+				<div
+					class="mt-2 rounded-lg border border-gray-200/70 bg-white/70 dark:border-gray-800/70 dark:bg-gray-900/45"
+				>
+					<div class="flex flex-wrap items-center justify-between gap-2 px-2.5 py-2">
+						<div class="flex flex-wrap items-center gap-1.5 text-[11px]">
+							{#if typeof lastEntry?.thoughtHistoryLength === 'number'}
+								<span
+									class="inline-flex items-center rounded-md bg-gray-100 px-1.5 py-0.5 text-gray-600 dark:bg-gray-850 dark:text-gray-300"
+								>
+									History: {lastEntry.thoughtHistoryLength}
+								</span>
+							{/if}
 
-				<div class="mt-2">
-					<button
-						type="button"
-						class="text-xs text-gray-500 underline-offset-2 hover:underline dark:text-gray-400"
-						on:click={() => {
-							showRaw = !showRaw;
-						}}
-					>
-						{showRaw ? 'Hide raw payload' : 'Show raw payload'}
-					</button>
+							<span class="inline-flex items-center rounded-md px-1.5 py-0.5 {nextThoughtToneClass}">
+								nextThoughtNeeded: {nextThoughtLabel}
+							</span>
+						</div>
+
+						<button
+							type="button"
+							class="inline-flex items-center rounded-md border border-gray-200/80 bg-gray-50/70 px-2 py-1 text-xs text-gray-600 transition hover:bg-gray-100/80 dark:border-gray-800/70 dark:bg-gray-900/60 dark:text-gray-300 dark:hover:bg-gray-800/70"
+							on:click={() => {
+								showRaw = !showRaw;
+							}}
+						>
+							{showRaw ? 'Hide raw payload' : 'Show raw payload'}
+						</button>
+					</div>
 				</div>
 
 				{#if showRaw}
 					<div
-						class="mt-2 rounded-lg border border-gray-200/70 bg-gray-50/70 px-2.5 py-2 dark:border-gray-800/70 dark:bg-gray-900/35"
+						class="mt-1 rounded-lg border border-gray-200/70 bg-gray-50/70 px-2.5 py-2 dark:border-gray-800/70 dark:bg-gray-900/35"
 					>
 						{#each entries as entry, idx (`raw-${entry.callId ?? idx}`)}
 							<div class={idx === 0 ? '' : 'mt-3'}>
