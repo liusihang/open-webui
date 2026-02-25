@@ -16,6 +16,7 @@
 		totalThoughts?: number | null;
 		thought?: string;
 		nextThoughtNeeded?: boolean | null;
+		isDone?: boolean | null;
 		branchId?: string | null;
 		branchFromThought?: number | null;
 		isRevision?: boolean;
@@ -29,6 +30,7 @@
 
 	export let id: string = '';
 	export let entries: SequentialThinkingEntry[] = [];
+	export let hasFollowingSequentialEntry = false;
 	export let className = '';
 
 	let open = false;
@@ -40,7 +42,11 @@
 	$: firstEntry = entries?.[0];
 	$: lastEntry = entries?.[entries.length - 1];
 	$: stepCount = entries?.length ?? 0;
-	$: isInProgress = Boolean(lastEntry?.nextThoughtNeeded);
+	$: lastEntryDone = lastEntry?.isDone ?? null;
+	$: isInProgress =
+		!hasFollowingSequentialEntry &&
+		(lastEntryDone === false ||
+			(lastEntryDone === null && Boolean(lastEntry?.nextThoughtNeeded)));
 	$: progressPercent =
 		typeof lastEntry?.thoughtNumber === 'number' && typeof lastEntry?.totalThoughts === 'number'
 			? Math.min(100, Math.max(0, (lastEntry.thoughtNumber / lastEntry.totalThoughts) * 100))

@@ -68,6 +68,7 @@
 		totalThoughts?: number | null;
 		thought?: string;
 		nextThoughtNeeded?: boolean | null;
+		isDone?: boolean | null;
 		branchId?: string | null;
 		branchFromThought?: number | null;
 		isRevision?: boolean;
@@ -87,6 +88,7 @@
 		| {
 				type: 'sequentialthinking_group';
 				entries: SequentialThinkingEntry[];
+				hasFollowingSequentialEntry: boolean;
 		  };
 
 	const SEQUENTIAL_THINKING_NAME_REGEX = /sequential[\s_-]*thinking|sequentialthinking/i;
@@ -172,6 +174,7 @@
 		const nextThoughtNeeded = toBoolean(
 			argumentObject?.nextThoughtNeeded ?? resultObject?.nextThoughtNeeded
 		);
+		const isDone = toBoolean(tokenAttributes?.done);
 		const branchFromThought = toNumber(argumentObject?.branchFromThought);
 		const revisesThought = toNumber(argumentObject?.revisesThought);
 		const thoughtHistoryLength = toNumber(resultObject?.thoughtHistoryLength);
@@ -188,6 +191,7 @@
 			totalThoughts,
 			thought,
 			nextThoughtNeeded,
+			isDone,
 			branchId,
 			branchFromThought,
 			isRevision: toBoolean(argumentObject?.isRevision) === true,
@@ -233,7 +237,11 @@
 				idx += 1;
 			}
 
-			items.push({ type: 'sequentialthinking_group', entries });
+			const hasFollowingSequentialEntry = tokenList
+				.slice(idx)
+				.some((candidate) => Boolean(getSequentialThinkingEntry(candidate)));
+
+			items.push({ type: 'sequentialthinking_group', entries, hasFollowingSequentialEntry });
 		}
 
 		return items;
@@ -286,6 +294,7 @@
 		<SequentialThinkingTimeline
 			id={`${id}-${tokenIdx}-st`}
 			entries={item.entries}
+			hasFollowingSequentialEntry={item.hasFollowingSequentialEntry}
 			className="w-full my-1"
 		/>
 	{:else}
