@@ -1933,18 +1933,157 @@ def _normalize_attachment_content_type(value) -> str:
         value = next((item for item in value if isinstance(item, str)), None)
     if not isinstance(value, str):
         return ""
-    return value.strip().lower().split(";")[0]
+
+    normalized = value.strip().lower()
+    if not normalized:
+        return ""
+
+    # Handle serialized list-like values such as ["image/jpeg"].
+    if normalized.startswith("[") and normalized.endswith("]"):
+        inner_items = re.findall(r"([a-z0-9.+-]+/[a-z0-9.+-]+)", normalized)
+        if inner_items:
+            return inner_items[0]
+
+    mime_match = re.search(r"([a-z0-9.+-]+/[a-z0-9.+-]+)", normalized)
+    if mime_match:
+        return mime_match.group(1)
+
+    return normalized.split(";")[0]
+
+
+def _extract_attachment_content_type(item: dict) -> str:
+    if not isinstance(item, dict):
+        return ""
+
+    candidates = [
+        item.get("content_type"),
+        item.get("mime_type"),
+        item.get("mimeType"),
+    ]
+
+    meta = item.get("meta")
+    if isinstance(meta, dict):
+        candidates.extend(
+            [
+                meta.get("content_type"),
+                meta.get("mime_type"),
+                meta.get("mimeType"),
+            ]
+        )
+
+    file_obj = item.get("file")
+    if isinstance(file_obj, dict):
+        candidates.extend(
+            [
+                file_obj.get("content_type"),
+                file_obj.get("mime_type"),
+                file_obj.get("mimeType"),
+            ]
+        )
+
+    for candidate in candidates:
+        normalized = _normalize_attachment_content_type(candidate)
+        if normalized:
+            return normalized
+
+    return ""
+
+
+def _extract_attachment_name(item: dict) -> str:
+    if not isinstance(item, dict):
+        return ""
+
+    for key in ("name", "filename"):
+        value = item.get(key)
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+
+    meta = item.get("meta")
+    if isinstance(meta, dict):
+        for key in ("name", "filename"):
+            value = meta.get(key)
+            if isinstance(value, str) and value.strip():
+                return value.strip()
+
+    file_obj = item.get("file")
+    if isinstance(file_obj, dict):
+        for key in ("name", "filename"):
+            value = file_obj.get(key)
+            if isinstance(value, str) and value.strip():
+                return value.strip()
+
+    return ""
+
+
+def _looks_like_image_path(value: str) -> bool:
+    if not isinstance(value, str) or not value:
+        return False
+
+    stripped = value.strip().lower()
+    if stripped.startswith("data:image/"):
+        return True
+
+    path = stripped.split("?", 1)[0].split("#", 1)[0]
+    return path.endswith(
+        (
+            ".png",
+            ".jpg",
+            ".jpeg",
+            ".webp",
+            ".gif",
+            ".bmp",
+            ".tif",
+            ".tiff",
+            ".heic",
+            ".heif",
+            ".avif",
+            ".svg",
+            ".ico",
+        )
+    )
+
+
+def _get_image_urls_from_message_content(content: Any) -> set[str]:
+    if not isinstance(content, list):
+        return set()
+
+    urls: set[str] = set()
+    for part in content:
+        if not isinstance(part, dict):
+            continue
+        if part.get("type") != "image_url":
+            continue
+        image_url = part.get("image_url")
+        if isinstance(image_url, dict):
+            url = image_url.get("url")
+        else:
+            url = image_url
+        if isinstance(url, str) and url.strip():
+            urls.add(url.strip())
+
+    return urls
 
 
 def _is_image_attachment(item: dict) -> bool:
     if not isinstance(item, dict):
         return False
 
-    if str(item.get("type", "")).lower() == "image":
+    if str(item.get("type", "")).lower() in {"image", "image_url", "input_image"}:
         return True
 
-    content_type = _normalize_attachment_content_type(item.get("content_type"))
-    return content_type.startswith("image/")
+    content_type = _extract_attachment_content_type(item)
+    if content_type.startswith("image/"):
+        return True
+
+    attachment_name = _extract_attachment_name(item)
+    if _looks_like_image_path(attachment_name):
+        return True
+
+    url = item.get("url")
+    if isinstance(url, str) and _looks_like_image_path(url):
+        return True
+
+    return False
 
 
 def get_image_urls(delta_images, request, metadata, user) -> list[str]:
@@ -1993,11 +2132,13 @@ def add_file_context(messages: list, chat_id: str, user) -> list:
         return f"<file {attrs}/>"
 
     for message, stored_message in zip(messages, stored_messages):
+        image_urls = _get_image_urls_from_message_content(message.get("content"))
         files_with_urls = [
             file
             for file in stored_message.get("files", [])
             if file.get("url")
             and not file.get("url").startswith("data:")
+            and str(file.get("url")) not in image_urls
             and not _is_image_attachment(file)
         ]
         if not files_with_urls:
