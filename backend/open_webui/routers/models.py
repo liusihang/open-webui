@@ -4,6 +4,13 @@ import base64
 import json
 import asyncio
 import logging
+import hashlib
+import mimetypes
+import ipaddress
+import socket
+from pathlib import Path
+from urllib.parse import urlparse
+from uuid import uuid4
 
 from open_webui.models.groups import Groups
 from open_webui.models.models import (
@@ -30,11 +37,12 @@ from fastapi import (
     Response,
 )
 from fastapi.responses import FileResponse, StreamingResponse
+import requests
 
 
 from open_webui.utils.auth import get_admin_user, get_verified_user
 from open_webui.utils.access_control import has_permission
-from open_webui.config import BYPASS_ADMIN_ACCESS_CONTROL, STATIC_DIR
+from open_webui.config import BYPASS_ADMIN_ACCESS_CONTROL, STATIC_DIR, CACHE_DIR
 from open_webui.internal.db import get_session
 from sqlalchemy.orm import Session
 
@@ -48,6 +56,8 @@ def is_valid_model_id(model_id: str) -> bool:
 
 
 _UNSET = object()
+MODEL_ICON_CACHE_DIR = CACHE_DIR / "models" / "icons"
+MAX_MODEL_ICON_CACHE_SIZE_BYTES = 5 * 1024 * 1024
 
 
 def _deep_merge_dict(base: dict, patch: dict) -> dict:
@@ -64,6 +74,123 @@ def _deep_merge_dict(base: dict, patch: dict) -> dict:
             merged[key] = value
 
     return merged
+
+
+def _guess_image_extension(content_type: Optional[str], image_url: str) -> str:
+    if content_type:
+        normalized = content_type.split(";")[0].strip().lower()
+        ext = mimetypes.guess_extension(normalized)
+        if ext:
+            return ext
+        if normalized == "image/svg+xml":
+            return ".svg"
+
+    path_suffix = Path(urlparse(image_url).path).suffix.lower()
+    if path_suffix and path_suffix.replace(".", "").isalnum():
+        return path_suffix
+
+    return ".img"
+
+
+def _is_safe_remote_icon_url(image_url: str) -> bool:
+    try:
+        parsed = urlparse(image_url)
+        if parsed.scheme not in {"http", "https"} or not parsed.hostname:
+            return False
+
+        host = parsed.hostname.lower()
+        if host == "localhost":
+            return False
+
+        try:
+            ip = ipaddress.ip_address(host)
+            if (
+                ip.is_private
+                or ip.is_loopback
+                or ip.is_link_local
+                or ip.is_reserved
+                or ip.is_multicast
+            ):
+                return False
+            return True
+        except ValueError:
+            pass
+
+        resolved = socket.getaddrinfo(parsed.hostname, None)
+        for entry in resolved:
+            ip = ipaddress.ip_address(entry[4][0])
+            if (
+                ip.is_private
+                or ip.is_loopback
+                or ip.is_link_local
+                or ip.is_reserved
+                or ip.is_multicast
+            ):
+                return False
+        return True
+    except Exception:
+        return False
+
+
+def _get_cached_model_icon_path(cache_key: str) -> Optional[Path]:
+    for file_path in MODEL_ICON_CACHE_DIR.glob(f"{cache_key}.*"):
+        if file_path.suffix == ".tmp":
+            continue
+        if file_path.is_file() and file_path.stat().st_size > 0:
+            return file_path
+    return None
+
+
+def _cache_remote_model_icon(model_id: str, image_url: str) -> Optional[Path]:
+    if not _is_safe_remote_icon_url(image_url):
+        return None
+
+    cache_key = hashlib.sha256(f"{model_id}:{image_url}".encode("utf-8")).hexdigest()
+
+    MODEL_ICON_CACHE_DIR.mkdir(parents=True, exist_ok=True)
+    cached_path = _get_cached_model_icon_path(cache_key)
+    if cached_path:
+        return cached_path
+
+    temp_path: Optional[Path] = None
+    try:
+        with requests.get(image_url, timeout=(5, 15), stream=True) as response:
+            if response.status_code != 200:
+                return None
+
+            content_type = response.headers.get("Content-Type", "")
+            media_type = content_type.split(";")[0].strip().lower()
+            if not media_type.startswith("image/"):
+                return None
+
+            extension = _guess_image_extension(content_type, image_url)
+            target_path = MODEL_ICON_CACHE_DIR / f"{cache_key}{extension}"
+            temp_path = MODEL_ICON_CACHE_DIR / f"{cache_key}.{uuid4().hex}.tmp"
+
+            total_size = 0
+            with open(temp_path, "wb") as file_handle:
+                for chunk in response.iter_content(chunk_size=8192):
+                    if not chunk:
+                        continue
+                    total_size += len(chunk)
+                    if total_size > MAX_MODEL_ICON_CACHE_SIZE_BYTES:
+                        raise ValueError("Model icon exceeds max cache size")
+                    file_handle.write(chunk)
+
+            if total_size == 0:
+                return None
+
+            temp_path.replace(target_path)
+            return target_path
+    except Exception as e:
+        log.debug(f"Failed to cache model icon ({model_id}): {e}")
+        return None
+    finally:
+        if temp_path and temp_path.exists():
+            try:
+                temp_path.unlink()
+            except Exception:
+                pass
 
 
 def _get_model_with_write_access(
@@ -539,6 +666,15 @@ def get_model_profile_image(id: str, user=Depends(get_verified_user)):
 
         if model.meta.profile_image_url:
             if model.meta.profile_image_url.startswith("http"):
+                cached_icon_path = _cache_remote_model_icon(
+                    model.id, model.meta.profile_image_url
+                )
+                if cached_icon_path:
+                    headers = {"Content-Disposition": "inline"}
+                    if etag:
+                        headers["ETag"] = etag
+                    return FileResponse(cached_icon_path, headers=headers)
+
                 return Response(
                     status_code=status.HTTP_302_FOUND,
                     headers={"Location": model.meta.profile_image_url},
