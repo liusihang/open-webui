@@ -71,8 +71,26 @@ def _get_model_with_write_access(
     user,
     db: Session,
     not_found_status_code: int = status.HTTP_401_UNAUTHORIZED,
+    create_if_missing_for_admin: bool = False,
 ) -> ModelModel:
     model = Models.get_model_by_id(model_id, db=db)
+    if not model and create_if_missing_for_admin and user.role == "admin":
+        model = Models.insert_new_model(
+            ModelForm(
+                id=model_id,
+                name=model_id,
+                meta=ModelMeta(),
+                params=ModelParams(),
+            ),
+            user.id,
+            db=db,
+        )
+        if not model:
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail=ERROR_MESSAGES.DEFAULT("Error creating model entry"),
+            )
+
     if not model:
         raise HTTPException(
             status_code=not_found_status_code,
@@ -627,7 +645,9 @@ async def patch_model_meta_by_id(
     user=Depends(get_verified_user),
     db: Session = Depends(get_session),
 ):
-    model = _get_model_with_write_access(form_data.id, user, db)
+    model = _get_model_with_write_access(
+        form_data.id, user, db, create_if_missing_for_admin=True
+    )
     return _update_model_partial(model, meta_patch=form_data.meta, db=db)
 
 
@@ -642,7 +662,9 @@ async def patch_model_params_by_id(
     user=Depends(get_verified_user),
     db: Session = Depends(get_session),
 ):
-    model = _get_model_with_write_access(form_data.id, user, db)
+    model = _get_model_with_write_access(
+        form_data.id, user, db, create_if_missing_for_admin=True
+    )
     return _update_model_partial(model, params_patch=form_data.params, db=db)
 
 
@@ -657,7 +679,9 @@ async def update_model_icon_by_id(
     user=Depends(get_verified_user),
     db: Session = Depends(get_session),
 ):
-    model = _get_model_with_write_access(form_data.id, user, db)
+    model = _get_model_with_write_access(
+        form_data.id, user, db, create_if_missing_for_admin=True
+    )
 
     profile_image_url = (form_data.profile_image_url or "").strip()
     if not profile_image_url:
@@ -681,7 +705,9 @@ async def update_model_system_prompt_by_id(
     user=Depends(get_verified_user),
     db: Session = Depends(get_session),
 ):
-    model = _get_model_with_write_access(form_data.id, user, db)
+    model = _get_model_with_write_access(
+        form_data.id, user, db, create_if_missing_for_admin=True
+    )
 
     system_prompt = (form_data.system or "").strip()
     params_patch = {"system": system_prompt} if system_prompt else {"system": None}
@@ -701,7 +727,9 @@ async def update_model_suggestion_prompts_by_id(
     user=Depends(get_verified_user),
     db: Session = Depends(get_session),
 ):
-    model = _get_model_with_write_access(form_data.id, user, db)
+    model = _get_model_with_write_access(
+        form_data.id, user, db, create_if_missing_for_admin=True
+    )
     return _update_model_partial(
         model,
         meta_patch={"suggestion_prompts": form_data.suggestion_prompts},
@@ -720,7 +748,9 @@ async def update_model_capabilities_by_id(
     user=Depends(get_verified_user),
     db: Session = Depends(get_session),
 ):
-    model = _get_model_with_write_access(form_data.id, user, db)
+    model = _get_model_with_write_access(
+        form_data.id, user, db, create_if_missing_for_admin=True
+    )
     return _update_model_partial(
         model,
         meta_patch={"capabilities": form_data.capabilities},
@@ -739,7 +769,9 @@ async def update_model_active_by_id(
     user=Depends(get_verified_user),
     db: Session = Depends(get_session),
 ):
-    model = _get_model_with_write_access(form_data.id, user, db)
+    model = _get_model_with_write_access(
+        form_data.id, user, db, create_if_missing_for_admin=True
+    )
     return _update_model_partial(model, is_active=form_data.is_active, db=db)
 
 
