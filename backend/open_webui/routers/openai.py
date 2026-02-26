@@ -1351,9 +1351,19 @@ async def generate_chat_completion(
     if prefix_id:
         payload["model"] = payload["model"].replace(f"{prefix_id}.", "")
 
-    if _normalize_bool_config_flag(api_config.get("cliproxy_api", False)):
+    cliproxy_api_enabled = _normalize_bool_config_flag(api_config.get("cliproxy_api", False))
+    api_type = str(api_config.get("api_type") or "").lower()
+
+    # Normalize local Open WebUI image references (UUID/path) into data URLs for
+    # all upstream modes, not only cliproxy.
+    payload = _inline_cliproxy_image_urls_in_payload(payload, metadata, user)
+
+    if cliproxy_api_enabled:
         payload = _inject_cliproxy_files_into_payload(payload, metadata, user)
-        payload = _inline_cliproxy_image_urls_in_payload(payload, metadata, user)
+    elif api_type == "responses":
+        # Responses API can consume input_file items after conversion, so reuse
+        # the same file-part builder for non-cliproxy providers.
+        payload = _inject_cliproxy_files_into_payload(payload, metadata, user)
 
     # Add user info to the payload if the model is a pipeline
     if "pipeline" in model and model.get("pipeline"):
@@ -1390,7 +1400,7 @@ async def generate_chat_completion(
         request, url, key, api_config, metadata, user=user
     )
 
-    is_responses = api_config.get("api_type") == "responses"
+    is_responses = api_type == "responses"
 
     if api_config.get("azure", False):
         api_version = api_config.get("api_version", "2023-03-15-preview")

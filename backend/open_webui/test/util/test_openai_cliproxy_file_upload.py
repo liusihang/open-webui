@@ -302,9 +302,13 @@ def openai_module():
     return _load_openai_module_with_stubs()
 
 
-def _build_request(cliproxy_api: bool):
+def _build_request(cliproxy_api: bool, api_type: str | None = None):
+    api_config: dict[str, object] = {"cliproxy_api": cliproxy_api}
+    if api_type is not None:
+        api_config["api_type"] = api_type
+
     config = types.SimpleNamespace(
-        OPENAI_API_CONFIGS={"0": {"cliproxy_api": cliproxy_api}},
+        OPENAI_API_CONFIGS={"0": api_config},
         OPENAI_API_BASE_URLS=["https://example.com/v1"],
         OPENAI_API_KEYS=["test-key"],
     )
@@ -621,3 +625,81 @@ async def test_generate_chat_completion_ignores_inaccessible_files_and_succeeds(
     assert result == {"ok": True}
     sent_payload = json.loads(captured_calls[0]["data"])
     assert sent_payload["messages"] == [{"role": "user", "content": "hello"}]
+
+
+@pytest.mark.asyncio
+async def test_generate_chat_completion_non_cliproxy_responses_applies_file_and_image_normalization(
+    openai_module, monkeypatch
+):
+    request = _build_request(cliproxy_api=False, api_type="responses")
+    user = types.SimpleNamespace(id="u1", role="admin", name="Admin", email="admin@test")
+    form_data = {
+        "model": "gpt-4o",
+        "messages": [{"role": "user", "content": [{"type": "text", "text": "hello"}]}],
+        "metadata": {
+            "parent_message": {
+                "files": [{"id": "f1"}],
+            }
+        },
+    }
+
+    injected = {"called": False}
+    inlined = {"called": False}
+
+    def fake_inject(payload, metadata, current_user):
+        injected["called"] = True
+        payload["messages"][0]["content"].append(
+            {
+                "type": "file",
+                "file": {
+                    "filename": "doc.pdf",
+                    "file_data": "data:application/pdf;base64,AAA",
+                },
+            }
+        )
+        return payload
+
+    def fake_inline(payload, metadata, current_user):
+        inlined["called"] = True
+        payload["messages"][0]["content"].append(
+            {
+                "type": "image_url",
+                "image_url": {"url": "data:image/png;base64,BBB"},
+            }
+        )
+        return payload
+
+    async def fake_headers_and_cookies(*args, **kwargs):
+        return {}, {}
+
+    async def fake_cleanup(*args, **kwargs):
+        return None
+
+    captured_calls = []
+    monkeypatch.setattr(openai_module, "_inject_cliproxy_files_into_payload", fake_inject)
+    monkeypatch.setattr(openai_module, "_inline_cliproxy_image_urls_in_payload", fake_inline)
+    monkeypatch.setattr(openai_module, "get_headers_and_cookies", fake_headers_and_cookies)
+    monkeypatch.setattr(openai_module, "cleanup_response", fake_cleanup)
+    monkeypatch.setattr(
+        openai_module.aiohttp,
+        "ClientSession",
+        lambda *args, **kwargs: _FakeSession(captured_calls),
+    )
+
+    result = await openai_module.generate_chat_completion(
+        request=request,
+        form_data=form_data,
+        user=user,
+        bypass_filter=True,
+    )
+
+    assert result == {"ok": True}
+    assert injected["called"] is True
+    assert inlined["called"] is True
+
+    call = captured_calls[0]
+    assert str(call["url"]).endswith("/responses")
+    sent_payload = json.loads(call["data"])
+    input_content = sent_payload["input"][0]["content"]
+    assert any(part.get("type") == "input_file" for part in input_content)
+    assert any(part.get("type") == "input_image" for part in input_content)
