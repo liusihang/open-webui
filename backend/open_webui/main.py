@@ -458,6 +458,10 @@ from open_webui.config import (
     OAUTH_PROVIDERS,
     WEBUI_URL,
     RESPONSE_WATERMARK,
+    ANNOUNCEMENT_MODAL_ENABLED,
+    ANNOUNCEMENT_MODAL_KEY,
+    ANNOUNCEMENT_MODAL_TITLE,
+    ANNOUNCEMENT_MODAL_CONTENT,
     # Admin
     ENABLE_ADMIN_CHAT_ACCESS,
     ENABLE_ADMIN_ANALYTICS,
@@ -861,6 +865,10 @@ app.state.config.PENDING_USER_OVERLAY_CONTENT = PENDING_USER_OVERLAY_CONTENT
 app.state.config.PENDING_USER_OVERLAY_TITLE = PENDING_USER_OVERLAY_TITLE
 
 app.state.config.RESPONSE_WATERMARK = RESPONSE_WATERMARK
+app.state.config.ANNOUNCEMENT_MODAL_ENABLED = ANNOUNCEMENT_MODAL_ENABLED
+app.state.config.ANNOUNCEMENT_MODAL_KEY = ANNOUNCEMENT_MODAL_KEY
+app.state.config.ANNOUNCEMENT_MODAL_TITLE = ANNOUNCEMENT_MODAL_TITLE
+app.state.config.ANNOUNCEMENT_MODAL_CONTENT = ANNOUNCEMENT_MODAL_CONTENT
 
 app.state.config.USER_PERMISSIONS = USER_PERMISSIONS
 app.state.config.WEBHOOK_URL = WEBHOOK_URL
@@ -2260,6 +2268,12 @@ async def get_app_config(request: Request):
                     "pending_user_overlay_title": app.state.config.PENDING_USER_OVERLAY_TITLE,
                     "pending_user_overlay_content": app.state.config.PENDING_USER_OVERLAY_CONTENT,
                     "response_watermark": app.state.config.RESPONSE_WATERMARK,
+                    "announcement_modal": {
+                        "enabled": app.state.config.ANNOUNCEMENT_MODAL_ENABLED,
+                        "key": app.state.config.ANNOUNCEMENT_MODAL_KEY,
+                        "title": app.state.config.ANNOUNCEMENT_MODAL_TITLE,
+                        "content": app.state.config.ANNOUNCEMENT_MODAL_CONTENT,
+                    },
                 },
                 "license_metadata": app.state.LICENSE_METADATA,
                 **(

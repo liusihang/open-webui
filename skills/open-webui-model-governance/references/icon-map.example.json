@@ -1,0 +1,25 @@
+{
+  "rules": [
+    {
+      "id_prefix": "openai_native_files_manifold_pipe.qwen/",
+      "url": "https://assets.example.com/icons/qwen.png"
+    },
+    {
+      "id_prefix": "openai_native_files_manifold_pipe.volcengine/",
+      "url": "https://assets.example.com/icons/volcengine.png"
+    },
+    {
+      "id_regex": "^paper_rewrite\\.pw__openai-",
+      "url": "https://assets.example.com/icons/openai.png"
+    },
+    {
+      "provider": "google",
+      "url": "https://assets.example.com/icons/google.png"
+    },
+    {
+      "contains": "deepseek",
+      "url": "https://assets.example.com/icons/deepseek.png"
+    }
+  ],
+  "fallback_url": "/static/favicon.png"
+}

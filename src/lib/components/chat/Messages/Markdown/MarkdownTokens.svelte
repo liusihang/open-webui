@@ -91,7 +91,44 @@
 				hasFollowingSequentialEntry: boolean;
 		  };
 
-	const SEQUENTIAL_THINKING_NAME_REGEX = /sequential[\s_-]*thinking|sequentialthinking/i;
+	const SEQUENTIAL_THINKING_NAME_REGEX =
+		/(^|[^a-z0-9])sequential[\s_-]*thinking([^a-z0-9]|$)/i;
+	const SEQUENTIAL_THINKING_PAYLOAD_HINT_REGEX =
+		/\b(thoughtNumber|totalThoughts|nextThoughtNeeded|branchId|branchFromThought|isRevision|revisesThought|thoughtHistoryLength)\b/i;
+
+	function hasSequentialThinkingPayload(
+		argumentObject: Record<string, unknown> | null,
+		resultObject: Record<string, unknown> | null,
+		rawArguments: string,
+		rawResult: string
+	): boolean {
+		const metadataKeys = [
+			'thoughtNumber',
+			'totalThoughts',
+			'nextThoughtNeeded',
+			'branchId',
+			'branchFromThought',
+			'isRevision',
+			'revisesThought',
+			'thoughtHistoryLength'
+		];
+
+		const argumentHasMetadata = metadataKeys.some((key) =>
+			Object.prototype.hasOwnProperty.call(argumentObject ?? {}, key)
+		);
+		if (argumentHasMetadata) {
+			return true;
+		}
+
+		const resultHasMetadata = metadataKeys.some((key) =>
+			Object.prototype.hasOwnProperty.call(resultObject ?? {}, key)
+		);
+		if (resultHasMetadata) {
+			return true;
+		}
+
+		return SEQUENTIAL_THINKING_PAYLOAD_HINT_REGEX.test(`${rawArguments}\n${rawResult}`);
+	}
 
 	function parseNestedJson(value: unknown): unknown {
 		let parsed = value;
@@ -168,6 +205,10 @@
 
 		const argumentObject = toObject(parsedArguments);
 		const resultObject = toObject(parsedResult);
+
+		if (!hasSequentialThinkingPayload(argumentObject, resultObject, rawArguments, rawResult)) {
+			return null;
+		}
 
 		const thoughtNumber = toNumber(argumentObject?.thoughtNumber ?? resultObject?.thoughtNumber);
 		const totalThoughts = toNumber(argumentObject?.totalThoughts ?? resultObject?.totalThoughts);

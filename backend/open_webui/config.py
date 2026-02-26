@@ -1306,6 +1306,30 @@ RESPONSE_WATERMARK = PersistentConfig(
     os.environ.get("RESPONSE_WATERMARK", ""),
 )
 
+ANNOUNCEMENT_MODAL_ENABLED = PersistentConfig(
+    "ANNOUNCEMENT_MODAL_ENABLED",
+    "ui.announcement_modal.enabled",
+    os.environ.get("ANNOUNCEMENT_MODAL_ENABLED", "False").lower() == "true",
+)
+
+ANNOUNCEMENT_MODAL_KEY = PersistentConfig(
+    "ANNOUNCEMENT_MODAL_KEY",
+    "ui.announcement_modal.key",
+    os.environ.get("ANNOUNCEMENT_MODAL_KEY", ""),
+)
+
+ANNOUNCEMENT_MODAL_TITLE = PersistentConfig(
+    "ANNOUNCEMENT_MODAL_TITLE",
+    "ui.announcement_modal.title",
+    os.environ.get("ANNOUNCEMENT_MODAL_TITLE", ""),
+)
+
+ANNOUNCEMENT_MODAL_CONTENT = PersistentConfig(
+    "ANNOUNCEMENT_MODAL_CONTENT",
+    "ui.announcement_modal.content",
+    os.environ.get("ANNOUNCEMENT_MODAL_CONTENT", ""),
+)
+
 
 USER_PERMISSIONS_WORKSPACE_MODELS_ACCESS = (
     os.environ.get("USER_PERMISSIONS_WORKSPACE_MODELS_ACCESS", "False").lower()

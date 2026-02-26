@@ -1,0 +1,4 @@
+interface:
+  display_name: "Open WebUI Model Governance"
+  short_description: "Batch-manage Open WebUI model policies and metadata"
+  default_prompt: "Use $open-webui-model-governance to batch-govern Open WebUI models with selectors and dry-run first."
