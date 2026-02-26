@@ -1919,15 +1919,32 @@ def get_images_from_messages(message_list):
 
         message_images = []
         for file in message.get("files", []):
-            if file.get("type") == "image":
-                message_images.append(file.get("url"))
-            elif file.get("content_type", "").startswith("image/"):
+            if _is_image_attachment(file):
                 message_images.append(file.get("url"))
 
         if message_images:
             images.append(message_images)
 
     return images
+
+
+def _normalize_attachment_content_type(value) -> str:
+    if isinstance(value, list):
+        value = next((item for item in value if isinstance(item, str)), None)
+    if not isinstance(value, str):
+        return ""
+    return value.strip().lower().split(";")[0]
+
+
+def _is_image_attachment(item: dict) -> bool:
+    if not isinstance(item, dict):
+        return False
+
+    if str(item.get("type", "")).lower() == "image":
+        return True
+
+    content_type = _normalize_attachment_content_type(item.get("content_type"))
+    return content_type.startswith("image/")
 
 
 def get_image_urls(delta_images, request, metadata, user) -> list[str]:
@@ -1979,7 +1996,9 @@ def add_file_context(messages: list, chat_id: str, user) -> list:
         files_with_urls = [
             file
             for file in stored_message.get("files", [])
-            if file.get("url") and not file.get("url").startswith("data:")
+            if file.get("url")
+            and not file.get("url").startswith("data:")
+            and not _is_image_attachment(file)
         ]
         if not files_with_urls:
             continue
@@ -2214,6 +2233,12 @@ async def chat_completion_files_handler(
                 continue
 
             item = dict(candidate)
+
+            # Images are handled as vision inputs; do not send them into
+            # retrieval/file-context pipeline.
+            if _is_image_attachment(item):
+                continue
+
             if str(item.get("type") or "file").lower() == "file" and item.get("id"):
                 file_id = str(item.get("id"))
                 has_access = False
