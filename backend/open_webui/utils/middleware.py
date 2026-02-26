@@ -77,6 +77,7 @@ from open_webui.utils.adaptive_file_context import (
     apply_adaptive_context_to_items,
     resolve_adaptive_config,
 )
+from open_webui.utils.message_merge import merge_messages_preserving_incoming_tail
 
 
 from open_webui.utils.sanitize import sanitize_code
@@ -2741,8 +2742,17 @@ async def process_chat_payload(request, form_data, user, metadata, model):
         db_messages = load_messages_from_db(chat_id, parent_message_id)
         if db_messages:
             system_message = get_system_message(form_data.get("messages", []))
+            incoming_messages = [
+                message
+                for message in form_data.get("messages", [])
+                if isinstance(message, dict) and message.get("role") != "system"
+            ]
+            merged_messages = merge_messages_preserving_incoming_tail(
+                db_messages=db_messages,
+                incoming_messages=incoming_messages,
+            )
             form_data["messages"] = (
-                [system_message, *db_messages] if system_message else db_messages
+                [system_message, *merged_messages] if system_message else merged_messages
             )
 
     # Process messages with OR-aligned output items for clean LLM messages
