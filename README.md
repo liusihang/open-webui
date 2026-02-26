@@ -50,6 +50,7 @@
 - 配置扩展：`backend/open_webui/config.py`
 - 管理后台接口：`backend/open_webui/routers/auths.py`
 - 管理页调参 UI：`src/lib/components/admin/Settings/General.svelte`
+- 专项文档：`MEMORY_RETRIEVAL_README.md`
 
 特性要点：
 
