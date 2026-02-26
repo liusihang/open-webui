@@ -28,7 +28,8 @@
 			? Search
 			: status?.action === 'knowledge_search' ||
 				  status?.action === 'deep_research' ||
-				  status?.action === 'memory_retrieval'
+				  status?.action === 'memory_retrieval' ||
+				  status?.action === 'memory_writeback'
 				? BookOpen
 				: Wrench;
 
@@ -239,6 +240,28 @@
 						{:else}
 							{$i18n.t('Retrieved {{count}} memories, no context injected', {
 								count: status?.count ?? 0
+							})}
+						{/if}
+					</div>
+				</div>
+			{:else if status?.action === 'memory_writeback'}
+				<div class="flex flex-col justify-center -space-y-0.5">
+					<div
+						class="{isRunning
+							? 'shimmer'
+							: ''} text-gray-500 dark:text-gray-400 text-sm line-clamp-1 text-wrap"
+					>
+						{#if isRunning}
+							{$i18n.t('Updating memories')}
+						{:else if status?.error === true}
+							{$i18n.t('Memory writeback failed')}
+						{:else if (status?.applied_count ?? 0) === 0}
+							{$i18n.t('No memory changes applied')}
+						{:else}
+							{$i18n.t('Saved {{addedCount}}, updated {{updatedCount}}, deleted {{deletedCount}}', {
+								addedCount: status?.added_count ?? 0,
+								updatedCount: status?.updated_count ?? 0,
+								deletedCount: status?.deleted_count ?? 0
 							})}
 						{/if}
 					</div>

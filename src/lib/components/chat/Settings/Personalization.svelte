@@ -15,9 +15,11 @@
 
 	// Addons
 	let enableMemory = false;
+	let enableAutoMemory = true;
 
 	onMount(async () => {
 		enableMemory = $settings?.memory ?? false;
+		enableAutoMemory = $settings?.autoMemory ?? true;
 	});
 </script>
 
@@ -53,6 +55,29 @@
 						}}
 					/>
 				</div>
+			</div>
+		</div>
+
+		<div class="mt-3">
+			<div class="flex items-center justify-between mb-1">
+				<div class="text-sm font-medium">
+					{$i18n.t('Auto Memory Writeback')}
+				</div>
+
+				<div class="">
+					<Switch
+						bind:state={enableAutoMemory}
+						on:change={async () => {
+							saveSettings({ autoMemory: enableAutoMemory });
+						}}
+					/>
+				</div>
+			</div>
+
+			<div class="text-xs text-gray-600 dark:text-gray-400">
+				{$i18n.t(
+					'When enabled, important long-term facts may be added or updated automatically after replies.'
+				)}
 			</div>
 		</div>
 

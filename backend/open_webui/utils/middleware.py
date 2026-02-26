@@ -115,6 +115,7 @@ from open_webui.utils.code_interpreter import execute_code_jupyter
 from open_webui.utils.payload import apply_system_prompt_to_body
 from open_webui.utils.response import normalize_usage
 from open_webui.utils.mcp.client import MCPClient
+from open_webui.utils.auto_memory import run_auto_memory_writeback
 
 
 from open_webui.config import (
@@ -2718,6 +2719,7 @@ async def process_chat_payload(request, form_data, user, metadata, model):
 
     features = form_data.pop("features", None) or {}
     extra_params["__features__"] = features
+    metadata["features"] = features
     if features:
         if "voice" in features and features["voice"]:
             if request.app.state.config.VOICE_MODE_PROMPT_TEMPLATE != None:
@@ -3446,6 +3448,18 @@ async def background_tasks_handler(ctx):
                             )
                         except Exception as e:
                             pass
+
+        try:
+            await run_auto_memory_writeback(
+                request=request,
+                user=user,
+                metadata=metadata,
+                form_data=form_data,
+                messages=messages,
+                event_emitter=event_emitter,
+            )
+        except Exception as e:
+            log.debug(f"auto memory writeback error: {e}")
 
 
 async def non_streaming_chat_response_handler(response, ctx):
