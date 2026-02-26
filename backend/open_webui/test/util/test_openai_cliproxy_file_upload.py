@@ -50,9 +50,9 @@ def _load_openai_module_with_stubs():
             async def get(self, *args, **kwargs):
                 raise RuntimeError("Stub ClientSession.get should be monkeypatched")
 
-        aiohttp_mod.ClientTimeout = ClientTimeout
-        aiohttp_mod.ClientSession = ClientSession
-        aiohttp_mod.ClientError = Exception
+        setattr(aiohttp_mod, "ClientTimeout", ClientTimeout)
+        setattr(aiohttp_mod, "ClientSession", ClientSession)
+        setattr(aiohttp_mod, "ClientError", Exception)
         register("aiohttp", aiohttp_mod)
 
         aiocache_mod = types.ModuleType("aiocache")
@@ -63,7 +63,7 @@ def _load_openai_module_with_stubs():
 
             return decorator
 
-        aiocache_mod.cached = cached
+        setattr(aiocache_mod, "cached", cached)
         register("aiocache", aiocache_mod)
         register("requests", types.ModuleType("requests"))
 
@@ -76,8 +76,8 @@ def _load_openai_module_with_stubs():
         def get_bearer_token_provider(*args, **kwargs):
             return lambda: "token"
 
-        azure_identity_mod.DefaultAzureCredential = DefaultAzureCredential
-        azure_identity_mod.get_bearer_token_provider = get_bearer_token_provider
+        setattr(azure_identity_mod, "DefaultAzureCredential", DefaultAzureCredential)
+        setattr(azure_identity_mod, "get_bearer_token_provider", get_bearer_token_provider)
         register("azure", azure_mod)
         register("azure.identity", azure_identity_mod)
 
@@ -104,10 +104,10 @@ def _load_openai_module_with_stubs():
 
             get = post = put = patch = delete = options = head = api_route = _decorator
 
-        fastapi_mod.Depends = Depends
-        fastapi_mod.HTTPException = HTTPException
-        fastapi_mod.Request = Request
-        fastapi_mod.APIRouter = APIRouter
+        setattr(fastapi_mod, "Depends", Depends)
+        setattr(fastapi_mod, "HTTPException", HTTPException)
+        setattr(fastapi_mod, "Request", Request)
+        setattr(fastapi_mod, "APIRouter", APIRouter)
         register("fastapi", fastapi_mod)
 
         fastapi_responses_mod = types.ModuleType("fastapi.responses")
@@ -117,10 +117,10 @@ def _load_openai_module_with_stubs():
                 self.args = args
                 self.kwargs = kwargs
 
-        fastapi_responses_mod.FileResponse = ResponseBase
-        fastapi_responses_mod.StreamingResponse = ResponseBase
-        fastapi_responses_mod.JSONResponse = ResponseBase
-        fastapi_responses_mod.PlainTextResponse = ResponseBase
+        setattr(fastapi_responses_mod, "FileResponse", ResponseBase)
+        setattr(fastapi_responses_mod, "StreamingResponse", ResponseBase)
+        setattr(fastapi_responses_mod, "JSONResponse", ResponseBase)
+        setattr(fastapi_responses_mod, "PlainTextResponse", ResponseBase)
         register("fastapi.responses", fastapi_responses_mod)
 
         pydantic_mod = types.ModuleType("pydantic")
@@ -136,8 +136,8 @@ def _load_openai_module_with_stubs():
         def ConfigDict(**kwargs):
             return kwargs
 
-        pydantic_mod.BaseModel = BaseModel
-        pydantic_mod.ConfigDict = ConfigDict
+        setattr(pydantic_mod, "BaseModel", BaseModel)
+        setattr(pydantic_mod, "ConfigDict", ConfigDict)
         register("pydantic", pydantic_mod)
 
         sqlalchemy_mod = package("sqlalchemy")
@@ -146,15 +146,16 @@ def _load_openai_module_with_stubs():
         class Session:
             pass
 
-        sqlalchemy_orm_mod.Session = Session
+        setattr(sqlalchemy_orm_mod, "Session", Session)
         register("sqlalchemy", sqlalchemy_mod)
         register("sqlalchemy.orm", sqlalchemy_orm_mod)
 
         # Internal modules
         register("open_webui", package("open_webui"))
+        register("open_webui.routers", package("open_webui.routers"))
         register("open_webui.internal", package("open_webui.internal"))
         register("open_webui.internal.db", types.ModuleType("open_webui.internal.db"))
-        sys.modules["open_webui.internal.db"].get_session = lambda: None
+        setattr(sys.modules["open_webui.internal.db"], "get_session", lambda: None)
 
         register("open_webui.models", package("open_webui.models"))
         models_models_mod = types.ModuleType("open_webui.models.models")
@@ -164,7 +165,7 @@ def _load_openai_module_with_stubs():
             def get_model_by_id(model_id):
                 return None
 
-        models_models_mod.Models = Models
+        setattr(models_models_mod, "Models", Models)
         register("open_webui.models.models", models_models_mod)
 
         access_grants_mod = types.ModuleType("open_webui.models.access_grants")
@@ -174,7 +175,7 @@ def _load_openai_module_with_stubs():
             def has_access(*args, **kwargs):
                 return False
 
-        access_grants_mod.AccessGrants = AccessGrants
+        setattr(access_grants_mod, "AccessGrants", AccessGrants)
         register("open_webui.models.access_grants", access_grants_mod)
 
         files_mod = types.ModuleType("open_webui.models.files")
@@ -184,7 +185,7 @@ def _load_openai_module_with_stubs():
             def get_file_by_id(file_id):
                 return None
 
-        files_mod.Files = Files
+        setattr(files_mod, "Files", Files)
         register("open_webui.models.files", files_mod)
 
         groups_mod = types.ModuleType("open_webui.models.groups")
@@ -194,7 +195,7 @@ def _load_openai_module_with_stubs():
             def get_groups_by_member_id(_user_id):
                 return []
 
-        groups_mod.Groups = Groups
+        setattr(groups_mod, "Groups", Groups)
         register("open_webui.models.groups", groups_mod)
 
         users_mod = types.ModuleType("open_webui.models.users")
@@ -202,33 +203,39 @@ def _load_openai_module_with_stubs():
         class UserModel:
             pass
 
-        users_mod.UserModel = UserModel
+        setattr(users_mod, "UserModel", UserModel)
         register("open_webui.models.users", users_mod)
 
         config_mod = types.ModuleType("open_webui.config")
-        config_mod.CACHE_DIR = "/tmp"
+        setattr(config_mod, "CACHE_DIR", "/tmp")
         register("open_webui.config", config_mod)
 
         env_mod = types.ModuleType("open_webui.env")
-        env_mod.MODELS_CACHE_TTL = 0
-        env_mod.AIOHTTP_CLIENT_SESSION_SSL = False
-        env_mod.AIOHTTP_CLIENT_TIMEOUT = 30
-        env_mod.AIOHTTP_CLIENT_TIMEOUT_MODEL_LIST = 30
-        env_mod.ENABLE_FORWARD_USER_INFO_HEADERS = False
-        env_mod.FORWARD_SESSION_INFO_HEADER_CHAT_ID = "x-chat-id"
-        env_mod.BYPASS_MODEL_ACCESS_CONTROL = False
+        setattr(env_mod, "MODELS_CACHE_TTL", 0)
+        setattr(env_mod, "AIOHTTP_CLIENT_SESSION_SSL", False)
+        setattr(env_mod, "AIOHTTP_CLIENT_TIMEOUT", 30)
+        setattr(env_mod, "AIOHTTP_CLIENT_TIMEOUT_MODEL_LIST", 30)
+        setattr(env_mod, "ENABLE_FORWARD_USER_INFO_HEADERS", False)
+        setattr(env_mod, "FORWARD_SESSION_INFO_HEADER_CHAT_ID", "x-chat-id")
+        setattr(env_mod, "BYPASS_MODEL_ACCESS_CONTROL", False)
         register("open_webui.env", env_mod)
 
         constants_mod = types.ModuleType("open_webui.constants")
-        constants_mod.ERROR_MESSAGES = types.SimpleNamespace(OPENAI_NOT_FOUND="OPENAI_NOT_FOUND")
+        setattr(
+            constants_mod,
+            "ERROR_MESSAGES",
+            types.SimpleNamespace(OPENAI_NOT_FOUND="OPENAI_NOT_FOUND"),
+        )
         register("open_webui.constants", constants_mod)
 
         register("open_webui.utils", package("open_webui.utils"))
 
         payload_mod = types.ModuleType("open_webui.utils.payload")
-        payload_mod.apply_model_params_to_body_openai = lambda params, payload: payload
-        payload_mod.apply_system_prompt_to_body = (
-            lambda system, payload, metadata, user: payload
+        setattr(payload_mod, "apply_model_params_to_body_openai", lambda params, payload: payload)
+        setattr(
+            payload_mod,
+            "apply_system_prompt_to_body",
+            (lambda system, payload, metadata, user: payload),
         )
         register("open_webui.utils.payload", payload_mod)
 
@@ -237,28 +244,28 @@ def _load_openai_module_with_stubs():
         async def cleanup_response(_r, _session):
             return None
 
-        misc_mod.cleanup_response = cleanup_response
-        misc_mod.convert_logit_bias_input_to_json = lambda value: None
-        misc_mod.stream_chunks_handler = lambda *args, **kwargs: None
-        misc_mod.stream_wrapper = lambda *args, **kwargs: None
+        setattr(misc_mod, "cleanup_response", cleanup_response)
+        setattr(misc_mod, "convert_logit_bias_input_to_json", lambda value: None)
+        setattr(misc_mod, "stream_chunks_handler", lambda *args, **kwargs: None)
+        setattr(misc_mod, "stream_wrapper", lambda *args, **kwargs: None)
         register("open_webui.utils.misc", misc_mod)
 
         auth_mod = types.ModuleType("open_webui.utils.auth")
-        auth_mod.get_admin_user = lambda: None
-        auth_mod.get_verified_user = lambda: None
+        setattr(auth_mod, "get_admin_user", lambda: None)
+        setattr(auth_mod, "get_verified_user", lambda: None)
         register("open_webui.utils.auth", auth_mod)
 
         headers_mod = types.ModuleType("open_webui.utils.headers")
-        headers_mod.include_user_info_headers = lambda headers, user: headers
+        setattr(headers_mod, "include_user_info_headers", lambda headers, user: headers)
         register("open_webui.utils.headers", headers_mod)
 
         anthropic_mod = types.ModuleType("open_webui.utils.anthropic")
-        anthropic_mod.is_anthropic_url = lambda url: False
+        setattr(anthropic_mod, "is_anthropic_url", lambda url: False)
 
         async def get_anthropic_models(url, key, user=None):
             return {"data": []}
 
-        anthropic_mod.get_anthropic_models = get_anthropic_models
+        setattr(anthropic_mod, "get_anthropic_models", get_anthropic_models)
         register("open_webui.utils.anthropic", anthropic_mod)
 
         register("open_webui.storage", package("open_webui.storage"))
@@ -269,11 +276,11 @@ def _load_openai_module_with_stubs():
             def get_file(path):
                 return path
 
-        storage_provider_mod.Storage = Storage
+        setattr(storage_provider_mod, "Storage", Storage)
         register("open_webui.storage.provider", storage_provider_mod)
 
         spec = importlib.util.spec_from_file_location(
-            f"openai_router_cliproxy_test_{id(object())}",
+            "open_webui.routers.openai",
             OPENAI_ROUTER_PATH,
         )
         if spec is None or spec.loader is None:
@@ -284,7 +291,7 @@ def _load_openai_module_with_stubs():
         return module
     finally:
         for name, original in originals.items():
-            if original is _MISSING:
+            if original is _MISSING or original is None or not isinstance(original, types.ModuleType):
                 sys.modules.pop(name, None)
             else:
                 sys.modules[name] = original
@@ -320,7 +327,7 @@ class _FakeResponse:
 
 
 class _FakeSession:
-    def __init__(self, captured_calls: list[dict]):
+    def __init__(self, captured_calls: list[dict[str, object]]):
         self.captured_calls = captured_calls
 
     async def request(self, **kwargs):
@@ -443,9 +450,18 @@ def test_build_cliproxy_file_parts_adds_doc_audio_video_and_skips_image(
         "recording.mp3",
         "demo.mp4",
     ]
-    assert parts[0]["file"]["file_data"] == base64.b64encode(pdf_path.read_bytes()).decode("utf-8")
-    assert parts[1]["file"]["file_data"] == base64.b64encode(mp3_path.read_bytes()).decode("utf-8")
-    assert parts[2]["file"]["file_data"] == base64.b64encode(mp4_path.read_bytes()).decode("utf-8")
+    assert parts[0]["file"]["file_data"] == (
+        "data:application/pdf;base64," + base64.b64encode(pdf_path.read_bytes()).decode("utf-8")
+    )
+    assert parts[1]["file"]["file_data"] == (
+        "data:audio/mpeg;base64," + base64.b64encode(mp3_path.read_bytes()).decode("utf-8")
+    )
+    assert parts[2]["file"]["file_data"] == (
+        "data:video/mp4;base64," + base64.b64encode(mp4_path.read_bytes()).decode("utf-8")
+    )
+    assert parts[0]["file"]["content_type"] == "application/pdf"
+    assert parts[1]["file"]["content_type"] == "audio/mpeg"
+    assert parts[2]["file"]["content_type"] == "video/mp4"
 
 
 def test_build_cliproxy_file_parts_uses_data_url_for_claude(openai_module, monkeypatch, tmp_path):
@@ -477,7 +493,44 @@ def test_build_cliproxy_file_parts_uses_data_url_for_claude(openai_module, monke
     )
 
     assert claude_parts[0]["file"]["file_data"].startswith("data:text/plain;base64,")
-    assert not gpt_parts[0]["file"]["file_data"].startswith("data:")
+    assert gpt_parts[0]["file"]["file_data"].startswith("data:text/plain;base64,")
+
+
+def test_inline_cliproxy_image_urls_rewrites_local_id_to_data_url(
+    openai_module, monkeypatch, tmp_path
+):
+    source = tmp_path / "image.png"
+    source.write_bytes(b"image-bytes")
+
+    file_obj = types.SimpleNamespace(
+        meta={"name": "image.png", "content_type": "image/png"},
+        filename="image.png",
+        user_id="u1",
+        path=str(source),
+    )
+
+    payload = {
+        "messages": [
+            {
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": "hello"},
+                    {"type": "image_url", "image_url": {"url": "11111111-1111-1111-1111-111111111111"}},
+                ],
+            }
+        ]
+    }
+    user = types.SimpleNamespace(id="u1", role="user")
+
+    monkeypatch.setattr(openai_module.Files, "get_file_by_id", lambda file_id: file_obj)
+    monkeypatch.setattr(openai_module.Storage, "get_file", lambda path: path)
+    monkeypatch.setattr(openai_module.AccessGrants, "has_access", lambda **kwargs: True)
+
+    rewritten = openai_module._inline_cliproxy_image_urls_in_payload(payload, metadata=None, user=user)
+    image_part = rewritten["messages"][0]["content"][1]
+    url = image_part["image_url"]["url"]
+    assert url.startswith("data:image/png;base64,")
+    assert url.endswith(base64.b64encode(source.read_bytes()).decode("utf-8"))
 
 
 def test_convert_to_responses_payload_maps_file_part_to_input_file(openai_module):
