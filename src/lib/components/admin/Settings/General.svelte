@@ -57,7 +57,11 @@
 			MEMORY_NEED_INTENT_WEIGHT: config.MEMORY_NEED_INTENT_WEIGHT ?? 0.45,
 			MEMORY_NEED_RELEVANCE_WEIGHT: config.MEMORY_NEED_RELEVANCE_WEIGHT ?? 0.45,
 			MEMORY_NEED_CONTINUITY_WEIGHT: config.MEMORY_NEED_CONTINUITY_WEIGHT ?? 0.1,
-			MEMORY_STATELESS_PENALTY: config.MEMORY_STATELESS_PENALTY ?? 0.15
+			MEMORY_STATELESS_PENALTY: config.MEMORY_STATELESS_PENALTY ?? 0.15,
+			ANNOUNCEMENT_MODAL_ENABLED: config.ANNOUNCEMENT_MODAL_ENABLED ?? false,
+			ANNOUNCEMENT_MODAL_KEY: config.ANNOUNCEMENT_MODAL_KEY ?? '',
+			ANNOUNCEMENT_MODAL_TITLE: config.ANNOUNCEMENT_MODAL_TITLE ?? '',
+			ANNOUNCEMENT_MODAL_CONTENT: config.ANNOUNCEMENT_MODAL_CONTENT ?? ''
 		};
 	};
 
@@ -410,6 +414,63 @@
 							bind:value={adminConfig.PENDING_USER_OVERLAY_CONTENT}
 						/>
 					</div>
+
+					<div class="mb-2.5 flex w-full items-center justify-between pr-2">
+						<div class=" self-center text-xs font-medium">
+							{$i18n.t('Enable Announcement Popup')}
+						</div>
+
+						<Switch bind:state={adminConfig.ANNOUNCEMENT_MODAL_ENABLED} />
+					</div>
+
+					{#if adminConfig.ANNOUNCEMENT_MODAL_ENABLED}
+						<div class="mb-2.5 w-full justify-between">
+							<div class="flex w-full justify-between">
+								<div class=" self-center text-xs font-medium">
+									{$i18n.t('Announcement Version Key')}
+								</div>
+							</div>
+
+							<div class="flex mt-2 space-x-2">
+								<input
+									class="w-full rounded-lg py-2 px-4 text-sm bg-gray-50 dark:text-gray-300 dark:bg-gray-850 outline-hidden"
+									type="text"
+									placeholder={$i18n.t('e.g.) 2026-02-release')}
+									bind:value={adminConfig.ANNOUNCEMENT_MODAL_KEY}
+								/>
+							</div>
+
+							<div class="mt-2 text-xs text-gray-400 dark:text-gray-500">
+								{$i18n.t(
+									'Each user sees the popup once per key. Change this key when publishing a new announcement.'
+								)}
+							</div>
+						</div>
+
+						<div class="mb-2.5">
+							<div class=" self-center text-xs font-medium mb-2">
+								{$i18n.t('Announcement Title')}
+							</div>
+							<input
+								class="w-full rounded-lg py-2 px-4 text-sm bg-gray-50 dark:text-gray-300 dark:bg-gray-850 outline-hidden"
+								type="text"
+								placeholder={$i18n.t('What changed')}
+								bind:value={adminConfig.ANNOUNCEMENT_MODAL_TITLE}
+							/>
+						</div>
+
+						<div class="mb-2.5">
+							<div class=" self-center text-xs font-medium mb-2">
+								{$i18n.t('Announcement Content')}
+							</div>
+							<Textarea
+								placeholder={$i18n.t(
+									'Supports Markdown. This content will be shown in a popup after login.'
+								)}
+								bind:value={adminConfig.ANNOUNCEMENT_MODAL_CONTENT}
+							/>
+						</div>
+					{/if}
 
 					<div class="mb-2.5 flex w-full justify-between pr-2">
 						<div class=" self-center text-xs font-medium">{$i18n.t('Enable API Keys')}</div>

@@ -159,6 +159,7 @@ type Settings = {
 	detectArtifacts?: boolean;
 	showUpdateToast?: boolean;
 	showChangelog?: boolean;
+	announcementModalKey?: string;
 	showEmojiInCall?: boolean;
 	voiceInterruption?: boolean;
 	collapseCodeBlocks?: boolean;
@@ -283,6 +284,13 @@ type Config = {
 	ui?: {
 		pending_user_overlay_title?: string;
 		pending_user_overlay_content?: string;
+		response_watermark?: string;
+		announcement_modal?: {
+			enabled?: boolean;
+			key?: string;
+			title?: string;
+			content?: string;
+		};
 	};
 };
 
