@@ -43,6 +43,7 @@
 	let enable = true;
 	let apiVersion = '';
 	let apiType = ''; // '' = chat completions (default), 'responses' = Responses API
+	let cliproxyApi = false;
 
 	let headers = '';
 
@@ -184,6 +185,7 @@
 				connection_type: connectionType,
 				auth_type,
 				headers: headers ? JSON.parse(headers) : undefined,
+				...(!ollama ? { cliproxy_api: cliproxyApi } : {}),
 				...(!ollama && azure ? { azure: true, api_version: apiVersion } : {}),
 				...(apiType ? { api_type: apiType } : {})
 			}
@@ -200,6 +202,7 @@
 		prefixId = '';
 		tags = [];
 		modelIds = [];
+		cliproxyApi = false;
 	};
 
 	const init = () => {
@@ -224,7 +227,10 @@
 				azure = connection.config?.azure ?? false;
 				apiVersion = connection.config?.api_version ?? '';
 				apiType = connection.config?.api_type ?? '';
+				cliproxyApi = connection.config?.cliproxy_api ?? false;
 			}
+		} else {
+			cliproxyApi = false;
 		}
 	};
 
@@ -539,7 +545,7 @@
 								<label
 									for="api-type-toggle"
 									class={`mb-0.5 text-xs text-gray-500
-							${($settings?.highContrastMode ?? false) ? 'text-gray-800 dark:text-gray-100' : ''}`}
+								${($settings?.highContrastMode ?? false) ? 'text-gray-800 dark:text-gray-100' : ''}`}
 									>{$i18n.t('API Type')}</label
 								>
 
@@ -569,6 +575,21 @@
 											{$i18n.t('Chat Completions')}
 										{/if}
 									</button>
+								</div>
+							</div>
+						{/if}
+
+						{#if !ollama && !direct}
+							<div class="flex flex-row justify-between items-center w-full mt-1.5">
+								<label
+									for="cliproxy-toggle"
+									class={`mb-0.5 text-xs text-gray-500
+								${($settings?.highContrastMode ?? false) ? 'text-gray-800 dark:text-gray-100' : ''}`}
+									>{$i18n.t('CLIProxyAPI Upstream')}</label
+								>
+
+								<div id="cliproxy-toggle">
+									<Switch bind:state={cliproxyApi} />
 								</div>
 							</div>
 						{/if}

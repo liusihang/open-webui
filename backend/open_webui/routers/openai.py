@@ -1,7 +1,9 @@
+import base64
 import asyncio
 import hashlib
 import json
 import logging
+import mimetypes
 from typing import Optional
 from urllib.parse import urlparse
 
@@ -26,6 +28,7 @@ from open_webui.internal.db import get_session
 
 from open_webui.models.models import Models
 from open_webui.models.access_grants import AccessGrants
+from open_webui.models.files import Files
 from open_webui.models.groups import Groups
 from open_webui.config import (
     CACHE_DIR,
@@ -58,6 +61,7 @@ from open_webui.utils.misc import (
 from open_webui.utils.auth import get_admin_user, get_verified_user
 from open_webui.utils.headers import include_user_info_headers
 from open_webui.utils.anthropic import is_anthropic_url, get_anthropic_models
+from open_webui.storage.provider import Storage
 
 log = logging.getLogger(__name__)
 
@@ -197,6 +201,163 @@ def get_microsoft_entra_id_access_token():
     except Exception as e:
         log.error(f"Error getting Microsoft Entra ID access token: {e}")
         return None
+
+
+def _normalize_bool_config_flag(value) -> bool:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        return value.strip().lower() in {"1", "true", "yes", "on"}
+    return bool(value)
+
+
+def _normalize_content_type(value, filename: str) -> str:
+    if isinstance(value, list):
+        value = next((item for item in value if isinstance(item, str)), None)
+    if not isinstance(value, str) or not value.strip():
+        guessed_type, _ = mimetypes.guess_type(filename)
+        return guessed_type or "application/octet-stream"
+    return value.strip().split(";")[0]
+
+
+def _is_image_file(file_item: dict, content_type: str) -> bool:
+    file_type = str(file_item.get("type", "")).lower()
+    if file_type == "image":
+        return True
+    return content_type.startswith("image/")
+
+
+def _resolve_file_name(file_obj, file_item: dict, content_type: str) -> str:
+    file_meta = file_obj.meta or {}
+    filename = file_meta.get("name") or file_obj.filename or str(file_item.get("id", "file"))
+    if "." not in filename:
+        ext = mimetypes.guess_extension(content_type or "application/octet-stream")
+        if ext:
+            filename = f"{filename}{ext}"
+    return filename
+
+
+def _append_file_parts_to_last_user_message(messages: list, file_parts: list[dict]) -> None:
+    if not file_parts:
+        return
+
+    target_index = None
+    for index in range(len(messages) - 1, -1, -1):
+        if isinstance(messages[index], dict) and messages[index].get("role") == "user":
+            target_index = index
+            break
+
+    if target_index is None:
+        return
+
+    message = messages[target_index]
+    content = message.get("content", "")
+
+    if isinstance(content, list):
+        normalized_content = [*content]
+    elif isinstance(content, str):
+        normalized_content = [{"type": "text", "text": content}]
+    elif content is None:
+        normalized_content = []
+    else:
+        normalized_content = [{"type": "text", "text": str(content)}]
+
+    normalized_content.extend(file_parts)
+    message["content"] = normalized_content
+
+
+def _build_cliproxy_file_parts(payload: dict, metadata: Optional[dict], user) -> list[dict]:
+    if not isinstance(metadata, dict):
+        return []
+
+    parent_message = metadata.get("parent_message")
+    if not isinstance(parent_message, dict):
+        return []
+
+    parent_files = parent_message.get("files")
+    if not isinstance(parent_files, list):
+        return []
+
+    model_name = str(payload.get("model", "")).lower()
+    use_data_url = "claude" in model_name
+    parts = []
+
+    for file_item in parent_files:
+        if not isinstance(file_item, dict):
+            continue
+
+        file_id = file_item.get("id")
+        if not file_id:
+            continue
+
+        file_obj = Files.get_file_by_id(str(file_id))
+        if not file_obj:
+            log.debug(f"CLIProxy file injection skipped: file not found ({file_id})")
+            continue
+
+        has_access = user.role == "admin" or file_obj.user_id == user.id
+        if not has_access:
+            has_access = AccessGrants.has_access(
+                user_id=user.id,
+                resource_type="file",
+                resource_id=str(file_id),
+                permission="read",
+            )
+
+        if not has_access:
+            log.debug(f"CLIProxy file injection skipped: access denied ({file_id})")
+            continue
+
+        try:
+            file_meta = file_obj.meta or {}
+            content_type = _normalize_content_type(
+                file_item.get("content_type") or file_meta.get("content_type"),
+                file_obj.filename or "",
+            )
+
+            if _is_image_file(file_item, content_type):
+                continue
+
+            file_path = Storage.get_file(file_obj.path)
+            with open(file_path, "rb") as file_handle:
+                raw_content = file_handle.read()
+
+            if not raw_content:
+                log.debug(f"CLIProxy file injection skipped: empty file ({file_id})")
+                continue
+
+            filename = _resolve_file_name(file_obj, file_item, content_type)
+            encoded_content = base64.b64encode(raw_content).decode("utf-8")
+            file_data = (
+                f"data:{content_type};base64,{encoded_content}"
+                if use_data_url
+                else encoded_content
+            )
+
+            parts.append(
+                {
+                    "type": "file",
+                    "file": {
+                        "filename": filename,
+                        "file_data": file_data,
+                    },
+                }
+            )
+        except Exception as e:
+            log.debug(f"CLIProxy file injection skipped: read failed ({file_id}): {e}")
+
+    return parts
+
+
+def _inject_cliproxy_files_into_payload(payload: dict, metadata: Optional[dict], user) -> dict:
+    messages = payload.get("messages")
+    if not isinstance(messages, list):
+        return payload
+
+    file_parts = _build_cliproxy_file_parts(payload, metadata, user)
+    _append_file_parts_to_last_user_message(messages, file_parts)
+    payload["messages"] = messages
+    return payload
 
 
 ##########################################
@@ -875,6 +1036,19 @@ def convert_to_responses_payload(payload: dict) -> dict:
                         else url_data
                     )
                     content_parts.append({"type": "input_image", "image_url": url})
+                elif part.get("type") == "file":
+                    file_obj = part.get("file") or {}
+                    if isinstance(file_obj, dict):
+                        file_data = file_obj.get("file_data")
+                        filename = file_obj.get("filename")
+                        if isinstance(file_data, str) and file_data:
+                            input_file = {
+                                "type": "input_file",
+                                "file_data": file_data,
+                            }
+                            if isinstance(filename, str) and filename:
+                                input_file["filename"] = filename
+                            content_parts.append(input_file)
         else:
             content_parts = [{"type": text_type, "text": str(content)}]
 
@@ -1028,6 +1202,9 @@ async def generate_chat_completion(
     prefix_id = api_config.get("prefix_id", None)
     if prefix_id:
         payload["model"] = payload["model"].replace(f"{prefix_id}.", "")
+
+    if _normalize_bool_config_flag(api_config.get("cliproxy_api", False)):
+        payload = _inject_cliproxy_files_into_payload(payload, metadata, user)
 
     # Add user info to the payload if the model is a pipeline
     if "pipeline" in model and model.get("pipeline"):
