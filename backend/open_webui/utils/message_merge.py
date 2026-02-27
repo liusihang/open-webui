@@ -52,6 +52,11 @@ def merge_messages_preserving_incoming_tail(
     if not tail:
         return db_chain
 
+    # If we found the DB chain tip in incoming, preserve the incoming tail exactly.
+    # This avoids dropping legitimate repeated user turns when messages do not carry ids.
+    if last_match_index >= 0:
+        return [*db_chain, *tail]
+
     merged = [*db_chain]
     existing_signatures = {_message_signature(msg) for msg in db_chain}
     for message in tail:

@@ -77,6 +77,7 @@ from open_webui.utils.adaptive_file_context import (
     apply_adaptive_context_to_items,
     resolve_adaptive_config,
 )
+from open_webui.utils.chat_context_budget import apply_context_budget_policy
 from open_webui.utils.message_merge import merge_messages_preserving_incoming_tail
 
 
@@ -3321,6 +3322,21 @@ async def process_chat_payload(request, form_data, user, metadata, model):
             }
         )
 
+    try:
+        form_data, budget_diagnostics = await apply_context_budget_policy(
+            request=request,
+            form_data=form_data,
+            user=user,
+            models=models,
+        )
+        if budget_diagnostics.get("overflow"):
+            log.warning(
+                "Context budget overflow on primary payload "
+                f"(chat_id={metadata.get('chat_id')}, message_id={metadata.get('message_id')})"
+            )
+    except Exception as e:
+        log.debug(f"Context budget policy failed on primary payload: {e}")
+
     return form_data, metadata, events
 
 
@@ -5086,6 +5102,24 @@ async def streaming_chat_response_handler(response, ctx):
                             ],
                         }
 
+                        try:
+                            new_form_data, budget_diagnostics = (
+                                await apply_context_budget_policy(
+                                    request=request,
+                                    form_data=new_form_data,
+                                    user=user,
+                                )
+                            )
+                            if budget_diagnostics.get("overflow"):
+                                log.warning(
+                                    "Context budget overflow during tool recursion "
+                                    f"(chat_id={metadata.get('chat_id')}, message_id={metadata.get('message_id')})"
+                                )
+                        except Exception as budget_error:
+                            log.debug(
+                                f"Context budget policy failed during tool recursion: {budget_error}"
+                            )
+
                         res = await generate_chat_completion(
                             request,
                             new_form_data,
@@ -5269,6 +5303,24 @@ async def streaming_chat_response_handler(response, ctx):
                                     *convert_output_to_messages(output, raw=True),
                                 ],
                             }
+
+                            try:
+                                new_form_data, budget_diagnostics = (
+                                    await apply_context_budget_policy(
+                                        request=request,
+                                        form_data=new_form_data,
+                                        user=user,
+                                    )
+                                )
+                                if budget_diagnostics.get("overflow"):
+                                    log.warning(
+                                        "Context budget overflow during code interpreter recursion "
+                                        f"(chat_id={metadata.get('chat_id')}, message_id={metadata.get('message_id')})"
+                                    )
+                            except Exception as budget_error:
+                                log.debug(
+                                    f"Context budget policy failed during code interpreter recursion: {budget_error}"
+                                )
 
                             res = await generate_chat_completion(
                                 request,

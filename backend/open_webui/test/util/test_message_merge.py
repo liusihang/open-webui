@@ -55,3 +55,22 @@ def test_merge_returns_db_when_incoming_is_prefix_only() -> None:
 
     merged = mod.merge_messages_preserving_incoming_tail(db_messages, incoming_messages)
     assert merged == db_messages
+
+
+def test_merge_keeps_repeated_user_tail_without_ids() -> None:
+    mod = _load_merge_module()
+    db_messages = [
+        {"role": "user", "content": "hi"},
+        {"role": "assistant", "content": "ack"},
+    ]
+    incoming_messages = [
+        {"role": "user", "content": "hi"},
+        {"role": "assistant", "content": "ack"},
+        {"role": "user", "content": "hi"},
+    ]
+
+    merged = mod.merge_messages_preserving_incoming_tail(db_messages, incoming_messages)
+
+    assert len(merged) == 3
+    assert merged[-1]["role"] == "user"
+    assert merged[-1]["content"] == "hi"

@@ -73,7 +73,15 @@
 			ANNOUNCEMENT_MODAL_ENABLED: config.ANNOUNCEMENT_MODAL_ENABLED ?? false,
 			ANNOUNCEMENT_MODAL_KEY: config.ANNOUNCEMENT_MODAL_KEY ?? '',
 			ANNOUNCEMENT_MODAL_TITLE: config.ANNOUNCEMENT_MODAL_TITLE ?? '',
-			ANNOUNCEMENT_MODAL_CONTENT: config.ANNOUNCEMENT_MODAL_CONTENT ?? ''
+			ANNOUNCEMENT_MODAL_CONTENT: config.ANNOUNCEMENT_MODAL_CONTENT ?? '',
+			CHAT_CONTEXT_BUDGET_ENABLED: config.CHAT_CONTEXT_BUDGET_ENABLED ?? true,
+			CHAT_CONTEXT_NON_SYSTEM_MAX_TOKENS: config.CHAT_CONTEXT_NON_SYSTEM_MAX_TOKENS ?? 32000,
+			CHAT_CONTEXT_WINDOW_ROUNDS: config.CHAT_CONTEXT_WINDOW_ROUNDS ?? 5,
+			CHAT_CONTEXT_COMPACTION_TRIGGER_TOKENS:
+				config.CHAT_CONTEXT_COMPACTION_TRIGGER_TOKENS ?? 50000,
+			CHAT_CONTEXT_TOOL_OUTPUT_MAX_TOKENS: config.CHAT_CONTEXT_TOOL_OUTPUT_MAX_TOKENS ?? 1800,
+			CHAT_CONTEXT_TOOL_OUTPUT_MAX_CHARS: config.CHAT_CONTEXT_TOOL_OUTPUT_MAX_CHARS ?? 6000,
+			CHAT_CONTEXT_ALLOW_TEMP_OVERFLOW: config.CHAT_CONTEXT_ALLOW_TEMP_OVERFLOW ?? true
 		};
 	};
 
@@ -1116,6 +1124,97 @@
 								</div>
 							</div>
 						{/if}
+					{/if}
+
+					<div class="mt-3 mb-2">
+						<div class="text-xs font-medium uppercase tracking-wide text-gray-500 dark:text-gray-400">
+							{$i18n.t('Chat Context Budget')}
+						</div>
+					</div>
+
+					<div class="mb-2.5 flex w-full items-center justify-between pr-2">
+						<div class=" self-center text-xs font-medium">
+							{$i18n.t('Enable Chat Context Budget Policy')}
+						</div>
+
+						<Switch bind:state={adminConfig.CHAT_CONTEXT_BUDGET_ENABLED} />
+					</div>
+
+					{#if adminConfig.CHAT_CONTEXT_BUDGET_ENABLED}
+						<div class="mb-2.5 grid grid-cols-1 md:grid-cols-2 gap-2">
+							<div class="w-full">
+								<div class="text-xs font-medium">
+									{$i18n.t('Non-System Max Tokens')}
+								</div>
+								<input
+									class="w-full mt-2 rounded-lg py-2 px-4 text-sm bg-gray-50 dark:text-gray-300 dark:bg-gray-850 outline-hidden"
+									type="number"
+									min="256"
+									step="1"
+									bind:value={adminConfig.CHAT_CONTEXT_NON_SYSTEM_MAX_TOKENS}
+								/>
+							</div>
+
+							<div class="w-full">
+								<div class="text-xs font-medium">
+									{$i18n.t('Recent User Rounds')}
+								</div>
+								<input
+									class="w-full mt-2 rounded-lg py-2 px-4 text-sm bg-gray-50 dark:text-gray-300 dark:bg-gray-850 outline-hidden"
+									type="number"
+									min="1"
+									step="1"
+									bind:value={adminConfig.CHAT_CONTEXT_WINDOW_ROUNDS}
+								/>
+							</div>
+
+							<div class="w-full">
+								<div class="text-xs font-medium">
+									{$i18n.t('Compaction Trigger Tokens')}
+								</div>
+								<input
+									class="w-full mt-2 rounded-lg py-2 px-4 text-sm bg-gray-50 dark:text-gray-300 dark:bg-gray-850 outline-hidden"
+									type="number"
+									min={adminConfig.CHAT_CONTEXT_NON_SYSTEM_MAX_TOKENS || 256}
+									step="1"
+									bind:value={adminConfig.CHAT_CONTEXT_COMPACTION_TRIGGER_TOKENS}
+								/>
+							</div>
+
+							<div class="w-full">
+								<div class="text-xs font-medium">
+									{$i18n.t('Tool Output Max Tokens')}
+								</div>
+								<input
+									class="w-full mt-2 rounded-lg py-2 px-4 text-sm bg-gray-50 dark:text-gray-300 dark:bg-gray-850 outline-hidden"
+									type="number"
+									min="128"
+									step="1"
+									bind:value={adminConfig.CHAT_CONTEXT_TOOL_OUTPUT_MAX_TOKENS}
+								/>
+							</div>
+
+							<div class="w-full">
+								<div class="text-xs font-medium">
+									{$i18n.t('Tool Output Max Chars')}
+								</div>
+								<input
+									class="w-full mt-2 rounded-lg py-2 px-4 text-sm bg-gray-50 dark:text-gray-300 dark:bg-gray-850 outline-hidden"
+									type="number"
+									min="256"
+									step="1"
+									bind:value={adminConfig.CHAT_CONTEXT_TOOL_OUTPUT_MAX_CHARS}
+								/>
+							</div>
+						</div>
+
+						<div class="mb-2.5 flex w-full items-center justify-between pr-2">
+							<div class=" self-center text-xs font-medium">
+								{$i18n.t('Allow Temporary Overflow')}
+							</div>
+
+							<Switch bind:state={adminConfig.CHAT_CONTEXT_ALLOW_TEMP_OVERFLOW} />
+						</div>
 					{/if}
 
 					<div class="mb-2.5 flex w-full items-center justify-between pr-2">

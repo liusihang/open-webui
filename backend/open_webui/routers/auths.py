@@ -1030,6 +1030,13 @@ async def get_admin_config(request: Request, user=Depends(get_admin_user)):
         "ANNOUNCEMENT_MODAL_KEY": request.app.state.config.ANNOUNCEMENT_MODAL_KEY,
         "ANNOUNCEMENT_MODAL_TITLE": request.app.state.config.ANNOUNCEMENT_MODAL_TITLE,
         "ANNOUNCEMENT_MODAL_CONTENT": request.app.state.config.ANNOUNCEMENT_MODAL_CONTENT,
+        "CHAT_CONTEXT_BUDGET_ENABLED": request.app.state.config.CHAT_CONTEXT_BUDGET_ENABLED,
+        "CHAT_CONTEXT_NON_SYSTEM_MAX_TOKENS": request.app.state.config.CHAT_CONTEXT_NON_SYSTEM_MAX_TOKENS,
+        "CHAT_CONTEXT_WINDOW_ROUNDS": request.app.state.config.CHAT_CONTEXT_WINDOW_ROUNDS,
+        "CHAT_CONTEXT_COMPACTION_TRIGGER_TOKENS": request.app.state.config.CHAT_CONTEXT_COMPACTION_TRIGGER_TOKENS,
+        "CHAT_CONTEXT_TOOL_OUTPUT_MAX_TOKENS": request.app.state.config.CHAT_CONTEXT_TOOL_OUTPUT_MAX_TOKENS,
+        "CHAT_CONTEXT_TOOL_OUTPUT_MAX_CHARS": request.app.state.config.CHAT_CONTEXT_TOOL_OUTPUT_MAX_CHARS,
+        "CHAT_CONTEXT_ALLOW_TEMP_OVERFLOW": request.app.state.config.CHAT_CONTEXT_ALLOW_TEMP_OVERFLOW,
     }
 
 
@@ -1080,6 +1087,13 @@ class AdminConfig(BaseModel):
     ANNOUNCEMENT_MODAL_KEY: Optional[str] = None
     ANNOUNCEMENT_MODAL_TITLE: Optional[str] = None
     ANNOUNCEMENT_MODAL_CONTENT: Optional[str] = None
+    CHAT_CONTEXT_BUDGET_ENABLED: Optional[bool] = None
+    CHAT_CONTEXT_NON_SYSTEM_MAX_TOKENS: Optional[int | str] = None
+    CHAT_CONTEXT_WINDOW_ROUNDS: Optional[int | str] = None
+    CHAT_CONTEXT_COMPACTION_TRIGGER_TOKENS: Optional[int | str] = None
+    CHAT_CONTEXT_TOOL_OUTPUT_MAX_TOKENS: Optional[int | str] = None
+    CHAT_CONTEXT_TOOL_OUTPUT_MAX_CHARS: Optional[int | str] = None
+    CHAT_CONTEXT_ALLOW_TEMP_OVERFLOW: Optional[bool] = None
 
 
 @router.post("/admin/config")
@@ -1319,6 +1333,61 @@ async def update_admin_config(
         form_data.ANNOUNCEMENT_MODAL_CONTENT
     )
 
+    current_budget_enabled = bool(
+        getattr(
+            request.app.state.config.CHAT_CONTEXT_BUDGET_ENABLED,
+            "value",
+            request.app.state.config.CHAT_CONTEXT_BUDGET_ENABLED,
+        )
+    )
+    request.app.state.config.CHAT_CONTEXT_BUDGET_ENABLED = (
+        form_data.CHAT_CONTEXT_BUDGET_ENABLED
+        if form_data.CHAT_CONTEXT_BUDGET_ENABLED is not None
+        else current_budget_enabled
+    )
+
+    chat_context_non_system_max_tokens = parse_int_or_default(
+        form_data.CHAT_CONTEXT_NON_SYSTEM_MAX_TOKENS,
+        int(request.app.state.config.CHAT_CONTEXT_NON_SYSTEM_MAX_TOKENS),
+        minimum=256,
+    )
+    request.app.state.config.CHAT_CONTEXT_NON_SYSTEM_MAX_TOKENS = (
+        chat_context_non_system_max_tokens
+    )
+    request.app.state.config.CHAT_CONTEXT_WINDOW_ROUNDS = parse_int_or_default(
+        form_data.CHAT_CONTEXT_WINDOW_ROUNDS,
+        int(request.app.state.config.CHAT_CONTEXT_WINDOW_ROUNDS),
+        minimum=1,
+    )
+    request.app.state.config.CHAT_CONTEXT_COMPACTION_TRIGGER_TOKENS = parse_int_or_default(
+        form_data.CHAT_CONTEXT_COMPACTION_TRIGGER_TOKENS,
+        int(request.app.state.config.CHAT_CONTEXT_COMPACTION_TRIGGER_TOKENS),
+        minimum=chat_context_non_system_max_tokens,
+    )
+    request.app.state.config.CHAT_CONTEXT_TOOL_OUTPUT_MAX_TOKENS = parse_int_or_default(
+        form_data.CHAT_CONTEXT_TOOL_OUTPUT_MAX_TOKENS,
+        int(request.app.state.config.CHAT_CONTEXT_TOOL_OUTPUT_MAX_TOKENS),
+        minimum=128,
+    )
+    request.app.state.config.CHAT_CONTEXT_TOOL_OUTPUT_MAX_CHARS = parse_int_or_default(
+        form_data.CHAT_CONTEXT_TOOL_OUTPUT_MAX_CHARS,
+        int(request.app.state.config.CHAT_CONTEXT_TOOL_OUTPUT_MAX_CHARS),
+        minimum=256,
+    )
+
+    current_allow_temp_overflow = bool(
+        getattr(
+            request.app.state.config.CHAT_CONTEXT_ALLOW_TEMP_OVERFLOW,
+            "value",
+            request.app.state.config.CHAT_CONTEXT_ALLOW_TEMP_OVERFLOW,
+        )
+    )
+    request.app.state.config.CHAT_CONTEXT_ALLOW_TEMP_OVERFLOW = (
+        form_data.CHAT_CONTEXT_ALLOW_TEMP_OVERFLOW
+        if form_data.CHAT_CONTEXT_ALLOW_TEMP_OVERFLOW is not None
+        else current_allow_temp_overflow
+    )
+
     return {
         "SHOW_ADMIN_DETAILS": request.app.state.config.SHOW_ADMIN_DETAILS,
         "ADMIN_EMAIL": request.app.state.config.ADMIN_EMAIL,
@@ -1366,6 +1435,13 @@ async def update_admin_config(
         "ANNOUNCEMENT_MODAL_KEY": request.app.state.config.ANNOUNCEMENT_MODAL_KEY,
         "ANNOUNCEMENT_MODAL_TITLE": request.app.state.config.ANNOUNCEMENT_MODAL_TITLE,
         "ANNOUNCEMENT_MODAL_CONTENT": request.app.state.config.ANNOUNCEMENT_MODAL_CONTENT,
+        "CHAT_CONTEXT_BUDGET_ENABLED": request.app.state.config.CHAT_CONTEXT_BUDGET_ENABLED,
+        "CHAT_CONTEXT_NON_SYSTEM_MAX_TOKENS": request.app.state.config.CHAT_CONTEXT_NON_SYSTEM_MAX_TOKENS,
+        "CHAT_CONTEXT_WINDOW_ROUNDS": request.app.state.config.CHAT_CONTEXT_WINDOW_ROUNDS,
+        "CHAT_CONTEXT_COMPACTION_TRIGGER_TOKENS": request.app.state.config.CHAT_CONTEXT_COMPACTION_TRIGGER_TOKENS,
+        "CHAT_CONTEXT_TOOL_OUTPUT_MAX_TOKENS": request.app.state.config.CHAT_CONTEXT_TOOL_OUTPUT_MAX_TOKENS,
+        "CHAT_CONTEXT_TOOL_OUTPUT_MAX_CHARS": request.app.state.config.CHAT_CONTEXT_TOOL_OUTPUT_MAX_CHARS,
+        "CHAT_CONTEXT_ALLOW_TEMP_OVERFLOW": request.app.state.config.CHAT_CONTEXT_ALLOW_TEMP_OVERFLOW,
     }
 
 
