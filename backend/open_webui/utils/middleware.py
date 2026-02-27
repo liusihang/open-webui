@@ -467,7 +467,7 @@ def serialize_output(output: list) -> str:
             pass
 
         elif item_type == "reasoning":
-            reasoning_content = ""
+            reasoning_parts = []
             # Check for 'summary' (new structure) or 'content' (legacy/fallback)
             source_list = item.get("summary", []) or item.get("content", [])
             for content_part in source_list:
@@ -476,13 +476,17 @@ def serialize_output(output: list) -> str:
                 if not isinstance(content_part, dict):
                     continue
                 if "text" in content_part:
-                    text = content_part.get("text", "")
-                    if not _is_encrypted_reasoning_text(text):
-                        reasoning_content += text
+                    text_value = content_part.get("text", "")
+                    if (
+                        isinstance(text_value, str)
+                        and text_value.strip()
+                        and not _is_encrypted_reasoning_text(text_value)
+                    ):
+                        reasoning_parts.append(text_value.strip())
                 elif "summary" in content_part:  # Handle potential nested logic if any
                     pass
 
-            reasoning_content = reasoning_content.strip()
+            reasoning_content = "\n\n".join(reasoning_parts)
 
             duration = item.get("duration")
             status = item.get("status", "in_progress")
@@ -585,7 +589,94 @@ def extract_reasoning_text(payload: Optional[dict[str, Any]]) -> str:
             if isinstance(value, str) and value.strip():
                 parts.append(value)
 
-    return "".join(parts)
+    normalized_parts = [part.strip() for part in parts if isinstance(part, str) and part.strip()]
+    return "\n\n".join(normalized_parts)
+
+
+def merge_output_item_preserve_content(existing: Any, incoming: Any) -> Any:
+    if not isinstance(existing, dict) or not isinstance(incoming, dict):
+        return incoming if incoming is not None else existing
+
+    merged = dict(existing)
+
+    for key, incoming_value in incoming.items():
+        existing_value = merged.get(key)
+
+        if isinstance(incoming_value, str):
+            if incoming_value == "" and isinstance(existing_value, str) and existing_value:
+                continue
+            merged[key] = incoming_value
+            continue
+
+        if isinstance(incoming_value, dict):
+            if isinstance(existing_value, dict):
+                merged[key] = merge_output_item_preserve_content(existing_value, incoming_value)
+            else:
+                merged[key] = incoming_value
+            continue
+
+        if isinstance(incoming_value, list):
+            if not incoming_value and isinstance(existing_value, list) and existing_value:
+                continue
+
+            if isinstance(existing_value, list):
+                merged_list: list[Any] = []
+                max_len = max(len(existing_value), len(incoming_value))
+                for idx in range(max_len):
+                    has_existing = idx < len(existing_value)
+                    has_incoming = idx < len(incoming_value)
+
+                    if has_existing and has_incoming:
+                        existing_item = existing_value[idx]
+                        incoming_item = incoming_value[idx]
+                        if isinstance(existing_item, dict) and isinstance(incoming_item, dict):
+                            merged_list.append(
+                                merge_output_item_preserve_content(existing_item, incoming_item)
+                            )
+                        elif (
+                            isinstance(incoming_item, str)
+                            and incoming_item == ""
+                            and isinstance(existing_item, str)
+                            and existing_item
+                        ):
+                            merged_list.append(existing_item)
+                        else:
+                            merged_list.append(incoming_item)
+                    elif has_incoming:
+                        merged_list.append(incoming_value[idx])
+                    else:
+                        merged_list.append(existing_value[idx])
+
+                merged[key] = merged_list
+            else:
+                merged[key] = incoming_value
+            continue
+
+        merged[key] = incoming_value
+
+    return merged
+
+
+def merge_final_output_preserve_content(
+    current_output: list[Any], final_output: list[Any]
+) -> list[Any]:
+    if not isinstance(final_output, list):
+        return current_output
+
+    if not isinstance(current_output, list):
+        return final_output
+
+    merged_output = list(current_output)
+
+    for idx, final_item in enumerate(final_output):
+        if idx < len(merged_output):
+            merged_output[idx] = merge_output_item_preserve_content(
+                merged_output[idx], final_item
+            )
+        else:
+            merged_output.append(final_item)
+
+    return merged_output
 
 
 def _to_timestamp(value: Any) -> Optional[float]:
@@ -1147,7 +1238,9 @@ def handle_responses_streaming_event(
         if isinstance(item, dict) and item.get("type") == "reasoning":
             item = _normalize_reasoning_item(_clone_output_item(item))
         if item and 0 <= output_index < len(current_output):
-            new_output[output_index] = item
+            new_output[output_index] = merge_output_item_preserve_content(
+                new_output[output_index], item
+            )
         elif item:
             new_output.append(item)
         return new_output, {}
@@ -1157,7 +1250,10 @@ def handle_responses_streaming_event(
         response_data = data.get("response", {})
         final_output = response_data.get("output")
 
-        new_output = final_output if final_output is not None else current_output
+        if final_output is not None:
+            new_output = merge_final_output_preserve_content(current_output, final_output)
+        else:
+            new_output = current_output
 
         # Ensure reasoning items are marked as completed in the final output
         if new_output:
