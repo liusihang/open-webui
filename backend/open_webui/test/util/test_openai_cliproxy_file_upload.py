@@ -577,7 +577,7 @@ def test_apply_default_reasoning_payload_adds_enabled_when_missing(openai_module
 
     updated = openai_module.apply_default_reasoning_payload(payload)
 
-    assert updated["reasoning"] == {"enabled": True}
+    assert updated["reasoning"] == {"enable": True}
 
 
 def test_apply_default_reasoning_payload_preserves_explicit_flag(openai_module):
@@ -589,7 +589,7 @@ def test_apply_default_reasoning_payload_preserves_explicit_flag(openai_module):
 
     updated = openai_module.apply_default_reasoning_payload(payload)
 
-    assert updated["reasoning"] == {"enabled": False}
+    assert updated["reasoning"] == {"enable": False}
 
 
 def test_sanitize_upstream_payload_prunes_banned_reasoning_tokens(openai_module):
@@ -920,7 +920,7 @@ async def test_generate_chat_completion_applies_default_reasoning_when_missing(
 
     assert result == {"ok": True}
     sent_payload = json.loads(captured_calls[0]["data"])
-    assert sent_payload["reasoning"] == {"enabled": True}
+    assert sent_payload["reasoning"] == {"enable": True}
 
 
 @pytest.mark.asyncio
@@ -956,4 +956,4 @@ async def test_responses_preserves_explicit_reasoning_enabled_flag(openai_module
 
     assert result == {"ok": True}
     sent_payload = json.loads(captured_calls[0]["data"])
-    assert sent_payload["reasoning"] == {"enabled": False}
+    assert sent_payload["reasoning"] == {"enable": False}
