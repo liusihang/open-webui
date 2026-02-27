@@ -471,8 +471,14 @@ def serialize_output(output: list) -> str:
             # Check for 'summary' (new structure) or 'content' (legacy/fallback)
             source_list = item.get("summary", []) or item.get("content", [])
             for content_part in source_list:
+                if _is_encrypted_reasoning_part(content_part):
+                    continue
+                if not isinstance(content_part, dict):
+                    continue
                 if "text" in content_part:
-                    reasoning_content += content_part.get("text", "")
+                    text = content_part.get("text", "")
+                    if not _is_encrypted_reasoning_text(text):
+                        reasoning_content += text
                 elif "summary" in content_part:  # Handle potential nested logic if any
                     pass
 
@@ -480,6 +486,12 @@ def serialize_output(output: list) -> str:
 
             duration = item.get("duration")
             status = item.get("status", "in_progress")
+            has_encrypted_content = isinstance(item.get("encrypted_content"), str)
+
+            if not reasoning_content and (
+                has_encrypted_content or str(status).lower() == "completed"
+            ):
+                continue
 
             # Infer completion: if this reasoning item is NOT the last item,
             # render as done (a subsequent item means reasoning is complete)
@@ -576,6 +588,242 @@ def extract_reasoning_text(payload: Optional[dict[str, Any]]) -> str:
     return "".join(parts)
 
 
+def _to_timestamp(value: Any) -> Optional[float]:
+    if isinstance(value, (int, float)):
+        return float(value)
+    return None
+
+
+def _normalize_reasoning_token(value: str) -> str:
+    return re.sub(r"[\s_]+", " ", value).strip().lower()
+
+
+def _is_encrypted_reasoning_text(value: Any) -> bool:
+    if not isinstance(value, str):
+        return False
+
+    normalized = _normalize_reasoning_token(value)
+    return normalized in {
+        "encrypted reasoning content",
+        "reasoning encrypted content",
+    }
+
+
+def _is_encrypted_reasoning_part(part: Any) -> bool:
+    if not isinstance(part, dict):
+        return False
+
+    part_type = str(part.get("type") or "").strip().lower()
+    if "encrypted" in part_type:
+        return True
+
+    if isinstance(part.get("encrypted_content"), str):
+        return True
+
+    text = part.get("text")
+    if _is_encrypted_reasoning_text(text):
+        return True
+
+    signature = part.get("signature")
+    if isinstance(signature, str) and not isinstance(text, str):
+        return True
+
+    return False
+
+
+def _sanitize_reasoning_parts(parts: Any) -> list[dict[str, Any]]:
+    if not isinstance(parts, list):
+        return []
+
+    sanitized: list[dict[str, Any]] = []
+    for raw_part in parts:
+        if not isinstance(raw_part, dict):
+            continue
+
+        part = dict(raw_part)
+        if _is_encrypted_reasoning_part(part):
+            continue
+
+        text = part.get("text")
+        if isinstance(text, str):
+            text = text.strip()
+            if not text or _is_encrypted_reasoning_text(text):
+                continue
+            part["text"] = text
+
+        sanitized.append(part)
+
+    return sanitized
+
+
+def _reasoning_item_has_visible_text(item: dict[str, Any]) -> bool:
+    for key in ("summary", "content"):
+        for part in item.get(key) or []:
+            if not isinstance(part, dict):
+                continue
+            text = part.get("text")
+            if isinstance(text, str) and text.strip() and not _is_encrypted_reasoning_text(
+                text
+            ):
+                return True
+    return False
+
+
+def _clone_output_item(item: dict[str, Any]) -> dict[str, Any]:
+    cloned = dict(item)
+
+    if isinstance(item.get("attributes"), dict):
+        cloned["attributes"] = dict(item["attributes"])
+
+    for key in ("content", "summary", "output"):
+        if isinstance(item.get(key), list):
+            cloned[key] = [
+                dict(part) if isinstance(part, dict) else part for part in item[key]
+            ]
+
+    return cloned
+
+
+def _finalize_timed_item(
+    item: dict[str, Any],
+    ended_at: Optional[float] = None,
+    mark_completed: bool = True,
+) -> None:
+    end_ts = _to_timestamp(ended_at) or _to_timestamp(item.get("ended_at")) or time.time()
+    start_ts = _to_timestamp(item.get("started_at")) or end_ts
+    if start_ts > end_ts:
+        start_ts = end_ts
+
+    item["started_at"] = start_ts
+    item["ended_at"] = end_ts
+    item["duration"] = int(max(0.0, end_ts - start_ts))
+    if mark_completed:
+        item["status"] = "completed"
+
+
+def _normalize_reasoning_item(item: dict[str, Any]) -> dict[str, Any]:
+    if item.get("type") != "reasoning":
+        return item
+
+    encrypted_marker = False
+
+    if isinstance(item.get("encrypted_content"), str):
+        encrypted_marker = True
+    item.pop("encrypted_content", None)
+
+    summary = _sanitize_reasoning_parts(item.get("summary"))
+    if summary:
+        item["summary"] = summary
+    else:
+        item.pop("summary", None)
+
+    content_parts = _sanitize_reasoning_parts(item.get("content"))
+    if content_parts:
+        item["content"] = content_parts
+    else:
+        item.pop("content", None)
+
+    if encrypted_marker and not _reasoning_item_has_visible_text(item):
+        item["_encrypted_reasoning"] = True
+
+    started_at = _to_timestamp(item.get("started_at"))
+    ended_at = _to_timestamp(item.get("ended_at"))
+    status = str(item.get("status") or "").lower()
+
+    if started_at is None:
+        started_at = ended_at if ended_at is not None else time.time()
+        item["started_at"] = started_at
+
+    if status == "completed":
+        _finalize_timed_item(item, ended_at=ended_at, mark_completed=True)
+
+    return item
+
+
+def _merge_reasoning_items(
+    base_item: dict[str, Any], incoming_item: dict[str, Any]
+) -> dict[str, Any]:
+    merged = _normalize_reasoning_item(_clone_output_item(base_item))
+    incoming = _normalize_reasoning_item(_clone_output_item(incoming_item))
+
+    merged_content = list(merged.get("content") or [])
+    incoming_content = incoming.get("content") or []
+    if isinstance(incoming_content, list):
+        merged_content.extend(incoming_content)
+    merged["content"] = merged_content
+
+    merged_summary = list(merged.get("summary") or [])
+    incoming_summary = incoming.get("summary") or []
+    if isinstance(incoming_summary, list):
+        merged_summary.extend(incoming_summary)
+    merged["summary"] = merged_summary
+
+    base_started = _to_timestamp(merged.get("started_at"))
+    incoming_started = _to_timestamp(incoming.get("started_at"))
+    if base_started is None:
+        base_started = incoming_started
+    elif incoming_started is not None:
+        base_started = min(base_started, incoming_started)
+    if base_started is not None:
+        merged["started_at"] = base_started
+
+    base_status = str(merged.get("status") or "in_progress").lower()
+    incoming_status = str(incoming.get("status") or "in_progress").lower()
+
+    if "in_progress" in (base_status, incoming_status):
+        merged["status"] = "in_progress"
+        merged.pop("ended_at", None)
+        merged.pop("duration", None)
+    else:
+        ended_candidates = [
+            ts
+            for ts in (
+                _to_timestamp(merged.get("ended_at")),
+                _to_timestamp(incoming.get("ended_at")),
+            )
+            if ts is not None
+        ]
+        merged_end = max(ended_candidates) if ended_candidates else base_started
+        _finalize_timed_item(merged, ended_at=merged_end, mark_completed=True)
+
+    return merged
+
+
+def normalize_reasoning_output_items(output: Any) -> Any:
+    if not isinstance(output, list):
+        return output
+
+    normalized: list[Any] = []
+    for raw_item in output:
+        if not isinstance(raw_item, dict):
+            normalized.append(raw_item)
+            continue
+
+        item = _clone_output_item(raw_item)
+        if item.get("type") != "reasoning":
+            normalized.append(item)
+            continue
+
+        item = _normalize_reasoning_item(item)
+        is_encrypted_reasoning = bool(item.pop("_encrypted_reasoning", False))
+        item_status = str(item.get("status") or "").lower()
+
+        if not _reasoning_item_has_visible_text(item):
+            if is_encrypted_reasoning or item_status == "completed":
+                continue
+
+        if (
+            normalized
+            and isinstance(normalized[-1], dict)
+            and normalized[-1].get("type") == "reasoning"
+        ):
+            normalized[-1] = _merge_reasoning_items(normalized[-1], item)
+        else:
+            normalized.append(item)
+
+    return normalized
+
+
 def deep_merge(target, source):
     """
     Merge source into target recursively (returning new structure).
@@ -622,6 +870,8 @@ def handle_responses_streaming_event(
     if event_type == "response.output_item.added":
         item = data.get("item", {})
         if item:
+            if isinstance(item, dict) and item.get("type") == "reasoning":
+                item = _normalize_reasoning_item(_clone_output_item(item))
             new_output = list(current_output)
             new_output.append(item)
             return new_output, None
@@ -894,6 +1144,8 @@ def handle_responses_streaming_event(
         output_index = data.get("output_index", len(current_output) - 1)
 
         new_output = list(current_output)
+        if isinstance(item, dict) and item.get("type") == "reasoning":
+            item = _normalize_reasoning_item(_clone_output_item(item))
         if item and 0 <= output_index < len(current_output):
             new_output[output_index] = item
         elif item:
@@ -915,6 +1167,9 @@ def handle_responses_streaming_event(
                     and item.get("status") != "completed"
                 ):
                     item["status"] = "completed"
+
+            # Normalize timing fields and fold fragmented reasoning chunks.
+            new_output = normalize_reasoning_output_items(new_output)
 
         return new_output, {"usage": response_data.get("usage"), "done": True}
 
@@ -4090,16 +4345,13 @@ async def streaming_chat_response_handler(response, ctx):
                                 item["content"] = [
                                     {"type": "output_text", "text": block_content}
                                 ]
-                                item["ended_at"] = time.time()
-                                item["duration"] = int(
-                                    item["ended_at"] - item["started_at"]
+                                _finalize_timed_item(
+                                    item, ended_at=time.time(), mark_completed=True
                                 )
-                                item["status"] = "completed"
                             elif last_type == "open_webui:code_interpreter":
                                 item["code"] = block_content
-                                item["ended_at"] = time.time()
-                                item["duration"] = int(
-                                    item["ended_at"] - item["started_at"]
+                                _finalize_timed_item(
+                                    item, ended_at=time.time(), mark_completed=False
                                 )
                             else:
                                 set_last_text(output, block_content)
@@ -4234,6 +4486,7 @@ async def streaming_chat_response_handler(response, ctx):
                         ),
                     )
                     last_delta_data = None
+                    saw_responses_events = False
 
                     async def flush_pending_delta_data(threshold: int = 0):
                         nonlocal delta_count
@@ -4302,13 +4555,17 @@ async def streaming_chat_response_handler(response, ctx):
                                     )
                                 # Check for Responses API events (type field starts with "response.")
                                 elif data.get("type", "").startswith("response."):
+                                    saw_responses_events = True
                                     output, response_metadata = (
                                         handle_responses_streaming_event(data, output)
                                     )
+                                    display_output = normalize_reasoning_output_items(
+                                        output
+                                    )
 
                                     processed_data = {
-                                        "output": output,
-                                        "content": serialize_output(output),
+                                        "output": display_output,
+                                        "content": serialize_output(display_output),
                                     }
 
                                     # print(data)
@@ -4598,12 +4855,11 @@ async def streaming_chat_response_handler(response, ctx):
                                             == "reasoning_content"
                                         ):
                                             reasoning_item = output[-1]
-                                            reasoning_item["ended_at"] = time.time()
-                                            reasoning_item["duration"] = int(
-                                                reasoning_item["ended_at"]
-                                                - reasoning_item["started_at"]
+                                            _finalize_timed_item(
+                                                reasoning_item,
+                                                ended_at=time.time(),
+                                                mark_completed=True,
                                             )
-                                            reasoning_item["status"] = "completed"
 
                                             output.append(
                                                 {
@@ -4830,12 +5086,14 @@ async def streaming_chat_response_handler(response, ctx):
                         if output[-1].get("type") == "reasoning":
                             reasoning_item = output[-1]
                             if reasoning_item.get("ended_at") is None:
-                                reasoning_item["ended_at"] = time.time()
-                                reasoning_item["duration"] = int(
-                                    reasoning_item["ended_at"]
-                                    - reasoning_item["started_at"]
+                                _finalize_timed_item(
+                                    reasoning_item,
+                                    ended_at=time.time(),
+                                    mark_completed=True,
                                 )
-                                reasoning_item["status"] = "completed"
+
+                    if saw_responses_events:
+                        output = normalize_reasoning_output_items(output)
 
                     if response_tool_calls:
                         tool_calls.append(response_tool_calls)
