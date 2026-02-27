@@ -36,7 +36,12 @@ WORKDIR /app
 RUN apk add --no-cache git
 
 COPY package.json package-lock.json ./
-RUN npm ci --force
+# Keep deterministic installs when lockfile is valid, but auto-heal lock drift
+# during image builds to avoid hard failures after partial file syncs.
+RUN npm ci --force || ( \
+    echo "npm ci failed (likely package-lock mismatch). Falling back to npm install --force." >&2; \
+    npm install --force \
+)
 
 COPY . .
 ENV APP_BUILD_HASH=${BUILD_HASH}
