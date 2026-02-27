@@ -131,11 +131,17 @@ def apply_default_reasoning_payload(payload: dict[str, Any]) -> dict[str, Any]:
     reasoning = payload.get("reasoning")
 
     if reasoning is None:
-        payload["reasoning"] = {"enabled": True}
+        payload["reasoning"] = {"enable": True}
         return payload
 
     if isinstance(reasoning, dict):
-        reasoning.setdefault("enabled", True)
+        if "enable" not in reasoning:
+            if "enabled" in reasoning:
+                reasoning["enable"] = bool(reasoning.get("enabled"))
+            else:
+                reasoning["enable"] = True
+
+        reasoning.pop("enabled", None)
 
     return payload
 
@@ -1367,6 +1373,13 @@ async def generate_chat_completion(
 
     cliproxy_api_enabled = _normalize_bool_config_flag(api_config.get("cliproxy_api", False))
     api_type = str(api_config.get("api_type") or "").lower()
+
+    # For OpenAI reasoning models (o1/o3/o4/gpt-5), Chat Completions may expose
+    # reasoning token usage without textual reasoning deltas. When api_type is not
+    # explicitly configured, prefer Responses API so reasoning summaries can be
+    # surfaced consistently in Open WebUI.
+    if not api_type and is_openai_reasoning_model(payload.get("model", "")):
+        api_type = "responses"
 
     # Normalize local Open WebUI image references (UUID/path) into data URLs for
     # all upstream modes, not only cliproxy.

@@ -545,6 +545,37 @@ def serialize_output(output: list) -> str:
     return content.strip()
 
 
+def extract_reasoning_text(payload: Optional[dict[str, Any]]) -> str:
+    if not isinstance(payload, dict):
+        return ""
+
+    for key in ("reasoning_content", "reasoning", "thinking"):
+        value = payload.get(key)
+        if isinstance(value, str) and value.strip():
+            return value
+
+    details = payload.get("reasoning_details")
+    if not isinstance(details, list):
+        return ""
+
+    parts = []
+    for item in details:
+        if isinstance(item, str):
+            if item.strip():
+                parts.append(item)
+            continue
+
+        if not isinstance(item, dict):
+            continue
+
+        for key in ("text", "reasoning", "content", "summary"):
+            value = item.get(key)
+            if isinstance(value, str) and value.strip():
+                parts.append(value)
+
+    return "".join(parts)
+
+
 def deep_merge(target, source):
     """
     Merge source into target recursively (returning new structure).
@@ -3510,9 +3541,9 @@ async def background_tasks_handler(ctx):
                     if len(res.get("choices", [])) == 1:
                         response_message = res.get("choices", [])[0].get("message", {})
 
-                        follow_ups_string = response_message.get(
-                            "content"
-                        ) or response_message.get("reasoning_content", "")
+                        follow_ups_string = response_message.get("content") or extract_reasoning_text(
+                            response_message
+                        )
                     else:
                         follow_ups_string = ""
 
@@ -3571,9 +3602,7 @@ async def background_tasks_handler(ctx):
 
                                 title_string = (
                                     response_message.get("content")
-                                    or response_message.get(
-                                        "reasoning_content",
-                                    )
+                                    or extract_reasoning_text(response_message)
                                     or message.get("content", user_message)
                                 )
                             else:
@@ -3631,9 +3660,9 @@ async def background_tasks_handler(ctx):
                                 "message", {}
                             )
 
-                            tags_string = response_message.get(
-                                "content"
-                            ) or response_message.get("reasoning_content", "")
+                            tags_string = response_message.get("content") or extract_reasoning_text(
+                                response_message
+                            )
                         else:
                             tags_string = ""
 
@@ -3717,73 +3746,94 @@ async def non_streaming_chat_response_handler(response, ctx):
                 )
 
             choices = response_data.get("choices", [])
-            if choices and choices[0].get("message", {}).get("content"):
-                content = response_data["choices"][0]["message"]["content"]
+            response_message = choices[0].get("message", {}) if choices else {}
+            content = response_message.get("content", "")
+            reasoning_content = extract_reasoning_text(response_message)
+            response_output = response_data.get("output")
 
-                if content:
-                    await event_emitter(
-                        {
-                            "type": "chat:completion",
-                            "data": response_data,
-                        }
-                    )
+            if choices and (content or reasoning_content or response_output):
+                await event_emitter(
+                    {
+                        "type": "chat:completion",
+                        "data": response_data,
+                    }
+                )
 
-                    title = Chats.get_chat_title_by_id(metadata["chat_id"])
+                title = Chats.get_chat_title_by_id(metadata["chat_id"])
 
-                    # Use output from backend if provided (OR-compliant backends),
-                    # otherwise generate from response content
-                    response_output = response_data.get("output")
-                    if not response_output:
-                        response_output = [
+                # Use output from backend if provided (OR-compliant backends),
+                # otherwise generate from response content/reasoning.
+                if not response_output:
+                    response_output = []
+
+                    if reasoning_content:
+                        response_output.append(
                             {
-                                "type": "message",
-                                "id": output_id("msg"),
+                                "type": "reasoning",
+                                "id": output_id("r"),
                                 "status": "completed",
-                                "role": "assistant",
-                                "content": [{"type": "output_text", "text": content}],
+                                "start_tag": "<think>",
+                                "end_tag": "</think>",
+                                "attributes": {"type": "reasoning_content"},
+                                "content": [
+                                    {"type": "output_text", "text": reasoning_content}
+                                ],
+                                "summary": None,
                             }
-                        ]
+                        )
 
-                    await event_emitter(
+                    response_output.append(
                         {
-                            "type": "chat:completion",
-                            "data": {
-                                "done": True,
-                                "content": content,
-                                "output": response_output,
-                                "title": title,
-                            },
+                            "type": "message",
+                            "id": output_id("msg"),
+                            "status": "completed",
+                            "role": "assistant",
+                            "content": [{"type": "output_text", "text": content}],
                         }
                     )
 
-                    # Save message in the database
-                    Chats.upsert_message_to_chat_by_id_and_message_id(
-                        metadata["chat_id"],
-                        metadata["message_id"],
-                        {
-                            "role": "assistant",
-                            "content": content,
+                content_to_store = content or serialize_output(response_output)
+
+                await event_emitter(
+                    {
+                        "type": "chat:completion",
+                        "data": {
+                            "done": True,
+                            "content": content_to_store,
                             "output": response_output,
+                            "title": title,
                         },
-                    )
+                    }
+                )
 
-                    # Send a webhook notification if the user is not active
-                    if not Users.is_user_active(user.id):
-                        webhook_url = Users.get_user_webhook_url_by_id(user.id)
-                        if webhook_url:
-                            await post_webhook(
-                                request.app.state.WEBUI_NAME,
-                                webhook_url,
-                                f"{title} - {request.app.state.config.WEBUI_URL}/c/{metadata['chat_id']}\n\n{content}",
-                                {
-                                    "action": "chat",
-                                    "message": content,
-                                    "title": title,
-                                    "url": f"{request.app.state.config.WEBUI_URL}/c/{metadata['chat_id']}",
-                                },
-                            )
+                # Save message in the database
+                Chats.upsert_message_to_chat_by_id_and_message_id(
+                    metadata["chat_id"],
+                    metadata["message_id"],
+                    {
+                        "role": "assistant",
+                        "content": content_to_store,
+                        "output": response_output,
+                    },
+                )
 
-                    await background_tasks_handler(ctx)
+                # Send a webhook notification if the user is not active
+                if not Users.is_user_active(user.id):
+                    webhook_url = Users.get_user_webhook_url_by_id(user.id)
+                    if webhook_url:
+                        await post_webhook(
+                            request.app.state.WEBUI_NAME,
+                            webhook_url,
+                            f"{title} - {request.app.state.config.WEBUI_URL}/c/{metadata['chat_id']}\n\n{content_to_store}",
+                            {
+                                "action": "chat",
+                                "message": content_to_store,
+                                "title": title,
+                                "url": f"{request.app.state.config.WEBUI_URL}/c/{metadata['chat_id']}",
+                            },
+                        )
+
+                await background_tasks_handler(ctx)
 
             response = build_response_object(
                 response, merge_events_into_response(response_data, events)
@@ -4498,11 +4548,7 @@ async def streaming_chat_response_handler(response, ctx):
 
                                     value = delta.get("content")
 
-                                    reasoning_content = (
-                                        delta.get("reasoning_content")
-                                        or delta.get("reasoning")
-                                        or delta.get("thinking")
-                                    )
+                                    reasoning_content = extract_reasoning_text(delta)
                                     if reasoning_content:
                                         if (
                                             not output
