@@ -140,6 +140,8 @@
 	let webSearchEnabled = false;
 	let codeInterpreterEnabled = false;
 	let deepResearchEnabled = false;
+	type ReasoningDepth = 'medium' | 'deep' | 'divergent';
+	let reasoningDepth: ReasoningDepth = 'medium';
 
 	let showCommands = false;
 
@@ -188,6 +190,7 @@
 		imageGenerationEnabled = false;
 		codeInterpreterEnabled = false;
 		deepResearchEnabled = false;
+		reasoningDepth = 'medium';
 
 		const storageChatInput = sessionStorage.getItem(
 			`chat-input${chatIdProp ? `-${chatIdProp}` : ''}`
@@ -237,6 +240,10 @@
 						imageGenerationEnabled = input.imageGenerationEnabled;
 						codeInterpreterEnabled = input.codeInterpreterEnabled;
 						deepResearchEnabled = input.deepResearchEnabled ?? false;
+						reasoningDepth =
+							input.reasoningDepth === 'deep' || input.reasoningDepth === 'divergent'
+								? input.reasoningDepth
+								: 'medium';
 					}
 				} catch (e) {}
 			} else {
@@ -298,6 +305,7 @@
 		imageGenerationEnabled = false;
 		codeInterpreterEnabled = false;
 		deepResearchEnabled = false;
+		reasoningDepth = 'medium';
 
 		if (selectedModelIds.filter((id) => id).length > 0) {
 			setDefaults();
@@ -1970,6 +1978,18 @@
 		return features;
 	};
 
+	const getReasoningMaxTokens = (depth: ReasoningDepth): number => {
+		if (depth === 'deep') {
+			return 8126;
+		}
+
+		if (depth === 'divergent') {
+			return 12400;
+		}
+
+		return 2048;
+	};
+
 	const sendMessageSocket = async (model, _messages, _history, responseMessageId, _chatId) => {
 		const responseMessage = _history.messages[responseMessageId];
 		const userMessage = _history.messages[responseMessage.parentId];
@@ -2021,6 +2041,11 @@
 			$settings?.params?.stream_response ??
 			params?.stream_response ??
 			true;
+
+		const reasoning = {
+			enabled: true,
+			max_tokens: getReasoningMaxTokens(reasoningDepth)
+		};
 
 		let messages = [
 			params?.system || $settings.system
@@ -2125,6 +2150,7 @@
 				stream: stream,
 				model: model.id,
 				messages: messages,
+				reasoning,
 				params: {
 					...$settings?.params,
 					...params,
@@ -2729,8 +2755,9 @@
 									bind:imageGenerationEnabled
 									bind:codeInterpreterEnabled
 									bind:webSearchEnabled
-									bind:deepResearchEnabled
-									bind:atSelectedModel
+					bind:deepResearchEnabled
+					bind:reasoningDepth
+					bind:atSelectedModel
 									bind:showCommands
 									toolServers={$toolServers}
 									{generating}
@@ -2800,8 +2827,9 @@
 									bind:imageGenerationEnabled
 									bind:codeInterpreterEnabled
 									bind:webSearchEnabled
-									bind:deepResearchEnabled
-									bind:atSelectedModel
+					bind:deepResearchEnabled
+					bind:reasoningDepth
+					bind:atSelectedModel
 									bind:showCommands
 									toolServers={$toolServers}
 									{stopResponse}
