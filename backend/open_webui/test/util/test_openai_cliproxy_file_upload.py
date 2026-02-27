@@ -572,6 +572,26 @@ def test_convert_to_responses_payload_maps_file_part_to_input_file(openai_module
     }
 
 
+def test_apply_default_reasoning_payload_adds_enabled_when_missing(openai_module):
+    payload = {"model": "gpt-4o", "messages": [{"role": "user", "content": "hi"}]}
+
+    updated = openai_module.apply_default_reasoning_payload(payload)
+
+    assert updated["reasoning"] == {"enabled": True}
+
+
+def test_apply_default_reasoning_payload_preserves_explicit_flag(openai_module):
+    payload = {
+        "model": "gpt-4o",
+        "messages": [{"role": "user", "content": "hi"}],
+        "reasoning": {"enabled": False},
+    }
+
+    updated = openai_module.apply_default_reasoning_payload(payload)
+
+    assert updated["reasoning"] == {"enabled": False}
+
+
 @pytest.mark.asyncio
 async def test_generate_chat_completion_ignores_inaccessible_files_and_succeeds(
     openai_module, monkeypatch, tmp_path
@@ -703,3 +723,77 @@ async def test_generate_chat_completion_non_cliproxy_responses_applies_file_and_
     input_content = sent_payload["input"][0]["content"]
     assert any(part.get("type") == "input_file" for part in input_content)
     assert any(part.get("type") == "input_image" for part in input_content)
+
+
+@pytest.mark.asyncio
+async def test_generate_chat_completion_applies_default_reasoning_when_missing(
+    openai_module, monkeypatch
+):
+    request = _build_request(cliproxy_api=False)
+    user = types.SimpleNamespace(id="u1", role="admin", name="Admin", email="admin@test")
+    form_data = {
+        "model": "gpt-4o",
+        "messages": [{"role": "user", "content": "hello"}],
+    }
+
+    async def fake_headers_and_cookies(*args, **kwargs):
+        return {}, {}
+
+    async def fake_cleanup(*args, **kwargs):
+        return None
+
+    captured_calls = []
+    monkeypatch.setattr(openai_module, "get_headers_and_cookies", fake_headers_and_cookies)
+    monkeypatch.setattr(openai_module, "cleanup_response", fake_cleanup)
+    monkeypatch.setattr(
+        openai_module.aiohttp,
+        "ClientSession",
+        lambda *args, **kwargs: _FakeSession(captured_calls),
+    )
+
+    result = await openai_module.generate_chat_completion(
+        request=request,
+        form_data=form_data,
+        user=user,
+        bypass_filter=True,
+    )
+
+    assert result == {"ok": True}
+    sent_payload = json.loads(captured_calls[0]["data"])
+    assert sent_payload["reasoning"] == {"enabled": True}
+
+
+@pytest.mark.asyncio
+async def test_responses_preserves_explicit_reasoning_enabled_flag(openai_module, monkeypatch):
+    request = _build_request(cliproxy_api=False)
+    user = types.SimpleNamespace(id="u1", role="admin", name="Admin", email="admin@test")
+    form_data = openai_module.ResponsesForm(
+        model="gpt-4o",
+        input=[{"role": "user", "content": [{"type": "input_text", "text": "hello"}]}],
+        reasoning={"enabled": False},
+    )
+
+    async def fake_headers_and_cookies(*args, **kwargs):
+        return {}, {}
+
+    async def fake_cleanup(*args, **kwargs):
+        return None
+
+    captured_calls = []
+    monkeypatch.setattr(openai_module, "get_headers_and_cookies", fake_headers_and_cookies)
+    monkeypatch.setattr(openai_module, "cleanup_response", fake_cleanup)
+    monkeypatch.setattr(
+        openai_module.aiohttp,
+        "ClientSession",
+        lambda *args, **kwargs: _FakeSession(captured_calls),
+    )
+
+    result = await openai_module.responses(
+        request=request,
+        form_data=form_data,
+        user=user,
+    )
+
+    assert result == {"ok": True}
+    sent_payload = json.loads(captured_calls[0]["data"])
+    assert sent_payload["reasoning"] == {"enabled": False}

@@ -126,6 +126,20 @@ def openai_reasoning_model_handler(payload):
     return payload
 
 
+def apply_default_reasoning_payload(payload: dict[str, Any]) -> dict[str, Any]:
+    """Ensure reasoning is enabled by default unless explicitly configured."""
+    reasoning = payload.get("reasoning")
+
+    if reasoning is None:
+        payload["reasoning"] = {"enabled": True}
+        return payload
+
+    if isinstance(reasoning, dict):
+        reasoning.setdefault("enabled", True)
+
+    return payload
+
+
 async def get_headers_and_cookies(
     request: Request,
     url: str,
@@ -1389,6 +1403,8 @@ async def generate_chat_completion(
     if "max_tokens" in payload and "max_completion_tokens" in payload:
         del payload["max_tokens"]
 
+    payload = apply_default_reasoning_payload(payload)
+
     # Convert the modified body back to JSON
     if "logit_bias" in payload and payload["logit_bias"]:
         logit_bias = convert_logit_bias_input_to_json(payload["logit_bias"])
@@ -1600,6 +1616,7 @@ async def responses(
     Routes to the correct upstream backend based on the model field.
     """
     payload = form_data.model_dump(exclude_none=True)
+    payload = apply_default_reasoning_payload(payload)
     body = json.dumps(payload)
 
     idx = 0
@@ -1705,6 +1722,9 @@ async def proxy(path: str, request: Request, user=Depends(get_verified_user)):
     if body:
         try:
             payload = json.loads(body)
+            if isinstance(payload, dict) and isinstance(payload.get("model"), str):
+                payload = apply_default_reasoning_payload(payload)
+                body = json.dumps(payload).encode()
         except (json.JSONDecodeError, ValueError):
             payload = None
 
