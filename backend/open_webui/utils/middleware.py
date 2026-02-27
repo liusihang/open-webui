@@ -1046,6 +1046,11 @@ def process_tool_result(
 
     tool_result_files = []
 
+    # Defensive normalization: some tool integrations may accidentally return tuples.
+    # Keep downstream handling JSON-serializable and string-safe.
+    if isinstance(tool_result, tuple):
+        tool_result = list(tool_result)
+
     if isinstance(tool_result, list):
         if tool_type == "mcp":  # MCP
             tool_response = []
@@ -1093,8 +1098,10 @@ def process_tool_result(
     if isinstance(tool_result, list):
         tool_result = {"results": tool_result}
 
-    if isinstance(tool_result, dict) or isinstance(tool_result, list):
+    if isinstance(tool_result, (dict, list, tuple)):
         tool_result = json.dumps(tool_result, indent=2, ensure_ascii=False)
+    elif tool_result is not None and not isinstance(tool_result, str):
+        tool_result = str(tool_result)
 
     return tool_result, tool_result_files, tool_result_embeds
 
@@ -2151,10 +2158,18 @@ def add_file_context(messages: list, chat_id: str, user) -> list:
         )
 
         content = message.get("content", "")
-        if isinstance(content, list):
-            message["content"] = [{"type": "text", "text": file_context}] + content
-        else:
+        if isinstance(content, (list, tuple)):
+            content_blocks = list(content)
+            if all(isinstance(block, dict) for block in content_blocks):
+                message["content"] = [{"type": "text", "text": file_context}] + content_blocks
+            else:
+                message["content"] = file_context + "".join(str(block) for block in content_blocks)
+        elif isinstance(content, str):
             message["content"] = file_context + content
+        elif content is None:
+            message["content"] = file_context
+        else:
+            message["content"] = file_context + str(content)
 
     return messages
 
