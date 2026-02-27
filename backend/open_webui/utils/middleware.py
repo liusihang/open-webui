@@ -1054,7 +1054,7 @@ def handle_responses_streaming_event(
                         content_list = item["content"]
 
                         while len(content_list) <= content_index:
-                            content_list.append({"type": "text", "text": ""})
+                            content_list.append({"type": "output_text", "text": ""})
 
                         # Copy the part to mutate it
                         part = content_list[content_index].copy()
@@ -1102,8 +1102,8 @@ def handle_responses_streaming_event(
                             content_list = item["content"]
 
                             while len(content_list) <= content_index:
-                                # Reasoning content parts default to text
-                                content_list.append({"type": "text", "text": ""})
+                                # Keep OR-compatible output part typing.
+                                content_list.append({"type": "output_text", "text": ""})
 
                             part = content_list[content_index].copy()
                             content_list[content_index] = part

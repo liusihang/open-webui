@@ -1238,6 +1238,48 @@
 			});
 		}
 	};
+	const mergeServerMessageIntoHistory = (incomingMessage) => {
+		if (!incomingMessage?.id) {
+			return;
+		}
+
+		const messageId = incomingMessage.id;
+		const existingMessage = history.messages?.[messageId] ?? {};
+		const existingContent =
+			typeof existingMessage?.content === 'string' ? existingMessage.content : '';
+		const incomingContent = incomingMessage.content;
+		const incomingContentIsEmpty =
+			incomingContent === undefined ||
+			incomingContent === null ||
+			(typeof incomingContent === 'string' && incomingContent.trim().length === 0);
+
+		const mergedMessage = {
+			...existingMessage,
+			...(!incomingContentIsEmpty &&
+			typeof incomingContent === 'string' &&
+			typeof existingMessage?.content === 'string' &&
+			existingMessage.content !== incomingContent
+				? { originalContent: existingMessage.content }
+				: {}),
+			...incomingMessage
+		};
+
+		if (incomingContentIsEmpty && existingContent) {
+			mergedMessage.content = existingContent;
+		}
+
+		if (
+			Array.isArray(incomingMessage.output) &&
+			incomingMessage.output.length === 0 &&
+			Array.isArray(existingMessage.output) &&
+			existingMessage.output.length > 0
+		) {
+			mergedMessage.output = existingMessage.output;
+		}
+
+		history.messages[messageId] = mergedMessage;
+	};
+
 	const chatCompletedHandler = async (_chatId, modelId, responseMessageId, messages) => {
 		const res = await chatCompleted(localStorage.token, {
 			model: modelId,
@@ -1265,16 +1307,7 @@
 		if (res !== null && res.messages) {
 			// Update chat history with the new messages
 			for (const message of res.messages) {
-				if (message?.id) {
-					// Add null check for message and message.id
-					history.messages[message.id] = {
-						...history.messages[message.id],
-						...(history.messages[message.id].content !== message.content
-							? { originalContent: history.messages[message.id].content }
-							: {}),
-						...message
-					};
-				}
+				mergeServerMessageIntoHistory(message);
 			}
 		}
 
@@ -1337,13 +1370,7 @@
 		if (res !== null && res.messages) {
 			// Update chat history with the new messages
 			for (const message of res.messages) {
-				history.messages[message.id] = {
-					...history.messages[message.id],
-					...(history.messages[message.id].content !== message.content
-						? { originalContent: history.messages[message.id].content }
-						: {}),
-					...message
-				};
+				mergeServerMessageIntoHistory(message);
 			}
 		}
 

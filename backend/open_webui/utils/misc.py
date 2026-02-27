@@ -193,7 +193,7 @@ def convert_output_to_messages(output: list, raw: bool = False) -> list[dict]:
             content_parts = item.get("content", [])
             text = ""
             for part in content_parts:
-                if part.get("type") == "output_text":
+                if part.get("type") in ["output_text", "text"]:
                     text += coerce_text(part.get("text", ""))
             if text:
                 pending_content.append(text)
