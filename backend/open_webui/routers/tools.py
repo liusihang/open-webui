@@ -398,6 +398,14 @@ async def create_new_tools(
             tool_cache_dir.mkdir(parents=True, exist_ok=True)
 
             if tools:
+                tool_search_service = getattr(request.app.state, "TOOL_SEARCH_SERVICE", None)
+                if tool_search_service is not None:
+                    try:
+                        await tool_search_service.upsert_local_tool_documents(form_data.id)
+                    except Exception as e:
+                        log.warning(
+                            f"Failed to index tool_search docs for tool '{form_data.id}': {e}"
+                        )
                 return tools
             else:
                 raise HTTPException(
@@ -522,6 +530,12 @@ async def update_tools_by_id(
         tools = Tools.update_tool_by_id(id, updated, db=db)
 
         if tools:
+            tool_search_service = getattr(request.app.state, "TOOL_SEARCH_SERVICE", None)
+            if tool_search_service is not None:
+                try:
+                    await tool_search_service.upsert_local_tool_documents(id)
+                except Exception as e:
+                    log.warning(f"Failed to index tool_search docs for tool '{id}': {e}")
             return tools
         else:
             raise HTTPException(
@@ -640,6 +654,13 @@ async def delete_tools_by_id(
         TOOLS = request.app.state.TOOLS
         if id in TOOLS:
             del TOOLS[id]
+
+        tool_search_service = getattr(request.app.state, "TOOL_SEARCH_SERVICE", None)
+        if tool_search_service is not None:
+            try:
+                await tool_search_service.delete_local_tool_documents(id)
+            except Exception as e:
+                log.warning(f"Failed to delete tool_search docs for tool '{id}': {e}")
 
     return result
 

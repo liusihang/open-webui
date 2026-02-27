@@ -91,6 +91,7 @@ from open_webui.routers import (
     prompts,
     evaluations,
     skills,
+    tool_search,
     tools,
     users,
     utils,
@@ -496,6 +497,17 @@ from open_webui.config import (
     TAGS_GENERATION_PROMPT_TEMPLATE,
     IMAGE_PROMPT_GENERATION_PROMPT_TEMPLATE,
     TOOLS_FUNCTION_CALLING_PROMPT_TEMPLATE,
+    ENABLE_NATIVE_TOOL_SEARCH,
+    TOOL_SEARCH_TRIGGER_COUNT,
+    TOOL_SEARCH_INITIAL_VISIBLE_COUNT,
+    TOOL_SEARCH_DEFAULT_TOP_K,
+    TOOL_SEARCH_VECTOR_CANDIDATES,
+    TOOL_SEARCH_BM25_CANDIDATES,
+    TOOL_SEARCH_HYBRID_BM25_WEIGHT,
+    TOOL_SEARCH_MCP_REBUILD_ENABLED,
+    TOOL_SEARCH_MCP_REBUILD_INTERVAL_HOURS,
+    TOOL_SEARCH_MCP_REBUILD_ON_STARTUP,
+    NATIVE_TOOL_ROUTER_PROMPT_TEMPLATE,
     VOICE_MODE_PROMPT_TEMPLATE,
     QUERY_GENERATION_PROMPT_TEMPLATE,
     AUTOCOMPLETE_GENERATION_PROMPT_TEMPLATE,
@@ -568,6 +580,7 @@ from open_webui.utils.middleware import (
     process_chat_response,
 )
 from open_webui.utils.tools import set_tool_servers
+from open_webui.utils.tool_search import ToolSearchService
 
 from open_webui.utils.auth import (
     get_license_data,
@@ -735,7 +748,17 @@ async def lifespan(app: FastAPI):
         except Exception as e:
             log.warning(f"Failed to initialize tool servers at startup: {e}")
 
+    try:
+        await app.state.TOOL_SEARCH_SERVICE.start()
+    except Exception as e:
+        log.warning(f"Failed to initialize native tool search service: {e}")
+
     yield
+
+    try:
+        await app.state.TOOL_SEARCH_SERVICE.stop()
+    except Exception as e:
+        log.debug(f"Failed to stop native tool search service: {e}")
 
     if hasattr(app.state, "redis_task_command_listener"):
         app.state.redis_task_command_listener.cancel()
@@ -816,6 +839,7 @@ app.state.OPENAI_MODELS = {}
 
 app.state.config.TOOL_SERVER_CONNECTIONS = TOOL_SERVER_CONNECTIONS
 app.state.TOOL_SERVERS = []
+app.state.TOOL_SEARCH_SERVICE = ToolSearchService(app)
 
 ########################################
 #
@@ -1423,6 +1447,23 @@ app.state.config.FOLLOW_UP_GENERATION_PROMPT_TEMPLATE = (
 app.state.config.TOOLS_FUNCTION_CALLING_PROMPT_TEMPLATE = (
     TOOLS_FUNCTION_CALLING_PROMPT_TEMPLATE
 )
+app.state.config.ENABLE_NATIVE_TOOL_SEARCH = ENABLE_NATIVE_TOOL_SEARCH
+app.state.config.TOOL_SEARCH_TRIGGER_COUNT = TOOL_SEARCH_TRIGGER_COUNT
+app.state.config.TOOL_SEARCH_INITIAL_VISIBLE_COUNT = TOOL_SEARCH_INITIAL_VISIBLE_COUNT
+app.state.config.TOOL_SEARCH_DEFAULT_TOP_K = TOOL_SEARCH_DEFAULT_TOP_K
+app.state.config.TOOL_SEARCH_VECTOR_CANDIDATES = TOOL_SEARCH_VECTOR_CANDIDATES
+app.state.config.TOOL_SEARCH_BM25_CANDIDATES = TOOL_SEARCH_BM25_CANDIDATES
+app.state.config.TOOL_SEARCH_HYBRID_BM25_WEIGHT = TOOL_SEARCH_HYBRID_BM25_WEIGHT
+app.state.config.TOOL_SEARCH_MCP_REBUILD_ENABLED = TOOL_SEARCH_MCP_REBUILD_ENABLED
+app.state.config.TOOL_SEARCH_MCP_REBUILD_INTERVAL_HOURS = (
+    TOOL_SEARCH_MCP_REBUILD_INTERVAL_HOURS
+)
+app.state.config.TOOL_SEARCH_MCP_REBUILD_ON_STARTUP = (
+    TOOL_SEARCH_MCP_REBUILD_ON_STARTUP
+)
+app.state.config.NATIVE_TOOL_ROUTER_PROMPT_TEMPLATE = (
+    NATIVE_TOOL_ROUTER_PROMPT_TEMPLATE
+)
 app.state.config.QUERY_GENERATION_PROMPT_TEMPLATE = QUERY_GENERATION_PROMPT_TEMPLATE
 app.state.config.AUTOCOMPLETE_GENERATION_PROMPT_TEMPLATE = (
     AUTOCOMPLETE_GENERATION_PROMPT_TEMPLATE
@@ -1636,6 +1677,9 @@ app.include_router(models.router, prefix="/api/v1/models", tags=["models"])
 app.include_router(knowledge.router, prefix="/api/v1/knowledge", tags=["knowledge"])
 app.include_router(prompts.router, prefix="/api/v1/prompts", tags=["prompts"])
 app.include_router(tools.router, prefix="/api/v1/tools", tags=["tools"])
+app.include_router(
+    tool_search.router, prefix="/api/v1/tool-search", tags=["tool-search"]
+)
 app.include_router(skills.router, prefix="/api/v1/skills", tags=["skills"])
 
 app.include_router(memories.router, prefix="/api/v1/memories", tags=["memories"])

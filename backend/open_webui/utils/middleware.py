@@ -83,6 +83,7 @@ from open_webui.utils.message_merge import merge_messages_preserving_incoming_ta
 
 from open_webui.utils.sanitize import sanitize_code
 from open_webui.utils.chat import generate_chat_completion
+from open_webui.functions import generate_function_chat_completion
 from open_webui.utils.task import (
     get_task_model_id,
     rag_template,
@@ -118,12 +119,25 @@ from open_webui.utils.payload import apply_system_prompt_to_body
 from open_webui.utils.response import normalize_usage
 from open_webui.utils.mcp.client import MCPClient
 from open_webui.utils.auto_memory import run_auto_memory_writeback
+from open_webui.utils.tool_search import (
+    build_function_pipe_spec,
+    build_tool_search_spec,
+    get_user_group_ids,
+    has_local_tool_access,
+    has_mcp_access,
+    resolve_bool as resolve_tool_search_bool,
+    resolve_float as resolve_tool_search_float,
+    resolve_int as resolve_tool_search_int,
+    sanitize_tool_name,
+    select_initial_visible_tools,
+)
 
 
 from open_webui.config import (
     CACHE_DIR,
     DEFAULT_VOICE_MODE_PROMPT_TEMPLATE,
     DEFAULT_TOOLS_FUNCTION_CALLING_PROMPT_TEMPLATE,
+    DEFAULT_NATIVE_TOOL_ROUTER_PROMPT_TEMPLATE,
     DEFAULT_CODE_INTERPRETER_PROMPT,
     CODE_INTERPRETER_BLOCKED_MODULES,
     ADAPTIVE_FILE_CONTEXT_ENABLED,
@@ -3126,6 +3140,309 @@ def process_messages_with_output(messages: list[dict]) -> list[dict]:
     return processed
 
 
+def _find_mcp_server_connection(request: Request, server_id: str) -> Optional[dict]:
+    for connection in request.app.state.config.TOOL_SERVER_CONNECTIONS or []:
+        if (
+            connection.get("type", "openapi") == "mcp"
+            and connection.get("info", {}).get("id") == server_id
+        ):
+            return connection
+    return None
+
+
+async def _build_mcp_runtime_headers(
+    request: Request, user: UserModel, server_connection: dict, metadata: dict, extra_params: dict
+) -> dict:
+    headers: dict[str, str] = {}
+    auth_type = server_connection.get("auth_type", "none")
+    server_id = server_connection.get("info", {}).get("id", "")
+
+    if auth_type == "bearer":
+        headers["Authorization"] = f"Bearer {server_connection.get('key', '')}"
+    elif auth_type == "session":
+        headers["Authorization"] = f"Bearer {request.state.token.credentials}"
+    elif auth_type == "system_oauth":
+        oauth_token = extra_params.get("__oauth_token__", None)
+        if oauth_token:
+            headers["Authorization"] = f"Bearer {oauth_token.get('access_token', '')}"
+    elif auth_type == "oauth_2.1":
+        splits = server_id.split(":")
+        oauth_server_id = splits[-1] if len(splits) > 1 else server_id
+        oauth_token = await request.app.state.oauth_client_manager.get_oauth_token(
+            user.id, f"mcp:{oauth_server_id}"
+        )
+        if oauth_token:
+            headers["Authorization"] = f"Bearer {oauth_token.get('access_token', '')}"
+
+    connection_headers = server_connection.get("headers", None)
+    if connection_headers and isinstance(connection_headers, dict):
+        for key, value in connection_headers.items():
+            headers[key] = value
+
+    if ENABLE_FORWARD_USER_INFO_HEADERS and user:
+        headers = include_user_info_headers(headers, user)
+        if metadata and metadata.get("chat_id"):
+            headers[FORWARD_SESSION_INFO_HEADER_CHAT_ID] = metadata.get("chat_id")
+        if metadata and metadata.get("message_id"):
+            headers[FORWARD_SESSION_INFO_HEADER_MESSAGE_ID] = metadata.get("message_id")
+
+    return headers
+
+
+def _refresh_native_tools_payload(form_data: dict, metadata: dict, tools_dict: dict) -> None:
+    metadata["tools"] = tools_dict
+    form_data["tools"] = [
+        {"type": "function", "function": tool.get("spec", {})}
+        for tool in tools_dict.values()
+        if tool.get("spec")
+    ]
+
+
+def _extract_function_result_text(result: Any) -> str:
+    if result is None:
+        return ""
+
+    if isinstance(result, str):
+        return result
+
+    if isinstance(result, dict):
+        choices = result.get("choices")
+        if isinstance(choices, list) and choices:
+            message = choices[0].get("message", {})
+            content = message.get("content")
+            if isinstance(content, str):
+                return content
+            if isinstance(content, list):
+                return "\n".join(
+                    [item.get("text", "") for item in content if isinstance(item, dict)]
+                )
+        return json.dumps(result, ensure_ascii=False)
+
+    return str(result)
+
+
+def _build_function_pipe_callable(
+    request: Request,
+    user: UserModel,
+    metadata: dict,
+    function_model_id: str,
+):
+    async def _fnpipe_callable(prompt: str, context: Optional[dict] = None):
+        prompt_text = str(prompt or "").strip()
+        if context and isinstance(context, dict):
+            prompt_text = (
+                f"{prompt_text}\n\nContext (JSON):\n"
+                f"{json.dumps(context, ensure_ascii=False, indent=2)}"
+            )
+
+        fn_form_data = {
+            "model": function_model_id,
+            "messages": [{"role": "user", "content": prompt_text}],
+            "stream": False,
+            "metadata": {
+                "chat_id": metadata.get("chat_id"),
+                "message_id": metadata.get("message_id"),
+                "session_id": metadata.get("session_id"),
+                "files": metadata.get("files", []),
+                "tool_ids": metadata.get("tool_ids", []),
+            },
+        }
+
+        result = await generate_function_chat_completion(
+            request, fn_form_data, user, models=request.app.state.MODELS
+        )
+        return _extract_function_result_text(result)
+
+    return _fnpipe_callable
+
+
+async def _load_catalog_tool_candidate(
+    request: Request,
+    *,
+    user: UserModel,
+    candidate: dict,
+    tools_dict: dict,
+    form_data: dict,
+    metadata: dict,
+    extra_params: dict,
+    user_group_ids: set[str],
+) -> tuple[Optional[str], str]:
+    source_type = candidate.get("source_type")
+    spec_snapshot = candidate.get("spec_snapshot") or {}
+    doc_metadata = candidate.get("metadata") or {}
+
+    try:
+        if source_type == "local_tool":
+            runtime_name = spec_snapshot.get("name", "")
+            if runtime_name in tools_dict:
+                return runtime_name, "already_loaded"
+
+            tool_id = doc_metadata.get("resource_id")
+            if not tool_id:
+                return None, "skipped_by_policy"
+
+            tool = Tools.get_tool_by_id(tool_id)
+            if not tool or not has_local_tool_access(tool, user, user_group_ids):
+                return None, "skipped_by_access"
+
+            loaded_tools = await get_tools(
+                request,
+                [tool_id],
+                user,
+                {
+                    **extra_params,
+                    "__model__": request.app.state.MODELS.get(form_data.get("model"), {}),
+                    "__messages__": form_data.get("messages", []),
+                    "__files__": metadata.get("files", []),
+                },
+            )
+
+            matched = None
+            for _, tool_obj in loaded_tools.items():
+                if (
+                    tool_obj.get("tool_id") == tool_id
+                    and (tool_obj.get("spec", {}) or {}).get("name") == runtime_name
+                ):
+                    matched = tool_obj
+                    break
+
+            if matched is None:
+                return None, "skipped_by_policy"
+
+            tools_dict[runtime_name] = {
+                **matched,
+                "spec": {
+                    **(matched.get("spec", {}) or {}),
+                    "name": runtime_name,
+                },
+            }
+            _refresh_native_tools_payload(form_data, metadata, tools_dict)
+            return runtime_name, "loaded"
+
+        if source_type == "function_pipe":
+            function_model_id = doc_metadata.get("function_model_id")
+            function_id = doc_metadata.get("function_id")
+
+            if not function_model_id:
+                return None, "skipped_by_policy"
+
+            runtime_name = spec_snapshot.get(
+                "name", f"fnpipe_{sanitize_tool_name(function_model_id)}"
+            )
+            if runtime_name in tools_dict:
+                return runtime_name, "already_loaded"
+
+            function = Functions.get_function_by_id(function_id or function_model_id.split(".")[0])
+            if not function or function.type != "pipe" or not function.is_active:
+                return None, "skipped_by_policy"
+
+            function_desc = (
+                (function.meta.model_dump() if function.meta else {}).get("description")
+                or doc_metadata.get("display_name", function_model_id)
+            )
+            spec = build_function_pipe_spec(
+                function_model_id,
+                doc_metadata.get("display_name", function_model_id),
+                function_desc,
+            )
+            spec["name"] = runtime_name
+
+            tools_dict[runtime_name] = {
+                "spec": spec,
+                "callable": _build_function_pipe_callable(
+                    request=request,
+                    user=user,
+                    metadata=metadata,
+                    function_model_id=function_model_id,
+                ),
+                "type": "function_pipe",
+                "direct": False,
+            }
+            _refresh_native_tools_payload(form_data, metadata, tools_dict)
+            return runtime_name, "loaded"
+
+        if source_type == "mcp":
+            server_id = doc_metadata.get("server_id")
+            function_name = doc_metadata.get("tool_name")
+            runtime_name = spec_snapshot.get("name", f"{server_id}_{function_name}")
+
+            if runtime_name in tools_dict:
+                return runtime_name, "already_loaded"
+
+            if not server_id or not function_name:
+                return None, "skipped_by_policy"
+
+            server_connection = _find_mcp_server_connection(request, server_id)
+            if not server_connection or not server_connection.get("config", {}).get(
+                "enable", False
+            ):
+                return None, "skipped_by_policy"
+
+            if not has_mcp_access(server_connection, user, user_group_ids):
+                return None, "skipped_by_access"
+
+            function_name_filter_list = server_connection.get("config", {}).get(
+                "function_name_filter_list", ""
+            )
+            if isinstance(function_name_filter_list, str):
+                function_name_filter_list = function_name_filter_list.split(",")
+            if function_name_filter_list and not is_string_allowed(
+                function_name, function_name_filter_list
+            ):
+                return None, "skipped_by_policy"
+
+            mcp_clients = metadata.setdefault("mcp_clients", {})
+            client = mcp_clients.get(server_id)
+            if client is None:
+                headers = await _build_mcp_runtime_headers(
+                    request=request,
+                    user=user,
+                    server_connection=server_connection,
+                    metadata=metadata,
+                    extra_params=extra_params,
+                )
+                client = MCPClient()
+                await client.connect(
+                    url=server_connection.get("url", ""),
+                    headers=headers if headers else None,
+                )
+                mcp_clients[server_id] = client
+
+            async def _mcp_callable(**kwargs):
+                return await client.call_tool(function_name, function_args=kwargs)
+
+            tools_dict[runtime_name] = {
+                "spec": {**spec_snapshot, "name": runtime_name},
+                "callable": _mcp_callable,
+                "type": "mcp",
+                "client": client,
+                "direct": False,
+            }
+            _refresh_native_tools_payload(form_data, metadata, tools_dict)
+            return runtime_name, "loaded"
+    except Exception as e:
+        log.debug(f"Failed loading tool_search candidate: {e}")
+        return None, "skipped_by_policy"
+
+    return None, "skipped_by_policy"
+
+
+def _inject_native_tool_router_prompt(
+    request: Request, form_data: dict, enabled: bool, function_calling_mode: str
+) -> None:
+    if not enabled or function_calling_mode != "native":
+        return
+
+    template = request.app.state.config.NATIVE_TOOL_ROUTER_PROMPT_TEMPLATE
+    template = template if isinstance(template, str) else str(template or "")
+    if template.strip() == "":
+        template = DEFAULT_NATIVE_TOOL_ROUTER_PROMPT_TEMPLATE
+
+    form_data["messages"] = add_or_update_system_message(
+        template, form_data.get("messages", []), append=True
+    )
+
+
 async def process_chat_payload(request, form_data, user, metadata, model):
     # Pipeline Inlet -> Filter Inlet -> Chat Memory -> Chat Web Search -> Chat Image Generation
     # -> Chat Code Interpreter (Form Data Update) -> (Default) Chat Tools Function Calling
@@ -3392,6 +3709,17 @@ async def process_chat_payload(request, form_data, user, metadata, model):
                 append=True,
             )
 
+    native_mode = metadata.get("params", {}).get("function_calling") == "native"
+    native_tool_search_enabled = resolve_tool_search_bool(
+        request.app.state.config.ENABLE_NATIVE_TOOL_SEARCH, False
+    )
+    _inject_native_tool_router_prompt(
+        request,
+        form_data,
+        enabled=native_tool_search_enabled,
+        function_calling_mode=metadata.get("params", {}).get("function_calling"),
+    )
+
     prompt = get_last_user_message(form_data["messages"])
     # TODO: re-enable URL extraction from prompt
     # urls = []
@@ -3644,15 +3972,155 @@ async def process_chat_payload(request, form_data, user, metadata, model):
                 if name not in tools_dict:
                     tools_dict[name] = tool_dict
 
-        if tools_dict:
-            if metadata.get("params", {}).get("function_calling") == "native":
-                # If the function calling is native, then call the tools function calling handler
-                metadata["tools"] = tools_dict
-                form_data["tools"] = [
-                    {"type": "function", "function": tool.get("spec", {})}
-                    for tool in tools_dict.values()
-                ]
+        if native_mode and native_tool_search_enabled:
+            tool_search_service = getattr(request.app.state, "TOOL_SEARCH_SERVICE", None)
+            if tool_search_service is not None:
+                default_top_k = resolve_tool_search_int(
+                    request.app.state.config.TOOL_SEARCH_DEFAULT_TOP_K,
+                    default=5,
+                    minimum=1,
+                    maximum=20,
+                )
 
+                async def _tool_search_callable(
+                    query: str, top_k: Optional[int] = None, source_filter: Optional[list[str]] = None
+                ):
+                    top_k_value = resolve_tool_search_int(
+                        top_k,
+                        default=default_top_k,
+                        minimum=1,
+                        maximum=20,
+                    )
+                    vector_candidates = resolve_tool_search_int(
+                        request.app.state.config.TOOL_SEARCH_VECTOR_CANDIDATES,
+                        default=40,
+                        minimum=1,
+                        maximum=200,
+                    )
+                    bm25_candidates = resolve_tool_search_int(
+                        request.app.state.config.TOOL_SEARCH_BM25_CANDIDATES,
+                        default=60,
+                        minimum=1,
+                        maximum=500,
+                    )
+                    bm25_weight = resolve_tool_search_float(
+                        request.app.state.config.TOOL_SEARCH_HYBRID_BM25_WEIGHT,
+                        default=0.35,
+                        minimum=0.0,
+                        maximum=1.0,
+                    )
+
+                    candidates = await tool_search_service.search(
+                        query=query,
+                        top_k=top_k_value,
+                        source_filter=source_filter,
+                        vector_candidates=vector_candidates,
+                        bm25_candidates=bm25_candidates,
+                        bm25_weight=bm25_weight,
+                    )
+
+                    hidden_tool_pool = metadata.setdefault("hidden_tool_pool", {})
+                    user_group_ids = get_user_group_ids(user.id)
+
+                    loaded_tools: list[str] = []
+                    already_loaded_tools: list[str] = []
+                    skipped_by_access: list[str] = []
+                    skipped_by_policy: list[str] = []
+
+                    for candidate in candidates:
+                        candidate_spec = candidate.get("spec_snapshot", {})
+                        candidate_name = candidate_spec.get("name", "")
+                        candidate_doc_id = candidate.get("doc_id", "")
+
+                        if candidate_name and candidate_name in tools_dict:
+                            already_loaded_tools.append(candidate_name)
+                            continue
+
+                        if candidate_name and candidate_name in hidden_tool_pool:
+                            tools_dict[candidate_name] = hidden_tool_pool.pop(candidate_name)
+                            loaded_tools.append(candidate_name)
+                            continue
+
+                        loaded_name, load_status = await _load_catalog_tool_candidate(
+                            request=request,
+                            user=user,
+                            candidate=candidate,
+                            tools_dict=tools_dict,
+                            form_data=form_data,
+                            metadata=metadata,
+                            extra_params=extra_params,
+                            user_group_ids=user_group_ids,
+                        )
+                        if load_status == "loaded" and loaded_name:
+                            loaded_tools.append(loaded_name)
+                        elif load_status == "already_loaded" and loaded_name:
+                            already_loaded_tools.append(loaded_name)
+                        elif load_status == "skipped_by_access":
+                            skipped_by_access.append(candidate_doc_id)
+                        else:
+                            skipped_by_policy.append(candidate_doc_id)
+
+                    if loaded_tools:
+                        _refresh_native_tools_payload(form_data, metadata, tools_dict)
+
+                    return {
+                        "loaded_tools": loaded_tools,
+                        "already_loaded_tools": already_loaded_tools,
+                        "candidates": [
+                            {
+                                "doc_id": c.get("doc_id"),
+                                "source_type": c.get("source_type"),
+                                "name": (c.get("spec_snapshot") or {}).get("name"),
+                                "score": c.get("score"),
+                            }
+                            for c in candidates
+                        ],
+                        "skipped_by_access": skipped_by_access,
+                        "skipped_by_policy": skipped_by_policy,
+                    }
+
+                tools_dict["tool_search"] = {
+                    "spec": build_tool_search_spec(default_top_k=default_top_k),
+                    "callable": _tool_search_callable,
+                    "type": "builtin",
+                    "direct": False,
+                }
+
+                trigger_count = resolve_tool_search_int(
+                    request.app.state.config.TOOL_SEARCH_TRIGGER_COUNT,
+                    default=20,
+                    minimum=1,
+                )
+                if len(tools_dict) > trigger_count:
+                    visible_tools, hidden_tools = select_initial_visible_tools(
+                        tools_dict,
+                        always_visible=[
+                            "tool_search",
+                            "get_current_timestamp",
+                            "calculate_timestamp",
+                        ],
+                        initial_visible_count=resolve_tool_search_int(
+                            request.app.state.config.TOOL_SEARCH_INITIAL_VISIBLE_COUNT,
+                            default=8,
+                            minimum=1,
+                        ),
+                    )
+                    tools_dict = visible_tools
+                    metadata["hidden_tool_pool"] = hidden_tools
+                else:
+                    metadata["hidden_tool_pool"] = {}
+
+        if tools_dict:
+            if native_mode:
+                _refresh_native_tools_payload(form_data, metadata, tools_dict)
+            else:
+                try:
+                    form_data, flags = await chat_completion_tools_handler(
+                        request, form_data, extra_params, user, models, tools_dict
+                    )
+                    sources.extend(flags.get("sources", []))
+                except Exception as e:
+                    log.exception(e)
         else:
             # If the function calling is not native, then call the tools function calling handler
             try:

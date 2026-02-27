@@ -36,6 +36,10 @@ class Tool(Base):
 class ToolMeta(BaseModel):
     description: Optional[str] = None
     manifest: Optional[dict] = {}
+    search_description: Optional[str] = ""
+    search_keywords: Optional[list[str]] = []
+    search_examples: Optional[list[str]] = []
+    search_enabled: Optional[bool] = True
 
 
 class ToolModel(BaseModel):

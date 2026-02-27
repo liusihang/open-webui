@@ -1,5 +1,14 @@
 import { WEBUI_API_BASE_URL } from '$lib/constants';
 
+export type ToolSearchMeta = {
+	description?: string;
+	manifest?: Record<string, any>;
+	search_description?: string;
+	search_keywords?: string[];
+	search_examples?: string[];
+	search_enabled?: boolean;
+};
+
 export const createNewTool = async (token: string, tool: object) => {
 	let error = null;
 

@@ -180,7 +180,16 @@ async def sync_functions(
                     )
                     raise e
 
-        return Functions.sync_functions(user.id, form_data.functions, db=db)
+        synced = Functions.sync_functions(user.id, form_data.functions, db=db)
+
+        tool_search_service = getattr(request.app.state, "TOOL_SEARCH_SERVICE", None)
+        if tool_search_service is not None:
+            try:
+                await tool_search_service.rebuild(scope="local")
+            except Exception as e:
+                log.warning(f"Failed to rebuild tool_search local index on sync: {e}")
+
+        return synced
     except Exception as e:
         log.exception(f"Failed to load a function: {e}")
         raise HTTPException(
@@ -235,6 +244,14 @@ async def create_new_function(
                 )
 
             if function:
+                tool_search_service = getattr(request.app.state, "TOOL_SEARCH_SERVICE", None)
+                if tool_search_service is not None:
+                    try:
+                        await tool_search_service.upsert_function_documents(form_data.id)
+                    except Exception as e:
+                        log.warning(
+                            f"Failed to index tool_search docs for function '{form_data.id}': {e}"
+                        )
                 return function
             else:
                 raise HTTPException(
@@ -290,6 +307,17 @@ async def toggle_function_by_id(
         )
 
         if function:
+            tool_search_service = getattr(request.app.state, "TOOL_SEARCH_SERVICE", None)
+            if tool_search_service is not None:
+                try:
+                    if function.is_active and function.type == "pipe":
+                        await tool_search_service.upsert_function_documents(id)
+                    else:
+                        await tool_search_service.delete_function_documents(id)
+                except Exception as e:
+                    log.warning(
+                        f"Failed to refresh tool_search docs for toggled function '{id}': {e}"
+                    )
             return function
         else:
             raise HTTPException(
@@ -364,6 +392,14 @@ async def update_function_by_id(
             Functions.update_function_metadata_by_id(id, {"toggle": True}, db=db)
 
         if function:
+            tool_search_service = getattr(request.app.state, "TOOL_SEARCH_SERVICE", None)
+            if tool_search_service is not None:
+                try:
+                    await tool_search_service.upsert_function_documents(id)
+                except Exception as e:
+                    log.warning(
+                        f"Failed to index tool_search docs for function '{id}': {e}"
+                    )
             return function
         else:
             raise HTTPException(
@@ -396,6 +432,13 @@ async def delete_function_by_id(
         FUNCTIONS = request.app.state.FUNCTIONS
         if id in FUNCTIONS:
             del FUNCTIONS[id]
+
+        tool_search_service = getattr(request.app.state, "TOOL_SEARCH_SERVICE", None)
+        if tool_search_service is not None:
+            try:
+                await tool_search_service.delete_function_documents(id)
+            except Exception as e:
+                log.warning(f"Failed to delete tool_search docs for function '{id}': {e}")
 
     return result
 

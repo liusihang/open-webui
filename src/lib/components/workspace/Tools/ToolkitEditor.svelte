@@ -29,12 +29,39 @@
 	export let id = '';
 	export let name = '';
 	export let meta = {
-		description: ''
+		description: '',
+		search_description: '',
+		search_keywords: [],
+		search_examples: [],
+		search_enabled: true
 	};
 	export let content = '';
 	export let accessGrants = [];
 
 	let _content = '';
+	let searchKeywordsInput = '';
+	let searchExamplesInput = '';
+	let metaSyncKey = '';
+
+	const normalizeKeywords = (value) =>
+		Array.from(
+			new Set(
+				(value || '')
+					.split(',')
+					.map((item) => item.trim())
+					.filter((item) => item.length > 0)
+			)
+		);
+
+	const normalizeExamples = (value) =>
+		Array.from(
+			new Set(
+				(value || '')
+					.split('\n')
+					.map((item) => item.trim())
+					.filter((item) => item.length > 0)
+			)
+		);
 
 	$: if (content) {
 		updateContent();
@@ -46,6 +73,24 @@
 
 	$: if (name && !edit && !clone) {
 		id = name.replace(/\s+/g, '_').toLowerCase();
+	}
+
+	$: if (meta) {
+		meta.description = meta.description ?? '';
+		meta.search_description = meta.search_description ?? '';
+		meta.search_keywords = Array.isArray(meta.search_keywords) ? meta.search_keywords : [];
+		meta.search_examples = Array.isArray(meta.search_examples) ? meta.search_examples : [];
+		meta.search_enabled = meta.search_enabled ?? true;
+
+		const nextSyncKey = JSON.stringify({
+			search_keywords: meta.search_keywords,
+			search_examples: meta.search_examples
+		});
+		if (nextSyncKey !== metaSyncKey) {
+			searchKeywordsInput = meta.search_keywords.join(', ');
+			searchExamplesInput = meta.search_examples.join('\n');
+			metaSyncKey = nextSyncKey;
+		}
 	}
 
 	let codeEditor;
@@ -158,10 +203,18 @@ class Tools:
 
 	const saveHandler = async () => {
 		loading = true;
+		const normalizedMeta = {
+			...meta,
+			description: (meta.description || '').trim(),
+			search_description: (meta.search_description || '').trim(),
+			search_keywords: normalizeKeywords(searchKeywordsInput),
+			search_examples: normalizeExamples(searchExamplesInput),
+			search_enabled: !!meta.search_enabled
+		};
 		onSave({
 			id,
 			name,
-			meta,
+			meta: normalizedMeta,
 			content,
 			access_grants: accessGrants
 		});
@@ -299,6 +352,38 @@ class Tools:
 								required
 							/>
 						</Tooltip>
+					</div>
+
+					<div class="mt-2 px-1 flex flex-col gap-2">
+						<div class="text-xs font-medium text-gray-500">
+							{$i18n.t('Tool Search Metadata')}
+						</div>
+
+						<textarea
+							class="w-full text-sm rounded-lg bg-transparent border border-gray-200 dark:border-gray-800 px-3 py-2 outline-hidden"
+							rows="2"
+							placeholder={$i18n.t('Search Description')}
+							bind:value={meta.search_description}
+						/>
+
+						<input
+							class="w-full text-sm rounded-lg bg-transparent border border-gray-200 dark:border-gray-800 px-3 py-2 outline-hidden"
+							type="text"
+							placeholder={$i18n.t('Search Keywords (comma separated)')}
+							bind:value={searchKeywordsInput}
+						/>
+
+						<textarea
+							class="w-full text-sm rounded-lg bg-transparent border border-gray-200 dark:border-gray-800 px-3 py-2 outline-hidden"
+							rows="2"
+							placeholder={$i18n.t('Search Examples (one per line)')}
+							bind:value={searchExamplesInput}
+						/>
+
+						<label class="flex items-center gap-2 text-sm text-gray-600 dark:text-gray-300">
+							<input type="checkbox" bind:checked={meta.search_enabled} />
+							{$i18n.t('Enable Tool Search Indexing')}
+						</label>
 					</div>
 				</div>
 

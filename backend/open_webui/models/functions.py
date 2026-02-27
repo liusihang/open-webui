@@ -36,6 +36,10 @@ class Function(Base):
 class FunctionMeta(BaseModel):
     description: Optional[str] = None
     manifest: Optional[dict] = {}
+    search_description: Optional[str] = ""
+    search_keywords: Optional[list[str]] = []
+    search_examples: Optional[list[str]] = []
+    search_enabled: Optional[bool] = True
     model_config = ConfigDict(extra="allow")
 
 

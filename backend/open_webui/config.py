@@ -2105,6 +2105,80 @@ TOOLS_FUNCTION_CALLING_PROMPT_TEMPLATE = PersistentConfig(
     os.environ.get("TOOLS_FUNCTION_CALLING_PROMPT_TEMPLATE", ""),
 )
 
+ENABLE_NATIVE_TOOL_SEARCH = PersistentConfig(
+    "ENABLE_NATIVE_TOOL_SEARCH",
+    "task.native_tool_search.enable",
+    os.environ.get("ENABLE_NATIVE_TOOL_SEARCH", "False").lower() == "true",
+)
+
+TOOL_SEARCH_TRIGGER_COUNT = PersistentConfig(
+    "TOOL_SEARCH_TRIGGER_COUNT",
+    "task.native_tool_search.trigger_count",
+    int(os.environ.get("TOOL_SEARCH_TRIGGER_COUNT", "20")),
+)
+
+TOOL_SEARCH_INITIAL_VISIBLE_COUNT = PersistentConfig(
+    "TOOL_SEARCH_INITIAL_VISIBLE_COUNT",
+    "task.native_tool_search.initial_visible_count",
+    int(os.environ.get("TOOL_SEARCH_INITIAL_VISIBLE_COUNT", "8")),
+)
+
+TOOL_SEARCH_DEFAULT_TOP_K = PersistentConfig(
+    "TOOL_SEARCH_DEFAULT_TOP_K",
+    "task.native_tool_search.default_top_k",
+    int(os.environ.get("TOOL_SEARCH_DEFAULT_TOP_K", "5")),
+)
+
+TOOL_SEARCH_VECTOR_CANDIDATES = PersistentConfig(
+    "TOOL_SEARCH_VECTOR_CANDIDATES",
+    "task.native_tool_search.vector_candidates",
+    int(os.environ.get("TOOL_SEARCH_VECTOR_CANDIDATES", "40")),
+)
+
+TOOL_SEARCH_BM25_CANDIDATES = PersistentConfig(
+    "TOOL_SEARCH_BM25_CANDIDATES",
+    "task.native_tool_search.bm25_candidates",
+    int(os.environ.get("TOOL_SEARCH_BM25_CANDIDATES", "60")),
+)
+
+TOOL_SEARCH_HYBRID_BM25_WEIGHT = PersistentConfig(
+    "TOOL_SEARCH_HYBRID_BM25_WEIGHT",
+    "task.native_tool_search.hybrid_bm25_weight",
+    float(os.environ.get("TOOL_SEARCH_HYBRID_BM25_WEIGHT", "0.35")),
+)
+
+TOOL_SEARCH_MCP_REBUILD_ENABLED = PersistentConfig(
+    "TOOL_SEARCH_MCP_REBUILD_ENABLED",
+    "task.native_tool_search.mcp_rebuild_enabled",
+    os.environ.get("TOOL_SEARCH_MCP_REBUILD_ENABLED", "True").lower() == "true",
+)
+
+TOOL_SEARCH_MCP_REBUILD_INTERVAL_HOURS = PersistentConfig(
+    "TOOL_SEARCH_MCP_REBUILD_INTERVAL_HOURS",
+    "task.native_tool_search.mcp_rebuild_interval_hours",
+    int(os.environ.get("TOOL_SEARCH_MCP_REBUILD_INTERVAL_HOURS", "24")),
+)
+
+TOOL_SEARCH_MCP_REBUILD_ON_STARTUP = PersistentConfig(
+    "TOOL_SEARCH_MCP_REBUILD_ON_STARTUP",
+    "task.native_tool_search.mcp_rebuild_on_startup",
+    os.environ.get("TOOL_SEARCH_MCP_REBUILD_ON_STARTUP", "True").lower() == "true",
+)
+
+NATIVE_TOOL_ROUTER_PROMPT_TEMPLATE = PersistentConfig(
+    "NATIVE_TOOL_ROUTER_PROMPT_TEMPLATE",
+    "task.native_tool_search.router_prompt_template",
+    os.environ.get("NATIVE_TOOL_ROUTER_PROMPT_TEMPLATE", ""),
+)
+
+DEFAULT_NATIVE_TOOL_ROUTER_PROMPT_TEMPLATE = """Native tool routing rules:
+
+1) Internally summarize the request, infer user intent, and decide if tools are needed.
+2) If external or execution capability is needed and current tools are insufficient, call `tool_search` first.
+3) If key parameters are missing, ask a clarification question. Do not guess critical parameters.
+4) Only call `tool_search` again when existing tool outputs are insufficient.
+5) Do not expose internal planning JSON. Return only the final answer with concise tool-result grounding when needed."""
+
 
 DEFAULT_TOOLS_FUNCTION_CALLING_PROMPT_TEMPLATE = """Available Tools: {{TOOLS}}
 
