@@ -149,7 +149,8 @@ def apply_default_reasoning_payload(payload: dict[str, Any]) -> dict[str, Any]:
 def _is_banned_reasoning_token(token: Any) -> bool:
     if not isinstance(token, str):
         return False
-    return token.strip().upper() == "REASONING_ENCRYPTED_CONTENT"
+    normalized = re.sub(r"[^A-Z0-9]", "", token.strip().upper())
+    return normalized == "REASONINGENCRYPTEDCONTENT"
 
 
 def _prune_banned_reasoning_tokens(value: Any) -> tuple[Any, int]:

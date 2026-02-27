@@ -1250,6 +1250,9 @@ def handle_responses_streaming_event(
         response_data = data.get("response", {})
         final_output = response_data.get("output")
 
+        # Some OpenAI-compatible upstreams emit an empty final `output` even though
+        # valid delta content has already streamed. Preserve streamed output in that
+        # case to avoid wiping the assistant message on completion.
         if final_output is not None:
             new_output = merge_final_output_preserve_content(current_output, final_output)
         else:

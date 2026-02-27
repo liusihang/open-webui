@@ -614,7 +614,11 @@ def test_sanitize_upstream_payload_prunes_banned_reasoning_tokens(openai_module)
                     "name": "demo",
                     "parameters": {
                         "type": "object",
-                        "required": ["query", "reasoning_encrypted_content"],
+                        "required": ["query", "reasoningEncryptedContent"],
+                        "properties": {
+                            "query": {"type": "string"},
+                            "reasoningEncryptedContent": {"type": "string"},
+                        },
                     },
                 },
             }
@@ -623,12 +627,14 @@ def test_sanitize_upstream_payload_prunes_banned_reasoning_tokens(openai_module)
 
     sanitized, removed = openai_module.sanitize_upstream_payload(payload)
 
-    assert removed == 3
+    assert removed == 4
     schema = sanitized["response_format"]["json_schema"]["schema"]
     assert "REASONING_ENCRYPTED_CONTENT" not in schema["required"]
     assert "REASONING_ENCRYPTED_CONTENT" not in schema["properties"]
     tool_required = sanitized["tools"][0]["function"]["parameters"]["required"]
-    assert "reasoning_encrypted_content" not in tool_required
+    tool_properties = sanitized["tools"][0]["function"]["parameters"]["properties"]
+    assert "reasoningEncryptedContent" not in tool_required
+    assert "reasoningEncryptedContent" not in tool_properties
 
 
 def test_dedupe_system_messages_keeps_only_first(openai_module):
@@ -957,3 +963,54 @@ async def test_responses_preserves_explicit_reasoning_enabled_flag(openai_module
     assert result == {"ok": True}
     sent_payload = json.loads(captured_calls[0]["data"])
     assert sent_payload["reasoning"] == {"enable": False}
+
+
+@pytest.mark.asyncio
+async def test_responses_prunes_banned_reasoning_tokens_in_tools(openai_module, monkeypatch):
+    request = _build_request(cliproxy_api=False)
+    user = types.SimpleNamespace(id="u1", role="admin", name="Admin", email="admin@test")
+    form_data = openai_module.ResponsesForm(
+        model="gpt-4o",
+        input=[{"role": "user", "content": [{"type": "input_text", "text": "hello"}]}],
+        tools=[
+            {
+                "type": "function",
+                "name": "lookup",
+                "parameters": {
+                    "type": "object",
+                    "required": ["query", "reasoningEncryptedContent"],
+                    "properties": {
+                        "query": {"type": "string"},
+                        "reasoningEncryptedContent": {"type": "string"},
+                    },
+                },
+            }
+        ],
+    )
+
+    async def fake_headers_and_cookies(*args, **kwargs):
+        return {}, {}
+
+    async def fake_cleanup(*args, **kwargs):
+        return None
+
+    captured_calls = []
+    monkeypatch.setattr(openai_module, "get_headers_and_cookies", fake_headers_and_cookies)
+    monkeypatch.setattr(openai_module, "cleanup_response", fake_cleanup)
+    monkeypatch.setattr(
+        openai_module.aiohttp,
+        "ClientSession",
+        lambda *args, **kwargs: _FakeSession(captured_calls),
+    )
+
+    result = await openai_module.responses(
+        request=request,
+        form_data=form_data,
+        user=user,
+    )
+
+    assert result == {"ok": True}
+    sent_payload = json.loads(captured_calls[0]["data"])
+    tool_params = sent_payload["tools"][0]["parameters"]
+    assert "reasoningEncryptedContent" not in tool_params["required"]
+    assert "reasoningEncryptedContent" not in tool_params["properties"]
