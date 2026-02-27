@@ -14,20 +14,34 @@ def _load_handler():
     for node in tree.body:
         if isinstance(node, ast.FunctionDef) and node.name in {
             "deep_merge",
+            "merge_output_item_preserve_content",
+            "merge_final_output_preserve_content",
             "handle_responses_streaming_event",
         }:
             wanted[node.name] = node
 
-    if "deep_merge" not in wanted or "handle_responses_streaming_event" not in wanted:
+    required = {
+        "deep_merge",
+        "merge_output_item_preserve_content",
+        "merge_final_output_preserve_content",
+        "handle_responses_streaming_event",
+    }
+    if not required.issubset(wanted):
         raise RuntimeError("Required middleware functions not found")
 
     module_ast = ast.Module(
-        body=[wanted["deep_merge"], wanted["handle_responses_streaming_event"]],
+        body=[
+            wanted["deep_merge"],
+            wanted["merge_output_item_preserve_content"],
+            wanted["merge_final_output_preserve_content"],
+            wanted["handle_responses_streaming_event"],
+        ],
         type_ignores=[],
     )
     ast.fix_missing_locations(module_ast)
 
     namespace = {
+        "Any": object,
         "_normalize_reasoning_item": lambda item: item,
         "_clone_output_item": lambda item: dict(item) if isinstance(item, dict) else item,
         "normalize_reasoning_output_items": lambda output: output,
