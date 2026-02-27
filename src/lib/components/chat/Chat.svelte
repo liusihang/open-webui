@@ -1518,16 +1518,25 @@
 		}
 
 		if (choices) {
+			const choice = choices[0] ?? {};
+			const messageReasoning = normalizeReasoningDelta(
+				choice?.message?.reasoning_content ?? choice?.message?.reasoning ?? choice?.message?.thinking
+			);
+			const deltaReasoning = normalizeReasoningDelta(
+				choice?.delta?.reasoning_content ?? choice?.delta?.reasoning ?? choice?.delta?.thinking
+			);
+
 			if (choices[0]?.message?.content) {
 				// Non-stream response
-				message.content += choices[0]?.message?.content;
+				message.responseContent =
+					(message.responseContent ?? message.content ?? '') + (choices[0]?.message?.content ?? '');
 			} else {
 				// Stream response
 				let value = choices[0]?.delta?.content ?? '';
 				if (message.content == '' && value == '\n') {
 					console.log('Empty response');
 				} else {
-					message.content += value;
+					message.responseContent = (message.responseContent ?? message.content ?? '') + value;
 
 					if (navigator.vibrate && ($settings?.hapticFeedback ?? false)) {
 						navigator.vibrate(5);
@@ -1535,7 +1544,7 @@
 
 					// Emit chat event for TTS
 					const messageContentParts = getMessageContentParts(
-						removeAllDetails(message.content),
+						removeAllDetails(message.responseContent),
 						$config?.audio?.tts?.split_on ?? 'punctuation'
 					);
 					messageContentParts.pop();
@@ -1556,6 +1565,20 @@
 						);
 					}
 				}
+			}
+
+			const reasoningDelta = messageReasoning || deltaReasoning;
+			if (reasoningDelta) {
+				message.reasoningContent = (message.reasoningContent ?? '') + reasoningDelta;
+			}
+
+			if (!output) {
+				const assistantContent = message.responseContent ?? message.content ?? '';
+				message.content = composeReasoningContent(
+					assistantContent,
+					message.reasoningContent ?? '',
+					done === true
+				);
 			}
 		}
 
@@ -1988,6 +2011,58 @@
 		}
 
 		return 2048;
+	};
+
+	const normalizeReasoningDelta = (value: unknown): string => {
+		if (typeof value === 'string') {
+			return value;
+		}
+
+		if (Array.isArray(value)) {
+			return value
+				.map((item) => {
+					if (typeof item === 'string') {
+						return item;
+					}
+
+					if (item && typeof item === 'object' && 'text' in item) {
+						const text = (item as { text?: unknown }).text;
+						return typeof text === 'string' ? text : '';
+					}
+
+					return '';
+				})
+				.join('');
+		}
+
+		if (value && typeof value === 'object' && 'text' in value) {
+			const text = (value as { text?: unknown }).text;
+			return typeof text === 'string' ? text : '';
+		}
+
+		return '';
+	};
+
+	const formatReasoningDetails = (reasoning: string, done: boolean): string => {
+		const quotedReasoning = reasoning
+			.split('\n')
+			.map((line) => (line ? `> ${line}` : '>'))
+			.join('\n');
+
+		return `<details type="reasoning" done="${done ? 'true' : 'false'}">\n<summary>${done ? 'Thought' : 'Thinking...'}</summary>\n${quotedReasoning}\n</details>`;
+	};
+
+	const composeReasoningContent = (
+		assistantContent: string,
+		reasoningContent: string,
+		done: boolean
+	): string => {
+		if (!reasoningContent) {
+			return assistantContent;
+		}
+
+		const details = formatReasoningDetails(reasoningContent, done);
+		return assistantContent ? `${details}\n${assistantContent}` : details;
 	};
 
 	const sendMessageSocket = async (model, _messages, _history, responseMessageId, _chatId) => {
