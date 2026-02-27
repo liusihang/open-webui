@@ -592,6 +592,64 @@ def test_apply_default_reasoning_payload_preserves_explicit_flag(openai_module):
     assert updated["reasoning"] == {"enabled": False}
 
 
+def test_sanitize_upstream_payload_prunes_banned_reasoning_tokens(openai_module):
+    payload = {
+        "model": "gpt-4o",
+        "response_format": {
+            "json_schema": {
+                "schema": {
+                    "type": "object",
+                    "required": ["ok", "REASONING_ENCRYPTED_CONTENT"],
+                    "properties": {
+                        "ok": {"type": "string"},
+                        "REASONING_ENCRYPTED_CONTENT": {"type": "string"},
+                    },
+                }
+            }
+        },
+        "tools": [
+            {
+                "type": "function",
+                "function": {
+                    "name": "demo",
+                    "parameters": {
+                        "type": "object",
+                        "required": ["query", "reasoning_encrypted_content"],
+                    },
+                },
+            }
+        ],
+    }
+
+    sanitized, removed = openai_module.sanitize_upstream_payload(payload)
+
+    assert removed == 3
+    schema = sanitized["response_format"]["json_schema"]["schema"]
+    assert "REASONING_ENCRYPTED_CONTENT" not in schema["required"]
+    assert "REASONING_ENCRYPTED_CONTENT" not in schema["properties"]
+    tool_required = sanitized["tools"][0]["function"]["parameters"]["required"]
+    assert "reasoning_encrypted_content" not in tool_required
+
+
+def test_dedupe_system_messages_keeps_only_first(openai_module):
+    messages = [
+        {"role": "system", "content": "sys-1"},
+        {"role": "user", "content": "hello"},
+        {"role": "system", "content": "sys-2"},
+        {"role": "assistant", "content": "ok"},
+        {"role": "system", "content": "sys-3"},
+    ]
+
+    deduped, removed = openai_module.dedupe_system_messages(messages)
+
+    assert removed == 2
+    assert deduped == [
+        {"role": "system", "content": "sys-1"},
+        {"role": "user", "content": "hello"},
+        {"role": "assistant", "content": "ok"},
+    ]
+
+
 @pytest.mark.asyncio
 async def test_generate_chat_completion_ignores_inaccessible_files_and_succeeds(
     openai_module, monkeypatch, tmp_path
@@ -713,7 +771,8 @@ async def test_generate_chat_completion_non_cliproxy_responses_applies_file_and_
         bypass_filter=True,
     )
 
-    assert result == {"ok": True}
+    assert result.get("ok") is True
+    assert result.get("done") is True
     assert injected["called"] is True
     assert inlined["called"] is True
 
@@ -723,6 +782,107 @@ async def test_generate_chat_completion_non_cliproxy_responses_applies_file_and_
     input_content = sent_payload["input"][0]["content"]
     assert any(part.get("type") == "input_file" for part in input_content)
     assert any(part.get("type") == "input_image" for part in input_content)
+
+
+@pytest.mark.asyncio
+async def test_generate_chat_completion_non_cliproxy_responses_prunes_banned_reasoning_tokens(
+    openai_module, monkeypatch
+):
+    request = _build_request(cliproxy_api=False, api_type="responses")
+    user = types.SimpleNamespace(id="u1", role="admin", name="Admin", email="admin@test")
+    form_data = {
+        "model": "gpt-4o",
+        "messages": [{"role": "user", "content": [{"type": "text", "text": "hello"}]}],
+        "tools": [
+            {
+                "type": "function",
+                "function": {
+                    "name": "lookup",
+                    "parameters": {
+                        "type": "object",
+                        "required": ["query", "REASONING_ENCRYPTED_CONTENT"],
+                        "properties": {
+                            "query": {"type": "string"},
+                            "REASONING_ENCRYPTED_CONTENT": {"type": "string"},
+                        },
+                    },
+                },
+            }
+        ],
+    }
+
+    async def fake_headers_and_cookies(*args, **kwargs):
+        return {}, {}
+
+    async def fake_cleanup(*args, **kwargs):
+        return None
+
+    captured_calls = []
+    monkeypatch.setattr(openai_module, "get_headers_and_cookies", fake_headers_and_cookies)
+    monkeypatch.setattr(openai_module, "cleanup_response", fake_cleanup)
+    monkeypatch.setattr(
+        openai_module.aiohttp,
+        "ClientSession",
+        lambda *args, **kwargs: _FakeSession(captured_calls),
+    )
+
+    result = await openai_module.generate_chat_completion(
+        request=request,
+        form_data=form_data,
+        user=user,
+        bypass_filter=True,
+    )
+
+    assert result.get("ok") is True
+    assert result.get("done") is True
+    sent_payload = json.loads(captured_calls[0]["data"])
+    tool_params = sent_payload["tools"][0]["parameters"]
+    assert "REASONING_ENCRYPTED_CONTENT" not in tool_params["required"]
+    assert "REASONING_ENCRYPTED_CONTENT" not in tool_params["properties"]
+
+
+@pytest.mark.asyncio
+async def test_generate_chat_completion_dedupes_system_messages_before_send(
+    openai_module, monkeypatch
+):
+    request = _build_request(cliproxy_api=False)
+    user = types.SimpleNamespace(id="u1", role="admin", name="Admin", email="admin@test")
+    form_data = {
+        "model": "gpt-4o",
+        "messages": [
+            {"role": "system", "content": "sys-a"},
+            {"role": "user", "content": "hello"},
+            {"role": "system", "content": "sys-b"},
+        ],
+    }
+
+    async def fake_headers_and_cookies(*args, **kwargs):
+        return {}, {}
+
+    async def fake_cleanup(*args, **kwargs):
+        return None
+
+    captured_calls = []
+    monkeypatch.setattr(openai_module, "get_headers_and_cookies", fake_headers_and_cookies)
+    monkeypatch.setattr(openai_module, "cleanup_response", fake_cleanup)
+    monkeypatch.setattr(
+        openai_module.aiohttp,
+        "ClientSession",
+        lambda *args, **kwargs: _FakeSession(captured_calls),
+    )
+
+    result = await openai_module.generate_chat_completion(
+        request=request,
+        form_data=form_data,
+        user=user,
+        bypass_filter=True,
+    )
+
+    assert result == {"ok": True}
+    sent_payload = json.loads(captured_calls[0]["data"])
+    system_messages = [m for m in sent_payload["messages"] if m.get("role") == "system"]
+    assert len(system_messages) == 1
+    assert system_messages[0]["content"] == "sys-a"
 
 
 @pytest.mark.asyncio

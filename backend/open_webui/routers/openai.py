@@ -146,6 +146,76 @@ def apply_default_reasoning_payload(payload: dict[str, Any]) -> dict[str, Any]:
     return payload
 
 
+def _is_banned_reasoning_token(token: Any) -> bool:
+    if not isinstance(token, str):
+        return False
+    return token.strip().upper() == "REASONING_ENCRYPTED_CONTENT"
+
+
+def _prune_banned_reasoning_tokens(value: Any) -> tuple[Any, int]:
+    removed = 0
+    if isinstance(value, dict):
+        sanitized: dict[str, Any] = {}
+        for key, nested in value.items():
+            if _is_banned_reasoning_token(key):
+                removed += 1
+                continue
+
+            if key == "required" and isinstance(nested, list):
+                filtered_required = []
+                for required_item in nested:
+                    if _is_banned_reasoning_token(required_item):
+                        removed += 1
+                        continue
+                    filtered_required.append(required_item)
+                sanitized[key] = filtered_required
+                continue
+
+            cleaned_nested, nested_removed = _prune_banned_reasoning_tokens(nested)
+            removed += nested_removed
+            sanitized[key] = cleaned_nested
+        return sanitized, removed
+
+    if isinstance(value, list):
+        sanitized_list = []
+        for item in value:
+            if _is_banned_reasoning_token(item):
+                removed += 1
+                continue
+            cleaned_item, nested_removed = _prune_banned_reasoning_tokens(item)
+            removed += nested_removed
+            sanitized_list.append(cleaned_item)
+        return sanitized_list, removed
+
+    return value, 0
+
+
+def sanitize_upstream_payload(payload: dict[str, Any]) -> tuple[dict[str, Any], int]:
+    sanitized, removed = _prune_banned_reasoning_tokens(payload)
+    if isinstance(sanitized, dict):
+        return sanitized, removed
+    return payload, removed
+
+
+def dedupe_system_messages(messages: Any) -> tuple[Any, int]:
+    if not isinstance(messages, list):
+        return messages, 0
+
+    deduped: list[Any] = []
+    has_system = False
+    removed = 0
+
+    for message in messages:
+        if isinstance(message, dict) and message.get("role") == "system":
+            if has_system:
+                removed += 1
+                continue
+            has_system = True
+        deduped.append(message)
+
+    return deduped, removed
+
+
 async def get_headers_and_cookies(
     request: Request,
     url: str,
@@ -1291,6 +1361,13 @@ async def generate_chat_completion(
 
     payload = {**form_data}
     metadata = payload.pop("metadata", None)
+    payload["messages"], removed_duplicate_system = dedupe_system_messages(
+        payload.get("messages", [])
+    )
+    if removed_duplicate_system > 0:
+        log.warning(
+            f"Removed {removed_duplicate_system} duplicate system message(s) before chat request"
+        )
 
     model_id = form_data.get("model")
     if not isinstance(model_id, str) or not model_id:
@@ -1453,6 +1530,12 @@ async def generate_chat_completion(
             request_url = f"{url}/responses"
         else:
             request_url = f"{url}/chat/completions"
+
+    payload, removed_banned_tokens = sanitize_upstream_payload(payload)
+    if removed_banned_tokens > 0:
+        log.warning(
+            f"Removed {removed_banned_tokens} banned reasoning token(s) from chat payload before upstream request"
+        )
 
     payload = json.dumps(payload)
 
@@ -1630,6 +1713,11 @@ async def responses(
     """
     payload = form_data.model_dump(exclude_none=True)
     payload = apply_default_reasoning_payload(payload)
+    payload, removed_banned_tokens = sanitize_upstream_payload(payload)
+    if removed_banned_tokens > 0:
+        log.warning(
+            f"Removed {removed_banned_tokens} banned reasoning token(s) from responses payload before upstream request"
+        )
     body = json.dumps(payload)
 
     idx = 0
@@ -1737,6 +1825,18 @@ async def proxy(path: str, request: Request, user=Depends(get_verified_user)):
             payload = json.loads(body)
             if isinstance(payload, dict) and isinstance(payload.get("model"), str):
                 payload = apply_default_reasoning_payload(payload)
+                payload["messages"], removed_duplicate_system = dedupe_system_messages(
+                    payload.get("messages", [])
+                )
+                if removed_duplicate_system > 0:
+                    log.warning(
+                        f"Removed {removed_duplicate_system} duplicate system message(s) from proxy payload before upstream request"
+                    )
+                payload, removed_banned_tokens = sanitize_upstream_payload(payload)
+                if removed_banned_tokens > 0:
+                    log.warning(
+                        f"Removed {removed_banned_tokens} banned reasoning token(s) from proxy payload before upstream request"
+                    )
                 body = json.dumps(payload).encode()
         except (json.JSONDecodeError, ValueError):
             payload = None
@@ -1781,6 +1881,11 @@ async def proxy(path: str, request: Request, user=Depends(get_verified_user)):
 
             payload = json.loads(body)
             url, payload = convert_to_azure_payload(url, payload, api_version)
+            payload, removed_banned_tokens = sanitize_upstream_payload(payload)
+            if removed_banned_tokens > 0:
+                log.warning(
+                    f"Removed {removed_banned_tokens} banned reasoning token(s) from azure proxy payload before upstream request"
+                )
             body = json.dumps(payload).encode()
 
             request_url = f"{url}/{path}?api-version={api_version}"
