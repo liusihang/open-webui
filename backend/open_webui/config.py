@@ -3082,6 +3082,68 @@ ADAPTIVE_FILE_CONTEXT_MIGRATION_VERSION = PersistentConfig(
     ),
 )
 
+CHAT_CONTEXT_NON_SYSTEM_MAX_TOKENS = PersistentConfig(
+    "CHAT_CONTEXT_NON_SYSTEM_MAX_TOKENS",
+    "chat.context.non_system_max_tokens",
+    (
+        int(os.environ.get("CHAT_CONTEXT_NON_SYSTEM_MAX_TOKENS", "32000"))
+        if os.environ.get("CHAT_CONTEXT_NON_SYSTEM_MAX_TOKENS")
+        else 32000
+    ),
+)
+
+CHAT_CONTEXT_WINDOW_ROUNDS = PersistentConfig(
+    "CHAT_CONTEXT_WINDOW_ROUNDS",
+    "chat.context.window_rounds",
+    (
+        int(os.environ.get("CHAT_CONTEXT_WINDOW_ROUNDS", "5"))
+        if os.environ.get("CHAT_CONTEXT_WINDOW_ROUNDS")
+        else 5
+    ),
+)
+
+CHAT_CONTEXT_COMPACTION_TRIGGER_TOKENS = PersistentConfig(
+    "CHAT_CONTEXT_COMPACTION_TRIGGER_TOKENS",
+    "chat.context.compaction_trigger_tokens",
+    (
+        int(os.environ.get("CHAT_CONTEXT_COMPACTION_TRIGGER_TOKENS", "50000"))
+        if os.environ.get("CHAT_CONTEXT_COMPACTION_TRIGGER_TOKENS")
+        else 50000
+    ),
+)
+
+CHAT_CONTEXT_TOOL_OUTPUT_MAX_TOKENS = PersistentConfig(
+    "CHAT_CONTEXT_TOOL_OUTPUT_MAX_TOKENS",
+    "chat.context.tool_output_max_tokens",
+    (
+        int(os.environ.get("CHAT_CONTEXT_TOOL_OUTPUT_MAX_TOKENS", "1800"))
+        if os.environ.get("CHAT_CONTEXT_TOOL_OUTPUT_MAX_TOKENS")
+        else 1800
+    ),
+)
+
+CHAT_CONTEXT_TOOL_OUTPUT_MAX_CHARS = PersistentConfig(
+    "CHAT_CONTEXT_TOOL_OUTPUT_MAX_CHARS",
+    "chat.context.tool_output_max_chars",
+    (
+        int(os.environ.get("CHAT_CONTEXT_TOOL_OUTPUT_MAX_CHARS", "6000"))
+        if os.environ.get("CHAT_CONTEXT_TOOL_OUTPUT_MAX_CHARS")
+        else 6000
+    ),
+)
+
+CHAT_CONTEXT_ALLOW_TEMP_OVERFLOW = PersistentConfig(
+    "CHAT_CONTEXT_ALLOW_TEMP_OVERFLOW",
+    "chat.context.allow_temp_overflow",
+    os.environ.get("CHAT_CONTEXT_ALLOW_TEMP_OVERFLOW", "True").lower() == "true",
+)
+
+CHAT_CONTEXT_BUDGET_ENABLED = PersistentConfig(
+    "CHAT_CONTEXT_BUDGET_ENABLED",
+    "chat.context.budget_enabled",
+    os.environ.get("CHAT_CONTEXT_BUDGET_ENABLED", "True").lower() == "true",
+)
+
 FILE_IMAGE_COMPRESSION_WIDTH = PersistentConfig(
     "FILE_IMAGE_COMPRESSION_WIDTH",
     "file.image_compression_width",
