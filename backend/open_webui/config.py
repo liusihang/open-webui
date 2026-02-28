@@ -2272,6 +2272,58 @@ MEMORY_STATELESS_PENALTY = PersistentConfig(
     float(os.environ.get("MEMORY_STATELESS_PENALTY", "0.15")),
 )
 
+MEMORY_AUTO_WRITEBACK_ENABLED = PersistentConfig(
+    "MEMORY_AUTO_WRITEBACK_ENABLED",
+    "memories.auto_writeback.enabled",
+    os.environ.get("MEMORY_AUTO_WRITEBACK_ENABLED", "True").lower() == "true",
+)
+
+MEMORY_AUTO_WRITEBACK_MODEL = PersistentConfig(
+    "MEMORY_AUTO_WRITEBACK_MODEL",
+    "memories.auto_writeback.model",
+    os.environ.get("MEMORY_AUTO_WRITEBACK_MODEL", ""),
+)
+
+MEMORY_AUTO_WRITEBACK_MESSAGES_TO_CONSIDER = PersistentConfig(
+    "MEMORY_AUTO_WRITEBACK_MESSAGES_TO_CONSIDER",
+    "memories.auto_writeback.messages_to_consider",
+    int(os.environ.get("MEMORY_AUTO_WRITEBACK_MESSAGES_TO_CONSIDER", "6")),
+)
+
+MEMORY_AUTO_WRITEBACK_RELATED_MEMORIES_N = PersistentConfig(
+    "MEMORY_AUTO_WRITEBACK_RELATED_MEMORIES_N",
+    "memories.auto_writeback.related_memories_n",
+    int(os.environ.get("MEMORY_AUTO_WRITEBACK_RELATED_MEMORIES_N", "5")),
+)
+
+MEMORY_AUTO_WRITEBACK_MIN_SIMILARITY = PersistentConfig(
+    "MEMORY_AUTO_WRITEBACK_MIN_SIMILARITY",
+    "memories.auto_writeback.minimum_similarity",
+    (
+        float(os.environ.get("MEMORY_AUTO_WRITEBACK_MIN_SIMILARITY"))
+        if os.environ.get("MEMORY_AUTO_WRITEBACK_MIN_SIMILARITY") not in [None, ""]
+        else None
+    ),
+)
+
+MEMORY_AUTO_WRITEBACK_MAX_ACTIONS = PersistentConfig(
+    "MEMORY_AUTO_WRITEBACK_MAX_ACTIONS",
+    "memories.auto_writeback.max_actions",
+    int(os.environ.get("MEMORY_AUTO_WRITEBACK_MAX_ACTIONS", "6")),
+)
+
+MEMORY_AUTO_WRITEBACK_MIN_USER_MESSAGE_CHARS = PersistentConfig(
+    "MEMORY_AUTO_WRITEBACK_MIN_USER_MESSAGE_CHARS",
+    "memories.auto_writeback.min_user_message_chars",
+    int(os.environ.get("MEMORY_AUTO_WRITEBACK_MIN_USER_MESSAGE_CHARS", "6")),
+)
+
+MEMORY_AUTO_WRITEBACK_SHOW_STATUS = PersistentConfig(
+    "MEMORY_AUTO_WRITEBACK_SHOW_STATUS",
+    "memories.auto_writeback.show_status",
+    os.environ.get("MEMORY_AUTO_WRITEBACK_SHOW_STATUS", "True").lower() == "true",
+)
+
 ENABLE_DEEP_RESEARCH = PersistentConfig(
     "ENABLE_DEEP_RESEARCH",
     "deep_research.enable",
@@ -3028,6 +3080,68 @@ ADAPTIVE_FILE_CONTEXT_MIGRATION_VERSION = PersistentConfig(
         if os.environ.get("ADAPTIVE_FILE_CONTEXT_MIGRATION_VERSION")
         else 0
     ),
+)
+
+CHAT_CONTEXT_NON_SYSTEM_MAX_TOKENS = PersistentConfig(
+    "CHAT_CONTEXT_NON_SYSTEM_MAX_TOKENS",
+    "chat.context.non_system_max_tokens",
+    (
+        int(os.environ.get("CHAT_CONTEXT_NON_SYSTEM_MAX_TOKENS", "32000"))
+        if os.environ.get("CHAT_CONTEXT_NON_SYSTEM_MAX_TOKENS")
+        else 32000
+    ),
+)
+
+CHAT_CONTEXT_WINDOW_ROUNDS = PersistentConfig(
+    "CHAT_CONTEXT_WINDOW_ROUNDS",
+    "chat.context.window_rounds",
+    (
+        int(os.environ.get("CHAT_CONTEXT_WINDOW_ROUNDS", "5"))
+        if os.environ.get("CHAT_CONTEXT_WINDOW_ROUNDS")
+        else 5
+    ),
+)
+
+CHAT_CONTEXT_COMPACTION_TRIGGER_TOKENS = PersistentConfig(
+    "CHAT_CONTEXT_COMPACTION_TRIGGER_TOKENS",
+    "chat.context.compaction_trigger_tokens",
+    (
+        int(os.environ.get("CHAT_CONTEXT_COMPACTION_TRIGGER_TOKENS", "50000"))
+        if os.environ.get("CHAT_CONTEXT_COMPACTION_TRIGGER_TOKENS")
+        else 50000
+    ),
+)
+
+CHAT_CONTEXT_TOOL_OUTPUT_MAX_TOKENS = PersistentConfig(
+    "CHAT_CONTEXT_TOOL_OUTPUT_MAX_TOKENS",
+    "chat.context.tool_output_max_tokens",
+    (
+        int(os.environ.get("CHAT_CONTEXT_TOOL_OUTPUT_MAX_TOKENS", "1800"))
+        if os.environ.get("CHAT_CONTEXT_TOOL_OUTPUT_MAX_TOKENS")
+        else 1800
+    ),
+)
+
+CHAT_CONTEXT_TOOL_OUTPUT_MAX_CHARS = PersistentConfig(
+    "CHAT_CONTEXT_TOOL_OUTPUT_MAX_CHARS",
+    "chat.context.tool_output_max_chars",
+    (
+        int(os.environ.get("CHAT_CONTEXT_TOOL_OUTPUT_MAX_CHARS", "6000"))
+        if os.environ.get("CHAT_CONTEXT_TOOL_OUTPUT_MAX_CHARS")
+        else 6000
+    ),
+)
+
+CHAT_CONTEXT_ALLOW_TEMP_OVERFLOW = PersistentConfig(
+    "CHAT_CONTEXT_ALLOW_TEMP_OVERFLOW",
+    "chat.context.allow_temp_overflow",
+    os.environ.get("CHAT_CONTEXT_ALLOW_TEMP_OVERFLOW", "True").lower() == "true",
+)
+
+CHAT_CONTEXT_BUDGET_ENABLED = PersistentConfig(
+    "CHAT_CONTEXT_BUDGET_ENABLED",
+    "chat.context.budget_enabled",
+    os.environ.get("CHAT_CONTEXT_BUDGET_ENABLED", "True").lower() == "true",
 )
 
 FILE_IMAGE_COMPRESSION_WIDTH = PersistentConfig(

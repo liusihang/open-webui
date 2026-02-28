@@ -156,6 +156,20 @@ def convert_output_to_messages(output: list, raw: bool = False) -> list[dict]:
     pending_tool_calls = []
     pending_content = []
 
+    def coerce_text(value) -> str:
+        if value is None:
+            return ""
+        if isinstance(value, str):
+            return value
+        if isinstance(value, bytes):
+            return value.decode("utf-8", "replace")
+        if isinstance(value, (dict, list, tuple)):
+            try:
+                return json.dumps(value, ensure_ascii=False)
+            except Exception:
+                return str(value)
+        return str(value)
+
     def flush_pending():
         nonlocal pending_content, pending_tool_calls
         if pending_content or pending_tool_calls:
@@ -179,8 +193,8 @@ def convert_output_to_messages(output: list, raw: bool = False) -> list[dict]:
             content_parts = item.get("content", [])
             text = ""
             for part in content_parts:
-                if part.get("type") == "output_text":
-                    text += part.get("text", "")
+                if part.get("type") in ["output_text", "text"]:
+                    text += coerce_text(part.get("text", ""))
             if text:
                 pending_content.append(text)
 
@@ -216,7 +230,7 @@ def convert_output_to_messages(output: list, raw: bool = False) -> list[dict]:
             content = ""
             for part in output_parts:
                 if part.get("type") == "input_text":
-                    content += part.get("text", "")
+                    content += coerce_text(part.get("text", ""))
 
             messages.append(
                 {
@@ -233,9 +247,9 @@ def convert_output_to_messages(output: list, raw: bool = False) -> list[dict]:
                 source_list = item.get("summary", []) or item.get("content", [])
                 for part in source_list:
                     if part.get("type") == "output_text":
-                        reasoning_text += part.get("text", "")
+                        reasoning_text += coerce_text(part.get("text", ""))
                     elif "text" in part:
-                        reasoning_text += part.get("text", "")
+                        reasoning_text += coerce_text(part.get("text", ""))
 
                 if reasoning_text:
                     start_tag = item.get("start_tag", "<think>")

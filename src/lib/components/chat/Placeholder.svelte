@@ -54,6 +54,7 @@
 	export let codeInterpreterEnabled = false;
 	export let webSearchEnabled = false;
 	export let deepResearchEnabled = false;
+	export let reasoningDepth: 'medium' | 'deep' | 'divergent' = 'medium';
 
 	export let onUpload: Function = (e) => {};
 	export let onSelect = (e) => {};
@@ -212,6 +213,7 @@
 					bind:codeInterpreterEnabled
 					bind:webSearchEnabled
 					bind:deepResearchEnabled
+					bind:reasoningDepth
 					bind:atSelectedModel
 					bind:showCommands
 					{toolServers}

@@ -3,6 +3,8 @@ import sys
 import inspect
 import json
 import asyncio
+import re
+from urllib.parse import urlparse
 
 from pydantic import BaseModel
 from typing import AsyncGenerator, Generator, Iterator
@@ -156,6 +158,89 @@ async def get_function_models(request):
 async def generate_function_chat_completion(
     request, form_data, user, models: dict = {}
 ):
+    def _extract_openwebui_file_id_from_image_ref(image_ref) -> str:
+        if not isinstance(image_ref, str):
+            return ""
+        ref = image_ref.strip()
+        if not ref:
+            return ""
+        if ref.lower().startswith("data:"):
+            return ""
+
+        candidate_path = ref
+        if ref.lower().startswith(("http://", "https://", "gs://")):
+            try:
+                candidate_path = urlparse(ref).path or ""
+            except Exception:
+                candidate_path = ref
+
+        for pattern in (
+            r"/api(?:/v1)?/files/([^/?#]+)(?:/content(?:/[^?#]*)?)?(?:[?#].*)?$",
+            r"/files/([^/?#]+)(?:/content(?:/[^?#]*)?)?(?:[?#].*)?$",
+        ):
+            m = re.search(pattern, candidate_path, flags=re.IGNORECASE)
+            if m:
+                file_id = str(m.group(1) or "").strip()
+                if file_id:
+                    return file_id
+
+        if "/" not in ref and "\\" not in ref and " " not in ref:
+            return ref
+
+        return ""
+
+    def _merge_image_files_from_messages(files, messages):
+        merged = list(files) if isinstance(files, list) else []
+        seen_file_ids = set()
+
+        for item in merged:
+            if not isinstance(item, dict):
+                continue
+            file_id = str(item.get("id") or "").strip()
+            if not file_id:
+                url = str(item.get("url") or "").strip()
+                if url and "/" not in url and "\\" not in url and " " not in url:
+                    file_id = url
+            if file_id:
+                seen_file_ids.add(file_id)
+
+        if not isinstance(messages, list):
+            return merged
+
+        for msg in messages:
+            if not isinstance(msg, dict):
+                continue
+            content = msg.get("content")
+            if not isinstance(content, list):
+                continue
+            for part in content:
+                if not isinstance(part, dict):
+                    continue
+                ptype = str(part.get("type") or "").strip().lower()
+                if ptype not in ("image_url", "input_image"):
+                    continue
+
+                image_ref = ""
+                if ptype == "image_url":
+                    image_obj = part.get("image_url")
+                    if isinstance(image_obj, dict):
+                        image_ref = str(image_obj.get("url") or "")
+                    elif isinstance(image_obj, str):
+                        image_ref = image_obj
+                else:
+                    image_url = part.get("image_url")
+                    if isinstance(image_url, str):
+                        image_ref = image_url
+
+                file_id = _extract_openwebui_file_id_from_image_ref(image_ref)
+                if not file_id or file_id in seen_file_ids:
+                    continue
+
+                merged.append({"id": file_id, "type": "image", "url": file_id})
+                seen_file_ids.add(file_id)
+
+        return merged
+
     async def execute_pipe(pipe, params):
         if inspect.iscoroutinefunction(pipe):
             return await pipe(**params)
@@ -222,6 +307,14 @@ async def generate_function_chat_completion(
     metadata = form_data.pop("metadata", {})
 
     files = metadata.get("files", [])
+    files_before = len(files) if isinstance(files, list) else 0
+    files = _merge_image_files_from_messages(files, form_data.get("messages", []))
+    if len(files) > files_before:
+        log.info(
+            "function pipe inferred image files from messages: +%d",
+            len(files) - files_before,
+        )
+    metadata["files"] = files
     tool_ids = metadata.get("tool_ids", [])
     # Check if tool_ids is None
     if tool_ids is None:

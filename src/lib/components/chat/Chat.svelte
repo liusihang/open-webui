@@ -140,6 +140,8 @@
 	let webSearchEnabled = false;
 	let codeInterpreterEnabled = false;
 	let deepResearchEnabled = false;
+	type ReasoningDepth = 'medium' | 'deep' | 'divergent';
+	let reasoningDepth: ReasoningDepth = 'medium';
 
 	let showCommands = false;
 
@@ -188,6 +190,7 @@
 		imageGenerationEnabled = false;
 		codeInterpreterEnabled = false;
 		deepResearchEnabled = false;
+		reasoningDepth = 'medium';
 
 		const storageChatInput = sessionStorage.getItem(
 			`chat-input${chatIdProp ? `-${chatIdProp}` : ''}`
@@ -237,6 +240,10 @@
 						imageGenerationEnabled = input.imageGenerationEnabled;
 						codeInterpreterEnabled = input.codeInterpreterEnabled;
 						deepResearchEnabled = input.deepResearchEnabled ?? false;
+						reasoningDepth =
+							input.reasoningDepth === 'deep' || input.reasoningDepth === 'divergent'
+								? input.reasoningDepth
+								: 'medium';
 					}
 				} catch (e) {}
 			} else {
@@ -298,6 +305,7 @@
 		imageGenerationEnabled = false;
 		codeInterpreterEnabled = false;
 		deepResearchEnabled = false;
+		reasoningDepth = 'medium';
 
 		if (selectedModelIds.filter((id) => id).length > 0) {
 			setDefaults();
@@ -1230,6 +1238,48 @@
 			});
 		}
 	};
+	const mergeServerMessageIntoHistory = (incomingMessage) => {
+		if (!incomingMessage?.id) {
+			return;
+		}
+
+		const messageId = incomingMessage.id;
+		const existingMessage = history.messages?.[messageId] ?? {};
+		const existingContent =
+			typeof existingMessage?.content === 'string' ? existingMessage.content : '';
+		const incomingContent = incomingMessage.content;
+		const incomingContentIsEmpty =
+			incomingContent === undefined ||
+			incomingContent === null ||
+			(typeof incomingContent === 'string' && incomingContent.trim().length === 0);
+
+		const mergedMessage = {
+			...existingMessage,
+			...(!incomingContentIsEmpty &&
+			typeof incomingContent === 'string' &&
+			typeof existingMessage?.content === 'string' &&
+			existingMessage.content !== incomingContent
+				? { originalContent: existingMessage.content }
+				: {}),
+			...incomingMessage
+		};
+
+		if (incomingContentIsEmpty && existingContent) {
+			mergedMessage.content = existingContent;
+		}
+
+		if (
+			Array.isArray(incomingMessage.output) &&
+			incomingMessage.output.length === 0 &&
+			Array.isArray(existingMessage.output) &&
+			existingMessage.output.length > 0
+		) {
+			mergedMessage.output = existingMessage.output;
+		}
+
+		history.messages[messageId] = mergedMessage;
+	};
+
 	const chatCompletedHandler = async (_chatId, modelId, responseMessageId, messages) => {
 		const res = await chatCompleted(localStorage.token, {
 			model: modelId,
@@ -1257,16 +1307,7 @@
 		if (res !== null && res.messages) {
 			// Update chat history with the new messages
 			for (const message of res.messages) {
-				if (message?.id) {
-					// Add null check for message and message.id
-					history.messages[message.id] = {
-						...history.messages[message.id],
-						...(history.messages[message.id].content !== message.content
-							? { originalContent: history.messages[message.id].content }
-							: {}),
-						...message
-					};
-				}
+				mergeServerMessageIntoHistory(message);
 			}
 		}
 
@@ -1329,13 +1370,7 @@
 		if (res !== null && res.messages) {
 			// Update chat history with the new messages
 			for (const message of res.messages) {
-				history.messages[message.id] = {
-					...history.messages[message.id],
-					...(history.messages[message.id].content !== message.content
-						? { originalContent: history.messages[message.id].content }
-						: {}),
-					...message
-				};
+				mergeServerMessageIntoHistory(message);
 			}
 		}
 
@@ -1510,16 +1545,25 @@
 		}
 
 		if (choices) {
+			const choice = choices[0] ?? {};
+			const messageReasoning = normalizeReasoningDelta(
+				choice?.message?.reasoning_content ?? choice?.message?.reasoning ?? choice?.message?.thinking
+			);
+			const deltaReasoning = normalizeReasoningDelta(
+				choice?.delta?.reasoning_content ?? choice?.delta?.reasoning ?? choice?.delta?.thinking
+			);
+
 			if (choices[0]?.message?.content) {
 				// Non-stream response
-				message.content += choices[0]?.message?.content;
+				message.responseContent =
+					(message.responseContent ?? message.content ?? '') + (choices[0]?.message?.content ?? '');
 			} else {
 				// Stream response
 				let value = choices[0]?.delta?.content ?? '';
 				if (message.content == '' && value == '\n') {
 					console.log('Empty response');
 				} else {
-					message.content += value;
+					message.responseContent = (message.responseContent ?? message.content ?? '') + value;
 
 					if (navigator.vibrate && ($settings?.hapticFeedback ?? false)) {
 						navigator.vibrate(5);
@@ -1527,7 +1571,7 @@
 
 					// Emit chat event for TTS
 					const messageContentParts = getMessageContentParts(
-						removeAllDetails(message.content),
+						removeAllDetails(message.responseContent),
 						$config?.audio?.tts?.split_on ?? 'punctuation'
 					);
 					messageContentParts.pop();
@@ -1548,6 +1592,20 @@
 						);
 					}
 				}
+			}
+
+			const reasoningDelta = messageReasoning || deltaReasoning;
+			if (reasoningDelta) {
+				message.reasoningContent = (message.reasoningContent ?? '') + reasoningDelta;
+			}
+
+			if (!output) {
+				const assistantContent = message.responseContent ?? message.content ?? '';
+				message.content = composeReasoningContent(
+					assistantContent,
+					message.reasoningContent ?? '',
+					done === true
+				);
 			}
 		}
 
@@ -1964,10 +2022,74 @@
 		}
 
 		if ($settings?.memory ?? false) {
-			features = { ...features, memory: true };
+			features = { ...features, memory: true, auto_memory: $settings?.autoMemory ?? true };
 		}
 
 		return features;
+	};
+
+	const getReasoningMaxTokens = (depth: ReasoningDepth): number => {
+		if (depth === 'deep') {
+			return 8126;
+		}
+
+		if (depth === 'divergent') {
+			return 12400;
+		}
+
+		return 2048;
+	};
+
+	const normalizeReasoningDelta = (value: unknown): string => {
+		if (typeof value === 'string') {
+			return value;
+		}
+
+		if (Array.isArray(value)) {
+			return value
+				.map((item) => {
+					if (typeof item === 'string') {
+						return item;
+					}
+
+					if (item && typeof item === 'object' && 'text' in item) {
+						const text = (item as { text?: unknown }).text;
+						return typeof text === 'string' ? text : '';
+					}
+
+					return '';
+				})
+				.join('');
+		}
+
+		if (value && typeof value === 'object' && 'text' in value) {
+			const text = (value as { text?: unknown }).text;
+			return typeof text === 'string' ? text : '';
+		}
+
+		return '';
+	};
+
+	const formatReasoningDetails = (reasoning: string, done: boolean): string => {
+		const quotedReasoning = reasoning
+			.split('\n')
+			.map((line) => (line ? `> ${line}` : '>'))
+			.join('\n');
+
+		return `<details type="reasoning" done="${done ? 'true' : 'false'}">\n<summary>${done ? 'Thought' : 'Thinking...'}</summary>\n${quotedReasoning}\n</details>`;
+	};
+
+	const composeReasoningContent = (
+		assistantContent: string,
+		reasoningContent: string,
+		done: boolean
+	): string => {
+		if (!reasoningContent) {
+			return assistantContent;
+		}
+
+		const details = formatReasoningDetails(reasoningContent, done);
+		return assistantContent ? `${details}\n${assistantContent}` : details;
 	};
 
 	const sendMessageSocket = async (model, _messages, _history, responseMessageId, _chatId) => {
@@ -2021,6 +2143,11 @@
 			$settings?.params?.stream_response ??
 			params?.stream_response ??
 			true;
+
+		const reasoning = {
+			enabled: true,
+			max_tokens: getReasoningMaxTokens(reasoningDepth)
+		};
 
 		let messages = [
 			params?.system || $settings.system
@@ -2125,6 +2252,7 @@
 				stream: stream,
 				model: model.id,
 				messages: messages,
+				reasoning,
 				params: {
 					...$settings?.params,
 					...params,
@@ -2729,8 +2857,9 @@
 									bind:imageGenerationEnabled
 									bind:codeInterpreterEnabled
 									bind:webSearchEnabled
-									bind:deepResearchEnabled
-									bind:atSelectedModel
+					bind:deepResearchEnabled
+					bind:reasoningDepth
+					bind:atSelectedModel
 									bind:showCommands
 									toolServers={$toolServers}
 									{generating}
@@ -2800,8 +2929,9 @@
 									bind:imageGenerationEnabled
 									bind:codeInterpreterEnabled
 									bind:webSearchEnabled
-									bind:deepResearchEnabled
-									bind:atSelectedModel
+					bind:deepResearchEnabled
+					bind:reasoningDepth
+					bind:atSelectedModel
 									bind:showCommands
 									toolServers={$toolServers}
 									{stopResponse}

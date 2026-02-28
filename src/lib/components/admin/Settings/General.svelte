@@ -58,10 +58,30 @@
 			MEMORY_NEED_RELEVANCE_WEIGHT: config.MEMORY_NEED_RELEVANCE_WEIGHT ?? 0.45,
 			MEMORY_NEED_CONTINUITY_WEIGHT: config.MEMORY_NEED_CONTINUITY_WEIGHT ?? 0.1,
 			MEMORY_STATELESS_PENALTY: config.MEMORY_STATELESS_PENALTY ?? 0.15,
+			MEMORY_AUTO_WRITEBACK_ENABLED: config.MEMORY_AUTO_WRITEBACK_ENABLED ?? true,
+			MEMORY_AUTO_WRITEBACK_MODEL: config.MEMORY_AUTO_WRITEBACK_MODEL ?? '',
+			MEMORY_AUTO_WRITEBACK_MESSAGES_TO_CONSIDER:
+				config.MEMORY_AUTO_WRITEBACK_MESSAGES_TO_CONSIDER ?? 6,
+			MEMORY_AUTO_WRITEBACK_RELATED_MEMORIES_N:
+				config.MEMORY_AUTO_WRITEBACK_RELATED_MEMORIES_N ?? 5,
+			MEMORY_AUTO_WRITEBACK_MIN_SIMILARITY:
+				config.MEMORY_AUTO_WRITEBACK_MIN_SIMILARITY ?? 0.25,
+			MEMORY_AUTO_WRITEBACK_MAX_ACTIONS: config.MEMORY_AUTO_WRITEBACK_MAX_ACTIONS ?? 6,
+			MEMORY_AUTO_WRITEBACK_MIN_USER_MESSAGE_CHARS:
+				config.MEMORY_AUTO_WRITEBACK_MIN_USER_MESSAGE_CHARS ?? 6,
+			MEMORY_AUTO_WRITEBACK_SHOW_STATUS: config.MEMORY_AUTO_WRITEBACK_SHOW_STATUS ?? true,
 			ANNOUNCEMENT_MODAL_ENABLED: config.ANNOUNCEMENT_MODAL_ENABLED ?? false,
 			ANNOUNCEMENT_MODAL_KEY: config.ANNOUNCEMENT_MODAL_KEY ?? '',
 			ANNOUNCEMENT_MODAL_TITLE: config.ANNOUNCEMENT_MODAL_TITLE ?? '',
-			ANNOUNCEMENT_MODAL_CONTENT: config.ANNOUNCEMENT_MODAL_CONTENT ?? ''
+			ANNOUNCEMENT_MODAL_CONTENT: config.ANNOUNCEMENT_MODAL_CONTENT ?? '',
+			CHAT_CONTEXT_BUDGET_ENABLED: config.CHAT_CONTEXT_BUDGET_ENABLED ?? true,
+			CHAT_CONTEXT_NON_SYSTEM_MAX_TOKENS: config.CHAT_CONTEXT_NON_SYSTEM_MAX_TOKENS ?? 32000,
+			CHAT_CONTEXT_WINDOW_ROUNDS: config.CHAT_CONTEXT_WINDOW_ROUNDS ?? 5,
+			CHAT_CONTEXT_COMPACTION_TRIGGER_TOKENS:
+				config.CHAT_CONTEXT_COMPACTION_TRIGGER_TOKENS ?? 50000,
+			CHAT_CONTEXT_TOOL_OUTPUT_MAX_TOKENS: config.CHAT_CONTEXT_TOOL_OUTPUT_MAX_TOKENS ?? 1800,
+			CHAT_CONTEXT_TOOL_OUTPUT_MAX_CHARS: config.CHAT_CONTEXT_TOOL_OUTPUT_MAX_CHARS ?? 6000,
+			CHAT_CONTEXT_ALLOW_TEMP_OVERFLOW: config.CHAT_CONTEXT_ALLOW_TEMP_OVERFLOW ?? true
 		};
 	};
 
@@ -1001,6 +1021,199 @@
 									bind:value={adminConfig.MEMORY_NEED_CONTINUITY_WEIGHT}
 								/>
 							</div>
+						</div>
+
+						<div class="mb-2.5 flex w-full items-center justify-between pr-2">
+							<div class=" self-center text-xs font-medium">
+								{$i18n.t('Auto Memory Writeback')}
+							</div>
+
+							<Switch bind:state={adminConfig.MEMORY_AUTO_WRITEBACK_ENABLED} />
+						</div>
+
+						{#if adminConfig.MEMORY_AUTO_WRITEBACK_ENABLED}
+							<div class="mb-2.5 w-full justify-between">
+								<div class="flex w-full justify-between">
+									<div class=" self-center text-xs font-medium">
+										{$i18n.t('Auto Memory Planner Model (optional)')}
+									</div>
+								</div>
+
+								<div class="flex mt-2 space-x-2">
+									<input
+										class="w-full rounded-lg py-2 px-4 text-sm bg-gray-50 dark:text-gray-300 dark:bg-gray-850 outline-hidden"
+										type="text"
+										placeholder={$i18n.t('Leave empty to use task model')}
+										bind:value={adminConfig.MEMORY_AUTO_WRITEBACK_MODEL}
+									/>
+								</div>
+							</div>
+
+							<div class="mb-2.5 grid grid-cols-1 md:grid-cols-2 gap-2">
+								<div class="w-full">
+									<div class="text-xs font-medium">
+										{$i18n.t('Messages To Consider')}
+									</div>
+									<input
+										class="w-full mt-2 rounded-lg py-2 px-4 text-sm bg-gray-50 dark:text-gray-300 dark:bg-gray-850 outline-hidden"
+										type="number"
+										min="2"
+										step="1"
+										bind:value={adminConfig.MEMORY_AUTO_WRITEBACK_MESSAGES_TO_CONSIDER}
+									/>
+								</div>
+
+								<div class="w-full">
+									<div class="text-xs font-medium">
+										{$i18n.t('Related Memories Top K')}
+									</div>
+									<input
+										class="w-full mt-2 rounded-lg py-2 px-4 text-sm bg-gray-50 dark:text-gray-300 dark:bg-gray-850 outline-hidden"
+										type="number"
+										min="1"
+										step="1"
+										bind:value={adminConfig.MEMORY_AUTO_WRITEBACK_RELATED_MEMORIES_N}
+									/>
+								</div>
+
+								<div class="w-full">
+									<div class="text-xs font-medium">
+										{$i18n.t('Minimum Similarity (0-1)')}
+									</div>
+									<input
+										class="w-full mt-2 rounded-lg py-2 px-4 text-sm bg-gray-50 dark:text-gray-300 dark:bg-gray-850 outline-hidden"
+										type="number"
+										min="0"
+										max="1"
+										step="0.01"
+										bind:value={adminConfig.MEMORY_AUTO_WRITEBACK_MIN_SIMILARITY}
+									/>
+								</div>
+
+								<div class="w-full">
+									<div class="text-xs font-medium">
+										{$i18n.t('Max Actions Per Turn')}
+									</div>
+									<input
+										class="w-full mt-2 rounded-lg py-2 px-4 text-sm bg-gray-50 dark:text-gray-300 dark:bg-gray-850 outline-hidden"
+										type="number"
+										min="1"
+										step="1"
+										bind:value={adminConfig.MEMORY_AUTO_WRITEBACK_MAX_ACTIONS}
+									/>
+								</div>
+
+								<div class="w-full">
+									<div class="text-xs font-medium">
+										{$i18n.t('Min User Message Chars')}
+									</div>
+									<input
+										class="w-full mt-2 rounded-lg py-2 px-4 text-sm bg-gray-50 dark:text-gray-300 dark:bg-gray-850 outline-hidden"
+										type="number"
+										min="1"
+										step="1"
+										bind:value={adminConfig.MEMORY_AUTO_WRITEBACK_MIN_USER_MESSAGE_CHARS}
+									/>
+								</div>
+
+								<div class="w-full">
+									<div class="text-xs font-medium">{$i18n.t('Show Status Events')}</div>
+									<div class="mt-2">
+										<Switch bind:state={adminConfig.MEMORY_AUTO_WRITEBACK_SHOW_STATUS} />
+									</div>
+								</div>
+							</div>
+						{/if}
+					{/if}
+
+					<div class="mt-3 mb-2">
+						<div class="text-xs font-medium uppercase tracking-wide text-gray-500 dark:text-gray-400">
+							{$i18n.t('Chat Context Budget')}
+						</div>
+					</div>
+
+					<div class="mb-2.5 flex w-full items-center justify-between pr-2">
+						<div class=" self-center text-xs font-medium">
+							{$i18n.t('Enable Chat Context Budget Policy')}
+						</div>
+
+						<Switch bind:state={adminConfig.CHAT_CONTEXT_BUDGET_ENABLED} />
+					</div>
+
+					{#if adminConfig.CHAT_CONTEXT_BUDGET_ENABLED}
+						<div class="mb-2.5 grid grid-cols-1 md:grid-cols-2 gap-2">
+							<div class="w-full">
+								<div class="text-xs font-medium">
+									{$i18n.t('Non-System Max Tokens')}
+								</div>
+								<input
+									class="w-full mt-2 rounded-lg py-2 px-4 text-sm bg-gray-50 dark:text-gray-300 dark:bg-gray-850 outline-hidden"
+									type="number"
+									min="256"
+									step="1"
+									bind:value={adminConfig.CHAT_CONTEXT_NON_SYSTEM_MAX_TOKENS}
+								/>
+							</div>
+
+							<div class="w-full">
+								<div class="text-xs font-medium">
+									{$i18n.t('Recent User Rounds')}
+								</div>
+								<input
+									class="w-full mt-2 rounded-lg py-2 px-4 text-sm bg-gray-50 dark:text-gray-300 dark:bg-gray-850 outline-hidden"
+									type="number"
+									min="1"
+									step="1"
+									bind:value={adminConfig.CHAT_CONTEXT_WINDOW_ROUNDS}
+								/>
+							</div>
+
+							<div class="w-full">
+								<div class="text-xs font-medium">
+									{$i18n.t('Compaction Trigger Tokens')}
+								</div>
+								<input
+									class="w-full mt-2 rounded-lg py-2 px-4 text-sm bg-gray-50 dark:text-gray-300 dark:bg-gray-850 outline-hidden"
+									type="number"
+									min={adminConfig.CHAT_CONTEXT_NON_SYSTEM_MAX_TOKENS || 256}
+									step="1"
+									bind:value={adminConfig.CHAT_CONTEXT_COMPACTION_TRIGGER_TOKENS}
+								/>
+							</div>
+
+							<div class="w-full">
+								<div class="text-xs font-medium">
+									{$i18n.t('Tool Output Max Tokens')}
+								</div>
+								<input
+									class="w-full mt-2 rounded-lg py-2 px-4 text-sm bg-gray-50 dark:text-gray-300 dark:bg-gray-850 outline-hidden"
+									type="number"
+									min="128"
+									step="1"
+									bind:value={adminConfig.CHAT_CONTEXT_TOOL_OUTPUT_MAX_TOKENS}
+								/>
+							</div>
+
+							<div class="w-full">
+								<div class="text-xs font-medium">
+									{$i18n.t('Tool Output Max Chars')}
+								</div>
+								<input
+									class="w-full mt-2 rounded-lg py-2 px-4 text-sm bg-gray-50 dark:text-gray-300 dark:bg-gray-850 outline-hidden"
+									type="number"
+									min="256"
+									step="1"
+									bind:value={adminConfig.CHAT_CONTEXT_TOOL_OUTPUT_MAX_CHARS}
+								/>
+							</div>
+						</div>
+
+						<div class="mb-2.5 flex w-full items-center justify-between pr-2">
+							<div class=" self-center text-xs font-medium">
+								{$i18n.t('Allow Temporary Overflow')}
+							</div>
+
+							<Switch bind:state={adminConfig.CHAT_CONTEXT_ALLOW_TEMP_OVERFLOW} />
 						</div>
 					{/if}
 

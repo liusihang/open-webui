@@ -77,6 +77,8 @@ from open_webui.utils.adaptive_file_context import (
     apply_adaptive_context_to_items,
     resolve_adaptive_config,
 )
+from open_webui.utils.chat_context_budget import apply_context_budget_policy
+from open_webui.utils.message_merge import merge_messages_preserving_incoming_tail
 
 
 from open_webui.utils.sanitize import sanitize_code
@@ -115,6 +117,7 @@ from open_webui.utils.code_interpreter import execute_code_jupyter
 from open_webui.utils.payload import apply_system_prompt_to_body
 from open_webui.utils.response import normalize_usage
 from open_webui.utils.mcp.client import MCPClient
+from open_webui.utils.auto_memory import run_auto_memory_writeback
 
 
 from open_webui.config import (
@@ -464,19 +467,35 @@ def serialize_output(output: list) -> str:
             pass
 
         elif item_type == "reasoning":
-            reasoning_content = ""
+            reasoning_parts = []
             # Check for 'summary' (new structure) or 'content' (legacy/fallback)
             source_list = item.get("summary", []) or item.get("content", [])
             for content_part in source_list:
+                if _is_encrypted_reasoning_part(content_part):
+                    continue
+                if not isinstance(content_part, dict):
+                    continue
                 if "text" in content_part:
-                    reasoning_content += content_part.get("text", "")
+                    text_value = content_part.get("text", "")
+                    if (
+                        isinstance(text_value, str)
+                        and text_value.strip()
+                        and not _is_encrypted_reasoning_text(text_value)
+                    ):
+                        reasoning_parts.append(text_value.strip())
                 elif "summary" in content_part:  # Handle potential nested logic if any
                     pass
 
-            reasoning_content = reasoning_content.strip()
+            reasoning_content = "\n\n".join(reasoning_parts)
 
             duration = item.get("duration")
             status = item.get("status", "in_progress")
+            has_encrypted_content = isinstance(item.get("encrypted_content"), str)
+
+            if not reasoning_content and (
+                has_encrypted_content or str(status).lower() == "completed"
+            ):
+                continue
 
             # Infer completion: if this reasoning item is NOT the last item,
             # render as done (a subsequent item means reasoning is complete)
@@ -542,6 +561,360 @@ def serialize_output(output: list) -> str:
     return content.strip()
 
 
+def extract_reasoning_text(payload: Optional[dict[str, Any]]) -> str:
+    if not isinstance(payload, dict):
+        return ""
+
+    for key in ("reasoning_content", "reasoning", "thinking"):
+        value = payload.get(key)
+        if isinstance(value, str) and value.strip():
+            return value
+
+    details = payload.get("reasoning_details")
+    if not isinstance(details, list):
+        return ""
+
+    parts = []
+    for item in details:
+        if isinstance(item, str):
+            if item.strip():
+                parts.append(item)
+            continue
+
+        if not isinstance(item, dict):
+            continue
+
+        for key in ("text", "reasoning", "content", "summary"):
+            value = item.get(key)
+            if isinstance(value, str) and value.strip():
+                parts.append(value)
+
+    normalized_parts = [part.strip() for part in parts if isinstance(part, str) and part.strip()]
+    return "\n\n".join(normalized_parts)
+
+
+def merge_output_item_preserve_content(existing: Any, incoming: Any) -> Any:
+    if not isinstance(existing, dict) or not isinstance(incoming, dict):
+        return incoming if incoming is not None else existing
+
+    merged = dict(existing)
+
+    for key, incoming_value in incoming.items():
+        existing_value = merged.get(key)
+
+        if isinstance(incoming_value, str):
+            if incoming_value == "" and isinstance(existing_value, str) and existing_value:
+                continue
+            merged[key] = incoming_value
+            continue
+
+        if isinstance(incoming_value, dict):
+            if isinstance(existing_value, dict):
+                merged[key] = merge_output_item_preserve_content(existing_value, incoming_value)
+            else:
+                merged[key] = incoming_value
+            continue
+
+        if isinstance(incoming_value, list):
+            if not incoming_value and isinstance(existing_value, list) and existing_value:
+                continue
+
+            if isinstance(existing_value, list):
+                merged_list: list[Any] = []
+                max_len = max(len(existing_value), len(incoming_value))
+                for idx in range(max_len):
+                    has_existing = idx < len(existing_value)
+                    has_incoming = idx < len(incoming_value)
+
+                    if has_existing and has_incoming:
+                        existing_item = existing_value[idx]
+                        incoming_item = incoming_value[idx]
+                        if isinstance(existing_item, dict) and isinstance(incoming_item, dict):
+                            merged_list.append(
+                                merge_output_item_preserve_content(existing_item, incoming_item)
+                            )
+                        elif (
+                            isinstance(incoming_item, str)
+                            and incoming_item == ""
+                            and isinstance(existing_item, str)
+                            and existing_item
+                        ):
+                            merged_list.append(existing_item)
+                        else:
+                            merged_list.append(incoming_item)
+                    elif has_incoming:
+                        merged_list.append(incoming_value[idx])
+                    else:
+                        merged_list.append(existing_value[idx])
+
+                merged[key] = merged_list
+            else:
+                merged[key] = incoming_value
+            continue
+
+        merged[key] = incoming_value
+
+    return merged
+
+
+def merge_final_output_preserve_content(
+    current_output: list[Any], final_output: list[Any]
+) -> list[Any]:
+    if not isinstance(final_output, list):
+        return current_output
+
+    if not isinstance(current_output, list):
+        return final_output
+
+    merged_output = list(current_output)
+
+    for idx, final_item in enumerate(final_output):
+        if idx < len(merged_output):
+            merged_output[idx] = merge_output_item_preserve_content(
+                merged_output[idx], final_item
+            )
+        else:
+            merged_output.append(final_item)
+
+    return merged_output
+
+
+def _to_timestamp(value: Any) -> Optional[float]:
+    if isinstance(value, (int, float)):
+        return float(value)
+    return None
+
+
+def _normalize_reasoning_token(value: str) -> str:
+    return re.sub(r"[\s_]+", " ", value).strip().lower()
+
+
+def _is_encrypted_reasoning_text(value: Any) -> bool:
+    if not isinstance(value, str):
+        return False
+
+    normalized = _normalize_reasoning_token(value)
+    return normalized in {
+        "encrypted reasoning content",
+        "reasoning encrypted content",
+    }
+
+
+def _is_encrypted_reasoning_part(part: Any) -> bool:
+    if not isinstance(part, dict):
+        return False
+
+    part_type = str(part.get("type") or "").strip().lower()
+    if "encrypted" in part_type:
+        return True
+
+    if isinstance(part.get("encrypted_content"), str):
+        return True
+
+    text = part.get("text")
+    if _is_encrypted_reasoning_text(text):
+        return True
+
+    signature = part.get("signature")
+    if isinstance(signature, str) and not isinstance(text, str):
+        return True
+
+    return False
+
+
+def _sanitize_reasoning_parts(parts: Any) -> list[dict[str, Any]]:
+    if not isinstance(parts, list):
+        return []
+
+    sanitized: list[dict[str, Any]] = []
+    for raw_part in parts:
+        if not isinstance(raw_part, dict):
+            continue
+
+        part = dict(raw_part)
+        if _is_encrypted_reasoning_part(part):
+            continue
+
+        text = part.get("text")
+        if isinstance(text, str):
+            text = text.strip()
+            if not text or _is_encrypted_reasoning_text(text):
+                continue
+            part["text"] = text
+
+        sanitized.append(part)
+
+    return sanitized
+
+
+def _reasoning_item_has_visible_text(item: dict[str, Any]) -> bool:
+    for key in ("summary", "content"):
+        for part in item.get(key) or []:
+            if not isinstance(part, dict):
+                continue
+            text = part.get("text")
+            if isinstance(text, str) and text.strip() and not _is_encrypted_reasoning_text(
+                text
+            ):
+                return True
+    return False
+
+
+def _clone_output_item(item: dict[str, Any]) -> dict[str, Any]:
+    cloned = dict(item)
+
+    if isinstance(item.get("attributes"), dict):
+        cloned["attributes"] = dict(item["attributes"])
+
+    for key in ("content", "summary", "output"):
+        if isinstance(item.get(key), list):
+            cloned[key] = [
+                dict(part) if isinstance(part, dict) else part for part in item[key]
+            ]
+
+    return cloned
+
+
+def _finalize_timed_item(
+    item: dict[str, Any],
+    ended_at: Optional[float] = None,
+    mark_completed: bool = True,
+) -> None:
+    end_ts = _to_timestamp(ended_at) or _to_timestamp(item.get("ended_at")) or time.time()
+    start_ts = _to_timestamp(item.get("started_at")) or end_ts
+    if start_ts > end_ts:
+        start_ts = end_ts
+
+    item["started_at"] = start_ts
+    item["ended_at"] = end_ts
+    item["duration"] = int(max(0.0, end_ts - start_ts))
+    if mark_completed:
+        item["status"] = "completed"
+
+
+def _normalize_reasoning_item(item: dict[str, Any]) -> dict[str, Any]:
+    if item.get("type") != "reasoning":
+        return item
+
+    encrypted_marker = False
+
+    if isinstance(item.get("encrypted_content"), str):
+        encrypted_marker = True
+    item.pop("encrypted_content", None)
+
+    summary = _sanitize_reasoning_parts(item.get("summary"))
+    if summary:
+        item["summary"] = summary
+    else:
+        item.pop("summary", None)
+
+    content_parts = _sanitize_reasoning_parts(item.get("content"))
+    if content_parts:
+        item["content"] = content_parts
+    else:
+        item.pop("content", None)
+
+    if encrypted_marker and not _reasoning_item_has_visible_text(item):
+        item["_encrypted_reasoning"] = True
+
+    started_at = _to_timestamp(item.get("started_at"))
+    ended_at = _to_timestamp(item.get("ended_at"))
+    status = str(item.get("status") or "").lower()
+
+    if started_at is None:
+        started_at = ended_at if ended_at is not None else time.time()
+        item["started_at"] = started_at
+
+    if status == "completed":
+        _finalize_timed_item(item, ended_at=ended_at, mark_completed=True)
+
+    return item
+
+
+def _merge_reasoning_items(
+    base_item: dict[str, Any], incoming_item: dict[str, Any]
+) -> dict[str, Any]:
+    merged = _normalize_reasoning_item(_clone_output_item(base_item))
+    incoming = _normalize_reasoning_item(_clone_output_item(incoming_item))
+
+    merged_content = list(merged.get("content") or [])
+    incoming_content = incoming.get("content") or []
+    if isinstance(incoming_content, list):
+        merged_content.extend(incoming_content)
+    merged["content"] = merged_content
+
+    merged_summary = list(merged.get("summary") or [])
+    incoming_summary = incoming.get("summary") or []
+    if isinstance(incoming_summary, list):
+        merged_summary.extend(incoming_summary)
+    merged["summary"] = merged_summary
+
+    base_started = _to_timestamp(merged.get("started_at"))
+    incoming_started = _to_timestamp(incoming.get("started_at"))
+    if base_started is None:
+        base_started = incoming_started
+    elif incoming_started is not None:
+        base_started = min(base_started, incoming_started)
+    if base_started is not None:
+        merged["started_at"] = base_started
+
+    base_status = str(merged.get("status") or "in_progress").lower()
+    incoming_status = str(incoming.get("status") or "in_progress").lower()
+
+    if "in_progress" in (base_status, incoming_status):
+        merged["status"] = "in_progress"
+        merged.pop("ended_at", None)
+        merged.pop("duration", None)
+    else:
+        ended_candidates = [
+            ts
+            for ts in (
+                _to_timestamp(merged.get("ended_at")),
+                _to_timestamp(incoming.get("ended_at")),
+            )
+            if ts is not None
+        ]
+        merged_end = max(ended_candidates) if ended_candidates else base_started
+        _finalize_timed_item(merged, ended_at=merged_end, mark_completed=True)
+
+    return merged
+
+
+def normalize_reasoning_output_items(output: Any) -> Any:
+    if not isinstance(output, list):
+        return output
+
+    normalized: list[Any] = []
+    for raw_item in output:
+        if not isinstance(raw_item, dict):
+            normalized.append(raw_item)
+            continue
+
+        item = _clone_output_item(raw_item)
+        if item.get("type") != "reasoning":
+            normalized.append(item)
+            continue
+
+        item = _normalize_reasoning_item(item)
+        is_encrypted_reasoning = bool(item.pop("_encrypted_reasoning", False))
+        item_status = str(item.get("status") or "").lower()
+
+        if not _reasoning_item_has_visible_text(item):
+            if is_encrypted_reasoning or item_status == "completed":
+                continue
+
+        if (
+            normalized
+            and isinstance(normalized[-1], dict)
+            and normalized[-1].get("type") == "reasoning"
+        ):
+            normalized[-1] = _merge_reasoning_items(normalized[-1], item)
+        else:
+            normalized.append(item)
+
+    return normalized
+
+
 def deep_merge(target, source):
     """
     Merge source into target recursively (returning new structure).
@@ -588,6 +961,8 @@ def handle_responses_streaming_event(
     if event_type == "response.output_item.added":
         item = data.get("item", {})
         if item:
+            if isinstance(item, dict) and item.get("type") == "reasoning":
+                item = _normalize_reasoning_item(_clone_output_item(item))
             new_output = list(current_output)
             new_output.append(item)
             return new_output, None
@@ -679,7 +1054,7 @@ def handle_responses_streaming_event(
                         content_list = item["content"]
 
                         while len(content_list) <= content_index:
-                            content_list.append({"type": "text", "text": ""})
+                            content_list.append({"type": "output_text", "text": ""})
 
                         # Copy the part to mutate it
                         part = content_list[content_index].copy()
@@ -727,8 +1102,8 @@ def handle_responses_streaming_event(
                             content_list = item["content"]
 
                             while len(content_list) <= content_index:
-                                # Reasoning content parts default to text
-                                content_list.append({"type": "text", "text": ""})
+                                # Keep OR-compatible output part typing.
+                                content_list.append({"type": "output_text", "text": ""})
 
                             part = content_list[content_index].copy()
                             content_list[content_index] = part
@@ -860,8 +1235,12 @@ def handle_responses_streaming_event(
         output_index = data.get("output_index", len(current_output) - 1)
 
         new_output = list(current_output)
+        if isinstance(item, dict) and item.get("type") == "reasoning":
+            item = _normalize_reasoning_item(_clone_output_item(item))
         if item and 0 <= output_index < len(current_output):
-            new_output[output_index] = item
+            new_output[output_index] = merge_output_item_preserve_content(
+                new_output[output_index], item
+            )
         elif item:
             new_output.append(item)
         return new_output, {}
@@ -871,7 +1250,13 @@ def handle_responses_streaming_event(
         response_data = data.get("response", {})
         final_output = response_data.get("output")
 
-        new_output = final_output if final_output is not None else current_output
+        # Some OpenAI-compatible upstreams emit an empty final `output` even though
+        # valid delta content has already streamed. Preserve streamed output in that
+        # case to avoid wiping the assistant message on completion.
+        if final_output is not None:
+            new_output = merge_final_output_preserve_content(current_output, final_output)
+        else:
+            new_output = current_output
 
         # Ensure reasoning items are marked as completed in the final output
         if new_output:
@@ -881,6 +1266,9 @@ def handle_responses_streaming_event(
                     and item.get("status") != "completed"
                 ):
                     item["status"] = "completed"
+
+            # Normalize timing fields and fold fragmented reasoning chunks.
+            new_output = normalize_reasoning_output_items(new_output)
 
         return new_output, {"usage": response_data.get("usage"), "done": True}
 
@@ -1044,6 +1432,11 @@ def process_tool_result(
 
     tool_result_files = []
 
+    # Defensive normalization: some tool integrations may accidentally return tuples.
+    # Keep downstream handling JSON-serializable and string-safe.
+    if isinstance(tool_result, tuple):
+        tool_result = list(tool_result)
+
     if isinstance(tool_result, list):
         if tool_type == "mcp":  # MCP
             tool_response = []
@@ -1091,8 +1484,10 @@ def process_tool_result(
     if isinstance(tool_result, list):
         tool_result = {"results": tool_result}
 
-    if isinstance(tool_result, dict) or isinstance(tool_result, list):
+    if isinstance(tool_result, (dict, list, tuple)):
         tool_result = json.dumps(tool_result, indent=2, ensure_ascii=False)
+    elif tool_result is not None and not isinstance(tool_result, str):
+        tool_result = str(tool_result)
 
     return tool_result, tool_result_files, tool_result_embeds
 
@@ -1918,15 +2313,171 @@ def get_images_from_messages(message_list):
 
         message_images = []
         for file in message.get("files", []):
-            if file.get("type") == "image":
-                message_images.append(file.get("url"))
-            elif file.get("content_type", "").startswith("image/"):
+            if _is_image_attachment(file):
                 message_images.append(file.get("url"))
 
         if message_images:
             images.append(message_images)
 
     return images
+
+
+def _normalize_attachment_content_type(value) -> str:
+    if isinstance(value, list):
+        value = next((item for item in value if isinstance(item, str)), None)
+    if not isinstance(value, str):
+        return ""
+
+    normalized = value.strip().lower()
+    if not normalized:
+        return ""
+
+    # Handle serialized list-like values such as ["image/jpeg"].
+    if normalized.startswith("[") and normalized.endswith("]"):
+        inner_items = re.findall(r"([a-z0-9.+-]+/[a-z0-9.+-]+)", normalized)
+        if inner_items:
+            return inner_items[0]
+
+    mime_match = re.search(r"([a-z0-9.+-]+/[a-z0-9.+-]+)", normalized)
+    if mime_match:
+        return mime_match.group(1)
+
+    return normalized.split(";")[0]
+
+
+def _extract_attachment_content_type(item: dict) -> str:
+    if not isinstance(item, dict):
+        return ""
+
+    candidates = [
+        item.get("content_type"),
+        item.get("mime_type"),
+        item.get("mimeType"),
+    ]
+
+    meta = item.get("meta")
+    if isinstance(meta, dict):
+        candidates.extend(
+            [
+                meta.get("content_type"),
+                meta.get("mime_type"),
+                meta.get("mimeType"),
+            ]
+        )
+
+    file_obj = item.get("file")
+    if isinstance(file_obj, dict):
+        candidates.extend(
+            [
+                file_obj.get("content_type"),
+                file_obj.get("mime_type"),
+                file_obj.get("mimeType"),
+            ]
+        )
+
+    for candidate in candidates:
+        normalized = _normalize_attachment_content_type(candidate)
+        if normalized:
+            return normalized
+
+    return ""
+
+
+def _extract_attachment_name(item: dict) -> str:
+    if not isinstance(item, dict):
+        return ""
+
+    for key in ("name", "filename"):
+        value = item.get(key)
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+
+    meta = item.get("meta")
+    if isinstance(meta, dict):
+        for key in ("name", "filename"):
+            value = meta.get(key)
+            if isinstance(value, str) and value.strip():
+                return value.strip()
+
+    file_obj = item.get("file")
+    if isinstance(file_obj, dict):
+        for key in ("name", "filename"):
+            value = file_obj.get(key)
+            if isinstance(value, str) and value.strip():
+                return value.strip()
+
+    return ""
+
+
+def _looks_like_image_path(value: str) -> bool:
+    if not isinstance(value, str) or not value:
+        return False
+
+    stripped = value.strip().lower()
+    if stripped.startswith("data:image/"):
+        return True
+
+    path = stripped.split("?", 1)[0].split("#", 1)[0]
+    return path.endswith(
+        (
+            ".png",
+            ".jpg",
+            ".jpeg",
+            ".webp",
+            ".gif",
+            ".bmp",
+            ".tif",
+            ".tiff",
+            ".heic",
+            ".heif",
+            ".avif",
+            ".svg",
+            ".ico",
+        )
+    )
+
+
+def _get_image_urls_from_message_content(content: Any) -> set[str]:
+    if not isinstance(content, list):
+        return set()
+
+    urls: set[str] = set()
+    for part in content:
+        if not isinstance(part, dict):
+            continue
+        if part.get("type") != "image_url":
+            continue
+        image_url = part.get("image_url")
+        if isinstance(image_url, dict):
+            url = image_url.get("url")
+        else:
+            url = image_url
+        if isinstance(url, str) and url.strip():
+            urls.add(url.strip())
+
+    return urls
+
+
+def _is_image_attachment(item: dict) -> bool:
+    if not isinstance(item, dict):
+        return False
+
+    if str(item.get("type", "")).lower() in {"image", "image_url", "input_image"}:
+        return True
+
+    content_type = _extract_attachment_content_type(item)
+    if content_type.startswith("image/"):
+        return True
+
+    attachment_name = _extract_attachment_name(item)
+    if _looks_like_image_path(attachment_name):
+        return True
+
+    url = item.get("url")
+    if isinstance(url, str) and _looks_like_image_path(url):
+        return True
+
+    return False
 
 
 def get_image_urls(delta_images, request, metadata, user) -> list[str]:
@@ -1975,10 +2526,14 @@ def add_file_context(messages: list, chat_id: str, user) -> list:
         return f"<file {attrs}/>"
 
     for message, stored_message in zip(messages, stored_messages):
+        image_urls = _get_image_urls_from_message_content(message.get("content"))
         files_with_urls = [
             file
             for file in stored_message.get("files", [])
-            if file.get("url") and not file.get("url").startswith("data:")
+            if file.get("url")
+            and not file.get("url").startswith("data:")
+            and str(file.get("url")) not in image_urls
+            and not _is_image_attachment(file)
         ]
         if not files_with_urls:
             continue
@@ -1989,10 +2544,18 @@ def add_file_context(messages: list, chat_id: str, user) -> list:
         )
 
         content = message.get("content", "")
-        if isinstance(content, list):
-            message["content"] = [{"type": "text", "text": file_context}] + content
-        else:
+        if isinstance(content, (list, tuple)):
+            content_blocks = list(content)
+            if all(isinstance(block, dict) for block in content_blocks):
+                message["content"] = [{"type": "text", "text": file_context}] + content_blocks
+            else:
+                message["content"] = file_context + "".join(str(block) for block in content_blocks)
+        elif isinstance(content, str):
             message["content"] = file_context + content
+        elif content is None:
+            message["content"] = file_context
+        else:
+            message["content"] = file_context + str(content)
 
     return messages
 
@@ -2213,6 +2776,12 @@ async def chat_completion_files_handler(
                 continue
 
             item = dict(candidate)
+
+            # Images are handled as vision inputs; do not send them into
+            # retrieval/file-context pipeline.
+            if _is_image_attachment(item):
+                continue
+
             if str(item.get("type") or "file").lower() == "file" and item.get("id"):
                 file_id = str(item.get("id"))
                 has_access = False
@@ -2574,8 +3143,17 @@ async def process_chat_payload(request, form_data, user, metadata, model):
         db_messages = load_messages_from_db(chat_id, parent_message_id)
         if db_messages:
             system_message = get_system_message(form_data.get("messages", []))
+            incoming_messages = [
+                message
+                for message in form_data.get("messages", [])
+                if isinstance(message, dict) and message.get("role") != "system"
+            ]
+            merged_messages = merge_messages_preserving_incoming_tail(
+                db_messages=db_messages,
+                incoming_messages=incoming_messages,
+            )
             form_data["messages"] = (
-                [system_message, *db_messages] if system_message else db_messages
+                [system_message, *merged_messages] if system_message else merged_messages
             )
 
     # Process messages with OR-aligned output items for clean LLM messages
@@ -2718,6 +3296,7 @@ async def process_chat_payload(request, form_data, user, metadata, model):
 
     features = form_data.pop("features", None) or {}
     extra_params["__features__"] = features
+    metadata["features"] = features
     if features:
         if "voice" in features and features["voice"]:
             if request.app.state.config.VOICE_MODE_PROMPT_TEMPLATE != None:
@@ -3128,6 +3707,21 @@ async def process_chat_payload(request, form_data, user, metadata, model):
             }
         )
 
+    try:
+        form_data, budget_diagnostics = await apply_context_budget_policy(
+            request=request,
+            form_data=form_data,
+            user=user,
+            models=models,
+        )
+        if budget_diagnostics.get("overflow"):
+            log.warning(
+                "Context budget overflow on primary payload "
+                f"(chat_id={metadata.get('chat_id')}, message_id={metadata.get('message_id')})"
+            )
+    except Exception as e:
+        log.debug(f"Context budget policy failed on primary payload: {e}")
+
     return form_data, metadata, events
 
 
@@ -3301,9 +3895,9 @@ async def background_tasks_handler(ctx):
                     if len(res.get("choices", [])) == 1:
                         response_message = res.get("choices", [])[0].get("message", {})
 
-                        follow_ups_string = response_message.get(
-                            "content"
-                        ) or response_message.get("reasoning_content", "")
+                        follow_ups_string = response_message.get("content") or extract_reasoning_text(
+                            response_message
+                        )
                     else:
                         follow_ups_string = ""
 
@@ -3362,9 +3956,7 @@ async def background_tasks_handler(ctx):
 
                                 title_string = (
                                     response_message.get("content")
-                                    or response_message.get(
-                                        "reasoning_content",
-                                    )
+                                    or extract_reasoning_text(response_message)
                                     or message.get("content", user_message)
                                 )
                             else:
@@ -3422,9 +4014,9 @@ async def background_tasks_handler(ctx):
                                 "message", {}
                             )
 
-                            tags_string = response_message.get(
-                                "content"
-                            ) or response_message.get("reasoning_content", "")
+                            tags_string = response_message.get("content") or extract_reasoning_text(
+                                response_message
+                            )
                         else:
                             tags_string = ""
 
@@ -3446,6 +4038,18 @@ async def background_tasks_handler(ctx):
                             )
                         except Exception as e:
                             pass
+
+        try:
+            await run_auto_memory_writeback(
+                request=request,
+                user=user,
+                metadata=metadata,
+                form_data=form_data,
+                messages=messages,
+                event_emitter=event_emitter,
+            )
+        except Exception as e:
+            log.debug(f"auto memory writeback error: {e}")
 
 
 async def non_streaming_chat_response_handler(response, ctx):
@@ -3496,73 +4100,94 @@ async def non_streaming_chat_response_handler(response, ctx):
                 )
 
             choices = response_data.get("choices", [])
-            if choices and choices[0].get("message", {}).get("content"):
-                content = response_data["choices"][0]["message"]["content"]
+            response_message = choices[0].get("message", {}) if choices else {}
+            content = response_message.get("content", "")
+            reasoning_content = extract_reasoning_text(response_message)
+            response_output = response_data.get("output")
 
-                if content:
-                    await event_emitter(
-                        {
-                            "type": "chat:completion",
-                            "data": response_data,
-                        }
-                    )
+            if choices and (content or reasoning_content or response_output):
+                await event_emitter(
+                    {
+                        "type": "chat:completion",
+                        "data": response_data,
+                    }
+                )
 
-                    title = Chats.get_chat_title_by_id(metadata["chat_id"])
+                title = Chats.get_chat_title_by_id(metadata["chat_id"])
 
-                    # Use output from backend if provided (OR-compliant backends),
-                    # otherwise generate from response content
-                    response_output = response_data.get("output")
-                    if not response_output:
-                        response_output = [
+                # Use output from backend if provided (OR-compliant backends),
+                # otherwise generate from response content/reasoning.
+                if not response_output:
+                    response_output = []
+
+                    if reasoning_content:
+                        response_output.append(
                             {
-                                "type": "message",
-                                "id": output_id("msg"),
+                                "type": "reasoning",
+                                "id": output_id("r"),
                                 "status": "completed",
-                                "role": "assistant",
-                                "content": [{"type": "output_text", "text": content}],
+                                "start_tag": "<think>",
+                                "end_tag": "</think>",
+                                "attributes": {"type": "reasoning_content"},
+                                "content": [
+                                    {"type": "output_text", "text": reasoning_content}
+                                ],
+                                "summary": None,
                             }
-                        ]
+                        )
 
-                    await event_emitter(
+                    response_output.append(
                         {
-                            "type": "chat:completion",
-                            "data": {
-                                "done": True,
-                                "content": content,
-                                "output": response_output,
-                                "title": title,
-                            },
+                            "type": "message",
+                            "id": output_id("msg"),
+                            "status": "completed",
+                            "role": "assistant",
+                            "content": [{"type": "output_text", "text": content}],
                         }
                     )
 
-                    # Save message in the database
-                    Chats.upsert_message_to_chat_by_id_and_message_id(
-                        metadata["chat_id"],
-                        metadata["message_id"],
-                        {
-                            "role": "assistant",
-                            "content": content,
+                content_to_store = content or serialize_output(response_output)
+
+                await event_emitter(
+                    {
+                        "type": "chat:completion",
+                        "data": {
+                            "done": True,
+                            "content": content_to_store,
                             "output": response_output,
+                            "title": title,
                         },
-                    )
+                    }
+                )
 
-                    # Send a webhook notification if the user is not active
-                    if not Users.is_user_active(user.id):
-                        webhook_url = Users.get_user_webhook_url_by_id(user.id)
-                        if webhook_url:
-                            await post_webhook(
-                                request.app.state.WEBUI_NAME,
-                                webhook_url,
-                                f"{title} - {request.app.state.config.WEBUI_URL}/c/{metadata['chat_id']}\n\n{content}",
-                                {
-                                    "action": "chat",
-                                    "message": content,
-                                    "title": title,
-                                    "url": f"{request.app.state.config.WEBUI_URL}/c/{metadata['chat_id']}",
-                                },
-                            )
+                # Save message in the database
+                Chats.upsert_message_to_chat_by_id_and_message_id(
+                    metadata["chat_id"],
+                    metadata["message_id"],
+                    {
+                        "role": "assistant",
+                        "content": content_to_store,
+                        "output": response_output,
+                    },
+                )
 
-                    await background_tasks_handler(ctx)
+                # Send a webhook notification if the user is not active
+                if not Users.is_user_active(user.id):
+                    webhook_url = Users.get_user_webhook_url_by_id(user.id)
+                    if webhook_url:
+                        await post_webhook(
+                            request.app.state.WEBUI_NAME,
+                            webhook_url,
+                            f"{title} - {request.app.state.config.WEBUI_URL}/c/{metadata['chat_id']}\n\n{content_to_store}",
+                            {
+                                "action": "chat",
+                                "message": content_to_store,
+                                "title": title,
+                                "url": f"{request.app.state.config.WEBUI_URL}/c/{metadata['chat_id']}",
+                            },
+                        )
+
+                await background_tasks_handler(ctx)
 
             response = build_response_object(
                 response, merge_events_into_response(response_data, events)
@@ -3819,16 +4444,13 @@ async def streaming_chat_response_handler(response, ctx):
                                 item["content"] = [
                                     {"type": "output_text", "text": block_content}
                                 ]
-                                item["ended_at"] = time.time()
-                                item["duration"] = int(
-                                    item["ended_at"] - item["started_at"]
+                                _finalize_timed_item(
+                                    item, ended_at=time.time(), mark_completed=True
                                 )
-                                item["status"] = "completed"
                             elif last_type == "open_webui:code_interpreter":
                                 item["code"] = block_content
-                                item["ended_at"] = time.time()
-                                item["duration"] = int(
-                                    item["ended_at"] - item["started_at"]
+                                _finalize_timed_item(
+                                    item, ended_at=time.time(), mark_completed=False
                                 )
                             else:
                                 set_last_text(output, block_content)
@@ -3963,6 +4585,7 @@ async def streaming_chat_response_handler(response, ctx):
                         ),
                     )
                     last_delta_data = None
+                    saw_responses_events = False
 
                     async def flush_pending_delta_data(threshold: int = 0):
                         nonlocal delta_count
@@ -4031,13 +4654,17 @@ async def streaming_chat_response_handler(response, ctx):
                                     )
                                 # Check for Responses API events (type field starts with "response.")
                                 elif data.get("type", "").startswith("response."):
+                                    saw_responses_events = True
                                     output, response_metadata = (
                                         handle_responses_streaming_event(data, output)
                                     )
+                                    display_output = normalize_reasoning_output_items(
+                                        output
+                                    )
 
                                     processed_data = {
-                                        "output": output,
-                                        "content": serialize_output(output),
+                                        "output": display_output,
+                                        "content": serialize_output(display_output),
                                     }
 
                                     # print(data)
@@ -4277,11 +4904,7 @@ async def streaming_chat_response_handler(response, ctx):
 
                                     value = delta.get("content")
 
-                                    reasoning_content = (
-                                        delta.get("reasoning_content")
-                                        or delta.get("reasoning")
-                                        or delta.get("thinking")
-                                    )
+                                    reasoning_content = extract_reasoning_text(delta)
                                     if reasoning_content:
                                         if (
                                             not output
@@ -4331,12 +4954,11 @@ async def streaming_chat_response_handler(response, ctx):
                                             == "reasoning_content"
                                         ):
                                             reasoning_item = output[-1]
-                                            reasoning_item["ended_at"] = time.time()
-                                            reasoning_item["duration"] = int(
-                                                reasoning_item["ended_at"]
-                                                - reasoning_item["started_at"]
+                                            _finalize_timed_item(
+                                                reasoning_item,
+                                                ended_at=time.time(),
+                                                mark_completed=True,
                                             )
-                                            reasoning_item["status"] = "completed"
 
                                             output.append(
                                                 {
@@ -4563,12 +5185,14 @@ async def streaming_chat_response_handler(response, ctx):
                         if output[-1].get("type") == "reasoning":
                             reasoning_item = output[-1]
                             if reasoning_item.get("ended_at") is None:
-                                reasoning_item["ended_at"] = time.time()
-                                reasoning_item["duration"] = int(
-                                    reasoning_item["ended_at"]
-                                    - reasoning_item["started_at"]
+                                _finalize_timed_item(
+                                    reasoning_item,
+                                    ended_at=time.time(),
+                                    mark_completed=True,
                                 )
-                                reasoning_item["status"] = "completed"
+
+                    if saw_responses_events:
+                        output = normalize_reasoning_output_items(output)
 
                     if response_tool_calls:
                         tool_calls.append(response_tool_calls)
@@ -4881,6 +5505,24 @@ async def streaming_chat_response_handler(response, ctx):
                             ],
                         }
 
+                        try:
+                            new_form_data, budget_diagnostics = (
+                                await apply_context_budget_policy(
+                                    request=request,
+                                    form_data=new_form_data,
+                                    user=user,
+                                )
+                            )
+                            if budget_diagnostics.get("overflow"):
+                                log.warning(
+                                    "Context budget overflow during tool recursion "
+                                    f"(chat_id={metadata.get('chat_id')}, message_id={metadata.get('message_id')})"
+                                )
+                        except Exception as budget_error:
+                            log.debug(
+                                f"Context budget policy failed during tool recursion: {budget_error}"
+                            )
+
                         res = await generate_chat_completion(
                             request,
                             new_form_data,
@@ -5064,6 +5706,24 @@ async def streaming_chat_response_handler(response, ctx):
                                     *convert_output_to_messages(output, raw=True),
                                 ],
                             }
+
+                            try:
+                                new_form_data, budget_diagnostics = (
+                                    await apply_context_budget_policy(
+                                        request=request,
+                                        form_data=new_form_data,
+                                        user=user,
+                                    )
+                                )
+                                if budget_diagnostics.get("overflow"):
+                                    log.warning(
+                                        "Context budget overflow during code interpreter recursion "
+                                        f"(chat_id={metadata.get('chat_id')}, message_id={metadata.get('message_id')})"
+                                    )
+                            except Exception as budget_error:
+                                log.debug(
+                                    f"Context budget policy failed during code interpreter recursion: {budget_error}"
+                                )
 
                             res = await generate_chat_completion(
                                 request,
