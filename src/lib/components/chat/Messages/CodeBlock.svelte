@@ -279,7 +279,9 @@
 	};
 
 	$: if (token) {
-		if (JSON.stringify(token) !== JSON.stringify(_token)) {
+		if (token.text !== _token?.text || token.raw !== _token?.raw) {
+			_token = token;
+		} else if (JSON.stringify(token) !== JSON.stringify(_token)) {
 			_token = token;
 		}
 	}
@@ -629,8 +631,9 @@
 
 <style>
 	.macos-code-font {
-		font-family: 'SF Mono', 'SFMono-Regular', Menlo, Monaco, Consolas, 'Liberation Mono',
-			'Courier New', monospace;
+		font-family:
+			'SF Mono', 'SFMono-Regular', Menlo, Monaco, Consolas, 'Liberation Mono', 'Courier New',
+			monospace;
 	}
 
 	.code-editor-no-gutters :global(.cm-gutters) {
@@ -638,8 +641,9 @@
 	}
 
 	.code-editor-no-gutters :global(.cm-editor) {
-		font-family: 'SF Mono', 'SFMono-Regular', Menlo, Monaco, Consolas, 'Liberation Mono',
-			'Courier New', monospace;
+		font-family:
+			'SF Mono', 'SFMono-Regular', Menlo, Monaco, Consolas, 'Liberation Mono', 'Courier New',
+			monospace;
 		background: transparent !important;
 		color: inherit !important;
 	}

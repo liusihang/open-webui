@@ -79,7 +79,9 @@
 			>
 				<div class="flex min-w-0 items-center gap-2">
 					{#if isReasoning}
-						<div class="rounded-md bg-amber-100/80 p-1 text-amber-700 dark:bg-amber-900/40 dark:text-amber-300">
+						<div
+							class="rounded-md bg-amber-100/80 p-1 text-amber-700 dark:bg-amber-900/40 dark:text-amber-300"
+						>
 							<LightBulb className="size-3.5" />
 						</div>
 					{:else if isStreaming}

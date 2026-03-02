@@ -22,7 +22,10 @@
 		showHistory = false;
 	}
 
-	$: if (JSON.stringify(statusHistory) !== JSON.stringify(history)) {
+	$: if (
+		(statusHistory ?? []).length !== history.length ||
+		JSON.stringify(statusHistory ?? []) !== JSON.stringify(history)
+	) {
 		history = statusHistory ?? [];
 	}
 

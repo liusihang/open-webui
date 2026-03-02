@@ -61,6 +61,8 @@
 
 	export let toolServers = [];
 
+	export let dragged = false;
+
 	let models = [];
 	let selectedModelIdx = 0;
 
@@ -214,6 +216,7 @@
 					bind:deepResearchEnabled
 					bind:atSelectedModel
 					bind:showCommands
+					bind:dragged
 					{toolServers}
 					{stopResponse}
 					{createMessagePair}
