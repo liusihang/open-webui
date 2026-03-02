@@ -32,6 +32,10 @@
 
 	export let open = false;
 	export let className = '';
+	const RESULT_PREVIEW_LIMIT = 10000;
+	let expandedResult = false;
+
+	$: if (!open) expandedResult = false;
 	export let buttonClassName = 'w-full transition';
 
 	const componentId = id || uuidv4();
@@ -238,10 +242,24 @@ ${JSON.stringify(parsedResult, null, 2)}
 									<div class="text-xs font-semibold tracking-wide text-gray-500 dark:text-gray-400">
 										{$i18n.t('Result')}
 									</div>
+									{@const resultStr = String(parsedResult)}
+									{@const isTruncated = resultStr.length > RESULT_PREVIEW_LIMIT && !expandedResult}
 									<pre
-										class="mt-1 text-xs text-gray-700 dark:text-gray-300 whitespace-pre-wrap break-words font-mono">{String(
-											parsedResult
-										)}</pre>
+										class="mt-1 text-xs text-gray-700 dark:text-gray-300 whitespace-pre-wrap break-words font-mono">{isTruncated
+											? resultStr.slice(0, RESULT_PREVIEW_LIMIT)
+											: resultStr}</pre>
+									{#if isTruncated}
+										<button
+											class="mt-1 text-xs text-gray-500 hover:text-gray-700 dark:hover:text-gray-300 transition"
+											on:click|stopPropagation={() => {
+												expandedResult = true;
+											}}
+										>
+											{$i18n.t('Show all ({{COUNT}} characters)', {
+												COUNT: resultStr.length.toLocaleString()
+											})}
+										</button>
+									{/if}
 								{/if}
 							</div>
 						{/if}
