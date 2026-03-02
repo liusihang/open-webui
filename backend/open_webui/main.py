@@ -152,6 +152,33 @@ from open_webui.config import (
     CODE_INTERPRETER_JUPYTER_AUTH_PASSWORD,
     CODE_INTERPRETER_JUPYTER_TIMEOUT,
     ENABLE_MEMORIES,
+    MEMORY_RETRIEVAL_MODE,
+    MEMORY_RETRIEVAL_QUERY_K,
+    MEMORY_NEED_STRONG_THRESHOLD,
+    MEMORY_NEED_SOFT_THRESHOLD,
+    MEMORY_MIN_TOP1_SIMILARITY,
+    MEMORY_INJECTION_STRONG_TOP_N,
+    MEMORY_INJECTION_SOFT_TOP_N,
+    MEMORY_MAX_CONTEXT_CHARS,
+    MEMORY_NEED_INTENT_WEIGHT,
+    MEMORY_NEED_RELEVANCE_WEIGHT,
+    MEMORY_NEED_CONTINUITY_WEIGHT,
+    MEMORY_STATELESS_PENALTY,
+    MEMORY_AUTO_WRITEBACK_ENABLED,
+    MEMORY_AUTO_WRITEBACK_MODEL,
+    MEMORY_AUTO_WRITEBACK_MESSAGES_TO_CONSIDER,
+    MEMORY_AUTO_WRITEBACK_RELATED_MEMORIES_N,
+    MEMORY_AUTO_WRITEBACK_MIN_SIMILARITY,
+    MEMORY_AUTO_WRITEBACK_MAX_ACTIONS,
+    MEMORY_AUTO_WRITEBACK_MIN_USER_MESSAGE_CHARS,
+    MEMORY_AUTO_WRITEBACK_SHOW_STATUS,
+    ENABLE_DEEP_RESEARCH,
+    DEERFLOW_BASE_URL,
+    DEERFLOW_API_KEY,
+    DEERFLOW_MODEL,
+    DEERFLOW_CONNECT_TIMEOUT_SECS,
+    DEERFLOW_REQUEST_TIMEOUT_SECS,
+    DEERFLOW_REUSE_THREADS,
     # Image
     AUTOMATIC1111_API_AUTH,
     AUTOMATIC1111_BASE_URL,
@@ -257,6 +284,13 @@ from open_webui.config import (
     ADAPTIVE_FILE_CONTEXT_MAX_TOKENS_PER_REQUEST,
     ADAPTIVE_FILE_CONTEXT_DEBUG,
     ADAPTIVE_FILE_CONTEXT_MIGRATION_VERSION,
+    CHAT_CONTEXT_NON_SYSTEM_MAX_TOKENS,
+    CHAT_CONTEXT_WINDOW_ROUNDS,
+    CHAT_CONTEXT_COMPACTION_TRIGGER_TOKENS,
+    CHAT_CONTEXT_TOOL_OUTPUT_MAX_TOKENS,
+    CHAT_CONTEXT_TOOL_OUTPUT_MAX_CHARS,
+    CHAT_CONTEXT_ALLOW_TEMP_OVERFLOW,
+    CHAT_CONTEXT_BUDGET_ENABLED,
     FILE_IMAGE_COMPRESSION_WIDTH,
     FILE_IMAGE_COMPRESSION_HEIGHT,
     RAG_OPENAI_API_BASE_URL,
@@ -443,6 +477,10 @@ from open_webui.config import (
     OAUTH_PROVIDERS,
     WEBUI_URL,
     RESPONSE_WATERMARK,
+    ANNOUNCEMENT_MODAL_ENABLED,
+    ANNOUNCEMENT_MODAL_KEY,
+    ANNOUNCEMENT_MODAL_TITLE,
+    ANNOUNCEMENT_MODAL_CONTENT,
     # Admin
     ENABLE_ADMIN_CHAT_ACCESS,
     ENABLE_ADMIN_ANALYTICS,
@@ -715,6 +753,30 @@ async def lifespan(app: FastAPI):
         except Exception as e:
             log.warning(f"Failed to initialize tool/terminal servers at startup: {e}")
 
+    # Pre-fetch tool server specs so the first request doesn't pay the latency cost
+    if len(app.state.config.TOOL_SERVER_CONNECTIONS) > 0:
+        log.info("Initializing tool servers...")
+        try:
+            mock_request = Request(
+                {
+                    "type": "http",
+                    "asgi.version": "3.0",
+                    "asgi.spec_version": "2.0",
+                    "method": "GET",
+                    "path": "/internal",
+                    "query_string": b"",
+                    "headers": Headers({}).raw,
+                    "client": ("127.0.0.1", 12345),
+                    "server": ("127.0.0.1", 80),
+                    "scheme": "http",
+                    "app": app,
+                }
+            )
+            await set_tool_servers(mock_request)
+            log.info(f"Initialized {len(app.state.TOOL_SERVERS)} tool server(s)")
+        except Exception as e:
+            log.warning(f"Failed to initialize tool servers at startup: {e}")
+
     yield
 
     if hasattr(app.state, "redis_task_command_listener"):
@@ -869,6 +931,10 @@ app.state.config.PENDING_USER_OVERLAY_CONTENT = PENDING_USER_OVERLAY_CONTENT
 app.state.config.PENDING_USER_OVERLAY_TITLE = PENDING_USER_OVERLAY_TITLE
 
 app.state.config.RESPONSE_WATERMARK = RESPONSE_WATERMARK
+app.state.config.ANNOUNCEMENT_MODAL_ENABLED = ANNOUNCEMENT_MODAL_ENABLED
+app.state.config.ANNOUNCEMENT_MODAL_KEY = ANNOUNCEMENT_MODAL_KEY
+app.state.config.ANNOUNCEMENT_MODAL_TITLE = ANNOUNCEMENT_MODAL_TITLE
+app.state.config.ANNOUNCEMENT_MODAL_CONTENT = ANNOUNCEMENT_MODAL_CONTENT
 
 app.state.config.USER_PERMISSIONS = USER_PERMISSIONS
 app.state.config.WEBHOOK_URL = WEBHOOK_URL
@@ -1025,6 +1091,19 @@ app.state.config.ENABLE_MARKDOWN_HEADER_TEXT_SPLITTER = (
 )
 
 app.state.config.TIKTOKEN_ENCODING_NAME = TIKTOKEN_ENCODING_NAME
+app.state.config.CHAT_CONTEXT_NON_SYSTEM_MAX_TOKENS = (
+    CHAT_CONTEXT_NON_SYSTEM_MAX_TOKENS
+)
+app.state.config.CHAT_CONTEXT_WINDOW_ROUNDS = CHAT_CONTEXT_WINDOW_ROUNDS
+app.state.config.CHAT_CONTEXT_COMPACTION_TRIGGER_TOKENS = (
+    CHAT_CONTEXT_COMPACTION_TRIGGER_TOKENS
+)
+app.state.config.CHAT_CONTEXT_TOOL_OUTPUT_MAX_TOKENS = (
+    CHAT_CONTEXT_TOOL_OUTPUT_MAX_TOKENS
+)
+app.state.config.CHAT_CONTEXT_TOOL_OUTPUT_MAX_CHARS = CHAT_CONTEXT_TOOL_OUTPUT_MAX_CHARS
+app.state.config.CHAT_CONTEXT_ALLOW_TEMP_OVERFLOW = CHAT_CONTEXT_ALLOW_TEMP_OVERFLOW
+app.state.config.CHAT_CONTEXT_BUDGET_ENABLED = CHAT_CONTEXT_BUDGET_ENABLED
 
 app.state.config.CHUNK_SIZE = CHUNK_SIZE
 app.state.config.CHUNK_MIN_SIZE_TARGET = CHUNK_MIN_SIZE_TARGET
@@ -1239,6 +1318,41 @@ app.state.config.IMAGE_GENERATION_ENGINE = IMAGE_GENERATION_ENGINE
 app.state.config.ENABLE_IMAGE_GENERATION = ENABLE_IMAGE_GENERATION
 app.state.config.ENABLE_IMAGE_PROMPT_GENERATION = ENABLE_IMAGE_PROMPT_GENERATION
 app.state.config.ENABLE_MEMORIES = ENABLE_MEMORIES
+app.state.config.MEMORY_RETRIEVAL_MODE = MEMORY_RETRIEVAL_MODE
+app.state.config.MEMORY_RETRIEVAL_QUERY_K = MEMORY_RETRIEVAL_QUERY_K
+app.state.config.MEMORY_NEED_STRONG_THRESHOLD = MEMORY_NEED_STRONG_THRESHOLD
+app.state.config.MEMORY_NEED_SOFT_THRESHOLD = MEMORY_NEED_SOFT_THRESHOLD
+app.state.config.MEMORY_MIN_TOP1_SIMILARITY = MEMORY_MIN_TOP1_SIMILARITY
+app.state.config.MEMORY_INJECTION_STRONG_TOP_N = MEMORY_INJECTION_STRONG_TOP_N
+app.state.config.MEMORY_INJECTION_SOFT_TOP_N = MEMORY_INJECTION_SOFT_TOP_N
+app.state.config.MEMORY_MAX_CONTEXT_CHARS = MEMORY_MAX_CONTEXT_CHARS
+app.state.config.MEMORY_NEED_INTENT_WEIGHT = MEMORY_NEED_INTENT_WEIGHT
+app.state.config.MEMORY_NEED_RELEVANCE_WEIGHT = MEMORY_NEED_RELEVANCE_WEIGHT
+app.state.config.MEMORY_NEED_CONTINUITY_WEIGHT = MEMORY_NEED_CONTINUITY_WEIGHT
+app.state.config.MEMORY_STATELESS_PENALTY = MEMORY_STATELESS_PENALTY
+app.state.config.MEMORY_AUTO_WRITEBACK_ENABLED = MEMORY_AUTO_WRITEBACK_ENABLED
+app.state.config.MEMORY_AUTO_WRITEBACK_MODEL = MEMORY_AUTO_WRITEBACK_MODEL
+app.state.config.MEMORY_AUTO_WRITEBACK_MESSAGES_TO_CONSIDER = (
+    MEMORY_AUTO_WRITEBACK_MESSAGES_TO_CONSIDER
+)
+app.state.config.MEMORY_AUTO_WRITEBACK_RELATED_MEMORIES_N = (
+    MEMORY_AUTO_WRITEBACK_RELATED_MEMORIES_N
+)
+app.state.config.MEMORY_AUTO_WRITEBACK_MIN_SIMILARITY = (
+    MEMORY_AUTO_WRITEBACK_MIN_SIMILARITY
+)
+app.state.config.MEMORY_AUTO_WRITEBACK_MAX_ACTIONS = MEMORY_AUTO_WRITEBACK_MAX_ACTIONS
+app.state.config.MEMORY_AUTO_WRITEBACK_MIN_USER_MESSAGE_CHARS = (
+    MEMORY_AUTO_WRITEBACK_MIN_USER_MESSAGE_CHARS
+)
+app.state.config.MEMORY_AUTO_WRITEBACK_SHOW_STATUS = MEMORY_AUTO_WRITEBACK_SHOW_STATUS
+app.state.config.ENABLE_DEEP_RESEARCH = ENABLE_DEEP_RESEARCH
+app.state.config.DEERFLOW_BASE_URL = DEERFLOW_BASE_URL
+app.state.config.DEERFLOW_API_KEY = DEERFLOW_API_KEY
+app.state.config.DEERFLOW_MODEL = DEERFLOW_MODEL
+app.state.config.DEERFLOW_CONNECT_TIMEOUT_SECS = DEERFLOW_CONNECT_TIMEOUT_SECS
+app.state.config.DEERFLOW_REQUEST_TIMEOUT_SECS = DEERFLOW_REQUEST_TIMEOUT_SECS
+app.state.config.DEERFLOW_REUSE_THREADS = DEERFLOW_REUSE_THREADS
 
 app.state.config.IMAGE_GENERATION_MODEL = IMAGE_GENERATION_MODEL
 app.state.config.IMAGE_SIZE = IMAGE_SIZE
@@ -2250,6 +2364,12 @@ async def get_app_config(request: Request):
                     "pending_user_overlay_title": app.state.config.PENDING_USER_OVERLAY_TITLE,
                     "pending_user_overlay_content": app.state.config.PENDING_USER_OVERLAY_CONTENT,
                     "response_watermark": app.state.config.RESPONSE_WATERMARK,
+                    "announcement_modal": {
+                        "enabled": app.state.config.ANNOUNCEMENT_MODAL_ENABLED,
+                        "key": app.state.config.ANNOUNCEMENT_MODAL_KEY,
+                        "title": app.state.config.ANNOUNCEMENT_MODAL_TITLE,
+                        "content": app.state.config.ANNOUNCEMENT_MODAL_CONTENT,
+                    },
                 },
                 "license_metadata": app.state.LICENSE_METADATA,
                 **(

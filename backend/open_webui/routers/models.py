@@ -1,9 +1,16 @@
-from typing import Optional
+from typing import Optional, Any
 import io
 import base64
 import json
 import asyncio
 import logging
+import hashlib
+import mimetypes
+import ipaddress
+import socket
+from pathlib import Path
+from urllib.parse import urlparse
+from uuid import uuid4
 
 from open_webui.models.groups import Groups
 from open_webui.models.models import (
@@ -19,7 +26,7 @@ from open_webui.models.models import (
 )
 from open_webui.models.access_grants import AccessGrants
 
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from open_webui.constants import ERROR_MESSAGES
 from fastapi import (
     APIRouter,
@@ -30,11 +37,12 @@ from fastapi import (
     Response,
 )
 from fastapi.responses import FileResponse, StreamingResponse
+import requests
 
 
 from open_webui.utils.auth import get_admin_user, get_verified_user
 from open_webui.utils.access_control import has_permission, filter_allowed_access_grants
-from open_webui.config import BYPASS_ADMIN_ACCESS_CONTROL, STATIC_DIR
+from open_webui.config import BYPASS_ADMIN_ACCESS_CONTROL, STATIC_DIR, CACHE_DIR
 from open_webui.internal.db import get_session
 from sqlalchemy.orm import Session
 
@@ -45,6 +53,235 @@ router = APIRouter()
 
 def is_valid_model_id(model_id: str) -> bool:
     return model_id and len(model_id) <= 256
+
+
+_UNSET = object()
+MODEL_ICON_CACHE_DIR = CACHE_DIR / "models" / "icons"
+MAX_MODEL_ICON_CACHE_SIZE_BYTES = 5 * 1024 * 1024
+
+
+def _deep_merge_dict(base: dict, patch: dict) -> dict:
+    merged = dict(base or {})
+
+    for key, value in (patch or {}).items():
+        if value is None:
+            merged.pop(key, None)
+            continue
+
+        if isinstance(value, dict) and isinstance(merged.get(key), dict):
+            merged[key] = _deep_merge_dict(merged[key], value)
+        else:
+            merged[key] = value
+
+    return merged
+
+
+def _guess_image_extension(content_type: Optional[str], image_url: str) -> str:
+    if content_type:
+        normalized = content_type.split(";")[0].strip().lower()
+        ext = mimetypes.guess_extension(normalized)
+        if ext:
+            return ext
+        if normalized == "image/svg+xml":
+            return ".svg"
+
+    path_suffix = Path(urlparse(image_url).path).suffix.lower()
+    if path_suffix and path_suffix.replace(".", "").isalnum():
+        return path_suffix
+
+    return ".img"
+
+
+def _is_safe_remote_icon_url(image_url: str) -> bool:
+    try:
+        parsed = urlparse(image_url)
+        if parsed.scheme not in {"http", "https"} or not parsed.hostname:
+            return False
+
+        host = parsed.hostname.lower()
+        if host == "localhost":
+            return False
+
+        try:
+            ip = ipaddress.ip_address(host)
+            if (
+                ip.is_private
+                or ip.is_loopback
+                or ip.is_link_local
+                or ip.is_reserved
+                or ip.is_multicast
+            ):
+                return False
+            return True
+        except ValueError:
+            pass
+
+        resolved = socket.getaddrinfo(parsed.hostname, None)
+        for entry in resolved:
+            ip = ipaddress.ip_address(entry[4][0])
+            if (
+                ip.is_private
+                or ip.is_loopback
+                or ip.is_link_local
+                or ip.is_reserved
+                or ip.is_multicast
+            ):
+                return False
+        return True
+    except Exception:
+        return False
+
+
+def _get_cached_model_icon_path(cache_key: str) -> Optional[Path]:
+    for file_path in MODEL_ICON_CACHE_DIR.glob(f"{cache_key}.*"):
+        if file_path.suffix == ".tmp":
+            continue
+        if file_path.is_file() and file_path.stat().st_size > 0:
+            return file_path
+    return None
+
+
+def _cache_remote_model_icon(model_id: str, image_url: str) -> Optional[Path]:
+    if not _is_safe_remote_icon_url(image_url):
+        return None
+
+    cache_key = hashlib.sha256(f"{model_id}:{image_url}".encode("utf-8")).hexdigest()
+
+    MODEL_ICON_CACHE_DIR.mkdir(parents=True, exist_ok=True)
+    cached_path = _get_cached_model_icon_path(cache_key)
+    if cached_path:
+        return cached_path
+
+    temp_path: Optional[Path] = None
+    try:
+        with requests.get(image_url, timeout=(5, 15), stream=True) as response:
+            if response.status_code != 200:
+                return None
+
+            content_type = response.headers.get("Content-Type", "")
+            media_type = content_type.split(";")[0].strip().lower()
+            if not media_type.startswith("image/"):
+                return None
+
+            extension = _guess_image_extension(content_type, image_url)
+            target_path = MODEL_ICON_CACHE_DIR / f"{cache_key}{extension}"
+            temp_path = MODEL_ICON_CACHE_DIR / f"{cache_key}.{uuid4().hex}.tmp"
+
+            total_size = 0
+            with open(temp_path, "wb") as file_handle:
+                for chunk in response.iter_content(chunk_size=8192):
+                    if not chunk:
+                        continue
+                    total_size += len(chunk)
+                    if total_size > MAX_MODEL_ICON_CACHE_SIZE_BYTES:
+                        raise ValueError("Model icon exceeds max cache size")
+                    file_handle.write(chunk)
+
+            if total_size == 0:
+                return None
+
+            temp_path.replace(target_path)
+            return target_path
+    except Exception as e:
+        log.debug(f"Failed to cache model icon ({model_id}): {e}")
+        return None
+    finally:
+        if temp_path and temp_path.exists():
+            try:
+                temp_path.unlink()
+            except Exception:
+                pass
+
+
+def _get_model_with_write_access(
+    model_id: str,
+    user,
+    db: Session,
+    not_found_status_code: int = status.HTTP_401_UNAUTHORIZED,
+    create_if_missing_for_admin: bool = False,
+) -> ModelModel:
+    model = Models.get_model_by_id(model_id, db=db)
+    if not model and create_if_missing_for_admin and user.role == "admin":
+        model = Models.insert_new_model(
+            ModelForm(
+                id=model_id,
+                name=model_id,
+                meta=ModelMeta(),
+                params=ModelParams(),
+            ),
+            user.id,
+            db=db,
+        )
+        if not model:
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail=ERROR_MESSAGES.DEFAULT("Error creating model entry"),
+            )
+
+    if not model:
+        raise HTTPException(
+            status_code=not_found_status_code,
+            detail=ERROR_MESSAGES.NOT_FOUND,
+        )
+
+    if (
+        model.user_id != user.id
+        and not AccessGrants.has_access(
+            user_id=user.id,
+            resource_type="model",
+            resource_id=model.id,
+            permission="write",
+            db=db,
+        )
+        and user.role != "admin"
+    ):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=ERROR_MESSAGES.ACCESS_PROHIBITED,
+        )
+
+    return model
+
+
+def _update_model_partial(
+    model: ModelModel,
+    *,
+    meta_patch: Optional[dict] = None,
+    params_patch: Optional[dict] = None,
+    name: Any = _UNSET,
+    base_model_id: Any = _UNSET,
+    is_active: Any = _UNSET,
+    db: Session,
+) -> ModelModel:
+    model_data = model.model_dump()
+
+    if meta_patch is not None:
+        model_data["meta"] = _deep_merge_dict(model_data.get("meta", {}), meta_patch)
+
+    if params_patch is not None:
+        model_data["params"] = _deep_merge_dict(
+            model_data.get("params", {}), params_patch
+        )
+
+    if name is not _UNSET:
+        model_data["name"] = name
+
+    if base_model_id is not _UNSET:
+        model_data["base_model_id"] = base_model_id
+
+    if is_active is not _UNSET:
+        model_data["is_active"] = is_active
+
+    updated_model = Models.update_model_by_id(
+        model.id, ModelForm(**model_data), db=db
+    )
+    if not updated_model:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=ERROR_MESSAGES.DEFAULT("Error updating model"),
+        )
+
+    return updated_model
 
 
 ###########################
@@ -336,6 +573,41 @@ class ModelIdForm(BaseModel):
     id: str
 
 
+class ModelMetaPatchForm(BaseModel):
+    id: str
+    meta: dict = Field(default_factory=dict)
+
+
+class ModelParamsPatchForm(BaseModel):
+    id: str
+    params: dict = Field(default_factory=dict)
+
+
+class ModelIconUpdateForm(BaseModel):
+    id: str
+    profile_image_url: Optional[str] = None
+
+
+class ModelSystemPromptUpdateForm(BaseModel):
+    id: str
+    system: Optional[str] = None
+
+
+class ModelSuggestionPromptsUpdateForm(BaseModel):
+    id: str
+    suggestion_prompts: Optional[list[dict]] = None
+
+
+class ModelCapabilitiesUpdateForm(BaseModel):
+    id: str
+    capabilities: dict = Field(default_factory=dict)
+
+
+class ModelActiveUpdateForm(BaseModel):
+    id: str
+    is_active: bool
+
+
 # Note: We're not using the typical url path param here, but instead using a query parameter to allow '/' in the id
 @router.get("/model", response_model=Optional[ModelAccessResponse])
 async def get_model_by_id(
@@ -394,6 +666,15 @@ def get_model_profile_image(id: str, user=Depends(get_verified_user)):
 
         if model.meta.profile_image_url:
             if model.meta.profile_image_url.startswith("http"):
+                cached_icon_path = _cache_remote_model_icon(
+                    model.id, model.meta.profile_image_url
+                )
+                if cached_icon_path:
+                    headers = {"Content-Disposition": "inline"}
+                    if etag:
+                        headers["ETag"] = etag
+                    return FileResponse(cached_icon_path, headers=headers)
+
                 return Response(
                     status_code=status.HTTP_302_FOUND,
                     headers={"Location": model.meta.profile_image_url},
@@ -476,33 +757,158 @@ async def update_model_by_id(
     user=Depends(get_verified_user),
     db: Session = Depends(get_session),
 ):
-    model = Models.get_model_by_id(form_data.id, db=db)
-    if not model:
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail=ERROR_MESSAGES.NOT_FOUND,
-        )
+    _get_model_with_write_access(form_data.id, user, db)
 
-    if (
-        model.user_id != user.id
-        and not AccessGrants.has_access(
-            user_id=user.id,
-            resource_type="model",
-            resource_id=model.id,
-            permission="write",
-            db=db,
-        )
-        and user.role != "admin"
-    ):
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail=ERROR_MESSAGES.ACCESS_PROHIBITED,
-        )
-
-    model = Models.update_model_by_id(
+    updated_model = Models.update_model_by_id(
         form_data.id, ModelForm(**form_data.model_dump()), db=db
     )
-    return model
+    if not updated_model:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=ERROR_MESSAGES.DEFAULT("Error updating model"),
+        )
+    return updated_model
+
+
+############################
+# PatchModelMetaById
+############################
+
+
+@router.post("/model/meta/update", response_model=Optional[ModelModel])
+async def patch_model_meta_by_id(
+    form_data: ModelMetaPatchForm,
+    user=Depends(get_verified_user),
+    db: Session = Depends(get_session),
+):
+    model = _get_model_with_write_access(
+        form_data.id, user, db, create_if_missing_for_admin=True
+    )
+    return _update_model_partial(model, meta_patch=form_data.meta, db=db)
+
+
+############################
+# PatchModelParamsById
+############################
+
+
+@router.post("/model/params/update", response_model=Optional[ModelModel])
+async def patch_model_params_by_id(
+    form_data: ModelParamsPatchForm,
+    user=Depends(get_verified_user),
+    db: Session = Depends(get_session),
+):
+    model = _get_model_with_write_access(
+        form_data.id, user, db, create_if_missing_for_admin=True
+    )
+    return _update_model_partial(model, params_patch=form_data.params, db=db)
+
+
+############################
+# UpdateModelIconById
+############################
+
+
+@router.post("/model/icon/update", response_model=Optional[ModelModel])
+async def update_model_icon_by_id(
+    form_data: ModelIconUpdateForm,
+    user=Depends(get_verified_user),
+    db: Session = Depends(get_session),
+):
+    model = _get_model_with_write_access(
+        form_data.id, user, db, create_if_missing_for_admin=True
+    )
+
+    profile_image_url = (form_data.profile_image_url or "").strip()
+    if not profile_image_url:
+        profile_image_url = "/static/favicon.png"
+
+    return _update_model_partial(
+        model,
+        meta_patch={"profile_image_url": profile_image_url},
+        db=db,
+    )
+
+
+############################
+# UpdateModelSystemPromptById
+############################
+
+
+@router.post("/model/prompt/system/update", response_model=Optional[ModelModel])
+async def update_model_system_prompt_by_id(
+    form_data: ModelSystemPromptUpdateForm,
+    user=Depends(get_verified_user),
+    db: Session = Depends(get_session),
+):
+    model = _get_model_with_write_access(
+        form_data.id, user, db, create_if_missing_for_admin=True
+    )
+
+    system_prompt = (form_data.system or "").strip()
+    params_patch = {"system": system_prompt} if system_prompt else {"system": None}
+    return _update_model_partial(model, params_patch=params_patch, db=db)
+
+
+############################
+# UpdateModelSuggestionPromptsById
+############################
+
+
+@router.post(
+    "/model/prompts/suggestions/update", response_model=Optional[ModelModel]
+)
+async def update_model_suggestion_prompts_by_id(
+    form_data: ModelSuggestionPromptsUpdateForm,
+    user=Depends(get_verified_user),
+    db: Session = Depends(get_session),
+):
+    model = _get_model_with_write_access(
+        form_data.id, user, db, create_if_missing_for_admin=True
+    )
+    return _update_model_partial(
+        model,
+        meta_patch={"suggestion_prompts": form_data.suggestion_prompts},
+        db=db,
+    )
+
+
+############################
+# UpdateModelCapabilitiesById
+############################
+
+
+@router.post("/model/capabilities/update", response_model=Optional[ModelModel])
+async def update_model_capabilities_by_id(
+    form_data: ModelCapabilitiesUpdateForm,
+    user=Depends(get_verified_user),
+    db: Session = Depends(get_session),
+):
+    model = _get_model_with_write_access(
+        form_data.id, user, db, create_if_missing_for_admin=True
+    )
+    return _update_model_partial(
+        model,
+        meta_patch={"capabilities": form_data.capabilities},
+        db=db,
+    )
+
+
+############################
+# UpdateModelActiveById
+############################
+
+
+@router.post("/model/active/update", response_model=Optional[ModelModel])
+async def update_model_active_by_id(
+    form_data: ModelActiveUpdateForm,
+    user=Depends(get_verified_user),
+    db: Session = Depends(get_session),
+):
+    model = _get_model_with_write_access(
+        form_data.id, user, db, create_if_missing_for_admin=True
+    )
+    return _update_model_partial(model, is_active=form_data.is_active, db=db)
 
 
 ############################
@@ -512,7 +918,6 @@ async def update_model_by_id(
 
 class ModelAccessGrantsForm(BaseModel):
     id: str
-    name: Optional[str] = None
     access_grants: list[dict]
 
 
@@ -536,7 +941,7 @@ async def update_model_access_by_id(
         model = Models.insert_new_model(
             ModelForm(
                 id=form_data.id,
-                name=form_data.name or form_data.id,
+                name=form_data.id,
                 meta=ModelMeta(),
                 params=ModelParams(),
             ),

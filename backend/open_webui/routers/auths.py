@@ -1000,12 +1000,43 @@ async def get_admin_config(request: Request, user=Depends(get_admin_user)):
         "FOLDER_MAX_FILE_COUNT": request.app.state.config.FOLDER_MAX_FILE_COUNT,
         "ENABLE_CHANNELS": request.app.state.config.ENABLE_CHANNELS,
         "ENABLE_MEMORIES": request.app.state.config.ENABLE_MEMORIES,
+        "MEMORY_RETRIEVAL_MODE": request.app.state.config.MEMORY_RETRIEVAL_MODE,
+        "MEMORY_RETRIEVAL_QUERY_K": request.app.state.config.MEMORY_RETRIEVAL_QUERY_K,
+        "MEMORY_NEED_STRONG_THRESHOLD": request.app.state.config.MEMORY_NEED_STRONG_THRESHOLD,
+        "MEMORY_NEED_SOFT_THRESHOLD": request.app.state.config.MEMORY_NEED_SOFT_THRESHOLD,
+        "MEMORY_MIN_TOP1_SIMILARITY": request.app.state.config.MEMORY_MIN_TOP1_SIMILARITY,
+        "MEMORY_INJECTION_STRONG_TOP_N": request.app.state.config.MEMORY_INJECTION_STRONG_TOP_N,
+        "MEMORY_INJECTION_SOFT_TOP_N": request.app.state.config.MEMORY_INJECTION_SOFT_TOP_N,
+        "MEMORY_MAX_CONTEXT_CHARS": request.app.state.config.MEMORY_MAX_CONTEXT_CHARS,
+        "MEMORY_NEED_INTENT_WEIGHT": request.app.state.config.MEMORY_NEED_INTENT_WEIGHT,
+        "MEMORY_NEED_RELEVANCE_WEIGHT": request.app.state.config.MEMORY_NEED_RELEVANCE_WEIGHT,
+        "MEMORY_NEED_CONTINUITY_WEIGHT": request.app.state.config.MEMORY_NEED_CONTINUITY_WEIGHT,
+        "MEMORY_STATELESS_PENALTY": request.app.state.config.MEMORY_STATELESS_PENALTY,
+        "MEMORY_AUTO_WRITEBACK_ENABLED": request.app.state.config.MEMORY_AUTO_WRITEBACK_ENABLED,
+        "MEMORY_AUTO_WRITEBACK_MODEL": request.app.state.config.MEMORY_AUTO_WRITEBACK_MODEL,
+        "MEMORY_AUTO_WRITEBACK_MESSAGES_TO_CONSIDER": request.app.state.config.MEMORY_AUTO_WRITEBACK_MESSAGES_TO_CONSIDER,
+        "MEMORY_AUTO_WRITEBACK_RELATED_MEMORIES_N": request.app.state.config.MEMORY_AUTO_WRITEBACK_RELATED_MEMORIES_N,
+        "MEMORY_AUTO_WRITEBACK_MIN_SIMILARITY": request.app.state.config.MEMORY_AUTO_WRITEBACK_MIN_SIMILARITY,
+        "MEMORY_AUTO_WRITEBACK_MAX_ACTIONS": request.app.state.config.MEMORY_AUTO_WRITEBACK_MAX_ACTIONS,
+        "MEMORY_AUTO_WRITEBACK_MIN_USER_MESSAGE_CHARS": request.app.state.config.MEMORY_AUTO_WRITEBACK_MIN_USER_MESSAGE_CHARS,
+        "MEMORY_AUTO_WRITEBACK_SHOW_STATUS": request.app.state.config.MEMORY_AUTO_WRITEBACK_SHOW_STATUS,
         "ENABLE_NOTES": request.app.state.config.ENABLE_NOTES,
         "ENABLE_USER_WEBHOOKS": request.app.state.config.ENABLE_USER_WEBHOOKS,
         "ENABLE_USER_STATUS": request.app.state.config.ENABLE_USER_STATUS,
         "PENDING_USER_OVERLAY_TITLE": request.app.state.config.PENDING_USER_OVERLAY_TITLE,
         "PENDING_USER_OVERLAY_CONTENT": request.app.state.config.PENDING_USER_OVERLAY_CONTENT,
         "RESPONSE_WATERMARK": request.app.state.config.RESPONSE_WATERMARK,
+        "ANNOUNCEMENT_MODAL_ENABLED": request.app.state.config.ANNOUNCEMENT_MODAL_ENABLED,
+        "ANNOUNCEMENT_MODAL_KEY": request.app.state.config.ANNOUNCEMENT_MODAL_KEY,
+        "ANNOUNCEMENT_MODAL_TITLE": request.app.state.config.ANNOUNCEMENT_MODAL_TITLE,
+        "ANNOUNCEMENT_MODAL_CONTENT": request.app.state.config.ANNOUNCEMENT_MODAL_CONTENT,
+        "CHAT_CONTEXT_BUDGET_ENABLED": request.app.state.config.CHAT_CONTEXT_BUDGET_ENABLED,
+        "CHAT_CONTEXT_NON_SYSTEM_MAX_TOKENS": request.app.state.config.CHAT_CONTEXT_NON_SYSTEM_MAX_TOKENS,
+        "CHAT_CONTEXT_WINDOW_ROUNDS": request.app.state.config.CHAT_CONTEXT_WINDOW_ROUNDS,
+        "CHAT_CONTEXT_COMPACTION_TRIGGER_TOKENS": request.app.state.config.CHAT_CONTEXT_COMPACTION_TRIGGER_TOKENS,
+        "CHAT_CONTEXT_TOOL_OUTPUT_MAX_TOKENS": request.app.state.config.CHAT_CONTEXT_TOOL_OUTPUT_MAX_TOKENS,
+        "CHAT_CONTEXT_TOOL_OUTPUT_MAX_CHARS": request.app.state.config.CHAT_CONTEXT_TOOL_OUTPUT_MAX_CHARS,
+        "CHAT_CONTEXT_ALLOW_TEMP_OVERFLOW": request.app.state.config.CHAT_CONTEXT_ALLOW_TEMP_OVERFLOW,
     }
 
 
@@ -1026,18 +1057,103 @@ class AdminConfig(BaseModel):
     FOLDER_MAX_FILE_COUNT: Optional[int | str] = None
     ENABLE_CHANNELS: bool
     ENABLE_MEMORIES: bool
+    MEMORY_RETRIEVAL_MODE: Optional[str] = "balanced"
+    MEMORY_RETRIEVAL_QUERY_K: Optional[int | str] = None
+    MEMORY_NEED_STRONG_THRESHOLD: Optional[float | int | str] = None
+    MEMORY_NEED_SOFT_THRESHOLD: Optional[float | int | str] = None
+    MEMORY_MIN_TOP1_SIMILARITY: Optional[float | int | str] = None
+    MEMORY_INJECTION_STRONG_TOP_N: Optional[int | str] = None
+    MEMORY_INJECTION_SOFT_TOP_N: Optional[int | str] = None
+    MEMORY_MAX_CONTEXT_CHARS: Optional[int | str] = None
+    MEMORY_NEED_INTENT_WEIGHT: Optional[float | int | str] = None
+    MEMORY_NEED_RELEVANCE_WEIGHT: Optional[float | int | str] = None
+    MEMORY_NEED_CONTINUITY_WEIGHT: Optional[float | int | str] = None
+    MEMORY_STATELESS_PENALTY: Optional[float | int | str] = None
+    MEMORY_AUTO_WRITEBACK_ENABLED: bool = True
+    MEMORY_AUTO_WRITEBACK_MODEL: Optional[str] = ""
+    MEMORY_AUTO_WRITEBACK_MESSAGES_TO_CONSIDER: Optional[int | str] = None
+    MEMORY_AUTO_WRITEBACK_RELATED_MEMORIES_N: Optional[int | str] = None
+    MEMORY_AUTO_WRITEBACK_MIN_SIMILARITY: Optional[float | int | str] = None
+    MEMORY_AUTO_WRITEBACK_MAX_ACTIONS: Optional[int | str] = None
+    MEMORY_AUTO_WRITEBACK_MIN_USER_MESSAGE_CHARS: Optional[int | str] = None
+    MEMORY_AUTO_WRITEBACK_SHOW_STATUS: bool = True
     ENABLE_NOTES: bool
     ENABLE_USER_WEBHOOKS: bool
     ENABLE_USER_STATUS: bool
     PENDING_USER_OVERLAY_TITLE: Optional[str] = None
     PENDING_USER_OVERLAY_CONTENT: Optional[str] = None
     RESPONSE_WATERMARK: Optional[str] = None
+    ANNOUNCEMENT_MODAL_ENABLED: bool = False
+    ANNOUNCEMENT_MODAL_KEY: Optional[str] = None
+    ANNOUNCEMENT_MODAL_TITLE: Optional[str] = None
+    ANNOUNCEMENT_MODAL_CONTENT: Optional[str] = None
+    CHAT_CONTEXT_BUDGET_ENABLED: Optional[bool] = None
+    CHAT_CONTEXT_NON_SYSTEM_MAX_TOKENS: Optional[int | str] = None
+    CHAT_CONTEXT_WINDOW_ROUNDS: Optional[int | str] = None
+    CHAT_CONTEXT_COMPACTION_TRIGGER_TOKENS: Optional[int | str] = None
+    CHAT_CONTEXT_TOOL_OUTPUT_MAX_TOKENS: Optional[int | str] = None
+    CHAT_CONTEXT_TOOL_OUTPUT_MAX_CHARS: Optional[int | str] = None
+    CHAT_CONTEXT_ALLOW_TEMP_OVERFLOW: Optional[bool] = None
 
 
 @router.post("/admin/config")
 async def update_admin_config(
     request: Request, form_data: AdminConfig, user=Depends(get_admin_user)
 ):
+    def parse_int_or_default(value, default: int, minimum: Optional[int] = None) -> int:
+        try:
+            if value in [None, ""]:
+                return default
+            parsed = int(value)
+            if minimum is not None:
+                parsed = max(minimum, parsed)
+            return parsed
+        except (TypeError, ValueError):
+            return default
+
+    def parse_float_or_default(
+        value,
+        default: float,
+        minimum: Optional[float] = None,
+        maximum: Optional[float] = None,
+    ) -> float:
+        try:
+            if value in [None, ""]:
+                parsed = default
+            else:
+                parsed = float(value)
+        except (TypeError, ValueError):
+            parsed = default
+
+        if minimum is not None:
+            parsed = max(minimum, parsed)
+        if maximum is not None:
+            parsed = min(maximum, parsed)
+        return parsed
+
+    def parse_optional_float(
+        value,
+        default: Optional[float] = None,
+        minimum: Optional[float] = None,
+        maximum: Optional[float] = None,
+    ) -> Optional[float]:
+        if value in [None, ""]:
+            return default
+
+        try:
+            parsed = float(value)
+        except (TypeError, ValueError):
+            parsed = default
+
+        if parsed is None:
+            return None
+
+        if minimum is not None:
+            parsed = max(minimum, parsed)
+        if maximum is not None:
+            parsed = min(maximum, parsed)
+        return parsed
+
     request.app.state.config.SHOW_ADMIN_DETAILS = form_data.SHOW_ADMIN_DETAILS
     request.app.state.config.ADMIN_EMAIL = form_data.ADMIN_EMAIL
     request.app.state.config.WEBUI_URL = form_data.WEBUI_URL
@@ -1057,6 +1173,124 @@ async def update_admin_config(
     )
     request.app.state.config.ENABLE_CHANNELS = form_data.ENABLE_CHANNELS
     request.app.state.config.ENABLE_MEMORIES = form_data.ENABLE_MEMORIES
+
+    retrieval_mode = (form_data.MEMORY_RETRIEVAL_MODE or "balanced").lower()
+    if retrieval_mode not in {"aggressive", "balanced", "conservative"}:
+        retrieval_mode = "balanced"
+
+    soft_threshold = parse_float_or_default(
+        form_data.MEMORY_NEED_SOFT_THRESHOLD,
+        float(request.app.state.config.MEMORY_NEED_SOFT_THRESHOLD),
+        minimum=0.0,
+        maximum=1.0,
+    )
+    strong_threshold = parse_float_or_default(
+        form_data.MEMORY_NEED_STRONG_THRESHOLD,
+        float(request.app.state.config.MEMORY_NEED_STRONG_THRESHOLD),
+        minimum=0.0,
+        maximum=1.0,
+    )
+    if strong_threshold <= soft_threshold:
+        strong_threshold = min(1.0, soft_threshold + 0.01)
+
+    request.app.state.config.MEMORY_RETRIEVAL_MODE = retrieval_mode
+    request.app.state.config.MEMORY_RETRIEVAL_QUERY_K = parse_int_or_default(
+        form_data.MEMORY_RETRIEVAL_QUERY_K,
+        int(request.app.state.config.MEMORY_RETRIEVAL_QUERY_K),
+        minimum=1,
+    )
+    request.app.state.config.MEMORY_NEED_SOFT_THRESHOLD = soft_threshold
+    request.app.state.config.MEMORY_NEED_STRONG_THRESHOLD = strong_threshold
+    request.app.state.config.MEMORY_MIN_TOP1_SIMILARITY = parse_float_or_default(
+        form_data.MEMORY_MIN_TOP1_SIMILARITY,
+        float(request.app.state.config.MEMORY_MIN_TOP1_SIMILARITY),
+        minimum=0.0,
+        maximum=1.0,
+    )
+    request.app.state.config.MEMORY_INJECTION_STRONG_TOP_N = parse_int_or_default(
+        form_data.MEMORY_INJECTION_STRONG_TOP_N,
+        int(request.app.state.config.MEMORY_INJECTION_STRONG_TOP_N),
+        minimum=1,
+    )
+    request.app.state.config.MEMORY_INJECTION_SOFT_TOP_N = parse_int_or_default(
+        form_data.MEMORY_INJECTION_SOFT_TOP_N,
+        int(request.app.state.config.MEMORY_INJECTION_SOFT_TOP_N),
+        minimum=1,
+    )
+    request.app.state.config.MEMORY_MAX_CONTEXT_CHARS = parse_int_or_default(
+        form_data.MEMORY_MAX_CONTEXT_CHARS,
+        int(request.app.state.config.MEMORY_MAX_CONTEXT_CHARS),
+        minimum=300,
+    )
+    request.app.state.config.MEMORY_NEED_INTENT_WEIGHT = parse_float_or_default(
+        form_data.MEMORY_NEED_INTENT_WEIGHT,
+        float(request.app.state.config.MEMORY_NEED_INTENT_WEIGHT),
+        minimum=0.0,
+    )
+    request.app.state.config.MEMORY_NEED_RELEVANCE_WEIGHT = parse_float_or_default(
+        form_data.MEMORY_NEED_RELEVANCE_WEIGHT,
+        float(request.app.state.config.MEMORY_NEED_RELEVANCE_WEIGHT),
+        minimum=0.0,
+    )
+    request.app.state.config.MEMORY_NEED_CONTINUITY_WEIGHT = parse_float_or_default(
+        form_data.MEMORY_NEED_CONTINUITY_WEIGHT,
+        float(request.app.state.config.MEMORY_NEED_CONTINUITY_WEIGHT),
+        minimum=0.0,
+    )
+    request.app.state.config.MEMORY_STATELESS_PENALTY = parse_float_or_default(
+        form_data.MEMORY_STATELESS_PENALTY,
+        float(request.app.state.config.MEMORY_STATELESS_PENALTY),
+        minimum=0.0,
+        maximum=1.0,
+    )
+    request.app.state.config.MEMORY_AUTO_WRITEBACK_ENABLED = (
+        form_data.MEMORY_AUTO_WRITEBACK_ENABLED
+    )
+    request.app.state.config.MEMORY_AUTO_WRITEBACK_MODEL = (
+        form_data.MEMORY_AUTO_WRITEBACK_MODEL or ""
+    )
+    request.app.state.config.MEMORY_AUTO_WRITEBACK_MESSAGES_TO_CONSIDER = (
+        parse_int_or_default(
+            form_data.MEMORY_AUTO_WRITEBACK_MESSAGES_TO_CONSIDER,
+            int(request.app.state.config.MEMORY_AUTO_WRITEBACK_MESSAGES_TO_CONSIDER),
+            minimum=2,
+        )
+    )
+    request.app.state.config.MEMORY_AUTO_WRITEBACK_RELATED_MEMORIES_N = (
+        parse_int_or_default(
+            form_data.MEMORY_AUTO_WRITEBACK_RELATED_MEMORIES_N,
+            int(request.app.state.config.MEMORY_AUTO_WRITEBACK_RELATED_MEMORIES_N),
+            minimum=1,
+        )
+    )
+    current_auto_writeback_similarity = parse_optional_float(
+        request.app.state.config.MEMORY_AUTO_WRITEBACK_MIN_SIMILARITY,
+        default=None,
+        minimum=0.0,
+        maximum=1.0,
+    )
+    request.app.state.config.MEMORY_AUTO_WRITEBACK_MIN_SIMILARITY = parse_optional_float(
+        form_data.MEMORY_AUTO_WRITEBACK_MIN_SIMILARITY,
+        current_auto_writeback_similarity,
+        minimum=0.0,
+        maximum=1.0,
+    )
+    request.app.state.config.MEMORY_AUTO_WRITEBACK_MAX_ACTIONS = parse_int_or_default(
+        form_data.MEMORY_AUTO_WRITEBACK_MAX_ACTIONS,
+        int(request.app.state.config.MEMORY_AUTO_WRITEBACK_MAX_ACTIONS),
+        minimum=1,
+    )
+    request.app.state.config.MEMORY_AUTO_WRITEBACK_MIN_USER_MESSAGE_CHARS = (
+        parse_int_or_default(
+            form_data.MEMORY_AUTO_WRITEBACK_MIN_USER_MESSAGE_CHARS,
+            int(request.app.state.config.MEMORY_AUTO_WRITEBACK_MIN_USER_MESSAGE_CHARS),
+            minimum=1,
+        )
+    )
+    request.app.state.config.MEMORY_AUTO_WRITEBACK_SHOW_STATUS = (
+        form_data.MEMORY_AUTO_WRITEBACK_SHOW_STATUS
+    )
+
     request.app.state.config.ENABLE_NOTES = form_data.ENABLE_NOTES
 
     if form_data.DEFAULT_USER_ROLE in ["pending", "user", "admin"]:
@@ -1086,6 +1320,73 @@ async def update_admin_config(
     )
 
     request.app.state.config.RESPONSE_WATERMARK = form_data.RESPONSE_WATERMARK
+    request.app.state.config.ANNOUNCEMENT_MODAL_ENABLED = (
+        form_data.ANNOUNCEMENT_MODAL_ENABLED
+    )
+    request.app.state.config.ANNOUNCEMENT_MODAL_KEY = (
+        form_data.ANNOUNCEMENT_MODAL_KEY
+    )
+    request.app.state.config.ANNOUNCEMENT_MODAL_TITLE = (
+        form_data.ANNOUNCEMENT_MODAL_TITLE
+    )
+    request.app.state.config.ANNOUNCEMENT_MODAL_CONTENT = (
+        form_data.ANNOUNCEMENT_MODAL_CONTENT
+    )
+
+    current_budget_enabled = bool(
+        getattr(
+            request.app.state.config.CHAT_CONTEXT_BUDGET_ENABLED,
+            "value",
+            request.app.state.config.CHAT_CONTEXT_BUDGET_ENABLED,
+        )
+    )
+    request.app.state.config.CHAT_CONTEXT_BUDGET_ENABLED = (
+        form_data.CHAT_CONTEXT_BUDGET_ENABLED
+        if form_data.CHAT_CONTEXT_BUDGET_ENABLED is not None
+        else current_budget_enabled
+    )
+
+    chat_context_non_system_max_tokens = parse_int_or_default(
+        form_data.CHAT_CONTEXT_NON_SYSTEM_MAX_TOKENS,
+        int(request.app.state.config.CHAT_CONTEXT_NON_SYSTEM_MAX_TOKENS),
+        minimum=256,
+    )
+    request.app.state.config.CHAT_CONTEXT_NON_SYSTEM_MAX_TOKENS = (
+        chat_context_non_system_max_tokens
+    )
+    request.app.state.config.CHAT_CONTEXT_WINDOW_ROUNDS = parse_int_or_default(
+        form_data.CHAT_CONTEXT_WINDOW_ROUNDS,
+        int(request.app.state.config.CHAT_CONTEXT_WINDOW_ROUNDS),
+        minimum=1,
+    )
+    request.app.state.config.CHAT_CONTEXT_COMPACTION_TRIGGER_TOKENS = parse_int_or_default(
+        form_data.CHAT_CONTEXT_COMPACTION_TRIGGER_TOKENS,
+        int(request.app.state.config.CHAT_CONTEXT_COMPACTION_TRIGGER_TOKENS),
+        minimum=chat_context_non_system_max_tokens,
+    )
+    request.app.state.config.CHAT_CONTEXT_TOOL_OUTPUT_MAX_TOKENS = parse_int_or_default(
+        form_data.CHAT_CONTEXT_TOOL_OUTPUT_MAX_TOKENS,
+        int(request.app.state.config.CHAT_CONTEXT_TOOL_OUTPUT_MAX_TOKENS),
+        minimum=128,
+    )
+    request.app.state.config.CHAT_CONTEXT_TOOL_OUTPUT_MAX_CHARS = parse_int_or_default(
+        form_data.CHAT_CONTEXT_TOOL_OUTPUT_MAX_CHARS,
+        int(request.app.state.config.CHAT_CONTEXT_TOOL_OUTPUT_MAX_CHARS),
+        minimum=256,
+    )
+
+    current_allow_temp_overflow = bool(
+        getattr(
+            request.app.state.config.CHAT_CONTEXT_ALLOW_TEMP_OVERFLOW,
+            "value",
+            request.app.state.config.CHAT_CONTEXT_ALLOW_TEMP_OVERFLOW,
+        )
+    )
+    request.app.state.config.CHAT_CONTEXT_ALLOW_TEMP_OVERFLOW = (
+        form_data.CHAT_CONTEXT_ALLOW_TEMP_OVERFLOW
+        if form_data.CHAT_CONTEXT_ALLOW_TEMP_OVERFLOW is not None
+        else current_allow_temp_overflow
+    )
 
     return {
         "SHOW_ADMIN_DETAILS": request.app.state.config.SHOW_ADMIN_DETAILS,
@@ -1104,12 +1405,43 @@ async def update_admin_config(
         "FOLDER_MAX_FILE_COUNT": request.app.state.config.FOLDER_MAX_FILE_COUNT,
         "ENABLE_CHANNELS": request.app.state.config.ENABLE_CHANNELS,
         "ENABLE_MEMORIES": request.app.state.config.ENABLE_MEMORIES,
+        "MEMORY_RETRIEVAL_MODE": request.app.state.config.MEMORY_RETRIEVAL_MODE,
+        "MEMORY_RETRIEVAL_QUERY_K": request.app.state.config.MEMORY_RETRIEVAL_QUERY_K,
+        "MEMORY_NEED_STRONG_THRESHOLD": request.app.state.config.MEMORY_NEED_STRONG_THRESHOLD,
+        "MEMORY_NEED_SOFT_THRESHOLD": request.app.state.config.MEMORY_NEED_SOFT_THRESHOLD,
+        "MEMORY_MIN_TOP1_SIMILARITY": request.app.state.config.MEMORY_MIN_TOP1_SIMILARITY,
+        "MEMORY_INJECTION_STRONG_TOP_N": request.app.state.config.MEMORY_INJECTION_STRONG_TOP_N,
+        "MEMORY_INJECTION_SOFT_TOP_N": request.app.state.config.MEMORY_INJECTION_SOFT_TOP_N,
+        "MEMORY_MAX_CONTEXT_CHARS": request.app.state.config.MEMORY_MAX_CONTEXT_CHARS,
+        "MEMORY_NEED_INTENT_WEIGHT": request.app.state.config.MEMORY_NEED_INTENT_WEIGHT,
+        "MEMORY_NEED_RELEVANCE_WEIGHT": request.app.state.config.MEMORY_NEED_RELEVANCE_WEIGHT,
+        "MEMORY_NEED_CONTINUITY_WEIGHT": request.app.state.config.MEMORY_NEED_CONTINUITY_WEIGHT,
+        "MEMORY_STATELESS_PENALTY": request.app.state.config.MEMORY_STATELESS_PENALTY,
+        "MEMORY_AUTO_WRITEBACK_ENABLED": request.app.state.config.MEMORY_AUTO_WRITEBACK_ENABLED,
+        "MEMORY_AUTO_WRITEBACK_MODEL": request.app.state.config.MEMORY_AUTO_WRITEBACK_MODEL,
+        "MEMORY_AUTO_WRITEBACK_MESSAGES_TO_CONSIDER": request.app.state.config.MEMORY_AUTO_WRITEBACK_MESSAGES_TO_CONSIDER,
+        "MEMORY_AUTO_WRITEBACK_RELATED_MEMORIES_N": request.app.state.config.MEMORY_AUTO_WRITEBACK_RELATED_MEMORIES_N,
+        "MEMORY_AUTO_WRITEBACK_MIN_SIMILARITY": request.app.state.config.MEMORY_AUTO_WRITEBACK_MIN_SIMILARITY,
+        "MEMORY_AUTO_WRITEBACK_MAX_ACTIONS": request.app.state.config.MEMORY_AUTO_WRITEBACK_MAX_ACTIONS,
+        "MEMORY_AUTO_WRITEBACK_MIN_USER_MESSAGE_CHARS": request.app.state.config.MEMORY_AUTO_WRITEBACK_MIN_USER_MESSAGE_CHARS,
+        "MEMORY_AUTO_WRITEBACK_SHOW_STATUS": request.app.state.config.MEMORY_AUTO_WRITEBACK_SHOW_STATUS,
         "ENABLE_NOTES": request.app.state.config.ENABLE_NOTES,
         "ENABLE_USER_WEBHOOKS": request.app.state.config.ENABLE_USER_WEBHOOKS,
         "ENABLE_USER_STATUS": request.app.state.config.ENABLE_USER_STATUS,
         "PENDING_USER_OVERLAY_TITLE": request.app.state.config.PENDING_USER_OVERLAY_TITLE,
         "PENDING_USER_OVERLAY_CONTENT": request.app.state.config.PENDING_USER_OVERLAY_CONTENT,
         "RESPONSE_WATERMARK": request.app.state.config.RESPONSE_WATERMARK,
+        "ANNOUNCEMENT_MODAL_ENABLED": request.app.state.config.ANNOUNCEMENT_MODAL_ENABLED,
+        "ANNOUNCEMENT_MODAL_KEY": request.app.state.config.ANNOUNCEMENT_MODAL_KEY,
+        "ANNOUNCEMENT_MODAL_TITLE": request.app.state.config.ANNOUNCEMENT_MODAL_TITLE,
+        "ANNOUNCEMENT_MODAL_CONTENT": request.app.state.config.ANNOUNCEMENT_MODAL_CONTENT,
+        "CHAT_CONTEXT_BUDGET_ENABLED": request.app.state.config.CHAT_CONTEXT_BUDGET_ENABLED,
+        "CHAT_CONTEXT_NON_SYSTEM_MAX_TOKENS": request.app.state.config.CHAT_CONTEXT_NON_SYSTEM_MAX_TOKENS,
+        "CHAT_CONTEXT_WINDOW_ROUNDS": request.app.state.config.CHAT_CONTEXT_WINDOW_ROUNDS,
+        "CHAT_CONTEXT_COMPACTION_TRIGGER_TOKENS": request.app.state.config.CHAT_CONTEXT_COMPACTION_TRIGGER_TOKENS,
+        "CHAT_CONTEXT_TOOL_OUTPUT_MAX_TOKENS": request.app.state.config.CHAT_CONTEXT_TOOL_OUTPUT_MAX_TOKENS,
+        "CHAT_CONTEXT_TOOL_OUTPUT_MAX_CHARS": request.app.state.config.CHAT_CONTEXT_TOOL_OUTPUT_MAX_CHARS,
+        "CHAT_CONTEXT_ALLOW_TEMP_OVERFLOW": request.app.state.config.CHAT_CONTEXT_ALLOW_TEMP_OVERFLOW,
     }
 
 

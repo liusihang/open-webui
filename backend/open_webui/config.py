@@ -1332,6 +1332,30 @@ RESPONSE_WATERMARK = PersistentConfig(
     os.environ.get("RESPONSE_WATERMARK", ""),
 )
 
+ANNOUNCEMENT_MODAL_ENABLED = PersistentConfig(
+    "ANNOUNCEMENT_MODAL_ENABLED",
+    "ui.announcement_modal.enabled",
+    os.environ.get("ANNOUNCEMENT_MODAL_ENABLED", "False").lower() == "true",
+)
+
+ANNOUNCEMENT_MODAL_KEY = PersistentConfig(
+    "ANNOUNCEMENT_MODAL_KEY",
+    "ui.announcement_modal.key",
+    os.environ.get("ANNOUNCEMENT_MODAL_KEY", ""),
+)
+
+ANNOUNCEMENT_MODAL_TITLE = PersistentConfig(
+    "ANNOUNCEMENT_MODAL_TITLE",
+    "ui.announcement_modal.title",
+    os.environ.get("ANNOUNCEMENT_MODAL_TITLE", ""),
+)
+
+ANNOUNCEMENT_MODAL_CONTENT = PersistentConfig(
+    "ANNOUNCEMENT_MODAL_CONTENT",
+    "ui.announcement_modal.content",
+    os.environ.get("ANNOUNCEMENT_MODAL_CONTENT", ""),
+)
+
 
 USER_PERMISSIONS_WORKSPACE_MODELS_ACCESS = (
     os.environ.get("USER_PERMISSIONS_WORKSPACE_MODELS_ACCESS", "False").lower()
@@ -2210,6 +2234,171 @@ ENABLE_MEMORIES = PersistentConfig(
     os.environ.get("ENABLE_MEMORIES", "True").lower() == "true",
 )
 
+MEMORY_RETRIEVAL_MODE = PersistentConfig(
+    "MEMORY_RETRIEVAL_MODE",
+    "memories.retrieval_mode",
+    os.environ.get("MEMORY_RETRIEVAL_MODE", "balanced"),
+)
+
+MEMORY_RETRIEVAL_QUERY_K = PersistentConfig(
+    "MEMORY_RETRIEVAL_QUERY_K",
+    "memories.query_k",
+    int(os.environ.get("MEMORY_RETRIEVAL_QUERY_K", "8")),
+)
+
+MEMORY_NEED_STRONG_THRESHOLD = PersistentConfig(
+    "MEMORY_NEED_STRONG_THRESHOLD",
+    "memories.need.strong_threshold",
+    float(os.environ.get("MEMORY_NEED_STRONG_THRESHOLD", "0.70")),
+)
+
+MEMORY_NEED_SOFT_THRESHOLD = PersistentConfig(
+    "MEMORY_NEED_SOFT_THRESHOLD",
+    "memories.need.soft_threshold",
+    float(os.environ.get("MEMORY_NEED_SOFT_THRESHOLD", "0.45")),
+)
+
+MEMORY_MIN_TOP1_SIMILARITY = PersistentConfig(
+    "MEMORY_MIN_TOP1_SIMILARITY",
+    "memories.need.min_top1_similarity",
+    float(os.environ.get("MEMORY_MIN_TOP1_SIMILARITY", "0.35")),
+)
+
+MEMORY_INJECTION_STRONG_TOP_N = PersistentConfig(
+    "MEMORY_INJECTION_STRONG_TOP_N",
+    "memories.injection.strong_top_n",
+    int(os.environ.get("MEMORY_INJECTION_STRONG_TOP_N", "2")),
+)
+
+MEMORY_INJECTION_SOFT_TOP_N = PersistentConfig(
+    "MEMORY_INJECTION_SOFT_TOP_N",
+    "memories.injection.soft_top_n",
+    int(os.environ.get("MEMORY_INJECTION_SOFT_TOP_N", "1")),
+)
+
+MEMORY_MAX_CONTEXT_CHARS = PersistentConfig(
+    "MEMORY_MAX_CONTEXT_CHARS",
+    "memories.injection.max_context_chars",
+    int(os.environ.get("MEMORY_MAX_CONTEXT_CHARS", "1400")),
+)
+
+MEMORY_NEED_INTENT_WEIGHT = PersistentConfig(
+    "MEMORY_NEED_INTENT_WEIGHT",
+    "memories.need.intent_weight",
+    float(os.environ.get("MEMORY_NEED_INTENT_WEIGHT", "0.45")),
+)
+
+MEMORY_NEED_RELEVANCE_WEIGHT = PersistentConfig(
+    "MEMORY_NEED_RELEVANCE_WEIGHT",
+    "memories.need.relevance_weight",
+    float(os.environ.get("MEMORY_NEED_RELEVANCE_WEIGHT", "0.45")),
+)
+
+MEMORY_NEED_CONTINUITY_WEIGHT = PersistentConfig(
+    "MEMORY_NEED_CONTINUITY_WEIGHT",
+    "memories.need.continuity_weight",
+    float(os.environ.get("MEMORY_NEED_CONTINUITY_WEIGHT", "0.10")),
+)
+
+MEMORY_STATELESS_PENALTY = PersistentConfig(
+    "MEMORY_STATELESS_PENALTY",
+    "memories.need.stateless_penalty",
+    float(os.environ.get("MEMORY_STATELESS_PENALTY", "0.15")),
+)
+
+MEMORY_AUTO_WRITEBACK_ENABLED = PersistentConfig(
+    "MEMORY_AUTO_WRITEBACK_ENABLED",
+    "memories.auto_writeback.enabled",
+    os.environ.get("MEMORY_AUTO_WRITEBACK_ENABLED", "True").lower() == "true",
+)
+
+MEMORY_AUTO_WRITEBACK_MODEL = PersistentConfig(
+    "MEMORY_AUTO_WRITEBACK_MODEL",
+    "memories.auto_writeback.model",
+    os.environ.get("MEMORY_AUTO_WRITEBACK_MODEL", ""),
+)
+
+MEMORY_AUTO_WRITEBACK_MESSAGES_TO_CONSIDER = PersistentConfig(
+    "MEMORY_AUTO_WRITEBACK_MESSAGES_TO_CONSIDER",
+    "memories.auto_writeback.messages_to_consider",
+    int(os.environ.get("MEMORY_AUTO_WRITEBACK_MESSAGES_TO_CONSIDER", "6")),
+)
+
+MEMORY_AUTO_WRITEBACK_RELATED_MEMORIES_N = PersistentConfig(
+    "MEMORY_AUTO_WRITEBACK_RELATED_MEMORIES_N",
+    "memories.auto_writeback.related_memories_n",
+    int(os.environ.get("MEMORY_AUTO_WRITEBACK_RELATED_MEMORIES_N", "5")),
+)
+
+MEMORY_AUTO_WRITEBACK_MIN_SIMILARITY = PersistentConfig(
+    "MEMORY_AUTO_WRITEBACK_MIN_SIMILARITY",
+    "memories.auto_writeback.minimum_similarity",
+    (
+        float(os.environ.get("MEMORY_AUTO_WRITEBACK_MIN_SIMILARITY"))
+        if os.environ.get("MEMORY_AUTO_WRITEBACK_MIN_SIMILARITY") not in [None, ""]
+        else None
+    ),
+)
+
+MEMORY_AUTO_WRITEBACK_MAX_ACTIONS = PersistentConfig(
+    "MEMORY_AUTO_WRITEBACK_MAX_ACTIONS",
+    "memories.auto_writeback.max_actions",
+    int(os.environ.get("MEMORY_AUTO_WRITEBACK_MAX_ACTIONS", "6")),
+)
+
+MEMORY_AUTO_WRITEBACK_MIN_USER_MESSAGE_CHARS = PersistentConfig(
+    "MEMORY_AUTO_WRITEBACK_MIN_USER_MESSAGE_CHARS",
+    "memories.auto_writeback.min_user_message_chars",
+    int(os.environ.get("MEMORY_AUTO_WRITEBACK_MIN_USER_MESSAGE_CHARS", "6")),
+)
+
+MEMORY_AUTO_WRITEBACK_SHOW_STATUS = PersistentConfig(
+    "MEMORY_AUTO_WRITEBACK_SHOW_STATUS",
+    "memories.auto_writeback.show_status",
+    os.environ.get("MEMORY_AUTO_WRITEBACK_SHOW_STATUS", "True").lower() == "true",
+)
+
+ENABLE_DEEP_RESEARCH = PersistentConfig(
+    "ENABLE_DEEP_RESEARCH",
+    "deep_research.enable",
+    os.environ.get("ENABLE_DEEP_RESEARCH", "False").lower() == "true",
+)
+
+DEERFLOW_BASE_URL = PersistentConfig(
+    "DEERFLOW_BASE_URL",
+    "deep_research.deerflow.base_url",
+    os.environ.get("DEERFLOW_BASE_URL", ""),
+)
+
+DEERFLOW_API_KEY = PersistentConfig(
+    "DEERFLOW_API_KEY",
+    "deep_research.deerflow.api_key",
+    os.environ.get("DEERFLOW_API_KEY", ""),
+)
+
+DEERFLOW_MODEL = PersistentConfig(
+    "DEERFLOW_MODEL",
+    "deep_research.deerflow.model",
+    os.environ.get("DEERFLOW_MODEL", ""),
+)
+
+DEERFLOW_CONNECT_TIMEOUT_SECS = PersistentConfig(
+    "DEERFLOW_CONNECT_TIMEOUT_SECS",
+    "deep_research.deerflow.connect_timeout_secs",
+    int(os.environ.get("DEERFLOW_CONNECT_TIMEOUT_SECS", "10")),
+)
+
+DEERFLOW_REQUEST_TIMEOUT_SECS = PersistentConfig(
+    "DEERFLOW_REQUEST_TIMEOUT_SECS",
+    "deep_research.deerflow.request_timeout_secs",
+    int(os.environ.get("DEERFLOW_REQUEST_TIMEOUT_SECS", "900")),
+)
+
+DEERFLOW_REUSE_THREADS = PersistentConfig(
+    "DEERFLOW_REUSE_THREADS",
+    "deep_research.deerflow.reuse_threads",
+    os.environ.get("DEERFLOW_REUSE_THREADS", "True").lower() == "true",
+)
 CODE_INTERPRETER_ENGINE = PersistentConfig(
     "CODE_INTERPRETER_ENGINE",
     "code_interpreter.engine",
@@ -2925,6 +3114,68 @@ ADAPTIVE_FILE_CONTEXT_MIGRATION_VERSION = PersistentConfig(
         if os.environ.get("ADAPTIVE_FILE_CONTEXT_MIGRATION_VERSION")
         else 0
     ),
+)
+
+CHAT_CONTEXT_NON_SYSTEM_MAX_TOKENS = PersistentConfig(
+    "CHAT_CONTEXT_NON_SYSTEM_MAX_TOKENS",
+    "chat.context.non_system_max_tokens",
+    (
+        int(os.environ.get("CHAT_CONTEXT_NON_SYSTEM_MAX_TOKENS", "32000"))
+        if os.environ.get("CHAT_CONTEXT_NON_SYSTEM_MAX_TOKENS")
+        else 32000
+    ),
+)
+
+CHAT_CONTEXT_WINDOW_ROUNDS = PersistentConfig(
+    "CHAT_CONTEXT_WINDOW_ROUNDS",
+    "chat.context.window_rounds",
+    (
+        int(os.environ.get("CHAT_CONTEXT_WINDOW_ROUNDS", "5"))
+        if os.environ.get("CHAT_CONTEXT_WINDOW_ROUNDS")
+        else 5
+    ),
+)
+
+CHAT_CONTEXT_COMPACTION_TRIGGER_TOKENS = PersistentConfig(
+    "CHAT_CONTEXT_COMPACTION_TRIGGER_TOKENS",
+    "chat.context.compaction_trigger_tokens",
+    (
+        int(os.environ.get("CHAT_CONTEXT_COMPACTION_TRIGGER_TOKENS", "50000"))
+        if os.environ.get("CHAT_CONTEXT_COMPACTION_TRIGGER_TOKENS")
+        else 50000
+    ),
+)
+
+CHAT_CONTEXT_TOOL_OUTPUT_MAX_TOKENS = PersistentConfig(
+    "CHAT_CONTEXT_TOOL_OUTPUT_MAX_TOKENS",
+    "chat.context.tool_output_max_tokens",
+    (
+        int(os.environ.get("CHAT_CONTEXT_TOOL_OUTPUT_MAX_TOKENS", "1800"))
+        if os.environ.get("CHAT_CONTEXT_TOOL_OUTPUT_MAX_TOKENS")
+        else 1800
+    ),
+)
+
+CHAT_CONTEXT_TOOL_OUTPUT_MAX_CHARS = PersistentConfig(
+    "CHAT_CONTEXT_TOOL_OUTPUT_MAX_CHARS",
+    "chat.context.tool_output_max_chars",
+    (
+        int(os.environ.get("CHAT_CONTEXT_TOOL_OUTPUT_MAX_CHARS", "6000"))
+        if os.environ.get("CHAT_CONTEXT_TOOL_OUTPUT_MAX_CHARS")
+        else 6000
+    ),
+)
+
+CHAT_CONTEXT_ALLOW_TEMP_OVERFLOW = PersistentConfig(
+    "CHAT_CONTEXT_ALLOW_TEMP_OVERFLOW",
+    "chat.context.allow_temp_overflow",
+    os.environ.get("CHAT_CONTEXT_ALLOW_TEMP_OVERFLOW", "True").lower() == "true",
+)
+
+CHAT_CONTEXT_BUDGET_ENABLED = PersistentConfig(
+    "CHAT_CONTEXT_BUDGET_ENABLED",
+    "chat.context.budget_enabled",
+    os.environ.get("CHAT_CONTEXT_BUDGET_ENABLED", "True").lower() == "true",
 )
 
 FILE_IMAGE_COMPRESSION_WIDTH = PersistentConfig(

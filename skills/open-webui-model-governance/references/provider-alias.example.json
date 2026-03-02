@@ -1,0 +1,7 @@
+{
+  "openai": "OpenAI",
+  "qwen": "Qwen",
+  "google": "Google Gemini",
+  "volcengine": "Volcengine Doubao",
+  "anthropic": "Anthropic Claude"
+}

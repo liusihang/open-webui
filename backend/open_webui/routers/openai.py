@@ -1,15 +1,18 @@
+import base64
 import asyncio
 import hashlib
+import importlib
 import json
 import logging
-from typing import Optional
+import mimetypes
+import re
+import uuid
+from typing import Any, Optional
 from urllib.parse import urlparse
 
 import aiohttp
 from aiocache import cached
 import requests
-
-from azure.identity import DefaultAzureCredential, get_bearer_token_provider
 
 from fastapi import Depends, HTTPException, Request, APIRouter
 from fastapi.responses import (
@@ -26,11 +29,12 @@ from open_webui.internal.db import get_session
 
 from open_webui.models.models import Models
 from open_webui.models.access_grants import AccessGrants
+from open_webui.models.files import Files
 from open_webui.models.groups import Groups
-from open_webui.config import (
+from ..config import (
     CACHE_DIR,
 )
-from open_webui.env import (
+from ..env import (
     MODELS_CACHE_TTL,
     AIOHTTP_CLIENT_SESSION_SSL,
     AIOHTTP_CLIENT_TIMEOUT,
@@ -41,7 +45,7 @@ from open_webui.env import (
 )
 from open_webui.models.users import UserModel
 
-from open_webui.constants import ERROR_MESSAGES
+from ..constants import ERROR_MESSAGES
 
 
 from open_webui.utils.payload import (
@@ -58,6 +62,7 @@ from open_webui.utils.misc import (
 from open_webui.utils.auth import get_admin_user, get_verified_user
 from open_webui.utils.headers import include_user_info_headers
 from open_webui.utils.anthropic import is_anthropic_url, get_anthropic_models
+from open_webui.storage.provider import Storage
 
 log = logging.getLogger(__name__)
 
@@ -69,7 +74,7 @@ log = logging.getLogger(__name__)
 ##########################################
 
 
-async def send_get_request(url, key=None, user: UserModel = None):
+async def send_get_request(url: str, key: Optional[str] = None, user: Optional[UserModel] = None):
     timeout = aiohttp.ClientTimeout(total=AIOHTTP_CLIENT_TIMEOUT_MODEL_LIST)
     try:
         async with aiohttp.ClientSession(timeout=timeout, trust_env=True) as session:
@@ -92,9 +97,11 @@ async def send_get_request(url, key=None, user: UserModel = None):
         return None
 
 
-async def get_models_request(url, key=None, user: UserModel = None):
+async def get_models_request(url: str, key: Optional[str] = None, user: Optional[UserModel] = None):
     if is_anthropic_url(url):
-        return await get_anthropic_models(url, key, user=user)
+        if user is None:
+            return await get_anthropic_models(url, key or "")
+        return await get_anthropic_models(url, key or "", user=user)
     return await send_get_request(f"{url}/models", key, user=user)
 
 
@@ -119,15 +126,107 @@ def openai_reasoning_model_handler(payload):
     return payload
 
 
+def apply_default_reasoning_payload(payload: dict[str, Any]) -> dict[str, Any]:
+    """Ensure reasoning is enabled by default unless explicitly configured."""
+    reasoning = payload.get("reasoning")
+
+    if reasoning is None:
+        payload["reasoning"] = {"enable": True}
+        return payload
+
+    if isinstance(reasoning, dict):
+        if "enable" not in reasoning:
+            if "enabled" in reasoning:
+                reasoning["enable"] = bool(reasoning.get("enabled"))
+            else:
+                reasoning["enable"] = True
+
+        reasoning.pop("enabled", None)
+
+    return payload
+
+
+def _is_banned_reasoning_token(token: Any) -> bool:
+    if not isinstance(token, str):
+        return False
+    normalized = re.sub(r"[^A-Z0-9]", "", token.strip().upper())
+    return normalized == "REASONINGENCRYPTEDCONTENT"
+
+
+def _prune_banned_reasoning_tokens(value: Any) -> tuple[Any, int]:
+    removed = 0
+    if isinstance(value, dict):
+        sanitized: dict[str, Any] = {}
+        for key, nested in value.items():
+            if _is_banned_reasoning_token(key):
+                removed += 1
+                continue
+
+            if key == "required" and isinstance(nested, list):
+                filtered_required = []
+                for required_item in nested:
+                    if _is_banned_reasoning_token(required_item):
+                        removed += 1
+                        continue
+                    filtered_required.append(required_item)
+                sanitized[key] = filtered_required
+                continue
+
+            cleaned_nested, nested_removed = _prune_banned_reasoning_tokens(nested)
+            removed += nested_removed
+            sanitized[key] = cleaned_nested
+        return sanitized, removed
+
+    if isinstance(value, list):
+        sanitized_list = []
+        for item in value:
+            if _is_banned_reasoning_token(item):
+                removed += 1
+                continue
+            cleaned_item, nested_removed = _prune_banned_reasoning_tokens(item)
+            removed += nested_removed
+            sanitized_list.append(cleaned_item)
+        return sanitized_list, removed
+
+    return value, 0
+
+
+def sanitize_upstream_payload(payload: dict[str, Any]) -> tuple[dict[str, Any], int]:
+    sanitized, removed = _prune_banned_reasoning_tokens(payload)
+    if isinstance(sanitized, dict):
+        return sanitized, removed
+    return payload, removed
+
+
+def dedupe_system_messages(messages: Any) -> tuple[Any, int]:
+    if not isinstance(messages, list):
+        return messages, 0
+
+    deduped: list[Any] = []
+    has_system = False
+    removed = 0
+
+    for message in messages:
+        if isinstance(message, dict) and message.get("role") == "system":
+            if has_system:
+                removed += 1
+                continue
+            has_system = True
+        deduped.append(message)
+
+    return deduped, removed
+
+
 async def get_headers_and_cookies(
     request: Request,
-    url,
-    key=None,
-    config=None,
-    metadata: Optional[dict] = None,
-    user: UserModel = None,
+    url: str,
+    key: Optional[str] = None,
+    config: Optional[dict[str, Any]] = None,
+    metadata: Optional[dict[str, Any]] = None,
+    user: Optional[UserModel] = None,
 ):
     cookies = {}
+    config = config or {}
     headers = {
         "Content-Type": "application/json",
         **(
@@ -142,8 +241,10 @@ async def get_headers_and_cookies(
 
     if ENABLE_FORWARD_USER_INFO_HEADERS and user:
         headers = include_user_info_headers(headers, user)
-        if metadata and metadata.get("chat_id"):
-            headers[FORWARD_SESSION_INFO_HEADER_CHAT_ID] = metadata.get("chat_id")
+        if metadata:
+            chat_id = metadata.get("chat_id")
+            if isinstance(chat_id, str) and chat_id:
+                headers[FORWARD_SESSION_INFO_HEADER_CHAT_ID] = chat_id
 
     token = None
     auth_type = config.get("auth_type")
@@ -158,10 +259,10 @@ async def get_headers_and_cookies(
         token = request.state.token.credentials
     elif auth_type == "system_oauth":
         cookies = request.cookies
-
+        
         oauth_token = None
         try:
-            if request.cookies.get("oauth_session_id", None):
+            if user and request.cookies.get("oauth_session_id", None):
                 oauth_token = await request.app.state.oauth_manager.get_oauth_token(
                     user.id,
                     request.cookies.get("oauth_session_id", None),
@@ -179,7 +280,9 @@ async def get_headers_and_cookies(
         headers["Authorization"] = f"Bearer {token}"
 
     if config.get("headers") and isinstance(config.get("headers"), dict):
-        headers = {**headers, **config.get("headers")}
+        extra_headers = config.get("headers")
+        if isinstance(extra_headers, dict):
+            headers = {**headers, **{str(k): str(v) for k, v in extra_headers.items()}}
 
     return headers, cookies
 
@@ -190,13 +293,303 @@ def get_microsoft_entra_id_access_token():
     Returns the token string or None if authentication fails.
     """
     try:
-        token_provider = get_bearer_token_provider(
-            DefaultAzureCredential(), "https://cognitiveservices.azure.com/.default"
+        identity = importlib.import_module("azure.identity")
+        default_credential = getattr(identity, "DefaultAzureCredential")
+        bearer_token_provider = getattr(identity, "get_bearer_token_provider")
+        token_provider = bearer_token_provider(
+            default_credential(),
+            "https://cognitiveservices.azure.com/.default",
         )
         return token_provider()
     except Exception as e:
         log.error(f"Error getting Microsoft Entra ID access token: {e}")
         return None
+
+
+def _normalize_bool_config_flag(value) -> bool:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        return value.strip().lower() in {"1", "true", "yes", "on"}
+    return bool(value)
+
+
+def _normalize_content_type(value, filename: str) -> str:
+    if isinstance(value, list):
+        value = next((item for item in value if isinstance(item, str)), None)
+    if not isinstance(value, str) or not value.strip():
+        guessed_type, _ = mimetypes.guess_type(filename)
+        return guessed_type or "application/octet-stream"
+    return value.strip().split(";")[0]
+
+
+def _is_image_file(file_item: dict[str, Any], content_type: str) -> bool:
+    file_type = str(file_item.get("type", "")).lower()
+    if file_type == "image":
+        return True
+    return content_type.startswith("image/")
+
+
+def _resolve_file_name(file_obj, file_item: dict[str, Any], content_type: str) -> str:
+    file_meta = file_obj.meta or {}
+    filename = file_meta.get("name") or file_obj.filename or str(file_item.get("id", "file"))
+    if "." not in filename:
+        ext = mimetypes.guess_extension(content_type or "application/octet-stream")
+        if ext:
+            filename = f"{filename}{ext}"
+    return filename
+
+
+_CLIPROXY_FILE_ID_PATTERN = re.compile(r"\b[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\b", re.IGNORECASE)
+
+
+def _extract_file_id_from_image_url(url: str) -> Optional[str]:
+    """Best-effort extraction of a local Open WebUI file id from an image_url.
+
+    Open WebUI frontend often uses the raw file id (UUID) as `image_url.url`.
+    When forwarding to an upstream service (e.g. cliproxy), we need to inline the
+    image bytes as a data URL because the upstream cannot resolve local ids.
+    """
+
+    if not isinstance(url, str):
+        return None
+    url = url.strip()
+    if not url:
+        return None
+    if url.startswith(("data:", "http://", "https://")):
+        return None
+
+    # If the URL is already a UUID, accept it.
+    try:
+        return str(uuid.UUID(url))
+    except Exception:
+        pass
+
+    # Extract UUID from common path forms: /files/<id>/content, /api/v1/files/<id>/content
+    match = _CLIPROXY_FILE_ID_PATTERN.search(url)
+    if match:
+        try:
+            return str(uuid.UUID(match.group(0)))
+        except Exception:
+            return None
+    return None
+
+
+def _inline_cliproxy_image_urls_in_payload(
+    payload: dict[str, Any],
+    metadata: Optional[dict[str, Any]],
+    user,
+) -> dict[str, Any]:
+    messages = payload.get("messages")
+    if not isinstance(messages, list):
+        return payload
+
+    for msg in messages:
+        if not isinstance(msg, dict):
+            continue
+        content = msg.get("content")
+        if not isinstance(content, list):
+            continue
+
+        for part in content:
+            if not isinstance(part, dict) or part.get("type") != "image_url":
+                continue
+
+            url_data = part.get("image_url")
+            if isinstance(url_data, dict):
+                url = url_data.get("url")
+            else:
+                url = url_data
+
+            if not isinstance(url, str):
+                continue
+
+            file_id = _extract_file_id_from_image_url(url)
+            if not file_id:
+                continue
+
+            file_obj = Files.get_file_by_id(str(file_id))
+            if not file_obj:
+                continue
+
+            has_access = user.role == "admin" or file_obj.user_id == user.id
+            if not has_access:
+                has_access = AccessGrants.has_access(
+                    user_id=user.id,
+                    resource_type="file",
+                    resource_id=str(file_id),
+                    permission="read",
+                )
+            if not has_access:
+                continue
+
+            try:
+                file_meta = file_obj.meta or {}
+                content_type = _normalize_content_type(
+                    file_meta.get("content_type"),
+                    file_obj.filename or "",
+                )
+                if not getattr(file_obj, "path", None):
+                    continue
+                file_path = Storage.get_file(str(file_obj.path))
+                with open(file_path, "rb") as file_handle:
+                    raw_content = file_handle.read()
+                if not raw_content:
+                    continue
+
+                encoded_content = base64.b64encode(raw_content).decode("utf-8")
+                data_url = f"data:{content_type};base64,{encoded_content}"
+
+                if isinstance(url_data, dict):
+                    url_data["url"] = data_url
+                    part["image_url"] = url_data
+                else:
+                    part["image_url"] = {"url": data_url}
+            except Exception as e:
+                log.debug(
+                    f"CLIProxy image inlining skipped: read failed ({file_id}): {e}"
+                )
+
+    payload["messages"] = messages
+    return payload
+
+
+def _append_file_parts_to_last_user_message(
+    messages: list[dict[str, Any]],
+    file_parts: list[dict[str, Any]],
+) -> None:
+    if not file_parts:
+        return
+
+    target_index = None
+    for index in range(len(messages) - 1, -1, -1):
+        if isinstance(messages[index], dict) and messages[index].get("role") == "user":
+            target_index = index
+            break
+
+    if target_index is None:
+        return
+
+    message = messages[target_index]
+    content = message.get("content", "")
+
+    if isinstance(content, list):
+        normalized_content = [*content]
+    elif isinstance(content, str):
+        normalized_content = [{"type": "text", "text": content}]
+    elif content is None:
+        normalized_content = []
+    else:
+        normalized_content = [{"type": "text", "text": str(content)}]
+
+    normalized_content.extend(file_parts)
+    message["content"] = normalized_content
+
+
+def _build_cliproxy_file_parts(
+    payload: dict[str, Any],
+    metadata: Optional[dict[str, Any]],
+    user,
+) -> list[dict[str, Any]]:
+    if not isinstance(metadata, dict):
+        return []
+
+    parent_message = metadata.get("parent_message")
+    if not isinstance(parent_message, dict):
+        return []
+
+    parent_files = parent_message.get("files")
+    if not isinstance(parent_files, list):
+        return []
+
+    # Use data URLs so upstream can reliably infer MIME types.
+    # (Raw base64 alone often causes upstreams to treat inputs as generic files.)
+    use_data_url = True
+    parts = []
+
+    for file_item in parent_files:
+        if not isinstance(file_item, dict):
+            continue
+
+        file_id = file_item.get("id")
+        if not file_id:
+            continue
+
+        file_obj = Files.get_file_by_id(str(file_id))
+        if not file_obj:
+            log.debug(f"CLIProxy file injection skipped: file not found ({file_id})")
+            continue
+
+        has_access = user.role == "admin" or file_obj.user_id == user.id
+        if not has_access:
+            has_access = AccessGrants.has_access(
+                user_id=user.id,
+                resource_type="file",
+                resource_id=str(file_id),
+                permission="read",
+            )
+
+        if not has_access:
+            log.debug(f"CLIProxy file injection skipped: access denied ({file_id})")
+            continue
+
+        try:
+            file_meta = file_obj.meta or {}
+            content_type = _normalize_content_type(
+                file_item.get("content_type") or file_meta.get("content_type"),
+                file_obj.filename or "",
+            )
+
+            if _is_image_file(file_item, content_type):
+                continue
+
+            if not getattr(file_obj, "path", None):
+                continue
+            file_path = Storage.get_file(str(file_obj.path))
+            with open(file_path, "rb") as file_handle:
+                raw_content = file_handle.read()
+
+            if not raw_content:
+                log.debug(f"CLIProxy file injection skipped: empty file ({file_id})")
+                continue
+
+            filename = _resolve_file_name(file_obj, file_item, content_type)
+            encoded_content = base64.b64encode(raw_content).decode("utf-8")
+            file_data = (
+                f"data:{content_type};base64,{encoded_content}"
+                if use_data_url
+                else encoded_content
+            )
+
+            parts.append(
+                {
+                    "type": "file",
+                    "file": {
+                        "filename": filename,
+                        "file_data": file_data,
+                        "content_type": content_type,
+                    },
+                }
+            )
+        except Exception as e:
+            log.debug(f"CLIProxy file injection skipped: read failed ({file_id}): {e}")
+
+    return parts
+
+
+def _inject_cliproxy_files_into_payload(
+    payload: dict[str, Any],
+    metadata: Optional[dict[str, Any]],
+    user,
+) -> dict[str, Any]:
+    messages = payload.get("messages")
+    if not isinstance(messages, list):
+        return payload
+
+    file_parts = _build_cliproxy_file_parts(payload, metadata, user)
+    _append_file_parts_to_last_user_message(messages, file_parts)
+    payload["messages"] = messages
+    return payload
 
 
 ##########################################
@@ -222,7 +615,7 @@ class OpenAIConfigForm(BaseModel):
     ENABLE_OPENAI_API: Optional[bool] = None
     OPENAI_API_BASE_URLS: list[str]
     OPENAI_API_KEYS: list[str]
-    OPENAI_API_CONFIGS: dict
+    OPENAI_API_CONFIGS: dict[str, Any]
 
 
 @router.post("/config/update")
@@ -344,7 +737,9 @@ async def speech(request: Request, user=Depends(get_verified_user)):
         raise HTTPException(status_code=401, detail=ERROR_MESSAGES.OPENAI_NOT_FOUND)
 
 
-async def get_all_models_responses(request: Request, user: UserModel) -> list:
+async def get_all_models_responses(
+    request: Request, user: UserModel
+) -> list[dict[str, Any]]:
     if not request.app.state.config.ENABLE_OPENAI_API:
         return []
 
@@ -483,7 +878,7 @@ async def get_filtered_models(models, user, db=None):
     ttl=MODELS_CACHE_TTL,
     key=lambda _, user: f"openai_all_models_{user.id}" if user else "openai_all_models",
 )
-async def get_all_models(request: Request, user: UserModel) -> dict[str, list]:
+async def get_all_models(request: Request, user: UserModel) -> dict[str, list[dict[str, Any]]]:
     log.info("get_all_models()")
 
     if not request.app.state.config.ENABLE_OPENAI_API:
@@ -653,7 +1048,7 @@ class ConnectionVerificationForm(BaseModel):
     url: str
     key: str
 
-    config: Optional[dict] = None
+    config: Optional[dict[str, Any]] = None
 
 
 @router.post("/verify")
@@ -797,7 +1192,9 @@ def is_openai_reasoning_model(model: str) -> bool:
     return model.lower().startswith(("o1", "o3", "o4", "gpt-5"))
 
 
-def convert_to_azure_payload(url, payload: dict, api_version: str):
+def convert_to_azure_payload(
+    url: str, payload: dict[str, Any], api_version: str
+) -> tuple[str, dict[str, Any]]:
     model = payload.get("model", "")
 
     # Filter allowed parameters based on Azure OpenAI API
@@ -824,7 +1221,7 @@ def convert_to_azure_payload(url, payload: dict, api_version: str):
     return url, payload
 
 
-def convert_to_responses_payload(payload: dict) -> dict:
+def convert_to_responses_payload(payload: dict[str, Any]) -> dict[str, Any]:
     """
     Convert Chat Completions payload to Responses API format.
 
@@ -875,6 +1272,19 @@ def convert_to_responses_payload(payload: dict) -> dict:
                         else url_data
                     )
                     content_parts.append({"type": "input_image", "image_url": url})
+                elif part.get("type") == "file":
+                    file_obj = part.get("file") or {}
+                    if isinstance(file_obj, dict):
+                        file_data = file_obj.get("file_data")
+                        filename = file_obj.get("filename")
+                        if isinstance(file_data, str) and file_data:
+                            input_file = {
+                                "type": "input_file",
+                                "file_data": file_data,
+                            }
+                            if isinstance(filename, str) and filename:
+                                input_file["filename"] = filename
+                            content_parts.append(input_file)
         else:
             content_parts = [{"type": text_type, "text": str(content)}]
 
@@ -924,7 +1334,7 @@ def convert_to_responses_payload(payload: dict) -> dict:
     return responses_payload
 
 
-def convert_responses_result(response: dict) -> dict:
+def convert_responses_result(response: dict[str, Any]) -> dict[str, Any]:
     """
     Convert non-streaming Responses API result.
     Just add done flag - pass through raw response, frontend handles output.
@@ -936,7 +1346,7 @@ def convert_responses_result(response: dict) -> dict:
 @router.post("/chat/completions")
 async def generate_chat_completion(
     request: Request,
-    form_data: dict,
+    form_data: dict[str, Any],
     user=Depends(get_verified_user),
     bypass_filter: Optional[bool] = False,
     bypass_system_prompt: bool = False,
@@ -952,18 +1362,28 @@ async def generate_chat_completion(
 
     payload = {**form_data}
     metadata = payload.pop("metadata", None)
+    payload["messages"], removed_duplicate_system = dedupe_system_messages(
+        payload.get("messages", [])
+    )
+    if removed_duplicate_system > 0:
+        log.warning(
+            f"Removed {removed_duplicate_system} duplicate system message(s) before chat request"
+        )
 
     model_id = form_data.get("model")
+    if not isinstance(model_id, str) or not model_id:
+        raise HTTPException(status_code=400, detail="Model not provided")
     model_info = Models.get_model_by_id(model_id)
 
     # Check model info and override the payload
     if model_info:
         if model_info.base_model_id:
+            request_base_model_id = getattr(request, "base_model_id", None)
             base_model_id = (
-                request.base_model_id
-                if hasattr(request, "base_model_id")
+                request_base_model_id
+                if isinstance(request_base_model_id, str) and request_base_model_id
                 else model_info.base_model_id
-            )  # Use request's base_model_id if available
+            )
             payload["model"] = base_model_id
             model_id = base_model_id
 
@@ -1029,6 +1449,27 @@ async def generate_chat_completion(
     if prefix_id:
         payload["model"] = payload["model"].replace(f"{prefix_id}.", "")
 
+    cliproxy_api_enabled = _normalize_bool_config_flag(api_config.get("cliproxy_api", False))
+    api_type = str(api_config.get("api_type") or "").lower()
+
+    # For OpenAI reasoning models (o1/o3/o4/gpt-5), Chat Completions may expose
+    # reasoning token usage without textual reasoning deltas. When api_type is not
+    # explicitly configured, prefer Responses API so reasoning summaries can be
+    # surfaced consistently in Open WebUI.
+    if not api_type and is_openai_reasoning_model(payload.get("model", "")):
+        api_type = "responses"
+
+    # Normalize local Open WebUI image references (UUID/path) into data URLs for
+    # all upstream modes, not only cliproxy.
+    payload = _inline_cliproxy_image_urls_in_payload(payload, metadata, user)
+
+    if cliproxy_api_enabled:
+        payload = _inject_cliproxy_files_into_payload(payload, metadata, user)
+    elif api_type == "responses":
+        # Responses API can consume input_file items after conversion, so reuse
+        # the same file-part builder for non-cliproxy providers.
+        payload = _inject_cliproxy_files_into_payload(payload, metadata, user)
+
     # Add user info to the payload if the model is a pipeline
     if "pipeline" in model and model.get("pipeline"):
         payload["user"] = {
@@ -1053,6 +1494,8 @@ async def generate_chat_completion(
     if "max_tokens" in payload and "max_completion_tokens" in payload:
         del payload["max_tokens"]
 
+    payload = apply_default_reasoning_payload(payload)
+
     # Convert the modified body back to JSON
     if "logit_bias" in payload and payload["logit_bias"]:
         logit_bias = convert_logit_bias_input_to_json(payload["logit_bias"])
@@ -1064,7 +1507,7 @@ async def generate_chat_completion(
         request, url, key, api_config, metadata, user=user
     )
 
-    is_responses = api_config.get("api_type") == "responses"
+    is_responses = api_type == "responses"
 
     if api_config.get("azure", False):
         api_version = api_config.get("api_version", "2023-03-15-preview")
@@ -1088,6 +1531,12 @@ async def generate_chat_completion(
             request_url = f"{url}/responses"
         else:
             request_url = f"{url}/chat/completions"
+
+    payload, removed_banned_tokens = sanitize_upstream_payload(payload)
+    if removed_banned_tokens > 0:
+        log.warning(
+            f"Removed {removed_banned_tokens} banned reasoning token(s) from chat payload before upstream request"
+        )
 
     payload = json.dumps(payload)
 
@@ -1148,7 +1597,7 @@ async def generate_chat_completion(
             await cleanup_response(r, session)
 
 
-async def embeddings(request: Request, form_data: dict, user):
+async def embeddings(request: Request, form_data: dict[str, Any], user: UserModel):
     """
     Calls the embeddings endpoint for OpenAI-compatible providers.
 
@@ -1237,19 +1686,19 @@ class ResponsesForm(BaseModel):
     model_config = ConfigDict(extra="allow")
 
     model: str
-    input: Optional[list | str] = None
+    input: Optional[list[Any] | str] = None
     instructions: Optional[str] = None
     stream: Optional[bool] = None
     temperature: Optional[float] = None
     max_output_tokens: Optional[int] = None
     top_p: Optional[float] = None
-    tools: Optional[list] = None
-    tool_choice: Optional[str | dict] = None
-    text: Optional[dict] = None
+    tools: Optional[list[dict[str, Any]]] = None
+    tool_choice: Optional[str | dict[str, Any]] = None
+    text: Optional[dict[str, Any]] = None
     truncation: Optional[str] = None
-    metadata: Optional[dict] = None
+    metadata: Optional[dict[str, Any]] = None
     store: Optional[bool] = None
-    reasoning: Optional[dict] = None
+    reasoning: Optional[dict[str, Any]] = None
     previous_response_id: Optional[str] = None
 
 
@@ -1264,6 +1713,12 @@ async def responses(
     Routes to the correct upstream backend based on the model field.
     """
     payload = form_data.model_dump(exclude_none=True)
+    payload = apply_default_reasoning_payload(payload)
+    payload, removed_banned_tokens = sanitize_upstream_payload(payload)
+    if removed_banned_tokens > 0:
+        log.warning(
+            f"Removed {removed_banned_tokens} banned reasoning token(s) from responses payload before upstream request"
+        )
     body = json.dumps(payload)
 
     idx = 0
@@ -1369,6 +1824,21 @@ async def proxy(path: str, request: Request, user=Depends(get_verified_user)):
     if body:
         try:
             payload = json.loads(body)
+            if isinstance(payload, dict) and isinstance(payload.get("model"), str):
+                payload = apply_default_reasoning_payload(payload)
+                payload["messages"], removed_duplicate_system = dedupe_system_messages(
+                    payload.get("messages", [])
+                )
+                if removed_duplicate_system > 0:
+                    log.warning(
+                        f"Removed {removed_duplicate_system} duplicate system message(s) from proxy payload before upstream request"
+                    )
+                payload, removed_banned_tokens = sanitize_upstream_payload(payload)
+                if removed_banned_tokens > 0:
+                    log.warning(
+                        f"Removed {removed_banned_tokens} banned reasoning token(s) from proxy payload before upstream request"
+                    )
+                body = json.dumps(payload).encode()
         except (json.JSONDecodeError, ValueError):
             payload = None
 
@@ -1412,6 +1882,11 @@ async def proxy(path: str, request: Request, user=Depends(get_verified_user)):
 
             payload = json.loads(body)
             url, payload = convert_to_azure_payload(url, payload, api_version)
+            payload, removed_banned_tokens = sanitize_upstream_payload(payload)
+            if removed_banned_tokens > 0:
+                log.warning(
+                    f"Removed {removed_banned_tokens} banned reasoning token(s) from azure proxy payload before upstream request"
+                )
             body = json.dumps(payload).encode()
 
             request_url = f"{url}/{path}?api-version={api_version}"
