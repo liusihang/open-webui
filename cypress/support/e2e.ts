@@ -3,9 +3,9 @@
 /// <reference path="../support/index.d.ts" />
 
 export const adminUser = {
-	name: 'Admin User',
-	email: 'admin@example.com',
-	password: 'password'
+	name: Cypress.env('ADMIN_NAME') || 'Admin User',
+	email: Cypress.env('ADMIN_EMAIL') || 'admin@example.com',
+	password: Cypress.env('ADMIN_PASSWORD') || 'password'
 };
 
 const login = (email: string, password: string) => {
