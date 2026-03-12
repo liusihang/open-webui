@@ -1,6 +1,7 @@
 import logging
 import os
-from typing import Awaitable, Optional, Union
+from dataclasses import dataclass
+from typing import Any, Awaitable, Optional, Union
 
 import requests
 import aiohttp
@@ -20,6 +21,8 @@ from langchain_community.retrievers import BM25Retriever
 from langchain_core.documents import Document
 
 from open_webui.config import VECTOR_DB
+from open_webui.retrieval.bm25_cache import BM25_RETRIEVER_CACHE
+from open_webui.retrieval.status import emit_knowledge_search_status
 from open_webui.retrieval.vector.factory import VECTOR_DB_CLIENT
 
 
@@ -52,9 +55,6 @@ from open_webui.config import (
 )
 
 log = logging.getLogger(__name__)
-
-
-from typing import Any
 
 from langchain_core.callbacks import CallbackManagerForRetrieverRun
 from langchain_core.retrievers import BaseRetriever
@@ -89,6 +89,13 @@ def get_content_from_url(request, url: str) -> str:
 
 
 CHUNK_HASH_KEY = "_chunk_hash"
+
+
+@dataclass(frozen=True)
+class CachedBM25Payload:
+    vectorizer: Any
+    docs: list[Document]
+    preprocess_func: Any
 
 
 def _content_hash(text: str) -> str:
@@ -217,6 +224,52 @@ def get_enriched_texts(collection_result: GetResult) -> list[str]:
     return enriched_texts
 
 
+def get_cached_bm25_retriever(
+    collection_name: str,
+    collection_result: GetResult,
+    enable_enriched_texts: bool,
+    k: int,
+) -> tuple[BM25Retriever, bool]:
+    original_texts = collection_result.documents[0]
+    bm25_metadatas = [
+        {**meta, CHUNK_HASH_KEY: _content_hash(original_texts[idx])}
+        for idx, meta in enumerate(collection_result.metadatas[0])
+    ]
+
+    bm25_texts = (
+        get_enriched_texts(collection_result)
+        if enable_enriched_texts
+        else original_texts
+    )
+
+    def builder() -> tuple[CachedBM25Payload, int]:
+        retriever = BM25Retriever.from_texts(
+            texts=bm25_texts,
+            metadatas=bm25_metadatas,
+        )
+        payload = CachedBM25Payload(
+            vectorizer=retriever.vectorizer,
+            docs=retriever.docs,
+            preprocess_func=retriever.preprocess_func,
+        )
+        return payload, len(retriever.docs)
+
+    payload, cache_hit = BM25_RETRIEVER_CACHE.get_or_create(
+        collection_name=collection_name,
+        enable_enriched_texts=enable_enriched_texts,
+        builder=builder,
+    )
+
+    retriever = BM25Retriever(
+        vectorizer=payload.vectorizer,
+        docs=payload.docs,
+        preprocess_func=payload.preprocess_func,
+        k=k,
+    )
+
+    return retriever, cache_hit
+
+
 async def query_doc_with_hybrid_search(
     collection_name: str,
     collection_result: GetResult,
@@ -228,6 +281,7 @@ async def query_doc_with_hybrid_search(
     r: float,
     hybrid_bm25_weight: float,
     enable_enriched_texts: bool = False,
+    status_callback=None,
 ) -> dict:
     try:
         # First check if collection_result has the required attributes
@@ -250,23 +304,20 @@ async def query_doc_with_hybrid_search(
 
         log.debug(f"query_doc_with_hybrid_search:doc {collection_name}")
 
-        original_texts = collection_result.documents[0]
-        bm25_metadatas = [
-            {**meta, CHUNK_HASH_KEY: _content_hash(original_texts[idx])}
-            for idx, meta in enumerate(collection_result.metadatas[0])
-        ]
-
-        bm25_texts = (
-            get_enriched_texts(collection_result)
-            if enable_enriched_texts
-            else original_texts
+        bm25_retriever, cache_hit = get_cached_bm25_retriever(
+            collection_name=collection_name,
+            collection_result=collection_result,
+            enable_enriched_texts=enable_enriched_texts,
+            k=k,
         )
 
-        bm25_retriever = BM25Retriever.from_texts(
-            texts=bm25_texts,
-            metadatas=bm25_metadatas,
+        await emit_knowledge_search_status(
+            status_callback,
+            "Reusing BM25 cache"
+            if cache_hit
+            else "Preparing BM25 index (first query may be slower)",
+            cache="hit" if cache_hit else "miss",
         )
-        bm25_retriever.k = k
 
         vector_search_retriever = VectorSearchRetriever(
             collection_name=collection_name,
@@ -304,6 +355,12 @@ async def query_doc_with_hybrid_search(
         compression_retriever = ContextualCompressionRetriever(
             base_compressor=compressor, base_retriever=ensemble_retriever
         )
+
+        if reranking_function is not None:
+            await emit_knowledge_search_status(
+                status_callback,
+                "Reranking candidate chunks",
+            )
 
         result = await compression_retriever.ainvoke(query)
 
@@ -488,6 +545,7 @@ async def query_collection_with_hybrid_search(
     r: float,
     hybrid_bm25_weight: float,
     enable_enriched_texts: bool = False,
+    status_callback=None,
 ) -> dict:
     results = []
     error = False
@@ -510,6 +568,11 @@ async def query_collection_with_hybrid_search(
         f"Starting hybrid search for {len(queries)} queries in {len(collection_names)} collections..."
     )
 
+    await emit_knowledge_search_status(
+        status_callback,
+        "Retrieving knowledge candidates",
+    )
+
     async def process_query(collection_name, query):
         try:
             result = await query_doc_with_hybrid_search(
@@ -523,6 +586,7 @@ async def query_collection_with_hybrid_search(
                 r=r,
                 hybrid_bm25_weight=hybrid_bm25_weight,
                 enable_enriched_texts=enable_enriched_texts,
+                status_callback=status_callback,
             )
             return result, None
         except Exception as e:
@@ -988,6 +1052,7 @@ async def get_sources_from_items(
     hybrid_bm25_weight,
     hybrid_search,
     full_context=False,
+    status_callback=None,
     user: Optional[UserModel] = None,
 ):
     log.debug(
@@ -1259,6 +1324,7 @@ async def get_sources_from_items(
                                 r=r,
                                 hybrid_bm25_weight=hybrid_bm25_weight,
                                 enable_enriched_texts=request.app.state.config.ENABLE_RAG_HYBRID_SEARCH_ENRICHED_TEXTS,
+                                status_callback=status_callback,
                             )
                         except Exception as e:
                             log.debug(

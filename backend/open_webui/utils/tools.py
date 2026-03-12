@@ -89,6 +89,79 @@ import copy
 log = logging.getLogger(__name__)
 
 
+def normalize_knowledge_scope_items(
+    scope_items: list[dict] | dict | None,
+) -> list[dict]:
+    if not scope_items:
+        return []
+
+    if isinstance(scope_items, dict):
+        scope_items = [scope_items]
+
+    normalized_items: list[dict] = []
+    for item in scope_items:
+        if not isinstance(item, dict):
+            continue
+        if item not in normalized_items:
+            normalized_items.append(item)
+
+    return normalized_items
+
+
+def get_model_knowledge_scope(model: dict | None) -> list[dict]:
+    return normalize_knowledge_scope_items(
+        (model or {}).get("info", {}).get("meta", {}).get("knowledge")
+    )
+
+
+def get_attached_knowledge_scope(metadata: dict | None) -> list[dict]:
+    return normalize_knowledge_scope_items(
+        (metadata or {}).get("attached_knowledge_scope")
+    )
+
+
+def build_effective_knowledge_scope(
+    metadata: dict | None, model_knowledge: list[dict] | dict | None
+) -> list[dict]:
+    return normalize_knowledge_scope_items(
+        [
+            *normalize_knowledge_scope_items(model_knowledge),
+            *get_attached_knowledge_scope(metadata),
+        ]
+    )
+
+
+def build_effective_knowledge_query_enabled(
+    manual_enabled: bool,
+    model_scope: list[dict] | dict | None,
+    attached_scope: list[dict] | dict | None,
+) -> bool:
+    return bool(
+        manual_enabled
+        or normalize_knowledge_scope_items(model_scope)
+        or normalize_knowledge_scope_items(attached_scope)
+    )
+
+
+def resolve_effective_knowledge_builtin_tools(
+    feature_enabled: bool, scope_items: list[dict] | None
+) -> list[str]:
+    if not feature_enabled or not scope_items:
+        return []
+
+    tool_names = ["query_knowledge_files"]
+    knowledge_types = {
+        item.get("type") for item in scope_items if isinstance(item, dict)
+    }
+
+    if "collection" in knowledge_types or "file" in knowledge_types:
+        tool_names.append("view_file")
+    if "note" in knowledge_types:
+        tool_names.append("view_note")
+
+    return tool_names
+
+
 def get_async_tool_function_and_apply_extra_params(
     function: Callable, extra_params: dict
 ) -> Callable[..., Awaitable]:
@@ -411,6 +484,7 @@ def get_builtin_tools(
     builtin_functions = []
     features = features or {}
     model = model or {}
+    metadata = extra_params.get("__metadata__", {}) or {}
 
     # Helper to get model capabilities (defaults to True if not specified)
     def get_model_capability(name: str, default: bool = True) -> bool:
@@ -428,33 +502,58 @@ def get_builtin_tools(
     if is_builtin_tool_enabled("time"):
         builtin_functions.extend([get_current_timestamp, calculate_timestamp])
 
-    # Knowledge base tools - conditional injection based on model knowledge
-    # If model has attached knowledge (any type), only provide query_knowledge_files
-    # Otherwise, provide all KB browsing tools
-    model_knowledge = model.get("info", {}).get("meta", {}).get("knowledge", [])
-    # Merge folder-attached knowledge so builtin tools can search it
-    folder_knowledge = extra_params.get("__metadata__", {}).get("folder_knowledge")
-    if folder_knowledge:
-        model_knowledge = list(model_knowledge or []) + list(folder_knowledge)
+    model_knowledge_scope = normalize_knowledge_scope_items(
+        metadata.get("model_knowledge_scope")
+    ) or get_model_knowledge_scope(model)
+    attached_knowledge_scope = normalize_knowledge_scope_items(
+        metadata.get("attached_knowledge_scope")
+    ) or get_attached_knowledge_scope(metadata)
+    effective_knowledge_scope = normalize_knowledge_scope_items(
+        metadata.get("effective_knowledge_scope")
+    ) or build_effective_knowledge_scope(metadata, model_knowledge_scope)
+    folder_knowledge_scope = normalize_knowledge_scope_items(
+        metadata.get("folder_knowledge")
+    )
+    scoped_knowledge_scope = effective_knowledge_scope or folder_knowledge_scope
+    effective_knowledge_query_enabled = metadata.get(
+        "effective_knowledge_query_enabled"
+    )
+    if effective_knowledge_query_enabled is None:
+        effective_knowledge_query_enabled = build_effective_knowledge_query_enabled(
+            bool(features.get("attached_knowledge_query")),
+            model_knowledge_scope,
+            attached_knowledge_scope,
+        )
+    scoped_knowledge_query_enabled = bool(
+        effective_knowledge_query_enabled or folder_knowledge_scope
+    )
+    scoped_knowledge_tool_names = resolve_effective_knowledge_builtin_tools(
+        feature_enabled=scoped_knowledge_query_enabled,
+        scope_items=scoped_knowledge_scope,
+    )
+    builtin_function_map = {
+        func.__name__: func
+        for func in [
+            query_knowledge_files,
+            view_file,
+            view_note,
+        ]
+    }
     if is_builtin_tool_enabled("knowledge"):
-        if model_knowledge:
-            # Model has attached knowledge - only allow semantic search within it
-            builtin_functions.append(query_knowledge_files)
-
-            knowledge_types = {item.get("type") for item in model_knowledge}
-            if "file" in knowledge_types or "collection" in knowledge_types:
-                builtin_functions.append(view_file)
-            if "note" in knowledge_types:
-                builtin_functions.append(view_note)
+        if scoped_knowledge_scope and scoped_knowledge_query_enabled:
+            builtin_functions.extend(
+                builtin_function_map[name]
+                for name in scoped_knowledge_tool_names
+                if name in builtin_function_map
+            )
         else:
-            # No model knowledge - allow full KB browsing
+            # No effective scoped knowledge - allow full KB browsing only.
             builtin_functions.extend(
                 [
                     list_knowledge_bases,
                     search_knowledge_bases,
                     query_knowledge_bases,
                     search_knowledge_files,
-                    query_knowledge_files,
                     view_knowledge_file,
                 ]
             )
@@ -535,6 +634,17 @@ def get_builtin_tools(
         builtin_functions.append(view_skill)
 
     for func in builtin_functions:
+        tool_metadata = metadata
+        if (
+            scoped_knowledge_scope
+            and not metadata.get("effective_knowledge_scope")
+            and func.__name__ in {"query_knowledge_files", "view_file", "view_note"}
+        ):
+            tool_metadata = {
+                **metadata,
+                "effective_knowledge_scope": scoped_knowledge_scope,
+            }
+
         callable = get_async_tool_function_and_apply_extra_params(
             func,
             {
@@ -542,10 +652,10 @@ def get_builtin_tools(
                 "__user__": extra_params.get("__user__", {}),
                 "__event_emitter__": extra_params.get("__event_emitter__"),
                 "__event_call__": extra_params.get("__event_call__"),
-                "__metadata__": extra_params.get("__metadata__"),
+                "__metadata__": tool_metadata,
                 "__chat_id__": extra_params.get("__chat_id__"),
                 "__message_id__": extra_params.get("__message_id__"),
-                "__model_knowledge__": model_knowledge,
+                "__model_knowledge__": scoped_knowledge_scope,
             },
         )
 

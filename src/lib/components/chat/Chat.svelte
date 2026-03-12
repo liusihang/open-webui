@@ -106,6 +106,12 @@
 	import Sidebar from '../icons/Sidebar.svelte';
 	import Image from '../common/Image.svelte';
 	import { getBanners } from '$lib/apis/configs';
+	import {
+		buildAttachedKnowledgeFeatureState,
+		filterPersistentChatFiles,
+		getEffectiveKnowledgeQueryEnabled,
+		getModelKnowledgeScopeFromModels
+	} from '$lib/utils/chat/attachedKnowledge';
 
 	export let chatIdProp = '';
 
@@ -148,6 +154,7 @@
 	let webSearchEnabled = false;
 	let codeInterpreterEnabled = false;
 	let deepResearchEnabled = false;
+	let attachedKnowledgeQueryEnabled = false;
 	type ReasoningDepth = 'medium' | 'deep' | 'divergent';
 	let reasoningDepth: ReasoningDepth = 'medium';
 
@@ -172,6 +179,20 @@
 	let chatFiles = [];
 	let files = [];
 	let params = {};
+	let activeModelKnowledgeScope = [];
+	let effectiveAttachedKnowledgeQueryEnabled = false;
+	let showAttachedKnowledgeQueryButton = false;
+	$: activeModelKnowledgeScope = getModelKnowledgeScopeFromModels(
+		(atSelectedModel?.id ? [atSelectedModel.id] : selectedModels)
+			.map((id) => $models.find((model) => model.id === id))
+			.filter(Boolean)
+	);
+	$: effectiveAttachedKnowledgeQueryEnabled = getEffectiveKnowledgeQueryEnabled(
+		attachedKnowledgeQueryEnabled,
+		activeModelKnowledgeScope,
+		files
+	);
+	$: showAttachedKnowledgeQueryButton = effectiveAttachedKnowledgeQueryEnabled;
 
 	// Message queue for storing messages while generating
 	let messageQueue: { id: string; prompt: string; files: any[] }[] = [];
@@ -199,6 +220,7 @@
 		imageGenerationEnabled = false;
 		codeInterpreterEnabled = false;
 		deepResearchEnabled = false;
+		attachedKnowledgeQueryEnabled = false;
 		reasoningDepth = 'medium';
 
 		const storageChatInput = sessionStorage.getItem(
@@ -249,6 +271,7 @@
 						imageGenerationEnabled = input.imageGenerationEnabled;
 						codeInterpreterEnabled = input.codeInterpreterEnabled;
 						deepResearchEnabled = input.deepResearchEnabled ?? false;
+						attachedKnowledgeQueryEnabled = input.attachedKnowledgeQueryEnabled ?? false;
 						reasoningDepth =
 							input.reasoningDepth === 'deep' || input.reasoningDepth === 'divergent'
 								? input.reasoningDepth
@@ -314,6 +337,7 @@
 		imageGenerationEnabled = false;
 		codeInterpreterEnabled = false;
 		deepResearchEnabled = false;
+		attachedKnowledgeQueryEnabled = false;
 		reasoningDepth = 'medium';
 
 		if (selectedModelIds.filter((id) => id).length > 0) {
@@ -731,6 +755,7 @@
 				imageGenerationEnabled = false;
 				codeInterpreterEnabled = false;
 				deepResearchEnabled = false;
+				attachedKnowledgeQueryEnabled = false;
 
 				try {
 					const input = JSON.parse(storageChatInput);
@@ -744,6 +769,7 @@
 						imageGenerationEnabled = input.imageGenerationEnabled;
 						codeInterpreterEnabled = input.codeInterpreterEnabled;
 						deepResearchEnabled = input.deepResearchEnabled ?? false;
+						attachedKnowledgeQueryEnabled = input.attachedKnowledgeQueryEnabled ?? false;
 					}
 				} catch (e) {}
 			}
@@ -1254,7 +1280,7 @@
 				chatTitle.set(chatContent.title);
 
 				params = chatContent?.params ?? {};
-				chatFiles = chatContent?.files ?? [];
+				chatFiles = filterPersistentChatFiles(chatContent?.files ?? []);
 
 				autoScroll = true;
 				await tick();
@@ -1870,7 +1896,7 @@
 		const _files = structuredClone(files);
 
 		chatFiles.push(
-			..._files.filter(
+			...filterPersistentChatFiles(_files).filter(
 				(item) =>
 					['doc', 'text', 'note', 'chat', 'folder', 'collection'].includes(item.type) ||
 					(item.type === 'file' && !(item?.content_type ?? '').startsWith('image/'))
@@ -2070,7 +2096,12 @@
 					$config?.features?.enable_deep_research &&
 					($user?.role === 'admin' || ($user?.permissions?.features?.deep_research ?? true))
 						? deepResearchEnabled
-						: false
+						: false,
+				...buildAttachedKnowledgeFeatureState(
+					attachedKnowledgeQueryEnabled,
+					activeModelKnowledgeScope,
+					files
+				)
 			};
 
 		if (features.deep_research) {
@@ -2966,6 +2997,9 @@
 									bind:codeInterpreterEnabled
 									bind:webSearchEnabled
 									bind:deepResearchEnabled
+									bind:attachedKnowledgeQueryEnabled
+									{effectiveAttachedKnowledgeQueryEnabled}
+									{showAttachedKnowledgeQueryButton}
 									bind:reasoningDepth
 									bind:atSelectedModel
 									bind:showCommands
@@ -3039,6 +3073,9 @@
 									bind:codeInterpreterEnabled
 									bind:webSearchEnabled
 									bind:deepResearchEnabled
+									bind:attachedKnowledgeQueryEnabled
+									{effectiveAttachedKnowledgeQueryEnabled}
+									{showAttachedKnowledgeQueryButton}
 									bind:reasoningDepth
 									bind:atSelectedModel
 									bind:showCommands

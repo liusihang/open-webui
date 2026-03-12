@@ -25,6 +25,10 @@ from sqlalchemy.orm import Session
 from open_webui.internal.db import get_session, SessionLocal
 
 from open_webui.constants import ERROR_MESSAGES
+from open_webui.retrieval.bm25_cache import (
+    invalidate_all_bm25_cache,
+    invalidate_bm25_cache,
+)
 from open_webui.retrieval.vector.factory import VECTOR_DB_CLIENT
 
 from open_webui.models.channels import Channels
@@ -410,6 +414,7 @@ async def delete_all_files(
         try:
             Storage.delete_all_files()
             VECTOR_DB_CLIENT.reset()
+            invalidate_all_bm25_cache()
         except Exception as e:
             log.exception(e)
             log.error("Error deleting files")
@@ -826,6 +831,7 @@ async def delete_file_by_id(
                     VECTOR_DB_CLIENT.delete(
                         collection_name=knowledge.id, filter={"hash": file.hash}
                     )
+                invalidate_bm25_cache(knowledge.id)
             except Exception as e:
                 log.debug(f"KB embedding cleanup for {knowledge.id}: {e}")
 
@@ -834,6 +840,7 @@ async def delete_file_by_id(
             try:
                 Storage.delete_file(file.path)
                 VECTOR_DB_CLIENT.delete(collection_name=f"file-{id}")
+                invalidate_bm25_cache(f"file-{id}")
             except Exception as e:
                 log.exception(e)
                 log.error("Error deleting files")
