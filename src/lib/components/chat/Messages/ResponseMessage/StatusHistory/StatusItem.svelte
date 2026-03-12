@@ -10,6 +10,7 @@
 	import Search from '$lib/components/icons/Search.svelte';
 	import Markdown from '$lib/components/chat/Messages/Markdown.svelte';
 	import WebSearchResults from '../WebSearchResults.svelte';
+	import { getKnowledgeSearchStatusText } from '$lib/utils/chat/knowledgeSearchStatus';
 
 	export let status = null;
 	export let done = false;
@@ -40,6 +41,7 @@
 			? 'text-violet-500 animate-spin'
 			: 'text-emerald-500';
 	$: webSearchCount = status?.urls?.length ?? status?.items?.length ?? 0;
+	$: knowledgeSearchStatusText = getKnowledgeSearchStatusText(status);
 
 	$: normalizedStepChildren = (() => {
 		if (Array.isArray(status?.children)) {
@@ -144,9 +146,7 @@
 							? 'shimmer'
 							: ''} text-gray-500 dark:text-gray-400 text-sm line-clamp-1 text-wrap"
 					>
-						{$i18n.t(`Searching Knowledge for "{{searchQuery}}"`, {
-							searchQuery: status.query
-						})}
+						{$i18n.t(knowledgeSearchStatusText.key, knowledgeSearchStatusText.values)}
 					</div>
 				</div>
 			{:else if status?.action === 'web_search_queries_generated' && status?.queries}
