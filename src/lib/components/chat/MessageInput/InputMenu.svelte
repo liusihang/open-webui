@@ -28,6 +28,10 @@
 	import Knowledge from './InputMenu/Knowledge.svelte';
 	import AttachWebpageModal from './AttachWebpageModal.svelte';
 	import GlobeAlt from '$lib/components/icons/GlobeAlt.svelte';
+	import {
+		isKnowledgeAttachmentItem,
+		markKnowledgeAttachment
+	} from '$lib/utils/chat/attachedKnowledge';
 
 	const i18n = getContext('i18n');
 
@@ -80,10 +84,12 @@
 		if (files.find((f) => f.id === item.id)) {
 			return;
 		}
+
+		const nextItem = isKnowledgeAttachmentItem(item) ? markKnowledgeAttachment(item) : item;
 		files = [
 			...files,
 			{
-				...item,
+				...nextItem,
 				status: 'processed'
 			}
 		];

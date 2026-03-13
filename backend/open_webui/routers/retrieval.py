@@ -44,6 +44,10 @@ from open_webui.internal.db import get_session, get_db
 from sqlalchemy.orm import Session
 
 
+from open_webui.retrieval.bm25_cache import (
+    invalidate_all_bm25_cache,
+    invalidate_bm25_cache,
+)
 from open_webui.retrieval.vector.factory import VECTOR_DB_CLIENT
 
 # Document loaders
@@ -1604,6 +1608,7 @@ def save_docs_to_vector_db(
 
             if overwrite:
                 VECTOR_DB_CLIENT.delete_collection(collection_name=collection_name)
+                invalidate_bm25_cache(collection_name)
                 log.info(f"deleting existing collection {collection_name}")
             elif add is False:
                 log.info(
@@ -1674,6 +1679,7 @@ def save_docs_to_vector_db(
             collection_name=collection_name,
             items=items,
         )
+        invalidate_bm25_cache(collection_name)
 
         log.info(f"added {len(items)} items to collection {collection_name}")
         return True
@@ -1723,6 +1729,7 @@ def process_file(
                     VECTOR_DB_CLIENT.delete_collection(
                         collection_name=f"file-{file.id}"
                     )
+                    invalidate_bm25_cache(f"file-{file.id}")
                 except:
                     # Audio file upload pipeline
                     pass
@@ -2738,6 +2745,7 @@ def delete_entries_from_collection(
                 collection_name=form_data.collection_name,
                 metadata={"hash": hash},
             )
+            invalidate_bm25_cache(form_data.collection_name)
             return {"status": True}
         else:
             return {"status": False}
@@ -2749,6 +2757,7 @@ def delete_entries_from_collection(
 @router.post("/reset/db")
 def reset_vector_db(user=Depends(get_admin_user), db: Session = Depends(get_session)):
     VECTOR_DB_CLIENT.reset()
+    invalidate_all_bm25_cache()
     Knowledges.delete_all_knowledge(db=db)
 
 

@@ -73,6 +73,7 @@ from open_webui.models.users import UserModel
 from open_webui.models.functions import Functions
 from open_webui.models.models import Models
 
+from open_webui.retrieval.status import emit_knowledge_search_status
 from open_webui.retrieval.utils import get_sources_from_items
 from open_webui.utils.adaptive_file_context import (
     apply_adaptive_context_to_items,
@@ -107,6 +108,10 @@ from open_webui.utils.misc import (
     convert_output_to_messages,
 )
 from open_webui.utils.tools import (
+    build_effective_knowledge_query_enabled,
+    build_effective_knowledge_scope,
+    get_attached_knowledge_scope,
+    get_model_knowledge_scope,
     get_tools,
     get_updated_tool_function,
     get_terminal_tools,
@@ -3106,6 +3111,16 @@ async def chat_completion_files_handler(
                 hybrid_search=request.app.state.config.ENABLE_RAG_HYBRID_SEARCH,
                 full_context=all_full_context
                 or request.app.state.config.RAG_FULL_CONTEXT,
+                status_callback=lambda event: emit_knowledge_search_status(
+                    __event_emitter__,
+                    event["data"].get("description", "Searching knowledge base"),
+                    done=event["data"].get("done", False),
+                    **{
+                        key: value
+                        for key, value in event["data"].items()
+                        if key not in {"action", "description", "done"}
+                    },
+                ),
                 user=user,
             )
         except Exception as e:
@@ -3393,6 +3408,7 @@ async def process_chat_payload(request, form_data, user, metadata, model):
                 "type": "status",
                 "data": {
                     "action": "knowledge_search",
+                    "description": "Searching knowledge base",
                     "query": user_message,
                     "done": False,
                 },
@@ -3597,7 +3613,26 @@ async def process_chat_payload(request, form_data, user, metadata, model):
         "terminal_id": terminal_id,
         "files": files,
     }
+    model_knowledge_scope = get_model_knowledge_scope(model)
+    attached_knowledge_scope = get_attached_knowledge_scope(metadata)
+    effective_knowledge_scope = build_effective_knowledge_scope(
+        metadata, model_knowledge_scope
+    )
+    effective_knowledge_query_enabled = build_effective_knowledge_query_enabled(
+        features.get("attached_knowledge_query", False),
+        model_knowledge_scope,
+        attached_knowledge_scope,
+    )
+    features["attached_knowledge_query"] = effective_knowledge_query_enabled
+    metadata["features"] = features
+    metadata["model_knowledge_scope"] = model_knowledge_scope
+    metadata["attached_knowledge_scope"] = attached_knowledge_scope
+    metadata["effective_knowledge_scope"] = effective_knowledge_scope
+    metadata["effective_knowledge_query_enabled"] = (
+        effective_knowledge_query_enabled
+    )
     form_data["metadata"] = metadata
+    extra_params["__metadata__"] = metadata
 
     # When the caller provides an explicit OpenAI-style `tools` array in the
     # request body, skip all server-side tool resolution and pass the caller's
@@ -3900,6 +3935,7 @@ async def process_chat_payload(request, form_data, user, metadata, model):
                 "type": "status",
                 "data": {
                     "action": "knowledge_search",
+                    "description": "Searching knowledge base",
                     "query": user_message,
                     "done": True,
                     "hidden": True,

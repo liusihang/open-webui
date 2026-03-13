@@ -80,6 +80,11 @@
 	import Wrench from '../icons/Wrench.svelte';
 	import Sparkles from '../icons/Sparkles.svelte';
 	import BookOpen from '../icons/BookOpen.svelte';
+	import Database from '../icons/Database.svelte';
+	import {
+		isKnowledgeAttachmentItem,
+		markKnowledgeAttachment
+	} from '$lib/utils/chat/attachedKnowledge';
 
 	import InputVariablesModal from './MessageInput/InputVariablesModal.svelte';
 	import Voice from '../icons/Voice.svelte';
@@ -133,6 +138,9 @@
 	export let webSearchEnabled = false;
 	export let codeInterpreterEnabled = false;
 	export let deepResearchEnabled = false;
+	export let attachedKnowledgeQueryEnabled = false;
+	export let effectiveAttachedKnowledgeQueryEnabled = false;
+	export let showAttachedKnowledgeQueryButton = false;
 	export let reasoningDepth: 'medium' | 'deep' | 'divergent' = 'medium';
 
 	let showTerminalMenu = false;
@@ -175,8 +183,17 @@
 		webSearchEnabled,
 		codeInterpreterEnabled,
 		deepResearchEnabled,
+		attachedKnowledgeQueryEnabled,
 		reasoningDepth
 	});
+
+	const normalizeAttachedFileItem = (item) => {
+		const nextItem = isKnowledgeAttachmentItem(item) ? markKnowledgeAttachment(item) : item;
+		return {
+			...nextItem,
+			status: 'processed'
+		};
+	};
 
 	const inputVariableHandler = async (text: string): Promise<string> => {
 		inputVariables = extractInputVariables(text);
@@ -913,13 +930,7 @@
 							if (files.find((f) => f.id === data.id)) {
 								return;
 							}
-							files = [
-								...files,
-								{
-									...data,
-									status: 'processed'
-								}
-							];
+							files = [...files, normalizeAttachedFileItem(data)];
 						} else {
 							onUpload(e);
 						}
@@ -948,13 +959,7 @@
 							if (files.find((f) => f.id === data.id)) {
 								return;
 							}
-							files = [
-								...files,
-								{
-									...data,
-									status: 'processed'
-								}
-							];
+							files = [...files, normalizeAttachedFileItem(data)];
 						} else {
 							onUpload(e);
 						}
@@ -983,13 +988,7 @@
 							if (files.find((f) => f.id === data.id)) {
 								return;
 							}
-							files = [
-								...files,
-								{
-									...data,
-									status: 'processed'
-								}
-							];
+							files = [...files, normalizeAttachedFileItem(data)];
 						} else {
 							onUpload(e);
 						}
@@ -1203,6 +1202,7 @@
 									<QueuedMessageItem
 										id={queuedMessage.id}
 										content={queuedMessage.prompt}
+										files={queuedMessage.files}
 										onSendNow={onQueueSendNow}
 										onEdit={onQueueEdit}
 										onDelete={onQueueDelete}
@@ -1599,7 +1599,7 @@
 										</div>
 									</InputMenu>
 
-									{#if showWebSearchButton || showImageGenerationButton || showCodeInterpreterButton || showDeepResearchButton || showToolsButton || (toggleFilters && toggleFilters.length > 0)}
+									{#if showWebSearchButton || showImageGenerationButton || showCodeInterpreterButton || showDeepResearchButton || showAttachedKnowledgeQueryButton || showToolsButton || (toggleFilters && toggleFilters.length > 0)}
 										<div
 											class="flex self-center w-[1px] h-4 mx-1 bg-gray-200/50 dark:bg-gray-800/50"
 										/>
@@ -1611,12 +1611,15 @@
 											{showImageGenerationButton}
 											{showCodeInterpreterButton}
 											{showDeepResearchButton}
+											{showAttachedKnowledgeQueryButton}
 											bind:selectedToolIds
 											bind:selectedFilterIds
 											bind:webSearchEnabled
 											bind:imageGenerationEnabled
 											bind:codeInterpreterEnabled
 											bind:deepResearchEnabled
+											bind:attachedKnowledgeQueryEnabled
+											{effectiveAttachedKnowledgeQueryEnabled}
 											closeOnOutsideClick={integrationsMenuCloseOnOutsideClick}
 											onShowValves={(e) => {
 												const { type, id } = e;
@@ -1814,6 +1817,22 @@
 												>
 													<BookOpen className="size-3.5" strokeWidth="1.9" />
 
+													<div class="hidden group-hover:block">
+														<XMark className="size-4" strokeWidth="1.75" />
+													</div>
+												</button>
+											</Tooltip>
+										{/if}
+
+										{#if effectiveAttachedKnowledgeQueryEnabled}
+											<Tooltip content={$i18n.t('Attached Knowledge')} placement="top">
+												<button
+													on:click|preventDefault={() =>
+														(attachedKnowledgeQueryEnabled = !attachedKnowledgeQueryEnabled)}
+													type="button"
+													class="group p-[7px] flex gap-1.5 items-center text-sm rounded-full transition-colors duration-300 focus:outline-hidden max-w-full overflow-hidden text-sky-500 dark:text-sky-300 bg-sky-50 hover:bg-sky-100 dark:bg-sky-400/10 dark:hover:bg-sky-700/10 border border-sky-200/40 dark:border-sky-500/20"
+												>
+													<Database className="size-4" />
 													<div class="hidden group-hover:block">
 														<XMark className="size-4" strokeWidth="1.75" />
 													</div>

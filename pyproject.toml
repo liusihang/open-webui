@@ -105,7 +105,7 @@ dependencies = [
     "pytube==15.0.0",
 
     "pydub",
-    "ddgs==9.11.2",
+    "ddgs==9.11.3",
 
     "google-api-python-client",
     "google-auth-httplib2",
@@ -137,11 +137,15 @@ postgres = [
     "psycopg2-binary==2.9.11",
     "pgvector==0.4.2",
 ]
+mariadb = [
+    "mariadb==1.1.14",
+]
 
 all = [
     "pymongo",
     "psycopg2-binary==2.9.11",
     "pgvector==0.4.2",
+    "mariadb==1.1.14",
     "moto[s3]>=5.0.26",
     "gcp-storage-emulator>=2024.8.3",
     "docker~=7.1.0",
@@ -159,6 +163,7 @@ all = [
     "colbert-ai==0.2.22",
 
     "firecrawl-py==4.18.0",
+    "crawl4ai==0.8.0",
     "azure-search-documents==11.6.0",
 ]
 

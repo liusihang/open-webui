@@ -18,6 +18,7 @@ from open_webui.models.knowledge import (
     KnowledgeUserResponse,
 )
 from open_webui.models.files import Files, FileModel, FileMetadataResponse
+from open_webui.retrieval.bm25_cache import invalidate_bm25_cache
 from open_webui.retrieval.vector.factory import VECTOR_DB_CLIENT
 from open_webui.routers.retrieval import (
     process_file,
@@ -317,6 +318,7 @@ async def reindex_knowledge_files(
                     VECTOR_DB_CLIENT.delete_collection(
                         collection_name=knowledge_base.id
                     )
+                    invalidate_bm25_cache(knowledge_base.id)
             except Exception as e:
                 log.error(f"Error deleting collection {knowledge_base.id}: {str(e)}")
                 continue  # Skip, don't raise
@@ -756,6 +758,7 @@ def update_file_from_knowledge_by_id(
     VECTOR_DB_CLIENT.delete(
         collection_name=knowledge.id, filter={"file_id": form_data.file_id}
     )
+    invalidate_bm25_cache(knowledge.id)
 
     # Add content to the vector database
     try:
@@ -846,6 +849,7 @@ def remove_file_from_knowledge_by_id(
         VECTOR_DB_CLIENT.delete(
             collection_name=knowledge.id, filter={"hash": file.hash}
         )  # Remove by hash as well in case of duplicates
+        invalidate_bm25_cache(knowledge.id)
     except Exception as e:
         log.debug("This was most likely caused by bypassing embedding processing")
         log.debug(e)
@@ -857,6 +861,7 @@ def remove_file_from_knowledge_by_id(
             file_collection = f"file-{form_data.file_id}"
             if VECTOR_DB_CLIENT.has_collection(collection_name=file_collection):
                 VECTOR_DB_CLIENT.delete_collection(collection_name=file_collection)
+                invalidate_bm25_cache(file_collection)
         except Exception as e:
             log.debug("This was most likely caused by bypassing embedding processing")
             log.debug(e)
@@ -941,6 +946,7 @@ async def delete_knowledge_by_id(
     # Clean up vector DB
     try:
         VECTOR_DB_CLIENT.delete_collection(collection_name=id)
+        invalidate_bm25_cache(id)
     except Exception as e:
         log.debug(e)
         pass
@@ -986,6 +992,7 @@ async def reset_knowledge_by_id(
 
     try:
         VECTOR_DB_CLIENT.delete_collection(collection_name=id)
+        invalidate_bm25_cache(id)
     except Exception as e:
         log.debug(e)
         pass

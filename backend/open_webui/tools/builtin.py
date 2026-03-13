@@ -10,13 +10,14 @@ import json
 import logging
 import time
 import asyncio
+import types
 from typing import Optional
 
 from fastapi import Request
 
 from open_webui.models.users import UserModel
 from open_webui.routers.retrieval import search_web as _search_web
-from open_webui.retrieval.utils import get_content_from_url
+from open_webui.retrieval.utils import get_content_from_url, get_sources_from_items
 from open_webui.routers.images import (
     image_generations,
     image_edits,
@@ -1758,6 +1759,7 @@ async def query_knowledge_files(
     count: int = 5,
     __request__: Request = None,
     __user__: dict = None,
+    __metadata__: dict = None,
     __model_knowledge__: list[dict] = None,
 ) -> str:
     """
@@ -1795,139 +1797,68 @@ async def query_knowledge_files(
                 knowledge_ids = [knowledge_ids]
 
     try:
-        from open_webui.models.knowledge import Knowledges
-        from open_webui.models.files import Files
-        from open_webui.models.notes import Notes
-        from open_webui.retrieval.utils import query_collection
-        from open_webui.models.access_grants import AccessGrants
+        metadata = __metadata__ or {}
+        effective_scope = metadata.get("effective_knowledge_scope")
+        if not effective_scope:
+            attached_scope = metadata.get("attached_knowledge_scope") or []
+            effective_scope = [*(__model_knowledge__ or []), *attached_scope]
 
-        user_id = __user__.get("id")
-        user_role = __user__.get("role", "user")
-        user_group_ids = [group.id for group in Groups.get_groups_by_member_id(user_id)]
+        if not effective_scope:
+            return json.dumps({"error": "No effective knowledge scope"})
 
         embedding_function = __request__.app.state.EMBEDDING_FUNCTION
         if not embedding_function:
             return json.dumps({"error": "Embedding function not configured"})
 
-        collection_names = []
-        note_results = []  # Notes aren't vectorized, handle separately
+        config = __request__.app.state.config
+        user = types.SimpleNamespace(
+            id=__user__.get("id"),
+            role=__user__.get("role", "user"),
+        )
 
-        # If model has attached knowledge, use those
-        if __model_knowledge__:
-            for item in __model_knowledge__:
-                item_type = item.get("type")
-                item_id = item.get("id")
-
-                if item_type == "collection":
-                    # Knowledge base - use KB ID as collection name
-                    knowledge = Knowledges.get_knowledge_by_id(item_id)
-                    if knowledge and (
-                        user_role == "admin"
-                        or knowledge.user_id == user_id
-                        or AccessGrants.has_access(
-                            user_id=user_id,
-                            resource_type="knowledge",
-                            resource_id=knowledge.id,
-                            permission="read",
-                            user_group_ids=set(user_group_ids),
-                        )
-                    ):
-                        collection_names.append(item_id)
-
-                elif item_type == "file":
-                    # Individual file - use file-{id} as collection name
-                    file = Files.get_file_by_id(item_id)
-                    if file:
-                        collection_names.append(f"file-{item_id}")
-
-                elif item_type == "note":
-                    # Note - always return full content as context
-                    note = Notes.get_note_by_id(item_id)
-                    if note and (
-                        user_role == "admin"
-                        or note.user_id == user_id
-                        or AccessGrants.has_access(
-                            user_id=user_id,
-                            resource_type="note",
-                            resource_id=note.id,
-                            permission="read",
-                        )
-                    ):
-                        content = note.data.get("content", {}).get("md", "")
-                        note_results.append(
-                            {
-                                "content": content,
-                                "source": note.title,
-                                "note_id": note.id,
-                                "type": "note",
-                            }
-                        )
-
-        elif knowledge_ids:
-            # User specified specific KBs
-            for knowledge_id in knowledge_ids:
-                knowledge = Knowledges.get_knowledge_by_id(knowledge_id)
-                if knowledge and (
-                    user_role == "admin"
-                    or knowledge.user_id == user_id
-                    or AccessGrants.has_access(
-                        user_id=user_id,
-                        resource_type="knowledge",
-                        resource_id=knowledge.id,
-                        permission="read",
-                        user_group_ids=set(user_group_ids),
-                    )
-                ):
-                    collection_names.append(knowledge_id)
-        else:
-            # No model knowledge and no specific IDs - search all accessible KBs
-            result = Knowledges.search_knowledge_bases(
-                user_id,
-                filter={
-                    "query": "",
-                    "user_id": user_id,
-                    "group_ids": user_group_ids,
-                },
-                skip=0,
-                limit=50,
-            )
-            collection_names = [knowledge_base.id for knowledge_base in result.items]
+        sources = await get_sources_from_items(
+            request=__request__,
+            items=effective_scope,
+            queries=[query],
+            embedding_function=embedding_function,
+            k=getattr(config, "TOP_K", count),
+            reranking_function=__request__.app.state.RERANKING_FUNCTION,
+            k_reranker=getattr(config, "TOP_K_RERANKER", count),
+            r=getattr(config, "RELEVANCE_THRESHOLD", 0.0),
+            hybrid_bm25_weight=getattr(config, "HYBRID_BM25_WEIGHT", 0.0),
+            hybrid_search=getattr(config, "ENABLE_RAG_HYBRID_SEARCH", False),
+            full_context=False,
+            user=user,
+        )
 
         chunks = []
+        for source_result in sources:
+            source_item = source_result.get("source") or {}
+            documents = source_result.get("document") or []
+            metadatas = source_result.get("metadata") or []
+            distances = source_result.get("distances") or []
 
-        # Add note results first
-        chunks.extend(note_results)
+            for idx, document in enumerate(documents):
+                metadata_item = metadatas[idx] if idx < len(metadatas) else {}
+                chunk = {
+                    "content": document,
+                    "source": metadata_item.get(
+                        "source",
+                        metadata_item.get("name", source_item.get("name", "Unknown")),
+                    ),
+                }
 
-        # Query vector collections if any
-        if collection_names:
-            query_results = await query_collection(
-                collection_names=collection_names,
-                queries=[query],
-                embedding_function=embedding_function,
-                k=count,
-            )
+                if metadata_item.get("file_id"):
+                    chunk["file_id"] = metadata_item["file_id"]
+                if idx < len(distances):
+                    chunk["distance"] = distances[idx]
+                if source_item.get("type") == "note":
+                    chunk["type"] = "note"
+                    chunk["note_id"] = source_item.get("id")
 
-            if query_results and "documents" in query_results:
-                documents = query_results.get("documents", [[]])[0]
-                metadatas = query_results.get("metadatas", [[]])[0]
-                distances = query_results.get("distances", [[]])[0]
+                chunks.append(chunk)
 
-                for idx, doc in enumerate(documents):
-                    chunk_info = {
-                        "content": doc,
-                        "source": metadatas[idx].get(
-                            "source", metadatas[idx].get("name", "Unknown")
-                        ),
-                        "file_id": metadatas[idx].get("file_id", ""),
-                    }
-                    if idx < len(distances):
-                        chunk_info["distance"] = distances[idx]
-                    chunks.append(chunk_info)
-
-        # Limit to requested count
-        chunks = chunks[:count]
-
-        return json.dumps(chunks, ensure_ascii=False)
+        return json.dumps(chunks[:count], ensure_ascii=False)
     except Exception as e:
         log.exception(f"query_knowledge_files error: {e}")
         return json.dumps({"error": str(e)})

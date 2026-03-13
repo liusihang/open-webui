@@ -54,6 +54,9 @@
 	export let codeInterpreterEnabled = false;
 	export let webSearchEnabled = false;
 	export let deepResearchEnabled = false;
+	export let attachedKnowledgeQueryEnabled = false;
+	export let effectiveAttachedKnowledgeQueryEnabled = false;
+	export let showAttachedKnowledgeQueryButton = false;
 	export let reasoningDepth: 'medium' | 'deep' | 'divergent' = 'medium';
 
 	export let onUpload: Function = (e) => {};
@@ -215,6 +218,9 @@
 					bind:codeInterpreterEnabled
 					bind:webSearchEnabled
 					bind:deepResearchEnabled
+					bind:attachedKnowledgeQueryEnabled
+					{effectiveAttachedKnowledgeQueryEnabled}
+					{showAttachedKnowledgeQueryButton}
 					bind:reasoningDepth
 					bind:atSelectedModel
 					bind:showCommands

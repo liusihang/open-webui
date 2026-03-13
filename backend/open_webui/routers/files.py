@@ -25,6 +25,10 @@ from sqlalchemy.orm import Session
 from open_webui.internal.db import get_session, SessionLocal
 
 from open_webui.constants import ERROR_MESSAGES
+from open_webui.retrieval.bm25_cache import (
+    invalidate_all_bm25_cache,
+    invalidate_bm25_cache,
+)
 from open_webui.retrieval.vector.factory import VECTOR_DB_CLIENT
 
 from open_webui.models.channels import Channels
@@ -410,6 +414,7 @@ async def delete_all_files(
         try:
             Storage.delete_all_files()
             VECTOR_DB_CLIENT.reset()
+            invalidate_all_bm25_cache()
         except Exception as e:
             log.exception(e)
             log.error("Error deleting files")
@@ -583,11 +588,35 @@ def update_file_data_content_by_id(
                 request,
                 ProcessFileForm(file_id=id, content=form_data.content),
                 user=user,
+                db=db,
             )
             file = Files.get_file_by_id(id=id, db=db)
         except Exception as e:
             log.exception(e)
             log.error(f"Error processing file: {file.id}")
+
+        # Propagate content change to all knowledge collections referencing
+        # this file.  Without this the old embeddings remain in the knowledge
+        # collection and RAG returns both stale and current data (#20558).
+        knowledges = Knowledges.get_knowledges_by_file_id(id, db=db)
+        for knowledge in knowledges:
+            try:
+                # Remove old embeddings for this file from the KB collection
+                VECTOR_DB_CLIENT.delete(
+                    collection_name=knowledge.id, filter={"file_id": id}
+                )
+                # Re-add from the now-updated file-{file_id} collection
+                process_file(
+                    request,
+                    ProcessFileForm(file_id=id, collection_name=knowledge.id),
+                    user=user,
+                    db=db,
+                )
+            except Exception as e:
+                log.warning(
+                    f"Failed to update knowledge {knowledge.id} after "
+                    f"content change for file {id}: {e}"
+                )
 
         return {"content": file.data.get("content", "")}
     else:
@@ -826,6 +855,7 @@ async def delete_file_by_id(
                     VECTOR_DB_CLIENT.delete(
                         collection_name=knowledge.id, filter={"hash": file.hash}
                     )
+                invalidate_bm25_cache(knowledge.id)
             except Exception as e:
                 log.debug(f"KB embedding cleanup for {knowledge.id}: {e}")
 
@@ -834,6 +864,7 @@ async def delete_file_by_id(
             try:
                 Storage.delete_file(file.path)
                 VECTOR_DB_CLIENT.delete(collection_name=f"file-{id}")
+                invalidate_bm25_cache(f"file-{id}")
             except Exception as e:
                 log.exception(e)
                 log.error("Error deleting files")

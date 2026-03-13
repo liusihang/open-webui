@@ -28,6 +28,7 @@
 	import Photo from '$lib/components/icons/Photo.svelte';
 	import Terminal from '$lib/components/icons/Terminal.svelte';
 	import BookOpen from '$lib/components/icons/BookOpen.svelte';
+	import Database from '$lib/components/icons/Database.svelte';
 	import ChevronRight from '$lib/components/icons/ChevronRight.svelte';
 	import ChevronLeft from '$lib/components/icons/ChevronLeft.svelte';
 
@@ -50,6 +51,9 @@
 	export let codeInterpreterEnabled = false;
 	export let showDeepResearchButton = false;
 	export let deepResearchEnabled = false;
+	export let showAttachedKnowledgeQueryButton = false;
+	export let attachedKnowledgeQueryEnabled = false;
+	export let effectiveAttachedKnowledgeQueryEnabled = false;
 
 	export let onShowValves: Function;
 	export let onClose: Function;
@@ -362,6 +366,39 @@
 										state={deepResearchEnabled}
 										on:change={async (e) => {
 											const state = e.detail;
+											await tick();
+										}}
+									/>
+								</div>
+							</button>
+						</Tooltip>
+					{/if}
+
+					{#if showAttachedKnowledgeQueryButton}
+						<Tooltip
+							content={$i18n.t('Enable model-driven attached knowledge search')}
+							placement="top-start"
+						>
+							<button
+								class="flex w-full justify-between gap-2 items-center px-3 py-1.5 text-sm cursor-pointer rounded-xl hover:bg-gray-50 dark:hover:bg-gray-800/50"
+								on:click={() => {
+									attachedKnowledgeQueryEnabled = !attachedKnowledgeQueryEnabled;
+								}}
+							>
+								<div class="flex-1 truncate">
+									<div class="flex flex-1 gap-2 items-center">
+										<div class="shrink-0">
+											<Database className="size-4" />
+										</div>
+
+										<div class="truncate">{$i18n.t('Attached Knowledge')}</div>
+									</div>
+								</div>
+
+								<div class="shrink-0">
+									<Switch
+										state={effectiveAttachedKnowledgeQueryEnabled}
+										on:change={async () => {
 											await tick();
 										}}
 									/>

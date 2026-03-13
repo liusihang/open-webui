@@ -97,7 +97,7 @@ youtube-transcript-api==1.2.4
 pytube==15.0.0
 
 pydub
-ddgs==9.11.2
+ddgs==9.11.3
 
 azure-ai-documentintelligence==1.0.2
 azure-identity==1.25.2
@@ -119,6 +119,7 @@ pgvector==0.4.2
 
 PyMySQL==1.1.2
 boto3==1.42.62
+mariadb==1.1.14
 
 pymilvus==2.6.9
 qdrant-client==1.17.0
@@ -142,6 +143,7 @@ ldap3==2.9.1
 
 ## Firecrawl
 firecrawl-py==4.18.0
+crawl4ai==0.8.0
 
 ## Trace
 opentelemetry-api==1.40.0
@@ -155,3 +157,4 @@ opentelemetry-instrumentation-requests==0.61b0
 opentelemetry-instrumentation-logging==0.61b0
 opentelemetry-instrumentation-httpx==0.61b0
 opentelemetry-instrumentation-aiohttp-client==0.61b0
+opentelemetry-instrumentation-system-metrics==0.61b0
