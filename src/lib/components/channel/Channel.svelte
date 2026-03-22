@@ -24,6 +24,11 @@
 	import Thread from './Thread.svelte';
 	import i18n from '$lib/i18n';
 	import Spinner from '../common/Spinner.svelte';
+	import {
+		appendChannelMessage,
+		replaceChannelMessage,
+		shouldAutoScrollOnMessageUpdate
+	} from './streaming';
 
 	export let id = '';
 
@@ -119,11 +124,7 @@
 
 			if (type === 'message') {
 				if ((data?.parent_id ?? null) === null) {
-					const tempId = data?.temp_id ?? null;
-					messages = [
-						{ ...data, temp_id: null },
-						...messages.filter((m) => !tempId || m?.temp_id !== tempId)
-					];
+					messages = appendChannelMessage(messages ?? [], data);
 
 					if (typingUsers.find((user) => user.id === event.user.id)) {
 						typingUsers = typingUsers.filter((user) => user.id !== event.user.id);
@@ -135,23 +136,22 @@
 					}
 				}
 			} else if (type === 'message:update') {
-				const idx = messages.findIndex((message) => message.id === data.id);
-
-				if (idx !== -1) {
-					messages[idx] = data;
+				if (messages?.some((message) => message.id === data.id)) {
+					messages = replaceChannelMessage(messages, data);
+					await tick();
+					if (shouldAutoScrollOnMessageUpdate({ scrollEnd, nextMessage: data })) {
+						scrollToBottom();
+					}
 				}
 			} else if (type === 'message:delete') {
 				messages = messages.filter((message) => message.id !== data.id);
 			} else if (type === 'message:reply') {
-				const idx = messages.findIndex((message) => message.id === data.id);
-
-				if (idx !== -1) {
-					messages[idx] = data;
+				if (messages?.some((message) => message.id === data.id)) {
+					messages = replaceChannelMessage(messages, data);
 				}
 			} else if (type.includes('message:reaction')) {
-				const idx = messages.findIndex((message) => message.id === data.id);
-				if (idx !== -1) {
-					messages[idx] = data;
+				if (messages?.some((message) => message.id === data.id)) {
+					messages = replaceChannelMessage(messages, data);
 				}
 			} else if (type === 'typing' && event.message_id === null) {
 				if (event.user.id === $user?.id) {

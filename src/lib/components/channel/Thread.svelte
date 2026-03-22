@@ -11,6 +11,11 @@
 	import { onDestroy, onMount, tick, getContext } from 'svelte';
 	import { toast } from 'svelte-sonner';
 	import Spinner from '../common/Spinner.svelte';
+	import {
+		appendChannelMessage,
+		replaceChannelMessage,
+		shouldAutoScrollOnMessageUpdate
+	} from './streaming';
 
 	const i18n = getContext('i18n');
 
@@ -21,6 +26,7 @@
 
 	let messages = null;
 	let top = false;
+	let scrollEnd = true;
 
 	let messagesContainerElement = null;
 	let chatInputElement = null;
@@ -68,7 +74,7 @@
 			if (type === 'message') {
 				if ((data?.parent_id ?? null) === threadId) {
 					if (messages) {
-						messages = [data, ...messages];
+						messages = appendChannelMessage(messages, data);
 
 						if (typingUsers.find((user) => user.id === event.user.id)) {
 							typingUsers = typingUsers.filter((user) => user.id !== event.user.id);
@@ -77,10 +83,12 @@
 				}
 			} else if (type === 'message:update') {
 				if (messages) {
-					const idx = messages.findIndex((message) => message.id === data.id);
-
-					if (idx !== -1) {
-						messages[idx] = data;
+					if (messages.some((message) => message.id === data.id)) {
+						messages = replaceChannelMessage(messages, data);
+						await tick();
+						if (shouldAutoScrollOnMessageUpdate({ scrollEnd, nextMessage: data })) {
+							scrollToBottom();
+						}
 					}
 				}
 			} else if (type === 'message:delete') {
@@ -89,9 +97,8 @@
 				}
 			} else if (type.includes('message:reaction')) {
 				if (messages) {
-					const idx = messages.findIndex((message) => message.id === data.id);
-					if (idx !== -1) {
-						messages[idx] = data;
+					if (messages.some((message) => message.id === data.id)) {
+						messages = replaceChannelMessage(messages, data);
 					}
 				}
 			} else if (type === 'typing' && event.message_id === threadId) {
@@ -181,7 +188,18 @@
 			</div>
 		</div>
 
-		<div class=" max-h-full w-full overflow-y-auto" bind:this={messagesContainerElement}>
+		<div
+			class=" max-h-full w-full overflow-y-auto"
+			bind:this={messagesContainerElement}
+			on:scroll={() => {
+				scrollEnd = messagesContainerElement
+					? messagesContainerElement.scrollHeight -
+							messagesContainerElement.scrollTop -
+							messagesContainerElement.clientHeight <=
+						50
+					: true;
+			}}
+		>
 			{#if messages !== null}
 				<Messages
 					id={threadId}
