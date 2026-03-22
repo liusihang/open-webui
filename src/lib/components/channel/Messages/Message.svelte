@@ -39,6 +39,11 @@
 	import ArrowUpLeftAlt from '$lib/components/icons/ArrowUpLeftAlt.svelte';
 	import PinSlash from '$lib/components/icons/PinSlash.svelte';
 	import Pin from '$lib/components/icons/Pin.svelte';
+	import {
+		OPENCLAW_LABEL,
+		getOpenClawDisplayName,
+		isOpenClawIdentity
+	} from '$lib/components/layout/Sidebar/openclaw';
 
 	export let className = '';
 
@@ -237,7 +242,13 @@
 						}
 					}}
 				>
-					{#if message?.reply_to_message?.meta?.model_id}
+					{#if isOpenClawIdentity(message?.reply_to_message)}
+						<div
+							class="size-4 ml-0.5 rounded-full bg-gradient-to-br from-emerald-500 to-cyan-500 text-[8px] font-semibold text-white flex items-center justify-center"
+						>
+							OC
+						</div>
+					{:else if message?.reply_to_message?.meta?.model_id}
 						<img
 							src={`${WEBUI_API_BASE_URL}/models/model/profile/image?id=${message.reply_to_message.meta.model_id}`}
 							alt={message.reply_to_message.meta.model_name ??
@@ -255,9 +266,13 @@
 					{/if}
 
 					<div class="shrink-0">
-						{message?.reply_to_message.meta?.model_name ??
-							message?.reply_to_message.user?.name ??
-							$i18n.t('Unknown User')}
+						{#if isOpenClawIdentity(message?.reply_to_message)}
+							{getOpenClawDisplayName(message?.reply_to_message)}
+						{:else}
+							{message?.reply_to_message.meta?.model_name ??
+								message?.reply_to_message.user?.name ??
+								$i18n.t('Unknown User')}
+						{/if}
 					</div>
 
 					<div class="italic text-sm text-gray-500 dark:text-gray-400 line-clamp-1 w-full flex-1">
@@ -274,7 +289,13 @@
 		>
 			<div class={`shrink-0 mr-1 w-9`}>
 				{#if showUserProfile}
-					{#if message?.meta?.model_id}
+					{#if isOpenClawIdentity(message)}
+						<div
+							class="size-8 translate-y-1 ml-0.5 rounded-2xl bg-gradient-to-br from-emerald-500 to-cyan-500 text-[11px] font-semibold text-white flex items-center justify-center shadow-sm"
+						>
+							OC
+						</div>
+					{:else if message?.meta?.model_id}
 						<img
 							src={`${WEBUI_API_BASE_URL}/models/model/profile/image?id=${message.meta.model_id}`}
 							alt={message.meta.model_name ?? message.meta.model_id}
@@ -309,7 +330,9 @@
 				{#if showUserProfile}
 					<Name>
 						<div class=" self-end text-base shrink-0 font-medium truncate">
-							{#if message?.meta?.model_id}
+							{#if isOpenClawIdentity(message)}
+								{OPENCLAW_LABEL}
+							{:else if message?.meta?.model_id}
 								{message?.meta?.model_name ?? message?.meta?.model_id}
 							{:else}
 								{message?.user?.name}

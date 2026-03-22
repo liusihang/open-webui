@@ -26,7 +26,7 @@
 	export let channel: any = null;
 	export let edit = false;
 
-	let channelTypes = ['group', 'dm'];
+	let channelTypes = ['group', 'dm']; // OpenClaw is a fixed sidebar entry, not a creatable channel type.
 	let type = '';
 	let name = '';
 

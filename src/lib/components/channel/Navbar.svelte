@@ -20,6 +20,7 @@
 	import Users from '../icons/Users.svelte';
 	import Pin from '../icons/Pin.svelte';
 	import PinnedMessagesModal from './PinnedMessagesModal.svelte';
+	import { OPENCLAW_LABEL, isOpenClawChannel } from '../layout/Sidebar/openclaw';
 
 	const i18n = getContext('i18n');
 
@@ -93,7 +94,15 @@
 			>
 				{#if channel}
 					<div class="flex items-center gap-0.5 shrink-0">
-						{#if channel?.type === 'dm'}
+						{#if isOpenClawChannel(channel)}
+							<div class=" size-4.5 justify-center flex items-center">
+								<div
+									class="flex size-5 items-center justify-center rounded-lg bg-gradient-to-br from-emerald-500 to-cyan-500 text-[10px] font-semibold text-white shadow-sm"
+								>
+									OC
+								</div>
+							</div>
+						{:else if channel?.type === 'dm'}
 							{#if channel?.users}
 								{@const channelMembers = channel.users.filter((u) => u.id !== $user?.id)}
 								<div class="flex mr-1.5 relative">
@@ -140,7 +149,9 @@
 						{/if}
 
 						<div class=" text-left self-center overflow-hidden w-full line-clamp-1 flex-1">
-							{#if channel?.name}
+							{#if isOpenClawChannel(channel)}
+								{channel?.name ?? OPENCLAW_LABEL}
+							{:else if channel?.name}
 								{channel.name}
 							{:else}
 								{channel?.users
