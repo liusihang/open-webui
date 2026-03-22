@@ -93,6 +93,7 @@
 {#if message}
 	<div
 		id="message-{message.id}"
+		data-message-id={message.id}
 		class="flex flex-col justify-between w-full max-w-full mx-auto group hover:bg-gray-300/5 dark:hover:bg-gray-700/5 transition relative {className
 			? className
 			: `px-5 ${
@@ -430,6 +431,15 @@
 								>{/if}
 						{/if}
 					</div>
+
+					{#if message?.meta?.streaming}
+						<div
+							class="mt-1 text-[11px] text-gray-400 dark:text-gray-500"
+							data-streaming-state="true"
+						>
+							{$i18n.t('Generating...')}
+						</div>
+					{/if}
 
 					{#if (message?.reactions ?? []).length > 0}
 						<div>

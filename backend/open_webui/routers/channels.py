@@ -2,6 +2,7 @@ import json
 import logging
 import base64
 import io
+import time
 from typing import Optional
 
 
@@ -973,6 +974,145 @@ async def send_notification(
     return True
 
 
+def build_stream_meta(
+    *,
+    model_id: str,
+    model_name: str,
+    done: bool,
+    error: str | None = None,
+    usage: dict | None = None,
+) -> dict:
+    meta = {
+        "streaming": not done,
+        "done": done,
+        "stream_source": "native-channel-ai",
+        "model_id": model_id,
+        "model_name": model_name,
+    }
+    if error:
+        meta["error"] = error
+    if usage:
+        meta["usage"] = usage
+    return meta
+
+
+async def update_streaming_channel_message(
+    request: Request,
+    channel_id: str,
+    message_id: str,
+    content: str,
+    user,
+    *,
+    meta: dict,
+    db=None,
+):
+    return await update_message_by_id(
+        request,
+        channel_id,
+        message_id,
+        MessageForm(content=content, meta=meta),
+        user,
+        db,
+    )
+
+
+def extract_stream_text(payload: dict) -> str:
+    choices = payload.get("choices", [])
+    if not choices:
+        return ""
+
+    choice = choices[0] or {}
+    delta = choice.get("delta", {}) or {}
+    return delta.get("content", "") or ""
+
+
+async def stream_native_channel_completion(
+    request: Request,
+    *,
+    response,
+    channel_id: str,
+    message_id: str,
+    user,
+    model_id: str,
+    model_name: str,
+    db=None,
+):
+    content = ""
+    pending = ""
+    usage = None
+    last_flush = 0.0
+    buffered = ""
+
+    async def flush(*, done: bool, error: str | None = None):
+        nonlocal content, pending, last_flush
+
+        if pending:
+            content += pending
+            pending = ""
+
+        last_flush = time.monotonic()
+        await update_streaming_channel_message(
+            request,
+            channel_id,
+            message_id,
+            content,
+            user,
+            meta=build_stream_meta(
+                model_id=model_id,
+                model_name=model_name,
+                done=done,
+                error=error,
+                usage=usage,
+            ),
+            db=db,
+        )
+
+    def process_line(line: str):
+        nonlocal pending, usage
+
+        line = line.strip()
+        if not line or not line.startswith("data:"):
+            return
+
+        payload_text = line[len("data:") :].strip()
+        if payload_text == "[DONE]":
+            return
+
+        try:
+            payload = json.loads(payload_text)
+        except json.JSONDecodeError:
+            log.debug("Ignoring malformed channel streaming payload: %s", payload_text)
+            return
+
+        pending += extract_stream_text(payload)
+        usage = payload.get("usage") or usage
+
+    try:
+        async for raw_line in response.body_iterator:
+            chunk = (
+                raw_line.decode("utf-8", "replace")
+                if isinstance(raw_line, bytes)
+                else raw_line
+            )
+            buffered += chunk
+
+            while "\n" in buffered:
+                line, buffered = buffered.split("\n", 1)
+                process_line(line)
+
+            now = time.monotonic()
+            if pending and (now - last_flush >= 0.075 or len(pending) >= 64):
+                await flush(done=False)
+
+        if buffered:
+            process_line(buffered)
+    except Exception as e:
+        await flush(done=True, error=str(e))
+        return
+
+    await flush(done=True)
+
+
 async def model_response_handler(request, channel, message, user, db=None):
     MODELS = {
         model["id"]: model
@@ -1006,6 +1146,7 @@ async def model_response_handler(request, channel, message, user, db=None):
         model = MODELS.get(model_id, None)
 
         if model:
+            response_message = None
             try:
                 # reverse to get in chronological order
                 thread_messages = Messages.get_messages_by_parent_id(
@@ -1024,10 +1165,11 @@ async def model_response_handler(request, channel, message, user, db=None):
                             ),
                             "content": f"",
                             "data": {},
-                            "meta": {
-                                "model_id": model_id,
-                                "model_name": model.get("name", model_id),
-                            },
+                            "meta": build_stream_meta(
+                                model_id=model_id,
+                                model_name=model.get("name", model_id),
+                                done=False,
+                            ),
                         }
                     ),
                     user,
@@ -1110,7 +1252,7 @@ async def model_response_handler(request, channel, message, user, db=None):
                         system_message,
                         {"role": "user", "content": content},
                     ],
-                    "stream": False,
+                    "stream": True,
                 }
 
                 res = await generate_chat_completion(
@@ -1119,42 +1261,70 @@ async def model_response_handler(request, channel, message, user, db=None):
                     user=user,
                 )
 
-                if res:
+                if isinstance(res, StreamingResponse):
+                    await stream_native_channel_completion(
+                        request,
+                        response=res,
+                        channel_id=channel.id,
+                        message_id=response_message.id,
+                        user=user,
+                        model_id=model_id,
+                        model_name=model.get("name", model_id),
+                        db=db,
+                    )
+                elif isinstance(res, dict):
                     if res.get("choices", []) and len(res["choices"]) > 0:
-                        await update_message_by_id(
+                        await update_streaming_channel_message(
                             request,
                             channel.id,
                             response_message.id,
-                            MessageForm(
-                                **{
-                                    "content": res["choices"][0]["message"]["content"],
-                                    "meta": {
-                                        "done": True,
-                                    },
-                                }
-                            ),
+                            res["choices"][0]["message"]["content"],
                             user,
-                            db,
+                            meta=build_stream_meta(
+                                model_id=model_id,
+                                model_name=model.get("name", model_id),
+                                done=True,
+                                usage=res.get("usage"),
+                            ),
+                            db=db,
                         )
                     elif res.get("error", None):
-                        await update_message_by_id(
+                        await update_streaming_channel_message(
                             request,
                             channel.id,
                             response_message.id,
-                            MessageForm(
-                                **{
-                                    "content": f"Error: {res['error']}",
-                                    "meta": {
-                                        "done": True,
-                                    },
-                                }
-                            ),
+                            f"Error: {res['error']}",
                             user,
-                            db,
+                            meta=build_stream_meta(
+                                model_id=model_id,
+                                model_name=model.get("name", model_id),
+                                done=True,
+                                error=str(res["error"]),
+                                usage=res.get("usage"),
+                            ),
+                            db=db,
                         )
+                    else:
+                        raise RuntimeError("Unexpected channel completion response")
+                else:
+                    raise RuntimeError("Unexpected channel completion response")
             except Exception as e:
+                if response_message:
+                    await update_streaming_channel_message(
+                        request,
+                        channel.id,
+                        response_message.id,
+                        response_message.content,
+                        user,
+                        meta=build_stream_meta(
+                            model_id=model_id,
+                            model_name=model.get("name", model_id),
+                            done=True,
+                            error=str(e),
+                        ),
+                        db=db,
+                    )
                 log.info(e)
-                pass
 
     return True
 
