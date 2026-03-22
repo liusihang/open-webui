@@ -1,7 +1,10 @@
+import os
 from contextlib import contextmanager
 
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
+
+os.environ.setdefault("ENABLE_DB_MIGRATIONS", "false")
 
 from open_webui.internal.db import Base
 from open_webui.models.access_grants import AccessGrant
