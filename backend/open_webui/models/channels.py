@@ -478,6 +478,47 @@ class ChannelTable:
 
             return self._to_channel_model(channel, db=db) if channel else None
 
+    def get_or_create_openclaw_channel(
+        self, user_id: str, db: Optional[Session] = None
+    ) -> Optional[ChannelModel]:
+        with get_db_context(db) as db:
+            channel = (
+                db.query(Channel)
+                .filter(
+                    Channel.deleted_at.is_(None),
+                    Channel.archived_at.is_(None),
+                    Channel.user_id == user_id,
+                    Channel.type == "openclaw",
+                )
+                .first()
+            )
+
+            if channel:
+                return self._to_channel_model(channel, db=db)
+
+            return self.insert_new_channel(
+                CreateChannelForm(
+                    type="openclaw",
+                    name="openclaw",
+                    data={"openclaw": {"user_id": user_id}},
+                    meta={"openclaw": {"user_id": user_id}},
+                    access_grants=[
+                        {
+                            "principal_type": "user",
+                            "principal_id": user_id,
+                            "permission": "read",
+                        },
+                        {
+                            "principal_type": "user",
+                            "principal_id": user_id,
+                            "permission": "write",
+                        },
+                    ],
+                ),
+                user_id,
+                db=db,
+            )
+
     def add_members_to_channel(
         self,
         channel_id: str,
