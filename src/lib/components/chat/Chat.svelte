@@ -29,6 +29,7 @@
 		socket,
 		audioQueue,
 		showControls,
+		showOverview,
 		showCallOverlay,
 		currentChatPage,
 		temporaryChatEnabled,
@@ -91,6 +92,7 @@
 	import { createOpenAITextStream } from '$lib/apis/streaming';
 	import { getFunctions } from '$lib/apis/functions';
 	import { updateFolderById } from '$lib/apis/folders';
+	import { mergeHistorySnapshot, mergeServerMessage } from '$lib/components/chat/historySync';
 
 	import Banner from '../common/Banner.svelte';
 	import MessageInput from '$lib/components/chat/MessageInput.svelte';
@@ -166,6 +168,8 @@
 	};
 
 	let taskIds = null;
+	let taskSyncInterval = null;
+	let lastStreamEventAt = 0;
 
 	// Chat Input
 	let prompt = '';
@@ -437,6 +441,7 @@
 		console.log(event);
 
 		if (event.chat_id === $chatId) {
+			lastStreamEventAt = Date.now();
 			await tick();
 			let message = history.messages[event.message_id];
 
@@ -1311,39 +1316,7 @@
 
 		const messageId = incomingMessage.id;
 		const existingMessage = history.messages?.[messageId] ?? {};
-		const existingContent =
-			typeof existingMessage?.content === 'string' ? existingMessage.content : '';
-		const incomingContent = incomingMessage.content;
-		const incomingContentIsEmpty =
-			incomingContent === undefined ||
-			incomingContent === null ||
-			(typeof incomingContent === 'string' && incomingContent.trim().length === 0);
-
-		const mergedMessage = {
-			...existingMessage,
-			...(!incomingContentIsEmpty &&
-			typeof incomingContent === 'string' &&
-			typeof existingMessage?.content === 'string' &&
-			existingMessage.content !== incomingContent
-				? { originalContent: existingMessage.content }
-				: {}),
-			...incomingMessage
-		};
-
-		if (incomingContentIsEmpty && existingContent) {
-			mergedMessage.content = existingContent;
-		}
-
-		if (
-			Array.isArray(incomingMessage.output) &&
-			incomingMessage.output.length === 0 &&
-			Array.isArray(existingMessage.output) &&
-			existingMessage.output.length > 0
-		) {
-			mergedMessage.output = existingMessage.output;
-		}
-
-		history.messages[messageId] = mergedMessage;
+		history.messages[messageId] = mergeServerMessage(existingMessage, incomingMessage);
 	};
 	const chatCompletedHandler = async (_chatId, modelId, responseMessageId, messages) => {
 		const res = await chatCompleted(localStorage.token, {
@@ -2177,6 +2150,7 @@
 	};
 
 	const sendMessageSocket = async (model, _messages, _history, responseMessageId, _chatId) => {
+		lastStreamEventAt = Date.now();
 		const responseMessage = _history.messages[responseMessageId];
 		const userMessage = _history.messages[responseMessage.parentId];
 
@@ -2442,6 +2416,73 @@
 		await tick();
 		scrollToBottom();
 	};
+
+	const syncTaskBackfilledMessages = async () => {
+		if (!$chatId || taskIds === null || taskIds.length === 0) {
+			return;
+		}
+
+		// Let live socket updates lead when they're healthy.
+		if (lastStreamEventAt && Date.now() - lastStreamEventAt < 1500) {
+			return;
+		}
+
+		const latestChat = await getChatById(localStorage.token, $chatId).catch(() => null);
+		const latestHistory =
+			latestChat?.chat?.history ??
+			(latestChat?.chat?.messages ? convertMessagesToHistory(latestChat.chat.messages) : null);
+		let hasRenderableAssistantUpdate = false;
+		let hasAssistantProgress = false;
+
+		if (latestHistory?.messages) {
+			const mergeResult = mergeHistorySnapshot(history, latestHistory);
+			hasRenderableAssistantUpdate = mergeResult.hasRenderableAssistantUpdate;
+			hasAssistantProgress = mergeResult.hasAssistantProgress;
+
+			if (mergeResult.changed) {
+				history = mergeResult.history;
+				lastStreamEventAt = Date.now();
+			}
+		}
+
+		const taskRes = await getTaskIdsByChatId(localStorage.token, $chatId).catch(() => null);
+		if (taskRes?.task_ids && taskRes.task_ids.length > 0 && !hasRenderableAssistantUpdate) {
+			taskIds = taskRes.task_ids;
+		} else if (
+			!hasRenderableAssistantUpdate &&
+			(hasAssistantProgress ||
+				(history.currentId &&
+					history.messages[history.currentId]?.role === 'assistant' &&
+					history.messages[history.currentId]?.done !== true))
+		) {
+			// Keep the sync loop alive a bit longer while we wait for persisted history to catch up.
+		} else {
+			taskIds = null;
+		}
+
+		await tick();
+		if (autoScroll) {
+			scrollToBottom('smooth');
+		}
+	};
+
+	$: {
+		if (taskIds !== null && taskIds.length > 0 && !taskSyncInterval) {
+			taskSyncInterval = setInterval(() => {
+				syncTaskBackfilledMessages();
+			}, 1000);
+		} else if ((taskIds === null || taskIds.length === 0) && taskSyncInterval) {
+			clearInterval(taskSyncInterval);
+			taskSyncInterval = null;
+		}
+	}
+
+	onDestroy(() => {
+		if (taskSyncInterval) {
+			clearInterval(taskSyncInterval);
+			taskSyncInterval = null;
+		}
+	});
 
 	const handleOpenAIError = async (error, responseMessage) => {
 		let errorMessage = '';
