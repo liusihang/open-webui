@@ -8,6 +8,7 @@ type TextStreamUpdate = {
 	sources?: any;
 	// eslint-disable-next-line @typescript-eslint/no-explicit-any
 	selectedModelId?: any;
+	// eslint-disable-next-line @typescript-eslint/no-explicit-any
 	error?: any;
 	usage?: ResponseUsage;
 };
@@ -38,6 +39,62 @@ export async function createOpenAITextStream(
 		iterator = streamLargeDeltasAsRandomChunks(iterator);
 	}
 	return iterator;
+}
+
+export async function collectSSEEventData(
+	responseBody: ReadableStream<Uint8Array>
+): Promise<string[]> {
+	const events: string[] = [];
+	const reader = responseBody
+		.pipeThrough(new TextDecoderStream())
+		.pipeThrough(new EventSourceParserStream())
+		.getReader();
+
+	try {
+		let streamDone = false;
+		while (!streamDone) {
+			const { value, done } = await reader.read();
+			if (done) {
+				streamDone = true;
+				continue;
+			}
+			if (!value) {
+				continue;
+			}
+			events.push(value.data);
+		}
+	} finally {
+		reader.releaseLock();
+	}
+
+	return events;
+}
+
+export async function pipeSSEEvents(
+	responseBody: ReadableStream<Uint8Array>,
+	onEvent: (data: string) => void | Promise<void>
+): Promise<void> {
+	const reader = responseBody
+		.pipeThrough(new TextDecoderStream())
+		.pipeThrough(new EventSourceParserStream())
+		.getReader();
+
+	try {
+		let streamDone = false;
+		while (!streamDone) {
+			const { value, done } = await reader.read();
+			if (done) {
+				streamDone = true;
+				continue;
+			}
+			if (!value) {
+				continue;
+			}
+			await onEvent(value.data);
+		}
+	} finally {
+		reader.releaseLock();
+	}
 }
 
 async function* openAIStreamToIterator(

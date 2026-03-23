@@ -309,6 +309,29 @@ async def get_dm_channel_by_user_id(
 
 
 ############################
+# GetOpenClawChannelByMe
+############################
+
+
+@router.get("/openclaw/me", response_model=Optional[ChannelModel])
+async def get_openclaw_channel_by_me(
+    request: Request,
+    user=Depends(get_verified_user),
+    db: Session = Depends(get_session),
+):
+    check_channels_access(request, user)
+
+    try:
+        channel = Channels.get_or_create_openclaw_channel(user.id, db=db)
+        return ChannelModel(**channel.model_dump()) if channel else None
+    except Exception as e:
+        log.exception(e)
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST, detail=ERROR_MESSAGES.DEFAULT()
+        )
+
+
+############################
 # CreateNewChannel
 ############################
 

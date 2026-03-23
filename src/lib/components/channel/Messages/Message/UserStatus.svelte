@@ -4,7 +4,7 @@
 	const i18n = getContext('i18n');
 
 	import { user as _user, channels, socket } from '$lib/stores';
-	import { WEBUI_API_BASE_URL, WEBUI_BASE_URL } from '$lib/constants';
+	import { WEBUI_API_BASE_URL } from '$lib/constants';
 	import { getChannels, getDMChannelByUserId } from '$lib/apis/channels';
 
 	import ChatBubbles from '$lib/components/icons/ChatBubbles.svelte';
@@ -13,8 +13,14 @@
 	import { goto } from '$app/navigation';
 	import Emoji from '$lib/components/common/Emoji.svelte';
 	import Tooltip from '$lib/components/common/Tooltip.svelte';
+	import {
+		OPENCLAW_LABEL,
+		isOpenClawIdentity
+	} from '$lib/components/layout/Sidebar/openclaw';
 
 	export let user = null;
+	let isOpenClaw = false;
+	$: isOpenClaw = isOpenClawIdentity(user);
 
 	const directMessageHandler = async () => {
 		if (!user) {
@@ -36,40 +42,60 @@
 	<div class="py-3">
 		<div class=" flex gap-3.5 w-full px-3 items-center">
 			<div class=" items-center flex shrink-0">
-				<img
-					src={`${WEBUI_API_BASE_URL}/users/${user?.id}/profile/image`}
-					class=" size-14 object-cover rounded-xl"
-					alt="profile"
-				/>
+				{#if isOpenClaw}
+					<div
+						class="size-14 rounded-2xl bg-gradient-to-br from-emerald-500 to-cyan-500 text-sm font-semibold text-white flex items-center justify-center shadow-sm"
+					>
+						OC
+					</div>
+				{:else}
+					<img
+						src={`${WEBUI_API_BASE_URL}/users/${user?.id}/profile/image`}
+						class=" size-14 object-cover rounded-xl"
+						alt="profile"
+					/>
+				{/if}
 			</div>
 
 			<div class=" flex flex-col w-full flex-1">
 				<div class="mb-0.5 font-medium line-clamp-1 pr-2">
-					{user.name}
-				</div>
-
-				<div class=" flex items-center gap-2">
-					{#if user?.is_active}
-						<div>
-							<span class="relative flex size-2">
-								<span
-									class="animate-ping absolute inline-flex h-full w-full rounded-full bg-green-400 opacity-75"
-								/>
-								<span class="relative inline-flex rounded-full size-2 bg-green-500" />
-							</span>
-						</div>
-
-						<span class="text-xs"> {$i18n.t('Active')} </span>
+					{#if isOpenClaw}
+						{OPENCLAW_LABEL}
 					{:else}
-						<div>
-							<span class="relative flex size-2">
-								<span class="relative inline-flex rounded-full size-2 bg-gray-500" />
-							</span>
-						</div>
-
-						<span class="text-xs"> {$i18n.t('Away')} </span>
+						{user.name}
 					{/if}
 				</div>
+
+				{#if isOpenClaw}
+					<div class="flex items-center gap-2">
+						<span class="text-xs rounded-full bg-emerald-500/10 text-emerald-600 dark:text-emerald-300 px-2 py-0.5">
+							Integration
+						</span>
+					</div>
+				{:else}
+					<div class=" flex items-center gap-2">
+						{#if user?.is_active}
+							<div>
+								<span class="relative flex size-2">
+									<span
+										class="animate-ping absolute inline-flex h-full w-full rounded-full bg-green-400 opacity-75"
+									/>
+									<span class="relative inline-flex rounded-full size-2 bg-green-500" />
+								</span>
+							</div>
+
+							<span class="text-xs"> {$i18n.t('Active')} </span>
+						{:else}
+							<div>
+								<span class="relative flex size-2">
+									<span class="relative inline-flex rounded-full size-2 bg-gray-500" />
+								</span>
+							</div>
+
+							<span class="text-xs"> {$i18n.t('Away')} </span>
+						{/if}
+					</div>
+				{/if}
 			</div>
 		</div>
 
@@ -114,7 +140,7 @@
 			</div>
 		{/if}
 
-		{#if $_user?.id !== user.id}
+		{#if $_user?.id !== user.id && !isOpenClaw}
 			<hr class="border-gray-100/50 dark:border-gray-800/50 my-2.5" />
 
 			<div class=" flex flex-col w-full px-2.5 items-center">

@@ -66,6 +66,7 @@
 	import Note from '../icons/Note.svelte';
 	import { slide } from 'svelte/transition';
 	import HotkeyHint from '../common/HotkeyHint.svelte';
+	import { OPENCLAW_LABEL, resolveOpenClawChannelId } from './Sidebar/openclaw';
 
 	const BREAKPOINT = 768;
 
@@ -88,6 +89,8 @@
 	let showPinnedModels = false;
 	let showChannels = false;
 	let showFolders = false;
+	let openClawChannelId: string | null = null;
+	let openClawResolving = false;
 
 	let folders = {};
 	let folderRegistry = {};
@@ -582,6 +585,26 @@
 		await tick();
 	};
 
+	const openOpenClawHandler = async () => {
+		if (openClawResolving) {
+			return;
+		}
+
+		if (!openClawChannelId) {
+			openClawResolving = true;
+			openClawChannelId = await resolveOpenClawChannelId(localStorage.token).catch((error) => {
+				toast.error(`${error}`);
+				return null;
+			});
+			openClawResolving = false;
+		}
+
+		if (openClawChannelId) {
+			goto(`/channels/${openClawChannelId}`);
+			await itemClickHandler();
+		}
+	};
+
 	const isWindows = /Windows/i.test(navigator.userAgent);
 </script>
 
@@ -754,6 +777,30 @@
 						>
 							<div class=" self-center flex items-center justify-center size-9">
 								<Search className="size-4.5" />
+							</div>
+						</button>
+					</Tooltip>
+				</div>
+
+				<div class="">
+					<Tooltip content={OPENCLAW_LABEL} placement="right">
+						<button
+							class=" cursor-pointer flex rounded-xl hover:bg-gray-100 dark:hover:bg-gray-850 transition group"
+							on:click={async (e) => {
+								e.stopImmediatePropagation();
+								e.preventDefault();
+
+								await openOpenClawHandler();
+							}}
+							draggable="false"
+							aria-label={OPENCLAW_LABEL}
+						>
+							<div class=" self-center flex items-center justify-center size-9">
+								<div
+									class="flex size-4.5 items-center justify-center rounded-lg bg-gradient-to-br from-emerald-500 to-cyan-500 text-[9px] font-semibold text-white shadow-sm"
+								>
+									OC
+								</div>
 							</div>
 						</button>
 					</Tooltip>
@@ -998,6 +1045,33 @@
 								<div class=" self-center text-sm font-primary">{$i18n.t('Search')}</div>
 							</div>
 							<HotkeyHint name="search" className=" group-hover:visible invisible" />
+						</button>
+					</div>
+
+					<div class="px-[0.4375rem] flex justify-center text-gray-800 dark:text-gray-200">
+						<button
+							id="sidebar-openclaw-button"
+							class="group grow flex items-center space-x-3 rounded-2xl px-2.5 py-2 hover:bg-gray-100 dark:hover:bg-gray-900 transition outline-none"
+							on:click={async (e) => {
+								e.stopImmediatePropagation();
+								e.preventDefault();
+
+								await openOpenClawHandler();
+							}}
+							draggable="false"
+							aria-label={OPENCLAW_LABEL}
+						>
+							<div class="self-center">
+								<div
+									class="flex size-4.5 items-center justify-center rounded-lg bg-gradient-to-br from-emerald-500 to-cyan-500 text-[9px] font-semibold text-white shadow-sm"
+								>
+									OC
+								</div>
+							</div>
+
+							<div class="flex flex-1 self-center translate-y-[0.5px]">
+								<div class="self-center text-sm font-primary">{OPENCLAW_LABEL}</div>
+							</div>
 						</button>
 					</div>
 

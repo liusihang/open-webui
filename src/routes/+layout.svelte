@@ -53,6 +53,7 @@
 	import { getSessionUser, userSignOut } from '$lib/apis/auths';
 	import { getAllTags, getChatList } from '$lib/apis/chats';
 	import { chatCompletion } from '$lib/apis/openai';
+	import { pipeSSEEvents } from '$lib/apis/streaming';
 
 	import { WEBUI_API_BASE_URL, WEBUI_BASE_URL, WEBUI_HOSTNAME } from '$lib/constants';
 	import { bestMatchingLanguage, displayFileHandler } from '$lib/utils';
@@ -519,32 +520,15 @@
 									console.log({ status: true });
 
 									// res will either be SSE or JSON
-									const reader = res.body.getReader();
-									const decoder = new TextDecoder();
+									if (!res.body) {
+										throw new Error('Streaming response body is empty');
+									}
 
-									const processStream = async () => {
-										while (true) {
-											// Read data chunks from the response stream
-											const { done, value } = await reader.read();
-											if (done) {
-												break;
-											}
-
-											// Decode the received chunk
-											const chunk = decoder.decode(value, { stream: true });
-
-											// Process lines within the chunk
-											const lines = chunk.split('\n').filter((line) => line.trim() !== '');
-
-											for (const line of lines) {
-												console.log(line);
-												$socket?.emit(channel, line);
-											}
-										}
-									};
-
-									// Process the stream in the background
-									await processStream();
+									await pipeSSEEvents(res.body, async (eventData) => {
+										const line = `data: ${eventData}`;
+										console.log(line);
+										$socket?.emit(channel, line);
+									});
 								} else {
 									const data = await res.json();
 									cb(data);
