@@ -34,7 +34,11 @@ describe('openclaw sidebar helper', () => {
 
 	it('renders the sidebar entry with the lobster icon', () => {
 		const sidebarSource = readFileSync('src/lib/components/layout/Sidebar.svelte', 'utf-8');
+		const lobsterBadges = sidebarSource.match(/>\s*🦞\s*</g) ?? [];
+		const ocBadges = sidebarSource.match(/>\s*OC\s*</g) ?? [];
 
 		expect(sidebarSource).toContain('🦞');
+		expect(lobsterBadges).toHaveLength(2);
+		expect(ocBadges).toHaveLength(0);
 	});
 });
