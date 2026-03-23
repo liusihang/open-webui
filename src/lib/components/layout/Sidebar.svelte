@@ -799,7 +799,7 @@
 								<div
 									class="flex size-4.5 items-center justify-center rounded-lg bg-gradient-to-br from-emerald-500 to-cyan-500 text-[9px] font-semibold text-white shadow-sm"
 								>
-									OC
+									🦞
 								</div>
 							</div>
 						</button>

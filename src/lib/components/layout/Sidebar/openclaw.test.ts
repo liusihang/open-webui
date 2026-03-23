@@ -1,3 +1,5 @@
+import { readFileSync } from 'node:fs';
+
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 vi.mock('$lib/apis/channels', () => ({
@@ -5,10 +7,7 @@ vi.mock('$lib/apis/channels', () => ({
 }));
 
 import { getOpenClawMe } from '$lib/apis/channels';
-import {
-	resolveOpenClawChannelId,
-	resetOpenClawChannelResolver
-} from './openclaw';
+import { resolveOpenClawChannelId, resetOpenClawChannelResolver } from './openclaw';
 
 describe('openclaw sidebar helper', () => {
 	beforeEach(() => {
@@ -31,5 +30,11 @@ describe('openclaw sidebar helper', () => {
 		expect(second).toBe('openclaw-123');
 		expect(getOpenClawMe).toHaveBeenCalledTimes(1);
 		expect(getOpenClawMe).toHaveBeenCalledWith('token-1');
+	});
+
+	it('renders the sidebar entry with the lobster icon', () => {
+		const sidebarSource = readFileSync('src/lib/components/layout/Sidebar.svelte', 'utf-8');
+
+		expect(sidebarSource).toContain('🦞');
 	});
 });
