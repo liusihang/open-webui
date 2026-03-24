@@ -1,8 +1,13 @@
 <script>
-	import { onDestroy, onMount, tick, getContext } from 'svelte';
-	const i18n = getContext('i18n');
+	import { onDestroy, onMount, tick } from 'svelte';
 
 	import Markdown from './Markdown.svelte';
+	import {
+		createStreamingTextState,
+		drainStreamingTextState,
+		getStreamingTextChunkSize,
+		syncStreamingTextState
+	} from '../streaming';
 	import {
 		artifactCode,
 		chatId,
@@ -34,16 +39,79 @@
 	export let editCodeBlock = true;
 	export let topPadding = false;
 
-	export let onSave = (e) => {};
-	export let onSourceClick = (e) => {};
-	export let onTaskClick = (e) => {};
-	export let onAddMessages = (e) => {};
+	export let onSave = () => {};
+	export let onSourceClick = () => {};
+	export let onTaskClick = () => {};
+	export let onAddMessages = () => {};
 
 	let contentContainerElement;
 	let floatingButtonsElement;
+	let renderedContent = content ?? '';
+	let streamingTextState = createStreamingTextState(renderedContent);
+	let streamingTimer = null;
 
 	let sourceIds = [];
 	$: getSourceIds(sources);
+
+	const STREAMING_TICK_MS = 40;
+
+	const clearStreamingTimer = () => {
+		if (streamingTimer) {
+			clearTimeout(streamingTimer);
+			streamingTimer = null;
+		}
+	};
+
+	const flushRenderedContent = (nextContent = '') => {
+		clearStreamingTimer();
+		streamingTextState = createStreamingTextState(nextContent);
+		renderedContent = nextContent;
+	};
+
+	const scheduleStreamingDrain = () => {
+		if (streamingTimer || done || !streamingTextState.queue) {
+			return;
+		}
+
+		streamingTimer = setTimeout(() => {
+			streamingTimer = null;
+
+			streamingTextState = drainStreamingTextState(
+				streamingTextState,
+				getStreamingTextChunkSize(streamingTextState.queue.length)
+			);
+			renderedContent = streamingTextState.rendered;
+
+			if (!done && streamingTextState.queue) {
+				scheduleStreamingDrain();
+			}
+		}, STREAMING_TICK_MS);
+	};
+
+	$: {
+		const nextContent = content ?? '';
+
+		if (done) {
+			flushRenderedContent(nextContent);
+		} else {
+			streamingTextState = syncStreamingTextState(streamingTextState, nextContent);
+
+			if (!renderedContent && streamingTextState.queue) {
+				streamingTextState = drainStreamingTextState(
+					streamingTextState,
+					Math.min(6, getStreamingTextChunkSize(streamingTextState.queue.length))
+				);
+				renderedContent = streamingTextState.rendered;
+			}
+
+			if (streamingTextState.queue) {
+				scheduleStreamingDrain();
+			} else {
+				clearStreamingTimer();
+				renderedContent = streamingTextState.rendered;
+			}
+		}
+	}
 
 	const getSourceIds = (sources) => {
 		const result = [];
@@ -149,6 +217,8 @@
 	});
 
 	onDestroy(() => {
+		clearStreamingTimer();
+
 		if (floatingButtons) {
 			contentContainerElement?.removeEventListener('mouseup', updateButtonPosition);
 			document.removeEventListener('mouseup', updateButtonPosition);
@@ -160,7 +230,7 @@
 <div bind:this={contentContainerElement}>
 	<Markdown
 		{id}
-		{content}
+		content={renderedContent}
 		{model}
 		{save}
 		{preview}

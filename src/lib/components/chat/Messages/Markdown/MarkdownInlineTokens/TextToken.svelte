@@ -1,19 +1,29 @@
 <script lang="ts">
 	import { fade } from 'svelte/transition';
+	import {
+		getTextTokenSegments,
+		getTextTokenShouldPreserveStreamingMarkup
+	} from './textToken';
 
 	export let token;
 	export let done = true;
 
+	let preserveStreamingMarkup = false;
 	let texts = [];
-	$: texts = (token?.raw ?? '').split(' ');
+
+	$: preserveStreamingMarkup = getTextTokenShouldPreserveStreamingMarkup(
+		preserveStreamingMarkup,
+		done
+	);
+	$: texts = preserveStreamingMarkup ? getTextTokenSegments(token?.raw ?? '') : [];
 </script>
 
-{#if done}
+{#if !preserveStreamingMarkup}
 	{token?.raw}
 {:else}
-	{#each texts as text}
-		<span class="" transition:fade={{ duration: 100 }}>
-			{text}{' '}
+	{#each texts as text, idx (idx)}
+		<span class="" in:fade={{ duration: done ? 0 : 100 }}>
+			{text}
 		</span>
 	{/each}
 {/if}
