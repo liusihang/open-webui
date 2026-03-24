@@ -1423,6 +1423,22 @@ def apply_source_context_to_messages(
         )
 
 
+def build_recursive_rag_source_context(
+    file_sources: list | None = None, tool_sources: list | None = None
+) -> str:
+    """
+    Build RAG context for tool recursion.
+
+    File sources keep their document content so the model can cite and read them.
+    Tool results already flow through structured function_call_output items, so
+    they should not be duplicated back into the RAG context as empty <source>
+    tags that can mislead downstream models into thinking the provided context
+    is unreadable.
+    """
+    source_ids = {}
+    return get_source_context(file_sources or [], source_ids).strip()
+
+
 def process_tool_result(
     request,
     tool_function_name,
@@ -5762,15 +5778,10 @@ async def streaming_chat_response_handler(response, ctx):
 
                             # Build context: file sources with content,
                             # tool sources as citation markers only.
-                            source_ids = {}
-                            source_context = get_source_context(
-                                metadata.get("sources", []), source_ids
-                            ) + get_source_context(
-                                all_tool_call_sources,
-                                source_ids,
-                                include_content=False,
+                            source_context = build_recursive_rag_source_context(
+                                file_sources=metadata.get("sources", []),
+                                tool_sources=all_tool_call_sources,
                             )
-                            source_context = source_context.strip()
                             if source_context:
                                 rag_content = rag_template(
                                     request.app.state.config.RAG_TEMPLATE,
