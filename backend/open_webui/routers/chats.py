@@ -1425,14 +1425,13 @@ async def update_chat_folder_id_by_id(
 async def get_chat_tags_by_id(
     id: str, user=Depends(get_verified_user), db: Session = Depends(get_session)
 ):
-    chat = Chats.get_chat_by_id_and_user_id(id, user.id, db=db)
-    if chat:
-        tags = chat.meta.get("tags", [])
-        return Tags.get_tags_by_ids_and_user_id(tags, user.id, db=db)
-    else:
+    tag_ids = Chats.get_chat_tag_ids(id, user.id, db=db)
+    if tag_ids is None:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED, detail=ERROR_MESSAGES.NOT_FOUND
         )
+
+    return Tags.get_tags_by_ids_and_user_id(tag_ids, user.id, db=db)
 
 
 ############################

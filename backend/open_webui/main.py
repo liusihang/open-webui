@@ -2220,8 +2220,7 @@ async def list_tasks_endpoint(request: Request, user=Depends(get_verified_user))
 async def list_tasks_by_chat_id_endpoint(
     request: Request, chat_id: str, user=Depends(get_verified_user)
 ):
-    chat = Chats.get_chat_by_id(chat_id)
-    if chat is None or chat.user_id != user.id:
+    if not Chats.is_chat_owner(chat_id, user.id):
         return {"task_ids": []}
 
     task_ids = await list_task_ids_by_item_id(request.app.state.redis, chat_id)

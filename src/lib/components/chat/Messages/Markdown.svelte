@@ -12,6 +12,10 @@
 	import MarkdownTokens from './Markdown/MarkdownTokens.svelte';
 	import footnoteExtension from '$lib/utils/marked/footnote-extension';
 	import citationExtension from '$lib/utils/marked/citation-extension';
+	import {
+		getLargeMarkdownPreview,
+		shouldDeferMarkdownParsing
+	} from './markdownPerformance';
 
 	export let id = '';
 	export let content;
@@ -36,6 +40,9 @@
 
 	let tokens = [];
 	let pendingUpdate = null;
+	let pendingTimeout = null;
+	let parsingDeferred = false;
+	let previewContent = '';
 	let lastContent = '';
 	let lastParsedContent = '';
 
@@ -57,6 +64,13 @@
 		]
 	});
 
+	const cancelPendingWork = () => {
+		cancelAnimationFrame(pendingUpdate);
+		pendingUpdate = null;
+		clearTimeout(pendingTimeout);
+		pendingTimeout = null;
+	};
+
 	const parseTokens = () => {
 		if (content === lastContent) return;
 		lastContent = content;
@@ -66,20 +80,40 @@
 		lastParsedContent = processed;
 
 		tokens = marked.lexer(processed);
+		parsingDeferred = false;
+		previewContent = '';
 	};
 
 	const updateHandler = (content) => {
-		if (content) {
-			if (done) {
-				cancelAnimationFrame(pendingUpdate);
+		if (!content) {
+			cancelPendingWork();
+			tokens = [];
+			parsingDeferred = false;
+			previewContent = '';
+			lastContent = '';
+			lastParsedContent = '';
+			return;
+		}
+
+		cancelPendingWork();
+
+		if (shouldDeferMarkdownParsing(content, done, preview)) {
+			parsingDeferred = true;
+			previewContent = getLargeMarkdownPreview(content);
+			pendingTimeout = setTimeout(() => {
+				pendingTimeout = null;
+				parseTokens();
+			}, 0);
+			return;
+		}
+
+		if (done) {
+			parseTokens();
+		} else if (!pendingUpdate) {
+			pendingUpdate = requestAnimationFrame(() => {
 				pendingUpdate = null;
 				parseTokens();
-			} else if (!pendingUpdate) {
-				pendingUpdate = requestAnimationFrame(() => {
-					pendingUpdate = null;
-					parseTokens();
-				});
-			}
+			});
 		}
 	};
 
@@ -87,25 +121,32 @@
 
 	// Throttle parsing to once per animation frame while streaming
 	$: onDestroy(() => {
-		cancelAnimationFrame(pendingUpdate);
+		cancelPendingWork();
 	});
 </script>
 
-{#key id}
-	<MarkdownTokens
-		{tokens}
-		{id}
-		{done}
-		{save}
-		{preview}
-		{paragraphTag}
-		{editCodeBlock}
-		{sourceIds}
-		{topPadding}
-		{onTaskClick}
-		{onSourceClick}
-		{onSave}
-		{onUpdate}
-		{onPreview}
-	/>
-{/key}
+{#if parsingDeferred && tokens.length === 0}
+	<div class="space-y-2">
+		<div class="text-xs text-gray-500 dark:text-gray-400">Formatting long response...</div>
+		<pre class="text-sm whitespace-pre-wrap break-words text-gray-700 dark:text-gray-300">{previewContent}</pre>
+	</div>
+{:else}
+	{#key id}
+		<MarkdownTokens
+			{tokens}
+			{id}
+			{done}
+			{save}
+			{preview}
+			{paragraphTag}
+			{editCodeBlock}
+			{sourceIds}
+			{topPadding}
+			{onTaskClick}
+			{onSourceClick}
+			{onSave}
+			{onUpdate}
+			{onPreview}
+		/>
+	{/key}
+{/if}

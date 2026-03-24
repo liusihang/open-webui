@@ -114,6 +114,7 @@
 		getEffectiveKnowledgeQueryEnabled,
 		getModelKnowledgeScopeFromModels
 	} from '$lib/utils/chat/attachedKnowledge';
+	import { loadChatPageData } from '$lib/components/chat/loadChatPageData';
 
 	export let chatIdProp = '';
 
@@ -177,6 +178,9 @@
 	let taskIds = null;
 	let taskSyncInterval = null;
 	let lastStreamEventAt = 0;
+	let pendingChatAncillary:
+		| Promise<{ chatId: string; tags: string[]; taskIds: string[] | null }>
+		| null = null;
 
 	// Chat Input
 	let prompt = '';
@@ -245,6 +249,13 @@
 					const restoredQueue = JSON.parse(storedQueueData);
 
 					if (restoredQueue.length > 0) {
+						const ancillaryState = pendingChatAncillary
+							? await pendingChatAncillary.catch(() => null)
+							: null;
+						if (ancillaryState?.chatId === chatIdProp && ancillaryState.taskIds !== null) {
+							taskIds = ancillaryState.taskIds;
+						}
+
 						sessionStorage.removeItem(`chat-queue-${chatIdProp}`);
 						// Check if there are pending tasks (still generating)
 						const hasPendingTask = taskIds !== null && taskIds.length > 0;
@@ -1246,21 +1257,48 @@
 
 	const loadChat = async () => {
 		chatId.set(chatIdProp);
+		const requestedChatId = chatIdProp;
 
 		if ($temporaryChatEnabled) {
 			temporaryChatEnabled.set(false);
 		}
 
-		chat = await getChatById(localStorage.token, $chatId).catch(async (error) => {
+		const pageData = await loadChatPageData({
+			token: localStorage.token,
+			chatId: requestedChatId,
+			deps: {
+				getChatById,
+				getTagsById,
+				getTaskIdsByChatId
+			}
+		}).catch(async (error) => {
 			await goto('/');
 			return null;
 		});
 
-		if (chat) {
-			tags = await getTagsById(localStorage.token, $chatId).catch(async (error) => {
-				return [];
-			});
+		if (!pageData) {
+			return null;
+		}
 
+		chat = pageData.chat;
+		tags = [];
+		taskIds = null;
+		pendingChatAncillary = pageData.ancillaryPromise;
+
+		void pageData.ancillaryPromise.then(
+			({ chatId: ancillaryChatId, tags: loadedTags, taskIds: loadedTaskIds }) => {
+				if (get(chatId) !== ancillaryChatId) {
+					return;
+				}
+
+				tags = loadedTags;
+				if (loadedTaskIds !== null) {
+					taskIds = loadedTaskIds;
+				}
+			}
+		);
+
+		if (chat) {
 			const chatContent = chat.chat;
 
 			if (chatContent) {
@@ -1296,14 +1334,6 @@
 							message.done = true;
 						}
 					}
-				}
-
-				const taskRes = await getTaskIdsByChatId(localStorage.token, $chatId).catch((error) => {
-					return null;
-				});
-
-				if (taskRes) {
-					taskIds = taskRes.task_ids;
 				}
 
 				await tick();

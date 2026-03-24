@@ -942,10 +942,6 @@ class ChatTable:
                 if chat_item is None:
                     return None
 
-                if self._sanitize_chat_row(chat_item):
-                    db.commit()
-                    db.refresh(chat_item)
-
                 return ChatModel.model_validate(chat_item)
         except Exception:
             return None
@@ -973,6 +969,20 @@ class ChatTable:
             with get_db_context(db) as db:
                 chat = db.query(Chat).filter_by(id=id, user_id=user_id).first()
                 return ChatModel.model_validate(chat)
+        except Exception:
+            return None
+
+    def get_chat_tag_ids(
+        self, id: str, user_id: str, db: Optional[Session] = None
+    ) -> Optional[list[str]]:
+        try:
+            with get_db_context(db) as db:
+                result = db.query(Chat.meta).filter_by(id=id, user_id=user_id).first()
+                if result is None:
+                    return None
+
+                meta = result[0] or {}
+                return meta.get("tags", [])
         except Exception:
             return None
 
