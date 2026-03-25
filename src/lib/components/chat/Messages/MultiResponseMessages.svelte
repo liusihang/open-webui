@@ -18,6 +18,7 @@
 	import Skeleton from './Skeleton.svelte';
 	import localizedFormat from 'dayjs/plugin/localizedFormat';
 	import ProfileImage from './ProfileImage.svelte';
+	import { shouldSyncRenderedMessage } from './messageSync';
 	import { WEBUI_BASE_URL } from '$lib/constants';
 	const i18n = getContext('i18n');
 	dayjs.extend(localizedFormat);
@@ -64,9 +65,7 @@
 	$: if (history.messages) {
 		const source = history.messages[messageId];
 		if (source) {
-			if (message.content !== source.content || message.done !== source.done) {
-				message = structuredClone(source);
-			} else if (JSON.stringify(message) !== JSON.stringify(source)) {
+			if (shouldSyncRenderedMessage(message, source)) {
 				message = structuredClone(source);
 			}
 		}

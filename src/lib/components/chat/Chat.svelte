@@ -115,6 +115,11 @@
 		getModelKnowledgeScopeFromModels
 	} from '$lib/utils/chat/attachedKnowledge';
 	import { loadChatPageData } from '$lib/components/chat/loadChatPageData';
+	import {
+		enqueueSourceBatch,
+		enqueueSourceUpdate,
+		flushQueuedSourceUpdates
+	} from '$lib/components/chat/sourceUpdates';
 
 	export let chatIdProp = '';
 
@@ -181,6 +186,8 @@
 	let pendingChatAncillary:
 		| Promise<{ chatId: string; tags: string[]; taskIds: string[] | null }>
 		| null = null;
+	let pendingSourceUpdates = new Map<string, unknown[]>();
+	let pendingSourceFlushFrame: number | null = null;
 
 	// Chat Input
 	let prompt = '';
@@ -472,6 +479,29 @@
 		}
 	};
 
+	const flushPendingSourceUpdates = () => {
+		pendingSourceFlushFrame = null;
+
+		if (pendingSourceUpdates.size === 0) {
+			return;
+		}
+
+		history = {
+			...history,
+			messages: flushQueuedSourceUpdates(history.messages, pendingSourceUpdates)
+		};
+	};
+
+	const scheduleSourceFlush = () => {
+		if (pendingSourceFlushFrame !== null) {
+			return;
+		}
+
+		pendingSourceFlushFrame = requestAnimationFrame(() => {
+			flushPendingSourceUpdates();
+		});
+	};
+
 	const chatEventHandler = async (event, cb) => {
 		console.log(event);
 
@@ -480,11 +510,12 @@
 			await tick();
 			let message = history.messages[event.message_id];
 
-			if (message) {
-				const type = event?.data?.type ?? null;
-				const data = event?.data?.data ?? null;
+				if (message) {
+					const type = event?.data?.type ?? null;
+					const data = event?.data?.data ?? null;
+					let shouldPersistMessage = true;
 
-				if (type === 'status') {
+					if (type === 'status') {
 					if (message?.statusHistory) {
 						message.statusHistory.push(data);
 					} else {
@@ -552,14 +583,16 @@
 						}
 
 						message.code_executions = message.code_executions;
-					} else {
-						// Regular source.
-						if (message?.sources) {
-							message.sources.push(data);
 						} else {
-							message.sources = [data];
+							// Regular source.
+							if (Array.isArray(data?.sources)) {
+								enqueueSourceBatch(pendingSourceUpdates, event.message_id, data.sources);
+							} else {
+								enqueueSourceUpdate(pendingSourceUpdates, event.message_id, data);
+							}
+							scheduleSourceFlush();
+							shouldPersistMessage = false;
 						}
-					}
 				} else if (type === 'notification') {
 					const toastType = data?.type ?? 'info';
 					const toastContent = data?.content ?? '';
@@ -612,10 +645,12 @@
 					console.log('Unknown message type', data);
 				}
 
-				history.messages[event.message_id] = message;
+					if (shouldPersistMessage) {
+						history.messages[event.message_id] = message;
+					}
+				}
 			}
-		}
-	};
+		};
 
 	const onMessageHandler = async (event: {
 		origin: string;
@@ -2539,6 +2574,11 @@
 	}
 
 	onDestroy(() => {
+		if (pendingSourceFlushFrame !== null) {
+			cancelAnimationFrame(pendingSourceFlushFrame);
+			flushPendingSourceUpdates();
+		}
+
 		if (taskSyncInterval) {
 			clearInterval(taskSyncInterval);
 			taskSyncInterval = null;

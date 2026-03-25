@@ -1439,6 +1439,46 @@ def build_recursive_rag_source_context(
     return get_source_context(file_sources or [], source_ids).strip()
 
 
+def build_source_event_payload(sources: list | None = None) -> dict | None:
+    """
+    Build a frontend source event payload.
+
+    Preserve the existing single-source event shape for compatibility, but batch
+    multiple sources into one payload to reduce websocket chatter and repeated
+    frontend re-renders during tool-heavy runs.
+    """
+    if not sources:
+        return None
+
+    if len(sources) == 1:
+        return {"type": "source", "data": sources[0]}
+
+    return {"type": "source", "data": {"sources": sources}}
+
+
+def build_chat_completion_event_data(
+    output: list | None = None, include_content: bool = True, **extra_data
+) -> dict:
+    """
+    Build a chat:completion event payload.
+
+    In source/tool-heavy flows, serializing the full markdown output for every
+    intermediate tool-state update is expensive and mostly redundant. Allow
+    callers to omit the serialized `content` field for transitional updates and
+    keep full content emission for result/final updates.
+    """
+    payload = {}
+    if output is not None:
+        payload["output"] = output
+        if include_content:
+            payload["content"] = serialize_output(output)
+
+    if extra_data:
+        payload.update(extra_data)
+
+    return payload
+
+
 def process_tool_result(
     request,
     tool_function_name,
@@ -5524,10 +5564,9 @@ async def streaming_chat_response_handler(response, ctx):
                     await event_emitter(
                         {
                             "type": "chat:completion",
-                            "data": {
-                                "content": serialize_output(output),
-                                "output": output,
-                            },
+                            "data": build_chat_completion_event_data(
+                                output, include_content=False
+                            ),
                         }
                     )
 
@@ -5754,8 +5793,9 @@ async def streaming_chat_response_handler(response, ctx):
 
                     # Emit citation sources to the frontend for display
                     if citations_enabled:
-                        for source in tool_call_sources:
-                            await event_emitter({"type": "source", "data": source})
+                        source_event = build_source_event_payload(tool_call_sources)
+                        if source_event:
+                            await event_emitter(source_event)
 
                         # Apply tool source context to messages for the model.
                         # Restoring to pre-RAG original prevents duplicating
@@ -5807,10 +5847,7 @@ async def streaming_chat_response_handler(response, ctx):
                     await event_emitter(
                         {
                             "type": "chat:completion",
-                            "data": {
-                                "content": serialize_output(output),
-                                "output": output,
-                            },
+                            "data": build_chat_completion_event_data(output),
                         }
                     )
 

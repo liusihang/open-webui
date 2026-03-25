@@ -62,6 +62,7 @@
 	import RegenerateMenu from './ResponseMessage/RegenerateMenu.svelte';
 	import StatusHistory from './ResponseMessage/StatusHistory.svelte';
 	import FullHeightIframe from '$lib/components/common/FullHeightIframe.svelte';
+	import { shouldSyncRenderedMessage } from './messageSync';
 
 	interface MessageType {
 		id: string;
@@ -123,12 +124,7 @@
 	$: if (history.messages) {
 		const source = history.messages[messageId];
 		if (source) {
-			// Fast path: O(1) check on the fields that change most often (content during streaming, done at end)
-			// Avoids 2x O(n) JSON.stringify calls that are always true during streaming anyway
-			if (message.content !== source.content || message.done !== source.done) {
-				message = structuredClone(source);
-			} else if (JSON.stringify(message) !== JSON.stringify(source)) {
-				// Slow path: full comparison for infrequent changes (sources, annotations, status, etc.)
+			if (shouldSyncRenderedMessage(message, source)) {
 				message = structuredClone(source);
 			}
 		}

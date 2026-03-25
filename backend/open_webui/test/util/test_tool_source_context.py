@@ -38,3 +38,61 @@ def test_build_recursive_rag_source_context_omits_tool_only_sources():
     assert context.count("<source") == 1
     assert 'name="knowledge.txt"' in context
     assert 'name="search_web"' not in context
+
+
+def test_build_source_event_payload_batches_multiple_sources():
+    middleware = _load_middleware_module()
+
+    sources = [
+        {"source": {"id": "a", "name": "A"}, "document": ["doc-a"], "metadata": [{"source": "a"}]},
+        {"source": {"id": "b", "name": "B"}, "document": ["doc-b"], "metadata": [{"source": "b"}]},
+    ]
+
+    payload = middleware.build_source_event_payload(sources)
+
+    assert payload == {
+        "type": "source",
+        "data": {
+            "sources": sources,
+        },
+    }
+
+
+def test_build_source_event_payload_keeps_single_source_shape():
+    middleware = _load_middleware_module()
+
+    source = {
+        "source": {"id": "a", "name": "A"},
+        "document": ["doc-a"],
+        "metadata": [{"source": "a"}],
+    }
+
+    payload = middleware.build_source_event_payload([source])
+
+    assert payload == {
+        "type": "source",
+        "data": source,
+    }
+
+
+def test_build_chat_completion_event_data_can_skip_serialized_content():
+    middleware = _load_middleware_module()
+
+    output = [{"type": "function_call", "call_id": "fc-1", "name": "search_web"}]
+
+    payload = middleware.build_chat_completion_event_data(output, include_content=False)
+
+    assert payload == {
+        "output": output,
+    }
+
+
+def test_build_chat_completion_event_data_includes_content_by_default():
+    middleware = _load_middleware_module()
+
+    output = [{"type": "message", "content": [{"type": "output_text", "text": "hello"}]}]
+
+    payload = middleware.build_chat_completion_event_data(output)
+
+    assert payload["output"] == output
+    assert payload["content"] == "hello"
