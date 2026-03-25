@@ -37,7 +37,11 @@ export const buildCitations = (sources: CitationSourceDocument[] = []): Citation
 			}
 
 			if (id.startsWith('http://') || id.startsWith('https://')) {
-				normalizedSource = { ...normalizedSource, name: id, url: id };
+				normalizedSource = {
+					...normalizedSource,
+					name: normalizedSource?.name || id,
+					url: normalizedSource?.url || metadata?.url || id
+				};
 			}
 
 			const existingSource = acc.find((item) => item.id === id);
@@ -81,15 +85,22 @@ export const summarizeCitations = (sources: CitationSourceDocument[] = []) => {
 			}
 
 			if (id.startsWith('http://') || id.startsWith('https://')) {
-				normalizedSource = { ...normalizedSource, name: id, url: id };
+				normalizedSource = {
+					...normalizedSource,
+					name: normalizedSource?.name || id,
+					url: normalizedSource?.url || metadata?.url || id
+				};
 			}
 
 			if (!summary.has(id)) {
 				const sourceName = normalizedSource?.name ?? '';
+				const sourceUrl = normalizedSource?.url ?? '';
 				summary.set(id, {
 					id,
 					source: normalizedSource,
-					hasUrl: typeof sourceName === 'string' && sourceName.startsWith('http')
+					hasUrl:
+						(typeof sourceUrl === 'string' && sourceUrl.startsWith('http')) ||
+						(typeof sourceName === 'string' && sourceName.startsWith('http'))
 				});
 			}
 

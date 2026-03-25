@@ -35,6 +35,29 @@ describe('summarizeCitations', () => {
 		expect(summary.items.map((item) => item.id)).toEqual(['https://example.com', 'paper-1']);
 		expect(summary.distances).toEqual([0.2, 0.4, 0.1]);
 	});
+
+	it('keeps titled URL citations in the URL summary bucket', () => {
+		const sources = [
+			{
+				source: { id: 'search_web', name: 'search_web' },
+				document: ['Example Paper\ndoc-1'],
+				metadata: [
+					{
+						source: 'https://example.com/paper',
+						name: 'Example Paper',
+						url: 'https://example.com/paper'
+					}
+				]
+			}
+		];
+
+		const summary = summarizeCitations(sources);
+
+		expect(summary.count).toBe(1);
+		expect(summary.urlSources).toHaveLength(1);
+		expect(summary.items[0].source.name).toBe('Example Paper');
+		expect(summary.items[0].source.url).toBe('https://example.com/paper');
+	});
 });
 
 
@@ -57,6 +80,28 @@ describe('buildCitations', () => {
 		expect(citations).toHaveLength(1);
 		expect(citations[0].document).toEqual(['doc-1', 'doc-2']);
 		expect(citations[0].distances).toEqual([0.1, 0.2]);
+	});
+
+	it('preserves page title when citation id is a URL', () => {
+		const sources = [
+			{
+				source: { id: 'search_web', name: 'search_web' },
+				document: ['Example Paper\ndoc-1'],
+				metadata: [
+					{
+						source: 'https://example.com/paper',
+						name: 'Example Paper',
+						url: 'https://example.com/paper'
+					}
+				]
+			}
+		];
+
+		const citations = buildCitations(sources);
+
+		expect(citations).toHaveLength(1);
+		expect(citations[0].source.name).toBe('Example Paper');
+		expect(citations[0].source.url).toBe('https://example.com/paper');
 	});
 });
 

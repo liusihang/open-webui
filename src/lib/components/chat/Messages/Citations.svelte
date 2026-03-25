@@ -128,7 +128,7 @@
 				<div class="flex -space-x-1 items-center">
 					{#each citationSummary.urlSources.slice(0, 3) as citation, idx}
 						<img
-							src="https://www.google.com/s2/favicons?sz=32&domain={citation.source.name}"
+							src="https://www.google.com/s2/favicons?sz=32&domain={citation.source.url || citation.source.name}"
 							alt="favicon"
 							class="size-4 rounded-full shrink-0 border border-white dark:border-gray-850 bg-white dark:bg-gray-900"
 							on:error={(e) => {

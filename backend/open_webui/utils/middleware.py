@@ -470,6 +470,52 @@ def get_citation_source_from_tool_result(
         ]
 
 
+def extract_embedded_sources_from_tool_result(tool_result: str) -> list[dict]:
+    """
+    Extract already-normalized citation sources embedded in a tool result payload.
+
+    This supports aggregator tools such as sub-agents that return their own
+    structured `sources` field instead of relying on the builtin tool-name
+    whitelist in `get_citation_source_from_tool_result`.
+
+    To avoid affecting unrelated JSON-returning tools, extraction is gated by a
+    top-level `citation_passthrough: true` marker.
+    """
+
+    try:
+        parsed = json.loads(tool_result)
+    except (json.JSONDecodeError, TypeError):
+        return []
+
+    if not (isinstance(parsed, dict) and parsed.get("citation_passthrough") is True):
+        return []
+
+    collected: list[dict] = []
+
+    def _collect(candidate):
+        if isinstance(candidate, list):
+            for item in candidate:
+                _collect(item)
+            return
+
+        if not isinstance(candidate, dict):
+            return
+
+        sources = candidate.get("sources")
+        if isinstance(sources, list):
+            for source in sources:
+                if isinstance(source, dict):
+                    collected.append(source)
+
+        nested_results = candidate.get("results")
+        if isinstance(nested_results, list):
+            for item in nested_results:
+                _collect(item)
+
+    _collect(parsed)
+    return collected
+
+
 def split_content_and_whitespace(content):
     content_stripped = content.rstrip()
     original_whitespace = (
@@ -5690,25 +5736,29 @@ async def streaming_chat_response_handler(response, ctx):
                         )
 
                         # Extract citation sources from tool results
-                        if (
-                            citations_enabled
-                            and tool_function_name
-                            in [
-                                "search_web",
-                                "fetch_url",
-                                "view_knowledge_file",
-                                "query_knowledge_files",
-                            ]
-                            and tool_result
-                        ):
+                        if citations_enabled and tool_result:
                             try:
-                                citation_sources = get_citation_source_from_tool_result(
-                                    tool_name=tool_function_name,
-                                    tool_params=tool_function_params,
-                                    tool_result=tool_result,
-                                    tool_id=tool.get("tool_id", "") if tool else "",
+                                if tool_function_name in [
+                                    "search_web",
+                                    "fetch_url",
+                                    "view_knowledge_file",
+                                    "query_knowledge_files",
+                                ]:
+                                    citation_sources = (
+                                        get_citation_source_from_tool_result(
+                                            tool_name=tool_function_name,
+                                            tool_params=tool_function_params,
+                                            tool_result=tool_result,
+                                            tool_id=tool.get("tool_id", "") if tool else "",
+                                        )
+                                    )
+                                    tool_call_sources.extend(citation_sources)
+
+                                embedded_sources = extract_embedded_sources_from_tool_result(
+                                    tool_result
                                 )
-                                tool_call_sources.extend(citation_sources)
+                                if embedded_sources:
+                                    tool_call_sources.extend(embedded_sources)
                             except Exception as e:
                                 log.exception(f"Error extracting citation source: {e}")
 

@@ -75,6 +75,97 @@ def test_build_source_event_payload_keeps_single_source_shape():
     }
 
 
+def test_extract_embedded_sources_from_tool_result_reads_top_level_sources():
+    middleware = _load_middleware_module()
+
+    payload = {
+        "citation_passthrough": True,
+        "completed": True,
+        "result": "summary",
+        "sources": [
+            {
+                "source": {"id": "https://example.com/paper", "name": "Example Paper"},
+                "document": ["Example Paper\nsnippet"],
+                "metadata": [
+                    {
+                        "source": "https://example.com/paper",
+                        "name": "Example Paper",
+                        "url": "https://example.com/paper",
+                    }
+                ],
+            }
+        ],
+    }
+
+    extracted = middleware.extract_embedded_sources_from_tool_result(
+        middleware.json.dumps(payload, ensure_ascii=False)
+    )
+
+    assert extracted == payload["sources"]
+
+
+def test_extract_embedded_sources_from_tool_result_reads_nested_parallel_sources():
+    middleware = _load_middleware_module()
+
+    payload = {
+        "citation_passthrough": True,
+        "completed": True,
+        "results": [
+            {
+                "description": "task 1",
+                "result": "summary",
+                "sources": [
+                    {
+                        "source": {"id": "https://example.com/a", "name": "Paper A"},
+                        "document": ["Paper A\nsnippet"],
+                        "metadata": [
+                            {
+                                "source": "https://example.com/a",
+                                "name": "Paper A",
+                                "url": "https://example.com/a",
+                            }
+                        ],
+                    }
+                ],
+            }
+        ],
+    }
+
+    extracted = middleware.extract_embedded_sources_from_tool_result(
+        middleware.json.dumps(payload, ensure_ascii=False)
+    )
+
+    assert extracted == payload["results"][0]["sources"]
+
+
+def test_extract_embedded_sources_from_tool_result_requires_protocol_marker():
+    middleware = _load_middleware_module()
+
+    payload = {
+        "completed": True,
+        "result": "summary",
+        "sources": [
+            {
+                "source": {"id": "https://example.com/paper", "name": "Example Paper"},
+                "document": ["Example Paper\nsnippet"],
+                "metadata": [
+                    {
+                        "source": "https://example.com/paper",
+                        "name": "Example Paper",
+                        "url": "https://example.com/paper",
+                    }
+                ],
+            }
+        ],
+    }
+
+    extracted = middleware.extract_embedded_sources_from_tool_result(
+        middleware.json.dumps(payload, ensure_ascii=False)
+    )
+
+    assert extracted == []
+
+
 def test_build_chat_completion_event_data_can_skip_serialized_content():
     middleware = _load_middleware_module()
 
