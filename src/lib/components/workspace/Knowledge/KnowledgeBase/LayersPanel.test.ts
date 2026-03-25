@@ -64,4 +64,31 @@ describe('LayersPanel helpers', () => {
 		expect(normalizeLayerStatus(null)).toBe('pending');
 		expect(normalizeLayerStatus('ready')).toBe('ready');
 	});
+
+	it('combines chunked layer rows in part order', () => {
+		const viewModel = buildLayerViewModel([
+			{
+				layer_type: 'abstract',
+				content: 'second chunk',
+				status: 'ready',
+				part_index: 2,
+				part_total: 2,
+				display_title: 'Abstract 2/2',
+				updated_at: 11
+			},
+			{
+				layer_type: 'abstract',
+				content: 'first chunk',
+				status: 'ready',
+				part_index: 1,
+				part_total: 2,
+				display_title: 'Abstract 1/2',
+				updated_at: 10
+			}
+		]);
+
+		expect(viewModel[0].content).toBe('Abstract 1/2: first chunk\n\nAbstract 2/2: second chunk');
+		expect(viewModel[0].status).toBe('ready');
+		expect(viewModel[0].updatedAt).toBe(11);
+	});
 });

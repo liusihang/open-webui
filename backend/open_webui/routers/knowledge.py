@@ -42,8 +42,10 @@ from open_webui.models.access_grants import AccessGrants
 from open_webui.config import BYPASS_ADMIN_ACCESS_CONTROL
 from open_webui.models.models import Models, ModelForm
 from open_webui.utils.layered_knowledge import (
+    backfill_layers_for_knowledge,
     mark_layers_for_file_stale,
     mark_layers_for_knowledge_stale,
+    regenerate_layers_for_file,
     regenerate_layer_for_file,
     sync_layers_for_file,
 )
@@ -646,6 +648,19 @@ class KnowledgeFileIdForm(BaseModel):
 
 class KnowledgeLayerRegenerateForm(BaseModel):
     layer_type: Optional[str] = None
+    layer_types: Optional[List[str]] = None
+    force: bool = False
+
+
+class KnowledgeLayerBackfillForm(BaseModel):
+    layer_types: Optional[List[str]] = None
+    force: bool = False
+
+
+class KnowledgeLayerBackfillResponse(BaseModel):
+    total_files: int
+    scheduled_files: int
+    skipped_files: int
 
 
 def _has_knowledge_permission(
@@ -731,13 +746,23 @@ async def regenerate_knowledge_file_layers(
         )
 
     try:
-        layer_type = form_data.layer_type if form_data else None
-        if layer_type:
-            regenerate_layer_for_file(
-                request, id, file_id, layer_type=layer_type, db=db
-            )
-        else:
-            sync_layers_for_file(request, id, file_id, db=db)
+        selected_layer_types = None
+        force = False
+        if form_data:
+            force = bool(form_data.force)
+            if form_data.layer_types:
+                selected_layer_types = form_data.layer_types
+            elif form_data.layer_type:
+                selected_layer_types = [form_data.layer_type]
+
+        regenerate_layers_for_file(
+            request,
+            id,
+            file_id,
+            layer_types=selected_layer_types,
+            force=force,
+            db=db,
+        )
     except ValueError as exc:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
@@ -780,7 +805,14 @@ async def regenerate_knowledge_file_layer_by_type(
         )
 
     try:
-        regenerate_layer_for_file(request, id, file_id, layer_type=layer_type, db=db)
+        regenerate_layers_for_file(
+            request,
+            id,
+            file_id,
+            layer_types=[layer_type],
+            force=False,
+            db=db,
+        )
     except ValueError as exc:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
@@ -789,6 +821,47 @@ async def regenerate_knowledge_file_layer_by_type(
 
     layers = KnowledgeLayers.get_layers_by_file(id, file_id, db=db)
     return KnowledgeFileLayerListResponse(items=layers, total=len(layers))
+
+
+@router.post(
+    "/{id}/layers/backfill",
+    response_model=KnowledgeLayerBackfillResponse,
+)
+async def backfill_knowledge_layers(
+    request: Request,
+    id: str,
+    form_data: Optional[KnowledgeLayerBackfillForm] = None,
+    user=Depends(get_verified_user),
+    db: Session = Depends(get_session),
+):
+    knowledge = Knowledges.get_knowledge_by_id(id=id, db=db)
+    if not knowledge:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=ERROR_MESSAGES.NOT_FOUND,
+        )
+
+    if not _has_knowledge_permission(knowledge, user, "write", db=db):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=ERROR_MESSAGES.ACCESS_PROHIBITED,
+        )
+
+    try:
+        summary = backfill_layers_for_knowledge(
+            request,
+            id,
+            layer_types=(form_data.layer_types if form_data else None),
+            force=(form_data.force if form_data else False),
+            db=db,
+        )
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=str(exc),
+        )
+
+    return KnowledgeLayerBackfillResponse(**summary)
 
 
 @router.post("/{id}/file/add", response_model=Optional[KnowledgeFilesResponse])
@@ -1176,6 +1249,8 @@ async def reset_knowledge_by_id(
         pass
 
     knowledge = Knowledges.reset_knowledge_by_id(id=id, db=db)
+    # Keep reset explicit: only mark layered rows stale.
+    # Operators must call /{id}/layers/backfill to regenerate legacy/old files.
     mark_layers_for_knowledge_stale(id, db=db)
     return knowledge
 

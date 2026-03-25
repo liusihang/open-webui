@@ -187,3 +187,61 @@ def test_view_knowledge_layers_returns_layer_payload_with_prefixed_sources(
     assert payload["layers"]["abstract"]["source"] == "Abstract: paper.pdf"
     assert payload["layers"]["key_findings"]["source"] == "Key Findings: paper.pdf"
     assert payload["layers"]["key_data"]["source"] == "Key Data: paper.pdf"
+
+
+def test_query_knowledge_abstract_keeps_chunk_source_labels(monkeypatch) -> None:
+    async def fake_query_layer_rows(**kwargs):
+        return [
+            {
+                "content": "chunk summary",
+                "source": "Abstract 1/3: paper.pdf",
+                "file_id": "file-1",
+            }
+        ]
+
+    monkeypatch.setattr(builtin, "_query_layer_rows", fake_query_layer_rows)
+
+    result = asyncio.run(
+        query_knowledge_abstract(
+            query="summary",
+            __request__=_FakeRequest(),
+            __user__={"id": "u1"},
+            __metadata__={
+                "effective_knowledge_scope": [{"id": "kb-1", "type": "collection"}]
+            },
+        )
+    )
+
+    payload = json.loads(result)
+    assert payload[0]["source"] == "Abstract 1/3: paper.pdf"
+
+
+def test_view_knowledge_layers_supports_chunked_layer_payload(monkeypatch) -> None:
+    async def fake_view_layer_rows(**kwargs):
+        return {
+            "file_id": "file-1",
+            "layers": {
+                "abstract": [
+                    {"content": "part1", "source": "Abstract 1/2: paper.pdf"},
+                    {"content": "part2", "source": "Abstract 2/2: paper.pdf"},
+                ]
+            },
+        }
+
+    monkeypatch.setattr(builtin, "_view_layer_rows", fake_view_layer_rows)
+
+    result = asyncio.run(
+        view_knowledge_layers(
+            file_id="file-1",
+            __request__=_FakeRequest(),
+            __user__={"id": "u1"},
+            __metadata__={
+                "effective_knowledge_scope": [{"id": "kb-1", "type": "collection"}]
+            },
+        )
+    )
+
+    payload = json.loads(result)
+    assert isinstance(payload["layers"]["abstract"], list)
+    assert payload["layers"]["abstract"][0]["source"] == "Abstract 1/2: paper.pdf"
+    assert payload["layers"]["abstract"][1]["source"] == "Abstract 2/2: paper.pdf"

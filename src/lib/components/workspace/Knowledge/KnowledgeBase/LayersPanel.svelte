@@ -9,6 +9,9 @@
 		content?: string | null;
 		status?: string | null;
 		updated_at?: number | null;
+		part_index?: number | null;
+		part_total?: number | null;
+		display_title?: string | null;
 	};
 
 	export type KnowledgeLayerCard = {
@@ -36,22 +39,66 @@
 	};
 
 	export const buildLayerViewModel = (layers: KnowledgeLayerItem[] = []): KnowledgeLayerCard[] => {
-		const layerMap = new Map<KnowledgeLayerType, KnowledgeLayerItem>();
+		const layerMap = new Map<KnowledgeLayerType, KnowledgeLayerItem[]>();
 		for (const layer of layers) {
 			if (!layer?.layer_type) {
 				continue;
 			}
-			layerMap.set(layer.layer_type, layer);
+			const next = layerMap.get(layer.layer_type) ?? [];
+			next.push(layer);
+			layerMap.set(layer.layer_type, next);
 		}
 
+		const statusPriority: Record<KnowledgeLayerStatus, number> = {
+			failed: 4,
+			stale: 3,
+			pending: 2,
+			ready: 1
+		};
+
 		return LAYER_TYPE_ORDER.map((layerType) => {
-			const layer = layerMap.get(layerType);
+			const layerParts = (layerMap.get(layerType) ?? []).sort((a, b) => {
+				const partA = a.part_index ?? 1;
+				const partB = b.part_index ?? 1;
+				if (partA !== partB) return partA - partB;
+				return (b.updated_at ?? 0) - (a.updated_at ?? 0);
+			});
+
+			let status: KnowledgeLayerStatus = 'pending';
+			if (layerParts.length > 0) {
+				status = normalizeLayerStatus(layerParts[0]?.status);
+				for (const part of layerParts.slice(1)) {
+					const nextStatus = normalizeLayerStatus(part?.status);
+					if (statusPriority[nextStatus] > statusPriority[status]) {
+						status = nextStatus;
+					}
+				}
+			}
+
+			const content = layerParts
+				.map((part) => {
+					const partContent = part?.content ?? '';
+					if (!partContent) return '';
+					if ((part?.part_total ?? 1) > 1) {
+						const partTitle = part.display_title ?? `${getLayerTitle(layerType)}`;
+						return `${partTitle}: ${partContent}`;
+					}
+					return partContent;
+				})
+				.filter(Boolean)
+				.join('\n\n');
+
+			const updatedAt =
+				layerParts.length > 0
+					? Math.max(...layerParts.map((part) => part?.updated_at ?? 0))
+					: null;
+
 			return {
 				layerType,
 				title: getLayerTitle(layerType),
-				content: layer?.content ?? '',
-				status: normalizeLayerStatus(layer?.status),
-				updatedAt: layer?.updated_at ?? null
+				content,
+				status,
+				updatedAt: updatedAt && updatedAt > 0 ? updatedAt : null
 			};
 		});
 	};

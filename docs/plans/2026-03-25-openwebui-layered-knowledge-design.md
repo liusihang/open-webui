@@ -130,8 +130,39 @@ Suggested fields:
 - `source_ref_id` — Open Notebook `insight_id`
 - `transformation_ref_id` — Open Notebook transformation identifier
 - `content_hash` — optional file-content hash for stale detection
+- `part_index` — chunk part index (1-based)
+- `part_total` — chunk part count
+- `display_title` — e.g. `Abstract 1/3`
 - `created_at`
 - `updated_at`
+
+Identity rule:
+
+- unique key is `(knowledge_id, file_id, layer_type, part_index)`
+- non-chunked rows use `part_index=1`, `part_total=1`
+
+## File ↔ Source Mapping
+
+Open Notebook source mapping is stored in `file.meta`:
+
+- `open_notebook_source_id` for single-source files
+- `open_notebook_source_ids` for chunked files
+- `open_notebook_sync_status`
+- `open_notebook_last_synced_at`
+- `open_notebook_is_large_file`
+- `open_notebook_part_count`
+
+This avoids adding a second mapping table while keeping mapping durable.
+
+## Chunking Rules
+
+Large-file insight generation uses token-aware planning:
+
+- token estimator: `tiktoken` (`cl100k_base`)
+- max chunk size: `24000` tokens
+- trailing chunk is dropped if `<1000` tokens
+- paragraph boundaries are preserved where possible
+- fallback to hard token slicing only when one paragraph exceeds max chunk size
 
 Why a sidecar table instead of `knowledge.meta`:
 
@@ -308,8 +339,14 @@ When a file is added to a knowledge base and its existing Open WebUI ingestion i
 
 User actions in the workspace should allow:
 
-- regenerate one layer
-- regenerate all layers for one file
+- regenerate selected layers for one file (`layer_types`)
+- regenerate one layer via path convenience endpoint
+- backfill an entire knowledge base for legacy/older files
+
+Reset behavior stays explicit:
+
+- `POST /knowledge/{id}/reset` marks layered rows `stale` only
+- `POST /knowledge/{id}/layers/backfill` is the supported catch-up generation path
 
 ### Failure handling
 

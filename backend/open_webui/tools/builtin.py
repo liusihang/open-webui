@@ -1796,7 +1796,12 @@ def _layer_label(layer: str) -> str:
 
 def _prefix_source(source: str, layer: str) -> str:
     source_value = source or "Unknown"
-    return f"{_layer_label(layer)}: {source_value}"
+    layer_label = _layer_label(layer)
+    if source_value.startswith(f"{layer_label}:") or source_value.startswith(
+        f"{layer_label} "
+    ):
+        return source_value
+    return f"{layer_label}: {source_value}"
 
 
 def _decorate_layer_result_items(items: list[dict], layer: str) -> list[dict]:
@@ -2056,6 +2061,20 @@ async def view_knowledge_layers(
                 source = str(payload.get("source", "Unknown"))
                 payload["source"] = _prefix_source(source, layer_name)
                 payload["layer"] = layer_name
+            elif isinstance(payload, list):
+                normalized_items: list[dict] = []
+                for item in payload:
+                    if not isinstance(item, dict):
+                        continue
+                    source = str(item.get("source", "Unknown"))
+                    normalized_items.append(
+                        {
+                            **item,
+                            "source": _prefix_source(source, layer_name),
+                            "layer": layer_name,
+                        }
+                    )
+                layers[layer_name] = normalized_items
 
         return json.dumps(
             {

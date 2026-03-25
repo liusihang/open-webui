@@ -644,9 +644,15 @@ export const getKnowledgeFileLayers = async (
 export const regenerateKnowledgeFileLayers = async (
 	token: string,
 	knowledgeId: string,
-	fileId: string
+	fileId: string,
+	options?: {
+		layerTypes?: KnowledgeLayerType[];
+		force?: boolean;
+	}
 ) => {
 	let error = null;
+	const layerTypes = options?.layerTypes;
+	const force = options?.force ?? false;
 
 	const res = await fetch(
 		`${WEBUI_API_BASE_URL}/knowledge/${knowledgeId}/file/${fileId}/layers/regenerate`,
@@ -656,7 +662,11 @@ export const regenerateKnowledgeFileLayers = async (
 				Accept: 'application/json',
 				'Content-Type': 'application/json',
 				authorization: `Bearer ${token}`
-			}
+			},
+			body: JSON.stringify({
+				layer_types: layerTypes,
+				force
+			})
 		}
 	)
 		.then(async (response) => {
@@ -665,6 +675,47 @@ export const regenerateKnowledgeFileLayers = async (
 		})
 		.catch((err) => {
 			error = getApiErrorMessage(err, 'Failed to regenerate layers');
+			console.error(err);
+			return null;
+		});
+
+	if (error) {
+		throw error;
+	}
+
+	return res;
+};
+
+export const backfillKnowledgeLayers = async (
+	token: string,
+	knowledgeId: string,
+	options?: {
+		layerTypes?: KnowledgeLayerType[];
+		force?: boolean;
+	}
+) => {
+	let error = null;
+	const layerTypes = options?.layerTypes;
+	const force = options?.force ?? false;
+
+	const res = await fetch(`${WEBUI_API_BASE_URL}/knowledge/${knowledgeId}/layers/backfill`, {
+		method: 'POST',
+		headers: {
+			Accept: 'application/json',
+			'Content-Type': 'application/json',
+			authorization: `Bearer ${token}`
+		},
+		body: JSON.stringify({
+			layer_types: layerTypes,
+			force
+		})
+	})
+		.then(async (response) => {
+			if (!response.ok) throw await parseApiErrorBody(response);
+			return response.json();
+		})
+		.catch((err) => {
+			error = getApiErrorMessage(err, 'Failed to backfill layers');
 			console.error(err);
 			return null;
 		});

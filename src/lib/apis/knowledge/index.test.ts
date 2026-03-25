@@ -1,6 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 import {
+	backfillKnowledgeLayers,
 	getKnowledgeFileLayers,
 	regenerateKnowledgeFileLayerByType,
 	regenerateKnowledgeFileLayers
@@ -48,6 +49,30 @@ describe('knowledge layered api bindings', () => {
 			method: 'POST'
 		});
 		expect(result).toEqual({ status: 'queued' });
+	});
+
+	it('sends selected layer types for file-level regenerate', async () => {
+		const fetchMock = vi.fn().mockResolvedValue({
+			ok: true,
+			json: async () => ({ status: 'queued' })
+		});
+		vi.stubGlobal('fetch', fetchMock);
+
+		await regenerateKnowledgeFileLayers('token-1', 'kb-1', 'file-1', {
+			layerTypes: ['abstract', 'key_data'],
+			force: false
+		});
+
+		expect(fetchMock).toHaveBeenCalledTimes(1);
+		expect(fetchMock.mock.calls[0]?.[1]).toMatchObject({
+			method: 'POST'
+		});
+		expect(fetchMock.mock.calls[0]?.[1]?.body).toBe(
+			JSON.stringify({
+				layer_types: ['abstract', 'key_data'],
+				force: false
+			})
+		);
 	});
 
 	it('triggers regenerate for a single layer type', async () => {
@@ -100,5 +125,28 @@ describe('knowledge layered api bindings', () => {
 		await expect(getKnowledgeFileLayers('token-1', 'kb-1', 'file-1')).rejects.toBe(
 			'503 Service Unavailable'
 		);
+	});
+
+	it('triggers knowledge-level backfill with selected layers', async () => {
+		const fetchMock = vi.fn().mockResolvedValue({
+			ok: true,
+			json: async () => ({ total_files: 3, scheduled_files: 2, skipped_files: 1 })
+		});
+		vi.stubGlobal('fetch', fetchMock);
+
+		const result = await backfillKnowledgeLayers('token-1', 'kb-1', {
+			layerTypes: ['abstract', 'key_findings'],
+			force: false
+		});
+
+		expect(fetchMock).toHaveBeenCalledTimes(1);
+		expect(fetchMock.mock.calls[0]?.[0]).toContain('/api/v1/knowledge/kb-1/layers/backfill');
+		expect(fetchMock.mock.calls[0]?.[1]?.body).toBe(
+			JSON.stringify({
+				layer_types: ['abstract', 'key_findings'],
+				force: false
+			})
+		);
+		expect(result).toEqual({ total_files: 3, scheduled_files: 2, skipped_files: 1 });
 	});
 });

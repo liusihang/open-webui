@@ -3,7 +3,15 @@ import uuid
 from typing import Literal, Optional
 
 from pydantic import BaseModel, ConfigDict
-from sqlalchemy import BigInteger, Column, ForeignKey, Index, Text, UniqueConstraint
+from sqlalchemy import (
+    BigInteger,
+    Column,
+    ForeignKey,
+    Index,
+    Integer,
+    Text,
+    UniqueConstraint,
+)
 from sqlalchemy.orm import Session
 
 from open_webui.internal.db import Base, get_db_context
@@ -43,6 +51,9 @@ class KnowledgeFileLayer(Base):
     source_ref_id = Column(Text, nullable=True)
     transformation_ref_id = Column(Text, nullable=True)
     content_hash = Column(Text, nullable=True)
+    part_index = Column(Integer, nullable=False, default=1)
+    part_total = Column(Integer, nullable=False, default=1)
+    display_title = Column(Text, nullable=True)
     created_at = Column(BigInteger, nullable=False)
     updated_at = Column(BigInteger, nullable=False)
 
@@ -51,6 +62,7 @@ class KnowledgeFileLayer(Base):
             "knowledge_id",
             "file_id",
             "layer_type",
+            "part_index",
             name="uq_knowledge_file_layer_identity",
         ),
         Index("idx_knowledge_file_layer_knowledge_id", "knowledge_id"),
@@ -73,6 +85,9 @@ class KnowledgeFileLayerModel(BaseModel):
     source_ref_id: Optional[str] = None
     transformation_ref_id: Optional[str] = None
     content_hash: Optional[str] = None
+    part_index: int
+    part_total: int
+    display_title: Optional[str] = None
     created_at: int
     updated_at: int
 
@@ -88,6 +103,9 @@ class KnowledgeFileLayerUpsertForm(BaseModel):
     source_ref_id: Optional[str] = None
     transformation_ref_id: Optional[str] = None
     content_hash: Optional[str] = None
+    part_index: int = 1
+    part_total: int = 1
+    display_title: Optional[str] = None
 
 
 class KnowledgeFileLayerListResponse(BaseModel):
@@ -112,6 +130,12 @@ class KnowledgeFileLayerTable:
             now = int(time.time())
             layer_type = _normalize_layer_type(form_data.layer_type)
             status = _normalize_layer_status(form_data.status)
+            part_index = int(form_data.part_index or 1)
+            part_total = int(form_data.part_total or 1)
+            if part_index < 1:
+                raise ValueError("part_index must be >= 1")
+            if part_total < 1:
+                raise ValueError("part_total must be >= 1")
 
             row = (
                 db.query(KnowledgeFileLayer)
@@ -119,6 +143,7 @@ class KnowledgeFileLayerTable:
                     knowledge_id=form_data.knowledge_id,
                     file_id=form_data.file_id,
                     layer_type=layer_type,
+                    part_index=part_index,
                 )
                 .first()
             )
@@ -131,6 +156,8 @@ class KnowledgeFileLayerTable:
                 row.source_ref_id = form_data.source_ref_id
                 row.transformation_ref_id = form_data.transformation_ref_id
                 row.content_hash = form_data.content_hash
+                row.part_total = part_total
+                row.display_title = form_data.display_title
                 row.updated_at = now
             else:
                 row = KnowledgeFileLayer(
@@ -145,6 +172,9 @@ class KnowledgeFileLayerTable:
                     source_ref_id=form_data.source_ref_id,
                     transformation_ref_id=form_data.transformation_ref_id,
                     content_hash=form_data.content_hash,
+                    part_index=part_index,
+                    part_total=part_total,
+                    display_title=form_data.display_title,
                     created_at=now,
                     updated_at=now,
                 )
@@ -161,7 +191,11 @@ class KnowledgeFileLayerTable:
             rows = (
                 db.query(KnowledgeFileLayer)
                 .filter_by(knowledge_id=knowledge_id, file_id=file_id)
-                .order_by(KnowledgeFileLayer.updated_at.desc())
+                .order_by(
+                    KnowledgeFileLayer.layer_type.asc(),
+                    KnowledgeFileLayer.part_index.asc(),
+                    KnowledgeFileLayer.updated_at.desc(),
+                )
                 .all()
             )
             return [KnowledgeFileLayerModel.model_validate(row) for row in rows]
@@ -176,7 +210,11 @@ class KnowledgeFileLayerTable:
             query = db.query(KnowledgeFileLayer).filter_by(file_id=file_id)
             if knowledge_ids:
                 query = query.filter(KnowledgeFileLayer.knowledge_id.in_(knowledge_ids))
-            rows = query.order_by(KnowledgeFileLayer.updated_at.desc()).all()
+            rows = query.order_by(
+                KnowledgeFileLayer.layer_type.asc(),
+                KnowledgeFileLayer.part_index.asc(),
+                KnowledgeFileLayer.updated_at.desc(),
+            ).all()
             return [KnowledgeFileLayerModel.model_validate(row) for row in rows]
 
     def query_layer_rows(
@@ -214,30 +252,50 @@ class KnowledgeFileLayerTable:
                 )
 
             rows = (
-                rows_query.order_by(KnowledgeFileLayer.updated_at.desc())
+                rows_query.order_by(
+                    KnowledgeFileLayer.layer_type.asc(),
+                    KnowledgeFileLayer.part_index.asc(),
+                    KnowledgeFileLayer.updated_at.desc(),
+                )
                 .limit(limit)
                 .all()
             )
             return [
-                KnowledgeFileLayerQueryRow(
-                    layer_type=row.layer_type,
-                    content=row.content or "",
-                    source=file.filename or row.title or row.file_id,
-                    file_id=row.file_id,
-                    knowledge_id=row.knowledge_id,
-                )
+                (
+                    lambda base_source: KnowledgeFileLayerQueryRow(
+                        layer_type=row.layer_type,
+                        content=row.content or "",
+                        source=(
+                            f"{row.display_title}: {base_source}"
+                            if row.display_title
+                            else base_source
+                        ),
+                        file_id=row.file_id,
+                        knowledge_id=row.knowledge_id,
+                    )
+                )(file.filename or row.title or row.file_id)
                 for row, file in rows
             ]
 
     def delete_layers_by_file(
-        self, knowledge_id: str, file_id: str, db: Optional[Session] = None
+        self,
+        knowledge_id: str,
+        file_id: str,
+        layer_types: Optional[list[str]] = None,
+        db: Optional[Session] = None,
     ) -> int:
         with get_db_context(db) as db:
-            deleted = (
-                db.query(KnowledgeFileLayer)
-                .filter_by(knowledge_id=knowledge_id, file_id=file_id)
-                .delete()
+            query = db.query(KnowledgeFileLayer).filter_by(
+                knowledge_id=knowledge_id, file_id=file_id
             )
+            if layer_types:
+                normalized_layer_types = [
+                    _normalize_layer_type(layer_type) for layer_type in layer_types
+                ]
+                query = query.filter(
+                    KnowledgeFileLayer.layer_type.in_(normalized_layer_types)
+                )
+            deleted = query.delete()
             db.commit()
             return deleted
 

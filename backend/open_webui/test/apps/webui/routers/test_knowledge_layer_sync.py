@@ -15,6 +15,10 @@ def _fake_user():
     return SimpleNamespace(id="user-1", role="user")
 
 
+def _fake_admin():
+    return SimpleNamespace(id="admin-1", role="admin")
+
+
 def _fake_knowledge():
     return SimpleNamespace(
         id="kb-1",
@@ -208,3 +212,117 @@ async def test_reset_knowledge_marks_all_layers_stale(monkeypatch):
 
     assert captured["knowledge_id"] == "kb-1"
     assert response.id == "kb-1"
+
+
+@pytest.mark.asyncio
+async def test_reset_knowledge_only_marks_stale_not_backfill(monkeypatch):
+    captured = {"stale": False, "backfill": False, "sync": False}
+
+    monkeypatch.setattr(
+        knowledge_mod.Knowledges,
+        "get_knowledge_by_id",
+        lambda *args, **kwargs: _fake_knowledge(),
+        raising=False,
+    )
+    monkeypatch.setattr(
+        knowledge_mod.Knowledges,
+        "reset_knowledge_by_id",
+        lambda *args, **kwargs: _fake_knowledge(),
+        raising=False,
+    )
+    monkeypatch.setattr(
+        knowledge_mod.VECTOR_DB_CLIENT,
+        "delete_collection",
+        lambda *args, **kwargs: None,
+        raising=False,
+    )
+    monkeypatch.setattr(
+        knowledge_mod,
+        "invalidate_bm25_cache",
+        lambda *args, **kwargs: None,
+        raising=False,
+    )
+    monkeypatch.setattr(
+        knowledge_mod,
+        "mark_layers_for_knowledge_stale",
+        lambda *args, **kwargs: captured.__setitem__("stale", True),
+        raising=False,
+    )
+    monkeypatch.setattr(
+        knowledge_mod,
+        "backfill_layers_for_knowledge",
+        lambda *args, **kwargs: captured.__setitem__("backfill", True),
+        raising=False,
+    )
+    monkeypatch.setattr(
+        knowledge_mod,
+        "sync_layers_for_file",
+        lambda *args, **kwargs: captured.__setitem__("sync", True),
+        raising=False,
+    )
+
+    await knowledge_mod.reset_knowledge_by_id(
+        id="kb-1",
+        user=_fake_user(),
+        db=None,
+    )
+
+    assert captured["stale"] is True
+    assert captured["backfill"] is False
+    assert captured["sync"] is False
+
+
+@pytest.mark.asyncio
+async def test_reindex_does_not_trigger_backfill_flow(monkeypatch):
+    captured = {"processed": False, "backfill": False}
+
+    monkeypatch.setattr(
+        knowledge_mod.Knowledges,
+        "get_knowledge_bases",
+        lambda *args, **kwargs: [SimpleNamespace(id="kb-1")],
+        raising=False,
+    )
+    monkeypatch.setattr(
+        knowledge_mod.Knowledges,
+        "get_files_by_id",
+        lambda *args, **kwargs: [SimpleNamespace(id="file-1", filename="f.txt")],
+        raising=False,
+    )
+    monkeypatch.setattr(
+        knowledge_mod.VECTOR_DB_CLIENT,
+        "has_collection",
+        lambda *args, **kwargs: False,
+        raising=False,
+    )
+    monkeypatch.setattr(
+        knowledge_mod,
+        "process_file",
+        lambda *args, **kwargs: captured.__setitem__("processed", True),
+        raising=False,
+    )
+
+    async def fake_run_in_threadpool(func, *args, **kwargs):
+        return func(*args, **kwargs)
+
+    monkeypatch.setattr(
+        knowledge_mod,
+        "run_in_threadpool",
+        fake_run_in_threadpool,
+        raising=False,
+    )
+    monkeypatch.setattr(
+        knowledge_mod,
+        "backfill_layers_for_knowledge",
+        lambda *args, **kwargs: captured.__setitem__("backfill", True),
+        raising=False,
+    )
+
+    response = await knowledge_mod.reindex_knowledge_files(
+        request=_fake_request(),
+        user=_fake_admin(),
+        db=None,
+    )
+
+    assert response is True
+    assert captured["processed"] is True
+    assert captured["backfill"] is False
