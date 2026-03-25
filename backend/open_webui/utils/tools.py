@@ -78,8 +78,12 @@ from open_webui.tools.builtin import (
     search_knowledge_bases,
     query_knowledge_bases,
     search_knowledge_files,
-    query_knowledge_files,
+    query_knowledge_abstract,
+    query_knowledge_key_findings,
+    query_knowledge_key_data,
+    query_knowledge_full_text,
     view_file,
+    view_knowledge_layers,
     view_knowledge_file,
     view_skill,
 )
@@ -149,7 +153,13 @@ def resolve_effective_knowledge_builtin_tools(
     if not feature_enabled or not scope_items:
         return []
 
-    tool_names = ["query_knowledge_files"]
+    tool_names = [
+        "query_knowledge_abstract",
+        "query_knowledge_key_findings",
+        "query_knowledge_key_data",
+        "query_knowledge_full_text",
+        "view_knowledge_layers",
+    ]
     knowledge_types = {
         item.get("type") for item in scope_items if isinstance(item, dict)
     }
@@ -534,7 +544,11 @@ def get_builtin_tools(
     builtin_function_map = {
         func.__name__: func
         for func in [
-            query_knowledge_files,
+            query_knowledge_abstract,
+            query_knowledge_key_findings,
+            query_knowledge_key_data,
+            query_knowledge_full_text,
+            view_knowledge_layers,
             view_file,
             view_note,
         ]

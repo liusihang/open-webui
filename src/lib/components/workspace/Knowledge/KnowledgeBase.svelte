@@ -27,6 +27,9 @@
 	import {
 		addFileToKnowledgeById,
 		getKnowledgeById,
+		getKnowledgeFileLayers,
+		regenerateKnowledgeFileLayerByType,
+		regenerateKnowledgeFileLayers,
 		removeFileFromKnowledgeById,
 		resetKnowledgeById,
 		updateFileFromKnowledgeById,
@@ -40,6 +43,7 @@
 
 	import Spinner from '$lib/components/common/Spinner.svelte';
 	import Files from './KnowledgeBase/Files.svelte';
+	import LayersPanel from './KnowledgeBase/LayersPanel.svelte';
 	import AddFilesPlaceholder from '$lib/components/AddFilesPlaceholder.svelte';
 
 	import AddContentMenu from './KnowledgeBase/AddContentMenu.svelte';
@@ -55,6 +59,10 @@
 	import DropdownOptions from '$lib/components/common/DropdownOptions.svelte';
 	import Pagination from '$lib/components/common/Pagination.svelte';
 	import AttachWebpageModal from '$lib/components/chat/MessageInput/AttachWebpageModal.svelte';
+	import type {
+		KnowledgeLayerItem,
+		KnowledgeLayerType
+	} from './KnowledgeBase/LayersPanel.svelte';
 
 	let largeScreen = true;
 
@@ -87,6 +95,11 @@
 	let selectedFileId = null;
 	let selectedFile = null;
 	let selectedFileContent = '';
+	let selectedFileLayers: KnowledgeLayerItem[] = [];
+	let selectedFileLayersError: string | null = null;
+	let selectedFileLayersLoading = false;
+	let isRegeneratingAllLayers = false;
+	let regeneratingLayerType: KnowledgeLayerType | null = null;
 
 	let inputFiles = null;
 
@@ -168,10 +181,118 @@
 		return res;
 	};
 
+	const normalizeLayerItems = (payload: unknown): KnowledgeLayerItem[] => {
+		if (!payload) {
+			return [];
+		}
+
+		if (Array.isArray(payload)) {
+			return payload as KnowledgeLayerItem[];
+		}
+
+		if (typeof payload === 'object' && payload !== null && 'items' in payload) {
+			const items = (payload as { items?: unknown }).items;
+			return Array.isArray(items) ? (items as KnowledgeLayerItem[]) : [];
+		}
+
+		return [];
+	};
+
+	const refreshSelectedFileLayers = async (fileId: string, showErrors = true) => {
+		if (!knowledge?.id || !fileId) {
+			selectedFileLayers = [];
+			selectedFileLayersError = null;
+			return;
+		}
+
+		selectedFileLayersLoading = true;
+		selectedFileLayersError = null;
+
+		try {
+			const response = await getKnowledgeFileLayers(localStorage.token, knowledge.id, fileId).catch(
+				(e) => {
+					throw e;
+				}
+			);
+			selectedFileLayers = normalizeLayerItems(response);
+		} catch (e) {
+			const errorMessage = `${e}`;
+			selectedFileLayers = [];
+			selectedFileLayersError = errorMessage;
+			if (showErrors) {
+				toast.error(errorMessage);
+			}
+		} finally {
+			selectedFileLayersLoading = false;
+		}
+	};
+
+	const regenerateAllLayersHandler = async () => {
+		if (!knowledge?.id || !selectedFileId || selectedFileLayersLoading || regeneratingLayerType) {
+			return;
+		}
+
+		isRegeneratingAllLayers = true;
+		try {
+			const response = await regenerateKnowledgeFileLayers(
+				localStorage.token,
+				knowledge.id,
+				selectedFileId
+			).catch((e) => {
+				throw e;
+			});
+
+			if (response) {
+				toast.success($i18n.t('Layer regeneration started.'));
+				await refreshSelectedFileLayers(selectedFileId, false);
+			}
+		} catch (e) {
+			toast.error(`${e}`);
+		} finally {
+			isRegeneratingAllLayers = false;
+		}
+	};
+
+	const regenerateLayerHandler = async (layerType: KnowledgeLayerType) => {
+		if (!knowledge?.id || !selectedFileId || isRegeneratingAllLayers || selectedFileLayersLoading) {
+			return;
+		}
+
+		regeneratingLayerType = layerType;
+		try {
+			const response = await regenerateKnowledgeFileLayerByType(
+				localStorage.token,
+				knowledge.id,
+				selectedFileId,
+				layerType
+			).catch((e) => {
+				throw e;
+			});
+
+			if (response) {
+				toast.success($i18n.t('Layer regeneration started.'));
+				await refreshSelectedFileLayers(selectedFileId, false);
+			}
+		} catch (e) {
+			toast.error(`${e}`);
+		} finally {
+			regeneratingLayerType = null;
+		}
+	};
+
+	const retrySelectedFileLayersHandler = async () => {
+		if (!selectedFileId) {
+			return;
+		}
+
+		await refreshSelectedFileLayers(selectedFileId);
+	};
+
 	const fileSelectHandler = async (file) => {
 		try {
 			selectedFile = file;
 			selectedFileContent = selectedFile?.data?.content || '';
+			await refreshSelectedFileLayers(file?.id, false);
 		} catch (e) {
 			toast.error($i18n.t('Failed to load file content.'));
 		}
@@ -933,6 +1054,9 @@
 						placeholder={$i18n.t('Search Collection')}
 						on:focus={() => {
 							selectedFileId = null;
+							selectedFile = null;
+							selectedFileLayers = [];
+							selectedFileLayersError = null;
 						}}
 					/>
 
@@ -1035,12 +1159,16 @@
 														fileSelectHandler(file);
 													} else {
 														selectedFile = null;
+														selectedFileLayers = [];
+														selectedFileLayersError = null;
 													}
 												}
 											}}
 											onDelete={(fileId) => {
 												selectedFileId = null;
 												selectedFile = null;
+												selectedFileLayers = [];
+												selectedFileLayersError = null;
 
 												deleteFileHandler(fileId);
 											}}
@@ -1051,9 +1179,14 @@
 										<Pagination bind:page={currentPage} count={fileItemsTotal} perPage={30} />
 									{/if}
 								{:else}
-									<div class="my-3 flex flex-col justify-center text-center text-gray-500 text-xs">
-										<div>
-											{$i18n.t('No content found')}
+									<div
+										class="my-3 flex flex-col justify-center text-center text-gray-500 dark:text-gray-400 text-xs px-4 py-8 rounded-lg border border-dashed border-gray-200 dark:border-gray-800"
+										role="status"
+										aria-live="polite"
+									>
+										<div>{$i18n.t('No content found')}</div>
+										<div class="mt-1 text-[11px]">
+											{$i18n.t('Add files or attach webpages to get started.')}
 										</div>
 									</div>
 								{/if}
@@ -1068,6 +1201,8 @@
 							onClose={() => {
 								selectedFileId = null;
 								selectedFile = null;
+								selectedFileLayers = [];
+								selectedFileLayersError = null;
 							}}
 						>
 							<div class="flex flex-col justify-start h-full max-h-full">
@@ -1080,6 +1215,8 @@
 												on:click={() => {
 													selectedFileId = null;
 													selectedFile = null;
+													selectedFileLayers = [];
+													selectedFileLayersError = null;
 												}}
 											>
 												<ChevronLeft strokeWidth="2.5" />
@@ -1109,9 +1246,21 @@
 										{/if}
 									</div>
 
+									<LayersPanel
+										layers={selectedFileLayers}
+										loading={selectedFileLayersLoading}
+										error={selectedFileLayersError}
+										canManage={knowledge?.write_access}
+										regeneratingAll={isRegeneratingAllLayers}
+										{regeneratingLayerType}
+										onRegenerateAll={regenerateAllLayersHandler}
+										onRegenerateLayer={regenerateLayerHandler}
+										onRetry={retrySelectedFileLayersHandler}
+									/>
+
 									{#key selectedFile.id}
 										<textarea
-											class="w-full h-full text-sm outline-none resize-none px-3 py-2"
+											class="w-full h-full text-sm outline-none resize-none px-3 py-2 leading-5 border-t border-gray-100 dark:border-gray-850 focus-visible:ring-2 focus-visible:ring-gray-300 dark:focus-visible:ring-gray-700"
 											bind:value={selectedFileContent}
 											disabled={!knowledge?.write_access}
 											aria-label={$i18n.t('File content')}
@@ -1124,12 +1273,20 @@
 					{/if}
 				</div>
 			{:else}
-				<div class="my-10">
+				<div class="my-10 flex items-center justify-center gap-2 text-xs text-gray-500 dark:text-gray-400">
 					<Spinner className="size-4" />
+					<span>{$i18n.t('Loading content...')}</span>
 				</div>
 			{/if}
 		</div>
 	{:else}
-		<Spinner className="size-5" />
+		<div
+			class="h-full w-full flex items-center justify-center gap-2 text-sm text-gray-500 dark:text-gray-400"
+			role="status"
+			aria-live="polite"
+		>
+			<Spinner className="size-5" />
+			<span>{$i18n.t('Loading knowledge base...')}</span>
+		</div>
 	{/if}
 </div>

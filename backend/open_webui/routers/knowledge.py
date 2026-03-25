@@ -18,6 +18,10 @@ from open_webui.models.knowledge import (
     KnowledgeResponse,
     KnowledgeUserResponse,
 )
+from open_webui.models.knowledge_layers import (
+    KnowledgeFileLayerListResponse,
+    KnowledgeLayers,
+)
 from open_webui.models.files import Files, FileModel, FileMetadataResponse
 from open_webui.retrieval.bm25_cache import invalidate_bm25_cache
 from open_webui.retrieval.vector.factory import VECTOR_DB_CLIENT
@@ -37,6 +41,12 @@ from open_webui.models.access_grants import AccessGrants
 
 from open_webui.config import BYPASS_ADMIN_ACCESS_CONTROL
 from open_webui.models.models import Models, ModelForm
+from open_webui.utils.layered_knowledge import (
+    mark_layers_for_file_stale,
+    mark_layers_for_knowledge_stale,
+    regenerate_layer_for_file,
+    sync_layers_for_file,
+)
 
 log = logging.getLogger(__name__)
 
@@ -634,6 +644,153 @@ class KnowledgeFileIdForm(BaseModel):
     file_id: str
 
 
+class KnowledgeLayerRegenerateForm(BaseModel):
+    layer_type: Optional[str] = None
+
+
+def _has_knowledge_permission(
+    knowledge,
+    user,
+    permission: str,
+    db: Optional[Session] = None,
+) -> bool:
+    if knowledge.user_id == user.id:
+        return True
+    if user.role == "admin":
+        return True
+    return AccessGrants.has_access(
+        user_id=user.id,
+        resource_type="knowledge",
+        resource_id=knowledge.id,
+        permission=permission,
+        db=db,
+    )
+
+
+@router.get(
+    "/{id}/file/{file_id}/layers", response_model=KnowledgeFileLayerListResponse
+)
+def get_knowledge_file_layers(
+    id: str,
+    file_id: str,
+    user=Depends(get_verified_user),
+    db: Session = Depends(get_session),
+):
+    knowledge = Knowledges.get_knowledge_by_id(id=id, db=db)
+    if not knowledge:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=ERROR_MESSAGES.NOT_FOUND,
+        )
+
+    if not _has_knowledge_permission(knowledge, user, "read", db=db):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=ERROR_MESSAGES.ACCESS_PROHIBITED,
+        )
+
+    if not Knowledges.has_file(knowledge_id=id, file_id=file_id, db=db):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=ERROR_MESSAGES.NOT_FOUND,
+        )
+
+    layers = KnowledgeLayers.get_layers_by_file(id, file_id, db=db)
+    return KnowledgeFileLayerListResponse(items=layers, total=len(layers))
+
+
+@router.post(
+    "/{id}/file/{file_id}/layers/regenerate",
+    response_model=KnowledgeFileLayerListResponse,
+)
+async def regenerate_knowledge_file_layers(
+    request: Request,
+    id: str,
+    file_id: str,
+    form_data: Optional[KnowledgeLayerRegenerateForm] = None,
+    user=Depends(get_verified_user),
+    db: Session = Depends(get_session),
+):
+    knowledge = Knowledges.get_knowledge_by_id(id=id, db=db)
+    if not knowledge:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=ERROR_MESSAGES.NOT_FOUND,
+        )
+
+    if not _has_knowledge_permission(knowledge, user, "write", db=db):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=ERROR_MESSAGES.ACCESS_PROHIBITED,
+        )
+
+    if not Knowledges.has_file(knowledge_id=id, file_id=file_id, db=db):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=ERROR_MESSAGES.NOT_FOUND,
+        )
+
+    try:
+        layer_type = form_data.layer_type if form_data else None
+        if layer_type:
+            regenerate_layer_for_file(
+                request, id, file_id, layer_type=layer_type, db=db
+            )
+        else:
+            sync_layers_for_file(request, id, file_id, db=db)
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=str(exc),
+        )
+
+    layers = KnowledgeLayers.get_layers_by_file(id, file_id, db=db)
+    return KnowledgeFileLayerListResponse(items=layers, total=len(layers))
+
+
+@router.post(
+    "/{id}/file/{file_id}/layers/regenerate/{layer_type}",
+    response_model=KnowledgeFileLayerListResponse,
+)
+async def regenerate_knowledge_file_layer_by_type(
+    request: Request,
+    id: str,
+    file_id: str,
+    layer_type: str,
+    user=Depends(get_verified_user),
+    db: Session = Depends(get_session),
+):
+    knowledge = Knowledges.get_knowledge_by_id(id=id, db=db)
+    if not knowledge:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=ERROR_MESSAGES.NOT_FOUND,
+        )
+
+    if not _has_knowledge_permission(knowledge, user, "write", db=db):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=ERROR_MESSAGES.ACCESS_PROHIBITED,
+        )
+
+    if not Knowledges.has_file(knowledge_id=id, file_id=file_id, db=db):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=ERROR_MESSAGES.NOT_FOUND,
+        )
+
+    try:
+        regenerate_layer_for_file(request, id, file_id, layer_type=layer_type, db=db)
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=str(exc),
+        )
+
+    layers = KnowledgeLayers.get_layers_by_file(id, file_id, db=db)
+    return KnowledgeFileLayerListResponse(items=layers, total=len(layers))
+
+
 @router.post("/{id}/file/add", response_model=Optional[KnowledgeFilesResponse])
 def add_file_to_knowledge_by_id(
     request: Request,
@@ -690,6 +847,15 @@ def add_file_to_knowledge_by_id(
         Knowledges.add_file_to_knowledge_by_id(
             knowledge_id=id, file_id=form_data.file_id, user_id=user.id, db=db
         )
+        try:
+            sync_layers_for_file(request, id, form_data.file_id, db=db)
+        except Exception as layer_exc:
+            log.warning(
+                "Layer sync failed after adding file to knowledge=%s file=%s: %s",
+                id,
+                form_data.file_id,
+                layer_exc,
+            )
     except Exception as e:
         log.debug(e)
         raise HTTPException(
@@ -763,12 +929,22 @@ def update_file_from_knowledge_by_id(
 
     # Add content to the vector database
     try:
+        mark_layers_for_file_stale(id, form_data.file_id, db=db)
         process_file(
             request,
             ProcessFileForm(file_id=form_data.file_id, collection_name=id),
             user=user,
             db=db,
         )
+        try:
+            sync_layers_for_file(request, id, form_data.file_id, db=db)
+        except Exception as layer_exc:
+            log.warning(
+                "Layer sync failed after updating file in knowledge=%s file=%s: %s",
+                id,
+                form_data.file_id,
+                layer_exc,
+            )
     except Exception as e:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
@@ -840,6 +1016,7 @@ def remove_file_from_knowledge_by_id(
     Knowledges.remove_file_from_knowledge_by_id(
         knowledge_id=id, file_id=form_data.file_id, db=db
     )
+    KnowledgeLayers.delete_layers_by_file(id, form_data.file_id, db=db)
 
     # Remove content from the vector database
     try:
@@ -999,6 +1176,7 @@ async def reset_knowledge_by_id(
         pass
 
     knowledge = Knowledges.reset_knowledge_by_id(id=id, db=db)
+    mark_layers_for_knowledge_stale(id, db=db)
     return knowledge
 
 
@@ -1075,6 +1253,15 @@ async def add_files_to_knowledge_batch(
         Knowledges.add_file_to_knowledge_by_id(
             knowledge_id=id, file_id=file_id, user_id=user.id, db=db
         )
+        try:
+            sync_layers_for_file(request, id, file_id, db=db)
+        except Exception as layer_exc:
+            log.warning(
+                "Layer sync failed after batch add for knowledge=%s file=%s: %s",
+                id,
+                file_id,
+                layer_exc,
+            )
 
     # If there were any errors, include them in the response
     if result.errors:

@@ -2416,6 +2416,42 @@ DEERFLOW_REUSE_THREADS = PersistentConfig(
     "deep_research.deerflow.reuse_threads",
     os.environ.get("DEERFLOW_REUSE_THREADS", "True").lower() == "true",
 )
+
+OPEN_NOTEBOOK_BASE_URL = PersistentConfig(
+    "OPEN_NOTEBOOK_BASE_URL",
+    "layered_knowledge.open_notebook.base_url",
+    os.environ.get("OPEN_NOTEBOOK_BASE_URL", "").rstrip("/"),
+)
+
+OPEN_NOTEBOOK_API_PASSWORD = PersistentConfig(
+    "OPEN_NOTEBOOK_API_PASSWORD",
+    "layered_knowledge.open_notebook.api_password",
+    os.environ.get("OPEN_NOTEBOOK_API_PASSWORD", ""),
+)
+
+OPEN_NOTEBOOK_TIMEOUT_SECS = PersistentConfig(
+    "OPEN_NOTEBOOK_TIMEOUT_SECS",
+    "layered_knowledge.open_notebook.timeout_secs",
+    int(os.environ.get("OPEN_NOTEBOOK_TIMEOUT_SECS", "30")),
+)
+
+OPEN_NOTEBOOK_TRANSFORMATION_ABSTRACT = PersistentConfig(
+    "OPEN_NOTEBOOK_TRANSFORMATION_ABSTRACT",
+    "layered_knowledge.open_notebook.transformations.abstract",
+    os.environ.get("OPEN_NOTEBOOK_TRANSFORMATION_ABSTRACT", ""),
+)
+
+OPEN_NOTEBOOK_TRANSFORMATION_KEY_FINDINGS = PersistentConfig(
+    "OPEN_NOTEBOOK_TRANSFORMATION_KEY_FINDINGS",
+    "layered_knowledge.open_notebook.transformations.key_findings",
+    os.environ.get("OPEN_NOTEBOOK_TRANSFORMATION_KEY_FINDINGS", ""),
+)
+
+OPEN_NOTEBOOK_TRANSFORMATION_KEY_DATA = PersistentConfig(
+    "OPEN_NOTEBOOK_TRANSFORMATION_KEY_DATA",
+    "layered_knowledge.open_notebook.transformations.key_data",
+    os.environ.get("OPEN_NOTEBOOK_TRANSFORMATION_KEY_DATA", ""),
+)
 CODE_INTERPRETER_ENGINE = PersistentConfig(
     "CODE_INTERPRETER_ENGINE",
     "code_interpreter.engine",

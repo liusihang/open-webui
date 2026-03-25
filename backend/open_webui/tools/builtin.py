@@ -10,6 +10,7 @@ import json
 import logging
 import time
 import asyncio
+import inspect
 import types
 from typing import Optional
 
@@ -1753,6 +1754,363 @@ async def view_knowledge_file(
         return json.dumps({"error": str(e)})
 
 
+def _coerce_count(count: int | str, default: int = 5) -> int:
+    if isinstance(count, str):
+        try:
+            return int(count)
+        except ValueError:
+            return default
+    return count
+
+
+def _coerce_knowledge_ids(knowledge_ids: Optional[list[str]] | str) -> Optional[list[str]]:
+    if isinstance(knowledge_ids, str):
+        if knowledge_ids.lower() in ("none", "null", ""):
+            return None
+        try:
+            return json.loads(knowledge_ids)
+        except json.JSONDecodeError:
+            return [knowledge_ids]
+    return knowledge_ids
+
+
+def _resolve_effective_scope(
+    metadata: dict | None, model_knowledge: list[dict] | None
+) -> list[dict]:
+    metadata = metadata or {}
+    effective_scope = metadata.get("effective_knowledge_scope") or []
+    if not effective_scope:
+        attached_scope = metadata.get("attached_knowledge_scope") or []
+        effective_scope = [*(model_knowledge or []), *attached_scope]
+    return effective_scope
+
+
+def _layer_label(layer: str) -> str:
+    return {
+        "abstract": "Abstract",
+        "key_findings": "Key Findings",
+        "key_data": "Key Data",
+        "full_text": "Full Text",
+    }.get(layer, layer.replace("_", " ").title())
+
+
+def _prefix_source(source: str, layer: str) -> str:
+    source_value = source or "Unknown"
+    return f"{_layer_label(layer)}: {source_value}"
+
+
+def _decorate_layer_result_items(items: list[dict], layer: str) -> list[dict]:
+    decorated: list[dict] = []
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        source = item.get("source", "Unknown")
+        decorated.append(
+            {
+                **item,
+                "layer": layer,
+                "source": _prefix_source(str(source), layer),
+            }
+        )
+    return decorated
+
+
+async def _query_layer_rows(
+    *,
+    layer: str,
+    query: str,
+    scope_items: list[dict],
+    count: int,
+    __request__: Request,
+    __user__: dict,
+) -> list[dict]:
+    """
+    Thin adapter to a layered knowledge backend.
+
+    This implementation intentionally assumes a small contract and does not hardcode
+    a specific backend module shape. If no compatible backend is loaded yet, it fails
+    explicitly so callers can surface a clear error instead of silently falling back.
+    """
+    try:
+        from open_webui.utils import layered_knowledge
+    except Exception as exc:
+        raise RuntimeError("Layered knowledge backend is not configured") from exc
+
+    candidate_names = ["query_layer_rows", "query_layer", "search_layer"]
+    for name in candidate_names:
+        fn = getattr(layered_knowledge, name, None)
+        if not callable(fn):
+            continue
+
+        kwargs = {
+            "layer": layer,
+            "query": query,
+            "count": count,
+            "scope_items": scope_items,
+            "request": __request__,
+            "user": __user__,
+        }
+        try:
+            result = fn(**kwargs)
+        except TypeError:
+            continue
+
+        if inspect.isawaitable(result):
+            result = await result
+        return result or []
+
+    raise RuntimeError("No compatible layered knowledge query function was found")
+
+
+async def _view_layer_rows(
+    *,
+    file_id: str,
+    scope_items: list[dict],
+    __request__: Request,
+    __user__: dict,
+) -> dict:
+    try:
+        from open_webui.utils import layered_knowledge
+    except Exception as exc:
+        raise RuntimeError("Layered knowledge backend is not configured") from exc
+
+    candidate_names = ["view_file_layers", "get_file_layers"]
+    for name in candidate_names:
+        fn = getattr(layered_knowledge, name, None)
+        if not callable(fn):
+            continue
+
+        kwargs = {
+            "file_id": file_id,
+            "scope_items": scope_items,
+            "request": __request__,
+            "user": __user__,
+        }
+        try:
+            result = fn(**kwargs)
+        except TypeError:
+            continue
+
+        if inspect.isawaitable(result):
+            result = await result
+        return result or {"file_id": file_id, "layers": {}}
+
+    raise RuntimeError("No compatible layered knowledge view function was found")
+
+
+async def _query_knowledge_layer(
+    *,
+    layer: str,
+    query: str,
+    count: int = 5,
+    __request__: Request = None,
+    __user__: dict = None,
+    __metadata__: dict = None,
+    __model_knowledge__: list[dict] = None,
+) -> str:
+    if __request__ is None:
+        return json.dumps({"error": "Request context not available"})
+    if not __user__:
+        return json.dumps({"error": "User context not available"})
+
+    count = _coerce_count(count)
+    effective_scope = _resolve_effective_scope(__metadata__, __model_knowledge__)
+    if not effective_scope:
+        return json.dumps({"error": "No effective knowledge scope"})
+
+    try:
+        rows = await _query_layer_rows(
+            layer=layer,
+            query=query,
+            scope_items=effective_scope,
+            count=count,
+            __request__=__request__,
+            __user__=__user__,
+        )
+        return json.dumps(
+            _decorate_layer_result_items(rows[:count], layer),
+            ensure_ascii=False,
+        )
+    except Exception as e:
+        log.exception(f"query_knowledge_{layer} error: {e}")
+        return json.dumps({"error": str(e)})
+
+
+async def query_knowledge_abstract(
+    query: str,
+    count: int = 5,
+    __request__: Request = None,
+    __user__: dict = None,
+    __metadata__: dict = None,
+    __model_knowledge__: list[dict] = None,
+) -> str:
+    """
+    Search only the `abstract` layer for scoped knowledge documents.
+    Use this first for broad questions like "what is this document about?" or
+    when you need quick triage before drilling into details.
+
+    :param query: Natural language summary-level query
+    :param count: Maximum number of abstract results to return
+    :return: JSON list of abstract matches with `layer` and layer-tagged `source`
+    """
+    return await _query_knowledge_layer(
+        layer="abstract",
+        query=query,
+        count=count,
+        __request__=__request__,
+        __user__=__user__,
+        __metadata__=__metadata__,
+        __model_knowledge__=__model_knowledge__,
+    )
+
+
+async def query_knowledge_key_findings(
+    query: str,
+    count: int = 5,
+    __request__: Request = None,
+    __user__: dict = None,
+    __metadata__: dict = None,
+    __model_knowledge__: list[dict] = None,
+) -> str:
+    """
+    Search only the `key_findings` layer for scoped knowledge documents.
+    Use this for conclusions, takeaways, comparisons, claims, and risk-focused questions.
+
+    :param query: Finding-oriented query
+    :param count: Maximum number of key findings results to return
+    :return: JSON list of finding matches with `layer` and layer-tagged `source`
+    """
+    return await _query_knowledge_layer(
+        layer="key_findings",
+        query=query,
+        count=count,
+        __request__=__request__,
+        __user__=__user__,
+        __metadata__=__metadata__,
+        __model_knowledge__=__model_knowledge__,
+    )
+
+
+async def query_knowledge_key_data(
+    query: str,
+    count: int = 5,
+    __request__: Request = None,
+    __user__: dict = None,
+    __metadata__: dict = None,
+    __model_knowledge__: list[dict] = None,
+) -> str:
+    """
+    Search only the `key_data` layer for scoped knowledge documents.
+    Use this for metrics, numbers, dates, parameters, and other fact-like values.
+
+    :param query: Data-oriented query
+    :param count: Maximum number of key data results to return
+    :return: JSON list of key data matches with `layer` and layer-tagged `source`
+    """
+    return await _query_knowledge_layer(
+        layer="key_data",
+        query=query,
+        count=count,
+        __request__=__request__,
+        __user__=__user__,
+        __metadata__=__metadata__,
+        __model_knowledge__=__model_knowledge__,
+    )
+
+
+async def view_knowledge_layers(
+    file_id: str,
+    __request__: Request = None,
+    __user__: dict = None,
+    __metadata__: dict = None,
+    __model_knowledge__: list[dict] = None,
+) -> str:
+    """
+    Return all available layered summaries (`abstract`, `key_findings`, `key_data`)
+    for a single scoped file. Use this to inspect what structured layers already exist
+    before deciding whether to query deeper or move to full text.
+
+    :param file_id: File identifier in the current scoped knowledge
+    :return: JSON object with file_id and per-layer content/status payloads
+    """
+    if __request__ is None:
+        return json.dumps({"error": "Request context not available"})
+    if not __user__:
+        return json.dumps({"error": "User context not available"})
+
+    effective_scope = _resolve_effective_scope(__metadata__, __model_knowledge__)
+    if not effective_scope:
+        return json.dumps({"error": "No effective knowledge scope"})
+
+    try:
+        result = await _view_layer_rows(
+            file_id=file_id,
+            scope_items=effective_scope,
+            __request__=__request__,
+            __user__=__user__,
+        )
+        layers = result.get("layers", {}) if isinstance(result, dict) else {}
+        for layer_name in ("abstract", "key_findings", "key_data"):
+            payload = layers.get(layer_name)
+            if isinstance(payload, dict):
+                source = str(payload.get("source", "Unknown"))
+                payload["source"] = _prefix_source(source, layer_name)
+                payload["layer"] = layer_name
+
+        return json.dumps(
+            {
+                **(result if isinstance(result, dict) else {"file_id": file_id}),
+                "layers": layers,
+            },
+            ensure_ascii=False,
+        )
+    except Exception as e:
+        log.exception(f"view_knowledge_layers error: {e}")
+        return json.dumps({"error": str(e)})
+
+
+async def query_knowledge_full_text(
+    query: str,
+    knowledge_ids: Optional[list[str]] = None,
+    count: int = 5,
+    __request__: Request = None,
+    __user__: dict = None,
+    __metadata__: dict = None,
+    __model_knowledge__: list[dict] = None,
+) -> str:
+    """
+    Search full document chunks (`full_text`) in scoped knowledge.
+    Use this when the user asks for concrete evidence, exact wording, or detailed context.
+    Prefer summary layers first for broad queries.
+
+    :param query: Evidence-oriented query
+    :param knowledge_ids: Optional list of KB ids to limit search to specific knowledge bases
+    :param count: Maximum number of full text results to return
+    :return: JSON list of full text chunk matches with `layer` and layer-tagged `source`
+    """
+    result = await query_knowledge_files(
+        query=query,
+        knowledge_ids=knowledge_ids,
+        count=count,
+        __request__=__request__,
+        __user__=__user__,
+        __metadata__=__metadata__,
+        __model_knowledge__=__model_knowledge__,
+    )
+
+    try:
+        payload = json.loads(result)
+    except json.JSONDecodeError:
+        return result
+
+    if isinstance(payload, list):
+        return json.dumps(
+            _decorate_layer_result_items(payload, "full_text"),
+            ensure_ascii=False,
+        )
+    return result
+
+
 async def query_knowledge_files(
     query: str,
     knowledge_ids: Optional[list[str]] = None,
@@ -1778,31 +2136,11 @@ async def query_knowledge_files(
         return json.dumps({"error": "User context not available"})
 
     # Coerce parameters from LLM tool calls (may come as strings)
-    if isinstance(count, str):
-        try:
-            count = int(count)
-        except ValueError:
-            count = 5  # Default fallback
-
-    # Handle knowledge_ids being string "None", "null", or empty
-    if isinstance(knowledge_ids, str):
-        if knowledge_ids.lower() in ("none", "null", ""):
-            knowledge_ids = None
-        else:
-            # Try to parse as JSON array if it looks like one
-            try:
-                knowledge_ids = json.loads(knowledge_ids)
-            except json.JSONDecodeError:
-                # Treat as single ID
-                knowledge_ids = [knowledge_ids]
+    count = _coerce_count(count)
+    knowledge_ids = _coerce_knowledge_ids(knowledge_ids)
 
     try:
-        metadata = __metadata__ or {}
-        effective_scope = metadata.get("effective_knowledge_scope")
-        if not effective_scope:
-            attached_scope = metadata.get("attached_knowledge_scope") or []
-            effective_scope = [*(__model_knowledge__ or []), *attached_scope]
-
+        effective_scope = _resolve_effective_scope(__metadata__, __model_knowledge__)
         if not effective_scope:
             return json.dumps({"error": "No effective knowledge scope"})
 
