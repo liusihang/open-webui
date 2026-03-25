@@ -32,10 +32,7 @@ ARG BUILD_HASH
 
 WORKDIR /app
 
-# to store git revision in build
-RUN apk add --no-cache git
-
-COPY package.json package-lock.json ./
+COPY package.json package-lock.json .npmrc ./
 # Keep deterministic installs when lockfile is valid, but auto-heal lock drift
 # during image builds to avoid hard failures after partial file syncs.
 RUN npm ci --force || ( \
@@ -43,7 +40,11 @@ RUN npm ci --force || ( \
     npm install --force \
 )
 
-COPY . .
+COPY CHANGELOG.md ./
+COPY postcss.config.js svelte.config.js tailwind.config.js tsconfig.json vite.config.ts ./
+COPY scripts ./scripts
+COPY src ./src
+COPY static ./static
 ENV APP_BUILD_HASH=${BUILD_HASH}
 RUN npm run build
 
@@ -122,11 +123,9 @@ RUN if [ $UID -ne 0 ]; then \
     adduser --uid $UID --gid $GID --home $HOME --disabled-password --no-create-home app; \
     fi
 
-RUN mkdir -p $HOME/.cache/chroma
-RUN echo -n 00000000-0000-0000-0000-000000000000 > $HOME/.cache/chroma/telemetry_user_id
-
-# Make sure the user has access to the app and root directory
-RUN chown -R $UID:$GID /app $HOME
+RUN mkdir -p $HOME/.cache/chroma && \
+    echo -n 00000000-0000-0000-0000-000000000000 > $HOME/.cache/chroma/telemetry_user_id && \
+    chown -R $UID:$GID /app $HOME
 
 # Install common system dependencies
 RUN apt-get update && \
