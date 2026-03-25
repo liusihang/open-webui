@@ -138,6 +138,28 @@
 - `DEERFLOW_REQUEST_TIMEOUT_SECS`
 - `DEERFLOW_REUSE_THREADS`
 
+### Zotero 同步前置条件（插件侧）
+
+若要使用 Zotero 插件把文献同步到 OpenWebUI 知识库，部署端需要满足以下条件：
+
+- 开启 API Key：`ENABLE_API_KEYS=true`
+- 给目标用户开启 `features.api_keys` 权限（允许生成/使用个人 API key）
+- 给目标用户开启 `workspace.knowledge` 权限（允许创建与维护知识库）
+
+如果你同时开启了 API key 端点限制（`ENABLE_API_KEYS_ENDPOINT_RESTRICTIONS=true`），请确保 `API_KEYS_ALLOWED_ENDPOINTS` 至少覆盖这些前缀：
+
+- `/api/v1/auths`（获取/管理用户 API key）
+- `/api/v1/files`（上传与更新文献文件）
+- `/api/v1/knowledge`（创建和维护知识库）
+
+示例：
+
+```env
+ENABLE_API_KEYS=true
+ENABLE_API_KEYS_ENDPOINT_RESTRICTIONS=true
+API_KEYS_ALLOWED_ENDPOINTS=/api/v1/auths,/api/v1/files,/api/v1/knowledge
+```
+
 ## 快速开始
 
 与官方 Open WebUI 安装方式兼容，推荐先用 Docker 启动：

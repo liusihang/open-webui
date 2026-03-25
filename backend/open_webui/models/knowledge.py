@@ -120,6 +120,14 @@ class KnowledgeUserResponse(KnowledgeUserModel):
 class KnowledgeForm(BaseModel):
     name: str
     description: str
+    meta: Optional[dict] = None
+    access_grants: Optional[list[dict]] = None
+
+
+class KnowledgeUpdateForm(BaseModel):
+    name: Optional[str] = None
+    description: Optional[str] = None
+    meta: Optional[dict] = None
     access_grants: Optional[list[dict]] = None
 
 
@@ -666,7 +674,7 @@ class KnowledgeTable:
     def update_knowledge_by_id(
         self,
         id: str,
-        form_data: KnowledgeForm,
+        form_data: KnowledgeForm | KnowledgeUpdateForm,
         overwrite: bool = False,
         db: Optional[Session] = None,
     ) -> Optional[KnowledgeModel]:
@@ -675,7 +683,9 @@ class KnowledgeTable:
                 knowledge = self.get_knowledge_by_id(id=id, db=db)
                 db.query(Knowledge).filter_by(id=id).update(
                     {
-                        **form_data.model_dump(exclude={"access_grants"}),
+                        **form_data.model_dump(
+                            exclude={"access_grants"}, exclude_none=True
+                        ),
                         "updated_at": int(time.time()),
                     }
                 )

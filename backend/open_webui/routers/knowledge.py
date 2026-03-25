@@ -14,6 +14,7 @@ from open_webui.models.knowledge import (
     KnowledgeFileListResponse,
     Knowledges,
     KnowledgeForm,
+    KnowledgeUpdateForm,
     KnowledgeResponse,
     KnowledgeUserResponse,
 )
@@ -451,7 +452,7 @@ async def get_knowledge_by_id(
 async def update_knowledge_by_id(
     request: Request,
     id: str,
-    form_data: KnowledgeForm,
+    form_data: KnowledgeUpdateForm,
     user=Depends(get_verified_user),
 ):
     # NOTE: We intentionally do NOT use Depends(get_session) here.

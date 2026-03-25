@@ -562,6 +562,88 @@ class ContentForm(BaseModel):
     content: str
 
 
+class FileMetadataUpdateForm(BaseModel):
+    meta: dict
+
+
+@router.post("/{id}/metadata/update", response_model=Optional[FileModel])
+def update_file_metadata_by_id(
+    request: Request,
+    id: str,
+    form_data: FileMetadataUpdateForm,
+    user=Depends(get_verified_user),
+    db: Session = Depends(get_session),
+):
+    file = Files.get_file_by_id(id, db=db)
+
+    if not file:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=ERROR_MESSAGES.NOT_FOUND,
+        )
+
+    if (
+        file.user_id == user.id
+        or user.role == "admin"
+        or has_access_to_file(id, "write", user, db=db)
+    ):
+        meta_payload = form_data.meta
+
+        # Keep existing nested metadata in `meta.data` unless explicitly overwritten.
+        if isinstance(meta_payload, dict) and isinstance(meta_payload.get("data"), dict):
+            existing_data = (
+                file.meta.get("data")
+                if isinstance(file.meta, dict) and isinstance(file.meta.get("data"), dict)
+                else {}
+            )
+            meta_payload = {
+                **meta_payload,
+                "data": {**existing_data, **meta_payload["data"]},
+            }
+
+        updated_file = Files.update_file_metadata_by_id(id, meta_payload, db=db)
+        if updated_file:
+            try:
+                process_file(
+                    request,
+                    ProcessFileForm(file_id=id),
+                    user=user,
+                    db=db,
+                )
+            except Exception as e:
+                log.warning(f"Failed to refresh file collection after metadata update: {e}")
+
+            knowledges = Knowledges.get_knowledges_by_file_id(id, db=db)
+            for knowledge in knowledges:
+                try:
+                    VECTOR_DB_CLIENT.delete(
+                        collection_name=knowledge.id, filter={"file_id": id}
+                    )
+                    process_file(
+                        request,
+                        ProcessFileForm(file_id=id, collection_name=knowledge.id),
+                        user=user,
+                        db=db,
+                    )
+                except Exception as e:
+                    log.warning(
+                        f"Failed to refresh knowledge {knowledge.id} after "
+                        f"metadata change for file {id}: {e}"
+                    )
+
+            return updated_file
+
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=ERROR_MESSAGES.DEFAULT("Error updating file metadata"),
+        )
+    else:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=ERROR_MESSAGES.NOT_FOUND,
+        )
+
+
 @router.post("/{id}/data/content/update")
 def update_file_data_content_by_id(
     request: Request,

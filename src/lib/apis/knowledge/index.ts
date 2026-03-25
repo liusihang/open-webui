@@ -4,7 +4,8 @@ export const createNewKnowledge = async (
 	token: string,
 	name: string,
 	description: string,
-	accessGrants: object[]
+	accessGrants: object[],
+	meta?: object
 ) => {
 	let error = null;
 
@@ -18,6 +19,7 @@ export const createNewKnowledge = async (
 		body: JSON.stringify({
 			name: name,
 			description: description,
+			meta: meta,
 			access_grants: accessGrants
 		})
 	})
@@ -248,6 +250,7 @@ type KnowledgeUpdateForm = {
 	name?: string;
 	description?: string;
 	data?: object;
+	meta?: object;
 	access_grants?: object[];
 };
 
@@ -265,6 +268,7 @@ export const updateKnowledgeById = async (token: string, id: string, form: Knowl
 			name: form?.name ? form.name : undefined,
 			description: form?.description ? form.description : undefined,
 			data: form?.data ? form.data : undefined,
+			meta: form?.meta ? form.meta : undefined,
 			access_grants: form.access_grants
 		})
 	})
