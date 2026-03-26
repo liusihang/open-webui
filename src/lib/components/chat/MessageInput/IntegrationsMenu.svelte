@@ -11,7 +11,8 @@
 		mobile,
 		settings,
 		toolServers,
-		terminalServers
+		terminalServers,
+		selectedTerminalId
 	} from '$lib/stores';
 
 	import { getOAuthClientAuthorizationUrl } from '$lib/apis/configs';
@@ -31,6 +32,7 @@
 	import Database from '$lib/components/icons/Database.svelte';
 	import ChevronRight from '$lib/components/icons/ChevronRight.svelte';
 	import ChevronLeft from '$lib/components/icons/ChevronLeft.svelte';
+	import { buildSelectedSystemTerminalTools } from '$lib/utils/chat/systemTerminals';
 
 	const i18n = getContext('i18n');
 
@@ -62,7 +64,8 @@
 	let show = false;
 	let tab = '';
 
-	let tools = null;
+	let tools: Record<string, any> | null = null;
+	let implicitTerminalTools: Record<string, any> = {};
 
 	$: if (show) {
 		init();
@@ -79,7 +82,7 @@
 		}
 
 		if ($_tools) {
-			tools = $_tools.reduce((a, tool, i, arr) => {
+			tools = $_tools.reduce((a, tool) => {
 				a[tool.id] = {
 					name: tool.name,
 					description: tool.meta.description,
@@ -87,7 +90,7 @@
 					...tool
 				};
 				return a;
-			}, {});
+			}, {} as Record<string, any>);
 		}
 
 		if ($toolServers) {
@@ -103,7 +106,16 @@
 			}
 		}
 
-		selectedToolIds = selectedToolIds.filter((id) => Object.keys(tools).includes(id));
+		implicitTerminalTools = buildSelectedSystemTerminalTools(
+			$terminalServers ?? [],
+			$selectedTerminalId
+		);
+		tools = {
+			...(tools ?? {}),
+			...implicitTerminalTools
+		};
+
+		selectedToolIds = selectedToolIds.filter((id) => Object.keys(tools ?? {}).includes(id));
 	};
 </script>
 
@@ -425,12 +437,14 @@
 						</div>
 					</button>
 
-					{#each Object.keys(tools) as toolId}
-						<button
-							class="relative flex w-full justify-between gap-2 items-center px-3 py-1.5 text-sm cursor-pointer rounded-xl hover:bg-gray-50 dark:hover:bg-gray-800/50"
-							on:click={async (e) => {
-								if (!(tools[toolId]?.authenticated ?? true)) {
-									e.preventDefault();
+						{#each Object.keys(tools) as toolId}
+							<button
+								class="relative flex w-full justify-between gap-2 items-center px-3 py-1.5 text-sm rounded-xl hover:bg-gray-50 dark:hover:bg-gray-800/50 {tools[toolId]?.implicit ? 'cursor-default' : 'cursor-pointer'}"
+								on:click={async (e) => {
+									if (tools[toolId]?.implicit) {
+										return;
+									} else if (!(tools[toolId]?.authenticated ?? true)) {
+										e.preventDefault();
 
 									let parts = toolId.split(':');
 									let serverId = parts?.at(-1) ?? toolId;
@@ -459,7 +473,11 @@
 								<div class="flex flex-1 gap-2 items-center">
 									<Tooltip content={tools[toolId]?.name ?? ''} placement="top">
 										<div class="shrink-0">
-											<Wrench />
+											{#if tools[toolId]?.implicit}
+												<Terminal className="size-3.5" strokeWidth="1.75" />
+											{:else}
+												<Wrench />
+											{/if}
 										</div>
 									</Tooltip>
 									<Tooltip content={tools[toolId]?.description ?? ''} placement="top-start">
@@ -490,7 +508,7 @@
 							{/if}
 
 							<div class=" shrink-0">
-								<Switch state={tools[toolId].enabled} />
+								<Switch state={tools[toolId].enabled} disabled={tools[toolId]?.implicit} />
 							</div>
 						</button>
 					{/each}

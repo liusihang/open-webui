@@ -57,6 +57,7 @@
 	import { deleteFileById } from '$lib/apis/files';
 	import { getSessionUser } from '$lib/apis/auths';
 	import { getTools } from '$lib/apis/tools';
+	import { buildSelectedSystemTerminalTools } from '$lib/utils/chat/systemTerminals';
 
 	import { WEBUI_BASE_URL, WEBUI_API_BASE_URL, PASTED_TEXT_CHARACTER_LIMIT } from '$lib/constants';
 
@@ -512,7 +513,10 @@
 		.reduce((acc, filters) => acc.filter((f1) => filters.some((f2) => f2.id === f1.id)));
 
 	let showToolsButton = false;
-	$: showToolsButton = ($tools ?? []).length > 0 || ($toolServers ?? []).length > 0;
+	$: showToolsButton =
+		($tools ?? []).length > 0 ||
+		($toolServers ?? []).length > 0 ||
+		Object.keys(buildSelectedSystemTerminalTools($terminalServers ?? [], $selectedTerminalId)).length > 0;
 
 	let showWebSearchButton = false;
 	$: showWebSearchButton =

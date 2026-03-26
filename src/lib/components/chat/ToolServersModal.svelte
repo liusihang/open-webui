@@ -1,6 +1,13 @@
 <script lang="ts">
 	import { getContext, onMount } from 'svelte';
-	import { models, config, toolServers, tools, terminalServers } from '$lib/stores';
+	import {
+		models,
+		config,
+		toolServers,
+		tools,
+		terminalServers,
+		selectedTerminalId
+	} from '$lib/stores';
 
 	import { toast } from 'svelte-sonner';
 	import { deleteSharedChatById, getChatById, shareChatById } from '$lib/apis/chats';
@@ -10,13 +17,18 @@
 	import Link from '../icons/Link.svelte';
 	import Collapsible from '../common/Collapsible.svelte';
 	import XMark from '$lib/components/icons/XMark.svelte';
+	import { buildSelectedSystemTerminalTools } from '$lib/utils/chat/systemTerminals';
 
 	export let show = false;
 	export let selectedToolIds = [];
 
-	let selectedTools = [];
+	let selectedTools: any[] = [];
+	let selectedSystemTerminalTools: any[] = [];
 
 	$: selectedTools = ($tools ?? []).filter((tool) => selectedToolIds.includes(tool.id));
+	$: selectedSystemTerminalTools = Object.values(
+		buildSelectedSystemTerminalTools($terminalServers ?? [], $selectedTerminalId)
+	);
 
 	const i18n = getContext('i18n');
 </script>
@@ -36,8 +48,8 @@
 			</button>
 		</div>
 
-		{#if selectedTools.length > 0}
-			{#if $toolServers.length > 0}
+		{#if selectedTools.length > 0 || selectedSystemTerminalTools.length > 0}
+			{#if $toolServers.length > 0 || selectedTools.length > 0 || selectedSystemTerminalTools.length > 0}
 				<div class=" flex justify-between dark:text-gray-300 px-5 pb-1">
 					<div class=" text-base font-medium self-center">{$i18n.t('Tools')}</div>
 				</div>
@@ -62,6 +74,21 @@
 							<!-- <div slot="content">
 							{JSON.stringify(tool, null, 2)}
 						</div> -->
+						</Collapsible>
+					{/each}
+					{#each selectedSystemTerminalTools as tool}
+						<Collapsible buttonClassName="w-full mb-0.5">
+							<div class="truncate">
+								<div class="text-sm font-medium dark:text-gray-100 text-gray-800 truncate">
+									{tool?.name}
+								</div>
+
+								{#if tool?.description}
+									<div class="text-xs text-gray-500">
+										{tool?.description}
+									</div>
+								{/if}
+							</div>
 						</Collapsible>
 					{/each}
 				</div>

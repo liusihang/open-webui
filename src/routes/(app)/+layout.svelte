@@ -17,6 +17,7 @@
 
 	import { WEBUI_VERSION, WEBUI_API_BASE_URL } from '$lib/constants';
 	import { compareVersion } from '$lib/utils';
+	import { buildSystemTerminalEntries } from '$lib/utils/chat/systemTerminals';
 
 	import {
 		config,
@@ -173,13 +174,20 @@
 		// Fetch terminal servers the user has access to (for FileNav + terminal_id)
 		const systemTerminals = await getTerminalServers(localStorage.token);
 		if (systemTerminals.length > 0) {
-			// Store with proxy URL and session key for FileNav file browsing
-			const terminalEntries = systemTerminals.map((t) => ({
-				id: t.id,
-				url: `${WEBUI_API_BASE_URL}/terminals/${t.id}`,
-				name: t.name,
-				key: localStorage.token
-			}));
+			const systemTerminalSpecs = await getToolServersData(
+				systemTerminals.map((t) => ({
+					url: `${WEBUI_API_BASE_URL}/terminals/${t.id}`,
+					auth_type: 'session',
+					path: '/openapi.json',
+					config: { enable: true }
+				}))
+			);
+			const terminalEntries = buildSystemTerminalEntries({
+				systemTerminals,
+				fetchedSpecs: systemTerminalSpecs.filter((entry) => entry && !entry.error),
+				apiBaseUrl: WEBUI_API_BASE_URL,
+				token: localStorage.token
+			});
 			terminalServers.update((existing) => [...existing, ...terminalEntries]);
 		}
 	};
