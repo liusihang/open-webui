@@ -1,5 +1,5 @@
 <script context="module" lang="ts">
-	export const LAYER_TYPE_ORDER = ['abstract', 'key_findings', 'key_data'] as const;
+	export const LAYER_TYPE_ORDER = ['abstract'] as const;
 	export type KnowledgeLayerType = (typeof LAYER_TYPE_ORDER)[number];
 
 	export type KnowledgeLayerStatus = 'pending' | 'ready' | 'failed' | 'stale';
@@ -23,9 +23,7 @@
 	};
 
 	const LAYER_TITLES: Record<KnowledgeLayerType, string> = {
-		abstract: 'Abstract',
-		key_findings: 'Key Findings',
-		key_data: 'Key Data'
+		abstract: 'Abstract'
 	};
 
 	export const getLayerTitle = (layerType: KnowledgeLayerType): string =>

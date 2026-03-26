@@ -41,6 +41,10 @@ from open_webui.models.access_grants import AccessGrants
 
 from open_webui.config import BYPASS_ADMIN_ACCESS_CONTROL
 from open_webui.models.models import Models, ModelForm
+from open_webui.utils.knowledge_layer_embeddings import (
+    delete_layer_embeddings_by_file_id,
+    delete_layer_embeddings_by_knowledge_id,
+)
 from open_webui.utils.layered_knowledge import (
     backfill_layers_for_knowledge,
     mark_layers_for_file_stale,
@@ -1090,6 +1094,7 @@ def remove_file_from_knowledge_by_id(
         knowledge_id=id, file_id=form_data.file_id, db=db
     )
     KnowledgeLayers.delete_layers_by_file(id, form_data.file_id, db=db)
+    delete_layer_embeddings_by_file_id(form_data.file_id)
 
     # Remove content from the vector database
     try:
@@ -1204,6 +1209,7 @@ async def delete_knowledge_by_id(
 
     # Remove knowledge base embedding
     remove_knowledge_base_metadata_embedding(id)
+    delete_layer_embeddings_by_knowledge_id(id)
 
     result = Knowledges.delete_knowledge_by_id(id=id, db=db)
     return result

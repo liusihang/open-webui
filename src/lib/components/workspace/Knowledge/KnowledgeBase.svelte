@@ -61,6 +61,7 @@
 	import DropdownOptions from '$lib/components/common/DropdownOptions.svelte';
 	import Pagination from '$lib/components/common/Pagination.svelte';
 	import AttachWebpageModal from '$lib/components/chat/MessageInput/AttachWebpageModal.svelte';
+	import { LAYER_TYPE_ORDER } from './KnowledgeBase/LayersPanel.svelte';
 	import type {
 		KnowledgeLayerItem,
 		KnowledgeLayerType

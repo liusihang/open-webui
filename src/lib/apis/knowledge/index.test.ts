@@ -59,7 +59,7 @@ describe('knowledge layered api bindings', () => {
 		vi.stubGlobal('fetch', fetchMock);
 
 		await regenerateKnowledgeFileLayers('token-1', 'kb-1', 'file-1', {
-			layerTypes: ['abstract', 'key_data'],
+			layerTypes: ['abstract'],
 			force: false
 		});
 
@@ -69,7 +69,7 @@ describe('knowledge layered api bindings', () => {
 		});
 		expect(fetchMock.mock.calls[0]?.[1]?.body).toBe(
 			JSON.stringify({
-				layer_types: ['abstract', 'key_data'],
+				layer_types: ['abstract'],
 				force: false
 			})
 		);
@@ -78,7 +78,7 @@ describe('knowledge layered api bindings', () => {
 	it('triggers regenerate for a single layer type', async () => {
 		const fetchMock = vi.fn().mockResolvedValue({
 			ok: true,
-			json: async () => ({ status: 'queued', layer_type: 'key_data' })
+			json: async () => ({ status: 'queued', layer_type: 'abstract' })
 		});
 		vi.stubGlobal('fetch', fetchMock);
 
@@ -86,17 +86,17 @@ describe('knowledge layered api bindings', () => {
 			'token-1',
 			'kb-1',
 			'file-1',
-			'key_data'
+			'abstract'
 		);
 
 		expect(fetchMock).toHaveBeenCalledTimes(1);
 		expect(fetchMock.mock.calls[0]?.[0]).toContain(
-			'/api/v1/knowledge/kb-1/file/file-1/layers/regenerate/key_data'
+			'/api/v1/knowledge/kb-1/file/file-1/layers/regenerate/abstract'
 		);
 		expect(fetchMock.mock.calls[0]?.[1]).toMatchObject({
 			method: 'POST'
 		});
-		expect(result).toEqual({ status: 'queued', layer_type: 'key_data' });
+		expect(result).toEqual({ status: 'queued', layer_type: 'abstract' });
 	});
 
 	it('falls back to readable error text when backend omits detail', async () => {
@@ -135,7 +135,7 @@ describe('knowledge layered api bindings', () => {
 		vi.stubGlobal('fetch', fetchMock);
 
 		const result = await backfillKnowledgeLayers('token-1', 'kb-1', {
-			layerTypes: ['abstract', 'key_findings'],
+			layerTypes: ['abstract'],
 			force: false
 		});
 
@@ -143,7 +143,7 @@ describe('knowledge layered api bindings', () => {
 		expect(fetchMock.mock.calls[0]?.[0]).toContain('/api/v1/knowledge/kb-1/layers/backfill');
 		expect(fetchMock.mock.calls[0]?.[1]?.body).toBe(
 			JSON.stringify({
-				layer_types: ['abstract', 'key_findings'],
+				layer_types: ['abstract'],
 				force: false
 			})
 		);

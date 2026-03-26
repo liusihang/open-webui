@@ -1,6 +1,7 @@
 import logging
 import re
 import time
+import asyncio
 from typing import Optional
 
 import requests
@@ -9,6 +10,11 @@ from requests import RequestException
 from sqlalchemy.orm import Session
 
 from open_webui.utils.misc import calculate_sha256_string
+from open_webui.utils.knowledge_layer_embeddings import (
+    delete_layer_embeddings_by_file_id,
+    delete_layer_embeddings_by_knowledge_id,
+    sync_file_layer_embeddings,
+)
 from open_webui.models.files import Files
 from open_webui.models.knowledge import Knowledges
 from open_webui.models.knowledge_layers import (
@@ -30,6 +36,14 @@ OPEN_NOTEBOOK_PART_COUNT_KEY = "open_notebook_part_count"
 OPEN_NOTEBOOK_SOURCE_CONTENT_HASH_KEY = "open_notebook_source_content_hash"
 DEFAULT_MAX_CHUNK_TOKENS = 24000
 DEFAULT_MIN_TAIL_TOKENS = 1000
+REFERENCE_SECTION_TITLES = (
+    "references",
+    "bibliography",
+    "works cited",
+    "参考文献",
+)
+ACTIVE_LAYER_TYPES = ("abstract",)
+COMPAT_LAYER_ALIASES = {"key_findings": "abstract", "key_data": "abstract"}
 
 
 def get_file_open_notebook_mapping(file_obj) -> dict:
@@ -128,6 +142,57 @@ def _split_text_by_token_limit(text: str, max_tokens: int) -> list[dict]:
     return chunks
 
 
+def is_reference_like_chunk(text: str) -> bool:
+    normalized_text = (text or "").strip()
+    if not normalized_text:
+        return False
+
+    lines = [line.strip() for line in normalized_text.splitlines() if line.strip()]
+    if not lines:
+        return False
+
+    first_line = lines[0].lower().rstrip(":")
+    has_reference_heading = any(
+        first_line == title or first_line.startswith(f"{title} ")
+        for title in REFERENCE_SECTION_TITLES
+    )
+
+    numbered_entry_count = sum(
+        1 for line in lines if re.match(r"^\s*(\[\d+\]|\d+\.)\s+", line)
+    )
+    doi_count = len(
+        re.findall(r"(?:\bdoi:\s*10\.\S+)|(?:\b10\.\d{4,9}/\S+)", normalized_text, re.I)
+    )
+    year_count = len(re.findall(r"\b(?:19|20)\d{2}[a-z]?\b", normalized_text))
+    et_al_count = len(re.findall(r"\bet al\.?\b", normalized_text, re.I))
+
+    citation_signal_count = 0
+    if numbered_entry_count >= 1:
+        citation_signal_count += 1
+    if doi_count >= 1:
+        citation_signal_count += 1
+    if year_count >= 2:
+        citation_signal_count += 1
+    if et_al_count >= 1:
+        citation_signal_count += 1
+
+    if has_reference_heading and citation_signal_count >= 1:
+        return True
+
+    return numbered_entry_count >= 2 and citation_signal_count >= 2
+
+
+def _drop_trailing_reference_like_chunks(chunk_rows: list[dict]) -> list[dict]:
+    if len(chunk_rows) <= 1:
+        return chunk_rows
+
+    cutoff = len(chunk_rows)
+    while cutoff > 1 and is_reference_like_chunk(chunk_rows[cutoff - 1]["content"]):
+        cutoff -= 1
+
+    return chunk_rows[:cutoff]
+
+
 def plan_text_chunks(
     text: str,
     *,
@@ -193,6 +258,8 @@ def plan_text_chunks(
     # to justify a separate Open Notebook source/insight generation pass.
     if len(chunk_rows) > 1 and chunk_rows[-1]["token_count"] < min_tail_tokens:
         chunk_rows.pop()
+
+    chunk_rows = _drop_trailing_reference_like_chunks(chunk_rows)
 
     total_parts = len(chunk_rows)
     for index, chunk in enumerate(chunk_rows, start=1):
@@ -336,20 +403,21 @@ def _normalize_layer_type(layer_type: str) -> Optional[str]:
     return normalized if normalized in LAYER_TYPES else None
 
 
-def get_layer_transformation_id(request, layer_type: str) -> Optional[str]:
+def _normalize_runtime_layer_type(layer_type: str) -> Optional[str]:
     normalized = _normalize_layer_type(layer_type)
+    if not normalized:
+        return None
+    return COMPAT_LAYER_ALIASES.get(normalized, normalized)
+
+
+def get_layer_transformation_id(request, layer_type: str) -> Optional[str]:
+    normalized = _normalize_runtime_layer_type(layer_type)
     if not normalized:
         return None
 
     config = request.app.state.config
     if normalized == "abstract":
         return (config.OPEN_NOTEBOOK_TRANSFORMATION_ABSTRACT or "").strip() or None
-    if normalized == "key_findings":
-        return (
-            (config.OPEN_NOTEBOOK_TRANSFORMATION_KEY_FINDINGS or "").strip() or None
-        )
-    if normalized == "key_data":
-        return (config.OPEN_NOTEBOOK_TRANSFORMATION_KEY_DATA or "").strip() or None
     return None
 
 
@@ -634,6 +702,9 @@ def _sync_selected_layers_for_file(
             layer_type = _normalize_layer_type(str(insight.get("insight_type", "")))
             if not layer_type:
                 continue
+            layer_type = _normalize_runtime_layer_type(layer_type)
+            if layer_type not in selected_layer_types:
+                continue
 
             content = insight.get("content")
             if not isinstance(content, str) or not content.strip():
@@ -705,6 +776,25 @@ def _sync_selected_layers_for_file(
         db=db,
     )
 
+    if getattr(request.app.state, "EMBEDDING_FUNCTION", None):
+        try:
+            try:
+                loop = asyncio.get_running_loop()
+            except RuntimeError:
+                loop = None
+
+            if loop and loop.is_running():
+                loop.create_task(sync_file_layer_embeddings(request, knowledge_id, file_id, db=db))
+            else:
+                asyncio.run(sync_file_layer_embeddings(request, knowledge_id, file_id, db=db))
+        except Exception as exc:
+            log.warning(
+                "Layer embedding sync failed for knowledge=%s file=%s: %s",
+                knowledge_id,
+                file_id,
+                exc,
+            )
+
     return KnowledgeLayers.get_layers_by_file(knowledge_id, file_id, db=db)
 
 
@@ -715,7 +805,7 @@ def sync_layers_for_file(
         request,
         knowledge_id,
         file_id,
-        selected_layer_types=list(LAYER_TYPES),
+        selected_layer_types=list(ACTIVE_LAYER_TYPES),
         db=db,
     )
 
@@ -727,7 +817,7 @@ def regenerate_layer_for_file(
     layer_type: str,
     db: Optional[Session] = None,
 ) -> list[KnowledgeFileLayerModel]:
-    normalized_layer = _normalize_layer_type(layer_type)
+    normalized_layer = _normalize_runtime_layer_type(layer_type)
     if not normalized_layer:
         raise ValueError(f"Unsupported layer_type: {layer_type}")
     return _sync_selected_layers_for_file(
@@ -751,15 +841,15 @@ def regenerate_layers_for_file(
     normalized_layer_types: list[str] = []
     if layer_types:
         for layer_type in layer_types:
-            normalized_layer = _normalize_layer_type(layer_type)
+            normalized_layer = _normalize_runtime_layer_type(layer_type)
             if not normalized_layer:
                 raise ValueError(f"Unsupported layer_type: {layer_type}")
             if normalized_layer not in normalized_layer_types:
                 normalized_layer_types.append(normalized_layer)
     else:
-        normalized_layer_types = list(LAYER_TYPES)
+        normalized_layer_types = list(ACTIVE_LAYER_TYPES)
 
-    if force or set(normalized_layer_types) == set(LAYER_TYPES):
+    if force or set(normalized_layer_types) == set(ACTIVE_LAYER_TYPES):
         return sync_layers_for_file(request, knowledge_id, file_id, db=db)
 
     for normalized_layer in normalized_layer_types:
@@ -788,6 +878,8 @@ def _file_needs_backfill(
             return True
         if any(row.status in {"failed", "stale"} for row in layer_rows):
             return True
+        if any(getattr(row, "embedding_status", "ready") != "ready" for row in layer_rows):
+            return True
     return False
 
 
@@ -802,13 +894,13 @@ def backfill_layers_for_knowledge(
     normalized_layer_types: list[str] = []
     if layer_types:
         for layer_type in layer_types:
-            normalized_layer = _normalize_layer_type(layer_type)
+            normalized_layer = _normalize_runtime_layer_type(layer_type)
             if not normalized_layer:
                 raise ValueError(f"Unsupported layer_type: {layer_type}")
             if normalized_layer not in normalized_layer_types:
                 normalized_layer_types.append(normalized_layer)
     else:
-        normalized_layer_types = list(LAYER_TYPES)
+        normalized_layer_types = list(ACTIVE_LAYER_TYPES)
 
     files = Knowledges.get_files_by_id(knowledge_id, db=db) or []
     total_files = len(files)
@@ -839,12 +931,14 @@ def backfill_layers_for_knowledge(
 def mark_layers_for_file_stale(
     knowledge_id: str, file_id: str, db: Optional[Session] = None
 ) -> int:
+    delete_layer_embeddings_by_file_id(file_id)
     return KnowledgeLayers.mark_layers_stale_for_file(knowledge_id, file_id, db=db)
 
 
 def mark_layers_for_knowledge_stale(
     knowledge_id: str, db: Optional[Session] = None
 ) -> int:
+    delete_layer_embeddings_by_knowledge_id(knowledge_id)
     return KnowledgeLayers.mark_layers_stale_for_knowledge(knowledge_id, db=db)
 
 
@@ -867,7 +961,7 @@ def _scope_ids(scope_items: list[dict]) -> tuple[list[str], list[str]]:
     return knowledge_ids, file_ids
 
 
-def query_layers(
+async def query_layers(
     *,
     layer: str,
     query: str,
@@ -878,12 +972,16 @@ def query_layers(
     db: Optional[Session] = None,
 ) -> list[dict]:
     knowledge_ids, file_ids = _scope_ids(scope_items)
-    rows = KnowledgeLayers.query_layer_rows(
-        layer_type=layer,
+    runtime_layer = _normalize_runtime_layer_type(layer)
+    if not runtime_layer:
+        raise ValueError(f"Unsupported layer_type: {layer}")
+    rows = await KnowledgeLayers.query_layer_rows(
+        layer_type=runtime_layer,
         query=query,
         knowledge_ids=knowledge_ids or None,
         file_ids=file_ids or None,
         limit=count,
+        request=request,
         db=db,
     )
     return [
@@ -910,6 +1008,8 @@ def get_file_layers(
         "layers": {},
     }
     for row in rows:
+        if row.layer_type not in ACTIVE_LAYER_TYPES:
+            continue
         base_source = row.title or row.file_id
         source = (
             f"{row.display_title}: {base_source}" if row.display_title else base_source

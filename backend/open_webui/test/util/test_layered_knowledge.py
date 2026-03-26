@@ -28,9 +28,9 @@ def test_get_layer_transformation_id_reads_config():
     assert layered_mod.get_layer_transformation_id(request, "abstract") == "tr-abstract"
     assert (
         layered_mod.get_layer_transformation_id(request, "key_findings")
-        == "tr-findings"
+        == "tr-abstract"
     )
-    assert layered_mod.get_layer_transformation_id(request, "key_data") == "tr-data"
+    assert layered_mod.get_layer_transformation_id(request, "key_data") == "tr-abstract"
     assert layered_mod.get_layer_transformation_id(request, "unknown") is None
 
 
@@ -92,17 +92,14 @@ def test_sync_layers_for_file_triggers_remote_calls(monkeypatch):
     post_calls = [call for call in captured_requests if call[0] == "POST"]
     get_calls = [call for call in captured_requests if call[0] == "GET"]
 
-    assert len(post_calls) == 3
+    assert len(post_calls) == 1
     assert len(get_calls) == 1
     assert all(call[4] == "secret" for call in captured_requests)
     assert any(
         upsert.layer_type == "abstract" and upsert.status == "ready"
         for upsert in captured_upserts
     )
-    assert any(
-        upsert.layer_type == "key_data" and upsert.status == "ready"
-        for upsert in captured_upserts
-    )
+    assert not any(upsert.layer_type == "key_data" for upsert in captured_upserts)
 
 
 def test_get_file_open_notebook_mapping_reads_source_keys():

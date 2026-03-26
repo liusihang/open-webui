@@ -54,6 +54,10 @@ type RAGConfigForm = {
 	PDF_EXTRACT_IMAGES?: boolean;
 	ENABLE_GOOGLE_DRIVE_INTEGRATION?: boolean;
 	ENABLE_ONEDRIVE_INTEGRATION?: boolean;
+	OPEN_NOTEBOOK_BASE_URL?: string;
+	OPEN_NOTEBOOK_API_PASSWORD?: string;
+	OPEN_NOTEBOOK_TIMEOUT_SECS?: number;
+	OPEN_NOTEBOOK_TRANSFORMATION_ABSTRACT?: string;
 	chunk?: ChunkConfigForm;
 	content_extraction?: ContentExtractConfigForm;
 	web_loader_ssl_verification?: boolean;

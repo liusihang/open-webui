@@ -549,7 +549,7 @@ export const exportKnowledgeById = async (token: string, id: string) => {
 	return res;
 };
 
-export type KnowledgeLayerType = 'abstract' | 'key_findings' | 'key_data';
+export type KnowledgeLayerType = 'abstract';
 
 export type KnowledgeFileLayer = {
 	id?: string;

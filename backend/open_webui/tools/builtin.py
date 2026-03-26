@@ -1986,7 +1986,7 @@ async def query_knowledge_key_findings(
     :return: JSON list of finding matches with `layer` and layer-tagged `source`
     """
     return await _query_knowledge_layer(
-        layer="key_findings",
+        layer="abstract",
         query=query,
         count=count,
         __request__=__request__,
@@ -2013,7 +2013,7 @@ async def query_knowledge_key_data(
     :return: JSON list of key data matches with `layer` and layer-tagged `source`
     """
     return await _query_knowledge_layer(
-        layer="key_data",
+        layer="abstract",
         query=query,
         count=count,
         __request__=__request__,
@@ -2031,7 +2031,7 @@ async def view_knowledge_layers(
     __model_knowledge__: list[dict] = None,
 ) -> str:
     """
-    Return all available layered summaries (`abstract`, `key_findings`, `key_data`)
+    Return the available structured knowledge summaries
     for a single scoped file. Use this to inspect what structured layers already exist
     before deciding whether to query deeper or move to full text.
 
@@ -2055,7 +2055,7 @@ async def view_knowledge_layers(
             __user__=__user__,
         )
         layers = result.get("layers", {}) if isinstance(result, dict) else {}
-        for layer_name in ("abstract", "key_findings", "key_data"):
+        for layer_name in ("abstract",):
             payload = layers.get(layer_name)
             if isinstance(payload, dict):
                 source = str(payload.get("source", "Unknown"))

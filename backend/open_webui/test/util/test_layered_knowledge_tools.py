@@ -163,8 +163,6 @@ def test_view_knowledge_layers_returns_layer_payload_with_prefixed_sources(
             "file_id": "file-1",
             "layers": {
                 "abstract": {"content": "Summary", "source": "paper.pdf"},
-                "key_findings": {"content": "Finding", "source": "paper.pdf"},
-                "key_data": {"content": "Value=42", "source": "paper.pdf"},
             },
         }
 
@@ -185,8 +183,6 @@ def test_view_knowledge_layers_returns_layer_payload_with_prefixed_sources(
     assert calls["file_id"] == "file-1"
     assert calls["scope_items"] == [{"id": "kb-1", "type": "collection"}]
     assert payload["layers"]["abstract"]["source"] == "Abstract: paper.pdf"
-    assert payload["layers"]["key_findings"]["source"] == "Key Findings: paper.pdf"
-    assert payload["layers"]["key_data"]["source"] == "Key Data: paper.pdf"
 
 
 def test_query_knowledge_abstract_keeps_chunk_source_labels(monkeypatch) -> None:
