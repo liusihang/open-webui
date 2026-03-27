@@ -330,7 +330,16 @@ def _layer_display_title(layer_type: str, part_index: int, part_total: int) -> s
 
 
 def _layer_generation_chunk_limits(request) -> tuple[int, int]:
-    return DEFAULT_MAX_CHUNK_TOKENS, DEFAULT_MIN_TAIL_TOKENS
+    config = request.app.state.config
+    max_tokens = int(
+        getattr(config, "LAYER_GENERATION_MAX_CHUNK_TOKENS", DEFAULT_MAX_CHUNK_TOKENS)
+        or DEFAULT_MAX_CHUNK_TOKENS
+    )
+    min_tail_tokens = int(
+        getattr(config, "LAYER_GENERATION_MIN_TAIL_TOKENS", DEFAULT_MIN_TAIL_TOKENS)
+        or DEFAULT_MIN_TAIL_TOKENS
+    )
+    return max_tokens, min_tail_tokens
 
 
 def _resolve_generation_models(request) -> dict:
@@ -347,6 +356,10 @@ def _get_layer_generation_model_id(request, layer_type: str) -> Optional[str]:
     models = _resolve_generation_models(request)
     if not models:
         return None
+
+    explicit_model_id = (getattr(config, "LAYER_GENERATION_MODEL", "") or "").strip()
+    if explicit_model_id and explicit_model_id in models:
+        return explicit_model_id
 
     default_models = (getattr(config, "DEFAULT_MODELS", "") or "").split(",")
     default_model_id = next(
@@ -377,6 +390,11 @@ def _get_layer_generation_model_id(request, layer_type: str) -> Optional[str]:
 
 
 def _get_layer_generation_prompt(request, layer_type: str) -> str:
+    configured_prompt = (
+        getattr(request.app.state.config, "LAYER_GENERATION_PROMPT_ABSTRACT", "") or ""
+    ).strip()
+    if configured_prompt:
+        return configured_prompt
     return DEFAULT_LAYER_GENERATION_PROMPT_ABSTRACT
 
 

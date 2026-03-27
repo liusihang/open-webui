@@ -132,6 +132,10 @@ def _fake_request():
                     YANDEX_WEB_SEARCH_API_KEY="",
                     YANDEX_WEB_SEARCH_CONFIG="",
                     YOUCOM_API_KEY="",
+                    LAYER_GENERATION_MODEL="layer-model",
+                    LAYER_GENERATION_PROMPT_ABSTRACT="Summarize this chunk: {{DOCUMENT_TEXT}}",
+                    LAYER_GENERATION_MAX_CHUNK_TOKENS=24000,
+                    LAYER_GENERATION_MIN_TAIL_TOKENS=1000,
                     OPEN_NOTEBOOK_BASE_URL="https://nb.example.com",
                     OPEN_NOTEBOOK_API_PASSWORD="secret",
                     OPEN_NOTEBOOK_TIMEOUT_SECS=45,
@@ -162,6 +166,13 @@ async def test_get_rag_config_hides_open_notebook_layer_generation_settings():
     assert "OPEN_NOTEBOOK_TRANSFORMATION_ABSTRACT" not in response
     assert "OPEN_NOTEBOOK_TRANSFORMATION_KEY_FINDINGS" not in response
     assert "OPEN_NOTEBOOK_TRANSFORMATION_KEY_DATA" not in response
+    assert response["LAYER_GENERATION_MODEL"] == "layer-model"
+    assert (
+        response["LAYER_GENERATION_PROMPT_ABSTRACT"]
+        == "Summarize this chunk: {{DOCUMENT_TEXT}}"
+    )
+    assert response["LAYER_GENERATION_MAX_CHUNK_TOKENS"] == 24000
+    assert response["LAYER_GENERATION_MIN_TAIL_TOKENS"] == 1000
 
 
 @pytest.mark.asyncio
@@ -170,7 +181,12 @@ async def test_update_rag_config_keeps_open_notebook_layer_generation_settings_i
 
     await retrieval_mod.update_rag_config(
         request=request,
-        form_data=retrieval_mod.ConfigForm(),
+        form_data=retrieval_mod.ConfigForm(
+            LAYER_GENERATION_MODEL="internal-layer-model",
+            LAYER_GENERATION_PROMPT_ABSTRACT="Internal prompt: {{DOCUMENT_TEXT}}",
+            LAYER_GENERATION_MAX_CHUNK_TOKENS=18000,
+            LAYER_GENERATION_MIN_TAIL_TOKENS=900,
+        ),
         user=_fake_admin(),
     )
 
@@ -180,3 +196,10 @@ async def test_update_rag_config_keeps_open_notebook_layer_generation_settings_i
     assert request.app.state.config.OPEN_NOTEBOOK_TRANSFORMATION_ABSTRACT == "tr-abstract"
     assert request.app.state.config.OPEN_NOTEBOOK_TRANSFORMATION_KEY_FINDINGS == "tr-findings"
     assert request.app.state.config.OPEN_NOTEBOOK_TRANSFORMATION_KEY_DATA == "tr-data"
+    assert request.app.state.config.LAYER_GENERATION_MODEL == "internal-layer-model"
+    assert (
+        request.app.state.config.LAYER_GENERATION_PROMPT_ABSTRACT
+        == "Internal prompt: {{DOCUMENT_TEXT}}"
+    )
+    assert request.app.state.config.LAYER_GENERATION_MAX_CHUNK_TOKENS == 18000
+    assert request.app.state.config.LAYER_GENERATION_MIN_TAIL_TOKENS == 900

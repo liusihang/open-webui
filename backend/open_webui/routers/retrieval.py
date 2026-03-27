@@ -530,6 +530,10 @@ async def get_rag_config(request: Request, user=Depends(get_admin_user)):
         "CHUNK_SIZE": request.app.state.config.CHUNK_SIZE,
         "CHUNK_MIN_SIZE_TARGET": request.app.state.config.CHUNK_MIN_SIZE_TARGET,
         "CHUNK_OVERLAP": request.app.state.config.CHUNK_OVERLAP,
+        "LAYER_GENERATION_MODEL": request.app.state.config.LAYER_GENERATION_MODEL,
+        "LAYER_GENERATION_PROMPT_ABSTRACT": request.app.state.config.LAYER_GENERATION_PROMPT_ABSTRACT,
+        "LAYER_GENERATION_MAX_CHUNK_TOKENS": request.app.state.config.LAYER_GENERATION_MAX_CHUNK_TOKENS,
+        "LAYER_GENERATION_MIN_TAIL_TOKENS": request.app.state.config.LAYER_GENERATION_MIN_TAIL_TOKENS,
         # File upload settings
         "FILE_MAX_SIZE": request.app.state.config.FILE_MAX_SIZE,
         "FILE_MAX_COUNT": request.app.state.config.FILE_MAX_COUNT,
@@ -741,6 +745,10 @@ class ConfigForm(BaseModel):
     CHUNK_SIZE: Optional[int] = None
     CHUNK_MIN_SIZE_TARGET: Optional[int] = None
     CHUNK_OVERLAP: Optional[int] = None
+    LAYER_GENERATION_MODEL: Optional[str] = None
+    LAYER_GENERATION_PROMPT_ABSTRACT: Optional[str] = None
+    LAYER_GENERATION_MAX_CHUNK_TOKENS: Optional[int] = None
+    LAYER_GENERATION_MIN_TAIL_TOKENS: Optional[int] = None
 
     # File upload settings
     FILE_MAX_SIZE: Optional[Union[int, str]] = None
@@ -1092,6 +1100,26 @@ async def update_rag_config(
         if form_data.CHUNK_OVERLAP is not None
         else request.app.state.config.CHUNK_OVERLAP
     )
+    request.app.state.config.LAYER_GENERATION_MODEL = (
+        form_data.LAYER_GENERATION_MODEL
+        if form_data.LAYER_GENERATION_MODEL is not None
+        else request.app.state.config.LAYER_GENERATION_MODEL
+    )
+    request.app.state.config.LAYER_GENERATION_PROMPT_ABSTRACT = (
+        form_data.LAYER_GENERATION_PROMPT_ABSTRACT
+        if form_data.LAYER_GENERATION_PROMPT_ABSTRACT is not None
+        else request.app.state.config.LAYER_GENERATION_PROMPT_ABSTRACT
+    )
+    request.app.state.config.LAYER_GENERATION_MAX_CHUNK_TOKENS = (
+        form_data.LAYER_GENERATION_MAX_CHUNK_TOKENS
+        if form_data.LAYER_GENERATION_MAX_CHUNK_TOKENS is not None
+        else request.app.state.config.LAYER_GENERATION_MAX_CHUNK_TOKENS
+    )
+    request.app.state.config.LAYER_GENERATION_MIN_TAIL_TOKENS = (
+        form_data.LAYER_GENERATION_MIN_TAIL_TOKENS
+        if form_data.LAYER_GENERATION_MIN_TAIL_TOKENS is not None
+        else request.app.state.config.LAYER_GENERATION_MIN_TAIL_TOKENS
+    )
 
     # File upload settings
     # Empty string means "clear to None" (unlimited/no compression),
@@ -1316,6 +1344,10 @@ async def update_rag_config(
         "CHUNK_MIN_SIZE_TARGET": request.app.state.config.CHUNK_MIN_SIZE_TARGET,
         "ENABLE_MARKDOWN_HEADER_TEXT_SPLITTER": request.app.state.config.ENABLE_MARKDOWN_HEADER_TEXT_SPLITTER,
         "CHUNK_OVERLAP": request.app.state.config.CHUNK_OVERLAP,
+        "LAYER_GENERATION_MODEL": request.app.state.config.LAYER_GENERATION_MODEL,
+        "LAYER_GENERATION_PROMPT_ABSTRACT": request.app.state.config.LAYER_GENERATION_PROMPT_ABSTRACT,
+        "LAYER_GENERATION_MAX_CHUNK_TOKENS": request.app.state.config.LAYER_GENERATION_MAX_CHUNK_TOKENS,
+        "LAYER_GENERATION_MIN_TAIL_TOKENS": request.app.state.config.LAYER_GENERATION_MIN_TAIL_TOKENS,
         # File upload settings
         "FILE_MAX_SIZE": request.app.state.config.FILE_MAX_SIZE,
         "FILE_MAX_COUNT": request.app.state.config.FILE_MAX_COUNT,

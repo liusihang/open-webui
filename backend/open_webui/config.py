@@ -2417,6 +2417,30 @@ DEERFLOW_REUSE_THREADS = PersistentConfig(
     os.environ.get("DEERFLOW_REUSE_THREADS", "True").lower() == "true",
 )
 
+LAYER_GENERATION_MODEL = PersistentConfig(
+    "LAYER_GENERATION_MODEL",
+    "layered_knowledge.internal.model",
+    os.environ.get("LAYER_GENERATION_MODEL", "").strip(),
+)
+
+LAYER_GENERATION_PROMPT_ABSTRACT = PersistentConfig(
+    "LAYER_GENERATION_PROMPT_ABSTRACT",
+    "layered_knowledge.internal.prompt_abstract",
+    os.environ.get("LAYER_GENERATION_PROMPT_ABSTRACT", ""),
+)
+
+LAYER_GENERATION_MAX_CHUNK_TOKENS = PersistentConfig(
+    "LAYER_GENERATION_MAX_CHUNK_TOKENS",
+    "layered_knowledge.internal.max_chunk_tokens",
+    int(os.environ.get("LAYER_GENERATION_MAX_CHUNK_TOKENS", "24000")),
+)
+
+LAYER_GENERATION_MIN_TAIL_TOKENS = PersistentConfig(
+    "LAYER_GENERATION_MIN_TAIL_TOKENS",
+    "layered_knowledge.internal.min_tail_tokens",
+    int(os.environ.get("LAYER_GENERATION_MIN_TAIL_TOKENS", "1000")),
+)
+
 OPEN_NOTEBOOK_BASE_URL = PersistentConfig(
     "OPEN_NOTEBOOK_BASE_URL",
     "layered_knowledge.open_notebook.base_url",

@@ -268,6 +268,13 @@
 
 		const config = await getRAGConfig(localStorage.token);
 		config.ALLOWED_FILE_EXTENSIONS = (config?.ALLOWED_FILE_EXTENSIONS ?? []).join(', ');
+		config.LAYER_GENERATION_MODEL = config?.LAYER_GENERATION_MODEL ?? '';
+		config.LAYER_GENERATION_PROMPT_ABSTRACT =
+			config?.LAYER_GENERATION_PROMPT_ABSTRACT ?? '';
+		config.LAYER_GENERATION_MAX_CHUNK_TOKENS =
+			config?.LAYER_GENERATION_MAX_CHUNK_TOKENS ?? 24000;
+		config.LAYER_GENERATION_MIN_TAIL_TOKENS =
+			config?.LAYER_GENERATION_MIN_TAIL_TOKENS ?? 1000;
 
 		config.DOCLING_PARAMS =
 			typeof config.DOCLING_PARAMS === 'object'
@@ -862,6 +869,84 @@
 							</div>
 						{/if}
 					{/if}
+				</div>
+
+				<div class="mb-3">
+					<div class=" mt-0.5 mb-2.5 text-base font-medium">{$i18n.t('Layer Generation')}</div>
+
+					<hr class=" border-gray-100/30 dark:border-gray-850/30 my-2" />
+
+					<div class="mb-2 text-xs text-gray-500 dark:text-gray-400">
+						{$i18n.t(
+							'These settings control Open WebUI internal layer generation. No external Open Notebook service is used here.'
+						)}
+					</div>
+
+					<div class="mb-2.5 flex flex-col w-full">
+						<div class=" mb-1 text-xs font-medium">{$i18n.t('Generation Model')}</div>
+						<div class="flex w-full">
+							<div class="flex-1 mr-2">
+								<input
+									class="flex-1 w-full text-sm bg-transparent outline-hidden"
+									placeholder={$i18n.t('Leave empty to use the task/default model')}
+									bind:value={RAGConfig.LAYER_GENERATION_MODEL}
+								/>
+							</div>
+						</div>
+					</div>
+
+					<div class="mb-2.5 flex gap-1.5 w-full">
+						<div class="w-full">
+							<div class="self-center text-xs font-medium min-w-fit mb-1">
+								{$i18n.t('Max Chunk Tokens')}
+							</div>
+							<div class="self-center">
+								<input
+									class="w-full rounded-lg py-1.5 px-4 text-sm bg-gray-50 dark:text-gray-300 dark:bg-gray-850 outline-hidden"
+									type="number"
+									placeholder={$i18n.t('Enter max chunk tokens')}
+									bind:value={RAGConfig.LAYER_GENERATION_MAX_CHUNK_TOKENS}
+									autocomplete="off"
+									min="1"
+								/>
+							</div>
+						</div>
+
+						<div class="w-full">
+							<div class=" self-center text-xs font-medium min-w-fit mb-1">
+								{$i18n.t('Min Tail Tokens')}
+							</div>
+
+							<div class="self-center">
+								<input
+									class="w-full rounded-lg py-1.5 px-4 text-sm bg-gray-50 dark:text-gray-300 dark:bg-gray-850 outline-hidden"
+									type="number"
+									placeholder={$i18n.t('Enter minimum tail tokens')}
+									bind:value={RAGConfig.LAYER_GENERATION_MIN_TAIL_TOKENS}
+									autocomplete="off"
+									min="0"
+								/>
+							</div>
+						</div>
+					</div>
+
+					<div class="mb-2.5 flex flex-col w-full justify-between">
+						<div class=" mb-1 text-xs font-medium">{$i18n.t('Abstract Prompt')}</div>
+						<div class="flex w-full items-center relative">
+							<Tooltip
+								content={$i18n.t(
+									'Prompt template used by the internal layer generation flow for abstract rows.'
+								)}
+								placement="top-start"
+								className="w-full"
+							>
+								<Textarea
+									bind:value={RAGConfig.LAYER_GENERATION_PROMPT_ABSTRACT}
+									placeholder={$i18n.t('Enter an abstract generation prompt')}
+								/>
+							</Tooltip>
+						</div>
+					</div>
 				</div>
 
 				{#if !RAGConfig.BYPASS_EMBEDDING_AND_RETRIEVAL}

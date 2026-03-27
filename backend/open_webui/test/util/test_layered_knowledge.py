@@ -15,6 +15,10 @@ def _fake_request():
                     TASK_MODEL="task-model",
                     TASK_MODEL_EXTERNAL="",
                     DEFAULT_MODELS="task-model",
+                    LAYER_GENERATION_MODEL="",
+                    LAYER_GENERATION_PROMPT_ABSTRACT="",
+                    LAYER_GENERATION_MAX_CHUNK_TOKENS=24000,
+                    LAYER_GENERATION_MIN_TAIL_TOKENS=1000,
                     OPEN_NOTEBOOK_BASE_URL="http://onb.local",
                     OPEN_NOTEBOOK_API_PASSWORD="secret",
                     OPEN_NOTEBOOK_TIMEOUT_SECS=12,
@@ -78,6 +82,33 @@ def test_get_layer_generation_model_id_falls_back_deterministically_without_hidd
     )
 
     assert layered_mod._get_layer_generation_model_id(request, "abstract") == "a-model"
+
+
+def test_get_layer_generation_model_id_prefers_explicit_internal_config():
+    request = _fake_request()
+    request.app.state.config.LAYER_GENERATION_MODEL = "task-model"
+
+    assert layered_mod._get_layer_generation_model_id(request, "abstract") == "task-model"
+
+
+def test_layer_generation_chunk_limits_read_internal_config():
+    request = _fake_request()
+    request.app.state.config.LAYER_GENERATION_MAX_CHUNK_TOKENS = 18000
+    request.app.state.config.LAYER_GENERATION_MIN_TAIL_TOKENS = 900
+
+    assert layered_mod._layer_generation_chunk_limits(request) == (18000, 900)
+
+
+def test_get_layer_generation_prompt_reads_internal_prompt_config():
+    request = _fake_request()
+    request.app.state.config.LAYER_GENERATION_PROMPT_ABSTRACT = (
+        "Internal abstract prompt for {{DOCUMENT_TEXT}}"
+    )
+
+    assert (
+        layered_mod._get_layer_generation_prompt(request, "abstract")
+        == "Internal abstract prompt for {{DOCUMENT_TEXT}}"
+    )
 
 
 def test_sync_layers_for_file_triggers_remote_calls(monkeypatch):
