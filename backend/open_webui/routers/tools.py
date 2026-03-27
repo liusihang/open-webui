@@ -87,7 +87,12 @@ async def get_tools(
 
     # OpenAPI Tool Servers
     server_access_grants = {}
-    for server in await get_tool_servers(request):
+    for server in await get_tool_servers(
+        request,
+        session_token=getattr(
+            getattr(request.state, "token", None), "credentials", None
+        ),
+    ):
         connection = request.app.state.config.TOOL_SERVER_CONNECTIONS[
             server.get("idx", 0)
         ]
