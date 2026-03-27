@@ -150,38 +150,33 @@ def _fake_admin():
 
 
 @pytest.mark.asyncio
-async def test_get_rag_config_includes_layer_generation_settings():
+async def test_get_rag_config_hides_open_notebook_layer_generation_settings():
     response = await retrieval_mod.get_rag_config(
         request=_fake_request(),
         user=_fake_admin(),
     )
 
-    assert response["OPEN_NOTEBOOK_BASE_URL"] == "https://nb.example.com"
-    assert response["OPEN_NOTEBOOK_API_PASSWORD"] == "secret"
-    assert response["OPEN_NOTEBOOK_TIMEOUT_SECS"] == 45
-    assert response["OPEN_NOTEBOOK_TRANSFORMATION_ABSTRACT"] == "tr-abstract"
+    assert "OPEN_NOTEBOOK_BASE_URL" not in response
+    assert "OPEN_NOTEBOOK_API_PASSWORD" not in response
+    assert "OPEN_NOTEBOOK_TIMEOUT_SECS" not in response
+    assert "OPEN_NOTEBOOK_TRANSFORMATION_ABSTRACT" not in response
     assert "OPEN_NOTEBOOK_TRANSFORMATION_KEY_FINDINGS" not in response
     assert "OPEN_NOTEBOOK_TRANSFORMATION_KEY_DATA" not in response
 
 
 @pytest.mark.asyncio
-async def test_update_rag_config_updates_layer_generation_settings():
+async def test_update_rag_config_keeps_open_notebook_layer_generation_settings_internal():
     request = _fake_request()
 
     await retrieval_mod.update_rag_config(
         request=request,
-        form_data=retrieval_mod.ConfigForm(
-            OPEN_NOTEBOOK_BASE_URL="https://next.example.com",
-            OPEN_NOTEBOOK_API_PASSWORD="next-secret",
-            OPEN_NOTEBOOK_TIMEOUT_SECS=60,
-            OPEN_NOTEBOOK_TRANSFORMATION_ABSTRACT="next-abstract",
-        ),
+        form_data=retrieval_mod.ConfigForm(),
         user=_fake_admin(),
     )
 
-    assert request.app.state.config.OPEN_NOTEBOOK_BASE_URL == "https://next.example.com"
-    assert request.app.state.config.OPEN_NOTEBOOK_API_PASSWORD == "next-secret"
-    assert request.app.state.config.OPEN_NOTEBOOK_TIMEOUT_SECS == 60
-    assert request.app.state.config.OPEN_NOTEBOOK_TRANSFORMATION_ABSTRACT == "next-abstract"
+    assert request.app.state.config.OPEN_NOTEBOOK_BASE_URL == "https://nb.example.com"
+    assert request.app.state.config.OPEN_NOTEBOOK_API_PASSWORD == "secret"
+    assert request.app.state.config.OPEN_NOTEBOOK_TIMEOUT_SECS == 45
+    assert request.app.state.config.OPEN_NOTEBOOK_TRANSFORMATION_ABSTRACT == "tr-abstract"
     assert request.app.state.config.OPEN_NOTEBOOK_TRANSFORMATION_KEY_FINDINGS == "tr-findings"
     assert request.app.state.config.OPEN_NOTEBOOK_TRANSFORMATION_KEY_DATA == "tr-data"

@@ -46,11 +46,11 @@ from open_webui.utils.knowledge_layer_embeddings import (
     delete_layer_embeddings_by_knowledge_id,
 )
 from open_webui.utils.layered_knowledge import (
-    backfill_layers_for_knowledge,
+    backfill_layers_for_knowledge_async,
     mark_layers_for_file_stale,
     mark_layers_for_knowledge_stale,
-    regenerate_layers_for_file,
-    regenerate_layer_for_file,
+    regenerate_layers_for_file_async,
+    sync_layers_for_file_async,
     sync_layers_for_file,
 )
 
@@ -759,7 +759,7 @@ async def regenerate_knowledge_file_layers(
             elif form_data.layer_type:
                 selected_layer_types = [form_data.layer_type]
 
-        regenerate_layers_for_file(
+        await regenerate_layers_for_file_async(
             request,
             id,
             file_id,
@@ -809,7 +809,7 @@ async def regenerate_knowledge_file_layer_by_type(
         )
 
     try:
-        regenerate_layers_for_file(
+        await regenerate_layers_for_file_async(
             request,
             id,
             file_id,
@@ -852,7 +852,7 @@ async def backfill_knowledge_layers(
         )
 
     try:
-        summary = backfill_layers_for_knowledge(
+        summary = await backfill_layers_for_knowledge_async(
             request,
             id,
             layer_types=(form_data.layer_types if form_data else None),
@@ -1335,7 +1335,7 @@ async def add_files_to_knowledge_batch(
             knowledge_id=id, file_id=file_id, user_id=user.id, db=db
         )
         try:
-            sync_layers_for_file(request, id, file_id, db=db)
+            await sync_layers_for_file_async(request, id, file_id, db=db)
         except Exception as layer_exc:
             log.warning(
                 "Layer sync failed after batch add for knowledge=%s file=%s: %s",

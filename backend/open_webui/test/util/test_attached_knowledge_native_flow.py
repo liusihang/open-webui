@@ -37,8 +37,6 @@ def test_native_builtin_tools_append_knowledge_tools_only_for_effective_scope() 
     )
 
     assert "query_knowledge_abstract" in tools
-    assert "query_knowledge_key_findings" in tools
-    assert "query_knowledge_key_data" in tools
     assert "query_knowledge_full_text" in tools
     assert "view_knowledge_layers" in tools
     assert "query_knowledge_files" not in tools
@@ -66,8 +64,6 @@ def test_native_builtin_tools_skip_scoped_knowledge_tools_without_scope() -> Non
 
     assert "query_knowledge_files" not in tools
     assert "query_knowledge_abstract" not in tools
-    assert "query_knowledge_key_findings" not in tools
-    assert "query_knowledge_key_data" not in tools
     assert "query_knowledge_full_text" not in tools
     assert "view_knowledge_layers" not in tools
     assert "view_file" not in tools

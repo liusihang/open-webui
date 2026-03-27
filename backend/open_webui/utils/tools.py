@@ -79,8 +79,6 @@ from open_webui.tools.builtin import (
     query_knowledge_bases,
     search_knowledge_files,
     query_knowledge_abstract,
-    query_knowledge_key_findings,
-    query_knowledge_key_data,
     query_knowledge_full_text,
     view_file,
     view_knowledge_layers,
@@ -155,8 +153,6 @@ def resolve_effective_knowledge_builtin_tools(
 
     tool_names = [
         "query_knowledge_abstract",
-        "query_knowledge_key_findings",
-        "query_knowledge_key_data",
         "query_knowledge_full_text",
         "view_knowledge_layers",
     ]
@@ -545,8 +541,6 @@ def get_builtin_tools(
         func.__name__: func
         for func in [
             query_knowledge_abstract,
-            query_knowledge_key_findings,
-            query_knowledge_key_data,
             query_knowledge_full_text,
             view_knowledge_layers,
             view_file,

@@ -44,7 +44,6 @@
 
 	import Spinner from '$lib/components/common/Spinner.svelte';
 	import Files from './KnowledgeBase/Files.svelte';
-	import LayerRegenerateMenu from './KnowledgeBase/LayerRegenerateMenu.svelte';
 	import LayersPanel from './KnowledgeBase/LayersPanel.svelte';
 	import AddFilesPlaceholder from '$lib/components/AddFilesPlaceholder.svelte';
 
@@ -53,6 +52,7 @@
 
 	import SyncConfirmDialog from '../../common/ConfirmDialog.svelte';
 	import Drawer from '$lib/components/common/Drawer.svelte';
+	import ArrowPath from '$lib/components/icons/ArrowPath.svelte';
 	import ChevronLeft from '$lib/components/icons/ChevronLeft.svelte';
 	import LockClosed from '$lib/components/icons/LockClosed.svelte';
 	import AccessControlModal from '../common/AccessControlModal.svelte';
@@ -61,7 +61,6 @@
 	import DropdownOptions from '$lib/components/common/DropdownOptions.svelte';
 	import Pagination from '$lib/components/common/Pagination.svelte';
 	import AttachWebpageModal from '$lib/components/chat/MessageInput/AttachWebpageModal.svelte';
-	import { LAYER_TYPE_ORDER } from './KnowledgeBase/LayersPanel.svelte';
 	import type {
 		KnowledgeLayerItem,
 		KnowledgeLayerType
@@ -104,7 +103,6 @@
 	let isRegeneratingAllLayers = false;
 	let isBackfillingLayers = false;
 	let regeneratingLayerType: KnowledgeLayerType | null = null;
-	let selectedLayerTypes: KnowledgeLayerType[] = [...LAYER_TYPE_ORDER];
 
 	let inputFiles = null;
 
@@ -244,7 +242,6 @@
 				knowledge.id,
 				selectedFileId,
 				{
-					layerTypes: selectedLayerTypes,
 					force: false
 				}
 			).catch((e) => {
@@ -262,15 +259,45 @@
 		}
 	};
 
-	const backfillLayersHandler = async (layerTypes: KnowledgeLayerType[]) => {
-		if (!knowledge?.id || isRegeneratingAllLayers || selectedFileLayersLoading || regeneratingLayerType) {
+	const regenerateFileLayersHandler = async (fileId: string) => {
+		if (!knowledge?.id || !fileId || isRegeneratingAllLayers || selectedFileLayersLoading) {
+			return;
+		}
+
+		isRegeneratingAllLayers = true;
+		try {
+			const response = await regenerateKnowledgeFileLayers(
+				localStorage.token,
+				knowledge.id,
+				fileId,
+				{
+					force: false
+				}
+			).catch((e) => {
+				throw e;
+			});
+
+			if (response) {
+				toast.success($i18n.t('Layer regeneration started.'));
+				if (selectedFileId === fileId) {
+					await refreshSelectedFileLayers(fileId, false);
+				}
+			}
+		} catch (e) {
+			toast.error(`${e}`);
+		} finally {
+			isRegeneratingAllLayers = false;
+		}
+	};
+
+	const backfillLayersHandler = async () => {
+		if (!knowledge?.id || isBackfillingLayers || isRegeneratingAllLayers || selectedFileLayersLoading) {
 			return;
 		}
 
 		isBackfillingLayers = true;
 		try {
 			const response = await backfillKnowledgeLayers(localStorage.token, knowledge.id, {
-				layerTypes,
 				force: false
 			}).catch((e) => {
 				throw e;
@@ -1097,7 +1124,24 @@
 					/>
 
 					{#if knowledge?.write_access}
-						<div>
+						<div class="flex items-center gap-2">
+							<button
+								type="button"
+								class="flex items-center gap-1.5 px-2.5 py-1.5 text-sm bg-gray-50 dark:bg-gray-850 rounded-xl hover:bg-gray-100 dark:hover:bg-gray-800 disabled:opacity-60 disabled:cursor-not-allowed"
+								disabled={isBackfillingLayers || isRegeneratingAllLayers}
+								on:click={() => {
+									backfillLayersHandler();
+								}}
+							>
+								<ArrowPath className="size-3.5" strokeWidth="2" />
+								<span>
+									{#if isBackfillingLayers}
+										{$i18n.t('Rebuilding...')}
+									{:else}
+										{$i18n.t('Rebuild Layers')}
+									{/if}
+								</span>
+							</button>
 							<AddContentMenu
 								onUpload={(data) => {
 									if (data.type === 'directory') {
@@ -1208,6 +1252,9 @@
 
 												deleteFileHandler(fileId);
 											}}
+											onRegenerateLayer={(fileId) => {
+												regenerateFileLayersHandler(fileId);
+											}}
 										/>
 									</div>
 
@@ -1281,25 +1328,6 @@
 											</div>
 										{/if}
 									</div>
-
-									<LayerRegenerateMenu
-										canManage={knowledge?.write_access}
-										disabled={selectedFileLayersLoading}
-										regenerating={isRegeneratingAllLayers}
-										backfilling={isBackfillingLayers}
-										{selectedLayerTypes}
-										onSelectionChange={(layerTypes) => {
-											selectedLayerTypes = layerTypes;
-										}}
-										onRegenerateSelected={(layerTypes) => {
-											selectedLayerTypes = layerTypes;
-											regenerateAllLayersHandler();
-										}}
-										onBackfill={(layerTypes) => {
-											selectedLayerTypes = layerTypes;
-											backfillLayersHandler(layerTypes);
-										}}
-									/>
 
 									<LayersPanel
 										layers={selectedFileLayers}

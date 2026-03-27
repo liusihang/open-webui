@@ -49,13 +49,13 @@ def test_backfill_layers_for_knowledge_selects_missing_failed_and_stale(monkeypa
             return [_fake_layer("abstract", "stale")]
         return [_fake_layer("abstract", "ready")]
 
-    def fake_regenerate(request, knowledge_id, file_id, layer_types=None, force=False, db=None):
+    async def fake_regenerate(request, knowledge_id, file_id, layer_types=None, force=False, db=None):
         scheduled.append((file_id, tuple(layer_types or []), force))
         return []
 
     monkeypatch.setattr(layered_mod.Knowledges, "get_files_by_id", lambda *args, **kwargs: files)
     monkeypatch.setattr(layered_mod.KnowledgeLayers, "get_layers_by_file", fake_get_layers_by_file)
-    monkeypatch.setattr(layered_mod, "regenerate_layers_for_file", fake_regenerate)
+    monkeypatch.setattr(layered_mod, "regenerate_layers_for_file_async", fake_regenerate)
 
     summary = layered_mod.backfill_layers_for_knowledge(
         _fake_request(),
@@ -72,6 +72,11 @@ def test_backfill_layers_for_knowledge_force_reprocesses_all(monkeypatch):
     scheduled = []
     files = [_fake_file("f1"), _fake_file("f2")]
 
+    async def fake_regenerate(
+        request, knowledge_id, file_id, layer_types=None, force=False, db=None
+    ):
+        scheduled.append(file_id)
+
     monkeypatch.setattr(layered_mod.Knowledges, "get_files_by_id", lambda *args, **kwargs: files)
     monkeypatch.setattr(
         layered_mod.KnowledgeLayers,
@@ -80,8 +85,8 @@ def test_backfill_layers_for_knowledge_force_reprocesses_all(monkeypatch):
     )
     monkeypatch.setattr(
         layered_mod,
-        "regenerate_layers_for_file",
-        lambda request, knowledge_id, file_id, layer_types=None, force=False, db=None: scheduled.append(file_id),
+        "regenerate_layers_for_file_async",
+        fake_regenerate,
     )
 
     summary = layered_mod.backfill_layers_for_knowledge(
@@ -99,6 +104,11 @@ def test_backfill_layers_for_knowledge_honors_selected_layer_types(monkeypatch):
     scheduled = []
     files = [_fake_file("f1"), _fake_file("f2")]
 
+    async def fake_regenerate(
+        request, knowledge_id, file_id, layer_types=None, force=False, db=None
+    ):
+        scheduled.append(file_id)
+
     def fake_get_layers_by_file(knowledge_id, file_id, db=None):
         if file_id == "f1":
             return [_fake_layer("abstract", "ready")]
@@ -108,8 +118,8 @@ def test_backfill_layers_for_knowledge_honors_selected_layer_types(monkeypatch):
     monkeypatch.setattr(layered_mod.KnowledgeLayers, "get_layers_by_file", fake_get_layers_by_file)
     monkeypatch.setattr(
         layered_mod,
-        "regenerate_layers_for_file",
-        lambda request, knowledge_id, file_id, layer_types=None, force=False, db=None: scheduled.append(file_id),
+        "regenerate_layers_for_file_async",
+        fake_regenerate,
     )
 
     summary = layered_mod.backfill_layers_for_knowledge(
@@ -125,6 +135,13 @@ def test_backfill_layers_for_knowledge_honors_selected_layer_types(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_backfill_knowledge_layers_endpoint_returns_summary(monkeypatch):
+    async def fake_backfill(request, knowledge_id, layer_types=None, force=False, db=None):
+        return {
+            "total_files": 5,
+            "scheduled_files": 3,
+            "skipped_files": 2,
+        }
+
     monkeypatch.setattr(
         knowledge_mod.Knowledges,
         "get_knowledge_by_id",
@@ -133,12 +150,8 @@ async def test_backfill_knowledge_layers_endpoint_returns_summary(monkeypatch):
     )
     monkeypatch.setattr(
         knowledge_mod,
-        "backfill_layers_for_knowledge",
-        lambda request, knowledge_id, layer_types=None, force=False, db=None: {
-            "total_files": 5,
-            "scheduled_files": 3,
-            "skipped_files": 2,
-        },
+        "backfill_layers_for_knowledge_async",
+        fake_backfill,
         raising=False,
     )
 

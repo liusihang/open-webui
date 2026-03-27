@@ -2,6 +2,7 @@ import logging
 import re
 import time
 import asyncio
+from types import SimpleNamespace
 from typing import Optional
 
 import requests
@@ -9,7 +10,9 @@ import tiktoken
 from requests import RequestException
 from sqlalchemy.orm import Session
 
+from open_webui.utils.chat import generate_chat_completion
 from open_webui.utils.misc import calculate_sha256_string
+from open_webui.utils.task import get_task_model_id
 from open_webui.utils.knowledge_layer_embeddings import (
     delete_layer_embeddings_by_file_id,
     delete_layer_embeddings_by_knowledge_id,
@@ -44,6 +47,18 @@ REFERENCE_SECTION_TITLES = (
 )
 ACTIVE_LAYER_TYPES = ("abstract",)
 COMPAT_LAYER_ALIASES = {"key_findings": "abstract", "key_data": "abstract"}
+DEFAULT_LAYER_GENERATION_PROMPT_ABSTRACT = """### Task:
+Generate a concise abstract for the provided document chunk.
+
+### Guidelines:
+- Summarize only the provided text.
+- Focus on the core subject, scope, and major conclusions.
+- Keep the answer compact and readable.
+- Do not invent facts that are not present in the text.
+
+### Document Chunk:
+{{DOCUMENT_TEXT}}
+"""
 
 
 def get_file_open_notebook_mapping(file_obj) -> dict:
@@ -314,6 +329,164 @@ def _layer_display_title(layer_type: str, part_index: int, part_total: int) -> s
     return f"{_layer_display_label(layer_type)} {part_index}/{part_total}"
 
 
+def _layer_generation_chunk_limits(request) -> tuple[int, int]:
+    return DEFAULT_MAX_CHUNK_TOKENS, DEFAULT_MIN_TAIL_TOKENS
+
+
+def _resolve_generation_models(request) -> dict:
+    if getattr(request.state, "direct", False) and hasattr(request.state, "model"):
+        model = request.state.model
+        if isinstance(model, dict) and model.get("id"):
+            return {model["id"]: model}
+
+    return getattr(request.app.state, "MODELS", {}) or {}
+
+
+def _get_layer_generation_model_id(request, layer_type: str) -> Optional[str]:
+    config = request.app.state.config
+    models = _resolve_generation_models(request)
+    if not models:
+        return None
+
+    default_models = (getattr(config, "DEFAULT_MODELS", "") or "").split(",")
+    default_model_id = next(
+        (
+            candidate.strip()
+            for candidate in default_models
+            if candidate.strip() in models and models[candidate.strip()].get("owned_by") != "arena"
+        ),
+        None,
+    )
+    if not default_model_id:
+        non_arena_model_ids = sorted(
+            model_id
+            for model_id, model in models.items()
+            if model.get("owned_by") != "arena"
+        )
+        default_model_id = non_arena_model_ids[0] if non_arena_model_ids else None
+
+    if not default_model_id:
+        return None
+
+    return get_task_model_id(
+        default_model_id=default_model_id,
+        task_model=(getattr(config, "TASK_MODEL", "") or "").strip(),
+        task_model_external=(getattr(config, "TASK_MODEL_EXTERNAL", "") or "").strip(),
+        models=models,
+    )
+
+
+def _get_layer_generation_prompt(request, layer_type: str) -> str:
+    return DEFAULT_LAYER_GENERATION_PROMPT_ABSTRACT
+
+
+def _render_layer_generation_prompt(
+    template: str,
+    *,
+    layer_type: str,
+    document_text: str,
+    part_index: int,
+    part_total: int,
+) -> str:
+    return (
+        (template or DEFAULT_LAYER_GENERATION_PROMPT_ABSTRACT)
+        .replace("{{DOCUMENT_TEXT}}", document_text)
+        .replace("{{LAYER_TYPE}}", layer_type)
+        .replace("{{PART_INDEX}}", str(part_index))
+        .replace("{{PART_TOTAL}}", str(part_total))
+    )
+
+
+def _run_coroutine_sync(coro):
+    try:
+        asyncio.get_running_loop()
+    except RuntimeError:
+        return asyncio.run(coro)
+    raise RuntimeError(
+        "Synchronous layered knowledge generation cannot run inside an active event loop"
+    )
+
+
+def _extract_chat_completion_content(response) -> str:
+    data = response
+    if isinstance(data, list) and data:
+        data = data[0]
+
+    if not isinstance(data, dict):
+        return ""
+
+    choices = data.get("choices")
+    if isinstance(choices, list) and choices:
+        message = choices[0].get("message", {}) if isinstance(choices[0], dict) else {}
+        if isinstance(message, dict):
+            content = message.get("content") or message.get("reasoning_content")
+            if isinstance(content, str):
+                return content.strip()
+
+    output = data.get("output")
+    if isinstance(output, list):
+        text_blocks: list[str] = []
+        for item in output:
+            if not isinstance(item, dict) or item.get("type") != "message":
+                continue
+            content_parts = item.get("content", [])
+            if not isinstance(content_parts, list):
+                continue
+            for part in content_parts:
+                if not isinstance(part, dict):
+                    continue
+                text = part.get("text")
+                if isinstance(text, str) and text.strip():
+                    text_blocks.append(text.strip())
+        return "\n".join(text_blocks).strip()
+
+    return ""
+
+
+def _get_layer_generation_user():
+    return SimpleNamespace(
+        id="layer-generation",
+        email="layer-generation@openwebui.local",
+        role="admin",
+    )
+
+
+async def _generate_layer_content_async(
+    request,
+    *,
+    layer_type: str,
+    document_text: str,
+    part_index: int,
+    part_total: int,
+) -> tuple[str, str]:
+    model_id = _get_layer_generation_model_id(request, layer_type)
+    if not model_id:
+        raise RuntimeError(f"Layer generation model is not configured for {layer_type}")
+
+    prompt = _render_layer_generation_prompt(
+        _get_layer_generation_prompt(request, layer_type),
+        layer_type=layer_type,
+        document_text=document_text,
+        part_index=part_index,
+        part_total=part_total,
+    )
+    payload = {
+        "model": model_id,
+        "messages": [{"role": "user", "content": prompt}],
+        "stream": False,
+    }
+    response = await generate_chat_completion(
+        request,
+        form_data=payload,
+        user=_get_layer_generation_user(),
+        bypass_filter=True,
+    )
+    content = _extract_chat_completion_content(response)
+    if not content:
+        raise RuntimeError(f"Layer generation returned empty content for {layer_type}")
+    return content, model_id
+
+
 def _current_file_content_hash(file_obj) -> str:
     file_hash = getattr(file_obj, "hash", None)
     if isinstance(file_hash, str) and file_hash.strip():
@@ -470,8 +643,10 @@ def _upsert_status(
     *,
     status: str,
     content: Optional[str] = None,
+    source_system: str = "open_notebook",
     source_ref_id: Optional[str] = None,
     transformation_ref_id: Optional[str] = None,
+    content_hash: Optional[str] = None,
     part_index: int = 1,
     part_total: int = 1,
     display_title: Optional[str] = None,
@@ -484,9 +659,10 @@ def _upsert_status(
             layer_type=layer_type,
             status=status,
             content=content,
-            source_system="open_notebook",
+            source_system=source_system,
             source_ref_id=source_ref_id,
             transformation_ref_id=transformation_ref_id,
+            content_hash=content_hash,
             part_index=part_index,
             part_total=part_total,
             display_title=display_title,
@@ -590,7 +766,7 @@ def _build_chunk_specs(
     return [{"source_id": source_id, "part_index": 1, "part_total": 1}], False, current_content_hash
 
 
-def _sync_selected_layers_for_file(
+async def _sync_selected_layers_for_file_async(
     request,
     knowledge_id: str,
     file_id: str,
@@ -598,38 +774,68 @@ def _sync_selected_layers_for_file(
     selected_layer_types: list[str],
     db: Optional[Session] = None,
 ) -> list[KnowledgeFileLayerModel]:
-    base_url, password, timeout = _open_notebook_config(request)
-    if not base_url or not password:
-        return KnowledgeLayers.get_layers_by_file(knowledge_id, file_id, db=db)
-
     file_obj = Files.get_file_by_id(file_id, db=db)
     if not file_obj:
         return KnowledgeLayers.get_layers_by_file(knowledge_id, file_id, db=db)
 
-    chunk_specs, is_large_file, current_content_hash = _build_chunk_specs(
-        request=request,
-        file_obj=file_obj,
-        file_id=file_id,
-        base_url=base_url,
-        password=password,
-        timeout=timeout,
-        db=db,
+    file_text = _extract_file_text(file_obj)
+    current_content_hash = _current_file_content_hash(file_obj)
+    if not file_text:
+        KnowledgeLayers.delete_layers_by_file(
+            knowledge_id, file_id, layer_types=selected_layer_types, db=db
+        )
+        for layer_type in selected_layer_types:
+            _upsert_status(
+                knowledge_id,
+                file_id,
+                layer_type,
+                status="failed",
+                content=(
+                    "Layer generation failed: file has no extracted text content "
+                    "available for native generation."
+                ),
+                source_system="open_webui",
+                content_hash=current_content_hash,
+                part_index=1,
+                part_total=1,
+                display_title=None,
+                db=db,
+            )
+        return KnowledgeLayers.get_layers_by_file(knowledge_id, file_id, db=db)
+
+    max_tokens, min_tail_tokens = _layer_generation_chunk_limits(request)
+    chunk_specs = plan_text_chunks(
+        file_text,
+        max_tokens=max_tokens,
+        min_tail_tokens=min_tail_tokens,
     )
     if not chunk_specs:
+        KnowledgeLayers.delete_layers_by_file(
+            knowledge_id, file_id, layer_types=selected_layer_types, db=db
+        )
+        for layer_type in selected_layer_types:
+            _upsert_status(
+                knowledge_id,
+                file_id,
+                layer_type,
+                status="failed",
+                content=(
+                    "Layer generation failed: file has no extracted text content "
+                    "available for native generation."
+                ),
+                source_system="open_webui",
+                content_hash=current_content_hash,
+                part_index=1,
+                part_total=1,
+                display_title=None,
+                db=db,
+            )
         return KnowledgeLayers.get_layers_by_file(knowledge_id, file_id, db=db)
 
     KnowledgeLayers.delete_layers_by_file(
         knowledge_id, file_id, layer_types=selected_layer_types, db=db
     )
-
-    source_ids = [spec["source_id"] for spec in chunk_specs]
-
-    trigger_errors: dict[tuple[str, int], str] = {}
     for layer_type in selected_layer_types:
-        transformation_id = get_layer_transformation_id(request, layer_type)
-        if not transformation_id:
-            continue
-
         for spec in chunk_specs:
             part_index = spec["part_index"]
             part_total = spec["part_total"]
@@ -643,150 +849,61 @@ def _sync_selected_layers_for_file(
                 file_id,
                 layer_type,
                 status="pending",
-                source_ref_id=spec["source_id"],
-                transformation_ref_id=transformation_id,
+                source_system="open_webui",
+                source_ref_id=f"chunk:{part_index}",
+                transformation_ref_id=_get_layer_generation_model_id(request, layer_type),
                 part_index=part_index,
                 part_total=part_total,
                 display_title=display_title,
                 db=db,
             )
             try:
-                _request_json(
-                    "POST",
-                    f"{base_url}/api/sources/{spec['source_id']}/insights",
-                    password,
-                    timeout,
-                    payload={"transformation_id": transformation_id},
+                content, model_id = await _generate_layer_content_async(
+                    request,
+                    layer_type=layer_type,
+                    document_text=spec.get("content", ""),
+                    part_index=part_index,
+                    part_total=part_total,
                 )
-            except RuntimeError as exc:
-                trigger_errors[(layer_type, part_index)] = str(exc)
+                _upsert_status(
+                    knowledge_id,
+                    file_id,
+                    layer_type,
+                    status="ready",
+                    content=content,
+                    source_system="open_webui",
+                    source_ref_id=f"chunk:{part_index}",
+                    transformation_ref_id=model_id,
+                    content_hash=current_content_hash,
+                    part_index=part_index,
+                    part_total=part_total,
+                    display_title=display_title,
+                    db=db,
+                )
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
                 _upsert_status(
                     knowledge_id,
                     file_id,
                     layer_type,
                     status="failed",
                     content=str(exc),
-                    source_ref_id=spec["source_id"],
-                    transformation_ref_id=transformation_id,
+                    source_system="open_webui",
+                    source_ref_id=f"chunk:{part_index}",
+                    transformation_ref_id=_get_layer_generation_model_id(
+                        request, layer_type
+                    ),
+                    content_hash=current_content_hash,
                     part_index=part_index,
                     part_total=part_total,
                     display_title=display_title,
                     db=db,
                 )
 
-    for spec in chunk_specs:
-        part_index = spec["part_index"]
-        part_total = spec["part_total"]
-        source_id = spec["source_id"]
-        try:
-            insights = _request_json(
-                "GET",
-                f"{base_url}/api/sources/{source_id}/insights",
-                password,
-                timeout,
-            )
-        except RuntimeError as exc:
-            log.warning(
-                "Open Notebook insight list failed for knowledge=%s file=%s source=%s: %s",
-                knowledge_id,
-                file_id,
-                source_id,
-                exc,
-            )
-            continue
-
-        if not isinstance(insights, list):
-            continue
-
-        for insight in insights:
-            layer_type = _normalize_layer_type(str(insight.get("insight_type", "")))
-            if not layer_type:
-                continue
-            layer_type = _normalize_runtime_layer_type(layer_type)
-            if layer_type not in selected_layer_types:
-                continue
-
-            content = insight.get("content")
-            if not isinstance(content, str) or not content.strip():
-                continue
-
-            transformation_id = get_layer_transformation_id(request, layer_type)
-            _upsert_status(
-                knowledge_id,
-                file_id,
-                layer_type,
-                status="ready",
-                content=content,
-                source_ref_id=source_id,
-                transformation_ref_id=transformation_id,
-                part_index=part_index,
-                part_total=part_total,
-                display_title=(
-                    _layer_display_title(layer_type, part_index, part_total)
-                    if part_total > 1
-                    else None
-                ),
-                db=db,
-            )
-
-    for (layer_type, part_index), message in trigger_errors.items():
-        existing = [
-            row
-            for row in KnowledgeLayers.get_layers_by_file(knowledge_id, file_id, db=db)
-            if row.layer_type == layer_type and row.part_index == part_index
-        ]
-        if existing and existing[0].status == "ready":
-            continue
-        target_spec = next(
-            (spec for spec in chunk_specs if spec["part_index"] == part_index),
-            None,
-        )
-        part_total = target_spec["part_total"] if target_spec else 1
-        source_id = next(
-            (spec["source_id"] for spec in chunk_specs if spec["part_index"] == part_index),
-            None,
-        )
-        _upsert_status(
-            knowledge_id,
-            file_id,
-            layer_type,
-            status="failed",
-            content=message,
-            source_ref_id=source_id,
-            transformation_ref_id=get_layer_transformation_id(request, layer_type),
-            part_index=part_index,
-            part_total=part_total,
-            display_title=(
-                _layer_display_title(layer_type, part_index, part_total)
-                if part_total > 1
-                else None
-            ),
-            db=db,
-        )
-
-    save_file_open_notebook_mapping(
-        file_id,
-        source_id=source_ids[0] if source_ids else None,
-        source_ids=source_ids,
-        sync_status="ready",
-        last_synced_at=int(time.time()),
-        is_large_file=is_large_file,
-        part_count=len(source_ids),
-        source_content_hash=current_content_hash,
-        db=db,
-    )
-
     if getattr(request.app.state, "EMBEDDING_FUNCTION", None):
         try:
-            try:
-                loop = asyncio.get_running_loop()
-            except RuntimeError:
-                loop = None
-
-            if loop and loop.is_running():
-                loop.create_task(sync_file_layer_embeddings(request, knowledge_id, file_id, db=db))
-            else:
-                asyncio.run(sync_file_layer_embeddings(request, knowledge_id, file_id, db=db))
+            await sync_file_layer_embeddings(request, knowledge_id, file_id, db=db)
         except Exception as exc:
             log.warning(
                 "Layer embedding sync failed for knowledge=%s file=%s: %s",
@@ -798,15 +915,28 @@ def _sync_selected_layers_for_file(
     return KnowledgeLayers.get_layers_by_file(knowledge_id, file_id, db=db)
 
 
-def sync_layers_for_file(
+async def sync_layers_for_file_async(
     request, knowledge_id: str, file_id: str, db: Optional[Session] = None
 ) -> list[KnowledgeFileLayerModel]:
-    return _sync_selected_layers_for_file(
+    return await _sync_selected_layers_for_file_async(
         request,
         knowledge_id,
         file_id,
         selected_layer_types=list(ACTIVE_LAYER_TYPES),
         db=db,
+    )
+
+
+def sync_layers_for_file(
+    request, knowledge_id: str, file_id: str, db: Optional[Session] = None
+) -> list[KnowledgeFileLayerModel]:
+    return _run_coroutine_sync(
+        sync_layers_for_file_async(
+            request,
+            knowledge_id,
+            file_id,
+            db=db,
+        )
     )
 
 
@@ -820,16 +950,18 @@ def regenerate_layer_for_file(
     normalized_layer = _normalize_runtime_layer_type(layer_type)
     if not normalized_layer:
         raise ValueError(f"Unsupported layer_type: {layer_type}")
-    return _sync_selected_layers_for_file(
-        request,
-        knowledge_id,
-        file_id,
-        selected_layer_types=[normalized_layer],
-        db=db,
+    return _run_coroutine_sync(
+        _sync_selected_layers_for_file_async(
+            request,
+            knowledge_id,
+            file_id,
+            selected_layer_types=[normalized_layer],
+            db=db,
+        )
     )
 
 
-def regenerate_layers_for_file(
+async def regenerate_layers_for_file_async(
     request,
     knowledge_id: str,
     file_id: str,
@@ -850,18 +982,45 @@ def regenerate_layers_for_file(
         normalized_layer_types = list(ACTIVE_LAYER_TYPES)
 
     if force or set(normalized_layer_types) == set(ACTIVE_LAYER_TYPES):
-        return sync_layers_for_file(request, knowledge_id, file_id, db=db)
-
-    for normalized_layer in normalized_layer_types:
-        regenerate_layer_for_file(
+        return await _sync_selected_layers_for_file_async(
             request,
             knowledge_id,
             file_id,
-            layer_type=normalized_layer,
+            selected_layer_types=list(ACTIVE_LAYER_TYPES),
+            db=db,
+        )
+
+    for normalized_layer in normalized_layer_types:
+        await _sync_selected_layers_for_file_async(
+            request,
+            knowledge_id,
+            file_id,
+            selected_layer_types=[normalized_layer],
             db=db,
         )
 
     return KnowledgeLayers.get_layers_by_file(knowledge_id, file_id, db=db)
+
+
+def regenerate_layers_for_file(
+    request,
+    knowledge_id: str,
+    file_id: str,
+    *,
+    layer_types: Optional[list[str]] = None,
+    force: bool = False,
+    db: Optional[Session] = None,
+) -> list[KnowledgeFileLayerModel]:
+    return _run_coroutine_sync(
+        regenerate_layers_for_file_async(
+            request,
+            knowledge_id,
+            file_id,
+            layer_types=layer_types,
+            force=force,
+            db=db,
+        )
+    )
 
 
 def _file_needs_backfill(
@@ -883,7 +1042,7 @@ def _file_needs_backfill(
     return False
 
 
-def backfill_layers_for_knowledge(
+async def backfill_layers_for_knowledge_async(
     request,
     knowledge_id: str,
     *,
@@ -911,7 +1070,7 @@ def backfill_layers_for_knowledge(
         if not force and not _file_needs_backfill(rows, normalized_layer_types):
             continue
 
-        regenerate_layers_for_file(
+        await regenerate_layers_for_file_async(
             request,
             knowledge_id,
             file.id,
@@ -926,6 +1085,25 @@ def backfill_layers_for_knowledge(
         "scheduled_files": scheduled_files,
         "skipped_files": total_files - scheduled_files,
     }
+
+
+def backfill_layers_for_knowledge(
+    request,
+    knowledge_id: str,
+    *,
+    layer_types: Optional[list[str]] = None,
+    force: bool = False,
+    db: Optional[Session] = None,
+) -> dict:
+    return _run_coroutine_sync(
+        backfill_layers_for_knowledge_async(
+            request,
+            knowledge_id,
+            layer_types=layer_types,
+            force=force,
+            db=db,
+        )
+    )
 
 
 def mark_layers_for_file_stale(

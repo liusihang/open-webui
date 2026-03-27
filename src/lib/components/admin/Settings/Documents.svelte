@@ -1469,57 +1469,6 @@
 				</div>
 
 				<div class="mb-3">
-					<div class=" mt-0.5 mb-2.5 text-base font-medium">{$i18n.t('Layer Generation')}</div>
-
-					<hr class=" border-gray-100/30 dark:border-gray-850/30 my-2" />
-
-					<div class="mb-2.5 flex flex-col w-full">
-						<div class="mb-1 text-xs font-medium">{$i18n.t('Open Notebook Base URL')}</div>
-						<input
-							class="flex-1 w-full text-sm bg-transparent outline-hidden"
-							placeholder={$i18n.t('Enter Open Notebook Base URL')}
-							bind:value={RAGConfig.OPEN_NOTEBOOK_BASE_URL}
-						/>
-					</div>
-
-					<div class="mb-2.5 flex flex-col w-full">
-						<div class="mb-1 text-xs font-medium">{$i18n.t('Open Notebook API Password')}</div>
-						<SensitiveInput
-							placeholder={$i18n.t('Enter Open Notebook API Password')}
-							required={false}
-							bind:value={RAGConfig.OPEN_NOTEBOOK_API_PASSWORD}
-						/>
-					</div>
-
-					<div class="mb-2.5 flex w-full justify-between">
-						<div class="self-center text-xs font-medium">
-							{$i18n.t('Open Notebook Timeout Seconds')}
-						</div>
-						<div class="flex items-center relative">
-							<input
-								class="flex-1 w-full text-sm bg-transparent outline-hidden text-right"
-								type="number"
-								min="1"
-								step="1"
-								placeholder={$i18n.t('30')}
-								bind:value={RAGConfig.OPEN_NOTEBOOK_TIMEOUT_SECS}
-							/>
-						</div>
-					</div>
-
-					<div class="mb-2.5 flex flex-col w-full">
-						<div class="mb-1 text-xs font-medium">
-							{$i18n.t('Transformation Abstract')}
-						</div>
-						<input
-							class="flex-1 w-full text-sm bg-transparent outline-hidden"
-							placeholder={$i18n.t('Enter transformation id for abstract')}
-							bind:value={RAGConfig.OPEN_NOTEBOOK_TRANSFORMATION_ABSTRACT}
-						/>
-					</div>
-				</div>
-
-				<div class="mb-3">
 					<div class=" mt-0.5 mb-2.5 text-base font-medium">{$i18n.t('Danger Zone')}</div>
 
 					<hr class=" border-gray-100/30 dark:border-gray-850/30 my-2" />

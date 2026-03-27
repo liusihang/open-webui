@@ -12,6 +12,7 @@
 	import { capitalizeFirstLetter, formatFileSize } from '$lib/utils';
 
 	import Tooltip from '$lib/components/common/Tooltip.svelte';
+	import ArrowPath from '$lib/components/icons/ArrowPath.svelte';
 	import DocumentPage from '$lib/components/icons/DocumentPage.svelte';
 	import XMark from '$lib/components/icons/XMark.svelte';
 	import Spinner from '$lib/components/common/Spinner.svelte';
@@ -21,6 +22,7 @@
 	export let files = [];
 
 	export let onClick = (fileId) => {};
+	export let onRegenerateLayer = (fileId) => {};
 	export let onDelete = (fileId) => {};
 </script>
 
@@ -87,6 +89,17 @@
 
 			{#if knowledge?.write_access}
 				<div class="flex items-center">
+					<Tooltip content={$i18n.t('Regenerate Layer')}>
+						<button
+							class="p-1 rounded-full hover:bg-gray-100 dark:hover:bg-gray-850 transition"
+							type="button"
+							on:click={() => {
+								onRegenerateLayer(file?.id ?? file?.tempId);
+							}}
+						>
+							<ArrowPath className="size-4" strokeWidth="2" />
+						</button>
+					</Tooltip>
 					<Tooltip content={$i18n.t('Delete')}>
 						<button
 							class="p-1 rounded-full hover:bg-gray-100 dark:hover:bg-gray-850 transition"

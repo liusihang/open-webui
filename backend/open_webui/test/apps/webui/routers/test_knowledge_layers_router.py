@@ -75,7 +75,7 @@ def test_get_knowledge_file_layers_returns_rows(monkeypatch):
 async def test_regenerate_knowledge_file_layer_by_type_calls_service(monkeypatch):
     captured = {}
 
-    def fake_regenerate(request, knowledge_id, file_id, layer_types=None, force=False, db=None):
+    async def fake_regenerate(request, knowledge_id, file_id, layer_types=None, force=False, db=None):
         captured["knowledge_id"] = knowledge_id
         captured["file_id"] = file_id
         captured["layer_types"] = layer_types
@@ -96,7 +96,7 @@ async def test_regenerate_knowledge_file_layer_by_type_calls_service(monkeypatch
     )
     monkeypatch.setattr(
         knowledge_mod,
-        "regenerate_layers_for_file",
+        "regenerate_layers_for_file_async",
         fake_regenerate,
         raising=False,
     )
@@ -129,7 +129,7 @@ async def test_regenerate_knowledge_file_layer_by_type_calls_service(monkeypatch
 async def test_regenerate_knowledge_file_layers_accepts_layer_types(monkeypatch):
     captured = {}
 
-    def fake_regenerate(request, knowledge_id, file_id, layer_types=None, force=False, db=None):
+    async def fake_regenerate(request, knowledge_id, file_id, layer_types=None, force=False, db=None):
         captured["knowledge_id"] = knowledge_id
         captured["file_id"] = file_id
         captured["layer_types"] = layer_types
@@ -150,7 +150,7 @@ async def test_regenerate_knowledge_file_layers_accepts_layer_types(monkeypatch)
     )
     monkeypatch.setattr(
         knowledge_mod,
-        "regenerate_layers_for_file",
+        "regenerate_layers_for_file_async",
         fake_regenerate,
         raising=False,
     )
@@ -184,7 +184,7 @@ async def test_regenerate_knowledge_file_layers_accepts_layer_types(monkeypatch)
 
 @pytest.mark.asyncio
 async def test_regenerate_knowledge_file_layers_rejects_invalid_layer_types(monkeypatch):
-    def fake_regenerate(request, knowledge_id, file_id, layer_types=None, force=False, db=None):
+    async def fake_regenerate(request, knowledge_id, file_id, layer_types=None, force=False, db=None):
         raise ValueError("Unsupported layer_type: unknown")
 
     monkeypatch.setattr(
@@ -201,7 +201,7 @@ async def test_regenerate_knowledge_file_layers_rejects_invalid_layer_types(monk
     )
     monkeypatch.setattr(
         knowledge_mod,
-        "regenerate_layers_for_file",
+        "regenerate_layers_for_file_async",
         fake_regenerate,
         raising=False,
     )

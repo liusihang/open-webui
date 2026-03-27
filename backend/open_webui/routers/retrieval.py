@@ -539,11 +539,6 @@ async def get_rag_config(request: Request, user=Depends(get_admin_user)):
         # Integration settings
         "ENABLE_GOOGLE_DRIVE_INTEGRATION": request.app.state.config.ENABLE_GOOGLE_DRIVE_INTEGRATION,
         "ENABLE_ONEDRIVE_INTEGRATION": request.app.state.config.ENABLE_ONEDRIVE_INTEGRATION,
-        # Layer generation settings
-        "OPEN_NOTEBOOK_BASE_URL": request.app.state.config.OPEN_NOTEBOOK_BASE_URL,
-        "OPEN_NOTEBOOK_API_PASSWORD": request.app.state.config.OPEN_NOTEBOOK_API_PASSWORD,
-        "OPEN_NOTEBOOK_TIMEOUT_SECS": request.app.state.config.OPEN_NOTEBOOK_TIMEOUT_SECS,
-        "OPEN_NOTEBOOK_TRANSFORMATION_ABSTRACT": request.app.state.config.OPEN_NOTEBOOK_TRANSFORMATION_ABSTRACT,
         # Web search settings
         "web": {
             "ENABLE_WEB_SEARCH": request.app.state.config.ENABLE_WEB_SEARCH,
@@ -758,11 +753,6 @@ class ConfigForm(BaseModel):
     ENABLE_GOOGLE_DRIVE_INTEGRATION: Optional[bool] = None
     ENABLE_ONEDRIVE_INTEGRATION: Optional[bool] = None
 
-    # Layer generation settings
-    OPEN_NOTEBOOK_BASE_URL: Optional[str] = None
-    OPEN_NOTEBOOK_API_PASSWORD: Optional[str] = None
-    OPEN_NOTEBOOK_TIMEOUT_SECS: Optional[int] = None
-    OPEN_NOTEBOOK_TRANSFORMATION_ABSTRACT: Optional[str] = None
     # Web search settings
     web: Optional[WebConfig] = None
 
@@ -1145,27 +1135,6 @@ async def update_rag_config(
         else request.app.state.config.ENABLE_ONEDRIVE_INTEGRATION
     )
 
-    # Layer generation settings
-    request.app.state.config.OPEN_NOTEBOOK_BASE_URL = (
-        form_data.OPEN_NOTEBOOK_BASE_URL.rstrip("/")
-        if form_data.OPEN_NOTEBOOK_BASE_URL is not None
-        else request.app.state.config.OPEN_NOTEBOOK_BASE_URL
-    )
-    request.app.state.config.OPEN_NOTEBOOK_API_PASSWORD = (
-        form_data.OPEN_NOTEBOOK_API_PASSWORD
-        if form_data.OPEN_NOTEBOOK_API_PASSWORD is not None
-        else request.app.state.config.OPEN_NOTEBOOK_API_PASSWORD
-    )
-    request.app.state.config.OPEN_NOTEBOOK_TIMEOUT_SECS = (
-        form_data.OPEN_NOTEBOOK_TIMEOUT_SECS
-        if form_data.OPEN_NOTEBOOK_TIMEOUT_SECS is not None
-        else request.app.state.config.OPEN_NOTEBOOK_TIMEOUT_SECS
-    )
-    request.app.state.config.OPEN_NOTEBOOK_TRANSFORMATION_ABSTRACT = (
-        form_data.OPEN_NOTEBOOK_TRANSFORMATION_ABSTRACT
-        if form_data.OPEN_NOTEBOOK_TRANSFORMATION_ABSTRACT is not None
-        else request.app.state.config.OPEN_NOTEBOOK_TRANSFORMATION_ABSTRACT
-    )
     if form_data.web is not None:
         # Web search settings
         request.app.state.config.ENABLE_WEB_SEARCH = form_data.web.ENABLE_WEB_SEARCH

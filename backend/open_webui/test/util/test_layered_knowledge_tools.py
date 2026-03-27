@@ -6,8 +6,6 @@ from open_webui.tools import builtin
 from open_webui.tools.builtin import (
     query_knowledge_abstract,
     query_knowledge_full_text,
-    query_knowledge_key_data,
-    query_knowledge_key_findings,
     view_knowledge_layers,
 )
 
@@ -40,22 +38,6 @@ def test_layered_query_tools_return_scope_error_without_effective_scope() -> Non
             __metadata__={},
         )
     )
-    result_findings = asyncio.run(
-        query_knowledge_key_findings(
-            query="topic",
-            __request__=request,
-            __user__={"id": "u1"},
-            __metadata__={},
-        )
-    )
-    result_data = asyncio.run(
-        query_knowledge_key_data(
-            query="topic",
-            __request__=request,
-            __user__={"id": "u1"},
-            __metadata__={},
-        )
-    )
     result_layers = asyncio.run(
         view_knowledge_layers(
             file_id="file-1",
@@ -67,8 +49,6 @@ def test_layered_query_tools_return_scope_error_without_effective_scope() -> Non
 
     expected = json.dumps({"error": "No effective knowledge scope"})
     assert result_abstract == expected
-    assert result_findings == expected
-    assert result_data == expected
     assert result_layers == expected
 
 

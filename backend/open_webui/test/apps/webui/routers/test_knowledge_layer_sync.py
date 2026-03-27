@@ -40,6 +40,94 @@ def _fake_file():
     return SimpleNamespace(id="file-1", hash="hash-1", data={"content": "hello"})
 
 
+@pytest.mark.asyncio
+async def test_add_files_to_knowledge_batch_triggers_async_layer_sync(monkeypatch):
+    captured = {"sync_calls": []}
+
+    async def fake_process_files_batch(*args, **kwargs):
+        return SimpleNamespace(
+            results=[
+                SimpleNamespace(file_id="file-1", status="completed"),
+                SimpleNamespace(file_id="file-2", status="completed"),
+            ],
+            errors=[],
+        )
+
+    monkeypatch.setattr(
+        knowledge_mod.Knowledges,
+        "get_knowledge_by_id",
+        lambda *args, **kwargs: _fake_knowledge(),
+        raising=False,
+    )
+    monkeypatch.setattr(
+        knowledge_mod.Files,
+        "get_files_by_ids",
+        lambda file_ids, db=None: [
+            SimpleNamespace(
+                id=file_id,
+                user_id="user-1",
+                filename=f"{file_id}.txt",
+                hash=f"hash-{file_id}",
+                data={"content": "hello"},
+                created_at=1,
+                updated_at=1,
+            )
+            for file_id in file_ids
+        ],
+        raising=False,
+    )
+    monkeypatch.setattr(
+        knowledge_mod,
+        "process_files_batch",
+        fake_process_files_batch,
+        raising=False,
+    )
+    monkeypatch.setattr(
+        knowledge_mod.Knowledges,
+        "add_file_to_knowledge_by_id",
+        lambda *args, **kwargs: None,
+        raising=False,
+    )
+    monkeypatch.setattr(
+        knowledge_mod.Knowledges,
+        "get_file_metadatas_by_id",
+        lambda *args, **kwargs: [],
+        raising=False,
+    )
+
+    async def fake_sync_layers_for_file_async(request, knowledge_id, file_id, db=None):
+        captured["sync_calls"].append((knowledge_id, file_id))
+
+    monkeypatch.setattr(
+        knowledge_mod,
+        "sync_layers_for_file_async",
+        fake_sync_layers_for_file_async,
+        raising=False,
+    )
+    monkeypatch.setattr(
+        knowledge_mod,
+        "sync_layers_for_file",
+        lambda *args, **kwargs: (_ for _ in ()).throw(
+            AssertionError("batch add should not use sync layer sync inside async route")
+        ),
+        raising=False,
+    )
+
+    response = await knowledge_mod.add_files_to_knowledge_batch(
+        request=_fake_request(),
+        id="kb-1",
+        form_data=[
+            knowledge_mod.KnowledgeFileIdForm(file_id="file-1"),
+            knowledge_mod.KnowledgeFileIdForm(file_id="file-2"),
+        ],
+        user=_fake_user(),
+        db=None,
+    )
+
+    assert captured["sync_calls"] == [("kb-1", "file-1"), ("kb-1", "file-2")]
+    assert response.id == "kb-1"
+
+
 def test_add_file_to_knowledge_triggers_layer_sync(monkeypatch):
     captured = {}
 

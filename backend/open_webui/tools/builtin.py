@@ -1969,60 +1969,6 @@ async def query_knowledge_abstract(
     )
 
 
-async def query_knowledge_key_findings(
-    query: str,
-    count: int = 5,
-    __request__: Request = None,
-    __user__: dict = None,
-    __metadata__: dict = None,
-    __model_knowledge__: list[dict] = None,
-) -> str:
-    """
-    Search only the `key_findings` layer for scoped knowledge documents.
-    Use this for conclusions, takeaways, comparisons, claims, and risk-focused questions.
-
-    :param query: Finding-oriented query
-    :param count: Maximum number of key findings results to return
-    :return: JSON list of finding matches with `layer` and layer-tagged `source`
-    """
-    return await _query_knowledge_layer(
-        layer="abstract",
-        query=query,
-        count=count,
-        __request__=__request__,
-        __user__=__user__,
-        __metadata__=__metadata__,
-        __model_knowledge__=__model_knowledge__,
-    )
-
-
-async def query_knowledge_key_data(
-    query: str,
-    count: int = 5,
-    __request__: Request = None,
-    __user__: dict = None,
-    __metadata__: dict = None,
-    __model_knowledge__: list[dict] = None,
-) -> str:
-    """
-    Search only the `key_data` layer for scoped knowledge documents.
-    Use this for metrics, numbers, dates, parameters, and other fact-like values.
-
-    :param query: Data-oriented query
-    :param count: Maximum number of key data results to return
-    :return: JSON list of key data matches with `layer` and layer-tagged `source`
-    """
-    return await _query_knowledge_layer(
-        layer="abstract",
-        query=query,
-        count=count,
-        __request__=__request__,
-        __user__=__user__,
-        __metadata__=__metadata__,
-        __model_knowledge__=__model_knowledge__,
-    )
-
-
 async def view_knowledge_layers(
     file_id: str,
     __request__: Request = None,

@@ -8,16 +8,28 @@ import open_webui.utils.layered_knowledge as layered_mod
 
 def _fake_request():
     return SimpleNamespace(
+        state=SimpleNamespace(),
         app=SimpleNamespace(
             state=SimpleNamespace(
                 config=SimpleNamespace(
+                    TASK_MODEL="task-model",
+                    TASK_MODEL_EXTERNAL="",
+                    DEFAULT_MODELS="task-model",
                     OPEN_NOTEBOOK_BASE_URL="http://onb.local",
                     OPEN_NOTEBOOK_API_PASSWORD="secret",
                     OPEN_NOTEBOOK_TIMEOUT_SECS=12,
                     OPEN_NOTEBOOK_TRANSFORMATION_ABSTRACT="tr-abstract",
                     OPEN_NOTEBOOK_TRANSFORMATION_KEY_FINDINGS="tr-findings",
                     OPEN_NOTEBOOK_TRANSFORMATION_KEY_DATA="tr-data",
-                )
+                ),
+                MODELS={
+                    "task-model": {
+                        "id": "task-model",
+                        "owned_by": "openai",
+                        "connection_type": "local",
+                        "info": {"params": {"max_tokens": 256}},
+                    }
+                },
             )
         )
     )
@@ -34,43 +46,82 @@ def test_get_layer_transformation_id_reads_config():
     assert layered_mod.get_layer_transformation_id(request, "unknown") is None
 
 
+def test_get_layer_generation_model_id_falls_back_deterministically_without_hidden_config():
+    request = SimpleNamespace(
+        state=SimpleNamespace(),
+        app=SimpleNamespace(
+            state=SimpleNamespace(
+                config=SimpleNamespace(
+                    TASK_MODEL="",
+                    TASK_MODEL_EXTERNAL="",
+                    DEFAULT_MODELS="",
+                ),
+                MODELS={
+                    "z-model": {
+                        "id": "z-model",
+                        "owned_by": "openai",
+                        "connection_type": "local",
+                    },
+                    "arena": {
+                        "id": "arena",
+                        "owned_by": "arena",
+                        "connection_type": "local",
+                    },
+                    "a-model": {
+                        "id": "a-model",
+                        "owned_by": "openai",
+                        "connection_type": "local",
+                    },
+                },
+            )
+        ),
+    )
+
+    assert layered_mod._get_layer_generation_model_id(request, "abstract") == "a-model"
+
+
 def test_sync_layers_for_file_triggers_remote_calls(monkeypatch):
     request = _fake_request()
     file_obj = SimpleNamespace(
         id="file-1",
         filename="demo.txt",
-        meta={
-            "open_notebook_source_id": "src-1",
-            "open_notebook_source_content_hash": "hash-1",
-        },
+        meta={},
         data={"content": "demo"},
         hash="hash-1",
     )
-    captured_requests = []
+    captured_payloads = []
     captured_upserts = []
 
-    def fake_request_json(method, url, password, timeout, payload=None):
-        captured_requests.append((method, url, payload, timeout, password))
-        if method == "GET":
-            return [
+    async def fake_generate_chat_completion(request, form_data, user, **kwargs):
+        captured_payloads.append(form_data)
+        return {
+            "choices": [
                 {
-                    "id": "ins-1",
-                    "insight_type": "abstract",
-                    "content": "abstract content",
-                },
-                {
-                    "id": "ins-2",
-                    "insight_type": "key_data",
-                    "content": "42",
-                },
+                    "message": {
+                        "content": "abstract content",
+                    }
+                }
             ]
-        return {"status": "pending"}
+        }
 
     def fake_upsert_layer(form_data, db=None):
         captured_upserts.append(form_data)
         return SimpleNamespace(**form_data.model_dump())
 
-    monkeypatch.setattr(layered_mod, "_request_json", fake_request_json)
+    monkeypatch.setattr(
+        layered_mod,
+        "generate_chat_completion",
+        fake_generate_chat_completion,
+        raising=False,
+    )
+    monkeypatch.setattr(
+        layered_mod,
+        "_request_json",
+        lambda *args, **kwargs: (_ for _ in ()).throw(
+            AssertionError("open notebook request path should be inactive")
+        ),
+        raising=False,
+    )
     monkeypatch.setattr(layered_mod.Files, "get_file_by_id", lambda *args, **kwargs: file_obj)
     monkeypatch.setattr(
         layered_mod.Files,
@@ -89,17 +140,15 @@ def test_sync_layers_for_file_triggers_remote_calls(monkeypatch):
 
     layered_mod.sync_layers_for_file(request, "kb-1", "file-1")
 
-    post_calls = [call for call in captured_requests if call[0] == "POST"]
-    get_calls = [call for call in captured_requests if call[0] == "GET"]
-
-    assert len(post_calls) == 1
-    assert len(get_calls) == 1
-    assert all(call[4] == "secret" for call in captured_requests)
+    assert len(captured_payloads) == 1
+    assert captured_payloads[0]["model"] == "task-model"
+    assert "demo" in captured_payloads[0]["messages"][0]["content"]
     assert any(
         upsert.layer_type == "abstract" and upsert.status == "ready"
         for upsert in captured_upserts
     )
     assert not any(upsert.layer_type == "key_data" for upsert in captured_upserts)
+    assert all(upsert.source_system == "open_webui" for upsert in captured_upserts)
 
 
 def test_get_file_open_notebook_mapping_reads_source_keys():
@@ -163,7 +212,7 @@ def test_save_file_open_notebook_mapping_preserves_other_meta(monkeypatch):
     assert result["open_notebook_source_id"] == "src-3"
 
 
-def test_sync_layers_for_file_creates_and_reuses_mapped_source_id(monkeypatch):
+def test_sync_layers_for_file_regenerates_natively_without_open_notebook_mapping(monkeypatch):
     request = _fake_request()
     file_obj = SimpleNamespace(
         id="file-1",
@@ -171,7 +220,7 @@ def test_sync_layers_for_file_creates_and_reuses_mapped_source_id(monkeypatch):
         meta={},
         data={"content": "hello world"},
     )
-    captured_requests = []
+    captured_payloads = []
     captured_upserts = []
 
     def fake_get_file_by_id(file_id, db=None):
@@ -183,19 +232,9 @@ def test_sync_layers_for_file_creates_and_reuses_mapped_source_id(monkeypatch):
         file_obj.meta = {**(file_obj.meta or {}), **meta}
         return file_obj
 
-    def fake_request_json(method, url, password, timeout, payload=None):
-        captured_requests.append((method, url, payload))
-        if method == "POST" and url.endswith("/api/sources"):
-            return {"id": "src-created"}
-        if method == "GET" and url.endswith("/api/sources/src-created/insights"):
-            return [
-                {
-                    "id": "ins-1",
-                    "insight_type": "abstract",
-                    "content": "abstract",
-                }
-            ]
-        return {"status": "pending"}
+    async def fake_generate_chat_completion(request, form_data, user, **kwargs):
+        captured_payloads.append(form_data)
+        return {"choices": [{"message": {"content": "abstract"}}]}
 
     def fake_upsert_layer(form_data, db=None):
         captured_upserts.append(form_data)
@@ -207,7 +246,20 @@ def test_sync_layers_for_file_creates_and_reuses_mapped_source_id(monkeypatch):
         "update_file_metadata_by_id",
         fake_update_file_metadata_by_id,
     )
-    monkeypatch.setattr(layered_mod, "_request_json", fake_request_json)
+    monkeypatch.setattr(
+        layered_mod,
+        "generate_chat_completion",
+        fake_generate_chat_completion,
+        raising=False,
+    )
+    monkeypatch.setattr(
+        layered_mod,
+        "_request_json",
+        lambda *args, **kwargs: (_ for _ in ()).throw(
+            AssertionError("open notebook request path should be inactive")
+        ),
+        raising=False,
+    )
     monkeypatch.setattr(
         layered_mod.KnowledgeLayers, "upsert_layer", fake_upsert_layer, raising=False
     )
@@ -219,30 +271,21 @@ def test_sync_layers_for_file_creates_and_reuses_mapped_source_id(monkeypatch):
     )
 
     layered_mod.sync_layers_for_file(request, "kb-1", "file-1")
-    assert file_obj.meta["open_notebook_source_id"] == "src-created"
-    assert any(
-        method == "POST" and url.endswith("/api/sources")
-        for method, url, _ in captured_requests
-    )
-    assert any(
-        method == "POST" and "/api/sources/src-created/insights" in url
-        for method, url, _ in captured_requests
-    )
-    assert all("/api/sources/file-1/insights" not in url for _, url, _ in captured_requests)
+    assert len(captured_payloads) == 1
+    assert file_obj.meta == {}
     assert any(
         upsert.layer_type == "abstract" and upsert.status == "ready"
         for upsert in captured_upserts
     )
+    assert all(upsert.source_system == "open_webui" for upsert in captured_upserts)
+    assert all(upsert.source_ref_id == "chunk:1" for upsert in captured_upserts)
 
-    captured_requests.clear()
+    captured_payloads.clear()
     layered_mod.sync_layers_for_file(request, "kb-1", "file-1")
-    assert not any(
-        method == "POST" and url.endswith("/api/sources")
-        for method, url, _ in captured_requests
-    )
+    assert len(captured_payloads) == 1
 
 
-def test_sync_layers_for_large_file_creates_chunk_sources_and_chunk_rows(monkeypatch):
+def test_sync_layers_for_large_file_creates_native_chunk_rows(monkeypatch):
     request = _fake_request()
     file_obj = SimpleNamespace(
         id="file-1",
@@ -250,9 +293,8 @@ def test_sync_layers_for_large_file_creates_chunk_sources_and_chunk_rows(monkeyp
         meta={},
         data={"content": "very large content"},
     )
-    captured_requests = []
+    captured_payloads = []
     captured_upserts = []
-    source_create_count = {"count": 0}
 
     def fake_get_file_by_id(file_id, db=None):
         assert file_id == "file-1"
@@ -268,16 +310,17 @@ def test_sync_layers_for_large_file_creates_chunk_sources_and_chunk_rows(monkeyp
             {"content": "chunk-2", "token_count": 14000, "part_index": 2, "part_total": 2},
         ]
 
-    def fake_request_json(method, url, password, timeout, payload=None):
-        captured_requests.append((method, url, payload))
-        if method == "POST" and url.endswith("/api/sources"):
-            source_create_count["count"] += 1
-            return {"id": f"src-{source_create_count['count']}"}
-        if method == "GET" and url.endswith("/api/sources/src-1/insights"):
-            return [{"id": "ins-1", "insight_type": "abstract", "content": "abs-1"}]
-        if method == "GET" and url.endswith("/api/sources/src-2/insights"):
-            return [{"id": "ins-2", "insight_type": "abstract", "content": "abs-2"}]
-        return {"status": "pending"}
+    async def fake_generate_chat_completion(request, form_data, user, **kwargs):
+        captured_payloads.append(form_data)
+        return {
+            "choices": [
+                {
+                    "message": {
+                        "content": f"abs-{len(captured_payloads)}",
+                    }
+                }
+            ]
+        }
 
     def fake_upsert_layer(form_data, db=None):
         captured_upserts.append(form_data)
@@ -290,7 +333,20 @@ def test_sync_layers_for_large_file_creates_chunk_sources_and_chunk_rows(monkeyp
         fake_update_file_metadata_by_id,
     )
     monkeypatch.setattr(layered_mod, "plan_text_chunks", fake_plan_text_chunks)
-    monkeypatch.setattr(layered_mod, "_request_json", fake_request_json)
+    monkeypatch.setattr(
+        layered_mod,
+        "generate_chat_completion",
+        fake_generate_chat_completion,
+        raising=False,
+    )
+    monkeypatch.setattr(
+        layered_mod,
+        "_request_json",
+        lambda *args, **kwargs: (_ for _ in ()).throw(
+            AssertionError("open notebook request path should be inactive")
+        ),
+        raising=False,
+    )
     monkeypatch.setattr(
         layered_mod.KnowledgeLayers, "upsert_layer", fake_upsert_layer, raising=False
     )
@@ -303,10 +359,8 @@ def test_sync_layers_for_large_file_creates_chunk_sources_and_chunk_rows(monkeyp
 
     layered_mod.sync_layers_for_file(request, "kb-1", "file-1")
 
-    assert source_create_count["count"] == 2
-    assert file_obj.meta["open_notebook_source_ids"] == ["src-1", "src-2"]
-    assert file_obj.meta["open_notebook_is_large_file"] is True
-    assert file_obj.meta["open_notebook_part_count"] == 2
+    assert len(captured_payloads) == 2
+    assert file_obj.meta == {}
 
     abstract_ready = [
         upsert
@@ -317,26 +371,23 @@ def test_sync_layers_for_large_file_creates_chunk_sources_and_chunk_rows(monkeyp
     assert abstract_ready[0].part_index == 1
     assert abstract_ready[0].part_total == 2
     assert abstract_ready[0].display_title == "Abstract 1/2"
-    assert abstract_ready[0].source_ref_id == "src-1"
+    assert abstract_ready[0].source_ref_id == "chunk:1"
     assert abstract_ready[1].part_index == 2
     assert abstract_ready[1].part_total == 2
     assert abstract_ready[1].display_title == "Abstract 2/2"
-    assert abstract_ready[1].source_ref_id == "src-2"
+    assert abstract_ready[1].source_ref_id == "chunk:2"
 
 
-def test_sync_layers_for_file_recreates_sources_when_content_hash_changes(monkeypatch):
+def test_sync_layers_for_file_updates_content_hash_for_native_rows(monkeypatch):
     request = _fake_request()
     file_obj = SimpleNamespace(
         id="file-1",
         filename="demo.txt",
-        meta={
-            "open_notebook_source_id": "src-old",
-            "open_notebook_source_ids": ["src-old"],
-            "open_notebook_source_content_hash": "old-hash",
-        },
+        meta={},
         data={"content": "new content"},
+        hash="new-hash",
     )
-    captured_requests = []
+    captured_upserts = []
 
     def fake_get_file_by_id(file_id, db=None):
         return file_obj
@@ -345,13 +396,8 @@ def test_sync_layers_for_file_recreates_sources_when_content_hash_changes(monkey
         file_obj.meta = {**(file_obj.meta or {}), **meta}
         return file_obj
 
-    def fake_request_json(method, url, password, timeout, payload=None):
-        captured_requests.append((method, url, payload))
-        if method == "POST" and url.endswith("/api/sources"):
-            return {"id": "src-new"}
-        if method == "GET" and url.endswith("/api/sources/src-new/insights"):
-            return [{"id": "ins-1", "insight_type": "abstract", "content": "updated"}]
-        return {"status": "pending"}
+    async def fake_generate_chat_completion(request, form_data, user, **kwargs):
+        return {"choices": [{"message": {"content": "updated"}}]}
 
     monkeypatch.setattr(layered_mod.Files, "get_file_by_id", fake_get_file_by_id)
     monkeypatch.setattr(
@@ -359,9 +405,25 @@ def test_sync_layers_for_file_recreates_sources_when_content_hash_changes(monkey
         "update_file_metadata_by_id",
         fake_update_file_metadata_by_id,
     )
-    monkeypatch.setattr(layered_mod, "_request_json", fake_request_json)
     monkeypatch.setattr(
-        layered_mod.KnowledgeLayers, "upsert_layer", lambda *args, **kwargs: SimpleNamespace(), raising=False
+        layered_mod,
+        "generate_chat_completion",
+        fake_generate_chat_completion,
+        raising=False,
+    )
+    monkeypatch.setattr(
+        layered_mod,
+        "_request_json",
+        lambda *args, **kwargs: (_ for _ in ()).throw(
+            AssertionError("open notebook request path should be inactive")
+        ),
+        raising=False,
+    )
+    monkeypatch.setattr(
+        layered_mod.KnowledgeLayers,
+        "upsert_layer",
+        lambda form_data, db=None: captured_upserts.append(form_data) or SimpleNamespace(),
+        raising=False,
     )
     monkeypatch.setattr(
         layered_mod.KnowledgeLayers,
@@ -378,28 +440,22 @@ def test_sync_layers_for_file_recreates_sources_when_content_hash_changes(monkey
 
     layered_mod.sync_layers_for_file(request, "kb-1", "file-1")
 
-    assert any(method == "POST" and url.endswith("/api/sources") for method, url, _ in captured_requests)
-    assert any("/api/sources/src-new/insights" in url for method, url, _ in captured_requests if method == "POST")
-    assert all("/api/sources/src-old/insights" not in url for _, url, _ in captured_requests)
-    assert file_obj.meta["open_notebook_source_id"] == "src-new"
+    ready_rows = [row for row in captured_upserts if row.status == "ready"]
+    assert len(ready_rows) == 1
+    assert ready_rows[0].content_hash == "new-hash"
+    assert ready_rows[0].source_system == "open_webui"
 
 
-def test_regenerate_layers_for_chunked_file_preserves_mapping_and_targets_all_parts(monkeypatch):
+def test_regenerate_layers_for_chunked_file_targets_all_parts_natively(monkeypatch):
     request = _fake_request()
     file_obj = SimpleNamespace(
         id="file-1",
         filename="large.txt",
-        meta={
-            "open_notebook_source_ids": ["src-1", "src-2"],
-            "open_notebook_source_id": "src-1",
-            "open_notebook_is_large_file": True,
-            "open_notebook_part_count": 2,
-            "open_notebook_source_content_hash": "hash-large",
-        },
+        meta={},
         data={"content": "large content"},
         hash="hash-large",
     )
-    captured_requests = []
+    captured_payloads = []
     captured_meta_updates = []
     deleted_layer_calls = []
     captured_upserts = []
@@ -418,13 +474,17 @@ def test_regenerate_layers_for_chunked_file_preserves_mapping_and_targets_all_pa
             {"content": "chunk-2", "token_count": 14000, "part_index": 2, "part_total": 2},
         ]
 
-    def fake_request_json(method, url, password, timeout, payload=None):
-        captured_requests.append((method, url, payload))
-        if method == "GET" and url.endswith("/api/sources/src-1/insights"):
-            return [{"id": "ins-1", "insight_type": "abstract", "content": "part-1"}]
-        if method == "GET" and url.endswith("/api/sources/src-2/insights"):
-            return [{"id": "ins-2", "insight_type": "abstract", "content": "part-2"}]
-        return {"status": "pending"}
+    async def fake_generate_chat_completion(request, form_data, user, **kwargs):
+        captured_payloads.append(form_data)
+        return {
+            "choices": [
+                {
+                    "message": {
+                        "content": f"part-{len(captured_payloads)}",
+                    }
+                }
+            ]
+        }
 
     def fake_delete_layers_by_file(knowledge_id, file_id, layer_types=None, db=None):
         deleted_layer_calls.append((knowledge_id, file_id, layer_types))
@@ -441,7 +501,20 @@ def test_regenerate_layers_for_chunked_file_preserves_mapping_and_targets_all_pa
         fake_update_file_metadata_by_id,
     )
     monkeypatch.setattr(layered_mod, "plan_text_chunks", fake_plan_text_chunks)
-    monkeypatch.setattr(layered_mod, "_request_json", fake_request_json)
+    monkeypatch.setattr(
+        layered_mod,
+        "generate_chat_completion",
+        fake_generate_chat_completion,
+        raising=False,
+    )
+    monkeypatch.setattr(
+        layered_mod,
+        "_request_json",
+        lambda *args, **kwargs: (_ for _ in ()).throw(
+            AssertionError("open notebook request path should be inactive")
+        ),
+        raising=False,
+    )
     monkeypatch.setattr(
         layered_mod.KnowledgeLayers,
         "delete_layers_by_file",
@@ -466,12 +539,9 @@ def test_regenerate_layers_for_chunked_file_preserves_mapping_and_targets_all_pa
         force=False,
     )
 
-    post_urls = [url for method, url, _ in captured_requests if method == "POST"]
-    assert any("/api/sources/src-1/insights" in url for url in post_urls)
-    assert any("/api/sources/src-2/insights" in url for url in post_urls)
+    assert len(captured_payloads) == 2
     assert deleted_layer_calls == [("kb-1", "file-1", ["abstract"])]
-    assert file_obj.meta["open_notebook_source_ids"] == ["src-1", "src-2"]
-    assert file_obj.meta["open_notebook_is_large_file"] is True
+    assert captured_meta_updates == []
     ready_parts = [
         upsert
         for upsert in captured_upserts
@@ -479,3 +549,4 @@ def test_regenerate_layers_for_chunked_file_preserves_mapping_and_targets_all_pa
     ]
     assert len(ready_parts) == 2
     assert {part.part_index for part in ready_parts} == {1, 2}
+    assert {part.source_ref_id for part in ready_parts} == {"chunk:1", "chunk:2"}
