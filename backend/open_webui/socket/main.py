@@ -13,6 +13,7 @@ from open_webui.models.users import Users, UserNameResponse
 from open_webui.models.channels import Channels
 from open_webui.models.chats import Chats
 from open_webui.models.notes import Notes, NoteUpdateForm
+from open_webui.socket.source_events import merge_persisted_sources
 from open_webui.utils.redis import (
     get_sentinels_from_env,
     get_sentinel_url_from_env,
@@ -887,8 +888,7 @@ def get_event_emitter(request_info, update_db=True):
                         request_info["message_id"],
                     )
 
-                    sources = message.get("sources", [])
-                    sources.append(data)
+                    sources = merge_persisted_sources(message.get("sources", []), data)
 
                     await asyncio.to_thread(
                         Chats.upsert_message_to_chat_by_id_and_message_id,

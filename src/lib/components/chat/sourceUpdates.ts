@@ -3,6 +3,11 @@ type ChatMessage = {
 	[key: string]: unknown;
 };
 
+type ChatHistory = {
+	messages: Record<string, ChatMessage>;
+	[key: string]: unknown;
+};
+
 type SourceQueue = Map<string, unknown[]>;
 
 export const enqueueSourceUpdate = (
@@ -53,4 +58,15 @@ export const flushQueuedSourceUpdates = (
 
 	queue.clear();
 	return nextMessages;
+};
+
+export const flushQueuedSourceHistory = (history: ChatHistory, queue: SourceQueue) => {
+	if (!history?.messages || queue.size === 0) {
+		return history;
+	}
+
+	return {
+		...history,
+		messages: flushQueuedSourceUpdates(history.messages, queue)
+	};
 };

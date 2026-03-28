@@ -1,6 +1,11 @@
 import { describe, expect, it } from 'vitest';
 
-import { enqueueSourceBatch, enqueueSourceUpdate, flushQueuedSourceUpdates } from './sourceUpdates';
+import {
+	enqueueSourceBatch,
+	enqueueSourceUpdate,
+	flushQueuedSourceHistory,
+	flushQueuedSourceUpdates
+} from './sourceUpdates';
 
 
 describe('source update batching helpers', () => {
@@ -44,5 +49,26 @@ describe('source update batching helpers', () => {
 		enqueueSourceBatch(queue, 'm1', [{ source: { id: 'a' } }, { source: { id: 'b' } }]);
 
 		expect(queue.get('m1')).toEqual([{ source: { id: 'a' } }, { source: { id: 'b' } }]);
+	});
+
+	it('materializes queued sources into history before persistence', () => {
+		const queue = new Map<string, unknown[]>();
+		enqueueSourceBatch(queue, 'm1', [{ source: { id: 'a' } }, { source: { id: 'b' } }]);
+
+		const nextHistory = flushQueuedSourceHistory(
+			{
+				currentId: 'm1',
+				messages: {
+					m1: { id: 'm1', role: 'assistant', content: '' }
+				}
+			},
+			queue
+		);
+
+		expect(nextHistory.messages.m1.sources).toEqual([
+			{ source: { id: 'a' } },
+			{ source: { id: 'b' } }
+		]);
+		expect(queue.size).toBe(0);
 	});
 });

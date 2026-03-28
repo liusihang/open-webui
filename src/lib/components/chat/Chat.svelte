@@ -118,6 +118,7 @@
 	import {
 		enqueueSourceBatch,
 		enqueueSourceUpdate,
+		flushQueuedSourceHistory,
 		flushQueuedSourceUpdates
 	} from '$lib/components/chat/sourceUpdates';
 
@@ -486,10 +487,7 @@
 			return;
 		}
 
-		history = {
-			...history,
-			messages: flushQueuedSourceUpdates(history.messages, pendingSourceUpdates)
-		};
+		history = flushQueuedSourceHistory(history, pendingSourceUpdates);
 	};
 
 	const scheduleSourceFlush = () => {
@@ -2850,13 +2848,21 @@
 		return _chatId;
 	};
 
-	const saveChatHandler = async (_chatId, history) => {
+	const saveChatHandler = async (_chatId, currentHistory) => {
 		if ($chatId == _chatId) {
 			if (!$temporaryChatEnabled) {
+				if (pendingSourceFlushFrame !== null) {
+					cancelAnimationFrame(pendingSourceFlushFrame);
+					pendingSourceFlushFrame = null;
+				}
+
+				const historyWithSources = flushQueuedSourceHistory(currentHistory, pendingSourceUpdates);
+				history = historyWithSources;
+
 				chat = await updateChatById(localStorage.token, _chatId, {
 					models: selectedModels,
-					history: history,
-					messages: createMessagesList(history, history.currentId),
+					history: historyWithSources,
+					messages: createMessagesList(historyWithSources, historyWithSources.currentId),
 					params: params,
 					files: chatFiles
 				});
