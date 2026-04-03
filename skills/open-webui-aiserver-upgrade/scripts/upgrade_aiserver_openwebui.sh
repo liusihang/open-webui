@@ -19,7 +19,7 @@ Usage:
 
 Commands:
   inspect       Show current live compose image, env path, runtime health, and image config.
-  build-only    Sync a local commit to aiserver staging, patch the staged Dockerfile, and build a replacement image only.
+  build-only    Sync a local commit to aiserver staging, patch the staged Dockerfile, and build a replacement image with docker buildx only.
   switch-image  Replace only the open-webui image line in the live compose and recreate only open-webui.
 
 Defaults:
@@ -49,16 +49,15 @@ remote_read() {
 
 remote_sudo_script() {
 	local script_text="$1"
+	local remote_script_path="/tmp/openwebui_aiserver_upgrade.$$.$RANDOM.sh"
 	ssh "$REMOTE_HOST" "printf '%s\n' \"\$OPENWEBUI_AISERVER_SUDO_PASSWORD\" >/dev/null 2>&1 || true" >/dev/null 2>&1 || true
-	ssh "$REMOTE_HOST" "cat >/tmp/openwebui_aiserver_upgrade.$$.$RANDOM.sh && chmod +x /tmp/openwebui_aiserver_upgrade.$$.$RANDOM.sh" <<<"$script_text"
-	local remote_script
-	remote_script="$(ssh "$REMOTE_HOST" "ls -1t /tmp/openwebui_aiserver_upgrade.*.sh | head -n 1")"
+	ssh "$REMOTE_HOST" "cat >\"$remote_script_path\" && chmod +x \"$remote_script_path\"" <<<"$script_text"
 	if [[ -n "${OPENWEBUI_AISERVER_SUDO_PASSWORD:-}" ]]; then
-		ssh "$REMOTE_HOST" "printf '%s\n' '${OPENWEBUI_AISERVER_SUDO_PASSWORD}' | sudo -S -p '' bash '$remote_script'"
+		ssh "$REMOTE_HOST" "printf '%s\n' '${OPENWEBUI_AISERVER_SUDO_PASSWORD}' | sudo -S -p '' bash '$remote_script_path'"
 	else
-		ssh -tt "$REMOTE_HOST" "sudo -k bash '$remote_script'"
+		ssh -tt "$REMOTE_HOST" "sudo -k bash '$remote_script_path'"
 	fi
-	ssh "$REMOTE_HOST" "rm -f '$remote_script'" >/dev/null 2>&1 || true
+	ssh "$REMOTE_HOST" "rm -f '$remote_script_path'" >/dev/null 2>&1 || true
 }
 
 build_only() {
@@ -100,14 +99,13 @@ build_only() {
 	COPYFILE_DISABLE=1 git archive --format=tar "$git_ref" \
 		| ssh "$REMOTE_HOST" "rm -rf '$staging_dir' && mkdir -p '$staging_dir' && tar -xf - -C '$staging_dir'"
 
-	echo "==> Patching staged Dockerfile for legacy builder and domestic mirrors"
+	echo "==> Patching staged Dockerfile for buildx and domestic mirrors"
 	local patch_script
 	read -r -d '' patch_script <<EOF || true
 set -euo pipefail
 cd '$staging_dir'
 cp Dockerfile Dockerfile.bak.codex
 cp .npmrc .npmrc.bak.codex
-perl -0pi -e 's/FROM --platform=\\\$BUILDPLATFORM node:22-alpine3\\.20 AS build/FROM node:22-alpine3.20 AS build/g' Dockerfile
 printf '\nregistry=https://registry.npmmirror.com\n' >> .npmrc
 python3 - <<'PY'
 from pathlib import Path
@@ -134,19 +132,31 @@ EOF
 	remote_sudo_script "$patch_script"
 
 	local build_cmd
-	read -r -d '' build_cmd <<EOF || true
+read -r -d '' build_cmd <<EOF || true
 set -euo pipefail
 cd '$staging_dir'
 LOG='${staging_dir}/docker-build-${commit_short}.log'
 mv "\$LOG" "\${LOG}.prev.\$(date +%s)" 2>/dev/null || true
 : > "\$LOG"
+BUILDER_NAME='default'
+if ! docker buildx inspect "\$BUILDER_NAME" >/dev/null 2>&1; then
+  BUILDER_NAME='codex-buildx'
+  if ! docker buildx inspect "\$BUILDER_NAME" >/dev/null 2>&1; then
+    docker buildx create --name "\$BUILDER_NAME" --use >/dev/null
+  else
+    docker buildx use "\$BUILDER_NAME" >/dev/null
+  fi
+fi
+docker buildx inspect "\$BUILDER_NAME" --bootstrap >/dev/null
 nohup env \\
   HTTP_PROXY='${proxy_url}' \\
   HTTPS_PROXY='${proxy_url}' \\
   ALL_PROXY='${proxy_url}' \\
   NO_PROXY='localhost,127.0.0.1' \\
-  DOCKER_BUILDKIT=0 \\
-  docker build \\
+  docker buildx build \\
+    --builder "\$BUILDER_NAME" \\
+    --load \\
+    --progress=plain \\
     --build-arg HTTP_PROXY='${proxy_url}' \\
     --build-arg HTTPS_PROXY='${proxy_url}' \\
     --build-arg ALL_PROXY='${proxy_url}' \\

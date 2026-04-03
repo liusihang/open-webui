@@ -672,7 +672,8 @@
 			}
 		} else {
 			// Event belongs to another chat; queue remains untouched for that chat.
-		};
+		}
+	};
 
 	const onMessageHandler = async (event: {
 		origin: string;

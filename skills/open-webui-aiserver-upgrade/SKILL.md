@@ -47,7 +47,7 @@ For source builds on `aiserver`, prefer this sequence:
 1. Build from an explicit git ref, not from an ambiguous dirty tree.
 2. Sync source into `/home/aiserver/staging/<name>`.
 3. Patch the staged `Dockerfile`, not the repository copy.
-4. Build on `aiserver` in the background with a persistent log file.
+4. Build on `aiserver` with `docker buildx build --load` in the background with a persistent log file.
 5. Inspect the final image ID, creation time, `CMD`, and `ENTRYPOINT`.
 6. Only switch the live service after the image is verified.
 
@@ -55,7 +55,7 @@ For source builds on `aiserver`, prefer this sequence:
 
 When building from source on `aiserver`, apply these remote-only patches unless the source already includes equivalent behavior:
 
-- Remove `--platform=$BUILDPLATFORM` from the frontend `FROM` line when the host still uses the legacy Docker builder.
+- Prefer `docker buildx build --load` instead of the legacy builder.
 - Set `npm` registry to `https://registry.npmmirror.com`.
 - Set `pip` and `uv` indexes to `https://pypi.tuna.tsinghua.edu.cn/simple`.
 - Rewrite Debian sources to `https://mirrors.tuna.tsinghua.edu.cn`.
@@ -144,5 +144,7 @@ skills/open-webui-aiserver-upgrade/scripts/upgrade_aiserver_openwebui.sh switch-
   - `/home/aiserver/staging/...` is for build prep, not the live stack.
 - Trusting build success without inspecting image config
   - Always confirm `CMD` and `Entrypoint`.
+- Leaving `buildx` unavailable on `aiserver`
+  - Install the `docker-buildx` package first, then rebuild.
 - Debugging missing terminal tools only from the frontend
   - Check terminal spec loading and stale model filter references too.

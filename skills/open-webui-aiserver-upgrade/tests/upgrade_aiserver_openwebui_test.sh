@@ -33,7 +33,17 @@ grep -q "ONNXRUNTIME_NODE_INSTALL_CUDA=skip" <<<"$script_source"
 grep -q "mirrors.tuna.tsinghua.edu.cn" <<<"$script_source"
 grep -q "registry.npmmirror.com" <<<"$script_source"
 grep -q "seq 1 60" <<<"$script_source"
+grep -q "docker buildx build" <<<"$script_source"
+grep -q -- "--load" <<<"$script_source"
+grep -q -- "--progress=plain" <<<"$script_source"
+grep -q "docker buildx inspect" <<<"$script_source"
 grep -q "docker compose -p" <<<"$script_source"
+grep -q "local remote_script_path" <<<"$script_source"
+grep -Eq 'cat >\\?"\$remote_script_path\\?" && chmod \+x \\?"\$remote_script_path\\?"' <<<"$script_source"
+if grep -q 'cat >/tmp/openwebui_aiserver_upgrade.\$\$\.\$RANDOM.sh && chmod +x /tmp/openwebui_aiserver_upgrade.\$\$\.\$RANDOM.sh' <<<"$script_source"; then
+	echo "remote_sudo_script still uses mismatched inline random temp paths" >&2
+	exit 1
+fi
 
 grep -q "session" <<<"$skill_source"
 grep -q "unified_tool_mcp_router_filter" <<<"$skill_source"
