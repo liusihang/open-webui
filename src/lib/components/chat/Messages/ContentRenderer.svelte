@@ -76,6 +76,12 @@
 		streamingTimer = setTimeout(() => {
 			streamingTimer = null;
 
+			// If HTML blocks appeared in the queue since last drain, flush immediately
+			if (/<details[\s>]/.test(streamingTextState.queue)) {
+				flushRenderedContent(streamingTextState.target);
+				return;
+			}
+
 			streamingTextState = drainStreamingTextState(
 				streamingTextState,
 				getStreamingTextChunkSize(streamingTextState.queue.length)
@@ -96,19 +102,26 @@
 		} else {
 			streamingTextState = syncStreamingTextState(streamingTextState, nextContent);
 
-			if (!renderedContent && streamingTextState.queue) {
-				streamingTextState = drainStreamingTextState(
-					streamingTextState,
-					Math.min(6, getStreamingTextChunkSize(streamingTextState.queue.length))
-				);
-				renderedContent = streamingTextState.rendered;
-			}
-
-			if (streamingTextState.queue) {
-				scheduleStreamingDrain();
+			// If the queue contains HTML blocks (e.g. <details> for tool calls),
+			// flush immediately to avoid partial-HTML artifacts during
+			// character-by-character streaming that cause the page to flash.
+			if (streamingTextState.queue && /<details[\s>]/.test(streamingTextState.queue)) {
+				flushRenderedContent(nextContent);
 			} else {
-				clearStreamingTimer();
-				renderedContent = streamingTextState.rendered;
+				if (!renderedContent && streamingTextState.queue) {
+					streamingTextState = drainStreamingTextState(
+						streamingTextState,
+						Math.min(6, getStreamingTextChunkSize(streamingTextState.queue.length))
+					);
+					renderedContent = streamingTextState.rendered;
+				}
+
+				if (streamingTextState.queue) {
+					scheduleStreamingDrain();
+				} else {
+					clearStreamingTimer();
+					renderedContent = streamingTextState.rendered;
+				}
 			}
 		}
 	}
