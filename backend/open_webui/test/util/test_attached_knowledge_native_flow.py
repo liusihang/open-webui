@@ -178,3 +178,135 @@ def test_file_retrieval_helper_keeps_legacy_handler_when_toggle_disabled(
     assert called is True
     assert form_data == {"messages": ["legacy"]}
     assert sources == [{"source": {"id": "legacy"}}]
+
+
+def test_file_retrieval_helper_keeps_regular_files_when_mixed_with_scoped_knowledge(
+    monkeypatch,
+) -> None:
+    captured_files = None
+
+    async def fake_files_handler(request, body, extra_params, user):
+        nonlocal captured_files
+        captured_files = body.get("metadata", {}).get("files")
+        return {"messages": ["legacy"]}, {"sources": [{"source": {"id": "legacy"}}]}
+
+    monkeypatch.setattr(middleware, "chat_completion_files_handler", fake_files_handler)
+
+    form_data, sources = middleware.asyncio.run(
+        middleware.apply_legacy_file_retrieval_if_needed(
+            request=_file_context_request(True),
+            form_data={
+                "messages": ["original"],
+                "metadata": {
+                    "files": [
+                        {
+                            "id": "kb-1",
+                            "type": "collection",
+                            "source": "knowledge_attachment",
+                        },
+                        {"id": "file-1", "type": "file", "name": "notes.txt"},
+                    ]
+                },
+            },
+            extra_params={},
+            user=types.SimpleNamespace(id="user-1"),
+            model={"info": {"meta": {"capabilities": {"file_context": True}}}},
+            metadata={
+                "params": {"function_calling": "native"},
+                "effective_knowledge_query_enabled": True,
+                "effective_knowledge_scope": [{"id": "kb-1", "type": "collection"}],
+                "files": [
+                    {
+                        "id": "kb-1",
+                        "type": "collection",
+                        "source": "knowledge_attachment",
+                    },
+                    {"id": "file-1", "type": "file", "name": "notes.txt"},
+                ],
+            },
+        )
+    )
+
+    assert captured_files == [{"id": "file-1", "type": "file", "name": "notes.txt"}]
+    assert form_data["messages"] == ["legacy"]
+    assert sources == [{"source": {"id": "legacy"}}]
+
+
+def test_file_retrieval_helper_keeps_legacy_handler_when_builtin_tools_capability_disabled(
+    monkeypatch,
+) -> None:
+    called = False
+
+    async def fake_files_handler(*args, **kwargs):
+        nonlocal called
+        called = True
+        return {"messages": ["legacy"]}, {"sources": [{"source": {"id": "legacy"}}]}
+
+    monkeypatch.setattr(middleware, "chat_completion_files_handler", fake_files_handler)
+
+    form_data, sources = middleware.asyncio.run(
+        middleware.apply_legacy_file_retrieval_if_needed(
+            request=_file_context_request(True),
+            form_data={"messages": ["original"]},
+            extra_params={},
+            user=types.SimpleNamespace(id="user-1"),
+            model={
+                "info": {
+                    "meta": {
+                        "capabilities": {
+                            "file_context": True,
+                            "builtin_tools": False,
+                        }
+                    }
+                }
+            },
+            metadata={
+                "params": {"function_calling": "native"},
+                "effective_knowledge_query_enabled": True,
+                "effective_knowledge_scope": [{"id": "kb-1", "type": "collection"}],
+            },
+        )
+    )
+
+    assert called is True
+    assert form_data == {"messages": ["legacy"]}
+    assert sources == [{"source": {"id": "legacy"}}]
+
+
+def test_file_retrieval_helper_keeps_legacy_handler_when_knowledge_builtin_category_disabled(
+    monkeypatch,
+) -> None:
+    called = False
+
+    async def fake_files_handler(*args, **kwargs):
+        nonlocal called
+        called = True
+        return {"messages": ["legacy"]}, {"sources": [{"source": {"id": "legacy"}}]}
+
+    monkeypatch.setattr(middleware, "chat_completion_files_handler", fake_files_handler)
+
+    form_data, sources = middleware.asyncio.run(
+        middleware.apply_legacy_file_retrieval_if_needed(
+            request=_file_context_request(True),
+            form_data={"messages": ["original"]},
+            extra_params={},
+            user=types.SimpleNamespace(id="user-1"),
+            model={
+                "info": {
+                    "meta": {
+                        "capabilities": {"file_context": True, "builtin_tools": True},
+                        "builtinTools": {"knowledge": False},
+                    }
+                }
+            },
+            metadata={
+                "params": {"function_calling": "native"},
+                "effective_knowledge_query_enabled": True,
+                "effective_knowledge_scope": [{"id": "kb-1", "type": "collection"}],
+            },
+        )
+    )
+
+    assert called is True
+    assert form_data == {"messages": ["legacy"]}
+    assert sources == [{"source": {"id": "legacy"}}]
