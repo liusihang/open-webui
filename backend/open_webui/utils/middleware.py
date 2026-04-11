@@ -247,6 +247,49 @@ def output_id(prefix: str) -> str:
     return f"{prefix}_{uuid4().hex[:24]}"
 
 
+def should_skip_legacy_file_retrieval_for_native_scoped_knowledge(
+    config: Any, metadata: Optional[dict]
+) -> bool:
+    metadata = metadata or {}
+    return bool(
+        getattr(
+            config,
+            "NATIVE_ATTACHED_KNOWLEDGE_BYPASS_LEGACY_FILE_RETRIEVAL",
+            False,
+        )
+        and metadata.get("params", {}).get("function_calling") == "native"
+        and metadata.get("effective_knowledge_query_enabled")
+        and metadata.get("effective_knowledge_scope")
+    )
+
+
+async def apply_legacy_file_retrieval_if_needed(
+    request: Request,
+    form_data: dict,
+    extra_params: dict,
+    user: UserModel,
+    model: dict,
+    metadata: Optional[dict],
+) -> tuple[dict, list[dict]]:
+    file_context_enabled = (
+        model.get("info", {}).get("meta", {}).get("capabilities") or {}
+    ).get("file_context", True)
+
+    if not file_context_enabled or should_skip_legacy_file_retrieval_for_native_scoped_knowledge(
+        request.app.state.config, metadata
+    ):
+        return form_data, []
+
+    try:
+        updated_form_data, flags = await chat_completion_files_handler(
+            request, form_data, extra_params, user
+        )
+        return updated_form_data, flags.get("sources", [])
+    except Exception as e:
+        log.exception(e)
+        return form_data, []
+
+
 def _split_tool_calls(
     tool_calls: list[dict],
 ) -> list[dict]:
@@ -4291,19 +4334,15 @@ async def process_chat_payload(request, form_data, user, metadata, model):
                 except Exception as e:
                     log.exception(e)
 
-    # Check if file context extraction is enabled for this model (default True)
-    file_context_enabled = (
-        model.get("info", {}).get("meta", {}).get("capabilities") or {}
-    ).get("file_context", True)
-
-    if file_context_enabled:
-        try:
-            form_data, flags = await chat_completion_files_handler(
-                request, form_data, extra_params, user
-            )
-            sources.extend(flags.get("sources", []))
-        except Exception as e:
-            log.exception(e)
+    form_data, file_sources = await apply_legacy_file_retrieval_if_needed(
+        request=request,
+        form_data=form_data,
+        extra_params=extra_params,
+        user=user,
+        model=model,
+        metadata=metadata,
+    )
+    sources.extend(file_sources)
 
     # Save the pre-RAG message state so the native tool call loop can
     # restore to the true original (before file-source injection) rather

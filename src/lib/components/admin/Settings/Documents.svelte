@@ -275,6 +275,8 @@
 			config?.LAYER_GENERATION_MAX_CHUNK_TOKENS ?? 24000;
 		config.LAYER_GENERATION_MIN_TAIL_TOKENS =
 			config?.LAYER_GENERATION_MIN_TAIL_TOKENS ?? 1000;
+		config.NATIVE_ATTACHED_KNOWLEDGE_BYPASS_LEGACY_FILE_RETRIEVAL =
+			config?.NATIVE_ATTACHED_KNOWLEDGE_BYPASS_LEGACY_FILE_RETRIEVAL ?? false;
 
 		config.DOCLING_PARAMS =
 			typeof config.DOCLING_PARAMS === 'object'
@@ -1167,6 +1169,27 @@
 						<div class=" mt-0.5 mb-2.5 text-base font-medium">{$i18n.t('Retrieval')}</div>
 
 						<hr class=" border-gray-100/30 dark:border-gray-850/30 my-2" />
+
+						<div class="mb-2.5 flex flex-col w-full gap-1">
+							<div class="text-xs font-medium">{$i18n.t('Native Attached Knowledge')}</div>
+							<div class="flex w-full justify-between items-center">
+								<div class="text-xs text-gray-500 dark:text-gray-400">
+									<Tooltip
+										content={$i18n.t(
+											'When enabled, native function-calling chats with scoped knowledge skip the legacy file retrieval injection path and rely on native knowledge tools.'
+										)}
+										placement="top-start"
+									>
+										{$i18n.t('Bypass legacy file retrieval in native mode')}
+									</Tooltip>
+								</div>
+								<div class="flex items-center relative">
+									<Switch
+										bind:state={RAGConfig.NATIVE_ATTACHED_KNOWLEDGE_BYPASS_LEGACY_FILE_RETRIEVAL}
+									/>
+								</div>
+							</div>
+						</div>
 
 						<div class="  mb-2.5 flex w-full justify-between">
 							<div class=" self-center text-xs font-medium">{$i18n.t('Full Context Mode')}</div>

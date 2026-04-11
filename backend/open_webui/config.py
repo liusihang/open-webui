@@ -2320,6 +2320,15 @@ LAYER_GENERATION_MIN_TAIL_TOKENS = PersistentConfig(
     int(os.environ.get("LAYER_GENERATION_MIN_TAIL_TOKENS", "1000")),
 )
 
+NATIVE_ATTACHED_KNOWLEDGE_BYPASS_LEGACY_FILE_RETRIEVAL = PersistentConfig(
+    "NATIVE_ATTACHED_KNOWLEDGE_BYPASS_LEGACY_FILE_RETRIEVAL",
+    "layered_knowledge.native_attached_knowledge_bypass_legacy_file_retrieval",
+    os.environ.get(
+        "NATIVE_ATTACHED_KNOWLEDGE_BYPASS_LEGACY_FILE_RETRIEVAL", "False"
+    ).lower()
+    == "true",
+)
+
 OPEN_NOTEBOOK_BASE_URL = PersistentConfig(
     "OPEN_NOTEBOOK_BASE_URL",
     "layered_knowledge.open_notebook.base_url",

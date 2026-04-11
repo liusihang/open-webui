@@ -136,6 +136,7 @@ def _fake_request():
                     LAYER_GENERATION_PROMPT_ABSTRACT="Summarize this chunk: {{DOCUMENT_TEXT}}",
                     LAYER_GENERATION_MAX_CHUNK_TOKENS=24000,
                     LAYER_GENERATION_MIN_TAIL_TOKENS=1000,
+                    NATIVE_ATTACHED_KNOWLEDGE_BYPASS_LEGACY_FILE_RETRIEVAL=False,
                     OPEN_NOTEBOOK_BASE_URL="https://nb.example.com",
                     OPEN_NOTEBOOK_API_PASSWORD="secret",
                     OPEN_NOTEBOOK_TIMEOUT_SECS=45,
@@ -173,6 +174,7 @@ async def test_get_rag_config_hides_open_notebook_layer_generation_settings():
     )
     assert response["LAYER_GENERATION_MAX_CHUNK_TOKENS"] == 24000
     assert response["LAYER_GENERATION_MIN_TAIL_TOKENS"] == 1000
+    assert response["NATIVE_ATTACHED_KNOWLEDGE_BYPASS_LEGACY_FILE_RETRIEVAL"] is False
 
 
 @pytest.mark.asyncio
@@ -186,6 +188,7 @@ async def test_update_rag_config_keeps_open_notebook_layer_generation_settings_i
             LAYER_GENERATION_PROMPT_ABSTRACT="Internal prompt: {{DOCUMENT_TEXT}}",
             LAYER_GENERATION_MAX_CHUNK_TOKENS=18000,
             LAYER_GENERATION_MIN_TAIL_TOKENS=900,
+            NATIVE_ATTACHED_KNOWLEDGE_BYPASS_LEGACY_FILE_RETRIEVAL=True,
         ),
         user=_fake_admin(),
     )
@@ -203,3 +206,7 @@ async def test_update_rag_config_keeps_open_notebook_layer_generation_settings_i
     )
     assert request.app.state.config.LAYER_GENERATION_MAX_CHUNK_TOKENS == 18000
     assert request.app.state.config.LAYER_GENERATION_MIN_TAIL_TOKENS == 900
+    assert (
+        request.app.state.config.NATIVE_ATTACHED_KNOWLEDGE_BYPASS_LEGACY_FILE_RETRIEVAL
+        is True
+    )
