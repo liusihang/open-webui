@@ -23,27 +23,9 @@ services:
     environment:
       - 'OLLAMA_BASE_URL=http://ollama:11434'
       - 'WEBUI_SECRET_KEY='
-      - 'ENABLE_ONLYOFFICE_PREVIEW=${ENABLE_ONLYOFFICE_PREVIEW-false}'
-      - 'ONLYOFFICE_DOCUMENT_SERVER_URL=${ONLYOFFICE_DOCUMENT_SERVER_URL-http://onlyoffice}'
-      - 'ONLYOFFICE_PUBLIC_BASE_URL=${ONLYOFFICE_PUBLIC_BASE_URL-http://open-webui:8080}'
-      - 'ONLYOFFICE_JWT_SECRET=${ONLYOFFICE_JWT_SECRET-}'
-      - 'ONLYOFFICE_FILE_TOKEN_EXPIRES_IN=${ONLYOFFICE_FILE_TOKEN_EXPIRES_IN-10m}'
-      - 'ONLYOFFICE_CALLBACK_ALLOWED_HOSTS=${ONLYOFFICE_CALLBACK_ALLOWED_HOSTS-onlyoffice}'
     extra_hosts:
       - host.docker.internal:host-gateway
     restart: unless-stopped
-
-  onlyoffice:
-    image: onlyoffice/documentserver:${ONLYOFFICE_DOCKER_TAG-latest}
-    container_name: onlyoffice
-    restart: unless-stopped
-    environment:
-      - 'JWT_ENABLED=${ONLYOFFICE_JWT_ENABLED-false}'
-      - 'JWT_SECRET=${ONLYOFFICE_JWT_SECRET-}'
-      - 'JWT_HEADER=${ONLYOFFICE_JWT_HEADER-Authorization}'
-      - 'JWT_IN_BODY=${ONLYOFFICE_JWT_IN_BODY-true}'
-    ports:
-      - ${ONLYOFFICE_PORT-8082}:80
 
 volumes:
   ollama: {}

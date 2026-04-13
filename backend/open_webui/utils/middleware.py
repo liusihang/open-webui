@@ -147,7 +147,6 @@ from open_webui.env import (
     ENABLE_CHAT_RESPONSE_BASE64_IMAGE_URL_CONVERSION,
     CHAT_RESPONSE_STREAM_DELTA_CHUNK_SIZE,
     CHAT_RESPONSE_MAX_TOOL_CALL_RETRIES,
-    ENABLE_RESPONSES_API_STATEFUL,
     BYPASS_MODEL_ACCESS_CONTROL,
     ENABLE_REALTIME_CHAT_SAVE,
     ENABLE_QUERIES_CACHE,
@@ -1056,61 +1055,6 @@ def deep_merge(target, source):
         return source
 
 
-def extract_anchor_state_from_response_payload(
-    response_payload: dict,
-    provider_route: str = "responses",
-    requested_model_id: str = "",
-) -> dict:
-    """Extract persisted anchor metadata from a non-stream/stream Responses payload."""
-    normalized_route = provider_route or "chat_completions"
-    anchor_model_id = ""
-    if isinstance(response_payload, dict):
-        model_value = response_payload.get("model")
-        if isinstance(model_value, str):
-            anchor_model_id = model_value
-    if not anchor_model_id and isinstance(requested_model_id, str):
-        anchor_model_id = requested_model_id
-
-    if normalized_route != "responses":
-        anchor_state = {
-            "provider_route": normalized_route,
-            "anchor_valid": False,
-        }
-        if anchor_model_id:
-            anchor_state["anchor_model_id"] = anchor_model_id
-        return anchor_state
-
-    response_id = ""
-    if isinstance(response_payload, dict):
-        payload_id = response_payload.get("id")
-        if isinstance(payload_id, str):
-            response_id = payload_id.strip()
-
-    anchor_state = {
-        "provider_route": "responses",
-        "anchor_valid": bool(response_id),
-    }
-    if response_id:
-        anchor_state["provider_response_id"] = response_id
-    if anchor_model_id:
-        anchor_state["anchor_model_id"] = anchor_model_id
-
-    return anchor_state
-
-
-def _normalize_stateful_model_id(model_id: str) -> str:
-    model_value = str(model_id or "").strip().lower()
-    if not model_value:
-        return ""
-
-    if "/" in model_value:
-        provider_prefix, provider_model_id = model_value.split("/", 1)
-        if provider_prefix and provider_model_id:
-            return provider_model_id
-
-    return model_value
-
-
 def handle_responses_streaming_event(
     data: dict,
     current_output: list,
@@ -1445,17 +1389,7 @@ def handle_responses_streaming_event(
             # Normalize timing fields and fold fragmented reasoning chunks.
             new_output = normalize_reasoning_output_items(new_output)
 
-        completion_metadata = {
-            "usage": response_data.get("usage"),
-            "done": True,
-        }
-        completion_metadata.update(
-            extract_anchor_state_from_response_payload(
-                response_payload=response_data,
-                provider_route="responses",
-            )
-        )
-        return new_output, completion_metadata
+        return new_output, {"usage": response_data.get("usage"), "done": True}
 
     elif event_type == "response.in_progress":
         # State Machine Event: In Progress
@@ -3418,241 +3352,6 @@ async def convert_url_images_to_base64(form_data):
 
     return form_data
 
-
-def _is_openai_new_model_for_stateful(model_id: str) -> bool:
-    normalize_model_id = globals().get("_normalize_stateful_model_id")
-    if not callable(normalize_model_id):
-        def normalize_model_id(raw_model_id: str) -> str:
-            model_value = str(raw_model_id or "").strip().lower()
-            if not model_value:
-                return ""
-            if "/" in model_value:
-                provider_prefix, provider_model_id = model_value.split("/", 1)
-                if provider_prefix and provider_model_id:
-                    return provider_model_id
-            return model_value
-
-    model_lower = normalize_model_id(model_id)
-    if re.match(r"^o\d+", model_lower):
-        return True
-    match = re.match(r"^gpt-(\d+)", model_lower)
-    if match and int(match.group(1)) >= 5:
-        return True
-    return False
-
-
-def _resolve_provider_route_for_chat_request(request, model: dict, requested_model_id: str) -> str:
-    if not isinstance(model, dict):
-        return "chat_completions"
-
-    if model.get("owned_by") != "openai":
-        return "chat_completions"
-
-    url_idx = model.get("urlIdx")
-    if not isinstance(url_idx, int):
-        return "chat_completions"
-
-    try:
-        openai_api_configs = request.app.state.config.OPENAI_API_CONFIGS or {}
-        openai_api_base_urls = request.app.state.config.OPENAI_API_BASE_URLS or []
-    except Exception:
-        return "chat_completions"
-
-    legacy_key = (
-        openai_api_base_urls[url_idx]
-        if isinstance(openai_api_base_urls, list) and 0 <= url_idx < len(openai_api_base_urls)
-        else None
-    )
-    api_config = openai_api_configs.get(str(url_idx), openai_api_configs.get(legacy_key, {}))
-    api_type = str((api_config or {}).get("api_type") or "").lower()
-
-    if not api_type and _is_openai_new_model_for_stateful(requested_model_id):
-        api_type = "responses"
-
-    return "responses" if api_type == "responses" else "chat_completions"
-
-
-def _compute_stateful_anchor_shadow_decision(
-    feature_enabled: bool,
-    provider_route: str,
-    current_message_id: str,
-    parent_message_id: str,
-    messages_map: dict,
-    requested_model_id: str,
-    tools_present: bool,
-    function_calling_mode: str,
-    code_interpreter_enabled: bool,
-) -> dict:
-    if not feature_enabled:
-        return {"eligible": False, "reason": "feature_disabled", "previous_response_id": None}
-
-    if provider_route != "responses":
-        return {
-            "eligible": False,
-            "reason": "provider_route_not_responses",
-            "previous_response_id": None,
-        }
-
-    if not current_message_id or not parent_message_id or current_message_id != parent_message_id:
-        return {"eligible": False, "reason": "non_linear_append", "previous_response_id": None}
-
-    if tools_present:
-        return {"eligible": False, "reason": "tools_present", "previous_response_id": None}
-
-    if str(function_calling_mode or "").lower() == "native":
-        return {
-            "eligible": False,
-            "reason": "function_calling_not_supported",
-            "previous_response_id": None,
-        }
-
-    if code_interpreter_enabled:
-        return {
-            "eligible": False,
-            "reason": "code_interpreter_not_supported",
-            "previous_response_id": None,
-        }
-
-    if not isinstance(messages_map, dict):
-        return {"eligible": False, "reason": "messages_unavailable", "previous_response_id": None}
-
-    parent_message = messages_map.get(parent_message_id)
-    if not isinstance(parent_message, dict) or parent_message.get("role") != "user":
-        return {"eligible": False, "reason": "parent_user_message_missing", "previous_response_id": None}
-
-    anchor_message_id = parent_message.get("parentId") or parent_message.get("parent_id")
-    if not isinstance(anchor_message_id, str) or not anchor_message_id:
-        return {"eligible": False, "reason": "anchor_invalid", "previous_response_id": None}
-
-    anchor_message = messages_map.get(anchor_message_id)
-    if not isinstance(anchor_message, dict) or anchor_message.get("role") != "assistant":
-        return {"eligible": False, "reason": "anchor_invalid", "previous_response_id": None}
-
-    normalize_model_id = globals().get("_normalize_stateful_model_id")
-    if not callable(normalize_model_id):
-        def normalize_model_id(raw_model_id: str) -> str:
-            model_value = str(raw_model_id or "").strip().lower()
-            if not model_value:
-                return ""
-            if "/" in model_value:
-                provider_prefix, provider_model_id = model_value.split("/", 1)
-                if provider_prefix and provider_model_id:
-                    return provider_model_id
-            return model_value
-
-    anchor_model_id = anchor_message.get("anchor_model_id")
-    normalized_anchor_model_id = normalize_model_id(anchor_model_id)
-    normalized_requested_model_id = normalize_model_id(requested_model_id)
-    if (
-        normalized_anchor_model_id
-        and normalized_requested_model_id
-        and normalized_anchor_model_id != normalized_requested_model_id
-    ):
-        return {"eligible": False, "reason": "model_changed", "previous_response_id": None}
-
-    if anchor_message.get("provider_route") != "responses":
-        return {"eligible": False, "reason": "anchor_invalid", "previous_response_id": None}
-
-    if anchor_message.get("anchor_valid") is not True:
-        return {"eligible": False, "reason": "anchor_invalid", "previous_response_id": None}
-
-    previous_response_id = anchor_message.get("provider_response_id")
-    if not isinstance(previous_response_id, str) or not previous_response_id.strip():
-        return {"eligible": False, "reason": "anchor_invalid", "previous_response_id": None}
-
-    return {
-        "eligible": True,
-        "reason": "eligible",
-        "previous_response_id": previous_response_id.strip(),
-        "anchor_message_id": anchor_message_id,
-    }
-
-
-def _build_stateful_shadow_messages(messages: list) -> list | None:
-    if not isinstance(messages, list):
-        return None
-
-    system_message = None
-    latest_user_message = None
-
-    for message in messages:
-        if not isinstance(message, dict):
-            continue
-        if message.get("role") == "system" and system_message is None:
-            system_message = message.copy()
-        if message.get("role") == "user":
-            latest_user_message = message.copy()
-
-    if latest_user_message is None:
-        return None
-
-    if system_message is not None:
-        return [system_message, latest_user_message]
-    return [latest_user_message]
-
-
-def _apply_stateful_anchor_shadow_mode(request, form_data: dict, metadata: dict, model: dict) -> dict:
-    if not isinstance(form_data, dict) or not isinstance(metadata, dict):
-        return form_data
-
-    form_data.pop("previous_response_id", None)
-
-    requested_model_id = form_data.get("model", "")
-    provider_route = _resolve_provider_route_for_chat_request(
-        request=request,
-        model=model,
-        requested_model_id=requested_model_id,
-    )
-    metadata["provider_route"] = provider_route
-
-    chat_id = metadata.get("chat_id")
-    parent_message_id = metadata.get("parent_message_id")
-
-    if not isinstance(chat_id, str) or not chat_id or chat_id.startswith("local:"):
-        return form_data
-
-    chat = Chats.get_chat_by_id(chat_id)
-    if chat is None:
-        return form_data
-
-    history = chat.chat.get("history", {}) if isinstance(chat.chat, dict) else {}
-    messages_map = history.get("messages", {}) if isinstance(history, dict) else {}
-    current_message_id = history.get("currentId") if isinstance(history, dict) else None
-
-    params = metadata.get("params", {}) if isinstance(metadata.get("params"), dict) else {}
-    features = metadata.get("features", {}) if isinstance(metadata.get("features"), dict) else {}
-
-    decision = _compute_stateful_anchor_shadow_decision(
-        feature_enabled=bool(ENABLE_RESPONSES_API_STATEFUL),
-        provider_route=provider_route,
-        current_message_id=current_message_id,
-        parent_message_id=parent_message_id,
-        messages_map=messages_map,
-        requested_model_id=requested_model_id,
-        tools_present=bool(form_data.get("tools")),
-        function_calling_mode=params.get("function_calling", "default"),
-        code_interpreter_enabled=bool(features.get("code_interpreter")),
-    )
-    metadata["stateful_anchor_reason"] = decision.get("reason")
-
-    if not decision.get("eligible"):
-        form_data.pop("previous_response_id", None)
-        return form_data
-
-    shadow_messages = _build_stateful_shadow_messages(form_data.get("messages", []))
-    if not shadow_messages:
-        metadata["stateful_anchor_reason"] = "latest_user_message_missing"
-        form_data.pop("previous_response_id", None)
-        return form_data
-
-    form_data["messages"] = shadow_messages
-    form_data["previous_response_id"] = decision["previous_response_id"]
-    metadata["stateful_anchor_anchor_message_id"] = decision.get("anchor_message_id")
-    metadata["stateful_anchor_previous_response_id"] = decision["previous_response_id"]
-
-    return form_data
-
-
 def load_messages_from_db(chat_id: str, message_id: str) -> Optional[list[dict]]:
     """
     Load the message chain from DB up to message_id,
@@ -4361,13 +4060,6 @@ async def process_chat_payload(request, form_data, user, metadata, model):
     except Exception as e:
         log.debug(f"Context budget policy failed on primary payload: {e}")
 
-    form_data = _apply_stateful_anchor_shadow_mode(
-        request=request,
-        form_data=form_data,
-        metadata=metadata,
-        model=model,
-    )
-
     return form_data, metadata, events
 
 
@@ -4701,15 +4393,11 @@ async def background_tasks_handler(ctx):
 async def non_streaming_chat_response_handler(response, ctx):
     request = ctx["request"]
 
-    form_data = ctx["form_data"]
     user = ctx["user"]
     metadata = ctx["metadata"]
     events = ctx["events"]
 
     event_emitter = ctx["event_emitter"]
-    requested_model_id = (
-        form_data.get("model", "") if isinstance(form_data, dict) else ""
-    )
 
     response, response_data = get_response_data(response)
     if response_data is None:
@@ -4754,13 +4442,8 @@ async def non_streaming_chat_response_handler(response, ctx):
             content = response_message.get("content", "")
             reasoning_content = extract_reasoning_text(response_message)
             response_output = response_data.get("output")
-            anchor_state = extract_anchor_state_from_response_payload(
-                response_payload=response_data,
-                provider_route=metadata.get("provider_route", "chat_completions"),
-                requested_model_id=requested_model_id,
-            )
 
-            if content or reasoning_content or response_output:
+            if choices and (content or reasoning_content or response_output):
                 await event_emitter(
                     {
                         "type": "chat:completion",
@@ -4825,7 +4508,6 @@ async def non_streaming_chat_response_handler(response, ctx):
                         "content": content_to_store,
                         "output": response_output,
                         **({"usage": usage} if usage else {}),
-                        **anchor_state,
                     },
                 )
 
@@ -5190,11 +4872,6 @@ async def streaming_chat_response_handler(response, ctx):
                     output = []
 
             usage = None
-            anchor_state = extract_anchor_state_from_response_payload(
-                response_payload={},
-                provider_route=metadata.get("provider_route", "chat_completions"),
-                requested_model_id=model_id,
-            )
 
             reasoning_tags_param = metadata.get("params", {}).get("reasoning_tags")
             DETECT_REASONING_TAGS = reasoning_tags_param is not False
@@ -5236,7 +4913,6 @@ async def streaming_chat_response_handler(response, ctx):
                     nonlocal content
                     nonlocal usage
                     nonlocal output
-                    nonlocal anchor_state
 
                     response_tool_calls = []
 
@@ -5337,14 +5013,6 @@ async def streaming_chat_response_handler(response, ctx):
                                     # Merge any metadata (usage, done, etc.)
                                     if response_metadata:
                                         processed_data.update(response_metadata)
-                                        for key in (
-                                            "provider_response_id",
-                                            "provider_route",
-                                            "anchor_valid",
-                                            "anchor_model_id",
-                                        ):
-                                            if key in response_metadata:
-                                                anchor_state[key] = response_metadata[key]
 
                                     await event_emitter(
                                         {
@@ -6243,7 +5911,6 @@ async def streaming_chat_response_handler(response, ctx):
                                 *convert_output_to_messages(output, raw=True),
                             ],
                         }
-                        new_form_data.pop("previous_response_id", None)
 
                         try:
                             new_form_data, budget_diagnostics = (
@@ -6447,7 +6114,6 @@ async def streaming_chat_response_handler(response, ctx):
                                     *convert_output_to_messages(output, raw=True),
                                 ],
                             }
-                            new_form_data.pop("previous_response_id", None)
 
                             try:
                                 new_form_data, budget_diagnostics = (
@@ -6504,18 +6170,13 @@ async def streaming_chat_response_handler(response, ctx):
                             "content": serialize_output(output),
                             "output": output,
                             **({"usage": usage} if usage else {}),
-                            **anchor_state,
                         },
                     )
-                elif usage or anchor_state:
-                    update_payload = {
-                        **({"usage": usage} if usage else {}),
-                        **anchor_state,
-                    }
+                elif usage:
                     Chats.upsert_message_to_chat_by_id_and_message_id(
                         metadata["chat_id"],
                         metadata["message_id"],
-                        update_payload,
+                        {"usage": usage},
                     )
 
                 # Send a webhook notification if the user is not active

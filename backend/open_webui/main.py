@@ -97,7 +97,6 @@ from open_webui.routers import (
     utils,
     scim,
     terminals,
-    onlyoffice,
 )
 
 from open_webui.routers.retrieval import (
@@ -136,13 +135,6 @@ from open_webui.config import (
     TOOL_SERVER_CONNECTIONS,
     # Terminal Server
     TERMINAL_SERVER_CONNECTIONS,
-    # OnlyOffice
-    ENABLE_ONLYOFFICE_PREVIEW,
-    ONLYOFFICE_DOCUMENT_SERVER_URL,
-    ONLYOFFICE_PUBLIC_BASE_URL,
-    ONLYOFFICE_JWT_SECRET,
-    ONLYOFFICE_FILE_TOKEN_EXPIRES_IN,
-    ONLYOFFICE_CALLBACK_ALLOWED_HOSTS,
     # Code Execution
     ENABLE_CODE_EXECUTION,
     CODE_EXECUTION_ENGINE,
@@ -894,19 +886,6 @@ app.state.TOOL_SERVERS = []
 
 app.state.config.TERMINAL_SERVER_CONNECTIONS = TERMINAL_SERVER_CONNECTIONS
 app.state.TERMINAL_SERVERS = []
-
-########################################
-#
-# ONLYOFFICE
-#
-########################################
-
-app.state.config.ENABLE_ONLYOFFICE_PREVIEW = ENABLE_ONLYOFFICE_PREVIEW
-app.state.config.ONLYOFFICE_DOCUMENT_SERVER_URL = ONLYOFFICE_DOCUMENT_SERVER_URL
-app.state.config.ONLYOFFICE_PUBLIC_BASE_URL = ONLYOFFICE_PUBLIC_BASE_URL
-app.state.config.ONLYOFFICE_JWT_SECRET = ONLYOFFICE_JWT_SECRET
-app.state.config.ONLYOFFICE_FILE_TOKEN_EXPIRES_IN = ONLYOFFICE_FILE_TOKEN_EXPIRES_IN
-app.state.config.ONLYOFFICE_CALLBACK_ALLOWED_HOSTS = ONLYOFFICE_CALLBACK_ALLOWED_HOSTS
 
 ########################################
 #
@@ -1715,7 +1694,6 @@ app.include_router(memories.router, prefix='/api/v1/memories', tags=['memories']
 app.include_router(folders.router, prefix='/api/v1/folders', tags=['folders'])
 app.include_router(groups.router, prefix='/api/v1/groups', tags=['groups'])
 app.include_router(files.router, prefix='/api/v1/files', tags=['files'])
-app.include_router(onlyoffice.router, prefix='/api/v1/onlyoffice', tags=['onlyoffice'])
 app.include_router(functions.router, prefix='/api/v1/functions', tags=['functions'])
 app.include_router(evaluations.router, prefix='/api/v1/evaluations', tags=['evaluations'])
 if ENABLE_ADMIN_ANALYTICS:
