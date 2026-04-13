@@ -38,6 +38,7 @@ SUPPORTED_OFFICE_FILE_TYPES = {
     "ppt": "slide",
     "pptx": "slide",
 }
+ONLYOFFICE_SAVE_STATUSES = {2, 6}
 
 
 class OnlyOfficeSessionForm(BaseModel):
@@ -193,6 +194,18 @@ def _extract_callback_token(request: Request, payload: dict[str, Any]) -> str:
     return ""
 
 
+def _extract_callback_context_token(request: Request, payload: dict[str, Any]) -> str:
+    query_params = getattr(request, "query_params", {}) or {}
+    query_token = query_params.get("context_token")
+    if isinstance(query_token, str) and query_token:
+        return query_token
+
+    payload_token = payload.get("context_token")
+    if isinstance(payload_token, str) and payload_token:
+        return payload_token
+    return ""
+
+
 def _get_terminal_connection(request: Request, terminal_server_id: str, user):
     connections = request.app.state.config.TERMINAL_SERVER_CONNECTIONS or []
     connection = next((c for c in connections if c.get("id") == terminal_server_id), None)
@@ -218,6 +231,158 @@ def _get_terminal_connection(request: Request, terminal_server_id: str, user):
     return connection
 
 
+def _get_terminal_connection_for_callback(request: Request, terminal_server_id: str) -> dict[str, Any]:
+    connections = request.app.state.config.TERMINAL_SERVER_CONNECTIONS or []
+    connection = next((c for c in connections if c.get("id") == terminal_server_id), None)
+    if connection is None or not connection.get("enabled", True):
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Terminal server not found.",
+        )
+    return connection
+
+
+def _get_terminal_target_base_url(connection: dict[str, Any]) -> str:
+    base_url = (connection.get("url") or "").rstrip("/")
+    if not base_url:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Terminal server URL is not configured.",
+        )
+
+    policy_id = connection.get("policy_id")
+    if policy_id:
+        return f"{base_url}/p/{policy_id}"
+    return base_url
+
+
+def _get_terminal_proxy_headers(
+    connection: dict[str, Any], user_id: str, session_proxy_token: Optional[str]
+) -> dict[str, str]:
+    headers = {"X-User-Id": user_id}
+    auth_type = connection.get("auth_type", "bearer")
+    if auth_type == "bearer":
+        headers["Authorization"] = f"Bearer {connection.get('key', '')}"
+    elif auth_type == "session":
+        if not isinstance(session_proxy_token, str) or not session_proxy_token:
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Missing session proxy token for terminal callback auth.",
+            )
+        headers["Authorization"] = f"Bearer {session_proxy_token}"
+    elif auth_type not in ("none",):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Terminal auth_type '{auth_type}' is not supported for OnlyOffice callback writeback.",
+        )
+    return headers
+
+
+async def _read_upstream_error_message(upstream) -> str:
+    try:
+        body = await upstream.read()
+    except Exception:
+        return ""
+
+    if not body:
+        return ""
+
+    try:
+        return body.decode("utf-8", errors="ignore").strip()
+    except Exception:
+        return ""
+
+
+async def _download_onlyoffice_callback_blob(callback_url: str) -> tuple[bytes, Optional[str]]:
+    timeout = aiohttp.ClientTimeout(total=300, connect=10)
+    async with aiohttp.ClientSession(timeout=timeout, trust_env=True) as session:
+        async with session.get(callback_url) as upstream:
+            body = await upstream.read()
+            if upstream.status >= 400:
+                raise HTTPException(
+                    status_code=status.HTTP_502_BAD_GATEWAY,
+                    detail=f"Failed to fetch callback document blob: HTTP {upstream.status}",
+                )
+            return body, upstream.headers.get("Content-Type")
+
+
+async def _replace_terminal_file_via_temp_upload(
+    connection: dict[str, Any],
+    terminal_file_path: str,
+    user_id: str,
+    session_proxy_token: Optional[str],
+    content: bytes,
+    content_type: Optional[str],
+) -> None:
+    target_base_url = _get_terminal_target_base_url(connection)
+    headers = _get_terminal_proxy_headers(connection, user_id, session_proxy_token)
+
+    directory = posixpath.dirname(terminal_file_path) or "/"
+    suffix = Path(terminal_file_path).suffix
+    temp_path = f"{terminal_file_path}.onlyoffice-{uuid4().hex}.tmp{suffix}"
+    temp_filename = posixpath.basename(temp_path)
+    upload_url = f"{target_base_url}/files/upload?{urlencode({'directory': directory})}"
+    delete_original_url = f"{target_base_url}/files/delete?{urlencode({'path': terminal_file_path})}"
+    move_url = f"{target_base_url}/files/move"
+
+    timeout = aiohttp.ClientTimeout(total=300, connect=10)
+    async with aiohttp.ClientSession(timeout=timeout, trust_env=True) as session:
+        form = aiohttp.FormData()
+        form.add_field(
+            "file",
+            content,
+            filename=temp_filename,
+            content_type=content_type or "application/octet-stream",
+        )
+        async with session.post(upload_url, headers=headers, data=form) as upload_resp:
+            if upload_resp.status >= 400:
+                error_message = await _read_upstream_error_message(upload_resp)
+                raise HTTPException(
+                    status_code=status.HTTP_502_BAD_GATEWAY,
+                    detail=f"Terminal upload failed: HTTP {upload_resp.status} {error_message}".strip(),
+                )
+
+        async with session.delete(delete_original_url, headers=headers) as delete_resp:
+            if delete_resp.status >= 400:
+                error_message = await _read_upstream_error_message(delete_resp)
+                cleanup_url = f"{target_base_url}/files/delete?{urlencode({'path': temp_path})}"
+                try:
+                    async with session.delete(cleanup_url, headers=headers):
+                        pass
+                except Exception as cleanup_exc:
+                    log.exception(
+                        "Failed to cleanup temporary terminal file after delete failure temp_path=%s error=%s",
+                        temp_path,
+                        cleanup_exc,
+                    )
+                raise HTTPException(
+                    status_code=status.HTTP_502_BAD_GATEWAY,
+                    detail=f"Terminal delete original failed: HTTP {delete_resp.status} {error_message}".strip(),
+                )
+
+        async with session.post(
+            move_url,
+            headers=headers,
+            json={"source": temp_path, "destination": terminal_file_path},
+        ) as move_resp:
+            if move_resp.status >= 400:
+                error_message = await _read_upstream_error_message(move_resp)
+                cleanup_url = f"{target_base_url}/files/delete?{urlencode({'path': temp_path})}"
+                try:
+                    async with session.delete(cleanup_url, headers=headers):
+                        pass
+                except Exception as cleanup_exc:
+                    log.exception(
+                        "Failed to cleanup temporary terminal file after move failure temp_path=%s error=%s",
+                        temp_path,
+                        cleanup_exc,
+                    )
+                raise HTTPException(
+                    status_code=status.HTTP_502_BAD_GATEWAY,
+                    detail=f"Terminal move failed: HTTP {move_resp.status} {error_message}".strip(),
+                )
+
+
 @router.post("/session")
 async def create_onlyoffice_session(
     form_data: OnlyOfficeSessionForm,
@@ -227,10 +392,10 @@ async def create_onlyoffice_session(
 ):
     document_server_url = _require_onlyoffice_enabled(request)
 
-    if form_data.mode != "view":
+    if form_data.mode == "edit" and form_data.source_type != "terminal":
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail="OnlyOffice edit mode is not enabled in this phase.",
+            detail="OnlyOffice edit mode is only enabled for terminal sources.",
         )
 
     ttl = _parse_file_token_ttl(request)
@@ -293,29 +458,29 @@ async def create_onlyoffice_session(
             )
 
         terminal_session_signal = uuid4().hex
+        session_proxy_token = None
+        if connection.get("auth_type", "bearer") == "session":
+            session_proxy_token = create_token(
+                {
+                    "id": user.id,
+                    "role": user.role,
+                },
+                expires_delta=ttl,
+            )
+
+        terminal_token_payload = {
+            "scope": "onlyoffice:terminal_file",
+            "terminal_server_id": connection.get("id"),
+            "terminal_file_path": terminal_file_path,
+            "user_id": user.id,
+            "mode": form_data.mode,
+            "session_signal": terminal_session_signal,
+        }
+        if session_proxy_token:
+            terminal_token_payload["session_proxy_token"] = session_proxy_token
 
         terminal_token = create_token(
-            {
-                "scope": "onlyoffice:terminal_file",
-                "terminal_server_id": connection.get("id"),
-                "terminal_file_path": terminal_file_path,
-                "user_id": user.id,
-                "mode": form_data.mode,
-                "session_signal": terminal_session_signal,
-                **(
-                    {
-                        "session_proxy_token": create_token(
-                            {
-                                "id": user.id,
-                                "role": user.role,
-                            },
-                            expires_delta=ttl,
-                        )
-                    }
-                    if connection.get("auth_type", "bearer") == "session"
-                    else {}
-                ),
-            },
+            terminal_token_payload,
             expires_delta=ttl,
         )
         file_name = Path(terminal_file_path).name or terminal_file_path
@@ -331,6 +496,23 @@ async def create_onlyoffice_session(
             terminal_session_signal,
         )
         callback_url = f"{public_base_url}/api/v1/onlyoffice/callback/terminal"
+        if form_data.mode == "edit":
+            callback_context_payload = {
+                "scope": "onlyoffice:terminal_callback",
+                "terminal_server_id": connection.get("id"),
+                "terminal_file_path": terminal_file_path,
+                "user_id": user.id,
+                "session_signal": terminal_session_signal,
+                "document_key": document_key,
+            }
+            if session_proxy_token:
+                callback_context_payload["session_proxy_token"] = session_proxy_token
+
+            callback_context_token = create_token(
+                callback_context_payload,
+                expires_delta=ttl,
+            )
+            callback_url = f"{callback_url}?{urlencode({'context_token': callback_context_token})}"
 
     document_type = SUPPORTED_OFFICE_FILE_TYPES.get(document_file_type)
     config = {
@@ -342,14 +524,14 @@ async def create_onlyoffice_session(
             "fileType": document_file_type,
             "key": document_key,
             "permissions": {
-                "edit": False,
+                "edit": form_data.mode == "edit",
                 "download": True,
                 "print": True,
                 "review": False,
             },
         },
         "editorConfig": {
-            "mode": "view",
+            "mode": form_data.mode,
             "callbackUrl": callback_url,
             "lang": "en",
             "customization": {
@@ -601,5 +783,66 @@ async def handle_onlyoffice_terminal_callback(
             detail="OnlyOffice callback URL host is not allowlisted.",
         )
 
-    log.info("OnlyOffice terminal callback received status=%s", payload.get("status"))
+    callback_context_token = _extract_callback_context_token(request, payload)
+    if not callback_context_token:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Missing OnlyOffice terminal callback context token.",
+        )
+
+    callback_context = decode_token(callback_context_token)
+    if not callback_context or callback_context.get("scope") != "onlyoffice:terminal_callback":
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid OnlyOffice terminal callback context token.",
+        )
+
+    callback_status = payload.get("status")
+    if callback_status not in ONLYOFFICE_SAVE_STATUSES:
+        log.info("OnlyOffice terminal callback acknowledged without save status=%s", callback_status)
+        return {"error": 0}
+
+    if not callback_url:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Missing callback URL for save status.",
+        )
+
+    terminal_server_id = callback_context.get("terminal_server_id")
+    terminal_file_path = callback_context.get("terminal_file_path")
+    user_id = callback_context.get("user_id")
+    document_key = callback_context.get("document_key")
+    session_proxy_token = callback_context.get("session_proxy_token")
+
+    if not terminal_server_id or not terminal_file_path or not user_id:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid OnlyOffice terminal callback context claims.",
+        )
+
+    callback_key = payload.get("key")
+    if callback_key and document_key and callback_key != document_key:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="OnlyOffice callback key does not match session context.",
+        )
+
+    terminal_file_path = _normalize_terminal_file_path(terminal_file_path)
+    connection = _get_terminal_connection_for_callback(request, terminal_server_id)
+    content, content_type = await _download_onlyoffice_callback_blob(callback_url)
+    await _replace_terminal_file_via_temp_upload(
+        connection=connection,
+        terminal_file_path=terminal_file_path,
+        user_id=user_id,
+        session_proxy_token=session_proxy_token,
+        content=content,
+        content_type=content_type,
+    )
+
+    log.info(
+        "OnlyOffice terminal callback saved status=%s terminal_server_id=%s path=%s",
+        callback_status,
+        terminal_server_id,
+        terminal_file_path,
+    )
     return {"error": 0}
