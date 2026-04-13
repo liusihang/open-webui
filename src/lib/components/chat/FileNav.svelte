@@ -198,6 +198,7 @@
 
 	// ── Terminal resolution ──────────────────────────────────────────────
 	let selectedTerminal: { url: string; key: string } | null = null;
+	let selectedTerminalServerId: string | null = null;
 
 	const getTerminal = (): { url: string; key: string } | null => {
 		const systemTerminal = $selectedTerminalId
@@ -215,6 +216,36 @@
 		return url ? { url, key } : null;
 	};
 
+	const getTerminalServerId = (): string | null => {
+		const selectedId = $selectedTerminalId;
+
+		const systemTerminal = selectedId
+			? (($terminalServers ?? []).find((t) => t.id === selectedId) ?? null)
+			: (($terminalServers ?? []).find((t) => t.id) ?? null);
+		if (systemTerminal?.id) {
+			return systemTerminal.id;
+		}
+
+		const userTerminal = selectedId
+			? (($settings?.terminalServers ?? []).find((s) => s.url === selectedId) ?? null)
+			: (($settings?.terminalServers ?? []).find((s) => s.enabled && s.url) ??
+				($settings?.terminalServers ?? []).find((s) => s.url) ??
+				null);
+		const userTerminalServerId = userTerminal?.id ?? userTerminal?.server_id;
+		if (typeof userTerminalServerId === 'string' && userTerminalServerId.trim()) {
+			return userTerminalServerId.trim();
+		}
+
+		const runtimeTerminal = selectedId
+			? (($terminalServers ?? []).find((t) => t.url === selectedId && t.id) ?? null)
+			: null;
+		if (runtimeTerminal?.id) {
+			return runtimeTerminal.id;
+		}
+
+		return null;
+	};
+
 	// Detect terminal changes — the explicit store references ensure
 	// Svelte re-runs this block when any of them update.
 	let prevTerminalUrl = '';
@@ -222,6 +253,7 @@
 		($selectedTerminalId, $terminalServers, $settings);
 		const terminal = getTerminal();
 		selectedTerminal = terminal;
+		selectedTerminalServerId = getTerminalServerId();
 
 		if (terminal && terminal.url !== prevTerminalUrl) {
 			prevTerminalUrl = terminal.url;
@@ -1175,6 +1207,9 @@
 					{fileOfficeSlides}
 					{excelSheetNames}
 					{selectedExcelSheet}
+					onlyOfficeFileId={null}
+					onlyOfficeTerminalServerId={selectedTerminalServerId}
+					onlyOfficeTerminalFilePath={selectedFile}
 					onSheetChange={async (sheet) => {
 						if (!excelWorkbook) return;
 						selectedExcelSheet = sheet;

@@ -25,6 +25,7 @@
 	import dayjs from 'dayjs';
 	import Spinner from './Spinner.svelte';
 	import PDFViewer from './PDFViewer.svelte';
+	import OnlyOfficeViewer from './OnlyOfficeViewer.svelte';
 	import Reset from '../icons/Reset.svelte';
 
 	import panzoom, { type PanZoom } from 'panzoom';
@@ -59,6 +60,16 @@
 	let pptxSlides: string[] = [];
 	let pptxCurrentSlide = 0;
 	let pptxError = '';
+
+	// OnlyOffice preview state
+	let onlyOfficeFailed = false;
+	let onlyOfficeError = '';
+	let lastOnlyOfficeFileId = '';
+
+	const retryOnlyOfficePreview = () => {
+		onlyOfficeFailed = false;
+		onlyOfficeError = '';
+	};
 
 	let pzInstance: PanZoom | null = null;
 
@@ -216,6 +227,12 @@
 	const loadContent = async () => {
 		selectedTab = '';
 		expandedContent = false;
+		const currentFileId = item?.type === 'file' ? item?.id : '';
+		if (currentFileId !== lastOnlyOfficeFileId) {
+			lastOnlyOfficeFileId = currentFileId;
+			onlyOfficeFailed = false;
+			onlyOfficeError = '';
+		}
 		if (item?.type === 'collection') {
 			loading = true;
 
@@ -259,6 +276,14 @@
 
 	$: if (show) {
 		loadContent();
+	}
+
+	$: canUseOnlyOffice = item?.type === 'file' && (isExcel || isDocx || isPptx) && !onlyOfficeFailed;
+
+	$: if (!show) {
+		onlyOfficeFailed = false;
+		onlyOfficeError = '';
+		lastOnlyOfficeFileId = '';
 	}
 
 	onMount(() => {
@@ -534,7 +559,35 @@
 							url={`${WEBUI_API_BASE_URL}/files/${item.id}/content`}
 							className="w-full h-[70vh] border-0 rounded-lg"
 						/>
+					{:else if canUseOnlyOffice}
+						<div class="relative h-[55dvh] md:h-[60vh]">
+							<OnlyOfficeViewer
+								fileId={item.id}
+								readOnly={true}
+								className="w-full h-full"
+								on:error={(event) => {
+									onlyOfficeFailed = true;
+									onlyOfficeError =
+										event?.detail?.message ??
+										$i18n.t('OnlyOffice preview failed. Falling back to built-in preview.');
+								}}
+							/>
+						</div>
 					{:else if isExcel}
+						{#if onlyOfficeError}
+							<div
+								class="flex items-center justify-between gap-3 text-amber-700 dark:text-amber-400 text-sm px-4 py-2"
+								role="alert"
+								aria-live="polite"
+							>
+								<span>{onlyOfficeError}</span>
+								<button
+									type="button"
+									class="shrink-0 underline underline-offset-2 hover:no-underline"
+									on:click={retryOnlyOfficePreview}>{$i18n.t('Retry')}</button
+								>
+							</div>
+						{/if}
 						{#if excelError}
 							<div class="text-red-500 text-sm p-4">
 								{excelError}
@@ -584,6 +637,20 @@
 							<Markdown content={item.file.data.content} id="markdown-viewer" />
 						</div>
 					{:else if isDocx}
+						{#if onlyOfficeError}
+							<div
+								class="flex items-center justify-between gap-3 text-amber-700 dark:text-amber-400 text-sm px-4 py-2"
+								role="alert"
+								aria-live="polite"
+							>
+								<span>{onlyOfficeError}</span>
+								<button
+									type="button"
+									class="shrink-0 underline underline-offset-2 hover:no-underline"
+									on:click={retryOnlyOfficePreview}>{$i18n.t('Retry')}</button
+								>
+							</div>
+						{/if}
 						{#if docxError}
 							<div class="text-red-500 text-sm p-4">{docxError}</div>
 						{:else if docxHtml}
@@ -596,6 +663,20 @@
 							<div class="text-gray-500 text-sm p-4">No content available</div>
 						{/if}
 					{:else if isPptx}
+						{#if onlyOfficeError}
+							<div
+								class="flex items-center justify-between gap-3 text-amber-700 dark:text-amber-400 text-sm px-4 py-2"
+								role="alert"
+								aria-live="polite"
+							>
+								<span>{onlyOfficeError}</span>
+								<button
+									type="button"
+									class="shrink-0 underline underline-offset-2 hover:no-underline"
+									on:click={retryOnlyOfficePreview}>{$i18n.t('Retry')}</button
+								>
+							</div>
+						{/if}
 						{#if pptxError}
 							<div class="text-red-500 text-sm p-4">{pptxError}</div>
 						{:else if pptxSlides.length > 0}
@@ -614,6 +695,7 @@
 											class="p-1.5 rounded-lg hover:bg-gray-100 dark:hover:bg-gray-800 disabled:opacity-30"
 											disabled={pptxCurrentSlide === 0}
 											on:click={() => (pptxCurrentSlide = Math.max(0, pptxCurrentSlide - 1))}
+											aria-label={$i18n.t('Previous slide')}
 										>
 											<svg
 												xmlns="http://www.w3.org/2000/svg"
@@ -634,6 +716,7 @@
 											disabled={pptxCurrentSlide === pptxSlides.length - 1}
 											on:click={() =>
 												(pptxCurrentSlide = Math.min(pptxSlides.length - 1, pptxCurrentSlide + 1))}
+											aria-label={$i18n.t('Next slide')}
 										>
 											<svg
 												xmlns="http://www.w3.org/2000/svg"
