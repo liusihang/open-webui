@@ -320,3 +320,15 @@
 - `/tmp/subagent_67af_replay_payload_compressed.json`
 - `/tmp/subagent_67af_replay_resp_compressed.json`
 - `/tmp/tool_threshold_summary.json`
+
+26. Checkpoint: 端到端在线探针（API 语义确认）
+- Goal: 尝试通过单次 `/api/chat/completions` 强制调用 `run_research_sub_agent` 做全链路复测。
+- Action:
+  - 构造 payload（含 `tools` + `tool_choice`）请求主模型 `bifrostapi.ZenMuxOAI/openai/gpt-5.4`。
+- Evidence:
+  - 请求：`/tmp/e2e_subagent_probe_payload.json`
+  - 响应：`/tmp/e2e_subagent_probe_resp.json`
+  - 返回包含 `tool_calls`，但无自动执行后的 `function_call_output`（API 直调默认只返回调用指令，非前端编排回路）。
+- Result:
+  - 单请求无法复现 UI 中“模型->工具执行->回填->继续推理”的完整闭环。
+  - 本次仍以 replay+在线 token 实测作为主要验证证据。
