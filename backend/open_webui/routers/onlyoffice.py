@@ -888,6 +888,11 @@ async def handle_onlyoffice_terminal_callback(
             detail="OnlyOffice callback URL host is not allowlisted.",
         )
 
+    callback_status = payload.get("status")
+    if callback_status not in ONLYOFFICE_SAVE_STATUSES:
+        log.info("OnlyOffice terminal callback acknowledged without save status=%s", callback_status)
+        return {"error": 0}
+
     callback_context_token = _extract_callback_context_token(request, payload)
     if not callback_context_token:
         raise HTTPException(
@@ -901,11 +906,6 @@ async def handle_onlyoffice_terminal_callback(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Invalid OnlyOffice terminal callback context token.",
         )
-
-    callback_status = payload.get("status")
-    if callback_status not in ONLYOFFICE_SAVE_STATUSES:
-        log.info("OnlyOffice terminal callback acknowledged without save status=%s", callback_status)
-        return {"error": 0}
 
     if not callback_url:
         raise HTTPException(
@@ -934,15 +934,23 @@ async def handle_onlyoffice_terminal_callback(
 
     terminal_file_path = _normalize_terminal_file_path(terminal_file_path)
     connection = _get_terminal_connection_for_callback(request, terminal_server_id)
-    content, content_type = await _download_onlyoffice_callback_blob(callback_url)
-    await _replace_terminal_file_via_temp_upload(
-        connection=connection,
-        terminal_file_path=terminal_file_path,
-        user_id=user_id,
-        session_proxy_token=session_proxy_token,
-        content=content,
-        content_type=content_type,
-    )
+    try:
+        content, content_type = await _download_onlyoffice_callback_blob(callback_url)
+        await _replace_terminal_file_via_temp_upload(
+            connection=connection,
+            terminal_file_path=terminal_file_path,
+            user_id=user_id,
+            session_proxy_token=session_proxy_token,
+            content=content,
+            content_type=content_type,
+        )
+    except HTTPException:
+        raise
+    except (aiohttp.ClientError, TimeoutError) as exc:
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail="OnlyOffice terminal callback dependency transport failure.",
+        ) from exc
 
     log.info(
         "OnlyOffice terminal callback saved status=%s terminal_server_id=%s path=%s",

@@ -2,6 +2,7 @@ from datetime import timedelta
 from types import SimpleNamespace
 from urllib.parse import parse_qs, urlparse
 
+import aiohttp
 import pytest
 from fastapi import HTTPException
 
@@ -57,6 +58,21 @@ def _terminal_connection():
         "auth_type": "session",
         "enabled": True,
     }
+
+
+def _make_context_token(*, expires_delta=timedelta(hours=2)):
+    return onlyoffice_mod.create_token(
+        {
+            "scope": "onlyoffice:terminal_callback",
+            "terminal_server_id": "terminals",
+            "terminal_file_path": "/workspace/demo.docx",
+            "user_id": "user-1",
+            "session_signal": "sig-1",
+            "document_key": "doc-key-1",
+            "session_proxy_token": "session-proxy",
+        },
+        expires_delta=expires_delta,
+    )
 
 
 class _FakeResponse:
@@ -197,18 +213,7 @@ async def test_create_onlyoffice_file_edit_session_is_rejected():
 
 @pytest.mark.asyncio
 async def test_terminal_callback_ignores_non_save_status(monkeypatch):
-    context_token = onlyoffice_mod.create_token(
-        {
-            "scope": "onlyoffice:terminal_callback",
-            "terminal_server_id": "terminals",
-            "terminal_file_path": "/workspace/demo.docx",
-            "user_id": "user-1",
-            "session_signal": "sig-1",
-            "document_key": "doc-key-1",
-            "session_proxy_token": "session-proxy",
-        },
-        expires_delta=timedelta(minutes=5),
-    )
+    context_token = _make_context_token(expires_delta=timedelta(minutes=5))
 
     def _unexpected_session(*args, **kwargs):
         raise AssertionError("ClientSession should not be created for non-save statuses")
@@ -221,6 +226,21 @@ async def test_terminal_callback_ignores_non_save_status(monkeypatch):
             terminal_connections=[_terminal_connection()],
             query_params={"context_token": context_token},
         ),
+    )
+
+    assert result == {"error": 0}
+
+
+@pytest.mark.asyncio
+async def test_terminal_callback_non_save_without_context_still_acks(monkeypatch):
+    def _unexpected_session(*args, **kwargs):
+        raise AssertionError("ClientSession should not be created for non-save statuses")
+
+    monkeypatch.setattr(onlyoffice_mod.aiohttp, "ClientSession", _unexpected_session)
+
+    result = await onlyoffice_mod.handle_onlyoffice_terminal_callback(
+        onlyoffice_mod.OnlyOfficeCallbackForm(status=1),
+        _fake_request(terminal_connections=[_terminal_connection()]),
     )
 
     assert result == {"error": 0}
@@ -276,18 +296,7 @@ async def test_terminal_callback_save_downloads_and_writes_back_via_terminal_api
         lambda: SimpleNamespace(hex="fixed"),
     )
 
-    context_token = onlyoffice_mod.create_token(
-        {
-            "scope": "onlyoffice:terminal_callback",
-            "terminal_server_id": "terminals",
-            "terminal_file_path": "/workspace/demo.docx",
-            "user_id": "user-1",
-            "session_signal": "sig-1",
-            "document_key": "doc-key-1",
-            "session_proxy_token": "session-proxy",
-        },
-        expires_delta=timedelta(minutes=5),
-    )
+    context_token = _make_context_token(expires_delta=timedelta(minutes=5))
 
     result = await onlyoffice_mod.handle_onlyoffice_terminal_callback(
         onlyoffice_mod.OnlyOfficeCallbackForm(
@@ -366,18 +375,7 @@ async def test_terminal_callback_restores_backup_when_install_move_fails(monkeyp
     monkeypatch.setattr(onlyoffice_mod.aiohttp, "ClientSession", _FakeClientSession)
     monkeypatch.setattr(onlyoffice_mod, "uuid4", lambda: SimpleNamespace(hex="fixed"))
 
-    context_token = onlyoffice_mod.create_token(
-        {
-            "scope": "onlyoffice:terminal_callback",
-            "terminal_server_id": "terminals",
-            "terminal_file_path": "/workspace/demo.docx",
-            "user_id": "user-1",
-            "session_signal": "sig-1",
-            "document_key": "doc-key-1",
-            "session_proxy_token": "session-proxy",
-        },
-        expires_delta=timedelta(hours=2),
-    )
+    context_token = _make_context_token()
 
     with pytest.raises(HTTPException) as exc_info:
         await onlyoffice_mod.handle_onlyoffice_terminal_callback(
@@ -400,3 +398,65 @@ async def test_terminal_callback_restores_backup_when_install_move_fails(monkeyp
         "source": "/workspace/demo.docx.onlyoffice-fixed.backup.docx",
         "destination": "/workspace/demo.docx",
     }
+
+
+@pytest.mark.asyncio
+async def test_terminal_callback_download_transport_exception_returns_502(monkeypatch):
+    class _TransportFailingSession:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+        def get(self, url, headers=None):
+            raise aiohttp.ClientConnectionError("download transport down")
+
+    monkeypatch.setattr(onlyoffice_mod.aiohttp, "ClientSession", _TransportFailingSession)
+
+    with pytest.raises(HTTPException) as exc_info:
+        await onlyoffice_mod.handle_onlyoffice_terminal_callback(
+            onlyoffice_mod.OnlyOfficeCallbackForm(
+                status=2,
+                key="doc-key-1",
+                url="https://onlyoffice.example/cache/edited.docx",
+            ),
+            _fake_request(
+                terminal_connections=[_terminal_connection()],
+                callback_allowlist=["onlyoffice.example"],
+                query_params={"context_token": _make_context_token()},
+            ),
+        )
+
+    assert exc_info.value.status_code == 502
+
+
+@pytest.mark.asyncio
+async def test_terminal_callback_saveback_transport_exception_returns_502(monkeypatch):
+    async def _fake_download(*args, **kwargs):
+        return b"edited-document-binary", "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+
+    async def _failing_saveback(*args, **kwargs):
+        raise aiohttp.ClientConnectionError("terminal transport down")
+
+    monkeypatch.setattr(onlyoffice_mod, "_download_onlyoffice_callback_blob", _fake_download)
+    monkeypatch.setattr(onlyoffice_mod, "_replace_terminal_file_via_temp_upload", _failing_saveback)
+
+    with pytest.raises(HTTPException) as exc_info:
+        await onlyoffice_mod.handle_onlyoffice_terminal_callback(
+            onlyoffice_mod.OnlyOfficeCallbackForm(
+                status=2,
+                key="doc-key-1",
+                url="https://onlyoffice.example/cache/edited.docx",
+            ),
+            _fake_request(
+                terminal_connections=[_terminal_connection()],
+                callback_allowlist=["onlyoffice.example"],
+                query_params={"context_token": _make_context_token()},
+            ),
+        )
+
+    assert exc_info.value.status_code == 502
