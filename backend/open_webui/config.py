@@ -1,6 +1,7 @@
 import json
 import logging
 import os
+import re
 import shutil
 import socket
 import base64
@@ -1134,6 +1135,52 @@ TERMINAL_SERVER_CONNECTIONS = PersistentConfig(
     'TERMINAL_SERVER_CONNECTIONS',
     'terminal_server.connections',
     terminal_server_connections,
+)
+
+####################################
+# ONLYOFFICE
+####################################
+
+ENABLE_ONLYOFFICE_PREVIEW = PersistentConfig(
+    'ENABLE_ONLYOFFICE_PREVIEW',
+    'onlyoffice.enable_preview',
+    os.environ.get('ENABLE_ONLYOFFICE_PREVIEW', 'False').lower() == 'true',
+)
+
+ONLYOFFICE_DOCUMENT_SERVER_URL = PersistentConfig(
+    'ONLYOFFICE_DOCUMENT_SERVER_URL',
+    'onlyoffice.document_server_url',
+    os.environ.get('ONLYOFFICE_DOCUMENT_SERVER_URL', '').strip().rstrip('/'),
+)
+
+ONLYOFFICE_PUBLIC_BASE_URL = PersistentConfig(
+    'ONLYOFFICE_PUBLIC_BASE_URL',
+    'onlyoffice.public_base_url',
+    os.environ.get('ONLYOFFICE_PUBLIC_BASE_URL', '').strip().rstrip('/'),
+)
+
+ONLYOFFICE_JWT_SECRET = PersistentConfig(
+    'ONLYOFFICE_JWT_SECRET',
+    'onlyoffice.jwt_secret',
+    os.environ.get('ONLYOFFICE_JWT_SECRET', '').strip(),
+)
+
+ONLYOFFICE_FILE_TOKEN_EXPIRES_IN = PersistentConfig(
+    'ONLYOFFICE_FILE_TOKEN_EXPIRES_IN',
+    'onlyoffice.file_token_expires_in',
+    os.environ.get('ONLYOFFICE_FILE_TOKEN_EXPIRES_IN', '10m').strip(),
+)
+
+onlyoffice_callback_allowed_hosts = [
+    host.strip()
+    for host in re.split(r'[;,]', os.environ.get('ONLYOFFICE_CALLBACK_ALLOWED_HOSTS', ''))
+    if host.strip()
+]
+
+ONLYOFFICE_CALLBACK_ALLOWED_HOSTS = PersistentConfig(
+    'ONLYOFFICE_CALLBACK_ALLOWED_HOSTS',
+    'onlyoffice.callback_allowed_hosts',
+    onlyoffice_callback_allowed_hosts,
 )
 
 ####################################
@@ -2271,6 +2318,15 @@ LAYER_GENERATION_MIN_TAIL_TOKENS = PersistentConfig(
     "LAYER_GENERATION_MIN_TAIL_TOKENS",
     "layered_knowledge.internal.min_tail_tokens",
     int(os.environ.get("LAYER_GENERATION_MIN_TAIL_TOKENS", "1000")),
+)
+
+NATIVE_ATTACHED_KNOWLEDGE_BYPASS_LEGACY_FILE_RETRIEVAL = PersistentConfig(
+    "NATIVE_ATTACHED_KNOWLEDGE_BYPASS_LEGACY_FILE_RETRIEVAL",
+    "layered_knowledge.native_attached_knowledge_bypass_legacy_file_retrieval",
+    os.environ.get(
+        "NATIVE_ATTACHED_KNOWLEDGE_BYPASS_LEGACY_FILE_RETRIEVAL", "False"
+    ).lower()
+    == "true",
 )
 
 OPEN_NOTEBOOK_BASE_URL = PersistentConfig(

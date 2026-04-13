@@ -246,6 +246,123 @@ def output_id(prefix: str) -> str:
     return f"{prefix}_{uuid4().hex[:24]}"
 
 
+KNOWLEDGE_ATTACHMENT_SOURCE = "knowledge_attachment"
+KNOWLEDGE_ATTACHMENT_TYPES = {"collection", "file", "note"}
+
+
+def has_native_builtin_knowledge_tools(model: Optional[dict]) -> bool:
+    meta = (model or {}).get("info", {}).get("meta", {}) or {}
+    capabilities = meta.get("capabilities", {}) or {}
+    if not capabilities.get("builtin_tools", True):
+        return False
+
+    builtin_tools = meta.get("builtinTools", {}) or {}
+    return builtin_tools.get("knowledge", True) is not False
+
+
+def is_scoped_knowledge_attachment(item: Any) -> bool:
+    if not isinstance(item, dict):
+        return False
+
+    item_type = str(item.get("type") or "file").lower()
+    if item_type not in KNOWLEDGE_ATTACHMENT_TYPES:
+        return False
+
+    if item_type in {"collection", "note"}:
+        return True
+
+    source = str(item.get("source") or "").lower()
+    return source == KNOWLEDGE_ATTACHMENT_SOURCE or any(
+        key in item for key in ("collection", "collection_name", "collection_names", "legacy")
+    )
+
+
+def split_files_for_native_scoped_knowledge_bypass(
+    metadata: Optional[dict],
+) -> tuple[list[Any], list[Any]]:
+    files = (metadata or {}).get("files")
+    if not isinstance(files, list):
+        return [], []
+
+    regular_files: list[Any] = []
+    scoped_knowledge_files: list[Any] = []
+    for item in files:
+        if is_scoped_knowledge_attachment(item):
+            scoped_knowledge_files.append(item)
+        else:
+            regular_files.append(item)
+
+    return regular_files, scoped_knowledge_files
+
+
+def should_skip_legacy_file_retrieval_for_native_scoped_knowledge(
+    config: Any, metadata: Optional[dict], model: Optional[dict]
+) -> bool:
+    metadata = metadata or {}
+    return bool(
+        getattr(
+            config,
+            "NATIVE_ATTACHED_KNOWLEDGE_BYPASS_LEGACY_FILE_RETRIEVAL",
+            False,
+        )
+        and metadata.get("params", {}).get("function_calling") == "native"
+        and metadata.get("effective_knowledge_query_enabled")
+        and metadata.get("effective_knowledge_scope")
+        and has_native_builtin_knowledge_tools(model)
+    )
+
+
+async def apply_legacy_file_retrieval_if_needed(
+    request: Request,
+    form_data: dict,
+    extra_params: dict,
+    user: UserModel,
+    model: dict,
+    metadata: Optional[dict],
+) -> tuple[dict, list[dict]]:
+    file_context_enabled = (
+        model.get("info", {}).get("meta", {}).get("capabilities") or {}
+    ).get("file_context", True)
+
+    if not file_context_enabled:
+        return form_data, []
+
+    metadata = metadata or form_data.get("metadata") or {}
+    skip_legacy_retrieval = (
+        should_skip_legacy_file_retrieval_for_native_scoped_knowledge(
+            request.app.state.config, metadata, model
+        )
+    )
+    retrieval_form_data = form_data
+
+    if skip_legacy_retrieval:
+        regular_files, _ = split_files_for_native_scoped_knowledge_bypass(metadata)
+        # Bypass only scoped knowledge attachments. If regular files exist in
+        # the same chat, keep legacy retrieval for those regular files.
+        if not regular_files:
+            return form_data, []
+
+        retrieval_form_data = copy.deepcopy(form_data)
+        retrieval_metadata = dict(retrieval_form_data.get("metadata") or metadata)
+        retrieval_metadata["files"] = regular_files
+        retrieval_form_data["metadata"] = retrieval_metadata
+
+    try:
+        updated_form_data, flags = await chat_completion_files_handler(
+            request, retrieval_form_data, extra_params, user
+        )
+        if skip_legacy_retrieval:
+            form_data["messages"] = updated_form_data.get(
+                "messages", form_data.get("messages", [])
+            )
+            return form_data, flags.get("sources", [])
+
+        return updated_form_data, flags.get("sources", [])
+    except Exception as e:
+        log.exception(e)
+        return form_data, []
+
+
 def _split_tool_calls(
     tool_calls: list[dict],
 ) -> list[dict]:
@@ -3990,19 +4107,15 @@ async def process_chat_payload(request, form_data, user, metadata, model):
                 except Exception as e:
                     log.exception(e)
 
-    # Check if file context extraction is enabled for this model (default True)
-    file_context_enabled = (
-        model.get("info", {}).get("meta", {}).get("capabilities") or {}
-    ).get("file_context", True)
-
-    if file_context_enabled:
-        try:
-            form_data, flags = await chat_completion_files_handler(
-                request, form_data, extra_params, user
-            )
-            sources.extend(flags.get("sources", []))
-        except Exception as e:
-            log.exception(e)
+    form_data, file_sources = await apply_legacy_file_retrieval_if_needed(
+        request=request,
+        form_data=form_data,
+        extra_params=extra_params,
+        user=user,
+        model=model,
+        metadata=metadata,
+    )
+    sources.extend(file_sources)
 
     # Save the pre-RAG message state so the native tool call loop can
     # restore to the true original (before file-source injection) rather

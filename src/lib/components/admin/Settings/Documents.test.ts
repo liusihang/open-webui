@@ -37,4 +37,16 @@ describe('Documents settings source', () => {
 		expect(source).toContain('LAYER_GENERATION_MIN_TAIL_TOKENS');
 		expect(source).toContain('LAYER_GENERATION_PROMPT_ABSTRACT');
 	});
+
+	it('exposes the native attached knowledge bypass toggle in documents settings', () => {
+		const filePath = resolve(
+			process.cwd(),
+			'src/lib/components/admin/Settings/Documents.svelte'
+		);
+		const source = readFileSync(filePath, 'utf-8');
+
+		expect(source).toContain('NATIVE_ATTACHED_KNOWLEDGE_BYPASS_LEGACY_FILE_RETRIEVAL');
+		expect(source).toContain('Native Attached Knowledge');
+		expect(source).toContain('Bypass legacy file retrieval in native mode');
+	});
 });

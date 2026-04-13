@@ -97,6 +97,7 @@ from open_webui.routers import (
     utils,
     scim,
     terminals,
+    onlyoffice,
 )
 
 from open_webui.routers.retrieval import (
@@ -135,6 +136,13 @@ from open_webui.config import (
     TOOL_SERVER_CONNECTIONS,
     # Terminal Server
     TERMINAL_SERVER_CONNECTIONS,
+    # OnlyOffice
+    ENABLE_ONLYOFFICE_PREVIEW,
+    ONLYOFFICE_DOCUMENT_SERVER_URL,
+    ONLYOFFICE_PUBLIC_BASE_URL,
+    ONLYOFFICE_JWT_SECRET,
+    ONLYOFFICE_FILE_TOKEN_EXPIRES_IN,
+    ONLYOFFICE_CALLBACK_ALLOWED_HOSTS,
     # Code Execution
     ENABLE_CODE_EXECUTION,
     CODE_EXECUTION_ENGINE,
@@ -303,6 +311,7 @@ from open_webui.config import (
     CHAT_CONTEXT_BUDGET_ENABLED,
     FILE_IMAGE_COMPRESSION_WIDTH,
     FILE_IMAGE_COMPRESSION_HEIGHT,
+    NATIVE_ATTACHED_KNOWLEDGE_BYPASS_LEGACY_FILE_RETRIEVAL,
     RAG_OPENAI_API_BASE_URL,
     RAG_OPENAI_API_KEY,
     RAG_AZURE_OPENAI_BASE_URL,
@@ -889,6 +898,19 @@ app.state.TERMINAL_SERVERS = []
 
 ########################################
 #
+# ONLYOFFICE
+#
+########################################
+
+app.state.config.ENABLE_ONLYOFFICE_PREVIEW = ENABLE_ONLYOFFICE_PREVIEW
+app.state.config.ONLYOFFICE_DOCUMENT_SERVER_URL = ONLYOFFICE_DOCUMENT_SERVER_URL
+app.state.config.ONLYOFFICE_PUBLIC_BASE_URL = ONLYOFFICE_PUBLIC_BASE_URL
+app.state.config.ONLYOFFICE_JWT_SECRET = ONLYOFFICE_JWT_SECRET
+app.state.config.ONLYOFFICE_FILE_TOKEN_EXPIRES_IN = ONLYOFFICE_FILE_TOKEN_EXPIRES_IN
+app.state.config.ONLYOFFICE_CALLBACK_ALLOWED_HOSTS = ONLYOFFICE_CALLBACK_ALLOWED_HOSTS
+
+########################################
+#
 # DIRECT CONNECTIONS
 #
 ########################################
@@ -1068,6 +1090,9 @@ app.state.config.RAG_FULL_CONTEXT = RAG_FULL_CONTEXT
 app.state.config.BYPASS_EMBEDDING_AND_RETRIEVAL = BYPASS_EMBEDDING_AND_RETRIEVAL
 app.state.config.ENABLE_RAG_HYBRID_SEARCH = ENABLE_RAG_HYBRID_SEARCH
 app.state.config.ENABLE_RAG_HYBRID_SEARCH_ENRICHED_TEXTS = ENABLE_RAG_HYBRID_SEARCH_ENRICHED_TEXTS
+app.state.config.NATIVE_ATTACHED_KNOWLEDGE_BYPASS_LEGACY_FILE_RETRIEVAL = (
+    NATIVE_ATTACHED_KNOWLEDGE_BYPASS_LEGACY_FILE_RETRIEVAL
+)
 app.state.config.ENABLE_WEB_LOADER_SSL_VERIFICATION = ENABLE_WEB_LOADER_SSL_VERIFICATION
 
 app.state.config.CONTENT_EXTRACTION_ENGINE = CONTENT_EXTRACTION_ENGINE
@@ -1694,6 +1719,7 @@ app.include_router(memories.router, prefix='/api/v1/memories', tags=['memories']
 app.include_router(folders.router, prefix='/api/v1/folders', tags=['folders'])
 app.include_router(groups.router, prefix='/api/v1/groups', tags=['groups'])
 app.include_router(files.router, prefix='/api/v1/files', tags=['files'])
+app.include_router(onlyoffice.router, prefix='/api/v1/onlyoffice', tags=['onlyoffice'])
 app.include_router(functions.router, prefix='/api/v1/functions', tags=['functions'])
 app.include_router(evaluations.router, prefix='/api/v1/evaluations', tags=['evaluations'])
 if ENABLE_ADMIN_ANALYTICS:
