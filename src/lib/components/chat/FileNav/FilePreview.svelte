@@ -120,6 +120,9 @@
 	$: isSvg = getExt(selectedFile) === 'svg';
 	$: isNotebook = getExt(selectedFile) === 'ipynb';
 	$: isCode = isCodeFile(selectedFile);
+	$: isTerminalOnlyOfficeSource = Boolean(
+		onlyOfficeTerminalServerId && onlyOfficeTerminalFilePath
+	);
 	$: canUseOnlyOffice =
 		isOfficeFile &&
 		!onlyOfficeFailed &&
@@ -350,7 +353,7 @@
 					fileId={onlyOfficeFileId ?? ''}
 					terminalServerId={onlyOfficeTerminalServerId ?? ''}
 					terminalFilePath={onlyOfficeTerminalFilePath ?? ''}
-					readOnly={true}
+					readOnly={!isTerminalOnlyOfficeSource}
 					className="w-full h-full"
 					on:error={(event) => {
 						onlyOfficeFailed = true;
