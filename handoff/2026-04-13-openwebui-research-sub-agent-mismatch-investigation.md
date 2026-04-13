@@ -159,3 +159,112 @@
 
 ## Pending
 - 若继续修复，优先最小改动：在 subagent system prompt/后处理增加“证据-结论一致性检查”，对“NOT EXISTS/不存在”结论增加硬性门槛（至少 1 条权威来源显式否定，且无正向命中证据）。
+
+16. Checkpoint: 回答“单独问不出错，但 subagent 会错”的机制差异
+- Action: 对比“单次直问模型（固定证据）”与“subagent 多轮工具调用”两种执行形态。
+- Why single-shot usually correct:
+  1) 输入更短、更干净，证据冲突少；
+  2) 没有多轮工具输出噪声与长网页碎片干扰；
+  3) 不受迭代结束策略（MAX_ITERATIONS）和“尽快收敛”提示影响。
+- Why subagent can fail:
+  1) `search_web` 返回的大段噪声文本会稀释关键证据；
+  2) 同轮可能混入质量不一来源，模型做了“拼写纠正”启发式（把 Resentoviricetes 误判成 Renoviricetes）；
+  3) 多轮+限步会放大“过早定性”风险；
+  4) 当前工具缺少“证据-结论一致性校验”硬约束。
+- Result:
+  - 这是典型的“多步代理编排误差”而非“基座模型单问能力不足”。
+
+17. Checkpoint: 明确子代理“回答前看到的原始内容”
+- Action: 从 live chat `928158e8` 的 assistant 消息 `c2f2fa34...` 中提取 `function_call` 入参 + `statusHistory`，并对照 live 工具源码的消息组装逻辑。
+- Raw inputs（按 run_sub_agent_loop 真实结构）:
+  1) system: `RESEARCH_SYSTEM_PROMPT`（工具 UserValves 默认研究提示词）
+  2) user: `run_research_sub_agent.prompt`（主模型传给子代理的任务提示）
+  3) 每轮额外 system: `[Iteration i/N] ...`（含“最后一轮请直接给结论”）
+  4) 若调用工具：追加
+     - assistant(tool_calls + content)
+     - tool(content=result原文)
+- This run 的具体值（第一轮子代理）:
+  - description: `核实病毒分类名Resentoviricetes是否为真实且当前有效的分类单元`
+  - prompt: `请检索可靠来源，核实“Resentoviricetes”是否为真实存在的病毒分类单元...`
+  - Step1 tool args: `{"query":"\"Resentoviricetes\" ICTV NCBI"}`
+  - Step1 tool result 原文片段含：`Taxonomy browser (Resentoviricetes)`、`Lineage ... * Resentoviricetes ...`
+- Result:
+  - 子代理回答前看到的并不是“只有用户一句话”，而是“系统提示词 + 用户任务 + 迭代提示 + 已执行工具原文结果”。
+
+18. Checkpoint: 量化“子代理最终判断前看到的 token 规模”
+- Action:
+  - 从消息 `c2f2fa34...` 提取第一次子代理（Resentoviricetes）的 3 次 `Step Result` 原文与 `prompt`。
+  - 按 `run_sub_agent_loop` 的真实 final-call 结构重建 messages（system + user + 3轮 assistant/tool + final user instruction）。
+  - 用项目 `.venv` 的 `tiktoken(cl100k_base)` 估算 token。
+- Estimated tokens (cl100k_base):
+  - Step1 tool result: `24021`
+  - Step2 tool result: `12461`
+  - Step3 tool result: `2555`
+  - Tool result合计: `39037`
+  - 最终判断请求（重建 payload JSON）总计: `41187`
+  - 同一消息仅 content 串联估算: `39746`
+- Note:
+  - 这是基于 cl100k 的近似值；实际模型（Gemini 路由）侧 tokenizer 可能有偏差（通常几个百分点到十几个百分点）。
+
+19. Checkpoint: 真实测量“最终判断前 token”而非 tiktoken 估算
+- Goal: 用线上同模型真实返回的 `usage.prompt_tokens` 验证“是否因为上下文过长导致幻觉”。
+- Action:
+  - 读取 live chat `928158e8` 中消息 `67af5bf4...`（即出现冲突结论的那轮）。
+  - 从 `statusHistory` 提取 Step1/2/3 的 `Tool calls/Args/Result`，按 `run_sub_agent_loop` 结构重建 replay payload：
+    - `system(RESEARCH_SYSTEM_PROMPT)`
+    - `user(prompt)`
+    - 3 组 `assistant(tool_calls)` + `tool(result)`
+    - 末尾 `user("Maximum tool iterations reached...")`
+  - 直接调用线上 `/api/chat/completions`，模型 `googlegemini-31-flash-lite-preview-academicsubagent`。
+- Evidence:
+  - 重建 payload: `/tmp/subagent_67af_replay_payload.json`
+  - 线上响应: `/tmp/subagent_67af_replay_resp.json`
+  - 实测 `usage.prompt_tokens=1572`（input_tokens 同值）。
+- Result:
+  - 与先前“~4万 tokens”估算不一致；真实链路下该 replay 请求不是 4w 量级。
+
+20. Checkpoint: 对照实验（同文本，改成普通 user 文本）
+- Goal: 判断低 token 是否来自“文本本身短”，还是“tool/result 在链路中被特殊处理”。
+- Action:
+  - 把同样三段 Step Result 从 `tool` 角色改为普通 `user` 文本（其余保持一致）后再次请求同模型。
+- Evidence:
+  - payload: `/tmp/subagent_67af_replay_payload_userized.json`
+  - response: `/tmp/subagent_67af_replay_resp_userized.json`
+  - 实测 `usage.prompt_tokens=9945`。
+- Result:
+  - 同内容在普通文本路径下 token 明显更高；说明 `tool/function_call_output` 路径存在显著压缩/截断/忽略差异。
+
+21. Checkpoint: function_call_output 长度阈值探测（真实线上）
+- Goal: 验证是否存在 `tool` 输出长度阈值，超过后内容不再有效进入模型上下文。
+- Action:
+  - 构造固定模板请求，仅改变 `role=tool` 的 `content` 长度，逐点测 `usage.prompt_tokens`。
+- Evidence:
+  - 随机词文本测试：
+    - 1000 chars -> `prompt_tokens=1053`
+    - 1199 chars -> `prompt_tokens=1090`
+    - 1200 chars -> `prompt_tokens=835`
+    - 1201 chars -> `prompt_tokens=835`
+  - 复测文件：`/tmp/_tool_threshold.json`, `/tmp/_tool_threshold2.json`, `/tmp/_tool_threshold3.json`
+- Result:
+  - 实测出现接近“硬阈值”行为：`tool content >= 1200 chars` 时 token 贡献骤降到近基线。
+  - 这更像链路侧对 `function_call_output` 的截断/替换，而不是模型自然 tokenizer 结果。
+
+22. Checkpoint: 对“是否因上下文太多导致幻觉”的结论更新
+- Conclusion:
+  1) 从真实 `usage.prompt_tokens` 看，这轮并非 4w token 级别上下文拥塞。
+  2) 更可疑的是 `tool/function_call_output` 在链路中的长度阈值/压缩策略（约 1200 chars）导致证据未完整进入最终判断。
+  3) 因此你的“上下文太多”怀疑需要改写为：
+     - 不是“完整上下文过大”，而是“工具结果进入模型时被截断或压缩失真”，进而诱发错判。
+
+## New Artifacts (2026-04-13 Real Token Tests)
+- `/tmp/subagent_67af_replay_payload.json`
+- `/tmp/subagent_67af_replay_resp.json`
+- `/tmp/subagent_67af_replay_payload_userized.json`
+- `/tmp/subagent_67af_replay_resp_userized.json`
+- `/tmp/subagent_tool_single_payload.json`
+- `/tmp/subagent_tool_single_resp.json`
+- `/tmp/subagent_tool_single_baseline.json`
+- `/tmp/subagent_tool_single_baseline_resp.json`
+- `/tmp/_tool_threshold.json`
+- `/tmp/_tool_threshold2.json`
+- `/tmp/_tool_threshold3.json`
