@@ -13,6 +13,7 @@ def _fake_request(
     terminal_connections=None,
     callback_allowlist=None,
     query_params=None,
+    callback_ttl=None,
 ):
     config = SimpleNamespace(
         ENABLE_ONLYOFFICE_PREVIEW=True,
@@ -21,6 +22,7 @@ def _fake_request(
         ONLYOFFICE_PUBLIC_BASE_URL="https://webui.example",
         WEBUI_URL="",
         ONLYOFFICE_JWT_SECRET="",
+        ONLYOFFICE_EDIT_CALLBACK_TOKEN_EXPIRES_IN=callback_ttl,
         ONLYOFFICE_CALLBACK_ALLOWED_HOSTS=callback_allowlist or [],
         TERMINAL_SERVER_CONNECTIONS=terminal_connections or [],
     )
@@ -39,6 +41,12 @@ def _fake_user():
 def _extract_context_token(callback_url: str):
     query = parse_qs(urlparse(callback_url).query)
     values = query.get("context_token", [])
+    return values[0] if values else None
+
+
+def _extract_query_token(url: str, name: str):
+    query = parse_qs(urlparse(url).query)
+    values = query.get(name, [])
     return values[0] if values else None
 
 
@@ -132,6 +140,44 @@ async def test_terminal_edit_session_embeds_callback_context(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_terminal_edit_session_uses_separate_callback_ttl(monkeypatch):
+    monkeypatch.setattr(
+        onlyoffice_mod,
+        "_get_terminal_connection",
+        lambda request, terminal_server_id, user: _terminal_connection(),
+    )
+
+    response = await onlyoffice_mod.create_onlyoffice_session(
+        onlyoffice_mod.OnlyOfficeSessionForm(
+            source_type="terminal",
+            terminal_server_id="terminals",
+            terminal_file_path="/workspace/demo.docx",
+            mode="edit",
+        ),
+        _fake_request(callback_ttl="2h"),
+        user=_fake_user(),
+        db=None,
+    )
+
+    file_token = _extract_query_token(response["config"]["document"]["url"], "token")
+    context_token = _extract_context_token(response["config"]["editorConfig"]["callbackUrl"])
+    assert file_token and context_token
+
+    decoded_file_token = onlyoffice_mod.decode_token(file_token)
+    decoded_context_token = onlyoffice_mod.decode_token(context_token)
+    assert decoded_file_token is not None and decoded_context_token is not None
+
+    assert decoded_context_token["exp"] > decoded_file_token["exp"] + 60 * 30
+    callback_proxy_token = decoded_context_token.get("session_proxy_token")
+    preview_proxy_token = decoded_file_token.get("session_proxy_token")
+    assert isinstance(callback_proxy_token, str) and isinstance(preview_proxy_token, str)
+    decoded_callback_proxy = onlyoffice_mod.decode_token(callback_proxy_token)
+    decoded_preview_proxy = onlyoffice_mod.decode_token(preview_proxy_token)
+    assert decoded_callback_proxy is not None and decoded_preview_proxy is not None
+    assert decoded_callback_proxy["exp"] > decoded_preview_proxy["exp"] + 60 * 30
+
+
+@pytest.mark.asyncio
 async def test_create_onlyoffice_file_edit_session_is_rejected():
     with pytest.raises(HTTPException) as exc_info:
         await onlyoffice_mod.create_onlyoffice_session(
@@ -206,18 +252,18 @@ async def test_terminal_callback_save_downloads_and_writes_back_via_terminal_api
         def post(self, url, headers=None, data=None, json=None):
             call_log.append(("post", url, headers, {"data": data, "json": json}))
             if "/files/upload?" in url:
-                return _FakeResponse(status=200, json_body={"path": "/workspace/demo.docx.onlyoffice-fixed.tmp.docx"})
+                return _FakeResponse(status=200, json_body={"path": "/workspace/.upload-random-name.docx"})
             if url.endswith("/files/move"):
-                assert json == {
-                    "source": "/workspace/demo.docx.onlyoffice-fixed.tmp.docx",
-                    "destination": "/workspace/demo.docx",
-                }
+                if json == {"source": "/workspace/demo.docx", "destination": "/workspace/demo.docx.onlyoffice-fixed.backup.docx"}:
+                    return _FakeResponse(status=200, json_body={"ok": True})
+                if json == {"source": "/workspace/.upload-random-name.docx", "destination": "/workspace/demo.docx"}:
+                    return _FakeResponse(status=200, json_body={"ok": True})
                 return _FakeResponse(status=200, json_body={"ok": True})
             raise AssertionError(f"Unexpected POST URL: {url}")
 
         def delete(self, url, headers=None):
             call_log.append(("delete", url, headers, None))
-            assert "path=%2Fworkspace%2Fdemo.docx" in url
+            assert "path=%2Fworkspace%2Fdemo.docx.onlyoffice-fixed.backup.docx" in url
             return _FakeResponse(status=200, json_body={"ok": True})
 
     monkeypatch.setattr(onlyoffice_mod.aiohttp, "ClientSession", _FakeClientSession)
@@ -254,9 +300,100 @@ async def test_terminal_callback_save_downloads_and_writes_back_via_terminal_api
     )
 
     assert result == {"error": 0}
-    assert len(call_log) == 4
+    assert len(call_log) == 5
     assert call_log[0][0] == "get"
     assert "/files/upload?directory=%2Fworkspace" in call_log[1][1]
-    assert call_log[2][0] == "delete"
+    assert call_log[2][0] == "post"
+    assert call_log[2][1].endswith("/files/move")
+    assert call_log[2][3]["json"] == {
+        "source": "/workspace/demo.docx",
+        "destination": "/workspace/demo.docx.onlyoffice-fixed.backup.docx",
+    }
     assert call_log[3][0] == "post"
     assert call_log[3][1].endswith("/files/move")
+    assert call_log[3][3]["json"] == {
+        "source": "/workspace/.upload-random-name.docx",
+        "destination": "/workspace/demo.docx",
+    }
+    assert call_log[4][0] == "delete"
+    assert "path=%2Fworkspace%2Fdemo.docx.onlyoffice-fixed.backup.docx" in call_log[4][1]
+
+
+@pytest.mark.asyncio
+async def test_terminal_callback_restores_backup_when_install_move_fails(monkeypatch):
+    call_log = []
+
+    class _FakeClientSession:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+        def get(self, url, headers=None):
+            call_log.append(("get", url, headers, None))
+            return _FakeResponse(
+                status=200,
+                body=b"edited-document-binary",
+                headers={"Content-Type": "application/vnd.openxmlformats-officedocument.wordprocessingml.document"},
+            )
+
+        def post(self, url, headers=None, data=None, json=None):
+            call_log.append(("post", url, headers, {"data": data, "json": json}))
+            if "/files/upload?" in url:
+                return _FakeResponse(status=200, json_body={"path": "/workspace/uploaded-temp.docx"})
+            if url.endswith("/files/move"):
+                if json == {"source": "/workspace/demo.docx", "destination": "/workspace/demo.docx.onlyoffice-fixed.backup.docx"}:
+                    return _FakeResponse(status=200, json_body={"ok": True})
+                if json == {"source": "/workspace/uploaded-temp.docx", "destination": "/workspace/demo.docx"}:
+                    return _FakeResponse(status=500, body=b"move failed")
+                if json == {"source": "/workspace/demo.docx.onlyoffice-fixed.backup.docx", "destination": "/workspace/demo.docx"}:
+                    return _FakeResponse(status=200, json_body={"ok": True})
+            raise AssertionError(f"Unexpected POST URL: {url} with json={json}")
+
+        def delete(self, url, headers=None):
+            call_log.append(("delete", url, headers, None))
+            if "path=%2Fworkspace%2Fuploaded-temp.docx" in url:
+                return _FakeResponse(status=200, json_body={"ok": True})
+            raise AssertionError(f"Unexpected DELETE URL: {url}")
+
+    monkeypatch.setattr(onlyoffice_mod.aiohttp, "ClientSession", _FakeClientSession)
+    monkeypatch.setattr(onlyoffice_mod, "uuid4", lambda: SimpleNamespace(hex="fixed"))
+
+    context_token = onlyoffice_mod.create_token(
+        {
+            "scope": "onlyoffice:terminal_callback",
+            "terminal_server_id": "terminals",
+            "terminal_file_path": "/workspace/demo.docx",
+            "user_id": "user-1",
+            "session_signal": "sig-1",
+            "document_key": "doc-key-1",
+            "session_proxy_token": "session-proxy",
+        },
+        expires_delta=timedelta(hours=2),
+    )
+
+    with pytest.raises(HTTPException) as exc_info:
+        await onlyoffice_mod.handle_onlyoffice_terminal_callback(
+            onlyoffice_mod.OnlyOfficeCallbackForm(
+                status=2,
+                key="doc-key-1",
+                url="https://onlyoffice.example/cache/edited.docx",
+            ),
+            _fake_request(
+                terminal_connections=[_terminal_connection()],
+                callback_allowlist=["onlyoffice.example"],
+                query_params={"context_token": context_token},
+            ),
+        )
+
+    assert exc_info.value.status_code == 502
+    move_calls = [entry for entry in call_log if entry[0] == "post" and entry[1].endswith("/files/move")]
+    assert len(move_calls) == 3
+    assert move_calls[2][3]["json"] == {
+        "source": "/workspace/demo.docx.onlyoffice-fixed.backup.docx",
+        "destination": "/workspace/demo.docx",
+    }

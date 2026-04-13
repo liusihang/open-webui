@@ -39,6 +39,7 @@ SUPPORTED_OFFICE_FILE_TYPES = {
     "pptx": "slide",
 }
 ONLYOFFICE_SAVE_STATUSES = {2, 6}
+DEFAULT_ONLYOFFICE_EDIT_CALLBACK_TOKEN_EXPIRES_IN = "8h"
 
 
 class OnlyOfficeSessionForm(BaseModel):
@@ -147,6 +148,38 @@ def _parse_file_token_ttl(request: Request) -> Optional[timedelta]:
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail="ONLYOFFICE_FILE_TOKEN_EXPIRES_IN must be a finite duration.",
+        )
+
+    return ttl
+
+
+def _parse_edit_callback_token_ttl(request: Request, file_token_ttl: timedelta) -> timedelta:
+    raw = (
+        getattr(request.app.state.config, "ONLYOFFICE_EDIT_CALLBACK_TOKEN_EXPIRES_IN", None)
+        or ""
+    ).strip()
+
+    if not raw:
+        default_ttl = parse_duration(DEFAULT_ONLYOFFICE_EDIT_CALLBACK_TOKEN_EXPIRES_IN)
+        if default_ttl is None:
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail="ONLYOFFICE_EDIT_CALLBACK_TOKEN_EXPIRES_IN must be a finite duration.",
+            )
+        return max(default_ttl, file_token_ttl)
+
+    try:
+        ttl = parse_duration(raw)
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Invalid ONLYOFFICE_EDIT_CALLBACK_TOKEN_EXPIRES_IN value: {raw}",
+        ) from exc
+
+    if ttl is None:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="ONLYOFFICE_EDIT_CALLBACK_TOKEN_EXPIRES_IN must be a finite duration.",
         )
 
     return ttl
@@ -293,6 +326,16 @@ async def _read_upstream_error_message(upstream) -> str:
         return ""
 
 
+async def _read_upstream_json(upstream) -> dict[str, Any]:
+    try:
+        payload = await upstream.json()
+        if isinstance(payload, dict):
+            return payload
+    except Exception:
+        return {}
+    return {}
+
+
 async def _download_onlyoffice_callback_blob(callback_url: str) -> tuple[bytes, Optional[str]]:
     timeout = aiohttp.ClientTimeout(total=300, connect=10)
     async with aiohttp.ClientSession(timeout=timeout, trust_env=True) as session:
@@ -320,9 +363,10 @@ async def _replace_terminal_file_via_temp_upload(
     directory = posixpath.dirname(terminal_file_path) or "/"
     suffix = Path(terminal_file_path).suffix
     temp_path = f"{terminal_file_path}.onlyoffice-{uuid4().hex}.tmp{suffix}"
+    backup_path = f"{terminal_file_path}.onlyoffice-{uuid4().hex}.backup{suffix}"
     temp_filename = posixpath.basename(temp_path)
     upload_url = f"{target_base_url}/files/upload?{urlencode({'directory': directory})}"
-    delete_original_url = f"{target_base_url}/files/delete?{urlencode({'path': terminal_file_path})}"
+    delete_backup_url = f"{target_base_url}/files/delete?{urlencode({'path': backup_path})}"
     move_url = f"{target_base_url}/files/move"
 
     timeout = aiohttp.ClientTimeout(total=300, connect=10)
@@ -341,46 +385,100 @@ async def _replace_terminal_file_via_temp_upload(
                     status_code=status.HTTP_502_BAD_GATEWAY,
                     detail=f"Terminal upload failed: HTTP {upload_resp.status} {error_message}".strip(),
                 )
+            upload_json = await _read_upstream_json(upload_resp)
+            uploaded_path = upload_json.get("path")
+            if not isinstance(uploaded_path, str) or not uploaded_path:
+                uploaded_path = temp_path
 
-        async with session.delete(delete_original_url, headers=headers) as delete_resp:
-            if delete_resp.status >= 400:
-                error_message = await _read_upstream_error_message(delete_resp)
-                cleanup_url = f"{target_base_url}/files/delete?{urlencode({'path': temp_path})}"
+        async with session.post(
+            move_url,
+            headers=headers,
+            json={"source": terminal_file_path, "destination": backup_path},
+        ) as backup_move_resp:
+            if backup_move_resp.status >= 400:
+                error_message = await _read_upstream_error_message(backup_move_resp)
+                cleanup_url = f"{target_base_url}/files/delete?{urlencode({'path': uploaded_path})}"
                 try:
                     async with session.delete(cleanup_url, headers=headers):
                         pass
                 except Exception as cleanup_exc:
                     log.exception(
-                        "Failed to cleanup temporary terminal file after delete failure temp_path=%s error=%s",
-                        temp_path,
+                        "Failed to cleanup uploaded temp file after backup move failure temp_path=%s error=%s",
+                        uploaded_path,
                         cleanup_exc,
                     )
                 raise HTTPException(
                     status_code=status.HTTP_502_BAD_GATEWAY,
-                    detail=f"Terminal delete original failed: HTTP {delete_resp.status} {error_message}".strip(),
+                    detail=f"Terminal backup move failed: HTTP {backup_move_resp.status} {error_message}".strip(),
                 )
 
         async with session.post(
             move_url,
             headers=headers,
-            json={"source": temp_path, "destination": terminal_file_path},
+            json={"source": uploaded_path, "destination": terminal_file_path},
         ) as move_resp:
             if move_resp.status >= 400:
                 error_message = await _read_upstream_error_message(move_resp)
-                cleanup_url = f"{target_base_url}/files/delete?{urlencode({'path': temp_path})}"
+                restored = False
+                try:
+                    async with session.post(
+                        move_url,
+                        headers=headers,
+                        json={"source": backup_path, "destination": terminal_file_path},
+                    ) as restore_resp:
+                        restored = restore_resp.status < 400
+                        if not restored:
+                            restore_error = await _read_upstream_error_message(restore_resp)
+                            log.error(
+                                "Failed to restore backup after install move failure backup_path=%s original_path=%s status=%s error=%s",
+                                backup_path,
+                                terminal_file_path,
+                                restore_resp.status,
+                                restore_error,
+                            )
+                except Exception as restore_exc:
+                    log.exception(
+                        "Failed to restore backup after install move failure backup_path=%s original_path=%s error=%s",
+                        backup_path,
+                        terminal_file_path,
+                        restore_exc,
+                    )
+
+                cleanup_url = f"{target_base_url}/files/delete?{urlencode({'path': uploaded_path})}"
                 try:
                     async with session.delete(cleanup_url, headers=headers):
                         pass
                 except Exception as cleanup_exc:
                     log.exception(
-                        "Failed to cleanup temporary terminal file after move failure temp_path=%s error=%s",
-                        temp_path,
+                        "Failed to cleanup uploaded temp file after install move failure temp_path=%s error=%s",
+                        uploaded_path,
                         cleanup_exc,
                     )
+
                 raise HTTPException(
                     status_code=status.HTTP_502_BAD_GATEWAY,
-                    detail=f"Terminal move failed: HTTP {move_resp.status} {error_message}".strip(),
+                    detail=(
+                        f"Terminal install move failed: HTTP {move_resp.status} {error_message}; "
+                        f"backup_restore={'ok' if restored else 'failed'}"
+                    ).strip(),
                 )
+
+        try:
+            async with session.delete(delete_backup_url, headers=headers) as delete_backup_resp:
+                if delete_backup_resp.status >= 400:
+                    backup_delete_error = await _read_upstream_error_message(delete_backup_resp)
+                    log.warning(
+                        "Failed to cleanup terminal backup after successful install backup_path=%s status=%s error=%s",
+                        backup_path,
+                        delete_backup_resp.status,
+                        backup_delete_error,
+                    )
+        except Exception as delete_backup_exc:
+            log.exception(
+                "Failed to cleanup terminal backup after successful install backup_path=%s error=%s",
+                backup_path,
+                delete_backup_exc,
+            )
 
 
 @router.post("/session")
@@ -398,7 +496,7 @@ async def create_onlyoffice_session(
             detail="OnlyOffice edit mode is only enabled for terminal sources.",
         )
 
-    ttl = _parse_file_token_ttl(request)
+    file_token_ttl = _parse_file_token_ttl(request)
     public_base_url = _resolve_onlyoffice_public_base_url(request)
 
     document_title = ""
@@ -430,7 +528,7 @@ async def create_onlyoffice_session(
                 "user_id": user.id,
                 "mode": form_data.mode,
             },
-            expires_delta=ttl,
+            expires_delta=file_token_ttl,
         )
 
         document_title = _get_display_name(file)
@@ -458,14 +556,14 @@ async def create_onlyoffice_session(
             )
 
         terminal_session_signal = uuid4().hex
-        session_proxy_token = None
+        preview_session_proxy_token = None
         if connection.get("auth_type", "bearer") == "session":
-            session_proxy_token = create_token(
+            preview_session_proxy_token = create_token(
                 {
                     "id": user.id,
                     "role": user.role,
                 },
-                expires_delta=ttl,
+                expires_delta=file_token_ttl,
             )
 
         terminal_token_payload = {
@@ -476,12 +574,12 @@ async def create_onlyoffice_session(
             "mode": form_data.mode,
             "session_signal": terminal_session_signal,
         }
-        if session_proxy_token:
-            terminal_token_payload["session_proxy_token"] = session_proxy_token
+        if preview_session_proxy_token:
+            terminal_token_payload["session_proxy_token"] = preview_session_proxy_token
 
         terminal_token = create_token(
             terminal_token_payload,
-            expires_delta=ttl,
+            expires_delta=file_token_ttl,
         )
         file_name = Path(terminal_file_path).name or terminal_file_path
         document_title = file_name
@@ -497,6 +595,7 @@ async def create_onlyoffice_session(
         )
         callback_url = f"{public_base_url}/api/v1/onlyoffice/callback/terminal"
         if form_data.mode == "edit":
+            callback_token_ttl = _parse_edit_callback_token_ttl(request, file_token_ttl)
             callback_context_payload = {
                 "scope": "onlyoffice:terminal_callback",
                 "terminal_server_id": connection.get("id"),
@@ -505,12 +604,18 @@ async def create_onlyoffice_session(
                 "session_signal": terminal_session_signal,
                 "document_key": document_key,
             }
-            if session_proxy_token:
-                callback_context_payload["session_proxy_token"] = session_proxy_token
+            if connection.get("auth_type", "bearer") == "session":
+                callback_context_payload["session_proxy_token"] = create_token(
+                    {
+                        "id": user.id,
+                        "role": user.role,
+                    },
+                    expires_delta=callback_token_ttl,
+                )
 
             callback_context_token = create_token(
                 callback_context_payload,
-                expires_delta=ttl,
+                expires_delta=callback_token_ttl,
             )
             callback_url = f"{callback_url}?{urlencode({'context_token': callback_context_token})}"
 
