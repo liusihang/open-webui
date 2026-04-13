@@ -268,3 +268,55 @@
 - `/tmp/_tool_threshold.json`
 - `/tmp/_tool_threshold2.json`
 - `/tmp/_tool_threshold3.json`
+
+23. Checkpoint: 1200 字符阈值精细复测（最终探针）
+- Goal: 排除随机文本波动，确认是否存在稳定硬阈值。
+- Action:
+  - 使用固定词串构造 `tool` 内容，分别取长度 `1000/1199/1200/1201`，其余请求参数保持完全一致。
+- Evidence:
+  - 结果摘要：`/tmp/tool_threshold_summary.json`
+  - 实测：
+    - 1000 -> `prompt_tokens=1047`
+    - 1199 -> `prompt_tokens=1090`
+    - 1200 -> `prompt_tokens=835`
+    - 1201 -> `prompt_tokens=835`
+- Result:
+  - 阈值行为稳定复现，拐点位于约 `1200` 字符。
+
+24. Checkpoint: research_sub_agent_plus 最小热修上线（tool context 安全压缩）
+- Goal: 避免 `function_call_output` 在约 1200 chars 阈值处失真，确保关键证据能进入子代理最终判断。
+- Action:
+  - 回读 live 工具：`/api/v1/tools/id/research_sub_agent_plus`。
+  - 在 `run_sub_agent_loop` 增加 `compress_tool_result_for_model_context()`，并将追加到 `current_messages` 的 tool content 改为压缩结果（默认 `max_chars=1100`）。
+  - 更新接口发布：`POST /api/v1/tools/id/research_sub_agent_plus/update`。
+- Evidence:
+  - 预补丁源码：`/tmp/research_sub_agent_plus.content.prepatch.py`
+  - 发布请求：`/tmp/research_sub_agent_plus.update_payload.json`
+  - 发布回执：`/tmp/research_sub_agent_plus.update_resp.json`
+  - 发布后源码回读：`/tmp/research_sub_agent_plus.content.after_patch.py`
+  - 关键符号存在：`compress_tool_result_for_model_context`, `tool_content_for_context`
+- Result:
+  - 线上 `research_sub_agent_plus` 已生效，tool 上下文注入改为阈值安全模式。
+
+25. Checkpoint: 上线后真实 replay 验证
+- Goal: 验证热修后“证据被吞”问题是否缓解。
+- Action:
+  - 使用 `67af5bf4...` 的同一批 Step Result，按新压缩逻辑构造 replay payload 后请求同模型。
+- Evidence:
+  - 压缩 replay payload：`/tmp/subagent_67af_replay_payload_compressed.json`
+  - 压缩 replay 响应：`/tmp/subagent_67af_replay_resp_compressed.json`
+  - tool content 长度（3步）: `[1026, 1026, 1017]`
+  - 实测 `prompt_tokens=2465`（修复前同结构 replay 为 `1572`）
+- Result:
+  - 修复后 prompt token 明显上升且可解释，表明 tool 证据在最终判断前更完整地进入了模型上下文。
+
+## New Artifacts (2026-04-13 Hotfix)
+- `/tmp/research_sub_agent_plus.tool.live.json`
+- `/tmp/research_sub_agent_plus.content.prepatch.py`
+- `/tmp/research_sub_agent_plus.update_payload.json`
+- `/tmp/research_sub_agent_plus.update_resp.json`
+- `/tmp/research_sub_agent_plus.tool.after_patch.json`
+- `/tmp/research_sub_agent_plus.content.after_patch.py`
+- `/tmp/subagent_67af_replay_payload_compressed.json`
+- `/tmp/subagent_67af_replay_resp_compressed.json`
+- `/tmp/tool_threshold_summary.json`
