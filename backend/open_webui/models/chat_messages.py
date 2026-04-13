@@ -6,7 +6,7 @@ from typing import Any, Optional
 from sqlalchemy.orm import Session
 from open_webui.internal.db import Base, get_db_context
 
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, model_validator
 from sqlalchemy import (
     BigInteger,
     Boolean,
@@ -39,6 +39,47 @@ def _normalize_timestamp(timestamp: int) -> float:
         return now
 
     return timestamp
+
+
+ANCHOR_USAGE_KEY = "_openwebui_anchor_state"
+
+
+def _normalize_anchor_state(data: Any) -> dict:
+    """Normalize anchor metadata carried on assistant message payloads."""
+    if not isinstance(data, dict):
+        return {}
+
+    state = {}
+
+    provider_response_id = data.get("provider_response_id")
+    if isinstance(provider_response_id, str) and provider_response_id.strip():
+        state["provider_response_id"] = provider_response_id.strip()
+
+    provider_route = data.get("provider_route")
+    if isinstance(provider_route, str) and provider_route.strip():
+        state["provider_route"] = provider_route.strip()
+
+    if isinstance(data.get("anchor_valid"), bool):
+        state["anchor_valid"] = data["anchor_valid"]
+    elif "provider_response_id" in state:
+        state["anchor_valid"] = True
+
+    anchor_model_id = data.get("anchor_model_id")
+    if isinstance(anchor_model_id, str) and anchor_model_id.strip():
+        state["anchor_model_id"] = anchor_model_id.strip()
+
+    return state
+
+
+def _extract_anchor_state_from_usage(usage: Any) -> dict:
+    if not isinstance(usage, dict):
+        return {}
+
+    stored_state = usage.get(ANCHOR_USAGE_KEY)
+    if not isinstance(stored_state, dict):
+        return {}
+
+    return _normalize_anchor_state(stored_state)
 
 
 ####################
@@ -112,8 +153,25 @@ class ChatMessageModel(BaseModel):
     status_history: Optional[list] = None
     error: Optional[dict | str] = None
     usage: Optional[dict] = None
+    provider_response_id: Optional[str] = None
+    provider_route: Optional[str] = None
+    anchor_valid: Optional[bool] = None
+    anchor_model_id: Optional[str] = None
     created_at: int
     updated_at: int
+
+    @model_validator(mode="after")
+    def hydrate_anchor_fields(self):
+        anchor_state = _extract_anchor_state_from_usage(self.usage)
+        if self.provider_response_id is None:
+            self.provider_response_id = anchor_state.get("provider_response_id")
+        if self.provider_route is None:
+            self.provider_route = anchor_state.get("provider_route")
+        if self.anchor_valid is None:
+            self.anchor_valid = anchor_state.get("anchor_valid")
+        if self.anchor_model_id is None:
+            self.anchor_model_id = anchor_state.get("anchor_model_id")
+        return self
 
 
 ####################
@@ -168,6 +226,15 @@ class ChatMessageTable:
                 if not usage:
                     info = data.get('info', {})
                     usage = info.get('usage') if info else None
+                anchor_state = _normalize_anchor_state(data)
+                if anchor_state:
+                    usage_payload = {}
+                    if isinstance(existing.usage, dict):
+                        usage_payload.update(existing.usage)
+                    if isinstance(usage, dict):
+                        usage_payload.update(usage)
+                    usage_payload[ANCHOR_USAGE_KEY] = anchor_state
+                    usage = usage_payload
                 if usage:
                     existing.usage = usage
                 existing.updated_at = now
@@ -181,6 +248,11 @@ class ChatMessageTable:
                 if not usage:
                     info = data.get('info', {})
                     usage = info.get('usage') if info else None
+                anchor_state = _normalize_anchor_state(data)
+                if anchor_state:
+                    usage_payload = usage.copy() if isinstance(usage, dict) else {}
+                    usage_payload[ANCHOR_USAGE_KEY] = anchor_state
+                    usage = usage_payload
                 message = ChatMessage(
                     id=composite_id,
                     chat_id=chat_id,
