@@ -227,7 +227,10 @@ async def test_terminal_callback_ignores_non_save_status(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_terminal_callback_save_downloads_and_writes_back_via_terminal_api(monkeypatch):
+@pytest.mark.parametrize("save_status", [2, 6])
+async def test_terminal_callback_save_downloads_and_writes_back_via_terminal_api(
+    monkeypatch, save_status
+):
     call_log = []
 
     class _FakeClientSession:
@@ -288,7 +291,7 @@ async def test_terminal_callback_save_downloads_and_writes_back_via_terminal_api
 
     result = await onlyoffice_mod.handle_onlyoffice_terminal_callback(
         onlyoffice_mod.OnlyOfficeCallbackForm(
-            status=2,
+            status=save_status,
             key="doc-key-1",
             url="https://onlyoffice.example/cache/edited.docx",
         ),
