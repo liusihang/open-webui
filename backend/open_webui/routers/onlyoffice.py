@@ -709,7 +709,7 @@ async def create_onlyoffice_session(
         "editorConfig": {
             "mode": form_data.mode,
             "callbackUrl": callback_url,
-            "lang": "en",
+            "lang": "zh-CN",
             "customization": {
                 "anonymous": {"request": False},
                 "compactHeader": True,

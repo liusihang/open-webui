@@ -119,6 +119,7 @@ async def test_create_onlyoffice_terminal_edit_session_returns_editable_config(m
 
     assert response["config"]["document"]["permissions"]["edit"] is True
     assert response["config"]["editorConfig"]["mode"] == "edit"
+    assert response["config"]["editorConfig"]["lang"] == "zh-CN"
     assert response["config"]["type"] == "desktop"
     assert response["config"]["editorConfig"]["customization"]["forcesave"] is True
     callback_url = response["config"]["editorConfig"]["callbackUrl"]
@@ -147,6 +148,7 @@ async def test_create_onlyoffice_terminal_view_session_does_not_force_save(monke
 
     customization = response["config"]["editorConfig"]["customization"]
     assert response["config"]["editorConfig"]["mode"] == "view"
+    assert response["config"]["editorConfig"]["lang"] == "zh-CN"
     assert "forcesave" not in customization
 
 
