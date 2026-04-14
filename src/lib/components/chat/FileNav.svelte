@@ -4,6 +4,7 @@
 </script>
 
 <script lang="ts">
+	import { base } from '$app/paths';
 	import { toast } from 'svelte-sonner';
 	import { getContext, onMount, onDestroy, tick } from 'svelte';
 	import {
@@ -288,6 +289,22 @@
 	const isSqlite = (path: string) => SQLITE_EXTS.has(path.split('.').pop()?.toLowerCase() ?? '');
 	const isPdf = (path: string) => path.split('.').pop()?.toLowerCase() === 'pdf';
 	const isOffice = (path: string) => OFFICE_EXTS.has(path.split('.').pop()?.toLowerCase() ?? '');
+	const openOnlyOfficeInNewTab = () => {
+		if (!selectedFile || !isOffice(selectedFile)) return;
+		if (!selectedTerminalServerId) {
+			toast.error($i18n.t('OnlyOffice new-tab mode requires a terminal server id.'));
+			return;
+		}
+
+		const params = new URLSearchParams({
+			terminal_server_id: selectedTerminalServerId,
+			terminal_file_path: selectedFile,
+			mode: 'edit'
+		});
+
+		const routePath = `${base}/office-preview`;
+		window.open(`${routePath}?${params.toString()}`, '_blank', 'noopener,noreferrer');
+	};
 
 	/** Normalize Windows backslashes to forward slashes. */
 	const normalizePath = (p: string) => p.replace(/\\/g, '/');
@@ -740,6 +757,9 @@
 	$: if (selectedFile === null && previewOverlayOpen) {
 		previewOverlayOpen = false;
 	}
+	$: canOpenOnlyOfficeNewTab = Boolean(
+		selectedFile !== null && isOffice(selectedFile) && selectedTerminalServerId
+	);
 
 	// Click outside panel to clear selection
 	const handleWindowClick = (e: MouseEvent) => {
@@ -1014,6 +1034,38 @@
 							aria-pressed={previewOverlayOpen}
 						>
 							<Expand className="size-3.5" />
+						</button>
+					</Tooltip>
+				{/if}
+				{#if selectedFile !== null && isOffice(selectedFile)}
+					<Tooltip content={$i18n.t('Open in new tab')}>
+						<button
+							class="shrink-0 p-1 rounded transition text-gray-400 dark:text-gray-500 hover:text-gray-600 dark:hover:text-gray-400 {canOpenOnlyOfficeNewTab
+								? 'hover:bg-gray-100 dark:hover:bg-gray-800'
+								: 'opacity-40 cursor-not-allowed'}"
+							on:click={openOnlyOfficeInNewTab}
+							aria-label={$i18n.t('Open in new tab')}
+							disabled={!canOpenOnlyOfficeNewTab}
+						>
+							<svg
+								xmlns="http://www.w3.org/2000/svg"
+								viewBox="0 0 24 24"
+								fill="none"
+								stroke="currentColor"
+								stroke-width="1.5"
+								class="size-3.5"
+							>
+								<path
+									stroke-linecap="round"
+									stroke-linejoin="round"
+									d="M13.5 6H18m0 0v4.5M18 6l-7.5 7.5"
+								/>
+								<path
+									stroke-linecap="round"
+									stroke-linejoin="round"
+									d="M6.75 7.5A2.25 2.25 0 0 0 4.5 9.75v7.5a2.25 2.25 0 0 0 2.25 2.25h7.5a2.25 2.25 0 0 0 2.25-2.25V13.5"
+								/>
+							</svg>
 						</button>
 					</Tooltip>
 				{/if}
