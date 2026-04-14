@@ -48,6 +48,14 @@ export const mergeServerMessage = (
 		mergedMessage.output = existingMessage.output;
 	}
 
+	if (
+		Array.isArray(incomingMessage.statusHistory) &&
+		Array.isArray(existingMessage.statusHistory) &&
+		incomingMessage.statusHistory.length < existingMessage.statusHistory.length
+	) {
+		mergedMessage.statusHistory = existingMessage.statusHistory;
+	}
+
 	return mergedMessage;
 };
 
@@ -84,7 +92,9 @@ export const mergeHistorySnapshot = (
 			previousContent !== nextContent ||
 			existingMessage.done !== mergedMessage.done ||
 			JSON.stringify(existingMessage.output ?? null) !==
-				JSON.stringify(mergedMessage.output ?? null)
+				JSON.stringify(mergedMessage.output ?? null) ||
+			JSON.stringify(existingMessage.statusHistory ?? null) !==
+				JSON.stringify(mergedMessage.statusHistory ?? null)
 		) {
 			changed = true;
 		}

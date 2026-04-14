@@ -12,6 +12,30 @@ describe('mergeServerMessage', () => {
 		expect(merged.content).toBe('partial answer');
 		expect(merged.done).toBe(true);
 	});
+
+	it('keeps local status history when server snapshot status history is empty', () => {
+		const existingStatusHistory = [{ action: 'tool', description: 'Running', done: false }];
+		const merged = mergeServerMessage(
+			{ id: 'a', statusHistory: existingStatusHistory },
+			{ id: 'a', statusHistory: [] }
+		);
+
+		expect(merged.statusHistory).toEqual(existingStatusHistory);
+	});
+
+	it('does not roll back to a shorter server status history snapshot', () => {
+		const existingStatusHistory = [
+			{ action: 'tool', description: 'Searching', done: false },
+			{ action: 'tool', description: 'Done', done: true }
+		];
+		const incomingStatusHistory = [{ action: 'tool', description: 'Done', done: true }];
+		const merged = mergeServerMessage(
+			{ id: 'a', statusHistory: existingStatusHistory },
+			{ id: 'a', statusHistory: incomingStatusHistory }
+		);
+
+		expect(merged.statusHistory).toEqual(existingStatusHistory);
+	});
 });
 
 describe('mergeHistorySnapshot', () => {
@@ -59,5 +83,41 @@ describe('mergeHistorySnapshot', () => {
 		expect(result.history.messages.a.done).toBe(true);
 		expect(result.hasAssistantProgress).toBe(true);
 		expect(result.hasRenderableAssistantUpdate).toBe(true);
+	});
+
+	it('marks snapshot as changed when status history changes without content changes', () => {
+		const currentHistory = {
+			currentId: 'a',
+			messages: {
+				a: {
+					id: 'a',
+					role: 'assistant',
+					content: 'same content',
+					done: false,
+					statusHistory: [{ action: 'tool', description: 'Running', done: false }]
+				}
+			}
+		};
+
+		const latestHistory = {
+			currentId: 'a',
+			messages: {
+				a: {
+					id: 'a',
+					role: 'assistant',
+					content: 'same content',
+					done: false,
+					statusHistory: [
+						{ action: 'tool', description: 'Running', done: false },
+						{ action: 'tool', description: 'Done', done: true }
+					]
+				}
+			}
+		};
+
+		const result = mergeHistorySnapshot(currentHistory, latestHistory);
+
+		expect(result.history.messages.a.statusHistory).toEqual(latestHistory.messages.a.statusHistory);
+		expect(result.changed).toBe(true);
 	});
 });

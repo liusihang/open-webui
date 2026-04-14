@@ -11,10 +11,11 @@
 	let showHistory = false;
 	let history = [];
 	let visibleHistory = [];
-	let rawLatestStatus = null;
-	let latestStatus = null;
+	let currentStatus = null;
+	let currentStatusIndex = -1;
+	let historyStatuses = [];
 	let canExpand = false;
-	let latestStatusIsRunning = false;
+	let currentStatusIsRunning = false;
 
 	$: if (expand) {
 		showHistory = true;
@@ -30,19 +31,31 @@
 	}
 
 	$: visibleHistory = (history ?? []).filter((item) => item?.hidden !== true);
-	$: rawLatestStatus = history.length > 0 ? history.at(-1) : null;
-	$: latestStatus = visibleHistory.length > 0 ? visibleHistory.at(-1) : null;
+	$: currentStatusIndex = (() => {
+		for (let idx = visibleHistory.length - 1; idx >= 0; idx -= 1) {
+			if (visibleHistory[idx]?.done === false) {
+				return idx;
+			}
+		}
+
+		return visibleHistory.length > 0 ? visibleHistory.length - 1 : -1;
+	})();
+	$: currentStatus = currentStatusIndex >= 0 ? visibleHistory[currentStatusIndex] : null;
+	$: historyStatuses =
+		currentStatusIndex >= 0
+			? visibleHistory.filter((_, idx) => idx !== currentStatusIndex)
+			: [];
 	$: canExpand = visibleHistory.length > 1;
-	$: latestStatusIsRunning = latestStatus?.done === false;
+	$: currentStatusIsRunning = currentStatus?.done === false;
 </script>
 
-{#if latestStatus && rawLatestStatus?.hidden !== true}
+{#if currentStatus}
 	<div class="w-full text-sm">
 		<button
 			type="button"
 			class="w-full min-h-11 rounded-xl border px-2.5 py-2 text-left transition focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-violet-400/60 {canExpand
 				? 'cursor-pointer'
-				: 'cursor-default'} {latestStatusIsRunning
+				: 'cursor-default'} {currentStatusIsRunning
 				? 'border-violet-300/70 bg-violet-50/60 dark:border-violet-700/60 dark:bg-violet-900/10'
 				: 'border-gray-200/70 bg-gray-50/70 dark:border-gray-800/70 dark:bg-gray-900/30'}"
 			aria-label={$i18n.t('Toggle status history')}
@@ -56,7 +69,7 @@
 		>
 			<div class="flex items-start gap-2">
 				<div class="min-w-0 flex-1">
-					<StatusItem status={latestStatus} />
+					<StatusItem status={currentStatus} />
 				</div>
 				{#if canExpand}
 					<div class="mt-1 shrink-0 text-gray-500 dark:text-gray-400">
@@ -70,9 +83,8 @@
 		</button>
 
 		{#if showHistory && canExpand}
-			{@const historyWithoutLatest = visibleHistory.slice(0, -1)}
 			<div class="mt-2">
-				{#each historyWithoutLatest as status, idx}
+				{#each historyStatuses as status, idx}
 					<div class="flex items-stretch gap-2 mb-1">
 						<div class="w-[13px] shrink-0">
 							<div class="pt-3 px-1 mb-1.5">
@@ -82,7 +94,7 @@
 									></span>
 								</span>
 							</div>
-							{#if idx !== historyWithoutLatest.length - 1}
+							{#if idx !== historyStatuses.length - 1}
 								<div class="w-px ml-[6.5px] h-[calc(100%-14px)] bg-gray-300 dark:bg-gray-700"></div>
 							{/if}
 						</div>
