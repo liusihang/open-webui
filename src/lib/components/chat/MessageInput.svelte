@@ -1951,6 +1951,33 @@
 										{#if !history?.currentId || history.messages[history.currentId]?.done == true}
 											<!-- Terminal Server Selector -->
 											{#if ($terminalServers ?? []).length > 0 || ($settings?.terminalServers ?? []).some((s) => s.url)}
+												<Tooltip content={$i18n.t('Files')} placement="top">
+													<button
+														id="open-terminal-filesystem-button"
+														class=" text-gray-600 dark:text-gray-300 hover:text-gray-700 dark:hover:text-gray-200 transition rounded-full p-1.5 self-center mr-0.5"
+														type="button"
+														on:click={() => {
+															if ($selectedTerminalId) {
+																showControls.set(true);
+															} else {
+																showTerminalMenu = true;
+															}
+														}}
+													>
+														<svg
+															xmlns="http://www.w3.org/2000/svg"
+															viewBox="0 0 20 20"
+															fill="currentColor"
+															class="size-5 translate-y-[0.5px]"
+														>
+															<path
+																fill-rule="evenodd"
+																d="M9.69 2.183a1.5 1.5 0 0 1 .912-.308h4.648A2.25 2.25 0 0 1 17.5 4.125v11.75a2.25 2.25 0 0 1-2.25 2.25H4.75a2.25 2.25 0 0 1-2.25-2.25V6.375a2.25 2.25 0 0 1 2.25-2.25H8.2l1.49-1.942Zm-4.94 3.442a.75.75 0 0 0-.75.75v9.5c0 .414.336.75.75.75h10.5a.75.75 0 0 0 .75-.75v-9.5a.75.75 0 0 0-.75-.75H4.75Zm2 3a.75.75 0 0 1 .75-.75h5a.75.75 0 0 1 0 1.5h-5a.75.75 0 0 1-.75-.75Z"
+																clip-rule="evenodd"
+															/>
+														</svg>
+													</button>
+												</Tooltip>
 												<TerminalMenu bind:show={showTerminalMenu} />
 											{/if}
 
