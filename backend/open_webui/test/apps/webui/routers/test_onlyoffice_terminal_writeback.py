@@ -16,6 +16,7 @@ def _fake_request(
     callback_allowlist=None,
     query_params=None,
     callback_ttl=None,
+    onlyoffice_jwt_secret="",
 ):
     config = SimpleNamespace(
         ENABLE_ONLYOFFICE_PREVIEW=True,
@@ -23,7 +24,7 @@ def _fake_request(
         ONLYOFFICE_FILE_TOKEN_EXPIRES_IN="5m",
         ONLYOFFICE_PUBLIC_BASE_URL="https://webui.example",
         WEBUI_URL="",
-        ONLYOFFICE_JWT_SECRET="",
+        ONLYOFFICE_JWT_SECRET=onlyoffice_jwt_secret,
         ONLYOFFICE_EDIT_CALLBACK_TOKEN_EXPIRES_IN=callback_ttl,
         ONLYOFFICE_CALLBACK_ALLOWED_HOSTS=callback_allowlist or [],
         TERMINAL_SERVER_CONNECTIONS=terminal_connections or [],
@@ -365,6 +366,57 @@ async def test_terminal_callback_token_only_payload_without_jwt_secret_still_per
             terminal_connections=[_terminal_connection()],
             callback_allowlist=["onlyoffice.example"],
             query_params={"context_token": context_token},
+        ),
+    )
+
+    assert result == {"error": 0}
+    assert download_calls == ["https://onlyoffice.example/cache/edited.docx"]
+    assert len(writeback_calls) == 1
+    assert writeback_calls[0]["terminal_file_path"] == "/workspace/demo.docx"
+    assert writeback_calls[0]["user_id"] == "user-1"
+
+
+@pytest.mark.asyncio
+async def test_terminal_callback_jwt_enabled_uses_outer_save_status_when_token_missing_status(
+    monkeypatch,
+):
+    download_calls = []
+    writeback_calls = []
+
+    async def _fake_download(callback_url):
+        download_calls.append(callback_url)
+        return (b"edited-content", "application/vnd.openxmlformats-officedocument.wordprocessingml.document")
+
+    async def _fake_writeback(**kwargs):
+        writeback_calls.append(kwargs)
+
+    monkeypatch.setattr(onlyoffice_mod, "_download_onlyoffice_callback_blob", _fake_download)
+    monkeypatch.setattr(onlyoffice_mod, "_replace_terminal_file_via_temp_upload", _fake_writeback)
+
+    context_token = _make_context_token(expires_delta=timedelta(minutes=5))
+    callback_jwt_secret = "onlyoffice-callback-secret"
+    callback_payload_token = jwt.encode(
+        {
+            "key": "doc-key-1",
+            "url": "https://onlyoffice.example/cache/edited.docx",
+            "context_token": context_token,
+        },
+        callback_jwt_secret,
+        algorithm="HS256",
+    )
+
+    result = await onlyoffice_mod.handle_onlyoffice_terminal_callback(
+        onlyoffice_mod.OnlyOfficeCallbackForm(
+            status=2,
+            key="doc-key-1",
+            url="https://onlyoffice.example/cache/edited.docx",
+            token=callback_payload_token,
+        ),
+        _fake_request(
+            terminal_connections=[_terminal_connection()],
+            callback_allowlist=["onlyoffice.example"],
+            query_params={"context_token": context_token},
+            onlyoffice_jwt_secret=callback_jwt_secret,
         ),
     )
 

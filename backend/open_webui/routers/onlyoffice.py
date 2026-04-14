@@ -944,7 +944,11 @@ async def handle_onlyoffice_terminal_callback(
         try:
             decoded_payload = jwt.decode(callback_token, onlyoffice_jwt_secret, algorithms=["HS256"])
             if isinstance(decoded_payload, dict):
-                payload = decoded_payload
+                merged_payload = dict(payload)
+                for field in ("status", "key", "url", "context_token"):
+                    if decoded_payload.get(field) is not None:
+                        merged_payload[field] = decoded_payload[field]
+                payload = merged_payload
         except jwt.InvalidTokenError as exc:
             raise HTTPException(
                 status_code=status.HTTP_401_UNAUTHORIZED,
@@ -962,6 +966,10 @@ async def handle_onlyoffice_terminal_callback(
         )
 
     callback_status = payload.get("status")
+    coerced_status = _coerce_callback_status(callback_status)
+    if coerced_status is not None:
+        callback_status = coerced_status
+        payload["status"] = callback_status
     if callback_status not in ONLYOFFICE_SAVE_STATUSES:
         log.info("OnlyOffice terminal callback acknowledged without save status=%s", callback_status)
         return {"error": 0}
