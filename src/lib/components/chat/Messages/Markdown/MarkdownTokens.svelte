@@ -327,6 +327,13 @@
 
 	$: renderItems = getRenderItems(tokens ?? []);
 
+	const progressCollapsibleButtonClass =
+		'w-full rounded-xl transition-colors duration-150 hover:bg-gray-50/70 dark:hover:bg-gray-800/50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-sky-500/60 focus-visible:ring-offset-2 focus-visible:ring-offset-white dark:focus-visible:ring-offset-gray-950';
+	const progressHistoryToggleButtonClass =
+		'progress-history-toggle w-fit rounded-lg px-2 py-1 text-xs font-medium text-gray-600 hover:text-gray-800 hover:bg-gray-100/80 dark:text-gray-400 dark:hover:text-gray-200 dark:hover:bg-gray-800/80 transition-colors duration-150 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-sky-500/60 focus-visible:ring-offset-2 focus-visible:ring-offset-white dark:focus-visible:ring-offset-gray-950';
+	const progressToolCallButtonClass =
+		'w-full rounded-xl transition-shadow duration-150 focus-within:ring-2 focus-within:ring-sky-500/50 focus-within:ring-offset-2 focus-within:ring-offset-white dark:focus-within:ring-offset-gray-950';
+
 	const getDetailsTextContent = (token: ProgressDetailsToken) =>
 		decode(token.text || '')
 			.replace(/<summary>.*?<\/summary>/gi, '')
@@ -382,21 +389,22 @@
 		/>
 	{:else if item.type === 'progress_group'}
 		{@const currentTextContent = getDetailsTextContent(item.currentToken)}
-		<div class="w-full my-1 space-y-1.5">
+		<div class="progress-group w-full my-1 space-y-2">
 			{#if item.currentToken?.attributes?.type === 'tool_calls'}
 				<ToolCallDisplay
 					id={`${id}-${tokenIdx}-tc-current`}
 					attributes={item.currentToken.attributes}
 					open={false}
-					className="w-full"
+					className="w-full progress-current-item"
+					buttonClassName={progressToolCallButtonClass}
 				/>
 			{:else if currentTextContent.length > 0}
 				<Collapsible
 					title={item.currentToken.summary}
 					open={false}
 					attributes={item.currentToken?.attributes}
-					className="w-full"
-					buttonClassName="w-full transition"
+					className="w-full progress-current-item"
+					buttonClassName={progressCollapsibleButtonClass}
 					dir="auto"
 				>
 					<div class="mb-1.5 reasoning-content text-base" slot="content">
@@ -418,7 +426,7 @@
 					open={false}
 					disabled={true}
 					attributes={item.currentToken?.attributes}
-					className="w-full"
+					className="w-full progress-current-item"
 					dir="auto"
 				/>
 			{/if}
@@ -427,52 +435,55 @@
 				<Collapsible
 					title={`${$i18n.t('History')} (${item.historyTokens.length})`}
 					open={false}
-					className="w-full"
-					buttonClassName="w-fit text-gray-500 hover:text-gray-700 dark:hover:text-gray-300 transition"
+					className="w-full progress-history-group"
+					buttonClassName={progressHistoryToggleButtonClass}
 					dir="auto"
 				>
-					<div slot="content" class="mt-1.5 space-y-1.5">
+					<div slot="content" class="progress-history-list mt-2 space-y-1.5">
 						{#each item.historyTokens as historyToken, historyIdx (`${historyToken?.attributes?.id ?? historyIdx}-${historyIdx}`)}
-							{@const historyTextContent = getDetailsTextContent(historyToken)}
-							{#if historyToken?.attributes?.type === 'tool_calls'}
-								<ToolCallDisplay
-									id={`${id}-${tokenIdx}-tc-history-${historyIdx}`}
-									attributes={historyToken.attributes}
-									open={false}
-									className="w-full"
-								/>
-							{:else if historyTextContent.length > 0}
-								<Collapsible
-									title={historyToken.summary}
-									open={false}
-									attributes={historyToken?.attributes}
-									className="w-full"
-									buttonClassName="w-full transition"
-									dir="auto"
-								>
-									<div class="mb-1.5 reasoning-content text-base" slot="content">
-										<svelte:self
-											id={`${id}-${tokenIdx}-progress-history-${historyIdx}`}
-											tokens={marked.lexer(decode(historyToken.text ?? ''))}
-											attributes={historyToken?.attributes}
-											{done}
-											{editCodeBlock}
-											{onTaskClick}
-											{sourceIds}
-											{onSourceClick}
-										/>
-									</div>
-								</Collapsible>
-							{:else}
-								<Collapsible
-									title={historyToken.summary}
-									open={false}
-									disabled={true}
-									attributes={historyToken?.attributes}
-									className="w-full"
-									dir="auto"
-								/>
-							{/if}
+							<div class="progress-history-entry">
+								{@const historyTextContent = getDetailsTextContent(historyToken)}
+								{#if historyToken?.attributes?.type === 'tool_calls'}
+									<ToolCallDisplay
+										id={`${id}-${tokenIdx}-tc-history-${historyIdx}`}
+										attributes={historyToken.attributes}
+										open={false}
+										className="w-full progress-history-item"
+										buttonClassName={progressToolCallButtonClass}
+									/>
+								{:else if historyTextContent.length > 0}
+									<Collapsible
+										title={historyToken.summary}
+										open={false}
+										attributes={historyToken?.attributes}
+										className="w-full progress-history-item"
+										buttonClassName={progressCollapsibleButtonClass}
+										dir="auto"
+									>
+										<div class="mb-1.5 reasoning-content text-base" slot="content">
+											<svelte:self
+												id={`${id}-${tokenIdx}-progress-history-${historyIdx}`}
+												tokens={marked.lexer(decode(historyToken.text ?? ''))}
+												attributes={historyToken?.attributes}
+												{done}
+												{editCodeBlock}
+												{onTaskClick}
+												{sourceIds}
+												{onSourceClick}
+											/>
+										</div>
+									</Collapsible>
+								{:else}
+									<Collapsible
+										title={historyToken.summary}
+										open={false}
+										disabled={true}
+										attributes={historyToken?.attributes}
+										className="w-full progress-history-item"
+										dir="auto"
+									/>
+								{/if}
+							</div>
 						{/each}
 					</div>
 				</Collapsible>
@@ -838,6 +849,30 @@
 {/each}
 
 <style>
+	.progress-group {
+		padding-top: 0.125rem;
+		padding-bottom: 0.125rem;
+	}
+
+	.progress-history-list {
+		padding-left: 0.5rem;
+		border-left: 1px solid rgb(229 231 235 / 0.75);
+	}
+
+	:global(.dark .progress-history-list) {
+		border-left-color: rgb(55 65 81 / 0.8);
+	}
+
+	:global(.progress-history-toggle[aria-expanded='true']) {
+		color: rgb(31 41 55);
+		background: rgb(243 244 246 / 0.9);
+	}
+
+	:global(.dark .progress-history-toggle[aria-expanded='true']) {
+		color: rgb(229 231 235);
+		background: rgb(31 41 55 / 0.9);
+	}
+
 	.reasoning-content {
 		padding-top: 0.5rem;
 	}
