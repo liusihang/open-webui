@@ -117,6 +117,7 @@ async def test_create_onlyoffice_terminal_edit_session_returns_editable_config(m
 
     assert response["config"]["document"]["permissions"]["edit"] is True
     assert response["config"]["editorConfig"]["mode"] == "edit"
+    assert response["config"]["type"] == "desktop"
     callback_url = response["config"]["editorConfig"]["callbackUrl"]
     assert urlparse(callback_url).path == "/api/v1/onlyoffice/callback/terminal"
 

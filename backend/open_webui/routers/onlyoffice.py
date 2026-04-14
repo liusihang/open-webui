@@ -622,7 +622,7 @@ async def create_onlyoffice_session(
     document_type = SUPPORTED_OFFICE_FILE_TYPES.get(document_file_type)
     config = {
         "documentType": document_type,
-        "type": "embedded",
+        "type": "desktop" if form_data.mode == "edit" else "embedded",
         "document": {
             "title": document_title,
             "url": document_url,
