@@ -1,4 +1,5 @@
 import hashlib
+import json
 import logging
 import posixpath
 from datetime import timedelta
@@ -237,6 +238,76 @@ def _extract_callback_context_token(request: Request, payload: dict[str, Any]) -
     if isinstance(payload_token, str) and payload_token:
         return payload_token
     return ""
+
+
+def _coerce_callback_status(value: Any) -> Optional[int]:
+    if isinstance(value, int):
+        return value
+    if isinstance(value, str):
+        stripped = value.strip()
+        if stripped.isdigit():
+            return int(stripped)
+    return None
+
+
+def _decode_callback_token_without_verification(callback_token: str) -> dict[str, Any]:
+    try:
+        payload = jwt.decode(
+            callback_token,
+            options={"verify_signature": False, "verify_exp": False},
+            algorithms=["HS256", "HS384", "HS512", "RS256", "RS384", "RS512"],
+        )
+        if isinstance(payload, dict):
+            return payload
+    except Exception:
+        return {}
+    return {}
+
+
+def _parse_embedded_callback_payload(payload: dict[str, Any]) -> dict[str, Any]:
+    nested = payload.get("payload")
+    if isinstance(nested, dict):
+        return nested
+    if isinstance(nested, str):
+        try:
+            parsed = json.loads(nested)
+            if isinstance(parsed, dict):
+                return parsed
+        except Exception:
+            return {}
+    return {}
+
+
+def _expand_callback_payload_without_jwt_secret(payload: dict[str, Any]) -> dict[str, Any]:
+    expanded = dict(payload)
+
+    embedded_payload = _parse_embedded_callback_payload(expanded)
+    if embedded_payload:
+        for field in ("status", "key", "url", "context_token", "token"):
+            if expanded.get(field) is None and embedded_payload.get(field) is not None:
+                expanded[field] = embedded_payload[field]
+
+    status_value = _coerce_callback_status(expanded.get("status"))
+    if status_value is not None:
+        expanded["status"] = status_value
+        return expanded
+
+    callback_token = expanded.get("token")
+    if not isinstance(callback_token, str) or not callback_token:
+        return expanded
+
+    decoded_payload = _decode_callback_token_without_verification(callback_token)
+    if not decoded_payload:
+        return expanded
+
+    for field in ("status", "key", "url", "context_token"):
+        if expanded.get(field) is None and decoded_payload.get(field) is not None:
+            expanded[field] = decoded_payload[field]
+
+    status_value = _coerce_callback_status(expanded.get("status"))
+    if status_value is not None:
+        expanded["status"] = status_value
+    return expanded
 
 
 def _get_terminal_connection(request: Request, terminal_server_id: str, user):
@@ -879,6 +950,8 @@ async def handle_onlyoffice_terminal_callback(
                 status_code=status.HTTP_401_UNAUTHORIZED,
                 detail="Invalid OnlyOffice callback token.",
             ) from exc
+    else:
+        payload = _expand_callback_payload_without_jwt_secret(payload)
 
     callback_url = payload.get("url")
     allowlist = request.app.state.config.ONLYOFFICE_CALLBACK_ALLOWED_HOSTS or []
