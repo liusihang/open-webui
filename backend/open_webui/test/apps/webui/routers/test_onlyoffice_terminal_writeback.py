@@ -120,8 +120,34 @@ async def test_create_onlyoffice_terminal_edit_session_returns_editable_config(m
     assert response["config"]["document"]["permissions"]["edit"] is True
     assert response["config"]["editorConfig"]["mode"] == "edit"
     assert response["config"]["type"] == "desktop"
+    assert response["config"]["editorConfig"]["customization"]["forcesave"] is True
     callback_url = response["config"]["editorConfig"]["callbackUrl"]
     assert urlparse(callback_url).path == "/api/v1/onlyoffice/callback/terminal"
+
+
+@pytest.mark.asyncio
+async def test_create_onlyoffice_terminal_view_session_does_not_force_save(monkeypatch):
+    monkeypatch.setattr(
+        onlyoffice_mod,
+        "_get_terminal_connection",
+        lambda request, terminal_server_id, user: _terminal_connection(),
+    )
+
+    response = await onlyoffice_mod.create_onlyoffice_session(
+        onlyoffice_mod.OnlyOfficeSessionForm(
+            source_type="terminal",
+            terminal_server_id="terminals",
+            terminal_file_path="/workspace/demo.docx",
+            mode="view",
+        ),
+        _fake_request(),
+        user=_fake_user(),
+        db=None,
+    )
+
+    customization = response["config"]["editorConfig"]["customization"]
+    assert response["config"]["editorConfig"]["mode"] == "view"
+    assert "forcesave" not in customization
 
 
 @pytest.mark.asyncio

@@ -719,6 +719,8 @@ async def create_onlyoffice_session(
             },
         },
     }
+    if form_data.mode == "edit":
+        config["editorConfig"]["customization"]["forcesave"] = True
 
     onlyoffice_jwt_secret = (request.app.state.config.ONLYOFFICE_JWT_SECRET or "").strip()
     if onlyoffice_jwt_secret:
