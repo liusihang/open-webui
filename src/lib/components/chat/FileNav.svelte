@@ -32,6 +32,8 @@
 	import Document from '../icons/Document.svelte';
 	import PenAlt from '../icons/PenAlt.svelte';
 	import ZoomReset from '../icons/ZoomReset.svelte';
+	import Expand from '../icons/Expand.svelte';
+	import XMark from '../icons/XMark.svelte';
 
 	import Spinner from '../common/Spinner.svelte';
 	import Tooltip from '../common/Tooltip.svelte';
@@ -163,6 +165,7 @@
 	let editing = false;
 	let showRaw = false;
 	let saving = false;
+	let previewOverlayOpen = false;
 
 	const MD_EXTS = new Set(['md', 'markdown', 'mdx']);
 	const CSV_EXTS = new Set(['csv', 'tsv']);
@@ -430,6 +433,25 @@
 			fileContent = await readFile(terminal.url, terminal.key, filePath);
 		}
 		fileLoading = false;
+	};
+
+	const handleOfficeSheetChange = async (sheet: string) => {
+		if (!excelWorkbook) return;
+		selectedExcelSheet = sheet;
+		const { excelToTable } = await import('$lib/utils/excelToTable');
+		const result = await excelToTable(excelWorkbook.Sheets[sheet]);
+		fileOfficeHtml = result.html;
+	};
+
+	const handleFilePreviewSave = async (content: string) => {
+		const terminal = selectedTerminal;
+		if (!terminal || !selectedFile) return;
+		const fileName = selectedFile.split('/').pop() ?? 'file';
+		const dir = selectedFile.substring(0, selectedFile.lastIndexOf('/') + 1) || '/';
+		const file = new File([content], fileName, { type: 'text/plain' });
+		const result = await uploadToTerminal(terminal.url, terminal.key, dir, file);
+		toast[result ? 'success' : 'error']($i18n.t(result ? 'File saved' : 'Failed to save file'));
+		if (result) fileContent = content;
 	};
 
 	const downloadFile = async (path: string) => {
@@ -703,11 +725,21 @@
 
 	// Escape to clear selection
 	const handleKeydown = (e: KeyboardEvent) => {
+		if (e.key === 'Escape' && previewOverlayOpen) {
+			e.preventDefault();
+			previewOverlayOpen = false;
+			return;
+		}
+
 		if (e.key === 'Escape' && selectedCount > 0) {
 			e.preventDefault();
 			clearSelection();
 		}
 	};
+
+	$: if (selectedFile === null && previewOverlayOpen) {
+		previewOverlayOpen = false;
+	}
 
 	// Click outside panel to clear selection
 	const handleWindowClick = (e: MouseEvent) => {
@@ -965,6 +997,26 @@
 						</button>
 					</Tooltip>
 				{/if}
+				{#if selectedFile !== null}
+					<Tooltip
+						content={previewOverlayOpen
+							? $i18n.t('Exit large preview')
+							: $i18n.t('Open large preview')}
+					>
+						<button
+							class="shrink-0 p-1 rounded hover:bg-gray-100 dark:hover:bg-gray-800 transition text-gray-400 dark:text-gray-500 hover:text-gray-600 dark:hover:text-gray-400"
+							on:click={() => {
+								previewOverlayOpen = !previewOverlayOpen;
+							}}
+							aria-label={previewOverlayOpen
+								? $i18n.t('Exit large preview')
+								: $i18n.t('Open large preview')}
+							aria-pressed={previewOverlayOpen}
+						>
+							<Expand className="size-3.5" />
+						</button>
+					</Tooltip>
+				{/if}
 				{#if isTextFile}
 					{#if isHtml && showRaw}
 						<Tooltip content={$i18n.t('Save')}>
@@ -1210,28 +1262,11 @@
 					onlyOfficeFileId={null}
 					onlyOfficeTerminalServerId={selectedTerminalServerId}
 					onlyOfficeTerminalFilePath={selectedFile}
-					onSheetChange={async (sheet) => {
-						if (!excelWorkbook) return;
-						selectedExcelSheet = sheet;
-						const { excelToTable } = await import('$lib/utils/excelToTable');
-						const result = await excelToTable(excelWorkbook.Sheets[sheet]);
-						fileOfficeHtml = result.html;
-					}}
+					onSheetChange={handleOfficeSheetChange}
 					baseUrl={selectedTerminal?.url ?? ''}
 					apiKey={selectedTerminal?.key ?? ''}
 					overlay={overlay || isDraggingHandle}
-					onSave={async (content) => {
-						const terminal = selectedTerminal;
-						if (!terminal || !selectedFile) return;
-						const fileName = selectedFile.split('/').pop() ?? 'file';
-						const dir = selectedFile.substring(0, selectedFile.lastIndexOf('/') + 1) || '/';
-						const file = new File([content], fileName, { type: 'text/plain' });
-						const result = await uploadToTerminal(terminal.url, terminal.key, dir, file);
-						toast[result ? 'success' : 'error'](
-							$i18n.t(result ? 'File saved' : 'Failed to save file')
-						);
-						if (result) fileContent = content;
-					}}
+					onSave={handleFilePreviewSave}
 				/>
 			{:else}
 				{#if uploading}
@@ -1409,4 +1444,74 @@
 			</div>
 		{/if}
 	</div>
+
+	{#if selectedFile !== null && previewOverlayOpen}
+		<div
+			class="fixed inset-0 z-[120] bg-black/60 backdrop-blur-sm p-2 sm:p-4 lg:p-6"
+			tabindex="-1"
+			on:click={() => {
+				previewOverlayOpen = false;
+			}}
+			on:keydown={(e) => {
+				if (e.key === 'Escape') {
+					previewOverlayOpen = false;
+				}
+			}}
+			role="dialog"
+			aria-modal="true"
+			aria-label={$i18n.t('Large file preview')}
+		>
+			<div
+				class="h-full w-full max-w-[1600px] mx-auto rounded-xl border border-gray-200/80 dark:border-gray-700/80 bg-white dark:bg-gray-900 shadow-2xl overflow-hidden flex flex-col"
+				on:click|stopPropagation
+			>
+				<div
+					class="shrink-0 h-11 px-3 border-b border-gray-100 dark:border-gray-800 flex items-center justify-between gap-3 bg-white/95 dark:bg-gray-900/95 backdrop-blur"
+				>
+					<div class="min-w-0 text-sm text-gray-700 dark:text-gray-200 truncate">
+						{selectedFile.split('/').pop()}
+					</div>
+					<Tooltip content={$i18n.t('Close')}>
+						<button
+							class="shrink-0 p-1 rounded hover:bg-gray-100 dark:hover:bg-gray-800 transition text-gray-500 dark:text-gray-400"
+							on:click={() => {
+								previewOverlayOpen = false;
+							}}
+							aria-label={$i18n.t('Close')}
+						>
+							<XMark className="size-4" />
+						</button>
+					</Tooltip>
+				</div>
+				<div class="flex-1 min-h-0 min-w-0">
+					<FilePreview
+						bind:editing
+						bind:showRaw
+						bind:saving
+						bind:currentSlide
+						{selectedFile}
+						{fileLoading}
+						{fileImageUrl}
+						{fileVideoUrl}
+						{fileAudioUrl}
+						{filePdfData}
+						{fileSqliteData}
+						{fileContent}
+						{fileOfficeHtml}
+						{fileOfficeSlides}
+						{excelSheetNames}
+						{selectedExcelSheet}
+						onlyOfficeFileId={null}
+						onlyOfficeTerminalServerId={selectedTerminalServerId}
+						onlyOfficeTerminalFilePath={selectedFile}
+						onSheetChange={handleOfficeSheetChange}
+						baseUrl={selectedTerminal?.url ?? ''}
+						apiKey={selectedTerminal?.key ?? ''}
+						overlay={overlay || isDraggingHandle}
+						onSave={handleFilePreviewSave}
+					/>
+				</div>
+			</div>
+		</div>
+	{/if}
 {/if}
