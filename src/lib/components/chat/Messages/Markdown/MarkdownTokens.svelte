@@ -441,8 +441,8 @@
 				>
 					<div slot="content" class="progress-history-list mt-2 space-y-1.5">
 						{#each item.historyTokens as historyToken, historyIdx (`${historyToken?.attributes?.id ?? historyIdx}-${historyIdx}`)}
+							{@const historyTextContent = getDetailsTextContent(historyToken)}
 							<div class="progress-history-entry">
-								{@const historyTextContent = getDetailsTextContent(historyToken)}
 								{#if historyToken?.attributes?.type === 'tool_calls'}
 									<ToolCallDisplay
 										id={`${id}-${tokenIdx}-tc-history-${historyIdx}`}
