@@ -7,6 +7,7 @@
 	import { initMermaid, renderMermaidDiagram } from '$lib/utils';
 	import Spinner from '../../common/Spinner.svelte';
 	import PDFViewer from '../../common/PDFViewer.svelte';
+	import OnlyOfficeViewer from '../../common/OnlyOfficeViewer.svelte';
 	import PanzoomContainer from '../../common/PanzoomContainer.svelte';
 	import JsonTreeView from './JsonTreeView.svelte';
 	import NotebookView from './NotebookView.svelte';
@@ -38,6 +39,9 @@
 	export let excelSheetNames: string[] = [];
 	export let selectedExcelSheet = '';
 	export let onSheetChange: ((sheet: string) => void) | null = null;
+	export let onlyOfficeFileId: string | null = null;
+	export let onlyOfficeTerminalServerId: string | null = null;
+	export let onlyOfficeTerminalFilePath: string | null = null;
 
 	export let overlay = false;
 
@@ -47,14 +51,26 @@
 	let editContent = '';
 	export let saving = false;
 	let editTextarea: HTMLTextAreaElement;
+	let onlyOfficeFailed = false;
+	let onlyOfficeError = '';
 
 	// Reset edit state when switching files
-	$: (selectedFile, resetEdit());
+	$: (selectedFile, resetEdit(), resetOnlyOfficeState());
 
 	const resetEdit = () => {
 		editing = false;
 		editContent = '';
 		saving = false;
+	};
+
+	const resetOnlyOfficeState = () => {
+		onlyOfficeFailed = false;
+		onlyOfficeError = '';
+	};
+
+	const retryOnlyOfficePreview = () => {
+		onlyOfficeFailed = false;
+		onlyOfficeError = '';
 	};
 
 	export const startEdit = async () => {
@@ -93,15 +109,23 @@
 	const CSV_EXTS = new Set(['csv', 'tsv']);
 	const HTML_EXTS = new Set(['html', 'htm']);
 	const JSON_EXTS = new Set(['json', 'jsonc', 'jsonl', 'json5']);
+	const OFFICE_EXTS = new Set(['docx', 'xlsx', 'pptx']);
 	const getExt = (path: string | null) => path?.split('.').pop()?.toLowerCase() ?? '';
 
 	$: isMarkdown = MD_EXTS.has(getExt(selectedFile));
 	$: isCsv = CSV_EXTS.has(getExt(selectedFile));
 	$: isHtml = HTML_EXTS.has(getExt(selectedFile));
 	$: isJson = JSON_EXTS.has(getExt(selectedFile));
+	$: isOfficeFile = OFFICE_EXTS.has(getExt(selectedFile));
 	$: isSvg = getExt(selectedFile) === 'svg';
 	$: isNotebook = getExt(selectedFile) === 'ipynb';
 	$: isCode = isCodeFile(selectedFile);
+	$: isTerminalOnlyOfficeSource = Boolean(onlyOfficeTerminalServerId && onlyOfficeTerminalFilePath);
+	$: canUseOnlyOffice =
+		isOfficeFile &&
+		!onlyOfficeFailed &&
+		(onlyOfficeFileId !== null ||
+			(onlyOfficeTerminalServerId !== null && onlyOfficeTerminalFilePath !== null));
 	$: csvDelimiter = getExt(selectedFile) === 'tsv' ? '\t' : ',';
 
 	// For HTML files on system terminals (proxy URL), use path-based serving
@@ -268,7 +292,9 @@
 </script>
 
 <div
-	class="flex-1 {fileImageUrl !== null || (fileOfficeSlides !== null && fileOfficeSlides.length > 0)
+	class="flex-1 {fileImageUrl !== null ||
+	canUseOnlyOffice ||
+	(fileOfficeSlides !== null && fileOfficeSlides.length > 0)
 		? 'overflow-hidden'
 		: 'overflow-y-auto'} min-h-0 min-w-0 relative h-full"
 >
@@ -305,8 +331,40 @@
 		<PDFViewer bind:this={pdfViewerRef} data={filePdfData} className="w-full h-full" />
 	{:else if fileSqliteData !== null}
 		<SqliteView data={fileSqliteData} />
+	{:else if canUseOnlyOffice}
+		<div class="flex flex-col h-full">
+			<div class="relative flex-1 min-h-0">
+				<OnlyOfficeViewer
+					fileId={onlyOfficeFileId ?? ''}
+					terminalServerId={onlyOfficeTerminalServerId ?? ''}
+					terminalFilePath={onlyOfficeTerminalFilePath ?? ''}
+					readOnly={!isTerminalOnlyOfficeSource}
+					className="w-full h-full"
+					on:error={(event) => {
+						onlyOfficeFailed = true;
+						onlyOfficeError =
+							event?.detail?.message ??
+							$i18n.t('OnlyOffice preview failed. Falling back to built-in preview.');
+					}}
+				/>
+			</div>
+		</div>
 	{:else if fileOfficeHtml !== null}
 		<div class="flex flex-col h-full">
+			{#if onlyOfficeError}
+				<div
+					class="flex items-center justify-between gap-3 text-amber-700 dark:text-amber-400 text-xs px-3 py-2"
+					role="alert"
+					aria-live="polite"
+				>
+					<span>{onlyOfficeError}</span>
+					<button
+						type="button"
+						class="shrink-0 underline underline-offset-2 hover:no-underline"
+						on:click={retryOnlyOfficePreview}>{$i18n.t('Retry')}</button
+					>
+				</div>
+			{/if}
 			<div class="office-preview overflow-auto flex-1 min-h-0">
 				{@html fileOfficeHtml}
 			</div>
@@ -330,6 +388,20 @@
 		</div>
 	{:else if fileOfficeSlides !== null && fileOfficeSlides.length > 0}
 		<div class="flex flex-col h-full">
+			{#if onlyOfficeError}
+				<div
+					class="flex items-center justify-between gap-3 text-amber-700 dark:text-amber-400 text-xs px-3 py-2"
+					role="alert"
+					aria-live="polite"
+				>
+					<span>{onlyOfficeError}</span>
+					<button
+						type="button"
+						class="shrink-0 underline underline-offset-2 hover:no-underline"
+						on:click={retryOnlyOfficePreview}>{$i18n.t('Retry')}</button
+					>
+				</div>
+			{/if}
 			<PanzoomContainer
 				bind:this={panzoomRef}
 				className="w-full flex-1 min-h-0 flex items-center justify-center overflow-hidden"

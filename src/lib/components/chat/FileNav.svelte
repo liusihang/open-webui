@@ -199,6 +199,7 @@
 
 	// ── Terminal resolution ──────────────────────────────────────────────
 	let selectedTerminal: { url: string; key: string } | null = null;
+	let selectedTerminalServerId: string | null = null;
 
 	const getTerminal = (): { url: string; key: string } | null => {
 		const systemTerminal = $selectedTerminalId
@@ -216,6 +217,36 @@
 		return url ? { url, key } : null;
 	};
 
+	const getTerminalServerId = (): string | null => {
+		const selectedId = $selectedTerminalId;
+
+		const systemTerminal = selectedId
+			? (($terminalServers ?? []).find((t) => t.id === selectedId) ?? null)
+			: (($terminalServers ?? []).find((t) => t.id) ?? null);
+		if (systemTerminal?.id) {
+			return systemTerminal.id;
+		}
+
+		const userTerminal = selectedId
+			? (($settings?.terminalServers ?? []).find((s) => s.url === selectedId) ?? null)
+			: (($settings?.terminalServers ?? []).find((s) => s.enabled && s.url) ??
+				($settings?.terminalServers ?? []).find((s) => s.url) ??
+				null);
+		const userTerminalServerId = userTerminal?.id ?? userTerminal?.server_id;
+		if (typeof userTerminalServerId === 'string' && userTerminalServerId.trim()) {
+			return userTerminalServerId.trim();
+		}
+
+		const runtimeTerminal = selectedId
+			? (($terminalServers ?? []).find((t) => t.url === selectedId && t.id) ?? null)
+			: null;
+		if (runtimeTerminal?.id) {
+			return runtimeTerminal.id;
+		}
+
+		return null;
+	};
+
 	// Detect terminal or chat changes — the explicit store references ensure
 	// Svelte re-runs this block when any of them update.
 	// The `mounted` flag prevents the initial run from racing with onMount.
@@ -226,6 +257,7 @@
 		($selectedTerminalId, $terminalServers, $settings);
 		const terminal = getTerminal();
 		selectedTerminal = terminal;
+		selectedTerminalServerId = getTerminalServerId();
 
 		const chatChanged = chatId !== prevChatId;
 		const oldChatId = prevChatId;
@@ -272,6 +304,17 @@
 	const isSqlite = (path: string) => SQLITE_EXTS.has(path.split('.').pop()?.toLowerCase() ?? '');
 	const isPdf = (path: string) => path.split('.').pop()?.toLowerCase() === 'pdf';
 	const isOffice = (path: string) => OFFICE_EXTS.has(path.split('.').pop()?.toLowerCase() ?? '');
+
+	const openOnlyOfficePreview = (mode: 'view' | 'edit') => {
+		if (!selectedFile || !selectedTerminalServerId) return;
+
+		const params = new URLSearchParams({
+			mode,
+			terminal_server_id: selectedTerminalServerId,
+			terminal_file_path: selectedFile
+		});
+		window.open(`/office-preview?${params.toString()}`, '_blank', 'noopener,noreferrer');
+	};
 
 	/** Normalize Windows backslashes to forward slashes. */
 	const normalizePath = (p: string) => p.replace(/\\/g, '/');
@@ -1146,6 +1189,36 @@
 					{/if}
 				{/if}
 
+				{#if selectedFile !== null && isOffice(selectedFile)}
+					<Tooltip
+						content={selectedTerminalServerId
+							? $i18n.t('Open in OnlyOffice')
+							: $i18n.t('OnlyOffice edit requires a terminal server id')}
+					>
+						<button
+							class="shrink-0 p-1 rounded hover:bg-gray-100 dark:hover:bg-gray-800 transition text-gray-400 dark:text-gray-500 hover:text-gray-600 dark:hover:text-gray-400 disabled:opacity-40 disabled:cursor-not-allowed"
+							on:click={() => openOnlyOfficePreview('edit')}
+							disabled={!selectedTerminalServerId}
+							aria-label={$i18n.t('Open in OnlyOffice')}
+						>
+							<svg
+								xmlns="http://www.w3.org/2000/svg"
+								viewBox="0 0 24 24"
+								fill="none"
+								stroke="currentColor"
+								stroke-width="1.5"
+								class="size-3.5"
+							>
+								<path
+									stroke-linecap="round"
+									stroke-linejoin="round"
+									d="M16.5 3.75H19.5A1.5 1.5 0 0 1 21 5.25V8.25M20.25 3.75 13.5 10.5M7.5 20.25H4.5A1.5 1.5 0 0 1 3 18.75V15.75M3.75 20.25 10.5 13.5"
+								/>
+							</svg>
+						</button>
+					</Tooltip>
+				{/if}
+
 				{#if fileContent !== null}
 					<Tooltip content={$i18n.t('Copy')}>
 						<button
@@ -1248,6 +1321,9 @@
 					{fileOfficeSlides}
 					{excelSheetNames}
 					{selectedExcelSheet}
+					onlyOfficeFileId={null}
+					onlyOfficeTerminalServerId={selectedTerminalServerId}
+					onlyOfficeTerminalFilePath={selectedFile}
 					onSheetChange={async (sheet) => {
 						if (!excelWorkbook) return;
 						selectedExcelSheet = sheet;
