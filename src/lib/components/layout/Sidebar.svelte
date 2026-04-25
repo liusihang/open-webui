@@ -1040,12 +1040,20 @@
 					/>
 				</a>
 
-				<a href="/" class="flex flex-1 px-0.5" on:click={newChatHandler}>
-					<div
-						id="sidebar-webui-name"
-						class=" self-center font-medium text-gray-850 dark:text-white font-primary"
-					>
-						{$WEBUI_NAME}
+				<a href="/" class="flex flex-1 px-0.5 min-w-0" on:click={newChatHandler}>
+					<div class="self-center min-w-0 leading-tight">
+						<div
+							id="sidebar-webui-name"
+							class="font-medium text-gray-850 dark:text-white font-primary truncate"
+						>
+							{$WEBUI_NAME}
+						</div>
+						<div
+							id="sidebar-customized-by"
+							class="text-[10px] text-gray-500 dark:text-gray-400 tracking-[0.01em] truncate"
+						>
+							Customized by shuofang
+						</div>
 					</div>
 				</a>
 				<Tooltip
