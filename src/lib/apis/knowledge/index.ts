@@ -544,3 +544,220 @@ export const exportKnowledgeById = async (token: string, id: string) => {
 
 	return res;
 };
+
+export type KnowledgeLayerType = 'abstract';
+
+export type KnowledgeFileLayer = {
+	id?: string;
+	knowledge_id?: string;
+	file_id?: string;
+	layer_type: KnowledgeLayerType;
+	content?: string;
+	status?: string;
+	updated_at?: number | null;
+	part_index?: number | null;
+	part_total?: number | null;
+	display_title?: string | null;
+};
+
+export type KnowledgeFileLayersResponse = {
+	items: KnowledgeFileLayer[];
+};
+
+const getApiErrorMessage = (err: unknown, fallback: string) => {
+	if (typeof err === 'string' && err.trim().length > 0) {
+		return err;
+	}
+
+	if (err instanceof Error && err.message.trim().length > 0) {
+		return err.message;
+	}
+
+	if (typeof err === 'object' && err !== null) {
+		const maybeDetail = (err as { detail?: unknown }).detail;
+		if (typeof maybeDetail === 'string' && maybeDetail.trim().length > 0) {
+			return maybeDetail;
+		}
+
+		const maybeMessage = (err as { message?: unknown }).message;
+		if (typeof maybeMessage === 'string' && maybeMessage.trim().length > 0) {
+			return maybeMessage;
+		}
+	}
+
+	return fallback;
+};
+
+const parseApiErrorBody = async (response: Response) => {
+	try {
+		return await response.json();
+	} catch {
+		if (response.statusText?.trim()) {
+			return {
+				detail: `${response.status} ${response.statusText}`
+			};
+		}
+
+		return {
+			detail: `Request failed with status ${response.status}`
+		};
+	}
+};
+
+export const getKnowledgeFileLayers = async (
+	token: string,
+	knowledgeId: string,
+	fileId: string
+): Promise<KnowledgeFileLayersResponse> => {
+	let error = null;
+
+	const res = await fetch(`${WEBUI_API_BASE_URL}/knowledge/${knowledgeId}/file/${fileId}/layers`, {
+		method: 'GET',
+		headers: {
+			Accept: 'application/json',
+			'Content-Type': 'application/json',
+			authorization: `Bearer ${token}`
+		}
+	})
+		.then(async (response) => {
+			if (!response.ok) throw await parseApiErrorBody(response);
+			return response.json();
+		})
+		.catch((err) => {
+			error = getApiErrorMessage(err, 'Failed to fetch file layers');
+			console.error(err);
+			return null;
+		});
+
+	if (error) {
+		throw error;
+	}
+
+	return (
+		res ?? {
+			items: []
+		}
+	);
+};
+
+export const regenerateKnowledgeFileLayers = async (
+	token: string,
+	knowledgeId: string,
+	fileId: string,
+	options?: {
+		layerTypes?: KnowledgeLayerType[];
+		force?: boolean;
+	}
+) => {
+	let error = null;
+	const layerTypes = options?.layerTypes;
+	const force = options?.force ?? false;
+
+	const res = await fetch(
+		`${WEBUI_API_BASE_URL}/knowledge/${knowledgeId}/file/${fileId}/layers/regenerate`,
+		{
+			method: 'POST',
+			headers: {
+				Accept: 'application/json',
+				'Content-Type': 'application/json',
+				authorization: `Bearer ${token}`
+			},
+			body: JSON.stringify({
+				layer_types: layerTypes,
+				force
+			})
+		}
+	)
+		.then(async (response) => {
+			if (!response.ok) throw await parseApiErrorBody(response);
+			return response.json();
+		})
+		.catch((err) => {
+			error = getApiErrorMessage(err, 'Failed to regenerate layers');
+			console.error(err);
+			return null;
+		});
+
+	if (error) {
+		throw error;
+	}
+
+	return res;
+};
+
+export const backfillKnowledgeLayers = async (
+	token: string,
+	knowledgeId: string,
+	options?: {
+		layerTypes?: KnowledgeLayerType[];
+		force?: boolean;
+	}
+) => {
+	let error = null;
+	const layerTypes = options?.layerTypes;
+	const force = options?.force ?? false;
+
+	const res = await fetch(`${WEBUI_API_BASE_URL}/knowledge/${knowledgeId}/layers/backfill`, {
+		method: 'POST',
+		headers: {
+			Accept: 'application/json',
+			'Content-Type': 'application/json',
+			authorization: `Bearer ${token}`
+		},
+		body: JSON.stringify({
+			layer_types: layerTypes,
+			force
+		})
+	})
+		.then(async (response) => {
+			if (!response.ok) throw await parseApiErrorBody(response);
+			return response.json();
+		})
+		.catch((err) => {
+			error = getApiErrorMessage(err, 'Failed to backfill layers');
+			console.error(err);
+			return null;
+		});
+
+	if (error) {
+		throw error;
+	}
+
+	return res;
+};
+
+export const regenerateKnowledgeFileLayerByType = async (
+	token: string,
+	knowledgeId: string,
+	fileId: string,
+	layerType: KnowledgeLayerType
+) => {
+	let error = null;
+
+	const res = await fetch(
+		`${WEBUI_API_BASE_URL}/knowledge/${knowledgeId}/file/${fileId}/layers/regenerate/${layerType}`,
+		{
+			method: 'POST',
+			headers: {
+				Accept: 'application/json',
+				'Content-Type': 'application/json',
+				authorization: `Bearer ${token}`
+			}
+		}
+	)
+		.then(async (response) => {
+			if (!response.ok) throw await parseApiErrorBody(response);
+			return response.json();
+		})
+		.catch((err) => {
+			error = getApiErrorMessage(err, 'Failed to regenerate layer');
+			console.error(err);
+			return null;
+		});
+
+	if (error) {
+		throw error;
+	}
+
+	return res;
+};

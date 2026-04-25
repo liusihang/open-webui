@@ -10,13 +10,14 @@ import json
 import logging
 import time
 import asyncio
+import types
 from typing import Optional
 
 from fastapi import Request
 
 from open_webui.models.users import UserModel
 from open_webui.routers.retrieval import search_web as _search_web
-from open_webui.retrieval.utils import get_content_from_url
+from open_webui.retrieval.utils import get_content_from_url, get_sources_from_items
 from open_webui.routers.images import (
     image_generations,
     image_edits,
@@ -1577,6 +1578,7 @@ async def search_knowledge_files(
     skip: int = 0,
     __request__: Request = None,
     __user__: dict = None,
+    __metadata__: dict = None,
     __model_knowledge__: Optional[list[dict]] = None,
 ) -> str:
     """
@@ -1604,12 +1606,14 @@ async def search_knowledge_files(
         user_role = __user__.get('role', 'user')
         user_group_ids = [group.id for group in await Groups.get_groups_by_member_id(user_id)]
 
-        # When model has attached knowledge, scope to attached KBs/files only
-        if __model_knowledge__:
+        effective_scope = _resolve_effective_scope(__metadata__, __model_knowledge__)
+
+        # When model has attached/scoped knowledge, scope to that set only
+        if effective_scope:
             attached_kb_ids = set()
             attached_file_ids = set()
 
-            for item in __model_knowledge__:
+            for item in effective_scope:
                 item_type = item.get('type')
                 item_id = item.get('id')
                 if item_type == 'collection':
@@ -1925,9 +1929,223 @@ async def view_knowledge_file(
         return json.dumps({'error': str(e)})
 
 
+def _coerce_count(count: int | str, default: int = 5) -> int:
+    if isinstance(count, str):
+        try:
+            return int(count)
+        except ValueError:
+            return default
+    return count
+
+
+def _coerce_knowledge_ids(knowledge_ids: Optional[list[str]] | str) -> Optional[list[str]]:
+    if isinstance(knowledge_ids, str):
+        if knowledge_ids.lower() in ('none', 'null', ''):
+            return None
+        try:
+            return json.loads(knowledge_ids)
+        except json.JSONDecodeError:
+            return [knowledge_ids]
+    return knowledge_ids
+
+
+def _resolve_effective_scope(metadata: dict | None, model_knowledge: list[dict] | None) -> list[dict]:
+    metadata = metadata or {}
+    effective_scope = metadata.get('effective_knowledge_scope') or []
+    if not effective_scope:
+        attached_scope = metadata.get('attached_knowledge_scope') or []
+        effective_scope = [*(model_knowledge or []), *attached_scope]
+    return effective_scope
+
+
+def _layer_label(layer: str) -> str:
+    return {
+        'abstract': 'Abstract',
+        'full_text': 'Full Text',
+    }.get(layer, layer.replace('_', ' ').title())
+
+
+def _prefix_source(source: str, layer: str) -> str:
+    source_value = source or 'Unknown'
+    layer_label = _layer_label(layer)
+    if source_value.startswith(f'{layer_label}:') or source_value.startswith(f'{layer_label} '):
+        return source_value
+    return f'{layer_label}: {source_value}'
+
+
+def _decorate_layer_result_items(items: list[dict], layer: str) -> list[dict]:
+    decorated: list[dict] = []
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        source = item.get('source', 'Unknown')
+        decorated.append(
+            {
+                **item,
+                'layer': layer,
+                'source': _prefix_source(str(source), layer),
+            }
+        )
+    return decorated
+
+
+async def _query_knowledge_layer(
+    *,
+    layer: str,
+    query: str,
+    count: int = 5,
+    __request__: Request = None,
+    __user__: dict = None,
+    __metadata__: dict = None,
+    __model_knowledge__: list[dict] = None,
+) -> str:
+    if __request__ is None:
+        return json.dumps({'error': 'Request context not available'})
+    if not __user__:
+        return json.dumps({'error': 'User context not available'})
+
+    effective_scope = _resolve_effective_scope(__metadata__, __model_knowledge__)
+    if not effective_scope:
+        return json.dumps({'error': 'No effective knowledge scope'})
+
+    try:
+        from open_webui.utils import layered_knowledge
+
+        rows = await layered_knowledge.query_layers(
+            layer=layer,
+            query=query,
+            scope_items=effective_scope,
+            count=_coerce_count(count),
+            request=__request__,
+            user=__user__,
+        )
+        return json.dumps(_decorate_layer_result_items(rows[: _coerce_count(count)], layer), ensure_ascii=False)
+    except Exception as e:
+        log.exception(f'query_knowledge_{layer} error: {e}')
+        return json.dumps({'error': str(e)})
+
+
+async def query_knowledge_abstract(
+    query: str,
+    count: int = 5,
+    __request__: Request = None,
+    __user__: dict = None,
+    __metadata__: dict = None,
+    __model_knowledge__: list[dict] = None,
+) -> str:
+    """
+    Search only the `abstract` layer for scoped knowledge documents.
+    Use this first for broad questions like "what is this document about?".
+    """
+    return await _query_knowledge_layer(
+        layer='abstract',
+        query=query,
+        count=count,
+        __request__=__request__,
+        __user__=__user__,
+        __metadata__=__metadata__,
+        __model_knowledge__=__model_knowledge__,
+    )
+
+
+async def view_knowledge_layers(
+    file_id: str,
+    __request__: Request = None,
+    __user__: dict = None,
+    __metadata__: dict = None,
+    __model_knowledge__: list[dict] = None,
+) -> str:
+    """
+    Return the available structured knowledge summaries for a single scoped file.
+    """
+    if __request__ is None:
+        return json.dumps({'error': 'Request context not available'})
+    if not __user__:
+        return json.dumps({'error': 'User context not available'})
+
+    effective_scope = _resolve_effective_scope(__metadata__, __model_knowledge__)
+    if not effective_scope:
+        return json.dumps({'error': 'No effective knowledge scope'})
+
+    try:
+        from open_webui.utils import layered_knowledge
+
+        result = await layered_knowledge.get_file_layers(
+            file_id=file_id,
+            scope_items=effective_scope,
+            request=__request__,
+            user=__user__,
+        )
+        layers = result.get('layers', {}) if isinstance(result, dict) else {}
+        for layer_name in ('abstract',):
+            payload = layers.get(layer_name)
+            if isinstance(payload, dict):
+                source = str(payload.get('source', 'Unknown'))
+                payload['source'] = _prefix_source(source, layer_name)
+                payload['layer'] = layer_name
+            elif isinstance(payload, list):
+                normalized_items: list[dict] = []
+                for item in payload:
+                    if not isinstance(item, dict):
+                        continue
+                    source = str(item.get('source', 'Unknown'))
+                    normalized_items.append(
+                        {
+                            **item,
+                            'source': _prefix_source(source, layer_name),
+                            'layer': layer_name,
+                        }
+                    )
+                layers[layer_name] = normalized_items
+
+        return json.dumps(
+            {
+                **(result if isinstance(result, dict) else {'file_id': file_id}),
+                'layers': layers,
+            },
+            ensure_ascii=False,
+        )
+    except Exception as e:
+        log.exception(f'view_knowledge_layers error: {e}')
+        return json.dumps({'error': str(e)})
+
+
+async def query_knowledge_full_text(
+    query: str,
+    knowledge_ids: Optional[list[str]] = None,
+    count: int = 5,
+    __request__: Request = None,
+    __user__: dict = None,
+    __metadata__: dict = None,
+    __model_knowledge__: list[dict] = None,
+) -> str:
+    """
+    Search full document chunks (`full_text`) in scoped knowledge.
+    Prefer summary layers first for broad questions.
+    """
+    result = await query_knowledge_files(
+        query=query,
+        knowledge_ids=knowledge_ids,
+        count=count,
+        __request__=__request__,
+        __user__=__user__,
+        __metadata__=__metadata__,
+        __model_knowledge__=__model_knowledge__,
+    )
+    try:
+        payload = json.loads(result)
+    except json.JSONDecodeError:
+        return result
+
+    if isinstance(payload, list):
+        return json.dumps(_decorate_layer_result_items(payload, 'full_text'), ensure_ascii=False)
+    return result
+
+
 async def list_knowledge(
     __request__: Request = None,
     __user__: dict = None,
+    __metadata__: dict = None,
     __model_knowledge__: Optional[list[dict]] = None,
 ) -> str:
     """
@@ -1942,7 +2160,8 @@ async def list_knowledge(
     if not __user__:
         return json.dumps({'error': 'User context not available'})
 
-    if not __model_knowledge__:
+    effective_scope = _resolve_effective_scope(__metadata__, __model_knowledge__)
+    if not effective_scope:
         return json.dumps({'knowledge_bases': [], 'files': [], 'notes': []})
 
     try:
@@ -1959,7 +2178,7 @@ async def list_knowledge(
         files = []
         notes = []
 
-        for item in __model_knowledge__:
+        for item in effective_scope:
             item_type = item.get('type')
             item_id = item.get('id')
 
@@ -2041,6 +2260,7 @@ async def query_knowledge_files(
     count: int = 5,
     __request__: Request = None,
     __user__: dict = None,
+    __metadata__: dict = None,
     __model_knowledge__: list[dict] = None,
 ) -> str:
     """
@@ -2058,96 +2278,81 @@ async def query_knowledge_files(
     if not __user__:
         return json.dumps({'error': 'User context not available'})
 
-    # Coerce parameters from LLM tool calls (may come as strings)
-    if isinstance(count, str):
-        try:
-            count = int(count)
-        except ValueError:
-            count = 5  # Default fallback
-
-    # Handle knowledge_ids being string "None", "null", or empty
-    if isinstance(knowledge_ids, str):
-        if knowledge_ids.lower() in ('none', 'null', ''):
-            knowledge_ids = None
-        else:
-            # Try to parse as JSON array if it looks like one
-            try:
-                knowledge_ids = json.loads(knowledge_ids)
-            except json.JSONDecodeError:
-                # Treat as single ID
-                knowledge_ids = [knowledge_ids]
+    count = _coerce_count(count)
+    knowledge_ids = _coerce_knowledge_ids(knowledge_ids)
 
     try:
+        effective_scope = _resolve_effective_scope(__metadata__, __model_knowledge__)
+        embedding_function = __request__.app.state.EMBEDDING_FUNCTION
+        if not embedding_function:
+            return json.dumps({'error': 'Embedding function not configured'})
+
+        if effective_scope:
+            config = __request__.app.state.config
+            user = types.SimpleNamespace(
+                id=__user__.get('id'),
+                role=__user__.get('role', 'user'),
+            )
+
+            sources = await get_sources_from_items(
+                request=__request__,
+                items=effective_scope,
+                queries=[query],
+                embedding_function=embedding_function,
+                k=getattr(config, 'TOP_K', count),
+                reranking_function=__request__.app.state.RERANKING_FUNCTION,
+                k_reranker=getattr(config, 'TOP_K_RERANKER', count),
+                r=getattr(config, 'RELEVANCE_THRESHOLD', 0.0),
+                hybrid_bm25_weight=getattr(config, 'HYBRID_BM25_WEIGHT', 0.0),
+                hybrid_search=getattr(config, 'ENABLE_RAG_HYBRID_SEARCH', False),
+                full_context=False,
+                user=user,
+            )
+
+            chunks = []
+            for source_result in sources:
+                source_item = source_result.get('source') or {}
+                if (
+                    knowledge_ids
+                    and source_item.get('type') == 'collection'
+                    and source_item.get('id') not in set(knowledge_ids)
+                ):
+                    continue
+
+                documents = source_result.get('document') or []
+                metadatas = source_result.get('metadata') or []
+                distances = source_result.get('distances') or []
+
+                for idx, document in enumerate(documents):
+                    metadata_item = metadatas[idx] if idx < len(metadatas) else {}
+                    chunk = {
+                        'content': document,
+                        'source': metadata_item.get(
+                            'source',
+                            metadata_item.get('name', source_item.get('name', 'Unknown')),
+                        ),
+                    }
+                    if metadata_item.get('file_id'):
+                        chunk['file_id'] = metadata_item['file_id']
+                    if idx < len(distances):
+                        chunk['distance'] = distances[idx]
+                    if source_item.get('type') == 'note':
+                        chunk['type'] = 'note'
+                        chunk['note_id'] = source_item.get('id')
+                    chunks.append(chunk)
+
+            return json.dumps(chunks[:count], ensure_ascii=False)
+
         from open_webui.models.knowledge import Knowledges
-        from open_webui.models.files import Files
-        from open_webui.models.notes import Notes
-        from open_webui.retrieval.utils import query_collection
         from open_webui.models.access_grants import AccessGrants
+        from open_webui.retrieval.utils import query_collection
 
         user_id = __user__.get('id')
         user_role = __user__.get('role', 'user')
         user_group_ids = [group.id for group in await Groups.get_groups_by_member_id(user_id)]
 
-        embedding_function = __request__.app.state.EMBEDDING_FUNCTION
-        if not embedding_function:
-            return json.dumps({'error': 'Embedding function not configured'})
-
         collection_names = []
-        note_results = []  # Notes aren't vectorized, handle separately
-
-        # If model has attached knowledge, use those
-        if __model_knowledge__:
-            for item in __model_knowledge__:
-                item_type = item.get('type')
-                item_id = item.get('id')
-
-                if item_type == 'collection':
-                    # Knowledge base - use KB ID as collection name
-                    knowledge = await Knowledges.get_knowledge_by_id(item_id)
-                    if knowledge and (
-                        user_role == 'admin'
-                        or knowledge.user_id == user_id
-                        or await AccessGrants.has_access(
-                            user_id=user_id,
-                            resource_type='knowledge',
-                            resource_id=knowledge.id,
-                            permission='read',
-                            user_group_ids=set(user_group_ids),
-                        )
-                    ):
-                        collection_names.append(item_id)
-
-                elif item_type == 'file':
-                    # Individual file - use file-{id} as collection name
-                    file = await Files.get_file_by_id(item_id)
-                    if file:
-                        collection_names.append(f'file-{item_id}')
-
-                elif item_type == 'note':
-                    # Note - always return full content as context
-                    note = await Notes.get_note_by_id(item_id)
-                    if note and (
-                        user_role == 'admin'
-                        or note.user_id == user_id
-                        or await AccessGrants.has_access(
-                            user_id=user_id,
-                            resource_type='note',
-                            resource_id=note.id,
-                            permission='read',
-                        )
-                    ):
-                        content = note.data.get('content', {}).get('md', '')
-                        note_results.append(
-                            {
-                                'content': content,
-                                'source': note.title,
-                                'note_id': note.id,
-                                'type': 'note',
-                            }
-                        )
-
-        elif knowledge_ids:
-            # User specified specific KBs
+        if knowledge_ids:
             for knowledge_id in knowledge_ids:
                 knowledge = await Knowledges.get_knowledge_by_id(knowledge_id)
                 if knowledge and (
@@ -2163,7 +2368,6 @@ async def query_knowledge_files(
                 ):
                     collection_names.append(knowledge_id)
         else:
-            # No model knowledge and no specific IDs - search all accessible KBs
             result = await Knowledges.search_knowledge_bases(
                 user_id,
                 filter={
@@ -2177,11 +2381,6 @@ async def query_knowledge_files(
             collection_names = [knowledge_base.id for knowledge_base in result.items]
 
         chunks = []
-
-        # Add note results first
-        chunks.extend(note_results)
-
-        # Query vector collections if any
         if collection_names:
             query_results = await query_collection(
                 __request__,
@@ -2190,12 +2389,10 @@ async def query_knowledge_files(
                 embedding_function=embedding_function,
                 k=count,
             )
-
             if query_results and 'documents' in query_results:
                 documents = query_results.get('documents', [[]])[0]
                 metadatas = query_results.get('metadatas', [[]])[0]
                 distances = query_results.get('distances', [[]])[0]
-
                 for idx, doc in enumerate(documents):
                     chunk_info = {
                         'content': doc,
@@ -2206,10 +2403,7 @@ async def query_knowledge_files(
                         chunk_info['distance'] = distances[idx]
                     chunks.append(chunk_info)
 
-        # Limit to requested count
-        chunks = chunks[:count]
-
-        return json.dumps(chunks, ensure_ascii=False)
+        return json.dumps(chunks[:count], ensure_ascii=False)
     except Exception as e:
         log.exception(f'query_knowledge_files error: {e}')
         return json.dumps({'error': str(e)})

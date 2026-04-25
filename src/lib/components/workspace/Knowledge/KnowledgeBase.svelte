@@ -26,7 +26,11 @@
 	} from '$lib/apis/files';
 	import {
 		addFileToKnowledgeById,
+		backfillKnowledgeLayers,
 		getKnowledgeById,
+		getKnowledgeFileLayers,
+		regenerateKnowledgeFileLayerByType,
+		regenerateKnowledgeFileLayers,
 		removeFileFromKnowledgeById,
 		resetKnowledgeById,
 		updateFileFromKnowledgeById,
@@ -40,6 +44,7 @@
 
 	import Spinner from '$lib/components/common/Spinner.svelte';
 	import Files from './KnowledgeBase/Files.svelte';
+	import LayersPanel from './KnowledgeBase/LayersPanel.svelte';
 	import AddFilesPlaceholder from '$lib/components/AddFilesPlaceholder.svelte';
 
 	import AddContentMenu from './KnowledgeBase/AddContentMenu.svelte';
@@ -47,6 +52,7 @@
 
 	import SyncConfirmDialog from '../../common/ConfirmDialog.svelte';
 	import Drawer from '$lib/components/common/Drawer.svelte';
+	import ArrowPath from '$lib/components/icons/ArrowPath.svelte';
 	import ChevronLeft from '$lib/components/icons/ChevronLeft.svelte';
 	import LockClosed from '$lib/components/icons/LockClosed.svelte';
 	import AccessControlModal from '../common/AccessControlModal.svelte';
@@ -55,6 +61,7 @@
 	import DropdownOptions from '$lib/components/common/DropdownOptions.svelte';
 	import Pagination from '$lib/components/common/Pagination.svelte';
 	import AttachWebpageModal from '$lib/components/chat/MessageInput/AttachWebpageModal.svelte';
+	import type { KnowledgeLayerItem, KnowledgeLayerType } from './KnowledgeBase/LayersPanel.svelte';
 
 	let largeScreen = true;
 
@@ -87,6 +94,12 @@
 	let selectedFileId = null;
 	let selectedFile = null;
 	let selectedFileContent = '';
+	let selectedFileLayers: KnowledgeLayerItem[] = [];
+	let selectedFileLayersError: string | null = null;
+	let selectedFileLayersLoading = false;
+	let isRegeneratingAllLayers = false;
+	let isBackfillingLayers = false;
+	let regeneratingLayerType: KnowledgeLayerType | null = null;
 
 	let inputFiles = null;
 
@@ -168,10 +181,152 @@
 		return res;
 	};
 
+	const normalizeLayerItems = (payload: unknown): KnowledgeLayerItem[] => {
+		if (!payload) {
+			return [];
+		}
+
+		if (Array.isArray(payload)) {
+			return payload as KnowledgeLayerItem[];
+		}
+
+		if (typeof payload === 'object' && payload !== null && 'items' in payload) {
+			const items = (payload as { items?: unknown }).items;
+			return Array.isArray(items) ? (items as KnowledgeLayerItem[]) : [];
+		}
+
+		return [];
+	};
+
+	const refreshSelectedFileLayers = async (fileId: string, showErrors = true) => {
+		if (!knowledge?.id || !fileId) {
+			selectedFileLayers = [];
+			selectedFileLayersError = null;
+			return;
+		}
+
+		selectedFileLayersLoading = true;
+		selectedFileLayersError = null;
+
+		try {
+			const response = await getKnowledgeFileLayers(localStorage.token, knowledge.id, fileId).catch(
+				(e) => {
+					throw e;
+				}
+			);
+			selectedFileLayers = normalizeLayerItems(response);
+		} catch (e) {
+			const errorMessage = `${e}`;
+			selectedFileLayers = [];
+			selectedFileLayersError = errorMessage;
+			if (showErrors) {
+				toast.error(errorMessage);
+			}
+		} finally {
+			selectedFileLayersLoading = false;
+		}
+	};
+
+	const regenerateAllLayersHandler = async () => {
+		if (!knowledge?.id || !selectedFileId || selectedFileLayersLoading || regeneratingLayerType) {
+			return;
+		}
+
+		isRegeneratingAllLayers = true;
+		try {
+			const response = await regenerateKnowledgeFileLayers(
+				localStorage.token,
+				knowledge.id,
+				selectedFileId,
+				{
+					force: false
+				}
+			).catch((e) => {
+				throw e;
+			});
+
+			if (response) {
+				toast.success($i18n.t('Layer regeneration started.'));
+				await refreshSelectedFileLayers(selectedFileId, false);
+			}
+		} catch (e) {
+			toast.error(`${e}`);
+		} finally {
+			isRegeneratingAllLayers = false;
+		}
+	};
+
+	const backfillLayersHandler = async () => {
+		if (
+			!knowledge?.id ||
+			isBackfillingLayers ||
+			isRegeneratingAllLayers ||
+			selectedFileLayersLoading
+		) {
+			return;
+		}
+
+		isBackfillingLayers = true;
+		try {
+			const response = await backfillKnowledgeLayers(localStorage.token, knowledge.id, {
+				force: false
+			}).catch((e) => {
+				throw e;
+			});
+
+			if (response) {
+				toast.success($i18n.t('Knowledge layer backfill started.'));
+				if (selectedFileId) {
+					await refreshSelectedFileLayers(selectedFileId, false);
+				}
+			}
+		} catch (e) {
+			toast.error(`${e}`);
+		} finally {
+			isBackfillingLayers = false;
+		}
+	};
+
+	const regenerateLayerHandler = async (layerType: KnowledgeLayerType) => {
+		if (!knowledge?.id || !selectedFileId || isRegeneratingAllLayers || selectedFileLayersLoading) {
+			return;
+		}
+
+		regeneratingLayerType = layerType;
+		try {
+			const response = await regenerateKnowledgeFileLayerByType(
+				localStorage.token,
+				knowledge.id,
+				selectedFileId,
+				layerType
+			).catch((e) => {
+				throw e;
+			});
+
+			if (response) {
+				toast.success($i18n.t('Layer regeneration started.'));
+				await refreshSelectedFileLayers(selectedFileId, false);
+			}
+		} catch (e) {
+			toast.error(`${e}`);
+		} finally {
+			regeneratingLayerType = null;
+		}
+	};
+
+	const retrySelectedFileLayersHandler = async () => {
+		if (!selectedFileId) {
+			return;
+		}
+
+		await refreshSelectedFileLayers(selectedFileId);
+	};
+
 	const fileSelectHandler = async (file) => {
 		try {
 			selectedFile = file;
 			selectedFileContent = selectedFile?.data?.content || '';
+			await refreshSelectedFileLayers(file?.id, false);
 		} catch (e) {
 			toast.error($i18n.t('Failed to load file content.'));
 		}
@@ -933,11 +1088,31 @@
 						placeholder={$i18n.t('Search Collection')}
 						on:focus={() => {
 							selectedFileId = null;
+							selectedFile = null;
+							selectedFileLayers = [];
+							selectedFileLayersError = null;
 						}}
 					/>
 
 					{#if knowledge?.write_access}
-						<div>
+						<div class="flex items-center gap-2">
+							<button
+								type="button"
+								class="flex items-center gap-1.5 px-2.5 py-1.5 text-sm bg-gray-50 dark:bg-gray-850 rounded-xl hover:bg-gray-100 dark:hover:bg-gray-800 disabled:opacity-60 disabled:cursor-not-allowed"
+								disabled={isBackfillingLayers || isRegeneratingAllLayers}
+								on:click={() => {
+									backfillLayersHandler();
+								}}
+							>
+								<ArrowPath className="size-3.5" strokeWidth="2" />
+								<span>
+									{#if isBackfillingLayers}
+										{$i18n.t('Rebuilding...')}
+									{:else}
+										{$i18n.t('Rebuild Layers')}
+									{/if}
+								</span>
+							</button>
 							<AddContentMenu
 								onUpload={(data) => {
 									if (data.type === 'directory') {
@@ -1041,6 +1216,8 @@
 											onDelete={(fileId) => {
 												selectedFileId = null;
 												selectedFile = null;
+												selectedFileLayers = [];
+												selectedFileLayersError = null;
 
 												deleteFileHandler(fileId);
 											}}
@@ -1068,6 +1245,8 @@
 							onClose={() => {
 								selectedFileId = null;
 								selectedFile = null;
+								selectedFileLayers = [];
+								selectedFileLayersError = null;
 							}}
 						>
 							<div class="flex flex-col justify-start h-full max-h-full">
@@ -1080,6 +1259,8 @@
 												on:click={() => {
 													selectedFileId = null;
 													selectedFile = null;
+													selectedFileLayers = [];
+													selectedFileLayersError = null;
 												}}
 											>
 												<ChevronLeft strokeWidth="2.5" />
@@ -1108,6 +1289,18 @@
 											</div>
 										{/if}
 									</div>
+
+									<LayersPanel
+										layers={selectedFileLayers}
+										loading={selectedFileLayersLoading}
+										error={selectedFileLayersError}
+										canManage={knowledge?.write_access ?? false}
+										regeneratingAll={isRegeneratingAllLayers}
+										{regeneratingLayerType}
+										onRegenerateAll={regenerateAllLayersHandler}
+										onRegenerateLayer={regenerateLayerHandler}
+										onRetry={retrySelectedFileLayersHandler}
+									/>
 
 									{#key selectedFile.id}
 										<textarea
