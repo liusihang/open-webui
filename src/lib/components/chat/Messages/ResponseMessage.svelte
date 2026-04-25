@@ -38,6 +38,7 @@
 	} from '$lib/utils';
 	import { WEBUI_API_BASE_URL, WEBUI_BASE_URL } from '$lib/constants';
 	import equal from 'fast-deep-equal';
+	import { mergeServerMessage } from '$lib/components/chat/historySync';
 
 	import Name from './Name.svelte';
 	import ProfileImage from './ProfileImage.svelte';
@@ -124,13 +125,13 @@
 	$: if (history.messages) {
 		const source = history.messages[messageId];
 		if (source) {
-			// Fast path: O(1) check on the fields that change most often (content during streaming, done at end)
-			// Avoids 2x O(n) JSON.stringify calls that are always true during streaming anyway
-			if (message.content !== source.content || message.done !== source.done) {
-				message = structuredClone(source);
-			} else if (!equal(message, source)) {
-				// Slow path: full comparison for infrequent changes (sources, annotations, status, etc.)
-				message = structuredClone(source);
+			const mergedMessage = mergeServerMessage(message, source) as MessageType;
+			// Fast path: content/done churn during streaming, with helper preserving replay-safe fields.
+			if (message.content !== mergedMessage.content || message.done !== mergedMessage.done) {
+				message = structuredClone(mergedMessage);
+			} else if (!equal(message, mergedMessage)) {
+				// Slow path: sources, status history, citations, code executions, etc.
+				message = structuredClone(mergedMessage);
 			}
 		}
 	}
@@ -789,7 +790,7 @@
 								<ContentRenderer
 									id={`${chatId}-${message.id}`}
 									content={message.content}
-									sources={message.sources}
+									sources={message.sources ?? message.citations}
 									floatingButtons={message?.done &&
 										!readOnly &&
 										($settings?.showFloatingActionButtons ?? true)}

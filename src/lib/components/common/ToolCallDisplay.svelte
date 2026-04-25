@@ -76,14 +76,31 @@
 		}
 	}
 
+	function pickBestContent(...candidates: string[]) {
+		return (
+			candidates
+				.map((candidate) => candidate ?? '')
+				.filter((candidate) => candidate.trim().length > 0)
+				.sort((left, right) => right.length - left.length)[0] ?? ''
+		);
+	}
+
 	$: args = decode(attributes?.arguments ?? '');
 	export let resultContent: string = '';
 
-	$: result = resultContent || decode(attributes?.result ?? '');
+	$: result = pickBestContent(resultContent, decode(attributes?.result ?? ''));
 	$: files = parseJSONString(decode(attributes?.files ?? ''));
 	$: embeds = parseJSONString(decode(attributes?.embeds ?? ''));
-	$: isDone = attributes?.done === 'true';
-	$: isExecuting = attributes?.done && attributes?.done !== 'true';
+	$: hasResult = result.trim().length > 0;
+	$: hasFiles = Array.isArray(files) && files.length > 0;
+	$: hasEmbeds = Array.isArray(embeds) && embeds.length > 0;
+	$: isExecuting =
+		Boolean(attributes?.done) &&
+		attributes?.done !== 'true' &&
+		!hasResult &&
+		!hasFiles &&
+		!hasEmbeds;
+	$: isDone = attributes?.done === 'true' || (!isExecuting && (hasResult || hasFiles || hasEmbeds));
 
 	$: parsedArgs = parseArguments(args);
 	$: parsedResult = parseJSONString(result);

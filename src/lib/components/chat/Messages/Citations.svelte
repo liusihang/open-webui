@@ -3,6 +3,7 @@
 	import { embed, showControls, showEmbeds } from '$lib/stores';
 
 	import CitationModal from './Citations/CitationModal.svelte';
+	import { buildCitations, calculateShowRelevance, shouldShowPercentage } from './citations';
 
 	const i18n = getContext('i18n');
 
@@ -15,8 +16,6 @@
 	let citations = [];
 	let showPercentage = false;
 	let showRelevance = true;
-
-	let citationModal = null;
 
 	let showCitations = false;
 	let showCitationModal = false;
@@ -71,73 +70,8 @@
 		}
 	};
 
-	function calculateShowRelevance(sources: any[]) {
-		const distances = sources.flatMap((citation) => citation.distances ?? []);
-		const inRange = distances.filter((d) => d !== undefined && d >= -1 && d <= 1).length;
-		const outOfRange = distances.filter((d) => d !== undefined && (d < -1 || d > 1)).length;
-
-		if (distances.length === 0) {
-			return false;
-		}
-
-		if (
-			(inRange === distances.length - 1 && outOfRange === 1) ||
-			(outOfRange === distances.length - 1 && inRange === 1)
-		) {
-			return false;
-		}
-
-		return true;
-	}
-
-	function shouldShowPercentage(sources: any[]) {
-		const distances = sources.flatMap((citation) => citation.distances ?? []);
-		return distances.every((d) => d !== undefined && d >= -1 && d <= 1);
-	}
-
 	$: {
-		citations = sources.reduce((acc, source) => {
-			if (Object.keys(source).length === 0) {
-				return acc;
-			}
-
-			source?.document?.forEach((document, index) => {
-				const metadata = source?.metadata?.[index];
-				const distance = source?.distances?.[index];
-
-				// Within the same citation there could be multiple documents
-				const id = metadata?.source ?? source?.source?.id ?? 'N/A';
-				let _source = source?.source;
-
-				if (metadata?.name) {
-					_source = { ..._source, name: metadata.name };
-				}
-
-				if (id.startsWith('http://') || id.startsWith('https://')) {
-					_source = { ..._source, name: id, url: id };
-				}
-
-				const existingSource = acc.find((item) => item.id === id);
-
-				if (existingSource) {
-					existingSource.document.push(document);
-					existingSource.metadata.push(metadata);
-					if (distance !== undefined) existingSource.distances.push(distance);
-				} else {
-					acc.push({
-						id: id,
-						source: _source,
-						document: [document],
-						metadata: metadata ? [metadata] : [],
-						distances: distance !== undefined ? [distance] : []
-					});
-				}
-			});
-
-			return acc;
-		}, []);
-		console.log('citations', citations);
-
+		citations = buildCitations(sources ?? []);
 		showRelevance = calculateShowRelevance(citations);
 		showPercentage = shouldShowPercentage(citations);
 	}
