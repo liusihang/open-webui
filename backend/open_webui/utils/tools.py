@@ -55,6 +55,7 @@ from open_webui.env import (
     REDIS_KEY_PREFIX,
 )
 from open_webui.utils.headers import include_user_info_headers
+from open_webui.socket.terminal_substrate import build_tool_server_headers, tool_server_cache_requires_refresh
 from open_webui.tools.builtin import (
     search_web,
     fetch_url,
@@ -83,9 +84,12 @@ from open_webui.tools.builtin import (
     query_knowledge_bases,
     search_knowledge_files,
     query_knowledge_files,
+    query_knowledge_abstract,
+    query_knowledge_full_text,
     list_knowledge,
     view_file,
     view_knowledge_file,
+    view_knowledge_layers,
     view_skill,
     create_tasks,
     update_task,
@@ -274,7 +278,11 @@ async def get_tools(request: Request, tool_ids: list[str], user: UserModel, extr
 
                 if type == 'openapi':
                     tool_server_data = None
-                    for server in await get_tool_servers(request):
+                    for server in await get_tool_servers(
+                        request,
+                        session_token=getattr(getattr(request.state, 'token', None), 'credentials', None),
+                        oauth_token=extra_params.get('__oauth_token__', None),
+                    ):
                         if server['id'] == server_id:
                             tool_server_data = server
                             break
@@ -441,12 +449,15 @@ async def get_builtin_tools(
             # Model has attached knowledge - provide discovery, search and semantic tools
             builtin_functions.append(list_knowledge)
             builtin_functions.append(search_knowledge_files)
+            builtin_functions.append(query_knowledge_abstract)
             builtin_functions.append(query_knowledge_files)
+            builtin_functions.append(query_knowledge_full_text)
 
             knowledge_types = {item.get('type') for item in model_knowledge}
             if 'file' in knowledge_types or 'collection' in knowledge_types:
                 builtin_functions.append(view_file)
                 builtin_functions.append(view_knowledge_file)
+                builtin_functions.append(view_knowledge_layers)
             if 'note' in knowledge_types:
                 builtin_functions.append(view_note)
         else:
@@ -458,7 +469,10 @@ async def get_builtin_tools(
                     query_knowledge_bases,
                     search_knowledge_files,
                     query_knowledge_files,
+                    query_knowledge_abstract,
+                    query_knowledge_full_text,
                     view_knowledge_file,
+                    view_knowledge_layers,
                 ]
             )
 
@@ -870,8 +884,17 @@ def convert_openapi_to_tool_payload(openapi_spec):
     return tool_payload
 
 
-async def set_tool_servers(request: Request):
-    request.app.state.TOOL_SERVERS = await get_tool_servers_data(request.app.state.config.TOOL_SERVER_CONNECTIONS)
+async def set_tool_servers(
+    request: Request,
+    *,
+    session_token: Optional[str] = None,
+    oauth_token: Optional[dict] = None,
+):
+    request.app.state.TOOL_SERVERS = await get_tool_servers_data(
+        request.app.state.config.TOOL_SERVER_CONNECTIONS,
+        session_token=session_token,
+        oauth_token=oauth_token,
+    )
 
     if request.app.state.redis is not None:
         await request.app.state.redis.set(
@@ -881,7 +904,12 @@ async def set_tool_servers(request: Request):
     return request.app.state.TOOL_SERVERS
 
 
-async def get_tool_servers(request: Request):
+async def get_tool_servers(
+    request: Request,
+    *,
+    session_token: Optional[str] = None,
+    oauth_token: Optional[dict] = None,
+):
     tool_servers = []
     if request.app.state.redis is not None:
         try:
@@ -890,8 +918,17 @@ async def get_tool_servers(request: Request):
         except Exception as e:
             log.error(f'Error fetching tool_servers from Redis: {e}')
 
-    if not tool_servers:
-        tool_servers = await set_tool_servers(request)
+    if not tool_servers or tool_server_cache_requires_refresh(
+        tool_servers,
+        request.app.state.config.TOOL_SERVER_CONNECTIONS or [],
+        session_token=session_token,
+        oauth_token=oauth_token,
+    ):
+        tool_servers = await set_tool_servers(
+            request,
+            session_token=session_token,
+            oauth_token=oauth_token,
+        )
 
     return tool_servers
 
@@ -956,7 +993,12 @@ async def get_terminal_system_prompt(
     return None
 
 
-async def set_terminal_servers(request: Request):
+async def set_terminal_servers(
+    request: Request,
+    *,
+    session_token: Optional[str] = None,
+    oauth_token: Optional[dict] = None,
+):
     """Load and cache OpenAPI specs from all TERMINAL_SERVER_CONNECTIONS."""
     connections = request.app.state.config.TERMINAL_SERVER_CONNECTIONS or []
 
@@ -993,7 +1035,11 @@ async def set_terminal_servers(request: Request):
             }
         )
 
-    request.app.state.TERMINAL_SERVERS = await get_tool_servers_data(server_configs)
+    request.app.state.TERMINAL_SERVERS = await get_tool_servers_data(
+        server_configs,
+        session_token=session_token,
+        oauth_token=oauth_token,
+    )
 
     # Fetch system prompts concurrently (runs at cache time, not per-request)
     connections_by_id = {c.get('id'): c for c in connections if c.get('id')}
@@ -1002,9 +1048,14 @@ async def set_terminal_servers(request: Request):
         connection = connections_by_id.get(server.get('id'))
         if not connection:
             return
-        headers = {}
-        if connection.get('auth_type', 'bearer') == 'bearer':
-            headers['Authorization'] = f'Bearer {connection.get("key", "")}'
+        headers = build_tool_server_headers(
+            connection,
+            session_token=session_token,
+            oauth_token=oauth_token,
+        )
+        auth_type = connection.get('auth_type', 'bearer')
+        if auth_type in {'session', 'system_oauth'} and headers is None:
+            return
         prompt = await get_terminal_system_prompt(server['url'], headers)
         if prompt:
             server['system_prompt'] = prompt
@@ -1022,7 +1073,12 @@ async def set_terminal_servers(request: Request):
     return request.app.state.TERMINAL_SERVERS
 
 
-async def get_terminal_servers(request: Request):
+async def get_terminal_servers(
+    request: Request,
+    *,
+    session_token: Optional[str] = None,
+    oauth_token: Optional[dict] = None,
+):
     """Return cached terminal server specs, loading if needed."""
     terminal_servers = []
     if request.app.state.redis is not None:
@@ -1032,8 +1088,24 @@ async def get_terminal_servers(request: Request):
         except Exception as e:
             log.error(f'Error fetching terminal_servers from Redis: {e}')
 
-    if not terminal_servers:
-        terminal_servers = await set_terminal_servers(request)
+    if not terminal_servers or tool_server_cache_requires_refresh(
+        terminal_servers,
+        [
+            {
+                'id': connection.get('id'),
+                'enabled': connection.get('enabled', True),
+                'auth_type': connection.get('auth_type', 'bearer'),
+            }
+            for connection in (request.app.state.config.TERMINAL_SERVER_CONNECTIONS or [])
+        ],
+        session_token=session_token,
+        oauth_token=oauth_token,
+    ):
+        terminal_servers = await set_terminal_servers(
+            request,
+            session_token=session_token,
+            oauth_token=oauth_token,
+        )
 
     return terminal_servers
 
@@ -1063,7 +1135,11 @@ async def get_terminal_tools(
         return {}
 
     # Find the cached spec data for this terminal
-    terminal_servers = await get_terminal_servers(request)
+    terminal_servers = await get_terminal_servers(
+        request,
+        session_token=getattr(getattr(request.state, 'token', None), 'credentials', None),
+        oauth_token=extra_params.get('__oauth_token__', None),
+    )
     server_data = next((s for s in terminal_servers if s.get('id') == terminal_id), None)
     if server_data is None:
         log.warning(f'Terminal server spec not found for {terminal_id}')
@@ -1183,7 +1259,12 @@ async def get_tool_server_data(url: str, headers: Optional[dict]) -> Dict[str, A
     return res
 
 
-async def get_tool_servers_data(servers: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+async def get_tool_servers_data(
+    servers: List[Dict[str, Any]],
+    *,
+    session_token: Optional[str] = None,
+    oauth_token: Optional[dict] = None,
+) -> List[Dict[str, Any]]:
     # Prepare list of enabled servers along with their original index
 
     tasks = []
@@ -1193,13 +1274,6 @@ async def get_tool_servers_data(servers: List[Dict[str, Any]]) -> List[Dict[str,
             info = server.get('info', {})
 
             auth_type = server.get('auth_type', 'bearer')
-            token = None
-
-            if auth_type == 'bearer':
-                token = server.get('key', '')
-            elif auth_type == 'none':
-                # No authentication
-                pass
 
             id = info.get('id')
             if not id:
@@ -1214,10 +1288,18 @@ async def get_tool_servers_data(servers: List[Dict[str, Any]]) -> List[Dict[str,
                 # Path (to OpenAPI spec URL) can be either a full URL or a path to append to the base URL
                 openapi_path = server.get('path', 'openapi.json')
                 spec_url = get_tool_server_url(server_url, openapi_path)
+                headers = build_tool_server_headers(
+                    server,
+                    session_token=session_token,
+                    oauth_token=oauth_token,
+                )
+                if auth_type in {'session', 'system_oauth'} and headers is None:
+                    log.debug(f'Skipping {server_url} OpenAPI tool server: missing auth context for {auth_type}')
+                    continue
                 # Fetch from URL
                 task = get_tool_server_data(
                     spec_url,
-                    {'Authorization': f'Bearer {token}'} if token else None,
+                    headers,
                 )
             elif spec_type == 'json' and server.get('spec', ''):
                 # Use provided JSON spec
@@ -1235,14 +1317,14 @@ async def get_tool_servers_data(servers: List[Dict[str, Any]]) -> List[Dict[str,
 
             if task:
                 tasks.append(task)
-                server_entries.append((id, idx, server, server_url, info, token))
+                server_entries.append((id, idx, server, server_url, info))
 
     # Execute tasks concurrently
     responses = await asyncio.gather(*tasks, return_exceptions=True)
 
     # Build final results with index and server metadata
     results = []
-    for (id, idx, server, url, info, _), response in zip(server_entries, responses):
+    for (id, idx, server, url, info), response in zip(server_entries, responses):
         if isinstance(response, Exception):
             log.error(f'Failed to connect to {url} OpenAPI tool server')
             continue

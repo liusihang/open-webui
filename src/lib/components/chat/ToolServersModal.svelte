@@ -1,24 +1,87 @@
 <script lang="ts">
-	import { getContext, onMount } from 'svelte';
-	import { models, config, toolServers, tools, terminalServers } from '$lib/stores';
+	import { getContext } from 'svelte';
+	import { toolServers, tools, terminalServers, selectedTerminalId } from '$lib/stores';
+	import { WEBUI_API_BASE_URL } from '$lib/constants';
 
-	import { toast } from 'svelte-sonner';
-	import { deleteSharedChatById, getChatById, shareChatById } from '$lib/apis/chats';
-	import { copyToClipboard } from '$lib/utils';
-
-	import Modal from '../common/Modal.svelte';
-	import Link from '../icons/Link.svelte';
 	import Collapsible from '../common/Collapsible.svelte';
+	import Modal from '../common/Modal.svelte';
 	import XMark from '$lib/components/icons/XMark.svelte';
+	import {
+		buildSelectedSystemTerminalTools,
+		convertTerminalOpenApiToSpecs,
+		type SystemTerminalToolSpec
+	} from './MessageInput/systemTerminalTools';
 
 	export let show = false;
 	export let selectedToolIds = [];
 
-	let selectedTools = [];
+	let selectedTools: any[] = [];
+	let selectedSystemTerminalTools: any[] = [];
+	let selectedSystemTerminalSpecs: SystemTerminalToolSpec[] = [];
+	let loadedSelectedSystemTerminalId: string | null = null;
+	let loadingSelectedSystemTerminalSpecs = false;
 
 	$: selectedTools = ($tools ?? []).filter((tool) => selectedToolIds.includes(tool.id));
+	$: selectedSystemTerminal = ($terminalServers ?? []).find(
+		(terminal) => terminal.id === $selectedTerminalId
+	);
+	$: effectiveSelectedSystemTerminalSpecs =
+		selectedSystemTerminal?.specs?.length > 0
+			? selectedSystemTerminal.specs
+			: loadedSelectedSystemTerminalId === selectedSystemTerminal?.id
+				? selectedSystemTerminalSpecs
+				: [];
+	$: selectedSystemTerminalTools = Object.values(
+		buildSelectedSystemTerminalTools(
+			selectedSystemTerminal
+				? [{ ...selectedSystemTerminal, specs: effectiveSelectedSystemTerminalSpecs }]
+				: [],
+			$selectedTerminalId
+		)
+	);
+	$: if (
+		show &&
+		selectedSystemTerminal?.id &&
+		!(selectedSystemTerminal?.specs?.length > 0) &&
+		loadedSelectedSystemTerminalId !== selectedSystemTerminal.id &&
+		!loadingSelectedSystemTerminalSpecs
+	) {
+		void loadSelectedSystemTerminalSpecs(selectedSystemTerminal.id);
+	}
 
 	const i18n = getContext('i18n');
+
+	const loadSelectedSystemTerminalSpecs = async (terminalId: string) => {
+		loadingSelectedSystemTerminalSpecs = true;
+		selectedSystemTerminalSpecs = [];
+		loadedSelectedSystemTerminalId = terminalId;
+
+		try {
+			const res = await fetch(`${WEBUI_API_BASE_URL}/terminals/${terminalId}/openapi.json`, {
+				headers: {
+					Authorization: `Bearer ${localStorage.token}`
+				}
+			});
+
+			if (!res.ok) {
+				return;
+			}
+
+			const openapi = await res.json();
+			const specs = convertTerminalOpenApiToSpecs(openapi);
+			selectedSystemTerminalSpecs = specs;
+
+			if (specs.length > 0) {
+				terminalServers.update((servers) =>
+					servers.map((server) => (server.id === terminalId ? { ...server, specs } : server))
+				);
+			}
+		} catch (error) {
+			console.error('Failed to load selected system terminal tools', error);
+		} finally {
+			loadingSelectedSystemTerminalSpecs = false;
+		}
+	};
 </script>
 
 <Modal bind:show size="md">
@@ -36,8 +99,8 @@
 			</button>
 		</div>
 
-		{#if selectedTools.length > 0}
-			{#if $toolServers.length > 0}
+		{#if selectedTools.length > 0 || selectedSystemTerminalTools.length > 0}
+			{#if $toolServers.length > 0 || selectedTools.length > 0 || selectedSystemTerminalTools.length > 0}
 				<div class=" flex justify-between dark:text-gray-300 px-5 pb-1">
 					<div class=" text-base font-medium self-center">{$i18n.t('Tools')}</div>
 				</div>
@@ -64,6 +127,26 @@
 						</div> -->
 						</Collapsible>
 					{/each}
+					{#each selectedSystemTerminalTools as tool}
+						<Collapsible buttonClassName="w-full mb-0.5">
+							<div class="truncate">
+								<div class="text-sm font-medium dark:text-gray-100 text-gray-800 truncate">
+									{tool?.name}
+								</div>
+
+								{#if tool?.description}
+									<div class="text-xs text-gray-500">
+										{tool?.description}
+									</div>
+								{/if}
+							</div>
+						</Collapsible>
+					{/each}
+					{#if loadingSelectedSystemTerminalSpecs && selectedSystemTerminalTools.length === 0}
+						<div class="px-3 py-2 text-xs text-gray-500">
+							{$i18n.t('Loading terminal tools...')}
+						</div>
+					{/if}
 				</div>
 			</div>
 		{/if}

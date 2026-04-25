@@ -14,6 +14,7 @@ from fastapi import APIRouter, Depends, Request, Response, WebSocket
 from fastapi.responses import JSONResponse, StreamingResponse
 from starlette.background import BackgroundTask
 
+from open_webui.socket.terminal_substrate import build_upstream_terminal_ws_request
 from open_webui.utils.auth import get_verified_user
 from open_webui.utils.access_control import has_connection_access
 from open_webui.env import AIOHTTP_CLIENT_SESSION_SSL
@@ -47,8 +48,6 @@ def _sanitize_proxy_path(path: str) -> str | None:
     if had_trailing_slash and cleaned and not cleaned.endswith('/'):
         cleaned += '/'
     return cleaned
-
-
 @router.get('/')
 async def list_terminal_servers(request: Request, user=Depends(get_verified_user)):
     """Return terminal servers the authenticated user has access to."""
@@ -191,7 +190,7 @@ async def _resolve_authenticated_connection(ws: WebSocket, server_id: str):
     The client must send ``{"type": "auth", "token": "<jwt>"}`` as its first
     message after connecting.
 
-    Returns ``(user, connection)`` on success, or ``None`` after closing *ws*
+    Returns ``(user, connection, token)`` on success, or ``None`` after closing *ws*
     with an appropriate error code.
     """
     import asyncio
@@ -234,7 +233,7 @@ async def _resolve_authenticated_connection(ws: WebSocket, server_id: str):
         await ws.close(code=4003, reason='Access denied')
         return None
 
-    return user, connection
+    return user, connection, token
 
 
 @router.websocket('/{server_id}/api/terminals/{session_id}')
@@ -254,30 +253,19 @@ async def ws_terminal(
     result = await _resolve_authenticated_connection(ws, server_id)
     if result is None:
         return
-    user, connection = result
+    user, connection, client_token = result
 
     base_url = (connection.get('url') or '').rstrip('/')
     if not base_url:
         await ws.close(code=4003, reason='Terminal server URL not configured')
         return
 
-    # Build upstream WebSocket URL (no token in URL)
-    ws_base = base_url.replace('https://', 'wss://').replace('http://', 'ws://')
-
-    # Route through orchestrator policy endpoint if policy_id is set
-    policy_id = connection.get('policy_id')
-    upstream_params = {}
-    # For orchestrator-backed servers, pass user_id
-    upstream_params['user_id'] = user.id
-
-    import urllib.parse
-
-    if policy_id:
-        upstream_url = f'{ws_base}/p/{policy_id}/api/terminals/{session_id}'
-    else:
-        upstream_url = f'{ws_base}/api/terminals/{session_id}'
-    if upstream_params:
-        upstream_url += f'?{urllib.parse.urlencode(upstream_params)}'
+    upstream_url, upstream_first_message = _build_upstream_terminal_ws_request(
+        connection=connection,
+        session_id=session_id,
+        user_id=user.id,
+        client_token=client_token,
+    )
 
     session = aiohttp.ClientSession()
     try:
@@ -286,10 +274,8 @@ async def ws_terminal(
             import json as _json
 
             # First-message auth to upstream terminal server
-            auth_type = connection.get('auth_type', 'bearer')
-            if auth_type == 'bearer':
-                key = connection.get('key', '')
-                await upstream.send_str(_json.dumps({'type': 'auth', 'token': key}))
+            if upstream_first_message is not None:
+                await upstream.send_str(_json.dumps(upstream_first_message))
 
             async def _client_to_upstream():
                 """Forward client → upstream."""
