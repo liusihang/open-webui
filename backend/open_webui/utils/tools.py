@@ -441,9 +441,13 @@ async def get_builtin_tools(
     # Otherwise, provide all KB browsing tools
     model_knowledge = model.get('info', {}).get('meta', {}).get('knowledge', [])
     # Merge folder-attached knowledge so builtin tools can search it
-    folder_knowledge = extra_params.get('__metadata__', {}).get('folder_knowledge')
+    metadata = extra_params.get('__metadata__', {})
+    folder_knowledge = metadata.get('folder_knowledge')
     if folder_knowledge:
         model_knowledge = list(model_knowledge or []) + list(folder_knowledge)
+    scoped_knowledge = metadata.get('effective_knowledge_scope') or metadata.get('attached_knowledge_scope')
+    if scoped_knowledge:
+        model_knowledge = list(model_knowledge or []) + list(scoped_knowledge)
     if is_builtin_tool_enabled('knowledge'):
         if model_knowledge:
             # Model has attached knowledge - provide discovery, search and semantic tools
@@ -469,10 +473,7 @@ async def get_builtin_tools(
                     query_knowledge_bases,
                     search_knowledge_files,
                     query_knowledge_files,
-                    query_knowledge_abstract,
-                    query_knowledge_full_text,
                     view_knowledge_file,
-                    view_knowledge_layers,
                 ]
             )
 
