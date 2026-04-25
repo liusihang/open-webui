@@ -55,6 +55,10 @@ from open_webui.utils.misc import (
     convert_logit_bias_input_to_json,
     stream_chunks_handler,
 )
+from open_webui.utils.openai_payload import (
+    dedupe_system_messages,
+    sanitize_openai_payload,
+)
 from open_webui.utils.session_pool import (
     cleanup_response,
     get_session,
@@ -1134,6 +1138,15 @@ async def generate_chat_completion(
     if 'max_tokens' in payload and 'max_completion_tokens' in payload:
         del payload['max_tokens']
 
+    payload, removed_reasoning_tokens = sanitize_openai_payload(payload)
+    if removed_reasoning_tokens:
+        log.warning('Removed %d banned reasoning token entries from upstream payload', removed_reasoning_tokens)
+
+    if 'messages' in payload:
+        payload['messages'], removed_system_messages = dedupe_system_messages(payload['messages'])
+        if removed_system_messages:
+            log.warning('Removed %d duplicate system messages from upstream payload', removed_system_messages)
+
     # Convert the modified body back to JSON
     if 'logit_bias' in payload and payload['logit_bias']:
         logit_bias = convert_logit_bias_input_to_json(payload['logit_bias'])
@@ -1372,6 +1385,10 @@ async def responses(
     Routes to the correct upstream backend based on the model field.
     """
     payload = form_data.model_dump(exclude_none=True)
+
+    payload, removed_reasoning_tokens = sanitize_openai_payload(payload)
+    if removed_reasoning_tokens:
+        log.warning('Removed %d banned reasoning token entries from responses payload', removed_reasoning_tokens)
 
     idx = 0
     model_id = form_data.model
