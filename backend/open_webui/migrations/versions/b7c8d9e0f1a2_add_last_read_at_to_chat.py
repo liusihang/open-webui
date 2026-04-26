@@ -1,7 +1,7 @@
 """add last_read_at to chat
 
 Revision ID: b7c8d9e0f1a2
-Revises: d4e5f6a7b8c9
+Revises: da5f6a7b8c90
 Create Date: 2026-04-01 04:00:00.000000
 
 """
@@ -12,7 +12,7 @@ import sqlalchemy as sa
 
 # revision identifiers, used by Alembic.
 revision = 'b7c8d9e0f1a2'
-down_revision = 'd4e5f6a7b8c9'
+down_revision = 'da5f6a7b8c90'
 branch_labels = None
 depends_on = None
 
