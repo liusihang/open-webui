@@ -1348,6 +1348,30 @@ RESPONSE_WATERMARK = PersistentConfig(
     os.environ.get('RESPONSE_WATERMARK', ''),
 )
 
+ANNOUNCEMENT_MODAL_ENABLED = PersistentConfig(
+    'ANNOUNCEMENT_MODAL_ENABLED',
+    'ui.announcement_modal.enabled',
+    os.environ.get('ANNOUNCEMENT_MODAL_ENABLED', 'False').lower() == 'true',
+)
+
+ANNOUNCEMENT_MODAL_KEY = PersistentConfig(
+    'ANNOUNCEMENT_MODAL_KEY',
+    'ui.announcement_modal.key',
+    os.environ.get('ANNOUNCEMENT_MODAL_KEY', ''),
+)
+
+ANNOUNCEMENT_MODAL_TITLE = PersistentConfig(
+    'ANNOUNCEMENT_MODAL_TITLE',
+    'ui.announcement_modal.title',
+    os.environ.get('ANNOUNCEMENT_MODAL_TITLE', ''),
+)
+
+ANNOUNCEMENT_MODAL_CONTENT = PersistentConfig(
+    'ANNOUNCEMENT_MODAL_CONTENT',
+    'ui.announcement_modal.content',
+    os.environ.get('ANNOUNCEMENT_MODAL_CONTENT', ''),
+)
+
 
 USER_PERMISSIONS_WORKSPACE_MODELS_ACCESS = (
     os.environ.get('USER_PERMISSIONS_WORKSPACE_MODELS_ACCESS', 'False').lower() == 'true'
@@ -2175,6 +2199,73 @@ ENABLE_MEMORIES = PersistentConfig(
     'ENABLE_MEMORIES',
     'memories.enable',
     os.environ.get('ENABLE_MEMORIES', 'True').lower() == 'true',
+)
+
+LAYER_GENERATION_MODEL = PersistentConfig(
+    'LAYER_GENERATION_MODEL',
+    'layered_knowledge.internal.model',
+    os.environ.get('LAYER_GENERATION_MODEL', '').strip(),
+)
+
+LAYER_GENERATION_PROMPT_ABSTRACT = PersistentConfig(
+    'LAYER_GENERATION_PROMPT_ABSTRACT',
+    'layered_knowledge.internal.prompt_abstract',
+    os.environ.get('LAYER_GENERATION_PROMPT_ABSTRACT', ''),
+)
+
+LAYER_GENERATION_MAX_CHUNK_TOKENS = PersistentConfig(
+    'LAYER_GENERATION_MAX_CHUNK_TOKENS',
+    'layered_knowledge.internal.max_chunk_tokens',
+    int(os.environ.get('LAYER_GENERATION_MAX_CHUNK_TOKENS', '24000')),
+)
+
+LAYER_GENERATION_MIN_TAIL_TOKENS = PersistentConfig(
+    'LAYER_GENERATION_MIN_TAIL_TOKENS',
+    'layered_knowledge.internal.min_tail_tokens',
+    int(os.environ.get('LAYER_GENERATION_MIN_TAIL_TOKENS', '1000')),
+)
+
+NATIVE_ATTACHED_KNOWLEDGE_BYPASS_LEGACY_FILE_RETRIEVAL = PersistentConfig(
+    'NATIVE_ATTACHED_KNOWLEDGE_BYPASS_LEGACY_FILE_RETRIEVAL',
+    'layered_knowledge.native_attached_knowledge_bypass_legacy_file_retrieval',
+    os.environ.get('NATIVE_ATTACHED_KNOWLEDGE_BYPASS_LEGACY_FILE_RETRIEVAL', 'False').lower()
+    == 'true',
+)
+
+OPEN_NOTEBOOK_BASE_URL = PersistentConfig(
+    'OPEN_NOTEBOOK_BASE_URL',
+    'layered_knowledge.open_notebook.base_url',
+    os.environ.get('OPEN_NOTEBOOK_BASE_URL', '').rstrip('/'),
+)
+
+OPEN_NOTEBOOK_API_PASSWORD = PersistentConfig(
+    'OPEN_NOTEBOOK_API_PASSWORD',
+    'layered_knowledge.open_notebook.api_password',
+    os.environ.get('OPEN_NOTEBOOK_API_PASSWORD', ''),
+)
+
+OPEN_NOTEBOOK_TIMEOUT_SECS = PersistentConfig(
+    'OPEN_NOTEBOOK_TIMEOUT_SECS',
+    'layered_knowledge.open_notebook.timeout_secs',
+    int(os.environ.get('OPEN_NOTEBOOK_TIMEOUT_SECS', '30')),
+)
+
+OPEN_NOTEBOOK_TRANSFORMATION_ABSTRACT = PersistentConfig(
+    'OPEN_NOTEBOOK_TRANSFORMATION_ABSTRACT',
+    'layered_knowledge.open_notebook.transformations.abstract',
+    os.environ.get('OPEN_NOTEBOOK_TRANSFORMATION_ABSTRACT', ''),
+)
+
+OPEN_NOTEBOOK_TRANSFORMATION_KEY_FINDINGS = PersistentConfig(
+    'OPEN_NOTEBOOK_TRANSFORMATION_KEY_FINDINGS',
+    'layered_knowledge.open_notebook.transformations.key_findings',
+    os.environ.get('OPEN_NOTEBOOK_TRANSFORMATION_KEY_FINDINGS', ''),
+)
+
+OPEN_NOTEBOOK_TRANSFORMATION_KEY_DATA = PersistentConfig(
+    'OPEN_NOTEBOOK_TRANSFORMATION_KEY_DATA',
+    'layered_knowledge.open_notebook.transformations.key_data',
+    os.environ.get('OPEN_NOTEBOOK_TRANSFORMATION_KEY_DATA', ''),
 )
 
 CODE_INTERPRETER_ENGINE = PersistentConfig(

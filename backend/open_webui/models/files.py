@@ -60,6 +60,12 @@ class FileMeta(BaseModel):
     name: Optional[str] = None
     content_type: Optional[str] = None
     size: Optional[int] = None
+    open_notebook_source_id: Optional[str] = None
+    open_notebook_source_ids: Optional[list[str]] = None
+    open_notebook_sync_status: Optional[str] = None
+    open_notebook_last_synced_at: Optional[int] = None
+    open_notebook_is_large_file: Optional[bool] = None
+    open_notebook_part_count: Optional[int] = None
 
     model_config = ConfigDict(extra='allow')
 

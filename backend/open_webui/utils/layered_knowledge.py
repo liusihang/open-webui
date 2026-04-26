@@ -1,10 +1,13 @@
 import asyncio
 import logging
 import re
+import time
 from types import SimpleNamespace
 from typing import Optional
 
+import requests
 import tiktoken
+from requests import RequestException
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from open_webui.models.files import Files
@@ -28,6 +31,13 @@ from open_webui.utils.task import get_task_model_id
 
 log = logging.getLogger(__name__)
 
+OPEN_NOTEBOOK_SOURCE_ID_KEY = "open_notebook_source_id"
+OPEN_NOTEBOOK_SOURCE_IDS_KEY = "open_notebook_source_ids"
+OPEN_NOTEBOOK_SYNC_STATUS_KEY = "open_notebook_sync_status"
+OPEN_NOTEBOOK_LAST_SYNCED_AT_KEY = "open_notebook_last_synced_at"
+OPEN_NOTEBOOK_IS_LARGE_FILE_KEY = "open_notebook_is_large_file"
+OPEN_NOTEBOOK_PART_COUNT_KEY = "open_notebook_part_count"
+OPEN_NOTEBOOK_SOURCE_CONTENT_HASH_KEY = "open_notebook_source_content_hash"
 ACTIVE_LAYER_TYPES = ("abstract",)
 DEFAULT_MAX_CHUNK_TOKENS = 24000
 DEFAULT_MIN_TAIL_TOKENS = 1000
@@ -45,6 +55,78 @@ Generate a concise abstract for the provided document chunk.
 """
 
 
+def get_file_open_notebook_mapping(file_obj) -> dict:
+    meta = getattr(file_obj, "meta", None)
+    if not isinstance(meta, dict):
+        meta = {}
+
+    source_id = meta.get(OPEN_NOTEBOOK_SOURCE_ID_KEY)
+    if source_id is not None:
+        source_id = str(source_id)
+
+    source_ids = meta.get(OPEN_NOTEBOOK_SOURCE_IDS_KEY)
+    if isinstance(source_ids, str):
+        source_ids = [source_ids]
+    elif isinstance(source_ids, list):
+        source_ids = [str(item) for item in source_ids if item]
+    else:
+        source_ids = []
+
+    return {
+        OPEN_NOTEBOOK_SOURCE_ID_KEY: source_id,
+        OPEN_NOTEBOOK_SOURCE_IDS_KEY: source_ids,
+        OPEN_NOTEBOOK_SYNC_STATUS_KEY: meta.get(OPEN_NOTEBOOK_SYNC_STATUS_KEY),
+        OPEN_NOTEBOOK_LAST_SYNCED_AT_KEY: meta.get(OPEN_NOTEBOOK_LAST_SYNCED_AT_KEY),
+        OPEN_NOTEBOOK_IS_LARGE_FILE_KEY: meta.get(OPEN_NOTEBOOK_IS_LARGE_FILE_KEY),
+        OPEN_NOTEBOOK_PART_COUNT_KEY: meta.get(OPEN_NOTEBOOK_PART_COUNT_KEY),
+        OPEN_NOTEBOOK_SOURCE_CONTENT_HASH_KEY: meta.get(
+            OPEN_NOTEBOOK_SOURCE_CONTENT_HASH_KEY
+        ),
+    }
+
+
+async def save_file_open_notebook_mapping(
+    file_id: str,
+    *,
+    source_id: Optional[str] = None,
+    source_ids: Optional[list[str]] = None,
+    sync_status: Optional[str] = None,
+    last_synced_at: Optional[int] = None,
+    is_large_file: Optional[bool] = None,
+    part_count: Optional[int] = None,
+    source_content_hash: Optional[str] = None,
+    db: Optional[AsyncSession] = None,
+) -> dict:
+    file_obj = await Files.get_file_by_id(file_id, db=db)
+    if not file_obj:
+        return {}
+
+    meta_update: dict = {}
+    if source_id is not None:
+        meta_update[OPEN_NOTEBOOK_SOURCE_ID_KEY] = str(source_id)
+    if source_ids is not None:
+        meta_update[OPEN_NOTEBOOK_SOURCE_IDS_KEY] = [
+            str(item) for item in source_ids if item
+        ]
+    if sync_status is not None:
+        meta_update[OPEN_NOTEBOOK_SYNC_STATUS_KEY] = sync_status
+    if last_synced_at is not None:
+        meta_update[OPEN_NOTEBOOK_LAST_SYNCED_AT_KEY] = int(last_synced_at)
+    if is_large_file is not None:
+        meta_update[OPEN_NOTEBOOK_IS_LARGE_FILE_KEY] = bool(is_large_file)
+    if part_count is not None:
+        meta_update[OPEN_NOTEBOOK_PART_COUNT_KEY] = int(part_count)
+    if source_content_hash is not None:
+        meta_update[OPEN_NOTEBOOK_SOURCE_CONTENT_HASH_KEY] = source_content_hash
+
+    if meta_update:
+        updated = await Files.update_file_metadata_by_id(file_id, meta_update, db=db)
+        if updated:
+            file_obj = updated
+
+    return get_file_open_notebook_mapping(file_obj)
+
+
 def _normalize_runtime_layer_type(layer_type: str) -> Optional[str]:
     normalized = (layer_type or "").strip().lower()
     normalized = LAYER_TYPE_ALIASES.get(normalized, normalized)
@@ -53,17 +135,28 @@ def _normalize_runtime_layer_type(layer_type: str) -> Optional[str]:
 
 def _extract_file_text(file_obj) -> str:
     data = getattr(file_obj, "data", None)
-    if not isinstance(data, dict):
-        return ""
-    content = data.get("content")
-    return content if isinstance(content, str) else ""
+    if isinstance(data, dict):
+        for key in ("content", "text"):
+            value = data.get(key)
+            if isinstance(value, str) and value.strip():
+                return value
+    return ""
 
 
 def _current_file_content_hash(file_obj) -> str:
     file_hash = getattr(file_obj, "hash", None)
     if isinstance(file_hash, str) and file_hash.strip():
         return file_hash
-    return calculate_sha256_string(_extract_file_text(file_obj) or getattr(file_obj, "id", ""))
+
+    file_text = _extract_file_text(file_obj)
+    if file_text:
+        return calculate_sha256_string(file_text)
+
+    file_path = getattr(file_obj, "path", None)
+    if isinstance(file_path, str) and file_path:
+        return calculate_sha256_string(file_path)
+
+    return calculate_sha256_string(getattr(file_obj, "id", ""))
 
 
 def _get_tiktoken_encoding():
@@ -311,6 +404,262 @@ def _layer_display_title(layer_type: str, part_index: int, part_total: int) -> O
         return None
     label = "Abstract" if layer_type == "abstract" else layer_type.replace("_", " ").title()
     return f"{label} {part_index}/{part_total}"
+
+
+def _build_source_create_payload(file_obj) -> dict:
+    filename = getattr(file_obj, "filename", None) or getattr(file_obj, "id", "file")
+    data = getattr(file_obj, "data", None)
+    content = None
+    if isinstance(data, dict):
+        raw_content = data.get("content") or data.get("text")
+        if isinstance(raw_content, str) and raw_content.strip():
+            content = raw_content
+
+    payload = {"title": filename}
+    if content:
+        payload.update({"type": "text", "content": content})
+    else:
+        file_path = getattr(file_obj, "path", None)
+        if file_path:
+            payload.update({"type": "upload", "file_path": file_path})
+        else:
+            raise ValueError("File has no extracted text content or usable file_path")
+    return payload
+
+
+async def _ensure_open_notebook_source_id(
+    *,
+    file_id: str,
+    base_url: str,
+    password: str,
+    timeout: int,
+    db: Optional[AsyncSession] = None,
+) -> Optional[str]:
+    file_obj = await Files.get_file_by_id(file_id, db=db)
+    if not file_obj:
+        return None
+
+    mapping = get_file_open_notebook_mapping(file_obj)
+    source_id = mapping.get(OPEN_NOTEBOOK_SOURCE_ID_KEY)
+    current_content_hash = _current_file_content_hash(file_obj)
+    if source_id and (
+        not current_content_hash
+        or mapping.get(OPEN_NOTEBOOK_SOURCE_CONTENT_HASH_KEY) == current_content_hash
+    ):
+        return source_id
+
+    source = _request_json(
+        "POST",
+        f"{base_url}/api/sources",
+        password,
+        timeout,
+        payload=_build_source_create_payload(file_obj),
+    )
+    if not isinstance(source, dict):
+        return None
+
+    source_id = str(source.get("id", "")).strip()
+    if not source_id:
+        return None
+
+    await save_file_open_notebook_mapping(
+        file_id,
+        source_id=source_id,
+        source_ids=[source_id],
+        sync_status="created",
+        last_synced_at=int(time.time()),
+        is_large_file=False,
+        part_count=1,
+        source_content_hash=current_content_hash,
+        db=db,
+    )
+    return source_id
+
+
+def _create_open_notebook_source(
+    *,
+    base_url: str,
+    password: str,
+    timeout: int,
+    payload: dict,
+) -> Optional[str]:
+    source = _request_json(
+        "POST",
+        f"{base_url}/api/sources",
+        password,
+        timeout,
+        payload=payload,
+    )
+    if not isinstance(source, dict):
+        return None
+
+    source_id = str(source.get("id", "")).strip()
+    return source_id or None
+
+
+def get_layer_transformation_id(request, layer_type: str) -> Optional[str]:
+    normalized = _normalize_runtime_layer_type(layer_type)
+    if not normalized:
+        return None
+
+    config = request.app.state.config
+    if normalized == "abstract":
+        return (getattr(config, "OPEN_NOTEBOOK_TRANSFORMATION_ABSTRACT", "") or "").strip() or None
+    if normalized == "key_findings":
+        return (getattr(config, "OPEN_NOTEBOOK_TRANSFORMATION_KEY_FINDINGS", "") or "").strip() or None
+    if normalized == "key_data":
+        return (getattr(config, "OPEN_NOTEBOOK_TRANSFORMATION_KEY_DATA", "") or "").strip() or None
+    return None
+
+
+def _open_notebook_config(request) -> tuple[Optional[str], Optional[str], int]:
+    config = request.app.state.config
+    base_url = (getattr(config, "OPEN_NOTEBOOK_BASE_URL", "") or "").strip().rstrip("/")
+    password = (getattr(config, "OPEN_NOTEBOOK_API_PASSWORD", "") or "").strip()
+    timeout = int(getattr(config, "OPEN_NOTEBOOK_TIMEOUT_SECS", 30) or 30)
+    return (base_url or None, password or None, timeout)
+
+
+def _request_json(
+    method: str,
+    url: str,
+    password: str,
+    timeout: int,
+    payload: Optional[dict] = None,
+):
+    headers = {
+        "Authorization": f"Bearer {password}",
+        "Content-Type": "application/json",
+        "Accept": "application/json",
+    }
+
+    try:
+        response = requests.request(
+            method=method,
+            url=url,
+            headers=headers,
+            json=payload,
+            timeout=timeout,
+        )
+        response.raise_for_status()
+    except RequestException as exc:
+        raise RuntimeError(f"Open Notebook request failed: {method} {url} ({exc})")
+
+    if response.status_code == 204:
+        return None
+
+    try:
+        return response.json()
+    except ValueError:
+        return None
+
+
+async def _build_chunk_specs(
+    *,
+    file_obj,
+    file_id: str,
+    base_url: str,
+    password: str,
+    timeout: int,
+    max_tokens: int,
+    min_tail_tokens: int,
+    db: Optional[AsyncSession] = None,
+) -> tuple[list[dict], bool, str]:
+    file_text = _extract_file_text(file_obj)
+    chunks = (
+        plan_text_chunks(file_text, max_tokens=max_tokens, min_tail_tokens=min_tail_tokens)
+        if file_text
+        else []
+    )
+    is_large_file = len(chunks) > 1
+    current_content_hash = _current_file_content_hash(file_obj)
+
+    mapping = get_file_open_notebook_mapping(file_obj)
+    mapped_source_ids = mapping.get(OPEN_NOTEBOOK_SOURCE_IDS_KEY) or []
+    mapping_hash_matches = (
+        mapping.get(OPEN_NOTEBOOK_SOURCE_CONTENT_HASH_KEY) == current_content_hash
+    )
+
+    chunk_specs: list[dict] = []
+    source_ids: list[str] = []
+
+    if is_large_file:
+        should_recreate_sources = (
+            not mapped_source_ids
+            or len(mapped_source_ids) != len(chunks)
+            or not mapping_hash_matches
+        )
+        if should_recreate_sources:
+            for index, chunk in enumerate(chunks, start=1):
+                payload = {
+                    "type": "text",
+                    "title": f"{getattr(file_obj, 'filename', file_id)} {index}/{len(chunks)}",
+                    "content": chunk.get("content", ""),
+                }
+                created_source_id = _create_open_notebook_source(
+                    base_url=base_url,
+                    password=password,
+                    timeout=timeout,
+                    payload=payload,
+                )
+                if not created_source_id:
+                    return [], is_large_file, current_content_hash
+                source_ids.append(created_source_id)
+        else:
+            source_ids = mapped_source_ids
+
+        await save_file_open_notebook_mapping(
+            file_id,
+            source_id=source_ids[0] if source_ids else None,
+            source_ids=source_ids,
+            sync_status="created",
+            last_synced_at=int(time.time()),
+            is_large_file=True,
+            part_count=len(source_ids),
+            source_content_hash=current_content_hash,
+            db=db,
+        )
+
+        for index, chunk in enumerate(chunks, start=1):
+            chunk_specs.append(
+                {
+                    "source_id": source_ids[index - 1],
+                    "content": chunk.get("content", ""),
+                    "part_index": index,
+                    "part_total": len(chunks),
+                }
+            )
+        return chunk_specs, True, current_content_hash
+
+    source_id = await _ensure_open_notebook_source_id(
+        file_id=file_id,
+        base_url=base_url,
+        password=password,
+        timeout=timeout,
+        db=db,
+    )
+    if not source_id:
+        return [], False, current_content_hash
+
+    await save_file_open_notebook_mapping(
+        file_id,
+        source_id=source_id,
+        source_ids=[source_id],
+        sync_status="created",
+        last_synced_at=int(time.time()),
+        is_large_file=False,
+        part_count=1,
+        source_content_hash=current_content_hash,
+        db=db,
+    )
+    return [
+        {
+            "source_id": source_id,
+            "content": file_text,
+            "part_index": 1,
+            "part_total": 1,
+        }
+    ], False, current_content_hash
 
 
 async def _upsert_status(

@@ -297,6 +297,107 @@ body > iframe[id^='imermaid-'] {
 	scrollbar-width: none; /* Firefox */
 }
 
+html.light .code-block-container {
+	background-color: #f2f4f7;
+	border-color: #d7dce3 !important;
+}
+
+html.light .code-block-container .code-block-action-btn {
+	background-color: #e8ecf2;
+	color: #3b4656;
+}
+
+html.light .code-block-container .code-block-action-btn:hover {
+	background-color: #dce2eb;
+}
+
+html.light .code-block-container .code-block-surface,
+html.light .code-block-container .code-block-output-surface,
+html.light .code-block-container .code-block-pre {
+	background-color: #f2f4f7;
+	color: #1f2937;
+}
+
+html.light .code-block-container .code-block-pre code {
+	color: #1f2937;
+}
+
+html.dark .code-block-container {
+	background-color: #111827;
+	border-color: #273041 !important;
+}
+
+html.dark .code-block-container .code-block-action-btn {
+	background-color: #1f2937;
+	color: #d1d5db;
+}
+
+html.dark .code-block-container .code-block-action-btn:hover {
+	background-color: #374151;
+}
+
+html.dark .code-block-container .code-block-surface,
+html.dark .code-block-container .code-block-output-surface,
+html.dark .code-block-container .code-block-pre {
+	background-color: #111827;
+	color: #e5e7eb;
+}
+
+html.dark .code-block-container .code-block-pre code {
+	color: #e5e7eb;
+}
+
+html.deerflow-light .code-block-container {
+	background-color: var(--deerflow-bg-content);
+	border-color: var(--deerflow-border-soft) !important;
+}
+
+html.deerflow-light .code-block-container .code-block-action-btn {
+	background-color: var(--deerflow-bg-input);
+	color: var(--deerflow-text);
+	border: 1px solid var(--deerflow-border-soft);
+}
+
+html.deerflow-light .code-block-container .code-block-action-btn:hover {
+	background-color: var(--deerflow-hover);
+}
+
+html.deerflow-light .code-block-container .code-block-surface,
+html.deerflow-light .code-block-container .code-block-output-surface,
+html.deerflow-light .code-block-container .code-block-pre {
+	background-color: var(--deerflow-bg-content);
+	color: var(--deerflow-text);
+}
+
+html.deerflow-light .code-block-container .code-block-pre code {
+	color: var(--deerflow-text);
+}
+
+html.light .tool-call-container .tool-call-body {
+	background-color: #f2f4f7;
+	color: #1f2937;
+}
+
+html.dark .tool-call-container .tool-call-body {
+	background-color: #111827;
+	color: #e5e7eb;
+}
+
+html.deerflow-light .tool-call-container .tool-call-body {
+	background-color: var(--deerflow-bg-content);
+	color: var(--deerflow-text);
+}
+
+html.light .tool-call-container .tool-call-body .code-block-pre,
+html.light .tool-call-container .tool-call-body .code-block-pre code,
+html.dark .tool-call-container .tool-call-body .code-block-pre,
+html.dark .tool-call-container .tool-call-body .code-block-pre code,
+html.deerflow-light .tool-call-container .tool-call-body .code-block-pre,
+html.deerflow-light .tool-call-container .tool-call-body .code-block-pre code {
+	background-color: transparent !important;
+	color: inherit !important;
+}
+
 input::-webkit-outer-spin-button,
 input::-webkit-inner-spin-button {
 	/* display: none; <- Crashes Chrome on hover */

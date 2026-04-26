@@ -44,6 +44,7 @@
 	import Sidebar from '$lib/components/layout/Sidebar.svelte';
 	import SettingsModal from '$lib/components/chat/SettingsModal.svelte';
 	import ChangelogModal from '$lib/components/ChangelogModal.svelte';
+	import AdminAnnouncementModal from '$lib/components/AdminAnnouncementModal.svelte';
 	import AccountPending from '$lib/components/layout/Overlay/AccountPending.svelte';
 	import UpdateInfoToast from '$lib/components/layout/UpdateInfoToast.svelte';
 	import Spinner from '$lib/components/common/Spinner.svelte';
@@ -56,6 +57,8 @@
 	let localDBChats = [];
 
 	let version;
+	let showAdminAnnouncementModal = false;
+	let pendingAdminAnnouncementModal = false;
 
 	const clearChatInputStorage = () => {
 		const chatInputKeys = Object.keys(localStorage).filter((key) => key.startsWith('chat-input'));
@@ -320,6 +323,27 @@
 			showChangelog.set($settings?.version !== $config.version);
 		}
 
+		const announcementModal = $config?.ui?.announcement_modal;
+		const announcementKey = (announcementModal?.key ?? '').trim();
+		const announcementContent = (announcementModal?.content ?? '').trim();
+		const hasSeenAnnouncement =
+			($settings?.announcementModalKey ?? localStorage.getItem('announcementModalKey') ?? '') ===
+			announcementKey;
+
+		if (
+			['admin', 'user'].includes($user?.role ?? '') &&
+			(announcementModal?.enabled ?? false) &&
+			announcementKey &&
+			announcementContent &&
+			!hasSeenAnnouncement
+		) {
+			if ($showChangelog) {
+				pendingAdminAnnouncementModal = true;
+			} else {
+				showAdminAnnouncementModal = true;
+			}
+		}
+
 		if ($user?.role === 'admin' || ($user?.permissions?.chat?.temporary ?? true)) {
 			if ($page.url.searchParams.get('temporary-chat') === 'true') {
 				temporaryChatEnabled.set(true);
@@ -374,10 +398,21 @@
 			};
 		});
 	};
+
+	$: if (pendingAdminAnnouncementModal && !$showChangelog) {
+		showAdminAnnouncementModal = true;
+		pendingAdminAnnouncementModal = false;
+	}
 </script>
 
 <SettingsModal bind:show={$showSettings} />
 <ChangelogModal bind:show={$showChangelog} />
+<AdminAnnouncementModal
+	bind:show={showAdminAnnouncementModal}
+	announcementKey={$config?.ui?.announcement_modal?.key ?? ''}
+	title={$config?.ui?.announcement_modal?.title ?? ''}
+	content={$config?.ui?.announcement_modal?.content ?? ''}
+/>
 
 {#if version && compareVersion(version.latest, version.current) && ($settings?.showUpdateToast ?? true)}
 	<div class=" absolute bottom-8 right-8 z-50" in:fade={{ duration: 100 }}>

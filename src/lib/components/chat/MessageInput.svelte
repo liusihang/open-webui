@@ -137,6 +137,7 @@
 	export let imageGenerationEnabled = false;
 	export let webSearchEnabled = false;
 	export let codeInterpreterEnabled = false;
+	export let reasoningDepth: 'medium' | 'deep' | 'divergent' = 'medium';
 
 	export let pendingOAuthTools = [];
 
@@ -180,7 +181,8 @@
 		selectedFilterIds,
 		imageGenerationEnabled,
 		webSearchEnabled,
-		codeInterpreterEnabled
+		codeInterpreterEnabled,
+		reasoningDepth
 	});
 
 	const inputVariableHandler = async (text: string): Promise<string> => {
@@ -1739,6 +1741,18 @@
 									{/if}
 
 									<div class="ml-1 flex gap-1.5">
+										<Tooltip content="思考深度" placement="top">
+											<select
+												aria-label="思考深度"
+												bind:value={reasoningDepth}
+												class="h-8 rounded-full border border-gray-200/70 bg-white px-2.5 text-xs text-gray-700 outline-hidden transition-colors hover:border-gray-300 dark:border-gray-700 dark:bg-gray-800 dark:text-gray-200"
+											>
+												<option value="medium">中度思考 (2048)</option>
+												<option value="deep">深度思考 (8126)</option>
+												<option value="divergent">发散性思考 (12400)</option>
+											</select>
+										</Tooltip>
+
 										{#if (selectedToolIds ?? []).length > 0}
 											<Tooltip
 												content={$i18n.t('{{COUNT}} Available Tools', {
