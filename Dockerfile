@@ -36,6 +36,8 @@ WORKDIR /app
 RUN apk add --no-cache git
 
 COPY package.json package-lock.json ./
+# Cypress is only used for E2E tests; skip its binary download in production image builds.
+ENV CYPRESS_INSTALL_BINARY=0
 RUN npm ci --force
 
 COPY . .
