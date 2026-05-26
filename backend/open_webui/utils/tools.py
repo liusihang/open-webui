@@ -1,4 +1,5 @@
 import base64
+import copy
 import inspect
 import logging
 import re
@@ -7,6 +8,7 @@ import aiohttp
 import asyncio
 import yaml
 import json
+from urllib.parse import quote, urlencode
 
 from pydantic import BaseModel
 from pydantic.fields import FieldInfo
@@ -45,6 +47,7 @@ from open_webui.utils.access_control import has_access, has_connection_access
 from open_webui.config import BYPASS_ADMIN_ACCESS_CONTROL
 from open_webui.env import (
     AIOHTTP_CLIENT_SESSION_SSL,
+    AIOHTTP_CLIENT_ALLOW_REDIRECTS,
     AIOHTTP_CLIENT_TIMEOUT,
     AIOHTTP_CLIENT_TIMEOUT_TOOL_SERVER,
     AIOHTTP_CLIENT_TIMEOUT_TOOL_SERVER_DATA,
@@ -54,7 +57,7 @@ from open_webui.env import (
     FORWARD_SESSION_INFO_HEADER_MESSAGE_ID,
     REDIS_KEY_PREFIX,
 )
-from open_webui.utils.headers import include_user_info_headers
+from open_webui.utils.headers import include_user_info_headers, get_custom_headers
 from open_webui.socket.terminal_substrate import build_tool_server_headers, tool_server_cache_requires_refresh
 from open_webui.tools.builtin import (
     search_web,
@@ -104,7 +107,6 @@ from open_webui.tools.builtin import (
     delete_calendar_event,
 )
 
-import copy
 from open_webui.utils.access_control import has_permission
 
 log = logging.getLogger(__name__)
@@ -193,10 +195,11 @@ async def get_tools(request: Request, tool_ids: list[str], user: UserModel, extr
                 log.warning(f'Access denied to tool {tool_id} for user {user.id}')
                 continue
 
-            module = request.app.state.TOOLS.get(tool_id, None)
-            if module is None:
-                module, _ = await load_tool_module_by_id(tool_id)
+            module = request.app.state.TOOLS.get(tool_id)
+            if module is None or request.app.state.TOOL_CONTENTS.get(tool_id) != tool.content:
+                module, _ = await load_tool_module_by_id(tool_id, content=tool.content)
                 request.app.state.TOOLS[tool_id] = module
+                request.app.state.TOOL_CONTENTS[tool_id] = tool.content
 
             __user__ = {
                 **extra_params['__user__'],
@@ -344,8 +347,9 @@ async def get_tools(request: Request, tool_ids: list[str], user: UserModel, extr
 
                         connection_headers = tool_server_connection.get('headers', None)
                         if connection_headers and isinstance(connection_headers, dict):
-                            for key, value in connection_headers.items():
-                                headers[key] = value
+                            metadata = extra_params.get('__metadata__', {})
+                            custom_headers = get_custom_headers(connection_headers, user, metadata)
+                            headers.update(custom_headers)
 
                         # Add user info headers if enabled
                         if ENABLE_FORWARD_USER_INFO_HEADERS and user:
@@ -741,7 +745,6 @@ def clean_properties(schema: dict):
 
 
 def clean_openai_tool_schema(spec: dict) -> dict:
-    import copy
 
     cleaned_spec = copy.deepcopy(spec)
 
@@ -772,6 +775,11 @@ def get_tool_specs(tool_module: object) -> list[dict]:
     ]
 
     return specs
+
+
+# Valid HTTP methods per OpenAPI 3.x – used to skip extension keys (x-*)
+# and non-operation path-item fields (summary, description, servers, parameters).
+OPENAPI_HTTP_METHODS = {'get', 'put', 'post', 'delete', 'options', 'head', 'patch', 'trace'}
 
 
 def resolve_schema(schema, components, resolved_schemas=None):
@@ -810,6 +818,13 @@ def resolve_schema(schema, components, resolved_schemas=None):
     if 'items' in resolved_schema:
         resolved_schema['items'] = resolve_schema(resolved_schema['items'], components)
 
+    # Resolve composition keywords (oneOf, anyOf, allOf) which may contain $ref
+    for keyword in ('oneOf', 'anyOf', 'allOf'):
+        if keyword in resolved_schema and isinstance(resolved_schema[keyword], list):
+            resolved_schema[keyword] = [
+                resolve_schema(inner, components, resolved_schemas) for inner in resolved_schema[keyword]
+            ]
+
     return resolved_schema
 
 
@@ -826,7 +841,20 @@ def convert_openapi_to_tool_payload(openapi_spec):
     tool_payload = []
 
     for path, methods in openapi_spec.get('paths', {}).items():
+        if not isinstance(methods, dict):
+            continue
+
+        # Path-level parameters apply to all operations under this path
+        # unless overridden at the operation level (matched by name + in).
+        path_level_params = methods.get('parameters', [])
+        if not isinstance(path_level_params, list):
+            path_level_params = []
+
         for method, operation in methods.items():
+            if method not in OPENAPI_HTTP_METHODS:
+                continue
+            if not isinstance(operation, dict):
+                continue
             if operation.get('operationId'):
                 tool = {
                     'name': operation.get('operationId'),
@@ -837,7 +865,21 @@ def convert_openapi_to_tool_payload(openapi_spec):
                     'parameters': {'type': 'object', 'properties': {}, 'required': []},
                 }
 
-                for param in operation.get('parameters', []):
+                # Merge path-level and operation-level parameters.
+                # Operation-level params override path-level params with the
+                # same (name, in) pair per the OpenAPI spec.
+                op_params = operation.get('parameters', [])
+                if not isinstance(op_params, list):
+                    op_params = []
+                merged_params = {}
+                for param in path_level_params:
+                    if isinstance(param, dict) and param.get('name'):
+                        merged_params[(param['name'], param.get('in', ''))] = param
+                for param in op_params:
+                    if isinstance(param, dict) and param.get('name'):
+                        merged_params[(param['name'], param.get('in', ''))] = param
+
+                for param in merged_params.values():
                     param_name = param.get('name')
                     if not param_name:
                         continue
@@ -891,16 +933,23 @@ async def set_tool_servers(
     session_token: Optional[str] = None,
     oauth_token: Optional[dict] = None,
 ):
-    request.app.state.TOOL_SERVERS = await get_tool_servers_data(
-        request.app.state.config.TOOL_SERVER_CONNECTIONS,
-        session_token=session_token,
-        oauth_token=oauth_token,
-    )
-
-    if request.app.state.redis is not None:
-        await request.app.state.redis.set(
-            f'{REDIS_KEY_PREFIX}:tool_servers', json.dumps(request.app.state.TOOL_SERVERS)
+    try:
+        request.app.state.TOOL_SERVERS = await get_tool_servers_data(
+            request.app.state.config.TOOL_SERVER_CONNECTIONS,
+            session_token=session_token,
+            oauth_token=oauth_token,
         )
+    except Exception as e:
+        log.error(f'Error fetching tool server data: {e}')
+        request.app.state.TOOL_SERVERS = getattr(request.app.state, 'TOOL_SERVERS', None) or []
+
+    try:
+        if request.app.state.redis is not None:
+            await request.app.state.redis.set(
+                f'{REDIS_KEY_PREFIX}:tool_servers', json.dumps(request.app.state.TOOL_SERVERS)
+            )
+    except Exception as e:
+        log.error(f'Error caching tool_servers to Redis: {e}')
 
     return request.app.state.TOOL_SERVERS
 
@@ -911,27 +960,31 @@ async def get_tool_servers(
     session_token: Optional[str] = None,
     oauth_token: Optional[dict] = None,
 ):
-    tool_servers = []
-    if request.app.state.redis is not None:
-        try:
-            tool_servers = json.loads(await request.app.state.redis.get(f'{REDIS_KEY_PREFIX}:tool_servers'))
-            request.app.state.TOOL_SERVERS = tool_servers
-        except Exception as e:
-            log.error(f'Error fetching tool_servers from Redis: {e}')
+    try:
+        tool_servers = []
+        if request.app.state.redis is not None:
+            try:
+                tool_servers = json.loads(await request.app.state.redis.get(f'{REDIS_KEY_PREFIX}:tool_servers'))
+                request.app.state.TOOL_SERVERS = tool_servers
+            except Exception as e:
+                log.error(f'Error fetching tool_servers from Redis: {e}')
 
-    if not tool_servers or tool_server_cache_requires_refresh(
-        tool_servers,
-        request.app.state.config.TOOL_SERVER_CONNECTIONS or [],
-        session_token=session_token,
-        oauth_token=oauth_token,
-    ):
-        tool_servers = await set_tool_servers(
-            request,
+        if not tool_servers or tool_server_cache_requires_refresh(
+            tool_servers,
+            request.app.state.config.TOOL_SERVER_CONNECTIONS or [],
             session_token=session_token,
             oauth_token=oauth_token,
-        )
+        ):
+            tool_servers = await set_tool_servers(
+                request,
+                session_token=session_token,
+                oauth_token=oauth_token,
+            )
 
-    return tool_servers
+        return tool_servers
+    except Exception as e:
+        log.error(f'Failed to load tool servers, skipping: {e}')
+        return getattr(request.app.state, 'TOOL_SERVERS', None) or []
 
 
 async def get_terminal_cwd(
@@ -1231,22 +1284,17 @@ async def get_tool_server_data(url: str, headers: Optional[dict]) -> Dict[str, A
                     error_body = await response.json()
                     raise Exception(error_body)
 
-                text_content = None
+                text_content = await response.text()
 
                 # Check if URL ends with .yaml or .yml to determine format
                 if url.lower().endswith(('.yaml', '.yml')):
-                    text_content = await response.text()
                     res = yaml.safe_load(text_content)
                 else:
-                    text_content = await response.text()
-
-                try:
-                    res = json.loads(text_content)
-                except json.JSONDecodeError:
                     try:
+                        res = json.loads(text_content)
+                    except json.JSONDecodeError:
+                        # Fall back to YAML for non-.yml URLs that aren't valid JSON
                         res = yaml.safe_load(text_content)
-                    except Exception as e:
-                        raise e
 
     except Exception as err:
         log.exception(f'Could not fetch tool server spec from {url}')
@@ -1380,7 +1428,11 @@ async def execute_tool_server(
 
         matching_route = None
         for route_path, methods in paths.items():
+            if not isinstance(methods, dict):
+                continue
             for http_method, operation in methods.items():
+                if http_method not in OPENAPI_HTTP_METHODS:
+                    continue
                 if isinstance(operation, dict) and operation.get('operationId') == name:
                     matching_route = (route_path, methods)
                     break
@@ -1394,6 +1446,10 @@ async def execute_tool_server(
 
         method_entry = None
         for http_method, operation in methods.items():
+            if http_method not in OPENAPI_HTTP_METHODS:
+                continue
+            if not isinstance(operation, dict):
+                continue
             if operation.get('operationId') == name:
                 method_entry = (http_method.lower(), operation)
                 break
@@ -1407,7 +1463,22 @@ async def execute_tool_server(
         query_params = {}
         body_params = {}
 
-        for param in operation.get('parameters', []):
+        # Merge path-level and operation-level parameters for execution.
+        path_level_params = methods.get('parameters', [])
+        if not isinstance(path_level_params, list):
+            path_level_params = []
+        op_params = operation.get('parameters', [])
+        if not isinstance(op_params, list):
+            op_params = []
+        merged_params = {}
+        for param in path_level_params:
+            if isinstance(param, dict) and param.get('name'):
+                merged_params[(param['name'], param.get('in', ''))] = param
+        for param in op_params:
+            if isinstance(param, dict) and param.get('name'):
+                merged_params[(param['name'], param.get('in', ''))] = param
+
+        for param in merged_params.values():
             param_name = param.get('name')
             if not param_name:
                 continue
@@ -1425,11 +1496,10 @@ async def execute_tool_server(
 
         final_url = f'{url.rstrip("/")}{route_path}'
         for key, value in path_params.items():
-            final_url = final_url.replace(f'{{{key}}}', str(value))
+            final_url = final_url.replace(f'{{{key}}}', quote(str(value), safe=''))
 
         if query_params:
-            query_string = '&'.join(f'{k}={v}' for k, v in query_params.items())
-            final_url = f'{final_url}?{query_string}'
+            final_url = f'{final_url}?{urlencode(query_params)}'
 
         if operation.get('requestBody', {}).get('content'):
             if params:
@@ -1447,7 +1517,7 @@ async def execute_tool_server(
                     headers=headers,
                     cookies=cookies,
                     ssl=AIOHTTP_CLIENT_SESSION_TOOL_SERVER_SSL,
-                    allow_redirects=False,
+                    allow_redirects=AIOHTTP_CLIENT_ALLOW_REDIRECTS,
                 ) as response:
                     if response.status >= 400:
                         text = await response.text()
@@ -1472,7 +1542,7 @@ async def execute_tool_server(
                     headers=headers,
                     cookies=cookies,
                     ssl=AIOHTTP_CLIENT_SESSION_TOOL_SERVER_SSL,
-                    allow_redirects=False,
+                    allow_redirects=AIOHTTP_CLIENT_ALLOW_REDIRECTS,
                 ) as response:
                     if response.status >= 400:
                         text = await response.text()

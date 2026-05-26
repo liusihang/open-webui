@@ -317,6 +317,7 @@ type Config = {
 			title?: string;
 			content?: string;
 		};
+		iframe_csp?: string;
 	};
 };
 

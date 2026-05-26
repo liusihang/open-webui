@@ -275,7 +275,32 @@ async def generate_image(
     if __request__ is None:
         return json.dumps({'error': 'Request context not available'})
 
+    start_time = time.monotonic()
+    config = getattr(getattr(__request__, 'app', None), 'state', None)
+    config = getattr(config, 'config', None)
+    log.info(
+        'generate_image start chat_id=%s message_id=%s prompt_len=%s engine=%s model=%s size=%s base_url=%s',
+        __chat_id__,
+        __message_id__,
+        len(prompt or ''),
+        getattr(config, 'IMAGE_GENERATION_ENGINE', None),
+        getattr(config, 'IMAGE_GENERATION_MODEL', None),
+        getattr(config, 'IMAGE_SIZE', None),
+        getattr(config, 'IMAGES_OPENAI_API_BASE_URL', None),
+    )
+
     try:
+        if __event_emitter__:
+            await __event_emitter__(
+                {
+                    'type': 'status',
+                    'data': {
+                        'description': 'Generating image',
+                        'done': False,
+                    },
+                }
+            )
+
         user = UserModel(**__user__) if __user__ else None
 
         images = await image_generations(
@@ -297,6 +322,15 @@ async def generate_image(
             if db_files is not None:
                 image_files = db_files
 
+        log.info(
+            'generate_image completed chat_id=%s message_id=%s image_count=%s persisted_files=%s elapsed_ms=%s',
+            __chat_id__,
+            __message_id__,
+            len(images or []),
+            len(image_files or []),
+            int((time.monotonic() - start_time) * 1000),
+        )
+
         # Emit the images to the UI if event emitter is available
         if __event_emitter__ and image_files:
             await __event_emitter__(
@@ -304,6 +338,15 @@ async def generate_image(
                     'type': 'chat:message:files',
                     'data': {
                         'files': image_files,
+                    },
+                }
+            )
+            await __event_emitter__(
+                {
+                    'type': 'status',
+                    'data': {
+                        'description': 'Image generation completed',
+                        'done': True,
                     },
                 }
             )
@@ -317,9 +360,36 @@ async def generate_image(
                 ensure_ascii=False,
             )
 
+        if __event_emitter__:
+            await __event_emitter__(
+                {
+                    'type': 'status',
+                    'data': {
+                        'description': 'Image generation completed',
+                        'done': True,
+                    },
+                }
+            )
+
         return json.dumps({'status': 'success', 'images': images}, ensure_ascii=False)
     except Exception as e:
-        log.exception(f'generate_image error: {e}')
+        log.exception(
+            'generate_image failed chat_id=%s message_id=%s elapsed_ms=%s error=%s',
+            __chat_id__,
+            __message_id__,
+            int((time.monotonic() - start_time) * 1000),
+            e,
+        )
+        if __event_emitter__:
+            await __event_emitter__(
+                {
+                    'type': 'status',
+                    'data': {
+                        'description': 'Image generation failed',
+                        'done': True,
+                    },
+                }
+            )
         return json.dumps({'error': str(e)})
 
 
@@ -342,7 +412,33 @@ async def edit_image(
     if __request__ is None:
         return json.dumps({'error': 'Request context not available'})
 
+    start_time = time.monotonic()
+    config = getattr(getattr(__request__, 'app', None), 'state', None)
+    config = getattr(config, 'config', None)
+    log.info(
+        'edit_image start chat_id=%s message_id=%s prompt_len=%s input_count=%s engine=%s model=%s size=%s base_url=%s',
+        __chat_id__,
+        __message_id__,
+        len(prompt or ''),
+        len(image_urls or []),
+        getattr(config, 'IMAGE_GENERATION_ENGINE', None),
+        getattr(config, 'IMAGE_GENERATION_MODEL', None),
+        getattr(config, 'IMAGE_SIZE', None),
+        getattr(config, 'IMAGES_OPENAI_API_BASE_URL', None),
+    )
+
     try:
+        if __event_emitter__:
+            await __event_emitter__(
+                {
+                    'type': 'status',
+                    'data': {
+                        'description': 'Editing image',
+                        'done': False,
+                    },
+                }
+            )
+
         user = UserModel(**__user__) if __user__ else None
 
         images = await image_edits(
@@ -364,6 +460,15 @@ async def edit_image(
             if db_files is not None:
                 image_files = db_files
 
+        log.info(
+            'edit_image completed chat_id=%s message_id=%s image_count=%s persisted_files=%s elapsed_ms=%s',
+            __chat_id__,
+            __message_id__,
+            len(images or []),
+            len(image_files or []),
+            int((time.monotonic() - start_time) * 1000),
+        )
+
         # Emit the images to the UI if event emitter is available
         if __event_emitter__ and image_files:
             await __event_emitter__(
@@ -371,6 +476,15 @@ async def edit_image(
                     'type': 'chat:message:files',
                     'data': {
                         'files': image_files,
+                    },
+                }
+            )
+            await __event_emitter__(
+                {
+                    'type': 'status',
+                    'data': {
+                        'description': 'Image edit completed',
+                        'done': True,
                     },
                 }
             )
@@ -384,9 +498,36 @@ async def edit_image(
                 ensure_ascii=False,
             )
 
+        if __event_emitter__:
+            await __event_emitter__(
+                {
+                    'type': 'status',
+                    'data': {
+                        'description': 'Image edit completed',
+                        'done': True,
+                    },
+                }
+            )
+
         return json.dumps({'status': 'success', 'images': images}, ensure_ascii=False)
     except Exception as e:
-        log.exception(f'edit_image error: {e}')
+        log.exception(
+            'edit_image failed chat_id=%s message_id=%s elapsed_ms=%s error=%s',
+            __chat_id__,
+            __message_id__,
+            int((time.monotonic() - start_time) * 1000),
+            e,
+        )
+        if __event_emitter__:
+            await __event_emitter__(
+                {
+                    'type': 'status',
+                    'data': {
+                        'description': 'Image edit failed',
+                        'done': True,
+                    },
+                }
+            )
         return json.dumps({'error': str(e)})
 
 
@@ -472,9 +613,15 @@ async def execute_code(
 
             # Parse the output - pyodide returns dict with stdout, stderr, result
             if isinstance(output, dict):
-                stdout = output.get('stdout', '')
-                stderr = output.get('stderr', '')
-                result = output.get('result', '')
+                # Handle error responses from event_caller (e.g. session disconnected, timeout)
+                if output.get('error') and not output.get('stdout') and not output.get('result'):
+                    stderr = output['error']
+                    stdout = ''
+                    result = ''
+                else:
+                    stdout = output.get('stdout', '')
+                    stderr = output.get('stderr', '')
+                    result = output.get('result', '')
             else:
                 stdout = ''
                 stderr = ''
@@ -2872,7 +3019,7 @@ async def update_automation(
             is_active=automation.is_active,
         )
 
-        updated = await Automations.update(automation_id, form, next_run_ns(new_rrule, tz=tz))
+        updated = await Automations.update_by_id(automation_id, form, next_run_ns(new_rrule, tz=tz))
 
         return json.dumps(
             {
@@ -3116,8 +3263,9 @@ async def search_calendar_events(
     __user__: dict = None,
 ) -> str:
     """
-    Search calendar events by text and/or date range.
-    Returns matching events across all accessible calendars.
+    Search calendar events, reminders, and scheduled items by text and/or date range.
+    Use this to check what's coming up, find a specific event or reminder, or list
+    the user's schedule for a time period.
 
     :param query: Search text to match against event title, description, or location (optional)
     :param start: Only return events starting at or after this datetime, e.g. "2026-04-20 00:00" (optional)
@@ -3213,17 +3361,19 @@ async def create_calendar_event(
     __user__: dict = None,
 ) -> str:
     """
-    Create a new calendar event. If no calendar_id is provided, the event is
-    added to the user's default calendar.
+    Create a calendar event, reminder, or alarm. Use this when the user wants to
+    schedule an event, set a reminder, create an alarm, or says things like
+    "remind me", "don't let me forget", "notify me at", or "add to my calendar".
+    For simple reminders, omit end/location/all_day and set reminder_minutes to 0.
 
-    :param title: Event title
-    :param start: Start datetime string in your local time (e.g. "2026-04-20 09:00" or "2026-04-20T09:00:00")
-    :param end: End datetime string in your local time (optional, omit for point-in-time events)
-    :param description: Event description (optional)
+    :param title: Event or reminder title (e.g. "Team standup", "Take medicine", "Call mom")
+    :param start: Start datetime in the user's local time (e.g. "2026-04-20 09:00")
+    :param end: End datetime in the user's local time (optional — omit for reminders or point-in-time events)
+    :param description: Event description or notes (optional)
     :param calendar_id: Target calendar ID (optional, uses default calendar if omitted)
     :param all_day: Whether this is an all-day event (default: false)
     :param location: Event location (optional)
-    :param reminder_minutes: Minutes before the event to send a reminder notification (optional, default: 10). Use 0 for "at time of event", -1 for no reminder. Accepts any positive integer for custom timing (e.g. 120 for 2 hours before).
+    :param reminder_minutes: Minutes before the event to send a notification (optional, default: 10). Use 0 for "at time of event", -1 for no notification.
     :return: JSON with the created event details including id
     """
     if __request__ is None:
@@ -3371,8 +3521,10 @@ async def update_calendar_event(
             return json.dumps({'error': 'Event not found'})
 
         # Check write access to the event's calendar
-        cal = await Calendars.get_calendar_by_id(event.calendar_id)
-        if cal and cal.user_id != user_id and __user__.get('role') != 'admin':
+        if event.user_id != user_id and __user__.get('role') != 'admin':
+            cal = await Calendars.get_calendar_by_id(event.calendar_id)
+            if not cal:
+                return json.dumps({'error': 'Access denied'})
             user_group_ids = [g.id for g in await Groups.get_groups_by_member_id(user_id)]
             if not await AccessGrants.has_access(
                 user_id=user_id,
@@ -3472,8 +3624,10 @@ async def delete_calendar_event(
             return json.dumps({'error': 'Event not found'})
 
         # Check write access
-        cal = await Calendars.get_calendar_by_id(event.calendar_id)
-        if cal and cal.user_id != user_id and __user__.get('role') != 'admin':
+        if event.user_id != user_id and __user__.get('role') != 'admin':
+            cal = await Calendars.get_calendar_by_id(event.calendar_id)
+            if not cal:
+                return json.dumps({'error': 'Access denied'})
             user_group_ids = [g.id for g in await Groups.get_groups_by_member_id(user_id)]
             if not await AccessGrants.has_access(
                 user_id=user_id,
