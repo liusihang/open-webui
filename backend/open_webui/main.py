@@ -1830,6 +1830,27 @@ async def chat_completion(
         if is_new_chat:
             metadata['chat_id'] = str(uuid4())
 
+        model_meta = model.get('info', {}).get('meta', {}) if isinstance(model, dict) else {}
+        log.info(
+            'Chat completion request metadata chat_id=%s user_message_id=%s assistant_message_ids=%s '
+            'model=%s stream=%s function_calling=%s image_generation=%s default_features=%s '
+            'builtin_image_generation=%s capability_image_generation=%s tool_ids_count=%s '
+            'tool_servers_count=%s session_id_present=%s',
+            metadata.get('chat_id'),
+            metadata.get('user_message_id'),
+            [message_id for message_id in message_ids.values() if message_id],
+            model_id,
+            form_data.get('stream'),
+            metadata.get('params', {}).get('function_calling'),
+            metadata.get('features', {}).get('image_generation'),
+            model_meta.get('defaultFeatureIds'),
+            (model_meta.get('builtinTools') or {}).get('image_generation'),
+            (model_meta.get('capabilities') or {}).get('image_generation'),
+            len(metadata.get('tool_ids') or []),
+            len(metadata.get('tool_servers') or []),
+            bool(metadata.get('session_id')),
+        )
+
         if metadata.get('chat_id') and user:
             chat_id = metadata['chat_id']
             if not chat_id.startswith('local:') and not chat_id.startswith(

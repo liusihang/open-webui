@@ -98,6 +98,7 @@
 
 	import Banner from '../common/Banner.svelte';
 	import MessageInput from '$lib/components/chat/MessageInput.svelte';
+	import { shouldEnableImageGenerationByDefault } from '$lib/components/chat/defaultFeatures';
 	import Messages from '$lib/components/chat/Messages.svelte';
 	import Navbar from '$lib/components/chat/Navbar.svelte';
 	import ChatControls from './ChatControls.svelte';
@@ -382,14 +383,6 @@
 			// Set Default Features
 			if (model?.info?.meta?.defaultFeatureIds) {
 				if (
-					model.info?.meta?.capabilities?.['image_generation'] &&
-					$config?.features?.enable_image_generation &&
-					($user?.role === 'admin' || $user?.permissions?.features?.image_generation)
-				) {
-					imageGenerationEnabled = model.info.meta.defaultFeatureIds.includes('image_generation');
-				}
-
-				if (
 					model.info?.meta?.capabilities?.['web_search'] &&
 					$config?.features?.enable_web_search &&
 					($user?.role === 'admin' || $user?.permissions?.features?.web_search)
@@ -405,6 +398,12 @@
 					codeInterpreterEnabled = model.info.meta.defaultFeatureIds.includes('code_interpreter');
 				}
 			}
+
+			imageGenerationEnabled = shouldEnableImageGenerationByDefault(
+				model,
+				$config?.features?.enable_image_generation ?? false,
+				$user?.role === 'admin' || ($user?.permissions?.features?.image_generation ?? false)
+			);
 
 			// Set Default Terminal — only if the referenced terminal actually exists
 			if (model?.info?.meta?.terminalId) {

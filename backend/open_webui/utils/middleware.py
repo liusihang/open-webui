@@ -3026,6 +3026,16 @@ async def process_chat_payload(request, form_data, user, metadata, model):
                 features,
                 model,
             )
+            log.info(
+                'Native builtin tools resolved chat_id=%s message_id=%s session_id=%s '
+                'image_generation=%s default_features=%s tool_names=%s',
+                metadata.get('chat_id'),
+                metadata.get('message_id'),
+                metadata.get('session_id'),
+                features.get('image_generation'),
+                (model.get('info', {}).get('meta', {}) or {}).get('defaultFeatureIds'),
+                sorted(builtin_tools.keys()),
+            )
             for name, tool_dict in builtin_tools.items():
                 if name not in tools_dict:
                     tools_dict[name] = tool_dict
