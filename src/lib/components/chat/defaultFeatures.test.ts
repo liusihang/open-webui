@@ -1,6 +1,10 @@
 import { describe, expect, it } from 'vitest';
 
-import { shouldEnableImageGenerationByDefault } from './defaultFeatures';
+import {
+	resolveImageGenerationDraftState,
+	resolveImageGenerationFeature,
+	shouldEnableImageGenerationByDefault
+} from './defaultFeatures';
 
 const imageModel = (meta = {}) =>
 	({
@@ -16,11 +20,7 @@ const imageModel = (meta = {}) =>
 describe('shouldEnableImageGenerationByDefault', () => {
 	it('uses explicit defaultFeatureIds when present', () => {
 		expect(
-			shouldEnableImageGenerationByDefault(
-				imageModel({ defaultFeatureIds: [] }),
-				true,
-				true
-			)
+			shouldEnableImageGenerationByDefault(imageModel({ defaultFeatureIds: [] }), true, true)
 		).toBe(false);
 
 		expect(
@@ -44,6 +44,31 @@ describe('shouldEnableImageGenerationByDefault', () => {
 				imageModel({ capabilities: { image_generation: false } }),
 				true,
 				true
+			)
+		).toBe(false);
+	});
+});
+
+describe('resolveImageGenerationFeature', () => {
+	it('restores old drafts without treating a saved false as a manual opt-out', () => {
+		expect(
+			resolveImageGenerationDraftState(
+				{ imageGenerationEnabled: false },
+				imageModel({ defaultFeatureIds: ['image_generation'] }),
+				true,
+				true
+			)
+		).toEqual({ enabled: true, userOverride: null });
+	});
+
+	it('preserves an explicit per-message image generation opt-out', () => {
+		expect(
+			resolveImageGenerationFeature(
+				imageModel({ defaultFeatureIds: ['image_generation'] }),
+				true,
+				true,
+				true,
+				false
 			)
 		).toBe(false);
 	});

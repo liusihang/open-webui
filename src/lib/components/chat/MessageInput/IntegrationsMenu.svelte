@@ -47,6 +47,7 @@
 	export let webSearchEnabled = false;
 	export let showImageGenerationButton = false;
 	export let imageGenerationEnabled = false;
+	export let onImageGenerationToggle: Function = () => {};
 	export let showCodeInterpreterButton = false;
 	export let codeInterpreterEnabled = false;
 
@@ -254,7 +255,9 @@
 							<button
 								class="flex w-full justify-between gap-2 items-center px-3 py-1.5 text-sm cursor-pointer rounded-xl hover:bg-gray-50 dark:hover:bg-gray-800/50"
 								on:click={() => {
-									imageGenerationEnabled = !imageGenerationEnabled;
+									const next = !imageGenerationEnabled;
+									imageGenerationEnabled = next;
+									onImageGenerationToggle(next);
 								}}
 							>
 								<div class="flex-1 truncate">

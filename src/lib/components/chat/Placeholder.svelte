@@ -60,6 +60,7 @@
 	export let onUpload: Function = (e) => {};
 	export let onSelect = (e) => {};
 	export let onChange = (e) => {};
+	export let onImageGenerationToggle: Function = () => {};
 
 	export let toolServers = [];
 
@@ -232,6 +233,7 @@
 					{createMessagePair}
 					placeholder={$i18n.t('How can I help you today?')}
 					{onChange}
+					{onImageGenerationToggle}
 					{onUpload}
 					on:submit={(e) => {
 						dispatch('submit', e.detail);

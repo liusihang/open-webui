@@ -98,7 +98,11 @@
 
 	import Banner from '../common/Banner.svelte';
 	import MessageInput from '$lib/components/chat/MessageInput.svelte';
-	import { shouldEnableImageGenerationByDefault } from '$lib/components/chat/defaultFeatures';
+	import {
+		resolveImageGenerationDraftState,
+		resolveImageGenerationFeature,
+		shouldEnableImageGenerationByDefault
+	} from '$lib/components/chat/defaultFeatures';
 	import Messages from '$lib/components/chat/Messages.svelte';
 	import Navbar from '$lib/components/chat/Navbar.svelte';
 	import ChatControls from './ChatControls.svelte';
@@ -154,6 +158,7 @@
 	let pendingOAuthTools = [];
 
 	let imageGenerationEnabled = false;
+	let imageGenerationUserOverride: boolean | null = null;
 	let webSearchEnabled = false;
 	let codeInterpreterEnabled = false;
 	type ReasoningDepth = 'medium' | 'deep' | 'divergent';
@@ -212,6 +217,7 @@
 		selectedFilterIds = [];
 		webSearchEnabled = false;
 		imageGenerationEnabled = false;
+		imageGenerationUserOverride = null;
 		reasoningDepth = 'medium';
 
 		const storageChatInput = sessionStorage.getItem(
@@ -247,7 +253,7 @@
 						selectedToolIds = input.selectedToolIds;
 						selectedFilterIds = input.selectedFilterIds;
 						webSearchEnabled = input.webSearchEnabled;
-						imageGenerationEnabled = input.imageGenerationEnabled;
+						restoreImageGenerationFromDraft(input);
 						codeInterpreterEnabled = input.codeInterpreterEnabled;
 						reasoningDepth =
 							input.reasoningDepth === 'deep' || input.reasoningDepth === 'divergent'
@@ -313,6 +319,7 @@
 		pendingOAuthTools = [];
 		webSearchEnabled = false;
 		imageGenerationEnabled = false;
+		imageGenerationUserOverride = null;
 		codeInterpreterEnabled = false;
 		reasoningDepth = 'medium';
 
@@ -327,6 +334,23 @@
 			($terminalServers ?? []).some((t) => t.id && t.id === tid) ||
 			($settings?.terminalServers ?? []).some((s) => s.url === tid)
 		);
+	};
+
+	const hasImageGenerationAccess = () =>
+		$user?.role === 'admin' || ($user?.permissions?.features?.image_generation ?? false);
+
+	const getPrimaryImageGenerationModel = () =>
+		atSelectedModel ?? $models.find((m) => m.id === selectedModels[0]);
+
+	const restoreImageGenerationFromDraft = (input) => {
+		const restored = resolveImageGenerationDraftState(
+			input,
+			getPrimaryImageGenerationModel(),
+			$config?.features?.enable_image_generation ?? false,
+			hasImageGenerationAccess()
+		);
+		imageGenerationEnabled = restored.enabled;
+		imageGenerationUserOverride = restored.userOverride;
 	};
 
 	const setDefaults = async () => {
@@ -404,6 +428,7 @@
 				$config?.features?.enable_image_generation ?? false,
 				$user?.role === 'admin' || ($user?.permissions?.features?.image_generation ?? false)
 			);
+			imageGenerationUserOverride = null;
 
 			// Set Default Terminal — only if the referenced terminal actually exists
 			if (model?.info?.meta?.terminalId) {
@@ -818,6 +843,7 @@
 				selectedFilterIds = [];
 				webSearchEnabled = false;
 				imageGenerationEnabled = false;
+				imageGenerationUserOverride = null;
 				codeInterpreterEnabled = false;
 				reasoningDepth = 'medium';
 
@@ -830,7 +856,7 @@
 						selectedToolIds = input.selectedToolIds;
 						selectedFilterIds = input.selectedFilterIds;
 						webSearchEnabled = input.webSearchEnabled;
-						imageGenerationEnabled = input.imageGenerationEnabled;
+						restoreImageGenerationFromDraft(input);
 						codeInterpreterEnabled = input.codeInterpreterEnabled;
 						reasoningDepth =
 							input.reasoningDepth === 'deep' || input.reasoningDepth === 'divergent'
@@ -1260,6 +1286,7 @@
 
 		if ($page.url.searchParams.get('image-generation') === 'true') {
 			imageGenerationEnabled = true;
+			imageGenerationUserOverride = true;
 		}
 
 		if ($page.url.searchParams.get('code-interpreter') === 'true') {
@@ -2191,15 +2218,19 @@
 
 	const getFeatures = () => {
 		let features = {};
+		const currentModels = atSelectedModel?.id ? [atSelectedModel.id] : selectedModels;
+		const primaryModel = $models.find((m) => m.id === currentModels[0]);
 
 		if ($config?.features)
 			features = {
 				voice: $showCallOverlay,
-				image_generation:
-					$config?.features?.enable_image_generation &&
-					($user?.role === 'admin' || $user?.permissions?.features?.image_generation)
-						? imageGenerationEnabled
-						: false,
+				image_generation: resolveImageGenerationFeature(
+					primaryModel,
+					$config?.features?.enable_image_generation ?? false,
+					hasImageGenerationAccess(),
+					imageGenerationEnabled,
+					imageGenerationUserOverride
+				),
 				code_interpreter:
 					$config?.features?.enable_code_interpreter &&
 					($user?.role === 'admin' || $user?.permissions?.features?.code_interpreter)
@@ -2212,7 +2243,6 @@
 						: false
 			};
 
-		const currentModels = atSelectedModel?.id ? [atSelectedModel.id] : selectedModels;
 		if (
 			currentModels.filter(
 				(model) => $models.find((m) => m.id === model)?.info?.meta?.capabilities?.web_search ?? true
@@ -3145,6 +3175,9 @@
 									{stopResponse}
 									{createMessagePair}
 									{onUpload}
+									onImageGenerationToggle={(enabled) => {
+										imageGenerationUserOverride = enabled;
+									}}
 									messageQueue={$chatRequestQueues[$chatId] ?? []}
 									{chatTasks}
 									onQueueSendNow={async (id) => {
@@ -3184,7 +3217,7 @@
 									}}
 									onChange={(data) => {
 										if (!$temporaryChatEnabled) {
-											saveDraft(data, $chatId);
+											saveDraft({ ...data, imageGenerationUserOverride }, $chatId);
 										}
 									}}
 									on:submit={async (e) => {
@@ -3227,9 +3260,12 @@
 									{createMessagePair}
 									{onSelect}
 									{onUpload}
+									onImageGenerationToggle={(enabled) => {
+										imageGenerationUserOverride = enabled;
+									}}
 									onChange={(data) => {
 										if (!$temporaryChatEnabled) {
-											saveDraft(data);
+											saveDraft({ ...data, imageGenerationUserOverride });
 										}
 									}}
 									on:submit={async (e) => {

@@ -106,6 +106,7 @@
 
 	export let onUpload: Function = (e) => {};
 	export let onChange: Function = () => {};
+	export let onImageGenerationToggle: Function = () => {};
 
 	export let createMessagePair: Function;
 	export let stopResponse: Function;
@@ -1573,6 +1574,7 @@
 
 															webSearchEnabled = false;
 															imageGenerationEnabled = false;
+															onImageGenerationToggle(false);
 															codeInterpreterEnabled = false;
 														}
 													}}
@@ -1697,6 +1699,7 @@
 											bind:webSearchEnabled
 											bind:imageGenerationEnabled
 											bind:codeInterpreterEnabled
+											{onImageGenerationToggle}
 											closeOnOutsideClick={integrationsMenuCloseOnOutsideClick}
 											onShowValves={(e) => {
 												const { type, id } = e;
@@ -1857,8 +1860,10 @@
 										{#if imageGenerationEnabled}
 											<Tooltip content={$i18n.t('Image')} placement="top">
 												<button
-													on:click|preventDefault={() =>
-														(imageGenerationEnabled = !imageGenerationEnabled)}
+													on:click|preventDefault={() => (
+														(imageGenerationEnabled = !imageGenerationEnabled),
+														onImageGenerationToggle(imageGenerationEnabled)
+													)}
 													type="button"
 													class="group p-[7px] flex gap-1.5 items-center text-sm rounded-full transition-colors duration-300 focus:outline-hidden max-w-full overflow-hidden {imageGenerationEnabled
 														? ' text-sky-500 dark:text-sky-300 bg-sky-50 hover:bg-sky-100 dark:bg-sky-400/10 dark:hover:bg-sky-700/10 border border-sky-200/40 dark:border-sky-500/20'
