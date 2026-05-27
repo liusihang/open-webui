@@ -16,9 +16,12 @@
 
 fastapi==0.135.1
 uvicorn[standard]==0.41.0
+typer==0.20.0
 pydantic==2.12.5
 python-multipart==0.0.22
 itsdangerous==2.2.0
+python-dotenv==1.2.1
+PyYAML==6.0.3
 
 python-socketio==5.16.1
 python-jose==3.5.0

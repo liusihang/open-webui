@@ -1,4 +1,5 @@
 import pytest
+from pathlib import Path
 
 from open_webui.utils.runtime_profiles import (
     is_external_services_slim_enabled,
@@ -36,3 +37,13 @@ def test_external_services_slim_allows_explicit_pgvector_backend():
     }
 
     validate_vector_db_for_runtime_profile(resolve_vector_db(env), env)
+
+
+def test_external_services_slim_requirements_include_startup_dependencies():
+    requirements_path = (
+        Path(__file__).resolve().parents[3] / 'requirements-external-slim.txt'
+    )
+    requirements_text = requirements_path.read_text()
+
+    for package_name in ('typer', 'python-dotenv', 'PyYAML'):
+        assert package_name in requirements_text

@@ -22,6 +22,9 @@ Notes:
   `USE_CUDA=true`.
 - This profile defaults `VECTOR_DB` to `pgvector` when no explicit `VECTOR_DB`
   is provided.
+- The slim requirements now pin `typer`, `python-dotenv`, and `PyYAML`
+  explicitly because the default image had been getting them transitively from
+  heavier optional dependencies.
 - This profile is meant for deployments that already use external embedding,
   reranking, OCR/document extraction, web loading/search, and image generation.
 
