@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 
 import {
+	canUseImageGeneration,
 	resolveImageGenerationDraftState,
 	resolveImageGenerationFeature,
 	shouldEnableImageGenerationByDefault
@@ -32,8 +33,8 @@ describe('shouldEnableImageGenerationByDefault', () => {
 		).toBe(true);
 	});
 
-	it('defaults image generation on when the model explicitly enables the builtin image tool', () => {
-		expect(shouldEnableImageGenerationByDefault(imageModel(), true, true)).toBe(true);
+	it('does not default on from builtin tool availability alone', () => {
+		expect(shouldEnableImageGenerationByDefault(imageModel(), true, true)).toBe(false);
 	});
 
 	it('does not default on without global feature access or model capability', () => {
@@ -46,6 +47,12 @@ describe('shouldEnableImageGenerationByDefault', () => {
 				true
 			)
 		).toBe(false);
+	});
+});
+
+describe('canUseImageGeneration', () => {
+	it('allows manual use when model, global config, and user permission allow it', () => {
+		expect(canUseImageGeneration(imageModel(), true, true)).toBe(true);
 	});
 });
 
@@ -71,5 +78,9 @@ describe('resolveImageGenerationFeature', () => {
 				false
 			)
 		).toBe(false);
+	});
+
+	it('allows an explicit per-message opt-in even when image generation is not defaulted', () => {
+		expect(resolveImageGenerationFeature(imageModel(), true, true, true, true)).toBe(true);
 	});
 });

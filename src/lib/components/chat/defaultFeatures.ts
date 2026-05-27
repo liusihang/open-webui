@@ -1,4 +1,4 @@
-export const shouldEnableImageGenerationByDefault = (
+export const canUseImageGeneration = (
 	model: any,
 	globalImageGenerationEnabled: boolean,
 	hasUserImageGenerationAccess: boolean
@@ -14,11 +14,25 @@ export const shouldEnableImageGenerationByDefault = (
 		return false;
 	}
 
+	return true;
+};
+
+export const shouldEnableImageGenerationByDefault = (
+	model: any,
+	globalImageGenerationEnabled: boolean,
+	hasUserImageGenerationAccess: boolean
+) => {
+	const meta = model?.info?.meta ?? {};
+
+	if (!canUseImageGeneration(model, globalImageGenerationEnabled, hasUserImageGenerationAccess)) {
+		return false;
+	}
+
 	if (Array.isArray(meta.defaultFeatureIds)) {
 		return meta.defaultFeatureIds.includes('image_generation');
 	}
 
-	return meta.builtinTools?.image_generation === true;
+	return false;
 };
 
 export const resolveImageGenerationFeature = (
@@ -28,13 +42,7 @@ export const resolveImageGenerationFeature = (
 	imageGenerationEnabled: boolean,
 	imageGenerationUserOverride: boolean | null
 ) => {
-	const canUseImageGeneration = shouldEnableImageGenerationByDefault(
-		model,
-		globalImageGenerationEnabled,
-		hasUserImageGenerationAccess
-	);
-
-	if (!canUseImageGeneration) {
+	if (!canUseImageGeneration(model, globalImageGenerationEnabled, hasUserImageGenerationAccess)) {
 		return false;
 	}
 
@@ -42,7 +50,14 @@ export const resolveImageGenerationFeature = (
 		return imageGenerationUserOverride;
 	}
 
-	return imageGenerationEnabled || canUseImageGeneration;
+	return (
+		imageGenerationEnabled ||
+		shouldEnableImageGenerationByDefault(
+			model,
+			globalImageGenerationEnabled,
+			hasUserImageGenerationAccess
+		)
+	);
 };
 
 export const resolveImageGenerationDraftState = (
