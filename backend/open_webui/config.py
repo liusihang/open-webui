@@ -37,6 +37,11 @@ from open_webui.env import (
     log,
 )
 from open_webui.internal.db import Base, get_db, get_async_db
+from open_webui.utils.runtime_profiles import (
+    is_external_services_slim_enabled,
+    resolve_vector_db,
+    validate_vector_db_for_runtime_profile,
+)
 from open_webui.utils.redis import get_redis_connection
 
 
@@ -2411,7 +2416,9 @@ CODE_INTERPRETER_PYODIDE_PROMPT = """
 # Vector Database
 ####################################
 
-VECTOR_DB = os.environ.get('VECTOR_DB', 'chroma')
+USE_EXTERNAL_SERVICES_SLIM_DOCKER = is_external_services_slim_enabled()
+VECTOR_DB = resolve_vector_db()
+validate_vector_db_for_runtime_profile(VECTOR_DB)
 
 # Chroma
 CHROMA_DATA_PATH = f'{DATA_DIR}/vector_db'
