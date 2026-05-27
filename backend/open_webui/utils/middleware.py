@@ -771,6 +771,58 @@ def deep_merge(target, source):
         return source
 
 
+_FUNCTION_ARGUMENT_FRAGMENT_KEYS = (
+    'value',
+    'text',
+    'partial_json',
+    'arguments_delta',
+    'arguments',
+    'delta',
+)
+
+
+def _coerce_function_argument_fragment(value: Any) -> str:
+    """Normalize streamed function-call argument fragments without stringifying wrappers."""
+    if value is None:
+        return ''
+
+    if isinstance(value, str):
+        return value
+
+    if isinstance(value, bytes):
+        try:
+            return value.decode('utf-8')
+        except Exception:
+            return value.decode('utf-8', errors='ignore')
+
+    if isinstance(value, dict):
+        if len(value) == 1:
+            key = next(iter(value))
+            if key in _FUNCTION_ARGUMENT_FRAGMENT_KEYS:
+                return _coerce_function_argument_fragment(value.get(key))
+            if key == 'input_json_delta':
+                nested = value.get(key)
+                if isinstance(nested, dict) and 'partial_json' in nested:
+                    return _coerce_function_argument_fragment(nested.get('partial_json'))
+            if key == 'function':
+                nested = value.get(key)
+                if isinstance(nested, dict) and 'arguments' in nested:
+                    return _coerce_function_argument_fragment(nested.get('arguments'))
+
+        try:
+            return json.dumps(value, ensure_ascii=False)
+        except Exception:
+            return str(value)
+
+    if isinstance(value, (list, int, float, bool)):
+        try:
+            return json.dumps(value, ensure_ascii=False)
+        except Exception:
+            return str(value)
+
+    return str(value)
+
+
 def handle_responses_streaming_event(
     data: dict,
     current_output: list,
@@ -862,8 +914,9 @@ def handle_responses_streaming_event(
                 if delta_type == 'function_call_arguments':
                     key = 'arguments'
                     if item_type == 'function_call':
-                        # Function call args are usually strings
-                        item[key] = item.get(key, '') + str(delta)
+                        fragment = _coerce_function_argument_fragment(delta)
+                        if fragment:
+                            item[key] = str(item.get(key, '') or '') + fragment
                 else:
                     # Generic handling, refined by item type below
                     pass
@@ -1037,7 +1090,7 @@ def handle_responses_streaming_event(
 
                         if type_name == 'function_call_arguments':
                             if item_type == 'function_call':
-                                item['arguments'] = final_value
+                                item['arguments'] = _coerce_function_argument_fragment(final_value)
                         elif item_type == 'message':
                             content_index = data.get('content_index', 0)
                             if 'content' in item:
@@ -1079,6 +1132,8 @@ def handle_responses_streaming_event(
             for item in new_output:
                 if item.get('type') == 'reasoning' and item.get('status') != 'completed':
                     item['status'] = 'completed'
+                if item.get('type') == 'function_call' and not isinstance(item.get('arguments'), str):
+                    item['arguments'] = _coerce_function_argument_fragment(item.get('arguments'))
 
         return new_output, {
             'usage': response_data.get('usage'),
@@ -4343,12 +4398,17 @@ async def streaming_chat_response_handler(response, ctx):
                                                     delta_tool_call.setdefault('function', {})
                                                     delta_tool_call['function'].setdefault('name', '')
                                                     delta_tool_call['function'].setdefault('arguments', '')
+                                                    delta_tool_call['function']['arguments'] = (
+                                                        _coerce_function_argument_fragment(
+                                                            delta_tool_call['function'].get('arguments')
+                                                        )
+                                                    )
                                                     response_tool_calls.append(delta_tool_call)
                                                 else:
                                                     # Update the existing tool call
                                                     delta_name = delta_tool_call.get('function', {}).get('name')
-                                                    delta_arguments = delta_tool_call.get('function', {}).get(
-                                                        'arguments'
+                                                    delta_arguments = _coerce_function_argument_fragment(
+                                                        delta_tool_call.get('function', {}).get('arguments')
                                                     )
 
                                                     if delta_name:
@@ -4679,9 +4739,7 @@ async def streaming_chat_response_handler(response, ctx):
                                         'index': len(responses_api_tool_calls),
                                         'function': {
                                             'name': item.get('name', ''),
-                                            'arguments': (
-                                                arguments if isinstance(arguments, str) else json.dumps(arguments)
-                                            ),
+                                            'arguments': _coerce_function_argument_fragment(arguments),
                                         },
                                     }
                                 )

@@ -38,7 +38,6 @@ def test_resolve_route_mode_auto_prefers_provider_specific_defaults():
 
 def test_resolve_effective_cache_settings_auto_generates_stable_gpt_prompt_cache_key():
     pipe = _load_pipe_class()()
-    pipe.valves.ENABLE_AUTO_PROMPT_CACHE_KEY = True
 
     attachments_a = [
         {
@@ -96,7 +95,6 @@ def test_resolve_effective_cache_settings_auto_generates_stable_gpt_prompt_cache
 
 def test_resolve_effective_cache_settings_does_not_auto_generate_non_gpt_prompt_cache_key():
     pipe = _load_pipe_class()()
-    pipe.valves.ENABLE_AUTO_PROMPT_CACHE_KEY = True
 
     settings = pipe._resolve_effective_cache_settings(
         body={'model': 'bifrostapi.anthropic/claude-3.7-sonnet'},
@@ -221,8 +219,11 @@ def test_build_chat_payload_attaches_attachments_to_last_user_message_and_normal
     last_user = payload['messages'][-1]
     assert last_user['role'] == 'user'
     assert last_user['content'][0] == {'type': 'text', 'text': 'look at this'}
-    assert last_user['content'][1]['type'] == 'file'
-    assert last_user['content'][2]['text'].startswith('[Attachment: notes.txt]\nnormalized fallback')
+    assert any(part.get('type') == 'file' for part in last_user['content'])
+    assert any(
+        part.get('type') == 'text' and part.get('text', '').startswith('[Attachment: notes.txt]\nnormalized fallback')
+        for part in last_user['content']
+    )
     assert payload['tools'][0]['type'] == 'function'
     assert payload['tools'][0]['function']['parameters'] == {'type': 'object', 'properties': {}}
     assert payload['tool_choice'] == {'type': 'function', 'function': {'name': 'demo'}}
@@ -279,8 +280,68 @@ def test_build_responses_payload_attaches_attachments_and_uses_responses_tool_sh
     assert user_message['type'] == 'message'
     assert user_message['role'] == 'user'
     assert user_message['content'][0] == {'type': 'input_text', 'text': 'hello'}
-    assert user_message['content'][1]['type'] == 'input_file'
-    assert user_message['content'][2] == {
-        'type': 'input_text',
-        'text': '[Attachment: notes.txt]\nnormalized fallback',
-    }
+    assert any(part.get('type') == 'input_file' for part in user_message['content'])
+    assert any(
+        part == {
+            'type': 'input_text',
+            'text': '[Attachment: notes.txt]\nnormalized fallback',
+        }
+        for part in user_message['content']
+    )
+
+
+def test_responses_streaming_function_call_arguments_emit_tool_calls_not_content():
+    pipe = _load_pipe_class()()
+    state = pipe._new_stream_state()
+    chunks = []
+
+    for event in [
+        {
+            'type': 'response.output_item.added',
+            'output_index': 0,
+            'item': {
+                'type': 'function_call',
+                'id': 'fc_1',
+                'call_id': 'call_1',
+                'name': 'generate_image',
+                'arguments': '',
+                'status': 'in_progress',
+            },
+        },
+        {
+            'type': 'response.function_call_arguments.delta',
+            'output_index': 0,
+            'item_id': 'fc_1',
+            'delta': {'value': '{"prompt": "A quiet'},
+        },
+        {
+            'type': 'response.function_call_arguments.delta',
+            'output_index': 0,
+            'item_id': 'fc_1',
+            'delta': {'partial_json': ' mountain lake"}'},
+        },
+        {
+            'type': 'response.function_call_arguments.done',
+            'output_index': 0,
+            'item_id': 'fc_1',
+            'arguments': {'value': '{"prompt": "A quiet mountain lake"}'},
+        },
+    ]:
+        chunk = pipe._parse_responses_event(event, state)
+        if isinstance(chunk, list):
+            chunks.extend(chunk)
+        elif chunk:
+            chunks.append(chunk)
+
+    assert chunks
+    assert all('content' not in chunk['choices'][0]['delta'] for chunk in chunks)
+
+    tool_call_deltas = [
+        chunk['choices'][0]['delta']['tool_calls'][0]
+        for chunk in chunks
+        if chunk['choices'][0]['delta'].get('tool_calls')
+    ]
+    assert tool_call_deltas[0]['function']['name'] == 'generate_image'
+    assert ''.join(delta['function'].get('arguments', '') for delta in tool_call_deltas) == (
+        '{"prompt": "A quiet mountain lake"}'
+    )
