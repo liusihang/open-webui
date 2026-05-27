@@ -45,5 +45,11 @@ def test_external_services_slim_requirements_include_startup_dependencies():
     )
     requirements_text = requirements_path.read_text()
 
-    for package_name in ('typer', 'python-dotenv', 'PyYAML', 'huggingface-hub'):
+    for package_name in (
+        'typer',
+        'python-dotenv',
+        'PyYAML',
+        'black',
+        'huggingface-hub',
+    ):
         assert package_name in requirements_text

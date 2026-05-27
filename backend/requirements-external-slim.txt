@@ -11,7 +11,7 @@
 #   weaviate-client, pymilvus, qdrant-client, elasticsearch, pinecone,
 #   oracledb, opensearch-py
 # - local browser loader and test/dev-only packages: playwright, docker,
-#   pytest, pytest-docker, black
+#   pytest, pytest-docker
 # - optional document parser bundle: unstructured
 
 fastapi==0.135.1
@@ -22,6 +22,7 @@ python-multipart==0.0.22
 itsdangerous==2.2.0
 python-dotenv==1.2.1
 PyYAML==6.0.3
+black==26.3.1
 
 python-socketio==5.16.1
 python-jose==3.5.0

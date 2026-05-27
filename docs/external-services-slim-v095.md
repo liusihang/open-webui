@@ -22,10 +22,10 @@ Notes:
   `USE_CUDA=true`.
 - This profile defaults `VECTOR_DB` to `pgvector` when no explicit `VECTOR_DB`
   is provided.
-- The slim requirements now pin `typer`, `python-dotenv`, `PyYAML`, and
-  `huggingface-hub` explicitly because the default image had been getting them
-  transitively from heavier optional dependencies, while the slim startup path
-  still imports them unconditionally.
+- The slim requirements now pin `typer`, `python-dotenv`, `PyYAML`, `black`,
+  and `huggingface-hub` explicitly because the default image had been getting
+  some of them transitively from heavier optional dependencies. `black` is kept
+  because `/api/v1/utils/code/format` imports it at runtime.
 - This profile is meant for deployments that already use external embedding,
   reranking, OCR/document extraction, web loading/search, and image generation.
 
@@ -71,8 +71,7 @@ Expected:
 - Local/unused vector backends: `chromadb`, `weaviate-client`, `pymilvus`,
   `qdrant-client`, `elasticsearch`, `pinecone`, `oracledb`, `opensearch-py`
 - Browser loader runtime: `playwright`
-- Production-image test/dev tools: `docker`, `pytest`, `pytest-docker`,
-  `black`
+- Production-image test/dev tools: `docker`, `pytest`, `pytest-docker`
 - Optional parser bundle: `unstructured`
 
 ## Functional Boundaries
