@@ -7,11 +7,12 @@ selected when `USE_EXTERNAL_SERVICES_SLIM=true` is passed at build time.
 ## Build
 
 ```bash
+BUILD_HASH="$(git -C /Users/liusihang/openwebui-v095-imagefix rev-parse --short HEAD)"
 docker buildx build \
   --load \
-  --build-arg BUILD_HASH=2e1c2d22c \
+  --build-arg BUILD_HASH="${BUILD_HASH}" \
   --build-arg USE_EXTERNAL_SERVICES_SLIM=true \
-  -t open-webui:v095-external-slim-2e1c2d22c \
+  -t "open-webui:v095-external-slim-${BUILD_HASH}" \
   /Users/liusihang/openwebui-v095-imagefix
 ```
 
@@ -38,7 +39,7 @@ docker run -d \
   -e PGVECTOR_DB_URL=postgresql://postgres:postgres@host.docker.internal:5432/openwebui \
   -e REDIS_URL=redis://host.docker.internal:6379/0 \
   -e WEBUI_SECRET_KEY=test-secret-key \
-  open-webui:v095-external-slim-2e1c2d22c
+  "open-webui:v095-external-slim-${BUILD_HASH}"
 ```
 
 Then verify:
