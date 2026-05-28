@@ -1986,9 +1986,17 @@ async def chat_image_generation_handler(request: Request, form_data: dict, extra
             }
         )
 
-        messages_map = chat.chat.get('history', {}).get('messages', {})
-        message_id = chat.chat.get('history', {}).get('currentId')
-        message_list = get_message_list(messages_map, message_id)
+        if chat:
+            messages_map = chat.chat.get('history', {}).get('messages', {})
+            message_id = chat.chat.get('history', {}).get('currentId')
+            message_list = get_message_list(messages_map, message_id)
+        else:
+            log.warning(
+                'Image generation chat row not found; falling back to request messages chat_id=%s user_id=%s',
+                chat_id,
+                user.id,
+            )
+            message_list = form_data.get('messages', [])
 
     user_message = get_last_user_message(message_list)
 
@@ -2078,20 +2086,28 @@ async def chat_image_generation_handler(request: Request, form_data: dict, extra
                     user,
                 )
 
-                response = res['choices'][0]['message']['content']
-
-                try:
-                    bracket_start = response.rfind('{')
-                    bracket_end = response.rfind('}') + 1
-
-                    if bracket_start == -1 or bracket_end == -1:
-                        raise Exception('No JSON object found in the response')
-
-                    response = response[bracket_start:bracket_end]
-                    response = json.loads(response)
-                    prompt = response.get('prompt', [])
-                except Exception as e:
+                if isinstance(res, JSONResponse):
+                    log.warning(
+                        'Image prompt generation returned HTTP %s; falling back to original prompt chat_id=%s',
+                        res.status_code,
+                        metadata.get('chat_id'),
+                    )
                     prompt = user_message
+                else:
+                    response = res['choices'][0]['message']['content']
+
+                    try:
+                        bracket_start = response.rfind('{')
+                        bracket_end = response.rfind('}') + 1
+
+                        if bracket_start == -1 or bracket_end == -1:
+                            raise Exception('No JSON object found in the response')
+
+                        response = response[bracket_start:bracket_end]
+                        response = json.loads(response)
+                        prompt = response.get('prompt', [])
+                    except Exception as e:
+                        prompt = user_message
 
             except Exception as e:
                 log.exception(e)
