@@ -3303,31 +3303,66 @@ class Pipe:
 
     def _normalize_chat_content(self, content: Any, role: str) -> Any:
         if isinstance(content, str):
-            return content
+            return (
+                self._strip_openwebui_internal_details(content)
+                if role == "assistant"
+                else content
+            )
         if isinstance(content, list):
             parts: List[dict] = []
             for part in content:
                 if isinstance(part, str):
-                    if part:
-                        parts.append({"type": "text", "text": part})
+                    text = (
+                        self._strip_openwebui_internal_details(part)
+                        if role == "assistant"
+                        else part
+                    )
+                    if text:
+                        parts.append({"type": "text", "text": text})
                     continue
                 if not isinstance(part, dict):
                     continue
                 ptype = str(part.get("type") or "").strip().lower()
                 if ptype in ("text", "image_url", "input_audio", "file"):
+                    if (
+                        role == "assistant"
+                        and ptype == "text"
+                        and isinstance(part.get("text"), str)
+                    ):
+                        cleaned = self._strip_openwebui_internal_details(
+                            str(part.get("text") or "")
+                        )
+                        if cleaned:
+                            part = {**part, "text": cleaned}
+                        else:
+                            continue
                     parts.append(part)
                     continue
                 if ptype == "input_text":
-                    parts.append({"type": "text", "text": str(part.get("text") or "")})
+                    text = str(part.get("text") or "")
+                    if role == "assistant":
+                        text = self._strip_openwebui_internal_details(text)
+                    if text:
+                        parts.append({"type": "text", "text": text})
                     continue
                 if ptype == "output_text":
-                    parts.append({"type": "text", "text": str(part.get("text") or "")})
+                    text = str(part.get("text") or "")
+                    if role == "assistant":
+                        text = self._strip_openwebui_internal_details(text)
+                    if text:
+                        parts.append({"type": "text", "text": text})
                     continue
                 if isinstance(part.get("text"), str):
-                    parts.append({"type": "text", "text": str(part.get("text") or "")})
+                    text = str(part.get("text") or "")
+                    if role == "assistant":
+                        text = self._strip_openwebui_internal_details(text)
+                    if text:
+                        parts.append({"type": "text", "text": text})
             if parts:
                 return parts
         text = self._content_to_text(content)
+        if role == "assistant":
+            text = self._strip_openwebui_internal_details(text)
         return text if text else ("" if role != "assistant" else None)
 
     def _content_to_responses_parts(self, content: Any, role: str) -> List[dict]:
@@ -3335,6 +3370,8 @@ class Pipe:
         text_part_type = "output_text" if role == "assistant" else "input_text"
 
         if isinstance(content, str):
+            if role == "assistant":
+                content = self._strip_openwebui_internal_details(content)
             if content:
                 out.append({"type": text_part_type, "text": content})
             return out
@@ -3342,6 +3379,8 @@ class Pipe:
         if isinstance(content, list):
             for part in content:
                 if isinstance(part, str):
+                    if role == "assistant":
+                        part = self._strip_openwebui_internal_details(part)
                     if part:
                         out.append({"type": text_part_type, "text": part})
                     continue
@@ -3351,6 +3390,10 @@ class Pipe:
                 if ptype in ("text", "input_text", "output_text"):
                     text = part.get("text")
                     if isinstance(text, str) and text:
+                        if role == "assistant":
+                            text = self._strip_openwebui_internal_details(text)
+                        if not text:
+                            continue
                         out.append({"type": text_part_type, "text": text})
                     continue
                 if role != "assistant" and ptype == "image_url":
@@ -3384,15 +3427,36 @@ class Pipe:
                         out.append({"type": "input_audio", "input_audio": audio_obj})
                     continue
                 if isinstance(part.get("text"), str) and part.get("text"):
-                    out.append({"type": text_part_type, "text": part.get("text")})
+                    text = part.get("text")
+                    if role == "assistant":
+                        text = self._strip_openwebui_internal_details(text)
+                    if text:
+                        out.append({"type": text_part_type, "text": text})
 
             if out:
                 return out
 
         text = self._content_to_text(content)
+        if role == "assistant":
+            text = self._strip_openwebui_internal_details(text)
         if text:
             out.append({"type": text_part_type, "text": text})
         return out
+
+    def _strip_openwebui_internal_details(self, text: str) -> str:
+        if not isinstance(text, str) or "<details" not in text.lower():
+            return text
+
+        pattern = re.compile(
+            r"<details\b(?=[^>]*\btype\s*=\s*(['\"]?)(?:tool_calls|reasoning)\1)[^>]*>.*?</details>\s*",
+            flags=re.IGNORECASE | re.DOTALL,
+        )
+        previous = None
+        cleaned = text
+        while previous != cleaned:
+            previous = cleaned
+            cleaned = pattern.sub("", cleaned)
+        return cleaned.strip()
 
     def _content_to_text(self, content: Any) -> str:
         if content is None:

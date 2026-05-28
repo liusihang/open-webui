@@ -229,6 +229,63 @@ def test_build_chat_payload_attaches_attachments_to_last_user_message_and_normal
     assert payload['tool_choice'] == {'type': 'function', 'function': {'name': 'demo'}}
 
 
+def test_build_payloads_strip_openwebui_internal_assistant_details_from_history():
+    pipe = _load_pipe_class()()
+    provider_private_id = 'baej6ulr_ts_' + ('x' * 600)
+    assistant_content = (
+        f'<details type="tool_calls" done="true" id="{provider_private_id}">\n'
+        '<summary>Tool Calls</summary>\n'
+        'generate_image({"prompt":"city"})\n'
+        '</details>\n'
+        '<details type="reasoning" done="true" duration="0">\n'
+        '<summary>Thought for 0 seconds</summary>\n'
+        '&gt; GPT思考中（上游未返回可见思考内容）\n'
+        '</details>\n'
+        '图片已经生成，可以继续描述你想调整的地方。'
+    )
+
+    chat_payload = pipe._build_chat_payload(
+        body={'model': 'bifrostapi.gemini/gemini-3.1-pro-preview', 'stream': True},
+        model='gemini/gemini-3.1-pro-preview',
+        system_message=None,
+        messages=[
+            {'role': 'user', 'content': '生成图片'},
+            {'role': 'assistant', 'content': assistant_content},
+            {'role': 'user', 'content': '改成箱根七曲发卡弯'},
+        ],
+        attachments=[],
+        function_specs=[],
+    )
+
+    assistant_message = chat_payload['messages'][1]
+    assert assistant_message['role'] == 'assistant'
+    assert assistant_message['content'] == '图片已经生成，可以继续描述你想调整的地方。'
+    assert provider_private_id not in str(chat_payload)
+    assert '<details' not in str(chat_payload)
+
+    responses_payload = pipe._build_responses_payload(
+        body={'model': 'bifrostapi.gemini/gemini-3.1-pro-preview', 'stream': True},
+        model='gemini/gemini-3.1-pro-preview',
+        system_message=None,
+        messages=[
+            {'role': 'user', 'content': '生成图片'},
+            {'role': 'assistant', 'content': assistant_content},
+            {'role': 'user', 'content': '改成箱根七曲发卡弯'},
+        ],
+        attachments=[],
+        function_specs=[],
+    )
+
+    assert provider_private_id not in str(responses_payload)
+    assert '<details' not in str(responses_payload)
+    assert any(
+        part.get('text') == '图片已经生成，可以继续描述你想调整的地方。'
+        for item in responses_payload['input']
+        if item.get('role') == 'assistant'
+        for part in item.get('content', [])
+    )
+
+
 def test_build_responses_payload_attaches_attachments_and_uses_responses_tool_shape():
     pipe = _load_pipe_class()()
 
