@@ -1877,6 +1877,73 @@ async def chat_web_search_handler(request: Request, form_data: dict, extra_param
     return form_data
 
 
+def _get_attachment_content_type(file):
+    if not isinstance(file, dict):
+        return ''
+
+    candidates = [
+        file.get('content_type'),
+        file.get('mime_type'),
+        file.get('mimeType'),
+    ]
+
+    meta = file.get('meta')
+    if isinstance(meta, dict):
+        candidates.extend(
+            [
+                meta.get('content_type'),
+                meta.get('mime_type'),
+                meta.get('mimeType'),
+            ]
+        )
+
+    file_obj = file.get('file')
+    if isinstance(file_obj, dict):
+        candidates.extend(
+            [
+                file_obj.get('content_type'),
+                file_obj.get('mime_type'),
+                file_obj.get('mimeType'),
+            ]
+        )
+        file_meta = file_obj.get('meta')
+        if isinstance(file_meta, dict):
+            candidates.extend(
+                [
+                    file_meta.get('content_type'),
+                    file_meta.get('mime_type'),
+                    file_meta.get('mimeType'),
+                ]
+            )
+
+    for candidate in candidates:
+        if isinstance(candidate, str) and candidate.strip():
+            return candidate.strip().lower().split(';', 1)[0]
+
+    return ''
+
+
+def _is_image_attachment(file):
+    if not isinstance(file, dict):
+        return False
+
+    if str(file.get('type') or '').lower() in {'image', 'image_url', 'input_image'}:
+        return True
+
+    content_type = _get_attachment_content_type(file)
+    if content_type.startswith('image/'):
+        return True
+
+    for key in ('name', 'filename', 'url'):
+        value = file.get(key)
+        if isinstance(value, str) and value.lower().split('?', 1)[0].endswith(
+            ('.png', '.jpg', '.jpeg', '.webp', '.gif', '.bmp', '.tif', '.tiff')
+        ):
+            return True
+
+    return False
+
+
 def get_images_from_messages(message_list):
     images = []
 
@@ -1951,6 +2018,7 @@ async def add_file_context(messages: list, chat_id: str, user) -> list:
             file
             for file in stored_message.get('files', [])
             if file.get('url') and not file.get('url').startswith('data:')
+            and not _is_image_attachment(file)
         ]
         if not files_with_urls:
             continue
