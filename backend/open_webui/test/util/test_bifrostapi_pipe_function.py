@@ -286,6 +286,72 @@ def test_build_payloads_strip_openwebui_internal_assistant_details_from_history(
     )
 
 
+def test_pipe_forces_non_stream_upstream_for_native_image_tool_planning():
+    pipe = _load_pipe_class()()
+    pipe.valves.BIFROST_API_KEY = 'test-key'
+    pipe.valves.ROUTE_MODE = 'chat'
+
+    captured = {}
+
+    def fake_chat_non_stream(payload, tool_name_prefix=''):
+        captured['payload'] = payload
+        captured['tool_name_prefix'] = tool_name_prefix
+        return {
+            'choices': [
+                {
+                    'finish_reason': 'tool_calls',
+                    'message': {
+                        'role': 'assistant',
+                        'tool_calls': [
+                            {
+                                'id': 'call_image',
+                                'type': 'function',
+                                'function': {
+                                    'name': 'generate_image',
+                                    'arguments': '{"prompt":"red apple"}',
+                                },
+                            }
+                        ],
+                    },
+                }
+            ]
+        }
+
+    pipe._chat_non_stream_with_fallback = fake_chat_non_stream
+
+    chunks = list(
+        pipe.pipe(
+            {
+                'model': 'bifrostapi.ZenMuxOAI/openai/gpt-5.4',
+                'stream': True,
+                'features': {'image_generation': True},
+                'messages': [{'role': 'user', 'content': '生成一张红苹果图片'}],
+                'tools': [
+                    {
+                        'type': 'function',
+                        'function': {
+                            'name': 'generate_image',
+                            'description': 'Generate image',
+                            'parameters': {
+                                'type': 'object',
+                                'properties': {'prompt': {'type': 'string'}},
+                                'required': ['prompt'],
+                            },
+                        },
+                    }
+                ],
+            }
+        )
+    )
+
+    assert captured['payload']['stream'] is False
+    assert (
+        chunks[0]['choices'][0]['delta']['tool_calls'][0]['function']['name']
+        == 'generate_image'
+    )
+    assert chunks[1]['choices'][0]['finish_reason'] == 'tool_calls'
+
+
 def test_build_responses_payload_attaches_attachments_and_uses_responses_tool_shape():
     pipe = _load_pipe_class()()
 

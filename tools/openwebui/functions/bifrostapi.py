@@ -258,6 +258,12 @@ class Pipe:
         function_specs = self._collect_function_specs(
             body.get("tools"), __tools__, runtime_tool_meta
         )
+        force_image_tool_non_stream = self._should_force_image_tool_non_stream(
+            body=body,
+            stream=stream,
+            model=model,
+            function_specs=function_specs,
+        )
         file_items = self._collect_file_candidates(body, __files__, __metadata__)
         attachments = self._prepare_attachments(
             file_items=file_items, user=__user__, model=model
@@ -348,7 +354,11 @@ class Pipe:
                 effective_cache_settings=effective_cache_settings,
             )
             payload, _ = self._sanitize_upstream_payload(payload)
-            if force_image_non_stream or force_agent_non_stream:
+            if (
+                force_image_non_stream
+                or force_agent_non_stream
+                or force_image_tool_non_stream
+            ):
                 payload["stream"] = False
                 _emit_agent_start("chat")
                 out = self._chat_non_stream_with_fallback(
@@ -385,7 +395,11 @@ class Pipe:
                 effective_cache_settings=effective_cache_settings,
             )
             payload, _ = self._sanitize_upstream_payload(payload)
-            if force_image_non_stream or force_agent_non_stream:
+            if (
+                force_image_non_stream
+                or force_agent_non_stream
+                or force_image_tool_non_stream
+            ):
                 payload["stream"] = False
                 _emit_agent_start("responses")
                 out = self._responses_non_stream_with_fallback(
@@ -423,7 +437,11 @@ class Pipe:
                 effective_cache_settings=effective_cache_settings,
             )
             responses_payload, _ = self._sanitize_upstream_payload(responses_payload)
-            if force_image_non_stream or force_agent_non_stream:
+            if (
+                force_image_non_stream
+                or force_agent_non_stream
+                or force_image_tool_non_stream
+            ):
                 responses_payload["stream"] = False
                 _emit_agent_start("responses")
                 out = self._responses_non_stream_with_fallback(
@@ -700,6 +718,35 @@ class Pipe:
                     return True
 
         return bool(self._extract_responses_tool_calls(result))
+
+    def _has_function_spec(self, function_specs: Any, name: str) -> bool:
+        expected = str(name or "").strip()
+        if not expected:
+            return False
+        for spec in self._ordered_function_specs(function_specs):
+            if str(spec.get("name") or "").strip() == expected:
+                return True
+        return False
+
+    def _should_force_image_tool_non_stream(
+        self,
+        body: dict,
+        stream: bool,
+        model: str,
+        function_specs: Any,
+    ) -> bool:
+        if not stream or not self._force_non_stream_image_mode():
+            return False
+        if self._is_image_generation_model(model):
+            return False
+        if not self._has_function_spec(function_specs, "generate_image"):
+            return False
+        features = self._body_param(body, "features")
+        if isinstance(features, dict):
+            return self._valve_bool(features.get("image_generation"), False)
+        # A selected generate_image tool is already enough evidence that this is
+        # native image planning, even if an older caller did not forward features.
+        return True
 
     def _office_to_pdf_enabled(self) -> bool:
         return self._valve_bool(self.valves.ENABLE_DOC_TO_PDF_CONVERSION, True)
