@@ -57,6 +57,7 @@ from open_webui.utils.misc import (
 )
 from open_webui.utils.openai_payload import (
     dedupe_system_messages,
+    responses_continuation_input_items,
     sanitize_openai_payload,
 )
 from open_webui.utils.session_pool import (
@@ -992,6 +993,9 @@ def convert_to_responses_payload(payload: dict) -> dict:
             content_parts = [{'type': text_type, 'text': str(content)}]
 
         input_items.append({'type': 'message', 'role': role, 'content': content_parts})
+
+    if payload.get('previous_response_id'):
+        input_items = responses_continuation_input_items(input_items)
 
     responses_payload = {**payload, 'input': input_items}
 

@@ -1,4 +1,8 @@
-from open_webui.utils.openai_payload import dedupe_system_messages, sanitize_openai_payload
+from open_webui.utils.openai_payload import (
+    dedupe_system_messages,
+    responses_continuation_input_items,
+    sanitize_openai_payload,
+)
 
 
 def test_sanitize_openai_payload_removes_reasoning_encrypted_content_keys_and_required_entries():
@@ -51,3 +55,27 @@ def test_dedupe_system_messages_ignores_non_list_inputs():
     payload, removed = dedupe_system_messages({'role': 'system'})
     assert payload == {'role': 'system'}
     assert removed == 0
+
+
+def test_responses_continuation_input_items_keeps_latest_user_turn():
+    input_items = [
+        {
+            'type': 'message',
+            'role': 'user',
+            'content': [{'type': 'input_text', 'text': 'old question'}],
+        },
+        {
+            'type': 'message',
+            'role': 'assistant',
+            'content': [{'type': 'output_text', 'text': 'old answer'}],
+        },
+        {
+            'type': 'message',
+            'role': 'user',
+            'content': [{'type': 'input_text', 'text': 'new question'}],
+        },
+    ]
+
+    trimmed = responses_continuation_input_items(input_items)
+
+    assert trimmed == [input_items[-1]]
