@@ -532,6 +532,66 @@ ENABLE_MEMORIES = ConfigVar(
     os.getenv('ENABLE_MEMORIES', 'True').lower() == 'true',
 )
 
+LAYER_GENERATION_MODEL = ConfigVar(
+    'LAYER_GENERATION_MODEL',
+    'layered_knowledge.internal.model',
+    os.getenv('LAYER_GENERATION_MODEL', '').strip(),
+)
+
+LAYER_GENERATION_PROMPT_ABSTRACT = ConfigVar(
+    'LAYER_GENERATION_PROMPT_ABSTRACT',
+    'layered_knowledge.internal.prompt_abstract',
+    os.getenv('LAYER_GENERATION_PROMPT_ABSTRACT', ''),
+)
+
+LAYER_GENERATION_MAX_CHUNK_TOKENS = ConfigVar(
+    'LAYER_GENERATION_MAX_CHUNK_TOKENS',
+    'layered_knowledge.internal.max_chunk_tokens',
+    int(os.getenv('LAYER_GENERATION_MAX_CHUNK_TOKENS', '24000')),
+)
+
+LAYER_GENERATION_MIN_TAIL_TOKENS = ConfigVar(
+    'LAYER_GENERATION_MIN_TAIL_TOKENS',
+    'layered_knowledge.internal.min_tail_tokens',
+    int(os.getenv('LAYER_GENERATION_MIN_TAIL_TOKENS', '1000')),
+)
+
+OPEN_NOTEBOOK_BASE_URL = ConfigVar(
+    'OPEN_NOTEBOOK_BASE_URL',
+    'layered_knowledge.open_notebook.base_url',
+    os.getenv('OPEN_NOTEBOOK_BASE_URL', '').rstrip('/'),
+)
+
+OPEN_NOTEBOOK_API_PASSWORD = ConfigVar(
+    'OPEN_NOTEBOOK_API_PASSWORD',
+    'layered_knowledge.open_notebook.api_password',
+    os.getenv('OPEN_NOTEBOOK_API_PASSWORD', ''),
+)
+
+OPEN_NOTEBOOK_TIMEOUT_SECS = ConfigVar(
+    'OPEN_NOTEBOOK_TIMEOUT_SECS',
+    'layered_knowledge.open_notebook.timeout_secs',
+    int(os.getenv('OPEN_NOTEBOOK_TIMEOUT_SECS', '30')),
+)
+
+OPEN_NOTEBOOK_TRANSFORMATION_ABSTRACT = ConfigVar(
+    'OPEN_NOTEBOOK_TRANSFORMATION_ABSTRACT',
+    'layered_knowledge.open_notebook.transformations.abstract',
+    os.getenv('OPEN_NOTEBOOK_TRANSFORMATION_ABSTRACT', ''),
+)
+
+OPEN_NOTEBOOK_TRANSFORMATION_KEY_FINDINGS = ConfigVar(
+    'OPEN_NOTEBOOK_TRANSFORMATION_KEY_FINDINGS',
+    'layered_knowledge.open_notebook.transformations.key_findings',
+    os.getenv('OPEN_NOTEBOOK_TRANSFORMATION_KEY_FINDINGS', ''),
+)
+
+OPEN_NOTEBOOK_TRANSFORMATION_KEY_DATA = ConfigVar(
+    'OPEN_NOTEBOOK_TRANSFORMATION_KEY_DATA',
+    'layered_knowledge.open_notebook.transformations.key_data',
+    os.getenv('OPEN_NOTEBOOK_TRANSFORMATION_KEY_DATA', ''),
+)
+
 CODE_INTERPRETER_ENGINE = ConfigVar(
     'CODE_INTERPRETER_ENGINE',
     'code_interpreter.engine',
@@ -1221,6 +1281,12 @@ BYPASS_EMBEDDING_AND_RETRIEVAL = ConfigVar(
     os.getenv('BYPASS_EMBEDDING_AND_RETRIEVAL', 'False').lower() == 'true',
 )
 
+NATIVE_ATTACHED_KNOWLEDGE_BYPASS_LEGACY_FILE_RETRIEVAL = ConfigVar(
+    'NATIVE_ATTACHED_KNOWLEDGE_BYPASS_LEGACY_FILE_RETRIEVAL',
+    'layered_knowledge.native_attached_knowledge_bypass_legacy_file_retrieval',
+    os.getenv('NATIVE_ATTACHED_KNOWLEDGE_BYPASS_LEGACY_FILE_RETRIEVAL', 'False').lower()
+    == 'true',
+)
 
 RAG_TOP_K = ConfigVar('RAG_TOP_K', 'rag.top_k', int(os.getenv('RAG_TOP_K', '3')))
 RAG_TOP_K_RERANKER = ConfigVar(
@@ -2625,6 +2691,29 @@ PENDING_USER_OVERLAY_CONTENT = ConfigVar(
     os.getenv('PENDING_USER_OVERLAY_CONTENT', ''),
 )
 
+ANNOUNCEMENT_MODAL_ENABLED = ConfigVar(
+    'ANNOUNCEMENT_MODAL_ENABLED',
+    'ui.announcement_modal.enabled',
+    os.getenv('ANNOUNCEMENT_MODAL_ENABLED', 'False').lower() == 'true',
+)
+
+ANNOUNCEMENT_MODAL_KEY = ConfigVar(
+    'ANNOUNCEMENT_MODAL_KEY',
+    'ui.announcement_modal.key',
+    os.getenv('ANNOUNCEMENT_MODAL_KEY', ''),
+)
+
+ANNOUNCEMENT_MODAL_TITLE = ConfigVar(
+    'ANNOUNCEMENT_MODAL_TITLE',
+    'ui.announcement_modal.title',
+    os.getenv('ANNOUNCEMENT_MODAL_TITLE', ''),
+)
+
+ANNOUNCEMENT_MODAL_CONTENT = ConfigVar(
+    'ANNOUNCEMENT_MODAL_CONTENT',
+    'ui.announcement_modal.content',
+    os.getenv('ANNOUNCEMENT_MODAL_CONTENT', ''),
+)
 
 RESPONSE_WATERMARK = ConfigVar(
     'RESPONSE_WATERMARK',
