@@ -72,3 +72,25 @@ def dedupe_system_messages(messages: Any) -> tuple[Any, int]:
         deduped.append(message)
 
     return deduped, removed
+
+
+def responses_continuation_input_items(input_items: Any) -> Any:
+    if not isinstance(input_items, list) or not input_items:
+        return input_items
+
+    for index in range(len(input_items) - 1, -1, -1):
+        item = input_items[index]
+        if (
+            isinstance(item, dict)
+            and str(item.get('type') or '').strip().lower() == 'message'
+            and str(item.get('role') or '').strip().lower() == 'user'
+        ):
+            return input_items[index:]
+
+    function_outputs = [
+        item
+        for item in input_items
+        if isinstance(item, dict)
+        and str(item.get('type') or '').strip().lower() == 'function_call_output'
+    ]
+    return function_outputs or input_items

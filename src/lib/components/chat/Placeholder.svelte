@@ -47,6 +47,7 @@
 	export let messageInput = null;
 
 	export let selectedToolIds = [];
+	export let selectedSkillIds = [];
 	export let selectedFilterIds = [];
 	export let pendingOAuthTools = [];
 
@@ -60,6 +61,7 @@
 	export let onUpload: Function = (e) => {};
 	export let onSelect = (e) => {};
 	export let onChange = (e) => {};
+	export let onImageGenerationToggle: Function = () => {};
 
 	export let toolServers = [];
 
@@ -218,6 +220,7 @@
 					bind:prompt
 					bind:autoScroll
 					bind:selectedToolIds
+					bind:selectedSkillIds
 					bind:selectedFilterIds
 					bind:imageGenerationEnabled
 					bind:codeInterpreterEnabled
@@ -232,6 +235,7 @@
 					{createMessagePair}
 					placeholder={$i18n.t('How can I help you today?')}
 					{onChange}
+					{onImageGenerationToggle}
 					{onUpload}
 					on:submit={(e) => {
 						dispatch('submit', e.detail);

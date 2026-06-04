@@ -38,7 +38,6 @@ def test_resolve_route_mode_auto_prefers_provider_specific_defaults():
 
 def test_resolve_effective_cache_settings_auto_generates_stable_gpt_prompt_cache_key():
     pipe = _load_pipe_class()()
-    pipe.valves.ENABLE_AUTO_PROMPT_CACHE_KEY = True
 
     attachments_a = [
         {
@@ -96,7 +95,6 @@ def test_resolve_effective_cache_settings_auto_generates_stable_gpt_prompt_cache
 
 def test_resolve_effective_cache_settings_does_not_auto_generate_non_gpt_prompt_cache_key():
     pipe = _load_pipe_class()()
-    pipe.valves.ENABLE_AUTO_PROMPT_CACHE_KEY = True
 
     settings = pipe._resolve_effective_cache_settings(
         body={'model': 'bifrostapi.anthropic/claude-3.7-sonnet'},
@@ -221,11 +219,137 @@ def test_build_chat_payload_attaches_attachments_to_last_user_message_and_normal
     last_user = payload['messages'][-1]
     assert last_user['role'] == 'user'
     assert last_user['content'][0] == {'type': 'text', 'text': 'look at this'}
-    assert last_user['content'][1]['type'] == 'file'
-    assert last_user['content'][2]['text'].startswith('[Attachment: notes.txt]\nnormalized fallback')
+    assert any(part.get('type') == 'file' for part in last_user['content'])
+    assert any(
+        part.get('type') == 'text' and part.get('text', '').startswith('[Attachment: notes.txt]\nnormalized fallback')
+        for part in last_user['content']
+    )
     assert payload['tools'][0]['type'] == 'function'
     assert payload['tools'][0]['function']['parameters'] == {'type': 'object', 'properties': {}}
     assert payload['tool_choice'] == {'type': 'function', 'function': {'name': 'demo'}}
+
+
+def test_build_payloads_strip_openwebui_internal_assistant_details_from_history():
+    pipe = _load_pipe_class()()
+    provider_private_id = 'baej6ulr_ts_' + ('x' * 600)
+    assistant_content = (
+        f'<details type="tool_calls" done="true" id="{provider_private_id}">\n'
+        '<summary>Tool Calls</summary>\n'
+        'generate_image({"prompt":"city"})\n'
+        '</details>\n'
+        '<details type="reasoning" done="true" duration="0">\n'
+        '<summary>Thought for 0 seconds</summary>\n'
+        '&gt; GPT思考中（上游未返回可见思考内容）\n'
+        '</details>\n'
+        '图片已经生成，可以继续描述你想调整的地方。'
+    )
+
+    chat_payload = pipe._build_chat_payload(
+        body={'model': 'bifrostapi.gemini/gemini-3.1-pro-preview', 'stream': True},
+        model='gemini/gemini-3.1-pro-preview',
+        system_message=None,
+        messages=[
+            {'role': 'user', 'content': '生成图片'},
+            {'role': 'assistant', 'content': assistant_content},
+            {'role': 'user', 'content': '改成箱根七曲发卡弯'},
+        ],
+        attachments=[],
+        function_specs=[],
+    )
+
+    assistant_message = chat_payload['messages'][1]
+    assert assistant_message['role'] == 'assistant'
+    assert assistant_message['content'] == '图片已经生成，可以继续描述你想调整的地方。'
+    assert provider_private_id not in str(chat_payload)
+    assert '<details' not in str(chat_payload)
+
+    responses_payload = pipe._build_responses_payload(
+        body={'model': 'bifrostapi.gemini/gemini-3.1-pro-preview', 'stream': True},
+        model='gemini/gemini-3.1-pro-preview',
+        system_message=None,
+        messages=[
+            {'role': 'user', 'content': '生成图片'},
+            {'role': 'assistant', 'content': assistant_content},
+            {'role': 'user', 'content': '改成箱根七曲发卡弯'},
+        ],
+        attachments=[],
+        function_specs=[],
+    )
+
+    assert provider_private_id not in str(responses_payload)
+    assert '<details' not in str(responses_payload)
+    assert any(
+        part.get('text') == '图片已经生成，可以继续描述你想调整的地方。'
+        for item in responses_payload['input']
+        if item.get('role') == 'assistant'
+        for part in item.get('content', [])
+    )
+
+
+def test_pipe_forces_non_stream_upstream_for_native_image_tool_planning():
+    pipe = _load_pipe_class()()
+    pipe.valves.BIFROST_API_KEY = 'test-key'
+    pipe.valves.ROUTE_MODE = 'chat'
+
+    captured = {}
+
+    def fake_chat_non_stream(payload, tool_name_prefix=''):
+        captured['payload'] = payload
+        captured['tool_name_prefix'] = tool_name_prefix
+        return {
+            'choices': [
+                {
+                    'finish_reason': 'tool_calls',
+                    'message': {
+                        'role': 'assistant',
+                        'tool_calls': [
+                            {
+                                'id': 'call_image',
+                                'type': 'function',
+                                'function': {
+                                    'name': 'generate_image',
+                                    'arguments': '{"prompt":"red apple"}',
+                                },
+                            }
+                        ],
+                    },
+                }
+            ]
+        }
+
+    pipe._chat_non_stream_with_fallback = fake_chat_non_stream
+
+    chunks = list(
+        pipe.pipe(
+            {
+                'model': 'bifrostapi.ZenMuxOAI/openai/gpt-5.4',
+                'stream': True,
+                'features': {'image_generation': True},
+                'messages': [{'role': 'user', 'content': '生成一张红苹果图片'}],
+                'tools': [
+                    {
+                        'type': 'function',
+                        'function': {
+                            'name': 'generate_image',
+                            'description': 'Generate image',
+                            'parameters': {
+                                'type': 'object',
+                                'properties': {'prompt': {'type': 'string'}},
+                                'required': ['prompt'],
+                            },
+                        },
+                    }
+                ],
+            }
+        )
+    )
+
+    assert captured['payload']['stream'] is False
+    assert (
+        chunks[0]['choices'][0]['delta']['tool_calls'][0]['function']['name']
+        == 'generate_image'
+    )
+    assert chunks[1]['choices'][0]['finish_reason'] == 'tool_calls'
 
 
 def test_build_responses_payload_attaches_attachments_and_uses_responses_tool_shape():
@@ -279,8 +403,68 @@ def test_build_responses_payload_attaches_attachments_and_uses_responses_tool_sh
     assert user_message['type'] == 'message'
     assert user_message['role'] == 'user'
     assert user_message['content'][0] == {'type': 'input_text', 'text': 'hello'}
-    assert user_message['content'][1]['type'] == 'input_file'
-    assert user_message['content'][2] == {
-        'type': 'input_text',
-        'text': '[Attachment: notes.txt]\nnormalized fallback',
-    }
+    assert any(part.get('type') == 'input_file' for part in user_message['content'])
+    assert any(
+        part == {
+            'type': 'input_text',
+            'text': '[Attachment: notes.txt]\nnormalized fallback',
+        }
+        for part in user_message['content']
+    )
+
+
+def test_responses_streaming_function_call_arguments_emit_tool_calls_not_content():
+    pipe = _load_pipe_class()()
+    state = pipe._new_stream_state()
+    chunks = []
+
+    for event in [
+        {
+            'type': 'response.output_item.added',
+            'output_index': 0,
+            'item': {
+                'type': 'function_call',
+                'id': 'fc_1',
+                'call_id': 'call_1',
+                'name': 'generate_image',
+                'arguments': '',
+                'status': 'in_progress',
+            },
+        },
+        {
+            'type': 'response.function_call_arguments.delta',
+            'output_index': 0,
+            'item_id': 'fc_1',
+            'delta': {'value': '{"prompt": "A quiet'},
+        },
+        {
+            'type': 'response.function_call_arguments.delta',
+            'output_index': 0,
+            'item_id': 'fc_1',
+            'delta': {'partial_json': ' mountain lake"}'},
+        },
+        {
+            'type': 'response.function_call_arguments.done',
+            'output_index': 0,
+            'item_id': 'fc_1',
+            'arguments': {'value': '{"prompt": "A quiet mountain lake"}'},
+        },
+    ]:
+        chunk = pipe._parse_responses_event(event, state)
+        if isinstance(chunk, list):
+            chunks.extend(chunk)
+        elif chunk:
+            chunks.append(chunk)
+
+    assert chunks
+    assert all('content' not in chunk['choices'][0]['delta'] for chunk in chunks)
+
+    tool_call_deltas = [
+        chunk['choices'][0]['delta']['tool_calls'][0]
+        for chunk in chunks
+        if chunk['choices'][0]['delta'].get('tool_calls')
+    ]
+    assert tool_call_deltas[0]['function']['name'] == 'generate_image'
+    assert ''.join(delta['function'].get('arguments', '') for delta in tool_call_deltas) == (
+        '{"prompt": "A quiet mountain lake"}'
+    )

@@ -4,6 +4,7 @@
 ARG USE_CUDA=false
 ARG USE_OLLAMA=false
 ARG USE_SLIM=false
+ARG USE_EXTERNAL_SERVICES_SLIM=false
 ARG USE_PERMISSION_HARDENING=false
 # Tested with cu117 for CUDA 11 and cu121 for CUDA 12 (default)
 ARG USE_CUDA_VER=cu128
@@ -36,6 +37,10 @@ WORKDIR /app
 RUN apk add --no-cache git
 
 COPY package.json package-lock.json ./
+# Cypress is only used for E2E tests; skip its binary download in production image builds.
+ENV CYPRESS_INSTALL_BINARY=0
+# onnxruntime-node otherwise tries to download CUDA providers during npm install on Linux/x64.
+ENV ONNXRUNTIME_NODE_INSTALL_CUDA=skip
 RUN npm ci --force
 
 COPY . .
@@ -43,13 +48,14 @@ ENV APP_BUILD_HASH=${BUILD_HASH}
 RUN npm run build
 
 ######## WebUI backend ########
-FROM python:3.11.14-slim-bookworm AS base
+FROM python:3.11-slim-bookworm AS base
 
 # Use args
 ARG USE_CUDA
 ARG USE_OLLAMA
 ARG USE_CUDA_VER
 ARG USE_SLIM
+ARG USE_EXTERNAL_SERVICES_SLIM
 ARG USE_PERMISSION_HARDENING
 ARG USE_EMBEDDING_MODEL
 ARG USE_RERANKING_MODEL
@@ -67,6 +73,7 @@ ENV ENV=prod \
     USE_OLLAMA_DOCKER=${USE_OLLAMA} \
     USE_CUDA_DOCKER=${USE_CUDA} \
     USE_SLIM_DOCKER=${USE_SLIM} \
+    USE_EXTERNAL_SERVICES_SLIM_DOCKER=${USE_EXTERNAL_SERVICES_SLIM} \
     USE_CUDA_DOCKER_VER=${USE_CUDA_VER} \
     USE_EMBEDDING_MODEL_DOCKER=${USE_EMBEDDING_MODEL} \
     USE_RERANKING_MODEL_DOCKER=${USE_RERANKING_MODEL} \
@@ -123,28 +130,49 @@ RUN echo -n 00000000-0000-0000-0000-000000000000 > $HOME/.cache/chroma/telemetry
 # Make sure the user has access to the app and root directory
 RUN chown -R $UID:$GID /app $HOME
 
-# Install common system dependencies
-RUN apt-get update && \
+# Install system dependencies.
+# The external-services slim profile intentionally skips local ML/OCR/browser
+# build deps and the OpenCV runtime libs they require.
+RUN set -e; \
+    if [ "$USE_EXTERNAL_SERVICES_SLIM" = "true" ] && [ "$USE_CUDA" = "true" ]; then \
+    echo "USE_EXTERNAL_SERVICES_SLIM=true is incompatible with USE_CUDA=true" >&2; \
+    exit 1; \
+    fi; \
+    apt-get update && \
+    if [ "$USE_EXTERNAL_SERVICES_SLIM" = "true" ]; then \
+    apt-get install -y --no-install-recommends \
+    git pandoc netcat-openbsd curl jq ffmpeg zstd; \
+    else \
     apt-get install -y --no-install-recommends \
     git build-essential pandoc gcc netcat-openbsd curl jq \
     libmariadb-dev \
     python3-dev \
-    ffmpeg libsm6 libxext6 zstd \
-    && rm -rf /var/lib/apt/lists/*
+    ffmpeg libsm6 libxext6 zstd; \
+    fi && \
+    rm -rf /var/lib/apt/lists/*
 
 # install python dependencies
 COPY --chown=$UID:$GID ./backend/requirements.txt ./requirements.txt
+COPY --chown=$UID:$GID ./backend/requirements-external-slim.txt ./requirements-external-slim.txt
 
 # Set UV_LINK_MODE to copy to prevent 0-byte file corruption in QEMU arm64 cross-builds
 ENV UV_LINK_MODE=copy
 
 RUN set -e; \
+    REQUIREMENTS_FILE="requirements.txt"; \
+    if [ "$USE_EXTERNAL_SERVICES_SLIM" = "true" ]; then \
+    REQUIREMENTS_FILE="requirements-external-slim.txt"; \
+    fi; \
     pip3 install --no-cache-dir uv; \
-    if [ "$USE_CUDA" = "true" ]; then \
+    if [ "$USE_EXTERNAL_SERVICES_SLIM" = "true" ]; then \
+    uv pip install --system -r "$REQUIREMENTS_FILE" --no-cache-dir; \
+    python -c "import os; import tiktoken; tiktoken.get_encoding(os.environ['TIKTOKEN_ENCODING_NAME'])"; \
+    python -c "import nltk; nltk.download('punkt_tab')"; \
+    elif [ "$USE_CUDA" = "true" ]; then \
     # If you use CUDA the whisper and embedding model will be downloaded on first use
     # fix: pin torch<=2.9.1 - torch 2.10.0 aarch64 wheels cause SIGILL on ARM devices (RPi 4 Cortex-A72) #21349
     pip3 install 'torch<=2.9.1' torchvision torchaudio --index-url https://download.pytorch.org/whl/$USE_CUDA_DOCKER_VER --no-cache-dir; \
-    uv pip install --system -r requirements.txt --no-cache-dir; \
+    uv pip install --system -r "$REQUIREMENTS_FILE" --no-cache-dir; \
     python -c "import os; from sentence_transformers import SentenceTransformer; SentenceTransformer(os.environ['RAG_EMBEDDING_MODEL'], device='cpu')"; \
     python -c "import os; from sentence_transformers import SentenceTransformer; SentenceTransformer(os.environ.get('AUXILIARY_EMBEDDING_MODEL', 'TaylorAI/bge-micro-v2'), device='cpu')"; \
     python -c "import os; from faster_whisper import WhisperModel; WhisperModel(os.environ['WHISPER_MODEL'], device='cpu', compute_type='int8', download_root=os.environ['WHISPER_MODEL_DIR'])"; \
@@ -152,7 +180,7 @@ RUN set -e; \
     python -c "import nltk; nltk.download('punkt_tab')"; \
     else \
     pip3 install 'torch<=2.9.1' torchvision torchaudio --index-url https://download.pytorch.org/whl/cpu --no-cache-dir; \
-    uv pip install --system -r requirements.txt --no-cache-dir; \
+    uv pip install --system -r "$REQUIREMENTS_FILE" --no-cache-dir; \
     if [ "$USE_SLIM" != "true" ]; then \
     python -c "import os; from sentence_transformers import SentenceTransformer; SentenceTransformer(os.environ['RAG_EMBEDDING_MODEL'], device='cpu')"; \
     python -c "import os; from sentence_transformers import SentenceTransformer; SentenceTransformer(os.environ.get('AUXILIARY_EMBEDDING_MODEL', 'TaylorAI/bge-micro-v2'), device='cpu')"; \
