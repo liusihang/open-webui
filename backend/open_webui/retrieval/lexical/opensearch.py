@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
+import re
 from typing import Any
 
 from opensearchpy import OpenSearch
@@ -100,6 +101,7 @@ class OpenSearchLexicalClient:
                 "analysis": analysis,
             },
             "mappings": {
+                "_source": {"excludes": ["text"]},
                 "properties": {
                     "chunk_uid": {"type": "keyword"},
                     "collection_id": {"type": "keyword"},
@@ -119,7 +121,7 @@ class OpenSearchLexicalClient:
                     "name": text_field(include_ngram=True),
                     "source": text_field(include_ngram=True),
                     "metadata_headings": text_field(),
-                    "metadata": {"type": "object", "enabled": True},
+                    "metadata": {"type": "object", "enabled": False},
                 }
             },
         }
@@ -141,22 +143,36 @@ class OpenSearchLexicalClient:
         self._ensure_alias(index_name)
         return index_name
 
-    def bulk_upsert(self, chunks: Iterable[Any]) -> int:
-        actions = [
-            {
-                "_op_type": "index",
-                "_index": self.alias,
-                "_id": source["chunk_uid"],
-                "_source": source,
-            }
-            for source in (self._source_from_chunk(chunk) for chunk in chunks)
-        ]
-        if not actions:
+    def bulk_upsert(self, chunks: Iterable[Any], *, batch_size: int = 500) -> int:
+        if batch_size < 1:
+            raise ValueError("batch_size must be at least 1")
+
+        count = 0
+        batch: list[dict[str, Any]] = []
+        for chunk in chunks:
+            source = self._source_from_chunk(chunk)
+            batch.append(
+                {
+                    "_op_type": "index",
+                    "_index": self.alias,
+                    "_id": source["chunk_uid"],
+                    "_source": source,
+                }
+            )
+            if len(batch) >= batch_size:
+                self._bulk(self.client, batch)
+                count += len(batch)
+                batch = []
+
+        if batch:
+            self._bulk(self.client, batch)
+            count += len(batch)
+
+        if count == 0:
             return 0
 
-        self._bulk(self.client, actions)
         self.client.indices.refresh(index=self.alias)
-        return len(actions)
+        return count
 
     def search(
         self,
@@ -167,6 +183,10 @@ class OpenSearchLexicalClient:
         file_ids: Iterable[str] | str | None = None,
         k: int = 10,
     ) -> list[LexicalSearchHit]:
+        query = query.strip()
+        if not query:
+            return []
+
         filters: list[dict[str, Any]] = [{"term": {"is_active": True}}]
         for field, values in (
             ("collection_id", self._as_list(collection_ids)),
@@ -231,20 +251,32 @@ class OpenSearchLexicalClient:
         return len(actions)
 
     def _ensure_alias(self, index_name: str) -> None:
+        actions = [
+            {"remove": {"index": existing_index, "alias": self.alias}}
+            for existing_index in self._existing_owned_alias_indices()
+        ]
+        actions.append({"add": {"index": index_name, "alias": self.alias}})
+
         self.client.indices.update_aliases(
-            body={
-                "actions": [
-                    {
-                        "remove": {
-                            "index": "*",
-                            "alias": self.alias,
-                            "must_exist": False,
-                        }
-                    },
-                    {"add": {"index": index_name, "alias": self.alias}},
-                ]
-            }
+            body={"actions": actions}
         )
+
+    def _existing_owned_alias_indices(self) -> list[str]:
+        try:
+            aliases = self.client.indices.get_alias(name=self.alias)
+        except Exception as exc:
+            if self._is_alias_not_found_error(exc):
+                return []
+            raise
+
+        return [
+            index_name
+            for index_name in aliases.keys()
+            if self._is_owned_index_name(index_name)
+        ]
+
+    def _is_owned_index_name(self, index_name: str) -> bool:
+        return re.fullmatch(rf"{re.escape(self.index_prefix)}_v\d+", index_name) is not None
 
     @staticmethod
     def _build_default_client() -> OpenSearch:
@@ -335,6 +367,17 @@ class OpenSearchLexicalClient:
                 "analyzer",
                 "tokenizer",
             )
+        )
+
+    @staticmethod
+    def _is_alias_not_found_error(exc: Exception) -> bool:
+        status_code = getattr(exc, "status_code", None)
+        if status_code == 404:
+            return True
+
+        message = str(exc).lower()
+        return "alias" in message and any(
+            token in message for token in ("missing", "not found", "not_found")
         )
 
     @staticmethod

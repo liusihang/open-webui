@@ -7,11 +7,12 @@ from open_webui.retrieval.lexical.opensearch import OpenSearchLexicalClient
 
 
 class FakeIndices:
-    def __init__(self, *, fail_icu_once=False):
+    def __init__(self, *, fail_icu_once=False, aliases=None):
         self.created = []
         self.existing = set()
         self.alias_updates = []
         self.fail_icu_once = fail_icu_once
+        self.aliases = aliases or {}
 
     def exists(self, index):
         return index in self.existing
@@ -24,15 +25,23 @@ class FakeIndices:
         self.existing.add(index)
 
     def update_aliases(self, body):
+        for action in body["actions"]:
+            if action.get("remove", {}).get("index") == "*":
+                raise AssertionError("alias removal must not use broad index='*'")
         self.alias_updates.append(body)
 
     def refresh(self, index):
         self.refreshed = index
 
+    def get_alias(self, name):
+        if name not in self.aliases:
+            raise RuntimeError(f"alias [{name}] missing")
+        return self.aliases[name]
+
 
 class FakeOpenSearch:
-    def __init__(self, *, fail_icu_once=False, search_result=None):
-        self.indices = FakeIndices(fail_icu_once=fail_icu_once)
+    def __init__(self, *, fail_icu_once=False, aliases=None, search_result=None):
+        self.indices = FakeIndices(fail_icu_once=fail_icu_once, aliases=aliases)
         self.search_calls = []
         self.search_result = search_result or {"hits": {"hits": []}}
 
@@ -56,6 +65,8 @@ def test_build_index_body_includes_required_multifields_and_icu_fallback():
 
     assert props["name"]["fields"]["ngram"]["analyzer"] == "lexical_ngram"
     assert props["source"]["fields"]["ngram"]["analyzer"] == "lexical_ngram"
+    assert body["mappings"]["_source"]["excludes"] == ["text"]
+    assert props["metadata"] == {"type": "object", "enabled": False}
     assert analysis["analyzer"]["lexical_icu"]["tokenizer"] == "icu_tokenizer"
 
     fallback_body = client.build_index_body(use_icu=False)
@@ -67,10 +78,21 @@ def test_build_index_body_includes_required_multifields_and_icu_fallback():
     assert fallback_props["title"]["fields"]["en"]["analyzer"] == "lexical_en"
     assert fallback_props["metadata_headings"]["fields"]["cjk"]["analyzer"] == "lexical_cjk"
     assert fallback_props["name"]["fields"]["ngram"]["analyzer"] == "lexical_ngram"
+    assert fallback_body["mappings"]["_source"]["excludes"] == ["text"]
+    assert fallback_props["metadata"] == {"type": "object", "enabled": False}
 
 
 def test_ensure_index_creates_versioned_index_sets_alias_and_retries_without_icu():
-    fake = FakeOpenSearch(fail_icu_once=True)
+    fake = FakeOpenSearch(
+        fail_icu_once=True,
+        aliases={
+            "retrieval_lexical_current": {
+                "retrieval_lexical_v1": {"aliases": {"retrieval_lexical_current": {}}},
+                "retrieval_lexical_notes": {"aliases": {"retrieval_lexical_current": {}}},
+                "other_retrieval_lexical_v1": {"aliases": {"retrieval_lexical_current": {}}},
+            }
+        },
+    )
     client = OpenSearchLexicalClient(client=fake)
 
     index_name = client.ensure_index(version=2, use_icu=True)
@@ -91,14 +113,32 @@ def test_ensure_index_creates_versioned_index_sets_alias_and_retries_without_icu
             "actions": [
                 {
                     "remove": {
-                        "index": "*",
+                        "index": "retrieval_lexical_v1",
                         "alias": "retrieval_lexical_current",
-                        "must_exist": False,
                     }
                 },
                 {
                     "add": {
                         "index": "retrieval_lexical_v2",
+                        "alias": "retrieval_lexical_current",
+                    }
+                },
+            ]
+        }
+    ]
+
+
+def test_ensure_index_tolerates_missing_existing_alias():
+    fake = FakeOpenSearch()
+    client = OpenSearchLexicalClient(client=fake)
+
+    assert client.ensure_index(version=1, use_icu=False) == "retrieval_lexical_v1"
+    assert fake.indices.alias_updates == [
+        {
+            "actions": [
+                {
+                    "add": {
+                        "index": "retrieval_lexical_v1",
                         "alias": "retrieval_lexical_current",
                     }
                 },
@@ -175,6 +215,30 @@ def test_bulk_upsert_uses_chunk_uid_as_id_and_extracts_metadata_fields():
         }
     ]
     assert fake.indices.refreshed == "retrieval_lexical_current"
+
+
+def test_bulk_upsert_batches_large_iterables_without_materializing():
+    captured_batches = []
+
+    def chunk_generator():
+        for index in range(3):
+            yield {
+                "chunk_uid": f"chunk_{index}",
+                "text": f"text {index}",
+                "metadata": {},
+            }
+
+    def fake_bulk(client, actions):
+        captured_batches.append(list(actions))
+        return len(captured_batches[-1]), []
+
+    client = OpenSearchLexicalClient(client=FakeOpenSearch(), bulk_helper=fake_bulk)
+
+    assert client.bulk_upsert(chunk_generator(), batch_size=2) == 3
+    assert [[action["_id"] for action in batch] for batch in captured_batches] == [
+        ["chunk_0", "chunk_1"],
+        ["chunk_2"],
+    ]
 
 
 def test_bulk_upsert_prefers_sqlalchemy_metadata_attribute_name():
@@ -264,3 +328,11 @@ def test_search_filters_weighted_fields_and_returns_hit_metadata_only():
         {"terms": {"knowledge_id": ["knowledge-1"]}},
         {"terms": {"file_id": ["file-1"]}},
     ]
+
+
+def test_search_returns_empty_for_blank_query_without_calling_opensearch():
+    fake = FakeOpenSearch()
+    client = OpenSearchLexicalClient(client=fake)
+
+    assert client.search(" \n\t ", collection_ids=["collection-1"]) == []
+    assert fake.search_calls == []
