@@ -8,8 +8,11 @@ import pytest
 
 from open_webui.retrieval.indexing import (
     RetrievalIndexingService,
+    SqlAlchemyManifestChunkStore,
+    SqlAlchemyVectorChunkStore,
     VectorChunkRecord,
 )
+import open_webui.retrieval.indexing as indexing_mod
 
 
 @dataclass
@@ -38,8 +41,10 @@ class FakeVectorStore:
     def __init__(self, rows):
         self.rows = rows
         self.patches = []
+        self.iter_calls = []
 
     def iter_chunks(self, collection_ids=None):
+        self.iter_calls.append(collection_ids)
         collection_ids = set(collection_ids or [])
         return [
             row
@@ -194,6 +199,71 @@ def test_lexical_reindex_promotes_only_after_successful_bulk_index():
     assert result.alias_promoted is True
 
 
+def test_scoped_reindex_with_promote_requested_fails_before_mutations():
+    lexical_client = FakeLexicalClient()
+    service = _service(
+        [
+            _row("vec-1", "alpha", collection_name="knowledge-1"),
+            _row("vec-2", "beta", collection_name="knowledge-2"),
+        ],
+        lexical_client=lexical_client,
+    )
+
+    result = service.reindex_lexical(
+        collection_ids=["knowledge-1"],
+        index_version=3,
+        promote_alias=True,
+    )
+
+    assert result.failed == 1
+    assert result.alias_promoted is False
+    assert result.failures == [
+        {
+            "error": "promote_alias=True is not allowed for scoped lexical reindex",
+            "stage": "validation",
+        }
+    ]
+    assert service.vector_store.iter_calls == []
+    assert service.vector_store.patches == []
+    assert service.manifest_store.upsert_batches == []
+    assert lexical_client.calls == []
+
+
+def test_scoped_reindex_without_promote_indexes_target_without_alias_promotion():
+    lexical_client = FakeLexicalClient()
+    service = _service([_row("vec-1", "alpha")], lexical_client=lexical_client)
+
+    result = service.reindex_lexical(
+        collection_ids=["knowledge-1"],
+        index_version=5,
+        promote_alias=False,
+    )
+
+    assert result.failed == 0
+    assert result.alias_promoted is False
+    assert [call[0] for call in lexical_client.calls] == ["ensure_index", "bulk_upsert"]
+    assert lexical_client.calls[1][3] == "retrieval_lexical_v5"
+
+
+def test_batch_size_validation_fails_before_db_or_opensearch_mutations():
+    lexical_client = FakeLexicalClient()
+    service = _service([_row("vec-1", "alpha")], lexical_client=lexical_client)
+
+    result = service.reindex_lexical(batch_size=0, promote_alias=False)
+
+    assert result.failed == 1
+    assert result.failures == [
+        {
+            "error": "batch_size must be at least 1",
+            "stage": "validation",
+        }
+    ]
+    assert service.vector_store.iter_calls == []
+    assert service.vector_store.patches == []
+    assert service.manifest_store.upsert_batches == []
+    assert lexical_client.calls == []
+
+
 def test_lexical_reindex_does_not_promote_after_bulk_failure():
     lexical_client = FakeLexicalClient(fail_bulk=True)
     service = _service([_row("vec-1", "alpha")], lexical_client=lexical_client)
@@ -205,6 +275,18 @@ def test_lexical_reindex_does_not_promote_after_bulk_failure():
     assert result.failed == 1
     assert "bulk failed" in result.failures[0]["error"]
     assert [call[0] for call in lexical_client.calls] == ["ensure_index", "bulk_upsert"]
+
+
+def test_result_returns_bounded_chunk_uid_sample():
+    rows = [_row(f"vec-{index}", f"text {index}") for index in range(5)]
+    service = _service(rows)
+    service.chunk_uid_sample_limit = 2
+
+    result = service.reindex_lexical(promote_alias=False)
+
+    assert len(result.chunk_uids) == 2
+    assert result.chunk_uid_sample == result.chunk_uids
+    assert result.chunk_uid_sample_truncated is True
 
 
 def test_none_text_rows_are_reported_and_skipped():
@@ -256,3 +338,92 @@ def test_pgcrypto_reindex_fails_clearly_without_faking_success():
     assert result.failed == 1
     assert result.unsupported is True
     assert "PGVECTOR_PGCRYPTO" in result.failures[0]["error"]
+
+
+class ExistingChunkQuery:
+    def __init__(self, existing):
+        self.existing = existing
+
+    def filter(self, *args, **kwargs):
+        return self
+
+    def first(self):
+        return self.existing
+
+    def count(self):
+        return 1
+
+
+class FakeManifestSession:
+    def __init__(self, existing):
+        self.existing = existing
+        self.added = []
+        self.commits = 0
+        self.rollbacks = 0
+
+    def query(self, model):
+        return ExistingChunkQuery(self.existing)
+
+    def add(self, value):
+        self.added.append(value)
+
+    def commit(self):
+        self.commits += 1
+
+    def rollback(self):
+        self.rollbacks += 1
+
+
+def test_manifest_store_preserves_created_at_on_existing_rows():
+    existing = type("ExistingChunk", (), {})()
+    existing.created_at = 111
+    existing.updated_at = 111
+    session = FakeManifestSession(existing)
+    store = SqlAlchemyManifestChunkStore(session=session)
+
+    count = store.upsert_chunks(
+        [
+            {
+                "chunk_uid": "chunk_existing",
+                "collection_id": "collection-1",
+                "knowledge_id": "knowledge-1",
+                "collection_name": "knowledge-1",
+                "file_id": "file-1",
+                "file_version": 1,
+                "chunk_version": 1,
+                "chunk_index": 0,
+                "start_index": 0,
+                "content_hash": "content-hash",
+                "chunker_config_hash": "chunker-hash",
+                "text": "updated text",
+                "metadata": {"chunk_uid": "chunk_existing"},
+                "is_active": True,
+                "deleted_at": None,
+                "created_at": 999,
+                "updated_at": 999,
+            }
+        ]
+    )
+
+    assert count == 1
+    assert existing.created_at == 111
+    assert existing.updated_at == 999
+    assert session.added == []
+    assert session.commits == 1
+
+
+def test_vector_store_factory_prefers_existing_pgvector_session(monkeypatch):
+    existing_session = object()
+
+    monkeypatch.setattr(indexing_mod, "_existing_pgvector_session", lambda: existing_session)
+    monkeypatch.setattr(
+        indexing_mod,
+        "_lightweight_pgvector_session",
+        lambda: (_ for _ in ()).throw(AssertionError("lightweight fallback should not be used")),
+    )
+
+    store = SqlAlchemyVectorChunkStore.from_existing_or_lightweight_session(
+        document_chunk_model=object(),
+    )
+
+    assert store.session is existing_session

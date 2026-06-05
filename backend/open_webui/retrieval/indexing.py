@@ -33,6 +33,8 @@ class ReindexResult:
     index_version: int = 1
     alias_promoted: bool = False
     chunk_uids: list[str] = field(default_factory=list)
+    chunk_uid_sample: list[str] = field(default_factory=list)
+    chunk_uid_sample_truncated: bool = False
     unsupported: bool = False
 
     def model_dump(self) -> dict[str, Any]:
@@ -56,31 +58,47 @@ class ManifestChunkStore(Protocol):
 
 
 class SqlAlchemyVectorChunkStore:
-    def __init__(self, *, session: Any | None = None) -> None:
-        from open_webui.retrieval.vector.dbs.pgvector import DocumentChunk, PgvectorClient
+    def __init__(
+        self,
+        *,
+        session: Any,
+        yield_per: int = 1000,
+        document_chunk_model: Any | None = None,
+    ) -> None:
+        if document_chunk_model is None:
+            from open_webui.retrieval.vector.dbs.pgvector import DocumentChunk
 
-        self._document_chunk = DocumentChunk
-        self._client = PgvectorClient() if session is None else None
-        self.session = session if session is not None else self._client.session
+            document_chunk_model = DocumentChunk
 
-    def iter_chunks(self, collection_ids: list[str] | None = None) -> list[VectorChunkRecord]:
+        self._document_chunk = document_chunk_model
+        self.session = session
+        self.yield_per = yield_per
+
+    @classmethod
+    def from_existing_or_lightweight_session(
+        cls,
+        *,
+        document_chunk_model: Any | None = None,
+    ) -> "SqlAlchemyVectorChunkStore":
+        session = _existing_pgvector_session()
+        if session is None:
+            session = _lightweight_pgvector_session()
+        return cls(session=session, document_chunk_model=document_chunk_model)
+
+    def iter_chunks(self, collection_ids: list[str] | None = None) -> Iterable[VectorChunkRecord]:
         query = self.session.query(self._document_chunk)
         if collection_ids:
             query = query.filter(self._document_chunk.collection_name.in_(collection_ids))
         query = query.order_by(self._document_chunk.collection_name.asc(), self._document_chunk.id.asc())
 
-        records = []
-        for row in query.all():
+        for row in query.yield_per(self.yield_per):
             metadata = row.vmetadata if isinstance(row.vmetadata, dict) else {}
-            records.append(
-                VectorChunkRecord(
-                    id=row.id,
-                    collection_name=row.collection_name,
-                    text=row.text,
-                    metadata=dict(metadata),
-                )
+            yield VectorChunkRecord(
+                id=row.id,
+                collection_name=row.collection_name,
+                text=row.text,
+                metadata=dict(metadata),
             )
-        return records
 
     def patch_chunk_metadata(self, row_id: str, metadata: dict[str, Any]) -> None:
         row = self.session.query(self._document_chunk).filter(self._document_chunk.id == row_id).first()
@@ -109,6 +127,7 @@ class SqlAlchemyManifestChunkStore:
                 )
                 values = self._model_values(chunk)
                 if existing:
+                    values.pop("created_at", None)
                     for key, value in values.items():
                         setattr(existing, key, value)
                 else:
@@ -158,6 +177,7 @@ class RetrievalIndexingService:
         pgcrypto_enabled: bool = False,
         now_fn: Any | None = None,
         failure_limit: int = 50,
+        chunk_uid_sample_limit: int = 50,
     ) -> None:
         self.vector_store = vector_store
         self.manifest_store = manifest_store
@@ -165,6 +185,7 @@ class RetrievalIndexingService:
         self.pgcrypto_enabled = pgcrypto_enabled
         self.now_fn = now_fn or (lambda: int(time.time()))
         self.failure_limit = failure_limit
+        self.chunk_uid_sample_limit = chunk_uid_sample_limit
 
     def reindex_lexical(
         self,
@@ -175,6 +196,16 @@ class RetrievalIndexingService:
         batch_size: int = 500,
     ) -> ReindexResult:
         result = ReindexResult(index_version=index_version)
+        validation_error = self._validation_error(
+            collection_ids=collection_ids,
+            promote_alias=promote_alias,
+            batch_size=batch_size,
+        )
+        if validation_error:
+            result.failed = 1
+            self._record_failure(result, validation_error)
+            return result
+
         if self.pgcrypto_enabled:
             result.failed = 1
             result.unsupported = True
@@ -241,7 +272,7 @@ class RetrievalIndexingService:
             except Exception as exc:
                 result.failed += 1
                 self._record_failure(result, {"error": str(exc), "stage": "lexical_promote_index"})
-        result.chunk_uids = [chunk["chunk_uid"] for chunk in chunks]
+        self._set_chunk_uid_sample(result, chunks)
         return result
 
     def get_status(self) -> dict[str, Any]:
@@ -425,6 +456,31 @@ class RetrievalIndexingService:
         if len(result.failures) < self.failure_limit:
             result.failures.append(failure)
 
+    @staticmethod
+    def _validation_error(
+        *,
+        collection_ids: list[str] | None,
+        promote_alias: bool,
+        batch_size: int,
+    ) -> dict[str, Any] | None:
+        if batch_size < 1:
+            return {
+                "error": "batch_size must be at least 1",
+                "stage": "validation",
+            }
+        if collection_ids and promote_alias:
+            return {
+                "error": "promote_alias=True is not allowed for scoped lexical reindex",
+                "stage": "validation",
+            }
+        return None
+
+    def _set_chunk_uid_sample(self, result: ReindexResult, chunks: list[dict[str, Any]]) -> None:
+        chunk_uids = [chunk["chunk_uid"] for chunk in chunks]
+        result.chunk_uid_sample = chunk_uids[: self.chunk_uid_sample_limit]
+        result.chunk_uid_sample_truncated = len(chunk_uids) > len(result.chunk_uid_sample)
+        result.chunk_uids = list(result.chunk_uid_sample)
+
 
 def reindex_lexical_from_current_vector_store(
     *,
@@ -456,7 +512,11 @@ def build_default_indexing_service() -> RetrievalIndexingService:
 
     pgcrypto_enabled = bool(PGVECTOR_PGCRYPTO)
     return RetrievalIndexingService(
-        vector_store=_NoopVectorChunkStore() if pgcrypto_enabled else SqlAlchemyVectorChunkStore(),
+        vector_store=(
+            _NoopVectorChunkStore()
+            if pgcrypto_enabled
+            else SqlAlchemyVectorChunkStore.from_existing_or_lightweight_session()
+        ),
         manifest_store=SqlAlchemyManifestChunkStore(),
         lexical_client=OpenSearchLexicalClient(),
         pgcrypto_enabled=pgcrypto_enabled,
@@ -483,3 +543,28 @@ class _NoopVectorChunkStore:
 
     def patch_chunk_metadata(self, row_id: str, metadata: dict[str, Any]) -> None:
         raise RuntimeError("vector chunk metadata patch is unavailable")
+
+
+def _existing_pgvector_session() -> Any | None:
+    from open_webui.retrieval.vector.async_client import ASYNC_VECTOR_DB_CLIENT
+
+    sync_client = ASYNC_VECTOR_DB_CLIENT.sync
+    if sync_client.__class__.__name__ != "PgvectorClient":
+        return None
+    return getattr(sync_client, "session", None)
+
+
+def _lightweight_pgvector_session() -> Any:
+    from sqlalchemy import create_engine
+    from sqlalchemy.orm import scoped_session, sessionmaker
+
+    from open_webui.config import PGVECTOR_DB_URL
+
+    if not PGVECTOR_DB_URL:
+        from open_webui.internal.db import ScopedSession
+
+        return ScopedSession
+
+    engine = create_engine(PGVECTOR_DB_URL, pool_pre_ping=True)
+    session_factory = sessionmaker(autocommit=False, autoflush=False, bind=engine, expire_on_commit=False)
+    return scoped_session(session_factory)

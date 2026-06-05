@@ -61,10 +61,11 @@ def test_reindex_routes_are_admin_only(path, method):
 
 @pytest.mark.asyncio
 async def test_reindex_full_explicitly_does_not_reembed(monkeypatch):
-    calls = []
+    reindex_calls = []
+    threadpool_calls = []
 
     def fake_reindex(**kwargs):
-        calls.append(kwargs)
+        reindex_calls.append(kwargs)
         return ReindexResult(
             scanned=1,
             manifest_upserted=1,
@@ -77,7 +78,12 @@ async def test_reindex_full_explicitly_does_not_reembed(monkeypatch):
             chunk_uids=["chunk_1"],
         )
 
+    async def fake_run_in_threadpool(func, *args, **kwargs):
+        threadpool_calls.append((func, args, kwargs))
+        return func(*args, **kwargs)
+
     monkeypatch.setattr(knowledge, "reindex_lexical_from_current_vector_store", fake_reindex)
+    monkeypatch.setattr(knowledge, "run_in_threadpool", fake_run_in_threadpool)
 
     response = await knowledge.reindex_knowledge_full(
         form_data=knowledge.KnowledgeReindexRequest(index_version=9),
@@ -86,7 +92,7 @@ async def test_reindex_full_explicitly_does_not_reembed(monkeypatch):
 
     assert response["embedding_reindexed"] is False
     assert response["lexical"]["scanned"] == 1
-    assert calls == [
+    assert reindex_calls == [
         {
             "collection_ids": None,
             "index_version": 9,
@@ -94,18 +100,88 @@ async def test_reindex_full_explicitly_does_not_reembed(monkeypatch):
             "batch_size": 500,
         }
     ]
+    assert threadpool_calls == [
+        (
+            fake_reindex,
+            (),
+            {
+                "collection_ids": None,
+                "index_version": 9,
+                "promote_alias": True,
+                "batch_size": 500,
+            },
+        )
+    ]
+
+
+@pytest.mark.asyncio
+async def test_reindex_lexical_uses_threadpool(monkeypatch):
+    threadpool_calls = []
+
+    def fake_reindex(**kwargs):
+        return ReindexResult(
+            scanned=0,
+            manifest_upserted=0,
+            metadata_patched=0,
+            lexical_indexed=0,
+            failed=0,
+            failures=[],
+            index_version=kwargs["index_version"],
+            alias_promoted=False,
+        )
+
+    async def fake_run_in_threadpool(func, *args, **kwargs):
+        threadpool_calls.append((func, args, kwargs))
+        return func(*args, **kwargs)
+
+    monkeypatch.setattr(knowledge, "reindex_lexical_from_current_vector_store", fake_reindex)
+    monkeypatch.setattr(knowledge, "run_in_threadpool", fake_run_in_threadpool)
+
+    response = await knowledge.reindex_knowledge_lexical(
+        form_data=knowledge.KnowledgeReindexRequest(
+            collection_ids=["knowledge-1"],
+            index_version=8,
+            promote_alias=False,
+            batch_size=25,
+        ),
+        user=SimpleNamespace(id="admin", role="admin"),
+    )
+
+    assert response["index_version"] == 8
+    assert threadpool_calls == [
+        (
+            fake_reindex,
+            (),
+            {
+                "collection_ids": ["knowledge-1"],
+                "index_version": 8,
+                "promote_alias": False,
+                "batch_size": 25,
+            },
+        )
+    ]
 
 
 @pytest.mark.asyncio
 async def test_index_status_handles_lexical_status_errors(monkeypatch):
+    threadpool_calls = []
+
+    def fake_status():
+        return {
+            "manifest": {"total": 3, "active": 2},
+            "lexical": {"error": "OpenSearch unavailable"},
+        }
+
+    async def fake_run_in_threadpool(func, *args, **kwargs):
+        threadpool_calls.append((func, args, kwargs))
+        return func(*args, **kwargs)
+
     monkeypatch.setattr(
         knowledge,
         "get_retrieval_index_status",
-        lambda: {
-            "manifest": {"total": 3, "active": 2},
-            "lexical": {"error": "OpenSearch unavailable"},
-        },
+        fake_status,
     )
+    monkeypatch.setattr(knowledge, "run_in_threadpool", fake_run_in_threadpool)
 
     response = await knowledge.get_knowledge_index_status(
         user=SimpleNamespace(id="admin", role="admin"),
@@ -113,3 +189,4 @@ async def test_index_status_handles_lexical_status_errors(monkeypatch):
 
     assert response["manifest"] == {"total": 3, "active": 2}
     assert response["lexical"]["error"] == "OpenSearch unavailable"
+    assert threadpool_calls == [(fake_status, (), {})]

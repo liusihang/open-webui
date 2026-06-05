@@ -10,6 +10,7 @@ from urllib.parse import quote
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
 from fastapi.responses import StreamingResponse
+from starlette.concurrency import run_in_threadpool
 from open_webui.config import BYPASS_ADMIN_ACCESS_CONTROL
 from open_webui.constants import ERROR_MESSAGES
 from open_webui.internal.db import get_async_session
@@ -417,7 +418,8 @@ async def reindex_knowledge_lexical(
     form_data: KnowledgeReindexRequest,
     user=Depends(get_admin_user),
 ):
-    result = reindex_lexical_from_current_vector_store(
+    result = await run_in_threadpool(
+        reindex_lexical_from_current_vector_store,
         collection_ids=form_data.collection_ids,
         index_version=form_data.index_version,
         promote_alias=form_data.promote_alias,
@@ -431,7 +433,8 @@ async def reindex_knowledge_full(
     form_data: KnowledgeReindexRequest,
     user=Depends(get_admin_user),
 ):
-    result = reindex_lexical_from_current_vector_store(
+    result = await run_in_threadpool(
+        reindex_lexical_from_current_vector_store,
         collection_ids=form_data.collection_ids,
         index_version=form_data.index_version,
         promote_alias=form_data.promote_alias,
@@ -445,7 +448,7 @@ async def reindex_knowledge_full(
 
 @router.get('/index/status', response_model=dict)
 async def get_knowledge_index_status(user=Depends(get_admin_user)):
-    return get_retrieval_index_status()
+    return await run_in_threadpool(get_retrieval_index_status)
 
 
 ############################
