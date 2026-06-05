@@ -3,6 +3,8 @@ import os
 os.environ.setdefault("WEBUI_SECRET_KEY", "test-secret")
 os.environ.setdefault("ENABLE_DB_MIGRATIONS", "false")
 
+import pytest
+
 from open_webui.retrieval.lexical.opensearch import OpenSearchLexicalClient
 
 
@@ -82,17 +84,8 @@ def test_build_index_body_includes_required_multifields_and_icu_fallback():
     assert fallback_props["metadata"] == {"type": "object", "enabled": False}
 
 
-def test_ensure_index_creates_versioned_index_sets_alias_and_retries_without_icu():
-    fake = FakeOpenSearch(
-        fail_icu_once=True,
-        aliases={
-            "retrieval_lexical_current": {
-                "retrieval_lexical_v1": {"aliases": {"retrieval_lexical_current": {}}},
-                "retrieval_lexical_notes": {"aliases": {"retrieval_lexical_current": {}}},
-                "other_retrieval_lexical_v1": {"aliases": {"retrieval_lexical_current": {}}},
-            }
-        },
-    )
+def test_ensure_index_creates_versioned_index_without_promoting_alias_and_retries_without_icu():
+    fake = FakeOpenSearch(fail_icu_once=True)
     client = OpenSearchLexicalClient(client=fake)
 
     index_name = client.ensure_index(version=2, use_icu=True)
@@ -108,6 +101,22 @@ def test_ensure_index_creates_versioned_index_sets_alias_and_retries_without_icu
     assert fake.indices.created[1][1]["mappings"]["properties"]["text"]["fields"]["icu"][
         "analyzer"
     ] == "lexical_cjk"
+    assert fake.indices.alias_updates == []
+
+
+def test_promote_index_removes_owned_prior_alias_and_adds_target():
+    fake = FakeOpenSearch(
+        aliases={
+            "retrieval_lexical_current": {
+                "retrieval_lexical_v1": {"aliases": {"retrieval_lexical_current": {}}},
+            }
+        },
+    )
+    client = OpenSearchLexicalClient(client=fake)
+
+    index_name = client.promote_index(version=2, use_icu=False)
+
+    assert index_name == "retrieval_lexical_v2"
     assert fake.indices.alias_updates == [
         {
             "actions": [
@@ -128,11 +137,11 @@ def test_ensure_index_creates_versioned_index_sets_alias_and_retries_without_icu
     ]
 
 
-def test_ensure_index_tolerates_missing_existing_alias():
+def test_promote_index_tolerates_missing_existing_alias():
     fake = FakeOpenSearch()
     client = OpenSearchLexicalClient(client=fake)
 
-    assert client.ensure_index(version=1, use_icu=False) == "retrieval_lexical_v1"
+    assert client.promote_index(version=1, use_icu=False) == "retrieval_lexical_v1"
     assert fake.indices.alias_updates == [
         {
             "actions": [
@@ -145,6 +154,39 @@ def test_ensure_index_tolerates_missing_existing_alias():
             ]
         }
     ]
+
+
+def test_promote_index_refuses_downgrade_without_explicit_override():
+    fake = FakeOpenSearch(
+        aliases={
+            "retrieval_lexical_current": {
+                "retrieval_lexical_v2": {"aliases": {"retrieval_lexical_current": {}}},
+            }
+        },
+    )
+    client = OpenSearchLexicalClient(client=fake)
+
+    with pytest.raises(RuntimeError, match="Refusing to promote"):
+        client.promote_index(version=1, use_icu=False)
+
+    assert fake.indices.alias_updates == []
+
+
+def test_promote_index_fails_closed_on_non_owned_alias_binding():
+    fake = FakeOpenSearch(
+        aliases={
+            "retrieval_lexical_current": {
+                "retrieval_lexical_v1": {"aliases": {"retrieval_lexical_current": {}}},
+                "other_retrieval_lexical_v1": {"aliases": {"retrieval_lexical_current": {}}},
+            }
+        },
+    )
+    client = OpenSearchLexicalClient(client=fake)
+
+    with pytest.raises(RuntimeError, match="non-owned"):
+        client.promote_index(version=2, use_icu=False)
+
+    assert fake.indices.alias_updates == []
 
 
 def test_bulk_upsert_uses_chunk_uid_as_id_and_extracts_metadata_fields():

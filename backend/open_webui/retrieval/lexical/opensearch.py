@@ -126,7 +126,7 @@ class OpenSearchLexicalClient:
             },
         }
 
-    def ensure_index(self, version: int = 1, use_icu: bool = True) -> str:
+    def ensure_index(self, version: int, use_icu: bool = True) -> str:
         index_name = self.index_name_for_version(version)
 
         if not self.client.indices.exists(index=index_name):
@@ -140,7 +140,39 @@ class OpenSearchLexicalClient:
                 fallback_body = self.build_index_body(use_icu=False)
                 self.client.indices.create(index=index_name, body=fallback_body)
 
-        self._ensure_alias(index_name)
+        return index_name
+
+    def promote_index(
+        self,
+        version: int,
+        use_icu: bool = True,
+        *,
+        allow_downgrade: bool = False,
+    ) -> str:
+        owned_indices, non_owned_indices = self._alias_bindings()
+        if non_owned_indices:
+            raise RuntimeError(
+                f"Alias {self.alias!r} is bound to non-owned indices: "
+                f"{', '.join(sorted(non_owned_indices))}"
+            )
+
+        highest_existing_version = max(
+            (self._owned_index_version(index_name) for index_name in owned_indices),
+            default=None,
+        )
+        if (
+            highest_existing_version is not None
+            and highest_existing_version > version
+            and not allow_downgrade
+        ):
+            raise RuntimeError(
+                f"Refusing to promote {self.index_name_for_version(version)!r}: "
+                f"alias {self.alias!r} is already bound to owned version "
+                f"{highest_existing_version}"
+            )
+
+        index_name = self.ensure_index(version=version, use_icu=use_icu)
+        self._promote_alias(index_name, owned_indices)
         return index_name
 
     def bulk_upsert(self, chunks: Iterable[Any], *, batch_size: int = 500) -> int:
@@ -250,33 +282,41 @@ class OpenSearchLexicalClient:
         self.client.indices.refresh(index=self.alias)
         return len(actions)
 
-    def _ensure_alias(self, index_name: str) -> None:
+    def _promote_alias(self, index_name: str, existing_owned_indices: list[str]) -> None:
         actions = [
             {"remove": {"index": existing_index, "alias": self.alias}}
-            for existing_index in self._existing_owned_alias_indices()
+            for existing_index in existing_owned_indices
         ]
         actions.append({"add": {"index": index_name, "alias": self.alias}})
 
-        self.client.indices.update_aliases(
-            body={"actions": actions}
-        )
+        self.client.indices.update_aliases(body={"actions": actions})
 
-    def _existing_owned_alias_indices(self) -> list[str]:
+    def _alias_bindings(self) -> tuple[list[str], list[str]]:
         try:
             aliases = self.client.indices.get_alias(name=self.alias)
         except Exception as exc:
             if self._is_alias_not_found_error(exc):
-                return []
+                return [], []
             raise
 
-        return [
-            index_name
-            for index_name in aliases.keys()
-            if self._is_owned_index_name(index_name)
-        ]
+        owned_indices = []
+        non_owned_indices = []
+        for index_name in aliases.keys():
+            if self._is_owned_index_name(index_name):
+                owned_indices.append(index_name)
+            else:
+                non_owned_indices.append(index_name)
+
+        return owned_indices, non_owned_indices
 
     def _is_owned_index_name(self, index_name: str) -> bool:
-        return re.fullmatch(rf"{re.escape(self.index_prefix)}_v\d+", index_name) is not None
+        return self._owned_index_version(index_name) is not None
+
+    def _owned_index_version(self, index_name: str) -> int | None:
+        match = re.fullmatch(rf"{re.escape(self.index_prefix)}_v(\d+)", index_name)
+        if not match:
+            return None
+        return int(match.group(1))
 
     @staticmethod
     def _build_default_client() -> OpenSearch:
