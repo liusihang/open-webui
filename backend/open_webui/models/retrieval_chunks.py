@@ -4,8 +4,10 @@ import hashlib
 import json
 from typing import Any
 
-from open_webui.internal.db import Base, JSONField
+from open_webui.internal.db import Base, JSONField, get_async_db_context
 from sqlalchemy import BigInteger, Boolean, Column, Index, Integer, Text, UniqueConstraint
+from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
 
 
 def _canonical_json(value: Any) -> str:
@@ -85,3 +87,30 @@ class RetrievalChunk(Base):
         Index("ix_retrieval_chunk_file_id", "file_id"),
         Index("ix_retrieval_chunk_collection_active", "collection_id", "is_active"),
     )
+
+
+async def fetch_active_chunks_by_chunk_uid(
+    chunk_uids: list[str],
+    *,
+    db: AsyncSession | None = None,
+) -> list[RetrievalChunk]:
+    """Fetch active manifest chunks in the caller's chunk_uid order."""
+    if not chunk_uids:
+        return []
+
+    requested_order = {chunk_uid: index for index, chunk_uid in enumerate(dict.fromkeys(chunk_uids))}
+    async with get_async_db_context(db) as session:
+        result = await session.execute(
+            select(RetrievalChunk).where(
+                RetrievalChunk.chunk_uid.in_(requested_order.keys()),
+                RetrievalChunk.is_active.is_(True),
+            )
+        )
+        rows = result.scalars().all()
+
+    by_uid = {
+        row.chunk_uid: row
+        for row in rows
+        if row.chunk_uid in requested_order and row.is_active
+    }
+    return [by_uid[chunk_uid] for chunk_uid in requested_order if chunk_uid in by_uid]
