@@ -31,6 +31,10 @@ from open_webui.models.knowledge_layers import (
     KnowledgeLayers,
 )
 from open_webui.models.models import ModelForm, Models
+from open_webui.retrieval.indexing import (
+    get_retrieval_index_status,
+    reindex_lexical_from_current_vector_store,
+)
 from open_webui.retrieval.vector.async_client import ASYNC_VECTOR_DB_CLIENT
 from open_webui.routers.retrieval import (
     BatchProcessFilesForm,
@@ -125,6 +129,13 @@ class KnowledgeAccessResponse(KnowledgeUserResponse):
 class KnowledgeAccessListResponse(BaseModel):
     items: list[KnowledgeAccessResponse]
     total: int
+
+
+class KnowledgeReindexRequest(BaseModel):
+    collection_ids: list[str] | None = None
+    index_version: int = 1
+    promote_alias: bool = True
+    batch_size: int = 500
 
 
 @router.get('/', response_model=KnowledgeAccessListResponse)
@@ -394,6 +405,47 @@ async def reindex_knowledge_base_metadata_embeddings(
 
     log.info(f'Embedding reindex complete: {success_count}/{len(knowledge_bases)}')
     return {'total': len(knowledge_bases), 'success': success_count}
+
+
+############################
+# RetrievalIndexAdmin
+############################
+
+
+@router.post('/reindex/lexical', response_model=dict)
+async def reindex_knowledge_lexical(
+    form_data: KnowledgeReindexRequest,
+    user=Depends(get_admin_user),
+):
+    result = reindex_lexical_from_current_vector_store(
+        collection_ids=form_data.collection_ids,
+        index_version=form_data.index_version,
+        promote_alias=form_data.promote_alias,
+        batch_size=form_data.batch_size,
+    )
+    return result.model_dump()
+
+
+@router.post('/reindex/full', response_model=dict)
+async def reindex_knowledge_full(
+    form_data: KnowledgeReindexRequest,
+    user=Depends(get_admin_user),
+):
+    result = reindex_lexical_from_current_vector_store(
+        collection_ids=form_data.collection_ids,
+        index_version=form_data.index_version,
+        promote_alias=form_data.promote_alias,
+        batch_size=form_data.batch_size,
+    )
+    return {
+        'embedding_reindexed': False,
+        'lexical': result.model_dump(),
+    }
+
+
+@router.get('/index/status', response_model=dict)
+async def get_knowledge_index_status(user=Depends(get_admin_user)):
+    return get_retrieval_index_status()
 
 
 ############################
