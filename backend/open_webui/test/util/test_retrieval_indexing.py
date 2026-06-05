@@ -22,6 +22,8 @@ class FakeManifestStore:
     def __init__(self):
         self.rows = {}
         self.upsert_batches = []
+        self.deactivate_absent_calls = []
+        self.deactivated_absent_count = 0
 
     def upsert_chunks(self, chunks):
         chunks = list(chunks)
@@ -29,6 +31,26 @@ class FakeManifestStore:
         for chunk in chunks:
             self.rows[chunk["chunk_uid"]] = dict(chunk)
         return len(chunks)
+
+    def deactivate_absent_chunks(self, *, active_chunk_uids, collection_ids, deleted_at):
+        self.deactivate_absent_calls.append(
+            {
+                "active_chunk_uids": set(active_chunk_uids),
+                "collection_ids": collection_ids,
+                "deleted_at": deleted_at,
+            }
+        )
+        count = 0
+        active_chunk_uids = set(active_chunk_uids)
+        collection_ids = set(collection_ids or [])
+        for chunk in self.rows.values():
+            in_scope = not collection_ids or chunk.get("collection_id") in collection_ids or chunk.get("collection_name") in collection_ids
+            if in_scope and chunk.get("is_active") and chunk["chunk_uid"] not in active_chunk_uids:
+                chunk["is_active"] = False
+                chunk["deleted_at"] = deleted_at
+                count += 1
+        self.deactivated_absent_count = count
+        return count
 
     def count_chunks(self):
         return {
@@ -262,6 +284,78 @@ def test_batch_size_validation_fails_before_db_or_opensearch_mutations():
     assert service.vector_store.patches == []
     assert service.manifest_store.upsert_batches == []
     assert lexical_client.calls == []
+
+
+def test_index_version_validation_fails_before_db_or_opensearch_mutations():
+    lexical_client = FakeLexicalClient()
+    service = _service([_row("vec-1", "alpha")], lexical_client=lexical_client)
+
+    result = service.reindex_lexical(index_version=0, promote_alias=False)
+
+    assert result.failed == 1
+    assert result.failures == [
+        {
+            "error": "index_version must be at least 1",
+            "stage": "validation",
+        }
+    ]
+    assert service.vector_store.iter_calls == []
+    assert service.vector_store.patches == []
+    assert service.manifest_store.upsert_batches == []
+    assert lexical_client.calls == []
+
+
+def test_scoped_reindex_deactivates_active_manifest_rows_absent_from_vector_source():
+    service = _service([_row("vec-1", "alpha", collection_name="knowledge-1")])
+    service.manifest_store.rows["chunk_stale"] = {
+        "chunk_uid": "chunk_stale",
+        "collection_id": "knowledge-1",
+        "collection_name": "knowledge-1",
+        "is_active": True,
+        "deleted_at": None,
+    }
+
+    result = service.reindex_lexical(
+        collection_ids=["knowledge-1"],
+        index_version=5,
+        promote_alias=False,
+    )
+
+    active_uid = result.chunk_uids[0]
+    assert result.manifest_deactivated == 1
+    assert service.manifest_store.rows["chunk_stale"]["is_active"] is False
+    assert service.manifest_store.rows["chunk_stale"]["deleted_at"] == 1234567890
+    assert service.manifest_store.deactivate_absent_calls == [
+        {
+            "active_chunk_uids": {active_uid},
+            "collection_ids": ["knowledge-1"],
+            "deleted_at": 1234567890,
+        }
+    ]
+
+
+def test_reindex_with_no_current_rows_still_deactivates_in_scope_manifest_rows():
+    service = _service([])
+    service.manifest_store.rows["chunk_stale"] = {
+        "chunk_uid": "chunk_stale",
+        "collection_id": "knowledge-1",
+        "collection_name": "knowledge-1",
+        "is_active": True,
+        "deleted_at": None,
+    }
+
+    result = service.reindex_lexical(
+        collection_ids=["knowledge-1"],
+        index_version=5,
+        promote_alias=False,
+    )
+
+    assert result.scanned == 0
+    assert result.manifest_deactivated == 1
+    assert service.manifest_store.rows["chunk_stale"]["is_active"] is False
+    assert service.vector_store.patches == []
+    assert service.manifest_store.upsert_batches == []
+    assert service.lexical_client.calls == []
 
 
 def test_lexical_reindex_does_not_promote_after_bulk_failure():

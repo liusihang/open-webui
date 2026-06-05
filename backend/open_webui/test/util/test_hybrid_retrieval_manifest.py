@@ -10,11 +10,13 @@ import pytest
 from open_webui.models import retrieval_chunks as retrieval_chunks_mod
 from open_webui.models.retrieval_chunks import fetch_active_chunks_by_chunk_uid
 from open_webui.retrieval.hybrid import (
+    HybridManifestNotReady,
     LexicalSearchHit,
     merge_rrf_by_chunk_uid,
     query_manifest_hybrid_search,
 )
 from open_webui.retrieval import hybrid as hybrid_mod
+from open_webui.retrieval import utils as retrieval_utils
 from open_webui.retrieval.vector.main import SearchResult
 
 
@@ -93,6 +95,85 @@ def manifest_chunk(chunk_uid, text, metadata=None, *, is_active=True):
         metadata_=metadata or {"chunk_uid": chunk_uid, "source": "manifest"},
         is_active=is_active,
     )
+
+
+@pytest.mark.asyncio
+async def test_collection_hybrid_wrapper_falls_back_to_vector_only_when_manifest_not_ready(monkeypatch):
+    async def fake_manifest_hybrid(**kwargs):
+        raise HybridManifestNotReady("legacy vector rows missing chunk_uid")
+
+    async def fake_query_collection(request, **kwargs):
+        assert request is None
+        return {"distances": [[0.9]], "documents": [["vector fallback"]], "metadatas": [[{"source": "vector"}]]}
+
+    monkeypatch.setattr(retrieval_utils, "query_manifest_hybrid_search", fake_manifest_hybrid)
+    monkeypatch.setattr(retrieval_utils, "query_collection", fake_query_collection)
+
+    result = await retrieval_utils.query_collection_with_hybrid_search(
+        collection_names=["collection-1"],
+        queries=["legacy"],
+        embedding_function=FakeEmbedder(),
+        k=1,
+        reranking_function=None,
+        k_reranker=1,
+        r=0.0,
+        hybrid_bm25_weight=0.5,
+    )
+
+    assert result == {"distances": [[0.9]], "documents": [["vector fallback"]], "metadatas": [[{"source": "vector"}]]}
+
+
+@pytest.mark.asyncio
+async def test_doc_hybrid_wrapper_falls_back_to_vector_only_when_manifest_not_ready(monkeypatch):
+    async def fake_manifest_hybrid(**kwargs):
+        raise HybridManifestNotReady("legacy vector rows missing chunk_uid")
+
+    search_calls = []
+
+    async def fake_vector_search(collection_name, vectors, filter=None, limit=10):
+        search_calls.append(
+            {
+                "collection_name": collection_name,
+                "vectors": vectors,
+                "filter": filter,
+                "limit": limit,
+            }
+        )
+        return SearchResult(
+            ids=[["vector-1"]],
+            documents=[["vector fallback"]],
+            metadatas=[[{"source": "vector"}]],
+            distances=[[0.9]],
+        )
+
+    monkeypatch.setattr(retrieval_utils, "query_manifest_hybrid_search", fake_manifest_hybrid)
+    monkeypatch.setattr(retrieval_utils.ASYNC_VECTOR_DB_CLIENT, "search", fake_vector_search)
+
+    result = await retrieval_utils.query_doc_with_hybrid_search(
+        collection_name="collection-1",
+        query="legacy",
+        embedding_function=FakeEmbedder(),
+        k=1,
+        reranking_function=None,
+        k_reranker=1,
+        r=0.0,
+        hybrid_bm25_weight=0.5,
+    )
+
+    assert result == {
+        "ids": [["vector-1"]],
+        "documents": [["vector fallback"]],
+        "metadatas": [[{"source": "vector"}]],
+        "distances": [[0.9]],
+    }
+    assert search_calls == [
+            {
+                "collection_name": "collection-1",
+                "vectors": [[1.0, 0.25]],
+                "filter": None,
+                "limit": 1,
+            }
+    ]
 
 
 @pytest.mark.asyncio
@@ -218,6 +299,65 @@ async def test_vector_hits_missing_chunk_uid_are_skipped_without_content_hash_me
 
     assert result["documents"] == [["manifest lexical"]]
     assert len(vector_client.search_calls) == 1
+
+
+@pytest.mark.asyncio
+async def test_missing_vector_chunk_uids_signal_manifest_not_ready_for_fallback():
+    vector_client = FakeVectorClient(
+        SearchResult(
+            ids=[["vector-legacy"]],
+            documents=[["legacy vector text"]],
+            metadatas=[[{"name": "legacy row without manifest uid"}]],
+            distances=[[0.99]],
+        )
+    )
+
+    with pytest.raises(HybridManifestNotReady, match="missing chunk_uid"):
+        await query_manifest_hybrid_search(
+            collection_names=["collection-1"],
+            queries=["legacy"],
+            embedding_function=FakeEmbedder(),
+            k=2,
+            reranking_function=None,
+            k_reranker=2,
+            r=0.0,
+            hybrid_bm25_weight=0.0,
+            vector_client=vector_client,
+            lexical_client=FakeLexicalClient(fail=True),
+            hydrate_chunks=lambda chunk_uids: (_ for _ in ()).throw(
+                AssertionError("no manifest hydration should run without chunk_uids")
+            ),
+        )
+
+
+@pytest.mark.asyncio
+async def test_stale_candidates_with_no_active_manifest_rows_signal_manifest_not_ready_for_fallback():
+    vector_client = FakeVectorClient(
+        SearchResult(
+            ids=[["vector-stale"]],
+            documents=[["derived stale"]],
+            metadatas=[[{"chunk_uid": "chunk_stale"}]],
+            distances=[[0.99]],
+        )
+    )
+
+    async def hydrate(chunk_uids):
+        return []
+
+    with pytest.raises(HybridManifestNotReady, match="no active manifest"):
+        await query_manifest_hybrid_search(
+            collection_names=["collection-1"],
+            queries=["stale"],
+            embedding_function=FakeEmbedder(),
+            k=2,
+            reranking_function=None,
+            k_reranker=2,
+            r=0.0,
+            hybrid_bm25_weight=0.0,
+            vector_client=vector_client,
+            lexical_client=FakeLexicalClient(fail=True),
+            hydrate_chunks=hydrate,
+        )
 
 
 @pytest.mark.asyncio

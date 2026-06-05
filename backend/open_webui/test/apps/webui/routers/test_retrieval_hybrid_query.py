@@ -125,3 +125,64 @@ async def test_query_collection_explicit_hybrid_false_uses_vector_only_even_when
     }
     assert captured_query_collection_kwargs["collection_names"] == ["collection-1"]
     assert captured_query_collection_kwargs["queries"] == ["alpha"]
+
+
+@pytest.mark.asyncio
+async def test_delete_entries_from_collection_deactivates_manifest_chunks(monkeypatch):
+    deactivate_calls = []
+    vector_delete_calls = []
+
+    async def fake_deactivate(*, collection_id=None, collection_name=None, file_id=None, db=None):
+        deactivate_calls.append(
+            {
+                "collection_id": collection_id,
+                "collection_name": collection_name,
+                "file_id": file_id,
+                "db": db,
+            }
+        )
+        return 1
+
+    async def fake_has_collection(collection_name):
+        return True
+
+    async def fake_delete(collection_name, ids=None, filter=None):
+        vector_delete_calls.append(
+            {
+                "collection_name": collection_name,
+                "ids": ids,
+                "filter": filter,
+            }
+        )
+
+    class FakeFiles:
+        async def get_file_by_id(self, file_id, db=None):
+            return SimpleNamespace(id=file_id, hash="hash-1")
+
+    monkeypatch.setattr(retrieval_router, "deactivate_active_chunks", fake_deactivate)
+    monkeypatch.setattr(retrieval_router.ASYNC_VECTOR_DB_CLIENT, "has_collection", fake_has_collection)
+    monkeypatch.setattr(retrieval_router.ASYNC_VECTOR_DB_CLIENT, "delete", fake_delete)
+    monkeypatch.setattr(retrieval_router, "Files", FakeFiles())
+
+    result = await retrieval_router.delete_entries_from_collection(
+        form_data=retrieval_router.DeleteForm(collection_name="knowledge-1", file_id="file-1"),
+        user=SimpleNamespace(id="admin", role="admin"),
+        db=object(),
+    )
+
+    assert result == {"status": True}
+    assert vector_delete_calls == [
+        {
+            "collection_name": "knowledge-1",
+            "ids": None,
+            "filter": {"hash": "hash-1"},
+        }
+    ]
+    assert deactivate_calls == [
+        {
+            "collection_id": "knowledge-1",
+            "collection_name": "knowledge-1",
+            "file_id": "file-1",
+            "db": deactivate_calls[0]["db"],
+        }
+    ]

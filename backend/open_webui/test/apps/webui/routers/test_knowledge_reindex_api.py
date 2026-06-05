@@ -23,6 +23,7 @@ with sqlite3.connect(_db_file.name) as conn:
     )
 
 import pytest
+from pydantic import ValidationError
 
 from open_webui.routers import knowledge
 from open_webui.retrieval.indexing import ReindexResult
@@ -57,6 +58,104 @@ def test_reindex_routes_are_admin_only(path, method):
     dependency_calls = {dependency.call for dependency in route.dependant.dependencies}
 
     assert get_admin_user in dependency_calls
+
+
+@pytest.mark.parametrize("index_version", [0, -1])
+def test_reindex_request_requires_positive_index_version(index_version):
+    with pytest.raises(ValidationError):
+        knowledge.KnowledgeReindexRequest(index_version=index_version)
+
+
+@pytest.mark.asyncio
+async def test_remove_file_from_knowledge_deactivates_manifest_when_vector_cleanup_fails(monkeypatch):
+    deactivate_calls = []
+
+    async def fake_get_knowledge_by_id(id, db=None):
+        return SimpleNamespace(
+            id=id,
+            user_id="owner-1",
+            name="Knowledge",
+            description="",
+            meta=None,
+            access_grants=[],
+            created_at=1,
+            updated_at=1,
+            model_dump=lambda: {
+                "id": id,
+                "user_id": "owner-1",
+                "name": "Knowledge",
+                "description": "",
+                "meta": None,
+                "access_grants": [],
+                "created_at": 1,
+                "updated_at": 1,
+            },
+        )
+
+    async def fake_get_file_by_id(file_id, db=None):
+        return SimpleNamespace(id=file_id, hash="hash-1", user_id="owner-1")
+
+    async def fake_true(*args, **kwargs):
+        return True
+
+    async def fake_none(*args, **kwargs):
+        return None
+
+    async def fake_empty_list(*args, **kwargs):
+        return []
+
+    async def fake_vector_delete(*args, **kwargs):
+        raise RuntimeError("derived vector index already unavailable")
+
+    async def fake_has_collection(*args, **kwargs):
+        return False
+
+    async def fake_deactivate(*, collection_id=None, collection_name=None, file_id=None, db=None):
+        deactivate_calls.append(
+            {
+                "collection_id": collection_id,
+                "collection_name": collection_name,
+                "file_id": file_id,
+                "db": db,
+            }
+        )
+        return 1
+
+    monkeypatch.setattr(knowledge.Knowledges, "get_knowledge_by_id", fake_get_knowledge_by_id)
+    monkeypatch.setattr(knowledge.Knowledges, "has_file", fake_true)
+    monkeypatch.setattr(knowledge.Knowledges, "remove_file_from_knowledge_by_id", fake_none)
+    monkeypatch.setattr(knowledge.Knowledges, "get_file_metadatas_by_id", fake_empty_list)
+    monkeypatch.setattr(knowledge.Files, "get_file_by_id", fake_get_file_by_id)
+    monkeypatch.setattr(knowledge.Files, "delete_file_by_id", fake_none)
+    monkeypatch.setattr(knowledge.KnowledgeLayers, "delete_layers_by_file", fake_none)
+    monkeypatch.setattr(knowledge, "delete_layer_embeddings_by_file_id", fake_none)
+    monkeypatch.setattr(knowledge.ASYNC_VECTOR_DB_CLIENT, "delete", fake_vector_delete)
+    monkeypatch.setattr(knowledge.ASYNC_VECTOR_DB_CLIENT, "has_collection", fake_has_collection)
+    monkeypatch.setattr(knowledge, "deactivate_active_chunks", fake_deactivate)
+
+    db = object()
+    await knowledge.remove_file_from_knowledge_by_id(
+        id="knowledge-1",
+        form_data=knowledge.KnowledgeFileIdForm(file_id="file-1"),
+        delete_file=True,
+        user=SimpleNamespace(id="owner-1", role="user"),
+        db=db,
+    )
+
+    assert deactivate_calls == [
+        {
+            "collection_id": "knowledge-1",
+            "collection_name": "knowledge-1",
+            "file_id": "file-1",
+            "db": db,
+        },
+        {
+            "collection_id": "file-file-1",
+            "collection_name": "file-file-1",
+            "file_id": "file-1",
+            "db": db,
+        }
+    ]
 
 
 @pytest.mark.asyncio

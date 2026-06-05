@@ -32,6 +32,7 @@ from open_webui.models.knowledge_layers import (
     KnowledgeLayers,
 )
 from open_webui.models.models import ModelForm, Models
+from open_webui.models.retrieval_chunks import deactivate_active_chunks
 from open_webui.retrieval.indexing import (
     get_retrieval_index_status,
     reindex_lexical_from_current_vector_store,
@@ -59,7 +60,7 @@ from open_webui.utils.layered_knowledge import (
     sync_layers_for_file_async,
 )
 from open_webui.utils.auth import get_admin_user, get_verified_user
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from sqlalchemy.ext.asyncio import AsyncSession
 
 log = logging.getLogger(__name__)
@@ -134,7 +135,7 @@ class KnowledgeAccessListResponse(BaseModel):
 
 class KnowledgeReindexRequest(BaseModel):
     collection_ids: list[str] | None = None
-    index_version: int = 1
+    index_version: int = Field(default=1, ge=1)
     promote_alias: bool = True
     batch_size: int = 500
 
@@ -350,6 +351,11 @@ async def reindex_knowledge_files(
             except Exception as e:
                 log.error(f'Error deleting collection {knowledge_base.id}: {str(e)}')
                 continue  # Skip, don't raise
+            await deactivate_active_chunks(
+                collection_id=knowledge_base.id,
+                collection_name=knowledge_base.id,
+                db=db,
+            )
 
             failed_files = []
             for file in files:
@@ -1113,6 +1119,12 @@ async def update_file_from_knowledge_by_id(
 
     # Remove content from the vector database
     await ASYNC_VECTOR_DB_CLIENT.delete(collection_name=knowledge.id, filter={'file_id': form_data.file_id})
+    await deactivate_active_chunks(
+        collection_id=knowledge.id,
+        collection_name=knowledge.id,
+        file_id=form_data.file_id,
+        db=db,
+    )
 
     # Add content to the vector database
     try:
@@ -1203,6 +1215,12 @@ async def remove_file_from_knowledge_by_id(
     await Knowledges.remove_file_from_knowledge_by_id(knowledge_id=id, file_id=form_data.file_id, db=db)
     await KnowledgeLayers.delete_layers_by_file(id, form_data.file_id, db=db)
     await delete_layer_embeddings_by_file_id(form_data.file_id)
+    await deactivate_active_chunks(
+        collection_id=knowledge.id,
+        collection_name=knowledge.id,
+        file_id=form_data.file_id,
+        db=db,
+    )
 
     # Remove content from the vector database
     try:
@@ -1220,15 +1238,21 @@ async def remove_file_from_knowledge_by_id(
 
     # Anyone with write permission or higher can delete files
     if delete_file and (file.user_id == user.id or user.role == 'admin'):
+        file_collection = f'file-{form_data.file_id}'
         try:
             # Remove the file's collection from vector database
-            file_collection = f'file-{form_data.file_id}'
             if await ASYNC_VECTOR_DB_CLIENT.has_collection(collection_name=file_collection):
                 await ASYNC_VECTOR_DB_CLIENT.delete_collection(collection_name=file_collection)
         except Exception as e:
             log.debug('This was most likely caused by bypassing embedding processing')
             log.debug(e)
             pass
+        await deactivate_active_chunks(
+            collection_id=file_collection,
+            collection_name=file_collection,
+            file_id=form_data.file_id,
+            db=db,
+        )
 
         # Delete file from database
         await Files.delete_file_by_id(form_data.file_id, db=db)
@@ -1303,6 +1327,7 @@ async def delete_knowledge_by_id(
     except Exception as e:
         log.debug(e)
         pass
+    await deactivate_active_chunks(collection_id=id, collection_name=id, db=db)
 
     # Remove knowledge base embedding
     await remove_knowledge_base_metadata_embedding(id)
@@ -1353,6 +1378,7 @@ async def reset_knowledge_by_id(
     except Exception as e:
         log.debug(e)
         pass
+    await deactivate_active_chunks(collection_id=id, collection_name=id, db=db)
 
     knowledge = await Knowledges.reset_knowledge_by_id(id=id, include_directories=include_directories, db=db)
     await mark_layers_for_knowledge_stale(id, db=db)
@@ -1510,6 +1536,12 @@ async def sync_knowledge_cleanup(
             continue
 
         await Knowledges.remove_file_from_knowledge_by_id(id, file_id, db=db)
+        await deactivate_active_chunks(
+            collection_id=id,
+            collection_name=id,
+            file_id=file_id,
+            db=db,
+        )
 
         try:
             await ASYNC_VECTOR_DB_CLIENT.delete(collection_name=id, filter={'file_id': file_id})
@@ -1517,12 +1549,18 @@ async def sync_knowledge_cleanup(
         except Exception:
             pass
 
+        collection_name = f'file-{file_id}'
         try:
-            collection_name = f'file-{file_id}'
             if await ASYNC_VECTOR_DB_CLIENT.has_collection(collection_name):
                 await ASYNC_VECTOR_DB_CLIENT.delete_collection(collection_name)
         except Exception:
             pass
+        await deactivate_active_chunks(
+            collection_id=collection_name,
+            collection_name=collection_name,
+            file_id=file_id,
+            db=db,
+        )
 
         if file.user_id == user.id or user.role == 'admin':
             await Files.delete_file_by_id(file_id, db=db)

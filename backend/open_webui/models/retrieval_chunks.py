@@ -2,11 +2,12 @@ from __future__ import annotations
 
 import hashlib
 import json
+import time
 from typing import Any
 
 from open_webui.internal.db import Base, JSONField, get_async_db_context
 from sqlalchemy import BigInteger, Boolean, Column, Index, Integer, Text, UniqueConstraint
-from sqlalchemy import select
+from sqlalchemy import or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 
@@ -114,3 +115,37 @@ async def fetch_active_chunks_by_chunk_uid(
         if row.chunk_uid in requested_order and row.is_active
     }
     return [by_uid[chunk_uid] for chunk_uid in requested_order if chunk_uid in by_uid]
+
+
+async def deactivate_active_chunks(
+    *,
+    collection_id: str | None = None,
+    collection_name: str | None = None,
+    file_id: str | None = None,
+    db: AsyncSession | None = None,
+    deleted_at: int | None = None,
+) -> int:
+    conditions = [RetrievalChunk.is_active.is_(True)]
+    collection_conditions = []
+    if collection_id:
+        collection_conditions.append(RetrievalChunk.collection_id == collection_id)
+    if collection_name:
+        collection_conditions.append(RetrievalChunk.collection_name == collection_name)
+    if collection_conditions:
+        conditions.append(or_(*collection_conditions))
+    if file_id:
+        conditions.append(RetrievalChunk.file_id == file_id)
+
+    deleted_at = int(deleted_at or time.time())
+    async with get_async_db_context(db) as session:
+        result = await session.execute(
+            update(RetrievalChunk)
+            .where(*conditions)
+            .values(
+                is_active=False,
+                deleted_at=deleted_at,
+                updated_at=deleted_at,
+            )
+        )
+        await session.commit()
+        return int(result.rowcount or 0)

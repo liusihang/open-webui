@@ -37,6 +37,7 @@ def _fake_file():
 @pytest.mark.asyncio
 async def test_remove_file_from_knowledge_cleans_layer_vectors(monkeypatch):
     cleaned = {}
+    deactivated = []
 
     async def fake_get_knowledge(*args, **kwargs):
         return _fake_knowledge()
@@ -65,6 +66,10 @@ async def test_remove_file_from_knowledge_cleans_layer_vectors(monkeypatch):
     async def fake_get_file_metadatas(*args, **kwargs):
         return []
 
+    async def fake_deactivate_active_chunks(**kwargs):
+        deactivated.append(kwargs)
+        return 1
+
     monkeypatch.setattr(knowledge_mod.Knowledges, "get_knowledge_by_id", fake_get_knowledge, raising=False)
     monkeypatch.setattr(knowledge_mod.Files, "get_file_by_id", fake_get_file, raising=False)
     monkeypatch.setattr(knowledge_mod.Knowledges, "has_file", fake_has_file, raising=False)
@@ -74,6 +79,7 @@ async def test_remove_file_from_knowledge_cleans_layer_vectors(monkeypatch):
     monkeypatch.setattr(knowledge_mod.ASYNC_VECTOR_DB_CLIENT, "delete", fake_delete, raising=False)
     monkeypatch.setattr(knowledge_mod.ASYNC_VECTOR_DB_CLIENT, "has_collection", fake_has_collection, raising=False)
     monkeypatch.setattr(knowledge_mod.Knowledges, "get_file_metadatas_by_id", fake_get_file_metadatas, raising=False)
+    monkeypatch.setattr(knowledge_mod, "deactivate_active_chunks", fake_deactivate_active_chunks, raising=False)
 
     response = await knowledge_mod.remove_file_from_knowledge_by_id(
         id="kb-1",
@@ -84,12 +90,21 @@ async def test_remove_file_from_knowledge_cleans_layer_vectors(monkeypatch):
     )
 
     assert cleaned == {"file_id": "file-1"}
+    assert deactivated == [
+        {
+            "collection_id": "kb-1",
+            "collection_name": "kb-1",
+            "file_id": "file-1",
+            "db": None,
+        }
+    ]
     assert response.id == "kb-1"
 
 
 @pytest.mark.asyncio
 async def test_delete_knowledge_cleans_layer_vectors(monkeypatch):
     cleaned = {}
+    deactivated = []
 
     async def fake_get_knowledge(*args, **kwargs):
         return _fake_knowledge()
@@ -112,6 +127,10 @@ async def test_delete_knowledge_cleans_layer_vectors(monkeypatch):
     async def fake_delete_knowledge(*args, **kwargs):
         return True
 
+    async def fake_deactivate_active_chunks(**kwargs):
+        deactivated.append(kwargs)
+        return 1
+
     monkeypatch.setattr(knowledge_mod.Knowledges, "get_knowledge_by_id", fake_get_knowledge, raising=False)
     monkeypatch.setattr(knowledge_mod.Models, "get_all_models", fake_get_models, raising=False)
     async def fake_has_access(*args, **kwargs):
@@ -123,6 +142,7 @@ async def test_delete_knowledge_cleans_layer_vectors(monkeypatch):
     monkeypatch.setattr(knowledge_mod.KnowledgeLayers, "delete_layers_by_knowledge", fake_delete_layers, raising=False)
     monkeypatch.setattr(knowledge_mod.ASYNC_VECTOR_DB_CLIENT, "delete_collection", fake_delete_collection, raising=False)
     monkeypatch.setattr(knowledge_mod.Knowledges, "delete_knowledge_by_id", fake_delete_knowledge, raising=False)
+    monkeypatch.setattr(knowledge_mod, "deactivate_active_chunks", fake_deactivate_active_chunks, raising=False)
 
     result = await knowledge_mod.delete_knowledge_by_id(
         id="kb-1",
@@ -131,4 +151,11 @@ async def test_delete_knowledge_cleans_layer_vectors(monkeypatch):
     )
 
     assert cleaned == {"knowledge_id": "kb-1"}
+    assert deactivated == [
+        {
+            "collection_id": "kb-1",
+            "collection_name": "kb-1",
+            "db": None,
+        }
+    ]
     assert result is True

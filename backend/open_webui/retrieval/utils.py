@@ -35,7 +35,7 @@ from open_webui.models.files import Files
 from open_webui.models.knowledge import Knowledges
 from open_webui.models.notes import Notes
 from open_webui.models.users import UserModel
-from open_webui.retrieval.hybrid import HybridSearchFailed, query_manifest_hybrid_search
+from open_webui.retrieval.hybrid import HybridManifestNotReady, HybridSearchFailed, query_manifest_hybrid_search
 from open_webui.retrieval.loaders.youtube import YoutubeLoader
 from open_webui.retrieval.vector.async_client import ASYNC_VECTOR_DB_CLIENT
 from open_webui.retrieval.vector.factory import VECTOR_DB_CLIENT
@@ -298,6 +298,24 @@ async def query_doc_with_hybrid_search(
         )
         log.info('query_doc_with_hybrid_search:result ' + f'{result["metadatas"]} {result["distances"]}')
         return result
+    except HybridManifestNotReady as e:
+        log.warning(
+            'Hybrid manifest not ready for collection %s; falling back to vector search: %s',
+            collection_name,
+            e,
+            exc_info=True,
+        )
+        query_embedding = await embedding_function(query, RAG_EMBEDDING_QUERY_PREFIX)
+        result = await ASYNC_VECTOR_DB_CLIENT.search(
+            collection_name=collection_name,
+            vectors=[query_embedding],
+            limit=k,
+        )
+        return (
+            result.model_dump()
+            if result is not None
+            else {'distances': [[]], 'documents': [[]], 'metadatas': [[]]}
+        )
     except Exception as e:
         log.exception(f'Error querying doc {collection_name} with hybrid search: {e}')
         raise e
@@ -418,6 +436,13 @@ async def query_collection(
                 exc_info=True,
             )
             raise
+        except HybridManifestNotReady as e:
+            log.warning(
+                'Hybrid manifest not ready for collections %s; falling back to vector search: %s',
+                collection_names,
+                e,
+                exc_info=True,
+            )
         except Exception as e:
             log.warning(
                 'Hybrid search failed for collections %s; falling back to vector search: %s',
@@ -487,16 +512,31 @@ async def query_collection_with_hybrid_search(
     enable_enriched_texts: bool = False,
 ) -> dict:
     log.info(f'Starting hybrid search for {len(queries)} queries in {len(collection_names)} collections...')
-    return await query_manifest_hybrid_search(
-        collection_names=collection_names,
-        queries=queries,
-        embedding_function=embedding_function,
-        k=k,
-        reranking_function=reranking_function,
-        k_reranker=k_reranker,
-        r=r,
-        hybrid_bm25_weight=hybrid_bm25_weight,
-    )
+    try:
+        return await query_manifest_hybrid_search(
+            collection_names=collection_names,
+            queries=queries,
+            embedding_function=embedding_function,
+            k=k,
+            reranking_function=reranking_function,
+            k_reranker=k_reranker,
+            r=r,
+            hybrid_bm25_weight=hybrid_bm25_weight,
+        )
+    except HybridManifestNotReady as e:
+        log.warning(
+            'Hybrid manifest not ready for collections %s; falling back to vector search: %s',
+            collection_names,
+            e,
+            exc_info=True,
+        )
+        return await query_collection(
+            None,
+            collection_names=collection_names,
+            queries=queries,
+            embedding_function=embedding_function,
+            k=k,
+        )
 
 
 def generate_openai_batch_embeddings(

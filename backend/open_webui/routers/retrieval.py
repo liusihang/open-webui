@@ -58,6 +58,7 @@ from open_webui.env import (
 from open_webui.internal.db import get_async_db, get_async_session
 from open_webui.models.files import FileModel, Files, FileUpdateForm
 from open_webui.models.knowledge import Knowledges
+from open_webui.models.retrieval_chunks import deactivate_active_chunks
 
 # Document loaders
 from open_webui.retrieval.loaders.youtube import YoutubeLoader
@@ -1601,6 +1602,12 @@ async def process_file(
                 except Exception:
                     # Audio file upload pipeline
                     pass
+                await deactivate_active_chunks(
+                    collection_id=f'file-{file.id}',
+                    collection_name=f'file-{file.id}',
+                    file_id=file.id,
+                    db=db,
+                )
 
                 docs = [
                     Document(
@@ -2561,6 +2568,12 @@ async def delete_entries_from_collection(
             await ASYNC_VECTOR_DB_CLIENT.delete(
                 collection_name=form_data.collection_name,
                 filter={'hash': hash},
+            )
+            await deactivate_active_chunks(
+                collection_id=form_data.collection_name,
+                collection_name=form_data.collection_name,
+                file_id=form_data.file_id,
+                db=db,
             )
             return {'status': True}
         else:

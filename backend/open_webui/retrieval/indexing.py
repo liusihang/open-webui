@@ -12,6 +12,7 @@ from open_webui.models.retrieval_chunks import (
     compute_content_hash,
 )
 from open_webui.retrieval.lexical.opensearch import OpenSearchLexicalClient
+from sqlalchemy import or_
 
 
 @dataclass
@@ -26,6 +27,7 @@ class VectorChunkRecord:
 class ReindexResult:
     scanned: int = 0
     manifest_upserted: int = 0
+    manifest_deactivated: int = 0
     metadata_patched: int = 0
     lexical_indexed: int = 0
     failed: int = 0
@@ -51,6 +53,15 @@ class VectorChunkStore(Protocol):
 
 class ManifestChunkStore(Protocol):
     def upsert_chunks(self, chunks: Iterable[dict[str, Any]]) -> int:
+        ...
+
+    def deactivate_absent_chunks(
+        self,
+        *,
+        active_chunk_uids: Iterable[str],
+        collection_ids: list[str] | None,
+        deleted_at: int,
+    ) -> int:
         ...
 
     def count_chunks(self) -> dict[str, int]:
@@ -144,6 +155,39 @@ class SqlAlchemyManifestChunkStore:
         active = self.session.query(RetrievalChunk).filter(RetrievalChunk.is_active.is_(True)).count()
         return {"total": int(total), "active": int(active)}
 
+    def deactivate_absent_chunks(
+        self,
+        *,
+        active_chunk_uids: Iterable[str],
+        collection_ids: list[str] | None,
+        deleted_at: int,
+    ) -> int:
+        active_chunk_uids = set(active_chunk_uids)
+        try:
+            query = self.session.query(RetrievalChunk).filter(RetrievalChunk.is_active.is_(True))
+            if collection_ids:
+                query = query.filter(
+                    or_(
+                        RetrievalChunk.collection_id.in_(collection_ids),
+                        RetrievalChunk.collection_name.in_(collection_ids),
+                    )
+                )
+            if active_chunk_uids:
+                query = query.filter(~RetrievalChunk.chunk_uid.in_(active_chunk_uids))
+            count = query.update(
+                {
+                    RetrievalChunk.is_active: False,
+                    RetrievalChunk.deleted_at: deleted_at,
+                    RetrievalChunk.updated_at: deleted_at,
+                },
+                synchronize_session=False,
+            )
+            self.session.commit()
+            return int(count or 0)
+        except Exception:
+            self.session.rollback()
+            raise
+
     @staticmethod
     def _model_values(chunk: dict[str, Any]) -> dict[str, Any]:
         return {
@@ -200,6 +244,7 @@ class RetrievalIndexingService:
             collection_ids=collection_ids,
             promote_alias=promote_alias,
             batch_size=batch_size,
+            index_version=index_version,
         )
         if validation_error:
             result.failed = 1
@@ -220,7 +265,13 @@ class RetrievalIndexingService:
         rows = list(self.vector_store.iter_chunks(collection_ids=collection_ids))
         result.scanned = len(rows)
         chunks, patch_plan = self._derive_manifest_chunks(rows, result)
+        active_chunk_uids = [chunk["chunk_uid"] for chunk in chunks]
         if not chunks:
+            result.manifest_deactivated = self.manifest_store.deactivate_absent_chunks(
+                active_chunk_uids=[],
+                collection_ids=collection_ids,
+                deleted_at=int(self.now_fn()),
+            )
             return result
 
         try:
@@ -228,6 +279,17 @@ class RetrievalIndexingService:
         except Exception as exc:
             result.failed += 1
             self._record_failure(result, {"error": str(exc), "stage": "manifest_upsert"})
+            return result
+
+        try:
+            result.manifest_deactivated = self.manifest_store.deactivate_absent_chunks(
+                active_chunk_uids=active_chunk_uids,
+                collection_ids=collection_ids,
+                deleted_at=int(self.now_fn()),
+            )
+        except Exception as exc:
+            result.failed += 1
+            self._record_failure(result, {"error": str(exc), "stage": "manifest_deactivate_absent"})
             return result
 
         for row_id, metadata in patch_plan:
@@ -462,10 +524,16 @@ class RetrievalIndexingService:
         collection_ids: list[str] | None,
         promote_alias: bool,
         batch_size: int,
+        index_version: int,
     ) -> dict[str, Any] | None:
         if batch_size < 1:
             return {
                 "error": "batch_size must be at least 1",
+                "stage": "validation",
+            }
+        if index_version < 1:
+            return {
+                "error": "index_version must be at least 1",
                 "stage": "validation",
             }
         if collection_ids and promote_alias:

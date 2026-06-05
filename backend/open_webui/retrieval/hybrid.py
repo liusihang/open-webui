@@ -24,6 +24,10 @@ class HybridSearchFailed(RuntimeError):
     pass
 
 
+class HybridManifestNotReady(RuntimeError):
+    pass
+
+
 @dataclass(frozen=True)
 class RrfCandidate:
     chunk_uid: str
@@ -135,6 +139,7 @@ async def query_manifest_hybrid_search(
 
     vector_chunk_uids: list[str] = []
     lexical_chunk_uids: list[str] = []
+    missing_vector_chunk_uid_count = 0
     errors = []
 
     for query_index, query in enumerate(queries):
@@ -146,9 +151,11 @@ async def query_manifest_hybrid_search(
                         vectors=[query_embeddings[query_index]],
                         limit=branch_limit,
                     )
-                    vector_chunk_uids.extend(
-                        _chunk_uids_from_vector_result(vector_result, collection_name=collection_name)
+                    chunk_uids, missing_count = _chunk_uids_from_vector_result(
+                        vector_result, collection_name=collection_name
                     )
+                    missing_vector_chunk_uid_count += missing_count
+                    vector_chunk_uids.extend(chunk_uids)
                 except Exception as exc:
                     log.warning(
                         "hybrid vector search failed for collection %s: %s",
@@ -184,6 +191,10 @@ async def query_manifest_hybrid_search(
     )
     if not candidates and errors:
         raise HybridSearchFailed("Hybrid search failed for all branches") from errors[-1]
+    if not candidates and missing_vector_chunk_uid_count:
+        raise HybridManifestNotReady(
+            f"Hybrid manifest is not ready: {missing_vector_chunk_uid_count} vector hit(s) missing chunk_uid"
+        )
 
     hydrated_chunks = await _hydrate_candidates_until_enough(
         candidates=candidates,
@@ -191,6 +202,8 @@ async def query_manifest_hybrid_search(
         target_count=branch_limit,
         batch_size=branch_limit,
     )
+    if candidates and not hydrated_chunks:
+        raise HybridManifestNotReady("Hybrid manifest is not ready: no active manifest rows for candidates")
     candidate_by_uid = {candidate.chunk_uid: candidate for candidate in candidates}
     documents = [
         Document(
@@ -239,9 +252,9 @@ def _looks_like_embedding_vector(value: Any) -> bool:
     return isinstance(value, list) and (not value or isinstance(value[0], Number))
 
 
-def _chunk_uids_from_vector_result(vector_result: Any, *, collection_name: str) -> list[str]:
+def _chunk_uids_from_vector_result(vector_result: Any, *, collection_name: str) -> tuple[list[str], int]:
     if not vector_result or not getattr(vector_result, "metadatas", None):
-        return []
+        return [], 0
 
     metadatas = vector_result.metadatas[0] if vector_result.metadatas else []
     chunk_uids = []
@@ -259,7 +272,7 @@ def _chunk_uids_from_vector_result(vector_result: Any, *, collection_name: str) 
             missing_chunk_uid_count,
             collection_name,
         )
-    return chunk_uids
+    return chunk_uids, missing_chunk_uid_count
 
 
 def _metadata_from_chunk(chunk: Any, score: float) -> dict[str, Any]:
