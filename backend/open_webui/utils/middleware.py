@@ -4914,11 +4914,11 @@ async def streaming_chat_response_handler(response, ctx):
 
                     response_tool_calls = tool_calls.pop(0)
                     log.info(
-                        'Native tool loop iteration start chat_id=%s message_id=%s session_id=%s retry=%s tool_count=%s function_calling=%s image_generation=%s',
+                        'Native tool loop iteration start chat_id=%s message_id=%s session_id=%s iteration=%s tool_count=%s function_calling=%s image_generation=%s',
                         metadata.get('chat_id'),
                         metadata.get('message_id'),
                         metadata.get('session_id'),
-                        tool_call_retries,
+                        tool_call_iterations,
                         len(response_tool_calls),
                         metadata.get('params', {}).get('function_calling'),
                         metadata.get('features', {}).get('image_generation'),
