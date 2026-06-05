@@ -17,11 +17,13 @@ def _load_script_directory() -> ScriptDirectory:
 def test_migration_graph_resolves_afc_hotfix_head():
     script = _load_script_directory()
 
-    assert script.get_current_head() == "a0b1c2d3e4f5"
+    assert script.get_current_head() == "b6f7c8d9e0a1"
     assert script.get_revision("20260327_add_knowledge_layer_embedding_state") is not None
     assert script.get_revision("e8c4b9a2d1f0") is not None
     assert script.get_revision("4de81c2a3af1") is not None
     assert script.get_revision("a0b1c2d3e4f5") is not None
+    assert script.get_revision("461111b60977") is not None
+    assert script.get_revision("b6f7c8d9e0a1") is not None
 
 
 def test_migration_graph_keeps_legacy_knowledge_revision_upgradeable():
@@ -33,7 +35,9 @@ def test_migration_graph_keeps_legacy_knowledge_revision_upgradeable():
     tasks_revision = script.get_revision("a3dd5bedd151")
     compatibility_revision = script.get_revision("e8c4b9a2d1f0")
     pinned_note_revision = script.get_revision("4de81c2a3af1")
-    head_revision = script.get_revision("a0b1c2d3e4f5")
+    stale_head_revision = script.get_revision("a0b1c2d3e4f5")
+    legacy_pk_revision = script.get_revision("461111b60977")
+    head_revision = script.get_revision("b6f7c8d9e0a1")
 
     assert chunking_revision is not None
     assert bridge_revision is not None
@@ -41,6 +45,8 @@ def test_migration_graph_keeps_legacy_knowledge_revision_upgradeable():
     assert tasks_revision is not None
     assert compatibility_revision is not None
     assert pinned_note_revision is not None
+    assert stale_head_revision is not None
+    assert legacy_pk_revision is not None
     assert head_revision is not None
     assert chunking_revision.down_revision == "c3d4e5f6a7b8"
     assert bridge_revision.down_revision == "d4e5f6a7b8c9"
@@ -48,4 +54,6 @@ def test_migration_graph_keeps_legacy_knowledge_revision_upgradeable():
     assert automation_revision.down_revision == "a3dd5bedd151"
     assert compatibility_revision.down_revision == "56359461a091"
     assert pinned_note_revision.down_revision == "e8c4b9a2d1f0"
-    assert head_revision.down_revision == "4de81c2a3af1"
+    assert stale_head_revision.down_revision == "4de81c2a3af1"
+    assert legacy_pk_revision.down_revision == "3c9b0ca343fd"
+    assert head_revision.down_revision == "461111b60977"
