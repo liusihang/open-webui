@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import math
 import os
 from dataclasses import dataclass
 from numbers import Number
@@ -16,6 +17,7 @@ log = logging.getLogger(__name__)
 
 RRF_RANK_CONSTANT = 60
 RAG_EMBEDDING_QUERY_PREFIX = os.getenv("RAG_EMBEDDING_QUERY_PREFIX", None)
+RAG_EMBEDDING_CONTENT_PREFIX = os.getenv("RAG_EMBEDDING_CONTENT_PREFIX", None)
 
 
 class HybridSearchFailed(RuntimeError):
@@ -122,7 +124,8 @@ async def query_manifest_hybrid_search(
         from open_webui.retrieval.vector.async_client import ASYNC_VECTOR_DB_CLIENT
 
         vector_client = ASYNC_VECTOR_DB_CLIENT
-    lexical_client = lexical_client or get_lexical_client()
+    if lexical_weight > 0 and lexical_client is None:
+        lexical_client = get_lexical_client()
     hydrate_chunks = hydrate_chunks or fetch_active_chunks_by_chunk_uid
 
     query_embeddings = None
@@ -182,9 +185,13 @@ async def query_manifest_hybrid_search(
     if not candidates and errors:
         raise HybridSearchFailed("Hybrid search failed for all branches") from errors[-1]
 
+    hydrated_chunks = await _hydrate_candidates_until_enough(
+        candidates=candidates,
+        hydrate_chunks=hydrate_chunks,
+        target_count=branch_limit,
+        batch_size=branch_limit,
+    )
     candidate_by_uid = {candidate.chunk_uid: candidate for candidate in candidates}
-    chunk_uids = [candidate.chunk_uid for candidate in candidates[:branch_limit]]
-    hydrated_chunks = await hydrate_chunks(chunk_uids)
     documents = [
         Document(
             page_content=chunk.text or "",
@@ -205,6 +212,14 @@ async def query_manifest_hybrid_search(
         if k < len(documents):
             documents = documents[:k]
     else:
+        documents = await _semantic_compress_documents(
+            documents,
+            query=queries[0],
+            embedding_function=embedding_function,
+            query_embedding=query_embeddings[0] if query_embeddings else None,
+            top_n=k_reranker,
+            r_score=r,
+        )
         documents = documents[:k]
 
     return {
@@ -255,6 +270,83 @@ def _metadata_from_chunk(chunk: Any, score: float) -> dict[str, Any]:
     metadata.setdefault("chunk_uid", chunk.chunk_uid)
     metadata["score"] = score
     return metadata
+
+
+async def _hydrate_candidates_until_enough(
+    *,
+    candidates: list[RrfCandidate],
+    hydrate_chunks: Callable[[list[str]], Awaitable[list[Any]]],
+    target_count: int,
+    batch_size: int,
+) -> list[Any]:
+    if not candidates:
+        return []
+
+    target_count = max(1, target_count)
+    batch_size = max(1, batch_size)
+    hydrated_chunks = []
+    seen_chunk_uids = set()
+    for start in range(0, len(candidates), batch_size):
+        chunk_uids = [candidate.chunk_uid for candidate in candidates[start : start + batch_size]]
+        requested_chunk_uids = set(chunk_uids)
+        for chunk in await hydrate_chunks(chunk_uids):
+            if chunk.chunk_uid not in requested_chunk_uids:
+                continue
+            if chunk.chunk_uid in seen_chunk_uids:
+                continue
+            seen_chunk_uids.add(chunk.chunk_uid)
+            hydrated_chunks.append(chunk)
+            if len(hydrated_chunks) >= target_count:
+                return hydrated_chunks
+    return hydrated_chunks
+
+
+async def _semantic_compress_documents(
+    documents: list[Document],
+    *,
+    query: str,
+    embedding_function,
+    query_embedding: list[float | int] | None,
+    top_n: int,
+    r_score: float,
+) -> list[Document]:
+    if not documents:
+        return []
+
+    if query_embedding is None:
+        query_embedding = await embedding_function(query, RAG_EMBEDDING_QUERY_PREFIX)
+    doc_texts = [document.page_content for document in documents]
+    document_embeddings = await embedding_function(doc_texts, RAG_EMBEDDING_CONTENT_PREFIX)
+    scores = _cosine_scores(query_embedding, document_embeddings)
+    docs_with_scores = list(zip(documents, scores))
+    if r_score:
+        docs_with_scores = [(document, score) for document, score in docs_with_scores if score >= r_score]
+
+    ranked = sorted(docs_with_scores, key=lambda item: item[1], reverse=True)
+    final_documents = []
+    for document, score in ranked[:top_n]:
+        metadata = dict(document.metadata)
+        metadata["score"] = score
+        final_documents.append(Document(page_content=document.page_content, metadata=metadata))
+    return final_documents
+
+
+def _cosine_scores(
+    query_embedding: list[float | int],
+    document_embeddings: list[list[float | int]],
+) -> list[float]:
+    return [_cosine_similarity(query_embedding, document_embedding) for document_embedding in document_embeddings]
+
+
+def _cosine_similarity(left: list[float | int], right: list[float | int]) -> float:
+    left_values = [float(value) for value in left]
+    right_values = [float(value) for value in right]
+    numerator = sum(left_value * right_value for left_value, right_value in zip(left_values, right_values))
+    left_norm = math.sqrt(sum(value * value for value in left_values))
+    right_norm = math.sqrt(sum(value * value for value in right_values))
+    if left_norm == 0 or right_norm == 0:
+        return 0.0
+    return numerator / (left_norm * right_norm)
 
 
 async def _rerank_documents(

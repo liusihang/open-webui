@@ -14,6 +14,7 @@ from open_webui.retrieval.hybrid import (
     merge_rrf_by_chunk_uid,
     query_manifest_hybrid_search,
 )
+from open_webui.retrieval import hybrid as hybrid_mod
 from open_webui.retrieval.vector.main import SearchResult
 
 
@@ -67,6 +68,22 @@ class FakeEmbedder:
         if isinstance(query, list):
             return [[float(index), 0.25] for index, _ in enumerate(query)]
         return [1.0, 0.25]
+
+
+class SemanticEmbedder:
+    def __init__(self):
+        self.calls = []
+
+    async def __call__(self, query, prefix=None):
+        self.calls.append((query, prefix))
+        if isinstance(query, list):
+            if query == ["alpha"]:
+                return [[1.0, 0.0]]
+            return [
+                [1.0, 0.0] if text == "manifest high" else [0.0, 1.0]
+                for text in query
+            ]
+        return [1.0, 0.0]
 
 
 def manifest_chunk(chunk_uid, text, metadata=None, *, is_active=True):
@@ -154,7 +171,7 @@ async def test_hybrid_search_merges_vector_and_lexical_by_chunk_uid_and_hydrates
         hydrate_chunks=hydrate,
     )
 
-    assert len(embedder.calls) == 1
+    assert embedder.calls.count((["alpha beta"], None)) == 1
     assert len(vector_client.search_calls) == 1
     assert len(lexical_client.search_calls) == 1
     assert result["documents"] == [["manifest shared", "manifest vector", "manifest lexical"]]
@@ -256,6 +273,123 @@ async def test_vector_only_weight_does_not_require_lexical_hits():
     )
 
     assert result["documents"] == [["manifest vector"]]
+
+
+@pytest.mark.asyncio
+async def test_vector_only_weight_does_not_instantiate_default_lexical_client(monkeypatch):
+    vector_client = FakeVectorClient(
+        SearchResult(
+            ids=[["vector-a"]],
+            documents=[["derived vector"]],
+            metadatas=[[{"chunk_uid": "chunk_vector"}]],
+            distances=[[0.9]],
+        )
+    )
+
+    def fail_get_lexical_client():
+        raise AssertionError("lexical client should not be created when lexical weight is zero")
+
+    monkeypatch.setattr(hybrid_mod, "get_lexical_client", fail_get_lexical_client)
+
+    async def hydrate(chunk_uids):
+        return [manifest_chunk("chunk_vector", "manifest vector")]
+
+    result = await query_manifest_hybrid_search(
+        collection_names=["collection-1"],
+        queries=["alpha"],
+        embedding_function=FakeEmbedder(),
+        k=1,
+        reranking_function=None,
+        k_reranker=1,
+        r=0.0,
+        hybrid_bm25_weight=0.0,
+        vector_client=vector_client,
+        hydrate_chunks=hydrate,
+    )
+
+    assert result["documents"] == [["manifest vector"]]
+
+
+@pytest.mark.asyncio
+async def test_no_reranker_filters_by_semantic_relevance_threshold_not_rrf_score():
+    vector_client = FakeVectorClient(
+        SearchResult(
+            ids=[["vector-high", "vector-low"]],
+            documents=[["derived high", "derived low"]],
+            metadatas=[[{"chunk_uid": "chunk_high"}, {"chunk_uid": "chunk_low"}]],
+            distances=[[0.99, 0.98]],
+        )
+    )
+
+    async def hydrate(chunk_uids):
+        return [
+            manifest_chunk("chunk_high", "manifest high"),
+            manifest_chunk("chunk_low", "manifest low"),
+        ]
+
+    result = await query_manifest_hybrid_search(
+        collection_names=["collection-1"],
+        queries=["alpha"],
+        embedding_function=SemanticEmbedder(),
+        k=2,
+        reranking_function=None,
+        k_reranker=2,
+        r=0.5,
+        hybrid_bm25_weight=0.0,
+        vector_client=vector_client,
+        lexical_client=FakeLexicalClient(fail=True),
+        hydrate_chunks=hydrate,
+    )
+
+    assert result["documents"] == [["manifest high"]]
+    assert result["distances"] == [[1.0]]
+
+
+@pytest.mark.asyncio
+async def test_hydration_scans_past_initial_branch_limit_until_enough_active_chunks():
+    vector_client = FakeVectorClient(
+        SearchResult(
+            ids=[["vector-a", "vector-b", "vector-c", "vector-d"]],
+            documents=[["derived a", "derived b", "derived c", "derived d"]],
+            metadatas=[
+                [
+                    {"chunk_uid": "chunk_missing_a"},
+                    {"chunk_uid": "chunk_missing_b"},
+                    {"chunk_uid": "chunk_c"},
+                    {"chunk_uid": "chunk_d"},
+                ]
+            ],
+            distances=[[0.99, 0.98, 0.97, 0.96]],
+        )
+    )
+    hydrate_calls = []
+
+    async def hydrate(chunk_uids):
+        hydrate_calls.append(list(chunk_uids))
+        return [
+            manifest_chunk("chunk_c", "manifest c"),
+            manifest_chunk("chunk_d", "manifest d"),
+        ]
+
+    result = await query_manifest_hybrid_search(
+        collection_names=["collection-1"],
+        queries=["alpha"],
+        embedding_function=FakeEmbedder(),
+        k=2,
+        reranking_function=None,
+        k_reranker=2,
+        r=0.0,
+        hybrid_bm25_weight=0.0,
+        vector_client=vector_client,
+        lexical_client=FakeLexicalClient(fail=True),
+        hydrate_chunks=hydrate,
+    )
+
+    assert hydrate_calls == [
+        ["chunk_missing_a", "chunk_missing_b"],
+        ["chunk_c", "chunk_d"],
+    ]
+    assert result["documents"] == [["manifest c", "manifest d"]]
 
 
 def test_rrf_ranking_is_deterministic_and_stable_when_scores_tie():
