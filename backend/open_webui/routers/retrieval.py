@@ -58,7 +58,9 @@ from open_webui.env import (
 from open_webui.internal.db import get_async_db, get_async_session
 from open_webui.models.files import FileModel, Files, FileUpdateForm
 from open_webui.models.knowledge import Knowledges
-from open_webui.models.retrieval_chunks import deactivate_active_chunks
+from open_webui.models.retrieval_chunks import compute_chunker_config_hash
+from open_webui.models.retrieval_indexes import compute_target_config_hash
+from open_webui.retrieval.indexing import deactivate_all_chunks_for_reset, deactivate_chunks_for_scope
 
 # Document loaders
 from open_webui.retrieval.loaders.youtube import YoutubeLoader
@@ -1359,6 +1361,56 @@ def merge_docs_to_target_size(
     return result
 
 
+def _current_chunker_config(request: Request) -> dict:
+    config = request.app.state.config
+    return {
+        'version': 1,
+        'text_splitter': getattr(config, 'TEXT_SPLITTER', ''),
+        'chunk_size': getattr(config, 'CHUNK_SIZE', None),
+        'chunk_overlap': getattr(config, 'CHUNK_OVERLAP', None),
+        'chunk_min_size_target': getattr(config, 'CHUNK_MIN_SIZE_TARGET', None),
+        'markdown_header_text_splitter': getattr(
+            config,
+            'ENABLE_MARKDOWN_HEADER_TEXT_SPLITTER',
+            False,
+        ),
+        'tiktoken_encoding_name': getattr(config, 'TIKTOKEN_ENCODING_NAME', None),
+    }
+
+
+def _build_vector_metadatas(
+    request: Request,
+    docs: list[Document],
+    metadata: dict | None = None,
+) -> list[dict]:
+    chunker_config = _current_chunker_config(request)
+    chunker_config_hash = compute_chunker_config_hash(chunker_config)
+    embedding_config = {
+        'engine': request.app.state.config.RAG_EMBEDDING_ENGINE,
+        'model': request.app.state.config.RAG_EMBEDDING_MODEL,
+    }
+    embedding_config_hash = compute_target_config_hash(
+        {
+            'index_kind': 'embedding',
+            **embedding_config,
+        }
+    )
+
+    return [
+        {
+            **doc.metadata,
+            **(metadata if metadata else {}),
+            'chunk_index': idx,
+            'chunk_version': 1,
+            'chunker_config': chunker_config,
+            'chunker_config_hash': chunker_config_hash,
+            'embedding_config': embedding_config,
+            'embedding_config_hash': embedding_config_hash,
+        }
+        for idx, doc in enumerate(docs)
+    ]
+
+
 def save_docs_to_vector_db(
     request: Request,
     docs,
@@ -1465,17 +1517,7 @@ def save_docs_to_vector_db(
         raise ValueError(ERROR_MESSAGES.EMPTY_CONTENT)
 
     texts = [sanitize_text_for_db(doc.page_content) for doc in docs]
-    metadatas = [
-        {
-            **doc.metadata,
-            **(metadata if metadata else {}),
-            'embedding_config': {
-                'engine': request.app.state.config.RAG_EMBEDDING_ENGINE,
-                'model': request.app.state.config.RAG_EMBEDDING_MODEL,
-            },
-        }
-        for doc in docs
-    ]
+    metadatas = _build_vector_metadatas(request, docs, metadata)
 
     try:
         if VECTOR_DB_CLIENT.has_collection(collection_name=collection_name):
@@ -1602,7 +1644,7 @@ async def process_file(
                 except Exception:
                     # Audio file upload pipeline
                     pass
-                await deactivate_active_chunks(
+                await deactivate_chunks_for_scope(
                     collection_id=f'file-{file.id}',
                     collection_name=f'file-{file.id}',
                     file_id=file.id,
@@ -2569,7 +2611,7 @@ async def delete_entries_from_collection(
                 collection_name=form_data.collection_name,
                 filter={'hash': hash},
             )
-            await deactivate_active_chunks(
+            await deactivate_chunks_for_scope(
                 collection_id=form_data.collection_name,
                 collection_name=form_data.collection_name,
                 file_id=form_data.file_id,
@@ -2590,6 +2632,7 @@ async def delete_entries_from_collection(
 @router.post('/reset/db')
 async def reset_vector_db(user=Depends(get_admin_user), db: AsyncSession = Depends(get_async_session)):
     await ASYNC_VECTOR_DB_CLIENT.reset()
+    await deactivate_all_chunks_for_reset(db=db)
     await Knowledges.delete_all_knowledge(db=db)
 
 

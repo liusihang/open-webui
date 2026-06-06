@@ -159,7 +159,7 @@ async def test_delete_entries_from_collection_deactivates_manifest_chunks(monkey
         async def get_file_by_id(self, file_id, db=None):
             return SimpleNamespace(id=file_id, hash="hash-1")
 
-    monkeypatch.setattr(retrieval_router, "deactivate_active_chunks", fake_deactivate)
+    monkeypatch.setattr(retrieval_router, "deactivate_chunks_for_scope", fake_deactivate)
     monkeypatch.setattr(retrieval_router.ASYNC_VECTOR_DB_CLIENT, "has_collection", fake_has_collection)
     monkeypatch.setattr(retrieval_router.ASYNC_VECTOR_DB_CLIENT, "delete", fake_delete)
     monkeypatch.setattr(retrieval_router, "Files", FakeFiles())

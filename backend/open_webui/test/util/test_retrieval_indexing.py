@@ -1,16 +1,25 @@
 import os
 from dataclasses import dataclass
+from types import SimpleNamespace
 
 os.environ.setdefault("WEBUI_SECRET_KEY", "test-secret")
 os.environ.setdefault("ENABLE_DB_MIGRATIONS", "false")
 
 import pytest
+from sqlalchemy import select
+from sqlalchemy.ext.asyncio import create_async_engine
+from sqlalchemy.orm import sessionmaker
 
+from open_webui.models.retrieval_chunks import RetrievalChunk
+from open_webui.models.retrieval_indexes import RetrievalIndexJob, RetrievalIndexState
 from open_webui.retrieval.indexing import (
     RetrievalIndexingService,
     SqlAlchemyManifestChunkStore,
     SqlAlchemyVectorChunkStore,
     VectorChunkRecord,
+    deactivate_all_chunks_for_reset,
+    deactivate_chunks_for_scope,
+    run_retrieval_index_job,
 )
 import open_webui.retrieval.indexing as indexing_mod
 
@@ -521,3 +530,204 @@ def test_vector_store_factory_prefers_existing_pgvector_session(monkeypatch):
     )
 
     assert store.session is existing_session
+
+
+class Dumpable(SimpleNamespace):
+    def model_dump(self):
+        return dict(self.__dict__)
+
+
+@pytest.mark.asyncio
+async def test_deactivate_chunks_for_scope_runs_enqueued_delete_job_inline(monkeypatch):
+    run_calls = []
+
+    async def fake_deactivate_and_enqueue(**kwargs):
+        return indexing_mod.ManifestDeactivationResult(
+            deactivated=2,
+            lexical_delete_enqueued=2,
+            chunk_uids=["chunk_1", "chunk_2"],
+            delete_job_id="job-delete",
+        )
+
+    async def fake_run(job_id):
+        run_calls.append(job_id)
+        return {"result": {"lexical_deleted": 2}}
+
+    monkeypatch.setattr(indexing_mod, "_deactivate_and_enqueue_delete_job", fake_deactivate_and_enqueue)
+    monkeypatch.setattr(indexing_mod, "run_retrieval_index_job", fake_run)
+
+    result = await deactivate_chunks_for_scope(collection_id="knowledge-1")
+
+    assert result.deactivated == 2
+    assert result.lexical_delete_enqueued == 2
+    assert result.lexical_delete_executed == 2
+    assert result.delete_job_id == "job-delete"
+    assert run_calls == ["job-delete"]
+
+
+@pytest.mark.asyncio
+async def test_deactivate_all_chunks_for_reset_can_queue_without_inline_run(monkeypatch):
+    run_calls = []
+
+    async def fake_deactivate_and_enqueue(**kwargs):
+        assert kwargs["all_chunks"] is True
+        return indexing_mod.ManifestDeactivationResult(
+            deactivated=2,
+            lexical_delete_enqueued=2,
+            chunk_uids=["chunk_1", "chunk_2"],
+            delete_job_id="job-reset-delete",
+        )
+
+    async def fake_run(job_id):
+        run_calls.append(job_id)
+        raise AssertionError("run_lexical_delete=False should not run delete inline")
+
+    monkeypatch.setattr(indexing_mod, "_deactivate_and_enqueue_delete_job", fake_deactivate_and_enqueue)
+    monkeypatch.setattr(indexing_mod, "run_retrieval_index_job", fake_run)
+
+    result = await deactivate_all_chunks_for_reset(run_lexical_delete=False)
+
+    assert result.deactivated == 2
+    assert result.lexical_delete_enqueued == 2
+    assert result.delete_job_id == "job-reset-delete"
+    assert run_calls == []
+
+
+@pytest.mark.asyncio
+async def test_deactivate_and_enqueue_delete_job_is_transactional_and_uses_ready_target_hash():
+    engine = create_async_engine("sqlite+aiosqlite:///:memory:")
+    async with engine.begin() as connection:
+        await connection.run_sync(RetrievalChunk.__table__.create)
+        await connection.run_sync(RetrievalIndexJob.__table__.create)
+        await connection.run_sync(RetrievalIndexState.__table__.create)
+
+    session_factory = sessionmaker(engine, expire_on_commit=False, class_=indexing_mod.AsyncSession)
+    async with session_factory() as session:
+        session.add_all(
+            [
+                RetrievalChunk(
+                    chunk_uid="chunk_1",
+                    collection_id="knowledge-1",
+                    knowledge_id="knowledge-1",
+                    collection_name="knowledge-1",
+                    file_id="file-1",
+                    file_version=1,
+                    chunk_version=1,
+                    chunk_index=0,
+                    content_hash="content-1",
+                    chunker_config_hash="chunker-1",
+                    text="alpha",
+                    metadata_={},
+                    is_active=True,
+                    created_at=1,
+                    updated_at=1,
+                ),
+                RetrievalIndexState(
+                    state_id="state-ready-v2",
+                    index_kind="lexical",
+                    target_config_hash="lexical-v2-hash",
+                    status="ready",
+                    created_at=1,
+                    updated_at=9,
+                ),
+            ]
+        )
+        await session.commit()
+
+        result = await indexing_mod._deactivate_and_enqueue_delete_job(
+            collection_id="knowledge-1",
+            collection_name="knowledge-1",
+            file_id="file-1",
+            db=session,
+        )
+
+        assert result.deactivated == 1
+        assert result.lexical_delete_enqueued == 1
+        assert result.chunk_uids == ["chunk_1"]
+        assert result.delete_job_id is not None
+
+        chunk = (
+            await session.execute(select(RetrievalChunk).filter_by(chunk_uid="chunk_1"))
+        ).scalars().first()
+        job = (
+            await session.execute(select(RetrievalIndexJob).filter_by(job_id=result.delete_job_id))
+        ).scalars().first()
+        states = (
+            await session.execute(
+                select(RetrievalIndexState).where(
+                    RetrievalIndexState.last_job_id == result.delete_job_id
+                )
+            )
+        ).scalars().all()
+
+        assert chunk.is_active is False
+        assert job.index_kind == "delete"
+        assert job.status == "pending"
+        assert job.target_config_hash == "lexical-v2-hash"
+        assert job.payload == {"chunk_uids": ["chunk_1"]}
+        assert len(states) == 1
+        assert states[0].status == "stale"
+        assert states[0].target_config_hash == "lexical-v2-hash"
+
+    await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_run_delete_job_physically_deletes_opensearch_chunks(monkeypatch):
+    job_status_calls = []
+    state_calls = []
+    delete_calls = []
+
+    class FakeJobs:
+        async def get_job_by_id(self, job_id):
+            assert job_id == "job-delete"
+            return Dumpable(
+                job_id=job_id,
+                index_kind="delete",
+                collection_id="knowledge-1",
+                knowledge_id="knowledge-1",
+                collection_name="knowledge-1",
+                file_id="file-1",
+                target_config_hash="target-hash",
+                payload={"chunk_uids": ["chunk_1", "chunk_1", "chunk_2"]},
+            )
+
+        async def update_job_status(self, job_id, **kwargs):
+            job_status_calls.append((job_id, kwargs))
+            return Dumpable(job_id=job_id, status=kwargs["status"], result=kwargs.get("result"))
+
+    class FakeStates:
+        async def upsert_state(self, **kwargs):
+            state_calls.append(kwargs)
+            return Dumpable(state_id="state-1")
+
+    class FakeOpenSearchLexicalClient:
+        def delete_chunks(self, chunk_uids):
+            delete_calls.append(chunk_uids)
+            return len(chunk_uids)
+
+    monkeypatch.setattr(indexing_mod, "RetrievalIndexJobs", FakeJobs())
+    monkeypatch.setattr(indexing_mod, "RetrievalIndexStates", FakeStates())
+    monkeypatch.setattr(indexing_mod, "OpenSearchLexicalClient", FakeOpenSearchLexicalClient)
+
+    response = await run_retrieval_index_job("job-delete")
+
+    assert delete_calls == [["chunk_1", "chunk_2"]]
+    assert response["result"]["lexical_deleted"] == 2
+    assert response["result"]["chunk_uid_count"] == 2
+    assert job_status_calls[0] == ("job-delete", {"status": "running"})
+    assert job_status_calls[-1][0] == "job-delete"
+    assert job_status_calls[-1][1]["status"] == "succeeded"
+    assert state_calls == [
+        {
+            "index_kind": "lexical",
+            "status": "deleted",
+            "collection_id": "knowledge-1",
+            "knowledge_id": "knowledge-1",
+            "collection_name": "knowledge-1",
+            "file_id": "file-1",
+            "target_config_hash": "target-hash",
+            "indexed_chunk_count": 2,
+            "last_job_id": "job-delete",
+        }
+    ]

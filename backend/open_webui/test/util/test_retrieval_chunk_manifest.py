@@ -16,6 +16,8 @@ from open_webui.models.retrieval_chunks import (
     compute_chunk_uid,
     compute_chunker_config_hash,
     compute_content_hash,
+    deactivate_active_chunks,
+    fetch_chunk_uids_for_scope,
 )
 
 
@@ -159,3 +161,15 @@ def test_retrieval_chunk_migration_upgrade_and_downgrade_tolerate_existing_surfa
 
     _run_migration(engine, "downgrade")
     _run_migration(engine, "downgrade")
+
+
+@pytest.mark.asyncio
+async def test_deactivate_active_chunks_requires_scope_selector():
+    with pytest.raises(ValueError, match="requires collection_id, collection_name, or file_id"):
+        await deactivate_active_chunks()
+
+
+@pytest.mark.asyncio
+async def test_fetch_chunk_uids_for_scope_requires_scope_selector():
+    with pytest.raises(ValueError, match="requires collection_id, collection_name, or file_id"):
+        await fetch_chunk_uids_for_scope()

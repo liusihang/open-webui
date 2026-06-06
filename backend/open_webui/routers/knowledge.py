@@ -10,7 +10,6 @@ from urllib.parse import quote
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
 from fastapi.responses import StreamingResponse
-from starlette.concurrency import run_in_threadpool
 from open_webui.config import BYPASS_ADMIN_ACCESS_CONTROL
 from open_webui.constants import ERROR_MESSAGES
 from open_webui.internal.db import get_async_session
@@ -32,10 +31,12 @@ from open_webui.models.knowledge_layers import (
     KnowledgeLayers,
 )
 from open_webui.models.models import ModelForm, Models
-from open_webui.models.retrieval_chunks import deactivate_active_chunks
+from open_webui.models.retrieval_indexes import RetrievalIndexJobs
 from open_webui.retrieval.indexing import (
-    get_retrieval_index_status,
-    reindex_lexical_from_current_vector_store,
+    deactivate_chunks_for_scope,
+    enqueue_retrieval_index_job,
+    get_retrieval_index_status_async,
+    run_retrieval_index_job,
 )
 from open_webui.retrieval.vector.async_client import ASYNC_VECTOR_DB_CLIENT
 from open_webui.routers.retrieval import (
@@ -137,7 +138,8 @@ class KnowledgeReindexRequest(BaseModel):
     collection_ids: list[str] | None = None
     index_version: int = Field(default=1, ge=1)
     promote_alias: bool = True
-    batch_size: int = 500
+    batch_size: int = Field(default=500, ge=1)
+    run_async: bool = False
 
 
 @router.get('/', response_model=KnowledgeAccessListResponse)
@@ -351,7 +353,7 @@ async def reindex_knowledge_files(
             except Exception as e:
                 log.error(f'Error deleting collection {knowledge_base.id}: {str(e)}')
                 continue  # Skip, don't raise
-            await deactivate_active_chunks(
+            await deactivate_chunks_for_scope(
                 collection_id=knowledge_base.id,
                 collection_name=knowledge_base.id,
                 db=db,
@@ -424,14 +426,18 @@ async def reindex_knowledge_lexical(
     form_data: KnowledgeReindexRequest,
     user=Depends(get_admin_user),
 ):
-    result = await run_in_threadpool(
-        reindex_lexical_from_current_vector_store,
+    queued = await enqueue_retrieval_index_job(
+        index_kind="lexical",
         collection_ids=form_data.collection_ids,
         index_version=form_data.index_version,
         promote_alias=form_data.promote_alias,
         batch_size=form_data.batch_size,
     )
-    return result.model_dump()
+    if form_data.run_async:
+        return {"queued": True, **queued}
+
+    execution = await run_retrieval_index_job(queued["job"]["job_id"])
+    return execution["result"]
 
 
 @router.post('/reindex/full', response_model=dict)
@@ -439,22 +445,45 @@ async def reindex_knowledge_full(
     form_data: KnowledgeReindexRequest,
     user=Depends(get_admin_user),
 ):
-    result = await run_in_threadpool(
-        reindex_lexical_from_current_vector_store,
+    queued = await enqueue_retrieval_index_job(
+        index_kind="full",
         collection_ids=form_data.collection_ids,
         index_version=form_data.index_version,
         promote_alias=form_data.promote_alias,
         batch_size=form_data.batch_size,
     )
-    return {
-        'embedding_reindexed': False,
-        'lexical': result.model_dump(),
-    }
+    if form_data.run_async:
+        return {"queued": True, **queued}
+
+    execution = await run_retrieval_index_job(queued["job"]["job_id"])
+    return execution["result"]
 
 
 @router.get('/index/status', response_model=dict)
 async def get_knowledge_index_status(user=Depends(get_admin_user)):
-    return await run_in_threadpool(get_retrieval_index_status)
+    return await get_retrieval_index_status_async()
+
+
+@router.get('/index/jobs/{job_id}', response_model=dict)
+async def get_retrieval_index_job(job_id: str, user=Depends(get_admin_user)):
+    job = await RetrievalIndexJobs.get_job_by_id(job_id)
+    if job is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=ERROR_MESSAGES.NOT_FOUND,
+        )
+    return job.model_dump()
+
+
+@router.post('/index/jobs/{job_id}/run', response_model=dict)
+async def run_retrieval_index_job_by_id(job_id: str, user=Depends(get_admin_user)):
+    try:
+        return await run_retrieval_index_job(job_id)
+    except ValueError:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=ERROR_MESSAGES.NOT_FOUND,
+        )
 
 
 ############################
@@ -1119,7 +1148,7 @@ async def update_file_from_knowledge_by_id(
 
     # Remove content from the vector database
     await ASYNC_VECTOR_DB_CLIENT.delete(collection_name=knowledge.id, filter={'file_id': form_data.file_id})
-    await deactivate_active_chunks(
+    await deactivate_chunks_for_scope(
         collection_id=knowledge.id,
         collection_name=knowledge.id,
         file_id=form_data.file_id,
@@ -1215,7 +1244,7 @@ async def remove_file_from_knowledge_by_id(
     await Knowledges.remove_file_from_knowledge_by_id(knowledge_id=id, file_id=form_data.file_id, db=db)
     await KnowledgeLayers.delete_layers_by_file(id, form_data.file_id, db=db)
     await delete_layer_embeddings_by_file_id(form_data.file_id)
-    await deactivate_active_chunks(
+    await deactivate_chunks_for_scope(
         collection_id=knowledge.id,
         collection_name=knowledge.id,
         file_id=form_data.file_id,
@@ -1247,7 +1276,7 @@ async def remove_file_from_knowledge_by_id(
             log.debug('This was most likely caused by bypassing embedding processing')
             log.debug(e)
             pass
-        await deactivate_active_chunks(
+        await deactivate_chunks_for_scope(
             collection_id=file_collection,
             collection_name=file_collection,
             file_id=form_data.file_id,
@@ -1327,7 +1356,7 @@ async def delete_knowledge_by_id(
     except Exception as e:
         log.debug(e)
         pass
-    await deactivate_active_chunks(collection_id=id, collection_name=id, db=db)
+    await deactivate_chunks_for_scope(collection_id=id, collection_name=id, db=db)
 
     # Remove knowledge base embedding
     await remove_knowledge_base_metadata_embedding(id)
@@ -1378,7 +1407,7 @@ async def reset_knowledge_by_id(
     except Exception as e:
         log.debug(e)
         pass
-    await deactivate_active_chunks(collection_id=id, collection_name=id, db=db)
+    await deactivate_chunks_for_scope(collection_id=id, collection_name=id, db=db)
 
     knowledge = await Knowledges.reset_knowledge_by_id(id=id, include_directories=include_directories, db=db)
     await mark_layers_for_knowledge_stale(id, db=db)
@@ -1536,7 +1565,7 @@ async def sync_knowledge_cleanup(
             continue
 
         await Knowledges.remove_file_from_knowledge_by_id(id, file_id, db=db)
-        await deactivate_active_chunks(
+        await deactivate_chunks_for_scope(
             collection_id=id,
             collection_name=id,
             file_id=file_id,
@@ -1555,7 +1584,7 @@ async def sync_knowledge_cleanup(
                 await ASYNC_VECTOR_DB_CLIENT.delete_collection(collection_name)
         except Exception:
             pass
-        await deactivate_active_chunks(
+        await deactivate_chunks_for_scope(
             collection_id=collection_name,
             collection_name=collection_name,
             file_id=file_id,

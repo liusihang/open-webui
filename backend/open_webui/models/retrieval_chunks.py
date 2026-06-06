@@ -117,15 +117,16 @@ async def fetch_active_chunks_by_chunk_uid(
     return [by_uid[chunk_uid] for chunk_uid in requested_order if chunk_uid in by_uid]
 
 
-async def deactivate_active_chunks(
+def _scope_conditions(
     *,
     collection_id: str | None = None,
     collection_name: str | None = None,
     file_id: str | None = None,
-    db: AsyncSession | None = None,
-    deleted_at: int | None = None,
-) -> int:
-    conditions = [RetrievalChunk.is_active.is_(True)]
+) -> list[Any]:
+    if not any((collection_id, collection_name, file_id)):
+        raise ValueError("retrieval chunk scope requires collection_id, collection_name, or file_id")
+
+    conditions: list[Any] = []
     collection_conditions = []
     if collection_id:
         collection_conditions.append(RetrievalChunk.collection_id == collection_id)
@@ -135,6 +136,83 @@ async def deactivate_active_chunks(
         conditions.append(or_(*collection_conditions))
     if file_id:
         conditions.append(RetrievalChunk.file_id == file_id)
+    return conditions
+
+
+async def fetch_chunk_uids_for_scope(
+    *,
+    collection_id: str | None = None,
+    collection_name: str | None = None,
+    file_id: str | None = None,
+    active_only: bool = True,
+    db: AsyncSession | None = None,
+) -> list[str]:
+    conditions = _scope_conditions(
+        collection_id=collection_id,
+        collection_name=collection_name,
+        file_id=file_id,
+    )
+    if active_only:
+        conditions.append(RetrievalChunk.is_active.is_(True))
+
+    async with get_async_db_context(db) as session:
+        result = await session.execute(
+            select(RetrievalChunk.chunk_uid)
+            .where(*conditions)
+            .order_by(RetrievalChunk.row_id.asc())
+        )
+        return list(dict.fromkeys(result.scalars().all()))
+
+
+async def fetch_all_active_chunk_uids_for_reset(
+    *,
+    db: AsyncSession | None = None,
+) -> list[str]:
+    async with get_async_db_context(db) as session:
+        result = await session.execute(
+            select(RetrievalChunk.chunk_uid)
+            .where(RetrievalChunk.is_active.is_(True))
+            .order_by(RetrievalChunk.row_id.asc())
+        )
+        return list(dict.fromkeys(result.scalars().all()))
+
+
+async def deactivate_all_active_chunks_for_reset(
+    *,
+    db: AsyncSession | None = None,
+    deleted_at: int | None = None,
+) -> int:
+    deleted_at = int(deleted_at or time.time())
+    async with get_async_db_context(db) as session:
+        result = await session.execute(
+            update(RetrievalChunk)
+            .where(RetrievalChunk.is_active.is_(True))
+            .values(
+                is_active=False,
+                deleted_at=deleted_at,
+                updated_at=deleted_at,
+            )
+        )
+        await session.commit()
+        return int(result.rowcount or 0)
+
+
+async def deactivate_active_chunks(
+    *,
+    collection_id: str | None = None,
+    collection_name: str | None = None,
+    file_id: str | None = None,
+    db: AsyncSession | None = None,
+    deleted_at: int | None = None,
+) -> int:
+    conditions = [
+        RetrievalChunk.is_active.is_(True),
+        *_scope_conditions(
+            collection_id=collection_id,
+            collection_name=collection_name,
+            file_id=file_id,
+        ),
+    ]
 
     deleted_at = int(deleted_at or time.time())
     async with get_async_db_context(db) as session:

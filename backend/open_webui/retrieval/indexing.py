@@ -1,18 +1,31 @@
 from __future__ import annotations
 
+import asyncio
 from collections import defaultdict
+from contextlib import asynccontextmanager
 from dataclasses import asdict, dataclass, field
 import time
+import uuid
 from typing import Any, Iterable, Protocol
 
+from open_webui.internal.db import get_async_db
 from open_webui.models.retrieval_chunks import (
     RetrievalChunk,
     compute_chunk_uid,
     compute_chunker_config_hash,
     compute_content_hash,
 )
+from open_webui.models.retrieval_indexes import (
+    RetrievalIndexJob,
+    RetrievalIndexJobs,
+    RetrievalIndexState,
+    RetrievalIndexStates,
+    compute_index_state_id,
+    compute_target_config_hash,
+)
 from open_webui.retrieval.lexical.opensearch import OpenSearchLexicalClient
-from sqlalchemy import or_
+from sqlalchemy import or_, select, update
+from sqlalchemy.ext.asyncio import AsyncSession
 
 
 @dataclass
@@ -38,6 +51,18 @@ class ReindexResult:
     chunk_uid_sample: list[str] = field(default_factory=list)
     chunk_uid_sample_truncated: bool = False
     unsupported: bool = False
+
+    def model_dump(self) -> dict[str, Any]:
+        return asdict(self)
+
+
+@dataclass
+class ManifestDeactivationResult:
+    deactivated: int = 0
+    lexical_delete_enqueued: int = 0
+    lexical_delete_executed: int = 0
+    chunk_uids: list[str] = field(default_factory=list)
+    delete_job_id: str | None = None
 
     def model_dump(self) -> dict[str, Any]:
         return asdict(self)
@@ -573,6 +598,395 @@ def get_retrieval_index_status() -> dict[str, Any]:
         lexical_client=OpenSearchLexicalClient(),
     )
     return service.get_status()
+
+
+async def get_retrieval_index_status_async() -> dict[str, Any]:
+    status = await asyncio.to_thread(get_retrieval_index_status)
+    try:
+        status["jobs"] = [
+            job.model_dump()
+            for job in await RetrievalIndexJobs.list_jobs(limit=20)
+        ]
+    except Exception as exc:
+        status["jobs"] = {"error": str(exc)}
+    try:
+        status["states"] = [
+            state.model_dump()
+            for state in await RetrievalIndexStates.list_states(limit=50)
+        ]
+    except Exception as exc:
+        status["states"] = {"error": str(exc)}
+    return status
+
+
+def lexical_target_config_hash(*, index_version: int) -> str:
+    return compute_target_config_hash(
+        {
+            "index_kind": "lexical",
+            "engine": "opensearch",
+            "index_prefix": "retrieval_lexical",
+            "alias": "retrieval_lexical_current",
+            "index_version": index_version,
+        }
+    )
+
+
+def lexical_current_alias_config_hash() -> str:
+    return compute_target_config_hash(
+        {
+            "index_kind": "lexical",
+            "engine": "opensearch",
+            "alias": "retrieval_lexical_current",
+            "target": "current_alias",
+        }
+    )
+
+
+async def enqueue_retrieval_index_job(
+    *,
+    index_kind: str,
+    collection_ids: list[str] | None = None,
+    index_version: int = 1,
+    promote_alias: bool = True,
+    batch_size: int = 500,
+    payload: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    target_config_hash = lexical_target_config_hash(index_version=index_version)
+    payload = {
+        "collection_ids": collection_ids,
+        "index_version": index_version,
+        "promote_alias": promote_alias,
+        "batch_size": batch_size,
+        **(payload or {}),
+    }
+    scope_id = collection_ids[0] if collection_ids and len(collection_ids) == 1 else None
+    job = await RetrievalIndexJobs.enqueue_job(
+        index_kind=index_kind,
+        collection_id=scope_id,
+        knowledge_id=scope_id,
+        collection_name=scope_id,
+        target_config_hash=target_config_hash,
+        payload=payload,
+    )
+    state = await RetrievalIndexStates.upsert_state(
+        index_kind="lexical" if index_kind in {"lexical", "full"} else index_kind,
+        status="pending",
+        collection_id=scope_id,
+        knowledge_id=scope_id,
+        collection_name=scope_id,
+        target_config_hash=target_config_hash,
+        last_job_id=job.job_id,
+    )
+    return {"job": job.model_dump(), "state": state.model_dump()}
+
+
+async def run_retrieval_index_job(job_id: str) -> dict[str, Any]:
+    job = await RetrievalIndexJobs.get_job_by_id(job_id)
+    if job is None:
+        raise ValueError(f"retrieval index job {job_id!r} not found")
+
+    await RetrievalIndexJobs.update_job_status(job_id, status="running")
+    try:
+        if job.index_kind in {"lexical", "full"}:
+            result = await asyncio.to_thread(
+                reindex_lexical_from_current_vector_store,
+                collection_ids=(job.payload or {}).get("collection_ids"),
+                index_version=int((job.payload or {}).get("index_version", 1)),
+                promote_alias=bool((job.payload or {}).get("promote_alias", True)),
+                batch_size=int((job.payload or {}).get("batch_size", 500)),
+            )
+            payload = (
+                {
+                    "embedding_reindexed": False,
+                    "lexical": result.model_dump(),
+                }
+                if job.index_kind == "full"
+                else result.model_dump()
+            )
+            final_status = "succeeded" if result.failed == 0 else "failed"
+            state_status = "ready" if result.failed == 0 else "failed"
+            await RetrievalIndexStates.upsert_state(
+                index_kind="lexical",
+                status=state_status,
+                collection_id=job.collection_id,
+                knowledge_id=job.knowledge_id,
+                collection_name=job.collection_name,
+                target_config_hash=job.target_config_hash,
+                active_chunk_count=result.manifest_upserted,
+                indexed_chunk_count=result.lexical_indexed,
+                last_job_id=job.job_id,
+                error=(result.failures[0]["error"] if result.failures else None),
+            )
+            updated = await RetrievalIndexJobs.update_job_status(
+                job_id,
+                status=final_status,
+                result=payload,
+                error=(result.failures[0]["error"] if result.failures else None),
+            )
+            return {"job": updated.model_dump() if updated else None, "result": payload}
+
+        if job.index_kind == "delete":
+            chunk_uids = list(dict.fromkeys((job.payload or {}).get("chunk_uids") or []))
+            deleted = await asyncio.to_thread(OpenSearchLexicalClient().delete_chunks, chunk_uids)
+            payload = {
+                "lexical_deleted": deleted,
+                "chunk_uid_count": len(chunk_uids),
+                "chunk_uids": chunk_uids[:50],
+                "chunk_uids_truncated": len(chunk_uids) > 50,
+            }
+            await RetrievalIndexStates.upsert_state(
+                index_kind="lexical",
+                status="deleted",
+                collection_id=job.collection_id,
+                knowledge_id=job.knowledge_id,
+                collection_name=job.collection_name,
+                file_id=job.file_id,
+                target_config_hash=job.target_config_hash,
+                indexed_chunk_count=deleted,
+                last_job_id=job.job_id,
+            )
+            updated = await RetrievalIndexJobs.update_job_status(job_id, status="succeeded", result=payload)
+            return {"job": updated.model_dump() if updated else None, "result": payload}
+
+        raise ValueError(f"retrieval index job kind {job.index_kind!r} is not executable yet")
+    except Exception as exc:
+        await RetrievalIndexJobs.update_job_status(job_id, status="failed", error=str(exc))
+        await RetrievalIndexStates.upsert_state(
+            index_kind="lexical" if job.index_kind in {"lexical", "full", "delete"} else job.index_kind,
+            status="failed",
+            collection_id=job.collection_id,
+            knowledge_id=job.knowledge_id,
+            collection_name=job.collection_name,
+            file_id=job.file_id,
+            target_config_hash=job.target_config_hash,
+            last_job_id=job.job_id,
+            error=str(exc),
+        )
+        raise
+
+
+@asynccontextmanager
+async def _atomic_async_session(db: Any | None):
+    if isinstance(db, AsyncSession):
+        yield db
+    else:
+        async with get_async_db() as session:
+            yield session
+
+
+def _chunk_scope_conditions(
+    *,
+    collection_id: str | None = None,
+    collection_name: str | None = None,
+    file_id: str | None = None,
+) -> list[Any]:
+    if not any((collection_id, collection_name, file_id)):
+        raise ValueError("retrieval chunk scope requires collection_id, collection_name, or file_id")
+
+    conditions: list[Any] = []
+    collection_conditions = []
+    if collection_id:
+        collection_conditions.append(RetrievalChunk.collection_id == collection_id)
+    if collection_name:
+        collection_conditions.append(RetrievalChunk.collection_name == collection_name)
+    if collection_conditions:
+        conditions.append(or_(*collection_conditions))
+    if file_id:
+        conditions.append(RetrievalChunk.file_id == file_id)
+    return conditions
+
+
+async def _current_lexical_target_config_hash(session: AsyncSession) -> str:
+    result = await session.execute(
+        select(RetrievalIndexState.target_config_hash)
+        .where(
+            RetrievalIndexState.index_kind == "lexical",
+            RetrievalIndexState.status == "ready",
+            RetrievalIndexState.target_config_hash.isnot(None),
+        )
+        .order_by(RetrievalIndexState.updated_at.desc())
+        .limit(1)
+    )
+    target_config_hash = result.scalars().first()
+    return target_config_hash or lexical_current_alias_config_hash()
+
+
+async def _upsert_delete_state_in_session(
+    session: AsyncSession,
+    *,
+    collection_id: str | None,
+    collection_name: str | None,
+    file_id: str | None,
+    target_config_hash: str,
+    active_chunk_count: int,
+    indexed_chunk_count: int,
+    last_job_id: str,
+) -> None:
+    state_id = compute_index_state_id(
+        index_kind="lexical",
+        collection_id=collection_id,
+        knowledge_id=collection_id,
+        collection_name=collection_name,
+        file_id=file_id,
+        target_config_hash=target_config_hash,
+    )
+    result = await session.execute(select(RetrievalIndexState).filter_by(state_id=state_id))
+    row = result.scalars().first()
+    now = int(time.time())
+    if row is None:
+        row = RetrievalIndexState(
+            state_id=state_id,
+            index_kind="lexical",
+            collection_id=collection_id,
+            knowledge_id=collection_id,
+            collection_name=collection_name,
+            file_id=file_id,
+            target_config_hash=target_config_hash,
+            created_at=now,
+        )
+        session.add(row)
+
+    row.status = "stale"
+    row.active_chunk_count = active_chunk_count
+    row.indexed_chunk_count = indexed_chunk_count
+    row.last_job_id = last_job_id
+    row.error = None
+    row.updated_at = now
+
+
+async def _deactivate_and_enqueue_delete_job(
+    *,
+    collection_id: str | None = None,
+    collection_name: str | None = None,
+    file_id: str | None = None,
+    all_chunks: bool = False,
+    db: Any | None = None,
+    enqueue_lexical_delete: bool = True,
+) -> ManifestDeactivationResult:
+    now = int(time.time())
+    async with _atomic_async_session(db) as session:
+        try:
+            conditions = [RetrievalChunk.is_active.is_(True)]
+            if not all_chunks:
+                conditions.extend(
+                    _chunk_scope_conditions(
+                        collection_id=collection_id,
+                        collection_name=collection_name,
+                        file_id=file_id,
+                    )
+                )
+
+            chunk_result = await session.execute(
+                select(RetrievalChunk.chunk_uid)
+                .where(*conditions)
+                .order_by(RetrievalChunk.row_id.asc())
+            )
+            chunk_uids = list(dict.fromkeys(chunk_result.scalars().all()))
+
+            update_result = await session.execute(
+                update(RetrievalChunk)
+                .where(*conditions)
+                .values(
+                    is_active=False,
+                    deleted_at=now,
+                    updated_at=now,
+                )
+            )
+            deactivated = int(update_result.rowcount or 0)
+
+            delete_job_id = None
+            lexical_delete_enqueued = 0
+            if enqueue_lexical_delete and chunk_uids:
+                target_config_hash = await _current_lexical_target_config_hash(session)
+                delete_job_id = str(uuid.uuid4())
+                job_payload = {"chunk_uids": chunk_uids}
+                if all_chunks:
+                    job_payload["scope"] = "all"
+                session.add(
+                    RetrievalIndexJob(
+                        job_id=delete_job_id,
+                        index_kind="delete",
+                        collection_id=collection_id,
+                        knowledge_id=collection_id,
+                        collection_name=collection_name,
+                        file_id=file_id,
+                        target_config_hash=target_config_hash,
+                        status="pending",
+                        payload=job_payload,
+                        result=None,
+                        error=None,
+                        retry_count=0,
+                        max_retries=3,
+                        created_at=now,
+                        updated_at=now,
+                    )
+                )
+                lexical_delete_enqueued = len(chunk_uids)
+                await _upsert_delete_state_in_session(
+                    session,
+                    collection_id=collection_id,
+                    collection_name=collection_name,
+                    file_id=file_id,
+                    target_config_hash=target_config_hash,
+                    active_chunk_count=max(0, len(chunk_uids) - deactivated),
+                    indexed_chunk_count=len(chunk_uids),
+                    last_job_id=delete_job_id,
+                )
+
+            await session.commit()
+        except Exception:
+            await session.rollback()
+            raise
+
+    return ManifestDeactivationResult(
+        deactivated=deactivated,
+        lexical_delete_enqueued=lexical_delete_enqueued,
+        chunk_uids=chunk_uids,
+        delete_job_id=delete_job_id,
+    )
+
+
+async def deactivate_chunks_for_scope(
+    *,
+    collection_id: str | None = None,
+    collection_name: str | None = None,
+    file_id: str | None = None,
+    db: Any | None = None,
+    enqueue_lexical_delete: bool = True,
+    run_lexical_delete: bool = True,
+) -> ManifestDeactivationResult:
+    result = await _deactivate_and_enqueue_delete_job(
+        collection_id=collection_id,
+        collection_name=collection_name,
+        file_id=file_id,
+        db=db,
+        enqueue_lexical_delete=enqueue_lexical_delete,
+    )
+    if run_lexical_delete and result.delete_job_id:
+        delete_execution = await run_retrieval_index_job(result.delete_job_id)
+        result.lexical_delete_executed = int(
+            (delete_execution.get("result") or {}).get("lexical_deleted") or 0
+        )
+    return result
+
+
+async def deactivate_all_chunks_for_reset(
+    *,
+    db: Any | None = None,
+    enqueue_lexical_delete: bool = True,
+    run_lexical_delete: bool = True,
+) -> ManifestDeactivationResult:
+    result = await _deactivate_and_enqueue_delete_job(
+        all_chunks=True,
+        db=db,
+        enqueue_lexical_delete=enqueue_lexical_delete,
+    )
+    if run_lexical_delete and result.delete_job_id:
+        delete_execution = await run_retrieval_index_job(result.delete_job_id)
+        result.lexical_delete_executed = int(
+            (delete_execution.get("result") or {}).get("lexical_deleted") or 0
+        )
+    return result
 
 
 def build_default_indexing_service() -> RetrievalIndexingService:

@@ -79,7 +79,7 @@ async def test_remove_file_from_knowledge_cleans_layer_vectors(monkeypatch):
     monkeypatch.setattr(knowledge_mod.ASYNC_VECTOR_DB_CLIENT, "delete", fake_delete, raising=False)
     monkeypatch.setattr(knowledge_mod.ASYNC_VECTOR_DB_CLIENT, "has_collection", fake_has_collection, raising=False)
     monkeypatch.setattr(knowledge_mod.Knowledges, "get_file_metadatas_by_id", fake_get_file_metadatas, raising=False)
-    monkeypatch.setattr(knowledge_mod, "deactivate_active_chunks", fake_deactivate_active_chunks, raising=False)
+    monkeypatch.setattr(knowledge_mod, "deactivate_chunks_for_scope", fake_deactivate_active_chunks, raising=False)
 
     response = await knowledge_mod.remove_file_from_knowledge_by_id(
         id="kb-1",
@@ -142,7 +142,7 @@ async def test_delete_knowledge_cleans_layer_vectors(monkeypatch):
     monkeypatch.setattr(knowledge_mod.KnowledgeLayers, "delete_layers_by_knowledge", fake_delete_layers, raising=False)
     monkeypatch.setattr(knowledge_mod.ASYNC_VECTOR_DB_CLIENT, "delete_collection", fake_delete_collection, raising=False)
     monkeypatch.setattr(knowledge_mod.Knowledges, "delete_knowledge_by_id", fake_delete_knowledge, raising=False)
-    monkeypatch.setattr(knowledge_mod, "deactivate_active_chunks", fake_deactivate_active_chunks, raising=False)
+    monkeypatch.setattr(knowledge_mod, "deactivate_chunks_for_scope", fake_deactivate_active_chunks, raising=False)
 
     result = await knowledge_mod.delete_knowledge_by_id(
         id="kb-1",
