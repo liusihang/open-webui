@@ -326,8 +326,14 @@ export const buildCitationTargets = (
 	const seenIds = new Set<string>();
 
 	for (const number of numbers) {
+		const directCitation = citations[number - 1];
 		const evidenceRef = getCitationMapEvidenceRef(citationMap, number);
-		const citation = evidenceRef ? citationsById.get(evidenceRef) : undefined;
+		const mappedCitation = evidenceRef ? citationsById.get(evidenceRef) : undefined;
+		const citation =
+			directCitation && (!mappedCitation || directCitation.id !== mappedCitation.id)
+				? directCitation
+				: mappedCitation ?? directCitation;
+
 		if (!citation || seenIds.has(citation.id)) {
 			continue;
 		}
