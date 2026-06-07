@@ -28,8 +28,6 @@ VECTOR_ROLES = (
 )
 EMBEDDING_FORMATS = ("single_dense", "multi_vector", "sparse")
 EMBEDDING_STATUSES = ("pending", "indexing", "ready", "failed", "stale")
-KNOWLEDGE_EVIDENCE_MODES = ("legacy_text", "evidence_dual_write", "evidence_primary")
-DEFAULT_KNOWLEDGE_EVIDENCE_MODE = "legacy_text"
 
 
 def _canonical_json(value: Any) -> str:
@@ -50,38 +48,6 @@ def _stable_uuid(prefix: str, payload: dict[str, Any]) -> str:
 
 def _suffix(payload: dict[str, Any], length: int = 12) -> str:
     return _stable_digest("suffix", payload)[:length]
-
-
-def normalize_knowledge_evidence_mode(mode: str | None) -> str:
-    normalized = (mode or DEFAULT_KNOWLEDGE_EVIDENCE_MODE).strip().lower()
-    if normalized not in KNOWLEDGE_EVIDENCE_MODES:
-        raise ValueError(f"Unsupported knowledge evidence mode: {mode}")
-    return normalized
-
-
-def set_knowledge_meta_evidence_mode(meta: dict | None, mode: str) -> dict:
-    updated_meta = dict(meta or {})
-    updated_meta["evidence_mode"] = normalize_knowledge_evidence_mode(mode)
-    return updated_meta
-
-
-def get_knowledge_evidence_mode(knowledge: Any | None) -> str:
-    if knowledge is None:
-        return DEFAULT_KNOWLEDGE_EVIDENCE_MODE
-
-    meta: Any = None
-    if isinstance(knowledge, dict):
-        meta = knowledge.get("meta")
-    else:
-        meta = getattr(knowledge, "meta", None)
-
-    if not isinstance(meta, dict):
-        return DEFAULT_KNOWLEDGE_EVIDENCE_MODE
-
-    try:
-        return normalize_knowledge_evidence_mode(meta.get("evidence_mode"))
-    except ValueError:
-        return DEFAULT_KNOWLEDGE_EVIDENCE_MODE
 
 
 def compute_knowledge_evidence_asset_ref(
