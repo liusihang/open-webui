@@ -1281,6 +1281,12 @@ BYPASS_EMBEDDING_AND_RETRIEVAL = ConfigVar(
     os.getenv('BYPASS_EMBEDDING_AND_RETRIEVAL', 'False').lower() == 'true',
 )
 
+ENABLE_MULTIMODAL_KNOWLEDGE_EVIDENCE = ConfigVar(
+    'ENABLE_MULTIMODAL_KNOWLEDGE_EVIDENCE',
+    'rag.enable_multimodal_knowledge_evidence',
+    os.getenv('ENABLE_MULTIMODAL_KNOWLEDGE_EVIDENCE', 'False').lower() == 'true',
+)
+
 NATIVE_ATTACHED_KNOWLEDGE_BYPASS_LEGACY_FILE_RETRIEVAL = ConfigVar(
     'NATIVE_ATTACHED_KNOWLEDGE_BYPASS_LEGACY_FILE_RETRIEVAL',
     'layered_knowledge.native_attached_knowledge_bypass_legacy_file_retrieval',
