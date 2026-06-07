@@ -373,7 +373,7 @@ def get_citation_source_from_tool_result(
     Returns a list of sources (usually one, but query_knowledge_files may return multiple).
     """
     _EXPECTS_LIST = {'search_web', 'query_knowledge_files'}
-    _EXPECTS_DICT = {'view_knowledge_file', 'view_file'}
+    _EXPECTS_DICT = {'view_knowledge_file', 'view_file', 'query_knowledge_evidence'}
 
     try:
         try:
@@ -505,6 +505,35 @@ def get_citation_source_from_tool_result(
 
             # Empty result fallback
             return []
+
+        elif tool_name == 'query_knowledge_evidence':
+            if not tool_result.get('ok', False):
+                return []
+
+            sources = []
+            for result in tool_result.get('results') or []:
+                if not isinstance(result, dict):
+                    continue
+                source = result.get('source') or {}
+                metadata = result.get('metadata') or {}
+                content = result.get('content') or result.get('preview_text') or ''
+                evidence_ref = result.get('evidence_ref') or metadata.get('evidence_ref') or source.get('evidence_ref')
+                if not evidence_ref:
+                    continue
+                sources.append(
+                    {
+                        'source': source
+                        or {
+                            'id': evidence_ref,
+                            'name': metadata.get('source') or metadata.get('name') or evidence_ref,
+                            'type': 'evidence',
+                            'evidence_ref': evidence_ref,
+                        },
+                        'document': [content],
+                        'metadata': [metadata],
+                    }
+                )
+            return sources
 
         else:
             # Fallback for other tools
@@ -1320,6 +1349,42 @@ async def process_tool_result(
                         }
 
     tool_result_files = []
+
+    if tool_function_name == 'query_knowledge_evidence' and isinstance(tool_result, str):
+        try:
+            parsed_tool_result = json.loads(tool_result)
+        except (json.JSONDecodeError, TypeError):
+            parsed_tool_result = None
+        if isinstance(parsed_tool_result, dict):
+            compact_files = []
+            for file_item in parsed_tool_result.get('model_only_files') or []:
+                if not isinstance(file_item, dict):
+                    continue
+                data_url = file_item.get('url') or file_item.get('data_url')
+                if file_item.get('type') == 'image' and isinstance(data_url, str) and data_url.startswith('data:'):
+                    tool_result_files.append(
+                        {
+                            'type': 'image',
+                            'url': data_url,
+                            **(
+                                {'evidence_ref': file_item.get('evidence_ref')}
+                                if file_item.get('evidence_ref')
+                                else {}
+                            ),
+                            **({'mime_type': file_item.get('mime_type')} if file_item.get('mime_type') else {}),
+                        }
+                    )
+                    compact_files.append(
+                        {
+                            key: value
+                            for key, value in file_item.items()
+                            if key not in {'url', 'data_url'} and value is not None
+                        }
+                    )
+                else:
+                    compact_files.append(file_item)
+            parsed_tool_result['model_only_files'] = compact_files
+            tool_result = parsed_tool_result
 
     # Detect base64 image data URIs from tool results (e.g. binary image
     # responses from execute_tool_server).  Move the data URI to
@@ -5110,6 +5175,7 @@ async def streaming_chat_response_handler(response, ctx):
                                 'view_file',
                                 'view_knowledge_file',
                                 'query_knowledge_files',
+                                'query_knowledge_evidence',
                             ]
                             and tool_result
                         ):

@@ -29,6 +29,7 @@ from open_webui.retrieval.evidence import (
     build_query_knowledge_evidence_response,
     collect_allowlisted_query_image_refs,
     normalize_query_knowledge_evidence_args,
+    query_knowledge_evidence_runtime,
     resolve_query_image_refs,
 )
 from open_webui.retrieval.utils import get_content_from_url, get_sources_from_items
@@ -2877,8 +2878,9 @@ async def query_knowledge_evidence(
     """
     Query typed knowledge evidence by evidence refs, text, image refs, or both.
 
-    This is the contract/safety skeleton for multimodal evidence retrieval.
-    The actual retrieval/embedding worker is not wired in this thread yet.
+    The actual vector search implementation is injected through the request
+    app-state evidence retrieval adapter; SQL truth rows are always hydrated
+    from knowledge_evidence tables before returning source metadata.
     """
     normalized = normalize_query_knowledge_evidence_args(
         evidence_refs=evidence_refs,
@@ -2907,32 +2909,12 @@ async def query_knowledge_evidence(
             acl_resolver=acl_resolver,
         )
 
-        if normalized.evidence_refs:
-            return build_query_knowledge_evidence_response(
-                query=normalized,
-                error=EvidenceToolError(
-                    'evidence_not_found',
-                    'Evidence hydration is not wired yet',
-                    details={'evidence_refs': normalized.evidence_refs},
-                ),
-            )
-
-        if normalized.query_image_refs:
-            return build_query_knowledge_evidence_response(
-                query=normalized,
-                error=EvidenceToolError(
-                    'unsupported_image_query',
-                    'query_image_refs are accepted by the contract, but image query retrieval is not wired yet',
-                    details={'query_image_refs': normalized.query_image_refs},
-                ),
-            )
-
-        return build_query_knowledge_evidence_response(
+        effective_scope = _resolve_effective_scope(__metadata__, __model_knowledge__)
+        return await query_knowledge_evidence_runtime(
             query=normalized,
-            error=EvidenceToolError(
-                'vector_space_unavailable',
-                'Evidence retrieval vector space is not wired yet',
-            ),
+            request=__request__,
+            user=__user__,
+            effective_scope=effective_scope,
         )
     except EvidenceToolError as e:
         return build_query_knowledge_evidence_response(query=normalized, error=e)

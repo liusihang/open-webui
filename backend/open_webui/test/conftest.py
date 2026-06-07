@@ -4,6 +4,7 @@ import tempfile
 
 os.environ.setdefault("WEBUI_SECRET_KEY", "test-secret")
 os.environ.setdefault("ENABLE_DB_MIGRATIONS", "false")
+os.environ.setdefault("DATABASE_ENABLE_SESSION_SHARING", "true")
 
 _db_file = tempfile.NamedTemporaryFile(suffix=".db", delete=False)
 _db_file.close()

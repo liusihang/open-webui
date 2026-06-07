@@ -1,9 +1,25 @@
 from __future__ import annotations
 
+import asyncio
+import base64
 import json
-from dataclasses import dataclass, field
 from collections.abc import Callable, Iterable, Mapping, Sequence
+from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any
+from urllib.parse import quote
+
+from fastapi import Request
+
+from open_webui.models.evidence import (
+    KnowledgeEvidenceAssets,
+    KnowledgeEvidenceModel,
+    KnowledgeEvidences,
+    KnowledgeVectorSpaceModel,
+    KnowledgeVectorSpaces,
+)
+from open_webui.retrieval.vector.multimodal import MultimodalVectorSpaceError, resolve_multimodal_vector_space
+from open_webui.storage.provider import Storage
 
 
 EVIDENCE_TOOL_ERROR_CODES = frozenset(
@@ -18,6 +34,7 @@ EVIDENCE_TOOL_ERROR_CODES = frozenset(
 
 _DEFAULT_TOP_K = 8
 _DEFAULT_IMAGE_QUERY_BUDGET = 4
+_DEFAULT_MODEL_IMAGE_BUDGET = 4
 _EVIDENCE_MODE_VALUES = {'evidence', 'evidence_dual_write', 'evidence_primary'}
 _TRUTHY = {'1', 'true', 'yes', 'on'}
 _FALSEY = {'0', 'false', 'no', 'off', ''}
@@ -356,3 +373,258 @@ def build_query_knowledge_evidence_response(
             **({'details': error.details} if error.details else {}),
         }
     return json.dumps(payload, ensure_ascii=False, separators=(',', ':'))
+
+
+def derive_knowledge_ids_from_scope(scope_items: Iterable[Mapping[str, Any]] | None) -> list[str]:
+    knowledge_ids: list[str] = []
+    for item in scope_items or []:
+        if not isinstance(item, Mapping):
+            continue
+        item_type = str(item.get('type') or '').strip().lower()
+        item_id = str(item.get('id') or '').strip()
+        if item_id and item_type in {'collection', 'knowledge'}:
+            knowledge_ids.append(item_id)
+    return _dedupe_preserve_order(knowledge_ids)
+
+
+def _safe_evidence_url_part(evidence_ref: str) -> str:
+    return quote(evidence_ref, safe='')
+
+
+def _build_evidence_source(evidence: KnowledgeEvidenceModel) -> dict[str, Any]:
+    ref_path = _safe_evidence_url_part(evidence.evidence_ref)
+    source: dict[str, Any] = {
+        'id': evidence.evidence_ref,
+        'name': evidence.source_name,
+        'type': 'evidence',
+        'file_id': evidence.file_id,
+        'knowledge_id': evidence.knowledge_id,
+        'evidence_ref': evidence.evidence_ref,
+        'modality': evidence.modality,
+        'evidence_kind': evidence.evidence_kind,
+        'content_url': f'/api/v1/knowledge/{evidence.knowledge_id}/evidence/{ref_path}/content',
+    }
+    if evidence.modality == 'image':
+        source['preview_url'] = f'/api/v1/knowledge/{evidence.knowledge_id}/evidence/{ref_path}/thumbnail'
+    if evidence.page_index is not None:
+        source['page_index'] = evidence.page_index
+    if evidence.title:
+        source['title'] = evidence.title
+    return source
+
+
+def _build_evidence_metadata(evidence: KnowledgeEvidenceModel, *, score: float | int | None = None) -> dict[str, Any]:
+    metadata: dict[str, Any] = {
+        'source': evidence.source_name,
+        'name': evidence.source_name,
+        'file_id': evidence.file_id,
+        'knowledge_id': evidence.knowledge_id,
+        'evidence_ref': evidence.evidence_ref,
+        'modality': evidence.modality,
+        'evidence_kind': evidence.evidence_kind,
+        'content_hash': evidence.content_hash,
+        'projection_profile': evidence.projection_profile,
+        'projection_config_hash': evidence.projection_config_hash,
+        'chunk_index': evidence.chunk_index,
+        'chunk_total': evidence.chunk_total,
+    }
+    if evidence.retrieval_chunk_uid:
+        metadata['retrieval_chunk_uid'] = evidence.retrieval_chunk_uid
+    if evidence.retrieval_chunk_row_id is not None:
+        metadata['retrieval_chunk_row_id'] = evidence.retrieval_chunk_row_id
+    if evidence.page_index is not None:
+        metadata['page_index'] = evidence.page_index
+    if evidence.anchor_json:
+        metadata['anchor'] = evidence.anchor_json
+    if score is not None:
+        metadata['score'] = score
+    return metadata
+
+
+def _compact_evidence_content(evidence: KnowledgeEvidenceModel) -> str:
+    for candidate in (evidence.content_text, evidence.preview_text, evidence.title, evidence.source_name):
+        if candidate and str(candidate).strip():
+            return str(candidate).strip()
+    return ''
+
+
+def _serialize_evidence_result(
+    evidence: KnowledgeEvidenceModel,
+    *,
+    score: float | int | None = None,
+) -> dict[str, Any]:
+    result = {
+        'evidence_ref': evidence.evidence_ref,
+        'modality': evidence.modality,
+        'evidence_kind': evidence.evidence_kind,
+        'title': evidence.title,
+        'content': _compact_evidence_content(evidence),
+        'preview_text': evidence.preview_text,
+        'source': _build_evidence_source(evidence),
+        'metadata': _build_evidence_metadata(evidence, score=score),
+    }
+    if score is not None:
+        result['score'] = score
+    return result
+
+
+async def _read_model_image_data_url(evidence: KnowledgeEvidenceModel) -> dict[str, Any] | None:
+    if evidence.modality != 'image' or not evidence.asset_id:
+        return None
+
+    asset = await KnowledgeEvidenceAssets.get_asset_by_id(evidence.asset_id)
+    if asset is None or asset.status != 'ready':
+        return None
+    if not str(asset.mime_type or '').lower().startswith('image/'):
+        return None
+
+    file_path = await asyncio.to_thread(Storage.get_file, asset.storage_uri)
+    data = await asyncio.to_thread(Path(file_path).read_bytes)
+    data_url = f'{asset.mime_type};base64,{base64.b64encode(data).decode("ascii")}'
+    return {
+        'type': 'image',
+        'evidence_ref': evidence.evidence_ref,
+        'file_id': evidence.file_id,
+        'knowledge_id': evidence.knowledge_id,
+        'mime_type': asset.mime_type,
+        'width': asset.width,
+        'height': asset.height,
+        'url': f'data:{data_url}',
+    }
+
+
+async def _hydrate_evidence_results(
+    search_hits: Sequence[str | Mapping[str, Any]],
+    *,
+    allowed_knowledge_ids: set[str],
+    include_images: bool,
+    model_image_budget: int = _DEFAULT_MODEL_IMAGE_BUDGET,
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]], list[str]]:
+    results: list[dict[str, Any]] = []
+    model_only_files: list[dict[str, Any]] = []
+    missing_refs: list[str] = []
+    seen_refs: set[str] = set()
+
+    for hit in search_hits:
+        if isinstance(hit, str):
+            evidence_ref = hit
+            score = None
+        elif isinstance(hit, Mapping):
+            evidence_ref = str(hit.get('evidence_ref') or '').strip()
+            score = hit.get('score', hit.get('distance'))
+        else:
+            continue
+        if not evidence_ref or evidence_ref in seen_refs:
+            continue
+        seen_refs.add(evidence_ref)
+
+        evidence = await KnowledgeEvidences.get_evidence_by_ref(evidence_ref)
+        if evidence is None or not evidence.is_active:
+            missing_refs.append(evidence_ref)
+            continue
+        if allowed_knowledge_ids and evidence.knowledge_id not in allowed_knowledge_ids:
+            missing_refs.append(evidence_ref)
+            continue
+
+        results.append(_serialize_evidence_result(evidence, score=score))
+        if include_images and len(model_only_files) < model_image_budget:
+            image_file = await _read_model_image_data_url(evidence)
+            if image_file is not None:
+                model_only_files.append(image_file)
+
+    return results, model_only_files, missing_refs
+
+
+async def _resolve_query_vector_spaces(
+    query: NormalizedQueryKnowledgeEvidence,
+    *,
+    knowledge_ids: list[str],
+) -> list[KnowledgeVectorSpaceModel]:
+    if not knowledge_ids:
+        raise EvidenceToolError(
+            'vector_space_unavailable',
+            'Evidence retrieval requires a scoped knowledge base',
+        )
+
+    query_modality = 'image' if query.query_image_refs else 'text'
+    vector_spaces: list[KnowledgeVectorSpaceModel] = []
+    for knowledge_id in knowledge_ids:
+        try:
+            selection = await resolve_multimodal_vector_space(
+                knowledge_id=knowledge_id,
+                query_modality=query_modality,
+            )
+        except MultimodalVectorSpaceError as e:
+            code = 'unsupported_image_query' if e.code == 'unsupported_image_query' else 'vector_space_unavailable'
+            raise EvidenceToolError(code, e.message, details=e.details) from e
+        vector_spaces.append(selection.vector_space)
+    return vector_spaces
+
+
+async def query_knowledge_evidence_runtime(
+    *,
+    query: NormalizedQueryKnowledgeEvidence,
+    request: Request | None = None,
+    user: Mapping[str, Any] | None = None,
+    effective_scope: Sequence[Mapping[str, Any]] | None = None,
+) -> str:
+    scoped_knowledge_ids = query.knowledge_ids or derive_knowledge_ids_from_scope(effective_scope)
+    allowed_knowledge_ids = set(scoped_knowledge_ids)
+
+    if query.evidence_refs:
+        results, model_only_files, missing_refs = await _hydrate_evidence_results(
+            query.evidence_refs,
+            allowed_knowledge_ids=allowed_knowledge_ids,
+            include_images=query.include_images,
+        )
+        if missing_refs and not results:
+            return build_query_knowledge_evidence_response(
+                query=query,
+                error=EvidenceToolError(
+                    'evidence_not_found',
+                    'No matching active evidence rows were found',
+                    details={'evidence_refs': missing_refs},
+                ),
+            )
+        return build_query_knowledge_evidence_response(
+            query=query,
+            results=results,
+            model_only_files=model_only_files,
+        )
+
+    if not query.query_text and not query.query_image_refs:
+        return build_query_knowledge_evidence_response(
+            query=query,
+            error=EvidenceToolError(
+                'vector_space_unavailable',
+                'query_knowledge_evidence requires evidence_refs, query_text, or query_image_refs',
+            ),
+        )
+
+    search_adapter = getattr(getattr(getattr(request, 'app', None), 'state', None), 'EVIDENCE_RETRIEVAL_SEARCH', None)
+    if not callable(search_adapter):
+        return build_query_knowledge_evidence_response(
+            query=query,
+            error=EvidenceToolError(
+                'vector_space_unavailable',
+                'Evidence retrieval search adapter is not configured',
+            ),
+        )
+
+    vector_spaces = await _resolve_query_vector_spaces(query, knowledge_ids=scoped_knowledge_ids)
+    hits = await search_adapter(
+        query=query,
+        vector_spaces=vector_spaces,
+        user=user,
+        request=request,
+    )
+    results, model_only_files, _ = await _hydrate_evidence_results(
+        hits or [],
+        allowed_knowledge_ids=allowed_knowledge_ids,
+        include_images=query.include_images,
+    )
+    return build_query_knowledge_evidence_response(
+        query=query,
+        results=results[: query.top_k],
+        model_only_files=model_only_files,
+    )

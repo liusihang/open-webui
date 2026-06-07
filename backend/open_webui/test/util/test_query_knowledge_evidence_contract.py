@@ -9,6 +9,7 @@ from open_webui.retrieval.evidence import (
     normalize_query_knowledge_evidence_args,
     resolve_query_image_refs,
 )
+from open_webui.retrieval import evidence as evidence_mod
 from open_webui.tools.builtin import query_knowledge_evidence
 from open_webui.utils.tools import get_builtin_tools
 
@@ -82,7 +83,12 @@ def test_resolve_query_image_refs_rejects_non_allowlisted_refs(query_image_ref: 
 
 
 @pytest.mark.asyncio
-async def test_query_knowledge_evidence_returns_compact_evidence_not_found_payload_for_exact_refs() -> None:
+async def test_query_knowledge_evidence_returns_compact_evidence_not_found_payload_for_exact_refs(monkeypatch) -> None:
+    async def fake_get_evidence_by_ref(ref, db=None):
+        return None
+
+    monkeypatch.setattr(evidence_mod.KnowledgeEvidences, "get_evidence_by_ref", fake_get_evidence_by_ref)
+
     result = await query_knowledge_evidence(
         evidence_refs=['ke:missing'],
         __request__=_FakeRequest(),
@@ -139,7 +145,7 @@ async def test_query_knowledge_evidence_returns_unsupported_image_query_for_allo
     payload = json.loads(result)
 
     assert payload['ok'] is False
-    assert payload['error']['code'] == 'unsupported_image_query'
+    assert payload['error']['code'] == 'vector_space_unavailable'
     assert payload['query']['query_image_refs'] == ['chat:file:abc']
 
 
