@@ -205,12 +205,16 @@ async def test_get_knowledge_evidence_thumbnail_rejects_svg_assets(monkeypatch):
     async def fake_get_asset_by_id(*args, **kwargs):
         return _fake_image_asset(mime_type="image/svg+xml")
 
+    async def fake_list_variants(*args, **kwargs):
+        return []
+
     async def fake_has_access(*args, **kwargs):
         return True
 
     monkeypatch.setattr(knowledge_mod.Knowledges, "get_knowledge_by_id", fake_get_knowledge_by_id, raising=False)
     monkeypatch.setattr(knowledge_mod.KnowledgeEvidences, "get_evidence_by_ref", fake_get_evidence_by_ref, raising=False)
     monkeypatch.setattr(knowledge_mod.KnowledgeEvidenceAssets, "get_asset_by_id", fake_get_asset_by_id, raising=False)
+    monkeypatch.setattr(knowledge_mod.KnowledgeEvidenceAssetVariants, "list_variants", fake_list_variants, raising=False)
     monkeypatch.setattr(knowledge_mod.AccessGrants, "has_access", fake_has_access, raising=False)
 
     with pytest.raises(knowledge_mod.HTTPException) as exc:
@@ -267,12 +271,16 @@ async def test_get_knowledge_evidence_content_streams_image_bytes(monkeypatch):
     async def fake_get_asset_by_id(*args, **kwargs):
         return _fake_image_asset(storage_uri=tmp_file.name)
 
+    async def fake_list_variants(*args, **kwargs):
+        return []
+
     async def fake_has_access(*args, **kwargs):
         return True
 
     monkeypatch.setattr(knowledge_mod.Knowledges, "get_knowledge_by_id", fake_get_knowledge_by_id, raising=False)
     monkeypatch.setattr(knowledge_mod.KnowledgeEvidences, "get_evidence_by_ref", fake_get_evidence_by_ref, raising=False)
     monkeypatch.setattr(knowledge_mod.KnowledgeEvidenceAssets, "get_asset_by_id", fake_get_asset_by_id, raising=False)
+    monkeypatch.setattr(knowledge_mod.KnowledgeEvidenceAssetVariants, "list_variants", fake_list_variants, raising=False)
     monkeypatch.setattr(knowledge_mod.AccessGrants, "has_access", fake_has_access, raising=False)
     monkeypatch.setattr(knowledge_mod.Storage, "get_file", lambda path: path, raising=False)
 

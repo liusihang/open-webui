@@ -567,16 +567,13 @@ async def _resolve_evidence_asset(
 
     variant = None
     if prefer_thumbnail:
-        try:
-            variants = await KnowledgeEvidenceAssetVariants.list_variants(
-                asset_id=asset.id,
-                variant_kind='thumbnail',
-                limit=1,
-                db=db,
-            )
-            variant = variants[0] if variants else None
-        except Exception:
-            variant = None
+        variants = await KnowledgeEvidenceAssetVariants.list_variants(
+            asset_id=asset.id,
+            variant_kind='thumbnail',
+            limit=1,
+            db=db,
+        )
+        variant = variants[0] if variants else None
 
     return asset, variant
 
