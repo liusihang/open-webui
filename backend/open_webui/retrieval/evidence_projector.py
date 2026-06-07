@@ -99,58 +99,58 @@ async def backfill_text_evidence_from_active_chunks(
         stmt = stmt.order_by(RetrievalChunk.row_id.asc())
         rows = (await session.execute(stmt)).scalars().all()
 
-    result.scanned_chunks = len(rows)
-    for row in rows:
-        metadata = _as_dict(getattr(row, "metadata_", None))
-        knowledge_id = row.knowledge_id or row.collection_id or row.collection_name
-        file_id = row.file_id
-        if not knowledge_id or not file_id:
-            result.failed += 1
-            result.failures.append(
-                {
-                    "stage": "text_backfill",
-                    "error": "retrieval_chunk is missing knowledge_id or file_id",
-                    "chunk_uid": row.chunk_uid,
-                }
-            )
-            continue
+        result.scanned_chunks = len(rows)
+        for row in rows:
+            metadata = _as_dict(getattr(row, "metadata_", None))
+            knowledge_id = row.knowledge_id or row.collection_id or row.collection_name
+            file_id = row.file_id
+            if not knowledge_id or not file_id:
+                result.failed += 1
+                result.failures.append(
+                    {
+                        "stage": "text_backfill",
+                        "error": "retrieval_chunk is missing knowledge_id or file_id",
+                        "chunk_uid": row.chunk_uid,
+                    }
+                )
+                continue
 
-        try:
-            evidence = await _upsert_evidence(
-                session,
-                knowledge_id=knowledge_id,
-                file_id=file_id,
-                asset_id=None,
-                retrieval_chunk_uid=row.chunk_uid,
-                retrieval_chunk_row_id=row.row_id,
-                modality="text",
-                evidence_kind="text_chunk",
-                title=metadata.get("title") if isinstance(metadata.get("title"), str) else None,
-                content_text=row.text,
-                preview_text=_preview_text(row.text),
-                source_name=str(metadata.get("name") or row.collection_name or file_id or row.chunk_uid),
-                page_index=_coerce_int(metadata.get("page_index")),
-                anchor_json=metadata.get("anchor_json") if isinstance(metadata.get("anchor_json"), dict) else metadata,
-                chunk_index=row.chunk_index or 0,
-                chunk_total=max(1, int(metadata.get("chunk_total") or 1)),
-                content_hash=row.content_hash,
-                projection_profile=projection_profile,
-                projection_config_hash=projection_config_hash,
-                is_active=True,
-                deleted_at=None,
-            )
-            result.text_evidence_upserted += 1
-            result.evidence_refs.append(evidence.evidence_ref)
-        except Exception as exc:
-            result.failed += 1
-            result.failures.append(
-                {
-                    "stage": "text_backfill",
-                    "error": str(exc),
-                    "chunk_uid": row.chunk_uid,
-                    "file_id": file_id,
-                }
-            )
+            try:
+                evidence = await _upsert_evidence(
+                    session,
+                    knowledge_id=knowledge_id,
+                    file_id=file_id,
+                    asset_id=None,
+                    retrieval_chunk_uid=row.chunk_uid,
+                    retrieval_chunk_row_id=row.row_id,
+                    modality="text",
+                    evidence_kind="text_chunk",
+                    title=metadata.get("title") if isinstance(metadata.get("title"), str) else None,
+                    content_text=row.text,
+                    preview_text=_preview_text(row.text),
+                    source_name=str(metadata.get("name") or row.collection_name or file_id or row.chunk_uid),
+                    page_index=_coerce_int(metadata.get("page_index")),
+                    anchor_json=metadata.get("anchor_json") if isinstance(metadata.get("anchor_json"), dict) else metadata,
+                    chunk_index=row.chunk_index or 0,
+                    chunk_total=max(1, int(metadata.get("chunk_total") or 1)),
+                    content_hash=row.content_hash,
+                    projection_profile=projection_profile,
+                    projection_config_hash=projection_config_hash,
+                    is_active=True,
+                    deleted_at=None,
+                )
+                result.text_evidence_upserted += 1
+                result.evidence_refs.append(evidence.evidence_ref)
+            except Exception as exc:
+                result.failed += 1
+                result.failures.append(
+                    {
+                        "stage": "text_backfill",
+                        "error": str(exc),
+                        "chunk_uid": row.chunk_uid,
+                        "file_id": file_id,
+                    }
+                )
 
     return result
 
@@ -197,11 +197,10 @@ async def project_standalone_image_evidence(
             status="ready",
             asset_ref=asset_ref,
         )
-    result.image_assets_upserted += 1
-    result.asset_refs.append(asset.asset_ref)
+        result.image_assets_upserted += 1
+        result.asset_refs.append(asset.asset_ref)
 
-    content_text = _build_image_content_text(file, metadata)
-    async with _session_scope(db) as session:
+        content_text = _build_image_content_text(file, metadata)
         evidence = await _upsert_evidence(
             session,
             knowledge_id=knowledge_id,
@@ -225,8 +224,8 @@ async def project_standalone_image_evidence(
             is_active=True,
             deleted_at=None,
         )
-    result.image_evidence_upserted += 1
-    result.evidence_refs.append(evidence.evidence_ref)
+        result.image_evidence_upserted += 1
+        result.evidence_refs.append(evidence.evidence_ref)
     return result
 
 

@@ -1,5 +1,6 @@
 import os
 import tempfile
+from unittest.mock import patch
 
 os.environ.setdefault("WEBUI_SECRET_KEY", "test-secret")
 os.environ.setdefault("ENABLE_DB_MIGRATIONS", "false")
@@ -7,10 +8,13 @@ os.environ.setdefault("DATABASE_ENABLE_SESSION_SHARING", "true")
 
 import pytest
 import pytest_asyncio
-from sqlalchemy import select
+from alembic.migration import MigrationContext
+from alembic.operations import Operations
+from sqlalchemy import create_engine, select
 from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
 from sqlalchemy.orm import sessionmaker
 
+from open_webui.migrations.versions import d1e2f3a4b5c6_add_multimodal_evidence_schema as evidence_migration
 from open_webui.models.evidence import KnowledgeEvidence, KnowledgeEvidenceAsset
 from open_webui.models.files import File
 from open_webui.models.knowledge import Knowledge
@@ -19,8 +23,18 @@ from open_webui.retrieval.evidence_projector import (
     EvidenceProjectionResult,
     backfill_text_evidence_from_active_chunks,
     project_evidence_for_knowledge_file,
+    project_evidence_from_job_payload,
 )
 import open_webui.retrieval.indexing as indexing_mod
+import open_webui.retrieval.evidence_projector as projector_mod
+
+
+def _run_migration(engine, direction):
+    with engine.begin() as connection:
+        context = MigrationContext.configure(connection)
+        operations = Operations(context)
+        with patch.object(evidence_migration, "op", operations):
+            getattr(evidence_migration, direction)()
 
 
 @pytest_asyncio.fixture
@@ -199,6 +213,52 @@ async def test_document_image_placeholder_does_not_fabricate_image_evidence(db_s
     assert len(asset_rows) == 0
     assert len(evidence_rows) == 1
     assert evidence_rows[0].evidence_kind == "text_chunk"
+
+
+@pytest.mark.asyncio
+async def test_db_none_projector_path_uses_internal_session_scope(tmp_path, monkeypatch):
+    db_path = tmp_path / "projector.db"
+    sync_engine = create_engine(f"sqlite:///{db_path}")
+    _run_migration(sync_engine, "upgrade")
+    with sync_engine.begin() as connection:
+        Knowledge.__table__.create(connection, checkfirst=True)
+        File.__table__.create(connection, checkfirst=True)
+        RetrievalChunk.__table__.create(connection, checkfirst=True)
+        KnowledgeEvidenceAsset.__table__.create(connection, checkfirst=True)
+        KnowledgeEvidence.__table__.create(connection, checkfirst=True)
+    engine = create_async_engine(f"sqlite+aiosqlite:///{db_path}")
+    session_factory = sessionmaker(engine, expire_on_commit=False, class_=AsyncSession)
+
+    async with session_factory() as shared_session:
+        await _seed_knowledge_file(
+            shared_session,
+            file_id="file-img",
+            filename="box-a.png",
+            content_type="image/png",
+            path="/tmp/box-a.png",
+        )
+        await _seed_active_text_chunk(shared_session, row_id=21, file_id="file-img", text="hello")
+
+        @projector_mod.asynccontextmanager
+        async def fake_get_async_db_context(db=None):
+            yield shared_session
+
+        monkeypatch.setattr(projector_mod, "get_async_db_context", fake_get_async_db_context)
+
+        result = await project_evidence_from_job_payload(
+            {"knowledge_id": "kb-1", "file_ids": ["file-img"], "project_document_images": True},
+            db=None,
+        )
+
+        assert result.text_evidence_upserted == 1
+        assert result.image_assets_upserted == 1
+        assert result.image_evidence_upserted == 1
+        evidence_rows = (
+            await shared_session.execute(select(KnowledgeEvidence).order_by(KnowledgeEvidence.id.asc()))
+        ).scalars().all()
+        assert len(evidence_rows) == 2
+
+    await engine.dispose()
 
 
 @pytest.mark.asyncio
