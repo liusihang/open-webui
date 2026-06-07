@@ -5,11 +5,12 @@ import io
 import json
 import logging
 import zipfile
+from pathlib import Path
 from typing import List, Optional
 from urllib.parse import quote
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
-from fastapi.responses import StreamingResponse
+from fastapi.responses import FileResponse, PlainTextResponse, StreamingResponse
 from open_webui.config import BYPASS_ADMIN_ACCESS_CONTROL
 from open_webui.constants import ERROR_MESSAGES
 from open_webui.internal.db import get_async_session
@@ -26,6 +27,7 @@ from open_webui.models.knowledge import (
     KnowledgeUserResponse,
 )
 from open_webui.models.files import Files, FileModel, FileMetadataResponse
+from open_webui.models.evidence import KnowledgeEvidenceAssets, KnowledgeEvidenceAssetVariants, KnowledgeEvidences
 from open_webui.models.knowledge_layers import (
     KnowledgeFileLayerListResponse,
     KnowledgeLayers,
@@ -484,6 +486,208 @@ async def run_retrieval_index_job_by_id(job_id: str, user=Depends(get_admin_user
             status_code=status.HTTP_404_NOT_FOUND,
             detail=ERROR_MESSAGES.NOT_FOUND,
         )
+
+
+async def _has_evidence_read_access(
+    knowledge,
+    evidence,
+    user,
+    db: Optional[AsyncSession] = None,
+) -> bool:
+    if user.role == 'admin':
+        return True
+    if knowledge.user_id == user.id:
+        return True
+    if await AccessGrants.has_access(
+        user_id=user.id,
+        resource_type='knowledge',
+        resource_id=knowledge.id,
+        permission='read',
+        db=db,
+    ):
+        return True
+    return await has_access_to_file(evidence.file_id, 'read', user, db=db)
+
+
+def _is_unsafe_image_mime_type(mime_type: str | None) -> bool:
+    normalized = (mime_type or '').strip().lower()
+    return normalized in {'image/svg', 'image/svg+xml', 'image/svg+xml;charset=utf-8'} or normalized.endswith('+xml')
+
+
+def _evidence_urls(knowledge_id: str, evidence_ref: str, modality: str) -> dict[str, str | None]:
+    quoted_ref = quote(evidence_ref, safe='')
+    base = f'/api/v1/knowledge/{knowledge_id}/evidence/{quoted_ref}'
+    return {
+        'content_url': f'{base}/content',
+        'thumbnail_url': f'{base}/thumbnail' if modality == 'image' else None,
+    }
+
+
+async def _resolve_knowledge_evidence_access(
+    knowledge_id: str,
+    evidence_ref: str,
+    user,
+    db: AsyncSession | None = None,
+):
+    knowledge = await Knowledges.get_knowledge_by_id(id=knowledge_id, db=db)
+    if not knowledge:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=ERROR_MESSAGES.NOT_FOUND,
+        )
+
+    evidence = await KnowledgeEvidences.get_evidence_by_ref(evidence_ref, db=db)
+    if not evidence or evidence.knowledge_id != knowledge.id or not evidence.is_active or evidence.deleted_at is not None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=ERROR_MESSAGES.NOT_FOUND,
+        )
+
+    if not await _has_evidence_read_access(knowledge, evidence, user, db=db):
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=ERROR_MESSAGES.NOT_FOUND,
+        )
+
+    return knowledge, evidence
+
+
+async def _resolve_evidence_asset(
+    evidence,
+    db: AsyncSession | None = None,
+    *,
+    prefer_thumbnail: bool = False,
+):
+    if not evidence.asset_id:
+        return None, None
+
+    asset = await KnowledgeEvidenceAssets.get_asset_by_id(evidence.asset_id, db=db)
+    if not asset:
+        return None, None
+
+    variant = None
+    if prefer_thumbnail:
+        try:
+            variants = await KnowledgeEvidenceAssetVariants.list_variants(
+                asset_id=asset.id,
+                variant_kind='thumbnail',
+                limit=1,
+                db=db,
+            )
+            variant = variants[0] if variants else None
+        except Exception:
+            variant = None
+
+    return asset, variant
+
+
+def _build_evidence_detail_response(knowledge_id: str, evidence, asset=None) -> dict:
+    preview_type = 'image' if evidence.modality == 'image' else 'text'
+    preview = {
+        'type': preview_type,
+        'text': evidence.preview_text or evidence.content_text or '',
+        'caption': getattr(asset, 'caption', None) if asset else None,
+        'ocr_text': getattr(asset, 'ocr_text', None) if asset else None,
+        'source_name': evidence.source_name,
+        'page_index': evidence.page_index,
+    }
+    if asset:
+        preview['mime_type'] = asset.mime_type
+        preview['asset_ref'] = asset.asset_ref
+
+    return {
+        'id': evidence.id,
+        'evidence_ref': evidence.evidence_ref,
+        'knowledge_id': evidence.knowledge_id,
+        'file_id': evidence.file_id,
+        'asset_id': evidence.asset_id,
+        'modality': evidence.modality,
+        'evidence_kind': evidence.evidence_kind,
+        'title': evidence.title,
+        'source_name': evidence.source_name,
+        'page_index': evidence.page_index,
+        'preview': preview,
+        **_evidence_urls(knowledge_id, evidence.evidence_ref, evidence.modality),
+    }
+
+
+@router.get('/{id}/evidence/{evidence_ref}', response_model=dict)
+async def get_knowledge_evidence_by_ref(
+    id: str,
+    evidence_ref: str,
+    user=Depends(get_verified_user),
+    db: AsyncSession = Depends(get_async_session),
+):
+    _, evidence = await _resolve_knowledge_evidence_access(id, evidence_ref, user, db=db)
+    asset = None
+    if evidence.asset_id:
+        asset = await KnowledgeEvidenceAssets.get_asset_by_id(evidence.asset_id, db=db)
+    return _build_evidence_detail_response(id, evidence, asset=asset)
+
+
+@router.get('/{id}/evidence/{evidence_ref}/thumbnail')
+async def get_knowledge_evidence_thumbnail_by_ref(
+    id: str,
+    evidence_ref: str,
+    user=Depends(get_verified_user),
+    db: AsyncSession = Depends(get_async_session),
+):
+    _, evidence = await _resolve_knowledge_evidence_access(id, evidence_ref, user, db=db)
+
+    if evidence.modality != 'image':
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=ERROR_MESSAGES.NOT_FOUND,
+        )
+
+    asset, variant = await _resolve_evidence_asset(evidence, db=db, prefer_thumbnail=True)
+    source = variant or asset
+    if not source or _is_unsafe_image_mime_type(source.mime_type):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=ERROR_MESSAGES.DEFAULT('Unsupported image evidence format'),
+        )
+
+    file_path = await asyncio.to_thread(Storage.get_file, source.storage_uri)
+    file_path = Path(file_path)
+    if not file_path.is_file():
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=ERROR_MESSAGES.NOT_FOUND,
+        )
+
+    return FileResponse(file_path, media_type=source.mime_type)
+
+
+@router.get('/{id}/evidence/{evidence_ref}/content')
+async def get_knowledge_evidence_content_by_ref(
+    id: str,
+    evidence_ref: str,
+    user=Depends(get_verified_user),
+    db: AsyncSession = Depends(get_async_session),
+):
+    _, evidence = await _resolve_knowledge_evidence_access(id, evidence_ref, user, db=db)
+
+    if evidence.modality == 'text':
+        return PlainTextResponse(evidence.content_text or evidence.preview_text or '')
+
+    asset, variant = await _resolve_evidence_asset(evidence, db=db, prefer_thumbnail=False)
+    source = asset or variant
+    if not source or _is_unsafe_image_mime_type(source.mime_type):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=ERROR_MESSAGES.DEFAULT('Unsupported image evidence format'),
+        )
+
+    file_path = await asyncio.to_thread(Storage.get_file, source.storage_uri)
+    file_path = Path(file_path)
+    if not file_path.is_file():
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=ERROR_MESSAGES.NOT_FOUND,
+        )
+
+    return FileResponse(file_path, media_type=source.mime_type)
 
 
 ############################
