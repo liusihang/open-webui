@@ -526,7 +526,7 @@ def _normalize_asset_kind(value: Any) -> str:
 def _evidence_kind_for_asset_kind(asset_kind: str) -> str:
     if asset_kind == "figure":
         return "figure"
-    if asset_kind in {"page_snapshot", "region"}:
+    if asset_kind == "region":
         return "page_region"
     return "document_image"
 

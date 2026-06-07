@@ -48,10 +48,9 @@ from open_webui.env import (
 )
 from open_webui.internal.db import get_async_db, get_async_session
 from open_webui.models.files import FileModel, Files, FileUpdateForm
-from open_webui.models.knowledge import Knowledges, get_knowledge_evidence_mode
+from open_webui.models.knowledge import Knowledges
 from open_webui.models.retrieval_chunks import compute_chunker_config_hash
 from open_webui.models.retrieval_indexes import compute_target_config_hash
-from open_webui.retrieval.document_image_assets import render_pdf_page_snapshots
 from open_webui.retrieval.indexing import deactivate_all_chunks_for_reset, deactivate_chunks_for_scope
 
 # Document loaders
@@ -135,59 +134,6 @@ def _collect_document_image_assets_from_docs(docs: Sequence[Document]) -> list[d
 
 def _is_metadata_only_document(doc: Document) -> bool:
     return bool(doc.metadata.get('_metadata_only')) if isinstance(doc.metadata, dict) else False
-
-
-def _existing_document_image_assets(file: FileModel) -> list[dict]:
-    assets: list[dict] = []
-    for container in (file.data, file.meta):
-        if not isinstance(container, dict):
-            continue
-        raw_assets = container.get('document_image_assets')
-        if not isinstance(raw_assets, list):
-            raw_assets = container.get('image_assets')
-        if isinstance(raw_assets, list):
-            assets.extend(asset for asset in raw_assets if isinstance(asset, dict))
-    return assets
-
-
-def _is_pdf_file(file: FileModel) -> bool:
-    content_type = (file.meta or {}).get('content_type') if isinstance(file.meta, dict) else None
-    if isinstance(content_type, str) and content_type.split(';', 1)[0].strip().lower() == 'application/pdf':
-        return True
-    return Path(file.filename).suffix.lower() == '.pdf'
-
-
-async def _collection_uses_evidence_mode(collection_name: str | None, db: AsyncSession | None = None) -> bool:
-    if not collection_name:
-        return False
-    knowledge = await Knowledges.get_knowledge_by_id(collection_name, db=db)
-    return get_knowledge_evidence_mode(knowledge) != 'legacy_text'
-
-
-async def _collect_evidence_pdf_page_snapshot_assets(
-    *,
-    request: Request,
-    file: FileModel,
-    collection_name: str | None,
-    local_file_path: str | Path,
-    db: AsyncSession | None = None,
-) -> list[dict]:
-    existing_assets = _existing_document_image_assets(file)
-    if not getattr(request.app.state.config, 'ENABLE_MULTIMODAL_KNOWLEDGE_EVIDENCE', False):
-        return existing_assets
-    if not _is_pdf_file(file):
-        return existing_assets
-    if any(asset.get('asset_kind') == 'page_snapshot' for asset in existing_assets):
-        return existing_assets
-    if not await _collection_uses_evidence_mode(collection_name, db=db):
-        return existing_assets
-
-    page_snapshots = render_pdf_page_snapshots(
-        source_path=Path(local_file_path),
-        source_id=file.id,
-        asset_root=Path(UPLOAD_DIR) / 'document-image-assets',
-    )
-    return existing_assets + page_snapshots
 
 
 def get_ef(
@@ -1762,15 +1708,6 @@ async def process_file(
 
                 text_content = file.data.get('content', '')
 
-                if file.path:
-                    local_file_path = await asyncio.to_thread(Storage.get_file, file.path)
-                    document_image_assets = await _collect_evidence_pdf_page_snapshot_assets(
-                        request=request,
-                        file=file,
-                        collection_name=form_data.collection_name,
-                        local_file_path=local_file_path,
-                        db=db,
-                    )
             else:
                 # Process the file and save the content
                 # Usage: /files/

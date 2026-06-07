@@ -14,6 +14,8 @@ from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 from open_webui.internal.db import JSONField
 from open_webui.migrations.versions import d1e2f3a4b5c6_add_multimodal_evidence_schema as evidence_migration
 from open_webui.models.evidence import (
+    ASSET_KINDS,
+    VECTOR_ROLES,
     KnowledgeEvidence,
     KnowledgeEvidenceAsset,
     KnowledgeEvidenceAssetVariant,
@@ -46,6 +48,13 @@ def _assert_unique_constraint(table, expected_columns):
         if isinstance(constraint, UniqueConstraint)
     }
     assert tuple(expected_columns) in unique_constraints
+
+
+def test_evidence_constants_do_not_include_page_snapshot_assets():
+    assert "page_snapshot" not in ASSET_KINDS
+    assert "page_screenshot_dense" not in VECTOR_ROLES
+    assert "page_multivector" not in VECTOR_ROLES
+    assert "region" in ASSET_KINDS
 
 
 def test_knowledge_evidence_asset_metadata_declares_expected_columns_constraints_and_indexes():

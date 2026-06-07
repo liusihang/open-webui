@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import hashlib
 import re
-from collections.abc import Iterable
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -108,7 +107,7 @@ def build_image_assets_from_markdown(
     markdown_text: str | None = None,
     backend: str = 'paddleocr-vl',
     extra_metadata: dict[str, Any] | None = None,
-    image_asset_roots: Iterable[Path] | None = None,
+    image_asset_roots: list[Path] | None = None,
 ) -> tuple[list[DocumentImageAssetPayload], list[dict[str, str]]]:
     text = markdown_text if markdown_text is not None else markdown.get('text', '')
     if not isinstance(text, str):
@@ -183,153 +182,6 @@ def build_image_assets_from_markdown(
     return assets, skipped
 
 
-def render_pdf_page_snapshots(
-    *,
-    source_path: Path,
-    source_id: str,
-    asset_root: Path,
-    pages: Iterable[int] | None = None,
-    scale: float = 2.0,
-) -> list[DocumentImageAssetPayload]:
-    try:
-        import pypdfium2
-    except ImportError:
-        pypdfium2 = None
-
-    if pypdfium2 is None:
-        return _render_pdf_page_snapshots_with_pymupdf(
-            source_path=source_path,
-            source_id=source_id,
-            asset_root=asset_root,
-            pages=pages,
-            scale=scale,
-        )
-    return _render_pdf_page_snapshots_with_pdfium(
-        pypdfium2=pypdfium2,
-        source_path=source_path,
-        source_id=source_id,
-        asset_root=asset_root,
-        pages=pages,
-        scale=scale,
-    )
-
-
-def _render_pdf_page_snapshots_with_pdfium(
-    *,
-    pypdfium2: Any,
-    source_path: Path,
-    source_id: str,
-    asset_root: Path,
-    pages: Iterable[int] | None,
-    scale: float,
-) -> list[DocumentImageAssetPayload]:
-    pdf = pypdfium2.PdfDocument(str(source_path))
-    assets: list[DocumentImageAssetPayload] = []
-    source_dir = Path(asset_root) / _safe_component(source_id)
-    source_dir.mkdir(parents=True, exist_ok=True)
-    page_numbers = list(pages) if pages is not None else list(range(1, len(pdf) + 1))
-    try:
-        for page_no in page_numbers:
-            if page_no < 1 or page_no > len(pdf):
-                continue
-            page = pdf[page_no - 1]
-            try:
-                bitmap = page.render(scale=scale)
-                image = bitmap.to_pil()
-                storage_path = (source_dir / f'page-{page_no:03d}-snapshot.png').resolve()
-                image.save(storage_path)
-            finally:
-                close = getattr(page, 'close', None)
-                if callable(close):
-                    close()
-
-            width, height = _probe_image_dimensions(storage_path)
-            block_id = f'page-{page_no:03d}-snapshot'
-            assets.append(
-                {
-                    'storage_path': str(storage_path),
-                    'asset_kind': 'page_snapshot',
-                    'image_fingerprint': _fingerprint_file(storage_path),
-                    'page_index': page_no,
-                    'caption': None,
-                    'surrounding_text': None,
-                    'anchor': {'page': page_no, 'block_id': block_id},
-                    'origin_uri': str(source_path),
-                    'metadata': {
-                        'backend': 'pdf-page-snapshot',
-                        'page': page_no,
-                        'origin_reference': str(source_path),
-                        **({'width': width} if width is not None else {}),
-                        **({'height': height} if height is not None else {}),
-                    },
-                }
-            )
-    finally:
-        close = getattr(pdf, 'close', None)
-        if callable(close):
-            close()
-    return assets
-
-
-def _render_pdf_page_snapshots_with_pymupdf(
-    *,
-    source_path: Path,
-    source_id: str,
-    asset_root: Path,
-    pages: Iterable[int] | None,
-    scale: float,
-) -> list[DocumentImageAssetPayload]:
-    try:
-        import fitz
-    except ImportError as exc:
-        raise RuntimeError('PDF page snapshot extraction requires pypdfium2 or PyMuPDF') from exc
-
-    pdf = fitz.open(str(source_path))
-    assets: list[DocumentImageAssetPayload] = []
-    source_dir = Path(asset_root) / _safe_component(source_id)
-    source_dir.mkdir(parents=True, exist_ok=True)
-    page_count = int(getattr(pdf, 'page_count', 0))
-    page_numbers = list(pages) if pages is not None else list(range(1, page_count + 1))
-    try:
-        for page_no in page_numbers:
-            if page_no < 1 or page_no > page_count:
-                continue
-            page = pdf.load_page(page_no - 1)
-            pixmap = page.get_pixmap(matrix=fitz.Matrix(scale, scale), alpha=False)
-            storage_path = (source_dir / f'page-{page_no:03d}-snapshot.png').resolve()
-            pixmap.save(str(storage_path))
-            width = getattr(pixmap, 'width', None)
-            height = getattr(pixmap, 'height', None)
-            if not isinstance(width, int) or not isinstance(height, int):
-                width, height = _probe_image_dimensions(storage_path)
-
-            block_id = f'page-{page_no:03d}-snapshot'
-            assets.append(
-                {
-                    'storage_path': str(storage_path),
-                    'asset_kind': 'page_snapshot',
-                    'image_fingerprint': _fingerprint_file(storage_path),
-                    'page_index': page_no,
-                    'caption': None,
-                    'surrounding_text': None,
-                    'anchor': {'page': page_no, 'block_id': block_id},
-                    'origin_uri': str(source_path),
-                    'metadata': {
-                        'backend': 'pdf-page-snapshot',
-                        'page': page_no,
-                        'origin_reference': str(source_path),
-                        **({'width': width} if isinstance(width, int) else {}),
-                        **({'height': height} if isinstance(height, int) else {}),
-                    },
-                }
-            )
-    finally:
-        close = getattr(pdf, 'close', None)
-        if callable(close):
-            close()
-    return assets
-
-
 def _iter_markdown_image_entries(images: Any) -> list[tuple[str, str | None]]:
     if isinstance(images, dict):
         entries: list[tuple[str, str | None]] = []
@@ -348,7 +200,7 @@ def _resolve_image_storage_path(
     source_path: Path,
     reference: str,
     origin_uri: str | None,
-    image_asset_roots: Iterable[Path] | None = None,
+    image_asset_roots: list[Path] | None = None,
 ) -> Path | None:
     for value in (reference, origin_uri):
         if not value or _is_remote_uri(value):

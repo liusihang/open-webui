@@ -13,7 +13,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from open_webui.internal.db import Base, JSONField, get_async_db_context
 
 
-ASSET_KINDS = ("standalone_image", "document_image", "figure", "page_snapshot", "region")
+ASSET_KINDS = ("standalone_image", "document_image", "figure", "region")
 ASSET_VARIANT_KINDS = ("original", "thumbnail", "model_default", "model_openai_low", "model_anthropic_default", "region_crop")
 ASSET_STATUSES = ("ready", "failed", "stale", "deleted")
 EVIDENCE_MODALITIES = ("text", "image")
@@ -23,8 +23,6 @@ VECTOR_ROLES = (
     "text_chunk_dense",
     "image_dense",
     "image_caption_dense",
-    "page_screenshot_dense",
-    "page_multivector",
 )
 EMBEDDING_FORMATS = ("single_dense", "multi_vector", "sparse")
 EMBEDDING_STATUSES = ("pending", "indexing", "ready", "failed", "stale")
@@ -279,7 +277,7 @@ class KnowledgeEvidenceAssetModel(BaseModel):
     knowledge_id: str
     file_id: str
     asset_ref: str
-    asset_kind: Literal["standalone_image", "document_image", "figure", "page_snapshot", "region"]
+    asset_kind: Literal["standalone_image", "document_image", "figure", "region"]
     mime_type: str
     storage_uri: str
     sha256: str
@@ -501,7 +499,7 @@ class KnowledgeEvidenceEmbeddingModel(BaseModel):
     vector_space_id: str
     vector_backend_collection: str
     vector_backend_id: str | None = None
-    vector_role: Literal["text_chunk_dense", "image_dense", "image_caption_dense", "page_screenshot_dense", "page_multivector"]
+    vector_role: Literal["text_chunk_dense", "image_dense", "image_caption_dense"]
     embedding_format: Literal["single_dense", "multi_vector", "sparse"]
     embedding_status: Literal["pending", "indexing", "ready", "failed", "stale"]
     embedding_error: str | None = None
