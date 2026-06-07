@@ -836,6 +836,7 @@
 									id={`${chatId}-${message.id}`}
 									content={message.content}
 									sources={message.sources ?? message.citations}
+									metadata={(message as any)?.metadata}
 									floatingButtons={message?.done &&
 										!readOnly &&
 										($settings?.showFloatingActionButtons ?? true)}
@@ -880,6 +881,8 @@
 									id={message?.id}
 									{chatId}
 									sources={message?.sources ?? message?.citations}
+									content={message.content}
+									metadata={(message as any)?.metadata}
 									{readOnly}
 								/>
 							{/if}

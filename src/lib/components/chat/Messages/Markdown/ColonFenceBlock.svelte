@@ -7,6 +7,7 @@
 	import MarkdownTokens from './MarkdownTokens.svelte';
 	import Tooltip from '$lib/components/common/Tooltip.svelte';
 	import DocumentDuplicate from '$lib/components/icons/DocumentDuplicate.svelte';
+	import type { CitationTarget } from '../citations';
 
 	export let id: string = '';
 	export let token: any;
@@ -15,6 +16,7 @@
 	export let done: boolean = true;
 	export let editCodeBlock: boolean = true;
 	export let sourceIds: string[] = [];
+	export let citationTargets: CitationTarget[] = [];
 	export let onTaskClick: Function = () => {};
 	export let onSourceClick: Function = () => {};
 
@@ -76,6 +78,7 @@
 			{done}
 			{editCodeBlock}
 			{sourceIds}
+			{citationTargets}
 			{onTaskClick}
 			{onSourceClick}
 		/>

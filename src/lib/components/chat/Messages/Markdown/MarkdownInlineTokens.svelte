@@ -20,11 +20,13 @@
 	import MentionToken from './MarkdownInlineTokens/MentionToken.svelte';
 	import NoteLinkToken from './MarkdownInlineTokens/NoteLinkToken.svelte';
 	import SourceToken from './SourceToken.svelte';
+	import type { CitationTarget } from '../citations';
 
 	export let id: string;
 	export let done = true;
 	export let tokens: Token[];
-	export let sourceIds = [];
+	export let sourceIds: string[] = [];
+	export let citationTargets: CitationTarget[] = [];
 	export let onSourceClick: Function = () => {};
 
 	/**
@@ -132,7 +134,7 @@
 		) || ''}
 	{:else if token.type === 'citation'}
 		{#if (sourceIds ?? []).length > 0}
-			<SourceToken {id} {token} {sourceIds} onClick={onSourceClick} />
+			<SourceToken {id} {token} {sourceIds} {citationTargets} onClick={onSourceClick} />
 		{:else}
 			<TextToken {token} {done} />
 		{/if}

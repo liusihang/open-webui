@@ -93,6 +93,20 @@
 
 		return fragment ? `${baseUrl}#:~:text=${fragment}` : baseUrl;
 	};
+
+	const getDocumentText = (content: any): string => {
+		if (typeof content === 'string') {
+			return content.trim().replace(/\n\n+/g, '\n\n');
+		}
+		if (content === undefined || content === null) {
+			return '';
+		}
+		try {
+			return JSON.stringify(content, null, 2);
+		} catch {
+			return String(content);
+		}
+	};
 </script>
 
 <Modal size="lg" bind:show>
@@ -144,6 +158,36 @@
 			<div
 				class="flex flex-col w-full dark:text-gray-200 overflow-y-scroll max-h-[22rem] scrollbar-thin gap-1"
 			>
+				{#if citation?.preview?.type === 'image' && citation.preview.content_url}
+					<div class="mb-3">
+						<img
+							src={citation.preview.content_url}
+							alt={citation.preview.caption ||
+								citation.preview.source_name ||
+								citation?.source?.name ||
+								''}
+							class="max-h-[18rem] w-full rounded-md object-contain bg-gray-50 dark:bg-gray-850"
+						/>
+						<div class="mt-2 space-y-1 text-sm text-gray-600 dark:text-gray-300">
+							{#if citation.preview.caption}
+								<div class="whitespace-pre-wrap">{citation.preview.caption}</div>
+							{/if}
+							{#if citation.preview.ocr_text}
+								<div class="whitespace-pre-wrap text-gray-500 dark:text-gray-400">
+									{citation.preview.ocr_text}
+								</div>
+							{/if}
+							<div class="flex flex-wrap gap-x-2 gap-y-1 text-xs text-gray-500 dark:text-gray-400">
+								{#if citation.preview.source_name}
+									<span>{citation.preview.source_name}</span>
+								{/if}
+								{#if Number.isInteger(citation.preview.page_index)}
+									<span>{$i18n.t('page')} {citation.preview.page_index + 1}</span>
+								{/if}
+							</div>
+						</div>
+					</div>
+				{/if}
 				{#each mergedDocuments as document, documentIdx}
 					<div class="flex flex-col w-full gap-2">
 						{#if document.metadata?.parameters}
@@ -223,12 +267,30 @@
 									title={$i18n.t('Content')}
 								></iframe>
 							{:else}
-								{@const rawContent = document.document.trim().replace(/\n\n+/g, '\n\n')}
+								{@const rawContent = getDocumentText(document.document)}
 								{@const isTruncated =
 									($settings?.renderMarkdownInPreviews ?? true) &&
 									rawContent.length > CONTENT_PREVIEW_LIMIT &&
 									!expandedDocs.has(documentIdx)}
-								{#if $settings?.renderMarkdownInPreviews ?? true}
+								{#if document.metadata?.evidence_ref || citation?.preview}
+									<pre
+										class="text-sm dark:text-gray-400 whitespace-pre-wrap break-words font-sans">{isTruncated
+											? rawContent.slice(0, CONTENT_PREVIEW_LIMIT)
+											: rawContent}</pre>
+									{#if isTruncated}
+										<button
+											class="mt-1 text-xs text-gray-500 hover:text-gray-700 dark:hover:text-gray-300 transition"
+											on:click={() => {
+												expandedDocs.add(documentIdx);
+												expandedDocs = expandedDocs;
+											}}
+										>
+											{$i18n.t('Show all ({{COUNT}} characters)', {
+												COUNT: rawContent.length.toLocaleString()
+											})}
+										</button>
+									{/if}
+								{:else if $settings?.renderMarkdownInPreviews ?? true}
 									<div
 										class="text-sm prose dark:prose-invert markdown-prose-sm min-w-full max-w-full"
 									>

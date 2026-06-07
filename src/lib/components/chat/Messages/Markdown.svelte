@@ -27,6 +27,7 @@
 	export let allowEmbeds = true;
 
 	export let sourceIds = [];
+	export let citationTargets = [];
 
 	export let onSave = () => {};
 	export let onUpdate = () => {};
@@ -104,6 +105,7 @@
 		{paragraphTag}
 		{editCodeBlock}
 		{sourceIds}
+		{citationTargets}
 		{topPadding}
 		{allowEmbeds}
 		{onTaskClick}
