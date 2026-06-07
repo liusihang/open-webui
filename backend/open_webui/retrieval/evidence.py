@@ -10,6 +10,7 @@ from typing import Any
 from urllib.parse import quote
 
 from fastapi import Request
+from sqlalchemy.exc import OperationalError
 
 from open_webui.models.evidence import (
     KnowledgeEvidenceAssets,
@@ -488,6 +489,11 @@ def _compact_evidence_content(evidence: KnowledgeEvidenceModel) -> str:
     return ''
 
 
+def _is_missing_vector_space_schema_error(error: OperationalError) -> bool:
+    message = str(getattr(error, 'orig', error)).lower()
+    return 'no such table' in message and 'knowledge_vector_space' in message
+
+
 def _serialize_evidence_result(
     evidence: KnowledgeEvidenceModel,
     *,
@@ -598,6 +604,14 @@ async def _resolve_query_vector_spaces(
         except MultimodalVectorSpaceError as e:
             code = 'unsupported_image_query' if e.code == 'unsupported_image_query' else 'vector_space_unavailable'
             raise EvidenceToolError(code, e.message, details=e.details) from e
+        except OperationalError as e:
+            if not _is_missing_vector_space_schema_error(e):
+                raise
+            raise EvidenceToolError(
+                'vector_space_unavailable',
+                'No active vector space is available for the supplied knowledge_id/profile',
+                details={'knowledge_id': knowledge_id},
+            ) from e
         vector_spaces.append(selection.vector_space)
     return vector_spaces
 
