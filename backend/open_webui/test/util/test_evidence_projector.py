@@ -57,7 +57,16 @@ async def db_session():
     os.unlink(db_file.name)
 
 
-async def _seed_knowledge_file(session: AsyncSession, *, file_id: str, filename: str, content_type: str, path: str):
+async def _seed_knowledge_file(
+    session: AsyncSession,
+    *,
+    file_id: str,
+    filename: str,
+    content_type: str,
+    path: str,
+    meta: dict | None = None,
+    data: dict | None = None,
+):
     session.add(
         Knowledge(
             id="kb-1",
@@ -76,8 +85,8 @@ async def _seed_knowledge_file(session: AsyncSession, *, file_id: str, filename:
             hash="file-hash-1",
             filename=filename,
             path=path,
-            data={"status": "completed"},
-            meta={"content_type": content_type, "name": filename},
+            data=data or {"status": "completed"},
+            meta={"content_type": content_type, "name": filename, **(meta or {})},
             created_at=1,
             updated_at=1,
         )
@@ -126,8 +135,8 @@ async def test_text_backfill_is_idempotent_and_bridges_retrieval_chunk_fields(db
     second = await backfill_text_evidence_from_active_chunks(collection_ids=["kb-1"], db=db_session)
 
     evidence_rows = (
-        await db_session.execute(select(KnowledgeEvidence).order_by(KnowledgeEvidence.id.asc()))
-    ).scalars().all()
+        (await db_session.execute(select(KnowledgeEvidence).order_by(KnowledgeEvidence.id.asc()))).scalars().all()
+    )
 
     assert first.text_evidence_upserted == 1
     assert second.text_evidence_upserted == 1
@@ -161,11 +170,13 @@ async def test_standalone_image_projection_creates_asset_and_evidence_without_te
     )
 
     assets = (
-        await db_session.execute(select(KnowledgeEvidenceAsset).order_by(KnowledgeEvidenceAsset.id.asc()))
-    ).scalars().all()
+        (await db_session.execute(select(KnowledgeEvidenceAsset).order_by(KnowledgeEvidenceAsset.id.asc())))
+        .scalars()
+        .all()
+    )
     evidence_rows = (
-        await db_session.execute(select(KnowledgeEvidence).order_by(KnowledgeEvidence.id.asc()))
-    ).scalars().all()
+        (await db_session.execute(select(KnowledgeEvidence).order_by(KnowledgeEvidence.id.asc()))).scalars().all()
+    )
 
     assert result.image_assets_upserted == 1
     assert result.image_evidence_upserted == 1
@@ -182,7 +193,70 @@ async def test_standalone_image_projection_creates_asset_and_evidence_without_te
 
 
 @pytest.mark.asyncio
-async def test_document_image_placeholder_does_not_fabricate_image_evidence(db_session):
+async def test_document_image_assets_projection_creates_real_asset_and_evidence(db_session, tmp_path):
+    image_path = tmp_path / "page-003-image-001.png"
+    image_path.write_bytes(b"\x89PNG\r\n\x1a\n")
+    await _seed_knowledge_file(
+        db_session,
+        file_id="file-doc",
+        filename="doc.pdf",
+        content_type="application/pdf",
+        path="/tmp/doc.pdf",
+        meta={
+            "document_image_assets": [
+                {
+                    "storage_path": str(image_path),
+                    "asset_kind": "figure",
+                    "image_fingerprint": "sha256:" + "a" * 64,
+                    "caption": "Box A placement diagram",
+                    "surrounding_text": "The sample should be placed into Box A.",
+                    "page": 3,
+                    "anchor": {"page": 3, "block_id": "page-003-image-001"},
+                    "metadata": {"width": 640, "height": 480, "origin_reference": "images/box-a.png"},
+                }
+            ]
+        },
+    )
+    await _seed_active_text_chunk(db_session, row_id=11, file_id="file-doc", text="Chunk one")
+
+    result = await project_evidence_for_knowledge_file(
+        knowledge_id="kb-1",
+        file_id="file-doc",
+        db=db_session,
+        project_document_images=True,
+    )
+
+    asset_rows = (
+        (await db_session.execute(select(KnowledgeEvidenceAsset).order_by(KnowledgeEvidenceAsset.id.asc())))
+        .scalars()
+        .all()
+    )
+    evidence_rows = (
+        (await db_session.execute(select(KnowledgeEvidence).order_by(KnowledgeEvidence.id.asc()))).scalars().all()
+    )
+
+    assert result.text_evidence_upserted == 1
+    assert result.image_assets_upserted == 1
+    assert result.image_evidence_upserted == 1
+    assert result.document_image_placeholders == 0
+    assert len(asset_rows) == 1
+    assert len(evidence_rows) == 2
+    image_evidence = next(row for row in evidence_rows if row.modality == "image")
+    assert image_evidence.asset_id == asset_rows[0].id
+    assert image_evidence.evidence_kind == "figure"
+    assert image_evidence.page_index == 3
+    assert image_evidence.content_text == (
+        "doc.pdf | Box A placement diagram | Page: 3 | " "Context: The sample should be placed into Box A."
+    )
+    assert asset_rows[0].asset_kind == "figure"
+    assert asset_rows[0].storage_uri == str(image_path)
+    assert asset_rows[0].width == 640
+    assert asset_rows[0].height == 480
+    assert asset_rows[0].anchor_json == {"page": 3, "block_id": "page-003-image-001"}
+
+
+@pytest.mark.asyncio
+async def test_document_image_placeholder_does_not_fabricate_image_evidence_without_assets(db_session):
     await _seed_knowledge_file(
         db_session,
         file_id="file-doc",
@@ -200,11 +274,13 @@ async def test_document_image_placeholder_does_not_fabricate_image_evidence(db_s
     )
 
     asset_rows = (
-        await db_session.execute(select(KnowledgeEvidenceAsset).order_by(KnowledgeEvidenceAsset.id.asc()))
-    ).scalars().all()
+        (await db_session.execute(select(KnowledgeEvidenceAsset).order_by(KnowledgeEvidenceAsset.id.asc())))
+        .scalars()
+        .all()
+    )
     evidence_rows = (
-        await db_session.execute(select(KnowledgeEvidence).order_by(KnowledgeEvidence.id.asc()))
-    ).scalars().all()
+        (await db_session.execute(select(KnowledgeEvidence).order_by(KnowledgeEvidence.id.asc()))).scalars().all()
+    )
 
     assert result.text_evidence_upserted == 1
     assert result.image_assets_upserted == 0
@@ -254,8 +330,10 @@ async def test_db_none_projector_path_uses_internal_session_scope(tmp_path, monk
         assert result.image_assets_upserted == 1
         assert result.image_evidence_upserted == 1
         evidence_rows = (
-            await shared_session.execute(select(KnowledgeEvidence).order_by(KnowledgeEvidence.id.asc()))
-        ).scalars().all()
+            (await shared_session.execute(select(KnowledgeEvidence).order_by(KnowledgeEvidence.id.asc())))
+            .scalars()
+            .all()
+        )
         assert len(evidence_rows) == 2
 
     await engine.dispose()
@@ -297,7 +375,11 @@ async def test_evidence_job_branch_uses_existing_job_state_surface(monkeypatch):
                     "job_id": job_id,
                     "status": kwargs["status"],
                     "result": kwargs.get("result"),
-                    "model_dump": lambda self=None: {"job_id": job_id, "status": kwargs["status"], "result": kwargs.get("result")},
+                    "model_dump": lambda self=None: {
+                        "job_id": job_id,
+                        "status": kwargs["status"],
+                        "result": kwargs.get("result"),
+                    },
                 },
             )()
 
@@ -344,12 +426,12 @@ async def test_evidence_job_branch_uses_existing_job_state_surface(monkeypatch):
             "collection_id": "kb-1",
             "knowledge_id": "kb-1",
             "collection_name": "kb-1",
-                "file_id": None,
-                "target_config_hash": "evidence-target-hash",
-                "active_chunk_count": 1,
-                "indexed_chunk_count": 2,
-                "last_job_id": "job-project",
-                "error": None,
+            "file_id": None,
+            "target_config_hash": "evidence-target-hash",
+            "active_chunk_count": 1,
+            "indexed_chunk_count": 2,
+            "last_job_id": "job-project",
+            "error": None,
         }
     ]
 

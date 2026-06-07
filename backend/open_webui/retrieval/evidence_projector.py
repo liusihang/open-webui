@@ -1,17 +1,20 @@
 from __future__ import annotations
 
-from contextlib import asynccontextmanager
 from collections.abc import Iterable, Sequence
+from contextlib import asynccontextmanager
 from dataclasses import asdict, dataclass, field
-from typing import Any
+import hashlib
 import mimetypes
+from pathlib import Path
 import time
+from typing import Any
 
 from sqlalchemy import or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from open_webui.internal.db import get_async_db_context
 from open_webui.models.evidence import (
+    ASSET_KINDS,
     KnowledgeEvidence,
     KnowledgeEvidenceAsset,
     compute_knowledge_evidence_asset_id,
@@ -130,7 +133,9 @@ async def backfill_text_evidence_from_active_chunks(
                     preview_text=_preview_text(row.text),
                     source_name=str(metadata.get("name") or row.collection_name or file_id or row.chunk_uid),
                     page_index=_coerce_int(metadata.get("page_index")),
-                    anchor_json=metadata.get("anchor_json") if isinstance(metadata.get("anchor_json"), dict) else metadata,
+                    anchor_json=(
+                        metadata.get("anchor_json") if isinstance(metadata.get("anchor_json"), dict) else metadata
+                    ),
                     chunk_index=row.chunk_index or 0,
                     chunk_total=max(1, int(metadata.get("chunk_total") or 1)),
                     content_hash=row.content_hash,
@@ -191,9 +196,13 @@ async def project_standalone_image_evidence(
             caption=_string_or_none(metadata.get("caption")),
             ocr_text=_string_or_none(metadata.get("ocr_text")),
             surrounding_text=_string_or_none(metadata.get("surrounding_text")),
+            width=_coerce_int(metadata.get("width")),
+            height=_coerce_int(metadata.get("height")),
             page_index=_coerce_int(metadata.get("page_index")),
             bbox_json=metadata.get("bbox_json") if isinstance(metadata.get("bbox_json"), dict) else None,
-            anchor_json=metadata.get("anchor_json") if isinstance(metadata.get("anchor_json"), dict) else metadata or None,
+            anchor_json=(
+                metadata.get("anchor_json") if isinstance(metadata.get("anchor_json"), dict) else metadata or None
+            ),
             status="ready",
             asset_ref=asset_ref,
         )
@@ -215,12 +224,15 @@ async def project_standalone_image_evidence(
             preview_text=_preview_text(content_text),
             source_name=_source_name_for_file(file),
             page_index=_coerce_int(metadata.get("page_index")),
-            anchor_json=metadata.get("anchor_json") if isinstance(metadata.get("anchor_json"), dict) else metadata or None,
+            anchor_json=(
+                metadata.get("anchor_json") if isinstance(metadata.get("anchor_json"), dict) else metadata or None
+            ),
             chunk_index=1,
             chunk_total=1,
             content_hash=sha256,
             projection_profile=projection_profile,
             projection_config_hash=projection_config_hash,
+            asset_ref=asset.asset_ref,
             is_active=True,
             deleted_at=None,
         )
@@ -259,8 +271,115 @@ async def project_evidence_for_knowledge_file(
         )
         _merge_projection_result(result, image_result)
     elif project_document_images:
-        result.document_image_placeholders += 1
+        image_result = await project_document_image_assets_evidence(
+            knowledge_id=knowledge_id,
+            file=file,
+            db=db,
+        )
+        _merge_projection_result(result, image_result)
+        if image_result.image_assets_upserted == 0 and image_result.image_evidence_upserted == 0:
+            result.document_image_placeholders += 1
 
+    return result
+
+
+async def project_document_image_assets_evidence(
+    *,
+    knowledge_id: str,
+    file: FileModel,
+    projection_profile: str = "unified_multimodal_dense",
+    projection_config_hash: str = "document-image-project-v1",
+    db: AsyncSession | None = None,
+) -> EvidenceProjectionResult:
+    result = EvidenceProjectionResult()
+    assets = _normalize_document_image_assets(file)
+    if not assets:
+        return result
+
+    async with _session_scope(db) as session:
+        chunk_total = len(assets)
+        for index, asset_input in enumerate(assets, start=1):
+            storage_uri = _string_or_none(asset_input.get("storage_uri"))
+            if not storage_uri:
+                result.failed += 1
+                result.failures.append(
+                    {
+                        "stage": "document_image_project",
+                        "error": "document image asset is missing storage_uri",
+                        "file_id": file.id,
+                        "asset_index": index,
+                    }
+                )
+                continue
+
+            sha256 = _document_asset_fingerprint(asset_input, storage_uri=storage_uri)
+            asset_kind = _normalize_asset_kind(asset_input.get("asset_kind"))
+            anchor_json = _as_dict(asset_input.get("anchor_json")) or None
+            bbox_json = _as_dict(asset_input.get("bbox_json")) or None
+            page_index = _coerce_int(asset_input.get("page_index"))
+            mime_type = (
+                _string_or_none(asset_input.get("mime_type")) or mimetypes.guess_type(storage_uri)[0] or "image/png"
+            )
+
+            try:
+                asset = await _upsert_asset(
+                    session,
+                    knowledge_id=knowledge_id,
+                    file_id=file.id,
+                    asset_kind=asset_kind,
+                    mime_type=mime_type,
+                    storage_uri=storage_uri,
+                    sha256=sha256,
+                    caption=_string_or_none(asset_input.get("caption")),
+                    ocr_text=_string_or_none(asset_input.get("ocr_text")),
+                    surrounding_text=_string_or_none(asset_input.get("surrounding_text")),
+                    width=_coerce_int(asset_input.get("width")),
+                    height=_coerce_int(asset_input.get("height")),
+                    page_index=page_index,
+                    bbox_json=bbox_json,
+                    anchor_json=anchor_json,
+                    status="ready",
+                )
+                result.image_assets_upserted += 1
+                result.asset_refs.append(asset.asset_ref)
+
+                content_text = _build_document_image_content_text(file, asset_input)
+                evidence = await _upsert_evidence(
+                    session,
+                    knowledge_id=knowledge_id,
+                    file_id=file.id,
+                    asset_id=asset.id,
+                    retrieval_chunk_uid=None,
+                    retrieval_chunk_row_id=None,
+                    modality="image",
+                    evidence_kind=_evidence_kind_for_asset_kind(asset_kind),
+                    title=_document_image_title(file, asset_input, index=index),
+                    content_text=content_text,
+                    preview_text=_preview_text(content_text),
+                    source_name=_source_name_for_file(file),
+                    page_index=page_index,
+                    anchor_json=anchor_json,
+                    chunk_index=index,
+                    chunk_total=chunk_total,
+                    content_hash=sha256,
+                    projection_profile=projection_profile,
+                    projection_config_hash=projection_config_hash,
+                    asset_ref=asset.asset_ref,
+                    is_active=True,
+                    deleted_at=None,
+                )
+                result.image_evidence_upserted += 1
+                result.evidence_refs.append(evidence.evidence_ref)
+            except Exception as exc:
+                result.failed += 1
+                result.failures.append(
+                    {
+                        "stage": "document_image_project",
+                        "error": str(exc),
+                        "file_id": file.id,
+                        "asset_index": index,
+                    }
+                )
     return result
 
 
@@ -322,6 +441,117 @@ def _build_image_content_text(file: FileModel, metadata: dict[str, Any]) -> str:
     return " | ".join(parts)
 
 
+def _build_document_image_content_text(file: FileModel, asset: dict[str, Any]) -> str:
+    parts: list[str] = [file.filename]
+    figure_label = _string_or_none(asset.get("figure_label"))
+    if figure_label:
+        parts.append(figure_label)
+    caption = _string_or_none(asset.get("caption"))
+    if caption:
+        parts.append(caption)
+    page_index = _coerce_int(asset.get("page_index"))
+    if page_index is not None:
+        parts.append(f"Page: {page_index}")
+    ocr_text = _string_or_none(asset.get("ocr_text"))
+    if ocr_text:
+        parts.append(f"OCR: {ocr_text}")
+    surrounding_text = _string_or_none(asset.get("surrounding_text"))
+    if surrounding_text:
+        parts.append(f"Context: {surrounding_text}")
+    return " | ".join(parts)
+
+
+def _document_image_title(file: FileModel, asset: dict[str, Any], *, index: int) -> str:
+    return (
+        _string_or_none(asset.get("figure_label"))
+        or _string_or_none(asset.get("caption"))
+        or f"{file.filename} image {index}"
+    )
+
+
+def _normalize_document_image_assets(file: FileModel) -> list[dict[str, Any]]:
+    containers = [_as_dict(file.meta), _as_dict(file.data)]
+    raw_assets: Any = None
+    for container in containers:
+        raw_assets = container.get("document_image_assets")
+        if raw_assets is None:
+            raw_assets = container.get("image_assets")
+        if raw_assets is not None:
+            break
+    if not isinstance(raw_assets, list):
+        return []
+
+    normalized: list[dict[str, Any]] = []
+    for item in raw_assets:
+        if not isinstance(item, dict):
+            continue
+        asset = dict(item)
+        metadata = _as_dict(asset.get("metadata"))
+        anchor = _as_dict(asset.get("anchor"))
+
+        storage_uri = (
+            _string_or_none(asset.get("storage_uri"))
+            or _string_or_none(asset.get("storage_path"))
+            or _string_or_none(asset.get("path"))
+        )
+        if storage_uri:
+            asset["storage_uri"] = storage_uri
+        if "mime_type" not in asset:
+            asset["mime_type"] = _string_or_none(metadata.get("mime_type"))
+        if "width" not in asset:
+            asset["width"] = metadata.get("width")
+        if "height" not in asset:
+            asset["height"] = metadata.get("height")
+        if "page_index" not in asset:
+            asset["page_index"] = (
+                asset.get("page") or anchor.get("page") or metadata.get("page") or metadata.get("page_index")
+            )
+        if "anchor_json" not in asset and anchor:
+            asset["anchor_json"] = anchor
+        if "bbox_json" not in asset and isinstance(metadata.get("bbox"), dict):
+            asset["bbox_json"] = metadata.get("bbox")
+        if "origin_reference" not in asset:
+            asset["origin_reference"] = _string_or_none(metadata.get("origin_reference"))
+        if "asset_kind" not in asset:
+            asset["asset_kind"] = metadata.get("asset_kind")
+        normalized.append(asset)
+    return normalized
+
+
+def _normalize_asset_kind(value: Any) -> str:
+    asset_kind = _string_or_none(value) or "document_image"
+    return asset_kind if asset_kind in ASSET_KINDS else "document_image"
+
+
+def _evidence_kind_for_asset_kind(asset_kind: str) -> str:
+    if asset_kind == "figure":
+        return "figure"
+    if asset_kind in {"page_snapshot", "region"}:
+        return "page_region"
+    return "document_image"
+
+
+def _document_asset_fingerprint(asset: dict[str, Any], *, storage_uri: str) -> str:
+    for key in ("sha256", "hash"):
+        value = _string_or_none(asset.get(key))
+        if value:
+            return _strip_sha256_prefix(value)
+    image_fingerprint = _string_or_none(asset.get("image_fingerprint"))
+    if image_fingerprint:
+        return _strip_sha256_prefix(image_fingerprint)
+    try:
+        path = Path(storage_uri)
+        if path.is_file():
+            return hashlib.sha256(path.read_bytes()).hexdigest()
+    except OSError:
+        pass
+    return hashlib.sha256(storage_uri.encode("utf-8")).hexdigest()
+
+
+def _strip_sha256_prefix(value: str) -> str:
+    return value.split("sha256:", 1)[1] if value.startswith("sha256:") else value
+
+
 def _looks_like_image_filename(filename: str | None) -> bool:
     if not filename:
         return False
@@ -373,6 +603,8 @@ async def _upsert_asset(
     caption: str | None = None,
     ocr_text: str | None = None,
     surrounding_text: str | None = None,
+    width: int | None = None,
+    height: int | None = None,
     page_index: int | None = None,
     bbox_json: dict[str, Any] | None = None,
     anchor_json: dict[str, Any] | None = None,
@@ -411,8 +643,8 @@ async def _upsert_asset(
             mime_type=mime_type,
             storage_uri=storage_uri,
             sha256=sha256,
-            width=None,
-            height=None,
+            width=width,
+            height=height,
             page_index=page_index,
             bbox_json=bbox_json,
             anchor_json=anchor_json,
@@ -433,6 +665,8 @@ async def _upsert_asset(
         row.mime_type = mime_type
         row.storage_uri = storage_uri
         row.sha256 = sha256
+        row.width = width
+        row.height = height
         row.page_index = page_index
         row.bbox_json = bbox_json
         row.anchor_json = anchor_json
@@ -469,6 +703,7 @@ async def _upsert_evidence(
     content_hash: str,
     projection_profile: str,
     projection_config_hash: str,
+    asset_ref: str | None = None,
     is_active: bool = True,
     deleted_at: int | None = None,
 ) -> KnowledgeEvidence:
@@ -483,7 +718,7 @@ async def _upsert_evidence(
         chunk_index=chunk_index,
         chunk_total=chunk_total,
         retrieval_chunk_uid=retrieval_chunk_uid,
-        asset_ref=None,
+        asset_ref=asset_ref,
         page_index=page_index,
     )
     evidence_id = compute_knowledge_evidence_id(evidence_ref=evidence_ref)
