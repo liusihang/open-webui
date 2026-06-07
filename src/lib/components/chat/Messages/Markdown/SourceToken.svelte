@@ -66,7 +66,7 @@
 {#if sourceIds}
 	{#if (token?.ids ?? []).length == 1}
 		{@const id = token.ids[0]}
-		{@const identifier = token.citationIdentifiers ? token.citationIdentifiers[0] : id - 1}
+		{@const identifier = token.citationIdentifiers ? token.citationIdentifiers[0] : id}
 		{@const target = getTarget(identifier)}
 		{#if target?.preview}
 			<LinkPreview.Root openDelay={0} bind:open={openPreview}>
