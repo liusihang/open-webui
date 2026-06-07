@@ -1,11 +1,25 @@
 from __future__ import annotations
 
+import asyncio
+import inspect
+import os
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any, Literal, Mapping, Sequence
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from open_webui.models.evidence import KnowledgeVectorSpaceModel, KnowledgeVectorSpaces, compute_knowledge_evidence_embedding_id
+from open_webui.models.evidence import (
+    KnowledgeEvidenceAssetModel,
+    KnowledgeEvidenceAssets,
+    KnowledgeEvidenceEmbeddingModel,
+    KnowledgeEvidenceEmbeddings,
+    KnowledgeEvidenceModel,
+    KnowledgeVectorSpaceModel,
+    KnowledgeVectorSpaces,
+    compute_knowledge_evidence_embedding_id,
+)
+from open_webui.storage.provider import Storage
 from open_webui.retrieval.vector.main import VectorItem
 
 _MODALITIES = {"text", "image"}
@@ -28,12 +42,21 @@ _UNSAFE_IMAGE_DESCRIPTOR_KEYS = {
     "storage_uri",
     "url",
 }
+RAG_EMBEDDING_QUERY_PREFIX = os.getenv("RAG_EMBEDDING_QUERY_PREFIX", None)
+RAG_EMBEDDING_CONTENT_PREFIX = os.getenv("RAG_EMBEDDING_CONTENT_PREFIX", None)
 
 
 @dataclass(slots=True)
 class MultimodalVectorSpaceSelection:
     vector_space: KnowledgeVectorSpaceModel
     collection_name: str
+
+
+@dataclass(slots=True)
+class MultimodalEvidenceEmbeddingWriteResult:
+    embedding: KnowledgeEvidenceEmbeddingModel | None = None
+    vector_item: VectorItem | None = None
+    error: str | None = None
 
 
 @dataclass(slots=True)
@@ -332,3 +355,297 @@ def build_multimodal_vector_item(
         vector=list(vector),
         metadata=metadata,
     )
+
+
+def build_multimodal_query_embedding_input(
+    *,
+    query_text: str | None,
+    query_image_refs: Sequence[str] | None,
+    vector_space: KnowledgeVectorSpaceModel,
+) -> str | dict[str, Any]:
+    if query_image_refs:
+        return {
+            "query_text": query_text,
+            "query_image_refs": list(query_image_refs),
+            "query_modality": "mixed" if query_text else "image",
+            "knowledge_id": vector_space.knowledge_id,
+            "vector_space_id": vector_space.id,
+            "retrieval_profile": vector_space.retrieval_profile,
+            "embedding_model": vector_space.embedding_model,
+        }
+    return query_text or ""
+
+
+def build_multimodal_evidence_descriptor(
+    *,
+    evidence: KnowledgeEvidenceModel,
+    vector_space: KnowledgeVectorSpaceModel,
+    asset: KnowledgeEvidenceAssetModel | None = None,
+) -> NormalizedMultimodalEvidenceInput:
+    return normalize_multimodal_evidence_input(
+        {
+            "modality": evidence.modality,
+            "knowledge_id": evidence.knowledge_id,
+            "file_id": evidence.file_id,
+            "evidence_ref": evidence.evidence_ref,
+            "evidence_kind": evidence.evidence_kind,
+            "source_name": evidence.source_name,
+            "content_hash": evidence.content_hash,
+            "projection_config_hash": vector_space.projection_config_hash,
+            "projection_profile": vector_space.retrieval_profile,
+            "chunk_index": evidence.chunk_index,
+            "chunk_total": evidence.chunk_total,
+            "text": evidence.content_text,
+            "preview_text": evidence.preview_text,
+            "title": evidence.title,
+            "asset_ref": asset.asset_ref if asset else None,
+            "retrieval_chunk_uid": evidence.retrieval_chunk_uid,
+            "retrieval_chunk_row_id": evidence.retrieval_chunk_row_id,
+            "page_index": evidence.page_index,
+            "vector_space_id": vector_space.id,
+            "retrieval_profile": vector_space.retrieval_profile,
+        }
+    )
+
+
+async def build_multimodal_evidence_embedding_input(
+    *,
+    evidence: KnowledgeEvidenceModel,
+    asset: KnowledgeEvidenceAssetModel | None = None,
+) -> str | dict[str, Any]:
+    if evidence.modality != "image":
+        return evidence.content_text or evidence.preview_text or evidence.title or evidence.source_name
+
+    if asset is None and evidence.asset_id:
+        asset = await KnowledgeEvidenceAssets.get_asset_by_id(evidence.asset_id)
+    if asset is None:
+        raise ValueError(f"image evidence {evidence.evidence_ref!r} is missing an asset row")
+
+    file_path = await asyncio.to_thread(Storage.get_file, asset.storage_uri)
+    image_bytes = await asyncio.to_thread(Path(file_path).read_bytes)
+    return {
+        "modality": evidence.modality,
+        "evidence_ref": evidence.evidence_ref,
+        "knowledge_id": evidence.knowledge_id,
+        "file_id": evidence.file_id,
+        "asset_ref": asset.asset_ref,
+        "content_text": evidence.content_text,
+        "preview_text": evidence.preview_text,
+        "title": evidence.title,
+        "source_name": evidence.source_name,
+        "image_bytes": image_bytes,
+        "mime_type": asset.mime_type,
+        "width": asset.width,
+        "height": asset.height,
+        "page_index": asset.page_index,
+    }
+
+
+async def _await_maybe(value: Any) -> Any:
+    if inspect.isawaitable(value):
+        return await value
+    return value
+
+
+def _normalize_embedding_vector(value: Any) -> list[float | int]:
+    if hasattr(value, "tolist"):
+        value = value.tolist()
+    if isinstance(value, tuple):
+        value = list(value)
+    if isinstance(value, list) and value and isinstance(value[0], (list, tuple)):
+        if len(value) == 1:
+            value = list(value[0])
+    if not isinstance(value, list):
+        raise ValueError(f"Unexpected embedding return type: {type(value)!r}")
+    return [float(item) if isinstance(item, float) else item for item in value]
+
+
+def _normalize_search_rows(vector_result: Any) -> list[dict[str, Any]]:
+    if not vector_result:
+        return []
+
+    ids = getattr(vector_result, "ids", None) or []
+    metadatas = getattr(vector_result, "metadatas", None) or []
+    distances = getattr(vector_result, "distances", None) or []
+
+    rows: list[dict[str, Any]] = []
+    if not metadatas:
+        return rows
+
+    result_metadatas = metadatas[0] if metadatas else []
+    result_ids = ids[0] if ids else []
+    result_distances = distances[0] if distances else []
+    for index, metadata in enumerate(result_metadatas):
+        if not isinstance(metadata, Mapping):
+            continue
+        evidence_ref = str(metadata.get("evidence_ref") or "").strip()
+        if not evidence_ref:
+            continue
+        distance = result_distances[index] if index < len(result_distances) else None
+        score = None
+        if isinstance(distance, (int, float)):
+            score = 1.0 - float(distance)
+        elif isinstance(metadata.get("score"), (int, float)):
+            score = float(metadata["score"])
+        rows.append(
+            {
+                "evidence_ref": evidence_ref,
+                "score": score,
+                "distance": distance,
+                "vector_backend_id": result_ids[index] if index < len(result_ids) else metadata.get("vector_backend_id"),
+                "vector_space_id": metadata.get("vector_space_id"),
+                "modality": metadata.get("modality"),
+                "evidence_kind": metadata.get("evidence_kind"),
+            }
+        )
+    return rows
+
+
+def _dedupe_search_hits(hits: Sequence[dict[str, Any]]) -> list[dict[str, Any]]:
+    best_by_ref: dict[str, dict[str, Any]] = {}
+    for hit in hits:
+        evidence_ref = str(hit.get("evidence_ref") or "").strip()
+        if not evidence_ref:
+            continue
+        score = hit.get("score")
+        if evidence_ref not in best_by_ref:
+            best_by_ref[evidence_ref] = dict(hit)
+            continue
+        current_score = best_by_ref[evidence_ref].get("score")
+        if isinstance(score, (int, float)) and not isinstance(current_score, (int, float)):
+            best_by_ref[evidence_ref] = dict(hit)
+        elif isinstance(score, (int, float)) and isinstance(current_score, (int, float)) and score > current_score:
+            best_by_ref[evidence_ref] = dict(hit)
+    return sorted(
+        best_by_ref.values(),
+        key=lambda item: (
+            -(item.get("score") if isinstance(item.get("score"), (int, float)) else -1e9),
+            str(item.get("evidence_ref") or ""),
+        ),
+    )
+
+
+async def search_multimodal_evidence(
+    *,
+    query,
+    vector_spaces: Sequence[KnowledgeVectorSpaceModel],
+    embedding_function: Any | None = None,
+    vector_client: Any | None = None,
+    user: Mapping[str, Any] | None = None,
+    request: Any | None = None,
+    limit: int | None = None,
+) -> list[dict[str, Any]]:
+    if not vector_spaces:
+        return []
+
+    if embedding_function is None and request is not None:
+        embedding_function = getattr(getattr(request, "app", None), "state", None)
+        embedding_function = getattr(embedding_function, "EVIDENCE_RETRIEVAL_EMBEDDING", None) or getattr(
+            embedding_function, "EMBEDDING_FUNCTION", None
+        )
+    if vector_client is None and request is not None:
+        vector_client = getattr(getattr(request, "app", None), "state", None)
+        vector_client = getattr(vector_client, "EVIDENCE_RETRIEVAL_VECTOR_CLIENT", None)
+    if vector_client is None:
+        from open_webui.retrieval.vector.async_client import ASYNC_VECTOR_DB_CLIENT
+
+        vector_client = ASYNC_VECTOR_DB_CLIENT
+    if embedding_function is None:
+        raise ValueError("No evidence embedding function is configured")
+
+    search_limit = max(1, int(limit or getattr(query, "top_k", 8) or 8))
+    hits: list[dict[str, Any]] = []
+    query_has_images = bool(getattr(query, "query_image_refs", None))
+    query_text = getattr(query, "query_text", None)
+
+    for vector_space in vector_spaces:
+        if query_has_images and not vector_space.supports_image_query:
+            raise MultimodalVectorSpaceError(
+                "unsupported_image_query",
+                "Vector space does not support image queries",
+                details={
+                    "knowledge_id": vector_space.knowledge_id,
+                    "vector_space_id": vector_space.id,
+                    "retrieval_profile": vector_space.retrieval_profile,
+                },
+            )
+        if not query_has_images and not vector_space.supports_text_query:
+            raise MultimodalVectorSpaceError(
+                "unsupported_text_query",
+                "Vector space does not support text queries",
+                details={
+                    "knowledge_id": vector_space.knowledge_id,
+                    "vector_space_id": vector_space.id,
+                    "retrieval_profile": vector_space.retrieval_profile,
+                },
+            )
+
+        query_input = build_multimodal_query_embedding_input(
+            query_text=query_text,
+            query_image_refs=getattr(query, "query_image_refs", None),
+            vector_space=vector_space,
+        )
+        query_vector = _normalize_embedding_vector(
+            await _await_maybe(embedding_function(query_input, prefix=RAG_EMBEDDING_QUERY_PREFIX, user=user))
+        )
+        vector_result = await vector_client.search(
+            collection_name=f"{vector_space.knowledge_id}:{vector_space.id}",
+            vectors=[query_vector],
+            limit=search_limit,
+        )
+        hits.extend(_normalize_search_rows(vector_result))
+
+    return _dedupe_search_hits(hits)[:search_limit]
+
+
+async def upsert_multimodal_evidence_embedding(
+    *,
+    evidence: KnowledgeEvidenceModel,
+    vector_space: KnowledgeVectorSpaceModel,
+    embedding_function: Any,
+    vector_client: Any,
+    db: AsyncSession | None = None,
+) -> MultimodalEvidenceEmbeddingWriteResult:
+    asset = None
+    if evidence.asset_id:
+        asset = await KnowledgeEvidenceAssets.get_asset_by_id(evidence.asset_id, db=db)
+    descriptor = build_multimodal_evidence_descriptor(evidence=evidence, vector_space=vector_space, asset=asset)
+    collection_name = f"{vector_space.knowledge_id}:{vector_space.id}"
+    selection = MultimodalVectorSpaceSelection(vector_space=vector_space, collection_name=collection_name)
+    try:
+        embedding_input = await build_multimodal_evidence_embedding_input(evidence=evidence, asset=asset)
+        vector = _normalize_embedding_vector(
+            await _await_maybe(embedding_function(embedding_input, prefix=RAG_EMBEDDING_CONTENT_PREFIX, user=None))
+        )
+        vector_item = build_multimodal_vector_item(
+            vector=vector,
+            descriptor=descriptor,
+            selection=selection,
+        )
+        await vector_client.upsert(collection_name, [vector_item])
+        embedding = await KnowledgeEvidenceEmbeddings.create_embedding(
+            evidence_id=evidence.id,
+            evidence_ref=evidence.evidence_ref,
+            vector_space_id=vector_space.id,
+            vector_backend_collection=collection_name,
+            vector_backend_id=vector_item.id,
+            vector_role=vector_item.metadata["vector_role"],
+            embedding_format=vector_item.metadata["embedding_format"],
+            embedding_status="ready",
+            db=db,
+        )
+        return MultimodalEvidenceEmbeddingWriteResult(embedding=embedding, vector_item=vector_item)
+    except Exception as exc:
+        embedding = await KnowledgeEvidenceEmbeddings.create_embedding(
+            evidence_id=evidence.id,
+            evidence_ref=evidence.evidence_ref,
+            vector_space_id=vector_space.id,
+            vector_backend_collection=collection_name,
+            vector_backend_id=None,
+            vector_role=get_multimodal_vector_role(evidence.modality),
+            embedding_format="single_dense",
+            embedding_status="failed",
+            embedding_error=str(exc),
+            db=db,
+        )
+        return MultimodalEvidenceEmbeddingWriteResult(embedding=embedding, vector_item=None, error=str(exc))

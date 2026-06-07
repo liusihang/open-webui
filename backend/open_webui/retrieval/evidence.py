@@ -18,7 +18,11 @@ from open_webui.models.evidence import (
     KnowledgeVectorSpaceModel,
     KnowledgeVectorSpaces,
 )
-from open_webui.retrieval.vector.multimodal import MultimodalVectorSpaceError, resolve_multimodal_vector_space
+from open_webui.retrieval.vector.multimodal import (
+    MultimodalVectorSpaceError,
+    resolve_multimodal_vector_space,
+    search_multimodal_evidence,
+)
 from open_webui.storage.provider import Storage
 
 
@@ -648,21 +652,19 @@ async def query_knowledge_evidence_runtime(
 
     search_adapter = getattr(getattr(getattr(request, 'app', None), 'state', None), 'EVIDENCE_RETRIEVAL_SEARCH', None)
     if not callable(search_adapter):
-        return build_query_knowledge_evidence_response(
-            query=query,
-            error=EvidenceToolError(
-                'vector_space_unavailable',
-                'Evidence retrieval search adapter is not configured',
-            ),
-        )
+        search_adapter = search_multimodal_evidence
 
     vector_spaces = await _resolve_query_vector_spaces(query, knowledge_ids=scoped_knowledge_ids)
-    hits = await search_adapter(
-        query=query,
-        vector_spaces=vector_spaces,
-        user=user,
-        request=request,
-    )
+    try:
+        hits = await search_adapter(
+            query=query,
+            vector_spaces=vector_spaces,
+            user=user,
+            request=request,
+        )
+    except MultimodalVectorSpaceError as e:
+        code = e.code if e.code in EVIDENCE_TOOL_ERROR_CODES else 'vector_space_unavailable'
+        raise EvidenceToolError(code, e.message, details=e.details) from e
     results, model_only_files, _ = await _hydrate_evidence_results(
         hits or [],
         allowed_knowledge_ids=allowed_knowledge_ids,

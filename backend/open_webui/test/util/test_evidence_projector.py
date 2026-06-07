@@ -318,9 +318,17 @@ async def test_evidence_job_branch_uses_existing_job_state_surface(monkeypatch):
             evidence_refs=["ke:kb-1:file-doc:text_chunk:0:abc"],
         )
 
+    async def fake_write_embeddings(evidence_refs, db=None):
+        assert evidence_refs == ["ke:kb-1:file-doc:text_chunk:0:abc"]
+        return indexing_mod.EvidenceEmbeddingProjectionResult(
+            written=1,
+            evidence_refs=list(evidence_refs),
+        )
+
     monkeypatch.setattr(indexing_mod, "RetrievalIndexJobs", FakeJobs())
     monkeypatch.setattr(indexing_mod, "RetrievalIndexStates", FakeStates())
     monkeypatch.setattr(indexing_mod, "project_evidence_from_job_payload", fake_project)
+    monkeypatch.setattr(indexing_mod, "write_projected_evidence_embeddings", fake_write_embeddings)
 
     response = await indexing_mod.run_retrieval_index_job("job-project")
 

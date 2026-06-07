@@ -9,6 +9,7 @@ import uuid
 from typing import Any, Iterable, Protocol
 
 from open_webui.internal.db import get_async_db
+from open_webui.models.evidence import KnowledgeEvidences
 from open_webui.models.retrieval_chunks import (
     RetrievalChunk,
     compute_chunk_uid,
@@ -25,6 +26,11 @@ from open_webui.models.retrieval_indexes import (
 )
 from open_webui.retrieval.evidence_projector import project_evidence_from_job_payload
 from open_webui.retrieval.lexical.opensearch import OpenSearchLexicalClient
+from open_webui.retrieval.vector.multimodal import (
+    MultimodalVectorSpaceError,
+    resolve_multimodal_vector_space,
+    upsert_multimodal_evidence_embedding,
+)
 from sqlalchemy import or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -64,6 +70,18 @@ class ManifestDeactivationResult:
     lexical_delete_executed: int = 0
     chunk_uids: list[str] = field(default_factory=list)
     delete_job_id: str | None = None
+
+    def model_dump(self) -> dict[str, Any]:
+        return asdict(self)
+
+
+@dataclass
+class EvidenceEmbeddingProjectionResult:
+    written: int = 0
+    skipped: int = 0
+    failed: int = 0
+    evidence_refs: list[str] = field(default_factory=list)
+    failures: list[dict[str, Any]] = field(default_factory=list)
 
     def model_dump(self) -> dict[str, Any]:
         return asdict(self)
@@ -737,6 +755,98 @@ async def enqueue_evidence_projection_job(
     return {"job": job.model_dump(), "state": state.model_dump()}
 
 
+def _get_evidence_embedding_runtime() -> tuple[Any | None, Any | None]:
+    try:
+        from open_webui.main import app as webui_app
+    except Exception:
+        return None, None
+
+    state = getattr(webui_app, "state", None)
+    if state is None:
+        return None, None
+
+    embedding_function = getattr(state, "EVIDENCE_RETRIEVAL_EMBEDDING", None) or getattr(
+        state, "EMBEDDING_FUNCTION", None
+    )
+    vector_client = getattr(state, "EVIDENCE_RETRIEVAL_VECTOR_CLIENT", None)
+    if vector_client is None:
+        from open_webui.retrieval.vector.async_client import ASYNC_VECTOR_DB_CLIENT
+
+        vector_client = ASYNC_VECTOR_DB_CLIENT
+    return embedding_function, vector_client
+
+
+async def write_projected_evidence_embeddings(
+    evidence_refs: list[str],
+    *,
+    db: AsyncSession | None = None,
+) -> EvidenceEmbeddingProjectionResult:
+    result = EvidenceEmbeddingProjectionResult()
+    if not evidence_refs:
+        return result
+
+    embedding_function, vector_client = _get_evidence_embedding_runtime()
+    if embedding_function is None:
+        result.skipped = len(evidence_refs)
+        return result
+
+    for evidence_ref in evidence_refs:
+        evidence = await KnowledgeEvidences.get_evidence_by_ref(evidence_ref, db=db)
+        if evidence is None:
+            result.skipped += 1
+            continue
+
+        try:
+            vector_space = await resolve_multimodal_vector_space(
+                knowledge_id=evidence.knowledge_id,
+                retrieval_profile=evidence.projection_profile,
+                evidence_modality=evidence.modality,
+                db=db,
+            )
+        except MultimodalVectorSpaceError as exc:
+            if exc.code == "vector_space_unavailable":
+                result.skipped += 1
+                continue
+            result.failed += 1
+            result.failures.append(
+                {
+                    "evidence_ref": evidence_ref,
+                    "error": str(exc),
+                }
+            )
+            continue
+
+        try:
+            write_result = await upsert_multimodal_evidence_embedding(
+                evidence=evidence,
+                vector_space=vector_space.vector_space,
+                embedding_function=embedding_function,
+                vector_client=vector_client,
+                db=db,
+            )
+            if write_result.embedding and write_result.embedding.embedding_status == "ready":
+                result.written += 1
+                result.evidence_refs.append(evidence_ref)
+            else:
+                result.failed += 1
+                result.failures.append(
+                    {
+                        "evidence_ref": evidence_ref,
+                        "error": write_result.error or "embedding write failed",
+                    }
+                )
+        except Exception as exc:
+            result.failed += 1
+            result.failures.append(
+                {
+                    "evidence_ref": evidence_ref,
+                    "error": str(exc),
+                }
+            )
+
+    return result
+
+
 async def run_retrieval_index_job(job_id: str) -> dict[str, Any]:
     job = await RetrievalIndexJobs.get_job_by_id(job_id)
     if job is None:
@@ -784,9 +894,13 @@ async def run_retrieval_index_job(job_id: str) -> dict[str, Any]:
 
         if job.index_kind == "project":
             evidence_result = await project_evidence_from_job_payload(job.payload or {})
-            payload = {"evidence": evidence_result.model_dump()}
-            final_status = "succeeded" if evidence_result.failed == 0 else "failed"
-            state_status = "ready" if evidence_result.failed == 0 else "failed"
+            embedding_result = await write_projected_evidence_embeddings(evidence_result.evidence_refs)
+            payload = {
+                "evidence": evidence_result.model_dump(),
+                "evidence_embeddings": embedding_result.model_dump(),
+            }
+            final_status = "succeeded" if evidence_result.failed == 0 and embedding_result.failed == 0 else "failed"
+            state_status = "ready" if final_status == "succeeded" else "failed"
             state_count = max(
                 evidence_result.scanned_chunks,
                 evidence_result.image_assets_upserted,
@@ -803,13 +917,21 @@ async def run_retrieval_index_job(job_id: str) -> dict[str, Any]:
                 active_chunk_count=state_count,
                 indexed_chunk_count=evidence_result.text_evidence_upserted + evidence_result.image_evidence_upserted,
                 last_job_id=job.job_id,
-                error=(evidence_result.failures[0]["error"] if evidence_result.failures else None),
+                error=(
+                    evidence_result.failures[0]["error"]
+                    if evidence_result.failures
+                    else (embedding_result.failures[0]["error"] if embedding_result.failures else None)
+                ),
             )
             updated = await RetrievalIndexJobs.update_job_status(
                 job_id,
                 status=final_status,
                 result=payload,
-                error=(evidence_result.failures[0]["error"] if evidence_result.failures else None),
+                error=(
+                    evidence_result.failures[0]["error"]
+                    if evidence_result.failures
+                    else (embedding_result.failures[0]["error"] if embedding_result.failures else None)
+                ),
             )
             return {"job": updated.model_dump() if updated else None, "result": payload}
 

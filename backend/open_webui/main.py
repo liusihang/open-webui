@@ -594,6 +594,8 @@ from open_webui.routers.retrieval import (
     get_ef,
     get_rf,
 )
+from open_webui.retrieval.vector.async_client import ASYNC_VECTOR_DB_CLIENT
+from open_webui.retrieval.vector.multimodal import search_multimodal_evidence
 
 
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -1700,6 +1702,9 @@ app.state.EMBEDDING_FUNCTION = get_embedding_function(
     enable_async=app.state.config.ENABLE_ASYNC_EMBEDDING,
     concurrent_requests=app.state.config.RAG_EMBEDDING_CONCURRENT_REQUESTS,
 )
+app.state.EVIDENCE_RETRIEVAL_EMBEDDING = app.state.EMBEDDING_FUNCTION
+app.state.EVIDENCE_RETRIEVAL_VECTOR_CLIENT = ASYNC_VECTOR_DB_CLIENT
+app.state.EVIDENCE_RETRIEVAL_SEARCH = search_multimodal_evidence
 
 app.state.RERANKING_FUNCTION = get_reranking_function(
     app.state.config.RAG_RERANKING_ENGINE,
