@@ -393,6 +393,7 @@ def _safe_evidence_url_part(evidence_ref: str) -> str:
 
 def _build_evidence_source(evidence: KnowledgeEvidenceModel) -> dict[str, Any]:
     ref_path = _safe_evidence_url_part(evidence.evidence_ref)
+    content_url = f'/api/v1/knowledge/{evidence.knowledge_id}/evidence/{ref_path}/content'
     source: dict[str, Any] = {
         'id': evidence.evidence_ref,
         'name': evidence.source_name,
@@ -402,10 +403,10 @@ def _build_evidence_source(evidence: KnowledgeEvidenceModel) -> dict[str, Any]:
         'evidence_ref': evidence.evidence_ref,
         'modality': evidence.modality,
         'evidence_kind': evidence.evidence_kind,
-        'content_url': f'/api/v1/knowledge/{evidence.knowledge_id}/evidence/{ref_path}/content',
+        'content_url': content_url,
     }
     if evidence.modality == 'image':
-        source['preview_url'] = f'/api/v1/knowledge/{evidence.knowledge_id}/evidence/{ref_path}/thumbnail'
+        source['thumbnail_url'] = f'/api/v1/knowledge/{evidence.knowledge_id}/evidence/{ref_path}/thumbnail'
     if evidence.page_index is not None:
         source['page_index'] = evidence.page_index
     if evidence.title:
@@ -413,7 +414,38 @@ def _build_evidence_source(evidence: KnowledgeEvidenceModel) -> dict[str, Any]:
     return source
 
 
-def _build_evidence_metadata(evidence: KnowledgeEvidenceModel, *, score: float | int | None = None) -> dict[str, Any]:
+def _build_evidence_preview(evidence: KnowledgeEvidenceModel, source: Mapping[str, Any]) -> dict[str, Any]:
+    if evidence.modality == 'image':
+        preview: dict[str, Any] = {
+            'type': 'image',
+            'caption': evidence.preview_text or evidence.content_text or evidence.title or '',
+            'source': evidence.source_name,
+            'thumbnail_url': source.get('thumbnail_url'),
+            'content_url': source.get('content_url'),
+        }
+        if evidence.content_text:
+            preview['text'] = evidence.content_text
+        if evidence.page_index is not None:
+            preview['page'] = evidence.page_index
+        return {key: value for key, value in preview.items() if value is not None}
+
+    preview = {
+        'type': 'text',
+        'text': evidence.preview_text or evidence.content_text or evidence.title or '',
+        'source': evidence.source_name,
+        'content_url': source.get('content_url'),
+    }
+    if evidence.page_index is not None:
+        preview['page'] = evidence.page_index
+    return {key: value for key, value in preview.items() if value is not None}
+
+
+def _build_evidence_metadata(
+    evidence: KnowledgeEvidenceModel,
+    *,
+    source: Mapping[str, Any],
+    score: float | int | None = None,
+) -> dict[str, Any]:
     metadata: dict[str, Any] = {
         'source': evidence.source_name,
         'name': evidence.source_name,
@@ -427,7 +459,11 @@ def _build_evidence_metadata(evidence: KnowledgeEvidenceModel, *, score: float |
         'projection_config_hash': evidence.projection_config_hash,
         'chunk_index': evidence.chunk_index,
         'chunk_total': evidence.chunk_total,
+        'content_url': source.get('content_url'),
+        'preview': _build_evidence_preview(evidence, source),
     }
+    if source.get('thumbnail_url'):
+        metadata['thumbnail_url'] = source['thumbnail_url']
     if evidence.retrieval_chunk_uid:
         metadata['retrieval_chunk_uid'] = evidence.retrieval_chunk_uid
     if evidence.retrieval_chunk_row_id is not None:
@@ -453,6 +489,7 @@ def _serialize_evidence_result(
     *,
     score: float | int | None = None,
 ) -> dict[str, Any]:
+    source = _build_evidence_source(evidence)
     result = {
         'evidence_ref': evidence.evidence_ref,
         'modality': evidence.modality,
@@ -460,8 +497,8 @@ def _serialize_evidence_result(
         'title': evidence.title,
         'content': _compact_evidence_content(evidence),
         'preview_text': evidence.preview_text,
-        'source': _build_evidence_source(evidence),
-        'metadata': _build_evidence_metadata(evidence, score=score),
+        'source': source,
+        'metadata': _build_evidence_metadata(evidence, source=source, score=score),
     }
     if score is not None:
         result['score'] = score
@@ -572,6 +609,14 @@ async def query_knowledge_evidence_runtime(
     allowed_knowledge_ids = set(scoped_knowledge_ids)
 
     if query.evidence_refs:
+        if not allowed_knowledge_ids:
+            return build_query_knowledge_evidence_response(
+                query=query,
+                error=EvidenceToolError(
+                    'vector_space_unavailable',
+                    'Evidence retrieval requires a scoped knowledge base',
+                ),
+            )
         results, model_only_files, missing_refs = await _hydrate_evidence_results(
             query.evidence_refs,
             allowed_knowledge_ids=allowed_knowledge_ids,

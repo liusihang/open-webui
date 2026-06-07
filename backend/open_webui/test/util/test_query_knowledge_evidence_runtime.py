@@ -134,6 +134,7 @@ async def test_query_knowledge_evidence_hydrates_exact_sql_truth_rows(monkeypatc
 
     result = await query_knowledge_evidence(
         evidence_refs=["ke:kb-1:file-text:text_chunk:1:abc"],
+        knowledge_ids=["kb-1"],
         __request__=_FakeRequest(),
         __user__={"id": "user-1", "role": "user"},
         __metadata__={"files": []},
@@ -147,7 +148,39 @@ async def test_query_knowledge_evidence_hydrates_exact_sql_truth_rows(monkeypatc
     assert payload["results"][0]["content"] == "The capsid shell has a conserved HK97-like fold."
     assert payload["results"][0]["source"]["file_id"] == "file-text"
     assert payload["results"][0]["source"]["evidence_ref"] == "ke:kb-1:file-text:text_chunk:1:abc"
+    assert payload["results"][0]["source"]["content_url"]
+    assert "preview_url" not in payload["results"][0]["source"]
+    assert payload["results"][0]["metadata"]["content_url"] == payload["results"][0]["source"]["content_url"]
+    assert payload["results"][0]["metadata"]["preview"] == {
+        "type": "text",
+        "text": "Conserved HK97-like fold.",
+        "source": "paper.pdf",
+        "page": 2,
+        "content_url": payload["results"][0]["source"]["content_url"],
+    }
     assert payload["model_only_files"] == []
+
+
+@pytest.mark.asyncio
+async def test_query_knowledge_evidence_rejects_exact_refs_without_scope(monkeypatch):
+    async def fake_get_evidence_by_ref(ref, db=None):
+        return _text_evidence(ref)
+
+    monkeypatch.setattr(evidence_mod.KnowledgeEvidences, "get_evidence_by_ref", fake_get_evidence_by_ref)
+
+    result = await query_knowledge_evidence(
+        evidence_refs=["ke:kb-1:file-text:text_chunk:1:abc"],
+        __request__=_FakeRequest(),
+        __user__={"id": "user-1", "role": "user"},
+        __metadata__={"files": []},
+    )
+
+    payload = json.loads(result)
+
+    assert payload["ok"] is False
+    assert payload["results"] == []
+    assert payload["error"]["code"] == "vector_space_unavailable"
+    assert payload["error"]["message"] == "Evidence retrieval requires a scoped knowledge base"
 
 
 @pytest.mark.asyncio
@@ -236,6 +269,7 @@ async def test_query_knowledge_evidence_adds_budgeted_model_only_image_files(mon
 
     result = await query_knowledge_evidence(
         evidence_refs=["ke:kb-1:file-img:standalone_image:1:def"],
+        knowledge_ids=["kb-1"],
         include_images=True,
         __request__=_FakeRequest(),
         __user__={"id": "user-1", "role": "user"},
@@ -247,6 +281,18 @@ async def test_query_knowledge_evidence_adds_budgeted_model_only_image_files(mon
     assert payload["ok"] is True
     assert payload["results"][0]["content"] == "A microscopy panel with ring-like capsid particles."
     assert "data:image" not in json.dumps(payload["results"])
+    assert "preview_url" not in payload["results"][0]["source"]
+    assert payload["results"][0]["source"]["thumbnail_url"]
+    assert payload["results"][0]["metadata"]["thumbnail_url"] == payload["results"][0]["source"]["thumbnail_url"]
+    assert payload["results"][0]["metadata"]["content_url"] == payload["results"][0]["source"]["content_url"]
+    assert payload["results"][0]["metadata"]["preview"] == {
+        "type": "image",
+        "caption": "Ring-like capsid particles.",
+        "text": "A microscopy panel with ring-like capsid particles.",
+        "source": "image.png",
+        "thumbnail_url": payload["results"][0]["source"]["thumbnail_url"],
+        "content_url": payload["results"][0]["source"]["content_url"],
+    }
     assert payload["model_only_files"][0]["type"] == "image"
     assert payload["model_only_files"][0]["evidence_ref"] == "ke:kb-1:file-img:standalone_image:1:def"
     assert payload["model_only_files"][0]["url"].startswith("data:image/png;base64,")
@@ -292,7 +338,68 @@ async def test_process_tool_result_moves_evidence_model_images_out_of_text(monke
     ]
 
 
-def test_citation_sources_from_query_knowledge_evidence_preserve_typed_metadata():
+def test_citation_sources_from_query_knowledge_evidence_include_text_preview_metadata():
+    payload = {
+        "ok": True,
+        "results": [
+            {
+                "evidence_ref": "ke:kb-1:file-text:text_chunk:1:abc",
+                "modality": "text",
+                "evidence_kind": "text_chunk",
+                "content": "The capsid shell has a conserved HK97-like fold.",
+                "source": {
+                    "id": "ke:kb-1:file-text:text_chunk:1:abc",
+                    "file_id": "file-text",
+                    "knowledge_id": "kb-1",
+                    "name": "paper.pdf",
+                    "type": "evidence",
+                    "evidence_ref": "ke:kb-1:file-text:text_chunk:1:abc",
+                    "modality": "text",
+                    "evidence_kind": "text_chunk",
+                    "content_url": "/api/v1/knowledge/kb-1/evidence/ref/content",
+                },
+                "metadata": {
+                    "evidence_ref": "ke:kb-1:file-text:text_chunk:1:abc",
+                    "file_id": "file-text",
+                    "knowledge_id": "kb-1",
+                    "source": "paper.pdf",
+                    "modality": "text",
+                    "evidence_kind": "text_chunk",
+                    "content_url": "/api/v1/knowledge/kb-1/evidence/ref/content",
+                    "preview": {
+                        "type": "text",
+                        "text": "Conserved HK97-like fold.",
+                        "source": "paper.pdf",
+                        "page": 2,
+                        "content_url": "/api/v1/knowledge/kb-1/evidence/ref/content",
+                    },
+                },
+            }
+        ],
+        "model_only_files": [],
+    }
+
+    sources = get_citation_source_from_tool_result(
+        "query_knowledge_evidence",
+        {},
+        json.dumps(payload),
+        "tool-call-1",
+    )
+
+    assert sources == [
+        {
+            "source": payload["results"][0]["source"],
+            "document": ["The capsid shell has a conserved HK97-like fold."],
+            "metadata": [payload["results"][0]["metadata"]],
+        }
+    ]
+    metadata = sources[0]["metadata"][0]
+    assert metadata["content_url"] == "/api/v1/knowledge/kb-1/evidence/ref/content"
+    assert metadata["preview"]["type"] == "text"
+    assert metadata["preview"]["text"] == "Conserved HK97-like fold."
+
+
+def test_citation_sources_from_query_knowledge_evidence_include_image_preview_metadata():
     payload = {
         "ok": True,
         "results": [
@@ -310,8 +417,8 @@ def test_citation_sources_from_query_knowledge_evidence_preserve_typed_metadata(
                     "evidence_ref": "ke:kb-1:file-img:standalone_image:1:def",
                     "modality": "image",
                     "evidence_kind": "standalone_image",
-                    "preview_url": "/api/v1/knowledge/kb-1/evidence/ke:kb-1:file-img:standalone_image:1:def/thumbnail",
-                    "content_url": "/api/v1/knowledge/kb-1/evidence/ke:kb-1:file-img:standalone_image:1:def/content",
+                    "thumbnail_url": "/api/v1/knowledge/kb-1/evidence/ref/thumbnail",
+                    "content_url": "/api/v1/knowledge/kb-1/evidence/ref/content",
                 },
                 "metadata": {
                     "evidence_ref": "ke:kb-1:file-img:standalone_image:1:def",
@@ -320,6 +427,15 @@ def test_citation_sources_from_query_knowledge_evidence_preserve_typed_metadata(
                     "source": "image.png",
                     "modality": "image",
                     "evidence_kind": "standalone_image",
+                    "thumbnail_url": "/api/v1/knowledge/kb-1/evidence/ref/thumbnail",
+                    "content_url": "/api/v1/knowledge/kb-1/evidence/ref/content",
+                    "preview": {
+                        "type": "image",
+                        "caption": "Ring-like capsid particles.",
+                        "source": "image.png",
+                        "thumbnail_url": "/api/v1/knowledge/kb-1/evidence/ref/thumbnail",
+                        "content_url": "/api/v1/knowledge/kb-1/evidence/ref/content",
+                    },
                 },
             }
         ],
@@ -340,3 +456,8 @@ def test_citation_sources_from_query_knowledge_evidence_preserve_typed_metadata(
             "metadata": [payload["results"][0]["metadata"]],
         }
     ]
+    metadata = sources[0]["metadata"][0]
+    assert metadata["thumbnail_url"] == "/api/v1/knowledge/kb-1/evidence/ref/thumbnail"
+    assert metadata["content_url"] == "/api/v1/knowledge/kb-1/evidence/ref/content"
+    assert metadata["preview"]["type"] == "image"
+    assert metadata["preview"]["caption"] == "Ring-like capsid particles."

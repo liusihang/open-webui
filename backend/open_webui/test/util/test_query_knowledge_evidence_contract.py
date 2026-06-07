@@ -91,6 +91,7 @@ async def test_query_knowledge_evidence_returns_compact_evidence_not_found_paylo
 
     result = await query_knowledge_evidence(
         evidence_refs=['ke:missing'],
+        knowledge_ids=['kb-1'],
         __request__=_FakeRequest(),
         __user__={'id': 'user-1', 'role': 'user'},
         __metadata__={'files': []},
