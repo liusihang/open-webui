@@ -24,6 +24,13 @@ from open_webui.models.memories import Memories
 from open_webui.models.messages import Message, Messages
 from open_webui.models.notes import Notes
 from open_webui.models.users import UserModel
+from open_webui.retrieval.evidence import (
+    EvidenceToolError,
+    build_query_knowledge_evidence_response,
+    collect_allowlisted_query_image_refs,
+    normalize_query_knowledge_evidence_args,
+    resolve_query_image_refs,
+)
 from open_webui.retrieval.utils import get_content_from_url, get_sources_from_items
 from open_webui.retrieval.vector.async_client import ASYNC_VECTOR_DB_CLIENT
 from open_webui.routers.images import (
@@ -2849,6 +2856,86 @@ async def query_knowledge_files(
     except Exception as e:
         log.exception(f'query_knowledge_files error: {e}')
         return json.dumps({'error': str(e)})
+
+
+async def query_knowledge_evidence(
+    evidence_refs: list[str] | str | None = None,
+    query_text: str | None = None,
+    query_image_refs: list[str] | str | None = None,
+    knowledge_ids: list[str] | str | None = None,
+    collection_ids: list[str] | str | None = None,
+    modalities: list[str] | str | None = None,
+    count: int | str | None = None,
+    top_k: int | str | None = None,
+    rerank: bool | str | None = None,
+    include_images: bool | str | None = None,
+    __request__: Request = None,
+    __user__: dict = None,
+    __metadata__: dict = None,
+    __model_knowledge__: list[dict] = None,
+) -> str:
+    """
+    Query typed knowledge evidence by evidence refs, text, image refs, or both.
+
+    This is the contract/safety skeleton for multimodal evidence retrieval.
+    The actual retrieval/embedding worker is not wired in this thread yet.
+    """
+    normalized = normalize_query_knowledge_evidence_args(
+        evidence_refs=evidence_refs,
+        query_text=query_text,
+        query_image_refs=query_image_refs,
+        knowledge_ids=knowledge_ids,
+        collection_ids=collection_ids,
+        modalities=modalities,
+        count=count,
+        top_k=top_k,
+        rerank=rerank,
+        include_images=include_images,
+    )
+
+    try:
+        allowed_query_image_refs = collect_allowlisted_query_image_refs(__metadata__)
+        acl_resolver = None
+        if __request__ is not None:
+            acl_resolver = getattr(__request__.app.state, 'QUERY_IMAGE_REF_ACL_CHECK', None)
+            if not callable(acl_resolver):
+                acl_resolver = None
+
+        normalized.query_image_refs = resolve_query_image_refs(
+            normalized.query_image_refs,
+            allowed_refs=allowed_query_image_refs,
+            acl_resolver=acl_resolver,
+        )
+
+        if normalized.evidence_refs:
+            return build_query_knowledge_evidence_response(
+                query=normalized,
+                error=EvidenceToolError(
+                    'evidence_not_found',
+                    'Evidence hydration is not wired yet',
+                    details={'evidence_refs': normalized.evidence_refs},
+                ),
+            )
+
+        if normalized.query_image_refs:
+            return build_query_knowledge_evidence_response(
+                query=normalized,
+                error=EvidenceToolError(
+                    'unsupported_image_query',
+                    'query_image_refs are accepted by the contract, but image query retrieval is not wired yet',
+                    details={'query_image_refs': normalized.query_image_refs},
+                ),
+            )
+
+        return build_query_knowledge_evidence_response(
+            query=normalized,
+            error=EvidenceToolError(
+                'vector_space_unavailable',
+                'Evidence retrieval vector space is not wired yet',
+            ),
+        )
+    except EvidenceToolError as e:
+        return build_query_knowledge_evidence_response(query=normalized, error=e)
 
 
 async def query_knowledge_bases(

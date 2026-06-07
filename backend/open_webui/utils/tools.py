@@ -70,6 +70,7 @@ from open_webui.tools.builtin import (
     list_knowledge_bases,
     list_memories,
     query_knowledge_bases,
+    query_knowledge_evidence,
     query_knowledge_files,
     replace_memory_content,
     replace_note_content,
@@ -100,6 +101,7 @@ from open_webui.tools.builtin import (
 )
 from open_webui.utils.access_control import has_access, has_connection_access, has_permission
 from open_webui.utils.headers import get_custom_headers, include_user_info_headers
+from open_webui.retrieval.evidence import has_evidence_enabled_knowledge_scope
 from open_webui.utils.misc import is_string_allowed
 from open_webui.utils.plugin import load_tool_module_by_id
 from pydantic import BaseModel, Field, create_model
@@ -525,6 +527,15 @@ async def get_builtin_tools(
                     view_knowledge_file,
                 ]
             )
+
+        if model_knowledge and has_evidence_enabled_knowledge_scope(model_knowledge):
+            if query_knowledge_evidence not in builtin_functions:
+                insert_at = (
+                    builtin_functions.index(query_knowledge_files)
+                    if query_knowledge_files in builtin_functions
+                    else len(builtin_functions)
+                )
+                builtin_functions.insert(insert_at, query_knowledge_evidence)
 
     # Chats tools - search and fetch user's chat history
     if is_builtin_tool_enabled('chats'):
