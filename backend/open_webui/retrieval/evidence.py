@@ -21,6 +21,14 @@ _DEFAULT_IMAGE_QUERY_BUDGET = 4
 _EVIDENCE_MODE_VALUES = {'evidence', 'evidence_dual_write', 'evidence_primary'}
 _TRUTHY = {'1', 'true', 'yes', 'on'}
 _FALSEY = {'0', 'false', 'no', 'off', ''}
+_ALLOWED_QUERY_IMAGE_REF_PREFIXES = (
+    'chat:file:',
+    'chat:image:',
+    'ka:',
+    'ke:',
+    'asset:',
+    'evidence:',
+)
 
 
 def _dedupe_preserve_order(values: Iterable[str]) -> list[str]:
@@ -102,6 +110,23 @@ def _coerce_modalities(value: Any) -> list[str]:
         if normalized in {'text', 'image'}:
             modalities.append(normalized)
     return _dedupe_preserve_order(modalities)
+
+
+def _is_allowlisted_query_image_ref(ref: Any) -> bool:
+    if not isinstance(ref, str):
+        return False
+
+    candidate = ref.strip()
+    if not candidate:
+        return False
+
+    lowered = candidate.lower()
+    if lowered.startswith(('http://', 'https://', 'data:', 'file://')):
+        return False
+    if candidate.startswith(('/', '.', '~')):
+        return False
+
+    return any(candidate.startswith(prefix) for prefix in _ALLOWED_QUERY_IMAGE_REF_PREFIXES)
 
 
 @dataclass(slots=True)
@@ -204,18 +229,20 @@ def collect_allowlisted_query_image_refs(metadata: Mapping[str, Any] | None) -> 
             continue
 
         if file_ref := file_item.get('id'):
-            refs.append(str(file_ref))
+            if _is_allowlisted_query_image_ref(file_ref):
+                refs.append(str(file_ref))
         if file_ref := file_item.get('file_id'):
-            refs.append(str(file_ref))
-        if file_ref := file_item.get('url'):
-            refs.append(str(file_ref))
+            if _is_allowlisted_query_image_ref(file_ref):
+                refs.append(str(file_ref))
 
         image_url = file_item.get('image_url')
         if isinstance(image_url, Mapping):
             if ref := image_url.get('url'):
-                refs.append(str(ref))
+                if _is_allowlisted_query_image_ref(ref):
+                    refs.append(str(ref))
         elif isinstance(image_url, str):
-            refs.append(image_url)
+            if _is_allowlisted_query_image_ref(image_url):
+                refs.append(image_url)
 
     return _dedupe_preserve_order(refs)
 
@@ -239,17 +266,16 @@ def resolve_query_image_refs(
     allowed = {str(ref).strip() for ref in allowed_refs or [] if str(ref).strip()}
     resolved_refs: list[str] = []
     for ref in refs:
-        lowered = ref.lower()
-        if lowered.startswith('data:') or lowered.startswith('file://'):
+        if not _is_allowlisted_query_image_ref(ref):
             raise EvidenceToolError(
                 'forbidden_image_ref',
-                'query_image_refs may only reference allowlisted chat/files refs',
+                'query_image_refs must use an allowlisted ref scheme',
                 details={'ref': ref},
             )
         if ref not in allowed:
             raise EvidenceToolError(
                 'forbidden_image_ref',
-                'query_image_refs may only reference allowlisted chat/files refs',
+                'query_image_refs must reference an allowlisted chat/files ref',
                 details={'ref': ref},
             )
         if acl_resolver is not None and not acl_resolver(ref):

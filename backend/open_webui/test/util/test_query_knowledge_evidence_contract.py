@@ -49,6 +49,9 @@ def test_collect_allowlisted_query_image_refs_uses_metadata_file_context() -> No
         {
             'files': [
                 {'id': 'chat:file:abc', 'type': 'image', 'url': '/api/v1/files/chat-file-abc/content'},
+                {'id': 'https://example.com/image.png', 'type': 'image'},
+                {'file_id': '/tmp/image.png', 'type': 'image'},
+                {'image_url': {'url': 'data:image/png;base64,AAAA'}, 'type': 'image'},
                 {'file_id': 'chat:file:def', 'type': 'image', 'image_url': {'url': 'chat:file:def'}},
                 {'id': 'note-1', 'type': 'note'},
             ]
@@ -57,7 +60,6 @@ def test_collect_allowlisted_query_image_refs_uses_metadata_file_context() -> No
 
     assert refs == [
         'chat:file:abc',
-        '/api/v1/files/chat-file-abc/content',
         'chat:file:def',
     ]
 
@@ -68,6 +70,8 @@ def test_collect_allowlisted_query_image_refs_uses_metadata_file_context() -> No
         'data:image/png;base64,AAAA',
         'https://example.com/image.png',
         '/tmp/image.png',
+        'file://localhost/tmp/image.png',
+        './relative/image.png',
     ],
 )
 def test_resolve_query_image_refs_rejects_non_allowlisted_refs(query_image_ref: str) -> None:
@@ -125,6 +129,9 @@ async def test_query_knowledge_evidence_returns_unsupported_image_query_for_allo
         __metadata__={
             'files': [
                 {'id': 'chat:file:abc', 'type': 'image', 'url': 'chat:file:abc'},
+                {'id': 'https://example.com/image.png', 'type': 'image'},
+                {'file_id': '/tmp/image.png', 'type': 'image'},
+                {'image_url': {'url': 'data:image/png;base64,AAAA'}, 'type': 'image'},
             ]
         },
     )
@@ -134,6 +141,39 @@ async def test_query_knowledge_evidence_returns_unsupported_image_query_for_allo
     assert payload['ok'] is False
     assert payload['error']['code'] == 'unsupported_image_query'
     assert payload['query']['query_image_refs'] == ['chat:file:abc']
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    'query_image_ref',
+    [
+        'https://example.com/image.png',
+        '/tmp/image.png',
+        'data:image/png;base64,AAAA',
+    ],
+)
+async def test_query_knowledge_evidence_rejects_raw_url_path_and_data_refs_even_when_present_in_metadata(
+    query_image_ref: str,
+) -> None:
+    result = await query_knowledge_evidence(
+        query_image_refs=[query_image_ref],
+        __request__=_FakeRequest(),
+        __user__={'id': 'user-1', 'role': 'user'},
+        __metadata__={
+            'files': [
+                {'id': 'chat:file:abc', 'type': 'image'},
+                {'id': 'https://example.com/image.png', 'type': 'image'},
+                {'file_id': '/tmp/image.png', 'type': 'image'},
+                {'image_url': {'url': 'data:image/png;base64,AAAA'}, 'type': 'image'},
+            ]
+        },
+    )
+
+    payload = json.loads(result)
+
+    assert payload['ok'] is False
+    assert payload['error']['code'] == 'forbidden_image_ref'
+    assert payload['query']['query_image_refs'] == [query_image_ref]
 
 
 @pytest.mark.asyncio
