@@ -30,6 +30,7 @@ from open_webui.retrieval.evidence import (
     normalize_query_knowledge_evidence_args,
     search_multimodal_evidence,
 )
+from open_webui.retrieval.vector import multimodal as multimodal_mod
 from open_webui.retrieval.vector.multimodal import MultimodalVectorSpaceError, upsert_multimodal_evidence_embedding
 
 
@@ -177,10 +178,15 @@ async def _seed_knowledge_and_file(session: AsyncSession, *, file_id: str, filen
 )
 async def test_search_multimodal_evidence_uses_query_embeddings_and_hydrates_evidence_refs(
     tmp_path,
+    monkeypatch,
     query_kwargs,
     expected_vector,
     expected_refs,
 ):
+    query_image_path = tmp_path / "query.png"
+    query_image_bytes = b"\x89PNG\r\n\x1a\nquery-image"
+    query_image_path.write_bytes(query_image_bytes)
+
     async with _db_session_ctx(tmp_path) as session:
         await _seed_knowledge_and_file(
             session,
@@ -202,7 +208,27 @@ async def test_search_multimodal_evidence_uses_query_embeddings_and_hydrates_evi
                 updated_at=1,
             )
         )
+        query_file = File(
+            id="query-image",
+            user_id="user-1",
+            hash="query-image-hash",
+            filename="query.png",
+            path=str(query_image_path),
+            data={"status": "completed"},
+            meta={"content_type": "image/png", "name": "query.png"},
+            created_at=1,
+            updated_at=1,
+        )
+        session.add(query_file)
         await session.commit()
+
+        async def fake_get_file_by_id(file_id, db=None):
+            if file_id == "query-image":
+                return multimodal_mod.FileModel.model_validate(query_file)
+            return None
+
+        monkeypatch.setattr(multimodal_mod.Files, "get_file_by_id", fake_get_file_by_id)
+        monkeypatch.setattr(multimodal_mod.Storage, "get_file", lambda storage_uri: storage_uri)
 
         text_evidence = await KnowledgeEvidences.create_evidence(
             knowledge_id="kb-1",
@@ -273,9 +299,16 @@ async def test_search_multimodal_evidence_uses_query_embeddings_and_hydrates_evi
         async def fake_embedding(query, prefix=None, user=None):
             embed_calls.append(query)
             if isinstance(query, dict):
-                if query.get("query_image_refs") and query.get("query_text"):
+                query_images = query.get("query_images") or []
+                if query_images:
+                    assert query_images[0]["ref"] == "chat:file:query-image"
+                    assert query_images[0]["file_id"] == "query-image"
+                    assert query_images[0]["mime_type"] == "image/png"
+                    assert query_images[0]["image_bytes"] == query_image_bytes
+                assert "query_image_refs" not in query
+                if query_images and query.get("query_text"):
                     return [2.0, 2.0, 0.0]
-                if query.get("query_image_refs"):
+                if query_images:
                     return [0.0, 1.0, 0.0]
             return [1.0, 0.0, 0.0]
 
@@ -296,10 +329,10 @@ async def test_search_multimodal_evidence_uses_query_embeddings_and_hydrates_evi
         if query.query_image_refs and query.query_text:
             assert isinstance(embed_calls[0], dict)
             assert embed_calls[0]["query_text"] == "find the figure and fold"
-            assert embed_calls[0]["query_image_refs"] == ["chat:file:query-image"]
+            assert embed_calls[0]["query_images"][0]["image_bytes"] == query_image_bytes
         elif query.query_image_refs:
             assert isinstance(embed_calls[0], dict)
-            assert embed_calls[0]["query_image_refs"] == ["chat:file:query-image"]
+            assert embed_calls[0]["query_images"][0]["image_bytes"] == query_image_bytes
             assert embed_calls[0]["query_text"] is None
         else:
             assert embed_calls[0] == "find the capsid fold"
@@ -334,6 +367,59 @@ async def test_search_multimodal_evidence_rejects_image_query_when_vector_space_
 
         query = normalize_query_knowledge_evidence_args(
             query_image_refs=["chat:file:query-image"],
+            knowledge_ids=["kb-1"],
+            count=4,
+        )
+
+        with pytest.raises(MultimodalVectorSpaceError) as exc_info:
+            await search_multimodal_evidence(
+                query=query,
+                vector_spaces=[vector_space],
+                embedding_function=lambda *_args, **_kwargs: [0.0, 1.0, 0.0],
+                vector_client=_FakeVectorClient(),
+                user={"id": "user-1", "role": "user"},
+                request=None,
+            )
+
+        assert exc_info.value.code == "unsupported_image_query"
+
+
+@pytest.mark.asyncio
+async def test_search_multimodal_evidence_fails_closed_when_query_image_ref_cannot_be_resolved(
+    tmp_path, monkeypatch
+):
+    async with _db_session_ctx(tmp_path) as session:
+        await _seed_knowledge_and_file(
+            session,
+            file_id="file-img",
+            filename="figure.png",
+            content_type="image/png",
+            path="/tmp/figure.png",
+        )
+
+        vector_space = await KnowledgeVectorSpaces.create_vector_space(
+            knowledge_id="kb-1",
+            retrieval_profile="unified_multimodal_dense",
+            embedding_model="fake-multimodal-embed",
+            projection_config_hash="profile-hash",
+            embedding_dim=3,
+            distance_metric="cosine",
+            vector_backend="pgvector",
+            supports_text_query=True,
+            supports_image_query=True,
+            supports_text_evidence=True,
+            supports_image_evidence=True,
+            active=True,
+            db=session,
+        )
+
+        async def fake_get_file_by_id(file_id, db=None):
+            return None
+
+        monkeypatch.setattr(multimodal_mod.Files, "get_file_by_id", fake_get_file_by_id)
+
+        query = normalize_query_knowledge_evidence_args(
+            query_image_refs=["chat:file:missing-query-image"],
             knowledge_ids=["kb-1"],
             count=4,
         )

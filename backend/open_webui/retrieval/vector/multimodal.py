@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import inspect
+import mimetypes
 import os
 from dataclasses import dataclass
 from pathlib import Path
@@ -19,6 +20,7 @@ from open_webui.models.evidence import (
     KnowledgeVectorSpaces,
     compute_knowledge_evidence_embedding_id,
 )
+from open_webui.models.files import FileModel, Files
 from open_webui.storage.provider import Storage
 from open_webui.retrieval.vector.main import VectorItem
 
@@ -57,6 +59,24 @@ class MultimodalEvidenceEmbeddingWriteResult:
     embedding: KnowledgeEvidenceEmbeddingModel | None = None
     vector_item: VectorItem | None = None
     error: str | None = None
+
+
+@dataclass(slots=True)
+class ResolvedQueryImageInput:
+    ref: str
+    file_id: str
+    mime_type: str
+    image_bytes: bytes
+    filename: str | None = None
+
+    def to_embedding_payload(self) -> dict[str, Any]:
+        return {
+            "ref": self.ref,
+            "file_id": self.file_id,
+            "mime_type": self.mime_type,
+            "image_bytes": self.image_bytes,
+            **({"filename": self.filename} if self.filename else {}),
+        }
 
 
 @dataclass(slots=True)
@@ -360,13 +380,17 @@ def build_multimodal_vector_item(
 def build_multimodal_query_embedding_input(
     *,
     query_text: str | None,
-    query_image_refs: Sequence[str] | None,
+    query_images: Sequence[ResolvedQueryImageInput | Mapping[str, Any]] | None,
     vector_space: KnowledgeVectorSpaceModel,
 ) -> str | dict[str, Any]:
-    if query_image_refs:
+    if query_images:
+        images = [
+            image.to_embedding_payload() if isinstance(image, ResolvedQueryImageInput) else dict(image)
+            for image in query_images
+        ]
         return {
             "query_text": query_text,
-            "query_image_refs": list(query_image_refs),
+            "query_images": images,
             "query_modality": "mixed" if query_text else "image",
             "knowledge_id": vector_space.knowledge_id,
             "vector_space_id": vector_space.id,
@@ -374,6 +398,115 @@ def build_multimodal_query_embedding_input(
             "embedding_model": vector_space.embedding_model,
         }
     return query_text or ""
+
+
+def _extract_file_content_type(file: FileModel) -> str | None:
+    meta = file.meta if isinstance(file.meta, Mapping) else {}
+    content_type = meta.get("content_type")
+    if isinstance(content_type, list):
+        content_type = next((item for item in content_type if isinstance(item, str) and item), None)
+    if isinstance(content_type, str) and content_type.strip():
+        return content_type.strip().split(";")[0].lower()
+    guessed, _ = mimetypes.guess_type(file.filename or file.path or "")
+    return guessed.lower() if guessed else None
+
+
+def _sniff_image_mime(image_bytes: bytes) -> str | None:
+    if image_bytes.startswith(b"\x89PNG\r\n\x1a\n"):
+        return "image/png"
+    if image_bytes.startswith(b"\xff\xd8\xff"):
+        return "image/jpeg"
+    if image_bytes.startswith(b"GIF87a") or image_bytes.startswith(b"GIF89a"):
+        return "image/gif"
+    if image_bytes.startswith(b"RIFF") and image_bytes[8:12] == b"WEBP":
+        return "image/webp"
+    return None
+
+
+async def resolve_query_image_ref_for_embedding(ref: str) -> ResolvedQueryImageInput:
+    if not ref.startswith("chat:file:"):
+        raise MultimodalVectorSpaceError(
+            "unsupported_image_query",
+            "Only chat:file image query refs are supported by the default evidence search adapter",
+            details={"ref": ref},
+        )
+
+    file_id = ref.removeprefix("chat:file:").strip()
+    if not file_id:
+        raise MultimodalVectorSpaceError(
+            "unsupported_image_query",
+            "query image ref is missing a file id",
+            details={"ref": ref},
+        )
+
+    file = await Files.get_file_by_id(file_id)
+    if file is None:
+        raise MultimodalVectorSpaceError(
+            "unsupported_image_query",
+            "query image file was not found",
+            details={"ref": ref, "file_id": file_id},
+        )
+    if not file.path:
+        raise MultimodalVectorSpaceError(
+            "unsupported_image_query",
+            "query image file has no storage path",
+            details={"ref": ref, "file_id": file_id},
+        )
+
+    metadata_mime = _extract_file_content_type(file)
+    if metadata_mime and not metadata_mime.startswith("image/"):
+        raise MultimodalVectorSpaceError(
+            "unsupported_image_query",
+            "query image ref does not point to an image file",
+            details={"ref": ref, "file_id": file_id, "mime_type": metadata_mime},
+        )
+
+    file_path = await asyncio.to_thread(Storage.get_file, file.path)
+    image_bytes = await asyncio.to_thread(Path(file_path).read_bytes)
+    sniffed_mime = _sniff_image_mime(image_bytes)
+    mime_type = metadata_mime or sniffed_mime
+    if not mime_type or not mime_type.startswith("image/"):
+        raise MultimodalVectorSpaceError(
+            "unsupported_image_query",
+            "query image bytes could not be validated as an image",
+            details={"ref": ref, "file_id": file_id},
+        )
+
+    return ResolvedQueryImageInput(
+        ref=ref,
+        file_id=file_id,
+        mime_type=mime_type,
+        image_bytes=image_bytes,
+        filename=file.filename,
+    )
+
+
+async def resolve_query_images_for_embedding(
+    query_image_refs: Sequence[str] | None,
+    *,
+    request: Any | None = None,
+) -> list[ResolvedQueryImageInput | Mapping[str, Any]]:
+    refs = [str(ref).strip() for ref in query_image_refs or [] if str(ref).strip()]
+    if not refs:
+        return []
+
+    resolver = None
+    if request is not None:
+        state = getattr(getattr(request, "app", None), "state", None)
+        resolver = getattr(state, "EVIDENCE_QUERY_IMAGE_RESOLVER", None) if state is not None else None
+    if callable(resolver):
+        resolved = await _await_maybe(resolver(refs=refs, request=request))
+        if not isinstance(resolved, Sequence) or isinstance(resolved, (str, bytes)):
+            raise MultimodalVectorSpaceError(
+                "unsupported_image_query",
+                "custom query image resolver returned an invalid payload",
+            )
+        return list(resolved)
+
+    resolved_images = []
+    for ref in refs:
+        resolved_images.append(await resolve_query_image_ref_for_embedding(ref))
+    return resolved_images
 
 
 def build_multimodal_evidence_descriptor(
@@ -555,8 +688,12 @@ async def search_multimodal_evidence(
 
     search_limit = max(1, int(limit or getattr(query, "top_k", 8) or 8))
     hits: list[dict[str, Any]] = []
-    query_has_images = bool(getattr(query, "query_image_refs", None))
+    query_image_refs = getattr(query, "query_image_refs", None)
+    query_has_images = bool(query_image_refs)
     query_text = getattr(query, "query_text", None)
+    query_images = (
+        await resolve_query_images_for_embedding(query_image_refs, request=request) if query_has_images else []
+    )
 
     for vector_space in vector_spaces:
         if query_has_images and not vector_space.supports_image_query:
@@ -582,7 +719,7 @@ async def search_multimodal_evidence(
 
         query_input = build_multimodal_query_embedding_input(
             query_text=query_text,
-            query_image_refs=getattr(query, "query_image_refs", None),
+            query_images=query_images,
             vector_space=vector_space,
         )
         query_vector = _normalize_embedding_vector(
