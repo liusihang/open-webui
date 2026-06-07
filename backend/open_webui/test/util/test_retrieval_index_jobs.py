@@ -65,7 +65,7 @@ def test_index_state_id_is_deterministic_and_scope_aware():
 @pytest.mark.parametrize(
     ("normalizer", "valid", "invalid"),
     [
-        (normalize_index_kind, "LEXICAL", "vector"),
+        (normalize_index_kind, "PROJECT", "vector"),
         (normalize_job_status, "RUNNING", "waiting"),
         (normalize_index_status, "STALE", "waiting"),
     ],

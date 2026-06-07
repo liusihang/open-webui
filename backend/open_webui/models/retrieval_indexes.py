@@ -13,7 +13,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from open_webui.internal.db import Base, JSONField, get_async_db_context
 
 
-INDEX_KINDS = ("embedding", "lexical", "full", "delete", "rechunk")
+INDEX_KINDS = ("embedding", "lexical", "full", "delete", "rechunk", "project")
 JOB_STATUSES = ("pending", "running", "succeeded", "failed", "cancelled")
 INDEX_STATUSES = ("pending", "indexing", "ready", "stale", "failed", "deleted")
 
@@ -141,7 +141,7 @@ class RetrievalIndexJobModel(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
     job_id: str
-    index_kind: Literal["embedding", "lexical", "full", "delete", "rechunk"]
+    index_kind: Literal["embedding", "lexical", "full", "delete", "rechunk", "project"]
     collection_id: str | None = None
     knowledge_id: str | None = None
     collection_name: str | None = None
@@ -164,7 +164,7 @@ class RetrievalIndexStateModel(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
     state_id: str
-    index_kind: Literal["embedding", "lexical", "full", "delete", "rechunk"]
+    index_kind: Literal["embedding", "lexical", "full", "delete", "rechunk", "project"]
     collection_id: str | None = None
     knowledge_id: str | None = None
     collection_name: str | None = None

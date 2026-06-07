@@ -39,6 +39,7 @@ def _route(path, method):
 def test_reindex_admin_routes_are_registered_before_dynamic_id_routes():
     paths = [getattr(route, "path", None) for route in knowledge.router.routes]
 
+    assert paths.index("/{id}/evidence/rebuild") < paths.index("/{id}")
     assert paths.index("/reindex/lexical") < paths.index("/{id}")
     assert paths.index("/reindex/full") < paths.index("/{id}")
     assert paths.index("/index/status") < paths.index("/{id}")
@@ -49,6 +50,7 @@ def test_reindex_admin_routes_are_registered_before_dynamic_id_routes():
 @pytest.mark.parametrize(
     ("path", "method"),
     [
+        ("/{id}/evidence/rebuild", "POST"),
         ("/reindex/lexical", "POST"),
         ("/reindex/full", "POST"),
         ("/index/status", "GET"),
@@ -270,6 +272,42 @@ async def test_reindex_lexical_can_enqueue_without_running(monkeypatch):
         "state": {"status": "pending"},
     }
     assert run_calls == []
+
+
+@pytest.mark.asyncio
+async def test_rebuild_evidence_creates_job_then_runs_it_by_default(monkeypatch):
+    enqueue_calls = []
+    run_calls = []
+
+    async def fake_enqueue(**kwargs):
+        enqueue_calls.append(kwargs)
+        return {"job": {"job_id": "job-evidence"}, "state": {"status": "pending"}}
+
+    async def fake_run(job_id):
+        run_calls.append(job_id)
+        return {"result": {"evidence": {"text_evidence_upserted": 1, "image_evidence_upserted": 1}}}
+
+    monkeypatch.setattr(knowledge, "enqueue_evidence_projection_job", fake_enqueue)
+    monkeypatch.setattr(knowledge, "run_retrieval_index_job", fake_run)
+
+    response = await knowledge.rebuild_knowledge_evidence(
+        id="knowledge-1",
+        form_data=knowledge.KnowledgeEvidenceRebuildRequest(
+            file_ids=["file-1"],
+            project_document_images=True,
+        ),
+        user=SimpleNamespace(id="admin", role="admin"),
+    )
+
+    assert response["evidence"]["text_evidence_upserted"] == 1
+    assert enqueue_calls == [
+        {
+            "knowledge_id": "knowledge-1",
+            "file_ids": ["file-1"],
+            "project_document_images": True,
+        }
+    ]
+    assert run_calls == ["job-evidence"]
 
 
 @pytest.mark.asyncio

@@ -36,6 +36,7 @@ from open_webui.models.models import ModelForm, Models
 from open_webui.models.retrieval_indexes import RetrievalIndexJobs
 from open_webui.retrieval.indexing import (
     deactivate_chunks_for_scope,
+    enqueue_evidence_projection_job,
     enqueue_retrieval_index_job,
     get_retrieval_index_status_async,
     run_retrieval_index_job,
@@ -141,6 +142,12 @@ class KnowledgeReindexRequest(BaseModel):
     index_version: int = Field(default=1, ge=1)
     promote_alias: bool = True
     batch_size: int = Field(default=500, ge=1)
+    run_async: bool = False
+
+
+class KnowledgeEvidenceRebuildRequest(BaseModel):
+    file_ids: list[str] | None = None
+    project_document_images: bool = False
     run_async: bool = False
 
 
@@ -421,6 +428,24 @@ async def reindex_knowledge_base_metadata_embeddings(
 ############################
 # RetrievalIndexAdmin
 ############################
+
+
+@router.post('/{id}/evidence/rebuild', response_model=dict)
+async def rebuild_knowledge_evidence(
+    id: str,
+    form_data: KnowledgeEvidenceRebuildRequest,
+    user=Depends(get_admin_user),
+):
+    queued = await enqueue_evidence_projection_job(
+        knowledge_id=id,
+        file_ids=form_data.file_ids,
+        project_document_images=form_data.project_document_images,
+    )
+    if form_data.run_async:
+        return {"queued": True, **queued}
+
+    execution = await run_retrieval_index_job(queued["job"]["job_id"])
+    return execution["result"]
 
 
 @router.post('/reindex/lexical', response_model=dict)

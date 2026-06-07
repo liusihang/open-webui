@@ -23,6 +23,7 @@ from open_webui.models.retrieval_indexes import (
     compute_index_state_id,
     compute_target_config_hash,
 )
+from open_webui.retrieval.evidence_projector import project_evidence_from_job_payload
 from open_webui.retrieval.lexical.opensearch import OpenSearchLexicalClient
 from sqlalchemy import or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -642,6 +643,23 @@ def lexical_current_alias_config_hash() -> str:
     )
 
 
+def evidence_target_config_hash(
+    *,
+    knowledge_id: str | None = None,
+    file_ids: list[str] | None = None,
+    project_document_images: bool = False,
+) -> str:
+    return compute_target_config_hash(
+        {
+            "index_kind": "project",
+            "workflow": "evidence_projection",
+            "knowledge_id": knowledge_id,
+            "file_ids": list(dict.fromkeys(file_ids or [])),
+            "project_document_images": bool(project_document_images),
+        }
+    )
+
+
 async def enqueue_retrieval_index_job(
     *,
     index_kind: str,
@@ -674,6 +692,45 @@ async def enqueue_retrieval_index_job(
         collection_id=scope_id,
         knowledge_id=scope_id,
         collection_name=scope_id,
+        target_config_hash=target_config_hash,
+        last_job_id=job.job_id,
+    )
+    return {"job": job.model_dump(), "state": state.model_dump()}
+
+
+async def enqueue_evidence_projection_job(
+    *,
+    knowledge_id: str,
+    file_ids: list[str] | None = None,
+    project_document_images: bool = False,
+    payload: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    target_config_hash = evidence_target_config_hash(
+        knowledge_id=knowledge_id,
+        file_ids=file_ids,
+        project_document_images=project_document_images,
+    )
+    job_payload = {
+        "workflow": "evidence_projection",
+        "knowledge_id": knowledge_id,
+        "file_ids": list(dict.fromkeys(file_ids or [])),
+        "project_document_images": project_document_images,
+        **(payload or {}),
+    }
+    job = await RetrievalIndexJobs.enqueue_job(
+        index_kind="project",
+        collection_id=knowledge_id,
+        knowledge_id=knowledge_id,
+        collection_name=knowledge_id,
+        target_config_hash=target_config_hash,
+        payload=job_payload,
+    )
+    state = await RetrievalIndexStates.upsert_state(
+        index_kind="project",
+        status="pending",
+        collection_id=knowledge_id,
+        knowledge_id=knowledge_id,
+        collection_name=knowledge_id,
         target_config_hash=target_config_hash,
         last_job_id=job.job_id,
     )
@@ -722,6 +779,37 @@ async def run_retrieval_index_job(job_id: str) -> dict[str, Any]:
                 status=final_status,
                 result=payload,
                 error=(result.failures[0]["error"] if result.failures else None),
+            )
+            return {"job": updated.model_dump() if updated else None, "result": payload}
+
+        if job.index_kind == "project":
+            evidence_result = await project_evidence_from_job_payload(job.payload or {})
+            payload = {"evidence": evidence_result.model_dump()}
+            final_status = "succeeded" if evidence_result.failed == 0 else "failed"
+            state_status = "ready" if evidence_result.failed == 0 else "failed"
+            state_count = max(
+                evidence_result.scanned_chunks,
+                evidence_result.image_assets_upserted,
+                evidence_result.document_image_placeholders,
+            )
+            await RetrievalIndexStates.upsert_state(
+                index_kind="project",
+                status=state_status,
+                collection_id=job.collection_id,
+                knowledge_id=job.knowledge_id,
+                collection_name=job.collection_name,
+                file_id=job.file_id,
+                target_config_hash=job.target_config_hash,
+                active_chunk_count=state_count,
+                indexed_chunk_count=evidence_result.text_evidence_upserted + evidence_result.image_evidence_upserted,
+                last_job_id=job.job_id,
+                error=(evidence_result.failures[0]["error"] if evidence_result.failures else None),
+            )
+            updated = await RetrievalIndexJobs.update_job_status(
+                job_id,
+                status=final_status,
+                result=payload,
+                error=(evidence_result.failures[0]["error"] if evidence_result.failures else None),
             )
             return {"job": updated.model_dump() if updated else None, "result": payload}
 
