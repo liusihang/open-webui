@@ -203,6 +203,7 @@ def convert_messages_openai_to_ollama(messages: list[dict]) -> list[dict]:
     for message in messages:
         # Initialize the new message structure with the role
         new_message = {'role': message['role']}
+        tool_call_id = message.get('tool_call_id', None)
 
         # Preserve Ollama-native 'thinking' field (used by reasoning models,
         # may be injected by filter inlet functions).
@@ -217,8 +218,6 @@ def convert_messages_openai_to_ollama(messages: list[dict]) -> list[dict]:
         if isinstance(content, str) and not tool_calls:
             # If the content is a string, it's pure text
             new_message['content'] = content
-
-            # If message is a tool call, add the tool call id to the message
             if tool_call_id:
                 new_message['tool_call_id'] = tool_call_id
 
@@ -248,17 +247,26 @@ def convert_messages_openai_to_ollama(messages: list[dict]) -> list[dict]:
             # Iterate through the list of content items
             for item in content:
                 # Check if it's a text type
-                if item.get('type') == 'text':
+                if item.get('type') in {'text', 'input_text'}:
                     content_text += item.get('text', '')
 
                 # Check if it's an image URL type
-                elif item.get('type') == 'image_url':
-                    img_url = item.get('image_url', {}).get('url', '')
+                elif item.get('type') in {'image_url', 'input_image'}:
+                    image_url = item.get('image_url', '')
+                    if isinstance(image_url, dict):
+                        img_url = image_url.get('url', '')
+                    elif isinstance(image_url, str):
+                        img_url = image_url
+                    else:
+                        img_url = ''
                     if img_url:
                         # If the image url starts with data:, it's a base64 image and should be trimmed
                         if img_url.startswith('data:'):
                             img_url = img_url.split(',')[-1]
                         images.append(img_url)
+
+            if tool_call_id:
+                new_message['tool_call_id'] = tool_call_id
 
             # Add content text (if any)
             if content_text:

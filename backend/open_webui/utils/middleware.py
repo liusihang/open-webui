@@ -559,6 +559,45 @@ def get_citation_source_from_tool_result(
         ]
 
 
+def build_citation_map_from_sources(sources: list[dict] | None) -> dict[str, str]:
+    """Build a stable citation-number -> evidence_ref map from hydrated sources."""
+    if not isinstance(sources, list) or not sources:
+        return {}
+
+    citation_map: dict[str, str] = {}
+    seen_refs: set[str] = set()
+
+    for source in sources:
+        if not isinstance(source, dict):
+            continue
+
+        evidence_ref = None
+        source_info = source.get('source') if isinstance(source.get('source'), dict) else {}
+        if isinstance(source_info, dict):
+            source_evidence_ref = source_info.get('evidence_ref')
+            if isinstance(source_evidence_ref, str) and source_evidence_ref:
+                evidence_ref = source_evidence_ref
+
+        if evidence_ref is None:
+            metadata = source.get('metadata')
+            if isinstance(metadata, list):
+                for metadata_item in metadata:
+                    if not isinstance(metadata_item, dict):
+                        continue
+                    metadata_evidence_ref = metadata_item.get('evidence_ref')
+                    if isinstance(metadata_evidence_ref, str) and metadata_evidence_ref:
+                        evidence_ref = metadata_evidence_ref
+                        break
+
+        if not evidence_ref or evidence_ref in seen_refs:
+            continue
+
+        seen_refs.add(evidence_ref)
+        citation_map[str(len(citation_map) + 1)] = evidence_ref
+
+    return citation_map
+
+
 def split_content_and_whitespace(content):
     content_stripped = content.rstrip()
     original_whitespace = content[len(content_stripped) :] if len(content) > len(content_stripped) else ''
@@ -5300,6 +5339,8 @@ async def streaming_chat_response_handler(response, ctx):
                                     )
                         tool_call_sources.clear()
 
+                    citation_metadata = build_citation_map_from_sources(all_tool_call_sources)
+
                     # Strip input_image parts (large base64 data URIs) from the
                     # output sent to the frontend — they're only for LLM consumption
                     # via convert_output_to_messages.
@@ -5317,6 +5358,7 @@ async def streaming_chat_response_handler(response, ctx):
                             'data': {
                                 'content': serialize_output(output),
                                 'output': frontend_output,
+                                **({'metadata': {'citation_map': citation_metadata}} if citation_metadata else {}),
                             },
                         }
                     )

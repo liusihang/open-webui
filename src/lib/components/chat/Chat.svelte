@@ -1794,7 +1794,18 @@
 	};
 
 	const chatCompletionEventHandler = async (data, message, chatId) => {
-		const { id, done, choices, content, output, sources, selected_model_id, error, usage } = data;
+		const {
+			id,
+			done,
+			choices,
+			content,
+			output,
+			sources,
+			metadata,
+			selected_model_id,
+			error,
+			usage
+		} = data;
 
 		// Store raw OR-aligned output items from backend
 		if (output) {
@@ -1807,6 +1818,13 @@
 
 		if (sources && !message?.sources) {
 			message.sources = sources;
+		}
+
+		if (metadata) {
+			message.metadata = {
+				...(message.metadata ?? {}),
+				...metadata,
+			};
 		}
 
 		if (choices) {

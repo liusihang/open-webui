@@ -3,6 +3,7 @@ from open_webui.utils.openai_payload import (
     responses_continuation_input_items,
     sanitize_openai_payload,
 )
+from open_webui.utils.payload import convert_payload_openai_to_ollama
 
 
 def test_sanitize_openai_payload_removes_reasoning_encrypted_content_keys_and_required_entries():
@@ -79,3 +80,30 @@ def test_responses_continuation_input_items_keeps_latest_user_turn():
     trimmed = responses_continuation_input_items(input_items)
 
     assert trimmed == [input_items[-1]]
+
+
+def test_convert_payload_openai_to_ollama_preserves_tool_input_images():
+    payload = {
+        'model': 'llama3.1',
+        'messages': [
+            {
+                'role': 'tool',
+                'tool_call_id': 'call_evidence',
+                'content': [
+                    {'type': 'input_text', 'text': 'Evidence summary'},
+                    {'type': 'input_image', 'image_url': 'data:image/png;base64,AAAA'},
+                ],
+            }
+        ],
+    }
+
+    ollama_payload = convert_payload_openai_to_ollama(payload)
+
+    assert ollama_payload['messages'] == [
+        {
+            'role': 'tool',
+            'tool_call_id': 'call_evidence',
+            'content': 'Evidence summary',
+            'images': ['AAAA'],
+        }
+    ]
