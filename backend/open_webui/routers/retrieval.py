@@ -133,6 +133,20 @@ log = logging.getLogger(__name__)
 ##########################################
 
 
+def _collect_document_image_assets_from_docs(docs: Sequence[Document]) -> list[dict]:
+    assets: list[dict] = []
+    for doc in docs:
+        doc_assets = doc.metadata.get('document_image_assets') if isinstance(doc.metadata, dict) else None
+        if not isinstance(doc_assets, list):
+            continue
+        assets.extend(asset for asset in doc_assets if isinstance(asset, dict))
+    return assets
+
+
+def _is_metadata_only_document(doc: Document) -> bool:
+    return bool(doc.metadata.get('_metadata_only')) if isinstance(doc.metadata, dict) else False
+
+
 def get_ef(
     engine: str,
     embedding_model: str,
@@ -1635,6 +1649,7 @@ async def process_file(
     if file:
         try:
             collection_name = form_data.collection_name
+            document_image_assets: list[dict] | None = None
 
             if collection_name is None:
                 collection_name = f'file-{file.id}'
@@ -1711,7 +1726,21 @@ async def process_file(
                     file_path = await asyncio.to_thread(Storage.get_file, file_path)
                     loader = build_loader_from_config(request)
                     loader.user = user
-                    docs = await loader.aload(file.filename, file.meta.get('content_type'), file_path)
+                    loaded_docs = await loader.aload(file.filename, file.meta.get('content_type'), file_path)
+                    document_image_assets = _collect_document_image_assets_from_docs(loaded_docs)
+                    loaded_docs = [doc for doc in loaded_docs if not _is_metadata_only_document(doc)]
+                    if not loaded_docs and document_image_assets:
+                        loaded_docs = [
+                            Document(
+                                page_content='No valid text content found in document',
+                                metadata={
+                                    'name': file.filename,
+                                    'created_by': file.user_id,
+                                    'file_id': file.id,
+                                    'source': file.filename,
+                                },
+                            )
+                        ]
 
                     docs = [
                         Document(
@@ -1724,7 +1753,7 @@ async def process_file(
                                 'source': file.filename,
                             },
                         )
-                        for doc in docs
+                        for doc in loaded_docs
                     ]
                 else:
                     docs = [
@@ -1742,9 +1771,12 @@ async def process_file(
                 text_content = ' '.join([doc.page_content for doc in docs])
 
             log.debug(f'text_content: {text_content}')
+            file_data_update = {'content': text_content}
+            if document_image_assets is not None:
+                file_data_update['document_image_assets'] = document_image_assets
             await Files.update_file_data_by_id(
                 file.id,
-                {'content': text_content},
+                file_data_update,
                 db=db,
             )
             hash = calculate_sha256_string(text_content)
