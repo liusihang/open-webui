@@ -4,6 +4,13 @@ type ChatStatusEntry = {
 	[key: string]: unknown;
 };
 
+type ChatSourceMetadata = {
+	source?: string;
+	name?: string;
+	evidence_ref?: string;
+	[key: string]: unknown;
+};
+
 type ChatSourceEntry = {
 	id?: string;
 	source?: {
@@ -11,10 +18,7 @@ type ChatSourceEntry = {
 		url?: string;
 		name?: string;
 	};
-	metadata?: Array<{
-		source?: string;
-		name?: string;
-	}>;
+	metadata?: Array<ChatSourceMetadata | undefined>;
 	[key: string]: unknown;
 };
 
@@ -28,6 +32,7 @@ export type ChatMessage = {
 	statusHistory?: ChatStatusEntry[];
 	sources?: ChatSourceEntry[];
 	citations?: ChatSourceEntry[];
+	metadata?: Record<string, unknown>;
 	[key: string]: unknown;
 };
 
@@ -39,6 +44,7 @@ type ChatHistory = {
 const getSourceMergeKey = (item: ChatSourceEntry, index: number) => {
 	const metadata = Array.isArray(item?.metadata) ? item.metadata[0] : undefined;
 	return (
+		metadata?.evidence_ref ??
 		metadata?.source ??
 		item?.source?.id ??
 		item?.source?.url ??
@@ -46,6 +52,36 @@ const getSourceMergeKey = (item: ChatSourceEntry, index: number) => {
 		item?.id ??
 		`source-${index}`
 	);
+};
+
+const isPlainObject = (value: unknown): value is Record<string, unknown> => {
+	return typeof value === 'object' && value !== null && !Array.isArray(value);
+};
+
+const mergeMessageMetadata = (
+	existingMetadata: Record<string, unknown> | undefined,
+	incomingMetadata: Record<string, unknown> | undefined
+) => {
+	if (!existingMetadata && !incomingMetadata) {
+		return undefined;
+	}
+
+	const mergedMetadata = {
+		...(existingMetadata ?? {}),
+		...(incomingMetadata ?? {})
+	};
+
+	if (
+		isPlainObject(existingMetadata?.citation_map) &&
+		isPlainObject(incomingMetadata?.citation_map)
+	) {
+		mergedMetadata.citation_map = {
+			...existingMetadata.citation_map,
+			...incomingMetadata.citation_map
+		};
+	}
+
+	return mergedMetadata;
 };
 
 export const mergeStableSources = <T extends ChatSourceEntry>(
@@ -117,6 +153,11 @@ export const mergeServerMessage = (
 			: {}),
 		...incomingMessage
 	};
+
+	mergedMessage.metadata = mergeMessageMetadata(
+		isPlainObject(existingMessage.metadata) ? existingMessage.metadata : undefined,
+		isPlainObject(incomingMessage.metadata) ? incomingMessage.metadata : undefined
+	);
 
 	if (
 		(existingContent && incomingContentIsEmpty) ||

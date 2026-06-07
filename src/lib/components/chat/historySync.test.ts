@@ -58,6 +58,63 @@ describe('mergeServerMessage', () => {
 
 		expect(merged.sources).toEqual(existingSources);
 	});
+
+	it('keeps distinct evidence refs from the same source file when merging replay snapshots', () => {
+		const existingSources = [
+			{
+				source: { id: 'doc-1', name: 'Doc 1' },
+				metadata: [{ source: 'doc-1', evidence_ref: 'ke:doc-1:1' }]
+			}
+		];
+		const incomingSources = [
+			{
+				source: { id: 'doc-1', name: 'Doc 1' },
+				metadata: [{ source: 'doc-1', evidence_ref: 'ke:doc-1:2' }]
+			}
+		];
+		const merged = mergeServerMessage(
+			{ id: 'a', sources: existingSources as any },
+			{ id: 'a', sources: incomingSources as any }
+		);
+
+		expect(merged.sources).toHaveLength(2);
+		expect(merged.sources).toEqual(
+			expect.arrayContaining([
+				expect.objectContaining({
+					metadata: [expect.objectContaining({ evidence_ref: 'ke:doc-1:1' })]
+				}),
+				expect.objectContaining({
+					metadata: [expect.objectContaining({ evidence_ref: 'ke:doc-1:2' })]
+				})
+			])
+		);
+	});
+
+	it('preserves and merges message metadata citation maps across replay snapshots', () => {
+		const merged = mergeServerMessage(
+			{
+				id: 'a',
+				metadata: {
+					citation_map: { '1': 'ke:doc-1:1' },
+					other: 'keep'
+				}
+			},
+			{
+				id: 'a',
+				metadata: {
+					citation_map: { '2': 'ke:doc-1:2' }
+				}
+			}
+		);
+
+		expect(merged.metadata).toEqual({
+			citation_map: {
+				'1': 'ke:doc-1:1',
+				'2': 'ke:doc-1:2'
+			},
+			other: 'keep'
+		});
+	});
 });
 
 describe('mergeHistorySnapshot', () => {

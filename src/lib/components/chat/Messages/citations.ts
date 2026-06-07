@@ -19,9 +19,17 @@ export type CitationGroup = {
 	distances: Array<number | undefined>;
 };
 
+const getMetadataString = (
+	metadata: Record<string, unknown> | undefined,
+	key: string
+): string | null => {
+	const value = metadata?.[key];
+	return typeof value === 'string' && value.length > 0 ? value : null;
+};
+
 const getGroupId = (source: CitationSource, metadata?: Record<string, unknown>) => {
-	const metadataSource =
-		typeof metadata?.source === 'string' && metadata.source.length > 0 ? metadata.source : null;
+	const evidenceRef = getMetadataString(metadata, 'evidence_ref');
+	const metadataSource = getMetadataString(metadata, 'source');
 	const sourceUrl =
 		typeof source?.source?.url === 'string' && source.source.url.length > 0
 			? source.source.url
@@ -33,7 +41,7 @@ const getGroupId = (source: CitationSource, metadata?: Record<string, unknown>) 
 			? source.source.name
 			: null;
 
-	return metadataSource ?? sourceId ?? sourceUrl ?? sourceName ?? 'N/A';
+	return evidenceRef ?? metadataSource ?? sourceId ?? sourceUrl ?? sourceName ?? 'N/A';
 };
 
 const getDisplaySource = (
@@ -63,8 +71,9 @@ const getDocumentKey = (
 	return JSON.stringify([
 		groupId,
 		document,
-		metadata?.source ?? null,
-		metadata?.name ?? null,
+		getMetadataString(metadata, 'source'),
+		getMetadataString(metadata, 'evidence_ref'),
+		getMetadataString(metadata, 'name'),
 		metadata?.page ?? null,
 		distance ?? null
 	]);

@@ -98,6 +98,7 @@
 
 	const getSourceIds = (sources) => {
 		const result = [];
+		const seenSourceKeys = new Set();
 		for (const source of sources ?? []) {
 			for (let index = 0; index < (source.document ?? []).length; index++) {
 				if (model?.info?.meta?.capabilities?.citations == false) {
@@ -105,6 +106,19 @@
 					continue;
 				}
 				const metadata = source.metadata?.[index];
+				const sourceKey =
+					typeof metadata?.evidence_ref === 'string' && metadata.evidence_ref.length > 0
+						? metadata.evidence_ref
+						: metadata?.source ??
+							source?.source?.id ??
+							source?.source?.url ??
+							source?.source?.name ??
+							source?.id ??
+							`${result.length}`;
+				if (seenSourceKeys.has(sourceKey)) {
+					continue;
+				}
+				seenSourceKeys.add(sourceKey);
 				const id = metadata?.source ?? 'N/A';
 				if (metadata?.name) {
 					result.push(metadata.name);
@@ -115,7 +129,7 @@
 				}
 			}
 		}
-		sourceIds = [...new Set(result)];
+		sourceIds = result;
 	};
 
 	const updateButtonPosition = (event) => {
