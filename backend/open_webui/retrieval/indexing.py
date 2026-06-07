@@ -895,11 +895,27 @@ async def run_retrieval_index_job(job_id: str) -> dict[str, Any]:
         if job.index_kind == "project":
             evidence_result = await project_evidence_from_job_payload(job.payload or {})
             embedding_result = await write_projected_evidence_embeddings(evidence_result.evidence_refs)
+            embedding_error = None
+            if embedding_result.failures:
+                embedding_error = embedding_result.failures[0]["error"]
+            elif evidence_result.evidence_refs and embedding_result.skipped:
+                embedding_error = (
+                    f"evidence embedding write skipped {embedding_result.skipped} projected evidence rows"
+                )
+            elif evidence_result.evidence_refs and embedding_result.written < len(evidence_result.evidence_refs):
+                embedding_error = (
+                    f"evidence embedding write produced {embedding_result.written} of "
+                    f"{len(evidence_result.evidence_refs)} projected evidence rows"
+                )
             payload = {
                 "evidence": evidence_result.model_dump(),
                 "evidence_embeddings": embedding_result.model_dump(),
             }
-            final_status = "succeeded" if evidence_result.failed == 0 and embedding_result.failed == 0 else "failed"
+            final_status = (
+                "succeeded"
+                if evidence_result.failed == 0 and embedding_result.failed == 0 and embedding_error is None
+                else "failed"
+            )
             state_status = "ready" if final_status == "succeeded" else "failed"
             state_count = max(
                 evidence_result.scanned_chunks,
@@ -920,7 +936,7 @@ async def run_retrieval_index_job(job_id: str) -> dict[str, Any]:
                 error=(
                     evidence_result.failures[0]["error"]
                     if evidence_result.failures
-                    else (embedding_result.failures[0]["error"] if embedding_result.failures else None)
+                    else embedding_error
                 ),
             )
             updated = await RetrievalIndexJobs.update_job_status(
@@ -930,7 +946,7 @@ async def run_retrieval_index_job(job_id: str) -> dict[str, Any]:
                 error=(
                     evidence_result.failures[0]["error"]
                     if evidence_result.failures
-                    else (embedding_result.failures[0]["error"] if embedding_result.failures else None)
+                    else embedding_error
                 ),
             )
             return {"job": updated.model_dump() if updated else None, "result": payload}

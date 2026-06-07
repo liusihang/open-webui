@@ -14,6 +14,7 @@ from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 from open_webui.migrations.versions import d1e2f3a4b5c6_add_multimodal_evidence_schema as evidence_migration
 from open_webui.models.evidence import KnowledgeVectorSpaces
 from open_webui.models.knowledge import Knowledge  # noqa: F401
+from open_webui.retrieval.vector import multimodal as multimodal_mod
 from open_webui.retrieval.vector.multimodal import (
     MultimodalVectorSpaceError,
     build_multimodal_vector_item,
@@ -92,6 +93,20 @@ async def test_resolve_multimodal_vector_space_prefers_explicit_profile_and_resp
         assert image_selection.collection_name == f"kb-1:{multimodal_space.id}"
 
     await engine.dispose()
+
+
+def test_sanitize_embedding_error_redacts_model_bound_image_payloads():
+    error = RuntimeError(
+        "provider failed with {'image_bytes': b'\\x89PNG\\r\\n\\x1a\\nsecret', "
+        "'url': 'data:image/png;base64,QUFBQUFBQUFBQUFBQUFBQUFB'}"
+    )
+
+    sanitized = multimodal_mod.sanitize_embedding_error(error)
+
+    assert "image_bytes" not in sanitized
+    assert "data:image" not in sanitized
+    assert "QUFBQUFB" not in sanitized
+    assert "[redacted-image-payload]" in sanitized
 
 
 @pytest.mark.asyncio

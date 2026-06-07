@@ -1216,18 +1216,26 @@ def get_source_context(sources: list, source_ids: dict = None, include_content: 
         source_ids = {}
     for source in sources:
         for doc, meta in zip(source.get('document', []), source.get('metadata', [])):
-            source_id = meta.get('source') or source.get('source', {}).get('id') or 'N/A'
+            source_info = source.get('source', {}) if isinstance(source.get('source'), dict) else {}
+            source_evidence_ref = source_info.get('evidence_ref') or source_info.get('id')
+            metadata_evidence_ref = meta.get('evidence_ref') if isinstance(meta, dict) else None
+            evidence_ref = metadata_evidence_ref or source_evidence_ref
+            is_evidence = source_info.get('type') == 'evidence' or bool(evidence_ref)
+            source_id = evidence_ref if is_evidence and evidence_ref else meta.get('source') or source_info.get('id') or 'N/A'
             if source_id not in source_ids:
                 source_ids[source_id] = len(source_ids) + 1
-            src_name = source.get('source', {}).get('name')
-            src_type = source.get('source', {}).get('type')
-            src_rid = source.get('source', {}).get('id')
+            src_name = source_info.get('name')
+            src_type = source_info.get('type')
+            src_rid = source_info.get('id')
+            modality = meta.get('modality') if isinstance(meta, dict) else None
             body = doc if include_content else ''
             context_string += (
                 f'<source id="{source_ids[source_id]}"'
                 + (f' name="{src_name}"' if src_name else '')
                 + (f' resource-type="{src_type}"' if src_type else '')
                 + (f' resource-id="{src_rid}"' if src_rid else '')
+                + (f' evidence-ref="{evidence_ref}"' if evidence_ref else '')
+                + (f' modality="{modality}"' if modality else '')
                 + f'>{body}</source>\n'
             )
     return context_string

@@ -4,6 +4,7 @@ import asyncio
 import inspect
 import mimetypes
 import os
+import re
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Literal, Mapping, Sequence
@@ -46,6 +47,8 @@ _UNSAFE_IMAGE_DESCRIPTOR_KEYS = {
 }
 RAG_EMBEDDING_QUERY_PREFIX = os.getenv("RAG_EMBEDDING_QUERY_PREFIX", None)
 RAG_EMBEDDING_CONTENT_PREFIX = os.getenv("RAG_EMBEDDING_CONTENT_PREFIX", None)
+_DATA_IMAGE_RE = re.compile(r"data:image/[a-zA-Z0-9.+-]+;base64,[A-Za-z0-9+/=_-]+")
+_IMAGE_BYTES_RE = re.compile(r"['\"]?image_bytes['\"]?\s*:\s*b?(['\"]).*?\1")
 
 
 @dataclass(slots=True)
@@ -122,6 +125,13 @@ class MultimodalVectorSpaceError(RuntimeError):
         self.code = code
         self.message = message
         self.details = details or {}
+
+
+def sanitize_embedding_error(error: Any) -> str:
+    message = str(error)
+    message = _DATA_IMAGE_RE.sub("[redacted-image-payload]", message)
+    message = _IMAGE_BYTES_RE.sub("[redacted-image-payload]", message)
+    return message
 
 
 def _normalize_modality(value: Any) -> str:
@@ -773,6 +783,7 @@ async def upsert_multimodal_evidence_embedding(
         )
         return MultimodalEvidenceEmbeddingWriteResult(embedding=embedding, vector_item=vector_item)
     except Exception as exc:
+        sanitized_error = sanitize_embedding_error(exc)
         embedding = await KnowledgeEvidenceEmbeddings.create_embedding(
             evidence_id=evidence.id,
             evidence_ref=evidence.evidence_ref,
@@ -782,7 +793,7 @@ async def upsert_multimodal_evidence_embedding(
             vector_role=get_multimodal_vector_role(evidence.modality),
             embedding_format="single_dense",
             embedding_status="failed",
-            embedding_error=str(exc),
+            embedding_error=sanitized_error,
             db=db,
         )
-        return MultimodalEvidenceEmbeddingWriteResult(embedding=embedding, vector_item=None, error=str(exc))
+        return MultimodalEvidenceEmbeddingWriteResult(embedding=embedding, vector_item=None, error=sanitized_error)

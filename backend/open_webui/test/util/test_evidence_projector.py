@@ -350,5 +350,82 @@ async def test_evidence_job_branch_uses_existing_job_state_surface(monkeypatch):
                 "indexed_chunk_count": 2,
                 "last_job_id": "job-project",
                 "error": None,
-            }
-        ]
+        }
+    ]
+
+
+@pytest.mark.asyncio
+async def test_evidence_job_branch_fails_when_embeddings_are_skipped(monkeypatch):
+    job_status_calls = []
+    state_calls = []
+
+    class FakeJobs:
+        async def get_job_by_id(self, job_id):
+            return type(
+                "Job",
+                (),
+                {
+                    "job_id": job_id,
+                    "index_kind": "project",
+                    "collection_id": "kb-1",
+                    "knowledge_id": "kb-1",
+                    "collection_name": "kb-1",
+                    "file_id": None,
+                    "target_config_hash": "evidence-target-hash",
+                    "payload": {
+                        "workflow": "evidence_projection",
+                        "knowledge_id": "kb-1",
+                        "file_ids": ["file-doc"],
+                    },
+                },
+            )()
+
+        async def update_job_status(self, job_id, **kwargs):
+            job_status_calls.append((job_id, kwargs))
+            return type(
+                "Job",
+                (),
+                {
+                    "job_id": job_id,
+                    "status": kwargs["status"],
+                    "result": kwargs.get("result"),
+                    "error": kwargs.get("error"),
+                    "model_dump": lambda self=None: {
+                        "job_id": job_id,
+                        "status": kwargs["status"],
+                        "result": kwargs.get("result"),
+                        "error": kwargs.get("error"),
+                    },
+                },
+            )()
+
+    class FakeStates:
+        async def upsert_state(self, **kwargs):
+            state_calls.append(kwargs)
+            return type("State", (), {"state_id": "state-1"})()
+
+    async def fake_project(job_payload, db=None):
+        return EvidenceProjectionResult(
+            scanned_chunks=1,
+            text_evidence_upserted=1,
+            failed=0,
+            evidence_refs=["ke:kb-1:file-doc:text_chunk:0:abc"],
+        )
+
+    async def fake_write_embeddings(evidence_refs, db=None):
+        return indexing_mod.EvidenceEmbeddingProjectionResult(
+            skipped=len(evidence_refs),
+        )
+
+    monkeypatch.setattr(indexing_mod, "RetrievalIndexJobs", FakeJobs())
+    monkeypatch.setattr(indexing_mod, "RetrievalIndexStates", FakeStates())
+    monkeypatch.setattr(indexing_mod, "project_evidence_from_job_payload", fake_project)
+    monkeypatch.setattr(indexing_mod, "write_projected_evidence_embeddings", fake_write_embeddings)
+
+    response = await indexing_mod.run_retrieval_index_job("job-project")
+
+    assert response["job"]["status"] == "failed"
+    assert response["job"]["error"] == "evidence embedding write skipped 1 projected evidence rows"
+    assert job_status_calls[-1][1]["status"] == "failed"
+    assert state_calls[-1]["status"] == "failed"
+    assert state_calls[-1]["error"] == "evidence embedding write skipped 1 projected evidence rows"

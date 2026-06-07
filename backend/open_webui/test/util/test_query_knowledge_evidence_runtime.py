@@ -137,7 +137,10 @@ async def test_query_knowledge_evidence_hydrates_exact_sql_truth_rows(monkeypatc
         knowledge_ids=["kb-1"],
         __request__=_FakeRequest(),
         __user__={"id": "user-1", "role": "user"},
-        __metadata__={"files": []},
+        __metadata__={
+            "files": [],
+            "effective_knowledge_scope": [{"id": "kb-1", "type": "knowledge"}],
+        },
     )
 
     payload = json.loads(result)
@@ -184,6 +187,41 @@ async def test_query_knowledge_evidence_rejects_exact_refs_without_scope(monkeyp
 
 
 @pytest.mark.asyncio
+async def test_query_knowledge_evidence_rejects_model_supplied_scope_outside_effective_scope(monkeypatch):
+    search_called = False
+
+    async def fake_get_active_vector_space(**kwargs):
+        raise AssertionError("unauthorized knowledge_ids must not reach vector-space resolution")
+
+    async def fake_search(**kwargs):
+        nonlocal search_called
+        search_called = True
+        return [{"evidence_ref": "ke:kb-secret:file-text:text_chunk:1:abc", "score": 0.99}]
+
+    monkeypatch.setattr(evidence_mod.KnowledgeVectorSpaces, "get_active_vector_space", fake_get_active_vector_space)
+
+    result = await query_knowledge_evidence(
+        query_text="retrieve private evidence",
+        knowledge_ids=["kb-secret"],
+        __request__=_FakeRequest(EVIDENCE_RETRIEVAL_SEARCH=fake_search),
+        __user__={"id": "user-1", "role": "user"},
+        __metadata__={
+            "files": [],
+            "effective_knowledge_scope": [{"id": "kb-allowed", "type": "knowledge"}],
+        },
+    )
+
+    payload = json.loads(result)
+
+    assert search_called is False
+    assert payload["ok"] is False
+    assert payload["results"] == []
+    assert payload["error"]["code"] == "vector_space_unavailable"
+    assert payload["query"]["knowledge_ids"] == []
+    assert payload["query"]["collection_ids"] == []
+
+
+@pytest.mark.asyncio
 async def test_query_knowledge_evidence_uses_search_adapter_then_hydrates_refs(monkeypatch):
     calls = []
 
@@ -213,7 +251,10 @@ async def test_query_knowledge_evidence_uses_search_adapter_then_hydrates_refs(m
         include_images=False,
         __request__=_FakeRequest(EVIDENCE_RETRIEVAL_SEARCH=fake_search),
         __user__={"id": "user-1", "role": "user"},
-        __metadata__={"files": [{"id": "chat:file:query-image", "type": "image"}]},
+        __metadata__={
+            "files": [{"id": "chat:file:query-image", "type": "image"}],
+            "effective_knowledge_scope": [{"id": "kb-1", "type": "knowledge"}],
+        },
     )
 
     payload = json.loads(result)
@@ -243,7 +284,10 @@ async def test_query_knowledge_evidence_fails_image_query_when_vector_space_does
         knowledge_ids=["kb-1"],
         __request__=_FakeRequest(EVIDENCE_RETRIEVAL_SEARCH=lambda **kwargs: []),
         __user__={"id": "user-1", "role": "user"},
-        __metadata__={"files": [{"id": "chat:file:query-image", "type": "image"}]},
+        __metadata__={
+            "files": [{"id": "chat:file:query-image", "type": "image"}],
+            "effective_knowledge_scope": [{"id": "kb-1", "type": "knowledge"}],
+        },
     )
 
     payload = json.loads(result)
@@ -273,7 +317,10 @@ async def test_query_knowledge_evidence_adds_budgeted_model_only_image_files(mon
         include_images=True,
         __request__=_FakeRequest(),
         __user__={"id": "user-1", "role": "user"},
-        __metadata__={"files": []},
+        __metadata__={
+            "files": [],
+            "effective_knowledge_scope": [{"id": "kb-1", "type": "knowledge"}],
+        },
     )
 
     payload = json.loads(result)

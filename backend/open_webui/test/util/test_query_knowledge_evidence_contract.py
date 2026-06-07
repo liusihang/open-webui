@@ -94,7 +94,10 @@ async def test_query_knowledge_evidence_returns_compact_evidence_not_found_paylo
         knowledge_ids=['kb-1'],
         __request__=_FakeRequest(),
         __user__={'id': 'user-1', 'role': 'user'},
-        __metadata__={'files': []},
+        __metadata__={
+            'files': [],
+            'effective_knowledge_scope': [{'id': 'kb-1', 'type': 'knowledge'}],
+        },
     )
 
     payload = json.loads(result)
@@ -121,8 +124,8 @@ async def test_query_knowledge_evidence_returns_vector_space_unavailable_for_tex
 
     assert payload['ok'] is False
     assert payload['error']['code'] == 'vector_space_unavailable'
-    assert payload['query']['collection_ids'] == ['kb-1']
-    assert payload['query']['knowledge_ids'] == ['kb-1']
+    assert payload['query']['collection_ids'] == []
+    assert payload['query']['knowledge_ids'] == []
     assert payload['query']['top_k'] == 3
     assert payload['query']['count'] == 3
 

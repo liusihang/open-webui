@@ -392,6 +392,29 @@ def derive_knowledge_ids_from_scope(scope_items: Iterable[Mapping[str, Any]] | N
     return _dedupe_preserve_order(knowledge_ids)
 
 
+def resolve_scoped_knowledge_ids(
+    query: NormalizedQueryKnowledgeEvidence,
+    *,
+    effective_scope: Sequence[Mapping[str, Any]] | None,
+) -> list[str]:
+    allowed_ids = derive_knowledge_ids_from_scope(effective_scope)
+    if not allowed_ids:
+        query.knowledge_ids = []
+        query.collection_ids = []
+        return []
+
+    if query.knowledge_ids:
+        allowed_set = set(allowed_ids)
+        scoped_ids = [knowledge_id for knowledge_id in query.knowledge_ids if knowledge_id in allowed_set]
+    else:
+        scoped_ids = allowed_ids
+
+    scoped_ids = _dedupe_preserve_order(scoped_ids)
+    query.knowledge_ids = scoped_ids
+    query.collection_ids = scoped_ids
+    return scoped_ids
+
+
 def _safe_evidence_url_part(evidence_ref: str) -> str:
     return quote(evidence_ref, safe='')
 
@@ -623,7 +646,7 @@ async def query_knowledge_evidence_runtime(
     user: Mapping[str, Any] | None = None,
     effective_scope: Sequence[Mapping[str, Any]] | None = None,
 ) -> str:
-    scoped_knowledge_ids = query.knowledge_ids or derive_knowledge_ids_from_scope(effective_scope)
+    scoped_knowledge_ids = resolve_scoped_knowledge_ids(query, effective_scope=effective_scope)
     allowed_knowledge_ids = set(scoped_knowledge_ids)
 
     if query.evidence_refs:
