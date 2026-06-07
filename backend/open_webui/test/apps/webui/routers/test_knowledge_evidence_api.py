@@ -8,6 +8,7 @@ import pytest
 
 os.environ.setdefault("WEBUI_SECRET_KEY", "test-secret")
 os.environ.setdefault("ENABLE_DB_MIGRATIONS", "false")
+os.environ.setdefault("DATABASE_ENABLE_SESSION_SHARING", "true")
 
 from open_webui.routers import knowledge as knowledge_mod
 
