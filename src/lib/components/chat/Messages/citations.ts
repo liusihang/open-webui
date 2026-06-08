@@ -329,10 +329,7 @@ export const buildCitationTargets = (
 		const directCitation = citations[number - 1];
 		const evidenceRef = getCitationMapEvidenceRef(citationMap, number);
 		const mappedCitation = evidenceRef ? citationsById.get(evidenceRef) : undefined;
-		const citation =
-			directCitation && (!mappedCitation || directCitation.id !== mappedCitation.id)
-				? directCitation
-				: mappedCitation ?? directCitation;
+		const citation = mappedCitation ?? directCitation;
 
 		if (!citation || seenIds.has(citation.id)) {
 			continue;

@@ -223,6 +223,26 @@ describe('buildCitationTargets', () => {
 		expect(targets.map((target) => target.id)).toEqual(['ke:doc-1:cited']);
 	});
 
+	it('falls back to direct citation order when citation_map entry is missing from sources', () => {
+		const targets = buildCitationTargets(
+			[
+				{
+					source: { id: 'doc-direct', name: 'Direct Doc' },
+					document: ['direct citation'],
+					metadata: [{ source: 'doc-direct' }]
+				}
+			],
+			{
+				content: 'The direct citation still renders [1].',
+				metadata: { citation_map: { '1': 'ke:missing:evidence' } }
+			}
+		);
+
+		expect(targets).toHaveLength(1);
+		expect(targets[0]?.id).toBe('doc-direct');
+		expect(targets[0]?.title).toBe('Direct Doc');
+	});
+
 	it('keeps legacy positional citation behavior when citation_map is absent', () => {
 		const targets = buildCitationTargets(
 			[
