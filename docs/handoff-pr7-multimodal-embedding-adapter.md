@@ -25,6 +25,11 @@
 - 2026-06-09 15:56 CST: Additional verification: `WEBUI_SECRET_KEY=test-secret ENABLE_DB_MIGRATIONS=false uv run python -m py_compile backend/open_webui/routers/retrieval.py backend/open_webui/test/apps/webui/routers/test_retrieval_hybrid_query.py` exits 0.
 - 2026-06-09 15:57 CST: Additional verification: `WEBUI_SECRET_KEY=test-secret ENABLE_DB_MIGRATIONS=false uv run pytest -q backend/open_webui/test/apps/webui/routers/test_retrieval_hybrid_query.py backend/open_webui/test/util/test_evidence_projector.py backend/open_webui/test/util/test_evidence_vector_search.py` reports `20 passed`.
 - 2026-06-09 15:57 CST: Additional verification: multimodal adapter/runtime/knowledge reindex suite reports `37 passed`; retrieval indexing/evidence API/contract suite reports `43 passed`; `git diff --check` exits 0.
+- 2026-06-09 16:33 CST: Follow-up review accepted the unconditional KB evidence projection design and found one useful hardening gap: project-job text evidence must default to `unified_multimodal_dense` instead of inheriting the low-level text-only backfill default.
+- 2026-06-09 16:38 CST: Implemented the follow-up in `backend/open_webui/retrieval/evidence_projector.py`: KB file projection and project-job payload projection now pass `projection_profile="unified_multimodal_dense"` unless the job explicitly overrides it. The low-level `backfill_text_evidence_from_active_chunks()` default remains `text_only` for direct legacy/manual use.
+- 2026-06-09 16:40 CST: Added regression tests that assert direct text backfill stays `text_only`, KB file projection produces `unified_multimodal_dense` text evidence, project jobs without `file_ids` also produce `unified_multimodal_dense`, and batch custom/non-KB collections do not enqueue evidence projection.
+- 2026-06-09 16:42 CST: Explorer subagent Euclid completed read-only review and accepted the implementation: ordinary Knowledge add/update/batch paths now project by default, generic `/files` and arbitrary custom collections fail closed because `_run_evidence_projection_for_knowledge_file()` first checks for a real Knowledge row.
+- 2026-06-09 16:44 CST: Verification after follow-up: `test_retrieval_hybrid_query.py + test_evidence_projector.py + test_evidence_vector_search.py` reports `25 passed`; broader PaddleOCR/query/adapter/evidence API/reindex/indexing suite reports `84 passed`; py_compile and `git diff --check` exit 0.
 
 ## First-Principles Design Decision
 The defect is not in vector search or the legacy OpenAI embedding helper itself. The evidence path can pass structured image descriptors, while the legacy helper only understands OpenAI text `input`; feeding image dicts into that helper silently creates text embeddings of serialized dicts. The lowest-complexity fix is an in-process evidence-only adapter registered as `EVIDENCE_RETRIEVAL_EMBEDDING`. This avoids a new compose service, avoids extra deployment state, and keeps legacy `EMBEDDING_FUNCTION` behavior unchanged.
@@ -37,5 +42,6 @@ The defect is not in vector search or the legacy OpenAI embedding helper itself.
 
 ## Current Status
 - Earlier implementation and focused verification are complete for the evidence embedding adapter slice.
-- The default ordinary KB ingest switch is implemented and focused verification passed.
+- The default ordinary KB ingest switch is implemented: ordinary Knowledge uploads/updates/batch add now run evidence projection unconditionally after vector insert, using the unified multimodal profile for projected text and image evidence.
+- Generic file uploads and arbitrary/custom collections are intentionally not projected into `knowledge_evidence`; projection requires a real Knowledge row.
 - No PaddleOCR loader files were modified by this task. The worktree still contains the pre-existing `uv.lock` change, which remains intentionally unstaged/uncommitted.

@@ -275,6 +275,7 @@ async def project_evidence_for_knowledge_file(
     knowledge_id: str,
     file_id: str,
     project_document_images: bool = False,
+    projection_profile: str = "unified_multimodal_dense",
     db: AsyncSession | None = None,
 ) -> EvidenceProjectionResult:
     async with _session_scope(db) as session:
@@ -296,6 +297,7 @@ async def project_evidence_for_knowledge_file(
         collection_ids=[knowledge_id],
         knowledge_ids=[knowledge_id],
         file_ids=[file_id],
+        projection_profile=projection_profile,
         db=db,
     )
     _merge_projection_result(result, text_result)
@@ -431,6 +433,7 @@ async def project_evidence_from_job_payload(
 
     file_ids = _normalize_string_sequence(job_payload.get("file_ids"))
     project_document_images = bool(job_payload.get("project_document_images", False))
+    projection_profile = _string_or_none(job_payload.get("projection_profile")) or "unified_multimodal_dense"
 
     result = EvidenceProjectionResult()
     if file_ids:
@@ -439,12 +442,14 @@ async def project_evidence_from_job_payload(
                 knowledge_id=knowledge_id,
                 file_id=file_id,
                 project_document_images=project_document_images,
+                projection_profile=projection_profile,
                 db=db,
             )
             _merge_projection_result(result, file_result)
     else:
         text_result = await backfill_text_evidence_from_active_chunks(
             collection_ids=[knowledge_id],
+            projection_profile=projection_profile,
             db=db,
         )
         _merge_projection_result(result, text_result)

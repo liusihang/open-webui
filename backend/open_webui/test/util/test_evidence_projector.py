@@ -185,6 +185,7 @@ async def test_text_backfill_is_idempotent_and_bridges_retrieval_chunk_fields(db
     assert evidence_rows[0].asset_id is None
     assert evidence_rows[0].content_text == "First paragraph"
     assert evidence_rows[0].preview_text == "First paragraph"
+    assert evidence_rows[0].projection_profile == "text_only"
 
 
 @pytest.mark.asyncio
@@ -231,6 +232,30 @@ async def test_project_knowledge_file_only_uses_chunks_from_target_knowledge(db_
     assert len(evidence_rows) == 1
     assert evidence_rows[0].knowledge_id == "kb-1"
     assert evidence_rows[0].content_text == "Knowledge chunk"
+    assert evidence_rows[0].projection_profile == "unified_multimodal_dense"
+
+
+@pytest.mark.asyncio
+async def test_project_job_without_file_ids_defaults_text_evidence_to_multimodal_profile(db_session):
+    await _seed_knowledge_file(
+        db_session,
+        file_id="file-doc",
+        filename="doc.pdf",
+        content_type="application/pdf",
+        path="/tmp/doc.pdf",
+    )
+    await _seed_active_text_chunk(db_session, row_id=13, file_id="file-doc", text="Knowledge chunk")
+
+    result = await project_evidence_from_job_payload({"knowledge_id": "kb-1"}, db=db_session)
+
+    evidence_rows = (
+        (await db_session.execute(select(KnowledgeEvidence).order_by(KnowledgeEvidence.id.asc()))).scalars().all()
+    )
+
+    assert result.text_evidence_upserted == 1
+    assert result.scanned_chunks == 1
+    assert len(evidence_rows) == 1
+    assert evidence_rows[0].projection_profile == "unified_multimodal_dense"
 
 
 @pytest.mark.asyncio

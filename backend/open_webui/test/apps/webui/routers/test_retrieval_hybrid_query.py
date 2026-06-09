@@ -466,6 +466,64 @@ async def test_process_files_batch_projects_evidence_for_completed_knowledge_fil
     assert run_calls == ["job-file-1", "job-file-2"]
 
 
+@pytest.mark.asyncio
+async def test_process_files_batch_does_not_project_evidence_for_non_knowledge_collection(monkeypatch):
+    enqueue_calls = []
+
+    files = [
+        SimpleNamespace(
+            id="file-1",
+            user_id="owner-1",
+            filename="doc.pdf",
+            path=None,
+            hash=None,
+            data={"content": "alpha"},
+            meta={"content_type": "application/pdf"},
+            created_at=1,
+            updated_at=1,
+        )
+    ]
+
+    async def fake_get_file_by_id(file_id, db=None):
+        return files[0]
+
+    async def fake_validate_collection_access(collection_names, user, access_type="write"):
+        assert collection_names == ["custom-collection"]
+
+    def fake_save_docs_to_vector_db(*args, **kwargs):
+        return True
+
+    async def fake_update_file_by_id(id, form_data, db=None):
+        return files[0]
+
+    async def fake_get_knowledge_by_id(id, db=None):
+        return None
+
+    async def fake_enqueue(**kwargs):
+        enqueue_calls.append(kwargs)
+        return {"job": {"job_id": "job-evidence"}, "state": {"status": "pending"}}
+
+    monkeypatch.setattr(retrieval_router.Files, "get_file_by_id", fake_get_file_by_id)
+    monkeypatch.setattr(retrieval_router.Files, "update_file_by_id", fake_update_file_by_id)
+    monkeypatch.setattr(retrieval_router.Knowledges, "get_knowledge_by_id", fake_get_knowledge_by_id)
+    monkeypatch.setattr(retrieval_router, "_validate_collection_access", fake_validate_collection_access)
+    monkeypatch.setattr(retrieval_router, "save_docs_to_vector_db", fake_save_docs_to_vector_db)
+    monkeypatch.setattr(retrieval_router, "enqueue_evidence_projection_job", fake_enqueue, raising=False)
+
+    request = SimpleNamespace(app=SimpleNamespace(state=SimpleNamespace(config=SimpleNamespace())))
+    user = SimpleNamespace(id="owner-1", role="admin")
+
+    result = await retrieval_router.process_files_batch(
+        request=request,
+        form_data=retrieval_router.BatchProcessFilesForm(files=files, collection_name="custom-collection"),
+        user=user,
+        db=object(),
+    )
+
+    assert [file_result.status for file_result in result.results] == ["completed"]
+    assert enqueue_calls == []
+
+
 def test_build_retrieval_manifest_chunks_preserves_kb_file_and_vector_identity():
     chunks = retrieval_router._build_retrieval_manifest_chunks_from_vector_items(
         collection_name="kb-1",
