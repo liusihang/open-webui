@@ -83,7 +83,8 @@ class PaddleOCRVLLoader:
             )
 
         payload = self._read_json_response(response, operation='submit')
-        job_id = payload.get('jobId') or payload.get('id')
+        job_data = _job_payload_data(payload)
+        job_id = job_data.get('jobId') or job_data.get('id') or payload.get('jobId') or payload.get('id')
         if not isinstance(job_id, str) or not job_id.strip():
             raise RuntimeError('PaddleOCR-vl submit response missing jobId.')
         return job_id
@@ -105,12 +106,13 @@ class PaddleOCRVLLoader:
                 ),
                 operation='poll',
             )
-            state = payload.get('state')
+            job_data = _job_payload_data(payload)
+            state = job_data.get('state') or payload.get('state')
             if state == 'done':
-                return payload
+                return job_data or payload
 
             if isinstance(state, str) and state.lower() in TERMINAL_FAILURE_STATES:
-                detail = _extract_error_detail(payload) or f'job entered terminal state {state!r}'
+                detail = _extract_error_detail(job_data) or _extract_error_detail(payload) or f'job entered terminal state {state!r}'
                 raise RuntimeError(f'PaddleOCR-vl job {job_id} failed: {detail}')
 
             if not isinstance(state, str) or not state:
@@ -264,6 +266,11 @@ def _normalize_jobs_url(api_url: str) -> str:
         normalized_path = f'{path}{PADDLEOCR_VL_JOBS_PATH}' if path else PADDLEOCR_VL_JOBS_PATH
 
     return parsed._replace(path=normalized_path, params='', query='', fragment='').geturl()
+
+
+def _job_payload_data(payload: dict[str, Any]) -> dict[str, Any]:
+    data = payload.get('data')
+    return data if isinstance(data, dict) else payload
 
 
 def _extract_error_detail(payload: dict[str, Any]) -> str | None:

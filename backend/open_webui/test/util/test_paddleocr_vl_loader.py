@@ -190,14 +190,16 @@ def test_paddleocr_loader_accepts_jobs_endpoint_base_url_and_raises_for_failed_j
 
     def fake_post(url, data=None, files=None, headers=None, timeout=None):
         assert url == 'https://paddleocr.aistudio-app.com/api/v2/ocr/jobs'
-        return FakeResponse(json_data={'jobId': 'job-999'})
+        return FakeResponse(json_data={'data': {'jobId': 'job-999'}})
 
     def fake_get(url, headers=None, timeout=None, stream=False):
         poll_urls.append(url)
         return FakeResponse(
             json_data={
-                'state': 'failed',
-                'error': {'message': 'quota exceeded'},
+                'data': {
+                    'state': 'failed',
+                    'error': {'message': 'quota exceeded'},
+                },
             }
         )
 
