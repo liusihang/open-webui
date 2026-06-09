@@ -568,12 +568,14 @@ async def _hydrate_evidence_results(
     *,
     allowed_knowledge_ids: set[str],
     include_images: bool,
+    modalities: Sequence[str] | None = None,
     model_image_budget: int = _DEFAULT_MODEL_IMAGE_BUDGET,
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]], list[str]]:
     results: list[dict[str, Any]] = []
     model_only_files: list[dict[str, Any]] = []
     missing_refs: list[str] = []
     seen_refs: set[str] = set()
+    modality_filter = {modality for modality in modalities or [] if modality in {'text', 'image'}}
 
     for hit in search_hits:
         if isinstance(hit, str):
@@ -594,6 +596,8 @@ async def _hydrate_evidence_results(
             continue
         if allowed_knowledge_ids and evidence.knowledge_id not in allowed_knowledge_ids:
             missing_refs.append(evidence_ref)
+            continue
+        if modality_filter and evidence.modality not in modality_filter:
             continue
 
         results.append(_serialize_evidence_result(evidence, score=score))
@@ -662,6 +666,7 @@ async def query_knowledge_evidence_runtime(
             query.evidence_refs,
             allowed_knowledge_ids=allowed_knowledge_ids,
             include_images=query.include_images,
+            modalities=query.modalities,
         )
         if missing_refs and not results:
             return build_query_knowledge_evidence_response(
@@ -706,6 +711,7 @@ async def query_knowledge_evidence_runtime(
         hits or [],
         allowed_knowledge_ids=allowed_knowledge_ids,
         include_images=query.include_images,
+        modalities=query.modalities,
     )
     return build_query_knowledge_evidence_response(
         query=query,

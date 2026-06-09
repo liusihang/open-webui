@@ -45,30 +45,62 @@ class _FakeVectorClient:
             {
                 "collection_name": collection_name,
                 "vector": vector,
+                "filter": filter,
                 "limit": limit,
             }
         )
         if vector == [1.0, 0.0, 0.0]:
-            return types.SimpleNamespace(
-                ids=[["vec-text"]],
-                metadatas=[[{"evidence_ref": "ke:kb-1:file-text:text_chunk:1:txt", "vector_space_id": "vs-1"}]],
-                distances=[[0.11]],
+            return _filtered_vector_result(
+                [
+                    (
+                        "vec-text",
+                        {
+                            "evidence_ref": "ke:kb-1:file-text:text_chunk:1:txt",
+                            "vector_space_id": "vs-1",
+                            "modality": "text",
+                        },
+                        0.11,
+                    )
+                ],
+                filter,
             )
         if vector == [0.0, 1.0, 0.0]:
-            return types.SimpleNamespace(
-                ids=[["vec-image"]],
-                metadatas=[[{"evidence_ref": "ke:kb-1:file-img:standalone_image:1:img", "vector_space_id": "vs-1"}]],
-                distances=[[0.21]],
-            )
-        return types.SimpleNamespace(
-            ids=[["vec-mixed-image", "vec-mixed-text"]],
-            metadatas=[
+            return _filtered_vector_result(
                 [
-                    {"evidence_ref": "ke:kb-1:file-img:standalone_image:1:img", "vector_space_id": "vs-1"},
-                    {"evidence_ref": "ke:kb-1:file-text:text_chunk:1:txt", "vector_space_id": "vs-1"},
-                ]
+                    (
+                        "vec-image",
+                        {
+                            "evidence_ref": "ke:kb-1:file-img:standalone_image:1:img",
+                            "vector_space_id": "vs-1",
+                            "modality": "image",
+                        },
+                        0.21,
+                    )
+                ],
+                filter,
+            )
+        return _filtered_vector_result(
+            [
+                (
+                    "vec-mixed-image",
+                    {
+                        "evidence_ref": "ke:kb-1:file-img:standalone_image:1:img",
+                        "vector_space_id": "vs-1",
+                        "modality": "image",
+                    },
+                    0.08,
+                ),
+                (
+                    "vec-mixed-text",
+                    {
+                        "evidence_ref": "ke:kb-1:file-text:text_chunk:1:txt",
+                        "vector_space_id": "vs-1",
+                        "modality": "text",
+                    },
+                    0.19,
+                ),
             ],
-            distances=[[0.08, 0.19]],
+            filter,
         )
 
     async def upsert(self, collection_name, items):
@@ -79,6 +111,22 @@ class _FakeVectorClient:
             }
         )
         return None
+
+
+def _filtered_vector_result(rows, filter=None):
+    requested = None
+    if isinstance(filter, dict):
+        modality_filter = filter.get("modality")
+        if isinstance(modality_filter, dict) and isinstance(modality_filter.get("$in"), list):
+            requested = set(modality_filter["$in"])
+        elif isinstance(modality_filter, str):
+            requested = {modality_filter}
+    filtered = [row for row in rows if requested is None or row[1].get("modality") in requested]
+    return types.SimpleNamespace(
+        ids=[[row[0] for row in filtered]],
+        metadatas=[[row[1] for row in filtered]],
+        distances=[[row[2] for row in filtered]],
+    )
 
 
 def _run_migration(engine, direction):
@@ -172,6 +220,19 @@ async def _seed_knowledge_and_file(session: AsyncSession, *, file_id: str, filen
             [
                 "ke:kb-1:file-img:standalone_image:1:img",
                 "ke:kb-1:file-text:text_chunk:1:txt",
+            ],
+        ),
+        (
+            {
+                "query_text": "find the figure and fold",
+                "query_image_refs": ["chat:file:query-image"],
+                "knowledge_ids": ["kb-1"],
+                "modalities": ["image"],
+                "count": 4,
+            },
+            [2.0, 2.0, 0.0],
+            [
+                "ke:kb-1:file-img:standalone_image:1:img",
             ],
         ),
     ],
@@ -326,6 +387,10 @@ async def test_search_multimodal_evidence_uses_query_embeddings_and_hydrates_evi
 
         assert [hit["evidence_ref"] for hit in hits] == expected_refs
         assert vector_client.search_calls[0]["vector"] == expected_vector
+        if query.modalities:
+            assert vector_client.search_calls[0]["filter"] == {"modality": {"$in": query.modalities}}
+        else:
+            assert vector_client.search_calls[0]["filter"] is None
         if query.query_image_refs and query.query_text:
             assert isinstance(embed_calls[0], dict)
             assert embed_calls[0]["query_text"] == "find the figure and fold"

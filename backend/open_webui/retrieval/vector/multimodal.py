@@ -697,6 +697,12 @@ async def search_multimodal_evidence(
         raise ValueError("No evidence embedding function is configured")
 
     search_limit = max(1, int(limit or getattr(query, "top_k", 8) or 8))
+    requested_modalities = [
+        modality
+        for modality in getattr(query, "modalities", []) or []
+        if isinstance(modality, str) and modality in {"text", "image"}
+    ]
+    metadata_filter = {"modality": {"$in": requested_modalities}} if requested_modalities else None
     hits: list[dict[str, Any]] = []
     query_image_refs = getattr(query, "query_image_refs", None)
     query_has_images = bool(query_image_refs)
@@ -738,6 +744,7 @@ async def search_multimodal_evidence(
         vector_result = await vector_client.search(
             collection_name=f"{vector_space.knowledge_id}:{vector_space.id}",
             vectors=[query_vector],
+            filter=metadata_filter,
             limit=search_limit,
         )
         hits.extend(_normalize_search_rows(vector_result))
