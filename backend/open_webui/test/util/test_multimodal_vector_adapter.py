@@ -281,6 +281,46 @@ async def test_evidence_embedding_adapter_sends_image_payload_as_messages_not_st
 
 
 @pytest.mark.asyncio
+async def test_evidence_embedding_adapter_accepts_dict_user_for_image_payload():
+    requests = []
+
+    async def text_embedding_function(query, prefix=None, user=None):
+        raise AssertionError(f"image input must not reach text embedding function: {query!r}")
+
+    async def post_json(*, url, headers, payload):
+        requests.append({"headers": headers, "payload": payload})
+        return {"data": [{"embedding": [0.4, 0.5, 0.6]}]}
+
+    adapter = OpenAICompatibleMultimodalEvidenceEmbeddingAdapter(
+        text_embedding_function=text_embedding_function,
+        model="Qwen3-VL-Embedding-2B",
+        url="http://embedding.local/v1",
+        key="",
+        post_json=post_json,
+    )
+
+    await adapter(
+        {
+            "query_text": "box",
+            "query_images": [
+                {
+                    "ref": "chat:file:file-1",
+                    "file_id": "file-1",
+                    "mime_type": "image/png",
+                    "image_bytes": b"\x89PNG\r\n\x1a\npayload",
+                }
+            ],
+        },
+        user={"id": "user-1", "role": "admin"},
+    )
+
+    assert requests[0]["headers"]["X-OpenWebUI-User-Id"] == "user-1"
+    assert requests[0]["headers"]["X-OpenWebUI-User-Role"] == "admin"
+    assert requests[0]["headers"]["X-OpenWebUI-User-Name"] == ""
+    assert requests[0]["headers"]["X-OpenWebUI-User-Email"] == ""
+
+
+@pytest.mark.asyncio
 async def test_evidence_embedding_adapter_sends_image_evidence_payload_as_messages():
     requests = []
 
