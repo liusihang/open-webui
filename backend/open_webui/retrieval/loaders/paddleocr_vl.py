@@ -136,7 +136,6 @@ class PaddleOCRVLLoader:
     def _download_layout_results(self, jsonl_url: str) -> list[dict[str, Any]]:
         response = requests.get(
             jsonl_url,
-            headers=self._auth_headers(),
             timeout=self.download_timeout_s,
             stream=True,
         )

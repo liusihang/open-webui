@@ -88,8 +88,8 @@ def test_paddleocr_loader_submits_async_job_polls_jsonl_and_downloads_assets(tmp
     poll_calls = []
 
     def fake_get(url, headers=None, timeout=None, stream=False):
-        assert headers == {'Authorization': 'bearer secret-token'}
         if url == poll_url:
+            assert headers == {'Authorization': 'bearer secret-token'}
             poll_calls.append(url)
             if len(poll_calls) == 1:
                 return FakeResponse(json_data={'state': 'running'})
@@ -100,6 +100,7 @@ def test_paddleocr_loader_submits_async_job_polls_jsonl_and_downloads_assets(tmp
                 }
             )
         if url == jsonl_url:
+            assert headers is None
             assert stream is True
             assert timeout == 60
             return FakeResponse(
