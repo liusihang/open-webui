@@ -113,6 +113,16 @@ class _FakeVectorClient:
         return None
 
 
+class _FakeRequest:
+    def __init__(self, **state) -> None:
+        self.app = types.SimpleNamespace(
+            state=types.SimpleNamespace(
+                config=types.SimpleNamespace(TOP_K_RERANKER=2),
+                **state,
+            )
+        )
+
+
 def _filtered_vector_result(rows, filter=None):
     requested = None
     if isinstance(filter, dict):
@@ -189,7 +199,7 @@ async def _seed_knowledge_and_file(session: AsyncSession, *, file_id: str, filen
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    "query_kwargs, expected_vector, expected_refs",
+    "query_kwargs, expected_vector, expected_refs, expected_filters",
     [
         (
             {
@@ -199,6 +209,7 @@ async def _seed_knowledge_and_file(session: AsyncSession, *, file_id: str, filen
             },
             [1.0, 0.0, 0.0],
             ["ke:kb-1:file-text:text_chunk:1:txt"],
+            [{"modality": {"$in": ["text"]}}, {"modality": {"$in": ["image"]}}],
         ),
         (
             {
@@ -208,6 +219,7 @@ async def _seed_knowledge_and_file(session: AsyncSession, *, file_id: str, filen
             },
             [0.0, 1.0, 0.0],
             ["ke:kb-1:file-img:standalone_image:1:img"],
+            [{"modality": {"$in": ["image"]}}, {"modality": {"$in": ["text"]}}],
         ),
         (
             {
@@ -221,6 +233,7 @@ async def _seed_knowledge_and_file(session: AsyncSession, *, file_id: str, filen
                 "ke:kb-1:file-img:standalone_image:1:img",
                 "ke:kb-1:file-text:text_chunk:1:txt",
             ],
+            [{"modality": {"$in": ["text"]}}, {"modality": {"$in": ["image"]}}],
         ),
         (
             {
@@ -234,6 +247,7 @@ async def _seed_knowledge_and_file(session: AsyncSession, *, file_id: str, filen
             [
                 "ke:kb-1:file-img:standalone_image:1:img",
             ],
+            [{"modality": {"$in": ["image"]}}],
         ),
     ],
 )
@@ -243,6 +257,7 @@ async def test_search_multimodal_evidence_uses_query_embeddings_and_hydrates_evi
     query_kwargs,
     expected_vector,
     expected_refs,
+    expected_filters,
 ):
     query_image_path = tmp_path / "query.png"
     query_image_bytes = b"\x89PNG\r\n\x1a\nquery-image"
@@ -386,11 +401,8 @@ async def test_search_multimodal_evidence_uses_query_embeddings_and_hydrates_evi
         )
 
         assert [hit["evidence_ref"] for hit in hits] == expected_refs
-        assert vector_client.search_calls[0]["vector"] == expected_vector
-        if query.modalities:
-            assert vector_client.search_calls[0]["filter"] == {"modality": {"$in": query.modalities}}
-        else:
-            assert vector_client.search_calls[0]["filter"] is None
+        assert [call["vector"] for call in vector_client.search_calls] == [expected_vector] * len(expected_filters)
+        assert [call["filter"] for call in vector_client.search_calls] == expected_filters
         if query.query_image_refs and query.query_text:
             assert isinstance(embed_calls[0], dict)
             assert embed_calls[0]["query_text"] == "find the figure and fold"
@@ -401,6 +413,781 @@ async def test_search_multimodal_evidence_uses_query_embeddings_and_hydrates_evi
             assert embed_calls[0]["query_text"] is None
         else:
             assert embed_calls[0] == "find the capsid fold"
+
+
+@pytest.mark.asyncio
+async def test_search_multimodal_evidence_fuses_ranked_branch_hits_with_rrf():
+    vector_space = types.SimpleNamespace(
+        id="vs-1",
+        knowledge_id="kb-1",
+        retrieval_profile="unified_multimodal_dense",
+        embedding_model="fake-multimodal-embed",
+        supports_text_query=True,
+        supports_image_query=True,
+        supports_text_evidence=True,
+        supports_image_evidence=True,
+    )
+
+    class _BranchQuotaVectorClient:
+        def __init__(self) -> None:
+            self.search_calls: list[dict[str, object]] = []
+
+        async def search(self, collection_name, vectors, filter=None, limit=10):
+            self.search_calls.append(
+                {
+                    "collection_name": collection_name,
+                    "vector": [round(float(value), 3) for value in vectors[0][:3]],
+                    "filter": filter,
+                    "limit": limit,
+                }
+            )
+            modality = (filter or {}).get("modality", {}).get("$in", [None])[0]
+            if modality == "text":
+                return _filtered_vector_result(
+                    [
+                        ("vec-text-1", {"evidence_ref": "ke:text:1", "modality": "text"}, 0.01),
+                        ("vec-shared-text", {"evidence_ref": "ke:shared", "modality": "text"}, 0.02),
+                        ("vec-text-3", {"evidence_ref": "ke:text:3", "modality": "text"}, 0.03),
+                    ],
+                    filter,
+                )
+            return _filtered_vector_result(
+                [
+                    ("vec-shared-image", {"evidence_ref": "ke:shared", "modality": "image"}, 0.01),
+                    ("vec-image-1", {"evidence_ref": "ke:image:1", "modality": "image"}, 0.02),
+                    ("vec-image-2", {"evidence_ref": "ke:image:2", "modality": "image"}, 0.03),
+                ],
+                filter,
+            )
+
+    async def fake_embedding(query, prefix=None, user=None):
+        assert query == "find matching figures"
+        return [1.0, 0.0, 0.0]
+
+    query = normalize_query_knowledge_evidence_args(
+        query_text="find matching figures",
+        knowledge_ids=["kb-1"],
+        count=3,
+    )
+    vector_client = _BranchQuotaVectorClient()
+
+    hits = await search_multimodal_evidence(
+        query=query,
+        vector_spaces=[vector_space],
+        embedding_function=fake_embedding,
+        vector_client=vector_client,
+        user={"id": "user-1", "role": "user"},
+        request=None,
+    )
+
+    assert [call["filter"] for call in vector_client.search_calls] == [
+        {"modality": {"$in": ["text"]}},
+        {"modality": {"$in": ["image"]}},
+    ]
+    assert all(call["limit"] > query.top_k for call in vector_client.search_calls)
+    assert [hit["evidence_ref"] for hit in hits] == ["ke:shared", "ke:text:1", "ke:image:1"]
+    assert hits[0]["fusion_score"] > hits[1]["fusion_score"] > hits[2]["fusion_score"]
+    assert hits[0]["branch_ranks"] == {"text_dense": 2, "image_dense": 1}
+
+
+@pytest.mark.asyncio
+async def test_search_multimodal_evidence_mixed_query_dedupes_after_branch_fusion():
+    vector_space = types.SimpleNamespace(
+        id="vs-1",
+        knowledge_id="kb-1",
+        retrieval_profile="unified_multimodal_dense",
+        embedding_model="fake-multimodal-embed",
+        supports_text_query=True,
+        supports_image_query=True,
+        supports_text_evidence=True,
+        supports_image_evidence=True,
+    )
+
+    class _MixedBranchVectorClient:
+        async def search(self, collection_name, vectors, filter=None, limit=10):
+            modality = (filter or {}).get("modality", {}).get("$in", [None])[0]
+            if modality == "text":
+                return _filtered_vector_result(
+                    [
+                        ("vec-shared-text", {"evidence_ref": "ke:shared", "modality": "text"}, 0.08),
+                        ("vec-text-1", {"evidence_ref": "ke:text:1", "modality": "text"}, 0.10),
+                    ],
+                    filter,
+                )
+            return _filtered_vector_result(
+                [
+                    ("vec-shared-image", {"evidence_ref": "ke:shared", "modality": "image"}, 0.06),
+                    ("vec-image-1", {"evidence_ref": "ke:image:1", "modality": "image"}, 0.20),
+                ],
+                filter,
+            )
+
+    async def fake_embedding(query, prefix=None, user=None):
+        assert isinstance(query, dict)
+        assert query["query_text"] == "find the figure and fold"
+        assert query["query_images"] == [
+            {
+                "ref": "chat:file:query-image",
+                "file_id": "query-image",
+                "mime_type": "image/png",
+                "image_bytes": b"query-image-bytes",
+            }
+        ]
+        return [2.0, 2.0, 0.0]
+
+    request = _FakeRequest(
+        EVIDENCE_QUERY_IMAGE_RESOLVER=lambda refs, request=None: [
+            {
+                "ref": refs[0],
+                "file_id": "query-image",
+                "mime_type": "image/png",
+                "image_bytes": b"query-image-bytes",
+            }
+        ]
+    )
+    query = normalize_query_knowledge_evidence_args(
+        query_text="find the figure and fold",
+        query_image_refs=["chat:file:query-image"],
+        knowledge_ids=["kb-1"],
+        count=3,
+    )
+
+    hits = await search_multimodal_evidence(
+        query=query,
+        vector_spaces=[vector_space],
+        embedding_function=fake_embedding,
+        vector_client=_MixedBranchVectorClient(),
+        user={"id": "user-1", "role": "user"},
+        request=request,
+    )
+
+    assert [hit["evidence_ref"] for hit in hits] == ["ke:shared", "ke:text:1", "ke:image:1"]
+    assert len({hit["evidence_ref"] for hit in hits}) == 3
+
+
+@pytest.mark.asyncio
+async def test_search_multimodal_evidence_rrf_helper_accepts_extensible_branch_names():
+    fused_hits = multimodal_mod._rrf_fuse_branch_hits(
+        {
+            "text_dense": [
+                {"evidence_ref": "ke:text:1", "score": 0.99, "modality": "text"},
+                {"evidence_ref": "ke:shared", "score": 0.98, "modality": "text"},
+            ],
+            "image_dense": [
+                {"evidence_ref": "ke:shared", "score": 0.97, "modality": "image"},
+                {"evidence_ref": "ke:image:1", "score": 0.96, "modality": "image"},
+            ],
+            "lexical_caption": [
+                {"evidence_ref": "ke:shared", "score": 12.0, "modality": "image"},
+                {"evidence_ref": "ke:image:1", "score": 11.0, "modality": "image"},
+            ],
+        },
+        limit=3,
+        rrf_k=40,
+    )
+
+    assert [hit["evidence_ref"] for hit in fused_hits] == ["ke:shared", "ke:image:1", "ke:text:1"]
+    assert fused_hits[0]["branch_ranks"] == {"text_dense": 2, "image_dense": 1, "lexical_caption": 1}
+    assert fused_hits[1]["branch_ranks"] == {"image_dense": 2, "lexical_caption": 2}
+    assert fused_hits[2]["branch_ranks"] == {"text_dense": 1}
+    assert fused_hits[0]["fusion_score"] > fused_hits[1]["fusion_score"] > fused_hits[2]["fusion_score"]
+
+
+def test_search_multimodal_evidence_candidate_limit_never_shrinks_below_top_k():
+    assert multimodal_mod._resolve_branch_candidate_limit(3) == 12
+    assert multimodal_mod._resolve_branch_candidate_limit(20) == 48
+    assert multimodal_mod._resolve_branch_candidate_limit(100) == 100
+
+
+def test_search_multimodal_evidence_lexical_hits_require_evidence_refs():
+    branch = multimodal_mod._SearchBranch(name="text_lexical", modality="text")
+
+    with pytest.raises(MultimodalVectorSpaceError, match="without evidence_ref"):
+        multimodal_mod._normalize_branch_search_hits(
+            [
+                {"evidence_ref": "ke:text:1", "score": 1.0, "modality": "text"},
+                {"chunk_uid": "legacy-manifest-chunk", "score": 0.9, "modality": "text"},
+            ],
+            branch=branch,
+            source="hook",
+        )
+
+
+@pytest.mark.asyncio
+async def test_search_multimodal_evidence_fuses_dense_and_lexical_branch_hits():
+    vector_space = types.SimpleNamespace(
+        id="vs-1",
+        knowledge_id="kb-1",
+        retrieval_profile="unified_multimodal_dense",
+        embedding_model="fake-multimodal-embed",
+        supports_text_query=True,
+        supports_image_query=True,
+        supports_text_evidence=True,
+        supports_image_evidence=True,
+    )
+
+    class _DenseBranchVectorClient:
+        def __init__(self) -> None:
+            self.search_calls: list[dict[str, object]] = []
+
+        async def search(self, collection_name, vectors, filter=None, limit=10):
+            self.search_calls.append(
+                {
+                    "collection_name": collection_name,
+                    "filter": filter,
+                    "limit": limit,
+                }
+            )
+            modality = (filter or {}).get("modality", {}).get("$in", [None])[0]
+            if modality == "text":
+                return _filtered_vector_result(
+                    [("vec-text-1", {"evidence_ref": "ke:text:1", "modality": "text"}, 0.01)],
+                    filter,
+                )
+            return _filtered_vector_result(
+                [("vec-image-1", {"evidence_ref": "ke:image:1", "modality": "image"}, 0.02)],
+                filter,
+            )
+
+    async def fake_embedding(query, prefix=None, user=None):
+        assert query == "find matching figures"
+        return [1.0, 0.0, 0.0]
+
+    lexical_calls: list[dict[str, object]] = []
+
+    async def fake_lexical_search(*, query_text, branch, vector_space, limit, request=None, user=None):
+        lexical_calls.append(
+            {
+                "query_text": query_text,
+                "branch_name": branch["name"],
+                "modality": branch["modality"],
+                "knowledge_id": vector_space.knowledge_id,
+                "vector_space_id": vector_space.id,
+                "limit": limit,
+            }
+        )
+        return [
+            {
+                "evidence_ref": "ke:shared",
+                "score": 10.0 if branch["modality"] == "text" else 9.0,
+                "modality": branch["modality"],
+            }
+        ]
+
+    query = normalize_query_knowledge_evidence_args(
+        query_text="find matching figures",
+        knowledge_ids=["kb-1"],
+        count=3,
+    )
+    vector_client = _DenseBranchVectorClient()
+
+    hits = await search_multimodal_evidence(
+        query=query,
+        vector_spaces=[vector_space],
+        embedding_function=fake_embedding,
+        vector_client=vector_client,
+        user={"id": "user-1", "role": "user"},
+        request=_FakeRequest(EVIDENCE_RETRIEVAL_LEXICAL_SEARCH=fake_lexical_search),
+    )
+
+    assert lexical_calls == [
+        {
+            "query_text": "find matching figures",
+            "branch_name": "text_lexical",
+            "modality": "text",
+            "knowledge_id": "kb-1",
+            "vector_space_id": "vs-1",
+            "limit": 12,
+        },
+        {
+            "query_text": "find matching figures",
+            "branch_name": "image_lexical",
+            "modality": "image",
+            "knowledge_id": "kb-1",
+            "vector_space_id": "vs-1",
+            "limit": 12,
+        },
+    ]
+    assert [call["filter"] for call in vector_client.search_calls] == [
+        {"modality": {"$in": ["text"]}},
+        {"modality": {"$in": ["image"]}},
+    ]
+    assert [hit["evidence_ref"] for hit in hits] == ["ke:shared", "ke:text:1", "ke:image:1"]
+    assert hits[0]["branch_ranks"] == {"text_lexical": 1, "image_lexical": 1}
+
+
+@pytest.mark.asyncio
+async def test_search_multimodal_evidence_applies_reranker_when_enabled(tmp_path, monkeypatch):
+    async with _db_session_ctx(tmp_path) as session:
+        await _seed_knowledge_and_file(
+            session,
+            file_id="file-text",
+            filename="paper.pdf",
+            content_type="application/pdf",
+            path="/tmp/paper.pdf",
+        )
+        session.add(
+            File(
+                id="file-img",
+                user_id="user-1",
+                hash="file-img-hash",
+                filename="figure.png",
+                path="/tmp/figure.png",
+                data={"status": "completed"},
+                meta={"content_type": "image/png", "name": "figure.png"},
+                created_at=1,
+                updated_at=1,
+            )
+        )
+        await session.commit()
+
+        await KnowledgeEvidences.create_evidence(
+            knowledge_id="kb-1",
+            file_id="file-text",
+            modality="text",
+            evidence_kind="text_chunk",
+            content_hash="hash-text",
+            projection_profile="unified_multimodal_dense",
+            projection_config_hash="profile-hash",
+            chunk_index=1,
+            chunk_total=1,
+            source_name="paper.pdf",
+            content_text="The capsid shell has a conserved HK97-like fold.",
+            preview_text="Conserved HK97-like fold.",
+            title="Text finding",
+            retrieval_chunk_uid="chunk-1",
+            retrieval_chunk_row_id=1,
+            evidence_ref="ke:kb-1:file-text:text_chunk:1:txt",
+            db=session,
+        )
+        image_asset = await KnowledgeEvidenceAssets.create_asset(
+            knowledge_id="kb-1",
+            file_id="file-img",
+            asset_kind="standalone_image",
+            mime_type="image/png",
+            storage_uri="/tmp/figure.png",
+            sha256="sha-image",
+            status="ready",
+            db=session,
+        )
+        await KnowledgeEvidences.create_evidence(
+            knowledge_id="kb-1",
+            file_id="file-img",
+            asset_id=image_asset.id,
+            modality="image",
+            evidence_kind="standalone_image",
+            content_hash="hash-image",
+            projection_profile="unified_multimodal_dense",
+            projection_config_hash="profile-hash",
+            chunk_index=1,
+            chunk_total=1,
+            source_name="figure.png",
+            content_text="A microscopy panel with ring-like capsid particles.",
+            preview_text="Ring-like capsid particles.",
+            title="Gel image",
+            evidence_ref="ke:kb-1:file-img:standalone_image:1:img",
+            db=session,
+        )
+        await KnowledgeEvidences.create_evidence(
+            knowledge_id="kb-1",
+            file_id="file-text",
+            modality="text",
+            evidence_kind="text_chunk",
+            content_hash="hash-text-2",
+            projection_profile="unified_multimodal_dense",
+            projection_config_hash="profile-hash",
+            chunk_index=2,
+            chunk_total=2,
+            source_name="paper.pdf",
+            content_text="An unrelated text chunk.",
+            preview_text="Unrelated text chunk.",
+            title="Other finding",
+            retrieval_chunk_uid="chunk-2",
+            retrieval_chunk_row_id=2,
+            evidence_ref="ke:kb-1:file-text:text_chunk:2:txt",
+            db=session,
+        )
+
+        evidence_by_ref = {
+            "ke:kb-1:file-text:text_chunk:1:txt": await KnowledgeEvidences.get_evidence_by_ref(
+                "ke:kb-1:file-text:text_chunk:1:txt", db=session
+            ),
+            "ke:kb-1:file-text:text_chunk:2:txt": await KnowledgeEvidences.get_evidence_by_ref(
+                "ke:kb-1:file-text:text_chunk:2:txt", db=session
+            ),
+            "ke:kb-1:file-img:standalone_image:1:img": await KnowledgeEvidences.get_evidence_by_ref(
+                "ke:kb-1:file-img:standalone_image:1:img", db=session
+            ),
+        }
+
+        async def fake_get_evidence_by_ref(ref, db=None):
+            return evidence_by_ref.get(ref)
+
+        monkeypatch.setattr(multimodal_mod.KnowledgeEvidences, "get_evidence_by_ref", fake_get_evidence_by_ref)
+
+        vector_space = await KnowledgeVectorSpaces.create_vector_space(
+            knowledge_id="kb-1",
+            retrieval_profile="unified_multimodal_dense",
+            embedding_model="fake-multimodal-embed",
+            projection_config_hash="profile-hash",
+            embedding_dim=3,
+            distance_metric="cosine",
+            vector_backend="pgvector",
+            supports_text_query=True,
+            supports_image_query=True,
+            supports_text_evidence=True,
+            supports_image_evidence=True,
+            active=True,
+            db=session,
+        )
+
+        class _RerankBranchVectorClient:
+            def __init__(self) -> None:
+                self.search_calls: list[dict[str, object]] = []
+
+            async def search(self, collection_name, vectors, filter=None, limit=10):
+                self.search_calls.append({"collection_name": collection_name, "filter": filter, "limit": limit})
+                modality = (filter or {}).get("modality", {}).get("$in", [None])[0]
+                if modality == "text":
+                    return _filtered_vector_result(
+                        [
+                            (
+                                "vec-text-1",
+                                {
+                                    "evidence_ref": "ke:kb-1:file-text:text_chunk:1:txt",
+                                    "vector_space_id": "vs-1",
+                                    "modality": "text",
+                                },
+                                0.01,
+                            ),
+                            (
+                                "vec-text-2",
+                                {
+                                    "evidence_ref": "ke:kb-1:file-text:text_chunk:2:txt",
+                                    "vector_space_id": "vs-1",
+                                    "modality": "text",
+                                },
+                                0.02,
+                            ),
+                        ],
+                        filter,
+                    )
+                return _filtered_vector_result(
+                    [
+                        (
+                            "vec-image-1",
+                            {
+                                "evidence_ref": "ke:kb-1:file-img:standalone_image:1:img",
+                                "vector_space_id": "vs-1",
+                                "modality": "image",
+                            },
+                            0.30,
+                        )
+                    ],
+                    filter,
+                )
+
+        async def fake_embedding(query, prefix=None, user=None):
+            return [2.0, 2.0, 0.0]
+
+        rerank_calls: list[dict[str, object]] = []
+
+        def fake_reranker(query, documents, user=None):
+            rerank_calls.append(
+                {
+                    "query": query,
+                    "documents": [doc.page_content for doc in documents],
+                    "user": user,
+                }
+            )
+            return [0.1, 0.9]
+
+        query = normalize_query_knowledge_evidence_args(
+            query_text="find the figure and fold",
+            knowledge_ids=["kb-1"],
+            count=4,
+            rerank=True,
+        )
+        hits = await search_multimodal_evidence(
+            query=query,
+            vector_spaces=[vector_space],
+            embedding_function=fake_embedding,
+            vector_client=_RerankBranchVectorClient(),
+            user={"id": "user-1", "role": "user"},
+            request=_FakeRequest(RERANKING_FUNCTION=fake_reranker),
+        )
+
+        assert rerank_calls == [
+            {
+                "query": "find the figure and fold",
+                "documents": [
+                    "The capsid shell has a conserved HK97-like fold.",
+                    "A microscopy panel with ring-like capsid particles.",
+                ],
+                "user": {"id": "user-1", "role": "user"},
+            }
+        ]
+        assert [hit["evidence_ref"] for hit in hits] == [
+            "ke:kb-1:file-img:standalone_image:1:img",
+            "ke:kb-1:file-text:text_chunk:1:txt",
+            "ke:kb-1:file-text:text_chunk:2:txt",
+        ]
+        assert hits[0]["score"] == pytest.approx(0.9)
+        assert hits[1]["score"] == pytest.approx(0.1)
+        assert hits[2]["score"] == pytest.approx(0.98)
+
+
+@pytest.mark.asyncio
+async def test_search_multimodal_evidence_reranker_uses_image_asset_metadata(tmp_path, monkeypatch):
+    async with _db_session_ctx(tmp_path) as session:
+        await _seed_knowledge_and_file(
+            session,
+            file_id="file-text",
+            filename="paper.pdf",
+            content_type="application/pdf",
+            path="/tmp/paper.pdf",
+        )
+        session.add(
+            File(
+                id="file-img",
+                user_id="user-1",
+                hash="file-img-hash",
+                filename="figure.png",
+                path="/tmp/figure.png",
+                data={"status": "completed"},
+                meta={"content_type": "image/png", "name": "figure.png"},
+                created_at=1,
+                updated_at=1,
+            )
+        )
+        await session.commit()
+
+        text_evidence = await KnowledgeEvidences.create_evidence(
+            knowledge_id="kb-1",
+            file_id="file-text",
+            modality="text",
+            evidence_kind="text_chunk",
+            content_hash="hash-text",
+            projection_profile="unified_multimodal_dense",
+            projection_config_hash="profile-hash",
+            chunk_index=1,
+            chunk_total=1,
+            source_name="paper.pdf",
+            content_text="The capsid shell has a conserved HK97-like fold.",
+            preview_text="Conserved HK97-like fold.",
+            title="Text finding",
+            retrieval_chunk_uid="chunk-1",
+            retrieval_chunk_row_id=1,
+            evidence_ref="ke:kb-1:file-text:text_chunk:1:txt",
+            db=session,
+        )
+        image_asset = await KnowledgeEvidenceAssets.create_asset(
+            knowledge_id="kb-1",
+            file_id="file-img",
+            asset_kind="standalone_image",
+            mime_type="image/png",
+            storage_uri="/tmp/figure.png",
+            sha256="sha-image",
+            caption="Ring-like capsid particles.",
+            ocr_text="Scale bar 100 nm",
+            surrounding_text="Results Figure 2 shows particles in negative stain.",
+            status="ready",
+            db=session,
+        )
+        image_evidence = await KnowledgeEvidences.create_evidence(
+            knowledge_id="kb-1",
+            file_id="file-img",
+            asset_id=image_asset.id,
+            modality="image",
+            evidence_kind="standalone_image",
+            content_hash="hash-image",
+            projection_profile="unified_multimodal_dense",
+            projection_config_hash="profile-hash",
+            chunk_index=1,
+            chunk_total=1,
+            source_name="figure.png",
+            content_text=None,
+            preview_text=None,
+            title=None,
+            evidence_ref="ke:kb-1:file-img:standalone_image:1:img",
+            db=session,
+        )
+
+        evidence_by_ref = {
+            text_evidence.evidence_ref: text_evidence,
+            image_evidence.evidence_ref: image_evidence,
+        }
+        asset_by_id = {
+            image_asset.id: image_asset,
+        }
+
+        async def fake_get_evidence_by_ref(ref, db=None):
+            return evidence_by_ref.get(ref)
+
+        async def fake_get_asset_by_id(asset_id, db=None):
+            return asset_by_id.get(asset_id)
+
+        monkeypatch.setattr(multimodal_mod.KnowledgeEvidences, "get_evidence_by_ref", fake_get_evidence_by_ref)
+        monkeypatch.setattr(multimodal_mod.KnowledgeEvidenceAssets, "get_asset_by_id", fake_get_asset_by_id)
+
+        vector_space = await KnowledgeVectorSpaces.create_vector_space(
+            knowledge_id="kb-1",
+            retrieval_profile="unified_multimodal_dense",
+            embedding_model="fake-multimodal-embed",
+            projection_config_hash="profile-hash",
+            embedding_dim=3,
+            distance_metric="cosine",
+            vector_backend="pgvector",
+            supports_text_query=True,
+            supports_image_query=True,
+            supports_text_evidence=True,
+            supports_image_evidence=True,
+            active=True,
+            db=session,
+        )
+
+        class _RerankMetadataVectorClient:
+            async def search(self, collection_name, vectors, filter=None, limit=10):
+                modality = (filter or {}).get("modality", {}).get("$in", [None])[0]
+                if modality == "text":
+                    return _filtered_vector_result(
+                        [
+                            (
+                                "vec-text-1",
+                                {
+                                    "evidence_ref": text_evidence.evidence_ref,
+                                    "vector_space_id": vector_space.id,
+                                    "modality": "text",
+                                },
+                                0.01,
+                            )
+                        ],
+                        filter,
+                    )
+                return _filtered_vector_result(
+                    [
+                        (
+                            "vec-image-1",
+                            {
+                                "evidence_ref": image_evidence.evidence_ref,
+                                "vector_space_id": vector_space.id,
+                                "modality": "image",
+                            },
+                            0.02,
+                        )
+                    ],
+                    filter,
+                )
+
+        async def fake_embedding(query, prefix=None, user=None):
+            return [1.0, 0.0, 0.0]
+
+        rerank_calls: list[dict[str, object]] = []
+
+        def fake_reranker(query, documents, user=None):
+            rerank_calls.append(
+                {
+                    "query": query,
+                    "documents": [doc.page_content for doc in documents],
+                }
+            )
+            return [0.1, 0.9]
+
+        query = normalize_query_knowledge_evidence_args(
+            query_text="find ring-like capsid particles",
+            knowledge_ids=["kb-1"],
+            count=2,
+            rerank=True,
+        )
+
+        hits = await search_multimodal_evidence(
+            query=query,
+            vector_spaces=[vector_space],
+            embedding_function=fake_embedding,
+            vector_client=_RerankMetadataVectorClient(),
+            user={"id": "user-1", "role": "user"},
+            request=_FakeRequest(RERANKING_FUNCTION=fake_reranker),
+        )
+
+        assert rerank_calls[0]["query"] == "find ring-like capsid particles"
+        assert rerank_calls[0]["documents"][0] == "The capsid shell has a conserved HK97-like fold."
+        assert "Ring-like capsid particles." in rerank_calls[0]["documents"][1]
+        assert "Results Figure 2 shows particles in negative stain." in rerank_calls[0]["documents"][1]
+        assert "Scale bar 100 nm" in rerank_calls[0]["documents"][1]
+        assert "figure.png" in rerank_calls[0]["documents"][1]
+        assert [hit["evidence_ref"] for hit in hits] == [
+            image_evidence.evidence_ref,
+            text_evidence.evidence_ref,
+        ]
+
+
+@pytest.mark.asyncio
+async def test_search_multimodal_evidence_skips_reranker_for_image_only_queries():
+    vector_space = types.SimpleNamespace(
+        id="vs-1",
+        knowledge_id="kb-1",
+        retrieval_profile="unified_multimodal_dense",
+        embedding_model="fake-multimodal-embed",
+        supports_text_query=True,
+        supports_image_query=True,
+        supports_text_evidence=True,
+        supports_image_evidence=True,
+    )
+
+    class _ImageOnlyVectorClient:
+        async def search(self, collection_name, vectors, filter=None, limit=10):
+            modality = (filter or {}).get("modality", {}).get("$in", [None])[0]
+            if modality == "image":
+                return _filtered_vector_result(
+                    [("vec-image-1", {"evidence_ref": "ke:image:1", "modality": "image"}, 0.10)],
+                    filter,
+                )
+            return _filtered_vector_result(
+                [("vec-text-1", {"evidence_ref": "ke:text:1", "modality": "text"}, 0.20)],
+                filter,
+            )
+
+    reranker_called = False
+
+    def fake_reranker(query, documents, user=None):
+        nonlocal reranker_called
+        reranker_called = True
+        return [0.9]
+
+    async def fake_embedding(query, prefix=None, user=None):
+        assert isinstance(query, dict)
+        assert query["query_text"] is None
+        return [0.0, 1.0, 0.0]
+
+    request = _FakeRequest(
+        RERANKING_FUNCTION=fake_reranker,
+        EVIDENCE_QUERY_IMAGE_RESOLVER=lambda refs, request=None: [
+            {
+                "ref": refs[0],
+                "file_id": "query-image",
+                "mime_type": "image/png",
+                "image_bytes": b"query-image-bytes",
+            }
+        ],
+    )
+    query = normalize_query_knowledge_evidence_args(
+        query_image_refs=["chat:file:query-image"],
+        knowledge_ids=["kb-1"],
+        count=2,
+        rerank=True,
+    )
+
+    hits = await search_multimodal_evidence(
+        query=query,
+        vector_spaces=[vector_space],
+        embedding_function=fake_embedding,
+        vector_client=_ImageOnlyVectorClient(),
+        user={"id": "user-1", "role": "user"},
+        request=request,
+    )
+
+    assert reranker_called is False
+    assert [hit["evidence_ref"] for hit in hits] == ["ke:image:1", "ke:text:1"]
 
 
 @pytest.mark.asyncio

@@ -9,6 +9,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Literal, Mapping, Sequence
 
+from langchain_core.documents import Document
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from open_webui.models.evidence import (
@@ -17,6 +18,7 @@ from open_webui.models.evidence import (
     KnowledgeEvidenceEmbeddingModel,
     KnowledgeEvidenceEmbeddings,
     KnowledgeEvidenceModel,
+    KnowledgeEvidences,
     KnowledgeVectorSpaceModel,
     KnowledgeVectorSpaces,
     compute_knowledge_evidence_embedding_id,
@@ -668,6 +670,332 @@ def _dedupe_search_hits(hits: Sequence[dict[str, Any]]) -> list[dict[str, Any]]:
     )
 
 
+def _supports_evidence_modality(vector_space: Any, modality: str) -> bool:
+    return bool(getattr(vector_space, f"supports_{modality}_evidence", False))
+
+
+@dataclass(frozen=True)
+class _SearchBranch:
+    name: str
+    modality: str
+
+
+_RRF_K = 40
+_BRANCH_CANDIDATE_MULTIPLIER = 3
+_MIN_BRANCH_CANDIDATE_LIMIT = 12
+_MAX_BRANCH_CANDIDATE_LIMIT = 48
+
+
+def _resolve_search_branches(
+    *,
+    requested_modalities: Sequence[str],
+    query_text: str | None,
+    query_has_images: bool,
+    vector_space: Any,
+) -> list[_SearchBranch]:
+    if requested_modalities:
+        ordered_modalities = [modality for modality in requested_modalities if modality in _MODALITIES]
+    elif query_has_images and not query_text:
+        ordered_modalities = ["image", "text"]
+    else:
+        ordered_modalities = ["text", "image"]
+    return [
+        _SearchBranch(name=f"{modality}_dense", modality=modality)
+        for modality in ordered_modalities
+        if _supports_evidence_modality(vector_space, modality)
+    ]
+
+
+def _resolve_branch_candidate_limit(search_limit: int) -> int:
+    widened_limit = min(
+        _MAX_BRANCH_CANDIDATE_LIMIT,
+        max(search_limit * _BRANCH_CANDIDATE_MULTIPLIER, _MIN_BRANCH_CANDIDATE_LIMIT),
+    )
+    return max(search_limit, widened_limit)
+
+
+def _rrf_fuse_branch_hits(
+    branch_hits: Mapping[str, Sequence[dict[str, Any]]],
+    *,
+    limit: int,
+    rrf_k: int = _RRF_K,
+) -> list[dict[str, Any]]:
+    if not branch_hits or limit <= 0:
+        return []
+
+    fused_by_ref: dict[str, dict[str, Any]] = {}
+    for branch_name, hits in branch_hits.items():
+        for rank, hit in enumerate(hits, start=1):
+            evidence_ref = str(hit.get("evidence_ref") or "").strip()
+            if not evidence_ref:
+                continue
+            fused_hit = fused_by_ref.setdefault(evidence_ref, dict(hit))
+            branch_ranks = dict(fused_hit.get("branch_ranks") or {})
+            branch_ranks[branch_name] = rank
+            fused_hit["branch_ranks"] = branch_ranks
+
+            branch_scores = dict(fused_hit.get("branch_scores") or {})
+            if isinstance(hit.get("score"), (int, float)):
+                branch_scores[branch_name] = float(hit["score"])
+            if branch_scores:
+                fused_hit["branch_scores"] = branch_scores
+
+            fused_hit["fusion_score"] = float(fused_hit.get("fusion_score") or 0.0) + (1.0 / float(rrf_k + rank))
+
+            current_score = fused_hit.get("score")
+            new_score = hit.get("score")
+            if isinstance(new_score, (int, float)) and (
+                not isinstance(current_score, (int, float)) or float(new_score) > float(current_score)
+            ):
+                for key, value in hit.items():
+                    fused_hit[key] = value
+                fused_hit["branch_ranks"] = branch_ranks
+                if branch_scores:
+                    fused_hit["branch_scores"] = branch_scores
+                fused_hit["fusion_score"] = float(
+                    sum(1.0 / float(rrf_k + branch_rank) for branch_rank in branch_ranks.values())
+                )
+
+    return sorted(
+        fused_by_ref.values(),
+        key=lambda item: (
+            -(item.get("fusion_score") if isinstance(item.get("fusion_score"), (int, float)) else -1e9),
+            -(item.get("score") if isinstance(item.get("score"), (int, float)) else -1e9),
+            str(item.get("evidence_ref") or ""),
+        ),
+    )[:limit]
+
+
+def _coerce_branch_score(value: Any) -> float | None:
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, (int, float)):
+        return float(value)
+    return None
+
+
+def _normalize_branch_search_hits(
+    hits: Any,
+    *,
+    branch: _SearchBranch,
+    source: str,
+) -> list[dict[str, Any]]:
+    if hits is None:
+        return []
+    if not isinstance(hits, Sequence) or isinstance(hits, (str, bytes)):
+        raise MultimodalVectorSpaceError(
+            "invalid_lexical_branch_payload",
+            f"{source} lexical branch {branch.name} returned an invalid payload",
+            details={"branch": branch.name, "source": source},
+        )
+
+    normalized_hits: list[dict[str, Any]] = []
+    unresolved_refs = 0
+    for hit in hits:
+        metadata: Mapping[str, Any] = {}
+        evidence_ref = ""
+        modality = branch.modality
+        score = None
+
+        if isinstance(hit, Mapping):
+            metadata = hit
+            evidence_ref = str(hit.get("evidence_ref") or "").strip()
+            modality = str(hit.get("modality") or branch.modality).strip().lower() or branch.modality
+            score = _coerce_branch_score(hit.get("score"))
+        else:
+            raw_metadata = getattr(hit, "metadata", None)
+            if isinstance(raw_metadata, Mapping):
+                metadata = raw_metadata
+            raw_chunk_uid = str(getattr(hit, "chunk_uid", "") or "").strip()
+            evidence_ref = str(metadata.get("evidence_ref") or "").strip()
+            if not evidence_ref and raw_chunk_uid.startswith("ke:"):
+                evidence_ref = raw_chunk_uid
+            modality = str(
+                metadata.get("modality")
+                or getattr(hit, "modality", None)
+                or branch.modality
+            ).strip().lower() or branch.modality
+            score = _coerce_branch_score(getattr(hit, "score", None))
+
+        if not evidence_ref:
+            unresolved_refs += 1
+            continue
+        if modality != branch.modality:
+            continue
+
+        normalized_hit = dict(metadata)
+        normalized_hit["evidence_ref"] = evidence_ref
+        normalized_hit["modality"] = modality
+        if score is not None:
+            normalized_hit["score"] = score
+        normalized_hits.append(normalized_hit)
+
+    if unresolved_refs:
+        raise MultimodalVectorSpaceError(
+            "invalid_lexical_branch_payload",
+            f"{source} lexical branch {branch.name} returned hit(s) without evidence_ref mapping",
+            details={"branch": branch.name, "source": source, "unresolved_hits": unresolved_refs},
+        )
+
+    return normalized_hits
+
+
+async def _search_lexical_branch(
+    *,
+    branch: _SearchBranch,
+    query_text: str | None,
+    vector_space: KnowledgeVectorSpaceModel,
+    candidate_limit: int,
+    request: Any | None,
+    user: Mapping[str, Any] | None,
+) -> list[dict[str, Any]]:
+    if not query_text or not query_text.strip():
+        return []
+
+    request_state = getattr(getattr(request, "app", None), "state", None) if request is not None else None
+    lexical_search = (
+        getattr(request_state, "EVIDENCE_RETRIEVAL_LEXICAL_SEARCH", None) if request_state is not None else None
+    )
+    lexical_client = (
+        getattr(request_state, "EVIDENCE_RETRIEVAL_LEXICAL_CLIENT", None) if request_state is not None else None
+    )
+
+    if callable(lexical_search):
+        hits = await _await_maybe(
+            lexical_search(
+                query_text=query_text.strip(),
+                branch={"name": branch.name, "modality": branch.modality},
+                vector_space=vector_space,
+                limit=candidate_limit,
+                request=request,
+                user=user,
+            )
+        )
+        return _normalize_branch_search_hits(hits, branch=branch, source="hook")
+
+    if lexical_client is None or not hasattr(lexical_client, "search"):
+        return []
+
+    hits = await asyncio.to_thread(
+        lexical_client.search,
+        query_text.strip(),
+        collection_ids=[f"{vector_space.knowledge_id}:{vector_space.id}"],
+        knowledge_ids=[vector_space.knowledge_id],
+        k=candidate_limit,
+    )
+    return _normalize_branch_search_hits(hits, branch=branch, source="client")
+
+
+async def _build_rerank_text(evidence: KnowledgeEvidenceModel) -> str:
+    if evidence.modality != "image":
+        for candidate in (evidence.content_text, evidence.preview_text, evidence.title, evidence.source_name):
+            if candidate and str(candidate).strip():
+                return str(candidate).strip()
+        return ""
+
+    for candidate in (evidence.content_text, evidence.preview_text):
+        if candidate and str(candidate).strip():
+            return str(candidate).strip()
+
+    parts: list[str] = []
+    seen: set[str] = set()
+
+    def add_part(value: Any, *, prefix: str | None = None) -> None:
+        text = str(value or "").strip()
+        if not text:
+            return
+        dedupe_key = f"{prefix}:{text}" if prefix else text
+        if dedupe_key in seen:
+            return
+        seen.add(dedupe_key)
+        parts.append(f"{prefix}: {text}" if prefix else text)
+
+    if evidence.asset_id:
+        asset = await KnowledgeEvidenceAssets.get_asset_by_id(evidence.asset_id)
+        if asset is not None:
+            add_part(asset.caption)
+            add_part(asset.surrounding_text, prefix="Context")
+            add_part(asset.ocr_text, prefix="OCR")
+
+    add_part(evidence.title)
+    add_part(evidence.source_name)
+    return "\n".join(parts)
+
+
+async def _call_reranking_function(reranking_function: Any, query_text: str, documents: list[Document], user: Any) -> Any:
+    try:
+        return await asyncio.to_thread(reranking_function, query_text, documents, user)
+    except TypeError:
+        return await asyncio.to_thread(reranking_function, query_text, documents)
+
+
+async def _rerank_search_hits(
+    hits: Sequence[dict[str, Any]],
+    *,
+    query_text: str | None,
+    reranking_function: Any,
+    rerank_top_n: int,
+    user: Any = None,
+) -> list[dict[str, Any]]:
+    if not hits or not query_text or not query_text.strip():
+        return list(hits)
+
+    rerank_limit = min(len(hits), max(1, int(rerank_top_n or len(hits))))
+    rerank_window = [dict(hit) for hit in hits[:rerank_limit]]
+    remaining_hits = [dict(hit) for hit in hits[rerank_limit:]]
+
+    documents: list[Document] = []
+    rerankable_hits: list[dict[str, Any]] = []
+    for hit in rerank_window:
+        evidence_ref = str(hit.get("evidence_ref") or "").strip()
+        if not evidence_ref:
+            continue
+        evidence = await KnowledgeEvidences.get_evidence_by_ref(evidence_ref)
+        if evidence is None or not evidence.is_active:
+            continue
+        rerank_text = await _build_rerank_text(evidence)
+        if not rerank_text:
+            continue
+        documents.append(
+            Document(
+                page_content=rerank_text,
+                metadata={"evidence_ref": evidence_ref},
+            )
+        )
+        rerankable_hits.append(dict(hit))
+
+    if len(documents) < 2:
+        return list(hits)
+
+    scores = await _call_reranking_function(reranking_function, query_text.strip(), documents, user)
+    if scores is None:
+        return list(hits)
+    if hasattr(scores, "tolist"):
+        scores = scores.tolist()
+    if not isinstance(scores, list) or len(scores) != len(rerankable_hits):
+        return list(hits)
+
+    scored_hits: list[dict[str, Any]] = []
+    for hit, score in zip(rerankable_hits, scores):
+        if not isinstance(score, (int, float)):
+            return list(hits)
+        reranked_hit = dict(hit)
+        reranked_hit["score"] = float(score)
+        scored_hits.append(reranked_hit)
+
+    scored_hits.sort(
+        key=lambda item: (
+            -(item.get("score") if isinstance(item.get("score"), (int, float)) else -1e9),
+            str(item.get("evidence_ref") or ""),
+        )
+    )
+    reranked_refs = {str(hit.get("evidence_ref") or "") for hit in scored_hits}
+    non_reranked_window_hits = [
+        dict(hit) for hit in rerank_window if str(hit.get("evidence_ref") or "") not in reranked_refs
+    ]
+    return scored_hits + non_reranked_window_hits + remaining_hits
+
+
 async def search_multimodal_evidence(
     *,
     query,
@@ -696,14 +1024,17 @@ async def search_multimodal_evidence(
     if embedding_function is None:
         raise ValueError("No evidence embedding function is configured")
 
+    request_state = getattr(getattr(request, "app", None), "state", None) if request is not None else None
+    request_config = getattr(request_state, "config", None) if request_state is not None else None
+    reranking_function = getattr(request_state, "RERANKING_FUNCTION", None) if request_state is not None else None
     search_limit = max(1, int(limit or getattr(query, "top_k", 8) or 8))
+    candidate_limit = _resolve_branch_candidate_limit(search_limit)
     requested_modalities = [
         modality
         for modality in getattr(query, "modalities", []) or []
         if isinstance(modality, str) and modality in {"text", "image"}
     ]
-    metadata_filter = {"modality": {"$in": requested_modalities}} if requested_modalities else None
-    hits: list[dict[str, Any]] = []
+    branch_hits: dict[str, list[dict[str, Any]]] = {}
     query_image_refs = getattr(query, "query_image_refs", None)
     query_has_images = bool(query_image_refs)
     query_text = getattr(query, "query_text", None)
@@ -741,15 +1072,50 @@ async def search_multimodal_evidence(
         query_vector = _normalize_embedding_vector(
             await _await_maybe(embedding_function(query_input, prefix=RAG_EMBEDDING_QUERY_PREFIX, user=user))
         )
-        vector_result = await vector_client.search(
-            collection_name=f"{vector_space.knowledge_id}:{vector_space.id}",
-            vectors=[query_vector],
-            filter=metadata_filter,
-            limit=search_limit,
-        )
-        hits.extend(_normalize_search_rows(vector_result))
+        for branch in _resolve_search_branches(
+            requested_modalities=requested_modalities,
+            query_text=query_text,
+            query_has_images=query_has_images,
+            vector_space=vector_space,
+        ):
+            vector_result = await vector_client.search(
+                collection_name=f"{vector_space.knowledge_id}:{vector_space.id}",
+                vectors=[query_vector],
+                filter={"modality": {"$in": [branch.modality]}},
+                limit=candidate_limit,
+            )
+            branch_hits.setdefault(branch.name, []).extend(_normalize_search_rows(vector_result))
+            lexical_branch = _SearchBranch(name=f"{branch.modality}_lexical", modality=branch.modality)
+            lexical_hits = await _search_lexical_branch(
+                branch=lexical_branch,
+                query_text=query_text,
+                vector_space=vector_space,
+                candidate_limit=candidate_limit,
+                request=request,
+                user=user,
+            )
+            if lexical_hits:
+                branch_hits.setdefault(lexical_branch.name, []).extend(lexical_hits)
 
-    return _dedupe_search_hits(hits)[:search_limit]
+    deduped_branch_hits = {
+        modality: _dedupe_search_hits(hits)
+        for modality, hits in branch_hits.items()
+        if hits
+    }
+    deduped_hits = _rrf_fuse_branch_hits(
+        deduped_branch_hits,
+        limit=candidate_limit,
+    )
+    if getattr(query, "rerank", True) and reranking_function is not None and query_text:
+        rerank_top_n = getattr(request_config, "TOP_K_RERANKER", search_limit) if request_config is not None else search_limit
+        deduped_hits = await _rerank_search_hits(
+            deduped_hits,
+            query_text=query_text,
+            reranking_function=reranking_function,
+            rerank_top_n=rerank_top_n,
+            user=user,
+        )
+    return deduped_hits[:search_limit]
 
 
 async def upsert_multimodal_evidence_embedding(
