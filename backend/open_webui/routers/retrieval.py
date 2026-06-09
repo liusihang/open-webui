@@ -4,6 +4,7 @@ import asyncio
 import logging
 import os
 import shutil
+import time
 import uuid
 from collections.abc import Callable, Sequence
 from pathlib import Path
@@ -49,9 +50,19 @@ from open_webui.env import (
 from open_webui.internal.db import get_async_db, get_async_session
 from open_webui.models.files import FileModel, Files, FileUpdateForm
 from open_webui.models.knowledge import Knowledges
-from open_webui.models.retrieval_chunks import compute_chunker_config_hash
+from open_webui.models.retrieval_chunks import (
+    compute_chunk_uid,
+    compute_chunker_config_hash,
+    compute_content_hash,
+)
 from open_webui.models.retrieval_indexes import compute_target_config_hash
-from open_webui.retrieval.indexing import deactivate_all_chunks_for_reset, deactivate_chunks_for_scope
+from open_webui.retrieval.indexing import (
+    SqlAlchemyManifestChunkStore,
+    deactivate_all_chunks_for_reset,
+    deactivate_chunks_for_scope,
+    enqueue_evidence_projection_job,
+    run_retrieval_index_job,
+)
 
 # Document loaders
 from open_webui.retrieval.utils import (
@@ -1429,6 +1440,108 @@ def _build_vector_metadatas(
     ]
 
 
+def _build_retrieval_manifest_chunks_from_vector_items(
+    *,
+    collection_name: str,
+    items: list[dict],
+    now: int | None = None,
+) -> list[dict]:
+    timestamp = int(time.time()) if now is None else now
+    chunks: list[dict] = []
+    for item in items:
+        text = item.get('text')
+        if text is None:
+            continue
+        metadata = dict(item.get('metadata') or {})
+        collection_id = metadata.get('collection_id') or collection_name
+        knowledge_id = metadata.get('knowledge_id') or collection_id
+        file_id = metadata.get('file_id')
+        file_version = int(metadata.get('file_version') or 1)
+        chunk_version = int(metadata.get('chunk_version') or 1)
+        chunk_index = metadata.get('chunk_index')
+        start_index = metadata.get('start_index')
+        chunker_config_hash = metadata.get('chunker_config_hash') or compute_chunker_config_hash(
+            metadata.get('chunker_config') if isinstance(metadata.get('chunker_config'), dict) else {}
+        )
+        content_hash = compute_content_hash(text)
+        chunk_uid = compute_chunk_uid(
+            collection_id=collection_id,
+            knowledge_id=knowledge_id,
+            collection_name=collection_name,
+            file_id=file_id,
+            file_version=file_version,
+            chunker_config_hash=chunker_config_hash,
+            chunk_index=chunk_index,
+            content_hash=content_hash,
+        )
+        manifest_metadata = {
+            **metadata,
+            'chunk_uid': chunk_uid,
+            'vector_id': item.get('id'),
+            'collection_id': collection_id,
+            'knowledge_id': knowledge_id,
+            'collection_name': collection_name,
+            'file_id': file_id,
+            'file_version': file_version,
+            'chunk_version': chunk_version,
+            'chunk_index': chunk_index,
+            'content_hash': content_hash,
+            'chunker_config_hash': chunker_config_hash,
+        }
+        if start_index is not None:
+            manifest_metadata['start_index'] = start_index
+
+        chunks.append(
+            {
+                'chunk_uid': chunk_uid,
+                'collection_id': collection_id,
+                'knowledge_id': knowledge_id,
+                'collection_name': collection_name,
+                'file_id': file_id,
+                'file_version': file_version,
+                'chunk_version': chunk_version,
+                'chunk_index': chunk_index,
+                'start_index': start_index,
+                'content_hash': content_hash,
+                'chunker_config_hash': chunker_config_hash,
+                'text': text,
+                'metadata': manifest_metadata,
+                'is_active': True,
+                'deleted_at': None,
+                'created_at': timestamp,
+                'updated_at': timestamp,
+            }
+        )
+    return chunks
+
+
+def _upsert_retrieval_manifest_chunks(
+    *,
+    collection_name: str,
+    items: list[dict],
+) -> int:
+    chunks = _build_retrieval_manifest_chunks_from_vector_items(collection_name=collection_name, items=items)
+    if not chunks:
+        return 0
+    return SqlAlchemyManifestChunkStore().upsert_chunks(chunks)
+
+
+async def _run_evidence_projection_for_knowledge_file(
+    *,
+    knowledge_id: str,
+    file_id: str,
+) -> dict:
+    queued = await enqueue_evidence_projection_job(
+        knowledge_id=knowledge_id,
+        file_ids=[file_id],
+        project_document_images=True,
+    )
+    job_id = (queued.get('job') or {}).get('job_id')
+    if not job_id:
+        raise RuntimeError('evidence projection job was not created')
+    return await run_retrieval_index_job(job_id)
+
+
 def save_docs_to_vector_db(
     request: Request,
     docs,
@@ -1611,6 +1724,11 @@ def save_docs_to_vector_db(
             collection_name=collection_name,
             items=items,
         )
+        manifest_upserted = _upsert_retrieval_manifest_chunks(
+            collection_name=collection_name,
+            items=items,
+        )
+        log.info(f'upserted {manifest_upserted} retrieval manifest chunks for {collection_name}')
 
         log.info(f'added {len(items)} items to collection {collection_name}')
         return True
@@ -1816,6 +1934,12 @@ async def process_file(
                     log.info(f'added {len(docs)} items to collection {collection_name}')
 
                     if result:
+                        if form_data.collection_name:
+                            await _run_evidence_projection_for_knowledge_file(
+                                knowledge_id=collection_name,
+                                file_id=file.id,
+                            )
+
                         # Fresh session for the final update.
                         async with get_async_db() as session:
                             await Files.update_file_metadata_by_id(
@@ -2813,6 +2937,11 @@ async def process_files_batch(
             # Update all files with collection name
             for file_update, file_result in zip(file_updates, file_results):
                 await Files.update_file_by_id(id=file_result.file_id, form_data=file_update, db=db)
+                if collection_name:
+                    await _run_evidence_projection_for_knowledge_file(
+                        knowledge_id=collection_name,
+                        file_id=file_result.file_id,
+                    )
                 file_result.status = 'completed'
 
         except Exception as e:

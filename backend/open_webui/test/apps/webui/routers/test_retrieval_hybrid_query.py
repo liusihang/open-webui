@@ -1,3 +1,4 @@
+from contextlib import asynccontextmanager
 from types import SimpleNamespace
 
 import pytest
@@ -186,3 +187,222 @@ async def test_delete_entries_from_collection_deactivates_manifest_chunks(monkey
             "db": deactivate_calls[0]["db"],
         }
     ]
+
+
+@pytest.mark.asyncio
+async def test_process_file_projects_evidence_for_knowledge_ingest_by_default(monkeypatch):
+    enqueue_calls = []
+    run_calls = []
+    file_updates = []
+
+    file = SimpleNamespace(
+        id="file-1",
+        user_id="owner-1",
+        filename="doc.pdf",
+        path=None,
+        hash=None,
+        data={
+            "content": "alpha text",
+            "document_image_assets": [
+                {
+                    "storage_path": "/tmp/page-1.png",
+                    "mime_type": "image/png",
+                }
+            ],
+        },
+        meta={"content_type": "application/pdf"},
+    )
+
+    async def fake_get_file_by_id(file_id, db=None):
+        return file
+
+    async def fake_validate_collection_access(collection_names, user, access_type="write"):
+        assert collection_names == ["kb-1"]
+
+    async def fake_query(collection_name, filter=None):
+        assert collection_name == "file-file-1"
+        return None
+
+    def fake_save_docs_to_vector_db(*args, **kwargs):
+        return True
+
+    async def fake_update_file_metadata_by_id(file_id, metadata, db=None):
+        file_updates.append(("metadata", file_id, metadata))
+        return file
+
+    async def fake_update_file_data_by_id(file_id, data, db=None):
+        file_updates.append(("data", file_id, data))
+        return file
+
+    async def fake_update_file_hash_by_id(file_id, hash, db=None):
+        file_updates.append(("hash", file_id, hash))
+        return file
+
+    async def fake_enqueue(**kwargs):
+        enqueue_calls.append(kwargs)
+        return {"job": {"job_id": "job-evidence"}, "state": {"status": "pending"}}
+
+    async def fake_run(job_id):
+        run_calls.append(job_id)
+        return {"result": {"evidence": {"text_evidence_upserted": 1, "image_evidence_upserted": 1}}}
+
+    @asynccontextmanager
+    async def fake_get_async_db():
+        yield object()
+
+    monkeypatch.setattr(retrieval_router.Files, "get_file_by_id", fake_get_file_by_id)
+    monkeypatch.setattr(retrieval_router, "_validate_collection_access", fake_validate_collection_access)
+    monkeypatch.setattr(retrieval_router.ASYNC_VECTOR_DB_CLIENT, "query", fake_query)
+    monkeypatch.setattr(retrieval_router, "save_docs_to_vector_db", fake_save_docs_to_vector_db)
+    monkeypatch.setattr(retrieval_router.Files, "update_file_metadata_by_id", fake_update_file_metadata_by_id)
+    monkeypatch.setattr(retrieval_router.Files, "update_file_data_by_id", fake_update_file_data_by_id)
+    monkeypatch.setattr(retrieval_router.Files, "update_file_hash_by_id", fake_update_file_hash_by_id)
+    monkeypatch.setattr(retrieval_router, "enqueue_evidence_projection_job", fake_enqueue, raising=False)
+    monkeypatch.setattr(retrieval_router, "run_retrieval_index_job", fake_run, raising=False)
+    monkeypatch.setattr(retrieval_router, "get_async_db", fake_get_async_db)
+
+    request = SimpleNamespace(
+        app=SimpleNamespace(
+            state=SimpleNamespace(
+                config=SimpleNamespace(BYPASS_EMBEDDING_AND_RETRIEVAL=False),
+                EMBEDDING_FUNCTION=lambda query, prefix=None, user=None: [0.1, 0.2],
+            )
+        )
+    )
+    user = SimpleNamespace(id="owner-1", role="admin")
+    async def fake_commit():
+        return None
+
+    db = SimpleNamespace(commit=fake_commit)
+
+    result = await retrieval_router.process_file(
+        request=request,
+        form_data=retrieval_router.ProcessFileForm(file_id="file-1", collection_name="kb-1"),
+        user=user,
+        db=db,
+    )
+
+    assert result["status"] is True
+    assert enqueue_calls == [
+        {
+            "knowledge_id": "kb-1",
+            "file_ids": ["file-1"],
+            "project_document_images": True,
+        }
+    ]
+    assert run_calls == ["job-evidence"]
+    assert ("data", "file-1", {"status": "completed"}) in file_updates
+
+
+@pytest.mark.asyncio
+async def test_process_files_batch_projects_evidence_for_completed_knowledge_files(monkeypatch):
+    enqueue_calls = []
+    run_calls = []
+
+    files = [
+        SimpleNamespace(
+            id="file-1",
+            user_id="owner-1",
+            filename="doc.pdf",
+            path=None,
+            hash=None,
+            data={"content": "alpha", "document_image_assets": [{"storage_path": "/tmp/page-1.png"}]},
+            meta={"content_type": "application/pdf"},
+            created_at=1,
+            updated_at=1,
+        ),
+        SimpleNamespace(
+            id="file-2",
+            user_id="owner-1",
+            filename="notes.txt",
+            path=None,
+            hash=None,
+            data={"content": "beta"},
+            meta={"content_type": "text/plain"},
+            created_at=1,
+            updated_at=1,
+        ),
+    ]
+
+    async def fake_get_file_by_id(file_id, db=None):
+        return next(file for file in files if file.id == file_id)
+
+    async def fake_validate_collection_access(collection_names, user, access_type="write"):
+        assert collection_names == ["kb-1"]
+
+    def fake_save_docs_to_vector_db(*args, **kwargs):
+        return True
+
+    async def fake_update_file_by_id(id, form_data, db=None):
+        return next(file for file in files if file.id == id)
+
+    async def fake_enqueue(**kwargs):
+        enqueue_calls.append(kwargs)
+        return {"job": {"job_id": f"job-{kwargs['file_ids'][0]}"}, "state": {"status": "pending"}}
+
+    async def fake_run(job_id):
+        run_calls.append(job_id)
+        return {"result": {"evidence": {"text_evidence_upserted": 1}}}
+
+    monkeypatch.setattr(retrieval_router.Files, "get_file_by_id", fake_get_file_by_id)
+    monkeypatch.setattr(retrieval_router.Files, "update_file_by_id", fake_update_file_by_id)
+    monkeypatch.setattr(retrieval_router, "_validate_collection_access", fake_validate_collection_access)
+    monkeypatch.setattr(retrieval_router, "save_docs_to_vector_db", fake_save_docs_to_vector_db)
+    monkeypatch.setattr(retrieval_router, "enqueue_evidence_projection_job", fake_enqueue, raising=False)
+    monkeypatch.setattr(retrieval_router, "run_retrieval_index_job", fake_run, raising=False)
+
+    request = SimpleNamespace(app=SimpleNamespace(state=SimpleNamespace(config=SimpleNamespace())))
+    user = SimpleNamespace(id="owner-1", role="admin")
+
+    result = await retrieval_router.process_files_batch(
+        request=request,
+        form_data=retrieval_router.BatchProcessFilesForm(files=files, collection_name="kb-1"),
+        user=user,
+        db=object(),
+    )
+
+    assert [file_result.status for file_result in result.results] == ["completed", "completed"]
+    assert enqueue_calls == [
+        {
+            "knowledge_id": "kb-1",
+            "file_ids": ["file-1"],
+            "project_document_images": True,
+        },
+        {
+            "knowledge_id": "kb-1",
+            "file_ids": ["file-2"],
+            "project_document_images": True,
+        },
+    ]
+    assert run_calls == ["job-file-1", "job-file-2"]
+
+
+def test_build_retrieval_manifest_chunks_preserves_kb_file_and_vector_identity():
+    chunks = retrieval_router._build_retrieval_manifest_chunks_from_vector_items(
+        collection_name="kb-1",
+        now=123,
+        items=[
+            {
+                "id": "vector-1",
+                "text": "alpha text",
+                "metadata": {
+                    "file_id": "file-1",
+                    "chunk_index": 4,
+                    "start_index": 80,
+                    "chunker_config_hash": "chunker-hash",
+                },
+            }
+        ],
+    )
+
+    assert len(chunks) == 1
+    chunk = chunks[0]
+    assert chunk["collection_id"] == "kb-1"
+    assert chunk["knowledge_id"] == "kb-1"
+    assert chunk["collection_name"] == "kb-1"
+    assert chunk["file_id"] == "file-1"
+    assert chunk["text"] == "alpha text"
+    assert chunk["is_active"] is True
+    assert chunk["created_at"] == 123
+    assert chunk["metadata"]["vector_id"] == "vector-1"
+    assert chunk["metadata"]["chunk_uid"] == chunk["chunk_uid"]
