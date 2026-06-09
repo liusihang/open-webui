@@ -595,6 +595,7 @@ from open_webui.routers.retrieval import (
     get_rf,
 )
 from open_webui.retrieval.vector.async_client import ASYNC_VECTOR_DB_CLIENT
+from open_webui.retrieval.vector.embedding_adapter import get_evidence_retrieval_embedding_function
 from open_webui.retrieval.vector.multimodal import search_multimodal_evidence
 
 
@@ -1702,7 +1703,13 @@ app.state.EMBEDDING_FUNCTION = get_embedding_function(
     enable_async=app.state.config.ENABLE_ASYNC_EMBEDDING,
     concurrent_requests=app.state.config.RAG_EMBEDDING_CONCURRENT_REQUESTS,
 )
-app.state.EVIDENCE_RETRIEVAL_EMBEDDING = app.state.EMBEDDING_FUNCTION
+app.state.EVIDENCE_RETRIEVAL_EMBEDDING = get_evidence_retrieval_embedding_function(
+    embedding_engine=app.state.config.RAG_EMBEDDING_ENGINE,
+    embedding_model=app.state.config.RAG_EMBEDDING_MODEL,
+    text_embedding_function=app.state.EMBEDDING_FUNCTION,
+    url=app.state.config.RAG_OPENAI_API_BASE_URL,
+    key=app.state.config.RAG_OPENAI_API_KEY,
+)
 app.state.EVIDENCE_RETRIEVAL_VECTOR_CLIENT = ASYNC_VECTOR_DB_CLIENT
 app.state.EVIDENCE_RETRIEVAL_SEARCH = search_multimodal_evidence
 

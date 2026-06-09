@@ -19,7 +19,11 @@ from open_webui.retrieval.vector.multimodal import (
     MultimodalVectorSpaceError,
     build_multimodal_vector_item,
     normalize_multimodal_evidence_input,
+    search_multimodal_evidence,
     resolve_multimodal_vector_space,
+)
+from open_webui.retrieval.vector.embedding_adapter import (
+    OpenAICompatibleMultimodalEvidenceEmbeddingAdapter,
 )
 
 
@@ -169,6 +173,212 @@ def test_normalize_multimodal_evidence_input_rejects_unsafe_image_path_url_and_b
             normalize_multimodal_evidence_input({**base, unsafe_field: unsafe_value})
 
         assert exc_info.value.code == "unsafe_image_descriptor"
+
+
+@pytest.mark.asyncio
+async def test_evidence_embedding_adapter_delegates_text_to_legacy_embedding_function():
+    calls = []
+
+    async def text_embedding_function(query, prefix=None, user=None):
+        calls.append({"query": query, "prefix": prefix, "user": user})
+        return [0.1, 0.2, 0.3]
+
+    adapter = OpenAICompatibleMultimodalEvidenceEmbeddingAdapter(
+        text_embedding_function=text_embedding_function,
+        model="Qwen3-VL-Embedding-2B",
+        url="http://embedding.local/v1",
+        key="",
+    )
+
+    embedding = await adapter("alpha beta", prefix="query:", user={"id": "user-1"})
+
+    assert embedding == [0.1, 0.2, 0.3]
+    assert calls == [
+        {
+            "query": "alpha beta",
+            "prefix": "query:",
+            "user": {"id": "user-1"},
+        }
+    ]
+
+
+@pytest.mark.asyncio
+async def test_evidence_embedding_adapter_sends_image_payload_as_messages_not_stringified_input():
+    requests = []
+
+    async def text_embedding_function(query, prefix=None, user=None):
+        raise AssertionError(f"image input must not reach text embedding function: {query!r}")
+
+    async def post_json(*, url, headers, payload):
+        requests.append({"url": url, "headers": headers, "payload": payload})
+        return {"data": [{"embedding": [0.4, 0.5, 0.6]}]}
+
+    adapter = OpenAICompatibleMultimodalEvidenceEmbeddingAdapter(
+        text_embedding_function=text_embedding_function,
+        model="Qwen3-VL-Embedding-2B",
+        url="http://embedding.local/v1",
+        key="",
+        dimensions=2048,
+        post_json=post_json,
+    )
+
+    embedding = await adapter(
+        {
+            "query_text": "find similar plots",
+            "query_images": [
+                {
+                    "ref": "chat:file:file-1",
+                    "file_id": "file-1",
+                    "mime_type": "image/png",
+                    "image_bytes": b"\x89PNG\r\n\x1a\npayload",
+                }
+            ],
+        }
+    )
+
+    assert embedding == [0.4, 0.5, 0.6]
+    assert requests[0]["url"] == "http://embedding.local/v1/embeddings"
+    payload = requests[0]["payload"]
+    assert "input" not in payload
+    assert payload["model"] == "Qwen3-VL-Embedding-2B"
+    assert payload["encoding_format"] == "float"
+    assert payload["dimensions"] == 2048
+    assert payload["messages"] == [
+        {
+            "role": "user",
+            "content": [
+                {
+                    "type": "image_url",
+                    "image_url": {
+                        "url": "data:image/png;base64,iVBORw0KGgpwYXlsb2Fk",
+                    },
+                },
+                {
+                    "type": "text",
+                    "text": "find similar plots",
+                },
+            ],
+        }
+    ]
+
+
+@pytest.mark.asyncio
+async def test_evidence_embedding_adapter_sends_image_evidence_payload_as_messages():
+    requests = []
+
+    async def text_embedding_function(query, prefix=None, user=None):
+        raise AssertionError(f"image evidence input must not reach text embedding function: {query!r}")
+
+    async def post_json(*, url, headers, payload):
+        requests.append(payload)
+        return {"data": [{"embedding": [0.7, 0.8, 0.9]}]}
+
+    adapter = OpenAICompatibleMultimodalEvidenceEmbeddingAdapter(
+        text_embedding_function=text_embedding_function,
+        model="Qwen3-VL-Embedding-2B",
+        url="http://embedding.local/v1",
+        key="",
+        post_json=post_json,
+    )
+
+    embedding = await adapter(
+        {
+            "modality": "image",
+            "evidence_ref": "ke:kb-1:file-1:standalone_image:0:def456",
+            "mime_type": "image/jpeg",
+            "image_bytes": b"\xff\xd8\xffpayload",
+            "preview_text": "Figure 1. A chart.",
+        }
+    )
+
+    assert embedding == [0.7, 0.8, 0.9]
+    payload = requests[0]
+    assert "input" not in payload
+    assert payload["messages"][0]["content"] == [
+        {
+            "type": "image_url",
+            "image_url": {
+                "url": "data:image/jpeg;base64,/9j/cGF5bG9hZA==",
+            },
+        },
+        {
+            "type": "text",
+            "text": "Figure 1. A chart.",
+        },
+    ]
+
+
+@pytest.mark.asyncio
+async def test_evidence_embedding_adapter_rejects_external_image_source_fields():
+    async def text_embedding_function(query, prefix=None, user=None):
+        raise AssertionError(f"image evidence input must not reach text embedding function: {query!r}")
+
+    async def post_json(*, url, headers, payload):
+        raise AssertionError("unsafe image descriptors must fail before remote embedding")
+
+    adapter = OpenAICompatibleMultimodalEvidenceEmbeddingAdapter(
+        text_embedding_function=text_embedding_function,
+        model="Qwen3-VL-Embedding-2B",
+        url="http://embedding.local/v1",
+        key="",
+        post_json=post_json,
+    )
+
+    with pytest.raises(ValueError, match="unsafe image fields"):
+        await adapter(
+            {
+                "modality": "image",
+                "evidence_ref": "ke:kb-1:file-1:standalone_image:0:def456",
+                "mime_type": "image/jpeg",
+                "image_bytes": b"\xff\xd8\xffpayload",
+                "path": "/tmp/unsafe.jpg",
+                "url": "https://example.test/unsafe.jpg",
+                "base64": "/9j/cGF5bG9hZA==",
+                "bytes": "not-resolved-bytes",
+            }
+        )
+
+
+@pytest.mark.asyncio
+async def test_default_evidence_search_rejects_raw_external_image_refs_before_embedding():
+    class VectorClient:
+        async def search(self, *args, **kwargs):
+            raise AssertionError("unsafe image refs must fail before vector search")
+
+    async def embedding_function(query, prefix=None, user=None):
+        raise AssertionError("unsafe image refs must fail before embedding")
+
+    query = type(
+        "Query",
+        (),
+        {
+            "query_text": "plot",
+            "query_image_refs": ["https://example.com/plot.png"],
+            "top_k": 3,
+        },
+    )()
+    vector_space = type(
+        "VectorSpace",
+        (),
+        {
+            "id": "vs-1",
+            "knowledge_id": "kb-1",
+            "retrieval_profile": "unified_multimodal_dense",
+            "embedding_model": "Qwen3-VL-Embedding-2B",
+            "supports_image_query": True,
+            "supports_text_query": True,
+        },
+    )()
+
+    with pytest.raises(MultimodalVectorSpaceError) as exc_info:
+        await search_multimodal_evidence(
+            query=query,
+            vector_spaces=[vector_space],
+            embedding_function=embedding_function,
+            vector_client=VectorClient(),
+        )
+
+    assert exc_info.value.code == "unsupported_image_query"
 
 
 @pytest.mark.asyncio

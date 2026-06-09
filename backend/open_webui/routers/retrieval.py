@@ -67,6 +67,7 @@ from open_webui.retrieval.utils import (
     query_doc_with_hybrid_search,
 )
 from open_webui.retrieval.vector.async_client import ASYNC_VECTOR_DB_CLIENT
+from open_webui.retrieval.vector.embedding_adapter import get_evidence_retrieval_embedding_function
 from open_webui.retrieval.vector.factory import VECTOR_DB_CLIENT
 from open_webui.retrieval.vector.utils import filter_metadata
 from open_webui.retrieval.web.azure import search_azure
@@ -392,6 +393,13 @@ async def update_embedding_config(request: Request, form_data: EmbeddingModelUpd
             ),
             enable_async=request.app.state.config.ENABLE_ASYNC_EMBEDDING,
             concurrent_requests=request.app.state.config.RAG_EMBEDDING_CONCURRENT_REQUESTS,
+        )
+        request.app.state.EVIDENCE_RETRIEVAL_EMBEDDING = get_evidence_retrieval_embedding_function(
+            embedding_engine=request.app.state.config.RAG_EMBEDDING_ENGINE,
+            embedding_model=request.app.state.config.RAG_EMBEDDING_MODEL,
+            text_embedding_function=request.app.state.EMBEDDING_FUNCTION,
+            url=request.app.state.config.RAG_OPENAI_API_BASE_URL,
+            key=request.app.state.config.RAG_OPENAI_API_KEY,
         )
 
         return {
