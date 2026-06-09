@@ -25,6 +25,7 @@ from open_webui.retrieval.vector.multimodal import (
 from open_webui.retrieval.vector.embedding_adapter import (
     OpenAICompatibleMultimodalEvidenceEmbeddingAdapter,
 )
+from open_webui.retrieval.vector.main import VectorItem
 
 
 def _run_migration(engine, direction):
@@ -34,6 +35,23 @@ def _run_migration(engine, direction):
         operations = Operations(context)
         with patch.object(evidence_migration, "op", operations):
             getattr(evidence_migration, direction)()
+
+
+def test_vector_item_supports_backend_dict_style_access():
+    item = VectorItem(
+        id="vec-1",
+        text="alpha",
+        vector=[0.1, 0.2, 0.3],
+        metadata={"evidence_ref": "ke:test"},
+    )
+
+    assert item["id"] == "vec-1"
+    assert item["text"] == "alpha"
+    assert item["vector"] == [0.1, 0.2, 0.3]
+    assert item["metadata"] == {"evidence_ref": "ke:test"}
+
+    with pytest.raises(KeyError):
+        _ = item["missing"]
 
 
 @pytest.mark.asyncio

@@ -10,6 +10,11 @@ class VectorItem(BaseModel):
     vector: List[float | int]
     metadata: Any
 
+    def __getitem__(self, key: str) -> Any:
+        if key in {'id', 'text', 'vector', 'metadata'}:
+            return getattr(self, key)
+        raise KeyError(key)
+
 
 class GetResult(BaseModel):
     ids: Optional[List[List[str]]]
