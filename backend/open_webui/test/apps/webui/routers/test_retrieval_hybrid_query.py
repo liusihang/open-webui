@@ -246,6 +246,9 @@ async def test_process_file_projects_evidence_for_knowledge_ingest_by_default(mo
         run_calls.append(job_id)
         return {"result": {"evidence": {"text_evidence_upserted": 1, "image_evidence_upserted": 1}}}
 
+    async def fake_get_knowledge_by_id(id, db=None):
+        return SimpleNamespace(id=id)
+
     @asynccontextmanager
     async def fake_get_async_db():
         yield object()
@@ -257,6 +260,7 @@ async def test_process_file_projects_evidence_for_knowledge_ingest_by_default(mo
     monkeypatch.setattr(retrieval_router.Files, "update_file_metadata_by_id", fake_update_file_metadata_by_id)
     monkeypatch.setattr(retrieval_router.Files, "update_file_data_by_id", fake_update_file_data_by_id)
     monkeypatch.setattr(retrieval_router.Files, "update_file_hash_by_id", fake_update_file_hash_by_id)
+    monkeypatch.setattr(retrieval_router.Knowledges, "get_knowledge_by_id", fake_get_knowledge_by_id)
     monkeypatch.setattr(retrieval_router, "enqueue_evidence_projection_job", fake_enqueue, raising=False)
     monkeypatch.setattr(retrieval_router, "run_retrieval_index_job", fake_run, raising=False)
     monkeypatch.setattr(retrieval_router, "get_async_db", fake_get_async_db)
@@ -292,6 +296,87 @@ async def test_process_file_projects_evidence_for_knowledge_ingest_by_default(mo
     ]
     assert run_calls == ["job-evidence"]
     assert ("data", "file-1", {"status": "completed"}) in file_updates
+
+
+@pytest.mark.asyncio
+async def test_process_file_does_not_project_evidence_for_non_knowledge_collection(monkeypatch):
+    enqueue_calls = []
+
+    file = SimpleNamespace(
+        id="file-1",
+        user_id="owner-1",
+        filename="doc.pdf",
+        path=None,
+        hash=None,
+        data={"content": "alpha text"},
+        meta={"content_type": "application/pdf"},
+    )
+
+    async def fake_get_file_by_id(file_id, db=None):
+        return file
+
+    async def fake_validate_collection_access(collection_names, user, access_type="write"):
+        assert collection_names == ["custom-collection"]
+
+    async def fake_query(collection_name, filter=None):
+        return None
+
+    def fake_save_docs_to_vector_db(*args, **kwargs):
+        return True
+
+    async def fake_update_file_metadata_by_id(file_id, metadata, db=None):
+        return file
+
+    async def fake_update_file_data_by_id(file_id, data, db=None):
+        return file
+
+    async def fake_update_file_hash_by_id(file_id, hash, db=None):
+        return file
+
+    async def fake_get_knowledge_by_id(id, db=None):
+        return None
+
+    async def fake_enqueue(**kwargs):
+        enqueue_calls.append(kwargs)
+        return {"job": {"job_id": "job-evidence"}, "state": {"status": "pending"}}
+
+    @asynccontextmanager
+    async def fake_get_async_db():
+        yield object()
+
+    monkeypatch.setattr(retrieval_router.Files, "get_file_by_id", fake_get_file_by_id)
+    monkeypatch.setattr(retrieval_router, "_validate_collection_access", fake_validate_collection_access)
+    monkeypatch.setattr(retrieval_router.ASYNC_VECTOR_DB_CLIENT, "query", fake_query)
+    monkeypatch.setattr(retrieval_router, "save_docs_to_vector_db", fake_save_docs_to_vector_db)
+    monkeypatch.setattr(retrieval_router.Files, "update_file_metadata_by_id", fake_update_file_metadata_by_id)
+    monkeypatch.setattr(retrieval_router.Files, "update_file_data_by_id", fake_update_file_data_by_id)
+    monkeypatch.setattr(retrieval_router.Files, "update_file_hash_by_id", fake_update_file_hash_by_id)
+    monkeypatch.setattr(retrieval_router.Knowledges, "get_knowledge_by_id", fake_get_knowledge_by_id)
+    monkeypatch.setattr(retrieval_router, "enqueue_evidence_projection_job", fake_enqueue, raising=False)
+    monkeypatch.setattr(retrieval_router, "get_async_db", fake_get_async_db)
+
+    request = SimpleNamespace(
+        app=SimpleNamespace(
+            state=SimpleNamespace(
+                config=SimpleNamespace(BYPASS_EMBEDDING_AND_RETRIEVAL=False),
+                EMBEDDING_FUNCTION=lambda query, prefix=None, user=None: [0.1, 0.2],
+            )
+        )
+    )
+    user = SimpleNamespace(id="owner-1", role="admin")
+
+    async def fake_commit():
+        return None
+
+    result = await retrieval_router.process_file(
+        request=request,
+        form_data=retrieval_router.ProcessFileForm(file_id="file-1", collection_name="custom-collection"),
+        user=user,
+        db=SimpleNamespace(commit=fake_commit),
+    )
+
+    assert result["status"] is True
+    assert enqueue_calls == []
 
 
 @pytest.mark.asyncio
@@ -344,8 +429,12 @@ async def test_process_files_batch_projects_evidence_for_completed_knowledge_fil
         run_calls.append(job_id)
         return {"result": {"evidence": {"text_evidence_upserted": 1}}}
 
+    async def fake_get_knowledge_by_id(id, db=None):
+        return SimpleNamespace(id=id)
+
     monkeypatch.setattr(retrieval_router.Files, "get_file_by_id", fake_get_file_by_id)
     monkeypatch.setattr(retrieval_router.Files, "update_file_by_id", fake_update_file_by_id)
+    monkeypatch.setattr(retrieval_router.Knowledges, "get_knowledge_by_id", fake_get_knowledge_by_id)
     monkeypatch.setattr(retrieval_router, "_validate_collection_access", fake_validate_collection_access)
     monkeypatch.setattr(retrieval_router, "save_docs_to_vector_db", fake_save_docs_to_vector_db)
     monkeypatch.setattr(retrieval_router, "enqueue_evidence_projection_job", fake_enqueue, raising=False)

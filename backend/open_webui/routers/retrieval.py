@@ -1530,7 +1530,12 @@ async def _run_evidence_projection_for_knowledge_file(
     *,
     knowledge_id: str,
     file_id: str,
+    db: AsyncSession | None = None,
 ) -> dict:
+    knowledge = await Knowledges.get_knowledge_by_id(id=knowledge_id, db=db)
+    if knowledge is None:
+        return {}
+
     queued = await enqueue_evidence_projection_job(
         knowledge_id=knowledge_id,
         file_ids=[file_id],
@@ -2941,6 +2946,7 @@ async def process_files_batch(
                     await _run_evidence_projection_for_knowledge_file(
                         knowledge_id=collection_name,
                         file_id=file_result.file_id,
+                        db=db,
                     )
                 file_result.status = 'completed'
 

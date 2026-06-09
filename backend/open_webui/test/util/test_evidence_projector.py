@@ -120,6 +120,41 @@ async def _seed_active_text_chunk(session: AsyncSession, *, row_id: int, file_id
     await session.commit()
 
 
+async def _seed_active_text_chunk_for_scope(
+    session: AsyncSession,
+    *,
+    row_id: int,
+    file_id: str,
+    text: str,
+    collection_id: str,
+    knowledge_id: str,
+    collection_name: str,
+):
+    session.add(
+        RetrievalChunk(
+            row_id=row_id,
+            chunk_uid=f"chunk-{row_id}",
+            collection_id=collection_id,
+            knowledge_id=knowledge_id,
+            collection_name=collection_name,
+            file_id=file_id,
+            file_version=1,
+            chunk_version=1,
+            chunk_index=row_id - 1,
+            start_index=(row_id - 1) * 100,
+            content_hash=f"content-hash-{row_id}",
+            chunker_config_hash="chunker-hash",
+            text=text,
+            metadata_={"name": "doc.pdf", "page_index": 3},
+            is_active=True,
+            deleted_at=None,
+            created_at=1,
+            updated_at=1,
+        )
+    )
+    await session.commit()
+
+
 @pytest.mark.asyncio
 async def test_text_backfill_is_idempotent_and_bridges_retrieval_chunk_fields(db_session):
     await _seed_knowledge_file(
@@ -150,6 +185,112 @@ async def test_text_backfill_is_idempotent_and_bridges_retrieval_chunk_fields(db
     assert evidence_rows[0].asset_id is None
     assert evidence_rows[0].content_text == "First paragraph"
     assert evidence_rows[0].preview_text == "First paragraph"
+
+
+@pytest.mark.asyncio
+async def test_project_knowledge_file_only_uses_chunks_from_target_knowledge(db_session):
+    await _seed_knowledge_file(
+        db_session,
+        file_id="file-doc",
+        filename="doc.pdf",
+        content_type="application/pdf",
+        path="/tmp/doc.pdf",
+    )
+    await _seed_active_text_chunk_for_scope(
+        db_session,
+        row_id=11,
+        file_id="file-doc",
+        text="Temporary file-level chunk",
+        collection_id="file-file-doc",
+        knowledge_id="file-file-doc",
+        collection_name="file-file-doc",
+    )
+    await _seed_active_text_chunk_for_scope(
+        db_session,
+        row_id=12,
+        file_id="file-doc",
+        text="Knowledge chunk",
+        collection_id="kb-1",
+        knowledge_id="kb-1",
+        collection_name="kb-1",
+    )
+
+    result = await project_evidence_for_knowledge_file(
+        knowledge_id="kb-1",
+        file_id="file-doc",
+        db=db_session,
+        project_document_images=True,
+    )
+
+    evidence_rows = (
+        (await db_session.execute(select(KnowledgeEvidence).order_by(KnowledgeEvidence.id.asc()))).scalars().all()
+    )
+
+    assert result.text_evidence_upserted == 1
+    assert result.scanned_chunks == 1
+    assert len(evidence_rows) == 1
+    assert evidence_rows[0].knowledge_id == "kb-1"
+    assert evidence_rows[0].content_text == "Knowledge chunk"
+
+
+@pytest.mark.asyncio
+async def test_project_knowledge_file_deactivates_stale_evidence_for_file(db_session):
+    await _seed_knowledge_file(
+        db_session,
+        file_id="file-doc",
+        filename="doc.pdf",
+        content_type="application/pdf",
+        path="/tmp/doc.pdf",
+    )
+    db_session.add(
+        KnowledgeEvidence(
+            id="stale-evidence",
+            evidence_ref="ke:kb-1:file-doc:text_chunk:stale",
+            knowledge_id="kb-1",
+            file_id="file-doc",
+            asset_id=None,
+            retrieval_chunk_uid="stale-chunk",
+            retrieval_chunk_row_id=1,
+            modality="text",
+            evidence_kind="text_chunk",
+            title=None,
+            content_text="Old chunk",
+            preview_text="Old chunk",
+            source_name="doc.pdf",
+            page_index=None,
+            anchor_json={},
+            chunk_index=0,
+            chunk_total=1,
+            content_hash="old-hash",
+            projection_profile="text_only",
+            projection_config_hash="text-backfill-v1",
+            is_active=True,
+            deleted_at=None,
+            created_at=1,
+            updated_at=1,
+        )
+    )
+    await db_session.commit()
+    await _seed_active_text_chunk(db_session, row_id=12, file_id="file-doc", text="Current chunk")
+
+    result = await project_evidence_for_knowledge_file(
+        knowledge_id="kb-1",
+        file_id="file-doc",
+        db=db_session,
+        project_document_images=True,
+    )
+
+    evidence_rows = (
+        (await db_session.execute(select(KnowledgeEvidence).order_by(KnowledgeEvidence.id.asc()))).scalars().all()
+    )
+    active_rows = [row for row in evidence_rows if row.is_active]
+    stale_row = next(row for row in evidence_rows if row.id == "stale-evidence")
+
+    assert result.text_evidence_upserted == 1
+    assert stale_row.is_active is False
+    assert stale_row.deleted_at is not None
+    assert len(active_rows) == 1
+    assert active_rows[0].content_text == "Current chunk"
 
 
 @pytest.mark.asyncio

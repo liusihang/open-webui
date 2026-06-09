@@ -160,6 +160,35 @@ async def backfill_text_evidence_from_active_chunks(
     return result
 
 
+async def deactivate_evidence_for_knowledge_file(
+    *,
+    knowledge_id: str,
+    file_id: str,
+    db: AsyncSession | None = None,
+) -> int:
+    now = int(time.time())
+    async with _session_scope(db) as session:
+        rows = (
+            (
+                await session.execute(
+                    select(KnowledgeEvidence).where(
+                        KnowledgeEvidence.knowledge_id == knowledge_id,
+                        KnowledgeEvidence.file_id == file_id,
+                        KnowledgeEvidence.is_active.is_(True),
+                    )
+                )
+            )
+            .scalars()
+            .all()
+        )
+        for row in rows:
+            row.is_active = False
+            row.deleted_at = now
+            row.updated_at = now
+        await session.commit()
+        return len(rows)
+
+
 async def project_standalone_image_evidence(
     *,
     knowledge_id: str,
@@ -257,7 +286,15 @@ async def project_evidence_for_knowledge_file(
     metadata = _as_dict(file.meta)
     content_type = metadata.get("content_type") if isinstance(metadata.get("content_type"), str) else None
 
+    await deactivate_evidence_for_knowledge_file(
+        knowledge_id=knowledge_id,
+        file_id=file_id,
+        db=db,
+    )
+
     text_result = await backfill_text_evidence_from_active_chunks(
+        collection_ids=[knowledge_id],
+        knowledge_ids=[knowledge_id],
         file_ids=[file_id],
         db=db,
     )
