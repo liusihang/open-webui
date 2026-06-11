@@ -782,6 +782,52 @@ def test_search_multimodal_evidence_candidate_limit_never_shrinks_below_top_k():
     assert multimodal_mod._resolve_branch_candidate_limit(100) == 100
 
 
+@pytest.mark.asyncio
+async def test_search_multimodal_evidence_preserves_dense_backend_rank_with_similarity_scores():
+    vector_space = types.SimpleNamespace(
+        id="vs-1",
+        knowledge_id="kb-1",
+        retrieval_profile="unified_multimodal_dense",
+        embedding_model="fake-multimodal-embed",
+        supports_text_query=True,
+        supports_image_query=True,
+        supports_text_evidence=True,
+        supports_image_evidence=True,
+    )
+
+    class _SimilarityScoreVectorClient:
+        async def search(self, collection_name, vectors, filter=None, limit=10):
+            return _filtered_vector_result(
+                [
+                    ("near", {"evidence_ref": "ke:image:near", "modality": "image"}, 0.90),
+                    ("middle", {"evidence_ref": "ke:image:middle", "modality": "image"}, 0.80),
+                    ("far", {"evidence_ref": "ke:image:far", "modality": "image"}, 0.70),
+                ],
+                filter,
+            )
+
+    async def fake_embedding(query, prefix=None, user=None):
+        return [0.0, 1.0, 0.0]
+
+    query = normalize_query_knowledge_evidence_args(
+        visual_query="find similar equipment",
+        knowledge_ids=["kb-1"],
+        modalities=["image"],
+        count=2,
+    )
+
+    hits = await search_multimodal_evidence(
+        query=query,
+        vector_spaces=[vector_space],
+        embedding_function=fake_embedding,
+        vector_client=_SimilarityScoreVectorClient(),
+        user={"id": "user-1", "role": "user"},
+        request=None,
+    )
+
+    assert [hit["evidence_ref"] for hit in hits] == ["ke:image:near", "ke:image:middle"]
+
+
 def test_search_multimodal_evidence_lexical_hits_require_evidence_refs():
     branch = multimodal_mod._SearchBranch(name="text_lexical", modality="text")
 

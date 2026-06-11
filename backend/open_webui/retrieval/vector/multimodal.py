@@ -648,6 +648,7 @@ def _normalize_search_rows(vector_result: Any) -> list[dict[str, Any]]:
 
 def _dedupe_search_hits(hits: Sequence[dict[str, Any]]) -> list[dict[str, Any]]:
     best_by_ref: dict[str, dict[str, Any]] = {}
+    ordered_refs: list[str] = []
     for hit in hits:
         evidence_ref = str(hit.get("evidence_ref") or "").strip()
         if not evidence_ref:
@@ -655,19 +656,14 @@ def _dedupe_search_hits(hits: Sequence[dict[str, Any]]) -> list[dict[str, Any]]:
         score = hit.get("score")
         if evidence_ref not in best_by_ref:
             best_by_ref[evidence_ref] = dict(hit)
+            ordered_refs.append(evidence_ref)
             continue
         current_score = best_by_ref[evidence_ref].get("score")
         if isinstance(score, (int, float)) and not isinstance(current_score, (int, float)):
             best_by_ref[evidence_ref] = dict(hit)
         elif isinstance(score, (int, float)) and isinstance(current_score, (int, float)) and score > current_score:
             best_by_ref[evidence_ref] = dict(hit)
-    return sorted(
-        best_by_ref.values(),
-        key=lambda item: (
-            -(item.get("score") if isinstance(item.get("score"), (int, float)) else -1e9),
-            str(item.get("evidence_ref") or ""),
-        ),
-    )
+    return [best_by_ref[evidence_ref] for evidence_ref in ordered_refs if evidence_ref in best_by_ref]
 
 
 def _supports_evidence_modality(vector_space: Any, modality: str) -> bool:
