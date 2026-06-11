@@ -2862,6 +2862,8 @@ async def query_knowledge_files(
 async def query_knowledge_evidence(
     evidence_refs: list[str] | str | None = None,
     query_text: str | None = None,
+    question: str | None = None,
+    visual_query: str | None = None,
     query_image_refs: list[str] | str | None = None,
     knowledge_ids: list[str] | str | None = None,
     collection_ids: list[str] | str | None = None,
@@ -2876,7 +2878,11 @@ async def query_knowledge_evidence(
     __model_knowledge__: list[dict] = None,
 ) -> str:
     """
-    Query typed knowledge evidence by evidence refs, text, image refs, or both.
+    Query typed knowledge evidence by evidence refs, text, image refs, or both. Use query_text/question for the
+    user's rule, fact, or task question. Use visual_query only for a specific visual target description when searching
+    image evidence, such as a resolved object, label, diagram, gel, box, or visual feature. Do not pass an unresolved
+    task question like "where should the red sample go?" as visual_query unless the user explicitly asks for image-only
+    evidence; first resolve the textual rule with query_text, then search images with a specific visual target.
 
     The actual vector search implementation is injected through the request
     app-state evidence retrieval adapter; SQL truth rows are always hydrated
@@ -2885,6 +2891,8 @@ async def query_knowledge_evidence(
     normalized = normalize_query_knowledge_evidence_args(
         evidence_refs=evidence_refs,
         query_text=query_text,
+        question=question,
+        visual_query=visual_query,
         query_image_refs=query_image_refs,
         knowledge_ids=knowledge_ids,
         collection_ids=collection_ids,

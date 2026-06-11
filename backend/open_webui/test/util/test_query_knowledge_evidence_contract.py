@@ -23,6 +23,7 @@ def test_normalize_query_knowledge_evidence_args_coerces_legacy_aliases_and_scal
     normalized = normalize_query_knowledge_evidence_args(
         evidence_refs='["ke:1", "ke:2"]',
         query_text='what is this?',
+        visual_query='red sample destination box',
         query_image_refs='["chat:file:abc"]',
         knowledge_ids='["kb-legacy"]',
         collection_ids=None,
@@ -35,6 +36,7 @@ def test_normalize_query_knowledge_evidence_args_coerces_legacy_aliases_and_scal
 
     assert normalized.evidence_refs == ['ke:1', 'ke:2']
     assert normalized.query_text == 'what is this?'
+    assert normalized.visual_query == 'red sample destination box'
     assert normalized.query_image_refs == ['chat:file:abc']
     assert normalized.knowledge_ids == ['kb-legacy']
     assert normalized.collection_ids == ['kb-legacy']
@@ -43,6 +45,18 @@ def test_normalize_query_knowledge_evidence_args_coerces_legacy_aliases_and_scal
     assert normalized.top_k == 12
     assert normalized.rerank is False
     assert normalized.include_images is True
+
+
+def test_normalize_query_knowledge_evidence_args_uses_question_alias_for_query_text() -> None:
+    normalized = normalize_query_knowledge_evidence_args(
+        question='where should the red sample go?',
+        visual_query='red-labeled destination box',
+        knowledge_ids=['kb-1'],
+    )
+
+    assert normalized.query_text == 'where should the red sample go?'
+    assert normalized.visual_query == 'red-labeled destination box'
+    assert normalized.to_payload()['visual_query'] == 'red-labeled destination box'
 
 
 def test_collect_allowlisted_query_image_refs_uses_metadata_file_context() -> None:
@@ -225,3 +239,6 @@ async def test_get_builtin_tools_keeps_legacy_query_knowledge_files_and_adds_evi
     assert 'query_knowledge_evidence' not in legacy_tools
     assert 'query_knowledge_files' in tools_dict
     assert 'query_knowledge_evidence' in tools_dict
+    evidence_spec = tools_dict['query_knowledge_evidence']['spec']
+    assert 'visual_query' in evidence_spec['parameters']['properties']
+    assert 'specific visual target' in evidence_spec['description']

@@ -155,6 +155,7 @@ def _is_allowlisted_query_image_ref(ref: Any) -> bool:
 class NormalizedQueryKnowledgeEvidence:
     evidence_refs: list[str] = field(default_factory=list)
     query_text: str | None = None
+    visual_query: str | None = None
     query_image_refs: list[str] = field(default_factory=list)
     knowledge_ids: list[str] = field(default_factory=list)
     collection_ids: list[str] = field(default_factory=list)
@@ -168,6 +169,7 @@ class NormalizedQueryKnowledgeEvidence:
         return {
             'evidence_refs': self.evidence_refs,
             'query_text': self.query_text,
+            'visual_query': self.visual_query,
             'query_image_refs': self.query_image_refs,
             'knowledge_ids': self.knowledge_ids,
             'collection_ids': self.collection_ids,
@@ -315,6 +317,8 @@ def normalize_query_knowledge_evidence_args(
     *,
     evidence_refs: Any = None,
     query_text: Any = None,
+    question: Any = None,
+    visual_query: Any = None,
     query_image_refs: Any = None,
     knowledge_ids: Any = None,
     collection_ids: Any = None,
@@ -325,12 +329,10 @@ def normalize_query_knowledge_evidence_args(
     include_images: Any = None,
 ) -> NormalizedQueryKnowledgeEvidence:
     resolved_evidence_refs = _coerce_string_list(evidence_refs)
-    resolved_query_text = None
-    if isinstance(query_text, str):
-        stripped = query_text.strip()
-        resolved_query_text = stripped or None
-    elif query_text is not None:
-        resolved_query_text = str(query_text).strip() or None
+    resolved_query_text = _coerce_optional_query_text(query_text)
+    if resolved_query_text is None:
+        resolved_query_text = _coerce_optional_query_text(question)
+    resolved_visual_query = _coerce_optional_query_text(visual_query)
 
     resolved_query_image_refs = _coerce_string_list(query_image_refs)
 
@@ -347,6 +349,7 @@ def normalize_query_knowledge_evidence_args(
     return NormalizedQueryKnowledgeEvidence(
         evidence_refs=resolved_evidence_refs,
         query_text=resolved_query_text,
+        visual_query=resolved_visual_query,
         query_image_refs=resolved_query_image_refs,
         knowledge_ids=resolved_scope_ids,
         collection_ids=resolved_scope_ids,
@@ -356,6 +359,15 @@ def normalize_query_knowledge_evidence_args(
         rerank=_coerce_bool(rerank, True),
         include_images=_coerce_bool(include_images, True),
     )
+
+
+def _coerce_optional_query_text(value: Any) -> str | None:
+    if isinstance(value, str):
+        stripped = value.strip()
+        return stripped or None
+    if value is not None:
+        return str(value).strip() or None
+    return None
 
 
 def build_query_knowledge_evidence_response(
@@ -683,12 +695,12 @@ async def query_knowledge_evidence_runtime(
             model_only_files=model_only_files,
         )
 
-    if not query.query_text and not query.query_image_refs:
+    if not query.query_text and not query.visual_query and not query.query_image_refs:
         return build_query_knowledge_evidence_response(
             query=query,
             error=EvidenceToolError(
                 'vector_space_unavailable',
-                'query_knowledge_evidence requires evidence_refs, query_text, or query_image_refs',
+                'query_knowledge_evidence requires evidence_refs, query_text/question, visual_query, or query_image_refs',
             ),
         )
 

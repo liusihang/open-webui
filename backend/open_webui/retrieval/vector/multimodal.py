@@ -678,6 +678,9 @@ def _supports_evidence_modality(vector_space: Any, modality: str) -> bool:
 class _SearchBranch:
     name: str
     modality: str
+    query_text: str | None = None
+    uses_query_images: bool = False
+    fusion_weight: float = 1.0
 
 
 _RRF_K = 40
@@ -690,20 +693,60 @@ def _resolve_search_branches(
     *,
     requested_modalities: Sequence[str],
     query_text: str | None,
+    visual_query: str | None,
     query_has_images: bool,
     vector_space: Any,
 ) -> list[_SearchBranch]:
-    if requested_modalities:
-        ordered_modalities = [modality for modality in requested_modalities if modality in _MODALITIES]
-    elif query_has_images and not query_text:
-        ordered_modalities = ["image", "text"]
-    else:
-        ordered_modalities = ["text", "image"]
-    return [
-        _SearchBranch(name=f"{modality}_dense", modality=modality)
-        for modality in ordered_modalities
-        if _supports_evidence_modality(vector_space, modality)
-    ]
+    normalized_modalities = [modality for modality in requested_modalities if modality in _MODALITIES]
+    branches: list[_SearchBranch] = []
+
+    def add_text_branch(*, weight: float = 1.0) -> None:
+        if query_text and _supports_evidence_modality(vector_space, "text"):
+            branches.append(
+                _SearchBranch(
+                    name="text_dense",
+                    modality="text",
+                    query_text=query_text,
+                    fusion_weight=weight,
+                )
+            )
+
+    def add_image_branch(*, image_query_text: str | None, uses_query_images: bool, weight: float = 1.0) -> None:
+        if not _supports_evidence_modality(vector_space, "image"):
+            return
+        if not image_query_text and not uses_query_images:
+            return
+        branches.append(
+            _SearchBranch(
+                name="image_dense",
+                modality="image",
+                query_text=image_query_text,
+                uses_query_images=uses_query_images,
+                fusion_weight=weight,
+            )
+        )
+
+    if normalized_modalities:
+        requested_set = set(normalized_modalities)
+        image_only_text_query = requested_set == {"image"} and bool(query_text) and not visual_query and not query_has_images
+        for modality in normalized_modalities:
+            if modality == "text":
+                add_text_branch()
+            elif modality == "image":
+                add_image_branch(
+                    image_query_text=visual_query or (query_text if image_only_text_query else None),
+                    uses_query_images=query_has_images,
+                )
+        return branches
+
+    if query_has_images:
+        add_image_branch(image_query_text=visual_query, uses_query_images=True)
+        add_text_branch(weight=0.5)
+        return branches
+
+    add_text_branch()
+    add_image_branch(image_query_text=visual_query, uses_query_images=False)
+    return branches
 
 
 def _resolve_branch_candidate_limit(search_limit: int) -> int:
@@ -719,12 +762,14 @@ def _rrf_fuse_branch_hits(
     *,
     limit: int,
     rrf_k: int = _RRF_K,
+    branch_weights: Mapping[str, float] | None = None,
 ) -> list[dict[str, Any]]:
     if not branch_hits or limit <= 0:
         return []
 
     fused_by_ref: dict[str, dict[str, Any]] = {}
     for branch_name, hits in branch_hits.items():
+        branch_weight = float((branch_weights or {}).get(branch_name, 1.0) or 1.0)
         for rank, hit in enumerate(hits, start=1):
             evidence_ref = str(hit.get("evidence_ref") or "").strip()
             if not evidence_ref:
@@ -740,7 +785,13 @@ def _rrf_fuse_branch_hits(
             if branch_scores:
                 fused_hit["branch_scores"] = branch_scores
 
-            fused_hit["fusion_score"] = float(fused_hit.get("fusion_score") or 0.0) + (1.0 / float(rrf_k + rank))
+            fused_hit["fusion_score"] = float(fused_hit.get("fusion_score") or 0.0) + (
+                branch_weight / float(rrf_k + rank)
+            )
+            if branch_weight != 1.0:
+                branch_weight_map = dict(fused_hit.get("branch_weights") or {})
+                branch_weight_map[branch_name] = branch_weight
+                fused_hit["branch_weights"] = branch_weight_map
 
             current_score = fused_hit.get("score")
             new_score = hit.get("score")
@@ -753,7 +804,10 @@ def _rrf_fuse_branch_hits(
                 if branch_scores:
                     fused_hit["branch_scores"] = branch_scores
                 fused_hit["fusion_score"] = float(
-                    sum(1.0 / float(rrf_k + branch_rank) for branch_rank in branch_ranks.values())
+                    sum(
+                        float((branch_weights or {}).get(branch, 1.0) or 1.0) / float(rrf_k + branch_rank)
+                        for branch, branch_rank in branch_ranks.items()
+                    )
                 )
 
     return sorted(
@@ -1035,9 +1089,11 @@ async def search_multimodal_evidence(
         if isinstance(modality, str) and modality in {"text", "image"}
     ]
     branch_hits: dict[str, list[dict[str, Any]]] = {}
+    branch_weights: dict[str, float] = {}
     query_image_refs = getattr(query, "query_image_refs", None)
     query_has_images = bool(query_image_refs)
     query_text = getattr(query, "query_text", None)
+    visual_query = getattr(query, "visual_query", None)
     query_images = (
         await resolve_query_images_for_embedding(query_image_refs, request=request) if query_has_images else []
     )
@@ -1053,7 +1109,7 @@ async def search_multimodal_evidence(
                     "retrieval_profile": vector_space.retrieval_profile,
                 },
             )
-        if not query_has_images and not vector_space.supports_text_query:
+        if (query_text or visual_query) and not vector_space.supports_text_query:
             raise MultimodalVectorSpaceError(
                 "unsupported_text_query",
                 "Vector space does not support text queries",
@@ -1064,20 +1120,23 @@ async def search_multimodal_evidence(
                 },
             )
 
-        query_input = build_multimodal_query_embedding_input(
-            query_text=query_text,
-            query_images=query_images,
-            vector_space=vector_space,
-        )
-        query_vector = _normalize_embedding_vector(
-            await _await_maybe(embedding_function(query_input, prefix=RAG_EMBEDDING_QUERY_PREFIX, user=user))
-        )
         for branch in _resolve_search_branches(
             requested_modalities=requested_modalities,
             query_text=query_text,
+            visual_query=visual_query,
             query_has_images=query_has_images,
             vector_space=vector_space,
         ):
+            branch_query_images = query_images if branch.uses_query_images else []
+            query_input = build_multimodal_query_embedding_input(
+                query_text=branch.query_text,
+                query_images=branch_query_images,
+                vector_space=vector_space,
+            )
+            query_vector = _normalize_embedding_vector(
+                await _await_maybe(embedding_function(query_input, prefix=RAG_EMBEDDING_QUERY_PREFIX, user=user))
+            )
+            branch_weights[branch.name] = max(branch_weights.get(branch.name, 0.0), branch.fusion_weight)
             vector_result = await vector_client.search(
                 collection_name=f"{vector_space.knowledge_id}:{vector_space.id}",
                 vectors=[query_vector],
@@ -1088,13 +1147,14 @@ async def search_multimodal_evidence(
             lexical_branch = _SearchBranch(name=f"{branch.modality}_lexical", modality=branch.modality)
             lexical_hits = await _search_lexical_branch(
                 branch=lexical_branch,
-                query_text=query_text,
+                query_text=branch.query_text,
                 vector_space=vector_space,
                 candidate_limit=candidate_limit,
                 request=request,
                 user=user,
             )
             if lexical_hits:
+                branch_weights[lexical_branch.name] = max(branch_weights.get(lexical_branch.name, 0.0), branch.fusion_weight)
                 branch_hits.setdefault(lexical_branch.name, []).extend(lexical_hits)
 
     deduped_branch_hits = {
@@ -1105,6 +1165,7 @@ async def search_multimodal_evidence(
     deduped_hits = _rrf_fuse_branch_hits(
         deduped_branch_hits,
         limit=candidate_limit,
+        branch_weights=branch_weights,
     )
     if getattr(query, "rerank", True) and reranking_function is not None and query_text:
         rerank_top_n = getattr(request_config, "TOP_K_RERANKER", search_limit) if request_config is not None else search_limit

@@ -235,6 +235,7 @@ async def test_query_knowledge_evidence_uses_search_adapter_then_hydrates_refs(m
         calls.append(
             {
                 "query_text": query.query_text,
+                "visual_query": query.visual_query,
                 "query_image_refs": query.query_image_refs,
                 "vector_spaces": [space.id for space in vector_spaces],
             }
@@ -246,6 +247,7 @@ async def test_query_knowledge_evidence_uses_search_adapter_then_hydrates_refs(m
 
     result = await query_knowledge_evidence(
         query_text="find similar capsid rings",
+        visual_query="ring-like capsid particles image",
         query_image_refs=["chat:file:query-image"],
         knowledge_ids=["kb-1"],
         include_images=False,
@@ -263,6 +265,7 @@ async def test_query_knowledge_evidence_uses_search_adapter_then_hydrates_refs(m
     assert calls == [
         {
             "query_text": "find similar capsid rings",
+            "visual_query": "ring-like capsid particles image",
             "query_image_refs": ["chat:file:query-image"],
             "vector_spaces": ["vs-1"],
         }

@@ -199,7 +199,7 @@ async def _seed_knowledge_and_file(session: AsyncSession, *, file_id: str, filen
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    "query_kwargs, expected_vector, expected_refs, expected_filters",
+    "query_kwargs, expected_vectors, expected_refs, expected_filters",
     [
         (
             {
@@ -207,9 +207,9 @@ async def _seed_knowledge_and_file(session: AsyncSession, *, file_id: str, filen
                 "knowledge_ids": ["kb-1"],
                 "count": 4,
             },
-            [1.0, 0.0, 0.0],
+            [[1.0, 0.0, 0.0]],
             ["ke:kb-1:file-text:text_chunk:1:txt"],
-            [{"modality": {"$in": ["text"]}}, {"modality": {"$in": ["image"]}}],
+            [{"modality": {"$in": ["text"]}}],
         ),
         (
             {
@@ -217,23 +217,24 @@ async def _seed_knowledge_and_file(session: AsyncSession, *, file_id: str, filen
                 "knowledge_ids": ["kb-1"],
                 "count": 4,
             },
-            [0.0, 1.0, 0.0],
+            [[0.0, 1.0, 0.0]],
             ["ke:kb-1:file-img:standalone_image:1:img"],
-            [{"modality": {"$in": ["image"]}}, {"modality": {"$in": ["text"]}}],
+            [{"modality": {"$in": ["image"]}}],
         ),
         (
             {
                 "query_text": "find the figure and fold",
+                "visual_query": "ring-like capsid particles figure",
                 "query_image_refs": ["chat:file:query-image"],
                 "knowledge_ids": ["kb-1"],
                 "count": 4,
             },
-            [2.0, 2.0, 0.0],
+            [[2.0, 2.0, 0.0], [1.0, 0.0, 0.0]],
             [
                 "ke:kb-1:file-img:standalone_image:1:img",
                 "ke:kb-1:file-text:text_chunk:1:txt",
             ],
-            [{"modality": {"$in": ["text"]}}, {"modality": {"$in": ["image"]}}],
+            [{"modality": {"$in": ["image"]}}, {"modality": {"$in": ["text"]}}],
         ),
         (
             {
@@ -243,7 +244,7 @@ async def _seed_knowledge_and_file(session: AsyncSession, *, file_id: str, filen
                 "modalities": ["image"],
                 "count": 4,
             },
-            [2.0, 2.0, 0.0],
+            [[0.0, 1.0, 0.0]],
             [
                 "ke:kb-1:file-img:standalone_image:1:img",
             ],
@@ -255,7 +256,7 @@ async def test_search_multimodal_evidence_uses_query_embeddings_and_hydrates_evi
     tmp_path,
     monkeypatch,
     query_kwargs,
-    expected_vector,
+    expected_vectors,
     expected_refs,
     expected_filters,
 ):
@@ -401,12 +402,13 @@ async def test_search_multimodal_evidence_uses_query_embeddings_and_hydrates_evi
         )
 
         assert [hit["evidence_ref"] for hit in hits] == expected_refs
-        assert [call["vector"] for call in vector_client.search_calls] == [expected_vector] * len(expected_filters)
+        assert [call["vector"] for call in vector_client.search_calls] == expected_vectors
         assert [call["filter"] for call in vector_client.search_calls] == expected_filters
-        if query.query_image_refs and query.query_text:
+        if query.query_image_refs and query.visual_query:
             assert isinstance(embed_calls[0], dict)
-            assert embed_calls[0]["query_text"] == "find the figure and fold"
+            assert embed_calls[0]["query_text"] == "ring-like capsid particles figure"
             assert embed_calls[0]["query_images"][0]["image_bytes"] == query_image_bytes
+            assert embed_calls[1] == "find the figure and fold"
         elif query.query_image_refs:
             assert isinstance(embed_calls[0], dict)
             assert embed_calls[0]["query_images"][0]["image_bytes"] == query_image_bytes
@@ -461,11 +463,12 @@ async def test_search_multimodal_evidence_fuses_ranked_branch_hits_with_rrf():
             )
 
     async def fake_embedding(query, prefix=None, user=None):
-        assert query == "find matching figures"
+        assert query in {"find matching figures", "matching figure panels"}
         return [1.0, 0.0, 0.0]
 
     query = normalize_query_knowledge_evidence_args(
         query_text="find matching figures",
+        visual_query="matching figure panels",
         knowledge_ids=["kb-1"],
         count=3,
     )
@@ -488,6 +491,183 @@ async def test_search_multimodal_evidence_fuses_ranked_branch_hits_with_rrf():
     assert [hit["evidence_ref"] for hit in hits] == ["ke:shared", "ke:text:1", "ke:image:1"]
     assert hits[0]["fusion_score"] > hits[1]["fusion_score"] > hits[2]["fusion_score"]
     assert hits[0]["branch_ranks"] == {"text_dense": 2, "image_dense": 1}
+
+
+@pytest.mark.asyncio
+async def test_search_multimodal_evidence_does_not_send_raw_question_to_image_dense_branch():
+    vector_space = types.SimpleNamespace(
+        id="vs-1",
+        knowledge_id="kb-1",
+        retrieval_profile="unified_multimodal_dense",
+        embedding_model="fake-multimodal-embed",
+        supports_text_query=True,
+        supports_image_query=True,
+        supports_text_evidence=True,
+        supports_image_evidence=True,
+    )
+
+    class _TracingVectorClient:
+        def __init__(self) -> None:
+            self.search_calls: list[dict[str, object]] = []
+
+        async def search(self, collection_name, vectors, filter=None, limit=10):
+            self.search_calls.append({"vector": vectors[0], "filter": filter, "limit": limit})
+            return _filtered_vector_result(
+                [("vec-text", {"evidence_ref": "ke:text:rule", "modality": "text"}, 0.01)],
+                filter,
+            )
+
+    embed_calls: list[object] = []
+
+    async def fake_embedding(query, prefix=None, user=None):
+        embed_calls.append(query)
+        assert query == "where should the red sample go?"
+        return [1.0, 0.0, 0.0]
+
+    query = normalize_query_knowledge_evidence_args(
+        query_text="where should the red sample go?",
+        knowledge_ids=["kb-1"],
+        count=3,
+    )
+    vector_client = _TracingVectorClient()
+
+    hits = await search_multimodal_evidence(
+        query=query,
+        vector_spaces=[vector_space],
+        embedding_function=fake_embedding,
+        vector_client=vector_client,
+        user={"id": "user-1", "role": "user"},
+        request=None,
+    )
+
+    assert embed_calls == ["where should the red sample go?"]
+    assert [call["filter"] for call in vector_client.search_calls] == [{"modality": {"$in": ["text"]}}]
+    assert [hit["evidence_ref"] for hit in hits] == ["ke:text:rule"]
+
+
+@pytest.mark.asyncio
+async def test_search_multimodal_evidence_uses_visual_query_for_text_to_image_branch():
+    vector_space = types.SimpleNamespace(
+        id="vs-1",
+        knowledge_id="kb-1",
+        retrieval_profile="unified_multimodal_dense",
+        embedding_model="fake-multimodal-embed",
+        supports_text_query=True,
+        supports_image_query=True,
+        supports_text_evidence=True,
+        supports_image_evidence=True,
+    )
+
+    class _VisualQueryVectorClient:
+        def __init__(self) -> None:
+            self.search_calls: list[dict[str, object]] = []
+
+        async def search(self, collection_name, vectors, filter=None, limit=10):
+            self.search_calls.append({"vector": vectors[0], "filter": filter, "limit": limit})
+            modality = (filter or {}).get("modality", {}).get("$in", [None])[0]
+            if modality == "text":
+                return _filtered_vector_result(
+                    [("vec-text", {"evidence_ref": "ke:text:rule", "modality": "text"}, 0.01)],
+                    filter,
+                )
+            return _filtered_vector_result(
+                [("vec-image", {"evidence_ref": "ke:image:red-box", "modality": "image"}, 0.02)],
+                filter,
+            )
+
+    embed_calls: list[object] = []
+
+    async def fake_embedding(query, prefix=None, user=None):
+        embed_calls.append(query)
+        if query == "where should the red sample go?":
+            return [1.0, 0.0, 0.0]
+        if query == "red-labeled destination box photo":
+            return [0.0, 1.0, 0.0]
+        raise AssertionError(f"unexpected embedding query: {query!r}")
+
+    query = normalize_query_knowledge_evidence_args(
+        query_text="where should the red sample go?",
+        visual_query="red-labeled destination box photo",
+        knowledge_ids=["kb-1"],
+        count=3,
+    )
+    vector_client = _VisualQueryVectorClient()
+
+    hits = await search_multimodal_evidence(
+        query=query,
+        vector_spaces=[vector_space],
+        embedding_function=fake_embedding,
+        vector_client=vector_client,
+        user={"id": "user-1", "role": "user"},
+        request=None,
+    )
+
+    assert embed_calls == [
+        "where should the red sample go?",
+        "red-labeled destination box photo",
+    ]
+    assert [call["filter"] for call in vector_client.search_calls] == [
+        {"modality": {"$in": ["text"]}},
+        {"modality": {"$in": ["image"]}},
+    ]
+    assert [call["vector"] for call in vector_client.search_calls] == [
+        [1.0, 0.0, 0.0],
+        [0.0, 1.0, 0.0],
+    ]
+    assert [hit["evidence_ref"] for hit in hits] == ["ke:text:rule", "ke:image:red-box"]
+
+
+@pytest.mark.asyncio
+async def test_search_multimodal_evidence_text_query_can_be_visual_query_when_image_modality_is_explicit():
+    vector_space = types.SimpleNamespace(
+        id="vs-1",
+        knowledge_id="kb-1",
+        retrieval_profile="unified_multimodal_dense",
+        embedding_model="fake-multimodal-embed",
+        supports_text_query=True,
+        supports_image_query=True,
+        supports_text_evidence=True,
+        supports_image_evidence=True,
+    )
+
+    class _ImageOnlyVectorClient:
+        def __init__(self) -> None:
+            self.search_calls: list[dict[str, object]] = []
+
+        async def search(self, collection_name, vectors, filter=None, limit=10):
+            self.search_calls.append({"vector": vectors[0], "filter": filter, "limit": limit})
+            return _filtered_vector_result(
+                [("vec-image", {"evidence_ref": "ke:image:red-box", "modality": "image"}, 0.02)],
+                filter,
+            )
+
+    embed_calls: list[object] = []
+
+    async def fake_embedding(query, prefix=None, user=None):
+        embed_calls.append(query)
+        assert query == "red-labeled destination box photo"
+        return [0.0, 1.0, 0.0]
+
+    query = normalize_query_knowledge_evidence_args(
+        query_text="red-labeled destination box photo",
+        knowledge_ids=["kb-1"],
+        modalities=["image"],
+        count=3,
+    )
+    vector_client = _ImageOnlyVectorClient()
+
+    hits = await search_multimodal_evidence(
+        query=query,
+        vector_spaces=[vector_space],
+        embedding_function=fake_embedding,
+        vector_client=vector_client,
+        user={"id": "user-1", "role": "user"},
+        request=None,
+    )
+
+    assert embed_calls == ["red-labeled destination box photo"]
+    assert [call["filter"] for call in vector_client.search_calls] == [{"modality": {"$in": ["image"]}}]
+    assert [hit["evidence_ref"] for hit in hits] == ["ke:image:red-box"]
 
 
 @pytest.mark.asyncio
@@ -523,8 +703,10 @@ async def test_search_multimodal_evidence_mixed_query_dedupes_after_branch_fusio
             )
 
     async def fake_embedding(query, prefix=None, user=None):
+        if query == "find the figure and fold":
+            return [1.0, 0.0, 0.0]
         assert isinstance(query, dict)
-        assert query["query_text"] == "find the figure and fold"
+        assert query["query_text"] == "ring-like capsid particles figure"
         assert query["query_images"] == [
             {
                 "ref": "chat:file:query-image",
@@ -547,6 +729,7 @@ async def test_search_multimodal_evidence_mixed_query_dedupes_after_branch_fusio
     )
     query = normalize_query_knowledge_evidence_args(
         query_text="find the figure and fold",
+        visual_query="ring-like capsid particles figure",
         query_image_refs=["chat:file:query-image"],
         knowledge_ids=["kb-1"],
         count=3,
@@ -561,7 +744,7 @@ async def test_search_multimodal_evidence_mixed_query_dedupes_after_branch_fusio
         request=request,
     )
 
-    assert [hit["evidence_ref"] for hit in hits] == ["ke:shared", "ke:text:1", "ke:image:1"]
+    assert [hit["evidence_ref"] for hit in hits] == ["ke:shared", "ke:image:1", "ke:text:1"]
     assert len({hit["evidence_ref"] for hit in hits}) == 3
 
 
@@ -650,7 +833,7 @@ async def test_search_multimodal_evidence_fuses_dense_and_lexical_branch_hits():
             )
 
     async def fake_embedding(query, prefix=None, user=None):
-        assert query == "find matching figures"
+        assert query in {"find matching figures", "matching figure panels"}
         return [1.0, 0.0, 0.0]
 
     lexical_calls: list[dict[str, object]] = []
@@ -676,6 +859,7 @@ async def test_search_multimodal_evidence_fuses_dense_and_lexical_branch_hits():
 
     query = normalize_query_knowledge_evidence_args(
         query_text="find matching figures",
+        visual_query="matching figure panels",
         knowledge_ids=["kb-1"],
         count=3,
     )
@@ -700,7 +884,7 @@ async def test_search_multimodal_evidence_fuses_dense_and_lexical_branch_hits():
             "limit": 12,
         },
         {
-            "query_text": "find matching figures",
+            "query_text": "matching figure panels",
             "branch_name": "image_lexical",
             "modality": "image",
             "knowledge_id": "kb-1",
@@ -904,6 +1088,7 @@ async def test_search_multimodal_evidence_applies_reranker_when_enabled(tmp_path
 
         query = normalize_query_knowledge_evidence_args(
             query_text="find the figure and fold",
+            visual_query="ring-like capsid particles figure",
             knowledge_ids=["kb-1"],
             count=4,
             rerank=True,
@@ -1095,6 +1280,7 @@ async def test_search_multimodal_evidence_reranker_uses_image_asset_metadata(tmp
 
         query = normalize_query_knowledge_evidence_args(
             query_text="find ring-like capsid particles",
+            visual_query="ring-like capsid particles figure",
             knowledge_ids=["kb-1"],
             count=2,
             rerank=True,
@@ -1187,7 +1373,7 @@ async def test_search_multimodal_evidence_skips_reranker_for_image_only_queries(
     )
 
     assert reranker_called is False
-    assert [hit["evidence_ref"] for hit in hits] == ["ke:image:1", "ke:text:1"]
+    assert [hit["evidence_ref"] for hit in hits] == ["ke:image:1"]
 
 
 @pytest.mark.asyncio
