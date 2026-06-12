@@ -2710,7 +2710,7 @@ async def process_chat_payload(request, form_data, user, metadata, model):
     if not isinstance(metadata.get('chat_id'), str):
         metadata['chat_id'] = ''
 
-    # Pipeline Inlet -> Filter Inlet -> Chat Memory -> Chat Web Search -> Chat Image Generation
+    # Pipeline Inlet -> Filter Inlet -> Chat Memory -> Chat Web Search
     # -> Chat Code Interpreter (Form Data Update) -> (Default) Chat Tools Function Calling
     # -> Chat Files
 
@@ -2967,28 +2967,6 @@ async def process_chat_payload(request, form_data, user, metadata, model):
             # Skip forced RAG web search when native FC is enabled - model can use web_search tool
             if metadata.get('params', {}).get('function_calling') != 'native':
                 form_data = await chat_web_search_handler(request, form_data, extra_params, user)
-
-        if 'image_generation' in features and features['image_generation']:
-            # Image generation is an explicit UI feature, not merely an
-            # optional tool suggestion.  Native FC models may ignore
-            # generate_image and still claim success, so keep the existing
-            # deterministic image handler for real chat/socket requests.
-            form_data = await chat_image_generation_handler(request, form_data, extra_params, user)
-
-            if (
-                metadata.get('params', {}).get('function_calling') == 'native'
-                and metadata.get('chat_id')
-                and extra_params.get('__event_emitter__')
-            ):
-                log.info(
-                    'Native image generation handled before model call chat_id=%s message_id=%s session_id=%s',
-                    metadata.get('chat_id'),
-                    metadata.get('message_id'),
-                    metadata.get('session_id'),
-                )
-                metadata['native_image_generation_forced'] = True
-                features = {**features, 'image_generation': False}
-                extra_params['__features__'] = features
 
         if 'code_interpreter' in features and features['code_interpreter']:
             engine = getattr(request.app.state.config, 'CODE_INTERPRETER_ENGINE', 'pyodide')
