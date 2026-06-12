@@ -567,11 +567,11 @@ async def test_search_multimodal_evidence_uses_visual_query_for_text_to_image_br
             modality = (filter or {}).get("modality", {}).get("$in", [None])[0]
             if modality == "text":
                 return _filtered_vector_result(
-                    [("vec-text", {"evidence_ref": "ke:text:rule", "modality": "text"}, 0.01)],
+                    [("vec-text", {"evidence_ref": "ke:text:rule", "modality": "text"}, 0.99)],
                     filter,
                 )
             return _filtered_vector_result(
-                [("vec-image", {"evidence_ref": "ke:image:red-box", "modality": "image"}, 0.02)],
+                [("vec-image", {"evidence_ref": "ke:image:red-box", "modality": "image"}, 0.98)],
                 filter,
             )
 
@@ -826,6 +826,10 @@ async def test_search_multimodal_evidence_preserves_dense_backend_rank_with_simi
     )
 
     assert [hit["evidence_ref"] for hit in hits] == ["ke:image:near", "ke:image:middle"]
+    assert hits[0]["score"] == pytest.approx(0.90)
+    assert hits[1]["score"] == pytest.approx(0.80)
+    assert hits[0]["branch_scores"] == {"image_dense": pytest.approx(0.90)}
+    assert hits[1]["branch_scores"] == {"image_dense": pytest.approx(0.80)}
 
 
 def test_search_multimodal_evidence_lexical_hits_require_evidence_refs():
@@ -870,11 +874,11 @@ async def test_search_multimodal_evidence_fuses_dense_and_lexical_branch_hits():
             modality = (filter or {}).get("modality", {}).get("$in", [None])[0]
             if modality == "text":
                 return _filtered_vector_result(
-                    [("vec-text-1", {"evidence_ref": "ke:text:1", "modality": "text"}, 0.01)],
+                    [("vec-text-1", {"evidence_ref": "ke:text:1", "modality": "text"}, 0.99)],
                     filter,
                 )
             return _filtered_vector_result(
-                [("vec-image-1", {"evidence_ref": "ke:image:1", "modality": "image"}, 0.02)],
+                [("vec-image-1", {"evidence_ref": "ke:image:1", "modality": "image"}, 0.98)],
                 filter,
             )
 
@@ -1088,7 +1092,7 @@ async def test_search_multimodal_evidence_applies_reranker_when_enabled(tmp_path
                                     "vector_space_id": "vs-1",
                                     "modality": "text",
                                 },
-                                0.01,
+                                0.99,
                             ),
                             (
                                 "vec-text-2",
@@ -1097,7 +1101,7 @@ async def test_search_multimodal_evidence_applies_reranker_when_enabled(tmp_path
                                     "vector_space_id": "vs-1",
                                     "modality": "text",
                                 },
-                                0.02,
+                                0.98,
                             ),
                         ],
                         filter,
@@ -1111,7 +1115,7 @@ async def test_search_multimodal_evidence_applies_reranker_when_enabled(tmp_path
                                 "vector_space_id": "vs-1",
                                 "modality": "image",
                             },
-                            0.30,
+                            0.70,
                         )
                     ],
                     filter,
@@ -1290,7 +1294,7 @@ async def test_search_multimodal_evidence_reranker_uses_image_asset_metadata(tmp
                                     "vector_space_id": vector_space.id,
                                     "modality": "text",
                                 },
-                                0.01,
+                                0.99,
                             )
                         ],
                         filter,
@@ -1304,7 +1308,7 @@ async def test_search_multimodal_evidence_reranker_uses_image_asset_metadata(tmp
                                 "vector_space_id": vector_space.id,
                                 "modality": "image",
                             },
-                            0.02,
+                            0.98,
                         )
                     ],
                     filter,

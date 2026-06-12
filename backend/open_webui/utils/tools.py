@@ -101,7 +101,6 @@ from open_webui.tools.builtin import (
 )
 from open_webui.utils.access_control import has_access, has_connection_access, has_permission
 from open_webui.utils.headers import get_custom_headers, include_user_info_headers
-from open_webui.retrieval.evidence import has_evidence_enabled_knowledge_scope
 from open_webui.utils.misc import is_string_allowed
 from open_webui.utils.plugin import load_tool_module_by_id
 from pydantic import BaseModel, Field, create_model
@@ -528,7 +527,7 @@ async def get_builtin_tools(
                 ]
             )
 
-        if model_knowledge and has_evidence_enabled_knowledge_scope(model_knowledge):
+        if model_knowledge:
             if query_knowledge_evidence not in builtin_functions:
                 insert_at = (
                     builtin_functions.index(query_knowledge_files)

@@ -629,7 +629,8 @@ def _normalize_search_rows(vector_result: Any) -> list[dict[str, Any]]:
         distance = result_distances[index] if index < len(result_distances) else None
         score = None
         if isinstance(distance, (int, float)):
-            score = 1.0 - float(distance)
+            # Vector backends normalize SearchResult.distances into larger-is-better similarity scores.
+            score = float(distance)
         elif isinstance(metadata.get("score"), (int, float)):
             score = float(metadata["score"])
         rows.append(

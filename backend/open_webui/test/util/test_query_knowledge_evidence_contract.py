@@ -201,7 +201,7 @@ async def test_query_knowledge_evidence_rejects_raw_url_path_and_data_refs_even_
 
 
 @pytest.mark.asyncio
-async def test_get_builtin_tools_keeps_legacy_query_knowledge_files_and_adds_evidence_tool_for_evidence_enabled_scope() -> None:
+async def test_get_builtin_tools_adds_evidence_tool_for_any_scoped_knowledge() -> None:
     request = _FakeRequest()
     model = {
         'info': {
@@ -229,6 +229,18 @@ async def test_get_builtin_tools_keeps_legacy_query_knowledge_files_and_adds_evi
             }
         },
     )
+    unscoped_tools = await get_builtin_tools(
+        request,
+        extra_params={'__user__': {'id': 'user-1', 'role': 'user'}},
+        model={
+            'info': {
+                'meta': {
+                    'capabilities': {'builtin_tools': True},
+                    'builtinTools': {'knowledge': True},
+                }
+            }
+        },
+    )
     tools_dict = await get_builtin_tools(
         request,
         extra_params={'__user__': {'id': 'user-1', 'role': 'user'}},
@@ -236,7 +248,8 @@ async def test_get_builtin_tools_keeps_legacy_query_knowledge_files_and_adds_evi
     )
 
     assert 'query_knowledge_files' in legacy_tools
-    assert 'query_knowledge_evidence' not in legacy_tools
+    assert 'query_knowledge_evidence' in legacy_tools
+    assert 'query_knowledge_evidence' not in unscoped_tools
     assert 'query_knowledge_files' in tools_dict
     assert 'query_knowledge_evidence' in tools_dict
     evidence_spec = tools_dict['query_knowledge_evidence']['spec']
