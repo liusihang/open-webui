@@ -89,9 +89,6 @@ from open_webui.tools.builtin import (
     update_task,
     view_channel_message,
     view_channel_thread,
-    query_knowledge_abstract,
-    query_knowledge_full_text,
-    view_knowledge_layers,
     view_chat,
     view_note,
     view_file,
@@ -505,13 +502,11 @@ async def get_builtin_tools(
                 builtin_functions.append(search_knowledge_bases)
         elif model_knowledge:
             builtin_functions.extend([list_knowledge, search_knowledge_files, grep_knowledge_files])
-            builtin_functions.append(query_knowledge_abstract)
             builtin_functions.append(query_knowledge_files)
-            builtin_functions.append(query_knowledge_full_text)
 
             knowledge_types = {item.get('type') for item in model_knowledge}
             if 'file' in knowledge_types or 'collection' in knowledge_types:
-                builtin_functions.extend([view_file, view_knowledge_file, view_knowledge_layers])
+                builtin_functions.extend([view_file, view_knowledge_file])
             if 'note' in knowledge_types:
                 builtin_functions.append(view_note)
         else:

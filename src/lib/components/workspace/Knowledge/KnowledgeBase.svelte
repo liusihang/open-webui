@@ -20,6 +20,7 @@
 
 	import {
 		updateFileDataContentById,
+		getFileContentById,
 		uploadFile,
 		deleteFileById,
 		getFileById,
@@ -27,11 +28,7 @@
 	} from '$lib/apis/files';
 	import {
 		addFileToKnowledgeById,
-		backfillKnowledgeLayers,
 		getKnowledgeById,
-		getKnowledgeFileLayers,
-		regenerateKnowledgeFileLayerByType,
-		regenerateKnowledgeFileLayers,
 		getPendingKnowledgeFiles,
 		removeFileFromKnowledgeById,
 		resetKnowledgeById,
@@ -52,9 +49,9 @@
 	import { computeFileHash } from '$lib/utils/hash';
 
 	import Spinner from '$lib/components/common/Spinner.svelte';
+	import PanzoomContainer from '$lib/components/common/PanzoomContainer.svelte';
 	import Tooltip from '$lib/components/common/Tooltip.svelte';
 	import Files from './KnowledgeBase/Files.svelte';
-	import LayersPanel from './KnowledgeBase/LayersPanel.svelte';
 	import AddFilesPlaceholder from '$lib/components/AddFilesPlaceholder.svelte';
 
 	import AddContentMenu from './KnowledgeBase/AddContentMenu.svelte';
@@ -65,7 +62,6 @@
 	import SyncConfirmDialog from '../../common/ConfirmDialog.svelte';
 	import ConfirmDialog from '../../common/ConfirmDialog.svelte';
 	import Drawer from '$lib/components/common/Drawer.svelte';
-	import ArrowPath from '$lib/components/icons/ArrowPath.svelte';
 	import ChevronLeft from '$lib/components/icons/ChevronLeft.svelte';
 	import LockClosed from '$lib/components/icons/LockClosed.svelte';
 	import AccessControlModal from '../common/AccessControlModal.svelte';
@@ -77,7 +73,6 @@
 	import AdjustmentsHorizontal from '$lib/components/icons/AdjustmentsHorizontal.svelte';
 	import Pagination from '$lib/components/common/Pagination.svelte';
 	import AttachWebpageModal from '$lib/components/chat/MessageInput/AttachWebpageModal.svelte';
-	import type { KnowledgeLayerItem, KnowledgeLayerType } from './KnowledgeBase/LayersPanel.svelte';
 
 	let largeScreen = true;
 
@@ -106,6 +101,18 @@
 		access_grants?: any[];
 		write_access?: boolean;
 	};
+	type KnowledgeFile = {
+		id: string;
+		name?: string;
+		filename?: string;
+		data?: {
+			content?: string;
+		} | null;
+		meta?: {
+			name?: string;
+			content_type?: unknown;
+		} | null;
+	};
 
 	let id = null;
 	let knowledge: Knowledge | null = null;
@@ -114,12 +121,9 @@
 	let selectedFileId = null;
 	let selectedFile = null;
 	let selectedFileContent = '';
-	let selectedFileLayers: KnowledgeLayerItem[] = [];
-	let selectedFileLayersError: string | null = null;
-	let selectedFileLayersLoading = false;
-	let isRegeneratingAllLayers = false;
-	let isBackfillingLayers = false;
-	let regeneratingLayerType: KnowledgeLayerType | null = null;
+	let selectedFileImageUrl: string | null = null;
+	let selectedFileImageLoading = false;
+	let selectedFileImageError: string | null = null;
 
 	let inputFiles = null;
 
@@ -145,6 +149,43 @@
 	let deleteDirectoryContents = true;
 
 	let pendingPollTimer: ReturnType<typeof setInterval> | null = null;
+
+	const IMAGE_EXTS = new Set(['png', 'jpg', 'jpeg', 'gif', 'webp', 'bmp', 'ico']);
+	const IMAGE_CONTENT_TYPES = new Set([
+		'image/png',
+		'image/jpeg',
+		'image/gif',
+		'image/webp',
+		'image/bmp',
+		'image/x-icon',
+		'image/vnd.microsoft.icon'
+	]);
+
+	const getFileName = (file: KnowledgeFile | null | undefined) =>
+		file?.meta?.name ?? file?.name ?? file?.filename ?? '';
+	const getFileExt = (file: KnowledgeFile | null | undefined) =>
+		getFileName(file).split('.').pop()?.toLowerCase() ?? '';
+	const getSelectedFileContentType = (file: KnowledgeFile | null | undefined) =>
+		typeof file?.meta?.content_type === 'string' ? file.meta.content_type : '';
+	const isSelectedFileImage = (file: KnowledgeFile | null | undefined) => {
+		const contentType = getSelectedFileContentType(file).split(';')[0]?.trim()?.toLowerCase() ?? '';
+		return IMAGE_CONTENT_TYPES.has(contentType) || IMAGE_EXTS.has(getFileExt(file));
+	};
+
+	const clearSelectedFileImagePreview = () => {
+		if (selectedFileImageUrl) {
+			URL.revokeObjectURL(selectedFileImageUrl);
+			selectedFileImageUrl = null;
+		}
+		selectedFileImageLoading = false;
+		selectedFileImageError = null;
+	};
+
+	const closeSelectedFileDrawer = () => {
+		selectedFileId = null;
+		selectedFile = null;
+		clearSelectedFileImagePreview();
+	};
 
 	const reset = () => {
 		currentPage = 1;
@@ -253,153 +294,32 @@
 		return res;
 	};
 
-	const normalizeLayerItems = (payload: unknown): KnowledgeLayerItem[] => {
-		if (!payload) {
-			return [];
-		}
-
-		if (Array.isArray(payload)) {
-			return payload as KnowledgeLayerItem[];
-		}
-
-		if (typeof payload === 'object' && payload !== null && 'items' in payload) {
-			const items = (payload as { items?: unknown }).items;
-			return Array.isArray(items) ? (items as KnowledgeLayerItem[]) : [];
-		}
-
-		return [];
-	};
-
-	const refreshSelectedFileLayers = async (fileId: string, showErrors = true) => {
-		if (!knowledge?.id || !fileId) {
-			selectedFileLayers = [];
-			selectedFileLayersError = null;
-			return;
-		}
-
-		selectedFileLayersLoading = true;
-		selectedFileLayersError = null;
-
+	const fileSelectHandler = async (file: KnowledgeFile) => {
+		const selectedId = file?.id;
 		try {
-			const response = await getKnowledgeFileLayers(localStorage.token, knowledge.id, fileId).catch(
-				(e) => {
-					throw e;
-				}
-			);
-			selectedFileLayers = normalizeLayerItems(response);
-		} catch (e) {
-			const errorMessage = `${e}`;
-			selectedFileLayers = [];
-			selectedFileLayersError = errorMessage;
-			if (showErrors) {
-				toast.error(errorMessage);
-			}
-		} finally {
-			selectedFileLayersLoading = false;
-		}
-	};
-
-	const regenerateAllLayersHandler = async () => {
-		if (!knowledge?.id || !selectedFileId || selectedFileLayersLoading || regeneratingLayerType) {
-			return;
-		}
-
-		isRegeneratingAllLayers = true;
-		try {
-			const response = await regenerateKnowledgeFileLayers(
-				localStorage.token,
-				knowledge.id,
-				selectedFileId,
-				{
-					force: false
-				}
-			).catch((e) => {
-				throw e;
-			});
-
-			if (response) {
-				toast.success($i18n.t('Layer regeneration started.'));
-				await refreshSelectedFileLayers(selectedFileId, false);
-			}
-		} catch (e) {
-			toast.error(`${e}`);
-		} finally {
-			isRegeneratingAllLayers = false;
-		}
-	};
-
-	const backfillLayersHandler = async () => {
-		if (
-			!knowledge?.id ||
-			isBackfillingLayers ||
-			isRegeneratingAllLayers ||
-			selectedFileLayersLoading
-		) {
-			return;
-		}
-
-		isBackfillingLayers = true;
-		try {
-			const response = await backfillKnowledgeLayers(localStorage.token, knowledge.id, {
-				force: false
-			}).catch((e) => {
-				throw e;
-			});
-
-			if (response) {
-				toast.success($i18n.t('Knowledge layer backfill started.'));
-				if (selectedFileId) {
-					await refreshSelectedFileLayers(selectedFileId, false);
-				}
-			}
-		} catch (e) {
-			toast.error(`${e}`);
-		} finally {
-			isBackfillingLayers = false;
-		}
-	};
-
-	const regenerateLayerHandler = async (layerType: KnowledgeLayerType) => {
-		if (!knowledge?.id || !selectedFileId || isRegeneratingAllLayers || selectedFileLayersLoading) {
-			return;
-		}
-
-		regeneratingLayerType = layerType;
-		try {
-			const response = await regenerateKnowledgeFileLayerByType(
-				localStorage.token,
-				knowledge.id,
-				selectedFileId,
-				layerType
-			).catch((e) => {
-				throw e;
-			});
-
-			if (response) {
-				toast.success($i18n.t('Layer regeneration started.'));
-				await refreshSelectedFileLayers(selectedFileId, false);
-			}
-		} catch (e) {
-			toast.error(`${e}`);
-		} finally {
-			regeneratingLayerType = null;
-		}
-	};
-
-	const retrySelectedFileLayersHandler = async () => {
-		if (!selectedFileId) {
-			return;
-		}
-
-		await refreshSelectedFileLayers(selectedFileId);
-	};
-
-	const fileSelectHandler = async (file) => {
-		try {
+			clearSelectedFileImagePreview();
 			selectedFile = file;
 			selectedFileContent = selectedFile?.data?.content || '';
-			await refreshSelectedFileLayers(file?.id, false);
+			if (isSelectedFileImage(selectedFile)) {
+				selectedFileImageLoading = true;
+				selectedFileContent = '';
+				const content = selectedId ? await getFileContentById(selectedId) : null;
+
+				if (selectedId && selectedFileId === selectedId) {
+					if (content) {
+						const contentType =
+							getSelectedFileContentType(selectedFile) || 'application/octet-stream';
+						selectedFileImageUrl = URL.createObjectURL(new Blob([content], { type: contentType }));
+					} else {
+						selectedFileImageError = $i18n.t('Failed to load image preview.');
+					}
+					selectedFileImageLoading = false;
+				}
+			}
 		} catch (e) {
+			if (selectedId && selectedFileId === selectedId) {
+				selectedFileImageLoading = false;
+			}
 			toast.error($i18n.t('Failed to load file content.'));
 		}
 	};
@@ -952,8 +872,7 @@
 	const navigateToDirectory = (directoryId: string | null) => {
 		currentDirectoryId = directoryId;
 		currentPage = 1;
-		selectedFileId = null;
-		selectedFile = null;
+		closeSelectedFileDrawer();
 		getItemsPage();
 	};
 
@@ -1082,6 +1001,10 @@
 	let isSaving = false;
 
 	const updateFileContentHandler = async () => {
+		if (isSelectedFileImage(selectedFile)) {
+			return;
+		}
+
 		if (isSaving) {
 			console.log('Save operation already in progress, skipping...');
 			return;
@@ -1105,6 +1028,7 @@
 				selectedFileId = null;
 				selectedFile = null;
 				selectedFileContent = '';
+				clearSelectedFileImagePreview();
 
 				await init();
 			}
@@ -1278,6 +1202,7 @@
 			clearInterval(pendingPollTimer);
 			pendingPollTimer = null;
 		}
+		clearSelectedFileImagePreview();
 		mediaQuery?.removeEventListener('change', handleMediaQuery);
 		const dropZone = document.querySelector('body');
 		dropZone?.removeEventListener('dragover', onDragOver);
@@ -1471,10 +1396,7 @@
 						aria-label={$i18n.t('Search Collection')}
 						placeholder={$i18n.t('Search Collection')}
 						on:focus={() => {
-							selectedFileId = null;
-							selectedFile = null;
-							selectedFileLayers = [];
-							selectedFileLayersError = null;
+							closeSelectedFileDrawer();
 						}}
 					/>
 
@@ -1511,23 +1433,6 @@
 
 					{#if knowledge?.write_access}
 						<div class="flex items-center gap-2">
-							<button
-								type="button"
-								class="flex items-center gap-1.5 px-2.5 py-1.5 text-sm bg-gray-50 dark:bg-gray-850 rounded-xl hover:bg-gray-100 dark:hover:bg-gray-800 disabled:opacity-60 disabled:cursor-not-allowed"
-								disabled={isBackfillingLayers || isRegeneratingAllLayers}
-								on:click={() => {
-									backfillLayersHandler();
-								}}
-							>
-								<ArrowPath className="size-3.5" strokeWidth="2" />
-								<span>
-									{#if isBackfillingLayers}
-										{$i18n.t('Rebuilding...')}
-									{:else}
-										{$i18n.t('Rebuild Layers')}
-									{/if}
-								</span>
-							</button>
 							<AddContentMenu
 								onUpload={(data) => {
 									if (data.type === 'directory') {
@@ -1656,15 +1561,12 @@
 													if (file) {
 														fileSelectHandler(file);
 													} else {
-														selectedFile = null;
+														closeSelectedFileDrawer();
 													}
 												}
 											}}
 											onDelete={(fileId) => {
-												selectedFileId = null;
-												selectedFile = null;
-												selectedFileLayers = [];
-												selectedFileLayersError = null;
+												closeSelectedFileDrawer();
 
 												deleteFileHandler(fileId);
 											}}
@@ -1698,10 +1600,7 @@
 							className="h-full"
 							show={selectedFileId !== null}
 							onClose={() => {
-								selectedFileId = null;
-								selectedFile = null;
-								selectedFileLayers = [];
-								selectedFileLayersError = null;
+								closeSelectedFileDrawer();
 							}}
 						>
 							<div class="flex flex-col justify-start h-full max-h-full">
@@ -1712,10 +1611,7 @@
 												class="w-full text-left text-sm p-1.5 rounded-lg dark:text-gray-300 dark:hover:text-white hover:bg-black/5 dark:hover:bg-gray-850"
 												aria-label={$i18n.t('Close')}
 												on:click={() => {
-													selectedFileId = null;
-													selectedFile = null;
-													selectedFileLayers = [];
-													selectedFileLayersError = null;
+													closeSelectedFileDrawer();
 												}}
 											>
 												<ChevronLeft strokeWidth="2.5" />
@@ -1725,7 +1621,7 @@
 											{selectedFile?.meta?.name}
 										</div>
 
-										{#if knowledge?.write_access}
+										{#if knowledge?.write_access && !isSelectedFileImage(selectedFile)}
 											<div>
 												<button
 													class="flex self-center w-fit text-sm py-1 px-2.5 dark:text-gray-300 dark:hover:text-white hover:bg-black/5 dark:hover:bg-white/5 rounded-lg disabled:opacity-50 disabled:cursor-not-allowed"
@@ -1745,26 +1641,42 @@
 										{/if}
 									</div>
 
-									<LayersPanel
-										layers={selectedFileLayers}
-										loading={selectedFileLayersLoading}
-										error={selectedFileLayersError}
-										canManage={knowledge?.write_access ?? false}
-										regeneratingAll={isRegeneratingAllLayers}
-										{regeneratingLayerType}
-										onRegenerateAll={regenerateAllLayersHandler}
-										onRegenerateLayer={regenerateLayerHandler}
-										onRetry={retrySelectedFileLayersHandler}
-									/>
-
 									{#key selectedFile.id}
-										<textarea
-											class="w-full h-full text-sm outline-none resize-none px-3 py-2"
-											bind:value={selectedFileContent}
-											disabled={!knowledge?.write_access}
-											aria-label={$i18n.t('File content')}
-											placeholder={$i18n.t('Add content here')}
-										/>
+										{#if isSelectedFileImage(selectedFile)}
+											<div class="min-h-0 flex-1">
+												{#if selectedFileImageLoading}
+													<div class="flex h-full items-center justify-center">
+														<Spinner className="size-4" />
+													</div>
+												{:else if selectedFileImageUrl}
+													<PanzoomContainer
+														className="w-full h-full flex items-center justify-center"
+														options={{ zoomDoubleClickSpeed: 1 }}
+													>
+														<img
+															src={selectedFileImageUrl}
+															alt={getFileName(selectedFile)}
+															class="max-w-full max-h-full object-contain p-3"
+															draggable="false"
+														/>
+													</PanzoomContainer>
+												{:else}
+													<div
+														class="flex h-full items-center justify-center px-3 text-center text-sm text-gray-500 dark:text-gray-400"
+													>
+														{selectedFileImageError ?? $i18n.t('Failed to load image preview.')}
+													</div>
+												{/if}
+											</div>
+										{:else}
+											<textarea
+												class="w-full h-full text-sm outline-none resize-none px-3 py-2"
+												bind:value={selectedFileContent}
+												disabled={!knowledge?.write_access}
+												aria-label={$i18n.t('File content')}
+												placeholder={$i18n.t('Add content here')}
+											></textarea>
+										{/if}
 									{/key}
 								</div>
 							</div>
