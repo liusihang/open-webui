@@ -468,3 +468,101 @@ def test_responses_streaming_function_call_arguments_emit_tool_calls_not_content
     assert ''.join(delta['function'].get('arguments', '') for delta in tool_call_deltas) == (
         '{"prompt": "A quiet mountain lake"}'
     )
+
+
+def test_responses_web_search_lifecycle_emits_status_events_without_results():
+    pipe = _load_pipe_class()()
+    emitted = []
+    state = pipe._new_stream_state(__event_emitter__=emitted.append)
+    chunks = []
+
+    for event in [
+        {
+            'type': 'response.output_item.added',
+            'item': {
+                'id': 'ws_1',
+                'type': 'web_search_call',
+                'status': 'in_progress',
+            },
+        },
+        {
+            'type': 'response.web_search_call.searching',
+            'item_id': 'ws_1',
+        },
+        {
+            'type': 'response.output_item.done',
+            'item': {
+                'id': 'ws_1',
+                'type': 'web_search_call',
+                'status': 'completed',
+                'action': {
+                    'type': 'search',
+                    'query': 'weather: Shanghai, China',
+                    'queries': ['weather: Shanghai, China'],
+                },
+            },
+        },
+    ]:
+        chunk = pipe._parse_responses_event(event, state)
+        if isinstance(chunk, list):
+            chunks.extend(chunk)
+        elif chunk:
+            chunks.append(chunk)
+
+    status_events = [event for event in emitted if event.get('type') == 'status']
+    source_events = [event for event in emitted if event.get('type') == 'source']
+    assert [event['data']['status'] for event in status_events] == [
+        'in_progress',
+        'in_progress',
+        'complete',
+    ]
+    assert all(event['data']['action'] == 'web_search' for event in status_events)
+    assert status_events[-1]['data']['query'] == 'weather: Shanghai, China'
+    assert source_events == []
+    assert all(not chunk['choices'][0]['delta'].get('tool_calls') for chunk in chunks)
+
+    content = ''.join(
+        chunk['choices'][0]['delta'].get('content', '')
+        for chunk in chunks
+        if chunk.get('choices')
+    )
+    assert 'Web Search' in content
+    assert 'weather: Shanghai, China' in content
+
+
+def test_responses_web_search_with_results_still_emits_sources():
+    pipe = _load_pipe_class()()
+    emitted = []
+    state = pipe._new_stream_state(__event_emitter__=emitted.append)
+
+    chunks = pipe._parse_responses_event(
+        {
+            'type': 'response.output_item.done',
+            'item': {
+                'id': 'ws_2',
+                'type': 'web_search_call',
+                'status': 'completed',
+                'query': 'world cup schedule',
+                'results': [
+                    {
+                        'title': 'Schedule',
+                        'url': 'https://example.com/schedule',
+                        'text': 'Match schedule summary',
+                    }
+                ],
+            },
+        },
+        state,
+    )
+
+    assert isinstance(chunks, list)
+    source_events = [event for event in emitted if event.get('type') == 'source']
+    assert len(source_events) == 1
+    assert source_events[0]['data']['source']['url'] == 'https://example.com/schedule'
+    content = ''.join(
+        chunk['choices'][0]['delta'].get('content', '')
+        for chunk in chunks
+        if chunk.get('choices')
+    )
+    assert 'world cup schedule' in content
+    assert 'https://example.com/schedule' in content

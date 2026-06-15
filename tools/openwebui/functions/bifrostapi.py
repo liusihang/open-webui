@@ -1,7 +1,7 @@
 """
 title: Bifrost Unified Manifold Pipe (Chat + Responses + Reasoning Fallback)
 authors: you
-version: 0.2.15
+version: 0.2.16
 required_open_webui_version: 0.8.5
 license: MIT
 """
@@ -11,6 +11,7 @@ from __future__ import annotations
 import copy
 import base64
 import hashlib
+import html
 import importlib
 import inspect
 import asyncio
@@ -4190,6 +4191,7 @@ class Pipe:
             "tool_name_alias_map": {},
             "next_tool_index": 0,
             "tool_call_seen": False,
+            "web_search_calls": {},
             "text_seen": False,
             "reasoning_seen": False,
             "reasoning_placeholder_emitted": False,
@@ -4920,6 +4922,115 @@ class Pipe:
 
         return None
 
+    def _web_search_call_details(self, item: dict) -> Tuple[str, List[str], str]:
+        action = item.get("action") if isinstance(item.get("action"), dict) else {}
+        action_type = str(action.get("type") or "search").strip()
+
+        raw_queries = action.get("queries")
+        if not isinstance(raw_queries, list):
+            raw_queries = item.get("queries")
+        queries = [
+            str(query).strip()
+            for query in (raw_queries if isinstance(raw_queries, list) else [])
+            if str(query).strip()
+        ]
+
+        query = str(action.get("query") or item.get("query") or "").strip()
+        if not query and queries:
+            query = queries[0]
+
+        return query, queries, action_type
+
+    def _record_web_search_call(self, item: dict, state: dict) -> dict:
+        call_id = str(item.get("id") or item.get("item_id") or "").strip()
+        if not call_id:
+            return item
+
+        calls = state.setdefault("web_search_calls", {})
+        previous = calls.get(call_id) if isinstance(calls.get(call_id), dict) else {}
+        merged = dict(previous)
+        merged.update(item)
+        calls[call_id] = merged
+        return merged
+
+    def _web_search_call_item_from_event(self, event: dict, state: dict) -> dict:
+        item = event.get("item") if isinstance(event.get("item"), dict) else {}
+        if item:
+            return self._record_web_search_call(item, state)
+
+        item_id = str(event.get("item_id") or "").strip()
+        calls = state.setdefault("web_search_calls", {})
+        existing = calls.get(item_id) if item_id else None
+        if isinstance(existing, dict):
+            return existing
+
+        fallback = {"id": item_id, "type": "web_search_call"}
+        if item_id:
+            calls[item_id] = fallback
+        return fallback
+
+    def _emit_web_search_call_status(
+        self, item: dict, state: dict, phase: str
+    ) -> None:
+        query, queries, _ = self._web_search_call_details(item)
+        done = phase == "complete"
+        description = (
+            'Searched "{{searchQuery}}"'
+            if done and query
+            else "Web search completed"
+            if done
+            else 'Searching "{{searchQuery}}"'
+            if query
+            else "Searching the web"
+        )
+
+        extra = {
+            "status": "complete" if done else "in_progress",
+            "item_id": item.get("id"),
+        }
+        if query:
+            extra["query"] = query
+        if queries:
+            extra["queries"] = queries
+
+        self._emit_status(
+            state.get("__event_emitter__"),
+            "web_search",
+            description,
+            done,
+            extra=extra,
+        )
+
+    def _format_web_search_call_without_results(self, item: dict, state: dict) -> list:
+        query, queries, action_type = self._web_search_call_details(item)
+        call_id = str(item.get("id") or "web_search_call").strip()
+        arguments = {
+            "action": action_type or "search",
+        }
+        if query:
+            arguments["query"] = query
+        if queries:
+            arguments["queries"] = queries
+
+        result_lines = [
+            "Web search completed.",
+            "The upstream provider did not include raw search result items for this call.",
+        ]
+        if query:
+            result_lines.insert(1, f"Query: {query}")
+
+        details = (
+            '\n<details type="tool_calls" done="true" '
+            f'id="{html.escape(call_id, quote=True)}" '
+            'name="Web Search" '
+            f'arguments="{html.escape(json.dumps(arguments, ensure_ascii=False), quote=True)}">\n'
+            "<summary>Tool Executed</summary>\n"
+            f"{html.escape(chr(10).join(result_lines))}\n"
+            "</details>\n"
+        )
+        state["text_seen"] = True
+        return [{"choices": [{"delta": {"content": details}}]}]
+
     def _parse_responses_event(
         self, event: dict, state: dict
     ) -> Optional[Union[dict, List[dict]]]:
@@ -4985,6 +5096,10 @@ class Pipe:
                     item, state, include_args=(event_type.endswith(".done"))
                 )
             if str(item.get("type") or "").strip().lower() == "web_search_call":
+                item = self._record_web_search_call(item, state)
+                if event_type.endswith(".added"):
+                    self._emit_web_search_call_status(item, state, "in_progress")
+                    return None
                 if event_type.endswith(".done"):
                     return self._format_web_search_call_result(item, state)
                 return None
@@ -5001,6 +5116,18 @@ class Pipe:
                     if placeholder_chunk:
                         return [placeholder_chunk, content_chunk]
                     return content_chunk
+            return None
+
+        if event_type in (
+            "response.web_search_call.in_progress",
+            "response.web_search_call.searching",
+            "response.web_search_call.completed",
+        ):
+            item = self._web_search_call_item_from_event(event, state)
+            if event_type.endswith(".in_progress"):
+                self._emit_web_search_call_status(item, state, "in_progress")
+            elif event_type.endswith(".searching"):
+                self._emit_web_search_call_status(item, state, "searching")
             return None
 
         if event_type in ("response.output_image.delta", "response.image.delta"):
@@ -6171,10 +6298,12 @@ class Pipe:
         if str(item.get("status") or "").strip().lower() != "completed":
             return None
 
-        query = str(item.get("query") or "").strip()
+        self._emit_web_search_call_status(item, state, "complete")
+
+        query, _, _ = self._web_search_call_details(item)
         results = item.get("results")
         if not isinstance(results, list) or not results:
-            return None
+            return self._format_web_search_call_without_results(item, state)
 
         chunks = []
         state["text_seen"] = True
