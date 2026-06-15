@@ -303,7 +303,9 @@
 			if (isSelectedFileImage(selectedFile)) {
 				selectedFileImageLoading = true;
 				selectedFileContent = '';
-				const content = selectedId ? await getFileContentById(selectedId) : null;
+				const content = selectedId
+					? await getFileContentById(selectedId, localStorage.token)
+					: null;
 
 				if (selectedId && selectedFileId === selectedId) {
 					if (content) {
