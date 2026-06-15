@@ -88,6 +88,24 @@ class SemanticEmbedder:
         return [1.0, 0.0]
 
 
+class CrossDocumentSemanticEmbedder:
+    def __init__(self):
+        self.calls = []
+
+    async def __call__(self, query, prefix=None):
+        self.calls.append((query, prefix))
+        if isinstance(query, list):
+            if query == ["Compare the Transformer architecture with Segment Anything prompts"]:
+                return [[1.0, 0.0]]
+            vectors_by_text = {
+                "SAM promptable segmentation": [1.0, 0.0],
+                "SAM mask decoder": [0.99, 0.0],
+                "Transformer self-attention": [0.75, 0.0],
+            }
+            return [vectors_by_text[text] for text in query]
+        return [1.0, 0.0]
+
+
 def manifest_chunk(chunk_uid, text, metadata=None, *, is_active=True):
     return SimpleNamespace(
         chunk_uid=chunk_uid,
@@ -590,3 +608,190 @@ async def test_reranker_receives_manifest_text_after_hydration():
     assert seen_documents == ["manifest a", "manifest b"]
     assert result["documents"] == [["manifest b", "manifest a"]]
     assert result["distances"] == [[0.9, 0.1]]
+
+
+@pytest.mark.asyncio
+async def test_compare_query_keeps_evidence_from_multiple_sources_after_reranking():
+    vector_client = FakeVectorClient(
+        SearchResult(
+            ids=[["vector-sam-a", "vector-sam-b", "vector-transformer"]],
+            documents=[["derived sam a", "derived sam b", "derived transformer"]],
+            metadatas=[
+                [
+                    {"chunk_uid": "chunk_sam_a"},
+                    {"chunk_uid": "chunk_sam_b"},
+                    {"chunk_uid": "chunk_transformer"},
+                ]
+            ],
+            distances=[[0.99, 0.98, 0.8]],
+        )
+    )
+
+    async def hydrate(chunk_uids):
+        return [
+            manifest_chunk(
+                "chunk_sam_a",
+                "SAM promptable segmentation",
+                {"chunk_uid": "chunk_sam_a", "source": "segment-anything.pdf", "file_id": "sam"},
+            ),
+            manifest_chunk(
+                "chunk_sam_b",
+                "SAM mask decoder",
+                {"chunk_uid": "chunk_sam_b", "source": "segment-anything.pdf", "file_id": "sam"},
+            ),
+            manifest_chunk(
+                "chunk_transformer",
+                "Transformer self-attention",
+                {
+                    "chunk_uid": "chunk_transformer",
+                    "source": "attention-is-all-you-need.pdf",
+                    "file_id": "transformer",
+                },
+            ),
+        ]
+
+    def rerank(query, documents):
+        assert "compare" in query.lower()
+        return [0.99, 0.98, 0.75]
+
+    result = await query_manifest_hybrid_search(
+        collection_names=["collection-1"],
+        queries=["Compare the Transformer architecture with Segment Anything prompts"],
+        embedding_function=FakeEmbedder(),
+        k=2,
+        reranking_function=rerank,
+        k_reranker=3,
+        r=0.0,
+        hybrid_bm25_weight=0.0,
+        vector_client=vector_client,
+        lexical_client=FakeLexicalClient(fail=True),
+        hydrate_chunks=hydrate,
+    )
+
+    sources = {metadata["source"] for metadata in result["metadatas"][0]}
+    assert sources == {"segment-anything.pdf", "attention-is-all-you-need.pdf"}
+    assert result["documents"][0][0] == "SAM promptable segmentation"
+
+
+@pytest.mark.asyncio
+async def test_compare_query_keeps_evidence_from_multiple_sources_without_reranker():
+    vector_client = FakeVectorClient(
+        SearchResult(
+            ids=[["vector-sam-a", "vector-sam-b", "vector-transformer"]],
+            documents=[["derived sam a", "derived sam b", "derived transformer"]],
+            metadatas=[
+                [
+                    {"chunk_uid": "chunk_sam_a"},
+                    {"chunk_uid": "chunk_sam_b"},
+                    {"chunk_uid": "chunk_transformer"},
+                ]
+            ],
+            distances=[[0.99, 0.98, 0.8]],
+        )
+    )
+
+    async def hydrate(chunk_uids):
+        return [
+            manifest_chunk(
+                "chunk_sam_a",
+                "SAM promptable segmentation",
+                {"chunk_uid": "chunk_sam_a", "source": "segment-anything.pdf", "file_id": "sam"},
+            ),
+            manifest_chunk(
+                "chunk_sam_b",
+                "SAM mask decoder",
+                {"chunk_uid": "chunk_sam_b", "source": "segment-anything.pdf", "file_id": "sam"},
+            ),
+            manifest_chunk(
+                "chunk_transformer",
+                "Transformer self-attention",
+                {
+                    "chunk_uid": "chunk_transformer",
+                    "source": "attention-is-all-you-need.pdf",
+                    "file_id": "transformer",
+                },
+            ),
+        ]
+
+    result = await query_manifest_hybrid_search(
+        collection_names=["collection-1"],
+        queries=["Compare the Transformer architecture with Segment Anything prompts"],
+        embedding_function=CrossDocumentSemanticEmbedder(),
+        k=2,
+        reranking_function=None,
+        k_reranker=3,
+        r=0.0,
+        hybrid_bm25_weight=0.0,
+        vector_client=vector_client,
+        lexical_client=FakeLexicalClient(fail=True),
+        hydrate_chunks=hydrate,
+    )
+
+    sources = {metadata["source"] for metadata in result["metadatas"][0]}
+    assert sources == {"segment-anything.pdf", "attention-is-all-you-need.pdf"}
+    assert result["documents"][0][0] == "SAM promptable segmentation"
+
+
+@pytest.mark.asyncio
+async def test_single_document_query_keeps_score_order_without_source_diversification():
+    vector_client = FakeVectorClient(
+        SearchResult(
+            ids=[["vector-sam-a", "vector-sam-b", "vector-transformer"]],
+            documents=[["derived sam a", "derived sam b", "derived transformer"]],
+            metadatas=[
+                [
+                    {"chunk_uid": "chunk_sam_a"},
+                    {"chunk_uid": "chunk_sam_b"},
+                    {"chunk_uid": "chunk_transformer"},
+                ]
+            ],
+            distances=[[0.99, 0.98, 0.8]],
+        )
+    )
+
+    async def hydrate(chunk_uids):
+        return [
+            manifest_chunk(
+                "chunk_sam_a",
+                "SAM promptable segmentation",
+                {"chunk_uid": "chunk_sam_a", "source": "segment-anything.pdf", "file_id": "sam"},
+            ),
+            manifest_chunk(
+                "chunk_sam_b",
+                "SAM mask decoder",
+                {"chunk_uid": "chunk_sam_b", "source": "segment-anything.pdf", "file_id": "sam"},
+            ),
+            manifest_chunk(
+                "chunk_transformer",
+                "Transformer self-attention",
+                {
+                    "chunk_uid": "chunk_transformer",
+                    "source": "attention-is-all-you-need.pdf",
+                    "file_id": "transformer",
+                },
+            ),
+        ]
+
+    def rerank(query, documents):
+        assert "compare" not in query.lower()
+        return [0.99, 0.98, 0.75]
+
+    result = await query_manifest_hybrid_search(
+        collection_names=["collection-1"],
+        queries=["What prompts does Segment Anything support?"],
+        embedding_function=FakeEmbedder(),
+        k=2,
+        reranking_function=rerank,
+        k_reranker=3,
+        r=0.0,
+        hybrid_bm25_weight=0.0,
+        vector_client=vector_client,
+        lexical_client=FakeLexicalClient(fail=True),
+        hydrate_chunks=hydrate,
+    )
+
+    assert result["documents"] == [["SAM promptable segmentation", "SAM mask decoder"]]
+    assert [metadata["source"] for metadata in result["metadatas"][0]] == [
+        "segment-anything.pdf",
+        "segment-anything.pdf",
+    ]

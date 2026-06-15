@@ -4,6 +4,7 @@ import asyncio
 import logging
 import math
 import os
+import re
 from dataclasses import dataclass
 from numbers import Number
 from typing import Any, Awaitable, Callable, Iterable
@@ -18,6 +19,11 @@ log = logging.getLogger(__name__)
 RRF_RANK_CONSTANT = 60
 RAG_EMBEDDING_QUERY_PREFIX = os.getenv("RAG_EMBEDDING_QUERY_PREFIX", None)
 RAG_EMBEDDING_CONTENT_PREFIX = os.getenv("RAG_EMBEDDING_CONTENT_PREFIX", None)
+COMPARATIVE_QUERY_PATTERN = re.compile(
+    r"\b(compare|comparison|contrast|different|difference|differences|versus|vs\.?|between|across|cross[- ]document)\b"
+    r"|比较|对比|区别|差异|相比|分别|异同",
+    re.IGNORECASE,
+)
 
 
 class HybridSearchFailed(RuntimeError):
@@ -222,8 +228,7 @@ async def query_manifest_hybrid_search(
             top_n=k_reranker,
             r_score=r,
         )
-        if k < len(documents):
-            documents = documents[:k]
+        documents = _select_final_documents(documents, query=queries[0], k=k)
     else:
         documents = await _semantic_compress_documents(
             documents,
@@ -233,13 +238,66 @@ async def query_manifest_hybrid_search(
             top_n=k_reranker,
             r_score=r,
         )
-        documents = documents[:k]
+        documents = _select_final_documents(documents, query=queries[0], k=k)
 
     return {
         "distances": [[document.metadata.get("score") for document in documents]],
         "documents": [[document.page_content for document in documents]],
         "metadatas": [[document.metadata for document in documents]],
     }
+
+
+def _select_final_documents(documents: list[Document], *, query: str, k: int) -> list[Document]:
+    if not documents or k <= 0:
+        return []
+    if not _should_diversify_sources(query=query, documents=documents, k=k):
+        return documents[:k]
+    return _diversify_by_source(documents, k=k)
+
+
+def _should_diversify_sources(*, query: str, documents: list[Document], k: int) -> bool:
+    if k < 2 or not COMPARATIVE_QUERY_PATTERN.search(query or ""):
+        return False
+
+    source_keys = {_document_source_key(document) for document in documents}
+    source_keys.discard("")
+    return len(source_keys) > 1
+
+
+def _diversify_by_source(documents: list[Document], *, k: int) -> list[Document]:
+    selected: list[Document] = []
+    selected_indexes: set[int] = set()
+    selected_sources: set[str] = set()
+
+    for index, document in enumerate(documents):
+        source_key = _document_source_key(document)
+        if not source_key or source_key in selected_sources:
+            continue
+        selected.append(document)
+        selected_indexes.add(index)
+        selected_sources.add(source_key)
+        if len(selected) >= k:
+            return selected
+
+    for index, document in enumerate(documents):
+        if index in selected_indexes:
+            continue
+        selected.append(document)
+        if len(selected) >= k:
+            return selected
+
+    return selected
+
+
+def _document_source_key(document: Document) -> str:
+    metadata = document.metadata if isinstance(document.metadata, dict) else {}
+    return str(
+        metadata.get("file_id")
+        or metadata.get("source")
+        or metadata.get("name")
+        or metadata.get("chunk_uid")
+        or ""
+    )
 
 
 def _normalize_query_embeddings(value: Any, query_count: int) -> list[list[float | int]]:
