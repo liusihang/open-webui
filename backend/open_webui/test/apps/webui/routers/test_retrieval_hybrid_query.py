@@ -1,3 +1,4 @@
+import asyncio
 from contextlib import asynccontextmanager
 from types import SimpleNamespace
 
@@ -553,3 +554,98 @@ def test_build_retrieval_manifest_chunks_preserves_kb_file_and_vector_identity()
     assert chunk["created_at"] == 123
     assert chunk["metadata"]["vector_id"] == "vector-1"
     assert chunk["metadata"]["chunk_uid"] == chunk["chunk_uid"]
+
+
+def test_save_docs_to_vector_db_inserts_vector_items_with_chunk_uid_metadata(monkeypatch):
+    captured_inserted_items = []
+    captured_manifest_chunks = []
+
+    class FakeFuture:
+        def __init__(self, value):
+            self.value = value
+
+        def result(self, timeout=None):
+            return self.value
+
+    async def fake_embedding_function(texts, prefix=None, user=None):
+        assert texts == ["alpha text"]
+        return [[0.1, 0.2, 0.3]]
+
+    def fake_run_coroutine_threadsafe(coro, loop):
+        return FakeFuture(asyncio.run(coro))
+
+    class FakeManifestChunkStore:
+        def upsert_chunks(self, chunks):
+            captured_manifest_chunks.extend(chunks)
+            return len(chunks)
+
+    def fake_insert(collection_name, items):
+        assert collection_name == "kb-1"
+        captured_inserted_items.extend(
+            [
+                {
+                    **item,
+                    "metadata": dict(item.get("metadata") or {}),
+                }
+                for item in items
+            ]
+        )
+
+    monkeypatch.setattr(retrieval_router.VECTOR_DB_CLIENT, "has_collection", lambda collection_name: False)
+    monkeypatch.setattr(retrieval_router.VECTOR_DB_CLIENT, "insert", fake_insert)
+    monkeypatch.setattr(retrieval_router, "get_embedding_function", lambda *args, **kwargs: fake_embedding_function)
+    monkeypatch.setattr(retrieval_router.asyncio, "run_coroutine_threadsafe", fake_run_coroutine_threadsafe)
+    monkeypatch.setattr(
+        retrieval_router,
+        "SqlAlchemyManifestChunkStore",
+        lambda: FakeManifestChunkStore(),
+    )
+
+    request = SimpleNamespace(
+        app=SimpleNamespace(
+            state=SimpleNamespace(
+                main_loop=object(),
+                ef=None,
+                config=SimpleNamespace(
+                    RAG_EMBEDDING_ENGINE="",
+                    RAG_EMBEDDING_MODEL="test-embedding",
+                    RAG_OPENAI_API_BASE_URL="",
+                    RAG_OLLAMA_BASE_URL="",
+                    RAG_AZURE_OPENAI_BASE_URL="",
+                    RAG_OPENAI_API_KEY="",
+                    RAG_OLLAMA_API_KEY="",
+                    RAG_AZURE_OPENAI_API_KEY="",
+                    RAG_EMBEDDING_BATCH_SIZE=1,
+                    RAG_AZURE_OPENAI_API_VERSION="",
+                    ENABLE_ASYNC_EMBEDDING=False,
+                    RAG_EMBEDDING_CONCURRENT_REQUESTS=0,
+                    TEXT_SPLITTER="",
+                    CHUNK_SIZE=1000,
+                    CHUNK_OVERLAP=0,
+                    CHUNK_MIN_SIZE_TARGET=0,
+                    ENABLE_MARKDOWN_HEADER_TEXT_SPLITTER=False,
+                    TIKTOKEN_ENCODING_NAME="cl100k_base",
+                ),
+            )
+        )
+    )
+
+    saved = retrieval_router.save_docs_to_vector_db(
+        request=request,
+        docs=[
+            retrieval_router.Document(
+                page_content="alpha text",
+                metadata={"file_id": "file-1", "name": "alpha.pdf"},
+            )
+        ],
+        collection_name="kb-1",
+        metadata={"knowledge_id": "kb-1"},
+        split=False,
+    )
+
+    assert saved is True
+    assert len(captured_inserted_items) == 1
+    assert len(captured_manifest_chunks) == 1
+    assert captured_inserted_items[0]["metadata"]["chunk_uid"] == captured_manifest_chunks[0]["chunk_uid"]
+    assert captured_inserted_items[0]["metadata"]["collection_name"] == "kb-1"
+    assert captured_inserted_items[0]["metadata"]["file_id"] == "file-1"

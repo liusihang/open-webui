@@ -1519,11 +1519,30 @@ def _upsert_retrieval_manifest_chunks(
     *,
     collection_name: str,
     items: list[dict],
+    chunks: list[dict] | None = None,
 ) -> int:
-    chunks = _build_retrieval_manifest_chunks_from_vector_items(collection_name=collection_name, items=items)
+    chunks = chunks or _prepare_retrieval_manifest_chunks_for_vector_items(
+        collection_name=collection_name,
+        items=items,
+    )
     if not chunks:
         return 0
     return SqlAlchemyManifestChunkStore().upsert_chunks(chunks)
+
+
+def _prepare_retrieval_manifest_chunks_for_vector_items(
+    *,
+    collection_name: str,
+    items: list[dict],
+) -> list[dict]:
+    chunks = _build_retrieval_manifest_chunks_from_vector_items(collection_name=collection_name, items=items)
+    chunk_iter = iter(chunks)
+    for item in items:
+        if item.get('text') is None:
+            continue
+        chunk = next(chunk_iter)
+        item['metadata'] = dict(chunk['metadata'])
+    return chunks
 
 
 async def _run_evidence_projection_for_knowledge_file(
@@ -1723,6 +1742,10 @@ def save_docs_to_vector_db(
             }
             for idx, text in enumerate(texts)
         ]
+        manifest_chunks = _prepare_retrieval_manifest_chunks_for_vector_items(
+            collection_name=collection_name,
+            items=items,
+        )
 
         log.info(f'adding to collection {collection_name}')
         VECTOR_DB_CLIENT.insert(
@@ -1732,6 +1755,7 @@ def save_docs_to_vector_db(
         manifest_upserted = _upsert_retrieval_manifest_chunks(
             collection_name=collection_name,
             items=items,
+            chunks=manifest_chunks,
         )
         log.info(f'upserted {manifest_upserted} retrieval manifest chunks for {collection_name}')
 
