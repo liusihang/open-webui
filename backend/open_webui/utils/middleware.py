@@ -739,11 +739,7 @@ def serialize_output(output: list) -> str:
             # render as done (a subsequent item means reasoning is complete)
             is_last_item = idx == len(output) - 1
 
-            display = html.escape(
-                '\n'.join(
-                    (f'> {line}' if not line.startswith('>') else line) for line in reasoning_content.splitlines()
-                )
-            )
+            display = html.escape(reasoning_content)
 
             if status == 'completed' or duration is not None or not is_last_item:
                 parts.append(
@@ -821,6 +817,21 @@ def deep_merge(target, source):
         return target + source
     else:
         return source
+
+
+def merge_stream_text_delta(current: str, delta: str) -> str:
+    """
+    Append text deltas while tolerating providers that send cumulative snapshots.
+    """
+    if not isinstance(current, str):
+        current = ''
+    if not isinstance(delta, str) or not delta:
+        return current
+    if delta == current:
+        return current
+    if current and delta.startswith(current):
+        return delta
+    return current + delta
 
 
 _FUNCTION_ARGUMENT_FRAGMENT_KEYS = (
@@ -1025,7 +1036,7 @@ def handle_responses_streaming_event(
                             summary_list[summary_index] = part
 
                             target_val = part.get(key, '')
-                            part[key] = deep_merge(target_val, delta)
+                            part[key] = merge_stream_text_delta(target_val, delta)
 
                         elif delta_type == 'reasoning_text':
                             # Reasoning body updates -> item['content']
@@ -1045,7 +1056,7 @@ def handle_responses_streaming_event(
                             content_list[content_index] = part
 
                             target_val = part.get(key, '')
-                            part[key] = deep_merge(target_val, delta)
+                            part[key] = merge_stream_text_delta(target_val, delta)
 
                         elif delta_type in ['text', 'output_text']:
                             return new_output, None
