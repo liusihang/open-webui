@@ -733,6 +733,94 @@ async def test_compare_query_keeps_evidence_from_multiple_sources_without_rerank
 
 
 @pytest.mark.asyncio
+async def test_compare_query_expands_candidate_window_before_source_diversification():
+    sam_chunk_uids = [f"chunk_sam_{index}" for index in range(60)]
+    attention_chunk_uid = "chunk_attention"
+    gpt4_chunk_uid = "chunk_gpt4"
+    all_chunk_uids = [*sam_chunk_uids, attention_chunk_uid, gpt4_chunk_uid]
+
+    class WindowSensitiveVectorClient:
+        def __init__(self):
+            self.search_calls = []
+
+        async def search(self, collection_name, vectors, filter=None, limit=10):
+            self.search_calls.append(
+                {
+                    "collection_name": collection_name,
+                    "limit": limit,
+                }
+            )
+            returned_chunk_uids = all_chunk_uids if limit >= 100 else sam_chunk_uids[:limit]
+            return SearchResult(
+                ids=[[f"vector-{chunk_uid}" for chunk_uid in returned_chunk_uids]],
+                documents=[[f"derived {chunk_uid}" for chunk_uid in returned_chunk_uids]],
+                metadatas=[[
+                    {"chunk_uid": chunk_uid}
+                    for chunk_uid in returned_chunk_uids
+                ]],
+                distances=[[1.0 - (index * 0.001) for index, _ in enumerate(returned_chunk_uids)]],
+            )
+
+    vector_client = WindowSensitiveVectorClient()
+
+    async def hydrate(chunk_uids):
+        chunks = []
+        for chunk_uid in chunk_uids:
+            if chunk_uid == attention_chunk_uid:
+                chunks.append(
+                    manifest_chunk(
+                        chunk_uid,
+                        "Transformer encoder decoder self-attention",
+                        {"chunk_uid": chunk_uid, "source": "attention-is-all-you-need.pdf", "file_id": "attention"},
+                    )
+                )
+            elif chunk_uid == gpt4_chunk_uid:
+                chunks.append(
+                    manifest_chunk(
+                        chunk_uid,
+                        "GPT-4 benchmark results and MMLU evaluation",
+                        {"chunk_uid": chunk_uid, "source": "gpt-4-technical-report.pdf", "file_id": "gpt4"},
+                    )
+                )
+            else:
+                chunks.append(
+                    manifest_chunk(
+                        chunk_uid,
+                        "SAM promptable segmentation masks",
+                        {"chunk_uid": chunk_uid, "source": "segment-anything.pdf", "file_id": "sam"},
+                    )
+                )
+        return chunks
+
+    def rerank(query, documents):
+        return [1.0 - (index * 0.001) for index, _ in enumerate(documents)]
+
+    result = await query_manifest_hybrid_search(
+        collection_names=["collection-1"],
+        queries=[
+            "Compare the Transformer architecture in Attention Is All You Need, "
+            "the benchmark results in GPT-4 Technical Report, and promptable masks in Segment Anything"
+        ],
+        embedding_function=FakeEmbedder(),
+        k=3,
+        reranking_function=rerank,
+        k_reranker=10,
+        r=0.0,
+        hybrid_bm25_weight=0.0,
+        vector_client=vector_client,
+        lexical_client=FakeLexicalClient(fail=True),
+        hydrate_chunks=hydrate,
+    )
+
+    assert vector_client.search_calls[0]["limit"] >= 100
+    assert {metadata["source"] for metadata in result["metadatas"][0]} == {
+        "segment-anything.pdf",
+        "attention-is-all-you-need.pdf",
+        "gpt-4-technical-report.pdf",
+    }
+
+
+@pytest.mark.asyncio
 async def test_single_document_query_keeps_score_order_without_source_diversification():
     vector_client = FakeVectorClient(
         SearchResult(

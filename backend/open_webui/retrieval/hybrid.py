@@ -17,6 +17,9 @@ from open_webui.retrieval.lexical.opensearch import LexicalSearchHit, OpenSearch
 log = logging.getLogger(__name__)
 
 RRF_RANK_CONSTANT = 60
+COMPARATIVE_CANDIDATE_MIN_LIMIT = 100
+COMPARATIVE_CANDIDATE_MAX_LIMIT = 200
+COMPARATIVE_CANDIDATE_MULTIPLIER = 10
 RAG_EMBEDDING_QUERY_PREFIX = os.getenv("RAG_EMBEDDING_QUERY_PREFIX", None)
 RAG_EMBEDDING_CONTENT_PREFIX = os.getenv("RAG_EMBEDDING_CONTENT_PREFIX", None)
 COMPARATIVE_QUERY_PATTERN = re.compile(
@@ -129,7 +132,10 @@ async def query_manifest_hybrid_search(
 
     lexical_weight = _clamp_weight(hybrid_bm25_weight)
     vector_weight = 1.0 - lexical_weight
-    branch_limit = max(k, k_reranker or k)
+    primary_query = queries[0]
+    base_limit = max(k, k_reranker or k)
+    branch_limit = _candidate_limit_for_query(query=primary_query, base_limit=base_limit)
+    selection_window = branch_limit if _is_comparative_query(primary_query) else base_limit
     if vector_client is None:
         from open_webui.retrieval.vector.async_client import ASYNC_VECTOR_DB_CLIENT
 
@@ -223,22 +229,22 @@ async def query_manifest_hybrid_search(
     if reranking_function is not None:
         documents = await _rerank_documents(
             documents,
-            query=queries[0],
+            query=primary_query,
             reranking_function=reranking_function,
-            top_n=k_reranker,
+            top_n=selection_window,
             r_score=r,
         )
-        documents = _select_final_documents(documents, query=queries[0], k=k)
+        documents = _select_final_documents(documents, query=primary_query, k=k)
     else:
         documents = await _semantic_compress_documents(
             documents,
-            query=queries[0],
+            query=primary_query,
             embedding_function=embedding_function,
             query_embedding=query_embeddings[0] if query_embeddings else None,
-            top_n=k_reranker,
+            top_n=selection_window,
             r_score=r,
         )
-        documents = _select_final_documents(documents, query=queries[0], k=k)
+        documents = _select_final_documents(documents, query=primary_query, k=k)
 
     return {
         "distances": [[document.metadata.get("score") for document in documents]],
@@ -255,8 +261,24 @@ def _select_final_documents(documents: list[Document], *, query: str, k: int) ->
     return _diversify_by_source(documents, k=k)
 
 
+def _candidate_limit_for_query(*, query: str, base_limit: int) -> int:
+    base_limit = max(1, base_limit)
+    if not _is_comparative_query(query):
+        return base_limit
+    widened = max(
+        base_limit,
+        base_limit * COMPARATIVE_CANDIDATE_MULTIPLIER,
+        COMPARATIVE_CANDIDATE_MIN_LIMIT,
+    )
+    return min(widened, COMPARATIVE_CANDIDATE_MAX_LIMIT)
+
+
+def _is_comparative_query(query: str) -> bool:
+    return bool(COMPARATIVE_QUERY_PATTERN.search(query or ""))
+
+
 def _should_diversify_sources(*, query: str, documents: list[Document], k: int) -> bool:
-    if k < 2 or not COMPARATIVE_QUERY_PATTERN.search(query or ""):
+    if k < 2 or not _is_comparative_query(query):
         return False
 
     source_keys = {_document_source_key(document) for document in documents}
