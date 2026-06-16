@@ -413,6 +413,24 @@
 							</div>
 						</div>
 
+						<div class="flex w-full mt-2">
+							<div class="flex-1 flex justify-between">
+								<div class="self-center text-xs font-medium">
+									<Tooltip
+										content={$i18n.t(
+											'Stores images found by local document loaders as document image assets. This is separate from PDF Extract Images (OCR), and PaddleOCR-vl layout images remain part of its parser output.'
+										)}
+										placement="top-start"
+									>
+										{$i18n.t('Extract Document Image Assets')}
+									</Tooltip>
+								</div>
+								<div class="flex items-center relative">
+									<Switch bind:state={RAGConfig.RAG_EXTRACT_DOCUMENT_IMAGE_ASSETS} />
+								</div>
+							</div>
+						</div>
+
 						{#if RAGConfig.CONTENT_EXTRACTION_ENGINE === ''}
 							<div class="flex w-full mt-1">
 								<div class="flex-1 flex justify-between">

@@ -459,6 +459,7 @@ async def get_rag_config(request: Request, user=Depends(get_admin_user)):
         'HYBRID_BM25_WEIGHT': request.app.state.config.HYBRID_BM25_WEIGHT,
         # Content extraction settings
         'CONTENT_EXTRACTION_ENGINE': request.app.state.config.CONTENT_EXTRACTION_ENGINE,
+        'RAG_EXTRACT_DOCUMENT_IMAGE_ASSETS': request.app.state.config.RAG_EXTRACT_DOCUMENT_IMAGE_ASSETS,
         'PDF_EXTRACT_IMAGES': request.app.state.config.PDF_EXTRACT_IMAGES,
         'PDF_LOADER_MODE': request.app.state.config.PDF_LOADER_MODE,
         'DATALAB_MARKER_API_KEY': request.app.state.config.DATALAB_MARKER_API_KEY,
@@ -678,6 +679,7 @@ class ConfigForm(BaseModel):
 
     # Content extraction settings
     CONTENT_EXTRACTION_ENGINE: str | None = None
+    RAG_EXTRACT_DOCUMENT_IMAGE_ASSETS: bool | None = None
     PDF_EXTRACT_IMAGES: bool | None = None
     PDF_LOADER_MODE: str | None = None
 
@@ -811,6 +813,11 @@ async def update_rag_config(request: Request, form_data: ConfigForm, user=Depend
         form_data.PDF_EXTRACT_IMAGES
         if form_data.PDF_EXTRACT_IMAGES is not None
         else request.app.state.config.PDF_EXTRACT_IMAGES
+    )
+    request.app.state.config.RAG_EXTRACT_DOCUMENT_IMAGE_ASSETS = (
+        form_data.RAG_EXTRACT_DOCUMENT_IMAGE_ASSETS
+        if form_data.RAG_EXTRACT_DOCUMENT_IMAGE_ASSETS is not None
+        else request.app.state.config.RAG_EXTRACT_DOCUMENT_IMAGE_ASSETS
     )
     request.app.state.config.PDF_LOADER_MODE = (
         form_data.PDF_LOADER_MODE if form_data.PDF_LOADER_MODE is not None else request.app.state.config.PDF_LOADER_MODE
@@ -1212,6 +1219,7 @@ async def update_rag_config(request: Request, form_data: ConfigForm, user=Depend
         'HYBRID_BM25_WEIGHT': request.app.state.config.HYBRID_BM25_WEIGHT,
         # Content extraction settings
         'CONTENT_EXTRACTION_ENGINE': request.app.state.config.CONTENT_EXTRACTION_ENGINE,
+        'RAG_EXTRACT_DOCUMENT_IMAGE_ASSETS': request.app.state.config.RAG_EXTRACT_DOCUMENT_IMAGE_ASSETS,
         'PDF_EXTRACT_IMAGES': request.app.state.config.PDF_EXTRACT_IMAGES,
         'PDF_LOADER_MODE': request.app.state.config.PDF_LOADER_MODE,
         'DATALAB_MARKER_API_KEY': request.app.state.config.DATALAB_MARKER_API_KEY,

@@ -47,7 +47,10 @@ def test_loader_materializes_docx_embedded_images_as_document_image_assets(tmp_p
 
     monkeypatch.setattr(Loader, '_get_loader', lambda *args, **kwargs: FakeTextLoader())
 
-    docs = Loader(OFFICE_IMAGE_ASSET_ROOT=str(asset_root)).load(
+    docs = Loader(
+        RAG_EXTRACT_DOCUMENT_IMAGE_ASSETS=True,
+        OFFICE_IMAGE_ASSET_ROOT=str(asset_root),
+    ).load(
         'with-image.docx',
         'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
         str(docx_path),
@@ -107,7 +110,10 @@ def test_loader_materializes_ooxml_and_opendocument_picture_entries(tmp_path, mo
     for filename, content_type, entry_name, image_bytes in cases:
         document_path = _write_zip_document(tmp_path, filename, {entry_name: image_bytes})
 
-        docs = Loader(OFFICE_IMAGE_ASSET_ROOT=str(tmp_path / f'{Path(filename).stem}-assets')).load(
+        docs = Loader(
+            RAG_EXTRACT_DOCUMENT_IMAGE_ASSETS=True,
+            OFFICE_IMAGE_ASSET_ROOT=str(tmp_path / f'{Path(filename).stem}-assets'),
+        ).load(
             filename,
             content_type,
             str(document_path),
@@ -117,8 +123,39 @@ def test_loader_materializes_ooxml_and_opendocument_picture_entries(tmp_path, mo
         assert isinstance(assets, list)
         assert len(assets) == 1
         assert Path(assets[0]['storage_path']).read_bytes() == image_bytes
-        assert assets[0]['metadata']['backend'] == 'office_zip'
-        assert assets[0]['metadata']['origin_reference'] == entry_name
+    assert assets[0]['metadata']['backend'] == 'office_zip'
+    assert assets[0]['metadata']['origin_reference'] == entry_name
+
+
+def test_loader_uses_document_asset_switch_for_office_image_asset_fallback(tmp_path, monkeypatch):
+    image_bytes = _image_bytes(tmp_path, filename='embedded.png', size=(24, 12), color='red')
+    docx_path = _write_zip_document(tmp_path, 'with-image.docx', {'word/media/image1.png': image_bytes})
+
+    monkeypatch.setattr(Loader, '_get_loader', lambda *args, **kwargs: FakeTextLoader())
+
+    docs_without_assets = Loader(
+        RAG_EXTRACT_DOCUMENT_IMAGE_ASSETS=False,
+        OFFICE_EXTRACT_IMAGE_ASSETS=True,
+        OFFICE_IMAGE_ASSET_ROOT=str(tmp_path / 'disabled-assets'),
+    ).load(
+        'with-image.docx',
+        'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+        str(docx_path),
+    )
+
+    assert 'document_image_assets' not in docs_without_assets[0].metadata
+
+    docs_with_assets = Loader(
+        RAG_EXTRACT_DOCUMENT_IMAGE_ASSETS=True,
+        OFFICE_EXTRACT_IMAGE_ASSETS=True,
+        OFFICE_IMAGE_ASSET_ROOT=str(tmp_path / 'enabled-assets'),
+    ).load(
+        'with-image.docx',
+        'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+        str(docx_path),
+    )
+
+    assert len(docs_with_assets[0].metadata.get('document_image_assets', [])) == 1
 
 
 def test_loader_records_office_image_asset_errors_without_breaking_text_load(tmp_path, monkeypatch):
@@ -127,7 +164,7 @@ def test_loader_records_office_image_asset_errors_without_breaking_text_load(tmp
 
     monkeypatch.setattr(Loader, '_get_loader', lambda *args, **kwargs: FakeTextLoader())
 
-    docs = Loader().load(
+    docs = Loader(RAG_EXTRACT_DOCUMENT_IMAGE_ASSETS=True).load(
         'not-a-real-docx.docx',
         'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
         str(document_path),

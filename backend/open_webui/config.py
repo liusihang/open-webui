@@ -1340,6 +1340,18 @@ ENABLE_MULTIMODAL_KNOWLEDGE_EVIDENCE = ConfigVar(
     os.getenv('ENABLE_MULTIMODAL_KNOWLEDGE_EVIDENCE', 'False').lower() == 'true',
 )
 
+RAG_EXTRACT_DOCUMENT_IMAGE_ASSETS = ConfigVar(
+    'RAG_EXTRACT_DOCUMENT_IMAGE_ASSETS',
+    'rag.extract_document_image_assets',
+    (
+        os.getenv(
+            'RAG_EXTRACT_DOCUMENT_IMAGE_ASSETS',
+            os.getenv('ENABLE_MULTIMODAL_KNOWLEDGE_EVIDENCE', 'False'),
+        ).lower()
+        == 'true'
+    ),
+)
+
 NATIVE_ATTACHED_KNOWLEDGE_BYPASS_LEGACY_FILE_RETRIEVAL = ConfigVar(
     'NATIVE_ATTACHED_KNOWLEDGE_BYPASS_LEGACY_FILE_RETRIEVAL',
     'layered_knowledge.native_attached_knowledge_bypass_legacy_file_retrieval',

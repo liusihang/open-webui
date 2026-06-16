@@ -29,6 +29,7 @@ def test_pdf_loader_materializes_embedded_images_as_document_image_assets(tmp_pa
     asset_root = tmp_path / 'pdf-assets'
 
     docs = Loader(
+        RAG_EXTRACT_DOCUMENT_IMAGE_ASSETS=True,
         PDF_EXTRACT_IMAGES=True,
         PDF_LOADER_MODE='page',
         PDF_IMAGE_ASSET_ROOT=str(asset_root),
@@ -56,6 +57,29 @@ def test_pdf_loader_materializes_embedded_images_as_document_image_assets(tmp_pa
     assert asset['metadata']['origin_reference'] == 'I1.png'
 
 
+def test_pdf_loader_image_asset_fallback_uses_document_asset_switch_not_pdf_ocr_switch(tmp_path):
+    pdf_path = _write_pdf_with_embedded_image(tmp_path)
+    asset_root = tmp_path / 'pdf-assets'
+
+    docs_without_assets = Loader(
+        RAG_EXTRACT_DOCUMENT_IMAGE_ASSETS=False,
+        PDF_EXTRACT_IMAGES=True,
+        PDF_LOADER_MODE='page',
+        PDF_IMAGE_ASSET_ROOT=str(asset_root),
+    ).load('with-image.pdf', 'application/pdf', str(pdf_path))
+
+    assert 'document_image_assets' not in docs_without_assets[0].metadata
+
+    docs_with_assets = Loader(
+        RAG_EXTRACT_DOCUMENT_IMAGE_ASSETS=True,
+        PDF_EXTRACT_IMAGES=False,
+        PDF_LOADER_MODE='page',
+        PDF_IMAGE_ASSET_ROOT=str(asset_root),
+    ).load('with-image.pdf', 'application/pdf', str(pdf_path))
+
+    assert len(docs_with_assets[0].metadata.get('document_image_assets', [])) == 1
+
+
 def test_pdf_loader_records_image_asset_errors_without_breaking_text_load(tmp_path, monkeypatch):
     pdf_path = _write_pdf_with_embedded_image(tmp_path)
 
@@ -64,7 +88,11 @@ def test_pdf_loader_records_image_asset_errors_without_breaking_text_load(tmp_pa
 
     monkeypatch.setattr(loader_main, 'extract_pdf_image_assets', fail_extraction)
 
-    docs = Loader(PDF_EXTRACT_IMAGES=True, PDF_LOADER_MODE='page').load(
+    docs = Loader(
+        RAG_EXTRACT_DOCUMENT_IMAGE_ASSETS=True,
+        PDF_EXTRACT_IMAGES=True,
+        PDF_LOADER_MODE='page',
+    ).load(
         'with-image.pdf',
         'application/pdf',
         str(pdf_path),

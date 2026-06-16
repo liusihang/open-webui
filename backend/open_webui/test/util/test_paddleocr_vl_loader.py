@@ -292,6 +292,7 @@ def test_build_loader_from_config_includes_paddleocr_async_options():
         PADDLEOCR_VL_DOWNLOAD_TIMEOUT = 90
         PADDLEOCR_VL_POLL_TIMEOUT = 600
         PADDLEOCR_VL_POLL_INTERVAL = 5
+        RAG_EXTRACT_DOCUMENT_IMAGE_ASSETS = False
 
         def __getattr__(self, name):
             return None
@@ -315,6 +316,7 @@ def test_build_loader_from_config_includes_paddleocr_async_options():
     assert loader.kwargs['PADDLEOCR_VL_DOWNLOAD_TIMEOUT'] == 90
     assert loader.kwargs['PADDLEOCR_VL_POLL_TIMEOUT'] == 600
     assert loader.kwargs['PADDLEOCR_VL_POLL_INTERVAL'] == 5
+    assert loader.kwargs['RAG_EXTRACT_DOCUMENT_IMAGE_ASSETS'] is False
 
 
 def test_paddleocr_loader_accepts_jobs_endpoint_base_url_and_raises_for_failed_job(tmp_path, monkeypatch):

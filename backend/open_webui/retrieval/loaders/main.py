@@ -325,13 +325,15 @@ class Loader:
         should_extract_pdf_image_assets = (
             isinstance(loader, PyPDFLoader)
             and Path(filename).suffix.lower() == '.pdf'
-            and bool(self.kwargs.get('PDF_EXTRACT_IMAGES'))
+            and bool(self.kwargs.get('RAG_EXTRACT_DOCUMENT_IMAGE_ASSETS'))
         )
         docs = [Document(page_content=ftfy.fix_text(doc.page_content), metadata=doc.metadata) for doc in loader.load()]
         if should_extract_pdf_image_assets:
             self._attach_pdf_image_assets(filename=filename, file_path=file_path, docs=docs)
-        should_extract_office_image_assets = _is_office_image_asset_file(filename, file_content_type) and bool(
-            self.kwargs.get('OFFICE_EXTRACT_IMAGE_ASSETS', True)
+        should_extract_office_image_assets = (
+            _is_office_image_asset_file(filename, file_content_type)
+            and bool(self.kwargs.get('RAG_EXTRACT_DOCUMENT_IMAGE_ASSETS'))
+            and bool(self.kwargs.get('OFFICE_EXTRACT_IMAGE_ASSETS', True))
         )
         if should_extract_office_image_assets and not _metadata_has_document_image_assets(docs):
             self._attach_office_image_assets(filename=filename, file_path=file_path, docs=docs)
