@@ -41,6 +41,10 @@ COPY package.json package-lock.json ./
 ENV CYPRESS_INSTALL_BINARY=0
 # onnxruntime-node otherwise tries to download CUDA providers during npm install on Linux/x64.
 ENV ONNXRUNTIME_NODE_INSTALL_CUDA=skip
+ENV NPM_CONFIG_FETCH_RETRIES=5 \
+    NPM_CONFIG_FETCH_RETRY_MINTIMEOUT=20000 \
+    NPM_CONFIG_FETCH_RETRY_MAXTIMEOUT=120000 \
+    NPM_CONFIG_FETCH_TIMEOUT=600000
 RUN npm ci --force
 
 COPY . .
@@ -65,6 +69,7 @@ ARG GID
 
 # Python settings
 ENV PYTHONUNBUFFERED=1
+ENV UV_HTTP_TIMEOUT=300
 
 ## Basis ##
 ENV ENV=prod \
