@@ -275,3 +275,44 @@ Checkpoint 2026-06-16 Phase 1:
   - GREEN full focused file: `WEBUI_SECRET_KEY=test timeout 180 uv run --frozen pytest -q backend/open_webui/test/util/test_bifrostapi_pipe_function.py` passed: `17 passed in 2.08s`.
   - Final focused file rerun: `WEBUI_SECRET_KEY=test timeout 180 uv run --frozen pytest -q backend/open_webui/test/util/test_bifrostapi_pipe_function.py` passed: `17 passed in 2.09s`.
   - Final whitespace gate before this handoff result entry: `git diff --check` exited 0.
+
+Checkpoint 2026-06-16 Phase 2 start:
+
+- Active agent confirmed worktree and branch before editing:
+  - worktree: `/Users/liusihang/.config/superpowers/worktrees/openwebui/codex-tool-cache-stability`
+  - branch: `codex/tool-cache-stability`
+  - HEAD before Phase 2 edits: `df1f52858205b537ab1d4d418af80b33852d6ef7`
+  - base ancestry check against `5cc1758f256c06635aaf500486d76b6fab1ffa1a` succeeded.
+- Phase 2 scope is deliberately limited to a Codex-style `previous_response_id` continuation guard:
+  - add pure helper coverage before production changes
+  - require same model, route mode, prompt cache key, tools, system/instructions, and conservative generation controls
+  - require strict append-only full message/input sequence before stateful continuation
+  - reject fail-closed by removing `previous_response_id` and preserving full replay
+  - no Phase 3 RAG/source rewrite restructuring
+  - no tool-output compression, summary fallback, Gemini cached-content changes, or prompt-cache-key policy changes
+- RED tests added first in `backend/open_webui/test/util/test_native_tool_continuation_api.py` for:
+  - append-only tool-output acceptance and delta extraction
+  - model / prompt cache key / tools / system / generation-control / rewritten-input rejection
+  - missing prior guard state rejection
+  - middleware guard application preserving full replay on rejection and sending delta on acceptance
+- RED command before production helpers:
+  - `WEBUI_SECRET_KEY=test timeout 180 uv run --frozen pytest -q backend/open_webui/test/util/test_native_tool_continuation_api.py -k "responses_continuation_guard or apply_responses_continuation_guard"` failed with 10 expected `AttributeError` failures for missing guard helpers.
+- Implemented Phase 2 in:
+  - `backend/open_webui/utils/middleware.py`
+  - `backend/open_webui/routers/openai.py`
+  - `backend/open_webui/test/util/test_native_tool_continuation_api.py`
+  - `backend/open_webui/test/util/test_openai_router_responses_payload.py`
+- Behavior implemented:
+  - `build_responses_continuation_guard_state` records route mode, model, prompt cache key hash, tools hash, system/instructions hash, conservative generation-controls hash, and the full message/input sequence.
+  - `evaluate_responses_continuation_delta` accepts only strict append-only deltas whose new items are function calls, tool outputs, or assistant tool-call continuation items.
+  - `apply_responses_continuation_guard` sets `previous_response_id` only on accepted `stateful_delta`; rejected stateful attempts remove it and preserve full replay.
+  - websocket Responses native-tool continuation now stores guard state after a response id is seen, then runs the guard before the next `generate_chat_completion`.
+  - router Responses payload conversion now forwards/trims `previous_response_id` only when middleware marks `continuation_mode == "stateful_delta"`; unguarded stateful fields fall back to full replay and the internal marker is not forwarded.
+  - no Phase 3 RAG/source rewrite restructuring, no prompt-cache-key policy changes, no Gemini cached-content changes, and no tool-output compression/summary fallback.
+- Additional websocket path RED/GREEN:
+  - websocket guard tests initially failed because the test emitter was synchronous, then because actual delta includes assistant tool-call plus tool output before router-level trimming; tests were adjusted to assert the real safe delta boundary.
+- Final verification for this checkpoint:
+  - `WEBUI_SECRET_KEY=test timeout 180 uv run --frozen pytest -q backend/open_webui/test/util/test_native_tool_continuation_api.py` passed: `17 passed, 6 warnings in 3.32s`.
+  - `WEBUI_SECRET_KEY=test timeout 180 uv run --frozen pytest -q backend/open_webui/test/util/test_openai_router_responses_payload.py` passed: `3 passed, 3 warnings in 2.24s`.
+  - `git diff --check` exited 0.
+  - `uv.lock` was not modified.

@@ -3762,6 +3762,210 @@ def _native_tool_cached_tokens(response_data: dict | None) -> int | None:
     return None
 
 
+_RESPONSES_CONTINUATION_GENERATION_CONTROL_KEYS = (
+    'temperature',
+    'top_p',
+    'reasoning',
+    'max_tokens',
+    'max_completion_tokens',
+    'max_output_tokens',
+    'tool_choice',
+    'parallel_tool_calls',
+    'response_format',
+    'store',
+    'seed',
+    'service_tier',
+)
+
+
+def _responses_continuation_generation_controls(form_data: dict) -> dict:
+    return {
+        key: copy.deepcopy(form_data[key])
+        for key in _RESPONSES_CONTINUATION_GENERATION_CONTROL_KEYS
+        if key in form_data
+    }
+
+
+def _responses_continuation_sequence(form_data: dict) -> tuple[str, list]:
+    input_items = form_data.get('input')
+    if isinstance(input_items, list):
+        return 'input', copy.deepcopy(input_items)
+
+    messages = form_data.get('messages')
+    if isinstance(messages, list):
+        return 'messages', copy.deepcopy(messages)
+
+    return 'messages', []
+
+
+def _responses_continuation_delta_item_allowed(item: Any) -> bool:
+    if not isinstance(item, dict):
+        return False
+
+    item_type = str(item.get('type') or '').strip().lower()
+    if item_type in {'function_call', 'function_call_output'}:
+        return True
+
+    role = str(item.get('role') or '').strip().lower()
+    if role == 'tool':
+        return True
+
+    if role == 'assistant':
+        content = item.get('content')
+        has_content = bool(content) if not isinstance(content, str) else bool(content.strip())
+        return bool(item.get('tool_calls')) or not has_content
+
+    return False
+
+
+def _responses_continuation_reject(reason: str) -> dict:
+    return {
+        'accepted': False,
+        'reason': reason,
+        'continuation_mode': 'stateful_rejected',
+        'delta_messages': [],
+        'delta_input': [],
+    }
+
+
+def build_responses_continuation_guard_state(form_data: dict, *, route_mode: str) -> dict:
+    sequence_type, sequence = _responses_continuation_sequence(form_data)
+    return {
+        'model': form_data.get('model'),
+        'route_mode': route_mode,
+        'prompt_cache_key_hash': _native_tool_fingerprint_hash(form_data.get('prompt_cache_key')),
+        'tools_hash': _native_tool_fingerprint_hash(form_data.get('tools')),
+        'instructions_hash': _native_tool_fingerprint_hash(_native_tool_system_parts(form_data)),
+        'generation_controls_hash': _native_tool_fingerprint_hash(
+            _responses_continuation_generation_controls(form_data)
+        ),
+        'sequence_type': sequence_type,
+        'sequence': sequence,
+    }
+
+
+def evaluate_responses_continuation_delta(
+    previous_state: dict | None,
+    current_form_data: dict,
+    *,
+    route_mode: str,
+) -> dict:
+    if not previous_state:
+        return _responses_continuation_reject('missing_previous_guard_state')
+
+    current_state = build_responses_continuation_guard_state(
+        current_form_data,
+        route_mode=route_mode,
+    )
+
+    for key, reason in (
+        ('model', 'model_changed'),
+        ('route_mode', 'route_mode_changed'),
+        ('prompt_cache_key_hash', 'prompt_cache_key_changed'),
+        ('tools_hash', 'tools_changed'),
+        ('instructions_hash', 'instructions_changed'),
+        ('generation_controls_hash', 'generation_controls_changed'),
+        ('sequence_type', 'sequence_type_changed'),
+    ):
+        if previous_state.get(key) != current_state.get(key):
+            return _responses_continuation_reject(reason)
+
+    previous_sequence = previous_state.get('sequence')
+    current_sequence = current_state.get('sequence')
+    if not isinstance(previous_sequence, list) or not isinstance(current_sequence, list):
+        return _responses_continuation_reject('input_not_strict_extension')
+
+    if len(current_sequence) <= len(previous_sequence):
+        return _responses_continuation_reject('input_not_strict_extension')
+
+    if current_sequence[: len(previous_sequence)] != previous_sequence:
+        return _responses_continuation_reject('input_not_strict_extension')
+
+    delta = current_sequence[len(previous_sequence) :]
+    if not delta or not all(_responses_continuation_delta_item_allowed(item) for item in delta):
+        return _responses_continuation_reject('delta_contains_non_continuation_items')
+
+    result = {
+        'accepted': True,
+        'reason': 'accepted',
+        'continuation_mode': 'stateful_delta',
+        'delta_messages': delta if current_state.get('sequence_type') == 'messages' else [],
+        'delta_input': delta if current_state.get('sequence_type') == 'input' else [],
+    }
+    return result
+
+
+def _responses_continuation_system_messages(messages: Any) -> list[dict]:
+    if not isinstance(messages, list):
+        return []
+    return [
+        copy.deepcopy(message)
+        for message in messages
+        if isinstance(message, dict) and message.get('role') in {'system', 'developer'}
+    ]
+
+
+def log_responses_continuation_guard_result(
+    result: dict,
+    form_data: dict,
+    *,
+    metadata: dict | None = None,
+    route_mode: str,
+) -> None:
+    if not is_native_tool_cache_debug_enabled(form_data, metadata):
+        return
+
+    log.info(
+        'native_tool_continuation_guard %s',
+        json.dumps(
+            {
+                'route_mode': route_mode,
+                'continuation_mode': result.get('continuation_mode'),
+                'reason': result.get('reason'),
+            },
+            sort_keys=True,
+            ensure_ascii=False,
+        ),
+    )
+
+
+def apply_responses_continuation_guard(
+    form_data: dict,
+    *,
+    previous_response_id: str | None,
+    previous_state: dict | None,
+    route_mode: str,
+    metadata: dict | None = None,
+) -> tuple[dict, dict]:
+    guarded_form_data = {**form_data}
+    result = evaluate_responses_continuation_delta(
+        previous_state,
+        form_data,
+        route_mode=route_mode,
+    )
+
+    guarded_form_data['continuation_mode'] = result['continuation_mode']
+    if result['accepted'] and previous_response_id:
+        guarded_form_data['previous_response_id'] = previous_response_id
+        if result.get('delta_messages'):
+            guarded_form_data['messages'] = [
+                *_responses_continuation_system_messages(form_data.get('messages')),
+                *copy.deepcopy(result['delta_messages']),
+            ]
+        elif result.get('delta_input'):
+            guarded_form_data['input'] = copy.deepcopy(result['delta_input'])
+    else:
+        guarded_form_data.pop('previous_response_id', None)
+
+    log_responses_continuation_guard_result(
+        result,
+        guarded_form_data,
+        metadata=metadata,
+        route_mode=route_mode,
+    )
+    return guarded_form_data, result
+
+
 def build_native_tool_continuation_request_fingerprint(
     form_data: dict,
     *,
@@ -3772,6 +3976,9 @@ def build_native_tool_continuation_request_fingerprint(
     messages = form_data.get('messages') or []
     input_items = form_data.get('input') or []
     previous_response_id_present = bool(form_data.get('previous_response_id'))
+    continuation_mode = form_data.get('continuation_mode')
+    if not continuation_mode:
+        continuation_mode = 'stateful_unchecked' if previous_response_id_present else 'stateless_replay'
 
     fingerprint = {
         'model': form_data.get('model'),
@@ -3784,7 +3991,7 @@ def build_native_tool_continuation_request_fingerprint(
         'input_count': len(input_items) if isinstance(input_items, list) else None,
         'input_hash': _native_tool_fingerprint_hash(input_items),
         'previous_response_id_present': previous_response_id_present,
-        'continuation_mode': 'stateful_unchecked' if previous_response_id_present else 'stateless_replay',
+        'continuation_mode': continuation_mode,
         'cached_tokens': _native_tool_cached_tokens(response_data),
     }
 
@@ -4989,9 +5196,32 @@ async def streaming_chat_response_handler(response, ctx):
             usage = None
             prior_output = []
             last_response_id = None
+            responses_continuation_guard_state = None
 
             def full_output():
                 return prior_output + output if prior_output else output
+
+            def update_responses_continuation_guard_state():
+                nonlocal responses_continuation_guard_state
+                if not ENABLE_RESPONSES_API_STATEFUL or not last_response_id:
+                    return
+
+                guard_messages = [
+                    *form_data.get('messages', []),
+                    *convert_output_to_messages(
+                        output,
+                        raw=True,
+                        reasoning_format=get_reasoning_format(model),
+                    ),
+                ]
+                responses_continuation_guard_state = build_responses_continuation_guard_state(
+                    {
+                        **form_data,
+                        'model': model_id,
+                        'messages': guard_messages,
+                    },
+                    route_mode='websocket_responses_api',
+                )
 
             reasoning_tags_param = metadata.get('params', {}).get('reasoning_tags')
             DETECT_REASONING_TAGS = reasoning_tags_param is not False
@@ -5633,6 +5863,7 @@ async def streaming_chat_response_handler(response, ctx):
 
                 try:
                     await stream_body_handler(response, form_data)
+                    update_responses_continuation_guard_state()
                 finally:
                     if response.background:
                         await response.background()
@@ -5849,13 +6080,20 @@ async def streaming_chat_response_handler(response, ctx):
                         }
 
                         if ENABLE_RESPONSES_API_STATEFUL and last_response_id:
-                            system_message = get_system_message(form_data['messages'])
-                            new_form_data['messages'] = (
-                                [system_message] if system_message else []
-                            ) + convert_output_to_messages(
+                            tool_messages = convert_output_to_messages(
                                 output, raw=True, reasoning_format=get_reasoning_format(model)
                             )
-                            new_form_data['previous_response_id'] = last_response_id
+                            new_form_data['messages'] = [
+                                *form_data['messages'],
+                                *tool_messages,
+                            ]
+                            new_form_data, _guard_result = apply_responses_continuation_guard(
+                                new_form_data,
+                                previous_response_id=last_response_id,
+                                previous_state=responses_continuation_guard_state,
+                                route_mode='websocket_responses_api',
+                                metadata=metadata,
+                            )
                         else:
                             tool_messages = convert_output_to_messages(
                                 output, raw=True, reasoning_format=get_reasoning_format(model)
@@ -5928,6 +6166,7 @@ async def streaming_chat_response_handler(response, ctx):
                             await stream_body_handler(res, new_form_data)
                             output[:0] = prior_output
                             prior_output = []
+                            update_responses_continuation_guard_state()
                         else:
                             break
                     except Exception as e:
