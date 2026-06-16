@@ -1,4 +1,5 @@
 import json
+import logging
 import types
 
 import pytest
@@ -97,6 +98,84 @@ def _tool_call_response():
             }
         ],
     }
+
+
+def test_cache_debug_can_be_enabled_from_form_data_or_metadata():
+    assert middleware.is_native_tool_cache_debug_enabled({'cache_debug': True}, {}) is True
+    assert middleware.is_native_tool_cache_debug_enabled({'extra_body': {'cache_debug': 'true'}}, {}) is True
+    assert middleware.is_native_tool_cache_debug_enabled({}, {'cache_debug': 1}) is True
+    assert middleware.is_native_tool_cache_debug_enabled({}, {'params': {'cache_debug': '1'}}) is True
+
+    assert middleware.is_native_tool_cache_debug_enabled({}, {}) is False
+    assert middleware.is_native_tool_cache_debug_enabled({'cache_debug': False}, {}) is False
+    assert middleware.is_native_tool_cache_debug_enabled({'extra_body': {'cache_debug': 'false'}}, {}) is False
+
+
+def test_native_tool_continuation_fingerprint_redacts_content_and_reports_shape():
+    form_data = {
+        'model': 'gpt-test',
+        'prompt_cache_key': 'chat-cache-key',
+        'previous_response_id': 'resp_123',
+        'messages': [
+            {'role': 'system', 'content': 'RAW SYSTEM SECRET'},
+            {'role': 'user', 'content': 'RAW USER QUESTION'},
+            {
+                'role': 'tool',
+                'tool_call_id': 'call_knowledge',
+                'content': 'RAW TOOL RESULT',
+            },
+        ],
+        'tools': [{'type': 'function', 'function': {'name': 'query_knowledge_files'}}],
+    }
+
+    fingerprint = middleware.build_native_tool_continuation_request_fingerprint(
+        form_data,
+        metadata={'params': {'function_calling': 'native'}},
+        route_mode='direct_stream',
+        response_data={'usage': {'prompt_tokens_details': {'cached_tokens': 77}}},
+    )
+
+    serialized = json.dumps(fingerprint, sort_keys=True)
+    assert 'RAW SYSTEM SECRET' not in serialized
+    assert 'RAW USER QUESTION' not in serialized
+    assert 'RAW TOOL RESULT' not in serialized
+    assert fingerprint['model'] == 'gpt-test'
+    assert fingerprint['route_mode'] == 'direct_stream'
+    assert fingerprint['prompt_cache_key_hash']
+    assert fingerprint['tools_hash']
+    assert fingerprint['instructions_hash']
+    assert fingerprint['message_count'] == 3
+    assert fingerprint['messages_hash']
+    assert fingerprint['previous_response_id_present'] is True
+    assert fingerprint['continuation_mode'] == 'stateful_unchecked'
+    assert fingerprint['cached_tokens'] == 77
+
+
+def test_native_tool_continuation_fingerprint_logging_is_debug_gated(caplog):
+    form_data = {
+        'model': 'gpt-test',
+        'messages': [{'role': 'user', 'content': 'RAW USER QUESTION'}],
+    }
+    metadata = {'params': {'function_calling': 'native'}}
+
+    with caplog.at_level(logging.INFO, logger=middleware.log.name):
+        middleware.log_native_tool_continuation_request_fingerprint(
+            form_data,
+            metadata=metadata,
+            route_mode='direct_stream',
+        )
+    assert 'native_tool_continuation_request_fingerprint' not in caplog.text
+
+    caplog.clear()
+    form_data['cache_debug'] = True
+    with caplog.at_level(logging.INFO, logger=middleware.log.name):
+        middleware.log_native_tool_continuation_request_fingerprint(
+            form_data,
+            metadata=metadata,
+            route_mode='direct_stream',
+        )
+    assert 'native_tool_continuation_request_fingerprint' in caplog.text
+    assert 'RAW USER QUESTION' not in caplog.text
 
 
 @pytest.mark.asyncio

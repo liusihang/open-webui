@@ -2,6 +2,7 @@ import ast
 import asyncio
 import base64
 import copy
+import hashlib
 import html
 import inspect
 import json
@@ -3696,6 +3697,127 @@ def build_native_tool_continuation_form_data(
     }
 
 
+def _cache_debug_value_enabled(value: Any) -> bool:
+    if isinstance(value, str):
+        return value.strip().lower() in {'1', 'true', 'yes', 'on'}
+    return bool(value)
+
+
+def is_native_tool_cache_debug_enabled(form_data: dict | None, metadata: dict | None) -> bool:
+    form_data = form_data or {}
+    metadata = metadata or {}
+    extra_body = form_data.get('extra_body') if isinstance(form_data.get('extra_body'), dict) else {}
+    params = metadata.get('params') if isinstance(metadata.get('params'), dict) else {}
+
+    return any(
+        _cache_debug_value_enabled(value)
+        for value in (
+            form_data.get('cache_debug'),
+            extra_body.get('cache_debug'),
+            metadata.get('cache_debug'),
+            params.get('cache_debug'),
+        )
+    )
+
+
+def _native_tool_fingerprint_hash(value: Any) -> str | None:
+    if value is None:
+        return None
+    try:
+        serialized = json.dumps(value, sort_keys=True, ensure_ascii=False, default=str)
+    except TypeError:
+        serialized = str(value)
+    return hashlib.sha256(serialized.encode('utf-8')).hexdigest()[:16]
+
+
+def _native_tool_system_parts(form_data: dict) -> list[Any]:
+    system_parts: list[Any] = []
+    if form_data.get('instructions') is not None:
+        system_parts.append({'instructions': form_data.get('instructions')})
+
+    for message in form_data.get('messages') or []:
+        if isinstance(message, dict) and message.get('role') in {'system', 'developer'}:
+            system_parts.append(message)
+
+    return system_parts
+
+
+def _native_tool_cached_tokens(response_data: dict | None) -> int | None:
+    usage = (response_data or {}).get('usage') if isinstance(response_data, dict) else None
+    if not isinstance(usage, dict):
+        return None
+
+    candidate_paths = (
+        ('prompt_tokens_details', 'cached_tokens'),
+        ('input_tokens_details', 'cached_tokens'),
+        ('prompt_tokens_details', 'cached_tokens_read'),
+        ('input_tokens_details', 'cached_tokens_read'),
+    )
+    for parent_key, child_key in candidate_paths:
+        parent = usage.get(parent_key)
+        value = parent.get(child_key) if isinstance(parent, dict) else None
+        if isinstance(value, (int, float)) and not isinstance(value, bool):
+            return int(value)
+
+    return None
+
+
+def build_native_tool_continuation_request_fingerprint(
+    form_data: dict,
+    *,
+    metadata: dict | None = None,
+    route_mode: str,
+    response_data: dict | None = None,
+) -> dict:
+    messages = form_data.get('messages') or []
+    input_items = form_data.get('input') or []
+    previous_response_id_present = bool(form_data.get('previous_response_id'))
+
+    fingerprint = {
+        'model': form_data.get('model'),
+        'route_mode': route_mode,
+        'prompt_cache_key_hash': _native_tool_fingerprint_hash(form_data.get('prompt_cache_key')),
+        'tools_hash': _native_tool_fingerprint_hash(form_data.get('tools')),
+        'instructions_hash': _native_tool_fingerprint_hash(_native_tool_system_parts(form_data)),
+        'message_count': len(messages) if isinstance(messages, list) else None,
+        'messages_hash': _native_tool_fingerprint_hash(messages),
+        'input_count': len(input_items) if isinstance(input_items, list) else None,
+        'input_hash': _native_tool_fingerprint_hash(input_items),
+        'previous_response_id_present': previous_response_id_present,
+        'continuation_mode': 'stateful_unchecked' if previous_response_id_present else 'stateless_replay',
+        'cached_tokens': _native_tool_cached_tokens(response_data),
+    }
+
+    if metadata:
+        params = metadata.get('params') if isinstance(metadata.get('params'), dict) else {}
+        fingerprint['function_calling'] = params.get('function_calling')
+
+    return fingerprint
+
+
+def log_native_tool_continuation_request_fingerprint(
+    form_data: dict,
+    *,
+    metadata: dict | None = None,
+    route_mode: str,
+    response_data: dict | None = None,
+) -> dict | None:
+    if not is_native_tool_cache_debug_enabled(form_data, metadata):
+        return None
+
+    fingerprint = build_native_tool_continuation_request_fingerprint(
+        form_data,
+        metadata=metadata,
+        route_mode=route_mode,
+        response_data=response_data,
+    )
+    log.info(
+        'native_tool_continuation_request_fingerprint %s',
+        json.dumps(fingerprint, sort_keys=True, ensure_ascii=False),
+    )
+    return fingerprint
+
+
 def _native_tool_loop_limit_reached(iterations: int) -> bool:
     return CHAT_RESPONSE_MAX_TOOL_CALL_ITERATIONS is not None and iterations >= CHAT_RESPONSE_MAX_TOOL_CALL_ITERATIONS
 
@@ -3749,6 +3871,12 @@ async def continue_native_tool_calls_non_streaming_response(response, response_d
             response_tool_calls,
             results,
             stream=False,
+        )
+        log_native_tool_continuation_request_fingerprint(
+            form_data,
+            metadata=metadata,
+            route_mode='direct_non_stream',
+            response_data=current_response_data,
         )
         current_response = await generate_chat_completion(
             request,
@@ -3916,6 +4044,11 @@ async def direct_native_tool_streaming_response_handler(response: StreamingRespo
                 response_tool_calls,
                 results,
                 stream=True,
+            )
+            log_native_tool_continuation_request_fingerprint(
+                form_data,
+                metadata=metadata,
+                route_mode='direct_stream',
             )
             current_response = await generate_chat_completion(
                 request,
@@ -5760,6 +5893,11 @@ async def streaming_chat_response_handler(response, ctx):
                                     }
                                 )
 
+                        log_native_tool_continuation_request_fingerprint(
+                            new_form_data,
+                            metadata=metadata,
+                            route_mode='websocket_responses_api',
+                        )
                         res = await generate_chat_completion(
                             request,
                             new_form_data,
@@ -5972,6 +6110,11 @@ async def streaming_chat_response_handler(response, ctx):
                                 ],
                             }
 
+                            log_native_tool_continuation_request_fingerprint(
+                                new_form_data,
+                                metadata=metadata,
+                                route_mode='websocket_native_tool',
+                            )
                             res = await generate_chat_completion(
                                 request,
                                 new_form_data,
