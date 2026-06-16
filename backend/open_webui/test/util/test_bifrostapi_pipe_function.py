@@ -93,6 +93,168 @@ def test_resolve_effective_cache_settings_auto_generates_stable_gpt_prompt_cache
     assert settings_a['prompt_cache_key'] == settings_b['prompt_cache_key']
 
 
+def test_resolve_effective_cache_settings_keeps_explicit_prompt_cache_key():
+    pipe = _load_pipe_class()()
+
+    settings = pipe._resolve_effective_cache_settings(
+        body={
+            'model': 'bifrostapi.openai/gpt-5',
+            'metadata': {'chat_id': 'chat-123'},
+            'prompt_cache_key': 'caller-key',
+        },
+        model='openai/gpt-5',
+        route_mode='responses',
+        system_message={'role': 'system', 'content': 'system prompt'},
+        messages=[{'role': 'user', 'content': 'hello'}],
+        attachments=[],
+        function_specs=[],
+    )
+
+    assert settings['prompt_cache_key'] == 'caller-key'
+
+
+def test_resolve_effective_cache_settings_uses_chat_id_scoped_gpt_prompt_cache_key():
+    pipe = _load_pipe_class()()
+
+    base = pipe._resolve_effective_cache_settings(
+        body={
+            'model': 'bifrostapi.openai/gpt-5',
+            'metadata': {'chat_id': 'chat-123'},
+        },
+        model='openai/gpt-5',
+        route_mode='responses',
+        system_message={'role': 'system', 'content': 'system prompt'},
+        messages=[{'role': 'user', 'content': 'hello'}],
+        attachments=[],
+        function_specs=[],
+    )
+    changed_user = pipe._resolve_effective_cache_settings(
+        body={
+            'model': 'bifrostapi.openai/gpt-5',
+            'metadata': {'chat_id': 'chat-123'},
+        },
+        model='openai/gpt-5',
+        route_mode='responses',
+        system_message={'role': 'system', 'content': 'system prompt'},
+        messages=[{'role': 'user', 'content': 'different user text'}],
+        attachments=[],
+        function_specs=[],
+    )
+    fallback = pipe._resolve_effective_cache_settings(
+        body={'model': 'bifrostapi.openai/gpt-5'},
+        model='openai/gpt-5',
+        route_mode='responses',
+        system_message={'role': 'system', 'content': 'system prompt'},
+        messages=[{'role': 'user', 'content': 'hello'}],
+        attachments=[],
+        function_specs=[],
+    )
+
+    assert base['provider'] == 'openai'
+    assert len(base['prompt_cache_key']) <= 64
+    assert base['prompt_cache_key'] == changed_user['prompt_cache_key']
+    assert base['prompt_cache_key'] != fallback['prompt_cache_key']
+    assert not base['prompt_cache_key'].startswith('owg:')
+
+
+def test_resolve_effective_cache_settings_chat_id_key_ignores_prefix_shape_changes():
+    pipe = _load_pipe_class()()
+
+    base = pipe._resolve_effective_cache_settings(
+        body={
+            'model': 'bifrostapi.openai/gpt-5',
+            'metadata': {'chat_id': 'chat-123'},
+        },
+        model='openai/gpt-5',
+        route_mode='responses',
+        system_message={'role': 'system', 'content': 'system prompt'},
+        messages=[{'role': 'user', 'content': 'hello'}],
+        attachments=[
+            {
+                'name': 'a.pdf',
+                'kind': 'document',
+                'responses_part': {'type': 'input_file', 'filename': 'a.pdf'},
+            }
+        ],
+        function_specs=[
+            {
+                'name': 'tool_a',
+                'description': 'First tool',
+                'parameters': {'type': 'object', 'properties': {'count': {'type': 'integer'}}},
+            }
+        ],
+    )
+    changed_prefix_shape = pipe._resolve_effective_cache_settings(
+        body={
+            'model': 'bifrostapi.openai/gpt-5',
+            'metadata': {'chat_id': 'chat-123'},
+        },
+        model='openai/gpt-5',
+        route_mode='responses',
+        system_message={'role': 'system', 'content': 'different system prompt'},
+        messages=[{'role': 'user', 'content': 'hello'}],
+        attachments=[
+            {
+                'name': 'b.png',
+                'kind': 'image',
+                'responses_part': {'type': 'input_image', 'image_url': 'data:image/png;base64,BBB'},
+            }
+        ],
+        function_specs=[
+            {
+                'name': 'tool_b',
+                'description': 'Second tool',
+                'parameters': {'type': 'object', 'properties': {'value': {'type': 'string'}}},
+            }
+        ],
+    )
+
+    assert base['prompt_cache_key'] == changed_prefix_shape['prompt_cache_key']
+
+
+def test_resolve_effective_cache_settings_without_chat_id_keeps_prefix_hash_semantics():
+    pipe = _load_pipe_class()()
+
+    base = pipe._resolve_effective_cache_settings(
+        body={'model': 'bifrostapi.openai/gpt-5'},
+        model='openai/gpt-5',
+        route_mode='responses',
+        system_message={'role': 'system', 'content': 'system prompt'},
+        messages=[{'role': 'user', 'content': 'hello'}],
+        attachments=[],
+        function_specs=[],
+    )
+    changed_system = pipe._resolve_effective_cache_settings(
+        body={'model': 'bifrostapi.openai/gpt-5'},
+        model='openai/gpt-5',
+        route_mode='responses',
+        system_message={'role': 'system', 'content': 'different system prompt'},
+        messages=[{'role': 'user', 'content': 'hello'}],
+        attachments=[],
+        function_specs=[],
+    )
+    changed_tools = pipe._resolve_effective_cache_settings(
+        body={'model': 'bifrostapi.openai/gpt-5'},
+        model='openai/gpt-5',
+        route_mode='responses',
+        system_message={'role': 'system', 'content': 'system prompt'},
+        messages=[{'role': 'user', 'content': 'hello'}],
+        attachments=[],
+        function_specs=[
+            {
+                'name': 'tool_a',
+                'description': 'First tool',
+                'parameters': {'type': 'object', 'properties': {'count': {'type': 'integer'}}},
+            }
+        ],
+    )
+
+    assert base['prompt_cache_key'].startswith('owg:')
+    assert len(base['prompt_cache_key']) == 64
+    assert base['prompt_cache_key'] != changed_system['prompt_cache_key']
+    assert base['prompt_cache_key'] != changed_tools['prompt_cache_key']
+
+
 def test_resolve_effective_cache_settings_does_not_auto_generate_non_gpt_prompt_cache_key():
     pipe = _load_pipe_class()()
 

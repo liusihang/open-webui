@@ -1024,6 +1024,51 @@ class Pipe:
         # deterministic hashing over the same stable-prefix inputs.
         return f"owg:{digest[:60]}"
 
+    def _prompt_cache_thread_id(self, body: dict) -> str:
+        def _as_id(value: Any) -> str:
+            if isinstance(value, bool):
+                return ""
+            if isinstance(value, (int, float)):
+                value = str(value)
+            if not isinstance(value, str):
+                return ""
+            return unicodedata.normalize("NFKC", value).strip()
+
+        keys = ("chat_id", "thread_id", "session_id", "conversation_id")
+        containers: List[dict] = []
+
+        metadata = self._body_param(body, "metadata")
+        if isinstance(metadata, dict):
+            containers.append(metadata)
+        if isinstance(body, dict):
+            containers.append(body)
+            params = body.get("params")
+            if isinstance(params, dict):
+                containers.append(params)
+                custom_params = params.get("custom_params")
+                if isinstance(custom_params, dict):
+                    containers.append(custom_params)
+            custom_params = body.get("custom_params")
+            if isinstance(custom_params, dict):
+                containers.append(custom_params)
+
+        for container in containers:
+            for key in keys:
+                durable_id = _as_id(container.get(key))
+                if durable_id:
+                    return durable_id
+        return ""
+
+    def _thread_prompt_cache_key(self, thread_id: str) -> str:
+        payload = {
+            "provider": "openai",
+            "thread_id": unicodedata.normalize("NFKC", str(thread_id)).strip(),
+        }
+        digest = hashlib.sha256(
+            json.dumps(payload, ensure_ascii=False, sort_keys=True).encode("utf-8")
+        ).hexdigest()
+        return f"owc:{digest[:60]}"
+
     def _default_prompt_cache_retention(self, model: Any) -> str:
         if not isinstance(model, str):
             return ""
@@ -1058,6 +1103,10 @@ class Pipe:
             settings["prompt_cache_key"] = prompt_cache_key
             return settings
         if not self._is_gpt_model_name(model):
+            return settings
+        thread_id = self._prompt_cache_thread_id(body)
+        if thread_id:
+            settings["prompt_cache_key"] = self._thread_prompt_cache_key(thread_id)
             return settings
         settings["prompt_cache_key"] = self._generate_prompt_cache_key(
             model=model,
