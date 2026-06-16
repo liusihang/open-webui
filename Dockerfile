@@ -188,10 +188,12 @@ RUN set -e; \
     REQUIREMENTS_FILE="requirements-external-slim.txt"; \
     fi; \
     UV_INDEX_ARGS=""; \
+    PIP_INDEX_ARGS=""; \
     if [ -n "$UV_DEFAULT_INDEX" ]; then \
     UV_INDEX_ARGS="--default-index $UV_DEFAULT_INDEX"; \
+    PIP_INDEX_ARGS="-i $UV_DEFAULT_INDEX"; \
     fi; \
-    pip3 install --no-cache-dir uv; \
+    pip3 install --no-cache-dir $PIP_INDEX_ARGS uv; \
     if [ "$USE_EXTERNAL_SERVICES_SLIM" = "true" ]; then \
     uv pip install --system -r "$REQUIREMENTS_FILE" --no-cache-dir $UV_INDEX_ARGS; \
     python -c "import os; import tiktoken; tiktoken.get_encoding(os.environ['TIKTOKEN_ENCODING_NAME'])"; \
