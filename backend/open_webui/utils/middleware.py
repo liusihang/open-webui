@@ -3775,6 +3775,8 @@ _RESPONSES_CONTINUATION_GENERATION_CONTROL_KEYS = (
     'store',
     'seed',
     'service_tier',
+    'text',
+    'truncation',
 )
 
 

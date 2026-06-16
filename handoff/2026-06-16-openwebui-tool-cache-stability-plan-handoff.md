@@ -316,3 +316,22 @@ Checkpoint 2026-06-16 Phase 2 start:
   - `WEBUI_SECRET_KEY=test timeout 180 uv run --frozen pytest -q backend/open_webui/test/util/test_openai_router_responses_payload.py` passed: `3 passed, 3 warnings in 2.24s`.
   - `git diff --check` exited 0.
   - `uv.lock` was not modified.
+
+Checkpoint 2026-06-16 Phase 2 review follow-up:
+
+- Reviewer found a blocking P1: the continuation guard's generation-control signature omitted Responses-native provider-bound controls `text` and `truncation`.
+- Verified the finding against current code:
+  - `text` / `truncation` can remain in `form_data` and be forwarded by `convert_to_responses_payload` through `{**payload, 'input': ...}`.
+  - `_RESPONSES_CONTINUATION_GENERATION_CONTROL_KEYS` did not include either field, so a strict append-only continuation could still be accepted after changing them.
+- TDD RED:
+  - Added `text={"verbosity":"low"}` and `truncation="auto"` to the guard base fixture.
+  - Added shape-change cases mutating `text` and `truncation`, expecting `generation_controls_changed`.
+  - `WEBUI_SECRET_KEY=test timeout 180 uv run --frozen pytest -q backend/open_webui/test/util/test_native_tool_continuation_api.py -k "responses_continuation_guard_rejects_shape_changes"` failed as expected: 2 failures where guard returned `accepted=True`.
+- Fix:
+  - Added `text` and `truncation` to `_RESPONSES_CONTINUATION_GENERATION_CONTROL_KEYS` in `backend/open_webui/utils/middleware.py`.
+- Verification:
+  - RED subset rerun passed: `8 passed, 11 deselected, 6 warnings in 3.45s`.
+  - `WEBUI_SECRET_KEY=test timeout 180 uv run --frozen pytest -q backend/open_webui/test/util/test_native_tool_continuation_api.py` passed: `19 passed, 6 warnings in 3.06s`.
+  - `WEBUI_SECRET_KEY=test timeout 180 uv run --frozen pytest -q backend/open_webui/test/util/test_openai_router_responses_payload.py` passed: `3 passed, 3 warnings in 2.22s`.
+  - `git diff --check` exited 0.
+  - `uv.lock` stayed clean.

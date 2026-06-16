@@ -233,6 +233,8 @@ def _responses_guard_base_form_data():
         'model': 'gpt-test',
         'prompt_cache_key': 'chat-cache-key',
         'temperature': 0.2,
+        'text': {'verbosity': 'low'},
+        'truncation': 'auto',
         'tools': [{'type': 'function', 'name': 'query_knowledge_files'}],
         'messages': [
             {'role': 'system', 'content': 'stable instructions'},
@@ -296,6 +298,8 @@ def test_responses_continuation_guard_accepts_exact_append_only_tool_output_delt
             'instructions_changed',
         ),
         (lambda form_data: form_data.update({'temperature': 0.9}), 'generation_controls_changed'),
+        (lambda form_data: form_data.update({'text': {'verbosity': 'high'}}), 'generation_controls_changed'),
+        (lambda form_data: form_data.update({'truncation': 'disabled'}), 'generation_controls_changed'),
         (
             lambda form_data: form_data['messages'][1].update({'content': 'rewritten user prompt'}),
             'input_not_strict_extension',
