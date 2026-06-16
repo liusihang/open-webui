@@ -84,7 +84,7 @@ def test_paddleocr_loader_submits_async_job_polls_jsonl_and_downloads_assets(tmp
         assert headers == {'Authorization': 'bearer secret-token'}
         assert data['model'] == 'PaddleOCR-VL-1.6'
         assert files['file'][0] == 'source.pdf'
-        assert timeout == 30
+        assert timeout == 45
         return FakeResponse(json_data={'jobId': 'job-123'})
 
     poll_calls = []
@@ -104,7 +104,7 @@ def test_paddleocr_loader_submits_async_job_polls_jsonl_and_downloads_assets(tmp
         if url == jsonl_url:
             assert headers is None
             assert stream is True
-            assert timeout == 60
+            assert timeout == 90
             return FakeResponse(
                 lines=[
                     json.dumps(
@@ -143,7 +143,7 @@ def test_paddleocr_loader_submits_async_job_polls_jsonl_and_downloads_assets(tmp
         raise AssertionError(f'unexpected GET {url}')
 
     def fake_urlopen(url, timeout=0):
-        assert timeout == 30.0
+        assert timeout == 90.0
         return FakeDownloadResponse(image_payloads[url])
 
     monkeypatch.setattr(paddleocr_vl.requests, 'post', fake_post)
@@ -156,6 +156,8 @@ def test_paddleocr_loader_submits_async_job_polls_jsonl_and_downloads_assets(tmp
         api_url='https://paddleocr.aistudio-app.com',
         token='secret-token',
         file_path=str(source_pdf),
+        request_timeout_s=45,
+        download_timeout_s=90,
     ).load()
 
     assert len(docs) == 2

@@ -473,6 +473,57 @@ try:
 except Exception:
     TERMINAL_PROXY_HEADERS = {}
 
+
+####################################
+# OnlyOffice
+####################################
+
+ENABLE_ONLYOFFICE_PREVIEW = ConfigVar(
+    'ENABLE_ONLYOFFICE_PREVIEW',
+    'onlyoffice.enable_preview',
+    os.getenv('ENABLE_ONLYOFFICE_PREVIEW', 'False').lower() == 'true',
+)
+
+ONLYOFFICE_DOCUMENT_SERVER_URL = ConfigVar(
+    'ONLYOFFICE_DOCUMENT_SERVER_URL',
+    'onlyoffice.document_server_url',
+    os.getenv('ONLYOFFICE_DOCUMENT_SERVER_URL', ''),
+)
+
+ONLYOFFICE_PUBLIC_BASE_URL = ConfigVar(
+    'ONLYOFFICE_PUBLIC_BASE_URL',
+    'onlyoffice.public_base_url',
+    os.getenv('ONLYOFFICE_PUBLIC_BASE_URL', ''),
+)
+
+ONLYOFFICE_JWT_SECRET = ConfigVar(
+    'ONLYOFFICE_JWT_SECRET',
+    'onlyoffice.jwt_secret',
+    os.getenv('ONLYOFFICE_JWT_SECRET', ''),
+)
+
+ONLYOFFICE_FILE_TOKEN_EXPIRES_IN = ConfigVar(
+    'ONLYOFFICE_FILE_TOKEN_EXPIRES_IN',
+    'onlyoffice.file_token_expires_in',
+    os.getenv('ONLYOFFICE_FILE_TOKEN_EXPIRES_IN', '5m'),
+)
+
+ONLYOFFICE_EDIT_CALLBACK_TOKEN_EXPIRES_IN = ConfigVar(
+    'ONLYOFFICE_EDIT_CALLBACK_TOKEN_EXPIRES_IN',
+    'onlyoffice.edit_callback_token_expires_in',
+    os.getenv('ONLYOFFICE_EDIT_CALLBACK_TOKEN_EXPIRES_IN', '8h'),
+)
+
+ONLYOFFICE_CALLBACK_ALLOWED_HOSTS = ConfigVar(
+    'ONLYOFFICE_CALLBACK_ALLOWED_HOSTS',
+    'onlyoffice.callback_allowed_hosts',
+    [
+        host.strip()
+        for host in os.getenv('ONLYOFFICE_CALLBACK_ALLOWED_HOSTS', '').split(',')
+        if host.strip()
+    ],
+)
+
 ####################################
 # Code Interpreter
 ####################################
