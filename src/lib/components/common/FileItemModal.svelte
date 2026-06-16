@@ -9,6 +9,7 @@
 	import { settings } from '$lib/stores';
 	import { getKnowledgeById } from '$lib/apis/knowledge';
 	import { getFileById, getFileContentById } from '$lib/apis/files';
+	import { isOnlyOfficePreviewFile } from '$lib/utils/filePreviewTypes';
 
 	import CodeBlock from '$lib/components/chat/Messages/CodeBlock.svelte';
 	import Markdown from '$lib/components/chat/Messages/Markdown.svelte';
@@ -25,6 +26,7 @@
 	import dayjs from 'dayjs';
 	import Spinner from './Spinner.svelte';
 	import PDFViewer from './PDFViewer.svelte';
+	import OnlyOfficeViewer from './OnlyOfficeViewer.svelte';
 	import PanzoomContainer from './PanzoomContainer.svelte';
 	import Reset from '../icons/Reset.svelte';
 
@@ -37,10 +39,14 @@
 
 	let isPDF = false;
 	let isAudio = false;
+	let isVideo = false;
 	let isImage = false;
 	let isExcel = false;
 	let isDocx = false;
 	let isPptx = false;
+	let isOnlyOffice = false;
+	let onlyOfficeFailed = false;
+	let onlyOfficeError = '';
 
 	let selectedTab = '';
 	let excelWorkbook: WorkBook | null = null;
@@ -63,6 +69,12 @@
 	const resetImageView = () => {
 		panzoomRef?.reset();
 	};
+	const fileContentUrl = () => `${WEBUI_API_BASE_URL}/files/${item.id}/content`;
+	const retryOnlyOfficePreview = () => {
+		onlyOfficeFailed = false;
+		onlyOfficeError = '';
+	};
+	const onlyOfficeFallbackMessage = 'OnlyOffice preview failed. Falling back to built-in preview.';
 
 	$: isPDF =
 		item?.meta?.content_type === 'application/pdf' ||
@@ -103,6 +115,16 @@
 		(item?.name && item?.name.toLowerCase().endsWith('.m4a')) ||
 		(item?.name && item?.name.toLowerCase().endsWith('.webm'));
 
+	$: isVideo =
+		(item?.meta?.content_type ?? '').startsWith('video/') ||
+		(item?.name &&
+			(item.name.toLowerCase().endsWith('.mp4') ||
+				item.name.toLowerCase().endsWith('.webm') ||
+				item.name.toLowerCase().endsWith('.mov') ||
+				item.name.toLowerCase().endsWith('.avi') ||
+				item.name.toLowerCase().endsWith('.mkv') ||
+				item.name.toLowerCase().endsWith('.m4v')));
+
 	$: isImage =
 		(item?.meta?.content_type ?? '').startsWith('image/') ||
 		(item?.name &&
@@ -135,6 +157,15 @@
 		item?.meta?.content_type ===
 			'application/vnd.openxmlformats-officedocument.presentationml.presentation' ||
 		(item?.name && item.name.toLowerCase().endsWith('.pptx'));
+
+	$: isOnlyOffice =
+		item?.type === 'file' &&
+		isOnlyOfficePreviewFile(item) &&
+		!isImage &&
+		!isAudio &&
+		!isVideo &&
+		!isMarkdown &&
+		!isCode;
 
 	const loadExcelContent = async () => {
 		try {
@@ -201,8 +232,10 @@
 	};
 
 	const loadContent = async () => {
-		selectedTab = '';
+		selectedTab = isOnlyOffice ? 'preview' : '';
 		expandedContent = false;
+		onlyOfficeFailed = false;
+		onlyOfficeError = '';
 		if (item?.type === 'collection') {
 			loading = true;
 
@@ -391,7 +424,7 @@
 					</div>
 				{/if}
 
-				{#if isAudio || isPDF || isExcel || isCode || isMarkdown || isDocx || isPptx}
+				{#if isAudio || isVideo || isPDF || isExcel || isCode || isMarkdown || isDocx || isPptx || isOnlyOffice}
 					<div
 						class="flex mb-2.5 scrollbar-none overflow-x-auto w-full border-b border-gray-50 dark:border-gray-850/30 text-center text-sm font-medium bg-transparent dark:text-gray-200"
 					>
@@ -431,7 +464,7 @@
 						</div>
 						<PanzoomContainer bind:this={panzoomRef}>
 							<img
-								src={`${WEBUI_API_BASE_URL}/files/${item.id}/content`}
+								src={fileContentUrl()}
 								alt={item?.name ?? 'Image'}
 								class="w-full object-contain rounded-lg"
 								loading="lazy"
@@ -508,17 +541,64 @@
 				{:else if selectedTab === 'preview'}
 					{#if isAudio}
 						<audio
-							src={`${WEBUI_API_BASE_URL}/files/${item.id}/content`}
+							src={fileContentUrl()}
 							class="w-full border-0 rounded-lg mb-2"
 							controls
 							playsinline
+						></audio>
+					{:else if isVideo}
+						<!-- svelte-ignore a11y-media-has-caption -->
+						<video
+							src={fileContentUrl()}
+							class="w-full max-h-[70vh] border-0 rounded-lg bg-black"
+							controls
+							playsinline
+						></video>
+					{:else if isOnlyOffice && !onlyOfficeFailed}
+						<OnlyOfficeViewer
+							fileId={item.id}
+							readOnly={true}
+							className="w-full h-[70vh] border-0 rounded-lg"
+							on:error={(event) => {
+								onlyOfficeFailed = true;
+								onlyOfficeError =
+									event?.detail?.message ?? onlyOfficeFallbackMessage;
+							}}
 						/>
 					{:else if isPDF}
+						{#if onlyOfficeError}
+							<div
+								class="flex items-center justify-between gap-3 text-amber-700 dark:text-amber-400 text-xs px-3 py-2"
+								role="alert"
+								aria-live="polite"
+							>
+								<span>{onlyOfficeError}</span>
+								<button
+									type="button"
+									class="shrink-0 underline underline-offset-2 hover:no-underline"
+									on:click={retryOnlyOfficePreview}>Retry</button
+								>
+							</div>
+						{/if}
 						<PDFViewer
-							url={`${WEBUI_API_BASE_URL}/files/${item.id}/content`}
+							url={fileContentUrl()}
 							className="w-full h-[70vh] border-0 rounded-lg"
 						/>
 					{:else if isExcel}
+						{#if onlyOfficeError}
+							<div
+								class="flex items-center justify-between gap-3 text-amber-700 dark:text-amber-400 text-xs px-3 py-2"
+								role="alert"
+								aria-live="polite"
+							>
+								<span>{onlyOfficeError}</span>
+								<button
+									type="button"
+									class="shrink-0 underline underline-offset-2 hover:no-underline"
+									on:click={retryOnlyOfficePreview}>Retry</button
+								>
+							</div>
+						{/if}
 						{#if excelError}
 							<div class="text-red-500 text-sm p-4">
 								{excelError}
@@ -568,6 +648,20 @@
 							<Markdown content={item.file.data.content} id="markdown-viewer" />
 						</div>
 					{:else if isDocx}
+						{#if onlyOfficeError}
+							<div
+								class="flex items-center justify-between gap-3 text-amber-700 dark:text-amber-400 text-xs px-3 py-2"
+								role="alert"
+								aria-live="polite"
+							>
+								<span>{onlyOfficeError}</span>
+								<button
+									type="button"
+									class="shrink-0 underline underline-offset-2 hover:no-underline"
+									on:click={retryOnlyOfficePreview}>Retry</button
+								>
+							</div>
+						{/if}
 						{#if docxError}
 							<div class="text-red-500 text-sm p-4">{docxError}</div>
 						{:else if docxHtml}
@@ -580,6 +674,20 @@
 							<div class="text-gray-500 text-sm p-4">No content available</div>
 						{/if}
 					{:else if isPptx}
+						{#if onlyOfficeError}
+							<div
+								class="flex items-center justify-between gap-3 text-amber-700 dark:text-amber-400 text-xs px-3 py-2"
+								role="alert"
+								aria-live="polite"
+							>
+								<span>{onlyOfficeError}</span>
+								<button
+									type="button"
+									class="shrink-0 underline underline-offset-2 hover:no-underline"
+									on:click={retryOnlyOfficePreview}>Retry</button
+								>
+							</div>
+						{/if}
 						{#if pptxError}
 							<div class="text-red-500 text-sm p-4">{pptxError}</div>
 						{:else if pptxSlides.length > 0}
@@ -638,6 +746,27 @@
 						{:else}
 							<div class="text-gray-500 text-sm p-4">No content available</div>
 						{/if}
+					{:else if isOnlyOffice}
+						<div class="flex flex-col items-center justify-center gap-2 text-sm p-6 text-center">
+							<div class="text-red-500">
+								{onlyOfficeError || 'Failed to initialize OnlyOffice preview.'}
+							</div>
+							<div class="flex items-center justify-center gap-3">
+								<button
+									type="button"
+									class="underline underline-offset-2 hover:no-underline"
+									on:click={retryOnlyOfficePreview}>Retry</button
+								>
+								<a
+									href={fileContentUrl()}
+									target="_blank"
+									rel="noreferrer"
+									class="underline underline-offset-2 hover:no-underline"
+								>
+									Download file
+								</a>
+							</div>
+						</div>
 					{:else}
 						<div class="max-h-96 overflow-scroll scrollbar-hidden text-xs whitespace-pre-wrap">
 							{(item?.file?.data?.content ?? '').trim() || 'No content'}
