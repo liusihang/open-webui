@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import mimetypes
 import re
 from dataclasses import dataclass
 from pathlib import Path
@@ -154,32 +155,93 @@ def build_image_assets_from_markdown(
         if width is None or height is None:
             width, height = _probe_image_dimensions(storage_path)
 
-        block_id = f'page-{page_no:03d}-image-{ordinal:03d}'
-        metadata = {
-            'backend': backend,
-            'page': page_no,
-            'origin_reference': reference,
-            **(extra_metadata or {}),
-        }
-        if width is not None:
-            metadata['width'] = width
-        if height is not None:
-            metadata['height'] = height
-
-        assets.append(
-            {
-                'storage_path': str(storage_path),
-                'asset_kind': 'document_image',
-                'image_fingerprint': image_fingerprint,
-                'page_index': page_no,
-                'caption': _first_non_empty_line(text),
-                'surrounding_text': _short_context(text),
-                'anchor': {'page': page_no, 'block_id': block_id},
-                'origin_uri': origin_uri,
-                'metadata': metadata,
-            }
+        asset = build_document_image_asset_payload(
+            storage_path=storage_path,
+            image_fingerprint=image_fingerprint,
+            page_no=page_no,
+            ordinal=ordinal,
+            text=text,
+            backend=backend,
+            origin_reference=reference,
+            origin_uri=origin_uri,
+            width=width,
+            height=height,
+            extra_metadata=extra_metadata,
         )
+        assets.append(asset)
     return assets, skipped
+
+
+def build_document_image_asset_payload(
+    *,
+    storage_path: Path,
+    page_no: int,
+    ordinal: int,
+    text: str | None,
+    backend: str,
+    image_fingerprint: str | None = None,
+    origin_reference: str | None = None,
+    origin_uri: str | None = None,
+    mime_type: str | None = None,
+    width: int | None = None,
+    height: int | None = None,
+    extra_metadata: dict[str, Any] | None = None,
+) -> DocumentImageAssetPayload:
+    storage_path = Path(storage_path)
+    image_fingerprint = image_fingerprint or _fingerprint_file(storage_path)
+    width, height = _resolve_image_dimensions(storage_path=storage_path, width=width, height=height)
+    mime_type = mime_type or mimetypes.guess_type(str(storage_path))[0]
+    text = text or ''
+    block_id = f'page-{page_no:03d}-image-{ordinal:03d}'
+    metadata = {
+        'backend': backend,
+        'page': page_no,
+        **(extra_metadata or {}),
+        **_present_values(
+            {
+                'origin_reference': origin_reference,
+                'mime_type': mime_type,
+                'width': width,
+                'height': height,
+            }
+        ),
+    }
+
+    asset: DocumentImageAssetPayload = {
+        'storage_path': str(storage_path),
+        'asset_kind': 'document_image',
+        'image_fingerprint': image_fingerprint,
+        'page_index': page_no,
+        'caption': _first_non_empty_line(text),
+        'surrounding_text': _short_context(text),
+        'anchor': {'page': page_no, 'block_id': block_id},
+        'metadata': metadata,
+        **_present_values(
+            {
+                'origin_uri': origin_uri,
+                'mime_type': mime_type,
+                'width': width,
+                'height': height,
+            }
+        ),
+    }
+    return asset
+
+
+def _resolve_image_dimensions(
+    *,
+    storage_path: Path,
+    width: int | None,
+    height: int | None,
+) -> tuple[int | None, int | None]:
+    if width is not None and height is not None:
+        return width, height
+    probed_width, probed_height = _probe_image_dimensions(storage_path)
+    return width if width is not None else probed_width, height if height is not None else probed_height
+
+
+def _present_values(values: dict[str, Any]) -> dict[str, Any]:
+    return {key: value for key, value in values.items() if value is not None}
 
 
 def _iter_markdown_image_entries(images: Any) -> list[tuple[str, str | None]]:
@@ -318,6 +380,10 @@ def _probe_image_dimensions(path: Path) -> tuple[int | None, int | None]:
 
             with Image.open(path) as image:
                 return image.width, image.height
-    except OSError:
+        from PIL import Image
+
+        with Image.open(path) as image:
+            return image.width, image.height
+    except (OSError, ImportError):
         return None, None
     return None, None
