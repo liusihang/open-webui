@@ -1275,6 +1275,59 @@ PADDLEOCR_VL_TOKEN = ConfigVar(
     os.getenv('PADDLEOCR_VL_TOKEN', ''),
 )
 
+PADDLEOCR_VL_MODEL = ConfigVar(
+    'PADDLEOCR_VL_MODEL',
+    'rag.paddleocr_vl_model',
+    os.getenv('PADDLEOCR_VL_MODEL', 'PaddleOCR-VL-1.6'),
+)
+
+DEFAULT_PADDLEOCR_VL_OPTIONAL_PAYLOAD = {
+    'useDocOrientationClassify': False,
+    'useDocUnwarping': False,
+    'useChartRecognition': False,
+}
+
+paddleocr_vl_optional_payload = os.getenv('PADDLEOCR_VL_OPTIONAL_PAYLOAD', '')
+try:
+    paddleocr_vl_optional_payload = json.loads(paddleocr_vl_optional_payload) if paddleocr_vl_optional_payload else {}
+except json.JSONDecodeError:
+    paddleocr_vl_optional_payload = {}
+if not isinstance(paddleocr_vl_optional_payload, dict):
+    paddleocr_vl_optional_payload = {}
+
+PADDLEOCR_VL_OPTIONAL_PAYLOAD = ConfigVar(
+    'PADDLEOCR_VL_OPTIONAL_PAYLOAD',
+    'rag.paddleocr_vl_optional_payload',
+    {
+        **DEFAULT_PADDLEOCR_VL_OPTIONAL_PAYLOAD,
+        **paddleocr_vl_optional_payload,
+    },
+)
+
+PADDLEOCR_VL_REQUEST_TIMEOUT = ConfigVar(
+    'PADDLEOCR_VL_REQUEST_TIMEOUT',
+    'rag.paddleocr_vl_request_timeout',
+    int(os.getenv('PADDLEOCR_VL_REQUEST_TIMEOUT', '30')),
+)
+
+PADDLEOCR_VL_DOWNLOAD_TIMEOUT = ConfigVar(
+    'PADDLEOCR_VL_DOWNLOAD_TIMEOUT',
+    'rag.paddleocr_vl_download_timeout',
+    int(os.getenv('PADDLEOCR_VL_DOWNLOAD_TIMEOUT', '60')),
+)
+
+PADDLEOCR_VL_POLL_TIMEOUT = ConfigVar(
+    'PADDLEOCR_VL_POLL_TIMEOUT',
+    'rag.paddleocr_vl_poll_timeout',
+    int(os.getenv('PADDLEOCR_VL_POLL_TIMEOUT', '300')),
+)
+
+PADDLEOCR_VL_POLL_INTERVAL = ConfigVar(
+    'PADDLEOCR_VL_POLL_INTERVAL',
+    'rag.paddleocr_vl_poll_interval',
+    float(os.getenv('PADDLEOCR_VL_POLL_INTERVAL', '2')),
+)
+
 BYPASS_EMBEDDING_AND_RETRIEVAL = ConfigVar(
     'BYPASS_EMBEDDING_AND_RETRIEVAL',
     'rag.bypass_embedding_and_retrieval',

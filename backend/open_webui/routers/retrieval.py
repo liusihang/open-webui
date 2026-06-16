@@ -485,6 +485,12 @@ async def get_rag_config(request: Request, user=Depends(get_admin_user)):
         'MISTRAL_OCR_API_KEY': request.app.state.config.MISTRAL_OCR_API_KEY,
         'PADDLEOCR_VL_BASE_URL': request.app.state.config.PADDLEOCR_VL_BASE_URL,
         'PADDLEOCR_VL_TOKEN': request.app.state.config.PADDLEOCR_VL_TOKEN,
+        'PADDLEOCR_VL_MODEL': request.app.state.config.PADDLEOCR_VL_MODEL,
+        'PADDLEOCR_VL_OPTIONAL_PAYLOAD': request.app.state.config.PADDLEOCR_VL_OPTIONAL_PAYLOAD,
+        'PADDLEOCR_VL_REQUEST_TIMEOUT': request.app.state.config.PADDLEOCR_VL_REQUEST_TIMEOUT,
+        'PADDLEOCR_VL_DOWNLOAD_TIMEOUT': request.app.state.config.PADDLEOCR_VL_DOWNLOAD_TIMEOUT,
+        'PADDLEOCR_VL_POLL_TIMEOUT': request.app.state.config.PADDLEOCR_VL_POLL_TIMEOUT,
+        'PADDLEOCR_VL_POLL_INTERVAL': request.app.state.config.PADDLEOCR_VL_POLL_INTERVAL,
         # MinerU settings
         'MINERU_API_MODE': request.app.state.config.MINERU_API_MODE,
         'MINERU_API_URL': request.app.state.config.MINERU_API_URL,
@@ -701,6 +707,12 @@ class ConfigForm(BaseModel):
     MISTRAL_OCR_API_KEY: str | None = None
     PADDLEOCR_VL_BASE_URL: str | None = None
     PADDLEOCR_VL_TOKEN: str | None = None
+    PADDLEOCR_VL_MODEL: str | None = None
+    PADDLEOCR_VL_OPTIONAL_PAYLOAD: dict | None = None
+    PADDLEOCR_VL_REQUEST_TIMEOUT: int | None = None
+    PADDLEOCR_VL_DOWNLOAD_TIMEOUT: int | None = None
+    PADDLEOCR_VL_POLL_TIMEOUT: int | None = None
+    PADDLEOCR_VL_POLL_INTERVAL: float | None = None
 
     # MinerU settings
     MINERU_API_MODE: str | None = None
@@ -917,6 +929,36 @@ async def update_rag_config(request: Request, form_data: ConfigForm, user=Depend
         form_data.PADDLEOCR_VL_TOKEN
         if form_data.PADDLEOCR_VL_TOKEN is not None
         else request.app.state.config.PADDLEOCR_VL_TOKEN
+    )
+    request.app.state.config.PADDLEOCR_VL_MODEL = (
+        form_data.PADDLEOCR_VL_MODEL
+        if form_data.PADDLEOCR_VL_MODEL is not None
+        else request.app.state.config.PADDLEOCR_VL_MODEL
+    )
+    request.app.state.config.PADDLEOCR_VL_OPTIONAL_PAYLOAD = (
+        form_data.PADDLEOCR_VL_OPTIONAL_PAYLOAD
+        if form_data.PADDLEOCR_VL_OPTIONAL_PAYLOAD is not None
+        else request.app.state.config.PADDLEOCR_VL_OPTIONAL_PAYLOAD
+    )
+    request.app.state.config.PADDLEOCR_VL_REQUEST_TIMEOUT = (
+        form_data.PADDLEOCR_VL_REQUEST_TIMEOUT
+        if form_data.PADDLEOCR_VL_REQUEST_TIMEOUT is not None
+        else request.app.state.config.PADDLEOCR_VL_REQUEST_TIMEOUT
+    )
+    request.app.state.config.PADDLEOCR_VL_DOWNLOAD_TIMEOUT = (
+        form_data.PADDLEOCR_VL_DOWNLOAD_TIMEOUT
+        if form_data.PADDLEOCR_VL_DOWNLOAD_TIMEOUT is not None
+        else request.app.state.config.PADDLEOCR_VL_DOWNLOAD_TIMEOUT
+    )
+    request.app.state.config.PADDLEOCR_VL_POLL_TIMEOUT = (
+        form_data.PADDLEOCR_VL_POLL_TIMEOUT
+        if form_data.PADDLEOCR_VL_POLL_TIMEOUT is not None
+        else request.app.state.config.PADDLEOCR_VL_POLL_TIMEOUT
+    )
+    request.app.state.config.PADDLEOCR_VL_POLL_INTERVAL = (
+        form_data.PADDLEOCR_VL_POLL_INTERVAL
+        if form_data.PADDLEOCR_VL_POLL_INTERVAL is not None
+        else request.app.state.config.PADDLEOCR_VL_POLL_INTERVAL
     )
 
     # MinerU settings
@@ -1195,6 +1237,12 @@ async def update_rag_config(request: Request, form_data: ConfigForm, user=Depend
         'MISTRAL_OCR_API_KEY': request.app.state.config.MISTRAL_OCR_API_KEY,
         'PADDLEOCR_VL_BASE_URL': request.app.state.config.PADDLEOCR_VL_BASE_URL,
         'PADDLEOCR_VL_TOKEN': request.app.state.config.PADDLEOCR_VL_TOKEN,
+        'PADDLEOCR_VL_MODEL': request.app.state.config.PADDLEOCR_VL_MODEL,
+        'PADDLEOCR_VL_OPTIONAL_PAYLOAD': request.app.state.config.PADDLEOCR_VL_OPTIONAL_PAYLOAD,
+        'PADDLEOCR_VL_REQUEST_TIMEOUT': request.app.state.config.PADDLEOCR_VL_REQUEST_TIMEOUT,
+        'PADDLEOCR_VL_DOWNLOAD_TIMEOUT': request.app.state.config.PADDLEOCR_VL_DOWNLOAD_TIMEOUT,
+        'PADDLEOCR_VL_POLL_TIMEOUT': request.app.state.config.PADDLEOCR_VL_POLL_TIMEOUT,
+        'PADDLEOCR_VL_POLL_INTERVAL': request.app.state.config.PADDLEOCR_VL_POLL_INTERVAL,
         # MinerU settings
         'MINERU_API_MODE': request.app.state.config.MINERU_API_MODE,
         'MINERU_API_URL': request.app.state.config.MINERU_API_URL,

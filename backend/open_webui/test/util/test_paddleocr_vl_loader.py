@@ -11,7 +11,9 @@ os.environ.setdefault('ENABLE_DB_MIGRATIONS', 'false')
 
 from open_webui.retrieval import document_image_assets
 from open_webui.retrieval.loaders import paddleocr_vl
+from open_webui.retrieval.loaders.main import Loader
 from open_webui.retrieval.loaders.paddleocr_vl import PaddleOCRVLLoader
+from open_webui.retrieval.utils import build_loader_from_config
 
 
 class FakeResponse:
@@ -182,6 +184,137 @@ def test_paddleocr_loader_submits_async_job_polls_jsonl_and_downloads_assets(tmp
     assert docs[1].metadata['document_image_assets'][0]['metadata']['origin_reference'] == (
         'https://cdn.test/output-only.png'
     )
+
+
+def test_paddleocr_loader_submits_configured_model_and_optional_payload(tmp_path, monkeypatch):
+    source_pdf = tmp_path / 'source.pdf'
+    source_pdf.write_bytes(b'%PDF-1.4\n')
+    submitted = {}
+
+    def fake_post(url, data=None, files=None, headers=None, timeout=None):
+        submitted.update(
+            {
+                'url': url,
+                'data': data,
+                'headers': headers,
+                'timeout': timeout,
+                'filename': files['file'][0],
+            }
+        )
+        return FakeResponse(json_data={'jobId': 'job-123'})
+
+    monkeypatch.setattr(paddleocr_vl.requests, 'post', fake_post)
+
+    job_id = PaddleOCRVLLoader(
+        api_url='https://paddleocr.aistudio-app.com',
+        token='secret-token',
+        file_path=str(source_pdf),
+        model='PaddleOCR-VL-1.6',
+        optional_payload={
+            'useDocOrientationClassify': False,
+            'useDocUnwarping': False,
+            'useChartRecognition': False,
+        },
+        request_timeout_s=45,
+    )._submit_job()
+
+    assert job_id == 'job-123'
+    assert submitted['url'] == 'https://paddleocr.aistudio-app.com/api/v2/ocr/jobs'
+    assert submitted['headers'] == {'Authorization': 'bearer secret-token'}
+    assert submitted['timeout'] == 45
+    assert submitted['filename'] == 'source.pdf'
+    assert submitted['data']['model'] == 'PaddleOCR-VL-1.6'
+    assert json.loads(submitted['data']['optionalPayload']) == {
+        'useDocOrientationClassify': False,
+        'useDocUnwarping': False,
+        'useChartRecognition': False,
+    }
+
+
+def test_loader_passes_paddleocr_async_options(monkeypatch):
+    captured = {}
+
+    class FakePaddleOCRVLLoader:
+        def __init__(self, **kwargs):
+            captured.update(kwargs)
+
+    monkeypatch.setattr(
+        'open_webui.retrieval.loaders.main.PaddleOCRVLLoader',
+        FakePaddleOCRVLLoader,
+    )
+
+    loader = Loader(
+        engine='paddleocr_vl',
+        PADDLEOCR_VL_BASE_URL='https://paddleocr.aistudio-app.com',
+        PADDLEOCR_VL_TOKEN='secret-token',
+        PADDLEOCR_VL_MODEL='PaddleOCR-VL-1.6',
+        PADDLEOCR_VL_OPTIONAL_PAYLOAD={
+            'useDocOrientationClassify': False,
+            'useDocUnwarping': False,
+            'useChartRecognition': False,
+        },
+        PADDLEOCR_VL_REQUEST_TIMEOUT=45,
+        PADDLEOCR_VL_DOWNLOAD_TIMEOUT=90,
+        PADDLEOCR_VL_POLL_TIMEOUT=600,
+        PADDLEOCR_VL_POLL_INTERVAL=5,
+    )
+
+    assert loader._get_loader('source.pdf', 'application/pdf', '/tmp/source.pdf') is not None
+    assert captured == {
+        'api_url': 'https://paddleocr.aistudio-app.com',
+        'token': 'secret-token',
+        'file_path': '/tmp/source.pdf',
+        'model': 'PaddleOCR-VL-1.6',
+        'optional_payload': {
+            'useDocOrientationClassify': False,
+            'useDocUnwarping': False,
+            'useChartRecognition': False,
+        },
+        'request_timeout_s': 45,
+        'download_timeout_s': 90,
+        'poll_timeout_s': 600,
+        'poll_interval_s': 5,
+    }
+
+
+def test_build_loader_from_config_includes_paddleocr_async_options():
+    class Config:
+        CONTENT_EXTRACTION_ENGINE = 'paddleocr_vl'
+        PADDLEOCR_VL_BASE_URL = 'https://paddleocr.aistudio-app.com'
+        PADDLEOCR_VL_TOKEN = 'secret-token'
+        PADDLEOCR_VL_MODEL = 'PaddleOCR-VL-1.6'
+        PADDLEOCR_VL_OPTIONAL_PAYLOAD = {
+            'useDocOrientationClassify': False,
+            'useDocUnwarping': False,
+            'useChartRecognition': False,
+        }
+        PADDLEOCR_VL_REQUEST_TIMEOUT = 45
+        PADDLEOCR_VL_DOWNLOAD_TIMEOUT = 90
+        PADDLEOCR_VL_POLL_TIMEOUT = 600
+        PADDLEOCR_VL_POLL_INTERVAL = 5
+
+        def __getattr__(self, name):
+            return None
+
+    request = type(
+        'Request',
+        (),
+        {'app': type('App', (), {'state': type('State', (), {'config': Config()})()})()},
+    )()
+
+    loader = build_loader_from_config(request)
+
+    assert loader.engine == 'paddleocr_vl'
+    assert loader.kwargs['PADDLEOCR_VL_MODEL'] == 'PaddleOCR-VL-1.6'
+    assert loader.kwargs['PADDLEOCR_VL_OPTIONAL_PAYLOAD'] == {
+        'useDocOrientationClassify': False,
+        'useDocUnwarping': False,
+        'useChartRecognition': False,
+    }
+    assert loader.kwargs['PADDLEOCR_VL_REQUEST_TIMEOUT'] == 45
+    assert loader.kwargs['PADDLEOCR_VL_DOWNLOAD_TIMEOUT'] == 90
+    assert loader.kwargs['PADDLEOCR_VL_POLL_TIMEOUT'] == 600
+    assert loader.kwargs['PADDLEOCR_VL_POLL_INTERVAL'] == 5
 
 
 def test_paddleocr_loader_accepts_jobs_endpoint_base_url_and_raises_for_failed_job(tmp_path, monkeypatch):

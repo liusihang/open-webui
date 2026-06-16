@@ -624,6 +624,12 @@ class Loader:
                 api_url=self.kwargs.get('PADDLEOCR_VL_BASE_URL'),
                 token=self.kwargs.get('PADDLEOCR_VL_TOKEN'),
                 file_path=file_path,
+                model=self.kwargs.get('PADDLEOCR_VL_MODEL', 'PaddleOCR-VL-1.6'),
+                optional_payload=self.kwargs.get('PADDLEOCR_VL_OPTIONAL_PAYLOAD'),
+                request_timeout_s=self.kwargs.get('PADDLEOCR_VL_REQUEST_TIMEOUT', 30),
+                download_timeout_s=self.kwargs.get('PADDLEOCR_VL_DOWNLOAD_TIMEOUT', 60),
+                poll_timeout_s=self.kwargs.get('PADDLEOCR_VL_POLL_TIMEOUT', 300),
+                poll_interval_s=self.kwargs.get('PADDLEOCR_VL_POLL_INTERVAL', 2),
             )
         else:
             if file_ext == 'pdf':
