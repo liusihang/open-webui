@@ -335,3 +335,34 @@ Checkpoint 2026-06-16 Phase 2 review follow-up:
   - `WEBUI_SECRET_KEY=test timeout 180 uv run --frozen pytest -q backend/open_webui/test/util/test_openai_router_responses_payload.py` passed: `3 passed, 3 warnings in 2.22s`.
   - `git diff --check` exited 0.
   - `uv.lock` stayed clean.
+
+Checkpoint 2026-06-16 Phase 3 start:
+
+- Active agent is working in `/Users/liusihang/.config/superpowers/worktrees/openwebui/codex-tool-cache-stability` only.
+- Confirmed branch `codex/tool-cache-stability`, HEAD `2a22246f862061f1f8f31994ce3576e929a46e86`, merge-base with `5cc1758f256c06635aaf500486d76b6fab1ffa1a` matches the requested base.
+- Scope for this checkpoint: native tool-loop source/citation context rewrite must explicitly force full replay instead of silently attempting `previous_response_id` after mutating stable system/user prefix.
+- Constraints carried forward:
+  - keep Phase 1 prompt cache key behavior unchanged
+  - keep Phase 2 guard contract intact except for a narrow explicit replay-required reason if needed
+  - preserve source/citation events and `citation_map`
+  - do not compress tool result payloads or add summary fallbacks
+- TDD next step: add a focused failing websocket/native Responses regression proving that tool source rewrite removes `previous_response_id`, records stable reason `tool_source_context_rewrite`, still sends full replay, and preserves emitted source event behavior.
+
+Checkpoint 2026-06-16 Phase 3:
+
+- Implemented explicit source-rewrite replay fallback in:
+  - `backend/open_webui/utils/middleware.py`
+  - `backend/open_webui/routers/openai.py`
+  - `backend/open_webui/test/util/test_native_tool_continuation_api.py`
+  - `backend/open_webui/test/util/test_openai_router_responses_payload.py`
+- Behavior:
+  - When native tool sources produce model-facing source context and the RAG template rewrites system/user prompt content, middleware sets `responses_stateful_replay_required_reason = "tool_source_context_rewrite"`.
+  - The Responses continuation guard treats that marker as an explicit stateful rejection reason, removes `previous_response_id`, and preserves full replay.
+  - Router payload conversion strips the internal replay-required marker so it is never forwarded upstream.
+  - Source events and `citation_map` metadata are preserved.
+  - Debug guard logs include only the compact reason/mode fields, not raw user/source/tool content.
+- Verification:
+  - `WEBUI_SECRET_KEY=test timeout 180 uv run --frozen pytest -q backend/open_webui/test/util/test_native_tool_continuation_api.py` passed: `20 passed, 6 warnings in 4.40s`.
+  - `WEBUI_SECRET_KEY=test timeout 180 uv run --frozen pytest -q backend/open_webui/test/util/test_openai_router_responses_payload.py` passed: `3 passed, 3 warnings in 3.05s`.
+  - `git diff --check` exited 0.
+  - `uv.lock` stayed clean.

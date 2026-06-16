@@ -5,6 +5,7 @@ def test_convert_to_responses_payload_preserves_full_replay_for_unguarded_previo
     payload = {
         'model': 'gpt-5.5',
         'previous_response_id': 'resp_existing',
+        'responses_stateful_replay_required_reason': 'tool_source_context_rewrite',
         'messages': [
             {'role': 'system', 'content': 'stable instructions'},
             {'role': 'user', 'content': 'old question'},
@@ -16,6 +17,7 @@ def test_convert_to_responses_payload_preserves_full_replay_for_unguarded_previo
     responses_payload = convert_to_responses_payload(payload)
 
     assert 'previous_response_id' not in responses_payload
+    assert 'responses_stateful_replay_required_reason' not in responses_payload
     assert responses_payload['instructions'] == 'stable instructions'
     assert responses_payload['input'] == [
         {

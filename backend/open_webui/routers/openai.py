@@ -979,6 +979,7 @@ def convert_to_responses_payload(payload: dict) -> dict:
     # strict delta continuation and marked the internal continuation mode.
     previous_response_id = responses_payload.pop('previous_response_id', None)
     responses_payload.pop('continuation_mode', None)
+    responses_payload.pop('responses_stateful_replay_required_reason', None)
     if previous_response_id and guarded_stateful_delta:
         responses_payload['previous_response_id'] = previous_response_id
 

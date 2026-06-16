@@ -601,6 +601,114 @@ async def test_websocket_responses_native_tool_continuation_guard_accepts_statef
 
 
 @pytest.mark.asyncio
+async def test_websocket_responses_native_tool_source_rewrite_forces_explicit_full_replay(
+    monkeypatch, caplog
+):
+    captured = {}
+
+    tool_source = {
+        'source': {
+            'id': 'ke:kb-1:file-a:text_chunk:1:aaa',
+            'name': 'paper.pdf',
+            'type': 'evidence',
+            'evidence_ref': 'ke:kb-1:file-a:text_chunk:1:aaa',
+        },
+        'document': ['Grounding evidence from source'],
+        'metadata': [
+            {
+                'source': 'paper.pdf',
+                'evidence_ref': 'ke:kb-1:file-a:text_chunk:1:aaa',
+                'modality': 'text',
+            }
+        ],
+    }
+
+    async def fake_execute_native_tool_calls(*args, **kwargs):
+        return [
+            {
+                'tool_call_id': 'call_knowledge',
+                'content': 'Grounding evidence',
+            }
+        ], [tool_source]
+
+    async def fake_generate_chat_completion(
+        request, form_data, user, bypass_system_prompt=False, **kwargs
+    ):
+        captured['form_data'] = deepcopy(form_data)
+        return _responses_final_stream()
+
+    async def noop(*args, **kwargs):
+        return None
+
+    async def event_emitter(event):
+        events.append(event)
+
+    monkeypatch.setattr(middleware, 'ENABLE_RESPONSES_API_STATEFUL', True)
+    monkeypatch.setattr(middleware, 'execute_native_tool_calls', fake_execute_native_tool_calls)
+    monkeypatch.setattr(middleware, 'generate_chat_completion', fake_generate_chat_completion)
+    monkeypatch.setattr(middleware, 'outlet_filter_handler', noop)
+    monkeypatch.setattr(middleware, 'background_tasks_handler', noop)
+    monkeypatch.setattr(middleware, 'get_system_oauth_token', noop)
+    monkeypatch.setattr(
+        middleware,
+        'get_sorted_filter_ids',
+        lambda *args, **kwargs: middleware.asyncio.sleep(0, result=[]),
+    )
+
+    events = []
+    ctx = _ctx()
+    ctx['form_data'].update(
+        {
+            'stream': True,
+            'cache_debug': True,
+            'prompt_cache_key': 'chat-cache-key',
+            'messages': [
+                {'role': 'system', 'content': 'stable instructions'},
+                {'role': 'user', 'content': 'Use the attached docs.'},
+            ],
+        }
+    )
+    ctx['metadata']['chat_id'] = 'channel:test'
+    ctx['metadata']['message_id'] = 'message-1'
+    ctx['event_emitter'] = event_emitter
+    ctx['model'] = {
+        'id': 'gpt-test',
+        'info': {'meta': {'capabilities': {'citations': True}}},
+    }
+
+    with caplog.at_level(logging.INFO, logger=middleware.log.name):
+        await middleware.streaming_chat_response_handler(_responses_tool_call_stream(), ctx)
+
+    assert 'previous_response_id' not in captured['form_data']
+    assert captured['form_data']['continuation_mode'] == 'stateful_rejected'
+    assert (
+        captured['form_data']['responses_stateful_replay_required_reason']
+        == 'tool_source_context_rewrite'
+    )
+    assert any(
+        '<source id="1"' in message.get('content', '')
+        for message in captured['form_data']['messages']
+    )
+    assert captured['form_data']['messages'][-2]['role'] == 'assistant'
+    assert captured['form_data']['messages'][-1] == {
+        'role': 'tool',
+        'tool_call_id': 'call_knowledge',
+        'content': 'Grounding evidence',
+    }
+    assert any(event['type'] == 'source' and event['data'] == tool_source for event in events)
+    completion_events = [event for event in events if event.get('type') == 'chat:completion']
+    assert any(
+        event.get('data', {}).get('metadata', {}).get('citation_map')
+        == {'1': 'ke:kb-1:file-a:text_chunk:1:aaa'}
+        for event in completion_events
+    )
+    assert 'native_tool_continuation_guard' in caplog.text
+    assert 'tool_source_context_rewrite' in caplog.text
+    assert 'Grounding evidence from source' not in caplog.text
+    assert 'Use the attached docs.' not in caplog.text
+
+
+@pytest.mark.asyncio
 async def test_websocket_responses_native_tool_continuation_guard_rejects_rewritten_prefix(monkeypatch):
     captured = {}
 

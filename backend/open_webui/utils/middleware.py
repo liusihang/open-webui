@@ -3852,6 +3852,10 @@ def evaluate_responses_continuation_delta(
     *,
     route_mode: str,
 ) -> dict:
+    replay_required_reason = current_form_data.get('responses_stateful_replay_required_reason')
+    if replay_required_reason:
+        return _responses_continuation_reject(str(replay_required_reason))
+
     if not previous_state:
         return _responses_continuation_reject('missing_previous_guard_state')
 
@@ -6030,6 +6034,9 @@ async def streaming_chat_response_handler(response, ctx):
                             )
                             source_context = source_context.strip()
                             if source_context:
+                                form_data['responses_stateful_replay_required_reason'] = (
+                                    'tool_source_context_rewrite'
+                                )
                                 rag_content = await rag_template(
                                     request.app.state.config.RAG_TEMPLATE,
                                     source_context,
