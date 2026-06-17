@@ -15,7 +15,12 @@ from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
 from sqlalchemy.orm import sessionmaker
 
 from open_webui.migrations.versions import d1e2f3a4b5c6_add_multimodal_evidence_schema as evidence_migration
-from open_webui.models.evidence import KnowledgeEvidence, KnowledgeEvidenceAsset
+from open_webui.models.evidence import (
+    KnowledgeEvidence,
+    KnowledgeEvidenceAsset,
+    KnowledgeEvidenceEmbedding,
+    KnowledgeVectorSpace,
+)
 from open_webui.models.files import File
 from open_webui.models.knowledge import Knowledge
 from open_webui.models.retrieval_chunks import RetrievalChunk
@@ -46,8 +51,10 @@ async def db_session():
         await connection.run_sync(Knowledge.__table__.create)
         await connection.run_sync(File.__table__.create)
         await connection.run_sync(RetrievalChunk.__table__.create)
+        await connection.run_sync(KnowledgeVectorSpace.__table__.create)
         await connection.run_sync(KnowledgeEvidenceAsset.__table__.create)
         await connection.run_sync(KnowledgeEvidence.__table__.create)
+        await connection.run_sync(KnowledgeEvidenceEmbedding.__table__.create)
 
     session_factory = sessionmaker(engine, expire_on_commit=False, class_=AsyncSession)
     async with session_factory() as session:
@@ -256,6 +263,81 @@ async def test_project_job_without_file_ids_defaults_text_evidence_to_multimodal
     assert result.scanned_chunks == 1
     assert len(evidence_rows) == 1
     assert evidence_rows[0].projection_profile == "unified_multimodal_dense"
+
+
+@pytest.mark.asyncio
+async def test_projected_evidence_embeddings_create_missing_vector_space(db_session, monkeypatch):
+    await _seed_knowledge_file(
+        db_session,
+        file_id="file-doc",
+        filename="doc.pdf",
+        content_type="application/pdf",
+        path="/tmp/doc.pdf",
+    )
+    await _seed_active_text_chunk(db_session, row_id=7, file_id="file-doc", text="First paragraph")
+
+    projection = await project_evidence_for_knowledge_file(
+        knowledge_id="kb-1",
+        file_id="file-doc",
+        projection_profile="unified_multimodal_dense",
+        db=db_session,
+    )
+
+    upserts = []
+
+    async def fake_embedding_function(query, prefix=None, user=None):
+        return [0.1, 0.2, 0.3]
+
+    fake_embedding_function._model = "Qwen3-VL-Embedding-2B"
+    fake_embedding_function._supports_image_payloads = True
+
+    class FakeVectorClient:
+        async def upsert(self, collection_name, items):
+            upserts.append((collection_name, items))
+
+    monkeypatch.setattr(
+        indexing_mod,
+        "_get_evidence_embedding_runtime",
+        lambda: (fake_embedding_function, FakeVectorClient()),
+    )
+
+    result = await indexing_mod.write_projected_evidence_embeddings(
+        projection.evidence_refs,
+        db=db_session,
+    )
+
+    vector_spaces = (
+        (
+            await db_session.execute(
+                select(KnowledgeVectorSpace).where(KnowledgeVectorSpace.knowledge_id == "kb-1")
+            )
+        )
+        .scalars()
+        .all()
+    )
+    embeddings = (
+        (
+            await db_session.execute(
+                select(KnowledgeEvidenceEmbedding).where(
+                    KnowledgeEvidenceEmbedding.evidence_ref.in_(projection.evidence_refs)
+                )
+            )
+        )
+        .scalars()
+        .all()
+    )
+
+    assert result.written == 1
+    assert result.skipped == 0
+    assert result.failed == 0
+    assert len(vector_spaces) == 1
+    assert vector_spaces[0].retrieval_profile == "unified_multimodal_dense"
+    assert vector_spaces[0].embedding_model == "Qwen3-VL-Embedding-2B"
+    assert vector_spaces[0].supports_text_evidence is True
+    assert vector_spaces[0].supports_image_evidence is True
+    assert len(upserts) == 1
+    assert len(embeddings) == 1
+    assert embeddings[0].embedding_status == "ready"
 
 
 @pytest.mark.asyncio

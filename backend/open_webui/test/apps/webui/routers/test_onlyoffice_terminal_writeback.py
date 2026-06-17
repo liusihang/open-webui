@@ -151,6 +151,61 @@ async def test_create_onlyoffice_terminal_view_session_does_not_force_save(monke
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ('file_ext', 'document_type'),
+    [
+        ('pdf', 'pdf'),
+        ('docm', 'word'),
+        ('dot', 'word'),
+        ('dotm', 'word'),
+        ('dotx', 'word'),
+        ('odt', 'word'),
+        ('ott', 'word'),
+        ('ods', 'cell'),
+        ('ots', 'cell'),
+        ('xlsb', 'cell'),
+        ('xlsm', 'cell'),
+        ('xlt', 'cell'),
+        ('xltm', 'cell'),
+        ('xltx', 'cell'),
+        ('odp', 'slide'),
+        ('otp', 'slide'),
+        ('pot', 'slide'),
+        ('potm', 'slide'),
+        ('potx', 'slide'),
+        ('pps', 'slide'),
+        ('ppsm', 'slide'),
+        ('ppsx', 'slide'),
+        ('pptm', 'slide'),
+        ('rtf', 'word'),
+    ],
+)
+async def test_create_onlyoffice_terminal_view_session_supports_common_formats(
+    monkeypatch, file_ext, document_type
+):
+    monkeypatch.setattr(
+        onlyoffice_mod,
+        '_get_terminal_connection',
+        lambda request, terminal_server_id, user: _terminal_connection(),
+    )
+
+    response = await onlyoffice_mod.create_onlyoffice_session(
+        onlyoffice_mod.OnlyOfficeSessionForm(
+            source_type='terminal',
+            terminal_server_id='terminals',
+            terminal_file_path=f'/workspace/demo.{file_ext}',
+            mode='view',
+        ),
+        _fake_request(),
+        user=_fake_user(),
+        db=None,
+    )
+
+    assert response['config']['document']['fileType'] == file_ext
+    assert response['config']['documentType'] == document_type
+
+
+@pytest.mark.asyncio
 async def test_terminal_edit_session_embeds_callback_context(monkeypatch):
     monkeypatch.setattr(
         onlyoffice_mod,

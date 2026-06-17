@@ -300,6 +300,128 @@ async def test_process_file_projects_evidence_for_knowledge_ingest_by_default(mo
 
 
 @pytest.mark.asyncio
+async def test_process_file_persists_loader_document_image_assets(monkeypatch):
+    file_updates = []
+    saved_docs = []
+
+    file = SimpleNamespace(
+        id="file-1",
+        user_id="owner-1",
+        filename="doc.pdf",
+        path="storage/doc.pdf",
+        hash=None,
+        data={},
+        meta={"content_type": "application/pdf"},
+    )
+
+    class FakeLoader:
+        user = None
+
+        async def aload(self, filename, content_type, file_path):
+            assert filename == "doc.pdf"
+            assert content_type == "application/pdf"
+            assert file_path == "/tmp/doc.pdf"
+            return [
+                retrieval_router.Document(
+                    page_content="alpha text",
+                    metadata={
+                        "document_image_assets": [
+                            {
+                                "storage_path": "/tmp/page-1.png",
+                                "mime_type": "image/png",
+                                "page_index": 1,
+                            }
+                        ],
+                    },
+                )
+            ]
+
+    async def fake_get_file_by_id(file_id, db=None):
+        return file
+
+    def fake_get_file(path):
+        assert path == "storage/doc.pdf"
+        return "/tmp/doc.pdf"
+
+    def fake_build_loader_from_config(request):
+        return FakeLoader()
+
+    def fake_save_docs_to_vector_db(*args, **kwargs):
+        saved_docs.extend(kwargs["docs"])
+        return True
+
+    async def fake_update_file_metadata_by_id(file_id, metadata, db=None):
+        file_updates.append(("metadata", file_id, metadata))
+        return file
+
+    async def fake_update_file_data_by_id(file_id, data, db=None):
+        file_updates.append(("data", file_id, data))
+        file.data = {**file.data, **data}
+        return file
+
+    async def fake_update_file_hash_by_id(file_id, hash, db=None):
+        file_updates.append(("hash", file_id, hash))
+        return file
+
+    @asynccontextmanager
+    async def fake_get_async_db():
+        yield object()
+
+    monkeypatch.setattr(retrieval_router.Files, "get_file_by_id", fake_get_file_by_id)
+    monkeypatch.setattr(retrieval_router.Storage, "get_file", fake_get_file)
+    monkeypatch.setattr(retrieval_router, "build_loader_from_config", fake_build_loader_from_config)
+    monkeypatch.setattr(retrieval_router, "save_docs_to_vector_db", fake_save_docs_to_vector_db)
+    monkeypatch.setattr(retrieval_router.Files, "update_file_metadata_by_id", fake_update_file_metadata_by_id)
+    monkeypatch.setattr(retrieval_router.Files, "update_file_data_by_id", fake_update_file_data_by_id)
+    monkeypatch.setattr(retrieval_router.Files, "update_file_hash_by_id", fake_update_file_hash_by_id)
+    monkeypatch.setattr(retrieval_router, "get_async_db", fake_get_async_db)
+
+    async def fake_commit():
+        return None
+
+    request = SimpleNamespace(
+        app=SimpleNamespace(
+            state=SimpleNamespace(
+                config=SimpleNamespace(BYPASS_EMBEDDING_AND_RETRIEVAL=False),
+                EMBEDDING_FUNCTION=lambda query, prefix=None, user=None: [0.1, 0.2],
+            )
+        )
+    )
+    user = SimpleNamespace(id="owner-1", role="admin")
+
+    result = await retrieval_router.process_file(
+        request=request,
+        form_data=retrieval_router.ProcessFileForm(file_id="file-1"),
+        user=user,
+        db=SimpleNamespace(commit=fake_commit),
+    )
+
+    assert result["status"] is True
+    assert saved_docs[0].page_content == "alpha text"
+    assert file_updates[0] == (
+        "data",
+        "file-1",
+        {
+            "content": "alpha text",
+            "document_image_assets": [
+                {
+                    "storage_path": "/tmp/page-1.png",
+                    "mime_type": "image/png",
+                    "page_index": 1,
+                }
+            ],
+        },
+    )
+    assert file.data["document_image_assets"] == [
+        {
+            "storage_path": "/tmp/page-1.png",
+            "mime_type": "image/png",
+            "page_index": 1,
+        }
+    ]
+
+
+@pytest.mark.asyncio
 async def test_process_file_does_not_project_evidence_for_non_knowledge_collection(monkeypatch):
     enqueue_calls = []
 
@@ -420,7 +542,9 @@ async def test_process_files_batch_projects_evidence_for_completed_knowledge_fil
         return True
 
     async def fake_update_file_by_id(id, form_data, db=None):
-        return next(file for file in files if file.id == id)
+        file = next(file for file in files if file.id == id)
+        file.data = {**file.data, **(form_data.data or {})}
+        return file
 
     async def fake_enqueue(**kwargs):
         enqueue_calls.append(kwargs)
@@ -465,6 +589,8 @@ async def test_process_files_batch_projects_evidence_for_completed_knowledge_fil
         },
     ]
     assert run_calls == ["job-file-1", "job-file-2"]
+    assert files[0].data["document_image_assets"] == [{"storage_path": "/tmp/page-1.png"}]
+    assert files[0].data["content"] == "alpha"
 
 
 @pytest.mark.asyncio
