@@ -80,6 +80,21 @@ integrate worker branches in the documented merge train.
   passed.
 - `git diff --check origin/pr/7..HEAD` passed. `uv.lock` was restored after
   test-run environment churn.
+- W3 chat entry integrated as `e2baad875`.
+- Post-W3 integration gate passed:
+  `WEBUI_SECRET_KEY=test-secret ENABLE_DB_MIGRATIONS=false uv run pytest -q
+  backend/open_webui/test/agent/test_chat_entry_agent_mode.py
+  backend/open_webui/test/agent/test_tool_authority.py
+  backend/open_webui/test/agent/test_events.py
+  backend/open_webui/test/agent/test_resources.py
+  backend/open_webui/test/agent/test_compaction.py
+  backend/open_webui/test/models/test_agent_runs.py` -> `43 passed`.
+- `uv run ruff check backend/open_webui/agent/runtime_client.py
+  backend/open_webui/test/agent/test_chat_entry_agent_mode.py
+  backend/open_webui/agent backend/open_webui/routers/agent_service.py
+  backend/open_webui/test/agent` passed.
+- `git diff --check origin/pr/7..HEAD` passed again. `uv.lock` was restored
+  after test-run environment churn.
 
 ## Merge Train
 
@@ -97,9 +112,7 @@ integrate worker branches in the documented merge train.
 
 ## Next
 
-Wait for W3 worker commit. Do not duplicate its `main.py`/config work in this
-controller thread. After W3 lands, create W5 model-authority worktree against
-the new integrated guard shape. W7/W8 may now be prepared from the integrated
-W6 tool result contract, but W7 approval should still coordinate with W3's user
-control endpoints. W9 should wait for W4 plus W5 before real subagent adapter
-work.
+Create W5 model-authority worktree against `e2baad875` or newer. W7/W8 may now
+be prepared from the integrated W6 tool result contract, but W7 approval should
+still coordinate with W3's user control endpoints. W9 should wait for W4 plus
+W5 before real subagent adapter work.
