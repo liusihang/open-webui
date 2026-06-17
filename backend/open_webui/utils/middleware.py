@@ -3275,6 +3275,7 @@ async def process_chat_payload(request, form_data, user, metadata, model):
                 {
                     **extra_params,
                     '__event_emitter__': event_emitter,
+                    '__terminal_id__': terminal_id,
                     '__skill_ids__': [s.id for s in available_skills if s.id not in user_skill_ids],
                 },
                 features,

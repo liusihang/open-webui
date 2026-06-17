@@ -11,18 +11,23 @@ from open_webui.tools.knowledge_fs import kb_exec  # noqa: F401 — re-exported
 import asyncio
 import json
 import logging
+import re
 import time
 import types
+from io import BytesIO
+from pathlib import PurePosixPath
 from typing import Optional
 
 from fastapi import Request
 
+from open_webui.models.access_grants import AccessGrants
 from open_webui.models.channels import Channel, ChannelMember, Channels
 from open_webui.models.chats import Chats
 from open_webui.models.groups import Groups
 from open_webui.models.memories import Memories
 from open_webui.models.messages import Message, Messages
 from open_webui.models.notes import Notes
+from open_webui.models.skills import SkillForm, Skills
 from open_webui.models.users import UserModel
 from open_webui.retrieval.evidence import (
     EvidenceToolError,
@@ -51,7 +56,19 @@ from open_webui.routers.memories import (
     add_memory as _add_memory,
 )
 from open_webui.routers.retrieval import search_web as _search_web
+from open_webui.storage.provider import Storage
+from open_webui.utils.access_control import has_permission
 from open_webui.utils.sanitize import sanitize_code
+from open_webui.utils.skill_packages import (
+    build_skill_package_manifest,
+    build_skill_package_zip_bytes,
+    parse_skill_markdown,
+    skill_package_storage_filename,
+)
+from open_webui.utils.terminal_skill_packages import (
+    ensure_skill_synced_to_terminal,
+    read_skill_package_source_from_terminal,
+)
 
 log = logging.getLogger(__name__)
 
@@ -3034,17 +3051,20 @@ async def query_knowledge_bases(
 # =============================================================================
 
 
-async def view_skill(
+async def read_skill(
     id: str,
     __request__: Request = None,
     __user__: dict = None,
+    __terminal_id__: str = None,
+    __metadata__: dict = None,
+    __oauth_token__: dict = None,
 ) -> str:
     """
-    Load the full instructions of a skill by its id from the available skills manifest.
-    Use this when you need detailed instructions for a skill listed in <available_skills>.
+    Read the full instructions of an existing skill by id. If the skill has a package,
+    its assets are synced into the active Open Terminal runtime cache before returning.
 
-    :param id: The id of the skill to load (as shown in the manifest)
-    :return: The full skill instructions as markdown content
+    :param id: The id of the skill to read
+    :return: JSON with skill instructions and, for package-backed skills, runtime package paths
     """
     if __request__ is None:
         return json.dumps({'error': 'Request context not available'})
@@ -3053,40 +3073,305 @@ async def view_skill(
         return json.dumps({'error': 'User context not available'})
 
     try:
-        from open_webui.models.access_grants import AccessGrants
-        from open_webui.models.skills import Skills
+        skill = await _get_accessible_skill_for_tool(id, __user__, permission='read')
+        package = await Skills.get_latest_skill_package_by_skill_id(skill.id)
+        payload = {'name': skill.name, 'content': skill.content}
 
-        user_id = __user__.get('id')
+        if package:
+            terminal_id = _resolve_terminal_id(__terminal_id__, __metadata__)
+            if not terminal_id:
+                return json.dumps({'error': 'Terminal context is required to sync skill package assets'})
 
-        # Direct DB lookup by id (case-insensitive since IDs are stored lowercase)
-        skill = await Skills.get_skill_by_id(id.lower())
+            sync_result = await ensure_skill_synced_to_terminal(
+                __request__,
+                terminal_id,
+                __user__,
+                skill,
+                package,
+                metadata=__metadata__,
+                oauth_token=__oauth_token__,
+            )
+            payload['package'] = {'path': sync_result['path']}
+            payload['entrypoints'] = sync_result['entrypoints']
 
-        if not skill or not skill.is_active:
-            return json.dumps({'error': f"Skill '{id}' not found"})
-
-        # Check user access
-        user_role = __user__.get('role', 'user')
-        if user_role != 'admin' and skill.user_id != user_id:
-            user_group_ids = [group.id for group in await Groups.get_groups_by_member_id(user_id)]
-            if not await AccessGrants.has_access(
-                user_id=user_id,
-                resource_type='skill',
-                resource_id=skill.id,
-                permission='read',
-                user_group_ids=set(user_group_ids),
-            ):
-                return json.dumps({'error': 'Access denied'})
-
-        return json.dumps(
-            {
-                'name': skill.name,
-                'content': skill.content,
-            },
-            ensure_ascii=False,
-        )
+        return json.dumps(payload, ensure_ascii=False)
     except Exception as e:
-        log.exception(f'view_skill error: {e}')
+        log.exception(f'read_skill error: {e}')
         return json.dumps({'error': str(e)})
+
+
+async def install_skill(
+    source_path: str,
+    __request__: Request = None,
+    __user__: dict = None,
+    __terminal_id__: str = None,
+    __metadata__: dict = None,
+    __oauth_token__: dict = None,
+) -> str:
+    """
+    Install a new skill from a concrete package directory in the active Open Terminal.
+
+    :param source_path: Terminal directory containing SKILL.md and optional skill package assets
+    :return: JSON containing only the installed skill id
+    """
+    if __request__ is None:
+        return json.dumps({'error': 'Request context not available'})
+    if not __user__:
+        return json.dumps({'error': 'User context not available'})
+
+    try:
+        terminal_id = _resolve_terminal_id(__terminal_id__, __metadata__)
+        if not terminal_id:
+            return json.dumps({'error': 'Terminal context is required'})
+        if not await _can_manage_workspace_skills(__request__, __user__):
+            return json.dumps({'error': 'Access denied'})
+
+        skill_id = await install_skill_from_terminal_source(
+            __request__,
+            __user__,
+            terminal_id,
+            source_path,
+            metadata=__metadata__,
+            oauth_token=__oauth_token__,
+        )
+        return json.dumps({'id': skill_id}, ensure_ascii=False)
+    except Exception as e:
+        log.exception(f'install_skill error: {e}')
+        return json.dumps({'error': str(e)})
+
+
+async def update_skill(
+    id: str,
+    content: Optional[str] = None,
+    source_path: Optional[str] = None,
+    __request__: Request = None,
+    __user__: dict = None,
+    __terminal_id__: str = None,
+    __metadata__: dict = None,
+    __oauth_token__: dict = None,
+) -> str:
+    """
+    Update an existing skill's instructions or replace it from a terminal package directory.
+
+    :param id: The existing skill id to update
+    :param content: Replacement SKILL.md instruction content for text-only updates
+    :param source_path: Terminal directory containing an updated skill package
+    :return: JSON containing only the updated skill id
+    """
+    if __request__ is None:
+        return json.dumps({'error': 'Request context not available'})
+    if not __user__:
+        return json.dumps({'error': 'User context not available'})
+
+    try:
+        skill_id = await update_skill_from_tool(
+            __request__,
+            __user__,
+            _resolve_terminal_id(__terminal_id__, __metadata__),
+            id,
+            content=content,
+            source_path=source_path,
+            metadata=__metadata__,
+            oauth_token=__oauth_token__,
+        )
+        return json.dumps({'id': skill_id}, ensure_ascii=False)
+    except Exception as e:
+        log.exception(f'update_skill error: {e}')
+        return json.dumps({'error': str(e)})
+
+
+async def view_skill(
+    id: str,
+    __request__: Request = None,
+    __user__: dict = None,
+    __terminal_id__: str = None,
+    __metadata__: dict = None,
+    __oauth_token__: dict = None,
+) -> str:
+    """Compatibility alias for read_skill."""
+    return await read_skill(
+        id,
+        __request__=__request__,
+        __user__=__user__,
+        __terminal_id__=__terminal_id__,
+        __metadata__=__metadata__,
+        __oauth_token__=__oauth_token__,
+    )
+
+
+async def install_skill_from_terminal_source(
+    request: Request,
+    user: dict,
+    terminal_id: str,
+    source_path: str,
+    *,
+    metadata: dict | None = None,
+    oauth_token: dict | None = None,
+) -> str:
+    files = await read_skill_package_source_from_terminal(
+        request,
+        terminal_id,
+        user,
+        source_path,
+        metadata=metadata,
+        oauth_token=oauth_token,
+    )
+    manifest = build_skill_package_manifest(files)
+    parsed_skill = parse_skill_markdown(files['SKILL.md'])
+    skill_name = parsed_skill.name or _fallback_skill_name_from_source_path(source_path)
+    skill_id = _skill_id_from_name(skill_name)
+
+    if await Skills.get_skill_by_id(skill_id):
+        raise ValueError(f"Skill '{skill_id}' already exists")
+
+    storage_path = await _upload_skill_package_bundle(skill_id, files, manifest)
+    skill = await Skills.insert_new_skill(
+        _user_id(user),
+        SkillForm(
+            id=skill_id,
+            name=skill_name,
+            description=parsed_skill.description,
+            content=parsed_skill.body,
+        ),
+    )
+    if not skill:
+        raise ValueError('Error creating skill')
+
+    package = await Skills.upsert_skill_package(
+        skill.id,
+        manifest.hash,
+        manifest.model_dump(),
+        storage_path,
+    )
+    if not package:
+        raise ValueError('Error storing skill package metadata')
+
+    return skill.id
+
+
+async def update_skill_from_tool(
+    request: Request,
+    user: dict,
+    terminal_id: str | None,
+    skill_id: str,
+    *,
+    content: Optional[str] = None,
+    source_path: Optional[str] = None,
+    metadata: dict | None = None,
+    oauth_token: dict | None = None,
+) -> str:
+    if content is None and source_path is None:
+        raise ValueError('content or source_path is required')
+    if content is not None and source_path is not None:
+        raise ValueError('provide either content or source_path, not both')
+
+    skill = await _get_accessible_skill_for_tool(skill_id, user, permission='write')
+    updated: dict[str, object] = {}
+
+    if source_path is not None:
+        if not terminal_id:
+            raise ValueError('Terminal context is required')
+        files = await read_skill_package_source_from_terminal(
+            request,
+            terminal_id,
+            user,
+            source_path,
+            metadata=metadata,
+            oauth_token=oauth_token,
+        )
+        manifest = build_skill_package_manifest(files)
+        parsed_skill = parse_skill_markdown(files['SKILL.md'])
+        updated['content'] = parsed_skill.body
+        if parsed_skill.name:
+            updated['name'] = parsed_skill.name
+        updated['description'] = parsed_skill.description
+        storage_path = await _upload_skill_package_bundle(skill.id, files, manifest)
+        saved = await Skills.update_skill_and_upsert_package_by_id(
+            skill.id,
+            updated,
+            bundle_hash=manifest.hash,
+            manifest=manifest.model_dump(),
+            storage_path=storage_path,
+        )
+    else:
+        updated['content'] = content
+        saved = await Skills.update_skill_by_id(skill.id, updated)
+    if not saved:
+        raise ValueError('Error updating skill')
+    return saved.id
+
+
+async def _upload_skill_package_bundle(skill_id: str, files: dict[str, str | bytes], manifest) -> str:
+    zip_bytes = build_skill_package_zip_bytes(files)
+    filename = skill_package_storage_filename(skill_id, manifest.hash)
+
+    def _upload() -> str:
+        _, storage_path = Storage.upload_file(
+            BytesIO(zip_bytes),
+            filename,
+            {'resource_type': 'skill_package', 'skill_id': skill_id, 'bundle_hash': manifest.hash},
+        )
+        return storage_path
+
+    return await asyncio.to_thread(_upload)
+
+
+async def _get_accessible_skill_for_tool(id: str, user: dict, *, permission: str):
+    user_id = _user_id(user)
+    skill = await Skills.get_skill_by_id(id.lower())
+    if not skill or not skill.is_active:
+        raise ValueError(f"Skill '{id}' not found")
+
+    user_role = user.get('role', 'user') if isinstance(user, dict) else getattr(user, 'role', 'user')
+    if user_role == 'admin' or skill.user_id == user_id:
+        return skill
+
+    user_group_ids = {group.id for group in await Groups.get_groups_by_member_id(user_id)}
+    if await AccessGrants.has_access(
+        user_id=user_id,
+        resource_type='skill',
+        resource_id=skill.id,
+        permission=permission,
+        user_group_ids=user_group_ids,
+    ):
+        return skill
+
+    raise PermissionError('Access denied')
+
+
+async def _can_manage_workspace_skills(request: Request, user: dict) -> bool:
+    if (user.get('role') if isinstance(user, dict) else getattr(user, 'role', None)) == 'admin':
+        return True
+    return await has_permission(
+        _user_id(user),
+        'workspace.skills',
+        request.app.state.config.USER_PERMISSIONS,
+    )
+
+
+def _resolve_terminal_id(terminal_id: str | None, metadata: dict | None = None) -> str | None:
+    if terminal_id:
+        return terminal_id
+    if isinstance(metadata, dict):
+        value = metadata.get('terminal_id')
+        if isinstance(value, str) and value:
+            return value
+    return None
+
+
+def _skill_id_from_name(name: str) -> str:
+    slug = re.sub(r'[^a-z0-9_-]+', '-', name.lower()).strip('-_')
+    slug = re.sub(r'-{2,}', '-', slug)
+    return slug or 'skill'
+
+
+def _fallback_skill_name_from_source_path(source_path: str) -> str:
+    name = PurePosixPath(source_path).name
+    return name.replace('-', ' ').replace('_', ' ').strip().title() or 'Skill'
+
+
+def _user_id(user: dict) -> str:
+    return user.get('id') if isinstance(user, dict) else getattr(user, 'id')
 
 
 # =============================================================================

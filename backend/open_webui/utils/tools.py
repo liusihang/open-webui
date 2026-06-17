@@ -64,6 +64,7 @@ from open_webui.tools.builtin import (
     generate_image,
     get_current_timestamp,
     grep_knowledge_files,
+    install_skill,
     kb_exec,
     list_automations,
     list_knowledge,
@@ -74,6 +75,7 @@ from open_webui.tools.builtin import (
     query_knowledge_files,
     replace_memory_content,
     replace_note_content,
+    read_skill,
     search_calendar_events,
     search_channel_messages,
     search_channels,
@@ -84,6 +86,7 @@ from open_webui.tools.builtin import (
     search_notes,
     search_web,
     toggle_automation,
+    update_skill,
     update_automation,
     update_calendar_event,
     update_task,
@@ -93,7 +96,6 @@ from open_webui.tools.builtin import (
     view_note,
     view_file,
     view_knowledge_file,
-    view_skill,
     write_note,
 )
 from open_webui.utils.access_control import has_access, has_connection_access, has_permission
@@ -612,9 +614,11 @@ async def get_builtin_tools(
             ]
         )
 
-    # Skills tools - view_skill allows model to load full skill instructions on demand
-    if extra_params.get('__skill_ids__'):
-        builtin_functions.append(view_skill)
+    # Skills tools - read existing skills and install/update terminal package sources.
+    if is_builtin_tool_enabled('skills') and (extra_params.get('__skill_ids__') or extra_params.get('__terminal_id__')):
+        builtin_functions.append(read_skill)
+        if extra_params.get('__terminal_id__'):
+            builtin_functions.extend([install_skill, update_skill])
 
     # Task management - break down complex work into trackable steps
     if is_builtin_tool_enabled('tasks'):
@@ -649,6 +653,9 @@ async def get_builtin_tools(
                 '__event_emitter__': extra_params.get('__event_emitter__'),
                 '__event_call__': extra_params.get('__event_call__'),
                 '__metadata__': extra_params.get('__metadata__'),
+                '__oauth_token__': extra_params.get('__oauth_token__'),
+                '__terminal_id__': extra_params.get('__terminal_id__'),
+                '__skill_ids__': extra_params.get('__skill_ids__'),
                 '__chat_id__': extra_params.get('__chat_id__'),
                 '__message_id__': extra_params.get('__message_id__'),
                 '__model_knowledge__': model_knowledge,
