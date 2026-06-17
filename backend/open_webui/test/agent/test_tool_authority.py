@@ -1,0 +1,230 @@
+import os
+
+os.environ.setdefault('WEBUI_SECRET_KEY', 'test-secret')
+os.environ.setdefault('ENABLE_DB_MIGRATIONS', 'false')
+
+import pytest
+from open_webui.agent.tool_authority import (
+    AgentToolAuthority,
+    ToolCallRequest,
+    build_tool_access_envelope,
+    normalize_tool_result,
+)
+
+
+class FakeOperationStore:
+    def __init__(self):
+        self.claims = {}
+        self.claim_count = 0
+        self.successes = {}
+
+    async def claim_operation(
+        self,
+        run_id,
+        *,
+        operation_type,
+        idempotency_key,
+        request_hash,
+    ):
+        from open_webui.models.agent_runs import (
+            AgentRunOperationClaim,
+            AgentRunOperationConflict,
+            AgentRunOperationModel,
+        )
+
+        key = (run_id, operation_type, idempotency_key)
+        existing = self.claims.get(key)
+        if existing:
+            if existing.request_hash != request_hash:
+                raise AgentRunOperationConflict(
+                    'idempotency key was reused with a different request hash'
+                )
+            return AgentRunOperationClaim(operation=existing, created=False)
+
+        self.claim_count += 1
+        operation = AgentRunOperationModel(
+            id=f'op-{self.claim_count}',
+            run_id=run_id,
+            operation_type=operation_type,
+            idempotency_key=idempotency_key,
+            request_hash=request_hash,
+            status='in_progress',
+            created_at=1,
+            updated_at=1,
+        )
+        self.claims[key] = operation
+        return AgentRunOperationClaim(operation=operation, created=True)
+
+    async def finish_operation_success(self, operation_id, response):
+        for key, operation in list(self.claims.items()):
+            if operation.id == operation_id:
+                updated = operation.model_copy(
+                    update={'status': 'succeeded', 'response': response}
+                )
+                self.claims[key] = updated
+                self.successes[operation_id] = response
+                return updated
+        raise AssertionError(f'unknown operation {operation_id}')
+
+    async def finish_operation_error(self, operation_id, error):
+        for key, operation in list(self.claims.items()):
+            if operation.id == operation_id:
+                updated = operation.model_copy(update={'status': 'failed', 'error': error})
+                self.claims[key] = updated
+                return updated
+        raise AssertionError(f'unknown operation {operation_id}')
+
+
+def test_tool_access_envelope_exposes_schema_and_opaque_ids_without_callables():
+    async def read_file(path: str):
+        return f'read {path}'
+
+    envelope, registry = build_tool_access_envelope(
+        {
+            'read_file': {
+                'tool_id': 'terminal:main',
+                'callable': read_file,
+                'spec': {
+                    'name': 'read_file',
+                    'description': 'Read a file.',
+                    'parameters': {
+                        'type': 'object',
+                        'properties': {'path': {'type': 'string'}},
+                        'required': ['path'],
+                    },
+                },
+                'type': 'terminal',
+            }
+        }
+    )
+
+    assert envelope == {
+        'tools': [
+            {
+                'id': 'tool:terminal:main:read_file',
+                'name': 'read_file',
+                'type': 'terminal',
+                'schema': {
+                    'name': 'read_file',
+                    'description': 'Read a file.',
+                    'parameters': {
+                        'type': 'object',
+                        'properties': {'path': {'type': 'string'}},
+                        'required': ['path'],
+                    },
+                },
+            }
+        ]
+    }
+    assert 'callable' not in envelope['tools'][0]
+    assert registry['tool:terminal:main:read_file']['callable'] is read_file
+
+
+def test_normalize_tool_result_extracts_terminal_process_refs():
+    result = normalize_tool_result(
+        {
+            'process_id': 'proc-123',
+            'status': 'running',
+            'exit_code': None,
+            'log_path': '/tmp/process.jsonl',
+            'next_offset': 8,
+        },
+        tool_name='run_command',
+        tool_id='terminal:main',
+        arguments={'command': 'python analysis.py'},
+    )
+
+    assert result['status'] == 'success'
+    assert result['structured_error'] is None
+    assert result['process_refs'] == [
+        {
+            'terminal_server_id': 'main',
+            'process_id': 'proc-123',
+            'command': 'python analysis.py',
+            'status': 'running',
+            'exit_code': None,
+            'log_path': '/tmp/process.jsonl',
+            'next_offset': 8,
+            'metadata': {},
+        }
+    ]
+    assert 'proc-123' in result['content']
+
+
+@pytest.mark.asyncio
+async def test_tool_call_retries_return_cached_response_without_reexecuting_callable():
+    calls = []
+
+    async def read_file(path: str):
+        calls.append(path)
+        return {'text': f'contents of {path}'}
+
+    _envelope, registry = build_tool_access_envelope(
+        {
+            'read_file': {
+                'tool_id': 'builtin:read_file',
+                'callable': read_file,
+                'spec': {'name': 'read_file', 'parameters': {'type': 'object'}},
+                'type': 'builtin',
+            }
+        }
+    )
+    store = FakeOperationStore()
+    authority = AgentToolAuthority(operation_store=store, registry=registry)
+    request = ToolCallRequest(
+        run_id='run-1',
+        participant_id='leader',
+        tool_call_id='call-1',
+        tool_id='tool:builtin:read_file:read_file',
+        arguments={'path': '/workspace/report.txt'},
+        idempotency_key='tool:leader:call-1:1',
+    )
+
+    first = await authority.execute_tool_call(request)
+    duplicate = await authority.execute_tool_call(request)
+
+    assert calls == ['/workspace/report.txt']
+    assert first == duplicate
+    assert duplicate['status'] == 'success'
+    assert duplicate['content'] == '{"text":"contents of /workspace/report.txt"}'
+
+
+@pytest.mark.asyncio
+async def test_tool_call_same_idempotency_key_with_modified_body_conflicts():
+    async def read_file(path: str):
+        return f'contents of {path}'
+
+    _envelope, registry = build_tool_access_envelope(
+        {
+            'read_file': {
+                'tool_id': 'builtin:read_file',
+                'callable': read_file,
+                'spec': {'name': 'read_file', 'parameters': {'type': 'object'}},
+                'type': 'builtin',
+            }
+        }
+    )
+    authority = AgentToolAuthority(operation_store=FakeOperationStore(), registry=registry)
+
+    await authority.execute_tool_call(
+        ToolCallRequest(
+            run_id='run-1',
+            participant_id='leader',
+            tool_call_id='call-1',
+            tool_id='tool:builtin:read_file:read_file',
+            arguments={'path': '/workspace/a.txt'},
+            idempotency_key='tool:leader:call-1:1',
+        )
+    )
+
+    with pytest.raises(ValueError, match='idempotency key'):
+        await authority.execute_tool_call(
+            ToolCallRequest(
+                run_id='run-1',
+                participant_id='leader',
+                tool_call_id='call-1',
+                tool_id='tool:builtin:read_file:read_file',
+                arguments={'path': '/workspace/b.txt'},
+                idempotency_key='tool:leader:call-1:1',
+            )
+        )
