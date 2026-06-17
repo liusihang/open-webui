@@ -3060,11 +3060,19 @@ async def read_skill(
     __oauth_token__: dict = None,
 ) -> str:
     """
-    Read the full instructions of an existing skill by id. If the skill has a package,
-    its assets are synced into the active Open Terminal runtime cache before returning.
+    Read an existing skill's full instructions by skill id.
+    Use when a skill is available by id but only its name or description is visible,
+    or before applying a package-backed skill that may need files in Open Terminal.
+    For package-backed skills, this also syncs the stored bundle into the active
+    Open Terminal runtime cache before returning absolute package and entrypoint paths.
+    Do not use this to install a new skill or modify an existing skill.
+    Returns JSON with name and content; package-backed skills also include package.path
+    and entrypoints[].path values that can be used with Open Terminal commands.
+    Errors are returned as JSON with an error field; if terminal context is missing
+    for a package-backed skill, retry only after an active Open Terminal is available.
 
-    :param id: The id of the skill to read
-    :return: JSON with skill instructions and, for package-backed skills, runtime package paths
+    :param id: Existing skill id, e.g. "data-cleanup"; use available_skills or a prior install/update result
+    :return: JSON with name/content, optional package.path and entrypoints, or an error field
     """
     if __request__ is None:
         return json.dumps({'error': 'Request context not available'})
@@ -3109,10 +3117,18 @@ async def install_skill(
     __oauth_token__: dict = None,
 ) -> str:
     """
-    Install a new skill from a concrete package directory in the active Open Terminal.
+    Install a new skill from an absolute source directory in the active Open Terminal.
+    Use when the user asks to add a new skill from files already prepared in their
+    terminal storage. The source directory must contain SKILL.md and may include
+    skill.json, scripts, templates, or assets. This stores the skill in OpenWebUI
+    DB/storage but does not return runtime execution paths or sync the runtime cache;
+    call read_skill after installation when package paths or entrypoints are needed.
+    Do not use this for existing skills; use update_skill instead.
+    Returns JSON containing only the new skill id, or an error field with recovery
+    guidance such as using an absolute source path or choosing a non-runtime-cache source.
 
-    :param source_path: Terminal directory containing SKILL.md and optional skill package assets
-    :return: JSON containing only the installed skill id
+    :param source_path: Absolute terminal source dir with SKILL.md; not relative or under /home/user/.openwebui/skills
+    :return: JSON object with only id on success, or an error field
     """
     if __request__ is None:
         return json.dumps({'error': 'Request context not available'})
@@ -3151,12 +3167,21 @@ async def update_skill(
     __oauth_token__: dict = None,
 ) -> str:
     """
-    Update an existing skill's instructions or replace it from a terminal package directory.
+    Update an existing skill's instructions or replace its package from Open Terminal.
+    Use when the user asks to modify a skill that already exists. Provide exactly one
+    of content or source_path: content performs a text-only SKILL.md instruction update,
+    while source_path replaces the whole package from an absolute Open Terminal source
+    directory containing SKILL.md. This stores the update in OpenWebUI DB/storage but
+    does not return runtime execution paths or sync the runtime cache; call read_skill
+    after updating when package paths or entrypoints are needed.
+    Do not use this to create a new skill; use install_skill instead.
+    Returns JSON containing only the updated skill id, or an error field explaining
+    what to change before retrying, such as providing exactly one update source.
 
-    :param id: The existing skill id to update
-    :param content: Replacement SKILL.md instruction content for text-only updates
-    :param source_path: Terminal directory containing an updated skill package
-    :return: JSON containing only the updated skill id
+    :param id: Existing skill id to update, e.g. "data-cleanup"; use available_skills or a prior install/update result
+    :param content: Replacement SKILL.md instruction body; provide only when source_path is not provided
+    :param source_path: Abs terminal source dir with replacement SKILL.md; omit content and avoid runtime cache paths
+    :return: JSON object with only id on success, or an error field
     """
     if __request__ is None:
         return json.dumps({'error': 'Request context not available'})
