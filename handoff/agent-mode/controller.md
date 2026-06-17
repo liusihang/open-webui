@@ -131,49 +131,24 @@ integrate worker branches in the documented merge train.
 
 ## Merge Train
 
-1. W1 storage/state/idempotency commit `587bdbada`.
-2. W2 protocol/events/SSE/final delta commit `943c41fb5`.
-3. W4 runtime service skeleton commit `f67d3ea2e` and W10 frontend helper commit
-   `01d71d90a` after W2 schema review.
-4. W3 chat-entry rollout skeleton.
+1. W1 storage/state/idempotency: integrated as `54eb58d53`.
+2. W2 protocol/events/SSE/final delta: integrated as `46c539c40`.
+3. W4 runtime service skeleton: integrated as `6f33e0e09`.
+4. W10 frontend helper slice: integrated as `7f20eb854`.
 5. W6 tool authority: integrated as `cd5b66308`.
 6. W11 compaction/resource lifecycle: integrated as `5351ad598`.
 7. W3 chat entry: integrated as `e2baad875`.
 8. W5 model authority: integrated as `5bf932464`.
-9. W7 approval and W8 terminal artifacts/process refs.
-10. W9 agent team/subagent support.
-11. W10 `Chat.svelte` event UI integration.
-12. W12 deployment/E2E.
+9. W8 terminal artifact/process refs: integrated as `3f692f946`.
+10. W7 approval: integrated as `0da571088`.
+11. W9A model catalog helper: integrated as `e59adeeda`.
+12. W9B1 OpenWebUI subagent control plane.
+13. W9B2 AgentScope runtime subagent adapter.
+14. W10A `Chat.svelte` event UI integration.
+15. W12A deployment/E2E harness, then W12B final acceptance.
 
-## Next
+## Current Integrated Checkpoint
 
-W7/W8 worktrees have been created from
-`056560b2f965b54861f7c0bc88ebce84c9a36e13` and dispatched in parallel from
-minimal context packs:
-
-- W7 owns destructive classifier plus approval wait/resume/reject behavior.
-  - Worktree: `/Users/liusihang/openwebui/.worktrees/agent-mode-w7-approval`
-  - Branch: `codex/agent-mode-w7-approval`
-  - Agent: `019ed6e4-4295-7023-9f49-650e962e1388`
-- W8 owns terminal artifacts, process refs, output/tmp path behavior, and
-  no-kill-on-cancel behavior.
-  - Worktree:
-    `/Users/liusihang/openwebui/.worktrees/agent-mode-w8-terminal-artifacts`
-  - Branch: `codex/agent-mode-w8-terminal-artifacts`
-  - Agent: `019ed6e4-42ff-7a00-9362-0a541e896877`
-
-W9 should be split: model-catalog helper work can start after W7/W8 are
-dispatched because W5 is now integrated, but the real AgentScope subagent
-adapter should wait until W7/W8 event/artifact shapes are visible.
-- W9A model catalog helper worktree was created from
-  `1ef1194eeeb224a7d3da8a7697eae9cbb499c157` and dispatched without full
-  context.
-  - Worktree:
-    `/Users/liusihang/openwebui/.worktrees/agent-mode-w9-model-catalog`
-  - Branch: `codex/agent-mode-w9-model-catalog`
-  - Agent: `019ed6ea-b5c4-7333-8c6f-be2fbbb2daa0`
-  - Scope: helper-level permission-filtered model catalog and
-    `meta.agent_selection`; no real AgentScope subagent adapter.
 - W8 terminal artifact/process tracking integrated as `3f692f946`.
   - Worker commit: `f81e41e73d8efe786a823e3df76d62d533fac119`.
   - Worker focused gate rerun by controller:
@@ -196,17 +171,49 @@ adapter should wait until W7/W8 event/artifact shapes are visible.
   `WEBUI_SECRET_KEY=test-secret ENABLE_DB_MIGRATIONS=false uv run pytest -q
   backend/open_webui/test/agent backend/open_webui/test/models/test_agent_runs.py`
   -> `58 passed`.
-- `uv run ruff check backend/open_webui/agent
-  backend/open_webui/routers/agent_service.py backend/open_webui/test/agent`
-  passed.
-- `git diff --check origin/pr/7..HEAD` passed.
-- `uv.lock` was restored after test-run environment churn.
+- W9A model catalog helper integrated as `e59adeeda`.
+  - Worker commit: `ca52ebf612361e04d08f1aa7e42bd8f228bab61f`.
+  - Adds helper-level permission-filtered model catalog and deterministic
+    fuzzy subagent model selection in
+    `backend/open_webui/agent/model_catalog.py`.
+  - It does not implement the real AgentScope subagent adapter.
+  - Focused integration gate:
+    `WEBUI_SECRET_KEY=test-secret ENABLE_DB_MIGRATIONS=false uv run pytest -q
+    backend/open_webui/test/agent/test_model_catalog.py
+    backend/open_webui/test/agent/test_model_authority.py` -> `9 passed`.
+  - Full backend agent/storage integration gate:
+    `WEBUI_SECRET_KEY=test-secret ENABLE_DB_MIGRATIONS=false uv run pytest -q
+    backend/open_webui/test/agent backend/open_webui/test/models/test_agent_runs.py`
+    -> `62 passed`.
+  - `uv run ruff check backend/open_webui/agent
+    backend/open_webui/routers/agent_service.py backend/open_webui/test/agent`
+    passed.
+  - `git diff --check origin/pr/7..HEAD` passed.
+  - `uv.lock` was restored after test-run environment churn.
+
+## Next
 
 Next controller action:
 
-1. Let W9A run without duplicating its task.
-2. When W9A returns, inspect handoff/diff/commit, run focused tests and ruff in
-   that worker worktree, then cherry-pick into integration.
-3. Run the W9A model-catalog integration gate.
-4. Restore `uv.lock` after any `uv run` churn.
-5. After W9A, start the real AgentScope subagent adapter slice.
+1. Commit this controller handoff checkpoint on
+   `codex/agent-mode-agentscope-pr7`.
+2. Update root planning docs with the W9A integrated status and the next
+   parallel dispatch board.
+3. Close or mark W9A agent `019ed6ea-b5c4-7333-8c6f-be2fbbb2daa0` complete if
+   the agent system still shows it active.
+4. Dispatch W9B1 OpenWebUI subagent control plane from `e59adeeda`.
+   - Owns `backend/open_webui/agent/subagents.py`, focused tests, and only the
+     minimal `routers/agent_service.py` binding needed for model-selection /
+     participant callbacks.
+   - Must not edit `services/agentscope-runtime/*`, frontend files, or nested
+     `open-terminal/`.
+5. Dispatch W9B2 AgentScope runtime adapter after W9B1 has a callback/interface
+   stub. It may begin AgentScope API verification immediately.
+   - Owns `services/agentscope-runtime/*`.
+   - Must verify concrete AgentScope APIs from a clean clone or pinned commit
+     before coding subagent internals.
+6. Dispatch W10A frontend `Chat.svelte` integration after W9B1 event fixtures
+   are checked in; reducer/API prep can start earlier but should not merge
+   before fixture stability.
+7. Dispatch W12A deployment/E2E harness as docs/scripts only; reserve W12B for
+   final acceptance after W9B2 and W10A merge.
