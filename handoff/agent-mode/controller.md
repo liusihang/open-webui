@@ -95,6 +95,16 @@ integrate worker branches in the documented merge train.
   backend/open_webui/test/agent` passed.
 - `git diff --check origin/pr/7..HEAD` passed again. `uv.lock` was restored
   after test-run environment churn.
+- Current plan refresh:
+  - Implementation plan in the root checkout has been updated with a
+    status-aware agent-team execution board and next integration gates.
+  - W5 model authority worker is active in
+    `/Users/liusihang/openwebui/.worktrees/agent-mode-w5-model-authority` on
+    `codex/agent-mode-w5-model-authority`.
+  - W5 agent id: `019ed6d5-583d-7030-b187-3f0287d96efc`.
+  - W5 base: `0f19ffe78c583943a314cfaa9a36aba6691a7057`.
+  - W5 has a handoff but no product-code commit at this checkpoint.
+  - Do not duplicate W5 scope while the worker is active.
 
 ## Merge Train
 
@@ -103,16 +113,34 @@ integrate worker branches in the documented merge train.
 3. W4 runtime service skeleton commit `f67d3ea2e` and W10 frontend helper commit
    `01d71d90a` after W2 schema review.
 4. W3 chat-entry rollout skeleton.
-5. W5 model authority and W6 tool authority.
-6. W7 approval and W8 terminal artifacts/process refs.
-7. W9 agent team/subagent support.
-8. W10 `Chat.svelte` event UI integration.
-9. W11 compaction/resource lifecycle.
-10. W12 deployment/E2E.
+5. W6 tool authority: integrated as `cd5b66308`.
+6. W11 compaction/resource lifecycle: integrated as `5351ad598`.
+7. W3 chat entry: integrated as `e2baad875`.
+8. W5 model authority: active worker, next merge.
+9. W7 approval and W8 terminal artifacts/process refs.
+10. W9 agent team/subagent support.
+11. W10 `Chat.svelte` event UI integration.
+12. W12 deployment/E2E.
 
 ## Next
 
-Create W5 model-authority worktree against `e2baad875` or newer. W7/W8 may now
-be prepared from the integrated W6 tool result contract, but W7 approval should
-still coordinate with W3's user control endpoints. W9 should wait for W4 plus
-W5 before real subagent adapter work.
+Wait for W5 model-authority worker
+`019ed6d5-583d-7030-b187-3f0287d96efc`.
+
+When W5 returns:
+
+1. Inspect its handoff, diff, and commit.
+2. Run W5 focused pytest, ruff, and `git show --check` in the W5 worktree.
+3. Cherry-pick W5 into this integration worktree.
+4. Run the integrated W5 gate documented in the root implementation plan.
+5. Restore `uv.lock` if `uv run` churns it.
+6. Update this handoff and the root planning files.
+
+W7/W8 may now be prepared in parallel from the integrated W6/W11 contracts:
+
+- W7 owns destructive classifier plus approval wait/resume/reject behavior.
+- W8 owns terminal artifacts, process refs, output/tmp path behavior, and
+  no-kill-on-cancel behavior.
+
+W9 should be split: catalog helper work can start once W5's callback schema is
+visible, but the real AgentScope subagent adapter waits for integrated W5.
