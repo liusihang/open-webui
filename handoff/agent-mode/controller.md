@@ -145,8 +145,9 @@ integrate worker branches in the documented merge train.
 12. W9B1 OpenWebUI subagent control plane: integrated as `d1509d8cb`.
 13. W9B2 AgentScope runtime subagent adapter: integrated through
     `5081f2a6e`.
-14. W10A `Chat.svelte` event UI integration.
-15. W12A deployment/E2E harness, then W12B final acceptance.
+14. W10A `Chat.svelte` event UI integration: integrated as `994cffc3c`.
+15. W12A deployment/E2E harness: integrated as `a7f45a7ba`.
+16. W12B final acceptance and hardening: pending.
 
 ## Current Integrated Checkpoint
 
@@ -271,9 +272,102 @@ Next controller action:
    - Agent closed after completion. This worker only claims dry-run/harness
      readiness; W12B final acceptance waits for W9B2 and W10A.
 
-Next controller action:
+## W9B2/W10A/W12A Integration Checkpoint
 
-1. Integrate W10A, then verify focused Vitest and frontend syntax/prettier
-   checks as appropriate.
-2. Integrate W12A if it remains docs/scripts/harness-only.
-3. Run final backend/runtime/frontend gates before W12B live acceptance.
+Date: 2026-06-18
+
+Current integration state:
+
+- Integration worktree:
+  `/Users/liusihang/openwebui/.worktrees/agent-mode-agentscope-pr7`
+- Branch: `codex/agent-mode-agentscope-pr7`
+- Current HEAD: `a7f45a7babd3bb912d3e81891ae6bcd66504e0d5`
+
+W9B2 AgentScope runtime adapter integrated:
+
+- Worker: Pauli `019ed701-533e-72a0-91ee-0a892946c900`
+- Worker commits:
+  - `8ad7bb0527d4916bd2c9150a9ca269868b6af33a`
+  - `3ab79f828d33c4d91a0ece82cb5ef7972cec113c`
+- Integration commits:
+  - `7a5f18fec`
+  - `5081f2a6e`
+- Notes:
+  - The follow-up commit resolved the earlier real-AgentScope gap.
+  - `services/agentscope-runtime/pyproject.toml` now pins
+    `agentscope[service]` to
+    `c13c3effcb568ef915cbbd0fe900df2f2b9b003c`.
+  - The service-local `services/agentscope-runtime/uv.lock` is intentional.
+
+W9B2 verification:
+
+- `cd services/agentscope-runtime && uv run --extra test pytest`
+  -> `19 passed`.
+- `WEBUI_SECRET_KEY=test-secret ENABLE_DB_MIGRATIONS=false uv run pytest -q
+  backend/open_webui/test/agent backend/open_webui/test/models/test_agent_runs.py`
+  -> `70 passed`.
+- `uv run ruff check backend/open_webui/agent
+  backend/open_webui/routers/agent_service.py backend/open_webui/test/agent`
+  -> passed.
+- `git diff --check origin/pr/7..HEAD` -> passed.
+
+W10A Agent Event UI integrated:
+
+- Worker: Mencius `019ed701-53b8-7673-b2cc-71a03a42e1d4`
+- Worker commit: `05e8968fc9989e7238037fd3d26ef548e27e78a1`
+- Integration commit: `994cffc3c`
+
+W10A verification:
+
+- `npm run test:frontend -- --run
+  src/lib/apis/agentRuns/index.test.ts
+  src/lib/components/chat/AgentEvents/eventFold.test.ts
+  src/lib/components/chat/historySync.test.ts`
+  -> `3 files / 24 tests passed`.
+- Svelte compile checks for `AgentRunEvents.svelte`, `ResponseMessage.svelte`,
+  and `Chat.svelte` -> passed.
+
+W12A deployment/E2E harness integrated:
+
+- Worker: Hilbert `019ed701-5420-78f1-ae9b-3dc0dc0f3711`
+- Worker commit: `5228d5bdc9bda7a4675c265cc58cd04219bc4623`
+- Integration commit: `a7f45a7ba`
+
+W12A verification:
+
+- `python3 scripts/agent_mode/acceptance_harness.py dry-run` -> passed.
+- `python3 scripts/agent_mode/acceptance_harness.py fixture` -> passed,
+  fixture contract `12/12 satisfied`.
+- W12 focused pytest
+  `backend/open_webui/test/agent/test_w12_acceptance_harness.py
+  backend/open_webui/test/agent/test_w12_healthcheck.py`
+  -> `9 passed`.
+- W12 ruff gate -> passed.
+- Focused frontend Vitest still passed after W12A.
+
+Important current dirty state:
+
+- `uv run` has again modified root `uv.lock` in the integration worktree.
+- Do not stage root `uv.lock` unless a slice explicitly owns root dependency
+  changes. It should be restored or left unstaged before controller commits.
+- Keep `services/agentscope-runtime/uv.lock` because it is intentional W9B2
+  dependency state.
+
+## Next W12B Agent-Team Plan
+
+The remaining work is final acceptance and hardening, not another feature slice.
+Dispatch W12B as parallel scenario workers after the controller starts local
+integrated services and records service URLs/log paths in this handoff.
+
+Recommended workers:
+
+| Worker | Owns | Evidence Required |
+| --- | --- | --- |
+| W12B-1 Runtime and chat-path smoke | runtime-unavailable, ordinary Q&A through Agent Mode, final-answer phase ordering | run id, event sequence, final assistant message, visible runtime failure |
+| W12B-2 Tool, approval, terminal artifacts | OpenWebUI tool call, destructive approval, output/tmp artifact metadata, cancel without killing Open Terminal process | tool/approval/artifact/process events and actual output/tmp paths |
+| W12B-3 Subagent and model-selection acceptance | leader/subagent cap, per-subagent budget, `meta.agent_selection` model choice | participant events, cap rejection, permission-valid chosen model ids |
+| W12B-4 SSE/UI/reconnect/compaction | SSE reconnect/backfill, socket/SSE duplicate prevention, compacted summary rendering | reconnect transcript, UI/event evidence, compaction summary |
+| W12B-5 Regression and release readiness | combined backend/runtime/frontend/W12 tests, ruff, diff check, rollout notes | final pass/fail matrix and blockers |
+
+Do not claim live/local 12 MVP scenarios pass until W12B has executed against
+the integrated services. W12A fixture success is only harness readiness.
