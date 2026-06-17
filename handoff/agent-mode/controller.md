@@ -128,6 +128,9 @@ integrate worker branches in the documented merge train.
     passed.
   - `git diff --check origin/pr/7..HEAD` passed.
   - `uv.lock` was restored after test-run environment churn.
+- W9A agent `019ed6ea-b5c4-7333-8c6f-be2fbbb2daa0` was closed after
+  integration. Its final status confirmed worker commit `ca52ebf6`, focused
+  test results, ruff, diff checks, and restored `uv.lock`.
 
 ## Merge Train
 
@@ -195,25 +198,23 @@ integrate worker branches in the documented merge train.
 
 Next controller action:
 
-1. Commit this controller handoff checkpoint on
-   `codex/agent-mode-agentscope-pr7`.
-2. Update root planning docs with the W9A integrated status and the next
+1. Update root planning docs with the W9A integrated status and the next
    parallel dispatch board.
-3. Close or mark W9A agent `019ed6ea-b5c4-7333-8c6f-be2fbbb2daa0` complete if
-   the agent system still shows it active.
-4. Dispatch W9B1 OpenWebUI subagent control plane from `e59adeeda`.
+2. Dispatch W9B1 OpenWebUI subagent control plane from the latest integration
+   HEAD after this handoff checkpoint. The last product-code slice remains
+   W9A commit `e59adeeda`.
    - Owns `backend/open_webui/agent/subagents.py`, focused tests, and only the
      minimal `routers/agent_service.py` binding needed for model-selection /
      participant callbacks.
    - Must not edit `services/agentscope-runtime/*`, frontend files, or nested
      `open-terminal/`.
-5. Dispatch W9B2 AgentScope runtime adapter after W9B1 has a callback/interface
+3. Dispatch W9B2 AgentScope runtime adapter after W9B1 has a callback/interface
    stub. It may begin AgentScope API verification immediately.
    - Owns `services/agentscope-runtime/*`.
    - Must verify concrete AgentScope APIs from a clean clone or pinned commit
      before coding subagent internals.
-6. Dispatch W10A frontend `Chat.svelte` integration after W9B1 event fixtures
+4. Dispatch W10A frontend `Chat.svelte` integration after W9B1 event fixtures
    are checked in; reducer/API prep can start earlier but should not merge
    before fixture stability.
-7. Dispatch W12A deployment/E2E harness as docs/scripts only; reserve W12B for
+5. Dispatch W12A deployment/E2E harness as docs/scripts only; reserve W12B for
    final acceptance after W9B2 and W10A merge.
