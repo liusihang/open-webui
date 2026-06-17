@@ -29,6 +29,43 @@ Notes:
 - This profile is meant for deployments that already use external embedding,
   reranking, OCR/document extraction, web loading/search, and image generation.
 
+## Cached PR7 Slim Rebuild
+
+For repeated PR7 slim rebuilds on a remote builder, prefer the repository
+script instead of patching the staged Dockerfile by hand:
+
+```bash
+scripts/rebuild-pr7-slim-cache.sh \
+  --remote aiserver \
+  --git-ref HEAD \
+  --image-tag "open-webui:pr7-slim-$(git rev-parse --short=10 HEAD)" \
+  --build-dir /home/aiserver/staging/openwebui-pr7-slim-build \
+  --cache-dir /home/aiserver/.cache/openwebui-pr7-slim-buildx
+```
+
+The script keeps the clean `git archive` input, runs `docker buildx build
+--load`, imports cache from `<cache-dir>/current`, writes a new
+`type=local,mode=max` cache directory, and promotes the `current` pointer only
+after a successful build.
+
+When public package fetches fail, prefer explicit mirror build args first:
+
+```bash
+scripts/rebuild-pr7-slim-cache.sh \
+  --remote aiserver \
+  --git-ref HEAD \
+  --image-tag "open-webui:pr7-slim-$(git rev-parse --short=10 HEAD)" \
+  --build-dir /home/aiserver/staging/openwebui-pr7-slim-build \
+  --cache-dir /home/aiserver/.cache/openwebui-pr7-slim-buildx \
+  --apt-debian-mirror https://mirrors.tuna.tsinghua.edu.cn/debian \
+  --apt-security-mirror https://mirrors.tuna.tsinghua.edu.cn/debian-security \
+  --npm-registry https://registry.npmmirror.com \
+  --uv-default-index https://pypi.tuna.tsinghua.edu.cn/simple
+```
+
+If mirrors are still insufficient, pass the local Clash HTTP proxy with
+`--proxy-url`.
+
 ## Smoke Test
 
 The slim image no longer ships local Chroma, so smoke tests should run with a
