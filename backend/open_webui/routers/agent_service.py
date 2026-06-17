@@ -24,9 +24,15 @@ from open_webui.agent.model_authority import (
     ModelNotAllowed,
     ModelOperationInProgress,
 )
+from open_webui.agent.model_catalog import ModelCatalogError, ModelSelectionNotAllowed
 from open_webui.agent.protocol import AgentEventAppend, FinalDeltaAppend
 from open_webui.agent.service.model_call import execute_agent_model_call
 from open_webui.agent.service.tool_call import execute_agent_tool_call
+from open_webui.agent.subagents import (
+    AgentSubagentCoordinator,
+    SubagentError,
+    SubagentModelSelectionRequest,
+)
 from open_webui.agent.tool_authority import (
     AgentToolAuthority,
     ToolAuthorityError,
@@ -119,6 +125,16 @@ def get_agent_approval_coordinator(request: Request) -> AgentApprovalCoordinator
     return coordinator
 
 
+def get_agent_subagent_coordinator(request: Request) -> AgentSubagentCoordinator:
+    coordinator = getattr(request.app.state, 'AGENT_SUBAGENT_COORDINATOR', None)
+    if coordinator is not None:
+        return coordinator
+
+    coordinator = AgentSubagentCoordinator()
+    request.app.state.AGENT_SUBAGENT_COORDINATOR = coordinator
+    return coordinator
+
+
 @router.post('/runs/{run_id}/events')
 async def append_agent_run_event(
     request: Request,
@@ -142,6 +158,55 @@ async def append_agent_run_event(
     except AgentEventError as exc:
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
     return event
+
+
+@router.post('/runs/{run_id}/model-selection')
+async def execute_agent_run_model_selection(
+    request: Request,
+    run_id: str,
+    form_data: SubagentModelSelectionRequest,
+    idempotency_key: str | None = Header(
+        default=None,
+        alias='X-Agent-Idempotency-Key',
+    ),
+    authorization: str | None = Header(default=None, alias='Authorization'),
+    coordinator: AgentSubagentCoordinator = Depends(get_agent_subagent_coordinator),
+):
+    _require_agent_service_credential(request, authorization)
+    key = _require_matching_idempotency_key(
+        form_data.idempotency_key,
+        idempotency_key,
+    )
+    try:
+        return await coordinator.select_subagent_model(
+            request,
+            form_data.model_copy(update={'run_id': run_id, 'idempotency_key': key}),
+        )
+    except ModelSelectionNotAllowed as exc:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail={
+                'code': exc.code,
+                'message': str(exc),
+                'warnings': exc.warnings,
+            },
+        ) from exc
+    except ModelCatalogError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail={
+                'code': getattr(exc, 'code', 'model_catalog_error'),
+                'message': str(exc),
+            },
+        ) from exc
+    except SubagentError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail={
+                'code': getattr(exc, 'code', 'subagent_error'),
+                'message': str(exc),
+            },
+        ) from exc
 
 
 @router.post('/runs/{run_id}/final-delta')
