@@ -1020,6 +1020,16 @@ async def get_admin_config(request: Request, user=Depends(get_admin_user)):
         'ENABLE_CHANNELS': request.app.state.config.ENABLE_CHANNELS,
         'ENABLE_CALENDAR': request.app.state.config.ENABLE_CALENDAR,
         'ENABLE_MEMORIES': request.app.state.config.ENABLE_MEMORIES,
+        'ENABLE_AGENT_MEMORY': request.app.state.config.ENABLE_AGENT_MEMORY,
+        'AGENT_MEMORY_EXTRACTION_MODEL': request.app.state.config.AGENT_MEMORY_EXTRACTION_MODEL,
+        'AGENT_MEMORY_CONSOLIDATION_MODEL': request.app.state.config.AGENT_MEMORY_CONSOLIDATION_MODEL,
+        'AGENT_MEMORY_IDLE_THRESHOLD_SECONDS': request.app.state.config.AGENT_MEMORY_IDLE_THRESHOLD_SECONDS,
+        'AGENT_MEMORY_STARTUP_CLAIM_LIMIT': request.app.state.config.AGENT_MEMORY_STARTUP_CLAIM_LIMIT,
+        'AGENT_MEMORY_EXTRACTION_CLAIM_LIMIT': request.app.state.config.AGENT_MEMORY_EXTRACTION_CLAIM_LIMIT,
+        'AGENT_MEMORY_CONSOLIDATION_CLAIM_LIMIT': request.app.state.config.AGENT_MEMORY_CONSOLIDATION_CLAIM_LIMIT,
+        'AGENT_MEMORY_LEASE_SECONDS': request.app.state.config.AGENT_MEMORY_LEASE_SECONDS,
+        'AGENT_MEMORY_RETRY_BACKOFF_SECONDS': request.app.state.config.AGENT_MEMORY_RETRY_BACKOFF_SECONDS,
+        'AGENT_MEMORY_SUMMARY_TOKEN_BUDGET': request.app.state.config.AGENT_MEMORY_SUMMARY_TOKEN_BUDGET,
         'ENABLE_NOTES': request.app.state.config.ENABLE_NOTES,
         'ENABLE_USER_WEBHOOKS': request.app.state.config.ENABLE_USER_WEBHOOKS,
         'ENABLE_USER_STATUS': request.app.state.config.ENABLE_USER_STATUS,
@@ -1050,12 +1060,26 @@ class AdminConfig(BaseModel):
     ENABLE_CHANNELS: bool
     ENABLE_CALENDAR: bool
     ENABLE_MEMORIES: bool
+    ENABLE_AGENT_MEMORY: bool = False
+    AGENT_MEMORY_EXTRACTION_MODEL: str | None = ''
+    AGENT_MEMORY_CONSOLIDATION_MODEL: str | None = ''
+    AGENT_MEMORY_IDLE_THRESHOLD_SECONDS: int | str | None = 900
+    AGENT_MEMORY_STARTUP_CLAIM_LIMIT: int | str | None = 0
+    AGENT_MEMORY_EXTRACTION_CLAIM_LIMIT: int | str | None = 5
+    AGENT_MEMORY_CONSOLIDATION_CLAIM_LIMIT: int | str | None = 2
+    AGENT_MEMORY_LEASE_SECONDS: int | str | None = 300
+    AGENT_MEMORY_RETRY_BACKOFF_SECONDS: int | str | None = 600
+    AGENT_MEMORY_SUMMARY_TOKEN_BUDGET: int | str | None = 1200
     ENABLE_NOTES: bool
     ENABLE_USER_WEBHOOKS: bool
     ENABLE_USER_STATUS: bool
     PENDING_USER_OVERLAY_TITLE: str | None = None
     PENDING_USER_OVERLAY_CONTENT: str | None = None
     RESPONSE_WATERMARK: str | None = None
+
+
+def _optional_int_config_value(value):
+    return int(value) if value not in [None, ''] else ''
 
 
 @router.post('/admin/config')
@@ -1083,6 +1107,30 @@ async def update_admin_config(request: Request, form_data: AdminConfig, user=Dep
     request.app.state.config.ENABLE_CHANNELS = form_data.ENABLE_CHANNELS
     request.app.state.config.ENABLE_CALENDAR = form_data.ENABLE_CALENDAR
     request.app.state.config.ENABLE_MEMORIES = form_data.ENABLE_MEMORIES
+    request.app.state.config.ENABLE_AGENT_MEMORY = form_data.ENABLE_AGENT_MEMORY
+    request.app.state.config.AGENT_MEMORY_EXTRACTION_MODEL = (form_data.AGENT_MEMORY_EXTRACTION_MODEL or '').strip()
+    request.app.state.config.AGENT_MEMORY_CONSOLIDATION_MODEL = (
+        form_data.AGENT_MEMORY_CONSOLIDATION_MODEL or ''
+    ).strip()
+    request.app.state.config.AGENT_MEMORY_IDLE_THRESHOLD_SECONDS = _optional_int_config_value(
+        form_data.AGENT_MEMORY_IDLE_THRESHOLD_SECONDS
+    )
+    request.app.state.config.AGENT_MEMORY_STARTUP_CLAIM_LIMIT = _optional_int_config_value(
+        form_data.AGENT_MEMORY_STARTUP_CLAIM_LIMIT
+    )
+    request.app.state.config.AGENT_MEMORY_EXTRACTION_CLAIM_LIMIT = _optional_int_config_value(
+        form_data.AGENT_MEMORY_EXTRACTION_CLAIM_LIMIT
+    )
+    request.app.state.config.AGENT_MEMORY_CONSOLIDATION_CLAIM_LIMIT = _optional_int_config_value(
+        form_data.AGENT_MEMORY_CONSOLIDATION_CLAIM_LIMIT
+    )
+    request.app.state.config.AGENT_MEMORY_LEASE_SECONDS = _optional_int_config_value(form_data.AGENT_MEMORY_LEASE_SECONDS)
+    request.app.state.config.AGENT_MEMORY_RETRY_BACKOFF_SECONDS = _optional_int_config_value(
+        form_data.AGENT_MEMORY_RETRY_BACKOFF_SECONDS
+    )
+    request.app.state.config.AGENT_MEMORY_SUMMARY_TOKEN_BUDGET = _optional_int_config_value(
+        form_data.AGENT_MEMORY_SUMMARY_TOKEN_BUDGET
+    )
     request.app.state.config.ENABLE_NOTES = form_data.ENABLE_NOTES
 
     if form_data.DEFAULT_USER_ROLE in ['pending', 'user', 'admin']:
@@ -1128,6 +1176,16 @@ async def update_admin_config(request: Request, form_data: AdminConfig, user=Dep
         'ENABLE_CHANNELS': request.app.state.config.ENABLE_CHANNELS,
         'ENABLE_CALENDAR': request.app.state.config.ENABLE_CALENDAR,
         'ENABLE_MEMORIES': request.app.state.config.ENABLE_MEMORIES,
+        'ENABLE_AGENT_MEMORY': request.app.state.config.ENABLE_AGENT_MEMORY,
+        'AGENT_MEMORY_EXTRACTION_MODEL': request.app.state.config.AGENT_MEMORY_EXTRACTION_MODEL,
+        'AGENT_MEMORY_CONSOLIDATION_MODEL': request.app.state.config.AGENT_MEMORY_CONSOLIDATION_MODEL,
+        'AGENT_MEMORY_IDLE_THRESHOLD_SECONDS': request.app.state.config.AGENT_MEMORY_IDLE_THRESHOLD_SECONDS,
+        'AGENT_MEMORY_STARTUP_CLAIM_LIMIT': request.app.state.config.AGENT_MEMORY_STARTUP_CLAIM_LIMIT,
+        'AGENT_MEMORY_EXTRACTION_CLAIM_LIMIT': request.app.state.config.AGENT_MEMORY_EXTRACTION_CLAIM_LIMIT,
+        'AGENT_MEMORY_CONSOLIDATION_CLAIM_LIMIT': request.app.state.config.AGENT_MEMORY_CONSOLIDATION_CLAIM_LIMIT,
+        'AGENT_MEMORY_LEASE_SECONDS': request.app.state.config.AGENT_MEMORY_LEASE_SECONDS,
+        'AGENT_MEMORY_RETRY_BACKOFF_SECONDS': request.app.state.config.AGENT_MEMORY_RETRY_BACKOFF_SECONDS,
+        'AGENT_MEMORY_SUMMARY_TOKEN_BUDGET': request.app.state.config.AGENT_MEMORY_SUMMARY_TOKEN_BUDGET,
         'ENABLE_NOTES': request.app.state.config.ENABLE_NOTES,
         'ENABLE_USER_WEBHOOKS': request.app.state.config.ENABLE_USER_WEBHOOKS,
         'ENABLE_USER_STATUS': request.app.state.config.ENABLE_USER_STATUS,

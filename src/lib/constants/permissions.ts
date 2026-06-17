@@ -63,6 +63,7 @@ export const DEFAULT_PERMISSIONS = {
 		image_generation: true,
 		code_interpreter: true,
 		memories: true,
+		agent_memory: false,
 		automations: false,
 		calendar: true
 	},
