@@ -50,6 +50,20 @@ class SubagentCreateRequest(BaseModel):
     idempotency_key: str | None = None
 
 
+class SubagentRegisterRequest(BaseModel):
+    model_config = ConfigDict(extra='allow')
+
+    run_id: str
+    parent_participant_id: str = 'leader'
+    participant_id: str
+    name: str
+    description: str = ''
+    task: str
+    budget: dict[str, Any] = Field(default_factory=dict)
+    metadata: dict[str, Any] = Field(default_factory=dict)
+    idempotency_key: str | None = None
+
+
 class SubagentFailureRequest(BaseModel):
     model_config = ConfigDict(extra='allow')
 
@@ -117,6 +131,50 @@ class AgentSubagentCoordinator:
         self.store = store or AgentRunSubagentStore()
         self.model_catalog = model_catalog or AgentModelCatalog(run_store=self.store)
         self.default_max_subagents = default_max_subagents
+
+    async def register_subagent(
+        self,
+        request,
+        registration: SubagentRegisterRequest,
+    ) -> dict[str, Any]:
+        del request
+        run = await self._running_run(registration.run_id)
+        participants = _participants(run)
+        max_subagents = self._max_subagents(run)
+        current_subagents = _subagent_count(participants)
+        self._ensure_under_subagent_cap(run, participants)
+
+        budget = _budget(run)
+        subagent_budget, budget = self._allocate_subagent_budget(
+            budget,
+            registration.budget,
+        )
+
+        participant = {
+            'id': registration.participant_id,
+            'parent_id': registration.parent_participant_id,
+            'type': 'subagent',
+            'role': registration.name,
+            'description': registration.description,
+            'state': AgentRunState.RUNNING.value,
+            'task': registration.task,
+            'budget': subagent_budget,
+            'metadata': dict(registration.metadata),
+        }
+        participants.append(participant)
+        await self.store.update_participants_and_budget(
+            registration.run_id,
+            participants=participants,
+            budget=budget,
+        )
+
+        return {
+            'status': 'accepted',
+            'participant_id': registration.participant_id,
+            'team_cap': max_subagents,
+            'remaining_slots': max(max_subagents - current_subagents - 1, 0),
+            'warnings': [],
+        }
 
     async def create_subagent(
         self,
@@ -336,19 +394,21 @@ class AgentSubagentCoordinator:
         return run
 
     def _ensure_under_subagent_cap(self, run, participants: list[dict[str, Any]]) -> None:
-        max_subagents = _team_budget_value(
-            _budget(run),
-            'max_subagents',
-            self.default_max_subagents,
-        )
-        current_subagents = sum(
-            1 for participant in participants if participant.get('type') == 'subagent'
-        )
+        max_subagents = self._max_subagents(run)
+        current_subagents = _subagent_count(participants)
         if current_subagents >= max_subagents:
             raise SubagentCapExceeded(
                 f'Agent run already has {current_subagents} subagents; '
                 f'default cap of {max_subagents} would be exceeded'
             )
+
+    def _max_subagents(self, run) -> int:
+        max_subagents = _team_budget_value(
+            _budget(run),
+            'max_subagents',
+            self.default_max_subagents,
+        )
+        return max_subagents
 
     def _allocate_subagent_budget(
         self,
@@ -394,6 +454,10 @@ class AgentSubagentCoordinator:
 
 def _participants(run) -> list[dict[str, Any]]:
     return [dict(participant) for participant in (getattr(run, 'participants', None) or [])]
+
+
+def _subagent_count(participants: list[dict[str, Any]]) -> int:
+    return sum(1 for participant in participants if participant.get('type') == 'subagent')
 
 
 def _budget(run) -> dict[str, Any]:

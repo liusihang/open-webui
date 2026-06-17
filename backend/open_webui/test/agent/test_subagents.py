@@ -6,6 +6,7 @@ os.environ.setdefault('ENABLE_DB_MIGRATIONS', 'false')
 
 import pytest
 from fastapi import HTTPException
+from open_webui.agent import subagents as subagent_module
 from open_webui.agent.model_catalog import (
     AgentModelCatalog,
     ModelSelectionNotAllowed,
@@ -19,6 +20,7 @@ from open_webui.agent.subagents import (
     SubagentFailureRequest,
     SubagentModelSelectionRequest,
 )
+from open_webui.routers import agent_service
 from open_webui.routers.agent_service import execute_agent_run_model_selection
 
 
@@ -332,6 +334,52 @@ async def test_model_selection_service_callback_requires_authority_and_delegates
 
 
 @pytest.mark.asyncio
+async def test_subagent_service_callback_requires_authority_and_delegates_registration():
+    coordinator = FakeSubagentRegistrationCoordinator()
+    handler = getattr(agent_service, 'execute_agent_run_subagent_registration', None)
+    assert handler is not None
+    form_model = getattr(subagent_module, 'SubagentRegisterRequest', None)
+    assert form_model is not None
+
+    response = await handler(
+        request=_service_request(),
+        run_id='run-1',
+        form_data=form_model(
+            run_id='runtime-supplied-run',
+            parent_participant_id='leader',
+            participant_id='subagent-a',
+            name='researcher',
+            description='Researches facts.',
+            task='Find facts',
+            budget={'max_model_calls': 2},
+            metadata={'team_cap': 5, 'single_level': True},
+            idempotency_key=None,
+        ),
+        idempotency_key='subagent:leader:subagent-a:create',
+        authorization='Bearer service-secret',
+        coordinator=coordinator,
+    )
+
+    assert response == {
+        'status': 'accepted',
+        'participant_id': 'subagent-a',
+        'team_cap': 5,
+        'remaining_slots': 4,
+        'warnings': [],
+    }
+    assert coordinator.calls == [
+        {
+            'run_id': 'run-1',
+            'participant_id': 'subagent-a',
+            'name': 'researcher',
+            'budget': {'max_model_calls': 2},
+            'metadata': {'team_cap': 5, 'single_level': True},
+            'idempotency_key': 'subagent:leader:subagent-a:create',
+        }
+    ]
+
+
+@pytest.mark.asyncio
 async def test_model_selection_service_callback_maps_unauthorized_model_to_structured_error():
     coordinator = FakeRejectingSubagentCoordinator()
 
@@ -543,6 +591,30 @@ class FakeSubagentCoordinator:
             }
         )
         return {'selected_model_id': 'allowed-model'}
+
+
+class FakeSubagentRegistrationCoordinator:
+    def __init__(self):
+        self.calls = []
+
+    async def register_subagent(self, request, creation):
+        self.calls.append(
+            {
+                'run_id': creation.run_id,
+                'participant_id': creation.participant_id,
+                'name': creation.name,
+                'budget': creation.budget,
+                'metadata': creation.metadata,
+                'idempotency_key': creation.idempotency_key,
+            }
+        )
+        return {
+            'status': 'accepted',
+            'participant_id': creation.participant_id,
+            'team_cap': 5,
+            'remaining_slots': 4,
+            'warnings': [],
+        }
 
 
 class FakeRejectingSubagentCoordinator:

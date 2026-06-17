@@ -1,3 +1,5 @@
+import asyncio
+
 import pytest
 
 from agentscope_runtime.subagents import (
@@ -238,6 +240,61 @@ async def test_cap_exceeded_comes_from_openwebui_registration_callback() -> None
 
 
 @pytest.mark.asyncio
+async def test_plan_runs_subagents_concurrently_up_to_team_cap() -> None:
+    callback_client = RecordingOpenWebUIRuntimeClient()
+    adapter = AgentScopeSubagentAdapter(
+        run_id="run-team",
+        runtime_session_id="rt-run-team",
+        callback_client=callback_client,
+        team_cap=5,
+    )
+    active = 0
+    peak_active = 0
+    started: list[str] = []
+    all_started = asyncio.Event()
+    release = asyncio.Event()
+
+    async def executor(context: SubagentExecutionContext) -> dict:
+        nonlocal active, peak_active
+        active += 1
+        peak_active = max(peak_active, active)
+        started.append(context.participant_id)
+        if len(started) == 5:
+            all_started.set()
+        await release.wait()
+        active -= 1
+        return {"content": f"{context.participant_id} complete"}
+
+    plan_task = asyncio.create_task(
+        adapter.run_subagent_plan(
+            [
+                SubagentSpec(name=f"worker-{index}", description="Worker.", task="Run slice.")
+                for index in range(5)
+            ],
+            executor=executor,
+        )
+    )
+    try:
+        await asyncio.wait_for(all_started.wait(), timeout=0.5)
+        assert peak_active == 5
+        assert not plan_task.done()
+    finally:
+        release.set()
+
+    results = await plan_task
+
+    assert [result.participant_id for result in results] == [
+        "subagent:run-team:1",
+        "subagent:run-team:2",
+        "subagent:run-team:3",
+        "subagent:run-team:4",
+        "subagent:run-team:5",
+    ]
+    assert len(callback_client.subagent_registrations) == 5
+    assert len(callback_client.model_selections) == 5
+
+
+@pytest.mark.asyncio
 async def test_cancelled_plan_stops_subagent_loop_without_killing_terminal_processes() -> None:
     callback_client = RecordingOpenWebUIRuntimeClient()
     cancel_requested = False
@@ -261,6 +318,7 @@ async def test_cancelled_plan_stops_subagent_loop_without_killing_terminal_proce
             SubagentSpec(name="worker-2", description="Second.", task="Run second."),
         ],
         executor=executor,
+        max_concurrency=1,
     )
 
     assert [result.participant_id for result in results] == ["subagent:run-team:1"]

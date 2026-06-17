@@ -32,6 +32,7 @@ from open_webui.agent.subagents import (
     AgentSubagentCoordinator,
     SubagentError,
     SubagentModelSelectionRequest,
+    SubagentRegisterRequest,
 )
 from open_webui.agent.tool_authority import (
     AgentToolAuthority,
@@ -135,6 +136,38 @@ def get_agent_subagent_coordinator(request: Request) -> AgentSubagentCoordinator
     coordinator = AgentSubagentCoordinator()
     request.app.state.AGENT_SUBAGENT_COORDINATOR = coordinator
     return coordinator
+
+
+@router.post('/runs/{run_id}/subagents')
+async def execute_agent_run_subagent_registration(
+    request: Request,
+    run_id: str,
+    form_data: SubagentRegisterRequest,
+    idempotency_key: str | None = Header(
+        default=None,
+        alias='X-Agent-Idempotency-Key',
+    ),
+    authorization: str | None = Header(default=None, alias='Authorization'),
+    coordinator: AgentSubagentCoordinator = Depends(get_agent_subagent_coordinator),
+):
+    _require_agent_service_credential(request, authorization)
+    key = _require_matching_idempotency_key(
+        form_data.idempotency_key,
+        idempotency_key,
+    )
+    try:
+        return await coordinator.register_subagent(
+            request,
+            form_data.model_copy(update={'run_id': run_id, 'idempotency_key': key}),
+        )
+    except SubagentError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail={
+                'code': getattr(exc, 'code', 'subagent_error'),
+                'message': str(exc),
+            },
+        ) from exc
 
 
 @router.post('/runs/{run_id}/events')

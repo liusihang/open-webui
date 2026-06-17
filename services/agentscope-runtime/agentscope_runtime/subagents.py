@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import inspect
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
@@ -219,25 +220,67 @@ class AgentScopeSubagentAdapter:
         specs: list[SubagentSpec],
         *,
         executor: SubagentExecutor,
+        max_concurrency: int | None = None,
     ) -> list[SubagentResult]:
-        results: list[SubagentResult] = []
-        for spec in specs:
-            if self._is_cancelled():
-                await self._emit_cancelled()
-                break
+        concurrency = self._plan_concurrency(max_concurrency)
+        indexed_results: list[tuple[int, SubagentResult]] = []
+        pending_specs = iter(enumerate(specs))
+        active: dict[asyncio.Task[SubagentResult], int] = {}
 
-            result = await self.run_subagent(
-                parent_participant_id=LEADER_PARTICIPANT_ID,
-                spec=spec,
-                executor=executor,
+        def start_next() -> bool:
+            if self._is_cancelled():
+                return False
+            try:
+                index, spec = next(pending_specs)
+            except StopIteration:
+                return False
+            task = asyncio.create_task(
+                self.run_subagent(
+                    parent_participant_id=LEADER_PARTICIPANT_ID,
+                    spec=spec,
+                    executor=executor,
+                )
             )
-            results.append(result)
+            active[task] = index
+            return True
+
+        for _ in range(concurrency):
+            if not start_next():
+                break
+
+        while active:
+            done, _pending = await asyncio.wait(
+                active,
+                return_when=asyncio.FIRST_COMPLETED,
+            )
+            for task in done:
+                index = active.pop(task)
+                indexed_results.append((index, task.result()))
 
             if self._is_cancelled():
                 await self._emit_cancelled()
+                for task in active:
+                    task.cancel()
+                await asyncio.gather(*active, return_exceptions=True)
                 break
 
-        return results
+            while len(active) < concurrency and start_next():
+                pass
+
+        if self._is_cancelled():
+            await self._emit_cancelled()
+
+        indexed_results.sort(key=lambda item: item[0])
+        return [result for _index, result in indexed_results]
+
+    def _plan_concurrency(self, max_concurrency: int | None) -> int:
+        if max_concurrency is None:
+            max_concurrency = self.team_cap
+        try:
+            requested = int(max_concurrency)
+        except (TypeError, ValueError):
+            requested = 1
+        return max(1, min(requested, self.team_cap, DEFAULT_TEAM_CAP))
 
     def _allocate_participant_id(self) -> str:
         participant_id = f"subagent:{self.run_id}:{self._next_subagent_index}"
