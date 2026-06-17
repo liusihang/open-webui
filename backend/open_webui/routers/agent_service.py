@@ -2,6 +2,14 @@ import secrets
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Request, status
 from fastapi.responses import JSONResponse
+from open_webui.agent.approval import (
+    AgentApprovalCoordinator,
+    ApprovalDecisionConflict,
+    ApprovalDecisionRequest,
+    ApprovalError,
+    ApprovalNotFound,
+    ApprovalOperationInProgress,
+)
 from open_webui.agent.events import (
     AgentEventError,
     AgentEventStore,
@@ -99,6 +107,16 @@ def get_agent_tool_authority(request: Request) -> AgentToolAuthority:
         operation_store=get_agent_event_store(request),
         registry=registry,
     )
+
+
+def get_agent_approval_coordinator(request: Request) -> AgentApprovalCoordinator:
+    coordinator = getattr(request.app.state, 'AGENT_APPROVAL_COORDINATOR', None)
+    if coordinator is not None:
+        return coordinator
+
+    coordinator = AgentApprovalCoordinator(get_agent_event_store(request))
+    request.app.state.AGENT_APPROVAL_COORDINATOR = coordinator
+    return coordinator
 
 
 @router.post('/runs/{run_id}/events')
@@ -206,32 +224,134 @@ async def execute_agent_run_tool_call(
         alias='X-Agent-Idempotency-Key',
     ),
     authority: AgentToolAuthority = Depends(get_agent_tool_authority),
+    approval_coordinator: AgentApprovalCoordinator = Depends(get_agent_approval_coordinator),
 ):
     key = _require_matching_idempotency_key(
         form_data.idempotency_key,
         idempotency_key,
     )
+    tool_request = form_data.model_copy(update={'run_id': run_id, 'idempotency_key': key})
     try:
+        tool = authority.registry.get(tool_request.tool_id)
+        if tool is not None:
+            async def resume_tool_call():
+                return await execute_agent_tool_call(authority, tool_request)
+
+            approval_result = await approval_coordinator.request_tool_approval(
+                tool_request,
+                tool,
+                resume=resume_tool_call,
+            )
+            if approval_result is not None:
+                return approval_result
+
         return await execute_agent_tool_call(
             authority,
-            form_data.model_copy(update={'run_id': run_id, 'idempotency_key': key}),
+            tool_request,
         )
     except AgentRunOperationConflict as exc:
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
             detail='idempotency_conflict',
         ) from exc
-    except ToolOperationInProgress:
+    except (ToolOperationInProgress, ApprovalOperationInProgress):
         return JSONResponse(
             status_code=status.HTTP_202_ACCEPTED,
             content={'detail': 'operation_in_progress'},
             headers={'Retry-After': '1'},
         )
+    except ApprovalDecisionConflict as exc:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail={
+                'code': exc.code,
+                'message': str(exc),
+            },
+        ) from exc
+    except ApprovalNotFound as exc:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail={
+                'code': exc.code,
+                'message': str(exc),
+            },
+        ) from exc
+    except ApprovalError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail={
+                'code': getattr(exc, 'code', 'approval_error'),
+                'message': str(exc),
+            },
+        ) from exc
     except ToolAuthorityError as exc:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail={
                 'code': getattr(exc, 'code', 'tool_authority_error'),
+                'message': str(exc),
+            },
+        ) from exc
+
+
+@router.post('/runs/{run_id}/approvals/{approval_id}/decision')
+async def decide_agent_run_approval(
+    request: Request,
+    run_id: str,
+    approval_id: str,
+    form_data: ApprovalDecisionRequest,
+    idempotency_key: str | None = Header(
+        default=None,
+        alias='X-Agent-Idempotency-Key',
+    ),
+    approval_coordinator: AgentApprovalCoordinator = Depends(get_agent_approval_coordinator),
+):
+    key = _require_matching_idempotency_key(
+        form_data.idempotency_key,
+        idempotency_key,
+    )
+    try:
+        return await approval_coordinator.decide(
+            form_data.model_copy(
+                update={
+                    'run_id': run_id,
+                    'approval_id': approval_id,
+                    'idempotency_key': key,
+                }
+            )
+        )
+    except AgentRunOperationConflict as exc:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail='idempotency_conflict',
+        ) from exc
+    except ApprovalOperationInProgress:
+        return JSONResponse(
+            status_code=status.HTTP_202_ACCEPTED,
+            content={'detail': 'operation_in_progress'},
+            headers={'Retry-After': '1'},
+        )
+    except ApprovalDecisionConflict as exc:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail={
+                'code': exc.code,
+                'message': str(exc),
+            },
+        ) from exc
+    except ApprovalNotFound as exc:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail={
+                'code': exc.code,
+                'message': str(exc),
+            },
+        ) from exc
+    except ApprovalError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail={
+                'code': getattr(exc, 'code', 'approval_error'),
                 'message': str(exc),
             },
         ) from exc
