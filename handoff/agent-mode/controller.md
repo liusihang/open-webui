@@ -143,8 +143,8 @@ integrate worker branches in the documented merge train.
 10. W7 approval: integrated as `0da571088`.
 11. W9A model catalog helper: integrated as `e59adeeda`.
 12. W9B1 OpenWebUI subagent control plane: integrated as `d1509d8cb`.
-13. W9B2 AgentScope runtime subagent adapter: initial worker commit
-    `8ad7bb052`; follow-up in progress to add a real AgentScope API boundary.
+13. W9B2 AgentScope runtime subagent adapter: integrated through
+    `5081f2a6e`.
 14. W10A `Chat.svelte` event UI integration.
 15. W12A deployment/E2E harness, then W12B final acceptance.
 
@@ -216,22 +216,45 @@ integrate worker branches in the documented merge train.
   resumed and asked to add a follow-up commit under
   `services/agentscope-runtime/*` that imports and validates the real
   AgentScope API surface.
+- W9B2 AgentScope runtime adapter integrated through `5081f2a6e`.
+  - Worker commits:
+    - `8ad7bb0527d4916bd2c9150a9ca269868b6af33a`
+    - `3ab79f828d33c4d91a0ece82cb5ef7972cec113c`
+  - Integration commits:
+    - `7a5f18fec`
+    - `5081f2a6e`
+  - The follow-up commit adds `agentscope[service]` pinned to
+    `c13c3effcb568ef915cbbd0fe900df2f2b9b003c` in the service-local
+    `services/agentscope-runtime/pyproject.toml` and service-local `uv.lock`.
+  - It adds a real AgentScope bridge that imports and validates
+    `SubAgentTemplate`, `ChatModelBase`, `ChatResponse`, `ToolBase`, and
+    `ToolChunk`, plus OpenWebUI callback-backed model/tool boundaries.
+  - Service-local runtime gate:
+    `cd services/agentscope-runtime && uv run --extra test pytest`
+    -> `19 passed`.
+  - Backend agent/storage gate:
+    `WEBUI_SECRET_KEY=test-secret ENABLE_DB_MIGRATIONS=false uv run pytest -q
+    backend/open_webui/test/agent backend/open_webui/test/models/test_agent_runs.py`
+    -> `70 passed`.
+  - `uv run ruff check backend/open_webui/agent
+    backend/open_webui/routers/agent_service.py backend/open_webui/test/agent`
+    passed.
+  - `git diff --check origin/pr/7..HEAD` passed.
+  - Root `uv.lock` was restored after test-run environment churn; service-local
+    `services/agentscope-runtime/uv.lock` is intentional dependency state.
 
 ## Next
 
 Next controller action:
 
 1. W9B1 is integrated and its worker agent was closed.
-2. W9B2 AgentScope runtime adapter is active for the real-AgentScope boundary
-   follow-up.
+2. W9B2 AgentScope runtime adapter is integrated.
    - Worktree:
      `/Users/liusihang/openwebui/.worktrees/agent-mode-w9b-agentscope-adapter`
    - Branch: `codex/agent-mode-w9b-agentscope-adapter`
-   - Initial worker commit: `8ad7bb052`
+   - Worker commits: `8ad7bb052`, `3ab79f828`
    - Agent: `019ed701-533e-72a0-91ee-0a892946c900` (Pauli)
-   - Owns `services/agentscope-runtime/*`.
-   - Must add a tested dependency/API boundary using real AgentScope imports,
-     not only a local shim.
+   - Agent closed after completion.
 3. W10A frontend Agent Event UI worker completed as `05e8968fc`, but should
    wait for W9B fixture/interface stability before integration.
    - Worktree: `/Users/liusihang/openwebui/.worktrees/agent-mode-w10-chat-ui`
@@ -250,7 +273,7 @@ Next controller action:
 
 Next controller action:
 
-1. Wait for Pauli's W9B2 follow-up commit.
-2. Verify W9B2 service-local tests and inspect dependency/lockfile scope.
-3. Integrate W9B2 only after the real-AgentScope boundary gap is resolved.
-4. Then integrate W10A, and W12A if it remains docs/scripts/harness-only.
+1. Integrate W10A, then verify focused Vitest and frontend syntax/prettier
+   checks as appropriate.
+2. Integrate W12A if it remains docs/scripts/harness-only.
+3. Run final backend/runtime/frontend gates before W12B live acceptance.
