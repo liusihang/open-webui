@@ -1175,8 +1175,10 @@ async def lifespan(app: FastAPI):
     asyncio.create_task(periodic_session_pool_cleanup())
 
     from open_webui.utils.automations import scheduler_worker_loop
+    from open_webui.utils.agent_memory_extraction import enqueue_startup_agent_memory_backlog
 
     asyncio.create_task(scheduler_worker_loop(app))
+    asyncio.create_task(enqueue_startup_agent_memory_backlog(app))
 
     if app.state.config.ENABLE_BASE_MODELS_CACHE:
         try:

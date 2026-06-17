@@ -74,6 +74,7 @@ from open_webui.socket.main import (
     get_event_emitter,
 )
 from open_webui.utils.access_control import has_connection_access, has_permission
+from open_webui.utils.agent_memory_extraction import enqueue_agent_memory_extraction_after_completion
 from open_webui.utils.access_control.files import get_accessible_folder_files
 from open_webui.utils.chat import generate_chat_completion
 from open_webui.utils.code_interpreter import execute_code_jupyter
@@ -4556,6 +4557,10 @@ async def background_tasks_handler(ctx):
                             )
                         except Exception as e:
                             pass
+
+        chat_id = metadata.get('chat_id', '')
+        if chat_id and not chat_id.startswith('local:') and not chat_id.startswith('channel:'):
+            await enqueue_agent_memory_extraction_after_completion(request, chat_id, user)
 
 
 async def outlet_filter_handler(ctx):
