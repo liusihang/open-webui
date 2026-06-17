@@ -8,6 +8,7 @@ from typing import Any
 
 from pydantic import BaseModel, Field
 
+from open_webui.agent.artifacts import collect_terminal_output_paths
 from open_webui.models.agent_runs import AgentRunOperationConflict
 
 NORMALIZED_TOOL_STATUSES = {
@@ -34,6 +35,7 @@ class ToolOperationInProgress(ToolAuthorityError):
 
 class ToolCallRequest(BaseModel):
     run_id: str
+    user_id: str | None = None
     participant_id: str
     tool_call_id: str
     tool_id: str
@@ -129,9 +131,13 @@ class AgentToolAuthority:
         *,
         operation_store,
         registry: dict[str, dict[str, Any]] | None = None,
+        resource_manager=None,
+        artifact_registrar=None,
     ):
         self.operation_store = operation_store
         self.registry = registry or {}
+        self.resource_manager = resource_manager
+        self.artifact_registrar = artifact_registrar
 
     async def execute_tool_call(self, request: ToolCallRequest) -> dict[str, Any]:
         if not request.idempotency_key:
@@ -169,11 +175,56 @@ class AgentToolAuthority:
                 tool_type=tool.get('type'),
                 arguments=request.arguments,
             )
+            await self._register_terminal_side_effects(
+                request=request,
+                tool=tool,
+                raw_result=raw_result,
+                response=response,
+            )
         except Exception as exc:
             response = normalize_tool_exception(exc)
 
         await self.operation_store.finish_operation_success(claim.operation.id, response)
         return response
+
+    async def _register_terminal_side_effects(
+        self,
+        *,
+        request: ToolCallRequest,
+        tool: dict[str, Any],
+        raw_result: Any,
+        response: dict[str, Any],
+    ) -> None:
+        if not _is_terminal_run_command(tool, response):
+            return
+
+        if self.resource_manager is not None:
+            for process_ref in response['process_refs']:
+                self.resource_manager.register_terminal_process(
+                    request.run_id,
+                    process_ref,
+                )
+
+        if self.artifact_registrar is None or request.user_id is None:
+            return
+
+        output_paths = collect_terminal_output_paths(
+            arguments=request.arguments,
+            result=raw_result,
+        )
+        if not output_paths:
+            return
+
+        terminal_server_id = _terminal_server_id(tool.get('tool_id'))
+        artifacts = await self.artifact_registrar.register_terminal_output_artifacts(
+            run_id=request.run_id,
+            user_id=request.user_id,
+            participant_id=request.participant_id,
+            terminal_server_id=terminal_server_id,
+            output_paths=output_paths,
+            output_dir=_requested_output_dir(request.arguments),
+        )
+        response['artifacts'] = _merge_artifacts(response['artifacts'], artifacts)
 
 
 def _cached_operation_response(operation) -> dict[str, Any]:
@@ -309,6 +360,37 @@ def _extract_process_refs(
             'metadata': {},
         }
     ]
+
+
+def _is_terminal_run_command(tool: dict[str, Any], response: dict[str, Any]) -> bool:
+    if not response.get('process_refs'):
+        return False
+    return tool.get('name') == 'run_command' or tool.get('type') == 'terminal'
+
+
+def _requested_output_dir(arguments: dict[str, Any]) -> str | None:
+    output_dir = arguments.get('output_dir') or arguments.get('output_directory')
+    return output_dir if isinstance(output_dir, str) and output_dir else None
+
+
+def _merge_artifacts(
+    existing: list[dict[str, Any]],
+    registered: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    merged = list(existing)
+    seen_paths = {
+        artifact.get('path')
+        for artifact in merged
+        if isinstance(artifact, dict) and artifact.get('path')
+    }
+    for artifact in registered:
+        path = artifact.get('path')
+        if path and path in seen_paths:
+            continue
+        if path:
+            seen_paths.add(path)
+        merged.append(artifact)
+    return merged
 
 
 def _terminal_server_id(tool_id: str | None) -> str | None:

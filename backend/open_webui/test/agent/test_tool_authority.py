@@ -4,6 +4,8 @@ os.environ.setdefault('WEBUI_SECRET_KEY', 'test-secret')
 os.environ.setdefault('ENABLE_DB_MIGRATIONS', 'false')
 
 import pytest
+from open_webui.agent.artifacts import AgentRunArtifactRegistrar
+from open_webui.agent.resources import AgentRunResourceManager
 from open_webui.agent.tool_authority import (
     AgentToolAuthority,
     ToolCallRequest,
@@ -73,6 +75,26 @@ class FakeOperationStore:
                 self.claims[key] = updated
                 return updated
         raise AssertionError(f'unknown operation {operation_id}')
+
+
+class FakeArtifactStore:
+    def __init__(self):
+        self.rows = []
+        self._by_path = {}
+
+    async def register_artifact(self, **kwargs):
+        path_key = (kwargs['run_id'], kwargs['path'], kwargs['kind'])
+        existing = self._by_path.get(path_key)
+        if existing is not None:
+            return existing
+        row = {
+            'id': f'artifact-{len(self.rows) + 1}',
+            **kwargs,
+            'created_at': len(self.rows) + 1,
+        }
+        self.rows.append(row)
+        self._by_path[path_key] = row
+        return row
 
 
 def test_tool_access_envelope_exposes_schema_and_opaque_ids_without_callables():
@@ -228,3 +250,78 @@ async def test_tool_call_same_idempotency_key_with_modified_body_conflicts():
                 idempotency_key='tool:leader:call-1:1',
             )
         )
+
+
+@pytest.mark.asyncio
+async def test_terminal_run_command_registers_process_refs_and_explicit_output_artifacts():
+    async def run_command(command: str, output_paths: list[str]):
+        return {
+            'process_id': 'proc-123',
+            'command': command,
+            'status': 'running',
+            'exit_code': None,
+            'log_path': '/workspace/logs/proc-123.jsonl',
+            'next_offset': 7,
+            'output_paths': output_paths,
+        }
+
+    _envelope, registry = build_tool_access_envelope(
+        {
+            'run_command': {
+                'tool_id': 'terminal:main',
+                'callable': run_command,
+                'spec': {'name': 'run_command', 'parameters': {'type': 'object'}},
+                'type': 'terminal',
+            }
+        }
+    )
+    resource_manager = AgentRunResourceManager()
+    artifact_store = FakeArtifactStore()
+    authority = AgentToolAuthority(
+        operation_store=FakeOperationStore(),
+        registry=registry,
+        resource_manager=resource_manager,
+        artifact_registrar=AgentRunArtifactRegistrar(artifact_store),
+    )
+
+    result = await authority.execute_tool_call(
+        ToolCallRequest(
+            run_id='run-1',
+            user_id='user-1',
+            participant_id='leader',
+            tool_call_id='call-1',
+            tool_id='tool:terminal:main:run_command',
+            arguments={'command': 'python analysis.py', 'output_paths': ['report.csv']},
+            idempotency_key='tool:leader:call-1:1',
+        )
+    )
+
+    assert result['process_refs'] == [
+        {
+            'terminal_server_id': 'main',
+            'process_id': 'proc-123',
+            'command': 'python analysis.py',
+            'status': 'running',
+            'exit_code': None,
+            'log_path': '/workspace/logs/proc-123.jsonl',
+            'next_offset': 7,
+            'metadata': {},
+        }
+    ]
+    assert resource_manager.process_refs_for_run('run-1') == result['process_refs']
+    assert result['artifacts'] == [
+        {
+            'artifact_id': 'artifact-1',
+            'kind': 'file',
+            'path': '/workspace/agent-runs/run-1/outputs/report.csv',
+            'url': None,
+            'mime_type': None,
+            'size': None,
+            'metadata': {
+                'cleanup_eligible': False,
+                'retention': 'user_visible_output',
+                'participant_id': 'leader',
+            },
+        }
+    ]
+    assert artifact_store.rows[0]['idempotency_key'] == 'artifact:leader:file:main:run-1:outputs:report.csv'
