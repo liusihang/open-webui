@@ -371,3 +371,32 @@ Recommended workers:
 
 Do not claim live/local 12 MVP scenarios pass until W12B has executed against
 the integrated services. W12A fixture success is only harness readiness.
+
+## W12B Worker Worktree Checkpoint
+
+Date: 2026-06-18
+
+Created W12B worker worktrees from integration checkpoint
+`da664a92611e19877adb4666c2497b7cd4e722e2`.
+
+| Worker | Worktree | Branch | Handoff Commit |
+| --- | --- | --- | --- |
+| W12B-1 Runtime and chat-path smoke | `/Users/liusihang/openwebui/.worktrees/agent-mode-w12b-runtime` | `codex/agent-mode-w12b-runtime` | `8f8ccc537` |
+| W12B-2 Tool, approval, terminal artifacts | `/Users/liusihang/openwebui/.worktrees/agent-mode-w12b-tool-terminal` | `codex/agent-mode-w12b-tool-terminal` | `834c9a4d7` |
+| W12B-3 Subagent and model-selection acceptance | `/Users/liusihang/openwebui/.worktrees/agent-mode-w12b-subagents` | `codex/agent-mode-w12b-subagents` | `5e4f4ff4c` |
+| W12B-4 SSE/UI/reconnect/compaction | `/Users/liusihang/openwebui/.worktrees/agent-mode-w12b-sse-ui` | `codex/agent-mode-w12b-sse-ui` | `892787ad0` |
+| W12B-5 Regression and release readiness | `/Users/liusihang/openwebui/.worktrees/agent-mode-w12b-regression` | `codex/agent-mode-w12b-regression` | `ec5cf1f01` |
+
+All five worker worktrees were clean after their handoff commits.
+
+Dispatched agents without forking full context:
+
+| Worker | Agent | Nickname |
+| --- | --- | --- |
+| W12B-1 Runtime and chat-path smoke | `019ed727-467d-7d20-85df-25d4f0aa6474` | Ramanujan |
+| W12B-2 Tool, approval, terminal artifacts | `019ed727-46e6-7263-9a78-1c3f25f0bc00` | Lovelace |
+| W12B-3 Subagent and model-selection acceptance | `019ed727-4767-7263-bf52-d865a68c1134` | Bernoulli |
+| W12B-4 SSE/UI/reconnect/compaction | `019ed727-47ea-75b0-9e21-dbd45959d6d1` | Banach |
+| W12B-5 Regression and release readiness | `019ed727-48a5-7221-9e83-01312782481a` | Schrodinger |
+
+Controller should not duplicate their assigned scenario work while they run.
