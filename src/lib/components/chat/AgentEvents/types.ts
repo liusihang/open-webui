@@ -8,29 +8,32 @@ export type AgentRunState =
 	| 'cancelled'
 	| 'budget_exceeded';
 
-export type AgentRunEventType =
-	| 'run.queued'
-	| 'run.running'
-	| 'action.summary'
-	| 'tool.requested'
-	| 'tool.started'
-	| 'tool.completed'
-	| 'tool.failed'
-	| 'approval.requested'
-	| 'approval.completed'
-	| 'artifact.registered'
-	| 'subagent.created'
-	| 'subagent.updated'
-	| 'subagent.completed'
-	| 'subagent.failed'
-	| 'model.selection.requested'
-	| 'model.selection.completed'
-	| 'final.started'
-	| 'final.delta'
-	| 'run.completed'
-	| 'run.failed'
-	| 'run.cancelled'
-	| 'run.budget_exceeded';
+export const AGENT_RUN_EVENT_TYPES = [
+	'run.queued',
+	'run.running',
+	'action.summary',
+	'tool.requested',
+	'tool.started',
+	'tool.completed',
+	'tool.failed',
+	'approval.requested',
+	'approval.completed',
+	'artifact.registered',
+	'subagent.created',
+	'subagent.updated',
+	'subagent.completed',
+	'subagent.failed',
+	'model.selection.requested',
+	'model.selection.completed',
+	'final.started',
+	'final.delta',
+	'run.completed',
+	'run.failed',
+	'run.cancelled',
+	'run.budget_exceeded'
+] as const;
+
+export type AgentRunEventType = (typeof AGENT_RUN_EVENT_TYPES)[number];
 
 export type AgentRun = {
 	id: string;
@@ -83,6 +86,15 @@ export type AgentRunEventState = {
 	items: AgentRunEventViewItem[];
 	lastSeq: number;
 	finalText: string;
+	finalStarted: boolean;
 	seenSeqs: Set<number>;
 	seenFinalDeltaKeys: Set<string>;
+	finalDeltaChunks: Map<
+		string,
+		{
+			streamId: string;
+			deltaIndex: number;
+			text: string;
+		}
+	>;
 };

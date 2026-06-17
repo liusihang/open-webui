@@ -1,6 +1,10 @@
 import { describe, expect, it } from 'vitest';
 
-import { mergeHistorySnapshot, mergeServerMessage } from './historySync';
+import {
+	mergeHistorySnapshot,
+	mergeServerMessage,
+	shouldApplySocketContentEvent
+} from './historySync';
 
 describe('mergeServerMessage', () => {
 	it('keeps existing content when the server snapshot has empty content', () => {
@@ -198,5 +202,48 @@ describe('mergeHistorySnapshot', () => {
 
 		expect(result.history.messages.a.statusHistory).toEqual(latestHistory.messages.a.statusHistory);
 		expect(result.changed).toBe(true);
+	});
+});
+
+describe('shouldApplySocketContentEvent', () => {
+	it('ignores socket incremental assistant content for Agent Mode messages', () => {
+		const agentMessage = {
+			id: 'assistant-msg',
+			role: 'assistant',
+			content: 'SSE final answer',
+			agent_run_id: 'run-1',
+			done: false
+		};
+
+		expect(shouldApplySocketContentEvent(agentMessage, 'chat:completion')).toBe(false);
+		expect(shouldApplySocketContentEvent(agentMessage, 'chat:message:delta')).toBe(false);
+		expect(shouldApplySocketContentEvent(agentMessage, 'message')).toBe(false);
+		expect(shouldApplySocketContentEvent(agentMessage, 'status')).toBe(true);
+	});
+
+	it('keeps legacy socket content events enabled when Agent Mode is absent', () => {
+		const legacyMessage = {
+			id: 'assistant-msg',
+			role: 'assistant',
+			content: '',
+			done: false
+		};
+
+		expect(shouldApplySocketContentEvent(legacyMessage, 'chat:completion')).toBe(true);
+		expect(shouldApplySocketContentEvent(legacyMessage, 'chat:message:delta')).toBe(true);
+		expect(shouldApplySocketContentEvent(legacyMessage, 'message')).toBe(true);
+	});
+
+	it('allows final replace-style socket updates for Agent Mode messages without appending text', () => {
+		const agentMessage = {
+			id: 'assistant-msg',
+			role: 'assistant',
+			content: 'SSE final answer',
+			agent_run_id: 'run-1',
+			done: true
+		};
+
+		expect(shouldApplySocketContentEvent(agentMessage, 'chat:message')).toBe(true);
+		expect(shouldApplySocketContentEvent(agentMessage, 'replace')).toBe(true);
 	});
 });

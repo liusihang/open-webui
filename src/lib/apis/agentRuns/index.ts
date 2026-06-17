@@ -1,8 +1,5 @@
 import { WEBUI_API_BASE_URL } from '$lib/constants';
-import type {
-	AgentRun,
-	AgentRunEvent
-} from '$lib/components/chat/AgentEvents/types';
+import type { AgentRun, AgentRunEvent } from '$lib/components/chat/AgentEvents/types';
 
 export type AgentRunListOptions = {
 	chatId?: string;
@@ -75,7 +72,7 @@ export const getAgentRunEvents = async (
 	options: AgentRunEventsOptions = {}
 ): Promise<AgentRunEvent[]> => {
 	let error = null;
-	const res = await fetch(buildAgentRunEventsUrl(runId, options), {
+	const res = await fetch(buildAgentRunEventsListUrl(runId, options), {
 		method: 'GET',
 		credentials: 'include',
 		headers: jsonHeaders(token)
@@ -101,10 +98,7 @@ export const getAgentRunEvents = async (
 	return res?.events ?? [];
 };
 
-export const buildAgentRunEventsUrl = (
-	runId: string,
-	options: AgentRunEventsOptions = {}
-): string => {
+const buildAgentRunEventsSearchParams = (options: AgentRunEventsOptions = {}): URLSearchParams => {
 	const searchParams = new URLSearchParams();
 
 	if (options.afterSeq !== undefined) {
@@ -113,6 +107,27 @@ export const buildAgentRunEventsUrl = (
 	if (options.lastEventId) {
 		searchParams.append('last_event_id', options.lastEventId);
 	}
+
+	return searchParams;
+};
+
+export const buildAgentRunEventsListUrl = (
+	runId: string,
+	options: AgentRunEventsOptions = {}
+): string => {
+	const searchParams = buildAgentRunEventsSearchParams(options);
+
+	const query = searchParams.toString();
+	return `${WEBUI_API_BASE_URL}/agent/runs/${encodeURIComponent(runId)}/events/list${
+		query ? `?${query}` : ''
+	}`;
+};
+
+export const buildAgentRunEventsUrl = (
+	runId: string,
+	options: AgentRunEventsOptions = {}
+): string => {
+	const searchParams = buildAgentRunEventsSearchParams(options);
 
 	const query = searchParams.toString();
 	return `${WEBUI_API_BASE_URL}/agent/runs/${encodeURIComponent(runId)}/events${

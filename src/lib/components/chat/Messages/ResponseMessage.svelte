@@ -65,6 +65,7 @@
 	import StatusHistory from './ResponseMessage/StatusHistory.svelte';
 	import FullHeightIframe from '$lib/components/common/FullHeightIframe.svelte';
 	import OutputEditView from './OutputEditView.svelte';
+	import AgentRunEvents from '../AgentEvents/AgentRunEvents.svelte';
 
 	interface MessageType {
 		id: string;
@@ -73,6 +74,7 @@
 		files?: { type: string; url: string }[];
 		timestamp: number;
 		role: string;
+		agent_run_id?: string;
 		statusHistory?: {
 			done: boolean;
 			action: string;
@@ -827,7 +829,14 @@
 							class="w-full flex flex-col relative {edit ? 'hidden' : ''}"
 							id="response-content-container"
 						>
-							{#if message.content === '' && !message.done && !message.error && !hasVisibleStatus}
+							{#if message.agent_run_id}
+								<AgentRunEvents
+									agentRunId={message.agent_run_id}
+									showFinalText={!(message.content ?? '').trim()}
+								/>
+							{/if}
+
+							{#if message.content === '' && !message.done && !message.error && !hasVisibleStatus && !message.agent_run_id}
 								<Skeleton />
 							{:else if message.content && message.error !== true}
 								<!-- always show message contents even if there's an error -->

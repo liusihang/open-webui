@@ -119,6 +119,7 @@
 	import Sidebar from '../icons/Sidebar.svelte';
 	import Image from '../common/Image.svelte';
 	import { getBanners } from '$lib/apis/configs';
+	import { shouldApplySocketContentEvent } from '$lib/components/chat/historySync';
 
 	export let chatIdProp = '';
 
@@ -528,6 +529,7 @@
 			if (message) {
 				const type = event?.data?.type ?? null;
 				const data = event?.data?.data ?? null;
+				const applySocketContentEvent = shouldApplySocketContentEvent(message, type);
 
 				if (type === 'status') {
 					if (message?.statusHistory) {
@@ -536,6 +538,10 @@
 						message.statusHistory = [data];
 					}
 				} else if (type === 'chat:completion') {
+					if (!applySocketContentEvent) {
+						history.messages[event.message_id] = message;
+						return;
+					}
 					chatCompletionEventHandler(data, message, event.chat_id);
 				} else if (type === 'chat:tasks:cancel') {
 					if (event.message_id === history.currentId) {
@@ -549,6 +555,10 @@
 						message.done = true;
 					}
 				} else if (type === 'chat:message:delta' || type === 'message') {
+					if (!applySocketContentEvent) {
+						history.messages[event.message_id] = message;
+						return;
+					}
 					message.content += data.content;
 				} else if (type === 'chat:message' || type === 'replace') {
 					message.content = data.content;
@@ -1823,7 +1833,7 @@
 		if (metadata) {
 			message.metadata = {
 				...(message.metadata ?? {}),
-				...metadata,
+				...metadata
 			};
 		}
 
@@ -2604,6 +2614,14 @@
 			if (res.error) {
 				await handleOpenAIError(res.error, responseMessage);
 			} else {
+				if (res.agent_run_id) {
+					responseMessage.agent_run_id = res.agent_run_id;
+					history.messages[responseMessageId] = {
+						...history.messages[responseMessageId],
+						agent_run_id: res.agent_run_id
+					};
+				}
+
 				// Backend returns task_ids (multi-model) or task_id (single model)
 				const newTaskIds = res.task_ids ?? (res.task_id ? [res.task_id] : []);
 				if (taskIds) {

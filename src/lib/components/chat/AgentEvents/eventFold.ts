@@ -19,8 +19,10 @@ export const createAgentRunEventState = (): AgentRunEventState => ({
 	items: [],
 	lastSeq: 0,
 	finalText: '',
+	finalStarted: false,
 	seenSeqs: new Set(),
-	seenFinalDeltaKeys: new Set()
+	seenFinalDeltaKeys: new Set(),
+	finalDeltaChunks: new Map()
 });
 
 export const foldAgentRunEvents = (events: AgentRunEvent[]): AgentRunEventState => {
@@ -33,30 +35,41 @@ export const foldAgentRunEvent = (
 	state: AgentRunEventState,
 	event: AgentRunEvent
 ): AgentRunEventState => {
-	if (!Number.isFinite(event.seq) || event.seq <= state.lastSeq || state.seenSeqs.has(event.seq)) {
+	if (!Number.isFinite(event.seq) || event.seq <= 0 || state.seenSeqs.has(event.seq)) {
 		return state;
 	}
 
 	const nextState: AgentRunEventState = {
 		items: [...state.items],
-		lastSeq: event.seq,
+		lastSeq: Math.max(state.lastSeq, event.seq),
 		finalText: state.finalText,
+		finalStarted: state.finalStarted || event.event_type === 'final.started',
 		seenSeqs: new Set(state.seenSeqs).add(event.seq),
-		seenFinalDeltaKeys: new Set(state.seenFinalDeltaKeys)
+		seenFinalDeltaKeys: new Set(state.seenFinalDeltaKeys),
+		finalDeltaChunks: new Map(state.finalDeltaChunks)
 	};
 
 	if (event.event_type === 'final.delta') {
+		if (!isFinalDeltaRenderable(nextState, event)) {
+			return nextState;
+		}
+
 		const deltaKey = getFinalDeltaKey(event);
 		if (!nextState.seenFinalDeltaKeys.has(deltaKey)) {
 			nextState.seenFinalDeltaKeys.add(deltaKey);
-			nextState.finalText += getFinalDeltaText(event);
+			nextState.finalDeltaChunks.set(deltaKey, {
+				streamId: getFinalStreamId(event),
+				deltaIndex: getFinalDeltaIndex(event),
+				text: getFinalDeltaText(event)
+			});
+			nextState.finalText = buildFinalText(nextState.finalDeltaChunks);
 		}
 
 		upsertFinalDeltaItem(nextState, event);
 		return nextState;
 	}
 
-	nextState.items.push(toViewItem(event));
+	insertViewItem(nextState, toViewItem(event));
 	return nextState;
 };
 
@@ -70,15 +83,26 @@ const upsertFinalDeltaItem = (state: AgentRunEventState, event: AgentRunEvent) =
 	if (existingIndex >= 0) {
 		state.items[existingIndex] = {
 			...state.items[existingIndex],
-			seq: event.seq,
+			seq: Math.max(state.items[existingIndex].seq, event.seq),
 			summary: item.summary,
 			status: item.status,
 			createdAt: event.created_at
 		};
+		state.items.sort((a, b) => a.seq - b.seq);
 		return;
 	}
 
-	state.items.push(item);
+	insertViewItem(state, item);
+};
+
+const insertViewItem = (state: AgentRunEventState, item: AgentRunEventViewItem) => {
+	const nextIndex = state.items.findIndex((existing) => existing.seq > item.seq);
+	if (nextIndex === -1) {
+		state.items.push(item);
+		return;
+	}
+
+	state.items.splice(nextIndex, 0, item);
 };
 
 const toViewItem = (event: AgentRunEvent): AgentRunEventViewItem => ({
@@ -102,7 +126,9 @@ const getEventSummary = (event: AgentRunEvent): string => {
 	const participantName = getString(
 		event.payload.participant_name ?? event.payload.participant_id ?? event.participant_id
 	);
-	const artifactName = getString(event.payload.name ?? event.payload.path ?? event.payload.artifact_id);
+	const artifactName = getString(
+		event.payload.name ?? event.payload.path ?? event.payload.artifact_id
+	);
 
 	switch (event.event_type) {
 		case 'run.queued':
@@ -212,14 +238,51 @@ const sanitizeValue = (value: unknown): unknown => {
 	return sanitized;
 };
 
+const isFinalDeltaRenderable = (state: AgentRunEventState, event: AgentRunEvent): boolean => {
+	return state.finalStarted || event.phase === 'finalizing';
+};
+
 const getFinalDeltaText = (event: AgentRunEvent): string => {
 	return getString(event.payload.delta ?? event.payload.text ?? event.summary) ?? '';
 };
 
 const getFinalDeltaKey = (event: AgentRunEvent): string => {
-	const streamId = getString(event.payload.final_stream_id) ?? 'default';
+	const streamId = getFinalStreamId(event);
 	const deltaIndex = getString(event.payload.delta_index) ?? `${event.seq}`;
 	return `${streamId}:${deltaIndex}`;
+};
+
+const getFinalStreamId = (event: AgentRunEvent): string => {
+	return getString(event.payload.final_stream_id) ?? 'default';
+};
+
+const getFinalDeltaIndex = (event: AgentRunEvent): number => {
+	const value = event.payload.delta_index;
+	if (typeof value === 'number' && Number.isFinite(value)) {
+		return value;
+	}
+
+	if (typeof value === 'string') {
+		const parsed = Number(value);
+		if (Number.isFinite(parsed)) {
+			return parsed;
+		}
+	}
+
+	return event.seq;
+};
+
+const buildFinalText = (chunks: AgentRunEventState['finalDeltaChunks']): string => {
+	return [...chunks.values()]
+		.sort((a, b) => {
+			if (a.streamId === b.streamId) {
+				return a.deltaIndex - b.deltaIndex;
+			}
+
+			return a.streamId.localeCompare(b.streamId);
+		})
+		.map((chunk) => chunk.text)
+		.join('');
 };
 
 const getString = (value: unknown): string | null => {
