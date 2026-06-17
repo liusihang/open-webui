@@ -21,14 +21,20 @@
 
 	let adminConfig: Record<string, any> | null = null;
 	let failedJobs: Record<string, any> | null = null;
+	let failedExtractionJobs: Array<Record<string, any>> = [];
+	let failedConsolidationJobs: Array<Record<string, any>> = [];
 	let operationUserId = '';
 	let operationScope: 'all' | 'global' | 'folder' = 'all';
 	let operationFolderId = '';
 	let noteMode: 'convert' | 'delete' = 'convert';
 	let operationRunning = '';
 
+	$: failedExtractionJobs = failedJobs?.extraction_jobs ?? [];
+	$: failedConsolidationJobs = failedJobs?.consolidation_jobs ?? [];
+
 	const scopeType = () => (operationScope === 'all' ? null : operationScope);
 	const scopeId = () => (operationScope === 'folder' ? operationFolderId.trim() : '');
+	const formatJobValue = (value: unknown) => (value === null || value === undefined || value === '' ? '-' : `${value}`);
 
 	const validateOperationScope = () => {
 		if (operationScope === 'folder' && !operationFolderId.trim()) {
@@ -384,6 +390,134 @@
 							value={failedJobs?.consolidation_jobs_failed ?? 0}
 							disabled
 						/>
+					</div>
+				</div>
+
+				<div class="mt-4">
+					<div class="mb-2.5 text-base font-medium">{$i18n.t('Inspect Failed Jobs')}</div>
+
+					<hr class="border-gray-100/30 dark:border-gray-850/30 my-2" />
+
+					<div class="grid grid-cols-1 xl:grid-cols-2 gap-3 mt-3">
+						<section class="space-y-2">
+							<div class="flex items-center justify-between gap-2">
+								<div class="text-xs font-medium">{$i18n.t('Failed Extractions')}</div>
+								<div class="text-[11px] text-gray-500 dark:text-gray-400">
+									{failedExtractionJobs.length}
+								</div>
+							</div>
+
+							{#if failedExtractionJobs.length > 0}
+								<div class="space-y-2">
+									{#each failedExtractionJobs as job}
+										<div class="rounded-lg border border-gray-100/60 dark:border-gray-850/60 bg-gray-50/70 dark:bg-gray-850/40 p-3">
+											<div class="flex items-start justify-between gap-3">
+												<div class="min-w-0">
+													<div class="text-[11px] font-medium uppercase tracking-wide text-gray-500 dark:text-gray-400">
+														{$i18n.t('Chat ID')}
+													</div>
+													<div class="break-all text-xs font-medium text-gray-900 dark:text-gray-100">
+														{job.chat_id}
+													</div>
+												</div>
+												<div class="shrink-0 text-[11px] font-medium capitalize text-gray-600 dark:text-gray-300">
+													{job.status}
+												</div>
+											</div>
+
+											<div class="mt-3 grid grid-cols-1 sm:grid-cols-2 gap-x-3 gap-y-2 text-[11px] text-gray-600 dark:text-gray-400">
+												<div>
+													<span class="font-medium text-gray-700 dark:text-gray-200">{$i18n.t('User ID')}:</span>
+													<span class="break-all">{job.user_id}</span>
+												</div>
+												<div>
+													<span class="font-medium text-gray-700 dark:text-gray-200">{$i18n.t('Retry Count')}:</span>
+													<span>{job.retry_count}</span>
+												</div>
+												<div>
+													<span class="font-medium text-gray-700 dark:text-gray-200">{$i18n.t('Updated At')}:</span>
+													<span>{formatJobValue(job.updated_at)}</span>
+												</div>
+												<div class="sm:col-span-2">
+													<span class="font-medium text-gray-700 dark:text-gray-200">{$i18n.t('Last Error')}:</span>
+													<span class="break-all">{formatJobValue(job.last_error)}</span>
+												</div>
+											</div>
+										</div>
+									{/each}
+								</div>
+							{:else}
+								<div class="rounded-lg border border-dashed border-gray-200 dark:border-gray-800 px-3 py-3 text-xs text-gray-500 dark:text-gray-400">
+									{$i18n.t('No failed extraction jobs to inspect')}
+								</div>
+							{/if}
+						</section>
+
+						<section class="space-y-2">
+							<div class="flex items-center justify-between gap-2">
+								<div class="text-xs font-medium">{$i18n.t('Failed Consolidations')}</div>
+								<div class="text-[11px] text-gray-500 dark:text-gray-400">
+									{failedConsolidationJobs.length}
+								</div>
+							</div>
+
+							{#if failedConsolidationJobs.length > 0}
+								<div class="space-y-2">
+									{#each failedConsolidationJobs as job}
+										<div class="rounded-lg border border-gray-100/60 dark:border-gray-850/60 bg-gray-50/70 dark:bg-gray-850/40 p-3">
+											<div class="flex items-start justify-between gap-3">
+												<div class="min-w-0">
+													<div class="text-[11px] font-medium uppercase tracking-wide text-gray-500 dark:text-gray-400">
+														{$i18n.t('Scope')}
+													</div>
+													<div class="break-all text-xs font-medium text-gray-900 dark:text-gray-100">
+														{job.scope_type}/{job.scope_id}
+													</div>
+												</div>
+												<div class="shrink-0 text-[11px] font-medium capitalize text-gray-600 dark:text-gray-300">
+													{job.status}
+												</div>
+											</div>
+
+											<div class="mt-3 grid grid-cols-1 sm:grid-cols-2 gap-x-3 gap-y-2 text-[11px] text-gray-600 dark:text-gray-400">
+												<div>
+													<span class="font-medium text-gray-700 dark:text-gray-200">{$i18n.t('User ID')}:</span>
+													<span class="break-all">{job.user_id}</span>
+												</div>
+												<div>
+													<span class="font-medium text-gray-700 dark:text-gray-200">{$i18n.t('Retry Count')}:</span>
+													<span>{job.retry_count}</span>
+												</div>
+												<div>
+													<span class="font-medium text-gray-700 dark:text-gray-200">{$i18n.t('Scope Type')}:</span>
+													<span class="break-all">{job.scope_type}</span>
+												</div>
+												<div>
+													<span class="font-medium text-gray-700 dark:text-gray-200">{$i18n.t('Scope ID')}:</span>
+													<span class="break-all">{job.scope_id}</span>
+												</div>
+												<div>
+													<span class="font-medium text-gray-700 dark:text-gray-200">{$i18n.t('Input Hash')}:</span>
+													<span class="break-all">{formatJobValue(job.input_hash)}</span>
+												</div>
+												<div>
+													<span class="font-medium text-gray-700 dark:text-gray-200">{$i18n.t('Updated At')}:</span>
+													<span>{formatJobValue(job.updated_at)}</span>
+												</div>
+												<div class="sm:col-span-2">
+													<span class="font-medium text-gray-700 dark:text-gray-200">{$i18n.t('Last Error')}:</span>
+													<span class="break-all">{formatJobValue(job.last_error)}</span>
+												</div>
+											</div>
+										</div>
+									{/each}
+								</div>
+							{:else}
+								<div class="rounded-lg border border-dashed border-gray-200 dark:border-gray-800 px-3 py-3 text-xs text-gray-500 dark:text-gray-400">
+									{$i18n.t('No failed consolidation jobs to inspect')}
+								</div>
+							{/if}
+						</section>
 					</div>
 				</div>
 			</div>

@@ -1293,6 +1293,23 @@ def test_agent_memory_admin_settings_wire_operational_controls():
     assert "rebuildAgentMemoryIndex" in component
     assert "clearAgentMemory" in component
     assert "retryFailedAgentMemoryJobs" in component
+    assert "failedExtractionJobs" in component
+    assert "failedConsolidationJobs" in component
+    assert "Inspect Failed Jobs" in component
+    assert "No failed extraction jobs" in component
+    assert "No failed consolidation jobs" in component
+    for snippet in [
+        "job.user_id",
+        "job.chat_id",
+        "job.status",
+        "job.retry_count",
+        "job.last_error",
+        "job.updated_at",
+        "job.scope_type",
+        "job.scope_id",
+        "job.input_hash",
+    ]:
+        assert snippet in component
     assert 'value="--"' not in component
     assert "cursor-not-allowed" not in component
     for endpoint in [
