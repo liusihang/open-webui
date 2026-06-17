@@ -98,7 +98,7 @@ integrate worker branches in the documented merge train.
 - Earlier plan refresh before W5 completed:
   - Implementation plan in the root checkout has been updated with a
     status-aware agent-team execution board and next integration gates.
-  - W5 model authority worker was active in
+  - W5 model authority worker was running in
     `/Users/liusihang/openwebui/.worktrees/agent-mode-w5-model-authority` on
     `codex/agent-mode-w5-model-authority`.
   - W5 agent id: `019ed6d5-583d-7030-b187-3f0287d96efc`.
