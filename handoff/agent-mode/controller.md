@@ -464,3 +464,58 @@ Result:
   contract shape and live acceptance remains pending.
 - Ruff and `git diff --check origin/pr/7..HEAD` -> passed.
 - No W12B live scenario acceptance was claimed by this worker.
+
+## W12B Scenario Worker Integration
+
+Date: 2026-06-18
+
+Integrated scenario worker results:
+
+| Worker | Agent | Worker Commit | Integrated Commits | Result |
+| --- | --- | --- | --- | --- |
+| W12B-1 Runtime/chat-path | `019ed727-467d-7d20-85df-25d4f0aa6474` | `1fb68709d` | `ac4581d24`, `003835f62` | Narrow fix: runtime start failure now appends a `run.failed` Agent Run event. Evidence remains incomplete/not live-proven. |
+| W12B-2 Tool/approval/terminal | `019ed727-46e6-7263-9a78-1c3f25f0bc00` | `7b9241878` | `0b3834d6a`, `552e6b45f` | Narrow fix: default service `AgentToolAuthority` now consumes configured resource/artifact helpers. Evidence remains incomplete/not live-proven. |
+| W12B-3 Subagents/model-selection | `019ed727-4767-7263-bf52-d865a68c1134` | `074b112a2` | `eecb49ad9`, `3d4b16adf` | Narrow fixes: adds OpenWebUI subagent registration callback; runtime subagent plan now runs concurrently up to cap 5. Evidence remains incomplete/not live-proven. |
+| W12B-4 SSE/UI/compaction | `019ed727-47ea-75b0-9e21-dbd45959d6d1` | `8eebb729f` | `17c1028ed`, `bc4072427` | Evidence-only: local route/unit evidence for SSE reconnect, dedupe, and compaction. Evidence remains incomplete/not live-proven. |
+
+Controller regression after integrating all W12B workers:
+
+- `WEBUI_SECRET_KEY=test-secret ENABLE_DB_MIGRATIONS=false uv run pytest -q
+  backend/open_webui/test/agent backend/open_webui/test/models/test_agent_runs.py`
+  -> `83 passed`.
+- `cd services/agentscope-runtime && uv run --extra test pytest`
+  -> `20 passed`.
+- `npm run test:frontend -- --run
+  src/lib/apis/agentRuns/index.test.ts
+  src/lib/components/chat/AgentEvents/eventFold.test.ts
+  src/lib/components/chat/historySync.test.ts`
+  -> `3 files / 24 tests passed`.
+- `python3 scripts/agent_mode/acceptance_harness.py dry-run` -> passed,
+  live pending.
+- `python3 scripts/agent_mode/acceptance_harness.py fixture` -> passed,
+  `12/12` fixture contract, live pending.
+- `uv run ruff check backend/open_webui/agent
+  backend/open_webui/routers/agent_service.py backend/open_webui/test/agent
+  scripts/agent_mode`
+  -> passed.
+- `git diff --check origin/pr/7..HEAD` -> passed.
+- Root `uv.lock` was restored after `uv run` churn.
+
+Merged W12B evidence:
+
+- Generated `handoff/agent-mode/w12b-merged-evidence.json` with
+  `scripts/agent_mode/merge_w12b_evidence.py`.
+- Live harness command:
+  `python3 scripts/agent_mode/acceptance_harness.py live --evidence
+  handoff/agent-mode/w12b-merged-evidence.json`
+  exited `1`.
+- This is expected and correct at this checkpoint: all 12 scenarios remain
+  `incomplete` / `not_proven` because no direct integrated OpenWebUI +
+  AgentScope runtime + frontend/Open Terminal run was captured.
+
+Next controller action:
+
+1. Commit the merged evidence and this controller update.
+2. Close completed W12B workers.
+3. Start a real local integrated-service acceptance attempt or record the
+   exact environmental blocker if local services cannot be stood up.
