@@ -1,0 +1,80 @@
+{
+  "mode": "partial_local_supporting_evidence",
+  "generated_at": "2026-06-18T04:05:39+08:00",
+  "worktree": "/Users/liusihang/openwebui/.worktrees/agent-mode-w12b-runtime",
+  "branch": "codex/agent-mode-w12b-runtime",
+  "live_acceptance": "not_proven",
+  "scenarios": [
+    {
+      "id": "scenario_01_ordinary_qa",
+      "status": "incomplete",
+      "live_status": "not_proven",
+      "required_observations": [
+        "event:run.running",
+        "event:final.started",
+        "event:final.delta",
+        "event:run.completed",
+        "no_tool_events"
+      ],
+      "observations": [],
+      "supporting_observations": [
+        "Agent Mode chat entry creates an Agent Run and does not call the legacy provider path when enabled.",
+        "Runtime service start endpoint accepts a run and appends run.running through its OpenWebUI callback client."
+      ],
+      "evidence": {
+        "commands": [
+          "PYTHONPATH=backend WEBUI_SECRET_KEY=test-secret ENABLE_DB_MIGRATIONS=false DATABASE_ENABLE_SESSION_SHARING=true uv run --no-project --python 3.12 --with-requirements backend/requirements.txt --with pytest --with pytest-asyncio pytest backend/open_webui/test/agent/test_chat_entry_agent_mode.py backend/open_webui/test/agent/test_events.py backend/open_webui/test/agent/test_w12_acceptance_harness.py backend/open_webui/test/models/test_agent_runs.py::test_final_started_helpers_and_final_text_accumulation -q",
+          "cd services/agentscope-runtime && uv run --frozen --extra test pytest tests/test_app.py -q"
+        ],
+        "notes": "No direct integrated-service ordinary Q&A run was captured. The current runtime service skeleton only appends run.running on start; no local path was found that emits final.started, final.delta, and run.completed for an ordinary Q&A run without the post-W9B2 runtime loop."
+      }
+    },
+    {
+      "id": "scenario_09_final_phase_deltas",
+      "status": "incomplete",
+      "live_status": "not_proven",
+      "required_observations": [
+        "event:final.started_before_delta",
+        "final.delta_only_finalizing",
+        "no_action_after_final.started"
+      ],
+      "observations": [],
+      "supporting_observations": [
+        "append_final_delta rejects deltas unless the run state is finalizing.",
+        "append_final_delta rejects deltas before final.started.",
+        "tool, subagent, artifact, and model events are rejected after final.started."
+      ],
+      "evidence": {
+        "commands": [
+          "PYTHONPATH=backend WEBUI_SECRET_KEY=test-secret ENABLE_DB_MIGRATIONS=false DATABASE_ENABLE_SESSION_SHARING=true uv run --no-project --python 3.12 --with-requirements backend/requirements.txt --with pytest --with pytest-asyncio pytest backend/open_webui/test/agent/test_chat_entry_agent_mode.py backend/open_webui/test/agent/test_events.py backend/open_webui/test/agent/test_w12_acceptance_harness.py backend/open_webui/test/models/test_agent_runs.py::test_final_started_helpers_and_final_text_accumulation -q"
+        ],
+        "notes": "Backend event helpers enforce the final phase contract in focused tests, but no direct integrated-service stream was captured showing final.started before final.delta and no post-final action events in an actual run."
+      }
+    },
+    {
+      "id": "scenario_12_runtime_unavailable_failure",
+      "status": "incomplete",
+      "live_status": "not_proven",
+      "required_observations": [
+        "ENABLE_AGENT_MODE:true",
+        "runtime_unavailable",
+        "event:run.failed",
+        "no_silent_legacy_fallback"
+      ],
+      "observations": [],
+      "supporting_observations": [
+        "Focused chat entry test runs with ENABLE_AGENT_MODE true.",
+        "Runtime unavailable path returns agent_runtime_unavailable and marks the Agent Run failed.",
+        "Narrow fix adds a run.failed Agent Run event on runtime start failure.",
+        "Focused chat entry test asserts no legacy provider fallback is called."
+      ],
+      "evidence": {
+        "commands": [
+          "PYTHONPATH=backend WEBUI_SECRET_KEY=test-secret ENABLE_DB_MIGRATIONS=false DATABASE_ENABLE_SESSION_SHARING=true uv run --no-project --python 3.12 --with-requirements backend/requirements.txt --with pytest --with pytest-asyncio pytest backend/open_webui/test/agent/test_chat_entry_agent_mode.py::test_agent_mode_runtime_unavailable_marks_run_failed_and_visible -q",
+          "PYTHONPATH=backend WEBUI_SECRET_KEY=test-secret ENABLE_DB_MIGRATIONS=false DATABASE_ENABLE_SESSION_SHARING=true uv run --no-project --python 3.12 --with-requirements backend/requirements.txt --with pytest --with pytest-asyncio pytest backend/open_webui/test/agent/test_chat_entry_agent_mode.py backend/open_webui/test/agent/test_events.py backend/open_webui/test/agent/test_w12_acceptance_harness.py backend/open_webui/test/models/test_agent_runs.py::test_final_started_helpers_and_final_text_accumulation -q"
+        ],
+        "notes": "Supporting backend evidence now covers the required failure observations after the fix. It is still not marked live_passed because no direct integrated-service request against a running OpenWebUI process and unavailable runtime was captured in this handoff."
+      }
+    }
+  ]
+}

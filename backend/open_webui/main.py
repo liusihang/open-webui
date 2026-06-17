@@ -1071,6 +1071,7 @@ from open_webui.agent.runtime_client import (
     AgentRuntimeError,
     AgentRuntimeUnavailable,
 )
+from open_webui.agent.protocol import AgentEventType
 
 from open_webui.utils.models import (
     get_all_models,
@@ -2404,6 +2405,13 @@ async def _start_agent_mode_chat(
             from_states=['queued'],
             to_state='failed',
             reason='runtime start failed',
+            payload={'error': error},
+        )
+        await AgentRuns.append_event(
+            run.id,
+            event_type=AgentEventType.RUN_FAILED.value,
+            participant_id='leader',
+            phase='failed',
             payload={'error': error},
         )
         await _link_agent_run_to_assistant_message(metadata, agent_run_id=run.id, error=error)

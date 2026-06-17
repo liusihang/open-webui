@@ -196,6 +196,19 @@ async def test_agent_mode_runtime_unavailable_marks_run_failed_and_visible(
         'code': 'agent_runtime_unavailable',
         'message': 'agent runtime unavailable',
     }
+    events = await AgentRuns.list_events(run.id)
+    assert [(event.event_type, event.phase, event.payload) for event in events] == [
+        (
+            'run.failed',
+            'failed',
+            {
+                'error': {
+                    'code': 'agent_runtime_unavailable',
+                    'message': 'agent runtime unavailable',
+                }
+            },
+        )
+    ]
     assert response['status'] is False
     assert response['agent_run_id'] == run.id
     assert response['error']['code'] == 'agent_runtime_unavailable'
