@@ -1,0 +1,232 @@
+{
+  "mode": "fixture",
+  "base_commit": "28830b966",
+  "scope": "Agent Mode W12A fixture contract only",
+  "live_acceptance": {
+    "status": "pending",
+    "reason": "W12B live acceptance must run after W9B2 and W10A merge."
+  },
+  "scenarios": [
+    {
+      "id": "scenario_01_ordinary_qa",
+      "status": "fixture_passed",
+      "live_status": "pending_w9b2_w10a",
+      "observations": [
+        "event:run.running",
+        "event:final.started",
+        "event:final.delta",
+        "event:run.completed",
+        "no_tool_events"
+      ],
+      "evidence": {
+        "run_state": "completed",
+        "event_order": ["run.running", "final.started", "final.delta", "run.completed"],
+        "tool_event_count": 0
+      }
+    },
+    {
+      "id": "scenario_02_single_tool_call",
+      "status": "fixture_passed",
+      "live_status": "pending_w9b2_w10a",
+      "observations": [
+        "event:tool.requested",
+        "event:tool.completed",
+        "normalized_tool_result:success"
+      ],
+      "evidence": {
+        "tool_name": "read_file",
+        "result": {
+          "status": "success",
+          "content": "fixture result"
+        }
+      }
+    },
+    {
+      "id": "scenario_03_terminal_output_artifact",
+      "status": "fixture_passed",
+      "live_status": "pending_w9b2_w10a",
+      "observations": [
+        "tool:run_command",
+        "process_ref_registered",
+        "artifact:/workspace/agent-runs/<run_id>/outputs"
+      ],
+      "evidence": {
+        "tool_name": "run_command",
+        "process_refs": [
+          {
+            "process_id": "proc-fixture",
+            "status": "completed"
+          }
+        ],
+        "artifacts": [
+          {
+            "path": "/workspace/agent-runs/run-fixture/outputs/report.txt",
+            "metadata": {
+              "cleanup_eligible": false,
+              "retention": "user_visible_output"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "id": "scenario_04_tmp_artifact_retention",
+      "status": "fixture_passed",
+      "live_status": "pending_w9b2_w10a",
+      "observations": [
+        "artifact:/workspace/agent-runs/<run_id>/tmp",
+        "cleanup_eligible:true",
+        "retained_after_completion"
+      ],
+      "evidence": {
+        "artifacts": [
+          {
+            "path": "/workspace/agent-runs/run-fixture/tmp/scratch.json",
+            "metadata": {
+              "cleanup_eligible": true,
+              "retention": "temporary_debug"
+            }
+          }
+        ],
+        "post_completion_available": true
+      }
+    },
+    {
+      "id": "scenario_05_destructive_approval",
+      "status": "fixture_passed",
+      "live_status": "pending_w9b2_w10a",
+      "observations": [
+        "event:approval.requested",
+        "state:waiting_approval",
+        "normalized_tool_result:approval_required"
+      ],
+      "evidence": {
+        "state": "waiting_approval",
+        "approval": {
+          "action": "rm /workspace/agent-runs/run-fixture/outputs/report.txt",
+          "result_status": "approval_required"
+        }
+      }
+    },
+    {
+      "id": "scenario_06_subagent_cap_concurrency",
+      "status": "fixture_passed",
+      "live_status": "pending_w9b2_w10a",
+      "observations": [
+        "event:subagent.created",
+        "subagent_concurrency:observed",
+        "subagent_cap:5"
+      ],
+      "evidence": {
+        "created_subagents": ["subagent-1", "subagent-2", "subagent-3", "subagent-4", "subagent-5"],
+        "max_concurrent": 5,
+        "rejected_after_cap": true
+      }
+    },
+    {
+      "id": "scenario_07_subagent_model_selection",
+      "status": "fixture_passed",
+      "live_status": "pending_w9b2_w10a",
+      "observations": [
+        "event:model.selection.requested",
+        "event:model.selection.completed",
+        "meta.agent_selection"
+      ],
+      "evidence": {
+        "request": "fast citation checker",
+        "selected_model_id": "fixture-fast-model",
+        "meta": {
+          "agent_selection": {
+            "best_for": ["fast", "citation"],
+            "reason": "fuzzy_match"
+          }
+        }
+      }
+    },
+    {
+      "id": "scenario_08_sse_reconnect_backfill",
+      "status": "fixture_passed",
+      "live_status": "pending_w9b2_w10a",
+      "observations": [
+        "last_event_id_reconnect",
+        "backfill_by_seq",
+        "dedupe_seq"
+      ],
+      "evidence": {
+        "last_event_id": 3,
+        "backfilled_seq": [4, 5, 6],
+        "duplicate_seq_ignored": [3]
+      }
+    },
+    {
+      "id": "scenario_09_final_phase_deltas",
+      "status": "fixture_passed",
+      "live_status": "pending_w9b2_w10a",
+      "observations": [
+        "event:final.started_before_delta",
+        "final.delta_only_finalizing",
+        "no_action_after_final.started"
+      ],
+      "evidence": {
+        "state_before_final_delta": "finalizing",
+        "event_order": ["run.running", "final.started", "final.delta", "run.completed"],
+        "post_final_action_rejected": true
+      }
+    },
+    {
+      "id": "scenario_10_cancel_keeps_terminal_process",
+      "status": "fixture_passed",
+      "live_status": "pending_w9b2_w10a",
+      "observations": [
+        "event:run.cancelled",
+        "runtime_cancel_requested",
+        "process_refs_retained",
+        "no_kill_process"
+      ],
+      "evidence": {
+        "run_state": "cancelled",
+        "runtime_cancel_requested": true,
+        "process_refs": [
+          {
+            "process_id": "proc-long-running",
+            "status": "running"
+          }
+        ],
+        "kill_process_called": false
+      }
+    },
+    {
+      "id": "scenario_11_terminal_state_compaction",
+      "status": "fixture_passed",
+      "live_status": "pending_w9b2_w10a",
+      "observations": [
+        "compaction:completed",
+        "compaction:failed",
+        "compaction:cancelled",
+        "compaction:budget_exceeded",
+        "summary_retains_expandable_ui"
+      ],
+      "evidence": {
+        "terminal_states": ["completed", "failed", "cancelled", "budget_exceeded"],
+        "summary_keys": ["participants", "tools", "approvals", "subagents", "artifacts", "process_refs"]
+      }
+    },
+    {
+      "id": "scenario_12_runtime_unavailable_failure",
+      "status": "fixture_passed",
+      "live_status": "pending_w9b2_w10a",
+      "observations": [
+        "ENABLE_AGENT_MODE:true",
+        "runtime_unavailable",
+        "event:run.failed",
+        "no_silent_legacy_fallback"
+      ],
+      "evidence": {
+        "enable_agent_mode": true,
+        "runtime_error_code": "agent_runtime_unavailable",
+        "run_state": "failed",
+        "legacy_fallback_used": false
+      }
+    }
+  ]
+}
