@@ -147,13 +147,29 @@ integrate worker branches in the documented merge train.
 
 ## Next
 
-Create W7/W8 worktrees from the current integration HEAD and dispatch them in
-parallel from minimal context packs:
+W7/W8 worktrees have been created from
+`056560b2f965b54861f7c0bc88ebce84c9a36e13` and dispatched in parallel from
+minimal context packs:
 
 - W7 owns destructive classifier plus approval wait/resume/reject behavior.
+  - Worktree: `/Users/liusihang/openwebui/.worktrees/agent-mode-w7-approval`
+  - Branch: `codex/agent-mode-w7-approval`
+  - Agent: `019ed6e4-4295-7023-9f49-650e962e1388`
 - W8 owns terminal artifacts, process refs, output/tmp path behavior, and
   no-kill-on-cancel behavior.
+  - Worktree:
+    `/Users/liusihang/openwebui/.worktrees/agent-mode-w8-terminal-artifacts`
+  - Branch: `codex/agent-mode-w8-terminal-artifacts`
+  - Agent: `019ed6e4-42ff-7a00-9362-0a541e896877`
 
 W9 should be split: model-catalog helper work can start after W7/W8 are
 dispatched because W5 is now integrated, but the real AgentScope subagent
 adapter should wait until W7/W8 event/artifact shapes are visible.
+
+Next controller action:
+
+1. Let W7/W8 run without duplicating their tasks.
+2. When a worker returns, inspect handoff/diff/commit, run focused tests and
+   ruff in that worker worktree, then cherry-pick into integration.
+3. Run the combined W7/W8 backend gate after both are integrated.
+4. Restore `uv.lock` after any `uv run` churn.
