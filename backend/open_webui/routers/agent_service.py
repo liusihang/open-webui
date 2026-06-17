@@ -112,6 +112,8 @@ def get_agent_tool_authority(request: Request) -> AgentToolAuthority:
     return AgentToolAuthority(
         operation_store=get_agent_event_store(request),
         registry=registry,
+        resource_manager=getattr(request.app.state, 'AGENT_RUN_RESOURCE_MANAGER', None),
+        artifact_registrar=getattr(request.app.state, 'AGENT_RUN_ARTIFACT_REGISTRAR', None),
     )
 
 

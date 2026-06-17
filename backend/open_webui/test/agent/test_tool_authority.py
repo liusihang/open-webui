@@ -1,4 +1,5 @@
 import os
+from types import SimpleNamespace
 
 os.environ.setdefault('WEBUI_SECRET_KEY', 'test-secret')
 os.environ.setdefault('ENABLE_DB_MIGRATIONS', 'false')
@@ -12,6 +13,7 @@ from open_webui.agent.tool_authority import (
     build_tool_access_envelope,
     normalize_tool_result,
 )
+from open_webui.routers.agent_service import get_agent_tool_authority
 
 
 class FakeOperationStore:
@@ -325,3 +327,58 @@ async def test_terminal_run_command_registers_process_refs_and_explicit_output_a
         }
     ]
     assert artifact_store.rows[0]['idempotency_key'] == 'artifact:leader:file:main:run-1:outputs:report.csv'
+
+
+@pytest.mark.asyncio
+async def test_service_default_tool_authority_wires_terminal_process_and_artifact_helpers():
+    async def run_command(command: str, output_paths: list[str]):
+        return {
+            'process_id': 'proc-456',
+            'command': command,
+            'status': 'completed',
+            'exit_code': 0,
+            'log_path': '/workspace/logs/proc-456.jsonl',
+            'next_offset': 12,
+            'output_paths': output_paths,
+        }
+
+    _envelope, registry = build_tool_access_envelope(
+        {
+            'run_command': {
+                'tool_id': 'terminal:main',
+                'callable': run_command,
+                'spec': {'name': 'run_command', 'parameters': {'type': 'object'}},
+                'type': 'terminal',
+            }
+        }
+    )
+    operation_store = FakeOperationStore()
+    resource_manager = AgentRunResourceManager()
+    artifact_store = FakeArtifactStore()
+    request = SimpleNamespace(
+        app=SimpleNamespace(
+            state=SimpleNamespace(
+                AGENT_EVENT_STORE=operation_store,
+                AGENT_TOOL_REGISTRY=registry,
+                AGENT_RUN_RESOURCE_MANAGER=resource_manager,
+                AGENT_RUN_ARTIFACT_REGISTRAR=AgentRunArtifactRegistrar(artifact_store),
+            )
+        )
+    )
+    authority = get_agent_tool_authority(request)
+
+    result = await authority.execute_tool_call(
+        ToolCallRequest(
+            run_id='run-1',
+            user_id='user-1',
+            participant_id='leader',
+            tool_call_id='call-1',
+            tool_id='tool:terminal:main:run_command',
+            arguments={'command': 'python analysis.py', 'output_paths': ['report.csv']},
+            idempotency_key='tool:leader:call-1:1',
+        )
+    )
+
+    assert resource_manager.process_refs_for_run('run-1') == result['process_refs']
+    assert result['artifacts'][0]['path'] == '/workspace/agent-runs/run-1/outputs/report.csv'
+    assert artifact_store.rows[0]['metadata']['cleanup_eligible'] is False

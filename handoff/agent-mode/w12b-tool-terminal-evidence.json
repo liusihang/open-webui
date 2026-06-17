@@ -1,0 +1,120 @@
+{
+  "mode": "local_subset",
+  "generated_at": "2026-06-18T04:03:41+08:00",
+  "worktree": "/Users/liusihang/openwebui/.worktrees/agent-mode-w12b-tool-terminal",
+  "branch": "codex/agent-mode-w12b-tool-terminal",
+  "scenarios": [
+    {
+      "id": "scenario_02_single_tool_call",
+      "status": "incomplete",
+      "live_status": "not_proven",
+      "required_observations": [
+        "event:tool.requested",
+        "event:tool.completed",
+        "normalized_tool_result:success"
+      ],
+      "observations": [],
+      "evidence": {
+        "local_checks": [
+          {
+            "command": "uv run pytest -q backend/open_webui/test/agent/test_tool_authority.py backend/open_webui/test/agent/test_terminal_artifacts.py backend/open_webui/test/agent/test_approval.py backend/open_webui/test/agent/test_resources.py",
+            "result": "17 passed, 2 warnings"
+          }
+        ],
+        "notes": "Local tests prove normalized read-only tool execution and idempotent tool authority behavior. No direct integrated OpenWebUI plus AgentScope runtime event capture was run, so tool.requested and tool.completed are not live-proven."
+      }
+    },
+    {
+      "id": "scenario_03_terminal_output_artifact",
+      "status": "incomplete",
+      "live_status": "not_proven",
+      "required_observations": [
+        "tool:run_command",
+        "process_ref_registered",
+        "artifact:/workspace/agent-runs/<run_id>/outputs"
+      ],
+      "observations": [],
+      "evidence": {
+        "local_checks": [
+          {
+            "command": "uv run pytest -q backend/open_webui/test/agent/test_tool_authority.py::test_service_default_tool_authority_wires_terminal_process_and_artifact_helpers",
+            "red_result": "failed before fix because resource_manager.process_refs_for_run('run-1') was empty while the normalized result contained a terminal process_ref",
+            "green_result": "1 passed, 2 warnings"
+          },
+          {
+            "command": "uv run pytest -q backend/open_webui/test/agent/test_tool_authority.py backend/open_webui/test/agent/test_terminal_artifacts.py backend/open_webui/test/agent/test_approval.py backend/open_webui/test/agent/test_resources.py",
+            "result": "17 passed, 2 warnings"
+          }
+        ],
+        "fix": "backend/open_webui/routers/agent_service.py now passes configured AGENT_RUN_RESOURCE_MANAGER and AGENT_RUN_ARTIFACT_REGISTRAR into the default AgentToolAuthority.",
+        "notes": "Local service-level regression proves configured terminal process and artifact helpers are consumed by the default tool authority. No live Open Terminal command was executed through an integrated OpenWebUI service, so live artifact registration under /workspace/agent-runs/<run_id>/outputs is not proven."
+      }
+    },
+    {
+      "id": "scenario_04_tmp_artifact_retention",
+      "status": "incomplete",
+      "live_status": "not_proven",
+      "required_observations": [
+        "artifact:/workspace/agent-runs/<run_id>/tmp",
+        "cleanup_eligible:true",
+        "retained_after_completion"
+      ],
+      "observations": [],
+      "evidence": {
+        "local_checks": [
+          {
+            "command": "uv run pytest -q backend/open_webui/test/agent/test_tool_authority.py backend/open_webui/test/agent/test_terminal_artifacts.py backend/open_webui/test/agent/test_approval.py backend/open_webui/test/agent/test_resources.py",
+            "result": "17 passed, 2 warnings"
+          }
+        ],
+        "notes": "Local artifact tests prove run-local tmp paths are marked cleanup_eligible true and outputs are not. No integrated run completion was executed with a tmp artifact and post-completion readback, so retained_after_completion is not live-proven."
+      }
+    },
+    {
+      "id": "scenario_05_destructive_approval",
+      "status": "incomplete",
+      "live_status": "not_proven",
+      "required_observations": [
+        "event:approval.requested",
+        "state:waiting_approval",
+        "normalized_tool_result:approval_required"
+      ],
+      "observations": [],
+      "evidence": {
+        "local_checks": [
+          {
+            "command": "uv run pytest -q backend/open_webui/test/agent/test_tool_authority.py backend/open_webui/test/agent/test_terminal_artifacts.py backend/open_webui/test/agent/test_approval.py backend/open_webui/test/agent/test_resources.py",
+            "result": "17 passed, 2 warnings"
+          }
+        ],
+        "notes": "Local approval tests prove destructive calls transition to waiting_approval, emit approval.requested, and return approval_required without executing the callable. No integrated service/UI approval wait was captured, so live approval behavior is not proven."
+      }
+    },
+    {
+      "id": "scenario_10_cancel_keeps_terminal_process",
+      "status": "incomplete",
+      "live_status": "not_proven",
+      "required_observations": [
+        "event:run.cancelled",
+        "runtime_cancel_requested",
+        "process_refs_retained",
+        "no_kill_process"
+      ],
+      "observations": [],
+      "evidence": {
+        "local_checks": [
+          {
+            "command": "uv run pytest -q backend/open_webui/test/agent/test_tool_authority.py backend/open_webui/test/agent/test_terminal_artifacts.py backend/open_webui/test/agent/test_approval.py backend/open_webui/test/agent/test_resources.py",
+            "result": "17 passed, 2 warnings"
+          },
+          {
+            "command": "uv run --extra test pytest -q tests/test_app.py tests/test_subagents.py tests/test_agentscope_bridge.py",
+            "workdir": "services/agentscope-runtime",
+            "result": "13 passed"
+          }
+        ],
+        "notes": "Local resource-manager and runtime-side tests prove cancellation paths retain process refs and do not call a terminal kill hook. No full integrated AgentScope loop with a real Open Terminal process was cancelled and read back, so live cancellation behavior is not proven."
+      }
+    }
+  ]
+}
