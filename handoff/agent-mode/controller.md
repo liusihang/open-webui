@@ -128,9 +128,6 @@ integrate worker branches in the documented merge train.
     passed.
   - `git diff --check origin/pr/7..HEAD` passed.
   - `uv.lock` was restored after test-run environment churn.
-- W9A agent `019ed6ea-b5c4-7333-8c6f-be2fbbb2daa0` was closed after
-  integration. Its final status confirmed worker commit `ca52ebf6`, focused
-  test results, ruff, diff checks, and restored `uv.lock`.
 
 ## Merge Train
 
@@ -193,6 +190,9 @@ integrate worker branches in the documented merge train.
     passed.
   - `git diff --check origin/pr/7..HEAD` passed.
   - `uv.lock` was restored after test-run environment churn.
+- W9A agent `019ed6ea-b5c4-7333-8c6f-be2fbbb2daa0` was closed after
+  integration. Its final status confirmed worker commit `ca52ebf6`, focused
+  test results, ruff, diff checks, and restored `uv.lock`.
 
 ## Next
 
