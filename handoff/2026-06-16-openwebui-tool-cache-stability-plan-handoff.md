@@ -366,3 +366,30 @@ Checkpoint 2026-06-16 Phase 3:
   - `WEBUI_SECRET_KEY=test timeout 180 uv run --frozen pytest -q backend/open_webui/test/util/test_openai_router_responses_payload.py` passed: `3 passed, 3 warnings in 3.05s`.
   - `git diff --check` exited 0.
   - `uv.lock` stayed clean.
+
+Checkpoint 2026-06-17 PR #7 integration:
+
+- Goal: integrate the completed cache-stability fix stack into GitHub PR #7 (`codex/retrieval-manifest-opensearch-phase2-3`).
+- Chosen strategy: cherry-pick the five cache-stability commits onto the PR head instead of merging the temporary branch, keeping the PR history narrow and reviewable.
+- Safety checks before integration:
+  - GitHub PR #7 head was `f8106c65191d2d3d191f5d05ea6900f584ed2bc3`.
+  - The existing local checkout of `codex/retrieval-manifest-opensearch-phase2-3` at `/Users/liusihang/.config/superpowers/worktrees/openwebui/codex-retrieval-manifest-opensearch-phase1` had unrelated dirty `uv.lock`, so it was not modified.
+  - A clean detached integration worktree was created at `/Users/liusihang/.config/superpowers/worktrees/openwebui/codex-pr7-cache-stability-integration` from `origin/codex/retrieval-manifest-opensearch-phase2-3`.
+  - First ordinary push was rejected as non-fast-forward because the PR branch advanced to `56fae4ee346ad417aefd12470de0c9d06bc55d07` (`chore(docker): cache PR7 slim rebuilds`); no force push was used.
+  - The integration stack was rebased onto `56fae4ee346ad417aefd12470de0c9d06bc55d07` and reverified.
+- Cherry-picked source commits from `codex/tool-cache-stability` in order:
+  - `21fd2ecc2` -> `d91346818` `test: add native tool cache debug fingerprints`
+  - `df1f52858` -> `abb4748b0` `fix: stabilize gpt prompt cache keys`
+  - `4dc90d86b` -> `4b7e851af` `fix: guard responses previous response continuation`
+  - `2a22246f8` -> `3d42661de` `fix: include responses text controls in continuation guard`
+  - `1f023c4c0` -> `de9f33536` `fix: force replay after tool source rewrites`
+- Cherry-pick result:
+  - no conflicts
+  - code stack ends at `de9f33536`, with a handoff-only docs checkpoint commit on top
+  - focused backend verification was required on the integrated PR branch before pushing.
+- Integrated-branch verification:
+  - `WEBUI_SECRET_KEY=test timeout 180 uv run --frozen pytest -q backend/open_webui/test/util/test_bifrostapi_pipe_function.py backend/open_webui/test/util/test_native_tool_continuation_api.py backend/open_webui/test/util/test_openai_router_responses_payload.py` failed during collection because the fresh `uv --frozen` environment did not install `aiosqlite`; no test assertions ran.
+  - `WEBUI_SECRET_KEY=test timeout 180 uv run --with aiosqlite==0.21.0 pytest -q backend/open_webui/test/util/test_bifrostapi_pipe_function.py backend/open_webui/test/util/test_native_tool_continuation_api.py backend/open_webui/test/util/test_openai_router_responses_payload.py` passed: `40 passed, 17 warnings in 70.72s`.
+  - After rebasing onto `56fae4ee3`, the same `uv run --with aiosqlite==0.21.0` focused test command passed again: `40 passed, 6 warnings in 7.48s`.
+  - `git diff --check` exited 0.
+  - `uv.lock` was restored after `uv run --with` rewrote it as environment noise.
