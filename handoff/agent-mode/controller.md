@@ -66,6 +66,20 @@ integrate worker branches in the documented merge train.
   files, not present in the PR7-derived worktrees. Workers were corrected to
   read these as read-only from `/Users/liusihang/openwebui/...` while editing
   only their own worktrees.
+- W6 tool authority integrated as `cd5b66308`.
+- W11 lifecycle/compaction integrated as `5351ad598`.
+- Post-integration backend gate passed:
+  `WEBUI_SECRET_KEY=test-secret ENABLE_DB_MIGRATIONS=false uv run pytest -q
+  backend/open_webui/test/agent/test_tool_authority.py
+  backend/open_webui/test/agent/test_events.py
+  backend/open_webui/test/agent/test_resources.py
+  backend/open_webui/test/agent/test_compaction.py
+  backend/open_webui/test/models/test_agent_runs.py` -> `37 passed`.
+- `uv run ruff check backend/open_webui/agent
+  backend/open_webui/routers/agent_service.py backend/open_webui/test/agent`
+  passed.
+- `git diff --check origin/pr/7..HEAD` passed. `uv.lock` was restored after
+  test-run environment churn.
 
 ## Merge Train
 
@@ -83,7 +97,9 @@ integrate worker branches in the documented merge train.
 
 ## Next
 
-Wait for W3/W6/W11 worker commits. Do not duplicate their work in this
+Wait for W3 worker commit. Do not duplicate its `main.py`/config work in this
 controller thread. After W3 lands, create W5 model-authority worktree against
-the new integrated guard shape. After W6 lands, start W7/W8. W9 should wait for
-W4 plus W5 before real subagent adapter work.
+the new integrated guard shape. W7/W8 may now be prepared from the integrated
+W6 tool result contract, but W7 approval should still coordinate with W3's user
+control endpoints. W9 should wait for W4 plus W5 before real subagent adapter
+work.
