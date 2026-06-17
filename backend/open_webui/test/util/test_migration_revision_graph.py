@@ -16,7 +16,7 @@ def _load_script_directory() -> ScriptDirectory:
 def test_migration_graph_resolves_afc_hotfix_head():
     script = _load_script_directory()
 
-    assert script.get_current_head() == 'e2f3a4b5c7'
+    assert script.get_current_head() == 'd6e7f8a9b0c1'
     assert script.get_revision('f0a1b2c3d4e5') is not None
     assert script.get_revision('e8c4b9a2d1f0') is not None
     assert script.get_revision('4de81c2a3af1') is not None
@@ -26,6 +26,7 @@ def test_migration_graph_resolves_afc_hotfix_head():
     assert script.get_revision('c7d8e9f0a1b2') is not None
     assert script.get_revision('d1e2f3a4b5c6') is not None
     assert script.get_revision('e2f3a4b5c7') is not None
+    assert script.get_revision('d6e7f8a9b0c1') is not None
 
 
 def test_migration_graph_keeps_legacy_knowledge_revision_upgradeable():
@@ -43,6 +44,7 @@ def test_migration_graph_keeps_legacy_knowledge_revision_upgradeable():
     head_revision = script.get_revision('c7d8e9f0a1b2')
     evidence_head_revision = script.get_revision('d1e2f3a4b5c6')
     skill_package_revision = script.get_revision('e2f3a4b5c7')
+    agent_run_revision = script.get_revision('d6e7f8a9b0c1')
 
     assert chunking_revision is not None
     assert bridge_revision is not None
@@ -56,6 +58,7 @@ def test_migration_graph_keeps_legacy_knowledge_revision_upgradeable():
     assert head_revision is not None
     assert evidence_head_revision is not None
     assert skill_package_revision is not None
+    assert agent_run_revision is not None
     assert chunking_revision.down_revision == 'c3d4e5f6a7b8'
     assert bridge_revision.down_revision == 'd4e5f6a7b8c9'
     assert tasks_revision.down_revision == 'f0a1b2c3d4e5'
@@ -68,6 +71,7 @@ def test_migration_graph_keeps_legacy_knowledge_revision_upgradeable():
     assert head_revision.down_revision == 'b6f7c8d9e0a1'
     assert evidence_head_revision.down_revision == 'c7d8e9f0a1b2'
     assert skill_package_revision.down_revision == 'd1e2f3a4b5c6'
+    assert agent_run_revision.down_revision == 'e2f3a4b5c7'
 
 
 def test_migration_revision_ids_fit_default_alembic_version_column():
