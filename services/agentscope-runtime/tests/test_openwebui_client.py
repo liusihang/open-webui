@@ -157,3 +157,107 @@ async def test_select_model_uses_openwebui_model_selection_callback() -> None:
         "fuzzy_request": "research long context",
         "source_request": {"task": "Find facts."},
     }
+
+
+@pytest.mark.asyncio
+async def test_call_model_uses_openwebui_model_call_callback() -> None:
+    async with respx.mock(assert_all_called=True) as router:
+        request = router.post(
+            "https://openwebui.test/api/agent/service/runs/run-1/model-call"
+        ).mock(
+            return_value=Response(
+                200,
+                json={
+                    "status": "success",
+                    "model": "model-research",
+                    "response": {"content": "model answer"},
+                    "metadata": {"participant_id": "subagent:run-1:1"},
+                },
+            )
+        )
+        client = OpenWebUIClient(
+            base_url="https://openwebui.test",
+            service_token="owui-token",
+        )
+
+        response = await client.call_model(
+            run_id="run-1",
+            idempotency_key="model:subagent:run-1:1:model-call-1:1",
+            participant_id="subagent:run-1:1",
+            model_call_id="model-call-1",
+            model="model-research",
+            messages=[{"role": "user", "content": [{"type": "text", "text": "hi"}]}],
+            stream=False,
+            params={"temperature": 0.2},
+            metadata={"runtime_session_id": "rt-run-1"},
+        )
+
+    assert response["response"]["content"] == "model answer"
+    assert request.calls.last.request.headers["authorization"] == "Bearer owui-token"
+    assert (
+        request.calls.last.request.headers["x-agent-idempotency-key"]
+        == "model:subagent:run-1:1:model-call-1:1"
+    )
+    assert json.loads(request.calls.last.request.content) == {
+        "idempotency_key": "model:subagent:run-1:1:model-call-1:1",
+        "run_id": "run-1",
+        "participant_id": "subagent:run-1:1",
+        "model_call_id": "model-call-1",
+        "model": "model-research",
+        "messages": [{"role": "user", "content": [{"type": "text", "text": "hi"}]}],
+        "stream": False,
+        "params": {"temperature": 0.2},
+        "metadata": {"runtime_session_id": "rt-run-1"},
+    }
+
+
+@pytest.mark.asyncio
+async def test_call_tool_uses_openwebui_tool_call_callback() -> None:
+    async with respx.mock(assert_all_called=True) as router:
+        request = router.post(
+            "https://openwebui.test/api/agent/service/runs/run-1/tool-call"
+        ).mock(
+            return_value=Response(
+                200,
+                json={
+                    "status": "success",
+                    "content": "tool answer",
+                    "files": [],
+                    "embeds": [],
+                    "sources": [],
+                    "artifacts": [],
+                    "process_refs": [],
+                    "warnings": [],
+                    "structured_error": None,
+                    "raw": None,
+                },
+            )
+        )
+        client = OpenWebUIClient(
+            base_url="https://openwebui.test",
+            service_token="owui-token",
+        )
+
+        response = await client.call_tool(
+            run_id="run-1",
+            idempotency_key="tool:subagent:run-1:1:tool-call-1:1",
+            participant_id="subagent:run-1:1",
+            tool_call_id="tool-call-1",
+            tool_id="tool-search",
+            arguments={"query": "agent mode"},
+        )
+
+    assert response["content"] == "tool answer"
+    assert request.calls.last.request.headers["authorization"] == "Bearer owui-token"
+    assert (
+        request.calls.last.request.headers["x-agent-idempotency-key"]
+        == "tool:subagent:run-1:1:tool-call-1:1"
+    )
+    assert json.loads(request.calls.last.request.content) == {
+        "idempotency_key": "tool:subagent:run-1:1:tool-call-1:1",
+        "run_id": "run-1",
+        "participant_id": "subagent:run-1:1",
+        "tool_call_id": "tool-call-1",
+        "tool_id": "tool-search",
+        "arguments": {"query": "agent mode"},
+    }

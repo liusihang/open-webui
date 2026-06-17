@@ -6,8 +6,10 @@ import httpx
 
 from agentscope_runtime.schemas import (
     AppendEventRequest,
+    ModelCallRequest,
     ModelSelectionRequest,
     SubagentRegisterRequest,
+    ToolCallRequest,
 )
 
 
@@ -110,6 +112,54 @@ class OpenWebUIClient:
             source_request=source_request or {},
         )
         url = f"{self._base_url}/api/agent/service/runs/{run_id}/model-selection"
+        return await self._post_callback(url, idempotency_key, body.model_dump(mode="json"))
+
+    async def call_model(
+        self,
+        *,
+        run_id: str,
+        idempotency_key: str,
+        participant_id: str,
+        model_call_id: str,
+        model: str,
+        messages: list[dict[str, Any]] | None = None,
+        stream: bool = False,
+        params: dict[str, Any] | None = None,
+        metadata: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        body = ModelCallRequest(
+            idempotency_key=idempotency_key,
+            run_id=run_id,
+            participant_id=participant_id,
+            model_call_id=model_call_id,
+            model=model,
+            messages=messages or [],
+            stream=stream,
+            params=params or {},
+            metadata=metadata or {},
+        )
+        url = f"{self._base_url}/api/agent/service/runs/{run_id}/model-call"
+        return await self._post_callback(url, idempotency_key, body.model_dump(mode="json"))
+
+    async def call_tool(
+        self,
+        *,
+        run_id: str,
+        idempotency_key: str,
+        participant_id: str,
+        tool_call_id: str,
+        tool_id: str,
+        arguments: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        body = ToolCallRequest(
+            idempotency_key=idempotency_key,
+            run_id=run_id,
+            participant_id=participant_id,
+            tool_call_id=tool_call_id,
+            tool_id=tool_id,
+            arguments=arguments or {},
+        )
+        url = f"{self._base_url}/api/agent/service/runs/{run_id}/tool-call"
         return await self._post_callback(url, idempotency_key, body.model_dump(mode="json"))
 
     async def _post_callback(

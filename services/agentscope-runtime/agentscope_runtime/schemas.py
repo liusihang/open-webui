@@ -99,6 +99,27 @@ class ModelSelectionRequest(BaseModel):
     source_request: dict[str, Any] = Field(default_factory=dict)
 
 
+class ModelCallRequest(BaseModel):
+    idempotency_key: str
+    run_id: str
+    participant_id: str
+    model_call_id: str
+    model: str
+    messages: list[dict[str, Any]] = Field(default_factory=list)
+    stream: bool = False
+    params: dict[str, Any] = Field(default_factory=dict)
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+
+class ToolCallRequest(BaseModel):
+    idempotency_key: str
+    run_id: str
+    participant_id: str
+    tool_call_id: str
+    tool_id: str
+    arguments: dict[str, Any] = Field(default_factory=dict)
+
+
 def _find_raw_credential_fields(value: Any, path: str = "") -> set[str]:
     blocked: set[str] = set()
     if isinstance(value, dict):

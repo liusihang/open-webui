@@ -234,3 +234,61 @@ Until W9B1 provides concrete backend bindings, W9B2 expects these callbacks:
   integration slice once W9B1 callback routes exist.
 - W9B1 should decide whether subagent registration emits its own events or
   treats W9B2's explicit lifecycle event callbacks as authoritative.
+
+## Follow-up AgentScope Boundary Checkpoint
+
+- 2026-06-18: Resumed after commit `8ad7bb052`.
+- Reconfirmed clean clone path `/tmp/agentscope-w9b2.UJKsxp/agentscope` at
+  commit `c13c3effcb568ef915cbbd0fe900df2f2b9b003c`.
+- Re-read verified API surfaces from the clean clone:
+  - `src/agentscope/app/_types.py`
+  - `src/agentscope/model/_base.py`
+  - `src/agentscope/model/_model_response.py`
+  - `src/agentscope/tool/_base.py`
+  - `src/agentscope/credential/_base.py`
+  - `src/agentscope/message/_base.py`
+  - `src/agentscope/message/_block.py`
+  - `src/agentscope/permission/_decision.py`
+  - `src/agentscope/permission/_types.py`
+- Added failing tests first:
+  - `services/agentscope-runtime/tests/test_agentscope_bridge.py`
+  - new `call_model` / `call_tool` tests in
+    `services/agentscope-runtime/tests/test_openwebui_client.py`
+- Red command:
+  - `cd services/agentscope-runtime && uv run --extra test pytest`
+- Red result:
+  - `4 failed, 15 passed`
+  - failures were expected:
+    - `ModuleNotFoundError: No module named 'agentscope'`
+    - `AttributeError: 'OpenWebUIClient' object has no attribute 'call_model'`
+    - `AttributeError: 'OpenWebUIClient' object has no attribute 'call_tool'`
+- First green attempt with bare `agentscope` dependency exposed a real extra
+  requirement: public `from agentscope.app import SubAgentTemplate` imports
+  scheduler service code requiring `apscheduler`. Dependency adjusted to the
+  same pinned commit with the `service` extra.
+- Implemented thin real AgentScope boundary:
+  - `services/agentscope-runtime/agentscope_runtime/agentscope_bridge.py`
+  - `verify_agentscope_runtime_apis()` imports and validates real
+    AgentScope `SubAgentTemplate`, `ChatModelBase`, `ChatResponse`,
+    `ToolBase`, and `ToolChunk` surfaces.
+  - `AgentScopeRuntimeBridge.build_subagent_template(...)` constructs a real
+    `SubAgentTemplate`.
+  - `OpenWebUIAgentScopeModel` subclasses real `ChatModelBase` and routes
+    `_call_api(...)` to OpenWebUI `model-call`; no provider credentials are
+    accepted or constructed.
+  - `OpenWebUIToolProxy` subclasses real `ToolBase`, allows AgentScope's local
+    permission layer only because OpenWebUI remains tool authority, and routes
+    execution to OpenWebUI `tool-call`.
+  - `OpenWebUIClient` now has `call_model(...)` and `call_tool(...)`.
+- Dependency metadata:
+  - `services/agentscope-runtime/pyproject.toml` now pins
+    `agentscope[service]` to
+    `git+https://github.com/agentscope-ai/agentscope.git@c13c3effcb568ef915cbbd0fe900df2f2b9b003c`.
+  - `services/agentscope-runtime/uv.lock` updated intentionally and locally
+    for this service only.
+- Green command:
+  - `cd services/agentscope-runtime && uv run --extra test pytest`
+- Green result:
+  - latest fresh run: `19 passed in 0.87s`
+- `git diff --check`
+  - result: passed with no output

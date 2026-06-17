@@ -4,6 +4,7 @@ version = "0.1.0"
 description = "OpenWebUI Agent Mode AgentScope runtime service skeleton"
 requires-python = ">=3.11"
 dependencies = [
+    "agentscope[service] @ git+https://github.com/agentscope-ai/agentscope.git@c13c3effcb568ef915cbbd0fe900df2f2b9b003c",
     "fastapi>=0.111",
     "httpx>=0.27",
     "pydantic>=2.7",
