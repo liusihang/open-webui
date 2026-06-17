@@ -433,3 +433,34 @@ Verification:
   -> passed.
 - `git diff --check` -> passed.
 - Root `uv.lock` was restored after `uv run` churn.
+
+## W12B-5 Regression Gate Integration
+
+Date: 2026-06-18
+
+Worker:
+
+- Agent: `019ed727-48a5-7221-9e83-01312782481a` (Schrodinger)
+- Worktree:
+  `/Users/liusihang/openwebui/.worktrees/agent-mode-w12b-regression`
+- Worker final commit: `e61ca30fc5233b2da3d67bf766e2a2822fe4b2b0`
+
+Integrated commits:
+
+- `d98f62029` docs(agent-mode): add w12b regression handoff
+- `884d27fd9` docs: record W12B regression gate evidence
+
+Evidence:
+
+- `handoff/agent-mode/w12b-regression.md`
+- `handoff/agent-mode/w12b-regression-evidence.json`
+
+Result:
+
+- Backend agent/storage regression -> `79 passed`.
+- AgentScope runtime service-local tests -> `19 passed`.
+- Focused frontend Vitest -> `3 files / 24 tests passed`.
+- W12 dry-run and fixture harness -> passed; fixture still only proves
+  contract shape and live acceptance remains pending.
+- Ruff and `git diff --check origin/pr/7..HEAD` -> passed.
+- No W12B live scenario acceptance was claimed by this worker.
