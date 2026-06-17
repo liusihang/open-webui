@@ -95,16 +95,16 @@ integrate worker branches in the documented merge train.
   backend/open_webui/test/agent` passed.
 - `git diff --check origin/pr/7..HEAD` passed again. `uv.lock` was restored
   after test-run environment churn.
-- Current plan refresh:
+- Earlier plan refresh before W5 completed:
   - Implementation plan in the root checkout has been updated with a
     status-aware agent-team execution board and next integration gates.
-  - W5 model authority worker is active in
+  - W5 model authority worker was active in
     `/Users/liusihang/openwebui/.worktrees/agent-mode-w5-model-authority` on
     `codex/agent-mode-w5-model-authority`.
   - W5 agent id: `019ed6d5-583d-7030-b187-3f0287d96efc`.
   - W5 base: `0f19ffe78c583943a314cfaa9a36aba6691a7057`.
   - W5 has a handoff but no product-code commit at this checkpoint.
-  - Do not duplicate W5 scope while the worker is active.
+  - This state is superseded by the W5 integration checkpoint below.
 - W5 model authority integrated as `5bf932464`.
 - W5 worker commit was `e732e31c6062eacbd303959adf3e25460fce4dfb`.
 - Controller verification:
