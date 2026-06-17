@@ -400,3 +400,36 @@ Dispatched agents without forking full context:
 | W12B-5 Regression and release readiness | `019ed727-48a5-7221-9e83-01312782481a` | Schrodinger |
 
 Controller should not duplicate their assigned scenario work while they run.
+
+## W12B Evidence Merge Helper Checkpoint
+
+Date: 2026-06-18
+
+Controller added a non-scenario helper so W12B worker evidence fragments can be
+merged into the single JSON document expected by
+`scripts/agent_mode/acceptance_harness.py live --evidence`.
+
+Files:
+
+- `scripts/agent_mode/merge_w12b_evidence.py`
+- `backend/open_webui/test/agent/test_w12_evidence_merge.py`
+
+Verification:
+
+- RED first:
+  `WEBUI_SECRET_KEY=test-secret ENABLE_DB_MIGRATIONS=false uv run pytest -q
+  backend/open_webui/test/agent/test_w12_evidence_merge.py`
+  failed because `merge_w12b_evidence.py` did not exist.
+- GREEN focused:
+  same command -> `2 passed`.
+- W12 focused:
+  `WEBUI_SECRET_KEY=test-secret ENABLE_DB_MIGRATIONS=false uv run pytest -q
+  backend/open_webui/test/agent/test_w12_acceptance_harness.py
+  backend/open_webui/test/agent/test_w12_healthcheck.py
+  backend/open_webui/test/agent/test_w12_evidence_merge.py`
+  -> `11 passed`.
+- `uv run ruff check scripts/agent_mode/merge_w12b_evidence.py
+  backend/open_webui/test/agent/test_w12_evidence_merge.py`
+  -> passed.
+- `git diff --check` -> passed.
+- Root `uv.lock` was restored after `uv run` churn.
