@@ -165,11 +165,21 @@ minimal context packs:
 W9 should be split: model-catalog helper work can start after W7/W8 are
 dispatched because W5 is now integrated, but the real AgentScope subagent
 adapter should wait until W7/W8 event/artifact shapes are visible.
+- W9A model catalog helper worktree was created from
+  `1ef1194eeeb224a7d3da8a7697eae9cbb499c157` and dispatched without full
+  context.
+  - Worktree:
+    `/Users/liusihang/openwebui/.worktrees/agent-mode-w9-model-catalog`
+  - Branch: `codex/agent-mode-w9-model-catalog`
+  - Agent: `019ed6ea-b5c4-7333-8c6f-be2fbbb2daa0`
+  - Scope: helper-level permission-filtered model catalog and
+    `meta.agent_selection`; no real AgentScope subagent adapter.
 
 Next controller action:
 
-1. Let W7/W8 run without duplicating their tasks.
+1. Let W7/W8/W9A run without duplicating their tasks.
 2. When a worker returns, inspect handoff/diff/commit, run focused tests and
    ruff in that worker worktree, then cherry-pick into integration.
-3. Run the combined W7/W8 backend gate after both are integrated.
+3. Run the combined W7/W8 backend gate after both are integrated; run the W9A
+   model-catalog gate after W9A is integrated.
 4. Restore `uv.lock` after any `uv run` churn.
