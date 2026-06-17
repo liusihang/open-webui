@@ -55,7 +55,7 @@ def _request(*, embedding=None, relevance_threshold=0.5):
 
 
 @pytest.mark.asyncio
-async def test_filter_accessible_collections_denies_agent_memory_for_generic_retrieval(monkeypatch):
+async def test_filter_accessible_collections_allows_owner_agent_memory_global_without_knowledge_fallback(monkeypatch):
     async def fail_knowledge_fallback(collection_name, user_id, permission="read"):
         if collection_name.startswith("agent-memory-"):
             raise AssertionError("agent-memory collections must not fall through to knowledge ACL")
@@ -69,11 +69,68 @@ async def test_filter_accessible_collections_denies_agent_memory_for_generic_ret
         access_type="read",
     )
 
-    assert result == set()
+    assert result == {"agent-memory-user-1-global"}
 
 
 @pytest.mark.asyncio
-async def test_filter_accessible_collections_denies_agent_memory_for_admin_generic_retrieval(monkeypatch):
+async def test_filter_accessible_collections_allows_owned_agent_memory_folder_only_when_active(monkeypatch):
+    async def fail_knowledge_fallback(collection_name, user_id, permission="read"):
+        if collection_name.startswith("agent-memory-"):
+            raise AssertionError("agent-memory collections must not fall through to knowledge ACL")
+        return False
+
+    monkeypatch.setattr(retrieval_utils.Knowledges, "check_access_by_user_id", fail_knowledge_fallback)
+
+    async def fake_folder(folder_id, user_id, db=None):
+        if user_id == "user-1" and folder_id == "folder-1":
+            return SimpleNamespace(id=folder_id, user_id=user_id, meta={})
+        if user_id == "user-1" and folder_id == "folder-off":
+            return SimpleNamespace(id=folder_id, user_id=user_id, meta={"agent_memory": {"disabled": True}})
+        return None
+
+    index = importlib.import_module("open_webui.utils.agent_memory_index")
+    monkeypatch.setattr(index.Folders, "get_folder_by_id_and_user_id", fake_folder)
+
+    result = await retrieval_utils.filter_accessible_collections(
+        {
+            "agent-memory-user-1-folder-folder-1",
+            "agent-memory-user-1-folder-folder-off",
+            "agent-memory-user-2-folder-folder-1",
+            "agent-memory-user-1-folder-missing",
+        },
+        _user("user-1"),
+        access_type="read",
+    )
+
+    assert result == {"agent-memory-user-1-folder-folder-1"}
+
+
+@pytest.mark.asyncio
+async def test_filter_accessible_collections_denies_agent_memory_for_other_users_and_write(monkeypatch):
+    async def fail_knowledge_fallback(collection_name, user_id, permission="read"):
+        if collection_name.startswith("agent-memory-"):
+            raise AssertionError("agent-memory collections must not fall through to knowledge ACL")
+        return False
+
+    monkeypatch.setattr(retrieval_utils.Knowledges, "check_access_by_user_id", fail_knowledge_fallback)
+
+    read_result = await retrieval_utils.filter_accessible_collections(
+        {"agent-memory-user-2-global"},
+        _user("user-1"),
+        access_type="read",
+    )
+    write_result = await retrieval_utils.filter_accessible_collections(
+        {"agent-memory-user-1-global"},
+        _user("user-1"),
+        access_type="write",
+    )
+
+    assert read_result == set()
+    assert write_result == set()
+
+
+@pytest.mark.asyncio
+async def test_filter_accessible_collections_does_not_grant_admin_blanket_agent_memory_access(monkeypatch):
     async def fail_knowledge_fallback(collection_name, user_id, permission="read"):
         if collection_name.startswith("agent-memory-"):
             raise AssertionError("agent-memory collections must not fall through to knowledge ACL")
@@ -82,12 +139,12 @@ async def test_filter_accessible_collections_denies_agent_memory_for_admin_gener
     monkeypatch.setattr(retrieval_utils.Knowledges, "check_access_by_user_id", fail_knowledge_fallback)
 
     result = await retrieval_utils.filter_accessible_collections(
-        {"agent-memory-admin-global"},
+        {"agent-memory-user-1-global", "agent-memory-admin-global"},
         _user("admin", role="admin"),
         access_type="read",
     )
 
-    assert result == set()
+    assert result == {"agent-memory-admin-global"}
 
 
 def _install_qdrant_stubs(monkeypatch):

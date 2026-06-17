@@ -954,8 +954,8 @@ async def filter_accessible_collections(
       - any name with characters outside [A-Za-z0-9_-] → rejected
       - file-*          → validated via has_access_to_file
       - user-memory-*   → must match user's own memory collection
-      - agent-memory-*  → always denied; dedicated Agent Memory tools/read path
-                          query these collections directly
+      - agent-memory-*  → read access validated against Agent Memory
+                          user/scope ownership; write denied
       - web-search-*    → ephemeral per-query collections, always allowed
       - knowledge-bases → always denied (system meta-collection)
       - everything else → if the name matches a knowledge base, validated
@@ -975,14 +975,19 @@ async def filter_accessible_collections(
             getattr(user, 'id', '<unknown>'),
         )
 
-    # Agent Memory collections are not part of ordinary retrieval ACL. They are
-    # user-scoped context and are queried only through the dedicated read path/tools.
     agent_memory_names = {n for n in safe_names if n.startswith('agent-memory-')}
+    validated_agent_memory = set()
+    if agent_memory_names:
+        from open_webui.utils.agent_memory_index import can_access_agent_memory_collection
+
+        for name in agent_memory_names:
+            if await can_access_agent_memory_collection(name, user, access_type=access_type):
+                validated_agent_memory.add(name)
 
     if user.role == 'admin':
-        return safe_names - agent_memory_names
+        return (safe_names - agent_memory_names) | validated_agent_memory
 
-    validated = set()
+    validated = set(validated_agent_memory)
     for name in safe_names - agent_memory_names:
         if name == 'knowledge-bases':
             # System meta-collection — never exposed to non-admins.
