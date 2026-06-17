@@ -81,6 +81,7 @@ class QdrantClient(VectorDBBase):
 
         # Main collection types for multi-tenancy
         self.MEMORY_COLLECTION = f'{self.collection_prefix}_memories'
+        self.AGENT_MEMORY_COLLECTION = f'{self.collection_prefix}_agent_memories'
         self.KNOWLEDGE_COLLECTION = f'{self.collection_prefix}_knowledge'
         self.FILE_COLLECTION = f'{self.collection_prefix}_files'
         self.WEB_SEARCH_COLLECTION = f'{self.collection_prefix}_web-search'
@@ -114,6 +115,10 @@ class QdrantClient(VectorDBBase):
 
         if collection_name.startswith('user-memory-'):
             return self.MEMORY_COLLECTION, tenant_id
+
+        # Check for Agent Memory collections
+        elif collection_name.startswith('agent-memory-'):
+            return self.AGENT_MEMORY_COLLECTION, tenant_id
 
         # Check for file collections
         elif collection_name.startswith('file-'):

@@ -74,12 +74,14 @@ class MilvusClient(VectorDBBase):
 
         # Main collection types for multi-tenancy
         self.MEMORY_COLLECTION = f'{self.collection_prefix}_memories'
+        self.AGENT_MEMORY_COLLECTION = f'{self.collection_prefix}_agent_memories'
         self.KNOWLEDGE_COLLECTION = f'{self.collection_prefix}_knowledge'
         self.FILE_COLLECTION = f'{self.collection_prefix}_files'
         self.WEB_SEARCH_COLLECTION = f'{self.collection_prefix}_web_search'
         self.HASH_BASED_COLLECTION = f'{self.collection_prefix}_hash_based'
         self.shared_collections = [
             self.MEMORY_COLLECTION,
+            self.AGENT_MEMORY_COLLECTION,
             self.KNOWLEDGE_COLLECTION,
             self.FILE_COLLECTION,
             self.WEB_SEARCH_COLLECTION,
@@ -101,6 +103,8 @@ class MilvusClient(VectorDBBase):
 
         if collection_name.startswith('user-memory-'):
             return self.MEMORY_COLLECTION, resource_id
+        elif collection_name.startswith('agent-memory-'):
+            return self.AGENT_MEMORY_COLLECTION, resource_id
         elif collection_name.startswith('file-'):
             return self.FILE_COLLECTION, resource_id
         elif collection_name.startswith('web-search-'):
@@ -216,7 +220,7 @@ class MilvusClient(VectorDBBase):
                 batch_ids.append(hit.entity.get('id'))
                 batch_docs.append(hit.entity.get('text'))
                 batch_metadatas.append(hit.entity.get('metadata'))
-                batch_dists.append(hit.distance)
+                batch_dists.append((hit.distance + 1.0) / 2.0)
             ids.append(batch_ids)
             documents.append(batch_docs)
             metadatas.append(batch_metadatas)
