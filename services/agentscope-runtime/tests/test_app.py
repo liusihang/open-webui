@@ -128,6 +128,35 @@ async def test_run_start_surfaces_append_event_failure() -> None:
 
 
 @pytest.mark.asyncio
+async def test_run_start_rejects_raw_openwebui_credentials_in_context_payload() -> None:
+    openwebui_client = RecordingOpenWebUIClient()
+    async with make_client(openwebui_client) as client:
+        response = await client.post(
+            "/v1/openwebui/runs",
+            headers={"Authorization": f"Bearer {SERVICE_TOKEN}"},
+            json={
+                "run_id": "run-secret",
+                "chat_id": "chat-1",
+                "messages": [],
+                "metadata": {"user_jwt": "raw-user-token"},
+                "tool_access_envelope": {
+                    "tools": [
+                        {
+                            "id": "tool-1",
+                            "name": "external",
+                            "tool_server_secret": "raw-secret",
+                        }
+                    ]
+                },
+            },
+        )
+
+        assert response.status_code == 422
+        assert "raw credential fields are not accepted" in response.text
+        assert openwebui_client.events == []
+
+
+@pytest.mark.asyncio
 async def test_cancel_marks_existing_run_cancel_requested_without_killing_processes() -> None:
     async with make_client() as client:
         start = await client.post(

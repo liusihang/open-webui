@@ -4,7 +4,11 @@ from typing import Any
 
 import httpx
 
-from agentscope_runtime.schemas import AppendEventRequest
+from agentscope_runtime.schemas import (
+    AppendEventRequest,
+    ModelSelectionRequest,
+    SubagentRegisterRequest,
+)
 
 
 class OpenWebUIClient:
@@ -54,6 +58,77 @@ class OpenWebUIClient:
         if response.is_error:
             raise RuntimeError(
                 "OpenWebUI append-event failed "
+                f"with status {response.status_code}: {response.text}",
+            )
+        return response.json()
+
+    async def register_subagent(
+        self,
+        *,
+        run_id: str,
+        idempotency_key: str,
+        parent_participant_id: str,
+        participant_id: str,
+        name: str,
+        description: str,
+        task: str,
+        budget: dict[str, Any] | None = None,
+        metadata: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        body = SubagentRegisterRequest(
+            idempotency_key=idempotency_key,
+            run_id=run_id,
+            parent_participant_id=parent_participant_id,
+            participant_id=participant_id,
+            name=name,
+            description=description,
+            task=task,
+            budget=budget or {},
+            metadata=metadata or {},
+        )
+        url = f"{self._base_url}/api/agent/service/runs/{run_id}/subagents"
+        return await self._post_callback(url, idempotency_key, body.model_dump(mode="json"))
+
+    async def select_model(
+        self,
+        *,
+        run_id: str,
+        idempotency_key: str,
+        participant_id: str,
+        selection_id: str,
+        requested_model_id: str | None = None,
+        fuzzy_request: str | None = None,
+        source_request: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        body = ModelSelectionRequest(
+            idempotency_key=idempotency_key,
+            run_id=run_id,
+            participant_id=participant_id,
+            selection_id=selection_id,
+            requested_model_id=requested_model_id,
+            fuzzy_request=fuzzy_request,
+            source_request=source_request or {},
+        )
+        url = f"{self._base_url}/api/agent/service/runs/{run_id}/model-selection"
+        return await self._post_callback(url, idempotency_key, body.model_dump(mode="json"))
+
+    async def _post_callback(
+        self,
+        url: str,
+        idempotency_key: str,
+        body: dict[str, Any],
+    ) -> dict[str, Any]:
+        headers = {
+            "Authorization": f"Bearer {self._service_token}",
+            "X-Agent-Idempotency-Key": idempotency_key,
+        }
+
+        async with httpx.AsyncClient(timeout=self._timeout) as client:
+            response = await client.post(url, headers=headers, json=body)
+
+        if response.is_error:
+            raise RuntimeError(
+                "OpenWebUI callback failed "
                 f"with status {response.status_code}: {response.text}",
             )
         return response.json()
