@@ -151,6 +151,43 @@ class KnowledgeEvidenceRebuildRequest(BaseModel):
     run_async: bool = False
 
 
+def _file_has_document_image_assets(file: object | None) -> bool:
+    if file is None:
+        return False
+
+    for container in (getattr(file, "data", None), getattr(file, "meta", None)):
+        if not isinstance(container, dict):
+            continue
+        raw_assets = container.get("document_image_assets")
+        if raw_assets is None:
+            raw_assets = container.get("image_assets")
+        if isinstance(raw_assets, list) and any(isinstance(asset, dict) for asset in raw_assets):
+            return True
+    return False
+
+
+async def _should_project_document_images_for_evidence_rebuild(
+    *,
+    knowledge_id: str,
+    file_ids: list[str] | None,
+    requested: bool,
+) -> bool:
+    if requested:
+        return True
+
+    if file_ids:
+        for file_id in dict.fromkeys(file_ids):
+            file = await Files.get_file_by_id(file_id)
+            if _file_has_document_image_assets(file):
+                return True
+        return False
+
+    for file in await Knowledges.get_files_by_id(knowledge_id):
+        if _file_has_document_image_assets(file):
+            return True
+    return False
+
+
 @router.get('/', response_model=KnowledgeAccessListResponse)
 async def get_knowledge_bases(
     page: int | None = 1,
@@ -436,10 +473,15 @@ async def rebuild_knowledge_evidence(
     form_data: KnowledgeEvidenceRebuildRequest,
     user=Depends(get_admin_user),
 ):
+    project_document_images = await _should_project_document_images_for_evidence_rebuild(
+        knowledge_id=id,
+        file_ids=form_data.file_ids,
+        requested=form_data.project_document_images,
+    )
     queued = await enqueue_evidence_projection_job(
         knowledge_id=id,
         file_ids=form_data.file_ids,
-        project_document_images=form_data.project_document_images,
+        project_document_images=project_document_images,
     )
     if form_data.run_async:
         return {"queued": True, **queued}

@@ -311,6 +311,102 @@ async def test_rebuild_evidence_creates_job_then_runs_it_by_default(monkeypatch)
 
 
 @pytest.mark.asyncio
+async def test_rebuild_evidence_auto_projects_document_images_for_scoped_asset_files(monkeypatch):
+    enqueue_calls = []
+
+    async def fake_get_file_by_id(file_id, db=None):
+        return SimpleNamespace(
+            id=file_id,
+            data={
+                "content": "alpha",
+                "document_image_assets": [
+                    {
+                        "storage_path": "/tmp/page-1.png",
+                        "mime_type": "image/png",
+                    }
+                ],
+            },
+            meta={"content_type": "application/pdf"},
+        )
+
+    async def fake_enqueue(**kwargs):
+        enqueue_calls.append(kwargs)
+        return {"job": {"job_id": "job-evidence"}, "state": {"status": "pending"}}
+
+    async def fake_run(job_id):
+        return {"result": {"evidence": {"image_evidence_upserted": 1}}}
+
+    monkeypatch.setattr(knowledge.Files, "get_file_by_id", fake_get_file_by_id)
+    monkeypatch.setattr(knowledge, "enqueue_evidence_projection_job", fake_enqueue)
+    monkeypatch.setattr(knowledge, "run_retrieval_index_job", fake_run)
+
+    response = await knowledge.rebuild_knowledge_evidence(
+        id="knowledge-1",
+        form_data=knowledge.KnowledgeEvidenceRebuildRequest(file_ids=["file-1"]),
+        user=SimpleNamespace(id="admin", role="admin"),
+    )
+
+    assert response["evidence"]["image_evidence_upserted"] == 1
+    assert enqueue_calls == [
+        {
+            "knowledge_id": "knowledge-1",
+            "file_ids": ["file-1"],
+            "project_document_images": True,
+        }
+    ]
+
+
+@pytest.mark.asyncio
+async def test_rebuild_evidence_auto_projects_document_images_for_whole_knowledge(monkeypatch):
+    enqueue_calls = []
+
+    async def fake_get_files_by_id(knowledge_id, db=None):
+        assert knowledge_id == "knowledge-1"
+        return [
+            SimpleNamespace(id="file-text", data={"content": "alpha"}, meta={"content_type": "text/plain"}),
+            SimpleNamespace(
+                id="file-doc",
+                data={
+                    "content": "beta",
+                    "document_image_assets": [
+                        {
+                            "storage_path": "/tmp/page-1.png",
+                            "mime_type": "image/png",
+                        }
+                    ],
+                },
+                meta={"content_type": "application/pdf"},
+            ),
+        ]
+
+    async def fake_enqueue(**kwargs):
+        enqueue_calls.append(kwargs)
+        return {"job": {"job_id": "job-evidence"}, "state": {"status": "pending"}}
+
+    async def fake_run(job_id):
+        return {"result": {"evidence": {"image_evidence_upserted": 1}}}
+
+    monkeypatch.setattr(knowledge.Knowledges, "get_files_by_id", fake_get_files_by_id)
+    monkeypatch.setattr(knowledge, "enqueue_evidence_projection_job", fake_enqueue)
+    monkeypatch.setattr(knowledge, "run_retrieval_index_job", fake_run)
+
+    response = await knowledge.rebuild_knowledge_evidence(
+        id="knowledge-1",
+        form_data=knowledge.KnowledgeEvidenceRebuildRequest(),
+        user=SimpleNamespace(id="admin", role="admin"),
+    )
+
+    assert response["evidence"]["image_evidence_upserted"] == 1
+    assert enqueue_calls == [
+        {
+            "knowledge_id": "knowledge-1",
+            "file_ids": None,
+            "project_document_images": True,
+        }
+    ]
+
+
+@pytest.mark.asyncio
 async def test_index_status_handles_lexical_status_errors(monkeypatch):
     async def fake_status():
         return {

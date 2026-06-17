@@ -51,6 +51,7 @@ type YoutubeConfigForm = {
 };
 
 type RAGConfigForm = {
+	RAG_EXTRACT_DOCUMENT_IMAGE_ASSETS?: boolean;
 	PDF_EXTRACT_IMAGES?: boolean;
 	ENABLE_GOOGLE_DRIVE_INTEGRATION?: boolean;
 	ENABLE_ONEDRIVE_INTEGRATION?: boolean;

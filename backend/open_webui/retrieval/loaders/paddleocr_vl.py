@@ -180,7 +180,7 @@ class PaddleOCRVLLoader:
                 page_no=page_no,
                 materializer=ImageAssetMaterializer(
                     Path(UPLOAD_DIR) / 'paddleocr-vl-image-assets',
-                    download_timeout_s=float(self.request_timeout_s),
+                    download_timeout_s=float(self.download_timeout_s),
                 ),
                 backend='paddleocr-vl',
             )

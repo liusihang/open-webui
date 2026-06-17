@@ -43,7 +43,11 @@ def test_external_services_slim_requirements_include_startup_dependencies():
     requirements_path = (
         Path(__file__).resolve().parents[3] / 'requirements-external-slim.txt'
     )
-    requirements_text = requirements_path.read_text()
+    requirement_names = {
+        line.split('==', 1)[0].split('[', 1)[0]
+        for line in requirements_path.read_text().splitlines()
+        if line.strip() and not line.strip().startswith('#')
+    }
 
     for package_name in (
         'typer',
@@ -51,5 +55,6 @@ def test_external_services_slim_requirements_include_startup_dependencies():
         'PyYAML',
         'black',
         'huggingface-hub',
+        'opensearch-py',
     ):
-        assert package_name in requirements_text
+        assert package_name in requirement_names

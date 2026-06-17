@@ -66,6 +66,32 @@
 
 	let RAGConfig = null;
 
+	const parseJsonObjectField = (value, label) => {
+		if (typeof value !== 'string') {
+			return value ?? {};
+		}
+
+		if (value.trim() === '') {
+			return {};
+		}
+
+		try {
+			const parsed = JSON.parse(value);
+			if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
+				return parsed;
+			}
+		} catch (e) {
+			// Toast below keeps the user-facing error consistent for parse and shape failures.
+		}
+
+		toast.error(
+			$i18n.t('Invalid JSON format in {{NAME}}', {
+				NAME: label
+			})
+		);
+		return null;
+	};
+
 	const embeddingModelUpdateHandler = async () => {
 		if (RAG_EMBEDDING_ENGINE === '' && RAG_EMBEDDING_MODEL.split('/').length - 1 > 1) {
 			toast.error(
@@ -191,6 +217,13 @@
 			toast.error($i18n.t('PaddleOCR-vl API URL required.'));
 			return;
 		}
+		const paddleOcrOptionalPayload = parseJsonObjectField(
+			RAGConfig.PADDLEOCR_VL_OPTIONAL_PAYLOAD,
+			$i18n.t('PaddleOCR-vl Optional Payload')
+		);
+		if (paddleOcrOptionalPayload === null) {
+			return;
+		}
 
 		if (
 			RAGConfig.CONTENT_EXTRACTION_ENGINE === 'mineru' &&
@@ -245,6 +278,7 @@
 				typeof RAGConfig.MINERU_PARAMS === 'string' && RAGConfig.MINERU_PARAMS.trim() !== ''
 					? JSON.parse(RAGConfig.MINERU_PARAMS)
 					: {},
+			PADDLEOCR_VL_OPTIONAL_PAYLOAD: paddleOcrOptionalPayload,
 			MINERU_FILE_EXTENSIONS: RAGConfig.MINERU_FILE_EXTENSIONS.split(',')
 				.map((ext) => ext.trim())
 				.filter((ext) => ext !== '')
@@ -288,6 +322,11 @@
 			typeof config.MINERU_PARAMS === 'object'
 				? JSON.stringify(config.MINERU_PARAMS ?? {}, null, 2)
 				: config.MINERU_PARAMS;
+
+		config.PADDLEOCR_VL_OPTIONAL_PAYLOAD =
+			typeof config.PADDLEOCR_VL_OPTIONAL_PAYLOAD === 'object'
+				? JSON.stringify(config.PADDLEOCR_VL_OPTIONAL_PAYLOAD ?? {}, null, 2)
+				: config.PADDLEOCR_VL_OPTIONAL_PAYLOAD;
 
 		config.MINERU_FILE_EXTENSIONS = (config?.MINERU_FILE_EXTENSIONS ?? ['pdf']).join(', ');
 
@@ -371,6 +410,24 @@
 									<option value="paddleocr_vl">{$i18n.t('PaddleOCR-vl')}</option>
 									<option value="mineru">{$i18n.t('MinerU')}</option>
 								</select>
+							</div>
+						</div>
+
+						<div class="flex w-full mt-2">
+							<div class="flex-1 flex justify-between">
+								<div class="self-center text-xs font-medium">
+									<Tooltip
+										content={$i18n.t(
+											'Stores images found by local document loaders as document image assets. This is separate from PDF Extract Images (OCR), and PaddleOCR-vl layout images remain part of its parser output.'
+										)}
+										placement="top-start"
+									>
+										{$i18n.t('Extract Document Image Assets')}
+									</Tooltip>
+								</div>
+								<div class="flex items-center relative">
+									<Switch bind:state={RAGConfig.RAG_EXTRACT_DOCUMENT_IMAGE_ASSETS} />
+								</div>
 							</div>
 						</div>
 
@@ -671,17 +728,98 @@
 								/>
 							</div>
 						{:else if RAGConfig.CONTENT_EXTRACTION_ENGINE === 'paddleocr_vl'}
-							<div class="my-0.5 flex gap-2 pr-2">
-								<input
-									class="flex-1 w-full text-sm bg-transparent outline-hidden"
-									placeholder={$i18n.t('Enter PaddleOCR-vl API Base URL')}
-									bind:value={RAGConfig.PADDLEOCR_VL_BASE_URL}
-								/>
-								<SensitiveInput
-									placeholder={$i18n.t('Enter PaddleOCR-vl API Token')}
-									bind:value={RAGConfig.PADDLEOCR_VL_TOKEN}
-									required={false}
-								/>
+							<div class="flex flex-col gap-2 pr-2">
+								<div class="my-0.5 flex gap-2">
+									<input
+										class="flex-1 w-full text-sm bg-transparent outline-hidden"
+										placeholder={$i18n.t('Enter PaddleOCR-vl API Base URL')}
+										bind:value={RAGConfig.PADDLEOCR_VL_BASE_URL}
+									/>
+									<SensitiveInput
+										placeholder={$i18n.t('Enter PaddleOCR-vl API Token')}
+										bind:value={RAGConfig.PADDLEOCR_VL_TOKEN}
+										required={false}
+									/>
+								</div>
+
+								<div class="flex justify-between w-full">
+									<div class="self-center text-xs font-medium">
+										{$i18n.t('Model')}
+									</div>
+									<input
+										class="w-52 text-sm bg-transparent outline-hidden text-right"
+										placeholder="PaddleOCR-VL-1.6"
+										bind:value={RAGConfig.PADDLEOCR_VL_MODEL}
+									/>
+								</div>
+
+								<div class="grid grid-cols-2 gap-2">
+									<div class="flex justify-between gap-2">
+										<div class="self-center text-xs font-medium">
+											{$i18n.t('Request Timeout')}
+										</div>
+										<input
+											class="w-16 text-sm bg-transparent outline-hidden text-right"
+											type="number"
+											min="1"
+											bind:value={RAGConfig.PADDLEOCR_VL_REQUEST_TIMEOUT}
+											placeholder="30"
+										/>
+									</div>
+									<div class="flex justify-between gap-2">
+										<div class="self-center text-xs font-medium">
+											{$i18n.t('Download Timeout')}
+										</div>
+										<input
+											class="w-16 text-sm bg-transparent outline-hidden text-right"
+											type="number"
+											min="1"
+											bind:value={RAGConfig.PADDLEOCR_VL_DOWNLOAD_TIMEOUT}
+											placeholder="60"
+										/>
+									</div>
+									<div class="flex justify-between gap-2">
+										<div class="self-center text-xs font-medium">
+											{$i18n.t('Poll Timeout')}
+										</div>
+										<input
+											class="w-16 text-sm bg-transparent outline-hidden text-right"
+											type="number"
+											min="1"
+											bind:value={RAGConfig.PADDLEOCR_VL_POLL_TIMEOUT}
+											placeholder="300"
+										/>
+									</div>
+									<div class="flex justify-between gap-2">
+										<div class="self-center text-xs font-medium">
+											{$i18n.t('Poll Interval')}
+										</div>
+										<input
+											class="w-16 text-sm bg-transparent outline-hidden text-right"
+											type="number"
+											min="0.1"
+											step="0.1"
+											bind:value={RAGConfig.PADDLEOCR_VL_POLL_INTERVAL}
+											placeholder="2"
+										/>
+									</div>
+								</div>
+
+								<div class="flex flex-col justify-between w-full">
+									<div class="text-xs font-medium mb-1">
+										<Tooltip
+											content={$i18n.t('Optional payload sent with the PaddleOCR-vl async job.')}
+											placement="top-start"
+										>
+											{$i18n.t('Optional Payload')}
+										</Tooltip>
+									</div>
+									<Textarea
+										bind:value={RAGConfig.PADDLEOCR_VL_OPTIONAL_PAYLOAD}
+										placeholder={`{\n  "useDocOrientationClassify": false,\n  "useDocUnwarping": false,\n  "useChartRecognition": false\n}`}
+										minSize={100}
+									/>
+								</div>
 							</div>
 						{:else if RAGConfig.CONTENT_EXTRACTION_ENGINE === 'mineru'}
 							<!-- API Mode Selection -->
