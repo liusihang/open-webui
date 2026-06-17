@@ -3,6 +3,14 @@
 	import type { Writable } from 'svelte/store';
 	import { toast } from 'svelte-sonner';
 
+	import {
+		clearAgentMemory,
+		getAgentMemoryFailedJobs,
+		rebuildAgentMemoryIndex,
+		retryFailedAgentMemoryJobs,
+		runAgentMemoryConsolidation,
+		runAgentMemoryExtraction
+	} from '$lib/apis/agent-memory';
 	import { getAdminConfig, updateAdminConfig } from '$lib/apis/auths';
 	import Switch from '$lib/components/common/Switch.svelte';
 
@@ -12,6 +20,115 @@
 	);
 
 	let adminConfig: Record<string, any> | null = null;
+	let failedJobs: Record<string, any> | null = null;
+	let operationUserId = '';
+	let operationScope: 'all' | 'global' | 'folder' = 'all';
+	let operationFolderId = '';
+	let noteMode: 'convert' | 'delete' = 'convert';
+	let operationRunning = '';
+
+	const scopeType = () => (operationScope === 'all' ? null : operationScope);
+	const scopeId = () => (operationScope === 'folder' ? operationFolderId.trim() : '');
+
+	const validateOperationScope = () => {
+		if (operationScope === 'folder' && !operationFolderId.trim()) {
+			toast.error($i18n.t('Folder ID is required'));
+			return false;
+		}
+		return true;
+	};
+
+	const loadFailedJobs = async () => {
+		failedJobs = await getAgentMemoryFailedJobs(localStorage.token, operationUserId).catch((error) => {
+			toast.error(`${error}`);
+			return failedJobs;
+		});
+	};
+
+	const runOperation = async (name: string, operation: () => Promise<any>, success: string) => {
+		operationRunning = name;
+		const res = await operation().catch((error) => {
+			toast.error(`${error}`);
+			return null;
+		});
+		operationRunning = '';
+
+		if (res) {
+			toast.success($i18n.t(success));
+			await loadFailedJobs();
+		}
+		return res;
+	};
+
+	const runExtractionHandler = async () => {
+		await runOperation(
+			'extraction',
+			() => runAgentMemoryExtraction(localStorage.token, null),
+			'Extraction run completed'
+		);
+	};
+
+	const runConsolidationHandler = async () => {
+		await runOperation(
+			'consolidation',
+			() => runAgentMemoryConsolidation(localStorage.token, null),
+			'Consolidation run completed'
+		);
+	};
+
+	const rebuildIndexHandler = async () => {
+		if (!operationUserId.trim()) {
+			toast.error($i18n.t('User ID is required'));
+			return;
+		}
+		if (!validateOperationScope()) {
+			return;
+		}
+		await runOperation(
+			'rebuild',
+			() =>
+				rebuildAgentMemoryIndex(
+					localStorage.token,
+					operationUserId,
+					scopeType(),
+					scopeId()
+				),
+			'Index rebuild completed'
+		);
+	};
+
+	const clearMemoryHandler = async () => {
+		if (!operationUserId.trim()) {
+			toast.error($i18n.t('User ID is required'));
+			return;
+		}
+		if (!validateOperationScope()) {
+			return;
+		}
+		if (!confirm($i18n.t('Clear Agent Memory?'))) {
+			return;
+		}
+		await runOperation(
+			'clear',
+			() =>
+				clearAgentMemory(
+					localStorage.token,
+					operationUserId,
+					noteMode,
+					scopeType(),
+					scopeId()
+				),
+			'Agent Memory cleared'
+		);
+	};
+
+	const retryFailedHandler = async () => {
+		await runOperation(
+			'retry',
+			() => retryFailedAgentMemoryJobs(localStorage.token, operationUserId),
+			'Failed jobs requeued'
+		);
+	};
 
 	const updateHandler = async () => {
 		if (!adminConfig) {
@@ -31,6 +148,7 @@
 
 	onMount(async () => {
 		adminConfig = await getAdminConfig(localStorage.token);
+		await loadFailedJobs();
 	});
 </script>
 
@@ -158,34 +276,92 @@
 
 				<hr class="border-gray-100/30 dark:border-gray-850/30 my-2" />
 
+				<div class="grid grid-cols-1 md:grid-cols-2 gap-3 mb-3">
+					<div>
+						<div class="text-xs mb-1">{$i18n.t('User ID')}</div>
+						<input
+							class="w-full rounded-lg py-2 px-4 text-sm bg-gray-50 dark:text-gray-300 dark:bg-gray-850 outline-hidden"
+							type="text"
+							bind:value={operationUserId}
+							on:change={loadFailedJobs}
+						/>
+					</div>
+
+					<div>
+						<div class="text-xs mb-1">{$i18n.t('Scope')}</div>
+						<select
+							class="w-full rounded-lg py-2 px-4 text-sm bg-gray-50 dark:text-gray-300 dark:bg-gray-850 outline-hidden"
+							bind:value={operationScope}
+						>
+							<option value="all">{$i18n.t('All')}</option>
+							<option value="global">{$i18n.t('Global')}</option>
+							<option value="folder">{$i18n.t('Folder')}</option>
+						</select>
+					</div>
+
+					{#if operationScope === 'folder'}
+						<div>
+							<div class="text-xs mb-1">{$i18n.t('Folder ID')}</div>
+							<input
+								class="w-full rounded-lg py-2 px-4 text-sm bg-gray-50 dark:text-gray-300 dark:bg-gray-850 outline-hidden"
+								type="text"
+								bind:value={operationFolderId}
+							/>
+						</div>
+					{/if}
+
+					<div>
+						<div class="text-xs mb-1">{$i18n.t('Linked Notes')}</div>
+						<select
+							class="w-full rounded-lg py-2 px-4 text-sm bg-gray-50 dark:text-gray-300 dark:bg-gray-850 outline-hidden"
+							bind:value={noteMode}
+						>
+							<option value="convert">{$i18n.t('Convert')}</option>
+							<option value="delete">{$i18n.t('Delete')}</option>
+						</select>
+					</div>
+				</div>
+
 				<div class="grid grid-cols-1 sm:grid-cols-2 gap-2">
 					<button
-						class="text-xs px-3 py-2 bg-gray-50 dark:bg-gray-850 text-gray-400 rounded-lg font-medium cursor-not-allowed"
+						class="text-xs px-3 py-2 bg-gray-50 hover:bg-gray-100 dark:bg-gray-850 dark:hover:bg-gray-800 rounded-lg font-medium transition disabled:opacity-50"
 						type="button"
-						disabled
+						disabled={operationRunning !== ''}
+						on:click={runExtractionHandler}
 					>
 						{$i18n.t('Run Extraction')}
 					</button>
 					<button
-						class="text-xs px-3 py-2 bg-gray-50 dark:bg-gray-850 text-gray-400 rounded-lg font-medium cursor-not-allowed"
+						class="text-xs px-3 py-2 bg-gray-50 hover:bg-gray-100 dark:bg-gray-850 dark:hover:bg-gray-800 rounded-lg font-medium transition disabled:opacity-50"
 						type="button"
-						disabled
+						disabled={operationRunning !== ''}
+						on:click={runConsolidationHandler}
 					>
 						{$i18n.t('Run Consolidation')}
 					</button>
 					<button
-						class="text-xs px-3 py-2 bg-gray-50 dark:bg-gray-850 text-gray-400 rounded-lg font-medium cursor-not-allowed"
+						class="text-xs px-3 py-2 bg-gray-50 hover:bg-gray-100 dark:bg-gray-850 dark:hover:bg-gray-800 rounded-lg font-medium transition disabled:opacity-50"
 						type="button"
-						disabled
+						disabled={operationRunning !== ''}
+						on:click={rebuildIndexHandler}
 					>
 						{$i18n.t('Rebuild Index')}
 					</button>
 					<button
-						class="text-xs px-3 py-2 bg-gray-50 dark:bg-gray-850 text-gray-400 rounded-lg font-medium cursor-not-allowed"
+						class="text-xs px-3 py-2 bg-gray-50 hover:bg-gray-100 dark:bg-gray-850 dark:hover:bg-gray-800 rounded-lg font-medium transition disabled:opacity-50"
 						type="button"
-						disabled
+						disabled={operationRunning !== ''}
+						on:click={clearMemoryHandler}
 					>
 						{$i18n.t('Clear Agent Memory')}
+					</button>
+					<button
+						class="text-xs px-3 py-2 bg-gray-50 hover:bg-gray-100 dark:bg-gray-850 dark:hover:bg-gray-800 rounded-lg font-medium transition disabled:opacity-50 sm:col-span-2"
+						type="button"
+						disabled={operationRunning !== ''}
+						on:click={retryFailedHandler}
+					>
+						{$i18n.t('Retry Failed Jobs')}
 					</button>
 				</div>
 
@@ -195,7 +371,7 @@
 						<input
 							class="w-full rounded-lg py-2 px-4 text-sm bg-gray-50 dark:text-gray-500 dark:bg-gray-850 outline-hidden"
 							type="text"
-							value="--"
+							value={failedJobs?.extraction_jobs_failed ?? 0}
 							disabled
 						/>
 					</div>
@@ -205,7 +381,7 @@
 						<input
 							class="w-full rounded-lg py-2 px-4 text-sm bg-gray-50 dark:text-gray-500 dark:bg-gray-850 outline-hidden"
 							type="text"
-							value="--"
+							value={failedJobs?.consolidation_jobs_failed ?? 0}
 							disabled
 						/>
 					</div>

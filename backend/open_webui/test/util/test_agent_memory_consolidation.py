@@ -882,6 +882,24 @@ async def test_run_consolidation_calls_model_and_completes_artifacts(tmp_path, m
         }
 
     monkeypatch.setattr(consolidation, "generate_chat_completion", fake_generate_chat_completion)
+    rebuild_calls = []
+
+    async def fake_rebuild_agent_memory_index_for_scope(request, user_id, scope_type, scope_id="", db=None):
+        rebuild_calls.append(
+            {
+                "request": request,
+                "user_id": user_id,
+                "scope_type": scope_type,
+                "scope_id": scope_id,
+                "db": db,
+            }
+        )
+
+    monkeypatch.setattr(
+        consolidation,
+        "rebuild_agent_memory_index_for_scope",
+        fake_rebuild_agent_memory_index_for_scope,
+    )
 
     async with session_factory() as session:
         session.add(_chat("global-chat"))
@@ -915,5 +933,14 @@ async def test_run_consolidation_calls_model_and_completes_artifacts(tmp_path, m
             await AgentMemoryArtifacts.get_artifact("user-1", "global", "", "memory_summary.md", db=session)
         ).content == "Summary from model"
         assert await AgentMemoryConsolidationJobs.get_job("user-1", "global", "", db=session) is None
+        assert rebuild_calls == [
+            {
+                "request": request,
+                "user_id": "user-1",
+                "scope_type": "global",
+                "scope_id": "",
+                "db": session,
+            }
+        ]
 
     await engine.dispose()

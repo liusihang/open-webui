@@ -31,6 +31,7 @@ from open_webui.models.shared_chats import SharedChatResponse, SharedChats
 from open_webui.models.tags import TagModel, Tags
 from open_webui.socket.main import get_event_emitter
 from open_webui.tasks import stop_item_tasks
+from open_webui.utils import agent_memory
 from open_webui.utils.access_control import filter_allowed_access_grants, has_permission
 from open_webui.utils.auth import get_admin_user, get_verified_user
 from open_webui.utils.middleware import serialize_output
@@ -1110,6 +1111,34 @@ async def send_chat_message_event_by_id(
 
 
 ############################
+# UpdateChatAgentMemoryById
+############################
+
+
+class ChatAgentMemoryForm(BaseModel):
+    disabled: bool
+
+
+@router.post('/{id}/agent-memory')
+async def update_chat_agent_memory_by_id(
+    id: str,
+    form_data: ChatAgentMemoryForm,
+    user=Depends(get_verified_user),
+    db: AsyncSession = Depends(get_async_session),
+):
+    chat = await Chats.get_chat_by_id_and_user_id(id, user.id, db=db)
+    if not chat:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=ERROR_MESSAGES.NOT_FOUND)
+
+    return await agent_memory.set_chat_agent_memory_disabled(
+        user_id=user.id,
+        chat_id=id,
+        disabled=form_data.disabled,
+        db=db,
+    )
+
+
+############################
 # DeleteChatById
 ############################
 
@@ -1134,6 +1163,12 @@ async def delete_chat_by_id(
             )
         await Chats.delete_orphan_tags_for_user(chat.meta.get('tags', []), user.id, threshold=1, db=db)
 
+        await agent_memory.forget_chat_agent_memory(
+            user_id=chat.user_id,
+            chat_id=id,
+            folder_id=chat.folder_id,
+            db=db,
+        )
         result = await Chats.delete_chat_by_id(id, db=db)
 
         return result
@@ -1152,6 +1187,12 @@ async def delete_chat_by_id(
             )
         await Chats.delete_orphan_tags_for_user(chat.meta.get('tags', []), user.id, threshold=1, db=db)
 
+        await agent_memory.forget_chat_agent_memory(
+            user_id=chat.user_id,
+            chat_id=id,
+            folder_id=chat.folder_id,
+            db=db,
+        )
         result = await Chats.delete_chat_by_id_and_user_id(id, user.id, db=db)
         return result
 
@@ -1489,6 +1530,7 @@ async def update_chat_folder_id_by_id(
 ):
     chat = await Chats.get_chat_by_id_and_user_id(id, user.id, db=db)
     if chat:
+        old_folder_id = chat.folder_id
         # Same ownership check as the create path — reject foreign / dangling
         # folder_id values. None is allowed (moves the chat out of any folder).
         if form_data.folder_id is not None:
@@ -1499,6 +1541,14 @@ async def update_chat_folder_id_by_id(
                 )
 
         chat = await Chats.update_chat_folder_id_by_id_and_user_id(id, user.id, form_data.folder_id, db=db)
+        if old_folder_id != form_data.folder_id:
+            await agent_memory.enqueue_consolidation_for_folder_move(
+                user_id=user.id,
+                chat_id=id,
+                old_folder_id=old_folder_id,
+                new_folder_id=form_data.folder_id,
+                db=db,
+            )
         return ChatResponse(**chat.model_dump())
     else:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail=ERROR_MESSAGES.DEFAULT())

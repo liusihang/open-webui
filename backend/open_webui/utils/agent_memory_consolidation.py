@@ -22,6 +22,7 @@ from open_webui.models.folders import Folder
 from open_webui.models.notes import Note
 from open_webui.utils.access_control import has_permission
 from open_webui.utils.agent_memory_extraction import sanitize_agent_memory_text
+from open_webui.utils.agent_memory_index import rebuild_agent_memory_index_for_scope
 from open_webui.utils.chat import generate_chat_completion
 from open_webui.utils.task import get_task_model_id
 from sqlalchemy import case, delete, func, or_, select, update
@@ -730,6 +731,13 @@ async def _run_single_consolidation_job(
             now=now,
             expected_lease_until=job.lease_until,
             expected_note_hashes=consolidation_input.expected_note_hashes,
+            db=db,
+        )
+        await rebuild_agent_memory_index_for_scope(
+            request,
+            job.user_id,
+            job.scope_type,
+            job.scope_id,
             db=db,
         )
         return True

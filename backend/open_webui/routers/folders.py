@@ -19,6 +19,7 @@ from open_webui.models.folders import (
     Folders,
     FolderUpdateForm,
 )
+from open_webui.utils import agent_memory
 from open_webui.utils.access_control import has_permission
 from open_webui.utils.access_control.files import get_accessible_folder_files
 from open_webui.utils.auth import get_admin_user, get_verified_user
@@ -29,6 +30,30 @@ log = logging.getLogger(__name__)
 
 
 router = APIRouter()
+
+
+def _is_agent_memory_disabled(meta: dict | None) -> bool:
+    agent_memory_meta = (meta or {}).get('agent_memory') or {}
+    return bool(agent_memory_meta.get('disabled'))
+
+
+def _merge_agent_memory_disabled_meta(meta: dict | None, old_meta: dict | None) -> dict | None:
+    if not meta or not isinstance(meta.get('agent_memory'), dict) or 'disabled' not in meta['agent_memory']:
+        return meta
+
+    next_meta = dict(meta)
+    next_agent_memory = dict((old_meta or {}).get('agent_memory') or {})
+    next_agent_memory.update(next_meta.get('agent_memory') or {})
+    if next_agent_memory.get('disabled'):
+        next_agent_memory['disabled'] = True
+    else:
+        next_agent_memory.pop('disabled', None)
+
+    if next_agent_memory:
+        next_meta['agent_memory'] = next_agent_memory
+    else:
+        next_meta.pop('agent_memory', None)
+    return next_meta
 
 
 ############################
@@ -144,6 +169,10 @@ async def update_folder_name_by_id(
 ):
     folder = await Folders.get_folder_by_id_and_user_id(id, user.id, db=db)
     if folder:
+        was_agent_memory_disabled = _is_agent_memory_disabled(folder.meta)
+        if form_data.meta is not None:
+            form_data.meta = _merge_agent_memory_disabled_meta(form_data.meta, folder.meta)
+
         if form_data.name is not None:
             # Check if folder with same name exists
             existing_folder = await Folders.get_folder_by_parent_id_and_user_id_and_name(
@@ -167,6 +196,14 @@ async def update_folder_name_by_id(
 
         try:
             folder = await Folders.update_folder_by_id_and_user_id(id, user.id, form_data, db=db)
+            if folder and not was_agent_memory_disabled and _is_agent_memory_disabled(folder.meta):
+                await agent_memory.set_folder_agent_memory_disabled(
+                    user_id=user.id,
+                    folder_id=id,
+                    disabled=True,
+                    db=db,
+                )
+                folder = await Folders.get_folder_by_id_and_user_id(id, user.id, db=db)
             return folder
         except Exception as e:
             log.exception(e)
@@ -277,7 +314,21 @@ async def delete_folder_by_id(
     user=Depends(get_verified_user),
     db: AsyncSession = Depends(get_async_session),
 ):
-    if await Chats.count_chats_by_folder_id_and_user_id(id, user.id, db=db):
+    root_folder = await Folders.get_folder_by_id_and_user_id(id, user.id, db=db)
+    if not root_folder:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=ERROR_MESSAGES.NOT_FOUND,
+        )
+
+    child_folders = await Folders.get_children_folders_by_id_and_user_id(id, user.id, db=db) or []
+    affected_folder_ids = list(dict.fromkeys(folder.id for folder in [root_folder, *child_folders] if folder))
+    chat_ids_by_folder = {
+        folder_id: await agent_memory.list_chat_ids_in_folder(user.id, folder_id, db=db)
+        for folder_id in affected_folder_ids
+    }
+
+    if any(chat_ids_by_folder.values()):
         chat_delete_permission = await has_permission(
             user.id, 'chat.delete', request.app.state.config.USER_PERMISSIONS, db=db
         )
@@ -287,35 +338,51 @@ async def delete_folder_by_id(
                 detail=ERROR_MESSAGES.ACCESS_PROHIBITED,
             )
 
-    folders = []
-    folders.append(await Folders.get_folder_by_id_and_user_id(id, user.id, db=db))
-    while folders:
-        folder = folders.pop()
-        if folder:
-            try:
-                folder_ids = await Folders.delete_folder_by_id_and_user_id(folder.id, user.id, db=db)
-
-                for folder_id in folder_ids:
-                    if delete_contents:
-                        await Chats.delete_chats_by_user_id_and_folder_id(user.id, folder_id, db=db)
-                    else:
-                        await Chats.move_chats_by_user_id_and_folder_id(user.id, folder_id, None, db=db)
-
-                return True
-            except Exception as e:
-                log.exception(e)
-                log.error(f'Error deleting folder: {id}')
-                raise HTTPException(
-                    status_code=status.HTTP_400_BAD_REQUEST,
-                    detail=ERROR_MESSAGES.DEFAULT('Error deleting folder'),
+    try:
+        for folder_id in affected_folder_ids:
+            if delete_contents:
+                if not await Chats.delete_chats_by_user_id_and_folder_id(user.id, folder_id, db=db):
+                    raise RuntimeError(f'Failed to delete chats for folder {folder_id}')
+                for chat_id in chat_ids_by_folder.get(folder_id, []):
+                    await agent_memory.forget_chat_agent_memory(
+                        user_id=user.id,
+                        chat_id=chat_id,
+                        folder_id=folder_id,
+                        db=db,
+                    )
+                await agent_memory.remove_agent_memory_scope_outputs(
+                    user_id=user.id,
+                    scope_type='folder',
+                    scope_id=folder_id,
+                    db=db,
                 )
-            finally:
-                # Get all subfolders
-                subfolders = await Folders.get_folders_by_parent_id_and_user_id(folder.id, user.id, db=db)
-                folders.extend(subfolders)
+            else:
+                if not await Chats.move_chats_by_user_id_and_folder_id(user.id, folder_id, None, db=db):
+                    raise RuntimeError(f'Failed to move chats out of folder {folder_id}')
+                await agent_memory.remove_agent_memory_scope_outputs(
+                    user_id=user.id,
+                    scope_type='folder',
+                    scope_id=folder_id,
+                    db=db,
+                )
+                if chat_ids_by_folder.get(folder_id, []):
+                    await agent_memory.enqueue_consolidation_for_scope(
+                        user_id=user.id,
+                        scope_type='global',
+                        scope_id='',
+                        db=db,
+                    )
 
-    else:
+        folder_ids = await Folders.delete_folder_by_id_and_user_id(id, user.id, db=db)
+        if not folder_ids:
+            raise RuntimeError(f'Failed to delete folder {id}')
+        return True
+    except HTTPException:
+        raise
+    except Exception as e:
+        log.exception(e)
+        log.error(f'Error deleting folder: {id}')
         raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail=ERROR_MESSAGES.NOT_FOUND,
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=ERROR_MESSAGES.DEFAULT('Error deleting folder'),
         )
