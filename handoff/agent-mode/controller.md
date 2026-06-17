@@ -142,8 +142,9 @@ integrate worker branches in the documented merge train.
 9. W8 terminal artifact/process refs: integrated as `3f692f946`.
 10. W7 approval: integrated as `0da571088`.
 11. W9A model catalog helper: integrated as `e59adeeda`.
-12. W9B1 OpenWebUI subagent control plane.
-13. W9B2 AgentScope runtime subagent adapter.
+12. W9B1 OpenWebUI subagent control plane: integrated as `d1509d8cb`.
+13. W9B2 AgentScope runtime subagent adapter: initial worker commit
+    `8ad7bb052`; follow-up in progress to add a real AgentScope API boundary.
 14. W10A `Chat.svelte` event UI integration.
 15. W12A deployment/E2E harness, then W12B final acceptance.
 
@@ -193,55 +194,63 @@ integrate worker branches in the documented merge train.
 - W9A agent `019ed6ea-b5c4-7333-8c6f-be2fbbb2daa0` was closed after
   integration. Its final status confirmed worker commit `ca52ebf6`, focused
   test results, ruff, diff checks, and restored `uv.lock`.
+- W9B1 OpenWebUI subagent control plane integrated as `d1509d8cb`.
+  - Worker commit: `0bc5673fef403c94b74cf63db8808661018b265f`.
+  - Controller kept the worker handoff file while resolving the cherry-pick
+    modify/delete conflict.
+  - Focused integration gate:
+    `WEBUI_SECRET_KEY=test-secret ENABLE_DB_MIGRATIONS=false uv run pytest -q
+    backend/open_webui/test/agent/test_subagents.py` -> `8 passed`.
+  - Backend agent/storage integration gate:
+    `WEBUI_SECRET_KEY=test-secret ENABLE_DB_MIGRATIONS=false uv run pytest -q
+    backend/open_webui/test/agent backend/open_webui/test/models/test_agent_runs.py`
+    -> `70 passed`.
+  - `uv run ruff check backend/open_webui/agent
+    backend/open_webui/routers/agent_service.py backend/open_webui/test/agent`
+    passed.
+  - `git diff --check origin/pr/7..HEAD` passed.
+  - `uv.lock` was restored after test-run environment churn.
+- W9B2 initially completed as `8ad7bb052`, but the worker handoff identified
+  that the slice verified AgentScope APIs without adding `agentscope` as a
+  runtime dependency or constructing a tested AgentScope boundary. Pauli was
+  resumed and asked to add a follow-up commit under
+  `services/agentscope-runtime/*` that imports and validates the real
+  AgentScope API surface.
 
 ## Next
 
 Next controller action:
 
-1. W9B1/W9B2/W10A/W12A worker handoffs were created and committed in their
-   worktrees from base `28830b966`.
-2. W9B1 OpenWebUI subagent control plane is active.
-   - Worktree:
-     `/Users/liusihang/openwebui/.worktrees/agent-mode-w9b-subagent-control`
-   - Branch: `codex/agent-mode-w9b-subagent-control`
-   - Handoff commit: `5b7f3163f`
-   - Agent: `019ed701-52da-7e60-a42e-a0045077d06f` (Newton)
-   - Owns `backend/open_webui/agent/subagents.py`, focused tests, and only the
-     minimal `routers/agent_service.py` binding needed for model-selection /
-     participant callbacks.
-   - Must not edit `services/agentscope-runtime/*`, frontend files, or nested
-     `open-terminal/`.
-3. W9B2 AgentScope runtime adapter is active for API verification and
-   service-local adapter work.
+1. W9B1 is integrated and its worker agent was closed.
+2. W9B2 AgentScope runtime adapter is active for the real-AgentScope boundary
+   follow-up.
    - Worktree:
      `/Users/liusihang/openwebui/.worktrees/agent-mode-w9b-agentscope-adapter`
    - Branch: `codex/agent-mode-w9b-agentscope-adapter`
-   - Handoff commit: `53b79d03e`
+   - Initial worker commit: `8ad7bb052`
    - Agent: `019ed701-533e-72a0-91ee-0a892946c900` (Pauli)
    - Owns `services/agentscope-runtime/*`.
-   - Must verify concrete AgentScope APIs from a clean clone or pinned commit
-     before coding subagent internals.
-4. W10A frontend Agent Event UI worker is active for reducer/API prep and
-   fixture-backed UI work.
+   - Must add a tested dependency/API boundary using real AgentScope imports,
+     not only a local shim.
+3. W10A frontend Agent Event UI worker completed as `05e8968fc`, but should
+   wait for W9B fixture/interface stability before integration.
    - Worktree: `/Users/liusihang/openwebui/.worktrees/agent-mode-w10-chat-ui`
    - Branch: `codex/agent-mode-w10-chat-ui`
-   - Handoff commit: `6e486bb83`
+   - Worker commit: `05e8968fc`
    - Agent: `019ed701-53b8-7673-b2cc-71a03a42e1d4` (Mencius)
-   - Must not merge speculative `Chat.svelte` work before W9B fixture
-     stability.
-5. W12A deployment/E2E harness worker is active.
+   - Agent closed after completion.
+4. W12A deployment/E2E harness worker completed as `5228d5bdc`.
    - Worktree:
      `/Users/liusihang/openwebui/.worktrees/agent-mode-w12-e2e-harness`
    - Branch: `codex/agent-mode-w12-e2e-harness`
-   - Handoff commit: `3c8044fb7`
+   - Worker commit: `5228d5bdc`
    - Agent: `019ed701-5420-78f1-ae9b-3dc0dc0f3711` (Hilbert)
-   - This worker may only claim dry-run/harness readiness; W12B final
-     acceptance waits for W9B2 and W10A.
+   - Agent closed after completion. This worker only claims dry-run/harness
+     readiness; W12B final acceptance waits for W9B2 and W10A.
 
 Next controller action:
 
-1. Let workers run without duplicating their assigned implementation work.
-2. While they run, only do non-overlapping controller work: update planning
-   files, inspect returned commits, and prepare merge gates.
-3. Integrate in order: W9B1, then W9B2, then W10A, then W12A if docs/harness
-   only.
+1. Wait for Pauli's W9B2 follow-up commit.
+2. Verify W9B2 service-local tests and inspect dependency/lockfile scope.
+3. Integrate W9B2 only after the real-AgentScope boundary gap is resolved.
+4. Then integrate W10A, and W12A if it remains docs/scripts/harness-only.
