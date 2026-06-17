@@ -174,12 +174,39 @@ adapter should wait until W7/W8 event/artifact shapes are visible.
   - Agent: `019ed6ea-b5c4-7333-8c6f-be2fbbb2daa0`
   - Scope: helper-level permission-filtered model catalog and
     `meta.agent_selection`; no real AgentScope subagent adapter.
+- W8 terminal artifact/process tracking integrated as `3f692f946`.
+  - Worker commit: `f81e41e73d8efe786a823e3df76d62d533fac119`.
+  - Worker focused gate rerun by controller:
+    `WEBUI_SECRET_KEY=test-secret ENABLE_DB_MIGRATIONS=false uv run pytest -q
+    backend/open_webui/test/agent/test_terminal_artifacts.py
+    backend/open_webui/test/agent/test_tool_authority.py
+    backend/open_webui/test/agent/test_resources.py
+    backend/open_webui/test/agent/test_compaction.py
+    backend/open_webui/test/models/test_agent_runs.py` -> `21 passed`.
+  - W8 ruff gate passed.
+- W7 destructive approval integrated as `0da571088`.
+  - Worker commit: `720c0afe621fe4944453f988bc4dec8024b030f4`.
+  - Worker focused gate rerun by controller:
+    `WEBUI_SECRET_KEY=test-secret ENABLE_DB_MIGRATIONS=false uv run pytest -q
+    backend/open_webui/test/agent/test_approval.py
+    backend/open_webui/test/agent/test_tool_authority.py
+    backend/open_webui/test/agent/test_resources.py` -> `11 passed`.
+  - W7 ruff gate passed.
+- Combined W7/W8 integration gate:
+  `WEBUI_SECRET_KEY=test-secret ENABLE_DB_MIGRATIONS=false uv run pytest -q
+  backend/open_webui/test/agent backend/open_webui/test/models/test_agent_runs.py`
+  -> `58 passed`.
+- `uv run ruff check backend/open_webui/agent
+  backend/open_webui/routers/agent_service.py backend/open_webui/test/agent`
+  passed.
+- `git diff --check origin/pr/7..HEAD` passed.
+- `uv.lock` was restored after test-run environment churn.
 
 Next controller action:
 
-1. Let W7/W8/W9A run without duplicating their tasks.
-2. When a worker returns, inspect handoff/diff/commit, run focused tests and
-   ruff in that worker worktree, then cherry-pick into integration.
-3. Run the combined W7/W8 backend gate after both are integrated; run the W9A
-   model-catalog gate after W9A is integrated.
+1. Let W9A run without duplicating its task.
+2. When W9A returns, inspect handoff/diff/commit, run focused tests and ruff in
+   that worker worktree, then cherry-pick into integration.
+3. Run the W9A model-catalog integration gate.
 4. Restore `uv.lock` after any `uv run` churn.
+5. After W9A, start the real AgentScope subagent adapter slice.
