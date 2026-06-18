@@ -675,10 +675,55 @@ Red/green evidence:
 
 Remaining W12C work:
 
-- W12C-2 is still open. Nash's read-only review confirmed a real contract risk:
-  service `/events` requires an idempotency key but does not yet persist
-  event-append idempotency in `agent_run_operation`, so retried event callbacks
-  can still duplicate non-final events. Final-delta idempotency is protected by
-  `final_delta_state` plus event scan, but concurrent final deltas remain a
-  later hardening risk.
 - W12C-3/W12D live service acceptance has not been rerun after this fix yet.
+
+## W12C-2 Checkpoint
+
+Date: 2026-06-18
+
+Scope:
+
+- Callback contract hardening for service credential checks and callback
+  idempotency.
+
+Implementation notes:
+
+- `backend/open_webui/routers/agent_service.py` now requires the Agent Service
+  Credential for:
+  - `/runs/{run_id}/events`;
+  - `/runs/{run_id}/final-delta`;
+  - `/runs/{run_id}/tool-call`.
+- Production DB-backed `/events` and `/final-delta` now use
+  `agent_run_operation`:
+  - duplicate successful callbacks return the cached event response;
+  - same idempotency key with a changed body returns
+    `409 idempotency_conflict`;
+  - in-progress duplicates return `202 operation_in_progress`;
+  - failures are stored as structured operation errors.
+- The sync fake-store path remains available for focused tests when
+  `app.state.AGENT_EVENT_STORE` is installed.
+
+Verification:
+
+- Focused W12C-2 gate:
+  `WEBUI_SECRET_KEY=test-secret ENABLE_DB_MIGRATIONS=false uv run pytest -q backend/open_webui/test/agent/test_agent_run_routes_db_store.py backend/open_webui/test/agent/test_approval.py`
+  -> `11 passed`.
+- Backend agent/storage gate:
+  `WEBUI_SECRET_KEY=test-secret ENABLE_DB_MIGRATIONS=false uv run pytest -q backend/open_webui/test/agent backend/open_webui/test/models/test_agent_runs.py`
+  -> `90 passed`.
+- Ruff:
+  `uv run ruff check backend/open_webui/agent/events.py backend/open_webui/routers/agent_runs.py backend/open_webui/routers/agent_service.py backend/open_webui/test/agent/test_agent_run_routes_db_store.py backend/open_webui/test/agent/test_approval.py backend/open_webui/test/models/test_agent_runs.py backend/open_webui/test/agent/test_chat_entry_agent_mode.py`
+  -> passed.
+- AgentScope runtime service-local gate:
+  `cd services/agentscope-runtime && uv run --extra test pytest -q`
+  -> `20 passed`.
+
+Remaining W12C work:
+
+- W12C-3 live service harness/evidence capture has not been rerun after
+  W12C-1/W12C-2.
+- W12C-4 final regression/diff hygiene still needs to run before W12D.
+- Concurrent final deltas can still race because `final_text` and
+  `final.delta` event append are separate DB transactions. This is acceptable
+  for the current unblock because the runtime serializes final deltas, but it
+  remains a future hardening item if callbacks become concurrent.

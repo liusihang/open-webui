@@ -1,4 +1,7 @@
+import hashlib
+import json
 import secrets
+from typing import Any
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Request, status
 from fastapi.responses import JSONResponse
@@ -27,7 +30,7 @@ from open_webui.agent.model_authority import (
     ModelOperationInProgress,
 )
 from open_webui.agent.model_catalog import ModelCatalogError, ModelSelectionNotAllowed
-from open_webui.agent.protocol import AgentEventAppend, FinalDeltaAppend
+from open_webui.agent.protocol import AgentEventAppend, AgentRunEvent, FinalDeltaAppend
 from open_webui.agent.service.model_call import execute_agent_model_call
 from open_webui.agent.service.tool_call import execute_agent_tool_call
 from open_webui.agent.subagents import (
@@ -63,6 +66,10 @@ def _require_matching_idempotency_key(
             detail='idempotency_key_required',
         )
     return body_key or header_key or ''
+
+
+class AgentServiceOperationInProgress(Exception):
+    pass
 
 
 def _require_agent_service_credential(request: Request, authorization: str | None) -> None:
@@ -189,8 +196,10 @@ async def append_agent_run_event(
         default=None,
         alias='X-Agent-Idempotency-Key',
     ),
+    authorization: str | None = Header(default=None, alias='Authorization'),
     store: AgentEventStore | None = Depends(get_optional_agent_event_store),
 ):
+    _require_agent_service_credential(request, authorization)
     key = _require_matching_idempotency_key(
         form_data.idempotency_key,
         idempotency_key,
@@ -200,9 +209,20 @@ async def append_agent_run_event(
         if store is not None:
             event = append_agent_event(store, event_payload)
         else:
-            event = await append_agent_event_async(AgentRuns, event_payload)
+            event = await _append_agent_event_with_operation(event_payload)
     except AgentEventError as exc:
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
+    except AgentRunOperationConflict as exc:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail='idempotency_conflict',
+        ) from exc
+    except AgentServiceOperationInProgress:
+        return JSONResponse(
+            status_code=status.HTTP_202_ACCEPTED,
+            content={'detail': 'operation_in_progress'},
+            headers={'Retry-After': '1'},
+        )
     return event
 
 
@@ -264,8 +284,10 @@ async def append_agent_run_final_delta(
         default=None,
         alias='X-Agent-Idempotency-Key',
     ),
+    authorization: str | None = Header(default=None, alias='Authorization'),
     store: AgentEventStore | None = Depends(get_optional_agent_event_store),
 ):
+    _require_agent_service_credential(request, authorization)
     key = _require_matching_idempotency_key(
         form_data.idempotency_key,
         idempotency_key,
@@ -275,9 +297,20 @@ async def append_agent_run_final_delta(
         if store is not None:
             event = append_final_delta(store, delta_payload)
         else:
-            event = await append_final_delta_async(AgentRuns, delta_payload)
+            event = await _append_final_delta_with_operation(delta_payload)
     except AgentEventError as exc:
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
+    except AgentRunOperationConflict as exc:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail='idempotency_conflict',
+        ) from exc
+    except AgentServiceOperationInProgress:
+        return JSONResponse(
+            status_code=status.HTTP_202_ACCEPTED,
+            content={'detail': 'operation_in_progress'},
+            headers={'Retry-After': '1'},
+        )
     return event
 
 
@@ -335,9 +368,11 @@ async def execute_agent_run_tool_call(
         default=None,
         alias='X-Agent-Idempotency-Key',
     ),
+    authorization: str | None = Header(default=None, alias='Authorization'),
     authority: AgentToolAuthority = Depends(get_agent_tool_authority),
     approval_coordinator: AgentApprovalCoordinator = Depends(get_agent_approval_coordinator),
 ):
+    _require_agent_service_credential(request, authorization)
     key = _require_matching_idempotency_key(
         form_data.idempotency_key,
         idempotency_key,
@@ -404,6 +439,93 @@ async def execute_agent_run_tool_call(
                 'message': str(exc),
             },
         ) from exc
+
+
+async def _append_agent_event_with_operation(event: AgentEventAppend) -> AgentRunEvent:
+    claim = await AgentRuns.claim_operation(
+        event.run_id,
+        operation_type='event.append',
+        idempotency_key=event.idempotency_key or '',
+        request_hash=_callback_request_hash('event.append', event),
+    )
+    if not claim.created:
+        return _cached_event_operation_response(claim.operation)
+
+    try:
+        stored = await append_agent_event_async(AgentRuns, event)
+    except Exception as exc:
+        await AgentRuns.finish_operation_error(
+            claim.operation.id,
+            {
+                'code': getattr(exc, 'code', 'event_append_failed'),
+                'message': str(exc),
+            },
+        )
+        raise
+
+    await AgentRuns.finish_operation_success(
+        claim.operation.id,
+        stored.model_dump(mode='json'),
+    )
+    return stored
+
+
+async def _append_final_delta_with_operation(delta: FinalDeltaAppend) -> AgentRunEvent:
+    claim = await AgentRuns.claim_operation(
+        delta.run_id,
+        operation_type='final.delta',
+        idempotency_key=delta.idempotency_key or '',
+        request_hash=_callback_request_hash('final.delta', delta),
+    )
+    if not claim.created:
+        return _cached_event_operation_response(claim.operation)
+
+    try:
+        stored = await append_final_delta_async(AgentRuns, delta)
+    except Exception as exc:
+        await AgentRuns.finish_operation_error(
+            claim.operation.id,
+            {
+                'code': getattr(exc, 'code', 'final_delta_failed'),
+                'message': str(exc),
+            },
+        )
+        raise
+
+    await AgentRuns.finish_operation_success(
+        claim.operation.id,
+        stored.model_dump(mode='json'),
+    )
+    return stored
+
+
+def _cached_event_operation_response(operation) -> AgentRunEvent:
+    if operation.status == 'succeeded' and operation.response is not None:
+        return AgentRunEvent.model_validate(operation.response)
+    if operation.status == 'in_progress':
+        raise AgentServiceOperationInProgress('operation_in_progress')
+    if operation.status == 'failed':
+        error = operation.error or {
+            'code': 'agent_event_operation_failed',
+            'message': 'Agent event operation failed before producing a response.',
+        }
+        raise AgentEventError(error.get('message', 'agent event operation failed'))
+    raise AgentEventError(f'Unsupported operation status: {operation.status}')
+
+
+def _callback_request_hash(operation_type: str, model: Any) -> str:
+    body = model.model_dump(mode='json', exclude={'idempotency_key'})
+    payload = {
+        'operation_type': operation_type,
+        'body': body,
+        'service_principal': 'agentscope-runtime',
+    }
+    canonical = json.dumps(
+        payload,
+        sort_keys=True,
+        separators=(',', ':'),
+    )
+    return hashlib.sha256(canonical.encode()).hexdigest()
 
 
 @router.post('/runs/{run_id}/approvals/{approval_id}/decision')

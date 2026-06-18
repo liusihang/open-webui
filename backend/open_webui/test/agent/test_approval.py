@@ -1,4 +1,5 @@
 import os
+from types import SimpleNamespace
 
 os.environ.setdefault('WEBUI_SECRET_KEY', 'test-secret')
 os.environ.setdefault('ENABLE_DB_MIGRATIONS', 'false')
@@ -16,6 +17,16 @@ from open_webui.agent.tool_authority import (
 )
 from open_webui.models.agent_runs import AgentRunOperationConflict
 from open_webui.routers.agent_service import execute_agent_run_tool_call
+
+
+def _service_request():
+    return SimpleNamespace(
+        app=SimpleNamespace(
+            state=SimpleNamespace(
+                config=SimpleNamespace(AGENT_RUNTIME_SERVICE_TOKEN='service-secret')
+            )
+        )
+    )
 
 
 class FakeApprovalStore:
@@ -178,7 +189,7 @@ async def test_read_only_tool_call_endpoint_bypasses_approval_and_executes_once(
     coordinator = AgentApprovalCoordinator(store)
 
     result = await execute_agent_run_tool_call(
-        request=None,
+        request=_service_request(),
         run_id='run-1',
         form_data=ToolCallRequest(
             run_id='run-1',
@@ -189,6 +200,7 @@ async def test_read_only_tool_call_endpoint_bypasses_approval_and_executes_once(
             idempotency_key='tool:leader:call-1:1',
         ),
         idempotency_key='tool:leader:call-1:1',
+        authorization='Bearer service-secret',
         authority=authority,
         approval_coordinator=coordinator,
     )
@@ -231,10 +243,11 @@ async def test_destructive_tool_call_waits_for_approval_then_resumes_with_tool_r
     )
 
     approval_required = await execute_agent_run_tool_call(
-        request=None,
+        request=_service_request(),
         run_id='run-1',
         form_data=request,
         idempotency_key='tool:leader:call-1:1',
+        authorization='Bearer service-secret',
         authority=authority,
         approval_coordinator=coordinator,
     )
