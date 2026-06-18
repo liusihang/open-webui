@@ -577,8 +577,37 @@ async def _has_evidence_read_access(
 
 
 def _is_unsafe_image_mime_type(mime_type: str | None) -> bool:
-    normalized = (mime_type or '').strip().lower()
-    return normalized in {'image/svg', 'image/svg+xml', 'image/svg+xml;charset=utf-8'} or normalized.endswith('+xml')
+    return not _is_safe_inline_image_mime_type(mime_type)
+
+
+def _normalize_mime_type(mime_type: str | None) -> str:
+    return (mime_type or '').split(';', 1)[0].strip().lower()
+
+
+def _is_safe_inline_image_mime_type(mime_type: str | None) -> bool:
+    return _normalize_mime_type(mime_type) in {
+        'image/png',
+        'image/jpeg',
+        'image/gif',
+        'image/webp',
+        'image/avif',
+        'image/bmp',
+    }
+
+
+def _evidence_file_response_headers(mime_type: str | None) -> dict[str, str]:
+    headers = {'X-Content-Type-Options': 'nosniff'}
+    if not _is_safe_inline_image_mime_type(mime_type):
+        headers['Content-Disposition'] = 'attachment'
+    return headers
+
+
+def _evidence_file_response(file_path: Path, *, media_type: str | None) -> FileResponse:
+    return FileResponse(
+        file_path,
+        media_type=media_type,
+        headers=_evidence_file_response_headers(media_type),
+    )
 
 
 def _evidence_urls(knowledge_id: str, evidence_ref: str, modality: str) -> dict[str, str | None]:
@@ -720,7 +749,7 @@ async def get_knowledge_evidence_thumbnail_by_ref(
             detail=ERROR_MESSAGES.NOT_FOUND,
         )
 
-    return FileResponse(file_path, media_type=source.mime_type)
+    return _evidence_file_response(file_path, media_type=source.mime_type)
 
 
 @router.get('/{id}/evidence/{evidence_ref}/content')
@@ -733,7 +762,10 @@ async def get_knowledge_evidence_content_by_ref(
     _, evidence = await _resolve_knowledge_evidence_access(id, evidence_ref, user, db=db)
 
     if evidence.modality == 'text':
-        return PlainTextResponse(evidence.content_text or evidence.preview_text or '')
+        return PlainTextResponse(
+            evidence.content_text or evidence.preview_text or '',
+            headers={'X-Content-Type-Options': 'nosniff'},
+        )
 
     asset, variant = await _resolve_evidence_asset(evidence, db=db, prefer_thumbnail=False)
     source = asset or variant
@@ -751,7 +783,7 @@ async def get_knowledge_evidence_content_by_ref(
             detail=ERROR_MESSAGES.NOT_FOUND,
         )
 
-    return FileResponse(file_path, media_type=source.mime_type)
+    return _evidence_file_response(file_path, media_type=source.mime_type)
 
 
 ############################

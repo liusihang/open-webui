@@ -40,9 +40,22 @@ EVIDENCE_TOOL_ERROR_CODES = frozenset(
 _DEFAULT_TOP_K = 8
 _DEFAULT_IMAGE_QUERY_BUDGET = 4
 _DEFAULT_MODEL_IMAGE_BUDGET = 4
+_MODEL_IMAGE_SINGLE_BYTE_BUDGET = 5 * 1024 * 1024
+_MODEL_IMAGE_TOTAL_BYTE_BUDGET = 20 * 1024 * 1024
+_MODEL_IMAGE_PIXEL_BUDGET = 16_000_000
 _EVIDENCE_MODE_VALUES = {'evidence', 'evidence_dual_write', 'evidence_primary'}
 _TRUTHY = {'1', 'true', 'yes', 'on'}
 _FALSEY = {'0', 'false', 'no', 'off', ''}
+_SAFE_INLINE_IMAGE_MIME_TYPES = frozenset(
+    {
+        'image/png',
+        'image/jpeg',
+        'image/gif',
+        'image/webp',
+        'image/avif',
+        'image/bmp',
+    }
+)
 _ALLOWED_QUERY_IMAGE_REF_PREFIXES = (
     'chat:file:',
     'chat:image:',
@@ -203,6 +216,13 @@ class EvidenceToolError(RuntimeError):
         if query is not None:
             payload['query'] = query.to_payload()
         return payload
+
+
+@dataclass(slots=True)
+class ModelImageHydrationResult:
+    file: dict[str, Any] | None = None
+    skip: dict[str, Any] | None = None
+    byte_size: int = 0
 
 
 def has_evidence_enabled_knowledge_scope(scope_items: Iterable[Mapping[str, Any]] | None) -> bool:
@@ -529,6 +549,28 @@ def _is_missing_vector_space_schema_error(error: OperationalError) -> bool:
     return 'no such table' in message and 'knowledge_vector_space' in message
 
 
+def _normalize_mime_type(mime_type: str | None) -> str:
+    return (mime_type or '').split(';', 1)[0].strip().lower()
+
+
+def _is_safe_inline_image_mime_type(mime_type: str | None) -> bool:
+    return _normalize_mime_type(mime_type) in _SAFE_INLINE_IMAGE_MIME_TYPES
+
+
+def _model_image_budget_skip(reason: str, **details: Any) -> dict[str, Any]:
+    return {
+        'status': 'skipped',
+        'code': 'image_budget_exceeded',
+        'reason': reason,
+        **{key: value for key, value in details.items() if value is not None},
+    }
+
+
+def _read_file_bytes_with_limit(path: Path, byte_limit: int) -> bytes:
+    with path.open('rb') as file:
+        return file.read(max(0, byte_limit) + 1)
+
+
 def _serialize_evidence_result(
     evidence: KnowledgeEvidenceModel,
     *,
@@ -550,29 +592,90 @@ def _serialize_evidence_result(
     return result
 
 
-async def _read_model_image_data_url(evidence: KnowledgeEvidenceModel) -> dict[str, Any] | None:
+async def _read_model_image_data_url(
+    evidence: KnowledgeEvidenceModel,
+    *,
+    remaining_total_bytes: int,
+) -> ModelImageHydrationResult:
     if evidence.modality != 'image' or not evidence.asset_id:
-        return None
+        return ModelImageHydrationResult()
 
     asset = await KnowledgeEvidenceAssets.get_asset_by_id(evidence.asset_id)
     if asset is None or asset.status != 'ready':
-        return None
-    if not str(asset.mime_type or '').lower().startswith('image/'):
-        return None
+        return ModelImageHydrationResult()
+    if not _is_safe_inline_image_mime_type(asset.mime_type):
+        return ModelImageHydrationResult()
+
+    pixel_count = None
+    if asset.width and asset.height and asset.width > 0 and asset.height > 0:
+        pixel_count = asset.width * asset.height
+        if pixel_count > _MODEL_IMAGE_PIXEL_BUDGET:
+            return ModelImageHydrationResult(
+                skip=_model_image_budget_skip(
+                    'pixel_budget',
+                    pixel_count=pixel_count,
+                    pixel_budget=_MODEL_IMAGE_PIXEL_BUDGET,
+                    width=asset.width,
+                    height=asset.height,
+                )
+            )
 
     file_path = await asyncio.to_thread(Storage.get_file, asset.storage_uri)
-    data = await asyncio.to_thread(Path(file_path).read_bytes)
+    path = Path(file_path)
+    byte_size = (await asyncio.to_thread(path.stat)).st_size
+    if byte_size > _MODEL_IMAGE_SINGLE_BYTE_BUDGET:
+        return ModelImageHydrationResult(
+            skip=_model_image_budget_skip(
+                'single_byte_budget',
+                byte_size=byte_size,
+                byte_budget=_MODEL_IMAGE_SINGLE_BYTE_BUDGET,
+            )
+        )
+    if byte_size > remaining_total_bytes:
+        return ModelImageHydrationResult(
+            skip=_model_image_budget_skip(
+                'total_byte_budget',
+                byte_size=byte_size,
+                remaining_total_bytes=remaining_total_bytes,
+                total_byte_budget=_MODEL_IMAGE_TOTAL_BYTE_BUDGET,
+            )
+        )
+
+    read_limit = min(_MODEL_IMAGE_SINGLE_BYTE_BUDGET, remaining_total_bytes)
+    data = await asyncio.to_thread(_read_file_bytes_with_limit, path, read_limit)
+    actual_byte_size = len(data)
+    if actual_byte_size > _MODEL_IMAGE_SINGLE_BYTE_BUDGET:
+        return ModelImageHydrationResult(
+            skip=_model_image_budget_skip(
+                'single_byte_budget',
+                byte_size=actual_byte_size,
+                byte_budget=_MODEL_IMAGE_SINGLE_BYTE_BUDGET,
+            )
+        )
+    if actual_byte_size > remaining_total_bytes:
+        return ModelImageHydrationResult(
+            skip=_model_image_budget_skip(
+                'total_byte_budget',
+                byte_size=actual_byte_size,
+                remaining_total_bytes=remaining_total_bytes,
+                total_byte_budget=_MODEL_IMAGE_TOTAL_BYTE_BUDGET,
+            )
+        )
+
     data_url = f'{asset.mime_type};base64,{base64.b64encode(data).decode("ascii")}'
-    return {
-        'type': 'image',
-        'evidence_ref': evidence.evidence_ref,
-        'file_id': evidence.file_id,
-        'knowledge_id': evidence.knowledge_id,
-        'mime_type': asset.mime_type,
-        'width': asset.width,
-        'height': asset.height,
-        'url': f'data:{data_url}',
-    }
+    return ModelImageHydrationResult(
+        file={
+            'type': 'image',
+            'evidence_ref': evidence.evidence_ref,
+            'file_id': evidence.file_id,
+            'knowledge_id': evidence.knowledge_id,
+            'mime_type': asset.mime_type,
+            'width': asset.width,
+            'height': asset.height,
+            'url': f'data:{data_url}',
+        },
+        byte_size=actual_byte_size,
+    )
 
 
 async def _hydrate_evidence_results(
@@ -587,6 +690,7 @@ async def _hydrate_evidence_results(
     model_only_files: list[dict[str, Any]] = []
     missing_refs: list[str] = []
     seen_refs: set[str] = set()
+    model_image_bytes = 0
     modality_filter = {modality for modality in modalities or [] if modality in {'text', 'image'}}
 
     for hit in search_hits:
@@ -612,11 +716,18 @@ async def _hydrate_evidence_results(
         if modality_filter and evidence.modality not in modality_filter:
             continue
 
-        results.append(_serialize_evidence_result(evidence, score=score))
+        result = _serialize_evidence_result(evidence, score=score)
+        results.append(result)
         if include_images and len(model_only_files) < model_image_budget:
-            image_file = await _read_model_image_data_url(evidence)
-            if image_file is not None:
-                model_only_files.append(image_file)
+            hydration = await _read_model_image_data_url(
+                evidence,
+                remaining_total_bytes=max(0, _MODEL_IMAGE_TOTAL_BYTE_BUDGET - model_image_bytes),
+            )
+            if hydration.file is not None:
+                model_only_files.append(hydration.file)
+                model_image_bytes += hydration.byte_size
+            elif hydration.skip is not None:
+                result.setdefault('metadata', {})['model_image'] = hydration.skip
 
     return results, model_only_files, missing_refs
 
