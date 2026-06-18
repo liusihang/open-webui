@@ -1478,3 +1478,75 @@ Notes:
   legacy fallback; artifact outputs/tmp retention; and cancellation not killing
   Open Terminal processes.
 - Root `uv.lock` remains unstaged local verification churn.
+
+## W13-2 Product Tool Path Caveat Integration
+
+Date: 2026-06-18
+
+Worker:
+
+- Agent: `019ed8ac-5283-7331-b51f-576dca60ac0c` (Curie)
+- Worktree:
+  `/Users/liusihang/openwebui/.worktrees/agent-mode-w13-product-path-caveat`
+- Worker commit:
+  `9799d2717d08`
+
+Integrated audit commit:
+
+- `38ad8d6d6` docs(agent-mode): audit product tool path caveat
+
+Worker finding:
+
+- No-go for MVP release as-is. Product Agent Mode chat returned into
+  `_start_agent_mode_chat(...)` before `process_chat_payload(...)`, so the real
+  OpenWebUI/MCP/OpenAPI/Open Terminal product tool-loading path was bypassed.
+- W12D-2 proved tool authority mechanics only after an acceptance-only
+  in-memory registry was already present.
+
+Controller-owned blocker fix:
+
+- Agent Mode product chat now calls `process_chat_payload(...)` before creating
+  the Agent Run and starting the runtime.
+- The resolved product tools are converted with `build_tool_access_envelope`.
+- The envelope is written both to the runtime start payload and the
+  `agent_run.tool_access_snapshot`.
+- Tool callables are stored in `app.state.AGENT_TOOL_REGISTRIES[run_id]`, and
+  `get_agent_tool_authority(...)` now prefers the path `run_id` scoped registry
+  before falling back to the legacy global `AGENT_TOOL_REGISTRY` used by older
+  tests/harnesses.
+- If runtime start fails, the run-scoped registry is removed so failed runs do
+  not leave callable tools behind.
+
+TDD evidence:
+
+- Red:
+  `WEBUI_SECRET_KEY=test-secret ENABLE_DB_MIGRATIONS=false uv run pytest -q backend/open_webui/test/agent/test_chat_entry_agent_mode.py::test_agent_mode_product_chat_populates_tool_envelope_and_callback_registry`
+  failed because the runtime payload had no `tool_access_envelope["tools"]`.
+- Red, tightened run boundary:
+  the same test failed because only global `AGENT_TOOL_REGISTRY` existed, not
+  run-scoped `AGENT_TOOL_REGISTRIES[run.id]`.
+- Red, failure cleanup:
+  `WEBUI_SECRET_KEY=test-secret ENABLE_DB_MIGRATIONS=false uv run pytest -q backend/open_webui/test/agent/test_chat_entry_agent_mode.py::test_agent_mode_runtime_unavailable_removes_run_tool_registry`
+  failed because runtime start failure left the run registry behind.
+- Green:
+  `WEBUI_SECRET_KEY=test-secret ENABLE_DB_MIGRATIONS=false uv run pytest -q backend/open_webui/test/agent/test_chat_entry_agent_mode.py`
+  -> `9 passed`.
+- Tool/router focused:
+  `WEBUI_SECRET_KEY=test-secret ENABLE_DB_MIGRATIONS=false uv run pytest -q backend/open_webui/test/agent/test_tool_authority.py backend/open_webui/test/agent/test_agent_run_routes_db_store.py`
+  -> `14 passed`.
+- Combined focused earlier in the fix:
+  chat entry, tool authority, approval, and DB route subset -> `26 passed`.
+- Scoped ruff:
+  `uv run ruff check --select F backend/open_webui/routers/agent_service.py backend/open_webui/test/agent/test_chat_entry_agent_mode.py backend/open_webui/test/agent/test_tool_authority.py`
+  -> passed.
+- Diff-check for changed files -> passed.
+
+Notes:
+
+- Broad `ruff --select F backend/open_webui/main.py` remains noisy from
+  pre-existing duplicate imports and unused imports in `main.py`; it is not a
+  useful narrow gate for this fix.
+- `python3 -m py_compile` on the large `main.py` was killed once with exit 137,
+  but importing `open_webui.main` through the focused pytest path succeeded.
+- After this fix, W13-3 release gates and live harness must be rerun because the
+  W13-3 worker completed against the pre-fix `00481b7ab` baseline.

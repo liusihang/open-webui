@@ -113,12 +113,17 @@ def get_agent_model_authority(request: Request) -> AgentModelAuthority:
     return AgentModelAuthority(operation_store=get_agent_operation_store(request))
 
 
-def get_agent_tool_authority(request: Request) -> AgentToolAuthority:
+def get_agent_tool_authority(request: Request, run_id: str | None = None) -> AgentToolAuthority:
     authority = getattr(request.app.state, 'AGENT_TOOL_AUTHORITY', None)
     if authority is not None:
         return authority
 
-    registry = getattr(request.app.state, 'AGENT_TOOL_REGISTRY', None)
+    registry = None
+    registries = getattr(request.app.state, 'AGENT_TOOL_REGISTRIES', None)
+    if run_id and isinstance(registries, dict):
+        registry = registries.get(run_id)
+    if registry is None:
+        registry = getattr(request.app.state, 'AGENT_TOOL_REGISTRY', None)
     if registry is None:
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,

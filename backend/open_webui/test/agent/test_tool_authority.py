@@ -144,6 +144,49 @@ def test_tool_access_envelope_exposes_schema_and_opaque_ids_without_callables():
     assert registry['tool:terminal:main:read_file']['callable'] is read_file
 
 
+def test_service_tool_authority_prefers_run_scoped_registry():
+    async def scoped_tool():
+        return 'scoped'
+
+    async def global_tool():
+        return 'global'
+
+    _scoped_envelope, scoped_registry = build_tool_access_envelope(
+        {
+            'lookup_fact': {
+                'tool_id': 'builtin:lookup_fact',
+                'callable': scoped_tool,
+                'spec': {'name': 'lookup_fact'},
+                'type': 'builtin',
+            }
+        }
+    )
+    _global_envelope, global_registry = build_tool_access_envelope(
+        {
+            'lookup_fact': {
+                'tool_id': 'builtin:lookup_fact',
+                'callable': global_tool,
+                'spec': {'name': 'lookup_fact'},
+                'type': 'builtin',
+            }
+        }
+    )
+    request = SimpleNamespace(
+        app=SimpleNamespace(
+            state=SimpleNamespace(
+                AGENT_EVENT_STORE=FakeOperationStore(),
+                AGENT_TOOL_REGISTRIES={'run-1': scoped_registry},
+                AGENT_TOOL_REGISTRY=global_registry,
+            )
+        )
+    )
+
+    authority = get_agent_tool_authority(request, run_id='run-1')
+
+    tool_id = 'tool:builtin:lookup_fact:lookup_fact'
+    assert authority.registry[tool_id]['callable'] is scoped_tool
+
+
 def test_normalize_tool_result_extracts_terminal_process_refs():
     result = normalize_tool_result(
         {

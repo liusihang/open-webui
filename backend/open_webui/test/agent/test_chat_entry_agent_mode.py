@@ -48,7 +48,7 @@ async def agent_run_db(monkeypatch):
 
 @pytest.fixture
 def chat_entry_patches(monkeypatch):
-    calls = SimpleNamespace(provider_calls=[], runtime_calls=[], upserts=[])
+    calls = SimpleNamespace(provider_calls=[], runtime_calls=[], upserts=[], process_payload_calls=[])
     _patch_model_and_chat_boundaries(monkeypatch, calls)
     _patch_legacy_chat_pipeline(monkeypatch, calls)
     _patch_runtime_client(monkeypatch, calls)
@@ -79,6 +79,13 @@ def _patch_model_and_chat_boundaries(monkeypatch, calls):
 
 def _patch_legacy_chat_pipeline(monkeypatch, calls):
     async def fake_process_payload(request, form_data, user, metadata, model):
+        calls.process_payload_calls.append(
+            {
+                'form_data': dict(form_data),
+                'metadata': dict(metadata),
+                'model': model,
+            }
+        )
         return form_data, metadata, []
 
     async def fake_provider_handler(request, form_data, user):
@@ -187,6 +194,61 @@ async def test_agent_mode_enabled_creates_run_links_message_and_starts_runtime(
 
 
 @pytest.mark.asyncio
+async def test_agent_mode_product_chat_populates_tool_envelope_and_callback_registry(
+    monkeypatch,
+    agent_run_db,
+    chat_entry_patches,
+):
+    async def fake_tool(query: str):
+        return {'answer': query}
+
+    async def fake_process_payload(request, form_data, user, metadata, model):
+        metadata['tools'] = {
+            'lookup_fact': {
+                'tool_id': 'builtin:lookup_fact',
+                'callable': fake_tool,
+                'spec': {
+                    'name': 'lookup_fact',
+                    'parameters': {
+                        'type': 'object',
+                        'properties': {'query': {'type': 'string'}},
+                    },
+                },
+                'type': 'builtin',
+            }
+        }
+        return form_data, metadata, []
+
+    monkeypatch.setattr(main, 'process_chat_payload', fake_process_payload)
+    request = _request(enable_agent_mode=True)
+
+    response = await main.chat_completion(request, _chat_form(), _user())
+
+    runs = await AgentRuns.list_runs_by_chat('chat-1', 'user-1')
+    run = runs[0]
+    runtime_payload = chat_entry_patches.runtime_calls[0]
+    envelope_tools = runtime_payload['tool_access_envelope']['tools']
+    assert response['agent_run_id'] == run.id
+    assert envelope_tools == [
+        {
+            'id': 'tool:builtin:lookup_fact:lookup_fact',
+            'name': 'lookup_fact',
+            'type': 'builtin',
+            'schema': {
+                'name': 'lookup_fact',
+                'parameters': {
+                    'type': 'object',
+                    'properties': {'query': {'type': 'string'}},
+                },
+            },
+        }
+    ]
+    assert run.tool_access_snapshot == runtime_payload['tool_access_envelope']
+    registry = request.app.state.AGENT_TOOL_REGISTRIES[run.id]
+    assert registry['tool:builtin:lookup_fact:lookup_fact']['callable'] is fake_tool
+
+
+@pytest.mark.asyncio
 async def test_agent_mode_runtime_unavailable_marks_run_failed_and_visible(
     monkeypatch,
     agent_run_db,
@@ -235,6 +297,43 @@ async def test_agent_mode_runtime_unavailable_marks_run_failed_and_visible(
         and message.get('error', {}).get('content') == 'agent runtime unavailable'
         for _chat_id, message_id, message in chat_entry_patches.upserts
     )
+
+
+@pytest.mark.asyncio
+async def test_agent_mode_runtime_unavailable_removes_run_tool_registry(
+    monkeypatch,
+    agent_run_db,
+    chat_entry_patches,
+):
+    async def fake_tool(query: str):
+        return {'answer': query}
+
+    async def fake_process_payload(request, form_data, user, metadata, model):
+        metadata['tools'] = {
+            'lookup_fact': {
+                'tool_id': 'builtin:lookup_fact',
+                'callable': fake_tool,
+                'spec': {'name': 'lookup_fact'},
+                'type': 'builtin',
+            }
+        }
+        return form_data, metadata, []
+
+    class UnavailableRuntimeClient:
+        def __init__(self, base_url, service_token=None, timeout=None):
+            pass
+
+        async def start_run(self, payload):
+            raise main.AgentRuntimeUnavailable('agent runtime unavailable')
+
+    monkeypatch.setattr(main, 'process_chat_payload', fake_process_payload)
+    monkeypatch.setattr(main, 'AgentRuntimeClient', UnavailableRuntimeClient, raising=False)
+    request = _request(enable_agent_mode=True)
+
+    response = await main.chat_completion(request, _chat_form(), _user())
+
+    assert response['status'] is False
+    assert request.app.state.AGENT_TOOL_REGISTRIES == {}
 
 
 @pytest.mark.asyncio

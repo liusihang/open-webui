@@ -1074,6 +1074,7 @@ from open_webui.agent.runtime_client import (
     AgentRuntimeUnavailable,
 )
 from open_webui.agent.protocol import AgentEventType
+from open_webui.agent.tool_authority import build_tool_access_envelope
 
 from open_webui.utils.models import (
     get_all_models,
@@ -2285,6 +2286,7 @@ def _agent_runtime_payload(
     user,
     leader_model_id: str,
     budget: dict,
+    tool_access_envelope: dict,
 ) -> dict:
     model_meta = {}
     model = metadata.get('model')
@@ -2307,7 +2309,7 @@ def _agent_runtime_payload(
             'outputs': f'/workspace/agent-runs/{run.id}/outputs',
             'tmp': f'/workspace/agent-runs/{run.id}/tmp',
         },
-        'tool_access_envelope': {},
+        'tool_access_envelope': tool_access_envelope,
         'model_catalog': [
             {
                 'id': leader_model_id,
@@ -2358,6 +2360,7 @@ async def _start_agent_mode_chat(
     user,
     metadata: dict,
     message_ids: dict,
+    model: dict,
 ) -> dict:
     assistant_message_id = _first_assistant_message_id(message_ids)
     if not assistant_message_id:
@@ -2366,9 +2369,13 @@ async def _start_agent_mode_chat(
             detail='Agent Mode requires an assistant message id',
         )
 
-    leader_model_id = form_data.get('model') or next(iter(message_ids.keys()))
     metadata['message_id'] = assistant_message_id
     metadata['assistant_message_id'] = assistant_message_id
+
+    form_data, metadata, _events = await process_chat_payload(request, form_data, user, metadata, model)
+    tool_access_envelope, tool_registry = build_tool_access_envelope(metadata.get('tools') or {})
+
+    leader_model_id = form_data.get('model') or next(iter(message_ids.keys()))
 
     budget = _agent_run_budget(request.app.state.config)
     run = await AgentRuns.create_run(
@@ -2385,9 +2392,10 @@ async def _start_agent_mode_chat(
                 'model_id': leader_model_id,
             }
         ],
-        tool_access_snapshot={},
+        tool_access_snapshot=tool_access_envelope,
         model_catalog_snapshot={'leader_model_id': leader_model_id},
     )
+    _install_agent_tool_registry(request, run.id, tool_registry)
     await _link_agent_run_to_assistant_message(metadata, agent_run_id=run.id)
 
     client = AgentRuntimeClient(
@@ -2402,11 +2410,13 @@ async def _start_agent_mode_chat(
         user=user,
         leader_model_id=leader_model_id,
         budget=budget,
+        tool_access_envelope=tool_access_envelope,
     )
 
     try:
         runtime_response = await client.start_run(payload)
     except (AgentRuntimeUnavailable, AgentRuntimeError) as exc:
+        _remove_agent_tool_registry(request, run.id)
         error = {
             'code': getattr(exc, 'code', 'agent_runtime_error'),
             'message': str(exc),
@@ -2449,6 +2459,24 @@ async def _start_agent_mode_chat(
         'runtime_session_id': runtime_session_id,
         'task_ids': [],
     }
+
+
+def _install_agent_tool_registry(request: Request, run_id: str, registry: dict) -> None:
+    if not registry:
+        return
+
+    registries = getattr(request.app.state, 'AGENT_TOOL_REGISTRIES', None)
+    if registries is None:
+        registries = {}
+        request.app.state.AGENT_TOOL_REGISTRIES = registries
+
+    registries[run_id] = dict(registry)
+
+
+def _remove_agent_tool_registry(request: Request, run_id: str) -> None:
+    registries = getattr(request.app.state, 'AGENT_TOOL_REGISTRIES', None)
+    if isinstance(registries, dict):
+        registries.pop(run_id, None)
 
 
 @app.post('/api/chat/completions')
@@ -2819,7 +2847,7 @@ async def chat_completion(
         form_data['metadata'] = metadata
 
         if _is_agent_mode_product_chat(request, metadata, message_ids):
-            return await _start_agent_mode_chat(request, form_data, user, metadata, message_ids)
+            return await _start_agent_mode_chat(request, form_data, user, metadata, message_ids, model)
 
     except HTTPException:
         raise
