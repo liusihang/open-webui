@@ -727,3 +727,51 @@ Remaining W12C work:
   `final.delta` event append are separate DB transactions. This is acceptable
   for the current unblock because the runtime serializes final deltas, but it
   remains a future hardening item if callbacks become concurrent.
+
+## W12C-4 Regression Checkpoint
+
+Date: 2026-06-18
+
+Commits since W12B evidence integration:
+
+- `ba897885d` fix(agent-mode): use db-backed agent run events
+- `f8f6afc38` fix(agent-mode): harden service callback idempotency
+
+Verification:
+
+- Backend agent/storage gate:
+  `WEBUI_SECRET_KEY=test-secret ENABLE_DB_MIGRATIONS=false uv run pytest -q backend/open_webui/test/agent backend/open_webui/test/models/test_agent_runs.py`
+  -> `90 passed`.
+- Focused frontend Vitest:
+  `npm run test:frontend -- --run src/lib/apis/agentRuns/index.test.ts src/lib/components/chat/AgentEvents/eventFold.test.ts src/lib/components/chat/historySync.test.ts`
+  -> `3 files / 24 tests passed`.
+- AgentScope runtime service-local gate:
+  `cd services/agentscope-runtime && uv run --extra test pytest -q`
+  -> `20 passed`.
+- W12 harness dry-run:
+  `python3 scripts/agent_mode/acceptance_harness.py dry-run`
+  -> passed, live pending.
+- W12 harness fixture:
+  `python3 scripts/agent_mode/acceptance_harness.py fixture`
+  -> passed, fixture contract `12/12`, live pending.
+- Diff hygiene:
+  `git diff --check 2183a6697c672c60d0137b64d57eca7fdad0b5e6..HEAD`
+  -> passed.
+
+Note:
+
+- The documented command using `origin/pr/7..HEAD` could not run because this
+  worktree no longer has an `origin/pr/7` remote ref. The equivalent PR7 base
+  commit `2183a6697c672c60d0137b64d57eca7fdad0b5e6` exists locally and was used
+  for diff-check.
+- Current unstaged state after the gates is root `uv.lock` churn only. It is
+  not staged and should remain excluded unless a root dependency change is
+  intentionally owned.
+
+Next controller action:
+
+1. Commit this W12C-4 handoff update.
+2. Run W12C-3 live service harness/evidence capture against the integrated
+   backend and AgentScope runtime.
+3. If W12C-3 no longer hits the prior payload/router/storage blockers, dispatch
+   W12D final scenario acceptance workers.
