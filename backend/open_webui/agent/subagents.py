@@ -5,6 +5,7 @@ from collections.abc import Mapping
 from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field
+from sqlalchemy import select, text
 
 from open_webui.agent.model_catalog import (
     AgentModelCatalog,
@@ -119,6 +120,87 @@ class AgentRunSubagentStore:
             await db.refresh(row)
             return AgentRunModel.model_validate(row)
 
+    async def register_subagent_atomically(
+        self,
+        registration: SubagentRegisterRequest,
+        *,
+        default_max_subagents: int,
+    ) -> dict[str, Any]:
+        async with get_async_db_context(None) as db:
+            bind = db.get_bind()
+            dialect_name = bind.dialect.name if bind is not None else ''
+            if dialect_name == 'sqlite':
+                await db.execute(text('BEGIN IMMEDIATE'))
+
+            stmt = select(AgentRun).where(AgentRun.id == registration.run_id)
+            if dialect_name != 'sqlite':
+                stmt = stmt.with_for_update()
+
+            result = await db.execute(stmt)
+            row = result.scalars().first()
+            if row is None:
+                raise SubagentRunRejected(f'Agent run not found: {registration.run_id}')
+            if row.state != AgentRunState.RUNNING.value:
+                raise SubagentRunRejected(
+                    f'Agent run {registration.run_id} cannot manage subagents while {row.state}'
+                )
+
+            run = AgentRunModel.model_validate(row)
+            participants = _participants(run)
+            max_subagents = _team_budget_value(
+                _budget(run),
+                'max_subagents',
+                default_max_subagents,
+            )
+            current_subagents = _subagent_count(participants)
+            for participant in participants:
+                if participant.get('id') == registration.participant_id:
+                    return {
+                        'status': 'accepted',
+                        'participant_id': registration.participant_id,
+                        'team_cap': max_subagents,
+                        'remaining_slots': max(max_subagents - current_subagents, 0),
+                        'warnings': [],
+                    }
+
+            if current_subagents >= max_subagents:
+                raise SubagentCapExceeded(
+                    f'Agent run already has {current_subagents} subagents; '
+                    f'default cap of {max_subagents} would be exceeded'
+                )
+
+            budget = _budget(run)
+            subagent_budget, budget = _allocate_subagent_budget(
+                budget,
+                registration.budget,
+                default_max_subagents,
+            )
+            participants.append(
+                {
+                    'id': registration.participant_id,
+                    'parent_id': registration.parent_participant_id,
+                    'type': 'subagent',
+                    'role': registration.name,
+                    'description': registration.description,
+                    'state': AgentRunState.RUNNING.value,
+                    'task': registration.task,
+                    'budget': subagent_budget,
+                    'metadata': dict(registration.metadata),
+                }
+            )
+            row.participants = participants
+            row.budget = budget
+            row.updated_at = int(time.time_ns())
+            await db.commit()
+
+            return {
+                'status': 'accepted',
+                'participant_id': registration.participant_id,
+                'team_cap': max_subagents,
+                'remaining_slots': max(max_subagents - current_subagents - 1, 0),
+                'warnings': [],
+            }
+
 
 class AgentSubagentCoordinator:
     def __init__(
@@ -137,6 +219,13 @@ class AgentSubagentCoordinator:
         request,
         registration: SubagentRegisterRequest,
     ) -> dict[str, Any]:
+        atomic_register = getattr(self.store, 'register_subagent_atomically', None)
+        if atomic_register is not None:
+            return await atomic_register(
+                registration,
+                default_max_subagents=self.default_max_subagents,
+            )
+
         del request
         run = await self._running_run(registration.run_id)
         participants = _participants(run)
@@ -415,41 +504,11 @@ class AgentSubagentCoordinator:
         budget: dict[str, Any],
         requested_budget: Mapping[str, Any],
     ) -> tuple[dict[str, int], dict[str, Any]]:
-        team = dict(budget.get('team') or {})
-        team_max_steps = _optional_int(team.get('max_steps'))
-        team_used_steps = _optional_int(team.get('used_steps'), default=0) or 0
-        if team_max_steps is not None:
-            remaining_team_steps = max(team_max_steps - team_used_steps, 0)
-            if remaining_team_steps <= 0:
-                raise SubagentBudgetExceeded(
-                    'Cannot create subagent because aggregate team budget is exhausted'
-                )
-        else:
-            remaining_team_steps = None
-
-        default_budget = dict(budget.get('subagent_default') or {})
-        requested_steps = _optional_int(requested_budget.get('max_steps'))
-        default_steps = _optional_int(default_budget.get('max_steps'), default=1) or 1
-        desired_steps = requested_steps if requested_steps is not None else default_steps
-        if desired_steps <= 0:
-            raise SubagentBudgetExceeded('Subagent budget must be greater than zero')
-
-        allocated_steps = desired_steps
-        if remaining_team_steps is not None:
-            allocated_steps = min(desired_steps, remaining_team_steps)
-
-        subagent_budget = {
-            'max_steps': allocated_steps,
-            'used_steps': 0,
-            'remaining_steps': allocated_steps,
-        }
-        team['used_steps'] = team_used_steps + allocated_steps
-        if team_max_steps is not None:
-            team['remaining_steps'] = max(team_max_steps - team['used_steps'], 0)
-        if 'max_subagents' not in team:
-            team['max_subagents'] = self.default_max_subagents
-        budget = {**budget, 'team': team}
-        return subagent_budget, budget
+        return _allocate_subagent_budget(
+            budget,
+            requested_budget,
+            self.default_max_subagents,
+        )
 
 
 def _participants(run) -> list[dict[str, Any]]:
@@ -462,6 +521,48 @@ def _subagent_count(participants: list[dict[str, Any]]) -> int:
 
 def _budget(run) -> dict[str, Any]:
     return dict(getattr(run, 'budget', None) or {})
+
+
+def _allocate_subagent_budget(
+    budget: dict[str, Any],
+    requested_budget: Mapping[str, Any],
+    default_max_subagents: int,
+) -> tuple[dict[str, int], dict[str, Any]]:
+    team = dict(budget.get('team') or {})
+    team_max_steps = _optional_int(team.get('max_steps'))
+    team_used_steps = _optional_int(team.get('used_steps'), default=0) or 0
+    if team_max_steps is not None:
+        remaining_team_steps = max(team_max_steps - team_used_steps, 0)
+        if remaining_team_steps <= 0:
+            raise SubagentBudgetExceeded(
+                'Cannot create subagent because aggregate team budget is exhausted'
+            )
+    else:
+        remaining_team_steps = None
+
+    default_budget = dict(budget.get('subagent_default') or {})
+    requested_steps = _optional_int(requested_budget.get('max_steps'))
+    default_steps = _optional_int(default_budget.get('max_steps'), default=1) or 1
+    desired_steps = requested_steps if requested_steps is not None else default_steps
+    if desired_steps <= 0:
+        raise SubagentBudgetExceeded('Subagent budget must be greater than zero')
+
+    allocated_steps = desired_steps
+    if remaining_team_steps is not None:
+        allocated_steps = min(desired_steps, remaining_team_steps)
+
+    subagent_budget = {
+        'max_steps': allocated_steps,
+        'used_steps': 0,
+        'remaining_steps': allocated_steps,
+    }
+    team['used_steps'] = team_used_steps + allocated_steps
+    if team_max_steps is not None:
+        team['remaining_steps'] = max(team_max_steps - team['used_steps'], 0)
+    if 'max_subagents' not in team:
+        team['max_subagents'] = default_max_subagents
+    budget = {**budget, 'team': team}
+    return subagent_budget, budget
 
 
 def _team_budget_value(

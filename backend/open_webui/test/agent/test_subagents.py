@@ -1,5 +1,8 @@
+import asyncio
 import os
+from contextlib import asynccontextmanager
 from types import SimpleNamespace
+from unittest.mock import patch
 
 os.environ.setdefault('WEBUI_SECRET_KEY', 'test-secret')
 os.environ.setdefault('ENABLE_DB_MIGRATIONS', 'false')
@@ -14,14 +17,32 @@ from open_webui.agent.model_catalog import (
 from open_webui.agent.protocol import AgentEventType, AgentRunState
 from open_webui.agent.subagents import (
     AgentSubagentCoordinator,
+    AgentRunSubagentStore,
     SubagentBudgetExceeded,
     SubagentCapExceeded,
     SubagentCreateRequest,
     SubagentFailureRequest,
     SubagentModelSelectionRequest,
+    SubagentRegisterRequest,
+)
+from open_webui.internal.db import Base
+from open_webui.models.agent_runs import (
+    AgentArtifact,
+    AgentRun,
+    AgentRunEvent,
+    AgentRunOperation,
+    AgentRunTable,
 )
 from open_webui.routers import agent_service
 from open_webui.routers.agent_service import execute_agent_run_model_selection
+from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
+
+AGENT_RUN_TABLES = [
+    AgentRun.__table__,
+    AgentRunEvent.__table__,
+    AgentArtifact.__table__,
+    AgentRunOperation.__table__,
+]
 
 
 @pytest.mark.asyncio
@@ -177,6 +198,91 @@ async def test_more_than_five_subagents_is_rejected_by_default():
         'subagent-3',
         'subagent-4',
     ]
+
+
+@pytest.mark.asyncio
+async def test_db_backed_subagent_registration_preserves_concurrent_participants(tmp_path):
+    db_path = tmp_path / 'agent-runs.db'
+    engine = create_async_engine(f'sqlite+aiosqlite:///{db_path}')
+    async with engine.begin() as conn:
+        await conn.run_sync(
+            lambda sync_conn: Base.metadata.create_all(
+                sync_conn,
+                tables=AGENT_RUN_TABLES,
+            )
+        )
+
+    session_factory = async_sessionmaker(engine, expire_on_commit=False)
+
+    @asynccontextmanager
+    async def session_context(db=None):
+        if db is not None:
+            yield db
+            return
+
+        async with session_factory() as session:
+            yield session
+
+    table = AgentRunTable()
+    try:
+        with (
+            patch('open_webui.models.agent_runs.get_async_db_context', session_context),
+            patch('open_webui.agent.subagents.get_async_db_context', session_context),
+        ):
+            run = await table.create_run(
+                user_id='user-1',
+                chat_id='chat-1',
+                user_message_id='msg-user',
+                assistant_message_id='msg-assistant',
+                leader_model_id='agent-general',
+                participants=[{'id': 'leader', 'type': 'leader', 'state': 'running'}],
+                budget={'team': {'max_subagents': 5, 'max_steps': 20, 'used_steps': 0}},
+            )
+            await table.transition_state(
+                run.id,
+                from_states=['queued'],
+                to_state='running',
+                reason='runtime accepted',
+            )
+            coordinator = AgentSubagentCoordinator(
+                store=AgentRunSubagentStore(run_store=table)
+            )
+
+            async def register(index: int):
+                return await coordinator.register_subagent(
+                    _request(),
+                    SubagentRegisterRequest(
+                        run_id=run.id,
+                        parent_participant_id='leader',
+                        participant_id=f'subagent-{index}',
+                        name=f'worker-{index}',
+                        task=f'Handle shard {index}',
+                        budget={'max_steps': 2},
+                        idempotency_key=f'subagent:{run.id}:subagent-{index}:create',
+                    ),
+                )
+
+            responses = await asyncio.gather(*(register(index) for index in range(5)))
+
+            assert [response['status'] for response in responses] == ['accepted'] * 5
+            updated = await table.get_run(run.id)
+            subagent_ids = [
+                participant['id']
+                for participant in updated.participants
+                if participant.get('type') == 'subagent'
+            ]
+            assert sorted(subagent_ids) == [f'subagent-{index}' for index in range(5)]
+            assert updated.budget['team'] == {
+                'max_subagents': 5,
+                'max_steps': 20,
+                'used_steps': 10,
+                'remaining_steps': 10,
+            }
+
+            with pytest.raises(SubagentCapExceeded, match='default cap of 5'):
+                await register(5)
+    finally:
+        await engine.dispose()
 
 
 @pytest.mark.asyncio

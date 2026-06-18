@@ -1,3 +1,4 @@
+import asyncio
 import os
 from contextlib import asynccontextmanager
 from unittest.mock import patch
@@ -374,6 +375,66 @@ async def test_append_event_assigns_run_local_monotonic_sequence(agent_db):
     events = await table.list_events(run.id, after_seq=0)
     assert [event.seq for event in events] == [1, 2]
     assert [event.event_type for event in events] == ['run.queued', 'action.summary']
+
+
+@pytest.mark.asyncio
+async def test_append_event_handles_concurrent_writers(tmp_path):
+    # File-backed SQLite gives concurrent sessions independent connections.
+    db_path = tmp_path / 'agent-runs.db'
+    engine = create_async_engine(f'sqlite+aiosqlite:///{db_path}')
+    async with engine.begin() as conn:
+        await conn.run_sync(
+            lambda sync_conn: Base.metadata.create_all(
+                sync_conn,
+                tables=AGENT_RUN_TABLES,
+            )
+        )
+
+    session_factory = async_sessionmaker(engine, expire_on_commit=False)
+
+    @asynccontextmanager
+    async def session_context(db=None):
+        if db is not None:
+            yield db
+            return
+
+        async with session_factory() as session:
+            yield session
+
+    table = AgentRunTable()
+    try:
+        with patch('open_webui.models.agent_runs.get_async_db_context', session_context):
+            run = await table.create_run(
+                user_id='user-1',
+                chat_id='chat-1',
+                user_message_id='msg-user',
+                assistant_message_id='msg-assistant',
+                leader_model_id='model-a',
+            )
+            await table.append_event(
+                run.id,
+                event_type='run.running',
+                participant_id='leader',
+                phase='running',
+                summary='Runtime accepted',
+            )
+
+            async def append(index: int):
+                return await table.append_event(
+                    run.id,
+                    event_type='model.selection.requested',
+                    participant_id=f'subagent-{index}',
+                    phase='running',
+                    summary=f'Selecting model for subagent-{index}',
+                )
+
+            appended = await asyncio.gather(*(append(index) for index in range(10)))
+
+            assert sorted(event.seq for event in appended) == list(range(2, 12))
+            events = await table.list_events(run.id, after_seq=0)
+            assert [event.seq for event in events] == list(range(1, 12))
+    finally:
+        await engine.dispose()
 
 
 @pytest.mark.asyncio

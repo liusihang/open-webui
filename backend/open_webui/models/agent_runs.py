@@ -10,6 +10,7 @@ from open_webui.agent.compaction import build_compacted_run_summary
 from open_webui.internal.db import Base, get_async_db_context
 from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy import JSON, BigInteger, Column, Index, Integer, Text, UniqueConstraint, select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 
@@ -49,6 +50,8 @@ LEGAL_TRANSITIONS: set[tuple[AgentRunState, AgentRunState]] = {
     (AgentRunState.FINALIZING, AgentRunState.CANCELLED),
     (AgentRunState.FINALIZING, AgentRunState.BUDGET_EXCEEDED),
 }
+
+EVENT_APPEND_MAX_ATTEMPTS = 10
 
 
 class AgentRunError(ValueError):
@@ -438,29 +441,42 @@ class AgentRunTable:
         payload: dict[str, Any] | None = None,
         db: AsyncSession | None = None,
     ) -> AgentRunEventModel:
-        async with get_async_db_context(db) as db:
-            if await db.get(AgentRun, run_id) is None:
-                raise AgentRunNotFound(run_id)
-            result = await db.execute(
-                select(AgentRunEvent.seq).filter_by(run_id=run_id).order_by(AgentRunEvent.seq.desc()).limit(1)
-            )
-            next_seq = (result.scalar() or 0) + 1
-            now = _now_ns()
-            row = AgentRunEvent(
-                id=str(uuid4()),
-                run_id=run_id,
-                seq=next_seq,
-                event_type=event_type,
-                participant_id=participant_id,
-                phase=phase,
-                summary=summary,
-                payload=payload or {},
-                created_at=now,
-            )
-            db.add(row)
-            await db.commit()
-            await db.refresh(row)
-            return AgentRunEventModel.model_validate(row)
+        last_integrity_error: IntegrityError | None = None
+        for _attempt in range(EVENT_APPEND_MAX_ATTEMPTS):
+            async with get_async_db_context(db) as db:
+                if await db.get(AgentRun, run_id) is None:
+                    raise AgentRunNotFound(run_id)
+                result = await db.execute(
+                    select(AgentRunEvent.seq).filter_by(run_id=run_id).order_by(AgentRunEvent.seq.desc()).limit(1)
+                )
+                next_seq = (result.scalar() or 0) + 1
+                now = _now_ns()
+                event = AgentRunEventModel(
+                    id=str(uuid4()),
+                    run_id=run_id,
+                    seq=next_seq,
+                    event_type=event_type,
+                    participant_id=participant_id,
+                    phase=phase,
+                    summary=summary,
+                    payload=payload or {},
+                    created_at=now,
+                )
+                row = AgentRunEvent(
+                    **event.model_dump(),
+                )
+                db.add(row)
+                try:
+                    await db.commit()
+                except IntegrityError as exc:
+                    await db.rollback()
+                    last_integrity_error = exc
+                    continue
+                return event
+
+        if last_integrity_error is not None:
+            raise last_integrity_error
+        raise AgentRunError(f'Failed to append event for agent run {run_id}')
 
     async def list_events(
         self,
