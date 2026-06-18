@@ -26,6 +26,7 @@ from open_webui.models.evidence import (
 from open_webui.models.files import FileModel, Files
 from open_webui.storage.provider import Storage
 from open_webui.retrieval.vector.main import VectorItem
+from open_webui.utils.access_control.files import has_access_to_file
 
 _MODALITIES = {"text", "image"}
 _VECTOR_ROLES = {
@@ -82,6 +83,12 @@ class ResolvedQueryImageInput:
             "image_bytes": self.image_bytes,
             **({"filename": self.filename} if self.filename else {}),
         }
+
+
+@dataclass(slots=True)
+class _QueryImageAccessUser:
+    id: str
+    role: str = "user"
 
 
 @dataclass(slots=True)
@@ -435,7 +442,28 @@ def _sniff_image_mime(image_bytes: bytes) -> str | None:
     return None
 
 
-async def resolve_query_image_ref_for_embedding(ref: str) -> ResolvedQueryImageInput:
+def _get_user_value(user: Mapping[str, Any] | Any | None, key: str, default: Any = None) -> Any:
+    if user is None:
+        return default
+    if isinstance(user, Mapping):
+        return user.get(key, default)
+    return getattr(user, key, default)
+
+
+def _query_image_ref_unavailable_error(ref: str) -> MultimodalVectorSpaceError:
+    return MultimodalVectorSpaceError(
+        "unsupported_image_query",
+        "query image ref is not available",
+        details={"ref": ref},
+    )
+
+
+async def authorize_query_image_ref_for_embedding(
+    ref: str,
+    *,
+    user: Mapping[str, Any] | Any | None = None,
+    db: AsyncSession | None = None,
+) -> FileModel:
     if not ref.startswith("chat:file:"):
         raise MultimodalVectorSpaceError(
             "unsupported_image_query",
@@ -451,13 +479,75 @@ async def resolve_query_image_ref_for_embedding(ref: str) -> ResolvedQueryImageI
             details={"ref": ref},
         )
 
-    file = await Files.get_file_by_id(file_id)
+    file = await Files.get_file_by_id(file_id, db=db)
     if file is None:
+        raise _query_image_ref_unavailable_error(ref)
+
+    user_id = _get_user_value(user, "id")
+    user_role = str(_get_user_value(user, "role", "user") or "user").lower()
+    if not user_id:
+        raise _query_image_ref_unavailable_error(ref)
+    if file.user_id == user_id or user_role == "admin":
+        return file
+
+    has_read_access = await has_access_to_file(
+        file_id=file.id,
+        access_type="read",
+        user=_QueryImageAccessUser(id=str(user_id), role=user_role),
+        db=db,
+    )
+    if not has_read_access:
+        raise _query_image_ref_unavailable_error(ref)
+
+    return file
+
+
+def _query_image_payload_field(payload: Any, key: str) -> Any:
+    if isinstance(payload, ResolvedQueryImageInput):
+        return getattr(payload, key)
+    if isinstance(payload, Mapping):
+        return payload.get(key)
+    return None
+
+
+def _validate_custom_query_image_payloads(
+    resolved: Sequence[Any],
+    *,
+    authorized_files: Mapping[str, FileModel],
+) -> None:
+    expected_refs = set(authorized_files)
+    returned_refs: set[str] = set()
+    for payload in resolved:
+        ref = _query_image_payload_field(payload, "ref")
+        file_id = _query_image_payload_field(payload, "file_id")
+        if not isinstance(ref, str) or ref not in authorized_files:
+            raise MultimodalVectorSpaceError(
+                "unsupported_image_query",
+                "custom query image resolver returned an unauthorized image ref",
+            )
+        if file_id != authorized_files[ref].id:
+            raise MultimodalVectorSpaceError(
+                "unsupported_image_query",
+                "custom query image resolver returned an unauthorized file id",
+            )
+        returned_refs.add(ref)
+
+    if returned_refs != expected_refs:
         raise MultimodalVectorSpaceError(
             "unsupported_image_query",
-            "query image file was not found",
-            details={"ref": ref, "file_id": file_id},
+            "custom query image resolver did not resolve every authorized query image ref",
         )
+
+
+async def resolve_query_image_ref_for_embedding(
+    ref: str,
+    *,
+    user: Mapping[str, Any] | Any | None = None,
+    db: AsyncSession | None = None,
+    authorized_file: FileModel | None = None,
+) -> ResolvedQueryImageInput:
+    file = authorized_file or await authorize_query_image_ref_for_embedding(ref, user=user, db=db)
+    file_id = file.id
     if not file.path:
         raise MultimodalVectorSpaceError(
             "unsupported_image_query",
@@ -497,6 +587,8 @@ async def resolve_query_images_for_embedding(
     query_image_refs: Sequence[str] | None,
     *,
     request: Any | None = None,
+    user: Mapping[str, Any] | Any | None = None,
+    db: AsyncSession | None = None,
 ) -> list[ResolvedQueryImageInput | Mapping[str, Any]]:
     refs = [str(ref).strip() for ref in query_image_refs or [] if str(ref).strip()]
     if not refs:
@@ -507,17 +599,22 @@ async def resolve_query_images_for_embedding(
         state = getattr(getattr(request, "app", None), "state", None)
         resolver = getattr(state, "EVIDENCE_QUERY_IMAGE_RESOLVER", None) if state is not None else None
     if callable(resolver):
+        authorized_files = {
+            ref: await authorize_query_image_ref_for_embedding(ref, user=user, db=db)
+            for ref in refs
+        }
         resolved = await _await_maybe(resolver(refs=refs, request=request))
         if not isinstance(resolved, Sequence) or isinstance(resolved, (str, bytes)):
             raise MultimodalVectorSpaceError(
                 "unsupported_image_query",
                 "custom query image resolver returned an invalid payload",
             )
+        _validate_custom_query_image_payloads(resolved, authorized_files=authorized_files)
         return list(resolved)
 
     resolved_images = []
     for ref in refs:
-        resolved_images.append(await resolve_query_image_ref_for_embedding(ref))
+        resolved_images.append(await resolve_query_image_ref_for_embedding(ref, user=user, db=db))
     return resolved_images
 
 
@@ -1092,7 +1189,13 @@ async def search_multimodal_evidence(
     query_text = getattr(query, "query_text", None)
     visual_query = getattr(query, "visual_query", None)
     query_images = (
-        await resolve_query_images_for_embedding(query_image_refs, request=request) if query_has_images else []
+        await resolve_query_images_for_embedding(
+            query_image_refs,
+            request=request,
+            user=user,
+        )
+        if query_has_images
+        else []
     )
 
     for vector_space in vector_spaces:

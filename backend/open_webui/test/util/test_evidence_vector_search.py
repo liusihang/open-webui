@@ -671,7 +671,7 @@ async def test_search_multimodal_evidence_text_query_can_be_visual_query_when_im
 
 
 @pytest.mark.asyncio
-async def test_search_multimodal_evidence_mixed_query_dedupes_after_branch_fusion():
+async def test_search_multimodal_evidence_mixed_query_dedupes_after_branch_fusion(monkeypatch):
     vector_space = types.SimpleNamespace(
         id="vs-1",
         knowledge_id="kb-1",
@@ -701,6 +701,23 @@ async def test_search_multimodal_evidence_mixed_query_dedupes_after_branch_fusio
                 ],
                 filter,
             )
+
+    query_file = multimodal_mod.FileModel(
+        id="query-image",
+        user_id="user-1",
+        hash="query-image-hash",
+        filename="query.png",
+        path="/tmp/query.png",
+        data={"status": "completed"},
+        meta={"content_type": "image/png", "name": "query.png"},
+        created_at=1,
+        updated_at=1,
+    )
+
+    async def fake_get_file_by_id(file_id, db=None):
+        return query_file if file_id == "query-image" else None
+
+    monkeypatch.setattr(multimodal_mod.Files, "get_file_by_id", fake_get_file_by_id)
 
     async def fake_embedding(query, prefix=None, user=None):
         if query == "find the figure and fold":
@@ -1358,7 +1375,7 @@ async def test_search_multimodal_evidence_reranker_uses_image_asset_metadata(tmp
 
 
 @pytest.mark.asyncio
-async def test_search_multimodal_evidence_skips_reranker_for_image_only_queries():
+async def test_search_multimodal_evidence_skips_reranker_for_image_only_queries(monkeypatch):
     vector_space = types.SimpleNamespace(
         id="vs-1",
         knowledge_id="kb-1",
@@ -1382,6 +1399,23 @@ async def test_search_multimodal_evidence_skips_reranker_for_image_only_queries(
                 [("vec-text-1", {"evidence_ref": "ke:text:1", "modality": "text"}, 0.20)],
                 filter,
             )
+
+    query_file = multimodal_mod.FileModel(
+        id="query-image",
+        user_id="user-1",
+        hash="query-image-hash",
+        filename="query.png",
+        path="/tmp/query.png",
+        data={"status": "completed"},
+        meta={"content_type": "image/png", "name": "query.png"},
+        created_at=1,
+        updated_at=1,
+    )
+
+    async def fake_get_file_by_id(file_id, db=None):
+        return query_file if file_id == "query-image" else None
+
+    monkeypatch.setattr(multimodal_mod.Files, "get_file_by_id", fake_get_file_by_id)
 
     reranker_called = False
 
@@ -1523,6 +1557,304 @@ async def test_search_multimodal_evidence_fails_closed_when_query_image_ref_cann
             )
 
         assert exc_info.value.code == "unsupported_image_query"
+
+
+@pytest.mark.asyncio
+async def test_search_multimodal_evidence_denies_query_image_ref_without_file_acl_before_storage_read(
+    tmp_path, monkeypatch
+):
+    query_image_path = tmp_path / "query.png"
+    query_image_path.write_bytes(b"\x89PNG\r\n\x1a\nquery-image")
+
+    query_file = multimodal_mod.FileModel(
+        id="query-image",
+        user_id="owner-user",
+        hash="query-image-hash",
+        filename="query.png",
+        path=str(query_image_path),
+        data={"status": "completed"},
+        meta={"content_type": "image/png", "name": "query.png"},
+        created_at=1,
+        updated_at=1,
+    )
+
+    async def fake_get_file_by_id(file_id, db=None):
+        return query_file if file_id == "query-image" else None
+
+    async def fake_has_access_to_file(file_id, access_type, user, db=None):
+        return False
+
+    def forbidden_storage_read(storage_uri):
+        raise AssertionError("unauthorized query image ref reached storage")
+
+    monkeypatch.setattr(multimodal_mod.Files, "get_file_by_id", fake_get_file_by_id)
+    monkeypatch.setattr(multimodal_mod, "has_access_to_file", fake_has_access_to_file, raising=False)
+    monkeypatch.setattr(multimodal_mod.Storage, "get_file", forbidden_storage_read)
+
+    vector_space = types.SimpleNamespace(
+        id="vs-1",
+        knowledge_id="kb-1",
+        retrieval_profile="unified_multimodal_dense",
+        embedding_model="fake-multimodal-embed",
+        supports_text_query=True,
+        supports_image_query=True,
+        supports_text_evidence=True,
+        supports_image_evidence=True,
+    )
+    query = normalize_query_knowledge_evidence_args(
+        query_image_refs=["chat:file:query-image"],
+        knowledge_ids=["kb-1"],
+        count=4,
+    )
+
+    with pytest.raises(MultimodalVectorSpaceError) as exc_info:
+        await search_multimodal_evidence(
+            query=query,
+            vector_spaces=[vector_space],
+            embedding_function=lambda *_args, **_kwargs: [0.0, 1.0, 0.0],
+            vector_client=_FakeVectorClient(),
+            user={"id": "other-user", "role": "user"},
+            request=None,
+        )
+
+    assert exc_info.value.code == "unsupported_image_query"
+
+
+@pytest.mark.asyncio
+async def test_query_image_ref_missing_and_unauthorized_use_same_error_shape(tmp_path, monkeypatch):
+    query_image_path = tmp_path / "query.png"
+    query_image_path.write_bytes(b"\x89PNG\r\n\x1a\nquery-image")
+    query_file = multimodal_mod.FileModel(
+        id="query-image",
+        user_id="owner-user",
+        hash="query-image-hash",
+        filename="query.png",
+        path=str(query_image_path),
+        data={"status": "completed"},
+        meta={"content_type": "image/png", "name": "query.png"},
+        created_at=1,
+        updated_at=1,
+    )
+
+    async def fake_has_access_to_file(file_id, access_type, user, db=None):
+        return False
+
+    monkeypatch.setattr(multimodal_mod, "has_access_to_file", fake_has_access_to_file, raising=False)
+    monkeypatch.setattr(multimodal_mod.Storage, "get_file", lambda storage_uri: storage_uri)
+
+    async def resolve_with_file(file):
+        async def fake_get_file_by_id(file_id, db=None):
+            return file
+
+        monkeypatch.setattr(multimodal_mod.Files, "get_file_by_id", fake_get_file_by_id)
+        with pytest.raises(MultimodalVectorSpaceError) as exc_info:
+            await multimodal_mod.resolve_query_image_ref_for_embedding(
+                "chat:file:query-image",
+                user={"id": "other-user", "role": "user"},
+            )
+        return exc_info.value
+
+    missing_error = await resolve_with_file(None)
+    unauthorized_error = await resolve_with_file(query_file)
+
+    assert unauthorized_error.code == missing_error.code == "unsupported_image_query"
+    assert unauthorized_error.message == missing_error.message
+    assert set(unauthorized_error.details) == set(missing_error.details)
+
+
+@pytest.mark.asyncio
+async def test_search_multimodal_evidence_allows_query_image_ref_with_granted_file_acl(tmp_path, monkeypatch):
+    query_image_path = tmp_path / "query.png"
+    query_image_bytes = b"\x89PNG\r\n\x1a\nquery-image"
+    query_image_path.write_bytes(query_image_bytes)
+    query_file = multimodal_mod.FileModel(
+        id="query-image",
+        user_id="owner-user",
+        hash="query-image-hash",
+        filename="query.png",
+        path=str(query_image_path),
+        data={"status": "completed"},
+        meta={"content_type": "image/png", "name": "query.png"},
+        created_at=1,
+        updated_at=1,
+    )
+    access_calls = []
+
+    async def fake_get_file_by_id(file_id, db=None):
+        return query_file if file_id == "query-image" else None
+
+    async def fake_has_access_to_file(file_id, access_type, user, db=None):
+        access_calls.append((file_id, access_type, user.id))
+        return True
+
+    monkeypatch.setattr(multimodal_mod.Files, "get_file_by_id", fake_get_file_by_id)
+    monkeypatch.setattr(multimodal_mod, "has_access_to_file", fake_has_access_to_file, raising=False)
+    monkeypatch.setattr(multimodal_mod.Storage, "get_file", lambda storage_uri: storage_uri)
+
+    vector_space = types.SimpleNamespace(
+        id="vs-1",
+        knowledge_id="kb-1",
+        retrieval_profile="unified_multimodal_dense",
+        embedding_model="fake-multimodal-embed",
+        supports_text_query=True,
+        supports_image_query=True,
+        supports_text_evidence=True,
+        supports_image_evidence=True,
+    )
+
+    async def fake_embedding(query, prefix=None, user=None):
+        assert isinstance(query, dict)
+        assert query["query_images"][0]["image_bytes"] == query_image_bytes
+        return [0.0, 1.0, 0.0]
+
+    query = normalize_query_knowledge_evidence_args(
+        query_image_refs=["chat:file:query-image"],
+        knowledge_ids=["kb-1"],
+        count=4,
+    )
+    hits = await search_multimodal_evidence(
+        query=query,
+        vector_spaces=[vector_space],
+        embedding_function=fake_embedding,
+        vector_client=_FakeVectorClient(),
+        user={"id": "shared-user", "role": "user"},
+        request=None,
+    )
+
+    assert access_calls == [("query-image", "read", "shared-user")]
+    assert [hit["evidence_ref"] for hit in hits] == ["ke:kb-1:file-img:standalone_image:1:img"]
+
+
+@pytest.mark.asyncio
+async def test_search_multimodal_evidence_allows_query_image_ref_for_admin_without_grant(tmp_path, monkeypatch):
+    query_image_path = tmp_path / "query.png"
+    query_image_bytes = b"\x89PNG\r\n\x1a\nquery-image"
+    query_image_path.write_bytes(query_image_bytes)
+    query_file = multimodal_mod.FileModel(
+        id="query-image",
+        user_id="owner-user",
+        hash="query-image-hash",
+        filename="query.png",
+        path=str(query_image_path),
+        data={"status": "completed"},
+        meta={"content_type": "image/png", "name": "query.png"},
+        created_at=1,
+        updated_at=1,
+    )
+
+    async def fake_get_file_by_id(file_id, db=None):
+        return query_file if file_id == "query-image" else None
+
+    async def unexpected_has_access_to_file(file_id, access_type, user, db=None):
+        raise AssertionError("admin query image ref should not need shared file grant")
+
+    monkeypatch.setattr(multimodal_mod.Files, "get_file_by_id", fake_get_file_by_id)
+    monkeypatch.setattr(multimodal_mod, "has_access_to_file", unexpected_has_access_to_file, raising=False)
+    monkeypatch.setattr(multimodal_mod.Storage, "get_file", lambda storage_uri: storage_uri)
+
+    vector_space = types.SimpleNamespace(
+        id="vs-1",
+        knowledge_id="kb-1",
+        retrieval_profile="unified_multimodal_dense",
+        embedding_model="fake-multimodal-embed",
+        supports_text_query=True,
+        supports_image_query=True,
+        supports_text_evidence=True,
+        supports_image_evidence=True,
+    )
+
+    async def fake_embedding(query, prefix=None, user=None):
+        assert isinstance(query, dict)
+        assert query["query_images"][0]["image_bytes"] == query_image_bytes
+        return [0.0, 1.0, 0.0]
+
+    query = normalize_query_knowledge_evidence_args(
+        query_image_refs=["chat:file:query-image"],
+        knowledge_ids=["kb-1"],
+        count=4,
+    )
+    hits = await search_multimodal_evidence(
+        query=query,
+        vector_spaces=[vector_space],
+        embedding_function=fake_embedding,
+        vector_client=_FakeVectorClient(),
+        user={"id": "admin-user", "role": "admin"},
+        request=None,
+    )
+
+    assert [hit["evidence_ref"] for hit in hits] == ["ke:kb-1:file-img:standalone_image:1:img"]
+
+
+@pytest.mark.asyncio
+async def test_custom_query_image_resolver_cannot_bypass_baseline_file_acl(tmp_path, monkeypatch):
+    query_image_path = tmp_path / "query.png"
+    query_image_path.write_bytes(b"\x89PNG\r\n\x1a\nquery-image")
+    query_file = multimodal_mod.FileModel(
+        id="query-image",
+        user_id="owner-user",
+        hash="query-image-hash",
+        filename="query.png",
+        path=str(query_image_path),
+        data={"status": "completed"},
+        meta={"content_type": "image/png", "name": "query.png"},
+        created_at=1,
+        updated_at=1,
+    )
+    resolver_calls = []
+
+    async def fake_get_file_by_id(file_id, db=None):
+        return query_file if file_id == "query-image" else None
+
+    async def fake_has_access_to_file(file_id, access_type, user, db=None):
+        return False
+
+    async def custom_resolver(refs, request=None):
+        resolver_calls.append(list(refs))
+        return [
+            {
+                "ref": refs[0],
+                "file_id": "query-image",
+                "mime_type": "image/png",
+                "image_bytes": b"bypass",
+            }
+        ]
+
+    monkeypatch.setattr(multimodal_mod.Files, "get_file_by_id", fake_get_file_by_id)
+    monkeypatch.setattr(multimodal_mod, "has_access_to_file", fake_has_access_to_file, raising=False)
+    monkeypatch.setattr(
+        multimodal_mod.Storage,
+        "get_file",
+        lambda storage_uri: (_ for _ in ()).throw(AssertionError("unauthorized query image ref reached storage")),
+    )
+
+    vector_space = types.SimpleNamespace(
+        id="vs-1",
+        knowledge_id="kb-1",
+        retrieval_profile="unified_multimodal_dense",
+        embedding_model="fake-multimodal-embed",
+        supports_text_query=True,
+        supports_image_query=True,
+        supports_text_evidence=True,
+        supports_image_evidence=True,
+    )
+    query = normalize_query_knowledge_evidence_args(
+        query_image_refs=["chat:file:query-image"],
+        knowledge_ids=["kb-1"],
+        count=4,
+    )
+
+    with pytest.raises(MultimodalVectorSpaceError) as exc_info:
+        await search_multimodal_evidence(
+            query=query,
+            vector_spaces=[vector_space],
+            embedding_function=lambda *_args, **_kwargs: [0.0, 1.0, 0.0],
+            vector_client=_FakeVectorClient(),
+            user={"id": "other-user", "role": "user"},
+            request=_FakeRequest(EVIDENCE_QUERY_IMAGE_RESOLVER=custom_resolver),
+        )
+
+    assert exc_info.value.code == "unsupported_image_query"
+    assert resolver_calls == []
 
 
 @pytest.mark.asyncio
