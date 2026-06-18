@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import os
 import secrets
 import time
 from dataclasses import dataclass, field
@@ -194,6 +195,25 @@ def create_app(
         return _status(session)
 
     return app
+
+
+def create_app_from_env() -> FastAPI:
+    service_token = os.getenv("AGENT_RUNTIME_SERVICE_TOKEN", "").strip()
+    if not service_token:
+        raise RuntimeError("AGENT_RUNTIME_SERVICE_TOKEN is required")
+
+    auto_finalize = os.getenv("AGENT_RUNTIME_AUTO_FINALIZE_ORDINARY_QA", "true").lower() not in {
+        "0",
+        "false",
+        "no",
+        "off",
+    }
+    return create_app(
+        service_token=service_token,
+        openwebui_base_url=os.getenv("OPENWEBUI_BASE_URL") or "http://127.0.0.1:8080",
+        openwebui_service_token=os.getenv("OPENWEBUI_SERVICE_TOKEN") or service_token,
+        auto_finalize_ordinary_qa=auto_finalize,
+    )
 
 
 def _status(session: RuntimeSession) -> RunStatusResponse:

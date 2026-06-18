@@ -3,7 +3,7 @@ import asyncio
 import httpx
 import pytest
 
-from agentscope_runtime.app import RuntimeStore, create_app
+from agentscope_runtime.app import RuntimeStore, create_app, create_app_from_env
 
 
 SERVICE_TOKEN = "runtime-secret"
@@ -137,6 +137,29 @@ async def test_health_does_not_require_auth() -> None:
 
         assert response.status_code == 200
         assert response.json() == {"status": "ok"}
+
+
+@pytest.mark.asyncio
+async def test_create_app_from_env_uses_operator_runtime_configuration(monkeypatch) -> None:
+    monkeypatch.setenv("AGENT_RUNTIME_SERVICE_TOKEN", "env-token")
+    monkeypatch.setenv("OPENWEBUI_BASE_URL", "https://openwebui.internal")
+    monkeypatch.setenv("OPENWEBUI_SERVICE_TOKEN", "callback-token")
+    monkeypatch.setenv("AGENT_RUNTIME_AUTO_FINALIZE_ORDINARY_QA", "false")
+
+    app = create_app_from_env()
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app),
+        base_url="http://runtime.test",
+    ) as client:
+        health = await client.get("/health")
+        unauthorized = await client.post(
+            "/v1/openwebui/runs",
+            headers={"Authorization": "Bearer wrong"},
+            json={"run_id": "run-env", "chat_id": "chat-1", "messages": []},
+        )
+
+    assert health.status_code == 200
+    assert unauthorized.status_code == 401
 
 
 @pytest.mark.asyncio

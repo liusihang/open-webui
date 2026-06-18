@@ -1426,3 +1426,55 @@ Controller rules while workers run:
   and rerun W13-3 plus the live harness before packaging.
 - Keep root `uv.lock` churn out of commits unless dependency work is explicitly
   approved.
+
+## W13-4 Deployment Docs Integration
+
+Date: 2026-06-18
+
+Worker:
+
+- Agent: `019ed8ac-d4e4-7e91-87e3-d2eeb6060c0d` (Boyle)
+- Worktree:
+  `/Users/liusihang/openwebui/.worktrees/agent-mode-w13-deployment-docs`
+- Worker commit:
+  `c13e50b6ba67c8db6a3540fe93081f5563aabe12`
+
+Integrated commit:
+
+- `499aeb911` docs: audit agent mode deployment readiness
+
+Worker finding:
+
+- No-go for release docs because `services/agentscope-runtime/README.md` was
+  absent and operators could not start or health-check the runtime topology
+  from checked-in docs.
+
+Controller-owned narrow fix:
+
+- Added `services/agentscope-runtime/README.md`.
+- Added `agentscope_runtime.app.create_app_from_env()` so the README can use a
+  real `uvicorn ... --factory` command backed by environment variables.
+- Added a focused runtime test covering the env-driven app factory.
+
+Verification:
+
+- Red:
+  `cd services/agentscope-runtime && uv run --extra test pytest -q tests/test_app.py -k create_app_from_env`
+  failed because `create_app_from_env` did not exist.
+- Green:
+  same command -> `1 passed, 8 deselected`.
+- Runtime app tests:
+  `cd services/agentscope-runtime && uv run --extra test pytest -q tests/test_app.py`
+  -> `9 passed`.
+- Scoped ruff:
+  `uv run ruff check --select F services/agentscope-runtime/agentscope_runtime/app.py services/agentscope-runtime/tests/test_app.py`
+  -> passed.
+- Diff-check for changed files -> passed.
+
+Notes:
+
+- The README documents OpenWebUI/backend, AgentScope runtime, and Open
+  Terminal topology; required env vars; startup order; health checks; no silent
+  legacy fallback; artifact outputs/tmp retention; and cancellation not killing
+  Open Terminal processes.
+- Root `uv.lock` remains unstaged local verification churn.
