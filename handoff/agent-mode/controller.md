@@ -1093,3 +1093,80 @@ Notes:
 - Do not use system `/usr/local/bin/python3` for the harness in this worktree.
   Python 3.13.7 hung while importing `argparse -> shutil -> lzma`. Use
   `uv run --frozen python ...` or the project virtualenv instead.
+
+## W12D-1 Integration Checkpoint
+
+Date: 2026-06-18
+
+Worker:
+
+- Agent: `019ed87e-693e-7410-98b9-d6c6841f7edd` (Euclid)
+- Worktree:
+  `/Users/liusihang/openwebui/.worktrees/agent-mode-w12d-runtime-chat`
+- Worker commit:
+  `c82e4319fce1f13f674e3a3335763becbab82d89`
+
+Integrated commit:
+
+- `e7cf1d264` fix(agent-mode): prove w12d runtime chat finalization
+
+Files integrated:
+
+- `backend/open_webui/agent/model_authority.py`
+- `backend/open_webui/agent/protocol.py`
+- `backend/open_webui/routers/agent_service.py`
+- `backend/open_webui/test/agent/test_agent_run_routes_db_store.py`
+- `backend/open_webui/test/agent/test_model_authority.py`
+- `services/agentscope-runtime/agentscope_runtime/app.py`
+- `services/agentscope-runtime/agentscope_runtime/openwebui_client.py`
+- `services/agentscope-runtime/agentscope_runtime/schemas.py`
+- `services/agentscope-runtime/tests/test_app.py`
+- `services/agentscope-runtime/tests/test_openwebui_client.py`
+- `handoff/agent-mode/w12d-runtime-chat.md`
+- `handoff/agent-mode/w12d-runtime-chat-evidence.json`
+
+Implementation summary:
+
+- Added service `state-transition` callback and `AgentStateTransitionAppend`.
+- Completion state transition writes `agent_run.final_text` back to the
+  assistant chat message with `done=true`.
+- Runtime ordinary-Q&A path now calls OpenWebUI model authority, transitions
+  `running -> finalizing -> completed`, appends `final.started`,
+  `final.delta`, and `run.completed`.
+- Internal model authority now mirrors product chat provider-model access
+  bypass for admins/global bypass so provider catalog models do not fail with
+  `model_not_allowed: Model not found`.
+
+Live evidence summary:
+
+- Scenarios covered: 1, 9, and 12.
+- Ordinary Q&A/finalization run:
+  `ff800529-1725-450e-b24c-b6e06eb5b749`.
+- Runtime-unavailable failure run:
+  `310055d5-c926-4f2f-9611-c82a84b15c2c`.
+- Service URLs used by the worker, now stopped:
+  - backend `http://127.0.0.1:18101`;
+  - AgentScope runtime `http://127.0.0.1:8111`;
+  - fake OpenAI provider `http://127.0.0.1:18109/v1`.
+
+Controller verification after cherry-pick:
+
+- `WEBUI_SECRET_KEY=test-secret ENABLE_DB_MIGRATIONS=false uv run pytest -q backend/open_webui/test/agent/test_agent_run_routes_db_store.py backend/open_webui/test/agent/test_events.py backend/open_webui/test/agent/test_chat_entry_agent_mode.py backend/open_webui/test/agent/test_model_authority.py`
+  -> `41 passed, 9 warnings`.
+- `cd services/agentscope-runtime && uv run --extra test pytest -q tests/test_app.py tests/test_openwebui_client.py`
+  -> `16 passed`.
+- `uv run ruff check --select F backend/open_webui/agent/protocol.py backend/open_webui/agent/model_authority.py backend/open_webui/routers/agent_service.py backend/open_webui/test/agent/test_agent_run_routes_db_store.py backend/open_webui/test/agent/test_model_authority.py services/agentscope-runtime/agentscope_runtime/app.py services/agentscope-runtime/agentscope_runtime/openwebui_client.py services/agentscope-runtime/agentscope_runtime/schemas.py services/agentscope-runtime/tests/test_app.py services/agentscope-runtime/tests/test_openwebui_client.py`
+  -> passed.
+- Diff-check from W12C-3 base for W12D-1 changed files -> passed.
+- Inline W12D-1 evidence subset check -> scenarios 1, 9, and 12 all
+  `live_passed` / `passed`.
+- `uv run --frozen python scripts/agent_mode/acceptance_harness.py live --evidence handoff/agent-mode/w12d-runtime-chat-evidence.json`
+  intentionally exits non-zero because this is subset evidence only; output
+  confirmed `case contract: 3/12 satisfied` and missing scenarios from other
+  W12D lanes.
+
+Notes:
+
+- This is a real product/runtime fix, not evidence-only.
+- The acceptance harness text still says `W12B` in its messages. That wording is
+  stale, but the case validation logic is still the authority for W12 evidence.
