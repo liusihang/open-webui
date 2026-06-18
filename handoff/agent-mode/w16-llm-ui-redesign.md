@@ -486,3 +486,61 @@ Verification evidence:
 - Broad `npm run check` was not used as the W16 gate because W15 already
   documented existing repo-wide Svelte/type debt; this pass used scoped compile,
   lint, formatting, and focused behavioral tests.
+
+## W17 Terminology Cleanup Checkpoint
+
+Status as of 2026-06-18:
+
+- [x] User feedback received:
+      the W16 UI introduced too many terms that ordinary users may not
+      understand.
+- [x] Audit visible labels and metadata for jargon such as `Model`, `Subagent`,
+      `Call`, `Artifact`, `Final answer`, and implementation-flavored metadata.
+- [x] Replace labels with user-facing action/result language while keeping the
+      render model semantics unchanged.
+- [x] Keep technical identifiers available only where they help debugging, not
+      in the primary scan path.
+- [x] Run focused render model tests, touched Svelte compile, ESLint, Prettier,
+      and `git diff --check`, then commit.
+
+Changes made:
+
+- Header title changed from `Agent Run` to `Assistant task`.
+- Header count text changed from `events` to `updates`.
+- Top chips changed:
+  `Tools -> Actions`, `Approvals -> Reviews`, `Artifacts -> Files`,
+  `Subagents -> Helpers`, `Model -> Setup`, `Final -> Answer`.
+- Row labels changed:
+  `Tool -> Action`, `Approval -> Review`, `Artifact -> File`,
+  `Subagent -> Helper`, `Model -> Setup`, `Step -> Progress`,
+  `Run -> Status`.
+- Run/stream labels changed:
+  `Queued -> Waiting`, `Running -> Working`, `Needs approval -> Needs review`,
+  `Finalizing -> Answering`, `Budget exceeded -> Limit reached`,
+  `Live -> Updating now`, `Reconnecting -> Connection retrying`,
+  `Stream error -> Connection issue`.
+- Tool names are humanized in the render model, for example
+  `query_knowledge -> Query Knowledge`.
+- Primary metadata no longer shows debug-style fields such as `Call`,
+  `Status`, `Phase`, approval status, provider, model, or process ids.
+- Detail section labels changed from `Input/Output/Error/Debug` toward
+  `Request/Result/Problem/More details`.
+
+Verification evidence:
+
+- Focused frontend:
+  `PATH="$HOME/.nvm/versions/node/v22.22.0/bin:$PATH" npm run test:frontend -- --run src/lib/components/chat/AgentEvents/eventFold.test.ts src/lib/components/chat/AgentEvents/renderModel.test.ts src/lib/apis/agentRuns/index.test.ts src/lib/components/chat/historySync.test.ts`
+  -> `4 passed`, `35 tests passed`.
+- Touched Svelte compile:
+  `AgentRunEvents.svelte`, `AgentRunHeader.svelte`, `AgentRunTimeline.svelte`,
+  `AgentRunEventItem.svelte`, `AgentToolPanel.svelte`,
+  `AgentApprovalPanel.svelte`, `AgentArtifactCard.svelte`,
+  `AgentSubagentPanel.svelte`, `AgentFinalAnswer.svelte`,
+  `AgentDetailSection.svelte` -> `warnings=0`.
+- Touched-file ESLint:
+  `npx eslint` over all touched AgentEvents Svelte/TS/test files -> passed.
+- Formatting:
+  `npx prettier --check` over touched files -> passed. Prettier still emits the
+  existing `pluginSearchDirs` warning.
+- Whitespace:
+  `git diff --check` -> passed.

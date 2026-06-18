@@ -8,7 +8,7 @@
 		group.status === 'waiting'
 			? 'border-amber-200 bg-amber-50/70 text-amber-900 dark:border-amber-800/60 dark:bg-amber-950/20 dark:text-amber-100'
 			: 'border-gray-200 bg-gray-50/80 text-gray-700 dark:border-gray-800 dark:bg-gray-900/40 dark:text-gray-200';
-	$: label = group.status === 'waiting' ? 'Waiting for approval' : 'Approval recorded';
+	$: label = group.status === 'waiting' ? 'Waiting for your review' : 'Review recorded';
 </script>
 
 <div class="space-y-3">

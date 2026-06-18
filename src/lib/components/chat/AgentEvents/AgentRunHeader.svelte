@@ -16,28 +16,28 @@
 		switch (status) {
 			case 'queued':
 				return {
-					label: 'Queued',
+					label: 'Waiting',
 					description: 'Waiting to start',
 					className:
 						'border-gray-200 bg-gray-50 text-gray-700 dark:border-gray-800 dark:bg-gray-900/50 dark:text-gray-200'
 				};
 			case 'running':
 				return {
-					label: 'Running',
+					label: 'Working',
 					description: 'Working through the task',
 					className:
 						'border-amber-300/70 bg-amber-50/80 text-amber-900 dark:border-amber-700/60 dark:bg-amber-950/30 dark:text-amber-100'
 				};
 			case 'waiting_approval':
 				return {
-					label: 'Needs approval',
+					label: 'Needs review',
 					description: 'Waiting for a user decision',
 					className:
 						'border-blue-300/70 bg-blue-50/80 text-blue-900 dark:border-blue-700/60 dark:bg-blue-950/30 dark:text-blue-100'
 				};
 			case 'finalizing':
 				return {
-					label: 'Finalizing',
+					label: 'Answering',
 					description: 'Writing the final answer',
 					className:
 						'border-indigo-300/70 bg-indigo-50/80 text-indigo-900 dark:border-indigo-700/60 dark:bg-indigo-950/30 dark:text-indigo-100'
@@ -45,28 +45,28 @@
 			case 'completed':
 				return {
 					label: 'Completed',
-					description: 'Run finished',
+					description: 'Task finished',
 					className:
 						'border-green-300/70 bg-green-50/80 text-green-900 dark:border-green-800/60 dark:bg-green-950/30 dark:text-green-100'
 				};
 			case 'failed':
 				return {
 					label: 'Failed',
-					description: 'Run stopped with an error',
+					description: 'Task stopped with an error',
 					className:
 						'border-red-300/70 bg-red-50/80 text-red-800 dark:border-red-800/60 dark:bg-red-950/30 dark:text-red-100'
 				};
 			case 'cancelled':
 				return {
 					label: 'Cancelled',
-					description: 'Run was cancelled',
+					description: 'Task was cancelled',
 					className:
 						'border-gray-300 bg-gray-100 text-gray-700 dark:border-gray-700 dark:bg-gray-800 dark:text-gray-200'
 				};
 			case 'budget_exceeded':
 				return {
-					label: 'Budget exceeded',
-					description: 'Run stopped at its budget limit',
+					label: 'Limit reached',
+					description: 'Task stopped at its budget limit',
 					className:
 						'border-red-300/70 bg-red-50/80 text-red-800 dark:border-red-800/60 dark:bg-red-950/30 dark:text-red-100'
 				};
@@ -76,13 +76,13 @@
 	const streamLabel = (status: AgentRunRenderModel['transportStatus']) => {
 		switch (status) {
 			case 'loading':
-				return 'Loading events';
+				return 'Loading updates';
 			case 'live':
-				return 'Live';
+				return 'Updating now';
 			case 'reconnecting':
-				return 'Reconnecting';
+				return 'Connection retrying';
 			case 'error':
-				return 'Stream error';
+				return 'Connection issue';
 		}
 	};
 
@@ -121,12 +121,12 @@
 	};
 
 	const countLabels: Array<{ category: AgentRunEventCategory; label: string }> = [
-		{ category: 'tool', label: 'Tools' },
-		{ category: 'approval', label: 'Approvals' },
-		{ category: 'artifact', label: 'Artifacts' },
-		{ category: 'subagent', label: 'Subagents' },
-		{ category: 'model', label: 'Model' },
-		{ category: 'final', label: 'Final' }
+		{ category: 'tool', label: 'Actions' },
+		{ category: 'approval', label: 'Reviews' },
+		{ category: 'artifact', label: 'Files' },
+		{ category: 'subagent', label: 'Helpers' },
+		{ category: 'model', label: 'Setup' },
+		{ category: 'final', label: 'Answer' }
 	];
 
 	$: statusMeta = runStatusMeta(model.runStatus);
@@ -152,7 +152,7 @@
 
 			<div class="min-w-0">
 				<div class="flex items-center gap-2">
-					<div class="font-medium text-gray-900 dark:text-gray-100">Agent Run</div>
+					<div class="font-medium text-gray-900 dark:text-gray-100">Assistant task</div>
 					<Tooltip content={statusMeta.description}>
 						<div
 							class="rounded-full border px-2 py-0.5 text-[11px] font-medium {statusMeta.className}"
@@ -175,7 +175,7 @@
 		{#if eventCount > 0}
 			<div class="text-xs text-gray-500 dark:text-gray-400">
 				{eventCount}
-				{eventCount === 1 ? 'event' : 'events'}
+				{eventCount === 1 ? 'update' : 'updates'}
 			</div>
 		{/if}
 	</div>

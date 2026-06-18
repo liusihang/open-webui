@@ -60,19 +60,19 @@
 	const kindLabel = (group: AgentRunRenderGroup) => {
 		switch (group.kind) {
 			case 'tool':
-				return 'Tool';
+				return 'Action';
 			case 'approval':
-				return 'Approval';
+				return 'Review';
 			case 'artifact':
-				return 'Artifact';
+				return 'File';
 			case 'subagent':
-				return 'Subagent';
+				return 'Helper';
 			case 'model':
-				return 'Model';
+				return 'Setup';
 			case 'step':
-				return 'Step';
+				return 'Progress';
 			case 'run':
-				return 'Run';
+				return 'Status';
 			case 'fallback':
 			default:
 				return 'Update';

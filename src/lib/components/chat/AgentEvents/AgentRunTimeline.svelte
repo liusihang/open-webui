@@ -12,10 +12,10 @@
 </script>
 
 {#if groups.length > 0}
-	<div class="flex flex-col" aria-label="Agent run events">
+	<div class="flex flex-col" aria-label="Assistant task updates">
 		{#if artifacts.length > 0}
 			<div class="border-b border-gray-100 px-3 py-2.5 dark:border-gray-800/80">
-				<div class="mb-1.5 text-[11px] font-medium text-gray-500 dark:text-gray-400">Artifacts</div>
+				<div class="mb-1.5 text-[11px] font-medium text-gray-500 dark:text-gray-400">Files</div>
 				<div class="grid gap-2 sm:grid-cols-2">
 					{#each artifacts as artifact (artifact.id)}
 						<AgentArtifactCard {artifact} />
@@ -33,7 +33,5 @@
 		{/each}
 	</div>
 {:else}
-	<div class="px-3 py-3 text-xs text-gray-500 dark:text-gray-400">
-		Waiting for Agent Run events.
-	</div>
+	<div class="px-3 py-3 text-xs text-gray-500 dark:text-gray-400">Waiting for task updates.</div>
 {/if}

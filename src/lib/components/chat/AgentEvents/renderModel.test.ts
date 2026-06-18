@@ -47,7 +47,7 @@ describe('createAgentRunRenderModel', () => {
 		expect(model.groups[0]).toMatchObject({
 			kind: 'tool',
 			status: 'done',
-			title: 'query_knowledge',
+			title: 'Query Knowledge',
 			seqRange: { start: 1, end: 3 }
 		});
 		expect(model.groups[0].detailSections.map((section) => section.kind)).toEqual([
@@ -81,13 +81,13 @@ describe('createAgentRunRenderModel', () => {
 		expect(model.groups[0]).toMatchObject({
 			kind: 'tool',
 			status: 'error',
-			title: 'delete_file'
+			title: 'Delete File'
 		});
 		expect(model.groups[0].detailSections).toEqual(
 			expect.arrayContaining([
 				expect.objectContaining({
 					kind: 'error',
-					title: 'Error'
+					title: 'Problem'
 				})
 			])
 		);
@@ -114,7 +114,7 @@ describe('createAgentRunRenderModel', () => {
 		expect(model.groups[0]).toMatchObject({
 			kind: 'approval',
 			status: 'done',
-			title: 'Approval completed',
+			title: 'Review completed',
 			subtitle: 'overwrite report.txt',
 			seqRange: { start: 1, end: 2 }
 		});
@@ -177,7 +177,7 @@ describe('createAgentRunRenderModel', () => {
 			status: 'done',
 			title: 'Citation checker',
 			subtitle: 'Checked citations',
-			metadata: expect.arrayContaining([{ label: 'Model', value: 'gpt-5.4' }])
+			metadata: []
 		});
 	});
 

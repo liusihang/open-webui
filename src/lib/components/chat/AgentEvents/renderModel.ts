@@ -282,21 +282,26 @@ const getGroupTitle = (kind: AgentRunRenderGroupKind, events: AgentRunEventViewI
 
 	switch (kind) {
 		case 'tool':
-			return firstString(merged.tool_name, merged.name, merged.tool) ?? last.summary;
+			return (
+				humanizeIdentifier(firstString(merged.tool_name, merged.name, merged.tool)) ?? last.summary
+			);
 		case 'approval':
 			return events.some((event) => event.eventType === 'approval.completed')
-				? 'Approval completed'
-				: 'Approval requested';
+				? 'Review completed'
+				: 'Review needed';
 		case 'artifact':
-			return firstString(merged.name, merged.path, merged.artifact_id) ?? 'Artifact';
+			return firstString(merged.name, merged.path, merged.artifact_id) ?? 'File';
 		case 'subagent':
 			return (
 				firstString(merged.participant_name, merged.name, last.participantId) ??
 				last.summary ??
-				'Subagent'
+				'Helper'
 			);
 		case 'model':
-			return firstString(merged.model_id, merged.model, merged.name) ?? last.summary;
+			return (
+				humanizeModelSelection(firstString(merged.model_id, merged.model, merged.name)) ??
+				last.summary
+			);
 		case 'step':
 		case 'fallback':
 		case 'run':
@@ -322,7 +327,7 @@ const getGroupSubtitle = (
 		case 'subagent':
 			return firstString(merged.result_summary, merged.status, last.participantId);
 		case 'model':
-			return firstString(merged.provider, merged.reason);
+			return firstString(merged.reason);
 		case 'fallback':
 		case 'step':
 		case 'run':
@@ -348,11 +353,11 @@ const getGroupMetadata = (
 	}
 
 	if (kind === 'tool') {
-		addMetadata(metadata, 'Call', firstString(merged.tool_call_id, merged.call_id));
+		return [...metadata].map(([label, value]) => ({ label, value }));
 	}
 
 	if (kind === 'subagent') {
-		addMetadata(metadata, 'Model', firstString(merged.model_id, merged.model));
+		return [...metadata].map(([label, value]) => ({ label, value }));
 	}
 
 	if (kind === 'artifact') {
@@ -364,13 +369,28 @@ const getGroupMetadata = (
 };
 
 const isRedundantMetadata = (kind: AgentRunRenderGroupKind, label: string) => {
+	if (label === 'Status' || label === 'Phase') {
+		return true;
+	}
+	if (kind === 'tool' && (label === 'Process' || label === 'Call')) {
+		return true;
+	}
 	if (kind === 'approval' && label === 'Action') {
+		return true;
+	}
+	if (kind === 'approval' && label === 'Approval') {
 		return true;
 	}
 	if (kind === 'artifact' && label === 'Path') {
 		return true;
 	}
+	if (kind === 'subagent' && label === 'Model') {
+		return true;
+	}
 	if (kind === 'model' && label === 'Provider') {
+		return true;
+	}
+	if (kind === 'model' && label === 'Reason') {
 		return true;
 	}
 
@@ -388,19 +408,19 @@ const getDetailSections = (
 		addSection(
 			sections,
 			'input',
-			'Input',
+			'Request',
 			pickFields(merged, ['arguments', 'query', 'path', 'command'])
 		);
 		addSection(
 			sections,
 			'output',
-			'Output',
+			'Result',
 			pickFields(merged, ['result', 'content', 'summary', 'process_refs', 'warnings'])
 		);
 		addSection(
 			sections,
 			'error',
-			'Error',
+			'Problem',
 			pickFields(merged, ['structured_error', 'error', 'message', 'code'])
 		);
 		addDebugSection(sections, merged);
@@ -428,7 +448,7 @@ const getDetailSections = (
 		addSection(
 			sections,
 			'output',
-			'Artifact',
+			'File',
 			pickFields(merged, ['artifact_id', 'name', 'path', 'mime_type', 'size'])
 		);
 		addDebugSection(sections, merged);
@@ -445,7 +465,7 @@ const getDetailSections = (
 		addSection(
 			sections,
 			'error',
-			'Error',
+			'Problem',
 			pickFields(merged, ['structured_error', 'error', 'message', 'code'])
 		);
 		addDebugSection(sections, merged);
@@ -456,7 +476,7 @@ const getDetailSections = (
 		addSection(
 			sections,
 			'output',
-			'Selection',
+			'Choice',
 			pickFields(merged, ['model_id', 'model', 'provider', 'reason'])
 		);
 		addDebugSection(sections, merged);
@@ -511,7 +531,7 @@ const addDebugSection = (sections: AgentRunDetailSection[], details: AgentRunEve
 		'request_id'
 	]);
 
-	addSection(sections, 'debug', 'Debug', visibleDetails);
+	addSection(sections, 'debug', 'More details', visibleDetails);
 };
 
 const addSection = (
@@ -539,7 +559,7 @@ const createFinalAnswer = (state: AgentRunEventState): AgentRunFinalPart | null 
 
 	return {
 		id: 'final-answer',
-		title: 'Final answer',
+		title: 'Answer',
 		content: state.finalText,
 		status: getFinalStatus(state.runStatus)
 	};
@@ -645,6 +665,21 @@ const firstString = (...values: unknown[]): string | null => {
 
 	return null;
 };
+
+const humanizeIdentifier = (value: string | null): string | null => {
+	if (!value) {
+		return null;
+	}
+
+	return value
+		.replace(/[_-]+/g, ' ')
+		.replace(/\s+/g, ' ')
+		.trim()
+		.replace(/\b\w/g, (letter) => letter.toUpperCase());
+};
+
+const humanizeModelSelection = (value: string | null): string | null =>
+	value ? `Using ${value}` : null;
 
 const isPlainObject = (value: unknown): value is Record<string, unknown> => {
 	return value !== null && typeof value === 'object' && !Array.isArray(value);
