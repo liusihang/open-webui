@@ -401,3 +401,88 @@ Start W16 implementation with `renderModel.ts` and `renderModel.test.ts`.
 
 Do not begin by restyling `AgentRunEvents.svelte`; the structural render model
 is the cheaper and safer first move.
+
+## W16 Implementation Checkpoint
+
+Status as of 2026-06-18:
+
+- [x] W16 design document accepted as the implementation source for this pass.
+- [x] Product/design context loader attempted for the `impeccable` UI skill:
+      this worktree has no `PRODUCT.md` or `DESIGN.md`, so the implementation
+      will follow OpenWebUI's existing Svelte/Tailwind conventions and W16
+      rather than inventing an external design context.
+- [x] Dependency decision reaffirmed:
+      do not add React LLM UI packages or generic Svelte UI kits. Use the
+      already locked `bits-ui` primitives plus local OpenWebUI components.
+- [x] Phase 1 TDD:
+      add `renderModel.test.ts`, verify the tests fail because
+      `renderModel.ts` does not exist yet, then implement the pure render
+      model.
+      Red command:
+      `PATH="$HOME/.nvm/versions/node/v22.22.0/bin:$PATH" npm run test:frontend -- --run src/lib/components/chat/AgentEvents/renderModel.test.ts`
+      failed as expected because `./renderModel` does not exist.
+      Green command:
+      `PATH="$HOME/.nvm/versions/node/v22.22.0/bin:$PATH" npm run test:frontend -- --run src/lib/components/chat/AgentEvents/renderModel.test.ts`
+      passed with 8 tests.
+- [x] Phase 2/3 UI:
+      split `AgentRunEvents.svelte` into semantic AgentEvents components and
+      render tool, approval, artifact, subagent, model, fallback, and final
+      answer groups from the render model.
+- [x] Phase 4 preview:
+      use a temporary fixture harness or equivalent local preview path to
+      capture desktop and mobile screenshots, then remove temporary preview
+      code unless intentionally retained.
+- [x] Phase 5 verification:
+      run focused frontend tests, touched-file compile/lint/format checks,
+      `git diff --check`, update this handoff with evidence, and commit.
+
+Implemented files:
+
+- `src/lib/components/chat/AgentEvents/renderModel.ts`
+- `src/lib/components/chat/AgentEvents/renderModel.test.ts`
+- `src/lib/components/chat/AgentEvents/AgentRunEvents.svelte`
+- `src/lib/components/chat/AgentEvents/AgentRunHeader.svelte`
+- `src/lib/components/chat/AgentEvents/AgentRunTimeline.svelte`
+- `src/lib/components/chat/AgentEvents/AgentRunEventItem.svelte`
+- `src/lib/components/chat/AgentEvents/AgentToolPanel.svelte`
+- `src/lib/components/chat/AgentEvents/AgentApprovalPanel.svelte`
+- `src/lib/components/chat/AgentEvents/AgentArtifactCard.svelte`
+- `src/lib/components/chat/AgentEvents/AgentSubagentPanel.svelte`
+- `src/lib/components/chat/AgentEvents/AgentFinalAnswer.svelte`
+- `src/lib/components/chat/AgentEvents/AgentDetailSection.svelte`
+
+Preview evidence:
+
+- Temporary route used: `src/routes/agent-run-preview/+page.svelte`.
+- Temporary route removed before commit.
+- Desktop screenshot:
+  `/tmp/openwebui-agent-mode-w16/agent-run-preview-desktop.png`
+- Mobile screenshot:
+  `/tmp/openwebui-agent-mode-w16/agent-run-preview-mobile.png`
+- Preview required Playwright route mocks for global layout backend calls
+  (`/api/config`, `/api/v1/auths/`) because no backend was running on
+  `127.0.0.1:8080`. The AgentEvents preview rendered correctly; remaining
+  console errors were from global layout websocket/user-settings/timezone calls
+  in the no-backend dev preview.
+
+Verification evidence:
+
+- Focused frontend:
+  `PATH="$HOME/.nvm/versions/node/v22.22.0/bin:$PATH" npm run test:frontend -- --run src/lib/components/chat/AgentEvents/eventFold.test.ts src/lib/components/chat/AgentEvents/renderModel.test.ts src/lib/apis/agentRuns/index.test.ts src/lib/components/chat/historySync.test.ts`
+  -> `4 passed`, `35 tests passed`.
+- Touched Svelte compile:
+  `AgentRunEvents.svelte`, `AgentRunHeader.svelte`, `AgentRunTimeline.svelte`,
+  `AgentRunEventItem.svelte`, `AgentToolPanel.svelte`,
+  `AgentApprovalPanel.svelte`, `AgentArtifactCard.svelte`,
+  `AgentSubagentPanel.svelte`, `AgentFinalAnswer.svelte`,
+  `AgentDetailSection.svelte` -> `warnings=0`.
+- Touched-file ESLint:
+  `npx eslint` over all touched AgentEvents Svelte/TS/test files -> passed.
+- Formatting:
+  `npx prettier --check` over touched files -> passed. Prettier still emits the
+  existing `pluginSearchDirs` warning.
+- Whitespace:
+  `git diff --check` -> passed.
+- Broad `npm run check` was not used as the W16 gate because W15 already
+  documented existing repo-wide Svelte/type debt; this pass used scoped compile,
+  lint, formatting, and focused behavioral tests.
