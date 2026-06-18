@@ -1028,3 +1028,68 @@ TDD evidence:
 This helper only merges evidence fragments and labels the merged document as
 `Agent Mode W12 live acceptance evidence`. It does not claim any scenario has
 passed; `acceptance_harness.py live` remains the authority.
+
+## W12D-2 Integration Checkpoint
+
+Date: 2026-06-18
+
+Worker:
+
+- Agent: `019ed87e-699f-7130-9201-3a72c2e7fe3f` (Harvey)
+- Worktree:
+  `/Users/liusihang/openwebui/.worktrees/agent-mode-w12d-tool-terminal`
+- Worker commit:
+  `ab459409923bda2de5376fc08989f8db02c813bc`
+
+Integrated commit:
+
+- `f6082b271` docs: record w12d tool terminal live evidence
+
+Files integrated:
+
+- `handoff/agent-mode/w12d-tool-terminal.md`
+- `handoff/agent-mode/w12d-tool-terminal-evidence.json`
+
+Live evidence summary:
+
+- Scenarios covered: 2, 3, 4, 5, and 10.
+- Tools/terminal/approval/tmp run:
+  `930faa6e-a7c8-45d8-960b-55e6b2c715ae`.
+- Cancel run:
+  `1a2c7259-cc9e-4396-83f4-651cb3672193`.
+- Service URLs used by the worker, now stopped:
+  - backend `http://127.0.0.1:18102`;
+  - AgentScope runtime `http://127.0.0.1:8112`;
+  - Open Terminal `http://127.0.0.1:18105`.
+- Output process ref: `20260618-102533-a542b9`.
+- Cancel process ref: `20260618-102534-7d1999`; it was `running` before and
+  after Agent Run cancellation and was killed manually only after evidence
+  capture.
+- Output artifact:
+  `/workspace/agent-runs/930faa6e-a7c8-45d8-960b-55e6b2c715ae/outputs/w12d-output.txt`.
+- Tmp artifact:
+  `/workspace/agent-runs/930faa6e-a7c8-45d8-960b-55e6b2c715ae/tmp/w12d-scratch.json`
+  with `cleanup_eligible=true`.
+
+Controller verification after cherry-pick:
+
+- `WEBUI_SECRET_KEY=test-secret ENABLE_DB_MIGRATIONS=false uv run --frozen pytest -q backend/open_webui/test/agent/test_tool_authority.py backend/open_webui/test/agent/test_terminal_artifacts.py backend/open_webui/test/agent/test_approval.py backend/open_webui/test/agent/test_resources.py`
+  -> `17 passed, 2 warnings`.
+- `cd services/agentscope-runtime && uv run --frozen pytest -q tests/test_app.py -k cancel`
+  -> `1 passed, 6 deselected`.
+- Inline W12D-2 evidence subset check -> scenarios 2, 3, 4, 5, and 10 all
+  `live_passed` / `passed`.
+- `uv run --frozen python scripts/agent_mode/acceptance_harness.py live --evidence handoff/agent-mode/w12d-tool-terminal-evidence.json`
+  intentionally exits non-zero because this is subset evidence only; output
+  confirmed `case contract: 5/12 satisfied` and missing scenarios from other
+  W12D lanes.
+
+Notes:
+
+- The worker did not change product code; this was evidence-only.
+- The worker caveat remains important: the proof used an acceptance-only
+  in-memory tool registry. Final release audit must decide whether real product
+  chat tool-registry population is in scope for the all-scenario harness.
+- Do not use system `/usr/local/bin/python3` for the harness in this worktree.
+  Python 3.13.7 hung while importing `argparse -> shutil -> lzma`. Use
+  `uv run --frozen python ...` or the project virtualenv instead.
