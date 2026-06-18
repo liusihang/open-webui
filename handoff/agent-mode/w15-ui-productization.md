@@ -61,6 +61,36 @@ need is proven.
   - Browser screenshot was not used because the component requires authenticated
     Agent Run API/SSE state; a mocked DOM harness would require adding a new
     testing stack for this slice.
+- [x] Next design checkpoint: evaluate mature open-source LLM UI component
+      libraries before a second UI upgrade pass.
+  - User clarified the preferred reference set: mature LLM/agent UI component
+    libraries, not generic UI kits.
+  - Subagents dispatched without parent context to read code from:
+    assistant-ui, Vercel AI Elements / AI SDK UI, CopilotKit, and
+    prompt-kit / Svelte AI Elements / shadcn-style AI components.
+  - Goal: produce a concrete upgrade plan for AgentEvents components before
+    any second-pass code changes.
+- [x] LLM UI library code-read results received:
+  - assistant-ui: borrow `MessagePart` / grouped parts / tool fallback /
+    runtime-state separation. Add a render model above the current folded
+    event state instead of making the Svelte component understand raw events.
+  - Vercel AI Elements / AI SDK UI: borrow `UIMessagePart`-style part
+    taxonomy, tool input/output/error sections, reasoning visibility semantics,
+    task/step primitive, and explicit transport-vs-run status separation.
+  - CopilotKit: borrow renderer registry / wildcard fallback / semantic tool
+    state / human-in-the-loop approval separation. Do not copy React hooks.
+  - prompt-kit / Svelte AI Elements / Vercel chatbot / shadcn-chatbot-kit:
+    borrow compact visual density, compound components, Svelte component
+    splitting, artifact separation, and low-noise tool/reasoning/source blocks.
+- [x] Second-pass design recommendation:
+  - Do not add a generic UI kit such as Flowbite or Skeleton.
+  - Keep `bits-ui` as the Svelte headless primitive layer.
+  - Add a local `renderModel.ts` and split Agent Run UI into small Svelte
+    components inspired by mature LLM UI libraries.
+  - Default to structure-first changes: tool panels, approval callouts,
+    artifact cards, final answer panel, and grouped run steps.
+- [x] Formal W16 redesign document written:
+  - `handoff/agent-mode/w16-llm-ui-redesign.md`
 
 ## Design Decision
 
