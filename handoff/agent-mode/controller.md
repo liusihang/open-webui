@@ -1170,3 +1170,78 @@ Notes:
 - This is a real product/runtime fix, not evidence-only.
 - The acceptance harness text still says `W12B` in its messages. That wording is
   stale, but the case validation logic is still the authority for W12 evidence.
+
+## W12D-4 Integration Checkpoint
+
+Date: 2026-06-18
+
+Worker:
+
+- Agent: `019ed87e-6a71-7bf3-a5ff-d777f01f00ab` (Wegener)
+- Worktree:
+  `/Users/liusihang/openwebui/.worktrees/agent-mode-w12d-sse-ui`
+- Worker commit:
+  `6edf9871d102707125e2cb576e7e2b775946bfc0`
+
+Integrated commit:
+
+- `baeb2f07b` fix(agent-mode): prove SSE reconnect and terminal compaction
+
+Files integrated:
+
+- `backend/open_webui/agent/compaction.py`
+- `backend/open_webui/models/agent_runs.py`
+- `backend/open_webui/test/models/test_agent_runs.py`
+- `src/lib/apis/agentRuns/index.ts`
+- `src/lib/apis/agentRuns/index.test.ts`
+- `handoff/agent-mode/w12d-sse-ui.md`
+- `handoff/agent-mode/w12d-sse-ui-evidence.json`
+- `handoff/agent-mode/w12d-sse-ui-proof.png`
+
+Implementation summary:
+
+- Frontend Agent Run API helpers now target backend-mounted `/api/agent/runs`
+  instead of the incorrect `/api/v1/agent/runs` path.
+- Terminal-state transitions now build compacted summaries from persisted
+  events/artifacts when no explicit summary is supplied.
+- Artifact compaction prefers ORM `meta` before SQLAlchemy declarative
+  `metadata`, preserving artifact metadata such as cleanup eligibility.
+
+Live evidence summary:
+
+- Scenarios covered: 8 and 11.
+- SSE reconnect run:
+  `11a09238-0455-48af-b235-4a1a0b1a88ce`, event seq `1..6`.
+- Reconnect proof:
+  - live SSE with `Last-Event-ID: 3`;
+  - JSON `after_seq=3`;
+  - both returned seq `[4, 5, 6]`.
+- UI proof screenshot:
+  `handoff/agent-mode/w12d-sse-ui-proof.png`.
+- Terminal compaction runs:
+  - completed `8dcb910c-5f0d-4fd2-bd35-12742e1932f3`;
+  - failed `fb600ee5-3c55-42ac-92bb-e6215a0340de`;
+  - cancelled `c39b6ffe-78e8-4d7a-bdf2-a3f99b3b7929`;
+  - budget_exceeded `fd02f780-d7a6-4023-9b33-851b98de8f29`.
+
+Controller verification after cherry-pick:
+
+- `WEBUI_SECRET_KEY=test-secret ENABLE_DB_MIGRATIONS=false uv run --frozen pytest -q backend/open_webui/test/models/test_agent_runs.py backend/open_webui/test/agent/test_agent_run_routes_db_store.py`
+  -> `19 passed, 3 warnings`.
+- `npm run test:frontend -- --run src/lib/apis/agentRuns/index.test.ts src/lib/components/chat/AgentEvents/eventFold.test.ts src/lib/components/chat/historySync.test.ts`
+  -> `3 files / 24 tests passed`.
+- `uv run --frozen ruff check backend/open_webui/agent/compaction.py backend/open_webui/models/agent_runs.py backend/open_webui/test/models/test_agent_runs.py`
+  -> passed.
+- Diff-check from W12C-3 base for W12D-4 changed files -> passed.
+- Inline W12D-4 evidence subset check -> scenarios 8 and 11 both
+  `live_passed` / `passed`.
+- `uv run --frozen python scripts/agent_mode/acceptance_harness.py live --evidence handoff/agent-mode/w12d-sse-ui-evidence.json`
+  intentionally exits non-zero because this is subset evidence only; output
+  confirmed `case contract: 2/12 satisfied` and missing scenarios from other
+  W12D lanes.
+
+Notes:
+
+- Screenshot inspection showed five event rows and final answer text once.
+- The page showed a reconnecting status line, which is acceptable evidence for
+  the reconnect scenario and does not duplicate final text.
