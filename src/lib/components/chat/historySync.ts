@@ -41,6 +41,23 @@ type ChatHistory = {
 	messages: Record<string, ChatMessage>;
 };
 
+const SOCKET_INCREMENTAL_CONTENT_EVENTS = new Set([
+	'chat:completion',
+	'chat:message:delta',
+	'message'
+]);
+
+export const shouldApplySocketContentEvent = (
+	message: ChatMessage | null | undefined,
+	eventType: string | null | undefined
+): boolean => {
+	if (!message?.agent_run_id || !eventType) {
+		return true;
+	}
+
+	return !SOCKET_INCREMENTAL_CONTENT_EVENTS.has(eventType);
+};
+
 const getSourceMergeKey = (item: ChatSourceEntry, index: number) => {
 	const metadata = Array.isArray(item?.metadata) ? item.metadata[0] : undefined;
 	return (

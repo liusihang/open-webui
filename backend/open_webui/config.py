@@ -3226,6 +3226,64 @@ AUTOMATION_MIN_INTERVAL = ConfigVar(
     os.getenv('AUTOMATION_MIN_INTERVAL', ''),
 )
 
+ENABLE_AGENT_MODE = ConfigVar(
+    'ENABLE_AGENT_MODE',
+    'agent.mode.enable',
+    os.getenv('ENABLE_AGENT_MODE', 'False').lower() == 'true',
+)
+
+AGENT_RUNTIME_BASE_URL = ConfigVar(
+    'AGENT_RUNTIME_BASE_URL',
+    'agent.runtime.base_url',
+    os.getenv('AGENT_RUNTIME_BASE_URL', ''),
+)
+
+AGENT_RUNTIME_SERVICE_TOKEN = ConfigVar(
+    'AGENT_RUNTIME_SERVICE_TOKEN',
+    'agent.runtime.service_token',
+    os.getenv('AGENT_RUNTIME_SERVICE_TOKEN', ''),
+)
+
+AGENT_RUN_DEFAULT_TIMEOUT_SECONDS = ConfigVar(
+    'AGENT_RUN_DEFAULT_TIMEOUT_SECONDS',
+    'agent.run.default_timeout_seconds',
+    int(os.getenv('AGENT_RUN_DEFAULT_TIMEOUT_SECONDS', '300')),
+)
+
+AGENT_RUN_MAX_MODEL_CALLS = ConfigVar(
+    'AGENT_RUN_MAX_MODEL_CALLS',
+    'agent.run.max_model_calls',
+    int(os.getenv('AGENT_RUN_MAX_MODEL_CALLS', '25')),
+)
+
+AGENT_RUN_MAX_TOOL_CALLS = ConfigVar(
+    'AGENT_RUN_MAX_TOOL_CALLS',
+    'agent.run.max_tool_calls',
+    int(os.getenv('AGENT_RUN_MAX_TOOL_CALLS', '50')),
+)
+
+AGENT_TEAM_MAX_SUBAGENTS = ConfigVar(
+    'AGENT_TEAM_MAX_SUBAGENTS',
+    'agent.team.max_subagents',
+    int(os.getenv('AGENT_TEAM_MAX_SUBAGENTS', '5')),
+)
+
+try:
+    agent_subagent_default_budget = json.loads(
+        os.getenv(
+            'AGENT_SUBAGENT_DEFAULT_BUDGET',
+            '{"max_model_calls": 8, "max_tool_calls": 16}',
+        )
+    )
+except json.JSONDecodeError:
+    agent_subagent_default_budget = {'max_model_calls': 8, 'max_tool_calls': 16}
+
+AGENT_SUBAGENT_DEFAULT_BUDGET = ConfigVar(
+    'AGENT_SUBAGENT_DEFAULT_BUDGET',
+    'agent.subagent.default_budget',
+    agent_subagent_default_budget,
+)
+
 ENABLE_NOTES = ConfigVar(
     'ENABLE_NOTES',
     'notes.enable',

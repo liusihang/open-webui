@@ -1,0 +1,194 @@
+{
+  "mode": "live",
+  "generated_at": "2026-06-18T10:36:17+08:00",
+  "worktree": "/Users/liusihang/openwebui/.worktrees/agent-mode-w12d-runtime-chat",
+  "branch": "codex/agent-mode-w12d-runtime-chat",
+  "base_commit": "1c1224225be1da454c47f9d5629f37b1fa4d4119",
+  "worker": "W12D-1",
+  "scope": "Agent Mode runtime/chat/finalization live acceptance scenarios 1, 9, and 12",
+  "service_urls": {
+    "backend": "http://127.0.0.1:18101",
+    "agentscope_runtime": "http://127.0.0.1:8111",
+    "fake_openai_provider": "http://127.0.0.1:18109/v1"
+  },
+  "live_setup": {
+    "data_dir": "/private/tmp/openwebui-agent-mode-w12d-runtime-data",
+    "static_dir": "/private/tmp/openwebui-agent-mode-w12d-runtime-static",
+    "agent_runtime_service_token": "test-service-token",
+    "openai_model": "w12d-fake-model",
+    "auth_user_id": "51741296-ee64-402b-8a45-5eb5780f6acc",
+    "auth_method": "JWT minted with live test WEBUI_SECRET_KEY for existing throwaway admin user"
+  },
+  "fixes": [
+    {
+      "summary": "Internal Agent Model Authority now mirrors product chat model-access bypass for admin/global bypass cases.",
+      "reason": "Live ordinary Q&A initially failed after run.running because provider-catalog model w12d-fake-model was visible to product chat but the internal model callback always called check_model_access, which requires a DB model row and returned model_not_allowed.",
+      "red_test": "WEBUI_SECRET_KEY=test-secret ENABLE_DB_MIGRATIONS=false uv run pytest -q backend/open_webui/test/agent/test_model_authority.py -k admin_model_call_uses_product_chat_access_bypass_for_provider_model",
+      "green_test": "WEBUI_SECRET_KEY=test-secret ENABLE_DB_MIGRATIONS=false uv run pytest -q backend/open_webui/test/agent/test_model_authority.py -k admin_model_call_uses_product_chat_access_bypass_for_provider_model"
+    }
+  ],
+  "scenarios": [
+    {
+      "id": "scenario_01_ordinary_qa",
+      "status": "live_passed",
+      "live_status": "passed",
+      "required_observations": [
+        "event:run.running",
+        "event:final.started",
+        "event:final.delta",
+        "event:run.completed",
+        "no_tool_events"
+      ],
+      "observations": [
+        "event:run.running",
+        "event:final.started",
+        "event:final.delta",
+        "event:run.completed",
+        "no_tool_events"
+      ],
+      "evidence": {
+        "run_id": "ff800529-1725-450e-b24c-b6e06eb5b749",
+        "runtime_session_id": "rt_ff800529-1725-450e-b24c-b6e06eb5b749_e76VIXH24L8",
+        "chat_id": "fc21b0b7-d5dc-4922-a612-b71ee6bfee1f",
+        "assistant_message_id": "w12d-assistant-1781750118257",
+        "chat_response": {
+          "status": true,
+          "agent_run_id": "ff800529-1725-450e-b24c-b6e06eb5b749",
+          "runtime_session_id": "rt_ff800529-1725-450e-b24c-b6e06eb5b749_e76VIXH24L8",
+          "task_ids": []
+        },
+        "run_detail": {
+          "state": "completed",
+          "state_version": 3,
+          "error": null
+        },
+        "assistant_message": {
+          "content": "Agent Mode final answer from W12D fake provider.",
+          "done": true,
+          "model": "w12d-fake-model",
+          "agent_run_id": "ff800529-1725-450e-b24c-b6e06eb5b749"
+        },
+        "events": [
+          {
+            "seq": 1,
+            "event_type": "run.running",
+            "phase": "running"
+          },
+          {
+            "seq": 2,
+            "event_type": "final.started",
+            "phase": "finalizing"
+          },
+          {
+            "seq": 3,
+            "event_type": "final.delta",
+            "phase": "finalizing",
+            "delta_index": 0,
+            "text": "Agent Mode final answer from W12D fake provider."
+          },
+          {
+            "seq": 4,
+            "event_type": "run.completed",
+            "phase": "completed"
+          }
+        ],
+        "legacy_fallback_absent": "The /api/chat/completions response returned agent_run_id/runtime_session_id/task_ids and no provider completion body; provider output arrived only through the AgentScope runtime model-call callback and final.delta."
+      }
+    },
+    {
+      "id": "scenario_09_final_phase_deltas",
+      "status": "live_passed",
+      "live_status": "passed",
+      "required_observations": [
+        "event:final.started_before_delta",
+        "final.delta_only_finalizing",
+        "no_action_after_final.started"
+      ],
+      "observations": [
+        "event:final.started_before_delta",
+        "final.delta_only_finalizing",
+        "no_action_after_final.started"
+      ],
+      "evidence": {
+        "run_id": "ff800529-1725-450e-b24c-b6e06eb5b749",
+        "runtime_session_id": "rt_ff800529-1725-450e-b24c-b6e06eb5b749_e76VIXH24L8",
+        "event_order": [
+          "1:run.running:running",
+          "2:final.started:finalizing",
+          "3:final.delta:finalizing",
+          "4:run.completed:completed"
+        ],
+        "final_started_seq": 2,
+        "final_delta_seqs": [
+          3
+        ],
+        "post_final_started_events": [
+          "final.delta",
+          "run.completed"
+        ],
+        "disallowed_post_final_events": [],
+        "assertions": {
+          "final_started_before_delta": true,
+          "all_final_delta_events_have_finalizing_phase": true,
+          "no_tool_subagent_artifact_or_model_selection_events_after_final_started": true
+        }
+      }
+    },
+    {
+      "id": "scenario_12_runtime_unavailable_failure",
+      "status": "live_passed",
+      "live_status": "passed",
+      "required_observations": [
+        "ENABLE_AGENT_MODE:true",
+        "runtime_unavailable",
+        "event:run.failed",
+        "no_silent_legacy_fallback"
+      ],
+      "observations": [
+        "ENABLE_AGENT_MODE:true",
+        "runtime_unavailable",
+        "event:run.failed",
+        "no_silent_legacy_fallback"
+      ],
+      "evidence": {
+        "run_id": "310055d5-c926-4f2f-9611-c82a84b15c2c",
+        "chat_id": "3787b89d-dfd8-42bf-a149-6c61158898aa",
+        "assistant_message_id": "w12d-unavail-assistant-1781750152421",
+        "runtime_port_check": "lsof -nP -iTCP:8111 -sTCP:LISTEN returned no listener before request",
+        "chat_response": {
+          "status": false,
+          "agent_run_id": "310055d5-c926-4f2f-9611-c82a84b15c2c",
+          "task_ids": [],
+          "error": {
+            "code": "agent_runtime_unavailable",
+            "message": "Cannot connect to host 127.0.0.1:8111 ssl:default [Connect call failed ('127.0.0.1', 8111)]"
+          }
+        },
+        "run_detail": {
+          "state": "failed",
+          "state_version": 1,
+          "error": {
+            "code": "agent_runtime_unavailable"
+          }
+        },
+        "events": [
+          {
+            "seq": 1,
+            "event_type": "run.failed",
+            "phase": "failed",
+            "error_code": "agent_runtime_unavailable"
+          }
+        ],
+        "assistant_message": {
+          "content": "",
+          "done": false,
+          "model": "w12d-fake-model",
+          "agent_run_id": "310055d5-c926-4f2f-9611-c82a84b15c2c",
+          "error_content": "Cannot connect to host 127.0.0.1:8111 ssl:default [Connect call failed ('127.0.0.1', 8111)]"
+        },
+        "legacy_fallback_absent": "The response is status=false with agent_run_id and run.failed; no final.delta, run.completed, or legacy provider answer was produced."
+      }
+    }
+  ],
+  "blockers": []
+}

@@ -1,0 +1,341 @@
+{
+  "base_commit": "bc4072427076b82082490115e8ede9f536da1426",
+  "mode": "live",
+  "scenarios": [
+    {
+      "evidence": {
+        "commands": [
+          "PYTHONPATH=backend WEBUI_SECRET_KEY=test-secret ENABLE_DB_MIGRATIONS=false DATABASE_ENABLE_SESSION_SHARING=true uv run --no-project --python 3.12 --with-requirements backend/requirements.txt --with pytest --with pytest-asyncio pytest backend/open_webui/test/agent/test_chat_entry_agent_mode.py backend/open_webui/test/agent/test_events.py backend/open_webui/test/agent/test_w12_acceptance_harness.py backend/open_webui/test/models/test_agent_runs.py::test_final_started_helpers_and_final_text_accumulation -q",
+          "cd services/agentscope-runtime && uv run --frozen --extra test pytest tests/test_app.py -q"
+        ],
+        "notes": "No direct integrated-service ordinary Q&A run was captured. The current runtime service skeleton only appends run.running on start; no local path was found that emits final.started, final.delta, and run.completed for an ordinary Q&A run without the post-W9B2 runtime loop."
+      },
+      "id": "scenario_01_ordinary_qa",
+      "live_status": "not_proven",
+      "observations": [],
+      "required_observations": [
+        "event:run.running",
+        "event:final.started",
+        "event:final.delta",
+        "event:run.completed",
+        "no_tool_events"
+      ],
+      "status": "incomplete",
+      "supporting_observations": [
+        "Agent Mode chat entry creates an Agent Run and does not call the legacy provider path when enabled.",
+        "Runtime service start endpoint accepts a run and appends run.running through its OpenWebUI callback client."
+      ]
+    },
+    {
+      "evidence": {
+        "local_checks": [
+          {
+            "command": "uv run pytest -q backend/open_webui/test/agent/test_tool_authority.py backend/open_webui/test/agent/test_terminal_artifacts.py backend/open_webui/test/agent/test_approval.py backend/open_webui/test/agent/test_resources.py",
+            "result": "17 passed, 2 warnings"
+          }
+        ],
+        "notes": "Local tests prove normalized read-only tool execution and idempotent tool authority behavior. No direct integrated OpenWebUI plus AgentScope runtime event capture was run, so tool.requested and tool.completed are not live-proven."
+      },
+      "id": "scenario_02_single_tool_call",
+      "live_status": "not_proven",
+      "observations": [],
+      "required_observations": [
+        "event:tool.requested",
+        "event:tool.completed",
+        "normalized_tool_result:success"
+      ],
+      "status": "incomplete"
+    },
+    {
+      "evidence": {
+        "fix": "backend/open_webui/routers/agent_service.py now passes configured AGENT_RUN_RESOURCE_MANAGER and AGENT_RUN_ARTIFACT_REGISTRAR into the default AgentToolAuthority.",
+        "local_checks": [
+          {
+            "command": "uv run pytest -q backend/open_webui/test/agent/test_tool_authority.py::test_service_default_tool_authority_wires_terminal_process_and_artifact_helpers",
+            "green_result": "1 passed, 2 warnings",
+            "red_result": "failed before fix because resource_manager.process_refs_for_run('run-1') was empty while the normalized result contained a terminal process_ref"
+          },
+          {
+            "command": "uv run pytest -q backend/open_webui/test/agent/test_tool_authority.py backend/open_webui/test/agent/test_terminal_artifacts.py backend/open_webui/test/agent/test_approval.py backend/open_webui/test/agent/test_resources.py",
+            "result": "17 passed, 2 warnings"
+          }
+        ],
+        "notes": "Local service-level regression proves configured terminal process and artifact helpers are consumed by the default tool authority. No live Open Terminal command was executed through an integrated OpenWebUI service, so live artifact registration under /workspace/agent-runs/<run_id>/outputs is not proven."
+      },
+      "id": "scenario_03_terminal_output_artifact",
+      "live_status": "not_proven",
+      "observations": [],
+      "required_observations": [
+        "tool:run_command",
+        "process_ref_registered",
+        "artifact:/workspace/agent-runs/<run_id>/outputs"
+      ],
+      "status": "incomplete"
+    },
+    {
+      "evidence": {
+        "local_checks": [
+          {
+            "command": "uv run pytest -q backend/open_webui/test/agent/test_tool_authority.py backend/open_webui/test/agent/test_terminal_artifacts.py backend/open_webui/test/agent/test_approval.py backend/open_webui/test/agent/test_resources.py",
+            "result": "17 passed, 2 warnings"
+          }
+        ],
+        "notes": "Local artifact tests prove run-local tmp paths are marked cleanup_eligible true and outputs are not. No integrated run completion was executed with a tmp artifact and post-completion readback, so retained_after_completion is not live-proven."
+      },
+      "id": "scenario_04_tmp_artifact_retention",
+      "live_status": "not_proven",
+      "observations": [],
+      "required_observations": [
+        "artifact:/workspace/agent-runs/<run_id>/tmp",
+        "cleanup_eligible:true",
+        "retained_after_completion"
+      ],
+      "status": "incomplete"
+    },
+    {
+      "evidence": {
+        "local_checks": [
+          {
+            "command": "uv run pytest -q backend/open_webui/test/agent/test_tool_authority.py backend/open_webui/test/agent/test_terminal_artifacts.py backend/open_webui/test/agent/test_approval.py backend/open_webui/test/agent/test_resources.py",
+            "result": "17 passed, 2 warnings"
+          }
+        ],
+        "notes": "Local approval tests prove destructive calls transition to waiting_approval, emit approval.requested, and return approval_required without executing the callable. No integrated service/UI approval wait was captured, so live approval behavior is not proven."
+      },
+      "id": "scenario_05_destructive_approval",
+      "live_status": "not_proven",
+      "observations": [],
+      "required_observations": [
+        "event:approval.requested",
+        "state:waiting_approval",
+        "normalized_tool_result:approval_required"
+      ],
+      "status": "incomplete"
+    },
+    {
+      "evidence": {
+        "commands": [
+          {
+            "command": "uv run --extra test pytest -q tests/test_subagents.py::test_plan_runs_subagents_concurrently_up_to_team_cap",
+            "cwd": "/Users/liusihang/openwebui/.worktrees/agent-mode-w12b-subagents/services/agentscope-runtime",
+            "green_result": "1 passed in 0.02s",
+            "red_result": "failed with TimeoutError waiting for all five subagent executors to be active together; this proved the existing plan loop was sequential"
+          },
+          {
+            "command": "uv run --extra test pytest -q tests/test_subagents.py tests/test_openwebui_client.py",
+            "cwd": "/Users/liusihang/openwebui/.worktrees/agent-mode-w12b-subagents/services/agentscope-runtime",
+            "result": "11 passed in 0.69s"
+          }
+        ],
+        "direct_integrated_service_evidence": false,
+        "local_observations": [
+          "event:subagent.created",
+          "subagent_concurrency:observed",
+          "subagent_cap:5"
+        ],
+        "notes": "Local service tests now prove the runtime adapter can launch five subagents concurrently with team_cap=5 and still route registration/model-selection callbacks through OpenWebUI client contracts. No direct integrated OpenWebUI + AgentScope runtime service execution was captured, so live acceptance is not proven."
+      },
+      "id": "scenario_06_subagent_cap_concurrency",
+      "live_status": "not_proven",
+      "observations": [],
+      "status": "incomplete"
+    },
+    {
+      "evidence": {
+        "commands": [
+          {
+            "command": "WEBUI_SECRET_KEY=test-secret ENABLE_DB_MIGRATIONS=false uv run pytest -q backend/open_webui/test/agent/test_subagents.py backend/open_webui/test/agent/test_model_catalog.py",
+            "cwd": "/Users/liusihang/openwebui/.worktrees/agent-mode-w12b-subagents",
+            "result": "13 passed, 2 warnings in 2.20s"
+          },
+          {
+            "command": "uv run --extra test pytest -q tests/test_subagents.py tests/test_openwebui_client.py",
+            "cwd": "/Users/liusihang/openwebui/.worktrees/agent-mode-w12b-subagents/services/agentscope-runtime",
+            "result": "11 passed in 0.69s"
+          }
+        ],
+        "direct_integrated_service_evidence": false,
+        "local_observations": [
+          "event:model.selection.requested",
+          "event:model.selection.completed",
+          "meta.agent_selection",
+          "permission_valid_model_ids"
+        ],
+        "notes": "Local backend tests prove model selection emits requested/completed events, filters choices through permission checks, and returns selected_model_id in meta.agent_selection. Runtime client tests prove the model-selection callback payload is sent to OpenWebUI. No direct integrated service run was captured, so live acceptance is not proven."
+      },
+      "id": "scenario_07_subagent_model_selection",
+      "live_status": "not_proven",
+      "observations": [],
+      "status": "incomplete"
+    },
+    {
+      "evidence": {
+        "duplicate_prevention": {
+          "replace_style_socket_events_allowed": [
+            "chat:message",
+            "replace"
+          ],
+          "socket_incremental_events_blocked_for_agent_mode": [
+            "chat:completion",
+            "chat:message:delta",
+            "message"
+          ],
+          "source": "src/lib/components/chat/historySync.test.ts"
+        },
+        "local_route_evidence": {
+          "events_list_after_seq_2": [
+            3,
+            4
+          ],
+          "invalid_last_event_id_status": 400,
+          "sse_last_event_id_2_contains_ids": [
+            3,
+            4
+          ]
+        },
+        "local_tests": [
+          {
+            "command": "uv run --group dev pytest backend/open_webui/test/agent/test_events.py backend/open_webui/test/agent/test_compaction.py backend/open_webui/test/agent/test_resources.py",
+            "result": "25 passed; includes backend reconnect, SSE formatting, and final-delta idempotency tests"
+          },
+          {
+            "command": "PATH=\"$HOME/.nvm/versions/node/v22.22.0/bin:$PATH\" npx vitest run src/lib/components/chat/AgentEvents/eventFold.test.ts src/lib/components/chat/historySync.test.ts",
+            "result": "2 files passed, 19 tests passed; includes AgentEvents seq dedupe/replay tests and Agent Mode socket incremental-content suppression tests"
+          },
+          {
+            "command": "WEBUI_SECRET_KEY=w12b-local-route-secret uv run python3 - <<'PY' ... FastAPI TestClient against open_webui.routers.agent_runs ... PY",
+            "result": "route-level /events/list?after_seq=2 returned seq [3, 4]; SSE /events with Last-Event-ID: 2 returned ids 3 and 4 only; invalid Last-Event-ID returned 400"
+          }
+        ],
+        "notes": "Local route/unit evidence proves the relevant code paths, but not a direct integrated-service acceptance run. No OpenWebUI backend was listening on 127.0.0.1:8080 and no AgentScope runtime was listening on 127.0.0.1:8097 during verification, so live acceptance remains not proven."
+      },
+      "id": "scenario_08_sse_reconnect_backfill",
+      "live_status": "not_proven",
+      "observations": [
+        "last_event_id_reconnect",
+        "backfill_by_seq",
+        "dedupe_seq"
+      ],
+      "status": "incomplete"
+    },
+    {
+      "evidence": {
+        "commands": [
+          "PYTHONPATH=backend WEBUI_SECRET_KEY=test-secret ENABLE_DB_MIGRATIONS=false DATABASE_ENABLE_SESSION_SHARING=true uv run --no-project --python 3.12 --with-requirements backend/requirements.txt --with pytest --with pytest-asyncio pytest backend/open_webui/test/agent/test_chat_entry_agent_mode.py backend/open_webui/test/agent/test_events.py backend/open_webui/test/agent/test_w12_acceptance_harness.py backend/open_webui/test/models/test_agent_runs.py::test_final_started_helpers_and_final_text_accumulation -q"
+        ],
+        "notes": "Backend event helpers enforce the final phase contract in focused tests, but no direct integrated-service stream was captured showing final.started before final.delta and no post-final action events in an actual run."
+      },
+      "id": "scenario_09_final_phase_deltas",
+      "live_status": "not_proven",
+      "observations": [],
+      "required_observations": [
+        "event:final.started_before_delta",
+        "final.delta_only_finalizing",
+        "no_action_after_final.started"
+      ],
+      "status": "incomplete",
+      "supporting_observations": [
+        "append_final_delta rejects deltas unless the run state is finalizing.",
+        "append_final_delta rejects deltas before final.started.",
+        "tool, subagent, artifact, and model events are rejected after final.started."
+      ]
+    },
+    {
+      "evidence": {
+        "local_checks": [
+          {
+            "command": "uv run pytest -q backend/open_webui/test/agent/test_tool_authority.py backend/open_webui/test/agent/test_terminal_artifacts.py backend/open_webui/test/agent/test_approval.py backend/open_webui/test/agent/test_resources.py",
+            "result": "17 passed, 2 warnings"
+          },
+          {
+            "command": "uv run --extra test pytest -q tests/test_app.py tests/test_subagents.py tests/test_agentscope_bridge.py",
+            "result": "13 passed",
+            "workdir": "services/agentscope-runtime"
+          }
+        ],
+        "notes": "Local resource-manager and runtime-side tests prove cancellation paths retain process refs and do not call a terminal kill hook. No full integrated AgentScope loop with a real Open Terminal process was cancelled and read back, so live cancellation behavior is not proven."
+      },
+      "id": "scenario_10_cancel_keeps_terminal_process",
+      "live_status": "not_proven",
+      "observations": [],
+      "required_observations": [
+        "event:run.cancelled",
+        "runtime_cancel_requested",
+        "process_refs_retained",
+        "no_kill_process"
+      ],
+      "status": "incomplete"
+    },
+    {
+      "evidence": {
+        "local_lifecycle_evidence": {
+          "compaction_calls_by_terminal_state": {
+            "budget_exceeded": 1,
+            "cancelled": 1,
+            "completed": 1,
+            "failed": 1
+          },
+          "summary_ui_keys": [
+            "actions",
+            "approvals",
+            "artifacts",
+            "budget",
+            "errors",
+            "participants",
+            "process_refs",
+            "subagents",
+            "tools",
+            "warnings"
+          ]
+        },
+        "local_tests": [
+          {
+            "command": "uv run --group dev pytest backend/open_webui/test/agent/test_events.py backend/open_webui/test/agent/test_compaction.py backend/open_webui/test/agent/test_resources.py",
+            "result": "25 passed; includes resource cleanup compaction-once behavior and compacted expandable summary shape"
+          },
+          {
+            "command": ".venv/bin/python - <<'PY' ... AgentRunResourceManager cleanup_terminal_state plus build_compacted_run_summary assertions ... PY",
+            "result": "completed, failed, cancelled, and budget_exceeded each triggered exactly one compaction callback; summary retained expandable UI keys"
+          }
+        ],
+        "notes": "Local lifecycle/summary evidence proves the narrow code path, but not a direct integrated-service run with a real terminal runtime callback and persisted Agent Run summary. No OpenWebUI backend was listening on 127.0.0.1:8080 and no AgentScope runtime was listening on 127.0.0.1:8097 during verification, so live acceptance remains not proven."
+      },
+      "id": "scenario_11_terminal_state_compaction",
+      "live_status": "not_proven",
+      "observations": [
+        "compaction:completed",
+        "compaction:failed",
+        "compaction:cancelled",
+        "compaction:budget_exceeded",
+        "summary_retains_expandable_ui"
+      ],
+      "status": "incomplete"
+    },
+    {
+      "evidence": {
+        "commands": [
+          "PYTHONPATH=backend WEBUI_SECRET_KEY=test-secret ENABLE_DB_MIGRATIONS=false DATABASE_ENABLE_SESSION_SHARING=true uv run --no-project --python 3.12 --with-requirements backend/requirements.txt --with pytest --with pytest-asyncio pytest backend/open_webui/test/agent/test_chat_entry_agent_mode.py::test_agent_mode_runtime_unavailable_marks_run_failed_and_visible -q",
+          "PYTHONPATH=backend WEBUI_SECRET_KEY=test-secret ENABLE_DB_MIGRATIONS=false DATABASE_ENABLE_SESSION_SHARING=true uv run --no-project --python 3.12 --with-requirements backend/requirements.txt --with pytest --with pytest-asyncio pytest backend/open_webui/test/agent/test_chat_entry_agent_mode.py backend/open_webui/test/agent/test_events.py backend/open_webui/test/agent/test_w12_acceptance_harness.py backend/open_webui/test/models/test_agent_runs.py::test_final_started_helpers_and_final_text_accumulation -q"
+        ],
+        "notes": "Supporting backend evidence now covers the required failure observations after the fix. It is still not marked live_passed because no direct integrated-service request against a running OpenWebUI process and unavailable runtime was captured in this handoff."
+      },
+      "id": "scenario_12_runtime_unavailable_failure",
+      "live_status": "not_proven",
+      "observations": [],
+      "required_observations": [
+        "ENABLE_AGENT_MODE:true",
+        "runtime_unavailable",
+        "event:run.failed",
+        "no_silent_legacy_fallback"
+      ],
+      "status": "incomplete",
+      "supporting_observations": [
+        "Focused chat entry test runs with ENABLE_AGENT_MODE true.",
+        "Runtime unavailable path returns agent_runtime_unavailable and marks the Agent Run failed.",
+        "Narrow fix adds a run.failed Agent Run event on runtime start failure.",
+        "Focused chat entry test asserts no legacy provider fallback is called."
+      ]
+    }
+  ],
+  "scope": "Agent Mode W12B live acceptance evidence"
+}

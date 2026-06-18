@@ -1,0 +1,709 @@
+{
+  "backend_url": "http://127.0.0.1:18104",
+  "blockers": [],
+  "branch": "codex/agent-mode-w12d-sse-ui",
+  "data_dir": "/private/tmp/openwebui-agent-mode-w12d-sse-data",
+  "generated_at": "2026-06-18T10:37:17+0800",
+  "mode": "live",
+  "runtime_url": "http://127.0.0.1:8114",
+  "scenarios": [
+    {
+      "evidence": {
+        "all_event_types": [
+          {
+            "event_type": "run.running",
+            "seq": 1
+          },
+          {
+            "event_type": "action.summary",
+            "seq": 2
+          },
+          {
+            "event_type": "final.started",
+            "seq": 3
+          },
+          {
+            "event_type": "final.delta",
+            "seq": 4
+          },
+          {
+            "event_type": "final.delta",
+            "seq": 5
+          },
+          {
+            "event_type": "run.completed",
+            "seq": 6
+          }
+        ],
+        "assistant_message_id": "w12d-assistant-1781750237-ab23b64b",
+        "chat_id": "w12d-sse-chat-1781750237-ab23b64b",
+        "chat_readback_agent_run_id": "11a09238-0455-48af-b235-4a1a0b1a88ce",
+        "delta_event_seqs": [
+          4,
+          5
+        ],
+        "duplicate_final_delta_response_seq": 5,
+        "duplicate_seq_ignored": [
+          3
+        ],
+        "event_seq_range": [
+          1,
+          6
+        ],
+        "final_text": "SSE reconnect final answer arrived once.",
+        "json_after_seq_3": [
+          4,
+          5,
+          6
+        ],
+        "last_event_id": 3,
+        "reconnect_method": "GET /api/agent/runs/{run_id}/events with Last-Event-ID: 3",
+        "run_id": "11a09238-0455-48af-b235-4a1a0b1a88ce",
+        "sse_backfilled_event_types": [
+          "final.delta",
+          "final.delta",
+          "run.completed"
+        ],
+        "sse_backfilled_seq": [
+          4,
+          5,
+          6
+        ],
+        "sse_content_type": "text/event-stream; charset=utf-8",
+        "sse_payload_seq": [
+          4,
+          5,
+          6
+        ],
+        "sse_status": 200,
+        "ui_proof": {
+          "dom_assertions": {
+            "agent_run_event_count": 5,
+            "final_containers": 1,
+            "final_text": "SSE reconnect final answer arrived once.",
+            "final_text_occurrences_after_reload": 1,
+            "visible_event_summaries": [
+              "Runtime accepted\\nLEADER",
+              "Preparing reconnect proof\\nLEADER",
+              "Writing final answer\\nLEADER",
+              "Streaming final answer\\nLEADER",
+              "Agent completed\\nLEADER"
+            ]
+          },
+          "frontend_resource_urls": [
+            "http://127.0.0.1:18104/api/agent/runs/11a09238-0455-48af-b235-4a1a0b1a88ce/events/list?after_seq=0",
+            "http://127.0.0.1:18104/api/agent/runs/11a09238-0455-48af-b235-4a1a0b1a88ce/events?after_seq=6"
+          ],
+          "method": "agent-browser reload of real /c/{chat_id} page after browser signin",
+          "no_raw_reasoning_visible": true,
+          "screenshot_path": "/Users/liusihang/openwebui/.worktrees/agent-mode-w12d-sse-ui/handoff/agent-mode/w12d-sse-ui-proof.png",
+          "status": "captured"
+        }
+      },
+      "id": "scenario_08_sse_reconnect_backfill",
+      "live_status": "passed",
+      "observations": [
+        "last_event_id_reconnect",
+        "backfill_by_seq",
+        "dedupe_seq"
+      ],
+      "status": "live_passed"
+    },
+    {
+      "evidence": {
+        "compaction_trigger": "AgentRuns.transition_state terminal target with summary absent",
+        "duplicate_terminal_callbacks": "same terminal state returned unchanged summary and state_version",
+        "runs": {
+          "budget_exceeded": {
+            "duplicate_terminal_summary_unchanged": true,
+            "event_seq_range": [
+              1,
+              4
+            ],
+            "event_types": [
+              {
+                "event_type": "run.running",
+                "seq": 1
+              },
+              {
+                "event_type": "action.summary",
+                "seq": 2
+              },
+              {
+                "event_type": "tool.completed",
+                "seq": 3
+              },
+              {
+                "event_type": "run.budget_exceeded",
+                "seq": 4
+              }
+            ],
+            "registered_artifact_ids": [
+              "e6bfc060-af6a-48bb-b566-22167444ad76",
+              "e70a2eb1-1718-4ea4-81b2-ee50ca911593"
+            ],
+            "run_id": "fd02f780-d7a6-4023-9b33-851b98de8f29",
+            "state_version_after_duplicate": 2,
+            "state_version_after_terminal": 2,
+            "summary_actions": [
+              {
+                "participant_id": "leader",
+                "seq": 2,
+                "summary": "Collecting terminal results for budget_exceeded"
+              }
+            ],
+            "summary_artifacts": [
+              {
+                "created_at": 1781750237860743000,
+                "id": "e6bfc060-af6a-48bb-b566-22167444ad76",
+                "kind": "file",
+                "metadata": {
+                  "cleanup_eligible": false,
+                  "label": "report-budget_exceeded",
+                  "retention": "user_visible_output"
+                },
+                "mime_type": "text/plain",
+                "path": "/workspace/agent-runs/fd02f780-d7a6-4023-9b33-851b98de8f29/outputs/report-budget_exceeded.txt",
+                "size": 128,
+                "terminal_server_id": "terminal-main",
+                "url": "/api/agent/runs/fd02f780-d7a6-4023-9b33-851b98de8f29/artifacts/report-budget_exceeded/content"
+              },
+              {
+                "created_at": 1781750237862952000,
+                "id": "e70a2eb1-1718-4ea4-81b2-ee50ca911593",
+                "kind": "file",
+                "metadata": {
+                  "cleanup_after_ns": 1782355037866942000,
+                  "cleanup_eligible": true,
+                  "label": "debug-budget_exceeded",
+                  "retention": "temporary_debug"
+                },
+                "mime_type": "text/plain",
+                "path": "/workspace/agent-runs/fd02f780-d7a6-4023-9b33-851b98de8f29/tmp/debug-budget_exceeded.log",
+                "size": 64,
+                "terminal_server_id": "terminal-main",
+                "url": null
+              }
+            ],
+            "summary_audit": {
+              "first_seq": 1,
+              "last_seq": 4,
+              "pruned_event_types": [
+                "run.running"
+              ],
+              "retained_event_count": 3,
+              "retained_event_seqs": [
+                2,
+                3,
+                4
+              ]
+            },
+            "summary_process_refs": [
+              {
+                "command": "python build_report.py",
+                "exit_code": null,
+                "log_path": "/workspace/agent-runs/fd02f780-d7a6-4023-9b33-851b98de8f29/tmp/process.jsonl",
+                "next_offset": 42,
+                "process_id": "proc-budget_exceeded-1781750237-ab23b64b",
+                "status": "running",
+                "terminal_server_id": "terminal-main"
+              }
+            ],
+            "summary_state": "budget_exceeded",
+            "summary_tools": [
+              {
+                "arguments_summary": "python build_report.py",
+                "artifacts": [
+                  {
+                    "kind": "file",
+                    "mime_type": "text/plain",
+                    "path": "/workspace/agent-runs/fd02f780-d7a6-4023-9b33-851b98de8f29/outputs/report-budget_exceeded.txt"
+                  },
+                  {
+                    "kind": "file",
+                    "mime_type": "text/plain",
+                    "path": "/workspace/agent-runs/fd02f780-d7a6-4023-9b33-851b98de8f29/tmp/debug-budget_exceeded.log"
+                  }
+                ],
+                "name": "run_command",
+                "participant_id": "leader",
+                "process_refs": [
+                  {
+                    "process_id": "proc-budget_exceeded-1781750237-ab23b64b",
+                    "status": "running"
+                  }
+                ],
+                "result_status": "success",
+                "seq": 3,
+                "structured_error": null,
+                "summary": "Terminal command produced report artifacts",
+                "warnings": []
+              }
+            ],
+            "summary_ui_keys": [
+              "actions",
+              "approvals",
+              "artifacts",
+              "budget",
+              "errors",
+              "participants",
+              "process_refs",
+              "subagents",
+              "tools",
+              "warnings"
+            ],
+            "terminal_event_type": "run.budget_exceeded"
+          },
+          "cancelled": {
+            "duplicate_terminal_summary_unchanged": true,
+            "event_seq_range": [
+              1,
+              4
+            ],
+            "event_types": [
+              {
+                "event_type": "run.running",
+                "seq": 1
+              },
+              {
+                "event_type": "action.summary",
+                "seq": 2
+              },
+              {
+                "event_type": "tool.completed",
+                "seq": 3
+              },
+              {
+                "event_type": "run.cancelled",
+                "seq": 4
+              }
+            ],
+            "registered_artifact_ids": [
+              "71dfc984-a845-4c90-9678-87e372ff89f3",
+              "2dcc4fd4-2f67-4f12-94cf-f0c2a17f50af"
+            ],
+            "run_id": "c39b6ffe-78e8-4d7a-bdf2-a3f99b3b7929",
+            "state_version_after_duplicate": 2,
+            "state_version_after_terminal": 2,
+            "summary_actions": [
+              {
+                "participant_id": "leader",
+                "seq": 2,
+                "summary": "Collecting terminal results for cancelled"
+              }
+            ],
+            "summary_artifacts": [
+              {
+                "created_at": 1781750237839717000,
+                "id": "71dfc984-a845-4c90-9678-87e372ff89f3",
+                "kind": "file",
+                "metadata": {
+                  "cleanup_eligible": false,
+                  "label": "report-cancelled",
+                  "retention": "user_visible_output"
+                },
+                "mime_type": "text/plain",
+                "path": "/workspace/agent-runs/c39b6ffe-78e8-4d7a-bdf2-a3f99b3b7929/outputs/report-cancelled.txt",
+                "size": 128,
+                "terminal_server_id": "terminal-main",
+                "url": "/api/agent/runs/c39b6ffe-78e8-4d7a-bdf2-a3f99b3b7929/artifacts/report-cancelled/content"
+              },
+              {
+                "created_at": 1781750237842762000,
+                "id": "2dcc4fd4-2f67-4f12-94cf-f0c2a17f50af",
+                "kind": "file",
+                "metadata": {
+                  "cleanup_after_ns": 1782355037845918000,
+                  "cleanup_eligible": true,
+                  "label": "debug-cancelled",
+                  "retention": "temporary_debug"
+                },
+                "mime_type": "text/plain",
+                "path": "/workspace/agent-runs/c39b6ffe-78e8-4d7a-bdf2-a3f99b3b7929/tmp/debug-cancelled.log",
+                "size": 64,
+                "terminal_server_id": "terminal-main",
+                "url": null
+              }
+            ],
+            "summary_audit": {
+              "first_seq": 1,
+              "last_seq": 4,
+              "pruned_event_types": [
+                "run.running"
+              ],
+              "retained_event_count": 3,
+              "retained_event_seqs": [
+                2,
+                3,
+                4
+              ]
+            },
+            "summary_process_refs": [
+              {
+                "command": "python build_report.py",
+                "exit_code": null,
+                "log_path": "/workspace/agent-runs/c39b6ffe-78e8-4d7a-bdf2-a3f99b3b7929/tmp/process.jsonl",
+                "next_offset": 42,
+                "process_id": "proc-cancelled-1781750237-ab23b64b",
+                "status": "running",
+                "terminal_server_id": "terminal-main"
+              }
+            ],
+            "summary_state": "cancelled",
+            "summary_tools": [
+              {
+                "arguments_summary": "python build_report.py",
+                "artifacts": [
+                  {
+                    "kind": "file",
+                    "mime_type": "text/plain",
+                    "path": "/workspace/agent-runs/c39b6ffe-78e8-4d7a-bdf2-a3f99b3b7929/outputs/report-cancelled.txt"
+                  },
+                  {
+                    "kind": "file",
+                    "mime_type": "text/plain",
+                    "path": "/workspace/agent-runs/c39b6ffe-78e8-4d7a-bdf2-a3f99b3b7929/tmp/debug-cancelled.log"
+                  }
+                ],
+                "name": "run_command",
+                "participant_id": "leader",
+                "process_refs": [
+                  {
+                    "process_id": "proc-cancelled-1781750237-ab23b64b",
+                    "status": "running"
+                  }
+                ],
+                "result_status": "success",
+                "seq": 3,
+                "structured_error": null,
+                "summary": "Terminal command produced report artifacts",
+                "warnings": []
+              }
+            ],
+            "summary_ui_keys": [
+              "actions",
+              "approvals",
+              "artifacts",
+              "budget",
+              "errors",
+              "participants",
+              "process_refs",
+              "subagents",
+              "tools",
+              "warnings"
+            ],
+            "terminal_event_type": "run.cancelled"
+          },
+          "completed": {
+            "duplicate_terminal_summary_unchanged": true,
+            "event_seq_range": [
+              1,
+              4
+            ],
+            "event_types": [
+              {
+                "event_type": "run.running",
+                "seq": 1
+              },
+              {
+                "event_type": "action.summary",
+                "seq": 2
+              },
+              {
+                "event_type": "tool.completed",
+                "seq": 3
+              },
+              {
+                "event_type": "run.completed",
+                "seq": 4
+              }
+            ],
+            "registered_artifact_ids": [
+              "c32145c6-e698-4f60-95af-75ca55cb5dcb",
+              "d1eb86c5-3977-43a6-a1ee-fb1f3709f98f"
+            ],
+            "run_id": "8dcb910c-5f0d-4fd2-bd35-12742e1932f3",
+            "state_version_after_duplicate": 3,
+            "state_version_after_terminal": 3,
+            "summary_actions": [
+              {
+                "participant_id": "leader",
+                "seq": 2,
+                "summary": "Collecting terminal results for completed"
+              }
+            ],
+            "summary_artifacts": [
+              {
+                "created_at": 1781750237795342000,
+                "id": "c32145c6-e698-4f60-95af-75ca55cb5dcb",
+                "kind": "file",
+                "metadata": {
+                  "cleanup_eligible": false,
+                  "label": "report-completed",
+                  "retention": "user_visible_output"
+                },
+                "mime_type": "text/plain",
+                "path": "/workspace/agent-runs/8dcb910c-5f0d-4fd2-bd35-12742e1932f3/outputs/report-completed.txt",
+                "size": 128,
+                "terminal_server_id": "terminal-main",
+                "url": "/api/agent/runs/8dcb910c-5f0d-4fd2-bd35-12742e1932f3/artifacts/report-completed/content"
+              },
+              {
+                "created_at": 1781750237797937000,
+                "id": "d1eb86c5-3977-43a6-a1ee-fb1f3709f98f",
+                "kind": "file",
+                "metadata": {
+                  "cleanup_after_ns": 1782355037804132000,
+                  "cleanup_eligible": true,
+                  "label": "debug-completed",
+                  "retention": "temporary_debug"
+                },
+                "mime_type": "text/plain",
+                "path": "/workspace/agent-runs/8dcb910c-5f0d-4fd2-bd35-12742e1932f3/tmp/debug-completed.log",
+                "size": 64,
+                "terminal_server_id": "terminal-main",
+                "url": null
+              }
+            ],
+            "summary_audit": {
+              "first_seq": 1,
+              "last_seq": 4,
+              "pruned_event_types": [
+                "run.running"
+              ],
+              "retained_event_count": 3,
+              "retained_event_seqs": [
+                2,
+                3,
+                4
+              ]
+            },
+            "summary_process_refs": [
+              {
+                "command": "python build_report.py",
+                "exit_code": null,
+                "log_path": "/workspace/agent-runs/8dcb910c-5f0d-4fd2-bd35-12742e1932f3/tmp/process.jsonl",
+                "next_offset": 42,
+                "process_id": "proc-completed-1781750237-ab23b64b",
+                "status": "running",
+                "terminal_server_id": "terminal-main"
+              }
+            ],
+            "summary_state": "completed",
+            "summary_tools": [
+              {
+                "arguments_summary": "python build_report.py",
+                "artifacts": [
+                  {
+                    "kind": "file",
+                    "mime_type": "text/plain",
+                    "path": "/workspace/agent-runs/8dcb910c-5f0d-4fd2-bd35-12742e1932f3/outputs/report-completed.txt"
+                  },
+                  {
+                    "kind": "file",
+                    "mime_type": "text/plain",
+                    "path": "/workspace/agent-runs/8dcb910c-5f0d-4fd2-bd35-12742e1932f3/tmp/debug-completed.log"
+                  }
+                ],
+                "name": "run_command",
+                "participant_id": "leader",
+                "process_refs": [
+                  {
+                    "process_id": "proc-completed-1781750237-ab23b64b",
+                    "status": "running"
+                  }
+                ],
+                "result_status": "success",
+                "seq": 3,
+                "structured_error": null,
+                "summary": "Terminal command produced report artifacts",
+                "warnings": []
+              }
+            ],
+            "summary_ui_keys": [
+              "actions",
+              "approvals",
+              "artifacts",
+              "budget",
+              "errors",
+              "participants",
+              "process_refs",
+              "subagents",
+              "tools",
+              "warnings"
+            ],
+            "terminal_event_type": "run.completed"
+          },
+          "failed": {
+            "duplicate_terminal_summary_unchanged": true,
+            "event_seq_range": [
+              1,
+              4
+            ],
+            "event_types": [
+              {
+                "event_type": "run.running",
+                "seq": 1
+              },
+              {
+                "event_type": "action.summary",
+                "seq": 2
+              },
+              {
+                "event_type": "tool.completed",
+                "seq": 3
+              },
+              {
+                "event_type": "run.failed",
+                "seq": 4
+              }
+            ],
+            "registered_artifact_ids": [
+              "74103068-554f-4716-b162-f09f621ebbb8",
+              "66ceb01f-8eef-4a8c-bb7e-5543f554da1e"
+            ],
+            "run_id": "fb600ee5-3c55-42ac-92bb-e6215a0340de",
+            "state_version_after_duplicate": 2,
+            "state_version_after_terminal": 2,
+            "summary_actions": [
+              {
+                "participant_id": "leader",
+                "seq": 2,
+                "summary": "Collecting terminal results for failed"
+              }
+            ],
+            "summary_artifacts": [
+              {
+                "created_at": 1781750237819366000,
+                "id": "74103068-554f-4716-b162-f09f621ebbb8",
+                "kind": "file",
+                "metadata": {
+                  "cleanup_eligible": false,
+                  "label": "report-failed",
+                  "retention": "user_visible_output"
+                },
+                "mime_type": "text/plain",
+                "path": "/workspace/agent-runs/fb600ee5-3c55-42ac-92bb-e6215a0340de/outputs/report-failed.txt",
+                "size": 128,
+                "terminal_server_id": "terminal-main",
+                "url": "/api/agent/runs/fb600ee5-3c55-42ac-92bb-e6215a0340de/artifacts/report-failed/content"
+              },
+              {
+                "created_at": 1781750237821153000,
+                "id": "66ceb01f-8eef-4a8c-bb7e-5543f554da1e",
+                "kind": "file",
+                "metadata": {
+                  "cleanup_after_ns": 1782355037825374000,
+                  "cleanup_eligible": true,
+                  "label": "debug-failed",
+                  "retention": "temporary_debug"
+                },
+                "mime_type": "text/plain",
+                "path": "/workspace/agent-runs/fb600ee5-3c55-42ac-92bb-e6215a0340de/tmp/debug-failed.log",
+                "size": 64,
+                "terminal_server_id": "terminal-main",
+                "url": null
+              }
+            ],
+            "summary_audit": {
+              "first_seq": 1,
+              "last_seq": 4,
+              "pruned_event_types": [
+                "run.running"
+              ],
+              "retained_event_count": 3,
+              "retained_event_seqs": [
+                2,
+                3,
+                4
+              ]
+            },
+            "summary_process_refs": [
+              {
+                "command": "python build_report.py",
+                "exit_code": null,
+                "log_path": "/workspace/agent-runs/fb600ee5-3c55-42ac-92bb-e6215a0340de/tmp/process.jsonl",
+                "next_offset": 42,
+                "process_id": "proc-failed-1781750237-ab23b64b",
+                "status": "running",
+                "terminal_server_id": "terminal-main"
+              }
+            ],
+            "summary_state": "failed",
+            "summary_tools": [
+              {
+                "arguments_summary": "python build_report.py",
+                "artifacts": [
+                  {
+                    "kind": "file",
+                    "mime_type": "text/plain",
+                    "path": "/workspace/agent-runs/fb600ee5-3c55-42ac-92bb-e6215a0340de/outputs/report-failed.txt"
+                  },
+                  {
+                    "kind": "file",
+                    "mime_type": "text/plain",
+                    "path": "/workspace/agent-runs/fb600ee5-3c55-42ac-92bb-e6215a0340de/tmp/debug-failed.log"
+                  }
+                ],
+                "name": "run_command",
+                "participant_id": "leader",
+                "process_refs": [
+                  {
+                    "process_id": "proc-failed-1781750237-ab23b64b",
+                    "status": "running"
+                  }
+                ],
+                "result_status": "success",
+                "seq": 3,
+                "structured_error": null,
+                "summary": "Terminal command produced report artifacts",
+                "warnings": []
+              }
+            ],
+            "summary_ui_keys": [
+              "actions",
+              "approvals",
+              "artifacts",
+              "budget",
+              "errors",
+              "participants",
+              "process_refs",
+              "subagents",
+              "tools",
+              "warnings"
+            ],
+            "terminal_event_type": "run.failed"
+          }
+        },
+        "summary_keys_required": [
+          "participants",
+          "tools",
+          "approvals",
+          "subagents",
+          "artifacts",
+          "process_refs"
+        ],
+        "terminal_states": [
+          "completed",
+          "failed",
+          "cancelled",
+          "budget_exceeded"
+        ]
+      },
+      "id": "scenario_11_terminal_state_compaction",
+      "live_status": "passed",
+      "observations": [
+        "compaction:completed",
+        "compaction:failed",
+        "compaction:cancelled",
+        "compaction:budget_exceeded",
+        "summary_retains_expandable_ui"
+      ],
+      "status": "live_passed"
+    }
+  ],
+  "scope": "OpenWebUI Agent Mode acceptance scenarios 8 and 11",
+  "static_dir": "/private/tmp/openwebui-agent-mode-w12d-sse-static",
+  "worker": "W12D-4",
+  "worktree": "/Users/liusihang/openwebui/.worktrees/agent-mode-w12d-sse-ui"
+}
