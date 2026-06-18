@@ -22,12 +22,24 @@ from open_webui.models.agent_runs import (
 from sqlalchemy import inspect
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
+AGENT_RUN_TABLES = [
+    AgentRun.__table__,
+    AgentRunEvent.__table__,
+    AgentArtifact.__table__,
+    AgentRunOperation.__table__,
+]
+
 
 @pytest_asyncio.fixture
 async def agent_db():
     engine = create_async_engine('sqlite+aiosqlite:///:memory:')
     async with engine.begin() as conn:
-        await conn.run_sync(Base.metadata.create_all)
+        await conn.run_sync(
+            lambda sync_conn: Base.metadata.create_all(
+                sync_conn,
+                tables=AGENT_RUN_TABLES,
+            )
+        )
 
     session_factory = async_sessionmaker(engine, expire_on_commit=False)
 
@@ -383,7 +395,12 @@ def test_agent_run_tables_create_in_sqlite_metadata():
 
     async def create_and_inspect():
         async with engine.begin() as conn:
-            await conn.run_sync(Base.metadata.create_all)
+            await conn.run_sync(
+                lambda sync_conn: Base.metadata.create_all(
+                    sync_conn,
+                    tables=AGENT_RUN_TABLES,
+                )
+            )
             return await conn.run_sync(lambda sync_conn: inspect(sync_conn).get_table_names())
 
     import asyncio

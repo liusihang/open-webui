@@ -82,6 +82,29 @@ def append_agent_event(
     return store.append_event(event)
 
 
+async def append_agent_event_async(
+    store,
+    event: AgentEventAppend,
+) -> AgentRunEvent:
+    if (
+        await store.has_final_started(event.run_id)
+        and event.event_type in POST_FINAL_BLOCKED_EVENT_TYPES
+    ):
+        raise AgentEventRejected(
+            f'{event.event_type.value} cannot be appended after final.started'
+        )
+
+    stored = await store.append_event(
+        event.run_id,
+        event_type=event.event_type.value,
+        participant_id=event.participant_id,
+        phase=event.phase,
+        summary=event.summary,
+        payload=event.payload,
+    )
+    return _coerce_event(stored)
+
+
 def list_events_for_reconnect(
     store: AgentEventStore,
     run_id: str,
@@ -90,6 +113,17 @@ def list_events_for_reconnect(
     if after_seq < 0:
         raise AgentEventRejected('after_seq must be greater than or equal to 0')
     return store.list_events_after(run_id, after_seq=after_seq)
+
+
+async def list_events_for_reconnect_async(
+    store,
+    run_id: str,
+    after_seq: int = 0,
+) -> list[AgentRunEvent]:
+    if after_seq < 0:
+        raise AgentEventRejected('after_seq must be greater than or equal to 0')
+    events = await store.list_events_after(run_id, after_seq=after_seq)
+    return [_coerce_event(event) for event in events]
 
 
 def append_final_delta(
@@ -137,6 +171,78 @@ def append_final_delta(
         return duplicate_event
 
     return append_agent_event(
+        store,
+        AgentEventAppend(
+            run_id=delta.run_id,
+            event_type=AgentEventType.FINAL_DELTA,
+            participant_id=delta.participant_id,
+            phase=AgentRunState.FINALIZING.value,
+            summary=None,
+            payload={
+                **delta.payload,
+                'final_stream_id': delta.final_stream_id,
+                'delta_index': delta.delta_index,
+                'delta': delta.delta,
+                'text': text_after_delta,
+            },
+            idempotency_key=delta.idempotency_key,
+        ),
+    )
+
+
+async def append_final_delta_async(
+    store,
+    delta: FinalDeltaAppend,
+) -> AgentRunEvent:
+    if _coerce_state(await store.get_run_state(delta.run_id)) != AgentRunState.FINALIZING:
+        raise FinalDeltaRejected('final.delta is only accepted while run is finalizing')
+    if not await store.has_final_started(delta.run_id):
+        raise FinalDeltaRejected('final.delta requires final.started first')
+
+    before_events = await list_events_for_reconnect_async(
+        store,
+        delta.run_id,
+        after_seq=0,
+    )
+    before_final_delta_count = _count_final_deltas(
+        before_events,
+        delta.final_stream_id,
+        delta.delta_index,
+    )
+
+    try:
+        text_after_delta = await store.append_final_text_delta(
+            delta.run_id,
+            delta.final_stream_id,
+            delta.delta_index,
+            delta.delta,
+        )
+    except ValueError as exc:
+        raise FinalDeltaRejected(f'final delta gap: {exc}') from exc
+
+    after_events = await list_events_for_reconnect_async(
+        store,
+        delta.run_id,
+        after_seq=0,
+    )
+    after_final_delta_count = _count_final_deltas(
+        after_events,
+        delta.final_stream_id,
+        delta.delta_index,
+    )
+    if after_final_delta_count > before_final_delta_count:
+        return _find_final_delta_event(after_events, delta.final_stream_id, delta.delta_index)
+
+    duplicate_event = _find_final_delta_event(
+        after_events,
+        delta.final_stream_id,
+        delta.delta_index,
+        required=False,
+    )
+    if duplicate_event is not None:
+        return duplicate_event
+
+    return await append_agent_event_async(
         store,
         AgentEventAppend(
             run_id=delta.run_id,
@@ -217,3 +323,18 @@ def _find_final_delta_event(
     if required:
         raise AgentEventStoreConflict('final delta text was stored without an event')
     return None
+
+
+def _coerce_event(event) -> AgentRunEvent:
+    if isinstance(event, AgentRunEvent):
+        return event
+    payload = event.model_dump(mode='json') if hasattr(event, 'model_dump') else dict(event)
+    if payload.get('payload') is None:
+        payload['payload'] = {}
+    return AgentRunEvent.model_validate(payload)
+
+
+def _coerce_state(state) -> AgentRunState:
+    if isinstance(state, AgentRunState):
+        return state
+    return AgentRunState(str(state))

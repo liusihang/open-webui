@@ -503,6 +503,8 @@ from open_webui.models.models import Models
 from open_webui.models.users import UserModel, Users
 from open_webui.routers import (
     analytics,
+    agent_runs,
+    agent_service,
     audio,
     auths,
     automations,
@@ -2029,6 +2031,8 @@ app.include_router(utils.router, prefix='/api/v1/utils', tags=['utils'])
 app.include_router(terminals.router, prefix='/api/v1/terminals', tags=['terminals'])
 app.include_router(automations.router, prefix='/api/v1/automations', tags=['automations'])
 app.include_router(calendar.router, prefix='/api/v1/calendars', tags=['calendars'])
+app.include_router(agent_runs.router, prefix='/api/agent/runs', tags=['agent-runs'])
+app.include_router(agent_service.router, prefix='/api/agent/service', tags=['agent-service'])
 
 # SCIM 2.0 API for identity management
 if ENABLE_SCIM:
@@ -2282,6 +2286,11 @@ def _agent_runtime_payload(
     leader_model_id: str,
     budget: dict,
 ) -> dict:
+    model_meta = {}
+    model = metadata.get('model')
+    if isinstance(model, dict):
+        model_meta = model.get('info', {}).get('meta', {}) or {}
+
     return {
         'run_id': run.id,
         'chat_id': metadata.get('chat_id'),
@@ -2293,17 +2302,19 @@ def _agent_runtime_payload(
             'role': getattr(user, 'role', None),
         },
         'budget': budget,
-        'team_cap': {
-            'max_subagents': budget.get('team_max_subagents'),
-        },
+        'team_cap': budget.get('team_max_subagents'),
         'default_paths': {
             'outputs': f'/workspace/agent-runs/{run.id}/outputs',
             'tmp': f'/workspace/agent-runs/{run.id}/tmp',
         },
         'tool_access_envelope': {},
-        'model_catalog': {
-            'leader_model_id': leader_model_id,
-        },
+        'model_catalog': [
+            {
+                'id': leader_model_id,
+                'role': 'leader',
+                'meta': model_meta,
+            }
+        ],
         'messages': [metadata.get('user_message')] if metadata.get('user_message') else [],
         'metadata': {
             'session_id': metadata.get('session_id'),

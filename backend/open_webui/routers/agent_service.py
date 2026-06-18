@@ -14,7 +14,9 @@ from open_webui.agent.events import (
     AgentEventError,
     AgentEventStore,
     append_agent_event,
+    append_agent_event_async,
     append_final_delta,
+    append_final_delta_async,
 )
 from open_webui.agent.model_authority import (
     AgentModelAuthority,
@@ -40,8 +42,8 @@ from open_webui.agent.tool_authority import (
     ToolCallRequest,
     ToolOperationInProgress,
 )
-from open_webui.models.agent_runs import AgentRunOperationConflict
-from open_webui.routers.agent_runs import get_agent_event_store
+from open_webui.models.agent_runs import AgentRunOperationConflict, AgentRuns
+from open_webui.routers.agent_runs import get_configured_agent_event_store
 
 router = APIRouter()
 
@@ -95,7 +97,7 @@ def get_agent_model_authority(request: Request) -> AgentModelAuthority:
     if authority is not None:
         return authority
 
-    return AgentModelAuthority(operation_store=get_agent_event_store(request))
+    return AgentModelAuthority(operation_store=get_agent_operation_store(request))
 
 
 def get_agent_tool_authority(request: Request) -> AgentToolAuthority:
@@ -111,7 +113,7 @@ def get_agent_tool_authority(request: Request) -> AgentToolAuthority:
         )
 
     return AgentToolAuthority(
-        operation_store=get_agent_event_store(request),
+        operation_store=get_agent_operation_store(request),
         registry=registry,
         resource_manager=getattr(request.app.state, 'AGENT_RUN_RESOURCE_MANAGER', None),
         artifact_registrar=getattr(request.app.state, 'AGENT_RUN_ARTIFACT_REGISTRAR', None),
@@ -123,7 +125,7 @@ def get_agent_approval_coordinator(request: Request) -> AgentApprovalCoordinator
     if coordinator is not None:
         return coordinator
 
-    coordinator = AgentApprovalCoordinator(get_agent_event_store(request))
+    coordinator = AgentApprovalCoordinator(get_agent_operation_store(request))
     request.app.state.AGENT_APPROVAL_COORDINATOR = coordinator
     return coordinator
 
@@ -136,6 +138,14 @@ def get_agent_subagent_coordinator(request: Request) -> AgentSubagentCoordinator
     coordinator = AgentSubagentCoordinator()
     request.app.state.AGENT_SUBAGENT_COORDINATOR = coordinator
     return coordinator
+
+
+def get_agent_operation_store(request: Request):
+    return get_configured_agent_event_store(request) or AgentRuns
+
+
+def get_optional_agent_event_store(request: Request) -> AgentEventStore | None:
+    return get_configured_agent_event_store(request)
 
 
 @router.post('/runs/{run_id}/subagents')
@@ -179,17 +189,18 @@ async def append_agent_run_event(
         default=None,
         alias='X-Agent-Idempotency-Key',
     ),
-    store: AgentEventStore = Depends(get_agent_event_store),
+    store: AgentEventStore | None = Depends(get_optional_agent_event_store),
 ):
     key = _require_matching_idempotency_key(
         form_data.idempotency_key,
         idempotency_key,
     )
     try:
-        event = append_agent_event(
-            store,
-            form_data.model_copy(update={'run_id': run_id, 'idempotency_key': key}),
-        )
+        event_payload = form_data.model_copy(update={'run_id': run_id, 'idempotency_key': key})
+        if store is not None:
+            event = append_agent_event(store, event_payload)
+        else:
+            event = await append_agent_event_async(AgentRuns, event_payload)
     except AgentEventError as exc:
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
     return event
@@ -253,17 +264,18 @@ async def append_agent_run_final_delta(
         default=None,
         alias='X-Agent-Idempotency-Key',
     ),
-    store: AgentEventStore = Depends(get_agent_event_store),
+    store: AgentEventStore | None = Depends(get_optional_agent_event_store),
 ):
     key = _require_matching_idempotency_key(
         form_data.idempotency_key,
         idempotency_key,
     )
     try:
-        event = append_final_delta(
-            store,
-            form_data.model_copy(update={'run_id': run_id, 'idempotency_key': key}),
-        )
+        delta_payload = form_data.model_copy(update={'run_id': run_id, 'idempotency_key': key})
+        if store is not None:
+            event = append_final_delta(store, delta_payload)
+        else:
+            event = await append_final_delta_async(AgentRuns, delta_payload)
     except AgentEventError as exc:
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
     return event

@@ -515,7 +515,170 @@ Merged W12B evidence:
 
 Next controller action:
 
-1. Commit the merged evidence and this controller update.
-2. Close completed W12B workers.
-3. Start a real local integrated-service acceptance attempt or record the
-   exact environmental blocker if local services cannot be stood up.
+1. Keep the merged W12B evidence as historical first-pass evidence, but do not
+   claim live acceptance from it.
+2. Continue with the W12C live-blocker remediation plan below.
+3. After W12C is green, dispatch W12D final integrated-service acceptance.
+
+## W12C/W12D Plan Refresh
+
+Date: 2026-06-18
+
+Reason:
+
+- The implementation plan was refreshed after the first real/local
+  integrated-service attempt. W12B is no longer the right label for the next
+  work because W12B already means the first scenario-worker/evidence wave.
+- The next work is a small live-blocker remediation wave followed by final
+  integrated-service acceptance.
+
+Current integration source:
+
+- Worktree:
+  `/Users/liusihang/openwebui/.worktrees/agent-mode-agentscope-pr7`
+- Branch: `codex/agent-mode-agentscope-pr7`
+- Current committed HEAD: `b40a4af6c`
+
+Current dirty state that must be handled carefully:
+
+- `backend/open_webui/main.py` has live-preflight fixes:
+  - imports and mounts `agent_runs` and `agent_service` routers;
+  - changes runtime start payload so `team_cap` is an integer and
+    `model_catalog` is a list compatible with the runtime service schema.
+- `backend/open_webui/test/agent/test_chat_entry_agent_mode.py` has focused
+  tests for the router mount and runtime payload contract.
+- `backend/open_webui/static/*` files currently show as deleted in the worktree.
+  Treat these as unrelated dirty state until provenance is proven. Do not stage
+  them with agent-mode fixes.
+- Root `uv.lock` currently shows dirty state from local tooling churn. Restore
+  or leave it unstaged unless a root dependency change is intentionally owned.
+
+Live preflight findings:
+
+1. First live attempt failed on runtime payload shape:
+   - runtime expected `team_cap` as an integer;
+   - runtime expected `model_catalog` as a list.
+   The current uncommitted `main.py` diff addresses this.
+2. Second live attempt failed because Agent Run routers were not mounted on the
+   main FastAPI app.
+   The current uncommitted `main.py` diff addresses this.
+3. Third live attempt reached the real remaining blocker:
+   `503 Agent Run storage is not configured`.
+   `backend/open_webui/routers/agent_runs.py::get_agent_event_store` still
+   expects `app.state.AGENT_EVENT_STORE` or `app.state.agent_event_store`, but
+   the production app does not install a DB-backed store. Unit tests used fake
+   stores, so this escaped earlier gates.
+
+W12C live-blocker remediation workers:
+
+| Worker | Owns | Required output |
+| --- | --- | --- |
+| W12C-0 Controller preflight | dirty-state triage and current uncommitted payload/router fixes | annotated `git status`, preserved focused diffs, static deletions/root `uv.lock` excluded or restored |
+| W12C-1 Production Agent Run event store | Agent Run user/service routes, `agent/events.py`, narrow `models/agent_runs.py` additions | DB-backed production path for run detail, event list/SSE, event append, final delta, and final text accumulation when no fake `AGENT_EVENT_STORE` is installed |
+| W12C-2 Callback contract hardening | service callback auth/idempotency parity in `routers/agent_service.py` and tests | callbacks align with runtime contract for service credential, matching idempotency key, duplicate behavior, and structured errors |
+| W12C-3 Live service harness | reproducible service startup and evidence capture | backend + AgentScope runtime + frontend/Open Terminal URLs/logs/env/PIDs recorded; live failures include exact logs |
+| W12C-4 Regression guard | combined gates and diff hygiene | backend agent/storage, runtime service, focused frontend, W12 harness, ruff, and diff-check pass after W12C fixes |
+
+W12C dependency notes:
+
+- W12C-1 removes the current `503` and is the critical path.
+- W12C-1 and W12C-2 both touch `routers/agent_service.py`; merge them
+  serially unless the controller creates disjoint patches.
+- Do not implement the DB-backed event store by running async SQLAlchemy calls
+  through a blocking synchronous shim inside the running event loop. Prefer
+  async route helpers for the production `AgentRuns` path while preserving the
+  current sync `AgentEventStore` fake-store protocol for focused tests.
+
+W12D final acceptance workers:
+
+| Worker | Acceptance items | Required evidence |
+| --- | --- | --- |
+| W12D-1 Runtime/chat finalization | 1, 9, 12 | ordinary Q&A run id, event sequence, final message, final phase ordering, visible runtime-unavailable failure |
+| W12D-2 Tools/terminal/approval/cancel | 2, 3, 4, 5, 10 | tool result, outputs/tmp artifacts, approval events, cancellation event, retained process refs with no automatic kill |
+| W12D-3 Subagents/model selection | 6, 7 | concurrent subagent events up to cap 5, cap rejection/stop behavior, model-selection events with permission-valid model ids |
+| W12D-4 SSE/UI/compaction | 8, 11 | reconnect/dedupe proof, no duplicate final text, terminal-state compaction summaries |
+| W12D-5 Release audit | all | merged live evidence passes harness; all regression gates pass; rollout notes updated |
+
+Completion gate:
+
+- Do not mark the Agent Mode MVP complete until
+  `python3 scripts/agent_mode/acceptance_harness.py live --evidence <merged-live-evidence.json>`
+  passes all 12 scenarios with live evidence from integrated services.
+
+## W12C-0/W12C-1 Checkpoint
+
+Date: 2026-06-18
+
+Scope:
+
+- W12C-0 controller preflight and dirty-state triage.
+- W12C-1 production Agent Run event-store path.
+- Also preserved the existing live-preflight fixes for runtime payload shape
+  and Agent Run router mounting, because they remove the first two live
+  blockers found before the `Agent Run storage is not configured` blocker.
+
+Current dirty-state triage:
+
+- Relevant agent-mode edits:
+  - `backend/open_webui/main.py`
+  - `backend/open_webui/agent/events.py`
+  - `backend/open_webui/routers/agent_runs.py`
+  - `backend/open_webui/routers/agent_service.py`
+  - `backend/open_webui/test/agent/test_chat_entry_agent_mode.py`
+  - `backend/open_webui/test/agent/test_agent_run_routes_db_store.py`
+  - `backend/open_webui/test/models/test_agent_runs.py`
+- Handoff update:
+  - `handoff/agent-mode/controller.md`
+- Unrelated / not staged:
+  - root `uv.lock` churn from `uv run`.
+- The earlier static asset deletions are no longer present in `git status` at
+  this checkpoint.
+
+Implementation notes:
+
+- Added async event helpers in `backend/open_webui/agent/events.py`:
+  - `append_agent_event_async`
+  - `list_events_for_reconnect_async`
+  - `append_final_delta_async`
+- Preserved the sync `AgentEventStore` protocol for focused fake-store tests.
+- `backend/open_webui/routers/agent_runs.py` now uses configured fake stores
+  when present, but defaults to `AgentRuns` for production run detail, event
+  list, and SSE backfill.
+- `backend/open_webui/routers/agent_service.py` now defaults model/tool/approval
+  operation storage to `AgentRuns` instead of requiring `app.state.AGENT_EVENT_STORE`.
+- Service `/events` and `/final-delta` callbacks now use the async `AgentRuns`
+  path when no fake store is installed.
+- `backend/open_webui/test/models/test_agent_runs.py` creates only the Agent Run
+  tables in its in-memory SQLite metadata setup. This prevents unrelated app
+  router imports from polluting `Base.metadata` and breaking the model tests via
+  external foreign keys.
+
+Red/green evidence:
+
+- Initial red test:
+  `WEBUI_SECRET_KEY=test-secret ENABLE_DB_MIGRATIONS=false uv run pytest -q backend/open_webui/test/agent/test_agent_run_routes_db_store.py`
+  failed with three `503` responses from routes/callbacks.
+- Green focused test:
+  same command -> `3 passed`.
+- Combined focused gate:
+  `WEBUI_SECRET_KEY=test-secret ENABLE_DB_MIGRATIONS=false uv run pytest -q backend/open_webui/test/agent/test_events.py backend/open_webui/test/agent/test_agent_run_routes_db_store.py backend/open_webui/test/models/test_agent_runs.py backend/open_webui/test/agent/test_model_authority.py backend/open_webui/test/agent/test_tool_authority.py backend/open_webui/test/agent/test_approval.py`
+  -> `48 passed`.
+- Chat-entry and DB route gate:
+  `WEBUI_SECRET_KEY=test-secret ENABLE_DB_MIGRATIONS=false uv run pytest -q backend/open_webui/test/agent/test_chat_entry_agent_mode.py backend/open_webui/test/agent/test_agent_run_routes_db_store.py`
+  -> `10 passed`.
+- Backend agent/storage gate:
+  `WEBUI_SECRET_KEY=test-secret ENABLE_DB_MIGRATIONS=false uv run pytest -q backend/open_webui/test/agent backend/open_webui/test/models/test_agent_runs.py`
+  -> `87 passed`.
+- Ruff:
+  `uv run ruff check backend/open_webui/agent/events.py backend/open_webui/routers/agent_runs.py backend/open_webui/routers/agent_service.py backend/open_webui/test/agent/test_agent_run_routes_db_store.py backend/open_webui/test/models/test_agent_runs.py backend/open_webui/test/agent/test_chat_entry_agent_mode.py`
+  -> passed after import sorting in `test_agent_runs.py`.
+
+Remaining W12C work:
+
+- W12C-2 is still open. Nash's read-only review confirmed a real contract risk:
+  service `/events` requires an idempotency key but does not yet persist
+  event-append idempotency in `agent_run_operation`, so retried event callbacks
+  can still duplicate non-final events. Final-delta idempotency is protected by
+  `final_delta_state` plus event scan, but concurrent final deltas remain a
+  later hardening risk.
+- W12C-3/W12D live service acceptance has not been rerun after this fix yet.

@@ -130,6 +130,13 @@ def test_agent_mode_rollout_config_is_defined_and_assigned_to_app_config():
         assert f'app.state.config.{symbol} = {symbol}' in main_text
 
 
+def test_agent_mode_routers_are_mounted_on_main_app():
+    paths = {getattr(route, 'path', '') for route in main.app.routes}
+
+    assert '/api/agent/runs/{run_id}/events' in paths
+    assert '/api/agent/service/runs/{run_id}/events' in paths
+
+
 @pytest.mark.asyncio
 async def test_agent_mode_disabled_uses_legacy_chat_path(agent_run_db, chat_entry_patches):
     request = _request(enable_agent_mode=False)
@@ -163,7 +170,16 @@ async def test_agent_mode_enabled_creates_run_links_message_and_starts_runtime(
     assert response['agent_run_id'] == run.id
     assert response['task_ids'] == []
     assert chat_entry_patches.provider_calls == []
-    assert chat_entry_patches.runtime_calls[0]['run_id'] == run.id
+    runtime_payload = chat_entry_patches.runtime_calls[0]
+    assert runtime_payload['run_id'] == run.id
+    assert runtime_payload['team_cap'] == 5
+    assert runtime_payload['model_catalog'] == [
+        {
+            'id': 'model-a',
+            'role': 'leader',
+            'meta': {},
+        }
+    ]
     assert any(
         message_id == 'assistant-msg' and message.get('agent_run_id') == run.id
         for _chat_id, message_id, message in chat_entry_patches.upserts
