@@ -510,7 +510,7 @@ def sanitize_messages_for_extraction(messages: list[dict[str, Any]], max_chars: 
             continue
 
         if len(content) > remaining:
-            content = content[:remaining]
+            content = content[-remaining:]
         if not content:
             continue
         selected.append({"role": role, "content": content})

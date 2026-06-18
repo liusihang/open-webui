@@ -1199,9 +1199,11 @@ async def lifespan(app: FastAPI):
 
     from open_webui.utils.automations import scheduler_worker_loop
     from open_webui.utils.agent_memory_extraction import enqueue_startup_agent_memory_backlog
+    from open_webui.utils.agent_memory_workers import start_agent_memory_worker_tasks
 
     asyncio.create_task(scheduler_worker_loop(app))
     asyncio.create_task(enqueue_startup_agent_memory_backlog(app))
+    start_agent_memory_worker_tasks(app)
 
     if app.state.config.ENABLE_BASE_MODELS_CACHE:
         try:
@@ -1265,7 +1267,9 @@ async def lifespan(app: FastAPI):
 
     # Shutdown: clean up shared resources
     from open_webui.utils.session_pool import close_session
+    from open_webui.utils.agent_memory_workers import stop_agent_memory_worker_tasks
 
+    await stop_agent_memory_worker_tasks(app)
     await close_session()
 
     if hasattr(app.state, 'redis_task_command_listener'):

@@ -544,6 +544,29 @@ def test_sanitize_messages_prefers_recent_messages_under_budget():
     assert "Older assistant summary" not in blob
 
 
+def test_sanitize_messages_keeps_tail_of_recent_oversized_message():
+    extraction = importlib.import_module("open_webui.utils.agent_memory_extraction")
+    latest_decision = "LATEST DECISION: run worker loop verification."
+
+    sanitized = extraction.sanitize_messages_for_extraction(
+        [
+            {"role": "user", "content": "old decision can be dropped"},
+            {
+                "role": "assistant",
+                "content": ("prefix " * 30) + latest_decision,
+            },
+        ],
+        max_chars=len(latest_decision),
+    )
+
+    assert sanitized == [
+        {
+            "role": "assistant",
+            "content": latest_decision,
+        }
+    ]
+
+
 def test_sanitize_messages_does_not_preserve_raw_tool_payloads():
     extraction = importlib.import_module("open_webui.utils.agent_memory_extraction")
 

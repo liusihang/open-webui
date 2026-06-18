@@ -10,6 +10,7 @@ from open_webui.internal.db import get_async_session
 from open_webui.utils import agent_memory
 from open_webui.utils.agent_memory_consolidation import run_agent_memory_consolidation_jobs_once
 from open_webui.utils.agent_memory_extraction import run_agent_memory_extraction_jobs_once
+from open_webui.utils.agent_memory_workers import get_agent_memory_job_metrics
 from open_webui.utils.auth import get_admin_user
 
 router = APIRouter()
@@ -55,6 +56,14 @@ async def get_failed_jobs(
     db: AsyncSession = Depends(get_async_session),
 ):
     return await agent_memory.list_failed_agent_memory_jobs(user_id=user_id, db=db)
+
+
+@router.get("/jobs/metrics")
+async def get_job_metrics(
+    user=Depends(get_admin_user),
+    db: AsyncSession = Depends(get_async_session),
+):
+    return await get_agent_memory_job_metrics(db=db)
 
 
 @router.post("/jobs/failed/retry")

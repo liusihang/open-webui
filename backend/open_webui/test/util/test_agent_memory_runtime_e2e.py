@@ -470,3 +470,95 @@ async def test_agent_memory_runtime_e2e_chain_with_native_tools_forgetting_and_d
         assert "agent_memory_list" not in disabled_builtin_tools
 
     await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_agent_memory_worker_cycle_consumes_queued_jobs_and_builds_artifacts_without_manual_run_api(
+    tmp_path, monkeypatch
+):
+    workers = importlib.import_module("open_webui.utils.agent_memory_workers")
+    extraction = importlib.import_module("open_webui.utils.agent_memory_extraction")
+    consolidation = importlib.import_module("open_webui.utils.agent_memory_consolidation")
+    index = importlib.import_module("open_webui.utils.agent_memory_index")
+
+    vector_client = FakeVectorClient()
+    monkeypatch.setattr(index, "ASYNC_VECTOR_DB_CLIENT", vector_client)
+
+    async def fake_extraction_completion(request, form_data, user, bypass_filter=False, bypass_system_prompt=False):
+        assert form_data["metadata"]["task"] == "agent_memory_extraction"
+        return {
+            "choices": [
+                {
+                    "message": {
+                        "content": json.dumps(
+                            {
+                                "raw_memory": "Worker-created memory prefers production loops.",
+                                "rollout_summary": "Worker-created summary.",
+                                "rollout_slug": "worker_memory",
+                            }
+                        )
+                    }
+                }
+            ]
+        }
+
+    async def fake_consolidation_completion(request, form_data, user, bypass_filter=False, bypass_system_prompt=False):
+        assert form_data["metadata"]["task"] == "agent_memory_consolidation"
+        return {
+            "choices": [
+                {
+                    "message": {
+                        "content": json.dumps(
+                            {
+                                "memory_summary_md": "Worker summary: production loop consumed jobs.",
+                                "memory_md": "# Worker Memory\nProduction worker loops consume queued jobs.",
+                            }
+                        )
+                    }
+                }
+            ]
+        }
+
+    monkeypatch.setattr(extraction, "generate_chat_completion", fake_extraction_completion)
+    monkeypatch.setattr(consolidation, "generate_chat_completion", fake_consolidation_completion)
+
+    engine, session_factory = await _session_factory(tmp_path)
+    request = _request(
+        config=_config(
+            AGENT_MEMORY_EXTRACTION_CLAIM_LIMIT=1,
+            AGENT_MEMORY_CONSOLIDATION_CLAIM_LIMIT=1,
+        ),
+        vector_store=vector_client,
+    )
+
+    async with session_factory() as session:
+        session.add(_chat("worker-chat", updated_at=1000))
+        session.add(_message("worker-chat", "u1", "user", "Remember to use production worker loops."))
+        session.add(_message("worker-chat", "a1", "assistant", "Stored.", created_at=1001))
+        await session.commit()
+
+        assert await extraction.enqueue_chat_extraction_if_needed(
+            "worker-chat",
+            config=request.app.state.config,
+            now=1200,
+            db=session,
+        )
+
+        result = await workers.run_agent_memory_worker_cycle(request.app, db=session)
+
+        assert result == {"extraction_completed": 1, "consolidation_completed": 1}
+        cache = await AgentMemoryExtractionCaches.get_cache("user-1", "worker-chat", db=session)
+        assert cache.status == "succeeded"
+        assert "Worker-created memory" in cache.raw_memory
+        assert await AgentMemoryExtractionJobs.get_job("user-1", "worker-chat", db=session) is None
+        assert await AgentMemoryConsolidationJobs.get_job("user-1", "global", "", db=session) is None
+
+        summary = await AgentMemoryArtifacts.get_artifact(
+            "user-1", "global", "", "memory_summary.md", db=session
+        )
+        memory = await AgentMemoryArtifacts.get_artifact("user-1", "global", "", "MEMORY.md", db=session)
+        assert summary.content == "Worker summary: production loop consumed jobs."
+        assert memory.content.startswith("# Worker Memory")
+        assert vector_client.collections["agent-memory-user-1-global"]
+
+    await engine.dispose()
