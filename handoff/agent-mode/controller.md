@@ -1337,3 +1337,49 @@ Live harness:
 
 The harness message still says `W12B`; this is stale wording only. The merged
 file and validation cover W12D live evidence for all 12 MVP scenarios.
+
+## Root Implementation Plan Refresh
+
+Date: 2026-06-18
+
+Scope:
+
+- Updated the root planning document:
+  `/Users/liusihang/openwebui/docs/plans/2026-06-17-openwebui-agent-mode-agentscope-implementation.md`.
+- This file is in the root checkout planning area, not inside the PR7-derived
+  integration worktree.
+
+Reason:
+
+- The root plan still described W12C-3 as an uncommitted callback fix and W12D
+  as pending.
+- The integration branch is now at `098f7ec18`, W12D scenario evidence is
+  integrated, and `handoff/agent-mode/w12d-merged-live-evidence.json` passes
+  the live harness for all 12 MVP scenarios.
+
+Plan update:
+
+- The current snapshot now points at `098f7ec18`.
+- W12C is marked complete through `78f4cf294`.
+- W12D scenario collection is marked complete through `098f7ec18`.
+- The old current-dispatch section has been superseded by a release-readiness
+  plan.
+
+Current parallel completion plan:
+
+| Worker | Goal |
+| --- | --- |
+| W13-1 Evidence integrity | Trace merged W12D evidence back to worker evidence and confirm no scenario is fixture-only. |
+| W13-2 Product-path caveat | Decide whether W12D-2's acceptance-only in-memory tool registry caveat is acceptable or needs one narrow product-path smoke/fix. |
+| W13-3 Regression gates | Rerun backend agent/storage, AgentScope runtime service, focused frontend, W12 dry-run/fixture/live harness, ruff, and diff-check gates. |
+| W13-4 Deployment docs | Audit env vars, startup order, health checks, service-local dependency pin, artifact/tmp cleanup semantics, and rollout notes. |
+| W13-5 PR package | Prepare final PR summary, commit map, risk register, known follow-ups, and merge checklist after gates pass. |
+
+Dispatch rule:
+
+- Start W13 workers from `098f7ec18` unless the controller lands a
+  release-blocker fix first.
+- W13 workers should be read-mostly. Any product-code fix they discover should
+  return as a narrow proposal for controller-owned integration.
+- Keep root `uv.lock` churn unstaged unless a root dependency change is
+  intentionally owned.
