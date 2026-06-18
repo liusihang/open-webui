@@ -82,6 +82,28 @@ EXPECTED_AGENT_MEMORY_TABLES = {
     },
 }
 
+EXPECTED_AGENT_MEMORY_INDEXES = {
+    "agent_memory_extraction_job": {
+        "ix_agent_memory_extraction_job_claim": [
+            "status",
+            "retry_at",
+            "lease_until",
+            "updated_at",
+            "chat_id",
+        ],
+    },
+    "agent_memory_consolidation_job": {
+        "ix_agent_memory_consolidation_job_claim": [
+            "status",
+            "retry_at",
+            "lease_until",
+            "updated_at",
+            "scope_type",
+            "scope_id",
+        ],
+    },
+}
+
 EXPECTED_AGENT_MEMORY_ADMIN_CONFIG_KEYS = {
     "ENABLE_AGENT_MEMORY",
     "AGENT_MEMORY_EXTRACTION_MODEL",
@@ -136,6 +158,10 @@ def test_agent_memory_migration_upgrade_and_downgrade_create_minimal_tables():
     for table_name, expected in EXPECTED_AGENT_MEMORY_TABLES.items():
         assert [column["name"] for column in inspector.get_columns(table_name)] == expected["columns"]
         assert inspector.get_pk_constraint(table_name)["constrained_columns"] == expected["primary_key"]
+    for table_name, expected_indexes in EXPECTED_AGENT_MEMORY_INDEXES.items():
+        indexes_by_name = {index["name"]: index["column_names"] for index in inspector.get_indexes(table_name)}
+        for index_name, expected_columns in expected_indexes.items():
+            assert indexes_by_name[index_name] == expected_columns
 
     _run_migration(engine, "downgrade")
     _run_migration(engine, "downgrade")
@@ -167,6 +193,20 @@ def test_agent_memory_table_metadata_declares_exact_columns():
     assert isinstance(agent_memories.AgentMemoryExtractionJob.__table__.c.retry_count.type, Integer)
     assert isinstance(agent_memories.AgentMemoryConsolidationJob.__table__.c.input_hash.type, Text)
     assert isinstance(agent_memories.AgentMemoryArtifact.__table__.c.revision.type, Integer)
+    expected_model_indexes = {
+        agent_memories.AgentMemoryExtractionJob: EXPECTED_AGENT_MEMORY_INDEXES[
+            "agent_memory_extraction_job"
+        ],
+        agent_memories.AgentMemoryConsolidationJob: EXPECTED_AGENT_MEMORY_INDEXES[
+            "agent_memory_consolidation_job"
+        ],
+    }
+    for model, expected_indexes in expected_model_indexes.items():
+        indexes_by_name = {
+            index.name: [column.name for column in index.columns]
+            for index in model.__table__.indexes
+        }
+        assert indexes_by_name == expected_indexes
     assert agent_memories.EXTRACTION_CACHE_STATUSES == {"succeeded", "succeeded_no_output", "stale"}
     assert agent_memories.EXTRACTION_JOB_STATUSES == {"queued", "leased", "retry", "failed"}
     assert agent_memories.CONSOLIDATION_JOB_STATUSES == {"queued", "leased", "retry", "failed"}

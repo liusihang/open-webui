@@ -228,6 +228,55 @@ async def _embed_query(embedding_function: Any, query: str) -> list[float | int]
     return vectors[0] if vectors else []
 
 
+def _stale_artifact_vector_filter(artifact: AgentMemoryArtifactModel | Any) -> dict[str, Any]:
+    return {
+        "user_id": artifact.user_id,
+        "scope_type": artifact.scope_type,
+        "scope_id": artifact.scope_id,
+        "path": artifact.path,
+        "revision": artifact.revision,
+    }
+
+
+async def _scope_is_current_and_enabled(
+    user_id: str,
+    scope_type: str,
+    scope_id: str,
+    db: AsyncSession | None = None,
+) -> bool:
+    if scope_type == "global":
+        return True
+    if scope_type != "folder" or not scope_id:
+        return False
+
+    folder = await Folders.get_folder_by_id_and_user_id(scope_id, user_id, db=db)
+    return bool(folder and not is_agent_memory_disabled(folder.meta))
+
+
+async def _artifact_snapshot_is_current(
+    artifact: AgentMemoryArtifactModel | Any,
+    db: AsyncSession | None = None,
+) -> bool:
+    if not await _scope_is_current_and_enabled(artifact.user_id, artifact.scope_type, artifact.scope_id, db=db):
+        return False
+
+    current = await AgentMemoryArtifacts.get_artifact(
+        artifact.user_id,
+        artifact.scope_type,
+        artifact.scope_id,
+        artifact.path,
+        db=db,
+    )
+    return bool(current and current.revision == artifact.revision)
+
+
+async def _delete_stale_artifact_vectors(collection_name: str, artifact: AgentMemoryArtifactModel | Any) -> None:
+    await ASYNC_VECTOR_DB_CLIENT.delete(
+        collection_name=collection_name,
+        filter=_stale_artifact_vector_filter(artifact),
+    )
+
+
 async def rebuild_agent_memory_index_for_scope(
     request: Any,
     user_id: str,
@@ -244,15 +293,23 @@ async def rebuild_agent_memory_index_for_scope(
     for artifact in artifacts:
         chunks = chunk_agent_memory_artifact(artifact)
         await ASYNC_VECTOR_DB_CLIENT.delete(collection_name=collection_name, filter={"path": artifact.path})
+        if not await _artifact_snapshot_is_current(artifact, db=db):
+            await _delete_stale_artifact_vectors(collection_name, artifact)
+            continue
         if not chunks:
             continue
         vectors = await _embed_texts(embedding_function, [chunk.text for chunk in chunks])
+        if not await _artifact_snapshot_is_current(artifact, db=db):
+            await _delete_stale_artifact_vectors(collection_name, artifact)
+            continue
         items = [
             VectorItem(id=chunk.id, text=chunk.text, vector=vector, metadata=chunk.metadata)
             for chunk, vector in zip(chunks, vectors)
         ]
         if items:
             await ASYNC_VECTOR_DB_CLIENT.upsert(collection_name=collection_name, items=items)
+            if not await _artifact_snapshot_is_current(artifact, db=db):
+                await _delete_stale_artifact_vectors(collection_name, artifact)
 
 
 def _coerce_limit(limit: int | None, default: int = 5) -> int:

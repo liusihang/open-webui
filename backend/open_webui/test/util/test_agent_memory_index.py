@@ -268,6 +268,17 @@ async def test_rebuild_index_writes_scope_collection_and_deletes_stale_chunks(tm
     monkeypatch.setattr(index, "ASYNC_VECTOR_DB_CLIENT", FakeVectorClient())
 
     async with session_factory() as session:
+        session.add(
+            Folder(
+                id="folder-1",
+                user_id="user-1",
+                name="Project",
+                meta={},
+                created_at=1000,
+                updated_at=1000,
+            )
+        )
+        await session.commit()
         await AgentMemoryArtifacts.upsert_artifact(
             "user-1",
             "folder",
@@ -299,6 +310,128 @@ async def test_rebuild_index_writes_scope_collection_and_deletes_stale_chunks(tm
     ]
     assert upsert_calls[0]["collection_name"] == "agent-memory-user-1-folder-folder-1"
     assert upsert_calls[0]["items"][0].metadata["revision"] == 7
+    await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_rebuild_index_skips_upsert_when_artifact_is_cleared_during_embedding(tmp_path, monkeypatch):
+    index = importlib.import_module("open_webui.utils.agent_memory_index")
+    engine, session_factory = await _session_factory(tmp_path)
+    upsert_calls = []
+    delete_calls = []
+
+    class FakeVectorClient:
+        async def delete(self, collection_name, ids=None, filter=None):
+            delete_calls.append({"collection_name": collection_name, "ids": ids, "filter": filter})
+
+        async def upsert(self, collection_name, items):
+            upsert_calls.append({"collection_name": collection_name, "items": items})
+
+    monkeypatch.setattr(index, "ASYNC_VECTOR_DB_CLIENT", FakeVectorClient())
+
+    async with session_factory() as session:
+        await AgentMemoryArtifacts.upsert_artifact(
+            "user-1",
+            "global",
+            "",
+            "MEMORY.md",
+            "# Runtime\nUse focused tests.",
+            "input-hash",
+            7,
+            None,
+            None,
+            1000,
+            db=session,
+        )
+
+        async def embedding(text, prefix=None):
+            await AgentMemoryArtifacts.delete_artifact("user-1", "global", "", "MEMORY.md", db=session)
+            if isinstance(text, list):
+                return [[1.0] for _ in text]
+            return [1.0]
+
+        await index.rebuild_agent_memory_index_for_scope(
+            _request(embedding=embedding),
+            user_id="user-1",
+            scope_type="global",
+            scope_id="",
+            db=session,
+        )
+
+    assert upsert_calls == []
+    assert delete_calls[0] == {
+        "collection_name": "agent-memory-user-1-global",
+        "ids": None,
+        "filter": {"path": "MEMORY.md"},
+    }
+    assert delete_calls[-1] == {
+        "collection_name": "agent-memory-user-1-global",
+        "ids": None,
+        "filter": {
+            "user_id": "user-1",
+            "scope_type": "global",
+            "scope_id": "",
+            "path": "MEMORY.md",
+            "revision": 7,
+        },
+    }
+    await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_rebuild_index_cleans_vectors_when_artifact_is_cleared_during_upsert(tmp_path, monkeypatch):
+    index = importlib.import_module("open_webui.utils.agent_memory_index")
+    engine, session_factory = await _session_factory(tmp_path)
+    upsert_calls = []
+    delete_calls = []
+
+    async with session_factory() as session:
+
+        class FakeVectorClient:
+            async def delete(self, collection_name, ids=None, filter=None):
+                delete_calls.append({"collection_name": collection_name, "ids": ids, "filter": filter})
+
+            async def upsert(self, collection_name, items):
+                upsert_calls.append({"collection_name": collection_name, "items": items})
+                await AgentMemoryArtifacts.delete_artifact("user-1", "global", "", "MEMORY.md", db=session)
+
+        monkeypatch.setattr(index, "ASYNC_VECTOR_DB_CLIENT", FakeVectorClient())
+
+        await AgentMemoryArtifacts.upsert_artifact(
+            "user-1",
+            "global",
+            "",
+            "MEMORY.md",
+            "# Runtime\nUse focused tests.",
+            "input-hash",
+            7,
+            None,
+            None,
+            1000,
+            db=session,
+        )
+
+        await index.rebuild_agent_memory_index_for_scope(
+            _request(),
+            user_id="user-1",
+            scope_type="global",
+            scope_id="",
+            db=session,
+        )
+
+    assert len(upsert_calls) == 1
+    assert delete_calls[0]["filter"] == {"path": "MEMORY.md"}
+    assert delete_calls[-1] == {
+        "collection_name": "agent-memory-user-1-global",
+        "ids": None,
+        "filter": {
+            "user_id": "user-1",
+            "scope_type": "global",
+            "scope_id": "",
+            "path": "MEMORY.md",
+            "revision": 7,
+        },
+    }
     await engine.dispose()
 
 

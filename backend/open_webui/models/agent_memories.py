@@ -4,7 +4,7 @@ from typing import Optional
 
 from open_webui.internal.db import Base, get_async_db_context
 from pydantic import BaseModel, ConfigDict
-from sqlalchemy import BigInteger, Column, Integer, Text, delete, select
+from sqlalchemy import BigInteger, Column, Index, Integer, Text, delete, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 EXTRACTION_CACHE_STATUSES = {"succeeded", "succeeded_no_output", "stale"}
@@ -29,6 +29,16 @@ class AgentMemoryExtractionCache(Base):
 
 class AgentMemoryExtractionJob(Base):
     __tablename__ = "agent_memory_extraction_job"
+    __table_args__ = (
+        Index(
+            "ix_agent_memory_extraction_job_claim",
+            "status",
+            "retry_at",
+            "lease_until",
+            "updated_at",
+            "chat_id",
+        ),
+    )
 
     user_id = Column(Text, primary_key=True)
     chat_id = Column(Text, primary_key=True)
@@ -42,6 +52,17 @@ class AgentMemoryExtractionJob(Base):
 
 class AgentMemoryConsolidationJob(Base):
     __tablename__ = "agent_memory_consolidation_job"
+    __table_args__ = (
+        Index(
+            "ix_agent_memory_consolidation_job_claim",
+            "status",
+            "retry_at",
+            "lease_until",
+            "updated_at",
+            "scope_type",
+            "scope_id",
+        ),
+    )
 
     user_id = Column(Text, primary_key=True)
     scope_type = Column(Text, primary_key=True)

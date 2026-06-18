@@ -79,9 +79,27 @@ TABLES = {
     ],
 }
 
+INDEXES = {
+    "ix_agent_memory_extraction_job_claim": (
+        "agent_memory_extraction_job",
+        ["status", "retry_at", "lease_until", "updated_at", "chat_id"],
+    ),
+    "ix_agent_memory_consolidation_job_claim": (
+        "agent_memory_consolidation_job",
+        ["status", "retry_at", "lease_until", "updated_at", "scope_type", "scope_id"],
+    ),
+}
+
 
 def _existing_table_names() -> set[str]:
     return set(sa.inspect(op.get_bind()).get_table_names())
+
+
+def _existing_index_names(table_name: str) -> set[str]:
+    existing_tables = _existing_table_names()
+    if table_name not in existing_tables:
+        return set()
+    return {index["name"] for index in sa.inspect(op.get_bind()).get_indexes(table_name)}
 
 
 def upgrade() -> None:
@@ -90,9 +108,17 @@ def upgrade() -> None:
         if table_name not in existing_tables:
             op.create_table(table_name, *columns)
 
+    for index_name, (table_name, columns) in INDEXES.items():
+        if index_name not in _existing_index_names(table_name):
+            op.create_index(index_name, table_name, columns)
+
 
 def downgrade() -> None:
     existing_tables = _existing_table_names()
+    for index_name, (table_name, _columns) in reversed(list(INDEXES.items())):
+        if table_name in existing_tables and index_name in _existing_index_names(table_name):
+            op.drop_index(index_name, table_name=table_name)
+
     for table_name in reversed(TABLES):
         if table_name in existing_tables:
             op.drop_table(table_name)
