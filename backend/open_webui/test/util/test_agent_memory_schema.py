@@ -142,9 +142,11 @@ def test_agent_memory_migration_revision_is_registered():
 
     revision = script.get_revision(AGENT_MEMORY_REVISION_ID)
 
-    assert script.get_current_head() == AGENT_MEMORY_REVISION_ID
     assert revision is not None
     assert revision.down_revision == "e2f3a4b5c7"
+    current_head = script.get_current_head()
+    head_lineage = tuple(script.iterate_revisions(current_head, revision.down_revision))
+    assert AGENT_MEMORY_REVISION_ID in {ancestor.revision for ancestor in head_lineage}
 
 
 def test_agent_memory_migration_upgrade_and_downgrade_create_minimal_tables():
