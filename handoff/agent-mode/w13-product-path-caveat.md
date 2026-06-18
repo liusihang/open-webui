@@ -163,4 +163,3 @@ Add the smallest product-path fix and smoke test that proves:
 Avoid broad suites for this follow-up. A focused
 `test_chat_entry_agent_mode.py` case that fails on the current empty
 `tool_access_envelope` is enough to guard the product-path handoff.
-

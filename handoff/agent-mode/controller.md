@@ -1550,3 +1550,50 @@ Notes:
   but importing `open_webui.main` through the focused pytest path succeeded.
 - After this fix, W13-3 release gates and live harness must be rerun because the
   W13-3 worker completed against the pre-fix `00481b7ab` baseline.
+
+## Final Release Gate Rerun After Product Tool Fix
+
+Date: 2026-06-18
+
+Reason:
+
+- W13-3 release gates passed on the pre-fix `00481b7ab` baseline.
+- W13-2 found a product-path release blocker, fixed by
+  `d394077ec` (`fix(agent-mode): populate product tool envelope`).
+- Final gates must therefore be rerun from the post-fix integration branch.
+
+Current verification:
+
+- Backend agent/storage:
+  `WEBUI_SECRET_KEY=test-secret ENABLE_DB_MIGRATIONS=false uv run pytest -q backend/open_webui/test/agent backend/open_webui/test/models/test_agent_runs.py`
+  -> `102 passed, 9 warnings`.
+- AgentScope runtime service-local:
+  `cd services/agentscope-runtime && uv run --extra test pytest -q`
+  -> `24 passed`.
+- Focused frontend Vitest:
+  `npm run test:frontend -- --run src/lib/apis/agentRuns/index.test.ts src/lib/components/chat/AgentEvents/eventFold.test.ts src/lib/components/chat/historySync.test.ts`
+  -> `3 files / 24 tests passed`.
+- W12 harness:
+  - `uv run --frozen python scripts/agent_mode/acceptance_harness.py dry-run`
+    -> passed, `failures: none`.
+  - `uv run --frozen python scripts/agent_mode/acceptance_harness.py fixture`
+    -> `case contract: 12/12 satisfied`, `failures: none`.
+  - `uv run --frozen python scripts/agent_mode/acceptance_harness.py live --evidence handoff/agent-mode/w12d-merged-live-evidence.json`
+    -> `case contract: 12/12 satisfied`, `live acceptance: passed`,
+    `failures: none`.
+- Scoped ruff:
+  `uv run ruff check --select F backend/open_webui/agent backend/open_webui/models/agent_runs.py backend/open_webui/routers/agent_runs.py backend/open_webui/routers/agent_service.py backend/open_webui/test/agent backend/open_webui/test/models/test_agent_runs.py scripts/agent_mode services/agentscope-runtime/agentscope_runtime services/agentscope-runtime/tests`
+  -> passed.
+
+Diff hygiene:
+
+- Initial `git diff --check 2183a6697c672c60d0137b64d57eca7fdad0b5e6..HEAD`
+  failed on a trailing blank line in the committed W13-2 audit handoff:
+  `handoff/agent-mode/w13-product-path-caveat.md:166`.
+- The handoff EOF whitespace was cleaned in the final fix commit.
+
+Remaining notes:
+
+- `uv.lock` remains unstaged verification churn.
+- Broad `main.py` ruff remains noisy due pre-existing duplicate/unused imports,
+  so the final release gate uses the documented scoped F-class check.
