@@ -934,3 +934,42 @@ Next controller action:
    - W12D-3 subagents/model-selection: scenarios 6, 7.
    - W12D-4 SSE/UI/compaction: scenarios 8, 11.
    - W12D-5 release audit: merged evidence and final gates.
+
+## W12D Worker Worktree Checkpoint
+
+Date: 2026-06-18
+
+W12C-3 closure commit:
+
+- `78f4cf294` fix(agent-mode): include run id in runtime event callbacks
+
+Created W12D worker worktrees from `78f4cf294`:
+
+| Worker | Worktree | Branch | Handoff Commit |
+| --- | --- | --- | --- |
+| W12D-1 Runtime/chat/finalization | `/Users/liusihang/openwebui/.worktrees/agent-mode-w12d-runtime-chat` | `codex/agent-mode-w12d-runtime-chat` | `1c1224225` |
+| W12D-2 Tools/terminal/approval/cancel | `/Users/liusihang/openwebui/.worktrees/agent-mode-w12d-tool-terminal` | `codex/agent-mode-w12d-tool-terminal` | `5b5d681a7` |
+| W12D-3 Subagents/model selection | `/Users/liusihang/openwebui/.worktrees/agent-mode-w12d-subagents` | `codex/agent-mode-w12d-subagents` | `7126c3e20` |
+| W12D-4 SSE/UI/compaction | `/Users/liusihang/openwebui/.worktrees/agent-mode-w12d-sse-ui` | `codex/agent-mode-w12d-sse-ui` | `94045d47b` |
+| W12D-5 Release audit | `/Users/liusihang/openwebui/.worktrees/agent-mode-w12d-release-audit` | `codex/agent-mode-w12d-release-audit` | `a6d9b682e` |
+
+All five worker worktrees were clean immediately after their handoff commits.
+
+Worker handoff files:
+
+- `handoff/agent-mode/w12d-runtime-chat.md`
+- `handoff/agent-mode/w12d-tool-terminal.md`
+- `handoff/agent-mode/w12d-subagents.md`
+- `handoff/agent-mode/w12d-sse-ui.md`
+- `handoff/agent-mode/w12d-release-audit.md`
+
+Dispatch rules for the next step:
+
+- Spawn workers without full context.
+- Give each worker only its handoff, root design/plan/contract paths, and the
+  controller handoff path.
+- Workers should collect live evidence first and propose only narrow fixes.
+- Workers must not stage root `uv.lock` churn.
+- W12D-5 release audit should not claim final acceptance until scenario
+  evidence from W12D-1 through W12D-4 has landed and
+  `acceptance_harness.py live` passes all 12 scenarios.
