@@ -1,5 +1,6 @@
 import json
 import types
+import zipfile
 
 import pytest
 from open_webui.tools import builtin
@@ -45,12 +46,14 @@ class _FakeTerminalClient:
     def __init__(self, listings=None, reads=None):
         self.listings = listings or {}
         self.reads = reads or {}
+        self.read_paths = []
         self.writes = []
 
     async def list_files(self, directory):
         return {'entries': self.listings[directory]}
 
     async def read_file(self, path):
+        self.read_paths.append(path)
         return {'content': self.reads[path]}
 
     async def write_file(self, path, content):
@@ -187,7 +190,7 @@ async def test_install_skill_returns_only_id_and_does_not_sync_runtime(monkeypat
         return 'demo-skill'
 
     async def forbidden_sync(*args, **kwargs):
-        raise AssertionError('install_skill must not sync runtime assets')
+        raise AssertionError('install_skill must not sync runtime package files')
 
     monkeypatch.setattr(builtin, 'install_skill_from_terminal_source', fake_install)
     monkeypatch.setattr(builtin, 'ensure_skill_synced_to_terminal', forbidden_sync)
@@ -224,7 +227,7 @@ async def test_update_skill_returns_only_id_and_defers_runtime_sync(monkeypatch)
         return 'demo-skill'
 
     async def forbidden_sync(*args, **kwargs):
-        raise AssertionError('update_skill must not sync runtime assets')
+        raise AssertionError('update_skill must not sync runtime package files')
 
     monkeypatch.setattr(builtin, 'update_skill_from_tool', fake_update)
     monkeypatch.setattr(builtin, 'ensure_skill_synced_to_terminal', forbidden_sync)
@@ -240,6 +243,14 @@ async def test_update_skill_returns_only_id_and_defers_runtime_sync(monkeypatch)
     )
 
     assert json.loads(raw) == {'id': 'demo-skill'}
+
+
+def test_builtin_skill_tool_descriptions_state_packages_are_text_only():
+    for tool in (builtin.read_skill, builtin.install_skill, builtin.update_skill):
+        description = tool.__doc__
+        assert 'text-only' in description
+        assert 'UTF-8 text' in description
+        assert 'binary assets are not supported' in description
 
 
 @pytest.mark.asyncio
@@ -391,6 +402,242 @@ async def test_terminal_source_reader_recursively_reads_text_package(monkeypatch
 
 
 @pytest.mark.asyncio
+async def test_terminal_source_reader_counts_nested_files_once(monkeypatch):
+    root = '/home/user/.openwebui/skill-worktrees/demo'
+    nested_file_count = terminal_packages.MAX_TERMINAL_SOURCE_FILES - 1
+    listings = {
+        root: [
+            {'name': 'SKILL.md', 'type': 'file'},
+            {'name': 'templates', 'type': 'directory'},
+        ],
+        f'{root}/templates': [
+            {'name': f'file-{index}.txt', 'type': 'file'}
+            for index in range(nested_file_count)
+        ],
+    }
+    reads = {f'{root}/SKILL.md': '---\nname: Demo\n---\nBody\n'}
+    reads.update({f'{root}/templates/file-{index}.txt': 'ok\n' for index in range(nested_file_count)})
+    client = _FakeTerminalClient(listings=listings, reads=reads)
+
+    async def fake_client(*args, **kwargs):
+        return client
+
+    monkeypatch.setattr(terminal_packages, '_get_terminal_file_client', fake_client)
+
+    files = await terminal_packages.read_skill_package_source_from_terminal(
+        types.SimpleNamespace(),
+        'terminal-1',
+        {'id': 'user-1', 'role': 'admin'},
+        root,
+    )
+
+    assert len(files) == terminal_packages.MAX_TERMINAL_SOURCE_FILES
+    assert files['SKILL.md'].startswith('---')
+    assert files['templates/file-0.txt'] == 'ok\n'
+
+
+@pytest.mark.asyncio
+async def test_terminal_source_reader_reserves_parent_files_before_recursing(monkeypatch):
+    root = '/home/user/.openwebui/skill-worktrees/demo'
+    nested_file_count = terminal_packages.MAX_TERMINAL_SOURCE_FILES
+    listings = {
+        root: [
+            {'name': 'templates', 'type': 'directory'},
+            {'name': 'SKILL.md', 'type': 'file'},
+        ],
+        f'{root}/templates': [
+            {'name': f'file-{index}.txt', 'type': 'file'}
+            for index in range(nested_file_count)
+        ],
+    }
+    reads = {f'{root}/SKILL.md': '---\nname: Demo\n---\nBody\n'}
+    reads.update({f'{root}/templates/file-{index}.txt': 'ok\n' for index in range(nested_file_count)})
+    client = _FakeTerminalClient(listings=listings, reads=reads)
+
+    async def fake_client(*args, **kwargs):
+        return client
+
+    monkeypatch.setattr(terminal_packages, '_get_terminal_file_client', fake_client)
+
+    with pytest.raises(terminal_packages.TerminalSkillPackageError, match='too many text files'):
+        await terminal_packages.read_skill_package_source_from_terminal(
+            types.SimpleNamespace(),
+            'terminal-1',
+            {'id': 'user-1', 'role': 'admin'},
+            root,
+        )
+
+    assert f'{root}/SKILL.md' not in client.read_paths
+
+
+@pytest.mark.asyncio
+async def test_terminal_source_reader_rejects_packages_over_resource_budgets(monkeypatch):
+    root = '/home/user/.openwebui/skill-worktrees/demo'
+
+    client = _FakeTerminalClient(
+        listings={
+            root: [
+                {'name': f'file-{index}.txt', 'type': 'file'}
+                for index in range(terminal_packages.MAX_TERMINAL_SOURCE_FILES + 1)
+            ],
+        },
+        reads={},
+    )
+
+    async def fake_client(*args, **kwargs):
+        return client
+
+    monkeypatch.setattr(terminal_packages, '_get_terminal_file_client', fake_client)
+
+    with pytest.raises(terminal_packages.TerminalSkillPackageError, match='too many text files'):
+        await terminal_packages.read_skill_package_source_from_terminal(
+            types.SimpleNamespace(),
+            'terminal-1',
+            {'id': 'user-1', 'role': 'admin'},
+            root,
+        )
+    assert client.reads == {}
+
+    deep_listing = {
+        root: [{'name': 'd1', 'type': 'directory'}],
+    }
+    current = root
+    for depth in range(1, terminal_packages.MAX_TERMINAL_SOURCE_DEPTH + 2):
+        child = f'{current}/d{depth}'
+        deep_listing[current] = [{'name': f'd{depth}', 'type': 'directory'}]
+        current = child
+        deep_listing[current] = []
+    client = _FakeTerminalClient(listings=deep_listing)
+
+    with pytest.raises(terminal_packages.TerminalSkillPackageError, match='too deep'):
+        await terminal_packages.read_skill_package_source_from_terminal(
+            types.SimpleNamespace(),
+            'terminal-1',
+            {'id': 'user-1', 'role': 'admin'},
+            root,
+        )
+
+    client = _FakeTerminalClient(
+        listings={root: [{'name': 'SKILL.md', 'type': 'file'}]},
+        reads={f'{root}/SKILL.md': 'x' * (terminal_packages.MAX_TERMINAL_SOURCE_SINGLE_TEXT_BYTES + 1)},
+    )
+
+    with pytest.raises(terminal_packages.TerminalSkillPackageError, match='exceeds max single text file size'):
+        await terminal_packages.read_skill_package_source_from_terminal(
+            types.SimpleNamespace(),
+            'terminal-1',
+            {'id': 'user-1', 'role': 'admin'},
+            root,
+        )
+
+    text_chunk = 'x' * terminal_packages.MAX_TERMINAL_SOURCE_SINGLE_TEXT_BYTES
+    total_file_count = (terminal_packages.MAX_TERMINAL_SOURCE_TOTAL_TEXT_BYTES // len(text_chunk)) + 1
+    client = _FakeTerminalClient(
+        listings={
+            root: [{'name': f'chunk-{index}.txt', 'type': 'file'} for index in range(total_file_count)],
+        },
+        reads={f'{root}/chunk-{index}.txt': text_chunk for index in range(total_file_count)},
+    )
+
+    with pytest.raises(terminal_packages.TerminalSkillPackageError, match='exceeds max total text package size'):
+        await terminal_packages.read_skill_package_source_from_terminal(
+            types.SimpleNamespace(),
+            'terminal-1',
+            {'id': 'user-1', 'role': 'admin'},
+            root,
+        )
+
+
+@pytest.mark.asyncio
+async def test_terminal_source_reader_rejects_listing_size_budgets_before_read(monkeypatch):
+    root = '/home/user/.openwebui/skill-worktrees/demo'
+
+    client = _FakeTerminalClient(
+        listings={
+            root: [
+                {
+                    'name': 'SKILL.md',
+                    'type': 'file',
+                    'size': terminal_packages.MAX_TERMINAL_SOURCE_SINGLE_TEXT_BYTES + 1,
+                }
+            ],
+        },
+        reads={f'{root}/SKILL.md': 'x' * (terminal_packages.MAX_TERMINAL_SOURCE_SINGLE_TEXT_BYTES + 1)},
+    )
+
+    async def fake_client(*args, **kwargs):
+        return client
+
+    monkeypatch.setattr(terminal_packages, '_get_terminal_file_client', fake_client)
+
+    with pytest.raises(terminal_packages.TerminalSkillPackageError, match='exceeds max single text file size'):
+        await terminal_packages.read_skill_package_source_from_terminal(
+            types.SimpleNamespace(),
+            'terminal-1',
+            {'id': 'user-1', 'role': 'admin'},
+            root,
+        )
+    assert client.read_paths == []
+
+    text_chunk = 'x' * terminal_packages.MAX_TERMINAL_SOURCE_SINGLE_TEXT_BYTES
+    total_file_count = (terminal_packages.MAX_TERMINAL_SOURCE_TOTAL_TEXT_BYTES // len(text_chunk)) + 1
+    client = _FakeTerminalClient(
+        listings={
+            root: [
+                {
+                    'name': f'chunk-{index}.txt',
+                    'type': 'file',
+                    'size': len(text_chunk),
+                }
+                for index in range(total_file_count)
+            ],
+        },
+        reads={f'{root}/chunk-{index}.txt': text_chunk for index in range(total_file_count)},
+    )
+
+    with pytest.raises(terminal_packages.TerminalSkillPackageError, match='exceeds max total text package size'):
+        await terminal_packages.read_skill_package_source_from_terminal(
+            types.SimpleNamespace(),
+            'terminal-1',
+            {'id': 'user-1', 'role': 'admin'},
+            root,
+        )
+    assert client.read_paths == []
+
+
+@pytest.mark.asyncio
+async def test_terminal_source_reader_uses_listed_size_as_hint_not_truth(monkeypatch):
+    root = '/home/user/.openwebui/skill-worktrees/demo'
+    client = _FakeTerminalClient(
+        listings={
+            root: [
+                {
+                    'name': 'SKILL.md',
+                    'type': 'file',
+                    'size': 1,
+                }
+            ],
+        },
+        reads={f'{root}/SKILL.md': 'x' * terminal_packages.MAX_TERMINAL_SOURCE_SINGLE_TEXT_BYTES},
+    )
+
+    async def fake_client(*args, **kwargs):
+        return client
+
+    monkeypatch.setattr(terminal_packages, '_get_terminal_file_client', fake_client)
+
+    files = await terminal_packages.read_skill_package_source_from_terminal(
+        types.SimpleNamespace(),
+        'terminal-1',
+        {'id': 'user-1', 'role': 'admin'},
+        root,
+    )
+
+    assert files['SKILL.md'] == 'x' * terminal_packages.MAX_TERMINAL_SOURCE_SINGLE_TEXT_BYTES
+    assert client.read_paths == [f'{root}/SKILL.md']
+
+
+@pytest.mark.asyncio
 async def test_terminal_sync_writes_runtime_package_files_and_marker_last(monkeypatch, tmp_path):
     files = {
         'SKILL.md': '---\nname: Demo\n---\nBody\n',
@@ -445,6 +692,70 @@ async def test_terminal_sync_writes_runtime_package_files_and_marker_last(monkey
     marker_path, marker_content = client.writes[-1]
     assert marker_path == f'{runtime_dir}/.openwebui-skill.json'
     assert json.loads(marker_content)['bundle_hash'] == manifest.hash
+
+
+@pytest.mark.asyncio
+async def test_storage_package_zip_readback_rejects_over_budget_entries_before_read(monkeypatch, tmp_path):
+    zip_path = tmp_path / 'demo.zip'
+    with zipfile.ZipFile(zip_path, 'w') as archive:
+        archive.writestr('SKILL.md', '---\nname: Demo\n---\nBody\n')
+        archive.writestr('templates/large.txt', 'x' * (terminal_packages.MAX_STORAGE_ZIP_SINGLE_ENTRY_BYTES + 1))
+
+    monkeypatch.setattr(terminal_packages.Storage, 'get_file', lambda storage_path: str(zip_path))
+
+    def forbidden_read(self, name, *args, **kwargs):
+        raise AssertionError('oversized zip entries must be rejected from ZipInfo before archive.read')
+
+    monkeypatch.setattr(zipfile.ZipFile, 'read', forbidden_read)
+
+    with pytest.raises(terminal_packages.TerminalSkillPackageError, match='zip entry templates/large.txt.*exceeds'):
+        await terminal_packages._read_storage_package_files('storage://demo.zip')
+
+
+@pytest.mark.asyncio
+async def test_storage_package_zip_readback_rejects_too_many_entries(monkeypatch, tmp_path):
+    zip_path = tmp_path / 'demo.zip'
+    with zipfile.ZipFile(zip_path, 'w') as archive:
+        for index in range(terminal_packages.MAX_STORAGE_ZIP_ENTRIES + 1):
+            archive.writestr(f'templates/file-{index}.txt', 'ok\n')
+
+    monkeypatch.setattr(terminal_packages.Storage, 'get_file', lambda storage_path: str(zip_path))
+
+    with pytest.raises(terminal_packages.TerminalSkillPackageError, match='too many zip entries'):
+        await terminal_packages._read_storage_package_files('storage://demo.zip')
+
+
+@pytest.mark.asyncio
+async def test_storage_package_zip_readback_counts_directory_entries(monkeypatch, tmp_path):
+    zip_path = tmp_path / 'demo.zip'
+    with zipfile.ZipFile(zip_path, 'w') as archive:
+        for index in range(terminal_packages.MAX_STORAGE_ZIP_ENTRIES + 1):
+            archive.writestr(f'templates/dir-{index}/', '')
+
+    monkeypatch.setattr(terminal_packages.Storage, 'get_file', lambda storage_path: str(zip_path))
+
+    with pytest.raises(terminal_packages.TerminalSkillPackageError, match='too many zip entries'):
+        await terminal_packages._read_storage_package_files('storage://demo.zip')
+
+
+@pytest.mark.asyncio
+async def test_storage_package_zip_readback_rejects_total_uncompressed_budget_before_read(monkeypatch, tmp_path):
+    zip_path = tmp_path / 'demo.zip'
+    entry = 'x' * terminal_packages.MAX_STORAGE_ZIP_SINGLE_ENTRY_BYTES
+    entry_count = (terminal_packages.MAX_STORAGE_ZIP_TOTAL_UNCOMPRESSED_BYTES // len(entry)) + 1
+    with zipfile.ZipFile(zip_path, 'w') as archive:
+        for index in range(entry_count):
+            archive.writestr(f'templates/chunk-{index}.txt', entry)
+
+    monkeypatch.setattr(terminal_packages.Storage, 'get_file', lambda storage_path: str(zip_path))
+
+    def forbidden_read(self, name, *args, **kwargs):
+        raise AssertionError('over-budget zip totals must be rejected from ZipInfo before archive.read')
+
+    monkeypatch.setattr(zipfile.ZipFile, 'read', forbidden_read)
+
+    with pytest.raises(terminal_packages.TerminalSkillPackageError, match='exceeds max total uncompressed zip size'):
+        await terminal_packages._read_storage_package_files('storage://demo.zip')
 
 
 def test_terminal_source_reader_rejects_runtime_cache_as_install_source():

@@ -16,11 +16,26 @@ from open_webui.env import AIOHTTP_CLIENT_SESSION_SSL, AIOHTTP_CLIENT_TIMEOUT_TO
 from open_webui.models.groups import Groups
 from open_webui.storage.provider import Storage
 from open_webui.utils.access_control import has_connection_access
-from open_webui.utils.skill_packages import normalize_package_files, validate_package_file_path
+from open_webui.utils.skill_packages import (
+    MAX_SKILL_PACKAGE_FILES,
+    MAX_SKILL_PACKAGE_SINGLE_TEXT_BYTES,
+    MAX_SKILL_PACKAGE_TOTAL_TEXT_BYTES,
+    SkillPackageError,
+    is_supported_text_package_path,
+    normalize_package_files,
+    validate_package_file_path,
+)
 
 TERMINAL_SKILL_RUNTIME_ROOT = '/home/user/.openwebui/skills'
 TERMINAL_SKILL_RUNTIME_MARKER = '.openwebui-skill.json'
 TERMINAL_SKILL_DERIVED_SOURCE_PREFIX = f'{TERMINAL_SKILL_RUNTIME_ROOT}/'
+MAX_TERMINAL_SOURCE_FILES = MAX_SKILL_PACKAGE_FILES
+MAX_TERMINAL_SOURCE_DEPTH = 12
+MAX_TERMINAL_SOURCE_SINGLE_TEXT_BYTES = MAX_SKILL_PACKAGE_SINGLE_TEXT_BYTES
+MAX_TERMINAL_SOURCE_TOTAL_TEXT_BYTES = MAX_SKILL_PACKAGE_TOTAL_TEXT_BYTES
+MAX_STORAGE_ZIP_ENTRIES = MAX_SKILL_PACKAGE_FILES
+MAX_STORAGE_ZIP_SINGLE_ENTRY_BYTES = MAX_SKILL_PACKAGE_SINGLE_TEXT_BYTES
+MAX_STORAGE_ZIP_TOTAL_UNCOMPRESSED_BYTES = MAX_SKILL_PACKAGE_TOTAL_TEXT_BYTES
 
 
 class TerminalSkillPackageError(ValueError):
@@ -34,6 +49,26 @@ class TerminalSkillSyncResult:
 
     def model_dump(self) -> dict[str, Any]:
         return {'path': self.path, 'entrypoints': self.entrypoints}
+
+
+@dataclass
+class _TerminalSourceBudgetState:
+    file_count: int = 0
+    total_text_bytes: int = 0
+
+
+@dataclass
+class _TerminalSourceEntry:
+    kind: str
+    terminal_path: str
+    relative_path: str
+    listed_size: int | None = None
+
+
+@dataclass
+class _StorageZipEntry:
+    path: str
+    info: zipfile.ZipInfo
 
 
 @dataclass
@@ -101,8 +136,12 @@ async def read_skill_package_source_from_terminal(
     source_path = _validate_terminal_source_path(source_path)
     client = await _get_terminal_file_client(request, terminal_id, user, metadata=metadata, oauth_token=oauth_token)
     files: dict[str, str] = {}
-    await _collect_terminal_source_files(client, source_path, '', files)
-    return files
+    await _collect_terminal_source_files(client, source_path, '', files, _TerminalSourceBudgetState(), depth=0)
+    try:
+        normalized = normalize_package_files(files)
+    except SkillPackageError as exc:
+        raise TerminalSkillPackageError(str(exc)) from exc
+    return {path: content.decode('utf-8') for path, content in normalized.items()}
 
 
 async def ensure_skill_synced_to_terminal(
@@ -156,32 +195,157 @@ async def _collect_terminal_source_files(
     current_path: str,
     relative_prefix: str,
     files: dict[str, str],
+    budget: _TerminalSourceBudgetState,
+    *,
+    depth: int,
 ) -> None:
+    if depth > MAX_TERMINAL_SOURCE_DEPTH:
+        raise TerminalSkillPackageError(
+            f'terminal skill source is too deep at {relative_prefix or "."}: '
+            f'depth {depth} exceeds max {MAX_TERMINAL_SOURCE_DEPTH}'
+        )
+
     listing = await client.list_files(current_path)
     entries = listing.get('entries')
     if not isinstance(entries, list):
         raise TerminalSkillPackageError('Terminal list_files returned invalid entries')
 
-    for entry in entries:
-        if not isinstance(entry, dict):
-            continue
-        name = entry.get('name')
-        kind = entry.get('type')
-        if not isinstance(name, str) or not name:
-            continue
-        if '/' in name or '\\' in name or name in {'.', '..'}:
-            raise TerminalSkillPackageError(f'Unsafe terminal directory entry: {name}')
+    source_entries = _prepare_terminal_source_entries(entries, current_path, relative_prefix, budget)
 
-        child_path = _join_terminal_path(current_path, name)
-        relative_path = _join_terminal_path(relative_prefix, name) if relative_prefix else name
-        if kind == 'directory':
-            await _collect_terminal_source_files(client, child_path, relative_path, files)
-        elif kind == 'file':
-            payload = await client.read_file(child_path)
-            content = payload.get('content')
-            if not isinstance(content, str):
-                raise TerminalSkillPackageError(f'Terminal source file is not readable as text: {relative_path}')
-            files[validate_package_file_path(relative_path)] = content
+    for entry in source_entries:
+        if entry.kind == 'directory':
+            await _collect_terminal_source_files(
+                client,
+                entry.terminal_path,
+                entry.relative_path,
+                files,
+                budget,
+                depth=depth + 1,
+            )
+        elif entry.kind == 'file':
+            payload = await client.read_file(entry.terminal_path)
+            _record_terminal_source_file(entry.relative_path, payload.get('content'), entry.listed_size, budget, files)
+
+
+def _prepare_terminal_source_entries(
+    entries: list[Any],
+    current_path: str,
+    relative_prefix: str,
+    budget: _TerminalSourceBudgetState,
+) -> list[_TerminalSourceEntry]:
+    source_entries = []
+    for entry in entries:
+        source_entry = _prepare_terminal_source_entry(entry, current_path, relative_prefix)
+        if source_entry is None:
+            continue
+        source_entries.append(source_entry)
+
+    _reserve_terminal_source_budget(source_entries, budget)
+    return source_entries
+
+
+def _reserve_terminal_source_budget(
+    source_entries: list[_TerminalSourceEntry],
+    budget: _TerminalSourceBudgetState,
+) -> None:
+    file_entries = [entry for entry in source_entries if entry.kind == 'file']
+    projected_file_count = budget.file_count + len(file_entries)
+    if projected_file_count > MAX_TERMINAL_SOURCE_FILES:
+        raise TerminalSkillPackageError(
+            f'terminal skill source has too many text files: '
+            f'{projected_file_count} > max {MAX_TERMINAL_SOURCE_FILES}'
+        )
+
+    known_total = 0
+    for entry in file_entries:
+        if entry.listed_size is None:
+            continue
+        _ensure_terminal_source_file_size(entry.relative_path, entry.listed_size)
+        known_total += entry.listed_size
+
+    projected_total = budget.total_text_bytes + known_total
+    if projected_total > MAX_TERMINAL_SOURCE_TOTAL_TEXT_BYTES:
+        raise TerminalSkillPackageError(
+            f'terminal skill source exceeds max total text package size '
+            f'({MAX_TERMINAL_SOURCE_TOTAL_TEXT_BYTES} bytes) after listing '
+            f'{file_entries[-1].relative_path if file_entries else "."}: {projected_total} bytes'
+        )
+
+    budget.file_count = projected_file_count
+    budget.total_text_bytes = projected_total
+
+
+def _prepare_terminal_source_entry(
+    entry: Any,
+    current_path: str,
+    relative_prefix: str,
+) -> _TerminalSourceEntry | None:
+    if not isinstance(entry, dict):
+        return None
+    name = entry.get('name')
+    kind = entry.get('type')
+    if not isinstance(name, str) or not name:
+        return None
+    if '/' in name or '\\' in name or name in {'.', '..'}:
+        raise TerminalSkillPackageError(f'Unsafe terminal directory entry: {name}')
+
+    child_path = _join_terminal_path(current_path, name)
+    relative_path = _join_terminal_path(relative_prefix, name) if relative_prefix else name
+    if kind == 'directory':
+        return _TerminalSourceEntry(kind='directory', terminal_path=child_path, relative_path=relative_path)
+    if kind != 'file':
+        return None
+
+    path = validate_package_file_path(relative_path)
+    if not is_supported_text_package_path(path):
+        raise TerminalSkillPackageError(
+            f'terminal skill source is text-only; unsupported file type: {path}; '
+            'binary assets are not supported'
+        )
+    listed_size = _coerce_terminal_source_listed_size(entry.get('size'), path)
+    return _TerminalSourceEntry(kind='file', terminal_path=child_path, relative_path=path, listed_size=listed_size)
+
+
+def _coerce_terminal_source_listed_size(raw_size: Any, path: str) -> int | None:
+    if raw_size is None:
+        return None
+    if isinstance(raw_size, bool) or not isinstance(raw_size, int) or raw_size < 0:
+        raise TerminalSkillPackageError(f'Terminal list_files returned invalid size for {path}: {raw_size!r}')
+    return raw_size
+
+
+def _record_terminal_source_file(
+    path: str,
+    content: Any,
+    listed_size: int | None,
+    budget: _TerminalSourceBudgetState,
+    files: dict[str, str],
+) -> None:
+    if not isinstance(content, str):
+        raise TerminalSkillPackageError(
+            f'Terminal source file is not readable as UTF-8 text: {path}; binary assets are not supported'
+        )
+    size = len(content.encode('utf-8'))
+    _ensure_terminal_source_file_size(path, size)
+    if listed_size is None:
+        budget.total_text_bytes += size
+    elif size > listed_size:
+        budget.total_text_bytes += size - listed_size
+    if budget.total_text_bytes > MAX_TERMINAL_SOURCE_TOTAL_TEXT_BYTES:
+        raise TerminalSkillPackageError(
+            f'terminal skill source exceeds max total text package size '
+            f'({MAX_TERMINAL_SOURCE_TOTAL_TEXT_BYTES} bytes) after adding {path}: '
+            f'{budget.total_text_bytes} bytes'
+        )
+    files[path] = content
+
+
+def _ensure_terminal_source_file_size(path: str, size: int) -> None:
+    if size > MAX_TERMINAL_SOURCE_SINGLE_TEXT_BYTES:
+        raise TerminalSkillPackageError(
+            f'terminal skill source file exceeds max single text file size '
+            f'({MAX_TERMINAL_SOURCE_SINGLE_TEXT_BYTES} bytes): {path} ({size} bytes)'
+        )
 
 
 async def _get_terminal_file_client(
@@ -276,17 +440,74 @@ def _terminal_headers_and_cookies(
 
 async def _read_storage_package_files(storage_path: str) -> dict[str, bytes]:
     local_path = await asyncio.to_thread(Storage.get_file, storage_path)
+    return await asyncio.to_thread(_read_storage_package_zip, local_path)
 
-    def _read_zip() -> dict[str, bytes]:
-        files: dict[str, bytes] = {}
+
+def _read_storage_package_zip(local_path: str) -> dict[str, bytes]:
+    files: dict[str, bytes] = {}
+    try:
         with zipfile.ZipFile(local_path, 'r') as archive:
-            for info in archive.infolist():
-                if info.is_dir():
-                    continue
-                files[validate_package_file_path(info.filename)] = archive.read(info)
+            zip_entries = _collect_storage_zip_entries(archive)
+            for entry in zip_entries:
+                files[entry.path] = archive.read(entry.info)
         return normalize_package_files(files)
+    except SkillPackageError as exc:
+        raise TerminalSkillPackageError(str(exc)) from exc
 
-    return await asyncio.to_thread(_read_zip)
+
+def _collect_storage_zip_entries(archive: zipfile.ZipFile) -> list[_StorageZipEntry]:
+    infos = archive.infolist()
+    _ensure_storage_zip_entry_count(len(infos))
+
+    zip_entries = []
+    total_uncompressed = 0
+    seen_paths: set[str] = set()
+    for info in infos:
+        if info.is_dir():
+            continue
+        path = _validate_storage_zip_entry_path(info, seen_paths)
+        _ensure_storage_zip_entry_size(path, info.file_size)
+        total_uncompressed = _add_storage_zip_uncompressed_size(path, total_uncompressed, info.file_size)
+        zip_entries.append(_StorageZipEntry(path=path, info=info))
+    return zip_entries
+
+
+def _validate_storage_zip_entry_path(info: zipfile.ZipInfo, seen_paths: set[str]) -> str:
+    path = validate_package_file_path(info.filename)
+    if path in seen_paths:
+        raise TerminalSkillPackageError(f'duplicate package file path in zip: {path}')
+    seen_paths.add(path)
+    if not is_supported_text_package_path(path):
+        raise TerminalSkillPackageError(
+            f'stored skill package zip is text-only; unsupported file type: {path}; '
+            'binary assets are not supported'
+        )
+    return path
+
+
+def _ensure_storage_zip_entry_count(count: int) -> None:
+    if count > MAX_STORAGE_ZIP_ENTRIES:
+        raise TerminalSkillPackageError(
+            f'stored skill package zip has too many zip entries: {count} > max {MAX_STORAGE_ZIP_ENTRIES}'
+        )
+
+
+def _ensure_storage_zip_entry_size(path: str, size: int) -> None:
+    if size > MAX_STORAGE_ZIP_SINGLE_ENTRY_BYTES:
+        raise TerminalSkillPackageError(
+            f'stored skill package zip entry {path} exceeds max single zip entry size '
+            f'({MAX_STORAGE_ZIP_SINGLE_ENTRY_BYTES} bytes): {size} bytes'
+        )
+
+
+def _add_storage_zip_uncompressed_size(path: str, total: int, size: int) -> int:
+    updated_total = total + size
+    if updated_total > MAX_STORAGE_ZIP_TOTAL_UNCOMPRESSED_BYTES:
+        raise TerminalSkillPackageError(
+            f'stored skill package zip exceeds max total uncompressed zip size '
+            f'({MAX_STORAGE_ZIP_TOTAL_UNCOMPRESSED_BYTES} bytes) after adding {path}: {updated_total} bytes'
+        )
+    return updated_total
 
 
 def _validate_terminal_source_path(source_path: str) -> str:

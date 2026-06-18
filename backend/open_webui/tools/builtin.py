@@ -3065,6 +3065,8 @@ async def read_skill(
     or before applying a package-backed skill that may need files in Open Terminal.
     For package-backed skills, this also syncs the stored bundle into the active
     Open Terminal runtime cache before returning absolute package and entrypoint paths.
+    Skill packages are text-only: SKILL.md, skill.json, scripts, templates, and
+    assets may be present only as supported UTF-8 text files; binary assets are not supported.
     Do not use this to install a new skill or modify an existing skill.
     Returns JSON with name and content; package-backed skills also include package.path
     and entrypoints[].path values that can be used with Open Terminal commands.
@@ -3088,7 +3090,7 @@ async def read_skill(
         if package:
             terminal_id = _resolve_terminal_id(__terminal_id__, __metadata__)
             if not terminal_id:
-                return json.dumps({'error': 'Terminal context is required to sync skill package assets'})
+                return json.dumps({'error': 'Terminal context is required to sync text-only skill package files'})
 
             sync_result = await ensure_skill_synced_to_terminal(
                 __request__,
@@ -3120,14 +3122,16 @@ async def install_skill(
     Install a new skill from an absolute source directory in the active Open Terminal.
     Use when the user asks to add a new skill from files already prepared in their
     terminal storage. The source directory must contain SKILL.md and may include
-    skill.json, scripts, templates, or assets. This stores the skill in OpenWebUI
+    skill.json, scripts, templates, or assets, but every packaged file must be a
+    supported UTF-8 text file; binary assets are not supported. This stores the skill in OpenWebUI
     DB/storage but does not return runtime execution paths or sync the runtime cache;
     call read_skill after installation when package paths or entrypoints are needed.
     Do not use this for existing skills; use update_skill instead.
     Returns JSON containing only the new skill id, or an error field with recovery
     guidance such as using an absolute source path or choosing a non-runtime-cache source.
 
-    :param source_path: Absolute terminal source dir with SKILL.md; not relative or under /home/user/.openwebui/skills
+    :param source_path: Absolute terminal source dir for a text-only package;
+        not relative or under /home/user/.openwebui/skills
     :return: JSON object with only id on success, or an error field
     """
     if __request__ is None:
@@ -3171,7 +3175,9 @@ async def update_skill(
     Use when the user asks to modify a skill that already exists. Provide exactly one
     of content or source_path: content performs a text-only SKILL.md instruction update,
     while source_path replaces the whole package from an absolute Open Terminal source
-    directory containing SKILL.md. This stores the update in OpenWebUI DB/storage but
+    directory containing SKILL.md. Source packages are text-only: skill.json, scripts,
+    templates, and assets may be present only as supported UTF-8 text files; binary assets are not supported.
+    This stores the update in OpenWebUI DB/storage but
     does not return runtime execution paths or sync the runtime cache; call read_skill
     after updating when package paths or entrypoints are needed.
     Do not use this to create a new skill; use install_skill instead.

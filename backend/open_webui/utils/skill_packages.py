@@ -68,6 +68,9 @@ _ALLOWED_TEXT_SUFFIXES = {
     '.yaml',
     '.yml',
 }
+MAX_SKILL_PACKAGE_FILES = 128
+MAX_SKILL_PACKAGE_SINGLE_TEXT_BYTES = 256 * 1024
+MAX_SKILL_PACKAGE_TOTAL_TEXT_BYTES = 2 * 1024 * 1024
 
 
 def validate_package_file_path(path: str) -> str:
@@ -127,19 +130,42 @@ def parse_skill_json(content: str | bytes) -> ParsedSkillJson:
 
 
 def normalize_package_files(files: dict[str, str | bytes]) -> dict[str, bytes]:
+    if len(files) > MAX_SKILL_PACKAGE_FILES:
+        raise SkillPackageError(
+            f'text-only package has too many text files: {len(files)} > max {MAX_SKILL_PACKAGE_FILES}'
+        )
+
     normalized: dict[str, bytes] = {}
+    total_size = 0
     for raw_path, content in files.items():
         path = validate_package_file_path(raw_path)
-        if not _is_supported_text_path(path):
-            raise SkillPackageError(f'unsupported package file type: {path}')
+        if not is_supported_text_package_path(path):
+            raise SkillPackageError(
+                f'text-only package has unsupported file type: {path}; '
+                'only UTF-8 text files with supported text extensions are allowed, '
+                'and binary assets are not supported'
+            )
         if path in normalized:
             raise SkillPackageError(f'duplicate package file path: {path}')
 
         text = _decode_text(content, path=path)
         text = _normalize_newlines(text)
         if '\x00' in text:
-            raise SkillPackageError(f'text package file contains NUL bytes: {path}')
-        normalized[path] = text.encode('utf-8')
+            raise SkillPackageError(f'text-only package file contains NUL bytes: {path}')
+        encoded = text.encode('utf-8')
+        size = len(encoded)
+        if size > MAX_SKILL_PACKAGE_SINGLE_TEXT_BYTES:
+            raise SkillPackageError(
+                f'text-only package file exceeds max single text file size '
+                f'({MAX_SKILL_PACKAGE_SINGLE_TEXT_BYTES} bytes): {path} ({size} bytes)'
+            )
+        total_size += size
+        if total_size > MAX_SKILL_PACKAGE_TOTAL_TEXT_BYTES:
+            raise SkillPackageError(
+                f'text-only package exceeds max total text package size '
+                f'({MAX_SKILL_PACKAGE_TOTAL_TEXT_BYTES} bytes) after adding {path}: {total_size} bytes'
+            )
+        normalized[path] = encoded
 
     return dict(sorted(normalized.items()))
 
@@ -290,7 +316,7 @@ def _validate_entrypoint_paths_are_packaged(entrypoints: list[dict[str, str]], p
             )
 
 
-def _is_supported_text_path(path: str) -> bool:
+def is_supported_text_package_path(path: str) -> bool:
     pure_path = PurePosixPath(path)
     return pure_path.name in _ALLOWED_TEXT_FILENAMES or pure_path.suffix.lower() in _ALLOWED_TEXT_SUFFIXES
 
@@ -302,8 +328,10 @@ def _decode_text(content: str | bytes, *, path: str) -> str:
         try:
             return content.decode('utf-8')
         except UnicodeDecodeError as exc:
-            raise SkillPackageError(f'text package files must be UTF-8: {path}') from exc
-    raise SkillPackageError(f'package file content must be text or bytes: {path}')
+            raise SkillPackageError(
+                f'text-only package files must be UTF-8: {path}; binary assets are not supported'
+            ) from exc
+    raise SkillPackageError(f'text-only package file content must be text or bytes: {path}')
 
 
 def _normalize_newlines(text: str) -> str:

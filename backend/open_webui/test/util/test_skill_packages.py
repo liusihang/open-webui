@@ -11,6 +11,8 @@ from open_webui.internal.db import JSONField
 from open_webui.migrations.versions import e2f3a4b5c7_add_skill_package_table as skill_package_migration
 from open_webui.models.skills import SkillPackage, SkillPackageModel, skill_package_id
 from open_webui.utils.skill_packages import (
+    MAX_SKILL_PACKAGE_SINGLE_TEXT_BYTES,
+    MAX_SKILL_PACKAGE_TOTAL_TEXT_BYTES,
     SkillPackageError,
     build_skill_package_manifest,
     build_skill_package_zip_bytes,
@@ -254,12 +256,52 @@ def test_validate_package_file_path_rejects_unsafe_paths(unsafe_path):
         validate_package_file_path(unsafe_path)
 
 
-def test_normalize_package_files_rejects_unsupported_binary_files():
-    with pytest.raises(SkillPackageError, match='unsupported package file type'):
+def test_normalize_package_files_rejects_binary_assets_in_text_only_package():
+    with pytest.raises(SkillPackageError, match='text-only package.*unsupported file type'):
         normalize_package_files({'assets/logo.png': b'\x89PNG\r\n'})
 
-    with pytest.raises(SkillPackageError, match='text package files must be UTF-8'):
+    with pytest.raises(SkillPackageError, match='text-only package files must be UTF-8'):
         normalize_package_files({'scripts/run.py': b'\xff\xfe\x00'})
+
+
+def test_normalize_package_files_rejects_text_files_over_resource_budgets():
+    with pytest.raises(SkillPackageError, match='exceeds max single text file size'):
+        normalize_package_files(
+            {
+                'SKILL.md': '---\nname: Demo\n---\nBody\n',
+                'templates/large.txt': 'x' * (MAX_SKILL_PACKAGE_SINGLE_TEXT_BYTES + 1),
+            }
+        )
+
+    files = {'SKILL.md': '---\nname: Demo\n---\nBody\n'}
+    for index in range((MAX_SKILL_PACKAGE_TOTAL_TEXT_BYTES // MAX_SKILL_PACKAGE_SINGLE_TEXT_BYTES) + 1):
+        files[f'templates/chunk-{index}.txt'] = 'x' * MAX_SKILL_PACKAGE_SINGLE_TEXT_BYTES
+
+    with pytest.raises(SkillPackageError, match='exceeds max total text package size'):
+        normalize_package_files(files)
+
+
+def test_normalize_package_files_accepts_text_files_at_resource_budget_limits():
+    single_limit = normalize_package_files(
+        {
+            'SKILL.md': '---\nname: Demo\n---\nBody\n',
+            'templates/large.txt': 'x' * MAX_SKILL_PACKAGE_SINGLE_TEXT_BYTES,
+        }
+    )
+    assert len(single_limit['templates/large.txt']) == MAX_SKILL_PACKAGE_SINGLE_TEXT_BYTES
+
+    files = {'SKILL.md': ''}
+    chunk_count = MAX_SKILL_PACKAGE_TOTAL_TEXT_BYTES // MAX_SKILL_PACKAGE_SINGLE_TEXT_BYTES
+    for index in range(chunk_count):
+        files[f'templates/chunk-{index}.txt'] = 'x' * MAX_SKILL_PACKAGE_SINGLE_TEXT_BYTES
+
+    total_limit = normalize_package_files(files)
+    assert sum(len(content) for content in total_limit.values()) == MAX_SKILL_PACKAGE_TOTAL_TEXT_BYTES
+
+
+def test_normalize_package_files_rejects_decoded_text_with_nul_bytes():
+    with pytest.raises(SkillPackageError, match='contains NUL bytes'):
+        normalize_package_files({'SKILL.md': 'Body\x00Hidden\n'})
 
 
 def test_normalize_package_files_rejects_paths_that_would_strip_into_duplicates():
