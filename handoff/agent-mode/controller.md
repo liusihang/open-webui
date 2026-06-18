@@ -997,3 +997,34 @@ non-overlapping controller work:
 - keep this handoff current;
 - inspect worker results only after they return;
 - integrate one returned worker branch at a time with focused gates.
+
+## W12D Evidence Merge Helper Checkpoint
+
+Date: 2026-06-18
+
+Controller added a generic W12 evidence merge helper so W12D does not have to
+reuse the W12B-labeled merge script for final live evidence.
+
+Files:
+
+- `scripts/agent_mode/merge_w12_evidence.py`
+- `backend/open_webui/test/agent/test_w12_evidence_merge.py`
+
+TDD evidence:
+
+- Red:
+  `WEBUI_SECRET_KEY=test-secret ENABLE_DB_MIGRATIONS=false uv run pytest -q backend/open_webui/test/agent/test_w12_evidence_merge.py -k generic_merge_uses_w12_scope_label`
+  failed because `scripts/agent_mode/merge_w12_evidence.py` did not exist.
+- Green:
+  `WEBUI_SECRET_KEY=test-secret ENABLE_DB_MIGRATIONS=false uv run pytest -q backend/open_webui/test/agent/test_w12_evidence_merge.py`
+  -> `3 passed`.
+- Ruff:
+  `uv run ruff check scripts/agent_mode/merge_w12_evidence.py backend/open_webui/test/agent/test_w12_evidence_merge.py`
+  -> passed after import sorting.
+- Diff-check:
+  `git diff --check -- scripts/agent_mode/merge_w12_evidence.py backend/open_webui/test/agent/test_w12_evidence_merge.py`
+  -> passed.
+
+This helper only merges evidence fragments and labels the merged document as
+`Agent Mode W12 live acceptance evidence`. It does not claim any scenario has
+passed; `acceptance_harness.py live` remains the authority.

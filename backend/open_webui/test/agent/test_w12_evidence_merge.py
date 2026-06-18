@@ -16,6 +16,16 @@ def load_merge_module():
     return module
 
 
+def load_generic_merge_module():
+    path = ROOT / 'scripts' / 'agent_mode' / 'merge_w12_evidence.py'
+    spec = importlib.util.spec_from_file_location('merge_w12_evidence', path)
+    module = importlib.util.module_from_spec(spec)
+    assert spec.loader is not None
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
 def write_fragment(path: Path, scenarios: list[dict]):
     path.write_text(json.dumps({'scenarios': scenarios}), encoding='utf-8')
 
@@ -86,3 +96,31 @@ def test_duplicate_scenario_ids_are_rejected(tmp_path):
         assert 'duplicate scenario id' in str(exc)
     else:
         raise AssertionError('duplicate scenario ids should be rejected')
+
+
+def test_generic_merge_uses_w12_scope_label(tmp_path):
+    merge = load_generic_merge_module()
+    fragment = tmp_path / 'runtime.json'
+    write_fragment(
+        fragment,
+        [
+            {
+                'id': 'scenario_01_ordinary_qa',
+                'status': 'live_passed',
+                'live_status': 'passed',
+                'observations': [
+                    'event:run.running',
+                    'event:final.started',
+                    'event:final.delta',
+                    'event:run.completed',
+                    'no_tool_events',
+                ],
+            }
+        ],
+    )
+
+    document = merge.merge_fragments([fragment], base_commit='def456')
+
+    assert document['mode'] == 'live'
+    assert document['base_commit'] == 'def456'
+    assert document['scope'] == 'Agent Mode W12 live acceptance evidence'
