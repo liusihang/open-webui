@@ -688,6 +688,7 @@ async def test_db_none_projector_path_uses_internal_session_scope(tmp_path, monk
 async def test_evidence_job_branch_uses_existing_job_state_surface(monkeypatch):
     job_status_calls = []
     state_calls = []
+    finalize_calls = []
 
     class FakeJobs:
         async def get_job_by_id(self, job_id):
@@ -733,8 +734,9 @@ async def test_evidence_job_branch_uses_existing_job_state_surface(monkeypatch):
             state_calls.append(kwargs)
             return type("State", (), {"state_id": "state-1"})()
 
-    async def fake_project(job_payload, db=None):
+    async def fake_project(job_payload, db=None, activate=True):
         assert job_payload["workflow"] == "evidence_projection"
+        assert activate is False
         return EvidenceProjectionResult(
             scanned_chunks=1,
             text_evidence_upserted=1,
@@ -752,15 +754,30 @@ async def test_evidence_job_branch_uses_existing_job_state_surface(monkeypatch):
             evidence_refs=list(evidence_refs),
         )
 
+    async def fake_finalize_projected_evidence(job_payload, evidence_refs, db=None):
+        finalize_calls.append((job_payload["file_ids"], list(evidence_refs)))
+
     monkeypatch.setattr(indexing_mod, "RetrievalIndexJobs", FakeJobs())
     monkeypatch.setattr(indexing_mod, "RetrievalIndexStates", FakeStates())
     monkeypatch.setattr(indexing_mod, "project_evidence_from_job_payload", fake_project)
     monkeypatch.setattr(indexing_mod, "write_projected_evidence_embeddings", fake_write_embeddings)
+    monkeypatch.setattr(
+        indexing_mod,
+        "finalize_projected_evidence_from_job_payload",
+        fake_finalize_projected_evidence,
+        raising=False,
+    )
 
     response = await indexing_mod.run_retrieval_index_job("job-project")
 
     assert response["result"]["evidence"]["text_evidence_upserted"] == 1
     assert response["result"]["evidence"]["image_evidence_upserted"] == 1
+    assert finalize_calls == [
+        (
+            ["file-doc"],
+            ["ke:kb-1:file-doc:text_chunk:0:abc"],
+        )
+    ]
     assert job_status_calls[0] == ("job-project", {"status": "running"})
     assert job_status_calls[-1][0] == "job-project"
     assert job_status_calls[-1][1]["status"] == "succeeded"
@@ -785,6 +802,7 @@ async def test_evidence_job_branch_uses_existing_job_state_surface(monkeypatch):
 async def test_evidence_job_branch_fails_when_embeddings_are_skipped(monkeypatch):
     job_status_calls = []
     state_calls = []
+    finalize_calls = []
 
     class FakeJobs:
         async def get_job_by_id(self, job_id):
@@ -831,7 +849,8 @@ async def test_evidence_job_branch_fails_when_embeddings_are_skipped(monkeypatch
             state_calls.append(kwargs)
             return type("State", (), {"state_id": "state-1"})()
 
-    async def fake_project(job_payload, db=None):
+    async def fake_project(job_payload, db=None, activate=True):
+        assert activate is False
         return EvidenceProjectionResult(
             scanned_chunks=1,
             text_evidence_upserted=1,
@@ -844,15 +863,25 @@ async def test_evidence_job_branch_fails_when_embeddings_are_skipped(monkeypatch
             skipped=len(evidence_refs),
         )
 
+    async def fake_finalize_projected_evidence(job_payload, evidence_refs, db=None):
+        finalize_calls.append((job_payload["file_ids"], list(evidence_refs)))
+
     monkeypatch.setattr(indexing_mod, "RetrievalIndexJobs", FakeJobs())
     monkeypatch.setattr(indexing_mod, "RetrievalIndexStates", FakeStates())
     monkeypatch.setattr(indexing_mod, "project_evidence_from_job_payload", fake_project)
     monkeypatch.setattr(indexing_mod, "write_projected_evidence_embeddings", fake_write_embeddings)
+    monkeypatch.setattr(
+        indexing_mod,
+        "finalize_projected_evidence_from_job_payload",
+        fake_finalize_projected_evidence,
+        raising=False,
+    )
 
     response = await indexing_mod.run_retrieval_index_job("job-project")
 
     assert response["job"]["status"] == "failed"
     assert response["job"]["error"] == "evidence embedding write skipped 1 projected evidence rows"
+    assert finalize_calls == []
     assert job_status_calls[-1][1]["status"] == "failed"
     assert state_calls[-1]["status"] == "failed"
     assert state_calls[-1]["error"] == "evidence embedding write skipped 1 projected evidence rows"

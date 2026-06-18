@@ -24,7 +24,10 @@ from open_webui.models.retrieval_indexes import (
     compute_index_state_id,
     compute_target_config_hash,
 )
-from open_webui.retrieval.evidence_projector import project_evidence_from_job_payload
+from open_webui.retrieval.evidence_projector import (
+    finalize_projected_evidence_from_job_payload,
+    project_evidence_from_job_payload,
+)
 from open_webui.retrieval.lexical.opensearch import OpenSearchLexicalClient
 from open_webui.retrieval.vector.multimodal import (
     MultimodalVectorSpaceError,
@@ -985,7 +988,7 @@ async def run_retrieval_index_job(job_id: str) -> dict[str, Any]:
             return {"job": updated.model_dump() if updated else None, "result": payload}
 
         if job.index_kind == "project":
-            evidence_result = await project_evidence_from_job_payload(job.payload or {})
+            evidence_result = await project_evidence_from_job_payload(job.payload or {}, activate=False)
             embedding_result = await write_projected_evidence_embeddings(evidence_result.evidence_refs)
             embedding_error = None
             if embedding_result.failures:
@@ -1008,6 +1011,16 @@ async def run_retrieval_index_job(job_id: str) -> dict[str, Any]:
                 if evidence_result.failed == 0 and embedding_result.failed == 0 and embedding_error is None
                 else "failed"
             )
+            activation_error = None
+            if final_status == "succeeded":
+                try:
+                    await finalize_projected_evidence_from_job_payload(
+                        job.payload or {},
+                        evidence_result.evidence_refs,
+                    )
+                except Exception as exc:
+                    activation_error = str(exc)
+                    final_status = "failed"
             state_status = "ready" if final_status == "succeeded" else "failed"
             state_count = max(
                 evidence_result.scanned_chunks,
@@ -1028,7 +1041,7 @@ async def run_retrieval_index_job(job_id: str) -> dict[str, Any]:
                 error=(
                     evidence_result.failures[0]["error"]
                     if evidence_result.failures
-                    else embedding_error
+                    else embedding_error or activation_error
                 ),
             )
             updated = await RetrievalIndexJobs.update_job_status(
@@ -1038,7 +1051,7 @@ async def run_retrieval_index_job(job_id: str) -> dict[str, Any]:
                 error=(
                     evidence_result.failures[0]["error"]
                     if evidence_result.failures
-                    else embedding_error
+                    else embedding_error or activation_error
                 ),
             )
             return {"job": updated.model_dump() if updated else None, "result": payload}

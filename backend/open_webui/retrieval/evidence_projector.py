@@ -278,6 +278,7 @@ async def project_evidence_for_knowledge_file(
     file_id: str,
     project_document_images: bool = False,
     projection_profile: str = "unified_multimodal_dense",
+    activate: bool = True,
     db: AsyncSession | None = None,
 ) -> EvidenceProjectionResult:
     async with _session_scope(db) as session:
@@ -322,12 +323,13 @@ async def project_evidence_for_knowledge_file(
         result.evidence_refs = []
         return result
 
-    await _finalize_evidence_projection_for_knowledge_file(
-        knowledge_id=knowledge_id,
-        file_id=file_id,
-        evidence_refs=result.evidence_refs,
-        db=db,
-    )
+    if activate:
+        await _finalize_evidence_projection_for_knowledge_file(
+            knowledge_id=knowledge_id,
+            file_id=file_id,
+            evidence_refs=result.evidence_refs,
+            db=db,
+        )
     return result
 
 
@@ -435,6 +437,7 @@ async def project_document_image_assets_evidence(
 async def project_evidence_from_job_payload(
     job_payload: dict[str, Any],
     *,
+    activate: bool = True,
     db: AsyncSession | None = None,
 ) -> EvidenceProjectionResult:
     knowledge_id = _string_or_none(job_payload.get("knowledge_id")) or _string_or_none(job_payload.get("collection_id"))
@@ -453,6 +456,7 @@ async def project_evidence_from_job_payload(
                 file_id=file_id,
                 project_document_images=project_document_images,
                 projection_profile=projection_profile,
+                activate=activate,
                 db=db,
             )
             _merge_projection_result(result, file_result)
@@ -465,6 +469,26 @@ async def project_evidence_from_job_payload(
         _merge_projection_result(result, text_result)
 
     return result
+
+
+async def finalize_projected_evidence_from_job_payload(
+    job_payload: dict[str, Any],
+    evidence_refs: Sequence[str],
+    *,
+    db: AsyncSession | None = None,
+) -> None:
+    knowledge_id = _string_or_none(job_payload.get("knowledge_id")) or _string_or_none(job_payload.get("collection_id"))
+    if not knowledge_id:
+        raise ValueError("evidence projection job payload requires knowledge_id or collection_id")
+
+    file_ids = _normalize_string_sequence(job_payload.get("file_ids"))
+    for file_id in file_ids:
+        await _finalize_evidence_projection_for_knowledge_file(
+            knowledge_id=knowledge_id,
+            file_id=file_id,
+            evidence_refs=evidence_refs,
+            db=db,
+        )
 
 
 def _merge_projection_result(target: EvidenceProjectionResult, source: EvidenceProjectionResult) -> None:
