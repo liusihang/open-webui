@@ -33,6 +33,7 @@ async def test_append_event_sends_bearer_auth_idempotency_key_and_structured_pay
     assert request.calls.last.request.headers["x-agent-idempotency-key"] == "evt:session:event-1"
     assert json.loads(request.calls.last.request.content) == {
         "idempotency_key": "evt:session:event-1",
+        "run_id": "run-1",
         "event_type": "run.running",
         "summary": "Agent runtime accepted run.",
         "payload": {"runtime_session_id": "session"},

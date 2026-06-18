@@ -770,8 +770,167 @@ Note:
 
 Next controller action:
 
-1. Commit this W12C-4 handoff update.
-2. Run W12C-3 live service harness/evidence capture against the integrated
-   backend and AgentScope runtime.
-3. If W12C-3 no longer hits the prior payload/router/storage blockers, dispatch
+1. Run W12C-3 live service harness/evidence capture against the integrated
+   backend and AgentScope runtime from current HEAD.
+2. If W12C-3 no longer hits the prior payload/router/storage blockers, dispatch
    W12D final scenario acceptance workers.
+3. If W12C-3 finds a new live blocker, land only the narrow fix through the
+   controller and rerun the W12C-4 regression gates.
+
+## W12C-3/W12D Agent-Team Plan Refresh
+
+Date: 2026-06-18
+
+Current committed HEAD:
+
+- `861c19e02` docs(agent-mode): record w12c regression gates
+
+Current unstaged state:
+
+- W12C-3 runtime callback fix:
+  - `services/agentscope-runtime/agentscope_runtime/openwebui_client.py`
+  - `services/agentscope-runtime/agentscope_runtime/schemas.py`
+  - `services/agentscope-runtime/tests/test_openwebui_client.py`
+- this controller handoff update.
+- root `uv.lock` churn from local tooling.
+- Do not stage root `uv.lock` unless a root dependency change is intentionally
+  owned.
+
+Plan update:
+
+- The root implementation plan was refreshed at
+  `/Users/liusihang/openwebui/docs/plans/2026-06-17-openwebui-agent-mode-agentscope-implementation.md`.
+- The old "next W12B workers" plan is now historical. W12B already produced
+  first-pass evidence and narrow fixes, but did not prove live acceptance.
+- W12C-1, W12C-2, and W12C-4 are complete at this checkpoint.
+- W12C-3 has now restarted backend and AgentScope runtime from current HEAD and
+  triggered the real Agent Mode chat path.
+- The old payload/router/storage blockers are gone.
+- A new narrow blocker appeared and was fixed in the runtime callback client:
+  `/api/agent/service/runs/{run_id}/events` requires `run_id` in the JSON body,
+  not only in the path.
+- Only after the W12C-3 fix and this handoff are linted/committed should the
+  controller dispatch W12D final scenario workers.
+
+W12C-3 worker:
+
+| Worker | Can Start | Owns | Must Not Touch | Output |
+| --- | --- | --- | --- | --- |
+| W12C-3 Live service harness | commit pending | backend/runtime startup, health checks, real Agent Mode chat trigger, exact logs/env/PIDs/URLs, narrow runtime callback fix | broad feature fixes, scenario-specific evidence claims, mass service-runtime formatting | failed `422` evidence, fix summary, successful run/session ids, persisted `run.running` event proof, focused pytest, `ruff --select F`, diff-check |
+
+W12D workers after W12C-3:
+
+| Worker | Acceptance Items | Required Evidence |
+| --- | --- | --- |
+| W12D-1 Runtime/chat finalization | 1, 9, 12 | ordinary Q&A run id, event sequence, final message, final phase ordering, visible runtime-unavailable failure |
+| W12D-2 Tools/terminal/approval/cancel | 2, 3, 4, 5, 10 | tool result, outputs/tmp artifacts, approval events, cancellation event, retained process refs with no automatic kill |
+| W12D-3 Subagents/model selection | 6, 7 | concurrent subagent events up to cap 5, cap rejection/stop behavior, model-selection events with permission-valid model ids |
+| W12D-4 SSE/UI/compaction | 8, 11 | reconnect/dedupe proof, no duplicate final text, terminal-state compaction summaries |
+| W12D-5 Release audit | all | merged live evidence passes harness; all regression gates pass; rollout notes updated |
+
+Dispatch rules:
+
+- Do not fork the full brainstorming conversation. Give each worker the root
+  implementation plan, runtime contract addendum, this controller handoff, and
+  only the files needed for its lane.
+- W12D workers should collect evidence and propose narrow fixes. The controller
+  decides whether a fix lands before final evidence merge.
+- Any fix touching `backend/open_webui/main.py`,
+  `backend/open_webui/routers/agent_service.py`,
+  `backend/open_webui/agent/events.py`, `services/agentscope-runtime/*`, or
+  `src/lib/components/chat/Chat.svelte` merges alone.
+- Completion requires:
+  `python3 scripts/agent_mode/acceptance_harness.py live --evidence <merged-live-evidence.json>`
+  passing all 12 live scenarios from integrated services.
+
+## W12C-3 Live Service Harness Checkpoint
+
+Date: 2026-06-18
+
+Scope:
+
+- Start backend and AgentScope runtime from current integration HEAD.
+- Exercise the real `/api/chat/completions` Agent Mode path using
+  `model_item.direct=true` to avoid unrelated provider catalog setup.
+- Capture whether runtime callbacks can persist Agent Run events through the
+  production DB-backed OpenWebUI service path.
+
+Service startup pattern:
+
+- Long-running `exec_command` sessions with `tty=true` are required. Starting
+  backend/runtime through background `&` or `nohup` from a short-lived
+  `exec_command` did not persist because process cleanup stopped them when the
+  command exited.
+- Backend URL used: `http://127.0.0.1:18080`.
+- Runtime URL used: `http://127.0.0.1:8097`.
+- Runtime service token used: `test-service-token`.
+- Both long-running service sessions were stopped with Ctrl-C after the smoke
+  run. Verify ports before the next live run with:
+  - `lsof -nP -iTCP:8097 -sTCP:LISTEN || true`
+  - `lsof -nP -iTCP:18080 -sTCP:LISTEN || true`
+
+First live blocker:
+
+- Chat successfully created an Agent Run and the runtime accepted the run.
+- Runtime callback failed:
+  `POST /api/agent/service/runs/{run_id}/events` returned `422`.
+- Root cause:
+  `services/agentscope-runtime/agentscope_runtime/openwebui_client.py` posted an
+  append-event body without `run_id`, while OpenWebUI
+  `AgentEventAppend` requires `run_id` in the body even though the path also
+  contains it.
+
+Narrow fix:
+
+- Added `run_id` to
+  `services/agentscope-runtime/agentscope_runtime/schemas.py::AppendEventRequest`.
+- Populated it in
+  `services/agentscope-runtime/agentscope_runtime/openwebui_client.py::append_event`.
+- Updated
+  `services/agentscope-runtime/tests/test_openwebui_client.py` to assert the
+  callback body includes `"run_id": "run-1"`.
+
+Focused verification already run:
+
+- `cd services/agentscope-runtime && uv run --extra test pytest -q tests/test_openwebui_client.py -k append_event_sends_bearer_auth_idempotency_key_and_structured_payload`
+  -> `1 passed, 5 deselected`.
+- `uv run ruff check --select F services/agentscope-runtime/agentscope_runtime/openwebui_client.py services/agentscope-runtime/agentscope_runtime/schemas.py services/agentscope-runtime/tests/test_openwebui_client.py`
+  -> passed.
+- `git diff --check -- handoff/agent-mode/controller.md services/agentscope-runtime/agentscope_runtime/openwebui_client.py services/agentscope-runtime/agentscope_runtime/schemas.py services/agentscope-runtime/tests/test_openwebui_client.py`
+  -> passed.
+- Full `uv run ruff check` on these service runtime files currently reports
+  existing quote/import style debt across the files. Do not mass-format those
+  files as part of this narrow W12C-3 fix.
+
+Successful live smoke after the fix:
+
+- Healthcheck passed for backend env and runtime `/health`.
+- Authenticated HTTP chat path succeeded with `model_item.direct=true`.
+- Run id: `4878e77d-a7e2-4ae0-ae8c-ae271b53f8b0`.
+- Runtime session id:
+  `rt_4878e77d-a7e2-4ae0-ae8c-ae271b53f8b0_ONK73O-fPkc`.
+- Chat response status: `true`.
+- Run detail state observed: `running`.
+- Runtime status state observed: `running`.
+- Persisted DB-backed event observed:
+  - event type: `run.running`
+  - seq: `1`
+
+Meaning:
+
+- The old W12C live blockers are cleared for the minimal integrated path:
+  payload shape, missing router mounts, production Agent Run storage, and event
+  callback body shape.
+- This is still not final acceptance. It proves the integrated services can
+  create a run and persist at least one runtime event. W12D must still collect
+  live evidence for all 12 acceptance scenarios.
+
+Next controller action:
+
+1. Commit the W12C-3 fix and this handoff update, excluding root `uv.lock`.
+2. Dispatch W12D final scenario workers from the new checkpoint:
+   - W12D-1 runtime/chat/finalization: scenarios 1, 9, 12.
+   - W12D-2 tools/terminal/approval/cancel: scenarios 2, 3, 4, 5, 10.
+   - W12D-3 subagents/model-selection: scenarios 6, 7.
+   - W12D-4 SSE/UI/compaction: scenarios 8, 11.
+   - W12D-5 release audit: merged evidence and final gates.

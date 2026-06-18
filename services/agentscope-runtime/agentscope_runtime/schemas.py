@@ -70,6 +70,7 @@ class RunStatusResponse(BaseModel):
 
 class AppendEventRequest(BaseModel):
     idempotency_key: str
+    run_id: str
     event_type: str
     summary: str | None = None
     payload: dict[str, Any] = Field(default_factory=dict)

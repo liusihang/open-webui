@@ -38,6 +38,7 @@ class OpenWebUIClient:
     ) -> dict[str, Any]:
         body = AppendEventRequest(
             idempotency_key=idempotency_key,
+            run_id=run_id,
             event_type=event_type,
             summary=summary,
             payload=payload or {},
