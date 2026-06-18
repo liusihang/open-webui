@@ -16,9 +16,15 @@ from open_webui.retrieval.document_image_assets import (
     DocumentImageAssetPayload,
     build_document_image_asset_payload,
 )
+from open_webui.storage.provider import Storage
 from pypdf import PdfReader
 
 log = logging.getLogger(__name__)
+
+DEFAULT_MAX_PDF_IMAGE_ASSET_PAGES = 200
+DEFAULT_MAX_PDF_IMAGE_ASSETS = 200
+DEFAULT_MAX_PDF_IMAGE_ASSET_BYTES = 20 * 1024 * 1024
+DEFAULT_MAX_PDF_IMAGE_ASSET_TOTAL_BYTES = 100 * 1024 * 1024
 
 
 @dataclass
@@ -43,6 +49,12 @@ def extract_pdf_image_assets(
     source_component = _safe_component(source_id or source_path.stem)
     page_text_by_index = page_text_by_index or {}
     result = PdfImageAssetExtraction()
+    max_pages = _budget(DEFAULT_MAX_PDF_IMAGE_ASSET_PAGES)
+    max_images = _budget(DEFAULT_MAX_PDF_IMAGE_ASSETS)
+    max_image_bytes = _budget(DEFAULT_MAX_PDF_IMAGE_ASSET_BYTES)
+    max_total_bytes = _budget(DEFAULT_MAX_PDF_IMAGE_ASSET_TOTAL_BYTES)
+    stored_images = 0
+    stored_bytes = 0
 
     try:
         reader = PdfReader(str(source_path))
@@ -51,6 +63,10 @@ def extract_pdf_image_assets(
         return result
 
     for page_no, page in enumerate(reader.pages, start=1):
+        if page_no > max_pages:
+            result.skipped.append(_skip(page_index=page_no, reason='pdf_image_asset_page_limit_exceeded'))
+            break
+
         try:
             images = list(page.images)
         except Exception as exc:
@@ -66,9 +82,27 @@ def extract_pdf_image_assets(
                         _skip(page_index=page_no, image_name=image_name, reason='pdf_image_bytes_unavailable')
                     )
                     continue
+                image_size = len(image_bytes)
+                budget_skip_reason = _pdf_image_budget_skip_reason(
+                    image_size=image_size,
+                    stored_images=stored_images,
+                    stored_bytes=stored_bytes,
+                    max_images=max_images,
+                    max_image_bytes=max_image_bytes,
+                    max_total_bytes=max_total_bytes,
+                )
+                if budget_skip_reason is not None:
+                    result.skipped.append(
+                        _skip(
+                            page_index=page_no,
+                            image_name=image_name,
+                            reason=budget_skip_reason,
+                        )
+                    )
+                    continue
 
                 digest = hashlib.sha256(image_bytes).hexdigest()
-                storage_path = _materialize_image_bytes(
+                storage_path, storage_uri = _materialize_image_bytes(
                     output_root=output_root,
                     source_component=source_component,
                     page_no=page_no,
@@ -90,7 +124,11 @@ def extract_pdf_image_assets(
                     height=height,
                     extra_metadata={'extractor': 'pypdf'},
                 )
+                asset['storage_uri'] = storage_uri
+                asset['local_path'] = asset['storage_path']
                 result.assets_by_page.setdefault(page_no, []).append(asset)
+                stored_images += 1
+                stored_bytes += image_size
             except Exception as exc:
                 result.skipped.append(
                     _skip(
@@ -132,12 +170,22 @@ def _materialize_image_bytes(
     digest: str,
     suffix: str,
     image_bytes: bytes,
-) -> Path:
+) -> tuple[Path, str]:
     source_dir = output_root / source_component
     source_dir.mkdir(parents=True, exist_ok=True)
-    storage_path = source_dir / f'page-{page_no:03d}-image-{ordinal:03d}-{digest[:16]}{suffix}'
+    filename = f'page-{page_no:03d}-image-{ordinal:03d}-{digest[:16]}{suffix}'
+    storage_path = source_dir / filename
+    storage_filename = f'pdf-image-assets/{source_component}/{filename}'
+    upload_parent = Path(UPLOAD_DIR) / storage_filename
+    upload_parent.parent.mkdir(parents=True, exist_ok=True)
+
     if storage_path.exists():
-        return storage_path.resolve()
+        storage_uri = _upload_image_bytes(
+            image_bytes=image_bytes,
+            storage_filename=storage_filename,
+            backend='pypdf',
+        )
+        return storage_path.resolve(), storage_uri
 
     temp_path = source_dir / f'.tmp-{uuid4().hex}'
     try:
@@ -145,7 +193,22 @@ def _materialize_image_bytes(
         temp_path.replace(storage_path)
     finally:
         temp_path.unlink(missing_ok=True)
-    return storage_path.resolve()
+
+    storage_uri = _upload_image_bytes(
+        image_bytes=image_bytes,
+        storage_filename=storage_filename,
+        backend='pypdf',
+    )
+    return storage_path.resolve(), storage_uri
+
+
+def _upload_image_bytes(*, image_bytes: bytes, storage_filename: str, backend: str) -> str:
+    _, storage_uri = Storage.upload_file(
+        io.BytesIO(image_bytes),
+        storage_filename,
+        tags={'asset_kind': 'document_image', 'backend': backend},
+    )
+    return storage_uri
 
 
 def _image_name(image_file: Any, *, ordinal: int) -> str:
@@ -188,6 +251,28 @@ def _image_mime_type(*, image_name: str, suffix: str, pil_image: Any) -> str | N
 def _safe_component(value: str) -> str:
     normalized = re.sub(r'[^A-Za-z0-9._-]+', '-', value).strip('-')
     return normalized or 'source'
+
+
+def _pdf_image_budget_skip_reason(
+    *,
+    image_size: int,
+    stored_images: int,
+    stored_bytes: int,
+    max_images: int,
+    max_image_bytes: int,
+    max_total_bytes: int,
+) -> str | None:
+    if image_size > max_image_bytes:
+        return 'pdf_image_asset_too_large'
+    if stored_images >= max_images:
+        return 'pdf_image_asset_limit_exceeded'
+    if stored_bytes + image_size > max_total_bytes:
+        return 'pdf_image_asset_total_bytes_exceeded'
+    return None
+
+
+def _budget(value: int) -> int:
+    return max(0, int(value))
 
 
 def _skip(
