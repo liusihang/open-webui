@@ -1383,3 +1383,46 @@ Dispatch rule:
   return as a narrow proposal for controller-owned integration.
 - Keep root `uv.lock` churn unstaged unless a root dependency change is
   intentionally owned.
+
+## W13 Release-Readiness Worker Dispatch
+
+Date: 2026-06-18
+
+Controller checkpoint:
+
+- Dispatch base commit: `00481b7ab`
+- Integration worktree:
+  `/Users/liusihang/openwebui/.worktrees/agent-mode-agentscope-pr7`
+- Integration branch: `codex/agent-mode-agentscope-pr7`
+- Current integration dirty state at dispatch: root `uv.lock` only.
+
+Created W13 worker worktrees from `00481b7ab`:
+
+| Worker | Worktree | Branch |
+| --- | --- | --- |
+| W13-1 Evidence integrity | `/Users/liusihang/openwebui/.worktrees/agent-mode-w13-evidence-integrity` | `codex/agent-mode-w13-evidence-integrity` |
+| W13-2 Product-path caveat | `/Users/liusihang/openwebui/.worktrees/agent-mode-w13-product-path-caveat` | `codex/agent-mode-w13-product-path-caveat` |
+| W13-3 Regression gates | `/Users/liusihang/openwebui/.worktrees/agent-mode-w13-regression-gates` | `codex/agent-mode-w13-regression-gates` |
+| W13-4 Deployment/runtime docs | `/Users/liusihang/openwebui/.worktrees/agent-mode-w13-deployment-docs` | `codex/agent-mode-w13-deployment-docs` |
+| W13-5 PR package | `/Users/liusihang/openwebui/.worktrees/agent-mode-w13-pr-package` | `codex/agent-mode-w13-pr-package` |
+
+Dispatched read-mostly audit agents without forking full context:
+
+| Worker | Agent | Nickname | Scope |
+| --- | --- | --- | --- |
+| W13-1 Evidence integrity | `019ed8ac-151d-7d51-be2d-2638ee77c3ef` | Kuhn | scenario/evidence traceability and live harness check |
+| W13-2 Product-path caveat | `019ed8ac-5283-7331-b51f-576dca60ac0c` | Curie | W12D-2 in-memory tool registry caveat severity |
+| W13-3 Regression gates | `019ed8ac-a596-7140-bc4a-abb39afed957` | Kierkegaard | final backend/runtime/frontend/W12/ruff/diff gate matrix |
+| W13-4 Deployment/runtime docs | `019ed8ac-d4e4-7e91-87e3-d2eeb6060c0d` | Boyle | operator docs, env vars, startup, cleanup semantics |
+
+W13-5 PR package was not dispatched yet. It should wait for W13-1 through
+W13-4 and W12D-5/regression gate results.
+
+Controller rules while workers run:
+
+- Do not duplicate the worker audits.
+- Integrate worker handoff commits one at a time.
+- If any worker finds a release blocker, land one narrow controller-owned fix
+  and rerun W13-3 plus the live harness before packaging.
+- Keep root `uv.lock` churn out of commits unless dependency work is explicitly
+  approved.
