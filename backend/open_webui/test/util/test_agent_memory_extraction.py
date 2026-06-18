@@ -520,6 +520,30 @@ def test_sanitize_messages_removes_injected_context_large_payloads_and_redacts_s
     assert len(blob) <= 900
 
 
+def test_sanitize_messages_prefers_recent_messages_under_budget():
+    extraction = importlib.import_module("open_webui.utils.agent_memory_extraction")
+    latest_user = "LATEST USER DECISION: prefer focused pytest."
+    latest_assistant = "LATEST ASSISTANT DECISION: run targeted checks before commit."
+
+    sanitized = extraction.sanitize_messages_for_extraction(
+        [
+            {"role": "user", "content": "EARLIEST CONTEXT " + "x" * 200},
+            {"role": "assistant", "content": "Older assistant summary that can be dropped."},
+            {"role": "user", "content": latest_user},
+            {"role": "assistant", "content": latest_assistant},
+        ],
+        max_chars=len(latest_user) + len(latest_assistant),
+    )
+    blob = json.dumps(sanitized)
+
+    assert sanitized == [
+        {"role": "user", "content": latest_user},
+        {"role": "assistant", "content": latest_assistant},
+    ]
+    assert "EARLIEST CONTEXT" not in blob
+    assert "Older assistant summary" not in blob
+
+
 def test_sanitize_messages_does_not_preserve_raw_tool_payloads():
     extraction = importlib.import_module("open_webui.utils.agent_memory_extraction")
 
@@ -617,8 +641,12 @@ async def test_run_extraction_jobs_once_uses_sanitized_payload_and_completes_cac
         assert payload["model"] == "extractor"
         assert payload["stream"] is False
         assert payload["metadata"]["task"] == "agent_memory_extraction"
-        assert captured_payloads[0]["bypass_filter"] is True
-        assert captured_payloads[0]["bypass_system_prompt"] is True
+        assert captured_payloads[0]["user"].role == "user"
+        assert captured_payloads[0]["user"].role != "admin"
+        assert captured_payloads[0]["user"].name == "Agent Memory Service"
+        assert captured_payloads[0]["user"].is_service_account is True
+        assert captured_payloads[0]["bypass_filter"] is False
+        assert captured_payloads[0]["bypass_system_prompt"] is False
         assert "system prompt must not leak" not in prompt
         assert "sk-inputsecret" not in prompt
         assert "[REDACTED]" in prompt

@@ -487,8 +487,10 @@ def _get_agent_memory_consolidation_model_id(request: Any) -> str | None:
 def _get_agent_memory_task_user(user_id: str) -> SimpleNamespace:
     return SimpleNamespace(
         id=user_id,
+        name="Agent Memory Service",
         email=f"{user_id}@agent-memory.openwebui.local",
-        role="admin",
+        role="user",
+        is_service_account=True,
     )
 
 
@@ -716,8 +718,6 @@ async def _run_single_consolidation_job(
             request,
             form_data=payload,
             user=_get_agent_memory_task_user(job.user_id),
-            bypass_filter=True,
-            bypass_system_prompt=True,
         )
         content = _extract_completion_content(response)
         if not content:

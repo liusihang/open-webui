@@ -927,8 +927,12 @@ async def test_run_consolidation_calls_model_and_completes_artifacts(tmp_path, m
         assert payload["stream"] is False
         assert payload["metadata"]["task"] == "agent_memory_consolidation"
         assert "global memory" in payload["messages"][0]["content"]
-        assert captured[0]["bypass_filter"] is True
-        assert captured[0]["bypass_system_prompt"] is True
+        assert captured[0]["user"].role == "user"
+        assert captured[0]["user"].role != "admin"
+        assert captured[0]["user"].name == "Agent Memory Service"
+        assert captured[0]["user"].is_service_account is True
+        assert captured[0]["bypass_filter"] is False
+        assert captured[0]["bypass_system_prompt"] is False
         assert (
             await AgentMemoryArtifacts.get_artifact("user-1", "global", "", "memory_summary.md", db=session)
         ).content == "Summary from model"

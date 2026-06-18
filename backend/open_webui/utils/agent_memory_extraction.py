@@ -489,10 +489,13 @@ def _sanitize_text(text: str) -> str:
 
 
 def sanitize_messages_for_extraction(messages: list[dict[str, Any]], max_chars: int = 12000) -> list[dict[str, str]]:
-    sanitized: list[dict[str, str]] = []
+    if max_chars <= 0:
+        return []
+
+    selected: list[dict[str, str]] = []
     remaining = max_chars
 
-    for message in messages:
+    for message in reversed(messages):
         role = message.get("role")
         if role in {"system", "developer"}:
             continue
@@ -508,12 +511,14 @@ def sanitize_messages_for_extraction(messages: list[dict[str, Any]], max_chars: 
 
         if len(content) > remaining:
             content = content[:remaining]
-        sanitized.append({"role": role, "content": content})
+        if not content:
+            continue
+        selected.append({"role": role, "content": content})
         remaining -= len(content)
         if remaining <= 0:
             break
 
-    return sanitized
+    return list(reversed(selected))
 
 
 def _message_row_to_dict(message: ChatMessage) -> dict[str, Any]:
@@ -603,8 +608,10 @@ def _get_agent_memory_extraction_model_id(request: Any) -> str | None:
 def _get_agent_memory_task_user(user_id: str) -> SimpleNamespace:
     return SimpleNamespace(
         id=user_id,
+        name="Agent Memory Service",
         email=f"{user_id}@agent-memory.openwebui.local",
-        role="admin",
+        role="user",
+        is_service_account=True,
     )
 
 
@@ -650,8 +657,6 @@ async def _run_single_extraction_job(
             request,
             form_data=payload,
             user=_get_agent_memory_task_user(job.user_id),
-            bypass_filter=True,
-            bypass_system_prompt=True,
         )
         content = _extract_completion_content(response)
         if not content:
