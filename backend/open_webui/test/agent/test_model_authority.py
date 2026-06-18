@@ -160,6 +160,46 @@ async def test_verified_model_call_uses_provider_path_without_creating_nested_ag
 
 
 @pytest.mark.asyncio
+async def test_admin_model_call_uses_product_chat_access_bypass_for_provider_model(
+    agent_run_db,
+):
+    run = await _create_running_run()
+    request = _trusted_request(enable_agent_mode=True, run_id=run.id)
+    captured = {}
+
+    async def completion_handler(request, form_data, user):
+        captured['form_data'] = form_data
+        captured['user_id'] = user.id
+        return {'id': 'chatcmpl-1', 'choices': [{'message': {'content': 'hello'}}]}
+
+    async def access_checker_should_be_bypassed(user, model):
+        raise AssertionError('admin provider model access check should be bypassed')
+
+    authority = AgentModelAuthority(
+        operation_store=AgentRuns,
+        completion_handler=completion_handler,
+        user_loader=_admin_user_loader,
+        model_access_checker=access_checker_should_be_bypassed,
+    )
+
+    response = await authority.execute_model_call(
+        request,
+        ModelCallRequest(
+            run_id=run.id,
+            participant_id='leader',
+            model_call_id='call-1',
+            model='model-a',
+            messages=[{'role': 'user', 'content': 'hello'}],
+            idempotency_key='model:leader:call-1:1',
+        ),
+    )
+
+    assert captured['user_id'] == 'user-1'
+    assert captured['form_data']['model'] == 'model-a'
+    assert response['status'] == 'success'
+
+
+@pytest.mark.asyncio
 async def test_model_call_payload_includes_agent_audit_metadata(agent_run_db):
     run = await _create_running_run()
     request = _trusted_request(enable_agent_mode=True, run_id=run.id)
@@ -280,6 +320,10 @@ def _trusted_request(*, enable_agent_mode: bool, run_id: str):
 
 async def _user_loader(user_id):
     return SimpleNamespace(id=user_id, role='user')
+
+
+async def _admin_user_loader(user_id):
+    return SimpleNamespace(id=user_id, role='admin')
 
 
 async def _allow_model_access(user, model):

@@ -8,6 +8,8 @@ from typing import Any
 from pydantic import BaseModel, ConfigDict, Field
 from starlette.responses import JSONResponse, Response, StreamingResponse
 
+from open_webui.config import BYPASS_ADMIN_ACCESS_CONTROL
+from open_webui.env import BYPASS_MODEL_ACCESS_CONTROL
 from open_webui.models.agent_runs import AgentRunOperationConflict
 from open_webui.models.users import Users
 from open_webui.utils.chat import generate_chat_completion
@@ -146,11 +148,12 @@ class AgentModelAuthority:
         if model is None:
             raise ModelNotAllowed(f'Model is not available for this run: {model_id}')
 
-        try:
-            await self.model_access_checker(user, model)
-        except Exception as exc:
-            message = getattr(exc, 'detail', None) or str(exc)
-            raise ModelNotAllowed(str(message)) from exc
+        if not _model_access_check_bypassed(user):
+            try:
+                await self.model_access_checker(user, model)
+            except Exception as exc:
+                message = getattr(exc, 'detail', None) or str(exc)
+                raise ModelNotAllowed(str(message)) from exc
 
         return model
 
@@ -197,6 +200,12 @@ def _model_call_form_data(call: ModelCallRequest) -> dict[str, Any]:
     if call.params:
         form_data['params'] = call.params
     return form_data
+
+
+def _model_access_check_bypassed(user) -> bool:
+    return BYPASS_MODEL_ACCESS_CONTROL or (
+        getattr(user, 'role', None) == 'admin' and BYPASS_ADMIN_ACCESS_CONTROL
+    )
 
 
 def _cached_operation_response(operation) -> dict[str, Any]:

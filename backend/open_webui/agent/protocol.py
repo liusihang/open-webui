@@ -75,6 +75,15 @@ class FinalDeltaAppend(BaseModel):
     idempotency_key: str | None = None
 
 
+class AgentStateTransitionAppend(BaseModel):
+    run_id: str
+    from_states: list[AgentRunState]
+    to_state: AgentRunState
+    reason: str
+    payload: dict[str, Any] = Field(default_factory=dict)
+    idempotency_key: str | None = None
+
+
 class AgentEventListResponse(BaseModel):
     events: list[AgentRunEvent]
     last_seq: int

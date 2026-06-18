@@ -6,8 +6,10 @@ import httpx
 
 from agentscope_runtime.schemas import (
     AppendEventRequest,
+    FinalDeltaRequest,
     ModelCallRequest,
     ModelSelectionRequest,
+    StateTransitionRequest,
     SubagentRegisterRequest,
     ToolCallRequest,
 )
@@ -64,6 +66,50 @@ class OpenWebUIClient:
                 f"with status {response.status_code}: {response.text}",
             )
         return response.json()
+
+    async def append_final_delta(
+        self,
+        *,
+        run_id: str,
+        idempotency_key: str,
+        final_stream_id: str,
+        delta_index: int,
+        delta: str,
+        participant_id: str | None = None,
+        payload: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        body = FinalDeltaRequest(
+            idempotency_key=idempotency_key,
+            run_id=run_id,
+            final_stream_id=final_stream_id,
+            delta_index=delta_index,
+            delta=delta,
+            participant_id=participant_id,
+            payload=payload or {},
+        )
+        url = f"{self._base_url}/api/agent/service/runs/{run_id}/final-delta"
+        return await self._post_callback(url, idempotency_key, body.model_dump(mode="json"))
+
+    async def transition_state(
+        self,
+        *,
+        run_id: str,
+        idempotency_key: str,
+        from_states: list[str],
+        to_state: str,
+        reason: str,
+        payload: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        body = StateTransitionRequest(
+            idempotency_key=idempotency_key,
+            run_id=run_id,
+            from_states=from_states,
+            to_state=to_state,
+            reason=reason,
+            payload=payload or {},
+        )
+        url = f"{self._base_url}/api/agent/service/runs/{run_id}/state-transition"
+        return await self._post_callback(url, idempotency_key, body.model_dump(mode="json"))
 
     async def register_subagent(
         self,

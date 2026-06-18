@@ -10,6 +10,7 @@ import pytest
 import pytest_asyncio
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
+from open_webui.routers import agent_service as agent_service_router
 from open_webui.internal.db import Base
 from open_webui.models.agent_runs import AgentArtifact, AgentRun, AgentRunEvent, AgentRunOperation, AgentRuns
 from open_webui.routers import agent_runs, agent_service
@@ -314,6 +315,103 @@ async def test_agent_service_final_delta_retries_are_idempotent_and_conflicting_
     assert updated.final_text == 'hello'
     events = await AgentRuns.list_events(run.id)
     assert [event.event_type for event in events] == ['final.started', 'final.delta']
+
+
+@pytest.mark.asyncio
+async def test_agent_service_state_transition_completed_writes_final_text_to_chat(
+    monkeypatch,
+    agent_run_db,
+    app_without_fake_event_store,
+):
+    chat_updates = []
+
+    async def fake_upsert_message(chat_id, message_id, message):
+        chat_updates.append(
+            {
+                'chat_id': chat_id,
+                'message_id': message_id,
+                'message': message,
+            }
+        )
+        return message
+
+    monkeypatch.setattr(
+        agent_service_router,
+        'Chats',
+        SimpleNamespace(upsert_message_to_chat_by_id_and_message_id=fake_upsert_message),
+        raising=False,
+    )
+    run = await AgentRuns.create_run(
+        user_id='user-1',
+        chat_id='chat-1',
+        user_message_id='msg-user',
+        assistant_message_id='msg-assistant',
+        leader_model_id='model-a',
+    )
+    await AgentRuns.transition_state(
+        run.id,
+        from_states=['queued'],
+        to_state='running',
+        reason='runtime accepted',
+    )
+    await AgentRuns.transition_state(
+        run.id,
+        from_states=['running'],
+        to_state='finalizing',
+        reason='runtime closed work',
+    )
+    await AgentRuns.append_event(
+        run.id,
+        event_type='final.started',
+        participant_id='leader',
+        phase='finalizing',
+        summary='Final answer phase',
+    )
+
+    with TestClient(app_without_fake_event_store) as client:
+        delta = client.post(
+            f'/api/agent/service/runs/{run.id}/final-delta',
+            json={
+                'run_id': run.id,
+                'final_stream_id': 'answer',
+                'delta_index': 0,
+                'delta': 'hello from agent mode',
+                'idempotency_key': f'final:{run.id}:answer:0',
+            },
+            headers=_service_headers(f'final:{run.id}:answer:0'),
+        )
+        complete = client.post(
+            f'/api/agent/service/runs/{run.id}/state-transition',
+            json={
+                'run_id': run.id,
+                'from_states': ['finalizing'],
+                'to_state': 'completed',
+                'reason': 'runtime final answer completed',
+                'payload': {},
+                'idempotency_key': f'state:{run.id}:completed',
+            },
+            headers=_service_headers(f'state:{run.id}:completed'),
+        )
+
+    assert delta.status_code == 200
+    assert complete.status_code == 200
+    assert complete.json()['state'] == 'completed'
+
+    updated = await AgentRuns.get_run(run.id)
+    assert updated is not None
+    assert updated.state == 'completed'
+    assert updated.final_text == 'hello from agent mode'
+    assert chat_updates == [
+        {
+            'chat_id': 'chat-1',
+            'message_id': 'msg-assistant',
+            'message': {
+                'agent_run_id': run.id,
+                'content': 'hello from agent mode',
+                'done': True,
+            },
+        }
+    ]
 
 
 @pytest.mark.asyncio

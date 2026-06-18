@@ -62,6 +62,74 @@ async def test_append_event_surfaces_callback_failure() -> None:
 
 
 @pytest.mark.asyncio
+async def test_append_final_delta_uses_openwebui_final_delta_callback() -> None:
+    async with respx.mock(assert_all_called=True) as router:
+        request = router.post("https://openwebui.test/api/agent/service/runs/run-1/final-delta").mock(
+            return_value=Response(200, json={"seq": 3, "event_type": "final.delta"})
+        )
+        client = OpenWebUIClient(
+            base_url="https://openwebui.test",
+            service_token="owui-token",
+        )
+
+        response = await client.append_final_delta(
+            run_id="run-1",
+            idempotency_key="final:run-1:answer:0",
+            final_stream_id="answer",
+            delta_index=0,
+            delta="final answer",
+            participant_id="leader",
+            payload={"runtime_session_id": "session"},
+        )
+
+    assert response == {"seq": 3, "event_type": "final.delta"}
+    assert request.calls.last.request.headers["authorization"] == "Bearer owui-token"
+    assert request.calls.last.request.headers["x-agent-idempotency-key"] == "final:run-1:answer:0"
+    assert json.loads(request.calls.last.request.content) == {
+        "idempotency_key": "final:run-1:answer:0",
+        "run_id": "run-1",
+        "final_stream_id": "answer",
+        "delta_index": 0,
+        "delta": "final answer",
+        "participant_id": "leader",
+        "payload": {"runtime_session_id": "session"},
+    }
+
+
+@pytest.mark.asyncio
+async def test_transition_state_uses_openwebui_state_transition_callback() -> None:
+    async with respx.mock(assert_all_called=True) as router:
+        request = router.post(
+            "https://openwebui.test/api/agent/service/runs/run-1/state-transition"
+        ).mock(return_value=Response(200, json={"id": "run-1", "state": "finalizing"}))
+        client = OpenWebUIClient(
+            base_url="https://openwebui.test",
+            service_token="owui-token",
+        )
+
+        response = await client.transition_state(
+            run_id="run-1",
+            idempotency_key="state:run-1:finalizing",
+            from_states=["running"],
+            to_state="finalizing",
+            reason="runtime closed work",
+            payload={"runtime_session_id": "session"},
+        )
+
+    assert response == {"id": "run-1", "state": "finalizing"}
+    assert request.calls.last.request.headers["authorization"] == "Bearer owui-token"
+    assert request.calls.last.request.headers["x-agent-idempotency-key"] == "state:run-1:finalizing"
+    assert json.loads(request.calls.last.request.content) == {
+        "idempotency_key": "state:run-1:finalizing",
+        "run_id": "run-1",
+        "from_states": ["running"],
+        "to_state": "finalizing",
+        "reason": "runtime closed work",
+        "payload": {"runtime_session_id": "session"},
+    }
+
+
+@pytest.mark.asyncio
 async def test_register_subagent_sends_callback_contract() -> None:
     async with respx.mock(assert_all_called=True) as router:
         request = router.post("https://openwebui.test/api/agent/service/runs/run-1/subagents").mock(

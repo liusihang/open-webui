@@ -78,6 +78,25 @@ class AppendEventRequest(BaseModel):
     phase: str | None = None
 
 
+class FinalDeltaRequest(BaseModel):
+    idempotency_key: str
+    run_id: str
+    final_stream_id: str
+    delta_index: int
+    delta: str
+    participant_id: str | None = None
+    payload: dict[str, Any] = Field(default_factory=dict)
+
+
+class StateTransitionRequest(BaseModel):
+    idempotency_key: str
+    run_id: str
+    from_states: list[str]
+    to_state: str
+    reason: str
+    payload: dict[str, Any] = Field(default_factory=dict)
+
+
 class SubagentRegisterRequest(BaseModel):
     idempotency_key: str
     run_id: str
