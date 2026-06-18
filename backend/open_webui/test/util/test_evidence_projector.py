@@ -162,6 +162,45 @@ async def _seed_active_text_chunk_for_scope(
     await session.commit()
 
 
+async def _seed_active_text_evidence(
+    session: AsyncSession,
+    *,
+    evidence_id: str,
+    file_id: str,
+    content_text: str,
+    content_hash: str,
+):
+    session.add(
+        KnowledgeEvidence(
+            id=evidence_id,
+            evidence_ref=f"ke:kb-1:{file_id}:text_chunk:{content_hash}",
+            knowledge_id="kb-1",
+            file_id=file_id,
+            asset_id=None,
+            retrieval_chunk_uid=f"{evidence_id}-chunk",
+            retrieval_chunk_row_id=1,
+            modality="text",
+            evidence_kind="text_chunk",
+            title=None,
+            content_text=content_text,
+            preview_text=content_text,
+            source_name="doc.pdf",
+            page_index=None,
+            anchor_json={},
+            chunk_index=0,
+            chunk_total=1,
+            content_hash=content_hash,
+            projection_profile="text_only",
+            projection_config_hash="text-backfill-v1",
+            is_active=True,
+            deleted_at=None,
+            created_at=1,
+            updated_at=1,
+        )
+    )
+    await session.commit()
+
+
 @pytest.mark.asyncio
 async def test_text_backfill_is_idempotent_and_bridges_retrieval_chunk_fields(db_session):
     await _seed_knowledge_file(
@@ -338,6 +377,64 @@ async def test_projected_evidence_embeddings_create_missing_vector_space(db_sess
     assert len(upserts) == 1
     assert len(embeddings) == 1
     assert embeddings[0].embedding_status == "ready"
+
+
+@pytest.mark.asyncio
+async def test_project_knowledge_file_keeps_previous_active_evidence_when_projection_fails(db_session):
+    await _seed_knowledge_file(
+        db_session,
+        file_id="file-doc",
+        filename="doc.pdf",
+        content_type="application/pdf",
+        path="/tmp/doc.pdf",
+        meta={
+            "document_image_assets": [
+                {
+                    "caption": "Broken image asset",
+                }
+            ]
+        },
+    )
+    await _seed_active_text_evidence(
+        db_session,
+        evidence_id="previous-evidence",
+        file_id="file-doc",
+        content_text="Previous chunk",
+        content_hash="previous-hash",
+    )
+    await _seed_active_text_chunk(db_session, row_id=14, file_id="file-doc", text="Replacement chunk")
+
+    result = await project_evidence_for_knowledge_file(
+        knowledge_id="kb-1",
+        file_id="file-doc",
+        db=db_session,
+        project_document_images=True,
+    )
+
+    previous_row = (
+        (
+            await db_session.execute(
+                select(KnowledgeEvidence).where(KnowledgeEvidence.id == "previous-evidence")
+            )
+        )
+        .scalars()
+        .one()
+    )
+    active_rows = (
+        (
+            await db_session.execute(
+                select(KnowledgeEvidence).where(KnowledgeEvidence.is_active.is_(True))
+            )
+        )
+        .scalars()
+        .all()
+    )
+
+    assert result.failed == 1
+    assert result.text_evidence_upserted == 1
+    assert previous_row.is_active is True
+    assert previous_row.deleted_at is None
+    assert [row.id for row in active_rows] == ["previous-evidence"]
 
 
 @pytest.mark.asyncio

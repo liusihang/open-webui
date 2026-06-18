@@ -83,6 +83,7 @@ async def backfill_text_evidence_from_active_chunks(
     file_ids: Sequence[str] | None = None,
     projection_profile: str = "text_only",
     projection_config_hash: str = "text-backfill-v1",
+    is_active: bool = True,
     db: AsyncSession | None = None,
 ) -> EvidenceProjectionResult:
     result = EvidenceProjectionResult()
@@ -141,7 +142,7 @@ async def backfill_text_evidence_from_active_chunks(
                     content_hash=row.content_hash,
                     projection_profile=projection_profile,
                     projection_config_hash=projection_config_hash,
-                    is_active=True,
+                    is_active=is_active,
                     deleted_at=None,
                 )
                 result.text_evidence_upserted += 1
@@ -195,6 +196,7 @@ async def project_standalone_image_evidence(
     file: FileModel,
     projection_profile: str = "unified_multimodal_dense",
     projection_config_hash: str = "image-project-v1",
+    is_active: bool = True,
     db: AsyncSession | None = None,
 ) -> EvidenceProjectionResult:
     result = EvidenceProjectionResult()
@@ -262,7 +264,7 @@ async def project_standalone_image_evidence(
             projection_profile=projection_profile,
             projection_config_hash=projection_config_hash,
             asset_ref=asset.asset_ref,
-            is_active=True,
+            is_active=is_active,
             deleted_at=None,
         )
         result.image_evidence_upserted += 1
@@ -287,17 +289,12 @@ async def project_evidence_for_knowledge_file(
     metadata = _as_dict(file.meta)
     content_type = metadata.get("content_type") if isinstance(metadata.get("content_type"), str) else None
 
-    await deactivate_evidence_for_knowledge_file(
-        knowledge_id=knowledge_id,
-        file_id=file_id,
-        db=db,
-    )
-
     text_result = await backfill_text_evidence_from_active_chunks(
         collection_ids=[knowledge_id],
         knowledge_ids=[knowledge_id],
         file_ids=[file_id],
         projection_profile=projection_profile,
+        is_active=False,
         db=db,
     )
     _merge_projection_result(result, text_result)
@@ -306,6 +303,7 @@ async def project_evidence_for_knowledge_file(
         image_result = await project_standalone_image_evidence(
             knowledge_id=knowledge_id,
             file=file,
+            is_active=False,
             db=db,
         )
         _merge_projection_result(result, image_result)
@@ -313,12 +311,23 @@ async def project_evidence_for_knowledge_file(
         image_result = await project_document_image_assets_evidence(
             knowledge_id=knowledge_id,
             file=file,
+            is_active=False,
             db=db,
         )
         _merge_projection_result(result, image_result)
         if image_result.image_assets_upserted == 0 and image_result.image_evidence_upserted == 0:
             result.document_image_placeholders += 1
 
+    if result.failed > 0:
+        result.evidence_refs = []
+        return result
+
+    await _finalize_evidence_projection_for_knowledge_file(
+        knowledge_id=knowledge_id,
+        file_id=file_id,
+        evidence_refs=result.evidence_refs,
+        db=db,
+    )
     return result
 
 
@@ -328,6 +337,7 @@ async def project_document_image_assets_evidence(
     file: FileModel,
     projection_profile: str = "unified_multimodal_dense",
     projection_config_hash: str = "document-image-project-v1",
+    is_active: bool = True,
     db: AsyncSession | None = None,
 ) -> EvidenceProjectionResult:
     result = EvidenceProjectionResult()
@@ -404,7 +414,7 @@ async def project_document_image_assets_evidence(
                     projection_profile=projection_profile,
                     projection_config_hash=projection_config_hash,
                     asset_ref=asset.asset_ref,
-                    is_active=True,
+                    is_active=is_active,
                     deleted_at=None,
                 )
                 result.image_evidence_upserted += 1
@@ -467,6 +477,40 @@ def _merge_projection_result(target: EvidenceProjectionResult, source: EvidenceP
     target.failures.extend(source.failures)
     target.evidence_refs.extend(source.evidence_refs)
     target.asset_refs.extend(source.asset_refs)
+
+
+async def _finalize_evidence_projection_for_knowledge_file(
+    *,
+    knowledge_id: str,
+    file_id: str,
+    evidence_refs: Sequence[str],
+    db: AsyncSession | None = None,
+) -> None:
+    now = int(time.time())
+    projected_refs = set(evidence_refs)
+    async with _session_scope(db) as session:
+        rows = (
+            (
+                await session.execute(
+                    select(KnowledgeEvidence).where(
+                        KnowledgeEvidence.knowledge_id == knowledge_id,
+                        KnowledgeEvidence.file_id == file_id,
+                    )
+                )
+            )
+            .scalars()
+            .all()
+        )
+        for row in rows:
+            if row.evidence_ref in projected_refs:
+                row.is_active = True
+                row.deleted_at = None
+                row.updated_at = now
+            elif row.is_active:
+                row.is_active = False
+                row.deleted_at = now
+                row.updated_at = now
+        await session.commit()
 
 
 def _build_image_content_text(file: FileModel, metadata: dict[str, Any]) -> str:
@@ -750,6 +794,8 @@ async def _upsert_evidence(
     deleted_at: int | None = None,
 ) -> KnowledgeEvidence:
     now = int(time.time())
+    if not is_active and deleted_at is None:
+        deleted_at = now
     evidence_ref = compute_knowledge_evidence_ref(
         knowledge_id=knowledge_id,
         file_id=file_id,
@@ -795,6 +841,7 @@ async def _upsert_evidence(
         )
         session.add(row)
     else:
+        staging_existing_active = not is_active and row.is_active
         row.evidence_ref = evidence_ref
         row.knowledge_id = knowledge_id
         row.file_id = file_id
@@ -814,8 +861,8 @@ async def _upsert_evidence(
         row.content_hash = content_hash
         row.projection_profile = projection_profile
         row.projection_config_hash = projection_config_hash
-        row.is_active = is_active
-        row.deleted_at = deleted_at
+        row.is_active = True if staging_existing_active else is_active
+        row.deleted_at = None if staging_existing_active else deleted_at
         row.updated_at = now
 
     await session.commit()
