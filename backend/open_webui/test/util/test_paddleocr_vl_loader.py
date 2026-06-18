@@ -17,12 +17,13 @@ from open_webui.retrieval.utils import build_loader_from_config
 
 
 class FakeResponse:
-    def __init__(self, *, json_data=None, lines=None, status_code=200, text='OK'):
+    def __init__(self, *, json_data=None, lines=None, status_code=200, text='OK', headers=None):
         self._json_data = json_data
         self._lines = lines or []
         self.status_code = status_code
         self.text = text
         self.content = text.encode('utf-8')
+        self.headers = headers or {}
 
     def raise_for_status(self):
         if self.status_code >= 400:
@@ -37,13 +38,24 @@ class FakeResponse:
 
     def iter_lines(self, decode_unicode=False):
         for line in self._lines:
-            yield line if decode_unicode else line.encode('utf-8')
+            if decode_unicode:
+                yield line.decode('utf-8') if isinstance(line, bytes) else line
+            else:
+                yield line if isinstance(line, bytes) else line.encode('utf-8')
+
+    def iter_content(self, chunk_size=1):
+        for line in self._lines:
+            payload = line if isinstance(line, bytes) else line.encode('utf-8')
+            payload += b'\n'
+            for offset in range(0, len(payload), chunk_size):
+                yield payload[offset : offset + chunk_size]
 
 
 class FakeDownloadResponse:
     def __init__(self, payload: bytes):
         self._payload = payload
         self.status = 200
+        self.headers = {}
         self._offset = 0
 
     def __enter__(self):
@@ -59,6 +71,9 @@ class FakeDownloadResponse:
         self._offset += len(chunk)
         return chunk
 
+    def getheader(self, name, default=None):
+        return self.headers.get(name, default)
+
 
 def _png_bytes(tmp_path: Path, name: str) -> bytes:
     image_path = tmp_path / name
@@ -72,12 +87,12 @@ def test_paddleocr_loader_submits_async_job_polls_jsonl_and_downloads_assets(tmp
     png_payload = _png_bytes(tmp_path, 'sample.png')
     uploads_dir = tmp_path / 'uploads'
     image_payloads = {
-        'https://cdn.test/markdown-image.png': png_payload,
-        'https://cdn.test/output-image.png': png_payload,
-        'https://cdn.test/output-only.png': png_payload,
+        'https://paddleocr.aistudio-app.com/markdown-image.png': png_payload,
+        'https://paddleocr.aistudio-app.com/output-image.png': png_payload,
+        'https://paddleocr.aistudio-app.com/output-only.png': png_payload,
     }
     poll_url = 'https://paddleocr.aistudio-app.com/api/v2/ocr/jobs/job-123'
-    jsonl_url = 'https://cdn.test/result.jsonl'
+    jsonl_url = 'https://paddleocr.aistudio-app.com/result.jsonl'
 
     def fake_post(url, data=None, files=None, headers=None, timeout=None):
         assert url == 'https://paddleocr.aistudio-app.com/api/v2/ocr/jobs'
@@ -89,7 +104,7 @@ def test_paddleocr_loader_submits_async_job_polls_jsonl_and_downloads_assets(tmp
 
     poll_calls = []
 
-    def fake_get(url, headers=None, timeout=None, stream=False):
+    def fake_get(url, headers=None, timeout=None, stream=False, allow_redirects=True):
         if url == poll_url:
             assert headers == {'Authorization': 'bearer secret-token'}
             poll_calls.append(url)
@@ -105,6 +120,7 @@ def test_paddleocr_loader_submits_async_job_polls_jsonl_and_downloads_assets(tmp
             assert headers is None
             assert stream is True
             assert timeout == 90
+            assert allow_redirects is False
             return FakeResponse(
                 lines=[
                     json.dumps(
@@ -116,10 +132,12 @@ def test_paddleocr_loader_submits_async_job_polls_jsonl_and_downloads_assets(tmp
                                         'markdown': {
                                             'text': 'Page two text.\nFigure 1 markdown image.',
                                             'images': {
-                                                'markdown-image.png': 'https://cdn.test/markdown-image.png'
+                                                'markdown-image.png': (
+                                                    'https://paddleocr.aistudio-app.com/markdown-image.png'
+                                                )
                                             },
                                         },
-                                        'outputImages': ['https://cdn.test/output-image.png'],
+                                        'outputImages': ['https://paddleocr.aistudio-app.com/output-image.png'],
                                     }
                                 ]
                             }
@@ -132,7 +150,7 @@ def test_paddleocr_loader_submits_async_job_polls_jsonl_and_downloads_assets(tmp
                                     {
                                         'pageNo': 3,
                                         'markdown': {'text': '', 'images': {}},
-                                        'outputImages': ['https://cdn.test/output-only.png'],
+                                        'outputImages': ['https://paddleocr.aistudio-app.com/output-only.png'],
                                     }
                                 ]
                             }
@@ -148,7 +166,9 @@ def test_paddleocr_loader_submits_async_job_polls_jsonl_and_downloads_assets(tmp
 
     monkeypatch.setattr(paddleocr_vl.requests, 'post', fake_post)
     monkeypatch.setattr(paddleocr_vl.requests, 'get', fake_get)
+    monkeypatch.setattr(document_image_assets, '_resolve_host_ips', lambda host, port: ['93.184.216.34'], raising=False)
     monkeypatch.setattr(document_image_assets.urlrequest, 'urlopen', fake_urlopen)
+    monkeypatch.setattr(document_image_assets, '_urlopen_no_redirect', fake_urlopen, raising=False)
     monkeypatch.setattr(paddleocr_vl.time, 'sleep', lambda _: None)
     monkeypatch.setattr(paddleocr_vl, 'UPLOAD_DIR', uploads_dir, raising=False)
 
@@ -171,7 +191,7 @@ def test_paddleocr_loader_submits_async_job_polls_jsonl_and_downloads_assets(tmp
     assert len(assets) == 2
     assert {asset['metadata']['origin_reference'] for asset in assets} == {
         'markdown-image.png',
-        'https://cdn.test/output-image.png',
+        'https://paddleocr.aistudio-app.com/output-image.png',
     }
     for asset in assets:
         assert asset['asset_kind'] == 'document_image'
@@ -184,7 +204,7 @@ def test_paddleocr_loader_submits_async_job_polls_jsonl_and_downloads_assets(tmp
     assert docs[1].metadata['_metadata_only'] is True
     assert docs[1].metadata['page_label'] == 3
     assert docs[1].metadata['document_image_assets'][0]['metadata']['origin_reference'] == (
-        'https://cdn.test/output-only.png'
+        'https://paddleocr.aistudio-app.com/output-only.png'
     )
 
 
@@ -403,3 +423,85 @@ def test_paddleocr_loader_raises_clear_submit_http_error_without_leaking_token(t
     assert 'submit' in message
     assert '401' in message
     assert 'secret-token' not in message
+
+
+def test_paddleocr_jsonl_download_blocks_redirect_to_loopback(tmp_path, monkeypatch):
+    source_pdf = tmp_path / 'source.pdf'
+    source_pdf.write_bytes(b'%PDF-1.4\n')
+    calls = []
+
+    def fake_get(url, headers=None, timeout=None, stream=False, allow_redirects=True):
+        calls.append(url)
+        assert stream is True
+        assert allow_redirects is False
+        return FakeResponse(
+            status_code=302,
+            text='',
+            headers={'Location': 'http://127.0.0.1/result.jsonl'},
+        )
+
+    monkeypatch.setattr(paddleocr_vl.requests, 'get', fake_get)
+    monkeypatch.setattr(document_image_assets, '_resolve_host_ips', lambda host, port: ['93.184.216.34'], raising=False)
+
+    loader = PaddleOCRVLLoader(
+        api_url='https://paddleocr.aistudio-app.com',
+        token='secret-token',
+        file_path=str(source_pdf),
+    )
+
+    with pytest.raises(RuntimeError, match='not allowed'):
+        loader._download_layout_results('https://paddleocr.aistudio-app.com/result.jsonl')
+
+    assert calls == ['https://paddleocr.aistudio-app.com/result.jsonl']
+
+
+def test_paddleocr_jsonl_download_rejects_oversized_response_bytes(tmp_path, monkeypatch):
+    source_pdf = tmp_path / 'source.pdf'
+    source_pdf.write_bytes(b'%PDF-1.4\n')
+    line = json.dumps({'result': {'layoutParsingResults': []}})
+
+    def fake_get(url, headers=None, timeout=None, stream=False, allow_redirects=True):
+        assert stream is True
+        assert allow_redirects is False
+        return FakeResponse(lines=[line, line])
+
+    monkeypatch.setattr(paddleocr_vl.requests, 'get', fake_get)
+    monkeypatch.setattr(document_image_assets, '_resolve_host_ips', lambda host, port: ['93.184.216.34'], raising=False)
+
+    loader = PaddleOCRVLLoader(
+        api_url='https://paddleocr.aistudio-app.com',
+        token='secret-token',
+        file_path=str(source_pdf),
+    )
+    loader.max_jsonl_response_bytes = len(line) + 1
+    loader.max_jsonl_line_bytes = 1024
+    loader.max_jsonl_lines = 10
+
+    with pytest.raises(RuntimeError, match='response size exceeded'):
+        loader._download_layout_results('https://paddleocr.aistudio-app.com/result.jsonl')
+
+
+def test_paddleocr_jsonl_download_rejects_oversized_line(tmp_path, monkeypatch):
+    source_pdf = tmp_path / 'source.pdf'
+    source_pdf.write_bytes(b'%PDF-1.4\n')
+    line = json.dumps({'result': {'layoutParsingResults': []}})
+
+    def fake_get(url, headers=None, timeout=None, stream=False, allow_redirects=True):
+        assert stream is True
+        assert allow_redirects is False
+        return FakeResponse(lines=[line])
+
+    monkeypatch.setattr(paddleocr_vl.requests, 'get', fake_get)
+    monkeypatch.setattr(document_image_assets, '_resolve_host_ips', lambda host, port: ['93.184.216.34'], raising=False)
+
+    loader = PaddleOCRVLLoader(
+        api_url='https://paddleocr.aistudio-app.com',
+        token='secret-token',
+        file_path=str(source_pdf),
+    )
+    loader.max_jsonl_response_bytes = 1024
+    loader.max_jsonl_line_bytes = 8
+    loader.max_jsonl_lines = 10
+
+    with pytest.raises(RuntimeError, match='line 1 exceeded'):
+        loader._download_layout_results('https://paddleocr.aistudio-app.com/result.jsonl')

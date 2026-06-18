@@ -6,13 +6,17 @@ import sys
 import time
 from pathlib import Path
 from typing import Any
-from urllib.parse import urlparse
+from urllib.parse import urljoin, urlparse
 
 import requests
 from langchain_core.documents import Document
 from open_webui.config import UPLOAD_DIR
 from open_webui.env import GLOBAL_LOG_LEVEL
-from open_webui.retrieval.document_image_assets import ImageAssetMaterializer, build_image_assets_from_markdown
+from open_webui.retrieval.document_image_assets import (
+    ImageAssetMaterializer,
+    build_image_assets_from_markdown,
+    validate_remote_download_url,
+)
 
 logging.basicConfig(stream=sys.stdout, level=GLOBAL_LOG_LEVEL)
 log = logging.getLogger(__name__)
@@ -22,6 +26,10 @@ DEFAULT_REQUEST_TIMEOUT_S = 30
 DEFAULT_DOWNLOAD_TIMEOUT_S = 60
 DEFAULT_POLL_TIMEOUT_S = 300
 DEFAULT_POLL_INTERVAL_S = 2
+DEFAULT_MAX_JSONL_RESPONSE_BYTES = 20 * 1024 * 1024
+DEFAULT_MAX_JSONL_LINE_BYTES = 1024 * 1024
+DEFAULT_MAX_JSONL_LINES = 10_000
+DEFAULT_MAX_JSONL_REDIRECTS = 5
 PADDLEOCR_VL_JOBS_PATH = '/api/v2/ocr/jobs'
 TERMINAL_FAILURE_STATES = {'failed', 'error', 'cancelled', 'canceled'}
 
@@ -41,6 +49,10 @@ class PaddleOCRVLLoader:
         download_timeout_s: int = DEFAULT_DOWNLOAD_TIMEOUT_S,
         poll_timeout_s: int = DEFAULT_POLL_TIMEOUT_S,
         poll_interval_s: int | float = DEFAULT_POLL_INTERVAL_S,
+        allowed_remote_origins: list[str] | tuple[str, ...] | None = None,
+        max_jsonl_response_bytes: int = DEFAULT_MAX_JSONL_RESPONSE_BYTES,
+        max_jsonl_line_bytes: int = DEFAULT_MAX_JSONL_LINE_BYTES,
+        max_jsonl_lines: int = DEFAULT_MAX_JSONL_LINES,
     ):
         if not api_url or not token:
             raise ValueError('PaddleOCR-vl API URL and Token are required.')
@@ -57,6 +69,10 @@ class PaddleOCRVLLoader:
         self.download_timeout_s = download_timeout_s
         self.poll_timeout_s = poll_timeout_s
         self.poll_interval_s = poll_interval_s
+        self.allowed_remote_origins = tuple(allowed_remote_origins or ())
+        self.max_jsonl_response_bytes = max(0, int(max_jsonl_response_bytes))
+        self.max_jsonl_line_bytes = max(0, int(max_jsonl_line_bytes))
+        self.max_jsonl_lines = max(0, int(max_jsonl_lines))
 
     def load(self) -> list[Document]:
         log.info('Processing with PaddleOCR-vl: %s', self.file_path)
@@ -65,7 +81,7 @@ class PaddleOCRVLLoader:
         job_result = self._poll_job(job_id)
         jsonl_url = self._extract_jsonl_url(job_result, job_id=job_id)
         layout_results = self._download_layout_results(jsonl_url)
-        return self._build_documents(layout_results)
+        return self._build_documents(layout_results, result_url=jsonl_url)
 
     def _submit_job(self) -> str:
         mime_type = mimetypes.guess_type(self.file_name)[0] or 'application/octet-stream'
@@ -112,7 +128,11 @@ class PaddleOCRVLLoader:
                 return job_data or payload
 
             if isinstance(state, str) and state.lower() in TERMINAL_FAILURE_STATES:
-                detail = _extract_error_detail(job_data) or _extract_error_detail(payload) or f'job entered terminal state {state!r}'
+                detail = (
+                    _extract_error_detail(job_data)
+                    or _extract_error_detail(payload)
+                    or f'job entered terminal state {state!r}'
+                )
                 raise RuntimeError(f'PaddleOCR-vl job {job_id} failed: {detail}')
 
             if not isinstance(state, str) or not state:
@@ -134,21 +154,20 @@ class PaddleOCRVLLoader:
         return jsonl_url
 
     def _download_layout_results(self, jsonl_url: str) -> list[dict[str, Any]]:
-        response = requests.get(
-            jsonl_url,
-            timeout=self.download_timeout_s,
-            stream=True,
-        )
+        response = self._get_result_response(jsonl_url)
         self._raise_for_status(response, operation='download results')
 
+        content_length = _response_content_length(response)
+        if content_length is not None and content_length > self.max_jsonl_response_bytes:
+            raise RuntimeError('PaddleOCR-vl results response size exceeded limit.')
+
         layout_results: list[dict[str, Any]] = []
-        for line_no, raw_line in enumerate(response.iter_lines(decode_unicode=True), start=1):
-            if isinstance(raw_line, bytes):
-                raw_line = raw_line.decode('utf-8')
-            if not raw_line or not raw_line.strip():
+        for line_no, raw_bytes in self._iter_limited_jsonl_lines(response):
+            if not raw_bytes or not raw_bytes.strip():
                 continue
+            raw_line_text = raw_bytes.decode('utf-8')
             try:
-                payload = json.loads(raw_line)
+                payload = json.loads(raw_line_text)
             except json.JSONDecodeError as exc:
                 raise RuntimeError(
                     f'PaddleOCR-vl results JSONL parse failed at line {line_no}: {exc}'
@@ -163,10 +182,94 @@ class PaddleOCRVLLoader:
 
         return layout_results
 
-    def _build_documents(self, layout_results: list[dict[str, Any]]) -> list[Document]:
+    def _iter_limited_jsonl_lines(self, response: requests.Response):
+        total_bytes = 0
+        line_no = 0
+        pending = bytearray()
+        for chunk in response.iter_content(chunk_size=64 * 1024):
+            if not chunk:
+                continue
+            chunk_bytes = chunk.encode('utf-8') if isinstance(chunk, str) else chunk
+            total_bytes += len(chunk_bytes)
+            if total_bytes > self.max_jsonl_response_bytes:
+                raise RuntimeError('PaddleOCR-vl results response size exceeded limit.')
+
+            pending.extend(chunk_bytes)
+            while True:
+                newline_index = pending.find(b'\n')
+                if newline_index < 0:
+                    if len(pending) > self.max_jsonl_line_bytes:
+                        raise RuntimeError(f'PaddleOCR-vl results line {line_no + 1} exceeded maximum length.')
+                    break
+                raw_line = bytes(pending[:newline_index]).rstrip(b'\r')
+                del pending[: newline_index + 1]
+                line_no += 1
+                yield self._validate_jsonl_line(line_no=line_no, raw_line=raw_line)
+
+        if pending:
+            line_no += 1
+            yield self._validate_jsonl_line(line_no=line_no, raw_line=bytes(pending).rstrip(b'\r'))
+
+    def _validate_jsonl_line(self, *, line_no: int, raw_line: bytes) -> tuple[int, bytes]:
+        if line_no > self.max_jsonl_lines:
+            raise RuntimeError('PaddleOCR-vl results line count exceeded limit.')
+        if len(raw_line) > self.max_jsonl_line_bytes:
+            raise RuntimeError(f'PaddleOCR-vl results line {line_no} exceeded maximum length.')
+        return line_no, raw_line
+
+    def _get_result_response(self, jsonl_url: str) -> requests.Response:
+        current_url = jsonl_url
+        redirects = 0
+        allowed_origins = (self.jobs_url, *self.allowed_remote_origins)
+
+        while True:
+            try:
+                current_url = validate_remote_download_url(
+                    current_url,
+                    allowed_remote_origins=allowed_origins,
+                )
+            except ValueError as exc:
+                raise RuntimeError(f'PaddleOCR-vl results URL not allowed: {exc}') from exc
+
+            response = requests.get(
+                current_url,
+                timeout=self.download_timeout_s,
+                stream=True,
+                allow_redirects=False,
+            )
+            status_code = getattr(response, 'status_code', None)
+            if not isinstance(status_code, int) or not 300 <= status_code < 400:
+                return response
+
+            if redirects >= DEFAULT_MAX_JSONL_REDIRECTS:
+                _close_response(response)
+                raise RuntimeError('PaddleOCR-vl results redirect limit exceeded.')
+            location = response.headers.get('Location') if hasattr(response, 'headers') else None
+            if not location:
+                _close_response(response)
+                raise RuntimeError('PaddleOCR-vl results redirect response missing Location header.')
+            _close_response(response)
+            current_url = urljoin(current_url, location)
+            redirects += 1
+
+    def _build_documents(
+        self,
+        layout_results: list[dict[str, Any]],
+        *,
+        result_url: str | None = None,
+    ) -> list[Document]:
         documents: list[Document] = []
         total_pages = len(layout_results)
         skipped_pages = 0
+        image_materializer = ImageAssetMaterializer(
+            Path(UPLOAD_DIR) / 'paddleocr-vl-image-assets',
+            download_timeout_s=float(self.download_timeout_s),
+            allowed_remote_origins=(
+                self.jobs_url,
+                *([result_url] if result_url else []),
+                *self.allowed_remote_origins,
+            ),
+        )
 
         for index, result in enumerate(layout_results):
             markdown = result.get('markdown', {}) if isinstance(result.get('markdown'), dict) else {}
@@ -178,10 +281,7 @@ class PaddleOCRVLLoader:
                 markdown=_with_output_images(markdown=markdown, output_images=result.get('outputImages')),
                 markdown_text=markdown_text if isinstance(markdown_text, str) else '',
                 page_no=page_no,
-                materializer=ImageAssetMaterializer(
-                    Path(UPLOAD_DIR) / 'paddleocr-vl-image-assets',
-                    download_timeout_s=float(self.download_timeout_s),
-                ),
+                materializer=image_materializer,
                 backend='paddleocr-vl',
             )
 
@@ -365,6 +465,23 @@ def _first_remote_string(*values: Any) -> str | None:
         if isinstance(value, str) and _is_remote_uri(value):
             return value
     return None
+
+
+def _response_content_length(response: requests.Response) -> int | None:
+    value = response.headers.get('Content-Length') if hasattr(response, 'headers') else None
+    if value is None:
+        return None
+    try:
+        content_length = int(value)
+    except ValueError:
+        return None
+    return content_length if content_length >= 0 else None
+
+
+def _close_response(response: requests.Response) -> None:
+    close = getattr(response, 'close', None)
+    if callable(close):
+        close()
 
 
 def _is_remote_uri(value: str) -> bool:
