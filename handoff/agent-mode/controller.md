@@ -973,3 +973,27 @@ Dispatch rules for the next step:
 - W12D-5 release audit should not claim final acceptance until scenario
   evidence from W12D-1 through W12D-4 has landed and
   `acceptance_harness.py live` passes all 12 scenarios.
+
+## W12D Scenario Worker Dispatch
+
+Date: 2026-06-18
+
+Dispatched scenario workers without forking full context:
+
+| Worker | Agent | Nickname | Scope |
+| --- | --- | --- | --- |
+| W12D-1 Runtime/chat/finalization | `019ed87e-693e-7410-98b9-d6c6841f7edd` | Euclid | scenarios 1, 9, 12 |
+| W12D-2 Tools/terminal/approval/cancel | `019ed87e-699f-7130-9201-3a72c2e7fe3f` | Harvey | scenarios 2, 3, 4, 5, 10 |
+| W12D-3 Subagents/model selection | `019ed87e-6a1a-7570-9fb3-b232424df01c` | Kant | scenarios 6, 7 |
+| W12D-4 SSE/UI/compaction | `019ed87e-6a71-7bf3-a5ff-d777f01f00ab` | Wegener | scenarios 8, 11 |
+
+W12D-5 release audit worktree exists but was not dispatched yet because it
+depends on scenario evidence from W12D-1 through W12D-4.
+
+Controller should avoid duplicating the scenario workers while they run. Useful
+non-overlapping controller work:
+
+- prepare evidence merge/audit tooling if needed;
+- keep this handoff current;
+- inspect worker results only after they return;
+- integrate one returned worker branch at a time with focused gates.
