@@ -1245,3 +1245,95 @@ Notes:
 - Screenshot inspection showed five event rows and final answer text once.
 - The page showed a reconnecting status line, which is acceptable evidence for
   the reconnect scenario and does not duplicate final text.
+
+## W12D-3 Integration Checkpoint
+
+Date: 2026-06-18
+
+Worker:
+
+- Agent: `019ed87e-6a1a-7570-9fb3-b232424df01c` (Kant)
+- Worktree:
+  `/Users/liusihang/openwebui/.worktrees/agent-mode-w12d-subagents`
+- Worker commits:
+  - `c8119da3e66d6b9bac37ee76b2262223e69f0b5a`
+  - `b4a5bdb5062d83f48377eeef1a6b32ef67886c8b`
+
+Integrated commits:
+
+- `60a5cc679` Validate W12D subagent acceptance
+- `89033c15a` Add W12D subagent harness scenarios
+
+Files integrated:
+
+- `backend/open_webui/agent/subagents.py`
+- `backend/open_webui/models/agent_runs.py`
+- `backend/open_webui/test/agent/test_subagents.py`
+- `backend/open_webui/test/models/test_agent_runs.py`
+- `handoff/agent-mode/w12d-subagents.md`
+- `handoff/agent-mode/w12d-subagents-evidence.json`
+
+Implementation summary:
+
+- `AgentRuns.append_event` now retries on concurrent `(run_id, seq)`
+  uniqueness collisions instead of losing concurrent callback events.
+- DB-backed subagent registration is atomic:
+  - SQLite uses `BEGIN IMMEDIATE`;
+  - other DBs use `SELECT ... FOR UPDATE`;
+  - cap and budget allocation are computed from the locked current row.
+
+Live evidence summary:
+
+- Scenarios covered: 6 and 7.
+- Run id:
+  `b9c75c49-0cfe-4a98-bbc1-179b2159c661`.
+- Runtime session:
+  `rt_b9c75c49-0cfe-4a98-bbc1-179b2159c661_FvcfsTDWeYw`.
+- Participant ids:
+  `subagent:...:1` through `subagent:...:5`.
+- Selected models: `agent-python` for all five subagents.
+- Services used by the worker, now stopped:
+  - backend `http://127.0.0.1:18103`;
+  - AgentScope runtime `http://127.0.0.1:8113`.
+- Cap rejection evidence:
+  sixth registration returned `409 subagent_cap_exceeded`.
+
+Controller verification after cherry-pick:
+
+- `WEBUI_SECRET_KEY=test-secret ENABLE_DB_MIGRATIONS=false uv run pytest -q backend/open_webui/test/agent backend/open_webui/test/models/test_agent_runs.py`
+  -> `99 passed, 9 warnings`.
+- `uv run ruff check --select F backend/open_webui/models/agent_runs.py backend/open_webui/agent/subagents.py backend/open_webui/test/models/test_agent_runs.py backend/open_webui/test/agent/test_subagents.py`
+  -> passed.
+- Diff-check from W12C-3 base for W12D-3 changed files -> passed.
+- `uv run --frozen python scripts/agent_mode/acceptance_harness.py live --evidence handoff/agent-mode/w12d-subagents-evidence.json`
+  intentionally exits non-zero because this is subset evidence only; output
+  confirmed `case contract: 2/12 satisfied`.
+
+Notes:
+
+- Kant's first evidence file had rich details but no top-level `scenarios`
+  list. The controller sent a follow-up; `b4a5bdb50` fixed the evidence schema
+  without product-code changes.
+- The runtime service still has no public subagent-plan endpoint. The W12D-3
+  proof uses public runtime start first, then drives
+  `AgentScopeSubagentAdapter` directly against live OpenWebUI callbacks.
+
+## W12D Merged Live Evidence Checkpoint
+
+Date: 2026-06-18
+
+Merged live evidence file:
+
+- `handoff/agent-mode/w12d-merged-live-evidence.json`
+
+Merge command:
+
+- `uv run --frozen python scripts/agent_mode/merge_w12_evidence.py handoff/agent-mode/w12d-runtime-chat-evidence.json handoff/agent-mode/w12d-tool-terminal-evidence.json handoff/agent-mode/w12d-subagents-evidence.json handoff/agent-mode/w12d-sse-ui-evidence.json --base-commit $(git rev-parse --short HEAD) --output handoff/agent-mode/w12d-merged-live-evidence.json`
+
+Live harness:
+
+- `uv run --frozen python scripts/agent_mode/acceptance_harness.py live --evidence handoff/agent-mode/w12d-merged-live-evidence.json`
+  -> `case contract: 12/12 satisfied`; `live acceptance: passed`.
+
+The harness message still says `W12B`; this is stale wording only. The merged
+file and validation cover W12D live evidence for all 12 MVP scenarios.
