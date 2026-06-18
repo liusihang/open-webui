@@ -488,7 +488,7 @@ async def _download_onlyoffice_callback_blob(callback_url: str) -> tuple[bytes, 
                     ) from exc
                 if parsed_content_length > ONLYOFFICE_EDIT_CALLBACK_MAX_BYTES:
                     raise HTTPException(
-                        status_code=status.HTTP_413_CONTENT_TOO_LARGE,
+                        status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
                         detail=(
                             "OnlyOffice callback document blob exceeds the "
                             f"{ONLYOFFICE_EDIT_CALLBACK_MAX_BYTES} byte limit."
@@ -505,7 +505,7 @@ async def _download_onlyoffice_callback_blob(callback_url: str) -> tuple[bytes, 
                 total_size += len(chunk)
                 if total_size > ONLYOFFICE_EDIT_CALLBACK_MAX_BYTES:
                     raise HTTPException(
-                        status_code=status.HTTP_413_CONTENT_TOO_LARGE,
+                        status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
                         detail=(
                             "OnlyOffice callback document blob exceeds the "
                             f"{ONLYOFFICE_EDIT_CALLBACK_MAX_BYTES} byte limit."

@@ -492,7 +492,8 @@ async def get_rag_config(request: Request, user=Depends(get_admin_user)):
         'PADDLEOCR_VL_DOWNLOAD_TIMEOUT': request.app.state.config.PADDLEOCR_VL_DOWNLOAD_TIMEOUT,
         'PADDLEOCR_VL_POLL_TIMEOUT': request.app.state.config.PADDLEOCR_VL_POLL_TIMEOUT,
         'PADDLEOCR_VL_POLL_INTERVAL': request.app.state.config.PADDLEOCR_VL_POLL_INTERVAL,
-        # MinerU settings
+        'PADDLEOCR_VL_ALLOWED_REMOTE_ORIGINS': request.app.state.config.PADDLEOCR_VL_ALLOWED_REMOTE_ORIGINS,
+    # MinerU settings
         'MINERU_API_MODE': request.app.state.config.MINERU_API_MODE,
         'MINERU_API_URL': request.app.state.config.MINERU_API_URL,
         'MINERU_API_KEY': request.app.state.config.MINERU_API_KEY,
@@ -715,6 +716,7 @@ class ConfigForm(BaseModel):
     PADDLEOCR_VL_DOWNLOAD_TIMEOUT: int | None = None
     PADDLEOCR_VL_POLL_TIMEOUT: int | None = None
     PADDLEOCR_VL_POLL_INTERVAL: float | None = None
+    PADDLEOCR_VL_ALLOWED_REMOTE_ORIGINS: list[str] | None = None
 
     # MinerU settings
     MINERU_API_MODE: str | None = None
@@ -967,8 +969,13 @@ async def update_rag_config(request: Request, form_data: ConfigForm, user=Depend
         if form_data.PADDLEOCR_VL_POLL_INTERVAL is not None
         else request.app.state.config.PADDLEOCR_VL_POLL_INTERVAL
     )
+    request.app.state.config.PADDLEOCR_VL_ALLOWED_REMOTE_ORIGINS = (
+        form_data.PADDLEOCR_VL_ALLOWED_REMOTE_ORIGINS
+        if form_data.PADDLEOCR_VL_ALLOWED_REMOTE_ORIGINS is not None
+        else request.app.state.config.PADDLEOCR_VL_ALLOWED_REMOTE_ORIGINS
+    )
 
-    # MinerU settings
+        # MinerU settings
     request.app.state.config.MINERU_API_MODE = (
         form_data.MINERU_API_MODE if form_data.MINERU_API_MODE is not None else request.app.state.config.MINERU_API_MODE
     )
@@ -1251,6 +1258,7 @@ async def update_rag_config(request: Request, form_data: ConfigForm, user=Depend
         'PADDLEOCR_VL_DOWNLOAD_TIMEOUT': request.app.state.config.PADDLEOCR_VL_DOWNLOAD_TIMEOUT,
         'PADDLEOCR_VL_POLL_TIMEOUT': request.app.state.config.PADDLEOCR_VL_POLL_TIMEOUT,
         'PADDLEOCR_VL_POLL_INTERVAL': request.app.state.config.PADDLEOCR_VL_POLL_INTERVAL,
+        'PADDLEOCR_VL_ALLOWED_REMOTE_ORIGINS': request.app.state.config.PADDLEOCR_VL_ALLOWED_REMOTE_ORIGINS,
         # MinerU settings
         'MINERU_API_MODE': request.app.state.config.MINERU_API_MODE,
         'MINERU_API_URL': request.app.state.config.MINERU_API_URL,

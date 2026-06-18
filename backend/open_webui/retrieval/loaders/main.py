@@ -691,6 +691,7 @@ class Loader:
                 download_timeout_s=self.kwargs.get('PADDLEOCR_VL_DOWNLOAD_TIMEOUT', 60),
                 poll_timeout_s=self.kwargs.get('PADDLEOCR_VL_POLL_TIMEOUT', 300),
                 poll_interval_s=self.kwargs.get('PADDLEOCR_VL_POLL_INTERVAL', 2),
+                allowed_remote_origins=self.kwargs.get('PADDLEOCR_VL_ALLOWED_REMOTE_ORIGINS') or (),
             )
         else:
             if file_ext == 'pdf':

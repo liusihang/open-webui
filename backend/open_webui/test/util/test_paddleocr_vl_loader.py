@@ -279,6 +279,10 @@ def test_loader_passes_paddleocr_async_options(monkeypatch):
         PADDLEOCR_VL_DOWNLOAD_TIMEOUT=90,
         PADDLEOCR_VL_POLL_TIMEOUT=600,
         PADDLEOCR_VL_POLL_INTERVAL=5,
+        PADDLEOCR_VL_ALLOWED_REMOTE_ORIGINS=[
+            'https://paddleocr.aistudio-app.com',
+            'https://paddleocr-cdn.example',
+        ],
     )
 
     assert loader._get_loader('source.pdf', 'application/pdf', '/tmp/source.pdf') is not None
@@ -296,6 +300,10 @@ def test_loader_passes_paddleocr_async_options(monkeypatch):
         'download_timeout_s': 90,
         'poll_timeout_s': 600,
         'poll_interval_s': 5,
+        'allowed_remote_origins': [
+            'https://paddleocr.aistudio-app.com',
+            'https://paddleocr-cdn.example',
+        ],
     }
 
 
@@ -314,6 +322,10 @@ def test_build_loader_from_config_includes_paddleocr_async_options():
         PADDLEOCR_VL_DOWNLOAD_TIMEOUT = 90
         PADDLEOCR_VL_POLL_TIMEOUT = 600
         PADDLEOCR_VL_POLL_INTERVAL = 5
+        PADDLEOCR_VL_ALLOWED_REMOTE_ORIGINS = [
+            'https://paddleocr.aistudio-app.com',
+            'https://paddleocr-cdn.example',
+        ]
         RAG_EXTRACT_DOCUMENT_IMAGE_ASSETS = False
 
         def __getattr__(self, name):
@@ -338,6 +350,10 @@ def test_build_loader_from_config_includes_paddleocr_async_options():
     assert loader.kwargs['PADDLEOCR_VL_DOWNLOAD_TIMEOUT'] == 90
     assert loader.kwargs['PADDLEOCR_VL_POLL_TIMEOUT'] == 600
     assert loader.kwargs['PADDLEOCR_VL_POLL_INTERVAL'] == 5
+    assert loader.kwargs['PADDLEOCR_VL_ALLOWED_REMOTE_ORIGINS'] == [
+        'https://paddleocr.aistudio-app.com',
+        'https://paddleocr-cdn.example',
+    ]
     assert loader.kwargs['RAG_EXTRACT_DOCUMENT_IMAGE_ASSETS'] is False
 
 

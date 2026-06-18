@@ -1439,6 +1439,16 @@ PADDLEOCR_VL_POLL_INTERVAL = ConfigVar(
     float(os.getenv('PADDLEOCR_VL_POLL_INTERVAL', '2')),
 )
 
+PADDLEOCR_VL_ALLOWED_REMOTE_ORIGINS = ConfigVar(
+    'PADDLEOCR_VL_ALLOWED_REMOTE_ORIGINS',
+    'rag.paddleocr_vl_allowed_remote_origins',
+    [
+        origin.strip()
+        for origin in os.getenv('PADDLEOCR_VL_ALLOWED_REMOTE_ORIGINS', '').split(',')
+        if origin.strip()
+    ],
+)
+
 BYPASS_EMBEDDING_AND_RETRIEVAL = ConfigVar(
     'BYPASS_EMBEDDING_AND_RETRIEVAL',
     'rag.bypass_embedding_and_retrieval',
