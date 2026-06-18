@@ -1597,3 +1597,29 @@ Remaining notes:
 - `uv.lock` remains unstaged verification churn.
 - Broad `main.py` ruff remains noisy due pre-existing duplicate/unused imports,
   so the final release gate uses the documented scoped F-class check.
+
+## W13 PR Package Checkpoint
+
+Date: 2026-06-18
+
+Package file:
+
+- `handoff/agent-mode/w13-pr-package.md`
+
+Final status:
+
+- Go for human review from the integration branch after W13 release-readiness
+  fixes and final gates.
+- Final checked commit before package commit: `07b6420cf`.
+- Remaining dirty state: root `uv.lock` only, treated as verification churn and
+  intentionally unstaged.
+
+Non-blocking caveats recorded in the package:
+
+- Harness success wording still says `W12B`.
+- Broad `main.py` ruff is noisy from pre-existing import debt; scoped F-class
+  checks pass.
+- Subagent live evidence is adapter-direct after public runtime start because
+  there is no public subagent-plan endpoint.
+- Terminal physical file proof uses `/private/tmp/...` while logical artifacts
+  persist `/workspace/...` paths because this host's `/workspace` is read-only.
