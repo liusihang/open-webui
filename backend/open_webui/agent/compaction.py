@@ -55,11 +55,10 @@ def compact_artifact_for_summary(
     now_ns: int,
 ) -> dict[str, Any]:
     path = _value(artifact, 'path')
-    metadata = dict(
-        _value(artifact, 'metadata', None)
-        or _value(artifact, 'meta', None)
-        or {}
-    )
+    raw_metadata = _value(artifact, 'meta', None)
+    if raw_metadata is None:
+        raw_metadata = _value(artifact, 'metadata', None)
+    metadata = dict(raw_metadata) if isinstance(raw_metadata, dict) else {}
 
     if _path_for_run(path, run_id, 'tmp'):
         metadata.update(

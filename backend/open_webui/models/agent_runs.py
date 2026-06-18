@@ -6,6 +6,7 @@ from enum import StrEnum
 from typing import Any
 from uuid import uuid4
 
+from open_webui.agent.compaction import build_compacted_run_summary
 from open_webui.internal.db import Base, get_async_db_context
 from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy import JSON, BigInteger, Column, Index, Integer, Text, UniqueConstraint, select
@@ -290,6 +291,32 @@ def _apply_transition_fields(
             setattr(row, field, payload[field])
 
 
+async def _compact_terminal_summary_if_needed(
+    row: AgentRun,
+    db: AsyncSession,
+    now: int,
+) -> None:
+    if row.summary is not None:
+        return
+
+    events_result = await db.execute(
+        select(AgentRunEvent)
+        .filter_by(run_id=row.id)
+        .order_by(AgentRunEvent.seq.asc())
+    )
+    artifacts_result = await db.execute(
+        select(AgentArtifact)
+        .filter_by(run_id=row.id)
+        .order_by(AgentArtifact.created_at.asc())
+    )
+    row.summary = build_compacted_run_summary(
+        run=row,
+        events=list(events_result.scalars().all()),
+        artifacts=list(artifacts_result.scalars().all()),
+        now_ns=now,
+    )
+
+
 class AgentRunTable:
     async def create_run(
         self,
@@ -391,7 +418,10 @@ class AgentRunTable:
                 return AgentRunModel.model_validate(row)
 
             _ensure_transition_allowed(run_id, current, target, allowed_from, reason)
-            _apply_transition_fields(row, target, _now_ns(), payload)
+            now = _now_ns()
+            _apply_transition_fields(row, target, now, payload)
+            if target in TERMINAL_STATES:
+                await _compact_terminal_summary_if_needed(row, db, now)
 
             await db.commit()
             await db.refresh(row)

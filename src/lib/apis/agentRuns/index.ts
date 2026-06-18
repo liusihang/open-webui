@@ -1,4 +1,4 @@
-import { WEBUI_API_BASE_URL } from '$lib/constants';
+import { WEBUI_BASE_URL } from '$lib/constants';
 import type { AgentRun, AgentRunEvent } from '$lib/components/chat/AgentEvents/types';
 
 export type AgentRunListOptions = {
@@ -24,6 +24,8 @@ const jsonHeaders = (token: string = '') => ({
 	...(token && { authorization: `Bearer ${token}` })
 });
 
+const AGENT_RUNS_API_BASE_URL = `${WEBUI_BASE_URL}/api/agent/runs`;
+
 export const getAgentRuns = async (
 	token: string = '',
 	options: AgentRunListOptions = {}
@@ -44,7 +46,7 @@ export const getAgentRuns = async (
 		searchParams.append('page', `${options.page}`);
 	}
 
-	const res = await fetch(`${WEBUI_API_BASE_URL}/agent/runs?${searchParams.toString()}`, {
+	const res = await fetch(`${AGENT_RUNS_API_BASE_URL}?${searchParams.toString()}`, {
 		method: 'GET',
 		credentials: 'include',
 		headers: jsonHeaders(token)
@@ -118,7 +120,7 @@ export const buildAgentRunEventsListUrl = (
 	const searchParams = buildAgentRunEventsSearchParams(options);
 
 	const query = searchParams.toString();
-	return `${WEBUI_API_BASE_URL}/agent/runs/${encodeURIComponent(runId)}/events/list${
+	return `${AGENT_RUNS_API_BASE_URL}/${encodeURIComponent(runId)}/events/list${
 		query ? `?${query}` : ''
 	}`;
 };
@@ -130,7 +132,7 @@ export const buildAgentRunEventsUrl = (
 	const searchParams = buildAgentRunEventsSearchParams(options);
 
 	const query = searchParams.toString();
-	return `${WEBUI_API_BASE_URL}/agent/runs/${encodeURIComponent(runId)}/events${
+	return `${AGENT_RUNS_API_BASE_URL}/${encodeURIComponent(runId)}/events${
 		query ? `?${query}` : ''
 	}`;
 };

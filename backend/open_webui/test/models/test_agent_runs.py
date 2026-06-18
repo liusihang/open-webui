@@ -216,6 +216,129 @@ async def test_state_transition_enforces_contract_and_versions(agent_db):
     assert terminal_exc.value.code == 'invalid_state_transition'
 
 
+@pytest.mark.parametrize(
+    ('terminal_state', 'from_state'),
+    [
+        ('completed', 'finalizing'),
+        ('failed', 'running'),
+        ('cancelled', 'running'),
+        ('budget_exceeded', 'running'),
+    ],
+)
+@pytest.mark.asyncio
+async def test_terminal_state_transition_compacts_events_once(agent_db, terminal_state, from_state):
+    table, _session_factory = agent_db
+    run = await table.create_run(
+        user_id='user-1',
+        chat_id='chat-1',
+        user_message_id='msg-user',
+        assistant_message_id='msg-assistant',
+        leader_model_id='model-a',
+        participants=[{'id': 'leader', 'role': 'leader', 'model_id': 'model-a'}],
+        budget={'max_tool_calls': 5, 'tool_calls_used': 1},
+    )
+    await table.transition_state(
+        run.id,
+        from_states=['queued'],
+        to_state='running',
+        reason='runtime accepted',
+        payload={
+            'process_refs': [
+                {
+                    'terminal_server_id': 'terminal-main',
+                    'process_id': 'proc-live',
+                    'command': 'python long_job.py',
+                    'status': 'running',
+                    'exit_code': None,
+                }
+            ]
+        },
+    )
+    await table.append_event(
+        run.id,
+        event_type='run.running',
+        participant_id='leader',
+        phase='running',
+        summary='Runtime accepted',
+    )
+    await table.append_event(
+        run.id,
+        event_type='action.summary',
+        participant_id='leader',
+        phase='running',
+        summary='Inspecting terminal output',
+    )
+    await table.append_event(
+        run.id,
+        event_type='tool.completed',
+        participant_id='leader',
+        phase='running',
+        summary='Command finished',
+        payload={
+            'tool_name': 'run_command',
+            'status': 'success',
+            'artifacts': [
+                {
+                    'path': f'/workspace/agent-runs/{run.id}/outputs/report.txt',
+                    'kind': 'file',
+                }
+            ],
+            'process_refs': [{'process_id': 'proc-live', 'status': 'running'}],
+        },
+    )
+    await table.register_artifact(
+        run_id=run.id,
+        user_id='user-1',
+        kind='file',
+        path=f'/workspace/agent-runs/{run.id}/outputs/report.txt',
+        mime_type='text/plain',
+        size=42,
+        idempotency_key=f'artifact:{run.id}:outputs:report.txt',
+    )
+
+    if from_state == 'finalizing':
+        await table.transition_state(
+            run.id,
+            from_states=['running'],
+            to_state='finalizing',
+            reason='runtime closed work',
+        )
+
+    terminal = await table.transition_state(
+        run.id,
+        from_states=[from_state],
+        to_state=terminal_state,
+        reason='terminal acceptance proof',
+    )
+    duplicate_terminal = await table.transition_state(
+        run.id,
+        from_states=[from_state],
+        to_state=terminal_state,
+        reason='duplicate terminal callback',
+    )
+
+    assert terminal.summary is not None
+    assert terminal.summary['state'] == terminal_state
+    assert terminal.summary['ui']['actions'] == [
+        {'seq': 2, 'participant_id': 'leader', 'summary': 'Inspecting terminal output'}
+    ]
+    assert terminal.summary['ui']['tools'][0]['process_refs'] == [
+        {'process_id': 'proc-live', 'status': 'running'}
+    ]
+    assert terminal.summary['ui']['artifacts'][0]['path'].endswith('/outputs/report.txt')
+    assert terminal.summary['ui']['artifacts'][0]['metadata']['cleanup_eligible'] is False
+    assert terminal.summary['ui']['process_refs'] == [
+        {
+            'terminal_server_id': 'terminal-main',
+            'process_id': 'proc-live',
+            'command': 'python long_job.py',
+            'status': 'running',
+            'exit_code': None,
+        }
+    ]
+    assert duplicate_terminal.summary == terminal.summary
+
+
 @pytest.mark.asyncio
 async def test_append_event_assigns_run_local_monotonic_sequence(agent_db):
     table, _session_factory = agent_db
