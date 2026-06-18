@@ -254,4 +254,122 @@ describe('foldAgentRunEvents', () => {
 		});
 		expect(state.items[4].participantId).toBe('subagent-1');
 	});
+
+	it('derives lifecycle status from run and final phase events', () => {
+		let state = createAgentRunEventState();
+
+		state = foldAgentRunEvent(state, agentRunEventFixture({ seq: 1, event_type: 'run.queued' }));
+		expect(state.runStatus).toBe('queued');
+
+		state = foldAgentRunEvent(state, agentRunEventFixture({ seq: 2, event_type: 'run.running' }));
+		expect(state.runStatus).toBe('running');
+
+		state = foldAgentRunEvent(
+			state,
+			agentRunEventFixture({ seq: 3, event_type: 'approval.requested' })
+		);
+		expect(state.runStatus).toBe('waiting_approval');
+
+		state = foldAgentRunEvent(state, agentRunEventFixture({ seq: 4, event_type: 'final.started' }));
+		expect(state.runStatus).toBe('finalizing');
+
+		state = foldAgentRunEvent(state, agentRunEventFixture({ seq: 5, event_type: 'run.completed' }));
+		expect(state.runStatus).toBe('completed');
+	});
+
+	it('exposes user-facing categories labels metadata and counts for Agent Run events', () => {
+		const state = foldAgentRunEvents([
+			agentRunEventFixture({
+				seq: 1,
+				event_type: 'model.selection.completed',
+				summary: '',
+				payload: { model_id: 'gpt-5.4', provider: 'openai' }
+			}),
+			agentRunEventFixture({
+				seq: 2,
+				event_type: 'tool.started',
+				summary: '',
+				payload: { tool_name: 'query_knowledge', status: 'running' }
+			}),
+			agentRunEventFixture({
+				seq: 3,
+				event_type: 'approval.requested',
+				summary: '',
+				payload: { approval_id: 'approval-1', action: 'overwrite report.txt' }
+			}),
+			agentRunEventFixture({
+				seq: 4,
+				event_type: 'artifact.registered',
+				summary: '',
+				payload: {
+					artifact_id: 'artifact-1',
+					name: 'report.txt',
+					path: '/workspace/agent-runs/run-1/outputs/report.txt'
+				}
+			}),
+			agentRunEventFixture({
+				seq: 5,
+				event_type: 'subagent.completed',
+				participant_id: 'subagent-1',
+				summary: '',
+				payload: { participant_name: 'Citation checker', result_summary: 'Checked citations' }
+			}),
+			agentRunEventFixture({ seq: 6, event_type: 'final.started', summary: '' })
+		]);
+
+		expect(state.counts).toMatchObject({
+			model: 1,
+			tool: 1,
+			approval: 1,
+			artifact: 1,
+			subagent: 1,
+			final: 1
+		});
+		expect(state.items[0]).toMatchObject({
+			category: 'model',
+			label: 'Model',
+			summary: 'Selected gpt-5.4',
+			metadata: [{ label: 'Provider', value: 'openai' }]
+		});
+		expect(state.items[1]).toMatchObject({
+			category: 'tool',
+			label: 'Tool',
+			summary: 'Running query_knowledge',
+			metadata: [{ label: 'Status', value: 'running' }]
+		});
+		expect(state.items[2]).toMatchObject({
+			category: 'approval',
+			label: 'Approval',
+			metadata: [{ label: 'Action', value: 'overwrite report.txt' }]
+		});
+		expect(state.items[3]).toMatchObject({
+			category: 'artifact',
+			label: 'Artifact',
+			summary: 'Registered report.txt',
+			metadata: [{ label: 'Path', value: '/workspace/agent-runs/run-1/outputs/report.txt' }]
+		});
+		expect(state.items[4]).toMatchObject({
+			category: 'subagent',
+			label: 'Subagent',
+			summary: 'Completed Citation checker'
+		});
+		expect(state.items[5]).toMatchObject({
+			category: 'final',
+			label: 'Final answer'
+		});
+	});
+
+	it('marks failed and cancelled terminal lifecycle states', () => {
+		const failedState = foldAgentRunEvents([
+			agentRunEventFixture({ seq: 1, event_type: 'run.running' }),
+			agentRunEventFixture({ seq: 2, event_type: 'run.failed' })
+		]);
+		const cancelledState = foldAgentRunEvents([
+			agentRunEventFixture({ seq: 1, event_type: 'run.running' }),
+			agentRunEventFixture({ seq: 2, event_type: 'run.cancelled' })
+		]);
+
+		expect(failedState.runStatus).toBe('failed');
+		expect(cancelledState.runStatus).toBe('cancelled');
+	});
 });

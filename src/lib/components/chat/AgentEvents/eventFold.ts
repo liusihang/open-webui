@@ -1,4 +1,6 @@
 import type {
+	AgentRunEventCategory,
+	AgentRunEventMetadata,
 	AgentRunEvent,
 	AgentRunEventPayload,
 	AgentRunEventState,
@@ -15,9 +17,28 @@ const STRIPPED_DETAIL_KEYS = new Set([
 	'thought'
 ]);
 
+const AGENT_RUN_EVENT_CATEGORIES: AgentRunEventCategory[] = [
+	'run',
+	'action',
+	'tool',
+	'approval',
+	'artifact',
+	'subagent',
+	'model',
+	'final'
+];
+
+const createEmptyCounts = (): AgentRunEventState['counts'] =>
+	Object.fromEntries(
+		AGENT_RUN_EVENT_CATEGORIES.map((category) => [category, 0])
+	) as AgentRunEventState['counts'];
+
 export const createAgentRunEventState = (): AgentRunEventState => ({
 	items: [],
 	lastSeq: 0,
+	runStatus: 'queued',
+	runStatusSeq: 0,
+	counts: createEmptyCounts(),
 	finalText: '',
 	finalStarted: false,
 	seenSeqs: new Set(),
@@ -42,12 +63,21 @@ export const foldAgentRunEvent = (
 	const nextState: AgentRunEventState = {
 		items: [...state.items],
 		lastSeq: Math.max(state.lastSeq, event.seq),
+		runStatus: state.runStatus,
+		runStatusSeq: state.runStatusSeq,
+		counts: { ...state.counts },
 		finalText: state.finalText,
 		finalStarted: state.finalStarted || event.event_type === 'final.started',
 		seenSeqs: new Set(state.seenSeqs).add(event.seq),
 		seenFinalDeltaKeys: new Set(state.seenFinalDeltaKeys),
 		finalDeltaChunks: new Map(state.finalDeltaChunks)
 	};
+
+	const nextRunStatus = getRunStatusForEvent(event.event_type);
+	if (nextRunStatus && event.seq >= nextState.runStatusSeq) {
+		nextState.runStatus = nextRunStatus;
+		nextState.runStatusSeq = event.seq;
+	}
 
 	if (event.event_type === 'final.delta') {
 		if (!isFinalDeltaRenderable(nextState, event)) {
@@ -96,6 +126,8 @@ const upsertFinalDeltaItem = (state: AgentRunEventState, event: AgentRunEvent) =
 };
 
 const insertViewItem = (state: AgentRunEventState, item: AgentRunEventViewItem) => {
+	state.counts[item.category] += 1;
+
 	const nextIndex = state.items.findIndex((existing) => existing.seq > item.seq);
 	if (nextIndex === -1) {
 		state.items.push(item);
@@ -108,9 +140,12 @@ const insertViewItem = (state: AgentRunEventState, item: AgentRunEventViewItem) 
 const toViewItem = (event: AgentRunEvent): AgentRunEventViewItem => ({
 	seq: event.seq,
 	eventType: event.event_type,
+	category: getEventCategory(event.event_type),
+	label: getEventLabel(event.event_type),
 	participantId: event.participant_id ?? null,
 	phase: event.phase ?? null,
 	summary: getEventSummary(event),
+	metadata: getEventMetadata(event),
 	details: sanitizeDetails(event.payload),
 	status: getEventStatus(event.event_type),
 	createdAt: event.created_at
@@ -129,6 +164,7 @@ const getEventSummary = (event: AgentRunEvent): string => {
 	const artifactName = getString(
 		event.payload.name ?? event.payload.path ?? event.payload.artifact_id
 	);
+	const modelName = getString(event.payload.model_id ?? event.payload.model ?? event.payload.name);
 
 	switch (event.event_type) {
 		case 'run.queued':
@@ -160,7 +196,7 @@ const getEventSummary = (event: AgentRunEvent): string => {
 		case 'model.selection.requested':
 			return 'Selecting model';
 		case 'model.selection.completed':
-			return 'Model selected';
+			return modelName ? `Selected ${modelName}` : 'Model selected';
 		case 'final.started':
 			return 'Writing final answer';
 		case 'final.delta':
@@ -177,6 +213,153 @@ const getEventSummary = (event: AgentRunEvent): string => {
 		default:
 			return 'Agent update';
 	}
+};
+
+const getRunStatusForEvent = (
+	eventType: AgentRunEventType
+): AgentRunEventState['runStatus'] | null => {
+	switch (eventType) {
+		case 'run.queued':
+			return 'queued';
+		case 'run.running':
+			return 'running';
+		case 'action.summary':
+		case 'tool.requested':
+		case 'tool.started':
+		case 'subagent.created':
+		case 'subagent.updated':
+		case 'model.selection.requested':
+			return 'running';
+		case 'approval.requested':
+			return 'waiting_approval';
+		case 'approval.completed':
+			return 'running';
+		case 'final.started':
+		case 'final.delta':
+			return 'finalizing';
+		case 'run.completed':
+			return 'completed';
+		case 'run.failed':
+			return 'failed';
+		case 'run.cancelled':
+			return 'cancelled';
+		case 'run.budget_exceeded':
+			return 'budget_exceeded';
+		default:
+			return null;
+	}
+};
+
+const getEventCategory = (eventType: AgentRunEventType): AgentRunEventCategory => {
+	if (eventType.startsWith('tool.')) {
+		return 'tool';
+	}
+	if (eventType.startsWith('approval.')) {
+		return 'approval';
+	}
+	if (eventType.startsWith('artifact.')) {
+		return 'artifact';
+	}
+	if (eventType.startsWith('subagent.')) {
+		return 'subagent';
+	}
+	if (eventType.startsWith('model.')) {
+		return 'model';
+	}
+	if (eventType.startsWith('final.')) {
+		return 'final';
+	}
+	if (eventType.startsWith('run.')) {
+		return 'run';
+	}
+
+	return 'action';
+};
+
+const getEventLabel = (eventType: AgentRunEventType): string => {
+	switch (getEventCategory(eventType)) {
+		case 'tool':
+			return 'Tool';
+		case 'approval':
+			return 'Approval';
+		case 'artifact':
+			return 'Artifact';
+		case 'subagent':
+			return 'Subagent';
+		case 'model':
+			return 'Model';
+		case 'final':
+			return 'Final answer';
+		case 'run':
+			return 'Run';
+		case 'action':
+		default:
+			return 'Update';
+	}
+};
+
+const getEventMetadata = (event: AgentRunEvent): AgentRunEventMetadata[] => {
+	const metadata: AgentRunEventMetadata[] = [];
+	const category = getEventCategory(event.event_type);
+	const payload = event.payload;
+
+	if (category === 'tool') {
+		addMetadata(metadata, 'Status', payload.status);
+		addMetadata(metadata, 'Process', getFirstProcessId(payload.process_refs));
+		return metadata;
+	}
+
+	if (category === 'approval') {
+		addMetadata(metadata, 'Action', payload.action ?? payload.description);
+		addMetadata(metadata, 'Approval', payload.status);
+		return metadata;
+	}
+
+	if (category === 'artifact') {
+		addMetadata(metadata, 'Path', payload.path);
+		addMetadata(metadata, 'Type', payload.mime_type);
+		return metadata;
+	}
+
+	if (category === 'subagent') {
+		addMetadata(metadata, 'Status', payload.status);
+		addMetadata(metadata, 'Model', payload.model_id ?? payload.model);
+		return metadata;
+	}
+
+	if (category === 'model') {
+		addMetadata(metadata, 'Provider', payload.provider);
+		addMetadata(metadata, 'Reason', payload.reason);
+		return metadata;
+	}
+
+	if (category === 'run' || category === 'final') {
+		addMetadata(metadata, 'Phase', event.phase);
+		return metadata;
+	}
+
+	addMetadata(metadata, 'Status', payload.status);
+	return metadata;
+};
+
+const addMetadata = (metadata: AgentRunEventMetadata[], label: string, value: unknown) => {
+	const stringValue = getString(value);
+	if (stringValue) {
+		metadata.push({ label, value: stringValue });
+	}
+};
+
+const getFirstProcessId = (value: unknown): string | null => {
+	if (!Array.isArray(value)) {
+		return null;
+	}
+
+	const first = value[0];
+	if (!isPlainObject(first)) {
+		return null;
+	}
+
+	return getString(first.process_id ?? first.pid ?? first.id);
 };
 
 const getEventStatus = (eventType: AgentRunEventType): AgentRunEventViewItem['status'] => {

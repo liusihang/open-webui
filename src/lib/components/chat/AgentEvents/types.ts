@@ -56,6 +56,21 @@ export type AgentRun = {
 
 export type AgentRunEventPayload = Record<string, unknown>;
 
+export type AgentRunEventCategory =
+	| 'run'
+	| 'action'
+	| 'tool'
+	| 'approval'
+	| 'artifact'
+	| 'subagent'
+	| 'model'
+	| 'final';
+
+export type AgentRunEventMetadata = {
+	label: string;
+	value: string;
+};
+
 export type AgentRunEvent = {
 	id?: string;
 	run_id: string;
@@ -74,9 +89,12 @@ export type AgentRunEvent = {
 export type AgentRunEventViewItem = {
 	seq: number;
 	eventType: AgentRunEventType;
+	category: AgentRunEventCategory;
+	label: string;
 	participantId: string | null;
 	phase: string | null;
 	summary: string;
+	metadata: AgentRunEventMetadata[];
 	details: AgentRunEventPayload | null;
 	status: 'running' | 'done' | 'error';
 	createdAt: number;
@@ -85,6 +103,9 @@ export type AgentRunEventViewItem = {
 export type AgentRunEventState = {
 	items: AgentRunEventViewItem[];
 	lastSeq: number;
+	runStatus: AgentRunState;
+	runStatusSeq: number;
+	counts: Record<AgentRunEventCategory, number>;
 	finalText: string;
 	finalStarted: boolean;
 	seenSeqs: Set<number>;
