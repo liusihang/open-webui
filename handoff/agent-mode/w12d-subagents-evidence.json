@@ -1026,6 +1026,72 @@
   "runtime_session_ids": [
     "rt_b9c75c49-0cfe-4a98-bbc1-179b2159c661_FvcfsTDWeYw"
   ],
+  "scenarios": [
+    {
+      "evidence": {
+        "cap_rejection_status": 409,
+        "executor_peak_concurrency": 5,
+        "participant_ids": [
+          "subagent:b9c75c49-0cfe-4a98-bbc1-179b2159c661:1",
+          "subagent:b9c75c49-0cfe-4a98-bbc1-179b2159c661:4",
+          "subagent:b9c75c49-0cfe-4a98-bbc1-179b2159c661:3",
+          "subagent:b9c75c49-0cfe-4a98-bbc1-179b2159c661:5",
+          "subagent:b9c75c49-0cfe-4a98-bbc1-179b2159c661:2"
+        ],
+        "run_ids": [
+          "b9c75c49-0cfe-4a98-bbc1-179b2159c661"
+        ],
+        "subagent_completed_count": 5,
+        "subagent_created_count": 5,
+        "team_cap": 5
+      },
+      "id": "scenario_06_subagent_cap_concurrency",
+      "live_status": "passed",
+      "observations": [
+        "event:subagent.created",
+        "subagent_concurrency:observed",
+        "subagent_cap:5"
+      ],
+      "status": "live_passed"
+    },
+    {
+      "evidence": {
+        "agent_selection_signal": {
+          "priority": 1,
+          "roles": [
+            "python",
+            "coder",
+            "analysis"
+          ],
+          "skills": [
+            "python",
+            "code",
+            "data"
+          ]
+        },
+        "model_selection_completed_count": 5,
+        "run_ids": [
+          "b9c75c49-0cfe-4a98-bbc1-179b2159c661"
+        ],
+        "selected_model_ids": [
+          "agent-python",
+          "agent-python",
+          "agent-python",
+          "agent-python",
+          "agent-python"
+        ],
+        "source_fuzzy_request": "data"
+      },
+      "id": "scenario_07_subagent_model_selection",
+      "live_status": "passed",
+      "observations": [
+        "event:model.selection.requested",
+        "event:model.selection.completed",
+        "meta.agent_selection"
+      ],
+      "status": "live_passed"
+    }
+  ],
   "scenario_6": {
     "cap_rejection": {
       "body": {

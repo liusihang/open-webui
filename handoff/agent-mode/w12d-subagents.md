@@ -183,6 +183,31 @@ Use long-running terminal sessions for backend/runtime.
     -> passed.
   - `git diff --check` -> passed.
 
+### 2026-06-18 - Harness Scenario List Follow-Up
+
+- Controller review found that
+  `handoff/agent-mode/w12d-subagents-evidence.json` had detailed W12D-3 proof
+  but no top-level `scenarios` list, so `acceptance_harness.py live` saw zero
+  satisfied scenarios.
+- Evidence-only follow-up:
+  - added top-level `scenarios` entry
+    `scenario_06_subagent_cap_concurrency` with status `live_passed`,
+    `live_status=passed`, and observations:
+    `event:subagent.created`, `subagent_concurrency:observed`,
+    `subagent_cap:5`;
+  - added top-level `scenarios` entry
+    `scenario_07_subagent_model_selection` with status `live_passed`,
+    `live_status=passed`, and observations:
+    `event:model.selection.requested`, `event:model.selection.completed`,
+    `meta.agent_selection`;
+  - kept existing detailed proof at the top level and added concise per-scenario
+    `evidence` summaries.
+- Validation:
+  `uv run --frozen python scripts/agent_mode/acceptance_harness.py live
+  --evidence handoff/agent-mode/w12d-subagents-evidence.json`
+  exited `1` as expected for subset evidence and reported:
+  `case contract: 2/12 satisfied`.
+
 ## Verification
 
 Run focused tests for any touched code. If you make code changes, also run:
