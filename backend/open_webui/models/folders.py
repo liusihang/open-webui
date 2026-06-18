@@ -12,6 +12,23 @@ from sqlalchemy.ext.asyncio import AsyncSession
 log = logging.getLogger(__name__)
 
 
+def set_agent_memory_disabled(meta: Optional[dict], disabled: bool) -> dict:
+    next_meta = dict(meta or {})
+    agent_memory_meta = dict(next_meta.get('agent_memory') or {})
+
+    if disabled:
+        agent_memory_meta['disabled'] = True
+    else:
+        agent_memory_meta.pop('disabled', None)
+
+    if agent_memory_meta:
+        next_meta['agent_memory'] = agent_memory_meta
+    else:
+        next_meta.pop('agent_memory', None)
+
+    return next_meta
+
+
 ####################
 # Folder DB Schema
 # Let every room in this house shelter someone who needs it,

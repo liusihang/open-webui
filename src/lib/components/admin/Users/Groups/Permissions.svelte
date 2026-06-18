@@ -1,14 +1,18 @@
 <script lang="ts">
 	import { getContext, onMount } from 'svelte';
-	const i18n = getContext('i18n');
+	import type { Writable } from 'svelte/store';
+
+	const i18n = getContext<Writable<{ t: (key: string, params?: Record<string, unknown>) => string }>>(
+		'i18n'
+	);
 
 	import Switch from '$lib/components/common/Switch.svelte';
 	import Tooltip from '$lib/components/common/Tooltip.svelte';
 
 	import { DEFAULT_PERMISSIONS } from '$lib/constants/permissions';
 
-	export let permissions = {};
-	export let defaultPermissions = {};
+	export let permissions: any = {};
+	export let defaultPermissions: any = {};
 
 	// Reactive statement to ensure all fields are present in `permissions`
 	$: {
@@ -923,6 +927,22 @@
 				<Switch bind:state={permissions.features.memories} />
 			</div>
 			{#if defaultPermissions?.features?.memories && !permissions.features.memories}
+				<div>
+					<div class="text-xs text-gray-500">
+						{$i18n.t('This is a default user permission and will remain enabled.')}
+					</div>
+				</div>
+			{/if}
+		</div>
+
+		<div class="flex flex-col w-full">
+			<div class="flex w-full justify-between my-1">
+				<div class=" self-center text-xs font-medium">
+					{$i18n.t('Agent Memory')}
+				</div>
+				<Switch bind:state={permissions.features.agent_memory} />
+			</div>
+			{#if defaultPermissions?.features?.agent_memory && !permissions.features.agent_memory}
 				<div>
 					<div class="text-xs text-gray-500">
 						{$i18n.t('This is a default user permission and will remain enabled.')}

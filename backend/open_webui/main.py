@@ -83,6 +83,15 @@ from open_webui.config import (
     AUDIO_TTS_OPENAI_PARAMS,
     AUDIO_TTS_SPLIT_ON,
     AUDIO_TTS_VOICE,
+    AGENT_MEMORY_CONSOLIDATION_CLAIM_LIMIT,
+    AGENT_MEMORY_CONSOLIDATION_MODEL,
+    AGENT_MEMORY_EXTRACTION_CLAIM_LIMIT,
+    AGENT_MEMORY_EXTRACTION_MODEL,
+    AGENT_MEMORY_IDLE_THRESHOLD_SECONDS,
+    AGENT_MEMORY_LEASE_SECONDS,
+    AGENT_MEMORY_RETRY_BACKOFF_SECONDS,
+    AGENT_MEMORY_STARTUP_CLAIM_LIMIT,
+    AGENT_MEMORY_SUMMARY_TOKEN_BUDGET,
     AUTOCOMPLETE_GENERATION_INPUT_MAX_LENGTH,
     AUTOCOMPLETE_GENERATION_PROMPT_TEMPLATE,
     # Image
@@ -169,6 +178,7 @@ from open_webui.config import (
     ENABLE_CODE_EXECUTION,
     ENABLE_CODE_INTERPRETER,
     ENABLE_COMMUNITY_SHARING,
+    ENABLE_AGENT_MEMORY,
     # Direct Connections
     ENABLE_DIRECT_CONNECTIONS,
     ENABLE_EVALUATION_ARENA_MODELS,
@@ -494,6 +504,7 @@ from open_webui.models.models import Models
 from open_webui.models.users import UserModel, Users
 from open_webui.routers import (
     analytics,
+    agent_memory,
     audio,
     auths,
     automations,
@@ -1185,8 +1196,10 @@ async def lifespan(app: FastAPI):
     asyncio.create_task(periodic_session_pool_cleanup())
 
     from open_webui.utils.automations import scheduler_worker_loop
+    from open_webui.utils.agent_memory_extraction import enqueue_startup_agent_memory_backlog
 
     asyncio.create_task(scheduler_worker_loop(app))
+    asyncio.create_task(enqueue_startup_agent_memory_backlog(app))
 
     if app.state.config.ENABLE_BASE_MODELS_CACHE:
         try:
@@ -1801,6 +1814,16 @@ app.state.config.IMAGE_GENERATION_ENGINE = IMAGE_GENERATION_ENGINE
 app.state.config.ENABLE_IMAGE_GENERATION = ENABLE_IMAGE_GENERATION
 app.state.config.ENABLE_IMAGE_PROMPT_GENERATION = ENABLE_IMAGE_PROMPT_GENERATION
 app.state.config.ENABLE_MEMORIES = ENABLE_MEMORIES
+app.state.config.ENABLE_AGENT_MEMORY = ENABLE_AGENT_MEMORY
+app.state.config.AGENT_MEMORY_EXTRACTION_MODEL = AGENT_MEMORY_EXTRACTION_MODEL
+app.state.config.AGENT_MEMORY_CONSOLIDATION_MODEL = AGENT_MEMORY_CONSOLIDATION_MODEL
+app.state.config.AGENT_MEMORY_IDLE_THRESHOLD_SECONDS = AGENT_MEMORY_IDLE_THRESHOLD_SECONDS
+app.state.config.AGENT_MEMORY_STARTUP_CLAIM_LIMIT = AGENT_MEMORY_STARTUP_CLAIM_LIMIT
+app.state.config.AGENT_MEMORY_EXTRACTION_CLAIM_LIMIT = AGENT_MEMORY_EXTRACTION_CLAIM_LIMIT
+app.state.config.AGENT_MEMORY_CONSOLIDATION_CLAIM_LIMIT = AGENT_MEMORY_CONSOLIDATION_CLAIM_LIMIT
+app.state.config.AGENT_MEMORY_LEASE_SECONDS = AGENT_MEMORY_LEASE_SECONDS
+app.state.config.AGENT_MEMORY_RETRY_BACKOFF_SECONDS = AGENT_MEMORY_RETRY_BACKOFF_SECONDS
+app.state.config.AGENT_MEMORY_SUMMARY_TOKEN_BUDGET = AGENT_MEMORY_SUMMARY_TOKEN_BUDGET
 
 app.state.config.IMAGE_GENERATION_MODEL = IMAGE_GENERATION_MODEL
 app.state.config.IMAGE_SIZE = IMAGE_SIZE
@@ -1994,6 +2017,7 @@ app.include_router(tools.router, prefix='/api/v1/tools', tags=['tools'])
 app.include_router(skills.router, prefix='/api/v1/skills', tags=['skills'])
 
 app.include_router(memories.router, prefix='/api/v1/memories', tags=['memories'])
+app.include_router(agent_memory.router, prefix='/api/v1/agent-memory', tags=['agent-memory'])
 app.include_router(folders.router, prefix='/api/v1/folders', tags=['folders'])
 app.include_router(groups.router, prefix='/api/v1/groups', tags=['groups'])
 app.include_router(files.router, prefix='/api/v1/files', tags=['files'])
@@ -3022,6 +3046,7 @@ async def get_app_config(request: Request):
                     'enable_google_drive_integration': app.state.config.ENABLE_GOOGLE_DRIVE_INTEGRATION,
                     'enable_onedrive_integration': app.state.config.ENABLE_ONEDRIVE_INTEGRATION,
                     'enable_memories': app.state.config.ENABLE_MEMORIES,
+                    'enable_agent_memory': app.state.config.ENABLE_AGENT_MEMORY,
                     **(
                         {
                             'enable_onedrive_personal': ENABLE_ONEDRIVE_PERSONAL,

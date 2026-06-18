@@ -583,6 +583,66 @@ ENABLE_MEMORIES = ConfigVar(
     os.getenv('ENABLE_MEMORIES', 'True').lower() == 'true',
 )
 
+ENABLE_AGENT_MEMORY = ConfigVar(
+    'ENABLE_AGENT_MEMORY',
+    'agent_memory.enable',
+    os.getenv('ENABLE_AGENT_MEMORY', 'False').lower() == 'true',
+)
+
+AGENT_MEMORY_EXTRACTION_MODEL = ConfigVar(
+    'AGENT_MEMORY_EXTRACTION_MODEL',
+    'agent_memory.extraction.model',
+    os.getenv('AGENT_MEMORY_EXTRACTION_MODEL', '').strip(),
+)
+
+AGENT_MEMORY_CONSOLIDATION_MODEL = ConfigVar(
+    'AGENT_MEMORY_CONSOLIDATION_MODEL',
+    'agent_memory.consolidation.model',
+    os.getenv('AGENT_MEMORY_CONSOLIDATION_MODEL', '').strip(),
+)
+
+AGENT_MEMORY_IDLE_THRESHOLD_SECONDS = ConfigVar(
+    'AGENT_MEMORY_IDLE_THRESHOLD_SECONDS',
+    'agent_memory.extraction.idle_threshold_seconds',
+    int(os.getenv('AGENT_MEMORY_IDLE_THRESHOLD_SECONDS', '900')),
+)
+
+AGENT_MEMORY_STARTUP_CLAIM_LIMIT = ConfigVar(
+    'AGENT_MEMORY_STARTUP_CLAIM_LIMIT',
+    'agent_memory.extraction.startup_claim_limit',
+    int(os.getenv('AGENT_MEMORY_STARTUP_CLAIM_LIMIT', '0')),
+)
+
+AGENT_MEMORY_EXTRACTION_CLAIM_LIMIT = ConfigVar(
+    'AGENT_MEMORY_EXTRACTION_CLAIM_LIMIT',
+    'agent_memory.extraction.claim_limit',
+    int(os.getenv('AGENT_MEMORY_EXTRACTION_CLAIM_LIMIT', '5')),
+)
+
+AGENT_MEMORY_CONSOLIDATION_CLAIM_LIMIT = ConfigVar(
+    'AGENT_MEMORY_CONSOLIDATION_CLAIM_LIMIT',
+    'agent_memory.consolidation.claim_limit',
+    int(os.getenv('AGENT_MEMORY_CONSOLIDATION_CLAIM_LIMIT', '2')),
+)
+
+AGENT_MEMORY_LEASE_SECONDS = ConfigVar(
+    'AGENT_MEMORY_LEASE_SECONDS',
+    'agent_memory.jobs.lease_seconds',
+    int(os.getenv('AGENT_MEMORY_LEASE_SECONDS', '300')),
+)
+
+AGENT_MEMORY_RETRY_BACKOFF_SECONDS = ConfigVar(
+    'AGENT_MEMORY_RETRY_BACKOFF_SECONDS',
+    'agent_memory.jobs.retry_backoff_seconds',
+    int(os.getenv('AGENT_MEMORY_RETRY_BACKOFF_SECONDS', '600')),
+)
+
+AGENT_MEMORY_SUMMARY_TOKEN_BUDGET = ConfigVar(
+    'AGENT_MEMORY_SUMMARY_TOKEN_BUDGET',
+    'agent_memory.read.summary_token_budget',
+    int(os.getenv('AGENT_MEMORY_SUMMARY_TOKEN_BUDGET', '1200')),
+)
+
 LAYER_GENERATION_MODEL = ConfigVar(
     'LAYER_GENERATION_MODEL',
     'layered_knowledge.internal.model',
@@ -3020,6 +3080,10 @@ USER_PERMISSIONS_FEATURES_API_KEYS = os.getenv('USER_PERMISSIONS_FEATURES_API_KE
 
 USER_PERMISSIONS_FEATURES_MEMORIES = os.getenv('USER_PERMISSIONS_FEATURES_MEMORIES', 'True').lower() == 'true'
 
+USER_PERMISSIONS_FEATURES_AGENT_MEMORY = (
+    os.getenv('USER_PERMISSIONS_FEATURES_AGENT_MEMORY', 'False').lower() == 'true'
+)
+
 USER_PERMISSIONS_FEATURES_AUTOMATIONS = os.getenv('USER_PERMISSIONS_FEATURES_AUTOMATIONS', 'False').lower() == 'true'
 
 USER_PERMISSIONS_FEATURES_CALENDAR = os.getenv('USER_PERMISSIONS_FEATURES_CALENDAR', 'True').lower() == 'true'
@@ -3095,6 +3159,7 @@ DEFAULT_USER_PERMISSIONS = {
         'image_generation': USER_PERMISSIONS_FEATURES_IMAGE_GENERATION,
         'code_interpreter': USER_PERMISSIONS_FEATURES_CODE_INTERPRETER,
         'memories': USER_PERMISSIONS_FEATURES_MEMORIES,
+        'agent_memory': USER_PERMISSIONS_FEATURES_AGENT_MEMORY,
         'automations': USER_PERMISSIONS_FEATURES_AUTOMATIONS,
         'calendar': USER_PERMISSIONS_FEATURES_CALENDAR,
     },

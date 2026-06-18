@@ -74,6 +74,8 @@ from open_webui.socket.main import (
     get_event_emitter,
 )
 from open_webui.utils.access_control import has_connection_access, has_permission
+from open_webui.utils.agent_memory_extraction import enqueue_agent_memory_extraction_after_completion
+from open_webui.utils.agent_memory_index import build_agent_memory_read_context
 from open_webui.utils.access_control.files import get_accessible_folder_files
 from open_webui.utils.chat import generate_chat_completion
 from open_webui.utils.code_interpreter import execute_code_jupyter
@@ -1826,6 +1828,47 @@ async def chat_memory_handler(request: Request, form_data: dict, extra_params: d
     return form_data
 
 
+async def apply_agent_memory_read_path(
+    request: Request,
+    form_data: dict,
+    user,
+    db=None,
+) -> dict:
+    metadata = form_data.get('metadata') or {}
+    params = metadata.get('params') if isinstance(metadata.get('params'), dict) else {}
+    if params.get('function_calling') != 'native':
+        return form_data
+    if not getattr(request.app.state.config, 'ENABLE_AGENT_MEMORY', False):
+        return form_data
+
+    user_id = getattr(user, 'id', None) or (user.get('id') if isinstance(user, dict) else None)
+    if not user_id:
+        return form_data
+    user_role = getattr(user, 'role', None) or (user.get('role') if isinstance(user, dict) else None)
+    if user_role != 'admin' and not await has_permission(
+        user_id,
+        'features.agent_memory',
+        getattr(request.app.state.config, 'USER_PERMISSIONS', {}),
+    ):
+        return form_data
+
+    context = await build_agent_memory_read_context(
+        user_id,
+        metadata.get('chat_id') if isinstance(metadata.get('chat_id'), str) else '',
+        getattr(request.app.state.config, 'AGENT_MEMORY_SUMMARY_TOKEN_BUDGET', 1200),
+        db=db,
+    )
+    if not context:
+        return form_data
+
+    form_data['messages'] = add_or_update_system_message(
+        context,
+        form_data.get('messages', []),
+        append=True,
+    )
+    return form_data
+
+
 async def chat_web_search_handler(request: Request, form_data: dict, extra_params: dict, user):
     event_emitter = extra_params['__event_emitter__']
     await event_emitter(
@@ -3126,6 +3169,8 @@ async def process_chat_payload(request, form_data, user, metadata, model):
     metadata['effective_knowledge_query_enabled'] = effective_knowledge_query_enabled
     form_data['metadata'] = metadata
     extra_params['__metadata__'] = metadata
+
+    form_data = await apply_agent_memory_read_path(request, form_data, user)
 
     # When the caller provides an explicit OpenAI-style `tools` array in the
     # request body, skip all server-side tool resolution and pass the caller's
@@ -4556,6 +4601,10 @@ async def background_tasks_handler(ctx):
                             )
                         except Exception as e:
                             pass
+
+        chat_id = metadata.get('chat_id', '')
+        if chat_id and not chat_id.startswith('local:') and not chat_id.startswith('channel:'):
+            await enqueue_agent_memory_extraction_after_completion(request, chat_id, user)
 
 
 async def outlet_filter_handler(ctx):

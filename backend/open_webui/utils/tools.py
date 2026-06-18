@@ -98,7 +98,13 @@ from open_webui.tools.builtin import (
     view_knowledge_file,
     write_note,
 )
+from open_webui.tools.agent_memory import (
+    agent_memory_list,
+    agent_memory_read,
+    agent_memory_search,
+)
 from open_webui.utils.access_control import has_access, has_connection_access, has_permission
+from open_webui.utils.agent_memory_index import resolve_agent_memory_scopes
 from open_webui.utils.headers import get_custom_headers, include_user_info_headers
 from open_webui.utils.misc import is_string_allowed
 from open_webui.utils.plugin import load_tool_module_by_id
@@ -553,6 +559,17 @@ async def get_builtin_tools(
             ]
         )
 
+    # Agent Memory tools are read-only and intentionally separate from User Memory tools.
+    if (
+        is_builtin_tool_enabled('agent_memory')
+        and getattr(request.app.state.config, 'ENABLE_AGENT_MEMORY', False)
+        and user.get('id')
+        and await has_user_permission('agent_memory')
+    ):
+        chat_id = metadata.get('chat_id') if isinstance(metadata.get('chat_id'), str) else ''
+        if await resolve_agent_memory_scopes(user.get('id', ''), chat_id):
+            builtin_functions.extend([agent_memory_search, agent_memory_read, agent_memory_list])
+
     # Add web search tools if builtin category enabled AND enabled globally AND model has web_search capability
     if (
         is_builtin_tool_enabled('web_search')
@@ -653,6 +670,7 @@ async def get_builtin_tools(
                 '__event_emitter__': extra_params.get('__event_emitter__'),
                 '__event_call__': extra_params.get('__event_call__'),
                 '__metadata__': extra_params.get('__metadata__'),
+                '__db__': extra_params.get('__db__'),
                 '__oauth_token__': extra_params.get('__oauth_token__'),
                 '__terminal_id__': extra_params.get('__terminal_id__'),
                 '__skill_ids__': extra_params.get('__skill_ids__'),
