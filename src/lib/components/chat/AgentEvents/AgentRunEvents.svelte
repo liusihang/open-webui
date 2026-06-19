@@ -5,6 +5,7 @@
 
 	import AgentFinalAnswer from './AgentFinalAnswer.svelte';
 	import AgentRunHeader from './AgentRunHeader.svelte';
+	import AgentRunThinkingState from './AgentRunThinkingState.svelte';
 	import AgentRunTimeline from './AgentRunTimeline.svelte';
 	import { createAgentRunEventState } from './eventFold';
 	import { isTerminalAgentRunStatus } from './messageState';
@@ -149,18 +150,24 @@
 	$: renderModel = createAgentRunRenderModel(state, { transportStatus: streamStatus });
 </script>
 
-<div
-	class="agent-run-events my-2 flex w-full flex-col overflow-hidden rounded-lg border border-gray-200 bg-white text-sm shadow-sm dark:border-gray-800 dark:bg-gray-950/30"
->
-	<AgentRunHeader model={renderModel} {streamError} />
-	<AgentRunTimeline
-		groups={renderModel.groups}
-		artifacts={renderModel.artifacts}
-		{expandedGroupIds}
-		{setGroupOpen}
-	/>
+{#if renderModel.presentationMode === 'full'}
+	<div
+		class="agent-run-events my-2 flex w-full flex-col overflow-hidden rounded-lg border border-gray-200 bg-white text-sm shadow-sm dark:border-gray-800 dark:bg-gray-950/30"
+	>
+		<AgentRunHeader model={renderModel} {streamError} />
+		<AgentRunTimeline
+			groups={renderModel.groups}
+			artifacts={renderModel.artifacts}
+			{expandedGroupIds}
+			{setGroupOpen}
+		/>
 
-	{#if showFinalText && renderModel.finalAnswer}
-		<AgentFinalAnswer {agentRunId} finalAnswer={renderModel.finalAnswer} />
-	{/if}
-</div>
+		{#if showFinalText && renderModel.finalAnswer}
+			<AgentFinalAnswer {agentRunId} finalAnswer={renderModel.finalAnswer} />
+		{/if}
+	</div>
+{:else if renderModel.presentationMode === 'quiet-thinking'}
+	<AgentRunThinkingState />
+{:else if showFinalText && renderModel.finalAnswer}
+	<AgentFinalAnswer {agentRunId} finalAnswer={renderModel.finalAnswer} quiet />
+{/if}

@@ -204,6 +204,34 @@ describe('createAgentRunRenderModel', () => {
 			status: 'done',
 			content: 'Done.'
 		});
+		expect(model.presentationMode).toBe('quiet-final');
+	});
+
+	it('shows a lightweight thinking state for ordinary Q&A before the answer starts', () => {
+		const state = foldAgentRunEvents([
+			agentRunEventFixture({ seq: 1, event_type: 'run.running' })
+		]);
+
+		const model = createAgentRunRenderModel(state, { transportStatus: 'live' });
+
+		expect(model.presentationMode).toBe('quiet-thinking');
+	});
+
+	it.each([
+		['tool', { seq: 1, event_type: 'tool.started', payload: { tool_call_id: 'tool-1' } }],
+		['artifact', { seq: 1, event_type: 'artifact.registered', payload: { artifact_id: 'artifact-1', name: 'report.md' } }],
+		['subagent', { seq: 1, event_type: 'subagent.created', participant_id: 'helper-1' }],
+		['approval', { seq: 1, event_type: 'approval.requested', payload: { approval_id: 'approval-1' } }],
+		['action summary', { seq: 1, event_type: 'action.summary', summary: 'Checking source' }],
+		['error run', { seq: 1, event_type: 'run.failed' }],
+		['cancelled run', { seq: 1, event_type: 'run.cancelled' }],
+		['budget exceeded run', { seq: 1, event_type: 'run.budget_exceeded' }]
+	])('keeps %s activity visible in the full panel', (_label, event) => {
+		const state = foldAgentRunEvents([agentRunEventFixture(event)]);
+
+		const model = createAgentRunRenderModel(state, { transportStatus: 'live' });
+
+		expect(model.presentationMode).toBe('full');
 	});
 
 	it('falls back for unknown events without exposing private reasoning fields', () => {

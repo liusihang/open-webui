@@ -9,6 +9,8 @@ import { isTerminalAgentRunStatus } from './messageState';
 
 export type AgentRunTransportStatus = 'loading' | 'live' | 'reconnecting' | 'error' | 'closed';
 
+export type AgentRunPresentationMode = 'quiet-thinking' | 'quiet-final' | 'full';
+
 export type AgentRunRenderStatus =
 	| 'queued'
 	| 'running'
@@ -78,6 +80,7 @@ export type AgentRunRenderGroup = {
 export type AgentRunRenderModel = {
 	runStatus: AgentRunState;
 	transportStatus: AgentRunTransportStatus;
+	presentationMode: AgentRunPresentationMode;
 	counts: AgentRunEventState['counts'];
 	groups: AgentRunRenderGroup[];
 	artifacts: AgentRunArtifactPart[];
@@ -140,6 +143,7 @@ export const createAgentRunRenderModel = (
 	return {
 		runStatus: state.runStatus,
 		transportStatus: normalizeTransportStatus(state.runStatus, options.transportStatus),
+		presentationMode: getPresentationMode(state),
 		counts: state.counts,
 		groups,
 		artifacts,
@@ -157,6 +161,28 @@ const normalizeTransportStatus = (
 	}
 
 	return transportStatus;
+};
+
+const getPresentationMode = (state: AgentRunEventState): AgentRunPresentationMode => {
+	if (hasUserRelevantActivity(state)) {
+		return 'full';
+	}
+
+	return state.finalText ? 'quiet-final' : 'quiet-thinking';
+};
+
+const hasUserRelevantActivity = (state: AgentRunEventState): boolean => {
+	if (
+		state.runStatus === 'failed' ||
+		state.runStatus === 'cancelled' ||
+		state.runStatus === 'budget_exceeded'
+	) {
+		return true;
+	}
+
+	return state.items.some(
+		(item) => item.category !== 'run' && item.category !== 'model' && item.category !== 'final'
+	);
 };
 
 const getGroupKind = (item: AgentRunEventViewItem): AgentRunRenderGroupKind => {
