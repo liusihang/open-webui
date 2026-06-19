@@ -304,7 +304,8 @@ describe('mergeHistorySnapshot', () => {
 		expect(result.hasRenderableAssistantUpdate).toBe(true);
 		expect(Boolean(recoveredMessage.agent_run_id)).toBe(true);
 		expect((recoveredMessage.content ?? '').trim()).toBe('');
-		expect(eventModel.groups.map((group) => group.kind)).toEqual(['run', 'run']);
+		expect(eventModel.groups).toEqual([]);
+		expect(eventModel.debugGroups.map((group) => group.kind)).toEqual(['run', 'run']);
 		expect(eventModel.finalAnswer?.content).toBe('Recovered final answer.');
 	});
 });

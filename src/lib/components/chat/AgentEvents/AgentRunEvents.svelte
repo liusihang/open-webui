@@ -3,6 +3,7 @@
 
 	import { createAgentRunEventsSource, getAgentRunEvents } from '$lib/apis/agentRuns';
 
+	import AgentRunDebugPanel from './AgentRunDebugPanel.svelte';
 	import AgentFinalAnswer from './AgentFinalAnswer.svelte';
 	import AgentRunHeader from './AgentRunHeader.svelte';
 	import AgentRunThinkingState from './AgentRunThinkingState.svelte';
@@ -26,19 +27,13 @@
 
 	const syncExpandedGroups = (nextState: AgentRunEventState) => {
 		const nextModel = createAgentRunRenderModel(nextState, { transportStatus: streamStatus });
-		const nextExpandedGroupIds = new Set(expandedGroupIds);
-
-		for (const group of nextModel.groups) {
-			if (
-				group.status === 'error' ||
-				group.status === 'waiting' ||
-				(group.kind === 'tool' && group.status === 'running')
-			) {
-				nextExpandedGroupIds.add(group.id);
-			}
-		}
-
-		expandedGroupIds = nextExpandedGroupIds;
+		const validGroupIds = new Set([
+			...nextModel.groups.map((group) => group.id),
+			...nextModel.debugGroups.map((group) => group.id)
+		]);
+		expandedGroupIds = new Set(
+			[...expandedGroupIds].filter((groupId) => validGroupIds.has(groupId))
+		);
 	};
 
 	const unsubscribe = eventsStore.subscribe((nextState) => {
@@ -154,12 +149,19 @@
 	<div
 		class="agent-run-events my-2 flex w-full flex-col overflow-hidden rounded-lg border border-gray-200 bg-white text-sm shadow-sm dark:border-gray-800 dark:bg-gray-950/30"
 	>
-		<AgentRunHeader model={renderModel} {streamError} />
+		<AgentRunHeader model={renderModel} />
 		<AgentRunTimeline
 			groups={renderModel.groups}
 			artifacts={renderModel.artifacts}
 			{expandedGroupIds}
 			{setGroupOpen}
+		/>
+		<AgentRunDebugPanel
+			{agentRunId}
+			model={renderModel}
+			{expandedGroupIds}
+			{setGroupOpen}
+			{streamError}
 		/>
 
 		{#if showFinalText && renderModel.finalAnswer}

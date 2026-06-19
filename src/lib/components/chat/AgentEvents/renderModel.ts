@@ -83,6 +83,13 @@ export type AgentRunRenderModel = {
 	presentationMode: AgentRunPresentationMode;
 	counts: AgentRunEventState['counts'];
 	groups: AgentRunRenderGroup[];
+	debugGroups: AgentRunRenderGroup[];
+	debug: {
+		lastSeq: number;
+		totalEvents: number;
+		visibleEvents: number;
+		hiddenEvents: number;
+	};
 	artifacts: AgentRunArtifactPart[];
 	finalAnswer: AgentRunFinalPart | null;
 	errors: AgentRunErrorPart[];
@@ -122,14 +129,16 @@ export const createAgentRunRenderModel = (
 		}
 	}
 
-	const groups = [...groupDrafts.values()]
+	const allGroups = [...groupDrafts.values()]
 		.map(toRenderGroup)
 		.sort((a, b) => a.seqRange.start - b.seqRange.start);
-	const artifacts = groups
+	const groups = allGroups.filter(shouldShowInDefaultTimeline).map(toDefaultTimelineGroup);
+	const debugGroups = allGroups;
+	const artifacts = allGroups
 		.filter((group) => group.kind === 'artifact')
 		.map(toArtifactPart)
 		.filter((artifact): artifact is AgentRunArtifactPart => artifact !== null);
-	const errors = groups.flatMap((group) =>
+	const errors = allGroups.flatMap((group) =>
 		group.detailSections
 			.filter((section) => section.kind === 'error')
 			.map((section) => ({
@@ -146,6 +155,16 @@ export const createAgentRunRenderModel = (
 		presentationMode: getPresentationMode(state),
 		counts: state.counts,
 		groups,
+		debugGroups,
+		debug: {
+			lastSeq: state.lastSeq,
+			totalEvents: state.items.length,
+			visibleEvents: groups.reduce((total, group) => total + group.events.length, 0),
+			hiddenEvents: Math.max(
+				0,
+				state.items.length - groups.reduce((total, group) => total + group.events.length, 0)
+			)
+		},
 		artifacts,
 		finalAnswer: createFinalAnswer(state),
 		errors
@@ -191,6 +210,10 @@ const getGroupKind = (item: AgentRunEventViewItem): AgentRunRenderGroupKind => {
 	}
 
 	if (item.category === 'action') {
+		return 'fallback';
+	}
+
+	if (item.category === 'final') {
 		return 'fallback';
 	}
 
@@ -325,24 +348,34 @@ const getGroupTitle = (kind: AgentRunRenderGroupKind, events: AgentRunEventViewI
 			);
 		case 'approval':
 			return events.some((event) => event.eventType === 'approval.completed')
-				? 'Review completed'
-				: 'Review needed';
+				? '已完成确认'
+				: '需要确认';
 		case 'artifact':
-			return firstString(merged.name, merged.path, merged.artifact_id) ?? 'File';
+			return firstString(merged.name, merged.path, merged.artifact_id) ?? '文件';
 		case 'subagent':
 			return (
 				firstString(merged.participant_name, merged.name, last.participantId) ??
 				last.summary ??
-				'Helper'
+				'助手'
 			);
 		case 'model':
 			return (
 				humanizeModelSelection(firstString(merged.model_id, merged.model, merged.name)) ??
 				last.summary
 			);
+		case 'run':
+			if (last.eventType === 'run.failed') {
+				return '任务失败';
+			}
+			if (last.eventType === 'run.cancelled') {
+				return '任务已取消';
+			}
+			if (last.eventType === 'run.budget_exceeded') {
+				return '任务达到限制';
+			}
+			return last.summary;
 		case 'step':
 		case 'fallback':
-		case 'run':
 		default:
 			return last.summary;
 	}
@@ -357,18 +390,24 @@ const getGroupSubtitle = (
 
 	switch (kind) {
 		case 'tool':
-			return firstString(merged.summary, merged.description);
+			return firstString(merged.summary, merged.description, getLatestEventSummary(events));
 		case 'approval':
 			return firstString(merged.action, merged.description, merged.request);
 		case 'artifact':
-			return firstString(merged.path, merged.mime_type);
+			return firstString(getLatestEventSummary(events), merged.path, merged.mime_type);
 		case 'subagent':
-			return firstString(merged.result_summary, merged.status, last.participantId);
+			return firstString(
+				merged.result_summary,
+				merged.status,
+				getLatestEventSummary(events),
+				last.participantId
+			);
 		case 'model':
 			return firstString(merged.reason);
+		case 'run':
+			return null;
 		case 'fallback':
 		case 'step':
-		case 'run':
 		default:
 			return null;
 	}
@@ -399,8 +438,8 @@ const getGroupMetadata = (
 	}
 
 	if (kind === 'artifact') {
-		addMetadata(metadata, 'Type', firstString(merged.mime_type));
-		addMetadata(metadata, 'Size', firstString(merged.size));
+		addMetadata(metadata, '类型', firstString(merged.mime_type));
+		addMetadata(metadata, '大小', firstString(merged.size));
 	}
 
 	return [...metadata].map(([label, value]) => ({ label, value }));
@@ -446,19 +485,19 @@ const getDetailSections = (
 		addSection(
 			sections,
 			'input',
-			'Request',
+			'请求',
 			pickFields(merged, ['arguments', 'query', 'path', 'command'])
 		);
 		addSection(
 			sections,
 			'output',
-			'Result',
+			'结果',
 			pickFields(merged, ['result', 'content', 'summary', 'process_refs', 'warnings'])
 		);
 		addSection(
 			sections,
 			'error',
-			'Problem',
+			'问题',
 			pickFields(merged, ['structured_error', 'error', 'message', 'code'])
 		);
 		addDebugSection(sections, merged);
@@ -469,13 +508,13 @@ const getDetailSections = (
 		addSection(
 			sections,
 			'input',
-			'Request',
+			'请求',
 			pickFields(merged, ['action', 'description', 'request'])
 		);
 		addSection(
 			sections,
 			'output',
-			'Decision',
+			'决定',
 			pickFields(merged, ['status', 'decision', 'approved'])
 		);
 		addDebugSection(sections, merged);
@@ -486,7 +525,7 @@ const getDetailSections = (
 		addSection(
 			sections,
 			'output',
-			'File',
+			'文件',
 			pickFields(merged, ['artifact_id', 'name', 'path', 'mime_type', 'size'])
 		);
 		addDebugSection(sections, merged);
@@ -497,13 +536,13 @@ const getDetailSections = (
 		addSection(
 			sections,
 			'output',
-			'Result',
+			'结果',
 			pickFields(merged, ['result_summary', 'status', 'model_id', 'model'])
 		);
 		addSection(
 			sections,
 			'error',
-			'Problem',
+			'问题',
 			pickFields(merged, ['structured_error', 'error', 'message', 'code'])
 		);
 		addDebugSection(sections, merged);
@@ -514,7 +553,7 @@ const getDetailSections = (
 		addSection(
 			sections,
 			'output',
-			'Choice',
+			'选择',
 			pickFields(merged, ['model_id', 'model', 'provider', 'reason'])
 		);
 		addDebugSection(sections, merged);
@@ -522,7 +561,7 @@ const getDetailSections = (
 	}
 
 	if (Object.keys(merged).length > 0) {
-		addSection(sections, kind === 'fallback' ? 'debug' : 'output', 'Details', merged);
+		addSection(sections, kind === 'fallback' ? 'debug' : 'output', '详情', merged);
 	}
 
 	return sections;
@@ -569,7 +608,7 @@ const addDebugSection = (sections: AgentRunDetailSection[], details: AgentRunEve
 		'request_id'
 	]);
 
-	addSection(sections, 'debug', 'More details', visibleDetails);
+	addSection(sections, 'debug', '更多细节', visibleDetails);
 };
 
 const addSection = (
@@ -597,7 +636,7 @@ const createFinalAnswer = (state: AgentRunEventState): AgentRunFinalPart | null 
 
 	return {
 		id: 'final-answer',
-		title: 'Answer',
+		title: '最终回答',
 		content: state.finalText,
 		status: getFinalStatus(state.runStatus)
 	};
@@ -684,6 +723,39 @@ const addMetadata = (metadata: Map<string, string>, label: string, value: string
 	if (value) {
 		metadata.set(label, value);
 	}
+};
+
+const shouldShowInDefaultTimeline = (group: AgentRunRenderGroup) => {
+	if (group.kind === 'model') {
+		return false;
+	}
+
+	if (group.kind !== 'run') {
+		return true;
+	}
+
+	const lastEventType = group.events[group.events.length - 1]?.eventType;
+	return (
+		lastEventType === 'run.failed' ||
+		lastEventType === 'run.cancelled' ||
+		lastEventType === 'run.budget_exceeded'
+	);
+};
+
+const toDefaultTimelineGroup = (group: AgentRunRenderGroup): AgentRunRenderGroup => ({
+	...group,
+	detailSections: []
+});
+
+const getLatestEventSummary = (events: AgentRunEventViewItem[]): string | null => {
+	for (let index = events.length - 1; index >= 0; index -= 1) {
+		const summary = events[index]?.summary?.trim();
+		if (summary) {
+			return summary;
+		}
+	}
+
+	return null;
 };
 
 const firstString = (...values: unknown[]): string | null => {

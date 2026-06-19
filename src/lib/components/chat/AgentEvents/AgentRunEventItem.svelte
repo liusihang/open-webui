@@ -60,22 +60,22 @@
 	const kindLabel = (group: AgentRunRenderGroup) => {
 		switch (group.kind) {
 			case 'tool':
-				return 'Action';
+				return '行动';
 			case 'approval':
-				return 'Review';
+				return '确认';
 			case 'artifact':
-				return 'File';
+				return '文件';
 			case 'subagent':
-				return 'Helper';
+				return '助手';
 			case 'model':
-				return 'Setup';
+				return '设置';
 			case 'step':
-				return 'Progress';
+				return '进展';
 			case 'run':
-				return 'Status';
+				return '状态';
 			case 'fallback':
 			default:
-				return 'Update';
+				return '更新';
 		}
 	};
 </script>
