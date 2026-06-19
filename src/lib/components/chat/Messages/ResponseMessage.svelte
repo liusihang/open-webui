@@ -66,6 +66,7 @@
 	import FullHeightIframe from '$lib/components/common/FullHeightIframe.svelte';
 	import OutputEditView from './OutputEditView.svelte';
 	import AgentRunEvents from '../AgentEvents/AgentRunEvents.svelte';
+	import { markAgentRunMessageDone } from '../AgentEvents/messageState';
 
 	interface MessageType {
 		id: string;
@@ -833,6 +834,11 @@
 								<AgentRunEvents
 									agentRunId={message.agent_run_id}
 									showFinalText={!(message.content ?? '').trim()}
+									on:terminal={async (event) => {
+										if (markAgentRunMessageDone(message, event.detail.runStatus)) {
+											await saveMessage(messageId, structuredClone(message));
+										}
+									}}
 								/>
 							{/if}
 

@@ -253,8 +253,25 @@ describe('createAgentRunRenderModel', () => {
 		const model = createAgentRunRenderModel(state, { transportStatus: 'reconnecting' });
 
 		expect(model.runStatus).toBe('completed');
-		expect(model.transportStatus).toBe('reconnecting');
+		expect(model.transportStatus).toBe('closed');
 		expect(model.groups.map((group) => group.kind)).toEqual(['tool', 'run']);
 		expect(model.groups[0].seqRange).toEqual({ start: 1, end: 2 });
+	});
+
+	it('does not show a reconnecting transport state after the run reaches a terminal state', () => {
+		const state = foldAgentRunEvents([
+			agentRunEventFixture({ seq: 1, event_type: 'run.running' }),
+			agentRunEventFixture({
+				seq: 2,
+				event_type: 'final.delta',
+				payload: { delta: 'OK', delta_index: 0, final_stream_id: 'answer' }
+			}),
+			agentRunEventFixture({ seq: 3, event_type: 'run.completed' })
+		]);
+
+		const model = createAgentRunRenderModel(state, { transportStatus: 'reconnecting' });
+
+		expect(model.runStatus).toBe('completed');
+		expect(model.transportStatus).toBe('closed');
 	});
 });

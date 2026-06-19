@@ -83,6 +83,8 @@
 				return 'Connection retrying';
 			case 'error':
 				return 'Connection issue';
+			case 'closed':
+				return 'Updates complete';
 		}
 	};
 
@@ -95,6 +97,9 @@
 		}
 		if (status === 'live') {
 			return 'text-green-700 dark:text-green-300';
+		}
+		if (status === 'closed') {
+			return 'text-gray-500 dark:text-gray-400';
 		}
 		return 'text-gray-500 dark:text-gray-400';
 	};

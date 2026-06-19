@@ -1,5 +1,5 @@
 <script lang="ts">
-	import { onDestroy, onMount } from 'svelte';
+	import { createEventDispatcher, onDestroy, onMount } from 'svelte';
 
 	import { createAgentRunEventsSource, getAgentRunEvents } from '$lib/apis/agentRuns';
 
@@ -7,6 +7,7 @@
 	import AgentRunHeader from './AgentRunHeader.svelte';
 	import AgentRunTimeline from './AgentRunTimeline.svelte';
 	import { createAgentRunEventState } from './eventFold';
+	import { isTerminalAgentRunStatus } from './messageState';
 	import { createAgentRunRenderModel, type AgentRunTransportStatus } from './renderModel';
 	import { createAgentRunEventsStore } from './store';
 	import { AGENT_RUN_EVENT_TYPES, type AgentRunEvent, type AgentRunEventState } from './types';
@@ -14,11 +15,13 @@
 	export let agentRunId: string;
 	export let showFinalText = true;
 
+	const dispatch = createEventDispatcher();
 	const eventsStore = createAgentRunEventsStore();
 	let state: AgentRunEventState = createAgentRunEventState();
 	let expandedGroupIds = new Set<string>();
 	let streamStatus: AgentRunTransportStatus = 'loading';
 	let streamError = '';
+	let dispatchedTerminalStatus: AgentRunEventState['runStatus'] | null = null;
 
 	const syncExpandedGroups = (nextState: AgentRunEventState) => {
 		const nextModel = createAgentRunRenderModel(nextState, { transportStatus: streamStatus });
@@ -73,13 +76,19 @@
 				}
 
 				eventsStore.backfill(events);
+				if (isTerminalAgentRunStatus(state.runStatus)) {
+					streamStatus = 'closed';
+					streamError = '';
+					return;
+				}
+
 				source = createAgentRunEventsSource(agentRunId, { afterSeq: state.lastSeq });
 				const handleMessage = (event: Event) => {
 					const message = event as MessageEvent<string>;
 					try {
 						const parsed = JSON.parse(message.data) as AgentRunEvent;
 						eventsStore.fold(parsed);
-						streamStatus = 'live';
+						streamStatus = isTerminalAgentRunStatus(state.runStatus) ? 'closed' : 'live';
 						streamError = '';
 					} catch {
 						streamStatus = 'error';
@@ -92,6 +101,13 @@
 					streamError = '';
 				};
 				source.onerror = () => {
+					if (isTerminalAgentRunStatus(state.runStatus)) {
+						streamStatus = 'closed';
+						streamError = '';
+						source?.close();
+						return;
+					}
+
 					streamStatus = state.items.length > 0 ? 'reconnecting' : 'error';
 					streamError = state.items.length > 0 ? '' : 'Agent Event Stream disconnected';
 				};
@@ -120,6 +136,16 @@
 		source?.close();
 	});
 
+	$: if (
+		isTerminalAgentRunStatus(state.runStatus) &&
+		dispatchedTerminalStatus !== state.runStatus
+	) {
+		dispatchedTerminalStatus = state.runStatus;
+		streamStatus = 'closed';
+		streamError = '';
+		source?.close();
+		dispatch('terminal', { agentRunId, runStatus: state.runStatus });
+	}
 	$: renderModel = createAgentRunRenderModel(state, { transportStatus: streamStatus });
 </script>
 

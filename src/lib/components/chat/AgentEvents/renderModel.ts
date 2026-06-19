@@ -5,8 +5,9 @@ import type {
 	AgentRunEventViewItem,
 	AgentRunState
 } from './types';
+import { isTerminalAgentRunStatus } from './messageState';
 
-export type AgentRunTransportStatus = 'loading' | 'live' | 'reconnecting' | 'error';
+export type AgentRunTransportStatus = 'loading' | 'live' | 'reconnecting' | 'error' | 'closed';
 
 export type AgentRunRenderStatus =
 	| 'queued'
@@ -138,13 +139,24 @@ export const createAgentRunRenderModel = (
 
 	return {
 		runStatus: state.runStatus,
-		transportStatus: options.transportStatus,
+		transportStatus: normalizeTransportStatus(state.runStatus, options.transportStatus),
 		counts: state.counts,
 		groups,
 		artifacts,
 		finalAnswer: createFinalAnswer(state),
 		errors
 	};
+};
+
+const normalizeTransportStatus = (
+	runStatus: AgentRunState,
+	transportStatus: AgentRunTransportStatus
+): AgentRunTransportStatus => {
+	if (isTerminalAgentRunStatus(runStatus)) {
+		return 'closed';
+	}
+
+	return transportStatus;
 };
 
 const getGroupKind = (item: AgentRunEventViewItem): AgentRunRenderGroupKind => {
