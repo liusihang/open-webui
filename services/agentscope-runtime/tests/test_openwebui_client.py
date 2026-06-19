@@ -335,6 +335,47 @@ async def test_call_model_uses_openwebui_model_call_callback() -> None:
 
 
 @pytest.mark.asyncio
+async def test_call_model_retries_operation_in_progress_until_cached_success() -> None:
+    async with respx.mock(assert_all_called=True) as router:
+        request = router.post(
+            "https://openwebui.test/api/agent/service/runs/run-1/model-call"
+        ).mock(
+            side_effect=[
+                Response(202, json={"detail": "operation_in_progress"}),
+                Response(202, json={"detail": "operation_in_progress"}),
+                Response(
+                    200,
+                    json={
+                        "status": "success",
+                        "model": "model-research",
+                        "response": {"content": "cached model answer"},
+                        "metadata": {"operation_id": "model-call-1"},
+                    },
+                ),
+            ]
+        )
+        client = OpenWebUIClient(
+            base_url="https://openwebui.test",
+            service_token="owui-token",
+        )
+
+        response = await client.call_model(
+            run_id="run-1",
+            idempotency_key="model:leader:model-call-1:1",
+            participant_id="leader",
+            model_call_id="model-call-1",
+            model="model-research",
+            messages=[{"role": "user", "content": "hi"}],
+        )
+
+    assert response["response"]["content"] == "cached model answer"
+    assert len(request.calls) == 3
+    assert {call.request.headers["x-agent-idempotency-key"] for call in request.calls} == {
+        "model:leader:model-call-1:1"
+    }
+
+
+@pytest.mark.asyncio
 async def test_call_model_sends_tools_and_tool_choice_as_top_level_callback_fields() -> None:
     async with respx.mock(assert_all_called=True) as router:
         request = router.post(

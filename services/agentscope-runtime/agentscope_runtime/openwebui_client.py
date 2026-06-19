@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import asyncio
+import time
 from typing import Any
 
 import httpx
@@ -15,6 +17,9 @@ from agentscope_runtime.schemas import (
 )
 
 
+MODEL_CALL_IN_PROGRESS_POLL_SECONDS = 0.25
+
+
 class OpenWebUIClient:
     def __init__(
         self,
@@ -27,6 +32,7 @@ class OpenWebUIClient:
         self._base_url = base_url.rstrip("/")
         self._service_token = service_token
         self._timeout = timeout
+        self._model_call_poll_timeout = model_call_timeout
         self._model_call_timeout = httpx.Timeout(model_call_timeout, connect=timeout)
 
     async def append_event(
@@ -197,6 +203,8 @@ class OpenWebUIClient:
             idempotency_key,
             body.model_dump(mode="json", exclude_none=True),
             timeout=self._model_call_timeout,
+            retry_operation_in_progress=True,
+            operation_poll_timeout=self._model_call_poll_timeout,
         )
 
     async def call_tool(
@@ -227,18 +235,58 @@ class OpenWebUIClient:
         body: dict[str, Any],
         *,
         timeout: float | httpx.Timeout | None = None,
+        retry_operation_in_progress: bool = False,
+        operation_poll_timeout: float | None = None,
     ) -> dict[str, Any]:
         headers = {
             "Authorization": f"Bearer {self._service_token}",
             "X-Agent-Idempotency-Key": idempotency_key,
         }
+        deadline = (
+            time.monotonic() + operation_poll_timeout
+            if operation_poll_timeout is not None
+            else None
+        )
+        client_timeout = timeout if timeout is not None else self._timeout
 
-        async with httpx.AsyncClient(timeout=timeout if timeout is not None else self._timeout) as client:
-            response = await client.post(url, headers=headers, json=body)
+        async with httpx.AsyncClient(timeout=client_timeout) as client:
+            while True:
+                response = await client.post(url, headers=headers, json=body)
+                payload = _safe_response_json(response)
+
+                if (
+                    retry_operation_in_progress
+                    and response.status_code == 202
+                    and isinstance(payload, dict)
+                    and payload.get("detail") == "operation_in_progress"
+                ):
+                    if deadline is not None and time.monotonic() >= deadline:
+                        raise RuntimeError(
+                            "OpenWebUI callback still in progress "
+                            f"after {operation_poll_timeout} seconds",
+                        )
+                    await asyncio.sleep(_poll_sleep_seconds(deadline))
+                    continue
+
+                break
 
         if response.is_error:
             raise RuntimeError(
                 "OpenWebUI callback failed "
                 f"with status {response.status_code}: {response.text}",
             )
+        return payload if payload is not None else response.json()
+
+
+def _safe_response_json(response: httpx.Response) -> Any | None:
+    try:
         return response.json()
+    except ValueError:
+        return None
+
+
+def _poll_sleep_seconds(deadline: float | None) -> float:
+    if deadline is None:
+        return MODEL_CALL_IN_PROGRESS_POLL_SECONDS
+    remaining = max(deadline - time.monotonic(), 0.0)
+    return min(MODEL_CALL_IN_PROGRESS_POLL_SECONDS, remaining)
