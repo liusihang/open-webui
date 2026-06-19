@@ -2339,6 +2339,10 @@ def _agent_runtime_payload(
     if isinstance(model, dict):
         model_meta = model.get('info', {}).get('meta', {}) or {}
 
+    messages = form_data.get('messages')
+    if not isinstance(messages, list):
+        messages = [metadata.get('user_message')] if metadata.get('user_message') else []
+
     return {
         'run_id': run.id,
         'chat_id': metadata.get('chat_id'),
@@ -2363,7 +2367,7 @@ def _agent_runtime_payload(
                 'meta': model_meta,
             }
         ],
-        'messages': [metadata.get('user_message')] if metadata.get('user_message') else [],
+        'messages': messages,
         'metadata': {
             'session_id': metadata.get('session_id'),
             'features': metadata.get('features') or {},
@@ -3239,6 +3243,13 @@ async def stop_tasks_by_chat_id_endpoint(request: Request, chat_id: str, user=De
         if chat is None or (chat.user_id != user.id and user.role != 'admin'):
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=ERROR_MESSAGES.NOT_FOUND)
     result = await stop_item_tasks(request.app.state.redis, chat_id)
+    cancelled_agent_run_ids = await agent_runs.cancel_agent_runs_for_chat(
+        request,
+        chat_id,
+        user=user,
+    )
+    if cancelled_agent_run_ids:
+        result['agent_run_ids'] = cancelled_agent_run_ids
     return result
 
 

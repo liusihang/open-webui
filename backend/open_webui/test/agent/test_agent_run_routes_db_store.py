@@ -112,6 +112,80 @@ async def test_agent_run_routes_use_agent_runs_db_when_no_fake_event_store(
 
 
 @pytest.mark.asyncio
+async def test_agent_run_cancel_marks_cancelled_and_rejects_late_completion(
+    monkeypatch,
+    agent_run_db,
+    app_without_fake_event_store,
+):
+    runtime_cancels = []
+
+    class RuntimeClient:
+        def __init__(self, base_url, service_token=None, timeout=None):
+            self.base_url = base_url
+            self.service_token = service_token
+            self.timeout = timeout
+
+        async def cancel_run(self, run_id):
+            runtime_cancels.append(
+                {
+                    'run_id': run_id,
+                    'base_url': self.base_url,
+                    'service_token': self.service_token,
+                }
+            )
+            return {'run_id': run_id, 'state': 'cancelled', 'cancel_requested': True}
+
+    monkeypatch.setattr(agent_runs, 'AgentRuntimeClient', RuntimeClient, raising=False)
+    app_without_fake_event_store.state.config.AGENT_RUNTIME_BASE_URL = 'http://agent-runtime.test'
+    run = await AgentRuns.create_run(
+        user_id='user-1',
+        chat_id='chat-1',
+        user_message_id='msg-user',
+        assistant_message_id='msg-assistant',
+        leader_model_id='model-a',
+    )
+    await AgentRuns.transition_state(
+        run.id,
+        from_states=['queued'],
+        to_state='running',
+        reason='runtime accepted',
+        payload={'runtime_session_id': 'runtime-session-1'},
+    )
+
+    with TestClient(app_without_fake_event_store) as client:
+        cancel = client.post(f'/api/agent/runs/{run.id}/cancel')
+        late_complete = client.post(
+            f'/api/agent/service/runs/{run.id}/state-transition',
+            json={
+                'run_id': run.id,
+                'from_states': ['finalizing'],
+                'to_state': 'completed',
+                'reason': 'runtime final answer completed',
+                'payload': {},
+                'idempotency_key': f'state:{run.id}:completed',
+            },
+            headers=_service_headers(f'state:{run.id}:completed'),
+        )
+
+    assert cancel.status_code == 200
+    assert cancel.json()['state'] == 'cancelled'
+    assert runtime_cancels == [
+        {
+            'run_id': run.id,
+            'base_url': 'http://agent-runtime.test',
+            'service_token': 'service-token',
+        }
+    ]
+    assert late_complete.status_code == 409
+
+    updated = await AgentRuns.get_run(run.id)
+    assert updated is not None
+    assert updated.state == 'cancelled'
+    events = await AgentRuns.list_events(run.id)
+    assert [event.event_type for event in events] == ['run.cancelled']
+
+
+@pytest.mark.asyncio
 async def test_agent_service_event_callbacks_use_agent_runs_db_without_fake_event_store(
     agent_run_db,
     app_without_fake_event_store,

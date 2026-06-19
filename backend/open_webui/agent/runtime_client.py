@@ -33,6 +33,15 @@ class AgentRuntimeClient:
         if not self.base_url:
             raise AgentRuntimeUnavailable('agent runtime base URL is not configured')
 
+        return await self._post('/v1/openwebui/runs', payload)
+
+    async def cancel_run(self, run_id: str) -> dict[str, Any]:
+        if not self.base_url:
+            raise AgentRuntimeUnavailable('agent runtime base URL is not configured')
+
+        return await self._post(f'/v1/openwebui/runs/{run_id}/cancel', None)
+
+    async def _post(self, path: str, payload: dict[str, Any] | None) -> dict[str, Any]:
         headers = {'Content-Type': 'application/json'}
         if self.service_token:
             headers['Authorization'] = f'Bearer {self.service_token}'
@@ -41,7 +50,7 @@ class AgentRuntimeClient:
         try:
             async with aiohttp.ClientSession(timeout=timeout) as session:
                 async with session.post(
-                    f'{self.base_url}/v1/openwebui/runs',
+                    f'{self.base_url}{path}',
                     json=payload,
                     headers=headers,
                 ) as response:

@@ -18,6 +18,14 @@ logger = logging.getLogger(__name__)
 
 MODEL_CALL_QUEUED_RETRY_ATTEMPTS = 3
 MODEL_CALL_QUEUED_RETRY_DELAY_SECONDS = 0.05
+PROVIDER_CONFIGURATION_UNAVAILABLE_SUMMARY = (
+    "The selected model provider is not available for this Agent Mode run."
+)
+
+
+class ProviderConfigurationUnavailable(RuntimeError):
+    code = "provider_configuration_unavailable"
+    user_summary = PROVIDER_CONFIGURATION_UNAVAILABLE_SUMMARY
 
 
 class RuntimeCallbackClient(Protocol):
@@ -240,7 +248,11 @@ async def _finalize_ordinary_qa(
     payload = {"runtime_session_id": session.runtime_session_id}
     stage = "model-call"
     try:
+        if _finalization_cancelled(session):
+            return
         answer = await _call_leader_model(callback_client, session, request)
+        if _finalization_cancelled(session):
+            return
         stage = "state-transition"
         await callback_client.transition_state(
             run_id=session.run_id,
@@ -253,6 +265,8 @@ async def _finalize_ordinary_qa(
         session.state = "finalizing"
         session.updated_at = time.time()
 
+        if _finalization_cancelled(session):
+            return
         stage = "final-started-event"
         await callback_client.append_event(
             run_id=session.run_id,
@@ -263,6 +277,8 @@ async def _finalize_ordinary_qa(
             participant_id="leader",
             phase="finalizing",
         )
+        if _finalization_cancelled(session):
+            return
         stage = "final-delta"
         await callback_client.append_final_delta(
             run_id=session.run_id,
@@ -273,6 +289,8 @@ async def _finalize_ordinary_qa(
             participant_id="leader",
             payload=payload,
         )
+        if _finalization_cancelled(session):
+            return
         stage = "completed-transition"
         await callback_client.transition_state(
             run_id=session.run_id,
@@ -295,6 +313,8 @@ async def _finalize_ordinary_qa(
         session.state = "completed"
         session.updated_at = time.time()
     except Exception as exc:
+        if _finalization_cancelled(session):
+            return
         logger.exception(
             "Runtime finalization failed during %s for run_id=%s runtime_session_id=%s",
             stage,
@@ -302,6 +322,10 @@ async def _finalize_ordinary_qa(
             session.runtime_session_id,
         )
         await _mark_session_failed(callback_client, session, exc, stage=stage)
+
+
+def _finalization_cancelled(session: RuntimeSession) -> bool:
+    return session.cancel_requested or session.state == "cancelled"
 
 
 async def _call_leader_model(
@@ -328,18 +352,76 @@ async def _call_leader_model(
             )
             break
         except Exception as exc:
-            if attempt >= MODEL_CALL_QUEUED_RETRY_ATTEMPTS or not _is_queued_model_call_rejection(exc):
-                raise
-            logger.info(
-                "OpenWebUI rejected model call while run is queued; retrying "
-                "run_id=%s runtime_session_id=%s attempt=%s",
-                session.run_id,
-                session.runtime_session_id,
-                attempt,
-            )
-            await asyncio.sleep(MODEL_CALL_QUEUED_RETRY_DELAY_SECONDS)
+            if attempt < MODEL_CALL_QUEUED_RETRY_ATTEMPTS and _is_queued_model_call_rejection(exc):
+                logger.info(
+                    "OpenWebUI rejected model call while run is queued; retrying "
+                    "run_id=%s runtime_session_id=%s attempt=%s",
+                    session.run_id,
+                    session.runtime_session_id,
+                    attempt,
+                )
+                await asyncio.sleep(MODEL_CALL_QUEUED_RETRY_DELAY_SECONDS)
+                continue
+
+            provider_error = _provider_configuration_error_from_text(str(exc))
+            if provider_error is not None:
+                raise provider_error from exc
+            raise
+
+    provider_error = _provider_configuration_error_from_model_response(response)
+    if provider_error is not None:
+        raise provider_error
 
     return _extract_model_text(response)
+
+
+def _provider_configuration_error_from_model_response(response: dict[str, Any]) -> Exception | None:
+    text = _diagnostic_text(response)
+    return _provider_configuration_error_from_text(text)
+
+
+def _provider_configuration_error_from_text(text: str) -> Exception | None:
+    normalized = text.lower()
+    has_http_error_context = (
+        "error http" in normalized
+        or "openwebui callback failed" in normalized
+        or "http 502" in normalized
+        or "http 503" in normalized
+    )
+    has_auth_failure = "auth_unavailable" in normalized or "no auth available" in normalized
+    has_unknown_provider = "unknown provider for model" in normalized
+    if has_http_error_context and (has_auth_failure or has_unknown_provider):
+        return ProviderConfigurationUnavailable(_truncate_diagnostic_message(text))
+    return None
+
+
+def _diagnostic_text(value: Any) -> str:
+    parts: list[str] = []
+
+    def collect(item: Any) -> None:
+        if isinstance(item, str):
+            parts.append(item)
+            return
+        if isinstance(item, dict):
+            for nested in item.values():
+                collect(nested)
+            return
+        if isinstance(item, list):
+            for nested in item:
+                collect(nested)
+            return
+        if item is not None:
+            parts.append(str(item))
+
+    collect(value)
+    return " ".join(part for part in parts if part)
+
+
+def _truncate_diagnostic_message(message: str, limit: int = 4000) -> str:
+    message = message.strip()
+    if len(message) <= limit:
+        return message
+    return f"{message[:limit]}... [truncated]"
 
 
 async def _mark_session_failed(
@@ -351,9 +433,11 @@ async def _mark_session_failed(
 ) -> None:
     session.state = "failed"
     session.updated_at = time.time()
+    summary = getattr(exc, "user_summary", "Agent runtime finalization failed.")
     error = {
         "code": getattr(exc, "code", "runtime_finalization_failed"),
         "message": _format_finalization_error_message(exc, stage),
+        "summary": summary,
     }
     try:
         await callback_client.transition_state(
@@ -371,7 +455,7 @@ async def _mark_session_failed(
             run_id=session.run_id,
             idempotency_key=f"evt:{session.runtime_session_id}:run-failed",
             event_type="run.failed",
-            summary="Agent runtime finalization failed.",
+            summary=summary,
             payload={"error": error, "runtime_session_id": session.runtime_session_id},
             participant_id="leader",
             phase="failed",

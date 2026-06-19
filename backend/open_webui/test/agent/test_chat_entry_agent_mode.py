@@ -12,6 +12,7 @@ import pytest
 import pytest_asyncio
 from open_webui.internal.db import Base
 from open_webui.models.agent_runs import AgentRuns
+from open_webui.routers import agent_runs as agent_runs_router
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 main = importlib.import_module('open_webui.main')
@@ -193,6 +194,35 @@ async def test_agent_mode_enabled_creates_run_links_message_and_starts_runtime(
         message_id == 'assistant-msg' and message.get('agent_run_id') == run.id
         for _chat_id, message_id, message in chat_entry_patches.upserts
     )
+
+
+@pytest.mark.asyncio
+async def test_agent_mode_runtime_payload_preserves_chat_completion_context(
+    agent_run_db,
+    chat_entry_patches,
+):
+    request = _request(enable_agent_mode=True)
+    messages = [
+        {'role': 'user', 'content': 'Remember this code: ORCHID-42.'},
+        {'role': 'assistant', 'content': 'I will remember ORCHID-42.'},
+        {'role': 'user', 'content': 'What code did I ask you to remember?'},
+    ]
+    form = _chat_form()
+    form['id'] = 'assistant-current'
+    form['parent_id'] = 'assistant-prev'
+    form['messages'] = messages
+    form['user_message'] = {
+        'id': 'user-msg',
+        'parentId': 'assistant-prev',
+        'childrenIds': [],
+        'role': 'user',
+        'content': 'What code did I ask you to remember?',
+    }
+
+    await main.chat_completion(request, form, _user())
+
+    runtime_payload = chat_entry_patches.runtime_calls[0]
+    assert runtime_payload['messages'] == messages
 
 
 @pytest.mark.asyncio
@@ -383,6 +413,59 @@ async def test_agent_mode_runtime_unavailable_removes_run_tool_registry(
 
     assert response['status'] is False
     assert request.app.state.AGENT_TOOL_REGISTRIES == {}
+
+
+@pytest.mark.asyncio
+async def test_chat_stop_endpoint_cancels_active_agent_runs(
+    monkeypatch,
+    agent_run_db,
+):
+    runtime_cancels = []
+
+    class RuntimeClient:
+        def __init__(self, base_url, service_token=None, timeout=None):
+            self.base_url = base_url
+            self.service_token = service_token
+            self.timeout = timeout
+
+        async def cancel_run(self, run_id):
+            runtime_cancels.append(run_id)
+            return {'run_id': run_id, 'state': 'cancelled', 'cancel_requested': True}
+
+    async def fake_get_chat_by_id(chat_id):
+        return SimpleNamespace(id=chat_id, user_id='user-1')
+
+    async def fake_stop_item_tasks(redis, chat_id):
+        return {'status': True, 'message': f'All tasks for item {chat_id} stopped.'}
+
+    monkeypatch.setattr(agent_runs_router, 'AgentRuntimeClient', RuntimeClient, raising=False)
+    monkeypatch.setattr(main.Chats, 'get_chat_by_id', fake_get_chat_by_id)
+    monkeypatch.setattr(main, 'stop_item_tasks', fake_stop_item_tasks)
+    run = await AgentRuns.create_run(
+        user_id='user-1',
+        chat_id='chat-1',
+        user_message_id='msg-user',
+        assistant_message_id='assistant-msg',
+        leader_model_id='model-a',
+    )
+    await AgentRuns.transition_state(
+        run.id,
+        from_states=['queued'],
+        to_state='running',
+        reason='runtime accepted',
+        payload={'runtime_session_id': 'runtime-session-1'},
+    )
+
+    response = await main.stop_tasks_by_chat_id_endpoint(_request(enable_agent_mode=True), 'chat-1', _user())
+
+    assert response['status'] is True
+    assert response['agent_run_ids'] == [run.id]
+    assert runtime_cancels == [run.id]
+    updated = await AgentRuns.get_run(run.id)
+    assert updated is not None
+    assert updated.state == 'cancelled'
+    events = await AgentRuns.list_events(run.id)
+    assert [event.event_type for event in events] == ['run.cancelled']
 
 
 @pytest.mark.asyncio

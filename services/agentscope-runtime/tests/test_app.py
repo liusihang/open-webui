@@ -291,6 +291,63 @@ async def test_run_start_finalizes_ordinary_qa_through_model_and_final_delta_cal
 
 
 @pytest.mark.asyncio
+async def test_cancel_during_model_call_prevents_finalization_callbacks() -> None:
+    class BlockingModelClient(RecordingOpenWebUIClient):
+        def __init__(self) -> None:
+            super().__init__()
+            self.model_call_started = asyncio.Event()
+            self.release_model_call = asyncio.Event()
+
+        async def call_model(self, **kwargs: object) -> dict:
+            await super().call_model(**kwargs)  # type: ignore[arg-type]
+            self.model_call_started.set()
+            await self.release_model_call.wait()
+            return {
+                "status": "success",
+                "model": kwargs["model"],
+                "response": {"content": "late final answer"},
+            }
+
+    openwebui_client = BlockingModelClient()
+    async with make_client(openwebui_client, auto_finalize_ordinary_qa=True) as client:
+        response = await client.post(
+            "/v1/openwebui/runs",
+            headers={"Authorization": f"Bearer {SERVICE_TOKEN}"},
+            json={
+                "run_id": "run-cancel-during-model",
+                "chat_id": "chat-1",
+                "user_message_id": "msg-user",
+                "assistant_message_id": "msg-assistant",
+                "leader_model_id": "model-a",
+                "messages": [{"role": "user", "content": "hello"}],
+            },
+        )
+        assert response.status_code == 202
+        await asyncio.wait_for(openwebui_client.model_call_started.wait(), timeout=1)
+
+        cancel = await client.post(
+            "/v1/openwebui/runs/run-cancel-during-model/cancel",
+            headers={"Authorization": f"Bearer {SERVICE_TOKEN}"},
+        )
+        assert cancel.status_code == 200
+        assert cancel.json()["state"] == "cancelled"
+
+        openwebui_client.release_model_call.set()
+        await asyncio.sleep(0.05)
+        status = await client.get(
+            "/v1/openwebui/runs/run-cancel-during-model/status",
+            headers={"Authorization": f"Bearer {SERVICE_TOKEN}"},
+        )
+
+    assert status.status_code == 200
+    assert status.json()["state"] == "cancelled"
+    assert status.json()["cancel_requested"] is True
+    assert openwebui_client.final_deltas == []
+    assert openwebui_client.state_transitions == []
+    assert [event["event_type"] for event in openwebui_client.events] == ["run.running"]
+
+
+@pytest.mark.asyncio
 async def test_run_start_retries_queued_model_call_before_finalization_failure() -> None:
     class QueuedOnceModelClient(RecordingOpenWebUIClient):
         async def call_model(self, **kwargs: object) -> dict:
@@ -343,6 +400,102 @@ async def test_run_start_retries_queued_model_call_before_finalization_failure()
         "run.completed",
     ]
     assert not any(event["event_type"] == "run.failed" for event in openwebui_client.events)
+
+
+@pytest.mark.asyncio
+async def test_provider_auth_error_text_from_model_call_fails_run_without_final_answer() -> None:
+    class ProviderAuthErrorAsContentClient(RecordingOpenWebUIClient):
+        async def call_model(self, **kwargs: object) -> dict:
+            await super().call_model(**kwargs)  # type: ignore[arg-type]
+            return {
+                "status": "success",
+                "model": kwargs["model"],
+                "response": {
+                    "content": (
+                        "Error HTTP 503 auth_unavailable: no auth available for "
+                        "model claude-3-5-haiku-latest\nTraceback: provider stack noise"
+                    )
+                },
+            }
+
+    openwebui_client = ProviderAuthErrorAsContentClient()
+    async with make_client(openwebui_client, auto_finalize_ordinary_qa=True) as client:
+        response = await client.post(
+            "/v1/openwebui/runs",
+            headers={"Authorization": f"Bearer {SERVICE_TOKEN}"},
+            json={
+                "run_id": "run-provider-auth",
+                "chat_id": "chat-1",
+                "leader_model_id": "claude-3-5-haiku-latest",
+                "messages": [{"role": "user", "content": "hello"}],
+            },
+        )
+
+        assert response.status_code == 202
+        for _ in range(20):
+            status = await client.get(
+                "/v1/openwebui/runs/run-provider-auth/status",
+                headers={"Authorization": f"Bearer {SERVICE_TOKEN}"},
+            )
+            if status.json()["state"] == "failed":
+                break
+            await asyncio.sleep(0.01)
+
+    assert status.json()["state"] == "failed"
+    assert openwebui_client.final_deltas == []
+    assert [transition["to_state"] for transition in openwebui_client.state_transitions] == ["failed"]
+
+    failed_event = next(event for event in openwebui_client.events if event["event_type"] == "run.failed")
+    error = failed_event["payload"]["error"]
+    assert error["code"] == "provider_configuration_unavailable"
+    assert error["summary"] == "The selected model provider is not available for this Agent Mode run."
+    assert "auth_unavailable" in error["message"]
+    assert "Traceback: provider stack noise" in error["message"]
+    assert "Traceback: provider stack noise" not in failed_event["summary"]
+
+
+@pytest.mark.asyncio
+async def test_unknown_provider_callback_failure_has_user_summary_and_diagnostics() -> None:
+    class UnknownProviderModelClient(RecordingOpenWebUIClient):
+        async def call_model(self, **kwargs: object) -> dict:
+            await super().call_model(**kwargs)  # type: ignore[arg-type]
+            raise RuntimeError(
+                "OpenWebUI callback failed with status 502: "
+                '{"detail":{"code":"model_authority_error","message":'
+                '"HTTP 502 unknown provider for model gpt-5-codex-mini"}}'
+            )
+
+    openwebui_client = UnknownProviderModelClient()
+    async with make_client(openwebui_client, auto_finalize_ordinary_qa=True) as client:
+        response = await client.post(
+            "/v1/openwebui/runs",
+            headers={"Authorization": f"Bearer {SERVICE_TOKEN}"},
+            json={
+                "run_id": "run-unknown-provider",
+                "chat_id": "chat-1",
+                "leader_model_id": "gpt-5-codex-mini",
+                "messages": [{"role": "user", "content": "hello"}],
+            },
+        )
+
+        assert response.status_code == 202
+        for _ in range(20):
+            status = await client.get(
+                "/v1/openwebui/runs/run-unknown-provider/status",
+                headers={"Authorization": f"Bearer {SERVICE_TOKEN}"},
+            )
+            if status.json()["state"] == "failed":
+                break
+            await asyncio.sleep(0.01)
+
+    assert status.json()["state"] == "failed"
+    assert openwebui_client.final_deltas == []
+
+    failed_event = next(event for event in openwebui_client.events if event["event_type"] == "run.failed")
+    error = failed_event["payload"]["error"]
+    assert error["code"] == "provider_configuration_unavailable"
+    assert error["summary"] == "The selected model provider is not available for this Agent Mode run."
+    assert "unknown provider for model gpt-5-codex-mini" in error["message"]
 
 
 @pytest.mark.asyncio

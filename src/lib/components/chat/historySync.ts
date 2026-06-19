@@ -238,10 +238,12 @@ export const mergeHistorySnapshot = (
 		const previousContent =
 			typeof existingMessage.content === 'string' ? existingMessage.content : '';
 		const nextContent = typeof mergedMessage.content === 'string' ? mergedMessage.content : '';
+		const agentRunIdChanged = existingMessage.agent_run_id !== mergedMessage.agent_run_id;
 
 		if (
 			previousContent !== nextContent ||
 			existingMessage.done !== mergedMessage.done ||
+			agentRunIdChanged ||
 			JSON.stringify(existingMessage.output ?? null) !==
 				JSON.stringify(mergedMessage.output ?? null) ||
 			JSON.stringify(existingMessage.statusHistory ?? null) !==
@@ -266,9 +268,13 @@ export const mergeHistorySnapshot = (
 				hasAssistantProgress = true;
 			}
 
-			if (mergedMessage.done === true) {
+			if (mergedMessage.done === true || agentRunIdChanged) {
 				hasRenderableAssistantUpdate = true;
 			}
+		}
+
+		if (mergedMessage.role === 'assistant' && agentRunIdChanged && mergedMessage.agent_run_id) {
+			hasRenderableAssistantUpdate = true;
 		}
 
 		mergedHistory.messages[incomingMessage.id] = mergedMessage;
