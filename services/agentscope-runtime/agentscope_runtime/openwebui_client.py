@@ -22,10 +22,12 @@ class OpenWebUIClient:
         base_url: str,
         service_token: str,
         timeout: float = 10.0,
+        model_call_timeout: float = 90.0,
     ) -> None:
         self._base_url = base_url.rstrip("/")
         self._service_token = service_token
         self._timeout = timeout
+        self._model_call_timeout = model_call_timeout
 
     async def append_event(
         self,
@@ -186,7 +188,12 @@ class OpenWebUIClient:
             metadata=metadata or {},
         )
         url = f"{self._base_url}/api/agent/service/runs/{run_id}/model-call"
-        return await self._post_callback(url, idempotency_key, body.model_dump(mode="json"))
+        return await self._post_callback(
+            url,
+            idempotency_key,
+            body.model_dump(mode="json"),
+            timeout=httpx.Timeout(self._model_call_timeout, connect=self._timeout),
+        )
 
     async def call_tool(
         self,
@@ -214,13 +221,14 @@ class OpenWebUIClient:
         url: str,
         idempotency_key: str,
         body: dict[str, Any],
+        timeout: float | httpx.Timeout | None = None,
     ) -> dict[str, Any]:
         headers = {
             "Authorization": f"Bearer {self._service_token}",
             "X-Agent-Idempotency-Key": idempotency_key,
         }
 
-        async with httpx.AsyncClient(timeout=self._timeout) as client:
+        async with httpx.AsyncClient(timeout=timeout or self._timeout) as client:
             response = await client.post(url, headers=headers, json=body)
 
         if response.is_error:
