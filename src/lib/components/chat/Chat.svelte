@@ -120,7 +120,10 @@
 	import Sidebar from '../icons/Sidebar.svelte';
 	import Image from '../common/Image.svelte';
 	import { getBanners } from '$lib/apis/configs';
-	import { shouldApplySocketContentEvent } from '$lib/components/chat/historySync';
+	import {
+		prepareLoadedChatHistory,
+		shouldApplySocketContentEvent
+	} from '$lib/components/chat/historySync';
 
 	export let chatIdProp = '';
 
@@ -184,12 +187,12 @@
 
 	let chatTasks = [];
 
-	let history = {
+	let history: any = {
 		messages: {},
 		currentId: null
 	};
 
-	let taskIds = null;
+	let taskIds: any = null;
 
 	// Chat Input
 	let prompt = '';
@@ -1472,14 +1475,14 @@
 
 				oldSelectedModelIds = structuredClone(selectedModels);
 
-				history =
+				const loadedHistory =
 					(chatContent?.history ?? undefined) !== undefined
 						? chatContent.history
 						: convertMessagesToHistory(chatContent.messages);
 
 				// Sanitize history: repair orphaned references and structurally-malformed
 				// nodes from failed regenerations (#24424, #24157, #20474)
-				sanitizeHistory(history);
+				sanitizeHistory(loadedHistory);
 
 				chatTitle.set(chatContent.title);
 
@@ -1490,40 +1493,13 @@
 				chatTasks = chat?.tasks ?? [];
 
 				autoScroll = true;
-				await tick();
 
-				// Mark all non-current assistant messages as done
-				if (history.currentId) {
-					for (const message of Object.values(history.messages)) {
-						if (
-							message &&
-							message.role === 'assistant' &&
-							message.id !== history.currentId &&
-							message.done !== false
-						) {
-							message.done = true;
-						}
-					}
-				}
-
-				// Reconcile active tasks with message state:
-				// If the response is already done, remaining tasks are just background
-				// work (follow-ups, title gen) that shouldn't block the input.
 				const pendingTaskIds = await getTaskIdsByChatId(localStorage.token, $chatId)
 					.then((res) => res?.task_ids ?? [])
 					.catch(() => []);
-				const currentMessage = history.currentId ? history.messages[history.currentId] : null;
-				const responseComplete = currentMessage?.role === 'assistant' && currentMessage?.done;
-
-				if (pendingTaskIds.length > 0 && !responseComplete) {
-					taskIds = pendingTaskIds;
-				} else {
-					taskIds = null;
-					// No active tasks and message incomplete → generation was interrupted
-					if (currentMessage?.role === 'assistant' && !currentMessage.done) {
-						currentMessage.done = true;
-					}
-				}
+				const loadedHistoryState = prepareLoadedChatHistory(history, loadedHistory, pendingTaskIds);
+				history = loadedHistoryState.history;
+				taskIds = loadedHistoryState.taskIds;
 
 				await tick();
 

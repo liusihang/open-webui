@@ -41,6 +41,10 @@ type ChatHistory = {
 	messages: Record<string, ChatMessage>;
 };
 
+type LoadedChatHistoryResult = ReturnType<typeof mergeHistorySnapshot> & {
+	taskIds: string[] | null;
+};
+
 const SOCKET_INCREMENTAL_CONTENT_EVENTS = new Set([
 	'chat:completion',
 	'chat:message:delta',
@@ -290,5 +294,72 @@ export const mergeHistorySnapshot = (
 		hasAssistantProgress,
 		hasRenderableAssistantUpdate,
 		changed
+	};
+};
+
+const createEmptyHistory = (
+	latestHistory: Partial<ChatHistory> | null | undefined
+): ChatHistory => ({
+	currentId: latestHistory?.currentId ?? null,
+	messages: {}
+});
+
+const shouldMergeWithCurrentHistory = (
+	currentHistory: ChatHistory,
+	latestHistory: Partial<ChatHistory> | null | undefined
+) => {
+	if (!currentHistory.currentId || !latestHistory?.currentId) {
+		return false;
+	}
+
+	return Boolean(currentHistory.messages?.[latestHistory.currentId]);
+};
+
+export const prepareLoadedChatHistory = (
+	currentHistory: ChatHistory,
+	latestHistory: Partial<ChatHistory>,
+	pendingTaskIds: string[]
+): LoadedChatHistoryResult => {
+	const baseHistory = shouldMergeWithCurrentHistory(currentHistory, latestHistory)
+		? currentHistory
+		: createEmptyHistory(latestHistory);
+	const snapshot = mergeHistorySnapshot(baseHistory, latestHistory);
+
+	if (snapshot.history.currentId) {
+		for (const message of Object.values(snapshot.history.messages)) {
+			if (
+				message &&
+				message.role === 'assistant' &&
+				message.id !== snapshot.history.currentId &&
+				message.done !== false
+			) {
+				message.done = true;
+			}
+		}
+	}
+
+	const currentMessage = snapshot.history.currentId
+		? snapshot.history.messages[snapshot.history.currentId]
+		: null;
+	const responseComplete = currentMessage?.role === 'assistant' && currentMessage?.done;
+
+	if (pendingTaskIds.length > 0 && !responseComplete) {
+		return {
+			...snapshot,
+			taskIds: pendingTaskIds
+		};
+	}
+
+	if (
+		currentMessage?.role === 'assistant' &&
+		!currentMessage.done &&
+		!currentMessage.agent_run_id
+	) {
+		currentMessage.done = true;
+	}
+
+	return {
+		...snapshot,
+		taskIds: null
 	};
 };

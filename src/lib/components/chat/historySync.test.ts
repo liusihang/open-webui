@@ -3,6 +3,7 @@ import { describe, expect, it } from 'vitest';
 import {
 	mergeHistorySnapshot,
 	mergeServerMessage,
+	prepareLoadedChatHistory,
 	shouldApplySocketContentEvent
 } from './historySync';
 import { foldAgentRunEvents } from './AgentEvents/eventFold';
@@ -307,6 +308,31 @@ describe('mergeHistorySnapshot', () => {
 		expect(eventModel.groups).toEqual([]);
 		expect(eventModel.debugGroups.map((group) => group.kind)).toEqual(['run', 'run']);
 		expect(eventModel.finalAnswer?.content).toBe('Recovered final answer.');
+	});
+});
+
+describe('prepareLoadedChatHistory', () => {
+	it('keeps an in-flight Agent Mode assistant message recoverable when legacy task ids are absent', () => {
+		const agentRunId = '817af0ee-e301-41e1-aeab-aedd9e1fb354';
+		const latestHistory = {
+			currentId: 'assistant-msg',
+			messages: {
+				'assistant-msg': {
+					id: 'assistant-msg',
+					role: 'assistant',
+					content: '',
+					done: false,
+					agent_run_id: agentRunId
+				}
+			}
+		};
+
+		const result = prepareLoadedChatHistory({ currentId: null, messages: {} }, latestHistory, []);
+
+		expect(result.history.messages['assistant-msg'].agent_run_id).toBe(agentRunId);
+		expect(result.history.messages['assistant-msg'].done).toBe(false);
+		expect(result.taskIds).toBeNull();
+		expect(result.hasRenderableAssistantUpdate).toBe(true);
 	});
 });
 
