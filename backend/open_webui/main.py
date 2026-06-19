@@ -2287,6 +2287,21 @@ def _first_assistant_message_id(message_ids: dict | None) -> str | None:
     return None
 
 
+def _assistant_message_id_for_model(message_ids: dict | None, model_id: str | None) -> str | None:
+    if not message_ids:
+        return None
+    if model_id and message_ids.get(model_id):
+        return message_ids[model_id]
+
+    fallback_message_id = _first_assistant_message_id(message_ids)
+    if fallback_message_id:
+        log.warning(
+            'Agent Mode could not find assistant message id for leader model=%s; falling back to first assistant message id',
+            model_id,
+        )
+    return fallback_message_id
+
+
 def _is_agent_mode_product_chat(request: Request, metadata: dict, message_ids: dict | None) -> bool:
     if getattr(request.state, 'agent_internal_model_call', False):
         return False
@@ -2393,7 +2408,8 @@ async def _start_agent_mode_chat(
     message_ids: dict,
     model: dict,
 ) -> dict:
-    assistant_message_id = _first_assistant_message_id(message_ids)
+    leader_model_id = form_data.get('model') or next(iter(message_ids.keys()))
+    assistant_message_id = _assistant_message_id_for_model(message_ids, leader_model_id)
     if not assistant_message_id:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
@@ -2405,8 +2421,6 @@ async def _start_agent_mode_chat(
 
     form_data, metadata, _events = await process_chat_payload(request, form_data, user, metadata, model)
     tool_access_envelope, tool_registry = build_tool_access_envelope(metadata.get('tools') or {})
-
-    leader_model_id = form_data.get('model') or next(iter(message_ids.keys()))
 
     budget = _agent_run_budget(request.app.state.config)
     run = await AgentRuns.create_run(
@@ -3316,6 +3330,7 @@ async def get_app_config(request: Request):
                     'enable_google_drive_integration': app.state.config.ENABLE_GOOGLE_DRIVE_INTEGRATION,
                     'enable_onedrive_integration': app.state.config.ENABLE_ONEDRIVE_INTEGRATION,
                     'enable_memories': app.state.config.ENABLE_MEMORIES,
+                    'enable_agent_mode': app.state.config.ENABLE_AGENT_MODE,
                     'enable_agent_memory': app.state.config.ENABLE_AGENT_MEMORY,
                     **(
                         {

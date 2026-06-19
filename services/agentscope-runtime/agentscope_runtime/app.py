@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 import os
 import secrets
 import time
@@ -11,6 +12,8 @@ from fastapi import Depends, FastAPI, Header, HTTPException, status
 
 from agentscope_runtime.openwebui_client import OpenWebUIClient
 from agentscope_runtime.schemas import RunStartRequest, RunStartResponse, RunStatusResponse
+
+logger = logging.getLogger(__name__)
 
 
 class RuntimeCallbackClient(Protocol):
@@ -231,8 +234,10 @@ async def _finalize_ordinary_qa(
     request: RunStartRequest,
 ) -> None:
     payload = {"runtime_session_id": session.runtime_session_id}
+    stage = "model-call"
     try:
         answer = await _call_leader_model(callback_client, session, request)
+        stage = "state-transition"
         await callback_client.transition_state(
             run_id=session.run_id,
             idempotency_key=f"state:{session.run_id}:finalizing",
@@ -244,6 +249,7 @@ async def _finalize_ordinary_qa(
         session.state = "finalizing"
         session.updated_at = time.time()
 
+        stage = "final-started-event"
         await callback_client.append_event(
             run_id=session.run_id,
             idempotency_key=f"evt:{session.runtime_session_id}:final-started",
@@ -253,6 +259,7 @@ async def _finalize_ordinary_qa(
             participant_id="leader",
             phase="finalizing",
         )
+        stage = "final-delta"
         await callback_client.append_final_delta(
             run_id=session.run_id,
             idempotency_key=f"final:{session.run_id}:answer:0",
@@ -262,6 +269,7 @@ async def _finalize_ordinary_qa(
             participant_id="leader",
             payload=payload,
         )
+        stage = "completed-transition"
         await callback_client.transition_state(
             run_id=session.run_id,
             idempotency_key=f"state:{session.run_id}:completed",
@@ -270,6 +278,7 @@ async def _finalize_ordinary_qa(
             reason="runtime final answer completed",
             payload=payload,
         )
+        stage = "completed-event"
         await callback_client.append_event(
             run_id=session.run_id,
             idempotency_key=f"evt:{session.runtime_session_id}:run-completed",
@@ -282,7 +291,13 @@ async def _finalize_ordinary_qa(
         session.state = "completed"
         session.updated_at = time.time()
     except Exception as exc:
-        await _mark_session_failed(callback_client, session, exc)
+        logger.exception(
+            "Runtime finalization failed during %s for run_id=%s runtime_session_id=%s",
+            stage,
+            session.run_id,
+            session.runtime_session_id,
+        )
+        await _mark_session_failed(callback_client, session, exc, stage=stage)
 
 
 async def _call_leader_model(
@@ -312,12 +327,14 @@ async def _mark_session_failed(
     callback_client: RuntimeCallbackClient,
     session: RuntimeSession,
     exc: Exception,
+    *,
+    stage: str = "unknown",
 ) -> None:
     session.state = "failed"
     session.updated_at = time.time()
     error = {
         "code": getattr(exc, "code", "runtime_finalization_failed"),
-        "message": str(exc),
+        "message": _format_finalization_error_message(exc, stage),
     }
     try:
         await callback_client.transition_state(
@@ -342,6 +359,14 @@ async def _mark_session_failed(
         )
     except Exception:
         pass
+
+
+def _format_finalization_error_message(exc: Exception, stage: str) -> str:
+    exc_type = type(exc).__name__
+    detail = str(exc).strip()
+    if detail:
+        return f"runtime finalization failed during {stage}: {exc_type}: {detail}"
+    return f"runtime finalization failed during {stage}: {exc_type}"
 
 
 def _extract_model_text(response: dict[str, Any]) -> str:

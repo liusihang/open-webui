@@ -106,6 +106,7 @@
 		resolveImageGenerationFeature,
 		shouldEnableImageGenerationByDefault
 	} from '$lib/components/chat/defaultFeatures';
+	import { resolveAgentModeRequestModels } from '$lib/components/chat/agentModeRequest';
 	import Messages from '$lib/components/chat/Messages.svelte';
 	import Navbar from '$lib/components/chat/Navbar.svelte';
 	import ChatControls from './ChatControls.svelte';
@@ -2020,7 +2021,7 @@
 			content: inputContent,
 			files: _files.length > 0 ? _files : undefined,
 			timestamp: Math.floor(Date.now() / 1000), // Unix epoch
-			models: selectedModels
+			models: resolveAgentModeRequestModels(selectedModels, $config)
 		};
 
 		// Add message to history and Set currentId to messageId
@@ -2164,6 +2165,7 @@
 			: atSelectedModel !== undefined
 				? [atSelectedModel.id]
 				: selectedModels;
+		selectedModelIds = resolveAgentModeRequestModels(selectedModelIds, $config);
 
 		// Create response messages for each selected model
 		// Build message_ids map: {model_id: assistant_message_id}

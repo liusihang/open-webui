@@ -136,6 +136,8 @@ def test_agent_mode_rollout_config_is_defined_and_assigned_to_app_config():
         assert symbol in main_text
         assert f'app.state.config.{symbol} = {symbol}' in main_text
 
+    assert "'enable_agent_mode': app.state.config.ENABLE_AGENT_MODE" in main_text
+
 
 def test_agent_mode_routers_are_mounted_on_main_app():
     paths = {getattr(route, 'path', '') for route in main.app.routes}
@@ -189,6 +191,53 @@ async def test_agent_mode_enabled_creates_run_links_message_and_starts_runtime(
     ]
     assert any(
         message_id == 'assistant-msg' and message.get('agent_run_id') == run.id
+        for _chat_id, message_id, message in chat_entry_patches.upserts
+    )
+
+
+@pytest.mark.asyncio
+async def test_agent_mode_multimodel_binds_current_model_assistant_message(
+    agent_run_db,
+    chat_entry_patches,
+):
+    request = _request(enable_agent_mode=True)
+    form = _chat_form()
+    form['message_ids'] = {
+        'comparison-model': 'assistant-comparison',
+        'model-a': 'assistant-current',
+    }
+
+    response = await main.chat_completion(request, form, _user())
+
+    runs = await AgentRuns.list_runs_by_chat('chat-1', 'user-1')
+    assert len(runs) == 1
+    run = runs[0]
+    assert run.assistant_message_id == 'assistant-current'
+    assert run.leader_model_id == 'model-a'
+    assert run.participants == [
+        {
+            'id': 'leader',
+            'role': 'leader',
+            'model_id': 'model-a',
+        }
+    ]
+    assert response['agent_run_id'] == run.id
+    runtime_payload = chat_entry_patches.runtime_calls[0]
+    assert runtime_payload['assistant_message_id'] == 'assistant-current'
+    assert runtime_payload['leader_model_id'] == 'model-a'
+    assert runtime_payload['model_catalog'] == [
+        {
+            'id': 'model-a',
+            'role': 'leader',
+            'meta': {},
+        }
+    ]
+    assert any(
+        message_id == 'assistant-current' and message.get('agent_run_id') == run.id
+        for _chat_id, message_id, message in chat_entry_patches.upserts
+    )
+    assert all(
+        message_id != 'assistant-comparison' or message.get('agent_run_id') != run.id
         for _chat_id, message_id, message in chat_entry_patches.upserts
     )
 

@@ -1,4 +1,5 @@
 import asyncio
+import logging
 
 import httpx
 import pytest
@@ -287,6 +288,47 @@ async def test_run_start_finalizes_ordinary_qa_through_model_and_final_delta_cal
     ]
     assert openwebui_client.events[1]["phase"] == "finalizing"
     assert openwebui_client.events[2]["phase"] == "completed"
+
+
+@pytest.mark.asyncio
+async def test_run_start_finalization_failure_keeps_diagnostic_message_and_traceback(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    class EmptyMessageModelFailureClient(RecordingOpenWebUIClient):
+        async def call_model(self, **kwargs: object) -> dict:
+            await super().call_model(**kwargs)  # type: ignore[arg-type]
+            raise Exception()
+
+    openwebui_client = EmptyMessageModelFailureClient()
+    with caplog.at_level(logging.ERROR, logger="agentscope_runtime.app"):
+        async with make_client(openwebui_client, auto_finalize_ordinary_qa=True) as client:
+            response = await client.post(
+                "/v1/openwebui/runs",
+                headers={"Authorization": f"Bearer {SERVICE_TOKEN}"},
+                json={
+                    "run_id": "run-final-empty-error",
+                    "chat_id": "chat-1",
+                    "leader_model_id": "model-a",
+                    "messages": [{"role": "user", "content": "hello"}],
+                },
+            )
+
+            assert response.status_code == 202
+            for _ in range(20):
+                status = await client.get(
+                    "/v1/openwebui/runs/run-final-empty-error/status",
+                    headers={"Authorization": f"Bearer {SERVICE_TOKEN}"},
+                )
+                if status.json()["state"] == "failed":
+                    break
+                await asyncio.sleep(0.01)
+
+    failed_event = next(event for event in openwebui_client.events if event["event_type"] == "run.failed")
+    message = failed_event["payload"]["error"]["message"]
+    assert message
+    assert "runtime finalization failed during model-call" in message
+    assert "Exception" in message
+    assert any(record.exc_info for record in caplog.records)
 
 
 @pytest.mark.asyncio
