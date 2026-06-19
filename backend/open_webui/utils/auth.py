@@ -288,6 +288,25 @@ def get_http_authorization_cred(auth_header: str | None):
         return None
 
 
+def get_effective_request_token(request: Request) -> str | None:
+    """Return the token source that browser-authenticated requests use."""
+    headers = getattr(request, 'headers', {}) or {}
+    auth_header = headers.get('Authorization') or headers.get('authorization')
+    auth_token = get_http_authorization_cred(auth_header)
+    if auth_token is not None and auth_token.scheme.lower() == 'bearer':
+        return auth_token.credentials
+
+    cookies = getattr(request, 'cookies', {}) or {}
+    if 'token' in cookies:
+        return cookies.get('token')
+
+    state_token = getattr(getattr(request, 'state', None), 'token', None)
+    if state_token:
+        return getattr(state_token, 'credentials', None)
+
+    return None
+
+
 async def get_current_user(
     request: Request,
     response: Response,

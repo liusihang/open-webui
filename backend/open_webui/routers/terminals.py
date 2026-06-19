@@ -20,7 +20,7 @@ from open_webui.env import AIOHTTP_CLIENT_SESSION_SSL
 from open_webui.models.groups import Groups
 from open_webui.models.users import Users
 from open_webui.utils.access_control import has_connection_access
-from open_webui.utils.auth import get_verified_user
+from open_webui.utils.auth import get_effective_request_token, get_verified_user
 
 log = logging.getLogger(__name__)
 
@@ -124,7 +124,9 @@ async def proxy_terminal(
         headers['Authorization'] = f'Bearer {connection.get("key", "")}'
     elif auth_type == 'session':
         cookies = request.cookies
-        headers['Authorization'] = f'Bearer {request.state.token.credentials}'
+        token = get_effective_request_token(request)
+        if token:
+            headers['Authorization'] = f'Bearer {token}'
     elif auth_type == 'system_oauth':
         cookies = request.cookies
         oauth_token = request.headers.get('x-oauth-access-token', '')
