@@ -536,6 +536,72 @@ async def test_run_start_with_tool_envelope_drives_tool_artifact_and_final_lifec
 
 
 @pytest.mark.asyncio
+async def test_general_agent_finalizes_with_code_interpreter_system_pyodide_message() -> None:
+    openwebui_client = RecordingOpenWebUIClient()
+    openwebui_client.model_responses = [
+        {
+            "status": "success",
+            "response": {"content": "I can use the code interpreter when needed."},
+        }
+    ]
+
+    async with make_client(openwebui_client, auto_finalize_ordinary_qa=True) as client:
+        response = await client.post(
+            "/v1/openwebui/runs",
+            headers={"Authorization": f"Bearer {SERVICE_TOKEN}"},
+            json={
+                "run_id": "run-code-interpreter-system",
+                "chat_id": "chat-1",
+                "leader_model_id": "model-a",
+                "messages": [
+                    {
+                        "role": "system",
+                        "name": "system",
+                        "content": "##### Pyodide Environment\nPython packages are available in-browser.",
+                    },
+                    {"role": "user", "content": "Use code if it helps, then answer."},
+                ],
+                "tool_access_envelope": {
+                    "tools": [
+                        {
+                            "id": "tool:code_interpreter:main:run_python",
+                            "name": "run_python",
+                            "type": "code_interpreter",
+                            "schema": {
+                                "name": "run_python",
+                                "description": "Run Python code in Pyodide.",
+                                "parameters": {
+                                    "type": "object",
+                                    "properties": {"code": {"type": "string"}},
+                                    "required": ["code"],
+                                },
+                            },
+                        }
+                    ]
+                },
+            },
+        )
+
+        assert response.status_code == 202
+        for _ in range(40):
+            status = await client.get(
+                "/v1/openwebui/runs/run-code-interpreter-system/status",
+                headers={"Authorization": f"Bearer {SERVICE_TOKEN}"},
+            )
+            if status.json()["state"] in {"completed", "failed"}:
+                break
+            await asyncio.sleep(0.01)
+
+    assert status.json()["state"] == "completed"
+    model_messages = openwebui_client.model_calls[0]["messages"]
+    assert [message["role"] for message in model_messages] == ["system", "user"]
+    assert "##### Pyodide Environment" in model_messages[0]["content"][0]["text"]
+    assert model_messages[1]["content"][0]["text"] == "Use code if it helps, then answer."
+    assert openwebui_client.final_deltas[0]["delta"] == "I can use the code interpreter when needed."
+    assert not any(event["event_type"] == "run.failed" for event in openwebui_client.events)
+
+
+@pytest.mark.asyncio
 async def test_create_subagent_tool_emits_subagent_events_and_integrates_result() -> None:
     openwebui_client = RecordingOpenWebUIClient()
     openwebui_client.model_responses = [

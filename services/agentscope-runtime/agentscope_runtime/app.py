@@ -652,24 +652,32 @@ def _request_messages_to_msgs(request: RunStartRequest) -> list[Msg]:
         if not isinstance(message, dict):
             continue
         role = str(message.get("role") or "user")
-        if role not in {"user", "assistant", "system"}:
+        if role == "system":
+            continue
+        if role not in {"user", "assistant"}:
             role = "user"
         name = str(message.get("name") or role)
-        content = message.get("content", "")
-        if isinstance(content, str):
-            blocks = [TextBlock(text=content)]
-        elif isinstance(content, list):
-            blocks = [
-                TextBlock(text=str(item.get("text", "")))
-                for item in content
-                if isinstance(item, dict) and item.get("type", "text") == "text"
-            ]
-        else:
-            blocks = [TextBlock(text=str(content))]
+        blocks = _message_content_text_blocks(message.get("content", ""))
         msgs.append(Msg(name=name, role=role, content=blocks))
     if msgs:
         return msgs
     return [UserMsg(name="user", content="")]
+
+
+def _message_content_text_blocks(content: Any) -> list[TextBlock]:
+    if isinstance(content, str):
+        return [TextBlock(text=content)]
+    if isinstance(content, list):
+        return [
+            TextBlock(text=str(item.get("text", "")))
+            for item in content
+            if isinstance(item, dict) and item.get("type", "text") == "text"
+        ]
+    return [TextBlock(text=str(content))]
+
+
+def _message_content_text(content: Any) -> str:
+    return "".join(block.text for block in _message_content_text_blocks(content)).strip()
 
 
 def _msg_text(msg: Msg) -> str:
@@ -685,11 +693,20 @@ def _msg_text(msg: Msg) -> str:
 
 
 def _leader_system_prompt(request: RunStartRequest) -> str:
-    return (
+    prompt = (
         "You are the leader agent for an OpenWebUI Agent Mode run. "
         "Use the available tools and subagents when they are useful, then "
         "respond with a concise final answer for the user."
     )
+    system_fragments = [
+        _message_content_text(message.get("content", ""))
+        for message in request.messages
+        if isinstance(message, dict) and str(message.get("role") or "") == "system"
+    ]
+    system_fragments = [fragment for fragment in system_fragments if fragment]
+    if not system_fragments:
+        return prompt
+    return "\n\n".join([prompt, *system_fragments])
 
 
 def _subagent_system_prompt(context: SubagentExecutionContext) -> str:
