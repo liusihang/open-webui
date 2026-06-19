@@ -10,10 +10,10 @@ import pytest
 import pytest_asyncio
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
-from open_webui.routers import agent_service as agent_service_router
 from open_webui.internal.db import Base
 from open_webui.models.agent_runs import AgentArtifact, AgentRun, AgentRunEvent, AgentRunOperation, AgentRuns
 from open_webui.routers import agent_runs, agent_service
+from open_webui.routers import agent_service as agent_service_router
 from open_webui.utils.auth import get_verified_user
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
@@ -528,3 +528,79 @@ async def test_agent_service_callbacks_require_service_credential(
     assert event_response.json()['detail'] == 'service token required'
     assert tool_response.status_code == 401
     assert tool_response.json()['detail'] == 'service token required'
+
+
+@pytest.mark.asyncio
+async def test_agent_service_tool_callback_rebuilds_missing_registry_from_run_snapshot(
+    monkeypatch,
+    agent_run_db,
+    app_without_fake_event_store,
+):
+    calls = []
+
+    async def write_note(title: str, content: str):
+        calls.append((title, content))
+        return {'title': title, 'content': content}
+
+    async def fake_get_builtin_tools(request, extra_params, features=None, model=None):
+        assert extra_params['__metadata__']['chat_id'] == 'chat-1'
+        return {
+            'write_note': {
+                'tool_id': 'builtin:write_note',
+                'callable': write_note,
+                'spec': {'name': 'write_note', 'parameters': {'type': 'object'}},
+                'type': 'builtin',
+            }
+        }
+
+    async def no_approval(tool_request, tool, resume):
+        return None
+
+    monkeypatch.setattr(agent_service, 'get_builtin_tools', fake_get_builtin_tools)
+    monkeypatch.setattr(
+        agent_service.Users,
+        'get_user_by_id',
+        lambda user_id: SimpleNamespace(
+            id=user_id,
+            model_dump=lambda mode=None: {'id': user_id, 'role': 'admin', 'name': 'Test User'},
+        ),
+    )
+
+    app_without_fake_event_store.state.AGENT_TOOL_REGISTRIES = {}
+    app_without_fake_event_store.state.AGENT_APPROVAL_COORDINATOR = SimpleNamespace(request_tool_approval=no_approval)
+    run = await AgentRuns.create_run(
+        user_id='user-1',
+        chat_id='chat-1',
+        user_message_id='msg-user',
+        assistant_message_id='msg-assistant',
+        leader_model_id='model-a',
+        tool_access_snapshot={
+            'tools': [
+                {
+                    'id': 'tool:builtin:write_note:write_note',
+                    'name': 'write_note',
+                    'type': 'builtin',
+                    'schema': {'name': 'write_note', 'parameters': {'type': 'object'}},
+                }
+            ]
+        },
+    )
+
+    with TestClient(app_without_fake_event_store) as client:
+        response = client.post(
+            f'/api/agent/service/runs/{run.id}/tool-call',
+            json={
+                'run_id': run.id,
+                'participant_id': 'leader',
+                'tool_call_id': 'call-1',
+                'tool_id': 'tool:builtin:write_note:write_note',
+                'arguments': {'title': 'Plan', 'content': 'Ship it'},
+                'idempotency_key': 'tool:leader:call-1:1',
+            },
+            headers=_service_headers('tool:leader:call-1:1'),
+        )
+
+    assert response.status_code == 200
+    assert response.json()['status'] == 'success'
+    assert calls == [('Plan', 'Ship it')]
+    assert 'tool:builtin:write_note:write_note' in app_without_fake_event_store.state.AGENT_TOOL_REGISTRIES[run.id]

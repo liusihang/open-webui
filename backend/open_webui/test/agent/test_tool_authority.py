@@ -40,9 +40,7 @@ class FakeOperationStore:
         existing = self.claims.get(key)
         if existing:
             if existing.request_hash != request_hash:
-                raise AgentRunOperationConflict(
-                    'idempotency key was reused with a different request hash'
-                )
+                raise AgentRunOperationConflict('idempotency key was reused with a different request hash')
             return AgentRunOperationClaim(operation=existing, created=False)
 
         self.claim_count += 1
@@ -62,9 +60,7 @@ class FakeOperationStore:
     async def finish_operation_success(self, operation_id, response):
         for key, operation in list(self.claims.items()):
             if operation.id == operation_id:
-                updated = operation.model_copy(
-                    update={'status': 'succeeded', 'response': response}
-                )
+                updated = operation.model_copy(update={'status': 'succeeded', 'response': response})
                 self.claims[key] = updated
                 self.successes[operation_id] = response
                 return updated
@@ -77,6 +73,17 @@ class FakeOperationStore:
                 self.claims[key] = updated
                 return updated
         raise AssertionError(f'unknown operation {operation_id}')
+
+
+class FakeRunStore(FakeOperationStore):
+    def __init__(self, run):
+        super().__init__()
+        self.run = run
+
+    async def get_run(self, run_id):
+        if self.run.id == run_id:
+            return self.run
+        return None
 
 
 class FakeArtifactStore:
@@ -144,7 +151,8 @@ def test_tool_access_envelope_exposes_schema_and_opaque_ids_without_callables():
     assert registry['tool:terminal:main:read_file']['callable'] is read_file
 
 
-def test_service_tool_authority_prefers_run_scoped_registry():
+@pytest.mark.asyncio
+async def test_service_tool_authority_prefers_run_scoped_registry():
     async def scoped_tool():
         return 'scoped'
 
@@ -181,10 +189,189 @@ def test_service_tool_authority_prefers_run_scoped_registry():
         )
     )
 
-    authority = get_agent_tool_authority(request, run_id='run-1')
+    authority = await get_agent_tool_authority(request, run_id='run-1')
 
     tool_id = 'tool:builtin:lookup_fact:lookup_fact'
     assert authority.registry[tool_id]['callable'] is scoped_tool
+
+
+@pytest.mark.asyncio
+async def test_service_tool_authority_rebuilds_missing_builtin_registry_from_run_snapshot(monkeypatch):
+    calls = []
+
+    async def write_note(title: str, content: str):
+        calls.append((title, content))
+        return {'title': title, 'content': content}
+
+    async def fake_get_builtin_tools(request, extra_params, features=None, model=None):
+        assert extra_params['__user__']['id'] == 'user-1'
+        assert extra_params['__metadata__']['chat_id'] == 'chat-1'
+        return {
+            'write_note': {
+                'tool_id': 'builtin:write_note',
+                'callable': write_note,
+                'spec': {'name': 'write_note', 'parameters': {'type': 'object'}},
+                'type': 'builtin',
+            },
+            'search_web': {
+                'tool_id': 'builtin:search_web',
+                'callable': lambda query: {'query': query},
+                'spec': {'name': 'search_web', 'parameters': {'type': 'object'}},
+                'type': 'builtin',
+            },
+        }
+
+    user = SimpleNamespace(
+        id='user-1',
+        model_dump=lambda mode=None: {'id': 'user-1', 'role': 'admin', 'name': 'Test User'},
+    )
+    run = SimpleNamespace(
+        id='run-1',
+        user_id='user-1',
+        chat_id='chat-1',
+        user_message_id='msg-user',
+        assistant_message_id='msg-assistant',
+        leader_model_id='model-1',
+        tool_access_snapshot={
+            'tools': [
+                {
+                    'id': 'tool:builtin:write_note:write_note',
+                    'name': 'write_note',
+                    'type': 'builtin',
+                    'schema': {'name': 'write_note', 'parameters': {'type': 'object'}},
+                }
+            ]
+        },
+    )
+
+    from open_webui.routers import agent_service
+
+    monkeypatch.setattr(agent_service, 'get_builtin_tools', fake_get_builtin_tools, raising=False)
+    monkeypatch.setattr(
+        agent_service,
+        'Users',
+        SimpleNamespace(get_user_by_id=lambda user_id: user),
+        raising=False,
+    )
+
+    request = SimpleNamespace(
+        cookies={},
+        app=SimpleNamespace(
+            state=SimpleNamespace(
+                config=SimpleNamespace(),
+                AGENT_EVENT_STORE=FakeRunStore(run),
+                AGENT_TOOL_REGISTRIES={},
+            )
+        ),
+    )
+
+    authority = await get_agent_tool_authority(request, run_id='run-1')
+
+    assert set(authority.registry) == {'tool:builtin:write_note:write_note'}
+    assert request.app.state.AGENT_TOOL_REGISTRIES['run-1'] is authority.registry
+
+    result = await authority.execute_tool_call(
+        ToolCallRequest(
+            run_id='run-1',
+            user_id='user-1',
+            participant_id='leader',
+            tool_call_id='call-1',
+            tool_id='tool:builtin:write_note:write_note',
+            arguments={'title': 'Plan', 'content': 'Ship it'},
+            idempotency_key='tool:leader:call-1:1',
+        )
+    )
+
+    assert calls == [('Plan', 'Ship it')]
+    assert result['status'] == 'success'
+
+
+@pytest.mark.asyncio
+async def test_service_tool_authority_rebuilds_missing_terminal_registry_from_run_snapshot(monkeypatch):
+    calls = []
+
+    async def run_command(command: str):
+        calls.append(command)
+        return {'process_id': 'proc-1', 'status': 'completed', 'exit_code': 0}
+
+    async def fake_get_terminal_tools(request, terminal_id, user, extra_params):
+        assert terminal_id == 'term-1'
+        assert user.id == 'user-1'
+        assert extra_params['__metadata__']['chat_id'] == 'chat-1'
+        return (
+            {
+                'run_command': {
+                    'tool_id': 'terminal:term-1',
+                    'callable': run_command,
+                    'spec': {'name': 'run_command', 'parameters': {'type': 'object'}},
+                    'type': 'terminal',
+                }
+            },
+            None,
+        )
+
+    user = SimpleNamespace(
+        id='user-1',
+        role='admin',
+        model_dump=lambda mode=None: {'id': 'user-1', 'role': 'admin', 'name': 'Test User'},
+    )
+    run = SimpleNamespace(
+        id='run-1',
+        user_id='user-1',
+        chat_id='chat-1',
+        user_message_id='msg-user',
+        assistant_message_id='msg-assistant',
+        leader_model_id='model-1',
+        tool_access_snapshot={
+            'tools': [
+                {
+                    'id': 'tool:terminal:term-1:run_command',
+                    'name': 'run_command',
+                    'type': 'terminal',
+                    'schema': {'name': 'run_command', 'parameters': {'type': 'object'}},
+                }
+            ]
+        },
+    )
+
+    from open_webui.routers import agent_service
+
+    monkeypatch.setattr(agent_service, 'get_terminal_tools', fake_get_terminal_tools)
+    monkeypatch.setattr(
+        agent_service,
+        'Users',
+        SimpleNamespace(get_user_by_id=lambda user_id: user),
+    )
+
+    request = SimpleNamespace(
+        cookies={},
+        app=SimpleNamespace(
+            state=SimpleNamespace(
+                config=SimpleNamespace(),
+                AGENT_EVENT_STORE=FakeRunStore(run),
+                AGENT_TOOL_REGISTRIES={},
+            )
+        ),
+    )
+
+    authority = await get_agent_tool_authority(request, run_id='run-1')
+
+    assert set(authority.registry) == {'tool:terminal:term-1:run_command'}
+    result = await authority.execute_tool_call(
+        ToolCallRequest(
+            run_id='run-1',
+            user_id='user-1',
+            participant_id='leader',
+            tool_call_id='call-1',
+            tool_id='tool:terminal:term-1:run_command',
+            arguments={'command': 'echo ok'},
+            idempotency_key='tool:leader:call-1:1',
+        )
+    )
+
+    assert calls == ['echo ok']
+    assert result['status'] == 'success'
+    assert result['process_refs'][0]['terminal_server_id'] == 'term-1'
 
 
 def test_normalize_tool_result_extracts_terminal_process_refs():
@@ -408,7 +595,7 @@ async def test_service_default_tool_authority_wires_terminal_process_and_artifac
             )
         )
     )
-    authority = get_agent_tool_authority(request)
+    authority = await get_agent_tool_authority(request)
 
     result = await authority.execute_tool_call(
         ToolCallRequest(

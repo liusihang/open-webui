@@ -1,4 +1,5 @@
 import hashlib
+import inspect
 import json
 import secrets
 from typing import Any
@@ -49,10 +50,13 @@ from open_webui.agent.tool_authority import (
     ToolAuthorityError,
     ToolCallRequest,
     ToolOperationInProgress,
+    build_tool_access_envelope,
 )
 from open_webui.models.agent_runs import AgentRunError, AgentRunOperationConflict, AgentRuns
 from open_webui.models.chats import Chats
+from open_webui.models.users import Users
 from open_webui.routers.agent_runs import get_configured_agent_event_store
+from open_webui.utils.tools import get_builtin_tools, get_terminal_tools
 
 router = APIRouter()
 
@@ -113,7 +117,7 @@ def get_agent_model_authority(request: Request) -> AgentModelAuthority:
     return AgentModelAuthority(operation_store=get_agent_operation_store(request))
 
 
-def get_agent_tool_authority(request: Request, run_id: str | None = None) -> AgentToolAuthority:
+async def get_agent_tool_authority(request: Request, run_id: str | None = None) -> AgentToolAuthority:
     authority = getattr(request.app.state, 'AGENT_TOOL_AUTHORITY', None)
     if authority is not None:
         return authority
@@ -122,6 +126,8 @@ def get_agent_tool_authority(request: Request, run_id: str | None = None) -> Age
     registries = getattr(request.app.state, 'AGENT_TOOL_REGISTRIES', None)
     if run_id and isinstance(registries, dict):
         registry = registries.get(run_id)
+    if registry is None and run_id:
+        registry = await _rebuild_agent_tool_registry(request, run_id)
     if registry is None:
         registry = getattr(request.app.state, 'AGENT_TOOL_REGISTRY', None)
     if registry is None:
@@ -136,6 +142,340 @@ def get_agent_tool_authority(request: Request, run_id: str | None = None) -> Age
         resource_manager=getattr(request.app.state, 'AGENT_RUN_RESOURCE_MANAGER', None),
         artifact_registrar=getattr(request.app.state, 'AGENT_RUN_ARTIFACT_REGISTRAR', None),
     )
+
+
+async def _rebuild_agent_tool_registry(request: Request, run_id: str) -> dict[str, dict[str, Any]] | None:
+    store = get_agent_operation_store(request)
+    get_run = getattr(store, 'get_run', None)
+    if get_run is None:
+        return None
+
+    run = await _maybe_await(get_run(run_id))
+    if run is None:
+        return None
+
+    snapshot_tools = _snapshot_tools(getattr(run, 'tool_access_snapshot', None))
+    if not snapshot_tools:
+        return None
+
+    user = await _load_agent_run_user(getattr(run, 'user_id', None))
+    if user is None:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail='Agent tool registry cannot be rebuilt because the run user is unavailable',
+        )
+
+    rebuilt: dict[str, dict[str, Any]] = {}
+    rebuilt.update(await _rebuild_builtin_tools(request, run, user, snapshot_tools))
+    rebuilt.update(await _rebuild_terminal_tools(request, run, user, snapshot_tools))
+
+    if not rebuilt:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail='Agent tool registry could not be rebuilt from persisted snapshot',
+        )
+
+    _cache_agent_tool_registry(request, run_id, rebuilt)
+    return rebuilt
+
+
+async def _load_agent_run_user(user_id: str | None):
+    if not user_id:
+        return None
+    return await _maybe_await(Users.get_user_by_id(user_id))
+
+
+def _snapshot_tools(snapshot: dict[str, Any] | None) -> list[dict[str, Any]]:
+    if not isinstance(snapshot, dict):
+        return []
+    tools = snapshot.get('tools')
+    if not isinstance(tools, list):
+        return []
+    return [tool for tool in tools if isinstance(tool, dict)]
+
+
+async def _rebuild_builtin_tools(
+    request: Request,
+    run,
+    user,
+    snapshot_tools: list[dict[str, Any]],
+) -> dict[str, dict[str, Any]]:
+    requested = [tool for tool in snapshot_tools if tool.get('type') == 'builtin']
+    if not requested:
+        return {}
+
+    requested_names = {tool.get('name') for tool in requested if isinstance(tool.get('name'), str)}
+    if not requested_names:
+        return {}
+
+    user_payload = user.model_dump(mode='json') if hasattr(user, 'model_dump') else dict(getattr(user, '__dict__', {}))
+    metadata = _agent_run_metadata(run)
+    current_tools = await get_builtin_tools(
+        request,
+        {
+            '__user__': user_payload,
+            '__metadata__': metadata,
+            '__chat_id__': metadata.get('chat_id'),
+            '__message_id__': metadata.get('assistant_message_id'),
+        },
+        _features_for_builtin_tools(requested_names),
+        _model_for_builtin_rebuild(getattr(run, 'leader_model_id', None), requested_names),
+    )
+
+    missing = sorted(name for name in requested_names if name not in current_tools)
+    if missing:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail={
+                'code': 'agent_tool_registry_rebuild_failed',
+                'message': 'Agent builtin tools are not available in the current server context',
+                'tools': missing,
+            },
+        )
+
+    _envelope, current_registry = build_tool_access_envelope({name: current_tools[name] for name in requested_names})
+    return _registry_from_snapshot(requested, current_registry)
+
+
+async def _rebuild_terminal_tools(
+    request: Request,
+    run,
+    user,
+    snapshot_tools: list[dict[str, Any]],
+) -> dict[str, dict[str, Any]]:
+    requested_by_terminal: dict[str, set[str]] = {}
+    for tool in snapshot_tools:
+        if tool.get('type') != 'terminal':
+            continue
+        terminal_id = _terminal_id_from_snapshot_tool(tool)
+        name = tool.get('name')
+        if terminal_id and isinstance(name, str):
+            requested_by_terminal.setdefault(terminal_id, set()).add(name)
+
+    if not requested_by_terminal:
+        return {}
+
+    rebuilt: dict[str, dict[str, Any]] = {}
+    metadata = _agent_run_metadata(run)
+    for terminal_id, names in requested_by_terminal.items():
+        terminal_result = await get_terminal_tools(
+            request,
+            terminal_id,
+            user,
+            {
+                '__metadata__': metadata,
+                '__chat_id__': metadata.get('chat_id'),
+                '__message_id__': metadata.get('assistant_message_id'),
+            },
+        )
+        terminal_tools = terminal_result[0] if isinstance(terminal_result, tuple) else terminal_result
+        terminal_tools = terminal_tools or {}
+        missing = sorted(name for name in names if name not in terminal_tools)
+        if missing:
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail={
+                    'code': 'agent_tool_registry_rebuild_failed',
+                    'message': 'Agent terminal tools are not available in the current server context',
+                    'terminal_id': terminal_id,
+                    'tools': missing,
+                },
+            )
+
+        _envelope, current_registry = build_tool_access_envelope({name: terminal_tools[name] for name in names})
+        requested = [
+            tool
+            for tool in snapshot_tools
+            if tool.get('type') == 'terminal'
+            and tool.get('name') in names
+            and _terminal_id_from_snapshot_tool(tool) == terminal_id
+        ]
+        rebuilt.update(_registry_from_snapshot(requested, current_registry))
+
+    return rebuilt
+
+
+def _registry_from_snapshot(
+    snapshot_tools: list[dict[str, Any]],
+    current_registry: dict[str, dict[str, Any]],
+) -> dict[str, dict[str, Any]]:
+    by_name = {tool.get('name'): tool for tool in current_registry.values()}
+    registry = {}
+    for snapshot_tool in snapshot_tools:
+        opaque_id = snapshot_tool.get('id')
+        name = snapshot_tool.get('name')
+        current = by_name.get(name)
+        if not isinstance(opaque_id, str) or current is None:
+            continue
+        registry[opaque_id] = {
+            **current,
+            'name': name,
+            'opaque_id': opaque_id,
+            'type': snapshot_tool.get('type') or current.get('type'),
+            'spec': dict(snapshot_tool.get('schema') or current.get('spec') or {}),
+        }
+    return registry
+
+
+def _agent_run_metadata(run) -> dict[str, Any]:
+    return {
+        'chat_id': getattr(run, 'chat_id', None),
+        'user_message_id': getattr(run, 'user_message_id', None),
+        'message_id': getattr(run, 'assistant_message_id', None),
+        'assistant_message_id': getattr(run, 'assistant_message_id', None),
+        'agent_run_id': getattr(run, 'id', None),
+    }
+
+
+def _features_for_builtin_tools(tool_names: set[str]) -> dict[str, bool]:
+    return {
+        'web_search': bool(tool_names & {'search_web', 'fetch_url'}),
+        'image_generation': bool(tool_names & {'generate_image', 'edit_image'}),
+        'code_interpreter': 'execute_code' in tool_names,
+        'memory': bool(
+            tool_names
+            & {
+                'search_memories',
+                'add_memory',
+                'replace_memory_content',
+                'delete_memory',
+                'list_memories',
+            }
+        ),
+    }
+
+
+def _model_for_builtin_rebuild(model_id: str | None, tool_names: set[str]) -> dict[str, Any]:
+    capabilities = {
+        'builtin_tools': True,
+        'web_search': bool(tool_names & {'search_web', 'fetch_url'}),
+        'image_generation': bool(tool_names & {'generate_image', 'edit_image'}),
+        'code_interpreter': 'execute_code' in tool_names,
+        'memory': bool(
+            tool_names
+            & {
+                'search_memories',
+                'add_memory',
+                'replace_memory_content',
+                'delete_memory',
+                'list_memories',
+            }
+        ),
+    }
+    categories = _builtin_categories_for_tools(tool_names)
+    return {
+        'id': model_id,
+        'info': {
+            'meta': {
+                'capabilities': capabilities,
+                'builtinTools': {category: category in categories for category in _BUILTIN_TOOL_CATEGORIES},
+            }
+        },
+    }
+
+
+_BUILTIN_TOOL_CATEGORIES = {
+    'time',
+    'knowledge',
+    'chats',
+    'memory',
+    'agent_memory',
+    'web_search',
+    'image_generation',
+    'code_interpreter',
+    'notes',
+    'channels',
+    'skills',
+    'tasks',
+    'automations',
+    'calendar',
+}
+
+
+def _builtin_categories_for_tools(tool_names: set[str]) -> set[str]:
+    categories: set[str] = set()
+    mapping = {
+        'time': {'get_current_timestamp', 'calculate_timestamp'},
+        'knowledge': {
+            'kb_exec',
+            'list_knowledge',
+            'search_knowledge_files',
+            'grep_knowledge_files',
+            'query_knowledge_files',
+            'query_knowledge_evidence',
+            'view_file',
+            'view_knowledge_file',
+            'list_knowledge_bases',
+            'search_knowledge_bases',
+            'query_knowledge_bases',
+            'view_note',
+        },
+        'chats': {'search_chats', 'view_chat'},
+        'web_search': {'search_web', 'fetch_url'},
+        'notes': {'search_notes', 'view_note', 'write_note', 'replace_note_content'},
+        'tasks': {'create_tasks', 'update_task'},
+        'code_interpreter': {'execute_code'},
+        'image_generation': {'generate_image', 'edit_image'},
+        'memory': {
+            'search_memories',
+            'add_memory',
+            'replace_memory_content',
+            'delete_memory',
+            'list_memories',
+        },
+        'agent_memory': {'agent_memory_search', 'agent_memory_read', 'agent_memory_list'},
+        'channels': {
+            'search_channels',
+            'search_channel_messages',
+            'view_channel_thread',
+            'view_channel_message',
+        },
+        'skills': {'read_skill', 'install_skill', 'update_skill'},
+        'automations': {
+            'create_automation',
+            'update_automation',
+            'list_automations',
+            'toggle_automation',
+            'delete_automation',
+        },
+        'calendar': {
+            'search_calendar_events',
+            'create_calendar_event',
+            'update_calendar_event',
+            'delete_calendar_event',
+        },
+    }
+    for category, names in mapping.items():
+        if tool_names & names:
+            categories.add(category)
+    return categories
+
+
+def _terminal_id_from_snapshot_tool(tool: dict[str, Any]) -> str | None:
+    opaque_id = tool.get('id')
+    name = tool.get('name')
+    if not isinstance(opaque_id, str) or not isinstance(name, str):
+        return None
+    prefix = 'tool:terminal:'
+    suffix = f':{name}'
+    if opaque_id.startswith(prefix) and opaque_id.endswith(suffix):
+        terminal_id = opaque_id[len(prefix) : -len(suffix)]
+        return terminal_id or None
+    return None
+
+
+def _cache_agent_tool_registry(request: Request, run_id: str, registry: dict[str, dict[str, Any]]) -> None:
+    registries = getattr(request.app.state, 'AGENT_TOOL_REGISTRIES', None)
+    if not isinstance(registries, dict):
+        registries = {}
+        request.app.state.AGENT_TOOL_REGISTRIES = registries
+    registries[run_id] = registry
+
+
+async def _maybe_await(value):
+    if inspect.isawaitable(value):
+        return await value
+    return value
 
 
 def get_agent_approval_coordinator(request: Request) -> AgentApprovalCoordinator:
@@ -437,6 +777,7 @@ async def execute_agent_run_tool_call(
     try:
         tool = authority.registry.get(tool_request.tool_id)
         if tool is not None:
+
             async def resume_tool_call():
                 return await execute_agent_tool_call(authority, tool_request)
 
