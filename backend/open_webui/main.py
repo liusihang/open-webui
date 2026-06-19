@@ -1487,7 +1487,7 @@ app.state.config.ENABLE_EVALUATION_ARENA_MODELS = ENABLE_EVALUATION_ARENA_MODELS
 app.state.config.EVALUATION_ARENA_MODELS = EVALUATION_ARENA_MODELS
 
 # Migrate legacy access_control → access_grants on boot
-from open_webui.utils.access_control import has_permission, migrate_access_control
+from open_webui.utils.access_control import has_connection_access, has_permission, migrate_access_control
 
 connections = app.state.config.TOOL_SERVER_CONNECTIONS
 if any('access_control' in c.get('config', {}) for c in connections):
@@ -2314,6 +2314,29 @@ def _is_agent_mode_product_chat(request: Request, metadata: dict, message_ids: d
     )
 
 
+async def _first_accessible_system_terminal_id(request: Request, user) -> str | None:
+    connections = getattr(request.app.state.config, 'TERMINAL_SERVER_CONNECTIONS', None) or []
+    for connection in connections:
+        terminal_id = connection.get('id')
+        if not terminal_id or not connection.get('enabled', True):
+            continue
+        try:
+            if await has_connection_access(user, connection):
+                return terminal_id
+        except Exception as exc:
+            log.warning('Failed to check Agent Mode terminal access for %s: %s', terminal_id, exc)
+    return None
+
+
+async def _attach_default_agent_mode_terminal(request: Request, form_data: dict, user) -> None:
+    if form_data.get('terminal_id'):
+        return
+
+    terminal_id = await _first_accessible_system_terminal_id(request, user)
+    if terminal_id:
+        form_data['terminal_id'] = terminal_id
+
+
 def _agent_run_budget(config) -> dict:
     return {
         'timeout_seconds': getattr(config, 'AGENT_RUN_DEFAULT_TIMEOUT_SECONDS', None),
@@ -2896,6 +2919,7 @@ async def chat_completion(
         form_data['metadata'] = metadata
 
         if _is_agent_mode_product_chat(request, metadata, message_ids):
+            await _attach_default_agent_mode_terminal(request, form_data, user)
             return await _start_agent_mode_chat(request, form_data, user, metadata, message_ids, model)
 
     except HTTPException:

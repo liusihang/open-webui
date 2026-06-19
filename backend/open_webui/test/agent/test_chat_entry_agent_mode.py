@@ -273,6 +273,75 @@ async def test_agent_mode_multimodel_binds_current_model_assistant_message(
 
 
 @pytest.mark.asyncio
+async def test_agent_mode_product_chat_auto_attaches_accessible_system_terminal(
+    monkeypatch,
+    agent_run_db,
+    chat_entry_patches,
+):
+    async def fake_terminal_tool(command: str):
+        return {'output': command}
+
+    async def fake_has_connection_access(user, connection, user_group_ids=None):
+        return connection.get('id') == 'terminal-system-2'
+
+    async def fake_process_payload(request, form_data, user, metadata, model):
+        terminal_id = form_data.get('terminal_id')
+        chat_entry_patches.process_payload_calls.append(
+            {
+                'terminal_id': terminal_id,
+                'form_data': dict(form_data),
+                'metadata': dict(metadata),
+            }
+        )
+        metadata['terminal_id'] = terminal_id
+        if terminal_id:
+            metadata['tools'] = {
+                'run_command': {
+                    'tool_id': f'terminal:{terminal_id}',
+                    'callable': fake_terminal_tool,
+                    'spec': {
+                        'name': 'run_command',
+                        'parameters': {
+                            'type': 'object',
+                            'properties': {'command': {'type': 'string'}},
+                        },
+                    },
+                    'type': 'terminal',
+                }
+            }
+        return form_data, metadata, []
+
+    monkeypatch.setattr(main, 'has_connection_access', fake_has_connection_access, raising=False)
+    monkeypatch.setattr(main, 'process_chat_payload', fake_process_payload)
+    request = _request(enable_agent_mode=True)
+    request.app.state.config.TERMINAL_SERVER_CONNECTIONS = [
+        {'id': 'terminal-disabled', 'enabled': False, 'url': 'http://terminal-disabled.test'},
+        {'id': 'terminal-system-1', 'enabled': True, 'url': 'http://terminal-one.test'},
+        {'id': 'terminal-system-2', 'enabled': True, 'url': 'http://terminal-two.test'},
+    ]
+
+    response = await main.chat_completion(request, _chat_form(), _user())
+
+    runtime_payload = chat_entry_patches.runtime_calls[0]
+    assert response['status'] is True
+    assert chat_entry_patches.process_payload_calls[0]['terminal_id'] == 'terminal-system-2'
+    assert runtime_payload['tool_access_envelope']['tools'] == [
+        {
+            'id': 'tool:terminal:terminal-system-2:run_command',
+            'name': 'run_command',
+            'type': 'terminal',
+            'schema': {
+                'name': 'run_command',
+                'parameters': {
+                    'type': 'object',
+                    'properties': {'command': {'type': 'string'}},
+                },
+            },
+        }
+    ]
+
+
+@pytest.mark.asyncio
 async def test_agent_mode_product_chat_populates_tool_envelope_and_callback_registry(
     monkeypatch,
     agent_run_db,

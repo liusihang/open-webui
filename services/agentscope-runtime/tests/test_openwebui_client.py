@@ -8,6 +8,60 @@ from agentscope_runtime.openwebui_client import OpenWebUIClient
 
 
 @pytest.mark.asyncio
+async def test_call_model_uses_dedicated_model_call_timeout(monkeypatch) -> None:
+    captured_timeouts = []
+
+    class FakeAsyncClient:
+        def __init__(self, *, timeout):
+            captured_timeouts.append(timeout)
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return None
+
+        async def post(self, url, headers=None, json=None):
+            return Response(
+                200,
+                json={
+                    "status": "success",
+                    "model": "model-research",
+                    "response": {"content": "model answer"},
+                    "metadata": {},
+                },
+            )
+
+    monkeypatch.setattr("agentscope_runtime.openwebui_client.httpx.AsyncClient", FakeAsyncClient)
+    client = OpenWebUIClient(
+        base_url="https://openwebui.test",
+        service_token="owui-token",
+        timeout=3.0,
+        model_call_timeout=45.0,
+    )
+
+    await client.append_final_delta(
+        run_id="run-1",
+        idempotency_key="final:run-1:answer:0",
+        final_stream_id="answer",
+        delta_index=0,
+        delta="final answer",
+    )
+    await client.call_model(
+        run_id="run-1",
+        idempotency_key="model:leader:model-call-1:1",
+        participant_id="leader",
+        model_call_id="model-call-1",
+        model="model-research",
+        messages=[{"role": "user", "content": "hi"}],
+    )
+
+    assert captured_timeouts[0] == 3.0
+    assert captured_timeouts[1].connect == 3.0
+    assert captured_timeouts[1].read == 45.0
+
+
+@pytest.mark.asyncio
 async def test_append_event_sends_bearer_auth_idempotency_key_and_structured_payload() -> None:
     async with respx.mock(assert_all_called=True) as router:
         request = router.post("https://openwebui.test/api/agent/service/runs/run-1/events").mock(
