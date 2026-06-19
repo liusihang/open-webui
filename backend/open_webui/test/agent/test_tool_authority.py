@@ -9,6 +9,7 @@ from open_webui.agent.artifacts import AgentRunArtifactRegistrar
 from open_webui.agent.resources import AgentRunResourceManager
 from open_webui.agent.tool_authority import (
     AgentToolAuthority,
+    ToolNotAllowed,
     ToolCallRequest,
     build_tool_access_envelope,
     normalize_tool_result,
@@ -284,6 +285,193 @@ async def test_service_tool_authority_rebuilds_missing_builtin_registry_from_run
 
     assert calls == [('Plan', 'Ship it')]
     assert result['status'] == 'success'
+
+
+@pytest.mark.asyncio
+async def test_service_tool_authority_rebuilds_available_builtin_when_snapshot_has_unavailable_builtin(
+    monkeypatch,
+):
+    calls = []
+
+    async def search_web(query: str):
+        calls.append(query)
+        return {'query': query, 'results': []}
+
+    async def fake_get_builtin_tools(request, extra_params, features=None, model=None):
+        assert features['web_search'] is True
+        assert model['info']['meta']['builtinTools']['web_search'] is True
+        assert model['info']['meta']['builtinTools']['skills'] is True
+        return {
+            'search_web': {
+                'tool_id': 'builtin:search_web',
+                'callable': search_web,
+                'spec': {'name': 'search_web', 'parameters': {'type': 'object'}},
+                'type': 'builtin',
+            }
+        }
+
+    user = SimpleNamespace(
+        id='user-1',
+        model_dump=lambda mode=None: {'id': 'user-1', 'role': 'admin', 'name': 'Test User'},
+    )
+    run = SimpleNamespace(
+        id='run-1',
+        user_id='user-1',
+        chat_id='chat-1',
+        user_message_id='msg-user',
+        assistant_message_id='msg-assistant',
+        leader_model_id='model-1',
+        tool_access_snapshot={
+            'tools': [
+                {
+                    'id': 'tool:builtin:search_web:search_web',
+                    'name': 'search_web',
+                    'type': 'builtin',
+                    'schema': {'name': 'search_web', 'parameters': {'type': 'object'}},
+                },
+                {
+                    'id': 'tool:builtin:install_skill:install_skill',
+                    'name': 'install_skill',
+                    'type': 'builtin',
+                    'schema': {'name': 'install_skill', 'parameters': {'type': 'object'}},
+                },
+                {
+                    'id': 'tool:builtin:read_skill:read_skill',
+                    'name': 'read_skill',
+                    'type': 'builtin',
+                    'schema': {'name': 'read_skill', 'parameters': {'type': 'object'}},
+                },
+                {
+                    'id': 'tool:builtin:update_skill:update_skill',
+                    'name': 'update_skill',
+                    'type': 'builtin',
+                    'schema': {'name': 'update_skill', 'parameters': {'type': 'object'}},
+                },
+            ]
+        },
+    )
+
+    from open_webui.routers import agent_service
+
+    monkeypatch.setattr(agent_service, 'get_builtin_tools', fake_get_builtin_tools, raising=False)
+    monkeypatch.setattr(
+        agent_service,
+        'Users',
+        SimpleNamespace(get_user_by_id=lambda user_id: user),
+        raising=False,
+    )
+
+    request = SimpleNamespace(
+        cookies={},
+        app=SimpleNamespace(
+            state=SimpleNamespace(
+                config=SimpleNamespace(),
+                AGENT_EVENT_STORE=FakeRunStore(run),
+                AGENT_TOOL_REGISTRIES={},
+            )
+        ),
+    )
+
+    authority = await get_agent_tool_authority(request, run_id='run-1')
+
+    assert set(authority.registry) == {'tool:builtin:search_web:search_web'}
+    result = await authority.execute_tool_call(
+        ToolCallRequest(
+            run_id='run-1',
+            user_id='user-1',
+            participant_id='leader',
+            tool_call_id='call-1',
+            tool_id='tool:builtin:search_web:search_web',
+            arguments={'query': 'pr7 registry rebuild'},
+            idempotency_key='tool:leader:call-1:1',
+        )
+    )
+
+    assert calls == ['pr7 registry rebuild']
+    assert result['status'] == 'success'
+
+
+@pytest.mark.asyncio
+async def test_service_tool_authority_reports_requested_builtin_unavailable_after_partial_rebuild(
+    monkeypatch,
+):
+    async def search_web(query: str):
+        return {'query': query, 'results': []}
+
+    async def fake_get_builtin_tools(request, extra_params, features=None, model=None):
+        return {
+            'search_web': {
+                'tool_id': 'builtin:search_web',
+                'callable': search_web,
+                'spec': {'name': 'search_web', 'parameters': {'type': 'object'}},
+                'type': 'builtin',
+            }
+        }
+
+    user = SimpleNamespace(
+        id='user-1',
+        model_dump=lambda mode=None: {'id': 'user-1', 'role': 'admin', 'name': 'Test User'},
+    )
+    run = SimpleNamespace(
+        id='run-1',
+        user_id='user-1',
+        chat_id='chat-1',
+        user_message_id='msg-user',
+        assistant_message_id='msg-assistant',
+        leader_model_id='model-1',
+        tool_access_snapshot={
+            'tools': [
+                {
+                    'id': 'tool:builtin:search_web:search_web',
+                    'name': 'search_web',
+                    'type': 'builtin',
+                    'schema': {'name': 'search_web', 'parameters': {'type': 'object'}},
+                },
+                {
+                    'id': 'tool:builtin:install_skill:install_skill',
+                    'name': 'install_skill',
+                    'type': 'builtin',
+                    'schema': {'name': 'install_skill', 'parameters': {'type': 'object'}},
+                },
+            ]
+        },
+    )
+
+    from open_webui.routers import agent_service
+
+    monkeypatch.setattr(agent_service, 'get_builtin_tools', fake_get_builtin_tools, raising=False)
+    monkeypatch.setattr(
+        agent_service,
+        'Users',
+        SimpleNamespace(get_user_by_id=lambda user_id: user),
+        raising=False,
+    )
+
+    request = SimpleNamespace(
+        cookies={},
+        app=SimpleNamespace(
+            state=SimpleNamespace(
+                config=SimpleNamespace(),
+                AGENT_EVENT_STORE=FakeRunStore(run),
+                AGENT_TOOL_REGISTRIES={},
+            )
+        ),
+    )
+
+    authority = await get_agent_tool_authority(request, run_id='run-1')
+
+    with pytest.raises(ToolNotAllowed, match='install_skill'):
+        await authority.execute_tool_call(
+            ToolCallRequest(
+                run_id='run-1',
+                user_id='user-1',
+                participant_id='leader',
+                tool_call_id='call-1',
+                tool_id='tool:builtin:install_skill:install_skill',
+                arguments={},
+                idempotency_key='tool:leader:call-1:1',
+            )
+        )
 
 
 @pytest.mark.asyncio

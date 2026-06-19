@@ -222,8 +222,9 @@ async def _rebuild_builtin_tools(
         _model_for_builtin_rebuild(getattr(run, 'leader_model_id', None), requested_names),
     )
 
-    missing = sorted(name for name in requested_names if name not in current_tools)
-    if missing:
+    available_names = requested_names & set(current_tools)
+    missing = sorted(requested_names - available_names)
+    if not available_names:
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
             detail={
@@ -233,7 +234,7 @@ async def _rebuild_builtin_tools(
             },
         )
 
-    _envelope, current_registry = build_tool_access_envelope({name: current_tools[name] for name in requested_names})
+    _envelope, current_registry = build_tool_access_envelope({name: current_tools[name] for name in available_names})
     return _registry_from_snapshot(requested, current_registry)
 
 
