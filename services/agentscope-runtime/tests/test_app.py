@@ -614,6 +614,98 @@ async def test_create_subagent_tool_emits_subagent_events_and_integrates_result(
 
 
 @pytest.mark.asyncio
+async def test_create_subagent_tool_uses_leader_model_when_selection_has_no_choices() -> None:
+    class NoAllowedModelChoicesClient(RecordingOpenWebUIClient):
+        async def select_model(self, **kwargs: object) -> dict:
+            await super().select_model(**kwargs)
+            raise RuntimeError(
+                "OpenWebUI callback failed with status 403: "
+                '{"detail":{"code":"model_selection_not_allowed",'
+                '"message":"No models are available for this run.",'
+                '"warnings":[{"code":"no_permission_valid_models",'
+                '"message":"No models are available for this run."}]}}'
+            )
+
+    openwebui_client = NoAllowedModelChoicesClient()
+    openwebui_client.model_responses = [
+        {
+            "status": "success",
+            "response": {
+                "choices": [
+                    {
+                        "message": {
+                            "tool_calls": [
+                                {
+                                    "id": "call_subagent_1",
+                                    "type": "function",
+                                    "function": {
+                                        "name": "create_subagent",
+                                        "arguments": (
+                                            "{\"name\":\"Researcher\","
+                                            "\"description\":\"Checks the facts.\","
+                                            "\"task\":\"Find the key fact.\","
+                                            "\"fuzzy_model_request\":\"small fast model\"}"
+                                        ),
+                                    },
+                                }
+                            ],
+                        }
+                    }
+                ]
+            },
+        },
+        {
+            "status": "success",
+            "response": {"content": "Subagent completed via leader fallback."},
+        },
+        {
+            "status": "success",
+            "response": {"content": "Integrated fallback result."},
+        },
+    ]
+
+    async with make_client(openwebui_client, auto_finalize_ordinary_qa=True) as client:
+        response = await client.post(
+            "/v1/openwebui/runs",
+            headers={"Authorization": f"Bearer {SERVICE_TOKEN}"},
+            json={
+                "run_id": "run-subagent-fallback",
+                "chat_id": "chat-1",
+                "leader_model_id": "model-a",
+                "messages": [{"role": "user", "content": "Delegate research."}],
+                "model_catalog": [{"id": "model-a"}],
+                "budget": {"max_subagent_model_calls": 1},
+            },
+        )
+
+        assert response.status_code == 202
+        for _ in range(60):
+            status_response = await client.get(
+                "/v1/openwebui/runs/run-subagent-fallback/status",
+                headers={"Authorization": f"Bearer {SERVICE_TOKEN}"},
+            )
+            if status_response.json()["state"] == "completed":
+                break
+            await asyncio.sleep(0.01)
+
+    assert openwebui_client.model_selections[0]["requested_model_id"] is None
+    assert openwebui_client.model_selections[0]["fuzzy_request"] == "small fast model"
+    assert [call["model"] for call in openwebui_client.model_calls] == [
+        "model-a",
+        "model-a",
+        "model-a",
+    ]
+    created_event = next(
+        event for event in openwebui_client.events if event["event_type"] == "subagent.created"
+    )
+    assert created_event["payload"]["model_selection"]["fallback"] is True
+    assert created_event["payload"]["model_selection"]["meta"]["agent_selection"]["reason"] == (
+        "leader_model_fallback_no_allowed_choices"
+    )
+    assert "Integrated fallback result." in openwebui_client.final_deltas[0]["delta"]
+
+
+@pytest.mark.asyncio
 async def test_cancel_during_ordinary_qa_finalization_keeps_session_cancelled_without_final_callbacks() -> None:
     openwebui_client = BlockingModelOpenWebUIClient()
     async with make_client(openwebui_client, auto_finalize_ordinary_qa=True) as client:

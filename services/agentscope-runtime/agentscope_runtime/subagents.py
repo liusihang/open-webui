@@ -121,6 +121,7 @@ class AgentScopeSubagentAdapter:
         run_id: str,
         runtime_session_id: str,
         callback_client: OpenWebUISubagentCallbacks,
+        leader_model_id: str | None = None,
         team_cap: int = DEFAULT_TEAM_CAP,
         is_cancelled: Callable[[], bool] | None = None,
         kill_terminal_process: Callable[[str], None] | None = None,
@@ -128,6 +129,7 @@ class AgentScopeSubagentAdapter:
         self.run_id = run_id
         self.runtime_session_id = runtime_session_id
         self.callback_client = callback_client
+        self.leader_model_id = leader_model_id
         self.team_cap = min(team_cap, DEFAULT_TEAM_CAP)
         self._is_cancelled = is_cancelled or (lambda: False)
         self._kill_terminal_process = kill_terminal_process
@@ -332,15 +334,28 @@ class AgentScopeSubagentAdapter:
         if spec.requested_model_id:
             source_request["requested_model_id"] = spec.requested_model_id
 
-        return await self.callback_client.select_model(
-            run_id=self.run_id,
-            idempotency_key=f"modelsel:{participant_id}:{selection_id}:1",
-            participant_id=participant_id,
-            selection_id=selection_id,
-            requested_model_id=spec.requested_model_id,
-            fuzzy_request=spec.fuzzy_model_request,
-            source_request=source_request,
-        )
+        try:
+            return await self.callback_client.select_model(
+                run_id=self.run_id,
+                idempotency_key=f"modelsel:{participant_id}:{selection_id}:1",
+                participant_id=participant_id,
+                selection_id=selection_id,
+                requested_model_id=spec.requested_model_id,
+                fuzzy_request=spec.fuzzy_model_request,
+                source_request=source_request,
+            )
+        except Exception as exc:
+            if (
+                spec.requested_model_id is None
+                and self.leader_model_id
+                and _is_no_allowed_model_choices_error(exc)
+            ):
+                return _leader_model_fallback_selection(
+                    leader_model_id=self.leader_model_id,
+                    source_request=source_request,
+                    error=exc,
+                )
+            raise
 
     async def _emit_subagent_created(
         self,
@@ -447,4 +462,42 @@ def _error_payload(exc: SubagentRejected) -> dict[str, Any]:
         "message": str(exc),
         "retryable": False,
         "details": exc.details,
+    }
+
+
+def _is_no_allowed_model_choices_error(exc: Exception) -> bool:
+    message = str(exc)
+    normalized = message.lower()
+    return (
+        "model_selection_not_allowed" in normalized
+        and (
+            "no_permission_valid_models" in normalized
+            or "no models are available for this run" in normalized
+        )
+    )
+
+
+def _leader_model_fallback_selection(
+    *,
+    leader_model_id: str,
+    source_request: dict[str, Any],
+    error: Exception,
+) -> dict[str, Any]:
+    warning = {
+        "code": "no_permission_valid_models",
+        "message": "No models are available for this run.",
+    }
+    return {
+        "selected_model_id": leader_model_id,
+        "choices": [],
+        "fallback": True,
+        "meta": {
+            "agent_selection": {
+                "reason": "leader_model_fallback_no_allowed_choices",
+                "source_request": source_request,
+                "selected_model_id": leader_model_id,
+                "fallback_from_error": str(error),
+            }
+        },
+        "warnings": [warning],
     }

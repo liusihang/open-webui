@@ -106,6 +106,31 @@ class RecordingOpenWebUIRuntimeClient:
         }
 
 
+class NoAllowedModelChoicesClient(RecordingOpenWebUIRuntimeClient):
+    async def select_model(self, **kwargs: object) -> dict:
+        await super().select_model(**kwargs)
+        raise RuntimeError(
+            "OpenWebUI callback failed with status 403: "
+            '{"detail":{"code":"model_selection_not_allowed",'
+            '"message":"No models are available for this run.",'
+            '"warnings":[{"code":"no_permission_valid_models",'
+            '"message":"No models are available for this run."}]}}'
+        )
+
+
+class ExplicitModelRejectedClient(RecordingOpenWebUIRuntimeClient):
+    async def select_model(self, **kwargs: object) -> dict:
+        await super().select_model(**kwargs)
+        raise RuntimeError(
+            "OpenWebUI callback failed with status 403: "
+            '{"detail":{"code":"model_selection_not_allowed",'
+            '"message":"Requested model is not available for this run: private-model",'
+            '"warnings":[{"code":"explicit_model_not_allowed",'
+            '"message":"Requested model is not available for this run: private-model",'
+            '"requested_model_id":"private-model"}]}}'
+        )
+
+
 @pytest.mark.asyncio
 async def test_adapter_registers_subagent_selects_model_and_emits_completion_events() -> None:
     callback_client = RecordingOpenWebUIRuntimeClient()
@@ -169,6 +194,78 @@ async def test_adapter_registers_subagent_selects_model_and_emits_completion_eve
         "subagent.completed",
     ]
     assert all(event["participant_id"] == "subagent:run-team:1" for event in callback_client.events)
+
+
+@pytest.mark.asyncio
+async def test_adapter_falls_back_to_leader_model_when_no_allowed_model_choices() -> None:
+    callback_client = NoAllowedModelChoicesClient()
+    adapter = AgentScopeSubagentAdapter(
+        run_id="run-team",
+        runtime_session_id="rt-run-team",
+        callback_client=callback_client,
+        leader_model_id="model-leader",
+    )
+
+    async def executor(context: SubagentExecutionContext) -> dict:
+        assert context.model_id == "model-leader"
+        assert context.model_selection["meta"]["agent_selection"]["reason"] == (
+            "leader_model_fallback_no_allowed_choices"
+        )
+        return {"content": "fallback subagent complete"}
+
+    result = await adapter.run_subagent(
+        parent_participant_id="leader",
+        spec=SubagentSpec(
+            name="researcher",
+            description="Researches the topic.",
+            task="Find the relevant facts.",
+            fuzzy_model_request="small fast model",
+            budget={"max_model_calls": 2},
+        ),
+        executor=executor,
+    )
+
+    assert result.status == "completed"
+    assert result.content == "fallback subagent complete"
+    created_event = callback_client.events[0]
+    assert created_event["event_type"] == "subagent.created"
+    assert created_event["payload"]["model_id"] == "model-leader"
+    assert created_event["payload"]["model_selection"]["fallback"] is True
+    assert created_event["payload"]["model_selection"]["warnings"][0]["code"] == (
+        "no_permission_valid_models"
+    )
+
+
+@pytest.mark.asyncio
+async def test_adapter_does_not_fallback_for_explicit_rejected_model() -> None:
+    callback_client = ExplicitModelRejectedClient()
+    adapter = AgentScopeSubagentAdapter(
+        run_id="run-team",
+        runtime_session_id="rt-run-team",
+        callback_client=callback_client,
+        leader_model_id="model-leader",
+    )
+    executed = False
+
+    async def executor(context: SubagentExecutionContext) -> dict:
+        nonlocal executed
+        executed = True
+        return {"content": "should not execute"}
+
+    with pytest.raises(RuntimeError, match="explicit_model_not_allowed"):
+        await adapter.run_subagent(
+            parent_participant_id="leader",
+            spec=SubagentSpec(
+                name="researcher",
+                description="Researches the topic.",
+                task="Find the relevant facts.",
+                requested_model_id="private-model",
+            ),
+            executor=executor,
+        )
+
+    assert executed is False
+    assert callback_client.events == []
 
 
 @pytest.mark.asyncio

@@ -369,6 +369,7 @@ async def _finalize_general_agent_run(
                 request=request,
                 participant_id=LEADER_PARTICIPANT_ID,
                 include_subagent_tool=_subagents_enabled(request),
+                leader_model_id=leader_model_id,
             ),
             react_config=ReActConfig(max_iters=_max_iters(request)),
         )
@@ -481,6 +482,7 @@ def _build_toolkit(
     request: RunStartRequest,
     participant_id: str,
     include_subagent_tool: bool,
+    leader_model_id: str | None = None,
 ) -> Toolkit:
     tools: list[ToolBase] = []
     for tool_spec in _tool_specs(request):
@@ -508,6 +510,7 @@ def _build_toolkit(
                 callback_client=callback_client,
                 session=session,
                 request=request,
+                leader_model_id=leader_model_id,
             )
         )
     return Toolkit(tools=tools)
@@ -549,10 +552,12 @@ class CreateSubagentTool(ToolBase):
         callback_client: RuntimeCallbackClient,
         session: RuntimeSession,
         request: RunStartRequest,
+        leader_model_id: str | None = None,
     ) -> None:
         self.callback_client = callback_client
         self.session = session
         self.request = request
+        self.leader_model_id = leader_model_id
 
     async def check_permissions(
         self,
@@ -577,6 +582,7 @@ class CreateSubagentTool(ToolBase):
             run_id=self.session.run_id,
             runtime_session_id=self.session.runtime_session_id,
             callback_client=self.callback_client,
+            leader_model_id=self.leader_model_id,
             team_cap=self.request.team_cap or 5,
             is_cancelled=lambda: _is_cancelled(self.session),
         )
