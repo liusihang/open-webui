@@ -271,6 +271,51 @@ async def test_model_call_endpoint_rejects_forged_service_callback_without_token
     assert not getattr(request.state, 'agent_internal_model_call', False)
 
 
+@pytest.mark.asyncio
+async def test_model_call_endpoint_rejects_queued_run_with_state_diagnostics(agent_run_db):
+    run = await _create_queued_run()
+    request = _request(enable_agent_mode=True)
+    authority = AgentModelAuthority(
+        operation_store=AgentRuns,
+        completion_handler=_unexpected_completion_handler,
+        user_loader=_user_loader,
+        model_access_checker=_allow_model_access,
+    )
+
+    with pytest.raises(HTTPException) as exc_info:
+        await execute_agent_run_model_call(
+            request,
+            run.id,
+            ModelCallRequest(
+                run_id=run.id,
+                participant_id='leader',
+                model_call_id='call-1',
+                model='model-a',
+                messages=[{'role': 'user', 'content': 'hello'}],
+                idempotency_key='model:leader:call-1:1',
+            ),
+            idempotency_key='model:leader:call-1:1',
+            authorization='Bearer test-service-token',
+            authority=authority,
+        )
+
+    detail = exc_info.value.detail
+    assert exc_info.value.status_code == 403
+    assert detail['code'] == 'model_run_rejected'
+    assert detail['message']
+    assert detail['current_state'] == 'queued'
+
+
+async def _create_queued_run():
+    return await AgentRuns.create_run(
+        user_id='user-1',
+        chat_id='chat-1',
+        user_message_id='user-msg',
+        assistant_message_id='assistant-msg',
+        leader_model_id='model-a',
+    )
+
+
 async def _create_running_run():
     run = await AgentRuns.create_run(
         user_id='user-1',

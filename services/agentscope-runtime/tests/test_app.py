@@ -291,6 +291,61 @@ async def test_run_start_finalizes_ordinary_qa_through_model_and_final_delta_cal
 
 
 @pytest.mark.asyncio
+async def test_run_start_retries_queued_model_call_before_finalization_failure() -> None:
+    class QueuedOnceModelClient(RecordingOpenWebUIClient):
+        async def call_model(self, **kwargs: object) -> dict:
+            await super().call_model(**kwargs)  # type: ignore[arg-type]
+            if len(self.model_calls) == 1:
+                raise RuntimeError(
+                    "OpenWebUI callback failed with status 403: "
+                    '{"detail":{"code":"model_run_rejected","message":'
+                    '"Agent run run-queued-race cannot execute model calls while queued"}}'
+                )
+            return {
+                "status": "success",
+                "model": kwargs["model"],
+                "response": {"content": "retried final answer"},
+            }
+
+    openwebui_client = QueuedOnceModelClient()
+    async with make_client(openwebui_client, auto_finalize_ordinary_qa=True) as client:
+        response = await client.post(
+            "/v1/openwebui/runs",
+            headers={"Authorization": f"Bearer {SERVICE_TOKEN}"},
+            json={
+                "run_id": "run-queued-race",
+                "chat_id": "chat-1",
+                "user_message_id": "msg-user",
+                "assistant_message_id": "msg-assistant",
+                "leader_model_id": "model-a",
+                "messages": [{"role": "user", "content": "hello"}],
+            },
+        )
+
+        assert response.status_code == 202
+        for _ in range(20):
+            status = await client.get(
+                "/v1/openwebui/runs/run-queued-race/status",
+                headers={"Authorization": f"Bearer {SERVICE_TOKEN}"},
+            )
+            if status.json()["state"] == "completed":
+                break
+            await asyncio.sleep(0.01)
+
+    assert [call["model_call_id"] for call in openwebui_client.model_calls] == [
+        "model-call-1",
+        "model-call-1",
+    ]
+    assert openwebui_client.final_deltas[0]["delta"] == "retried final answer"
+    assert [event["event_type"] for event in openwebui_client.events] == [
+        "run.running",
+        "final.started",
+        "run.completed",
+    ]
+    assert not any(event["event_type"] == "run.failed" for event in openwebui_client.events)
+
+
+@pytest.mark.asyncio
 async def test_run_start_finalization_failure_keeps_diagnostic_message_and_traceback(
     caplog: pytest.LogCaptureFixture,
 ) -> None:

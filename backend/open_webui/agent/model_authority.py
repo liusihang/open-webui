@@ -31,6 +31,10 @@ class ModelNotAllowed(ModelAuthorityError):
 class ModelRunRejected(ModelAuthorityError):
     code = 'model_run_rejected'
 
+    def __init__(self, message: str, *, current_state: str | None = None) -> None:
+        super().__init__(message)
+        self.current_state = current_state
+
 
 class ModelOperationInProgress(ModelAuthorityError):
     code = 'operation_in_progress'
@@ -88,6 +92,7 @@ class AgentModelAuthority:
         if run.state != 'running':
             raise ModelRunRejected(
                 f'Agent run {call.run_id} cannot execute model calls while {run.state}',
+                current_state=run.state,
             )
 
         user = await self.user_loader(run.user_id)

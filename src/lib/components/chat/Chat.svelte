@@ -152,10 +152,13 @@
 	let selectedModels = [''];
 	let atSelectedModel: Model | undefined;
 	let selectedModelIds = [];
+	$: if (selectedModels.length > 1) {
+		selectedModels = resolveAgentModeRequestModels(selectedModels, $config);
+	}
 	$: if (atSelectedModel !== undefined) {
 		selectedModelIds = [atSelectedModel.id];
 	} else {
-		selectedModelIds = selectedModels;
+		selectedModelIds = resolveAgentModeRequestModels(selectedModels, $config);
 	}
 
 	let selectedToolIds = [];

@@ -10,12 +10,8 @@ export const isAgentModeRequestConstraintEnabled = (config: AgentModeConfig | un
 
 export const resolveAgentModeRequestModels = (
 	selectedModels: string[],
-	config: AgentModeConfig | undefined
+	_config: AgentModeConfig | undefined
 ): string[] => {
-	if (!isAgentModeRequestConstraintEnabled(config)) {
-		return selectedModels;
-	}
-
 	const leaderModelId = selectedModels.find((modelId) => modelId !== '');
-	return leaderModelId ? [leaderModelId] : selectedModels;
+	return leaderModelId ? [leaderModelId] : [''];
 };

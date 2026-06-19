@@ -6,16 +6,13 @@ import {
 } from './agentModeRequest';
 
 describe('resolveAgentModeRequestModels', () => {
-	it('keeps multi-model compare unchanged when Agent Mode is not visible to the frontend', () => {
-		expect(resolveAgentModeRequestModels(['model-a', 'model-b'], undefined)).toEqual([
-			'model-a',
-			'model-b'
-		]);
+	it('uses a single selected model when Agent Mode is not visible to the frontend', () => {
+		expect(resolveAgentModeRequestModels(['model-a', 'model-b'], undefined)).toEqual(['model-a']);
 		expect(
 			resolveAgentModeRequestModels(['model-a', 'model-b'], {
 				features: { enable_agent_mode: false }
 			})
-		).toEqual(['model-a', 'model-b']);
+		).toEqual(['model-a']);
 	});
 
 	it('uses the first valid selected model as the Agent Mode leader', () => {
@@ -24,6 +21,10 @@ describe('resolveAgentModeRequestModels', () => {
 				features: { enable_agent_mode: true }
 			})
 		).toEqual(['model-a']);
+	});
+
+	it('collapses multiple empty model placeholders to one empty selection', () => {
+		expect(resolveAgentModeRequestModels(['', ''], undefined)).toEqual(['']);
 	});
 });
 

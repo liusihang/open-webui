@@ -16,6 +16,10 @@ from agentscope_runtime.schemas import RunStartRequest, RunStartResponse, RunSta
 logger = logging.getLogger(__name__)
 
 
+MODEL_CALL_QUEUED_RETRY_ATTEMPTS = 3
+MODEL_CALL_QUEUED_RETRY_DELAY_SECONDS = 0.05
+
+
 class RuntimeCallbackClient(Protocol):
     async def append_event(
         self,
@@ -309,17 +313,32 @@ async def _call_leader_model(
     if not model_id:
         raise RuntimeError("leader model id is required for ordinary Q&A finalization")
 
-    response = await callback_client.call_model(
-        run_id=session.run_id,
-        idempotency_key="model:leader:model-call-1:1",
-        participant_id="leader",
-        model_call_id="model-call-1",
-        model=model_id,
-        messages=request.messages,
-        stream=False,
-        params={},
-        metadata={"runtime_session_id": session.runtime_session_id},
-    )
+    for attempt in range(1, MODEL_CALL_QUEUED_RETRY_ATTEMPTS + 1):
+        try:
+            response = await callback_client.call_model(
+                run_id=session.run_id,
+                idempotency_key="model:leader:model-call-1:1",
+                participant_id="leader",
+                model_call_id="model-call-1",
+                model=model_id,
+                messages=request.messages,
+                stream=False,
+                params={},
+                metadata={"runtime_session_id": session.runtime_session_id},
+            )
+            break
+        except Exception as exc:
+            if attempt >= MODEL_CALL_QUEUED_RETRY_ATTEMPTS or not _is_queued_model_call_rejection(exc):
+                raise
+            logger.info(
+                "OpenWebUI rejected model call while run is queued; retrying "
+                "run_id=%s runtime_session_id=%s attempt=%s",
+                session.run_id,
+                session.runtime_session_id,
+                attempt,
+            )
+            await asyncio.sleep(MODEL_CALL_QUEUED_RETRY_DELAY_SECONDS)
+
     return _extract_model_text(response)
 
 
@@ -367,6 +386,11 @@ def _format_finalization_error_message(exc: Exception, stage: str) -> str:
     if detail:
         return f"runtime finalization failed during {stage}: {exc_type}: {detail}"
     return f"runtime finalization failed during {stage}: {exc_type}"
+
+
+def _is_queued_model_call_rejection(exc: Exception) -> bool:
+    message = str(exc)
+    return "model_run_rejected" in message and "while queued" in message
 
 
 def _extract_model_text(response: dict[str, Any]) -> str:

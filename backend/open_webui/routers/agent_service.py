@@ -402,12 +402,16 @@ async def execute_agent_run_model_call(
             headers={'Retry-After': '1'},
         )
     except (ModelGuardRejected, ModelNotAllowed, ModelAuthorityError) as exc:
+        detail = {
+            'code': getattr(exc, 'code', 'model_authority_error'),
+            'message': str(exc),
+        }
+        current_state = getattr(exc, 'current_state', None)
+        if current_state is not None:
+            detail['current_state'] = current_state
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
-            detail={
-                'code': getattr(exc, 'code', 'model_authority_error'),
-                'message': str(exc),
-            },
+            detail=detail,
         ) from exc
 
 
