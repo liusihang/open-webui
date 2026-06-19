@@ -104,7 +104,7 @@ from open_webui.tools.agent_memory import (
     agent_memory_search,
 )
 from open_webui.utils.access_control import has_access, has_connection_access, has_permission
-from open_webui.utils.auth import get_effective_request_token
+from open_webui.utils.auth import create_terminal_session_token, get_effective_request_token
 from open_webui.utils.agent_memory_index import resolve_agent_memory_scopes
 from open_webui.utils.headers import get_custom_headers, include_user_info_headers
 from open_webui.utils.misc import is_string_allowed
@@ -1264,10 +1264,13 @@ async def get_terminal_tools(
         log.warning(f'Access denied to terminal {terminal_id} for user {user.id}')
         return {}
 
+    auth_type = connection.get('auth_type', 'bearer')
+    terminal_session_token = create_terminal_session_token(user) if auth_type == 'session' else None
+
     # Find the cached spec data for this terminal
     terminal_servers = await get_terminal_servers(
         request,
-        session_token=get_effective_request_token(request),
+        session_token=terminal_session_token,
         oauth_token=extra_params.get('__oauth_token__', None),
     )
     server_data = next((s for s in terminal_servers if s.get('id') == terminal_id), None)
@@ -1280,7 +1283,6 @@ async def get_terminal_tools(
         return {}
 
     # Build auth headers
-    auth_type = connection.get('auth_type', 'bearer')
     cookies = {}
     headers = {'Content-Type': 'application/json', 'X-User-Id': user.id}
 
@@ -1288,9 +1290,7 @@ async def get_terminal_tools(
         headers['Authorization'] = f'Bearer {connection.get("key", "")}'
     elif auth_type == 'session':
         cookies = request.cookies
-        token = get_effective_request_token(request)
-        if token:
-            headers['Authorization'] = f'Bearer {token}'
+        headers['Authorization'] = f'Bearer {terminal_session_token}'
     elif auth_type == 'system_oauth':
         cookies = request.cookies
         oauth_token = extra_params.get('__oauth_token__', None)

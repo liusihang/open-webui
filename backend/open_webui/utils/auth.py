@@ -205,6 +205,17 @@ def create_token(data: dict, expires_delta: Union[timedelta, None] = None) -> st
     return encoded_jwt
 
 
+TERMINAL_SESSION_TOKEN_TTL = timedelta(minutes=5)
+
+
+def create_terminal_session_token(
+    user,
+    expires_delta: Union[timedelta, None] = TERMINAL_SESSION_TOKEN_TTL,
+) -> str:
+    """Mint a short-lived JWT for terminal session-auth handoff."""
+    return create_token({'id': user.id}, expires_delta=expires_delta)
+
+
 def decode_token(token: str) -> dict | None:
     try:
         decoded = jwt.decode(token, SESSION_SECRET, algorithms=[ALGORITHM])

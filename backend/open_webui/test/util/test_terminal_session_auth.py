@@ -1,8 +1,10 @@
+import datetime as dt
 from types import SimpleNamespace
 
 import pytest
 
 from open_webui.routers import terminals as terminals_mod
+from open_webui.utils import auth as auth_mod
 from open_webui.utils import tools as tools_mod
 
 
@@ -37,9 +39,22 @@ async def _allow_access(*_args, **_kwargs):
     return True
 
 
+def test_create_terminal_session_token_mints_short_lived_user_jwt():
+    token = auth_mod.create_terminal_session_token(_user(), expires_delta=dt.timedelta(seconds=60))
+
+    decoded = auth_mod.decode_token(token)
+
+    assert decoded['id'] == 'user-1'
+    assert 0 < decoded['exp'] - decoded['iat'] <= 60
+
+
 @pytest.mark.asyncio
-async def test_terminal_tool_resolution_uses_authorization_header_token_before_state_token(monkeypatch):
+async def test_terminal_tool_resolution_uses_minted_jwt_instead_of_request_token(monkeypatch):
     captured = {}
+
+    def fake_create_terminal_session_token(user):
+        captured['minted_for_user'] = user.id
+        return f'minted-token-for-{user.id}'
 
     async def fake_get_terminal_servers(request, *, session_token=None, oauth_token=None):
         captured['session_token'] = session_token
@@ -82,6 +97,7 @@ async def test_terminal_tool_resolution_uses_authorization_header_token_before_s
     monkeypatch.setattr(tools_mod, 'get_terminal_servers', fake_get_terminal_servers)
     monkeypatch.setattr(tools_mod, 'get_terminal_cwd', fake_get_terminal_cwd)
     monkeypatch.setattr(tools_mod, 'execute_tool_server', fake_execute_tool_server)
+    monkeypatch.setattr(tools_mod, 'create_terminal_session_token', fake_create_terminal_session_token)
 
     request = _request(
         headers={'Authorization': 'Bearer header-token'},
@@ -97,15 +113,20 @@ async def test_terminal_tool_resolution_uses_authorization_header_token_before_s
 
     await result['run_command']['callable']()
 
-    assert captured['session_token'] == 'header-token'
-    assert captured['cwd_headers']['Authorization'] == 'Bearer header-token'
-    assert captured['execute_headers']['Authorization'] == 'Bearer header-token'
+    assert captured['minted_for_user'] == 'user-1'
+    assert captured['session_token'] == 'minted-token-for-user-1'
+    assert captured['cwd_headers']['Authorization'] == 'Bearer minted-token-for-user-1'
+    assert captured['execute_headers']['Authorization'] == 'Bearer minted-token-for-user-1'
     assert captured['execute_cookies'] == {'token': 'cookie-token'}
 
 
 @pytest.mark.asyncio
-async def test_terminal_proxy_uses_cookie_token_before_state_token(monkeypatch):
+async def test_terminal_proxy_uses_minted_jwt_instead_of_request_token(monkeypatch):
     captured = {}
+
+    def fake_create_terminal_session_token(user):
+        captured['minted_for_user'] = user.id
+        return f'minted-token-for-{user.id}'
 
     class FakeResponse:
         status = 200
@@ -131,6 +152,7 @@ async def test_terminal_proxy_uses_cookie_token_before_state_token(monkeypatch):
     monkeypatch.setattr(terminals_mod.Groups, 'get_groups_by_member_id', _allowed_groups)
     monkeypatch.setattr(terminals_mod, 'has_connection_access', _allow_access)
     monkeypatch.setattr(terminals_mod.aiohttp, 'ClientSession', FakeSession)
+    monkeypatch.setattr(terminals_mod, 'create_terminal_session_token', fake_create_terminal_session_token)
 
     async def body():
         return b''
@@ -146,5 +168,6 @@ async def test_terminal_proxy_uses_cookie_token_before_state_token(monkeypatch):
     )
 
     assert response.status_code == 200
-    assert captured['request']['headers']['Authorization'] == 'Bearer cookie-token'
+    assert captured['minted_for_user'] == 'user-1'
+    assert captured['request']['headers']['Authorization'] == 'Bearer minted-token-for-user-1'
     assert captured['request']['cookies'] == {'token': 'cookie-token'}
