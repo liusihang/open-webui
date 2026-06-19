@@ -602,6 +602,188 @@ async def test_general_agent_finalizes_with_code_interpreter_system_pyodide_mess
 
 
 @pytest.mark.asyncio
+async def test_general_agent_model_call_retries_queued_rejection() -> None:
+    class QueuedOnceAgentScopeModelClient(RecordingOpenWebUIClient):
+        async def call_model(self, **kwargs: object) -> dict:
+            await super().call_model(**kwargs)  # type: ignore[arg-type]
+            if len(self.model_calls) == 1:
+                raise RuntimeError(
+                    "OpenWebUI callback failed with status 403: "
+                    '{"detail":{"code":"model_run_rejected","message":'
+                    '"Agent run run-agentscope-queued cannot execute model calls while queued"}}'
+                )
+            return {
+                "status": "success",
+                "model": kwargs["model"],
+                "response": {"content": "retried AgentScope final answer"},
+            }
+
+    openwebui_client = QueuedOnceAgentScopeModelClient()
+    async with make_client(openwebui_client, auto_finalize_ordinary_qa=True) as client:
+        response = await client.post(
+            "/v1/openwebui/runs",
+            headers={"Authorization": f"Bearer {SERVICE_TOKEN}"},
+            json={
+                "run_id": "run-agentscope-queued",
+                "chat_id": "chat-1",
+                "leader_model_id": "model-a",
+                "messages": [{"role": "user", "content": "Use a tool if useful, then answer."}],
+                "tool_access_envelope": {
+                    "tools": [
+                        {
+                            "id": "tool:terminal:main:list_files",
+                            "name": "list_files",
+                            "type": "terminal",
+                            "schema": {
+                                "name": "list_files",
+                                "description": "List files.",
+                                "parameters": {"type": "object", "properties": {}},
+                            },
+                        }
+                    ]
+                },
+            },
+        )
+
+        assert response.status_code == 202
+        for _ in range(40):
+            status = await client.get(
+                "/v1/openwebui/runs/run-agentscope-queued/status",
+                headers={"Authorization": f"Bearer {SERVICE_TOKEN}"},
+            )
+            if status.json()["state"] in {"completed", "failed"}:
+                break
+            await asyncio.sleep(0.01)
+
+    assert status.json()["state"] == "completed"
+    assert [call["model_call_id"] for call in openwebui_client.model_calls] == [
+        "model-call-1",
+        "model-call-1",
+    ]
+    assert {call["idempotency_key"] for call in openwebui_client.model_calls} == {
+        "model:leader:model-call-1:1"
+    }
+    assert openwebui_client.final_deltas[0]["delta"] == "retried AgentScope final answer"
+    assert not any(event["event_type"] == "run.failed" for event in openwebui_client.events)
+
+
+@pytest.mark.asyncio
+async def test_general_agent_model_call_retries_timeout_until_cached_success() -> None:
+    class TimeoutThenCachedSuccessAgentScopeModelClient(RecordingOpenWebUIClient):
+        async def call_model(self, **kwargs: object) -> dict:
+            await super().call_model(**kwargs)  # type: ignore[arg-type]
+            if len(self.model_calls) == 1:
+                raise httpx.ReadTimeout("model callback still in flight")
+            return {
+                "status": "success",
+                "model": kwargs["model"],
+                "response": {"content": "cached callback final answer"},
+            }
+
+    openwebui_client = TimeoutThenCachedSuccessAgentScopeModelClient()
+    async with make_client(openwebui_client, auto_finalize_ordinary_qa=True) as client:
+        response = await client.post(
+            "/v1/openwebui/runs",
+            headers={"Authorization": f"Bearer {SERVICE_TOKEN}"},
+            json={
+                "run_id": "run-agentscope-timeout",
+                "chat_id": "chat-1",
+                "leader_model_id": "model-a",
+                "messages": [{"role": "user", "content": "Use a tool if useful, then answer."}],
+                "tool_access_envelope": {
+                    "tools": [
+                        {
+                            "id": "tool:terminal:main:list_files",
+                            "name": "list_files",
+                            "type": "terminal",
+                            "schema": {
+                                "name": "list_files",
+                                "description": "List files.",
+                                "parameters": {"type": "object", "properties": {}},
+                            },
+                        }
+                    ]
+                },
+            },
+        )
+
+        assert response.status_code == 202
+        for _ in range(40):
+            status = await client.get(
+                "/v1/openwebui/runs/run-agentscope-timeout/status",
+                headers={"Authorization": f"Bearer {SERVICE_TOKEN}"},
+            )
+            if status.json()["state"] in {"completed", "failed"}:
+                break
+            await asyncio.sleep(0.01)
+
+    assert status.json()["state"] == "completed"
+    assert [call["model_call_id"] for call in openwebui_client.model_calls] == [
+        "model-call-1",
+        "model-call-1",
+    ]
+    assert {call["idempotency_key"] for call in openwebui_client.model_calls} == {
+        "model:leader:model-call-1:1"
+    }
+    assert openwebui_client.final_deltas[0]["delta"] == "cached callback final answer"
+    assert not any(event["event_type"] == "run.failed" for event in openwebui_client.events)
+
+
+@pytest.mark.asyncio
+async def test_leader_system_prompt_guides_real_files_to_default_outputs_path() -> None:
+    openwebui_client = RecordingOpenWebUIClient()
+    openwebui_client.model_responses = [
+        {
+            "status": "success",
+            "response": {"content": "I will write real outputs into the default outputs path."},
+        }
+    ]
+
+    async with make_client(openwebui_client, auto_finalize_ordinary_qa=True) as client:
+        response = await client.post(
+            "/v1/openwebui/runs",
+            headers={"Authorization": f"Bearer {SERVICE_TOKEN}"},
+            json={
+                "run_id": "run-default-outputs-guidance",
+                "chat_id": "chat-1",
+                "leader_model_id": "model-a",
+                "messages": [{"role": "user", "content": "Create a downloadable artifact."}],
+                "default_paths": {"outputs": "/srv/agent-runs/run-default-outputs-guidance/outputs"},
+                "tool_access_envelope": {
+                    "tools": [
+                        {
+                            "id": "tool:terminal:main:list_files",
+                            "name": "list_files",
+                            "type": "terminal",
+                            "schema": {
+                                "name": "list_files",
+                                "description": "List files.",
+                                "parameters": {"type": "object", "properties": {}},
+                            },
+                        }
+                    ]
+                },
+            },
+        )
+
+        assert response.status_code == 202
+        for _ in range(40):
+            status = await client.get(
+                "/v1/openwebui/runs/run-default-outputs-guidance/status",
+                headers={"Authorization": f"Bearer {SERVICE_TOKEN}"},
+            )
+            if status.json()["state"] in {"completed", "failed"}:
+                break
+            await asyncio.sleep(0.01)
+
+    assert status.json()["state"] == "completed"
+    system_text = openwebui_client.model_calls[0]["messages"][0]["content"][0]["text"]
+    assert "/srv/agent-runs/run-default-outputs-guidance/outputs" in system_text
+    assert "request.default_paths.outputs" in system_text
+    assert "Notes are not a substitute" in system_text
+
+
+@pytest.mark.asyncio
 async def test_create_subagent_tool_emits_subagent_events_and_integrates_result() -> None:
     openwebui_client = RecordingOpenWebUIClient()
     openwebui_client.model_responses = [

@@ -1,10 +1,12 @@
 from __future__ import annotations
 
+import asyncio
 import json
 from collections.abc import AsyncGenerator
 from dataclasses import dataclass
 from typing import Any, Protocol
 
+import httpx
 from pydantic import BaseModel
 
 from agentscope.app import SubAgentTemplate
@@ -26,6 +28,10 @@ Your role: {member_description}
 Use only OpenWebUI-governed model and tool callbacks supplied by the runtime. \
 Do not expect direct provider credentials, user JWTs, terminal keys, MCP \
 secrets, or raw tool server credentials inside this AgentScope runtime."""
+
+
+MODEL_CALL_RETRY_ATTEMPTS = 3
+MODEL_CALL_RETRY_DELAY_SECONDS = 0.05
 
 
 class OpenWebUIBridgeCallbacks(Protocol):
@@ -149,23 +155,33 @@ class OpenWebUIAgentScopeModel(ChatModelBase):
     ) -> ChatResponse | AsyncGenerator[ChatResponse, None]:
         model_call_id = self._allocate_model_call_id()
         params = dict(kwargs)
+        idempotency_key = f"model:{self.participant_id}:{model_call_id}:1"
 
-        response = await self.callback_client.call_model(
-            run_id=self.run_id,
-            idempotency_key=f"model:{self.participant_id}:{model_call_id}:1",
-            participant_id=self.participant_id,
-            model_call_id=model_call_id,
-            model=model_name,
-            messages=await self._format_messages(messages),
-            stream=False,
-            params=params,
-            tools=tools,
-            tool_choice=_jsonable(tool_choice) if tool_choice is not None else None,
-            metadata={
-                "runtime_session_id": self.runtime_session_id,
-                "agentscope_bridge": True,
-            },
-        )
+        formatted_messages = await self._format_messages(messages)
+        for attempt in range(1, MODEL_CALL_RETRY_ATTEMPTS + 1):
+            try:
+                response = await self.callback_client.call_model(
+                    run_id=self.run_id,
+                    idempotency_key=idempotency_key,
+                    participant_id=self.participant_id,
+                    model_call_id=model_call_id,
+                    model=model_name,
+                    messages=formatted_messages,
+                    stream=False,
+                    params=params,
+                    tools=tools,
+                    tool_choice=_jsonable(tool_choice) if tool_choice is not None else None,
+                    metadata={
+                        "runtime_session_id": self.runtime_session_id,
+                        "agentscope_bridge": True,
+                    },
+                )
+                break
+            except Exception as exc:
+                if attempt < MODEL_CALL_RETRY_ATTEMPTS and _is_retryable_model_call_callback(exc):
+                    await asyncio.sleep(MODEL_CALL_RETRY_DELAY_SECONDS)
+                    continue
+                raise
         return ChatResponse(
             content=_extract_chat_response_blocks(response),
             is_last=True,
@@ -479,6 +495,13 @@ def _extract_artifacts(response: dict[str, Any]) -> list[dict[str, Any]]:
     if isinstance(payload, dict) and isinstance(payload.get("artifacts"), list):
         return [artifact for artifact in payload["artifacts"] if isinstance(artifact, dict)]
     return []
+
+
+def _is_retryable_model_call_callback(exc: Exception) -> bool:
+    if isinstance(exc, httpx.TimeoutException):
+        return True
+    message = str(exc)
+    return "model_run_rejected" in message and "while queued" in message
 
 
 def _humanize_tool_name(name: str) -> str:

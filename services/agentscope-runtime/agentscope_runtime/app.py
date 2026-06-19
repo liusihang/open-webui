@@ -698,15 +698,22 @@ def _leader_system_prompt(request: RunStartRequest) -> str:
         "Use the available tools and subagents when they are useful, then "
         "respond with a concise final answer for the user."
     )
+    fragments = [prompt]
+    outputs_path = request.default_paths.get("outputs")
+    if isinstance(outputs_path, str) and outputs_path.strip():
+        fragments.append(
+            "When the user asks for real files or downloadable artifacts, write them under "
+            f"request.default_paths.outputs: {outputs_path.strip()}. Do not invent output paths. "
+            "Notes are not a substitute for downloadable files; create the file with a tool and "
+            "reference the real path or registered artifact."
+        )
     system_fragments = [
         _message_content_text(message.get("content", ""))
         for message in request.messages
         if isinstance(message, dict) and str(message.get("role") or "") == "system"
     ]
     system_fragments = [fragment for fragment in system_fragments if fragment]
-    if not system_fragments:
-        return prompt
-    return "\n\n".join([prompt, *system_fragments])
+    return "\n\n".join([*fragments, *system_fragments])
 
 
 def _subagent_system_prompt(context: SubagentExecutionContext) -> str:
