@@ -127,6 +127,8 @@ class ModelCallRequest(BaseModel):
     model: str
     messages: list[dict[str, Any]] = Field(default_factory=list)
     stream: bool = False
+    tools: list[dict[str, Any]] | None = None
+    tool_choice: Any | None = None
     params: dict[str, Any] = Field(default_factory=dict)
     metadata: dict[str, Any] = Field(default_factory=dict)
 

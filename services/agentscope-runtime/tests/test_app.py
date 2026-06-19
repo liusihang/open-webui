@@ -1,10 +1,11 @@
 import asyncio
 import logging
+from types import SimpleNamespace
 
 import httpx
 import pytest
 
-from agentscope_runtime.app import RuntimeStore, create_app, create_app_from_env
+from agentscope_runtime.app import RuntimeStore, _msg_text, create_app, create_app_from_env
 
 
 SERVICE_TOKEN = "runtime-secret"
@@ -15,7 +16,17 @@ class RecordingOpenWebUIClient:
         self.events: list[dict] = []
         self.final_deltas: list[dict] = []
         self.model_calls: list[dict] = []
+        self.tool_calls: list[dict] = []
+        self.subagent_registrations: list[dict] = []
+        self.model_selections: list[dict] = []
         self.state_transitions: list[dict] = []
+        self.model_responses: list[dict] = [
+            {
+                "status": "success",
+                "model": "model-a",
+                "response": {"content": "callback final answer"},
+            }
+        ]
 
     async def append_event(
         self,
@@ -75,6 +86,8 @@ class RecordingOpenWebUIClient:
         stream: bool,
         params: dict,
         metadata: dict,
+        tools: list[dict] | None = None,
+        tool_choice: object | None = None,
     ) -> dict:
         call = {
             "run_id": run_id,
@@ -86,13 +99,99 @@ class RecordingOpenWebUIClient:
             "stream": stream,
             "params": params,
             "metadata": metadata,
+            "tools": tools,
+            "tool_choice": tool_choice,
         }
         self.model_calls.append(call)
+        if self.model_responses:
+            return self.model_responses.pop(0)
         return {
             "status": "success",
             "model": model,
             "response": {"content": "callback final answer"},
         }
+
+    async def call_tool(
+        self,
+        *,
+        run_id: str,
+        idempotency_key: str,
+        participant_id: str,
+        tool_call_id: str,
+        tool_id: str,
+        arguments: dict,
+    ) -> dict:
+        call = {
+            "run_id": run_id,
+            "idempotency_key": idempotency_key,
+            "participant_id": participant_id,
+            "tool_call_id": tool_call_id,
+            "tool_id": tool_id,
+            "arguments": arguments,
+        }
+        self.tool_calls.append(call)
+        return {
+            "status": "success",
+            "content": "tool callback result",
+            "artifacts": [
+                {
+                    "id": "artifact-1",
+                    "name": "result.txt",
+                    "mime_type": "text/plain",
+                    "url": "/api/files/artifact-1",
+                }
+            ],
+        }
+
+    async def register_subagent(
+        self,
+        *,
+        run_id: str,
+        idempotency_key: str,
+        parent_participant_id: str,
+        participant_id: str,
+        name: str,
+        description: str,
+        task: str,
+        budget: dict,
+        metadata: dict,
+    ) -> dict:
+        registration = {
+            "run_id": run_id,
+            "idempotency_key": idempotency_key,
+            "parent_participant_id": parent_participant_id,
+            "participant_id": participant_id,
+            "name": name,
+            "description": description,
+            "task": task,
+            "budget": budget,
+            "metadata": metadata,
+        }
+        self.subagent_registrations.append(registration)
+        return {"status": "accepted", "participant_id": participant_id}
+
+    async def select_model(
+        self,
+        *,
+        run_id: str,
+        idempotency_key: str,
+        participant_id: str,
+        selection_id: str,
+        requested_model_id: str | None = None,
+        fuzzy_request: str | None = None,
+        source_request: dict | None = None,
+    ) -> dict:
+        selection = {
+            "run_id": run_id,
+            "idempotency_key": idempotency_key,
+            "participant_id": participant_id,
+            "selection_id": selection_id,
+            "requested_model_id": requested_model_id,
+            "fuzzy_request": fuzzy_request,
+            "source_request": source_request or {},
+        }
+        self.model_selections.append(selection)
+        return {"selected_model_id": requested_model_id or "model-a"}
 
     async def transition_state(
         self,
@@ -116,6 +215,36 @@ class RecordingOpenWebUIClient:
         return {"id": run_id, "state": to_state}
 
 
+class BlockingModelOpenWebUIClient(RecordingOpenWebUIClient):
+    def __init__(self) -> None:
+        super().__init__()
+        self.model_started = asyncio.Event()
+        self.release_model = asyncio.Event()
+
+    async def call_model(self, **kwargs: object) -> dict:
+        self.model_calls.append(kwargs)
+        self.model_started.set()
+        await self.release_model.wait()
+        return {
+            "status": "success",
+            "model": kwargs["model"],
+            "response": {"content": "callback final answer"},
+        }
+
+
+class FailFirstRunningEventOpenWebUIClient(RecordingOpenWebUIClient):
+    def __init__(self) -> None:
+        super().__init__()
+        self.running_event_attempts = 0
+
+    async def append_event(self, **kwargs: object) -> dict:
+        if kwargs["event_type"] == "run.running":
+            self.running_event_attempts += 1
+            if self.running_event_attempts == 1:
+                raise RuntimeError("transient callback outage")
+        return await super().append_event(**kwargs)
+
+
 def make_client(
     openwebui_client: RecordingOpenWebUIClient | None = None,
     *,
@@ -129,6 +258,20 @@ def make_client(
     )
     transport = httpx.ASGITransport(app=app)
     return httpx.AsyncClient(transport=transport, base_url="http://runtime.test")
+
+
+def test_msg_text_extracts_text_from_agentscope_objects_and_dict_like_blocks() -> None:
+    from agentscope.message import TextBlock
+
+    msg = SimpleNamespace(
+        get_content_blocks=lambda: [
+            TextBlock(text="object text"),
+            {"type": "text", "text": " dict text"},
+            {"type": "data", "name": "artifact.png"},
+        ]
+    )
+
+    assert _msg_text(msg) == "object text dict text"
 
 
 @pytest.mark.asyncio
@@ -291,51 +434,214 @@ async def test_run_start_finalizes_ordinary_qa_through_model_and_final_delta_cal
 
 
 @pytest.mark.asyncio
-async def test_cancel_during_model_call_prevents_finalization_callbacks() -> None:
-    class BlockingModelClient(RecordingOpenWebUIClient):
-        def __init__(self) -> None:
-            super().__init__()
-            self.model_call_started = asyncio.Event()
-            self.release_model_call = asyncio.Event()
+async def test_run_start_with_tool_envelope_drives_tool_artifact_and_final_lifecycle() -> None:
+    openwebui_client = RecordingOpenWebUIClient()
+    openwebui_client.model_responses = [
+        {
+            "status": "success",
+            "response": {
+                "choices": [
+                    {
+                        "message": {
+                            "content": "I will read the file.",
+                            "tool_calls": [
+                                {
+                                    "id": "call_read_1",
+                                    "type": "function",
+                                    "function": {
+                                        "name": "read_file",
+                                        "arguments": "{\"path\":\"/tmp/input.txt\"}",
+                                    },
+                                }
+                            ],
+                        }
+                    }
+                ]
+            },
+        },
+        {
+            "status": "success",
+            "response": {"content": "The file says: tool callback result"},
+        },
+    ]
 
-        async def call_model(self, **kwargs: object) -> dict:
-            await super().call_model(**kwargs)  # type: ignore[arg-type]
-            self.model_call_started.set()
-            await self.release_model_call.wait()
-            return {
-                "status": "success",
-                "model": kwargs["model"],
-                "response": {"content": "late final answer"},
-            }
-
-    openwebui_client = BlockingModelClient()
     async with make_client(openwebui_client, auto_finalize_ordinary_qa=True) as client:
         response = await client.post(
             "/v1/openwebui/runs",
             headers={"Authorization": f"Bearer {SERVICE_TOKEN}"},
             json={
-                "run_id": "run-cancel-during-model",
+                "run_id": "run-tool",
                 "chat_id": "chat-1",
-                "user_message_id": "msg-user",
-                "assistant_message_id": "msg-assistant",
+                "leader_model_id": "model-a",
+                "messages": [{"role": "user", "content": "Read the file."}],
+                "tool_access_envelope": {
+                    "tools": [
+                        {
+                            "id": "tool:terminal:main:read_file",
+                            "name": "read_file",
+                            "type": "terminal",
+                            "schema": {
+                                "name": "read_file",
+                                "description": "Read a file.",
+                                "parameters": {
+                                    "type": "object",
+                                    "properties": {"path": {"type": "string"}},
+                                    "required": ["path"],
+                                },
+                            },
+                        }
+                    ]
+                },
+            },
+        )
+
+        assert response.status_code == 202
+        for _ in range(40):
+            status = await client.get(
+                "/v1/openwebui/runs/run-tool/status",
+                headers={"Authorization": f"Bearer {SERVICE_TOKEN}"},
+            )
+            if status.json()["state"] == "completed":
+                break
+            await asyncio.sleep(0.01)
+
+    assert [call["model_call_id"] for call in openwebui_client.model_calls] == [
+        "model-call-1",
+        "model-call-2",
+    ]
+    assert openwebui_client.model_calls[0]["tools"][0]["function"]["name"] == "read_file"
+    assert "tools" not in openwebui_client.model_calls[0]["params"]
+    assert openwebui_client.tool_calls == [
+        {
+            "run_id": "run-tool",
+            "idempotency_key": "tool:leader:tool-call-1:1",
+            "participant_id": "leader",
+            "tool_call_id": "tool-call-1",
+            "tool_id": "tool:terminal:main:read_file",
+            "arguments": {"path": "/tmp/input.txt"},
+        }
+    ]
+    assert [event["event_type"] for event in openwebui_client.events] == [
+        "run.running",
+        "tool.requested",
+        "tool.completed",
+        "artifact.registered",
+        "final.started",
+        "run.completed",
+    ]
+    assert openwebui_client.events[1]["summary"] == "Read a file."
+    assert openwebui_client.events[2]["summary"] == "Read file completed."
+    assert openwebui_client.events[3]["payload"]["artifact"]["id"] == "artifact-1"
+    assert openwebui_client.final_deltas[0]["delta"] == "The file says: tool callback result"
+
+
+@pytest.mark.asyncio
+async def test_create_subagent_tool_emits_subagent_events_and_integrates_result() -> None:
+    openwebui_client = RecordingOpenWebUIClient()
+    openwebui_client.model_responses = [
+        {
+            "status": "success",
+            "response": {
+                "choices": [
+                    {
+                        "message": {
+                            "tool_calls": [
+                                {
+                                    "id": "call_subagent_1",
+                                    "type": "function",
+                                    "function": {
+                                        "name": "create_subagent",
+                                        "arguments": (
+                                            "{\"name\":\"Researcher\","
+                                            "\"description\":\"Checks the facts.\","
+                                            "\"task\":\"Find the key fact.\","
+                                            "\"requested_model_id\":\"model-a\"}"
+                                        ),
+                                    },
+                                }
+                            ],
+                        }
+                    }
+                ]
+            },
+        },
+        {
+            "status": "success",
+            "response": {"content": "Subagent found the key fact."},
+        },
+        {
+            "status": "success",
+            "response": {"content": "Integrated: Subagent found the key fact."},
+        },
+    ]
+
+    async with make_client(openwebui_client, auto_finalize_ordinary_qa=True) as client:
+        response = await client.post(
+            "/v1/openwebui/runs",
+            headers={"Authorization": f"Bearer {SERVICE_TOKEN}"},
+            json={
+                "run_id": "run-subagent",
+                "chat_id": "chat-1",
+                "leader_model_id": "model-a",
+                "messages": [{"role": "user", "content": "Delegate research."}],
+                "model_catalog": [{"id": "model-a"}],
+                "budget": {"max_subagent_model_calls": 1},
+            },
+        )
+
+        assert response.status_code == 202
+        for _ in range(60):
+            status = await client.get(
+                "/v1/openwebui/runs/run-subagent/status",
+                headers={"Authorization": f"Bearer {SERVICE_TOKEN}"},
+            )
+            if status.json()["state"] == "completed":
+                break
+            await asyncio.sleep(0.01)
+
+    assert [registration["name"] for registration in openwebui_client.subagent_registrations] == [
+        "Researcher"
+    ]
+    assert openwebui_client.model_selections[0]["requested_model_id"] == "model-a"
+    assert [call["participant_id"] for call in openwebui_client.model_calls] == [
+        "leader",
+        "subagent:run-subagent:1",
+        "leader",
+    ]
+    assert "Subagent found the key fact." in openwebui_client.final_deltas[0]["delta"]
+    assert "subagent.created" in [event["event_type"] for event in openwebui_client.events]
+    assert "subagent.completed" in [event["event_type"] for event in openwebui_client.events]
+
+
+@pytest.mark.asyncio
+async def test_cancel_during_ordinary_qa_finalization_keeps_session_cancelled_without_final_callbacks() -> None:
+    openwebui_client = BlockingModelOpenWebUIClient()
+    async with make_client(openwebui_client, auto_finalize_ordinary_qa=True) as client:
+        start = await client.post(
+            "/v1/openwebui/runs",
+            headers={"Authorization": f"Bearer {SERVICE_TOKEN}"},
+            json={
+                "run_id": "run-cancel-finalizing",
+                "chat_id": "chat-1",
                 "leader_model_id": "model-a",
                 "messages": [{"role": "user", "content": "hello"}],
             },
         )
-        assert response.status_code == 202
-        await asyncio.wait_for(openwebui_client.model_call_started.wait(), timeout=1)
+        assert start.status_code == 202
+        await asyncio.wait_for(openwebui_client.model_started.wait(), timeout=1)
 
         cancel = await client.post(
-            "/v1/openwebui/runs/run-cancel-during-model/cancel",
+            "/v1/openwebui/runs/run-cancel-finalizing/cancel",
             headers={"Authorization": f"Bearer {SERVICE_TOKEN}"},
         )
         assert cancel.status_code == 200
         assert cancel.json()["state"] == "cancelled"
 
-        openwebui_client.release_model_call.set()
+        openwebui_client.release_model.set()
         await asyncio.sleep(0.05)
+
         status = await client.get(
-            "/v1/openwebui/runs/run-cancel-during-model/status",
+            "/v1/openwebui/runs/run-cancel-finalizing/status",
             headers={"Authorization": f"Bearer {SERVICE_TOKEN}"},
         )
 
@@ -537,6 +843,88 @@ async def test_run_start_finalization_failure_keeps_diagnostic_message_and_trace
     assert "runtime finalization failed during model-call" in message
     assert "Exception" in message
     assert any(record.exc_info for record in caplog.records)
+
+
+@pytest.mark.asyncio
+async def test_duplicate_run_start_reuses_existing_session_without_reemitting_running_or_rescheduling() -> None:
+    openwebui_client = BlockingModelOpenWebUIClient()
+    async with make_client(openwebui_client, auto_finalize_ordinary_qa=True) as client:
+        first = await client.post(
+            "/v1/openwebui/runs",
+            headers={"Authorization": f"Bearer {SERVICE_TOKEN}"},
+            json={
+                "run_id": "run-duplicate",
+                "chat_id": "chat-1",
+                "leader_model_id": "model-a",
+                "messages": [{"role": "user", "content": "hello"}],
+            },
+        )
+        assert first.status_code == 202
+        first_body = first.json()
+        await asyncio.wait_for(openwebui_client.model_started.wait(), timeout=1)
+
+        try:
+            second = await client.post(
+                "/v1/openwebui/runs",
+                headers={"Authorization": f"Bearer {SERVICE_TOKEN}"},
+                json={
+                    "run_id": "run-duplicate",
+                    "chat_id": "chat-1",
+                    "leader_model_id": "model-a",
+                    "messages": [{"role": "user", "content": "hello again"}],
+                },
+            )
+            second_body = second.json()
+            await asyncio.sleep(0.05)
+
+            assert second.status_code == 202
+            assert second_body["accepted"] is True
+            assert second_body["runtime_session_id"] == first_body["runtime_session_id"]
+            assert [event["event_type"] for event in openwebui_client.events] == ["run.running"]
+            assert len(openwebui_client.model_calls) == 1
+        finally:
+            openwebui_client.release_model.set()
+            await asyncio.sleep(0.05)
+
+
+@pytest.mark.asyncio
+async def test_run_start_retry_after_callback_failure_creates_fresh_session() -> None:
+    openwebui_client = FailFirstRunningEventOpenWebUIClient()
+    async with make_client(openwebui_client) as client:
+        first = await client.post(
+            "/v1/openwebui/runs",
+            headers={"Authorization": f"Bearer {SERVICE_TOKEN}"},
+            json={
+                "run_id": "run-start-retry",
+                "chat_id": "chat-1",
+                "leader_model_id": "model-a",
+                "messages": [{"role": "user", "content": "hello"}],
+            },
+        )
+        assert first.status_code == 502
+
+        retry = await client.post(
+            "/v1/openwebui/runs",
+            headers={"Authorization": f"Bearer {SERVICE_TOKEN}"},
+            json={
+                "run_id": "run-start-retry",
+                "chat_id": "chat-1",
+                "leader_model_id": "model-a",
+                "messages": [{"role": "user", "content": "hello"}],
+            },
+        )
+        retry_body = retry.json()
+
+        status = await client.get(
+            "/v1/openwebui/runs/run-start-retry/status",
+            headers={"Authorization": f"Bearer {SERVICE_TOKEN}"},
+        )
+
+    assert retry.status_code == 202
+    assert retry_body["accepted"] is True
+    assert status.json()["state"] == "running"
+    assert openwebui_client.running_event_attempts == 2
+    assert [event["event_type"] for event in openwebui_client.events] == ["run.running"]
 
 
 @pytest.mark.asyncio

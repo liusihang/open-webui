@@ -10,8 +10,20 @@ from typing import Any, Protocol
 
 from fastapi import Depends, FastAPI, Header, HTTPException, status
 
+from agentscope.agent import Agent, ReActConfig
+from agentscope.message import Msg, TextBlock, ToolResultState, UserMsg
+from agentscope.permission import PermissionBehavior, PermissionContext, PermissionDecision
+from agentscope.tool import ToolBase, ToolChunk, Toolkit
+
+from agentscope_runtime.agentscope_bridge import AgentScopeRuntimeBridge
 from agentscope_runtime.openwebui_client import OpenWebUIClient
 from agentscope_runtime.schemas import RunStartRequest, RunStartResponse, RunStatusResponse
+from agentscope_runtime.subagents import (
+    AgentScopeSubagentAdapter,
+    LEADER_PARTICIPANT_ID,
+    SubagentExecutionContext,
+    SubagentSpec,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -66,7 +78,49 @@ class RuntimeCallbackClient(Protocol):
         messages: list[dict[str, Any]],
         stream: bool,
         params: dict[str, Any],
+        tools: list[dict[str, Any]] | None = None,
+        tool_choice: Any | None = None,
         metadata: dict[str, Any],
+    ) -> dict[str, Any]:
+        ...
+
+    async def call_tool(
+        self,
+        *,
+        run_id: str,
+        idempotency_key: str,
+        participant_id: str,
+        tool_call_id: str,
+        tool_id: str,
+        arguments: dict[str, Any],
+    ) -> dict[str, Any]:
+        ...
+
+    async def register_subagent(
+        self,
+        *,
+        run_id: str,
+        idempotency_key: str,
+        parent_participant_id: str,
+        participant_id: str,
+        name: str,
+        description: str,
+        task: str,
+        budget: dict[str, Any],
+        metadata: dict[str, Any],
+    ) -> dict[str, Any]:
+        ...
+
+    async def select_model(
+        self,
+        *,
+        run_id: str,
+        idempotency_key: str,
+        participant_id: str,
+        selection_id: str,
+        requested_model_id: str | None = None,
+        fuzzy_request: str | None = None,
+        source_request: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         ...
 
@@ -89,6 +143,7 @@ class RuntimeSession:
     runtime_session_id: str
     state: str
     cancel_requested: bool = False
+    start_accepted: bool = False
     request: RunStartRequest | None = None
     created_at: float = field(default_factory=time.time)
     updated_at: float = field(default_factory=time.time)
@@ -156,6 +211,13 @@ def create_app(
         dependencies=[Depends(require_service_token)],
     )
     async def start_run(request: RunStartRequest) -> RunStartResponse:
+        existing_session = runtime_store.get(request.run_id)
+        if existing_session is not None and existing_session.start_accepted:
+            return RunStartResponse(
+                runtime_session_id=existing_session.runtime_session_id,
+                accepted=True,
+            )
+
         session = runtime_store.create(request)
         idempotency_key = f"evt:{session.runtime_session_id}:run-running"
         try:
@@ -168,6 +230,8 @@ def create_app(
                 participant_id="leader",
                 phase="running",
             )
+            session.start_accepted = True
+            session.updated_at = time.time()
         except Exception as exc:
             session.state = "failed"
             session.updated_at = time.time()
@@ -180,7 +244,10 @@ def create_app(
             ) from exc
 
         if auto_finalize_ordinary_qa:
-            asyncio.create_task(_finalize_ordinary_qa(callback_client, session, request))
+            if _should_use_general_agent(request):
+                asyncio.create_task(_finalize_general_agent_run(callback_client, session, request))
+            else:
+                asyncio.create_task(_finalize_ordinary_qa(callback_client, session, request))
 
         return RunStartResponse(
             runtime_session_id=session.runtime_session_id,
@@ -248,75 +315,19 @@ async def _finalize_ordinary_qa(
     payload = {"runtime_session_id": session.runtime_session_id}
     stage = "model-call"
     try:
-        if _finalization_cancelled(session):
+        if _is_cancelled(session):
             return
         answer = await _call_leader_model(callback_client, session, request)
-        if _finalization_cancelled(session):
+        if _is_cancelled(session):
             return
-        stage = "state-transition"
-        await callback_client.transition_state(
-            run_id=session.run_id,
-            idempotency_key=f"state:{session.run_id}:finalizing",
-            from_states=["running"],
-            to_state="finalizing",
-            reason="runtime closed work",
-            payload=payload,
-        )
-        session.state = "finalizing"
-        session.updated_at = time.time()
 
-        if _finalization_cancelled(session):
-            return
-        stage = "final-started-event"
-        await callback_client.append_event(
-            run_id=session.run_id,
-            idempotency_key=f"evt:{session.runtime_session_id}:final-started",
-            event_type="final.started",
-            summary="Final answer phase started.",
-            payload=payload,
-            participant_id="leader",
-            phase="finalizing",
-        )
-        if _finalization_cancelled(session):
-            return
-        stage = "final-delta"
-        await callback_client.append_final_delta(
-            run_id=session.run_id,
-            idempotency_key=f"final:{session.run_id}:answer:0",
-            final_stream_id="answer",
-            delta_index=0,
-            delta=answer,
-            participant_id="leader",
-            payload=payload,
-        )
-        if _finalization_cancelled(session):
-            return
-        stage = "completed-transition"
-        await callback_client.transition_state(
-            run_id=session.run_id,
-            idempotency_key=f"state:{session.run_id}:completed",
-            from_states=["finalizing"],
-            to_state="completed",
-            reason="runtime final answer completed",
-            payload=payload,
-        )
-        stage = "completed-event"
-        await callback_client.append_event(
-            run_id=session.run_id,
-            idempotency_key=f"evt:{session.runtime_session_id}:run-completed",
-            event_type="run.completed",
-            summary="Agent run completed.",
-            payload=payload,
-            participant_id="leader",
-            phase="completed",
-        )
-        session.state = "completed"
-        session.updated_at = time.time()
+        stage = "emit-final-answer"
+        await _emit_final_answer(callback_client, session, answer, payload)
     except Exception as exc:
-        if _finalization_cancelled(session):
+        if _is_cancelled(session):
             return
         logger.exception(
-            "Runtime finalization failed during %s for run_id=%s runtime_session_id=%s",
+            "Runtime ordinary QA finalization failed during %s for run_id=%s runtime_session_id=%s",
             stage,
             session.run_id,
             session.runtime_session_id,
@@ -324,7 +335,389 @@ async def _finalize_ordinary_qa(
         await _mark_session_failed(callback_client, session, exc, stage=stage)
 
 
-def _finalization_cancelled(session: RuntimeSession) -> bool:
+async def _finalize_general_agent_run(
+    callback_client: RuntimeCallbackClient,
+    session: RuntimeSession,
+    request: RunStartRequest,
+) -> None:
+    payload = {"runtime_session_id": session.runtime_session_id}
+    stage = "general-agent-setup"
+    try:
+        if _is_cancelled(session):
+            return
+        bridge = AgentScopeRuntimeBridge(
+            run_id=session.run_id,
+            runtime_session_id=session.runtime_session_id,
+            callback_client=callback_client,
+        )
+        leader_model_id = request.leader_model_id or _first_model_catalog_id(request.model_catalog)
+        if not leader_model_id:
+            raise RuntimeError("leader model id is required for agent execution")
+
+        stage = "general-agent-reply"
+        leader = Agent(
+            name=LEADER_PARTICIPANT_ID,
+            system_prompt=_leader_system_prompt(request),
+            model=bridge.build_model(
+                participant_id=LEADER_PARTICIPANT_ID,
+                model_id=leader_model_id,
+            ),
+            toolkit=_build_toolkit(
+                bridge=bridge,
+                callback_client=callback_client,
+                session=session,
+                request=request,
+                participant_id=LEADER_PARTICIPANT_ID,
+                include_subagent_tool=_subagents_enabled(request),
+            ),
+            react_config=ReActConfig(max_iters=_max_iters(request)),
+        )
+        reply = await leader.reply(_request_messages_to_msgs(request))
+        if _is_cancelled(session):
+            return
+        stage = "emit-final-answer"
+        await _emit_final_answer(callback_client, session, _msg_text(reply), payload)
+    except Exception as exc:
+        if _is_cancelled(session):
+            return
+        provider_error = _provider_configuration_error_from_text(str(exc))
+        if provider_error is not None:
+            exc = provider_error
+        logger.exception(
+            "Runtime general agent execution failed during %s for run_id=%s runtime_session_id=%s",
+            stage,
+            session.run_id,
+            session.runtime_session_id,
+        )
+        await _mark_session_failed(callback_client, session, exc, stage=stage)
+
+
+async def _emit_final_answer(
+    callback_client: RuntimeCallbackClient,
+    session: RuntimeSession,
+    answer: str,
+    payload: dict[str, Any],
+) -> None:
+    await callback_client.transition_state(
+        run_id=session.run_id,
+        idempotency_key=f"state:{session.run_id}:finalizing",
+        from_states=["running"],
+        to_state="finalizing",
+        reason="runtime closed work",
+        payload=payload,
+    )
+    if _is_cancelled(session):
+        return
+    session.state = "finalizing"
+    session.updated_at = time.time()
+
+    await callback_client.append_event(
+        run_id=session.run_id,
+        idempotency_key=f"evt:{session.runtime_session_id}:final-started",
+        event_type="final.started",
+        summary="Final answer phase started.",
+        payload=payload,
+        participant_id="leader",
+        phase="finalizing",
+    )
+    if _is_cancelled(session):
+        return
+    await callback_client.append_final_delta(
+        run_id=session.run_id,
+        idempotency_key=f"final:{session.run_id}:answer:0",
+        final_stream_id="answer",
+        delta_index=0,
+        delta=answer,
+        participant_id="leader",
+        payload=payload,
+    )
+    if _is_cancelled(session):
+        return
+    await callback_client.transition_state(
+        run_id=session.run_id,
+        idempotency_key=f"state:{session.run_id}:completed",
+        from_states=["finalizing"],
+        to_state="completed",
+        reason="runtime final answer completed",
+        payload=payload,
+    )
+    if _is_cancelled(session):
+        return
+    await callback_client.append_event(
+        run_id=session.run_id,
+        idempotency_key=f"evt:{session.runtime_session_id}:run-completed",
+        event_type="run.completed",
+        summary="Agent run completed.",
+        payload=payload,
+        participant_id="leader",
+        phase="completed",
+    )
+    session.state = "completed"
+    session.updated_at = time.time()
+
+
+def _should_use_general_agent(request: RunStartRequest) -> bool:
+    return _has_tool_access(request) or _subagents_enabled(request)
+
+
+def _has_tool_access(request: RunStartRequest) -> bool:
+    tools = request.tool_access_envelope.get("tools")
+    return isinstance(tools, list) and bool(tools)
+
+
+def _subagents_enabled(request: RunStartRequest) -> bool:
+    if request.team_cap is not None:
+        return request.team_cap > 0
+    if request.budget.get("max_subagent_model_calls") is not None:
+        return True
+    return request.metadata.get("enable_subagents") is True
+
+
+def _build_toolkit(
+    *,
+    bridge: AgentScopeRuntimeBridge,
+    callback_client: RuntimeCallbackClient,
+    session: RuntimeSession,
+    request: RunStartRequest,
+    participant_id: str,
+    include_subagent_tool: bool,
+) -> Toolkit:
+    tools: list[ToolBase] = []
+    for tool_spec in _tool_specs(request):
+        schema = tool_spec.get("schema") if isinstance(tool_spec.get("schema"), dict) else {}
+        name = str(tool_spec.get("name") or schema.get("name") or tool_spec.get("id"))
+        if not name:
+            continue
+        description = str(schema.get("description") or tool_spec.get("description") or name)
+        input_schema = schema.get("parameters")
+        if not isinstance(input_schema, dict):
+            input_schema = {"type": "object", "properties": {}}
+        tools.append(
+            bridge.build_tool_proxy(
+                participant_id=participant_id,
+                tool_id=str(tool_spec.get("id") or name),
+                name=name,
+                description=description,
+                input_schema=input_schema,
+            )
+        )
+
+    if include_subagent_tool:
+        tools.append(
+            CreateSubagentTool(
+                callback_client=callback_client,
+                session=session,
+                request=request,
+            )
+        )
+    return Toolkit(tools=tools)
+
+
+def _tool_specs(request: RunStartRequest) -> list[dict[str, Any]]:
+    tools = request.tool_access_envelope.get("tools")
+    if not isinstance(tools, list):
+        return []
+    return [tool for tool in tools if isinstance(tool, dict)]
+
+
+class CreateSubagentTool(ToolBase):
+    name = "create_subagent"
+    description = "Delegate a focused subtask to a separate worker agent."
+    input_schema = {
+        "type": "object",
+        "properties": {
+            "name": {"type": "string", "description": "Short worker name."},
+            "description": {"type": "string", "description": "Worker role."},
+            "task": {"type": "string", "description": "Specific delegated task."},
+            "requested_model_id": {
+                "type": "string",
+                "description": "Optional exact model id for the worker.",
+            },
+            "fuzzy_model_request": {
+                "type": "string",
+                "description": "Optional model capability request.",
+            },
+        },
+        "required": ["name", "description", "task"],
+    }
+    is_concurrency_safe = False
+    is_read_only = False
+
+    def __init__(
+        self,
+        *,
+        callback_client: RuntimeCallbackClient,
+        session: RuntimeSession,
+        request: RunStartRequest,
+    ) -> None:
+        self.callback_client = callback_client
+        self.session = session
+        self.request = request
+
+    async def check_permissions(
+        self,
+        tool_input: dict[str, Any],
+        context: PermissionContext,
+    ) -> PermissionDecision:
+        return PermissionDecision(
+            behavior=PermissionBehavior.ALLOW,
+            message="Subagent creation is governed by OpenWebUI runtime limits.",
+        )
+
+    async def __call__(
+        self,
+        *,
+        name: str,
+        description: str,
+        task: str,
+        requested_model_id: str | None = None,
+        fuzzy_model_request: str | None = None,
+    ) -> ToolChunk:
+        adapter = AgentScopeSubagentAdapter(
+            run_id=self.session.run_id,
+            runtime_session_id=self.session.runtime_session_id,
+            callback_client=self.callback_client,
+            team_cap=self.request.team_cap or 5,
+            is_cancelled=lambda: _is_cancelled(self.session),
+        )
+        spec = SubagentSpec(
+            name=name,
+            description=description,
+            task=task,
+            requested_model_id=requested_model_id,
+            fuzzy_model_request=fuzzy_model_request,
+            budget=_subagent_budget(self.request),
+        )
+        result = await adapter.run_subagent(
+            parent_participant_id=LEADER_PARTICIPANT_ID,
+            spec=spec,
+            executor=lambda context: _execute_subagent(
+                callback_client=self.callback_client,
+                session=self.session,
+                request=self.request,
+                context=context,
+            ),
+        )
+        state = ToolResultState.SUCCESS if result.status == "completed" else ToolResultState.ERROR
+        content = result.content or "Subagent finished without a text result."
+        return ToolChunk(
+            content=[TextBlock(text=content)],
+            state=state,
+            metadata={"subagent_result": result.metadata},
+        )
+
+
+async def _execute_subagent(
+    *,
+    callback_client: RuntimeCallbackClient,
+    session: RuntimeSession,
+    request: RunStartRequest,
+    context: SubagentExecutionContext,
+) -> dict[str, Any]:
+    bridge = AgentScopeRuntimeBridge(
+        run_id=session.run_id,
+        runtime_session_id=session.runtime_session_id,
+        callback_client=callback_client,
+    )
+    worker = Agent(
+        name=context.participant_id,
+        system_prompt=_subagent_system_prompt(context),
+        model=bridge.build_model(
+            participant_id=context.participant_id,
+            model_id=context.model_id,
+        ),
+        toolkit=_build_toolkit(
+            bridge=bridge,
+            callback_client=callback_client,
+            session=session,
+            request=request,
+            participant_id=context.participant_id,
+            include_subagent_tool=False,
+        ),
+        react_config=ReActConfig(max_iters=_subagent_max_iters(context.budget)),
+    )
+    reply = await worker.reply(UserMsg(name="user", content=context.task))
+    return {"content": _msg_text(reply), "metadata": {"model_id": context.model_id}}
+
+
+def _request_messages_to_msgs(request: RunStartRequest) -> list[Msg]:
+    msgs: list[Msg] = []
+    for message in request.messages:
+        if not isinstance(message, dict):
+            continue
+        role = str(message.get("role") or "user")
+        if role not in {"user", "assistant", "system"}:
+            role = "user"
+        name = str(message.get("name") or role)
+        content = message.get("content", "")
+        if isinstance(content, str):
+            blocks = [TextBlock(text=content)]
+        elif isinstance(content, list):
+            blocks = [
+                TextBlock(text=str(item.get("text", "")))
+                for item in content
+                if isinstance(item, dict) and item.get("type", "text") == "text"
+            ]
+        else:
+            blocks = [TextBlock(text=str(content))]
+        msgs.append(Msg(name=name, role=role, content=blocks))
+    if msgs:
+        return msgs
+    return [UserMsg(name="user", content="")]
+
+
+def _msg_text(msg: Msg) -> str:
+    parts: list[str] = []
+    for block in msg.get_content_blocks():
+        if isinstance(block, TextBlock):
+            parts.append(block.text)
+        elif isinstance(block, dict) and block.get("type") == "text":
+            text = block.get("text")
+            if isinstance(text, str):
+                parts.append(text)
+    return "".join(parts).strip()
+
+
+def _leader_system_prompt(request: RunStartRequest) -> str:
+    return (
+        "You are the leader agent for an OpenWebUI Agent Mode run. "
+        "Use the available tools and subagents when they are useful, then "
+        "respond with a concise final answer for the user."
+    )
+
+
+def _subagent_system_prompt(context: SubagentExecutionContext) -> str:
+    return (
+        f"You are {context.name}, a focused worker subagent. "
+        f"Role: {context.description}. Complete only the delegated task and "
+        "return the useful result to the leader."
+    )
+
+
+def _max_iters(request: RunStartRequest) -> int:
+    value = request.budget.get("max_model_calls") or request.budget.get("max_iters")
+    try:
+        return max(1, min(int(value), 20))
+    except (TypeError, ValueError):
+        return 10
+
+
+def _subagent_max_iters(budget: dict[str, Any]) -> int:
+    value = budget.get("max_model_calls")
+    try:
+        return max(1, min(int(value), 10))
+    except (TypeError, ValueError):
+        return 3
+
+
+def _subagent_budget(request: RunStartRequest) -> dict[str, Any]:
+    value = request.budget.get("max_subagent_model_calls")
+    if value is None:
+        return {}
+    return {"max_model_calls": value}
+
+
+def _is_cancelled(session: RuntimeSession) -> bool:
     return session.cancel_requested or session.state == "cancelled"
 
 
@@ -375,9 +768,48 @@ async def _call_leader_model(
     return _extract_model_text(response)
 
 
+async def _mark_session_failed(
+    callback_client: RuntimeCallbackClient,
+    session: RuntimeSession,
+    exc: Exception,
+    *,
+    stage: str = "unknown",
+) -> None:
+    session.state = "failed"
+    session.updated_at = time.time()
+    summary = getattr(exc, "user_summary", "Agent runtime finalization failed.")
+    error = {
+        "code": getattr(exc, "code", "runtime_finalization_failed"),
+        "message": _format_finalization_error_message(exc, stage),
+        "summary": summary,
+    }
+    try:
+        await callback_client.transition_state(
+            run_id=session.run_id,
+            idempotency_key=f"state:{session.run_id}:failed",
+            from_states=["queued", "running", "waiting_approval", "finalizing"],
+            to_state="failed",
+            reason="runtime finalization failed",
+            payload={"error": error, "runtime_session_id": session.runtime_session_id},
+        )
+    except Exception:
+        pass
+    try:
+        await callback_client.append_event(
+            run_id=session.run_id,
+            idempotency_key=f"evt:{session.runtime_session_id}:run-failed",
+            event_type="run.failed",
+            summary=summary,
+            payload={"error": error, "runtime_session_id": session.runtime_session_id},
+            participant_id="leader",
+            phase="failed",
+        )
+    except Exception:
+        pass
+
+
 def _provider_configuration_error_from_model_response(response: dict[str, Any]) -> Exception | None:
-    text = _diagnostic_text(response)
-    return _provider_configuration_error_from_text(text)
+    return _provider_configuration_error_from_text(_diagnostic_text(response))
 
 
 def _provider_configuration_error_from_text(text: str) -> Exception | None:
@@ -422,46 +854,6 @@ def _truncate_diagnostic_message(message: str, limit: int = 4000) -> str:
     if len(message) <= limit:
         return message
     return f"{message[:limit]}... [truncated]"
-
-
-async def _mark_session_failed(
-    callback_client: RuntimeCallbackClient,
-    session: RuntimeSession,
-    exc: Exception,
-    *,
-    stage: str = "unknown",
-) -> None:
-    session.state = "failed"
-    session.updated_at = time.time()
-    summary = getattr(exc, "user_summary", "Agent runtime finalization failed.")
-    error = {
-        "code": getattr(exc, "code", "runtime_finalization_failed"),
-        "message": _format_finalization_error_message(exc, stage),
-        "summary": summary,
-    }
-    try:
-        await callback_client.transition_state(
-            run_id=session.run_id,
-            idempotency_key=f"state:{session.run_id}:failed",
-            from_states=["queued", "running", "waiting_approval", "finalizing"],
-            to_state="failed",
-            reason="runtime finalization failed",
-            payload={"error": error, "runtime_session_id": session.runtime_session_id},
-        )
-    except Exception:
-        pass
-    try:
-        await callback_client.append_event(
-            run_id=session.run_id,
-            idempotency_key=f"evt:{session.runtime_session_id}:run-failed",
-            event_type="run.failed",
-            summary=summary,
-            payload={"error": error, "runtime_session_id": session.runtime_session_id},
-            participant_id="leader",
-            phase="failed",
-        )
-    except Exception:
-        pass
 
 
 def _format_finalization_error_message(exc: Exception, stage: str) -> str:

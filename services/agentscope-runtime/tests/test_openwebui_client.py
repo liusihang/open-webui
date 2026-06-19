@@ -281,44 +281,56 @@ async def test_call_model_uses_openwebui_model_call_callback() -> None:
 
 
 @pytest.mark.asyncio
-async def test_call_model_uses_long_model_call_timeout() -> None:
-    seen_timeout: dict[str, object] = {}
-
-    def handler(request):
-        seen_timeout.update(request.extensions["timeout"])
-        return Response(
-            200,
-            json={
-                "status": "success",
-                "model": "model-research",
-                "response": {"content": "model answer"},
-                "metadata": {"participant_id": "leader"},
-            },
-        )
-
+async def test_call_model_sends_tools_and_tool_choice_as_top_level_callback_fields() -> None:
     async with respx.mock(assert_all_called=True) as router:
-        router.post("https://openwebui.test/api/agent/service/runs/run-1/model-call").mock(
-            side_effect=handler
+        request = router.post(
+            "https://openwebui.test/api/agent/service/runs/run-1/model-call"
+        ).mock(
+            return_value=Response(
+                200,
+                json={
+                    "status": "success",
+                    "model": "model-research",
+                    "response": {"content": "model answer"},
+                    "metadata": {},
+                },
+            )
         )
         client = OpenWebUIClient(
             base_url="https://openwebui.test",
             service_token="owui-token",
-            timeout=3.0,
-            model_call_timeout=90.0,
         )
+        tools = [
+            {
+                "type": "function",
+                "function": {
+                    "name": "read_file",
+                    "description": "Read a file.",
+                    "parameters": {"type": "object", "properties": {}},
+                },
+            }
+        ]
 
-        response = await client.call_model(
+        await client.call_model(
             run_id="run-1",
             idempotency_key="model:leader:model-call-1:1",
             participant_id="leader",
             model_call_id="model-call-1",
             model="model-research",
-            messages=[{"role": "user", "content": "hi"}],
+            messages=[{"role": "user", "content": "read"}],
+            stream=False,
+            params={"temperature": 0.2},
+            tools=tools,
+            tool_choice="auto",
+            metadata={"runtime_session_id": "rt-run-1"},
         )
 
-    assert response["response"]["content"] == "model answer"
-    assert seen_timeout["read"] == 90.0
-    assert seen_timeout["connect"] == 3.0
+    body = json.loads(request.calls.last.request.content)
+    assert body["tools"] == tools
+    assert body["tool_choice"] == "auto"
+    assert body["params"] == {"temperature": 0.2}
+    assert "tools" not in body["params"]
+    assert "tool_choice" not in body["params"]
 
 
 @pytest.mark.asyncio
