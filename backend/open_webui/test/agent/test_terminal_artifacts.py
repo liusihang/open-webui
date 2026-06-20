@@ -9,6 +9,7 @@ from open_webui.agent.artifacts import (
     agent_run_output_dir,
     agent_run_tmp_dir,
     artifact_metadata_for_path,
+    collect_terminal_output_paths,
 )
 
 
@@ -66,6 +67,41 @@ def test_artifact_cleanup_metadata_is_true_only_for_run_local_tmp_paths():
         'cleanup_eligible': False,
         'retention': 'external_or_user_selected',
     }
+
+
+def test_collect_terminal_output_paths_infers_run_output_shell_redirect():
+    paths = collect_terminal_output_paths(
+        arguments={
+            'command': (
+                "printf 'done\\n' > "
+                '/workspace/agent-runs/run-1/outputs/report.md'
+            )
+        },
+        result={'status': 'completed', 'exit_code': 0},
+    )
+
+    assert paths == ['/workspace/agent-runs/run-1/outputs/report.md']
+
+
+def test_collect_terminal_output_paths_ignores_unrelated_command_paths():
+    assert collect_terminal_output_paths(
+        arguments={
+            'command': (
+                'cat /workspace/agent-runs/run-1/outputs/report.md && '
+                "printf done > /workspace/reports/report.md"
+            )
+        },
+        result={'status': 'completed', 'exit_code': 0},
+    ) == []
+
+
+def test_collect_terminal_output_paths_ignores_quoted_redirect_symbols():
+    assert collect_terminal_output_paths(
+        arguments={
+            'command': "echo '>' /workspace/agent-runs/run-1/outputs/report.md"
+        },
+        result={'status': 'completed', 'exit_code': 0},
+    ) == []
 
 
 @pytest.mark.asyncio

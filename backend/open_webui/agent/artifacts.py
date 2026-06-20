@@ -55,8 +55,10 @@ def collect_terminal_output_paths(
 ) -> list[str]:
     paths: list[str] = []
     _collect_explicit_paths(paths, arguments or {})
+    _collect_shell_redirect_paths(paths, arguments or {})
     if isinstance(result, dict):
         _collect_explicit_paths(paths, result)
+        _collect_shell_redirect_paths(paths, result)
     return _dedupe(paths)
 
 
@@ -126,6 +128,107 @@ def _collect_explicit_paths(paths: list[str], source: dict[str, Any]) -> None:
     for artifact in source.get('artifacts') or []:
         if isinstance(artifact, dict):
             _append_path(paths, artifact.get('path'))
+
+
+def _collect_shell_redirect_paths(paths: list[str], source: dict[str, Any]) -> None:
+    command = source.get('command')
+    if not isinstance(command, str) or not command:
+        return
+    for path in _shell_redirect_output_paths(command):
+        paths.append(path)
+
+
+def _shell_redirect_output_paths(command: str) -> list[str]:
+    paths: list[str] = []
+    index = 0
+    quote: str | None = None
+    escaped = False
+    while index < len(command):
+        char = command[index]
+        if escaped:
+            escaped = False
+            index += 1
+            continue
+        if quote:
+            if char == '\\' and quote == '"':
+                escaped = True
+            elif char == quote:
+                quote = None
+            index += 1
+            continue
+        if char == '\\':
+            escaped = True
+            index += 1
+            continue
+        if char in {"'", '"'}:
+            quote = char
+            index += 1
+            continue
+        if char == '>':
+            target_start = index + 2 if _has_at(command, index + 1, '>') else index + 1
+            target, target_end = _read_shell_word(command, target_start)
+            if target:
+                _append_safe_shell_redirect_path(paths, target)
+            index = target_end
+            continue
+        index += 1
+    return paths
+
+
+def _read_shell_word(command: str, index: int) -> tuple[str | None, int]:
+    while index < len(command) and command[index].isspace():
+        index += 1
+
+    chars: list[str] = []
+    quote: str | None = None
+    escaped = False
+    while index < len(command):
+        char = command[index]
+        if escaped:
+            chars.append(char)
+            escaped = False
+            index += 1
+            continue
+        if quote:
+            if char == '\\' and quote == '"':
+                escaped = True
+            elif char == quote:
+                quote = None
+            else:
+                chars.append(char)
+            index += 1
+            continue
+        if char == '\\':
+            escaped = True
+            index += 1
+            continue
+        if char in {"'", '"'}:
+            quote = char
+            index += 1
+            continue
+        if char.isspace() or char in {';', '|', '&', '<', '(', ')', '>'}:
+            break
+        chars.append(char)
+        index += 1
+
+    return (''.join(chars) or None, index)
+
+
+def _has_at(value: str, index: int, char: str) -> bool:
+    return index < len(value) and value[index] == char
+
+
+def _append_safe_shell_redirect_path(paths: list[str], path: str) -> None:
+    normalized = posixpath.normpath(path)
+    if _is_agent_run_artifact_path(normalized):
+        paths.append(normalized)
+
+
+def _is_agent_run_artifact_path(path: str) -> bool:
+    if not path.startswith(f'{AGENT_RUN_WORKSPACE_ROOT}/'):
+        return False
+    parts = path.removeprefix(f'{AGENT_RUN_WORKSPACE_ROOT}/').split('/')
+    return len(parts) >= 3 and parts[1] in {'outputs', 'tmp'} and bool(parts[2])
 
 
 def _append_path(paths: list[str], value: Any) -> None:
