@@ -1086,7 +1086,9 @@ from open_webui.agent.runtime_client import (
     AgentRuntimeError,
     AgentRuntimeUnavailable,
 )
+from open_webui.agent.artifacts import AgentRunArtifactRegistrar
 from open_webui.agent.protocol import AgentEventType
+from open_webui.agent.resources import AgentRunResourceManager
 from open_webui.agent.tool_authority import build_tool_access_envelope
 
 from open_webui.utils.models import (
@@ -1475,6 +1477,8 @@ app.state.config.AGENT_RUN_MAX_MODEL_CALLS = AGENT_RUN_MAX_MODEL_CALLS
 app.state.config.AGENT_RUN_MAX_TOOL_CALLS = AGENT_RUN_MAX_TOOL_CALLS
 app.state.config.AGENT_TEAM_MAX_SUBAGENTS = AGENT_TEAM_MAX_SUBAGENTS
 app.state.config.AGENT_SUBAGENT_DEFAULT_BUDGET = AGENT_SUBAGENT_DEFAULT_BUDGET
+app.state.AGENT_RUN_RESOURCE_MANAGER = AgentRunResourceManager()
+app.state.AGENT_RUN_ARTIFACT_REGISTRAR = AgentRunArtifactRegistrar(AgentRuns)
 app.state.config.ENABLE_CHANNELS = ENABLE_CHANNELS
 app.state.config.ENABLE_CALENDAR = ENABLE_CALENDAR
 app.state.config.ENABLE_NOTES = ENABLE_NOTES

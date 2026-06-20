@@ -10,6 +10,8 @@ os.environ.setdefault('DATABASE_ENABLE_SESSION_SHARING', 'true')
 
 import pytest
 import pytest_asyncio
+from open_webui.agent.artifacts import AgentRunArtifactRegistrar
+from open_webui.agent.resources import AgentRunResourceManager
 from open_webui.internal.db import Base
 from open_webui.models.agent_runs import AgentRuns
 from open_webui.routers import agent_runs as agent_runs_router
@@ -145,6 +147,15 @@ def test_agent_mode_routers_are_mounted_on_main_app():
 
     assert '/api/agent/runs/{run_id}/events' in paths
     assert '/api/agent/service/runs/{run_id}/events' in paths
+
+
+def test_main_app_initializes_agent_run_app_state_helpers():
+    resource_manager = getattr(main.app.state, 'AGENT_RUN_RESOURCE_MANAGER', None)
+    artifact_registrar = getattr(main.app.state, 'AGENT_RUN_ARTIFACT_REGISTRAR', None)
+
+    assert isinstance(resource_manager, AgentRunResourceManager)
+    assert isinstance(artifact_registrar, AgentRunArtifactRegistrar)
+    assert artifact_registrar.artifact_store is AgentRuns
 
 
 @pytest.mark.asyncio
