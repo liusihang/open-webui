@@ -748,6 +748,69 @@ async def test_terminal_run_command_registers_process_refs_and_explicit_output_a
 
 
 @pytest.mark.asyncio
+async def test_terminal_run_command_registers_inferred_output_artifacts_without_process_refs():
+    async def run_command(command: str):
+        return {'status': 'success', 'content': 'wrote final report'}
+
+    _envelope, registry = build_tool_access_envelope(
+        {
+            'run_command': {
+                'tool_id': 'terminal:terminals',
+                'callable': run_command,
+                'spec': {'name': 'run_command', 'parameters': {'type': 'object'}},
+                'type': 'terminal',
+            }
+        }
+    )
+    resource_manager = AgentRunResourceManager()
+    artifact_store = FakeArtifactStore()
+    authority = AgentToolAuthority(
+        operation_store=FakeOperationStore(),
+        registry=registry,
+        resource_manager=resource_manager,
+        artifact_registrar=AgentRunArtifactRegistrar(artifact_store),
+    )
+
+    result = await authority.execute_tool_call(
+        ToolCallRequest(
+            run_id='run-1',
+            user_id='user-1',
+            participant_id='leader',
+            tool_call_id='call-1',
+            tool_id='tool:terminal:terminals:run_command',
+            arguments={
+                'command': (
+                    "printf 'done\\n' > "
+                    '/workspace/agent-runs/run-1/outputs/final_report.md'
+                )
+            },
+            idempotency_key='tool:leader:call-1:1',
+        )
+    )
+
+    assert result['process_refs'] == []
+    assert resource_manager.process_refs_for_run('run-1') == []
+    assert result['artifacts'] == [
+        {
+            'artifact_id': 'artifact-1',
+            'kind': 'file',
+            'path': '/workspace/agent-runs/run-1/outputs/final_report.md',
+            'url': None,
+            'mime_type': None,
+            'size': None,
+            'metadata': {
+                'cleanup_eligible': False,
+                'retention': 'user_visible_output',
+                'participant_id': 'leader',
+            },
+        }
+    ]
+    assert artifact_store.rows[0]['idempotency_key'] == (
+        'artifact:leader:file:terminals:run-1:outputs:final_report.md'
+    )
+
+
+@pytest.mark.asyncio
 async def test_service_default_tool_authority_wires_terminal_process_and_artifact_helpers():
     async def run_command(command: str, output_paths: list[str]):
         return {

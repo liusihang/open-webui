@@ -363,7 +363,7 @@ def _extract_process_refs(
 
 
 def _is_terminal_run_command(tool: dict[str, Any], response: dict[str, Any]) -> bool:
-    if not response.get('process_refs'):
+    if not response.get('process_refs') and response.get('status') != 'success':
         return False
     return tool.get('name') == 'run_command' or tool.get('type') == 'terminal'
 
