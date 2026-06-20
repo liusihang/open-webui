@@ -57,7 +57,7 @@ from open_webui.models.agent_runs import AgentRunError, AgentRunOperationConflic
 from open_webui.models.chats import Chats
 from open_webui.models.users import Users
 from open_webui.routers.agent_runs import get_configured_agent_event_store
-from open_webui.utils.tools import get_builtin_tools, get_terminal_tools
+from open_webui.utils.tools import get_builtin_tools, get_terminal_tools, get_tools
 
 router = APIRouter()
 
@@ -169,6 +169,7 @@ async def _rebuild_agent_tool_registry(request: Request, run_id: str) -> dict[st
     rebuilt: dict[str, dict[str, Any]] = {}
     rebuilt.update(await _rebuild_builtin_tools(request, run, user, snapshot_tools))
     rebuilt.update(await _rebuild_terminal_tools(request, run, user, snapshot_tools))
+    rebuilt.update(await _rebuild_external_tools(request, run, user, snapshot_tools))
 
     if not rebuilt:
         raise HTTPException(
@@ -295,6 +296,103 @@ async def _rebuild_terminal_tools(
         rebuilt.update(_registry_from_snapshot(requested, current_registry))
 
     return rebuilt
+
+
+def _external_tool_source_id_from_snapshot(tool: dict[str, Any]) -> str | None:
+    """Extract the source tool_id from a type=='external' snapshot tool's opaque id.
+
+    The opaque id follows the pattern ``tool:{tool_id}:{name}`` where
+    ``tool_id`` is the source identifier (e.g. ``server:openapi:abc``).
+    This mirrors the convention in ``_opaque_tool_id``.
+    """
+    opaque_id = tool.get('id')
+    name = tool.get('name')
+    if not isinstance(opaque_id, str) or not isinstance(name, str):
+        return None
+    prefix = 'tool:server:'
+    suffix = f':{name}'
+    if opaque_id.startswith(prefix) and opaque_id.endswith(suffix):
+        source_part = opaque_id[len(prefix) : -len(suffix)]
+        if not source_part:
+            return None
+        # source_part is e.g. "abc" (server:abc) or "openapi:xyz" (server:openapi:xyz)
+        return f'server:{source_part}'
+    return None
+
+
+async def _rebuild_external_tools(
+    request: Request,
+    run,
+    user,
+    snapshot_tools: list[dict[str, Any]],
+) -> dict[str, dict[str, Any]]:
+    requested_external: list[dict[str, Any]] = []
+    for tool in snapshot_tools:
+        if tool.get('type') != 'external':
+            continue
+        source_id = _external_tool_source_id_from_snapshot(tool)
+        if source_id:
+            requested_external.append(tool)
+
+    if not requested_external:
+        return {}
+
+    # Group tools by source tool_id so we call get_tools only once per tool server
+    by_source: dict[str, list[dict[str, Any]]] = {}
+    for tool in requested_external:
+        source_id = _external_tool_source_id_from_snapshot(tool)
+        if source_id:
+            by_source.setdefault(source_id, []).append(tool)
+
+    rebuilt: dict[str, dict[str, Any]] = {}
+    metadata = _agent_run_metadata(run)
+    extra_params = {
+        '__user__': _user_payload(user),
+        '__metadata__': metadata,
+        '__chat_id__': metadata.get('chat_id'),
+        '__message_id__': metadata.get('assistant_message_id'),
+    }
+
+    for source_id, tools_in_group in by_source.items():
+        current_tools = await get_tools(request, [source_id], user, extra_params)
+        current_tools = current_tools or {}
+
+        requested_names = {
+            t.get('name')
+            for t in tools_in_group
+            if isinstance(t.get('name'), str)
+        }
+        available_names = requested_names & set(current_tools)
+        missing = sorted(requested_names - available_names)
+
+        if not available_names:
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail={
+                    'code': 'agent_tool_registry_rebuild_failed',
+                    'message': 'Agent external tools are not available in the current server context',
+                    'tool_source_id': source_id,
+                    'tools': missing,
+                },
+            )
+
+        if missing:
+            # Graceful: skip tools that have disappeared but keep those that remain
+            tools_in_group = [
+                t for t in tools_in_group if t.get('name') in available_names
+            ]
+
+        available = {name: current_tools[name] for name in available_names}
+        _envelope, current_registry = build_tool_access_envelope(available)
+        rebuilt.update(_registry_from_snapshot(tools_in_group, current_registry))
+
+    return rebuilt
+
+
+def _user_payload(user) -> dict[str, Any]:
+    if hasattr(user, 'model_dump'):
+        return user.model_dump(mode='json')
+    return dict(getattr(user, '__dict__', {}))
 
 
 def _registry_from_snapshot(

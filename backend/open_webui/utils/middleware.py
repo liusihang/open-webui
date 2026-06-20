@@ -3019,9 +3019,13 @@ async def process_chat_payload(request, form_data, user, metadata, model):
                 form_data = await chat_memory_handler(request, form_data, extra_params, user)
 
         if 'web_search' in features and features['web_search']:
-            # Skip forced RAG web search when native FC is enabled - model can use web_search tool
             if metadata.get('params', {}).get('function_calling') != 'native':
+                # Legacy path: force RAG web search before LLM inference
                 form_data = await chat_web_search_handler(request, form_data, extra_params, user)
+            else:
+                # Native FC path: signal that web_search_tools should be auto-injected
+                # (handled by get_builtin_tools — bypasses model-level builtinTools/web_search gate)
+                extra_params['__force_web_search_tools__'] = True
 
         if 'code_interpreter' in features and features['code_interpreter']:
             engine = getattr(request.app.state.config, 'CODE_INTERPRETER_ENGINE', 'pyodide')

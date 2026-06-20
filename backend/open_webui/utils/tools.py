@@ -85,6 +85,7 @@ from open_webui.tools.builtin import (
     search_memories,
     search_notes,
     search_web,
+    web_search_research,
     toggle_automation,
     update_skill,
     update_automation,
@@ -579,7 +580,19 @@ async def get_builtin_tools(
         and features.get('web_search')
         and await has_user_permission('web_search')
     ):
-        builtin_functions.extend([search_web, fetch_url])
+        builtin_functions.extend([search_web, web_search_research, fetch_url])
+    elif (
+        extra_params.get('__force_web_search_tools__')
+        and features.get('web_search')
+        and getattr(request.app.state.config, 'ENABLE_WEB_SEARCH', False)
+        and await has_user_permission('web_search')
+    ):
+        # Native FC path: features.web_search=true signaled from middleware.
+        # Bypass the model-level builtinTools/web_search capability gate (the
+        # model may not declare web_search in its capabilities, but the user
+        # explicitly enabled the feature), but still honor the global
+        # ENABLE_WEB_SEARCH switch and per-user web_search permission.
+        builtin_functions.extend([search_web, web_search_research])
 
     # Add image generation/edit tools if builtin category enabled AND enabled globally AND model has image_generation capability
     if (

@@ -272,6 +272,115 @@ async def search_web(
         return json.dumps({'error': str(e)})
 
 
+async def web_search_research(
+    topic: str,
+    count: Optional[int] = None,
+    __request__: Request = None,
+    __user__: dict = None,
+) -> str:
+    """
+    Research a topic using multiple search queries for broader, deeper coverage.
+    Use this for complex or open-ended topics where a single query may miss
+    important angles.  For simple, targeted lookups, use search_web instead.
+
+    Internally this tool:
+      1. Asks a task model to break the topic into several focused search queries.
+      2. Executes all queries in parallel against the configured web search engine.
+      3. Deduplicates results by URL before returning.
+
+    :param topic: The research topic or question to investigate.
+    :param count: Maximum number of results retained per query (default: admin-configured).
+    :return: JSON list of deduplicated results — each with title, link, snippet, and
+             the source query that produced it.
+    """
+    if __request__ is None:
+        return json.dumps({'error': 'Request context not available'})
+
+    try:
+        # ── 1. Pick a task model & generate multiple queries ──────────────────
+        models = __request__.app.state.MODELS
+        model_id = None
+        if hasattr(__request__.state, 'model') and __request__.state.model:
+            model_id = __request__.state.model.get('id')
+        if not model_id and models:
+            model_id = next(iter(models.keys()), None)
+
+        user = UserModel(**__user__) if __user__ else None
+
+        queries = []
+        try:
+            from open_webui.routers.tasks import generate_queries
+
+            messages = [{'role': 'user', 'content': topic}]
+            res = await generate_queries(
+                __request__,
+                {
+                    'model': model_id,
+                    'messages': messages,
+                    'prompt': topic,
+                    'type': 'web_search',
+                    'chat_id': None,
+                },
+                user,
+            )
+
+            # generate_queries may return a JSONResponse on error
+            from fastapi.responses import JSONResponse
+
+            if isinstance(res, JSONResponse):
+                raise Exception('Query generation endpoint returned an error')
+
+            response_text = res['choices'][0]['message']['content']
+            # Robust JSON extraction: find the outermost {} block
+            bracket_start = response_text.rfind('{')
+            bracket_end = response_text.rfind('}') + 1
+            if bracket_start != -1 and bracket_end > bracket_start:
+                parsed = json.loads(response_text[bracket_start:bracket_end])
+                queries = parsed.get('queries', [])
+            else:
+                queries = [response_text]
+
+            queries = [q.strip() for q in queries if q and q.strip()]
+            if not queries:
+                queries = [topic]
+        except Exception as e:
+            log.warning('web_search_research: query generation failed (%s), falling back to topic', e)
+            queries = [topic]
+
+        # ── 2. Parallel search ────────────────────────────────────────────────
+        engine = __request__.app.state.config.WEB_SEARCH_ENGINE
+        configured = __request__.app.state.config.WEB_SEARCH_RESULT_COUNT
+        max_count = 5 if configured is None else configured
+        count_val = max(1, min(count, max_count)) if count is not None else max_count
+
+        search_tasks = [_search_web(__request__, engine, q, user) for q in queries]
+        search_results = await asyncio.gather(*search_tasks)
+
+        # ── 3. Deduplicate & assemble structured output ────────────────────────
+        seen_links: set[str] = set()
+        structured: list[dict] = []
+        for query_str, results in zip(queries, search_results):
+            if not results:
+                continue
+            for r in results:
+                if r.link not in seen_links:
+                    seen_links.add(r.link)
+                    structured.append({
+                        'title': r.title,
+                        'link': r.link,
+                        'snippet': r.snippet,
+                        'query': query_str,
+                    })
+
+        # Honor count per overall results (cap total, not per-query)
+        structured = structured[:count_val] if count_val else structured
+
+        return json.dumps(structured, ensure_ascii=False)
+    except Exception as e:
+        log.exception('web_search_research error: %s', e)
+        return json.dumps({'error': str(e)})
+
+
 async def fetch_url(
     url: str,
     __request__: Request = None,
