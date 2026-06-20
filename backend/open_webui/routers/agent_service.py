@@ -21,6 +21,8 @@ from open_webui.agent.events import (
     append_agent_event_async,
     append_final_delta,
     append_final_delta_async,
+    append_text_delta,
+    append_text_delta_async,
 )
 from open_webui.agent.model_authority import (
     AgentModelAuthority,
@@ -37,6 +39,7 @@ from open_webui.agent.protocol import (
     AgentRunEvent,
     AgentStateTransitionAppend,
     FinalDeltaAppend,
+    TextDeltaAppend,
 )
 from open_webui.agent.service.model_call import execute_agent_model_call
 from open_webui.agent.service.tool_call import execute_agent_tool_call
@@ -812,6 +815,45 @@ async def append_agent_run_final_delta(
     return event
 
 
+@router.post('/runs/{run_id}/text-delta')
+async def append_agent_run_text_delta(
+    request: Request,
+    run_id: str,
+    form_data: TextDeltaAppend,
+    idempotency_key: str | None = Header(
+        default=None,
+        alias='X-Agent-Idempotency-Key',
+    ),
+    authorization: str | None = Header(default=None, alias='Authorization'),
+    store: AgentEventStore | None = Depends(get_optional_agent_event_store),
+):
+    _require_agent_service_credential(request, authorization)
+    key = _require_matching_idempotency_key(
+        form_data.idempotency_key,
+        idempotency_key,
+    )
+    try:
+        delta_payload = form_data.model_copy(update={'run_id': run_id, 'idempotency_key': key})
+        if store is not None:
+            event = append_text_delta(store, delta_payload)
+        else:
+            event = await _append_text_delta_with_operation(delta_payload)
+    except AgentEventError as exc:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
+    except AgentRunOperationConflict as exc:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail='idempotency_conflict',
+        ) from exc
+    except AgentServiceOperationInProgress:
+        return JSONResponse(
+            status_code=status.HTTP_202_ACCEPTED,
+            content={'detail': 'operation_in_progress'},
+            headers={'Retry-After': '1'},
+        )
+    return event
+
+
 @router.post('/runs/{run_id}/state-transition')
 async def transition_agent_run_state(
     request: Request,
@@ -1050,6 +1092,50 @@ async def _append_final_delta_with_operation(delta: FinalDeltaAppend) -> AgentRu
             claim.operation.id,
             {
                 'code': getattr(exc, 'code', 'final_delta_failed'),
+                'message': str(exc),
+            },
+        )
+        raise
+
+    await AgentRuns.finish_operation_success(
+        claim.operation.id,
+        stored.model_dump(mode='json'),
+    )
+    return stored
+
+
+async def _append_text_delta_with_operation(delta: TextDeltaAppend) -> AgentRunEvent:
+    key = delta.idempotency_key or ''
+    try:
+        claim = await AgentRuns.claim_operation(
+            delta.run_id,
+            operation_type='text.delta',
+            idempotency_key=key,
+            request_hash=_callback_request_hash('text.delta', delta),
+        )
+    except AgentRunOperationConflict:
+        # text.delta shares the event.append relaxation: a re-used
+        # idempotency_key with a different request_hash is treated as a
+        # duplicate and returns the previously stored event.
+        existing = await AgentRuns.find_operation_by_idempotency_key(
+            delta.run_id,
+            operation_type='text.delta',
+            idempotency_key=key,
+        )
+        if existing is None:
+            raise
+        return _cached_event_operation_response(existing)
+
+    if not claim.created:
+        return _cached_event_operation_response(claim.operation)
+
+    try:
+        stored = await append_text_delta_async(AgentRuns, delta)
+    except Exception as exc:
+        await AgentRuns.finish_operation_error(
+            claim.operation.id,
+            {
+                'code': getattr(exc, 'code', 'text_delta_failed'),
                 'message': str(exc),
             },
         )

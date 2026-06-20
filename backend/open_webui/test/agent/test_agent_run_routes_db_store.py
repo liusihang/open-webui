@@ -692,3 +692,185 @@ async def test_agent_service_tool_callback_uses_run_user_id_for_terminal_artifac
     assert events[-1].event_type == 'artifact.registered'
     assert events[-1].participant_id == 'leader'
     assert events[-1].payload['artifacts'][0]['path'] == output_path
+
+
+@pytest.mark.asyncio
+async def test_agent_service_text_delta_writes_to_db_and_final_text_store(
+    agent_run_db,
+    app_without_fake_event_store,
+):
+    """text.delta endpoint writes a text.delta event and accumulates into
+    final_text so the completion handler sees the full message content.
+    Run does NOT need to be finalizing — text deltas are emitted during the
+    ReAct loop.
+    """
+    run = await AgentRuns.create_run(
+        user_id='user-1',
+        chat_id='chat-1',
+        user_message_id='msg-user',
+        assistant_message_id='msg-assistant',
+        leader_model_id='model-a',
+    )
+    await AgentRuns.transition_state(
+        run.id,
+        from_states=['queued'],
+        to_state='running',
+        reason='runtime accepted',
+    )
+
+    with TestClient(app_without_fake_event_store) as client:
+        first = client.post(
+            f'/api/agent/service/runs/{run.id}/text-delta',
+            json={
+                'run_id': run.id,
+                'block_id': 'block-1',
+                'delta_index': 0,
+                'delta': 'Let me check',
+                'participant_id': 'leader',
+                'phase': 'running',
+                'idempotency_key': f'text:{run.id}:leader:block-1:0',
+            },
+            headers=_service_headers(f'text:{run.id}:leader:block-1:0'),
+        )
+        second = client.post(
+            f'/api/agent/service/runs/{run.id}/text-delta',
+            json={
+                'run_id': run.id,
+                'block_id': 'block-1',
+                'delta_index': 1,
+                'delta': ' the repo.',
+                'participant_id': 'leader',
+                'phase': 'running',
+                'idempotency_key': f'text:{run.id}:leader:block-1:1',
+            },
+            headers=_service_headers(f'text:{run.id}:leader:block-1:1'),
+        )
+
+    assert first.status_code == 200
+    assert first.json()['event_type'] == 'text.delta'
+    assert first.json()['payload']['block_id'] == 'block-1'
+    assert first.json()['payload']['delta_index'] == 0
+    assert first.json()['payload']['text'] == 'Let me check'
+    assert second.status_code == 200
+    assert second.json()['payload']['delta_index'] == 1
+    assert second.json()['payload']['text'] == 'Let me check the repo.'
+
+    updated = await AgentRuns.get_run(run.id)
+    assert updated is not None
+    assert updated.final_text == 'Let me check the repo.'
+    events = await AgentRuns.list_events(run.id)
+    assert [event.event_type for event in events] == ['text.delta', 'text.delta']
+
+
+@pytest.mark.asyncio
+async def test_agent_service_text_delta_retries_are_idempotent_and_conflicting_bodies_return_existing(
+    agent_run_db,
+    app_without_fake_event_store,
+):
+    """text.delta shares event.append's idempotency relaxation: duplicate
+    payload returns the same event, conflicting payload also returns the
+    previously stored event (not 409).
+    """
+    run = await AgentRuns.create_run(
+        user_id='user-1',
+        chat_id='chat-1',
+        user_message_id='msg-user',
+        assistant_message_id='msg-assistant',
+        leader_model_id='model-a',
+    )
+    await AgentRuns.transition_state(
+        run.id,
+        from_states=['queued'],
+        to_state='running',
+        reason='runtime accepted',
+    )
+    key = f'text:{run.id}:leader:block-1:0'
+    body = {
+        'run_id': run.id,
+        'block_id': 'block-1',
+        'delta_index': 0,
+        'delta': 'hello',
+        'participant_id': 'leader',
+        'phase': 'running',
+        'idempotency_key': key,
+    }
+
+    with TestClient(app_without_fake_event_store) as client:
+        first = client.post(
+            f'/api/agent/service/runs/{run.id}/text-delta',
+            json=body,
+            headers=_service_headers(key),
+        )
+        duplicate = client.post(
+            f'/api/agent/service/runs/{run.id}/text-delta',
+            json=body,
+            headers=_service_headers(key),
+        )
+        conflict = client.post(
+            f'/api/agent/service/runs/{run.id}/text-delta',
+            json={**body, 'delta': 'changed'},
+            headers=_service_headers(key),
+        )
+
+    assert first.status_code == 200
+    assert duplicate.status_code == 200
+    assert duplicate.json() == first.json()
+    assert conflict.status_code == 200
+    assert conflict.json()['seq'] == first.json()['seq']
+    assert conflict.json()['payload']['delta'] == 'hello'
+
+    updated = await AgentRuns.get_run(run.id)
+    assert updated is not None
+    assert updated.final_text == 'hello'
+    events = await AgentRuns.list_events(run.id)
+    assert len(events) == 1
+    assert events[0].event_type == 'text.delta'
+
+
+@pytest.mark.asyncio
+async def test_agent_service_text_delta_gap_returns_409(
+    agent_run_db,
+    app_without_fake_event_store,
+):
+    """text.delta enforces per-block monotonic delta_index."""
+    run = await AgentRuns.create_run(
+        user_id='user-1',
+        chat_id='chat-1',
+        user_message_id='msg-user',
+        assistant_message_id='msg-assistant',
+        leader_model_id='model-a',
+    )
+    await AgentRuns.transition_state(
+        run.id,
+        from_states=['queued'],
+        to_state='running',
+        reason='runtime accepted',
+    )
+
+    with TestClient(app_without_fake_event_store) as client:
+        first = client.post(
+            f'/api/agent/service/runs/{run.id}/text-delta',
+            json={
+                'run_id': run.id,
+                'block_id': 'block-1',
+                'delta_index': 0,
+                'delta': 'hel',
+                'idempotency_key': f'text:{run.id}:block-1:0',
+            },
+            headers=_service_headers(f'text:{run.id}:block-1:0'),
+        )
+        gap = client.post(
+            f'/api/agent/service/runs/{run.id}/text-delta',
+            json={
+                'run_id': run.id,
+                'block_id': 'block-1',
+                'delta_index': 2,
+                'delta': 'lo',
+                'idempotency_key': f'text:{run.id}:block-1:2',
+            },
+            headers=_service_headers(f'text:{run.id}:block-1:2'),
+        )
+
+    assert first.status_code == 200
+    assert gap.status_code == 409
+    assert 'gap' in gap.json()['detail']

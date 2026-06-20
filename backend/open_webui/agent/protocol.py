@@ -34,6 +34,7 @@ class AgentEventType(StrEnum):
     MODEL_SELECTION_COMPLETED = 'model.selection.completed'
     FINAL_STARTED = 'final.started'
     FINAL_DELTA = 'final.delta'
+    TEXT_DELTA = 'text.delta'
     RUN_COMPLETED = 'run.completed'
     RUN_FAILED = 'run.failed'
     RUN_CANCELLED = 'run.cancelled'
@@ -71,6 +72,28 @@ class FinalDeltaAppend(BaseModel):
     delta_index: int = Field(ge=0)
     delta: str
     participant_id: str | None = None
+    payload: dict[str, Any] = Field(default_factory=dict)
+    idempotency_key: str | None = None
+
+
+class TextDeltaAppend(BaseModel):
+    """Streaming text delta emitted by the agentscope runtime during a run.
+
+    `block_id` identifies a contiguous text segment within a participant's
+    turn (one model call may produce multiple text blocks interleaved with
+    tool calls). `delta_index` is the per-block monotonic index. Each
+    (block_id, delta_index) pair is idempotent — duplicates return the
+    previously stored event. Deltas are also folded into the run's
+    final_text store keyed by block_id, so the completion handler that
+    reads final_text for the persisted message sees the full content.
+    """
+
+    run_id: str
+    block_id: str
+    delta_index: int = Field(ge=0)
+    delta: str
+    participant_id: str | None = None
+    phase: str | None = None
     payload: dict[str, Any] = Field(default_factory=dict)
     idempotency_key: str | None = None
 
