@@ -10,11 +10,14 @@ import pytest
 import pytest_asyncio
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
+from open_webui.agent.artifacts import AgentRunArtifactRegistrar
+from open_webui.agent.tool_authority import build_tool_access_envelope
 from open_webui.internal.db import Base
 from open_webui.models.agent_runs import AgentArtifact, AgentRun, AgentRunEvent, AgentRunOperation, AgentRuns
 from open_webui.routers import agent_runs, agent_service
 from open_webui.routers import agent_service as agent_service_router
 from open_webui.utils.auth import get_verified_user
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 
@@ -604,3 +607,86 @@ async def test_agent_service_tool_callback_rebuilds_missing_registry_from_run_sn
     assert response.json()['status'] == 'success'
     assert calls == [('Plan', 'Ship it')]
     assert 'tool:builtin:write_note:write_note' in app_without_fake_event_store.state.AGENT_TOOL_REGISTRIES[run.id]
+
+
+@pytest.mark.asyncio
+async def test_agent_service_tool_callback_uses_run_user_id_for_terminal_artifacts(
+    agent_run_db,
+    app_without_fake_event_store,
+):
+    async def run_command(command: str):
+        return {
+            'process_id': 'proc-report',
+            'command': command,
+            'status': 'completed',
+            'exit_code': 0,
+            'log_path': '/workspace/logs/proc-report.jsonl',
+            'next_offset': 12,
+        }
+
+    async def no_approval(tool_request, tool, resume):
+        return None
+
+    _envelope, registry = build_tool_access_envelope(
+        {
+            'run_command': {
+                'tool_id': 'terminal:main',
+                'callable': run_command,
+                'spec': {'name': 'run_command', 'parameters': {'type': 'object'}},
+                'type': 'terminal',
+            }
+        }
+    )
+    app_without_fake_event_store.state.AGENT_TOOL_REGISTRY = registry
+    app_without_fake_event_store.state.AGENT_RUN_ARTIFACT_REGISTRAR = AgentRunArtifactRegistrar(AgentRuns)
+    app_without_fake_event_store.state.AGENT_APPROVAL_COORDINATOR = SimpleNamespace(request_tool_approval=no_approval)
+
+    run = await AgentRuns.create_run(
+        user_id='user-1',
+        chat_id='chat-1',
+        user_message_id='msg-user',
+        assistant_message_id='msg-assistant',
+        leader_model_id='model-a',
+    )
+    output_path = f'/workspace/agent-runs/{run.id}/outputs/final_report.md'
+
+    with TestClient(app_without_fake_event_store) as client:
+        response = client.post(
+            f'/api/agent/service/runs/{run.id}/tool-call',
+            json={
+                'run_id': run.id,
+                'participant_id': 'leader',
+                'tool_call_id': 'call-1',
+                'tool_id': 'tool:terminal:main:run_command',
+                'arguments': {'command': f'python write_report.py > {output_path}'},
+                'idempotency_key': 'tool:leader:call-1:1',
+            },
+            headers=_service_headers('tool:leader:call-1:1'),
+        )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload['status'] == 'success'
+    assert payload['artifacts'][0]['path'] == output_path
+
+    async with agent_run_db() as session:
+        operation = (
+            await session.execute(
+                select(AgentRunOperation).filter_by(
+                    run_id=run.id,
+                    operation_type='tool.call',
+                    idempotency_key='tool:leader:call-1:1',
+                )
+            )
+        ).scalars().one()
+        artifact = (await session.execute(select(AgentArtifact).filter_by(run_id=run.id))).scalars().one()
+        events = (
+            await session.execute(select(AgentRunEvent).filter_by(run_id=run.id).order_by(AgentRunEvent.seq))
+        ).scalars().all()
+
+    assert operation.response['artifacts'][0]['path'] == output_path
+    assert artifact.user_id == 'user-1'
+    assert artifact.path == output_path
+    assert events[-1].event_type == 'artifact.registered'
+    assert events[-1].participant_id == 'leader'
+    assert events[-1].payload['artifacts'][0]['path'] == output_path

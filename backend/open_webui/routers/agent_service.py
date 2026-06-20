@@ -33,6 +33,7 @@ from open_webui.agent.model_authority import (
 from open_webui.agent.model_catalog import ModelCatalogError, ModelSelectionNotAllowed
 from open_webui.agent.protocol import (
     AgentEventAppend,
+    AgentEventType,
     AgentRunEvent,
     AgentStateTransitionAppend,
     FinalDeltaAppend,
@@ -507,6 +508,53 @@ def get_optional_agent_event_store(request: Request) -> AgentEventStore | None:
     return get_configured_agent_event_store(request)
 
 
+async def _load_service_tool_call_user_id(
+    authority: AgentToolAuthority,
+    run_id: str,
+) -> str | None:
+    get_run = getattr(getattr(authority, 'operation_store', None), 'get_run', None)
+    if get_run is None:
+        return None
+    run = await _maybe_await(get_run(run_id))
+    if run is None:
+        return None
+    user_id = getattr(run, 'user_id', None)
+    if isinstance(user_id, str) and user_id:
+        return user_id
+    return None
+
+
+async def _append_tool_artifact_registered_events(
+    tool_request: ToolCallRequest,
+    response: dict[str, Any],
+) -> None:
+    artifacts = response.get('artifacts')
+    if not isinstance(artifacts, list) or not artifacts:
+        return
+
+    for artifact in artifacts:
+        if not isinstance(artifact, dict):
+            continue
+        artifact_ref = artifact.get('artifact_id') or artifact.get('id') or artifact.get('path')
+        if not isinstance(artifact_ref, str) or not artifact_ref:
+            continue
+        await _append_agent_event_with_operation(
+            AgentEventAppend(
+                run_id=tool_request.run_id,
+                event_type=AgentEventType.ARTIFACT_REGISTERED,
+                participant_id=tool_request.participant_id,
+                phase='running',
+                summary=f'Artifact registered: {artifact.get("path") or artifact_ref}',
+                payload={
+                    'tool_call_id': tool_request.tool_call_id,
+                    'tool_id': tool_request.tool_id,
+                    'artifacts': [artifact],
+                },
+                idempotency_key=f'artifact.registered:{tool_request.tool_call_id}:{artifact_ref}',
+            )
+        )
+
+
 @router.post('/runs/{run_id}/subagents')
 async def execute_agent_run_subagent_registration(
     request: Request,
@@ -774,13 +822,18 @@ async def execute_agent_run_tool_call(
         form_data.idempotency_key,
         idempotency_key,
     )
-    tool_request = form_data.model_copy(update={'run_id': run_id, 'idempotency_key': key})
+    user_id = form_data.user_id or await _load_service_tool_call_user_id(authority, run_id)
+    tool_request = form_data.model_copy(
+        update={'run_id': run_id, 'user_id': user_id, 'idempotency_key': key}
+    )
     try:
         tool = authority.registry.get(tool_request.tool_id)
         if tool is not None:
 
             async def resume_tool_call():
-                return await execute_agent_tool_call(authority, tool_request)
+                response = await execute_agent_tool_call(authority, tool_request)
+                await _append_tool_artifact_registered_events(tool_request, response)
+                return response
 
             approval_result = await approval_coordinator.request_tool_approval(
                 tool_request,
@@ -790,10 +843,12 @@ async def execute_agent_run_tool_call(
             if approval_result is not None:
                 return approval_result
 
-        return await execute_agent_tool_call(
+        response = await execute_agent_tool_call(
             authority,
             tool_request,
         )
+        await _append_tool_artifact_registered_events(tool_request, response)
+        return response
     except AgentRunOperationConflict as exc:
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
