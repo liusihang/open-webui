@@ -34,6 +34,24 @@ MODEL_CALL_RETRY_ATTEMPTS = 3
 MODEL_CALL_RETRY_DELAY_SECONDS = 0.05
 
 
+class OpenWebUIToolApprovalRequired(BaseException):
+    """Control-flow signal: OpenWebUI paused the run for tool approval."""
+
+    def __init__(
+        self,
+        *,
+        response: dict[str, Any],
+        tool_call_id: str,
+        tool_id: str,
+        tool_name: str,
+    ) -> None:
+        super().__init__("OpenWebUI tool approval required")
+        self.response = response
+        self.tool_call_id = tool_call_id
+        self.tool_id = tool_id
+        self.tool_name = tool_name
+
+
 class OpenWebUIBridgeCallbacks(Protocol):
     async def append_event(
         self,
@@ -283,6 +301,13 @@ class OpenWebUIToolProxy(ToolBase):
                 phase="running",
             )
             raise
+        if _tool_requires_approval(response):
+            raise OpenWebUIToolApprovalRequired(
+                response=response,
+                tool_call_id=tool_call_id,
+                tool_id=self.tool_id,
+                tool_name=self.name,
+            )
         state = _tool_result_state(response)
         event_type = "tool.completed" if state == ToolResultState.SUCCESS else "tool.failed"
         await self.callback_client.append_event(
@@ -517,6 +542,10 @@ def _tool_result_state(response: dict[str, Any]) -> ToolResultState:
     if status == "approval_rejected":
         return ToolResultState.DENIED
     return ToolResultState.ERROR
+
+
+def _tool_requires_approval(response: dict[str, Any]) -> bool:
+    return response.get("status") == "approval_required"
 
 
 def _jsonable(value: Any) -> Any:

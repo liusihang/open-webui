@@ -536,6 +536,100 @@ async def test_run_start_with_tool_envelope_drives_tool_artifact_and_final_lifec
 
 
 @pytest.mark.asyncio
+async def test_general_agent_stops_when_tool_authority_requires_approval() -> None:
+    class ApprovalRequiredToolClient(RecordingOpenWebUIClient):
+        async def call_model(self, **kwargs: object) -> dict:
+            await super().call_model(**kwargs)  # type: ignore[arg-type]
+            if len(self.model_calls) > 1:
+                raise RuntimeError(
+                    "OpenWebUI callback failed with status 403: "
+                    '{"detail":{"code":"model_run_rejected","message":'
+                    '"Agent run run-tool-approval cannot execute model calls while waiting_approval"}}'
+                )
+            return {
+                "status": "success",
+                "response": {
+                    "choices": [
+                        {
+                            "message": {
+                                "content": "I need to inspect the file.",
+                                "tool_calls": [
+                                    {
+                                        "id": "call_read_1",
+                                        "type": "function",
+                                        "function": {
+                                            "name": "read_file",
+                                            "arguments": "{\"path\":\"/tmp/input.txt\"}",
+                                        },
+                                    }
+                                ],
+                            }
+                        }
+                    ]
+                },
+            }
+
+        async def call_tool(self, **kwargs: object) -> dict:
+            await super().call_tool(**kwargs)  # type: ignore[arg-type]
+            return {
+                "status": "approval_required",
+                "content": "Approval is required before running read_file.",
+                "approval_request_id": "approval-1",
+            }
+
+    openwebui_client = ApprovalRequiredToolClient()
+    async with make_client(openwebui_client, auto_finalize_ordinary_qa=True) as client:
+        response = await client.post(
+            "/v1/openwebui/runs",
+            headers={"Authorization": f"Bearer {SERVICE_TOKEN}"},
+            json={
+                "run_id": "run-tool-approval",
+                "chat_id": "chat-1",
+                "leader_model_id": "model-a",
+                "messages": [{"role": "user", "content": "Read the file."}],
+                "tool_access_envelope": {
+                    "tools": [
+                        {
+                            "id": "tool:terminal:main:read_file",
+                            "name": "read_file",
+                            "type": "terminal",
+                            "schema": {
+                                "name": "read_file",
+                                "description": "Read a file.",
+                                "parameters": {
+                                    "type": "object",
+                                    "properties": {"path": {"type": "string"}},
+                                    "required": ["path"],
+                                },
+                            },
+                        }
+                    ]
+                },
+            },
+        )
+
+        assert response.status_code == 202
+        for _ in range(40):
+            status = await client.get(
+                "/v1/openwebui/runs/run-tool-approval/status",
+                headers={"Authorization": f"Bearer {SERVICE_TOKEN}"},
+            )
+            if status.json()["state"] in {"waiting_approval", "completed", "failed"}:
+                break
+            await asyncio.sleep(0.01)
+
+    assert status.json()["state"] == "waiting_approval"
+    assert [call["model_call_id"] for call in openwebui_client.model_calls] == ["model-call-1"]
+    assert len(openwebui_client.tool_calls) == 1
+    assert [event["event_type"] for event in openwebui_client.events] == [
+        "run.running",
+        "tool.requested",
+    ]
+    assert openwebui_client.final_deltas == []
+    assert not any(event["event_type"] == "run.failed" for event in openwebui_client.events)
+
+
+@pytest.mark.asyncio
 async def test_general_agent_finalizes_with_code_interpreter_system_pyodide_message() -> None:
     openwebui_client = RecordingOpenWebUIClient()
     openwebui_client.model_responses = [

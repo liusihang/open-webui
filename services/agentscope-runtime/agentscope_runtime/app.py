@@ -15,7 +15,10 @@ from agentscope.message import Msg, TextBlock, ToolResultState, UserMsg
 from agentscope.permission import PermissionBehavior, PermissionContext, PermissionDecision
 from agentscope.tool import ToolBase, ToolChunk, Toolkit
 
-from agentscope_runtime.agentscope_bridge import AgentScopeRuntimeBridge
+from agentscope_runtime.agentscope_bridge import (
+    AgentScopeRuntimeBridge,
+    OpenWebUIToolApprovalRequired,
+)
 from agentscope_runtime.openwebui_client import OpenWebUIClient
 from agentscope_runtime.schemas import RunStartRequest, RunStartResponse, RunStatusResponse
 from agentscope_runtime.subagents import (
@@ -378,6 +381,14 @@ async def _finalize_general_agent_run(
             return
         stage = "emit-final-answer"
         await _emit_final_answer(callback_client, session, _msg_text(reply), payload)
+    except OpenWebUIToolApprovalRequired:
+        session.state = "waiting_approval"
+        session.updated_at = time.time()
+        logger.info(
+            "Runtime paused for OpenWebUI tool approval run_id=%s runtime_session_id=%s",
+            session.run_id,
+            session.runtime_session_id,
+        )
     except Exception as exc:
         if _is_cancelled(session):
             return
