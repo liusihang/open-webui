@@ -65,7 +65,8 @@
 	import StatusHistory from './ResponseMessage/StatusHistory.svelte';
 	import FullHeightIframe from '$lib/components/common/FullHeightIframe.svelte';
 	import OutputEditView from './OutputEditView.svelte';
-	import AgentRunEvents from '../AgentEvents/AgentRunEvents.svelte';
+	import AgentRunStatusBridge from '../AgentEvents/AgentRunStatusBridge.svelte';
+	import AgentFinalAnswer from '../AgentEvents/AgentFinalAnswer.svelte';
 	import { markAgentRunMessageDone } from '../AgentEvents/messageState';
 
 	interface MessageType {
@@ -82,6 +83,23 @@
 			description: string;
 			urls?: string[];
 			query?: string;
+			id?: string;
+			kind?: 'tool' | 'approval' | 'artifact' | 'subagent' | 'thinking' | 'step' | 'error';
+			detail?: {
+				input?: unknown;
+				output?: unknown;
+				error?: { message?: string; code?: string } | string;
+				artifact?: {
+					id: string;
+					name: string;
+					mimeType?: string;
+					path?: string;
+					size?: string;
+				};
+				subagent?: { name?: string; resultSummary?: string };
+			};
+			seq?: number;
+			created_at?: number;
 		}[];
 		status?: {
 			done: boolean;
@@ -170,6 +188,9 @@
 	let contentContainerElement: HTMLDivElement;
 	let buttonsContainerElement: HTMLDivElement;
 	let showDeleteConfirm = false;
+
+	let agentFinalAnswer = '';
+	let agentFinalAnswerDone = false;
 
 	let model = null;
 	$: model = $models.find((m) => m.id === message.model);
@@ -831,14 +852,29 @@
 							id="response-content-container"
 						>
 							{#if message.agent_run_id}
-								<AgentRunEvents
+								<AgentRunStatusBridge
 									agentRunId={message.agent_run_id}
-									showFinalText={!(message.content ?? '').trim()}
+									bind:statusHistory={message.statusHistory}
+									on:final={(event) => {
+										agentFinalAnswer = event.detail.content;
+										agentFinalAnswerDone = event.detail.done;
+									}}
 									on:terminal={async (event) => {
 										if (markAgentRunMessageDone(message, event.detail.runStatus)) {
 											await saveMessage(messageId, structuredClone(message));
 										}
 									}}
+								/>
+							{/if}
+
+							{#if message.agent_run_id && agentFinalAnswer && !(message.content ?? '').trim()}
+								<AgentFinalAnswer
+									agentRunId={message.agent_run_id}
+									content={agentFinalAnswer}
+									done={agentFinalAnswerDone}
+									{history}
+									messageId={message.id}
+									quiet
 								/>
 							{/if}
 

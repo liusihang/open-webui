@@ -8,7 +8,6 @@ import {
 } from './historySync';
 import { foldAgentRunEvents } from './AgentEvents/eventFold';
 import { agentRunEventFixture } from './AgentEvents/fixtures';
-import { createAgentRunRenderModel } from './AgentEvents/renderModel';
 
 describe('mergeServerMessage', () => {
 	it('keeps existing content when the server snapshot has empty content', () => {
@@ -270,44 +269,39 @@ describe('mergeHistorySnapshot', () => {
 
 		const result = mergeHistorySnapshot(currentHistory, latestHistory);
 		const recoveredMessage = result.history.messages.a;
-		const eventModel = createAgentRunRenderModel(
-			foldAgentRunEvents([
-				agentRunEventFixture({
-					seq: 1,
-					event_type: 'run.running',
-					summary: 'Agent started'
-				}),
-				agentRunEventFixture({
-					seq: 2,
-					event_type: 'final.started',
-					summary: 'Writing final answer'
-				}),
-				agentRunEventFixture({
-					seq: 3,
-					event_type: 'final.delta',
-					payload: { delta: 'Recovered final answer.', delta_index: 0, final_stream_id: 'final-1' }
-				}),
-				agentRunEventFixture({
-					seq: 3,
-					event_type: 'final.delta',
-					payload: { delta: 'Recovered final answer.', delta_index: 0, final_stream_id: 'final-1' }
-				}),
-				agentRunEventFixture({
-					seq: 4,
-					event_type: 'run.completed'
-				})
-			]),
-			{ transportStatus: 'live' }
-		);
+		const eventState = foldAgentRunEvents([
+			agentRunEventFixture({
+				seq: 1,
+				event_type: 'run.running',
+				summary: 'Agent started'
+			}),
+			agentRunEventFixture({
+				seq: 2,
+				event_type: 'final.started',
+				summary: 'Writing final answer'
+			}),
+			agentRunEventFixture({
+				seq: 3,
+				event_type: 'final.delta',
+				payload: { delta: 'Recovered final answer.', delta_index: 0, final_stream_id: 'final-1' }
+			}),
+			agentRunEventFixture({
+				seq: 3,
+				event_type: 'final.delta',
+				payload: { delta: 'Recovered final answer.', delta_index: 0, final_stream_id: 'final-1' }
+			}),
+			agentRunEventFixture({
+				seq: 4,
+				event_type: 'run.completed'
+			})
+		]);
 
 		expect(recoveredMessage.agent_run_id).toBe('run-1');
 		expect(result.changed).toBe(true);
 		expect(result.hasRenderableAssistantUpdate).toBe(true);
 		expect(Boolean(recoveredMessage.agent_run_id)).toBe(true);
 		expect((recoveredMessage.content ?? '').trim()).toBe('');
-		expect(eventModel.groups).toEqual([]);
-		expect(eventModel.debugGroups.map((group) => group.kind)).toEqual(['run', 'run']);
-		expect(eventModel.finalAnswer?.content).toBe('Recovered final answer.');
+		expect(eventState.finalText).toBe('Recovered final answer.');
 	});
 });
 

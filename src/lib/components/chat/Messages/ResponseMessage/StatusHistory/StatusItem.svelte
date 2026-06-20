@@ -3,6 +3,12 @@
 	const i18n = getContext('i18n');
 	import WebSearchResults from '../WebSearchResults.svelte';
 	import Search from '$lib/components/icons/Search.svelte';
+	import ThinkingStatusRow from './ThinkingStatusRow.svelte';
+	import ToolStatusRow from './ToolStatusRow.svelte';
+	import ErrorStatusRow from './ErrorStatusRow.svelte';
+	import ArtifactStatusRow from './ArtifactStatusRow.svelte';
+	import SubagentStatusRow from './SubagentStatusRow.svelte';
+	import ApprovalStatusRow from './ApprovalStatusRow.svelte';
 	import { t } from 'i18next';
 
 	export let status = null;
@@ -11,7 +17,41 @@
 
 {#if !status?.hidden}
 	<div class="status-description flex items-center gap-2 py-0.5 w-full text-left">
-		{#if status?.action === 'web_search' && (status?.urls || status?.items)}
+		{#if status?.kind === 'thinking'}
+			<ThinkingStatusRow done={status?.done !== false} description={status?.description} />
+		{:else if status?.kind === 'tool'}
+			<ToolStatusRow
+				description={status?.description}
+				done={status?.done !== false}
+				detail={status?.detail}
+			/>
+		{:else if status?.kind === 'error'}
+			<ErrorStatusRow description={status?.description} detail={status?.detail} />
+		{:else if status?.kind === 'artifact'}
+			<ArtifactStatusRow description={status?.description} detail={status?.detail} />
+		{:else if status?.kind === 'subagent'}
+			<SubagentStatusRow
+				description={status?.description}
+				done={status?.done !== false}
+				detail={status?.detail}
+			/>
+		{:else if status?.kind === 'approval'}
+			<ApprovalStatusRow
+				description={status?.description}
+				done={status?.done !== false}
+				detail={status?.detail}
+			/>
+		{:else if status?.kind === 'step'}
+			<div class="flex flex-col justify-center -space-y-0.5 w-full">
+				<div
+					class="{(done || status?.done) === false
+						? 'shimmer'
+						: ''} text-gray-500 dark:text-gray-500 text-base line-clamp-1 text-wrap"
+				>
+					{status?.description}
+				</div>
+			</div>
+		{:else if status?.action === 'web_search' && (status?.urls || status?.items)}
 			<WebSearchResults {status}>
 				<div class="flex flex-col justify-center -space-y-0.5">
 					<div

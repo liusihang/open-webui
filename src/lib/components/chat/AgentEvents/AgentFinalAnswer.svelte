@@ -2,18 +2,21 @@
 	import ContentRenderer from '$lib/components/chat/Messages/ContentRenderer.svelte';
 	import Sparkles from '$lib/components/icons/Sparkles.svelte';
 
-	import type { AgentRunFinalPart } from './renderModel';
-
 	export let agentRunId: string;
-	export let finalAnswer: AgentRunFinalPart;
+	export let content = '';
+	export let done = false;
 	export let quiet = false;
+	export let history: any;
+	export let messageId: string;
 </script>
 
 {#if quiet}
 	<ContentRenderer
 		id={`agent-run-final-${agentRunId}`}
-		content={finalAnswer.content}
-		done={finalAnswer.status === 'done'}
+		{content}
+		{done}
+		{history}
+		{messageId}
 		floatingButtons={false}
 		save={false}
 		preview={false}
@@ -24,12 +27,14 @@
 	>
 		<div class="mb-2 flex items-center gap-2 text-xs font-medium text-gray-500 dark:text-gray-400">
 			<Sparkles className="size-3.5" />
-			<span>{finalAnswer.title}</span>
+			<span>最终回答</span>
 		</div>
 		<ContentRenderer
 			id={`agent-run-final-${agentRunId}`}
-			content={finalAnswer.content}
-			done={finalAnswer.status === 'done'}
+			{content}
+			{done}
+			{history}
+			{messageId}
 			floatingButtons={false}
 			save={false}
 			preview={false}
