@@ -993,12 +993,24 @@ async def execute_agent_run_tool_call(
 
 
 async def _append_agent_event_with_operation(event: AgentEventAppend) -> AgentRunEvent:
-    claim = await AgentRuns.claim_operation(
-        event.run_id,
-        operation_type='event.append',
-        idempotency_key=event.idempotency_key or '',
-        request_hash=_callback_request_hash('event.append', event),
-    )
+    key = event.idempotency_key or ''
+    try:
+        claim = await AgentRuns.claim_operation(
+            event.run_id,
+            operation_type='event.append',
+            idempotency_key=key,
+            request_hash=_callback_request_hash('event.append', event),
+        )
+    except AgentRunOperationConflict:
+        existing = await AgentRuns.find_operation_by_idempotency_key(
+            event.run_id,
+            operation_type='event.append',
+            idempotency_key=key,
+        )
+        if existing is None:
+            raise
+        return _cached_event_operation_response(existing)
+
     if not claim.created:
         return _cached_event_operation_response(claim.operation)
 

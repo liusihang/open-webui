@@ -116,6 +116,60 @@ async def test_append_event_surfaces_callback_failure() -> None:
 
 
 @pytest.mark.asyncio
+async def test_append_event_treats_409_idempotency_conflict_as_success() -> None:
+    """When openwebui returns 409 idempotency_conflict for event.append, the
+    runtime must treat it as success (event already stored) and not crash the
+    agent run. See docs/handoff-agent-runtime-streaming-text-2026-06-20.md.
+    """
+    async with respx.mock(assert_all_called=True) as router:
+        router.post("https://openwebui.test/api/agent/service/runs/run-1/events").mock(
+            return_value=Response(
+                409,
+                json={"detail": "idempotency_conflict", "seq": 7},
+            )
+        )
+        client = OpenWebUIClient(
+            base_url="https://openwebui.test",
+            service_token="owui-token",
+        )
+
+        response = await client.append_event(
+            run_id="run-1",
+            idempotency_key="evt:session:sub-1:completed",
+            event_type="subagent.completed",
+            summary="Subagent finished.",
+            payload={"participant_id": "sub-1", "content": "ok"},
+            participant_id="sub-1",
+            phase="running",
+        )
+
+    assert response["detail"] == "idempotency_conflict"
+    assert response["seq"] == 7
+
+
+@pytest.mark.asyncio
+async def test_append_event_treats_409_with_empty_body_as_idempotency_conflict() -> None:
+    """A 409 without a JSON body still resolves to a synthetic
+    idempotency_conflict payload rather than raising."""
+    async with respx.mock(assert_all_called=True) as router:
+        router.post("https://openwebui.test/api/agent/service/runs/run-1/events").mock(
+            return_value=Response(409, text="")
+        )
+        client = OpenWebUIClient(
+            base_url="https://openwebui.test",
+            service_token="owui-token",
+        )
+
+        response = await client.append_event(
+            run_id="run-1",
+            idempotency_key="evt:session:run-running",
+            event_type="run.running",
+        )
+
+    assert response["detail"] == "idempotency_conflict"
+
+
+@pytest.mark.asyncio
 async def test_append_final_delta_uses_openwebui_final_delta_callback() -> None:
     async with respx.mock(assert_all_called=True) as router:
         request = router.post("https://openwebui.test/api/agent/service/runs/run-1/final-delta").mock(

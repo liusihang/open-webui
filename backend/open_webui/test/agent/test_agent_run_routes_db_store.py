@@ -223,7 +223,7 @@ async def test_agent_service_event_callbacks_use_agent_runs_db_without_fake_even
 
 
 @pytest.mark.asyncio
-async def test_agent_service_event_callback_retries_are_idempotent_and_conflicting_bodies_fail(
+async def test_agent_service_event_callback_retries_are_idempotent_and_conflicting_bodies_return_existing(
     agent_run_db,
     app_without_fake_event_store,
 ):
@@ -262,8 +262,10 @@ async def test_agent_service_event_callback_retries_are_idempotent_and_conflicti
     assert first.status_code == 200
     assert duplicate.status_code == 200
     assert duplicate.json() == first.json()
-    assert conflict.status_code == 409
-    assert conflict.json()['detail'] == 'idempotency_conflict'
+    # event.append 放宽幂等冲突：payload 不同时返回已存事件，不抛 409
+    assert conflict.status_code == 200
+    assert conflict.json()['summary'] == 'Runtime accepted'
+    assert conflict.json()['seq'] == first.json()['seq']
 
     events = await AgentRuns.list_events(run.id)
     assert len(events) == 1

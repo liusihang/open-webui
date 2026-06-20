@@ -68,6 +68,11 @@ class OpenWebUIClient:
                 json=body.model_dump(mode="json"),
             )
 
+        if response.status_code == 409:
+            return _safe_response_json(response) or {
+                "detail": "idempotency_conflict",
+            }
+
         if response.is_error:
             raise RuntimeError(
                 "OpenWebUI append-event failed "

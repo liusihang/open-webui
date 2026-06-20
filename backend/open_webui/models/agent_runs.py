@@ -590,6 +590,33 @@ class AgentRunTable:
                 created=True,
             )
 
+    async def find_operation_by_idempotency_key(
+        self,
+        run_id: str,
+        *,
+        operation_type: str,
+        idempotency_key: str,
+        db: AsyncSession | None = None,
+    ) -> AgentRunOperationModel | None:
+        """Return the existing operation row for an idempotency key, or None.
+
+        Used to recover from AgentRunOperationConflict on event.append: when
+        the same key was already used with a different request_hash, callers
+        can resolve to the previously stored event instead of failing the run.
+        """
+        async with get_async_db_context(db) as db:
+            result = await db.execute(
+                select(AgentRunOperation).filter_by(
+                    run_id=run_id,
+                    operation_type=operation_type,
+                    idempotency_key=idempotency_key,
+                )
+            )
+            row = result.scalars().first()
+            if row is None:
+                return None
+            return AgentRunOperationModel.model_validate(row)
+
     async def finish_operation_success(
         self,
         operation_id: str,
