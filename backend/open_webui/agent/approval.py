@@ -71,7 +71,10 @@ class AgentApprovalCoordinator:
             tool_id=tool.get('tool_id'),
             tool_type=tool.get('type'),
             arguments=request.arguments,
-            metadata=tool.get('metadata') or tool.get('meta') or {},
+            metadata={
+                **(tool.get('metadata') or tool.get('meta') or {}),
+                'run_id': request.run_id,
+            },
         )
         if not assessment.requires_approval:
             return None

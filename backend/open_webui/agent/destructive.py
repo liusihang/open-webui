@@ -43,13 +43,15 @@ _DELETE_COMMAND_PATTERNS = (
     re.compile(r'(^|[;&|()]\s*)(rm|rmdir|unlink|shred)\b'),
 )
 
+_SINGLE_REDIRECT_PATTERN = re.compile(r'(^|[^>])>(?!>)\s*(?P<target>\S+)')
+
 _OVERWRITE_COMMAND_PATTERNS = (
     re.compile(r'(^|[;&|()]\s*)(mv|truncate)\b'),
     re.compile(r'(^|[;&|()]\s*)cp\s+-(?:[^;&|]*f|[^;&|]*T)\b'),
     re.compile(r'(^|[;&|()]\s*)(sed|perl)\b[^;&|]*\s-i(?:\s|$)'),
     re.compile(r'(^|[;&|()]\s*)dd\b[^;&|]*\bof='),
     re.compile(r'(^|[;&|()]\s*)tee\b'),
-    re.compile(r'(^|[^>])>(?!>)\s*\S+'),
+    _SINGLE_REDIRECT_PATTERN,
     re.compile(r'(^|[;&|()]\s*)apply_patch\b'),
 )
 
@@ -112,7 +114,12 @@ def classify_destructive_tool_call(
         )
 
     if name == 'run_command':
-        return _classify_command(args.get('command'), tool_id=tool_id, tool_type=tool_type)
+        return _classify_command(
+            args.get('command'),
+            run_id=meta.get('run_id') if isinstance(meta.get('run_id'), str) else None,
+            tool_id=tool_id,
+            tool_type=tool_type,
+        )
 
     return DestructiveAssessment(
         requires_approval=False,
@@ -124,6 +131,7 @@ def classify_destructive_tool_call(
 def _classify_command(
     command: Any,
     *,
+    run_id: str | None = None,
     tool_id: str | None,
     tool_type: str | None,
 ) -> DestructiveAssessment:
@@ -142,6 +150,10 @@ def _classify_command(
     for pattern in _OVERWRITE_COMMAND_PATTERNS:
         match = pattern.search(text)
         if match:
+            if pattern is _SINGLE_REDIRECT_PATTERN and _redirects_only_to_run_artifact_dir(
+                text, run_id
+            ):
+                continue
             matched = (
                 match.group(2)
                 if match.lastindex and match.lastindex >= 2
@@ -200,3 +212,21 @@ def _action_summary(tool_name: str | None, arguments: dict[str, Any]) -> str:
 
 def _command_action_summary(command: str) -> str:
     return f'run_command {command[:160]}' if command else 'run_command'
+
+
+def _redirects_only_to_run_artifact_dir(command: str, run_id: str | None) -> bool:
+    if not run_id:
+        return False
+    matches = list(_SINGLE_REDIRECT_PATTERN.finditer(command))
+    if not matches:
+        return False
+    return all(_is_run_artifact_path(match.group('target'), run_id) for match in matches)
+
+
+def _is_run_artifact_path(path: str, run_id: str) -> bool:
+    cleaned = path.strip('\'"')
+    safe_prefixes = (
+        f'/workspace/agent-runs/{run_id}/outputs/',
+        f'/workspace/agent-runs/{run_id}/tmp/',
+    )
+    return cleaned.startswith(safe_prefixes)

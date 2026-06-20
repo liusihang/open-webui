@@ -213,6 +213,109 @@ async def test_read_only_tool_call_endpoint_bypasses_approval_and_executes_once(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    'target_path',
+    [
+        '/workspace/agent-runs/run-1/outputs/report.md',
+        '/workspace/agent-runs/run-1/tmp/scratch.json',
+    ],
+)
+async def test_run_command_creating_current_run_artifact_bypasses_approval(target_path):
+    calls = []
+
+    async def run_command(command: str):
+        calls.append(command)
+        return {'exit_code': 0, 'stdout': '', 'stderr': ''}
+
+    _envelope, registry = build_tool_access_envelope(
+        {
+            'run_command': {
+                'tool_id': 'terminal:main',
+                'callable': run_command,
+                'spec': {'name': 'run_command', 'parameters': {'type': 'object'}},
+                'type': 'terminal',
+            }
+        }
+    )
+    store = FakeApprovalStore()
+    authority = AgentToolAuthority(operation_store=store, registry=registry)
+    coordinator = AgentApprovalCoordinator(store)
+    command = f'printf "artifact" > {target_path}'
+
+    result = await execute_agent_run_tool_call(
+        request=_service_request(),
+        run_id='run-1',
+        form_data=ToolCallRequest(
+            run_id='run-1',
+            participant_id='leader',
+            tool_call_id='call-1',
+            tool_id='tool:terminal:main:run_command',
+            arguments={'command': command},
+            idempotency_key='tool:leader:call-1:1',
+        ),
+        idempotency_key='tool:leader:call-1:1',
+        authorization='Bearer service-secret',
+        authority=authority,
+        approval_coordinator=coordinator,
+    )
+
+    assert result['status'] == 'success'
+    assert calls == [command]
+    assert store.state['run-1'] == 'running'
+    assert store.events == []
+
+
+@pytest.mark.asyncio
+async def test_run_command_write_outside_current_run_artifact_dirs_requires_approval():
+    calls = []
+
+    async def run_command(command: str):
+        calls.append(command)
+        return {'exit_code': 0, 'stdout': '', 'stderr': ''}
+
+    _envelope, registry = build_tool_access_envelope(
+        {
+            'run_command': {
+                'tool_id': 'terminal:main',
+                'callable': run_command,
+                'spec': {'name': 'run_command', 'parameters': {'type': 'object'}},
+                'type': 'terminal',
+            }
+        }
+    )
+    store = FakeApprovalStore()
+    authority = AgentToolAuthority(operation_store=store, registry=registry)
+    coordinator = AgentApprovalCoordinator(store)
+
+    approval_required = await execute_agent_run_tool_call(
+        request=_service_request(),
+        run_id='run-1',
+        form_data=ToolCallRequest(
+            run_id='run-1',
+            participant_id='leader',
+            tool_call_id='call-1',
+            tool_id='tool:terminal:main:run_command',
+            arguments={
+                'command': (
+                    'printf "artifact" > '
+                    '/workspace/agent-runs/run-2/outputs/report.md'
+                )
+            },
+            idempotency_key='tool:leader:call-1:1',
+        ),
+        idempotency_key='tool:leader:call-1:1',
+        authorization='Bearer service-secret',
+        authority=authority,
+        approval_coordinator=coordinator,
+    )
+
+    assert approval_required['status'] == 'approval_required'
+    assert calls == []
+    assert store.state['run-1'] == 'waiting_approval'
+    assert [event['event_type'] for event in store.events] == ['approval.requested']
+
+
+@pytest.mark.asyncio
 async def test_destructive_tool_call_waits_for_approval_then_resumes_with_tool_result():
     calls = []
 
