@@ -9,6 +9,7 @@
 	import ArtifactStatusRow from './ArtifactStatusRow.svelte';
 	import SubagentStatusRow from './SubagentStatusRow.svelte';
 	import ApprovalStatusRow from './ApprovalStatusRow.svelte';
+	import TextStatusRow from './TextStatusRow.svelte';
 	import { t } from 'i18next';
 
 	export let status = null;
@@ -16,7 +17,11 @@
 </script>
 
 {#if !status?.hidden}
-	<div class="status-description flex items-center gap-2 py-0.5 w-full text-left">
+	<div
+		class="status-description py-0.5 w-full text-left {status?.kind === 'text'
+			? 'block'
+			: 'flex items-center gap-2'}"
+	>
 		{#if status?.kind === 'thinking'}
 			<ThinkingStatusRow done={status?.done !== false} description={status?.description} />
 		{:else if status?.kind === 'tool'}
@@ -41,6 +46,8 @@
 				done={status?.done !== false}
 				detail={status?.detail}
 			/>
+		{:else if status?.kind === 'text'}
+			<TextStatusRow done={status?.done !== false} detail={status?.detail} />
 		{:else if status?.kind === 'step'}
 			<div class="flex flex-col justify-center -space-y-0.5 w-full">
 				<div

@@ -6,6 +6,7 @@ export type AgentStatusKind =
 	| 'artifact'
 	| 'subagent'
 	| 'thinking'
+	| 'text'
 	| 'step'
 	| 'error';
 
@@ -23,6 +24,11 @@ export type AgentStatusDetail = {
 	subagent?: {
 		name?: string;
 		resultSummary?: string;
+	};
+	text?: {
+		blockId: string;
+		content: string;
+		participantId?: string | null;
 	};
 };
 
@@ -53,10 +59,7 @@ export const foldAgentEventIntoStatusHistory = (
 	return [...next];
 };
 
-const applyEvent = (
-	history: AgentStatusEntry[],
-	event: AgentRunEvent
-): AgentStatusEntry[] => {
+const applyEvent = (history: AgentStatusEntry[], event: AgentRunEvent): AgentStatusEntry[] => {
 	switch (event.event_type) {
 		case 'run.queued':
 		case 'run.running':
@@ -70,16 +73,19 @@ const applyEvent = (
 			});
 
 		case 'run.completed':
-			return markThinkingDone(history, event);
+			return markThinkingDone(markTextSegmentsDone(history, event), event);
 
 		case 'run.failed':
 		case 'run.cancelled':
 		case 'run.budget_exceeded':
-			return appendRunError(markThinkingDone(history, event), event);
+			return appendRunError(markThinkingDone(markTextSegmentsDone(history, event), event), event);
+
+		case 'text.delta':
+			return upsertText(history, event);
 
 		case 'tool.requested':
 		case 'tool.started':
-			return upsertTool(history, event, false);
+			return upsertTool(markTextSegmentsDone(history, event), event, false);
 
 		case 'tool.completed':
 			return upsertTool(history, event, true);
@@ -88,7 +94,7 @@ const applyEvent = (
 			return upsertToolError(history, event);
 
 		case 'approval.requested':
-			return upsertApproval(history, event);
+			return upsertApproval(markTextSegmentsDone(history, event), event);
 
 		case 'approval.completed':
 			return updateApprovalDone(history, event);
@@ -98,7 +104,7 @@ const applyEvent = (
 
 		case 'subagent.created':
 		case 'subagent.updated':
-			return upsertSubagent(history, event, false);
+			return upsertSubagent(markTextSegmentsDone(history, event), event, false);
 
 		case 'subagent.completed':
 			return upsertSubagent(history, event, true);
@@ -136,6 +142,34 @@ const upsert = (
 	return history.map((entry, idx) => (idx === index ? updated : entry));
 };
 
+const upsertText = (history: AgentStatusEntry[], event: AgentRunEvent): AgentStatusEntry[] => {
+	const blockId = firstString(event.payload.block_id, event.payload.blockId);
+	if (!blockId) {
+		return history;
+	}
+
+	const id = `text:${blockId}`;
+	const delta = firstString(event.payload.delta, event.payload.text) ?? '';
+	const existing = history.find((entry) => entry.id === id);
+	const previousContent = existing?.detail?.text?.content ?? '';
+
+	return upsert(history, id, {
+		done: false,
+		action: 'agent_text',
+		description: '',
+		kind: 'text',
+		seq: event.seq,
+		created_at: event.created_at,
+		detail: {
+			text: {
+				blockId,
+				content: previousContent + delta,
+				participantId: event.participant_id ?? null
+			}
+		}
+	});
+};
+
 const markThinkingDone = (
 	history: AgentStatusEntry[],
 	event: AgentRunEvent
@@ -152,10 +186,24 @@ const markThinkingDone = (
 	return history.map((entry, idx) => (idx === index ? updated : entry));
 };
 
-const appendRunError = (
+const markTextSegmentsDone = (
 	history: AgentStatusEntry[],
 	event: AgentRunEvent
 ): AgentStatusEntry[] => {
+	let changed = false;
+	const next = history.map((entry) => {
+		if (entry.kind !== 'text' || entry.done) {
+			return entry;
+		}
+
+		changed = true;
+		return { ...entry, done: true, seq: event.seq, created_at: event.created_at };
+	});
+
+	return changed ? next : history;
+};
+
+const appendRunError = (history: AgentStatusEntry[], event: AgentRunEvent): AgentStatusEntry[] => {
 	const description = runErrorDescription(event);
 	const error = extractError(event.payload);
 	const entry: AgentStatusEntry = {
@@ -210,18 +258,17 @@ const upsertTool = (
 	});
 };
 
-const upsertToolError = (
-	history: AgentStatusEntry[],
-	event: AgentRunEvent
-): AgentStatusEntry[] => {
+const upsertToolError = (history: AgentStatusEntry[], event: AgentRunEvent): AgentStatusEntry[] => {
 	const payload = event.payload;
 	const toolCallId = firstString(payload.tool_call_id, payload.call_id);
 	const id = toolCallId ? `tool:${toolCallId}` : `tool:seq-${event.seq}`;
 	const error = extractError(payload);
 	const existing = history.find((entry) => entry.id === id);
-	const description = existing?.description ?? humanizeIdentifier(
-		firstString(payload.tool_name, payload.name, payload.tool)
-	) ?? event.summary ?? '工具调用失败';
+	const description =
+		existing?.description ??
+		humanizeIdentifier(firstString(payload.tool_name, payload.name, payload.tool)) ??
+		event.summary ??
+		'工具调用失败';
 
 	return upsert(history, id, {
 		done: true,
@@ -237,10 +284,7 @@ const upsertToolError = (
 	});
 };
 
-const upsertApproval = (
-	history: AgentStatusEntry[],
-	event: AgentRunEvent
-): AgentStatusEntry[] => {
+const upsertApproval = (history: AgentStatusEntry[], event: AgentRunEvent): AgentStatusEntry[] => {
 	const payload = event.payload;
 	const approvalId = firstString(payload.approval_id, payload.id);
 	const id = approvalId ? `approval:${approvalId}` : `approval:seq-${event.seq}`;
@@ -278,10 +322,7 @@ const updateApprovalDone = (
 	return history.map((entry, idx) => (idx === index ? updated : entry));
 };
 
-const upsertArtifact = (
-	history: AgentStatusEntry[],
-	event: AgentRunEvent
-): AgentStatusEntry[] => {
+const upsertArtifact = (history: AgentStatusEntry[], event: AgentRunEvent): AgentStatusEntry[] => {
 	const payload = event.payload;
 	const artifactId = firstString(payload.artifact_id, payload.id, payload.path, payload.name);
 	const id = artifactId ? `artifact:${artifactId}` : `artifact:seq-${event.seq}`;
@@ -344,7 +385,8 @@ const upsertSubagentError = (
 	const participantId = event.participant_id ?? firstString(payload.participant_id);
 	const id = participantId ? `subagent:${participantId}` : `subagent:seq-${event.seq}`;
 	const existing = history.find((entry) => entry.id === id);
-	const name = existing?.description ?? firstString(payload.participant_name, payload.name) ?? '助手';
+	const name =
+		existing?.description ?? firstString(payload.participant_name, payload.name) ?? '助手';
 	const error = extractError(payload);
 
 	return upsert(history, id, {
@@ -361,10 +403,7 @@ const upsertSubagentError = (
 	});
 };
 
-const appendStep = (
-	history: AgentStatusEntry[],
-	event: AgentRunEvent
-): AgentStatusEntry[] => {
+const appendStep = (history: AgentStatusEntry[], event: AgentRunEvent): AgentStatusEntry[] => {
 	const description = event.summary?.trim() || '执行步骤';
 	const entry: AgentStatusEntry = {
 		id: `step:${event.seq}`,
@@ -406,10 +445,7 @@ const errorMessage = (payload: AgentRunEventPayload): string | null => {
 	return err.message ?? null;
 };
 
-const pickFields = (
-	value: AgentRunEventPayload,
-	keys: string[]
-): AgentRunEventPayload => {
+const pickFields = (value: AgentRunEventPayload, keys: string[]): AgentRunEventPayload => {
 	const picked: AgentRunEventPayload = {};
 	for (const key of keys) {
 		if (value[key] !== undefined && value[key] !== null) {
@@ -425,7 +461,8 @@ const stripEmptyDetail = (detail: AgentStatusDetail): AgentStatusDetail | undefi
 		detail.output === undefined &&
 		detail.error === undefined &&
 		detail.artifact === undefined &&
-		detail.subagent === undefined
+		detail.subagent === undefined &&
+		detail.text === undefined
 	) {
 		return undefined;
 	}
@@ -435,6 +472,7 @@ const stripEmptyDetail = (detail: AgentStatusDetail): AgentStatusDetail | undefi
 	if (detail.error !== undefined) cleaned.error = detail.error;
 	if (detail.artifact !== undefined) cleaned.artifact = detail.artifact;
 	if (detail.subagent !== undefined) cleaned.subagent = detail.subagent;
+	if (detail.text !== undefined) cleaned.text = detail.text;
 	return cleaned;
 };
 

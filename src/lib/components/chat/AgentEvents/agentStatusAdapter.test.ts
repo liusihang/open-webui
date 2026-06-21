@@ -50,7 +50,11 @@ describe('foldAgentEventIntoStatusHistory - thinking status', () => {
 	});
 
 	it('marks thinking done on run.cancelled', () => {
-		const event = agentRunEventFixture({ seq: 3, event_type: 'run.cancelled', summary: 'Cancelled' });
+		const event = agentRunEventFixture({
+			seq: 3,
+			event_type: 'run.cancelled',
+			summary: 'Cancelled'
+		});
 
 		const next = foldAgentEventIntoStatusHistory([thinkingEntry({ seq: 1 })], event);
 
@@ -353,6 +357,74 @@ describe('foldAgentEventIntoStatusHistory - run error status', () => {
 	});
 });
 
+describe('foldAgentEventIntoStatusHistory - text status', () => {
+	it('accumulates text.delta content per block id', () => {
+		const first = agentRunEventFixture({
+			seq: 2,
+			event_type: 'text.delta',
+			payload: { block_id: 'block-1', delta: 'Hello ' }
+		});
+		const second = agentRunEventFixture({
+			seq: 3,
+			event_type: 'text.delta',
+			payload: { block_id: 'block-1', delta: 'world' }
+		});
+
+		let history = foldAgentEventIntoStatusHistory([thinkingEntry({ seq: 1 })], first);
+		history = foldAgentEventIntoStatusHistory(history, second);
+
+		expect(history).toHaveLength(2);
+		expect(history[1]).toMatchObject({
+			id: 'text:block-1',
+			kind: 'text',
+			done: false,
+			detail: { text: { blockId: 'block-1', content: 'Hello world', participantId: 'leader' } }
+		});
+	});
+
+	it('marks open text segments done when the run pivots to a tool', () => {
+		const text = agentRunEventFixture({
+			seq: 2,
+			event_type: 'text.delta',
+			payload: { block_id: 'block-1', delta: 'Let me check that.' }
+		});
+		const tool = agentRunEventFixture({
+			seq: 3,
+			event_type: 'tool.requested',
+			payload: { tool_call_id: 'tc-1', tool_name: 'web_search', arguments: { query: 'x' } }
+		});
+
+		let history = foldAgentEventIntoStatusHistory([thinkingEntry({ seq: 1 })], text);
+		history = foldAgentEventIntoStatusHistory(history, tool);
+
+		expect(history).toHaveLength(3);
+		expect(history[1]).toMatchObject({
+			id: 'text:block-1',
+			kind: 'text',
+			done: true,
+			seq: 3
+		});
+		expect(history[2]).toMatchObject({
+			id: 'tool:tc-1',
+			kind: 'tool',
+			done: false
+		});
+	});
+
+	it('ignores text.delta without a block id', () => {
+		const event = agentRunEventFixture({
+			seq: 2,
+			event_type: 'text.delta',
+			payload: { delta: 'Hello world' }
+		});
+
+		const next = foldAgentEventIntoStatusHistory([thinkingEntry({ seq: 1 })], event);
+
+		expect(next).toHaveLength(1);
+		expect(next[0].id).toBe('thinking:run');
+	});
+});
+
 describe('foldAgentEventIntoStatusHistory - ignored events', () => {
 	it('does not create entries for model.selection.* events', () => {
 		const event = agentRunEventFixture({
@@ -384,17 +456,16 @@ describe('foldAgentEventIntoStatusHistory - ignored events', () => {
 });
 
 describe('foldAgentEventIntoStatusHistory - ordinary Q&A full flow', () => {
-	it('produces only a thinking entry for a no-tool run', () => {
+	it('keeps the streamed answer as a text entry for a no-tool run', () => {
 		const events: AgentRunEvent[] = [
 			agentRunEventFixture({ seq: 1, event_type: 'run.queued', summary: 'Queued' }),
 			agentRunEventFixture({ seq: 2, event_type: 'run.running', summary: 'Running' }),
-			agentRunEventFixture({ seq: 3, event_type: 'final.started' }),
 			agentRunEventFixture({
-				seq: 4,
-				event_type: 'final.delta',
-				payload: { stream_id: 's1', delta_index: 0, text: 'Hello' }
+				seq: 3,
+				event_type: 'text.delta',
+				payload: { block_id: 'answer', delta: 'Hello' }
 			}),
-			agentRunEventFixture({ seq: 5, event_type: 'run.completed', summary: 'Done' })
+			agentRunEventFixture({ seq: 4, event_type: 'run.completed', summary: 'Done' })
 		];
 
 		const history = events.reduce(
@@ -402,8 +473,14 @@ describe('foldAgentEventIntoStatusHistory - ordinary Q&A full flow', () => {
 			[] as AgentStatusEntry[]
 		);
 
-		expect(history).toHaveLength(1);
+		expect(history).toHaveLength(2);
 		expect(history[0]).toMatchObject({ id: 'thinking:run', kind: 'thinking', done: true });
+		expect(history[1]).toMatchObject({
+			id: 'text:answer',
+			kind: 'text',
+			done: true,
+			detail: { text: { blockId: 'answer', content: 'Hello' } }
+		});
 	});
 });
 

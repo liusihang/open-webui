@@ -132,6 +132,46 @@ describe('foldAgentRunEvents', () => {
 		expect(state.items.map((item) => item.eventType)).toEqual(['final.started', 'final.delta']);
 	});
 
+	it('accumulates text.delta chunks into finalText using event sequence order', () => {
+		let state = createAgentRunEventState();
+
+		state = foldAgentRunEvent(
+			state,
+			agentRunEventFixture({ seq: 1, event_type: 'run.running', summary: 'Agent started' })
+		);
+		state = foldAgentRunEvent(
+			state,
+			agentRunEventFixture({
+				seq: 2,
+				event_type: 'text.delta',
+				payload: { block_id: 'z-first', delta_index: 0, delta: 'Hello ' },
+				phase: 'running'
+			})
+		);
+		state = foldAgentRunEvent(
+			state,
+			agentRunEventFixture({
+				seq: 3,
+				event_type: 'tool.requested',
+				payload: { tool_name: 'web_search' },
+				summary: 'Searching docs'
+			})
+		);
+		state = foldAgentRunEvent(
+			state,
+			agentRunEventFixture({
+				seq: 4,
+				event_type: 'text.delta',
+				payload: { block_id: 'a-second', delta_index: 0, delta: 'world' },
+				phase: 'running'
+			})
+		);
+
+		expect(state.finalText).toBe('Hello world');
+		expect(state.items.map((item) => item.eventType)).toEqual(['run.running', 'tool.requested']);
+		expect(state.runStatus).toBe('running');
+	});
+
 	it('surfaces concise details and strips raw reasoning fields', () => {
 		const state = foldAgentRunEvents([
 			agentRunEventFixture({

@@ -90,12 +90,33 @@ export const foldAgentRunEvent = (
 			nextState.finalDeltaChunks.set(deltaKey, {
 				streamId: getFinalStreamId(event),
 				deltaIndex: getFinalDeltaIndex(event),
-				text: getFinalDeltaText(event)
+				text: getFinalDeltaText(event),
+				seq: event.seq
 			});
 			nextState.finalText = buildFinalText(nextState.finalDeltaChunks);
 		}
 
 		upsertFinalDeltaItem(nextState, event);
+		return nextState;
+	}
+
+	if (event.event_type === 'text.delta') {
+		const deltaKey = getTextDeltaKey(event);
+		if (!deltaKey) {
+			return nextState;
+		}
+
+		if (!nextState.seenFinalDeltaKeys.has(deltaKey)) {
+			nextState.seenFinalDeltaKeys.add(deltaKey);
+			nextState.finalDeltaChunks.set(deltaKey, {
+				streamId: getTextStreamId(event),
+				deltaIndex: getFinalDeltaIndex(event),
+				text: getFinalDeltaText(event),
+				seq: event.seq
+			});
+			nextState.finalText = buildFinalText(nextState.finalDeltaChunks);
+		}
+
 		return nextState;
 	}
 
@@ -435,8 +456,22 @@ const getFinalDeltaKey = (event: AgentRunEvent): string => {
 	return `${streamId}:${deltaIndex}`;
 };
 
+const getTextDeltaKey = (event: AgentRunEvent): string | null => {
+	const streamId = getTextStreamId(event);
+	if (!streamId) {
+		return null;
+	}
+
+	const deltaIndex = getString(event.payload.delta_index) ?? `${event.seq}`;
+	return `${streamId}:${deltaIndex}`;
+};
+
 const getFinalStreamId = (event: AgentRunEvent): string => {
 	return getString(event.payload.final_stream_id) ?? 'default';
+};
+
+const getTextStreamId = (event: AgentRunEvent): string | null => {
+	return getString(event.payload.block_id ?? event.payload.blockId);
 };
 
 const getFinalDeltaIndex = (event: AgentRunEvent): number => {
@@ -458,11 +493,15 @@ const getFinalDeltaIndex = (event: AgentRunEvent): number => {
 const buildFinalText = (chunks: AgentRunEventState['finalDeltaChunks']): string => {
 	return [...chunks.values()]
 		.sort((a, b) => {
-			if (a.streamId === b.streamId) {
-				return a.deltaIndex - b.deltaIndex;
+			if (a.seq === b.seq) {
+				if (a.streamId === b.streamId) {
+					return a.deltaIndex - b.deltaIndex;
+				}
+
+				return a.streamId.localeCompare(b.streamId);
 			}
 
-			return a.streamId.localeCompare(b.streamId);
+			return a.seq - b.seq;
 		})
 		.map((chunk) => chunk.text)
 		.join('');

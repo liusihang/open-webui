@@ -27,6 +27,7 @@ export const AGENT_RUN_EVENT_TYPES = [
 	'model.selection.completed',
 	'final.started',
 	'final.delta',
+	'text.delta',
 	'run.completed',
 	'run.failed',
 	'run.cancelled',
@@ -116,6 +117,7 @@ export type AgentRunEventState = {
 			streamId: string;
 			deltaIndex: number;
 			text: string;
+			seq: number;
 		}
 	>;
 };
