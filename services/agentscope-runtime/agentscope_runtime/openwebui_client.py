@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import time
 from typing import Any
 
@@ -102,6 +103,31 @@ class OpenWebUIClient:
         )
         url = f"{self._base_url}/api/agent/service/runs/{run_id}/final-delta"
         return await self._post_callback(url, idempotency_key, body.model_dump(mode="json"))
+
+    async def append_text_delta(
+        self,
+        *,
+        run_id: str,
+        idempotency_key: str,
+        block_id: str,
+        delta_index: int,
+        delta: str,
+        participant_id: str | None = None,
+        phase: str | None = None,
+        payload: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        body = {
+            "idempotency_key": idempotency_key,
+            "run_id": run_id,
+            "block_id": block_id,
+            "delta_index": delta_index,
+            "delta": delta,
+            "participant_id": participant_id,
+            "phase": phase,
+            "payload": payload or {},
+        }
+        url = f"{self._base_url}/api/agent/service/runs/{run_id}/text-delta"
+        return await self._post_callback(url, idempotency_key, body)
 
     async def transition_state(
         self,
@@ -281,6 +307,146 @@ class OpenWebUIClient:
                 f"with status {response.status_code}: {response.text}",
             )
         return payload if payload is not None else response.json()
+
+    async def call_model_stream(
+        self,
+        *,
+        run_id: str,
+        idempotency_key: str,
+        participant_id: str,
+        model_call_id: str,
+        model: str,
+        messages: list[dict[str, Any]] | None = None,
+        params: dict[str, Any] | None = None,
+        tools: list[dict[str, Any]] | None = None,
+        tool_choice: Any | None = None,
+        metadata: dict[str, Any] | None = None,
+    ):
+        """Stream a model call's response as an async generator of parsed
+        SSE events.
+
+        Yields dicts of shape:
+            {'type': 'chunk', 'delta': {'content': str | None,
+                                        'tool_calls': list | None}}
+            {'type': 'done', 'response': <full response dict>}  # non-stream fallback
+            {'type': 'stream_end', 'model_call_id': str}         # terminal
+
+        The caller is responsible for accumulating text and tool_calls
+        across chunks.
+        """
+        body = ModelCallRequest(
+            idempotency_key=idempotency_key,
+            run_id=run_id,
+            participant_id=participant_id,
+            model_call_id=model_call_id,
+            model=model,
+            messages=messages or [],
+            stream=True,
+            tools=tools,
+            tool_choice=tool_choice,
+            params=params or {},
+            metadata=metadata or {},
+        )
+        url = f"{self._base_url}/api/agent/service/runs/{run_id}/model-call"
+        headers = {
+            "Authorization": f"Bearer {self._service_token}",
+            "X-Agent-Idempotency-Key": idempotency_key,
+            "Accept": "text/event-stream",
+        }
+
+        async with httpx.AsyncClient(timeout=self._model_call_timeout) as client:
+            async with client.stream(
+                "POST",
+                url,
+                headers=headers,
+                json=body.model_dump(mode="json", exclude_none=True),
+            ) as response:
+                if response.status_code == 202:
+                    payload = _safe_response_json_sync(response)
+                    if (
+                        isinstance(payload, dict)
+                        and payload.get("detail") == "operation_in_progress"
+                    ):
+                        raise _ModelCallOperationInProgress(payload)
+                if response.is_error:
+                    text = await response.aread()
+                    raise RuntimeError(
+                        "OpenWebUI model-call stream failed "
+                        f"with status {response.status_code}: "
+                        f"{text.decode('utf-8', 'replace')}",
+                    )
+
+                async for event in _iter_sse_events(response):
+                    yield event
+
+
+async def _iter_sse_events(response: httpx.Response):
+    """Parse an SSE stream into typed event dicts.
+
+    Handles two payload shapes:
+    - Provider passthrough: standard OpenAI-style `data: {...}` lines,
+      where the JSON is an OpenAI chat completion chunk. These are
+      parsed into {'type': 'chunk', 'delta': {'content': ..., 'tool_calls': ...}}.
+    - OpenWebUI meta events: `data: {"type": "done|stream_end", "payload": ...}`.
+      These are passed through with 'type' and 'payload' keys.
+    """
+    async for raw_line in response.aiter_lines():
+        if not raw_line:
+            continue
+        line = raw_line.strip()
+        if not line.startswith("data:"):
+            continue
+        data = line[len("data:"):].strip()
+        if not data:
+            continue
+        if data == "[DONE]":
+            yield {"type": "stream_end"}
+            return
+        try:
+            payload = json.loads(data)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(payload, dict) and "type" in payload and "payload" in payload:
+            # OpenWebUI meta event (done/stream_end)
+            yield {"type": payload["type"], "payload": payload["payload"]}
+            continue
+        # OpenAI-style chunk
+        yield _parse_openai_chunk(payload)
+
+
+def _parse_openai_chunk(payload: Any) -> dict[str, Any]:
+    """Extract text delta and tool_call deltas from an OpenAI chat chunk."""
+    delta: dict[str, Any] = {"content": None, "tool_calls": None}
+    if not isinstance(payload, dict):
+        return {"type": "chunk", "delta": delta}
+    choices = payload.get("choices")
+    if isinstance(choices, list) and choices:
+        choice = choices[0]
+        if isinstance(choice, dict):
+            choice_delta = choice.get("delta")
+            if isinstance(choice_delta, dict):
+                content = choice_delta.get("content")
+                if isinstance(content, str):
+                    delta["content"] = content
+                tool_calls = choice_delta.get("tool_calls")
+                if isinstance(tool_calls, list):
+                    delta["tool_calls"] = tool_calls
+    return {"type": "chunk", "delta": delta}
+
+
+def _safe_response_json_sync(response: httpx.Response) -> Any:
+    try:
+        return response.json()
+    except Exception:
+        return None
+
+
+class _ModelCallOperationInProgress(RuntimeError):
+    """Internal signal: /model-call returned 202 operation_in_progress."""
+
+    def __init__(self, payload: dict[str, Any]) -> None:
+        super().__init__("operation_in_progress")
+        self.payload = payload
 
 
 def _safe_response_json(response: httpx.Response) -> Any | None:

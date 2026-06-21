@@ -8,6 +8,7 @@ class RecordingBridgeCallbacks:
         self.events: list[dict] = []
         self.model_calls: list[dict] = []
         self.tool_calls: list[dict] = []
+        self.text_deltas: list[dict] = []
 
     async def append_event(
         self,
@@ -31,6 +32,31 @@ class RecordingBridgeCallbacks:
         }
         self.events.append(event)
         return {"seq": len(self.events)}
+
+    async def append_text_delta(
+        self,
+        *,
+        run_id: str,
+        idempotency_key: str,
+        block_id: str,
+        delta_index: int,
+        delta: str,
+        participant_id: str | None = None,
+        phase: str | None = None,
+        payload: dict | None = None,
+    ) -> dict:
+        record = {
+            "run_id": run_id,
+            "idempotency_key": idempotency_key,
+            "block_id": block_id,
+            "delta_index": delta_index,
+            "delta": delta,
+            "participant_id": participant_id,
+            "phase": phase,
+            "payload": payload,
+        }
+        self.text_deltas.append(record)
+        return {"seq": len(self.events) + len(self.text_deltas)}
 
     async def call_model(
         self,
@@ -67,6 +93,42 @@ class RecordingBridgeCallbacks:
             "model": model,
             "response": {"content": "callback answer"},
         }
+
+    async def call_model_stream(
+        self,
+        *,
+        run_id: str,
+        idempotency_key: str,
+        participant_id: str,
+        model_call_id: str,
+        model: str,
+        messages: list[dict],
+        params: dict,
+        metadata: dict,
+        tools: list[dict] | None = None,
+        tool_choice: object | None = None,
+    ):
+        self.model_calls.append(
+            {
+                "run_id": run_id,
+                "idempotency_key": idempotency_key,
+                "participant_id": participant_id,
+                "model_call_id": model_call_id,
+                "model": model,
+                "messages": messages,
+                "stream": True,
+                "params": params,
+                "metadata": metadata,
+                "tools": tools,
+                "tool_choice": tool_choice,
+            }
+        )
+        # Default mock: emit a single text chunk then stream_end.
+        yield {
+            "type": "chunk",
+            "delta": {"content": "callback answer", "tool_calls": None},
+        }
+        yield {"type": "stream_end"}
 
     async def call_tool(
         self,
@@ -142,7 +204,8 @@ async def test_bridge_builds_agentscope_template_model_and_tool_callback_boundar
     )
     assert isinstance(model, ChatModelBase)
 
-    response = await model(
+    response = None
+    async for chunk in await model(
         [
             Msg(
                 name="user",
@@ -151,9 +214,11 @@ async def test_bridge_builds_agentscope_template_model_and_tool_callback_boundar
             )
         ],
         temperature=0.2,
-    )
+    ):
+        response = chunk
     assert isinstance(response, ChatResponse)
     assert response.content[0].text == "callback answer"
+    assert response.is_last is True
     assert callbacks.model_calls[0]["idempotency_key"] == (
         "model:subagent:run-bridge:1:model-call-1:1"
     )
@@ -191,30 +256,25 @@ async def test_model_bridge_preserves_openwebui_tool_calls_as_agentscope_blocks(
     from agentscope_runtime.agentscope_bridge import OpenWebUIAgentScopeModel
 
     class ToolCallingCallbacks(RecordingBridgeCallbacks):
-        async def call_model(self, **kwargs: object) -> dict:
+        async def call_model_stream(self, **kwargs: object):
             self.model_calls.append(kwargs)
-            return {
-                "status": "success",
-                "response": {
-                    "choices": [
+            yield {
+                "type": "chunk",
+                "delta": {
+                    "content": "I will search first.",
+                    "tool_calls": [
                         {
-                            "message": {
-                                "content": "I will search first.",
-                                "tool_calls": [
-                                    {
-                                        "id": "call_search_1",
-                                        "type": "function",
-                                        "function": {
-                                            "name": "search_web",
-                                            "arguments": "{\"query\":\"agent mode\"}",
-                                        },
-                                    }
-                                ],
-                            }
+                            "id": "call_search_1",
+                            "type": "function",
+                            "function": {
+                                "name": "search_web",
+                                "arguments": "{\"query\":\"agent mode\"}",
+                            },
                         }
-                    ]
+                    ],
                 },
             }
+            yield {"type": "stream_end"}
 
     callbacks = ToolCallingCallbacks()
     model = OpenWebUIAgentScopeModel(
@@ -225,7 +285,8 @@ async def test_model_bridge_preserves_openwebui_tool_calls_as_agentscope_blocks(
         callback_client=callbacks,
     )
 
-    response = await model(
+    response = None
+    async for chunk in await model(
         [{"role": "user", "content": "Search for agent mode."}],
         tools=[
             {
@@ -237,8 +298,10 @@ async def test_model_bridge_preserves_openwebui_tool_calls_as_agentscope_blocks(
                 },
             }
         ],
-    )
+    ):
+        response = chunk
 
+    assert response is not None
     tool_calls = [block for block in response.content if isinstance(block, ToolCallBlock)]
     assert callbacks.model_calls[0]["messages"] == [
         {"role": "user", "content": "Search for agent mode."}
@@ -272,12 +335,13 @@ async def test_model_bridge_passes_tools_and_tool_choice_as_top_level_callback_f
         }
     ]
 
-    await model(
+    async for _ in await model(
         [{"role": "user", "content": "Read the file."}],
         tools=tools,
         tool_choice="auto",
         temperature=0.2,
-    )
+    ):
+        pass
 
     assert callbacks.model_calls[0]["tools"] == tools
     assert callbacks.model_calls[0]["tool_choice"] == "auto"

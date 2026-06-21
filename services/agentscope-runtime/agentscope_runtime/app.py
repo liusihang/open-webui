@@ -57,6 +57,20 @@ class RuntimeCallbackClient(Protocol):
     ) -> dict[str, Any]:
         ...
 
+    async def append_text_delta(
+        self,
+        *,
+        run_id: str,
+        idempotency_key: str,
+        block_id: str,
+        delta_index: int,
+        delta: str,
+        participant_id: str | None = None,
+        phase: str | None = None,
+        payload: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        ...
+
     async def append_final_delta(
         self,
         *,
@@ -324,6 +338,28 @@ async def _finalize_ordinary_qa(
         if _is_cancelled(session):
             return
 
+        # Ordinary QA bypasses the streaming bridge (no tools, no ReAct).
+        # Push the answer as a single text.delta so the final_text store
+        # has content for the completion handler. Production uses block_id
+        # 'answer' to make the idempotency key deterministic.
+        if answer:
+            try:
+                await callback_client.append_text_delta(
+                    run_id=session.run_id,
+                    idempotency_key=f"text:{session.run_id}:leader:answer:0",
+                    block_id="answer",
+                    delta_index=0,
+                    delta=answer,
+                    participant_id="leader",
+                    phase="running",
+                    payload=payload,
+                )
+            except Exception:
+                logger.exception(
+                    "Runtime failed to push ordinary-QA text.delta run_id=%s",
+                    session.run_id,
+                )
+
         stage = "emit-final-answer"
         await _emit_final_answer(callback_client, session, answer, payload)
     except Exception as exc:
@@ -376,7 +412,7 @@ async def _finalize_general_agent_run(
             ),
             react_config=ReActConfig(max_iters=_max_iters(request)),
         )
-        reply = await leader.reply(_request_messages_to_msgs(request))
+        reply = await _run_leader_streaming(leader, session, _request_messages_to_msgs(request))
         if _is_cancelled(session):
             return
         stage = "emit-final-answer"
@@ -410,6 +446,19 @@ async def _emit_final_answer(
     answer: str,
     payload: dict[str, Any],
 ) -> None:
+    """Drive the run to terminal state.
+
+    text.delta events during the ReAct loop already streamed the model's
+    text to OpenWebUI and accumulated into final_text, so we no longer
+    emit final.delta here. We keep the state transition (running →
+    finalizing → completed), final.started event (for front-end state
+    machine + back-compat), and run.completed event (terminal signal).
+
+    `answer` is the final answer text. Callers are responsible for pushing
+    text.delta callbacks before invoking this helper (the streaming bridge
+    pushes them per-chunk; the ordinary-QA path pushes one delta with the
+    full answer in ``_finalize_ordinary_qa``).
+    """
     await callback_client.transition_state(
         run_id=session.run_id,
         idempotency_key=f"state:{session.run_id}:finalizing",
@@ -434,17 +483,6 @@ async def _emit_final_answer(
     )
     if _is_cancelled(session):
         return
-    await callback_client.append_final_delta(
-        run_id=session.run_id,
-        idempotency_key=f"final:{session.run_id}:answer:0",
-        final_stream_id="answer",
-        delta_index=0,
-        delta=answer,
-        participant_id="leader",
-        payload=payload,
-    )
-    if _is_cancelled(session):
-        return
     await callback_client.transition_state(
         run_id=session.run_id,
         idempotency_key=f"state:{session.run_id}:completed",
@@ -466,6 +504,27 @@ async def _emit_final_answer(
     )
     session.state = "completed"
     session.updated_at = time.time()
+
+
+async def _run_leader_streaming(leader, session, messages):
+    """Consume leader.reply_stream() events.
+
+    The bridge's OpenWebUIAgentScopeModel._call_api already pushes
+    text.delta callbacks while consuming the provider stream, and
+    OpenWebUIToolProxy.__call__ already emits tool.requested/completed.
+    So we only need to consume the stream to drive the ReAct loop
+    forward and capture the final AssistantMsg for fallback text
+    extraction.
+    """
+    final_msg = None
+    async for event in leader.reply_stream(messages):
+        if _is_cancelled(session):
+            return final_msg
+        # AssistantMsg is the terminal event carrying the final content
+        # blocks. Save it for fallback text extraction.
+        if hasattr(event, "content") and hasattr(event, "id"):
+            final_msg = event
+    return final_msg
 
 
 def _should_use_general_agent(request: RunStartRequest) -> bool:
@@ -691,7 +750,9 @@ def _message_content_text(content: Any) -> str:
     return "".join(block.text for block in _message_content_text_blocks(content)).strip()
 
 
-def _msg_text(msg: Msg) -> str:
+def _msg_text(msg: Msg | None) -> str:
+    if msg is None:
+        return ""
     parts: list[str] = []
     for block in msg.get_content_blocks():
         if isinstance(block, TextBlock):

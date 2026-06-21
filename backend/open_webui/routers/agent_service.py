@@ -5,7 +5,7 @@ import secrets
 from typing import Any
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Request, status
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, StreamingResponse
 from open_webui.agent.approval import (
     AgentApprovalCoordinator,
     ApprovalDecisionConflict,
@@ -913,11 +913,50 @@ async def execute_agent_run_model_call(
         form_data.idempotency_key,
         idempotency_key,
     )
+    call_payload = form_data.model_copy(update={'run_id': run_id, 'idempotency_key': key})
+    if call_payload.stream:
+        # Streaming mode: bypass operation store (no canonical response to
+        # cache) and stream provider SSE chunks directly to the agentscope
+        # runtime. The runtime is responsible for idempotency at the
+        # model_call_id level.
+        try:
+            return StreamingResponse(
+                authority.stream_model_call(request, call_payload),
+                media_type='text/event-stream',
+                headers={
+                    'Cache-Control': 'no-cache',
+                    'X-Accel-Buffering': 'no',
+                },
+            )
+        except AgentRunOperationConflict as exc:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail='idempotency_conflict',
+            ) from exc
+        except ModelOperationInProgress:
+            return JSONResponse(
+                status_code=status.HTTP_202_ACCEPTED,
+                content={'detail': 'operation_in_progress'},
+                headers={'Retry-After': '1'},
+            )
+        except (ModelGuardRejected, ModelNotAllowed, ModelAuthorityError) as exc:
+            detail = {
+                'code': getattr(exc, 'code', 'model_authority_error'),
+                'message': str(exc),
+            }
+            current_state = getattr(exc, 'current_state', None)
+            if current_state is not None:
+                detail['current_state'] = current_state
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail=detail,
+            ) from exc
+
     try:
         return await execute_agent_model_call(
             authority,
             request,
-            form_data.model_copy(update={'run_id': run_id, 'idempotency_key': key}),
+            call_payload,
         )
     except AgentRunOperationConflict as exc:
         raise HTTPException(

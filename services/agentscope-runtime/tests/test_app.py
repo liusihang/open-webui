@@ -15,6 +15,7 @@ class RecordingOpenWebUIClient:
     def __init__(self) -> None:
         self.events: list[dict] = []
         self.final_deltas: list[dict] = []
+        self.text_deltas: list[dict] = []
         self.model_calls: list[dict] = []
         self.tool_calls: list[dict] = []
         self.subagent_registrations: list[dict] = []
@@ -74,6 +75,31 @@ class RecordingOpenWebUIClient:
         self.final_deltas.append(final_delta)
         return {"seq": len(self.events) + len(self.final_deltas), "event_type": "final.delta"}
 
+    async def append_text_delta(
+        self,
+        *,
+        run_id: str,
+        idempotency_key: str,
+        block_id: str,
+        delta_index: int,
+        delta: str,
+        participant_id: str | None = None,
+        phase: str | None = None,
+        payload: dict | None = None,
+    ) -> dict:
+        text_delta = {
+            "run_id": run_id,
+            "idempotency_key": idempotency_key,
+            "block_id": block_id,
+            "delta_index": delta_index,
+            "delta": delta,
+            "participant_id": participant_id,
+            "phase": phase,
+            "payload": payload,
+        }
+        self.text_deltas.append(text_delta)
+        return {"seq": len(self.events) + len(self.text_deltas), "event_type": "text.delta"}
+
     async def call_model(
         self,
         *,
@@ -110,6 +136,48 @@ class RecordingOpenWebUIClient:
             "model": model,
             "response": {"content": "callback final answer"},
         }
+
+    async def call_model_stream(
+        self,
+        *,
+        run_id: str,
+        idempotency_key: str,
+        participant_id: str,
+        model_call_id: str,
+        model: str,
+        messages: list[dict],
+        params: dict,
+        metadata: dict,
+        tools: list[dict] | None = None,
+        tool_choice: object | None = None,
+    ):
+        """Stream-shim that wraps the non-streaming ``call_model`` response.
+
+        Tests record their canned responses in ``model_responses`` (or
+        override ``call_model``). This shim runs that path and converts the
+        single response dict into the same SSE-event sequence the production
+        client emits: ``done`` (with the full response payload) followed by
+        ``stream_end``. Subclasses that override ``call_model`` to raise
+        retryable errors get the same retryable surface here.
+        """
+        try:
+            response = await self.call_model(
+                run_id=run_id,
+                idempotency_key=idempotency_key,
+                participant_id=participant_id,
+                model_call_id=model_call_id,
+                model=model,
+                messages=messages,
+                stream=True,
+                params=params,
+                metadata=metadata,
+                tools=tools,
+                tool_choice=tool_choice,
+            )
+        except Exception:
+            raise
+        yield {"type": "done", "payload": response}
+        yield {"type": "stream_end"}
 
     async def call_tool(
         self,
@@ -413,17 +481,11 @@ async def test_run_start_finalizes_ordinary_qa_through_model_and_final_delta_cal
             "payload": {"runtime_session_id": runtime_session_id},
         },
     ]
-    assert openwebui_client.final_deltas == [
-        {
-            "run_id": "run-final",
-            "idempotency_key": "final:run-final:answer:0",
-            "final_stream_id": "answer",
-            "delta_index": 0,
-            "delta": "callback final answer",
-            "participant_id": "leader",
-            "payload": {"runtime_session_id": runtime_session_id},
-        }
-    ]
+    assert openwebui_client.final_deltas == []
+    assert openwebui_client.text_deltas[-1]["delta"] == "callback final answer"
+    assert openwebui_client.text_deltas[-1]["block_id"]
+    assert openwebui_client.text_deltas[-1]["delta_index"] == 0
+    assert openwebui_client.text_deltas[-1]["participant_id"] == "leader"
     assert [event["event_type"] for event in openwebui_client.events] == [
         "run.running",
         "final.started",
@@ -532,7 +594,7 @@ async def test_run_start_with_tool_envelope_drives_tool_artifact_and_final_lifec
     assert openwebui_client.events[1]["summary"] == "Read a file."
     assert openwebui_client.events[2]["summary"] == "Read file completed."
     assert openwebui_client.events[3]["payload"]["artifact"]["id"] == "artifact-1"
-    assert openwebui_client.final_deltas[0]["delta"] == "The file says: tool callback result"
+    assert openwebui_client.text_deltas[-1]["delta"] == "The file says: tool callback result"
 
 
 @pytest.mark.asyncio
@@ -691,7 +753,7 @@ async def test_general_agent_finalizes_with_code_interpreter_system_pyodide_mess
     assert [message["role"] for message in model_messages] == ["system", "user"]
     assert "##### Pyodide Environment" in model_messages[0]["content"][0]["text"]
     assert model_messages[1]["content"][0]["text"] == "Use code if it helps, then answer."
-    assert openwebui_client.final_deltas[0]["delta"] == "I can use the code interpreter when needed."
+    assert openwebui_client.text_deltas[-1]["delta"] == "I can use the code interpreter when needed."
     assert not any(event["event_type"] == "run.failed" for event in openwebui_client.events)
 
 
@@ -757,7 +819,7 @@ async def test_general_agent_model_call_retries_queued_rejection() -> None:
     assert {call["idempotency_key"] for call in openwebui_client.model_calls} == {
         "model:leader:model-call-1:1"
     }
-    assert openwebui_client.final_deltas[0]["delta"] == "retried AgentScope final answer"
+    assert openwebui_client.text_deltas[-1]["delta"] == "retried AgentScope final answer"
     assert not any(event["event_type"] == "run.failed" for event in openwebui_client.events)
 
 
@@ -819,7 +881,7 @@ async def test_general_agent_model_call_retries_timeout_until_cached_success() -
     assert {call["idempotency_key"] for call in openwebui_client.model_calls} == {
         "model:leader:model-call-1:1"
     }
-    assert openwebui_client.final_deltas[0]["delta"] == "cached callback final answer"
+    assert openwebui_client.text_deltas[-1]["delta"] == "cached callback final answer"
     assert not any(event["event_type"] == "run.failed" for event in openwebui_client.events)
 
 
@@ -950,7 +1012,10 @@ async def test_create_subagent_tool_emits_subagent_events_and_integrates_result(
         "subagent:run-subagent:1",
         "leader",
     ]
-    assert "Subagent found the key fact." in openwebui_client.final_deltas[0]["delta"]
+    assert any(
+        "Subagent found the key fact." in text_delta["delta"]
+        for text_delta in openwebui_client.text_deltas
+    )
     assert "subagent.created" in [event["event_type"] for event in openwebui_client.events]
     assert "subagent.completed" in [event["event_type"] for event in openwebui_client.events]
 
@@ -1044,7 +1109,10 @@ async def test_create_subagent_tool_uses_leader_model_when_selection_has_no_choi
     assert created_event["payload"]["model_selection"]["meta"]["agent_selection"]["reason"] == (
         "leader_model_fallback_no_allowed_choices"
     )
-    assert "Integrated fallback result." in openwebui_client.final_deltas[0]["delta"]
+    assert any(
+        "Integrated fallback result." in text_delta["delta"]
+        for text_delta in openwebui_client.text_deltas
+    )
 
 
 @pytest.mark.asyncio
@@ -1133,7 +1201,7 @@ async def test_run_start_retries_queued_model_call_before_finalization_failure()
         "model-call-1",
         "model-call-1",
     ]
-    assert openwebui_client.final_deltas[0]["delta"] == "retried final answer"
+    assert openwebui_client.text_deltas[-1]["delta"] == "retried final answer"
     assert [event["event_type"] for event in openwebui_client.events] == [
         "run.running",
         "final.started",

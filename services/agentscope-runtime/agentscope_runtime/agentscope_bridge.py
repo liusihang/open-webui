@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import uuid
 from collections.abc import AsyncGenerator
 from dataclasses import dataclass
 from typing import Any, Protocol
@@ -63,6 +64,20 @@ class OpenWebUIBridgeCallbacks(Protocol):
         payload: dict[str, Any] | None = None,
         participant_id: str | None = None,
         phase: str | None = None,
+    ) -> dict[str, Any]:
+        ...
+
+    async def append_text_delta(
+        self,
+        *,
+        run_id: str,
+        idempotency_key: str,
+        block_id: str,
+        delta_index: int,
+        delta: str,
+        participant_id: str | None = None,
+        phase: str | None = None,
+        payload: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         ...
 
@@ -153,7 +168,7 @@ class OpenWebUIAgentScopeModel(ChatModelBase):
             credential=OpenWebUICallbackCredential(),
             model=model_id,
             parameters=self.Parameters(),
-            stream=False,
+            stream=True,
             max_retries=0,
         )
         self.run_id = run_id
@@ -170,43 +185,193 @@ class OpenWebUIAgentScopeModel(ChatModelBase):
         tools: list[dict] | None = None,
         tool_choice: Any | None = None,
         **kwargs: Any,
-    ) -> ChatResponse | AsyncGenerator[ChatResponse, None]:
+    ) -> AsyncGenerator[ChatResponse, None]:
+        """Delegate to ``_stream_model_call`` for streaming.
+
+        This method is ``async def`` (not an async generator function — no
+        ``yield`` in body). It returns an async generator object created by
+        ``_stream_model_call``. This matches the agentscope ``ChatModelBase``
+        pattern where ``__call__`` does ``return await self._call_api(...)``
+        and ``_reasoning_impl`` checks ``inspect.isasyncgen(res)`` to iterate
+        the returned generator.
+        """
+        return self._stream_model_call(
+            model_name=model_name,
+            messages=messages,
+            tools=tools,
+            tool_choice=tool_choice,
+            **kwargs,
+        )
+
+    async def _stream_model_call(
+        self,
+        *,
+        model_name: str,
+        messages: list[Msg] | list[dict[str, Any]],
+        tools: list[dict] | None,
+        tool_choice: Any | None,
+        **kwargs: Any,
+    ) -> AsyncGenerator[ChatResponse, None]:
+        """Stream a model call, pushing text.delta callbacks per chunk.
+
+        Yields intermediate ChatResponse chunks (is_last=False) with
+        partial TextBlock content for agentscope's _convert_chat_response_to_event
+        to consume, then a final ChatResponse (is_last=True) with the
+        complete content blocks (TextBlock + ToolCallBlocks).
+
+        Side effect: pushes text.delta events to OpenWebUI for each text
+        chunk received, using a per-model-call block_id (uuid4).
+        """
         model_call_id = self._allocate_model_call_id()
         params = dict(kwargs)
         idempotency_key = f"model:{self.participant_id}:{model_call_id}:1"
 
         formatted_messages = await self._format_messages(messages)
+
+        block_id = uuid.uuid4().hex
+        text_delta_index = 0
+        accumulated_text_parts: list[str] = []
+        accumulated_tool_calls: list[dict[str, Any]] = []
+
         for attempt in range(1, MODEL_CALL_RETRY_ATTEMPTS + 1):
+            stream = self.callback_client.call_model_stream(
+                run_id=self.run_id,
+                idempotency_key=idempotency_key,
+                participant_id=self.participant_id,
+                model_call_id=model_call_id,
+                model=model_name,
+                messages=formatted_messages,
+                params=params,
+                tools=tools,
+                tool_choice=_jsonable(tool_choice) if tool_choice is not None else None,
+                metadata={
+                    "runtime_session_id": self.runtime_session_id,
+                    "agentscope_bridge": True,
+                },
+            )
             try:
-                response = await self.callback_client.call_model(
-                    run_id=self.run_id,
-                    idempotency_key=idempotency_key,
-                    participant_id=self.participant_id,
-                    model_call_id=model_call_id,
-                    model=model_name,
-                    messages=formatted_messages,
-                    stream=False,
-                    params=params,
-                    tools=tools,
-                    tool_choice=_jsonable(tool_choice) if tool_choice is not None else None,
-                    metadata={
-                        "runtime_session_id": self.runtime_session_id,
-                        "agentscope_bridge": True,
-                    },
-                )
+                # Touch the first event to surface any callback-rejection
+                # errors (e.g. ``model_run_rejected … while queued``,
+                # httpx timeouts) that the underlying callback raises
+                # before yielding any data. Successful streams just go
+                # straight into the regular consumer below.
+                first_event = await stream.__anext__()
+                break
+            except StopAsyncIteration:
+                first_event = None
                 break
             except Exception as exc:
+                # Close the partially-started generator before retrying
+                # so we don't leak a context manager.
+                try:
+                    await stream.aclose()
+                except Exception:
+                    pass
                 if attempt < MODEL_CALL_RETRY_ATTEMPTS and _is_retryable_model_call_callback(exc):
                     await asyncio.sleep(MODEL_CALL_RETRY_DELAY_SECONDS)
                     continue
                 raise
-        return ChatResponse(
-            content=_extract_chat_response_blocks(response),
+
+        events_to_consume: AsyncGenerator[dict[str, Any], None] = _prepend_event(first_event, stream)
+
+        async for event in events_to_consume:
+            event_type = event.get("type")
+            if event_type == "chunk":
+                delta = event.get("delta") or {}
+                content = delta.get("content")
+                if isinstance(content, str) and content:
+                    accumulated_text_parts.append(content)
+                    try:
+                        await self.callback_client.append_text_delta(
+                            run_id=self.run_id,
+                            idempotency_key=(
+                                f"text:{self.run_id}:{self.participant_id}:"
+                                f"{block_id}:{text_delta_index}"
+                            ),
+                            block_id=block_id,
+                            delta_index=text_delta_index,
+                            delta=content,
+                            participant_id=self.participant_id,
+                            phase="running",
+                        )
+                    except Exception:
+                        # text.delta failure must not break the model call;
+                        # the final ChatResponse still carries the full text.
+                        pass
+                    text_delta_index += 1
+                    yield ChatResponse(
+                        content=[TextBlock(text=content)],
+                        is_last=False,
+                        metadata={
+                            "block_id": block_id,
+                            "delta_index": text_delta_index - 1,
+                        },
+                    )
+                tool_calls = delta.get("tool_calls")
+                if isinstance(tool_calls, list):
+                    for tool_call in tool_calls:
+                        if isinstance(tool_call, dict):
+                            accumulated_tool_calls.append(tool_call)
+            elif event_type == "done":
+                # Non-stream fallback: full response in payload.
+                payload = event.get("payload") or {}
+                response = payload.get("response") or payload
+                full_text = _extract_model_text(response)
+                if full_text and not accumulated_text_parts:
+                    accumulated_text_parts.append(full_text)
+                    try:
+                        await self.callback_client.append_text_delta(
+                            run_id=self.run_id,
+                            idempotency_key=(
+                                f"text:{self.run_id}:{self.participant_id}:"
+                                f"{block_id}:0"
+                            ),
+                            block_id=block_id,
+                            delta_index=0,
+                            delta=full_text,
+                            participant_id=self.participant_id,
+                            phase="running",
+                        )
+                    except Exception:
+                        pass
+                for tool_call in _extract_tool_calls(response):
+                    accumulated_tool_calls.append(tool_call)
+            elif event_type == "stream_end":
+                break
+
+        full_text = "".join(accumulated_text_parts)
+        blocks: list[TextBlock | ToolCallBlock] = []
+        if full_text:
+            blocks.append(TextBlock(text=full_text))
+        for tool_call in _merge_tool_calls(accumulated_tool_calls):
+            function = tool_call.get("function") if isinstance(tool_call, dict) else None
+            if not isinstance(function, dict):
+                continue
+            name = function.get("name")
+            if not isinstance(name, str) or not name:
+                continue
+            raw_arguments = function.get("arguments", "{}")
+            if not isinstance(raw_arguments, str):
+                raw_arguments = json.dumps(raw_arguments)
+            call_id = tool_call.get("id")
+            blocks.append(
+                ToolCallBlock(
+                    id=str(call_id or f"tool-call-{len(blocks) + 1}"),
+                    name=name,
+                    input=raw_arguments,
+                )
+            )
+        if not blocks:
+            blocks.append(TextBlock(text=""))
+
+        yield ChatResponse(
+            content=blocks,
             is_last=True,
             metadata={
-                "openwebui_response": response.get("metadata", {}),
+                "openwebui_response": {},
                 "participant_id": self.participant_id,
                 "model_call_id": model_call_id,
+                "block_id": block_id,
             },
         )
 
@@ -503,6 +668,36 @@ def _extract_tool_calls(response: dict[str, Any]) -> list[dict[str, Any]]:
     return tool_calls
 
 
+def _merge_tool_calls(deltas: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Merge OpenAI-style streaming tool_call deltas by index.
+
+    Each delta may carry `id`, `function.name` (first delta only), and
+    `function.arguments` (incremental string). We accumulate by index.
+    Deltas without an index are treated as standalone tool_calls.
+    """
+    by_index: dict[int, dict[str, Any]] = {}
+    standalone: list[dict[str, Any]] = []
+    for delta in deltas:
+        if not isinstance(delta, dict):
+            continue
+        if "index" in delta and isinstance(delta["index"], int):
+            index = delta["index"]
+            current = by_index.setdefault(index, {"index": index})
+            if "id" in delta and delta["id"]:
+                current["id"] = delta["id"]
+            function = current.setdefault("function", {})
+            delta_function = delta.get("function")
+            if isinstance(delta_function, dict):
+                if "name" in delta_function and delta_function["name"]:
+                    function["name"] = delta_function["name"]
+                if "arguments" in delta_function and isinstance(delta_function["arguments"], str):
+                    function["arguments"] = function.get("arguments", "") + delta_function["arguments"]
+        else:
+            standalone.append(delta)
+    merged = list(by_index.values()) + standalone
+    return merged
+
+
 def _content_item_text(item: Any) -> str:
     if isinstance(item, str):
         return item
@@ -527,6 +722,21 @@ def _is_retryable_model_call_callback(exc: Exception) -> bool:
         return True
     message = str(exc)
     return "model_run_rejected" in message and "while queued" in message
+
+
+async def _prepend_event(
+    first_event: dict[str, Any] | None,
+    stream: AsyncGenerator[dict[str, Any], None],
+) -> AsyncGenerator[dict[str, Any], None]:
+    """Yield ``first_event`` (if any) then the rest of ``stream``.
+
+    Used to re-attach the head event we already pulled from the SSE
+    iterator while probing for retryable callback errors.
+    """
+    if first_event is not None:
+        yield first_event
+    async for event in stream:
+        yield event
 
 
 def _humanize_tool_name(name: str) -> str:

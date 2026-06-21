@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
-from collections.abc import Awaitable, Callable
+from collections.abc import AsyncIterator, Awaitable, Callable
 from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field
@@ -191,6 +191,96 @@ class AgentModelAuthority:
                 'model_call_id': call.model_call_id,
             },
         }
+
+    async def stream_model_call(
+        self,
+        request,
+        call: ModelCallRequest,
+    ) -> AsyncIterator[bytes]:
+        """Stream a model call's provider response as SSE bytes.
+
+        Bypasses operation store (no claim/finish) because the response is
+        streamed chunk-by-chunk and there is no single canonical response
+        payload to cache. The agentscope runtime is responsible for
+        idempotency at the model_call_id level.
+
+        Yields raw SSE bytes from the provider's StreamingResponse. The
+        caller (the /model-call endpoint) wraps this in a StreamingResponse
+        with text/event-stream content type.
+        """
+        self._ensure_trusted_internal_guard(request, call.run_id)
+
+        if not call.idempotency_key:
+            raise ModelAuthorityError('idempotency_key_required')
+
+        run = await self.operation_store.get_run(call.run_id)
+        if run is None:
+            raise ModelRunRejected(f'Agent run not found: {call.run_id}')
+        if run.state != 'running':
+            raise ModelRunRejected(
+                f'Agent run {call.run_id} cannot execute model calls while {run.state}',
+                current_state=run.state,
+            )
+
+        user = await self.user_loader(run.user_id)
+        if user is None:
+            raise ModelRunRejected(f'Agent run user not found: {run.user_id}')
+
+        model = await self._resolve_authorized_model(request, user, call.model)
+
+        form_data = _model_call_form_data(call)
+        audit_metadata = {
+            **call.metadata,
+            'agent_run_id': call.run_id,
+            'agent_internal_model_call': True,
+            'agent_participant_id': call.participant_id,
+            'agent_model_call_id': call.model_call_id,
+        }
+        form_data['metadata'] = audit_metadata
+        request.state.metadata = audit_metadata
+
+        raw_response = await self.completion_handler(request, form_data, user)
+        if not isinstance(raw_response, StreamingResponse):
+            # Provider returned a non-streaming response despite stream=True
+            # (e.g. model doesn't support streaming). Fall back to emitting
+            # the full response as a single SSE event so the agentscope
+            # runtime still gets a parseable payload.
+            payload = await _jsonable_response(raw_response)
+            yield _format_model_stream_event(
+                'done',
+                {
+                    'status': 'success',
+                    'model': model.get('id') or call.model,
+                    'response': payload,
+                    'metadata': {
+                        'agent_run_id': call.run_id,
+                        'participant_id': call.participant_id,
+                        'model_call_id': call.model_call_id,
+                    },
+                },
+            )
+            return
+
+        async for chunk in raw_response.body_iterator:
+            if not chunk:
+                continue
+            if isinstance(chunk, str):
+                yield chunk.encode('utf-8')
+            else:
+                yield chunk
+        # Emit a terminal done event so the agentscope runtime knows the
+        # stream has ended even if the provider didn't send [DONE].
+        yield _format_model_stream_event('stream_end', {'model_call_id': call.model_call_id})
+
+
+def _format_model_stream_event(event_type: str, payload: dict[str, Any]) -> bytes:
+    """Format a model stream SSE event for agentscope runtime consumption."""
+    data = json.dumps(
+        {'type': event_type, 'payload': payload},
+        ensure_ascii=False,
+        separators=(',', ':'),
+    )
+    return f'data: {data}\n\n'.encode('utf-8')
 
 
 def _model_call_form_data(call: ModelCallRequest) -> dict[str, Any]:
