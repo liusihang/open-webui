@@ -403,6 +403,7 @@ async def test_agent_mode_product_chat_populates_tool_envelope_and_callback_regi
         }
     ]
     assert run.tool_access_snapshot == runtime_payload['tool_access_envelope']
+    assert run.tool_access_snapshot['metadata'] == {'session_id': 'session-1', 'files': []}
     registry = request.app.state.AGENT_TOOL_REGISTRIES[run.id]
     assert registry['tool:builtin:lookup_fact:lookup_fact']['callable'] is fake_tool
 

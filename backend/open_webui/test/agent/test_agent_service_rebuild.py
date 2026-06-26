@@ -9,6 +9,7 @@ import pytest
 from open_webui.agent.tool_authority import build_tool_access_envelope
 from open_webui.routers.agent_service import (
     _external_tool_source_id_from_snapshot,
+    _rebuild_builtin_tools,
     _rebuild_agent_tool_registry,
     _rebuild_external_tools,
     _registry_from_snapshot,
@@ -92,8 +93,11 @@ def _snapshot_with_builtin_tool(name='write_note'):
     }
 
 
-def _snapshot_envelope(tools):
-    return {'tools': tools}
+def _snapshot_envelope(tools, metadata=None):
+    envelope = {'tools': tools}
+    if metadata is not None:
+        envelope['metadata'] = metadata
+    return envelope
 
 
 # ---------------------------------------------------------------------------
@@ -220,6 +224,54 @@ async def test_rebuild_external_tools_empty_when_no_external(monkeypatch):
         request, run, user, _snapshot_tools(run.tool_access_snapshot)
     )
     assert result == {}
+
+
+@pytest.mark.asyncio
+async def test_rebuild_builtin_tools_restores_session_event_call(monkeypatch):
+    sentinel_event_call = object()
+
+    async def fake_get_event_call(metadata):
+        assert metadata['session_id'] == 'session-1'
+        assert metadata['chat_id'] == 'chat-1'
+        assert metadata['message_id'] == 'msg-1'
+        assert metadata['files'] == []
+        return sentinel_event_call
+
+    async def fake_get_builtin_tools(request, extra_params, features, model):
+        assert extra_params['__metadata__']['session_id'] == 'session-1'
+        assert extra_params['__event_call__'] is sentinel_event_call
+        return {
+            'execute_code': {
+                'tool_id': 'builtin:execute_code',
+                'callable': sentinel_event_call,
+                'spec': {'name': 'execute_code', 'parameters': {'type': 'object'}},
+                'type': 'builtin',
+            }
+        }
+
+    monkeypatch.setattr('open_webui.socket.main.get_event_call', fake_get_event_call)
+    monkeypatch.setattr(
+        'open_webui.routers.agent_service.get_builtin_tools', fake_get_builtin_tools
+    )
+
+    run = _fake_run(
+        tool_access_snapshot=_snapshot_envelope(
+            [_snapshot_with_builtin_tool('execute_code')],
+            metadata={'session_id': 'session-1', 'files': []},
+        ),
+        user_id='user-1',
+        chat_id='chat-1',
+        assistant_message_id='msg-1',
+        leader_model_id='model-1',
+    )
+    user = _fake_user()
+    request = SimpleNamespace(app=SimpleNamespace(state=SimpleNamespace()))
+
+    result = await _rebuild_builtin_tools(
+        request, run, user, _snapshot_tools(run.tool_access_snapshot)
+    )
+
+    assert 'tool:builtin:execute_code:execute_code' in result
 
 
 @pytest.mark.asyncio

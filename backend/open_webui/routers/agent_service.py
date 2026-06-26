@@ -215,11 +215,17 @@ async def _rebuild_builtin_tools(
 
     user_payload = user.model_dump(mode='json') if hasattr(user, 'model_dump') else dict(getattr(user, '__dict__', {}))
     metadata = _agent_run_metadata(run)
+    event_call = None
+    if metadata.get('session_id') and metadata.get('chat_id') and metadata.get('message_id'):
+        from open_webui.socket.main import get_event_call
+
+        event_call = await get_event_call(metadata)
     current_tools = await get_builtin_tools(
         request,
         {
             '__user__': user_payload,
             '__metadata__': metadata,
+            '__event_call__': event_call,
             '__chat_id__': metadata.get('chat_id'),
             '__message_id__': metadata.get('assistant_message_id'),
         },
@@ -421,12 +427,21 @@ def _registry_from_snapshot(
 
 
 def _agent_run_metadata(run) -> dict[str, Any]:
+    snapshot_metadata = {}
+    snapshot = getattr(run, 'tool_access_snapshot', None)
+    if isinstance(snapshot, dict):
+        metadata = snapshot.get('metadata')
+        if isinstance(metadata, dict):
+            snapshot_metadata = metadata
+
     return {
         'chat_id': getattr(run, 'chat_id', None),
         'user_message_id': getattr(run, 'user_message_id', None),
         'message_id': getattr(run, 'assistant_message_id', None),
         'assistant_message_id': getattr(run, 'assistant_message_id', None),
         'agent_run_id': getattr(run, 'id', None),
+        'session_id': snapshot_metadata.get('session_id'),
+        'files': snapshot_metadata.get('files') or [],
     }
 
 

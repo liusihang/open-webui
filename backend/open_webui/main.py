@@ -2452,6 +2452,10 @@ async def _start_agent_mode_chat(
 
     form_data, metadata, _events = await process_chat_payload(request, form_data, user, metadata, model)
     tool_access_envelope, tool_registry = build_tool_access_envelope(metadata.get('tools') or {})
+    tool_access_envelope['metadata'] = {
+        'session_id': metadata.get('session_id'),
+        'files': metadata.get('files') or [],
+    }
 
     budget = _agent_run_budget(request.app.state.config)
     run = await AgentRuns.create_run(
