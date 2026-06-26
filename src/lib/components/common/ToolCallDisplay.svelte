@@ -17,6 +17,7 @@
 	import Image from './Image.svelte';
 	import FullHeightIframe from './FullHeightIframe.svelte';
 	import { settings } from '$lib/stores';
+	import { getToolCallIframePolicy } from '$lib/components/chat/toolCallIframePolicy';
 
 	export let id: string = '';
 	export let attributes: {
@@ -86,6 +87,7 @@
 
 	$: args = decode(attributes?.arguments ?? '');
 	export let resultContent: string = '';
+	$: iframePolicy = getToolCallIframePolicy($settings);
 
 	$: result = pickBestContent(resultContent, decode(attributes?.result ?? ''));
 	$: files = parseJSONString(decode(attributes?.files ?? ''));
@@ -145,8 +147,8 @@
 						src={embed}
 						{args}
 						allowScripts={true}
-						allowForms={$settings?.iframeSandboxAllowForms ?? false}
-						allowSameOrigin={$settings?.iframeSandboxAllowSameOrigin ?? false}
+						allowForms={iframePolicy.allowForms}
+						allowSameOrigin={iframePolicy.allowSameOrigin}
 						allowPopups={true}
 					/>
 				</div>
