@@ -2956,6 +2956,27 @@
 		}
 	};
 
+	const persistFeatureDraft = async (chatId: string | null = null) => {
+		if (saveDraftTimeout) {
+			clearTimeout(saveDraftTimeout);
+		}
+
+		const draft = {
+			prompt: '',
+			files: [],
+			selectedToolIds,
+			selectedSkillIds,
+			selectedFilterIds,
+			webSearchEnabled,
+			imageGenerationEnabled,
+			imageGenerationUserOverride,
+			codeInterpreterEnabled,
+			reasoningDepth
+		};
+
+		await sessionStorage.setItem(`chat-input${chatId ? `-${chatId}` : ''}`, JSON.stringify(draft));
+	};
+
 	const clearDraft = async (chatId: string | null = null) => {
 		if (saveDraftTimeout) {
 			clearTimeout(saveDraftTimeout);
@@ -3273,7 +3294,7 @@
 										}
 									}}
 									on:submit={async (e) => {
-										clearDraft($chatId);
+										await persistFeatureDraft($chatId);
 										if (e.detail || files.length > 0) {
 											await tick();
 
@@ -3322,7 +3343,7 @@
 										}
 									}}
 									on:submit={async (e) => {
-										clearDraft();
+										await persistFeatureDraft();
 										if (e.detail || files.length > 0) {
 											await tick();
 											submitHandler(e.detail);
