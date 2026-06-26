@@ -10,7 +10,6 @@
 	import SubagentStatusRow from './SubagentStatusRow.svelte';
 	import ApprovalStatusRow from './ApprovalStatusRow.svelte';
 	import TextStatusRow from './TextStatusRow.svelte';
-	import { t } from 'i18next';
 
 	export let status = null;
 	export let done = false;
@@ -53,7 +52,7 @@
 				<div
 					class="{(done || status?.done) === false
 						? 'shimmer'
-						: ''} text-gray-500 dark:text-gray-500 text-base line-clamp-1 text-wrap"
+						: ''} text-gray-500 dark:text-gray-500 text-[13px] line-clamp-1 text-wrap"
 				>
 					{status?.description}
 				</div>
@@ -64,7 +63,7 @@
 					<div
 						class="{(done || status?.done) === false
 							? 'shimmer'
-							: ''} text-base line-clamp-1 text-wrap"
+							: ''} text-[13px] line-clamp-1 text-wrap"
 					>
 						<!-- $i18n.t("Generating search query") -->
 						<!-- $i18n.t("No search query generated") -->
@@ -88,7 +87,7 @@
 				<div
 					class="{(done || status?.done) === false
 						? 'shimmer'
-						: ''} text-gray-500 dark:text-gray-500 text-base line-clamp-1 text-wrap"
+						: ''} text-gray-500 dark:text-gray-500 text-[13px] line-clamp-1 text-wrap"
 				>
 					{$i18n.t(`Searching Knowledge for "{{searchQuery}}"`, {
 						searchQuery: status.query
@@ -100,7 +99,7 @@
 				<div
 					class="{(done || status?.done) === false
 						? 'shimmer'
-						: ''} text-gray-500 dark:text-gray-500 text-base line-clamp-1 text-wrap"
+						: ''} text-gray-500 dark:text-gray-500 text-[13px] line-clamp-1 text-wrap"
 				>
 					{$i18n.t(`Searching`)}
 				</div>
@@ -126,7 +125,7 @@
 				<div
 					class="{(done || status?.done) === false
 						? 'shimmer'
-						: ''} text-gray-500 dark:text-gray-500 text-base line-clamp-1 text-wrap"
+						: ''} text-gray-500 dark:text-gray-500 text-[13px] line-clamp-1 text-wrap"
 				>
 					{$i18n.t(`Querying`)}
 				</div>
@@ -152,7 +151,7 @@
 				<div
 					class="{(done || status?.done) === false
 						? 'shimmer'
-						: ''} text-gray-500 dark:text-gray-500 text-base line-clamp-1 text-wrap"
+						: ''} text-gray-500 dark:text-gray-500 text-[13px] line-clamp-1 text-wrap"
 				>
 					{#if status.count === 0}
 						{$i18n.t('No sources found')}
@@ -174,7 +173,7 @@
 				<div
 					class="{(done || status?.done) === false
 						? 'shimmer'
-						: ''} text-gray-500 dark:text-gray-500 text-base line-clamp-1 text-wrap"
+						: ''} text-gray-500 dark:text-gray-500 text-[13px] line-clamp-1 text-wrap"
 				>
 					<!-- $i18n.t(`Searching "{{searchQuery}}"`) -->
 					{#if status?.description?.includes('{{searchQuery}}')}

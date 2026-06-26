@@ -26,7 +26,7 @@
 </script>
 
 <div class="flex items-start gap-2 py-0.5 w-full text-left">
-	<span class="flex-shrink-0 mt-0.5 text-emerald-600 dark:text-emerald-400">
+	<span class="flex-shrink-0 mt-0.5 text-gray-400 dark:text-gray-500">
 		<Document className="w-3.5 h-3.5" />
 	</span>
 
@@ -36,7 +36,7 @@
 			class="flex items-center gap-1 min-w-0 w-full text-left"
 			on:click={() => (open = !open)}
 		>
-			<span class="text-gray-700 dark:text-gray-300 text-base line-clamp-1 text-wrap">
+			<span class="text-gray-600 dark:text-gray-300 text-[13px] line-clamp-1 text-wrap">
 				{name}
 			</span>
 			{#if meta.length > 0}

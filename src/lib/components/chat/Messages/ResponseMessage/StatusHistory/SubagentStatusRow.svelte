@@ -20,7 +20,7 @@
 </script>
 
 <div class="flex items-start gap-2 py-0.5 w-full text-left">
-	<span class="flex-shrink-0 mt-0.5 text-violet-500 dark:text-violet-400">
+	<span class="flex-shrink-0 mt-0.5 text-gray-400 dark:text-gray-500">
 		<Users className="w-3.5 h-3.5" />
 	</span>
 
@@ -30,7 +30,7 @@
 			class="flex items-center gap-1 min-w-0 w-full text-left"
 			on:click={() => (open = !open)}
 		>
-			<span class="text-gray-700 dark:text-gray-300 text-base line-clamp-1 text-wrap">
+			<span class="text-gray-600 dark:text-gray-300 text-[13px] line-clamp-1 text-wrap">
 				{name}
 			</span>
 			{#if !done}
@@ -53,7 +53,7 @@
 		{#if open}
 			<div class="mt-1.5 space-y-1" transition:slide={{ duration: 150 }}>
 				{#if summary}
-					<div class="text-xs text-gray-600 dark:text-gray-300">{summary}</div>
+					<div class="text-xs text-gray-500 dark:text-gray-400">{summary}</div>
 				{/if}
 				{#if detail?.output !== undefined}
 					<pre

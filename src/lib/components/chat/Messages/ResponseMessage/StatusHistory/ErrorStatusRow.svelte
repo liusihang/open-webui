@@ -35,7 +35,7 @@
 			class="flex items-center gap-1 min-w-0 w-full text-left"
 			on:click={() => (open = !open)}
 		>
-			<span class="text-red-700 dark:text-red-300 text-base line-clamp-1 text-wrap">
+			<span class="text-red-700 dark:text-red-300 text-[13px] line-clamp-1 text-wrap">
 				{errorMessage || description}
 			</span>
 			<ChevronDown

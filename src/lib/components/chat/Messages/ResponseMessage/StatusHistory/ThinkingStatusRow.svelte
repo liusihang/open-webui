@@ -28,8 +28,8 @@
 		</span>
 	{/if}
 	<span
-		class="{done ? '' : 'shimmer'} text-gray-500 dark:text-gray-500 text-base line-clamp-1 text-wrap"
+		class="{done ? '' : 'shimmer'} text-gray-500 dark:text-gray-500 text-[13px] line-clamp-1 text-wrap"
 	>
-		{done ? $i18n.t('已完成思考') : $i18n.t(description)}
+		{done ? $i18n.t('Thinking complete') : $i18n.t(description)}
 	</span>
 </div>

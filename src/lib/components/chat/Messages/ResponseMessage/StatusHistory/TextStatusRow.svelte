@@ -17,7 +17,7 @@
 </script>
 
 {#if text}
-	<div class="w-full text-sm">
+	<div class="w-full text-xs">
 		{#if done}
 			<ContentRenderer
 				id={`agent-text-${blockId}`}
@@ -27,7 +27,7 @@
 			/>
 		{:else}
 			<pre
-				class="m-0 whitespace-pre-wrap break-words font-sans text-sm text-gray-900 dark:text-gray-100">{text}<span
+				class="m-0 whitespace-pre-wrap break-words font-sans text-xs text-gray-900 dark:text-gray-100">{text}<span
 					class="agent-text-cursor">|</span
 				></pre>
 		{/if}
