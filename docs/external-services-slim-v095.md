@@ -12,6 +12,7 @@ docker buildx build \
   --load \
   --build-arg BUILD_HASH="${BUILD_HASH}" \
   --build-arg USE_EXTERNAL_SERVICES_SLIM=true \
+  --build-arg PYODIDE_CACHE_POLICY=prefer-local \
   -t "open-webui:v095-external-slim-${BUILD_HASH}" \
   /Users/liusihang/openwebui-v095-imagefix
 ```
@@ -66,6 +67,50 @@ scripts/rebuild-pr7-slim-cache.sh \
 If mirrors are still insufficient, pass the local Clash HTTP proxy with
 `--proxy-url`.
 
+## Pyodide Cache And Mirror Controls
+
+The frontend build now prefers a checked-in or prebuilt `static/pyodide`
+artifact before attempting any network fetch.
+
+Supported build args and environment variables:
+
+- `PYODIDE_CACHE_POLICY`
+  - `prefer-local` default
+  - `refresh` forces a rebuild of `static/pyodide`
+  - `local-only` fails if a valid local `static/pyodide` artifact is not present
+- `PYODIDE_INDEX_URL`
+  - mirror base for Pyodide package assets
+- `PYODIDE_PYPI_API_BASE_URL`
+  - metadata base for `.../pypi/<package>/json`
+- `PYODIDE_PYPI_FILES_BASE_URL`
+  - optional files mirror used to rewrite `files.pythonhosted.org` wheel URLs
+- `PYODIDE_PYPI_INDEX_URLS`
+  - optional comma-separated index list passed to `micropip.install(...)`
+
+Recommended controlled-build examples:
+
+```bash
+docker buildx build \
+  --load \
+  --build-arg BUILD_HASH="${BUILD_HASH}" \
+  --build-arg USE_EXTERNAL_SERVICES_SLIM=true \
+  --build-arg PYODIDE_CACHE_POLICY=local-only \
+  -t "open-webui:v095-external-slim-${BUILD_HASH}" \
+  /Users/liusihang/openwebui-v095-imagefix
+```
+
+```bash
+docker buildx build \
+  --load \
+  --build-arg BUILD_HASH="${BUILD_HASH}" \
+  --build-arg USE_EXTERNAL_SERVICES_SLIM=true \
+  --build-arg PYODIDE_CACHE_POLICY=refresh \
+  --build-arg PYODIDE_INDEX_URL="https://mirror.example.com/pyodide/v0.28.3/full/" \
+  --build-arg PYODIDE_PYPI_API_BASE_URL="https://pypi.tuna.tsinghua.edu.cn/pypi" \
+  --build-arg PYODIDE_PYPI_FILES_BASE_URL="https://pypi.tuna.tsinghua.edu.cn/packages" \
+  -t "open-webui:v095-external-slim-${BUILD_HASH}" \
+  /Users/liusihang/openwebui-v095-imagefix
+```
 ## Smoke Test
 
 The slim image no longer ships local Chroma, so smoke tests should run with a

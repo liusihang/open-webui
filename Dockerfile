@@ -29,6 +29,11 @@ FROM --platform=$BUILDPLATFORM node:22-alpine3.20 AS build
 ARG BUILD_HASH
 ARG ALPINE_MIRROR=
 ARG NPM_REGISTRY=
+ARG PYODIDE_CACHE_POLICY=prefer-local
+ARG PYODIDE_INDEX_URL=
+ARG PYODIDE_PYPI_API_BASE_URL=
+ARG PYODIDE_PYPI_FILES_BASE_URL=
+ARG PYODIDE_PYPI_INDEX_URLS=
 
 # Set Node.js options (heap limit Allocation failed - JavaScript heap out of memory)
 # ENV NODE_OPTIONS="--max-old-space-size=4096"
@@ -47,7 +52,12 @@ COPY scripts/prepare-pyodide.js ./scripts/prepare-pyodide.js
 # Cypress is only used for E2E tests; skip its binary download in production image builds.
 ENV CYPRESS_INSTALL_BINARY=0
 # onnxruntime-node otherwise tries to download CUDA providers during npm install on Linux/x64.
-ENV ONNXRUNTIME_NODE_INSTALL_CUDA=skip
+ENV ONNXRUNTIME_NODE_INSTALL_CUDA=skip \
+    PYODIDE_CACHE_POLICY=${PYODIDE_CACHE_POLICY} \
+    PYODIDE_INDEX_URL=${PYODIDE_INDEX_URL} \
+    PYODIDE_PYPI_API_BASE_URL=${PYODIDE_PYPI_API_BASE_URL} \
+    PYODIDE_PYPI_FILES_BASE_URL=${PYODIDE_PYPI_FILES_BASE_URL} \
+    PYODIDE_PYPI_INDEX_URLS=${PYODIDE_PYPI_INDEX_URLS}
 ENV NPM_CONFIG_FETCH_RETRIES=5 \
     NPM_CONFIG_FETCH_RETRY_MINTIMEOUT=20000 \
     NPM_CONFIG_FETCH_RETRY_MAXTIMEOUT=120000 \
