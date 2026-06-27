@@ -11,6 +11,7 @@ import type {
 
 const STRIPPED_DETAIL_KEYS = new Set([
 	'chain_of_thought',
+	'debug',
 	'private',
 	'raw',
 	'raw_reasoning',

@@ -335,6 +335,21 @@ def test_text_delta_rejects_raw_private_reasoning_payload_fields():
         )
 
 
+def test_text_delta_rejects_debug_payload_fields():
+    with pytest.raises(ValidationError, match='debug'):
+        TextDeltaAppend(
+            run_id='run-1',
+            block_id='block-1',
+            block_kind='assistant_note',
+            delta_index=0,
+            delta='public summary',
+            payload={
+                'safe': {'nested': True},
+                'nested': {'debug': 'private trace'},
+            },
+        )
+
+
 def test_text_delta_duplicates_are_idempotent():
     store = FakeAgentEventStore()
     store.run_states['run-1'] = AgentRunState.RUNNING

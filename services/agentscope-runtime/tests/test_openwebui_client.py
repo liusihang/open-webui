@@ -3,6 +3,7 @@ import json
 import pytest
 import respx
 from httpx import Response
+from pydantic import ValidationError
 
 from agentscope_runtime.openwebui_client import OpenWebUIClient
 
@@ -241,6 +242,25 @@ async def test_append_text_delta_includes_public_block_kind() -> None:
         "phase": "running",
         "payload": {"runtime_session_id": "session"},
     }
+
+
+@pytest.mark.asyncio
+async def test_append_text_delta_rejects_debug_payload_before_callback() -> None:
+    client = OpenWebUIClient(
+        base_url="https://openwebui.test",
+        service_token="owui-token",
+    )
+
+    with pytest.raises(ValidationError, match="debug"):
+        await client.append_text_delta(
+            run_id="run-1",
+            idempotency_key="text:run-1:leader:block-1:0",
+            block_id="block-1",
+            block_kind="assistant_note",
+            delta_index=0,
+            delta="Public progress note.",
+            payload={"debug": {"trace": "private"}},
+        )
 
 
 @pytest.mark.asyncio

@@ -75,11 +75,9 @@
 			started = true;
 
 			try {
-				const events = await getAgentRunEvents(
-					localStorage.getItem('token') ?? '',
-					agentRunId,
-					{ afterSeq: state.lastSeq }
-				);
+				const events = await getAgentRunEvents(localStorage.getItem('token') ?? '', agentRunId, {
+					afterSeq: state.lastSeq
+				});
 				if (cancelled) {
 					return;
 				}
@@ -129,4 +127,4 @@
 		source?.close();
 		dispatch('terminal', { agentRunId, runStatus: state.runStatus });
 	}
-</script></script>
+</script>

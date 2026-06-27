@@ -7,12 +7,14 @@ const readSource = (relativePath: string) =>
 describe('AgentTranscript presentation guardrails', () => {
 	it('uses AgentTranscript for Agent Mode and keeps StatusHistory for non-agent fallback', () => {
 		const source = readSource('../Messages/ResponseMessage.svelte');
+		const bridge = readSource('./AgentRunStatusBridge.svelte');
 
 		expect(source).toContain('import AgentTranscript');
 		expect(source).toContain('<AgentTranscript');
 		expect(source).toContain('StatusHistory');
 		// Agent Mode branch must be separate from the legacy non-agent StatusHistory branch
 		expect(source).toMatch(/\{#if message\?\.agent_run_id\}[\s\S]*<AgentTranscript/);
+		expect(bridge).not.toContain('</script></script>');
 	});
 
 	it('renders the final answer through the normal ContentRenderer path', () => {
@@ -36,6 +38,7 @@ describe('AgentTranscript presentation guardrails', () => {
 		expect(source).toContain("'raw'");
 		expect(source).toContain("'raw_reasoning'");
 		expect(source).toContain("'reasoning'");
+		expect(source).toContain("'debug'");
 		expect(source).toContain("'thought'");
 		// text.delta must write into textBlocks, never finalText
 		expect(source).toMatch(/event_type === 'text\.delta'[\s\S]*?textBlocks/);

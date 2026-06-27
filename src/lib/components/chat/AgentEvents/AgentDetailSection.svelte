@@ -29,7 +29,18 @@
 			return [];
 		}
 		return Object.entries(payload)
-			.filter(([key]) => key !== 'chain_of_thought' && key !== 'reasoning' && key !== 'thought')
+			.filter(
+				([key]) =>
+					![
+						'chain_of_thought',
+						'debug',
+						'private',
+						'raw',
+						'raw_reasoning',
+						'reasoning',
+						'thought'
+					].includes(key.toLowerCase())
+			)
 			.map(([key, value]) => ({ key, value }));
 	};
 </script>

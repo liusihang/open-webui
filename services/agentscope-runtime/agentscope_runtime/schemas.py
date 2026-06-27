@@ -22,6 +22,7 @@ RAW_CREDENTIAL_FIELD_NAMES = {
 
 UNSAFE_REPLAY_FIELD_NAMES = {
     "chain_of_thought",
+    "debug",
     "private",
     "raw",
     "raw_reasoning",
@@ -119,7 +120,7 @@ class TextDeltaRequest(BaseModel):
         blocked = _find_unsafe_replay_fields(self.payload)
         if blocked:
             fields = ", ".join(sorted(blocked))
-            raise ValueError(f"raw/private/reasoning fields are not accepted in text.delta payload: {fields}")
+            raise ValueError(f"raw/private/reasoning/debug fields are not accepted in text.delta payload: {fields}")
         return self
 
 

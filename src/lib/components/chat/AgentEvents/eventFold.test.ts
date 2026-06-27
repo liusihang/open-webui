@@ -181,7 +181,9 @@ describe('foldAgentRunEvents', () => {
 		expect(state.items.map((item) => item.eventType)).toEqual(['run.running', 'tool.requested']);
 		expect(state.runStatus).toBe('running');
 
-		expect(state.textBlocks.map((block) => ({ id: block.id, kind: block.kind, text: block.text }))).toEqual([
+		expect(
+			state.textBlocks.map((block) => ({ id: block.id, kind: block.kind, text: block.text }))
+		).toEqual([
 			{ id: 'z-first', kind: 'assistant_note', text: 'Hello ' },
 			{ id: 'a-second', kind: 'action_summary', text: 'world' }
 		]);
@@ -271,6 +273,7 @@ describe('foldAgentRunEvents', () => {
 					raw_reasoning: 'hidden raw',
 					reasoning: 'hidden reasoning',
 					thought: 'hidden thought',
+					debug: 'hidden debug',
 					private: 'hidden private',
 					raw: { massive: 'hidden payload' },
 					nested: { chain_of_thought: 'hidden nested' }
@@ -284,6 +287,7 @@ describe('foldAgentRunEvents', () => {
 		expect(serialized).not.toContain('chain_of_thought');
 		expect(serialized).not.toContain('reasoning');
 		expect(serialized).not.toContain('thought');
+		expect(serialized).not.toContain('debug');
 		expect(serialized).not.toContain('private');
 		expect(serialized).not.toContain('raw_reasoning');
 	});
@@ -296,6 +300,7 @@ describe('foldAgentRunEvents', () => {
 				summary: 'Deciding next step',
 				payload: {
 					status: 'running',
+					debug: 'hidden debug trace',
 					reasoning: 'hidden chain of thought',
 					raw_reasoning: 'hidden raw chain',
 					thought: 'hidden thought',
