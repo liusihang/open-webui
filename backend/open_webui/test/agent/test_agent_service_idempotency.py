@@ -255,6 +255,54 @@ async def test_final_delta_remains_strict_on_hash_conflict(
 
 
 @pytest.mark.asyncio
+async def test_text_delta_duplicate_and_conflicting_payload_return_existing_without_final_text(
+    agent_run_db,
+    app_without_fake_event_store,
+):
+    run_id = await _create_running_run()
+    key = 'text:run-1:leader:block-1:0'
+    body = {
+        'run_id': run_id,
+        'block_id': 'block-1',
+        'block_kind': 'assistant_note',
+        'delta_index': 0,
+        'delta': 'public note',
+        'participant_id': 'leader',
+        'phase': 'running',
+        'idempotency_key': key,
+    }
+
+    with TestClient(app_without_fake_event_store) as client:
+        first = client.post(
+            f'/api/agent/service/runs/{run_id}/text-delta',
+            json=body,
+            headers=_service_headers(key),
+        )
+        duplicate = client.post(
+            f'/api/agent/service/runs/{run_id}/text-delta',
+            json=body,
+            headers=_service_headers(key),
+        )
+        conflict = client.post(
+            f'/api/agent/service/runs/{run_id}/text-delta',
+            json={**body, 'delta': 'changed note'},
+            headers=_service_headers(key),
+        )
+
+    assert first.status_code == 200
+    assert duplicate.status_code == 200
+    assert conflict.status_code == 200
+    assert duplicate.json() == first.json()
+    assert conflict.json()['seq'] == first.json()['seq']
+    assert conflict.json()['payload']['delta'] == 'public note'
+    assert conflict.json()['payload']['block_kind'] == 'assistant_note'
+
+    updated = await AgentRuns.get_run(run_id)
+    assert updated is not None
+    assert updated.final_text == ''
+
+
+@pytest.mark.asyncio
 async def test_event_append_in_progress_operation_returns_202(
     agent_run_db,
     app_without_fake_event_store,

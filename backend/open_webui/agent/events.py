@@ -273,49 +273,28 @@ def append_text_delta(
 ) -> AgentRunEvent:
     """Append a streaming text delta for a participant's text block.
 
-    Text deltas are accepted in any run state (running, waiting_approval,
-    finalizing) — they represent model text emitted between tool calls or
-    during the final answer. Each (block_id, delta_index) is idempotent;
-    duplicates return the previously stored event.
-
-    The delta is also folded into the run's final_text store (keyed by
-    block_id) so the completion handler that reads final_text for the
-    persisted message sees the full content.
+    Text deltas are accepted in any active run state. Each
+    (block_id, delta_index) is idempotent; duplicates return the previously
+    stored event. These are public transcript blocks only and must not write
+    AgentRun.final_text.
     """
-    before_events = store.list_events_after(delta.run_id, after_seq=0)
-    before_count = _count_text_deltas(
-        before_events,
-        delta.block_id,
-        delta.delta_index,
-    )
-
-    try:
-        text_after_delta = store.append_final_text_delta(
-            delta.run_id,
-            delta.block_id,
-            delta.delta_index,
-            delta.delta,
-        )
-    except ValueError as exc:
-        raise TextDeltaRejected(f'text delta gap: {exc}') from exc
-
-    after_events = store.list_events_after(delta.run_id, after_seq=0)
-    after_count = _count_text_deltas(
-        after_events,
-        delta.block_id,
-        delta.delta_index,
-    )
-    if after_count > before_count:
-        return _find_text_delta_event(after_events, delta.block_id, delta.delta_index)
-
+    events = store.list_events_after(delta.run_id, after_seq=0)
     duplicate_event = _find_text_delta_event(
-        after_events,
+        events,
         delta.block_id,
         delta.delta_index,
         required=False,
     )
     if duplicate_event is not None:
         return duplicate_event
+
+    expected = _next_text_delta_index(events, delta.block_id)
+    if delta.delta_index != expected:
+        raise TextDeltaRejected(
+            f'text delta gap: expected delta_index {expected}, got {delta.delta_index}'
+        )
+
+    text_after_delta = _text_after_text_delta(events, delta.block_id, delta.delta)
 
     return append_agent_event(
         store,
@@ -328,6 +307,7 @@ def append_text_delta(
             payload={
                 **delta.payload,
                 'block_id': delta.block_id,
+                'block_kind': delta.block_kind.value,
                 'delta_index': delta.delta_index,
                 'delta': delta.delta,
                 'text': text_after_delta,
@@ -341,48 +321,27 @@ async def append_text_delta_async(
     store,
     delta: TextDeltaAppend,
 ) -> AgentRunEvent:
-    before_events = await list_events_for_reconnect_async(
+    events = await list_events_for_reconnect_async(
         store,
         delta.run_id,
         after_seq=0,
     )
-    before_count = _count_text_deltas(
-        before_events,
-        delta.block_id,
-        delta.delta_index,
-    )
-
-    try:
-        text_after_delta = await store.append_final_text_delta(
-            delta.run_id,
-            delta.block_id,
-            delta.delta_index,
-            delta.delta,
-        )
-    except ValueError as exc:
-        raise TextDeltaRejected(f'text delta gap: {exc}') from exc
-
-    after_events = await list_events_for_reconnect_async(
-        store,
-        delta.run_id,
-        after_seq=0,
-    )
-    after_count = _count_text_deltas(
-        after_events,
-        delta.block_id,
-        delta.delta_index,
-    )
-    if after_count > before_count:
-        return _find_text_delta_event(after_events, delta.block_id, delta.delta_index)
-
     duplicate_event = _find_text_delta_event(
-        after_events,
+        events,
         delta.block_id,
         delta.delta_index,
         required=False,
     )
     if duplicate_event is not None:
         return duplicate_event
+
+    expected = _next_text_delta_index(events, delta.block_id)
+    if delta.delta_index != expected:
+        raise TextDeltaRejected(
+            f'text delta gap: expected delta_index {expected}, got {delta.delta_index}'
+        )
+
+    text_after_delta = _text_after_text_delta(events, delta.block_id, delta.delta)
 
     return await append_agent_event_async(
         store,
@@ -395,6 +354,7 @@ async def append_text_delta_async(
             payload={
                 **delta.payload,
                 'block_id': delta.block_id,
+                'block_kind': delta.block_kind.value,
                 'delta_index': delta.delta_index,
                 'delta': delta.delta,
                 'text': text_after_delta,
@@ -498,6 +458,34 @@ def _find_text_delta_event(
     if required:
         raise AgentEventStoreConflict('text delta text was stored without an event')
     return None
+
+
+def _next_text_delta_index(events: list[AgentRunEvent], block_id: str) -> int:
+    return len(_text_delta_events_for_block(events, block_id))
+
+
+def _text_after_text_delta(
+    events: list[AgentRunEvent],
+    block_id: str,
+    delta: str,
+) -> str:
+    return ''.join(
+        str(event.payload.get('delta') or '')
+        for event in _text_delta_events_for_block(events, block_id)
+    ) + delta
+
+
+def _text_delta_events_for_block(
+    events: list[AgentRunEvent],
+    block_id: str,
+) -> list[AgentRunEvent]:
+    matching = [
+        event
+        for event in events
+        if event.event_type == AgentEventType.TEXT_DELTA
+        and event.payload.get('block_id') == block_id
+    ]
+    return sorted(matching, key=lambda event: int(event.payload.get('delta_index') or 0))
 
 
 def _coerce_event(event) -> AgentRunEvent:

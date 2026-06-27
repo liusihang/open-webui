@@ -1,4 +1,5 @@
 import pytest
+from pydantic import ValidationError
 from open_webui.agent.events import (
     AgentEventRejected,
     AgentEventStore,
@@ -283,6 +284,7 @@ def test_text_delta_accepts_running_state_without_final_started():
         TextDeltaAppend(
             run_id='run-1',
             block_id='block-1',
+            block_kind='assistant_note',
             delta_index=0,
             delta='Let me check',
             participant_id='leader',
@@ -293,9 +295,44 @@ def test_text_delta_accepts_running_state_without_final_started():
     assert event.event_type == AgentEventType.TEXT_DELTA
     assert event.seq == 1
     assert event.payload['block_id'] == 'block-1'
+    assert event.payload['block_kind'] == 'assistant_note'
     assert event.payload['delta_index'] == 0
     assert event.payload['delta'] == 'Let me check'
-    assert store.final_text['run-1'] == 'Let me check'
+    assert store.final_text.get('run-1') is None
+
+
+def test_text_delta_requires_valid_block_kind():
+    with pytest.raises(ValidationError, match='block_kind'):
+        TextDeltaAppend(
+            run_id='run-1',
+            block_id='block-1',
+            delta_index=0,
+            delta='missing kind',
+        )
+
+    with pytest.raises(ValidationError, match='block_kind'):
+        TextDeltaAppend(
+            run_id='run-1',
+            block_id='block-1',
+            block_kind='raw_reasoning',
+            delta_index=0,
+            delta='unsafe kind',
+        )
+
+
+def test_text_delta_rejects_raw_private_reasoning_payload_fields():
+    with pytest.raises(ValidationError, match='raw/private/reasoning'):
+        TextDeltaAppend(
+            run_id='run-1',
+            block_id='block-1',
+            block_kind='assistant_note',
+            delta_index=0,
+            delta='public summary',
+            payload={
+                'safe': {'nested': True},
+                'raw': {'reasoning': 'private chain'},
+            },
+        )
 
 
 def test_text_delta_duplicates_are_idempotent():
@@ -307,6 +344,7 @@ def test_text_delta_duplicates_are_idempotent():
         TextDeltaAppend(
             run_id='run-1',
             block_id='block-1',
+            block_kind='assistant_note',
             delta_index=0,
             delta='hel',
         ),
@@ -316,6 +354,7 @@ def test_text_delta_duplicates_are_idempotent():
         TextDeltaAppend(
             run_id='run-1',
             block_id='block-1',
+            block_kind='assistant_note',
             delta_index=0,
             delta='hel',
         ),
@@ -324,7 +363,7 @@ def test_text_delta_duplicates_are_idempotent():
     assert first.seq == 1
     assert duplicate.seq == 1
     assert duplicate.model_dump() == first.model_dump()
-    assert store.final_text['run-1'] == 'hel'
+    assert store.final_text.get('run-1') is None
     assert [e.event_type for e in store.events['run-1']].count(
         AgentEventType.TEXT_DELTA
     ) == 1
@@ -339,6 +378,7 @@ def test_text_delta_gaps_are_rejected():
         TextDeltaAppend(
             run_id='run-1',
             block_id='block-1',
+            block_kind='assistant_note',
             delta_index=0,
             delta='hel',
         ),
@@ -350,38 +390,62 @@ def test_text_delta_gaps_are_rejected():
             TextDeltaAppend(
                 run_id='run-1',
                 block_id='block-1',
+                block_kind='assistant_note',
                 delta_index=2,
                 delta='lo',
             ),
         )
 
 
-def test_text_delta_multiple_blocks_are_independent_and_concatenate_into_final_text():
-    """Two text blocks (e.g. text → tool → text) accumulate independently
-    per block_id but the run's final_text sees them concatenated in append
-    order.
+def test_text_delta_multiple_blocks_are_independent_without_final_text_side_effects():
+    """Two public transcript text blocks keep per-block ordering and do not
+    change the run's final_text, which is reserved for final.delta.
     """
     store = FakeAgentEventStore()
     store.run_states['run-1'] = AgentRunState.RUNNING
 
     append_text_delta(
         store,
-        TextDeltaAppend(run_id='run-1', block_id='block-a', delta_index=0, delta='First '),
+        TextDeltaAppend(
+            run_id='run-1',
+            block_id='block-a',
+            block_kind='assistant_note',
+            delta_index=0,
+            delta='First ',
+        ),
     )
     append_text_delta(
         store,
-        TextDeltaAppend(run_id='run-1', block_id='block-a', delta_index=1, delta='thought.'),
+        TextDeltaAppend(
+            run_id='run-1',
+            block_id='block-a',
+            block_kind='assistant_note',
+            delta_index=1,
+            delta='note.',
+        ),
     )
     append_text_delta(
         store,
-        TextDeltaAppend(run_id='run-1', block_id='block-b', delta_index=0, delta='Second '),
+        TextDeltaAppend(
+            run_id='run-1',
+            block_id='block-b',
+            block_kind='action_summary',
+            delta_index=0,
+            delta='Second ',
+        ),
     )
     append_text_delta(
         store,
-        TextDeltaAppend(run_id='run-1', block_id='block-b', delta_index=1, delta='answer.'),
+        TextDeltaAppend(
+            run_id='run-1',
+            block_id='block-b',
+            block_kind='action_summary',
+            delta_index=1,
+            delta='summary.',
+        ),
     )
 
-    assert store.final_text['run-1'] == 'First thought.Second answer.'
+    assert store.final_text.get('run-1') is None
     text_events = [e for e in store.events['run-1'] if e.event_type == AgentEventType.TEXT_DELTA]
     assert len(text_events) == 4
     assert [e.payload['block_id'] for e in text_events] == [
@@ -389,6 +453,12 @@ def test_text_delta_multiple_blocks_are_independent_and_concatenate_into_final_t
         'block-a',
         'block-b',
         'block-b',
+    ]
+    assert [e.payload['block_kind'] for e in text_events] == [
+        'assistant_note',
+        'assistant_note',
+        'action_summary',
+        'action_summary',
     ]
     assert [e.payload['delta_index'] for e in text_events] == [0, 1, 0, 1]
 
@@ -408,8 +478,9 @@ def test_text_delta_is_allowed_after_final_started():
         TextDeltaAppend(
             run_id='run-1',
             block_id='final-block',
+            block_kind='action_summary',
             delta_index=0,
-            delta='Streaming final.',
+            delta='Summarizing action.',
         ),
     )
 
@@ -427,6 +498,7 @@ def test_text_delta_interleaves_with_tool_events_by_seq():
         TextDeltaAppend(
             run_id='run-1',
             block_id='block-pre',
+            block_kind='assistant_note',
             delta_index=0,
             delta='Let me check the repo.',
             participant_id='leader',
@@ -460,6 +532,7 @@ def test_text_delta_interleaves_with_tool_events_by_seq():
         TextDeltaAppend(
             run_id='run-1',
             block_id='block-post',
+            block_kind='action_summary',
             delta_index=0,
             delta='Now I have the info.',
             participant_id='leader',
@@ -476,7 +549,7 @@ def test_text_delta_interleaves_with_tool_events_by_seq():
         AgentEventType.TEXT_DELTA,
     ]
     assert text1.seq < tool_req.seq < tool_done.seq < text2.seq
-    assert store.final_text['run-1'] == 'Let me check the repo.Now I have the info.'
+    assert store.final_text.get('run-1') is None
 
 
 def test_text_delta_payload_is_preserved_and_includes_runtime_metadata():
@@ -488,6 +561,7 @@ def test_text_delta_payload_is_preserved_and_includes_runtime_metadata():
         TextDeltaAppend(
             run_id='run-1',
             block_id='block-meta',
+            block_kind='assistant_note',
             delta_index=0,
             delta='hello',
             participant_id='leader',
@@ -498,6 +572,7 @@ def test_text_delta_payload_is_preserved_and_includes_runtime_metadata():
 
     assert event.payload['model_call_id'] == 'mc-1'
     assert event.payload['block_id'] == 'block-meta'
+    assert event.payload['block_kind'] == 'assistant_note'
     assert event.payload['delta'] == 'hello'
     assert event.payload['text'] == 'hello'
     assert event.participant_id == 'leader'

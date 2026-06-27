@@ -1,7 +1,7 @@
 from enum import StrEnum
 from typing import Any
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 
 class AgentRunState(StrEnum):
@@ -41,6 +41,21 @@ class AgentEventType(StrEnum):
     RUN_BUDGET_EXCEEDED = 'run.budget_exceeded'
 
 
+class TextBlockKind(StrEnum):
+    ASSISTANT_NOTE = 'assistant_note'
+    ACTION_SUMMARY = 'action_summary'
+
+
+UNSAFE_REPLAY_FIELD_NAMES = {
+    'chain_of_thought',
+    'private',
+    'raw',
+    'raw_reasoning',
+    'reasoning',
+    'thought',
+}
+
+
 class AgentRunEvent(BaseModel):
     model_config = ConfigDict(use_enum_values=False)
 
@@ -77,25 +92,35 @@ class FinalDeltaAppend(BaseModel):
 
 
 class TextDeltaAppend(BaseModel):
-    """Streaming text delta emitted by the agentscope runtime during a run.
+    """Public transcript text delta emitted during a run.
 
     `block_id` identifies a contiguous text segment within a participant's
     turn (one model call may produce multiple text blocks interleaved with
     tool calls). `delta_index` is the per-block monotonic index. Each
     (block_id, delta_index) pair is idempotent — duplicates return the
-    previously stored event. Deltas are also folded into the run's
-    final_text store keyed by block_id, so the completion handler that
-    reads final_text for the persisted message sees the full content.
+    previously stored event. Text deltas are replayable public transcript
+    text only; they do not write AgentRun.final_text or the final assistant
+    message content. Final answers must use final.delta.
     """
 
     run_id: str
     block_id: str
+    block_kind: TextBlockKind
     delta_index: int = Field(ge=0)
     delta: str
     participant_id: str | None = None
     phase: str | None = None
     payload: dict[str, Any] = Field(default_factory=dict)
     idempotency_key: str | None = None
+
+    @field_validator('payload')
+    @classmethod
+    def reject_unsafe_replay_payload(cls, payload: dict[str, Any]) -> dict[str, Any]:
+        blocked = _find_unsafe_replay_fields(payload)
+        if blocked:
+            fields = ', '.join(sorted(blocked))
+            raise ValueError(f'raw/private/reasoning fields are not accepted in text.delta payload: {fields}')
+        return payload
 
 
 class AgentStateTransitionAppend(BaseModel):
@@ -120,3 +145,19 @@ class AgentRunDetailResponse(BaseModel):
     assistant_message_id: str | None = None
     summary: dict[str, Any] | None = None
     error: dict[str, Any] | None = None
+
+
+def _find_unsafe_replay_fields(value: Any, path: str = '') -> set[str]:
+    blocked: set[str] = set()
+    if isinstance(value, dict):
+        for key, nested in value.items():
+            key_text = str(key)
+            next_path = f'{path}.{key_text}' if path else key_text
+            if key_text in UNSAFE_REPLAY_FIELD_NAMES:
+                blocked.add(next_path)
+            blocked.update(_find_unsafe_replay_fields(nested, next_path))
+    elif isinstance(value, list):
+        for index, nested in enumerate(value):
+            next_path = f'{path}[{index}]'
+            blocked.update(_find_unsafe_replay_fields(nested, next_path))
+    return blocked

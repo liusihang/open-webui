@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from enum import StrEnum
 from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
@@ -18,6 +19,20 @@ RAW_CREDENTIAL_FIELD_NAMES = {
     "oauth_token",
     "raw_credentials",
 }
+
+UNSAFE_REPLAY_FIELD_NAMES = {
+    "chain_of_thought",
+    "private",
+    "raw",
+    "raw_reasoning",
+    "reasoning",
+    "thought",
+}
+
+
+class TextBlockKind(StrEnum):
+    ASSISTANT_NOTE = "assistant_note"
+    ACTION_SUMMARY = "action_summary"
 
 
 class RunStartRequest(BaseModel):
@@ -88,6 +103,26 @@ class FinalDeltaRequest(BaseModel):
     payload: dict[str, Any] = Field(default_factory=dict)
 
 
+class TextDeltaRequest(BaseModel):
+    idempotency_key: str
+    run_id: str
+    block_id: str
+    block_kind: TextBlockKind
+    delta_index: int
+    delta: str
+    participant_id: str | None = None
+    phase: str | None = None
+    payload: dict[str, Any] = Field(default_factory=dict)
+
+    @model_validator(mode="after")
+    def reject_unsafe_replay_payload(self) -> "TextDeltaRequest":
+        blocked = _find_unsafe_replay_fields(self.payload)
+        if blocked:
+            fields = ", ".join(sorted(blocked))
+            raise ValueError(f"raw/private/reasoning fields are not accepted in text.delta payload: {fields}")
+        return self
+
+
 class StateTransitionRequest(BaseModel):
     idempotency_key: str
     run_id: str
@@ -155,4 +190,20 @@ def _find_raw_credential_fields(value: Any, path: str = "") -> set[str]:
         for index, nested in enumerate(value):
             next_path = f"{path}[{index}]"
             blocked.update(_find_raw_credential_fields(nested, next_path))
+    return blocked
+
+
+def _find_unsafe_replay_fields(value: Any, path: str = "") -> set[str]:
+    blocked: set[str] = set()
+    if isinstance(value, dict):
+        for key, nested in value.items():
+            key_text = str(key)
+            next_path = f"{path}.{key_text}" if path else key_text
+            if key_text in UNSAFE_REPLAY_FIELD_NAMES:
+                blocked.add(next_path)
+            blocked.update(_find_unsafe_replay_fields(nested, next_path))
+    elif isinstance(value, list):
+        for index, nested in enumerate(value):
+            next_path = f"{path}[{index}]"
+            blocked.update(_find_unsafe_replay_fields(nested, next_path))
     return blocked

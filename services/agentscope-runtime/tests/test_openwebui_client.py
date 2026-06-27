@@ -205,6 +205,45 @@ async def test_append_final_delta_uses_openwebui_final_delta_callback() -> None:
 
 
 @pytest.mark.asyncio
+async def test_append_text_delta_includes_public_block_kind() -> None:
+    async with respx.mock(assert_all_called=True) as router:
+        request = router.post("https://openwebui.test/api/agent/service/runs/run-1/text-delta").mock(
+            return_value=Response(200, json={"seq": 4, "event_type": "text.delta"})
+        )
+        client = OpenWebUIClient(
+            base_url="https://openwebui.test",
+            service_token="owui-token",
+        )
+
+        response = await client.append_text_delta(
+            run_id="run-1",
+            idempotency_key="text:run-1:leader:block-1:0",
+            block_id="block-1",
+            block_kind="assistant_note",
+            delta_index=0,
+            delta="Public progress note.",
+            participant_id="leader",
+            phase="running",
+            payload={"runtime_session_id": "session"},
+        )
+
+    assert response == {"seq": 4, "event_type": "text.delta"}
+    assert request.calls.last.request.headers["authorization"] == "Bearer owui-token"
+    assert request.calls.last.request.headers["x-agent-idempotency-key"] == "text:run-1:leader:block-1:0"
+    assert json.loads(request.calls.last.request.content) == {
+        "idempotency_key": "text:run-1:leader:block-1:0",
+        "run_id": "run-1",
+        "block_id": "block-1",
+        "block_kind": "assistant_note",
+        "delta_index": 0,
+        "delta": "Public progress note.",
+        "participant_id": "leader",
+        "phase": "running",
+        "payload": {"runtime_session_id": "session"},
+    }
+
+
+@pytest.mark.asyncio
 async def test_transition_state_uses_openwebui_state_transition_callback() -> None:
     async with respx.mock(assert_all_called=True) as router:
         request = router.post(

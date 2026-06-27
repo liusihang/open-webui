@@ -39,6 +39,7 @@ class RecordingBridgeCallbacks:
         run_id: str,
         idempotency_key: str,
         block_id: str,
+        block_kind: str,
         delta_index: int,
         delta: str,
         participant_id: str | None = None,
@@ -49,6 +50,7 @@ class RecordingBridgeCallbacks:
             "run_id": run_id,
             "idempotency_key": idempotency_key,
             "block_id": block_id,
+            "block_kind": block_kind,
             "delta_index": delta_index,
             "delta": delta,
             "participant_id": participant_id,
@@ -225,6 +227,7 @@ async def test_bridge_builds_agentscope_template_model_and_tool_callback_boundar
     assert callbacks.model_calls[0]["model"] == "model-research"
     assert callbacks.model_calls[0]["messages"][0]["role"] == "user"
     assert callbacks.model_calls[0]["params"] == {"temperature": 0.2}
+    assert callbacks.text_deltas == []
 
     tool = bridge.build_tool_proxy(
         participant_id="subagent:run-bridge:1",
@@ -310,6 +313,7 @@ async def test_model_bridge_preserves_openwebui_tool_calls_as_agentscope_blocks(
     assert tool_calls[0].id == "call_search_1"
     assert tool_calls[0].name == "search_web"
     assert tool_calls[0].input == "{\"query\":\"agent mode\"}"
+    assert callbacks.text_deltas == []
 
 
 @pytest.mark.asyncio

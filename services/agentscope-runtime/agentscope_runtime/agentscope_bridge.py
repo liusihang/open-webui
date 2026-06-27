@@ -5,7 +5,7 @@ import json
 import uuid
 from collections.abc import AsyncGenerator
 from dataclasses import dataclass
-from typing import Any, Protocol
+from typing import Any, Callable, Protocol
 
 import httpx
 from pydantic import BaseModel
@@ -73,6 +73,7 @@ class OpenWebUIBridgeCallbacks(Protocol):
         run_id: str,
         idempotency_key: str,
         block_id: str,
+        block_kind: str,
         delta_index: int,
         delta: str,
         participant_id: str | None = None,
@@ -163,6 +164,7 @@ class OpenWebUIAgentScopeModel(ChatModelBase):
         participant_id: str,
         model_id: str,
         callback_client: OpenWebUIBridgeCallbacks,
+        on_final_text: Callable[[str, str], None] | None = None,
     ) -> None:
         super().__init__(
             credential=OpenWebUICallbackCredential(),
@@ -175,6 +177,7 @@ class OpenWebUIAgentScopeModel(ChatModelBase):
         self.runtime_session_id = runtime_session_id
         self.participant_id = participant_id
         self.callback_client = callback_client
+        self._on_final_text = on_final_text
         self._next_model_call_index = 1
         self._formatter = OpenAIChatFormatter()
 
@@ -212,15 +215,12 @@ class OpenWebUIAgentScopeModel(ChatModelBase):
         tool_choice: Any | None,
         **kwargs: Any,
     ) -> AsyncGenerator[ChatResponse, None]:
-        """Stream a model call, pushing text.delta callbacks per chunk.
+        """Stream a model call while preserving AgentScope ChatResponse chunks.
 
         Yields intermediate ChatResponse chunks (is_last=False) with
         partial TextBlock content for agentscope's _convert_chat_response_to_event
         to consume, then a final ChatResponse (is_last=True) with the
         complete content blocks (TextBlock + ToolCallBlocks).
-
-        Side effect: pushes text.delta events to OpenWebUI for each text
-        chunk received, using a per-model-call block_id (uuid4).
         """
         model_call_id = self._allocate_model_call_id()
         params = dict(kwargs)
@@ -281,23 +281,6 @@ class OpenWebUIAgentScopeModel(ChatModelBase):
                 content = delta.get("content")
                 if isinstance(content, str) and content:
                     accumulated_text_parts.append(content)
-                    try:
-                        await self.callback_client.append_text_delta(
-                            run_id=self.run_id,
-                            idempotency_key=(
-                                f"text:{self.run_id}:{self.participant_id}:"
-                                f"{block_id}:{text_delta_index}"
-                            ),
-                            block_id=block_id,
-                            delta_index=text_delta_index,
-                            delta=content,
-                            participant_id=self.participant_id,
-                            phase="running",
-                        )
-                    except Exception:
-                        # text.delta failure must not break the model call;
-                        # the final ChatResponse still carries the full text.
-                        pass
                     text_delta_index += 1
                     yield ChatResponse(
                         content=[TextBlock(text=content)],
@@ -319,27 +302,14 @@ class OpenWebUIAgentScopeModel(ChatModelBase):
                 full_text = _extract_model_text(response)
                 if full_text and not accumulated_text_parts:
                     accumulated_text_parts.append(full_text)
-                    try:
-                        await self.callback_client.append_text_delta(
-                            run_id=self.run_id,
-                            idempotency_key=(
-                                f"text:{self.run_id}:{self.participant_id}:"
-                                f"{block_id}:0"
-                            ),
-                            block_id=block_id,
-                            delta_index=0,
-                            delta=full_text,
-                            participant_id=self.participant_id,
-                            phase="running",
-                        )
-                    except Exception:
-                        pass
                 for tool_call in _extract_tool_calls(response):
                     accumulated_tool_calls.append(tool_call)
             elif event_type == "stream_end":
                 break
 
         full_text = "".join(accumulated_text_parts)
+        if full_text and self._on_final_text is not None:
+            self._on_final_text(self.participant_id, full_text)
         blocks: list[TextBlock | ToolCallBlock] = []
         if full_text:
             blocks.append(TextBlock(text=full_text))
@@ -538,6 +508,7 @@ class AgentScopeRuntimeBridge:
         self.run_id = run_id
         self.runtime_session_id = runtime_session_id
         self.callback_client = callback_client
+        self._final_text_by_participant: dict[str, str] = {}
 
     def build_subagent_template(
         self,
@@ -564,7 +535,14 @@ class AgentScopeRuntimeBridge:
             participant_id=participant_id,
             model_id=model_id,
             callback_client=self.callback_client,
+            on_final_text=self._record_final_text,
         )
+
+    def latest_final_text(self, participant_id: str) -> str:
+        return self._final_text_by_participant.get(participant_id, "")
+
+    def _record_final_text(self, participant_id: str, text: str) -> None:
+        self._final_text_by_participant[participant_id] = text
 
     def build_tool_proxy(
         self,

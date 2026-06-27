@@ -14,6 +14,7 @@ from agentscope_runtime.schemas import (
     ModelSelectionRequest,
     StateTransitionRequest,
     SubagentRegisterRequest,
+    TextDeltaRequest,
     ToolCallRequest,
 )
 
@@ -110,24 +111,26 @@ class OpenWebUIClient:
         run_id: str,
         idempotency_key: str,
         block_id: str,
+        block_kind: str,
         delta_index: int,
         delta: str,
         participant_id: str | None = None,
         phase: str | None = None,
         payload: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
-        body = {
-            "idempotency_key": idempotency_key,
-            "run_id": run_id,
-            "block_id": block_id,
-            "delta_index": delta_index,
-            "delta": delta,
-            "participant_id": participant_id,
-            "phase": phase,
-            "payload": payload or {},
-        }
+        body = TextDeltaRequest(
+            idempotency_key=idempotency_key,
+            run_id=run_id,
+            block_id=block_id,
+            block_kind=block_kind,
+            delta_index=delta_index,
+            delta=delta,
+            participant_id=participant_id,
+            phase=phase,
+            payload=payload or {},
+        )
         url = f"{self._base_url}/api/agent/service/runs/{run_id}/text-delta"
-        return await self._post_callback(url, idempotency_key, body)
+        return await self._post_callback(url, idempotency_key, body.model_dump(mode="json"))
 
     async def transition_state(
         self,
