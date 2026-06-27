@@ -67,6 +67,8 @@
 	import OutputEditView from './OutputEditView.svelte';
 	import AgentRunStatusBridge from '../AgentEvents/AgentRunStatusBridge.svelte';
 	import AgentFinalAnswer from '../AgentEvents/AgentFinalAnswer.svelte';
+	import AgentTranscript from '../AgentEvents/AgentTranscript.svelte';
+	import type { AgentTranscriptModel } from '../AgentEvents/types';
 	import { markAgentRunMessageDone } from '../AgentEvents/messageState';
 
 	interface MessageType {
@@ -191,6 +193,7 @@
 
 	let agentFinalAnswer = '';
 	let agentFinalAnswerDone = false;
+	let agentTranscript: AgentTranscriptModel | null = null;
 
 	let model = null;
 	$: model = $models.find((m) => m.id === message.model);
@@ -720,7 +723,11 @@
 			<div>
 				<div class="chat-{message.role} w-full min-w-full markdown-prose">
 					<div>
-						{#if model?.info?.meta?.capabilities?.status_updates ?? true}
+						{#if message?.agent_run_id}
+							{#if agentTranscript}
+								<AgentTranscript model={agentTranscript} />
+							{/if}
+						{:else if model?.info?.meta?.capabilities?.status_updates ?? true}
 							<StatusHistory statusHistory={message?.statusHistory} />
 						{/if}
 
@@ -858,6 +865,9 @@
 									on:final={(event) => {
 										agentFinalAnswer = event.detail.content;
 										agentFinalAnswerDone = event.detail.done;
+									}}
+									on:transcript={(event) => {
+										agentTranscript = event.detail.model;
 									}}
 									on:terminal={async (event) => {
 										if (markAgentRunMessageDone(message, event.detail.runStatus)) {

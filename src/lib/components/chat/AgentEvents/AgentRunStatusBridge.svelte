@@ -5,8 +5,14 @@
 
 	import { foldAgentEventIntoStatusHistory, type AgentStatusEntry } from './agentStatusAdapter';
 	import { createAgentRunEventState, foldAgentRunEvent } from './eventFold';
+	import { buildAgentTranscriptModel } from './transcriptModel';
 	import { isTerminalAgentRunStatus } from './messageState';
-	import { AGENT_RUN_EVENT_TYPES, type AgentRunEvent, type AgentRunState } from './types';
+	import {
+		AGENT_RUN_EVENT_TYPES,
+		type AgentRunEvent,
+		type AgentRunState,
+		type AgentTranscriptModel
+	} from './types';
 
 	export let agentRunId: string;
 	export let statusHistory: AgentStatusEntry[] = [];
@@ -14,12 +20,24 @@
 	const dispatch = createEventDispatcher<{
 		final: { content: string; done: boolean; status: AgentRunState };
 		terminal: { agentRunId: string; runStatus: AgentRunState };
+		transcript: { model: AgentTranscriptModel };
 	}>();
 
 	let state = createAgentRunEventState();
 	let source: EventSource | null = null;
 	let dispatchedTerminalStatus: AgentRunState | null = null;
 	let started = false;
+	let lastTranscriptSignature = '';
+
+	const emitTranscript = () => {
+		const model = buildAgentTranscriptModel(state);
+		const signature = `${state.lastSeq}:${model.parts.length}:${state.runStatus}:${state.finalText.length}`;
+		if (signature === lastTranscriptSignature) {
+			return;
+		}
+		lastTranscriptSignature = signature;
+		dispatch('transcript', { model });
+	};
 
 	const ingestEvent = (event: AgentRunEvent) => {
 		state = foldAgentRunEvent(state, event);
@@ -32,6 +50,8 @@
 				status: state.runStatus
 			});
 		}
+
+		emitTranscript();
 	};
 
 	const handleMessage = (event: Event) => {
@@ -109,4 +129,4 @@
 		source?.close();
 		dispatch('terminal', { agentRunId, runStatus: state.runStatus });
 	}
-</script>
+</script></script>

@@ -101,6 +101,123 @@ export type AgentRunEventViewItem = {
 	createdAt: number;
 };
 
+export type AgentTextBlockKind = 'assistant_note' | 'action_summary' | 'legacy';
+
+export type AgentRunTextBlock = {
+	id: string;
+	kind: AgentTextBlockKind;
+	participantId: string | null;
+	phase: string | null;
+	text: string;
+	status: 'running' | 'done';
+	firstSeq: number;
+	lastSeq: number;
+	createdAt: number;
+};
+
+export type AgentTranscriptToolStatus = 'running' | 'done' | 'error';
+
+export type AgentTranscriptApprovalStatus = 'pending' | 'approved' | 'rejected';
+
+export type AgentTranscriptPartBase = {
+	seq: number;
+	createdAt: number;
+	participantId: string | null;
+	phase: string | null;
+	/** Whether the part should render expanded by default in the UI. */
+	defaultExpanded: boolean;
+};
+
+export type AgentTranscriptTextPart = AgentTranscriptPartBase & {
+	kind: 'assistant_note' | 'action_summary' | 'legacy_note';
+	textKind: AgentTextBlockKind;
+	blockId: string;
+	text: string;
+	status: 'running' | 'done';
+};
+
+export type AgentTranscriptToolPart = AgentTranscriptPartBase & {
+	kind: 'tool';
+	toolCallId: string;
+	toolName: string | null;
+	label: string;
+	status: AgentTranscriptToolStatus;
+	summary: string;
+	metadata: AgentRunEventMetadata[];
+	details: AgentRunEventPayload | null;
+};
+
+export type AgentTranscriptApprovalPart = AgentTranscriptPartBase & {
+	kind: 'approval';
+	approvalId: string;
+	action: string | null;
+	description: string;
+	status: AgentTranscriptApprovalStatus;
+	metadata: AgentRunEventMetadata[];
+	details: AgentRunEventPayload | null;
+};
+
+export type AgentTranscriptArtifactPart = AgentTranscriptPartBase & {
+	kind: 'artifact';
+	artifactId: string;
+	name: string | null;
+	path: string | null;
+	mimeType: string | null;
+	summary: string;
+	details: AgentRunEventPayload | null;
+};
+
+export type AgentTranscriptErrorPart = AgentTranscriptPartBase & {
+	kind: 'error';
+	label: string;
+	summary: string;
+	details: AgentRunEventPayload | null;
+};
+
+export type AgentTranscriptSubagentPart = AgentTranscriptPartBase & {
+	kind: 'subagent';
+	participantName: string | null;
+	label: string;
+	status: 'running' | 'done' | 'error';
+	summary: string;
+	resultSummary: string | null;
+	details: AgentRunEventPayload | null;
+};
+
+export type AgentTranscriptRunPart = AgentTranscriptPartBase & {
+	kind: 'run';
+	label: string;
+	summary: string;
+	runStatus: AgentRunState;
+};
+
+export type AgentTranscriptModelPart =
+	| AgentTranscriptTextPart
+	| AgentTranscriptToolPart
+	| AgentTranscriptApprovalPart
+	| AgentTranscriptArtifactPart
+	| AgentTranscriptErrorPart
+	| AgentTranscriptSubagentPart
+	| AgentTranscriptRunPart;
+
+export type AgentTranscriptSummary = {
+	toolCount: number;
+	artifactCount: number;
+	approvalCount: number;
+	subagentCount: number;
+	hasError: boolean;
+	hasPendingApproval: boolean;
+};
+
+export type AgentTranscriptModel = {
+	runStatus: AgentRunState;
+	isRunning: boolean;
+	isTerminal: boolean;
+	parts: AgentTranscriptModelPart[];
+	final: { content: string; done: boolean } | null;
+	summary: AgentTranscriptSummary;
+};
+
 export type AgentRunEventState = {
 	items: AgentRunEventViewItem[];
 	lastSeq: number;
@@ -118,6 +235,21 @@ export type AgentRunEventState = {
 			deltaIndex: number;
 			text: string;
 			seq: number;
+		}
+	>;
+	textBlocks: AgentRunTextBlock[];
+	seenTextDeltaKeys: Set<string>;
+	textDeltaChunks: Map<
+		string,
+		{
+			blockId: string;
+			deltaIndex: number;
+			text: string;
+			seq: number;
+			kind: AgentTextBlockKind;
+			participantId: string | null;
+			phase: string | null;
+			createdAt: number;
 		}
 	>;
 };

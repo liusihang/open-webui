@@ -132,7 +132,7 @@ describe('foldAgentRunEvents', () => {
 		expect(state.items.map((item) => item.eventType)).toEqual(['final.started', 'final.delta']);
 	});
 
-	it('accumulates text.delta chunks into finalText using event sequence order', () => {
+	it('channels text.delta into textBlocks and never into finalText', () => {
 		let state = createAgentRunEventState();
 
 		state = foldAgentRunEvent(
@@ -144,7 +144,12 @@ describe('foldAgentRunEvents', () => {
 			agentRunEventFixture({
 				seq: 2,
 				event_type: 'text.delta',
-				payload: { block_id: 'z-first', delta_index: 0, delta: 'Hello ' },
+				payload: {
+					block_id: 'z-first',
+					delta_index: 0,
+					delta: 'Hello ',
+					block_kind: 'assistant_note'
+				},
 				phase: 'running'
 			})
 		);
@@ -162,14 +167,125 @@ describe('foldAgentRunEvents', () => {
 			agentRunEventFixture({
 				seq: 4,
 				event_type: 'text.delta',
-				payload: { block_id: 'a-second', delta_index: 0, delta: 'world' },
+				payload: {
+					block_id: 'a-second',
+					delta_index: 0,
+					delta: 'world',
+					block_kind: 'action_summary'
+				},
 				phase: 'running'
 			})
 		);
 
-		expect(state.finalText).toBe('Hello world');
+		expect(state.finalText).toBe('');
 		expect(state.items.map((item) => item.eventType)).toEqual(['run.running', 'tool.requested']);
 		expect(state.runStatus).toBe('running');
+
+		expect(state.textBlocks.map((block) => ({ id: block.id, kind: block.kind, text: block.text }))).toEqual([
+			{ id: 'z-first', kind: 'assistant_note', text: 'Hello ' },
+			{ id: 'a-second', kind: 'action_summary', text: 'world' }
+		]);
+	});
+
+	it('accumulates text.delta chunks per block using delta_index order and dedupes replays', () => {
+		let state = createAgentRunEventState();
+
+		state = foldAgentRunEvent(
+			state,
+			agentRunEventFixture({
+				seq: 1,
+				event_type: 'text.delta',
+				payload: {
+					block_id: 'block-1',
+					delta_index: 0,
+					delta: 'Hello ',
+					block_kind: 'assistant_note'
+				}
+			})
+		);
+		state = foldAgentRunEvent(
+			state,
+			agentRunEventFixture({
+				seq: 2,
+				event_type: 'text.delta',
+				payload: {
+					block_id: 'block-1',
+					delta_index: 1,
+					delta: 'world',
+					block_kind: 'assistant_note'
+				}
+			})
+		);
+		state = foldAgentRunEvent(
+			state,
+			agentRunEventFixture({
+				seq: 2,
+				event_type: 'text.delta',
+				payload: {
+					block_id: 'block-1',
+					delta_index: 1,
+					delta: 'world',
+					block_kind: 'assistant_note'
+				}
+			})
+		);
+
+		expect(state.textBlocks).toHaveLength(1);
+		expect(state.textBlocks[0].text).toBe('Hello world');
+		expect(state.textBlocks[0].status).toBe('running');
+		expect(state.finalText).toBe('');
+	});
+
+	it('treats text.delta without block_kind as legacy transcript block but still keeps it out of finalText', () => {
+		let state = createAgentRunEventState();
+
+		state = foldAgentRunEvent(
+			state,
+			agentRunEventFixture({
+				seq: 1,
+				event_type: 'text.delta',
+				payload: { block_id: 'legacy-1', delta_index: 0, delta: 'legacy note' }
+			})
+		);
+
+		expect(state.finalText).toBe('');
+		expect(state.textBlocks).toHaveLength(1);
+		expect(state.textBlocks[0].kind).toBe('legacy');
+		expect(state.textBlocks[0].text).toBe('legacy note');
+	});
+
+	it('strips unsafe reasoning/private fields from text.delta payloads before they enter transcript state', () => {
+		let state = createAgentRunEventState();
+
+		state = foldAgentRunEvent(
+			state,
+			agentRunEventFixture({
+				seq: 1,
+				event_type: 'text.delta',
+				payload: {
+					block_id: 'block-1',
+					delta_index: 0,
+					delta: 'visible summary',
+					block_kind: 'assistant_note',
+					chain_of_thought: 'hidden chain',
+					raw_reasoning: 'hidden raw',
+					reasoning: 'hidden reasoning',
+					thought: 'hidden thought',
+					private: 'hidden private',
+					raw: { massive: 'hidden payload' },
+					nested: { chain_of_thought: 'hidden nested' }
+				}
+			})
+		);
+
+		expect(state.textBlocks[0].text).toBe('visible summary');
+		const serialized = JSON.stringify(state);
+		expect(serialized).not.toContain('hidden');
+		expect(serialized).not.toContain('chain_of_thought');
+		expect(serialized).not.toContain('reasoning');
+		expect(serialized).not.toContain('thought');
+		expect(serialized).not.toContain('private');
+		expect(serialized).not.toContain('raw_reasoning');
 	});
 
 	it('surfaces concise details and strips raw reasoning fields', () => {

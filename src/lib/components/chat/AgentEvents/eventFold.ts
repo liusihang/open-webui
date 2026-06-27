@@ -5,7 +5,8 @@ import type {
 	AgentRunEventPayload,
 	AgentRunEventState,
 	AgentRunEventType,
-	AgentRunEventViewItem
+	AgentRunEventViewItem,
+	AgentTextBlockKind
 } from './types';
 
 const STRIPPED_DETAIL_KEYS = new Set([
@@ -43,7 +44,10 @@ export const createAgentRunEventState = (): AgentRunEventState => ({
 	finalStarted: false,
 	seenSeqs: new Set(),
 	seenFinalDeltaKeys: new Set(),
-	finalDeltaChunks: new Map()
+	finalDeltaChunks: new Map(),
+	textBlocks: [],
+	seenTextDeltaKeys: new Set(),
+	textDeltaChunks: new Map()
 });
 
 export const foldAgentRunEvents = (events: AgentRunEvent[]): AgentRunEventState => {
@@ -70,7 +74,10 @@ export const foldAgentRunEvent = (
 		finalStarted: state.finalStarted || event.event_type === 'final.started',
 		seenSeqs: new Set(state.seenSeqs).add(event.seq),
 		seenFinalDeltaKeys: new Set(state.seenFinalDeltaKeys),
-		finalDeltaChunks: new Map(state.finalDeltaChunks)
+		finalDeltaChunks: new Map(state.finalDeltaChunks),
+		textBlocks: [...state.textBlocks],
+		seenTextDeltaKeys: new Set(state.seenTextDeltaKeys),
+		textDeltaChunks: new Map(state.textDeltaChunks)
 	};
 
 	const nextRunStatus = getRunStatusForEvent(event.event_type);
@@ -89,7 +96,7 @@ export const foldAgentRunEvent = (
 			nextState.seenFinalDeltaKeys.add(deltaKey);
 			nextState.finalDeltaChunks.set(deltaKey, {
 				streamId: getFinalStreamId(event),
-				deltaIndex: getFinalDeltaIndex(event),
+				deltaIndex: getDeltaIndex(event),
 				text: getFinalDeltaText(event),
 				seq: event.seq
 			});
@@ -101,21 +108,33 @@ export const foldAgentRunEvent = (
 	}
 
 	if (event.event_type === 'text.delta') {
-		const deltaKey = getTextDeltaKey(event);
-		if (!deltaKey) {
+		const blockId = getTextStreamId(event);
+		if (!blockId) {
 			return nextState;
 		}
 
-		if (!nextState.seenFinalDeltaKeys.has(deltaKey)) {
-			nextState.seenFinalDeltaKeys.add(deltaKey);
-			nextState.finalDeltaChunks.set(deltaKey, {
-				streamId: getTextStreamId(event),
-				deltaIndex: getFinalDeltaIndex(event),
-				text: getFinalDeltaText(event),
-				seq: event.seq
-			});
-			nextState.finalText = buildFinalText(nextState.finalDeltaChunks);
+		const deltaKey = getTextDeltaKey(event, blockId);
+		if (deltaKey && nextState.seenTextDeltaKeys.has(deltaKey)) {
+			return nextState;
 		}
+
+		if (deltaKey) {
+			nextState.seenTextDeltaKeys.add(deltaKey);
+		}
+
+		const kind = resolveTextBlockKind(event);
+		const deltaText = getTextDeltaText(event);
+		nextState.textDeltaChunks.set(`${blockId}:${getDeltaIndex(event)}`, {
+			blockId,
+			deltaIndex: getDeltaIndex(event),
+			text: deltaText,
+			seq: event.seq,
+			kind,
+			participantId: event.participant_id ?? null,
+			phase: event.phase ?? null,
+			createdAt: event.created_at
+		});
+		nextState.textBlocks = rebuildTextBlocks(nextState.textDeltaChunks);
 
 		return nextState;
 	}
@@ -450,20 +469,18 @@ const getFinalDeltaText = (event: AgentRunEvent): string => {
 	return getString(event.payload.delta ?? event.payload.text ?? event.summary) ?? '';
 };
 
+const getTextDeltaText = (event: AgentRunEvent): string => {
+	return getString(event.payload.delta ?? event.payload.text ?? event.summary) ?? '';
+};
+
 const getFinalDeltaKey = (event: AgentRunEvent): string => {
 	const streamId = getFinalStreamId(event);
-	const deltaIndex = getString(event.payload.delta_index) ?? `${event.seq}`;
+	const deltaIndex = getDeltaIndex(event);
 	return `${streamId}:${deltaIndex}`;
 };
 
-const getTextDeltaKey = (event: AgentRunEvent): string | null => {
-	const streamId = getTextStreamId(event);
-	if (!streamId) {
-		return null;
-	}
-
-	const deltaIndex = getString(event.payload.delta_index) ?? `${event.seq}`;
-	return `${streamId}:${deltaIndex}`;
+const getTextDeltaKey = (event: AgentRunEvent, blockId: string): string => {
+	return `${blockId}:${getDeltaIndex(event)}`;
 };
 
 const getFinalStreamId = (event: AgentRunEvent): string => {
@@ -474,7 +491,7 @@ const getTextStreamId = (event: AgentRunEvent): string | null => {
 	return getString(event.payload.block_id ?? event.payload.blockId);
 };
 
-const getFinalDeltaIndex = (event: AgentRunEvent): number => {
+const getDeltaIndex = (event: AgentRunEvent): number => {
 	const value = event.payload.delta_index;
 	if (typeof value === 'number' && Number.isFinite(value)) {
 		return value;
@@ -488,6 +505,16 @@ const getFinalDeltaIndex = (event: AgentRunEvent): number => {
 	}
 
 	return event.seq;
+};
+
+const TEXT_BLOCK_KINDS = new Set<AgentTextBlockKind>(['assistant_note', 'action_summary']);
+
+const resolveTextBlockKind = (event: AgentRunEvent): AgentTextBlockKind => {
+	const raw = event.payload.block_kind ?? event.payload.blockKind;
+	const value = typeof raw === 'string' ? raw.toLowerCase() : '';
+	return TEXT_BLOCK_KINDS.has(value as AgentTextBlockKind)
+		? (value as AgentTextBlockKind)
+		: 'legacy';
 };
 
 const buildFinalText = (chunks: AgentRunEventState['finalDeltaChunks']): string => {
@@ -505,6 +532,78 @@ const buildFinalText = (chunks: AgentRunEventState['finalDeltaChunks']): string 
 		})
 		.map((chunk) => chunk.text)
 		.join('');
+};
+
+const rebuildTextBlocks = (
+	chunks: AgentRunEventState['textDeltaChunks']
+): AgentRunEventState['textBlocks'] => {
+	const byBlock = new Map<
+		string,
+		{
+			blockId: string;
+			kind: AgentTextBlockKind;
+			participantId: string | null;
+			phase: string | null;
+			chunks: { text: string; deltaIndex: number; seq: number; createdAt: number }[];
+		}
+	>();
+
+	for (const chunk of chunks.values()) {
+		const existing = byBlock.get(chunk.blockId);
+		if (!existing) {
+			byBlock.set(chunk.blockId, {
+				blockId: chunk.blockId,
+				kind: chunk.kind,
+				participantId: chunk.participantId,
+				phase: chunk.phase,
+				chunks: [
+					{
+						text: chunk.text,
+						deltaIndex: chunk.deltaIndex,
+						seq: chunk.seq,
+						createdAt: chunk.createdAt
+					}
+				]
+			});
+			continue;
+		}
+
+		existing.chunks.push({
+			text: chunk.text,
+			deltaIndex: chunk.deltaIndex,
+			seq: chunk.seq,
+			createdAt: chunk.createdAt
+		});
+	}
+
+	return [...byBlock.values()]
+		.map((entry) => {
+			const ordered = [...entry.chunks].sort((a, b) => {
+				if (a.deltaIndex === b.deltaIndex) {
+					return a.seq - b.seq;
+				}
+				return a.deltaIndex - b.deltaIndex;
+			});
+			const first = ordered[0];
+			const last = ordered[ordered.length - 1];
+			return {
+				id: entry.blockId,
+				kind: entry.kind,
+				participantId: entry.participantId,
+				phase: entry.phase,
+				text: ordered.map((chunk) => chunk.text).join(''),
+				status: 'running' as const,
+				firstSeq: first.seq,
+				lastSeq: last.seq,
+				createdAt: first.createdAt
+			};
+		})
+		.sort((a, b) => {
+			if (a.firstSeq === b.firstSeq) {
+				return a.id.localeCompare(b.id);
+			}
+			return a.firstSeq - b.firstSeq;
+		});
 };
 
 const getString = (value: unknown): string | null => {
