@@ -18,7 +18,6 @@ from agentscope.model import ChatModelBase, ChatResponse
 from agentscope.permission import PermissionBehavior, PermissionContext, PermissionDecision
 from agentscope.tool import ToolBase, ToolChunk
 
-
 OPENWEBUI_SUBAGENT_SYSTEM_PROMPT = """You are {member_name}, an OpenWebUI-governed \
 subagent in team '{team_name}' led by {leader_name}.
 
@@ -64,8 +63,7 @@ class OpenWebUIBridgeCallbacks(Protocol):
         payload: dict[str, Any] | None = None,
         participant_id: str | None = None,
         phase: str | None = None,
-    ) -> dict[str, Any]:
-        ...
+    ) -> dict[str, Any]: ...
 
     async def append_text_delta(
         self,
@@ -79,8 +77,7 @@ class OpenWebUIBridgeCallbacks(Protocol):
         participant_id: str | None = None,
         phase: str | None = None,
         payload: dict[str, Any] | None = None,
-    ) -> dict[str, Any]:
-        ...
+    ) -> dict[str, Any]: ...
 
     async def call_model(
         self,
@@ -96,8 +93,7 @@ class OpenWebUIBridgeCallbacks(Protocol):
         tools: list[dict[str, Any]] | None = None,
         tool_choice: Any | None = None,
         metadata: dict[str, Any],
-    ) -> dict[str, Any]:
-        ...
+    ) -> dict[str, Any]: ...
 
     async def call_tool(
         self,
@@ -108,8 +104,7 @@ class OpenWebUIBridgeCallbacks(Protocol):
         tool_call_id: str,
         tool_id: str,
         arguments: dict[str, Any],
-    ) -> dict[str, Any]:
-        ...
+    ) -> dict[str, Any]: ...
 
 
 @dataclass(frozen=True)
@@ -126,8 +121,7 @@ def verify_agentscope_runtime_apis() -> AgentScopeAPISurfaces:
     missing_fields = required_template_fields - set(SubAgentTemplate.model_fields)
     if missing_fields:
         raise RuntimeError(
-            "AgentScope SubAgentTemplate API drifted; missing fields: "
-            + ", ".join(sorted(missing_fields))
+            "AgentScope SubAgentTemplate API drifted; missing fields: " + ", ".join(sorted(missing_fields))
         )
 
     if not hasattr(ChatModelBase, "_call_api"):
@@ -374,6 +368,7 @@ class OpenWebUIToolProxy(ToolBase):
         description: str,
         input_schema: dict[str, Any],
         callback_client: OpenWebUIBridgeCallbacks,
+        allocate_tool_call_id: Callable[[], str],
     ) -> None:
         self.run_id = run_id
         self.runtime_session_id = runtime_session_id
@@ -383,7 +378,7 @@ class OpenWebUIToolProxy(ToolBase):
         self.description = description
         self.input_schema = input_schema
         self.callback_client = callback_client
-        self._next_tool_call_index = 1
+        self._allocate_tool_call_id = allocate_tool_call_id
 
     async def check_permissions(
         self,
@@ -490,11 +485,6 @@ class OpenWebUIToolProxy(ToolBase):
             },
         )
 
-    def _allocate_tool_call_id(self) -> str:
-        tool_call_id = f"tool-call-{self._next_tool_call_index}"
-        self._next_tool_call_index += 1
-        return tool_call_id
-
 
 class AgentScopeRuntimeBridge:
     def __init__(
@@ -509,6 +499,7 @@ class AgentScopeRuntimeBridge:
         self.runtime_session_id = runtime_session_id
         self.callback_client = callback_client
         self._final_text_by_participant: dict[str, str] = {}
+        self._next_tool_call_index = 1
 
     def build_subagent_template(
         self,
@@ -562,7 +553,13 @@ class AgentScopeRuntimeBridge:
             description=description,
             input_schema=input_schema,
             callback_client=self.callback_client,
+            allocate_tool_call_id=self._allocate_tool_call_id,
         )
+
+    def _allocate_tool_call_id(self) -> str:
+        tool_call_id = f"tool-call-{self._next_tool_call_index}"
+        self._next_tool_call_index += 1
+        return tool_call_id
 
 
 def _extract_model_text(response: dict[str, Any]) -> str:

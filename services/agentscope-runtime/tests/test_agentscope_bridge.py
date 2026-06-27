@@ -1,3 +1,4 @@
+import asyncio
 import inspect
 
 import pytest
@@ -170,9 +171,7 @@ def test_verified_agentscope_api_surfaces_are_importable_and_stable() -> None:
     assert surfaces.tool_base_cls is ToolBase
     assert surfaces.tool_chunk_cls is ToolChunk
     assert "model_name" in inspect.signature(ChatModelBase._call_api).parameters
-    assert {"type", "description", "system_prompt_template"} <= set(
-        SubAgentTemplate.model_fields
-    )
+    assert {"type", "description", "system_prompt_template"} <= set(SubAgentTemplate.model_fields)
 
 
 @pytest.mark.asyncio
@@ -221,9 +220,7 @@ async def test_bridge_builds_agentscope_template_model_and_tool_callback_boundar
     assert isinstance(response, ChatResponse)
     assert response.content[0].text == "callback answer"
     assert response.is_last is True
-    assert callbacks.model_calls[0]["idempotency_key"] == (
-        "model:subagent:run-bridge:1:model-call-1:1"
-    )
+    assert callbacks.model_calls[0]["idempotency_key"] == ("model:subagent:run-bridge:1:model-call-1:1")
     assert callbacks.model_calls[0]["model"] == "model-research"
     assert callbacks.model_calls[0]["messages"][0]["role"] == "user"
     assert callbacks.model_calls[0]["params"] == {"temperature": 0.2}
@@ -246,9 +243,7 @@ async def test_bridge_builds_agentscope_template_model_and_tool_callback_boundar
     assert isinstance(tool_chunk, ToolChunk)
     assert tool_chunk.state == ToolResultState.SUCCESS
     assert tool_chunk.content[0].text == "tool callback answer"
-    assert callbacks.tool_calls[0]["idempotency_key"] == (
-        "tool:subagent:run-bridge:1:tool-call-1:1"
-    )
+    assert callbacks.tool_calls[0]["idempotency_key"] == ("tool:subagent:run-bridge:1:tool-call-1:1")
     assert callbacks.tool_calls[0]["arguments"] == {"query": "agent mode"}
 
 
@@ -306,9 +301,7 @@ async def test_model_bridge_preserves_openwebui_tool_calls_as_agentscope_blocks(
 
     assert response is not None
     tool_calls = [block for block in response.content if isinstance(block, ToolCallBlock)]
-    assert callbacks.model_calls[0]["messages"] == [
-        {"role": "user", "content": "Search for agent mode."}
-    ]
+    assert callbacks.model_calls[0]["messages"] == [{"role": "user", "content": "Search for agent mode."}]
     assert len(tool_calls) == 1
     assert tool_calls[0].id == "call_search_1"
     assert tool_calls[0].name == "search_web"
@@ -350,3 +343,36 @@ async def test_model_bridge_passes_tools_and_tool_choice_as_top_level_callback_f
     assert callbacks.model_calls[0]["tools"] == tools
     assert callbacks.model_calls[0]["tool_choice"] == "auto"
     assert callbacks.model_calls[0]["params"] == {"temperature": 0.2}
+
+
+@pytest.mark.asyncio
+async def test_bridge_allocates_unique_tool_call_ids_across_different_tools() -> None:
+    from agentscope_runtime.agentscope_bridge import AgentScopeRuntimeBridge
+
+    callbacks = RecordingBridgeCallbacks()
+    bridge = AgentScopeRuntimeBridge(
+        run_id="run-parallel-tools",
+        runtime_session_id="rt-run-parallel-tools",
+        callback_client=callbacks,
+    )
+    health = bridge.build_tool_proxy(
+        participant_id="leader",
+        tool_id="tool:terminal:terminals:health_check",
+        name="health_check",
+        description="Returns service status.",
+        input_schema={"type": "object", "properties": {}},
+    )
+    timestamp = bridge.build_tool_proxy(
+        participant_id="leader",
+        tool_id="tool:builtin:get_current_timestamp:get_current_timestamp",
+        name="get_current_timestamp",
+        description="Get current timestamp.",
+        input_schema={"type": "object", "properties": {}},
+    )
+
+    await asyncio.gather(health(), timestamp())
+
+    tool_call_ids = [call["tool_call_id"] for call in callbacks.tool_calls]
+    idempotency_keys = [call["idempotency_key"] for call in callbacks.tool_calls]
+    assert len(set(tool_call_ids)) == 2
+    assert len(set(idempotency_keys)) == 2

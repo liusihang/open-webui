@@ -11,6 +11,7 @@ from typing import Any, Protocol
 from fastapi import Depends, FastAPI, Header, HTTPException, status
 
 from agentscope.agent import Agent, ReActConfig
+from agentscope.event import TextBlockDeltaEvent
 from agentscope.message import Msg, TextBlock, ToolResultState, UserMsg
 from agentscope.permission import PermissionBehavior, PermissionContext, PermissionDecision
 from agentscope.tool import ToolBase, ToolChunk, Toolkit
@@ -33,9 +34,8 @@ logger = logging.getLogger(__name__)
 
 MODEL_CALL_QUEUED_RETRY_ATTEMPTS = 3
 MODEL_CALL_QUEUED_RETRY_DELAY_SECONDS = 0.05
-PROVIDER_CONFIGURATION_UNAVAILABLE_SUMMARY = (
-    "The selected model provider is not available for this Agent Mode run."
-)
+FINAL_DELTA_CHUNK_CHARS = int(os.getenv("AGENT_RUNTIME_FINAL_DELTA_CHUNK_CHARS", "32"))
+PROVIDER_CONFIGURATION_UNAVAILABLE_SUMMARY = "The selected model provider is not available for this Agent Mode run."
 
 
 class ProviderConfigurationUnavailable(RuntimeError):
@@ -54,8 +54,7 @@ class RuntimeCallbackClient(Protocol):
         payload: dict[str, Any] | None = None,
         participant_id: str | None = None,
         phase: str | None = None,
-    ) -> dict[str, Any]:
-        ...
+    ) -> dict[str, Any]: ...
 
     async def append_text_delta(
         self,
@@ -69,8 +68,7 @@ class RuntimeCallbackClient(Protocol):
         participant_id: str | None = None,
         phase: str | None = None,
         payload: dict[str, Any] | None = None,
-    ) -> dict[str, Any]:
-        ...
+    ) -> dict[str, Any]: ...
 
     async def append_final_delta(
         self,
@@ -82,8 +80,7 @@ class RuntimeCallbackClient(Protocol):
         delta: str,
         participant_id: str | None = None,
         payload: dict[str, Any] | None = None,
-    ) -> dict[str, Any]:
-        ...
+    ) -> dict[str, Any]: ...
 
     async def call_model(
         self,
@@ -99,8 +96,7 @@ class RuntimeCallbackClient(Protocol):
         tools: list[dict[str, Any]] | None = None,
         tool_choice: Any | None = None,
         metadata: dict[str, Any],
-    ) -> dict[str, Any]:
-        ...
+    ) -> dict[str, Any]: ...
 
     async def call_tool(
         self,
@@ -111,8 +107,7 @@ class RuntimeCallbackClient(Protocol):
         tool_call_id: str,
         tool_id: str,
         arguments: dict[str, Any],
-    ) -> dict[str, Any]:
-        ...
+    ) -> dict[str, Any]: ...
 
     async def register_subagent(
         self,
@@ -126,8 +121,7 @@ class RuntimeCallbackClient(Protocol):
         task: str,
         budget: dict[str, Any],
         metadata: dict[str, Any],
-    ) -> dict[str, Any]:
-        ...
+    ) -> dict[str, Any]: ...
 
     async def select_model(
         self,
@@ -139,8 +133,7 @@ class RuntimeCallbackClient(Protocol):
         requested_model_id: str | None = None,
         fuzzy_request: str | None = None,
         source_request: dict[str, Any] | None = None,
-    ) -> dict[str, Any]:
-        ...
+    ) -> dict[str, Any]: ...
 
     async def transition_state(
         self,
@@ -151,8 +144,7 @@ class RuntimeCallbackClient(Protocol):
         to_state: str,
         reason: str,
         payload: dict[str, Any] | None = None,
-    ) -> dict[str, Any]:
-        ...
+    ) -> dict[str, Any]: ...
 
 
 @dataclass
@@ -165,6 +157,13 @@ class RuntimeSession:
     request: RunStartRequest | None = None
     created_at: float = field(default_factory=time.time)
     updated_at: float = field(default_factory=time.time)
+
+
+@dataclass
+class FinalAnswerStreamResult:
+    final_msg: Any | None = None
+    streamed_text: str = ""
+    next_delta_index: int = 0
 
 
 class RuntimeStore:
@@ -391,12 +390,29 @@ async def _finalize_general_agent_run(
             ),
             react_config=ReActConfig(max_iters=_max_iters(request)),
         )
-        reply = await _run_leader_streaming(leader, session, _request_messages_to_msgs(request))
+        stream_result = await _run_leader_streaming(
+            leader,
+            session,
+            _request_messages_to_msgs(request),
+            callback_client=callback_client,
+            payload=payload,
+        )
         if _is_cancelled(session):
             return
-        final_answer = _msg_text(reply) or bridge.latest_final_text(LEADER_PARTICIPANT_ID)
+        final_answer = (
+            _msg_text(stream_result.final_msg)
+            or bridge.latest_final_text(LEADER_PARTICIPANT_ID)
+            or stream_result.streamed_text
+        )
         stage = "emit-final-answer"
-        await _emit_final_answer(callback_client, session, final_answer, payload)
+        await _emit_final_answer(
+            callback_client,
+            session,
+            final_answer,
+            payload,
+            already_emitted_text=stream_result.streamed_text,
+            next_delta_index=stream_result.next_delta_index,
+        )
     except OpenWebUIToolApprovalRequired:
         session.state = "waiting_approval"
         session.updated_at = time.time()
@@ -425,6 +441,9 @@ async def _emit_final_answer(
     session: RuntimeSession,
     answer: str,
     payload: dict[str, Any],
+    *,
+    already_emitted_text: str = "",
+    next_delta_index: int = 0,
 ) -> None:
     """Drive the run to terminal state.
 
@@ -434,6 +453,26 @@ async def _emit_final_answer(
     transcript text, if any, must use text.delta separately and never carries
     raw provider chunks.
     """
+    if session.state != "finalizing":
+        await _start_final_answer_phase(callback_client, session, payload)
+        if _is_cancelled(session):
+            return
+
+    remaining_answer = _remaining_final_answer(answer, already_emitted_text)
+    for index, chunk in enumerate(_final_delta_chunks(remaining_answer), start=next_delta_index):
+        await _append_final_answer_delta(callback_client, session, payload, index, chunk)
+        if _is_cancelled(session):
+            return
+    await _complete_final_answer_phase(callback_client, session, payload)
+
+
+async def _start_final_answer_phase(
+    callback_client: RuntimeCallbackClient,
+    session: RuntimeSession,
+    payload: dict[str, Any],
+) -> None:
+    if session.state == "finalizing":
+        return
     await callback_client.transition_state(
         run_id=session.run_id,
         idempotency_key=f"state:{session.run_id}:finalizing",
@@ -456,20 +495,32 @@ async def _emit_final_answer(
         participant_id="leader",
         phase="finalizing",
     )
-    if _is_cancelled(session):
-        return
-    if answer:
-        await callback_client.append_final_delta(
-            run_id=session.run_id,
-            idempotency_key=f"final:{session.run_id}:answer:0",
-            final_stream_id="answer",
-            delta_index=0,
-            delta=answer,
-            participant_id="leader",
-            payload=payload,
-        )
-    if _is_cancelled(session):
-        return
+
+
+async def _append_final_answer_delta(
+    callback_client: RuntimeCallbackClient,
+    session: RuntimeSession,
+    payload: dict[str, Any],
+    delta_index: int,
+    delta: str,
+) -> None:
+    await callback_client.append_final_delta(
+        run_id=session.run_id,
+        idempotency_key=f"final:{session.run_id}:answer:{delta_index}",
+        final_stream_id="answer",
+        delta_index=delta_index,
+        delta=delta,
+        participant_id="leader",
+        payload=payload,
+    )
+    await asyncio.sleep(0)
+
+
+async def _complete_final_answer_phase(
+    callback_client: RuntimeCallbackClient,
+    session: RuntimeSession,
+    payload: dict[str, Any],
+) -> None:
     await callback_client.transition_state(
         run_id=session.run_id,
         idempotency_key=f"state:{session.run_id}:completed",
@@ -493,25 +544,80 @@ async def _emit_final_answer(
     session.updated_at = time.time()
 
 
-async def _run_leader_streaming(leader, session, messages):
+def _remaining_final_answer(answer: str, already_emitted_text: str) -> str:
+    if not already_emitted_text:
+        return answer
+    if answer.startswith(already_emitted_text):
+        return answer[len(already_emitted_text) :]
+    logger.warning(
+        "Runtime streamed final prefix did not match completed final answer; "
+        "suppressing duplicate final replay for run answer mismatch",
+    )
+    return ""
+
+
+def _final_delta_chunks(answer: str) -> list[str]:
+    if not answer:
+        return []
+    chunk_size = max(1, FINAL_DELTA_CHUNK_CHARS)
+    return [answer[index : index + chunk_size] for index in range(0, len(answer), chunk_size)]
+
+
+async def _run_leader_streaming(
+    leader,
+    session: RuntimeSession,
+    messages: list[Msg],
+    *,
+    callback_client: RuntimeCallbackClient | None = None,
+    payload: dict[str, Any] | None = None,
+) -> FinalAnswerStreamResult:
     """Consume leader.reply_stream() events.
 
-    The bridge's OpenWebUIAgentScopeModel._call_api already pushes
-    text.delta callbacks while consuming the provider stream, and
-    OpenWebUIToolProxy.__call__ already emits tool.requested/completed.
-    So we only need to consume the stream to drive the ReAct loop
-    forward and capture the final AssistantMsg for fallback text
-    extraction.
+    TextBlockDeltaEvent carries provider chunks produced by the leader model.
+    When a final-answer chunk arrives, start the final phase and forward it as
+    final.delta so the user sees the answer grow while the model is generating.
+    Tool and transcript events keep using their existing callback paths.
     """
     final_msg = None
+    streamed_parts: list[str] = []
+    next_delta_index = 0
     async for event in leader.reply_stream(messages):
         if _is_cancelled(session):
-            return final_msg
-        # AssistantMsg is the terminal event carrying the final content
-        # blocks. Save it for fallback text extraction.
+            return FinalAnswerStreamResult(
+                final_msg=final_msg,
+                streamed_text="".join(streamed_parts),
+                next_delta_index=next_delta_index,
+            )
+        if (
+            callback_client is not None
+            and payload is not None
+            and isinstance(event, TextBlockDeltaEvent)
+            and event.delta
+        ):
+            if session.state != "finalizing":
+                await _start_final_answer_phase(callback_client, session, payload)
+            if _is_cancelled(session):
+                return FinalAnswerStreamResult(
+                    final_msg=final_msg,
+                    streamed_text="".join(streamed_parts),
+                    next_delta_index=next_delta_index,
+                )
+            await _append_final_answer_delta(
+                callback_client,
+                session,
+                payload,
+                next_delta_index,
+                event.delta,
+            )
+            streamed_parts.append(event.delta)
+            next_delta_index += 1
         if _msg_text(event):
             final_msg = event
-    return final_msg
+    return FinalAnswerStreamResult(
+        final_msg=final_msg,
+        streamed_text="".join(streamed_parts),
+        next_delta_index=next_delta_index,
+    )
 
 
 def _should_use_general_agent(request: RunStartRequest) -> bool:
