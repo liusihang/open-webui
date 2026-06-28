@@ -7,6 +7,7 @@ from open_webui.agent.events import (
     TextDeltaRejected,
     append_agent_event,
     append_final_delta,
+    append_final_delta_async,
     append_text_delta,
     format_sse_event,
     list_events_for_reconnect,
@@ -189,6 +190,128 @@ def test_final_delta_duplicates_are_idempotent_and_gaps_are_rejected():
                 final_stream_id='answer',
                 delta_index=2,
                 delta='lo',
+            ),
+        )
+
+
+@pytest.mark.asyncio
+async def test_async_final_delta_fast_path_preserves_text_and_avoids_full_event_scans():
+    class AsyncFastPathStore:
+        def __init__(self):
+            self.events = [
+                AgentRunEvent(
+                    run_id='run-1',
+                    seq=1,
+                    event_type=AgentEventType.FINAL_STARTED,
+                    participant_id='leader',
+                    phase='finalizing',
+                    summary='Final answer phase',
+                    payload={},
+                    created_at=1_718_000_000_001,
+                )
+            ]
+            self.final_text = ''
+            self.seen: set[int] = set()
+
+        async def get_run_state(self, run_id: str):
+            return AgentRunState.FINALIZING
+
+        async def has_final_started(self, run_id: str):
+            return True
+
+        async def list_events_after(self, run_id: str, after_seq: int = 0):
+            raise AssertionError('append_final_delta_async should use append_final_delta_event fast path')
+
+        async def append_final_text_delta(self, *args, **kwargs):
+            raise AssertionError('append_final_delta_async should not split text and event writes')
+
+        async def append_event(self, *args, **kwargs):
+            raise AssertionError('append_final_delta_async should not append the event separately')
+
+        async def append_final_delta_event(self, delta: FinalDeltaAppend):
+            for event in self.events:
+                if (
+                    event.event_type == AgentEventType.FINAL_DELTA
+                    and event.payload.get('final_stream_id') == delta.final_stream_id
+                    and event.payload.get('delta_index') == delta.delta_index
+                ):
+                    return event
+            expected = len(self.seen)
+            if delta.delta_index != expected:
+                raise ValueError(f'expected delta_index {expected}, got {delta.delta_index}')
+            self.seen.add(delta.delta_index)
+            self.final_text += delta.delta
+            event = AgentRunEvent(
+                run_id=delta.run_id,
+                seq=len(self.events) + 1,
+                event_type=AgentEventType.FINAL_DELTA,
+                participant_id=delta.participant_id,
+                phase=AgentRunState.FINALIZING.value,
+                summary=None,
+                payload={
+                    **delta.payload,
+                    'final_stream_id': delta.final_stream_id,
+                    'delta_index': delta.delta_index,
+                    'delta': delta.delta,
+                    'text': self.final_text,
+                },
+                created_at=1_718_000_000_000 + len(self.events) + 1,
+            )
+            self.events.append(event)
+            return event
+
+    store = AsyncFastPathStore()
+
+    first = await append_final_delta_async(
+        store,
+        FinalDeltaAppend(
+            run_id='run-1',
+            final_stream_id='answer',
+            delta_index=0,
+            delta='hel',
+            participant_id='leader',
+        ),
+    )
+    duplicate = await append_final_delta_async(
+        store,
+        FinalDeltaAppend(
+            run_id='run-1',
+            final_stream_id='answer',
+            delta_index=0,
+            delta='hel',
+            participant_id='leader',
+        ),
+    )
+    second = await append_final_delta_async(
+        store,
+        FinalDeltaAppend(
+            run_id='run-1',
+            final_stream_id='answer',
+            delta_index=1,
+            delta='lo',
+            participant_id='leader',
+        ),
+    )
+
+    assert first.seq == 2
+    assert duplicate.seq == 2
+    assert second.seq == 3
+    assert store.final_text == 'hello'
+    assert second.payload['text'] == 'hello'
+    assert [event.event_type for event in store.events] == [
+        AgentEventType.FINAL_STARTED,
+        AgentEventType.FINAL_DELTA,
+        AgentEventType.FINAL_DELTA,
+    ]
+
+    with pytest.raises(FinalDeltaRejected, match='gap'):
+        await append_final_delta_async(
+            store,
+            FinalDeltaAppend(
+                run_id='run-1',
+                final_stream_id='answer',
+                delta_index=3,
+                delta='!',
             ),
         )
 

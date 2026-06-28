@@ -1,3 +1,4 @@
+import asyncio
 import os
 from contextlib import asynccontextmanager
 from types import SimpleNamespace
@@ -102,7 +103,23 @@ async def test_agent_run_routes_use_agent_runs_db_when_no_fake_event_store(
     with TestClient(app_without_fake_event_store) as client:
         detail = client.get(f'/api/agent/runs/{run.id}')
         events = client.get(f'/api/agent/runs/{run.id}/events/list')
-        stream = client.get(f'/api/agent/runs/{run.id}/events')
+
+    class FakeRequest:
+        app = app_without_fake_event_store
+
+        async def is_disconnected(self):
+            return False
+
+    stream = await agent_runs.stream_agent_run_events(
+        run.id,
+        FakeRequest(),
+        after_seq=0,
+        last_event_id=None,
+        user=SimpleNamespace(id='user-1'),
+    )
+    iterator = stream.body_iterator
+    stream_text = await asyncio.wait_for(anext(iterator), timeout=1)
+    await iterator.aclose()
 
     assert detail.status_code == 200
     assert detail.json()['state'] == 'running'
@@ -111,7 +128,90 @@ async def test_agent_run_routes_use_agent_runs_db_when_no_fake_event_store(
     assert events.json()['last_seq'] == 1
     assert events.json()['events'][0]['event_type'] == 'run.running'
     assert stream.status_code == 200
-    assert 'event: run.running' in stream.text
+    assert 'event: run.running' in stream_text
+
+
+@pytest.mark.asyncio
+async def test_agent_run_events_stream_tails_new_events_until_terminal(
+    monkeypatch,
+    agent_run_db,
+    app_without_fake_event_store,
+):
+    monkeypatch.setattr(agent_runs, 'AGENT_RUN_EVENTS_POLL_SECONDS', 0.01, raising=False)
+    monkeypatch.setattr(agent_runs, 'AGENT_RUN_EVENTS_HEARTBEAT_SECONDS', 60.0, raising=False)
+    run = await AgentRuns.create_run(
+        user_id='user-1',
+        chat_id='chat-1',
+        user_message_id='msg-user',
+        assistant_message_id='msg-assistant',
+        leader_model_id='model-a',
+    )
+    await AgentRuns.transition_state(
+        run.id,
+        from_states=['queued'],
+        to_state='running',
+        reason='runtime accepted',
+    )
+    await AgentRuns.append_event(
+        run.id,
+        event_type='run.running',
+        participant_id='leader',
+        phase='running',
+        summary='Runtime accepted',
+    )
+
+    class FakeRequest:
+        app = app_without_fake_event_store
+
+        async def is_disconnected(self):
+            return False
+
+    response = await agent_runs.stream_agent_run_events(
+        run.id,
+        FakeRequest(),
+        after_seq=1,
+        last_event_id=None,
+        user=SimpleNamespace(id='user-1'),
+    )
+    iterator = response.body_iterator
+    next_chunk = asyncio.create_task(anext(iterator))
+    await asyncio.sleep(0)
+
+    await AgentRuns.append_event(
+        run.id,
+        event_type='action.summary',
+        participant_id='leader',
+        phase='running',
+        summary='Still working',
+    )
+
+    assert 'event: action.summary' in await asyncio.wait_for(next_chunk, timeout=1)
+
+    terminal_chunk = asyncio.create_task(anext(iterator))
+    await asyncio.sleep(0)
+    await AgentRuns.transition_state(
+        run.id,
+        from_states=['running'],
+        to_state='finalizing',
+        reason='runtime closed work',
+    )
+    await AgentRuns.transition_state(
+        run.id,
+        from_states=['finalizing'],
+        to_state='completed',
+        reason='runtime final answer completed',
+    )
+    await AgentRuns.append_event(
+        run.id,
+        event_type='run.completed',
+        participant_id='leader',
+        phase='completed',
+        summary='Agent run completed.',
+    )
+
+    assert 'event: run.completed' in await asyncio.wait_for(terminal_chunk, timeout=1)
+    with pytest.raises(StopAsyncIteration):
+        await asyncio.wait_for(anext(iterator), timeout=1)
 
 
 @pytest.mark.asyncio
@@ -783,12 +883,28 @@ async def test_agent_service_text_delta_writes_to_db_without_final_text_side_eff
 
     with TestClient(app_without_fake_event_store) as client:
         listed = client.get(f'/api/agent/runs/{run.id}/events/list')
-        stream = client.get(f'/api/agent/runs/{run.id}/events')
+
+    class FakeRequest:
+        app = app_without_fake_event_store
+
+        async def is_disconnected(self):
+            return False
+
+    stream = await agent_runs.stream_agent_run_events(
+        run.id,
+        FakeRequest(),
+        after_seq=0,
+        last_event_id=None,
+        user=SimpleNamespace(id='user-1'),
+    )
+    iterator = stream.body_iterator
+    stream_text = await asyncio.wait_for(anext(iterator), timeout=1)
+    await iterator.aclose()
 
     assert listed.status_code == 200
     assert listed.json()['events'][0]['payload']['block_kind'] == 'assistant_note'
     assert stream.status_code == 200
-    assert '"block_kind":"assistant_note"' in stream.text
+    assert '"block_kind":"assistant_note"' in stream_text
 
 
 @pytest.mark.asyncio

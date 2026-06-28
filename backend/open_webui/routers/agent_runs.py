@@ -1,4 +1,7 @@
+import asyncio
 import logging
+import os
+import time
 from typing import Any
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Query, Request, status
@@ -21,6 +24,9 @@ log = logging.getLogger(__name__)
 
 ACTIVE_CANCEL_FROM_STATES = ['queued', 'running', 'waiting_approval', 'finalizing']
 TERMINAL_STATES = {'completed', 'failed', 'cancelled', 'budget_exceeded'}
+TERMINAL_EVENT_TYPES = {'run.completed', 'run.failed', 'run.cancelled', 'run.budget_exceeded'}
+AGENT_RUN_EVENTS_POLL_SECONDS = float(os.getenv('AGENT_RUN_EVENTS_POLL_SECONDS', '0.1'))
+AGENT_RUN_EVENTS_HEARTBEAT_SECONDS = float(os.getenv('AGENT_RUN_EVENTS_HEARTBEAT_SECONDS', '15.0'))
 
 
 def get_configured_agent_event_store(request: Request) -> AgentEventStore | None:
@@ -239,7 +245,32 @@ async def stream_agent_run_events(
         ) from exc
 
     async def event_stream():
-        yield format_sse_backfill(events)
+        current_after_seq = resolved_after_seq
+        last_heartbeat_at = time.monotonic()
+        if events:
+            current_after_seq = events[-1].seq
+            yield format_sse_backfill(events)
+            if _contains_terminal_event(events):
+                return
+
+        while not await request.is_disconnected():
+            await asyncio.sleep(max(0.01, AGENT_RUN_EVENTS_POLL_SECONDS))
+            new_events = await _list_agent_run_events_for_tail(
+                request,
+                store,
+                run_id,
+                after_seq=current_after_seq,
+            )
+            if new_events:
+                current_after_seq = new_events[-1].seq
+                last_heartbeat_at = time.monotonic()
+                yield format_sse_backfill(new_events)
+                if _contains_terminal_event(new_events):
+                    return
+                continue
+            if time.monotonic() - last_heartbeat_at >= AGENT_RUN_EVENTS_HEARTBEAT_SECONDS:
+                last_heartbeat_at = time.monotonic()
+                yield ': keep-alive\n\n'
 
     return StreamingResponse(
         event_stream(),
@@ -248,6 +279,33 @@ async def stream_agent_run_events(
             'Cache-Control': 'no-cache',
             'X-Accel-Buffering': 'no',
         },
+    )
+
+
+async def _list_agent_run_events_for_tail(
+    request: Request,
+    store,
+    run_id: str,
+    *,
+    after_seq: int,
+):
+    if store is not None:
+        return list_events_for_reconnect(
+            store,
+            run_id,
+            after_seq=after_seq,
+        )
+    return await list_events_for_reconnect_async(
+        AgentRuns,
+        run_id,
+        after_seq=after_seq,
+    )
+
+
+def _contains_terminal_event(events) -> bool:
+    return any(
+        str(getattr(event.event_type, 'value', event.event_type)) in TERMINAL_EVENT_TYPES
+        for event in events
     )
 
 

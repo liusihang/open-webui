@@ -559,6 +559,115 @@ class AgentRunTable:
             await db.refresh(row)
             return row.final_text
 
+    async def append_final_delta_event(
+        self,
+        delta,
+        db: AsyncSession | None = None,
+    ) -> AgentRunEventModel:
+        last_integrity_error: IntegrityError | None = None
+        for _attempt in range(EVENT_APPEND_MAX_ATTEMPTS):
+            async with get_async_db_context(db) as db:
+                row = await db.get(AgentRun, delta.run_id)
+                if row is None:
+                    raise AgentRunNotFound(delta.run_id)
+
+                state = dict(row.final_delta_state or {})
+                stream_state = dict(state.get(delta.final_stream_id) or {})
+                seen = {int(index) for index in stream_state.get('seen', [])}
+                event_ids = {
+                    str(index): event_id
+                    for index, event_id in dict(stream_state.get('events') or {}).items()
+                }
+
+                if delta.delta_index in seen:
+                    stored = await self._get_final_delta_event(
+                        db,
+                        delta.run_id,
+                        delta.final_stream_id,
+                        delta.delta_index,
+                        event_id=event_ids.get(str(delta.delta_index)),
+                    )
+                    if stored is None:
+                        raise AgentRunError('final delta text was stored without an event')
+                    return AgentRunEventModel.model_validate(stored)
+
+                expected = len(seen)
+                if delta.delta_index != expected:
+                    raise ValueError(f'expected delta_index {expected}, got {delta.delta_index}')
+
+                result = await db.execute(
+                    select(AgentRunEvent.seq)
+                    .filter_by(run_id=delta.run_id)
+                    .order_by(AgentRunEvent.seq.desc())
+                    .limit(1)
+                )
+                next_seq = (result.scalar() or 0) + 1
+                now = _now_ns()
+                text_after_delta = (row.final_text or '') + delta.delta
+                event = AgentRunEvent(
+                    id=str(uuid4()),
+                    run_id=delta.run_id,
+                    seq=next_seq,
+                    event_type='final.delta',
+                    participant_id=delta.participant_id,
+                    phase=AgentRunState.FINALIZING.value,
+                    summary=None,
+                    payload={
+                        **delta.payload,
+                        'final_stream_id': delta.final_stream_id,
+                        'delta_index': delta.delta_index,
+                        'delta': delta.delta,
+                        'text': text_after_delta,
+                    },
+                    created_at=now,
+                )
+                seen.add(delta.delta_index)
+                event_ids[str(delta.delta_index)] = event.id
+                row.final_text = text_after_delta
+                state[delta.final_stream_id] = {
+                    'seen': sorted(seen),
+                    'events': event_ids,
+                }
+                row.final_delta_state = state
+                row.updated_at = now
+                db.add(event)
+                try:
+                    await db.commit()
+                except IntegrityError as exc:
+                    await db.rollback()
+                    last_integrity_error = exc
+                    continue
+                return AgentRunEventModel.model_validate(event)
+
+        if last_integrity_error is not None:
+            raise last_integrity_error
+        raise AgentRunError(f'Failed to append final delta for agent run {delta.run_id}')
+
+    async def _get_final_delta_event(
+        self,
+        db: AsyncSession,
+        run_id: str,
+        final_stream_id: str,
+        delta_index: int,
+        *,
+        event_id: str | None = None,
+    ) -> AgentRunEvent | None:
+        if event_id is not None:
+            row = await db.get(AgentRunEvent, event_id)
+            if row is not None:
+                return row
+        result = await db.execute(
+            select(AgentRunEvent)
+            .filter(
+                AgentRunEvent.run_id == run_id,
+                AgentRunEvent.event_type == 'final.delta',
+                AgentRunEvent.payload['final_stream_id'].as_string() == final_stream_id,
+                AgentRunEvent.payload['delta_index'].as_integer() == delta_index,
+            )
+            .limit(1)
+        )
+        return result.scalars().first()
+
     async def claim_operation(
         self,
         run_id: str,

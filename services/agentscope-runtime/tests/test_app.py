@@ -5,6 +5,7 @@ from types import SimpleNamespace
 import httpx
 import pytest
 
+import agentscope_runtime.app as runtime_app
 from agentscope_runtime.app import (
     FinalAnswerStreamResult,
     RuntimeSession,
@@ -644,9 +645,11 @@ async def test_emit_final_answer_streams_long_answer_as_ordered_final_deltas() -
 
 
 @pytest.mark.asyncio
-async def test_run_leader_streaming_appends_final_delta_while_reply_stream_is_open() -> None:
+async def test_run_leader_streaming_appends_final_delta_while_reply_stream_is_open(monkeypatch) -> None:
     from agentscope.event import TextBlockDeltaEvent
 
+    monkeypatch.setattr(runtime_app, "FINAL_DELTA_STREAM_CHUNK_CHARS", 6)
+    monkeypatch.setattr(runtime_app, "FINAL_DELTA_STREAM_FLUSH_SECONDS", 999.0)
     openwebui_client = RecordingOpenWebUIClient()
     session = RuntimeSession(
         run_id="run-live-final-stream",
@@ -675,6 +678,89 @@ async def test_run_leader_streaming_appends_final_delta_while_reply_stream_is_op
     assert joined_final_delta_text(openwebui_client) == "alpha beta"
     assert [transition["to_state"] for transition in openwebui_client.state_transitions] == ["finalizing"]
     assert [event["event_type"] for event in openwebui_client.events] == ["final.started"]
+
+
+@pytest.mark.asyncio
+async def test_run_leader_streaming_coalesces_tiny_final_delta_chunks(monkeypatch) -> None:
+    from agentscope.event import TextBlockDeltaEvent
+
+    monkeypatch.setattr(runtime_app, "FINAL_DELTA_STREAM_CHUNK_CHARS", 8, raising=False)
+    monkeypatch.setattr(runtime_app, "FINAL_DELTA_STREAM_FLUSH_SECONDS", 999.0, raising=False)
+    monkeypatch.setattr(runtime_app.time, "monotonic", lambda: 1000.0)
+
+    openwebui_client = RecordingOpenWebUIClient()
+    session = RuntimeSession(
+        run_id="run-coalesced-final-stream",
+        runtime_session_id="rt-run-coalesced-final-stream",
+        state="running",
+    )
+    answer = "abcdefghijklmnopqrst"
+
+    class StreamingLeader:
+        async def reply_stream(self, messages):
+            for char in answer:
+                yield TextBlockDeltaEvent(reply_id="reply-1", block_id="block-1", delta=char)
+
+    result = await _run_leader_streaming(
+        StreamingLeader(),
+        session,
+        [],
+        callback_client=openwebui_client,
+        payload={"runtime_session_id": session.runtime_session_id},
+    )
+
+    assert result.streamed_text == answer
+    assert joined_final_delta_text(openwebui_client) == answer
+    assert [delta["delta"] for delta in openwebui_client.final_deltas] == [
+        "abcdefgh",
+        "ijklmnop",
+        "qrst",
+    ]
+    assert [delta["delta_index"] for delta in openwebui_client.final_deltas] == [0, 1, 2]
+    assert result.next_delta_index == 3
+
+
+@pytest.mark.asyncio
+async def test_run_leader_streaming_flushes_final_delta_after_latency_threshold(monkeypatch) -> None:
+    from agentscope.event import TextBlockDeltaEvent
+
+    now = 2000.0
+
+    def monotonic() -> float:
+        return now
+
+    monkeypatch.setattr(runtime_app, "FINAL_DELTA_STREAM_CHUNK_CHARS", 96, raising=False)
+    monkeypatch.setattr(runtime_app, "FINAL_DELTA_STREAM_FLUSH_SECONDS", 0.05, raising=False)
+    monkeypatch.setattr(runtime_app.time, "monotonic", monotonic)
+
+    openwebui_client = RecordingOpenWebUIClient()
+    session = RuntimeSession(
+        run_id="run-latency-final-stream",
+        runtime_session_id="rt-run-latency-final-stream",
+        state="running",
+    )
+
+    class StreamingLeader:
+        async def reply_stream(self, messages):
+            nonlocal now
+            yield TextBlockDeltaEvent(reply_id="reply-1", block_id="block-1", delta="a")
+            assert openwebui_client.final_deltas == []
+            now += 0.06
+            yield TextBlockDeltaEvent(reply_id="reply-1", block_id="block-1", delta="b")
+            assert [delta["delta"] for delta in openwebui_client.final_deltas] == ["ab"]
+
+    result = await _run_leader_streaming(
+        StreamingLeader(),
+        session,
+        [],
+        callback_client=openwebui_client,
+        payload={"runtime_session_id": session.runtime_session_id},
+    )
+
+    assert result.streamed_text == "ab"
+    assert joined_final_delta_text(openwebui_client) == "ab"
+    assert [delta["delta_index"] for delta in openwebui_client.final_deltas] == [0]
+    assert result.next_delta_index == 1
 
 
 @pytest.mark.asyncio

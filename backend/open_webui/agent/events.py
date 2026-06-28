@@ -203,6 +203,12 @@ async def append_final_delta_async(
         raise FinalDeltaRejected('final.delta is only accepted while run is finalizing')
     if not await store.has_final_started(delta.run_id):
         raise FinalDeltaRejected('final.delta requires final.started first')
+    if hasattr(store, 'append_final_delta_event'):
+        try:
+            stored = await store.append_final_delta_event(delta)
+        except ValueError as exc:
+            raise FinalDeltaRejected(f'final delta gap: {exc}') from exc
+        return _coerce_event(stored)
 
     before_events = await list_events_for_reconnect_async(
         store,

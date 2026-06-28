@@ -35,6 +35,13 @@ logger = logging.getLogger(__name__)
 MODEL_CALL_QUEUED_RETRY_ATTEMPTS = 3
 MODEL_CALL_QUEUED_RETRY_DELAY_SECONDS = 0.05
 FINAL_DELTA_CHUNK_CHARS = int(os.getenv("AGENT_RUNTIME_FINAL_DELTA_CHUNK_CHARS", "32"))
+FINAL_DELTA_STREAM_CHUNK_CHARS = int(
+    os.getenv(
+        "AGENT_RUNTIME_FINAL_DELTA_STREAM_CHUNK_CHARS",
+        os.getenv("AGENT_RUNTIME_FINAL_DELTA_CHUNK_CHARS", "96"),
+    )
+)
+FINAL_DELTA_STREAM_FLUSH_SECONDS = float(os.getenv("AGENT_RUNTIME_FINAL_DELTA_FLUSH_SECONDS", "0.05"))
 PROVIDER_CONFIGURATION_UNAVAILABLE_SUMMARY = "The selected model provider is not available for this Agent Mode run."
 
 
@@ -580,15 +587,39 @@ async def _run_leader_streaming(
     Tool and transcript events keep using their existing callback paths.
     """
     final_msg = None
-    streamed_parts: list[str] = []
+    emitted_parts: list[str] = []
+    buffered_parts: list[str] = []
+    buffered_chars = 0
+    buffer_started_at: float | None = None
     next_delta_index = 0
-    async for event in leader.reply_stream(messages):
+
+    def buffered_elapsed() -> float:
+        if buffer_started_at is None:
+            return 0.0
+        return time.monotonic() - buffer_started_at
+
+    async def flush_buffer() -> None:
+        nonlocal buffered_chars, buffer_started_at, next_delta_index
+        if not buffered_parts or callback_client is None or payload is None:
+            return
+        chunk = "".join(buffered_parts)
+        await _append_final_answer_delta(
+            callback_client,
+            session,
+            payload,
+            next_delta_index,
+            chunk,
+        )
+        emitted_parts.append(chunk)
+        buffered_parts.clear()
+        buffered_chars = 0
+        buffer_started_at = None
+        next_delta_index += 1
+
+    async def process_event(event) -> None:
+        nonlocal buffered_chars, buffer_started_at, final_msg
         if _is_cancelled(session):
-            return FinalAnswerStreamResult(
-                final_msg=final_msg,
-                streamed_text="".join(streamed_parts),
-                next_delta_index=next_delta_index,
-            )
+            return
         if (
             callback_client is not None
             and payload is not None
@@ -598,25 +629,57 @@ async def _run_leader_streaming(
             if session.state != "finalizing":
                 await _start_final_answer_phase(callback_client, session, payload)
             if _is_cancelled(session):
-                return FinalAnswerStreamResult(
-                    final_msg=final_msg,
-                    streamed_text="".join(streamed_parts),
-                    next_delta_index=next_delta_index,
-                )
-            await _append_final_answer_delta(
-                callback_client,
-                session,
-                payload,
-                next_delta_index,
-                event.delta,
-            )
-            streamed_parts.append(event.delta)
-            next_delta_index += 1
+                return
+            if not buffered_parts:
+                buffer_started_at = time.monotonic()
+            buffered_parts.append(event.delta)
+            buffered_chars += len(event.delta)
+            if (
+                buffered_chars >= max(1, FINAL_DELTA_STREAM_CHUNK_CHARS)
+                or buffered_elapsed() >= max(0.0, FINAL_DELTA_STREAM_FLUSH_SECONDS)
+            ):
+                await flush_buffer()
         if _msg_text(event):
             final_msg = event
+
+    event_iterator = leader.reply_stream(messages).__aiter__()
+    pending_event: asyncio.Task | None = asyncio.create_task(anext(event_iterator))
+    try:
+        while pending_event is not None:
+            if _is_cancelled(session):
+                return FinalAnswerStreamResult(
+                    final_msg=final_msg,
+                    streamed_text="".join(emitted_parts),
+                    next_delta_index=next_delta_index,
+                )
+            timeout = None
+            if buffered_parts:
+                timeout = max(0.0, FINAL_DELTA_STREAM_FLUSH_SECONDS - buffered_elapsed())
+            done, _pending = await asyncio.wait({pending_event}, timeout=timeout)
+            if pending_event not in done:
+                await flush_buffer()
+                if _is_cancelled(session):
+                    return FinalAnswerStreamResult(
+                        final_msg=final_msg,
+                        streamed_text="".join(emitted_parts),
+                        next_delta_index=next_delta_index,
+                    )
+                continue
+
+            try:
+                event = pending_event.result()
+            except StopAsyncIteration:
+                pending_event = None
+                break
+            pending_event = asyncio.create_task(anext(event_iterator))
+            await process_event(event)
+        await flush_buffer()
+    finally:
+        if pending_event is not None and not pending_event.done():
+            pending_event.cancel()
     return FinalAnswerStreamResult(
         final_msg=final_msg,
-        streamed_text="".join(streamed_parts),
+        streamed_text="".join(emitted_parts),
         next_delta_index=next_delta_index,
     )
 
