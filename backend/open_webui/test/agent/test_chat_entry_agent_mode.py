@@ -208,6 +208,31 @@ async def test_agent_mode_enabled_creates_run_links_message_and_starts_runtime(
 
 
 @pytest.mark.asyncio
+async def test_agent_mode_marks_run_running_before_runtime_start(
+    monkeypatch,
+    agent_run_db,
+    chat_entry_patches,
+):
+    observed_states = []
+
+    class InspectingRuntimeClient:
+        def __init__(self, base_url, service_token=None, timeout=None):
+            pass
+
+        async def start_run(self, payload):
+            run = await AgentRuns.get_run(payload['run_id'])
+            observed_states.append(run.state)
+            return {'accepted': True, 'runtime_session_id': 'runtime-session-1'}
+
+    monkeypatch.setattr(main, 'AgentRuntimeClient', InspectingRuntimeClient, raising=False)
+    request = _request(enable_agent_mode=True)
+
+    await main.chat_completion(request, _chat_form(), _user())
+
+    assert observed_states == ['running']
+
+
+@pytest.mark.asyncio
 async def test_agent_mode_runtime_payload_preserves_chat_completion_context(
     agent_run_db,
     chat_entry_patches,

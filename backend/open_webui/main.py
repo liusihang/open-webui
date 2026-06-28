@@ -2517,6 +2517,12 @@ async def _start_agent_mode_chat(
     )
     _install_agent_tool_registry(request, run.id, tool_registry)
     await _link_agent_run_to_assistant_message(metadata, agent_run_id=run.id)
+    run = await AgentRuns.transition_state(
+        run.id,
+        from_states=['queued'],
+        to_state='running',
+        reason='runtime starting',
+    )
 
     client = AgentRuntimeClient(
         getattr(request.app.state.config, 'AGENT_RUNTIME_BASE_URL', ''),
@@ -2544,7 +2550,7 @@ async def _start_agent_mode_chat(
         }
         await AgentRuns.transition_state(
             run.id,
-            from_states=['queued'],
+            from_states=['queued', 'running'],
             to_state='failed',
             reason='runtime start failed',
             payload={'error': error},
@@ -2566,13 +2572,8 @@ async def _start_agent_mode_chat(
         }
 
     runtime_session_id = runtime_response.get('runtime_session_id')
-    await AgentRuns.transition_state(
-        run.id,
-        from_states=['queued'],
-        to_state='running',
-        reason='runtime accepted',
-        payload={'runtime_session_id': runtime_session_id},
-    )
+    if runtime_session_id:
+        await AgentRuns.attach_runtime_session(run.id, runtime_session_id)
     return {
         'status': True,
         'chat_id': metadata['chat_id'],

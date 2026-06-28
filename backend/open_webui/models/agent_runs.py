@@ -373,6 +373,23 @@ class AgentRunTable:
                 raise AgentRunNotFound(run_id)
             return _state(row.state)
 
+    async def attach_runtime_session(
+        self,
+        run_id: str,
+        runtime_session_id: str,
+        db: AsyncSession | None = None,
+    ) -> AgentRunModel:
+        async with get_async_db_context(db) as db:
+            row = await db.get(AgentRun, run_id)
+            if row is None:
+                raise AgentRunNotFound(run_id)
+
+            row.runtime_session_id = runtime_session_id
+            row.updated_at = _now_ns()
+            await db.commit()
+            await db.refresh(row)
+            return AgentRunModel.model_validate(row)
+
     async def list_runs_by_chat(
         self,
         chat_id: str,
