@@ -585,6 +585,7 @@ def test_build_responses_payload_preserves_request_reasoning_effort():
             'reasoning': {
                 'enabled': True,
                 'effort': 'xhigh',
+                'summary': 'detailed',
                 'max_tokens': 12400,
             },
         },
@@ -598,8 +599,30 @@ def test_build_responses_payload_preserves_request_reasoning_effort():
     assert payload['reasoning'] == {
         'enabled': True,
         'effort': 'xhigh',
+        'summary': 'detailed',
         'max_tokens': 12400,
     }
+
+
+def test_build_responses_payload_omits_default_reasoning_summary_without_effort():
+    pipe = _load_pipe_class()()
+    pipe.valves.DEFAULT_REASONING_ENABLED = True
+    pipe.valves.DEFAULT_REASONING_SUMMARY = 'detailed'
+    pipe.valves.DEFAULT_REASONING_EFFORT = ''
+
+    payload = pipe._build_responses_payload(
+        body={
+            'model': 'bifrostapi.ZenMuxOAI/openai/gpt-5.4',
+            'stream': True,
+        },
+        model='ZenMuxOAI/openai/gpt-5.4',
+        system_message={'role': 'system', 'content': 'system'},
+        messages=[{'role': 'user', 'content': 'hello'}],
+        attachments=[],
+        function_specs=[],
+    )
+
+    assert 'reasoning' not in payload or 'summary' not in payload['reasoning']
 
 
 def test_reasoning_param_error_detects_empty_level_rejection():

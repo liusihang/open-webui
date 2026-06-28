@@ -3195,6 +3195,9 @@ class Pipe:
             if default_reasoning_max_tokens > 0:
                 reasoning["max_tokens"] = default_reasoning_max_tokens
 
+        if "effort" not in reasoning:
+            reasoning.pop("summary", None)
+
         mode = str(self.valves.REASONING_PARAM_MODE or "").strip().lower()
         if mode == "minimal":
             minimal_reasoning: Dict[str, Any] = {}
