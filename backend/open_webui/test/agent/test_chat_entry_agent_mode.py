@@ -237,6 +237,55 @@ async def test_agent_mode_runtime_payload_preserves_chat_completion_context(
 
 
 @pytest.mark.asyncio
+async def test_agent_mode_runtime_payload_preserves_reasoning_model_params(
+    agent_run_db,
+    chat_entry_patches,
+):
+    request = _request(enable_agent_mode=True)
+    form = _chat_form()
+    form['params'] = {'temperature': 0.2}
+    form['reasoning'] = {
+        'enabled': True,
+        'effort': 'xhigh',
+        'max_tokens': 12400,
+    }
+
+    await main.chat_completion(request, form, _user())
+
+    runtime_payload = chat_entry_patches.runtime_calls[0]
+    assert runtime_payload['metadata']['model_params'] == {
+        'temperature': 0.2,
+        'reasoning': {
+            'enabled': True,
+            'effort': 'xhigh',
+            'max_tokens': 12400,
+        },
+    }
+
+
+@pytest.mark.asyncio
+async def test_agent_mode_runtime_payload_omits_empty_reasoning_effort(
+    agent_run_db,
+    chat_entry_patches,
+):
+    request = _request(enable_agent_mode=True)
+    form = _chat_form()
+    form['reasoning'] = {
+        'enabled': True,
+        'effort': '',
+        'max_tokens': 8126,
+    }
+
+    await main.chat_completion(request, form, _user())
+
+    runtime_payload = chat_entry_patches.runtime_calls[0]
+    assert runtime_payload['metadata']['model_params']['reasoning'] == {
+        'enabled': True,
+        'max_tokens': 8126,
+    }
+
+
+@pytest.mark.asyncio
 async def test_agent_mode_multimodel_binds_current_model_assistant_message(
     agent_run_db,
     chat_entry_patches,

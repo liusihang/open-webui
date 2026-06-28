@@ -2351,6 +2351,39 @@ def _agent_run_budget(config) -> dict:
     }
 
 
+def _agent_runtime_model_params(form_data: dict) -> dict:
+    params = {}
+    request_params = form_data.get('params')
+    if isinstance(request_params, dict):
+        params.update({key: value for key, value in request_params.items() if value is not None})
+
+    reasoning = _agent_runtime_reasoning_params(form_data.get('reasoning'))
+    if reasoning:
+        params['reasoning'] = reasoning
+
+    return params
+
+
+def _agent_runtime_reasoning_params(value) -> dict:
+    if not isinstance(value, dict):
+        return {}
+
+    reasoning = {}
+    enabled = value.get('enabled')
+    if isinstance(enabled, bool):
+        reasoning['enabled'] = enabled
+
+    effort = value.get('effort')
+    if isinstance(effort, str) and effort.strip():
+        reasoning['effort'] = effort.strip()
+
+    max_tokens = value.get('max_tokens')
+    if max_tokens not in (None, ''):
+        reasoning['max_tokens'] = max_tokens
+
+    return reasoning
+
+
 def _agent_runtime_payload(
     *,
     run,
@@ -2369,6 +2402,16 @@ def _agent_runtime_payload(
     messages = form_data.get('messages')
     if not isinstance(messages, list):
         messages = [metadata.get('user_message')] if metadata.get('user_message') else []
+
+    runtime_metadata = {
+        'session_id': metadata.get('session_id'),
+        'features': metadata.get('features') or {},
+        'variables': metadata.get('variables') or {},
+        'stream': form_data.get('stream'),
+    }
+    model_params = _agent_runtime_model_params(form_data)
+    if model_params:
+        runtime_metadata['model_params'] = model_params
 
     return {
         'run_id': run.id,
@@ -2395,12 +2438,7 @@ def _agent_runtime_payload(
             }
         ],
         'messages': messages,
-        'metadata': {
-            'session_id': metadata.get('session_id'),
-            'features': metadata.get('features') or {},
-            'variables': metadata.get('variables') or {},
-            'stream': form_data.get('stream'),
-        },
+        'metadata': runtime_metadata,
     }
 
 

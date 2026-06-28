@@ -293,7 +293,12 @@ def _model_call_form_data(call: ModelCallRequest) -> dict[str, Any]:
         }
     )
     if call.params:
-        form_data['params'] = call.params
+        params = dict(call.params)
+        reasoning = params.pop('reasoning', None)
+        if params:
+            form_data['params'] = params
+        if isinstance(reasoning, dict) and reasoning:
+            form_data['reasoning'] = reasoning
     return form_data
 
 

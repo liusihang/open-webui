@@ -239,6 +239,102 @@ async def test_model_call_payload_includes_agent_audit_metadata(agent_run_db):
 
 
 @pytest.mark.asyncio
+async def test_model_call_promotes_reasoning_params_to_top_level_form_data(agent_run_db):
+    run = await _create_running_run()
+    request = _trusted_request(enable_agent_mode=True, run_id=run.id)
+    captured = {}
+
+    async def completion_handler(request, form_data, user):
+        captured['form_data'] = form_data
+        return {'id': 'chatcmpl-1'}
+
+    authority = AgentModelAuthority(
+        operation_store=AgentRuns,
+        completion_handler=completion_handler,
+        user_loader=_user_loader,
+        model_access_checker=_allow_model_access,
+    )
+
+    await authority.execute_model_call(
+        request,
+        ModelCallRequest(
+            run_id=run.id,
+            participant_id='leader',
+            model_call_id='call-reasoning',
+            model='model-a',
+            messages=[{'role': 'user', 'content': 'hello'}],
+            params={
+                'temperature': 0.2,
+                'reasoning': {
+                    'enabled': True,
+                    'effort': 'high',
+                    'max_tokens': 8126,
+                },
+            },
+            idempotency_key='model:leader:call-reasoning:1',
+        ),
+    )
+
+    assert captured['form_data']['params'] == {'temperature': 0.2}
+    assert captured['form_data']['reasoning'] == {
+        'enabled': True,
+        'effort': 'high',
+        'max_tokens': 8126,
+    }
+
+
+@pytest.mark.asyncio
+async def test_stream_model_call_promotes_reasoning_params_to_top_level_form_data(agent_run_db):
+    run = await _create_running_run()
+    request = _trusted_request(enable_agent_mode=True, run_id=run.id)
+    captured = {}
+
+    async def completion_handler(request, form_data, user):
+        captured['form_data'] = form_data
+        return {'id': 'chatcmpl-1', 'choices': [{'message': {'content': 'hello'}}]}
+
+    authority = AgentModelAuthority(
+        operation_store=AgentRuns,
+        completion_handler=completion_handler,
+        user_loader=_user_loader,
+        model_access_checker=_allow_model_access,
+    )
+
+    chunks = [
+        chunk
+        async for chunk in authority.stream_model_call(
+            request,
+            ModelCallRequest(
+                run_id=run.id,
+                participant_id='leader',
+                model_call_id='call-stream-reasoning',
+                model='model-a',
+                messages=[{'role': 'user', 'content': 'hello'}],
+                stream=True,
+                params={
+                    'temperature': 0.2,
+                    'reasoning': {
+                        'enabled': True,
+                        'effort': 'xhigh',
+                        'max_tokens': 12400,
+                    },
+                },
+                idempotency_key='model:leader:call-stream-reasoning:1',
+            ),
+        )
+    ]
+
+    assert chunks
+    assert captured['form_data']['stream'] is True
+    assert captured['form_data']['params'] == {'temperature': 0.2}
+    assert captured['form_data']['reasoning'] == {
+        'enabled': True,
+        'effort': 'xhigh',
+        'max_tokens': 12400,
+    }
+
+
+@pytest.mark.asyncio
 async def test_model_call_endpoint_rejects_forged_service_callback_without_token(agent_run_db):
     run = await _create_running_run()
     request = _request(enable_agent_mode=True)

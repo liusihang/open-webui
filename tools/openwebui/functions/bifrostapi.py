@@ -3662,6 +3662,8 @@ class Pipe:
         up = str(message or "").upper()
         if "REASONING_ENCRYPTED_CONTENT" in up:
             return True
+        if "LEVEL" in up and "NOT SUPPORTED" in up and "VALID LEVELS" in up:
+            return True
         if "UNKNOWN PARAMETER" in up and "REASONING" in up:
             return True
         if "UNRECOGNIZED" in up and "REASONING" in up:

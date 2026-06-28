@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 
 import {
+	buildReasoningPayload,
 	isAgentModeRequestConstraintEnabled,
 	resolveAgentModeRequestModels
 } from './agentModeRequest';
@@ -37,5 +38,25 @@ describe('isAgentModeRequestConstraintEnabled', () => {
 		expect(isAgentModeRequestConstraintEnabled({ features: { enable_agent_mode: true } })).toBe(
 			true
 		);
+	});
+});
+
+describe('buildReasoningPayload', () => {
+	it('maps UI reasoning depth to Bifrost effort values and preserves max token budgets', () => {
+		expect(buildReasoningPayload('medium')).toEqual({
+			enabled: true,
+			effort: 'medium',
+			max_tokens: 2048
+		});
+		expect(buildReasoningPayload('deep')).toEqual({
+			enabled: true,
+			effort: 'high',
+			max_tokens: 8126
+		});
+		expect(buildReasoningPayload('divergent')).toEqual({
+			enabled: true,
+			effort: 'xhigh',
+			max_tokens: 12400
+		});
 	});
 });

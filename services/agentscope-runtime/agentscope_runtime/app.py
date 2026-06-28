@@ -933,6 +933,13 @@ def _is_cancelled(session: RuntimeSession) -> bool:
     return session.cancel_requested or session.state == "cancelled"
 
 
+def _request_model_params(request: RunStartRequest) -> dict[str, Any]:
+    model_params = request.metadata.get("model_params")
+    if not isinstance(model_params, dict):
+        return {}
+    return dict(model_params)
+
+
 async def _call_leader_model(
     callback_client: RuntimeCallbackClient,
     session: RuntimeSession,
@@ -952,7 +959,7 @@ async def _call_leader_model(
                 model=model_id,
                 messages=request.messages,
                 stream=False,
-                params={},
+                params=_request_model_params(request),
                 metadata={"runtime_session_id": session.runtime_session_id},
             )
             break

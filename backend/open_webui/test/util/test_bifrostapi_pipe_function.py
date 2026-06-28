@@ -575,6 +575,41 @@ def test_build_responses_payload_attaches_attachments_and_uses_responses_tool_sh
     )
 
 
+def test_build_responses_payload_preserves_request_reasoning_effort():
+    pipe = _load_pipe_class()()
+
+    payload = pipe._build_responses_payload(
+        body={
+            'model': 'bifrostapi.ZenMuxOAI/openai/gpt-5.4',
+            'stream': True,
+            'reasoning': {
+                'enabled': True,
+                'effort': 'xhigh',
+                'max_tokens': 12400,
+            },
+        },
+        model='ZenMuxOAI/openai/gpt-5.4',
+        system_message={'role': 'system', 'content': 'system'},
+        messages=[{'role': 'user', 'content': 'hello'}],
+        attachments=[],
+        function_specs=[],
+    )
+
+    assert payload['reasoning'] == {
+        'enabled': True,
+        'effort': 'xhigh',
+        'max_tokens': 12400,
+    }
+
+
+def test_reasoning_param_error_detects_empty_level_rejection():
+    pipe = _load_pipe_class()()
+
+    assert pipe._is_reasoning_param_error(
+        'level "" not supported, valid levels: low, medium, high, xhigh'
+    )
+
+
 def test_responses_streaming_function_call_arguments_emit_tool_calls_not_content():
     pipe = _load_pipe_class()()
     state = pipe._new_stream_state()

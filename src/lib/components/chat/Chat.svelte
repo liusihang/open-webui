@@ -106,7 +106,11 @@
 		resolveImageGenerationFeature,
 		shouldEnableImageGenerationByDefault
 	} from '$lib/components/chat/defaultFeatures';
-	import { resolveAgentModeRequestModels } from '$lib/components/chat/agentModeRequest';
+	import {
+		buildReasoningPayload,
+		resolveAgentModeRequestModels,
+		type ReasoningDepth
+	} from '$lib/components/chat/agentModeRequest';
 	import Messages from '$lib/components/chat/Messages.svelte';
 	import Navbar from '$lib/components/chat/Navbar.svelte';
 	import ChatControls from './ChatControls.svelte';
@@ -173,7 +177,6 @@
 	let imageGenerationUserOverride: boolean | null = null;
 	let webSearchEnabled = false;
 	let codeInterpreterEnabled = false;
-	type ReasoningDepth = 'medium' | 'deep' | 'divergent';
 	let reasoningDepth: ReasoningDepth = 'medium';
 
 	let showCommands = false;
@@ -2296,18 +2299,6 @@
 		return features;
 	};
 
-	const getReasoningMaxTokens = (depth: ReasoningDepth): number => {
-		if (depth === 'deep') {
-			return 8126;
-		}
-
-		if (depth === 'divergent') {
-			return 12400;
-		}
-
-		return 2048;
-	};
-
 	const getStopTokens = () => {
 		const stop = params?.stop ?? $settings?.params?.stop;
 		if (!stop) return undefined;
@@ -2382,10 +2373,7 @@
 			$settings?.params?.stream_response ??
 			params?.stream_response ??
 			true;
-		const reasoning = {
-			enabled: true,
-			max_tokens: getReasoningMaxTokens(reasoningDepth)
-		};
+		const reasoning = buildReasoningPayload(reasoningDepth);
 		// Always include system prompt — backend extracts it and prepends to DB messages.
 		// Only temp chats need conversation messages (persisted chats load from DB).
 		let messages = [
