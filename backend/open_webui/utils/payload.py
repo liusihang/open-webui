@@ -47,6 +47,8 @@ def apply_model_params_to_body(params: dict, form_data: dict, mappings: dict[str
 
     for key, value in params.items():
         if value is not None:
+            if key == 'reasoning' and isinstance(form_data.get('reasoning'), dict) and form_data['reasoning']:
+                continue
             if key in mappings:
                 cast_func = mappings[key]
                 if isinstance(cast_func, Callable):

@@ -560,6 +560,63 @@ async def test_run_start_forwards_model_params_to_ordinary_qa_callback() -> None
 
 
 @pytest.mark.asyncio
+async def test_run_start_forwards_model_params_to_general_agent_bridge_callback() -> None:
+    openwebui_client = RecordingOpenWebUIClient()
+    async with make_client(openwebui_client, auto_finalize_ordinary_qa=True) as client:
+        response = await client.post(
+            "/v1/openwebui/runs",
+            headers={"Authorization": f"Bearer {SERVICE_TOKEN}"},
+            json={
+                "run_id": "run-general-reasoning",
+                "chat_id": "chat-1",
+                "leader_model_id": "model-a",
+                "messages": [{"role": "user", "content": "think carefully"}],
+                "tool_access_envelope": {
+                    "tools": [
+                        {
+                            "id": "tool:terminal:main:list_files",
+                            "name": "list_files",
+                            "type": "terminal",
+                            "schema": {
+                                "name": "list_files",
+                                "description": "List files.",
+                                "parameters": {"type": "object", "properties": {}},
+                            },
+                        }
+                    ]
+                },
+                "metadata": {
+                    "model_params": {
+                        "reasoning": {
+                            "enabled": True,
+                            "effort": "xhigh",
+                            "max_tokens": 12400,
+                        }
+                    }
+                },
+            },
+        )
+
+        assert response.status_code == 202
+        for _ in range(40):
+            status = await client.get(
+                "/v1/openwebui/runs/run-general-reasoning/status",
+                headers={"Authorization": f"Bearer {SERVICE_TOKEN}"},
+            )
+            if status.json()["state"] == "completed":
+                break
+            await asyncio.sleep(0.01)
+
+    assert openwebui_client.model_calls[0]["params"] == {
+        "reasoning": {
+            "enabled": True,
+            "effort": "xhigh",
+            "max_tokens": 12400,
+        }
+    }
+
+
+@pytest.mark.asyncio
 async def test_emit_final_answer_streams_long_answer_as_ordered_final_deltas() -> None:
     openwebui_client = RecordingOpenWebUIClient()
     session = RuntimeSession(

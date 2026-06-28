@@ -2393,6 +2393,7 @@ def _agent_runtime_payload(
     leader_model_id: str,
     budget: dict,
     tool_access_envelope: dict,
+    model_params: dict | None = None,
 ) -> dict:
     model_meta = {}
     model = metadata.get('model')
@@ -2409,9 +2410,9 @@ def _agent_runtime_payload(
         'variables': metadata.get('variables') or {},
         'stream': form_data.get('stream'),
     }
-    model_params = _agent_runtime_model_params(form_data)
-    if model_params:
-        runtime_metadata['model_params'] = model_params
+    runtime_model_params = model_params if model_params is not None else _agent_runtime_model_params(form_data)
+    if runtime_model_params:
+        runtime_metadata['model_params'] = runtime_model_params
 
     return {
         'run_id': run.id,
@@ -2488,6 +2489,7 @@ async def _start_agent_mode_chat(
     metadata['message_id'] = assistant_message_id
     metadata['assistant_message_id'] = assistant_message_id
 
+    requested_model_params = _agent_runtime_model_params(form_data)
     form_data, metadata, _events = await process_chat_payload(request, form_data, user, metadata, model)
     tool_access_envelope, tool_registry = build_tool_access_envelope(metadata.get('tools') or {})
     tool_access_envelope['metadata'] = {
@@ -2529,6 +2531,7 @@ async def _start_agent_mode_chat(
         leader_model_id=leader_model_id,
         budget=budget,
         tool_access_envelope=tool_access_envelope,
+        model_params=requested_model_params,
     )
 
     try:

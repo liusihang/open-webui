@@ -159,6 +159,7 @@ class OpenWebUIAgentScopeModel(ChatModelBase):
         model_id: str,
         callback_client: OpenWebUIBridgeCallbacks,
         on_final_text: Callable[[str, str], None] | None = None,
+        default_model_params: dict[str, Any] | None = None,
     ) -> None:
         super().__init__(
             credential=OpenWebUICallbackCredential(),
@@ -172,6 +173,7 @@ class OpenWebUIAgentScopeModel(ChatModelBase):
         self.participant_id = participant_id
         self.callback_client = callback_client
         self._on_final_text = on_final_text
+        self.default_model_params = dict(default_model_params or {})
         self._next_model_call_index = 1
         self._formatter = OpenAIChatFormatter()
 
@@ -217,7 +219,7 @@ class OpenWebUIAgentScopeModel(ChatModelBase):
         complete content blocks (TextBlock + ToolCallBlocks).
         """
         model_call_id = self._allocate_model_call_id()
-        params = dict(kwargs)
+        params = _merge_model_params(self.default_model_params, dict(kwargs))
         idempotency_key = f"model:{self.participant_id}:{model_call_id}:1"
 
         formatted_messages = await self._format_messages(messages)
@@ -519,6 +521,7 @@ class AgentScopeRuntimeBridge:
         *,
         participant_id: str,
         model_id: str,
+        default_model_params: dict[str, Any] | None = None,
     ) -> OpenWebUIAgentScopeModel:
         return OpenWebUIAgentScopeModel(
             run_id=self.run_id,
@@ -527,6 +530,7 @@ class AgentScopeRuntimeBridge:
             model_id=model_id,
             callback_client=self.callback_client,
             on_final_text=self._record_final_text,
+            default_model_params=default_model_params,
         )
 
     def latest_final_text(self, participant_id: str) -> str:
@@ -588,6 +592,16 @@ def _extract_model_text(response: dict[str, Any]) -> str:
                         return delta_content
     content = response.get("content")
     return content if isinstance(content, str) else str(payload)
+
+
+def _merge_model_params(defaults: dict[str, Any], overrides: dict[str, Any]) -> dict[str, Any]:
+    params = dict(defaults)
+    for key, value in overrides.items():
+        if key == "reasoning" and isinstance(params.get("reasoning"), dict) and isinstance(value, dict):
+            params[key] = {**params[key], **value}
+        else:
+            params[key] = value
+    return params
 
 
 def _extract_chat_response_blocks(response: dict[str, Any]) -> list[TextBlock | ToolCallBlock]:

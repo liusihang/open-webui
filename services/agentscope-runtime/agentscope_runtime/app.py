@@ -378,6 +378,7 @@ async def _finalize_general_agent_run(
             model=bridge.build_model(
                 participant_id=LEADER_PARTICIPANT_ID,
                 model_id=leader_model_id,
+                default_model_params=_request_model_params(request),
             ),
             toolkit=_build_toolkit(
                 bridge=bridge,
@@ -794,6 +795,7 @@ async def _execute_subagent(
         model=bridge.build_model(
             participant_id=context.participant_id,
             model_id=context.model_id,
+            default_model_params=_request_model_params(request),
         ),
         toolkit=_build_toolkit(
             bridge=bridge,

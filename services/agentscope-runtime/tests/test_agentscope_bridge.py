@@ -248,6 +248,76 @@ async def test_bridge_builds_agentscope_template_model_and_tool_callback_boundar
 
 
 @pytest.mark.asyncio
+async def test_model_bridge_forwards_default_model_params_to_callback() -> None:
+    from agentscope_runtime.agentscope_bridge import OpenWebUIAgentScopeModel
+
+    callbacks = RecordingBridgeCallbacks()
+    model = OpenWebUIAgentScopeModel(
+        run_id="run-reasoning",
+        runtime_session_id="rt-run-reasoning",
+        participant_id="leader",
+        model_id="model-a",
+        callback_client=callbacks,
+        default_model_params={
+            "reasoning": {
+                "enabled": True,
+                "effort": "high",
+                "max_tokens": 8126,
+            }
+        },
+    )
+
+    async for _ in await model([{"role": "user", "content": "think carefully"}]):
+        pass
+
+    assert callbacks.model_calls[0]["params"] == {
+        "reasoning": {
+            "enabled": True,
+            "effort": "high",
+            "max_tokens": 8126,
+        }
+    }
+
+
+@pytest.mark.asyncio
+async def test_model_bridge_merges_call_kwargs_over_default_model_params() -> None:
+    from agentscope_runtime.agentscope_bridge import OpenWebUIAgentScopeModel
+
+    callbacks = RecordingBridgeCallbacks()
+    model = OpenWebUIAgentScopeModel(
+        run_id="run-reasoning-merge",
+        runtime_session_id="rt-run-reasoning-merge",
+        participant_id="leader",
+        model_id="model-a",
+        callback_client=callbacks,
+        default_model_params={
+            "reasoning": {
+                "enabled": True,
+                "effort": "high",
+                "max_tokens": 8126,
+            },
+            "temperature": 0.1,
+        },
+    )
+
+    async for _ in await model(
+        [{"role": "user", "content": "think carefully"}],
+        reasoning={"effort": "xhigh"},
+        temperature=0.2,
+    ):
+        pass
+
+    assert callbacks.model_calls[0]["params"] == {
+        "reasoning": {
+            "enabled": True,
+            "effort": "xhigh",
+            "max_tokens": 8126,
+        },
+        "temperature": 0.2,
+    }
+
+
+@pytest.mark.asyncio
 async def test_model_bridge_preserves_openwebui_tool_calls_as_agentscope_blocks() -> None:
     from agentscope.message import ToolCallBlock
 
