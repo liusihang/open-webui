@@ -604,7 +604,7 @@ def test_build_responses_payload_preserves_request_reasoning_effort():
     }
 
 
-def test_build_responses_payload_omits_default_reasoning_summary_without_effort():
+def test_build_responses_payload_omits_default_reasoning_without_effort():
     pipe = _load_pipe_class()()
     pipe.valves.DEFAULT_REASONING_ENABLED = True
     pipe.valves.DEFAULT_REASONING_SUMMARY = 'detailed'
@@ -622,7 +622,7 @@ def test_build_responses_payload_omits_default_reasoning_summary_without_effort(
         function_specs=[],
     )
 
-    assert 'reasoning' not in payload or 'summary' not in payload['reasoning']
+    assert 'reasoning' not in payload
 
 
 def test_reasoning_param_error_detects_empty_level_rejection():
