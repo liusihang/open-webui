@@ -7,6 +7,7 @@ os.environ.setdefault('ENABLE_DB_MIGRATIONS', 'false')
 import pytest
 from open_webui.agent.approval import (
     AgentApprovalCoordinator,
+    ApprovalNotFound,
     ApprovalDecisionRequest,
 )
 from open_webui.agent.destructive import classify_destructive_tool_call
@@ -19,11 +20,16 @@ from open_webui.models.agent_runs import AgentRunOperationConflict
 from open_webui.routers.agent_service import execute_agent_run_tool_call
 
 
-def _service_request():
+def _service_request(authority=None):
+    registry = getattr(authority, 'registry', None)
+    operation_store = getattr(authority, 'operation_store', None)
     return SimpleNamespace(
         app=SimpleNamespace(
             state=SimpleNamespace(
-                config=SimpleNamespace(AGENT_RUNTIME_SERVICE_TOKEN='service-secret')
+                config=SimpleNamespace(AGENT_RUNTIME_SERVICE_TOKEN='service-secret'),
+                AGENT_EVENT_STORE=operation_store,
+                AGENT_TOOL_AUTHORITY=authority,
+                AGENT_TOOL_REGISTRIES={'run-1': registry} if registry is not None else {},
             )
         )
     )
@@ -189,7 +195,7 @@ async def test_read_only_tool_call_endpoint_bypasses_approval_and_executes_once(
     coordinator = AgentApprovalCoordinator(store)
 
     result = await execute_agent_run_tool_call(
-        request=_service_request(),
+        request=_service_request(authority),
         run_id='run-1',
         form_data=ToolCallRequest(
             run_id='run-1',
@@ -201,7 +207,6 @@ async def test_read_only_tool_call_endpoint_bypasses_approval_and_executes_once(
         ),
         idempotency_key='tool:leader:call-1:1',
         authorization='Bearer service-secret',
-        authority=authority,
         approval_coordinator=coordinator,
     )
 
@@ -243,7 +248,7 @@ async def test_run_command_creating_current_run_artifact_bypasses_approval(targe
     command = f'printf "artifact" > {target_path}'
 
     result = await execute_agent_run_tool_call(
-        request=_service_request(),
+        request=_service_request(authority),
         run_id='run-1',
         form_data=ToolCallRequest(
             run_id='run-1',
@@ -255,7 +260,6 @@ async def test_run_command_creating_current_run_artifact_bypasses_approval(targe
         ),
         idempotency_key='tool:leader:call-1:1',
         authorization='Bearer service-secret',
-        authority=authority,
         approval_coordinator=coordinator,
     )
 
@@ -288,7 +292,7 @@ async def test_run_command_write_outside_current_run_artifact_dirs_requires_appr
     coordinator = AgentApprovalCoordinator(store)
 
     approval_required = await execute_agent_run_tool_call(
-        request=_service_request(),
+        request=_service_request(authority),
         run_id='run-1',
         form_data=ToolCallRequest(
             run_id='run-1',
@@ -305,7 +309,6 @@ async def test_run_command_write_outside_current_run_artifact_dirs_requires_appr
         ),
         idempotency_key='tool:leader:call-1:1',
         authorization='Bearer service-secret',
-        authority=authority,
         approval_coordinator=coordinator,
     )
 
@@ -346,12 +349,11 @@ async def test_destructive_tool_call_waits_for_approval_then_resumes_with_tool_r
     )
 
     approval_required = await execute_agent_run_tool_call(
-        request=_service_request(),
+        request=_service_request(authority),
         run_id='run-1',
         form_data=request,
         idempotency_key='tool:leader:call-1:1',
         authorization='Bearer service-secret',
-        authority=authority,
         approval_coordinator=coordinator,
     )
 
@@ -436,6 +438,44 @@ async def test_destructive_tool_call_rejection_returns_normalized_rejection_resu
     assert resume_called is False
     assert store.state['run-1'] == 'running'
     assert store.events[-1]['payload']['decision'] == 'rejected'
+
+
+@pytest.mark.asyncio
+async def test_approval_decision_requires_same_coordinator_that_holds_pending_resume():
+    store = FakeApprovalStore()
+    request_coordinator = AgentApprovalCoordinator(store)
+    decision_coordinator = AgentApprovalCoordinator(store)
+    request = ToolCallRequest(
+        run_id='run-1',
+        participant_id='leader',
+        tool_call_id='call-4',
+        tool_id='tool:terminal:main:delete_entry',
+        arguments={'path': '/workspace/report.txt'},
+        idempotency_key='tool:leader:call-4:1',
+    )
+
+    approval_required = await request_coordinator.request_tool_approval(
+        request,
+        {
+            'name': 'delete_entry',
+            'tool_id': 'terminal:main',
+            'type': 'terminal',
+        },
+        resume=lambda: {'status': 'success', 'content': 'deleted'},
+    )
+
+    assert approval_required is not None
+    assert store.state['run-1'] == 'waiting_approval'
+
+    with pytest.raises(ApprovalNotFound):
+        await decision_coordinator.decide(
+            ApprovalDecisionRequest(
+                run_id='run-1',
+                approval_id='approval:run-1:call-4',
+                decision='approved',
+                idempotency_key='approval:run-1:approval:run-1:call-4:1',
+            )
+        )
 
 
 @pytest.mark.asyncio
