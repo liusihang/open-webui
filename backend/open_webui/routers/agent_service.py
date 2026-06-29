@@ -2,10 +2,12 @@ import hashlib
 import inspect
 import json
 import secrets
+from types import SimpleNamespace
 from typing import Any
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Request, status
 from fastapi.responses import JSONResponse, StreamingResponse
+from fastapi.security import HTTPAuthorizationCredentials
 from open_webui.agent.approval import (
     AgentApprovalCoordinator,
     ApprovalDecisionConflict,
@@ -60,6 +62,7 @@ from open_webui.models.agent_runs import AgentRunError, AgentRunOperationConflic
 from open_webui.models.chats import Chats
 from open_webui.models.users import Users
 from open_webui.routers.agent_runs import get_configured_agent_event_store
+from open_webui.utils.auth import create_terminal_session_token
 from open_webui.utils.tools import get_builtin_tools, get_terminal_tools, get_tools
 
 router = APIRouter()
@@ -178,6 +181,8 @@ async def _rebuild_agent_tool_registry(request: Request, run_id: str) -> dict[st
             detail='Agent tool registry cannot be rebuilt because the run user is unavailable',
         )
 
+    _restore_agent_run_user_auth_context(request, user)
+
     rebuilt: dict[str, dict[str, Any]] = {}
     rebuilt.update(await _rebuild_builtin_tools(request, run, user, snapshot_tools))
     rebuilt.update(await _rebuild_terminal_tools(request, run, user, snapshot_tools))
@@ -197,6 +202,18 @@ async def _load_agent_run_user(user_id: str | None):
     if not user_id:
         return None
     return await _maybe_await(Users.get_user_by_id(user_id))
+
+
+def _restore_agent_run_user_auth_context(request: Request, user) -> None:
+    state = getattr(request, 'state', None)
+    if state is None:
+        state = SimpleNamespace()
+        setattr(request, 'state', state)
+
+    state.token = HTTPAuthorizationCredentials(
+        scheme='Bearer',
+        credentials=create_terminal_session_token(user),
+    )
 
 
 def _snapshot_tools(snapshot: dict[str, Any] | None) -> list[dict[str, Any]]:
@@ -1021,7 +1038,6 @@ async def execute_agent_run_tool_call(
         alias='X-Agent-Idempotency-Key',
     ),
     authorization: str | None = Header(default=None, alias='Authorization'),
-    authority: AgentToolAuthority = Depends(get_agent_tool_authority),
     approval_coordinator: AgentApprovalCoordinator = Depends(get_agent_approval_coordinator),
 ):
     _require_agent_service_credential(request, authorization)
@@ -1029,6 +1045,7 @@ async def execute_agent_run_tool_call(
         form_data.idempotency_key,
         idempotency_key,
     )
+    authority = await get_agent_tool_authority(request, run_id=run_id)
     user_id = form_data.user_id or await _load_service_tool_call_user_id(authority, run_id)
     tool_request = form_data.model_copy(
         update={'run_id': run_id, 'user_id': user_id, 'idempotency_key': key}

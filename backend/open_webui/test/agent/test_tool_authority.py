@@ -15,6 +15,7 @@ from open_webui.agent.tool_authority import (
     normalize_tool_result,
 )
 from open_webui.routers.agent_service import get_agent_tool_authority
+from open_webui.utils.auth import decode_token
 
 
 class FakeOperationStore:
@@ -285,6 +286,77 @@ async def test_service_tool_authority_rebuilds_missing_builtin_registry_from_run
 
     assert calls == [('Plan', 'Ship it')]
     assert result['status'] == 'success'
+
+
+@pytest.mark.asyncio
+async def test_service_tool_authority_rebuild_restores_user_token_for_session_tools(monkeypatch):
+    async def external_lookup(query: str):
+        return {'query': query}
+
+    async def fake_get_tools(request, tool_ids, user, extra_params):
+        token = request.state.token.credentials
+        decoded = decode_token(token)
+        assert token != 'runtime-service-token'
+        assert decoded['id'] == 'user-1'
+        return {
+            'external_lookup': {
+                'tool_id': 'server:openapi:ext',
+                'callable': external_lookup,
+                'spec': {'name': 'external_lookup', 'parameters': {'type': 'object'}},
+                'type': 'external',
+            }
+        }
+
+    user = SimpleNamespace(
+        id='user-1',
+        model_dump=lambda mode=None: {'id': 'user-1', 'role': 'admin', 'name': 'Test User'},
+    )
+    run = SimpleNamespace(
+        id='run-1',
+        user_id='user-1',
+        chat_id='chat-1',
+        user_message_id='msg-user',
+        assistant_message_id='msg-assistant',
+        leader_model_id='model-1',
+        tool_access_snapshot={
+            'tools': [
+                {
+                    'id': 'tool:server:openapi:ext:external_lookup',
+                    'name': 'external_lookup',
+                    'type': 'external',
+                    'schema': {'name': 'external_lookup', 'parameters': {'type': 'object'}},
+                }
+            ]
+        },
+    )
+
+    from open_webui.routers import agent_service
+
+    monkeypatch.setattr(agent_service, 'get_tools', fake_get_tools, raising=False)
+    monkeypatch.setattr(
+        agent_service,
+        'Users',
+        SimpleNamespace(get_user_by_id=lambda user_id: user),
+        raising=False,
+    )
+
+    request = SimpleNamespace(
+        cookies={},
+        state=SimpleNamespace(
+            token=SimpleNamespace(scheme='Bearer', credentials='runtime-service-token')
+        ),
+        app=SimpleNamespace(
+            state=SimpleNamespace(
+                config=SimpleNamespace(),
+                AGENT_EVENT_STORE=FakeRunStore(run),
+                AGENT_TOOL_REGISTRIES={},
+            )
+        ),
+    )
+
+    authority = await get_agent_tool_authority(request, run_id='run-1')
+
+    assert 'tool:server:openapi:ext:external_lookup' in authority.registry
 
 
 @pytest.mark.asyncio
