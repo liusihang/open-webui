@@ -16,6 +16,7 @@ from open_webui.agent.approval import (
     ApprovalNotFound,
     ApprovalOperationInProgress,
 )
+from open_webui.agent.runtime_client import AgentRuntimeClient, AgentRuntimeError, AgentRuntimeRejected
 from open_webui.agent.events import (
     AgentEventError,
     AgentEventStore,
@@ -1346,15 +1347,33 @@ async def decide_agent_run_approval(
         idempotency_key,
     )
     try:
-        return await approval_coordinator.decide(
-            form_data.model_copy(
-                update={
-                    'run_id': run_id,
-                    'approval_id': approval_id,
-                    'idempotency_key': key,
-                }
-            )
+        decision = form_data.model_copy(
+            update={
+                'run_id': run_id,
+                'approval_id': approval_id,
+                'idempotency_key': key,
+            }
         )
+        response = await approval_coordinator.decide(decision)
+        if response.get('status') == 'approval_rejected':
+            await _notify_runtime_approval_decision(request, run_id, approval_id, decision, response)
+        return response
+    except AgentRuntimeRejected as exc:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail={
+                'code': exc.code,
+                'message': str(exc),
+            },
+        ) from exc
+    except AgentRuntimeError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail={
+                'code': exc.code,
+                'message': str(exc),
+            },
+        ) from exc
     except AgentRunOperationConflict as exc:
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
@@ -1390,3 +1409,35 @@ async def decide_agent_run_approval(
                 'message': str(exc),
             },
         ) from exc
+
+
+async def _notify_runtime_approval_decision(
+    request: Request,
+    run_id: str,
+    approval_id: str,
+    decision: ApprovalDecisionRequest,
+    response: dict[str, Any],
+) -> None:
+    payload = {
+        'approval_id': approval_id,
+        'decision': decision.decision,
+        'tool_call_id': response.get('structured_error', {}).get('details', {}).get('tool_call_id'),
+        'tool_id': response.get('structured_error', {}).get('details', {}).get('tool_id'),
+        'tool_name': _approval_tool_name_from_content(response.get('content')),
+        'result': response,
+    }
+    client = AgentRuntimeClient(
+        getattr(request.app.state.config, 'AGENT_RUNTIME_BASE_URL', ''),
+        service_token=getattr(request.app.state.config, 'AGENT_RUNTIME_SERVICE_TOKEN', ''),
+        timeout=getattr(request.app.state.config, 'AGENT_RUN_DEFAULT_TIMEOUT_SECONDS', None),
+    )
+    await client.notify_approval_decision(run_id, payload)
+
+
+def _approval_tool_name_from_content(content: Any) -> str | None:
+    if not isinstance(content, str):
+        return None
+    prefix = 'User rejected approval for '
+    if not content.startswith(prefix):
+        return None
+    return content.removeprefix(prefix).rstrip('.') or None

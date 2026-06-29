@@ -41,6 +41,12 @@ class AgentRuntimeClient:
 
         return await self._post(f'/v1/openwebui/runs/{run_id}/cancel', None)
 
+    async def notify_approval_decision(self, run_id: str, payload: dict[str, Any]) -> dict[str, Any]:
+        if not self.base_url:
+            raise AgentRuntimeUnavailable('agent runtime base URL is not configured')
+
+        return await self._post(f'/v1/openwebui/runs/{run_id}/approval-decision', payload)
+
     async def _post(self, path: str, payload: dict[str, Any] | None) -> dict[str, Any]:
         headers = {'Content-Type': 'application/json'}
         if self.service_token:

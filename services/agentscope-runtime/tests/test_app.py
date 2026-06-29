@@ -1056,6 +1056,22 @@ async def test_rejected_approval_notification_marks_waiting_run_failed() -> None
         assert openwebui_client.events[-1]["event_type"] == "run.failed"
         assert openwebui_client.events[-1]["payload"]["error"]["code"] == "approval_rejected"
 
+        duplicate_decision = await client.post(
+            "/v1/openwebui/runs/run-rejected-approval/approval-decision",
+            headers={"Authorization": f"Bearer {SERVICE_TOKEN}"},
+            json={
+                "approval_id": "approval-1",
+                "decision": "rejected",
+                "tool_call_id": "tool-call-1",
+                "tool_id": "tool:terminal:main:delete_file",
+                "tool_name": "delete_file",
+            },
+        )
+
+        assert duplicate_decision.status_code == 200
+        assert duplicate_decision.json()["state"] == "failed"
+        assert [event["event_type"] for event in openwebui_client.events].count("run.failed") == 1
+
 
 @pytest.mark.asyncio
 async def test_general_agent_finalizes_with_code_interpreter_system_pyodide_message() -> None:

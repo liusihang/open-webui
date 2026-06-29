@@ -330,6 +330,8 @@ def create_app(
                     "message": "Approved approval decisions require a backend/runtime resume contract.",
                 },
             )
+        if session.state == "failed":
+            return _status(session)
         if session.state != "waiting_approval":
             raise HTTPException(
                 status_code=status.HTTP_409_CONFLICT,

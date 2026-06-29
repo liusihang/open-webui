@@ -17,7 +17,11 @@ from open_webui.agent.tool_authority import (
     build_tool_access_envelope,
 )
 from open_webui.models.agent_runs import AgentRunOperationConflict
-from open_webui.routers.agent_service import execute_agent_run_tool_call
+from open_webui.routers import agent_service
+from open_webui.routers.agent_service import (
+    decide_agent_run_approval,
+    execute_agent_run_tool_call,
+)
 
 
 def _service_request(authority=None):
@@ -26,7 +30,11 @@ def _service_request(authority=None):
     return SimpleNamespace(
         app=SimpleNamespace(
             state=SimpleNamespace(
-                config=SimpleNamespace(AGENT_RUNTIME_SERVICE_TOKEN='service-secret'),
+                config=SimpleNamespace(
+                    AGENT_RUNTIME_BASE_URL='http://agent-runtime.test',
+                    AGENT_RUNTIME_SERVICE_TOKEN='service-secret',
+                    AGENT_RUN_DEFAULT_TIMEOUT_SECONDS=30,
+                ),
                 AGENT_EVENT_STORE=operation_store,
                 AGENT_TOOL_AUTHORITY=authority,
                 AGENT_TOOL_REGISTRIES={'run-1': registry} if registry is not None else {},
@@ -476,6 +484,84 @@ async def test_approval_decision_requires_same_coordinator_that_holds_pending_re
                 idempotency_key='approval:run-1:approval:run-1:call-4:1',
             )
         )
+
+
+@pytest.mark.asyncio
+async def test_rejected_approval_decision_notifies_runtime(monkeypatch):
+    runtime_calls = []
+
+    class RuntimeClient:
+        def __init__(self, base_url, *, service_token=None, timeout=None):
+            self.base_url = base_url
+            self.service_token = service_token
+            self.timeout = timeout
+
+        async def notify_approval_decision(self, run_id, payload):
+            runtime_calls.append(
+                {
+                    'base_url': self.base_url,
+                    'service_token': self.service_token,
+                    'timeout': self.timeout,
+                    'run_id': run_id,
+                    'payload': payload,
+                }
+            )
+            return {'run_id': run_id, 'state': 'failed'}
+
+    monkeypatch.setattr(agent_service, 'AgentRuntimeClient', RuntimeClient, raising=False)
+    store = FakeApprovalStore()
+    coordinator = AgentApprovalCoordinator(store)
+    request = ToolCallRequest(
+        run_id='run-1',
+        participant_id='leader',
+        tool_call_id='call-5',
+        tool_id='tool:terminal:main:delete_entry',
+        arguments={'path': '/workspace/report.txt'},
+        idempotency_key='tool:leader:call-5:1',
+    )
+    approval_required = await coordinator.request_tool_approval(
+        request,
+        {
+            'name': 'delete_entry',
+            'tool_id': 'terminal:main',
+            'type': 'terminal',
+        },
+        resume=lambda: {'status': 'success', 'content': 'deleted'},
+    )
+
+    assert approval_required is not None
+
+    response = await decide_agent_run_approval(
+        request=_service_request(),
+        run_id='run-1',
+        approval_id='approval:run-1:call-5',
+        form_data=ApprovalDecisionRequest(
+            run_id='run-1',
+            approval_id='approval:run-1:call-5',
+            decision='rejected',
+            idempotency_key='approval:run-1:approval:run-1:call-5:1',
+        ),
+        idempotency_key='approval:run-1:approval:run-1:call-5:1',
+        approval_coordinator=coordinator,
+    )
+
+    assert response['status'] == 'approval_rejected'
+    assert runtime_calls == [
+        {
+            'base_url': 'http://agent-runtime.test',
+            'service_token': 'service-secret',
+            'timeout': 30,
+            'run_id': 'run-1',
+            'payload': {
+                'approval_id': 'approval:run-1:call-5',
+                'decision': 'rejected',
+                'tool_call_id': 'call-5',
+                'tool_id': 'tool:terminal:main:delete_entry',
+                'tool_name': 'delete_entry',
+                'result': response,
+            },
+        }
+    ]
 
 
 @pytest.mark.asyncio
