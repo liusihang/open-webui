@@ -288,6 +288,194 @@ async def test_service_tool_authority_rebuilds_missing_builtin_registry_from_run
 
 
 @pytest.mark.asyncio
+async def test_service_tool_authority_rebuilds_run_snapshot_before_global_authority(monkeypatch):
+    calls = []
+
+    async def write_note(title: str, content: str):
+        calls.append((title, content))
+        return {'title': title, 'content': content}
+
+    async def fake_get_builtin_tools(request, extra_params, features=None, model=None):
+        assert extra_params['__user__']['id'] == 'user-1'
+        return {
+            'write_note': {
+                'tool_id': 'builtin:write_note',
+                'callable': write_note,
+                'spec': {'name': 'write_note', 'parameters': {'type': 'object'}},
+                'type': 'builtin',
+            }
+        }
+
+    user = SimpleNamespace(
+        id='user-1',
+        model_dump=lambda mode=None: {'id': 'user-1', 'role': 'admin', 'name': 'Test User'},
+    )
+    run = SimpleNamespace(
+        id='run-1',
+        user_id='user-1',
+        chat_id='chat-1',
+        user_message_id='msg-user',
+        assistant_message_id='msg-assistant',
+        leader_model_id='model-1',
+        tool_access_snapshot={
+            'tools': [
+                {
+                    'id': 'tool:builtin:write_note:write_note',
+                    'name': 'write_note',
+                    'type': 'builtin',
+                    'schema': {'name': 'write_note', 'parameters': {'type': 'object'}},
+                }
+            ]
+        },
+    )
+
+    from open_webui.routers import agent_service
+
+    monkeypatch.setattr(agent_service, 'get_builtin_tools', fake_get_builtin_tools, raising=False)
+    monkeypatch.setattr(
+        agent_service,
+        'Users',
+        SimpleNamespace(get_user_by_id=lambda user_id: user),
+        raising=False,
+    )
+
+    request = SimpleNamespace(
+        cookies={},
+        app=SimpleNamespace(
+            state=SimpleNamespace(
+                config=SimpleNamespace(),
+                AGENT_EVENT_STORE=FakeRunStore(run),
+                AGENT_TOOL_REGISTRIES={},
+                AGENT_TOOL_AUTHORITY=AgentToolAuthority(
+                    operation_store=FakeOperationStore(),
+                    registry={},
+                ),
+            )
+        ),
+    )
+
+    authority = await get_agent_tool_authority(request, run_id='run-1')
+    result = await authority.execute_tool_call(
+        ToolCallRequest(
+            run_id='run-1',
+            participant_id='leader',
+            tool_call_id='call-1',
+            tool_id='tool:builtin:write_note:write_note',
+            arguments={'title': 'Plan', 'content': 'Ship it'},
+            idempotency_key='tool:leader:call-1:1',
+        )
+    )
+
+    assert result['status'] == 'success'
+    assert calls == [('Plan', 'Ship it')]
+    assert 'tool:builtin:write_note:write_note' in request.app.state.AGENT_TOOL_REGISTRIES['run-1']
+
+
+@pytest.mark.asyncio
+async def test_service_tool_authority_rebuilds_builtin_skill_tools_with_terminal_context(monkeypatch):
+    calls = []
+
+    async def update_skill(id: str, source_path: str):
+        calls.append(('update_skill', id, source_path))
+        return {'id': id}
+
+    async def read_skill(id: str):
+        calls.append(('read_skill', id))
+        return {'name': id, 'package': {'path': '/home/user/.openwebui/skills/demo/hash'}}
+
+    async def fake_get_builtin_tools(request, extra_params, features=None, model=None):
+        assert extra_params['__terminal_id__'] == 'terminals'
+        assert extra_params['__metadata__']['terminal_id'] == 'terminals'
+        return {
+            'update_skill': {
+                'tool_id': 'builtin:update_skill',
+                'callable': update_skill,
+                'spec': {'name': 'update_skill', 'parameters': {'type': 'object'}},
+                'type': 'builtin',
+            },
+            'read_skill': {
+                'tool_id': 'builtin:read_skill',
+                'callable': read_skill,
+                'spec': {'name': 'read_skill', 'parameters': {'type': 'object'}},
+                'type': 'builtin',
+            },
+        }
+
+    user = SimpleNamespace(
+        id='user-1',
+        model_dump=lambda mode=None: {'id': 'user-1', 'role': 'admin', 'name': 'Test User'},
+    )
+    run = SimpleNamespace(
+        id='run-1',
+        user_id='user-1',
+        chat_id='chat-1',
+        user_message_id='msg-user',
+        assistant_message_id='msg-assistant',
+        leader_model_id='model-1',
+        tool_access_snapshot={
+            'tools': [
+                {
+                    'id': 'tool:builtin:update_skill:update_skill',
+                    'name': 'update_skill',
+                    'type': 'builtin',
+                    'schema': {'name': 'update_skill', 'parameters': {'type': 'object'}},
+                },
+                {
+                    'id': 'tool:builtin:read_skill:read_skill',
+                    'name': 'read_skill',
+                    'type': 'builtin',
+                    'schema': {'name': 'read_skill', 'parameters': {'type': 'object'}},
+                },
+            ],
+            'metadata': {
+                'session_id': 'session-1',
+                'terminal_id': 'terminals',
+            },
+        },
+    )
+
+    from open_webui.routers import agent_service
+
+    monkeypatch.setattr(agent_service, 'get_builtin_tools', fake_get_builtin_tools, raising=False)
+    monkeypatch.setattr(
+        agent_service,
+        'Users',
+        SimpleNamespace(get_user_by_id=lambda user_id: user),
+        raising=False,
+    )
+
+    request = SimpleNamespace(
+        cookies={},
+        app=SimpleNamespace(
+            state=SimpleNamespace(
+                config=SimpleNamespace(),
+                AGENT_EVENT_STORE=FakeRunStore(run),
+                AGENT_TOOL_REGISTRIES={},
+            )
+        ),
+    )
+
+    authority = await get_agent_tool_authority(request, run_id='run-1')
+    result = await authority.execute_tool_call(
+        ToolCallRequest(
+            run_id='run-1',
+            participant_id='leader',
+            tool_call_id='call-1',
+            tool_id='tool:builtin:update_skill:update_skill',
+            arguments={'id': 'demo-skill', 'source_path': '/workspace/demo-skill'},
+            idempotency_key='tool:leader:call-1:1',
+        )
+    )
+
+    assert result['status'] == 'success'
+    assert calls == [('update_skill', 'demo-skill', '/workspace/demo-skill')]
+    assert set(authority.registry) == {
+        'tool:builtin:update_skill:update_skill',
+        'tool:builtin:read_skill:read_skill',
+    }
+
+
+@pytest.mark.asyncio
 async def test_service_tool_authority_rebuilds_available_builtin_when_snapshot_has_unavailable_builtin(
     monkeypatch,
 ):

@@ -445,6 +445,7 @@ async def test_agent_mode_product_chat_auto_attaches_accessible_system_terminal(
     runtime_payload = chat_entry_patches.runtime_calls[0]
     assert response['status'] is True
     assert chat_entry_patches.process_payload_calls[0]['terminal_id'] == 'terminal-system-2'
+    assert runtime_payload['tool_access_envelope']['metadata']['terminal_id'] == 'terminal-system-2'
     assert runtime_payload['tool_access_envelope']['tools'] == [
         {
             'id': 'tool:terminal:terminal-system-2:run_command',

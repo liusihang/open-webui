@@ -790,6 +790,35 @@ def test_terminal_headers_include_session_and_system_oauth_token():
     assert cookies == {'session': 'cookie'}
 
 
+def test_terminal_skill_package_session_auth_uses_minted_terminal_token(monkeypatch):
+    captured = {}
+
+    def fake_create_terminal_session_token(user):
+        captured['user_id'] = user.id
+        return f'minted-token-for-{user.id}'
+
+    monkeypatch.setattr(terminal_packages, 'create_terminal_session_token', fake_create_terminal_session_token)
+
+    request = types.SimpleNamespace(
+        cookies={'session': 'cookie'},
+        state=types.SimpleNamespace(token=types.SimpleNamespace(credentials='service-token')),
+    )
+    headers, cookies = terminal_packages._terminal_headers_and_cookies(
+        request,
+        {'auth_type': 'session'},
+        types.SimpleNamespace(id='user-1'),
+        metadata={'chat_id': 'chat-1'},
+    )
+
+    assert captured['user_id'] == 'user-1'
+    assert headers == {
+        'X-User-Id': 'user-1',
+        'X-Session-Id': 'chat-1',
+        'Authorization': 'Bearer minted-token-for-user-1',
+    }
+    assert cookies == {'session': 'cookie'}
+
+
 @pytest.mark.asyncio
 async def test_package_update_uses_transaction_facade_and_does_not_independently_upsert(monkeypatch):
     files = {

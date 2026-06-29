@@ -122,16 +122,25 @@ def get_agent_model_authority(request: Request) -> AgentModelAuthority:
 
 
 async def get_agent_tool_authority(request: Request, run_id: str | None = None) -> AgentToolAuthority:
+    registry = None
+    if run_id:
+        registries = getattr(request.app.state, 'AGENT_TOOL_REGISTRIES', None)
+        if isinstance(registries, dict):
+            registry = registries.get(run_id)
+        if registry is None:
+            registry = await _rebuild_agent_tool_registry(request, run_id)
+        if registry is not None:
+            return AgentToolAuthority(
+                operation_store=get_agent_operation_store(request),
+                registry=registry,
+                resource_manager=getattr(request.app.state, 'AGENT_RUN_RESOURCE_MANAGER', None),
+                artifact_registrar=getattr(request.app.state, 'AGENT_RUN_ARTIFACT_REGISTRAR', None),
+            )
+
     authority = getattr(request.app.state, 'AGENT_TOOL_AUTHORITY', None)
     if authority is not None:
         return authority
 
-    registry = None
-    registries = getattr(request.app.state, 'AGENT_TOOL_REGISTRIES', None)
-    if run_id and isinstance(registries, dict):
-        registry = registries.get(run_id)
-    if registry is None and run_id:
-        registry = await _rebuild_agent_tool_registry(request, run_id)
     if registry is None:
         registry = getattr(request.app.state, 'AGENT_TOOL_REGISTRY', None)
     if registry is None:
@@ -228,6 +237,8 @@ async def _rebuild_builtin_tools(
             '__event_call__': event_call,
             '__chat_id__': metadata.get('chat_id'),
             '__message_id__': metadata.get('assistant_message_id'),
+            '__terminal_id__': metadata.get('terminal_id'),
+            '__skill_ids__': metadata.get('skill_ids') or [],
         },
         _features_for_builtin_tools(requested_names),
         _model_for_builtin_rebuild(getattr(run, 'leader_model_id', None), requested_names),
@@ -441,6 +452,8 @@ def _agent_run_metadata(run) -> dict[str, Any]:
         'assistant_message_id': getattr(run, 'assistant_message_id', None),
         'agent_run_id': getattr(run, 'id', None),
         'session_id': snapshot_metadata.get('session_id'),
+        'terminal_id': snapshot_metadata.get('terminal_id'),
+        'skill_ids': snapshot_metadata.get('skill_ids') or [],
         'files': snapshot_metadata.get('files') or [],
     }
 

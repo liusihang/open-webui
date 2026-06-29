@@ -16,6 +16,7 @@ from open_webui.env import AIOHTTP_CLIENT_SESSION_SSL, AIOHTTP_CLIENT_TIMEOUT_TO
 from open_webui.models.groups import Groups
 from open_webui.storage.provider import Storage
 from open_webui.utils.access_control import has_connection_access
+from open_webui.utils.auth import create_terminal_session_token
 from open_webui.utils.skill_packages import (
     MAX_SKILL_PACKAGE_FILES,
     MAX_SKILL_PACKAGE_SINGLE_TEXT_BYTES,
@@ -419,11 +420,7 @@ def _terminal_headers_and_cookies(
         headers['Authorization'] = f'Bearer {connection.get("key", "")}'
     elif auth_type == 'session':
         cookies = getattr(request, 'cookies', {}) or {}
-        token = getattr(getattr(request, 'state', None), 'token', None)
-        credentials = getattr(token, 'credentials', None)
-        if not credentials:
-            raise TerminalSkillPackageError('Missing session token for terminal access')
-        headers['Authorization'] = f'Bearer {credentials}'
+        headers['Authorization'] = f'Bearer {create_terminal_session_token(user_ref)}'
     elif auth_type == 'system_oauth':
         cookies = getattr(request, 'cookies', {}) or {}
         token = (oauth_token or {}).get('access_token')

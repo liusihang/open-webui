@@ -1,5 +1,6 @@
 import json
 
+import httpx
 import pytest
 import respx
 from httpx import Response
@@ -168,6 +169,50 @@ async def test_append_event_treats_409_with_empty_body_as_idempotency_conflict()
         )
 
     assert response["detail"] == "idempotency_conflict"
+
+
+@pytest.mark.asyncio
+async def test_append_event_retries_timeout_with_same_idempotency_key(monkeypatch) -> None:
+    calls = []
+
+    class FakeAsyncClient:
+        def __init__(self, *, timeout):
+            self.timeout = timeout
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return None
+
+        async def post(self, url, headers=None, json=None):
+            calls.append({'url': url, 'headers': headers, 'json': json, 'timeout': self.timeout})
+            if len(calls) == 1:
+                raise httpx.ReadTimeout('event append still in flight')
+            return Response(409, json={'detail': 'idempotency_conflict', 'seq': 12})
+
+    monkeypatch.setattr("agentscope_runtime.openwebui_client.httpx.AsyncClient", FakeAsyncClient)
+    client = OpenWebUIClient(
+        base_url="https://openwebui.test",
+        service_token="owui-token",
+        timeout=3.0,
+    )
+
+    response = await client.append_event(
+        run_id="run-1",
+        idempotency_key="evt:session:run-running",
+        event_type="run.running",
+        summary="Agent runtime accepted run.",
+        payload={"runtime_session_id": "session"},
+        participant_id="leader",
+        phase="running",
+    )
+
+    assert response == {'detail': 'idempotency_conflict', 'seq': 12}
+    assert len(calls) == 2
+    assert calls[0]['json'] == calls[1]['json']
+    assert calls[0]['headers']['X-Agent-Idempotency-Key'] == 'evt:session:run-running'
+    assert calls[1]['headers']['X-Agent-Idempotency-Key'] == 'evt:session:run-running'
 
 
 @pytest.mark.asyncio

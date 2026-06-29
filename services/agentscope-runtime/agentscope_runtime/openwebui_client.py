@@ -63,12 +63,20 @@ class OpenWebUIClient:
             "X-Agent-Idempotency-Key": idempotency_key,
         }
 
-        async with httpx.AsyncClient(timeout=self._timeout) as client:
-            response = await client.post(
-                url,
-                headers=headers,
-                json=body.model_dump(mode="json"),
-            )
+        payload = body.model_dump(mode="json")
+        response = None
+        for attempt in range(2):
+            try:
+                async with httpx.AsyncClient(timeout=self._timeout) as client:
+                    response = await client.post(
+                        url,
+                        headers=headers,
+                        json=payload,
+                    )
+                break
+            except httpx.TimeoutException:
+                if attempt == 1:
+                    raise
 
         if response.status_code == 409:
             return _safe_response_json(response) or {
