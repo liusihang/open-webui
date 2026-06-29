@@ -961,6 +961,103 @@ async def test_general_agent_stops_when_tool_authority_requires_approval() -> No
 
 
 @pytest.mark.asyncio
+async def test_rejected_approval_notification_marks_waiting_run_failed() -> None:
+    class ApprovalRequiredToolClient(RecordingOpenWebUIClient):
+        async def call_model(self, **kwargs: object) -> dict:
+            await super().call_model(**kwargs)  # type: ignore[arg-type]
+            return {
+                "status": "success",
+                "response": {
+                    "choices": [
+                        {
+                            "message": {
+                                "content": "I need approval.",
+                                "tool_calls": [
+                                    {
+                                        "id": "call_delete_1",
+                                        "type": "function",
+                                        "function": {
+                                            "name": "delete_file",
+                                            "arguments": "{\"path\":\"/tmp/report.txt\"}",
+                                        },
+                                    }
+                                ],
+                            }
+                        }
+                    ]
+                },
+            }
+
+        async def call_tool(self, **kwargs: object) -> dict:
+            await super().call_tool(**kwargs)  # type: ignore[arg-type]
+            return {
+                "status": "approval_required",
+                "content": "Approval is required before deleting the file.",
+                "approval_request_id": "approval-1",
+            }
+
+    openwebui_client = ApprovalRequiredToolClient()
+    async with make_client(openwebui_client, auto_finalize_ordinary_qa=True) as client:
+        response = await client.post(
+            "/v1/openwebui/runs",
+            headers={"Authorization": f"Bearer {SERVICE_TOKEN}"},
+            json={
+                "run_id": "run-rejected-approval",
+                "chat_id": "chat-1",
+                "leader_model_id": "model-a",
+                "messages": [{"role": "user", "content": "Delete the file."}],
+                "tool_access_envelope": {
+                    "tools": [
+                        {
+                            "id": "tool:terminal:main:delete_file",
+                            "name": "delete_file",
+                            "type": "terminal",
+                            "schema": {
+                                "name": "delete_file",
+                                "description": "Delete a file.",
+                                "parameters": {
+                                    "type": "object",
+                                    "properties": {"path": {"type": "string"}},
+                                    "required": ["path"],
+                                },
+                            },
+                        }
+                    ]
+                },
+            },
+        )
+        assert response.status_code == 202
+
+        for _ in range(40):
+            status = await client.get(
+                "/v1/openwebui/runs/run-rejected-approval/status",
+                headers={"Authorization": f"Bearer {SERVICE_TOKEN}"},
+            )
+            if status.json()["state"] == "waiting_approval":
+                break
+            await asyncio.sleep(0.01)
+        assert status.json()["state"] == "waiting_approval"
+
+        decision = await client.post(
+            "/v1/openwebui/runs/run-rejected-approval/approval-decision",
+            headers={"Authorization": f"Bearer {SERVICE_TOKEN}"},
+            json={
+                "approval_id": "approval-1",
+                "decision": "rejected",
+                "tool_call_id": "tool-call-1",
+                "tool_id": "tool:terminal:main:delete_file",
+                "tool_name": "delete_file",
+            },
+        )
+
+        assert decision.status_code == 200
+        assert decision.json()["state"] == "failed"
+        assert openwebui_client.state_transitions[-1]["to_state"] == "failed"
+        assert openwebui_client.events[-1]["event_type"] == "run.failed"
+        assert openwebui_client.events[-1]["payload"]["error"]["code"] == "approval_rejected"
+
+
+@pytest.mark.asyncio
 async def test_general_agent_finalizes_with_code_interpreter_system_pyodide_message() -> None:
     openwebui_client = RecordingOpenWebUIClient()
     openwebui_client.model_responses = [

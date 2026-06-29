@@ -84,6 +84,15 @@ class RunStatusResponse(BaseModel):
     cancel_requested: bool = False
 
 
+class ApprovalDecisionNotification(BaseModel):
+    approval_id: str
+    decision: str
+    tool_call_id: str | None = None
+    tool_id: str | None = None
+    tool_name: str | None = None
+    result: dict[str, Any] | None = None
+
+
 class AppendEventRequest(BaseModel):
     idempotency_key: str
     run_id: str

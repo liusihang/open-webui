@@ -21,7 +21,12 @@ from agentscope_runtime.agentscope_bridge import (
     OpenWebUIToolApprovalRequired,
 )
 from agentscope_runtime.openwebui_client import OpenWebUIClient
-from agentscope_runtime.schemas import RunStartRequest, RunStartResponse, RunStatusResponse
+from agentscope_runtime.schemas import (
+    ApprovalDecisionNotification,
+    RunStartRequest,
+    RunStartResponse,
+    RunStatusResponse,
+)
 from agentscope_runtime.subagents import (
     AgentScopeSubagentAdapter,
     LEADER_PARTICIPANT_ID,
@@ -48,6 +53,11 @@ PROVIDER_CONFIGURATION_UNAVAILABLE_SUMMARY = "The selected model provider is not
 class ProviderConfigurationUnavailable(RuntimeError):
     code = "provider_configuration_unavailable"
     user_summary = PROVIDER_CONFIGURATION_UNAVAILABLE_SUMMARY
+
+
+class ApprovalRejectedError(RuntimeError):
+    code = "approval_rejected"
+    user_summary = "Tool approval was rejected."
 
 
 class RuntimeCallbackClient(Protocol):
@@ -298,6 +308,52 @@ def create_app(
         session = runtime_store.get(run_id)
         if session is None:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="run not found")
+        return _status(session)
+
+    @app.post(
+        "/v1/openwebui/runs/{run_id}/approval-decision",
+        response_model=RunStatusResponse,
+        dependencies=[Depends(require_service_token)],
+    )
+    async def notify_approval_decision(
+        run_id: str,
+        decision: ApprovalDecisionNotification,
+    ) -> RunStatusResponse:
+        session = runtime_store.get(run_id)
+        if session is None:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="run not found")
+        if decision.decision != "rejected":
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail={
+                    "code": "approval_resume_not_supported",
+                    "message": "Approved approval decisions require a backend/runtime resume contract.",
+                },
+            )
+        if session.state != "waiting_approval":
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail={
+                    "code": "run_not_waiting_approval",
+                    "message": f"Run {run_id} is {session.state}, not waiting_approval.",
+                },
+            )
+
+        payload = {
+            "runtime_session_id": session.runtime_session_id,
+            "approval_id": decision.approval_id,
+            "decision": decision.decision,
+            "tool_call_id": decision.tool_call_id,
+            "tool_id": decision.tool_id,
+            "tool_name": decision.tool_name,
+        }
+        await _mark_session_failed(
+            callback_client,
+            session,
+            ApprovalRejectedError(_approval_rejected_message(decision)),
+            stage="approval-decision",
+            payload=payload,
+        )
         return _status(session)
 
     return app
@@ -1058,10 +1114,12 @@ async def _mark_session_failed(
     exc: Exception,
     *,
     stage: str = "unknown",
+    payload: dict[str, Any] | None = None,
 ) -> None:
     session.state = "failed"
     session.updated_at = time.time()
     summary = getattr(exc, "user_summary", "Agent runtime finalization failed.")
+    event_payload = {"runtime_session_id": session.runtime_session_id, **(payload or {})}
     error = {
         "code": getattr(exc, "code", "runtime_finalization_failed"),
         "message": _format_finalization_error_message(exc, stage),
@@ -1074,7 +1132,7 @@ async def _mark_session_failed(
             from_states=["queued", "running", "waiting_approval", "finalizing"],
             to_state="failed",
             reason="runtime finalization failed",
-            payload={"error": error, "runtime_session_id": session.runtime_session_id},
+            payload={"error": error, **event_payload},
         )
     except Exception:
         pass
@@ -1084,12 +1142,17 @@ async def _mark_session_failed(
             idempotency_key=f"evt:{session.runtime_session_id}:run-failed",
             event_type="run.failed",
             summary=summary,
-            payload={"error": error, "runtime_session_id": session.runtime_session_id},
+            payload={"error": error, **event_payload},
             participant_id="leader",
             phase="failed",
         )
     except Exception:
         pass
+
+
+def _approval_rejected_message(decision: ApprovalDecisionNotification) -> str:
+    tool_name = decision.tool_name or decision.tool_id or "tool call"
+    return f"User rejected approval {decision.approval_id} for {tool_name}."
 
 
 def _provider_configuration_error_from_model_response(response: dict[str, Any]) -> Exception | None:
