@@ -144,6 +144,120 @@ describe('buildAgentTranscriptModel', () => {
 		expect(model.summary.artifactCount).toBe(1);
 	});
 
+	it('extracts artifact details from runtime and service nested artifact payloads', () => {
+		const state = foldAgentRunEvents([
+			agentRunEventFixture({
+				seq: 1,
+				event_type: 'artifact.registered',
+				summary: 'Artifact runtime-report.txt is ready.',
+				payload: {
+					tool_call_id: 'call-runtime',
+					artifact: {
+						id: 'artifact-runtime',
+						name: 'runtime-report.txt',
+						path: '/workspace/agent-runs/run-1/outputs/runtime-report.txt',
+						mime_type: 'text/plain'
+					}
+				}
+			}),
+			agentRunEventFixture({
+				seq: 2,
+				event_type: 'artifact.registered',
+				summary: 'Artifact registered: /workspace/agent-runs/run-1/outputs/service-report.md',
+				payload: {
+					tool_call_id: 'call-service',
+					artifacts: [
+						{
+							id: 'artifact-service',
+							name: 'service-report.md',
+							path: '/workspace/agent-runs/run-1/outputs/service-report.md',
+							mime_type: 'text/markdown'
+						}
+					]
+				}
+			})
+		]);
+
+		const model = buildAgentTranscriptModel(state);
+		const artifacts = model.parts.filter((part) => part.kind === 'artifact');
+		expect(artifacts).toHaveLength(2);
+		expect(artifacts[0]).toMatchObject({
+			artifactId: 'artifact-runtime',
+			name: 'runtime-report.txt',
+			path: '/workspace/agent-runs/run-1/outputs/runtime-report.txt',
+			mimeType: 'text/plain'
+		});
+		expect(artifacts[1]).toMatchObject({
+			artifactId: 'artifact-service',
+			name: 'service-report.md',
+			path: '/workspace/agent-runs/run-1/outputs/service-report.md',
+			mimeType: 'text/markdown'
+		});
+	});
+
+	it('uses approval.completed decision when resolving approval status', () => {
+		const model = buildAgentTranscriptModel(
+			foldAgentRunEvents([
+				agentRunEventFixture({
+					seq: 1,
+					event_type: 'approval.requested',
+					summary: '',
+					payload: { approval_id: 'appr-1', action: 'delete report.txt' }
+				}),
+				agentRunEventFixture({
+					seq: 2,
+					event_type: 'approval.completed',
+					summary: '',
+					payload: { approval_id: 'appr-1', decision: 'rejected' }
+				})
+			])
+		);
+
+		const approval = model.parts.find((part) => part.kind === 'approval');
+		if (!approval || approval.kind !== 'approval') {
+			throw new Error('expected approval part');
+		}
+		expect(approval.status).toBe('rejected');
+	});
+
+	it('renders successful runtime subagent completion with worker name and result content', () => {
+		const model = buildAgentTranscriptModel(
+			foldAgentRunEvents([
+				agentRunEventFixture({
+					seq: 1,
+					event_type: 'subagent.created',
+					participant_id: 'subagent:run-1:1',
+					summary: 'Subagent Researcher started.',
+					payload: {
+						participant_id: 'subagent:run-1:1',
+						name: 'Researcher',
+						task: 'Find the key fact'
+					}
+				}),
+				agentRunEventFixture({
+					seq: 2,
+					event_type: 'subagent.completed',
+					participant_id: 'subagent:run-1:1',
+					summary: 'Subagent Researcher completed.',
+					payload: {
+						participant_id: 'subagent:run-1:1',
+						name: 'Researcher',
+						status: 'completed',
+						content: 'Subagent found the key fact.'
+					}
+				})
+			])
+		);
+
+		const subagent = model.parts.find((part) => part.kind === 'subagent');
+		if (!subagent || subagent.kind !== 'subagent') {
+			throw new Error('expected subagent part');
+		}
+		expect(subagent.status).toBe('done');
+		expect(subagent.participantName).toBe('Researcher');
+		expect(subagent.resultSummary).toBe('Subagent found the key fact.');
+	});
+
 	it('renders run.failed as a transcript error part that defaults to expanded', () => {
 		const state = foldAgentRunEvents([
 			agentRunEventFixture({ seq: 1, event_type: 'run.running' }),

@@ -145,7 +145,10 @@ const buildParts = (state: AgentRunEventState): AgentTranscriptModelPart[] => {
 				break;
 			}
 			case 'artifact.registered': {
-				const artifactId = readPayloadString(item.details, 'artifact_id', 'id');
+				const artifactDetails = extractArtifactPayload(item.details);
+				const artifactId =
+					readPayloadString(artifactDetails, 'artifact_id', 'id') ??
+					readPayloadString(item.details, 'artifact_id', 'id');
 				const key = artifactId ?? `seq:${item.seq}`;
 				if (!artifacts.has(key)) {
 					artifacts.set(key, item);
@@ -278,7 +281,8 @@ const approvalAccumulatorToPart = (acc: ApprovalAccumulator): AgentTranscriptApp
 	const last = acc.lastItem;
 	const details = pickRicherDetails(acc.firstItem, acc.lastItem);
 	const action = readPayloadString(details, 'action', 'description');
-	const status = last.eventType === 'approval.completed' ? resolveApprovalStatus(details) : 'pending';
+	const status =
+		last.eventType === 'approval.completed' ? resolveApprovalStatus(last.details) : 'pending';
 	const summary = last.summary || (action ? `Approval: ${action}` : 'Approval requested');
 	return {
 		kind: 'approval',
@@ -299,7 +303,7 @@ const approvalAccumulatorToPart = (acc: ApprovalAccumulator): AgentTranscriptApp
 const artifactItemToPart = (
 	item: AgentRunEventViewItem
 ): AgentTranscriptArtifactPart | null => {
-	const details = item.details;
+	const details = extractArtifactPayload(item.details);
 	if (!details) {
 		return null;
 	}
@@ -328,14 +332,14 @@ const subagentAccumulatorToPart = (acc: SubagentAccumulator): AgentTranscriptSub
 	const last = acc.lastItem;
 	const details = pickRicherDetails(acc.firstItem, acc.lastItem);
 	const participantName =
-		readPayloadString(details, 'participant_name') ?? acc.participantId;
+		readPayloadString(details, 'participant_name', 'name') ?? acc.participantId;
 	const status =
 		last.eventType === 'subagent.failed'
 			? 'error'
 			: last.eventType === 'subagent.completed'
 				? 'done'
 				: 'running';
-	const resultSummary = readPayloadString(details, 'result_summary');
+	const resultSummary = readPayloadString(details, 'result_summary', 'content');
 	const summary = last.summary || (participantName ? `${status === 'error' ? `${participantName} failed` : `Completed ${participantName}`}` : 'Subagent');
 	return {
 		kind: 'subagent',
@@ -382,11 +386,33 @@ const resolveToolStatus = (
 const resolveApprovalStatus = (
 	details: AgentRunEventPayload | null
 ): AgentTranscriptApprovalPart['status'] => {
-	const raw = readPayloadString(details, 'status');
+	const raw = readPayloadString(details, 'status', 'decision');
 	if (raw === 'approved' || raw === 'rejected') {
 		return raw;
 	}
 	return 'approved';
+};
+
+const extractArtifactPayload = (
+	payload: AgentRunEventPayload | null | undefined
+): AgentRunEventPayload | null => {
+	if (!payload) {
+		return null;
+	}
+
+	if (isPlainPayload(payload.artifact)) {
+		return payload.artifact;
+	}
+
+	const artifacts = payload.artifacts;
+	if (Array.isArray(artifacts)) {
+		const firstArtifact = artifacts.find(isPlainPayload);
+		if (firstArtifact) {
+			return firstArtifact;
+		}
+	}
+
+	return payload;
 };
 
 const pickRicherDetails = (
@@ -418,6 +444,10 @@ const readPayloadString = (
 		}
 	}
 	return null;
+};
+
+const isPlainPayload = (value: unknown): value is AgentRunEventPayload => {
+	return typeof value === 'object' && value !== null && !Array.isArray(value);
 };
 
 const extractToolNameFromSummary = (summary: string): string | null => {
