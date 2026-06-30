@@ -141,14 +141,14 @@
 	</Tooltip>
 	<div slot="content">
 		<div
-			class="min-w-70 max-w-70 rounded-2xl px-1 py-1 border border-gray-100 dark:border-gray-800 z-50 bg-white dark:bg-gray-850 dark:text-white shadow-lg max-h-72 overflow-y-auto overflow-x-hidden scrollbar-thin"
+			class="z-50 max-h-72 min-w-80 max-w-80 overflow-x-hidden overflow-y-auto rounded-lg border border-gray-200 bg-white p-1.5 text-sm shadow-sm scrollbar-thin dark:border-gray-800 dark:bg-gray-950 dark:text-white"
 		>
 			{#if tab === ''}
 				<div in:fly={{ x: -20, duration: 150 }}>
 					{#if tools}
 						{#if Object.keys(tools).length > 0}
 							<button
-								class="flex w-full justify-between gap-2 items-center px-3 py-1.5 text-sm cursor-pointer rounded-xl hover:bg-gray-50 dark:hover:bg-gray-800/50"
+								class="flex w-full cursor-pointer items-center justify-between gap-2 rounded-md px-2.5 py-2 text-sm transition hover:bg-gray-100/70 dark:hover:bg-gray-800/70"
 								on:click={() => {
 									tab = 'tools';
 								}}
@@ -170,7 +170,7 @@
 
 						{#if skills && Object.keys(skills).length > 0}
 							<button
-								class="flex w-full justify-between gap-2 items-center px-3 py-1.5 text-sm cursor-pointer rounded-xl hover:bg-gray-50 dark:hover:bg-gray-800/50"
+								class="flex w-full cursor-pointer items-center justify-between gap-2 rounded-md px-2.5 py-2 text-sm transition hover:bg-gray-100/70 dark:hover:bg-gray-800/70"
 								on:click={() => {
 									tab = 'skills';
 								}}
@@ -199,7 +199,7 @@
 						{#each toggleFilters.sort( (a, b) => a.name.localeCompare( b.name, undefined, { sensitivity: 'base' } ) ) as filter, filterIdx (filter.id)}
 							<Tooltip content={filter?.description} placement="top-start">
 								<button
-									class="flex w-full justify-between gap-2 items-center px-3 py-1.5 text-sm cursor-pointer rounded-xl hover:bg-gray-50 dark:hover:bg-gray-800/50"
+									class="flex w-full cursor-pointer items-center justify-between gap-2 rounded-md px-2.5 py-2 text-sm transition hover:bg-gray-100/70 dark:hover:bg-gray-800/70"
 									on:click={() => {
 										if (selectedFilterIds.includes(filter.id)) {
 											selectedFilterIds = selectedFilterIds.filter((id) => id !== filter.id);
@@ -269,7 +269,7 @@
 					{#if showWebSearchButton}
 						<Tooltip content={$i18n.t('Search the internet')} placement="top-start">
 							<button
-								class="flex w-full justify-between gap-2 items-center px-3 py-1.5 text-sm cursor-pointer rounded-xl hover:bg-gray-50 dark:hover:bg-gray-800/50"
+								class="flex w-full cursor-pointer items-center justify-between gap-2 rounded-md px-2.5 py-2 text-sm transition hover:bg-gray-100/70 dark:hover:bg-gray-800/70"
 								on:click={() => {
 									webSearchEnabled = !webSearchEnabled;
 								}}
@@ -300,7 +300,7 @@
 					{#if showImageGenerationButton}
 						<Tooltip content={$i18n.t('Generate an image')} placement="top-start">
 							<button
-								class="flex w-full justify-between gap-2 items-center px-3 py-1.5 text-sm cursor-pointer rounded-xl hover:bg-gray-50 dark:hover:bg-gray-800/50"
+								class="flex w-full cursor-pointer items-center justify-between gap-2 rounded-md px-2.5 py-2 text-sm transition hover:bg-gray-100/70 dark:hover:bg-gray-800/70"
 								on:click={() => {
 									const next = !imageGenerationEnabled;
 									imageGenerationEnabled = next;
@@ -333,7 +333,7 @@
 					{#if showCodeInterpreterButton}
 						<Tooltip content={$i18n.t('Execute code for analysis')} placement="top-start">
 							<button
-								class="flex w-full justify-between gap-2 items-center px-3 py-1.5 text-sm cursor-pointer rounded-xl hover:bg-gray-50 dark:hover:bg-gray-800/50"
+								class="flex w-full cursor-pointer items-center justify-between gap-2 rounded-md px-2.5 py-2 text-sm transition hover:bg-gray-100/70 dark:hover:bg-gray-800/70"
 								aria-pressed={codeInterpreterEnabled}
 								aria-label={codeInterpreterEnabled
 									? $i18n.t('Disable Code Interpreter')
@@ -368,7 +368,7 @@
 			{:else if tab === 'tools' && tools}
 				<div in:fly={{ x: 20, duration: 150 }}>
 					<button
-						class="flex w-full justify-between gap-2 items-center px-3 py-1.5 text-sm cursor-pointer rounded-xl hover:bg-gray-50 dark:hover:bg-gray-800/50"
+						class="flex w-full cursor-pointer items-center justify-between gap-2 rounded-md px-2.5 py-2 text-sm transition hover:bg-gray-100/70 dark:hover:bg-gray-800/70"
 						on:click={() => {
 							tab = '';
 						}}
@@ -385,7 +385,7 @@
 
 					{#each Object.keys(tools) as toolId}
 						<button
-							class="relative flex w-full justify-between gap-2 items-center px-3 py-1.5 text-sm cursor-pointer rounded-xl hover:bg-gray-50 dark:hover:bg-gray-800/50"
+							class="relative flex w-full cursor-pointer items-center justify-between gap-2 rounded-md px-2.5 py-2 text-sm transition hover:bg-gray-100/70 dark:hover:bg-gray-800/70"
 							on:click={async (e) => {
 								if (!(tools[toolId]?.authenticated ?? true)) {
 									e.preventDefault();
@@ -414,7 +414,7 @@
 						>
 							{#if !(tools[toolId]?.authenticated ?? true)}
 								<!-- make it slighly darker and not clickable -->
-								<div class="absolute inset-0 opacity-50 rounded-xl cursor-pointer z-10" />
+								<div class="absolute inset-0 z-10 cursor-pointer rounded-md opacity-50" />
 							{/if}
 							<div class="flex-1 truncate">
 								<div class="flex flex-1 gap-2 items-center">
@@ -492,7 +492,7 @@
 			{:else if tab === 'skills' && skills}
 				<div in:fly={{ x: 20, duration: 150 }}>
 					<button
-						class="flex w-full justify-between gap-2 items-center px-3 py-1.5 text-sm cursor-pointer rounded-xl hover:bg-gray-50 dark:hover:bg-gray-800/50"
+						class="flex w-full cursor-pointer items-center justify-between gap-2 rounded-md px-2.5 py-2 text-sm transition hover:bg-gray-100/70 dark:hover:bg-gray-800/70"
 						on:click={() => {
 							tab = '';
 						}}
@@ -509,7 +509,7 @@
 
 					{#each Object.keys(skills) as skillId}
 						<button
-							class="relative flex w-full justify-between gap-2 items-center px-3 py-1.5 text-sm cursor-pointer rounded-xl hover:bg-gray-50 dark:hover:bg-gray-800/50"
+							class="relative flex w-full cursor-pointer items-center justify-between gap-2 rounded-md px-2.5 py-2 text-sm transition hover:bg-gray-100/70 dark:hover:bg-gray-800/70"
 							on:click={async () => {
 								skills[skillId].enabled = !skills[skillId].enabled;
 

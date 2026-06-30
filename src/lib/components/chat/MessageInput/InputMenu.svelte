@@ -122,7 +122,7 @@
 
 	<div slot="content">
 		<div
-			class="w-70 rounded-2xl px-1 py-1 border border-gray-100 dark:border-gray-800 z-50 bg-white dark:bg-gray-850 dark:text-white shadow-lg max-h-72 overflow-y-auto overflow-x-hidden scrollbar-thin transition"
+			class="z-50 max-h-72 w-80 overflow-x-hidden overflow-y-auto rounded-lg border border-gray-200 bg-white p-1.5 text-sm shadow-sm transition scrollbar-thin dark:border-gray-800 dark:bg-gray-950 dark:text-white"
 		>
 			{#if tab === ''}
 				<div in:fly={{ x: -20, duration: 150 }}>
@@ -135,7 +135,7 @@
 						className="w-full"
 					>
 						<button
-							class="flex w-full gap-2 items-center px-3 py-1.5 text-sm select-none cursor-pointer hover:bg-gray-50 dark:hover:bg-gray-800/50 rounded-xl {!fileUploadEnabled
+							class="flex w-full cursor-pointer select-none items-center gap-2 rounded-md px-2.5 py-2 text-sm transition hover:bg-gray-100/70 dark:hover:bg-gray-800/70 {!fileUploadEnabled
 								? 'opacity-50'
 								: ''}"
 							type="button"
@@ -161,7 +161,7 @@
 						className="w-full"
 					>
 						<button
-							class="flex w-full gap-2 items-center px-3 py-1.5 text-sm select-none cursor-pointer hover:bg-gray-50 dark:hover:bg-gray-800/50 rounded-xl {!fileUploadEnabled
+							class="flex w-full cursor-pointer select-none items-center gap-2 rounded-md px-2.5 py-2 text-sm transition hover:bg-gray-100/70 dark:hover:bg-gray-800/70 {!fileUploadEnabled
 								? 'opacity-50'
 								: ''}"
 							type="button"
@@ -192,7 +192,7 @@
 						className="w-full"
 					>
 						<button
-							class="flex w-full gap-2 items-center px-3 py-1.5 text-sm select-none cursor-pointer hover:bg-gray-50 dark:hover:bg-gray-800 rounded-xl {!webUploadEnabled
+							class="flex w-full cursor-pointer select-none items-center gap-2 rounded-md px-2.5 py-2 text-sm transition hover:bg-gray-100/70 dark:hover:bg-gray-800/70 {!webUploadEnabled
 								? 'opacity-50'
 								: ''}"
 							type="button"
@@ -217,7 +217,7 @@
 						className="w-full"
 					>
 						<button
-							class="flex gap-2 w-full items-center px-3 py-1.5 text-sm select-none cursor-pointer hover:bg-gray-50 dark:hover:bg-gray-800/50 rounded-xl {!fileUploadEnabled
+							class="flex w-full cursor-pointer select-none items-center gap-2 rounded-md px-2.5 py-2 text-sm transition hover:bg-gray-100/70 dark:hover:bg-gray-800/70 {!fileUploadEnabled
 								? 'opacity-50'
 								: ''}"
 							on:click={() => {
@@ -250,7 +250,7 @@
 							className="w-full"
 						>
 							<button
-								class="flex gap-2 w-full items-center px-3 py-1.5 text-sm select-none cursor-pointer hover:bg-gray-50 dark:hover:bg-gray-800/50 rounded-xl {!fileUploadEnabled
+								class="flex w-full cursor-pointer select-none items-center gap-2 rounded-md px-2.5 py-2 text-sm transition hover:bg-gray-100/70 dark:hover:bg-gray-800/70 {!fileUploadEnabled
 									? 'opacity-50'
 									: ''}"
 								on:click={() => {
@@ -281,7 +281,7 @@
 						className="w-full"
 					>
 						<button
-							class="flex gap-2 w-full items-center px-3 py-1.5 text-sm cursor-pointer hover:bg-gray-50 dark:hover:bg-gray-800/50 rounded-xl {!fileUploadEnabled
+							class="flex w-full cursor-pointer items-center gap-2 rounded-md px-2.5 py-2 text-sm transition hover:bg-gray-100/70 dark:hover:bg-gray-800/70 {!fileUploadEnabled
 								? 'opacity-50'
 								: ''}"
 							on:click={() => {
@@ -311,7 +311,7 @@
 						className="w-full"
 					>
 						<button
-							class="flex gap-2 w-full items-center px-3 py-1.5 text-sm cursor-pointer hover:bg-gray-50 dark:hover:bg-gray-800/50 rounded-xl {!fileUploadEnabled
+							class="flex w-full cursor-pointer items-center gap-2 rounded-md px-2.5 py-2 text-sm transition hover:bg-gray-100/70 dark:hover:bg-gray-800/70 {!fileUploadEnabled
 								? 'opacity-50'
 								: ''}"
 							on:click={() => {
@@ -335,7 +335,7 @@
 					{#if fileUploadEnabled}
 						{#if $config?.features?.enable_google_drive_integration}
 							<button
-								class="flex w-full gap-2 items-center px-3 py-1.5 text-sm select-none cursor-pointer hover:bg-gray-50 dark:hover:bg-gray-800/50 rounded-xl"
+								class="flex w-full cursor-pointer select-none items-center gap-2 rounded-md px-2.5 py-2 text-sm transition hover:bg-gray-100/70 dark:hover:bg-gray-800/70"
 								type="button"
 								on:click={() => {
 									uploadGoogleDriveHandler();
@@ -374,7 +374,7 @@
 
 						{#if $config?.features?.enable_onedrive_integration && ($config?.features?.enable_onedrive_personal || $config?.features?.enable_onedrive_business)}
 							<button
-								class="flex gap-2 w-full items-center px-3 py-1.5 text-sm select-none cursor-pointer hover:bg-gray-50 dark:hover:bg-gray-800/50 rounded-xl {!fileUploadEnabled
+								class="flex w-full cursor-pointer select-none items-center gap-2 rounded-md px-2.5 py-2 text-sm transition hover:bg-gray-100/70 dark:hover:bg-gray-800/70 {!fileUploadEnabled
 									? 'opacity-50'
 									: ''}"
 								on:click={() => {
@@ -483,7 +483,7 @@
 			{:else if tab === 'knowledge'}
 				<div in:fly={{ x: 20, duration: 150 }}>
 					<button
-						class="flex w-full justify-between gap-2 items-center px-3 py-1.5 text-sm select-none cursor-pointer rounded-xl hover:bg-gray-50 dark:hover:bg-gray-800/50"
+						class="flex w-full cursor-pointer select-none items-center justify-between gap-2 rounded-md px-2.5 py-2 text-sm transition hover:bg-gray-100/70 dark:hover:bg-gray-800/70"
 						on:click={() => {
 							tab = '';
 						}}
@@ -502,7 +502,7 @@
 			{:else if tab === 'notes'}
 				<div in:fly={{ x: 20, duration: 150 }}>
 					<button
-						class="flex w-full justify-between gap-2 items-center px-3 py-1.5 text-sm select-none cursor-pointer rounded-xl hover:bg-gray-50 dark:hover:bg-gray-800/50"
+						class="flex w-full cursor-pointer select-none items-center justify-between gap-2 rounded-md px-2.5 py-2 text-sm transition hover:bg-gray-100/70 dark:hover:bg-gray-800/70"
 						on:click={() => {
 							tab = '';
 						}}
@@ -521,7 +521,7 @@
 			{:else if tab === 'files'}
 				<div in:fly={{ x: 20, duration: 150 }}>
 					<button
-						class="flex w-full justify-between gap-2 items-center px-3 py-1.5 text-sm select-none cursor-pointer rounded-xl hover:bg-gray-50 dark:hover:bg-gray-800/50"
+						class="flex w-full cursor-pointer select-none items-center justify-between gap-2 rounded-md px-2.5 py-2 text-sm transition hover:bg-gray-100/70 dark:hover:bg-gray-800/70"
 						on:click={() => {
 							tab = '';
 						}}
@@ -540,7 +540,7 @@
 			{:else if tab === 'chats'}
 				<div in:fly={{ x: 20, duration: 150 }}>
 					<button
-						class="flex w-full justify-between gap-2 items-center px-3 py-1.5 text-sm select-none cursor-pointer rounded-xl hover:bg-gray-50 dark:hover:bg-gray-800/50"
+						class="flex w-full cursor-pointer select-none items-center justify-between gap-2 rounded-md px-2.5 py-2 text-sm transition hover:bg-gray-100/70 dark:hover:bg-gray-800/70"
 						on:click={() => {
 							tab = '';
 						}}
@@ -559,7 +559,7 @@
 			{:else if tab === 'microsoft_onedrive'}
 				<div in:fly={{ x: 20, duration: 150 }}>
 					<button
-						class="flex w-full justify-between gap-2 items-center px-3 py-1.5 text-sm select-none cursor-pointer rounded-xl hover:bg-gray-50 dark:hover:bg-gray-800/50"
+						class="flex w-full cursor-pointer select-none items-center justify-between gap-2 rounded-md px-2.5 py-2 text-sm transition hover:bg-gray-100/70 dark:hover:bg-gray-800/70"
 						on:click={() => {
 							tab = '';
 						}}
@@ -575,7 +575,7 @@
 
 					{#if $config?.features?.enable_onedrive_personal}
 						<button
-							class="flex w-full gap-2 items-center px-3 py-1.5 text-sm select-none cursor-pointer hover:bg-gray-50 dark:hover:bg-gray-800/50 rounded-xl text-left"
+							class="flex w-full cursor-pointer select-none items-center gap-2 rounded-md px-2.5 py-2 text-left text-sm transition hover:bg-gray-100/70 dark:hover:bg-gray-800/70"
 							type="button"
 							on:click={() => {
 								uploadOneDriveHandler('personal');
@@ -590,7 +590,7 @@
 
 					{#if $config?.features?.enable_onedrive_business}
 						<button
-							class="flex w-full gap-2 items-center px-3 py-1.5 text-sm select-none cursor-pointer hover:bg-gray-50 dark:hover:bg-gray-800/50 rounded-xl text-left"
+							class="flex w-full cursor-pointer select-none items-center gap-2 rounded-md px-2.5 py-2 text-left text-sm transition hover:bg-gray-100/70 dark:hover:bg-gray-800/70"
 							type="button"
 							on:click={() => {
 								uploadOneDriveHandler('organizations');

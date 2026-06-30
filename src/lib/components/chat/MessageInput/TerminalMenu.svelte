@@ -94,10 +94,10 @@
 		<Tooltip content={$i18n.t('Terminal')} placement="top">
 			<button
 				type="button"
-				class="flex items-center gap-1.5 translate-y-[1px] hover:bg-gray-50 dark:hover:bg-gray-850 text-sm transition rounded-lg cursor-pointer {$selectedTerminalId &&
+				class="flex cursor-pointer items-center gap-1.5 rounded-md border border-transparent text-sm transition hover:border-gray-200 hover:bg-white dark:hover:border-gray-700 dark:hover:bg-gray-800 {$selectedTerminalId &&
 				selectedLabel
 					? ' px-2.5 py-1 '
-					: ' p-2 opacity-50'}"
+					: ' p-2 opacity-60'}"
 			>
 				<Cloud className="size-3.5" strokeWidth="2" />
 
@@ -109,7 +109,7 @@
 
 		<div slot="content">
 			<div
-				class="min-w-56 max-w-56 rounded-2xl px-1 py-1 border border-gray-100 dark:border-gray-800 z-50 bg-white dark:bg-gray-850 dark:text-white shadow-lg max-h-72 overflow-y-auto overflow-x-hidden scrollbar-thin"
+				class="z-50 max-h-72 min-w-64 max-w-64 overflow-x-hidden overflow-y-auto rounded-lg border border-gray-200 bg-white p-1.5 text-sm shadow-sm scrollbar-thin dark:border-gray-800 dark:bg-gray-950 dark:text-white"
 			>
 				<!-- Direct terminals (gated by permission) -->
 				{#if directTerminals.length > 0 && ($user?.role === 'admin' || ($user?.permissions?.features?.direct_tool_servers ?? true))}
@@ -145,10 +145,10 @@
 					{#each directTerminals as terminal}
 						<button
 							type="button"
-							class="flex w-full justify-between gap-2 items-center px-3 py-1.5 text-sm cursor-pointer rounded-xl {$selectedTerminalId ===
+							class="flex w-full cursor-pointer items-center justify-between gap-2 rounded-md px-2.5 py-2 text-sm transition {$selectedTerminalId ===
 							terminal.url
-								? 'bg-gray-50 dark:bg-gray-800/50'
-								: 'hover:bg-gray-50 dark:hover:bg-gray-800/50'}"
+								? 'border border-sky-200/70 bg-sky-50 text-sky-700 dark:border-sky-500/30 dark:bg-sky-400/10 dark:text-sky-200'
+								: 'border border-transparent hover:bg-gray-100/70 dark:hover:bg-gray-800/70'}"
 							on:click={() => selectDirect(terminal)}
 						>
 							<div class="flex flex-1 gap-2 items-center truncate">
@@ -217,10 +217,10 @@
 					{#each systemTerminals as terminal}
 						<button
 							type="button"
-							class="flex w-full justify-between gap-2 items-center px-3 py-1.5 text-sm cursor-pointer rounded-xl {$selectedTerminalId ===
+							class="flex w-full cursor-pointer items-center justify-between gap-2 rounded-md px-2.5 py-2 text-sm transition {$selectedTerminalId ===
 							terminal.id
-								? 'bg-gray-50 dark:bg-gray-800/50'
-								: 'hover:bg-gray-50 dark:hover:bg-gray-800/50'}"
+								? 'border border-sky-200/70 bg-sky-50 text-sky-700 dark:border-sky-500/30 dark:bg-sky-400/10 dark:text-sky-200'
+								: 'border border-transparent hover:bg-gray-100/70 dark:hover:bg-gray-800/70'}"
 							on:click={() => selectSystem(terminal)}
 						>
 							<div class="flex flex-1 gap-2 items-center truncate">
