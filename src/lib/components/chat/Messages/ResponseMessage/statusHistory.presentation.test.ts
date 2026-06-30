@@ -32,7 +32,7 @@ describe('StatusHistory presentation guardrails', () => {
 		const source = readSource('./StatusHistory/ToolStatusRow.svelte');
 
 		expect(source).toContain('<details');
-		expect(source).toContain('Debug details');
+		expect(source).toContain('Dev details');
 	});
 
 	it('keeps artifact, subagent, and approval rows visually quiet', () => {

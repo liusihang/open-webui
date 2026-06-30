@@ -50,7 +50,8 @@ describe('AgentTranscript presentation guardrails', () => {
 		const detail = readSource('./AgentDetailSection.svelte');
 
 		expect(tool).toContain('AgentDetailSection');
-		expect(tool).toContain('Debug details');
+		expect(tool).toContain('User summary');
+		expect(tool).toContain('Dev details');
 		expect(detail).toContain('<details');
 		// Debug payload must be formatted as <pre> blocks inside the disclosure,
 		// not inlined into the default view
@@ -64,9 +65,27 @@ describe('AgentTranscript presentation guardrails', () => {
 		// Approval must surface status text only; no approve/reject form actions
 		expect(approval).not.toContain('<button');
 		expect(approval).not.toContain('<form');
+		expect(approval).toContain('Confirmation required');
+		expect(approval).not.toContain('Approve selected');
+		expect(approval).not.toContain('Reject selected');
+		expect(approval).not.toContain('Auto-reject');
 		// Artifact must show name/mime, with long path held for the detail section
 		expect(artifact).not.toContain('text-base');
 		expect(artifact).toContain('shortPath');
+	});
+
+	it('presents the transcript as one ReAct Agent Activity Timeline', () => {
+		const transcript = readSource('./AgentTranscript.svelte');
+		const part = readSource('./TranscriptPart.svelte');
+
+		expect(transcript).toContain('Agent Activity Timeline');
+		expect(transcript).toContain('agent-activity-timeline');
+		expect(part).toContain('reactStage');
+		expect(part).toContain('Reasoning');
+		expect(part).toContain('Action');
+		expect(part).toContain('Observation');
+		expect(part).toContain('Final answer');
+		expect(part).not.toContain('Chain of Thought');
 	});
 
 	it('defaults failed tools and error parts to expanded so failures are visible', () => {
