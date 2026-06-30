@@ -1064,6 +1064,8 @@ async def execute_agent_run_tool_call(
                 tool_request,
                 tool,
                 resume=resume_tool_call,
+                wait_for_decision=True,
+                decision_timeout_seconds=_approval_decision_timeout_seconds(request),
             )
             if approval_result is not None:
                 return approval_result
@@ -1441,3 +1443,17 @@ def _approval_tool_name_from_content(content: Any) -> str | None:
     if not content.startswith(prefix):
         return None
     return content.removeprefix(prefix).rstrip('.') or None
+
+
+def _approval_decision_timeout_seconds(request: Request) -> float:
+    value = getattr(
+        request.app.state.config,
+        'AGENT_APPROVAL_DECISION_TIMEOUT_SECONDS',
+        None,
+    )
+    if value is None:
+        return 300.0
+    try:
+        return max(float(value), 0.0)
+    except (TypeError, ValueError):
+        return 300.0

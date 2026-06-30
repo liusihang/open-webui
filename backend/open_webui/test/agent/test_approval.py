@@ -1,3 +1,5 @@
+import asyncio
+import json
 import os
 from types import SimpleNamespace
 
@@ -7,7 +9,6 @@ os.environ.setdefault('ENABLE_DB_MIGRATIONS', 'false')
 import pytest
 from open_webui.agent.approval import (
     AgentApprovalCoordinator,
-    ApprovalNotFound,
     ApprovalDecisionRequest,
 )
 from open_webui.agent.destructive import classify_destructive_tool_call
@@ -24,7 +25,7 @@ from open_webui.routers.agent_service import (
 )
 
 
-def _service_request(authority=None):
+def _service_request(authority=None, *, approval_decision_timeout_seconds=0):
     registry = getattr(authority, 'registry', None)
     operation_store = getattr(authority, 'operation_store', None)
     return SimpleNamespace(
@@ -34,6 +35,7 @@ def _service_request(authority=None):
                     AGENT_RUNTIME_BASE_URL='http://agent-runtime.test',
                     AGENT_RUNTIME_SERVICE_TOKEN='service-secret',
                     AGENT_RUN_DEFAULT_TIMEOUT_SECONDS=30,
+                    AGENT_APPROVAL_DECISION_TIMEOUT_SECONDS=approval_decision_timeout_seconds,
                 ),
                 AGENT_EVENT_STORE=operation_store,
                 AGENT_TOOL_AUTHORITY=authority,
@@ -88,6 +90,19 @@ class FakeApprovalStore:
         }
         self.events.append(event)
         return event
+
+    async def get_run(self, run_id):
+        state = self.state.get(run_id)
+        if state is None:
+            return None
+        return SimpleNamespace(id=run_id, state=state)
+
+    async def list_events_after(self, run_id, after_seq=0):
+        return [
+            SimpleNamespace(**event)
+            for event in self.events
+            if event['run_id'] == run_id and event['seq'] > after_seq
+        ]
 
     async def claim_operation(
         self,
@@ -393,6 +408,98 @@ async def test_destructive_tool_call_waits_for_approval_then_resumes_with_tool_r
 
 
 @pytest.mark.asyncio
+async def test_destructive_tool_call_waits_for_cross_coordinator_approval_then_returns_real_tool_result():
+    calls = []
+
+    async def write_file(path: str, content: str):
+        calls.append((path, content))
+        return {'written': path, 'content': content}
+
+    _envelope, registry = build_tool_access_envelope(
+        {
+            'write_file': {
+                'tool_id': 'terminal:main',
+                'callable': write_file,
+                'spec': {'name': 'write_file', 'parameters': {'type': 'object'}},
+                'type': 'terminal',
+            }
+        }
+    )
+    store = FakeApprovalStore()
+    authority = AgentToolAuthority(operation_store=store, registry=registry)
+    request_coordinator = AgentApprovalCoordinator(store)
+    decision_coordinator = AgentApprovalCoordinator(store)
+    tool_call = ToolCallRequest(
+        run_id='run-1',
+        participant_id='leader',
+        tool_call_id='call-cross-worker',
+        tool_id='tool:terminal:main:write_file',
+        arguments={'path': '/workspace/report.txt', 'content': 'replacement'},
+        idempotency_key='tool:leader:call-cross-worker:1',
+    )
+
+    pending_tool_call = asyncio.create_task(
+        execute_agent_run_tool_call(
+            request=_service_request(
+                authority,
+                approval_decision_timeout_seconds=1,
+            ),
+            run_id='run-1',
+            form_data=tool_call,
+            idempotency_key='tool:leader:call-cross-worker:1',
+            authorization='Bearer service-secret',
+            approval_coordinator=request_coordinator,
+        )
+    )
+    try:
+        for _ in range(20):
+            if any(event['event_type'] == 'approval.requested' for event in store.events):
+                break
+            await asyncio.sleep(0.01)
+
+        assert [event['event_type'] for event in store.events] == ['approval.requested']
+        assert store.state['run-1'] == 'waiting_approval'
+        assert calls == []
+        assert pending_tool_call.done() is False
+
+        decision_response = await decide_agent_run_approval(
+            request=_service_request(),
+            run_id='run-1',
+            approval_id='approval:run-1:call-cross-worker',
+            form_data=ApprovalDecisionRequest(
+                run_id='run-1',
+                approval_id='approval:run-1:call-cross-worker',
+                decision='approved',
+                idempotency_key='approval:run-1:approval:run-1:call-cross-worker:1',
+            ),
+            idempotency_key='approval:run-1:approval:run-1:call-cross-worker:1',
+            approval_coordinator=decision_coordinator,
+        )
+        result = await asyncio.wait_for(pending_tool_call, timeout=1)
+    finally:
+        if not pending_tool_call.done():
+            pending_tool_call.cancel()
+
+    assert decision_response['status'] == 'approval_recorded'
+    assert decision_response['raw'] == {
+        'approval_id': 'approval:run-1:call-cross-worker',
+        'decision': 'approved',
+    }
+    assert result['status'] == 'success'
+    assert json.loads(result['content']) == {
+        'written': '/workspace/report.txt',
+        'content': 'replacement',
+    }
+    assert calls == [('/workspace/report.txt', 'replacement')]
+    assert store.state['run-1'] == 'running'
+    assert [event['event_type'] for event in store.events] == [
+        'approval.requested',
+        'approval.completed',
+    ]
+    assert store.events[-1]['payload']['decision'] == 'approved'
+
+
+@pytest.mark.asyncio
 async def test_destructive_tool_call_rejection_returns_normalized_rejection_result():
     store = FakeApprovalStore()
     coordinator = AgentApprovalCoordinator(store)
@@ -449,7 +556,7 @@ async def test_destructive_tool_call_rejection_returns_normalized_rejection_resu
 
 
 @pytest.mark.asyncio
-async def test_approval_decision_requires_same_coordinator_that_holds_pending_resume():
+async def test_cross_coordinator_approval_decision_records_without_faking_tool_result():
     store = FakeApprovalStore()
     request_coordinator = AgentApprovalCoordinator(store)
     decision_coordinator = AgentApprovalCoordinator(store)
@@ -475,15 +582,23 @@ async def test_approval_decision_requires_same_coordinator_that_holds_pending_re
     assert approval_required is not None
     assert store.state['run-1'] == 'waiting_approval'
 
-    with pytest.raises(ApprovalNotFound):
-        await decision_coordinator.decide(
-            ApprovalDecisionRequest(
-                run_id='run-1',
-                approval_id='approval:run-1:call-4',
-                decision='approved',
-                idempotency_key='approval:run-1:approval:run-1:call-4:1',
-            )
+    response = await decision_coordinator.decide(
+        ApprovalDecisionRequest(
+            run_id='run-1',
+            approval_id='approval:run-1:call-4',
+            decision='approved',
+            idempotency_key='approval:run-1:approval:run-1:call-4:1',
         )
+    )
+
+    assert response['status'] == 'approval_recorded'
+    assert response['content'] == 'Approval approved for delete_entry.'
+    assert store.state['run-1'] == 'running'
+    assert [event['event_type'] for event in store.events] == [
+        'approval.requested',
+        'approval.completed',
+    ]
+    assert store.events[-1]['payload']['decision'] == 'approved'
 
 
 @pytest.mark.asyncio

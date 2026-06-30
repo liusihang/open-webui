@@ -867,6 +867,123 @@ async def test_run_start_with_tool_envelope_drives_tool_artifact_and_final_lifec
 
 
 @pytest.mark.asyncio
+async def test_general_agent_continues_after_tool_callback_waits_for_approved_result() -> None:
+    class ApprovedAfterWaitToolClient(RecordingOpenWebUIClient):
+        def __init__(self) -> None:
+            super().__init__()
+            self.tool_started = asyncio.Event()
+            self.release_tool = asyncio.Event()
+            self.model_responses = [
+                {
+                    "status": "success",
+                    "response": {
+                        "choices": [
+                            {
+                                "message": {
+                                    "content": "I need to update the file.",
+                                    "tool_calls": [
+                                        {
+                                            "id": "call_write_1",
+                                            "type": "function",
+                                            "function": {
+                                                "name": "write_file",
+                                                "arguments": "{\"path\":\"/tmp/input.txt\",\"content\":\"approved\"}",
+                                            },
+                                        }
+                                    ],
+                                }
+                            }
+                        ]
+                    },
+                },
+                {
+                    "status": "success",
+                    "response": {"content": "Write finished: approved write result"},
+                },
+            ]
+
+        async def call_tool(self, **kwargs: object) -> dict:
+            self.tool_calls.append(kwargs)
+            self.tool_started.set()
+            await self.release_tool.wait()
+            return {
+                "status": "success",
+                "content": "approved write result",
+                "raw": {"approved": True},
+            }
+
+    openwebui_client = ApprovedAfterWaitToolClient()
+    async with make_client(openwebui_client, auto_finalize_ordinary_qa=True) as client:
+        response = await client.post(
+            "/v1/openwebui/runs",
+            headers={"Authorization": f"Bearer {SERVICE_TOKEN}"},
+            json={
+                "run_id": "run-approved-tool-wait",
+                "chat_id": "chat-1",
+                "leader_model_id": "model-a",
+                "messages": [{"role": "user", "content": "Write the file."}],
+                "tool_access_envelope": {
+                    "tools": [
+                        {
+                            "id": "tool:terminal:main:write_file",
+                            "name": "write_file",
+                            "type": "terminal",
+                            "schema": {
+                                "name": "write_file",
+                                "description": "Write a file.",
+                                "parameters": {
+                                    "type": "object",
+                                    "properties": {
+                                        "path": {"type": "string"},
+                                        "content": {"type": "string"},
+                                    },
+                                    "required": ["path", "content"],
+                                },
+                            },
+                        }
+                    ]
+                },
+            },
+        )
+        assert response.status_code == 202
+
+        await asyncio.wait_for(openwebui_client.tool_started.wait(), timeout=1)
+        status = await client.get(
+            "/v1/openwebui/runs/run-approved-tool-wait/status",
+            headers={"Authorization": f"Bearer {SERVICE_TOKEN}"},
+        )
+        assert status.json()["state"] == "running"
+
+        openwebui_client.release_tool.set()
+        for _ in range(40):
+            status = await client.get(
+                "/v1/openwebui/runs/run-approved-tool-wait/status",
+                headers={"Authorization": f"Bearer {SERVICE_TOKEN}"},
+            )
+            if status.json()["state"] == "completed":
+                break
+            await asyncio.sleep(0.01)
+
+    assert status.json()["state"] == "completed"
+    assert [call["model_call_id"] for call in openwebui_client.model_calls] == [
+        "model-call-1",
+        "model-call-2",
+    ]
+    assert openwebui_client.tool_calls[0]["arguments"] == {
+        "path": "/tmp/input.txt",
+        "content": "approved",
+    }
+    assert [event["event_type"] for event in openwebui_client.events] == [
+        "run.running",
+        "tool.requested",
+        "tool.completed",
+        "final.started",
+        "run.completed",
+    ]
+    assert joined_final_delta_text(openwebui_client) == "Write finished: approved write result"
+
+
+@pytest.mark.asyncio
 async def test_general_agent_stops_when_tool_authority_requires_approval() -> None:
     class ApprovalRequiredToolClient(RecordingOpenWebUIClient):
         async def call_model(self, **kwargs: object) -> dict:

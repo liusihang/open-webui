@@ -19,6 +19,7 @@ from agentscope.tool import ToolBase, ToolChunk, Toolkit
 from agentscope_runtime.agentscope_bridge import (
     AgentScopeRuntimeBridge,
     OpenWebUIToolApprovalRequired,
+    OpenWebUIToolApprovalRejected,
 )
 from agentscope_runtime.openwebui_client import OpenWebUIClient
 from agentscope_runtime.schemas import (
@@ -480,12 +481,28 @@ async def _finalize_general_agent_run(
             next_delta_index=stream_result.next_delta_index,
         )
     except OpenWebUIToolApprovalRequired:
+        if session.state == "failed":
+            return
         session.state = "waiting_approval"
         session.updated_at = time.time()
         logger.info(
             "Runtime paused for OpenWebUI tool approval run_id=%s runtime_session_id=%s",
             session.run_id,
             session.runtime_session_id,
+        )
+    except OpenWebUIToolApprovalRejected as exc:
+        await _mark_session_failed(
+            callback_client,
+            session,
+            ApprovalRejectedError(str(exc)),
+            stage="approval-rejected",
+            payload={
+                "approval_id": _approval_id_from_tool_response(exc.response),
+                "decision": "rejected",
+                "tool_call_id": exc.tool_call_id,
+                "tool_id": exc.tool_id,
+                "tool_name": exc.tool_name,
+            },
         )
     except Exception as exc:
         if _is_cancelled(session):
@@ -1118,6 +1135,8 @@ async def _mark_session_failed(
     stage: str = "unknown",
     payload: dict[str, Any] | None = None,
 ) -> None:
+    if session.state == "failed":
+        return
     session.state = "failed"
     session.updated_at = time.time()
     summary = getattr(exc, "user_summary", "Agent runtime finalization failed.")
@@ -1155,6 +1174,14 @@ async def _mark_session_failed(
 def _approval_rejected_message(decision: ApprovalDecisionNotification) -> str:
     tool_name = decision.tool_name or decision.tool_id or "tool call"
     return f"User rejected approval {decision.approval_id} for {tool_name}."
+
+
+def _approval_id_from_tool_response(response: dict[str, Any]) -> str | None:
+    raw = response.get("raw")
+    if isinstance(raw, dict):
+        approval_id = raw.get("approval_id")
+        return approval_id if isinstance(approval_id, str) else None
+    return None
 
 
 def _provider_configuration_error_from_model_response(response: dict[str, Any]) -> Exception | None:

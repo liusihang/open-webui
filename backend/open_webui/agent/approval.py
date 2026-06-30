@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import inspect
 import json
@@ -20,6 +21,10 @@ from open_webui.agent.tool_authority import (
     normalize_tool_exception,
     normalize_tool_result,
 )
+
+
+APPROVAL_DECISION_POLL_INTERVAL_SECONDS = 0.05
+DEFAULT_APPROVAL_DECISION_TIMEOUT_SECONDS = 300.0
 
 
 class ApprovalError(ValueError):
@@ -51,6 +56,7 @@ class _PendingApproval:
     tool: dict[str, Any]
     assessment: DestructiveAssessment
     resume: Callable[[], Any] | None
+    wait_for_decision: bool = False
 
 
 class AgentApprovalCoordinator:
@@ -65,6 +71,9 @@ class AgentApprovalCoordinator:
         tool: dict[str, Any],
         *,
         resume: Callable[[], Any] | None = None,
+        wait_for_decision: bool = False,
+        decision_timeout_seconds: float | None = None,
+        poll_interval_seconds: float = APPROVAL_DECISION_POLL_INTERVAL_SECONDS,
     ) -> dict[str, Any] | None:
         assessment = classify_destructive_tool_call(
             tool_name=tool.get('name'),
@@ -108,6 +117,7 @@ class AgentApprovalCoordinator:
             tool=tool,
             assessment=assessment,
             resume=resume,
+            wait_for_decision=wait_for_decision,
         )
 
         try:
@@ -124,7 +134,7 @@ class AgentApprovalCoordinator:
                     },
                 )
             )
-            await _append_approval_event(
+            requested_event = await _append_approval_event(
                 self.store,
                 request=request,
                 event_type=AgentEventType.APPROVAL_REQUESTED.value,
@@ -140,6 +150,24 @@ class AgentApprovalCoordinator:
             await _maybe_await(
                 self.store.finish_operation_success(claim.operation.id, response)
             )
+            if wait_for_decision:
+                try:
+                    return await self._wait_for_recorded_decision_and_resume(
+                        pending_key=pending_key,
+                        requested_seq=_event_seq(requested_event),
+                        approval_required_response=response,
+                        timeout_seconds=(
+                            DEFAULT_APPROVAL_DECISION_TIMEOUT_SECONDS
+                            if decision_timeout_seconds is None
+                            else decision_timeout_seconds
+                        ),
+                        poll_interval_seconds=poll_interval_seconds,
+                    )
+                except TimeoutError:
+                    pending = self._pending.get(pending_key)
+                    if pending is not None:
+                        pending.wait_for_decision = False
+                    return response
             return response
         except Exception as exc:
             await _maybe_await(
@@ -188,53 +216,63 @@ class AgentApprovalCoordinator:
             )
             return resolved['response']
 
+        recorded = await self._find_recorded_approval_decision(
+            run_id=request.run_id,
+            approval_id=request.approval_id,
+            after_seq=0,
+        )
+        if recorded is not None:
+            if recorded['decision'] != request.decision:
+                await self._finish_decision_error(
+                    claim.operation.id,
+                    code=ApprovalDecisionConflict.code,
+                    message='approval already has a different decision',
+                )
+                raise ApprovalDecisionConflict('approval already has a different decision')
+            response = self._response_for_recorded_decision(recorded)
+            await _maybe_await(
+                self.store.finish_operation_success(claim.operation.id, response)
+            )
+            return response
+
         pending = self._pending.get(pending_key)
         if pending is None:
-            await self._finish_decision_error(
-                claim.operation.id,
-                code=ApprovalNotFound.code,
-                message=f'Unknown approval: {request.approval_id}',
+            requested = await self._find_recorded_approval_request(
+                run_id=request.run_id,
+                approval_id=request.approval_id,
             )
-            raise ApprovalNotFound(f'Unknown approval: {request.approval_id}')
+            if requested is None:
+                await self._finish_decision_error(
+                    claim.operation.id,
+                    code=ApprovalNotFound.code,
+                    message=f'Unknown approval: {request.approval_id}',
+                )
+                raise ApprovalNotFound(f'Unknown approval: {request.approval_id}')
+
+            response = await self._record_external_decision(request, requested)
+            await _maybe_await(
+                self.store.finish_operation_success(claim.operation.id, response)
+            )
+            return response
 
         try:
-            await _maybe_await(
-                self.store.transition_state(
-                    request.run_id,
-                    from_states=[AgentRunState.WAITING_APPROVAL.value],
-                    to_state=AgentRunState.RUNNING.value,
-                    reason=f'approval {request.decision}',
-                    payload={
-                        'approval_id': request.approval_id,
-                        'decision': request.decision,
-                    },
-                )
-            )
-            await _append_approval_event(
-                self.store,
-                request=pending.request,
-                event_type=AgentEventType.APPROVAL_COMPLETED.value,
-                phase=AgentRunState.RUNNING.value,
-                summary=f'Approval {request.decision} for {pending.tool.get("name") or pending.request.tool_id}.',
-                payload={
-                    **_approval_event_payload(
-                        approval_id=request.approval_id,
-                        request=pending.request,
-                        tool=pending.tool,
-                        assessment=pending.assessment,
-                    ),
-                    'decision': request.decision,
-                },
-            )
+            await self._record_pending_decision(request, pending)
             if request.decision == 'rejected':
                 response = _approval_rejected_result(
                     approval_id=request.approval_id,
                     pending=pending,
                 )
+            elif pending.wait_for_decision:
+                response = _approval_recorded_result(
+                    approval_id=request.approval_id,
+                    decision=request.decision,
+                    tool_name=pending.tool.get('name') or pending.request.tool_id,
+                )
             else:
                 response = await self._resume_approved_tool(pending)
 
-            self._pending.pop(pending_key, None)
+            if not pending.wait_for_decision:
+                self._pending.pop(pending_key, None)
             self._resolved[pending_key] = {
                 'decision': request.decision,
                 'response': response,
@@ -250,6 +288,187 @@ class AgentApprovalCoordinator:
                 message=str(exc),
             )
             raise
+
+    async def _wait_for_recorded_decision_and_resume(
+        self,
+        *,
+        pending_key: tuple[str, str],
+        requested_seq: int,
+        approval_required_response: dict[str, Any],
+        timeout_seconds: float,
+        poll_interval_seconds: float,
+    ) -> dict[str, Any]:
+        run_id, approval_id = pending_key
+        deadline = asyncio.get_running_loop().time() + max(timeout_seconds, 0.0)
+        while True:
+            recorded = await self._find_recorded_approval_decision(
+                run_id=run_id,
+                approval_id=approval_id,
+                after_seq=requested_seq,
+            )
+            if recorded is not None:
+                pending = self._pending.pop(pending_key, None)
+                if pending is None:
+                    return approval_required_response
+                if recorded['decision'] == 'rejected':
+                    response = _approval_rejected_result(
+                        approval_id=approval_id,
+                        pending=pending,
+                    )
+                else:
+                    response = await self._resume_approved_tool(pending)
+                self._resolved[pending_key] = {
+                    'decision': recorded['decision'],
+                    'response': response,
+                }
+                return response
+
+            now = asyncio.get_running_loop().time()
+            if now >= deadline:
+                raise TimeoutError('approval decision wait timed out')
+            await asyncio.sleep(min(poll_interval_seconds, max(deadline - now, 0.0)))
+
+    async def _record_pending_decision(
+        self,
+        request: ApprovalDecisionRequest,
+        pending: _PendingApproval,
+    ) -> None:
+        await _maybe_await(
+            self.store.transition_state(
+                request.run_id,
+                from_states=[AgentRunState.WAITING_APPROVAL.value],
+                to_state=AgentRunState.RUNNING.value,
+                reason=f'approval {request.decision}',
+                payload={
+                    'approval_id': request.approval_id,
+                    'decision': request.decision,
+                },
+            )
+        )
+        await _append_approval_event(
+            self.store,
+            request=pending.request,
+            event_type=AgentEventType.APPROVAL_COMPLETED.value,
+            phase=AgentRunState.RUNNING.value,
+            summary=f'Approval {request.decision} for {pending.tool.get("name") or pending.request.tool_id}.',
+            payload={
+                **_approval_event_payload(
+                    approval_id=request.approval_id,
+                    request=pending.request,
+                    tool=pending.tool,
+                    assessment=pending.assessment,
+                ),
+                'decision': request.decision,
+            },
+        )
+
+    async def _record_external_decision(
+        self,
+        request: ApprovalDecisionRequest,
+        requested: dict[str, Any],
+    ) -> dict[str, Any]:
+        payload = requested['payload']
+        await _maybe_await(
+            self.store.transition_state(
+                request.run_id,
+                from_states=[AgentRunState.WAITING_APPROVAL.value],
+                to_state=AgentRunState.RUNNING.value,
+                reason=f'approval {request.decision}',
+                payload={
+                    'approval_id': request.approval_id,
+                    'decision': request.decision,
+                },
+            )
+        )
+        completed_payload = {**payload, 'decision': request.decision}
+        await _maybe_await(
+            self.store.append_event(
+                request.run_id,
+                event_type=AgentEventType.APPROVAL_COMPLETED.value,
+                participant_id=requested.get('participant_id'),
+                phase=AgentRunState.RUNNING.value,
+                summary=f'Approval {request.decision} for {payload.get("tool_name") or payload.get("tool_id")}.',
+                payload=completed_payload,
+            )
+        )
+        if request.decision == 'rejected':
+            return _approval_rejected_result_from_payload(
+                approval_id=request.approval_id,
+                payload=completed_payload,
+            )
+        return _approval_recorded_result(
+            approval_id=request.approval_id,
+            decision=request.decision,
+            tool_name=payload.get('tool_name') or payload.get('tool_id') or request.approval_id,
+        )
+
+    async def _find_recorded_approval_request(
+        self,
+        *,
+        run_id: str,
+        approval_id: str,
+    ) -> dict[str, Any] | None:
+        return await self._find_recorded_approval_event(
+            run_id=run_id,
+            approval_id=approval_id,
+            event_type=AgentEventType.APPROVAL_REQUESTED.value,
+            after_seq=0,
+        )
+
+    async def _find_recorded_approval_decision(
+        self,
+        *,
+        run_id: str,
+        approval_id: str,
+        after_seq: int,
+    ) -> dict[str, Any] | None:
+        event = await self._find_recorded_approval_event(
+            run_id=run_id,
+            approval_id=approval_id,
+            event_type=AgentEventType.APPROVAL_COMPLETED.value,
+            after_seq=after_seq,
+        )
+        if event is None:
+            return None
+        payload = event['payload']
+        decision = payload.get('decision')
+        if decision not in {'approved', 'rejected'}:
+            return None
+        return {**event, 'decision': decision}
+
+    async def _find_recorded_approval_event(
+        self,
+        *,
+        run_id: str,
+        approval_id: str,
+        event_type: str,
+        after_seq: int,
+    ) -> dict[str, Any] | None:
+        list_events_after = getattr(self.store, 'list_events_after', None)
+        if list_events_after is None:
+            return None
+        events = await _maybe_await(list_events_after(run_id, after_seq=after_seq))
+        for event in events:
+            normalized = _event_dict(event)
+            payload = normalized.get('payload') or {}
+            if (
+                normalized.get('event_type') == event_type
+                and payload.get('approval_id') == approval_id
+            ):
+                return normalized
+        return None
+
+    def _response_for_recorded_decision(self, recorded: dict[str, Any]) -> dict[str, Any]:
+        if recorded['decision'] == 'rejected':
+            return _approval_rejected_result_from_payload(
+                approval_id=recorded['payload']['approval_id'],
+                payload=recorded['payload'],
+            )
+        return _approval_recorded_result(
+            approval_id=recorded['payload']['approval_id'],
+            decision=recorded['decision'],
+            tool_name=recorded['payload'].get('tool_name') or recorded['payload'].get('tool_id'),
+        )
 
     async def _resume_approved_tool(self, pending: _PendingApproval) -> dict[str, Any]:
         if pending.resume is None:
@@ -362,6 +581,49 @@ def _approval_rejected_result(
     return result
 
 
+def _approval_rejected_result_from_payload(
+    *,
+    approval_id: str,
+    payload: dict[str, Any],
+) -> dict[str, Any]:
+    tool_name = payload.get('tool_name') or payload.get('tool_id') or approval_id
+    message = f'User rejected approval for {tool_name}.'
+    return ToolCallResponse(
+        status='approval_rejected',
+        content=message,
+        structured_error={
+            'code': 'approval_rejected',
+            'message': message,
+            'retryable': False,
+            'details': {
+                'approval_id': approval_id,
+                'tool_call_id': payload.get('tool_call_id'),
+                'tool_id': payload.get('tool_id'),
+            },
+        },
+        raw={
+            'approval_id': approval_id,
+            'decision': 'rejected',
+        },
+    ).model_dump(mode='json')
+
+
+def _approval_recorded_result(
+    *,
+    approval_id: str,
+    decision: str,
+    tool_name: str | None,
+) -> dict[str, Any]:
+    return ToolCallResponse(
+        status='approval_recorded',
+        content=f'Approval {decision} for {tool_name or approval_id}.',
+        raw={
+            'approval_id': approval_id,
+            'decision': decision,
+        },
+    ).model_dump(mode='json')
+
+
 def _approval_event_payload(
     *,
     approval_id: str,
@@ -453,6 +715,19 @@ async def _maybe_await(value: Any) -> Any:
     if inspect.isawaitable(value):
         return await value
     return value
+
+
+def _event_dict(event: Any) -> dict[str, Any]:
+    if isinstance(event, dict):
+        return event
+    if hasattr(event, 'model_dump'):
+        return event.model_dump(mode='json')
+    return dict(getattr(event, '__dict__', {}))
+
+
+def _event_seq(event: Any) -> int:
+    value = _event_dict(event).get('seq', 0)
+    return value if isinstance(value, int) else 0
 
 
 def _arguments_summary(arguments: dict[str, Any]) -> dict[str, Any]:
