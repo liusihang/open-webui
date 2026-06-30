@@ -290,7 +290,7 @@
 
 		{#if value === item.value}
 			<div
-				class="flex size-7 items-center justify-center rounded-md bg-emerald-50 text-emerald-700 dark:bg-emerald-500/10 dark:text-emerald-300"
+				class="flex size-7 items-center justify-center rounded-md bg-sky-50 text-sky-700 dark:bg-sky-500/10 dark:text-sky-200"
 			>
 				<Check className="size-3" />
 			</div>

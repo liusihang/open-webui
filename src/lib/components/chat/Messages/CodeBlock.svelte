@@ -580,20 +580,27 @@
 						</div>
 					{:else}
 						<div class="relative">
-							<pre
-								class="code-block-pre hljs overflow-x-auto p-4 px-5 {shouldBoundCode &&
-								!showFullCode
-									? 'max-h-[26rem] overflow-y-hidden'
-									: ''}"
-								style="border-top-left-radius: 0px; border-top-right-radius: 0px; {(executing ||
-									stdout ||
-									stderr ||
-									result) &&
-									'border-bottom-left-radius: 0px; border-bottom-right-radius: 0px;'}"><code
-									class="language-{lang} rounded-t-none whitespace-pre text-sm leading-6"
-									>{@html hljs.highlightAuto(code, hljs.getLanguage(lang)?.aliases).value ||
-										code}</code
-								></pre>
+							<div class="relative">
+								<pre
+									class="code-block-pre hljs overflow-x-auto p-4 px-5 {shouldBoundCode &&
+									!showFullCode
+										? 'max-h-[26rem] overflow-y-hidden'
+										: ''}"
+									style="border-top-left-radius: 0px; border-top-right-radius: 0px; {(executing ||
+										stdout ||
+										stderr ||
+										result) &&
+										'border-bottom-left-radius: 0px; border-bottom-right-radius: 0px;'}"><code
+										class="language-{lang} rounded-t-none whitespace-pre text-sm leading-6"
+										>{@html hljs.highlightAuto(code, hljs.getLanguage(lang)?.aliases).value ||
+											code}</code
+									></pre>
+								{#if shouldBoundCode && !showFullCode}
+									<div
+										class="pointer-events-none absolute inset-x-0 bottom-0 h-14 bg-gradient-to-b from-transparent to-white/95 dark:to-gray-950/95"
+									/>
+								{/if}
+							</div>
 							{#if shouldBoundCode}
 								<div
 									class="code-block-surface flex items-center justify-between gap-2 border-t border-black/5 px-3 py-2 text-xs dark:border-white/10"
@@ -643,13 +650,20 @@
 								<div class=" ">
 									<div class=" text-gray-500 text-xs mb-1">{$i18n.t('STDOUT/STDERR')}</div>
 									<div class="relative">
-										<div
-											class="font-mono text-sm whitespace-pre-wrap {shouldBoundOutput &&
-											!showFullOutput
-												? 'max-h-[22rem] overflow-hidden'
-												: 'overflow-y-auto'}"
-										>
-											{outputText}
+										<div class="relative">
+											<div
+												class="font-mono text-sm whitespace-pre-wrap {shouldBoundOutput &&
+												!showFullOutput
+													? 'max-h-[22rem] overflow-hidden'
+													: 'overflow-y-auto'}"
+											>
+												{outputText}
+											</div>
+											{#if shouldBoundOutput && !showFullOutput}
+												<div
+													class="pointer-events-none absolute inset-x-0 bottom-0 h-12 bg-gradient-to-b from-transparent to-white/95 dark:to-gray-950/95"
+												/>
+											{/if}
 										</div>
 										{#if shouldBoundOutput}
 											<div
