@@ -104,4 +104,35 @@ describe('AgentTranscript presentation guardrails', () => {
 		expect(transcript).not.toContain('text-base');
 		expect(transcript).not.toContain('text-lg');
 	});
+
+	it('presents registered artifacts as compact artifact shells without fake open links', () => {
+		const artifact = readSource('./ArtifactPart.svelte');
+
+		expect(artifact).toContain('agent-artifact-card');
+		expect(artifact).toContain('agent-artifact-actions');
+		expect(artifact).toContain('agent-artifact-path-chip');
+		expect(artifact).toContain('AgentDetailSection');
+		// This part only knows `artifact.registered` metadata. It must not invent an open URL.
+		expect(artifact).not.toContain('window.open');
+		expect(artifact).not.toContain('<a ');
+	});
+
+	it('bounds code execution logs with a terminal-like body and reveals long output deliberately', () => {
+		const modal = readSource('../Messages/CodeExecutionModal.svelte');
+
+		expect(modal).toContain('code-execution-shell');
+		expect(modal).toContain('code-execution-terminal');
+		expect(modal).toContain('showFullOutput');
+		expect(modal).toContain('result?.files');
+		expect(modal).toContain('Show more');
+	});
+
+	it('keeps live terminal routing intact while adding an AI Elements terminal shell', () => {
+		const terminal = readSource('../XTerminal.svelte');
+
+		expect(terminal).toContain("serverId === '__direct__'");
+		expect(terminal).toContain('/terminals/${info.serverId}/api/terminals');
+		expect(terminal).toContain('terminal-shell');
+		expect(terminal).toContain('terminal-surface');
+	});
 });
