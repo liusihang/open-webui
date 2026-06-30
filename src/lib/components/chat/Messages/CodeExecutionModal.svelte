@@ -1,20 +1,75 @@
 <script lang="ts">
 	import { getContext } from 'svelte';
+	import type { Readable } from 'svelte/store';
 	import CodeBlock from './CodeBlock.svelte';
 	import Modal from '$lib/components/common/Modal.svelte';
 	import Spinner from '$lib/components/common/Spinner.svelte';
 	import Badge from '$lib/components/common/Badge.svelte';
+	import Clipboard from '$lib/components/icons/Clipboard.svelte';
+	import Document from '$lib/components/icons/Document.svelte';
+	import Terminal from '$lib/components/icons/Terminal.svelte';
 	import XMark from '$lib/components/icons/XMark.svelte';
-	const i18n = getContext('i18n');
+	import { copyToClipboard } from '$lib/utils';
+
+	type I18nValue = {
+		t: (key: string, options?: Record<string, unknown>) => string;
+	};
+	type CodeExecutionFile = {
+		name?: string;
+		url?: string;
+	};
+	type CodeExecutionResult = {
+		error?: string | null;
+		output?: string | null;
+		files?: CodeExecutionFile[] | null;
+	};
+	type CodeExecution = {
+		id?: string;
+		name?: string;
+		language?: string;
+		code?: string;
+		result?: CodeExecutionResult | null;
+	};
+
+	const i18n = getContext<Readable<I18nValue>>('i18n');
 
 	export let show = false;
-	export let codeExecution = null;
+	export let codeExecution: CodeExecution | null = null;
+
+	let showFullOutput = false;
+	let copiedOutput = false;
+	let previousExecutionId: string | null = null;
+
+	$: executionId = codeExecution?.id ?? null;
+	$: if (executionId !== previousExecutionId) {
+		previousExecutionId = executionId;
+		showFullOutput = false;
+		copiedOutput = false;
+	}
+	$: result = codeExecution?.result ?? null;
+	$: outputText = [
+		result?.error ? `[error]\n${result.error}` : null,
+		result?.output ? `[output]\n${result.output}` : null
+	]
+		.filter(Boolean)
+		.join('\n\n');
+	$: outputLineCount = outputText ? outputText.split('\n').length : 0;
+	$: isLongOutput = outputText.length > 1800 || outputLineCount > 18;
+
+	const copyOutput = async () => {
+		if (!outputText) return;
+		copiedOutput = true;
+		await copyToClipboard(outputText);
+		setTimeout(() => {
+			copiedOutput = false;
+		}, 1500);
+	};
 </script>
 
 <Modal size="lg" bind:show>
-	<div>
-		<div class="flex justify-between dark:text-gray-300 px-5 pt-4 pb-2">
-			<div class="text-lg font-medium self-center flex flex-col gap-0.5 capitalize">
+	<div class="code-execution-shell">
+		<div class="code-execution-header">
+			<div class="code-execution-title">
 				{#if codeExecution?.result}
 					<div>
 						{#if codeExecution.result?.error}
@@ -27,14 +82,12 @@
 					</div>
 				{/if}
 
-				<div class="flex gap-2 items-center">
+				<div class="code-execution-title-row">
 					{#if !codeExecution?.result}
-						<div>
-							<Spinner className="size-4" />
-						</div>
+						<Spinner className="size-4" />
 					{/if}
 
-					<div>
+					<div class="code-execution-title-text">
 						{#if codeExecution?.name}
 							{$i18n.t('Code execution')}: {codeExecution?.name}
 						{:else}
@@ -44,66 +97,333 @@
 				</div>
 			</div>
 			<button
-				class="self-center"
+				class="code-execution-close"
 				on:click={() => {
 					show = false;
 					codeExecution = null;
 				}}
+				aria-label={$i18n.t('Close')}
 			>
 				<XMark className={'size-5'} />
 			</button>
 		</div>
 
-		<div class="flex flex-col md:flex-row w-full px-4 pb-5">
-			<div
-				class="flex flex-col w-full dark:text-gray-200 overflow-y-scroll max-h-[22rem] scrollbar-hidden"
-			>
-				<div class="flex flex-col w-full">
-					<CodeBlock
-						id="code-exec-{codeExecution?.id}-code"
-						lang={codeExecution?.language ?? ''}
-						code={codeExecution?.code ?? ''}
-						className=""
-						editorClassName={codeExecution?.result &&
-						(codeExecution?.result?.error || codeExecution?.result?.output)
-							? 'rounded-b-none'
-							: ''}
-						run={false}
-					/>
-				</div>
+		<div class="code-execution-body">
+			<div class="code-execution-content">
+				<CodeBlock
+					id="code-exec-{codeExecution?.id}-code"
+					lang={codeExecution?.language ?? ''}
+					code={codeExecution?.code ?? ''}
+					token={null}
+					className="code-execution-code"
+					editorClassName={codeExecution?.result &&
+					(codeExecution?.result?.error || codeExecution?.result?.output)
+						? 'rounded-b-none'
+						: ''}
+					run={false}
+				/>
 
-				{#if codeExecution?.result && (codeExecution?.result?.error || codeExecution?.result?.output)}
-					<div class="dark:bg-[#202123] dark:text-white px-4 py-4 rounded-b-lg flex flex-col gap-3">
-						{#if codeExecution?.result?.error}
-							<div>
-								<div class=" text-gray-500 text-xs mb-1">{$i18n.t('ERROR')}</div>
-								<div class="text-sm">{codeExecution?.result?.error}</div>
+				{#if codeExecution?.result && outputText}
+					<section class="code-execution-terminal" aria-label={$i18n.t('Execution output')}>
+						<div class="code-execution-terminal-header">
+							<div class="code-execution-terminal-title">
+								<Terminal className="size-3.5" strokeWidth="1.75" />
+								<span>{$i18n.t('Output')}</span>
+								{#if outputLineCount > 0}
+									<span class="code-execution-terminal-count">{outputLineCount} lines</span>
+								{/if}
 							</div>
-						{/if}
-						{#if codeExecution?.result?.output}
-							<div>
-								<div class=" text-gray-500 text-xs mb-1">{$i18n.t('OUTPUT')}</div>
-								<div class="text-sm">{codeExecution?.result?.output}</div>
-							</div>
-						{/if}
-					</div>
-				{/if}
-				{#if codeExecution?.result?.files && codeExecution?.result?.files.length > 0}
-					<div class="flex flex-col w-full">
-						<hr class="border-gray-100/30 dark:border-gray-850/30 my-2" />
-						<div class=" text-sm font-medium dark:text-gray-300">
-							{$i18n.t('Files')}
+							<button class="code-execution-action" on:click={copyOutput}>
+								<Clipboard className="size-3.5" strokeWidth="1.75" />
+								<span>{copiedOutput ? $i18n.t('Copied') : $i18n.t('Copy')}</span>
+							</button>
 						</div>
-						<ul class="mt-1 list-disc pl-4 text-xs">
+						<div class="code-execution-output-frame">
+							<pre
+								class="code-execution-terminal-output"
+								class:clamped={isLongOutput && !showFullOutput}>{outputText}</pre>
+							{#if isLongOutput && !showFullOutput}
+								<div class="code-execution-output-fade" aria-hidden="true"></div>
+							{/if}
+						</div>
+						{#if isLongOutput}
+							<button
+								class="code-execution-show-more"
+								on:click={() => (showFullOutput = !showFullOutput)}
+							>
+								{showFullOutput ? $i18n.t('Show less') : $i18n.t('Show more')}
+							</button>
+						{/if}
+					</section>
+				{/if}
+
+				{#if codeExecution?.result?.files && codeExecution?.result?.files.length > 0}
+					<section class="code-execution-files">
+						<div class="code-execution-files-title">{$i18n.t('Files')}</div>
+						<ul>
 							{#each codeExecution?.result?.files as file}
 								<li>
-									<a href={file.url} target="_blank">{file.name}</a>
+									<Document className="size-3.5" strokeWidth="1.75" />
+									{#if file.url}
+										<a href={file.url} target="_blank" rel="noreferrer">
+											{file.name ?? file.url}
+										</a>
+									{:else}
+										<span>{file.name ?? $i18n.t('Generated file')}</span>
+									{/if}
 								</li>
 							{/each}
 						</ul>
-					</div>
+					</section>
 				{/if}
 			</div>
 		</div>
 	</div>
 </Modal>
+
+<style>
+	.code-execution-shell {
+		display: flex;
+		flex-direction: column;
+		color: var(--gray-900, #111827);
+		background: var(--white, #ffffff);
+		border-radius: 0.75rem;
+		overflow: hidden;
+	}
+	.code-execution-header {
+		display: flex;
+		align-items: flex-start;
+		justify-content: space-between;
+		gap: 0.75rem;
+		padding: 1rem 1.1rem 0.65rem;
+		border-bottom: 1px solid var(--gray-100, #f3f4f6);
+	}
+	.code-execution-title {
+		display: flex;
+		flex-direction: column;
+		gap: 0.35rem;
+		min-width: 0;
+		font-weight: 600;
+	}
+	.code-execution-title-row {
+		display: flex;
+		align-items: center;
+		gap: 0.5rem;
+		min-width: 0;
+	}
+	.code-execution-title-text {
+		font-size: 0.92rem;
+		line-height: 1.25;
+		overflow: hidden;
+		text-overflow: ellipsis;
+		white-space: nowrap;
+		text-transform: none;
+	}
+	.code-execution-close,
+	.code-execution-action,
+	.code-execution-show-more {
+		border: 1px solid var(--gray-200, #e5e7eb);
+		background: var(--white, #ffffff);
+		color: var(--gray-600, #4b5563);
+		transition:
+			background 120ms ease,
+			border-color 120ms ease,
+			color 120ms ease;
+	}
+	.code-execution-close {
+		display: inline-flex;
+		align-items: center;
+		justify-content: center;
+		width: 2rem;
+		height: 2rem;
+		border-radius: 0.5rem;
+		flex-shrink: 0;
+	}
+	.code-execution-close:hover,
+	.code-execution-action:hover,
+	.code-execution-show-more:hover {
+		background: var(--gray-50, #f9fafb);
+		border-color: var(--gray-300, #d1d5db);
+		color: var(--gray-900, #111827);
+	}
+	.code-execution-body {
+		padding: 0.8rem 1rem 1rem;
+	}
+	.code-execution-content {
+		display: flex;
+		flex-direction: column;
+		gap: 0.75rem;
+		width: 100%;
+		max-height: min(70vh, 42rem);
+		overflow-y: auto;
+		scrollbar-width: thin;
+	}
+	:global(.code-execution-code) {
+		margin: 0;
+		border-radius: 0.65rem !important;
+	}
+	.code-execution-terminal {
+		border-radius: 0.65rem;
+		background: #0b1020;
+		border: 1px solid rgba(148, 163, 184, 0.18);
+		box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.04);
+		overflow: hidden;
+	}
+	.code-execution-terminal-header {
+		display: flex;
+		align-items: center;
+		justify-content: space-between;
+		gap: 0.75rem;
+		padding: 0.55rem 0.65rem;
+		border-bottom: 1px solid rgba(148, 163, 184, 0.16);
+		color: #dbeafe;
+	}
+	.code-execution-terminal-title {
+		display: inline-flex;
+		align-items: center;
+		gap: 0.42rem;
+		min-width: 0;
+		font-size: 0.72rem;
+		font-weight: 700;
+	}
+	.code-execution-terminal-count {
+		color: #94a3b8;
+		font-size: 0.65rem;
+		font-weight: 500;
+	}
+	.code-execution-action {
+		display: inline-flex;
+		align-items: center;
+		gap: 0.32rem;
+		border-color: rgba(148, 163, 184, 0.2);
+		background: rgba(15, 23, 42, 0.82);
+		color: #cbd5e1;
+		border-radius: 0.42rem;
+		font-size: 0.68rem;
+		font-weight: 600;
+		line-height: 1;
+		padding: 0.35rem 0.45rem;
+	}
+	.code-execution-action:hover {
+		background: rgba(30, 41, 59, 0.9);
+		border-color: rgba(148, 163, 184, 0.35);
+		color: #f8fafc;
+	}
+	.code-execution-output-frame {
+		position: relative;
+	}
+	.code-execution-terminal-output {
+		margin: 0;
+		padding: 0.85rem 0.95rem;
+		color: #d7deea;
+		font-family: var(--font-mono, monospace);
+		font-size: 0.78rem;
+		line-height: 1.55;
+		white-space: pre-wrap;
+		word-break: break-word;
+		overflow: auto;
+	}
+	.code-execution-terminal-output.clamped {
+		max-height: 16rem;
+		overflow: hidden;
+	}
+	.code-execution-output-fade {
+		position: absolute;
+		left: 0;
+		right: 0;
+		bottom: 0;
+		height: 4rem;
+		pointer-events: none;
+		background: linear-gradient(rgba(11, 16, 32, 0), #0b1020);
+	}
+	.code-execution-show-more {
+		display: flex;
+		width: 100%;
+		align-items: center;
+		justify-content: center;
+		border-width: 1px 0 0;
+		border-color: rgba(148, 163, 184, 0.16);
+		border-radius: 0;
+		background: rgba(15, 23, 42, 0.96);
+		color: #cbd5e1;
+		font-size: 0.72rem;
+		font-weight: 600;
+		padding: 0.55rem;
+	}
+	.code-execution-show-more:hover {
+		background: rgba(30, 41, 59, 0.96);
+		border-color: rgba(148, 163, 184, 0.22);
+		color: #f8fafc;
+	}
+	.code-execution-files {
+		display: flex;
+		flex-direction: column;
+		gap: 0.42rem;
+		border: 1px solid var(--gray-200, #e5e7eb);
+		border-radius: 0.65rem;
+		background: var(--gray-50, #f9fafb);
+		padding: 0.65rem 0.75rem;
+	}
+	.code-execution-files-title {
+		color: var(--gray-700, #374151);
+		font-size: 0.76rem;
+		font-weight: 700;
+	}
+	.code-execution-files ul {
+		display: flex;
+		flex-direction: column;
+		gap: 0.35rem;
+		margin: 0;
+		padding: 0;
+		list-style: none;
+	}
+	.code-execution-files li {
+		display: flex;
+		align-items: center;
+		gap: 0.4rem;
+		min-width: 0;
+		color: var(--gray-500, #6b7280);
+		font-size: 0.75rem;
+	}
+	.code-execution-files a,
+	.code-execution-files span {
+		min-width: 0;
+		overflow: hidden;
+		text-overflow: ellipsis;
+		white-space: nowrap;
+	}
+	.code-execution-files a {
+		color: var(--blue-700, #1d4ed8);
+		font-family: var(--font-mono, monospace);
+		text-decoration: none;
+	}
+	.code-execution-files a:hover {
+		text-decoration: underline;
+	}
+	:global(.dark) .code-execution-shell {
+		background: var(--gray-900, #111827);
+		color: var(--gray-100, #f3f4f6);
+	}
+	:global(.dark) .code-execution-header {
+		border-bottom-color: rgba(148, 163, 184, 0.16);
+	}
+	:global(.dark) .code-execution-close {
+		background: rgba(15, 23, 42, 0.82);
+		border-color: rgba(148, 163, 184, 0.22);
+		color: var(--gray-300, #d1d5db);
+	}
+	:global(.dark) .code-execution-close:hover {
+		background: rgba(30, 41, 59, 0.9);
+		color: var(--gray-100, #f3f4f6);
+	}
+	:global(.dark) .code-execution-files {
+		background: rgba(15, 23, 42, 0.62);
+		border-color: rgba(148, 163, 184, 0.18);
+	}
+	:global(.dark) .code-execution-files-title {
+		color: var(--gray-200, #e5e7eb);
+	}
+	:global(.dark) .code-execution-files a {
+		color: var(--blue-300, #93c5fd);
+	}
+</style>
