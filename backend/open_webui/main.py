@@ -1131,6 +1131,7 @@ from open_webui.utils.redis import get_redis_client, get_redis_connection
 from open_webui.utils.security_headers import SecurityHeadersMiddleware
 from open_webui.utils.session_pool import get_session
 from open_webui.utils.tools import set_terminal_servers, set_tool_servers
+from open_webui.utils import startup_singleton
 
 if SAFE_MODE:
     print('SAFE MODE ENABLED')
@@ -1176,6 +1177,60 @@ https://github.com/open-webui/open-webui
         print(f'Open WebUI v{VERSION} - building the best AI user interface.\nhttps://github.com/open-webui/open-webui')
 
 
+def _build_internal_startup_request(app: FastAPI) -> Request:
+    return Request(
+        {
+            'type': 'http',
+            'asgi.version': '3.0',
+            'asgi.spec_version': '2.0',
+            'method': 'GET',
+            'path': '/internal',
+            'query_string': b'',
+            'headers': Headers({}).raw,
+            'client': ('127.0.0.1', 12345),
+            'server': ('127.0.0.1', 80),
+            'scheme': 'http',
+            'app': app,
+        }
+    )
+
+
+async def _run_singleton_startup_tasks(app: FastAPI) -> None:
+    asyncio.create_task(periodic_usage_pool_cleanup())
+    asyncio.create_task(periodic_session_pool_cleanup())
+
+    from open_webui.utils.automations import scheduler_worker_loop
+    from open_webui.utils.agent_memory_extraction import enqueue_startup_agent_memory_backlog
+    from open_webui.utils.agent_memory_workers import start_agent_memory_worker_tasks
+
+    asyncio.create_task(scheduler_worker_loop(app))
+    asyncio.create_task(enqueue_startup_agent_memory_backlog(app))
+    start_agent_memory_worker_tasks(app)
+
+    if app.state.config.ENABLE_BASE_MODELS_CACHE:
+        try:
+            await get_all_models(_build_internal_startup_request(app), None)
+        except Exception as e:
+            log.warning(f'Failed to pre-fetch models at startup: {e}')
+
+    # Pre-fetch tool server specs so the first request doesn't pay the latency cost
+    if len(app.state.config.TOOL_SERVER_CONNECTIONS) > 0:
+        mock_request = _build_internal_startup_request(app)
+
+        log.info('Initializing tool servers...')
+        try:
+            await set_tool_servers(mock_request)
+            log.info(f'Initialized {len(app.state.TOOL_SERVERS)} tool server(s)')
+        except Exception as e:
+            log.warning(f'Failed to initialize tool servers at startup: {e}')
+
+        try:
+            await set_terminal_servers(mock_request)
+            log.info(f'Initialized {len(app.state.TERMINAL_SERVERS)} terminal server(s)')
+        except Exception as e:
+            log.warning(f'Failed to initialize terminal servers at startup: {e}')
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     # Store reference to main event loop for sync->async calls (e.g., embedding generation)
@@ -1214,71 +1269,12 @@ async def lifespan(app: FastAPI):
         limiter = anyio.to_thread.current_default_thread_limiter()
         limiter.total_tokens = THREAD_POOL_SIZE
 
-    asyncio.create_task(periodic_usage_pool_cleanup())
-    asyncio.create_task(periodic_session_pool_cleanup())
-
-    from open_webui.utils.automations import scheduler_worker_loop
-    from open_webui.utils.agent_memory_extraction import enqueue_startup_agent_memory_backlog
-    from open_webui.utils.agent_memory_workers import start_agent_memory_worker_tasks
-
-    asyncio.create_task(scheduler_worker_loop(app))
-    asyncio.create_task(enqueue_startup_agent_memory_backlog(app))
-    start_agent_memory_worker_tasks(app)
-
-    if app.state.config.ENABLE_BASE_MODELS_CACHE:
-        try:
-            await get_all_models(
-                Request(
-                    # Creating a mock request object to pass to get_all_models
-                    {
-                        'type': 'http',
-                        'asgi.version': '3.0',
-                        'asgi.spec_version': '2.0',
-                        'method': 'GET',
-                        'path': '/internal',
-                        'query_string': b'',
-                        'headers': Headers({}).raw,
-                        'client': ('127.0.0.1', 12345),
-                        'server': ('127.0.0.1', 80),
-                        'scheme': 'http',
-                        'app': app,
-                    }
-                ),
-                None,
-            )
-        except Exception as e:
-            log.warning(f'Failed to pre-fetch models at startup: {e}')
-
-    # Pre-fetch tool server specs so the first request doesn't pay the latency cost
-    if len(app.state.config.TOOL_SERVER_CONNECTIONS) > 0:
-        mock_request = Request(
-            {
-                'type': 'http',
-                'asgi.version': '3.0',
-                'asgi.spec_version': '2.0',
-                'method': 'GET',
-                'path': '/internal',
-                'query_string': b'',
-                'headers': Headers({}).raw,
-                'client': ('127.0.0.1', 12345),
-                'server': ('127.0.0.1', 80),
-                'scheme': 'http',
-                'app': app,
-            }
-        )
-
-        log.info('Initializing tool servers...')
-        try:
-            await set_tool_servers(mock_request)
-            log.info(f'Initialized {len(app.state.TOOL_SERVERS)} tool server(s)')
-        except Exception as e:
-            log.warning(f'Failed to initialize tool servers at startup: {e}')
-
-        try:
-            await set_terminal_servers(mock_request)
-            log.info(f'Initialized {len(app.state.TERMINAL_SERVERS)} terminal server(s)')
-        except Exception as e:
-            log.warning(f'Failed to initialize terminal servers at startup: {e}')
+    startup_singleton_lock = startup_singleton.startup_singleton_lock('lifespan-startup-tasks')
+    if startup_singleton_lock.acquire():
+        app.state.startup_singleton_lock = startup_singleton_lock
+        await _run_singleton_startup_tasks(app)
+    else:
+        log.info('Startup singleton tasks already running in another worker; skipping in this worker')
 
     # Mark application as ready to accept traffic from a startup perspective.
     app.state.startup_complete = True
@@ -1294,6 +1290,10 @@ async def lifespan(app: FastAPI):
 
     if hasattr(app.state, 'redis_task_command_listener'):
         app.state.redis_task_command_listener.cancel()
+
+    startup_singleton_lock = getattr(app.state, 'startup_singleton_lock', None)
+    if startup_singleton_lock is not None:
+        startup_singleton_lock.release()
 
 
 app = FastAPI(

@@ -57,6 +57,7 @@ from open_webui.internal.config import (
 from open_webui.internal.config import (
     initialize as _initialize_config,
 )
+from open_webui.utils import startup_singleton
 
 
 def get_config():
@@ -133,15 +134,48 @@ def run_migrations():
         log.exception(f'Error running migrations: {e}')
 
 
+def _build_alembic_config():
+    from alembic.config import Config as AlembicConfig
+
+    alembic_cfg = AlembicConfig(OPEN_WEBUI_DIR / 'alembic.ini')
+    migrations_path = OPEN_WEBUI_DIR / 'migrations'
+    alembic_cfg.set_main_option('script_location', str(migrations_path))
+    return alembic_cfg
+
+
+def _database_is_at_migration_head(alembic_cfg) -> bool:
+    try:
+        from alembic.migration import MigrationContext
+        from alembic.script import ScriptDirectory
+        from open_webui.internal.db import engine
+
+        expected_heads = set(ScriptDirectory.from_config(alembic_cfg).get_heads())
+        with engine.connect() as connection:
+            current_heads = set(MigrationContext.configure(connection).get_current_heads())
+        return bool(expected_heads) and current_heads == expected_heads
+    except Exception:
+        return False
+
+
+def run_migrations_once():
+    alembic_cfg = _build_alembic_config()
+    with startup_singleton.startup_singleton_lock('db-migrations', blocking=True):
+        if _database_is_at_migration_head(alembic_cfg):
+            log.info('Database migrations already at head; skipping')
+            return
+        run_migrations()
+
+
 if ENABLE_DB_MIGRATIONS:
-    run_migrations()
+    run_migrations_once()
 
 
 # Migrate legacy config.json → database on first run
-if os.path.exists(f'{DATA_DIR}/config.json'):
-    with open(f'{DATA_DIR}/config.json', 'r') as _f:
-        save_to_db(json.load(_f))
-    os.rename(f'{DATA_DIR}/config.json', f'{DATA_DIR}/old_config.json')
+with startup_singleton.startup_singleton_lock('legacy-config-json-migration', blocking=True):
+    if os.path.exists(f'{DATA_DIR}/config.json'):
+        with open(f'{DATA_DIR}/config.json', 'r') as _f:
+            save_to_db(json.load(_f))
+        os.rename(f'{DATA_DIR}/config.json', f'{DATA_DIR}/old_config.json')
 
 
 ENABLE_PERSISTENT_CONFIG = os.getenv('ENABLE_PERSISTENT_CONFIG', 'True').lower() == 'true'
