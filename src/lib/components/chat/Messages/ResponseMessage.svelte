@@ -681,19 +681,19 @@
 
 {#key message.id}
 	<div
-		class=" flex w-full message-{message.id}"
+		class="flex w-full message-{message.id}"
 		id="message-{message.id}"
 		dir={$settings.chatDirection}
 		style="scroll-margin-top: 3rem;"
 	>
-		<div class={`shrink-0 ltr:mr-3 rtl:ml-3 hidden @lg:flex mt-1 `}>
+		<div class={`shrink-0 ltr:mr-3 rtl:ml-3 hidden @lg:flex mt-1.5 `}>
 			<ProfileImage
 				src={`${WEBUI_API_BASE_URL}/models/model/profile/image?id=${model?.id}&lang=${$i18n.language}`}
 				className={'size-8 assistant-message-profile-image'}
 			/>
 		</div>
 
-		<div class="flex-auto w-0 pl-1 relative">
+		<div class="ai-assistant-content flex-auto w-0 pl-1 relative">
 			<Name>
 				<Tooltip content={model?.name ?? message.model} placement="top-start">
 					<span id="response-message-model-name" class="line-clamp-1 text-black dark:text-white">
@@ -958,7 +958,7 @@
 				{#if !edit}
 					<div
 						bind:this={buttonsContainerElement}
-						class="flex justify-start overflow-x-auto buttons text-gray-600 dark:text-gray-500 mt-0.5"
+						class="message-actions buttons mt-1 flex justify-start gap-0.5 overflow-x-auto rounded-lg px-1 py-1 text-gray-500 dark:text-gray-500"
 					>
 						{#if message.done || siblings.length > 1}
 							{#if siblings.length > 1}
@@ -1586,6 +1586,47 @@
 {/key}
 
 <style>
+	.ai-assistant-content :global(.markdown-prose) {
+		line-height: 1.65;
+	}
+
+	.ai-assistant-content :global(.markdown-prose p) {
+		margin-block: 0.35rem;
+	}
+
+	.ai-assistant-content :global(.markdown-prose ul),
+	.ai-assistant-content :global(.markdown-prose ol) {
+		margin-block: 0.45rem;
+		padding-inline-start: 1.35rem;
+	}
+
+	.ai-assistant-content :global(.markdown-prose li) {
+		margin-block: 0.15rem;
+	}
+
+	.ai-assistant-content :global(.markdown-prose h1),
+	.ai-assistant-content :global(.markdown-prose h2),
+	.ai-assistant-content :global(.markdown-prose h3),
+	.ai-assistant-content :global(.markdown-prose h4) {
+		margin-top: 0.85rem;
+		margin-bottom: 0.35rem;
+		letter-spacing: 0;
+	}
+
+	.ai-assistant-content :global(.markdown-prose table) {
+		margin-block: 0.75rem;
+	}
+
+	.ai-assistant-content :global(.markdown-prose blockquote) {
+		margin-block: 0.75rem;
+		padding-inline-start: 0.9rem;
+	}
+
+	.message-actions :global(button),
+	.message-actions :global([role='button']) {
+		border-radius: 0.375rem;
+	}
+
 	.buttons::-webkit-scrollbar {
 		display: none; /* for Chrome, Safari and Opera */
 	}

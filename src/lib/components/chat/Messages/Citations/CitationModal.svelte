@@ -126,7 +126,8 @@
 		const previewText =
 			typeof citation?.preview?.text === 'string' && citation.preview.text.trim().length > 0
 				? citation.preview.text
-				: typeof citation?.preview?.caption === 'string' && citation.preview.caption.trim().length > 0
+				: typeof citation?.preview?.caption === 'string' &&
+					  citation.preview.caption.trim().length > 0
 					? citation.preview.caption
 					: '';
 		if (previewText.length > 0) {
@@ -138,9 +139,16 @@
 </script>
 
 <Modal size="lg" bind:show>
-	<div>
-		<div class=" flex justify-between dark:text-gray-300 px-4.5 pt-3 pb-2">
-			<div class=" text-lg font-medium self-center flex items-center">
+	<div class="overflow-hidden rounded-lg">
+		<div
+			class="flex justify-between gap-3 border-b border-gray-100 px-4.5 py-3 dark:border-gray-800 dark:text-gray-300"
+		>
+			<div class="min-w-0 self-center flex items-center gap-2 text-base font-semibold">
+				<span
+					class="inline-flex h-6 shrink-0 items-center rounded-md border border-blue-200 bg-blue-50 px-2 text-xs font-semibold text-blue-700 dark:border-blue-500/30 dark:bg-blue-500/10 dark:text-blue-200"
+				>
+					{citation?.preview?.type === 'image' ? $i18n.t('Image') : $i18n.t('Source')}
+				</span>
 				{#if citation?.source?.name}
 					{#if primaryDocument?.metadata?.file_id || primaryDocument?.source?.url?.includes('http')}
 						<Tooltip
@@ -152,11 +160,11 @@
 							tippyOptions={{ duration: [500, 0] }}
 						>
 							<a
-								class="hover:text-gray-500 dark:hover:text-gray-100 underline grow line-clamp-1"
+								class="grow line-clamp-1 underline hover:text-gray-500 dark:hover:text-gray-100"
 								href={primaryDocument?.metadata?.file_id
 									? `${WEBUI_API_BASE_URL}/files/${primaryDocument?.metadata?.file_id}/content${primaryDocument?.metadata?.page !== undefined ? `#page=${primaryDocument.metadata.page + 1}` : ''}`
 									: primaryDocument?.source?.url?.includes('http')
-										? primaryDocument?.source?.url ?? '#'
+										? (primaryDocument?.source?.url ?? '#')
 										: `#`}
 								target="_blank"
 							>
@@ -171,7 +179,7 @@
 				{/if}
 			</div>
 			<button
-				class="self-center"
+				class="self-center rounded-md p-1 text-gray-500 transition hover:bg-gray-100 hover:text-gray-900 dark:text-gray-400 dark:hover:bg-gray-800 dark:hover:text-gray-100"
 				aria-label={$i18n.t('Close citation modal')}
 				on:click={() => {
 					show = false;
@@ -181,9 +189,9 @@
 			</button>
 		</div>
 
-		<div class="flex flex-col md:flex-row w-full px-5 pb-5 md:space-x-4">
+		<div class="flex flex-col md:flex-row w-full px-5 py-5 md:space-x-4">
 			<div
-				class="flex flex-col w-full dark:text-gray-200 overflow-y-scroll max-h-[22rem] scrollbar-thin gap-3"
+				class="flex max-h-[28rem] w-full flex-col gap-3 overflow-y-scroll scrollbar-thin dark:text-gray-200"
 			>
 				{#if citation?.preview?.type === 'image' && citation.preview.content_url}
 					<div class="space-y-2">
@@ -203,7 +211,8 @@
 								{#if citation.preview.source_name}
 									<span>{citation.preview.source_name}</span>
 								{/if}
-								<span>{citation.preview.type === 'image' ? $i18n.t('Image') : $i18n.t('Text')}</span>
+								<span>{citation.preview.type === 'image' ? $i18n.t('Image') : $i18n.t('Text')}</span
+								>
 								{#if Number.isInteger(citation.preview.page_index)}
 									<span>{$i18n.t('page')} {citation.preview.page_index + 1}</span>
 								{/if}
@@ -211,10 +220,15 @@
 						</div>
 					</div>
 				{:else if primaryPreviewText}
-					<div class="rounded-lg border border-gray-100 bg-gray-50/80 p-3 dark:border-gray-800 dark:bg-gray-850/60">
+					<div
+						class="rounded-lg border border-gray-200 bg-white p-3 shadow-sm dark:border-gray-800 dark:bg-gray-900"
+					>
 						{#if $settings?.renderMarkdownInPreviews ?? true}
 							<div class="text-sm prose dark:prose-invert markdown-prose-sm min-w-full max-w-full">
-								<Markdown content={primaryPreviewText} id="citation-preview-{citation?.source?.name || 'citation'}" />
+								<Markdown
+									content={primaryPreviewText}
+									id="citation-preview-{citation?.source?.name || 'citation'}"
+								/>
 							</div>
 						{:else}
 							<pre class="text-sm whitespace-pre-wrap break-words font-sans dark:text-gray-300">
@@ -224,9 +238,11 @@
 					</div>
 				{/if}
 
-				<details class="rounded-lg border border-gray-100 bg-white/70 p-3 dark:border-gray-800 dark:bg-gray-900/60">
+				<details
+					class="rounded-lg border border-gray-200 bg-gray-50/70 p-3 dark:border-gray-800 dark:bg-gray-900/70"
+				>
 					<summary
-						class="cursor-pointer select-none list-none flex items-center justify-between gap-2 text-sm font-medium text-gray-700 dark:text-gray-200"
+						class="flex cursor-pointer select-none list-none items-center justify-between gap-2 text-sm font-semibold text-gray-700 dark:text-gray-200"
 					>
 						<span>{$i18n.t('Details')}</span>
 					</summary>
@@ -236,7 +252,9 @@
 								<div class="text-sm font-medium dark:text-gray-300">
 									{$i18n.t('OCR')}
 								</div>
-								<pre class="text-sm whitespace-pre-wrap break-words font-sans text-gray-500 dark:text-gray-400">{citation.preview.ocr_text}</pre>
+								<pre
+									class="text-sm whitespace-pre-wrap break-words font-sans text-gray-500 dark:text-gray-400">{citation
+										.preview.ocr_text}</pre>
 							</div>
 						{/if}
 
@@ -331,7 +349,7 @@
 													: rawContent}</pre>
 											{#if isTruncated}
 												<button
-													class="mt-1 text-xs text-gray-500 hover:text-gray-700 dark:hover:text-gray-300 transition"
+													class="mt-2 rounded-md border border-gray-200 bg-white px-2.5 py-1 text-xs font-medium text-gray-600 transition hover:border-gray-300 hover:text-gray-900 dark:border-gray-700 dark:bg-gray-850 dark:text-gray-300 dark:hover:text-gray-100"
 													on:click={() => {
 														expandedDocs.add(documentIdx);
 														expandedDocs = expandedDocs;
@@ -355,7 +373,7 @@
 											</div>
 											{#if isTruncated}
 												<button
-													class="mt-1 text-xs text-gray-500 hover:text-gray-700 dark:hover:text-gray-300 transition"
+													class="mt-2 rounded-md border border-gray-200 bg-white px-2.5 py-1 text-xs font-medium text-gray-600 transition hover:border-gray-300 hover:text-gray-900 dark:border-gray-700 dark:bg-gray-850 dark:text-gray-300 dark:hover:text-gray-100"
 													on:click={() => {
 														expandedDocs.add(documentIdx);
 														expandedDocs = expandedDocs;

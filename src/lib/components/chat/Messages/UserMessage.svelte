@@ -369,8 +369,8 @@
 				<div class="w-full">
 					<div class="flex {($settings?.chatBubble ?? true) ? 'justify-end pb-1' : 'w-full'}">
 						<div
-							class="rounded-3xl {($settings?.chatBubble ?? true)
-								? `max-w-[90%] px-4 py-1.5  bg-gray-50 dark:bg-gray-850 ${
+							class="user-message-bubble rounded-lg {($settings?.chatBubble ?? true)
+								? `max-w-[min(42rem,90%)] border border-gray-900/10 bg-gray-900 px-4 py-2.5 text-white shadow-sm dark:border-white/10 dark:bg-gray-100 dark:text-gray-950 ${
 										message.files ? 'rounded-tr-lg' : ''
 									}`
 								: ' w-full'}"
@@ -683,3 +683,30 @@
 		</div>
 	</div>
 </div>
+
+<style>
+	.user-message-bubble :global(.markdown-prose),
+	.user-message-bubble :global(.prose),
+	.user-message-bubble :global(p),
+	.user-message-bubble :global(li),
+	.user-message-bubble :global(strong),
+	.user-message-bubble :global(em) {
+		color: inherit;
+	}
+
+	.user-message-bubble :global(a) {
+		color: inherit;
+		text-decoration-color: currentColor;
+	}
+
+	.user-message-bubble :global(code:not(pre code)) {
+		border-radius: 0.25rem;
+		background: rgba(255, 255, 255, 0.14);
+		padding: 0.0625rem 0.25rem;
+		color: inherit;
+	}
+
+	:global(html.dark) .user-message-bubble :global(code:not(pre code)) {
+		background: rgba(0, 0, 0, 0.08);
+	}
+</style>
