@@ -52,6 +52,14 @@ from open_webui.agent.subagents import (
     SubagentModelSelectionRequest,
     SubagentRegisterRequest,
 )
+from open_webui.agent.user_input import (
+    AgentUserInputCoordinator,
+    UserInputConflict,
+    UserInputError,
+    UserInputNotFound,
+    UserInputOperationInProgress,
+    UserInputRequest,
+)
 from open_webui.agent.tool_authority import (
     AgentToolAuthority,
     ToolAuthorityError,
@@ -647,6 +655,16 @@ def get_agent_subagent_coordinator(request: Request) -> AgentSubagentCoordinator
     return coordinator
 
 
+def get_agent_user_input_coordinator(request: Request) -> AgentUserInputCoordinator:
+    coordinator = getattr(request.app.state, 'AGENT_USER_INPUT_COORDINATOR', None)
+    if coordinator is not None:
+        return coordinator
+
+    coordinator = AgentUserInputCoordinator(get_agent_operation_store(request))
+    request.app.state.AGENT_USER_INPUT_COORDINATOR = coordinator
+    return coordinator
+
+
 def get_agent_operation_store(request: Request):
     return get_configured_agent_event_store(request) or AgentRuns
 
@@ -729,6 +747,67 @@ async def execute_agent_run_subagent_registration(
             status_code=status.HTTP_409_CONFLICT,
             detail={
                 'code': getattr(exc, 'code', 'subagent_error'),
+                'message': str(exc),
+            },
+        ) from exc
+
+
+@router.post('/runs/{run_id}/user-input-requests')
+async def request_agent_run_user_input(
+    request: Request,
+    run_id: str,
+    form_data: UserInputRequest,
+    idempotency_key: str | None = Header(
+        default=None,
+        alias='X-Agent-Idempotency-Key',
+    ),
+    authorization: str | None = Header(default=None, alias='Authorization'),
+    coordinator: AgentUserInputCoordinator = Depends(get_agent_user_input_coordinator),
+):
+    _require_agent_service_credential(request, authorization)
+    key = _require_matching_idempotency_key(
+        form_data.idempotency_key,
+        idempotency_key,
+    )
+    try:
+        payload = form_data.model_copy(update={'run_id': run_id, 'idempotency_key': key})
+        return await coordinator.request_user_input(
+            payload,
+            wait_for_response=True,
+            response_timeout_seconds=payload.timeout_seconds,
+        )
+    except AgentRunOperationConflict as exc:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail='idempotency_conflict',
+        ) from exc
+    except UserInputOperationInProgress:
+        return JSONResponse(
+            status_code=status.HTTP_202_ACCEPTED,
+            content={'detail': 'operation_in_progress'},
+            headers={'Retry-After': '1'},
+        )
+    except UserInputConflict as exc:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail={
+                'code': exc.code,
+                'message': str(exc),
+            },
+        ) from exc
+    except UserInputNotFound as exc:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail={
+                'code': exc.code,
+                'message': str(exc),
+            },
+        ) from exc
+    except UserInputError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail={
+                'code': getattr(exc, 'code', 'user_input_error'),
                 'message': str(exc),
             },
         ) from exc

@@ -13,6 +13,12 @@ export type AgentRunEventsOptions = {
 	lastEventId?: string;
 };
 
+export type AgentRunUserInputSubmission = {
+	status: 'accepted' | 'declined' | 'cancelled';
+	content?: unknown;
+	idempotencyKey?: string;
+};
+
 export type AgentRunListResponse = {
 	items: AgentRun[];
 	total: number;
@@ -144,4 +150,57 @@ export const createAgentRunEventsSource = (
 	return new EventSource(buildAgentRunEventsUrl(runId, options), {
 		withCredentials: true
 	});
+};
+
+export const submitAgentRunUserInput = async (
+	token: string = '',
+	runId: string,
+	userInputId: string,
+	submission: AgentRunUserInputSubmission
+): Promise<Record<string, unknown>> => {
+	let error = null;
+	const idempotencyKey = submission.idempotencyKey ?? createIdempotencyKey(userInputId, submission.status);
+	const res = await fetch(
+		`${AGENT_RUNS_API_BASE_URL}/${encodeURIComponent(runId)}/user-input/${encodeURIComponent(
+			userInputId
+		)}`,
+		{
+			method: 'POST',
+			credentials: 'include',
+			headers: {
+				...jsonHeaders(token),
+				'X-Agent-Idempotency-Key': idempotencyKey
+			},
+			body: JSON.stringify({
+				run_id: runId,
+				user_input_id: userInputId,
+				status: submission.status,
+				content: submission.content,
+				idempotency_key: idempotencyKey
+			})
+		}
+	)
+		.then(async (res) => {
+			if (!res.ok) throw await res.json();
+			return res.json();
+		})
+		.catch((err) => {
+			error = err?.detail ?? err;
+			console.error(err);
+			return null;
+		});
+
+	if (error) {
+		throw error;
+	}
+
+	return res ?? {};
+};
+
+const createIdempotencyKey = (userInputId: string, status: string): string => {
+	const random =
+		typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function'
+			? crypto.randomUUID()
+			: `${Date.now()}-${Math.random().toString(36).slice(2)}`;
+	return `user-input:${userInputId}:${status}:${random}`;
 };

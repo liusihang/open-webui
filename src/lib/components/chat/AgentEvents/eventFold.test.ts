@@ -431,11 +431,88 @@ describe('foldAgentRunEvents', () => {
 		);
 		expect(state.runStatus).toBe('waiting_approval');
 
-		state = foldAgentRunEvent(state, agentRunEventFixture({ seq: 4, event_type: 'final.started' }));
+		state = foldAgentRunEvent(
+			state,
+			agentRunEventFixture({ seq: 4, event_type: 'user_input.requested' })
+		);
+		expect(state.runStatus).toBe('waiting_user_input');
+
+		state = foldAgentRunEvent(
+			state,
+			agentRunEventFixture({ seq: 5, event_type: 'user_input.completed' })
+		);
+		expect(state.runStatus).toBe('running');
+
+		state = foldAgentRunEvent(state, agentRunEventFixture({ seq: 6, event_type: 'final.started' }));
 		expect(state.runStatus).toBe('finalizing');
 
-		state = foldAgentRunEvent(state, agentRunEventFixture({ seq: 5, event_type: 'run.completed' }));
+		state = foldAgentRunEvent(state, agentRunEventFixture({ seq: 7, event_type: 'run.completed' }));
 		expect(state.runStatus).toBe('completed');
+	});
+
+	it('folds user input lifecycle as pending and terminal user_input items', () => {
+		const state = foldAgentRunEvents([
+			agentRunEventFixture({
+				seq: 1,
+				event_type: 'user_input.requested',
+				summary: '',
+				payload: {
+					user_input_id: 'input-1',
+					message: 'Which file should I update?',
+					requested_schema: {
+						type: 'object',
+						properties: { file: { type: 'string', title: 'Target file' } },
+						required: ['file']
+					}
+				}
+			}),
+			agentRunEventFixture({
+				seq: 2,
+				event_type: 'user_input.completed',
+				summary: '',
+				payload: {
+					user_input_id: 'input-1',
+					status: 'accepted',
+					content: { file: 'README.md' }
+				}
+			})
+		]);
+
+		expect(state.runStatus).toBe('running');
+		expect(state.counts.user_input).toBe(2);
+		expect(state.items.map((item) => item.eventType)).toEqual([
+			'user_input.requested',
+			'user_input.completed'
+		]);
+		expect(state.items[0]).toMatchObject({
+			category: 'user_input',
+			label: 'User input',
+			summary: 'Needs your input',
+			status: 'running'
+		});
+		expect(state.items[1]).toMatchObject({
+			category: 'user_input',
+			label: 'User input',
+			summary: 'User input submitted',
+			status: 'done'
+		});
+	});
+
+	it('marks declined user input as a normal terminal event', () => {
+		const state = foldAgentRunEvents([
+			agentRunEventFixture({
+				seq: 1,
+				event_type: 'user_input.declined',
+				summary: '',
+				payload: { user_input_id: 'input-1', status: 'declined' }
+			})
+		]);
+
+		expect(state.items[0]).toMatchObject({
+			category: 'user_input',
+			status: 'done',
+			summary: 'User input declined'
+		});
 	});
 
 	it('exposes user-facing categories labels metadata and counts for Agent Run events', () => {

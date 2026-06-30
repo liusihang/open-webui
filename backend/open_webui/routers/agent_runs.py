@@ -16,17 +16,42 @@ from open_webui.agent.events import (
     resolve_after_seq,
 )
 from open_webui.agent.protocol import AgentEventListResponse, AgentRunDetailResponse
+from open_webui.agent.user_input import (
+    AgentUserInputCoordinator,
+    UserInputCompletionRequest,
+    UserInputConflict,
+    UserInputError,
+    UserInputNotFound,
+    UserInputOperationInProgress,
+)
 from open_webui.models.agent_runs import AgentRunNotFound, AgentRuns
 from open_webui.utils.auth import get_verified_user
 
 router = APIRouter()
 log = logging.getLogger(__name__)
 
-ACTIVE_CANCEL_FROM_STATES = ['queued', 'running', 'waiting_approval', 'finalizing']
+ACTIVE_CANCEL_FROM_STATES = ['queued', 'running', 'waiting_approval', 'waiting_user_input', 'finalizing']
 TERMINAL_STATES = {'completed', 'failed', 'cancelled', 'budget_exceeded'}
 TERMINAL_EVENT_TYPES = {'run.completed', 'run.failed', 'run.cancelled', 'run.budget_exceeded'}
 AGENT_RUN_EVENTS_POLL_SECONDS = float(os.getenv('AGENT_RUN_EVENTS_POLL_SECONDS', '0.1'))
 AGENT_RUN_EVENTS_HEARTBEAT_SECONDS = float(os.getenv('AGENT_RUN_EVENTS_HEARTBEAT_SECONDS', '15.0'))
+
+
+def _require_matching_idempotency_key(
+    body_key: str | None,
+    header_key: str | None,
+) -> str:
+    if not body_key and not header_key:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail='idempotency_key_required',
+        )
+    if body_key and header_key and body_key != header_key:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail='idempotency_key_required',
+        )
+    return body_key or header_key or ''
 
 
 def get_configured_agent_event_store(request: Request) -> AgentEventStore | None:
@@ -44,6 +69,16 @@ def get_agent_event_store(request: Request) -> AgentEventStore:
             detail='Agent Run storage is not configured',
         )
     return store
+
+
+def get_agent_user_input_coordinator(request: Request) -> AgentUserInputCoordinator:
+    coordinator = getattr(request.app.state, 'AGENT_USER_INPUT_COORDINATOR', None)
+    if coordinator is not None:
+        return coordinator
+
+    coordinator = AgentUserInputCoordinator(get_configured_agent_event_store(request) or AgentRuns)
+    request.app.state.AGENT_USER_INPUT_COORDINATOR = coordinator
+    return coordinator
 
 
 @router.get('/{run_id}', response_model=AgentRunDetailResponse)
@@ -132,6 +167,79 @@ async def cancel_agent_run(
 
     await _request_runtime_cancel(request, run.id)
     return _agent_run_detail(updated)
+
+
+@router.post('/{run_id}/user-input/{user_input_id}')
+async def complete_agent_run_user_input(
+    run_id: str,
+    user_input_id: str,
+    form_data: UserInputCompletionRequest,
+    request: Request,
+    idempotency_key: str | None = Header(
+        default=None,
+        alias='X-Agent-Idempotency-Key',
+    ),
+    user=Depends(get_verified_user),
+    coordinator: AgentUserInputCoordinator = Depends(get_agent_user_input_coordinator),
+):
+    run = await AgentRuns.get_run(run_id)
+    if run is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail='Agent Run not found',
+        )
+    if run.user_id != user.id and getattr(user, 'role', None) != 'admin':
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail='Agent Run not found',
+        )
+
+    key = _require_matching_idempotency_key(
+        form_data.idempotency_key,
+        idempotency_key,
+    )
+    try:
+        return await coordinator.complete(
+            form_data.model_copy(
+                update={
+                    'run_id': run_id,
+                    'user_input_id': user_input_id,
+                    'idempotency_key': key,
+                }
+            )
+        )
+    except UserInputOperationInProgress:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail={
+                'code': UserInputOperationInProgress.code,
+                'message': 'user input operation is still in progress',
+            },
+        )
+    except UserInputConflict as exc:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail={
+                'code': exc.code,
+                'message': str(exc),
+            },
+        ) from exc
+    except UserInputNotFound as exc:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail={
+                'code': exc.code,
+                'message': str(exc),
+            },
+        ) from exc
+    except UserInputError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail={
+                'code': getattr(exc, 'code', 'user_input_error'),
+                'message': str(exc),
+            },
+        ) from exc
 
 
 async def cancel_agent_runs_for_chat(

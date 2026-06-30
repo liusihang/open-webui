@@ -3,6 +3,7 @@
 	import TranscriptPart from './TranscriptPart.svelte';
 
 	export let model: AgentTranscriptModel;
+	export let agentRunId: string | null = null;
 	export let expandAll = false;
 
 	const headline = ($model: AgentTranscriptModel): string => {
@@ -17,6 +18,8 @@
 							? 'Budget exceeded'
 							: $model.runStatus === 'waiting_approval'
 								? 'Waiting on approval'
+								: $model.runStatus === 'waiting_user_input'
+									? 'Waiting for input'
 								: $model.runStatus === 'finalizing'
 									? 'Writing final answer'
 									: 'Working';
@@ -34,6 +37,11 @@
 				`${$model.summary.approvalCount} approval${$model.summary.approvalCount === 1 ? '' : 's'}`
 			);
 		}
+		if ($model.summary.userInputCount > 0) {
+			segments.push(
+				`${$model.summary.userInputCount} input${$model.summary.userInputCount === 1 ? '' : 's'}`
+			);
+		}
 		if ($model.summary.subagentCount > 0) {
 			segments.push(
 				`${$model.summary.subagentCount} subagent${$model.summary.subagentCount === 1 ? '' : 's'}`
@@ -48,7 +56,7 @@
 		<span class="agent-transcript-headline">{headline(model)}</span>
 		{#if model.summary.hasError}
 			<span class="agent-transcript-flag error" aria-hidden="true">error</span>
-		{:else if model.summary.hasPendingApproval}
+		{:else if model.summary.hasPendingApproval || model.summary.hasPendingUserInput}
 			<span class="agent-transcript-flag pending" aria-hidden="true">pending</span>
 		{/if}
 	</header>
@@ -57,7 +65,7 @@
 		<ol class="agent-transcript-timeline">
 			{#each model.parts as part (part.seq + ':' + part.kind)}
 				<li class="agent-transcript-timeline-row">
-					<TranscriptPart {part} />
+					<TranscriptPart {part} {agentRunId} />
 				</li>
 			{/each}
 		</ol>

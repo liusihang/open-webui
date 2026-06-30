@@ -4,11 +4,13 @@
 	import ActionSummaryPart from './ActionSummaryPart.svelte';
 	import ToolPart from './ToolPart.svelte';
 	import ApprovalPart from './ApprovalPart.svelte';
+	import UserInputPart from './UserInputPart.svelte';
 	import ArtifactPart from './ArtifactPart.svelte';
 	import ErrorPart from './ErrorPart.svelte';
 	import AgentDetailSection from './AgentDetailSection.svelte';
 
 	export let part: AgentTranscriptModelPart;
+	export let agentRunId: string | null = null;
 </script>
 
 <div class="transcript-part" data-kind={part.kind}>
@@ -20,6 +22,8 @@
 		<ToolPart {part} />
 	{:else if part.kind === 'approval'}
 		<ApprovalPart {part} />
+	{:else if part.kind === 'user_input'}
+		<UserInputPart {part} {agentRunId} />
 	{:else if part.kind === 'artifact'}
 		<ArtifactPart {part} />
 	{:else if part.kind === 'error'}
@@ -49,7 +53,7 @@
 				open={part.defaultExpanded}
 			/>
 		</div>
-	{:else}
+	{:else if part.kind === 'run'}
 		<div class="transcript-run-row">
 			<span class="transcript-run-label">{part.label}</span>
 			<span class="transcript-run-summary">{part.summary}</span>

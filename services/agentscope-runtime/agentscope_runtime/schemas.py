@@ -142,6 +142,18 @@ class StateTransitionRequest(BaseModel):
     payload: dict[str, Any] = Field(default_factory=dict)
 
 
+class UserInputRequest(BaseModel):
+    idempotency_key: str
+    run_id: str
+    participant_id: str
+    user_input_id: str
+    tool_call_id: str
+    message: str
+    requested_schema: dict[str, Any] = Field(default_factory=dict)
+    timeout_seconds: float | None = None
+    allow_cancel: bool = True
+
+
 class SubagentRegisterRequest(BaseModel):
     idempotency_key: str
     run_id: str

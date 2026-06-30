@@ -24,6 +24,7 @@ const AGENT_RUN_EVENT_CATEGORIES: AgentRunEventCategory[] = [
 	'action',
 	'tool',
 	'approval',
+	'user_input',
 	'artifact',
 	'subagent',
 	'model',
@@ -224,6 +225,16 @@ const getEventSummary = (event: AgentRunEvent): string => {
 			return 'Approval requested';
 		case 'approval.completed':
 			return 'Approval completed';
+		case 'user_input.requested':
+			return 'Needs your input';
+		case 'user_input.completed':
+			return 'User input submitted';
+		case 'user_input.declined':
+			return 'User input declined';
+		case 'user_input.cancelled':
+			return 'User input cancelled';
+		case 'user_input.expired':
+			return 'User input timed out';
 		case 'artifact.registered':
 			return artifactName ? `Registered ${artifactName}` : 'Artifact registered';
 		case 'subagent.created':
@@ -275,6 +286,13 @@ const getRunStatusForEvent = (
 			return 'waiting_approval';
 		case 'approval.completed':
 			return 'running';
+		case 'user_input.requested':
+			return 'waiting_user_input';
+		case 'user_input.completed':
+		case 'user_input.declined':
+		case 'user_input.cancelled':
+		case 'user_input.expired':
+			return 'running';
 		case 'final.started':
 		case 'final.delta':
 			return 'finalizing';
@@ -297,6 +315,9 @@ const getEventCategory = (eventType: AgentRunEventType): AgentRunEventCategory =
 	}
 	if (eventType.startsWith('approval.')) {
 		return 'approval';
+	}
+	if (eventType.startsWith('user_input.')) {
+		return 'user_input';
 	}
 	if (eventType.startsWith('artifact.')) {
 		return 'artifact';
@@ -323,6 +344,8 @@ const getEventLabel = (eventType: AgentRunEventType): string => {
 			return 'Tool';
 		case 'approval':
 			return 'Approval';
+		case 'user_input':
+			return 'User input';
 		case 'artifact':
 			return 'Artifact';
 		case 'subagent':
@@ -353,6 +376,12 @@ const getEventMetadata = (event: AgentRunEvent): AgentRunEventMetadata[] => {
 	if (category === 'approval') {
 		addMetadata(metadata, 'Action', payload.action ?? payload.description);
 		addMetadata(metadata, 'Approval', payload.status);
+		return metadata;
+	}
+
+	if (category === 'user_input') {
+		addMetadata(metadata, 'Status', payload.status);
+		addMetadata(metadata, 'Prompt', payload.message);
 		return metadata;
 	}
 
@@ -419,6 +448,7 @@ const getEventStatus = (eventType: AgentRunEventType): AgentRunEventViewItem['st
 		eventType === 'tool.requested' ||
 		eventType === 'tool.started' ||
 		eventType === 'approval.requested' ||
+		eventType === 'user_input.requested' ||
 		eventType === 'subagent.created' ||
 		eventType === 'subagent.updated' ||
 		eventType === 'model.selection.requested' ||

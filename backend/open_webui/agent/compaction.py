@@ -15,6 +15,13 @@ _APPROVAL_EVENTS = {
     AgentEventType.APPROVAL_REQUESTED.value,
     AgentEventType.APPROVAL_COMPLETED.value,
 }
+_USER_INPUT_EVENTS = {
+    AgentEventType.USER_INPUT_REQUESTED.value,
+    AgentEventType.USER_INPUT_COMPLETED.value,
+    AgentEventType.USER_INPUT_DECLINED.value,
+    AgentEventType.USER_INPUT_CANCELLED.value,
+    AgentEventType.USER_INPUT_EXPIRED.value,
+}
 _SUBAGENT_EVENTS = {
     AgentEventType.SUBAGENT_CREATED.value,
     AgentEventType.SUBAGENT_UPDATED.value,
@@ -102,6 +109,7 @@ def build_compacted_run_summary(
     actions: list[dict[str, Any]] = []
     tools: list[dict[str, Any]] = []
     approvals: list[dict[str, Any]] = []
+    user_inputs: list[dict[str, Any]] = []
     subagents: list[dict[str, Any]] = []
     errors: list[dict[str, Any]] = []
     warnings: list[dict[str, Any]] = []
@@ -153,6 +161,18 @@ def build_compacted_run_summary(
                 }
             )
             retained = True
+        elif event_type in _USER_INPUT_EVENTS:
+            user_inputs.append(
+                {
+                    'seq': _value(event, 'seq'),
+                    'participant_id': _value(event, 'participant_id'),
+                    'summary': _value(event, 'summary'),
+                    'user_input_id': payload.get('user_input_id'),
+                    'status': payload.get('status'),
+                    'payload': payload,
+                }
+            )
+            retained = True
         elif event_type in _SUBAGENT_EVENTS:
             subagents.append(
                 {
@@ -188,6 +208,7 @@ def build_compacted_run_summary(
             'actions': actions,
             'tools': tools,
             'approvals': approvals,
+            'user_inputs': user_inputs,
             'subagents': subagents,
             'artifacts': [
                 compact_artifact_for_summary(
