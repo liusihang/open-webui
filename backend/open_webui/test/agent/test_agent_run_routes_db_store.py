@@ -674,7 +674,7 @@ async def test_agent_service_tool_callback_rebuilds_missing_registry_from_run_sn
             }
         }
 
-    async def no_approval(tool_request, tool, resume):
+    async def no_approval(tool_request, tool, resume, **kwargs):
         return None
 
     monkeypatch.setattr(agent_service, 'get_builtin_tools', fake_get_builtin_tools)
@@ -742,7 +742,7 @@ async def test_agent_service_tool_callback_uses_run_user_id_for_terminal_artifac
             'next_offset': 12,
         }
 
-    async def no_approval(tool_request, tool, resume):
+    async def no_approval(tool_request, tool, resume, **kwargs):
         return None
 
     _envelope, registry = build_tool_access_envelope(

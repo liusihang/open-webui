@@ -19,6 +19,7 @@ NON_TERMINAL_STATES = [
     AgentRunState.QUEUED,
     AgentRunState.RUNNING,
     AgentRunState.WAITING_APPROVAL,
+    AgentRunState.WAITING_USER_INPUT,
     AgentRunState.FINALIZING,
 ]
 

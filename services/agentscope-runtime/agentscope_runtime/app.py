@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import os
 import secrets
@@ -125,6 +126,20 @@ class RuntimeCallbackClient(Protocol):
         tool_call_id: str,
         tool_id: str,
         arguments: dict[str, Any],
+    ) -> dict[str, Any]: ...
+
+    async def request_user_input(
+        self,
+        *,
+        run_id: str,
+        idempotency_key: str,
+        participant_id: str,
+        user_input_id: str,
+        tool_call_id: str,
+        message: str,
+        requested_schema: dict[str, Any],
+        timeout_seconds: float | None = None,
+        allow_cancel: bool = True,
     ) -> dict[str, Any]: ...
 
     async def register_subagent(
@@ -806,6 +821,15 @@ def _build_toolkit(
             )
         )
 
+    tools.append(
+        RequestUserInputTool(
+            callback_client=callback_client,
+            session=session,
+            participant_id=participant_id,
+            allocate_tool_call_id=bridge._allocate_tool_call_id,
+        )
+    )
+
     if include_subagent_tool:
         tools.append(
             CreateSubagentTool(
@@ -823,6 +847,111 @@ def _tool_specs(request: RunStartRequest) -> list[dict[str, Any]]:
     if not isinstance(tools, list):
         return []
     return [tool for tool in tools if isinstance(tool, dict)]
+
+
+class RequestUserInputTool(ToolBase):
+    name = "request_user_input"
+    description = (
+        "Use this tool only when the agent cannot continue without user-provided "
+        "information, preference, or selection. Do not use it for safety approvals, "
+        "secrets, passwords, API keys, tokens, cookies, private credentials, or "
+        "information already available in the conversation. Ask one concise question "
+        "unless a structured form is necessary. Returns a JSON object with status "
+        "accepted, declined, cancelled, or timeout, and accepted content when provided."
+    )
+    input_schema = {
+        "type": "object",
+        "properties": {
+            "message": {
+                "type": "string",
+                "description": "Concise user-facing question or instruction.",
+            },
+            "requested_schema": {
+                "type": "object",
+                "description": "JSON schema for the user response. Prefer a small object with 1-3 fields.",
+            },
+            "timeout_seconds": {
+                "type": "number",
+                "description": "Optional wait timeout in seconds.",
+            },
+            "allow_cancel": {
+                "type": "boolean",
+                "description": "Whether the user may cancel the request.",
+            },
+        },
+        "required": ["message", "requested_schema"],
+    }
+    is_concurrency_safe = False
+    is_read_only = True
+
+    def __init__(
+        self,
+        *,
+        callback_client: RuntimeCallbackClient,
+        session: RuntimeSession,
+        participant_id: str,
+        allocate_tool_call_id,
+    ) -> None:
+        self.callback_client = callback_client
+        self.session = session
+        self.participant_id = participant_id
+        self._allocate_tool_call_id = allocate_tool_call_id
+
+    async def check_permissions(
+        self,
+        tool_input: dict[str, Any],
+        context: PermissionContext,
+    ) -> PermissionDecision:
+        return PermissionDecision(
+            behavior=PermissionBehavior.ALLOW,
+            message="OpenWebUI will request input from the current user.",
+        )
+
+    async def __call__(
+        self,
+        *,
+        message: str,
+        requested_schema: dict[str, Any],
+        timeout_seconds: float | None = None,
+        allow_cancel: bool = True,
+    ) -> ToolChunk:
+        tool_call_id = self._allocate_tool_call_id()
+        user_input_id = f"user-input:{self.session.run_id}:{tool_call_id}"
+        self.session.state = "waiting_user_input"
+        self.session.updated_at = time.time()
+        try:
+            response = await self.callback_client.request_user_input(
+                run_id=self.session.run_id,
+                idempotency_key=f"user-input:{self.participant_id}:{tool_call_id}:1",
+                participant_id=self.participant_id,
+                user_input_id=user_input_id,
+                tool_call_id=tool_call_id,
+                message=message,
+                requested_schema=requested_schema,
+                timeout_seconds=timeout_seconds,
+                allow_cancel=allow_cancel,
+            )
+        finally:
+            if self.session.state == "waiting_user_input":
+                self.session.state = "running"
+                self.session.updated_at = time.time()
+        status = str(response.get("status") or "cancelled")
+        if status == "accepted":
+            state = ToolResultState.SUCCESS
+        elif status == "declined":
+            state = ToolResultState.DENIED
+        else:
+            state = ToolResultState.INTERRUPTED
+        return ToolChunk(
+            content=[TextBlock(text=json.dumps(response, ensure_ascii=False, separators=(",", ":")))],
+            state=state,
+            metadata={
+                "user_input": response,
+                "participant_id": self.participant_id,
+                "tool_call_id": tool_call_id,
+                "user_input_id": user_input_id,
+            },
+        )
 
 
 class CreateSubagentTool(ToolBase):
@@ -1150,7 +1279,7 @@ async def _mark_session_failed(
         await callback_client.transition_state(
             run_id=session.run_id,
             idempotency_key=f"state:{session.run_id}:failed",
-            from_states=["queued", "running", "waiting_approval", "finalizing"],
+            from_states=["queued", "running", "waiting_approval", "waiting_user_input", "finalizing"],
             to_state="failed",
             reason="runtime finalization failed",
             payload={"error": error, **event_payload},

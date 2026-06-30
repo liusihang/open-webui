@@ -18,6 +18,7 @@ class AgentRunState(StrEnum):
     QUEUED = 'queued'
     RUNNING = 'running'
     WAITING_APPROVAL = 'waiting_approval'
+    WAITING_USER_INPUT = 'waiting_user_input'
     FINALIZING = 'finalizing'
     COMPLETED = 'completed'
     FAILED = 'failed'
@@ -37,6 +38,7 @@ LEGAL_TRANSITIONS: set[tuple[AgentRunState, AgentRunState]] = {
     (AgentRunState.QUEUED, AgentRunState.FAILED),
     (AgentRunState.QUEUED, AgentRunState.CANCELLED),
     (AgentRunState.RUNNING, AgentRunState.WAITING_APPROVAL),
+    (AgentRunState.RUNNING, AgentRunState.WAITING_USER_INPUT),
     (AgentRunState.RUNNING, AgentRunState.FINALIZING),
     (AgentRunState.RUNNING, AgentRunState.FAILED),
     (AgentRunState.RUNNING, AgentRunState.CANCELLED),
@@ -45,6 +47,10 @@ LEGAL_TRANSITIONS: set[tuple[AgentRunState, AgentRunState]] = {
     (AgentRunState.WAITING_APPROVAL, AgentRunState.FAILED),
     (AgentRunState.WAITING_APPROVAL, AgentRunState.CANCELLED),
     (AgentRunState.WAITING_APPROVAL, AgentRunState.BUDGET_EXCEEDED),
+    (AgentRunState.WAITING_USER_INPUT, AgentRunState.RUNNING),
+    (AgentRunState.WAITING_USER_INPUT, AgentRunState.FAILED),
+    (AgentRunState.WAITING_USER_INPUT, AgentRunState.CANCELLED),
+    (AgentRunState.WAITING_USER_INPUT, AgentRunState.BUDGET_EXCEEDED),
     (AgentRunState.FINALIZING, AgentRunState.COMPLETED),
     (AgentRunState.FINALIZING, AgentRunState.FAILED),
     (AgentRunState.FINALIZING, AgentRunState.CANCELLED),

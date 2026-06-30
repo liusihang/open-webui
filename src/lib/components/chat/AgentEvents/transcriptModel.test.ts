@@ -116,6 +116,110 @@ describe('buildAgentTranscriptModel', () => {
 		expect(resolved.summary.hasPendingApproval).toBe(false);
 	});
 
+	it('groups user input lifecycle by user_input_id and exposes a single inline input part', () => {
+		const pending = buildAgentTranscriptModel(
+			foldAgentRunEvents([
+				agentRunEventFixture({
+					seq: 1,
+					event_type: 'user_input.requested',
+					summary: '',
+					payload: {
+						user_input_id: 'input-1',
+						message: 'Which file should I update?',
+						requested_schema: {
+							type: 'object',
+							properties: { file: { type: 'string', title: 'Target file' } },
+							required: ['file']
+						},
+						allow_cancel: true
+					}
+				})
+			])
+		);
+		const pendingInput = pending.parts.find((part) => part.kind === 'user_input');
+		if (!pendingInput || pendingInput.kind !== 'user_input') {
+			throw new Error('expected user_input part');
+		}
+		expect(pendingInput.status).toBe('pending');
+		expect(pendingInput.defaultExpanded).toBe(true);
+		expect(pendingInput.message).toBe('Which file should I update?');
+		expect(pendingInput.requestedSchema).toMatchObject({
+			properties: { file: { title: 'Target file' } }
+		});
+		expect(pending.summary.userInputCount).toBe(1);
+		expect(pending.summary.hasPendingUserInput).toBe(true);
+
+		const completed = buildAgentTranscriptModel(
+			foldAgentRunEvents([
+				agentRunEventFixture({
+					seq: 1,
+					event_type: 'user_input.requested',
+					summary: '',
+					payload: {
+						user_input_id: 'input-1',
+						message: 'Which file should I update?',
+						requested_schema: {
+							type: 'object',
+							properties: { file: { type: 'string', title: 'Target file' } },
+							required: ['file']
+						}
+					}
+				}),
+				agentRunEventFixture({
+					seq: 2,
+					event_type: 'user_input.completed',
+					summary: '',
+					payload: {
+						user_input_id: 'input-1',
+						status: 'accepted',
+						content: { file: 'README.md' }
+					}
+				})
+			])
+		);
+		const completedInput = completed.parts.find((part) => part.kind === 'user_input');
+		if (!completedInput || completedInput.kind !== 'user_input') {
+			throw new Error('expected user_input part');
+		}
+		expect(completedInput.status).toBe('accepted');
+		expect(completedInput.defaultExpanded).toBe(false);
+		expect(completedInput.content).toEqual({ file: 'README.md' });
+		expect(completed.summary.hasPendingUserInput).toBe(false);
+	});
+
+	it('treats declined user input as a normal user-input terminal status', () => {
+		const model = buildAgentTranscriptModel(
+			foldAgentRunEvents([
+				agentRunEventFixture({
+					seq: 1,
+					event_type: 'user_input.requested',
+					summary: '',
+					payload: {
+						user_input_id: 'input-1',
+						message: 'Which file should I update?'
+					}
+				}),
+				agentRunEventFixture({
+					seq: 2,
+					event_type: 'user_input.declined',
+					summary: '',
+					payload: {
+						user_input_id: 'input-1',
+						status: 'declined'
+					}
+				})
+			])
+		);
+		const input = model.parts.find((part) => part.kind === 'user_input');
+		if (!input || input.kind !== 'user_input') {
+			throw new Error('expected user_input part');
+		}
+
+		expect(input.status).toBe('declined');
+		expect(model.summary.hasError).toBe(false);
+		expect(model.summary.hasPendingUserInput).toBe(false);
+	});
+
 	it('renders artifact summary without exposing the raw path as the headline', () => {
 		const longPath = '/workspace/agent-runs/run-1/outputs/deep/nested/report.txt';
 		const state = foldAgentRunEvents([

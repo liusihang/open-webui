@@ -12,7 +12,8 @@ import type {
 	AgentTranscriptModelPart,
 	AgentTranscriptSubagentPart,
 	AgentTranscriptTextPart,
-	AgentTranscriptToolPart
+	AgentTranscriptToolPart,
+	AgentTranscriptUserInputPart
 } from './types';
 
 const TERMINAL_RUN_STATUSES: ReadonlySet<AgentRunState> = new Set([
@@ -43,6 +44,7 @@ export const buildAgentTranscriptModel = (state: AgentRunEventState): AgentTrans
 		isRunning:
 			state.runStatus === 'running' ||
 			state.runStatus === 'waiting_approval' ||
+			state.runStatus === 'waiting_user_input' ||
 			state.runStatus === 'finalizing',
 		isTerminal: TERMINAL_RUN_STATUSES.has(state.runStatus),
 		parts,
@@ -57,9 +59,11 @@ const summarizeParts = (parts: AgentTranscriptModelPart[]) => {
 	let toolCount = 0;
 	let artifactCount = 0;
 	let approvalCount = 0;
+	let userInputCount = 0;
 	let subagentCount = 0;
 	let hasError = false;
 	let hasPendingApproval = false;
+	let hasPendingUserInput = false;
 
 	for (const part of parts) {
 		switch (part.kind) {
@@ -73,6 +77,12 @@ const summarizeParts = (parts: AgentTranscriptModelPart[]) => {
 				approvalCount += 1;
 				if (part.status === 'pending') {
 					hasPendingApproval = true;
+				}
+				break;
+			case 'user_input':
+				userInputCount += 1;
+				if (part.status === 'pending') {
+					hasPendingUserInput = true;
 				}
 				break;
 			case 'artifact':
@@ -96,9 +106,11 @@ const summarizeParts = (parts: AgentTranscriptModelPart[]) => {
 		toolCount,
 		artifactCount,
 		approvalCount,
+		userInputCount,
 		subagentCount,
 		hasError,
-		hasPendingApproval
+		hasPendingApproval,
+		hasPendingUserInput
 	};
 };
 
@@ -111,6 +123,7 @@ const buildParts = (state: AgentRunEventState): AgentTranscriptModelPart[] => {
 
 	const tools = new Map<string, ToolAccumulator>();
 	const approvals = new Map<string, ApprovalAccumulator>();
+	const userInputs = new Map<string, UserInputAccumulator>();
 	const artifacts = new Map<string, AgentRunEventViewItem>();
 	const subagents = new Map<string, SubagentAccumulator>();
 
@@ -142,6 +155,22 @@ const buildParts = (state: AgentRunEventState): AgentTranscriptModelPart[] => {
 				};
 				acc.lastItem = item;
 				approvals.set(key, acc);
+				break;
+			}
+			case 'user_input.requested':
+			case 'user_input.completed':
+			case 'user_input.declined':
+			case 'user_input.cancelled':
+			case 'user_input.expired': {
+				const userInputId = readPayloadString(item.details, 'user_input_id');
+				const key = userInputId ?? `seq:${item.seq}`;
+				const acc = userInputs.get(key) ?? {
+					userInputId: userInputId ?? key,
+					firstItem: item,
+					lastItem: item
+				};
+				acc.lastItem = item;
+				userInputs.set(key, acc);
 				break;
 			}
 			case 'artifact.registered': {
@@ -185,6 +214,9 @@ const buildParts = (state: AgentRunEventState): AgentTranscriptModelPart[] => {
 	for (const acc of approvals.values()) {
 		parts.push(approvalAccumulatorToPart(acc));
 	}
+	for (const acc of userInputs.values()) {
+		parts.push(userInputAccumulatorToPart(acc));
+	}
 	for (const item of artifacts.values()) {
 		const part = artifactItemToPart(item);
 		if (part) {
@@ -217,6 +249,12 @@ type ToolAccumulator = {
 
 type ApprovalAccumulator = {
 	approvalId: string;
+	firstItem: AgentRunEventViewItem;
+	lastItem: AgentRunEventViewItem;
+};
+
+type UserInputAccumulator = {
+	userInputId: string;
 	firstItem: AgentRunEventViewItem;
 	lastItem: AgentRunEventViewItem;
 };
@@ -297,6 +335,37 @@ const approvalAccumulatorToPart = (acc: ApprovalAccumulator): AgentTranscriptApp
 		participantId: acc.firstItem.participantId,
 		phase: acc.firstItem.phase,
 		defaultExpanded: status === 'pending'
+	};
+};
+
+const userInputAccumulatorToPart = (acc: UserInputAccumulator): AgentTranscriptUserInputPart => {
+	const last = acc.lastItem;
+	const requestDetails = acc.firstItem.details;
+	const details =
+		acc.firstItem.details || acc.lastItem.details
+			? { ...(acc.firstItem.details ?? {}), ...(acc.lastItem.details ?? {}) }
+			: null;
+	const status = resolveUserInputStatus(last);
+	const message =
+		readPayloadString(requestDetails, 'message', 'prompt', 'question') ||
+		readPayloadString(details, 'message', 'prompt', 'question') ||
+		'Needs your input';
+	const requestedSchema = readPayloadObject(requestDetails, 'requested_schema', 'requestedSchema');
+	return {
+		kind: 'user_input',
+		userInputId: acc.userInputId,
+		message,
+		status,
+		requestedSchema,
+		content: details?.content ?? null,
+		allowCancel: readPayloadBoolean(requestDetails, 'allow_cancel', 'allowCancel') ?? true,
+		metadata: last.metadata,
+		details,
+		seq: acc.firstItem.seq,
+		createdAt: acc.firstItem.createdAt,
+		participantId: acc.firstItem.participantId,
+		phase: acc.firstItem.phase,
+		defaultExpanded: status !== 'accepted'
 	};
 };
 
@@ -393,6 +462,28 @@ const resolveApprovalStatus = (
 	return 'approved';
 };
 
+const resolveUserInputStatus = (
+	item: AgentRunEventViewItem
+): AgentTranscriptUserInputPart['status'] => {
+	if (item.eventType === 'user_input.requested') {
+		return 'pending';
+	}
+	if (item.eventType === 'user_input.declined') {
+		return 'declined';
+	}
+	if (item.eventType === 'user_input.cancelled') {
+		return 'cancelled';
+	}
+	if (item.eventType === 'user_input.expired') {
+		return 'timeout';
+	}
+	const raw = readPayloadString(item.details, 'status');
+	if (raw === 'accepted' || raw === 'declined' || raw === 'cancelled' || raw === 'timeout') {
+		return raw;
+	}
+	return 'accepted';
+};
+
 const extractArtifactPayload = (
 	payload: AgentRunEventPayload | null | undefined
 ): AgentRunEventPayload | null => {
@@ -441,6 +532,38 @@ const readPayloadString = (
 		}
 		if (typeof value === 'number' && Number.isFinite(value)) {
 			return `${value}`;
+		}
+	}
+	return null;
+};
+
+const readPayloadObject = (
+	payload: AgentRunEventPayload | null | undefined,
+	...keys: string[]
+): AgentRunEventPayload | null => {
+	if (!payload) {
+		return null;
+	}
+	for (const key of keys) {
+		const value = payload[key];
+		if (isPlainPayload(value)) {
+			return value;
+		}
+	}
+	return null;
+};
+
+const readPayloadBoolean = (
+	payload: AgentRunEventPayload | null | undefined,
+	...keys: string[]
+): boolean | null => {
+	if (!payload) {
+		return null;
+	}
+	for (const key of keys) {
+		const value = payload[key];
+		if (typeof value === 'boolean') {
+			return value;
 		}
 	}
 	return null;

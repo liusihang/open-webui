@@ -16,6 +16,7 @@ from agentscope_runtime.schemas import (
     SubagentRegisterRequest,
     TextDeltaRequest,
     ToolCallRequest,
+    UserInputRequest,
 )
 
 
@@ -210,6 +211,39 @@ class OpenWebUIClient:
         )
         url = f"{self._base_url}/api/agent/service/runs/{run_id}/model-selection"
         return await self._post_callback(url, idempotency_key, body.model_dump(mode="json"))
+
+    async def request_user_input(
+        self,
+        *,
+        run_id: str,
+        idempotency_key: str,
+        participant_id: str,
+        user_input_id: str,
+        tool_call_id: str,
+        message: str,
+        requested_schema: dict[str, Any] | None = None,
+        timeout_seconds: float | None = None,
+        allow_cancel: bool = True,
+    ) -> dict[str, Any]:
+        body = UserInputRequest(
+            idempotency_key=idempotency_key,
+            run_id=run_id,
+            participant_id=participant_id,
+            user_input_id=user_input_id,
+            tool_call_id=tool_call_id,
+            message=message,
+            requested_schema=requested_schema or {},
+            timeout_seconds=timeout_seconds,
+            allow_cancel=allow_cancel,
+        )
+        url = f"{self._base_url}/api/agent/service/runs/{run_id}/user-input-requests"
+        request_timeout = _user_input_timeout(timeout_seconds, self._timeout)
+        return await self._post_callback(
+            url,
+            idempotency_key,
+            body.model_dump(mode="json"),
+            timeout=request_timeout,
+        )
 
     async def call_model(
         self,
@@ -472,3 +506,12 @@ def _poll_sleep_seconds(deadline: float | None) -> float:
         return MODEL_CALL_IN_PROGRESS_POLL_SECONDS
     remaining = max(deadline - time.monotonic(), 0.0)
     return min(MODEL_CALL_IN_PROGRESS_POLL_SECONDS, remaining)
+
+
+def _user_input_timeout(timeout_seconds: float | None, connect_timeout: float) -> httpx.Timeout:
+    try:
+        wait_seconds = float(timeout_seconds) if timeout_seconds is not None else 300.0
+    except (TypeError, ValueError):
+        wait_seconds = 300.0
+    total = max(wait_seconds, 0.0) + max(connect_timeout, 1.0)
+    return httpx.Timeout(total, connect=connect_timeout)

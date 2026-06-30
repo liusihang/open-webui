@@ -27,6 +27,7 @@ class RecordingOpenWebUIClient:
         self.text_deltas: list[dict] = []
         self.model_calls: list[dict] = []
         self.tool_calls: list[dict] = []
+        self.user_input_requests: list[dict] = []
         self.subagent_registrations: list[dict] = []
         self.model_selections: list[dict] = []
         self.state_transitions: list[dict] = []
@@ -220,6 +221,37 @@ class RecordingOpenWebUIClient:
                     "url": "/api/files/artifact-1",
                 }
             ],
+        }
+
+    async def request_user_input(
+        self,
+        *,
+        run_id: str,
+        idempotency_key: str,
+        participant_id: str,
+        user_input_id: str,
+        tool_call_id: str,
+        message: str,
+        requested_schema: dict,
+        timeout_seconds: float | None = None,
+        allow_cancel: bool = True,
+    ) -> dict:
+        request = {
+            "run_id": run_id,
+            "idempotency_key": idempotency_key,
+            "participant_id": participant_id,
+            "user_input_id": user_input_id,
+            "tool_call_id": tool_call_id,
+            "message": message,
+            "requested_schema": requested_schema,
+            "timeout_seconds": timeout_seconds,
+            "allow_cancel": allow_cancel,
+        }
+        self.user_input_requests.append(request)
+        return {
+            "status": "accepted",
+            "content": {"file": "README.md"},
+            "user_input_id": user_input_id,
         }
 
     async def register_subagent(
@@ -864,6 +896,111 @@ async def test_run_start_with_tool_envelope_drives_tool_artifact_and_final_lifec
     assert openwebui_client.events[3]["payload"]["artifact"]["id"] == "artifact-1"
     assert openwebui_client.text_deltas == []
     assert joined_final_delta_text(openwebui_client) == "The file says: tool callback result"
+
+
+@pytest.mark.asyncio
+async def test_general_agent_exposes_request_user_input_tool_and_continues_after_answer() -> None:
+    openwebui_client = RecordingOpenWebUIClient()
+    openwebui_client.model_responses = [
+        {
+            "status": "success",
+            "response": {
+                "choices": [
+                    {
+                        "message": {
+                            "content": "I need the target file.",
+                            "tool_calls": [
+                                {
+                                    "id": "call_user_input_1",
+                                    "type": "function",
+                                    "function": {
+                                        "name": "request_user_input",
+                                        "arguments": (
+                                            '{"message":"Which file should I update?",'
+                                            '"requested_schema":{"type":"object","properties":'
+                                            '{"file":{"type":"string","title":"Target file"}},'
+                                            '"required":["file"]},"timeout_seconds":300,'
+                                            '"allow_cancel":true}'
+                                        ),
+                                    },
+                                }
+                            ],
+                        }
+                    }
+                ]
+            },
+        },
+        {
+            "status": "success",
+            "response": {"content": "I will update README.md."},
+        },
+    ]
+
+    async with make_client(openwebui_client, auto_finalize_ordinary_qa=True) as client:
+        response = await client.post(
+            "/v1/openwebui/runs",
+            headers={"Authorization": f"Bearer {SERVICE_TOKEN}"},
+            json={
+                "run_id": "run-user-input-tool",
+                "chat_id": "chat-1",
+                "leader_model_id": "model-a",
+                "messages": [{"role": "user", "content": "Update a file."}],
+                "tool_access_envelope": {
+                    "tools": [
+                        {
+                            "id": "tool:terminal:main:list_files",
+                            "name": "list_files",
+                            "type": "terminal",
+                            "schema": {
+                                "name": "list_files",
+                                "description": "List files.",
+                                "parameters": {"type": "object", "properties": {}},
+                            },
+                        }
+                    ]
+                },
+            },
+        )
+
+        assert response.status_code == 202
+        for _ in range(40):
+            status = await client.get(
+                "/v1/openwebui/runs/run-user-input-tool/status",
+                headers={"Authorization": f"Bearer {SERVICE_TOKEN}"},
+            )
+            if status.json()["state"] == "completed":
+                break
+            await asyncio.sleep(0.01)
+
+    assert status.json()["state"] == "completed"
+    tool_names = [
+        tool["function"]["name"]
+        for tool in openwebui_client.model_calls[0]["tools"]
+        if tool.get("type") == "function"
+    ]
+    assert "request_user_input" in tool_names
+    assert openwebui_client.user_input_requests == [
+        {
+            "run_id": "run-user-input-tool",
+            "idempotency_key": "user-input:leader:tool-call-1:1",
+            "participant_id": "leader",
+            "user_input_id": "user-input:run-user-input-tool:tool-call-1",
+            "tool_call_id": "tool-call-1",
+            "message": "Which file should I update?",
+            "requested_schema": {
+                "type": "object",
+                "properties": {"file": {"type": "string", "title": "Target file"}},
+                "required": ["file"],
+            },
+            "timeout_seconds": 300,
+            "allow_cancel": True,
+        }
+    ]
+    assert [call["model_call_id"] for call in openwebui_client.model_calls] == [
+        "model-call-1",
+        "model-call-2",
+    ]
+    assert joined_final_delta_text(openwebui_client) == "I will update README.md."
 
 
 @pytest.mark.asyncio

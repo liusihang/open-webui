@@ -725,7 +725,7 @@
 					<div>
 						{#if message?.agent_run_id}
 							{#if agentTranscript}
-								<AgentTranscript model={agentTranscript} />
+								<AgentTranscript model={agentTranscript} agentRunId={message.agent_run_id} />
 							{/if}
 						{:else if model?.info?.meta?.capabilities?.status_updates ?? true}
 							<StatusHistory statusHistory={message?.statusHistory} />

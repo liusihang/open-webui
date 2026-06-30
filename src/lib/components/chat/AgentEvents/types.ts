@@ -2,6 +2,7 @@ export type AgentRunState =
 	| 'queued'
 	| 'running'
 	| 'waiting_approval'
+	| 'waiting_user_input'
 	| 'finalizing'
 	| 'completed'
 	| 'failed'
@@ -18,6 +19,11 @@ export const AGENT_RUN_EVENT_TYPES = [
 	'tool.failed',
 	'approval.requested',
 	'approval.completed',
+	'user_input.requested',
+	'user_input.completed',
+	'user_input.declined',
+	'user_input.cancelled',
+	'user_input.expired',
 	'artifact.registered',
 	'subagent.created',
 	'subagent.updated',
@@ -62,6 +68,7 @@ export type AgentRunEventCategory =
 	| 'action'
 	| 'tool'
 	| 'approval'
+	| 'user_input'
 	| 'artifact'
 	| 'subagent'
 	| 'model'
@@ -118,6 +125,12 @@ export type AgentRunTextBlock = {
 export type AgentTranscriptToolStatus = 'running' | 'done' | 'error';
 
 export type AgentTranscriptApprovalStatus = 'pending' | 'approved' | 'rejected';
+export type AgentTranscriptUserInputStatus =
+	| 'pending'
+	| 'accepted'
+	| 'declined'
+	| 'cancelled'
+	| 'timeout';
 
 export type AgentTranscriptPartBase = {
 	seq: number;
@@ -153,6 +166,18 @@ export type AgentTranscriptApprovalPart = AgentTranscriptPartBase & {
 	action: string | null;
 	description: string;
 	status: AgentTranscriptApprovalStatus;
+	metadata: AgentRunEventMetadata[];
+	details: AgentRunEventPayload | null;
+};
+
+export type AgentTranscriptUserInputPart = AgentTranscriptPartBase & {
+	kind: 'user_input';
+	userInputId: string;
+	message: string;
+	status: AgentTranscriptUserInputStatus;
+	requestedSchema: AgentRunEventPayload | null;
+	content: unknown;
+	allowCancel: boolean;
 	metadata: AgentRunEventMetadata[];
 	details: AgentRunEventPayload | null;
 };
@@ -195,6 +220,7 @@ export type AgentTranscriptModelPart =
 	| AgentTranscriptTextPart
 	| AgentTranscriptToolPart
 	| AgentTranscriptApprovalPart
+	| AgentTranscriptUserInputPart
 	| AgentTranscriptArtifactPart
 	| AgentTranscriptErrorPart
 	| AgentTranscriptSubagentPart
@@ -204,9 +230,11 @@ export type AgentTranscriptSummary = {
 	toolCount: number;
 	artifactCount: number;
 	approvalCount: number;
+	userInputCount: number;
 	subagentCount: number;
 	hasError: boolean;
 	hasPendingApproval: boolean;
+	hasPendingUserInput: boolean;
 };
 
 export type AgentTranscriptModel = {
