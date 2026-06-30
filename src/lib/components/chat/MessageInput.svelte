@@ -1270,7 +1270,7 @@
 						/>
 					</div>
 					<form
-						class="w-full flex flex-col gap-1.5 {recording ? 'hidden' : ''}"
+						class="w-full flex flex-col gap-2 {recording ? 'hidden' : ''}"
 						on:submit|preventDefault={() => {
 							// check if selectedModels support image input
 							dispatch('submit', prompt);
@@ -1284,7 +1284,9 @@
 
 						<!-- Task list display -->
 						{#if isActive && chatTasks.length > 0}
-							<div class="mx-1">
+							<div
+								class="mx-1 rounded-lg border border-gray-200/70 bg-white/90 p-1.5 shadow-xs dark:border-gray-800/80 dark:bg-gray-950/70"
+							>
 								<TaskList tasks={chatTasks} />
 							</div>
 						{/if}
@@ -1292,7 +1294,7 @@
 						<!-- Queued messages display -->
 						{#if messageQueue.length > 0}
 							<div
-								class="mb-1 mx-2 py-0.5 px-1.5 rounded-2xl bg-white dark:bg-gray-900/60 border border-gray-100 dark:border-gray-800/50 overflow-x-hidden overflow-y-auto max-h-[25vh]"
+								class="mx-1 max-h-[25vh] overflow-x-hidden overflow-y-auto rounded-lg border border-gray-200/70 bg-white/95 px-1.5 py-1 shadow-xs dark:border-gray-800/80 dark:bg-gray-950/70"
 							>
 								{#each messageQueue as queuedMessage (queuedMessage.id)}
 									<QueuedMessageItem
@@ -1309,27 +1311,30 @@
 
 						<div
 							id="message-input-container"
-							class="flex-1 flex flex-col relative w-full shadow-lg rounded-3xl border {$temporaryChatEnabled
-								? 'border-dashed border-gray-100 dark:border-gray-800 hover:border-gray-200 focus-within:border-gray-200 hover:dark:border-gray-700 focus-within:dark:border-gray-700'
-								: ' border-gray-100/30 dark:border-gray-850/30 hover:border-gray-200 focus-within:border-gray-100 hover:dark:border-gray-800 focus-within:dark:border-gray-800'}  transition px-1 bg-white/5 dark:bg-gray-500/5 backdrop-blur-sm dark:text-gray-100"
+							class="flex-1 flex flex-col relative w-full overflow-hidden rounded-lg border shadow-sm {$temporaryChatEnabled
+								? 'border-dashed border-gray-300/80 dark:border-gray-700/80 hover:border-gray-400 focus-within:border-gray-400 hover:dark:border-gray-600 focus-within:dark:border-gray-600'
+								: 'border-gray-200/80 dark:border-gray-800/80 hover:border-gray-300 focus-within:border-gray-400 hover:dark:border-gray-700 focus-within:dark:border-gray-600'} transition bg-white/95 dark:bg-gray-950/95 dark:text-gray-100"
 							dir={$settings?.chatDirection ?? 'auto'}
 						>
 							{#if atSelectedModel !== undefined}
 								<div class="px-3 pt-3 text-left w-full flex flex-col z-10">
 									<div class="flex items-center justify-between w-full">
-										<div class="pl-[1px] flex items-center gap-2 text-sm dark:text-gray-500">
+										<div
+											class="flex max-w-full items-center gap-2 rounded-md border border-gray-200/80 bg-gray-50 px-2 py-1 text-xs font-medium text-gray-700 dark:border-gray-800 dark:bg-gray-900 dark:text-gray-300"
+										>
 											<img
 												alt="model profile"
-												class="size-3.5 max-w-[28px] object-cover rounded-full"
+												class="size-4 max-w-[28px] object-cover rounded-sm"
 												src={`${WEBUI_API_BASE_URL}/models/model/profile/image?id=${$models.find((model) => model.id === atSelectedModel.id).id}&lang=${$i18n.language}`}
 											/>
-											<div class="translate-y-[0.5px]">
+											<div class="truncate">
 												<span class="">{atSelectedModel.name}</span>
 											</div>
 										</div>
 										<div>
 											<button
-												class="flex items-center dark:text-gray-500"
+												type="button"
+												class="flex size-6 items-center justify-center rounded-md text-gray-500 transition hover:bg-gray-100 hover:text-gray-700 dark:text-gray-400 dark:hover:bg-gray-800 dark:hover:text-gray-200"
 												on:click={() => {
 													atSelectedModel = undefined;
 												}}
@@ -1343,7 +1348,7 @@
 
 							{#if files.length > 0}
 								<div
-									class="mx-2 mt-2.5 pb-1.5 flex items-center flex-wrap gap-2"
+									class="mx-3 mt-3 flex items-center flex-wrap gap-1.5 border-b border-gray-100 pb-2 dark:border-gray-800"
 									dir={$settings?.chatDirection ?? 'auto'}
 								>
 									{#each files as file, fileIdx}
@@ -1352,12 +1357,14 @@
 												file.url.startsWith('data') || file.url.startsWith('http')
 													? file.url
 													: `${WEBUI_API_BASE_URL}/files/${file.url}${file?.content_type ? '/content' : ''}`}
-											<div class=" relative group">
+											<div
+												class="relative group rounded-md border border-gray-200 bg-white p-1 shadow-xs dark:border-gray-800 dark:bg-gray-900"
+											>
 												<div class="relative flex items-center">
 													<Image
 														src={fileUrl}
 														alt=""
-														imageClassName=" size-10 rounded-xl object-cover"
+														imageClassName=" size-9 rounded object-cover"
 													/>
 													{#if atSelectedModel ? visionCapableModels.length === 0 : selectedModels.length !== visionCapableModels.length}
 														<Tooltip
@@ -1386,7 +1393,7 @@
 												</div>
 												<div class=" absolute -top-1 -right-1">
 													<button
-														class=" bg-white text-black border border-white rounded-full {($settings?.highContrastMode ??
+														class=" bg-white text-black border border-gray-200 rounded-full shadow-xs dark:border-gray-700 {($settings?.highContrastMode ??
 														false)
 															? ''
 															: 'outline-hidden focus:outline-hidden group-hover:visible invisible transition'}"
@@ -1436,13 +1443,13 @@
 								</div>
 							{/if}
 
-							<div class="px-2.5">
+							<div class="px-3">
 								<div
-									class="scrollbar-hidden rtl:text-right ltr:text-left bg-transparent dark:text-gray-100 outline-hidden w-full pb-1 px-1 resize-none h-fit max-h-96 overflow-auto {files.length ===
+									class="scrollbar-hidden rtl:text-right ltr:text-left bg-transparent dark:text-gray-100 outline-hidden w-full min-h-[72px] pb-2 px-1 resize-none h-fit max-h-96 overflow-auto text-[15px] leading-6 {files.length ===
 									0
 										? atSelectedModel !== undefined
-											? 'pt-1.5'
-											: 'pt-2.5'
+											? 'pt-2'
+											: 'pt-3'
 										: ''}"
 									id="chat-input-container"
 								>
@@ -1451,7 +1458,7 @@
 											<div class="mt-2.5 mr-3">
 												<button
 													type="button"
-													class="p-1 rounded-lg hover:bg-gray-100/50 dark:hover:bg-gray-800/50"
+													class="p-1 rounded-md text-gray-500 transition hover:bg-gray-100/70 hover:text-gray-700 dark:hover:bg-gray-800/70 dark:hover:text-gray-200"
 													aria-label="Expand input"
 													on:click={async () => {
 														showInputModal = true;
@@ -1633,8 +1640,11 @@
 								</div>
 							</div>
 
-							<div class=" flex justify-between mt-0.5 mb-2.5 mx-0.5 max-w-full" dir="ltr">
-								<div class="ml-1 self-end flex items-center flex-1 max-w-[80%]">
+							<div
+								class="flex justify-between gap-2 border-t border-gray-100 bg-gray-50/80 px-2.5 py-2 dark:border-gray-800 dark:bg-gray-900/50"
+								dir="ltr"
+							>
+								<div class="self-end flex min-w-0 flex-1 flex-wrap items-center gap-1.5">
 									<InputMenu
 										bind:files
 										selectedModels={atSelectedModel ? [atSelectedModel.id] : selectedModels}
@@ -1690,7 +1700,7 @@
 										<button
 											type="button"
 											id="input-menu-button"
-											class="bg-transparent hover:bg-gray-100 text-gray-700 dark:text-white dark:hover:bg-gray-800 rounded-full size-8 flex justify-center items-center outline-hidden focus:outline-hidden"
+											class="flex size-8 items-center justify-center rounded-md border border-transparent bg-transparent text-gray-600 outline-hidden transition hover:border-gray-200 hover:bg-white hover:text-gray-900 focus:outline-hidden dark:text-gray-300 dark:hover:border-gray-700 dark:hover:bg-gray-800 dark:hover:text-white"
 											aria-label={$i18n.t('More')}
 										>
 											<PlusAlt className="size-5.5" />
@@ -1699,8 +1709,8 @@
 
 									{#if showWebSearchButton || showImageGenerationButton || showCodeInterpreterButton || showToolsButton || showSkillsButton || (toggleFilters && toggleFilters.length > 0)}
 										<div
-											class="flex self-center w-[1px] h-4 mx-1 bg-gray-200/50 dark:bg-gray-800/50"
-										/>
+											class="mx-0.5 flex h-5 w-px self-center bg-gray-200/80 dark:bg-gray-800"
+										></div>
 
 										<IntegrationsMenu
 											selectedModels={atSelectedModel ? [atSelectedModel.id] : selectedModels}
@@ -1733,7 +1743,7 @@
 											<button
 												type="button"
 												id="integration-menu-button"
-												class="bg-transparent hover:bg-gray-100 text-gray-700 dark:text-white dark:hover:bg-gray-800 rounded-full size-8 flex justify-center items-center outline-hidden focus:outline-hidden"
+												class="flex size-8 items-center justify-center rounded-md border border-transparent bg-transparent text-gray-600 outline-hidden transition hover:border-gray-200 hover:bg-white hover:text-gray-900 focus:outline-hidden dark:text-gray-300 dark:hover:border-gray-700 dark:hover:bg-gray-800 dark:hover:text-white"
 												aria-label={$i18n.t('Integrations')}
 											>
 												<Component className="size-4.5" strokeWidth="1.5" />
@@ -1742,12 +1752,12 @@
 									{/if}
 
 									{#if selectedModelIds.length === 1 && $models.find((m) => m.id === selectedModelIds[0])?.has_user_valves}
-										<div class="ml-1 flex gap-1.5">
+										<div class="flex gap-1.5">
 											<Tooltip content={$i18n.t('Valves')} placement="top">
 												<button
 													type="button"
 													id="model-valves-button"
-													class="bg-transparent hover:bg-gray-100 text-gray-700 dark:text-white dark:hover:bg-gray-800 rounded-full size-8 flex justify-center items-center outline-hidden focus:outline-hidden"
+													class="flex size-8 items-center justify-center rounded-md border border-transparent bg-transparent text-gray-600 outline-hidden transition hover:border-gray-200 hover:bg-white hover:text-gray-900 focus:outline-hidden dark:text-gray-300 dark:hover:border-gray-700 dark:hover:bg-gray-800 dark:hover:text-white"
 													on:click={() => {
 														selectedValvesType = 'function';
 														selectedValvesItemId = selectedModelIds[0]?.split('.')[0];
@@ -1760,12 +1770,12 @@
 										</div>
 									{/if}
 
-									<div class="ml-1 flex gap-1.5">
+									<div class="flex flex-wrap items-center gap-1.5">
 										<Tooltip content="思考深度" placement="top">
 											<select
 												aria-label="思考深度"
 												bind:value={reasoningDepth}
-												class="h-8 rounded-full border border-gray-200/70 bg-white px-2.5 text-xs text-gray-700 outline-hidden transition-colors hover:border-gray-300 dark:border-gray-700 dark:bg-gray-800 dark:text-gray-200"
+												class="h-8 max-w-[10rem] rounded-md border border-gray-200/80 bg-white px-2 text-xs font-medium text-gray-700 outline-hidden transition-colors hover:border-gray-300 dark:border-gray-700 dark:bg-gray-900 dark:text-gray-200"
 											>
 												<option value="medium">中度思考 (2048)</option>
 												<option value="deep">深度思考 (8126)</option>
@@ -1780,7 +1790,7 @@
 												})}
 											>
 												<button
-													class="translate-y-[0.5px] px-1 flex gap-1 items-center text-gray-600 dark:text-gray-300 hover:text-gray-700 dark:hover:text-gray-200 rounded-lg self-center transition"
+													class="flex h-8 items-center gap-1 rounded-md border border-gray-200/80 bg-white px-2 text-xs font-medium text-gray-700 transition hover:border-gray-300 hover:text-gray-900 dark:border-gray-700 dark:bg-gray-900 dark:text-gray-200 dark:hover:border-gray-600"
 													aria-label="Available Tools"
 													type="button"
 													on:click={() => {
@@ -1789,7 +1799,7 @@
 												>
 													<Wrench className="size-4" strokeWidth="1.75" />
 
-													<span class="text-sm">
+													<span>
 														{(selectedToolIds ?? []).length}
 													</span>
 												</button>
@@ -1803,7 +1813,7 @@
 												})}
 											>
 												<button
-													class="translate-y-[0.5px] px-1 flex gap-1 items-center text-gray-600 dark:text-gray-300 hover:text-gray-700 dark:hover:text-gray-200 rounded-lg self-center transition"
+													class="flex h-8 items-center gap-1 rounded-md border border-gray-200/80 bg-white px-2 text-xs font-medium text-gray-700 transition hover:border-gray-300 hover:text-gray-900 dark:border-gray-700 dark:bg-gray-900 dark:text-gray-200 dark:hover:border-gray-600"
 													aria-label="Available Skills"
 													type="button"
 													on:click={() => {
@@ -1812,7 +1822,7 @@
 												>
 													<Keyframes className="size-4" strokeWidth="1.75" />
 
-													<span class="text-sm">
+													<span>
 														{(selectedSkillIds ?? []).length}
 													</span>
 												</button>
@@ -1840,11 +1850,11 @@
 															}
 														}}
 														type="button"
-														class="group p-[7px] flex gap-1.5 items-center text-sm rounded-full transition-colors duration-300 focus:outline-hidden max-w-full overflow-hidden {selectedFilterIds.includes(
+														class="group flex h-8 max-w-full items-center gap-1.5 overflow-hidden rounded-md px-2 text-xs font-medium transition-colors duration-200 focus:outline-hidden {selectedFilterIds.includes(
 															filterId
 														)
-															? 'text-sky-500 dark:text-sky-300 bg-sky-50 hover:bg-sky-100 dark:bg-sky-400/10 dark:hover:bg-sky-600/10 border border-sky-200/40 dark:border-sky-500/20'
-															: 'bg-transparent text-gray-600 dark:text-gray-300 hover:bg-gray-50 dark:hover:bg-gray-800 '} capitalize"
+															? 'border border-sky-200/70 bg-sky-50 text-sky-700 hover:bg-sky-100 dark:border-sky-500/30 dark:bg-sky-400/10 dark:text-sky-200 dark:hover:bg-sky-600/10'
+															: 'border border-gray-200/80 bg-white text-gray-700 hover:border-gray-300 hover:text-gray-900 dark:border-gray-700 dark:bg-gray-900 dark:text-gray-200 dark:hover:border-gray-600'} capitalize"
 													>
 														{#if filter?.icon}
 															<div class="size-4 items-center flex justify-center">
@@ -1884,10 +1894,10 @@
 												<button
 													on:click|preventDefault={() => (webSearchEnabled = !webSearchEnabled)}
 													type="button"
-													class="group p-[7px] flex gap-1.5 items-center text-sm rounded-full transition-colors duration-300 focus:outline-hidden max-w-full overflow-hidden {webSearchEnabled ||
+													class="group flex h-8 max-w-full items-center gap-1.5 overflow-hidden rounded-md px-2 text-xs font-medium transition-colors duration-200 focus:outline-hidden {webSearchEnabled ||
 													($settings?.webSearch ?? false) === 'always'
-														? ' text-sky-500 dark:text-sky-300 bg-sky-50 hover:bg-sky-100 dark:bg-sky-400/10 dark:hover:bg-sky-600/10 border border-sky-200/40 dark:border-sky-500/20'
-														: 'bg-transparent text-gray-600 dark:text-gray-300 hover:bg-gray-50 dark:hover:bg-gray-800 '}"
+														? 'border border-sky-200/70 bg-sky-50 text-sky-700 hover:bg-sky-100 dark:border-sky-500/30 dark:bg-sky-400/10 dark:text-sky-200 dark:hover:bg-sky-600/10'
+														: 'border border-gray-200/80 bg-white text-gray-700 hover:border-gray-300 hover:text-gray-900 dark:border-gray-700 dark:bg-gray-900 dark:text-gray-200 dark:hover:border-gray-600'}"
 												>
 													<GlobeAlt className="size-4" strokeWidth="1.75" />
 													<div class="hidden group-hover:block">
@@ -1905,9 +1915,9 @@
 														onImageGenerationToggle(imageGenerationEnabled)
 													)}
 													type="button"
-													class="group p-[7px] flex gap-1.5 items-center text-sm rounded-full transition-colors duration-300 focus:outline-hidden max-w-full overflow-hidden {imageGenerationEnabled
-														? ' text-sky-500 dark:text-sky-300 bg-sky-50 hover:bg-sky-100 dark:bg-sky-400/10 dark:hover:bg-sky-700/10 border border-sky-200/40 dark:border-sky-500/20'
-														: 'bg-transparent text-gray-600 dark:text-gray-300 hover:bg-gray-50 dark:hover:bg-gray-800 '}"
+													class="group flex h-8 max-w-full items-center gap-1.5 overflow-hidden rounded-md px-2 text-xs font-medium transition-colors duration-200 focus:outline-hidden {imageGenerationEnabled
+														? 'border border-sky-200/70 bg-sky-50 text-sky-700 hover:bg-sky-100 dark:border-sky-500/30 dark:bg-sky-400/10 dark:text-sky-200 dark:hover:bg-sky-600/10'
+														: 'border border-gray-200/80 bg-white text-gray-700 hover:border-gray-300 hover:text-gray-900 dark:border-gray-700 dark:bg-gray-900 dark:text-gray-200 dark:hover:border-gray-600'}"
 												>
 													<Photo className="size-4" strokeWidth="1.75" />
 													<div class="hidden group-hover:block">
@@ -1927,12 +1937,12 @@
 													on:click|preventDefault={() =>
 														(codeInterpreterEnabled = !codeInterpreterEnabled)}
 													type="button"
-													class=" group p-[7px] flex gap-1.5 items-center text-sm transition-colors duration-300 max-w-full overflow-hidden {codeInterpreterEnabled
-														? ' text-sky-500 dark:text-sky-300 bg-sky-50 hover:bg-sky-100 dark:bg-sky-400/10 dark:hover:bg-sky-700/10 border border-sky-200/40 dark:border-sky-500/20'
-														: 'bg-transparent text-gray-600 dark:text-gray-300 hover:bg-gray-50 dark:hover:bg-gray-800 '} {($settings?.highContrastMode ??
+													class="group flex h-8 max-w-full items-center gap-1.5 overflow-hidden px-2 text-xs font-medium transition-colors duration-200 {codeInterpreterEnabled
+														? 'border border-sky-200/70 bg-sky-50 text-sky-700 hover:bg-sky-100 dark:border-sky-500/30 dark:bg-sky-400/10 dark:text-sky-200 dark:hover:bg-sky-600/10'
+														: 'border border-gray-200/80 bg-white text-gray-700 hover:border-gray-300 hover:text-gray-900 dark:border-gray-700 dark:bg-gray-900 dark:text-gray-200 dark:hover:border-gray-600'} {($settings?.highContrastMode ??
 													false)
 														? 'm-1'
-														: 'focus:outline-hidden rounded-full'}"
+														: 'focus:outline-hidden rounded-md'}"
 												>
 													<Terminal className="size-3.5" strokeWidth="2" />
 
@@ -1955,8 +1965,7 @@
 														window.open(authUrl, '_self', 'noopener');
 													}}
 													type="button"
-													class="group px-2 py-[5px] flex gap-1.5 items-center text-xs rounded-full transition-colors duration-300 focus:outline-hidden max-w-full overflow-hidden
-														text-amber-600 dark:text-amber-400 bg-amber-50 hover:bg-amber-100 dark:bg-amber-400/10 dark:hover:bg-amber-600/10 border border-amber-200/40 dark:border-amber-500/20"
+													class="group flex h-8 max-w-full items-center gap-1.5 overflow-hidden rounded-md border border-amber-200/70 bg-amber-50 px-2 text-xs font-medium text-amber-700 transition-colors duration-200 hover:bg-amber-100 focus:outline-hidden dark:border-amber-500/30 dark:bg-amber-400/10 dark:text-amber-300 dark:hover:bg-amber-600/10"
 												>
 													<Wrench className="size-3.5" strokeWidth="1.75" />
 													<span class="truncate">{pendingTool.name}</span>
@@ -1966,12 +1975,14 @@
 									</div>
 								</div>
 
-								<div class="self-end flex space-x-1 mr-1 shrink-0 gap-[0.5px]">
+								<div class="flex shrink-0 items-center gap-1 self-end">
 									{#if isActive && prompt === '' && files.length === 0}
 										<div class=" flex items-center">
 											<Tooltip content={$i18n.t('Stop')}>
 												<button
-													class="bg-white hover:bg-gray-100 text-gray-800 dark:bg-gray-700 dark:text-white dark:hover:bg-gray-800 transition rounded-full p-1.5"
+													type="button"
+													aria-label={$i18n.t('Stop')}
+													class="flex size-9 items-center justify-center rounded-md bg-gray-950 text-white transition hover:bg-gray-800 dark:bg-white dark:text-gray-950 dark:hover:bg-gray-100"
 													on:click={() => {
 														stopResponse();
 													}}
@@ -1997,8 +2008,9 @@
 											<Tooltip content={$i18n.t('Create note')} className=" flex items-center">
 												<button
 													id="create-note-button"
-													class=" text-gray-500 dark:text-gray-500 hover:text-gray-700 dark:hover:text-gray-200 transition rounded-full p-1.5 -mr-1 self-center"
+													class="flex size-8 items-center justify-center rounded-md border border-transparent text-gray-500 transition hover:border-gray-200 hover:bg-white hover:text-gray-800 dark:text-gray-400 dark:hover:border-gray-700 dark:hover:bg-gray-800 dark:hover:text-gray-100"
 													type="button"
+													aria-label={$i18n.t('Create note')}
 													disabled={prompt === '' && files.length === 0}
 													on:click={() => {
 														createNote();
@@ -2018,8 +2030,9 @@
 												<Tooltip content={$i18n.t('Files')} placement="top">
 													<button
 														id="open-terminal-filesystem-button"
-														class=" text-gray-600 dark:text-gray-300 hover:text-gray-700 dark:hover:text-gray-200 transition rounded-full p-1.5 self-center mr-0.5"
+														class="flex size-8 items-center justify-center rounded-md border border-transparent text-gray-600 transition hover:border-gray-200 hover:bg-white hover:text-gray-900 dark:text-gray-300 dark:hover:border-gray-700 dark:hover:bg-gray-800 dark:hover:text-white"
 														type="button"
+														aria-label={$i18n.t('Files')}
 														on:click={() => {
 															if ($selectedTerminalId) {
 																showControls.set(true);
@@ -2050,7 +2063,7 @@
 												<Tooltip content={$i18n.t('Dictate')}>
 													<button
 														id="voice-input-button"
-														class=" text-gray-600 dark:text-gray-300 hover:text-gray-700 dark:hover:text-gray-200 transition rounded-full p-1.5 self-center mr-0.5"
+														class="flex size-8 items-center justify-center rounded-md border border-transparent text-gray-600 transition hover:border-gray-200 hover:bg-white hover:text-gray-900 dark:text-gray-300 dark:hover:border-gray-700 dark:hover:bg-gray-800 dark:hover:text-white"
 														type="button"
 														on:click={async () => {
 															try {
@@ -2101,7 +2114,7 @@
 												<!-- {$i18n.t('Call')} -->
 												<Tooltip content={$i18n.t('Voice mode')}>
 													<button
-														class=" bg-black text-white hover:bg-gray-900 dark:bg-white dark:text-black dark:hover:bg-gray-100 transition rounded-full p-1.5 self-center"
+														class="flex size-9 items-center justify-center rounded-md bg-gray-950 text-white transition hover:bg-gray-800 dark:bg-white dark:text-gray-950 dark:hover:bg-gray-100"
 														type="button"
 														on:click={async () => {
 															if (selectedModels.length > 1) {
@@ -2168,9 +2181,11 @@
 												>
 													<button
 														id="send-message-button"
-														class="{!(prompt === '' && files.length === 0) || uploadPending
-															? 'bg-black text-white hover:bg-gray-900 dark:bg-white dark:text-black dark:hover:bg-gray-100 '
-															: 'text-white bg-gray-200 dark:text-gray-900 dark:bg-gray-700 disabled'} transition rounded-full p-1.5 self-center"
+														class="flex size-9 items-center justify-center rounded-md transition {!(
+															prompt === '' && files.length === 0
+														) || uploadPending
+															? 'bg-gray-950 text-white hover:bg-gray-800 dark:bg-white dark:text-gray-950 dark:hover:bg-gray-100'
+															: 'bg-gray-200 text-white disabled dark:bg-gray-700 dark:text-gray-900'}"
 														type="submit"
 														disabled={(prompt === '' && files.length === 0) || uploadPending}
 													>

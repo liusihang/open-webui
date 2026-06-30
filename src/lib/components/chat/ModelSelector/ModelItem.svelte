@@ -48,17 +48,17 @@
 	role="option"
 	aria-selected={value === item.value}
 	aria-label={$i18n.t('Select {{modelName}} model', { modelName: item.label })}
-	class="flex group/item w-full text-left font-medium line-clamp-1 select-none items-center rounded-button py-2 pl-3 pr-1.5 text-sm text-gray-700 dark:text-gray-100 outline-hidden transition-all duration-75 hover:bg-gray-100 dark:hover:bg-gray-800 rounded-xl cursor-pointer data-highlighted:bg-muted {index ===
+	class="group/item flex h-14 w-full cursor-pointer select-none items-center rounded-md border px-2.5 py-2 text-left text-sm text-gray-700 outline-hidden transition dark:text-gray-100 {index ===
 	selectedModelIdx
-		? 'bg-gray-100 dark:bg-gray-800 group-hover:bg-transparent'
-		: ''}"
+		? 'border-sky-200/70 bg-sky-50 dark:border-sky-500/30 dark:bg-sky-400/10'
+		: 'border-transparent hover:bg-gray-100/70 dark:hover:bg-gray-800/70'}"
 	data-arrow-selected={index === selectedModelIdx}
 	data-value={item.value}
 	on:click={() => {
 		onClick();
 	}}
 >
-	<div class="flex flex-col flex-1 gap-1.5">
+	<div class="flex min-w-0 flex-1 flex-col gap-1">
 		<!-- {#if (item?.model?.tags ?? []).length > 0}
 			<div
 				class="flex gap-0.5 self-center items-start h-full w-full translate-y-[0.5px] overflow-x-auto scrollbar-none"
@@ -75,13 +75,13 @@
 			</div>
 		{/if} -->
 
-		<div class="flex items-center gap-2">
-			<div class="flex items-center min-w-fit">
+		<div class="flex min-w-0 items-center gap-2">
+			<div class="flex min-w-fit items-center">
 				<Tooltip content={$user?.role === 'admin' ? (item?.value ?? '') : ''} placement="top-start">
 					<img
 						src={`${WEBUI_API_BASE_URL}/models/model/profile/image?id=${item.model.id}&lang=${$i18n.language}`}
 						alt={$i18n.t('{{modelName}} profile image', { modelName: item.label })}
-						class="rounded-full size-5 flex items-center"
+						class="flex size-7 items-center rounded-md border border-gray-200 bg-white object-cover p-0.5 dark:border-gray-700 dark:bg-gray-900"
 						loading="lazy"
 						on:error={(e) => {
 							e.currentTarget.src = '/favicon.png';
@@ -90,15 +90,24 @@
 				</Tooltip>
 			</div>
 
-			<div class="flex items-center">
+			<div class="flex min-w-0 flex-col">
 				<Tooltip content={`${item.label} (${item.value})`} placement="top-start">
-					<div class="line-clamp-1">
+					<div class="line-clamp-1 font-semibold text-gray-900 dark:text-gray-100">
 						{item.label}
 					</div>
 				</Tooltip>
+				{#if item.model?.info?.meta?.description}
+					<div class="line-clamp-1 text-xs font-normal text-gray-500 dark:text-gray-400">
+						{item.model.info.meta.description}
+					</div>
+				{:else if item.model?.owned_by}
+					<div class="line-clamp-1 text-xs font-normal uppercase text-gray-400 dark:text-gray-500">
+						{item.model.owned_by}
+					</div>
+				{/if}
 			</div>
 
-			<div class=" shrink-0 flex items-center gap-2">
+			<div class="ml-auto flex shrink-0 items-center gap-2">
 				{#if item.model.owned_by === 'ollama'}
 					{#if (item.model.ollama?.details?.parameter_size ?? '') !== ''}
 						<div class="flex items-center translate-y-[0.5px]">
@@ -114,7 +123,8 @@
 								}`}
 								className="self-end"
 							>
-								<span class=" text-xs font-medium text-gray-600 dark:text-gray-400 line-clamp-1"
+								<span
+									class="line-clamp-1 rounded border border-gray-200 bg-white px-1.5 py-0.5 text-[11px] font-medium text-gray-600 dark:border-gray-700 dark:bg-gray-900 dark:text-gray-300"
 									>{item.model.ollama?.details?.parameter_size ?? ''}</span
 								>
 							</Tooltip>
@@ -137,8 +147,8 @@
 								<span class="relative flex size-2">
 									<span
 										class="animate-ping absolute inline-flex h-full w-full rounded-full bg-green-400 opacity-75"
-									/>
-									<span class="relative inline-flex rounded-full size-2 bg-green-500" />
+									></span>
+									<span class="relative inline-flex rounded-full size-2 bg-green-500"></span>
 								</span>
 							</div>
 						</Tooltip>
@@ -236,14 +246,14 @@
 		</div>
 	</div>
 
-	<div class="ml-auto pl-2 pr-1 flex items-center gap-1.5 shrink-0">
+	<div class="ml-2 flex shrink-0 items-center gap-1.5">
 		{#if $user?.role === 'admin' && item.model.loaded}
 			<Tooltip
 				content={`${$i18n.t('Eject')}`}
 				className="flex-shrink-0 group-hover/item:opacity-100 opacity-0 "
 			>
 				<button
-					class="flex"
+					class="flex size-7 items-center justify-center rounded-md text-gray-500 transition hover:bg-gray-200/70 hover:text-gray-900 dark:hover:bg-gray-800 dark:hover:text-white"
 					aria-label={$i18n.t('Eject model')}
 					on:click={(e) => {
 						e.preventDefault();
@@ -267,7 +277,7 @@
 		>
 			<button
 				aria-label={`${$i18n.t('More Options')}`}
-				class="flex"
+				class="flex size-7 items-center justify-center rounded-md text-gray-500 transition hover:bg-gray-200/70 hover:text-gray-900 dark:hover:bg-gray-800 dark:hover:text-white"
 				on:click={(e) => {
 					e.preventDefault();
 					e.stopPropagation();
@@ -279,7 +289,9 @@
 		</ModelItemMenu>
 
 		{#if value === item.value}
-			<div>
+			<div
+				class="flex size-7 items-center justify-center rounded-md bg-emerald-50 text-emerald-700 dark:bg-emerald-500/10 dark:text-emerald-300"
+			>
 				<Check className="size-3" />
 			</div>
 		{/if}

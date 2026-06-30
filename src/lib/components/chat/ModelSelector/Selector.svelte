@@ -241,7 +241,7 @@
 		}
 
 		// Set the virtual scroll position so the selected item is rendered and centered
-		const targetScrollTop = Math.max(0, selectedModelIdx * ITEM_HEIGHT - 128 + ITEM_HEIGHT / 2);
+		const targetScrollTop = Math.max(0, selectedModelIdx * ITEM_HEIGHT - 144 + ITEM_HEIGHT / 2);
 		listScrollTop = targetScrollTop;
 
 		await tick();
@@ -472,7 +472,7 @@
 		deleteModelTarget = null;
 	};
 
-	const ITEM_HEIGHT = 42;
+	const ITEM_HEIGHT = 56;
 	const OVERSCAN = 10;
 
 	let listScrollTop = 0;
@@ -481,7 +481,7 @@
 	$: visibleStart = Math.max(0, Math.floor(listScrollTop / ITEM_HEIGHT) - OVERSCAN);
 	$: visibleEnd = Math.min(
 		filteredItems.length,
-		Math.ceil((listScrollTop + 256) / ITEM_HEIGHT) + OVERSCAN
+		Math.ceil((listScrollTop + 288) / ITEM_HEIGHT) + OVERSCAN
 	);
 </script>
 
@@ -518,7 +518,7 @@
 		on:click={toggleOpen}
 	>
 		<div
-			class="flex w-full text-left px-0.5 bg-transparent truncate {triggerClassName} justify-between {($settings?.highContrastMode ??
+			class="flex max-w-full items-center justify-between gap-1 rounded-md border border-transparent bg-transparent px-2 py-1 text-left font-medium text-gray-900 transition hover:border-gray-200 hover:bg-white dark:text-gray-100 dark:hover:border-gray-700 dark:hover:bg-gray-900 {triggerClassName} {($settings?.highContrastMode ??
 			false)
 				? 'dark:placeholder-gray-100 placeholder-gray-800'
 				: 'placeholder-gray-400'}"
@@ -532,11 +532,11 @@
 			}}
 		>
 			{#if selectedModel}
-				{selectedModel.label}
+				<span class="truncate">{selectedModel.label}</span>
 			{:else}
-				{placeholder}
+				<span class="truncate text-gray-500 dark:text-gray-400">{placeholder}</span>
 			{/if}
-			<ChevronDown className=" self-center ml-2 size-3" strokeWidth="2.5" />
+			<ChevronDown className="ml-1 size-3 shrink-0 self-center text-gray-500" strokeWidth="2.5" />
 		</div>
 	</button>
 
@@ -551,18 +551,20 @@
 			<div
 				class="z-40 {$mobile
 					? `w-full`
-					: `${className}`} max-w-[calc(100vw-1rem)] justify-start rounded-2xl bg-white dark:bg-gray-850 dark:text-white shadow-lg outline-hidden"
+					: `${className}`} max-w-[calc(100vw-1rem)] justify-start overflow-hidden rounded-lg border border-gray-200 bg-white text-gray-950 shadow-sm outline-hidden dark:border-gray-800 dark:bg-gray-950 dark:text-white"
 				transition:flyAndScale
 			>
 				<slot>
 					{#if searchEnabled}
-						<div class="flex items-center gap-2.5 px-4.5 pt-3.5 mb-1.5">
-							<Search className="size-4" strokeWidth="2.5" />
+						<div
+							class="flex items-center gap-2.5 border-b border-gray-100 px-3 py-2.5 dark:border-gray-800"
+						>
+							<Search className="size-4 shrink-0 text-gray-500" strokeWidth="2.5" />
 
 							<input
 								id="model-search-input"
 								bind:value={searchValue}
-								class="w-full text-sm bg-transparent outline-hidden"
+								class="w-full bg-transparent text-sm outline-hidden placeholder:text-gray-500 dark:placeholder:text-gray-400"
 								placeholder={searchPlaceholder}
 								autocomplete="off"
 								aria-label={$i18n.t('Search In Models')}
@@ -593,10 +595,10 @@
 						</div>
 					{/if}
 
-					<div class="px-2">
+					<div class="px-2 pt-2">
 						{#if tags && items.filter((item) => !(item.model?.info?.meta?.hidden ?? false)).length > 0}
 							<div
-								class=" flex w-full bg-white dark:bg-gray-850 overflow-x-auto scrollbar-none font-[450] mb-0.5"
+								class="mb-1 flex w-full overflow-x-auto bg-white font-[450] scrollbar-none dark:bg-gray-950"
 								on:wheel={(e) => {
 									if (e.deltaY !== 0) {
 										e.preventDefault();
@@ -605,15 +607,15 @@
 								}}
 							>
 								<div
-									class="flex gap-1 w-fit text-center text-sm rounded-full bg-transparent px-1.5 whitespace-nowrap"
+									class="flex w-fit gap-1 whitespace-nowrap rounded-md bg-gray-50 p-1 text-center text-xs dark:bg-gray-900"
 									bind:this={tagsContainerElement}
 								>
 									{#if items.find((item) => item.model?.connection_type === 'local') || items.find((item) => item.model?.connection_type === 'external') || items.find((item) => item.model?.direct) || tags.length > 0}
 										<button
 											class="min-w-fit outline-none px-1.5 py-0.5 {selectedTag === '' &&
 											selectedConnectionType === ''
-												? ''
-												: 'text-gray-300 dark:text-gray-600 hover:text-gray-700 dark:hover:text-white'} transition capitalize"
+												? 'rounded bg-white text-gray-900 shadow-xs dark:bg-gray-800 dark:text-white'
+												: 'text-gray-500 hover:text-gray-900 dark:text-gray-500 dark:hover:text-white'} transition capitalize"
 											aria-pressed={selectedTag === '' && selectedConnectionType === ''}
 											on:click={() => {
 												selectedConnectionType = '';
@@ -628,8 +630,8 @@
 										<button
 											class="min-w-fit outline-none px-1.5 py-0.5 {selectedConnectionType ===
 											'local'
-												? ''
-												: 'text-gray-300 dark:text-gray-600 hover:text-gray-700 dark:hover:text-white'} transition capitalize"
+												? 'rounded bg-white text-gray-900 shadow-xs dark:bg-gray-800 dark:text-white'
+												: 'text-gray-500 hover:text-gray-900 dark:text-gray-500 dark:hover:text-white'} transition capitalize"
 											aria-pressed={selectedConnectionType === 'local'}
 											on:click={() => {
 												selectedTag = '';
@@ -644,8 +646,8 @@
 										<button
 											class="min-w-fit outline-none px-1.5 py-0.5 {selectedConnectionType ===
 											'external'
-												? ''
-												: 'text-gray-300 dark:text-gray-600 hover:text-gray-700 dark:hover:text-white'} transition capitalize"
+												? 'rounded bg-white text-gray-900 shadow-xs dark:bg-gray-800 dark:text-white'
+												: 'text-gray-500 hover:text-gray-900 dark:text-gray-500 dark:hover:text-white'} transition capitalize"
 											aria-pressed={selectedConnectionType === 'external'}
 											on:click={() => {
 												selectedTag = '';
@@ -660,8 +662,8 @@
 										<button
 											class="min-w-fit outline-none px-1.5 py-0.5 {selectedConnectionType ===
 											'direct'
-												? ''
-												: 'text-gray-300 dark:text-gray-600 hover:text-gray-700 dark:hover:text-white'} transition capitalize"
+												? 'rounded bg-white text-gray-900 shadow-xs dark:bg-gray-800 dark:text-white'
+												: 'text-gray-500 hover:text-gray-900 dark:text-gray-500 dark:hover:text-white'} transition capitalize"
 											aria-pressed={selectedConnectionType === 'direct'}
 											on:click={() => {
 												selectedTag = '';
@@ -676,8 +678,8 @@
 										<Tooltip content={tag}>
 											<button
 												class="min-w-fit outline-none px-1.5 py-0.5 {selectedTag === tag
-													? ''
-													: 'text-gray-300 dark:text-gray-600 hover:text-gray-700 dark:hover:text-white'} transition capitalize"
+													? 'rounded bg-white text-gray-900 shadow-xs dark:bg-gray-800 dark:text-white'
+													: 'text-gray-500 hover:text-gray-900 dark:text-gray-500 dark:hover:text-white'} transition capitalize"
 												aria-pressed={selectedTag === tag}
 												on:click={() => {
 													selectedConnectionType = '';
@@ -693,10 +695,10 @@
 						{/if}
 					</div>
 
-					<div class="px-2.5 group relative">
+					<div class="group relative px-2.5 pb-2">
 						{#if filteredItems.length === 0}
 							{#if items.length === 0 && $user?.role === 'admin'}
-								<div class="flex flex-col items-start justify-center py-6 px-4 text-start">
+								<div class="flex flex-col items-start justify-center px-4 py-6 text-start">
 									<div class="text-sm font-medium text-gray-900 dark:text-gray-100 mb-1">
 										{$i18n.t('No models available')}
 									</div>
@@ -705,7 +707,7 @@
 									</div>
 									<a
 										href="/admin/settings/connections"
-										class="px-4 py-1.5 rounded-xl text-xs font-medium bg-gray-900 dark:bg-white text-white dark:text-gray-900 hover:bg-gray-800 dark:hover:bg-gray-100 transition"
+										class="rounded-md bg-gray-900 px-4 py-1.5 text-xs font-medium text-white transition hover:bg-gray-800 dark:bg-white dark:text-gray-900 dark:hover:bg-gray-100"
 										on:click={() => {
 											show = false;
 										}}
@@ -723,7 +725,7 @@
 						{:else}
 							<!-- svelte-ignore a11y-no-static-element-interactions -->
 							<div
-								class="max-h-64 overflow-y-auto"
+								class="max-h-72 overflow-y-auto"
 								role="listbox"
 								aria-label={$i18n.t('Available models')}
 								bind:this={listContainer}
@@ -731,7 +733,7 @@
 									listScrollTop = listContainer.scrollTop;
 								}}
 							>
-								<div style="height: {visibleStart * ITEM_HEIGHT}px;" />
+								<div style="height: {visibleStart * ITEM_HEIGHT}px;"></div>
 								{#each filteredItems.slice(visibleStart, visibleEnd) as item, i (item.value)}
 									{@const index = visibleStart + i}
 									<ModelItem
@@ -750,7 +752,7 @@
 										}}
 									/>
 								{/each}
-								<div style="height: {(filteredItems.length - visibleEnd) * ITEM_HEIGHT}px;" />
+								<div style="height: {(filteredItems.length - visibleEnd) * ITEM_HEIGHT}px;"></div>
 							</div>
 						{/if}
 
@@ -762,7 +764,7 @@
 								placement="top-start"
 							>
 								<button
-									class="flex w-full font-medium line-clamp-1 select-none items-center rounded-button py-2 pl-3 pr-1.5 text-sm text-gray-700 dark:text-gray-100 outline-hidden transition-all duration-75 hover:bg-gray-100 dark:hover:bg-gray-800 rounded-xl cursor-pointer data-highlighted:bg-muted"
+									class="flex h-14 w-full cursor-pointer select-none items-center rounded-md px-2.5 py-2 text-sm font-medium text-gray-700 outline-hidden transition hover:bg-gray-100 dark:text-gray-100 dark:hover:bg-gray-800"
 									on:click={() => {
 										pullModelHandler();
 									}}
@@ -778,7 +780,7 @@
 
 						{#each Object.keys($MODEL_DOWNLOAD_POOL) as model}
 							<div
-								class="flex w-full justify-between font-medium select-none rounded-button py-2 pl-3 pr-1.5 text-sm text-gray-700 dark:text-gray-100 outline-hidden transition-all duration-75 rounded-xl cursor-pointer data-highlighted:bg-muted"
+								class="flex h-14 w-full cursor-pointer select-none justify-between rounded-md px-2.5 py-2 text-sm font-medium text-gray-700 outline-hidden transition dark:text-gray-100"
 							>
 								<div class="flex">
 									<div class="mr-2.5 translate-y-0.5">
@@ -841,8 +843,8 @@
 
 					<div class="pb-2.5"></div>
 
-					<div class="hidden w-[42rem]" />
-					<div class="hidden w-[32rem]" />
+					<div class="hidden w-[42rem]"></div>
+					<div class="hidden w-[32rem]"></div>
 				</slot>
 			</div>
 		</div>

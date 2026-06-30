@@ -55,10 +55,10 @@
 <div
 	class="{(filteredItems ?? []).length > 0
 		? ''
-		: 'hidden'} rounded-2xl shadow-lg border border-gray-200 dark:border-gray-800 flex flex-col bg-white dark:bg-gray-850 w-72 p-1"
+		: 'hidden'} flex w-80 flex-col rounded-lg border border-gray-200 bg-white p-1.5 shadow-sm dark:border-gray-800 dark:bg-gray-950"
 	id="suggestions-container"
 >
-	<div class="overflow-y-auto scrollbar-thin max-h-60">
+	<div class="max-h-64 overflow-y-auto scrollbar-thin">
 		{#if char === '/'}
 			<Prompts
 				bind:this={suggestionElement}
