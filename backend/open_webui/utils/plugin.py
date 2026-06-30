@@ -18,6 +18,7 @@ from open_webui.env import (
 )
 from open_webui.models.functions import FunctionModel, Functions
 from open_webui.models.tools import Tools
+from open_webui.utils.cache_invalidation import CACHE_NAMESPACE_FUNCTIONS, ensure_cache_fresh
 
 log = logging.getLogger(__name__)
 
@@ -340,6 +341,8 @@ async def get_tool_module_from_cache(request, tool_id, load_from_db=True):
 async def get_function_module_from_cache(
     request, function_id, function: FunctionModel | None = None, load_from_db=True
 ):
+    await ensure_cache_fresh(request.app, CACHE_NAMESPACE_FUNCTIONS, function_id)
+
     if load_from_db:
         # Always load from the database by default
         # This is useful for hooks like "inlet" or "outlet" where the content might change
@@ -371,7 +374,7 @@ async def get_function_module_from_cache(
         if hasattr(request.app.state, 'FUNCTIONS') and function_id in request.app.state.FUNCTIONS:
             return request.app.state.FUNCTIONS[function_id], None, None
 
-        function_module, function_type, frontmatter = await load_function_module_by_id(function_id)
+        return await get_function_module_from_cache(request, function_id, function=function, load_from_db=True)
 
     if not hasattr(request.app.state, 'FUNCTIONS'):
         request.app.state.FUNCTIONS = {}

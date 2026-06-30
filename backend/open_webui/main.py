@@ -1103,6 +1103,7 @@ from open_webui.utils.chat import (
 from open_webui.utils.chat import (
     generate_chat_completion as chat_completion_handler,
 )
+from open_webui.utils.cache_invalidation import redis_cache_invalidation_listener
 from open_webui.utils.embeddings import generate_embeddings
 from open_webui.utils.logger import start_logger
 from open_webui.utils.middleware import (
@@ -1264,6 +1265,7 @@ async def lifespan(app: FastAPI):
 
     if app.state.redis is not None:
         app.state.redis_task_command_listener = asyncio.create_task(redis_task_command_listener(app))
+        app.state.redis_cache_invalidation_listener = asyncio.create_task(redis_cache_invalidation_listener(app))
 
     if THREAD_POOL_SIZE and THREAD_POOL_SIZE > 0:
         limiter = anyio.to_thread.current_default_thread_limiter()
@@ -1290,6 +1292,8 @@ async def lifespan(app: FastAPI):
 
     if hasattr(app.state, 'redis_task_command_listener'):
         app.state.redis_task_command_listener.cancel()
+    if hasattr(app.state, 'redis_cache_invalidation_listener'):
+        app.state.redis_cache_invalidation_listener.cancel()
 
     startup_singleton_lock = getattr(app.state, 'startup_singleton_lock', None)
     if startup_singleton_lock is not None:
