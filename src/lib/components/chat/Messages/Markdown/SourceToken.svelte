@@ -79,19 +79,32 @@
 				</LinkPreview.Trigger>
 				<LinkPreview.Portal>
 					<LinkPreview.Content class="z-[999]" align="start" sideOffset={6}>
-						<div class="max-w-80 rounded-lg border border-gray-100 bg-white p-3 text-xs text-gray-700 shadow-lg dark:border-gray-800 dark:bg-gray-900 dark:text-gray-200">
-							<div class="mb-2 space-y-1">
-								<div class="font-medium text-gray-900 dark:text-gray-100 line-clamp-1">
-									{formattedTitle(decodeString(target.preview.title || getTitle(identifier)))}
+						<div
+							class="max-w-80 rounded-lg border border-gray-200 bg-white p-3 text-xs text-gray-700 shadow-xl shadow-gray-900/10 dark:border-gray-800 dark:bg-gray-900 dark:text-gray-200"
+						>
+							<div class="mb-2 flex items-start gap-2">
+								<div
+									class="mt-0.5 inline-flex size-6 shrink-0 items-center justify-center rounded-md bg-blue-50 text-[11px] font-semibold text-blue-700 dark:bg-blue-500/10 dark:text-blue-200"
+								>
+									{getBadgeLabel(identifier).replace('[', '').replace(']', '')}
 								</div>
-								<div class="flex flex-wrap gap-x-2 gap-y-1 text-[11px] text-gray-500 dark:text-gray-400">
-									{#if target.preview.source_name}
-										<span>{target.preview.source_name}</span>
-									{/if}
-									<span>{target.preview.type === 'image' ? $i18n.t('Image') : $i18n.t('Text')}</span>
-									{#if Number.isInteger(target.preview.page_index)}
-										<span>{$i18n.t('page')} {(target.preview.page_index ?? 0) + 1}</span>
-									{/if}
+								<div class="min-w-0 flex-1 space-y-1">
+									<div class="font-semibold text-gray-900 dark:text-gray-100 line-clamp-1">
+										{formattedTitle(decodeString(target.preview.title || getTitle(identifier)))}
+									</div>
+									<div
+										class="flex flex-wrap gap-x-2 gap-y-1 text-[11px] text-gray-500 dark:text-gray-400"
+									>
+										{#if target.preview.source_name}
+											<span>{target.preview.source_name}</span>
+										{/if}
+										<span
+											>{target.preview.type === 'image' ? $i18n.t('Image') : $i18n.t('Text')}</span
+										>
+										{#if Number.isInteger(target.preview.page_index)}
+											<span>{$i18n.t('page')} {(target.preview.page_index ?? 0) + 1}</span>
+										{/if}
+									</div>
 								</div>
 							</div>
 							{#if target.preview.type === 'image' && target.preview.thumbnail_url}
@@ -102,7 +115,9 @@
 								/>
 							{/if}
 							{#if getPreviewText(target.preview)}
-								<div class="line-clamp-3 whitespace-pre-wrap break-words leading-5">
+								<div
+									class="rounded-md border border-gray-100 bg-gray-50/80 p-2 line-clamp-3 whitespace-pre-wrap break-words leading-5 dark:border-gray-800 dark:bg-gray-850/70"
+								>
 									{getPreviewText(target.preview)}
 								</div>
 							{/if}
@@ -118,7 +133,7 @@
 			<LinkPreview.Trigger>
 				<button
 					aria-label={`${formattedTitle(decodeString(getTitle(token.ids[0])))} +${(token?.ids ?? []).length - 1} ${$i18n.t('more sources')}`}
-					class="text-[10px] w-fit translate-y-[2px] px-2 py-0.5 dark:bg-white/5 dark:text-white/80 dark:hover:text-white bg-gray-50 text-black/80 hover:text-black transition rounded-xl"
+					class="inline-flex h-5 w-fit translate-y-[2px] items-center rounded-md border border-blue-200 bg-blue-50 px-1.5 text-[11px] font-semibold leading-none text-blue-700 shadow-sm transition hover:border-blue-300 hover:bg-blue-100 focus:outline-hidden focus:ring-2 focus:ring-blue-500/30 dark:border-blue-500/30 dark:bg-blue-500/10 dark:text-blue-200 dark:hover:bg-blue-500/20"
 					on:click={() => {
 						openPreview = !openPreview;
 					}}
@@ -133,14 +148,27 @@
 			</LinkPreview.Trigger>
 			<LinkPreview.Portal>
 				<LinkPreview.Content class="z-[999]" align="start" sideOffset={6}>
-					<div class="bg-gray-50 dark:bg-gray-850 rounded-xl p-1 cursor-pointer">
-						{#each token.citationIdentifiers ?? token.ids as identifier}
-							{@const id =
-								typeof identifier === 'string' ? parseInt(identifier.split('#')[0]) : identifier}
-							<div class="">
-								<Source id={identifier} title={getTitle(identifier)} {onClick} />
-							</div>
-						{/each}
+					<div
+						class="w-72 cursor-pointer rounded-lg border border-gray-200 bg-white p-2 text-xs shadow-xl shadow-gray-900/10 dark:border-gray-800 dark:bg-gray-900"
+					>
+						<div
+							class="mb-2 flex items-center justify-between border-b border-gray-100 px-1 pb-2 text-gray-500 dark:border-gray-800 dark:text-gray-400"
+						>
+							<span class="font-medium text-gray-700 dark:text-gray-200">{$i18n.t('Sources')}</span>
+							<span>{(token?.ids ?? []).length}</span>
+						</div>
+						<div class="flex flex-col gap-1">
+							{#each token.citationIdentifiers ?? token.ids as identifier}
+								<div
+									class="flex items-center justify-between gap-2 rounded-md px-1.5 py-1.5 hover:bg-gray-50 dark:hover:bg-gray-850"
+								>
+									<div class="min-w-0 flex-1 truncate text-gray-700 dark:text-gray-200">
+										{formattedTitle(decodeString(getTitle(identifier)))}
+									</div>
+									<Source id={identifier} title={getTitle(identifier)} {onClick} />
+								</div>
+							{/each}
+						</div>
 					</div>
 				</LinkPreview.Content>
 			</LinkPreview.Portal>

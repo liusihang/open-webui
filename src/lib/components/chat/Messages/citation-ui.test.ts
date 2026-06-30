@@ -31,4 +31,13 @@ describe('citation UI stopgap regressions', () => {
 		expect(modal).not.toContain('export let showRelevance = true;');
 		expect(modal).toContain('<details');
 	});
+
+	it('keeps long code blocks bounded with an explicit show-more action', () => {
+		const codeBlock = readComponent('./CodeBlock.svelte');
+
+		expect(codeBlock).toContain('MAX_VISIBLE_CODE_LINES');
+		expect(codeBlock).toContain('showFullCode');
+		expect(codeBlock).toContain("$i18n.t('Show more')");
+		expect(codeBlock).toContain('max-h-[26rem]');
+	});
 });

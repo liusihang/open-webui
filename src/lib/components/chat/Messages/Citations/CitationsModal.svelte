@@ -38,13 +38,16 @@
 />
 
 <Modal size="lg" bind:show>
-	<div>
-		<div class=" flex justify-between dark:text-gray-300 px-5 pt-4 pb-2">
-			<div class=" text-lg font-medium self-center capitalize">
+	<div class="overflow-hidden rounded-lg">
+		<div
+			class="flex justify-between gap-3 border-b border-gray-100 px-5 py-3 dark:border-gray-800 dark:text-gray-300"
+		>
+			<div class="self-center text-base font-semibold capitalize">
 				{$i18n.t('Citations')}
 			</div>
 			<button
-				class="self-center"
+				class="self-center rounded-md p-1 text-gray-500 transition hover:bg-gray-100 hover:text-gray-900 dark:text-gray-400 dark:hover:bg-gray-800 dark:hover:text-gray-100"
+				aria-label={$i18n.t('Close citation modal')}
 				on:click={() => {
 					show = false;
 				}}
@@ -53,24 +56,26 @@
 			</button>
 		</div>
 
-		<div class="flex flex-col md:flex-row w-full px-6 pb-5 md:space-x-4">
+		<div class="flex flex-col md:flex-row w-full px-5 py-5 md:space-x-4">
 			<div
-				class="flex flex-col w-full dark:text-gray-200 overflow-y-scroll max-h-[22rem] scrollbar-hidden text-left text-sm gap-2"
+				class="grid max-h-[28rem] w-full gap-2 overflow-y-scroll text-left text-sm scrollbar-hidden dark:text-gray-200 sm:grid-cols-2"
 			>
 				{#each citations as citation, idx}
 					<button
 						id={`source-${id}-${idx + 1}`}
-						class="no-toggle outline-hidden flex dark:text-gray-300 bg-white dark:bg-gray-900 rounded-xl gap-1.5 items-center"
+						class="no-toggle flex min-w-0 items-start gap-3 rounded-lg border border-gray-100 bg-white p-3 outline-hidden transition hover:border-blue-200 hover:bg-blue-50/40 focus:border-blue-300 focus:ring-2 focus:ring-blue-500/20 dark:border-gray-800 dark:bg-gray-900 dark:hover:border-blue-500/30 dark:hover:bg-blue-500/10"
 						on:click={() => {
 							showCitationModal = true;
 							selectedCitation = citation;
 						}}
 					>
-						<div class=" font-medium">
-							{idx + 1}.
+						<div
+							class="inline-flex size-7 shrink-0 items-center justify-center rounded-md bg-blue-50 text-xs font-semibold tabular-nums text-blue-700 dark:bg-blue-500/10 dark:text-blue-200"
+						>
+							{idx + 1}
 						</div>
 						<div
-							class="flex-1 truncate text-black/60 hover:text-black dark:text-white/60 dark:hover:text-white transition text-left"
+							class="min-w-0 flex-1 truncate text-left font-semibold text-gray-900 transition dark:text-gray-100"
 						>
 							{decodeString(citation.source.name)}
 						</div>

@@ -45,12 +45,12 @@
 {#if id !== undefined && id !== null}
 	<button
 		aria-label={$i18n.t('View source: {{title}}', { title: formattedTitle(decodeString(title)) })}
-		class="text-[10px] w-fit translate-y-[2px] px-2 py-0.5 dark:bg-white/5 dark:text-white/80 dark:hover:text-white bg-gray-50 text-black/80 hover:text-black transition rounded-xl"
+		class="inline-flex h-5 w-fit translate-y-[2px] items-center rounded-md border border-blue-200 bg-blue-50 px-1.5 text-[11px] font-semibold leading-none text-blue-700 shadow-sm transition hover:border-blue-300 hover:bg-blue-100 focus:outline-hidden focus:ring-2 focus:ring-blue-500/30 dark:border-blue-500/30 dark:bg-blue-500/10 dark:text-blue-200 dark:hover:bg-blue-500/20"
 		on:click={() => {
 			onClick(id);
 		}}
 	>
-		<span class="font-medium tabular-nums whitespace-nowrap">
+		<span class="tabular-nums whitespace-nowrap">
 			{getBadgeLabel(id)}
 		</span>
 	</button>

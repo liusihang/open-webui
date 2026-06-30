@@ -27,6 +27,8 @@
 	import Tooltip from '$lib/components/common/Tooltip.svelte';
 
 	const i18n = getContext('i18n');
+	const MAX_VISIBLE_CODE_LINES = 28;
+	const MAX_VISIBLE_OUTPUT_LINES = 80;
 
 	export let id = '';
 	export let edit = true;
@@ -75,6 +77,21 @@
 
 	let copied = false;
 	let saved = false;
+	let showFullCode = false;
+	let showFullOutput = false;
+	let blockId = id;
+
+	$: if (id !== blockId) {
+		blockId = id;
+		showFullCode = false;
+		showFullOutput = false;
+	}
+
+	$: codeLineCount = (_code || code || '').split('\n').length;
+	$: shouldBoundCode = !edit && codeLineCount > MAX_VISIBLE_CODE_LINES;
+	$: outputText = stdout || stderr || '';
+	$: outputLineCount = outputText ? outputText.split('\n').length : 0;
+	$: shouldBoundOutput = outputLineCount > MAX_VISIBLE_OUTPUT_LINES;
 
 	const collapseCodeBlock = () => {
 		collapsed = !collapsed;
@@ -434,13 +451,13 @@
 
 <div>
 	<div
-		class="code-block-container relative {className} flex flex-col rounded-2xl border border-gray-100/30 dark:border-gray-850/30 my-0.5"
+		class="code-block-container relative {className} my-2 flex flex-col overflow-hidden rounded-lg border border-gray-200/80 shadow-sm dark:border-gray-800/80"
 		dir="ltr"
 	>
 		{#if ['mermaid', 'vega', 'vega-lite'].includes(lang)}
 			{#if renderHTML}
 				<SvgPanZoom
-					className="code-block-surface rounded-2xl max-h-fit overflow-hidden"
+					className="code-block-surface rounded-lg max-h-fit overflow-hidden"
 					svg={renderHTML}
 					content={_token.text}
 				/>
@@ -458,19 +475,24 @@
 			{/if}
 		{:else}
 			<div
-				class="code-block-surface sticky {stickyButtonsClassName} left-0 right-0 py-1.5 px-3.5 gap-2 flex items-center justify-end w-full z-10 text-xs text-gray-700 dark:text-gray-200 rounded-t-2xl"
+				class="code-block-surface sticky {stickyButtonsClassName} left-0 right-0 z-10 flex min-h-10 w-full items-center justify-end gap-2 border-b border-black/5 px-3 py-2 text-xs text-gray-700 dark:border-white/10 dark:text-gray-200"
 			>
-				<div class="flex-1 truncate">
+				<div class="flex flex-1 items-center gap-2 truncate">
+					<span
+						class="inline-flex h-5 shrink-0 items-center rounded border border-black/10 bg-white/60 px-1.5 text-[10px] font-semibold uppercase tracking-normal text-gray-600 dark:border-white/10 dark:bg-white/10 dark:text-gray-300"
+					>
+						{(lang || 'text').slice(0, 8)}
+					</span>
 					<Tooltip content={lang} placement="top-start">
-						<span class=" truncate text-ellipsis">
-							{lang}
+						<span class="truncate text-ellipsis font-medium text-gray-700 dark:text-gray-200">
+							{lang || $i18n.t('Code')}
 						</span>
 					</Tooltip>
 				</div>
 
 				<div class="flex items-center gap-0.5 shrink-0">
 					<button
-						class="code-block-action-btn flex gap-1 items-center bg-none border-none transition rounded-md px-1.5 py-0.5 bg-transparent"
+						class="code-block-action-btn flex items-center gap-1 rounded-md border-none bg-transparent px-2 py-1 transition"
 						on:click={collapseCodeBlock}
 					>
 						<div class=" -translate-y-[0.5px]">
@@ -485,13 +507,13 @@
 					{#if ($config?.features?.enable_code_execution ?? true) && (lang.toLowerCase() === 'python' || lang.toLowerCase() === 'py' || (lang === '' && checkPythonCode(code)))}
 						{#if executing}
 							<div
-								class="run-code-button code-block-action-btn bg-none border-none p-0.5 cursor-not-allowed bg-transparent"
+								class="run-code-button code-block-action-btn cursor-not-allowed border-none bg-transparent p-1"
 							>
 								{$i18n.t('Running')}
 							</div>
 						{:else if run}
 							<button
-								class="code-block-action-btn flex gap-1 items-center run-code-button bg-none border-none transition rounded-md px-1.5 py-0.5 bg-transparent"
+								class="code-block-action-btn run-code-button flex items-center gap-1 rounded-md border-none bg-transparent px-2 py-1 transition"
 								on:click={async () => {
 									code = _code;
 									await tick();
@@ -507,7 +529,7 @@
 
 					{#if save}
 						<button
-							class="code-block-action-btn save-code-button bg-none border-none transition rounded-md px-1.5 py-0.5 bg-transparent"
+							class="code-block-action-btn save-code-button rounded-md border-none bg-transparent px-2 py-1 transition"
 							on:click={saveCode}
 						>
 							{saved ? $i18n.t('Saved') : $i18n.t('Save')}
@@ -515,13 +537,13 @@
 					{/if}
 
 					<button
-						class="code-block-action-btn copy-code-button bg-none border-none transition rounded-md px-1.5 py-0.5 bg-transparent"
+						class="code-block-action-btn copy-code-button rounded-md border-none bg-transparent px-2 py-1 transition"
 						on:click={copyCode}>{copied ? $i18n.t('Copied') : $i18n.t('Copy')}</button
 					>
 
 					{#if preview && ['html', 'svg'].includes(lang)}
 						<button
-							class="code-block-action-btn flex gap-1 items-center run-code-button bg-none border-none transition rounded-md px-1.5 py-0.5 bg-transparent"
+							class="code-block-action-btn run-code-button flex items-center gap-1 rounded-md border-none bg-transparent px-2 py-1 transition"
 							on:click={previewCode}
 						>
 							<div>
@@ -533,13 +555,13 @@
 			</div>
 
 			<div
-				class="code-block-surface language-{lang} rounded-t-2xl -mt-8 {editorClassName
+				class="code-block-surface language-{lang} -mt-10 {editorClassName
 					? editorClassName
 					: executing || stdout || stderr || result
 						? ''
-						: 'rounded-b-2xl'} overflow-hidden"
+						: 'rounded-b-lg'} overflow-hidden"
 			>
-				<div class="code-block-surface pt-6.5"></div>
+				<div class="code-block-surface pt-10"></div>
 
 				{#if !collapsed}
 					{#if edit}
@@ -557,20 +579,43 @@
 							/>
 						</div>
 					{:else}
-						<pre
-							class="code-block-pre hljs p-4 px-5 overflow-x-auto"
-							style="border-top-left-radius: 0px; border-top-right-radius: 0px; {(executing ||
-								stdout ||
-								stderr ||
-								result) &&
-								'border-bottom-left-radius: 0px; border-bottom-right-radius: 0px;'}"><code
-								class="language-{lang} rounded-t-none whitespace-pre text-sm"
-								>{@html hljs.highlightAuto(code, hljs.getLanguage(lang)?.aliases).value ||
-									code}</code
-							></pre>
+						<div class="relative">
+							<pre
+								class="code-block-pre hljs overflow-x-auto p-4 px-5 {shouldBoundCode &&
+								!showFullCode
+									? 'max-h-[26rem] overflow-y-hidden'
+									: ''}"
+								style="border-top-left-radius: 0px; border-top-right-radius: 0px; {(executing ||
+									stdout ||
+									stderr ||
+									result) &&
+									'border-bottom-left-radius: 0px; border-bottom-right-radius: 0px;'}"><code
+									class="language-{lang} rounded-t-none whitespace-pre text-sm leading-6"
+									>{@html hljs.highlightAuto(code, hljs.getLanguage(lang)?.aliases).value ||
+										code}</code
+								></pre>
+							{#if shouldBoundCode}
+								<div
+									class="code-block-surface flex items-center justify-between gap-2 border-t border-black/5 px-3 py-2 text-xs dark:border-white/10"
+								>
+									<span class="text-gray-500 dark:text-gray-400">
+										{$i18n.t('{{COUNT}} lines', { COUNT: codeLineCount })}
+									</span>
+									<button
+										type="button"
+										class="code-block-action-btn rounded-md px-2.5 py-1 font-medium transition"
+										on:click={() => {
+											showFullCode = !showFullCode;
+										}}
+									>
+										{showFullCode ? $i18n.t('Show less') : $i18n.t('Show more')}
+									</button>
+								</div>
+							{/if}
+						</div>
 					{/if}
 				{:else}
-					<div class="code-block-surface rounded-b-2xl! pt-1 pb-2 px-4 flex flex-col gap-2 text-xs">
+					<div class="code-block-surface flex flex-col gap-2 rounded-b-lg! px-4 pb-2 pt-1 text-xs">
 						<span class="text-gray-500 italic">
 							{$i18n.t('{{COUNT}} hidden lines', {
 								COUNT: code.split('\n').length
@@ -587,9 +632,7 @@
 				/>
 
 				{#if executing || stdout || stderr || result || files}
-					<div
-						class="code-block-output-surface rounded-b-2xl! pt-2 pb-3 px-3.5 flex flex-col gap-2"
-					>
+					<div class="code-block-output-surface flex flex-col gap-2 rounded-b-lg! px-3.5 pb-3 pt-2">
 						{#if executing}
 							<div class=" ">
 								<div class=" text-gray-500 text-xs mb-1">{$i18n.t('STDOUT/STDERR')}</div>
@@ -599,12 +642,33 @@
 							{#if stdout || stderr}
 								<div class=" ">
 									<div class=" text-gray-500 text-xs mb-1">{$i18n.t('STDOUT/STDERR')}</div>
-									<div
-										class="text-sm font-mono whitespace-pre-wrap {stdout?.split('\n')?.length > 100
-											? `max-h-96`
-											: ''}  overflow-y-auto"
-									>
-										{stdout || stderr}
+									<div class="relative">
+										<div
+											class="font-mono text-sm whitespace-pre-wrap {shouldBoundOutput &&
+											!showFullOutput
+												? 'max-h-[22rem] overflow-hidden'
+												: 'overflow-y-auto'}"
+										>
+											{outputText}
+										</div>
+										{#if shouldBoundOutput}
+											<div
+												class="mt-2 flex items-center justify-between gap-2 border-t border-black/5 pt-2 text-xs dark:border-white/10"
+											>
+												<span class="text-gray-500 dark:text-gray-400">
+													{$i18n.t('{{COUNT}} lines', { COUNT: outputLineCount })}
+												</span>
+												<button
+													type="button"
+													class="code-block-action-btn rounded-md px-2.5 py-1 font-medium transition"
+													on:click={() => {
+														showFullOutput = !showFullOutput;
+													}}
+												>
+													{showFullOutput ? $i18n.t('Show less') : $i18n.t('Show more')}
+												</button>
+											</div>
+										{/if}
 									</div>
 								</div>
 							{/if}
