@@ -1232,6 +1232,21 @@ async def _run_singleton_startup_tasks(app: FastAPI) -> None:
             log.warning(f'Failed to initialize terminal servers at startup: {e}')
 
 
+async def _install_tool_and_function_dependencies_once() -> None:
+    async def install_dependencies() -> None:
+        # This should block startup so functions are not deactivated on first /get_models calls
+        # when the first user lands on the / route.
+        log.info('Installing external dependencies of functions and tools...')
+        await install_tool_and_function_dependencies()
+
+    ran, _ = await startup_singleton.run_startup_once(
+        'tool-function-dependencies',
+        install_dependencies,
+    )
+    if not ran:
+        log.info('External dependencies of functions and tools already installed by another worker; skipping')
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     # Store reference to main event loop for sync->async calls (e.g., embedding generation)
@@ -1256,10 +1271,7 @@ async def lifespan(app: FastAPI):
     if SAFE_MODE:
         await Functions.deactivate_all_functions()
 
-    # This should be blocking (sync) so functions are not deactivated on first /get_models calls
-    # when the first user lands on the / route.
-    log.info('Installing external dependencies of functions and tools...')
-    await install_tool_and_function_dependencies()
+    await _install_tool_and_function_dependencies_once()
 
     app.state.redis = get_redis_client(async_mode=True)
 
