@@ -50,12 +50,20 @@ describe('AgentTranscript presentation guardrails', () => {
 		const detail = readSource('./AgentDetailSection.svelte');
 
 		expect(tool).toContain('AgentDetailSection');
-		expect(tool).toContain('User summary');
+		expect(tool).toContain('agent-tool-view-switch');
+		expect(tool).toContain('User view');
 		expect(tool).toContain('Dev details');
 		expect(detail).toContain('<details');
 		// Debug payload must be formatted as <pre> blocks inside the disclosure,
 		// not inlined into the default view
 		expect(detail).toContain('<pre');
+	});
+
+	it('keeps the timeline rail chronological without exposing hash-number debug labels', () => {
+		const part = readSource('./TranscriptPart.svelte');
+
+		expect(part).toContain('Seq {part.seq}');
+		expect(part).not.toContain('>#{part.seq}<');
 	});
 
 	it('keeps approval and artifact rows visually quiet and free of fake buttons', () => {
@@ -65,6 +73,8 @@ describe('AgentTranscript presentation guardrails', () => {
 		// Approval must surface status text only; no approve/reject form actions
 		expect(approval).not.toContain('<button');
 		expect(approval).not.toContain('<form');
+		expect(approval).toContain('agent-approval-request-shell');
+		expect(approval).toContain('Review before continuing');
 		expect(approval).toContain('Confirmation required');
 		expect(approval).not.toContain('Approve selected');
 		expect(approval).not.toContain('Reject selected');
@@ -124,6 +134,8 @@ describe('AgentTranscript presentation guardrails', () => {
 		expect(modal).toContain('code-execution-terminal');
 		expect(modal).toContain('showFullOutput');
 		expect(modal).toContain('result?.files');
+		expect(modal).toContain('code-execution-file-chip');
+		expect(modal).toContain('code-execution-file-path');
 		expect(modal).toContain('Show more');
 	});
 

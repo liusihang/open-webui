@@ -27,14 +27,25 @@
 	<div class="agent-approval-row">
 		<div class="agent-approval-title-block">
 			<span class="agent-approval-icon" aria-hidden="true"></span>
-			<span class="agent-approval-title">{titleText(part.status)}</span>
+			<div class="agent-approval-title-copy">
+				<span class="agent-approval-title">{titleText(part.status)}</span>
+				<span class="agent-approval-subtitle">Review before continuing</span>
+			</div>
 		</div>
 		<span class="agent-approval-status">{statusText(part.status)}</span>
 	</div>
-	<div class="agent-approval-action">{part.action ?? part.description}</div>
-	{#if part.description && part.description !== part.action}
-		<div class="agent-approval-description">{part.description}</div>
-	{/if}
+	<div class="agent-approval-request-shell">
+		<div class="agent-approval-request-row">
+			<span class="agent-approval-request-label">Request</span>
+			<span class="agent-approval-action">{part.action ?? part.description}</span>
+		</div>
+		{#if part.description && part.description !== part.action}
+			<div class="agent-approval-request-row">
+				<span class="agent-approval-request-label">Risk</span>
+				<span class="agent-approval-description">{part.description}</span>
+			</div>
+		{/if}
+	</div>
 	<AgentDetailSection
 		label="Approval details"
 		payload={part.details}
@@ -72,7 +83,7 @@
 	.agent-approval-title-block {
 		min-width: 0;
 		display: inline-flex;
-		align-items: center;
+		align-items: flex-start;
 		gap: 0.45rem;
 	}
 	.agent-approval-icon {
@@ -90,15 +101,21 @@
 		border-color: var(--red-600, #dc2626);
 		background: var(--red-600, #dc2626);
 	}
+	.agent-approval-title-copy {
+		display: flex;
+		min-width: 0;
+		flex-direction: column;
+		gap: 0.08rem;
+	}
 	.agent-approval-title {
 		color: var(--gray-950, #030712);
 		font-weight: 650;
 	}
-	.agent-approval-action {
-		color: var(--gray-800, #1f2937);
+	.agent-approval-subtitle {
+		color: var(--gray-600, #4b5563);
+		font-size: 0.68rem;
 		font-weight: 500;
-		font-size: 0.76rem;
-		line-height: 1.4;
+		line-height: 1.25;
 	}
 	.agent-approval-status {
 		flex: none;
@@ -119,8 +136,63 @@
 		border-color: var(--red-200, #fecaca);
 		color: var(--red-700, #b91c1c);
 	}
+	.agent-approval-request-shell {
+		display: flex;
+		flex-direction: column;
+		gap: 0;
+		overflow: hidden;
+		border: 1px solid rgba(245, 158, 11, 0.28);
+		border-radius: 0.45rem;
+		background: rgba(255, 255, 255, 0.78);
+	}
+	.agent-approval-part.approved .agent-approval-request-shell {
+		border-color: rgba(34, 197, 94, 0.24);
+	}
+	.agent-approval-part.rejected .agent-approval-request-shell {
+		border-color: rgba(239, 68, 68, 0.24);
+	}
+	.agent-approval-request-row {
+		display: grid;
+		grid-template-columns: 4.6rem minmax(0, 1fr);
+		gap: 0.55rem;
+		align-items: start;
+		padding: 0.48rem 0.55rem;
+		font-size: 0.74rem;
+		line-height: 1.38;
+	}
+	.agent-approval-request-row + .agent-approval-request-row {
+		border-top: 1px solid rgba(245, 158, 11, 0.16);
+	}
+	.agent-approval-part.approved .agent-approval-request-row + .agent-approval-request-row {
+		border-top-color: rgba(34, 197, 94, 0.14);
+	}
+	.agent-approval-part.rejected .agent-approval-request-row + .agent-approval-request-row {
+		border-top-color: rgba(239, 68, 68, 0.14);
+	}
+	.agent-approval-request-label {
+		color: var(--gray-500, #6b7280);
+		font-size: 0.65rem;
+		font-weight: 700;
+		line-height: 1.5;
+		text-transform: uppercase;
+	}
+	.agent-approval-action {
+		color: var(--gray-900, #111827);
+		font-weight: 600;
+		overflow-wrap: anywhere;
+	}
 	.agent-approval-description {
-		font-size: 0.72rem;
 		color: var(--gray-600, #4b5563);
+		overflow-wrap: anywhere;
+	}
+	@media (max-width: 520px) {
+		.agent-approval-row {
+			align-items: flex-start;
+			flex-direction: column;
+		}
+		.agent-approval-request-row {
+			grid-template-columns: 1fr;
+			gap: 0.18rem;
+		}
 	}
 </style>

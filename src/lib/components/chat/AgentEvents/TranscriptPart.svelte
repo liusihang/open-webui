@@ -81,7 +81,7 @@
 	data-status={partStatus(part)}
 	data-tone={tone(part)}
 >
-	<div class="transcript-part-seq" aria-label={`Event ${part.seq}`}>#{part.seq}</div>
+	<div class="transcript-part-seq" aria-label={`Event ${part.seq}`}>Seq {part.seq}</div>
 	<div class="transcript-part-rail" aria-hidden="true">
 		<span class="transcript-part-dot"></span>
 	</div>
