@@ -432,8 +432,8 @@ describe('buildAgentTranscriptModel', () => {
 		]);
 
 		const model = buildAgentTranscriptModel(state);
-		const textParts = model.parts.filter((part) =>
-			part.kind === 'assistant_note' || part.kind === 'action_summary'
+		const textParts = model.parts.filter(
+			(part) => part.kind === 'assistant_note' || part.kind === 'action_summary'
 		);
 		expect(textParts.map((part) => part.kind)).toEqual(['assistant_note', 'action_summary']);
 	});
@@ -450,7 +450,11 @@ describe('buildAgentTranscriptModel', () => {
 					block_kind: 'assistant_note'
 				}
 			}),
-			agentRunEventFixture({ seq: 2, event_type: 'final.started', summary: 'Writing final answer' }),
+			agentRunEventFixture({
+				seq: 2,
+				event_type: 'final.started',
+				summary: 'Writing final answer'
+			}),
 			agentRunEventFixture({
 				seq: 3,
 				event_type: 'final.delta',
@@ -465,6 +469,54 @@ describe('buildAgentTranscriptModel', () => {
 
 		const model = buildAgentTranscriptModel(state);
 		expect(model.final).toEqual({ content: 'the real answer', done: false });
+	});
+
+	it('adds final.started as a timeline part without rendering final.delta as transcript content', () => {
+		const state = foldAgentRunEvents([
+			agentRunEventFixture({
+				seq: 1,
+				event_type: 'text.delta',
+				payload: {
+					block_id: 'note-1',
+					delta_index: 0,
+					delta: 'Need source-backed answer',
+					block_kind: 'assistant_note'
+				}
+			}),
+			agentRunEventFixture({
+				seq: 2,
+				event_type: 'tool.started',
+				summary: 'Searching Web',
+				payload: { tool_call_id: 'call-1', tool_name: 'search_web' }
+			}),
+			agentRunEventFixture({
+				seq: 3,
+				event_type: 'final.started',
+				summary: 'Final answer streaming'
+			}),
+			agentRunEventFixture({
+				seq: 4,
+				event_type: 'final.delta',
+				payload: {
+					delta: 'Answer body',
+					delta_index: 0,
+					final_stream_id: 'final-1'
+				},
+				phase: 'finalizing'
+			})
+		]);
+
+		const model = buildAgentTranscriptModel(state);
+
+		expect(model.parts.map((part) => part.kind)).toEqual(['assistant_note', 'tool', 'run']);
+		const finalPart = model.parts.at(-1);
+		if (!finalPart || finalPart.kind !== 'run') {
+			throw new Error('expected final timeline part');
+		}
+		expect(finalPart.label).toBe('Final answer');
+		expect(finalPart.summary).toBe('Final answer streaming');
+		expect(finalPart.seq).toBe(3);
+		expect(model.final?.content).toBe('Answer body');
 	});
 
 	it('keeps the model coherent across incremental folds (live SSE then reconnect backfill)', () => {

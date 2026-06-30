@@ -10,6 +10,7 @@ import type {
 	AgentTranscriptErrorPart,
 	AgentTranscriptModel,
 	AgentTranscriptModelPart,
+	AgentTranscriptRunPart,
 	AgentTranscriptSubagentPart,
 	AgentTranscriptTextPart,
 	AgentTranscriptToolPart,
@@ -126,6 +127,7 @@ const buildParts = (state: AgentRunEventState): AgentTranscriptModelPart[] => {
 	const userInputs = new Map<string, UserInputAccumulator>();
 	const artifacts = new Map<string, AgentRunEventViewItem>();
 	const subagents = new Map<string, SubagentAccumulator>();
+	const finalStartedItems: AgentRunEventViewItem[] = [];
 
 	for (const item of state.items) {
 		switch (item.eventType) {
@@ -203,6 +205,9 @@ const buildParts = (state: AgentRunEventState): AgentTranscriptModelPart[] => {
 				subagents.set(participantId, acc);
 				break;
 			}
+			case 'final.started':
+				finalStartedItems.push(item);
+				break;
 			default:
 				break;
 		}
@@ -225,6 +230,9 @@ const buildParts = (state: AgentRunEventState): AgentTranscriptModelPart[] => {
 	}
 	for (const acc of subagents.values()) {
 		parts.push(subagentAccumulatorToPart(acc));
+	}
+	for (const item of finalStartedItems) {
+		parts.push(finalStartedItemToPart(item, state.runStatus));
 	}
 
 	for (const item of state.items) {
@@ -265,7 +273,9 @@ type SubagentAccumulator = {
 	lastItem: AgentRunEventViewItem;
 };
 
-const textBlockToPart = (block: AgentRunEventState['textBlocks'][number]): AgentTranscriptTextPart => {
+const textBlockToPart = (
+	block: AgentRunEventState['textBlocks'][number]
+): AgentTranscriptTextPart => {
 	const kind = textKindToPartKind(block.kind);
 	return {
 		kind,
@@ -295,9 +305,12 @@ const toolAccumulatorToPart = (acc: ToolAccumulator): AgentTranscriptToolPart =>
 	const last = acc.lastItem;
 	const details = pickRicherDetails(acc.firstItem, acc.lastItem);
 	const toolName =
-		readPayloadString(details, 'tool_name', 'name', 'tool') ?? extractToolNameFromSummary(last.summary);
+		readPayloadString(details, 'tool_name', 'name', 'tool') ??
+		extractToolNameFromSummary(last.summary);
 	const status = resolveToolStatus(last.eventType);
-	const summary = last.summary || (toolName ? `${status === 'error' ? `${toolName} failed` : `Completed ${toolName}`}` : 'Tool');
+	const summary =
+		last.summary ||
+		(toolName ? `${status === 'error' ? `${toolName} failed` : `Completed ${toolName}`}` : 'Tool');
 	return {
 		kind: 'tool',
 		toolCallId: acc.toolCallId,
@@ -369,9 +382,7 @@ const userInputAccumulatorToPart = (acc: UserInputAccumulator): AgentTranscriptU
 	};
 };
 
-const artifactItemToPart = (
-	item: AgentRunEventViewItem
-): AgentTranscriptArtifactPart | null => {
+const artifactItemToPart = (item: AgentRunEventViewItem): AgentTranscriptArtifactPart | null => {
 	const details = extractArtifactPayload(item.details);
 	if (!details) {
 		return null;
@@ -409,7 +420,11 @@ const subagentAccumulatorToPart = (acc: SubagentAccumulator): AgentTranscriptSub
 				? 'done'
 				: 'running';
 	const resultSummary = readPayloadString(details, 'result_summary', 'content');
-	const summary = last.summary || (participantName ? `${status === 'error' ? `${participantName} failed` : `Completed ${participantName}`}` : 'Subagent');
+	const summary =
+		last.summary ||
+		(participantName
+			? `${status === 'error' ? `${participantName} failed` : `Completed ${participantName}`}`
+			: 'Subagent');
 	return {
 		kind: 'subagent',
 		participantName,
@@ -423,6 +438,23 @@ const subagentAccumulatorToPart = (acc: SubagentAccumulator): AgentTranscriptSub
 		participantId: acc.firstItem.participantId,
 		phase: acc.firstItem.phase,
 		defaultExpanded: status === 'error'
+	};
+};
+
+const finalStartedItemToPart = (
+	item: AgentRunEventViewItem,
+	runStatus: AgentRunState
+): AgentTranscriptRunPart => {
+	return {
+		kind: 'run',
+		label: 'Final answer',
+		summary: item.summary || 'Writing final answer',
+		runStatus,
+		seq: item.seq,
+		createdAt: item.createdAt,
+		participantId: item.participantId,
+		phase: item.phase,
+		defaultExpanded: false
 	};
 };
 
