@@ -47,6 +47,7 @@
 		copiedOutput = false;
 	}
 	$: result = codeExecution?.result ?? null;
+	$: resultFiles = result?.files ?? [];
 	$: outputText = [
 		result?.error ? `[error]\n${result.error}` : null,
 		result?.output ? `[output]\n${result.output}` : null
@@ -157,20 +158,34 @@
 					</section>
 				{/if}
 
-				{#if codeExecution?.result?.files && codeExecution?.result?.files.length > 0}
+				{#if resultFiles.length > 0}
 					<section class="code-execution-files">
-						<div class="code-execution-files-title">{$i18n.t('Files')}</div>
-						<ul>
-							{#each codeExecution?.result?.files as file}
-								<li>
-									<Document className="size-3.5" strokeWidth="1.75" />
-									{#if file.url}
-										<a href={file.url} target="_blank" rel="noreferrer">
-											{file.name ?? file.url}
-										</a>
-									{:else}
-										<span>{file.name ?? $i18n.t('Generated file')}</span>
-									{/if}
+						<div class="code-execution-files-title">
+							<span>{$i18n.t('Generated files')}</span>
+							<span class="code-execution-files-count">
+								{resultFiles.length} {$i18n.t('files')}
+							</span>
+						</div>
+						<ul class="code-execution-file-list">
+							{#each resultFiles as file}
+								<li class="code-execution-file-chip">
+									<span class="code-execution-file-icon" aria-hidden="true">
+										<Document className="size-3.5" strokeWidth="1.75" />
+									</span>
+									<div class="code-execution-file-copy">
+										{#if file.url}
+											<a class="code-execution-file-name" href={file.url} target="_blank" rel="noreferrer">
+												{file.name ?? file.url}
+											</a>
+										{:else}
+											<span class="code-execution-file-name">
+												{file.name ?? $i18n.t('Generated file')}
+											</span>
+										{/if}
+										<span class="code-execution-file-path">
+											{file.url ?? file.name ?? $i18n.t('Generated file')}
+										</span>
+									</div>
 								</li>
 							{/each}
 						</ul>
@@ -358,18 +373,33 @@
 	.code-execution-files {
 		display: flex;
 		flex-direction: column;
-		gap: 0.42rem;
+		gap: 0.5rem;
 		border: 1px solid var(--gray-200, #e5e7eb);
 		border-radius: 0.65rem;
-		background: var(--gray-50, #f9fafb);
+		background: var(--white, #ffffff);
 		padding: 0.65rem 0.75rem;
 	}
 	.code-execution-files-title {
+		display: flex;
+		align-items: center;
+		justify-content: space-between;
+		gap: 0.75rem;
 		color: var(--gray-700, #374151);
 		font-size: 0.76rem;
 		font-weight: 700;
 	}
-	.code-execution-files ul {
+	.code-execution-files-count {
+		border: 1px solid var(--gray-200, #e5e7eb);
+		border-radius: 9999px;
+		background: var(--gray-50, #f9fafb);
+		color: var(--gray-500, #6b7280);
+		font-size: 0.62rem;
+		font-weight: 700;
+		line-height: 1;
+		padding: 0.22rem 0.38rem;
+		white-space: nowrap;
+	}
+	.code-execution-file-list {
 		display: flex;
 		flex-direction: column;
 		gap: 0.35rem;
@@ -377,27 +407,56 @@
 		padding: 0;
 		list-style: none;
 	}
-	.code-execution-files li {
+	.code-execution-file-chip {
 		display: flex;
-		align-items: center;
-		gap: 0.4rem;
+		align-items: flex-start;
+		gap: 0.5rem;
 		min-width: 0;
-		color: var(--gray-500, #6b7280);
-		font-size: 0.75rem;
+		border: 1px solid var(--gray-200, #e5e7eb);
+		border-radius: 0.5rem;
+		background: var(--gray-50, #f9fafb);
+		padding: 0.5rem 0.55rem;
 	}
-	.code-execution-files a,
-	.code-execution-files span {
+	.code-execution-file-icon {
+		display: inline-flex;
+		align-items: center;
+		justify-content: center;
+		width: 1.45rem;
+		height: 1.45rem;
+		flex-shrink: 0;
+		border: 1px solid var(--gray-200, #e5e7eb);
+		border-radius: 0.4rem;
+		background: var(--white, #ffffff);
+		color: var(--gray-500, #6b7280);
+	}
+	.code-execution-file-copy {
+		display: flex;
+		flex-direction: column;
+		gap: 0.12rem;
+		min-width: 0;
+	}
+	.code-execution-file-name,
+	.code-execution-file-path {
 		min-width: 0;
 		overflow: hidden;
 		text-overflow: ellipsis;
 		white-space: nowrap;
 	}
-	.code-execution-files a {
-		color: var(--blue-700, #1d4ed8);
-		font-family: var(--font-mono, monospace);
+	.code-execution-file-name {
+		color: var(--gray-800, #1f2937);
+		font-size: 0.75rem;
+		font-weight: 650;
+		line-height: 1.2;
 		text-decoration: none;
 	}
-	.code-execution-files a:hover {
+	.code-execution-file-path {
+		color: var(--blue-700, #1d4ed8);
+		font-family: var(--font-mono, monospace);
+		font-size: 0.68rem;
+		line-height: 1.2;
+		text-decoration: none;
+	}
+	.code-execution-file-name:hover {
 		text-decoration: underline;
 	}
 	:global(.dark) .code-execution-shell {
@@ -423,7 +482,16 @@
 	:global(.dark) .code-execution-files-title {
 		color: var(--gray-200, #e5e7eb);
 	}
-	:global(.dark) .code-execution-files a {
+	:global(.dark) .code-execution-files-count,
+	:global(.dark) .code-execution-file-chip,
+	:global(.dark) .code-execution-file-icon {
+		background: rgba(30, 41, 59, 0.62);
+		border-color: rgba(148, 163, 184, 0.22);
+	}
+	:global(.dark) .code-execution-file-name {
+		color: var(--gray-100, #f3f4f6);
+	}
+	:global(.dark) .code-execution-file-path {
 		color: var(--blue-300, #93c5fd);
 	}
 </style>

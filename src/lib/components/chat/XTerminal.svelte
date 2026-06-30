@@ -39,6 +39,7 @@
 	let resizeObserver: ResizeObserver | null = null;
 	let pingInterval: ReturnType<typeof setInterval> | null = null;
 	let copiedSelection = false;
+	let terminalInfo: { serverId: string; baseUrl: string } | null = null;
 
 	// Resolve the active terminal server's info for the WebSocket URL
 	const getTerminalInfo = (): { serverId: string; baseUrl: string } | null => {
@@ -63,6 +64,13 @@
 
 		return null;
 	};
+
+	$: {
+		$selectedTerminalId;
+		$terminalServers;
+		$settings;
+		terminalInfo = getTerminalInfo();
+	}
 
 	const connect = async () => {
 		if (ws) disconnect();
@@ -323,6 +331,13 @@
 		<div class="terminal-live-title">
 			<TerminalIcon className="size-3.5" strokeWidth="1.75" />
 			<span>{$i18n.t('Terminal')}</span>
+			<span class="terminal-live-route">
+				{terminalInfo?.serverId === '__direct__'
+					? $i18n.t('Direct')
+					: terminalInfo
+						? $i18n.t('System')
+						: $i18n.t('No terminal')}
+			</span>
 			<span class="terminal-live-status-dot" class:connected class:connecting aria-hidden="true"
 			></span>
 			<span class="terminal-live-status-text">
@@ -397,6 +412,19 @@
 		color: #94a3b8;
 		font-size: 0.66rem;
 		font-weight: 500;
+		white-space: nowrap;
+	}
+	.terminal-live-route {
+		display: inline-flex;
+		align-items: center;
+		border: 1px solid rgba(96, 165, 250, 0.24);
+		border-radius: 9999px;
+		background: rgba(37, 99, 235, 0.12);
+		color: #bfdbfe;
+		font-size: 0.62rem;
+		font-weight: 700;
+		line-height: 1;
+		padding: 0.18rem 0.38rem;
 		white-space: nowrap;
 	}
 	.terminal-live-actions {

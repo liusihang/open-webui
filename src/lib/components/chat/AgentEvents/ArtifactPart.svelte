@@ -45,6 +45,7 @@
 		</div>
 
 		<div class="agent-artifact-actions">
+			<span class="agent-artifact-status">Registered</span>
 			{#if part.mimeType}
 				<span class="agent-artifact-meta">{part.mimeType}</span>
 			{/if}
@@ -84,7 +85,7 @@
 		padding: 0.55rem 0.65rem;
 		border-radius: 0.5rem;
 		margin: 0.2rem 0;
-		background: linear-gradient(180deg, rgba(249, 250, 251, 0.96), rgba(255, 255, 255, 0.98));
+		background: var(--white, #ffffff);
 		border: 1px solid var(--gray-200, #e5e7eb);
 		box-shadow: 0 1px 2px rgba(15, 23, 42, 0.04);
 	}
@@ -153,6 +154,16 @@
 		padding: 0.25rem 0.4rem;
 		text-transform: uppercase;
 	}
+	.agent-artifact-status {
+		color: var(--green-700, #15803d);
+		background: var(--green-50, #f0fdf4);
+		border: 1px solid var(--green-200, #bbf7d0);
+		border-radius: 9999px;
+		font-size: 0.61rem;
+		font-weight: 700;
+		line-height: 1;
+		padding: 0.25rem 0.4rem;
+	}
 	.agent-artifact-action {
 		display: inline-flex;
 		align-items: center;
@@ -199,13 +210,14 @@
 		color: var(--blue-400, #60a5fa);
 	}
 	:global(.dark) .agent-artifact-card {
-		background: linear-gradient(180deg, rgba(17, 24, 39, 0.94), rgba(15, 23, 42, 0.96));
+		background: rgba(15, 23, 42, 0.94);
 		border-color: rgba(148, 163, 184, 0.22);
 		box-shadow: none;
 	}
 	:global(.dark) .agent-artifact-icon,
 	:global(.dark) .agent-artifact-action,
-	:global(.dark) .agent-artifact-meta {
+	:global(.dark) .agent-artifact-meta,
+	:global(.dark) .agent-artifact-status {
 		background: rgba(30, 41, 59, 0.72);
 		border-color: rgba(148, 163, 184, 0.22);
 	}
@@ -217,6 +229,9 @@
 	:global(.dark) .agent-artifact-action,
 	:global(.dark) .agent-artifact-meta {
 		color: var(--gray-400, #9ca3af);
+	}
+	:global(.dark) .agent-artifact-status {
+		color: var(--green-300, #86efac);
 	}
 	:global(.dark) .agent-artifact-action:hover {
 		color: var(--gray-100, #f3f4f6);
