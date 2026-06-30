@@ -3,7 +3,12 @@
 	import { embed, showControls, showEmbeds } from '$lib/stores';
 
 	import CitationModal from './Citations/CitationModal.svelte';
-	import { buildCitationTargets, calculateShowRelevance, shouldShowPercentage } from './citations';
+	import {
+		buildCitationTargets,
+		calculateShowRelevance,
+		groupCitationTargetsForDisplay,
+		shouldShowPercentage
+	} from './citations';
 
 	const i18n = getContext('i18n');
 
@@ -16,6 +21,7 @@
 	export let readOnly = false;
 
 	let citationTargets = [];
+	let sourceGroups = [];
 	let citations = [];
 	let showPercentage = false;
 	let showRelevance = true;
@@ -81,6 +87,7 @@
 
 	$: {
 		citationTargets = buildCitationTargets(sources ?? [], { content, metadata });
+		sourceGroups = groupCitationTargetsForDisplay(citationTargets);
 		citations = citationTargets.map((target) => target.citation);
 		showRelevance = calculateShowRelevance(citations);
 		showPercentage = shouldShowPercentage(citations);
@@ -170,7 +177,7 @@
 	{@const urlCitations = citations.filter((c) => c?.source?.name?.startsWith('http'))}
 	<div class="w-full py-1">
 		<button
-			class="inline-flex h-8 items-center gap-2 rounded-lg border border-blue-200 bg-blue-50 px-3 text-xs font-semibold text-blue-700 shadow-sm transition hover:border-blue-300 hover:bg-blue-100 dark:border-blue-500/30 dark:bg-blue-500/10 dark:text-blue-200 dark:hover:bg-blue-500/20"
+			class="inline-flex h-8 items-center gap-2 rounded-lg border border-gray-200 bg-white px-3 text-xs font-semibold text-gray-700 shadow-sm transition hover:border-blue-200 hover:text-blue-700 dark:border-gray-800 dark:bg-gray-900 dark:text-gray-200 dark:hover:border-blue-500/30 dark:hover:text-blue-200"
 			aria-label={citations.length === 1
 				? $i18n.t('Toggle 1 source')
 				: $i18n.t('Toggle {{COUNT}} sources', { COUNT: citations.length })}
@@ -193,7 +200,7 @@
 					{/each}
 					{#if citations.length > 3}
 						<div
-							class="size-4 rounded-full shrink-0 border border-white dark:border-gray-850 bg-blue-100 dark:bg-blue-950 flex items-center justify-center text-[8px] font-semibold text-blue-700 dark:text-blue-200 whitespace-nowrap tracking-tighter"
+							class="flex size-4 shrink-0 items-center justify-center rounded-full border border-white bg-blue-100 text-[8px] font-semibold tracking-tighter text-blue-700 dark:border-gray-850 dark:bg-blue-950 dark:text-blue-200"
 							aria-hidden="true"
 						>
 							+{citations.length - Math.min(urlCitations.length, 3)}
@@ -201,17 +208,14 @@
 					{/if}
 				</div>
 			{/if}
-			<span>
-				{#if citations.length === 1}
-					{$i18n.t('1 Source')}
-				{:else}
-					{$i18n.t('{{COUNT}} Sources', {
-						COUNT: citations.length
-					})}
-				{/if}
+			<span>{$i18n.t('Sources')}</span>
+			<span
+				class="rounded-md border border-blue-200 bg-blue-50 px-1.5 py-0.5 text-[11px] leading-none text-blue-700 dark:border-blue-500/30 dark:bg-blue-500/10 dark:text-blue-200"
+			>
+				{citations.length === 1 ? $i18n.t('1 Source') : citations.length}
 			</span>
-			<span class="text-blue-500 dark:text-blue-300" aria-hidden="true">
-				{showCitations ? '−' : '+'}
+			<span class="text-gray-400 dark:text-gray-500" aria-hidden="true">
+				{showCitations ? '-' : '+'}
 			</span>
 		</button>
 	</div>
@@ -235,69 +239,95 @@
 					: $i18n.t('{{COUNT}} Sources', { COUNT: citations.length })}
 			</div>
 		</div>
-		<div class="grid gap-2 p-2 sm:grid-cols-2">
-			{#each citationTargets as target, idx}
-				{@const pages = getTargetPages(target)}
-				{@const snippet = getTargetSnippet(target)}
-				{@const host = getTargetHost(target)}
-				<button
-					id={`source-${id}-${idx + 1}`}
-					aria-label={$i18n.t('View source: {{name}}', {
-						name: decodeString(target.title)
-					})}
-					class="no-toggle group/source flex min-w-0 items-start gap-3 rounded-lg border border-gray-100 bg-white p-3 text-left outline-hidden transition hover:border-blue-200 hover:bg-blue-50/40 focus:border-blue-300 focus:ring-2 focus:ring-blue-500/20 dark:border-gray-800 dark:bg-gray-900 dark:hover:border-blue-500/30 dark:hover:bg-blue-500/10"
-					on:click={() => {
-						showCitationModal = true;
-						selectedCitation = { ...target.citation, preview: target.preview };
-					}}
-				>
-					<div
-						class="inline-flex size-7 shrink-0 items-center justify-center rounded-md bg-blue-50 text-xs font-semibold tabular-nums text-blue-700 dark:bg-blue-500/10 dark:text-blue-200"
-					>
-						{target.number}
-					</div>
-					<div class="min-w-0 flex-1 space-y-1">
-						<div class="line-clamp-1 font-semibold text-gray-900 dark:text-gray-100">
-							{decodeString(target.title)}
-						</div>
+		<div class="divide-y divide-gray-100 dark:divide-gray-800">
+			{#each sourceGroups as group, groupIdx}
+				{@const groupTarget = group.targets[0]}
+				{@const host = getTargetHost(groupTarget)}
+				<div class="p-3">
+					<div class="flex min-w-0 items-start gap-3">
 						<div
-							class="flex flex-wrap items-center gap-1.5 text-[11px] text-gray-500 dark:text-gray-400"
+							class="inline-flex size-8 shrink-0 items-center justify-center rounded-md bg-blue-50 text-xs font-semibold text-blue-700 dark:bg-blue-500/10 dark:text-blue-200"
 						>
-							<span
-								class="rounded bg-gray-100 px-1.5 py-0.5 font-medium text-gray-600 dark:bg-gray-850 dark:text-gray-300"
-							>
-								{getTargetKind(target)}
-							</span>
-							{#if host}
-								<span class="truncate">{host}</span>
-							{/if}
+							{String.fromCharCode(65 + (groupIdx % 26))}
 						</div>
-						{#if snippet}
-							<div class="line-clamp-2 text-xs leading-5 text-gray-600 dark:text-gray-300">
-								{snippet}
+						<div class="min-w-0 flex-1">
+							<div class="line-clamp-1 font-semibold text-gray-900 dark:text-gray-100">
+								{decodeString(group.title)}
 							</div>
-						{/if}
-						{#if pages.length > 0}
-							<div class="flex flex-wrap gap-1 pt-0.5">
-								{#each pages.slice(0, 4) as page}
-									<span
-										class="rounded-md border border-gray-200 px-1.5 py-0.5 text-[11px] font-medium text-gray-600 dark:border-gray-700 dark:text-gray-300"
-									>
-										{$i18n.t('Page')}
-										{page}
-									</span>
-								{/each}
-								{#if pages.length > 4}
-									<span
-										class="rounded-md border border-gray-200 px-1.5 py-0.5 text-[11px] font-medium text-gray-500 dark:border-gray-700 dark:text-gray-400"
-									>
-										+{pages.length - 4}
-									</span>
+							<div
+								class="mt-1 flex flex-wrap items-center gap-1.5 text-[11px] text-gray-500 dark:text-gray-400"
+							>
+								<span
+									class="rounded bg-gray-100 px-1.5 py-0.5 font-medium text-gray-600 dark:bg-gray-850 dark:text-gray-300"
+								>
+									{getTargetKind(groupTarget)}
+								</span>
+								{#if host}
+									<span class="truncate">{host}</span>
 								{/if}
+								<span>
+									{group.targets.length === 1
+										? $i18n.t('1 Source')
+										: $i18n.t('{{COUNT}} references', { COUNT: group.targets.length })}
+								</span>
 							</div>
-						{/if}
+						</div>
 					</div>
-				</button>
+					<div class="mt-2 grid gap-2 sm:grid-cols-2">
+						{#each group.targets as target}
+							{@const pages = getTargetPages(target)}
+							{@const snippet = getTargetSnippet(target)}
+							<button
+								id={`source-${id}-${target.number}`}
+								aria-label={$i18n.t('View source: {{name}}', {
+									name: decodeString(target.title)
+								})}
+								class="no-toggle group/source flex min-w-0 items-start gap-2 rounded-md border border-gray-100 bg-gray-50/60 p-2.5 text-left outline-hidden transition hover:border-blue-200 hover:bg-blue-50/50 focus:border-blue-300 focus:ring-2 focus:ring-blue-500/20 dark:border-gray-800 dark:bg-gray-950/40 dark:hover:border-blue-500/30 dark:hover:bg-blue-500/10"
+								on:click={() => {
+									showCitationModal = true;
+									selectedCitation = { ...target.citation, preview: target.preview };
+								}}
+							>
+								<div
+									class="inline-flex size-6 shrink-0 items-center justify-center rounded-md bg-white text-[11px] font-semibold tabular-nums text-blue-700 shadow-xs dark:bg-gray-900 dark:text-blue-200"
+								>
+									{target.number}
+								</div>
+								<div class="min-w-0 flex-1 space-y-1">
+									<div class="line-clamp-1 text-sm font-semibold text-gray-900 dark:text-gray-100">
+										{pages.length > 0
+											? `${$i18n.t('Page')} ${pages[0]}`
+											: decodeString(target.title)}
+									</div>
+									{#if snippet}
+										<div class="line-clamp-2 text-xs leading-5 text-gray-600 dark:text-gray-300">
+											{snippet}
+										</div>
+									{/if}
+									{#if pages.length > 1}
+										<div class="flex flex-wrap gap-1 pt-0.5">
+											{#each pages.slice(1, 4) as page}
+												<span
+													class="rounded-md border border-gray-200 bg-white px-1.5 py-0.5 text-[11px] font-medium text-gray-600 dark:border-gray-700 dark:bg-gray-900 dark:text-gray-300"
+												>
+													{$i18n.t('Page')}
+													{page}
+												</span>
+											{/each}
+											{#if pages.length > 4}
+												<span
+													class="rounded-md border border-gray-200 bg-white px-1.5 py-0.5 text-[11px] font-medium text-gray-500 dark:border-gray-700 dark:bg-gray-900 dark:text-gray-400"
+												>
+													+{pages.length - 4}
+												</span>
+											{/if}
+										</div>
+									{/if}
+								</div>
+							</button>
+						{/each}
+					</div>
+				</div>
 			{/each}
 		</div>
 	</div>

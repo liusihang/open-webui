@@ -231,7 +231,9 @@
 			{/if}
 
 			{#if edit === true}
-				<div class=" w-full bg-gray-50 dark:bg-gray-800 rounded-3xl px-5 py-3 mb-2">
+				<div
+					class="mb-2 w-full rounded-lg border border-gray-200/80 bg-gray-50 px-4 py-3 dark:border-gray-800/80 dark:bg-gray-900"
+				>
 					{#if (editedFiles ?? []).length > 0}
 						<div class="flex items-center flex-wrap gap-2 -mx-2 mb-1">
 							{#each editedFiles as file, fileIdx}
@@ -333,7 +335,7 @@
 						<div>
 							<button
 								id="save-edit-message-button"
-								class="px-3.5 py-1.5 bg-gray-50 hover:bg-gray-100 dark:bg-gray-800 dark:hover:bg-gray-700 border border-gray-100 dark:border-gray-700 text-gray-700 dark:text-gray-200 transition rounded-3xl"
+								class="rounded-md border border-gray-200 bg-white px-3 py-1.5 text-gray-700 transition hover:border-gray-300 hover:text-gray-900 dark:border-gray-700 dark:bg-gray-900 dark:text-gray-200 dark:hover:text-gray-100"
 								on:click={() => {
 									editMessageConfirmHandler(false);
 								}}
@@ -345,7 +347,7 @@
 						<div class="flex space-x-1.5">
 							<button
 								id="close-edit-message-button"
-								class="px-3.5 py-1.5 bg-white dark:bg-gray-900 hover:bg-gray-100 text-gray-800 dark:text-gray-100 transition rounded-3xl"
+								class="rounded-md px-3 py-1.5 text-gray-700 transition hover:bg-gray-100 hover:text-gray-900 dark:text-gray-200 dark:hover:bg-gray-800 dark:hover:text-gray-100"
 								on:click={() => {
 									cancelEditMessage();
 								}}
@@ -355,7 +357,7 @@
 
 							<button
 								id="confirm-edit-message-button"
-								class="px-3.5 py-1.5 bg-gray-900 dark:bg-white hover:bg-gray-850 text-gray-100 dark:text-gray-800 transition rounded-3xl"
+								class="rounded-md bg-gray-950 px-3 py-1.5 text-gray-100 transition hover:bg-gray-800 dark:bg-white dark:text-gray-950 dark:hover:bg-gray-100"
 								on:click={() => {
 									editMessageConfirmHandler();
 								}}
@@ -370,7 +372,7 @@
 					<div class="flex {($settings?.chatBubble ?? true) ? 'justify-end pb-1' : 'w-full'}">
 						<div
 							class="user-message-bubble rounded-lg {($settings?.chatBubble ?? true)
-								? `max-w-[min(42rem,90%)] border border-gray-900/10 bg-gray-900 px-4 py-2.5 text-white shadow-sm dark:border-white/10 dark:bg-gray-100 dark:text-gray-950 ${
+								? `max-w-[min(42rem,90%)] border border-gray-200/80 bg-gray-50 px-4 py-2.5 text-gray-900 shadow-sm dark:border-gray-800/80 dark:bg-gray-900 dark:text-gray-100 ${
 										message.files ? 'rounded-tr-lg' : ''
 									}`
 								: ' w-full'}"
@@ -701,12 +703,12 @@
 
 	.user-message-bubble :global(code:not(pre code)) {
 		border-radius: 0.25rem;
-		background: rgba(255, 255, 255, 0.14);
+		background: rgba(17, 24, 39, 0.06);
 		padding: 0.0625rem 0.25rem;
 		color: inherit;
 	}
 
 	:global(html.dark) .user-message-bubble :global(code:not(pre code)) {
-		background: rgba(0, 0, 0, 0.08);
+		background: rgba(255, 255, 255, 0.1);
 	}
 </style>

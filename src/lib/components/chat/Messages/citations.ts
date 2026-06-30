@@ -48,6 +48,12 @@ export type CitationTarget = {
 	preview?: CitationPreview;
 };
 
+export type CitationDisplayGroup = {
+	id: string;
+	title: string;
+	targets: CitationTarget[];
+};
+
 type CitationTargetOptions = {
 	content?: string | null;
 	metadata?: Record<string, unknown> | null;
@@ -339,6 +345,46 @@ export const buildCitationTargets = (
 	}
 
 	return targets;
+};
+
+const getSourceIdentityValue = (
+	source: Record<string, unknown> | undefined,
+	key: 'id' | 'url' | 'name'
+) => {
+	const value = source?.[key];
+	return typeof value === 'string' && value.length > 0 ? value : null;
+};
+
+export const groupCitationTargetsForDisplay = (
+	targets: CitationTarget[] = []
+): CitationDisplayGroup[] => {
+	const groups = new Map<string, CitationDisplayGroup>();
+
+	for (const target of targets) {
+		const source = target?.citation?.source;
+		const id =
+			getSourceIdentityValue(source, 'id') ??
+			getSourceIdentityValue(source, 'url') ??
+			getSourceIdentityValue(source, 'name') ??
+			target.id;
+		const title =
+			getSourceIdentityValue(source, 'name') ??
+			getSourceIdentityValue(source, 'url') ??
+			target.title ??
+			id;
+
+		if (!groups.has(id)) {
+			groups.set(id, {
+				id,
+				title,
+				targets: []
+			});
+		}
+
+		groups.get(id)!.targets.push(target);
+	}
+
+	return Array.from(groups.values());
 };
 
 export const calculateShowRelevance = (sources: CitationGroup[]) => {

@@ -4,6 +4,7 @@ import {
 	buildCitationTargets,
 	buildCitations,
 	calculateShowRelevance,
+	groupCitationTargetsForDisplay,
 	shouldShowPercentage
 } from './citations';
 
@@ -261,5 +262,55 @@ describe('buildCitationTargets', () => {
 		expect(targets).toHaveLength(1);
 		expect(targets[0]?.id).toBe('doc-legacy');
 		expect(targets[0]?.title).toBe('Legacy Doc');
+	});
+});
+
+describe('groupCitationTargetsForDisplay', () => {
+	it('groups targets by document identity without renumbering individual citations', () => {
+		const targets = [
+			{
+				id: 'doc-1#page-2',
+				number: 1,
+				title: 'Page 2',
+				citation: {
+					id: 'doc-1#page-2',
+					source: { id: 'doc-1', name: 'Source A.pdf' },
+					document: ['page 2 text'],
+					metadata: [{ source: 'doc-1', page: 1 }],
+					distances: []
+				}
+			},
+			{
+				id: 'doc-1#page-5',
+				number: 2,
+				title: 'Page 5',
+				citation: {
+					id: 'doc-1#page-5',
+					source: { id: 'doc-1', name: 'Source A.pdf' },
+					document: ['page 5 text'],
+					metadata: [{ source: 'doc-1', page: 4 }],
+					distances: []
+				}
+			},
+			{
+				id: 'web-1',
+				number: 3,
+				title: 'Web Source',
+				citation: {
+					id: 'web-1',
+					source: { id: 'web-1', name: 'https://example.com/report' },
+					document: ['web text'],
+					metadata: [{ source: 'web-1' }],
+					distances: []
+				}
+			}
+		];
+
+		const groups = groupCitationTargetsForDisplay(targets);
+
+		expect(groups).toHaveLength(2);
+		expect(groups[0].title).toBe('Source A.pdf');
+		expect(groups[0].targets.map((target) => target.number)).toEqual([1, 2]);
+		expect(groups[1].targets.map((target) => target.number)).toEqual([3]);
 	});
 });
