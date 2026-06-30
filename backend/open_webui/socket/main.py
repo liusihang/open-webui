@@ -94,6 +94,10 @@ else:
 # Timeout duration in seconds
 TIMEOUT_DURATION = 3
 SESSION_POOL_TIMEOUT = 120  # seconds without heartbeat before session is reaped
+SESSION_CLEANUP_LOCK_RENEW_INTERVAL = min(
+    SESSION_POOL_TIMEOUT,
+    max(1, WEBSOCKET_REDIS_LOCK_TIMEOUT // 2),
+)
 
 # Dictionary to maintain the user pool
 
@@ -182,7 +186,7 @@ async def periodic_session_pool_cleanup():
                 if entry and now - entry.get('last_seen_at', 0) > SESSION_POOL_TIMEOUT:
                     log.warning(f'Reaping orphaned session {sid} (user {entry.get("id")})')
                     del SESSION_POOL[sid]
-            await asyncio.sleep(SESSION_POOL_TIMEOUT)
+            await asyncio.sleep(SESSION_CLEANUP_LOCK_RENEW_INTERVAL)
     finally:
         session_release_func()
 
