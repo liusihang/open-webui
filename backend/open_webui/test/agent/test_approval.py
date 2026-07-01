@@ -230,6 +230,7 @@ async def test_read_only_tool_call_endpoint_bypasses_approval_and_executes_once(
         ),
         idempotency_key='tool:leader:call-1:1',
         authorization='Bearer service-secret',
+        authority=authority,
         approval_coordinator=coordinator,
     )
 
@@ -283,6 +284,7 @@ async def test_run_command_creating_current_run_artifact_bypasses_approval(targe
         ),
         idempotency_key='tool:leader:call-1:1',
         authorization='Bearer service-secret',
+        authority=authority,
         approval_coordinator=coordinator,
     )
 
@@ -332,6 +334,7 @@ async def test_run_command_write_outside_current_run_artifact_dirs_requires_appr
         ),
         idempotency_key='tool:leader:call-1:1',
         authorization='Bearer service-secret',
+        authority=authority,
         approval_coordinator=coordinator,
     )
 
@@ -377,6 +380,7 @@ async def test_destructive_tool_call_waits_for_approval_then_resumes_with_tool_r
         form_data=request,
         idempotency_key='tool:leader:call-1:1',
         authorization='Bearer service-secret',
+        authority=authority,
         approval_coordinator=coordinator,
     )
 
@@ -408,7 +412,7 @@ async def test_destructive_tool_call_waits_for_approval_then_resumes_with_tool_r
 
 
 @pytest.mark.asyncio
-async def test_destructive_tool_call_waits_for_cross_coordinator_approval_then_returns_real_tool_result():
+async def test_service_tool_call_returns_immediate_approval_then_same_coordinator_resumes_on_approval():
     calls = []
 
     async def write_file(path: str, content: str):
@@ -428,7 +432,6 @@ async def test_destructive_tool_call_waits_for_cross_coordinator_approval_then_r
     store = FakeApprovalStore()
     authority = AgentToolAuthority(operation_store=store, registry=registry)
     request_coordinator = AgentApprovalCoordinator(store)
-    decision_coordinator = AgentApprovalCoordinator(store)
     tool_call = ToolCallRequest(
         run_id='run-1',
         participant_id='leader',
@@ -438,55 +441,41 @@ async def test_destructive_tool_call_waits_for_cross_coordinator_approval_then_r
         idempotency_key='tool:leader:call-cross-worker:1',
     )
 
-    pending_tool_call = asyncio.create_task(
-        execute_agent_run_tool_call(
-            request=_service_request(
-                authority,
-                approval_decision_timeout_seconds=1,
-            ),
-            run_id='run-1',
-            form_data=tool_call,
-            idempotency_key='tool:leader:call-cross-worker:1',
-            authorization='Bearer service-secret',
-            approval_coordinator=request_coordinator,
-        )
+    approval_required = await execute_agent_run_tool_call(
+        request=_service_request(
+            authority,
+            approval_decision_timeout_seconds=300,
+        ),
+        run_id='run-1',
+        form_data=tool_call,
+        idempotency_key='tool:leader:call-cross-worker:1',
+        authorization='Bearer service-secret',
+        authority=authority,
+        approval_coordinator=request_coordinator,
     )
-    try:
-        for _ in range(20):
-            if any(event['event_type'] == 'approval.requested' for event in store.events):
-                break
-            await asyncio.sleep(0.01)
+    assert approval_required['status'] == 'approval_required'
+    assert approval_required['raw']['approval_id'] == 'approval:run-1:call-cross-worker'
+    assert approval_required['raw']['action'] == 'write_file /workspace/report.txt'
+    assert [event['event_type'] for event in store.events] == ['approval.requested']
+    assert store.state['run-1'] == 'waiting_approval'
+    assert calls == []
 
-        assert [event['event_type'] for event in store.events] == ['approval.requested']
-        assert store.state['run-1'] == 'waiting_approval'
-        assert calls == []
-        assert pending_tool_call.done() is False
-
-        decision_response = await decide_agent_run_approval(
-            request=_service_request(),
+    decision_response = await decide_agent_run_approval(
+        request=_service_request(),
+        run_id='run-1',
+        approval_id='approval:run-1:call-cross-worker',
+        form_data=ApprovalDecisionRequest(
             run_id='run-1',
             approval_id='approval:run-1:call-cross-worker',
-            form_data=ApprovalDecisionRequest(
-                run_id='run-1',
-                approval_id='approval:run-1:call-cross-worker',
-                decision='approved',
-                idempotency_key='approval:run-1:approval:run-1:call-cross-worker:1',
-            ),
+            decision='approved',
             idempotency_key='approval:run-1:approval:run-1:call-cross-worker:1',
-            approval_coordinator=decision_coordinator,
-        )
-        result = await asyncio.wait_for(pending_tool_call, timeout=1)
-    finally:
-        if not pending_tool_call.done():
-            pending_tool_call.cancel()
+        ),
+        idempotency_key='approval:run-1:approval:run-1:call-cross-worker:1',
+        approval_coordinator=request_coordinator,
+    )
 
-    assert decision_response['status'] == 'approval_recorded'
-    assert decision_response['raw'] == {
-        'approval_id': 'approval:run-1:call-cross-worker',
-        'decision': 'approved',
-    }
-    assert result['status'] == 'success'
-    assert json.loads(result['content']) == {
+    assert decision_response['status'] == 'success'
+    assert json.loads(decision_response['content']) == {
         'written': '/workspace/report.txt',
         'content': 'replacement',
     }

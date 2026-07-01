@@ -1215,6 +1215,291 @@ async def test_general_agent_stops_when_tool_authority_requires_approval() -> No
 
 
 @pytest.mark.asyncio
+async def test_general_agent_stops_remaining_tool_calls_when_one_requires_approval() -> None:
+    class ApprovalRequiredBeforeSecondToolClient(RecordingOpenWebUIClient):
+        def __init__(self) -> None:
+            super().__init__()
+            self.model_responses = [
+                {
+                    "status": "success",
+                    "response": {
+                        "choices": [
+                            {
+                                "message": {
+                                    "content": "I need to write and inspect files.",
+                                    "tool_calls": [
+                                        {
+                                            "id": "call_write_1",
+                                            "type": "function",
+                                            "function": {
+                                                "name": "write_file",
+                                                "arguments": "{\"path\":\"/tmp/input.txt\",\"content\":\"pending\"}",
+                                            },
+                                        },
+                                        {
+                                            "id": "call_list_1",
+                                            "type": "function",
+                                            "function": {
+                                                "name": "list_files",
+                                                "arguments": "{\"path\":\"/tmp\"}",
+                                            },
+                                        },
+                                    ],
+                                }
+                            }
+                        ]
+                    },
+                },
+                {
+                    "status": "success",
+                    "response": {"content": "This should not be finalized while approval is pending."},
+                },
+            ]
+
+        async def call_tool(self, **kwargs: object) -> dict:
+            await super().call_tool(**kwargs)  # type: ignore[arg-type]
+            tool_id = str(kwargs["tool_id"])
+            if tool_id.endswith(":write_file"):
+                return {
+                    "status": "approval_required",
+                    "content": "Approval is required before running write_file.",
+                    "approval_request_id": "approval-write-1",
+                }
+            return {
+                "status": "success",
+                "content": "list result",
+                "raw": {"unexpected": True},
+            }
+
+    openwebui_client = ApprovalRequiredBeforeSecondToolClient()
+    async with make_client(openwebui_client, auto_finalize_ordinary_qa=True) as client:
+        response = await client.post(
+            "/v1/openwebui/runs",
+            headers={"Authorization": f"Bearer {SERVICE_TOKEN}"},
+            json={
+                "run_id": "run-tool-approval-batch",
+                "chat_id": "chat-1",
+                "leader_model_id": "model-a",
+                "messages": [{"role": "user", "content": "Write then list files."}],
+                "tool_access_envelope": {
+                    "tools": [
+                        {
+                            "id": "tool:terminal:main:write_file",
+                            "name": "write_file",
+                            "type": "terminal",
+                            "schema": {
+                                "name": "write_file",
+                                "description": "Write a file.",
+                                "parameters": {
+                                    "type": "object",
+                                    "properties": {
+                                        "path": {"type": "string"},
+                                        "content": {"type": "string"},
+                                    },
+                                    "required": ["path", "content"],
+                                },
+                            },
+                        },
+                        {
+                            "id": "tool:terminal:main:list_files",
+                            "name": "list_files",
+                            "type": "terminal",
+                            "schema": {
+                                "name": "list_files",
+                                "description": "List files.",
+                                "parameters": {
+                                    "type": "object",
+                                    "properties": {"path": {"type": "string"}},
+                                    "required": ["path"],
+                                },
+                            },
+                        },
+                    ]
+                },
+            },
+        )
+
+        assert response.status_code == 202
+        for _ in range(40):
+            status = await client.get(
+                "/v1/openwebui/runs/run-tool-approval-batch/status",
+                headers={"Authorization": f"Bearer {SERVICE_TOKEN}"},
+            )
+            if status.json()["state"] in {"waiting_approval", "completed", "failed"}:
+                break
+            await asyncio.sleep(0.01)
+
+    assert status.json()["state"] == "waiting_approval"
+    assert [call["tool_id"] for call in openwebui_client.tool_calls] == [
+        "tool:terminal:main:write_file",
+    ]
+    assert [call["model_call_id"] for call in openwebui_client.model_calls] == ["model-call-1"]
+    assert [event["event_type"] for event in openwebui_client.events] == [
+        "run.running",
+        "tool.requested",
+    ]
+    assert openwebui_client.final_deltas == []
+    assert not any(event["event_type"] == "run.failed" for event in openwebui_client.events)
+
+
+@pytest.mark.asyncio
+async def test_general_agent_stops_after_user_input_then_tool_approval() -> None:
+    class UserInputThenApprovalClient(RecordingOpenWebUIClient):
+        def __init__(self) -> None:
+            super().__init__()
+            self.model_responses = [
+                {
+                    "status": "success",
+                    "response": {
+                        "choices": [
+                            {
+                                "message": {
+                                    "content": "Need a reply first.",
+                                    "tool_calls": [
+                                        {
+                                            "id": "call_user_input_1",
+                                            "type": "function",
+                                            "function": {
+                                                "name": "request_user_input",
+                                                "arguments": (
+                                                    '{"message":"Reply with any sentence.",'
+                                                    '"requested_schema":{"type":"object","properties":'
+                                                    '{"reply":{"type":"string"}},"required":["reply"]},'
+                                                    '"timeout_seconds":300,"allow_cancel":true}'
+                                                ),
+                                            },
+                                        }
+                                    ],
+                                }
+                            }
+                        ]
+                    },
+                },
+                {
+                    "status": "success",
+                    "response": {
+                        "choices": [
+                            {
+                                "message": {
+                                    "content": "Now write and list files.",
+                                    "tool_calls": [
+                                        {
+                                            "id": "call_write_1",
+                                            "type": "function",
+                                            "function": {
+                                                "name": "write_file",
+                                                "arguments": (
+                                                    '{"path":"/workspace/outputs/test.txt",'
+                                                    '"content":"pending approval"}'
+                                                ),
+                                            },
+                                        },
+                                        {
+                                            "id": "call_list_1",
+                                            "type": "function",
+                                            "function": {
+                                                "name": "list_files",
+                                                "arguments": '{"directory":"/workspace/outputs"}',
+                                            },
+                                        },
+                                    ],
+                                }
+                            }
+                        ]
+                    },
+                },
+                {
+                    "status": "success",
+                    "response": {"content": "This final answer should never be emitted."},
+                },
+            ]
+
+        async def call_tool(self, **kwargs: object) -> dict:
+            await super().call_tool(**kwargs)  # type: ignore[arg-type]
+            tool_id = str(kwargs["tool_id"])
+            if tool_id.endswith(":write_file"):
+                return {
+                    "status": "approval_required",
+                    "content": "Approval is required before running write_file.",
+                    "approval_request_id": "approval-write-after-user-input",
+                }
+            return {
+                "status": "success",
+                "content": "list result",
+                "raw": {"unexpected": True},
+            }
+
+    openwebui_client = UserInputThenApprovalClient()
+    async with make_client(openwebui_client, auto_finalize_ordinary_qa=True) as client:
+        response = await client.post(
+            "/v1/openwebui/runs",
+            headers={"Authorization": f"Bearer {SERVICE_TOKEN}"},
+            json={
+                "run_id": "run-user-input-then-approval",
+                "chat_id": "chat-1",
+                "leader_model_id": "model-a",
+                "messages": [{"role": "user", "content": "Test user input then approval."}],
+                "tool_access_envelope": {
+                    "tools": [
+                        {
+                            "id": "tool:terminal:main:write_file",
+                            "name": "write_file",
+                            "type": "terminal",
+                            "schema": {
+                                "name": "write_file",
+                                "description": "Write a file.",
+                                "parameters": {
+                                    "type": "object",
+                                    "properties": {
+                                        "path": {"type": "string"},
+                                        "content": {"type": "string"},
+                                    },
+                                    "required": ["path", "content"],
+                                },
+                            },
+                        },
+                        {
+                            "id": "tool:terminal:main:list_files",
+                            "name": "list_files",
+                            "type": "terminal",
+                            "schema": {
+                                "name": "list_files",
+                                "description": "List files.",
+                                "parameters": {
+                                    "type": "object",
+                                    "properties": {"directory": {"type": "string"}},
+                                    "required": ["directory"],
+                                },
+                            },
+                        },
+                    ]
+                },
+            },
+        )
+
+        assert response.status_code == 202
+        for _ in range(60):
+            status = await client.get(
+                "/v1/openwebui/runs/run-user-input-then-approval/status",
+                headers={"Authorization": f"Bearer {SERVICE_TOKEN}"},
+            )
+            if status.json()["state"] in {"waiting_approval", "completed", "failed"}:
+                break
+            await asyncio.sleep(0.01)
+
+    assert status.json()["state"] == "waiting_approval"
+    assert [call["model_call_id"] for call in openwebui_client.model_calls] == [
+        "model-call-1",
+        "model-call-2",
+    ]
+    assert [call["tool_id"] for call in openwebui_client.tool_calls] == [
+        "tool:terminal:main:write_file",
+    ]
+    assert openwebui_client.final_deltas == []
+    assert not any(event["event_type"] == "run.failed" for event in openwebui_client.events)
+
+
+@pytest.mark.asyncio
 async def test_rejected_approval_notification_marks_waiting_run_failed() -> None:
     class ApprovalRequiredToolClient(RecordingOpenWebUIClient):
         async def call_model(self, **kwargs: object) -> dict:

@@ -1143,8 +1143,7 @@ async def execute_agent_run_tool_call(
                 tool_request,
                 tool,
                 resume=resume_tool_call,
-                wait_for_decision=True,
-                decision_timeout_seconds=_approval_decision_timeout_seconds(request),
+                wait_for_decision=False,
             )
             if approval_result is not None:
                 return approval_result
