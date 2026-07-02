@@ -4,6 +4,13 @@ type ChatStatusEntry = {
 	[key: string]: unknown;
 };
 
+type ChatSourceMetadata = {
+	source?: string;
+	name?: string;
+	evidence_ref?: string;
+	[key: string]: unknown;
+};
+
 type ChatSourceEntry = {
 	id?: string;
 	source?: {
@@ -11,10 +18,7 @@ type ChatSourceEntry = {
 		url?: string;
 		name?: string;
 	};
-	metadata?: Array<{
-		source?: string;
-		name?: string;
-	}>;
+	metadata?: Array<ChatSourceMetadata | undefined>;
 	[key: string]: unknown;
 };
 
@@ -28,6 +32,7 @@ export type ChatMessage = {
 	statusHistory?: ChatStatusEntry[];
 	sources?: ChatSourceEntry[];
 	citations?: ChatSourceEntry[];
+	metadata?: Record<string, unknown>;
 	[key: string]: unknown;
 };
 
@@ -36,9 +41,31 @@ type ChatHistory = {
 	messages: Record<string, ChatMessage>;
 };
 
+type LoadedChatHistoryResult = ReturnType<typeof mergeHistorySnapshot> & {
+	taskIds: string[] | null;
+};
+
+const SOCKET_INCREMENTAL_CONTENT_EVENTS = new Set([
+	'chat:completion',
+	'chat:message:delta',
+	'message'
+]);
+
+export const shouldApplySocketContentEvent = (
+	message: ChatMessage | null | undefined,
+	eventType: string | null | undefined
+): boolean => {
+	if (!message?.agent_run_id || !eventType) {
+		return true;
+	}
+
+	return !SOCKET_INCREMENTAL_CONTENT_EVENTS.has(eventType);
+};
+
 const getSourceMergeKey = (item: ChatSourceEntry, index: number) => {
 	const metadata = Array.isArray(item?.metadata) ? item.metadata[0] : undefined;
 	return (
+		metadata?.evidence_ref ??
 		metadata?.source ??
 		item?.source?.id ??
 		item?.source?.url ??
@@ -46,6 +73,36 @@ const getSourceMergeKey = (item: ChatSourceEntry, index: number) => {
 		item?.id ??
 		`source-${index}`
 	);
+};
+
+const isPlainObject = (value: unknown): value is Record<string, unknown> => {
+	return typeof value === 'object' && value !== null && !Array.isArray(value);
+};
+
+const mergeMessageMetadata = (
+	existingMetadata: Record<string, unknown> | undefined,
+	incomingMetadata: Record<string, unknown> | undefined
+) => {
+	if (!existingMetadata && !incomingMetadata) {
+		return undefined;
+	}
+
+	const mergedMetadata = {
+		...(existingMetadata ?? {}),
+		...(incomingMetadata ?? {})
+	};
+
+	if (
+		isPlainObject(existingMetadata?.citation_map) &&
+		isPlainObject(incomingMetadata?.citation_map)
+	) {
+		mergedMetadata.citation_map = {
+			...existingMetadata.citation_map,
+			...incomingMetadata.citation_map
+		};
+	}
+
+	return mergedMetadata;
 };
 
 export const mergeStableSources = <T extends ChatSourceEntry>(
@@ -118,6 +175,11 @@ export const mergeServerMessage = (
 		...incomingMessage
 	};
 
+	mergedMessage.metadata = mergeMessageMetadata(
+		isPlainObject(existingMessage.metadata) ? existingMessage.metadata : undefined,
+		isPlainObject(incomingMessage.metadata) ? incomingMessage.metadata : undefined
+	);
+
 	if (
 		(existingContent && incomingContentIsEmpty) ||
 		(existingContent && incomingContentIsPlaceholder) ||
@@ -180,10 +242,12 @@ export const mergeHistorySnapshot = (
 		const previousContent =
 			typeof existingMessage.content === 'string' ? existingMessage.content : '';
 		const nextContent = typeof mergedMessage.content === 'string' ? mergedMessage.content : '';
+		const agentRunIdChanged = existingMessage.agent_run_id !== mergedMessage.agent_run_id;
 
 		if (
 			previousContent !== nextContent ||
 			existingMessage.done !== mergedMessage.done ||
+			agentRunIdChanged ||
 			JSON.stringify(existingMessage.output ?? null) !==
 				JSON.stringify(mergedMessage.output ?? null) ||
 			JSON.stringify(existingMessage.statusHistory ?? null) !==
@@ -208,9 +272,13 @@ export const mergeHistorySnapshot = (
 				hasAssistantProgress = true;
 			}
 
-			if (mergedMessage.done === true) {
+			if (mergedMessage.done === true || agentRunIdChanged) {
 				hasRenderableAssistantUpdate = true;
 			}
+		}
+
+		if (mergedMessage.role === 'assistant' && agentRunIdChanged && mergedMessage.agent_run_id) {
+			hasRenderableAssistantUpdate = true;
 		}
 
 		mergedHistory.messages[incomingMessage.id] = mergedMessage;
@@ -226,5 +294,72 @@ export const mergeHistorySnapshot = (
 		hasAssistantProgress,
 		hasRenderableAssistantUpdate,
 		changed
+	};
+};
+
+const createEmptyHistory = (
+	latestHistory: Partial<ChatHistory> | null | undefined
+): ChatHistory => ({
+	currentId: latestHistory?.currentId ?? null,
+	messages: {}
+});
+
+const shouldMergeWithCurrentHistory = (
+	currentHistory: ChatHistory,
+	latestHistory: Partial<ChatHistory> | null | undefined
+) => {
+	if (!currentHistory.currentId || !latestHistory?.currentId) {
+		return false;
+	}
+
+	return Boolean(currentHistory.messages?.[latestHistory.currentId]);
+};
+
+export const prepareLoadedChatHistory = (
+	currentHistory: ChatHistory,
+	latestHistory: Partial<ChatHistory>,
+	pendingTaskIds: string[]
+): LoadedChatHistoryResult => {
+	const baseHistory = shouldMergeWithCurrentHistory(currentHistory, latestHistory)
+		? currentHistory
+		: createEmptyHistory(latestHistory);
+	const snapshot = mergeHistorySnapshot(baseHistory, latestHistory);
+
+	if (snapshot.history.currentId) {
+		for (const message of Object.values(snapshot.history.messages)) {
+			if (
+				message &&
+				message.role === 'assistant' &&
+				message.id !== snapshot.history.currentId &&
+				message.done !== false
+			) {
+				message.done = true;
+			}
+		}
+	}
+
+	const currentMessage = snapshot.history.currentId
+		? snapshot.history.messages[snapshot.history.currentId]
+		: null;
+	const responseComplete = currentMessage?.role === 'assistant' && currentMessage?.done;
+
+	if (pendingTaskIds.length > 0 && !responseComplete) {
+		return {
+			...snapshot,
+			taskIds: pendingTaskIds
+		};
+	}
+
+	if (
+		currentMessage?.role === 'assistant' &&
+		!currentMessage.done &&
+		!currentMessage.agent_run_id
+	) {
+		currentMessage.done = true;
+	}
+
+	return {
+		...snapshot,
+		taskIds: null
 	};
 };

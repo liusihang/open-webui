@@ -1,0 +1,120 @@
+# PR7 Agent Mode Reasoning Params Handoff
+
+## Scope
+- Worktree: `/Users/liusihang/.codex/worktrees/4078/openwebui`
+- Truth surface: detached HEAD `243235b84ae36b406d3303089c2e55dc4d474048`
+- Task: pass frontend reasoning options through Agent Mode runtime payload and runtime `call_model(params=...)`.
+- Constraints: no root checkout, no push, no live `open-webui`, no unrelated UI/protocol churn.
+
+## Checkpoints
+- [x] Confirmed delegated worktree HEAD matches `243235b84ae36b406d3303089c2e55dc4d474048`.
+- [x] Located frontend reasoning construction in `src/lib/components/chat/Chat.svelte`.
+- [x] Located backend runtime start payload in `backend/open_webui/main.py::_agent_runtime_payload`.
+- [x] Located runtime ordinary QA model call in `services/agentscope-runtime/agentscope_runtime/app.py::_call_leader_model`, currently `params={}`.
+- [x] Add failing focused tests for frontend mapping, backend payload, and runtime model-call param forwarding.
+- [x] Implement minimal production changes.
+- [x] Run focused verification commands and summarize dirty state.
+- [x] Read-only preflight on isolated PR7 stack and live-safety anchor capture.
+- [x] Isolated-only deploy choice: frontend cannot be truthfully hotpatched, so use minimal isolated rebuild.
+- [x] Isolated deploy v1: rebuilt `open-webui-pr7-agentscope-runtime:243235b84-rparams` and `open-webui:pr7-slim-243235b84-rparams`, updated isolated compose only, recreated `agentscope-runtime` and `open-webui-pr7`.
+- [x] Acceptance found a remaining callback bridge bug: Agent Mode runs completed, but Bifrost still logged `level "" not supported` for `gpt-5.4`, so current dirty fix was not sufficient.
+- [x] Added focused RED/GREEN test for `backend/open_webui/agent/model_authority.py` and implemented minimal bridge fix promoting `params.reasoning` to top-level `form_data.reasoning`.
+- [x] Isolated deploy v2: rebuilt `open-webui:pr7-slim-243235b84-rparams2`, updated isolated compose only, recreated `open-webui-pr7`.
+- [x] Post-deploy acceptance completed with health and live-safety checks, but Bifrost still emits `level "" not supported` rows adjacent to successful runs; acceptance remains blocked on a deeper OpenWebUI->Bifrost reasoning mapping issue.
+- [x] Local fix v3: added stream `/model-call` bridge coverage, added Bifrost reasoning-payload coverage, and patched Bifrost `_is_reasoning_param_error()` to classify `level "" not supported, valid levels: low, medium, high, xhigh` as a reasoning parameter error.
+
+## Notes
+- Current local dirty state is intentional and limited to:
+  - `src/lib/components/chat/Chat.svelte`
+  - `src/lib/components/chat/agentModeRequest.ts`
+  - `src/lib/components/chat/agentModeRequest.test.ts`
+  - `backend/open_webui/main.py`
+  - `backend/open_webui/test/agent/test_chat_entry_agent_mode.py`
+  - `services/agentscope-runtime/agentscope_runtime/app.py`
+  - `services/agentscope-runtime/tests/test_app.py`
+- Frontend current payload builds `reasoning = { enabled: true, max_tokens: getReasoningMaxTokens(reasoningDepth) }` and lacks `effort`.
+- Backend `metadata` currently includes `session_id/features/variables/stream`, not model params or reasoning.
+- Runtime request schema allows arbitrary `metadata`, so the low-cost path is to carry a `model_params` dict under runtime request metadata and pass it to callback `call_model`.
+- RED evidence:
+  - `npm run test:frontend -- src/lib/components/chat/agentModeRequest.test.ts` failed because `buildReasoningPayload is not a function`.
+  - `PYTHONPATH=backend .venv/bin/python -m pytest -q backend/open_webui/test/agent/test_chat_entry_agent_mode.py::test_agent_mode_runtime_payload_preserves_reasoning_model_params` failed with `KeyError: 'model_params'`.
+  - `services/agentscope-runtime/.venv/bin/python -m pytest -q tests/test_app.py::test_run_start_forwards_model_params_to_ordinary_qa_callback` failed because callback `params` was `{}`.
+- GREEN evidence:
+  - `npx vitest run src/lib/components/chat/agentModeRequest.test.ts` passed: 5 tests.
+  - `PYTHONPATH=backend .venv/bin/python -m pytest -q backend/open_webui/test/agent/test_chat_entry_agent_mode.py` passed: 16 tests, existing warnings only.
+  - `services/agentscope-runtime/.venv/bin/python -m pytest -q tests/test_app.py` passed: 28 tests.
+  - `npx prettier --check src/lib/components/chat/Chat.svelte src/lib/components/chat/agentModeRequest.ts src/lib/components/chat/agentModeRequest.test.ts` passed.
+  - `git diff --check` passed.
+- `npm run check` was attempted but failed on pre-existing all-repo svelte-check diagnostics unrelated to this change (9381 errors across 392 files). It also followed an earlier failed editable build that temporarily dirtied static assets and `uv.lock`; those generated changes were restored.
+- 2026-06-28 deployment preflight on `aiserver`:
+  - Isolated compose path confirmed: `/home/aiserver/staging/openwebui-pr7-eea11194ed-test/compose.yaml`.
+  - Isolated containers confirmed:
+    - `open-webui-pr7` -> container `a74c4e471a3c...`, image `open-webui:pr7-slim-cae9e6c4a`, image id `sha256:89a3c8ba418f...`, port `18085->8080`, healthy.
+    - `openwebui-pr7-agentscope-runtime` -> container `c6ab21cf29b3...`, image `open-webui-pr7-agentscope-runtime:243235b84`, image id `sha256:3eac37ba5c63...`, healthy.
+  - Live safety anchor confirmed:
+    - live `open-webui` -> container `ea8970ee375a...`, image `open-webui:live-pr7-f8106c651`, image id `sha256:ff93757ae3bd...`, healthy.
+  - Bifrost confirmed separate from WebUI stack:
+    - container `a15af084e98f...`, image `maximhq/bifrost:v1.5.13-amd64`, mount `/srv/openwebui-migration/data/bifrost:/app/data`, healthy.
+  - `open-webui-pr7` only bind-mounts `/home/aiserver/staging/openwebui-pr7-eea11194ed-test/data/openwebui:/app/backend/data`; there is no source or built-frontend bind mount, so frontend `.svelte/.ts` changes cannot be truthfully hotpatched by copying source files alone.
+  - Remote build tree `/home/aiserver/staging/openwebui-pr7-hotfix-243235b84-build/src` is still missing this dirty fix in `Chat.svelte`, `backend/open_webui/main.py`, and `services/agentscope-runtime/agentscope_runtime/app.py`, so the current isolated runtime/web images do not yet include the reasoning-param pass-through.
+- 2026-06-28 isolated deploy details:
+  - Remote build root used for isolated rebuilds: `/home/aiserver/staging/openwebui-pr7-rparams-243235b84-20260628/src`.
+  - Build-only remote Dockerfile adjustments were required because the original `# syntax=docker/dockerfile:1` and base `FROM` lines hit Docker Hub EOFs in this environment. The isolated rebuild tree was patched to use `docker.m.daocloud.io/...` only for the remote build surface.
+  - Rebuilt isolated runtime image:
+    - tag `open-webui-pr7-agentscope-runtime:243235b84-rparams`
+    - image id `sha256:b482024480ef642ecd17e35a0f57adabb40620aef472efc9e1e79618c68fc98c`
+  - Rebuilt isolated web images:
+    - tag `open-webui:pr7-slim-243235b84-rparams`
+    - image id `sha256:bd5f785e68b720db6539bc0a89040d3d5dfc0cd6a7244ca8fc96b32f00db0c4f`
+    - follow-up tag `open-webui:pr7-slim-243235b84-rparams2`
+    - image id `sha256:da21b9cc99a76a0c8655604b58166f8415bcf5de0d504d9d9d77682a0e0fd37a`
+  - Current isolated containers after v2:
+    - `open-webui-pr7` -> container `8c5a89efba38...`, image id `sha256:da21b9cc99a7...`, healthy
+    - `openwebui-pr7-agentscope-runtime` -> container `847728682fb4...`, image id `sha256:b482024480ef...`, healthy
+  - Live `open-webui` remained unchanged throughout:
+    - container `ea8970ee375a...`
+    - image id `sha256:ff93757ae3bd...`
+- 2026-06-28 additional root-cause findings:
+  - First acceptance on rebuilt isolated stack showed successful Agent Mode runs but new Bifrost rows still paired each success with `400 invalid_request_error: level "" not supported, valid levels: low, medium, high, xhigh`.
+  - Root cause found in deployed source:
+    - `services/agentscope-runtime/agentscope_runtime/app.py` correctly forwards `params=_request_model_params(request)`.
+    - `backend/open_webui/agent/model_authority.py` originally passed the entire `call.params` under `form_data['params']`, so nested `params.reasoning` was not promoted back to top-level provider request fields.
+  - Focused RED/GREEN verification for that bridge:
+    - Added `test_model_call_promotes_reasoning_params_to_top_level_form_data` in `backend/open_webui/test/agent/test_model_authority.py`.
+    - RED: the new test failed because `reasoning` stayed nested inside `params`.
+    - GREEN: patched `_model_call_form_data` to pop `reasoning` out of `call.params`, preserve the remaining params, and write top-level `form_data['reasoning']`.
+    - `PYTHONPATH=backend .venv/bin/python -m pytest -q backend/open_webui/test/agent/test_model_authority.py::test_model_call_promotes_reasoning_params_to_top_level_form_data` passed.
+    - `PYTHONPATH=backend .venv/bin/python -m pytest -q backend/open_webui/test/agent/test_chat_entry_agent_mode.py backend/open_webui/test/agent/test_model_authority.py` passed: 24 passed.
+- 2026-06-28 acceptance evidence after the follow-up isolated rebuild:
+  - Health:
+    - `http://127.0.0.1:18085/health` -> `{"status":true}`
+    - `http://127.0.0.1:18085/health/db` -> `{"status":true}`
+    - `http://127.0.0.1:18080/health` -> `{"components":{"db_pings":"ok"},"status":"ok"}`
+  - Deployed runtime/web source checks inside containers:
+    - `open-webui-pr7` contains `_agent_runtime_reasoning_params(...)` and `runtime_metadata['model_params'] = model_params`.
+    - `openwebui-pr7-agentscope-runtime` contains `_request_model_params(...)` and `params=_request_model_params(request)`.
+  - API-equivalent Agent Mode runs after v2:
+    - deep/high marker `PR7-DEEP2-1782589173` -> run `b9b625d6-ac0b-4502-896e-7a5fc7d55fae` completed, final text echoed marker.
+    - divergent/xhigh marker `PR7-DIV2-1782589186` -> run `3e72c917-934c-4112-8860-f8be8ddd7c4d` completed, final text echoed marker.
+  - Blocking issue remains in Bifrost logs after v2:
+    - latest `gpt-5.4` rows still show success rows paired with error rows:
+      - success `6aeb3f57-c08c-490d-b914-7a9ded212f99`
+      - errors `4fea997e-b62d-41ce-99c1-68680b9f86a3`, `9f1ff7b2-b2b9-4077-aded-820c9194b097`
+      - success `d58d7883-1fd5-47a6-a756-10207a5d6a16`
+      - errors `0e3105c0-84df-4571-ad28-1a8fcdb934a1`, `363373e3-23c6-4d5b-8ea3-d51090bed35a`
+    - error excerpt: `level "" not supported, valid levels: low, medium, high, xhigh`
+  - Conclusion: current chain still has a deeper OpenWebUI->Bifrost reasoning-field mismatch beyond the frontend/runtime/model-authority bridges already patched here, so this thread should not mark the fix accepted yet.
+- 2026-06-28 local fix v3 details:
+  - Added `test_stream_model_call_promotes_reasoning_params_to_top_level_form_data` in `backend/open_webui/test/agent/test_model_authority.py`; it passed immediately, confirming the existing `_model_call_form_data()` bridge now covers streaming and non-streaming model calls.
+  - Added `test_build_responses_payload_preserves_request_reasoning_effort` in `backend/open_webui/test/util/test_bifrostapi_pipe_function.py`; it passed, confirming Bifrost preserves request `reasoning.effort` when it reaches the function body.
+  - Added `test_reasoning_param_error_detects_empty_level_rejection`; RED failed because `_is_reasoning_param_error()` did not classify `level "" not supported, valid levels: low, medium, high, xhigh`.
+  - Minimal GREEN patch: `tools/openwebui/functions/bifrostapi.py::_is_reasoning_param_error()` now returns true for messages containing `LEVEL`, `NOT SUPPORTED`, and `VALID LEVELS`. This reuses existing retry-with-minimal/retry-without-reasoning behavior instead of adding a new fallback path.
+  - Focused verification passed:
+    - `PYTHONPATH=backend .venv/bin/python -m pytest -q backend/open_webui/test/util/test_bifrostapi_pipe_function.py` -> 19 passed.
+    - `PYTHONPATH=backend .venv/bin/python -m pytest -q backend/open_webui/test/agent/test_chat_entry_agent_mode.py backend/open_webui/test/agent/test_model_authority.py` -> 25 passed.
+    - `services/agentscope-runtime/.venv/bin/python -m pytest -q services/agentscope-runtime/tests/test_app.py` -> 28 passed.
+    - `npx vitest run src/lib/components/chat/agentModeRequest.test.ts` -> 5 passed.
+    - `npx prettier --check src/lib/components/chat/Chat.svelte src/lib/components/chat/agentModeRequest.ts src/lib/components/chat/agentModeRequest.test.ts` -> passed.
+    - `git diff --check` -> passed.
+  - A failed attempt to run Prettier on Python files reported `No parser could be inferred`; no code changes were needed for that. During hygiene checks a transient deletion of `backend/open_webui/static/*` appeared and was restored immediately; final `git status --short` contains only the intended reasoning-related files plus this handoff.
+  - Next acceptance step: rebuild/swap only isolated `open-webui-pr7` with the local dirty patch and update isolated DB function content if the image does not seed `tools/openwebui/functions/bifrostapi.py` into the existing `function` row automatically. Then run fresh deep/divergent Agent Mode calls and confirm new Bifrost logs either contain `params.reasoning.effort = high/xhigh` or, if provider rejects reasoning, show successful retry without the `level "" not supported` error surfacing to OpenWebUI.

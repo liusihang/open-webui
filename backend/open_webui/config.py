@@ -57,6 +57,7 @@ from open_webui.internal.config import (
 from open_webui.internal.config import (
     initialize as _initialize_config,
 )
+from open_webui.utils import startup_singleton
 
 
 def get_config():
@@ -133,15 +134,48 @@ def run_migrations():
         log.exception(f'Error running migrations: {e}')
 
 
+def _build_alembic_config():
+    from alembic.config import Config as AlembicConfig
+
+    alembic_cfg = AlembicConfig(OPEN_WEBUI_DIR / 'alembic.ini')
+    migrations_path = OPEN_WEBUI_DIR / 'migrations'
+    alembic_cfg.set_main_option('script_location', str(migrations_path))
+    return alembic_cfg
+
+
+def _database_is_at_migration_head(alembic_cfg) -> bool:
+    try:
+        from alembic.migration import MigrationContext
+        from alembic.script import ScriptDirectory
+        from open_webui.internal.db import engine
+
+        expected_heads = set(ScriptDirectory.from_config(alembic_cfg).get_heads())
+        with engine.connect() as connection:
+            current_heads = set(MigrationContext.configure(connection).get_current_heads())
+        return bool(expected_heads) and current_heads == expected_heads
+    except Exception:
+        return False
+
+
+def run_migrations_once():
+    alembic_cfg = _build_alembic_config()
+    with startup_singleton.startup_singleton_lock('db-migrations', blocking=True):
+        if _database_is_at_migration_head(alembic_cfg):
+            log.info('Database migrations already at head; skipping')
+            return
+        run_migrations()
+
+
 if ENABLE_DB_MIGRATIONS:
-    run_migrations()
+    run_migrations_once()
 
 
 # Migrate legacy config.json → database on first run
-if os.path.exists(f'{DATA_DIR}/config.json'):
-    with open(f'{DATA_DIR}/config.json', 'r') as _f:
-        save_to_db(json.load(_f))
-    os.rename(f'{DATA_DIR}/config.json', f'{DATA_DIR}/old_config.json')
+with startup_singleton.startup_singleton_lock('legacy-config-json-migration', blocking=True):
+    if os.path.exists(f'{DATA_DIR}/config.json'):
+        with open(f'{DATA_DIR}/config.json', 'r') as _f:
+            save_to_db(json.load(_f))
+        os.rename(f'{DATA_DIR}/config.json', f'{DATA_DIR}/old_config.json')
 
 
 ENABLE_PERSISTENT_CONFIG = os.getenv('ENABLE_PERSISTENT_CONFIG', 'True').lower() == 'true'
@@ -473,6 +507,57 @@ try:
 except Exception:
     TERMINAL_PROXY_HEADERS = {}
 
+
+####################################
+# OnlyOffice
+####################################
+
+ENABLE_ONLYOFFICE_PREVIEW = ConfigVar(
+    'ENABLE_ONLYOFFICE_PREVIEW',
+    'onlyoffice.enable_preview',
+    os.getenv('ENABLE_ONLYOFFICE_PREVIEW', 'False').lower() == 'true',
+)
+
+ONLYOFFICE_DOCUMENT_SERVER_URL = ConfigVar(
+    'ONLYOFFICE_DOCUMENT_SERVER_URL',
+    'onlyoffice.document_server_url',
+    os.getenv('ONLYOFFICE_DOCUMENT_SERVER_URL', ''),
+)
+
+ONLYOFFICE_PUBLIC_BASE_URL = ConfigVar(
+    'ONLYOFFICE_PUBLIC_BASE_URL',
+    'onlyoffice.public_base_url',
+    os.getenv('ONLYOFFICE_PUBLIC_BASE_URL', ''),
+)
+
+ONLYOFFICE_JWT_SECRET = ConfigVar(
+    'ONLYOFFICE_JWT_SECRET',
+    'onlyoffice.jwt_secret',
+    os.getenv('ONLYOFFICE_JWT_SECRET', ''),
+)
+
+ONLYOFFICE_FILE_TOKEN_EXPIRES_IN = ConfigVar(
+    'ONLYOFFICE_FILE_TOKEN_EXPIRES_IN',
+    'onlyoffice.file_token_expires_in',
+    os.getenv('ONLYOFFICE_FILE_TOKEN_EXPIRES_IN', '5m'),
+)
+
+ONLYOFFICE_EDIT_CALLBACK_TOKEN_EXPIRES_IN = ConfigVar(
+    'ONLYOFFICE_EDIT_CALLBACK_TOKEN_EXPIRES_IN',
+    'onlyoffice.edit_callback_token_expires_in',
+    os.getenv('ONLYOFFICE_EDIT_CALLBACK_TOKEN_EXPIRES_IN', '8h'),
+)
+
+ONLYOFFICE_CALLBACK_ALLOWED_HOSTS = ConfigVar(
+    'ONLYOFFICE_CALLBACK_ALLOWED_HOSTS',
+    'onlyoffice.callback_allowed_hosts',
+    [
+        host.strip()
+        for host in os.getenv('ONLYOFFICE_CALLBACK_ALLOWED_HOSTS', '').split(',')
+        if host.strip()
+    ],
+)
+
 ####################################
 # Code Interpreter
 ####################################
@@ -530,6 +615,152 @@ ENABLE_MEMORIES = ConfigVar(
     'ENABLE_MEMORIES',
     'memories.enable',
     os.getenv('ENABLE_MEMORIES', 'True').lower() == 'true',
+)
+
+ENABLE_AGENT_MEMORY = ConfigVar(
+    'ENABLE_AGENT_MEMORY',
+    'agent_memory.enable',
+    os.getenv('ENABLE_AGENT_MEMORY', 'False').lower() == 'true',
+)
+
+
+def _agent_memory_split_flag_default(env_name: str) -> bool:
+    value = os.getenv(env_name)
+    if value is not None:
+        return value.lower() == 'true'
+    return bool(ENABLE_AGENT_MEMORY.value)
+
+
+ENABLE_AGENT_MEMORY_GENERATION = ConfigVar(
+    'ENABLE_AGENT_MEMORY_GENERATION',
+    'agent_memory.generation.enable',
+    _agent_memory_split_flag_default('ENABLE_AGENT_MEMORY_GENERATION'),
+)
+
+ENABLE_AGENT_MEMORY_USE = ConfigVar(
+    'ENABLE_AGENT_MEMORY_USE',
+    'agent_memory.use.enable',
+    _agent_memory_split_flag_default('ENABLE_AGENT_MEMORY_USE'),
+)
+
+ENABLE_AGENT_MEMORY_DEDICATED_TOOLS = ConfigVar(
+    'ENABLE_AGENT_MEMORY_DEDICATED_TOOLS',
+    'agent_memory.dedicated_tools.enable',
+    _agent_memory_split_flag_default('ENABLE_AGENT_MEMORY_DEDICATED_TOOLS'),
+)
+
+AGENT_MEMORY_EXTRACTION_MODEL = ConfigVar(
+    'AGENT_MEMORY_EXTRACTION_MODEL',
+    'agent_memory.extraction.model',
+    os.getenv('AGENT_MEMORY_EXTRACTION_MODEL', '').strip(),
+)
+
+AGENT_MEMORY_CONSOLIDATION_MODEL = ConfigVar(
+    'AGENT_MEMORY_CONSOLIDATION_MODEL',
+    'agent_memory.consolidation.model',
+    os.getenv('AGENT_MEMORY_CONSOLIDATION_MODEL', '').strip(),
+)
+
+AGENT_MEMORY_IDLE_THRESHOLD_SECONDS = ConfigVar(
+    'AGENT_MEMORY_IDLE_THRESHOLD_SECONDS',
+    'agent_memory.extraction.idle_threshold_seconds',
+    int(os.getenv('AGENT_MEMORY_IDLE_THRESHOLD_SECONDS', '900')),
+)
+
+AGENT_MEMORY_STARTUP_CLAIM_LIMIT = ConfigVar(
+    'AGENT_MEMORY_STARTUP_CLAIM_LIMIT',
+    'agent_memory.extraction.startup_claim_limit',
+    int(os.getenv('AGENT_MEMORY_STARTUP_CLAIM_LIMIT', '0')),
+)
+
+AGENT_MEMORY_EXTRACTION_CLAIM_LIMIT = ConfigVar(
+    'AGENT_MEMORY_EXTRACTION_CLAIM_LIMIT',
+    'agent_memory.extraction.claim_limit',
+    int(os.getenv('AGENT_MEMORY_EXTRACTION_CLAIM_LIMIT', '5')),
+)
+
+AGENT_MEMORY_CONSOLIDATION_CLAIM_LIMIT = ConfigVar(
+    'AGENT_MEMORY_CONSOLIDATION_CLAIM_LIMIT',
+    'agent_memory.consolidation.claim_limit',
+    int(os.getenv('AGENT_MEMORY_CONSOLIDATION_CLAIM_LIMIT', '2')),
+)
+
+AGENT_MEMORY_LEASE_SECONDS = ConfigVar(
+    'AGENT_MEMORY_LEASE_SECONDS',
+    'agent_memory.jobs.lease_seconds',
+    int(os.getenv('AGENT_MEMORY_LEASE_SECONDS', '300')),
+)
+
+AGENT_MEMORY_RETRY_BACKOFF_SECONDS = ConfigVar(
+    'AGENT_MEMORY_RETRY_BACKOFF_SECONDS',
+    'agent_memory.jobs.retry_backoff_seconds',
+    int(os.getenv('AGENT_MEMORY_RETRY_BACKOFF_SECONDS', '600')),
+)
+
+AGENT_MEMORY_SUMMARY_TOKEN_BUDGET = ConfigVar(
+    'AGENT_MEMORY_SUMMARY_TOKEN_BUDGET',
+    'agent_memory.read.summary_token_budget',
+    int(os.getenv('AGENT_MEMORY_SUMMARY_TOKEN_BUDGET', '1200')),
+)
+
+LAYER_GENERATION_MODEL = ConfigVar(
+    'LAYER_GENERATION_MODEL',
+    'layered_knowledge.internal.model',
+    os.getenv('LAYER_GENERATION_MODEL', '').strip(),
+)
+
+LAYER_GENERATION_PROMPT_ABSTRACT = ConfigVar(
+    'LAYER_GENERATION_PROMPT_ABSTRACT',
+    'layered_knowledge.internal.prompt_abstract',
+    os.getenv('LAYER_GENERATION_PROMPT_ABSTRACT', ''),
+)
+
+LAYER_GENERATION_MAX_CHUNK_TOKENS = ConfigVar(
+    'LAYER_GENERATION_MAX_CHUNK_TOKENS',
+    'layered_knowledge.internal.max_chunk_tokens',
+    int(os.getenv('LAYER_GENERATION_MAX_CHUNK_TOKENS', '24000')),
+)
+
+LAYER_GENERATION_MIN_TAIL_TOKENS = ConfigVar(
+    'LAYER_GENERATION_MIN_TAIL_TOKENS',
+    'layered_knowledge.internal.min_tail_tokens',
+    int(os.getenv('LAYER_GENERATION_MIN_TAIL_TOKENS', '1000')),
+)
+
+OPEN_NOTEBOOK_BASE_URL = ConfigVar(
+    'OPEN_NOTEBOOK_BASE_URL',
+    'layered_knowledge.open_notebook.base_url',
+    os.getenv('OPEN_NOTEBOOK_BASE_URL', '').rstrip('/'),
+)
+
+OPEN_NOTEBOOK_API_PASSWORD = ConfigVar(
+    'OPEN_NOTEBOOK_API_PASSWORD',
+    'layered_knowledge.open_notebook.api_password',
+    os.getenv('OPEN_NOTEBOOK_API_PASSWORD', ''),
+)
+
+OPEN_NOTEBOOK_TIMEOUT_SECS = ConfigVar(
+    'OPEN_NOTEBOOK_TIMEOUT_SECS',
+    'layered_knowledge.open_notebook.timeout_secs',
+    int(os.getenv('OPEN_NOTEBOOK_TIMEOUT_SECS', '30')),
+)
+
+OPEN_NOTEBOOK_TRANSFORMATION_ABSTRACT = ConfigVar(
+    'OPEN_NOTEBOOK_TRANSFORMATION_ABSTRACT',
+    'layered_knowledge.open_notebook.transformations.abstract',
+    os.getenv('OPEN_NOTEBOOK_TRANSFORMATION_ABSTRACT', ''),
+)
+
+OPEN_NOTEBOOK_TRANSFORMATION_KEY_FINDINGS = ConfigVar(
+    'OPEN_NOTEBOOK_TRANSFORMATION_KEY_FINDINGS',
+    'layered_knowledge.open_notebook.transformations.key_findings',
+    os.getenv('OPEN_NOTEBOOK_TRANSFORMATION_KEY_FINDINGS', ''),
+)
+
+OPEN_NOTEBOOK_TRANSFORMATION_KEY_DATA = ConfigVar(
+    'OPEN_NOTEBOOK_TRANSFORMATION_KEY_DATA',
+    'layered_knowledge.open_notebook.transformations.key_data',
+    os.getenv('OPEN_NOTEBOOK_TRANSFORMATION_KEY_DATA', ''),
 )
 
 CODE_INTERPRETER_ENGINE = ConfigVar(
@@ -1215,12 +1446,99 @@ PADDLEOCR_VL_TOKEN = ConfigVar(
     os.getenv('PADDLEOCR_VL_TOKEN', ''),
 )
 
+PADDLEOCR_VL_MODEL = ConfigVar(
+    'PADDLEOCR_VL_MODEL',
+    'rag.paddleocr_vl_model',
+    os.getenv('PADDLEOCR_VL_MODEL', 'PaddleOCR-VL-1.6'),
+)
+
+DEFAULT_PADDLEOCR_VL_OPTIONAL_PAYLOAD = {
+    'useDocOrientationClassify': False,
+    'useDocUnwarping': False,
+    'useChartRecognition': False,
+}
+
+paddleocr_vl_optional_payload = os.getenv('PADDLEOCR_VL_OPTIONAL_PAYLOAD', '')
+try:
+    paddleocr_vl_optional_payload = json.loads(paddleocr_vl_optional_payload) if paddleocr_vl_optional_payload else {}
+except json.JSONDecodeError:
+    paddleocr_vl_optional_payload = {}
+if not isinstance(paddleocr_vl_optional_payload, dict):
+    paddleocr_vl_optional_payload = {}
+
+PADDLEOCR_VL_OPTIONAL_PAYLOAD = ConfigVar(
+    'PADDLEOCR_VL_OPTIONAL_PAYLOAD',
+    'rag.paddleocr_vl_optional_payload',
+    {
+        **DEFAULT_PADDLEOCR_VL_OPTIONAL_PAYLOAD,
+        **paddleocr_vl_optional_payload,
+    },
+)
+
+PADDLEOCR_VL_REQUEST_TIMEOUT = ConfigVar(
+    'PADDLEOCR_VL_REQUEST_TIMEOUT',
+    'rag.paddleocr_vl_request_timeout',
+    int(os.getenv('PADDLEOCR_VL_REQUEST_TIMEOUT', '30')),
+)
+
+PADDLEOCR_VL_DOWNLOAD_TIMEOUT = ConfigVar(
+    'PADDLEOCR_VL_DOWNLOAD_TIMEOUT',
+    'rag.paddleocr_vl_download_timeout',
+    int(os.getenv('PADDLEOCR_VL_DOWNLOAD_TIMEOUT', '60')),
+)
+
+PADDLEOCR_VL_POLL_TIMEOUT = ConfigVar(
+    'PADDLEOCR_VL_POLL_TIMEOUT',
+    'rag.paddleocr_vl_poll_timeout',
+    int(os.getenv('PADDLEOCR_VL_POLL_TIMEOUT', '300')),
+)
+
+PADDLEOCR_VL_POLL_INTERVAL = ConfigVar(
+    'PADDLEOCR_VL_POLL_INTERVAL',
+    'rag.paddleocr_vl_poll_interval',
+    float(os.getenv('PADDLEOCR_VL_POLL_INTERVAL', '2')),
+)
+
+PADDLEOCR_VL_ALLOWED_REMOTE_ORIGINS = ConfigVar(
+    'PADDLEOCR_VL_ALLOWED_REMOTE_ORIGINS',
+    'rag.paddleocr_vl_allowed_remote_origins',
+    [
+        origin.strip()
+        for origin in os.getenv('PADDLEOCR_VL_ALLOWED_REMOTE_ORIGINS', '').split(',')
+        if origin.strip()
+    ],
+)
+
 BYPASS_EMBEDDING_AND_RETRIEVAL = ConfigVar(
     'BYPASS_EMBEDDING_AND_RETRIEVAL',
     'rag.bypass_embedding_and_retrieval',
     os.getenv('BYPASS_EMBEDDING_AND_RETRIEVAL', 'False').lower() == 'true',
 )
 
+ENABLE_MULTIMODAL_KNOWLEDGE_EVIDENCE = ConfigVar(
+    'ENABLE_MULTIMODAL_KNOWLEDGE_EVIDENCE',
+    'rag.enable_multimodal_knowledge_evidence',
+    os.getenv('ENABLE_MULTIMODAL_KNOWLEDGE_EVIDENCE', 'False').lower() == 'true',
+)
+
+RAG_EXTRACT_DOCUMENT_IMAGE_ASSETS = ConfigVar(
+    'RAG_EXTRACT_DOCUMENT_IMAGE_ASSETS',
+    'rag.extract_document_image_assets',
+    (
+        os.getenv(
+            'RAG_EXTRACT_DOCUMENT_IMAGE_ASSETS',
+            os.getenv('ENABLE_MULTIMODAL_KNOWLEDGE_EVIDENCE', 'False'),
+        ).lower()
+        == 'true'
+    ),
+)
+
+NATIVE_ATTACHED_KNOWLEDGE_BYPASS_LEGACY_FILE_RETRIEVAL = ConfigVar(
+    'NATIVE_ATTACHED_KNOWLEDGE_BYPASS_LEGACY_FILE_RETRIEVAL',
+    'layered_knowledge.native_attached_knowledge_bypass_legacy_file_retrieval',
+    os.getenv('NATIVE_ATTACHED_KNOWLEDGE_BYPASS_LEGACY_FILE_RETRIEVAL', 'False').lower()
+    == 'true',
+)
 
 RAG_TOP_K = ConfigVar('RAG_TOP_K', 'rag.top_k', int(os.getenv('RAG_TOP_K', '3')))
 RAG_TOP_K_RERANKER = ConfigVar(
@@ -2625,6 +2943,29 @@ PENDING_USER_OVERLAY_CONTENT = ConfigVar(
     os.getenv('PENDING_USER_OVERLAY_CONTENT', ''),
 )
 
+ANNOUNCEMENT_MODAL_ENABLED = ConfigVar(
+    'ANNOUNCEMENT_MODAL_ENABLED',
+    'ui.announcement_modal.enabled',
+    os.getenv('ANNOUNCEMENT_MODAL_ENABLED', 'False').lower() == 'true',
+)
+
+ANNOUNCEMENT_MODAL_KEY = ConfigVar(
+    'ANNOUNCEMENT_MODAL_KEY',
+    'ui.announcement_modal.key',
+    os.getenv('ANNOUNCEMENT_MODAL_KEY', ''),
+)
+
+ANNOUNCEMENT_MODAL_TITLE = ConfigVar(
+    'ANNOUNCEMENT_MODAL_TITLE',
+    'ui.announcement_modal.title',
+    os.getenv('ANNOUNCEMENT_MODAL_TITLE', ''),
+)
+
+ANNOUNCEMENT_MODAL_CONTENT = ConfigVar(
+    'ANNOUNCEMENT_MODAL_CONTENT',
+    'ui.announcement_modal.content',
+    os.getenv('ANNOUNCEMENT_MODAL_CONTENT', ''),
+)
 
 RESPONSE_WATERMARK = ConfigVar(
     'RESPONSE_WATERMARK',
@@ -2809,6 +3150,10 @@ USER_PERMISSIONS_FEATURES_API_KEYS = os.getenv('USER_PERMISSIONS_FEATURES_API_KE
 
 USER_PERMISSIONS_FEATURES_MEMORIES = os.getenv('USER_PERMISSIONS_FEATURES_MEMORIES', 'True').lower() == 'true'
 
+USER_PERMISSIONS_FEATURES_AGENT_MEMORY = (
+    os.getenv('USER_PERMISSIONS_FEATURES_AGENT_MEMORY', 'False').lower() == 'true'
+)
+
 USER_PERMISSIONS_FEATURES_AUTOMATIONS = os.getenv('USER_PERMISSIONS_FEATURES_AUTOMATIONS', 'False').lower() == 'true'
 
 USER_PERMISSIONS_FEATURES_CALENDAR = os.getenv('USER_PERMISSIONS_FEATURES_CALENDAR', 'True').lower() == 'true'
@@ -2884,6 +3229,7 @@ DEFAULT_USER_PERMISSIONS = {
         'image_generation': USER_PERMISSIONS_FEATURES_IMAGE_GENERATION,
         'code_interpreter': USER_PERMISSIONS_FEATURES_CODE_INTERPRETER,
         'memories': USER_PERMISSIONS_FEATURES_MEMORIES,
+        'agent_memory': USER_PERMISSIONS_FEATURES_AGENT_MEMORY,
         'automations': USER_PERMISSIONS_FEATURES_AUTOMATIONS,
         'calendar': USER_PERMISSIONS_FEATURES_CALENDAR,
     },
@@ -2938,6 +3284,64 @@ AUTOMATION_MIN_INTERVAL = ConfigVar(
     'AUTOMATION_MIN_INTERVAL',
     'automations.min_interval',
     os.getenv('AUTOMATION_MIN_INTERVAL', ''),
+)
+
+ENABLE_AGENT_MODE = ConfigVar(
+    'ENABLE_AGENT_MODE',
+    'agent.mode.enable',
+    os.getenv('ENABLE_AGENT_MODE', 'False').lower() == 'true',
+)
+
+AGENT_RUNTIME_BASE_URL = ConfigVar(
+    'AGENT_RUNTIME_BASE_URL',
+    'agent.runtime.base_url',
+    os.getenv('AGENT_RUNTIME_BASE_URL', ''),
+)
+
+AGENT_RUNTIME_SERVICE_TOKEN = ConfigVar(
+    'AGENT_RUNTIME_SERVICE_TOKEN',
+    'agent.runtime.service_token',
+    os.getenv('AGENT_RUNTIME_SERVICE_TOKEN', ''),
+)
+
+AGENT_RUN_DEFAULT_TIMEOUT_SECONDS = ConfigVar(
+    'AGENT_RUN_DEFAULT_TIMEOUT_SECONDS',
+    'agent.run.default_timeout_seconds',
+    int(os.getenv('AGENT_RUN_DEFAULT_TIMEOUT_SECONDS', '300')),
+)
+
+AGENT_RUN_MAX_MODEL_CALLS = ConfigVar(
+    'AGENT_RUN_MAX_MODEL_CALLS',
+    'agent.run.max_model_calls',
+    int(os.getenv('AGENT_RUN_MAX_MODEL_CALLS', '25')),
+)
+
+AGENT_RUN_MAX_TOOL_CALLS = ConfigVar(
+    'AGENT_RUN_MAX_TOOL_CALLS',
+    'agent.run.max_tool_calls',
+    int(os.getenv('AGENT_RUN_MAX_TOOL_CALLS', '50')),
+)
+
+AGENT_TEAM_MAX_SUBAGENTS = ConfigVar(
+    'AGENT_TEAM_MAX_SUBAGENTS',
+    'agent.team.max_subagents',
+    int(os.getenv('AGENT_TEAM_MAX_SUBAGENTS', '5')),
+)
+
+try:
+    agent_subagent_default_budget = json.loads(
+        os.getenv(
+            'AGENT_SUBAGENT_DEFAULT_BUDGET',
+            '{"max_model_calls": 8, "max_tool_calls": 16}',
+        )
+    )
+except json.JSONDecodeError:
+    agent_subagent_default_budget = {'max_model_calls': 8, 'max_tool_calls': 16}
+
+AGENT_SUBAGENT_DEFAULT_BUDGET = ConfigVar(
+    'AGENT_SUBAGENT_DEFAULT_BUDGET',
+    'agent.subagent.default_budget',
+    agent_subagent_default_budget,
 )
 
 ENABLE_NOTES = ConfigVar(

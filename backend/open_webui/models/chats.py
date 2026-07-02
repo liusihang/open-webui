@@ -40,6 +40,22 @@ from sqlalchemy.sql.expression import bindparam
 log = logging.getLogger(__name__)
 
 
+def set_agent_memory_disabled(meta: dict | None, disabled: bool) -> dict:
+    next_meta = dict(meta or {})
+    agent_memory_meta = dict(next_meta.get('agent_memory') or {})
+
+    if disabled:
+        agent_memory_meta['mode'] = 'disabled'
+        agent_memory_meta['disabled'] = True
+    else:
+        agent_memory_meta['mode'] = 'enabled'
+        agent_memory_meta.pop('disabled', None)
+
+    next_meta['agent_memory'] = agent_memory_meta
+
+    return next_meta
+
+
 class Chat(Base):  # database table mapping for chat entity
     __tablename__ = 'chat'
 

@@ -93,6 +93,168 @@ def test_resolve_effective_cache_settings_auto_generates_stable_gpt_prompt_cache
     assert settings_a['prompt_cache_key'] == settings_b['prompt_cache_key']
 
 
+def test_resolve_effective_cache_settings_keeps_explicit_prompt_cache_key():
+    pipe = _load_pipe_class()()
+
+    settings = pipe._resolve_effective_cache_settings(
+        body={
+            'model': 'bifrostapi.openai/gpt-5',
+            'metadata': {'chat_id': 'chat-123'},
+            'prompt_cache_key': 'caller-key',
+        },
+        model='openai/gpt-5',
+        route_mode='responses',
+        system_message={'role': 'system', 'content': 'system prompt'},
+        messages=[{'role': 'user', 'content': 'hello'}],
+        attachments=[],
+        function_specs=[],
+    )
+
+    assert settings['prompt_cache_key'] == 'caller-key'
+
+
+def test_resolve_effective_cache_settings_uses_chat_id_scoped_gpt_prompt_cache_key():
+    pipe = _load_pipe_class()()
+
+    base = pipe._resolve_effective_cache_settings(
+        body={
+            'model': 'bifrostapi.openai/gpt-5',
+            'metadata': {'chat_id': 'chat-123'},
+        },
+        model='openai/gpt-5',
+        route_mode='responses',
+        system_message={'role': 'system', 'content': 'system prompt'},
+        messages=[{'role': 'user', 'content': 'hello'}],
+        attachments=[],
+        function_specs=[],
+    )
+    changed_user = pipe._resolve_effective_cache_settings(
+        body={
+            'model': 'bifrostapi.openai/gpt-5',
+            'metadata': {'chat_id': 'chat-123'},
+        },
+        model='openai/gpt-5',
+        route_mode='responses',
+        system_message={'role': 'system', 'content': 'system prompt'},
+        messages=[{'role': 'user', 'content': 'different user text'}],
+        attachments=[],
+        function_specs=[],
+    )
+    fallback = pipe._resolve_effective_cache_settings(
+        body={'model': 'bifrostapi.openai/gpt-5'},
+        model='openai/gpt-5',
+        route_mode='responses',
+        system_message={'role': 'system', 'content': 'system prompt'},
+        messages=[{'role': 'user', 'content': 'hello'}],
+        attachments=[],
+        function_specs=[],
+    )
+
+    assert base['provider'] == 'openai'
+    assert len(base['prompt_cache_key']) <= 64
+    assert base['prompt_cache_key'] == changed_user['prompt_cache_key']
+    assert base['prompt_cache_key'] != fallback['prompt_cache_key']
+    assert not base['prompt_cache_key'].startswith('owg:')
+
+
+def test_resolve_effective_cache_settings_chat_id_key_ignores_prefix_shape_changes():
+    pipe = _load_pipe_class()()
+
+    base = pipe._resolve_effective_cache_settings(
+        body={
+            'model': 'bifrostapi.openai/gpt-5',
+            'metadata': {'chat_id': 'chat-123'},
+        },
+        model='openai/gpt-5',
+        route_mode='responses',
+        system_message={'role': 'system', 'content': 'system prompt'},
+        messages=[{'role': 'user', 'content': 'hello'}],
+        attachments=[
+            {
+                'name': 'a.pdf',
+                'kind': 'document',
+                'responses_part': {'type': 'input_file', 'filename': 'a.pdf'},
+            }
+        ],
+        function_specs=[
+            {
+                'name': 'tool_a',
+                'description': 'First tool',
+                'parameters': {'type': 'object', 'properties': {'count': {'type': 'integer'}}},
+            }
+        ],
+    )
+    changed_prefix_shape = pipe._resolve_effective_cache_settings(
+        body={
+            'model': 'bifrostapi.openai/gpt-5',
+            'metadata': {'chat_id': 'chat-123'},
+        },
+        model='openai/gpt-5',
+        route_mode='responses',
+        system_message={'role': 'system', 'content': 'different system prompt'},
+        messages=[{'role': 'user', 'content': 'hello'}],
+        attachments=[
+            {
+                'name': 'b.png',
+                'kind': 'image',
+                'responses_part': {'type': 'input_image', 'image_url': 'data:image/png;base64,BBB'},
+            }
+        ],
+        function_specs=[
+            {
+                'name': 'tool_b',
+                'description': 'Second tool',
+                'parameters': {'type': 'object', 'properties': {'value': {'type': 'string'}}},
+            }
+        ],
+    )
+
+    assert base['prompt_cache_key'] == changed_prefix_shape['prompt_cache_key']
+
+
+def test_resolve_effective_cache_settings_without_chat_id_keeps_prefix_hash_semantics():
+    pipe = _load_pipe_class()()
+
+    base = pipe._resolve_effective_cache_settings(
+        body={'model': 'bifrostapi.openai/gpt-5'},
+        model='openai/gpt-5',
+        route_mode='responses',
+        system_message={'role': 'system', 'content': 'system prompt'},
+        messages=[{'role': 'user', 'content': 'hello'}],
+        attachments=[],
+        function_specs=[],
+    )
+    changed_system = pipe._resolve_effective_cache_settings(
+        body={'model': 'bifrostapi.openai/gpt-5'},
+        model='openai/gpt-5',
+        route_mode='responses',
+        system_message={'role': 'system', 'content': 'different system prompt'},
+        messages=[{'role': 'user', 'content': 'hello'}],
+        attachments=[],
+        function_specs=[],
+    )
+    changed_tools = pipe._resolve_effective_cache_settings(
+        body={'model': 'bifrostapi.openai/gpt-5'},
+        model='openai/gpt-5',
+        route_mode='responses',
+        system_message={'role': 'system', 'content': 'system prompt'},
+        messages=[{'role': 'user', 'content': 'hello'}],
+        attachments=[],
+        function_specs=[
+            {
+                'name': 'tool_a',
+                'description': 'First tool',
+                'parameters': {'type': 'object', 'properties': {'count': {'type': 'integer'}}},
+            }
+        ],
+    )
+
+    assert base['prompt_cache_key'].startswith('owg:')
+    assert len(base['prompt_cache_key']) == 64
+    assert base['prompt_cache_key'] != changed_system['prompt_cache_key']
+    assert base['prompt_cache_key'] != changed_tools['prompt_cache_key']
+
+
 def test_resolve_effective_cache_settings_does_not_auto_generate_non_gpt_prompt_cache_key():
     pipe = _load_pipe_class()()
 
@@ -413,6 +575,64 @@ def test_build_responses_payload_attaches_attachments_and_uses_responses_tool_sh
     )
 
 
+def test_build_responses_payload_preserves_request_reasoning_effort():
+    pipe = _load_pipe_class()()
+
+    payload = pipe._build_responses_payload(
+        body={
+            'model': 'bifrostapi.ZenMuxOAI/openai/gpt-5.4',
+            'stream': True,
+            'reasoning': {
+                'enabled': True,
+                'effort': 'xhigh',
+                'summary': 'detailed',
+                'max_tokens': 12400,
+            },
+        },
+        model='ZenMuxOAI/openai/gpt-5.4',
+        system_message={'role': 'system', 'content': 'system'},
+        messages=[{'role': 'user', 'content': 'hello'}],
+        attachments=[],
+        function_specs=[],
+    )
+
+    assert payload['reasoning'] == {
+        'enabled': True,
+        'effort': 'xhigh',
+        'summary': 'detailed',
+        'max_tokens': 12400,
+    }
+
+
+def test_build_responses_payload_omits_default_reasoning_without_effort():
+    pipe = _load_pipe_class()()
+    pipe.valves.DEFAULT_REASONING_ENABLED = True
+    pipe.valves.DEFAULT_REASONING_SUMMARY = 'detailed'
+    pipe.valves.DEFAULT_REASONING_EFFORT = ''
+
+    payload = pipe._build_responses_payload(
+        body={
+            'model': 'bifrostapi.ZenMuxOAI/openai/gpt-5.4',
+            'stream': True,
+        },
+        model='ZenMuxOAI/openai/gpt-5.4',
+        system_message={'role': 'system', 'content': 'system'},
+        messages=[{'role': 'user', 'content': 'hello'}],
+        attachments=[],
+        function_specs=[],
+    )
+
+    assert 'reasoning' not in payload
+
+
+def test_reasoning_param_error_detects_empty_level_rejection():
+    pipe = _load_pipe_class()()
+
+    assert pipe._is_reasoning_param_error(
+        'level "" not supported, valid levels: low, medium, high, xhigh'
+    )
+
+
 def test_responses_streaming_function_call_arguments_emit_tool_calls_not_content():
     pipe = _load_pipe_class()()
     state = pipe._new_stream_state()
@@ -468,3 +688,101 @@ def test_responses_streaming_function_call_arguments_emit_tool_calls_not_content
     assert ''.join(delta['function'].get('arguments', '') for delta in tool_call_deltas) == (
         '{"prompt": "A quiet mountain lake"}'
     )
+
+
+def test_responses_web_search_lifecycle_emits_status_events_without_results():
+    pipe = _load_pipe_class()()
+    emitted = []
+    state = pipe._new_stream_state(__event_emitter__=emitted.append)
+    chunks = []
+
+    for event in [
+        {
+            'type': 'response.output_item.added',
+            'item': {
+                'id': 'ws_1',
+                'type': 'web_search_call',
+                'status': 'in_progress',
+            },
+        },
+        {
+            'type': 'response.web_search_call.searching',
+            'item_id': 'ws_1',
+        },
+        {
+            'type': 'response.output_item.done',
+            'item': {
+                'id': 'ws_1',
+                'type': 'web_search_call',
+                'status': 'completed',
+                'action': {
+                    'type': 'search',
+                    'query': 'weather: Shanghai, China',
+                    'queries': ['weather: Shanghai, China'],
+                },
+            },
+        },
+    ]:
+        chunk = pipe._parse_responses_event(event, state)
+        if isinstance(chunk, list):
+            chunks.extend(chunk)
+        elif chunk:
+            chunks.append(chunk)
+
+    status_events = [event for event in emitted if event.get('type') == 'status']
+    source_events = [event for event in emitted if event.get('type') == 'source']
+    assert [event['data']['status'] for event in status_events] == [
+        'in_progress',
+        'in_progress',
+        'complete',
+    ]
+    assert all(event['data']['action'] == 'web_search' for event in status_events)
+    assert status_events[-1]['data']['query'] == 'weather: Shanghai, China'
+    assert source_events == []
+    assert all(not chunk['choices'][0]['delta'].get('tool_calls') for chunk in chunks)
+
+    content = ''.join(
+        chunk['choices'][0]['delta'].get('content', '')
+        for chunk in chunks
+        if chunk.get('choices')
+    )
+    assert 'Web Search' in content
+    assert 'weather: Shanghai, China' in content
+
+
+def test_responses_web_search_with_results_still_emits_sources():
+    pipe = _load_pipe_class()()
+    emitted = []
+    state = pipe._new_stream_state(__event_emitter__=emitted.append)
+
+    chunks = pipe._parse_responses_event(
+        {
+            'type': 'response.output_item.done',
+            'item': {
+                'id': 'ws_2',
+                'type': 'web_search_call',
+                'status': 'completed',
+                'query': 'world cup schedule',
+                'results': [
+                    {
+                        'title': 'Schedule',
+                        'url': 'https://example.com/schedule',
+                        'text': 'Match schedule summary',
+                    }
+                ],
+            },
+        },
+        state,
+    )
+
+    assert isinstance(chunks, list)
+    source_events = [event for event in emitted if event.get('type') == 'source']
+    assert len(source_events) == 1
+    assert source_events[0]['data']['source']['url'] == 'https://example.com/schedule'
+    content = ''.join(
+        chunk['choices'][0]['delta'].get('content', '')
+        for chunk in chunks
+        if chunk.get('choices')
+    )
+    assert 'world cup schedule' in content
+    assert 'https://example.com/schedule' in content

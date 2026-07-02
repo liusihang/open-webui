@@ -2,7 +2,7 @@ from datetime import datetime
 
 from open_webui.utils.misc import sanitize_text_for_db
 
-KEYS_TO_EXCLUDE = ['content', 'pages', 'tables', 'paragraphs', 'sections', 'figures']
+KEYS_TO_EXCLUDE = ['content', 'pages', 'tables', 'paragraphs', 'sections', 'figures', 'document_image_assets']
 
 
 def filter_metadata(metadata: dict[str, any]) -> dict[str, any]:

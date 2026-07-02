@@ -17,6 +17,7 @@
 	import Connections from './Settings/Connections.svelte';
 	import Documents from './Settings/Documents.svelte';
 	import WebSearch from './Settings/WebSearch.svelte';
+	import AgentMemory from './Settings/AgentMemory.svelte';
 
 	import Evaluations from './Settings/Evaluations.svelte';
 	import CodeExecution from './Settings/CodeExecution.svelte';
@@ -48,6 +49,7 @@
 			'audio',
 			'images',
 			'pipelines',
+			'agent-memory',
 			'db'
 		].includes(tabFromPath)
 			? tabFromPath
@@ -239,6 +241,20 @@
 			keywords: ['pipelines', 'workflows', 'filters', 'valves', 'middleware']
 		},
 		{
+			id: 'agent-memory',
+			title: 'Agent Memory',
+			route: '/admin/settings/agent-memory',
+			keywords: [
+				'agent memory',
+				'memory',
+				'extraction',
+				'consolidation',
+				'lease',
+				'retry',
+				'summary'
+			]
+		},
+		{
 			id: 'db',
 			title: 'Database',
 			route: '/admin/settings/db',
@@ -319,6 +335,7 @@
 		<!-- {$i18n.t('Audio')} -->
 		<!-- {$i18n.t('Images')} -->
 		<!-- {$i18n.t('Pipelines')} -->
+		<!-- {$i18n.t('Agent Memory')} -->
 		<!-- {$i18n.t('Database')} -->
 		{#each filteredSettings as tab (tab.id)}
 			<a
@@ -481,6 +498,8 @@
 								d="m10.933 19.231-7.668-4.13-1.37.739a.75.75 0 0 0 0 1.32l9.75 5.25c.221.12.489.12.71 0l9.75-5.25a.75.75 0 0 0 0-1.32l-1.37-.738-7.668 4.13a2.25 2.25 0 0 1-2.134-.001Z"
 							/>
 						</svg>
+					{:else if tab.id === 'agent-memory'}
+						<ChartBar />
 					{:else if tab.id === 'db'}
 						<svg
 							xmlns="http://www.w3.org/2000/svg"
@@ -582,6 +601,15 @@
 			<Pipelines
 				saveHandler={() => {
 					toast.success($i18n.t('Settings saved successfully!'));
+				}}
+			/>
+		{:else if selectedTab === 'agent-memory'}
+			<AgentMemory
+				on:save={async () => {
+					toast.success($i18n.t('Settings saved successfully!'));
+
+					await tick();
+					await config.set(await getBackendConfig());
 				}}
 			/>
 		{/if}

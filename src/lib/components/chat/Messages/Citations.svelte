@@ -3,7 +3,7 @@
 	import { embed, showControls, showEmbeds } from '$lib/stores';
 
 	import CitationModal from './Citations/CitationModal.svelte';
-	import { buildCitations, calculateShowRelevance, shouldShowPercentage } from './citations';
+	import { buildCitationTargets, calculateShowRelevance, shouldShowPercentage } from './citations';
 
 	const i18n = getContext('i18n');
 
@@ -11,8 +11,11 @@
 	export let chatId = '';
 
 	export let sources = [];
+	export let content = '';
+	export let metadata = null;
 	export let readOnly = false;
 
+	let citationTargets = [];
 	let citations = [];
 	let showPercentage = false;
 	let showRelevance = true;
@@ -37,11 +40,17 @@
 			index = sourceId - 1;
 		}
 
-		if (citations[index]) {
-			console.log('Showing citation modal for:', citations[index]);
+		const target =
+			typeof sourceId === 'string' || typeof sourceId === 'number'
+				? citationTargets.find((item) => item.number === index + 1)
+				: null;
+		const citation = target?.citation ?? citations[index];
 
-			if (citations[index]?.source?.embed_url) {
-				const embedUrl = citations[index].source.embed_url;
+		if (citation) {
+			console.log('Showing citation modal for:', citation);
+
+			if (citation?.source?.embed_url) {
+				const embedUrl = citation.source.embed_url;
 				if (embedUrl) {
 					if (readOnly) {
 						// Open in new tab if readOnly
@@ -52,26 +61,27 @@
 						showEmbeds.set(true);
 						embed.set({
 							url: embedUrl,
-							title: citations[index]?.source?.name || 'Embedded Content',
-							source: citations[index],
+							title: citation?.source?.name || 'Embedded Content',
+							source: citation,
 							chatId: chatId,
 							messageId: id,
 							sourceId: sourceId
 						});
 					}
 				} else {
-					selectedCitation = citations[index];
+					selectedCitation = { ...citation, preview: target?.preview };
 					showCitationModal = true;
 				}
 			} else {
-				selectedCitation = citations[index];
+				selectedCitation = { ...citation, preview: target?.preview };
 				showCitationModal = true;
 			}
 		}
 	};
 
 	$: {
-		citations = buildCitations(sources ?? []);
+		citationTargets = buildCitationTargets(sources ?? [], { content, metadata });
+		citations = citationTargets.map((target) => target.citation);
 		showRelevance = calculateShowRelevance(citations);
 		showPercentage = shouldShowPercentage(citations);
 	}
@@ -143,25 +153,25 @@
 {#if showCitations}
 	<div class="py-1.5">
 		<div class="text-xs gap-2 flex flex-col">
-			{#each citations as citation, idx}
+			{#each citationTargets as target, idx}
 				<button
 					id={`source-${id}-${idx + 1}`}
 					aria-label={$i18n.t('View source: {{name}}', {
-						name: decodeString(citation.source.name)
+						name: decodeString(target.title)
 					})}
 					class="no-toggle outline-hidden flex dark:text-gray-300 bg-transparent text-gray-600 rounded-xl gap-1.5 items-center"
 					on:click={() => {
 						showCitationModal = true;
-						selectedCitation = citation;
+						selectedCitation = { ...target.citation, preview: target.preview };
 					}}
 				>
 					<div class=" font-medium bg-gray-50 dark:bg-gray-850 rounded-md px-1">
-						{idx + 1}
+						{target.number}
 					</div>
 					<div
 						class="flex-1 truncate hover:text-black dark:text-white/60 dark:hover:text-white transition text-left"
 					>
-						{decodeString(citation.source.name)}
+						{decodeString(target.title)}
 					</div>
 				</button>
 			{/each}

@@ -1,0 +1,62 @@
+{
+  "mode": "partial_local",
+  "generated_at": "2026-06-18T04:04:53+08:00",
+  "scenarios": [
+    {
+      "id": "scenario_06_subagent_cap_concurrency",
+      "status": "incomplete",
+      "live_status": "not_proven",
+      "observations": [],
+      "evidence": {
+        "direct_integrated_service_evidence": false,
+        "local_observations": [
+          "event:subagent.created",
+          "subagent_concurrency:observed",
+          "subagent_cap:5"
+        ],
+        "commands": [
+          {
+            "command": "uv run --extra test pytest -q tests/test_subagents.py::test_plan_runs_subagents_concurrently_up_to_team_cap",
+            "cwd": "/Users/liusihang/openwebui/.worktrees/agent-mode-w12b-subagents/services/agentscope-runtime",
+            "red_result": "failed with TimeoutError waiting for all five subagent executors to be active together; this proved the existing plan loop was sequential",
+            "green_result": "1 passed in 0.02s"
+          },
+          {
+            "command": "uv run --extra test pytest -q tests/test_subagents.py tests/test_openwebui_client.py",
+            "cwd": "/Users/liusihang/openwebui/.worktrees/agent-mode-w12b-subagents/services/agentscope-runtime",
+            "result": "11 passed in 0.69s"
+          }
+        ],
+        "notes": "Local service tests now prove the runtime adapter can launch five subagents concurrently with team_cap=5 and still route registration/model-selection callbacks through OpenWebUI client contracts. No direct integrated OpenWebUI + AgentScope runtime service execution was captured, so live acceptance is not proven."
+      }
+    },
+    {
+      "id": "scenario_07_subagent_model_selection",
+      "status": "incomplete",
+      "live_status": "not_proven",
+      "observations": [],
+      "evidence": {
+        "direct_integrated_service_evidence": false,
+        "local_observations": [
+          "event:model.selection.requested",
+          "event:model.selection.completed",
+          "meta.agent_selection",
+          "permission_valid_model_ids"
+        ],
+        "commands": [
+          {
+            "command": "WEBUI_SECRET_KEY=test-secret ENABLE_DB_MIGRATIONS=false uv run pytest -q backend/open_webui/test/agent/test_subagents.py backend/open_webui/test/agent/test_model_catalog.py",
+            "cwd": "/Users/liusihang/openwebui/.worktrees/agent-mode-w12b-subagents",
+            "result": "13 passed, 2 warnings in 2.20s"
+          },
+          {
+            "command": "uv run --extra test pytest -q tests/test_subagents.py tests/test_openwebui_client.py",
+            "cwd": "/Users/liusihang/openwebui/.worktrees/agent-mode-w12b-subagents/services/agentscope-runtime",
+            "result": "11 passed in 0.69s"
+          }
+        ],
+        "notes": "Local backend tests prove model selection emits requested/completed events, filters choices through permission checks, and returns selected_model_id in meta.agent_selection. Runtime client tests prove the model-selection callback payload is sent to OpenWebUI. No direct integrated service run was captured, so live acceptance is not proven."
+      }
+    }
+  ]
+}

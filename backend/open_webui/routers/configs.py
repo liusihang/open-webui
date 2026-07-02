@@ -11,6 +11,11 @@ from open_webui.config import BannerModel, async_save_config, get_config, save_c
 from open_webui.env import AIOHTTP_CLIENT_SESSION_SSL, AIOHTTP_CLIENT_TIMEOUT
 from open_webui.models.oauth_sessions import OAuthSessions
 from open_webui.utils.auth import get_admin_user, get_verified_user
+from open_webui.utils.cache_invalidation import (
+    CACHE_NAMESPACE_CONFIG,
+    CACHE_NAMESPACE_MODELS,
+    apply_cache_invalidation_event,
+)
 from open_webui.utils.headers import get_custom_headers
 from open_webui.utils.mcp.client import MCPClient
 from open_webui.utils.oauth import (
@@ -50,6 +55,7 @@ class ImportConfigForm(BaseModel):
 async def import_config(request: Request, form_data: ImportConfigForm, user=Depends(get_admin_user)):
     await async_save_config(form_data.config)
     request.app.state.config._sync_to_redis()
+    _apply_local_config_invalidation(request.app)
     return get_config()
 
 
@@ -89,11 +95,17 @@ async def set_connections_config(
 ):
     request.app.state.config.ENABLE_DIRECT_CONNECTIONS = form_data.ENABLE_DIRECT_CONNECTIONS
     request.app.state.config.ENABLE_BASE_MODELS_CACHE = form_data.ENABLE_BASE_MODELS_CACHE
+    _apply_local_config_invalidation(request.app, 'ENABLE_BASE_MODELS_CACHE')
 
     return {
         'ENABLE_DIRECT_CONNECTIONS': request.app.state.config.ENABLE_DIRECT_CONNECTIONS,
         'ENABLE_BASE_MODELS_CACHE': request.app.state.config.ENABLE_BASE_MODELS_CACHE,
     }
+
+
+def _apply_local_config_invalidation(app, key: str | None = None) -> None:
+    apply_cache_invalidation_event(app, {'namespace': CACHE_NAMESPACE_CONFIG, 'key': key})
+    apply_cache_invalidation_event(app, {'namespace': CACHE_NAMESPACE_MODELS})
 
 
 class OAuthClientRegistrationForm(BaseModel):

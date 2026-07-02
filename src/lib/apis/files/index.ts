@@ -279,13 +279,14 @@ export const updateFileDataContentById = async (token: string, id: string, conte
 	return res;
 };
 
-export const getFileContentById = async (id: string) => {
+export const getFileContentById = async (id: string, token: string = '') => {
 	let error = null;
 
 	const res = await fetch(`${WEBUI_API_BASE_URL}/files/${id}/content`, {
 		method: 'GET',
 		headers: {
-			Accept: 'application/json'
+			Accept: 'application/json',
+			...(token && { authorization: `Bearer ${token}` })
 		},
 		credentials: 'include'
 	})

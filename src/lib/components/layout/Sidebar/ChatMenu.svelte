@@ -1,6 +1,8 @@
 <script lang="ts">
 	import { getContext, tick } from 'svelte';
+	import type { Writable } from 'svelte/store';
 
+	// @ts-expect-error local workspace does not provide bundled file-saver types
 	import fileSaver from 'file-saver';
 	const { saveAs } = fileSaver;
 
@@ -18,6 +20,7 @@
 	import {
 		getChatById,
 		getChatPinnedStatusById,
+		updateChatAgentMemoryById,
 		toggleChatPinnedStatusById
 	} from '$lib/apis/chats';
 	import { chats, folders, settings, theme, user } from '$lib/stores';
@@ -27,7 +30,9 @@
 	import Folder from '$lib/components/icons/Folder.svelte';
 	import Messages from '$lib/components/chat/Messages.svelte';
 
-	const i18n = getContext('i18n');
+	const i18n = getContext<Writable<{ t: (key: string, params?: Record<string, unknown>) => string }>>(
+		'i18n'
+	);
 
 	export let shareHandler: Function;
 	export let moveChatHandler: Function;
@@ -43,8 +48,10 @@
 	let show = false;
 	let pinned = false;
 
-	let chat = null;
+	let chat: any = null;
 	let showFullMessages = false;
+	let agentMemoryMode: 'enabled' | 'disabled' = 'enabled';
+	let sortedFolders: Array<{ id: string; name?: string; updated_at?: number }> = [];
 
 	export let onPinChange: () => void = () => {};
 
@@ -57,7 +64,47 @@
 		pinned = await getChatPinnedStatusById(localStorage.token, chatId);
 	};
 
-	const getChatAsText = async (chat) => {
+	const getAgentMemoryMode = (meta: Record<string, any> | null | undefined): 'enabled' | 'disabled' => {
+		const agentMemory = meta?.agent_memory ?? {};
+		if (agentMemory?.mode === 'disabled' || agentMemory?.disabled === true) {
+			return 'disabled';
+		}
+		return 'enabled';
+	};
+
+	const loadAgentMemoryMode = async () => {
+		if (!chatId) {
+			return;
+		}
+
+		const currentChat = await getChatById(localStorage.token, chatId);
+		if (!currentChat) {
+			return;
+		}
+
+		chat = currentChat;
+		agentMemoryMode = getAgentMemoryMode(currentChat.meta);
+	};
+
+	const setAgentMemoryMode = async (mode: 'enabled' | 'disabled') => {
+		await updateChatAgentMemoryById(localStorage.token, chatId, mode);
+		agentMemoryMode = mode;
+		if (chat) {
+			chat.meta = {
+				...(chat.meta ?? {}),
+				agent_memory: {
+					...(chat.meta?.agent_memory ?? {}),
+					mode,
+					...(mode === 'disabled' ? { disabled: true } : {})
+				}
+			};
+			if (mode === 'enabled') {
+				delete chat.meta.agent_memory.disabled;
+			}
+		}
+	};
+
+	const getChatAsText = async (chat: any) => {
 		const history = chat.chat.history;
 		const messages = createMessagesList(history, history.currentId);
 		const chatText = messages.reduce((a, message, i, arr) => {
@@ -66,6 +113,10 @@
 
 		return chatText.trim();
 	};
+
+	$: sortedFolders = [...(($folders ?? []) as Array<{ id: string; name?: string; updated_at?: number }>)].sort(
+		(a, b) => (b.updated_at ?? 0) - (a.updated_at ?? 0)
+	);
 
 	const downloadTxt = async () => {
 		const chat = await getChatById(localStorage.token, chatId);
@@ -103,9 +154,9 @@
 					const virtualWidth = 800; // px, fixed width for cloned element
 
 					// Clone and style
-					const clonedElement = containerElement.cloneNode(true);
-					clonedElement.classList.add('text-black');
-					clonedElement.classList.add('dark:text-white');
+						const clonedElement = containerElement.cloneNode(true) as HTMLElement;
+						clonedElement.classList.add('text-black');
+						clonedElement.classList.add('dark:text-white');
 					clonedElement.style.width = `${virtualWidth}px`;
 					clonedElement.style.position = 'absolute';
 					clonedElement.style.left = '-9999px';
@@ -113,9 +164,9 @@
 					document.body.appendChild(clonedElement);
 
 					// Override content-visibility so html2canvas can capture all messages
-					clonedElement.querySelectorAll('.message-listitem').forEach((el) => {
-						el.style.contentVisibility = 'visible';
-					});
+						clonedElement.querySelectorAll<HTMLElement>('.message-listitem').forEach((el) => {
+							el.style.contentVisibility = 'visible';
+						});
 
 					// Let the browser compute layout for the cloned element
 					await new Promise((r) => requestAnimationFrame(r));
@@ -159,6 +210,9 @@
 						pageCanvas.height = sliceHeight;
 
 						const ctx = pageCanvas.getContext('2d');
+						if (!ctx) {
+							throw new Error('Failed to create PDF canvas context');
+						}
 
 						// Draw the slice of original canvas onto pageCanvas
 						ctx.drawImage(
@@ -260,26 +314,31 @@
 
 	$: if (show) {
 		checkPinned();
+		loadAgentMemoryMode();
 	}
 </script>
 
 {#if chat && showFullMessages}
 	<div class="hidden w-full h-full flex-col">
 		<div id="full-messages-container">
-			<Messages
-				className="h-full flex pt-4 pb-8 w-full"
-				chatId={`chat-preview-${chat?.id ?? ''}`}
-				user={$user}
-				readOnly={true}
-				history={chat.chat.history}
-				messages={chat.chat.messages}
-				autoScroll={true}
-				sendMessage={() => {}}
-				continueResponse={() => {}}
-				regenerateResponse={() => {}}
-				messagesCount={null}
-				editCodeBlock={false}
-			/>
+				<Messages
+					className="h-full flex pt-4 pb-8 w-full"
+					chatId={`chat-preview-${chat?.id ?? ''}`}
+					user={$user}
+					prompt={''}
+					readOnly={true}
+					history={chat.chat.history}
+					selectedModels={[]}
+					atSelectedModel={null}
+					autoScroll={true}
+					sendMessage={() => {}}
+					continueResponse={() => {}}
+					regenerateResponse={() => {}}
+					mergeResponses={() => {}}
+					chatActionHandler={() => {}}
+					messagesCount={null}
+					editCodeBlock={false}
+				/>
 		</div>
 	</div>
 {/if}
@@ -300,7 +359,7 @@
 		<div
 			class="select-none min-w-[200px] rounded-2xl px-1 py-1 border border-gray-100 dark:border-gray-800 z-50 bg-white dark:bg-gray-850 dark:text-white shadow-lg transition"
 		>
-			{#if $user?.role === 'admin' || ($user.permissions?.chat?.share ?? true)}
+			{#if $user?.role === 'admin' || ($user?.permissions?.chat?.share ?? true)}
 				<button
 					draggable="false"
 					class="flex gap-2 items-center px-3 py-1.5 text-sm cursor-pointer hover:bg-gray-50 dark:hover:bg-gray-800 rounded-xl w-full"
@@ -325,7 +384,7 @@
 					<div class="flex items-center">{$i18n.t('Download')}</div>
 				</button>
 
-				{#if $user?.role === 'admin' || ($user.permissions?.chat?.export ?? true)}
+					{#if $user?.role === 'admin' || ($user?.permissions?.chat?.export ?? true)}
 					<button
 						draggable="false"
 						class="flex gap-2 items-center px-3 py-1.5 text-sm cursor-pointer hover:bg-gray-50 dark:hover:bg-gray-800 rounded-xl w-full"
@@ -391,6 +450,22 @@
 				draggable="false"
 				class="flex gap-2 items-center px-3 py-1.5 text-sm cursor-pointer hover:bg-gray-50 dark:hover:bg-gray-800 rounded-xl w-full"
 				on:click={() => {
+					setAgentMemoryMode(agentMemoryMode === 'disabled' ? 'enabled' : 'disabled');
+				}}
+			>
+				{#if agentMemoryMode === 'disabled'}
+					<Bookmark strokeWidth="1.5" />
+					<div class="flex items-center">{$i18n.t('Remember this chat')}</div>
+				{:else}
+					<BookmarkSlash strokeWidth="1.5" />
+					<div class="flex items-center">{$i18n.t('Do not remember this chat')}</div>
+				{/if}
+			</button>
+
+			<button
+				draggable="false"
+				class="flex gap-2 items-center px-3 py-1.5 text-sm cursor-pointer hover:bg-gray-50 dark:hover:bg-gray-800 rounded-xl w-full"
+				on:click={() => {
 					show = false;
 					cloneChatHandler();
 				}}
@@ -412,7 +487,7 @@
 						<div class="flex items-center">{$i18n.t('Move')}</div>
 					</button>
 
-					{#each $folders.sort((a, b) => b.updated_at - a.updated_at) as folder}
+					{#each sortedFolders as folder}
 						<button
 							draggable="false"
 							class="flex gap-2 items-center px-3 py-1.5 text-sm cursor-pointer hover:bg-gray-50 dark:hover:bg-gray-800 rounded-xl overflow-hidden w-full"

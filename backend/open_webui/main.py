@@ -83,6 +83,15 @@ from open_webui.config import (
     AUDIO_TTS_OPENAI_PARAMS,
     AUDIO_TTS_SPLIT_ON,
     AUDIO_TTS_VOICE,
+    AGENT_MEMORY_CONSOLIDATION_CLAIM_LIMIT,
+    AGENT_MEMORY_CONSOLIDATION_MODEL,
+    AGENT_MEMORY_EXTRACTION_CLAIM_LIMIT,
+    AGENT_MEMORY_EXTRACTION_MODEL,
+    AGENT_MEMORY_IDLE_THRESHOLD_SECONDS,
+    AGENT_MEMORY_LEASE_SECONDS,
+    AGENT_MEMORY_RETRY_BACKOFF_SECONDS,
+    AGENT_MEMORY_STARTUP_CLAIM_LIMIT,
+    AGENT_MEMORY_SUMMARY_TOKEN_BUDGET,
     AUTOCOMPLETE_GENERATION_INPUT_MAX_LENGTH,
     AUTOCOMPLETE_GENERATION_PROMPT_TEMPLATE,
     # Image
@@ -91,6 +100,13 @@ from open_webui.config import (
     AUTOMATIC1111_PARAMS,
     AUTOMATION_MAX_COUNT,
     AUTOMATION_MIN_INTERVAL,
+    AGENT_RUN_DEFAULT_TIMEOUT_SECONDS,
+    AGENT_RUN_MAX_MODEL_CALLS,
+    AGENT_RUN_MAX_TOOL_CALLS,
+    AGENT_RUNTIME_BASE_URL,
+    AGENT_RUNTIME_SERVICE_TOKEN,
+    AGENT_SUBAGENT_DEFAULT_BUDGET,
+    AGENT_TEAM_MAX_SUBAGENTS,
     BING_SEARCH_V7_ENDPOINT,
     BING_SEARCH_V7_SUBSCRIPTION_KEY,
     BOCHA_SEARCH_API_KEY,
@@ -158,6 +174,7 @@ from open_webui.config import (
     ENABLE_ADMIN_EXPORT,
     ENABLE_API_KEYS,
     ENABLE_API_KEYS_ENDPOINT_RESTRICTIONS,
+    ENABLE_AGENT_MODE,
     ENABLE_ASYNC_EMBEDDING,
     ENABLE_AUTOCOMPLETE_GENERATION,
     ENABLE_AUTOMATIONS,
@@ -169,6 +186,10 @@ from open_webui.config import (
     ENABLE_CODE_EXECUTION,
     ENABLE_CODE_INTERPRETER,
     ENABLE_COMMUNITY_SHARING,
+    ENABLE_AGENT_MEMORY,
+    ENABLE_AGENT_MEMORY_DEDICATED_TOOLS,
+    ENABLE_AGENT_MEMORY_GENERATION,
+    ENABLE_AGENT_MEMORY_USE,
     # Direct Connections
     ENABLE_DIRECT_CONNECTIONS,
     ENABLE_EVALUATION_ARENA_MODELS,
@@ -178,6 +199,7 @@ from open_webui.config import (
     ENABLE_IMAGE_EDIT,
     ENABLE_IMAGE_GENERATION,
     ENABLE_IMAGE_PROMPT_GENERATION,
+    ENABLE_MULTIMODAL_KNOWLEDGE_EVIDENCE,
     # WebUI (LDAP)
     ENABLE_LDAP,
     ENABLE_LDAP_GROUP_CREATION,
@@ -192,6 +214,7 @@ from open_webui.config import (
     ENABLE_OAUTH_ROLE_MANAGEMENT,
     # Ollama
     ENABLE_OLLAMA_API,
+    ENABLE_ONLYOFFICE_PREVIEW,
     ENABLE_ONEDRIVE_BUSINESS,
     ENABLE_ONEDRIVE_INTEGRATION,
     ENABLE_ONEDRIVE_PERSONAL,
@@ -299,6 +322,12 @@ from open_webui.config import (
     OLLAMA_API_CONFIGS,
     OLLAMA_BASE_URLS,
     OLLAMA_CLOUD_WEB_SEARCH_API_KEY,
+    ONLYOFFICE_CALLBACK_ALLOWED_HOSTS,
+    ONLYOFFICE_DOCUMENT_SERVER_URL,
+    ONLYOFFICE_EDIT_CALLBACK_TOKEN_EXPIRES_IN,
+    ONLYOFFICE_FILE_TOKEN_EXPIRES_IN,
+    ONLYOFFICE_JWT_SECRET,
+    ONLYOFFICE_PUBLIC_BASE_URL,
     ONEDRIVE_CLIENT_ID_BUSINESS,
     ONEDRIVE_CLIENT_ID_PERSONAL,
     ONEDRIVE_SHAREPOINT_TENANT_ID,
@@ -306,7 +335,14 @@ from open_webui.config import (
     OPENAI_API_BASE_URLS,
     OPENAI_API_CONFIGS,
     OPENAI_API_KEYS,
+    PADDLEOCR_VL_ALLOWED_REMOTE_ORIGINS,
     PADDLEOCR_VL_BASE_URL,
+    PADDLEOCR_VL_DOWNLOAD_TIMEOUT,
+    PADDLEOCR_VL_MODEL,
+    PADDLEOCR_VL_OPTIONAL_PAYLOAD,
+    PADDLEOCR_VL_POLL_INTERVAL,
+    PADDLEOCR_VL_POLL_TIMEOUT,
+    PADDLEOCR_VL_REQUEST_TIMEOUT,
     PADDLEOCR_VL_TOKEN,
     PDF_EXTRACT_IMAGES,
     PDF_LOADER_MODE,
@@ -332,6 +368,7 @@ from open_webui.config import (
     RAG_EXTERNAL_RERANKER_API_KEY,
     RAG_EXTERNAL_RERANKER_TIMEOUT,
     RAG_EXTERNAL_RERANKER_URL,
+    RAG_EXTRACT_DOCUMENT_IMAGE_ASSETS,
     RAG_FILE_MAX_COUNT,
     RAG_FILE_MAX_SIZE,
     RAG_FULL_CONTEXT,
@@ -471,6 +508,7 @@ from open_webui.env import (
 )
 from open_webui.internal.db import ScopedSession, engine, get_async_session
 from open_webui.models.access_grants import AccessGrants
+from open_webui.models.agent_runs import AgentRuns
 from open_webui.models.channels import Channels
 from open_webui.models.chats import ChatForm, Chats
 from open_webui.models.functions import Functions
@@ -479,6 +517,9 @@ from open_webui.models.models import Models
 from open_webui.models.users import UserModel, Users
 from open_webui.routers import (
     analytics,
+    agent_memory,
+    agent_runs,
+    agent_service,
     audio,
     auths,
     automations,
@@ -593,6 +634,9 @@ from open_webui.routers.retrieval import (
     get_ef,
     get_rf,
 )
+from open_webui.retrieval.vector.async_client import ASYNC_VECTOR_DB_CLIENT
+from open_webui.retrieval.vector.embedding_adapter import get_evidence_retrieval_embedding_function
+from open_webui.retrieval.vector.multimodal import search_multimodal_evidence
 
 
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -784,7 +828,14 @@ from open_webui.config import (
     DOCUMENT_INTELLIGENCE_MODEL,
     MISTRAL_OCR_API_BASE_URL,
     MISTRAL_OCR_API_KEY,
+    PADDLEOCR_VL_ALLOWED_REMOTE_ORIGINS,
     PADDLEOCR_VL_BASE_URL,
+    PADDLEOCR_VL_DOWNLOAD_TIMEOUT,
+    PADDLEOCR_VL_MODEL,
+    PADDLEOCR_VL_OPTIONAL_PAYLOAD,
+    PADDLEOCR_VL_POLL_INTERVAL,
+    PADDLEOCR_VL_POLL_TIMEOUT,
+    PADDLEOCR_VL_REQUEST_TIMEOUT,
     PADDLEOCR_VL_TOKEN,
     RAG_TEXT_SPLITTER,
     ENABLE_MARKDOWN_HEADER_TEXT_SPLITTER,
@@ -1033,6 +1084,15 @@ from open_webui.env import (
     ENABLE_OAUTH_BACKCHANNEL_LOGOUT,
 )
 
+from open_webui.agent.runtime_client import (
+    AgentRuntimeClient,
+    AgentRuntimeError,
+    AgentRuntimeUnavailable,
+)
+from open_webui.agent.artifacts import AgentRunArtifactRegistrar
+from open_webui.agent.protocol import AgentEventType
+from open_webui.agent.resources import AgentRunResourceManager
+from open_webui.agent.tool_authority import build_tool_access_envelope
 
 from open_webui.utils.models import (
     get_all_models,
@@ -1046,6 +1106,7 @@ from open_webui.utils.chat import (
 from open_webui.utils.chat import (
     generate_chat_completion as chat_completion_handler,
 )
+from open_webui.utils.cache_invalidation import redis_cache_invalidation_listener
 from open_webui.utils.embeddings import generate_embeddings
 from open_webui.utils.logger import start_logger
 from open_webui.utils.middleware import (
@@ -1074,6 +1135,7 @@ from open_webui.utils.redis import get_redis_client, get_redis_connection
 from open_webui.utils.security_headers import SecurityHeadersMiddleware
 from open_webui.utils.session_pool import get_session
 from open_webui.utils.tools import set_terminal_servers, set_tool_servers
+from open_webui.utils import startup_singleton
 
 if SAFE_MODE:
     print('SAFE MODE ENABLED')
@@ -1119,6 +1181,75 @@ https://github.com/open-webui/open-webui
         print(f'Open WebUI v{VERSION} - building the best AI user interface.\nhttps://github.com/open-webui/open-webui')
 
 
+def _build_internal_startup_request(app: FastAPI) -> Request:
+    return Request(
+        {
+            'type': 'http',
+            'asgi.version': '3.0',
+            'asgi.spec_version': '2.0',
+            'method': 'GET',
+            'path': '/internal',
+            'query_string': b'',
+            'headers': Headers({}).raw,
+            'client': ('127.0.0.1', 12345),
+            'server': ('127.0.0.1', 80),
+            'scheme': 'http',
+            'app': app,
+        }
+    )
+
+
+async def _run_singleton_startup_tasks(app: FastAPI) -> None:
+    asyncio.create_task(periodic_usage_pool_cleanup())
+    asyncio.create_task(periodic_session_pool_cleanup())
+
+    from open_webui.utils.automations import scheduler_worker_loop
+    from open_webui.utils.agent_memory_extraction import enqueue_startup_agent_memory_backlog
+    from open_webui.utils.agent_memory_workers import start_agent_memory_worker_tasks
+
+    asyncio.create_task(scheduler_worker_loop(app))
+    asyncio.create_task(enqueue_startup_agent_memory_backlog(app))
+    start_agent_memory_worker_tasks(app)
+
+    if app.state.config.ENABLE_BASE_MODELS_CACHE:
+        try:
+            await get_all_models(_build_internal_startup_request(app), None)
+        except Exception as e:
+            log.warning(f'Failed to pre-fetch models at startup: {e}')
+
+    # Pre-fetch tool server specs so the first request doesn't pay the latency cost
+    if len(app.state.config.TOOL_SERVER_CONNECTIONS) > 0:
+        mock_request = _build_internal_startup_request(app)
+
+        log.info('Initializing tool servers...')
+        try:
+            await set_tool_servers(mock_request)
+            log.info(f'Initialized {len(app.state.TOOL_SERVERS)} tool server(s)')
+        except Exception as e:
+            log.warning(f'Failed to initialize tool servers at startup: {e}')
+
+        try:
+            await set_terminal_servers(mock_request)
+            log.info(f'Initialized {len(app.state.TERMINAL_SERVERS)} terminal server(s)')
+        except Exception as e:
+            log.warning(f'Failed to initialize terminal servers at startup: {e}')
+
+
+async def _install_tool_and_function_dependencies_once() -> None:
+    async def install_dependencies() -> None:
+        # This should block startup so functions are not deactivated on first /get_models calls
+        # when the first user lands on the / route.
+        log.info('Installing external dependencies of functions and tools...')
+        await install_tool_and_function_dependencies()
+
+    ran, _ = await startup_singleton.run_startup_once(
+        'tool-function-dependencies',
+        install_dependencies,
+    )
+    if not ran:
+        log.info('External dependencies of functions and tools already installed by another worker; skipping')
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     # Store reference to main event loop for sync->async calls (e.g., embedding generation)
@@ -1143,81 +1274,24 @@ async def lifespan(app: FastAPI):
     if SAFE_MODE:
         await Functions.deactivate_all_functions()
 
-    # This should be blocking (sync) so functions are not deactivated on first /get_models calls
-    # when the first user lands on the / route.
-    log.info('Installing external dependencies of functions and tools...')
-    await install_tool_and_function_dependencies()
+    await _install_tool_and_function_dependencies_once()
 
     app.state.redis = get_redis_client(async_mode=True)
 
     if app.state.redis is not None:
         app.state.redis_task_command_listener = asyncio.create_task(redis_task_command_listener(app))
+        app.state.redis_cache_invalidation_listener = asyncio.create_task(redis_cache_invalidation_listener(app))
 
     if THREAD_POOL_SIZE and THREAD_POOL_SIZE > 0:
         limiter = anyio.to_thread.current_default_thread_limiter()
         limiter.total_tokens = THREAD_POOL_SIZE
 
-    asyncio.create_task(periodic_usage_pool_cleanup())
-    asyncio.create_task(periodic_session_pool_cleanup())
-
-    from open_webui.utils.automations import scheduler_worker_loop
-
-    asyncio.create_task(scheduler_worker_loop(app))
-
-    if app.state.config.ENABLE_BASE_MODELS_CACHE:
-        try:
-            await get_all_models(
-                Request(
-                    # Creating a mock request object to pass to get_all_models
-                    {
-                        'type': 'http',
-                        'asgi.version': '3.0',
-                        'asgi.spec_version': '2.0',
-                        'method': 'GET',
-                        'path': '/internal',
-                        'query_string': b'',
-                        'headers': Headers({}).raw,
-                        'client': ('127.0.0.1', 12345),
-                        'server': ('127.0.0.1', 80),
-                        'scheme': 'http',
-                        'app': app,
-                    }
-                ),
-                None,
-            )
-        except Exception as e:
-            log.warning(f'Failed to pre-fetch models at startup: {e}')
-
-    # Pre-fetch tool server specs so the first request doesn't pay the latency cost
-    if len(app.state.config.TOOL_SERVER_CONNECTIONS) > 0:
-        mock_request = Request(
-            {
-                'type': 'http',
-                'asgi.version': '3.0',
-                'asgi.spec_version': '2.0',
-                'method': 'GET',
-                'path': '/internal',
-                'query_string': b'',
-                'headers': Headers({}).raw,
-                'client': ('127.0.0.1', 12345),
-                'server': ('127.0.0.1', 80),
-                'scheme': 'http',
-                'app': app,
-            }
-        )
-
-        log.info('Initializing tool servers...')
-        try:
-            await set_tool_servers(mock_request)
-            log.info(f'Initialized {len(app.state.TOOL_SERVERS)} tool server(s)')
-        except Exception as e:
-            log.warning(f'Failed to initialize tool servers at startup: {e}')
-
-        try:
-            await set_terminal_servers(mock_request)
-            log.info(f'Initialized {len(app.state.TERMINAL_SERVERS)} terminal server(s)')
-        except Exception as e:
-            log.warning(f'Failed to initialize terminal servers at startup: {e}')
+    startup_singleton_lock = startup_singleton.startup_singleton_lock('lifespan-startup-tasks')
+    if startup_singleton_lock.acquire():
+        app.state.startup_singleton_lock = startup_singleton_lock
+        await _run_singleton_startup_tasks(app)
+    else:
+        log.info('Startup singleton tasks already running in another worker; skipping in this worker')
 
     # Mark application as ready to accept traffic from a startup perspective.
     app.state.startup_complete = True
@@ -1226,11 +1300,19 @@ async def lifespan(app: FastAPI):
 
     # Shutdown: clean up shared resources
     from open_webui.utils.session_pool import close_session
+    from open_webui.utils.agent_memory_workers import stop_agent_memory_worker_tasks
 
+    await stop_agent_memory_worker_tasks(app)
     await close_session()
 
     if hasattr(app.state, 'redis_task_command_listener'):
         app.state.redis_task_command_listener.cancel()
+    if hasattr(app.state, 'redis_cache_invalidation_listener'):
+        app.state.redis_cache_invalidation_listener.cancel()
+
+    startup_singleton_lock = getattr(app.state, 'startup_singleton_lock', None)
+    if startup_singleton_lock is not None:
+        startup_singleton_lock.release()
 
 
 app = FastAPI(
@@ -1320,6 +1402,14 @@ app.state.TOOL_SERVERS = []
 app.state.config.TERMINAL_SERVER_CONNECTIONS = TERMINAL_SERVER_CONNECTIONS
 app.state.TERMINAL_SERVERS = []
 
+app.state.config.ENABLE_ONLYOFFICE_PREVIEW = ENABLE_ONLYOFFICE_PREVIEW
+app.state.config.ONLYOFFICE_DOCUMENT_SERVER_URL = ONLYOFFICE_DOCUMENT_SERVER_URL
+app.state.config.ONLYOFFICE_PUBLIC_BASE_URL = ONLYOFFICE_PUBLIC_BASE_URL
+app.state.config.ONLYOFFICE_JWT_SECRET = ONLYOFFICE_JWT_SECRET
+app.state.config.ONLYOFFICE_FILE_TOKEN_EXPIRES_IN = ONLYOFFICE_FILE_TOKEN_EXPIRES_IN
+app.state.config.ONLYOFFICE_EDIT_CALLBACK_TOKEN_EXPIRES_IN = ONLYOFFICE_EDIT_CALLBACK_TOKEN_EXPIRES_IN
+app.state.config.ONLYOFFICE_CALLBACK_ALLOWED_HOSTS = ONLYOFFICE_CALLBACK_ALLOWED_HOSTS
+
 ########################################
 #
 # DIRECT CONNECTIONS
@@ -1398,6 +1488,16 @@ app.state.config.FOLDER_MAX_FILE_COUNT = FOLDER_MAX_FILE_COUNT
 app.state.config.ENABLE_AUTOMATIONS = ENABLE_AUTOMATIONS
 app.state.config.AUTOMATION_MAX_COUNT = AUTOMATION_MAX_COUNT
 app.state.config.AUTOMATION_MIN_INTERVAL = AUTOMATION_MIN_INTERVAL
+app.state.config.ENABLE_AGENT_MODE = ENABLE_AGENT_MODE
+app.state.config.AGENT_RUNTIME_BASE_URL = AGENT_RUNTIME_BASE_URL
+app.state.config.AGENT_RUNTIME_SERVICE_TOKEN = AGENT_RUNTIME_SERVICE_TOKEN
+app.state.config.AGENT_RUN_DEFAULT_TIMEOUT_SECONDS = AGENT_RUN_DEFAULT_TIMEOUT_SECONDS
+app.state.config.AGENT_RUN_MAX_MODEL_CALLS = AGENT_RUN_MAX_MODEL_CALLS
+app.state.config.AGENT_RUN_MAX_TOOL_CALLS = AGENT_RUN_MAX_TOOL_CALLS
+app.state.config.AGENT_TEAM_MAX_SUBAGENTS = AGENT_TEAM_MAX_SUBAGENTS
+app.state.config.AGENT_SUBAGENT_DEFAULT_BUDGET = AGENT_SUBAGENT_DEFAULT_BUDGET
+app.state.AGENT_RUN_RESOURCE_MANAGER = AgentRunResourceManager()
+app.state.AGENT_RUN_ARTIFACT_REGISTRAR = AgentRunArtifactRegistrar(AgentRuns)
 app.state.config.ENABLE_CHANNELS = ENABLE_CHANNELS
 app.state.config.ENABLE_CALENDAR = ENABLE_CALENDAR
 app.state.config.ENABLE_NOTES = ENABLE_NOTES
@@ -1410,7 +1510,7 @@ app.state.config.ENABLE_EVALUATION_ARENA_MODELS = ENABLE_EVALUATION_ARENA_MODELS
 app.state.config.EVALUATION_ARENA_MODELS = EVALUATION_ARENA_MODELS
 
 # Migrate legacy access_control → access_grants on boot
-from open_webui.utils.access_control import has_permission, migrate_access_control
+from open_webui.utils.access_control import has_connection_access, has_permission, migrate_access_control
 
 connections = app.state.config.TOOL_SERVER_CONNECTIONS
 if any('access_control' in c.get('config', {}) for c in connections):
@@ -1492,6 +1592,8 @@ app.state.config.RAG_FULL_CONTEXT = RAG_FULL_CONTEXT
 app.state.config.BYPASS_EMBEDDING_AND_RETRIEVAL = BYPASS_EMBEDDING_AND_RETRIEVAL
 app.state.config.ENABLE_RAG_HYBRID_SEARCH = ENABLE_RAG_HYBRID_SEARCH
 app.state.config.ENABLE_RAG_HYBRID_SEARCH_ENRICHED_TEXTS = ENABLE_RAG_HYBRID_SEARCH_ENRICHED_TEXTS
+app.state.config.ENABLE_MULTIMODAL_KNOWLEDGE_EVIDENCE = ENABLE_MULTIMODAL_KNOWLEDGE_EVIDENCE
+app.state.config.RAG_EXTRACT_DOCUMENT_IMAGE_ASSETS = RAG_EXTRACT_DOCUMENT_IMAGE_ASSETS
 app.state.config.NATIVE_ATTACHED_KNOWLEDGE_BYPASS_LEGACY_FILE_RETRIEVAL = (
     NATIVE_ATTACHED_KNOWLEDGE_BYPASS_LEGACY_FILE_RETRIEVAL
 )
@@ -1522,6 +1624,13 @@ app.state.config.MISTRAL_OCR_API_BASE_URL = MISTRAL_OCR_API_BASE_URL
 app.state.config.MISTRAL_OCR_API_KEY = MISTRAL_OCR_API_KEY
 app.state.config.PADDLEOCR_VL_BASE_URL = PADDLEOCR_VL_BASE_URL
 app.state.config.PADDLEOCR_VL_TOKEN = PADDLEOCR_VL_TOKEN
+app.state.config.PADDLEOCR_VL_MODEL = PADDLEOCR_VL_MODEL
+app.state.config.PADDLEOCR_VL_OPTIONAL_PAYLOAD = PADDLEOCR_VL_OPTIONAL_PAYLOAD
+app.state.config.PADDLEOCR_VL_REQUEST_TIMEOUT = PADDLEOCR_VL_REQUEST_TIMEOUT
+app.state.config.PADDLEOCR_VL_DOWNLOAD_TIMEOUT = PADDLEOCR_VL_DOWNLOAD_TIMEOUT
+app.state.config.PADDLEOCR_VL_POLL_TIMEOUT = PADDLEOCR_VL_POLL_TIMEOUT
+app.state.config.PADDLEOCR_VL_POLL_INTERVAL = PADDLEOCR_VL_POLL_INTERVAL
+app.state.config.PADDLEOCR_VL_ALLOWED_REMOTE_ORIGINS = PADDLEOCR_VL_ALLOWED_REMOTE_ORIGINS
 app.state.config.MINERU_API_MODE = MINERU_API_MODE
 app.state.config.MINERU_API_URL = MINERU_API_URL
 app.state.config.MINERU_API_KEY = MINERU_API_KEY
@@ -1698,6 +1807,15 @@ app.state.EMBEDDING_FUNCTION = get_embedding_function(
     enable_async=app.state.config.ENABLE_ASYNC_EMBEDDING,
     concurrent_requests=app.state.config.RAG_EMBEDDING_CONCURRENT_REQUESTS,
 )
+app.state.EVIDENCE_RETRIEVAL_EMBEDDING = get_evidence_retrieval_embedding_function(
+    embedding_engine=app.state.config.RAG_EMBEDDING_ENGINE,
+    embedding_model=app.state.config.RAG_EMBEDDING_MODEL,
+    text_embedding_function=app.state.EMBEDDING_FUNCTION,
+    url=app.state.config.RAG_OPENAI_API_BASE_URL,
+    key=app.state.config.RAG_OPENAI_API_KEY,
+)
+app.state.EVIDENCE_RETRIEVAL_VECTOR_CLIENT = ASYNC_VECTOR_DB_CLIENT
+app.state.EVIDENCE_RETRIEVAL_SEARCH = search_multimodal_evidence
 
 app.state.RERANKING_FUNCTION = get_reranking_function(
     app.state.config.RAG_RERANKING_ENGINE,
@@ -1752,6 +1870,19 @@ app.state.config.IMAGE_GENERATION_ENGINE = IMAGE_GENERATION_ENGINE
 app.state.config.ENABLE_IMAGE_GENERATION = ENABLE_IMAGE_GENERATION
 app.state.config.ENABLE_IMAGE_PROMPT_GENERATION = ENABLE_IMAGE_PROMPT_GENERATION
 app.state.config.ENABLE_MEMORIES = ENABLE_MEMORIES
+app.state.config.ENABLE_AGENT_MEMORY = ENABLE_AGENT_MEMORY
+app.state.config.ENABLE_AGENT_MEMORY_GENERATION = ENABLE_AGENT_MEMORY_GENERATION
+app.state.config.ENABLE_AGENT_MEMORY_USE = ENABLE_AGENT_MEMORY_USE
+app.state.config.ENABLE_AGENT_MEMORY_DEDICATED_TOOLS = ENABLE_AGENT_MEMORY_DEDICATED_TOOLS
+app.state.config.AGENT_MEMORY_EXTRACTION_MODEL = AGENT_MEMORY_EXTRACTION_MODEL
+app.state.config.AGENT_MEMORY_CONSOLIDATION_MODEL = AGENT_MEMORY_CONSOLIDATION_MODEL
+app.state.config.AGENT_MEMORY_IDLE_THRESHOLD_SECONDS = AGENT_MEMORY_IDLE_THRESHOLD_SECONDS
+app.state.config.AGENT_MEMORY_STARTUP_CLAIM_LIMIT = AGENT_MEMORY_STARTUP_CLAIM_LIMIT
+app.state.config.AGENT_MEMORY_EXTRACTION_CLAIM_LIMIT = AGENT_MEMORY_EXTRACTION_CLAIM_LIMIT
+app.state.config.AGENT_MEMORY_CONSOLIDATION_CLAIM_LIMIT = AGENT_MEMORY_CONSOLIDATION_CLAIM_LIMIT
+app.state.config.AGENT_MEMORY_LEASE_SECONDS = AGENT_MEMORY_LEASE_SECONDS
+app.state.config.AGENT_MEMORY_RETRY_BACKOFF_SECONDS = AGENT_MEMORY_RETRY_BACKOFF_SECONDS
+app.state.config.AGENT_MEMORY_SUMMARY_TOKEN_BUDGET = AGENT_MEMORY_SUMMARY_TOKEN_BUDGET
 
 app.state.config.IMAGE_GENERATION_MODEL = IMAGE_GENERATION_MODEL
 app.state.config.IMAGE_SIZE = IMAGE_SIZE
@@ -1945,6 +2076,7 @@ app.include_router(tools.router, prefix='/api/v1/tools', tags=['tools'])
 app.include_router(skills.router, prefix='/api/v1/skills', tags=['skills'])
 
 app.include_router(memories.router, prefix='/api/v1/memories', tags=['memories'])
+app.include_router(agent_memory.router, prefix='/api/v1/agent-memory', tags=['agent-memory'])
 app.include_router(folders.router, prefix='/api/v1/folders', tags=['folders'])
 app.include_router(groups.router, prefix='/api/v1/groups', tags=['groups'])
 app.include_router(files.router, prefix='/api/v1/files', tags=['files'])
@@ -1957,6 +2089,8 @@ app.include_router(utils.router, prefix='/api/v1/utils', tags=['utils'])
 app.include_router(terminals.router, prefix='/api/v1/terminals', tags=['terminals'])
 app.include_router(automations.router, prefix='/api/v1/automations', tags=['automations'])
 app.include_router(calendar.router, prefix='/api/v1/calendars', tags=['calendars'])
+app.include_router(agent_runs.router, prefix='/api/agent/runs', tags=['agent-runs'])
+app.include_router(agent_service.router, prefix='/api/agent/service', tags=['agent-service'])
 
 # SCIM 2.0 API for identity management
 if ENABLE_SCIM:
@@ -2168,6 +2302,332 @@ async def embeddings(request: Request, form_data: dict, user=Depends(get_verifie
         await get_all_models(request, user=user)
     # Use generic dispatcher in utils.embeddings
     return await generate_embeddings(request, form_data, user)
+
+
+def _first_assistant_message_id(message_ids: dict | None) -> str | None:
+    if not message_ids:
+        return None
+    for message_id in message_ids.values():
+        if message_id:
+            return message_id
+    return None
+
+
+def _assistant_message_id_for_model(message_ids: dict | None, model_id: str | None) -> str | None:
+    if not message_ids:
+        return None
+    if model_id and message_ids.get(model_id):
+        return message_ids[model_id]
+
+    fallback_message_id = _first_assistant_message_id(message_ids)
+    if fallback_message_id:
+        log.warning(
+            'Agent Mode could not find assistant message id for leader model=%s; falling back to first assistant message id',
+            model_id,
+        )
+    return fallback_message_id
+
+
+def _is_agent_mode_product_chat(request: Request, metadata: dict, message_ids: dict | None) -> bool:
+    if getattr(request.state, 'agent_internal_model_call', False):
+        return False
+    if not getattr(request.app.state.config, 'ENABLE_AGENT_MODE', False):
+        return False
+    return bool(
+        metadata.get('chat_id')
+        and metadata.get('user_message_id')
+        and _first_assistant_message_id(message_ids)
+    )
+
+
+async def _first_accessible_system_terminal_id(request: Request, user) -> str | None:
+    connections = getattr(request.app.state.config, 'TERMINAL_SERVER_CONNECTIONS', None) or []
+    for connection in connections:
+        terminal_id = connection.get('id')
+        if not terminal_id or not connection.get('enabled', True):
+            continue
+        try:
+            if await has_connection_access(user, connection):
+                return terminal_id
+        except Exception as exc:
+            log.warning('Failed to check Agent Mode terminal access for %s: %s', terminal_id, exc)
+    return None
+
+
+async def _attach_default_agent_mode_terminal(request: Request, form_data: dict, user) -> None:
+    if form_data.get('terminal_id'):
+        return
+
+    terminal_id = await _first_accessible_system_terminal_id(request, user)
+    if terminal_id:
+        form_data['terminal_id'] = terminal_id
+
+
+def _agent_run_budget(config) -> dict:
+    return {
+        'timeout_seconds': getattr(config, 'AGENT_RUN_DEFAULT_TIMEOUT_SECONDS', None),
+        'max_model_calls': getattr(config, 'AGENT_RUN_MAX_MODEL_CALLS', None),
+        'max_tool_calls': getattr(config, 'AGENT_RUN_MAX_TOOL_CALLS', None),
+        'team_max_subagents': getattr(config, 'AGENT_TEAM_MAX_SUBAGENTS', None),
+        'subagent_default_budget': getattr(config, 'AGENT_SUBAGENT_DEFAULT_BUDGET', None),
+    }
+
+
+def _agent_runtime_model_params(form_data: dict) -> dict:
+    params = {}
+    request_params = form_data.get('params')
+    if isinstance(request_params, dict):
+        params.update({key: value for key, value in request_params.items() if value is not None})
+
+    reasoning = _agent_runtime_reasoning_params(form_data.get('reasoning'))
+    if reasoning:
+        params['reasoning'] = reasoning
+
+    return params
+
+
+def _agent_runtime_reasoning_params(value) -> dict:
+    if not isinstance(value, dict):
+        return {}
+
+    reasoning = {}
+    enabled = value.get('enabled')
+    if isinstance(enabled, bool):
+        reasoning['enabled'] = enabled
+
+    effort = value.get('effort')
+    if isinstance(effort, str) and effort.strip():
+        reasoning['effort'] = effort.strip()
+
+    max_tokens = value.get('max_tokens')
+    if max_tokens not in (None, ''):
+        reasoning['max_tokens'] = max_tokens
+
+    return reasoning
+
+
+def _agent_runtime_payload(
+    *,
+    run,
+    form_data: dict,
+    metadata: dict,
+    user,
+    leader_model_id: str,
+    budget: dict,
+    tool_access_envelope: dict,
+    model_params: dict | None = None,
+) -> dict:
+    model_meta = {}
+    model = metadata.get('model')
+    if isinstance(model, dict):
+        model_meta = model.get('info', {}).get('meta', {}) or {}
+
+    messages = form_data.get('messages')
+    if not isinstance(messages, list):
+        messages = [metadata.get('user_message')] if metadata.get('user_message') else []
+
+    runtime_metadata = {
+        'session_id': metadata.get('session_id'),
+        'features': metadata.get('features') or {},
+        'variables': metadata.get('variables') or {},
+        'stream': form_data.get('stream'),
+    }
+    runtime_model_params = model_params if model_params is not None else _agent_runtime_model_params(form_data)
+    if runtime_model_params:
+        runtime_metadata['model_params'] = runtime_model_params
+
+    return {
+        'run_id': run.id,
+        'chat_id': metadata.get('chat_id'),
+        'user_message_id': metadata.get('user_message_id'),
+        'assistant_message_id': run.assistant_message_id,
+        'leader_model_id': leader_model_id,
+        'user_ref': {
+            'id': user.id,
+            'role': getattr(user, 'role', None),
+        },
+        'budget': budget,
+        'team_cap': budget.get('team_max_subagents'),
+        'default_paths': {
+            'outputs': f'/workspace/agent-runs/{run.id}/outputs',
+            'tmp': f'/workspace/agent-runs/{run.id}/tmp',
+        },
+        'tool_access_envelope': tool_access_envelope,
+        'model_catalog': [
+            {
+                'id': leader_model_id,
+                'role': 'leader',
+                'meta': model_meta,
+            }
+        ],
+        'messages': messages,
+        'metadata': runtime_metadata,
+    }
+
+
+async def _link_agent_run_to_assistant_message(
+    metadata: dict,
+    *,
+    agent_run_id: str,
+    error: dict | None = None,
+) -> None:
+    chat_id = metadata.get('chat_id')
+    assistant_message_id = metadata.get('message_id') or metadata.get('assistant_message_id')
+    if not chat_id or not assistant_message_id:
+        return
+    if chat_id.startswith('local:') or chat_id.startswith('channel:'):
+        return
+
+    update = {
+        'parentId': metadata.get('user_message_id', None),
+        'agent_run_id': agent_run_id,
+    }
+    if error:
+        update['error'] = {'content': error.get('message') or 'Agent runtime unavailable'}
+
+    await Chats.upsert_message_to_chat_by_id_and_message_id(
+        chat_id,
+        assistant_message_id,
+        update,
+    )
+
+
+async def _start_agent_mode_chat(
+    request: Request,
+    form_data: dict,
+    user,
+    metadata: dict,
+    message_ids: dict,
+    model: dict,
+) -> dict:
+    leader_model_id = form_data.get('model') or next(iter(message_ids.keys()))
+    assistant_message_id = _assistant_message_id_for_model(message_ids, leader_model_id)
+    if not assistant_message_id:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail='Agent Mode requires an assistant message id',
+        )
+
+    metadata['message_id'] = assistant_message_id
+    metadata['assistant_message_id'] = assistant_message_id
+
+    requested_model_params = _agent_runtime_model_params(form_data)
+    form_data, metadata, _events = await process_chat_payload(request, form_data, user, metadata, model)
+    tool_access_envelope, tool_registry = build_tool_access_envelope(metadata.get('tools') or {})
+    tool_access_metadata = {
+        'session_id': metadata.get('session_id'),
+        'files': metadata.get('files') or [],
+    }
+    terminal_id = metadata.get('terminal_id') or form_data.get('terminal_id')
+    if terminal_id:
+        tool_access_metadata['terminal_id'] = terminal_id
+    skill_ids = metadata.get('skill_ids')
+    if isinstance(skill_ids, list):
+        tool_access_metadata['skill_ids'] = skill_ids
+    tool_access_envelope['metadata'] = tool_access_metadata
+
+    budget = _agent_run_budget(request.app.state.config)
+    run = await AgentRuns.create_run(
+        user_id=user.id,
+        chat_id=metadata['chat_id'],
+        user_message_id=metadata['user_message_id'],
+        assistant_message_id=assistant_message_id,
+        leader_model_id=leader_model_id,
+        budget=budget,
+        participants=[
+            {
+                'id': 'leader',
+                'role': 'leader',
+                'model_id': leader_model_id,
+            }
+        ],
+        tool_access_snapshot=tool_access_envelope,
+        model_catalog_snapshot={'leader_model_id': leader_model_id},
+    )
+    _install_agent_tool_registry(request, run.id, tool_registry)
+    await _link_agent_run_to_assistant_message(metadata, agent_run_id=run.id)
+    run = await AgentRuns.transition_state(
+        run.id,
+        from_states=['queued'],
+        to_state='running',
+        reason='runtime starting',
+    )
+
+    client = AgentRuntimeClient(
+        getattr(request.app.state.config, 'AGENT_RUNTIME_BASE_URL', ''),
+        service_token=getattr(request.app.state.config, 'AGENT_RUNTIME_SERVICE_TOKEN', ''),
+        timeout=getattr(request.app.state.config, 'AGENT_RUN_DEFAULT_TIMEOUT_SECONDS', None),
+    )
+    payload = _agent_runtime_payload(
+        run=run,
+        form_data=form_data,
+        metadata=metadata,
+        user=user,
+        leader_model_id=leader_model_id,
+        budget=budget,
+        tool_access_envelope=tool_access_envelope,
+        model_params=requested_model_params,
+    )
+
+    try:
+        runtime_response = await client.start_run(payload)
+    except (AgentRuntimeUnavailable, AgentRuntimeError) as exc:
+        _remove_agent_tool_registry(request, run.id)
+        error = {
+            'code': getattr(exc, 'code', 'agent_runtime_error'),
+            'message': str(exc),
+        }
+        await AgentRuns.transition_state(
+            run.id,
+            from_states=['queued', 'running'],
+            to_state='failed',
+            reason='runtime start failed',
+            payload={'error': error},
+        )
+        await AgentRuns.append_event(
+            run.id,
+            event_type=AgentEventType.RUN_FAILED.value,
+            participant_id='leader',
+            phase='failed',
+            payload={'error': error},
+        )
+        await _link_agent_run_to_assistant_message(metadata, agent_run_id=run.id, error=error)
+        return {
+            'status': False,
+            'chat_id': metadata['chat_id'],
+            'agent_run_id': run.id,
+            'task_ids': [],
+            'error': error,
+        }
+
+    runtime_session_id = runtime_response.get('runtime_session_id')
+    if runtime_session_id:
+        await AgentRuns.attach_runtime_session(run.id, runtime_session_id)
+    return {
+        'status': True,
+        'chat_id': metadata['chat_id'],
+        'agent_run_id': run.id,
+        'runtime_session_id': runtime_session_id,
+        'task_ids': [],
+    }
+
+
+def _install_agent_tool_registry(request: Request, run_id: str, registry: dict) -> None:
+    if not registry:
+        return
+
+    registries = getattr(request.app.state, 'AGENT_TOOL_REGISTRIES', None)
+    if registries is None:
+        registries = {}
+        request.app.state.AGENT_TOOL_REGISTRIES = registries
+
+    registries[run_id] = dict(registry)
+
+
+def _remove_agent_tool_registry(request: Request, run_id: str) -> None:
+    registries = getattr(request.app.state, 'AGENT_TOOL_REGISTRIES', None)
+    if isinstance(registries, dict):
+        registries.pop(run_id, None)
 
 
 @app.post('/api/chat/completions')
@@ -2537,6 +2997,10 @@ async def chat_completion(
         request.state.metadata = metadata
         form_data['metadata'] = metadata
 
+        if _is_agent_mode_product_chat(request, metadata, message_ids):
+            await _attach_default_agent_mode_terminal(request, form_data, user)
+            return await _start_agent_mode_chat(request, form_data, user, metadata, message_ids, model)
+
     except HTTPException:
         raise
     except Exception as e:
@@ -2882,6 +3346,13 @@ async def stop_tasks_by_chat_id_endpoint(request: Request, chat_id: str, user=De
         if chat is None or (chat.user_id != user.id and user.role != 'admin'):
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=ERROR_MESSAGES.NOT_FOUND)
     result = await stop_item_tasks(request.app.state.redis, chat_id)
+    cancelled_agent_run_ids = await agent_runs.cancel_agent_runs_for_chat(
+        request,
+        chat_id,
+        user=user,
+    )
+    if cancelled_agent_run_ids:
+        result['agent_run_ids'] = cancelled_agent_run_ids
     return result
 
 
@@ -2973,6 +3444,11 @@ async def get_app_config(request: Request):
                     'enable_google_drive_integration': app.state.config.ENABLE_GOOGLE_DRIVE_INTEGRATION,
                     'enable_onedrive_integration': app.state.config.ENABLE_ONEDRIVE_INTEGRATION,
                     'enable_memories': app.state.config.ENABLE_MEMORIES,
+                    'enable_agent_mode': app.state.config.ENABLE_AGENT_MODE,
+                    'enable_agent_memory': app.state.config.ENABLE_AGENT_MEMORY,
+                    'enable_agent_memory_generation': app.state.config.ENABLE_AGENT_MEMORY_GENERATION,
+                    'enable_agent_memory_use': app.state.config.ENABLE_AGENT_MEMORY_USE,
+                    'enable_agent_memory_dedicated_tools': app.state.config.ENABLE_AGENT_MEMORY_DEDICATED_TOOLS,
                     **(
                         {
                             'enable_onedrive_personal': ENABLE_ONEDRIVE_PERSONAL,

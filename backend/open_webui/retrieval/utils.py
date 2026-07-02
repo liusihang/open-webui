@@ -13,11 +13,6 @@ from urllib.parse import quote
 import aiohttp
 import requests
 from huggingface_hub import snapshot_download
-from langchain_classic.retrievers import (
-    ContextualCompressionRetriever,
-    EnsembleRetriever,
-)
-from langchain_community.retrievers import BM25Retriever
 from langchain_core.documents import Document
 from open_webui.config import (
     RAG_EMBEDDING_CONTENT_PREFIX,
@@ -40,6 +35,7 @@ from open_webui.models.files import Files
 from open_webui.models.knowledge import Knowledges
 from open_webui.models.notes import Notes
 from open_webui.models.users import UserModel
+from open_webui.retrieval.hybrid import HybridManifestNotReady, HybridSearchFailed, query_manifest_hybrid_search
 from open_webui.retrieval.loaders.youtube import YoutubeLoader
 from open_webui.retrieval.vector.async_client import ASYNC_VECTOR_DB_CLIENT
 from open_webui.retrieval.vector.factory import VECTOR_DB_CLIENT
@@ -50,12 +46,6 @@ from open_webui.utils.headers import include_user_info_headers
 from open_webui.utils.misc import get_message_list
 
 log = logging.getLogger(__name__)
-
-
-from typing import Any
-
-from langchain_core.callbacks import CallbackManagerForRetrieverRun
-from langchain_core.retrievers import BaseRetriever
 
 
 def is_youtube_url(url: str) -> bool:
@@ -103,6 +93,7 @@ def build_loader_from_config(request):
         DOCLING_SERVER_URL=config.DOCLING_SERVER_URL,
         DOCLING_API_KEY=config.DOCLING_API_KEY,
         DOCLING_PARAMS=config.DOCLING_PARAMS,
+        RAG_EXTRACT_DOCUMENT_IMAGE_ASSETS=config.RAG_EXTRACT_DOCUMENT_IMAGE_ASSETS,
         PDF_EXTRACT_IMAGES=config.PDF_EXTRACT_IMAGES,
         PDF_LOADER_MODE=config.PDF_LOADER_MODE,
         DOCUMENT_INTELLIGENCE_ENDPOINT=config.DOCUMENT_INTELLIGENCE_ENDPOINT,
@@ -112,6 +103,13 @@ def build_loader_from_config(request):
         MISTRAL_OCR_API_KEY=config.MISTRAL_OCR_API_KEY,
         PADDLEOCR_VL_BASE_URL=config.PADDLEOCR_VL_BASE_URL,
         PADDLEOCR_VL_TOKEN=config.PADDLEOCR_VL_TOKEN,
+        PADDLEOCR_VL_MODEL=config.PADDLEOCR_VL_MODEL,
+        PADDLEOCR_VL_OPTIONAL_PAYLOAD=config.PADDLEOCR_VL_OPTIONAL_PAYLOAD,
+        PADDLEOCR_VL_REQUEST_TIMEOUT=config.PADDLEOCR_VL_REQUEST_TIMEOUT,
+        PADDLEOCR_VL_DOWNLOAD_TIMEOUT=config.PADDLEOCR_VL_DOWNLOAD_TIMEOUT,
+        PADDLEOCR_VL_POLL_TIMEOUT=config.PADDLEOCR_VL_POLL_TIMEOUT,
+        PADDLEOCR_VL_POLL_INTERVAL=config.PADDLEOCR_VL_POLL_INTERVAL,
+        PADDLEOCR_VL_ALLOWED_REMOTE_ORIGINS=config.PADDLEOCR_VL_ALLOWED_REMOTE_ORIGINS,
         MINERU_API_MODE=config.MINERU_API_MODE,
         MINERU_API_URL=config.MINERU_API_URL,
         MINERU_API_KEY=config.MINERU_API_KEY,
@@ -217,61 +215,6 @@ def get_content_from_url(request, url: str) -> str:
         response.close()
 
 
-CHUNK_HASH_KEY = '_chunk_hash'
-
-
-def _content_hash(text: str) -> str:
-    """SHA-256 hash of text, used as a stable chunk identifier for RRF dedup."""
-    return hashlib.sha256(text.encode()).hexdigest()
-
-
-class VectorSearchRetriever(BaseRetriever):
-    collection_name: Any
-    embedding_function: Any
-    top_k: int
-
-    def _get_relevant_documents(self, query: str, *, run_manager: CallbackManagerForRetrieverRun) -> list[Document]:
-        """Get documents relevant to a query.
-
-        Args:
-            query: String to find relevant documents for.
-            run_manager: The callback handler to use.
-
-        Returns:
-            List of relevant documents.
-        """
-        return []
-
-    async def _aget_relevant_documents(
-        self,
-        query: str,
-        *,
-        run_manager: CallbackManagerForRetrieverRun,
-    ) -> list[Document]:
-        embedding = await self.embedding_function(query, RAG_EMBEDDING_QUERY_PREFIX)
-        result = await ASYNC_VECTOR_DB_CLIENT.search(
-            collection_name=self.collection_name,
-            vectors=[embedding],
-            limit=self.top_k,
-        )
-
-        ids = result.ids[0]
-        metadatas = result.metadatas[0]
-        documents = result.documents[0]
-
-        results = []
-        for idx in range(len(ids)):
-            metadata = metadatas[idx]
-            metadata[CHUNK_HASH_KEY] = _content_hash(documents[idx])
-            results.append(
-                Document(
-                    metadata=metadata,
-                    page_content=documents[idx],
-                )
-            )
-        return results
-
-
 def query_doc(collection_name: str, query_embedding: list[float], k: int, user: UserModel = None):
     try:
         log.debug(f'query_doc:doc {collection_name}')
@@ -340,7 +283,6 @@ def get_enriched_texts(collection_result: GetResult) -> list[str]:
 
 async def query_doc_with_hybrid_search(
     collection_name: str,
-    collection_result: GetResult,
     query: str,
     embedding_function,
     k: int,
@@ -351,101 +293,37 @@ async def query_doc_with_hybrid_search(
     enable_enriched_texts: bool = False,
 ) -> dict:
     try:
-        # First check if collection_result has the required attributes
-        if (
-            not collection_result
-            or not hasattr(collection_result, 'documents')
-            or not hasattr(collection_result, 'metadatas')
-        ):
-            log.warning(f'query_doc_with_hybrid_search:no_docs {collection_name}')
-            return {'documents': [], 'metadatas': [], 'distances': []}
-
-        # Now safely check the documents content after confirming attributes exist
-        if (
-            not collection_result.documents
-            or len(collection_result.documents) == 0
-            or not collection_result.documents[0]
-        ):
-            log.warning(f'query_doc_with_hybrid_search:no_docs {collection_name}')
-            return {'documents': [], 'metadatas': [], 'distances': []}
-
         log.debug(f'query_doc_with_hybrid_search:doc {collection_name}')
-
-        original_texts = collection_result.documents[0]
-        bm25_metadatas = [
-            {**meta, CHUNK_HASH_KEY: _content_hash(original_texts[idx])}
-            for idx, meta in enumerate(collection_result.metadatas[0])
-        ]
-
-        bm25_texts = get_enriched_texts(collection_result) if enable_enriched_texts else original_texts
-
-        bm25_retriever = BM25Retriever.from_texts(
-            texts=bm25_texts,
-            metadatas=bm25_metadatas,
-        )
-        bm25_retriever.k = k
-
-        vector_search_retriever = VectorSearchRetriever(
-            collection_name=collection_name,
+        result = await query_manifest_hybrid_search(
+            collection_names=[collection_name],
+            queries=[query],
             embedding_function=embedding_function,
-            top_k=k,
-        )
-
-        # Use CHUNK_HASH_KEY for dedup so enriched BM25 texts don't defeat RRF
-        if hybrid_bm25_weight <= 0:
-            ensemble_retriever = EnsembleRetriever(
-                retrievers=[vector_search_retriever],
-                weights=[1.0],
-                id_key=CHUNK_HASH_KEY,
-            )
-        elif hybrid_bm25_weight >= 1:
-            ensemble_retriever = EnsembleRetriever(
-                retrievers=[bm25_retriever],
-                weights=[1.0],
-                id_key=CHUNK_HASH_KEY,
-            )
-        else:
-            ensemble_retriever = EnsembleRetriever(
-                retrievers=[bm25_retriever, vector_search_retriever],
-                weights=[hybrid_bm25_weight, 1.0 - hybrid_bm25_weight],
-                id_key=CHUNK_HASH_KEY,
-            )
-
-        compressor = RerankCompressor(
-            embedding_function=embedding_function,
-            top_n=k_reranker,
+            k=k,
             reranking_function=reranking_function,
-            r_score=r,
+            k_reranker=k_reranker,
+            r=r,
+            hybrid_bm25_weight=hybrid_bm25_weight,
         )
-
-        compression_retriever = ContextualCompressionRetriever(
-            base_compressor=compressor, base_retriever=ensemble_retriever
-        )
-
-        result = await compression_retriever.ainvoke(query)
-
-        distances = [d.metadata.get('score') for d in result]
-        documents = [d.page_content for d in result]
-        metadatas = [d.metadata for d in result]
-
-        # retrieve only min(k, k_reranker) items, sort and cut by distance if k < k_reranker
-        if k < k_reranker:
-            sorted_items = sorted(zip(distances, documents, metadatas), key=lambda x: x[0], reverse=True)
-            sorted_items = sorted_items[:k]
-
-            if sorted_items:
-                distances, documents, metadatas = map(list, zip(*sorted_items))
-            else:
-                distances, documents, metadatas = [], [], []
-
-        result = {
-            'distances': [distances],
-            'documents': [documents],
-            'metadatas': [metadatas],
-        }
-
         log.info('query_doc_with_hybrid_search:result ' + f'{result["metadatas"]} {result["distances"]}')
         return result
+    except HybridManifestNotReady as e:
+        log.warning(
+            'Hybrid manifest not ready for collection %s; falling back to vector search: %s',
+            collection_name,
+            e,
+            exc_info=True,
+        )
+        query_embedding = await embedding_function(query, RAG_EMBEDDING_QUERY_PREFIX)
+        result = await ASYNC_VECTOR_DB_CLIENT.search(
+            collection_name=collection_name,
+            vectors=[query_embedding],
+            limit=k,
+        )
+        return (
+            result.model_dump()
+            if result is not None
+            else {'distances': [[]], 'documents': [[]], 'metadatas': [[]]}
+        )
     except Exception as e:
         log.exception(f'Error querying doc {collection_name} with hybrid search: {e}')
         raise e
@@ -558,8 +436,28 @@ async def query_collection(
                 hybrid_bm25_weight=request.app.state.config.HYBRID_BM25_WEIGHT,
                 enable_enriched_texts=request.app.state.config.ENABLE_RAG_HYBRID_SEARCH_ENRICHED_TEXTS,
             )
+        except HybridSearchFailed as e:
+            log.warning(
+                'Hybrid search failed for all branches in collections %s: %s',
+                collection_names,
+                e,
+                exc_info=True,
+            )
+            raise
+        except HybridManifestNotReady as e:
+            log.warning(
+                'Hybrid manifest not ready for collections %s; falling back to vector search: %s',
+                collection_names,
+                e,
+                exc_info=True,
+            )
         except Exception as e:
-            log.debug(f'Hybrid search failed, falling back to vector search: {e}')
+            log.warning(
+                'Hybrid search failed for collections %s; falling back to vector search: %s',
+                collection_names,
+                e,
+                exc_info=True,
+            )
 
     results = []
     error = False
@@ -621,70 +519,32 @@ async def query_collection_with_hybrid_search(
     hybrid_bm25_weight: float,
     enable_enriched_texts: bool = False,
 ) -> dict:
-    results = []
-    error = False
-    # Fetch every collection's contents once up front so the
-    # per-query/per-document loop below can reuse them. Each fetch
-    # offloads to a worker thread, so run them concurrently with
-    # `asyncio.gather` instead of awaiting them serially — otherwise
-    # latency scales linearly with `len(collection_names)`.
-    log.debug(
-        'query_collection_with_hybrid_search: prefetching %d collections',
-        len(collection_names),
-    )
-
-    async def _fetch_collection(name: str):
-        try:
-            return name, await ASYNC_VECTOR_DB_CLIENT.get(collection_name=name)
-        except Exception as e:
-            log.exception(f'Failed to fetch collection {name}: {e}')
-            return name, None
-
-    collection_results = dict(await asyncio.gather(*(_fetch_collection(name) for name in collection_names)))
-
     log.info(f'Starting hybrid search for {len(queries)} queries in {len(collection_names)} collections...')
-
-    async def process_query(collection_name, query):
-        try:
-            result = await query_doc_with_hybrid_search(
-                collection_name=collection_name,
-                collection_result=collection_results[collection_name],
-                query=query,
-                embedding_function=embedding_function,
-                k=k,
-                reranking_function=reranking_function,
-                k_reranker=k_reranker,
-                r=r,
-                hybrid_bm25_weight=hybrid_bm25_weight,
-                enable_enriched_texts=enable_enriched_texts,
-            )
-            return result, None
-        except Exception as e:
-            log.exception(f'Error when querying the collection with hybrid_search: {e}')
-            return None, e
-
-    # Prepare tasks for all collections and queries
-    # Avoid running any tasks for collections that failed to fetch data (have assigned None)
-    tasks = [
-        (collection_name, query)
-        for collection_name in collection_names
-        if collection_results[collection_name] is not None
-        for query in queries
-    ]
-
-    # Run all queries in parallel using asyncio.gather
-    task_results = await asyncio.gather(*[process_query(collection_name, query) for collection_name, query in tasks])
-
-    for result, err in task_results:
-        if err is not None:
-            error = True
-        elif result is not None:
-            results.append(result)
-
-    if error and not results:
-        raise Exception('Hybrid search failed for all collections. Using Non-hybrid search as fallback.')
-
-    return merge_and_sort_query_results(results, k=k)
+    try:
+        return await query_manifest_hybrid_search(
+            collection_names=collection_names,
+            queries=queries,
+            embedding_function=embedding_function,
+            k=k,
+            reranking_function=reranking_function,
+            k_reranker=k_reranker,
+            r=r,
+            hybrid_bm25_weight=hybrid_bm25_weight,
+        )
+    except HybridManifestNotReady as e:
+        log.warning(
+            'Hybrid manifest not ready for collections %s; falling back to vector search: %s',
+            collection_names,
+            e,
+            exc_info=True,
+        )
+        return await query_collection(
+            None,
+            collection_names=collection_names,
+            queries=queries,
+            embedding_function=embedding_function,
+            k=k,
+        )
 
 
 def generate_openai_batch_embeddings(
@@ -1095,6 +955,8 @@ async def filter_accessible_collections(
       - any name with characters outside [A-Za-z0-9_-] → rejected
       - file-*          → validated via has_access_to_file
       - user-memory-*   → must match user's own memory collection
+      - agent-memory-*  → read access validated against Agent Memory
+                          user/scope ownership; write denied
       - web-search-*    → ephemeral per-query collections, always allowed
       - knowledge-bases → always denied (system meta-collection)
       - everything else → if the name matches a knowledge base, validated
@@ -1114,11 +976,20 @@ async def filter_accessible_collections(
             getattr(user, 'id', '<unknown>'),
         )
 
-    if user.role == 'admin':
-        return safe_names
+    agent_memory_names = {n for n in safe_names if n.startswith('agent-memory-')}
+    validated_agent_memory = set()
+    if agent_memory_names:
+        from open_webui.utils.agent_memory_index import can_access_agent_memory_collection
 
-    validated = set()
-    for name in safe_names:
+        for name in agent_memory_names:
+            if await can_access_agent_memory_collection(name, user, access_type=access_type):
+                validated_agent_memory.add(name)
+
+    if user.role == 'admin':
+        return (safe_names - agent_memory_names) | validated_agent_memory
+
+    validated = set(validated_agent_memory)
+    for name in safe_names - agent_memory_names:
         if name == 'knowledge-bases':
             # System meta-collection — never exposed to non-admins.
             continue

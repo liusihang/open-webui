@@ -1,12 +1,15 @@
 from __future__ import annotations
 
+import logging
+
 # Alembic environment configuration runner.
 # Coordinates database migrations in both offline and online execution modes.
 import logging.config
-import logging
+
 import alembic.context
 from open_webui.env import DATABASE_PASSWORD, DATABASE_URL, LOG_FORMAT
 from open_webui.internal.db import extract_ssl_params_from_url, reattach_ssl_params_to_url
+from open_webui.models.agent_runs import AgentArtifact, AgentRun, AgentRunEvent, AgentRunOperation  # noqa: F401
 from open_webui.models.auths import Auth
 from open_webui.models.calendar import Calendar, CalendarEvent, CalendarEventAttendee  # noqa: F401
 from sqlalchemy import create_engine, engine_from_config, pool

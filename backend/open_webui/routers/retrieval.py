@@ -1,32 +1,24 @@
 from __future__ import annotations
 
 import asyncio
-import json
 import logging
-import mimetypes
 import os
-import re
 import shutil
+import time
 import uuid
-from datetime import datetime
+from collections.abc import Callable, Sequence
 from pathlib import Path
-from typing import Callable, Iterator, Optional, Sequence, Union
 
 import tiktoken
 from fastapi import (
     APIRouter,
     Depends,
-    FastAPI,
-    File,
-    Form,
     HTTPException,
     Query,
     Request,
-    UploadFile,
     status,
 )
 from fastapi.concurrency import run_in_threadpool
-from fastapi.middleware.cors import CORSMiddleware
 from langchain_core.documents import Document
 from langchain_text_splitters import (
     MarkdownHeaderTextSplitter,
@@ -58,9 +50,21 @@ from open_webui.env import (
 from open_webui.internal.db import get_async_db, get_async_session
 from open_webui.models.files import FileModel, Files, FileUpdateForm
 from open_webui.models.knowledge import Knowledges
+from open_webui.models.retrieval_chunks import (
+    compute_chunk_uid,
+    compute_chunker_config_hash,
+    compute_content_hash,
+)
+from open_webui.models.retrieval_indexes import compute_target_config_hash
+from open_webui.retrieval.indexing import (
+    SqlAlchemyManifestChunkStore,
+    deactivate_all_chunks_for_reset,
+    deactivate_chunks_for_scope,
+    enqueue_evidence_projection_job,
+    run_retrieval_index_job,
+)
 
 # Document loaders
-from open_webui.retrieval.loaders.youtube import YoutubeLoader
 from open_webui.retrieval.utils import (
     build_loader_from_config,
     filter_accessible_collections,
@@ -74,6 +78,7 @@ from open_webui.retrieval.utils import (
     query_doc_with_hybrid_search,
 )
 from open_webui.retrieval.vector.async_client import ASYNC_VECTOR_DB_CLIENT
+from open_webui.retrieval.vector.embedding_adapter import get_evidence_retrieval_embedding_function
 from open_webui.retrieval.vector.factory import VECTOR_DB_CLIENT
 from open_webui.retrieval.vector.utils import filter_metadata
 from open_webui.retrieval.web.azure import search_azure
@@ -88,6 +93,7 @@ from open_webui.retrieval.web.firecrawl import search_firecrawl
 from open_webui.retrieval.web.google_pse import search_google_pse
 from open_webui.retrieval.web.jina_search import search_jina
 from open_webui.retrieval.web.kagi import search_kagi
+from open_webui.retrieval.web.linkup import search_linkup
 
 # Web search engines
 from open_webui.retrieval.web.main import SearchResult
@@ -107,10 +113,8 @@ from open_webui.retrieval.web.utils import get_web_loader
 from open_webui.retrieval.web.yacy import search_yacy
 from open_webui.retrieval.web.yandex import search_yandex
 from open_webui.retrieval.web.ydc import search_youcom
-from open_webui.retrieval.web.linkup import search_linkup
 from open_webui.storage.provider import Storage
 from open_webui.utils.access_control import has_permission
-from open_webui.utils.access_control.files import has_access_to_file
 from open_webui.utils.auth import get_admin_user, get_verified_user
 from open_webui.utils.misc import (
     calculate_sha256_string,
@@ -128,6 +132,20 @@ log = logging.getLogger(__name__)
 # not into hallucination, but deliver us from noise.
 #
 ##########################################
+
+
+def _collect_document_image_assets_from_docs(docs: Sequence[Document]) -> list[dict]:
+    assets: list[dict] = []
+    for doc in docs:
+        doc_assets = doc.metadata.get('document_image_assets') if isinstance(doc.metadata, dict) else None
+        if not isinstance(doc_assets, list):
+            continue
+        assets.extend(asset for asset in doc_assets if isinstance(asset, dict))
+    return assets
+
+
+def _is_metadata_only_document(doc: Document) -> bool:
+    return bool(doc.metadata.get('_metadata_only')) if isinstance(doc.metadata, dict) else False
 
 
 def get_ef(
@@ -387,6 +405,13 @@ async def update_embedding_config(request: Request, form_data: EmbeddingModelUpd
             enable_async=request.app.state.config.ENABLE_ASYNC_EMBEDDING,
             concurrent_requests=request.app.state.config.RAG_EMBEDDING_CONCURRENT_REQUESTS,
         )
+        request.app.state.EVIDENCE_RETRIEVAL_EMBEDDING = get_evidence_retrieval_embedding_function(
+            embedding_engine=request.app.state.config.RAG_EMBEDDING_ENGINE,
+            embedding_model=request.app.state.config.RAG_EMBEDDING_MODEL,
+            text_embedding_function=request.app.state.EMBEDDING_FUNCTION,
+            url=request.app.state.config.RAG_OPENAI_API_BASE_URL,
+            key=request.app.state.config.RAG_OPENAI_API_KEY,
+        )
 
         return {
             'status': True,
@@ -434,6 +459,7 @@ async def get_rag_config(request: Request, user=Depends(get_admin_user)):
         'HYBRID_BM25_WEIGHT': request.app.state.config.HYBRID_BM25_WEIGHT,
         # Content extraction settings
         'CONTENT_EXTRACTION_ENGINE': request.app.state.config.CONTENT_EXTRACTION_ENGINE,
+        'RAG_EXTRACT_DOCUMENT_IMAGE_ASSETS': request.app.state.config.RAG_EXTRACT_DOCUMENT_IMAGE_ASSETS,
         'PDF_EXTRACT_IMAGES': request.app.state.config.PDF_EXTRACT_IMAGES,
         'PDF_LOADER_MODE': request.app.state.config.PDF_LOADER_MODE,
         'DATALAB_MARKER_API_KEY': request.app.state.config.DATALAB_MARKER_API_KEY,
@@ -460,7 +486,14 @@ async def get_rag_config(request: Request, user=Depends(get_admin_user)):
         'MISTRAL_OCR_API_KEY': request.app.state.config.MISTRAL_OCR_API_KEY,
         'PADDLEOCR_VL_BASE_URL': request.app.state.config.PADDLEOCR_VL_BASE_URL,
         'PADDLEOCR_VL_TOKEN': request.app.state.config.PADDLEOCR_VL_TOKEN,
-        # MinerU settings
+        'PADDLEOCR_VL_MODEL': request.app.state.config.PADDLEOCR_VL_MODEL,
+        'PADDLEOCR_VL_OPTIONAL_PAYLOAD': request.app.state.config.PADDLEOCR_VL_OPTIONAL_PAYLOAD,
+        'PADDLEOCR_VL_REQUEST_TIMEOUT': request.app.state.config.PADDLEOCR_VL_REQUEST_TIMEOUT,
+        'PADDLEOCR_VL_DOWNLOAD_TIMEOUT': request.app.state.config.PADDLEOCR_VL_DOWNLOAD_TIMEOUT,
+        'PADDLEOCR_VL_POLL_TIMEOUT': request.app.state.config.PADDLEOCR_VL_POLL_TIMEOUT,
+        'PADDLEOCR_VL_POLL_INTERVAL': request.app.state.config.PADDLEOCR_VL_POLL_INTERVAL,
+        'PADDLEOCR_VL_ALLOWED_REMOTE_ORIGINS': request.app.state.config.PADDLEOCR_VL_ALLOWED_REMOTE_ORIGINS,
+    # MinerU settings
         'MINERU_API_MODE': request.app.state.config.MINERU_API_MODE,
         'MINERU_API_URL': request.app.state.config.MINERU_API_URL,
         'MINERU_API_KEY': request.app.state.config.MINERU_API_KEY,
@@ -636,6 +669,7 @@ class ConfigForm(BaseModel):
     TOP_K: int | None = None
     BYPASS_EMBEDDING_AND_RETRIEVAL: bool | None = None
     RAG_FULL_CONTEXT: bool | None = None
+    ENABLE_MULTIMODAL_KNOWLEDGE_EVIDENCE: bool | None = None
 
     # Hybrid search settings
     ENABLE_RAG_HYBRID_SEARCH: bool | None = None
@@ -646,6 +680,7 @@ class ConfigForm(BaseModel):
 
     # Content extraction settings
     CONTENT_EXTRACTION_ENGINE: str | None = None
+    RAG_EXTRACT_DOCUMENT_IMAGE_ASSETS: bool | None = None
     PDF_EXTRACT_IMAGES: bool | None = None
     PDF_LOADER_MODE: str | None = None
 
@@ -675,6 +710,13 @@ class ConfigForm(BaseModel):
     MISTRAL_OCR_API_KEY: str | None = None
     PADDLEOCR_VL_BASE_URL: str | None = None
     PADDLEOCR_VL_TOKEN: str | None = None
+    PADDLEOCR_VL_MODEL: str | None = None
+    PADDLEOCR_VL_OPTIONAL_PAYLOAD: dict | None = None
+    PADDLEOCR_VL_REQUEST_TIMEOUT: int | None = None
+    PADDLEOCR_VL_DOWNLOAD_TIMEOUT: int | None = None
+    PADDLEOCR_VL_POLL_TIMEOUT: int | None = None
+    PADDLEOCR_VL_POLL_INTERVAL: float | None = None
+    PADDLEOCR_VL_ALLOWED_REMOTE_ORIGINS: list[str] | None = None
 
     # MinerU settings
     MINERU_API_MODE: str | None = None
@@ -700,10 +742,10 @@ class ConfigForm(BaseModel):
     CHUNK_OVERLAP: int | None = None
 
     # File upload settings
-    FILE_MAX_SIZE: Union[int, str | None] = None
-    FILE_MAX_COUNT: Union[int, str | None] = None
-    FILE_IMAGE_COMPRESSION_WIDTH: Union[int, str | None] = None
-    FILE_IMAGE_COMPRESSION_HEIGHT: Union[int, str | None] = None
+    FILE_MAX_SIZE: int | (str | None) = None
+    FILE_MAX_COUNT: int | (str | None) = None
+    FILE_IMAGE_COMPRESSION_WIDTH: int | (str | None) = None
+    FILE_IMAGE_COMPRESSION_HEIGHT: int | (str | None) = None
     ALLOWED_FILE_EXTENSIONS: list[str | None] = None
 
     # Integration settings
@@ -730,6 +772,11 @@ async def update_rag_config(request: Request, form_data: ConfigForm, user=Depend
         form_data.RAG_FULL_CONTEXT
         if form_data.RAG_FULL_CONTEXT is not None
         else request.app.state.config.RAG_FULL_CONTEXT
+    )
+    request.app.state.config.ENABLE_MULTIMODAL_KNOWLEDGE_EVIDENCE = (
+        form_data.ENABLE_MULTIMODAL_KNOWLEDGE_EVIDENCE
+        if form_data.ENABLE_MULTIMODAL_KNOWLEDGE_EVIDENCE is not None
+        else request.app.state.config.ENABLE_MULTIMODAL_KNOWLEDGE_EVIDENCE
     )
 
     # Hybrid search settings
@@ -768,6 +815,11 @@ async def update_rag_config(request: Request, form_data: ConfigForm, user=Depend
         form_data.PDF_EXTRACT_IMAGES
         if form_data.PDF_EXTRACT_IMAGES is not None
         else request.app.state.config.PDF_EXTRACT_IMAGES
+    )
+    request.app.state.config.RAG_EXTRACT_DOCUMENT_IMAGE_ASSETS = (
+        form_data.RAG_EXTRACT_DOCUMENT_IMAGE_ASSETS
+        if form_data.RAG_EXTRACT_DOCUMENT_IMAGE_ASSETS is not None
+        else request.app.state.config.RAG_EXTRACT_DOCUMENT_IMAGE_ASSETS
     )
     request.app.state.config.PDF_LOADER_MODE = (
         form_data.PDF_LOADER_MODE if form_data.PDF_LOADER_MODE is not None else request.app.state.config.PDF_LOADER_MODE
@@ -887,8 +939,43 @@ async def update_rag_config(request: Request, form_data: ConfigForm, user=Depend
         if form_data.PADDLEOCR_VL_TOKEN is not None
         else request.app.state.config.PADDLEOCR_VL_TOKEN
     )
+    request.app.state.config.PADDLEOCR_VL_MODEL = (
+        form_data.PADDLEOCR_VL_MODEL
+        if form_data.PADDLEOCR_VL_MODEL is not None
+        else request.app.state.config.PADDLEOCR_VL_MODEL
+    )
+    request.app.state.config.PADDLEOCR_VL_OPTIONAL_PAYLOAD = (
+        form_data.PADDLEOCR_VL_OPTIONAL_PAYLOAD
+        if form_data.PADDLEOCR_VL_OPTIONAL_PAYLOAD is not None
+        else request.app.state.config.PADDLEOCR_VL_OPTIONAL_PAYLOAD
+    )
+    request.app.state.config.PADDLEOCR_VL_REQUEST_TIMEOUT = (
+        form_data.PADDLEOCR_VL_REQUEST_TIMEOUT
+        if form_data.PADDLEOCR_VL_REQUEST_TIMEOUT is not None
+        else request.app.state.config.PADDLEOCR_VL_REQUEST_TIMEOUT
+    )
+    request.app.state.config.PADDLEOCR_VL_DOWNLOAD_TIMEOUT = (
+        form_data.PADDLEOCR_VL_DOWNLOAD_TIMEOUT
+        if form_data.PADDLEOCR_VL_DOWNLOAD_TIMEOUT is not None
+        else request.app.state.config.PADDLEOCR_VL_DOWNLOAD_TIMEOUT
+    )
+    request.app.state.config.PADDLEOCR_VL_POLL_TIMEOUT = (
+        form_data.PADDLEOCR_VL_POLL_TIMEOUT
+        if form_data.PADDLEOCR_VL_POLL_TIMEOUT is not None
+        else request.app.state.config.PADDLEOCR_VL_POLL_TIMEOUT
+    )
+    request.app.state.config.PADDLEOCR_VL_POLL_INTERVAL = (
+        form_data.PADDLEOCR_VL_POLL_INTERVAL
+        if form_data.PADDLEOCR_VL_POLL_INTERVAL is not None
+        else request.app.state.config.PADDLEOCR_VL_POLL_INTERVAL
+    )
+    request.app.state.config.PADDLEOCR_VL_ALLOWED_REMOTE_ORIGINS = (
+        form_data.PADDLEOCR_VL_ALLOWED_REMOTE_ORIGINS
+        if form_data.PADDLEOCR_VL_ALLOWED_REMOTE_ORIGINS is not None
+        else request.app.state.config.PADDLEOCR_VL_ALLOWED_REMOTE_ORIGINS
+    )
 
-    # MinerU settings
+        # MinerU settings
     request.app.state.config.MINERU_API_MODE = (
         form_data.MINERU_API_MODE if form_data.MINERU_API_MODE is not None else request.app.state.config.MINERU_API_MODE
     )
@@ -1131,6 +1218,7 @@ async def update_rag_config(request: Request, form_data: ConfigForm, user=Depend
         'TOP_K': request.app.state.config.TOP_K,
         'BYPASS_EMBEDDING_AND_RETRIEVAL': request.app.state.config.BYPASS_EMBEDDING_AND_RETRIEVAL,
         'RAG_FULL_CONTEXT': request.app.state.config.RAG_FULL_CONTEXT,
+        'ENABLE_MULTIMODAL_KNOWLEDGE_EVIDENCE': request.app.state.config.ENABLE_MULTIMODAL_KNOWLEDGE_EVIDENCE,
         # Hybrid search settings
         'ENABLE_RAG_HYBRID_SEARCH': request.app.state.config.ENABLE_RAG_HYBRID_SEARCH,
         'TOP_K_RERANKER': request.app.state.config.TOP_K_RERANKER,
@@ -1138,6 +1226,7 @@ async def update_rag_config(request: Request, form_data: ConfigForm, user=Depend
         'HYBRID_BM25_WEIGHT': request.app.state.config.HYBRID_BM25_WEIGHT,
         # Content extraction settings
         'CONTENT_EXTRACTION_ENGINE': request.app.state.config.CONTENT_EXTRACTION_ENGINE,
+        'RAG_EXTRACT_DOCUMENT_IMAGE_ASSETS': request.app.state.config.RAG_EXTRACT_DOCUMENT_IMAGE_ASSETS,
         'PDF_EXTRACT_IMAGES': request.app.state.config.PDF_EXTRACT_IMAGES,
         'PDF_LOADER_MODE': request.app.state.config.PDF_LOADER_MODE,
         'DATALAB_MARKER_API_KEY': request.app.state.config.DATALAB_MARKER_API_KEY,
@@ -1163,6 +1252,13 @@ async def update_rag_config(request: Request, form_data: ConfigForm, user=Depend
         'MISTRAL_OCR_API_KEY': request.app.state.config.MISTRAL_OCR_API_KEY,
         'PADDLEOCR_VL_BASE_URL': request.app.state.config.PADDLEOCR_VL_BASE_URL,
         'PADDLEOCR_VL_TOKEN': request.app.state.config.PADDLEOCR_VL_TOKEN,
+        'PADDLEOCR_VL_MODEL': request.app.state.config.PADDLEOCR_VL_MODEL,
+        'PADDLEOCR_VL_OPTIONAL_PAYLOAD': request.app.state.config.PADDLEOCR_VL_OPTIONAL_PAYLOAD,
+        'PADDLEOCR_VL_REQUEST_TIMEOUT': request.app.state.config.PADDLEOCR_VL_REQUEST_TIMEOUT,
+        'PADDLEOCR_VL_DOWNLOAD_TIMEOUT': request.app.state.config.PADDLEOCR_VL_DOWNLOAD_TIMEOUT,
+        'PADDLEOCR_VL_POLL_TIMEOUT': request.app.state.config.PADDLEOCR_VL_POLL_TIMEOUT,
+        'PADDLEOCR_VL_POLL_INTERVAL': request.app.state.config.PADDLEOCR_VL_POLL_INTERVAL,
+        'PADDLEOCR_VL_ALLOWED_REMOTE_ORIGINS': request.app.state.config.PADDLEOCR_VL_ALLOWED_REMOTE_ORIGINS,
         # MinerU settings
         'MINERU_API_MODE': request.app.state.config.MINERU_API_MODE,
         'MINERU_API_URL': request.app.state.config.MINERU_API_URL,
@@ -1358,6 +1454,182 @@ def merge_docs_to_target_size(
     return result
 
 
+def _current_chunker_config(request: Request) -> dict:
+    config = request.app.state.config
+    return {
+        'version': 1,
+        'text_splitter': getattr(config, 'TEXT_SPLITTER', ''),
+        'chunk_size': getattr(config, 'CHUNK_SIZE', None),
+        'chunk_overlap': getattr(config, 'CHUNK_OVERLAP', None),
+        'chunk_min_size_target': getattr(config, 'CHUNK_MIN_SIZE_TARGET', None),
+        'markdown_header_text_splitter': getattr(
+            config,
+            'ENABLE_MARKDOWN_HEADER_TEXT_SPLITTER',
+            False,
+        ),
+        'tiktoken_encoding_name': getattr(config, 'TIKTOKEN_ENCODING_NAME', None),
+    }
+
+
+def _build_vector_metadatas(
+    request: Request,
+    docs: list[Document],
+    metadata: dict | None = None,
+) -> list[dict]:
+    chunker_config = _current_chunker_config(request)
+    chunker_config_hash = compute_chunker_config_hash(chunker_config)
+    embedding_config = {
+        'engine': request.app.state.config.RAG_EMBEDDING_ENGINE,
+        'model': request.app.state.config.RAG_EMBEDDING_MODEL,
+    }
+    embedding_config_hash = compute_target_config_hash(
+        {
+            'index_kind': 'embedding',
+            **embedding_config,
+        }
+    )
+
+    return [
+        {
+            **doc.metadata,
+            **(metadata if metadata else {}),
+            'chunk_index': idx,
+            'chunk_version': 1,
+            'chunker_config': chunker_config,
+            'chunker_config_hash': chunker_config_hash,
+            'embedding_config': embedding_config,
+            'embedding_config_hash': embedding_config_hash,
+        }
+        for idx, doc in enumerate(docs)
+    ]
+
+
+def _build_retrieval_manifest_chunks_from_vector_items(
+    *,
+    collection_name: str,
+    items: list[dict],
+    now: int | None = None,
+) -> list[dict]:
+    timestamp = int(time.time()) if now is None else now
+    chunks: list[dict] = []
+    for item in items:
+        text = item.get('text')
+        if text is None:
+            continue
+        metadata = dict(item.get('metadata') or {})
+        collection_id = metadata.get('collection_id') or collection_name
+        knowledge_id = metadata.get('knowledge_id') or collection_id
+        file_id = metadata.get('file_id')
+        file_version = int(metadata.get('file_version') or 1)
+        chunk_version = int(metadata.get('chunk_version') or 1)
+        chunk_index = metadata.get('chunk_index')
+        start_index = metadata.get('start_index')
+        chunker_config_hash = metadata.get('chunker_config_hash') or compute_chunker_config_hash(
+            metadata.get('chunker_config') if isinstance(metadata.get('chunker_config'), dict) else {}
+        )
+        content_hash = compute_content_hash(text)
+        chunk_uid = compute_chunk_uid(
+            collection_id=collection_id,
+            knowledge_id=knowledge_id,
+            collection_name=collection_name,
+            file_id=file_id,
+            file_version=file_version,
+            chunker_config_hash=chunker_config_hash,
+            chunk_index=chunk_index,
+            content_hash=content_hash,
+        )
+        manifest_metadata = {
+            **metadata,
+            'chunk_uid': chunk_uid,
+            'vector_id': item.get('id'),
+            'collection_id': collection_id,
+            'knowledge_id': knowledge_id,
+            'collection_name': collection_name,
+            'file_id': file_id,
+            'file_version': file_version,
+            'chunk_version': chunk_version,
+            'chunk_index': chunk_index,
+            'content_hash': content_hash,
+            'chunker_config_hash': chunker_config_hash,
+        }
+        if start_index is not None:
+            manifest_metadata['start_index'] = start_index
+
+        chunks.append(
+            {
+                'chunk_uid': chunk_uid,
+                'collection_id': collection_id,
+                'knowledge_id': knowledge_id,
+                'collection_name': collection_name,
+                'file_id': file_id,
+                'file_version': file_version,
+                'chunk_version': chunk_version,
+                'chunk_index': chunk_index,
+                'start_index': start_index,
+                'content_hash': content_hash,
+                'chunker_config_hash': chunker_config_hash,
+                'text': text,
+                'metadata': manifest_metadata,
+                'is_active': True,
+                'deleted_at': None,
+                'created_at': timestamp,
+                'updated_at': timestamp,
+            }
+        )
+    return chunks
+
+
+def _upsert_retrieval_manifest_chunks(
+    *,
+    collection_name: str,
+    items: list[dict],
+    chunks: list[dict] | None = None,
+) -> int:
+    chunks = chunks or _prepare_retrieval_manifest_chunks_for_vector_items(
+        collection_name=collection_name,
+        items=items,
+    )
+    if not chunks:
+        return 0
+    return SqlAlchemyManifestChunkStore().upsert_chunks(chunks)
+
+
+def _prepare_retrieval_manifest_chunks_for_vector_items(
+    *,
+    collection_name: str,
+    items: list[dict],
+) -> list[dict]:
+    chunks = _build_retrieval_manifest_chunks_from_vector_items(collection_name=collection_name, items=items)
+    chunk_iter = iter(chunks)
+    for item in items:
+        if item.get('text') is None:
+            continue
+        chunk = next(chunk_iter)
+        item['metadata'] = dict(chunk['metadata'])
+    return chunks
+
+
+async def _run_evidence_projection_for_knowledge_file(
+    *,
+    knowledge_id: str,
+    file_id: str,
+    db: AsyncSession | None = None,
+) -> dict:
+    knowledge = await Knowledges.get_knowledge_by_id(id=knowledge_id, db=db)
+    if knowledge is None:
+        return {}
+
+    queued = await enqueue_evidence_projection_job(
+        knowledge_id=knowledge_id,
+        file_ids=[file_id],
+        project_document_images=True,
+    )
+    job_id = (queued.get('job') or {}).get('job_id')
+    if not job_id:
+        raise RuntimeError('evidence projection job was not created')
+    return await run_retrieval_index_job(job_id)
+
+
 def save_docs_to_vector_db(
     request: Request,
     docs,
@@ -1464,17 +1736,7 @@ def save_docs_to_vector_db(
         raise ValueError(ERROR_MESSAGES.EMPTY_CONTENT)
 
     texts = [sanitize_text_for_db(doc.page_content) for doc in docs]
-    metadatas = [
-        {
-            **doc.metadata,
-            **(metadata if metadata else {}),
-            'embedding_config': {
-                'engine': request.app.state.config.RAG_EMBEDDING_ENGINE,
-                'model': request.app.state.config.RAG_EMBEDDING_MODEL,
-            },
-        }
-        for doc in docs
-    ]
+    metadatas = _build_vector_metadatas(request, docs, metadata)
 
     try:
         if VECTOR_DB_CLIENT.has_collection(collection_name=collection_name):
@@ -1544,12 +1806,22 @@ def save_docs_to_vector_db(
             }
             for idx, text in enumerate(texts)
         ]
+        manifest_chunks = _prepare_retrieval_manifest_chunks_for_vector_items(
+            collection_name=collection_name,
+            items=items,
+        )
 
         log.info(f'adding to collection {collection_name}')
         VECTOR_DB_CLIENT.insert(
             collection_name=collection_name,
             items=items,
         )
+        manifest_upserted = _upsert_retrieval_manifest_chunks(
+            collection_name=collection_name,
+            items=items,
+            chunks=manifest_chunks,
+        )
+        log.info(f'upserted {manifest_upserted} retrieval manifest chunks for {collection_name}')
 
         log.info(f'added {len(items)} items to collection {collection_name}')
         return True
@@ -1585,6 +1857,7 @@ async def process_file(
     if file:
         try:
             collection_name = form_data.collection_name
+            document_image_assets: list[dict] | None = None
 
             if collection_name is None:
                 collection_name = f'file-{file.id}'
@@ -1601,6 +1874,12 @@ async def process_file(
                 except Exception:
                     # Audio file upload pipeline
                     pass
+                await deactivate_chunks_for_scope(
+                    collection_id=f'file-{file.id}',
+                    collection_name=f'file-{file.id}',
+                    file_id=file.id,
+                    db=db,
+                )
 
                 docs = [
                     Document(
@@ -1647,6 +1926,7 @@ async def process_file(
                     ]
 
                 text_content = file.data.get('content', '')
+
             else:
                 # Process the file and save the content
                 # Usage: /files/
@@ -1655,7 +1935,21 @@ async def process_file(
                     file_path = await asyncio.to_thread(Storage.get_file, file_path)
                     loader = build_loader_from_config(request)
                     loader.user = user
-                    docs = await loader.aload(file.filename, file.meta.get('content_type'), file_path)
+                    loaded_docs = await loader.aload(file.filename, file.meta.get('content_type'), file_path)
+                    document_image_assets = _collect_document_image_assets_from_docs(loaded_docs)
+                    loaded_docs = [doc for doc in loaded_docs if not _is_metadata_only_document(doc)]
+                    if not loaded_docs and document_image_assets:
+                        loaded_docs = [
+                            Document(
+                                page_content='No valid text content found in document',
+                                metadata={
+                                    'name': file.filename,
+                                    'created_by': file.user_id,
+                                    'file_id': file.id,
+                                    'source': file.filename,
+                                },
+                            )
+                        ]
 
                     docs = [
                         Document(
@@ -1668,7 +1962,7 @@ async def process_file(
                                 'source': file.filename,
                             },
                         )
-                        for doc in docs
+                        for doc in loaded_docs
                     ]
                 else:
                     docs = [
@@ -1686,9 +1980,12 @@ async def process_file(
                 text_content = ' '.join([doc.page_content for doc in docs])
 
             log.debug(f'text_content: {text_content}')
+            file_data_update = {'content': text_content}
+            if document_image_assets is not None:
+                file_data_update['document_image_assets'] = document_image_assets
             await Files.update_file_data_by_id(
                 file.id,
-                {'content': text_content},
+                file_data_update,
                 db=db,
             )
             hash = calculate_sha256_string(text_content)
@@ -1730,6 +2027,12 @@ async def process_file(
                     log.info(f'added {len(docs)} items to collection {collection_name}')
 
                     if result:
+                        if form_data.collection_name:
+                            await _run_evidence_projection_for_knowledge_file(
+                                knowledge_id=collection_name,
+                                file_id=file.id,
+                            )
+
                         # Fresh session for the final update.
                         async with get_async_db() as session:
                             await Files.update_file_metadata_by_id(
@@ -2385,6 +2688,8 @@ class QueryDocForm(BaseModel):
     k_reranker: int | None = None
     r: float | None = None
     hybrid: bool | None = None
+    hybrid_bm25_weight: float | None = None
+    enable_enriched_texts: bool | None = None
 
 
 @router.post('/query/doc')
@@ -2397,13 +2702,8 @@ async def query_doc_handler(
 
     try:
         if request.app.state.config.ENABLE_RAG_HYBRID_SEARCH and (form_data.hybrid is None or form_data.hybrid):
-            collection_results = {}
-            collection_results[form_data.collection_name] = await ASYNC_VECTOR_DB_CLIENT.get(
-                collection_name=form_data.collection_name
-            )
             return await query_doc_with_hybrid_search(
                 collection_name=form_data.collection_name,
-                collection_result=collection_results[form_data.collection_name],
                 query=form_data.query,
                 embedding_function=lambda query, prefix: request.app.state.EMBEDDING_FUNCTION(
                     query, prefix=prefix, user=user
@@ -2418,10 +2718,14 @@ async def query_doc_handler(
                 r=(form_data.r if form_data.r else request.app.state.config.RELEVANCE_THRESHOLD),
                 hybrid_bm25_weight=(
                     form_data.hybrid_bm25_weight
-                    if form_data.hybrid_bm25_weight
+                    if form_data.hybrid_bm25_weight is not None
                     else request.app.state.config.HYBRID_BM25_WEIGHT
                 ),
-                user=user,
+                enable_enriched_texts=(
+                    form_data.enable_enriched_texts
+                    if form_data.enable_enriched_texts is not None
+                    else request.app.state.config.ENABLE_RAG_HYBRID_SEARCH_ENRICHED_TEXTS
+                ),
             )
         else:
             query_embedding = await request.app.state.EMBEDDING_FUNCTION(
@@ -2481,7 +2785,7 @@ async def query_collection_handler(
                 r=(form_data.r if form_data.r else request.app.state.config.RELEVANCE_THRESHOLD),
                 hybrid_bm25_weight=(
                     form_data.hybrid_bm25_weight
-                    if form_data.hybrid_bm25_weight
+                    if form_data.hybrid_bm25_weight is not None
                     else request.app.state.config.HYBRID_BM25_WEIGHT
                 ),
                 enable_enriched_texts=(
@@ -2492,7 +2796,7 @@ async def query_collection_handler(
             )
         else:
             return await query_collection(
-                request,
+                None,
                 collection_names=form_data.collection_names,
                 queries=[form_data.query],
                 embedding_function=lambda query, prefix: request.app.state.EMBEDDING_FUNCTION(
@@ -2561,6 +2865,12 @@ async def delete_entries_from_collection(
                 collection_name=form_data.collection_name,
                 filter={'hash': hash},
             )
+            await deactivate_chunks_for_scope(
+                collection_id=form_data.collection_name,
+                collection_name=form_data.collection_name,
+                file_id=form_data.file_id,
+                db=db,
+            )
             return {'status': True}
         else:
             return {'status': False}
@@ -2576,6 +2886,7 @@ async def delete_entries_from_collection(
 @router.post('/reset/db')
 async def reset_vector_db(user=Depends(get_admin_user), db: AsyncSession = Depends(get_async_session)):
     await ASYNC_VECTOR_DB_CLIENT.reset()
+    await deactivate_all_chunks_for_reset(db=db)
     await Knowledges.delete_all_knowledge(db=db)
 
 
@@ -2719,6 +3030,12 @@ async def process_files_batch(
             # Update all files with collection name
             for file_update, file_result in zip(file_updates, file_results):
                 await Files.update_file_by_id(id=file_result.file_id, form_data=file_update, db=db)
+                if collection_name:
+                    await _run_evidence_projection_for_knowledge_file(
+                        knowledge_id=collection_name,
+                        file_id=file_result.file_id,
+                        db=db,
+                    )
                 file_result.status = 'completed'
 
         except Exception as e:

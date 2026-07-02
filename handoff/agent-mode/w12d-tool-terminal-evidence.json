@@ -1,0 +1,639 @@
+{
+  "approvals": {
+    "approval_id": "approval:930faa6e-a7c8-45d8-960b-55e6b2c715ae:destructive-tool-1",
+    "decision": "rejected",
+    "decision_result": {
+      "artifacts": [],
+      "content": "User rejected approval for write_file.",
+      "embeds": [],
+      "files": [],
+      "process_refs": [],
+      "raw": {
+        "approval_id": "approval:930faa6e-a7c8-45d8-960b-55e6b2c715ae:destructive-tool-1",
+        "decision": "rejected"
+      },
+      "sources": [],
+      "status": "approval_rejected",
+      "structured_error": {
+        "code": "approval_rejected",
+        "details": {
+          "approval_id": "approval:930faa6e-a7c8-45d8-960b-55e6b2c715ae:destructive-tool-1",
+          "tool_call_id": "destructive-tool-1",
+          "tool_id": "tool:terminal:w12d-open-terminal:write_file"
+        },
+        "message": "User rejected approval for write_file.",
+        "retryable": false
+      },
+      "warnings": []
+    },
+    "required_result": {
+      "artifacts": [],
+      "content": "Approval required for write_file.",
+      "embeds": [],
+      "files": [],
+      "process_refs": [],
+      "raw": {
+        "action": "write_file /workspace/agent-runs/destructive-target.txt",
+        "approval_id": "approval:930faa6e-a7c8-45d8-960b-55e6b2c715ae:destructive-tool-1",
+        "category": "overwrite",
+        "matched": "write_file",
+        "reason": "Tool name is a write/replace operation.",
+        "tool_call_id": "destructive-tool-1",
+        "tool_id": "tool:terminal:w12d-open-terminal:write_file",
+        "tool_name": "write_file"
+      },
+      "sources": [],
+      "status": "approval_required",
+      "structured_error": null,
+      "warnings": []
+    }
+  },
+  "artifacts": {
+    "all_for_tools_run": [
+      {
+        "created_at": 1781749533842641000,
+        "id": "d290f597-bea9-4558-aa74-afa903441fb4",
+        "idempotency_key": "artifact:leader:file:w12d-open-terminal:930faa6e-a7c8-45d8-960b-55e6b2c715ae:outputs:w12d-output.txt",
+        "kind": "file",
+        "metadata": {
+          "cleanup_eligible": false,
+          "participant_id": "leader",
+          "retention": "user_visible_output"
+        },
+        "mime_type": null,
+        "path": "/workspace/agent-runs/930faa6e-a7c8-45d8-960b-55e6b2c715ae/outputs/w12d-output.txt",
+        "run_id": "930faa6e-a7c8-45d8-960b-55e6b2c715ae",
+        "size": null,
+        "terminal_server_id": "w12d-open-terminal",
+        "url": null
+      },
+      {
+        "created_at": 1781749533845857000,
+        "id": "1c81bcbd-75cb-414a-a230-7fc6ae7b5ebd",
+        "idempotency_key": "artifact:leader:file:w12d-open-terminal:930faa6e-a7c8-45d8-960b-55e6b2c715ae:tmp:w12d-scratch.json",
+        "kind": "file",
+        "metadata": {
+          "cleanup_eligible": true,
+          "participant_id": "leader",
+          "retention": "temporary_debug"
+        },
+        "mime_type": null,
+        "path": "/workspace/agent-runs/930faa6e-a7c8-45d8-960b-55e6b2c715ae/tmp/w12d-scratch.json",
+        "run_id": "930faa6e-a7c8-45d8-960b-55e6b2c715ae",
+        "size": null,
+        "terminal_server_id": "w12d-open-terminal",
+        "url": null
+      }
+    ],
+    "output_artifact": {
+      "created_at": 1781749533842641000,
+      "id": "d290f597-bea9-4558-aa74-afa903441fb4",
+      "idempotency_key": "artifact:leader:file:w12d-open-terminal:930faa6e-a7c8-45d8-960b-55e6b2c715ae:outputs:w12d-output.txt",
+      "kind": "file",
+      "metadata": {
+        "cleanup_eligible": false,
+        "participant_id": "leader",
+        "retention": "user_visible_output"
+      },
+      "mime_type": null,
+      "path": "/workspace/agent-runs/930faa6e-a7c8-45d8-960b-55e6b2c715ae/outputs/w12d-output.txt",
+      "run_id": "930faa6e-a7c8-45d8-960b-55e6b2c715ae",
+      "size": null,
+      "terminal_server_id": "w12d-open-terminal",
+      "url": null
+    },
+    "physical_output_exists": true,
+    "physical_output_path": "/private/tmp/openwebui-agent-mode-w12d-tool-runtime/workspace/agent-runs/930faa6e-a7c8-45d8-960b-55e6b2c715ae/outputs/w12d-output.txt",
+    "physical_output_size": 62,
+    "physical_tmp_exists_after_completion": true,
+    "physical_tmp_path": "/private/tmp/openwebui-agent-mode-w12d-tool-runtime/workspace/agent-runs/930faa6e-a7c8-45d8-960b-55e6b2c715ae/tmp/w12d-scratch.json",
+    "physical_tmp_size": 69,
+    "tmp_artifact": {
+      "created_at": 1781749533845857000,
+      "id": "1c81bcbd-75cb-414a-a230-7fc6ae7b5ebd",
+      "idempotency_key": "artifact:leader:file:w12d-open-terminal:930faa6e-a7c8-45d8-960b-55e6b2c715ae:tmp:w12d-scratch.json",
+      "kind": "file",
+      "metadata": {
+        "cleanup_eligible": true,
+        "participant_id": "leader",
+        "retention": "temporary_debug"
+      },
+      "mime_type": null,
+      "path": "/workspace/agent-runs/930faa6e-a7c8-45d8-960b-55e6b2c715ae/tmp/w12d-scratch.json",
+      "run_id": "930faa6e-a7c8-45d8-960b-55e6b2c715ae",
+      "size": null,
+      "terminal_server_id": "w12d-open-terminal",
+      "url": null
+    }
+  },
+  "branch": "codex/agent-mode-w12d-tool-terminal",
+  "generated_at": "2026-06-18T10:25:34+08:00",
+  "head": "5b5d681a7731",
+  "mode": "live",
+  "notes": [
+    "Open Terminal source was run from /Users/liusihang/openwebui/open-terminal because this worktree does not contain the nested repo.",
+    "/workspace is read-only on this host; OpenWebUI persisted logical /workspace artifact paths while the bare-metal Open Terminal process wrote corroborating files under /private/tmp/openwebui-agent-mode-w12d-tool-runtime/workspace.",
+    "Backend was launched from the assigned worktree with an acceptance-only in-memory AGENT_TOOL_REGISTRY; no product code was changed.",
+    "Scenario 10 long terminal process was explicitly killed only after proving runtime cancel left it running."
+  ],
+  "runs": {
+    "cancel": {
+      "event_types": [
+        "run.running",
+        "tool.requested",
+        "tool.started",
+        "tool.completed",
+        "run.cancelled"
+      ],
+      "final_state": "cancelled",
+      "run_id": "1a2c7259-cc9e-4396-83f4-651cb3672193",
+      "runtime_session_id": "rt_1a2c7259-cc9e-4396-83f4-651cb3672193_O97cpOjA01k"
+    },
+    "tools_terminal_approval": {
+      "event_types": [
+        "run.running",
+        "tool.requested",
+        "tool.started",
+        "tool.completed",
+        "tool.requested",
+        "tool.started",
+        "tool.completed",
+        "artifact.registered",
+        "artifact.registered",
+        "approval.requested",
+        "approval.completed"
+      ],
+      "final_state": "completed",
+      "run_id": "930faa6e-a7c8-45d8-960b-55e6b2c715ae",
+      "runtime_session_id": "rt_930faa6e-a7c8-45d8-960b-55e6b2c715ae_gfeAct_iQ-w"
+    }
+  },
+  "scenarios": [
+    {
+      "evidence": {
+        "event_types": [
+          "tool.requested",
+          "tool.started",
+          "tool.completed",
+          "tool.requested",
+          "tool.started",
+          "tool.completed"
+        ],
+        "normalized_result": {
+          "artifacts": [],
+          "content": "{\"fact\":\"single OpenWebUI tool call succeeded\",\"source\":\"w12d-live-acceptance-registry\",\"subject\":\"agent-mode-live-acceptance\"}",
+          "embeds": [],
+          "files": [],
+          "process_refs": [],
+          "raw": {
+            "fact": "single OpenWebUI tool call succeeded",
+            "source": "w12d-live-acceptance-registry",
+            "subject": "agent-mode-live-acceptance"
+          },
+          "sources": [],
+          "status": "success",
+          "structured_error": null,
+          "warnings": []
+        },
+        "run_id": "930faa6e-a7c8-45d8-960b-55e6b2c715ae",
+        "runtime_session_id": "rt_930faa6e-a7c8-45d8-960b-55e6b2c715ae_gfeAct_iQ-w",
+        "tool_id": "tool:builtin:w12d-read-acceptance-fact:read_acceptance_fact"
+      },
+      "id": "scenario_02_single_tool_call",
+      "live_status": "passed",
+      "observations": [
+        "event:tool.requested",
+        "event:tool.started",
+        "event:tool.completed",
+        "normalized_tool_result:success"
+      ],
+      "required_observations": [
+        "event:tool.requested",
+        "event:tool.started",
+        "event:tool.completed",
+        "normalized_tool_result:success"
+      ],
+      "status": "live_passed"
+    },
+    {
+      "evidence": {
+        "artifact": {
+          "created_at": 1781749533842641000,
+          "id": "d290f597-bea9-4558-aa74-afa903441fb4",
+          "idempotency_key": "artifact:leader:file:w12d-open-terminal:930faa6e-a7c8-45d8-960b-55e6b2c715ae:outputs:w12d-output.txt",
+          "kind": "file",
+          "metadata": {
+            "cleanup_eligible": false,
+            "participant_id": "leader",
+            "retention": "user_visible_output"
+          },
+          "mime_type": null,
+          "path": "/workspace/agent-runs/930faa6e-a7c8-45d8-960b-55e6b2c715ae/outputs/w12d-output.txt",
+          "run_id": "930faa6e-a7c8-45d8-960b-55e6b2c715ae",
+          "size": null,
+          "terminal_server_id": "w12d-open-terminal",
+          "url": null
+        },
+        "physical_output_exists": true,
+        "physical_output_path": "/private/tmp/openwebui-agent-mode-w12d-tool-runtime/workspace/agent-runs/930faa6e-a7c8-45d8-960b-55e6b2c715ae/outputs/w12d-output.txt",
+        "process_refs": [
+          {
+            "command": "python3 - <<'INNER'\nfrom pathlib import Path\nroot = Path('/private/tmp/openwebui-agent-mode-w12d-tool-runtime/workspace/agent-runs/930faa6e-a7c8-45d8-960b-55e6b2c715ae')\n(root / 'outputs').mkdir(parents=True, exist_ok=True)\n(root / 'tmp').mkdir(parents=True, exist_ok=True)\n(root.joinpath('outputs', 'w12d-output.txt')).write_text('w12d output artifact for 930faa6e-a7c8-45d8-960b-55e6b2c715ae\\n')\nroot.joinpath('tmp', 'w12d-scratch.json').write_text('{\"run_id\": \"930faa6e-a7c8-45d8-960b-55e6b2c715ae\", \"retained\": true}\\n')\nprint('created w12d-output.txt and w12d-scratch.json')\nINNER",
+            "exit_code": 0,
+            "log_path": "/private/tmp/openwebui-agent-mode-w12d-tool-runtime/open-terminal-logs/processes/20260618-102533-a542b9.jsonl",
+            "metadata": {},
+            "next_offset": 1,
+            "process_id": "20260618-102533-a542b9",
+            "status": "done",
+            "terminal_server_id": "w12d-open-terminal"
+          }
+        ],
+        "run_id": "930faa6e-a7c8-45d8-960b-55e6b2c715ae",
+        "runtime_session_id": "rt_930faa6e-a7c8-45d8-960b-55e6b2c715ae_gfeAct_iQ-w",
+        "tool_result": {
+          "artifacts": [
+            {
+              "artifact_id": "d290f597-bea9-4558-aa74-afa903441fb4",
+              "kind": "file",
+              "metadata": {
+                "cleanup_eligible": false,
+                "participant_id": "leader",
+                "retention": "user_visible_output"
+              },
+              "mime_type": null,
+              "path": "/workspace/agent-runs/930faa6e-a7c8-45d8-960b-55e6b2c715ae/outputs/w12d-output.txt",
+              "size": null,
+              "url": null
+            },
+            {
+              "artifact_id": "1c81bcbd-75cb-414a-a230-7fc6ae7b5ebd",
+              "kind": "file",
+              "metadata": {
+                "cleanup_eligible": true,
+                "participant_id": "leader",
+                "retention": "temporary_debug"
+              },
+              "mime_type": null,
+              "path": "/workspace/agent-runs/930faa6e-a7c8-45d8-960b-55e6b2c715ae/tmp/w12d-scratch.json",
+              "size": null,
+              "url": null
+            }
+          ],
+          "content": "{\"command\":\"python3 - <<'INNER'\\nfrom pathlib import Path\\nroot = Path('/private/tmp/openwebui-agent-mode-w12d-tool-runtime/workspace/agent-runs/930faa6e-a7c8-45d8-960b-55e6b2c715ae')\\n(root / 'outputs').mkdir(parents=True, exist_ok=True)\\n(root / 'tmp').mkdir(parents=True, exist_ok=True)\\n(root.joinpath('outputs', 'w12d-output.txt')).write_text('w12d output artifact for 930faa6e-a7c8-45d8-960b-55e6b2c715ae\\\\n')\\nroot.joinpath('tmp', 'w12d-scratch.json').write_text('{\\\"run_id\\\": \\\"930faa6e-a7c8-45d8-960b-55e6b2c715ae\\\", \\\"retained\\\": true}\\\\n')\\nprint('created w12d-output.txt and w12d-scratch.json')\\nINNER\",\"exit_code\":0,\"id\":\"20260618-102533-a542b9\",\"log_path\":\"/private/tmp/openwebui-agent-mode-w12d-tool-runtime/open-terminal-logs/processes/20260618-102533-a542b9.jsonl\",\"next_offset\":1,\"output\":[{\"data\":\"created w12d-output.txt and w12d-scratch.json\\r\\n\",\"type\":\"output\"}],\"output_paths\":[\"w12d-output.txt\",\"/workspace/agent-runs/930faa6e-a7c8-45d8-960b-55e6b2c715ae/tmp/w12d-scratch.json\"],\"physical_workspace_root\":\"/private/tmp/openwebui-agent-mode-w12d-tool-runtime/workspace\",\"process_id\":\"20260618-102533-a542b9\",\"status\":\"done\",\"truncated\":false}",
+          "embeds": [],
+          "files": [],
+          "process_refs": [
+            {
+              "command": "python3 - <<'INNER'\nfrom pathlib import Path\nroot = Path('/private/tmp/openwebui-agent-mode-w12d-tool-runtime/workspace/agent-runs/930faa6e-a7c8-45d8-960b-55e6b2c715ae')\n(root / 'outputs').mkdir(parents=True, exist_ok=True)\n(root / 'tmp').mkdir(parents=True, exist_ok=True)\n(root.joinpath('outputs', 'w12d-output.txt')).write_text('w12d output artifact for 930faa6e-a7c8-45d8-960b-55e6b2c715ae\\n')\nroot.joinpath('tmp', 'w12d-scratch.json').write_text('{\"run_id\": \"930faa6e-a7c8-45d8-960b-55e6b2c715ae\", \"retained\": true}\\n')\nprint('created w12d-output.txt and w12d-scratch.json')\nINNER",
+              "exit_code": 0,
+              "log_path": "/private/tmp/openwebui-agent-mode-w12d-tool-runtime/open-terminal-logs/processes/20260618-102533-a542b9.jsonl",
+              "metadata": {},
+              "next_offset": 1,
+              "process_id": "20260618-102533-a542b9",
+              "status": "done",
+              "terminal_server_id": "w12d-open-terminal"
+            }
+          ],
+          "raw": {
+            "command": "python3 - <<'INNER'\nfrom pathlib import Path\nroot = Path('/private/tmp/openwebui-agent-mode-w12d-tool-runtime/workspace/agent-runs/930faa6e-a7c8-45d8-960b-55e6b2c715ae')\n(root / 'outputs').mkdir(parents=True, exist_ok=True)\n(root / 'tmp').mkdir(parents=True, exist_ok=True)\n(root.joinpath('outputs', 'w12d-output.txt')).write_text('w12d output artifact for 930faa6e-a7c8-45d8-960b-55e6b2c715ae\\n')\nroot.joinpath('tmp', 'w12d-scratch.json').write_text('{\"run_id\": \"930faa6e-a7c8-45d8-960b-55e6b2c715ae\", \"retained\": true}\\n')\nprint('created w12d-output.txt and w12d-scratch.json')\nINNER",
+            "exit_code": 0,
+            "id": "20260618-102533-a542b9",
+            "log_path": "/private/tmp/openwebui-agent-mode-w12d-tool-runtime/open-terminal-logs/processes/20260618-102533-a542b9.jsonl",
+            "next_offset": 1,
+            "output": [
+              {
+                "data": "created w12d-output.txt and w12d-scratch.json\r\n",
+                "type": "output"
+              }
+            ],
+            "output_paths": [
+              "w12d-output.txt",
+              "/workspace/agent-runs/930faa6e-a7c8-45d8-960b-55e6b2c715ae/tmp/w12d-scratch.json"
+            ],
+            "physical_workspace_root": "/private/tmp/openwebui-agent-mode-w12d-tool-runtime/workspace",
+            "process_id": "20260618-102533-a542b9",
+            "status": "done",
+            "truncated": false
+          },
+          "sources": [],
+          "status": "success",
+          "structured_error": null,
+          "warnings": []
+        }
+      },
+      "id": "scenario_03_terminal_output_artifact",
+      "live_status": "passed",
+      "observations": [
+        "tool:run_command",
+        "process_ref_registered",
+        "artifact:/workspace/agent-runs/<run_id>/outputs"
+      ],
+      "required_observations": [
+        "tool:run_command",
+        "process_ref_registered",
+        "artifact:/workspace/agent-runs/<run_id>/outputs"
+      ],
+      "status": "live_passed"
+    },
+    {
+      "evidence": {
+        "artifact_after_completion": {
+          "created_at": 1781749533845857000,
+          "id": "1c81bcbd-75cb-414a-a230-7fc6ae7b5ebd",
+          "idempotency_key": "artifact:leader:file:w12d-open-terminal:930faa6e-a7c8-45d8-960b-55e6b2c715ae:tmp:w12d-scratch.json",
+          "kind": "file",
+          "metadata": {
+            "cleanup_eligible": true,
+            "participant_id": "leader",
+            "retention": "temporary_debug"
+          },
+          "mime_type": null,
+          "path": "/workspace/agent-runs/930faa6e-a7c8-45d8-960b-55e6b2c715ae/tmp/w12d-scratch.json",
+          "run_id": "930faa6e-a7c8-45d8-960b-55e6b2c715ae",
+          "size": null,
+          "terminal_server_id": "w12d-open-terminal",
+          "url": null
+        },
+        "cleanup_eligible": true,
+        "physical_tmp_exists_after_completion": true,
+        "physical_tmp_path": "/private/tmp/openwebui-agent-mode-w12d-tool-runtime/workspace/agent-runs/930faa6e-a7c8-45d8-960b-55e6b2c715ae/tmp/w12d-scratch.json",
+        "run_id": "930faa6e-a7c8-45d8-960b-55e6b2c715ae",
+        "run_state_after_completion": "completed"
+      },
+      "id": "scenario_04_tmp_artifact_retention",
+      "live_status": "passed",
+      "observations": [
+        "artifact:/workspace/agent-runs/<run_id>/tmp",
+        "cleanup_eligible:true",
+        "retained_after_completion"
+      ],
+      "required_observations": [
+        "artifact:/workspace/agent-runs/<run_id>/tmp",
+        "cleanup_eligible:true",
+        "retained_after_completion"
+      ],
+      "status": "live_passed"
+    },
+    {
+      "evidence": {
+        "approval_events": [
+          {
+            "created_at": 1781749533982055000,
+            "event_type": "approval.requested",
+            "id": "0282b04c-d1ee-42f9-9134-a9f380c0541b",
+            "participant_id": "leader",
+            "payload": {
+              "action": "write_file /workspace/agent-runs/destructive-target.txt",
+              "approval_id": "approval:930faa6e-a7c8-45d8-960b-55e6b2c715ae:destructive-tool-1",
+              "arguments_summary": {
+                "content": "<10 chars>",
+                "overwrite": true,
+                "path": "/workspace/agent-runs/destructive-target.txt"
+              },
+              "category": "overwrite",
+              "matched": "write_file",
+              "reason": "Tool name is a write/replace operation.",
+              "tool_call_id": "destructive-tool-1",
+              "tool_id": "tool:terminal:w12d-open-terminal:write_file",
+              "tool_name": "write_file"
+            },
+            "phase": "waiting_approval",
+            "run_id": "930faa6e-a7c8-45d8-960b-55e6b2c715ae",
+            "seq": 10,
+            "summary": "Approval requested for write_file."
+          },
+          {
+            "created_at": 1781749533993538000,
+            "event_type": "approval.completed",
+            "id": "eb359089-8419-4364-ad32-255654adc740",
+            "participant_id": "leader",
+            "payload": {
+              "action": "write_file /workspace/agent-runs/destructive-target.txt",
+              "approval_id": "approval:930faa6e-a7c8-45d8-960b-55e6b2c715ae:destructive-tool-1",
+              "arguments_summary": {
+                "content": "<10 chars>",
+                "overwrite": true,
+                "path": "/workspace/agent-runs/destructive-target.txt"
+              },
+              "category": "overwrite",
+              "decision": "rejected",
+              "matched": "write_file",
+              "reason": "Tool name is a write/replace operation.",
+              "tool_call_id": "destructive-tool-1",
+              "tool_id": "tool:terminal:w12d-open-terminal:write_file",
+              "tool_name": "write_file"
+            },
+            "phase": "running",
+            "run_id": "930faa6e-a7c8-45d8-960b-55e6b2c715ae",
+            "seq": 11,
+            "summary": "Approval rejected for write_file."
+          }
+        ],
+        "approval_id": "approval:930faa6e-a7c8-45d8-960b-55e6b2c715ae:destructive-tool-1",
+        "decision_result": {
+          "artifacts": [],
+          "content": "User rejected approval for write_file.",
+          "embeds": [],
+          "files": [],
+          "process_refs": [],
+          "raw": {
+            "approval_id": "approval:930faa6e-a7c8-45d8-960b-55e6b2c715ae:destructive-tool-1",
+            "decision": "rejected"
+          },
+          "sources": [],
+          "status": "approval_rejected",
+          "structured_error": {
+            "code": "approval_rejected",
+            "details": {
+              "approval_id": "approval:930faa6e-a7c8-45d8-960b-55e6b2c715ae:destructive-tool-1",
+              "tool_call_id": "destructive-tool-1",
+              "tool_id": "tool:terminal:w12d-open-terminal:write_file"
+            },
+            "message": "User rejected approval for write_file.",
+            "retryable": false
+          },
+          "warnings": []
+        },
+        "required_result": {
+          "artifacts": [],
+          "content": "Approval required for write_file.",
+          "embeds": [],
+          "files": [],
+          "process_refs": [],
+          "raw": {
+            "action": "write_file /workspace/agent-runs/destructive-target.txt",
+            "approval_id": "approval:930faa6e-a7c8-45d8-960b-55e6b2c715ae:destructive-tool-1",
+            "category": "overwrite",
+            "matched": "write_file",
+            "reason": "Tool name is a write/replace operation.",
+            "tool_call_id": "destructive-tool-1",
+            "tool_id": "tool:terminal:w12d-open-terminal:write_file",
+            "tool_name": "write_file"
+          },
+          "sources": [],
+          "status": "approval_required",
+          "structured_error": null,
+          "warnings": []
+        },
+        "run_id": "930faa6e-a7c8-45d8-960b-55e6b2c715ae"
+      },
+      "id": "scenario_05_destructive_approval",
+      "live_status": "passed",
+      "observations": [
+        "event:approval.requested",
+        "event:approval.completed",
+        "state:waiting_approval",
+        "normalized_tool_result:approval_required",
+        "normalized_tool_result:approval_rejected"
+      ],
+      "required_observations": [
+        "event:approval.requested",
+        "event:approval.completed",
+        "state:waiting_approval",
+        "normalized_tool_result:approval_required"
+      ],
+      "status": "live_passed"
+    },
+    {
+      "evidence": {
+        "manual_post_evidence_cleanup": {
+          "manual_post_evidence_cleanup": true,
+          "status": "killed"
+        },
+        "process_ref": {
+          "command": "python3 - <<'INNER'\nfrom pathlib import Path\nimport time\nroot = Path('/private/tmp/openwebui-agent-mode-w12d-tool-runtime/workspace/agent-runs/1a2c7259-cc9e-4396-83f4-651cb3672193')\n(root / 'tmp').mkdir(parents=True, exist_ok=True)\n(root.joinpath('tmp', 'cancel-marker.txt')).write_text('started\\n')\ntime.sleep(90)\nroot.joinpath('tmp', 'cancel-marker.txt').write_text('finished\\n')\nINNER",
+          "exit_code": null,
+          "log_path": "/private/tmp/openwebui-agent-mode-w12d-tool-runtime/open-terminal-logs/processes/20260618-102534-7d1999.jsonl",
+          "metadata": {},
+          "next_offset": 0,
+          "process_id": "20260618-102534-7d1999",
+          "status": "running",
+          "terminal_server_id": "w12d-open-terminal"
+        },
+        "run_id": "1a2c7259-cc9e-4396-83f4-651cb3672193",
+        "run_process_refs": [
+          {
+            "command": "python3 - <<'INNER'\nfrom pathlib import Path\nimport time\nroot = Path('/private/tmp/openwebui-agent-mode-w12d-tool-runtime/workspace/agent-runs/1a2c7259-cc9e-4396-83f4-651cb3672193')\n(root / 'tmp').mkdir(parents=True, exist_ok=True)\n(root.joinpath('tmp', 'cancel-marker.txt')).write_text('started\\n')\ntime.sleep(90)\nroot.joinpath('tmp', 'cancel-marker.txt').write_text('finished\\n')\nINNER",
+            "exit_code": null,
+            "log_path": "/private/tmp/openwebui-agent-mode-w12d-tool-runtime/open-terminal-logs/processes/20260618-102534-7d1999.jsonl",
+            "metadata": {},
+            "next_offset": 0,
+            "process_id": "20260618-102534-7d1999",
+            "status": "running",
+            "terminal_server_id": "w12d-open-terminal"
+          }
+        ],
+        "run_state_after_cancel": "cancelled",
+        "runtime_cancel_response": {
+          "cancel_requested": true,
+          "run_id": "1a2c7259-cc9e-4396-83f4-651cb3672193",
+          "runtime_session_id": "rt_1a2c7259-cc9e-4396-83f4-651cb3672193_O97cpOjA01k",
+          "state": "cancelled"
+        },
+        "runtime_session_id": "rt_1a2c7259-cc9e-4396-83f4-651cb3672193_O97cpOjA01k",
+        "terminal_status_after_cancel": {
+          "command": "python3 - <<'INNER'\nfrom pathlib import Path\nimport time\nroot = Path('/private/tmp/openwebui-agent-mode-w12d-tool-runtime/workspace/agent-runs/1a2c7259-cc9e-4396-83f4-651cb3672193')\n(root / 'tmp').mkdir(parents=True, exist_ok=True)\n(root.joinpath('tmp', 'cancel-marker.txt')).write_text('started\\n')\ntime.sleep(90)\nroot.joinpath('tmp', 'cancel-marker.txt').write_text('finished\\n')\nINNER",
+          "exit_code": null,
+          "id": "20260618-102534-7d1999",
+          "log_path": "/private/tmp/openwebui-agent-mode-w12d-tool-runtime/open-terminal-logs/processes/20260618-102534-7d1999.jsonl",
+          "next_offset": 0,
+          "output": [],
+          "process_id": "20260618-102534-7d1999",
+          "status": "running",
+          "truncated": false
+        },
+        "terminal_status_before_cancel": {
+          "command": "python3 - <<'INNER'\nfrom pathlib import Path\nimport time\nroot = Path('/private/tmp/openwebui-agent-mode-w12d-tool-runtime/workspace/agent-runs/1a2c7259-cc9e-4396-83f4-651cb3672193')\n(root / 'tmp').mkdir(parents=True, exist_ok=True)\n(root.joinpath('tmp', 'cancel-marker.txt')).write_text('started\\n')\ntime.sleep(90)\nroot.joinpath('tmp', 'cancel-marker.txt').write_text('finished\\n')\nINNER",
+          "exit_code": null,
+          "id": "20260618-102534-7d1999",
+          "log_path": "/private/tmp/openwebui-agent-mode-w12d-tool-runtime/open-terminal-logs/processes/20260618-102534-7d1999.jsonl",
+          "next_offset": 0,
+          "output": [],
+          "process_id": "20260618-102534-7d1999",
+          "status": "running",
+          "truncated": false
+        }
+      },
+      "id": "scenario_10_cancel_keeps_terminal_process",
+      "live_status": "passed",
+      "observations": [
+        "event:run.cancelled",
+        "runtime_cancel_requested",
+        "process_refs_retained",
+        "no_kill_process"
+      ],
+      "required_observations": [
+        "event:run.cancelled",
+        "runtime_cancel_requested",
+        "process_refs_retained",
+        "no_kill_process"
+      ],
+      "status": "live_passed"
+    }
+  ],
+  "service_checks": {
+    "backend_health": {
+      "status": true
+    },
+    "runtime_health": {
+      "status": "ok"
+    },
+    "terminal_processes_initial": []
+  },
+  "service_urls": {
+    "agentscope_runtime": "http://127.0.0.1:8112",
+    "open_terminal": "http://127.0.0.1:18105",
+    "openwebui_backend": "http://127.0.0.1:18102"
+  },
+  "terminal_processes": {
+    "artifact_command": [
+      {
+        "command": "python3 - <<'INNER'\nfrom pathlib import Path\nroot = Path('/private/tmp/openwebui-agent-mode-w12d-tool-runtime/workspace/agent-runs/930faa6e-a7c8-45d8-960b-55e6b2c715ae')\n(root / 'outputs').mkdir(parents=True, exist_ok=True)\n(root / 'tmp').mkdir(parents=True, exist_ok=True)\n(root.joinpath('outputs', 'w12d-output.txt')).write_text('w12d output artifact for 930faa6e-a7c8-45d8-960b-55e6b2c715ae\\n')\nroot.joinpath('tmp', 'w12d-scratch.json').write_text('{\"run_id\": \"930faa6e-a7c8-45d8-960b-55e6b2c715ae\", \"retained\": true}\\n')\nprint('created w12d-output.txt and w12d-scratch.json')\nINNER",
+        "exit_code": 0,
+        "log_path": "/private/tmp/openwebui-agent-mode-w12d-tool-runtime/open-terminal-logs/processes/20260618-102533-a542b9.jsonl",
+        "metadata": {},
+        "next_offset": 1,
+        "process_id": "20260618-102533-a542b9",
+        "status": "done",
+        "terminal_server_id": "w12d-open-terminal"
+      }
+    ],
+    "cancel_after_status": {
+      "command": "python3 - <<'INNER'\nfrom pathlib import Path\nimport time\nroot = Path('/private/tmp/openwebui-agent-mode-w12d-tool-runtime/workspace/agent-runs/1a2c7259-cc9e-4396-83f4-651cb3672193')\n(root / 'tmp').mkdir(parents=True, exist_ok=True)\n(root.joinpath('tmp', 'cancel-marker.txt')).write_text('started\\n')\ntime.sleep(90)\nroot.joinpath('tmp', 'cancel-marker.txt').write_text('finished\\n')\nINNER",
+      "exit_code": null,
+      "id": "20260618-102534-7d1999",
+      "log_path": "/private/tmp/openwebui-agent-mode-w12d-tool-runtime/open-terminal-logs/processes/20260618-102534-7d1999.jsonl",
+      "next_offset": 0,
+      "output": [],
+      "process_id": "20260618-102534-7d1999",
+      "status": "running",
+      "truncated": false
+    },
+    "cancel_before_status": {
+      "command": "python3 - <<'INNER'\nfrom pathlib import Path\nimport time\nroot = Path('/private/tmp/openwebui-agent-mode-w12d-tool-runtime/workspace/agent-runs/1a2c7259-cc9e-4396-83f4-651cb3672193')\n(root / 'tmp').mkdir(parents=True, exist_ok=True)\n(root.joinpath('tmp', 'cancel-marker.txt')).write_text('started\\n')\ntime.sleep(90)\nroot.joinpath('tmp', 'cancel-marker.txt').write_text('finished\\n')\nINNER",
+      "exit_code": null,
+      "id": "20260618-102534-7d1999",
+      "log_path": "/private/tmp/openwebui-agent-mode-w12d-tool-runtime/open-terminal-logs/processes/20260618-102534-7d1999.jsonl",
+      "next_offset": 0,
+      "output": [],
+      "process_id": "20260618-102534-7d1999",
+      "status": "running",
+      "truncated": false
+    },
+    "cancel_command_ref": {
+      "command": "python3 - <<'INNER'\nfrom pathlib import Path\nimport time\nroot = Path('/private/tmp/openwebui-agent-mode-w12d-tool-runtime/workspace/agent-runs/1a2c7259-cc9e-4396-83f4-651cb3672193')\n(root / 'tmp').mkdir(parents=True, exist_ok=True)\n(root.joinpath('tmp', 'cancel-marker.txt')).write_text('started\\n')\ntime.sleep(90)\nroot.joinpath('tmp', 'cancel-marker.txt').write_text('finished\\n')\nINNER",
+      "exit_code": null,
+      "log_path": "/private/tmp/openwebui-agent-mode-w12d-tool-runtime/open-terminal-logs/processes/20260618-102534-7d1999.jsonl",
+      "metadata": {},
+      "next_offset": 0,
+      "process_id": "20260618-102534-7d1999",
+      "status": "running",
+      "terminal_server_id": "w12d-open-terminal"
+    },
+    "manual_post_evidence_cleanup": {
+      "manual_post_evidence_cleanup": true,
+      "status": "killed"
+    }
+  },
+  "worktree": "/Users/liusihang/openwebui/.worktrees/agent-mode-w12d-tool-terminal"
+}

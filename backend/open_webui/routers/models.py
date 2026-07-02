@@ -38,6 +38,7 @@ from open_webui.models.models import (
 from open_webui.utils.access_control import filter_allowed_access_grants, has_permission
 from open_webui.utils.access_control.files import has_access_to_file
 from open_webui.utils.auth import get_admin_user, get_verified_user
+from open_webui.utils.cache_invalidation import invalidate_model_cache
 from pydantic import BaseModel
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -264,6 +265,7 @@ async def create_new_model(
 
         model = await Models.insert_new_model(form_data, user.id, db=db)
         if model:
+            await invalidate_model_cache(request.app)
             return model
         else:
             raise HTTPException(
@@ -420,6 +422,7 @@ async def import_models(
                             'sharing.public_models',
                         )
                         await Models.insert_new_model(user_id=user.id, form_data=new_model, db=db)
+            await invalidate_model_cache(request.app)
             return True
         else:
             raise HTTPException(status_code=400, detail='Invalid JSON format')
@@ -444,7 +447,9 @@ async def sync_models(
     user=Depends(get_admin_user),
     db: AsyncSession = Depends(get_async_session),
 ):
-    return await Models.sync_models(user.id, form_data.models, db=db)
+    models = await Models.sync_models(user.id, form_data.models, db=db)
+    await invalidate_model_cache(request.app)
+    return models
 
 
 ###########################
@@ -596,7 +601,12 @@ async def get_model_profile_image(
 
 
 @router.post('/model/toggle', response_model=ModelResponse | None)
-async def toggle_model_by_id(id: str, user=Depends(get_verified_user), db: AsyncSession = Depends(get_async_session)):
+async def toggle_model_by_id(
+    request: Request,
+    id: str,
+    user=Depends(get_verified_user),
+    db: AsyncSession = Depends(get_async_session),
+):
     model = await Models.get_model_by_id(id, db=db)
     if model:
         if (
@@ -613,6 +623,7 @@ async def toggle_model_by_id(id: str, user=Depends(get_verified_user), db: Async
             model = await Models.toggle_model_by_id(id, db=db)
 
             if model:
+                await invalidate_model_cache(request.app)
                 return model
             else:
                 raise HTTPException(
@@ -682,6 +693,8 @@ async def update_model_by_id(
     )
 
     model = await Models.update_model_by_id(form_data.id, ModelForm(**form_data.model_dump()), db=db)
+    if model:
+        await invalidate_model_cache(request.app)
     return model
 
 
@@ -756,6 +769,7 @@ async def update_model_access_by_id(
     await AccessGrants.set_access_grants('model', form_data.id, form_data.access_grants, db=db)
 
     await Models.update_model_updated_at_by_id(form_data.id, db=db)
+    await invalidate_model_cache(request.app)
 
     return await Models.get_model_by_id(form_data.id, db=db)
 
@@ -767,6 +781,7 @@ async def update_model_access_by_id(
 
 @router.post('/model/delete', response_model=bool)
 async def delete_model_by_id(
+    request: Request,
     form_data: ModelIdForm,
     user=Depends(get_verified_user),
     db: AsyncSession = Depends(get_async_session),
@@ -795,10 +810,18 @@ async def delete_model_by_id(
         )
 
     result = await Models.delete_model_by_id(form_data.id, db=db)
+    if result:
+        await invalidate_model_cache(request.app)
     return result
 
 
 @router.delete('/delete/all', response_model=bool)
-async def delete_all_models(user=Depends(get_admin_user), db: AsyncSession = Depends(get_async_session)):
+async def delete_all_models(
+    request: Request,
+    user=Depends(get_admin_user),
+    db: AsyncSession = Depends(get_async_session),
+):
     result = await Models.delete_all_models(db=db)
+    if result:
+        await invalidate_model_cache(request.app)
     return result

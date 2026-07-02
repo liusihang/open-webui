@@ -19,6 +19,7 @@ from open_webui.models.users import UserModel
 from open_webui.routers import ollama, openai
 from open_webui.socket.utils import RedisDict
 from open_webui.utils.access_control import has_access, has_base_model_access
+from open_webui.utils.cache_invalidation import CACHE_NAMESPACE_MODELS, ensure_cache_fresh
 from open_webui.utils.plugin import (
     get_function_module_from_cache,
     load_function_module_by_id,
@@ -70,6 +71,8 @@ async def get_all_base_models(request: Request, user: UserModel = None):
 
 
 async def get_all_models(request, refresh: bool = False, user: UserModel = None):
+    await ensure_cache_fresh(request.app, CACHE_NAMESPACE_MODELS)
+
     if (
         request.app.state.MODELS
         and request.app.state.BASE_MODELS
@@ -138,6 +141,11 @@ async def get_all_models(request, refresh: bool = False, user: UserModel = None)
         base_model_lookup[model['id']] = model
 
     existing_ids = {m['id'] for m in models}
+    disabled_base_model_ids = {
+        custom_model.id
+        for custom_model in custom_models
+        if custom_model.base_model_id is None and not custom_model.is_active
+    }
 
     for custom_model in custom_models:
         if custom_model.base_model_id is None:
@@ -164,6 +172,8 @@ async def get_all_models(request, refresh: bool = False, user: UserModel = None)
                     model['filter_ids'] = filter_ids
                 else:
                     models.remove(model)
+                    base_model_lookup.pop(custom_model.id, None)
+                    base_model_lookup.pop(custom_model.id.split(':')[0], None)
 
         elif custom_model.is_active:
             if custom_model.id in existing_ids:
@@ -176,6 +186,22 @@ async def get_all_models(request, refresh: bool = False, user: UserModel = None)
             base_model = base_model_lookup.get(custom_model.base_model_id)
             if base_model is None:
                 base_model = base_model_lookup.get(custom_model.base_model_id.split(':')[0])
+            if custom_model.base_model_id in disabled_base_model_ids or (
+                custom_model.base_model_id.split(':')[0] in disabled_base_model_ids
+            ):
+                log.warning(
+                    'Skipping custom model %s because base model %s is disabled',
+                    custom_model.id,
+                    custom_model.base_model_id,
+                )
+                continue
+            if base_model is None:
+                log.warning(
+                    'Skipping custom model %s because base model %s is not available',
+                    custom_model.id,
+                    custom_model.base_model_id,
+                )
+                continue
             if base_model:
                 owned_by = base_model.get('owned_by', 'unknown')
                 if 'pipe' in base_model:

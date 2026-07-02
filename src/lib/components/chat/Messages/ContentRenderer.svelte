@@ -14,6 +14,7 @@
 	} from '$lib/stores';
 	import FloatingButtons from '../ContentRenderer/FloatingButtons.svelte';
 	import { createMessagesList, replaceOutsideCode } from '$lib/utils';
+	import { buildCitationTargets } from './citations';
 
 	/**
 	 * Extracts all top-level <details>...</details> blocks from content,
@@ -77,6 +78,7 @@
 	export let done = true;
 	export let model = null;
 	export let sources = null;
+	export let metadata = null;
 
 	export let save = false;
 	export let preview = false;
@@ -94,29 +96,15 @@
 	let floatingButtonsElement;
 
 	let sourceIds = [];
-	$: getSourceIds(sources);
+	let citationTargets = [];
 
-	const getSourceIds = (sources) => {
-		const result = [];
-		for (const source of sources ?? []) {
-			for (let index = 0; index < (source.document ?? []).length; index++) {
-				if (model?.info?.meta?.capabilities?.citations == false) {
-					result.push('N/A');
-					continue;
-				}
-				const metadata = source.metadata?.[index];
-				const id = metadata?.source ?? 'N/A';
-				if (metadata?.name) {
-					result.push(metadata.name);
-				} else if (id.startsWith('http://') || id.startsWith('https://')) {
-					result.push(id);
-				} else {
-					result.push(source?.source?.name ?? id);
-				}
-			}
-		}
-		sourceIds = [...new Set(result)];
-	};
+	$: {
+		citationTargets = buildCitationTargets(sources ?? [], { content, metadata });
+		sourceIds =
+			model?.info?.meta?.capabilities?.citations == false
+				? citationTargets.map(() => 'N/A')
+				: citationTargets.map((target) => target.title);
+	}
 
 	const updateButtonPosition = (event) => {
 		const buttonsContainerElement = document.getElementById(`floating-buttons-${id}`);
@@ -240,6 +228,7 @@
 			{editCodeBlock}
 			{topPadding}
 			{sourceIds}
+			{citationTargets}
 			{onSourceClick}
 			{onTaskClick}
 			{onSave}

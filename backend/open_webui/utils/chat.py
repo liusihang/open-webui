@@ -5,6 +5,7 @@ import random
 import sys
 import time
 import uuid
+from types import SimpleNamespace
 from typing import Any, Optional
 
 from aiocache import cached
@@ -300,6 +301,37 @@ async def generate_chat_completion(
 
 
 chat_completion = generate_chat_completion
+
+
+def _sanitize_agent_memory_internal_form_data(form_data: dict) -> dict:
+    sanitized = dict(form_data)
+    for key in ("tools", "tool_choice", "tool_ids", "features"):
+        sanitized.pop(key, None)
+
+    metadata = dict(sanitized.get("metadata") or {})
+    for key in ("tools", "tool_ids", "features"):
+        metadata.pop(key, None)
+    sanitized["metadata"] = metadata
+    return sanitized
+
+
+async def generate_agent_memory_internal_chat_completion(
+    request: Request,
+    form_data: dict,
+    user: Any,
+    bypass_filter: bool = False,
+    bypass_system_prompt: bool = False,
+    completion_fn=None,
+):
+    completion_fn = completion_fn or generate_chat_completion
+    internal_request = SimpleNamespace(app=request.app, state=SimpleNamespace())
+    return await completion_fn(
+        internal_request,
+        form_data=_sanitize_agent_memory_internal_form_data(form_data),
+        user=user,
+        bypass_filter=bypass_filter,
+        bypass_system_prompt=bypass_system_prompt,
+    )
 
 
 async def chat_completed(request: Request, form_data: dict, user: Any):

@@ -11,19 +11,32 @@ from open_webui.tools.knowledge_fs import kb_exec  # noqa: F401 — re-exported
 import asyncio
 import json
 import logging
+import re
 import time
 import types
+from io import BytesIO
+from pathlib import PurePosixPath
 from typing import Optional
 
 from fastapi import Request
 
+from open_webui.models.access_grants import AccessGrants
 from open_webui.models.channels import Channel, ChannelMember, Channels
 from open_webui.models.chats import Chats
 from open_webui.models.groups import Groups
 from open_webui.models.memories import Memories
 from open_webui.models.messages import Message, Messages
 from open_webui.models.notes import Notes
+from open_webui.models.skills import SkillForm, Skills
 from open_webui.models.users import UserModel
+from open_webui.retrieval.evidence import (
+    EvidenceToolError,
+    build_query_knowledge_evidence_response,
+    collect_allowlisted_query_image_refs,
+    normalize_query_knowledge_evidence_args,
+    query_knowledge_evidence_runtime,
+    resolve_query_image_refs,
+)
 from open_webui.retrieval.utils import get_content_from_url, get_sources_from_items
 from open_webui.retrieval.vector.async_client import ASYNC_VECTOR_DB_CLIENT
 from open_webui.routers.images import (
@@ -43,7 +56,19 @@ from open_webui.routers.memories import (
     add_memory as _add_memory,
 )
 from open_webui.routers.retrieval import search_web as _search_web
+from open_webui.storage.provider import Storage
+from open_webui.utils.access_control import has_permission
 from open_webui.utils.sanitize import sanitize_code
+from open_webui.utils.skill_packages import (
+    build_skill_package_manifest,
+    build_skill_package_zip_bytes,
+    parse_skill_markdown,
+    skill_package_storage_filename,
+)
+from open_webui.utils.terminal_skill_packages import (
+    ensure_skill_synced_to_terminal,
+    read_skill_package_source_from_terminal,
+)
 
 log = logging.getLogger(__name__)
 
@@ -244,6 +269,115 @@ async def search_web(
         )
     except Exception as e:
         log.exception(f'search_web error: {e}')
+        return json.dumps({'error': str(e)})
+
+
+async def web_search_research(
+    topic: str,
+    count: Optional[int] = None,
+    __request__: Request = None,
+    __user__: dict = None,
+) -> str:
+    """
+    Research a topic using multiple search queries for broader, deeper coverage.
+    Use this for complex or open-ended topics where a single query may miss
+    important angles.  For simple, targeted lookups, use search_web instead.
+
+    Internally this tool:
+      1. Asks a task model to break the topic into several focused search queries.
+      2. Executes all queries in parallel against the configured web search engine.
+      3. Deduplicates results by URL before returning.
+
+    :param topic: The research topic or question to investigate.
+    :param count: Maximum number of results retained per query (default: admin-configured).
+    :return: JSON list of deduplicated results — each with title, link, snippet, and
+             the source query that produced it.
+    """
+    if __request__ is None:
+        return json.dumps({'error': 'Request context not available'})
+
+    try:
+        # ── 1. Pick a task model & generate multiple queries ──────────────────
+        models = __request__.app.state.MODELS
+        model_id = None
+        if hasattr(__request__.state, 'model') and __request__.state.model:
+            model_id = __request__.state.model.get('id')
+        if not model_id and models:
+            model_id = next(iter(models.keys()), None)
+
+        user = UserModel(**__user__) if __user__ else None
+
+        queries = []
+        try:
+            from open_webui.routers.tasks import generate_queries
+
+            messages = [{'role': 'user', 'content': topic}]
+            res = await generate_queries(
+                __request__,
+                {
+                    'model': model_id,
+                    'messages': messages,
+                    'prompt': topic,
+                    'type': 'web_search',
+                    'chat_id': None,
+                },
+                user,
+            )
+
+            # generate_queries may return a JSONResponse on error
+            from fastapi.responses import JSONResponse
+
+            if isinstance(res, JSONResponse):
+                raise Exception('Query generation endpoint returned an error')
+
+            response_text = res['choices'][0]['message']['content']
+            # Robust JSON extraction: find the outermost {} block
+            bracket_start = response_text.rfind('{')
+            bracket_end = response_text.rfind('}') + 1
+            if bracket_start != -1 and bracket_end > bracket_start:
+                parsed = json.loads(response_text[bracket_start:bracket_end])
+                queries = parsed.get('queries', [])
+            else:
+                queries = [response_text]
+
+            queries = [q.strip() for q in queries if q and q.strip()]
+            if not queries:
+                queries = [topic]
+        except Exception as e:
+            log.warning('web_search_research: query generation failed (%s), falling back to topic', e)
+            queries = [topic]
+
+        # ── 2. Parallel search ────────────────────────────────────────────────
+        engine = __request__.app.state.config.WEB_SEARCH_ENGINE
+        configured = __request__.app.state.config.WEB_SEARCH_RESULT_COUNT
+        max_count = 5 if configured is None else configured
+        count_val = max(1, min(count, max_count)) if count is not None else max_count
+
+        search_tasks = [_search_web(__request__, engine, q, user) for q in queries]
+        search_results = await asyncio.gather(*search_tasks)
+
+        # ── 3. Deduplicate & assemble structured output ────────────────────────
+        seen_links: set[str] = set()
+        structured: list[dict] = []
+        for query_str, results in zip(queries, search_results):
+            if not results:
+                continue
+            for r in results:
+                if r.link not in seen_links:
+                    seen_links.add(r.link)
+                    structured.append({
+                        'title': r.title,
+                        'link': r.link,
+                        'snippet': r.snippet,
+                        'query': query_str,
+                    })
+
+        # Honor count per overall results (cap total, not per-query)
+        structured = structured[:count_val] if count_val else structured
+
+        return json.dumps(structured, ensure_ascii=False)
+    except Exception as e:
+        log.exception('web_search_research error: %s', e)
         return json.dumps({'error': str(e)})
 
 
@@ -2851,6 +2985,75 @@ async def query_knowledge_files(
         return json.dumps({'error': str(e)})
 
 
+async def query_knowledge_evidence(
+    evidence_refs: list[str] | str | None = None,
+    query_text: str | None = None,
+    question: str | None = None,
+    visual_query: str | None = None,
+    query_image_refs: list[str] | str | None = None,
+    knowledge_ids: list[str] | str | None = None,
+    collection_ids: list[str] | str | None = None,
+    modalities: list[str] | str | None = None,
+    count: int | str | None = None,
+    top_k: int | str | None = None,
+    rerank: bool | str | None = None,
+    include_images: bool | str | None = None,
+    __request__: Request = None,
+    __user__: dict = None,
+    __metadata__: dict = None,
+    __model_knowledge__: list[dict] = None,
+) -> str:
+    """
+    Query typed knowledge evidence by evidence refs, text, image refs, or both. Use query_text/question for the
+    user's rule, fact, or task question. Use visual_query only for a specific visual target description when searching
+    image evidence, such as a resolved object, label, diagram, gel, box, or visual feature. Do not pass an unresolved
+    task question like "where should the red sample go?" as visual_query unless the user explicitly asks for image-only
+    evidence; first resolve the textual rule with query_text, then search images with a specific visual target.
+
+    The actual vector search implementation is injected through the request
+    app-state evidence retrieval adapter; SQL truth rows are always hydrated
+    from knowledge_evidence tables before returning source metadata.
+    """
+    normalized = normalize_query_knowledge_evidence_args(
+        evidence_refs=evidence_refs,
+        query_text=query_text,
+        question=question,
+        visual_query=visual_query,
+        query_image_refs=query_image_refs,
+        knowledge_ids=knowledge_ids,
+        collection_ids=collection_ids,
+        modalities=modalities,
+        count=count,
+        top_k=top_k,
+        rerank=rerank,
+        include_images=include_images,
+    )
+
+    try:
+        allowed_query_image_refs = collect_allowlisted_query_image_refs(__metadata__)
+        acl_resolver = None
+        if __request__ is not None:
+            acl_resolver = getattr(__request__.app.state, 'QUERY_IMAGE_REF_ACL_CHECK', None)
+            if not callable(acl_resolver):
+                acl_resolver = None
+
+        normalized.query_image_refs = resolve_query_image_refs(
+            normalized.query_image_refs,
+            allowed_refs=allowed_query_image_refs,
+            acl_resolver=acl_resolver,
+        )
+
+        effective_scope = _resolve_effective_scope(__metadata__, __model_knowledge__)
+        return await query_knowledge_evidence_runtime(
+            query=normalized,
+            request=__request__,
+            user=__user__,
+            effective_scope=effective_scope,
+        )
+    except EvidenceToolError as e:
+        return build_query_knowledge_evidence_response(query=normalized, error=e)
+
+
 async def query_knowledge_bases(
     query: str,
     count: int = 5,
@@ -2957,17 +3160,30 @@ async def query_knowledge_bases(
 # =============================================================================
 
 
-async def view_skill(
+async def read_skill(
     id: str,
     __request__: Request = None,
     __user__: dict = None,
+    __terminal_id__: str = None,
+    __metadata__: dict = None,
+    __oauth_token__: dict = None,
 ) -> str:
     """
-    Load the full instructions of a skill by its id from the available skills manifest.
-    Use this when you need detailed instructions for a skill listed in <available_skills>.
+    Read an existing skill's full instructions by skill id.
+    Use when a skill is available by id but only its name or description is visible,
+    or before applying a package-backed skill that may need files in Open Terminal.
+    For package-backed skills, this also syncs the stored bundle into the active
+    Open Terminal runtime cache before returning absolute package and entrypoint paths.
+    Skill packages are text-only: SKILL.md, skill.json, scripts, templates, and
+    assets may be present only as supported UTF-8 text files; binary assets are not supported.
+    Do not use this to install a new skill or modify an existing skill.
+    Returns JSON with name and content; package-backed skills also include package.path
+    and entrypoints[].path values that can be used with Open Terminal commands.
+    Errors are returned as JSON with an error field; if terminal context is missing
+    for a package-backed skill, retry only after an active Open Terminal is available.
 
-    :param id: The id of the skill to load (as shown in the manifest)
-    :return: The full skill instructions as markdown content
+    :param id: Existing skill id, e.g. "data-cleanup"; use available_skills or a prior install/update result
+    :return: JSON with name/content, optional package.path and entrypoints, or an error field
     """
     if __request__ is None:
         return json.dumps({'error': 'Request context not available'})
@@ -2976,40 +3192,326 @@ async def view_skill(
         return json.dumps({'error': 'User context not available'})
 
     try:
-        from open_webui.models.access_grants import AccessGrants
-        from open_webui.models.skills import Skills
+        skill = await _get_accessible_skill_for_tool(id, __user__, permission='read')
+        package = await Skills.get_latest_skill_package_by_skill_id(skill.id)
+        payload = {'name': skill.name, 'content': skill.content}
 
-        user_id = __user__.get('id')
+        if package:
+            terminal_id = _resolve_terminal_id(__terminal_id__, __metadata__)
+            if not terminal_id:
+                return json.dumps({'error': 'Terminal context is required to sync text-only skill package files'})
 
-        # Direct DB lookup by id (case-insensitive since IDs are stored lowercase)
-        skill = await Skills.get_skill_by_id(id.lower())
+            sync_result = await ensure_skill_synced_to_terminal(
+                __request__,
+                terminal_id,
+                __user__,
+                skill,
+                package,
+                metadata=__metadata__,
+                oauth_token=__oauth_token__,
+            )
+            payload['package'] = {'path': sync_result['path']}
+            payload['entrypoints'] = sync_result['entrypoints']
 
-        if not skill or not skill.is_active:
-            return json.dumps({'error': f"Skill '{id}' not found"})
-
-        # Check user access
-        user_role = __user__.get('role', 'user')
-        if user_role != 'admin' and skill.user_id != user_id:
-            user_group_ids = [group.id for group in await Groups.get_groups_by_member_id(user_id)]
-            if not await AccessGrants.has_access(
-                user_id=user_id,
-                resource_type='skill',
-                resource_id=skill.id,
-                permission='read',
-                user_group_ids=set(user_group_ids),
-            ):
-                return json.dumps({'error': 'Access denied'})
-
-        return json.dumps(
-            {
-                'name': skill.name,
-                'content': skill.content,
-            },
-            ensure_ascii=False,
-        )
+        return json.dumps(payload, ensure_ascii=False)
     except Exception as e:
-        log.exception(f'view_skill error: {e}')
+        log.exception(f'read_skill error: {e}')
         return json.dumps({'error': str(e)})
+
+
+async def install_skill(
+    source_path: str,
+    __request__: Request = None,
+    __user__: dict = None,
+    __terminal_id__: str = None,
+    __metadata__: dict = None,
+    __oauth_token__: dict = None,
+) -> str:
+    """
+    Install a new skill from an absolute source directory in the active Open Terminal.
+    Use when the user asks to add a new skill from files already prepared in their
+    terminal storage. The source directory must contain SKILL.md and may include
+    skill.json, scripts, templates, or assets, but every packaged file must be a
+    supported UTF-8 text file; binary assets are not supported. This stores the skill in OpenWebUI
+    DB/storage but does not return runtime execution paths or sync the runtime cache;
+    call read_skill after installation when package paths or entrypoints are needed.
+    Do not use this for existing skills; use update_skill instead.
+    Returns JSON containing only the new skill id, or an error field with recovery
+    guidance such as using an absolute source path or choosing a non-runtime-cache source.
+
+    :param source_path: Absolute terminal source dir for a text-only package;
+        not relative or under /home/user/.openwebui/skills
+    :return: JSON object with only id on success, or an error field
+    """
+    if __request__ is None:
+        return json.dumps({'error': 'Request context not available'})
+    if not __user__:
+        return json.dumps({'error': 'User context not available'})
+
+    try:
+        terminal_id = _resolve_terminal_id(__terminal_id__, __metadata__)
+        if not terminal_id:
+            return json.dumps({'error': 'Terminal context is required'})
+        if not await _can_manage_workspace_skills(__request__, __user__):
+            return json.dumps({'error': 'Access denied'})
+
+        skill_id = await install_skill_from_terminal_source(
+            __request__,
+            __user__,
+            terminal_id,
+            source_path,
+            metadata=__metadata__,
+            oauth_token=__oauth_token__,
+        )
+        return json.dumps({'id': skill_id}, ensure_ascii=False)
+    except Exception as e:
+        log.exception(f'install_skill error: {e}')
+        return json.dumps({'error': str(e)})
+
+
+async def update_skill(
+    id: str,
+    content: Optional[str] = None,
+    source_path: Optional[str] = None,
+    __request__: Request = None,
+    __user__: dict = None,
+    __terminal_id__: str = None,
+    __metadata__: dict = None,
+    __oauth_token__: dict = None,
+) -> str:
+    """
+    Update an existing skill's instructions or replace its package from Open Terminal.
+    Use when the user asks to modify a skill that already exists. Provide exactly one
+    of content or source_path: content performs a text-only SKILL.md instruction update,
+    while source_path replaces the whole package from an absolute Open Terminal source
+    directory containing SKILL.md. Source packages are text-only: skill.json, scripts,
+    templates, and assets may be present only as supported UTF-8 text files; binary assets are not supported.
+    This stores the update in OpenWebUI DB/storage but
+    does not return runtime execution paths or sync the runtime cache; call read_skill
+    after updating when package paths or entrypoints are needed.
+    Do not use this to create a new skill; use install_skill instead.
+    Returns JSON containing only the updated skill id, or an error field explaining
+    what to change before retrying, such as providing exactly one update source.
+
+    :param id: Existing skill id to update, e.g. "data-cleanup"; use available_skills or a prior install/update result
+    :param content: Replacement SKILL.md instruction body; provide only when source_path is not provided
+    :param source_path: Abs terminal source dir with replacement SKILL.md; omit content and avoid runtime cache paths
+    :return: JSON object with only id on success, or an error field
+    """
+    if __request__ is None:
+        return json.dumps({'error': 'Request context not available'})
+    if not __user__:
+        return json.dumps({'error': 'User context not available'})
+
+    try:
+        skill_id = await update_skill_from_tool(
+            __request__,
+            __user__,
+            _resolve_terminal_id(__terminal_id__, __metadata__),
+            id,
+            content=content,
+            source_path=source_path,
+            metadata=__metadata__,
+            oauth_token=__oauth_token__,
+        )
+        return json.dumps({'id': skill_id}, ensure_ascii=False)
+    except Exception as e:
+        log.exception(f'update_skill error: {e}')
+        return json.dumps({'error': str(e)})
+
+
+async def view_skill(
+    id: str,
+    __request__: Request = None,
+    __user__: dict = None,
+    __terminal_id__: str = None,
+    __metadata__: dict = None,
+    __oauth_token__: dict = None,
+) -> str:
+    """Compatibility alias for read_skill."""
+    return await read_skill(
+        id,
+        __request__=__request__,
+        __user__=__user__,
+        __terminal_id__=__terminal_id__,
+        __metadata__=__metadata__,
+        __oauth_token__=__oauth_token__,
+    )
+
+
+async def install_skill_from_terminal_source(
+    request: Request,
+    user: dict,
+    terminal_id: str,
+    source_path: str,
+    *,
+    metadata: dict | None = None,
+    oauth_token: dict | None = None,
+) -> str:
+    files = await read_skill_package_source_from_terminal(
+        request,
+        terminal_id,
+        user,
+        source_path,
+        metadata=metadata,
+        oauth_token=oauth_token,
+    )
+    manifest = build_skill_package_manifest(files)
+    parsed_skill = parse_skill_markdown(files['SKILL.md'])
+    skill_name = parsed_skill.name or _fallback_skill_name_from_source_path(source_path)
+    skill_id = _skill_id_from_name(skill_name)
+
+    if await Skills.get_skill_by_id(skill_id):
+        raise ValueError(f"Skill '{skill_id}' already exists")
+
+    storage_path = await _upload_skill_package_bundle(skill_id, files, manifest)
+    skill = await Skills.insert_new_skill(
+        _user_id(user),
+        SkillForm(
+            id=skill_id,
+            name=skill_name,
+            description=parsed_skill.description,
+            content=parsed_skill.body,
+        ),
+    )
+    if not skill:
+        raise ValueError('Error creating skill')
+
+    package = await Skills.upsert_skill_package(
+        skill.id,
+        manifest.hash,
+        manifest.model_dump(),
+        storage_path,
+    )
+    if not package:
+        raise ValueError('Error storing skill package metadata')
+
+    return skill.id
+
+
+async def update_skill_from_tool(
+    request: Request,
+    user: dict,
+    terminal_id: str | None,
+    skill_id: str,
+    *,
+    content: Optional[str] = None,
+    source_path: Optional[str] = None,
+    metadata: dict | None = None,
+    oauth_token: dict | None = None,
+) -> str:
+    if content is None and source_path is None:
+        raise ValueError('content or source_path is required')
+    if content is not None and source_path is not None:
+        raise ValueError('provide either content or source_path, not both')
+
+    skill = await _get_accessible_skill_for_tool(skill_id, user, permission='write')
+    updated: dict[str, object] = {}
+
+    if source_path is not None:
+        if not terminal_id:
+            raise ValueError('Terminal context is required')
+        files = await read_skill_package_source_from_terminal(
+            request,
+            terminal_id,
+            user,
+            source_path,
+            metadata=metadata,
+            oauth_token=oauth_token,
+        )
+        manifest = build_skill_package_manifest(files)
+        parsed_skill = parse_skill_markdown(files['SKILL.md'])
+        updated['content'] = parsed_skill.body
+        if parsed_skill.name:
+            updated['name'] = parsed_skill.name
+        updated['description'] = parsed_skill.description
+        storage_path = await _upload_skill_package_bundle(skill.id, files, manifest)
+        saved = await Skills.update_skill_and_upsert_package_by_id(
+            skill.id,
+            updated,
+            bundle_hash=manifest.hash,
+            manifest=manifest.model_dump(),
+            storage_path=storage_path,
+        )
+    else:
+        updated['content'] = content
+        saved = await Skills.update_skill_by_id(skill.id, updated)
+    if not saved:
+        raise ValueError('Error updating skill')
+    return saved.id
+
+
+async def _upload_skill_package_bundle(skill_id: str, files: dict[str, str | bytes], manifest) -> str:
+    zip_bytes = build_skill_package_zip_bytes(files)
+    filename = skill_package_storage_filename(skill_id, manifest.hash)
+
+    def _upload() -> str:
+        _, storage_path = Storage.upload_file(
+            BytesIO(zip_bytes),
+            filename,
+            {'resource_type': 'skill_package', 'skill_id': skill_id, 'bundle_hash': manifest.hash},
+        )
+        return storage_path
+
+    return await asyncio.to_thread(_upload)
+
+
+async def _get_accessible_skill_for_tool(id: str, user: dict, *, permission: str):
+    user_id = _user_id(user)
+    skill = await Skills.get_skill_by_id(id.lower())
+    if not skill or not skill.is_active:
+        raise ValueError(f"Skill '{id}' not found")
+
+    user_role = user.get('role', 'user') if isinstance(user, dict) else getattr(user, 'role', 'user')
+    if user_role == 'admin' or skill.user_id == user_id:
+        return skill
+
+    user_group_ids = {group.id for group in await Groups.get_groups_by_member_id(user_id)}
+    if await AccessGrants.has_access(
+        user_id=user_id,
+        resource_type='skill',
+        resource_id=skill.id,
+        permission=permission,
+        user_group_ids=user_group_ids,
+    ):
+        return skill
+
+    raise PermissionError('Access denied')
+
+
+async def _can_manage_workspace_skills(request: Request, user: dict) -> bool:
+    if (user.get('role') if isinstance(user, dict) else getattr(user, 'role', None)) == 'admin':
+        return True
+    return await has_permission(
+        _user_id(user),
+        'workspace.skills',
+        request.app.state.config.USER_PERMISSIONS,
+    )
+
+
+def _resolve_terminal_id(terminal_id: str | None, metadata: dict | None = None) -> str | None:
+    if terminal_id:
+        return terminal_id
+    if isinstance(metadata, dict):
+        value = metadata.get('terminal_id')
+        if isinstance(value, str) and value:
+            return value
+    return None
+
+
+def _skill_id_from_name(name: str) -> str:
+    slug = re.sub(r'[^a-z0-9_-]+', '-', name.lower()).strip('-_')
+    slug = re.sub(r'-{2,}', '-', slug)
+    return slug or 'skill'
+
+
+def _fallback_skill_name_from_source_path(source_path: str) -> str:
+    name = PurePosixPath(source_path).name
+    return name.replace('-', ' ').replace('_', ' ').strip().title() or 'Skill'
+
+
+def _user_id(user: dict) -> str:
+    return user.get('id') if isinstance(user, dict) else getattr(user, 'id')
 
 
 # =============================================================================

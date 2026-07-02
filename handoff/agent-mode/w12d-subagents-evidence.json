@@ -1,0 +1,1305 @@
+{
+  "blockers": [],
+  "budget_evidence": {
+    "participants": [
+      {
+        "id": "leader",
+        "model_id": "agent-general",
+        "role": "leader",
+        "state": "running",
+        "type": "leader"
+      },
+      {
+        "budget": {
+          "max_steps": 2,
+          "remaining_steps": 2,
+          "used_steps": 0
+        },
+        "description": "Live W12D-3 concurrent data subagent.",
+        "id": "subagent:b9c75c49-0cfe-4a98-bbc1-179b2159c661:1",
+        "metadata": {
+          "acceptance_scenario": "W12D-3",
+          "index": 0,
+          "single_level": true,
+          "team_cap": 5
+        },
+        "parent_id": "leader",
+        "role": "data-worker-0",
+        "state": "running",
+        "task": "Inspect data shard 0.",
+        "type": "subagent"
+      },
+      {
+        "budget": {
+          "max_steps": 2,
+          "remaining_steps": 2,
+          "used_steps": 0
+        },
+        "description": "Live W12D-3 concurrent data subagent.",
+        "id": "subagent:b9c75c49-0cfe-4a98-bbc1-179b2159c661:4",
+        "metadata": {
+          "acceptance_scenario": "W12D-3",
+          "index": 3,
+          "single_level": true,
+          "team_cap": 5
+        },
+        "parent_id": "leader",
+        "role": "data-worker-3",
+        "state": "running",
+        "task": "Inspect data shard 3.",
+        "type": "subagent"
+      },
+      {
+        "budget": {
+          "max_steps": 2,
+          "remaining_steps": 2,
+          "used_steps": 0
+        },
+        "description": "Live W12D-3 concurrent data subagent.",
+        "id": "subagent:b9c75c49-0cfe-4a98-bbc1-179b2159c661:3",
+        "metadata": {
+          "acceptance_scenario": "W12D-3",
+          "index": 2,
+          "single_level": true,
+          "team_cap": 5
+        },
+        "parent_id": "leader",
+        "role": "data-worker-2",
+        "state": "running",
+        "task": "Inspect data shard 2.",
+        "type": "subagent"
+      },
+      {
+        "budget": {
+          "max_steps": 2,
+          "remaining_steps": 2,
+          "used_steps": 0
+        },
+        "description": "Live W12D-3 concurrent data subagent.",
+        "id": "subagent:b9c75c49-0cfe-4a98-bbc1-179b2159c661:5",
+        "metadata": {
+          "acceptance_scenario": "W12D-3",
+          "index": 4,
+          "single_level": true,
+          "team_cap": 5
+        },
+        "parent_id": "leader",
+        "role": "data-worker-4",
+        "state": "running",
+        "task": "Inspect data shard 4.",
+        "type": "subagent"
+      },
+      {
+        "budget": {
+          "max_steps": 2,
+          "remaining_steps": 2,
+          "used_steps": 0
+        },
+        "description": "Live W12D-3 concurrent data subagent.",
+        "id": "subagent:b9c75c49-0cfe-4a98-bbc1-179b2159c661:2",
+        "metadata": {
+          "acceptance_scenario": "W12D-3",
+          "index": 1,
+          "single_level": true,
+          "team_cap": 5
+        },
+        "parent_id": "leader",
+        "role": "data-worker-1",
+        "state": "running",
+        "task": "Inspect data shard 1.",
+        "type": "subagent"
+      }
+    ],
+    "run_budget": {
+      "team": {
+        "max_steps": 20,
+        "max_subagents": 5,
+        "remaining_steps": 10,
+        "used_steps": 10
+      }
+    }
+  },
+  "events": [
+    {
+      "created_at": 1781750430138366000,
+      "event_type": "run.running",
+      "participant_id": "leader",
+      "payload": {
+        "runtime_session_id": "rt_b9c75c49-0cfe-4a98-bbc1-179b2159c661_FvcfsTDWeYw"
+      },
+      "phase": "running",
+      "seq": 1,
+      "summary": "Agent runtime accepted run."
+    },
+    {
+      "created_at": 1781750430352311000,
+      "event_type": "model.selection.requested",
+      "participant_id": "subagent:b9c75c49-0cfe-4a98-bbc1-179b2159c661:1",
+      "payload": {
+        "fuzzy_request": "data",
+        "parent_participant_id": null,
+        "participant_id": "subagent:b9c75c49-0cfe-4a98-bbc1-179b2159c661:1",
+        "requested_model_id": null
+      },
+      "phase": "running",
+      "seq": 2,
+      "summary": "Selecting model for subagent:b9c75c49-0cfe-4a98-bbc1-179b2159c661:1"
+    },
+    {
+      "created_at": 1781750430372451000,
+      "event_type": "model.selection.requested",
+      "participant_id": "subagent:b9c75c49-0cfe-4a98-bbc1-179b2159c661:3",
+      "payload": {
+        "fuzzy_request": "data",
+        "parent_participant_id": null,
+        "participant_id": "subagent:b9c75c49-0cfe-4a98-bbc1-179b2159c661:3",
+        "requested_model_id": null
+      },
+      "phase": "running",
+      "seq": 3,
+      "summary": "Selecting model for subagent:b9c75c49-0cfe-4a98-bbc1-179b2159c661:3"
+    },
+    {
+      "created_at": 1781750430398723000,
+      "event_type": "model.selection.completed",
+      "participant_id": "subagent:b9c75c49-0cfe-4a98-bbc1-179b2159c661:1",
+      "payload": {
+        "choices": [
+          {
+            "id": "agent-python",
+            "meta": {
+              "agent_selection": {
+                "priority": 1,
+                "roles": [
+                  "python",
+                  "coder",
+                  "analysis"
+                ],
+                "skills": [
+                  "python",
+                  "code",
+                  "data"
+                ]
+              }
+            },
+            "name": "Agent Python",
+            "object": "model",
+            "owned_by": "openwebui-local"
+          },
+          {
+            "id": "agent-general",
+            "meta": {
+              "agent_selection": {
+                "priority": 20,
+                "roles": [
+                  "generalist",
+                  "researcher"
+                ],
+                "skills": [
+                  "analysis",
+                  "summary"
+                ]
+              }
+            },
+            "name": "Agent General",
+            "object": "model",
+            "owned_by": "openwebui-local"
+          }
+        ],
+        "meta": {
+          "agent_selection": {
+            "reason": "fuzzy_match",
+            "selected_model_id": "agent-python",
+            "source_request": {
+              "name": "data-worker-0",
+              "request": "data",
+              "task": "Inspect data shard 0."
+            }
+          }
+        },
+        "selected_model_id": "agent-python",
+        "warnings": []
+      },
+      "phase": "running",
+      "seq": 4,
+      "summary": "Selected agent-python for subagent:b9c75c49-0cfe-4a98-bbc1-179b2159c661:1"
+    },
+    {
+      "created_at": 1781750430406766000,
+      "event_type": "model.selection.requested",
+      "participant_id": "subagent:b9c75c49-0cfe-4a98-bbc1-179b2159c661:2",
+      "payload": {
+        "fuzzy_request": "data",
+        "parent_participant_id": null,
+        "participant_id": "subagent:b9c75c49-0cfe-4a98-bbc1-179b2159c661:2",
+        "requested_model_id": null
+      },
+      "phase": "running",
+      "seq": 5,
+      "summary": "Selecting model for subagent:b9c75c49-0cfe-4a98-bbc1-179b2159c661:2"
+    },
+    {
+      "created_at": 1781750430415231000,
+      "event_type": "model.selection.requested",
+      "participant_id": "subagent:b9c75c49-0cfe-4a98-bbc1-179b2159c661:5",
+      "payload": {
+        "fuzzy_request": "data",
+        "parent_participant_id": null,
+        "participant_id": "subagent:b9c75c49-0cfe-4a98-bbc1-179b2159c661:5",
+        "requested_model_id": null
+      },
+      "phase": "running",
+      "seq": 6,
+      "summary": "Selecting model for subagent:b9c75c49-0cfe-4a98-bbc1-179b2159c661:5"
+    },
+    {
+      "created_at": 1781750430420586000,
+      "event_type": "model.selection.requested",
+      "participant_id": "subagent:b9c75c49-0cfe-4a98-bbc1-179b2159c661:4",
+      "payload": {
+        "fuzzy_request": "data",
+        "parent_participant_id": null,
+        "participant_id": "subagent:b9c75c49-0cfe-4a98-bbc1-179b2159c661:4",
+        "requested_model_id": null
+      },
+      "phase": "running",
+      "seq": 7,
+      "summary": "Selecting model for subagent:b9c75c49-0cfe-4a98-bbc1-179b2159c661:4"
+    },
+    {
+      "created_at": 1781750430435168000,
+      "event_type": "model.selection.completed",
+      "participant_id": "subagent:b9c75c49-0cfe-4a98-bbc1-179b2159c661:3",
+      "payload": {
+        "choices": [
+          {
+            "id": "agent-python",
+            "meta": {
+              "agent_selection": {
+                "priority": 1,
+                "roles": [
+                  "python",
+                  "coder",
+                  "analysis"
+                ],
+                "skills": [
+                  "python",
+                  "code",
+                  "data"
+                ]
+              }
+            },
+            "name": "Agent Python",
+            "object": "model",
+            "owned_by": "openwebui-local"
+          },
+          {
+            "id": "agent-general",
+            "meta": {
+              "agent_selection": {
+                "priority": 20,
+                "roles": [
+                  "generalist",
+                  "researcher"
+                ],
+                "skills": [
+                  "analysis",
+                  "summary"
+                ]
+              }
+            },
+            "name": "Agent General",
+            "object": "model",
+            "owned_by": "openwebui-local"
+          }
+        ],
+        "meta": {
+          "agent_selection": {
+            "reason": "fuzzy_match",
+            "selected_model_id": "agent-python",
+            "source_request": {
+              "name": "data-worker-2",
+              "request": "data",
+              "task": "Inspect data shard 2."
+            }
+          }
+        },
+        "selected_model_id": "agent-python",
+        "warnings": []
+      },
+      "phase": "running",
+      "seq": 8,
+      "summary": "Selected agent-python for subagent:b9c75c49-0cfe-4a98-bbc1-179b2159c661:3"
+    },
+    {
+      "created_at": 1781750430438955000,
+      "event_type": "subagent.created",
+      "participant_id": "subagent:b9c75c49-0cfe-4a98-bbc1-179b2159c661:1",
+      "payload": {
+        "description": "Live W12D-3 concurrent data subagent.",
+        "model_id": "agent-python",
+        "model_selection": {
+          "choices": [
+            {
+              "id": "agent-python",
+              "meta": {
+                "agent_selection": {
+                  "priority": 1,
+                  "roles": [
+                    "python",
+                    "coder",
+                    "analysis"
+                  ],
+                  "skills": [
+                    "python",
+                    "code",
+                    "data"
+                  ]
+                }
+              },
+              "name": "Agent Python",
+              "object": "model",
+              "owned_by": "openwebui-local"
+            },
+            {
+              "id": "agent-general",
+              "meta": {
+                "agent_selection": {
+                  "priority": 20,
+                  "roles": [
+                    "generalist",
+                    "researcher"
+                  ],
+                  "skills": [
+                    "analysis",
+                    "summary"
+                  ]
+                }
+              },
+              "name": "Agent General",
+              "object": "model",
+              "owned_by": "openwebui-local"
+            }
+          ],
+          "meta": {
+            "agent_selection": {
+              "reason": "fuzzy_match",
+              "selected_model_id": "agent-python",
+              "source_request": {
+                "name": "data-worker-0",
+                "request": "data",
+                "task": "Inspect data shard 0."
+              }
+            }
+          },
+          "selected_model_id": "agent-python",
+          "warnings": []
+        },
+        "name": "data-worker-0",
+        "parent_participant_id": "leader",
+        "participant_id": "subagent:b9c75c49-0cfe-4a98-bbc1-179b2159c661:1",
+        "task": "Inspect data shard 0."
+      },
+      "phase": "running",
+      "seq": 9,
+      "summary": "Subagent data-worker-0 started."
+    },
+    {
+      "created_at": 1781750430448179000,
+      "event_type": "model.selection.completed",
+      "participant_id": "subagent:b9c75c49-0cfe-4a98-bbc1-179b2159c661:2",
+      "payload": {
+        "choices": [
+          {
+            "id": "agent-python",
+            "meta": {
+              "agent_selection": {
+                "priority": 1,
+                "roles": [
+                  "python",
+                  "coder",
+                  "analysis"
+                ],
+                "skills": [
+                  "python",
+                  "code",
+                  "data"
+                ]
+              }
+            },
+            "name": "Agent Python",
+            "object": "model",
+            "owned_by": "openwebui-local"
+          },
+          {
+            "id": "agent-general",
+            "meta": {
+              "agent_selection": {
+                "priority": 20,
+                "roles": [
+                  "generalist",
+                  "researcher"
+                ],
+                "skills": [
+                  "analysis",
+                  "summary"
+                ]
+              }
+            },
+            "name": "Agent General",
+            "object": "model",
+            "owned_by": "openwebui-local"
+          }
+        ],
+        "meta": {
+          "agent_selection": {
+            "reason": "fuzzy_match",
+            "selected_model_id": "agent-python",
+            "source_request": {
+              "name": "data-worker-1",
+              "request": "data",
+              "task": "Inspect data shard 1."
+            }
+          }
+        },
+        "selected_model_id": "agent-python",
+        "warnings": []
+      },
+      "phase": "running",
+      "seq": 10,
+      "summary": "Selected agent-python for subagent:b9c75c49-0cfe-4a98-bbc1-179b2159c661:2"
+    },
+    {
+      "created_at": 1781750430451246000,
+      "event_type": "model.selection.completed",
+      "participant_id": "subagent:b9c75c49-0cfe-4a98-bbc1-179b2159c661:5",
+      "payload": {
+        "choices": [
+          {
+            "id": "agent-python",
+            "meta": {
+              "agent_selection": {
+                "priority": 1,
+                "roles": [
+                  "python",
+                  "coder",
+                  "analysis"
+                ],
+                "skills": [
+                  "python",
+                  "code",
+                  "data"
+                ]
+              }
+            },
+            "name": "Agent Python",
+            "object": "model",
+            "owned_by": "openwebui-local"
+          },
+          {
+            "id": "agent-general",
+            "meta": {
+              "agent_selection": {
+                "priority": 20,
+                "roles": [
+                  "generalist",
+                  "researcher"
+                ],
+                "skills": [
+                  "analysis",
+                  "summary"
+                ]
+              }
+            },
+            "name": "Agent General",
+            "object": "model",
+            "owned_by": "openwebui-local"
+          }
+        ],
+        "meta": {
+          "agent_selection": {
+            "reason": "fuzzy_match",
+            "selected_model_id": "agent-python",
+            "source_request": {
+              "name": "data-worker-4",
+              "request": "data",
+              "task": "Inspect data shard 4."
+            }
+          }
+        },
+        "selected_model_id": "agent-python",
+        "warnings": []
+      },
+      "phase": "running",
+      "seq": 11,
+      "summary": "Selected agent-python for subagent:b9c75c49-0cfe-4a98-bbc1-179b2159c661:5"
+    },
+    {
+      "created_at": 1781750430452737000,
+      "event_type": "model.selection.completed",
+      "participant_id": "subagent:b9c75c49-0cfe-4a98-bbc1-179b2159c661:4",
+      "payload": {
+        "choices": [
+          {
+            "id": "agent-python",
+            "meta": {
+              "agent_selection": {
+                "priority": 1,
+                "roles": [
+                  "python",
+                  "coder",
+                  "analysis"
+                ],
+                "skills": [
+                  "python",
+                  "code",
+                  "data"
+                ]
+              }
+            },
+            "name": "Agent Python",
+            "object": "model",
+            "owned_by": "openwebui-local"
+          },
+          {
+            "id": "agent-general",
+            "meta": {
+              "agent_selection": {
+                "priority": 20,
+                "roles": [
+                  "generalist",
+                  "researcher"
+                ],
+                "skills": [
+                  "analysis",
+                  "summary"
+                ]
+              }
+            },
+            "name": "Agent General",
+            "object": "model",
+            "owned_by": "openwebui-local"
+          }
+        ],
+        "meta": {
+          "agent_selection": {
+            "reason": "fuzzy_match",
+            "selected_model_id": "agent-python",
+            "source_request": {
+              "name": "data-worker-3",
+              "request": "data",
+              "task": "Inspect data shard 3."
+            }
+          }
+        },
+        "selected_model_id": "agent-python",
+        "warnings": []
+      },
+      "phase": "running",
+      "seq": 12,
+      "summary": "Selected agent-python for subagent:b9c75c49-0cfe-4a98-bbc1-179b2159c661:4"
+    },
+    {
+      "created_at": 1781750430510024000,
+      "event_type": "subagent.created",
+      "participant_id": "subagent:b9c75c49-0cfe-4a98-bbc1-179b2159c661:3",
+      "payload": {
+        "description": "Live W12D-3 concurrent data subagent.",
+        "model_id": "agent-python",
+        "model_selection": {
+          "choices": [
+            {
+              "id": "agent-python",
+              "meta": {
+                "agent_selection": {
+                  "priority": 1,
+                  "roles": [
+                    "python",
+                    "coder",
+                    "analysis"
+                  ],
+                  "skills": [
+                    "python",
+                    "code",
+                    "data"
+                  ]
+                }
+              },
+              "name": "Agent Python",
+              "object": "model",
+              "owned_by": "openwebui-local"
+            },
+            {
+              "id": "agent-general",
+              "meta": {
+                "agent_selection": {
+                  "priority": 20,
+                  "roles": [
+                    "generalist",
+                    "researcher"
+                  ],
+                  "skills": [
+                    "analysis",
+                    "summary"
+                  ]
+                }
+              },
+              "name": "Agent General",
+              "object": "model",
+              "owned_by": "openwebui-local"
+            }
+          ],
+          "meta": {
+            "agent_selection": {
+              "reason": "fuzzy_match",
+              "selected_model_id": "agent-python",
+              "source_request": {
+                "name": "data-worker-2",
+                "request": "data",
+                "task": "Inspect data shard 2."
+              }
+            }
+          },
+          "selected_model_id": "agent-python",
+          "warnings": []
+        },
+        "name": "data-worker-2",
+        "parent_participant_id": "leader",
+        "participant_id": "subagent:b9c75c49-0cfe-4a98-bbc1-179b2159c661:3",
+        "task": "Inspect data shard 2."
+      },
+      "phase": "running",
+      "seq": 13,
+      "summary": "Subagent data-worker-2 started."
+    },
+    {
+      "created_at": 1781750430513059000,
+      "event_type": "subagent.created",
+      "participant_id": "subagent:b9c75c49-0cfe-4a98-bbc1-179b2159c661:5",
+      "payload": {
+        "description": "Live W12D-3 concurrent data subagent.",
+        "model_id": "agent-python",
+        "model_selection": {
+          "choices": [
+            {
+              "id": "agent-python",
+              "meta": {
+                "agent_selection": {
+                  "priority": 1,
+                  "roles": [
+                    "python",
+                    "coder",
+                    "analysis"
+                  ],
+                  "skills": [
+                    "python",
+                    "code",
+                    "data"
+                  ]
+                }
+              },
+              "name": "Agent Python",
+              "object": "model",
+              "owned_by": "openwebui-local"
+            },
+            {
+              "id": "agent-general",
+              "meta": {
+                "agent_selection": {
+                  "priority": 20,
+                  "roles": [
+                    "generalist",
+                    "researcher"
+                  ],
+                  "skills": [
+                    "analysis",
+                    "summary"
+                  ]
+                }
+              },
+              "name": "Agent General",
+              "object": "model",
+              "owned_by": "openwebui-local"
+            }
+          ],
+          "meta": {
+            "agent_selection": {
+              "reason": "fuzzy_match",
+              "selected_model_id": "agent-python",
+              "source_request": {
+                "name": "data-worker-4",
+                "request": "data",
+                "task": "Inspect data shard 4."
+              }
+            }
+          },
+          "selected_model_id": "agent-python",
+          "warnings": []
+        },
+        "name": "data-worker-4",
+        "parent_participant_id": "leader",
+        "participant_id": "subagent:b9c75c49-0cfe-4a98-bbc1-179b2159c661:5",
+        "task": "Inspect data shard 4."
+      },
+      "phase": "running",
+      "seq": 14,
+      "summary": "Subagent data-worker-4 started."
+    },
+    {
+      "created_at": 1781750430514714000,
+      "event_type": "subagent.created",
+      "participant_id": "subagent:b9c75c49-0cfe-4a98-bbc1-179b2159c661:4",
+      "payload": {
+        "description": "Live W12D-3 concurrent data subagent.",
+        "model_id": "agent-python",
+        "model_selection": {
+          "choices": [
+            {
+              "id": "agent-python",
+              "meta": {
+                "agent_selection": {
+                  "priority": 1,
+                  "roles": [
+                    "python",
+                    "coder",
+                    "analysis"
+                  ],
+                  "skills": [
+                    "python",
+                    "code",
+                    "data"
+                  ]
+                }
+              },
+              "name": "Agent Python",
+              "object": "model",
+              "owned_by": "openwebui-local"
+            },
+            {
+              "id": "agent-general",
+              "meta": {
+                "agent_selection": {
+                  "priority": 20,
+                  "roles": [
+                    "generalist",
+                    "researcher"
+                  ],
+                  "skills": [
+                    "analysis",
+                    "summary"
+                  ]
+                }
+              },
+              "name": "Agent General",
+              "object": "model",
+              "owned_by": "openwebui-local"
+            }
+          ],
+          "meta": {
+            "agent_selection": {
+              "reason": "fuzzy_match",
+              "selected_model_id": "agent-python",
+              "source_request": {
+                "name": "data-worker-3",
+                "request": "data",
+                "task": "Inspect data shard 3."
+              }
+            }
+          },
+          "selected_model_id": "agent-python",
+          "warnings": []
+        },
+        "name": "data-worker-3",
+        "parent_participant_id": "leader",
+        "participant_id": "subagent:b9c75c49-0cfe-4a98-bbc1-179b2159c661:4",
+        "task": "Inspect data shard 3."
+      },
+      "phase": "running",
+      "seq": 15,
+      "summary": "Subagent data-worker-3 started."
+    },
+    {
+      "created_at": 1781750430520061000,
+      "event_type": "subagent.created",
+      "participant_id": "subagent:b9c75c49-0cfe-4a98-bbc1-179b2159c661:2",
+      "payload": {
+        "description": "Live W12D-3 concurrent data subagent.",
+        "model_id": "agent-python",
+        "model_selection": {
+          "choices": [
+            {
+              "id": "agent-python",
+              "meta": {
+                "agent_selection": {
+                  "priority": 1,
+                  "roles": [
+                    "python",
+                    "coder",
+                    "analysis"
+                  ],
+                  "skills": [
+                    "python",
+                    "code",
+                    "data"
+                  ]
+                }
+              },
+              "name": "Agent Python",
+              "object": "model",
+              "owned_by": "openwebui-local"
+            },
+            {
+              "id": "agent-general",
+              "meta": {
+                "agent_selection": {
+                  "priority": 20,
+                  "roles": [
+                    "generalist",
+                    "researcher"
+                  ],
+                  "skills": [
+                    "analysis",
+                    "summary"
+                  ]
+                }
+              },
+              "name": "Agent General",
+              "object": "model",
+              "owned_by": "openwebui-local"
+            }
+          ],
+          "meta": {
+            "agent_selection": {
+              "reason": "fuzzy_match",
+              "selected_model_id": "agent-python",
+              "source_request": {
+                "name": "data-worker-1",
+                "request": "data",
+                "task": "Inspect data shard 1."
+              }
+            }
+          },
+          "selected_model_id": "agent-python",
+          "warnings": []
+        },
+        "name": "data-worker-1",
+        "parent_participant_id": "leader",
+        "participant_id": "subagent:b9c75c49-0cfe-4a98-bbc1-179b2159c661:2",
+        "task": "Inspect data shard 1."
+      },
+      "phase": "running",
+      "seq": 16,
+      "summary": "Subagent data-worker-1 started."
+    },
+    {
+      "created_at": 1781750430735764000,
+      "event_type": "subagent.completed",
+      "participant_id": "subagent:b9c75c49-0cfe-4a98-bbc1-179b2159c661:1",
+      "payload": {
+        "content": "subagent:b9c75c49-0cfe-4a98-bbc1-179b2159c661:1 completed with agent-python",
+        "metadata": {
+          "budget": {
+            "max_steps": 2
+          },
+          "model_id": "agent-python"
+        },
+        "name": "data-worker-0",
+        "participant_id": "subagent:b9c75c49-0cfe-4a98-bbc1-179b2159c661:1",
+        "status": "completed"
+      },
+      "phase": "running",
+      "seq": 17,
+      "summary": "Subagent data-worker-0 completed."
+    },
+    {
+      "created_at": 1781750430893229000,
+      "event_type": "subagent.completed",
+      "participant_id": "subagent:b9c75c49-0cfe-4a98-bbc1-179b2159c661:5",
+      "payload": {
+        "content": "subagent:b9c75c49-0cfe-4a98-bbc1-179b2159c661:5 completed with agent-python",
+        "metadata": {
+          "budget": {
+            "max_steps": 2
+          },
+          "model_id": "agent-python"
+        },
+        "name": "data-worker-4",
+        "participant_id": "subagent:b9c75c49-0cfe-4a98-bbc1-179b2159c661:5",
+        "status": "completed"
+      },
+      "phase": "running",
+      "seq": 18,
+      "summary": "Subagent data-worker-4 completed."
+    },
+    {
+      "created_at": 1781750430896738000,
+      "event_type": "subagent.completed",
+      "participant_id": "subagent:b9c75c49-0cfe-4a98-bbc1-179b2159c661:4",
+      "payload": {
+        "content": "subagent:b9c75c49-0cfe-4a98-bbc1-179b2159c661:4 completed with agent-python",
+        "metadata": {
+          "budget": {
+            "max_steps": 2
+          },
+          "model_id": "agent-python"
+        },
+        "name": "data-worker-3",
+        "participant_id": "subagent:b9c75c49-0cfe-4a98-bbc1-179b2159c661:4",
+        "status": "completed"
+      },
+      "phase": "running",
+      "seq": 19,
+      "summary": "Subagent data-worker-3 completed."
+    },
+    {
+      "created_at": 1781750430898343000,
+      "event_type": "subagent.completed",
+      "participant_id": "subagent:b9c75c49-0cfe-4a98-bbc1-179b2159c661:2",
+      "payload": {
+        "content": "subagent:b9c75c49-0cfe-4a98-bbc1-179b2159c661:2 completed with agent-python",
+        "metadata": {
+          "budget": {
+            "max_steps": 2
+          },
+          "model_id": "agent-python"
+        },
+        "name": "data-worker-1",
+        "participant_id": "subagent:b9c75c49-0cfe-4a98-bbc1-179b2159c661:2",
+        "status": "completed"
+      },
+      "phase": "running",
+      "seq": 20,
+      "summary": "Subagent data-worker-1 completed."
+    },
+    {
+      "created_at": 1781750430916071000,
+      "event_type": "subagent.completed",
+      "participant_id": "subagent:b9c75c49-0cfe-4a98-bbc1-179b2159c661:3",
+      "payload": {
+        "content": "subagent:b9c75c49-0cfe-4a98-bbc1-179b2159c661:3 completed with agent-python",
+        "metadata": {
+          "budget": {
+            "max_steps": 2
+          },
+          "model_id": "agent-python"
+        },
+        "name": "data-worker-2",
+        "participant_id": "subagent:b9c75c49-0cfe-4a98-bbc1-179b2159c661:3",
+        "status": "completed"
+      },
+      "phase": "running",
+      "seq": 21,
+      "summary": "Subagent data-worker-2 completed."
+    }
+  ],
+  "generated_at": "2026-06-18T10:40:30+0800",
+  "health": {
+    "backend": {
+      "body": {
+        "status": true
+      },
+      "status_code": 200
+    },
+    "runtime": {
+      "body": {
+        "status": "ok"
+      },
+      "status_code": 200
+    }
+  },
+  "limitations": [
+    "The runtime HTTP service exposes run start/cancel/status but no public subagent-plan endpoint; W12D-3 drives AgentScopeSubagentAdapter directly against live OpenWebUI callbacks after public runtime start."
+  ],
+  "mode": "live",
+  "participant_ids": [
+    "subagent:b9c75c49-0cfe-4a98-bbc1-179b2159c661:1",
+    "subagent:b9c75c49-0cfe-4a98-bbc1-179b2159c661:4",
+    "subagent:b9c75c49-0cfe-4a98-bbc1-179b2159c661:3",
+    "subagent:b9c75c49-0cfe-4a98-bbc1-179b2159c661:5",
+    "subagent:b9c75c49-0cfe-4a98-bbc1-179b2159c661:2"
+  ],
+  "run_ids": [
+    "b9c75c49-0cfe-4a98-bbc1-179b2159c661"
+  ],
+  "runtime_adapter_directly_driven": true,
+  "runtime_public_start_used": true,
+  "runtime_session_ids": [
+    "rt_b9c75c49-0cfe-4a98-bbc1-179b2159c661_FvcfsTDWeYw"
+  ],
+  "scenarios": [
+    {
+      "evidence": {
+        "cap_rejection_status": 409,
+        "executor_peak_concurrency": 5,
+        "participant_ids": [
+          "subagent:b9c75c49-0cfe-4a98-bbc1-179b2159c661:1",
+          "subagent:b9c75c49-0cfe-4a98-bbc1-179b2159c661:4",
+          "subagent:b9c75c49-0cfe-4a98-bbc1-179b2159c661:3",
+          "subagent:b9c75c49-0cfe-4a98-bbc1-179b2159c661:5",
+          "subagent:b9c75c49-0cfe-4a98-bbc1-179b2159c661:2"
+        ],
+        "run_ids": [
+          "b9c75c49-0cfe-4a98-bbc1-179b2159c661"
+        ],
+        "subagent_completed_count": 5,
+        "subagent_created_count": 5,
+        "team_cap": 5
+      },
+      "id": "scenario_06_subagent_cap_concurrency",
+      "live_status": "passed",
+      "observations": [
+        "event:subagent.created",
+        "subagent_concurrency:observed",
+        "subagent_cap:5"
+      ],
+      "status": "live_passed"
+    },
+    {
+      "evidence": {
+        "agent_selection_signal": {
+          "priority": 1,
+          "roles": [
+            "python",
+            "coder",
+            "analysis"
+          ],
+          "skills": [
+            "python",
+            "code",
+            "data"
+          ]
+        },
+        "model_selection_completed_count": 5,
+        "run_ids": [
+          "b9c75c49-0cfe-4a98-bbc1-179b2159c661"
+        ],
+        "selected_model_ids": [
+          "agent-python",
+          "agent-python",
+          "agent-python",
+          "agent-python",
+          "agent-python"
+        ],
+        "source_fuzzy_request": "data"
+      },
+      "id": "scenario_07_subagent_model_selection",
+      "live_status": "passed",
+      "observations": [
+        "event:model.selection.requested",
+        "event:model.selection.completed",
+        "meta.agent_selection"
+      ],
+      "status": "live_passed"
+    }
+  ],
+  "scenario_6": {
+    "cap_rejection": {
+      "body": {
+        "detail": {
+          "code": "subagent_cap_exceeded",
+          "message": "Agent run already has 5 subagents; default cap of 5 would be exceeded"
+        }
+      },
+      "status_code": 409
+    },
+    "executor_peak_concurrency": 5,
+    "participant_ids": [
+      "subagent:b9c75c49-0cfe-4a98-bbc1-179b2159c661:1",
+      "subagent:b9c75c49-0cfe-4a98-bbc1-179b2159c661:4",
+      "subagent:b9c75c49-0cfe-4a98-bbc1-179b2159c661:3",
+      "subagent:b9c75c49-0cfe-4a98-bbc1-179b2159c661:5",
+      "subagent:b9c75c49-0cfe-4a98-bbc1-179b2159c661:2"
+    ],
+    "status": "live_passed",
+    "subagent_completed_count": 5,
+    "subagent_event_count": 5,
+    "team_cap": 5
+  },
+  "scenario_7": {
+    "agent_selection_signal": {
+      "priority": 1,
+      "roles": [
+        "python",
+        "coder",
+        "analysis"
+      ],
+      "skills": [
+        "python",
+        "code",
+        "data"
+      ]
+    },
+    "model_selection_completed_count": 5,
+    "selected_model_ids": [
+      "agent-python",
+      "agent-python",
+      "agent-python",
+      "agent-python",
+      "agent-python"
+    ],
+    "source_fuzzy_request": "data",
+    "status": "live_passed"
+  },
+  "selected_model_ids": [
+    "agent-python",
+    "agent-python",
+    "agent-python",
+    "agent-python",
+    "agent-python"
+  ],
+  "service_urls": {
+    "agentscope_runtime": "http://127.0.0.1:8113",
+    "backend": "http://127.0.0.1:18103"
+  },
+  "setup": {
+    "db_path": "/private/tmp/openwebui-agent-mode-w12d-subagents-data/webui.db",
+    "leader_model_id": "agent-general",
+    "model_catalog": [
+      {
+        "id": "agent-general",
+        "info": {
+          "meta": {
+            "agent_selection": {
+              "priority": 20,
+              "roles": [
+                "generalist",
+                "researcher"
+              ],
+              "skills": [
+                "analysis",
+                "summary"
+              ]
+            }
+          }
+        },
+        "name": "Agent General"
+      },
+      {
+        "id": "agent-python",
+        "info": {
+          "meta": {
+            "agent_selection": {
+              "priority": 1,
+              "roles": [
+                "python",
+                "coder",
+                "analysis"
+              ],
+              "skills": [
+                "python",
+                "code",
+                "data"
+              ]
+            }
+          }
+        },
+        "name": "Agent Python"
+      }
+    ],
+    "seeded_model_ids": [
+      "agent-general",
+      "agent-python"
+    ],
+    "seeded_user_id": "669d39aa-876a-48b9-82c6-d0d439d9088c",
+    "team_cap": 5,
+    "team_topology": "single-level leader -> subagents"
+  },
+  "subagent_plan": {
+    "executor_peak_concurrency": 5,
+    "executor_starts": [
+      {
+        "active_at_start": 1,
+        "model_id": "agent-python",
+        "participant_id": "subagent:b9c75c49-0cfe-4a98-bbc1-179b2159c661:1",
+        "started_at_ns": 1781750430457230000
+      },
+      {
+        "active_at_start": 2,
+        "model_id": "agent-python",
+        "participant_id": "subagent:b9c75c49-0cfe-4a98-bbc1-179b2159c661:2",
+        "started_at_ns": 1781750430538222000
+      },
+      {
+        "active_at_start": 3,
+        "model_id": "agent-python",
+        "participant_id": "subagent:b9c75c49-0cfe-4a98-bbc1-179b2159c661:3",
+        "started_at_ns": 1781750430540912000
+      },
+      {
+        "active_at_start": 4,
+        "model_id": "agent-python",
+        "participant_id": "subagent:b9c75c49-0cfe-4a98-bbc1-179b2159c661:4",
+        "started_at_ns": 1781750430541748000
+      },
+      {
+        "active_at_start": 5,
+        "model_id": "agent-python",
+        "participant_id": "subagent:b9c75c49-0cfe-4a98-bbc1-179b2159c661:5",
+        "started_at_ns": 1781750430542944000
+      }
+    ],
+    "results": [
+      {
+        "content": "subagent:b9c75c49-0cfe-4a98-bbc1-179b2159c661:1 completed with agent-python",
+        "error": null,
+        "metadata": {
+          "budget": {
+            "max_steps": 2
+          },
+          "model_id": "agent-python"
+        },
+        "participant_id": "subagent:b9c75c49-0cfe-4a98-bbc1-179b2159c661:1",
+        "status": "completed"
+      },
+      {
+        "content": "subagent:b9c75c49-0cfe-4a98-bbc1-179b2159c661:2 completed with agent-python",
+        "error": null,
+        "metadata": {
+          "budget": {
+            "max_steps": 2
+          },
+          "model_id": "agent-python"
+        },
+        "participant_id": "subagent:b9c75c49-0cfe-4a98-bbc1-179b2159c661:2",
+        "status": "completed"
+      },
+      {
+        "content": "subagent:b9c75c49-0cfe-4a98-bbc1-179b2159c661:3 completed with agent-python",
+        "error": null,
+        "metadata": {
+          "budget": {
+            "max_steps": 2
+          },
+          "model_id": "agent-python"
+        },
+        "participant_id": "subagent:b9c75c49-0cfe-4a98-bbc1-179b2159c661:3",
+        "status": "completed"
+      },
+      {
+        "content": "subagent:b9c75c49-0cfe-4a98-bbc1-179b2159c661:4 completed with agent-python",
+        "error": null,
+        "metadata": {
+          "budget": {
+            "max_steps": 2
+          },
+          "model_id": "agent-python"
+        },
+        "participant_id": "subagent:b9c75c49-0cfe-4a98-bbc1-179b2159c661:4",
+        "status": "completed"
+      },
+      {
+        "content": "subagent:b9c75c49-0cfe-4a98-bbc1-179b2159c661:5 completed with agent-python",
+        "error": null,
+        "metadata": {
+          "budget": {
+            "max_steps": 2
+          },
+          "model_id": "agent-python"
+        },
+        "participant_id": "subagent:b9c75c49-0cfe-4a98-bbc1-179b2159c661:5",
+        "status": "completed"
+      }
+    ]
+  },
+  "worker": "W12D-3"
+}

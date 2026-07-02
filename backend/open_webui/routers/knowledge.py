@@ -2,13 +2,15 @@ from __future__ import annotations
 
 import asyncio
 import io
+import json
 import logging
 import zipfile
+from pathlib import Path
 from typing import List, Optional
 from urllib.parse import quote
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
-from fastapi.responses import StreamingResponse
+from fastapi.responses import FileResponse, PlainTextResponse, StreamingResponse
 from open_webui.config import BYPASS_ADMIN_ACCESS_CONTROL
 from open_webui.constants import ERROR_MESSAGES
 from open_webui.internal.db import get_async_session
@@ -25,11 +27,20 @@ from open_webui.models.knowledge import (
     KnowledgeUserResponse,
 )
 from open_webui.models.files import Files, FileModel, FileMetadataResponse
+from open_webui.models.evidence import KnowledgeEvidenceAssets, KnowledgeEvidenceAssetVariants, KnowledgeEvidences
 from open_webui.models.knowledge_layers import (
     KnowledgeFileLayerListResponse,
     KnowledgeLayers,
 )
 from open_webui.models.models import ModelForm, Models
+from open_webui.models.retrieval_indexes import RetrievalIndexJobs
+from open_webui.retrieval.indexing import (
+    deactivate_chunks_for_scope,
+    enqueue_evidence_projection_job,
+    enqueue_retrieval_index_job,
+    get_retrieval_index_status_async,
+    run_retrieval_index_job,
+)
 from open_webui.retrieval.vector.async_client import ASYNC_VECTOR_DB_CLIENT
 from open_webui.routers.retrieval import (
     BatchProcessFilesForm,
@@ -53,7 +64,7 @@ from open_webui.utils.layered_knowledge import (
     sync_layers_for_file_async,
 )
 from open_webui.utils.auth import get_admin_user, get_verified_user
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from sqlalchemy.ext.asyncio import AsyncSession
 
 log = logging.getLogger(__name__)
@@ -124,6 +135,57 @@ class KnowledgeAccessResponse(KnowledgeUserResponse):
 class KnowledgeAccessListResponse(BaseModel):
     items: list[KnowledgeAccessResponse]
     total: int
+
+
+class KnowledgeReindexRequest(BaseModel):
+    collection_ids: list[str] | None = None
+    index_version: int = Field(default=1, ge=1)
+    promote_alias: bool = True
+    batch_size: int = Field(default=500, ge=1)
+    run_async: bool = False
+
+
+class KnowledgeEvidenceRebuildRequest(BaseModel):
+    file_ids: list[str] | None = None
+    project_document_images: bool = False
+    run_async: bool = False
+
+
+def _file_has_document_image_assets(file: object | None) -> bool:
+    if file is None:
+        return False
+
+    for container in (getattr(file, "data", None), getattr(file, "meta", None)):
+        if not isinstance(container, dict):
+            continue
+        raw_assets = container.get("document_image_assets")
+        if raw_assets is None:
+            raw_assets = container.get("image_assets")
+        if isinstance(raw_assets, list) and any(isinstance(asset, dict) for asset in raw_assets):
+            return True
+    return False
+
+
+async def _should_project_document_images_for_evidence_rebuild(
+    *,
+    knowledge_id: str,
+    file_ids: list[str] | None,
+    requested: bool,
+) -> bool:
+    if requested:
+        return True
+
+    if file_ids:
+        for file_id in dict.fromkeys(file_ids):
+            file = await Files.get_file_by_id(file_id)
+            if _file_has_document_image_assets(file):
+                return True
+        return False
+
+    for file in await Knowledges.get_files_by_id(knowledge_id):
+        if _file_has_document_image_assets(file):
+            return True
+    return False
 
 
 @router.get('/', response_model=KnowledgeAccessListResponse)
@@ -337,6 +399,11 @@ async def reindex_knowledge_files(
             except Exception as e:
                 log.error(f'Error deleting collection {knowledge_base.id}: {str(e)}')
                 continue  # Skip, don't raise
+            await deactivate_chunks_for_scope(
+                collection_id=knowledge_base.id,
+                collection_name=knowledge_base.id,
+                db=db,
+            )
 
             failed_files = []
             for file in files:
@@ -393,6 +460,330 @@ async def reindex_knowledge_base_metadata_embeddings(
 
     log.info(f'Embedding reindex complete: {success_count}/{len(knowledge_bases)}')
     return {'total': len(knowledge_bases), 'success': success_count}
+
+
+############################
+# RetrievalIndexAdmin
+############################
+
+
+@router.post('/{id}/evidence/rebuild', response_model=dict)
+async def rebuild_knowledge_evidence(
+    id: str,
+    form_data: KnowledgeEvidenceRebuildRequest,
+    user=Depends(get_admin_user),
+):
+    project_document_images = await _should_project_document_images_for_evidence_rebuild(
+        knowledge_id=id,
+        file_ids=form_data.file_ids,
+        requested=form_data.project_document_images,
+    )
+    queued = await enqueue_evidence_projection_job(
+        knowledge_id=id,
+        file_ids=form_data.file_ids,
+        project_document_images=project_document_images,
+    )
+    if form_data.run_async:
+        return {"queued": True, **queued}
+
+    execution = await run_retrieval_index_job(queued["job"]["job_id"])
+    return execution["result"]
+
+
+@router.post('/reindex/lexical', response_model=dict)
+async def reindex_knowledge_lexical(
+    form_data: KnowledgeReindexRequest,
+    user=Depends(get_admin_user),
+):
+    queued = await enqueue_retrieval_index_job(
+        index_kind="lexical",
+        collection_ids=form_data.collection_ids,
+        index_version=form_data.index_version,
+        promote_alias=form_data.promote_alias,
+        batch_size=form_data.batch_size,
+    )
+    if form_data.run_async:
+        return {"queued": True, **queued}
+
+    execution = await run_retrieval_index_job(queued["job"]["job_id"])
+    return execution["result"]
+
+
+@router.post('/reindex/full', response_model=dict)
+async def reindex_knowledge_full(
+    form_data: KnowledgeReindexRequest,
+    user=Depends(get_admin_user),
+):
+    queued = await enqueue_retrieval_index_job(
+        index_kind="full",
+        collection_ids=form_data.collection_ids,
+        index_version=form_data.index_version,
+        promote_alias=form_data.promote_alias,
+        batch_size=form_data.batch_size,
+    )
+    if form_data.run_async:
+        return {"queued": True, **queued}
+
+    execution = await run_retrieval_index_job(queued["job"]["job_id"])
+    return execution["result"]
+
+
+@router.get('/index/status', response_model=dict)
+async def get_knowledge_index_status(user=Depends(get_admin_user)):
+    return await get_retrieval_index_status_async()
+
+
+@router.get('/index/jobs/{job_id}', response_model=dict)
+async def get_retrieval_index_job(job_id: str, user=Depends(get_admin_user)):
+    job = await RetrievalIndexJobs.get_job_by_id(job_id)
+    if job is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=ERROR_MESSAGES.NOT_FOUND,
+        )
+    return job.model_dump()
+
+
+@router.post('/index/jobs/{job_id}/run', response_model=dict)
+async def run_retrieval_index_job_by_id(job_id: str, user=Depends(get_admin_user)):
+    try:
+        return await run_retrieval_index_job(job_id)
+    except ValueError:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=ERROR_MESSAGES.NOT_FOUND,
+        )
+
+
+async def _has_evidence_read_access(
+    knowledge,
+    evidence,
+    user,
+    db: Optional[AsyncSession] = None,
+) -> bool:
+    if user.role == 'admin':
+        return True
+    if knowledge.user_id == user.id:
+        return True
+    if await AccessGrants.has_access(
+        user_id=user.id,
+        resource_type='knowledge',
+        resource_id=knowledge.id,
+        permission='read',
+        db=db,
+    ):
+        return True
+    return await has_access_to_file(evidence.file_id, 'read', user, db=db)
+
+
+def _is_unsafe_image_mime_type(mime_type: str | None) -> bool:
+    return not _is_safe_inline_image_mime_type(mime_type)
+
+
+def _normalize_mime_type(mime_type: str | None) -> str:
+    return (mime_type or '').split(';', 1)[0].strip().lower()
+
+
+def _is_safe_inline_image_mime_type(mime_type: str | None) -> bool:
+    return _normalize_mime_type(mime_type) in {
+        'image/png',
+        'image/jpeg',
+        'image/gif',
+        'image/webp',
+        'image/avif',
+        'image/bmp',
+    }
+
+
+def _evidence_file_response_headers(mime_type: str | None) -> dict[str, str]:
+    headers = {'X-Content-Type-Options': 'nosniff'}
+    if not _is_safe_inline_image_mime_type(mime_type):
+        headers['Content-Disposition'] = 'attachment'
+    return headers
+
+
+def _evidence_file_response(file_path: Path, *, media_type: str | None) -> FileResponse:
+    return FileResponse(
+        file_path,
+        media_type=media_type,
+        headers=_evidence_file_response_headers(media_type),
+    )
+
+
+def _evidence_urls(knowledge_id: str, evidence_ref: str, modality: str) -> dict[str, str | None]:
+    quoted_ref = quote(evidence_ref, safe='')
+    base = f'/api/v1/knowledge/{knowledge_id}/evidence/{quoted_ref}'
+    return {
+        'content_url': f'{base}/content',
+        'thumbnail_url': f'{base}/thumbnail' if modality == 'image' else None,
+    }
+
+
+async def _resolve_knowledge_evidence_access(
+    knowledge_id: str,
+    evidence_ref: str,
+    user,
+    db: AsyncSession | None = None,
+):
+    knowledge = await Knowledges.get_knowledge_by_id(id=knowledge_id, db=db)
+    if not knowledge:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=ERROR_MESSAGES.NOT_FOUND,
+        )
+
+    evidence = await KnowledgeEvidences.get_evidence_by_ref(evidence_ref, db=db)
+    if not evidence or evidence.knowledge_id != knowledge.id or not evidence.is_active or evidence.deleted_at is not None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=ERROR_MESSAGES.NOT_FOUND,
+        )
+
+    if not await _has_evidence_read_access(knowledge, evidence, user, db=db):
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=ERROR_MESSAGES.NOT_FOUND,
+        )
+
+    return knowledge, evidence
+
+
+async def _resolve_evidence_asset(
+    evidence,
+    db: AsyncSession | None = None,
+    *,
+    prefer_thumbnail: bool = False,
+):
+    if not evidence.asset_id:
+        return None, None
+
+    asset = await KnowledgeEvidenceAssets.get_asset_by_id(evidence.asset_id, db=db)
+    if not asset:
+        return None, None
+
+    variant = None
+    if prefer_thumbnail:
+        variants = await KnowledgeEvidenceAssetVariants.list_variants(
+            asset_id=asset.id,
+            variant_kind='thumbnail',
+            limit=1,
+            db=db,
+        )
+        variant = variants[0] if variants else None
+
+    return asset, variant
+
+
+def _build_evidence_detail_response(knowledge_id: str, evidence, asset=None) -> dict:
+    preview_type = 'image' if evidence.modality == 'image' else 'text'
+    preview = {
+        'type': preview_type,
+        'text': evidence.preview_text or evidence.content_text or '',
+        'caption': getattr(asset, 'caption', None) if asset else None,
+        'ocr_text': getattr(asset, 'ocr_text', None) if asset else None,
+        'source_name': evidence.source_name,
+        'page_index': evidence.page_index,
+    }
+    if asset:
+        preview['mime_type'] = asset.mime_type
+        preview['asset_ref'] = asset.asset_ref
+
+    return {
+        'id': evidence.id,
+        'evidence_ref': evidence.evidence_ref,
+        'knowledge_id': evidence.knowledge_id,
+        'file_id': evidence.file_id,
+        'asset_id': evidence.asset_id,
+        'modality': evidence.modality,
+        'evidence_kind': evidence.evidence_kind,
+        'title': evidence.title,
+        'source_name': evidence.source_name,
+        'page_index': evidence.page_index,
+        'preview': preview,
+        **_evidence_urls(knowledge_id, evidence.evidence_ref, evidence.modality),
+    }
+
+
+@router.get('/{id}/evidence/{evidence_ref}', response_model=dict)
+async def get_knowledge_evidence_by_ref(
+    id: str,
+    evidence_ref: str,
+    user=Depends(get_verified_user),
+    db: AsyncSession = Depends(get_async_session),
+):
+    _, evidence = await _resolve_knowledge_evidence_access(id, evidence_ref, user, db=db)
+    asset = None
+    if evidence.asset_id:
+        asset = await KnowledgeEvidenceAssets.get_asset_by_id(evidence.asset_id, db=db)
+    return _build_evidence_detail_response(id, evidence, asset=asset)
+
+
+@router.get('/{id}/evidence/{evidence_ref}/thumbnail')
+async def get_knowledge_evidence_thumbnail_by_ref(
+    id: str,
+    evidence_ref: str,
+    user=Depends(get_verified_user),
+    db: AsyncSession = Depends(get_async_session),
+):
+    _, evidence = await _resolve_knowledge_evidence_access(id, evidence_ref, user, db=db)
+
+    if evidence.modality != 'image':
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=ERROR_MESSAGES.NOT_FOUND,
+        )
+
+    asset, variant = await _resolve_evidence_asset(evidence, db=db, prefer_thumbnail=True)
+    source = variant or asset
+    if not source or _is_unsafe_image_mime_type(source.mime_type):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=ERROR_MESSAGES.DEFAULT('Unsupported image evidence format'),
+        )
+
+    file_path = await asyncio.to_thread(Storage.get_file, source.storage_uri)
+    file_path = Path(file_path)
+    if not file_path.is_file():
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=ERROR_MESSAGES.NOT_FOUND,
+        )
+
+    return _evidence_file_response(file_path, media_type=source.mime_type)
+
+
+@router.get('/{id}/evidence/{evidence_ref}/content')
+async def get_knowledge_evidence_content_by_ref(
+    id: str,
+    evidence_ref: str,
+    user=Depends(get_verified_user),
+    db: AsyncSession = Depends(get_async_session),
+):
+    _, evidence = await _resolve_knowledge_evidence_access(id, evidence_ref, user, db=db)
+
+    if evidence.modality == 'text':
+        return PlainTextResponse(
+            evidence.content_text or evidence.preview_text or '',
+            headers={'X-Content-Type-Options': 'nosniff'},
+        )
+
+    asset, variant = await _resolve_evidence_asset(evidence, db=db, prefer_thumbnail=False)
+    source = asset or variant
+    if not source or _is_unsafe_image_mime_type(source.mime_type):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=ERROR_MESSAGES.DEFAULT('Unsupported image evidence format'),
+        )
+
+    file_path = await asyncio.to_thread(Storage.get_file, source.storage_uri)
+    file_path = Path(file_path)
+    if not file_path.is_file():
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=ERROR_MESSAGES.NOT_FOUND,
+        )
+
+    return _evidence_file_response(file_path, media_type=source.mime_type)
 
 
 ############################
@@ -1057,6 +1448,12 @@ async def update_file_from_knowledge_by_id(
 
     # Remove content from the vector database
     await ASYNC_VECTOR_DB_CLIENT.delete(collection_name=knowledge.id, filter={'file_id': form_data.file_id})
+    await deactivate_chunks_for_scope(
+        collection_id=knowledge.id,
+        collection_name=knowledge.id,
+        file_id=form_data.file_id,
+        db=db,
+    )
 
     # Add content to the vector database
     try:
@@ -1147,6 +1544,12 @@ async def remove_file_from_knowledge_by_id(
     await Knowledges.remove_file_from_knowledge_by_id(knowledge_id=id, file_id=form_data.file_id, db=db)
     await KnowledgeLayers.delete_layers_by_file(id, form_data.file_id, db=db)
     await delete_layer_embeddings_by_file_id(form_data.file_id)
+    await deactivate_chunks_for_scope(
+        collection_id=knowledge.id,
+        collection_name=knowledge.id,
+        file_id=form_data.file_id,
+        db=db,
+    )
 
     # Remove content from the vector database
     try:
@@ -1164,15 +1567,21 @@ async def remove_file_from_knowledge_by_id(
 
     # Anyone with write permission or higher can delete files
     if delete_file and (file.user_id == user.id or user.role == 'admin'):
+        file_collection = f'file-{form_data.file_id}'
         try:
             # Remove the file's collection from vector database
-            file_collection = f'file-{form_data.file_id}'
             if await ASYNC_VECTOR_DB_CLIENT.has_collection(collection_name=file_collection):
                 await ASYNC_VECTOR_DB_CLIENT.delete_collection(collection_name=file_collection)
         except Exception as e:
             log.debug('This was most likely caused by bypassing embedding processing')
             log.debug(e)
             pass
+        await deactivate_chunks_for_scope(
+            collection_id=file_collection,
+            collection_name=file_collection,
+            file_id=form_data.file_id,
+            db=db,
+        )
 
         # Delete file from database
         await Files.delete_file_by_id(form_data.file_id, db=db)
@@ -1247,6 +1656,7 @@ async def delete_knowledge_by_id(
     except Exception as e:
         log.debug(e)
         pass
+    await deactivate_chunks_for_scope(collection_id=id, collection_name=id, db=db)
 
     # Remove knowledge base embedding
     await remove_knowledge_base_metadata_embedding(id)
@@ -1297,6 +1707,7 @@ async def reset_knowledge_by_id(
     except Exception as e:
         log.debug(e)
         pass
+    await deactivate_chunks_for_scope(collection_id=id, collection_name=id, db=db)
 
     knowledge = await Knowledges.reset_knowledge_by_id(id=id, include_directories=include_directories, db=db)
     await mark_layers_for_knowledge_stale(id, db=db)
@@ -1454,6 +1865,12 @@ async def sync_knowledge_cleanup(
             continue
 
         await Knowledges.remove_file_from_knowledge_by_id(id, file_id, db=db)
+        await deactivate_chunks_for_scope(
+            collection_id=id,
+            collection_name=id,
+            file_id=file_id,
+            db=db,
+        )
 
         try:
             await ASYNC_VECTOR_DB_CLIENT.delete(collection_name=id, filter={'file_id': file_id})
@@ -1461,12 +1878,18 @@ async def sync_knowledge_cleanup(
         except Exception:
             pass
 
+        collection_name = f'file-{file_id}'
         try:
-            collection_name = f'file-{file_id}'
             if await ASYNC_VECTOR_DB_CLIENT.has_collection(collection_name):
                 await ASYNC_VECTOR_DB_CLIENT.delete_collection(collection_name)
         except Exception:
             pass
+        await deactivate_chunks_for_scope(
+            collection_id=collection_name,
+            collection_name=collection_name,
+            file_id=file_id,
+            db=db,
+        )
 
         if file.user_id == user.id or user.role == 'admin':
             await Files.delete_file_by_id(file_id, db=db)

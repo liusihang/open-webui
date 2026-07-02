@@ -2,6 +2,7 @@ import ast
 import asyncio
 import base64
 import copy
+import hashlib
 import html
 import inspect
 import json
@@ -73,6 +74,8 @@ from open_webui.socket.main import (
     get_event_emitter,
 )
 from open_webui.utils.access_control import has_connection_access, has_permission
+from open_webui.utils.agent_memory_extraction import enqueue_agent_memory_extraction_after_completion
+from open_webui.utils.agent_memory_index import build_agent_memory_read_context
 from open_webui.utils.access_control.files import get_accessible_folder_files
 from open_webui.utils.chat import generate_chat_completion
 from open_webui.utils.code_interpreter import execute_code_jupyter
@@ -373,7 +376,7 @@ def get_citation_source_from_tool_result(
     Returns a list of sources (usually one, but query_knowledge_files may return multiple).
     """
     _EXPECTS_LIST = {'search_web', 'query_knowledge_files'}
-    _EXPECTS_DICT = {'view_knowledge_file', 'view_file'}
+    _EXPECTS_DICT = {'view_knowledge_file', 'view_file', 'query_knowledge_evidence'}
 
     try:
         try:
@@ -506,6 +509,35 @@ def get_citation_source_from_tool_result(
             # Empty result fallback
             return []
 
+        elif tool_name == 'query_knowledge_evidence':
+            if not tool_result.get('ok', False):
+                return []
+
+            sources = []
+            for result in tool_result.get('results') or []:
+                if not isinstance(result, dict):
+                    continue
+                source = result.get('source') or {}
+                metadata = result.get('metadata') or {}
+                content = result.get('content') or result.get('preview_text') or ''
+                evidence_ref = result.get('evidence_ref') or metadata.get('evidence_ref') or source.get('evidence_ref')
+                if not evidence_ref:
+                    continue
+                sources.append(
+                    {
+                        'source': source
+                        or {
+                            'id': evidence_ref,
+                            'name': metadata.get('source') or metadata.get('name') or evidence_ref,
+                            'type': 'evidence',
+                            'evidence_ref': evidence_ref,
+                        },
+                        'document': [content],
+                        'metadata': [metadata],
+                    }
+                )
+            return sources
+
         else:
             # Fallback for other tools
             return [
@@ -528,6 +560,45 @@ def get_citation_source_from_tool_result(
                 'metadata': [{'source': tool_name}],
             }
         ]
+
+
+def build_citation_map_from_sources(sources: list[dict] | None) -> dict[str, str]:
+    """Build a stable citation-number -> evidence_ref map from hydrated sources."""
+    if not isinstance(sources, list) or not sources:
+        return {}
+
+    citation_map: dict[str, str] = {}
+    seen_refs: set[str] = set()
+
+    for source in sources:
+        if not isinstance(source, dict):
+            continue
+
+        evidence_ref = None
+        source_info = source.get('source') if isinstance(source.get('source'), dict) else {}
+        if isinstance(source_info, dict):
+            source_evidence_ref = source_info.get('evidence_ref')
+            if isinstance(source_evidence_ref, str) and source_evidence_ref:
+                evidence_ref = source_evidence_ref
+
+        if evidence_ref is None:
+            metadata = source.get('metadata')
+            if isinstance(metadata, list):
+                for metadata_item in metadata:
+                    if not isinstance(metadata_item, dict):
+                        continue
+                    metadata_evidence_ref = metadata_item.get('evidence_ref')
+                    if isinstance(metadata_evidence_ref, str) and metadata_evidence_ref:
+                        evidence_ref = metadata_evidence_ref
+                        break
+
+        if not evidence_ref or evidence_ref in seen_refs:
+            continue
+
+        seen_refs.add(evidence_ref)
+        citation_map[str(len(citation_map) + 1)] = evidence_ref
+
+    return citation_map
 
 
 def split_content_and_whitespace(content):
@@ -671,11 +742,7 @@ def serialize_output(output: list) -> str:
             # render as done (a subsequent item means reasoning is complete)
             is_last_item = idx == len(output) - 1
 
-            display = html.escape(
-                '\n'.join(
-                    (f'> {line}' if not line.startswith('>') else line) for line in reasoning_content.splitlines()
-                )
-            )
+            display = html.escape(reasoning_content)
 
             if status == 'completed' or duration is not None or not is_last_item:
                 parts.append(
@@ -753,6 +820,21 @@ def deep_merge(target, source):
         return target + source
     else:
         return source
+
+
+def merge_stream_text_delta(current: str, delta: str) -> str:
+    """
+    Append text deltas while tolerating providers that send cumulative snapshots.
+    """
+    if not isinstance(current, str):
+        current = ''
+    if not isinstance(delta, str) or not delta:
+        return current
+    if delta == current:
+        return current
+    if current and delta.startswith(current):
+        return delta
+    return current + delta
 
 
 _FUNCTION_ARGUMENT_FRAGMENT_KEYS = (
@@ -957,7 +1039,7 @@ def handle_responses_streaming_event(
                             summary_list[summary_index] = part
 
                             target_val = part.get(key, '')
-                            part[key] = deep_merge(target_val, delta)
+                            part[key] = merge_stream_text_delta(target_val, delta)
 
                         elif delta_type == 'reasoning_text':
                             # Reasoning body updates -> item['content']
@@ -977,7 +1059,7 @@ def handle_responses_streaming_event(
                             content_list[content_index] = part
 
                             target_val = part.get(key, '')
-                            part[key] = deep_merge(target_val, delta)
+                            part[key] = merge_stream_text_delta(target_val, delta)
 
                         elif delta_type in ['text', 'output_text']:
                             return new_output, None
@@ -1148,18 +1230,26 @@ def get_source_context(sources: list, source_ids: dict = None, include_content: 
         source_ids = {}
     for source in sources:
         for doc, meta in zip(source.get('document', []), source.get('metadata', [])):
-            source_id = meta.get('source') or source.get('source', {}).get('id') or 'N/A'
+            source_info = source.get('source', {}) if isinstance(source.get('source'), dict) else {}
+            source_evidence_ref = source_info.get('evidence_ref') or source_info.get('id')
+            metadata_evidence_ref = meta.get('evidence_ref') if isinstance(meta, dict) else None
+            evidence_ref = metadata_evidence_ref or source_evidence_ref
+            is_evidence = source_info.get('type') == 'evidence' or bool(evidence_ref)
+            source_id = evidence_ref if is_evidence and evidence_ref else meta.get('source') or source_info.get('id') or 'N/A'
             if source_id not in source_ids:
                 source_ids[source_id] = len(source_ids) + 1
-            src_name = source.get('source', {}).get('name')
-            src_type = source.get('source', {}).get('type')
-            src_rid = source.get('source', {}).get('id')
+            src_name = source_info.get('name')
+            src_type = source_info.get('type')
+            src_rid = source_info.get('id')
+            modality = meta.get('modality') if isinstance(meta, dict) else None
             body = doc if include_content else ''
             context_string += (
                 f'<source id="{source_ids[source_id]}"'
                 + (f' name="{src_name}"' if src_name else '')
                 + (f' resource-type="{src_type}"' if src_type else '')
                 + (f' resource-id="{src_rid}"' if src_rid else '')
+                + (f' evidence-ref="{evidence_ref}"' if evidence_ref else '')
+                + (f' modality="{modality}"' if modality else '')
                 + f'>{body}</source>\n'
             )
     return context_string
@@ -1320,6 +1410,42 @@ async def process_tool_result(
                         }
 
     tool_result_files = []
+
+    if tool_function_name == 'query_knowledge_evidence' and isinstance(tool_result, str):
+        try:
+            parsed_tool_result = json.loads(tool_result)
+        except (json.JSONDecodeError, TypeError):
+            parsed_tool_result = None
+        if isinstance(parsed_tool_result, dict):
+            compact_files = []
+            for file_item in parsed_tool_result.get('model_only_files') or []:
+                if not isinstance(file_item, dict):
+                    continue
+                data_url = file_item.get('url') or file_item.get('data_url')
+                if file_item.get('type') == 'image' and isinstance(data_url, str) and data_url.startswith('data:'):
+                    tool_result_files.append(
+                        {
+                            'type': 'image',
+                            'url': data_url,
+                            **(
+                                {'evidence_ref': file_item.get('evidence_ref')}
+                                if file_item.get('evidence_ref')
+                                else {}
+                            ),
+                            **({'mime_type': file_item.get('mime_type')} if file_item.get('mime_type') else {}),
+                        }
+                    )
+                    compact_files.append(
+                        {
+                            key: value
+                            for key, value in file_item.items()
+                            if key not in {'url', 'data_url'} and value is not None
+                        }
+                    )
+                else:
+                    compact_files.append(file_item)
+            parsed_tool_result['model_only_files'] = compact_files
+            tool_result = parsed_tool_result
 
     # Detect base64 image data URIs from tool results (e.g. binary image
     # responses from execute_tool_server).  Move the data URI to
@@ -1699,6 +1825,51 @@ async def chat_memory_handler(request: Request, form_data: dict, extra_params: d
         f'User Context:\n{user_context}\n', form_data['messages'], append=True
     )
 
+    return form_data
+
+
+async def apply_agent_memory_read_path(
+    request: Request,
+    form_data: dict,
+    user,
+    db=None,
+) -> dict:
+    metadata = form_data.get('metadata') or {}
+    params = metadata.get('params') if isinstance(metadata.get('params'), dict) else {}
+    if params.get('function_calling') != 'native':
+        return form_data
+    if not getattr(
+        request.app.state.config,
+        'ENABLE_AGENT_MEMORY_USE',
+        getattr(request.app.state.config, 'ENABLE_AGENT_MEMORY', False),
+    ):
+        return form_data
+
+    user_id = getattr(user, 'id', None) or (user.get('id') if isinstance(user, dict) else None)
+    if not user_id:
+        return form_data
+    user_role = getattr(user, 'role', None) or (user.get('role') if isinstance(user, dict) else None)
+    if user_role != 'admin' and not await has_permission(
+        user_id,
+        'features.agent_memory',
+        getattr(request.app.state.config, 'USER_PERMISSIONS', {}),
+    ):
+        return form_data
+
+    context = await build_agent_memory_read_context(
+        user_id,
+        metadata.get('chat_id') if isinstance(metadata.get('chat_id'), str) else '',
+        getattr(request.app.state.config, 'AGENT_MEMORY_SUMMARY_TOKEN_BUDGET', 1200),
+        db=db,
+    )
+    if not context:
+        return form_data
+
+    form_data['messages'] = add_or_update_system_message(
+        context,
+        form_data.get('messages', []),
+        append=True,
+    )
     return form_data
 
 
@@ -2598,7 +2769,7 @@ async def process_chat_payload(request, form_data, user, metadata, model):
     if not isinstance(metadata.get('chat_id'), str):
         metadata['chat_id'] = ''
 
-    # Pipeline Inlet -> Filter Inlet -> Chat Memory -> Chat Web Search -> Chat Image Generation
+    # Pipeline Inlet -> Filter Inlet -> Chat Memory -> Chat Web Search
     # -> Chat Code Interpreter (Form Data Update) -> (Default) Chat Tools Function Calling
     # -> Chat Files
 
@@ -2852,31 +3023,13 @@ async def process_chat_payload(request, form_data, user, metadata, model):
                 form_data = await chat_memory_handler(request, form_data, extra_params, user)
 
         if 'web_search' in features and features['web_search']:
-            # Skip forced RAG web search when native FC is enabled - model can use web_search tool
             if metadata.get('params', {}).get('function_calling') != 'native':
+                # Legacy path: force RAG web search before LLM inference
                 form_data = await chat_web_search_handler(request, form_data, extra_params, user)
-
-        if 'image_generation' in features and features['image_generation']:
-            # Image generation is an explicit UI feature, not merely an
-            # optional tool suggestion.  Native FC models may ignore
-            # generate_image and still claim success, so keep the existing
-            # deterministic image handler for real chat/socket requests.
-            form_data = await chat_image_generation_handler(request, form_data, extra_params, user)
-
-            if (
-                metadata.get('params', {}).get('function_calling') == 'native'
-                and metadata.get('chat_id')
-                and extra_params.get('__event_emitter__')
-            ):
-                log.info(
-                    'Native image generation handled before model call chat_id=%s message_id=%s session_id=%s',
-                    metadata.get('chat_id'),
-                    metadata.get('message_id'),
-                    metadata.get('session_id'),
-                )
-                metadata['native_image_generation_forced'] = True
-                features = {**features, 'image_generation': False}
-                extra_params['__features__'] = features
+            else:
+                # Native FC path: signal that web_search_tools should be auto-injected
+                # (handled by get_builtin_tools — bypasses model-level builtinTools/web_search gate)
+                extra_params['__force_web_search_tools__'] = True
 
         if 'code_interpreter' in features and features['code_interpreter']:
             engine = getattr(request.app.state.config, 'CODE_INTERPRETER_ENGINE', 'pyodide')
@@ -3024,6 +3177,8 @@ async def process_chat_payload(request, form_data, user, metadata, model):
     metadata['effective_knowledge_query_enabled'] = effective_knowledge_query_enabled
     form_data['metadata'] = metadata
     extra_params['__metadata__'] = metadata
+
+    form_data = await apply_agent_memory_read_path(request, form_data, user)
 
     # When the caller provides an explicit OpenAI-style `tools` array in the
     # request body, skip all server-side tool resolution and pass the caller's
@@ -3173,6 +3328,7 @@ async def process_chat_payload(request, form_data, user, metadata, model):
                 {
                     **extra_params,
                     '__event_emitter__': event_emitter,
+                    '__terminal_id__': terminal_id,
                     '__skill_ids__': [s.id for s in available_skills if s.id not in user_skill_ids],
                 },
                 features,
@@ -3322,6 +3478,859 @@ def get_response_data(response):
         response_data = None
 
     return response, response_data
+
+
+def get_chat_completion_tool_calls(response_data: dict | None) -> list[dict]:
+    if not isinstance(response_data, dict):
+        return []
+
+    choices = response_data.get('choices', [])
+    if not choices:
+        return []
+
+    message = choices[0].get('message', {}) or {}
+    tool_calls = list(message.get('tool_calls') or [])
+
+    if message.get('function_call'):
+        function_call = message.get('function_call') or {}
+        tool_calls.append(
+            {
+                'id': function_call.get('id') or str(uuid4()),
+                'type': 'function',
+                'function': {
+                    'name': function_call.get('name', ''),
+                    'arguments': function_call.get('arguments', '{}'),
+                },
+            }
+        )
+
+    return tool_calls
+
+
+def build_tool_call_assistant_message(response_tool_calls: list[dict]) -> dict:
+    return {
+        'role': 'assistant',
+        'content': None,
+        'tool_calls': [
+            {
+                'id': tool_call.get('id', ''),
+                'type': tool_call.get('type', 'function'),
+                'function': {
+                    'name': tool_call.get('function', {}).get('name', ''),
+                    'arguments': tool_call.get('function', {}).get('arguments', '{}'),
+                },
+            }
+            for tool_call in response_tool_calls
+        ],
+    }
+
+
+def build_tool_result_messages(results: list[dict]) -> list[dict]:
+    return [
+        {
+            'role': 'tool',
+            'tool_call_id': result.get('tool_call_id', ''),
+            'content': result.get('content', ''),
+        }
+        for result in results
+    ]
+
+
+async def execute_native_tool_calls(
+    request,
+    form_data: dict,
+    user,
+    metadata: dict,
+    response_tool_calls: list[dict],
+    *,
+    event_emitter=None,
+    event_caller=None,
+    citations_enabled: bool = True,
+) -> tuple[list[dict], list[dict]]:
+    tools = metadata.get('tools', {})
+    results = []
+    tool_call_sources = []
+
+    for tool_call in response_tool_calls:
+        tool_call_id = tool_call.get('id', '')
+        tool_function_name = tool_call.get('function', {}).get('name', '')
+        tool_args = tool_call.get('function', {}).get('arguments', '{}')
+        tool_start_time = time.monotonic()
+
+        tool_function_params = {}
+        if tool_args and tool_args.strip():
+            try:
+                # json.loads cannot be used because some models do not produce valid JSON
+                tool_function_params = ast.literal_eval(tool_args)
+            except Exception as e:
+                log.debug(e)
+                # Fallback to JSON parsing
+                try:
+                    tool_function_params = json.loads(tool_args)
+                except Exception as e:
+                    log.error(f'Error parsing tool call arguments: {tool_args}')
+                    results.append(
+                        {
+                            'tool_call_id': tool_call_id,
+                            'content': f'Error: Tool call arguments could not be parsed. The model generated malformed or incomplete JSON for `{tool_function_name}`. Please try again.',
+                        }
+                    )
+                    log.warning(
+                        'Native tool argument parse failed chat_id=%s message_id=%s session_id=%s tool=%s call_id=%s raw_args=%s',
+                        metadata.get('chat_id'),
+                        metadata.get('message_id'),
+                        metadata.get('session_id'),
+                        tool_function_name,
+                        tool_call_id,
+                        tool_args,
+                    )
+                    continue
+
+        # Ensure arguments are valid JSON for downstream LLM integrations
+        log.debug(f'Parsed args from {tool_args} to {tool_function_params}')
+        tool_call.setdefault('function', {})['arguments'] = json.dumps(tool_function_params)
+        log.info(
+            'Native tool call start chat_id=%s message_id=%s session_id=%s tool=%s call_id=%s arg_keys=%s',
+            metadata.get('chat_id'),
+            metadata.get('message_id'),
+            metadata.get('session_id'),
+            tool_function_name,
+            tool_call_id,
+            sorted(tool_function_params.keys()),
+        )
+
+        tool_result = None
+        tool = None
+        tool_type = None
+        direct_tool = False
+
+        if tool_function_name in tools:
+            tool = tools[tool_function_name]
+            spec = tool.get('spec', {})
+
+            tool_type = tool.get('type', '')
+            direct_tool = tool.get('direct', False)
+
+            try:
+                allowed_params = spec.get('parameters', {}).get('properties', {}).keys()
+
+                tool_function_params = {k: v for k, v in tool_function_params.items() if k in allowed_params}
+
+                if direct_tool:
+                    tool_result = await event_caller(
+                        {
+                            'type': 'execute:tool',
+                            'data': {
+                                'id': str(uuid4()),
+                                'name': tool_function_name,
+                                'params': tool_function_params,
+                                'server': tool.get('server', {}),
+                                'session_id': metadata.get('session_id', None),
+                            },
+                        }
+                    )
+
+                else:
+                    tool_function = await get_updated_tool_function(
+                        function=tool['callable'],
+                        extra_params={
+                            '__messages__': form_data.get('messages', []),
+                            '__files__': metadata.get('files', []),
+                        },
+                    )
+
+                    tool_result = await tool_function(**tool_function_params)
+
+            except Exception as e:
+                tool_result = str(e)
+                log.exception(
+                    'Native tool call raised chat_id=%s message_id=%s session_id=%s tool=%s call_id=%s elapsed_ms=%s',
+                    metadata.get('chat_id'),
+                    metadata.get('message_id'),
+                    metadata.get('session_id'),
+                    tool_function_name,
+                    tool_call_id,
+                    int((time.monotonic() - tool_start_time) * 1000),
+                )
+        else:
+            tool_result = f'Error: Tool `{tool_function_name}` is not available.'
+            log.warning(
+                'Native tool not found chat_id=%s message_id=%s session_id=%s tool=%s call_id=%s available_count=%s',
+                metadata.get('chat_id'),
+                metadata.get('message_id'),
+                metadata.get('session_id'),
+                tool_function_name,
+                tool_call_id,
+                len(tools),
+            )
+
+        tool_result, tool_result_files, tool_result_embeds = await process_tool_result(
+            request,
+            tool_function_name,
+            tool_result,
+            tool_type,
+            direct_tool,
+            metadata,
+            user,
+        )
+        log.info(
+            'Native tool call completed chat_id=%s message_id=%s session_id=%s tool=%s call_id=%s elapsed_ms=%s files=%s embeds=%s result_len=%s',
+            metadata.get('chat_id'),
+            metadata.get('message_id'),
+            metadata.get('session_id'),
+            tool_function_name,
+            tool_call_id,
+            int((time.monotonic() - tool_start_time) * 1000),
+            len(tool_result_files or []),
+            len(tool_result_embeds or []),
+            len(str(tool_result or '')),
+        )
+
+        if event_emitter:
+            await terminal_event_handler(
+                tool_function_name,
+                tool_function_params,
+                tool_result,
+                event_emitter,
+            )
+
+        # Extract citation sources from tool results
+        if (
+            citations_enabled
+            and tool_function_name
+            in [
+                'search_web',
+                'fetch_url',
+                'view_file',
+                'view_knowledge_file',
+                'query_knowledge_files',
+                'query_knowledge_evidence',
+            ]
+            and tool_result
+        ):
+            try:
+                citation_sources = get_citation_source_from_tool_result(
+                    tool_name=tool_function_name,
+                    tool_params=tool_function_params,
+                    tool_result=tool_result,
+                    tool_id=tool.get('tool_id', '') if tool else '',
+                )
+                tool_call_sources.extend(citation_sources)
+            except Exception as e:
+                log.exception(f'Error extracting citation source: {e}')
+
+        results.append(
+            {
+                'tool_call_id': tool_call_id,
+                'content': str(tool_result) if tool_result else '',
+                **({'files': tool_result_files} if tool_result_files else {}),
+                **({'embeds': tool_result_embeds} if tool_result_embeds else {}),
+            }
+        )
+
+    return results, tool_call_sources
+
+
+def build_native_tool_continuation_form_data(
+    form_data: dict,
+    metadata: dict,
+    response_tool_calls: list[dict],
+    results: list[dict],
+    *,
+    stream: bool,
+) -> dict:
+    return {
+        **form_data,
+        'stream': stream,
+        'metadata': metadata,
+        'messages': [
+            *form_data.get('messages', []),
+            build_tool_call_assistant_message(response_tool_calls),
+            *build_tool_result_messages(results),
+        ],
+    }
+
+
+def _cache_debug_value_enabled(value: Any) -> bool:
+    if isinstance(value, str):
+        return value.strip().lower() in {'1', 'true', 'yes', 'on'}
+    return bool(value)
+
+
+def is_native_tool_cache_debug_enabled(form_data: dict | None, metadata: dict | None) -> bool:
+    form_data = form_data or {}
+    metadata = metadata or {}
+    extra_body = form_data.get('extra_body') if isinstance(form_data.get('extra_body'), dict) else {}
+    params = metadata.get('params') if isinstance(metadata.get('params'), dict) else {}
+
+    return any(
+        _cache_debug_value_enabled(value)
+        for value in (
+            form_data.get('cache_debug'),
+            extra_body.get('cache_debug'),
+            metadata.get('cache_debug'),
+            params.get('cache_debug'),
+        )
+    )
+
+
+def _native_tool_fingerprint_hash(value: Any) -> str | None:
+    if value is None:
+        return None
+    try:
+        serialized = json.dumps(value, sort_keys=True, ensure_ascii=False, default=str)
+    except TypeError:
+        serialized = str(value)
+    return hashlib.sha256(serialized.encode('utf-8')).hexdigest()[:16]
+
+
+def _native_tool_system_parts(form_data: dict) -> list[Any]:
+    system_parts: list[Any] = []
+    if form_data.get('instructions') is not None:
+        system_parts.append({'instructions': form_data.get('instructions')})
+
+    for message in form_data.get('messages') or []:
+        if isinstance(message, dict) and message.get('role') in {'system', 'developer'}:
+            system_parts.append(message)
+
+    return system_parts
+
+
+def _native_tool_cached_tokens(response_data: dict | None) -> int | None:
+    usage = (response_data or {}).get('usage') if isinstance(response_data, dict) else None
+    if not isinstance(usage, dict):
+        return None
+
+    candidate_paths = (
+        ('prompt_tokens_details', 'cached_tokens'),
+        ('input_tokens_details', 'cached_tokens'),
+        ('prompt_tokens_details', 'cached_tokens_read'),
+        ('input_tokens_details', 'cached_tokens_read'),
+    )
+    for parent_key, child_key in candidate_paths:
+        parent = usage.get(parent_key)
+        value = parent.get(child_key) if isinstance(parent, dict) else None
+        if isinstance(value, (int, float)) and not isinstance(value, bool):
+            return int(value)
+
+    return None
+
+
+_RESPONSES_CONTINUATION_GENERATION_CONTROL_KEYS = (
+    'temperature',
+    'top_p',
+    'reasoning',
+    'max_tokens',
+    'max_completion_tokens',
+    'max_output_tokens',
+    'tool_choice',
+    'parallel_tool_calls',
+    'response_format',
+    'store',
+    'seed',
+    'service_tier',
+    'text',
+    'truncation',
+)
+
+
+def _responses_continuation_generation_controls(form_data: dict) -> dict:
+    return {
+        key: copy.deepcopy(form_data[key])
+        for key in _RESPONSES_CONTINUATION_GENERATION_CONTROL_KEYS
+        if key in form_data
+    }
+
+
+def _responses_continuation_sequence(form_data: dict) -> tuple[str, list]:
+    input_items = form_data.get('input')
+    if isinstance(input_items, list):
+        return 'input', copy.deepcopy(input_items)
+
+    messages = form_data.get('messages')
+    if isinstance(messages, list):
+        return 'messages', copy.deepcopy(messages)
+
+    return 'messages', []
+
+
+def _responses_continuation_delta_item_allowed(item: Any) -> bool:
+    if not isinstance(item, dict):
+        return False
+
+    item_type = str(item.get('type') or '').strip().lower()
+    if item_type in {'function_call', 'function_call_output'}:
+        return True
+
+    role = str(item.get('role') or '').strip().lower()
+    if role == 'tool':
+        return True
+
+    if role == 'assistant':
+        content = item.get('content')
+        has_content = bool(content) if not isinstance(content, str) else bool(content.strip())
+        return bool(item.get('tool_calls')) or not has_content
+
+    return False
+
+
+def _responses_continuation_reject(reason: str) -> dict:
+    return {
+        'accepted': False,
+        'reason': reason,
+        'continuation_mode': 'stateful_rejected',
+        'delta_messages': [],
+        'delta_input': [],
+    }
+
+
+def build_responses_continuation_guard_state(form_data: dict, *, route_mode: str) -> dict:
+    sequence_type, sequence = _responses_continuation_sequence(form_data)
+    return {
+        'model': form_data.get('model'),
+        'route_mode': route_mode,
+        'prompt_cache_key_hash': _native_tool_fingerprint_hash(form_data.get('prompt_cache_key')),
+        'tools_hash': _native_tool_fingerprint_hash(form_data.get('tools')),
+        'instructions_hash': _native_tool_fingerprint_hash(_native_tool_system_parts(form_data)),
+        'generation_controls_hash': _native_tool_fingerprint_hash(
+            _responses_continuation_generation_controls(form_data)
+        ),
+        'sequence_type': sequence_type,
+        'sequence': sequence,
+    }
+
+
+def evaluate_responses_continuation_delta(
+    previous_state: dict | None,
+    current_form_data: dict,
+    *,
+    route_mode: str,
+) -> dict:
+    replay_required_reason = current_form_data.get('responses_stateful_replay_required_reason')
+    if replay_required_reason:
+        return _responses_continuation_reject(str(replay_required_reason))
+
+    if not previous_state:
+        return _responses_continuation_reject('missing_previous_guard_state')
+
+    current_state = build_responses_continuation_guard_state(
+        current_form_data,
+        route_mode=route_mode,
+    )
+
+    for key, reason in (
+        ('model', 'model_changed'),
+        ('route_mode', 'route_mode_changed'),
+        ('prompt_cache_key_hash', 'prompt_cache_key_changed'),
+        ('tools_hash', 'tools_changed'),
+        ('instructions_hash', 'instructions_changed'),
+        ('generation_controls_hash', 'generation_controls_changed'),
+        ('sequence_type', 'sequence_type_changed'),
+    ):
+        if previous_state.get(key) != current_state.get(key):
+            return _responses_continuation_reject(reason)
+
+    previous_sequence = previous_state.get('sequence')
+    current_sequence = current_state.get('sequence')
+    if not isinstance(previous_sequence, list) or not isinstance(current_sequence, list):
+        return _responses_continuation_reject('input_not_strict_extension')
+
+    if len(current_sequence) <= len(previous_sequence):
+        return _responses_continuation_reject('input_not_strict_extension')
+
+    if current_sequence[: len(previous_sequence)] != previous_sequence:
+        return _responses_continuation_reject('input_not_strict_extension')
+
+    delta = current_sequence[len(previous_sequence) :]
+    if not delta or not all(_responses_continuation_delta_item_allowed(item) for item in delta):
+        return _responses_continuation_reject('delta_contains_non_continuation_items')
+
+    result = {
+        'accepted': True,
+        'reason': 'accepted',
+        'continuation_mode': 'stateful_delta',
+        'delta_messages': delta if current_state.get('sequence_type') == 'messages' else [],
+        'delta_input': delta if current_state.get('sequence_type') == 'input' else [],
+    }
+    return result
+
+
+def _responses_continuation_system_messages(messages: Any) -> list[dict]:
+    if not isinstance(messages, list):
+        return []
+    return [
+        copy.deepcopy(message)
+        for message in messages
+        if isinstance(message, dict) and message.get('role') in {'system', 'developer'}
+    ]
+
+
+def log_responses_continuation_guard_result(
+    result: dict,
+    form_data: dict,
+    *,
+    metadata: dict | None = None,
+    route_mode: str,
+) -> None:
+    if not is_native_tool_cache_debug_enabled(form_data, metadata):
+        return
+
+    log.info(
+        'native_tool_continuation_guard %s',
+        json.dumps(
+            {
+                'route_mode': route_mode,
+                'continuation_mode': result.get('continuation_mode'),
+                'reason': result.get('reason'),
+            },
+            sort_keys=True,
+            ensure_ascii=False,
+        ),
+    )
+
+
+def apply_responses_continuation_guard(
+    form_data: dict,
+    *,
+    previous_response_id: str | None,
+    previous_state: dict | None,
+    route_mode: str,
+    metadata: dict | None = None,
+) -> tuple[dict, dict]:
+    guarded_form_data = {**form_data}
+    result = evaluate_responses_continuation_delta(
+        previous_state,
+        form_data,
+        route_mode=route_mode,
+    )
+
+    guarded_form_data['continuation_mode'] = result['continuation_mode']
+    if result['accepted'] and previous_response_id:
+        guarded_form_data['previous_response_id'] = previous_response_id
+        if result.get('delta_messages'):
+            guarded_form_data['messages'] = [
+                *_responses_continuation_system_messages(form_data.get('messages')),
+                *copy.deepcopy(result['delta_messages']),
+            ]
+        elif result.get('delta_input'):
+            guarded_form_data['input'] = copy.deepcopy(result['delta_input'])
+    else:
+        guarded_form_data.pop('previous_response_id', None)
+
+    log_responses_continuation_guard_result(
+        result,
+        guarded_form_data,
+        metadata=metadata,
+        route_mode=route_mode,
+    )
+    return guarded_form_data, result
+
+
+def build_native_tool_continuation_request_fingerprint(
+    form_data: dict,
+    *,
+    metadata: dict | None = None,
+    route_mode: str,
+    response_data: dict | None = None,
+) -> dict:
+    messages = form_data.get('messages') or []
+    input_items = form_data.get('input') or []
+    previous_response_id_present = bool(form_data.get('previous_response_id'))
+    continuation_mode = form_data.get('continuation_mode')
+    if not continuation_mode:
+        continuation_mode = 'stateful_unchecked' if previous_response_id_present else 'stateless_replay'
+
+    fingerprint = {
+        'model': form_data.get('model'),
+        'route_mode': route_mode,
+        'prompt_cache_key_hash': _native_tool_fingerprint_hash(form_data.get('prompt_cache_key')),
+        'tools_hash': _native_tool_fingerprint_hash(form_data.get('tools')),
+        'instructions_hash': _native_tool_fingerprint_hash(_native_tool_system_parts(form_data)),
+        'message_count': len(messages) if isinstance(messages, list) else None,
+        'messages_hash': _native_tool_fingerprint_hash(messages),
+        'input_count': len(input_items) if isinstance(input_items, list) else None,
+        'input_hash': _native_tool_fingerprint_hash(input_items),
+        'previous_response_id_present': previous_response_id_present,
+        'continuation_mode': continuation_mode,
+        'cached_tokens': _native_tool_cached_tokens(response_data),
+    }
+
+    if metadata:
+        params = metadata.get('params') if isinstance(metadata.get('params'), dict) else {}
+        fingerprint['function_calling'] = params.get('function_calling')
+
+    return fingerprint
+
+
+def log_native_tool_continuation_request_fingerprint(
+    form_data: dict,
+    *,
+    metadata: dict | None = None,
+    route_mode: str,
+    response_data: dict | None = None,
+) -> dict | None:
+    if not is_native_tool_cache_debug_enabled(form_data, metadata):
+        return None
+
+    fingerprint = build_native_tool_continuation_request_fingerprint(
+        form_data,
+        metadata=metadata,
+        route_mode=route_mode,
+        response_data=response_data,
+    )
+    log.info(
+        'native_tool_continuation_request_fingerprint %s',
+        json.dumps(fingerprint, sort_keys=True, ensure_ascii=False),
+    )
+    return fingerprint
+
+
+def _native_tool_loop_limit_reached(iterations: int) -> bool:
+    return CHAT_RESPONSE_MAX_TOOL_CALL_ITERATIONS is not None and iterations >= CHAT_RESPONSE_MAX_TOOL_CALL_ITERATIONS
+
+
+async def continue_native_tool_calls_non_streaming_response(response, response_data: dict, ctx: dict):
+    request = ctx['request']
+    form_data = ctx['form_data']
+    user = ctx['user']
+    model = ctx['model']
+    metadata = ctx['metadata']
+    event_emitter = ctx.get('event_emitter')
+    event_caller = ctx.get('event_caller')
+
+    iterations = 0
+    all_tool_call_sources = []
+    current_response = response
+    current_response_data = response_data
+
+    citations_enabled = (model.get('info', {}).get('meta', {}).get('capabilities') or {}).get('citations', True)
+
+    while not _native_tool_loop_limit_reached(iterations):
+        response_tool_calls = get_chat_completion_tool_calls(current_response_data)
+        if not response_tool_calls:
+            if all_tool_call_sources and isinstance(current_response_data, dict):
+                current_response_data = {
+                    **current_response_data,
+                    'sources': all_tool_call_sources,
+                    'metadata': {
+                        **(current_response_data.get('metadata') or {}),
+                        'citation_map': build_citation_map_from_sources(all_tool_call_sources),
+                    },
+                }
+            return build_response_object(current_response, current_response_data)
+
+        iterations += 1
+        results, tool_call_sources = await execute_native_tool_calls(
+            request,
+            form_data,
+            user,
+            metadata,
+            response_tool_calls,
+            event_emitter=event_emitter,
+            event_caller=event_caller,
+            citations_enabled=citations_enabled,
+        )
+        all_tool_call_sources.extend(tool_call_sources)
+
+        form_data = build_native_tool_continuation_form_data(
+            form_data,
+            metadata,
+            response_tool_calls,
+            results,
+            stream=False,
+        )
+        log_native_tool_continuation_request_fingerprint(
+            form_data,
+            metadata=metadata,
+            route_mode='direct_non_stream',
+            response_data=current_response_data,
+        )
+        current_response = await generate_chat_completion(
+            request,
+            form_data,
+            user,
+            bypass_system_prompt=True,
+        )
+        current_response, current_response_data = get_response_data(current_response)
+        if current_response_data is None:
+            return current_response
+
+    log.warning('Tool-call iteration limit reached (%s)', CHAT_RESPONSE_MAX_TOOL_CALL_ITERATIONS)
+    return build_response_object(current_response, current_response_data)
+
+
+def should_continue_direct_native_tool_stream(ctx: dict) -> bool:
+    metadata = ctx.get('metadata') or {}
+    return (
+        ctx.get('event_emitter') is None
+        and metadata.get('params', {}).get('function_calling') == 'native'
+        and bool(metadata.get('tools'))
+    )
+
+
+def _sse_data_from_event(raw_event: str) -> str | None:
+    data_lines = []
+    for line in raw_event.splitlines():
+        if line.startswith('data:'):
+            data_lines.append(line[len('data:') :].strip())
+    if not data_lines:
+        return None
+    return '\n'.join(data_lines)
+
+
+async def _iter_sse_raw_events(body_iterator):
+    buffer = ''
+    async for chunk in body_iterator:
+        buffer += chunk.decode('utf-8', 'replace') if isinstance(chunk, bytes) else chunk
+        while '\n\n' in buffer:
+            raw_event, buffer = buffer.split('\n\n', 1)
+            if raw_event.strip():
+                yield f'{raw_event}\n\n'
+    if buffer.strip():
+        yield buffer if buffer.endswith('\n\n') else f'{buffer}\n\n'
+
+
+def _accumulate_chat_completion_stream_tool_calls(data: dict, response_tool_calls: list[dict]) -> None:
+    choices = data.get('choices', [])
+    if not choices:
+        return
+
+    delta_tool_calls = choices[0].get('delta', {}).get('tool_calls')
+    if not delta_tool_calls:
+        return
+
+    for delta_tool_call in delta_tool_calls:
+        tool_call_index = delta_tool_call.get('index')
+        if tool_call_index is None:
+            continue
+
+        current_response_tool_call = None
+        for response_tool_call in response_tool_calls:
+            if response_tool_call.get('index') == tool_call_index:
+                current_response_tool_call = response_tool_call
+                break
+
+        if current_response_tool_call is None:
+            delta_tool_call = copy.deepcopy(delta_tool_call)
+            delta_tool_call.setdefault('function', {})
+            delta_tool_call['function'].setdefault('name', '')
+            delta_tool_call['function'].setdefault('arguments', '')
+            delta_tool_call['function']['arguments'] = _coerce_function_argument_fragment(
+                delta_tool_call['function'].get('arguments')
+            )
+            response_tool_calls.append(delta_tool_call)
+        else:
+            delta_name = delta_tool_call.get('function', {}).get('name')
+            delta_arguments = _coerce_function_argument_fragment(
+                delta_tool_call.get('function', {}).get('arguments')
+            )
+            if delta_name:
+                current_response_tool_call.setdefault('function', {})['name'] = delta_name
+            if delta_arguments:
+                current_response_tool_call.setdefault('function', {})
+                current_response_tool_call['function']['arguments'] += delta_arguments
+
+
+async def _drain_streaming_response_for_tool_calls(response: StreamingResponse) -> tuple[list[str], list[dict]]:
+    raw_events = []
+    response_tool_calls = []
+
+    async for raw_event in _iter_sse_raw_events(response.body_iterator):
+        raw_events.append(raw_event)
+        data_text = _sse_data_from_event(raw_event)
+        if not data_text or data_text == '[DONE]':
+            continue
+        try:
+            data = json.loads(data_text)
+        except Exception:
+            continue
+        _accumulate_chat_completion_stream_tool_calls(data, response_tool_calls)
+
+    if response.background:
+        await response.background()
+
+    if response_tool_calls:
+        response_tool_calls = _split_tool_calls(response_tool_calls)
+
+    return raw_events, response_tool_calls
+
+
+async def direct_native_tool_streaming_response_handler(response: StreamingResponse, ctx: dict) -> StreamingResponse:
+    request = ctx['request']
+    user = ctx['user']
+    model = ctx['model']
+    metadata = ctx['metadata']
+    event_caller = ctx.get('event_caller')
+
+    async def stream_generator():
+        form_data = ctx['form_data']
+        current_response = response
+        iterations = 0
+
+        citations_enabled = (model.get('info', {}).get('meta', {}).get('capabilities') or {}).get('citations', True)
+
+        while True:
+            raw_events, response_tool_calls = await _drain_streaming_response_for_tool_calls(current_response)
+            if not response_tool_calls:
+                for raw_event in raw_events:
+                    yield raw_event
+                return
+
+            if _native_tool_loop_limit_reached(iterations):
+                yield (
+                    'data: '
+                    + json.dumps(
+                        {
+                            'error': {
+                                'message': f'Tool-call limit reached ({CHAT_RESPONSE_MAX_TOOL_CALL_ITERATIONS} iterations).'
+                            }
+                        }
+                    )
+                    + '\n\n'
+                )
+                yield 'data: [DONE]\n\n'
+                return
+
+            iterations += 1
+            results, tool_call_sources = await execute_native_tool_calls(
+                request,
+                form_data,
+                user,
+                metadata,
+                response_tool_calls,
+                event_caller=event_caller,
+                citations_enabled=citations_enabled,
+            )
+
+            if tool_call_sources:
+                yield f'data: {json.dumps({"sources": tool_call_sources})}\n\n'
+
+            form_data = build_native_tool_continuation_form_data(
+                form_data,
+                metadata,
+                response_tool_calls,
+                results,
+                stream=True,
+            )
+            log_native_tool_continuation_request_fingerprint(
+                form_data,
+                metadata=metadata,
+                route_mode='direct_stream',
+            )
+            current_response = await generate_chat_completion(
+                request,
+                form_data,
+                user,
+                bypass_system_prompt=True,
+            )
+            if not isinstance(current_response, StreamingResponse):
+                _, response_data = get_response_data(current_response)
+                if response_data is not None:
+                    yield f'data: {json.dumps(response_data)}\n\n'
+                yield 'data: [DONE]\n\n'
+                return
+
+    return StreamingResponse(stream_generator(), headers=dict(response.headers), background=None)
 
 
 def merge_events_into_response(response_data, events):
@@ -3601,6 +4610,10 @@ async def background_tasks_handler(ctx):
                         except Exception as e:
                             pass
 
+        chat_id = metadata.get('chat_id', '')
+        if chat_id and not chat_id.startswith('local:') and not chat_id.startswith('channel:'):
+            await enqueue_agent_memory_extraction_after_completion(request, chat_id, user)
+
 
 async def outlet_filter_handler(ctx):
     """Run outlet filters inline after chat completion.
@@ -3764,6 +4777,12 @@ async def non_streaming_chat_response_handler(response, ctx):
     response, response_data = get_response_data(response)
     if response_data is None:
         return response
+
+    if (
+        metadata.get('params', {}).get('function_calling') == 'native'
+        and get_chat_completion_tool_calls(response_data)
+    ):
+        return await continue_native_tool_calls_non_streaming_response(response, response_data, ctx)
 
     if event_emitter:
         try:
@@ -3968,6 +4987,9 @@ async def streaming_chat_response_handler(response, ctx):
         await Functions.get_function_by_id(filter_id)
         for filter_id in await get_sorted_filter_ids(request, model, metadata.get('filter_ids', []))
     ]
+
+    if should_continue_direct_native_tool_stream(ctx):
+        return await direct_native_tool_streaming_response_handler(response, ctx)
 
     # Standard streaming response handler
     # event_caller is optional — only needed for direct (client-side) tools
@@ -4238,9 +5260,32 @@ async def streaming_chat_response_handler(response, ctx):
             usage = None
             prior_output = []
             last_response_id = None
+            responses_continuation_guard_state = None
 
             def full_output():
                 return prior_output + output if prior_output else output
+
+            def update_responses_continuation_guard_state():
+                nonlocal responses_continuation_guard_state
+                if not ENABLE_RESPONSES_API_STATEFUL or not last_response_id:
+                    return
+
+                guard_messages = [
+                    *form_data.get('messages', []),
+                    *convert_output_to_messages(
+                        output,
+                        raw=True,
+                        reasoning_format=get_reasoning_format(model),
+                    ),
+                ]
+                responses_continuation_guard_state = build_responses_continuation_guard_state(
+                    {
+                        **form_data,
+                        'model': model_id,
+                        'messages': guard_messages,
+                    },
+                    route_mode='websocket_responses_api',
+                )
 
             reasoning_tags_param = metadata.get('params', {}).get('reasoning_tags')
             DETECT_REASONING_TAGS = reasoning_tags_param is not False
@@ -4882,6 +5927,7 @@ async def streaming_chat_response_handler(response, ctx):
 
                 try:
                     await stream_body_handler(response, form_data)
+                    update_responses_continuation_guard_state()
                 finally:
                     if response.background:
                         await response.background()
@@ -4914,11 +5960,11 @@ async def streaming_chat_response_handler(response, ctx):
 
                     response_tool_calls = tool_calls.pop(0)
                     log.info(
-                        'Native tool loop iteration start chat_id=%s message_id=%s session_id=%s retry=%s tool_count=%s function_calling=%s image_generation=%s',
+                        'Native tool loop iteration start chat_id=%s message_id=%s session_id=%s iteration=%s tool_count=%s function_calling=%s image_generation=%s',
                         metadata.get('chat_id'),
                         metadata.get('message_id'),
                         metadata.get('session_id'),
-                        tool_call_retries,
+                        tool_call_iterations,
                         len(response_tool_calls),
                         metadata.get('params', {}).get('function_calling'),
                         metadata.get('features', {}).get('image_generation'),
@@ -4952,186 +5998,17 @@ async def streaming_chat_response_handler(response, ctx):
                         }
                     )
 
-                    tools = metadata.get('tools', {})
-
-                    results = []
-
-                    for tool_call in response_tool_calls:
-                        tool_call_id = tool_call.get('id', '')
-                        tool_function_name = tool_call.get('function', {}).get('name', '')
-                        tool_args = tool_call.get('function', {}).get('arguments', '{}')
-                        tool_start_time = time.monotonic()
-
-                        tool_function_params = {}
-                        if tool_args and tool_args.strip():
-                            try:
-                                # json.loads cannot be used because some models do not produce valid JSON
-                                tool_function_params = ast.literal_eval(tool_args)
-                            except Exception as e:
-                                log.debug(e)
-                                # Fallback to JSON parsing
-                                try:
-                                    tool_function_params = json.loads(tool_args)
-                                except Exception as e:
-                                    log.error(f'Error parsing tool call arguments: {tool_args}')
-                                    results.append(
-                                        {
-                                            'tool_call_id': tool_call_id,
-                                            'content': f'Error: Tool call arguments could not be parsed. The model generated malformed or incomplete JSON for `{tool_function_name}`. Please try again.',
-                                        }
-                                    )
-                                    log.warning(
-                                        'Native tool argument parse failed chat_id=%s message_id=%s session_id=%s tool=%s call_id=%s raw_args=%s',
-                                        metadata.get('chat_id'),
-                                        metadata.get('message_id'),
-                                        metadata.get('session_id'),
-                                        tool_function_name,
-                                        tool_call_id,
-                                        tool_args,
-                                    )
-                                    continue
-
-                        # Ensure arguments are valid JSON for downstream LLM integrations
-                        log.debug(f'Parsed args from {tool_args} to {tool_function_params}')
-                        tool_call.setdefault('function', {})['arguments'] = json.dumps(tool_function_params)
-                        log.info(
-                            'Native tool call start chat_id=%s message_id=%s session_id=%s tool=%s call_id=%s arg_keys=%s',
-                            metadata.get('chat_id'),
-                            metadata.get('message_id'),
-                            metadata.get('session_id'),
-                            tool_function_name,
-                            tool_call_id,
-                            sorted(tool_function_params.keys()),
-                        )
-
-                        tool_result = None
-                        tool = None
-                        tool_type = None
-                        direct_tool = False
-
-                        if tool_function_name in tools:
-                            tool = tools[tool_function_name]
-                            spec = tool.get('spec', {})
-
-                            tool_type = tool.get('type', '')
-                            direct_tool = tool.get('direct', False)
-
-                            try:
-                                allowed_params = spec.get('parameters', {}).get('properties', {}).keys()
-
-                                tool_function_params = {
-                                    k: v for k, v in tool_function_params.items() if k in allowed_params
-                                }
-
-                                if direct_tool:
-                                    tool_result = await event_caller(
-                                        {
-                                            'type': 'execute:tool',
-                                            'data': {
-                                                'id': str(uuid4()),
-                                                'name': tool_function_name,
-                                                'params': tool_function_params,
-                                                'server': tool.get('server', {}),
-                                                'session_id': metadata.get('session_id', None),
-                                            },
-                                        }
-                                    )
-
-                                else:
-                                    tool_function = await get_updated_tool_function(
-                                        function=tool['callable'],
-                                        extra_params={
-                                            '__messages__': form_data.get('messages', []),
-                                            '__files__': metadata.get('files', []),
-                                        },
-                                    )
-
-                                    tool_result = await tool_function(**tool_function_params)
-
-                            except Exception as e:
-                                tool_result = str(e)
-                                log.exception(
-                                    'Native tool call raised chat_id=%s message_id=%s session_id=%s tool=%s call_id=%s elapsed_ms=%s',
-                                    metadata.get('chat_id'),
-                                    metadata.get('message_id'),
-                                    metadata.get('session_id'),
-                                    tool_function_name,
-                                    tool_call_id,
-                                    int((time.monotonic() - tool_start_time) * 1000),
-                                )
-                        else:
-                            tool_result = f'Error: Tool `{tool_function_name}` is not available.'
-                            log.warning(
-                                'Native tool not found chat_id=%s message_id=%s session_id=%s tool=%s call_id=%s available_count=%s',
-                                metadata.get('chat_id'),
-                                metadata.get('message_id'),
-                                metadata.get('session_id'),
-                                tool_function_name,
-                                tool_call_id,
-                                len(tools),
-                            )
-
-                        tool_result, tool_result_files, tool_result_embeds = await process_tool_result(
-                            request,
-                            tool_function_name,
-                            tool_result,
-                            tool_type,
-                            direct_tool,
-                            metadata,
-                            user,
-                        )
-                        log.info(
-                            'Native tool call completed chat_id=%s message_id=%s session_id=%s tool=%s call_id=%s elapsed_ms=%s files=%s embeds=%s result_len=%s',
-                            metadata.get('chat_id'),
-                            metadata.get('message_id'),
-                            metadata.get('session_id'),
-                            tool_function_name,
-                            tool_call_id,
-                            int((time.monotonic() - tool_start_time) * 1000),
-                            len(tool_result_files or []),
-                            len(tool_result_embeds or []),
-                            len(str(tool_result or '')),
-                        )
-
-                        await terminal_event_handler(
-                            tool_function_name,
-                            tool_function_params,
-                            tool_result,
-                            event_emitter,
-                        )
-
-                        # Extract citation sources from tool results
-                        if (
-                            citations_enabled
-                            and tool_function_name
-                            in [
-                                'search_web',
-                                'fetch_url',
-                                'view_file',
-                                'view_knowledge_file',
-                                'query_knowledge_files',
-                            ]
-                            and tool_result
-                        ):
-                            try:
-                                citation_sources = get_citation_source_from_tool_result(
-                                    tool_name=tool_function_name,
-                                    tool_params=tool_function_params,
-                                    tool_result=tool_result,
-                                    tool_id=tool.get('tool_id', '') if tool else '',
-                                )
-                                tool_call_sources.extend(citation_sources)
-                            except Exception as e:
-                                log.exception(f'Error extracting citation source: {e}')
-
-                        results.append(
-                            {
-                                'tool_call_id': tool_call_id,
-                                'content': str(tool_result) if tool_result else '',
-                                **({'files': tool_result_files} if tool_result_files else {}),
-                                **({'embeds': tool_result_embeds} if tool_result_embeds else {}),
-                            }
-                        )
+                    results, iteration_tool_call_sources = await execute_native_tool_calls(
+                        request,
+                        form_data,
+                        user,
+                        metadata,
+                        response_tool_calls,
+                        event_emitter=event_emitter,
+                        event_caller=event_caller,
+                        citations_enabled=citations_enabled,
+                    )
+                    tool_call_sources.extend(iteration_tool_call_sources)
 
                     # Update function_call statuses and append function_call_output items
                     for tc in response_tool_calls:
@@ -5215,6 +6092,9 @@ async def streaming_chat_response_handler(response, ctx):
                             )
                             source_context = source_context.strip()
                             if source_context:
+                                form_data['responses_stateful_replay_required_reason'] = (
+                                    'tool_source_context_rewrite'
+                                )
                                 rag_content = await rag_template(
                                     request.app.state.config.RAG_TEMPLATE,
                                     source_context,
@@ -5234,6 +6114,8 @@ async def streaming_chat_response_handler(response, ctx):
                                     )
                         tool_call_sources.clear()
 
+                    citation_metadata = build_citation_map_from_sources(all_tool_call_sources)
+
                     # Strip input_image parts (large base64 data URIs) from the
                     # output sent to the frontend — they're only for LLM consumption
                     # via convert_output_to_messages.
@@ -5251,6 +6133,7 @@ async def streaming_chat_response_handler(response, ctx):
                             'data': {
                                 'content': serialize_output(output),
                                 'output': frontend_output,
+                                **({'metadata': {'citation_map': citation_metadata}} if citation_metadata else {}),
                             },
                         }
                     )
@@ -5264,13 +6147,20 @@ async def streaming_chat_response_handler(response, ctx):
                         }
 
                         if ENABLE_RESPONSES_API_STATEFUL and last_response_id:
-                            system_message = get_system_message(form_data['messages'])
-                            new_form_data['messages'] = (
-                                [system_message] if system_message else []
-                            ) + convert_output_to_messages(
+                            tool_messages = convert_output_to_messages(
                                 output, raw=True, reasoning_format=get_reasoning_format(model)
                             )
-                            new_form_data['previous_response_id'] = last_response_id
+                            new_form_data['messages'] = [
+                                *form_data['messages'],
+                                *tool_messages,
+                            ]
+                            new_form_data, _guard_result = apply_responses_continuation_guard(
+                                new_form_data,
+                                previous_response_id=last_response_id,
+                                previous_state=responses_continuation_guard_state,
+                                route_mode='websocket_responses_api',
+                                metadata=metadata,
+                            )
                         else:
                             tool_messages = convert_output_to_messages(
                                 output, raw=True, reasoning_format=get_reasoning_format(model)
@@ -5308,6 +6198,11 @@ async def streaming_chat_response_handler(response, ctx):
                                     }
                                 )
 
+                        log_native_tool_continuation_request_fingerprint(
+                            new_form_data,
+                            metadata=metadata,
+                            route_mode='websocket_responses_api',
+                        )
                         res = await generate_chat_completion(
                             request,
                             new_form_data,
@@ -5338,6 +6233,7 @@ async def streaming_chat_response_handler(response, ctx):
                             await stream_body_handler(res, new_form_data)
                             output[:0] = prior_output
                             prior_output = []
+                            update_responses_continuation_guard_state()
                         else:
                             break
                     except Exception as e:
@@ -5520,6 +6416,11 @@ async def streaming_chat_response_handler(response, ctx):
                                 ],
                             }
 
+                            log_native_tool_continuation_request_fingerprint(
+                                new_form_data,
+                                metadata=metadata,
+                                route_mode='websocket_native_tool',
+                            )
                             res = await generate_chat_completion(
                                 request,
                                 new_form_data,

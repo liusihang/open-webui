@@ -1,4 +1,4 @@
-from open_webui.utils.middleware import handle_responses_streaming_event
+from open_webui.utils.middleware import handle_responses_streaming_event, serialize_output
 
 
 def test_responses_function_call_arguments_delta_coerces_object_fragments():
@@ -59,3 +59,60 @@ def test_responses_function_call_arguments_delta_coerces_object_fragments():
     )
 
     assert output[1]['arguments'] == '{"prompt": "A quiet mountain lake at sunrise"}'
+
+
+def test_responses_reasoning_summary_delta_accepts_cumulative_snapshots():
+    output = []
+
+    output, _ = handle_responses_streaming_event(
+        {
+            'type': 'response.output_item.added',
+            'output_index': 0,
+            'item': {
+                'type': 'reasoning',
+                'id': 'rs_1',
+                'status': 'in_progress',
+                'summary': [],
+            },
+        },
+        output,
+    )
+
+    for delta in [
+        'Looking up current scores\n\nI need the latest sports scores.',
+        'Looking up current scores\n\nI need the latest sports scores. Checking sources.',
+    ]:
+        output, _ = handle_responses_streaming_event(
+            {
+                'type': 'response.reasoning_summary_text.delta',
+                'output_index': 0,
+                'summary_index': 0,
+                'delta': delta,
+            },
+            output,
+        )
+
+    assert output[0]['summary'][0]['text'] == (
+        'Looking up current scores\n\nI need the latest sports scores. Checking sources.'
+    )
+
+
+def test_serialize_output_preserves_reasoning_line_breaks_without_blockquote_markup():
+    rendered = serialize_output(
+        [
+            {
+                'type': 'reasoning',
+                'id': 'rs_1',
+                'status': 'completed',
+                'summary': [
+                    {
+                        'type': 'summary_text',
+                        'text': 'Looking up current scores\n\nI need the latest sports scores.',
+                    }
+                ],
+            }
+        ]
+    )
+
+    assert '&gt;' not in rendered
+    assert 'Looking up current scores\n\nI need the latest sports scores.' in rendered

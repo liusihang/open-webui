@@ -3,21 +3,67 @@
 	const i18n = getContext('i18n');
 	import WebSearchResults from '../WebSearchResults.svelte';
 	import Search from '$lib/components/icons/Search.svelte';
-	import { t } from 'i18next';
+	import ThinkingStatusRow from './ThinkingStatusRow.svelte';
+	import ToolStatusRow from './ToolStatusRow.svelte';
+	import ErrorStatusRow from './ErrorStatusRow.svelte';
+	import ArtifactStatusRow from './ArtifactStatusRow.svelte';
+	import SubagentStatusRow from './SubagentStatusRow.svelte';
+	import ApprovalStatusRow from './ApprovalStatusRow.svelte';
+	import TextStatusRow from './TextStatusRow.svelte';
 
 	export let status = null;
 	export let done = false;
 </script>
 
 {#if !status?.hidden}
-	<div class="status-description flex items-center gap-2 py-0.5 w-full text-left">
-		{#if status?.action === 'web_search' && (status?.urls || status?.items)}
+	<div
+		class="status-description py-0.5 w-full text-left {status?.kind === 'text'
+			? 'block'
+			: 'flex items-center gap-2'}"
+	>
+		{#if status?.kind === 'thinking'}
+			<ThinkingStatusRow done={status?.done !== false} description={status?.description} />
+		{:else if status?.kind === 'tool'}
+			<ToolStatusRow
+				description={status?.description}
+				done={status?.done !== false}
+				detail={status?.detail}
+			/>
+		{:else if status?.kind === 'error'}
+			<ErrorStatusRow description={status?.description} detail={status?.detail} />
+		{:else if status?.kind === 'artifact'}
+			<ArtifactStatusRow description={status?.description} detail={status?.detail} />
+		{:else if status?.kind === 'subagent'}
+			<SubagentStatusRow
+				description={status?.description}
+				done={status?.done !== false}
+				detail={status?.detail}
+			/>
+		{:else if status?.kind === 'approval'}
+			<ApprovalStatusRow
+				description={status?.description}
+				done={status?.done !== false}
+				detail={status?.detail}
+			/>
+		{:else if status?.kind === 'text'}
+			<TextStatusRow done={status?.done !== false} detail={status?.detail} />
+		{:else if status?.kind === 'step'}
+			<div class="flex flex-col justify-center -space-y-0.5 w-full">
+				<div
+					class="{(done || status?.done) === false
+						? 'shimmer'
+						: ''} text-gray-500 dark:text-gray-500 text-[13px] line-clamp-1 text-wrap"
+				>
+					{status?.description}
+				</div>
+			</div>
+		{:else if status?.action === 'web_search' && (status?.urls || status?.items)}
 			<WebSearchResults {status}>
 				<div class="flex flex-col justify-center -space-y-0.5">
 					<div
 						class="{(done || status?.done) === false
 							? 'shimmer'
-							: ''} text-base line-clamp-1 text-wrap"
+							: ''} text-[13px] line-clamp-1 text-wrap"
 					>
 						<!-- $i18n.t("Generating search query") -->
 						<!-- $i18n.t("No search query generated") -->
@@ -41,7 +87,7 @@
 				<div
 					class="{(done || status?.done) === false
 						? 'shimmer'
-						: ''} text-gray-500 dark:text-gray-500 text-base line-clamp-1 text-wrap"
+						: ''} text-gray-500 dark:text-gray-500 text-[13px] line-clamp-1 text-wrap"
 				>
 					{$i18n.t(`Searching Knowledge for "{{searchQuery}}"`, {
 						searchQuery: status.query
@@ -53,7 +99,7 @@
 				<div
 					class="{(done || status?.done) === false
 						? 'shimmer'
-						: ''} text-gray-500 dark:text-gray-500 text-base line-clamp-1 text-wrap"
+						: ''} text-gray-500 dark:text-gray-500 text-[13px] line-clamp-1 text-wrap"
 				>
 					{$i18n.t(`Searching`)}
 				</div>
@@ -79,7 +125,7 @@
 				<div
 					class="{(done || status?.done) === false
 						? 'shimmer'
-						: ''} text-gray-500 dark:text-gray-500 text-base line-clamp-1 text-wrap"
+						: ''} text-gray-500 dark:text-gray-500 text-[13px] line-clamp-1 text-wrap"
 				>
 					{$i18n.t(`Querying`)}
 				</div>
@@ -105,7 +151,7 @@
 				<div
 					class="{(done || status?.done) === false
 						? 'shimmer'
-						: ''} text-gray-500 dark:text-gray-500 text-base line-clamp-1 text-wrap"
+						: ''} text-gray-500 dark:text-gray-500 text-[13px] line-clamp-1 text-wrap"
 				>
 					{#if status.count === 0}
 						{$i18n.t('No sources found')}
@@ -127,7 +173,7 @@
 				<div
 					class="{(done || status?.done) === false
 						? 'shimmer'
-						: ''} text-gray-500 dark:text-gray-500 text-base line-clamp-1 text-wrap"
+						: ''} text-gray-500 dark:text-gray-500 text-[13px] line-clamp-1 text-wrap"
 				>
 					<!-- $i18n.t(`Searching "{{searchQuery}}"`) -->
 					{#if status?.description?.includes('{{searchQuery}}')}

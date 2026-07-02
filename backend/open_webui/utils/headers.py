@@ -1,5 +1,6 @@
 import logging
 import time
+from collections.abc import Mapping
 from typing import Any, Optional
 from urllib.parse import quote
 
@@ -17,13 +18,19 @@ from open_webui.env import (
 log = logging.getLogger(__name__)
 
 
+def _get_user_value(user: Any, key: str) -> str:
+    if isinstance(user, Mapping):
+        return str(user.get(key) or '')
+    return str(getattr(user, key, '') or '')
+
+
 def _mint_forward_user_jwt(user: Any) -> str:
     now = int(time.time())
     payload = {
-        'sub': str(user.id),
-        'email': str(user.email),
-        'name': str(user.name),
-        'role': str(user.role),
+        'sub': _get_user_value(user, 'id'),
+        'email': _get_user_value(user, 'email'),
+        'name': _get_user_value(user, 'name'),
+        'role': _get_user_value(user, 'role'),
         'iss': 'open-webui',
         'iat': now,
         'exp': now + FORWARD_USER_INFO_HEADER_JWT_EXPIRES_SECONDS,
@@ -52,10 +59,10 @@ def include_user_info_headers(headers: dict, user: Optional[Any] = None) -> dict
 
     return {
         **headers,
-        FORWARD_USER_INFO_HEADER_USER_NAME: quote(user.name, safe=' '),
-        FORWARD_USER_INFO_HEADER_USER_ID: user.id,
-        FORWARD_USER_INFO_HEADER_USER_EMAIL: user.email,
-        FORWARD_USER_INFO_HEADER_USER_ROLE: user.role,
+        FORWARD_USER_INFO_HEADER_USER_NAME: quote(_get_user_value(user, 'name'), safe=' '),
+        FORWARD_USER_INFO_HEADER_USER_ID: _get_user_value(user, 'id'),
+        FORWARD_USER_INFO_HEADER_USER_EMAIL: _get_user_value(user, 'email'),
+        FORWARD_USER_INFO_HEADER_USER_ROLE: _get_user_value(user, 'role'),
     }
 
 

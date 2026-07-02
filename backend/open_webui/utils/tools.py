@@ -64,15 +64,18 @@ from open_webui.tools.builtin import (
     generate_image,
     get_current_timestamp,
     grep_knowledge_files,
+    install_skill,
     kb_exec,
     list_automations,
     list_knowledge,
     list_knowledge_bases,
     list_memories,
     query_knowledge_bases,
+    query_knowledge_evidence,
     query_knowledge_files,
     replace_memory_content,
     replace_note_content,
+    read_skill,
     search_calendar_events,
     search_channel_messages,
     search_channels,
@@ -82,23 +85,28 @@ from open_webui.tools.builtin import (
     search_memories,
     search_notes,
     search_web,
+    web_search_research,
     toggle_automation,
+    update_skill,
     update_automation,
     update_calendar_event,
     update_task,
     view_channel_message,
     view_channel_thread,
-    query_knowledge_abstract,
-    query_knowledge_full_text,
-    view_knowledge_layers,
     view_chat,
     view_note,
     view_file,
     view_knowledge_file,
-    view_skill,
     write_note,
 )
+from open_webui.tools.agent_memory import (
+    agent_memory_list,
+    agent_memory_read,
+    agent_memory_search,
+)
 from open_webui.utils.access_control import has_access, has_connection_access, has_permission
+from open_webui.utils.auth import create_terminal_session_token, get_effective_request_token
+from open_webui.utils.agent_memory_index import resolve_agent_memory_scopes
 from open_webui.utils.headers import get_custom_headers, include_user_info_headers
 from open_webui.utils.misc import is_string_allowed
 from open_webui.utils.plugin import load_tool_module_by_id
@@ -504,13 +512,11 @@ async def get_builtin_tools(
                 builtin_functions.append(search_knowledge_bases)
         elif model_knowledge:
             builtin_functions.extend([list_knowledge, search_knowledge_files, grep_knowledge_files])
-            builtin_functions.append(query_knowledge_abstract)
             builtin_functions.append(query_knowledge_files)
-            builtin_functions.append(query_knowledge_full_text)
 
             knowledge_types = {item.get('type') for item in model_knowledge}
             if 'file' in knowledge_types or 'collection' in knowledge_types:
-                builtin_functions.extend([view_file, view_knowledge_file, view_knowledge_layers])
+                builtin_functions.extend([view_file, view_knowledge_file])
             if 'note' in knowledge_types:
                 builtin_functions.append(view_note)
         else:
@@ -525,6 +531,15 @@ async def get_builtin_tools(
                     view_knowledge_file,
                 ]
             )
+
+        if model_knowledge:
+            if query_knowledge_evidence not in builtin_functions:
+                insert_at = (
+                    builtin_functions.index(query_knowledge_files)
+                    if query_knowledge_files in builtin_functions
+                    else len(builtin_functions)
+                )
+                builtin_functions.insert(insert_at, query_knowledge_evidence)
 
     # Chats tools - search and fetch user's chat history
     if is_builtin_tool_enabled('chats'):
@@ -546,6 +561,26 @@ async def get_builtin_tools(
             ]
         )
 
+    # Agent Memory tools are read-only and intentionally separate from User Memory tools.
+    if (
+        is_builtin_tool_enabled('agent_memory')
+        and getattr(
+            request.app.state.config,
+            'ENABLE_AGENT_MEMORY_USE',
+            getattr(request.app.state.config, 'ENABLE_AGENT_MEMORY', False),
+        )
+        and getattr(
+            request.app.state.config,
+            'ENABLE_AGENT_MEMORY_DEDICATED_TOOLS',
+            getattr(request.app.state.config, 'ENABLE_AGENT_MEMORY', False),
+        )
+        and user.get('id')
+        and await has_user_permission('agent_memory')
+    ):
+        chat_id = metadata.get('chat_id') if isinstance(metadata.get('chat_id'), str) else ''
+        if await resolve_agent_memory_scopes(user.get('id', ''), chat_id):
+            builtin_functions.extend([agent_memory_search, agent_memory_read, agent_memory_list])
+
     # Add web search tools if builtin category enabled AND enabled globally AND model has web_search capability
     if (
         is_builtin_tool_enabled('web_search')
@@ -554,7 +589,19 @@ async def get_builtin_tools(
         and features.get('web_search')
         and await has_user_permission('web_search')
     ):
-        builtin_functions.extend([search_web, fetch_url])
+        builtin_functions.extend([search_web, web_search_research, fetch_url])
+    elif (
+        extra_params.get('__force_web_search_tools__')
+        and features.get('web_search')
+        and getattr(request.app.state.config, 'ENABLE_WEB_SEARCH', False)
+        and await has_user_permission('web_search')
+    ):
+        # Native FC path: features.web_search=true signaled from middleware.
+        # Bypass the model-level builtinTools/web_search capability gate (the
+        # model may not declare web_search in its capabilities, but the user
+        # explicitly enabled the feature), but still honor the global
+        # ENABLE_WEB_SEARCH switch and per-user web_search permission.
+        builtin_functions.extend([search_web, web_search_research])
 
     # Add image generation/edit tools if builtin category enabled AND enabled globally AND model has image_generation capability
     if (
@@ -607,9 +654,11 @@ async def get_builtin_tools(
             ]
         )
 
-    # Skills tools - view_skill allows model to load full skill instructions on demand
-    if extra_params.get('__skill_ids__'):
-        builtin_functions.append(view_skill)
+    # Skills tools - read existing skills and install/update terminal package sources.
+    if is_builtin_tool_enabled('skills') and (extra_params.get('__skill_ids__') or extra_params.get('__terminal_id__')):
+        builtin_functions.append(read_skill)
+        if extra_params.get('__terminal_id__'):
+            builtin_functions.extend([install_skill, update_skill])
 
     # Task management - break down complex work into trackable steps
     if is_builtin_tool_enabled('tasks'):
@@ -644,6 +693,10 @@ async def get_builtin_tools(
                 '__event_emitter__': extra_params.get('__event_emitter__'),
                 '__event_call__': extra_params.get('__event_call__'),
                 '__metadata__': extra_params.get('__metadata__'),
+                '__db__': extra_params.get('__db__'),
+                '__oauth_token__': extra_params.get('__oauth_token__'),
+                '__terminal_id__': extra_params.get('__terminal_id__'),
+                '__skill_ids__': extra_params.get('__skill_ids__'),
                 '__chat_id__': extra_params.get('__chat_id__'),
                 '__message_id__': extra_params.get('__message_id__'),
                 '__model_knowledge__': model_knowledge,
@@ -1233,10 +1286,13 @@ async def get_terminal_tools(
         log.warning(f'Access denied to terminal {terminal_id} for user {user.id}')
         return {}
 
+    auth_type = connection.get('auth_type', 'bearer')
+    terminal_session_token = create_terminal_session_token(user) if auth_type == 'session' else None
+
     # Find the cached spec data for this terminal
     terminal_servers = await get_terminal_servers(
         request,
-        session_token=getattr(getattr(request.state, 'token', None), 'credentials', None),
+        session_token=terminal_session_token,
         oauth_token=extra_params.get('__oauth_token__', None),
     )
     server_data = next((s for s in terminal_servers if s.get('id') == terminal_id), None)
@@ -1249,7 +1305,6 @@ async def get_terminal_tools(
         return {}
 
     # Build auth headers
-    auth_type = connection.get('auth_type', 'bearer')
     cookies = {}
     headers = {'Content-Type': 'application/json', 'X-User-Id': user.id}
 
@@ -1257,7 +1312,7 @@ async def get_terminal_tools(
         headers['Authorization'] = f'Bearer {connection.get("key", "")}'
     elif auth_type == 'session':
         cookies = request.cookies
-        headers['Authorization'] = f'Bearer {request.state.token.credentials}'
+        headers['Authorization'] = f'Bearer {terminal_session_token}'
     elif auth_type == 'system_oauth':
         cookies = request.cookies
         oauth_token = extra_params.get('__oauth_token__', None)

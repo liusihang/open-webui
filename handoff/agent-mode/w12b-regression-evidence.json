@@ -1,0 +1,81 @@
+{
+  "worker": "W12B-5",
+  "scope": "combined regression and release-readiness gates",
+  "generated_at": "2026-06-18 04:02:32 CST",
+  "worktree": "/Users/liusihang/openwebui/.worktrees/agent-mode-w12b-regression",
+  "branch": "codex/agent-mode-w12b-regression",
+  "head": "ec5cf1f0127c9bad30036fed8e14b1550ad4c5da",
+  "base_ref": "origin/pr/7",
+  "live_acceptance": "pending_not_claimed",
+  "scenario_live_claims": false,
+  "source_context_read": [
+    "handoff/agent-mode/w12b-regression.md",
+    "scripts/agent_mode/acceptance_harness.py",
+    "docs/runbooks/agent-mode-runtime-deployment.md",
+    "/Users/liusihang/openwebui/.worktrees/agent-mode-agentscope-pr7/handoff/agent-mode/controller.md"
+  ],
+  "gates": [
+    {
+      "name": "backend agent/storage regression",
+      "command": "WEBUI_SECRET_KEY=test-secret ENABLE_DB_MIGRATIONS=false uv run pytest -q backend/open_webui/test/agent backend/open_webui/test/models/test_agent_runs.py",
+      "cwd": "/Users/liusihang/openwebui/.worktrees/agent-mode-w12b-regression",
+      "exit_code": 0,
+      "status": "passed",
+      "summary": "79 passed, 19 warnings in 91.84s"
+    },
+    {
+      "name": "AgentScope runtime service-local tests",
+      "command": "uv run --extra test pytest",
+      "cwd": "/Users/liusihang/openwebui/.worktrees/agent-mode-w12b-regression/services/agentscope-runtime",
+      "exit_code": 0,
+      "status": "passed",
+      "summary": "19 passed in 5.80s"
+    },
+    {
+      "name": "focused frontend Vitest",
+      "command": "npm run test:frontend -- --run src/lib/apis/agentRuns/index.test.ts src/lib/components/chat/AgentEvents/eventFold.test.ts src/lib/components/chat/historySync.test.ts",
+      "cwd": "/Users/liusihang/openwebui/.worktrees/agent-mode-w12b-regression",
+      "exit_code": 0,
+      "status": "passed",
+      "summary": "3 test files passed, 24 tests passed"
+    },
+    {
+      "name": "acceptance harness dry-run",
+      "command": "python3 scripts/agent_mode/acceptance_harness.py dry-run",
+      "cwd": "/Users/liusihang/openwebui/.worktrees/agent-mode-w12b-regression",
+      "exit_code": 0,
+      "status": "passed",
+      "summary": "mode dry-run; case contract 0/12 satisfied; live acceptance pending; failures none"
+    },
+    {
+      "name": "acceptance harness fixture",
+      "command": "python3 scripts/agent_mode/acceptance_harness.py fixture",
+      "cwd": "/Users/liusihang/openwebui/.worktrees/agent-mode-w12b-regression",
+      "exit_code": 0,
+      "status": "passed",
+      "summary": "mode fixture; case contract 12/12 satisfied; live acceptance pending; failures none"
+    },
+    {
+      "name": "ruff",
+      "command": "uv run ruff check backend/open_webui/agent backend/open_webui/routers/agent_service.py backend/open_webui/test/agent scripts/agent_mode",
+      "cwd": "/Users/liusihang/openwebui/.worktrees/agent-mode-w12b-regression",
+      "exit_code": 0,
+      "status": "passed",
+      "summary": "All checks passed"
+    },
+    {
+      "name": "committed-range whitespace check",
+      "command": "git diff --check origin/pr/7..HEAD",
+      "cwd": "/Users/liusihang/openwebui/.worktrees/agent-mode-w12b-regression",
+      "exit_code": 0,
+      "status": "passed",
+      "summary": "No whitespace errors reported"
+    }
+  ],
+  "lockfile_handling": {
+    "root_uv_lock": "changed by uv run during backend and ruff gates, then restored",
+    "services_agentscope_runtime_uv_lock": "unchanged and kept intact"
+  },
+  "overall_status": "passed_regression_gates",
+  "blockers": []
+}

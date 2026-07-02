@@ -1,5 +1,6 @@
 <script lang="ts">
 	import { getContext, createEventDispatcher, onMount, tick } from 'svelte';
+	import type { Writable } from 'svelte/store';
 
 	import Spinner from '$lib/components/common/Spinner.svelte';
 	import Modal from '$lib/components/common/Modal.svelte';
@@ -13,31 +14,60 @@
 	import Textarea from '$lib/components/common/Textarea.svelte';
 	import Knowledge from '$lib/components/workspace/Models/Knowledge.svelte';
 	import { getFolderById } from '$lib/apis/folders';
-	const i18n = getContext('i18n');
+	const i18n = getContext<Writable<{ t: (key: string, params?: Record<string, unknown>) => string }>>(
+		'i18n'
+	);
 
 	export let show = false;
-	export let onSubmit: Function = (e) => {};
+	export let onSubmit: Function = (_payload: Record<string, any>) => {};
 
 	export let folderId = null;
 	export let parentId = null;
 	export let edit = false;
 
-	let folder = null;
+	let folder: any = null;
 	let name = '';
-	let meta = {
+	let meta: Record<string, any> = {
 		background_image_url: null
 	};
-	let data = {
+	let data: Record<string, any> = {
 		system_prompt: '',
 		files: []
 	};
+	let agentMemoryMode: 'enabled' | 'disabled' = 'enabled';
 
 	let loading = false;
+
+	const getAgentMemoryMode = (
+		meta: Record<string, any> | null | undefined
+	): 'enabled' | 'disabled' => {
+		const agentMemory = meta?.agent_memory ?? {};
+		if (agentMemory?.mode === 'disabled' || agentMemory?.disabled === true) {
+			return 'disabled';
+		}
+		return 'enabled';
+	};
+
+	const getMetaWithAgentMemoryMode = () => {
+		const nextAgentMemory: Record<string, any> = {
+			...(meta?.agent_memory ?? {}),
+			mode: agentMemoryMode,
+			...(agentMemoryMode === 'disabled' ? { disabled: true } : {})
+		};
+		if (agentMemoryMode === 'enabled') {
+			delete nextAgentMemory.disabled;
+		}
+
+		return {
+			...(meta ?? {}),
+			agent_memory: nextAgentMemory
+		};
+	};
 
 	const submitHandler = async () => {
 		loading = true;
 
-		if ((data?.files ?? []).some((file) => file.status === 'uploading')) {
+		if ((data?.files ?? []).some((file: any) => file.status === 'uploading')) {
 			toast.error($i18n.t('Please wait until all files are uploaded.'));
 			loading = false;
 			return;
@@ -55,7 +85,7 @@
 
 		await onSubmit({
 			name,
-			meta,
+			meta: getMetaWithAgentMemoryMode(),
 			data,
 			parent_id: edit ? undefined : parentId
 		});
@@ -74,6 +104,7 @@
 			meta = folder.meta || {
 				background_image_url: null
 			};
+			agentMemoryMode = getAgentMemoryMode(meta);
 			data = folder.data || {
 				system_prompt: '',
 				files: []
@@ -101,6 +132,7 @@
 		meta = {
 			background_image_url: null
 		};
+		agentMemoryMode = 'enabled';
 		data = {
 			system_prompt: '',
 			files: []
@@ -156,30 +188,31 @@
 						type="file"
 						hidden
 						accept="image/*"
-						on:change={(e) => {
-							const inputFiles = e.target.files;
+							on:change={(e) => {
+								const target = e.currentTarget as HTMLInputElement;
+								const inputFiles = target.files;
 
-							let reader = new FileReader();
-							reader.onload = (event) => {
-								let originalImageUrl = `${event.target.result}`;
-								meta.background_image_url = originalImageUrl;
-							};
+								let reader = new FileReader();
+								reader.onload = (event) => {
+									const originalImageUrl = `${(event.target as FileReader | null)?.result ?? ''}`;
+									meta.background_image_url = originalImageUrl;
+								};
 
-							if (
-								inputFiles &&
-								inputFiles.length > 0 &&
-								['image/gif', 'image/webp', 'image/jpeg', 'image/png'].includes(
-									inputFiles[0]['type']
-								)
-							) {
-								reader.readAsDataURL(inputFiles[0]);
-							} else {
-								console.log(`Unsupported File Type '${inputFiles[0]['type']}'.`);
+								const firstInputFile = inputFiles?.[0];
+								if (
+									firstInputFile &&
+									['image/gif', 'image/webp', 'image/jpeg', 'image/png'].includes(
+										firstInputFile.type
+									)
+								) {
+									reader.readAsDataURL(firstInputFile);
+								} else {
+									console.log(`Unsupported File Type '${firstInputFile?.type ?? 'unknown'}'.`);
 
-								// clear the input
-								e.target.value = '';
-							}
-						}}
+									// clear the input
+									target.value = '';
+								}
+							}}
 					/>
 
 					<div class="flex justify-between w-full mt-1 items-center">
@@ -212,18 +245,39 @@
 
 					<hr class=" border-gray-50 dark:border-gray-850/30 my-2.5 w-full" />
 
+					<div class="flex justify-between w-full my-1 items-center">
+						<div class="text-xs text-gray-500">{$i18n.t('Remember chats in this folder')}</div>
+
+						<label class="relative inline-flex cursor-pointer items-center">
+							<input
+								type="checkbox"
+								class="sr-only peer"
+								checked={agentMemoryMode === 'enabled'}
+								on:change={(e) => {
+									agentMemoryMode = e.currentTarget.checked ? 'enabled' : 'disabled';
+								}}
+							/>
+							<div
+								class="w-9 h-5 rounded-full bg-gray-200 peer-checked:bg-gray-900 dark:bg-gray-700 dark:peer-checked:bg-white transition"
+							></div>
+							<div
+								class="absolute left-0.5 top-0.5 size-4 rounded-full bg-white dark:bg-gray-900 peer-checked:translate-x-4 transition"
+							></div>
+						</label>
+					</div>
+
 					{#if $user?.role === 'admin' || ($user?.permissions.chat?.system_prompt ?? true)}
 						<div class="my-1">
 							<div class="mb-2 text-xs text-gray-500">{$i18n.t('System Prompt')}</div>
 							<div>
-								<Textarea
-									className=" text-sm w-full bg-transparent outline-hidden "
-									placeholder={$i18n.t(
-										'Write your model system prompt content here\ne.g.) You are Mario from Super Mario Bros, acting as an assistant.'
-									)}
-									maxSize={200}
-									bind:value={data.system_prompt}
-								/>
+									<Textarea
+										className=" text-sm w-full bg-transparent outline-hidden "
+										placeholder={$i18n.t(
+											'Write your model system prompt content here\ne.g.) You are Mario from Super Mario Bros, acting as an assistant.'
+										)}
+										maxSize={200 as any}
+										bind:value={data.system_prompt}
+									/>
 							</div>
 						</div>
 					{/if}

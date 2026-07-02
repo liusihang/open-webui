@@ -65,6 +65,11 @@
 	import StatusHistory from './ResponseMessage/StatusHistory.svelte';
 	import FullHeightIframe from '$lib/components/common/FullHeightIframe.svelte';
 	import OutputEditView from './OutputEditView.svelte';
+	import AgentRunStatusBridge from '../AgentEvents/AgentRunStatusBridge.svelte';
+	import AgentFinalAnswer from '../AgentEvents/AgentFinalAnswer.svelte';
+	import AgentTranscript from '../AgentEvents/AgentTranscript.svelte';
+	import type { AgentTranscriptModel } from '../AgentEvents/types';
+	import { markAgentRunMessageDone } from '../AgentEvents/messageState';
 
 	interface MessageType {
 		id: string;
@@ -73,12 +78,30 @@
 		files?: { type: string; url: string }[];
 		timestamp: number;
 		role: string;
+		agent_run_id?: string;
 		statusHistory?: {
 			done: boolean;
 			action: string;
 			description: string;
 			urls?: string[];
 			query?: string;
+			id?: string;
+			kind?: 'tool' | 'approval' | 'artifact' | 'subagent' | 'thinking' | 'step' | 'error';
+			detail?: {
+				input?: unknown;
+				output?: unknown;
+				error?: { message?: string; code?: string } | string;
+				artifact?: {
+					id: string;
+					name: string;
+					mimeType?: string;
+					path?: string;
+					size?: string;
+				};
+				subagent?: { name?: string; resultSummary?: string };
+			};
+			seq?: number;
+			created_at?: number;
 		}[];
 		status?: {
 			done: boolean;
@@ -167,6 +190,10 @@
 	let contentContainerElement: HTMLDivElement;
 	let buttonsContainerElement: HTMLDivElement;
 	let showDeleteConfirm = false;
+
+	let agentFinalAnswer = '';
+	let agentFinalAnswerDone = false;
+	let agentTranscript: AgentTranscriptModel | null = null;
 
 	let model = null;
 	$: model = $models.find((m) => m.id === message.model);
@@ -696,7 +723,11 @@
 			<div>
 				<div class="chat-{message.role} w-full min-w-full markdown-prose">
 					<div>
-						{#if model?.info?.meta?.capabilities?.status_updates ?? true}
+						{#if message?.agent_run_id}
+							{#if agentTranscript}
+								<AgentTranscript model={agentTranscript} agentRunId={message.agent_run_id} />
+							{/if}
+						{:else if model?.info?.meta?.capabilities?.status_updates ?? true}
 							<StatusHistory statusHistory={message?.statusHistory} />
 						{/if}
 
@@ -827,7 +858,37 @@
 							class="w-full flex flex-col relative {edit ? 'hidden' : ''}"
 							id="response-content-container"
 						>
-							{#if message.content === '' && !message.done && !message.error && !hasVisibleStatus}
+							{#if message.agent_run_id}
+								<AgentRunStatusBridge
+									agentRunId={message.agent_run_id}
+									bind:statusHistory={message.statusHistory}
+									on:final={(event) => {
+										agentFinalAnswer = event.detail.content;
+										agentFinalAnswerDone = event.detail.done;
+									}}
+									on:transcript={(event) => {
+										agentTranscript = event.detail.model;
+									}}
+									on:terminal={async (event) => {
+										if (markAgentRunMessageDone(message, event.detail.runStatus)) {
+											await saveMessage(messageId, structuredClone(message));
+										}
+									}}
+								/>
+							{/if}
+
+							{#if message.agent_run_id && agentFinalAnswer && !(message.content ?? '').trim()}
+								<AgentFinalAnswer
+									agentRunId={message.agent_run_id}
+									content={agentFinalAnswer}
+									done={agentFinalAnswerDone}
+									{history}
+									messageId={message.id}
+									quiet
+								/>
+							{/if}
+
+							{#if message.content === '' && !message.done && !message.error && !hasVisibleStatus && !message.agent_run_id}
 								<Skeleton />
 							{:else if message.content && message.error !== true}
 								<!-- always show message contents even if there's an error -->
@@ -836,6 +897,7 @@
 									id={`${chatId}-${message.id}`}
 									content={message.content}
 									sources={message.sources ?? message.citations}
+									metadata={(message as any)?.metadata}
 									floatingButtons={message?.done &&
 										!readOnly &&
 										($settings?.showFloatingActionButtons ?? true)}
@@ -880,6 +942,8 @@
 									id={message?.id}
 									{chatId}
 									sources={message?.sources ?? message?.citations}
+									content={message.content}
+									metadata={(message as any)?.metadata}
 									{readOnly}
 								/>
 							{/if}

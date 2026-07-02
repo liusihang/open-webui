@@ -11,6 +11,11 @@ from typing import Any, Optional, Union
 
 import redis
 from open_webui.internal.db import Base, get_async_db, get_db
+from open_webui.utils.cache_invalidation import (
+    CACHE_NAMESPACE_CONFIG,
+    CACHE_NAMESPACE_MODELS,
+    publish_cache_invalidation_sync,
+)
 from open_webui.utils.redis import get_redis_connection
 from sqlalchemy import JSON, Column, DateTime, Integer, func, select
 
@@ -224,6 +229,8 @@ class AppConfig:
             prefix = super().__getattribute__('_key_prefix')
             try:
                 rc.set(f'{prefix}:config:{name}', json.dumps(entries[name].value))
+                publish_cache_invalidation_sync(rc, CACHE_NAMESPACE_CONFIG, name)
+                publish_cache_invalidation_sync(rc, CACHE_NAMESPACE_MODELS)
             except Exception as exc:
                 log.error("Redis write failed for '%s': %s", name, exc)
 
@@ -238,6 +245,15 @@ class AppConfig:
         if name not in entries:
             raise AttributeError(f"No config key '{name}'")
 
+        self._load_from_redis(name)
+
+        return entries[name].value
+
+    def _load_from_redis(self, name: str) -> None:
+        entries = super().__getattribute__('_entries')
+        if name not in entries:
+            return
+
         rc = super().__getattribute__('_rc')
         if rc and _persist_enabled:
             prefix = super().__getattribute__('_key_prefix')
@@ -251,8 +267,6 @@ class AppConfig:
             except Exception as exc:
                 log.error("Redis read failed for '%s': %s", name, exc)
 
-        return entries[name].value
-
     def _sync_to_redis(self) -> None:
         rc = super().__getattribute__('_rc')
         if not rc or not _persist_enabled:
@@ -263,3 +277,5 @@ class AppConfig:
                 rc.set(f'{prefix}:config:{name}', json.dumps(s.value))
             except Exception as exc:
                 log.error("Redis sync failed for '%s': %s", name, exc)
+        publish_cache_invalidation_sync(rc, CACHE_NAMESPACE_CONFIG)
+        publish_cache_invalidation_sync(rc, CACHE_NAMESPACE_MODELS)

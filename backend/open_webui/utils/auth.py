@@ -205,6 +205,17 @@ def create_token(data: dict, expires_delta: Union[timedelta, None] = None) -> st
     return encoded_jwt
 
 
+TERMINAL_SESSION_TOKEN_TTL = timedelta(minutes=5)
+
+
+def create_terminal_session_token(
+    user,
+    expires_delta: Union[timedelta, None] = TERMINAL_SESSION_TOKEN_TTL,
+) -> str:
+    """Mint a short-lived JWT for terminal session-auth handoff."""
+    return create_token({'id': user.id}, expires_delta=expires_delta)
+
+
 def decode_token(token: str) -> dict | None:
     try:
         decoded = jwt.decode(token, SESSION_SECRET, algorithms=[ALGORITHM])
@@ -286,6 +297,25 @@ def get_http_authorization_cred(auth_header: str | None):
         return HTTPAuthorizationCredentials(scheme=scheme, credentials=credentials)
     except Exception:
         return None
+
+
+def get_effective_request_token(request: Request) -> str | None:
+    """Return the token source that browser-authenticated requests use."""
+    headers = getattr(request, 'headers', {}) or {}
+    auth_header = headers.get('Authorization') or headers.get('authorization')
+    auth_token = get_http_authorization_cred(auth_header)
+    if auth_token is not None and auth_token.scheme.lower() == 'bearer':
+        return auth_token.credentials
+
+    cookies = getattr(request, 'cookies', {}) or {}
+    if 'token' in cookies:
+        return cookies.get('token')
+
+    state_token = getattr(getattr(request, 'state', None), 'token', None)
+    if state_token:
+        return getattr(state_token, 'credentials', None)
+
+    return None
 
 
 async def get_current_user(

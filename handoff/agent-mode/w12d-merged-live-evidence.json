@@ -1,0 +1,1327 @@
+{
+  "base_commit": "89033c15a",
+  "mode": "live",
+  "scenarios": [
+    {
+      "evidence": {
+        "assistant_message": {
+          "agent_run_id": "ff800529-1725-450e-b24c-b6e06eb5b749",
+          "content": "Agent Mode final answer from W12D fake provider.",
+          "done": true,
+          "model": "w12d-fake-model"
+        },
+        "assistant_message_id": "w12d-assistant-1781750118257",
+        "chat_id": "fc21b0b7-d5dc-4922-a612-b71ee6bfee1f",
+        "chat_response": {
+          "agent_run_id": "ff800529-1725-450e-b24c-b6e06eb5b749",
+          "runtime_session_id": "rt_ff800529-1725-450e-b24c-b6e06eb5b749_e76VIXH24L8",
+          "status": true,
+          "task_ids": []
+        },
+        "events": [
+          {
+            "event_type": "run.running",
+            "phase": "running",
+            "seq": 1
+          },
+          {
+            "event_type": "final.started",
+            "phase": "finalizing",
+            "seq": 2
+          },
+          {
+            "delta_index": 0,
+            "event_type": "final.delta",
+            "phase": "finalizing",
+            "seq": 3,
+            "text": "Agent Mode final answer from W12D fake provider."
+          },
+          {
+            "event_type": "run.completed",
+            "phase": "completed",
+            "seq": 4
+          }
+        ],
+        "legacy_fallback_absent": "The /api/chat/completions response returned agent_run_id/runtime_session_id/task_ids and no provider completion body; provider output arrived only through the AgentScope runtime model-call callback and final.delta.",
+        "run_detail": {
+          "error": null,
+          "state": "completed",
+          "state_version": 3
+        },
+        "run_id": "ff800529-1725-450e-b24c-b6e06eb5b749",
+        "runtime_session_id": "rt_ff800529-1725-450e-b24c-b6e06eb5b749_e76VIXH24L8"
+      },
+      "id": "scenario_01_ordinary_qa",
+      "live_status": "passed",
+      "observations": [
+        "event:run.running",
+        "event:final.started",
+        "event:final.delta",
+        "event:run.completed",
+        "no_tool_events"
+      ],
+      "required_observations": [
+        "event:run.running",
+        "event:final.started",
+        "event:final.delta",
+        "event:run.completed",
+        "no_tool_events"
+      ],
+      "status": "live_passed"
+    },
+    {
+      "evidence": {
+        "event_types": [
+          "tool.requested",
+          "tool.started",
+          "tool.completed",
+          "tool.requested",
+          "tool.started",
+          "tool.completed"
+        ],
+        "normalized_result": {
+          "artifacts": [],
+          "content": "{\"fact\":\"single OpenWebUI tool call succeeded\",\"source\":\"w12d-live-acceptance-registry\",\"subject\":\"agent-mode-live-acceptance\"}",
+          "embeds": [],
+          "files": [],
+          "process_refs": [],
+          "raw": {
+            "fact": "single OpenWebUI tool call succeeded",
+            "source": "w12d-live-acceptance-registry",
+            "subject": "agent-mode-live-acceptance"
+          },
+          "sources": [],
+          "status": "success",
+          "structured_error": null,
+          "warnings": []
+        },
+        "run_id": "930faa6e-a7c8-45d8-960b-55e6b2c715ae",
+        "runtime_session_id": "rt_930faa6e-a7c8-45d8-960b-55e6b2c715ae_gfeAct_iQ-w",
+        "tool_id": "tool:builtin:w12d-read-acceptance-fact:read_acceptance_fact"
+      },
+      "id": "scenario_02_single_tool_call",
+      "live_status": "passed",
+      "observations": [
+        "event:tool.requested",
+        "event:tool.started",
+        "event:tool.completed",
+        "normalized_tool_result:success"
+      ],
+      "required_observations": [
+        "event:tool.requested",
+        "event:tool.started",
+        "event:tool.completed",
+        "normalized_tool_result:success"
+      ],
+      "status": "live_passed"
+    },
+    {
+      "evidence": {
+        "artifact": {
+          "created_at": 1781749533842641000,
+          "id": "d290f597-bea9-4558-aa74-afa903441fb4",
+          "idempotency_key": "artifact:leader:file:w12d-open-terminal:930faa6e-a7c8-45d8-960b-55e6b2c715ae:outputs:w12d-output.txt",
+          "kind": "file",
+          "metadata": {
+            "cleanup_eligible": false,
+            "participant_id": "leader",
+            "retention": "user_visible_output"
+          },
+          "mime_type": null,
+          "path": "/workspace/agent-runs/930faa6e-a7c8-45d8-960b-55e6b2c715ae/outputs/w12d-output.txt",
+          "run_id": "930faa6e-a7c8-45d8-960b-55e6b2c715ae",
+          "size": null,
+          "terminal_server_id": "w12d-open-terminal",
+          "url": null
+        },
+        "physical_output_exists": true,
+        "physical_output_path": "/private/tmp/openwebui-agent-mode-w12d-tool-runtime/workspace/agent-runs/930faa6e-a7c8-45d8-960b-55e6b2c715ae/outputs/w12d-output.txt",
+        "process_refs": [
+          {
+            "command": "python3 - <<'INNER'\nfrom pathlib import Path\nroot = Path('/private/tmp/openwebui-agent-mode-w12d-tool-runtime/workspace/agent-runs/930faa6e-a7c8-45d8-960b-55e6b2c715ae')\n(root / 'outputs').mkdir(parents=True, exist_ok=True)\n(root / 'tmp').mkdir(parents=True, exist_ok=True)\n(root.joinpath('outputs', 'w12d-output.txt')).write_text('w12d output artifact for 930faa6e-a7c8-45d8-960b-55e6b2c715ae\\n')\nroot.joinpath('tmp', 'w12d-scratch.json').write_text('{\"run_id\": \"930faa6e-a7c8-45d8-960b-55e6b2c715ae\", \"retained\": true}\\n')\nprint('created w12d-output.txt and w12d-scratch.json')\nINNER",
+            "exit_code": 0,
+            "log_path": "/private/tmp/openwebui-agent-mode-w12d-tool-runtime/open-terminal-logs/processes/20260618-102533-a542b9.jsonl",
+            "metadata": {},
+            "next_offset": 1,
+            "process_id": "20260618-102533-a542b9",
+            "status": "done",
+            "terminal_server_id": "w12d-open-terminal"
+          }
+        ],
+        "run_id": "930faa6e-a7c8-45d8-960b-55e6b2c715ae",
+        "runtime_session_id": "rt_930faa6e-a7c8-45d8-960b-55e6b2c715ae_gfeAct_iQ-w",
+        "tool_result": {
+          "artifacts": [
+            {
+              "artifact_id": "d290f597-bea9-4558-aa74-afa903441fb4",
+              "kind": "file",
+              "metadata": {
+                "cleanup_eligible": false,
+                "participant_id": "leader",
+                "retention": "user_visible_output"
+              },
+              "mime_type": null,
+              "path": "/workspace/agent-runs/930faa6e-a7c8-45d8-960b-55e6b2c715ae/outputs/w12d-output.txt",
+              "size": null,
+              "url": null
+            },
+            {
+              "artifact_id": "1c81bcbd-75cb-414a-a230-7fc6ae7b5ebd",
+              "kind": "file",
+              "metadata": {
+                "cleanup_eligible": true,
+                "participant_id": "leader",
+                "retention": "temporary_debug"
+              },
+              "mime_type": null,
+              "path": "/workspace/agent-runs/930faa6e-a7c8-45d8-960b-55e6b2c715ae/tmp/w12d-scratch.json",
+              "size": null,
+              "url": null
+            }
+          ],
+          "content": "{\"command\":\"python3 - <<'INNER'\\nfrom pathlib import Path\\nroot = Path('/private/tmp/openwebui-agent-mode-w12d-tool-runtime/workspace/agent-runs/930faa6e-a7c8-45d8-960b-55e6b2c715ae')\\n(root / 'outputs').mkdir(parents=True, exist_ok=True)\\n(root / 'tmp').mkdir(parents=True, exist_ok=True)\\n(root.joinpath('outputs', 'w12d-output.txt')).write_text('w12d output artifact for 930faa6e-a7c8-45d8-960b-55e6b2c715ae\\\\n')\\nroot.joinpath('tmp', 'w12d-scratch.json').write_text('{\\\"run_id\\\": \\\"930faa6e-a7c8-45d8-960b-55e6b2c715ae\\\", \\\"retained\\\": true}\\\\n')\\nprint('created w12d-output.txt and w12d-scratch.json')\\nINNER\",\"exit_code\":0,\"id\":\"20260618-102533-a542b9\",\"log_path\":\"/private/tmp/openwebui-agent-mode-w12d-tool-runtime/open-terminal-logs/processes/20260618-102533-a542b9.jsonl\",\"next_offset\":1,\"output\":[{\"data\":\"created w12d-output.txt and w12d-scratch.json\\r\\n\",\"type\":\"output\"}],\"output_paths\":[\"w12d-output.txt\",\"/workspace/agent-runs/930faa6e-a7c8-45d8-960b-55e6b2c715ae/tmp/w12d-scratch.json\"],\"physical_workspace_root\":\"/private/tmp/openwebui-agent-mode-w12d-tool-runtime/workspace\",\"process_id\":\"20260618-102533-a542b9\",\"status\":\"done\",\"truncated\":false}",
+          "embeds": [],
+          "files": [],
+          "process_refs": [
+            {
+              "command": "python3 - <<'INNER'\nfrom pathlib import Path\nroot = Path('/private/tmp/openwebui-agent-mode-w12d-tool-runtime/workspace/agent-runs/930faa6e-a7c8-45d8-960b-55e6b2c715ae')\n(root / 'outputs').mkdir(parents=True, exist_ok=True)\n(root / 'tmp').mkdir(parents=True, exist_ok=True)\n(root.joinpath('outputs', 'w12d-output.txt')).write_text('w12d output artifact for 930faa6e-a7c8-45d8-960b-55e6b2c715ae\\n')\nroot.joinpath('tmp', 'w12d-scratch.json').write_text('{\"run_id\": \"930faa6e-a7c8-45d8-960b-55e6b2c715ae\", \"retained\": true}\\n')\nprint('created w12d-output.txt and w12d-scratch.json')\nINNER",
+              "exit_code": 0,
+              "log_path": "/private/tmp/openwebui-agent-mode-w12d-tool-runtime/open-terminal-logs/processes/20260618-102533-a542b9.jsonl",
+              "metadata": {},
+              "next_offset": 1,
+              "process_id": "20260618-102533-a542b9",
+              "status": "done",
+              "terminal_server_id": "w12d-open-terminal"
+            }
+          ],
+          "raw": {
+            "command": "python3 - <<'INNER'\nfrom pathlib import Path\nroot = Path('/private/tmp/openwebui-agent-mode-w12d-tool-runtime/workspace/agent-runs/930faa6e-a7c8-45d8-960b-55e6b2c715ae')\n(root / 'outputs').mkdir(parents=True, exist_ok=True)\n(root / 'tmp').mkdir(parents=True, exist_ok=True)\n(root.joinpath('outputs', 'w12d-output.txt')).write_text('w12d output artifact for 930faa6e-a7c8-45d8-960b-55e6b2c715ae\\n')\nroot.joinpath('tmp', 'w12d-scratch.json').write_text('{\"run_id\": \"930faa6e-a7c8-45d8-960b-55e6b2c715ae\", \"retained\": true}\\n')\nprint('created w12d-output.txt and w12d-scratch.json')\nINNER",
+            "exit_code": 0,
+            "id": "20260618-102533-a542b9",
+            "log_path": "/private/tmp/openwebui-agent-mode-w12d-tool-runtime/open-terminal-logs/processes/20260618-102533-a542b9.jsonl",
+            "next_offset": 1,
+            "output": [
+              {
+                "data": "created w12d-output.txt and w12d-scratch.json\r\n",
+                "type": "output"
+              }
+            ],
+            "output_paths": [
+              "w12d-output.txt",
+              "/workspace/agent-runs/930faa6e-a7c8-45d8-960b-55e6b2c715ae/tmp/w12d-scratch.json"
+            ],
+            "physical_workspace_root": "/private/tmp/openwebui-agent-mode-w12d-tool-runtime/workspace",
+            "process_id": "20260618-102533-a542b9",
+            "status": "done",
+            "truncated": false
+          },
+          "sources": [],
+          "status": "success",
+          "structured_error": null,
+          "warnings": []
+        }
+      },
+      "id": "scenario_03_terminal_output_artifact",
+      "live_status": "passed",
+      "observations": [
+        "tool:run_command",
+        "process_ref_registered",
+        "artifact:/workspace/agent-runs/<run_id>/outputs"
+      ],
+      "required_observations": [
+        "tool:run_command",
+        "process_ref_registered",
+        "artifact:/workspace/agent-runs/<run_id>/outputs"
+      ],
+      "status": "live_passed"
+    },
+    {
+      "evidence": {
+        "artifact_after_completion": {
+          "created_at": 1781749533845857000,
+          "id": "1c81bcbd-75cb-414a-a230-7fc6ae7b5ebd",
+          "idempotency_key": "artifact:leader:file:w12d-open-terminal:930faa6e-a7c8-45d8-960b-55e6b2c715ae:tmp:w12d-scratch.json",
+          "kind": "file",
+          "metadata": {
+            "cleanup_eligible": true,
+            "participant_id": "leader",
+            "retention": "temporary_debug"
+          },
+          "mime_type": null,
+          "path": "/workspace/agent-runs/930faa6e-a7c8-45d8-960b-55e6b2c715ae/tmp/w12d-scratch.json",
+          "run_id": "930faa6e-a7c8-45d8-960b-55e6b2c715ae",
+          "size": null,
+          "terminal_server_id": "w12d-open-terminal",
+          "url": null
+        },
+        "cleanup_eligible": true,
+        "physical_tmp_exists_after_completion": true,
+        "physical_tmp_path": "/private/tmp/openwebui-agent-mode-w12d-tool-runtime/workspace/agent-runs/930faa6e-a7c8-45d8-960b-55e6b2c715ae/tmp/w12d-scratch.json",
+        "run_id": "930faa6e-a7c8-45d8-960b-55e6b2c715ae",
+        "run_state_after_completion": "completed"
+      },
+      "id": "scenario_04_tmp_artifact_retention",
+      "live_status": "passed",
+      "observations": [
+        "artifact:/workspace/agent-runs/<run_id>/tmp",
+        "cleanup_eligible:true",
+        "retained_after_completion"
+      ],
+      "required_observations": [
+        "artifact:/workspace/agent-runs/<run_id>/tmp",
+        "cleanup_eligible:true",
+        "retained_after_completion"
+      ],
+      "status": "live_passed"
+    },
+    {
+      "evidence": {
+        "approval_events": [
+          {
+            "created_at": 1781749533982055000,
+            "event_type": "approval.requested",
+            "id": "0282b04c-d1ee-42f9-9134-a9f380c0541b",
+            "participant_id": "leader",
+            "payload": {
+              "action": "write_file /workspace/agent-runs/destructive-target.txt",
+              "approval_id": "approval:930faa6e-a7c8-45d8-960b-55e6b2c715ae:destructive-tool-1",
+              "arguments_summary": {
+                "content": "<10 chars>",
+                "overwrite": true,
+                "path": "/workspace/agent-runs/destructive-target.txt"
+              },
+              "category": "overwrite",
+              "matched": "write_file",
+              "reason": "Tool name is a write/replace operation.",
+              "tool_call_id": "destructive-tool-1",
+              "tool_id": "tool:terminal:w12d-open-terminal:write_file",
+              "tool_name": "write_file"
+            },
+            "phase": "waiting_approval",
+            "run_id": "930faa6e-a7c8-45d8-960b-55e6b2c715ae",
+            "seq": 10,
+            "summary": "Approval requested for write_file."
+          },
+          {
+            "created_at": 1781749533993538000,
+            "event_type": "approval.completed",
+            "id": "eb359089-8419-4364-ad32-255654adc740",
+            "participant_id": "leader",
+            "payload": {
+              "action": "write_file /workspace/agent-runs/destructive-target.txt",
+              "approval_id": "approval:930faa6e-a7c8-45d8-960b-55e6b2c715ae:destructive-tool-1",
+              "arguments_summary": {
+                "content": "<10 chars>",
+                "overwrite": true,
+                "path": "/workspace/agent-runs/destructive-target.txt"
+              },
+              "category": "overwrite",
+              "decision": "rejected",
+              "matched": "write_file",
+              "reason": "Tool name is a write/replace operation.",
+              "tool_call_id": "destructive-tool-1",
+              "tool_id": "tool:terminal:w12d-open-terminal:write_file",
+              "tool_name": "write_file"
+            },
+            "phase": "running",
+            "run_id": "930faa6e-a7c8-45d8-960b-55e6b2c715ae",
+            "seq": 11,
+            "summary": "Approval rejected for write_file."
+          }
+        ],
+        "approval_id": "approval:930faa6e-a7c8-45d8-960b-55e6b2c715ae:destructive-tool-1",
+        "decision_result": {
+          "artifacts": [],
+          "content": "User rejected approval for write_file.",
+          "embeds": [],
+          "files": [],
+          "process_refs": [],
+          "raw": {
+            "approval_id": "approval:930faa6e-a7c8-45d8-960b-55e6b2c715ae:destructive-tool-1",
+            "decision": "rejected"
+          },
+          "sources": [],
+          "status": "approval_rejected",
+          "structured_error": {
+            "code": "approval_rejected",
+            "details": {
+              "approval_id": "approval:930faa6e-a7c8-45d8-960b-55e6b2c715ae:destructive-tool-1",
+              "tool_call_id": "destructive-tool-1",
+              "tool_id": "tool:terminal:w12d-open-terminal:write_file"
+            },
+            "message": "User rejected approval for write_file.",
+            "retryable": false
+          },
+          "warnings": []
+        },
+        "required_result": {
+          "artifacts": [],
+          "content": "Approval required for write_file.",
+          "embeds": [],
+          "files": [],
+          "process_refs": [],
+          "raw": {
+            "action": "write_file /workspace/agent-runs/destructive-target.txt",
+            "approval_id": "approval:930faa6e-a7c8-45d8-960b-55e6b2c715ae:destructive-tool-1",
+            "category": "overwrite",
+            "matched": "write_file",
+            "reason": "Tool name is a write/replace operation.",
+            "tool_call_id": "destructive-tool-1",
+            "tool_id": "tool:terminal:w12d-open-terminal:write_file",
+            "tool_name": "write_file"
+          },
+          "sources": [],
+          "status": "approval_required",
+          "structured_error": null,
+          "warnings": []
+        },
+        "run_id": "930faa6e-a7c8-45d8-960b-55e6b2c715ae"
+      },
+      "id": "scenario_05_destructive_approval",
+      "live_status": "passed",
+      "observations": [
+        "event:approval.requested",
+        "event:approval.completed",
+        "state:waiting_approval",
+        "normalized_tool_result:approval_required",
+        "normalized_tool_result:approval_rejected"
+      ],
+      "required_observations": [
+        "event:approval.requested",
+        "event:approval.completed",
+        "state:waiting_approval",
+        "normalized_tool_result:approval_required"
+      ],
+      "status": "live_passed"
+    },
+    {
+      "evidence": {
+        "cap_rejection_status": 409,
+        "executor_peak_concurrency": 5,
+        "participant_ids": [
+          "subagent:b9c75c49-0cfe-4a98-bbc1-179b2159c661:1",
+          "subagent:b9c75c49-0cfe-4a98-bbc1-179b2159c661:4",
+          "subagent:b9c75c49-0cfe-4a98-bbc1-179b2159c661:3",
+          "subagent:b9c75c49-0cfe-4a98-bbc1-179b2159c661:5",
+          "subagent:b9c75c49-0cfe-4a98-bbc1-179b2159c661:2"
+        ],
+        "run_ids": [
+          "b9c75c49-0cfe-4a98-bbc1-179b2159c661"
+        ],
+        "subagent_completed_count": 5,
+        "subagent_created_count": 5,
+        "team_cap": 5
+      },
+      "id": "scenario_06_subagent_cap_concurrency",
+      "live_status": "passed",
+      "observations": [
+        "event:subagent.created",
+        "subagent_concurrency:observed",
+        "subagent_cap:5"
+      ],
+      "status": "live_passed"
+    },
+    {
+      "evidence": {
+        "agent_selection_signal": {
+          "priority": 1,
+          "roles": [
+            "python",
+            "coder",
+            "analysis"
+          ],
+          "skills": [
+            "python",
+            "code",
+            "data"
+          ]
+        },
+        "model_selection_completed_count": 5,
+        "run_ids": [
+          "b9c75c49-0cfe-4a98-bbc1-179b2159c661"
+        ],
+        "selected_model_ids": [
+          "agent-python",
+          "agent-python",
+          "agent-python",
+          "agent-python",
+          "agent-python"
+        ],
+        "source_fuzzy_request": "data"
+      },
+      "id": "scenario_07_subagent_model_selection",
+      "live_status": "passed",
+      "observations": [
+        "event:model.selection.requested",
+        "event:model.selection.completed",
+        "meta.agent_selection"
+      ],
+      "status": "live_passed"
+    },
+    {
+      "evidence": {
+        "all_event_types": [
+          {
+            "event_type": "run.running",
+            "seq": 1
+          },
+          {
+            "event_type": "action.summary",
+            "seq": 2
+          },
+          {
+            "event_type": "final.started",
+            "seq": 3
+          },
+          {
+            "event_type": "final.delta",
+            "seq": 4
+          },
+          {
+            "event_type": "final.delta",
+            "seq": 5
+          },
+          {
+            "event_type": "run.completed",
+            "seq": 6
+          }
+        ],
+        "assistant_message_id": "w12d-assistant-1781750237-ab23b64b",
+        "chat_id": "w12d-sse-chat-1781750237-ab23b64b",
+        "chat_readback_agent_run_id": "11a09238-0455-48af-b235-4a1a0b1a88ce",
+        "delta_event_seqs": [
+          4,
+          5
+        ],
+        "duplicate_final_delta_response_seq": 5,
+        "duplicate_seq_ignored": [
+          3
+        ],
+        "event_seq_range": [
+          1,
+          6
+        ],
+        "final_text": "SSE reconnect final answer arrived once.",
+        "json_after_seq_3": [
+          4,
+          5,
+          6
+        ],
+        "last_event_id": 3,
+        "reconnect_method": "GET /api/agent/runs/{run_id}/events with Last-Event-ID: 3",
+        "run_id": "11a09238-0455-48af-b235-4a1a0b1a88ce",
+        "sse_backfilled_event_types": [
+          "final.delta",
+          "final.delta",
+          "run.completed"
+        ],
+        "sse_backfilled_seq": [
+          4,
+          5,
+          6
+        ],
+        "sse_content_type": "text/event-stream; charset=utf-8",
+        "sse_payload_seq": [
+          4,
+          5,
+          6
+        ],
+        "sse_status": 200,
+        "ui_proof": {
+          "dom_assertions": {
+            "agent_run_event_count": 5,
+            "final_containers": 1,
+            "final_text": "SSE reconnect final answer arrived once.",
+            "final_text_occurrences_after_reload": 1,
+            "visible_event_summaries": [
+              "Runtime accepted\\nLEADER",
+              "Preparing reconnect proof\\nLEADER",
+              "Writing final answer\\nLEADER",
+              "Streaming final answer\\nLEADER",
+              "Agent completed\\nLEADER"
+            ]
+          },
+          "frontend_resource_urls": [
+            "http://127.0.0.1:18104/api/agent/runs/11a09238-0455-48af-b235-4a1a0b1a88ce/events/list?after_seq=0",
+            "http://127.0.0.1:18104/api/agent/runs/11a09238-0455-48af-b235-4a1a0b1a88ce/events?after_seq=6"
+          ],
+          "method": "agent-browser reload of real /c/{chat_id} page after browser signin",
+          "no_raw_reasoning_visible": true,
+          "screenshot_path": "/Users/liusihang/openwebui/.worktrees/agent-mode-w12d-sse-ui/handoff/agent-mode/w12d-sse-ui-proof.png",
+          "status": "captured"
+        }
+      },
+      "id": "scenario_08_sse_reconnect_backfill",
+      "live_status": "passed",
+      "observations": [
+        "last_event_id_reconnect",
+        "backfill_by_seq",
+        "dedupe_seq"
+      ],
+      "status": "live_passed"
+    },
+    {
+      "evidence": {
+        "assertions": {
+          "all_final_delta_events_have_finalizing_phase": true,
+          "final_started_before_delta": true,
+          "no_tool_subagent_artifact_or_model_selection_events_after_final_started": true
+        },
+        "disallowed_post_final_events": [],
+        "event_order": [
+          "1:run.running:running",
+          "2:final.started:finalizing",
+          "3:final.delta:finalizing",
+          "4:run.completed:completed"
+        ],
+        "final_delta_seqs": [
+          3
+        ],
+        "final_started_seq": 2,
+        "post_final_started_events": [
+          "final.delta",
+          "run.completed"
+        ],
+        "run_id": "ff800529-1725-450e-b24c-b6e06eb5b749",
+        "runtime_session_id": "rt_ff800529-1725-450e-b24c-b6e06eb5b749_e76VIXH24L8"
+      },
+      "id": "scenario_09_final_phase_deltas",
+      "live_status": "passed",
+      "observations": [
+        "event:final.started_before_delta",
+        "final.delta_only_finalizing",
+        "no_action_after_final.started"
+      ],
+      "required_observations": [
+        "event:final.started_before_delta",
+        "final.delta_only_finalizing",
+        "no_action_after_final.started"
+      ],
+      "status": "live_passed"
+    },
+    {
+      "evidence": {
+        "manual_post_evidence_cleanup": {
+          "manual_post_evidence_cleanup": true,
+          "status": "killed"
+        },
+        "process_ref": {
+          "command": "python3 - <<'INNER'\nfrom pathlib import Path\nimport time\nroot = Path('/private/tmp/openwebui-agent-mode-w12d-tool-runtime/workspace/agent-runs/1a2c7259-cc9e-4396-83f4-651cb3672193')\n(root / 'tmp').mkdir(parents=True, exist_ok=True)\n(root.joinpath('tmp', 'cancel-marker.txt')).write_text('started\\n')\ntime.sleep(90)\nroot.joinpath('tmp', 'cancel-marker.txt').write_text('finished\\n')\nINNER",
+          "exit_code": null,
+          "log_path": "/private/tmp/openwebui-agent-mode-w12d-tool-runtime/open-terminal-logs/processes/20260618-102534-7d1999.jsonl",
+          "metadata": {},
+          "next_offset": 0,
+          "process_id": "20260618-102534-7d1999",
+          "status": "running",
+          "terminal_server_id": "w12d-open-terminal"
+        },
+        "run_id": "1a2c7259-cc9e-4396-83f4-651cb3672193",
+        "run_process_refs": [
+          {
+            "command": "python3 - <<'INNER'\nfrom pathlib import Path\nimport time\nroot = Path('/private/tmp/openwebui-agent-mode-w12d-tool-runtime/workspace/agent-runs/1a2c7259-cc9e-4396-83f4-651cb3672193')\n(root / 'tmp').mkdir(parents=True, exist_ok=True)\n(root.joinpath('tmp', 'cancel-marker.txt')).write_text('started\\n')\ntime.sleep(90)\nroot.joinpath('tmp', 'cancel-marker.txt').write_text('finished\\n')\nINNER",
+            "exit_code": null,
+            "log_path": "/private/tmp/openwebui-agent-mode-w12d-tool-runtime/open-terminal-logs/processes/20260618-102534-7d1999.jsonl",
+            "metadata": {},
+            "next_offset": 0,
+            "process_id": "20260618-102534-7d1999",
+            "status": "running",
+            "terminal_server_id": "w12d-open-terminal"
+          }
+        ],
+        "run_state_after_cancel": "cancelled",
+        "runtime_cancel_response": {
+          "cancel_requested": true,
+          "run_id": "1a2c7259-cc9e-4396-83f4-651cb3672193",
+          "runtime_session_id": "rt_1a2c7259-cc9e-4396-83f4-651cb3672193_O97cpOjA01k",
+          "state": "cancelled"
+        },
+        "runtime_session_id": "rt_1a2c7259-cc9e-4396-83f4-651cb3672193_O97cpOjA01k",
+        "terminal_status_after_cancel": {
+          "command": "python3 - <<'INNER'\nfrom pathlib import Path\nimport time\nroot = Path('/private/tmp/openwebui-agent-mode-w12d-tool-runtime/workspace/agent-runs/1a2c7259-cc9e-4396-83f4-651cb3672193')\n(root / 'tmp').mkdir(parents=True, exist_ok=True)\n(root.joinpath('tmp', 'cancel-marker.txt')).write_text('started\\n')\ntime.sleep(90)\nroot.joinpath('tmp', 'cancel-marker.txt').write_text('finished\\n')\nINNER",
+          "exit_code": null,
+          "id": "20260618-102534-7d1999",
+          "log_path": "/private/tmp/openwebui-agent-mode-w12d-tool-runtime/open-terminal-logs/processes/20260618-102534-7d1999.jsonl",
+          "next_offset": 0,
+          "output": [],
+          "process_id": "20260618-102534-7d1999",
+          "status": "running",
+          "truncated": false
+        },
+        "terminal_status_before_cancel": {
+          "command": "python3 - <<'INNER'\nfrom pathlib import Path\nimport time\nroot = Path('/private/tmp/openwebui-agent-mode-w12d-tool-runtime/workspace/agent-runs/1a2c7259-cc9e-4396-83f4-651cb3672193')\n(root / 'tmp').mkdir(parents=True, exist_ok=True)\n(root.joinpath('tmp', 'cancel-marker.txt')).write_text('started\\n')\ntime.sleep(90)\nroot.joinpath('tmp', 'cancel-marker.txt').write_text('finished\\n')\nINNER",
+          "exit_code": null,
+          "id": "20260618-102534-7d1999",
+          "log_path": "/private/tmp/openwebui-agent-mode-w12d-tool-runtime/open-terminal-logs/processes/20260618-102534-7d1999.jsonl",
+          "next_offset": 0,
+          "output": [],
+          "process_id": "20260618-102534-7d1999",
+          "status": "running",
+          "truncated": false
+        }
+      },
+      "id": "scenario_10_cancel_keeps_terminal_process",
+      "live_status": "passed",
+      "observations": [
+        "event:run.cancelled",
+        "runtime_cancel_requested",
+        "process_refs_retained",
+        "no_kill_process"
+      ],
+      "required_observations": [
+        "event:run.cancelled",
+        "runtime_cancel_requested",
+        "process_refs_retained",
+        "no_kill_process"
+      ],
+      "status": "live_passed"
+    },
+    {
+      "evidence": {
+        "compaction_trigger": "AgentRuns.transition_state terminal target with summary absent",
+        "duplicate_terminal_callbacks": "same terminal state returned unchanged summary and state_version",
+        "runs": {
+          "budget_exceeded": {
+            "duplicate_terminal_summary_unchanged": true,
+            "event_seq_range": [
+              1,
+              4
+            ],
+            "event_types": [
+              {
+                "event_type": "run.running",
+                "seq": 1
+              },
+              {
+                "event_type": "action.summary",
+                "seq": 2
+              },
+              {
+                "event_type": "tool.completed",
+                "seq": 3
+              },
+              {
+                "event_type": "run.budget_exceeded",
+                "seq": 4
+              }
+            ],
+            "registered_artifact_ids": [
+              "e6bfc060-af6a-48bb-b566-22167444ad76",
+              "e70a2eb1-1718-4ea4-81b2-ee50ca911593"
+            ],
+            "run_id": "fd02f780-d7a6-4023-9b33-851b98de8f29",
+            "state_version_after_duplicate": 2,
+            "state_version_after_terminal": 2,
+            "summary_actions": [
+              {
+                "participant_id": "leader",
+                "seq": 2,
+                "summary": "Collecting terminal results for budget_exceeded"
+              }
+            ],
+            "summary_artifacts": [
+              {
+                "created_at": 1781750237860743000,
+                "id": "e6bfc060-af6a-48bb-b566-22167444ad76",
+                "kind": "file",
+                "metadata": {
+                  "cleanup_eligible": false,
+                  "label": "report-budget_exceeded",
+                  "retention": "user_visible_output"
+                },
+                "mime_type": "text/plain",
+                "path": "/workspace/agent-runs/fd02f780-d7a6-4023-9b33-851b98de8f29/outputs/report-budget_exceeded.txt",
+                "size": 128,
+                "terminal_server_id": "terminal-main",
+                "url": "/api/agent/runs/fd02f780-d7a6-4023-9b33-851b98de8f29/artifacts/report-budget_exceeded/content"
+              },
+              {
+                "created_at": 1781750237862952000,
+                "id": "e70a2eb1-1718-4ea4-81b2-ee50ca911593",
+                "kind": "file",
+                "metadata": {
+                  "cleanup_after_ns": 1782355037866942000,
+                  "cleanup_eligible": true,
+                  "label": "debug-budget_exceeded",
+                  "retention": "temporary_debug"
+                },
+                "mime_type": "text/plain",
+                "path": "/workspace/agent-runs/fd02f780-d7a6-4023-9b33-851b98de8f29/tmp/debug-budget_exceeded.log",
+                "size": 64,
+                "terminal_server_id": "terminal-main",
+                "url": null
+              }
+            ],
+            "summary_audit": {
+              "first_seq": 1,
+              "last_seq": 4,
+              "pruned_event_types": [
+                "run.running"
+              ],
+              "retained_event_count": 3,
+              "retained_event_seqs": [
+                2,
+                3,
+                4
+              ]
+            },
+            "summary_process_refs": [
+              {
+                "command": "python build_report.py",
+                "exit_code": null,
+                "log_path": "/workspace/agent-runs/fd02f780-d7a6-4023-9b33-851b98de8f29/tmp/process.jsonl",
+                "next_offset": 42,
+                "process_id": "proc-budget_exceeded-1781750237-ab23b64b",
+                "status": "running",
+                "terminal_server_id": "terminal-main"
+              }
+            ],
+            "summary_state": "budget_exceeded",
+            "summary_tools": [
+              {
+                "arguments_summary": "python build_report.py",
+                "artifacts": [
+                  {
+                    "kind": "file",
+                    "mime_type": "text/plain",
+                    "path": "/workspace/agent-runs/fd02f780-d7a6-4023-9b33-851b98de8f29/outputs/report-budget_exceeded.txt"
+                  },
+                  {
+                    "kind": "file",
+                    "mime_type": "text/plain",
+                    "path": "/workspace/agent-runs/fd02f780-d7a6-4023-9b33-851b98de8f29/tmp/debug-budget_exceeded.log"
+                  }
+                ],
+                "name": "run_command",
+                "participant_id": "leader",
+                "process_refs": [
+                  {
+                    "process_id": "proc-budget_exceeded-1781750237-ab23b64b",
+                    "status": "running"
+                  }
+                ],
+                "result_status": "success",
+                "seq": 3,
+                "structured_error": null,
+                "summary": "Terminal command produced report artifacts",
+                "warnings": []
+              }
+            ],
+            "summary_ui_keys": [
+              "actions",
+              "approvals",
+              "artifacts",
+              "budget",
+              "errors",
+              "participants",
+              "process_refs",
+              "subagents",
+              "tools",
+              "warnings"
+            ],
+            "terminal_event_type": "run.budget_exceeded"
+          },
+          "cancelled": {
+            "duplicate_terminal_summary_unchanged": true,
+            "event_seq_range": [
+              1,
+              4
+            ],
+            "event_types": [
+              {
+                "event_type": "run.running",
+                "seq": 1
+              },
+              {
+                "event_type": "action.summary",
+                "seq": 2
+              },
+              {
+                "event_type": "tool.completed",
+                "seq": 3
+              },
+              {
+                "event_type": "run.cancelled",
+                "seq": 4
+              }
+            ],
+            "registered_artifact_ids": [
+              "71dfc984-a845-4c90-9678-87e372ff89f3",
+              "2dcc4fd4-2f67-4f12-94cf-f0c2a17f50af"
+            ],
+            "run_id": "c39b6ffe-78e8-4d7a-bdf2-a3f99b3b7929",
+            "state_version_after_duplicate": 2,
+            "state_version_after_terminal": 2,
+            "summary_actions": [
+              {
+                "participant_id": "leader",
+                "seq": 2,
+                "summary": "Collecting terminal results for cancelled"
+              }
+            ],
+            "summary_artifacts": [
+              {
+                "created_at": 1781750237839717000,
+                "id": "71dfc984-a845-4c90-9678-87e372ff89f3",
+                "kind": "file",
+                "metadata": {
+                  "cleanup_eligible": false,
+                  "label": "report-cancelled",
+                  "retention": "user_visible_output"
+                },
+                "mime_type": "text/plain",
+                "path": "/workspace/agent-runs/c39b6ffe-78e8-4d7a-bdf2-a3f99b3b7929/outputs/report-cancelled.txt",
+                "size": 128,
+                "terminal_server_id": "terminal-main",
+                "url": "/api/agent/runs/c39b6ffe-78e8-4d7a-bdf2-a3f99b3b7929/artifacts/report-cancelled/content"
+              },
+              {
+                "created_at": 1781750237842762000,
+                "id": "2dcc4fd4-2f67-4f12-94cf-f0c2a17f50af",
+                "kind": "file",
+                "metadata": {
+                  "cleanup_after_ns": 1782355037845918000,
+                  "cleanup_eligible": true,
+                  "label": "debug-cancelled",
+                  "retention": "temporary_debug"
+                },
+                "mime_type": "text/plain",
+                "path": "/workspace/agent-runs/c39b6ffe-78e8-4d7a-bdf2-a3f99b3b7929/tmp/debug-cancelled.log",
+                "size": 64,
+                "terminal_server_id": "terminal-main",
+                "url": null
+              }
+            ],
+            "summary_audit": {
+              "first_seq": 1,
+              "last_seq": 4,
+              "pruned_event_types": [
+                "run.running"
+              ],
+              "retained_event_count": 3,
+              "retained_event_seqs": [
+                2,
+                3,
+                4
+              ]
+            },
+            "summary_process_refs": [
+              {
+                "command": "python build_report.py",
+                "exit_code": null,
+                "log_path": "/workspace/agent-runs/c39b6ffe-78e8-4d7a-bdf2-a3f99b3b7929/tmp/process.jsonl",
+                "next_offset": 42,
+                "process_id": "proc-cancelled-1781750237-ab23b64b",
+                "status": "running",
+                "terminal_server_id": "terminal-main"
+              }
+            ],
+            "summary_state": "cancelled",
+            "summary_tools": [
+              {
+                "arguments_summary": "python build_report.py",
+                "artifacts": [
+                  {
+                    "kind": "file",
+                    "mime_type": "text/plain",
+                    "path": "/workspace/agent-runs/c39b6ffe-78e8-4d7a-bdf2-a3f99b3b7929/outputs/report-cancelled.txt"
+                  },
+                  {
+                    "kind": "file",
+                    "mime_type": "text/plain",
+                    "path": "/workspace/agent-runs/c39b6ffe-78e8-4d7a-bdf2-a3f99b3b7929/tmp/debug-cancelled.log"
+                  }
+                ],
+                "name": "run_command",
+                "participant_id": "leader",
+                "process_refs": [
+                  {
+                    "process_id": "proc-cancelled-1781750237-ab23b64b",
+                    "status": "running"
+                  }
+                ],
+                "result_status": "success",
+                "seq": 3,
+                "structured_error": null,
+                "summary": "Terminal command produced report artifacts",
+                "warnings": []
+              }
+            ],
+            "summary_ui_keys": [
+              "actions",
+              "approvals",
+              "artifacts",
+              "budget",
+              "errors",
+              "participants",
+              "process_refs",
+              "subagents",
+              "tools",
+              "warnings"
+            ],
+            "terminal_event_type": "run.cancelled"
+          },
+          "completed": {
+            "duplicate_terminal_summary_unchanged": true,
+            "event_seq_range": [
+              1,
+              4
+            ],
+            "event_types": [
+              {
+                "event_type": "run.running",
+                "seq": 1
+              },
+              {
+                "event_type": "action.summary",
+                "seq": 2
+              },
+              {
+                "event_type": "tool.completed",
+                "seq": 3
+              },
+              {
+                "event_type": "run.completed",
+                "seq": 4
+              }
+            ],
+            "registered_artifact_ids": [
+              "c32145c6-e698-4f60-95af-75ca55cb5dcb",
+              "d1eb86c5-3977-43a6-a1ee-fb1f3709f98f"
+            ],
+            "run_id": "8dcb910c-5f0d-4fd2-bd35-12742e1932f3",
+            "state_version_after_duplicate": 3,
+            "state_version_after_terminal": 3,
+            "summary_actions": [
+              {
+                "participant_id": "leader",
+                "seq": 2,
+                "summary": "Collecting terminal results for completed"
+              }
+            ],
+            "summary_artifacts": [
+              {
+                "created_at": 1781750237795342000,
+                "id": "c32145c6-e698-4f60-95af-75ca55cb5dcb",
+                "kind": "file",
+                "metadata": {
+                  "cleanup_eligible": false,
+                  "label": "report-completed",
+                  "retention": "user_visible_output"
+                },
+                "mime_type": "text/plain",
+                "path": "/workspace/agent-runs/8dcb910c-5f0d-4fd2-bd35-12742e1932f3/outputs/report-completed.txt",
+                "size": 128,
+                "terminal_server_id": "terminal-main",
+                "url": "/api/agent/runs/8dcb910c-5f0d-4fd2-bd35-12742e1932f3/artifacts/report-completed/content"
+              },
+              {
+                "created_at": 1781750237797937000,
+                "id": "d1eb86c5-3977-43a6-a1ee-fb1f3709f98f",
+                "kind": "file",
+                "metadata": {
+                  "cleanup_after_ns": 1782355037804132000,
+                  "cleanup_eligible": true,
+                  "label": "debug-completed",
+                  "retention": "temporary_debug"
+                },
+                "mime_type": "text/plain",
+                "path": "/workspace/agent-runs/8dcb910c-5f0d-4fd2-bd35-12742e1932f3/tmp/debug-completed.log",
+                "size": 64,
+                "terminal_server_id": "terminal-main",
+                "url": null
+              }
+            ],
+            "summary_audit": {
+              "first_seq": 1,
+              "last_seq": 4,
+              "pruned_event_types": [
+                "run.running"
+              ],
+              "retained_event_count": 3,
+              "retained_event_seqs": [
+                2,
+                3,
+                4
+              ]
+            },
+            "summary_process_refs": [
+              {
+                "command": "python build_report.py",
+                "exit_code": null,
+                "log_path": "/workspace/agent-runs/8dcb910c-5f0d-4fd2-bd35-12742e1932f3/tmp/process.jsonl",
+                "next_offset": 42,
+                "process_id": "proc-completed-1781750237-ab23b64b",
+                "status": "running",
+                "terminal_server_id": "terminal-main"
+              }
+            ],
+            "summary_state": "completed",
+            "summary_tools": [
+              {
+                "arguments_summary": "python build_report.py",
+                "artifacts": [
+                  {
+                    "kind": "file",
+                    "mime_type": "text/plain",
+                    "path": "/workspace/agent-runs/8dcb910c-5f0d-4fd2-bd35-12742e1932f3/outputs/report-completed.txt"
+                  },
+                  {
+                    "kind": "file",
+                    "mime_type": "text/plain",
+                    "path": "/workspace/agent-runs/8dcb910c-5f0d-4fd2-bd35-12742e1932f3/tmp/debug-completed.log"
+                  }
+                ],
+                "name": "run_command",
+                "participant_id": "leader",
+                "process_refs": [
+                  {
+                    "process_id": "proc-completed-1781750237-ab23b64b",
+                    "status": "running"
+                  }
+                ],
+                "result_status": "success",
+                "seq": 3,
+                "structured_error": null,
+                "summary": "Terminal command produced report artifacts",
+                "warnings": []
+              }
+            ],
+            "summary_ui_keys": [
+              "actions",
+              "approvals",
+              "artifacts",
+              "budget",
+              "errors",
+              "participants",
+              "process_refs",
+              "subagents",
+              "tools",
+              "warnings"
+            ],
+            "terminal_event_type": "run.completed"
+          },
+          "failed": {
+            "duplicate_terminal_summary_unchanged": true,
+            "event_seq_range": [
+              1,
+              4
+            ],
+            "event_types": [
+              {
+                "event_type": "run.running",
+                "seq": 1
+              },
+              {
+                "event_type": "action.summary",
+                "seq": 2
+              },
+              {
+                "event_type": "tool.completed",
+                "seq": 3
+              },
+              {
+                "event_type": "run.failed",
+                "seq": 4
+              }
+            ],
+            "registered_artifact_ids": [
+              "74103068-554f-4716-b162-f09f621ebbb8",
+              "66ceb01f-8eef-4a8c-bb7e-5543f554da1e"
+            ],
+            "run_id": "fb600ee5-3c55-42ac-92bb-e6215a0340de",
+            "state_version_after_duplicate": 2,
+            "state_version_after_terminal": 2,
+            "summary_actions": [
+              {
+                "participant_id": "leader",
+                "seq": 2,
+                "summary": "Collecting terminal results for failed"
+              }
+            ],
+            "summary_artifacts": [
+              {
+                "created_at": 1781750237819366000,
+                "id": "74103068-554f-4716-b162-f09f621ebbb8",
+                "kind": "file",
+                "metadata": {
+                  "cleanup_eligible": false,
+                  "label": "report-failed",
+                  "retention": "user_visible_output"
+                },
+                "mime_type": "text/plain",
+                "path": "/workspace/agent-runs/fb600ee5-3c55-42ac-92bb-e6215a0340de/outputs/report-failed.txt",
+                "size": 128,
+                "terminal_server_id": "terminal-main",
+                "url": "/api/agent/runs/fb600ee5-3c55-42ac-92bb-e6215a0340de/artifacts/report-failed/content"
+              },
+              {
+                "created_at": 1781750237821153000,
+                "id": "66ceb01f-8eef-4a8c-bb7e-5543f554da1e",
+                "kind": "file",
+                "metadata": {
+                  "cleanup_after_ns": 1782355037825374000,
+                  "cleanup_eligible": true,
+                  "label": "debug-failed",
+                  "retention": "temporary_debug"
+                },
+                "mime_type": "text/plain",
+                "path": "/workspace/agent-runs/fb600ee5-3c55-42ac-92bb-e6215a0340de/tmp/debug-failed.log",
+                "size": 64,
+                "terminal_server_id": "terminal-main",
+                "url": null
+              }
+            ],
+            "summary_audit": {
+              "first_seq": 1,
+              "last_seq": 4,
+              "pruned_event_types": [
+                "run.running"
+              ],
+              "retained_event_count": 3,
+              "retained_event_seqs": [
+                2,
+                3,
+                4
+              ]
+            },
+            "summary_process_refs": [
+              {
+                "command": "python build_report.py",
+                "exit_code": null,
+                "log_path": "/workspace/agent-runs/fb600ee5-3c55-42ac-92bb-e6215a0340de/tmp/process.jsonl",
+                "next_offset": 42,
+                "process_id": "proc-failed-1781750237-ab23b64b",
+                "status": "running",
+                "terminal_server_id": "terminal-main"
+              }
+            ],
+            "summary_state": "failed",
+            "summary_tools": [
+              {
+                "arguments_summary": "python build_report.py",
+                "artifacts": [
+                  {
+                    "kind": "file",
+                    "mime_type": "text/plain",
+                    "path": "/workspace/agent-runs/fb600ee5-3c55-42ac-92bb-e6215a0340de/outputs/report-failed.txt"
+                  },
+                  {
+                    "kind": "file",
+                    "mime_type": "text/plain",
+                    "path": "/workspace/agent-runs/fb600ee5-3c55-42ac-92bb-e6215a0340de/tmp/debug-failed.log"
+                  }
+                ],
+                "name": "run_command",
+                "participant_id": "leader",
+                "process_refs": [
+                  {
+                    "process_id": "proc-failed-1781750237-ab23b64b",
+                    "status": "running"
+                  }
+                ],
+                "result_status": "success",
+                "seq": 3,
+                "structured_error": null,
+                "summary": "Terminal command produced report artifacts",
+                "warnings": []
+              }
+            ],
+            "summary_ui_keys": [
+              "actions",
+              "approvals",
+              "artifacts",
+              "budget",
+              "errors",
+              "participants",
+              "process_refs",
+              "subagents",
+              "tools",
+              "warnings"
+            ],
+            "terminal_event_type": "run.failed"
+          }
+        },
+        "summary_keys_required": [
+          "participants",
+          "tools",
+          "approvals",
+          "subagents",
+          "artifacts",
+          "process_refs"
+        ],
+        "terminal_states": [
+          "completed",
+          "failed",
+          "cancelled",
+          "budget_exceeded"
+        ]
+      },
+      "id": "scenario_11_terminal_state_compaction",
+      "live_status": "passed",
+      "observations": [
+        "compaction:completed",
+        "compaction:failed",
+        "compaction:cancelled",
+        "compaction:budget_exceeded",
+        "summary_retains_expandable_ui"
+      ],
+      "status": "live_passed"
+    },
+    {
+      "evidence": {
+        "assistant_message": {
+          "agent_run_id": "310055d5-c926-4f2f-9611-c82a84b15c2c",
+          "content": "",
+          "done": false,
+          "error_content": "Cannot connect to host 127.0.0.1:8111 ssl:default [Connect call failed ('127.0.0.1', 8111)]",
+          "model": "w12d-fake-model"
+        },
+        "assistant_message_id": "w12d-unavail-assistant-1781750152421",
+        "chat_id": "3787b89d-dfd8-42bf-a149-6c61158898aa",
+        "chat_response": {
+          "agent_run_id": "310055d5-c926-4f2f-9611-c82a84b15c2c",
+          "error": {
+            "code": "agent_runtime_unavailable",
+            "message": "Cannot connect to host 127.0.0.1:8111 ssl:default [Connect call failed ('127.0.0.1', 8111)]"
+          },
+          "status": false,
+          "task_ids": []
+        },
+        "events": [
+          {
+            "error_code": "agent_runtime_unavailable",
+            "event_type": "run.failed",
+            "phase": "failed",
+            "seq": 1
+          }
+        ],
+        "legacy_fallback_absent": "The response is status=false with agent_run_id and run.failed; no final.delta, run.completed, or legacy provider answer was produced.",
+        "run_detail": {
+          "error": {
+            "code": "agent_runtime_unavailable"
+          },
+          "state": "failed",
+          "state_version": 1
+        },
+        "run_id": "310055d5-c926-4f2f-9611-c82a84b15c2c",
+        "runtime_port_check": "lsof -nP -iTCP:8111 -sTCP:LISTEN returned no listener before request"
+      },
+      "id": "scenario_12_runtime_unavailable_failure",
+      "live_status": "passed",
+      "observations": [
+        "ENABLE_AGENT_MODE:true",
+        "runtime_unavailable",
+        "event:run.failed",
+        "no_silent_legacy_fallback"
+      ],
+      "required_observations": [
+        "ENABLE_AGENT_MODE:true",
+        "runtime_unavailable",
+        "event:run.failed",
+        "no_silent_legacy_fallback"
+      ],
+      "status": "live_passed"
+    }
+  ],
+  "scope": "Agent Mode W12 live acceptance evidence"
+}

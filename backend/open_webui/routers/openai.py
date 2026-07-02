@@ -967,15 +967,20 @@ def convert_to_responses_payload(payload: dict) -> dict:
 
         input_items.append({'type': 'message', 'role': role, 'content': content_parts})
 
-    if payload.get('previous_response_id'):
+    guarded_stateful_delta = (
+        payload.get('previous_response_id') and payload.get('continuation_mode') == 'stateful_delta'
+    )
+    if guarded_stateful_delta:
         input_items = responses_continuation_input_items(input_items)
 
     responses_payload = {**payload, 'input': input_items}
 
-    # Forward previous_response_id when the middleware has set it
-    # (only used when ENABLE_RESPONSES_API_STATEFUL is enabled).
+    # Forward previous_response_id only after middleware has proved a
+    # strict delta continuation and marked the internal continuation mode.
     previous_response_id = responses_payload.pop('previous_response_id', None)
-    if previous_response_id:
+    responses_payload.pop('continuation_mode', None)
+    responses_payload.pop('responses_stateful_replay_required_reason', None)
+    if previous_response_id and guarded_stateful_delta:
         responses_payload['previous_response_id'] = previous_response_id
 
     if system_content:

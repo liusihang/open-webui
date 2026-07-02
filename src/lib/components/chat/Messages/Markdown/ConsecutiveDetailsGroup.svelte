@@ -11,6 +11,7 @@
 	import Sparkles from '$lib/components/icons/Sparkles.svelte';
 	import CheckCircle from '$lib/components/icons/CheckCircle.svelte';
 	import FullHeightIframe from '$lib/components/common/FullHeightIframe.svelte';
+	import { getToolCallIframePolicy } from '$lib/components/chat/toolCallIframePolicy';
 
 	import { settings } from '$lib/stores';
 
@@ -49,6 +50,7 @@
 		tokens.some((t) => t?.attributes?.done !== undefined && t?.attributes?.done !== 'true');
 
 	$: codeInterpreterCount = tokens.filter((t) => t?.attributes?.type === 'code_interpreter').length;
+	$: iframePolicy = getToolCallIframePolicy($settings);
 
 	// Collect all embeds from tool_calls tokens
 	$: allEmbeds = (() => {
@@ -171,8 +173,8 @@
 					src={embedItem.embed}
 					args={embedItem.args}
 					allowScripts={true}
-					allowForms={$settings?.iframeSandboxAllowForms ?? false}
-					allowSameOrigin={$settings?.iframeSandboxAllowSameOrigin ?? false}
+					allowForms={iframePolicy.allowForms}
+					allowSameOrigin={iframePolicy.allowSameOrigin}
 					allowPopups={true}
 				/>
 			</div>

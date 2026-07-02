@@ -106,6 +106,11 @@
 		resolveImageGenerationFeature,
 		shouldEnableImageGenerationByDefault
 	} from '$lib/components/chat/defaultFeatures';
+	import {
+		buildReasoningPayload,
+		resolveAgentModeRequestModels,
+		type ReasoningDepth
+	} from '$lib/components/chat/agentModeRequest';
 	import Messages from '$lib/components/chat/Messages.svelte';
 	import Navbar from '$lib/components/chat/Navbar.svelte';
 	import ChatControls from './ChatControls.svelte';
@@ -119,6 +124,10 @@
 	import Sidebar from '../icons/Sidebar.svelte';
 	import Image from '../common/Image.svelte';
 	import { getBanners } from '$lib/apis/configs';
+	import {
+		prepareLoadedChatHistory,
+		shouldApplySocketContentEvent
+	} from '$lib/components/chat/historySync';
 
 	export let chatIdProp = '';
 
@@ -150,10 +159,13 @@
 	let selectedModels = [''];
 	let atSelectedModel: Model | undefined;
 	let selectedModelIds = [];
+	$: if (selectedModels.length > 1) {
+		selectedModels = resolveAgentModeRequestModels(selectedModels, $config);
+	}
 	$: if (atSelectedModel !== undefined) {
 		selectedModelIds = [atSelectedModel.id];
 	} else {
-		selectedModelIds = selectedModels;
+		selectedModelIds = resolveAgentModeRequestModels(selectedModels, $config);
 	}
 
 	let selectedToolIds = [];
@@ -165,7 +177,6 @@
 	let imageGenerationUserOverride: boolean | null = null;
 	let webSearchEnabled = false;
 	let codeInterpreterEnabled = false;
-	type ReasoningDepth = 'medium' | 'deep' | 'divergent';
 	let reasoningDepth: ReasoningDepth = 'medium';
 
 	let showCommands = false;
@@ -179,12 +190,12 @@
 
 	let chatTasks = [];
 
-	let history = {
+	let history: any = {
 		messages: {},
 		currentId: null
 	};
 
-	let taskIds = null;
+	let taskIds: any = null;
 
 	// Chat Input
 	let prompt = '';
@@ -528,6 +539,7 @@
 			if (message) {
 				const type = event?.data?.type ?? null;
 				const data = event?.data?.data ?? null;
+				const applySocketContentEvent = shouldApplySocketContentEvent(message, type);
 
 				if (type === 'status') {
 					if (message?.statusHistory) {
@@ -536,6 +548,10 @@
 						message.statusHistory = [data];
 					}
 				} else if (type === 'chat:completion') {
+					if (!applySocketContentEvent) {
+						history.messages[event.message_id] = message;
+						return;
+					}
 					chatCompletionEventHandler(data, message, event.chat_id);
 				} else if (type === 'chat:tasks:cancel') {
 					if (event.message_id === history.currentId) {
@@ -549,6 +565,10 @@
 						message.done = true;
 					}
 				} else if (type === 'chat:message:delta' || type === 'message') {
+					if (!applySocketContentEvent) {
+						history.messages[event.message_id] = message;
+						return;
+					}
 					message.content += data.content;
 				} else if (type === 'chat:message' || type === 'replace') {
 					message.content = data.content;
@@ -1458,14 +1478,14 @@
 
 				oldSelectedModelIds = structuredClone(selectedModels);
 
-				history =
+				const loadedHistory =
 					(chatContent?.history ?? undefined) !== undefined
 						? chatContent.history
 						: convertMessagesToHistory(chatContent.messages);
 
 				// Sanitize history: repair orphaned references and structurally-malformed
 				// nodes from failed regenerations (#24424, #24157, #20474)
-				sanitizeHistory(history);
+				sanitizeHistory(loadedHistory);
 
 				chatTitle.set(chatContent.title);
 
@@ -1476,40 +1496,13 @@
 				chatTasks = chat?.tasks ?? [];
 
 				autoScroll = true;
-				await tick();
 
-				// Mark all non-current assistant messages as done
-				if (history.currentId) {
-					for (const message of Object.values(history.messages)) {
-						if (
-							message &&
-							message.role === 'assistant' &&
-							message.id !== history.currentId &&
-							message.done !== false
-						) {
-							message.done = true;
-						}
-					}
-				}
-
-				// Reconcile active tasks with message state:
-				// If the response is already done, remaining tasks are just background
-				// work (follow-ups, title gen) that shouldn't block the input.
 				const pendingTaskIds = await getTaskIdsByChatId(localStorage.token, $chatId)
 					.then((res) => res?.task_ids ?? [])
 					.catch(() => []);
-				const currentMessage = history.currentId ? history.messages[history.currentId] : null;
-				const responseComplete = currentMessage?.role === 'assistant' && currentMessage?.done;
-
-				if (pendingTaskIds.length > 0 && !responseComplete) {
-					taskIds = pendingTaskIds;
-				} else {
-					taskIds = null;
-					// No active tasks and message incomplete → generation was interrupted
-					if (currentMessage?.role === 'assistant' && !currentMessage.done) {
-						currentMessage.done = true;
-					}
-				}
+				const loadedHistoryState = prepareLoadedChatHistory(history, loadedHistory, pendingTaskIds);
+				history = loadedHistoryState.history;
+				taskIds = loadedHistoryState.taskIds;
 
 				await tick();
 
@@ -1794,7 +1787,18 @@
 	};
 
 	const chatCompletionEventHandler = async (data, message, chatId) => {
-		const { id, done, choices, content, output, sources, selected_model_id, error, usage } = data;
+		const {
+			id,
+			done,
+			choices,
+			content,
+			output,
+			sources,
+			metadata,
+			selected_model_id,
+			error,
+			usage
+		} = data;
 
 		// Store raw OR-aligned output items from backend
 		if (output) {
@@ -1807,6 +1811,13 @@
 
 		if (sources && !message?.sources) {
 			message.sources = sources;
+		}
+
+		if (metadata) {
+			message.metadata = {
+				...(message.metadata ?? {}),
+				...metadata
+			};
 		}
 
 		if (choices) {
@@ -1992,7 +2003,7 @@
 			content: inputContent,
 			files: _files.length > 0 ? _files : undefined,
 			timestamp: Math.floor(Date.now() / 1000), // Unix epoch
-			models: selectedModels
+			models: resolveAgentModeRequestModels(selectedModels, $config)
 		};
 
 		// Add message to history and Set currentId to messageId
@@ -2136,6 +2147,7 @@
 			: atSelectedModel !== undefined
 				? [atSelectedModel.id]
 				: selectedModels;
+		selectedModelIds = resolveAgentModeRequestModels(selectedModelIds, $config);
 
 		// Create response messages for each selected model
 		// Build message_ids map: {model_id: assistant_message_id}
@@ -2287,18 +2299,6 @@
 		return features;
 	};
 
-	const getReasoningMaxTokens = (depth: ReasoningDepth): number => {
-		if (depth === 'deep') {
-			return 8126;
-		}
-
-		if (depth === 'divergent') {
-			return 12400;
-		}
-
-		return 2048;
-	};
-
 	const getStopTokens = () => {
 		const stop = params?.stop ?? $settings?.params?.stop;
 		if (!stop) return undefined;
@@ -2373,10 +2373,7 @@
 			$settings?.params?.stream_response ??
 			params?.stream_response ??
 			true;
-		const reasoning = {
-			enabled: true,
-			max_tokens: getReasoningMaxTokens(reasoningDepth)
-		};
+		const reasoning = buildReasoningPayload(reasoningDepth);
 		// Always include system prompt — backend extracts it and prepends to DB messages.
 		// Only temp chats need conversation messages (persisted chats load from DB).
 		let messages = [
@@ -2586,6 +2583,14 @@
 			if (res.error) {
 				await handleOpenAIError(res.error, responseMessage);
 			} else {
+				if (res.agent_run_id) {
+					responseMessage.agent_run_id = res.agent_run_id;
+					history.messages[responseMessageId] = {
+						...history.messages[responseMessageId],
+						agent_run_id: res.agent_run_id
+					};
+				}
+
 				// Backend returns task_ids (multi-model) or task_id (single model)
 				const newTaskIds = res.task_ids ?? (res.task_id ? [res.task_id] : []);
 				if (taskIds) {
@@ -2939,6 +2944,27 @@
 		}
 	};
 
+	const persistFeatureDraft = async (chatId: string | null = null) => {
+		if (saveDraftTimeout) {
+			clearTimeout(saveDraftTimeout);
+		}
+
+		const draft = {
+			prompt: '',
+			files: [],
+			selectedToolIds,
+			selectedSkillIds,
+			selectedFilterIds,
+			webSearchEnabled,
+			imageGenerationEnabled,
+			imageGenerationUserOverride,
+			codeInterpreterEnabled,
+			reasoningDepth
+		};
+
+		await sessionStorage.setItem(`chat-input${chatId ? `-${chatId}` : ''}`, JSON.stringify(draft));
+	};
+
 	const clearDraft = async (chatId: string | null = null) => {
 		if (saveDraftTimeout) {
 			clearTimeout(saveDraftTimeout);
@@ -3256,7 +3282,7 @@
 										}
 									}}
 									on:submit={async (e) => {
-										clearDraft($chatId);
+										await persistFeatureDraft($chatId);
 										if (e.detail || files.length > 0) {
 											await tick();
 
@@ -3305,7 +3331,7 @@
 										}
 									}}
 									on:submit={async (e) => {
-										clearDraft();
+										await persistFeatureDraft();
 										if (e.detail || files.length > 0) {
 											await tick();
 											submitHandler(e.detail);

@@ -12,6 +12,7 @@ docker buildx build \
   --load \
   --build-arg BUILD_HASH="${BUILD_HASH}" \
   --build-arg USE_EXTERNAL_SERVICES_SLIM=true \
+  --build-arg PYODIDE_CACHE_POLICY=prefer-local \
   -t "open-webui:v095-external-slim-${BUILD_HASH}" \
   /Users/liusihang/openwebui-v095-imagefix
 ```
@@ -29,6 +30,115 @@ Notes:
 - This profile is meant for deployments that already use external embedding,
   reranking, OCR/document extraction, web loading/search, and image generation.
 
+## Cached PR7 Slim Rebuild
+
+For repeated PR7 slim rebuilds on a remote builder, prefer the repository
+script instead of patching the staged Dockerfile by hand:
+
+```bash
+scripts/rebuild-pr7-slim-cache.sh \
+  --remote aiserver \
+  --git-ref HEAD \
+  --image-tag "open-webui:pr7-slim-$(git rev-parse --short=10 HEAD)" \
+  --build-dir /home/aiserver/staging/openwebui-pr7-slim-build \
+  --cache-dir /home/aiserver/.cache/openwebui-pr7-slim-buildx
+```
+
+The script keeps the clean `git archive` input, runs `docker buildx build
+--load`, imports cache from `<cache-dir>/current`, writes a new
+`type=local,mode=max` cache directory, and promotes the `current` pointer only
+after a successful build.
+
+When public package fetches fail, prefer explicit mirror build args first:
+
+```bash
+scripts/rebuild-pr7-slim-cache.sh \
+  --remote aiserver \
+  --git-ref HEAD \
+  --image-tag "open-webui:pr7-slim-$(git rev-parse --short=10 HEAD)" \
+  --build-dir /home/aiserver/staging/openwebui-pr7-slim-build \
+  --cache-dir /home/aiserver/.cache/openwebui-pr7-slim-buildx \
+  --apt-debian-mirror https://mirrors.tuna.tsinghua.edu.cn/debian \
+  --apt-security-mirror https://mirrors.tuna.tsinghua.edu.cn/debian-security \
+  --npm-registry https://registry.npmmirror.com \
+  --uv-default-index https://pypi.tuna.tsinghua.edu.cn/simple
+```
+
+If mirrors are still insufficient, pass the local Clash HTTP proxy with
+`--proxy-url`.
+
+When you already have a known-good local `static/pyodide` cache and want the
+remote build to reuse it instead of rebuilding from scratch, seed it into the
+staged clean archive:
+
+```bash
+scripts/rebuild-pr7-slim-cache.sh \
+  --remote aiserver \
+  --git-ref HEAD \
+  --image-tag "open-webui:pr7-slim-$(git rev-parse --short=10 HEAD)" \
+  --build-dir /home/aiserver/staging/openwebui-pr7-slim-build \
+  --cache-dir /home/aiserver/.cache/openwebui-pr7-slim-buildx \
+  --seed-pyodide-dir "$(pwd)/static/pyodide" \
+  --proxy-url http://192.168.2.201:7897 \
+  --dockerfile-syntax-image docker.m.daocloud.io/docker/dockerfile:1 \
+  --node-base-image docker.m.daocloud.io/library/node:22-alpine3.20 \
+  --python-base-image docker.m.daocloud.io/library/python:3.11-slim-bookworm \
+  --npm-registry https://registry.npmmirror.com \
+  --uv-default-index https://pypi.tuna.tsinghua.edu.cn/simple \
+  --pyodide-pypi-api-base-url https://pypi.tuna.tsinghua.edu.cn/pypi \
+  --pyodide-pypi-files-base-url https://pypi.tuna.tsinghua.edu.cn/packages \
+  --pyodide-pypi-index-urls https://pypi.tuna.tsinghua.edu.cn/pypi
+```
+
+That path keeps the clean `git archive` source ref, overlays only the seeded
+`static/pyodide/` artifact into remote staging, patches the staged Dockerfile
+base-image sources when Docker Hub is flaky, and still builds a fresh image
+with `docker buildx build --load`.
+
+## Pyodide Cache And Mirror Controls
+
+The frontend build now prefers a checked-in or prebuilt `static/pyodide`
+artifact before attempting any network fetch.
+
+Supported build args and environment variables:
+
+- `PYODIDE_CACHE_POLICY`
+  - `prefer-local` default
+  - `refresh` forces a rebuild of `static/pyodide`
+  - `local-only` fails if a valid local `static/pyodide` artifact is not present
+- `PYODIDE_INDEX_URL`
+  - mirror base for Pyodide package assets
+- `PYODIDE_PYPI_API_BASE_URL`
+  - metadata base for `.../pypi/<package>/json`
+- `PYODIDE_PYPI_FILES_BASE_URL`
+  - optional files mirror used to rewrite `files.pythonhosted.org` wheel URLs
+- `PYODIDE_PYPI_INDEX_URLS`
+  - optional comma-separated index list passed to `micropip.install(...)`
+
+Recommended controlled-build examples:
+
+```bash
+docker buildx build \
+  --load \
+  --build-arg BUILD_HASH="${BUILD_HASH}" \
+  --build-arg USE_EXTERNAL_SERVICES_SLIM=true \
+  --build-arg PYODIDE_CACHE_POLICY=local-only \
+  -t "open-webui:v095-external-slim-${BUILD_HASH}" \
+  /Users/liusihang/openwebui-v095-imagefix
+```
+
+```bash
+docker buildx build \
+  --load \
+  --build-arg BUILD_HASH="${BUILD_HASH}" \
+  --build-arg USE_EXTERNAL_SERVICES_SLIM=true \
+  --build-arg PYODIDE_CACHE_POLICY=refresh \
+  --build-arg PYODIDE_INDEX_URL="https://mirror.example.com/pyodide/v0.28.3/full/" \
+  --build-arg PYODIDE_PYPI_API_BASE_URL="https://pypi.tuna.tsinghua.edu.cn/pypi" \
+  --build-arg PYODIDE_PYPI_FILES_BASE_URL="https://pypi.tuna.tsinghua.edu.cn/packages" \
+  -t "open-webui:v095-external-slim-${BUILD_HASH}" \
+  /Users/liusihang/openwebui-v095-imagefix
+```
 ## Smoke Test
 
 The slim image no longer ships local Chroma, so smoke tests should run with a
