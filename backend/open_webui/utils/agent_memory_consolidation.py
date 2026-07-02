@@ -21,9 +21,15 @@ from open_webui.models.chats import Chat
 from open_webui.models.folders import Folder
 from open_webui.models.notes import Note
 from open_webui.utils.access_control import has_permission
-from open_webui.utils.agent_memory_extraction import sanitize_agent_memory_text
+from open_webui.utils.agent_memory_extraction import (
+    is_agent_memory_generation_enabled,
+    sanitize_agent_memory_text,
+)
 from open_webui.utils.agent_memory_index import rebuild_agent_memory_index_for_scope
-from open_webui.utils.chat import generate_chat_completion
+from open_webui.utils.chat import (
+    generate_agent_memory_internal_chat_completion as _generate_agent_memory_internal_chat_completion,
+    generate_chat_completion,
+)
 from open_webui.utils.task import get_task_model_id
 from sqlalchemy import case, delete, func, or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -53,6 +59,23 @@ class ConsolidationInput:
 def _config_value(config: Any, key: str, default: Any) -> Any:
     value = getattr(config, key, default)
     return default if value in (None, "") else value
+
+
+async def generate_agent_memory_internal_chat_completion(
+    request: Any,
+    form_data: dict,
+    user: Any,
+    bypass_filter: bool = False,
+    bypass_system_prompt: bool = False,
+):
+    return await _generate_agent_memory_internal_chat_completion(
+        request,
+        form_data=form_data,
+        user=user,
+        bypass_filter=bypass_filter,
+        bypass_system_prompt=bypass_system_prompt,
+        completion_fn=generate_chat_completion,
+    )
 
 
 def _is_agent_memory_disabled(meta: dict | None) -> bool:
@@ -108,7 +131,7 @@ def _note_matches_linkage(note: Note, user_id: str, scope_type: str, scope_id: s
 
 
 async def _user_can_use_agent_memory(user_id: str, config: Any, db: AsyncSession) -> bool:
-    if not bool(_config_value(config, "ENABLE_AGENT_MEMORY", False)):
+    if not is_agent_memory_generation_enabled(config):
         return False
     return await has_permission(
         user_id,
@@ -714,7 +737,7 @@ async def _run_single_consolidation_job(
                 "scope_id": job.scope_id,
             },
         }
-        response = await generate_chat_completion(
+        response = await generate_agent_memory_internal_chat_completion(
             request,
             form_data=payload,
             user=_get_agent_memory_task_user(job.user_id),
@@ -765,7 +788,7 @@ async def run_agent_memory_consolidation_jobs_once(
 ) -> int:
     now = int(now or time.time())
     config = request.app.state.config
-    if not bool(_config_value(config, "ENABLE_AGENT_MEMORY", False)):
+    if not is_agent_memory_generation_enabled(config):
         return 0
     claim_limit = int(limit if limit is not None else _config_value(config, "AGENT_MEMORY_CONSOLIDATION_CLAIM_LIMIT", 2))
     lease_seconds = int(_config_value(config, "AGENT_MEMORY_LEASE_SECONDS", 300))

@@ -507,12 +507,12 @@ def test_chat_agent_memory_opt_out_helper_preserves_unrelated_meta_keys():
 
     assert disabled == {
         "tags": ["project-a"],
-        "agent_memory": {"note": "keep", "disabled": True},
+        "agent_memory": {"note": "keep", "mode": "disabled", "disabled": True},
         "ui": {"expanded": True},
     }
     assert enabled == {
         "tags": ["project-a"],
-        "agent_memory": {"note": "keep"},
+        "agent_memory": {"note": "keep", "mode": "enabled"},
         "ui": {"expanded": True},
     }
     assert meta["agent_memory"] == {"note": "keep"}
@@ -531,12 +531,12 @@ def test_folder_agent_memory_opt_out_helper_preserves_unrelated_meta_keys():
 
     assert disabled == {
         "icon": "folder",
-        "agent_memory": {"note": "keep", "disabled": True},
+        "agent_memory": {"note": "keep", "mode": "disabled", "disabled": True},
         "layout": {"sort": "updated"},
     }
     assert enabled == {
         "icon": "folder",
-        "agent_memory": {"note": "keep"},
+        "agent_memory": {"note": "keep", "mode": "enabled"},
         "layout": {"sort": "updated"},
     }
     assert meta["agent_memory"] == {"note": "keep"}

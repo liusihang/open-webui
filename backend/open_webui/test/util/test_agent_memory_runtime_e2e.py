@@ -407,6 +407,8 @@ async def test_agent_memory_runtime_e2e_chain_with_native_tools_forgetting_and_d
             now=1230,
             db=session,
         )
+        disabled_chat = await session.get(Chat, "folder-chat")
+        assert disabled_chat.meta["agent_memory"] == {"mode": "disabled", "disabled": True}
         assert await AgentMemoryExtractionCaches.get_cache("user-1", "folder-chat", db=session) is None
         assert await AgentMemoryConsolidationJobs.get_job("user-1", "folder", "folder-1", db=session)
         assert await consolidation.run_agent_memory_consolidation_jobs_once(

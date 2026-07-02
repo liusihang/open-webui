@@ -602,7 +602,9 @@ async def test_run_extraction_jobs_once_uses_sanitized_payload_and_completes_cac
     engine, session_factory = await _session_factory(tmp_path)
     captured_payloads = []
 
-    async def fake_generate_chat_completion(request, form_data, user, bypass_filter=False, bypass_system_prompt=False):
+    async def fake_generate_agent_memory_chat_completion(
+        request, form_data, user, bypass_filter=False, bypass_system_prompt=False
+    ):
         captured_payloads.append(
             {
                 "form_data": form_data,
@@ -627,7 +629,12 @@ async def test_run_extraction_jobs_once_uses_sanitized_payload_and_completes_cac
             ]
         }
 
-    monkeypatch.setattr(extraction, "generate_chat_completion", fake_generate_chat_completion)
+    monkeypatch.setattr(
+        extraction,
+        "generate_agent_memory_internal_chat_completion",
+        fake_generate_agent_memory_chat_completion,
+        raising=False,
+    )
 
     async with session_factory() as session:
         session.add(_chat("chat-1", updated_at=1000))
@@ -661,6 +668,9 @@ async def test_run_extraction_jobs_once_uses_sanitized_payload_and_completes_cac
         assert len(captured_payloads) == 1
         payload = captured_payloads[0]["form_data"]
         prompt = payload["messages"][0]["content"]
+        assert "tools" not in payload
+        assert "tool_choice" not in payload
+        assert "tool_ids" not in payload
         assert payload["model"] == "extractor"
         assert payload["stream"] is False
         assert payload["metadata"]["task"] == "agent_memory_extraction"
@@ -679,6 +689,93 @@ async def test_run_extraction_jobs_once_uses_sanitized_payload_and_completes_cac
         assert "sk-outputsecret" not in cache.raw_memory
         assert await AgentMemoryExtractionJobs.get_job("user-1", "chat-1", db=session) is None
         assert (await AgentMemoryConsolidationJobs.get_job("user-1", "global", "", db=session)).status == "queued"
+
+    await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_generation_disabled_skips_startup_enqueue_after_completion_and_run(tmp_path, monkeypatch):
+    extraction = importlib.import_module("open_webui.utils.agent_memory_extraction")
+    engine, session_factory = await _session_factory(tmp_path)
+    calls = []
+
+    async def fake_generate_chat_completion(*args, **kwargs):
+        calls.append((args, kwargs))
+        return {}
+
+    monkeypatch.setattr(extraction, "generate_chat_completion", fake_generate_chat_completion)
+
+    async with session_factory() as session:
+        await _insert_exchange(session, "chat-1")
+        await AgentMemoryExtractionJobs.upsert_job(
+            "user-1", "chat-1", "queued", None, None, 0, None, 100, db=session
+        )
+        app = SimpleNamespace(
+            state=SimpleNamespace(
+                config=_config(
+                    ENABLE_AGENT_MEMORY=True,
+                    ENABLE_AGENT_MEMORY_GENERATION=False,
+                    AGENT_MEMORY_STARTUP_CLAIM_LIMIT=5,
+                    DEFAULT_MODELS="gpt-test",
+                )
+            )
+        )
+        request = SimpleNamespace(
+            state=SimpleNamespace(),
+            app=SimpleNamespace(
+                state=SimpleNamespace(
+                    MODELS={"gpt-test": {"id": "gpt-test", "owned_by": "openai", "info": {"params": {}}}},
+                    config=app.state.config,
+                )
+            ),
+        )
+
+        assert await extraction.enqueue_startup_agent_memory_backlog(app, now=1200, db=session) == []
+        assert await extraction.enqueue_agent_memory_extraction_after_completion(request, "chat-1", None) is False
+        assert await extraction.run_agent_memory_extraction_jobs_once(request, now=1200, limit=1, db=session) == 0
+        assert calls == []
+        assert (await AgentMemoryExtractionJobs.get_job("user-1", "chat-1", db=session)).status == "queued"
+
+    await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_generation_gate_falls_back_to_enable_agent_memory_when_split_key_absent(tmp_path, monkeypatch):
+    extraction = importlib.import_module("open_webui.utils.agent_memory_extraction")
+    engine, session_factory = await _session_factory(tmp_path)
+
+    async with session_factory() as session:
+        await _insert_exchange(session, "chat-1")
+        config = _config(ENABLE_AGENT_MEMORY=True, AGENT_MEMORY_STARTUP_CLAIM_LIMIT=5)
+        assert not hasattr(config, "ENABLE_AGENT_MEMORY_GENERATION")
+        app = SimpleNamespace(state=SimpleNamespace(config=config))
+
+        enqueued = await extraction.enqueue_startup_agent_memory_backlog(app, now=1200, db=session)
+
+        assert enqueued == ["chat-1"]
+        assert (await AgentMemoryExtractionJobs.get_job("user-1", "chat-1", db=session)).status == "queued"
+
+    await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_generation_split_key_overrides_disabled_legacy_enable_for_generation(tmp_path):
+    extraction = importlib.import_module("open_webui.utils.agent_memory_extraction")
+    engine, session_factory = await _session_factory(tmp_path)
+
+    async with session_factory() as session:
+        await _insert_exchange(session, "chat-1")
+        config = _config(
+            ENABLE_AGENT_MEMORY=False,
+            ENABLE_AGENT_MEMORY_GENERATION=True,
+            AGENT_MEMORY_STARTUP_CLAIM_LIMIT=5,
+        )
+        app = SimpleNamespace(state=SimpleNamespace(config=config))
+
+        enqueued = await extraction.enqueue_startup_agent_memory_backlog(app, now=1200, db=session)
+
+        assert enqueued == ["chat-1"]
+        assert (await AgentMemoryExtractionJobs.get_job("user-1", "chat-1", db=session)).status == "queued"
 
     await engine.dispose()
 

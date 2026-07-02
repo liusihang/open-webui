@@ -36,7 +36,7 @@ class RebuildIndexForm(BaseModel):
         return self
 
 
-class ClearAgentMemoryForm(BaseModel):
+class ResetAgentMemoryForm(BaseModel):
     user_id: str
     note_mode: Literal["convert", "delete"] = "convert"
     scope_type: Literal["global", "folder"] | None = None
@@ -47,6 +47,10 @@ class ClearAgentMemoryForm(BaseModel):
         if self.scope_type == "folder" and not (self.scope_id or "").strip():
             raise ValueError("scope_id is required when scope_type is folder")
         return self
+
+
+class ClearAgentMemoryForm(ResetAgentMemoryForm):
+    pass
 
 
 @router.get("/jobs/failed")
@@ -121,12 +125,7 @@ async def rebuild_index(
     )
 
 
-@router.post("/clear")
-async def clear_memory(
-    form_data: ClearAgentMemoryForm,
-    user=Depends(get_admin_user),
-    db: AsyncSession = Depends(get_async_session),
-):
+async def _reset_memory(form_data: ResetAgentMemoryForm, db: AsyncSession):
     return await agent_memory.clear_agent_memory(
         user_id=form_data.user_id,
         note_mode=form_data.note_mode,
@@ -134,3 +133,21 @@ async def clear_memory(
         scope_id=form_data.scope_id,
         db=db,
     )
+
+
+@router.post("/reset")
+async def reset_memory(
+    form_data: ResetAgentMemoryForm,
+    user=Depends(get_admin_user),
+    db: AsyncSession = Depends(get_async_session),
+):
+    return await _reset_memory(form_data, db)
+
+
+@router.post("/clear")
+async def clear_memory(
+    form_data: ClearAgentMemoryForm,
+    user=Depends(get_admin_user),
+    db: AsyncSession = Depends(get_async_session),
+):
+    return await _reset_memory(form_data, db)

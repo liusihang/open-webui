@@ -45,14 +45,13 @@ def set_agent_memory_disabled(meta: dict | None, disabled: bool) -> dict:
     agent_memory_meta = dict(next_meta.get('agent_memory') or {})
 
     if disabled:
+        agent_memory_meta['mode'] = 'disabled'
         agent_memory_meta['disabled'] = True
     else:
+        agent_memory_meta['mode'] = 'enabled'
         agent_memory_meta.pop('disabled', None)
 
-    if agent_memory_meta:
-        next_meta['agent_memory'] = agent_memory_meta
-    else:
-        next_meta.pop('agent_memory', None)
+    next_meta['agent_memory'] = agent_memory_meta
 
     return next_meta
 

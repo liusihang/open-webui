@@ -48,9 +48,22 @@ def _validate_scope(scope_type: str | None, scope_id: str | None) -> tuple[str |
     raise ValueError("scope_type must be global or folder with scope_id")
 
 
-def _is_agent_memory_disabled(meta: dict | None) -> bool:
+def agent_memory_mode_from_meta(meta: dict | None) -> str:
     agent_memory = (meta or {}).get("agent_memory") or {}
-    return bool(agent_memory.get("disabled"))
+    mode = agent_memory.get("mode")
+    if mode in {"enabled", "disabled"}:
+        return mode
+    if agent_memory.get("disabled") is True:
+        return "disabled"
+    return "enabled"
+
+
+def is_agent_memory_disabled_meta(meta: dict | None) -> bool:
+    return agent_memory_mode_from_meta(meta) == "disabled"
+
+
+def _is_agent_memory_disabled(meta: dict | None) -> bool:
+    return is_agent_memory_disabled_meta(meta)
 
 
 def _note_matches_agent_memory_scope(

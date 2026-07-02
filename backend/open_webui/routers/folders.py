@@ -33,26 +33,29 @@ router = APIRouter()
 
 
 def _is_agent_memory_disabled(meta: dict | None) -> bool:
-    agent_memory_meta = (meta or {}).get('agent_memory') or {}
-    return bool(agent_memory_meta.get('disabled'))
+    return agent_memory.is_agent_memory_disabled_meta(meta)
 
 
 def _merge_agent_memory_disabled_meta(meta: dict | None, old_meta: dict | None) -> dict | None:
-    if not meta or not isinstance(meta.get('agent_memory'), dict) or 'disabled' not in meta['agent_memory']:
+    if not meta or not isinstance(meta.get('agent_memory'), dict):
+        return meta
+    if 'disabled' not in meta['agent_memory'] and 'mode' not in meta['agent_memory']:
         return meta
 
     next_meta = dict(meta)
     next_agent_memory = dict((old_meta or {}).get('agent_memory') or {})
     next_agent_memory.update(next_meta.get('agent_memory') or {})
-    if next_agent_memory.get('disabled'):
+    mode = next_agent_memory.get('mode')
+    if mode not in {'enabled', 'disabled'}:
+        mode = 'disabled' if next_agent_memory.get('disabled') is True else 'enabled'
+
+    next_agent_memory['mode'] = mode
+    if mode == 'disabled':
         next_agent_memory['disabled'] = True
     else:
         next_agent_memory.pop('disabled', None)
 
-    if next_agent_memory:
-        next_meta['agent_memory'] = next_agent_memory
-    else:
-        next_meta.pop('agent_memory', None)
+    next_meta['agent_memory'] = next_agent_memory
     return next_meta
 
 

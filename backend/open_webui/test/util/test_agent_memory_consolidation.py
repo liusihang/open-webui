@@ -857,7 +857,9 @@ async def test_run_consolidation_calls_model_and_completes_artifacts(tmp_path, m
     engine, session_factory = await _session_factory(tmp_path)
     captured = []
 
-    async def fake_generate_chat_completion(request, form_data, user, bypass_filter=False, bypass_system_prompt=False):
+    async def fake_generate_agent_memory_chat_completion(
+        request, form_data, user, bypass_filter=False, bypass_system_prompt=False
+    ):
         captured.append(
             {
                 "form_data": form_data,
@@ -881,7 +883,12 @@ async def test_run_consolidation_calls_model_and_completes_artifacts(tmp_path, m
             ]
         }
 
-    monkeypatch.setattr(consolidation, "generate_chat_completion", fake_generate_chat_completion)
+    monkeypatch.setattr(
+        consolidation,
+        "generate_agent_memory_internal_chat_completion",
+        fake_generate_agent_memory_chat_completion,
+        raising=False,
+    )
     rebuild_calls = []
 
     async def fake_rebuild_agent_memory_index_for_scope(request, user_id, scope_type, scope_id="", db=None):
@@ -923,6 +930,9 @@ async def test_run_consolidation_calls_model_and_completes_artifacts(tmp_path, m
         assert await consolidation.run_agent_memory_consolidation_jobs_once(request, now=1200, limit=1, db=session) == 1
         assert len(captured) == 1
         payload = captured[0]["form_data"]
+        assert "tools" not in payload
+        assert "tool_choice" not in payload
+        assert "tool_ids" not in payload
         assert payload["model"] == "consolidator"
         assert payload["stream"] is False
         assert payload["metadata"]["task"] == "agent_memory_consolidation"
@@ -946,5 +956,86 @@ async def test_run_consolidation_calls_model_and_completes_artifacts(tmp_path, m
                 "db": session,
             }
         ]
+
+    await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_generation_disabled_skips_consolidation_run_even_with_ready_job(tmp_path, monkeypatch):
+    consolidation = importlib.import_module("open_webui.utils.agent_memory_consolidation")
+    engine, session_factory = await _session_factory(tmp_path)
+    calls = []
+
+    async def fake_generate_chat_completion(*args, **kwargs):
+        calls.append((args, kwargs))
+        return {}
+
+    monkeypatch.setattr(consolidation, "generate_chat_completion", fake_generate_chat_completion)
+
+    async with session_factory() as session:
+        session.add(_chat("global-chat"))
+        await _cache(session, "global-chat", "memory", "summary")
+        await AgentMemoryConsolidationJobs.upsert_job(
+            "user-1", "global", "", "queued", None, None, 0, None, None, 100, db=session
+        )
+        request = SimpleNamespace(
+            state=SimpleNamespace(),
+            app=SimpleNamespace(
+                state=SimpleNamespace(
+                    MODELS={"gpt-test": {"id": "gpt-test", "owned_by": "openai", "info": {"params": {}}}},
+                    config=_config(
+                        ENABLE_AGENT_MEMORY=True,
+                        ENABLE_AGENT_MEMORY_GENERATION=False,
+                        DEFAULT_MODELS="gpt-test",
+                    ),
+                )
+            ),
+        )
+
+        assert await consolidation.run_agent_memory_consolidation_jobs_once(request, now=1200, limit=1, db=session) == 0
+        assert calls == []
+        assert (await AgentMemoryConsolidationJobs.get_job("user-1", "global", "", db=session)).status == "queued"
+
+    await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_generation_split_key_overrides_disabled_legacy_enable_for_consolidation(tmp_path, monkeypatch):
+    consolidation = importlib.import_module("open_webui.utils.agent_memory_consolidation")
+    engine, session_factory = await _session_factory(tmp_path)
+    calls = []
+
+    async def fake_generate_chat_completion(request, form_data, user, bypass_filter=False, bypass_system_prompt=False):
+        calls.append(form_data)
+        return {"choices": [{"message": {"content": json.dumps({"memory_summary_md": "S", "memory_md": "M"})}}]}
+
+    async def fake_rebuild_agent_memory_index_for_scope(*args, **kwargs):
+        return None
+
+    monkeypatch.setattr(consolidation, "generate_chat_completion", fake_generate_chat_completion)
+    monkeypatch.setattr(consolidation, "rebuild_agent_memory_index_for_scope", fake_rebuild_agent_memory_index_for_scope)
+
+    async with session_factory() as session:
+        session.add(_chat("global-chat"))
+        await _cache(session, "global-chat", "memory", "summary")
+        await AgentMemoryConsolidationJobs.upsert_job(
+            "user-1", "global", "", "queued", None, None, 0, None, None, 100, db=session
+        )
+        request = SimpleNamespace(
+            state=SimpleNamespace(),
+            app=SimpleNamespace(
+                state=SimpleNamespace(
+                    MODELS={"gpt-test": {"id": "gpt-test", "owned_by": "openai", "info": {"params": {}}}},
+                    config=_config(
+                        ENABLE_AGENT_MEMORY=False,
+                        ENABLE_AGENT_MEMORY_GENERATION=True,
+                        DEFAULT_MODELS="gpt-test",
+                    ),
+                )
+            ),
+        )
+
+        assert await consolidation.run_agent_memory_consolidation_jobs_once(request, now=1200, limit=1, db=session) == 1
+        assert calls[0]["metadata"]["task"] == "agent_memory_consolidation"
 
     await engine.dispose()

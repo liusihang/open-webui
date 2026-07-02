@@ -30,6 +30,68 @@ def _app(**config_overrides):
     return SimpleNamespace(state=SimpleNamespace(config=SimpleNamespace(**config)))
 
 
+@pytest.mark.asyncio
+async def test_internal_agent_memory_chat_completion_strips_tools_and_preserves_task_metadata():
+    chat = importlib.import_module("open_webui.utils.chat")
+    captured = {}
+
+    async def fake_completion(request, form_data, user, bypass_filter=False, bypass_system_prompt=False):
+        captured.update(
+            {
+                "request": request,
+                "form_data": form_data,
+                "user": user,
+                "bypass_filter": bypass_filter,
+                "bypass_system_prompt": bypass_system_prompt,
+            }
+        )
+        return {"ok": True}
+
+    app = SimpleNamespace(state=SimpleNamespace())
+    request = SimpleNamespace(
+        app=app,
+        state=SimpleNamespace(
+            metadata={
+                "task": "ordinary_chat",
+                "tools": {"agent_memory_search": {}},
+                "features": {"web_search": True},
+            }
+        ),
+    )
+    user = SimpleNamespace(id="user-1", role="user")
+    response = await chat.generate_agent_memory_internal_chat_completion(
+        request,
+        form_data={
+            "model": "gpt-test",
+            "messages": [{"role": "user", "content": "Summarize"}],
+            "stream": False,
+            "tools": [{"type": "function", "function": {"name": "memory_update"}}],
+            "tool_choice": "auto",
+            "tool_ids": ["user-memory"],
+            "features": {"web_search": True},
+            "metadata": {
+                "task": "agent_memory_extraction",
+                "tools": {"agent_memory_search": {}},
+                "features": {"web_search": True},
+            },
+        },
+        user=user,
+        completion_fn=fake_completion,
+    )
+
+    assert response == {"ok": True}
+    payload = captured["form_data"]
+    assert captured["request"] is not request
+    assert captured["request"].app is app
+    assert not hasattr(captured["request"].state, "metadata")
+    assert payload["metadata"] == {"task": "agent_memory_extraction"}
+    assert "tools" not in payload
+    assert "tool_choice" not in payload
+    assert "tool_ids" not in payload
+    assert "features" not in payload
+    assert captured["user"] is user
+
+
 async def _session_factory(tmp_path):
     db_path = tmp_path / "agent-memory-workers.db"
     sync_engine = create_engine(f"sqlite:///{db_path}")
@@ -75,6 +137,61 @@ async def test_agent_memory_worker_loop_runs_extraction_and_consolidation_withou
         ("extraction", True, 3),
         ("consolidation", True, 2),
     ]
+
+
+@pytest.mark.asyncio
+async def test_worker_cycle_respects_generation_gate_even_when_jobs_exist(tmp_path, monkeypatch):
+    workers = importlib.import_module("open_webui.utils.agent_memory_workers")
+    engine, session_factory = await _session_factory(tmp_path)
+    app = _app(ENABLE_AGENT_MEMORY=True, ENABLE_AGENT_MEMORY_GENERATION=False)
+    calls = []
+
+    async def fake_extraction(*args, **kwargs):
+        calls.append(("extraction", args, kwargs))
+        return 1
+
+    async def fake_consolidation(*args, **kwargs):
+        calls.append(("consolidation", args, kwargs))
+        return 1
+
+    monkeypatch.setattr(workers, "run_agent_memory_extraction_jobs_once", fake_extraction)
+    monkeypatch.setattr(workers, "run_agent_memory_consolidation_jobs_once", fake_consolidation)
+
+    async with session_factory() as session:
+        await AgentMemoryExtractionJobs.upsert_job(
+            "user-1",
+            "chat-ready",
+            status="queued",
+            lease_until=None,
+            retry_at=None,
+            retry_count=0,
+            last_error=None,
+            updated_at=100,
+            db=session,
+        )
+        await AgentMemoryConsolidationJobs.upsert_job(
+            "user-1",
+            "global",
+            "",
+            status="queued",
+            lease_until=None,
+            retry_at=None,
+            retry_count=0,
+            last_error=None,
+            input_hash=None,
+            updated_at=100,
+            db=session,
+        )
+
+        assert await workers.run_agent_memory_worker_cycle(app, db=session) == {
+            "extraction_completed": 0,
+            "consolidation_completed": 0,
+        }
+        assert calls == []
+        assert (await AgentMemoryExtractionJobs.get_job("user-1", "chat-ready", db=session)).status == "queued"
+        assert (await AgentMemoryConsolidationJobs.get_job("user-1", "global", "", db=session)).status == "queued"
+
+    await engine.dispose()
 
 
 def test_lifespan_starts_and_stops_agent_memory_worker_tasks():

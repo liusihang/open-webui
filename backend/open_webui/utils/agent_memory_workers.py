@@ -8,7 +8,10 @@ from typing import Awaitable, Callable
 from open_webui.internal.db import get_async_db_context
 from open_webui.models.agent_memories import AgentMemoryConsolidationJob, AgentMemoryExtractionJob
 from open_webui.utils.agent_memory_consolidation import run_agent_memory_consolidation_jobs_once
-from open_webui.utils.agent_memory_extraction import run_agent_memory_extraction_jobs_once
+from open_webui.utils.agent_memory_extraction import (
+    is_agent_memory_generation_enabled,
+    run_agent_memory_extraction_jobs_once,
+)
 from sqlalchemy import func, or_, select
 
 log = logging.getLogger(__name__)
@@ -71,7 +74,7 @@ async def get_agent_memory_job_metrics(now: int | None = None, db=None) -> dict[
 
 async def run_agent_memory_worker_cycle(app, db=None) -> dict[str, int]:
     config = app.state.config
-    if not getattr(config, "ENABLE_AGENT_MEMORY", False):
+    if not is_agent_memory_generation_enabled(config):
         return {"extraction_completed": 0, "consolidation_completed": 0}
 
     request = _build_worker_request(app)

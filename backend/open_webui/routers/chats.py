@@ -3,7 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-from typing import Optional
+from typing import Literal, Optional
 from uuid import uuid4
 
 from fastapi import APIRouter, Depends, HTTPException, Request, status
@@ -36,7 +36,7 @@ from open_webui.utils.access_control import filter_allowed_access_grants, has_pe
 from open_webui.utils.auth import get_admin_user, get_verified_user
 from open_webui.utils.middleware import serialize_output
 from open_webui.utils.misc import get_message_list
-from pydantic import BaseModel
+from pydantic import BaseModel, model_validator
 from sqlalchemy.ext.asyncio import AsyncSession
 
 log = logging.getLogger(__name__)
@@ -1116,7 +1116,21 @@ async def send_chat_message_event_by_id(
 
 
 class ChatAgentMemoryForm(BaseModel):
-    disabled: bool
+    mode: Literal['enabled', 'disabled'] | None = None
+    disabled: bool | None = None
+
+    @model_validator(mode='after')
+    def normalize_mode(self):
+        if self.mode is None:
+            if self.disabled is None:
+                raise ValueError('mode is required')
+            self.mode = 'disabled' if self.disabled else 'enabled'
+
+        normalized_disabled = self.mode == 'disabled'
+        if self.disabled is not None and self.disabled != normalized_disabled:
+            raise ValueError('disabled does not match mode')
+        self.disabled = normalized_disabled
+        return self
 
 
 @router.post('/{id}/agent-memory')

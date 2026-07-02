@@ -28,6 +28,7 @@ from open_webui.models.chat_messages import ChatMessage
 from open_webui.models.chats import Chat, ChatModel
 from open_webui.models.folders import Folder
 from open_webui.models.groups import Group, GroupMember
+from open_webui.models.memories import Memory
 from open_webui.models.notes import Note, PinnedNote
 from open_webui.utils.auth import get_admin_user
 
@@ -44,6 +45,7 @@ async def _session_factory(tmp_path):
         AccessGrant.__table__,
         Group.__table__,
         GroupMember.__table__,
+        Memory.__table__,
         AgentMemoryExtractionCache.__table__,
         AgentMemoryExtractionJob.__table__,
         AgentMemoryConsolidationJob.__table__,
@@ -234,11 +236,39 @@ async def test_chat_opt_out_marks_meta_preserves_keys_and_stops_future_extractio
         )
 
         chat = await session.get(Chat, "chat-1")
-        assert chat.meta == {"keep": "yes", "agent_memory": {"note": "keep", "disabled": True}}
+        assert chat.meta == {
+            "keep": "yes",
+            "agent_memory": {"note": "keep", "mode": "disabled", "disabled": True},
+        }
         assert await AgentMemoryExtractionCaches.get_cache("user-1", "chat-1", db=session) is None
         assert await AgentMemoryExtractionJobs.get_job("user-1", "chat-1", db=session) is None
         assert not await extraction.enqueue_chat_extraction_if_needed(
             "chat-1",
+            config=SimpleNamespace(
+                ENABLE_AGENT_MEMORY=True,
+                AGENT_MEMORY_IDLE_THRESHOLD_SECONDS=60,
+                USER_PERMISSIONS={"features": {"agent_memory": True}},
+            ),
+            now=2000,
+            db=session,
+        )
+
+    await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_legacy_chat_disabled_meta_still_stops_future_extraction(tmp_path):
+    extraction = importlib.import_module("open_webui.utils.agent_memory_extraction")
+    engine, session_factory = await _session_factory(tmp_path)
+
+    async with session_factory() as session:
+        session.add(_chat("chat-legacy", meta={"agent_memory": {"disabled": True}}))
+        session.add(_message("chat-legacy", "u1", "user", "remember no more"))
+        session.add(_message("chat-legacy", "a1", "assistant", "ok", created_at=1001))
+        await session.commit()
+
+        assert not await extraction.enqueue_chat_extraction_if_needed(
+            "chat-legacy",
             config=SimpleNamespace(
                 ENABLE_AGENT_MEMORY=True,
                 AGENT_MEMORY_IDLE_THRESHOLD_SECONDS=60,
@@ -305,7 +335,7 @@ async def test_folder_opt_out_removes_folder_artifacts_index_and_note_linkage(tm
 
         folder = await session.get(Folder, "folder-1")
         note = await session.get(Note, "note-folder-summary")
-        assert folder.meta == {"keep": "yes", "agent_memory": {"disabled": True}}
+        assert folder.meta == {"keep": "yes", "agent_memory": {"mode": "disabled", "disabled": True}}
         assert result["extraction_caches_deleted"] == 1
         assert result["artifacts_deleted"] == 1
         assert await AgentMemoryExtractionCaches.get_cache("user-1", "folder-chat", db=session) is None
@@ -316,6 +346,58 @@ async def test_folder_opt_out_removes_folder_artifacts_index_and_note_linkage(tm
         assert deleted_collections == ["agent-memory-user-1-folder-folder-1"]
 
     await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_folder_update_mode_disabled_triggers_cleanup_path(monkeypatch):
+    folders_router = importlib.import_module("open_webui.routers.folders")
+    calls = []
+    state = {"updated": None}
+
+    old_folder = SimpleNamespace(
+        id="folder-1",
+        user_id="user-1",
+        parent_id=None,
+        meta={"agent_memory": {"note": "keep"}},
+    )
+
+    class FakeFolders:
+        @staticmethod
+        async def get_folder_by_id_and_user_id(folder_id, user_id, db=None):
+            assert folder_id == "folder-1"
+            assert user_id == "user-1"
+            return state["updated"] or old_folder
+
+        @staticmethod
+        async def update_folder_by_id_and_user_id(folder_id, user_id, form_data, db=None):
+            assert folder_id == "folder-1"
+            assert user_id == "user-1"
+            assert form_data.meta == {
+                "agent_memory": {"note": "keep", "mode": "disabled", "disabled": True}
+            }
+            state["updated"] = SimpleNamespace(id=folder_id, user_id=user_id, meta=form_data.meta)
+            return state["updated"]
+
+    async def fake_set_folder_agent_memory_disabled(user_id, folder_id, disabled, db=None):
+        calls.append({"user_id": user_id, "folder_id": folder_id, "disabled": disabled})
+        return {"updated": True}
+
+    monkeypatch.setattr(folders_router, "Folders", FakeFolders)
+    monkeypatch.setattr(
+        folders_router.agent_memory,
+        "set_folder_agent_memory_disabled",
+        fake_set_folder_agent_memory_disabled,
+    )
+
+    result = await folders_router.update_folder_name_by_id(
+        id="folder-1",
+        form_data=folders_router.FolderUpdateForm(meta={"agent_memory": {"mode": "disabled"}}),
+        user=SimpleNamespace(id="user-1"),
+        db=None,
+    )
+
+    assert result.meta["agent_memory"]["mode"] == "disabled"
+    assert calls == [{"user_id": "user-1", "folder_id": "folder-1", "disabled": True}]
 
 
 @pytest.mark.asyncio
@@ -347,7 +429,7 @@ async def test_folder_move_enqueues_old_and_new_scopes_without_rewriting_cache(t
 
 
 @pytest.mark.asyncio
-async def test_clear_agent_memory_converts_notes_and_removes_rows_and_index(tmp_path, monkeypatch):
+async def test_reset_agent_memory_converts_notes_removes_rows_index_and_preserves_source_data(tmp_path, monkeypatch):
     agent_memory = importlib.import_module("open_webui.utils.agent_memory")
     index = importlib.import_module("open_webui.utils.agent_memory_index")
     engine, session_factory = await _session_factory(tmp_path)
@@ -361,6 +443,8 @@ async def test_clear_agent_memory_converts_notes_and_removes_rows_and_index(tmp_
     monkeypatch.setattr(agent_memory, "ASYNC_VECTOR_DB_CLIENT", FakeVectorClient())
 
     async with session_factory() as session:
+        session.add(_chat("chat-1"))
+        session.add(Memory(id="memory-1", user_id="user-1", content="manual memory", created_at=1, updated_at=1))
         session.add(_note("note-global", meta={"agent_memory": {"managed": True}, "keep": "yes"}))
         await session.commit()
         await _seed_cache(session, "chat-1")
@@ -386,6 +470,8 @@ async def test_clear_agent_memory_converts_notes_and_removes_rows_and_index(tmp_
         assert await AgentMemoryExtractionJobs.get_job("user-1", "chat-1", db=session) is None
         assert await AgentMemoryConsolidationJobs.get_job("user-1", "global", "", db=session) is None
         assert await AgentMemoryArtifacts.list_artifacts("user-1", "global", "", db=session) == []
+        assert await session.get(Chat, "chat-1") is not None
+        assert await session.get(Memory, "memory-1") is not None
         assert deleted_collections == ["agent-memory-user-1-global", "agent-memory-user-1-folder-folder-1"]
 
     await engine.dispose()
@@ -580,6 +666,7 @@ def _route(router, path, method):
         ("/extract/run", "POST"),
         ("/consolidate/run", "POST"),
         ("/index/rebuild", "POST"),
+        ("/reset", "POST"),
         ("/clear", "POST"),
     ],
 )
@@ -590,6 +677,48 @@ def test_agent_memory_ops_routes_are_admin_only(path, method):
     dependency_calls = {dependency.call for dependency in route.dependant.dependencies}
 
     assert get_admin_user in dependency_calls
+
+
+def test_chat_agent_memory_form_accepts_mode_and_legacy_disabled_payloads():
+    chats_router = importlib.import_module("open_webui.routers.chats")
+
+    mode_form = chats_router.ChatAgentMemoryForm(mode="disabled")
+    legacy_form = chats_router.ChatAgentMemoryForm(disabled=True)
+
+    assert mode_form.mode == "disabled"
+    assert mode_form.disabled is True
+    assert legacy_form.mode == "disabled"
+    assert legacy_form.disabled is True
+
+
+@pytest.mark.asyncio
+async def test_chat_agent_memory_route_sends_disabled_from_mode(monkeypatch):
+    chats_router = importlib.import_module("open_webui.routers.chats")
+    calls = []
+
+    async def fake_get_chat_by_id_and_user_id(chat_id, user_id, db=None):
+        return SimpleNamespace(id=chat_id, user_id=user_id)
+
+    async def fake_set_chat_agent_memory_disabled(user_id, chat_id, disabled, db=None):
+        calls.append({"user_id": user_id, "chat_id": chat_id, "disabled": disabled, "db": db})
+        return {"updated": True}
+
+    monkeypatch.setattr(chats_router.Chats, "get_chat_by_id_and_user_id", fake_get_chat_by_id_and_user_id)
+    monkeypatch.setattr(
+        chats_router.agent_memory,
+        "set_chat_agent_memory_disabled",
+        fake_set_chat_agent_memory_disabled,
+    )
+
+    result = await chats_router.update_chat_agent_memory_by_id(
+        id="chat-1",
+        form_data=chats_router.ChatAgentMemoryForm(mode="enabled"),
+        user=SimpleNamespace(id="user-1"),
+        db="db",
+    )
+
+    assert result == {"updated": True}
+    assert calls == [{"user_id": "user-1", "chat_id": "chat-1", "disabled": False, "db": "db"}]
 
 
 def test_chat_agent_memory_opt_out_route_is_owner_gated_and_registered():
