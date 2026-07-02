@@ -1420,7 +1420,7 @@ def test_agent_memory_admin_settings_wire_operational_controls():
     assert "runAgentMemoryExtraction" in component
     assert "runAgentMemoryConsolidation" in component
     assert "rebuildAgentMemoryIndex" in component
-    assert "clearAgentMemory" in component
+    assert "resetAgentMemory" in component
     assert "retryFailedAgentMemoryJobs" in component
     assert "failedExtractionJobs" in component
     assert "failedConsolidationJobs" in component
@@ -1447,6 +1447,7 @@ def test_agent_memory_admin_settings_wire_operational_controls():
         "/agent-memory/extract/run",
         "/agent-memory/consolidate/run",
         "/agent-memory/index/rebuild",
+        "/agent-memory/reset",
         "/agent-memory/clear",
     ]:
         assert endpoint in api
