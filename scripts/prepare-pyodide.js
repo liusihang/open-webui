@@ -41,6 +41,7 @@ export const pypiPackages = [
 const DEFAULT_CACHE_POLICY = 'prefer-local';
 const DEFAULT_PYPI_API_BASE_URL = 'https://pypi.org/pypi';
 const CACHE_POLICIES = new Set(['prefer-local', 'refresh', 'local-only']);
+const RETRYABLE_FETCH_PATTERNS = [/terminated/i, /fetch failed/i, /abort/i, /timeout/i, /eof/i];
 
 function resolvePath(baseDir, relativePath) {
 	return path.join(baseDir, relativePath);
@@ -105,6 +106,10 @@ function buildPypiMetadataUrl(packageName, pypiApiBaseUrl) {
 	return `${normalizeBaseUrl(pypiApiBaseUrl)}/${packageName}/json`;
 }
 
+function normalizePypiProjectSlug(packageName) {
+	return packageName.replace(/_/g, '-');
+}
+
 export function rewriteWheelUrl(wheelUrl, pypiFilesBaseUrl) {
 	if (!pypiFilesBaseUrl) {
 		return wheelUrl;
@@ -142,6 +147,83 @@ async function readJson(filePath) {
 
 function normalizePypiPackageName(packageName) {
 	return packageName.replace(/-/g, '_');
+}
+
+export function buildPypiMetadataUrls(packageName, pypiApiBaseUrl) {
+	const urls = [];
+	const seen = new Set();
+
+	for (const baseUrl of [pypiApiBaseUrl, DEFAULT_PYPI_API_BASE_URL]) {
+		for (const candidate of [packageName, normalizePypiProjectSlug(packageName)]) {
+			const metadataUrl = buildPypiMetadataUrl(candidate, baseUrl);
+			if (seen.has(metadataUrl)) {
+				continue;
+			}
+			seen.add(metadataUrl);
+			urls.push(metadataUrl);
+		}
+	}
+
+	return urls;
+}
+
+function isRetryableFetchError(error) {
+	const message = String(error?.stack || error?.message || error);
+	return RETRYABLE_FETCH_PATTERNS.some((pattern) => pattern.test(message));
+}
+
+async function retryAsync(label, fn, { attempts = 3, delayMs = 1000 } = {}) {
+	let lastError;
+
+	for (let attempt = 1; attempt <= attempts; attempt += 1) {
+		try {
+			return await fn();
+		} catch (error) {
+			lastError = error;
+			if (attempt === attempts || !isRetryableFetchError(error)) {
+				throw error;
+			}
+			console.warn(
+				`${label} failed on attempt ${attempt}/${attempts}: ${error}. Retrying in ${delayMs}ms`
+			);
+			await new Promise((resolve) => setTimeout(resolve, delayMs));
+		}
+	}
+
+	throw lastError;
+}
+
+async function fetchJsonWithFallback(packageName, config) {
+	let lastStatus = null;
+
+	for (const metadataUrl of buildPypiMetadataUrls(packageName, config.pypiApiBaseUrl)) {
+		const res = await fetch(metadataUrl);
+		if (res.ok) {
+			return await res.json();
+		}
+		lastStatus = res.status;
+	}
+
+	throw new Error(`Failed to fetch PyPI metadata for ${packageName}: ${lastStatus ?? 'unknown'}`);
+}
+
+async function downloadWheelWithFallback(wheelUrl, dest, config) {
+	const urls = [rewriteWheelUrl(wheelUrl, config.pypiFilesBaseUrl), wheelUrl].filter(
+		(url, index, array) => array.indexOf(url) === index
+	);
+
+	let lastStatus = null;
+	for (const candidateUrl of urls) {
+		const wheelRes = await fetch(candidateUrl);
+		if (wheelRes.ok) {
+			const buffer = Buffer.from(await wheelRes.arrayBuffer());
+			await writeFile(dest, buffer);
+			return buffer.length;
+		}
+		lastStatus = wheelRes.status;
+	}
+
+	throw new Error(`Failed to download wheel ${wheelUrl}: ${lastStatus ?? 'unknown'}`);
 }
 
 function normalizeVersionRange(versionSpec) {
@@ -235,9 +317,11 @@ async function installMicropipPackages(micropip, config) {
 
 	for (const pkg of packages) {
 		console.log(`Installing package: ${pkg}`);
-		await micropip.install(pkg, {
-			index_urls: config.pypiIndexUrls
-		});
+		await retryAsync(`Installing package ${pkg}`, () =>
+			micropip.install(pkg, {
+				index_urls: config.pypiIndexUrls
+			})
+		);
 	}
 }
 
@@ -319,13 +403,13 @@ async function downloadPyPIWheels(baseDir, config) {
 
 	for (const pkg of pypiPackages) {
 		console.log(`Fetching PyPI metadata for: ${pkg}`);
-		const metadataUrl = buildPypiMetadataUrl(pkg, config.pypiApiBaseUrl);
-		const res = await fetch(metadataUrl);
-		if (!res.ok) {
-			console.error(`Failed to fetch PyPI metadata for ${pkg}: ${res.status}`);
+		let meta;
+		try {
+			meta = await fetchJsonWithFallback(pkg, config);
+		} catch (error) {
+			console.error(String(error));
 			continue;
 		}
-		const meta = await res.json();
 		const version = meta.info.version;
 		const files = meta.urls || [];
 		const wheel = files.find(
@@ -342,15 +426,13 @@ async function downloadPyPIWheels(baseDir, config) {
 			console.log(`  Already exists: ${wheel.filename}`);
 		} catch {
 			console.log(`  Downloading: ${wheel.filename}`);
-			const wheelUrl = rewriteWheelUrl(wheel.url, config.pypiFilesBaseUrl);
-			const wheelRes = await fetch(wheelUrl);
-			if (!wheelRes.ok) {
-				console.error(`  Failed to download ${wheel.filename}: ${wheelRes.status}`);
+			try {
+				const bytes = await downloadWheelWithFallback(wheel.url, dest, config);
+				console.log(`  Saved: ${dest} (${bytes} bytes)`);
+			} catch (error) {
+				console.error(`  ${error}`);
 				continue;
 			}
-			const buffer = Buffer.from(await wheelRes.arrayBuffer());
-			await writeFile(dest, buffer);
-			console.log(`  Saved: ${dest} (${buffer.length} bytes)`);
 		}
 
 		const normalizedName = normalizePypiPackageName(pkg);

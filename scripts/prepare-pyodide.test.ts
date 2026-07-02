@@ -5,6 +5,7 @@ import path from 'path';
 import { afterEach, describe, expect, it } from 'vitest';
 
 import {
+	buildPypiMetadataUrls,
 	buildPyodideFetchConfig,
 	isLocalPyodideCacheUsable,
 	pypiPackages,
@@ -75,6 +76,17 @@ describe('buildPyodideFetchConfig', () => {
 		expect(config.pypiApiBaseUrl).toBe('https://pypi.example.com/pypi');
 		expect(config.pypiFilesBaseUrl).toBe('https://files.example.com/packages');
 		expect(config.pypiIndexUrls).toEqual(['https://pypi.example.com/pypi']);
+	});
+});
+
+describe('buildPypiMetadataUrls', () => {
+	it('tries mirror-compatible slug variants before falling back to upstream', () => {
+		expect(buildPypiMetadataUrls('et_xmlfile', 'https://pypi.tuna.tsinghua.edu.cn/pypi')).toEqual([
+			'https://pypi.tuna.tsinghua.edu.cn/pypi/et_xmlfile/json',
+			'https://pypi.tuna.tsinghua.edu.cn/pypi/et-xmlfile/json',
+			'https://pypi.org/pypi/et_xmlfile/json',
+			'https://pypi.org/pypi/et-xmlfile/json'
+		]);
 	});
 });
 
