@@ -75,7 +75,9 @@ RUN mkdir -p static/pyodide && npm run pyodide:fetch
 
 COPY . .
 ENV APP_BUILD_HASH=${BUILD_HASH}
-RUN npm run build
+# Pyodide assets were already prefetched above into a cacheable dependency
+# layer, so the final frontend build should not trigger a second fetch pass.
+RUN ./node_modules/.bin/vite build
 
 ######## WebUI backend ########
 FROM python:3.11-slim-bookworm AS base
