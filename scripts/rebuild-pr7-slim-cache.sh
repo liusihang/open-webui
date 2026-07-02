@@ -70,6 +70,10 @@ require_cmd() {
 	command -v "$1" >/dev/null 2>&1 || die "missing required command: $1"
 }
 
+shell_quote() {
+	printf '%q' "$1"
+}
+
 validate_remote_path() {
 	local name="$1"
 	local path="$2"
@@ -91,15 +95,9 @@ validate_local_dir() {
 
 extract_archive_to_remote_context() {
 	echo "==> Archiving ${COMMIT} to ${REMOTE_HOST}:${REMOTE_CONTEXT_DIR}"
-	COPYFILE_DISABLE=1 COPY_EXTENDED_ATTRIBUTES_DISABLE=1 git archive --format=tar "$COMMIT" |
-		ssh "$REMOTE_HOST" bash -s -- "$REMOTE_CONTEXT_DIR" <<'EOF'
-set -euo pipefail
-
-context_dir="$1"
-rm -rf "$context_dir"
-mkdir -p "$context_dir"
-tar -xf - -C "$context_dir"
-EOF
+	COPYFILE_DISABLE=1 COPY_EXTENDED_ATTRIBUTES_DISABLE=1 git archive --format=tar "$COMMIT" -o "$LOCAL_ARCHIVE_TAR"
+	scp "$LOCAL_ARCHIVE_TAR" "${REMOTE_HOST}:${REMOTE_ARCHIVE_TAR}" >/dev/null
+	ssh "$REMOTE_HOST" "bash -lc 'set -euo pipefail; rm -rf $(shell_quote "$REMOTE_CONTEXT_DIR"); mkdir -p $(shell_quote "$REMOTE_CONTEXT_DIR"); tar -xf $(shell_quote "$REMOTE_ARCHIVE_TAR") -C $(shell_quote "$REMOTE_CONTEXT_DIR"); rm -f $(shell_quote "$REMOTE_ARCHIVE_TAR")'"
 }
 
 overlay_seed_pyodide_dir() {
@@ -108,34 +106,23 @@ overlay_seed_pyodide_dir() {
 	echo "==> Overlaying seeded static/pyodide from ${SEED_PYODIDE_DIR}"
 	COPYFILE_DISABLE=1 COPY_EXTENDED_ATTRIBUTES_DISABLE=1 tar \
 		-C "$(dirname "$SEED_PYODIDE_DIR")" \
-		-cf - \
-		"$(basename "$SEED_PYODIDE_DIR")" |
-		ssh "$REMOTE_HOST" bash -s -- "$REMOTE_CONTEXT_DIR/static" <<'EOF'
-set -euo pipefail
-
-static_dir="$1"
-mkdir -p "$static_dir"
-rm -rf "$static_dir/pyodide"
-tar -xf - -C "$static_dir"
-EOF
+		-cf "$LOCAL_SEED_TAR" \
+		"$(basename "$SEED_PYODIDE_DIR")"
+	scp "$LOCAL_SEED_TAR" "${REMOTE_HOST}:${REMOTE_SEED_TAR}" >/dev/null
+	ssh "$REMOTE_HOST" "bash -lc 'set -euo pipefail; mkdir -p $(shell_quote "$REMOTE_CONTEXT_DIR/static"); rm -rf $(shell_quote "$REMOTE_CONTEXT_DIR/static/pyodide"); tar -xf $(shell_quote "$REMOTE_SEED_TAR") -C $(shell_quote "$REMOTE_CONTEXT_DIR/static"); rm -f $(shell_quote "$REMOTE_SEED_TAR")'"
 }
 
 patch_remote_dockerfile() {
 	[[ -n "$DOCKERFILE_SYNTAX_IMAGE$NODE_BASE_IMAGE$PYTHON_BASE_IMAGE" ]] || return 0
 
 	echo "==> Patching staged Dockerfile image sources"
-	ssh "$REMOTE_HOST" bash -s -- \
-		"$REMOTE_CONTEXT_DIR" \
-		"$DOCKERFILE_SYNTAX_IMAGE" \
-		"$NODE_BASE_IMAGE" \
-		"$PYTHON_BASE_IMAGE" <<'EOF'
-set -euo pipefail
-
-context_dir="$1"
-dockerfile_syntax_image="$2"
-node_base_image="$3"
-python_base_image="$4"
-
+	{
+		printf 'set -euo pipefail\n'
+		printf 'context_dir=%q\n' "$REMOTE_CONTEXT_DIR"
+		printf 'dockerfile_syntax_image=%q\n' "$DOCKERFILE_SYNTAX_IMAGE"
+		printf 'node_base_image=%q\n' "$NODE_BASE_IMAGE"
+		printf 'python_base_image=%q\n' "$PYTHON_BASE_IMAGE"
+		cat <<'EOF'
 cd "$context_dir"
 cp Dockerfile Dockerfile.pre-rebuild-helper
 
@@ -178,6 +165,7 @@ if python_base_image:
 path.write_text(text)
 PY
 EOF
+	} | ssh "$REMOTE_HOST" bash -s
 }
 
 while [[ $# -gt 0 ]]; do
@@ -270,7 +258,9 @@ done
 
 require_cmd git
 require_cmd ssh
+require_cmd scp
 require_cmd tar
+require_cmd mktemp
 
 validate_remote_path "--build-dir" "$BUILD_DIR"
 validate_remote_path "--cache-dir" "$CACHE_DIR"
@@ -286,46 +276,36 @@ fi
 
 REMOTE_CONTEXT_DIR="${BUILD_DIR%/}/src"
 REMOTE_LOG="${BUILD_DIR%/}/docker-build-${BUILD_HASH}.log"
+REMOTE_ARCHIVE_TAR="${BUILD_DIR%/}/src.tar"
+REMOTE_SEED_TAR="${BUILD_DIR%/}/seed-pyodide.tar"
+LOCAL_STAGE_DIR="$(mktemp -d "${TMPDIR:-/tmp}/openwebui-pr7-slim.XXXXXX")"
+LOCAL_ARCHIVE_TAR="${LOCAL_STAGE_DIR}/src.tar"
+LOCAL_SEED_TAR="${LOCAL_STAGE_DIR}/seed-pyodide.tar"
+trap 'rm -rf "$LOCAL_STAGE_DIR"' EXIT
 
 extract_archive_to_remote_context
 overlay_seed_pyodide_dir
 patch_remote_dockerfile
 
 echo "==> Starting cached PR7 slim build for ${IMAGE_TAG}"
-ssh "$REMOTE_HOST" bash -s -- \
-	"$REMOTE_CONTEXT_DIR" \
-	"$CACHE_DIR" \
-	"$BUILDER_NAME" \
-	"$IMAGE_TAG" \
-	"$BUILD_HASH" \
-	"$REMOTE_LOG" \
-	"$PLATFORM" \
-	"$PROXY_URL" \
-	"$APT_DEBIAN_MIRROR" \
-	"$APT_SECURITY_MIRROR" \
-	"$NPM_REGISTRY" \
-	"$UV_DEFAULT_INDEX" \
-	"$PYODIDE_PYPI_API_BASE_URL" \
-	"$PYODIDE_PYPI_FILES_BASE_URL" \
-	"$PYODIDE_PYPI_INDEX_URLS" <<'EOF'
-set -euo pipefail
-
-context_dir="$1"
-cache_root="$2"
-builder_name="$3"
-image_tag="$4"
-build_hash="$5"
-log_path="$6"
-platform="$7"
-proxy_url="$8"
-apt_debian_mirror="$9"
-apt_security_mirror="${10}"
-npm_registry="${11}"
-uv_default_index="${12}"
-pyodide_pypi_api_base_url="${13}"
-pyodide_pypi_files_base_url="${14}"
-pyodide_pypi_index_urls="${15}"
-
+{
+	printf 'set -euo pipefail\n'
+	printf 'context_dir=%q\n' "$REMOTE_CONTEXT_DIR"
+	printf 'cache_root=%q\n' "$CACHE_DIR"
+	printf 'builder_name=%q\n' "$BUILDER_NAME"
+	printf 'image_tag=%q\n' "$IMAGE_TAG"
+	printf 'build_hash=%q\n' "$BUILD_HASH"
+	printf 'log_path=%q\n' "$REMOTE_LOG"
+	printf 'platform=%q\n' "$PLATFORM"
+	printf 'proxy_url=%q\n' "$PROXY_URL"
+	printf 'apt_debian_mirror=%q\n' "$APT_DEBIAN_MIRROR"
+	printf 'apt_security_mirror=%q\n' "$APT_SECURITY_MIRROR"
+	printf 'npm_registry=%q\n' "$NPM_REGISTRY"
+	printf 'uv_default_index=%q\n' "$UV_DEFAULT_INDEX"
+	printf 'pyodide_pypi_api_base_url=%q\n' "$PYODIDE_PYPI_API_BASE_URL"
+	printf 'pyodide_pypi_files_base_url=%q\n' "$PYODIDE_PYPI_FILES_BASE_URL"
+	printf 'pyodide_pypi_index_urls=%q\n' "$PYODIDE_PYPI_INDEX_URLS"
+	cat <<'EOF'
 mkdir -p "$(dirname "$log_path")" "$cache_root"
 cache_current="$cache_root/current"
 cache_next="$cache_root/cache-$build_hash-$(date +%Y%m%d%H%M%S)"
@@ -411,3 +391,4 @@ echo "IMAGE=$image_tag"
 echo "LOG=$log_path"
 echo "CACHE_CURRENT=$cache_current"
 EOF
+} | ssh "$REMOTE_HOST" bash -s
