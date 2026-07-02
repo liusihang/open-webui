@@ -106,6 +106,9 @@ EXPECTED_AGENT_MEMORY_INDEXES = {
 
 EXPECTED_AGENT_MEMORY_ADMIN_CONFIG_KEYS = {
     "ENABLE_AGENT_MEMORY",
+    "ENABLE_AGENT_MEMORY_GENERATION",
+    "ENABLE_AGENT_MEMORY_USE",
+    "ENABLE_AGENT_MEMORY_DEDICATED_TOOLS",
     "AGENT_MEMORY_EXTRACTION_MODEL",
     "AGENT_MEMORY_CONSOLIDATION_MODEL",
     "AGENT_MEMORY_IDLE_THRESHOLD_SECONDS",
@@ -344,6 +347,9 @@ async def test_agent_memory_admin_config_disables_feature_when_global_switch_is_
         "PENDING_USER_OVERLAY_CONTENT": "",
         "RESPONSE_WATERMARK": "",
         "ENABLE_AGENT_MEMORY": False,
+        "ENABLE_AGENT_MEMORY_GENERATION": False,
+        "ENABLE_AGENT_MEMORY_USE": False,
+        "ENABLE_AGENT_MEMORY_DEDICATED_TOOLS": False,
         "AGENT_MEMORY_EXTRACTION_MODEL": "",
         "AGENT_MEMORY_CONSOLIDATION_MODEL": "",
         "AGENT_MEMORY_IDLE_THRESHOLD_SECONDS": 900,
@@ -359,6 +365,9 @@ async def test_agent_memory_admin_config_disables_feature_when_global_switch_is_
     response = await auths.get_admin_config(request, user=SimpleNamespace(id="admin"))
 
     assert response["ENABLE_AGENT_MEMORY"] is False
+    assert response["ENABLE_AGENT_MEMORY_GENERATION"] is False
+    assert response["ENABLE_AGENT_MEMORY_USE"] is False
+    assert response["ENABLE_AGENT_MEMORY_DEDICATED_TOOLS"] is False
     assert EXPECTED_AGENT_MEMORY_ADMIN_CONFIG_KEYS <= set(response)
     assert response["AGENT_MEMORY_EXTRACTION_MODEL"] == ""
     assert response["AGENT_MEMORY_CONSOLIDATION_MODEL"] == ""
@@ -396,6 +405,9 @@ async def test_agent_memory_admin_config_preserves_blank_numeric_settings_on_sav
         "PENDING_USER_OVERLAY_CONTENT": "",
         "RESPONSE_WATERMARK": "",
         "ENABLE_AGENT_MEMORY": False,
+        "ENABLE_AGENT_MEMORY_GENERATION": False,
+        "ENABLE_AGENT_MEMORY_USE": False,
+        "ENABLE_AGENT_MEMORY_DEDICATED_TOOLS": False,
         "AGENT_MEMORY_EXTRACTION_MODEL": "extractor",
         "AGENT_MEMORY_CONSOLIDATION_MODEL": "consolidator",
         "AGENT_MEMORY_IDLE_THRESHOLD_SECONDS": 900,
@@ -420,6 +432,9 @@ async def test_agent_memory_admin_config_preserves_blank_numeric_settings_on_sav
 
     response = await auths.update_admin_config(request, form_data, user=SimpleNamespace(id="admin"))
 
+    assert response["ENABLE_AGENT_MEMORY_GENERATION"] is False
+    assert response["ENABLE_AGENT_MEMORY_USE"] is False
+    assert response["ENABLE_AGENT_MEMORY_DEDICATED_TOOLS"] is False
     assert response["AGENT_MEMORY_IDLE_THRESHOLD_SECONDS"] == ""
     assert response["AGENT_MEMORY_STARTUP_CLAIM_LIMIT"] == ""
     assert response["AGENT_MEMORY_EXTRACTION_CLAIM_LIMIT"] == ""
@@ -427,6 +442,42 @@ async def test_agent_memory_admin_config_preserves_blank_numeric_settings_on_sav
     assert response["AGENT_MEMORY_LEASE_SECONDS"] == ""
     assert response["AGENT_MEMORY_RETRY_BACKOFF_SECONDS"] == ""
     assert response["AGENT_MEMORY_SUMMARY_TOKEN_BUDGET"] == ""
+
+
+def test_agent_memory_split_config_defaults_fallback_to_legacy_flag(monkeypatch):
+    monkeypatch.setenv("ENABLE_AGENT_MEMORY", "true")
+    monkeypatch.delenv("ENABLE_AGENT_MEMORY_GENERATION", raising=False)
+    monkeypatch.delenv("ENABLE_AGENT_MEMORY_USE", raising=False)
+    monkeypatch.delenv("ENABLE_AGENT_MEMORY_DEDICATED_TOOLS", raising=False)
+
+    backend_config = importlib.reload(importlib.import_module("open_webui.config"))
+
+    assert backend_config.ENABLE_AGENT_MEMORY.value is True
+    assert backend_config.ENABLE_AGENT_MEMORY_GENERATION.value is True
+    assert backend_config.ENABLE_AGENT_MEMORY_USE.value is True
+    assert backend_config.ENABLE_AGENT_MEMORY_DEDICATED_TOOLS.value is True
+
+    monkeypatch.setenv("ENABLE_AGENT_MEMORY", "false")
+    backend_config = importlib.reload(backend_config)
+
+    assert backend_config.ENABLE_AGENT_MEMORY.value is False
+    assert backend_config.ENABLE_AGENT_MEMORY_GENERATION.value is False
+    assert backend_config.ENABLE_AGENT_MEMORY_USE.value is False
+    assert backend_config.ENABLE_AGENT_MEMORY_DEDICATED_TOOLS.value is False
+
+
+def test_agent_memory_split_config_env_overrides_legacy_fallback(monkeypatch):
+    monkeypatch.setenv("ENABLE_AGENT_MEMORY", "true")
+    monkeypatch.setenv("ENABLE_AGENT_MEMORY_GENERATION", "false")
+    monkeypatch.setenv("ENABLE_AGENT_MEMORY_USE", "false")
+    monkeypatch.setenv("ENABLE_AGENT_MEMORY_DEDICATED_TOOLS", "false")
+
+    backend_config = importlib.reload(importlib.import_module("open_webui.config"))
+
+    assert backend_config.ENABLE_AGENT_MEMORY.value is True
+    assert backend_config.ENABLE_AGENT_MEMORY_GENERATION.value is False
+    assert backend_config.ENABLE_AGENT_MEMORY_USE.value is False
+    assert backend_config.ENABLE_AGENT_MEMORY_DEDICATED_TOOLS.value is False
 
 
 def test_agent_memory_features_are_independent_from_memories():

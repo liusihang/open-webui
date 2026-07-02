@@ -187,6 +187,9 @@ from open_webui.config import (
     ENABLE_CODE_INTERPRETER,
     ENABLE_COMMUNITY_SHARING,
     ENABLE_AGENT_MEMORY,
+    ENABLE_AGENT_MEMORY_DEDICATED_TOOLS,
+    ENABLE_AGENT_MEMORY_GENERATION,
+    ENABLE_AGENT_MEMORY_USE,
     # Direct Connections
     ENABLE_DIRECT_CONNECTIONS,
     ENABLE_EVALUATION_ARENA_MODELS,
@@ -1868,6 +1871,9 @@ app.state.config.ENABLE_IMAGE_GENERATION = ENABLE_IMAGE_GENERATION
 app.state.config.ENABLE_IMAGE_PROMPT_GENERATION = ENABLE_IMAGE_PROMPT_GENERATION
 app.state.config.ENABLE_MEMORIES = ENABLE_MEMORIES
 app.state.config.ENABLE_AGENT_MEMORY = ENABLE_AGENT_MEMORY
+app.state.config.ENABLE_AGENT_MEMORY_GENERATION = ENABLE_AGENT_MEMORY_GENERATION
+app.state.config.ENABLE_AGENT_MEMORY_USE = ENABLE_AGENT_MEMORY_USE
+app.state.config.ENABLE_AGENT_MEMORY_DEDICATED_TOOLS = ENABLE_AGENT_MEMORY_DEDICATED_TOOLS
 app.state.config.AGENT_MEMORY_EXTRACTION_MODEL = AGENT_MEMORY_EXTRACTION_MODEL
 app.state.config.AGENT_MEMORY_CONSOLIDATION_MODEL = AGENT_MEMORY_CONSOLIDATION_MODEL
 app.state.config.AGENT_MEMORY_IDLE_THRESHOLD_SECONDS = AGENT_MEMORY_IDLE_THRESHOLD_SECONDS
@@ -3440,6 +3446,9 @@ async def get_app_config(request: Request):
                     'enable_memories': app.state.config.ENABLE_MEMORIES,
                     'enable_agent_mode': app.state.config.ENABLE_AGENT_MODE,
                     'enable_agent_memory': app.state.config.ENABLE_AGENT_MEMORY,
+                    'enable_agent_memory_generation': app.state.config.ENABLE_AGENT_MEMORY_GENERATION,
+                    'enable_agent_memory_use': app.state.config.ENABLE_AGENT_MEMORY_USE,
+                    'enable_agent_memory_dedicated_tools': app.state.config.ENABLE_AGENT_MEMORY_DEDICATED_TOOLS,
                     **(
                         {
                             'enable_onedrive_personal': ENABLE_ONEDRIVE_PERSONAL,

@@ -34,10 +34,17 @@ def _json(payload: dict[str, Any]) -> str:
     return json.dumps(payload, ensure_ascii=False)
 
 
+def _config_flag(config: Any, name: str) -> bool:
+    return bool(getattr(config, name, getattr(config, "ENABLE_AGENT_MEMORY", False)))
+
+
 async def _is_agent_memory_allowed(request: Request | None, user: dict | None, db: Any = None) -> bool:
     if request is None:
         return False
-    if not getattr(request.app.state.config, "ENABLE_AGENT_MEMORY", False):
+    config = request.app.state.config
+    if not _config_flag(config, "ENABLE_AGENT_MEMORY_USE"):
+        return False
+    if not _config_flag(config, "ENABLE_AGENT_MEMORY_DEDICATED_TOOLS"):
         return False
     user_id = _user_id(user)
     if not user_id:

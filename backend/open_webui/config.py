@@ -623,6 +623,32 @@ ENABLE_AGENT_MEMORY = ConfigVar(
     os.getenv('ENABLE_AGENT_MEMORY', 'False').lower() == 'true',
 )
 
+
+def _agent_memory_split_flag_default(env_name: str) -> bool:
+    value = os.getenv(env_name)
+    if value is not None:
+        return value.lower() == 'true'
+    return bool(ENABLE_AGENT_MEMORY.value)
+
+
+ENABLE_AGENT_MEMORY_GENERATION = ConfigVar(
+    'ENABLE_AGENT_MEMORY_GENERATION',
+    'agent_memory.generation.enable',
+    _agent_memory_split_flag_default('ENABLE_AGENT_MEMORY_GENERATION'),
+)
+
+ENABLE_AGENT_MEMORY_USE = ConfigVar(
+    'ENABLE_AGENT_MEMORY_USE',
+    'agent_memory.use.enable',
+    _agent_memory_split_flag_default('ENABLE_AGENT_MEMORY_USE'),
+)
+
+ENABLE_AGENT_MEMORY_DEDICATED_TOOLS = ConfigVar(
+    'ENABLE_AGENT_MEMORY_DEDICATED_TOOLS',
+    'agent_memory.dedicated_tools.enable',
+    _agent_memory_split_flag_default('ENABLE_AGENT_MEMORY_DEDICATED_TOOLS'),
+)
+
 AGENT_MEMORY_EXTRACTION_MODEL = ConfigVar(
     'AGENT_MEMORY_EXTRACTION_MODEL',
     'agent_memory.extraction.model',

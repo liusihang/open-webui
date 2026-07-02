@@ -1838,7 +1838,11 @@ async def apply_agent_memory_read_path(
     params = metadata.get('params') if isinstance(metadata.get('params'), dict) else {}
     if params.get('function_calling') != 'native':
         return form_data
-    if not getattr(request.app.state.config, 'ENABLE_AGENT_MEMORY', False):
+    if not getattr(
+        request.app.state.config,
+        'ENABLE_AGENT_MEMORY_USE',
+        getattr(request.app.state.config, 'ENABLE_AGENT_MEMORY', False),
+    ):
         return form_data
 
     user_id = getattr(user, 'id', None) or (user.get('id') if isinstance(user, dict) else None)

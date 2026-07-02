@@ -27,7 +27,19 @@ async def _session_factory(tmp_path):
     return engine, async_sessionmaker(engine, expire_on_commit=False)
 
 
-def _request(*, enabled=True, embedding=None, relevance_threshold=0.9):
+def _request(
+    *,
+    enabled=True,
+    use_enabled=None,
+    dedicated_tools_enabled=None,
+    embedding=None,
+    relevance_threshold=0.9,
+):
+    if use_enabled is None:
+        use_enabled = enabled
+    if dedicated_tools_enabled is None:
+        dedicated_tools_enabled = enabled
+
     async def default_embedding(text, prefix=None):
         if isinstance(text, list):
             return [[1.0] for _ in text]
@@ -39,6 +51,8 @@ def _request(*, enabled=True, embedding=None, relevance_threshold=0.9):
                 EMBEDDING_FUNCTION=embedding or default_embedding,
                 config=SimpleNamespace(
                     ENABLE_AGENT_MEMORY=enabled,
+                    ENABLE_AGENT_MEMORY_USE=use_enabled,
+                    ENABLE_AGENT_MEMORY_DEDICATED_TOOLS=dedicated_tools_enabled,
                     USER_PERMISSIONS={"features": {"agent_memory": True}},
                     RELEVANCE_THRESHOLD=relevance_threshold,
                 ),
@@ -186,6 +200,55 @@ async def test_direct_agent_memory_tools_deny_when_server_permission_denies(tmp_
 
 
 @pytest.mark.asyncio
+async def test_direct_agent_memory_tools_deny_when_dedicated_tools_disabled(tmp_path, monkeypatch):
+    agent_tools = importlib.import_module("open_webui.tools.agent_memory")
+    index = importlib.import_module("open_webui.utils.agent_memory_index")
+    engine, session_factory = await _session_factory(tmp_path)
+
+    class FailingVectorClient:
+        async def search(self, collection_name, vectors, filter=None, limit=10):
+            raise AssertionError("dedicated-tools-disabled search must not reach vector search")
+
+    monkeypatch.setattr(index, "ASYNC_VECTOR_DB_CLIENT", FailingVectorClient())
+
+    async with session_factory() as session:
+        await _seed_scope(session)
+        request = _request(enabled=True, use_enabled=True, dedicated_tools_enabled=False)
+        search_result = json.loads(
+            await agent_tools.agent_memory_search(
+                "runtime",
+                __request__=request,
+                __user__=_user_dict(),
+                __metadata__={"chat_id": "chat-1", "features": {"agent_memory": True}},
+                __db__=session,
+            )
+        )
+        read_result = json.loads(
+            await agent_tools.agent_memory_read(
+                "MEMORY.md",
+                scope="global",
+                __request__=request,
+                __user__=_user_dict(),
+                __metadata__={"chat_id": "chat-1", "features": {"agent_memory": True}},
+                __db__=session,
+            )
+        )
+        list_result = json.loads(
+            await agent_tools.agent_memory_list(
+                __request__=request,
+                __user__=_user_dict(),
+                __metadata__={"chat_id": "chat-1", "features": {"agent_memory": True}},
+                __db__=session,
+            )
+        )
+
+    assert search_result == {"results": []}
+    assert "error" in read_result
+    assert list_result == {"artifacts": []}
+    await engine.dispose()
+
+
+@pytest.mark.asyncio
 async def test_search_filters_vector_rows_to_current_artifact_path_and_revision(tmp_path, monkeypatch):
     agent_tools = importlib.import_module("open_webui.tools.agent_memory")
     index = importlib.import_module("open_webui.utils.agent_memory_index")
@@ -291,6 +354,63 @@ async def test_exact_three_read_only_tools_registered_when_enabled(monkeypatch):
     agent_tool_names = sorted(name for name in registered if name.startswith("agent_memory_"))
     assert agent_tool_names == ["agent_memory_list", "agent_memory_read", "agent_memory_search"]
     assert not any(name in registered for name in ["agent_memory_add", "agent_memory_delete", "agent_memory_replace"])
+
+
+@pytest.mark.asyncio
+async def test_agent_memory_tools_do_not_register_when_use_enabled_but_dedicated_tools_disabled(monkeypatch):
+    tools = importlib.import_module("open_webui.utils.tools")
+
+    async def allow_permission(user_id, permission, user_permissions):
+        return permission == "features.agent_memory"
+
+    monkeypatch.setattr(tools, "has_permission", allow_permission)
+
+    registered = await tools.get_builtin_tools(
+        _request(enabled=True, use_enabled=True, dedicated_tools_enabled=False),
+        {"__user__": _user_dict(), "__metadata__": {"chat_id": "chat-1"}},
+        features={"agent_memory": True},
+        model={"info": {"meta": {"builtinTools": {"agent_memory": True}}}},
+    )
+
+    assert not [name for name in registered if name.startswith("agent_memory_")]
+
+
+@pytest.mark.asyncio
+async def test_agent_memory_tools_do_not_register_when_use_disabled_even_if_dedicated_tools_enabled(monkeypatch):
+    tools = importlib.import_module("open_webui.utils.tools")
+
+    async def allow_permission(user_id, permission, user_permissions):
+        return permission == "features.agent_memory"
+
+    monkeypatch.setattr(tools, "has_permission", allow_permission)
+
+    registered = await tools.get_builtin_tools(
+        _request(enabled=True, use_enabled=False, dedicated_tools_enabled=True),
+        {"__user__": _user_dict(), "__metadata__": {"chat_id": "chat-1"}},
+        features={"agent_memory": True},
+        model={"info": {"meta": {"builtinTools": {"agent_memory": True}}}},
+    )
+
+    assert not [name for name in registered if name.startswith("agent_memory_")]
+
+
+@pytest.mark.asyncio
+async def test_agent_memory_tools_do_not_register_when_builtin_category_disabled(monkeypatch):
+    tools = importlib.import_module("open_webui.utils.tools")
+
+    async def allow_permission(user_id, permission, user_permissions):
+        return permission == "features.agent_memory"
+
+    monkeypatch.setattr(tools, "has_permission", allow_permission)
+
+    registered = await tools.get_builtin_tools(
+        _request(),
+        {"__user__": _user_dict(), "__metadata__": {"chat_id": "chat-1"}},
+        features={"agent_memory": True},
+        model={"info": {"meta": {"builtinTools": {"agent_memory": False}}}},
+    )
+
+    assert not [name for name in registered if name.startswith("agent_memory_")]
 
 
 @pytest.mark.asyncio

@@ -1021,6 +1021,9 @@ async def get_admin_config(request: Request, user=Depends(get_admin_user)):
         'ENABLE_CALENDAR': request.app.state.config.ENABLE_CALENDAR,
         'ENABLE_MEMORIES': request.app.state.config.ENABLE_MEMORIES,
         'ENABLE_AGENT_MEMORY': request.app.state.config.ENABLE_AGENT_MEMORY,
+        'ENABLE_AGENT_MEMORY_GENERATION': request.app.state.config.ENABLE_AGENT_MEMORY_GENERATION,
+        'ENABLE_AGENT_MEMORY_USE': request.app.state.config.ENABLE_AGENT_MEMORY_USE,
+        'ENABLE_AGENT_MEMORY_DEDICATED_TOOLS': request.app.state.config.ENABLE_AGENT_MEMORY_DEDICATED_TOOLS,
         'AGENT_MEMORY_EXTRACTION_MODEL': request.app.state.config.AGENT_MEMORY_EXTRACTION_MODEL,
         'AGENT_MEMORY_CONSOLIDATION_MODEL': request.app.state.config.AGENT_MEMORY_CONSOLIDATION_MODEL,
         'AGENT_MEMORY_IDLE_THRESHOLD_SECONDS': request.app.state.config.AGENT_MEMORY_IDLE_THRESHOLD_SECONDS,
@@ -1061,6 +1064,9 @@ class AdminConfig(BaseModel):
     ENABLE_CALENDAR: bool
     ENABLE_MEMORIES: bool
     ENABLE_AGENT_MEMORY: bool = False
+    ENABLE_AGENT_MEMORY_GENERATION: bool = False
+    ENABLE_AGENT_MEMORY_USE: bool = False
+    ENABLE_AGENT_MEMORY_DEDICATED_TOOLS: bool = False
     AGENT_MEMORY_EXTRACTION_MODEL: str | None = ''
     AGENT_MEMORY_CONSOLIDATION_MODEL: str | None = ''
     AGENT_MEMORY_IDLE_THRESHOLD_SECONDS: int | str | None = 900
@@ -1108,6 +1114,9 @@ async def update_admin_config(request: Request, form_data: AdminConfig, user=Dep
     request.app.state.config.ENABLE_CALENDAR = form_data.ENABLE_CALENDAR
     request.app.state.config.ENABLE_MEMORIES = form_data.ENABLE_MEMORIES
     request.app.state.config.ENABLE_AGENT_MEMORY = form_data.ENABLE_AGENT_MEMORY
+    request.app.state.config.ENABLE_AGENT_MEMORY_GENERATION = form_data.ENABLE_AGENT_MEMORY_GENERATION
+    request.app.state.config.ENABLE_AGENT_MEMORY_USE = form_data.ENABLE_AGENT_MEMORY_USE
+    request.app.state.config.ENABLE_AGENT_MEMORY_DEDICATED_TOOLS = form_data.ENABLE_AGENT_MEMORY_DEDICATED_TOOLS
     request.app.state.config.AGENT_MEMORY_EXTRACTION_MODEL = (form_data.AGENT_MEMORY_EXTRACTION_MODEL or '').strip()
     request.app.state.config.AGENT_MEMORY_CONSOLIDATION_MODEL = (
         form_data.AGENT_MEMORY_CONSOLIDATION_MODEL or ''
@@ -1177,6 +1186,9 @@ async def update_admin_config(request: Request, form_data: AdminConfig, user=Dep
         'ENABLE_CALENDAR': request.app.state.config.ENABLE_CALENDAR,
         'ENABLE_MEMORIES': request.app.state.config.ENABLE_MEMORIES,
         'ENABLE_AGENT_MEMORY': request.app.state.config.ENABLE_AGENT_MEMORY,
+        'ENABLE_AGENT_MEMORY_GENERATION': request.app.state.config.ENABLE_AGENT_MEMORY_GENERATION,
+        'ENABLE_AGENT_MEMORY_USE': request.app.state.config.ENABLE_AGENT_MEMORY_USE,
+        'ENABLE_AGENT_MEMORY_DEDICATED_TOOLS': request.app.state.config.ENABLE_AGENT_MEMORY_DEDICATED_TOOLS,
         'AGENT_MEMORY_EXTRACTION_MODEL': request.app.state.config.AGENT_MEMORY_EXTRACTION_MODEL,
         'AGENT_MEMORY_CONSOLIDATION_MODEL': request.app.state.config.AGENT_MEMORY_CONSOLIDATION_MODEL,
         'AGENT_MEMORY_IDLE_THRESHOLD_SECONDS': request.app.state.config.AGENT_MEMORY_IDLE_THRESHOLD_SECONDS,

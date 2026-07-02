@@ -564,7 +564,16 @@ async def get_builtin_tools(
     # Agent Memory tools are read-only and intentionally separate from User Memory tools.
     if (
         is_builtin_tool_enabled('agent_memory')
-        and getattr(request.app.state.config, 'ENABLE_AGENT_MEMORY', False)
+        and getattr(
+            request.app.state.config,
+            'ENABLE_AGENT_MEMORY_USE',
+            getattr(request.app.state.config, 'ENABLE_AGENT_MEMORY', False),
+        )
+        and getattr(
+            request.app.state.config,
+            'ENABLE_AGENT_MEMORY_DEDICATED_TOOLS',
+            getattr(request.app.state.config, 'ENABLE_AGENT_MEMORY', False),
+        )
         and user.get('id')
         and await has_user_permission('agent_memory')
     ):

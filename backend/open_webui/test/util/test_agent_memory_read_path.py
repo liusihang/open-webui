@@ -26,12 +26,16 @@ async def _session_factory(tmp_path):
     return engine, async_sessionmaker(engine, expire_on_commit=False)
 
 
-def _request(*, enabled=True, budget=1200):
+def _request(*, enabled=True, use_enabled=None, dedicated_tools_enabled=True, budget=1200):
+    if use_enabled is None:
+        use_enabled = enabled
     return SimpleNamespace(
         app=SimpleNamespace(
             state=SimpleNamespace(
                 config=SimpleNamespace(
                     ENABLE_AGENT_MEMORY=enabled,
+                    ENABLE_AGENT_MEMORY_USE=use_enabled,
+                    ENABLE_AGENT_MEMORY_DEDICATED_TOOLS=dedicated_tools_enabled,
                     AGENT_MEMORY_SUMMARY_TOKEN_BUDGET=budget,
                     USER_PERMISSIONS={"features": {"agent_memory": True}},
                 )
@@ -140,6 +144,44 @@ async def test_native_read_path_uses_server_permission_without_client_feature_to
         )
 
     assert "server allowed summary" in form_data["messages"][0]["content"]
+    await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_native_read_path_injects_when_use_enabled_and_dedicated_tools_disabled(tmp_path):
+    middleware = importlib.import_module("open_webui.utils.middleware")
+    engine, session_factory = await _session_factory(tmp_path)
+
+    async with session_factory() as session:
+        await _artifact(session, "global", "", "use-only summary")
+
+        form_data = await middleware.apply_agent_memory_read_path(
+            _request(enabled=True, use_enabled=True, dedicated_tools_enabled=False),
+            _form_data(chat_id=""),
+            user=_user(),
+            db=session,
+        )
+
+    assert "use-only summary" in form_data["messages"][0]["content"]
+    await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_native_read_path_does_not_inject_when_use_disabled_even_if_legacy_enabled(tmp_path):
+    middleware = importlib.import_module("open_webui.utils.middleware")
+    engine, session_factory = await _session_factory(tmp_path)
+
+    async with session_factory() as session:
+        await _artifact(session, "global", "", "should not inject")
+
+        form_data = await middleware.apply_agent_memory_read_path(
+            _request(enabled=True, use_enabled=False, dedicated_tools_enabled=True),
+            _form_data(chat_id=""),
+            user=_user(),
+            db=session,
+        )
+
+    assert form_data["messages"][0]["role"] == "user"
     await engine.dispose()
 
 
