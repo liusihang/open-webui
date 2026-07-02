@@ -67,6 +67,34 @@ scripts/rebuild-pr7-slim-cache.sh \
 If mirrors are still insufficient, pass the local Clash HTTP proxy with
 `--proxy-url`.
 
+When you already have a known-good local `static/pyodide` cache and want the
+remote build to reuse it instead of rebuilding from scratch, seed it into the
+staged clean archive:
+
+```bash
+scripts/rebuild-pr7-slim-cache.sh \
+  --remote aiserver \
+  --git-ref HEAD \
+  --image-tag "open-webui:pr7-slim-$(git rev-parse --short=10 HEAD)" \
+  --build-dir /home/aiserver/staging/openwebui-pr7-slim-build \
+  --cache-dir /home/aiserver/.cache/openwebui-pr7-slim-buildx \
+  --seed-pyodide-dir "$(pwd)/static/pyodide" \
+  --proxy-url http://192.168.2.201:7897 \
+  --dockerfile-syntax-image docker.m.daocloud.io/docker/dockerfile:1 \
+  --node-base-image docker.m.daocloud.io/library/node:22-alpine3.20 \
+  --python-base-image docker.m.daocloud.io/library/python:3.11-slim-bookworm \
+  --npm-registry https://registry.npmmirror.com \
+  --uv-default-index https://pypi.tuna.tsinghua.edu.cn/simple \
+  --pyodide-pypi-api-base-url https://pypi.tuna.tsinghua.edu.cn/pypi \
+  --pyodide-pypi-files-base-url https://pypi.tuna.tsinghua.edu.cn/packages \
+  --pyodide-pypi-index-urls https://pypi.tuna.tsinghua.edu.cn/pypi
+```
+
+That path keeps the clean `git archive` source ref, overlays only the seeded
+`static/pyodide/` artifact into remote staging, patches the staged Dockerfile
+base-image sources when Docker Hub is flaky, and still builds a fresh image
+with `docker buildx build --load`.
+
 ## Pyodide Cache And Mirror Controls
 
 The frontend build now prefers a checked-in or prebuilt `static/pyodide`

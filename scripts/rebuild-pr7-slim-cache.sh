@@ -13,6 +13,13 @@ APT_DEBIAN_MIRROR="${OPENWEBUI_PR7_SLIM_APT_DEBIAN_MIRROR:-}"
 APT_SECURITY_MIRROR="${OPENWEBUI_PR7_SLIM_APT_SECURITY_MIRROR:-}"
 NPM_REGISTRY="${OPENWEBUI_PR7_SLIM_NPM_REGISTRY:-}"
 UV_DEFAULT_INDEX="${OPENWEBUI_PR7_SLIM_UV_DEFAULT_INDEX:-}"
+PYODIDE_PYPI_API_BASE_URL="${OPENWEBUI_PR7_SLIM_PYODIDE_PYPI_API_BASE_URL:-}"
+PYODIDE_PYPI_FILES_BASE_URL="${OPENWEBUI_PR7_SLIM_PYODIDE_PYPI_FILES_BASE_URL:-}"
+PYODIDE_PYPI_INDEX_URLS="${OPENWEBUI_PR7_SLIM_PYODIDE_PYPI_INDEX_URLS:-}"
+SEED_PYODIDE_DIR="${OPENWEBUI_PR7_SLIM_SEED_PYODIDE_DIR:-}"
+DOCKERFILE_SYNTAX_IMAGE="${OPENWEBUI_PR7_SLIM_DOCKERFILE_SYNTAX_IMAGE:-}"
+NODE_BASE_IMAGE="${OPENWEBUI_PR7_SLIM_NODE_BASE_IMAGE:-}"
+PYTHON_BASE_IMAGE="${OPENWEBUI_PR7_SLIM_PYTHON_BASE_IMAGE:-}"
 
 usage() {
 	cat <<'EOF'
@@ -32,6 +39,17 @@ Options:
   --apt-security-mirror <url>   Optional APT_SECURITY_MIRROR build arg.
   --npm-registry <url>          Optional NPM_REGISTRY build arg.
   --uv-default-index <url>      Optional UV_DEFAULT_INDEX build arg.
+  --pyodide-pypi-api-base-url <url>
+                                 Optional PYODIDE_PYPI_API_BASE_URL build arg.
+  --pyodide-pypi-files-base-url <url>
+                                 Optional PYODIDE_PYPI_FILES_BASE_URL build arg.
+  --pyodide-pypi-index-urls <csv>
+                                 Optional PYODIDE_PYPI_INDEX_URLS build arg.
+  --seed-pyodide-dir <dir>      Optional local static/pyodide seed dir overlay.
+  --dockerfile-syntax-image <image>
+                                 Optional remote staging patch for Dockerfile syntax image.
+  --node-base-image <image>     Optional remote staging patch for the frontend base image.
+  --python-base-image <image>   Optional remote staging patch for the backend base image.
   -h, --help                    Show this help.
 
 Behavior:
@@ -52,11 +70,6 @@ require_cmd() {
 	command -v "$1" >/dev/null 2>&1 || die "missing required command: $1"
 }
 
-shell_quote() {
-	local value="${1//\'/\'\\\'\'}"
-	printf "'%s'" "$value"
-}
-
 validate_remote_path() {
 	local name="$1"
 	local path="$2"
@@ -67,6 +80,104 @@ validate_remote_path() {
 			die "$name is too broad for build-cache operations: $path"
 			;;
 	esac
+}
+
+validate_local_dir() {
+	local name="$1"
+	local dir="$2"
+
+	[[ -d "$dir" ]] || die "$name must be an existing directory: $dir"
+}
+
+extract_archive_to_remote_context() {
+	echo "==> Archiving ${COMMIT} to ${REMOTE_HOST}:${REMOTE_CONTEXT_DIR}"
+	COPYFILE_DISABLE=1 COPY_EXTENDED_ATTRIBUTES_DISABLE=1 git archive --format=tar "$COMMIT" |
+		ssh "$REMOTE_HOST" bash -s -- "$REMOTE_CONTEXT_DIR" <<'EOF'
+set -euo pipefail
+
+context_dir="$1"
+rm -rf "$context_dir"
+mkdir -p "$context_dir"
+tar -xf - -C "$context_dir"
+EOF
+}
+
+overlay_seed_pyodide_dir() {
+	[[ -n "$SEED_PYODIDE_DIR" ]] || return 0
+
+	echo "==> Overlaying seeded static/pyodide from ${SEED_PYODIDE_DIR}"
+	COPYFILE_DISABLE=1 COPY_EXTENDED_ATTRIBUTES_DISABLE=1 tar \
+		-C "$(dirname "$SEED_PYODIDE_DIR")" \
+		-cf - \
+		"$(basename "$SEED_PYODIDE_DIR")" |
+		ssh "$REMOTE_HOST" bash -s -- "$REMOTE_CONTEXT_DIR/static" <<'EOF'
+set -euo pipefail
+
+static_dir="$1"
+mkdir -p "$static_dir"
+rm -rf "$static_dir/pyodide"
+tar -xf - -C "$static_dir"
+EOF
+}
+
+patch_remote_dockerfile() {
+	[[ -n "$DOCKERFILE_SYNTAX_IMAGE$NODE_BASE_IMAGE$PYTHON_BASE_IMAGE" ]] || return 0
+
+	echo "==> Patching staged Dockerfile image sources"
+	ssh "$REMOTE_HOST" bash -s -- \
+		"$REMOTE_CONTEXT_DIR" \
+		"$DOCKERFILE_SYNTAX_IMAGE" \
+		"$NODE_BASE_IMAGE" \
+		"$PYTHON_BASE_IMAGE" <<'EOF'
+set -euo pipefail
+
+context_dir="$1"
+dockerfile_syntax_image="$2"
+node_base_image="$3"
+python_base_image="$4"
+
+cd "$context_dir"
+cp Dockerfile Dockerfile.pre-rebuild-helper
+
+python3 - "$dockerfile_syntax_image" "$node_base_image" "$python_base_image" <<'PY'
+from pathlib import Path
+import re
+import sys
+
+dockerfile_syntax_image, node_base_image, python_base_image = sys.argv[1:4]
+path = Path("Dockerfile")
+text = path.read_text()
+
+if dockerfile_syntax_image:
+    text = re.sub(
+        r"^# syntax=.*$",
+        f"# syntax={dockerfile_syntax_image}",
+        text,
+        count=1,
+        flags=re.MULTILINE,
+    )
+
+if node_base_image:
+    text = re.sub(
+        r"^FROM --platform=\$BUILDPLATFORM \S+ AS build$",
+        f"FROM --platform=$BUILDPLATFORM {node_base_image} AS build",
+        text,
+        count=1,
+        flags=re.MULTILINE,
+    )
+
+if python_base_image:
+    text = re.sub(
+        r"^FROM \S+ AS base$",
+        f"FROM {python_base_image} AS base",
+        text,
+        count=1,
+        flags=re.MULTILINE,
+    )
+
+path.write_text(text)
+PY
+EOF
 }
 
 while [[ $# -gt 0 ]]; do
@@ -119,6 +230,34 @@ while [[ $# -gt 0 ]]; do
 			UV_DEFAULT_INDEX="${2:?missing value for --uv-default-index}"
 			shift 2
 			;;
+		--pyodide-pypi-api-base-url)
+			PYODIDE_PYPI_API_BASE_URL="${2:?missing value for --pyodide-pypi-api-base-url}"
+			shift 2
+			;;
+		--pyodide-pypi-files-base-url)
+			PYODIDE_PYPI_FILES_BASE_URL="${2:?missing value for --pyodide-pypi-files-base-url}"
+			shift 2
+			;;
+		--pyodide-pypi-index-urls)
+			PYODIDE_PYPI_INDEX_URLS="${2:?missing value for --pyodide-pypi-index-urls}"
+			shift 2
+			;;
+		--seed-pyodide-dir)
+			SEED_PYODIDE_DIR="${2:?missing value for --seed-pyodide-dir}"
+			shift 2
+			;;
+		--dockerfile-syntax-image)
+			DOCKERFILE_SYNTAX_IMAGE="${2:?missing value for --dockerfile-syntax-image}"
+			shift 2
+			;;
+		--node-base-image)
+			NODE_BASE_IMAGE="${2:?missing value for --node-base-image}"
+			shift 2
+			;;
+		--python-base-image)
+			PYTHON_BASE_IMAGE="${2:?missing value for --python-base-image}"
+			shift 2
+			;;
 		-h | --help)
 			usage
 			exit 0
@@ -131,9 +270,13 @@ done
 
 require_cmd git
 require_cmd ssh
+require_cmd tar
 
 validate_remote_path "--build-dir" "$BUILD_DIR"
 validate_remote_path "--cache-dir" "$CACHE_DIR"
+if [[ -n "$SEED_PYODIDE_DIR" ]]; then
+	validate_local_dir "--seed-pyodide-dir" "$SEED_PYODIDE_DIR"
+fi
 
 COMMIT="$(git rev-parse "$GIT_REF")"
 BUILD_HASH="$(git rev-parse --short=10 "$GIT_REF")"
@@ -144,109 +287,127 @@ fi
 REMOTE_CONTEXT_DIR="${BUILD_DIR%/}/src"
 REMOTE_LOG="${BUILD_DIR%/}/docker-build-${BUILD_HASH}.log"
 
-echo "==> Archiving ${COMMIT} to ${REMOTE_HOST}:${REMOTE_CONTEXT_DIR}"
-remote_prepare_cmd=$(
-	printf "set -euo pipefail; rm -rf %s; mkdir -p %s; tar -xf - -C %s" \
-		"$(shell_quote "$REMOTE_CONTEXT_DIR")" \
-		"$(shell_quote "$REMOTE_CONTEXT_DIR")" \
-		"$(shell_quote "$REMOTE_CONTEXT_DIR")"
-)
-COPYFILE_DISABLE=1 git archive --format=tar "$COMMIT" | ssh "$REMOTE_HOST" "bash -lc $(shell_quote "$remote_prepare_cmd")"
+extract_archive_to_remote_context
+overlay_seed_pyodide_dir
+patch_remote_dockerfile
 
-remote_build_script=$(
-	cat <<EOF
+echo "==> Starting cached PR7 slim build for ${IMAGE_TAG}"
+ssh "$REMOTE_HOST" bash -s -- \
+	"$REMOTE_CONTEXT_DIR" \
+	"$CACHE_DIR" \
+	"$BUILDER_NAME" \
+	"$IMAGE_TAG" \
+	"$BUILD_HASH" \
+	"$REMOTE_LOG" \
+	"$PLATFORM" \
+	"$PROXY_URL" \
+	"$APT_DEBIAN_MIRROR" \
+	"$APT_SECURITY_MIRROR" \
+	"$NPM_REGISTRY" \
+	"$UV_DEFAULT_INDEX" \
+	"$PYODIDE_PYPI_API_BASE_URL" \
+	"$PYODIDE_PYPI_FILES_BASE_URL" \
+	"$PYODIDE_PYPI_INDEX_URLS" <<'EOF'
 set -euo pipefail
 
-context_dir=$(shell_quote "$REMOTE_CONTEXT_DIR")
-cache_root=$(shell_quote "$CACHE_DIR")
-builder_name=$(shell_quote "$BUILDER_NAME")
-image_tag=$(shell_quote "$IMAGE_TAG")
-build_hash=$(shell_quote "$BUILD_HASH")
-log_path=$(shell_quote "$REMOTE_LOG")
-platform=$(shell_quote "$PLATFORM")
-proxy_url=$(shell_quote "$PROXY_URL")
-apt_debian_mirror=$(shell_quote "$APT_DEBIAN_MIRROR")
-apt_security_mirror=$(shell_quote "$APT_SECURITY_MIRROR")
-npm_registry=$(shell_quote "$NPM_REGISTRY")
-uv_default_index=$(shell_quote "$UV_DEFAULT_INDEX")
+context_dir="$1"
+cache_root="$2"
+builder_name="$3"
+image_tag="$4"
+build_hash="$5"
+log_path="$6"
+platform="$7"
+proxy_url="$8"
+apt_debian_mirror="$9"
+apt_security_mirror="${10}"
+npm_registry="${11}"
+uv_default_index="${12}"
+pyodide_pypi_api_base_url="${13}"
+pyodide_pypi_files_base_url="${14}"
+pyodide_pypi_index_urls="${15}"
 
-mkdir -p "\$(dirname "\$log_path")" "\$cache_root"
-cache_current="\$cache_root/current"
-cache_next="\$cache_root/cache-\$build_hash-\$(date +%Y%m%d%H%M%S)"
+mkdir -p "$(dirname "$log_path")" "$cache_root"
+cache_current="$cache_root/current"
+cache_next="$cache_root/cache-$build_hash-$(date +%Y%m%d%H%M%S)"
 
-if ! docker buildx inspect "\$builder_name" >/dev/null 2>&1; then
-	docker buildx create --name "\$builder_name" --use >/dev/null
+if ! docker buildx inspect "$builder_name" >/dev/null 2>&1; then
+	docker buildx create --name "$builder_name" --use >/dev/null
 else
-	docker buildx use "\$builder_name" >/dev/null
+	docker buildx use "$builder_name" >/dev/null
 fi
-docker buildx inspect "\$builder_name" --bootstrap >/dev/null
+docker buildx inspect "$builder_name" --bootstrap >/dev/null
 
 build_cmd=(
 	docker buildx build
-	--builder "\$builder_name"
+	--builder "$builder_name"
 	--load
 	--progress=plain
-	--build-arg "BUILD_HASH=\$build_hash"
+	--build-arg "BUILD_HASH=$build_hash"
 	--build-arg "USE_EXTERNAL_SERVICES_SLIM=true"
-	--cache-to "type=local,dest=\$cache_next,mode=max"
-	-t "\$image_tag"
+	--cache-to "type=local,dest=$cache_next,mode=max"
+	-t "$image_tag"
 )
 
-if [[ -e "\$cache_current" ]]; then
-	build_cmd+=(--cache-from "type=local,src=\$cache_current")
+if [[ -e "$cache_current" ]]; then
+	build_cmd+=(--cache-from "type=local,src=$cache_current")
 fi
-if [[ -n "\$platform" ]]; then
-	build_cmd+=(--platform "\$platform")
+if [[ -n "$platform" ]]; then
+	build_cmd+=(--platform "$platform")
 fi
-if [[ -n "\$apt_debian_mirror" ]]; then
-	build_cmd+=(--build-arg "APT_DEBIAN_MIRROR=\$apt_debian_mirror")
+if [[ -n "$apt_debian_mirror" ]]; then
+	build_cmd+=(--build-arg "APT_DEBIAN_MIRROR=$apt_debian_mirror")
 fi
-if [[ -n "\$apt_security_mirror" ]]; then
-	build_cmd+=(--build-arg "APT_SECURITY_MIRROR=\$apt_security_mirror")
+if [[ -n "$apt_security_mirror" ]]; then
+	build_cmd+=(--build-arg "APT_SECURITY_MIRROR=$apt_security_mirror")
 fi
-if [[ -n "\$npm_registry" ]]; then
-	build_cmd+=(--build-arg "NPM_REGISTRY=\$npm_registry")
+if [[ -n "$npm_registry" ]]; then
+	build_cmd+=(--build-arg "NPM_REGISTRY=$npm_registry")
 fi
-if [[ -n "\$uv_default_index" ]]; then
-	build_cmd+=(--build-arg "UV_DEFAULT_INDEX=\$uv_default_index")
+if [[ -n "$uv_default_index" ]]; then
+	build_cmd+=(--build-arg "UV_DEFAULT_INDEX=$uv_default_index")
+fi
+if [[ -n "$pyodide_pypi_api_base_url" ]]; then
+	build_cmd+=(--build-arg "PYODIDE_PYPI_API_BASE_URL=$pyodide_pypi_api_base_url")
+fi
+if [[ -n "$pyodide_pypi_files_base_url" ]]; then
+	build_cmd+=(--build-arg "PYODIDE_PYPI_FILES_BASE_URL=$pyodide_pypi_files_base_url")
+fi
+if [[ -n "$pyodide_pypi_index_urls" ]]; then
+	build_cmd+=(--build-arg "PYODIDE_PYPI_INDEX_URLS=$pyodide_pypi_index_urls")
 fi
 
 env_args=()
-if [[ -n "\$proxy_url" ]]; then
+if [[ -n "$proxy_url" ]]; then
 	env_args+=(
-		"HTTP_PROXY=\$proxy_url"
-		"HTTPS_PROXY=\$proxy_url"
-		"ALL_PROXY=\$proxy_url"
+		"HTTP_PROXY=$proxy_url"
+		"HTTPS_PROXY=$proxy_url"
+		"ALL_PROXY=$proxy_url"
 		"NO_PROXY=localhost,127.0.0.1"
 	)
 	build_cmd+=(
-		--build-arg "HTTP_PROXY=\$proxy_url"
-		--build-arg "HTTPS_PROXY=\$proxy_url"
-		--build-arg "ALL_PROXY=\$proxy_url"
+		--build-arg "HTTP_PROXY=$proxy_url"
+		--build-arg "HTTPS_PROXY=$proxy_url"
+		--build-arg "ALL_PROXY=$proxy_url"
 		--build-arg "NO_PROXY=localhost,127.0.0.1"
 	)
 fi
 
-build_cmd+=("\$context_dir")
+build_cmd+=("$context_dir")
 
-mv "\$log_path" "\$log_path.prev.\$(date +%s)" 2>/dev/null || true
-printf 'build_hash=%s\nimage_tag=%s\ncache_next=%s\n' "\$build_hash" "\$image_tag" "\$cache_next" > "\$log_path"
+mv "$log_path" "$log_path.prev.$(date +%s)" 2>/dev/null || true
+printf 'build_hash=%s\nimage_tag=%s\ncache_next=%s\n' "$build_hash" "$image_tag" "$cache_next" > "$log_path"
 
-env "\${env_args[@]}" "\${build_cmd[@]}" >> "\$log_path" 2>&1
+env "${env_args[@]}" "${build_cmd[@]}" >> "$log_path" 2>&1
 
-if [[ -L "\$cache_current" || ! -e "\$cache_current" ]]; then
-	ln -sfn "\$cache_next" "\$cache_current.next"
-	mv -Tf "\$cache_current.next" "\$cache_current"
+if [[ -L "$cache_current" || ! -e "$cache_current" ]]; then
+	ln -sfn "$cache_next" "$cache_current.next"
+	mv -Tf "$cache_current.next" "$cache_current"
 else
-	mv "\$cache_current" "\$cache_current.previous.\$(date +%Y%m%d%H%M%S)"
-	ln -s "\$cache_next" "\$cache_current"
+	mv "$cache_current" "$cache_current.previous.$(date +%Y%m%d%H%M%S)"
+	ln -s "$cache_next" "$cache_current"
 fi
 
-echo "IMAGE=\$image_tag"
-echo "LOG=\$log_path"
-echo "CACHE_CURRENT=\$cache_current"
+echo "IMAGE=$image_tag"
+echo "LOG=$log_path"
+echo "CACHE_CURRENT=$cache_current"
 EOF
-)
-
-echo "==> Starting cached PR7 slim build for ${IMAGE_TAG}"
-ssh "$REMOTE_HOST" "bash -lc $(shell_quote "$remote_build_script")"
