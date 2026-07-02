@@ -49,6 +49,7 @@ RUN set -e; \
 
 COPY package.json package-lock.json ./
 COPY scripts/prepare-pyodide.js ./scripts/prepare-pyodide.js
+COPY static/pyodide ./static/pyodide
 # Cypress is only used for E2E tests; skip its binary download in production image builds.
 ENV CYPRESS_INSTALL_BINARY=0
 # onnxruntime-node otherwise tries to download CUDA providers during npm install on Linux/x64.
