@@ -4,9 +4,9 @@
 	import { toast } from 'svelte-sonner';
 
 	import {
-		clearAgentMemory,
 		getAgentMemoryFailedJobs,
 		rebuildAgentMemoryIndex,
+		resetAgentMemory,
 		retryFailedAgentMemoryJobs,
 		runAgentMemoryConsolidation,
 		runAgentMemoryExtraction
@@ -103,7 +103,7 @@
 		);
 	};
 
-	const clearMemoryHandler = async () => {
+	const resetMemoryHandler = async () => {
 		if (!operationUserId.trim()) {
 			toast.error($i18n.t('User ID is required'));
 			return;
@@ -111,20 +111,22 @@
 		if (!validateOperationScope()) {
 			return;
 		}
-		if (!confirm($i18n.t('Clear Agent Memory?'))) {
+		if (
+			!confirm($i18n.t('Reset Agent Memory artifacts? Existing chats will remain intact.'))
+		) {
 			return;
 		}
 		await runOperation(
-			'clear',
+			'reset',
 			() =>
-				clearAgentMemory(
+				resetAgentMemory(
 					localStorage.token,
 					operationUserId,
 					noteMode,
 					scopeType(),
 					scopeId()
 				),
-			'Agent Memory cleared'
+			'Agent Memory artifacts reset'
 		);
 	};
 
@@ -140,6 +142,12 @@
 		if (!adminConfig) {
 			return;
 		}
+
+		adminConfig.ENABLE_AGENT_MEMORY = Boolean(
+			adminConfig.ENABLE_AGENT_MEMORY_GENERATION ||
+				adminConfig.ENABLE_AGENT_MEMORY_USE ||
+				adminConfig.ENABLE_AGENT_MEMORY_DEDICATED_TOOLS
+		);
 
 		const res = await updateAdminConfig(localStorage.token, adminConfig).catch((error) => {
 			toast.error(`${error}`);
@@ -171,9 +179,23 @@
 
 				<div class="mb-3 flex w-full justify-between items-center">
 					<div class="self-center text-xs font-medium">
-						{$i18n.t('Enable Agent Memory')}
+						{$i18n.t('Generate Agent Memory')}
 					</div>
-					<Switch bind:state={adminConfig.ENABLE_AGENT_MEMORY} />
+					<Switch bind:state={adminConfig.ENABLE_AGENT_MEMORY_GENERATION} />
+				</div>
+
+				<div class="mb-3 flex w-full justify-between items-center">
+					<div class="self-center text-xs font-medium">
+						{$i18n.t('Use Agent Memory')}
+					</div>
+					<Switch bind:state={adminConfig.ENABLE_AGENT_MEMORY_USE} />
+				</div>
+
+				<div class="mb-3 flex w-full justify-between items-center">
+					<div class="self-center text-xs font-medium">
+						{$i18n.t('Agent Memory Dedicated Tools')}
+					</div>
+					<Switch bind:state={adminConfig.ENABLE_AGENT_MEMORY_DEDICATED_TOOLS} />
 				</div>
 
 				<div class="grid grid-cols-1 md:grid-cols-2 gap-3">
@@ -357,9 +379,9 @@
 						class="text-xs px-3 py-2 bg-gray-50 hover:bg-gray-100 dark:bg-gray-850 dark:hover:bg-gray-800 rounded-lg font-medium transition disabled:opacity-50"
 						type="button"
 						disabled={operationRunning !== ''}
-						on:click={clearMemoryHandler}
+						on:click={resetMemoryHandler}
 					>
-						{$i18n.t('Clear Agent Memory')}
+						{$i18n.t('Reset Agent Memory Artifacts')}
 					</button>
 					<button
 						class="text-xs px-3 py-2 bg-gray-50 hover:bg-gray-100 dark:bg-gray-850 dark:hover:bg-gray-800 rounded-lg font-medium transition disabled:opacity-50 sm:col-span-2"

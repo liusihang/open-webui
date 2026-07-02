@@ -70,6 +70,21 @@ export const rebuildAgentMemoryIndex = async (
 	});
 };
 
+export const resetAgentMemory = async (
+	token: string,
+	userId: string,
+	noteMode: 'convert' | 'delete' = 'convert',
+	scopeType: 'global' | 'folder' | null = null,
+	scopeId = ''
+) => {
+	return await requestAgentMemory(token, '/agent-memory/reset', 'POST', {
+		user_id: userId.trim(),
+		note_mode: noteMode,
+		scope_type: scopeType,
+		scope_id: scopeType === 'folder' ? scopeId.trim() : null
+	});
+};
+
 export const clearAgentMemory = async (
 	token: string,
 	userId: string,
