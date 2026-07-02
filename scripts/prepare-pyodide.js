@@ -29,7 +29,14 @@ const packages = [
 // static/pyodide/ so that the browser can install them offline via micropip.
 // Packages already provided by the Pyodide distribution (click, platformdirs,
 // typing_extensions, etc.) do NOT need to be listed here.
-const pypiPackages = ['black', 'pathspec', 'mypy_extensions', 'pytokens'];
+export const pypiPackages = [
+	'black',
+	'pathspec',
+	'mypy_extensions',
+	'pytokens',
+	'openpyxl',
+	'et_xmlfile'
+];
 
 const DEFAULT_CACHE_POLICY = 'prefer-local';
 const DEFAULT_PYPI_API_BASE_URL = 'https://pypi.org/pypi';
@@ -133,6 +140,10 @@ async function readJson(filePath) {
 	return JSON.parse(await readFile(filePath, 'utf-8'));
 }
 
+function normalizePypiPackageName(packageName) {
+	return packageName.replace(/-/g, '_');
+}
+
 function normalizeVersionRange(versionSpec) {
 	return versionSpec.replace(/^[~^<>= ]+/, '');
 }
@@ -158,7 +169,27 @@ export async function isLocalPyodideCacheUsable(baseDir, pyodideVersion) {
 
 	try {
 		const localPackage = await readJson(pyodidePackagePath);
-		return localPackage.version === pyodideVersion;
+		if (localPackage.version !== pyodideVersion) {
+			return false;
+		}
+
+		const lockData = await readJson(lockPath);
+		if (!lockData.packages) {
+			return false;
+		}
+
+		for (const pkg of pypiPackages) {
+			const packageInfo = lockData.packages[normalizePypiPackageName(pkg)];
+			if (!packageInfo?.file_name) {
+				return false;
+			}
+
+			if (!(await fileExists(resolvePath(baseDir, `static/pyodide/${packageInfo.file_name}`)))) {
+				return false;
+			}
+		}
+
+		return true;
 	} catch {
 		return false;
 	}
@@ -322,7 +353,7 @@ async function downloadPyPIWheels(baseDir, config) {
 			console.log(`  Saved: ${dest} (${buffer.length} bytes)`);
 		}
 
-		const normalizedName = pkg.replace(/-/g, '_');
+		const normalizedName = normalizePypiPackageName(pkg);
 		if (!lockData.packages[normalizedName]) {
 			lockData.packages[normalizedName] = {
 				name: normalizedName,

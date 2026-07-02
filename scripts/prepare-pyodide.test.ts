@@ -7,6 +7,7 @@ import { afterEach, describe, expect, it } from 'vitest';
 import {
 	buildPyodideFetchConfig,
 	isLocalPyodideCacheUsable,
+	pypiPackages,
 	rewriteWheelUrl
 } from './prepare-pyodide';
 
@@ -23,6 +24,30 @@ async function writeJson(filePath: string, value: unknown) {
 	await writeFile(filePath, JSON.stringify(value, null, 2));
 }
 
+async function writePyodideCache(dir: string, version: string, cachedPackages = pypiPackages) {
+	const pyodideDir = path.join(dir, 'static/pyodide');
+	const packageFiles = Object.fromEntries(
+		cachedPackages.map((name) => [name.replace(/-/g, '_'), `${name}-1.0.0-py3-none-any.whl`])
+	);
+
+	await writeJson(path.join(pyodideDir, 'package.json'), { version });
+	await writeJson(path.join(pyodideDir, 'pyodide-lock.json'), {
+		packages: Object.fromEntries(
+			Object.entries(packageFiles).map(([name, fileName]) => [
+				name,
+				{
+					name,
+					version: '1.0.0',
+					file_name: fileName
+				}
+			])
+		)
+	});
+	await Promise.all(
+		Object.values(packageFiles).map((fileName) => writeFile(path.join(pyodideDir, fileName), ''))
+	);
+}
+
 afterEach(async () => {
 	await Promise.all(tempDirs.splice(0).map((dir) => rm(dir, { recursive: true, force: true })));
 });
@@ -34,6 +59,7 @@ describe('buildPyodideFetchConfig', () => {
 		expect(config.cachePolicy).toBe('prefer-local');
 		expect(config.pypiApiBaseUrl).toBe('https://pypi.org/pypi');
 		expect(config.pypiFilesBaseUrl).toBe(null);
+		expect(config.pypiIndexUrls).toEqual(['https://pypi.org/pypi']);
 	});
 
 	it('normalizes configured mirror URLs', () => {
@@ -48,14 +74,14 @@ describe('buildPyodideFetchConfig', () => {
 		expect(config.indexURL).toBe('https://mirror.example.com/pyodide/');
 		expect(config.pypiApiBaseUrl).toBe('https://pypi.example.com/pypi');
 		expect(config.pypiFilesBaseUrl).toBe('https://files.example.com/packages');
+		expect(config.pypiIndexUrls).toEqual(['https://pypi.example.com/pypi']);
 	});
 });
 
 describe('isLocalPyodideCacheUsable', () => {
 	it('accepts a matching local artifact', async () => {
 		const dir = await makeTempDir();
-		await writeJson(path.join(dir, 'static/pyodide/package.json'), { version: '0.28.2' });
-		await writeJson(path.join(dir, 'static/pyodide/pyodide-lock.json'), { packages: {} });
+		await writePyodideCache(dir, '0.28.2');
 
 		await expect(isLocalPyodideCacheUsable(dir, '0.28.2')).resolves.toBe(true);
 	});
@@ -64,6 +90,17 @@ describe('isLocalPyodideCacheUsable', () => {
 		const dir = await makeTempDir();
 		await writeJson(path.join(dir, 'static/pyodide/package.json'), { version: '0.28.1' });
 		await writeJson(path.join(dir, 'static/pyodide/pyodide-lock.json'), { packages: {} });
+
+		await expect(isLocalPyodideCacheUsable(dir, '0.28.2')).resolves.toBe(false);
+	});
+
+	it('rejects a matching local artifact when required pure-Python PyPI packages are missing', async () => {
+		const dir = await makeTempDir();
+		await writePyodideCache(
+			dir,
+			'0.28.2',
+			pypiPackages.filter((name) => !['openpyxl', 'et_xmlfile'].includes(name))
+		);
 
 		await expect(isLocalPyodideCacheUsable(dir, '0.28.2')).resolves.toBe(false);
 	});
