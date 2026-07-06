@@ -15,7 +15,12 @@ from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
 from sqlalchemy.orm import sessionmaker
 
 from open_webui.migrations.versions import d1e2f3a4b5c6_add_multimodal_evidence_schema as evidence_migration
-from open_webui.models.evidence import KnowledgeEvidence, KnowledgeEvidenceAsset
+from open_webui.models.evidence import (
+    KnowledgeEvidence,
+    KnowledgeEvidenceAsset,
+    KnowledgeEvidenceEmbedding,
+    KnowledgeVectorSpace,
+)
 from open_webui.models.files import File
 from open_webui.models.knowledge import Knowledge
 from open_webui.models.retrieval_chunks import RetrievalChunk
@@ -46,8 +51,10 @@ async def db_session():
         await connection.run_sync(Knowledge.__table__.create)
         await connection.run_sync(File.__table__.create)
         await connection.run_sync(RetrievalChunk.__table__.create)
+        await connection.run_sync(KnowledgeVectorSpace.__table__.create)
         await connection.run_sync(KnowledgeEvidenceAsset.__table__.create)
         await connection.run_sync(KnowledgeEvidence.__table__.create)
+        await connection.run_sync(KnowledgeEvidenceEmbedding.__table__.create)
 
     session_factory = sessionmaker(engine, expire_on_commit=False, class_=AsyncSession)
     async with session_factory() as session:
@@ -146,6 +153,45 @@ async def _seed_active_text_chunk_for_scope(
             chunker_config_hash="chunker-hash",
             text=text,
             metadata_={"name": "doc.pdf", "page_index": 3},
+            is_active=True,
+            deleted_at=None,
+            created_at=1,
+            updated_at=1,
+        )
+    )
+    await session.commit()
+
+
+async def _seed_active_text_evidence(
+    session: AsyncSession,
+    *,
+    evidence_id: str,
+    file_id: str,
+    content_text: str,
+    content_hash: str,
+):
+    session.add(
+        KnowledgeEvidence(
+            id=evidence_id,
+            evidence_ref=f"ke:kb-1:{file_id}:text_chunk:{content_hash}",
+            knowledge_id="kb-1",
+            file_id=file_id,
+            asset_id=None,
+            retrieval_chunk_uid=f"{evidence_id}-chunk",
+            retrieval_chunk_row_id=1,
+            modality="text",
+            evidence_kind="text_chunk",
+            title=None,
+            content_text=content_text,
+            preview_text=content_text,
+            source_name="doc.pdf",
+            page_index=None,
+            anchor_json={},
+            chunk_index=0,
+            chunk_total=1,
+            content_hash=content_hash,
+            projection_profile="text_only",
+            projection_config_hash="text-backfill-v1",
             is_active=True,
             deleted_at=None,
             created_at=1,
@@ -256,6 +302,139 @@ async def test_project_job_without_file_ids_defaults_text_evidence_to_multimodal
     assert result.scanned_chunks == 1
     assert len(evidence_rows) == 1
     assert evidence_rows[0].projection_profile == "unified_multimodal_dense"
+
+
+@pytest.mark.asyncio
+async def test_projected_evidence_embeddings_create_missing_vector_space(db_session, monkeypatch):
+    await _seed_knowledge_file(
+        db_session,
+        file_id="file-doc",
+        filename="doc.pdf",
+        content_type="application/pdf",
+        path="/tmp/doc.pdf",
+    )
+    await _seed_active_text_chunk(db_session, row_id=7, file_id="file-doc", text="First paragraph")
+
+    projection = await project_evidence_for_knowledge_file(
+        knowledge_id="kb-1",
+        file_id="file-doc",
+        projection_profile="unified_multimodal_dense",
+        db=db_session,
+    )
+
+    upserts = []
+
+    async def fake_embedding_function(query, prefix=None, user=None):
+        return [0.1, 0.2, 0.3]
+
+    fake_embedding_function._model = "Qwen3-VL-Embedding-2B"
+    fake_embedding_function._supports_image_payloads = True
+
+    class FakeVectorClient:
+        async def upsert(self, collection_name, items):
+            upserts.append((collection_name, items))
+
+    monkeypatch.setattr(
+        indexing_mod,
+        "_get_evidence_embedding_runtime",
+        lambda: (fake_embedding_function, FakeVectorClient()),
+    )
+
+    result = await indexing_mod.write_projected_evidence_embeddings(
+        projection.evidence_refs,
+        db=db_session,
+    )
+
+    vector_spaces = (
+        (
+            await db_session.execute(
+                select(KnowledgeVectorSpace).where(KnowledgeVectorSpace.knowledge_id == "kb-1")
+            )
+        )
+        .scalars()
+        .all()
+    )
+    embeddings = (
+        (
+            await db_session.execute(
+                select(KnowledgeEvidenceEmbedding).where(
+                    KnowledgeEvidenceEmbedding.evidence_ref.in_(projection.evidence_refs)
+                )
+            )
+        )
+        .scalars()
+        .all()
+    )
+
+    assert result.written == 1
+    assert result.skipped == 0
+    assert result.failed == 0
+    assert len(vector_spaces) == 1
+    assert vector_spaces[0].retrieval_profile == "unified_multimodal_dense"
+    assert vector_spaces[0].embedding_model == "Qwen3-VL-Embedding-2B"
+    assert vector_spaces[0].supports_text_evidence is True
+    assert vector_spaces[0].supports_image_evidence is True
+    assert len(upserts) == 1
+    assert len(embeddings) == 1
+    assert embeddings[0].embedding_status == "ready"
+
+
+@pytest.mark.asyncio
+async def test_project_knowledge_file_keeps_previous_active_evidence_when_projection_fails(db_session):
+    await _seed_knowledge_file(
+        db_session,
+        file_id="file-doc",
+        filename="doc.pdf",
+        content_type="application/pdf",
+        path="/tmp/doc.pdf",
+        meta={
+            "document_image_assets": [
+                {
+                    "caption": "Broken image asset",
+                }
+            ]
+        },
+    )
+    await _seed_active_text_evidence(
+        db_session,
+        evidence_id="previous-evidence",
+        file_id="file-doc",
+        content_text="Previous chunk",
+        content_hash="previous-hash",
+    )
+    await _seed_active_text_chunk(db_session, row_id=14, file_id="file-doc", text="Replacement chunk")
+
+    result = await project_evidence_for_knowledge_file(
+        knowledge_id="kb-1",
+        file_id="file-doc",
+        db=db_session,
+        project_document_images=True,
+    )
+
+    previous_row = (
+        (
+            await db_session.execute(
+                select(KnowledgeEvidence).where(KnowledgeEvidence.id == "previous-evidence")
+            )
+        )
+        .scalars()
+        .one()
+    )
+    active_rows = (
+        (
+            await db_session.execute(
+                select(KnowledgeEvidence).where(KnowledgeEvidence.is_active.is_(True))
+            )
+        )
+        .scalars()
+        .all()
+    )
+
+    assert result.failed == 1
+    assert result.text_evidence_upserted == 1
+    assert previous_row.is_active is True
+    assert previous_row.deleted_at is None
+    assert [row.id for row in active_rows] == ["previous-evidence"]
 
 
 @pytest.mark.asyncio
@@ -509,6 +688,7 @@ async def test_db_none_projector_path_uses_internal_session_scope(tmp_path, monk
 async def test_evidence_job_branch_uses_existing_job_state_surface(monkeypatch):
     job_status_calls = []
     state_calls = []
+    finalize_calls = []
 
     class FakeJobs:
         async def get_job_by_id(self, job_id):
@@ -554,8 +734,9 @@ async def test_evidence_job_branch_uses_existing_job_state_surface(monkeypatch):
             state_calls.append(kwargs)
             return type("State", (), {"state_id": "state-1"})()
 
-    async def fake_project(job_payload, db=None):
+    async def fake_project(job_payload, db=None, activate=True):
         assert job_payload["workflow"] == "evidence_projection"
+        assert activate is False
         return EvidenceProjectionResult(
             scanned_chunks=1,
             text_evidence_upserted=1,
@@ -573,15 +754,30 @@ async def test_evidence_job_branch_uses_existing_job_state_surface(monkeypatch):
             evidence_refs=list(evidence_refs),
         )
 
+    async def fake_finalize_projected_evidence(job_payload, evidence_refs, db=None):
+        finalize_calls.append((job_payload["file_ids"], list(evidence_refs)))
+
     monkeypatch.setattr(indexing_mod, "RetrievalIndexJobs", FakeJobs())
     monkeypatch.setattr(indexing_mod, "RetrievalIndexStates", FakeStates())
     monkeypatch.setattr(indexing_mod, "project_evidence_from_job_payload", fake_project)
     monkeypatch.setattr(indexing_mod, "write_projected_evidence_embeddings", fake_write_embeddings)
+    monkeypatch.setattr(
+        indexing_mod,
+        "finalize_projected_evidence_from_job_payload",
+        fake_finalize_projected_evidence,
+        raising=False,
+    )
 
     response = await indexing_mod.run_retrieval_index_job("job-project")
 
     assert response["result"]["evidence"]["text_evidence_upserted"] == 1
     assert response["result"]["evidence"]["image_evidence_upserted"] == 1
+    assert finalize_calls == [
+        (
+            ["file-doc"],
+            ["ke:kb-1:file-doc:text_chunk:0:abc"],
+        )
+    ]
     assert job_status_calls[0] == ("job-project", {"status": "running"})
     assert job_status_calls[-1][0] == "job-project"
     assert job_status_calls[-1][1]["status"] == "succeeded"
@@ -606,6 +802,7 @@ async def test_evidence_job_branch_uses_existing_job_state_surface(monkeypatch):
 async def test_evidence_job_branch_fails_when_embeddings_are_skipped(monkeypatch):
     job_status_calls = []
     state_calls = []
+    finalize_calls = []
 
     class FakeJobs:
         async def get_job_by_id(self, job_id):
@@ -652,7 +849,8 @@ async def test_evidence_job_branch_fails_when_embeddings_are_skipped(monkeypatch
             state_calls.append(kwargs)
             return type("State", (), {"state_id": "state-1"})()
 
-    async def fake_project(job_payload, db=None):
+    async def fake_project(job_payload, db=None, activate=True):
+        assert activate is False
         return EvidenceProjectionResult(
             scanned_chunks=1,
             text_evidence_upserted=1,
@@ -665,15 +863,25 @@ async def test_evidence_job_branch_fails_when_embeddings_are_skipped(monkeypatch
             skipped=len(evidence_refs),
         )
 
+    async def fake_finalize_projected_evidence(job_payload, evidence_refs, db=None):
+        finalize_calls.append((job_payload["file_ids"], list(evidence_refs)))
+
     monkeypatch.setattr(indexing_mod, "RetrievalIndexJobs", FakeJobs())
     monkeypatch.setattr(indexing_mod, "RetrievalIndexStates", FakeStates())
     monkeypatch.setattr(indexing_mod, "project_evidence_from_job_payload", fake_project)
     monkeypatch.setattr(indexing_mod, "write_projected_evidence_embeddings", fake_write_embeddings)
+    monkeypatch.setattr(
+        indexing_mod,
+        "finalize_projected_evidence_from_job_payload",
+        fake_finalize_projected_evidence,
+        raising=False,
+    )
 
     response = await indexing_mod.run_retrieval_index_job("job-project")
 
     assert response["job"]["status"] == "failed"
     assert response["job"]["error"] == "evidence embedding write skipped 1 projected evidence rows"
+    assert finalize_calls == []
     assert job_status_calls[-1][1]["status"] == "failed"
     assert state_calls[-1]["status"] == "failed"
     assert state_calls[-1]["error"] == "evidence embedding write skipped 1 projected evidence rows"

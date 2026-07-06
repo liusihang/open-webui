@@ -1,5 +1,5 @@
 from typing import Any, Dict, List, Optional
-from urllib.parse import urlencode
+from urllib.parse import quote, urlencode
 
 
 def build_tool_server_headers(
@@ -79,13 +79,15 @@ def build_upstream_terminal_ws_request(
     if auth_type == 'session' and client_token:
         params['token'] = client_token
     elif auth_type == 'bearer':
-        first_message = {'type': 'auth', 'token': connection.get('key', '')}
+        token = connection.get('key', '')
+        first_message = {'type': 'auth', 'token': token.strip() if isinstance(token, str) else token or ''}
 
     policy_id = connection.get('policy_id')
+    safe_session_id = quote(session_id, safe='')
     if policy_id:
-        upstream_url = f'{ws_base}/p/{policy_id}/api/terminals/{session_id}'
+        upstream_url = f'{ws_base}/p/{policy_id}/api/terminals/{safe_session_id}'
     else:
-        upstream_url = f'{ws_base}/api/terminals/{session_id}'
+        upstream_url = f'{ws_base}/api/terminals/{safe_session_id}'
 
     if params:
         upstream_url += f'?{urlencode(params)}'

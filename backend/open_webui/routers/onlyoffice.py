@@ -1,4 +1,5 @@
 import hashlib
+import ipaddress
 import json
 import logging
 import posixpath
@@ -32,15 +33,41 @@ router = APIRouter()
 
 SUPPORTED_OFFICE_FILE_TYPES = {
     "doc": "word",
+    "docm": "word",
     "docx": "word",
+    "dot": "word",
+    "dotm": "word",
+    "dotx": "word",
+    "odt": "word",
+    "ott": "word",
+    "rtf": "word",
+    "pdf": "pdf",
     "xls": "cell",
+    "xlsb": "cell",
+    "xlsm": "cell",
     "xlsx": "cell",
+    "xlt": "cell",
+    "xltm": "cell",
+    "xltx": "cell",
     "csv": "cell",
+    "ods": "cell",
+    "ots": "cell",
+    "odp": "slide",
+    "otp": "slide",
+    "pot": "slide",
+    "potm": "slide",
+    "potx": "slide",
+    "pps": "slide",
+    "ppsm": "slide",
+    "ppsx": "slide",
     "ppt": "slide",
+    "pptm": "slide",
     "pptx": "slide",
 }
 ONLYOFFICE_SAVE_STATUSES = {2, 6}
 DEFAULT_ONLYOFFICE_EDIT_CALLBACK_TOKEN_EXPIRES_IN = "8h"
+ONLYOFFICE_EDIT_CALLBACK_MAX_BYTES = 100 * 1024 * 1024
+ONLYOFFICE_CALLBACK_DOWNLOAD_CHUNK_BYTES = 1024 * 1024
 
 
 class OnlyOfficeSessionForm(BaseModel):
@@ -219,6 +246,33 @@ def _is_allowed_host(url: str, allowlist: list[str]) -> bool:
         return False
 
     return any(host == entry or host.endswith(f".{entry}") for entry in normalized_allowlist)
+
+
+def _is_disallowed_callback_ip_host(host: str) -> bool:
+    normalized_host = (host or "").strip().lower()
+    if normalized_host == "localhost" or normalized_host.endswith(".localhost"):
+        return True
+
+    try:
+        ip = ipaddress.ip_address(normalized_host)
+    except ValueError:
+        return False
+
+    return (
+        ip.is_loopback
+        or ip.is_private
+        or ip.is_link_local
+        or ip.is_multicast
+        or ip.is_unspecified
+    )
+
+
+def _is_allowed_callback_blob_url(url: str, allowlist: list[str]) -> bool:
+    if not _is_allowed_host(url, allowlist):
+        return False
+
+    host = (urlparse(url).hostname or "").lower()
+    return not _is_disallowed_callback_ip_host(host)
 
 
 def _extract_callback_token(request: Request, payload: dict[str, Any]) -> str:
@@ -412,13 +466,54 @@ async def _read_upstream_json(upstream) -> dict[str, Any]:
 async def _download_onlyoffice_callback_blob(callback_url: str) -> tuple[bytes, Optional[str]]:
     timeout = aiohttp.ClientTimeout(total=300, connect=10)
     async with aiohttp.ClientSession(timeout=timeout, trust_env=True) as session:
-        async with session.get(callback_url) as upstream:
-            body = await upstream.read()
+        async with session.get(callback_url, allow_redirects=False) as upstream:
+            if 300 <= upstream.status < 400:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail="OnlyOffice callback document blob redirects are not allowed.",
+                )
             if upstream.status >= 400:
                 raise HTTPException(
                     status_code=status.HTTP_502_BAD_GATEWAY,
                     detail=f"Failed to fetch callback document blob: HTTP {upstream.status}",
                 )
+            content_length = upstream.headers.get("Content-Length")
+            if content_length:
+                try:
+                    parsed_content_length = int(content_length)
+                except ValueError as exc:
+                    raise HTTPException(
+                        status_code=status.HTTP_502_BAD_GATEWAY,
+                        detail="Failed to fetch callback document blob: invalid Content-Length.",
+                    ) from exc
+                if parsed_content_length > ONLYOFFICE_EDIT_CALLBACK_MAX_BYTES:
+                    raise HTTPException(
+                        status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
+                        detail=(
+                            "OnlyOffice callback document blob exceeds the "
+                            f"{ONLYOFFICE_EDIT_CALLBACK_MAX_BYTES} byte limit."
+                        ),
+                    )
+
+            body_chunks: list[bytes] = []
+            total_size = 0
+            async for chunk in upstream.content.iter_chunked(
+                ONLYOFFICE_CALLBACK_DOWNLOAD_CHUNK_BYTES
+            ):
+                if not chunk:
+                    continue
+                total_size += len(chunk)
+                if total_size > ONLYOFFICE_EDIT_CALLBACK_MAX_BYTES:
+                    raise HTTPException(
+                        status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
+                        detail=(
+                            "OnlyOffice callback document blob exceeds the "
+                            f"{ONLYOFFICE_EDIT_CALLBACK_MAX_BYTES} byte limit."
+                        ),
+                    )
+                body_chunks.append(chunk)
+
+            body = b"".join(body_chunks)
             return body, upstream.headers.get("Content-Type")
 
 
@@ -973,7 +1068,7 @@ async def handle_onlyoffice_terminal_callback(
     allowlist = (
         getattr(request.app.state.config, "ONLYOFFICE_CALLBACK_ALLOWED_HOSTS", None) or []
     )
-    if callback_url and not _is_allowed_host(callback_url, allowlist):
+    if callback_url and not _is_allowed_callback_blob_url(callback_url, allowlist):
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="OnlyOffice callback URL host is not allowlisted.",

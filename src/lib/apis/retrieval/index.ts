@@ -51,12 +51,15 @@ type YoutubeConfigForm = {
 };
 
 type RAGConfigForm = {
+	RAG_EXTRACT_DOCUMENT_IMAGE_ASSETS?: boolean;
 	PDF_EXTRACT_IMAGES?: boolean;
 	ENABLE_GOOGLE_DRIVE_INTEGRATION?: boolean;
 	ENABLE_ONEDRIVE_INTEGRATION?: boolean;
+	EXTERNAL_DOCUMENT_LOADER_HEADERS?: Record<string, string>;
 	chunk?: ChunkConfigForm;
 	content_extraction?: ContentExtractConfigForm;
 	web_loader_ssl_verification?: boolean;
+	web?: Record<string, unknown>;
 	youtube?: YoutubeConfigForm;
 };
 

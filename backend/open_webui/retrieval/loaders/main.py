@@ -2,6 +2,8 @@ import asyncio
 import json
 import logging
 import sys
+from pathlib import Path
+from typing import Any
 
 import ftfy
 import requests
@@ -17,12 +19,22 @@ from langchain_community.document_loaders import (
     YoutubeLoader,
 )
 from langchain_core.documents import Document
-from open_webui.env import AIOHTTP_CLIENT_SESSION_SSL, GLOBAL_LOG_LEVEL, REQUESTS_VERIFY
+from open_webui.env import (
+    AIOHTTP_CLIENT_SESSION_SSL,
+    GLOBAL_LOG_LEVEL,
+    MINERU_MAX_MARKDOWN_BYTES,
+    REQUESTS_VERIFY,
+)
 from open_webui.retrieval.loaders.datalab_marker import DatalabMarkerLoader
 from open_webui.retrieval.loaders.external_document import ExternalDocumentLoader
 from open_webui.retrieval.loaders.mineru import MinerULoader
 from open_webui.retrieval.loaders.mistral import MistralLoader
+from open_webui.retrieval.loaders.office_image_assets import (
+    OfficeImageAssetExtraction,
+    extract_office_image_assets,
+)
 from open_webui.retrieval.loaders.paddleocr_vl import PaddleOCRVLLoader
+from open_webui.retrieval.loaders.pdf_image_assets import PdfImageAssetExtraction, extract_pdf_image_assets
 
 logging.basicConfig(stream=sys.stdout, level=GLOBAL_LOG_LEVEL)
 log = logging.getLogger(__name__)
@@ -183,6 +195,7 @@ class DoclingLoader:
         self.params = params or {}
 
     def load(self) -> list[Document]:
+        page_break_marker = '\f'
         with open(self.file_path, 'rb') as f:
             headers = {}
             if self.api_key:
@@ -199,6 +212,7 @@ class DoclingLoader:
                 },
                 data={
                     'image_export_mode': 'placeholder',
+                    'md_page_break_placeholder': page_break_marker,
                     **self.params,
                 },
                 headers=headers,
@@ -207,9 +221,19 @@ class DoclingLoader:
         if r.ok:
             result = r.json()
             document_data = result.get('document', {})
-            text = document_data.get('md_content', '<No text content found>')
+            md_content = document_data.get('md_content', '')
+            text = md_content or '<No text content found>'
 
             metadata = {'Content-Type': self.mime_type} if self.mime_type else {}
+            if page_break_marker in md_content:
+                documents = [
+                    Document(page_content=page.strip(), metadata={**metadata, 'page': page_idx})
+                    for page_idx, page in enumerate(md_content.split(page_break_marker))
+                    if page.strip()
+                ]
+                if documents:
+                    log.debug('Docling extracted text: %s', text)
+                    return documents
 
             log.debug('Docling extracted text: %s', text)
             return [Document(page_content=text, metadata=metadata)]
@@ -225,16 +249,114 @@ class DoclingLoader:
             raise Exception(f'Error calling Docling: {error_msg}')
 
 
+def _page_text_by_index(docs: list[Document]) -> dict[int, str]:
+    if len(docs) == 1:
+        return {1: docs[0].page_content}
+
+    page_text: dict[int, str] = {}
+    for index, doc in enumerate(docs, start=1):
+        page_no = _document_page_no(doc, fallback=index)
+        page_text[page_no] = doc.page_content
+    return page_text
+
+
+def _merge_pdf_image_asset_metadata(docs: list[Document], extraction: PdfImageAssetExtraction) -> None:
+    if not docs:
+        return
+
+    if len(docs) == 1:
+        _extend_metadata_list(docs[0].metadata, 'document_image_assets', extraction.assets)
+        _extend_metadata_list(docs[0].metadata, 'document_image_assets_skipped', extraction.skipped)
+        return
+
+    skipped_without_page = [item for item in extraction.skipped if not isinstance(item.get('page_index'), int)]
+    for index, doc in enumerate(docs, start=1):
+        page_no = _document_page_no(doc, fallback=index)
+        _extend_metadata_list(doc.metadata, 'document_image_assets', extraction.assets_by_page.get(page_no, []))
+        page_skipped = [item for item in extraction.skipped if item.get('page_index') == page_no]
+        if index == 1:
+            page_skipped = [*skipped_without_page, *page_skipped]
+        _extend_metadata_list(doc.metadata, 'document_image_assets_skipped', page_skipped)
+
+
+def _merge_office_image_asset_metadata(docs: list[Document], extraction: OfficeImageAssetExtraction) -> None:
+    if not docs:
+        return
+
+    _extend_metadata_list(docs[0].metadata, 'document_image_assets', extraction.assets)
+    _extend_metadata_list(docs[0].metadata, 'document_image_assets_skipped', extraction.skipped)
+
+
+def _extend_metadata_list(metadata: dict[str, Any], key: str, values: list[Any]) -> None:
+    if not values:
+        return
+    existing = metadata.get(key)
+    if isinstance(existing, list):
+        metadata[key] = [*existing, *values]
+    else:
+        metadata[key] = values
+
+
+def _document_page_no(doc: Document, *, fallback: int) -> int:
+    page = doc.metadata.get('page')
+    if isinstance(page, int):
+        return page + 1
+    if isinstance(page, str) and page.isdigit():
+        return int(page) + 1
+
+    page_label = doc.metadata.get('page_label')
+    if isinstance(page_label, int):
+        return page_label
+    if isinstance(page_label, str) and page_label.isdigit():
+        return int(page_label)
+    return fallback
+
+
+def _is_office_image_asset_file(filename: str, file_content_type: str) -> bool:
+    file_ext = Path(filename).suffix.lower().lstrip('.')
+    if file_ext in {'docx', 'pptx', 'xlsx', 'odt', 'odp', 'ods'}:
+        return True
+
+    return file_content_type in {
+        'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+        'application/vnd.openxmlformats-officedocument.presentationml.presentation',
+        'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+        'application/vnd.oasis.opendocument.text',
+        'application/vnd.oasis.opendocument.presentation',
+        'application/vnd.oasis.opendocument.spreadsheet',
+    }
+
+
+def _metadata_has_document_image_assets(docs: list[Document]) -> bool:
+    return any(isinstance(doc.metadata.get('document_image_assets'), list) for doc in docs)
+
+
 class Loader:
     def __init__(self, engine: str = '', **kwargs):
         self.engine = engine
         self.user = kwargs.get('user', None)
+        self.metadata = kwargs.get('metadata', {})
         self.kwargs = kwargs
 
     def load(self, filename: str, file_content_type: str, file_path: str) -> list[Document]:
         loader = self._get_loader(filename, file_content_type, file_path)
-        docs = loader.load()
-        return [Document(page_content=ftfy.fix_text(doc.page_content), metadata=doc.metadata) for doc in docs]
+        should_extract_pdf_image_assets = (
+            isinstance(loader, PyPDFLoader)
+            and Path(filename).suffix.lower() == '.pdf'
+            and bool(self.kwargs.get('RAG_EXTRACT_DOCUMENT_IMAGE_ASSETS'))
+        )
+        docs = [Document(page_content=ftfy.fix_text(doc.page_content), metadata=doc.metadata) for doc in loader.load()]
+        if should_extract_pdf_image_assets:
+            self._attach_pdf_image_assets(filename=filename, file_path=file_path, docs=docs)
+
+        should_extract_office_image_assets = (
+            _is_office_image_asset_file(filename, file_content_type)
+            and bool(self.kwargs.get('RAG_EXTRACT_DOCUMENT_IMAGE_ASSETS'))
+            and bool(self.kwargs.get('OFFICE_EXTRACT_IMAGE_ASSETS', True))
+        )
+        if should_extract_office_image_assets and not _metadata_has_document_image_assets(docs):
+            self._attach_office_image_assets(filename=filename, file_path=file_path, docs=docs)
+        return docs
 
     async def aload(self, filename: str, file_content_type: str, file_path: str) -> list[Document]:
         """
@@ -351,6 +473,53 @@ class Loader:
         log.info('Falling back to latin-1 encoding for %s', file_path)
         return 'latin-1'
 
+    def _attach_pdf_image_assets(self, *, filename: str, file_path: str, docs: list[Document]) -> None:
+        page_text_by_index = _page_text_by_index(docs)
+        try:
+            extraction = extract_pdf_image_assets(
+                file_path,
+                asset_root=self.kwargs.get('PDF_IMAGE_ASSET_ROOT'),
+                source_id=Path(filename).stem or Path(file_path).stem,
+                page_text_by_index=page_text_by_index,
+            )
+        except Exception as exc:
+            log.warning('PDF image asset extraction failed for %s: %s', file_path, exc)
+            extraction = PdfImageAssetExtraction(
+                skipped=[
+                    {
+                        'backend': 'pypdf',
+                        'reason': 'pdf_image_asset_extraction_error',
+                        'error': type(exc).__name__,
+                        **({'message': str(exc)} if str(exc) else {}),
+                    }
+                ]
+            )
+
+        _merge_pdf_image_asset_metadata(docs, extraction)
+
+    def _attach_office_image_assets(self, *, filename: str, file_path: str, docs: list[Document]) -> None:
+        try:
+            extraction = extract_office_image_assets(
+                file_path,
+                asset_root=self.kwargs.get('OFFICE_IMAGE_ASSET_ROOT'),
+                source_id=Path(filename).stem or Path(file_path).stem,
+                document_text='',
+            )
+        except Exception as exc:
+            log.warning('Office image asset extraction failed for %s: %s', file_path, exc)
+            extraction = OfficeImageAssetExtraction(
+                skipped=[
+                    {
+                        'backend': 'office_zip',
+                        'reason': 'office_image_asset_extraction_error',
+                        'error': type(exc).__name__,
+                        **({'message': str(exc)} if str(exc) else {}),
+                    }
+                ]
+            )
+
+        _merge_office_image_asset_metadata(docs, extraction)
+
     @staticmethod
     def _has_cjk_characters(text: str, threshold: float = 0.05) -> bool:
         """Check if decoded text contains a meaningful proportion of CJK characters.
@@ -404,6 +573,12 @@ class Loader:
                 api_key=self.kwargs.get('EXTERNAL_DOCUMENT_LOADER_API_KEY'),
                 mime_type=file_content_type,
                 user=self.user,
+                headers=self.kwargs.get('EXTERNAL_DOCUMENT_LOADER_HEADERS'),
+                metadata={
+                    **self.metadata,
+                    'file_name': filename,
+                    'file_content_type': file_content_type,
+                },
             )
         elif self.engine == 'tika' and self.kwargs.get('TIKA_SERVER_URL'):
             if self._is_text_file(file_ext, file_content_type):
@@ -511,7 +686,6 @@ class Loader:
                     mineru_timeout = int(mineru_timeout)
                 except ValueError:
                     mineru_timeout = 300
-
             loader = MinerULoader(
                 file_path=file_path,
                 api_mode=self.kwargs.get('MINERU_API_MODE', 'local'),
@@ -519,6 +693,7 @@ class Loader:
                 api_key=self.kwargs.get('MINERU_API_KEY', ''),
                 params=self.kwargs.get('MINERU_PARAMS', {}),
                 timeout=mineru_timeout,
+                max_markdown_bytes=MINERU_MAX_MARKDOWN_BYTES,
             )
         elif (
             self.engine == 'mistral_ocr'
@@ -529,12 +704,23 @@ class Loader:
                 base_url=self.kwargs.get('MISTRAL_OCR_API_BASE_URL'),
                 api_key=self.kwargs.get('MISTRAL_OCR_API_KEY'),
                 file_path=file_path,
+                use_base64=self.kwargs.get('MISTRAL_OCR_USE_BASE64', False),
             )
         elif self.engine == 'paddleocr_vl' and self.kwargs.get('PADDLEOCR_VL_TOKEN') != '':
             loader = PaddleOCRVLLoader(
                 api_url=self.kwargs.get('PADDLEOCR_VL_BASE_URL'),
                 token=self.kwargs.get('PADDLEOCR_VL_TOKEN'),
                 file_path=file_path,
+                model=self.kwargs.get('PADDLEOCR_VL_MODEL', 'PaddleOCR-VL-1.6'),
+                optional_payload=self.kwargs.get('PADDLEOCR_VL_OPTIONAL_PAYLOAD'),
+                request_timeout_s=self.kwargs.get('PADDLEOCR_VL_REQUEST_TIMEOUT', 30),
+                download_timeout_s=self.kwargs.get('PADDLEOCR_VL_DOWNLOAD_TIMEOUT', 60),
+                poll_timeout_s=self.kwargs.get('PADDLEOCR_VL_POLL_TIMEOUT', 300),
+                poll_interval_s=self.kwargs.get('PADDLEOCR_VL_POLL_INTERVAL', 2),
+                allowed_remote_origins=self.kwargs.get('PADDLEOCR_VL_ALLOWED_REMOTE_ORIGINS') or (),
+                max_jsonl_response_bytes=self.kwargs.get('PADDLEOCR_VL_MAX_JSONL_RESPONSE_BYTES', 20 * 1024 * 1024),
+                max_jsonl_line_bytes=self.kwargs.get('PADDLEOCR_VL_MAX_JSONL_LINE_BYTES', 1024 * 1024),
+                max_jsonl_lines=self.kwargs.get('PADDLEOCR_VL_MAX_JSONL_LINES', 10_000),
             )
         else:
             if file_ext == 'pdf':

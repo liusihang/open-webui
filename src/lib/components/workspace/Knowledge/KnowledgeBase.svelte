@@ -5,7 +5,10 @@
 	import { PaneGroup, Pane, PaneResizer } from 'paneforge';
 
 	import { onMount, getContext, onDestroy, tick } from 'svelte';
-	const i18n = getContext('i18n');
+	import type { Writable } from 'svelte/store';
+	import type { i18n as i18nType } from 'i18next';
+
+	const i18n = getContext<Writable<i18nType>>('i18n');
 
 	import { goto } from '$app/navigation';
 	import { page } from '$app/stores';
@@ -41,7 +44,8 @@
 		deleteKnowledgeDirectory,
 		moveFileInKnowledge,
 		syncKnowledgeDiff,
-		syncKnowledgeCleanup
+		syncKnowledgeCleanup,
+		testExternalKnowledgeRetrieval
 	} from '$lib/apis/knowledge';
 	import { processWeb, processYoutubeVideo } from '$lib/apis/retrieval';
 
@@ -90,6 +94,9 @@
 	let showResetConfirm = false;
 
 	let minSize = 0;
+	type DirectoryFileEntry = { path: string; filename: string; file: File };
+	type DirectoryManifestEntry = DirectoryFileEntry & { checksum: string; size: number };
+
 	type Knowledge = {
 		id: string;
 		name: string;
@@ -100,6 +107,7 @@
 		files: any[];
 		access_grants?: any[];
 		write_access?: boolean;
+		meta?: any;
 	};
 	type KnowledgeFile = {
 		id: string;
@@ -117,6 +125,7 @@
 	let id = null;
 	let knowledge: Knowledge | null = null;
 	let knowledgeId = null;
+	let isExternalKnowledge = false;
 
 	let selectedFileId = null;
 	let selectedFile = null;
@@ -124,6 +133,7 @@
 	let selectedFileImageUrl: string | null = null;
 	let selectedFileImageLoading = false;
 	let selectedFileImageError: string | null = null;
+	let loadingFileContent = false;
 
 	let inputFiles = null;
 
@@ -149,6 +159,14 @@
 	let deleteDirectoryContents = true;
 
 	let pendingPollTimer: ReturnType<typeof setInterval> | null = null;
+	let externalTestQuery = '';
+	let externalTestResult: {
+		documents?: string[];
+		metadatas?: Record<string, any>[];
+		distances?: number[];
+	} | null = null;
+
+	$: isExternalKnowledge = knowledge?.meta?.source === 'external';
 
 	const IMAGE_EXTS = new Set(['png', 'jpg', 'jpeg', 'gif', 'webp', 'bmp', 'ico']);
 	const IMAGE_CONTENT_TYPES = new Set([
@@ -184,6 +202,8 @@
 	const closeSelectedFileDrawer = () => {
 		selectedFileId = null;
 		selectedFile = null;
+		selectedFileContent = '';
+		loadingFileContent = false;
 		clearSelectedFileImagePreview();
 	};
 
@@ -196,14 +216,17 @@
 		await getItemsPage();
 	};
 
-	// Debounce only query changes
-	$: if (query !== undefined) {
+	const handleSearchInput = () => {
 		clearTimeout(searchDebounceTimer);
 
 		searchDebounceTimer = setTimeout(() => {
-			getItemsPage();
+			if (currentPage !== 1) {
+				currentPage = 1;
+			} else {
+				getItemsPage();
+			}
 		}, 300);
-	}
+	};
 
 	// Immediate response to filter/pagination changes
 	$: if (
@@ -215,15 +238,6 @@
 		includeContent !== undefined
 	) {
 		getItemsPage();
-	}
-
-	$: if (
-		query !== undefined &&
-		viewOption !== undefined &&
-		sortKey !== undefined &&
-		direction !== undefined
-	) {
-		reset();
 	}
 
 	const getItemsPage = async () => {
@@ -296,33 +310,79 @@
 
 	const fileSelectHandler = async (file: KnowledgeFile) => {
 		const selectedId = file?.id;
-		try {
-			clearSelectedFileImagePreview();
-			selectedFile = file;
-			selectedFileContent = selectedFile?.data?.content || '';
-			if (isSelectedFileImage(selectedFile)) {
-				selectedFileImageLoading = true;
-				selectedFileContent = '';
-				const content = selectedId
-					? await getFileContentById(selectedId, localStorage.token)
-					: null;
+		clearSelectedFileImagePreview();
+		selectedFile = file;
+		selectedFileContent = file?.data?.content ?? '';
+		loadingFileContent = false;
 
-				if (selectedId && selectedFileId === selectedId) {
+		if (!selectedId) {
+			return;
+		}
+
+		if (isSelectedFileImage(file)) {
+			selectedFileImageLoading = true;
+			selectedFileContent = '';
+
+			try {
+				const content = await getFileContentById(selectedId, localStorage.token);
+				if (selectedFileId === selectedId) {
 					if (content) {
-						const contentType =
-							getSelectedFileContentType(selectedFile) || 'application/octet-stream';
+						const contentType = getSelectedFileContentType(file) || 'application/octet-stream';
 						selectedFileImageUrl = URL.createObjectURL(new Blob([content], { type: contentType }));
 					} else {
 						selectedFileImageError = $i18n.t('Failed to load image preview.');
 					}
+				}
+			} catch (e) {
+				if (selectedFileId === selectedId) {
+					selectedFileImageError = $i18n.t('Failed to load image preview.');
+					toast.error($i18n.t('Failed to load file content.'));
+				}
+			} finally {
+				if (selectedFileId === selectedId) {
 					selectedFileImageLoading = false;
 				}
 			}
-		} catch (e) {
-			if (selectedId && selectedFileId === selectedId) {
-				selectedFileImageLoading = false;
+			return;
+		}
+
+		if (file.data?.content !== undefined) {
+			return;
+		}
+
+		loadingFileContent = true;
+		try {
+			const fileWithContent = await getFileById(localStorage.token, selectedId);
+			if (selectedFileId === selectedId) {
+				selectedFile = fileWithContent ?? file;
+				selectedFileContent = fileWithContent?.data?.content ?? '';
 			}
-			toast.error($i18n.t('Failed to load file content.'));
+		} catch (e) {
+			if (selectedFileId === selectedId) {
+				toast.error($i18n.t('Failed to load file content.'));
+			}
+		} finally {
+			if (selectedFileId === selectedId) {
+				loadingFileContent = false;
+			}
+		}
+	};
+
+	const externalTestHandler = async () => {
+		if (!isExternalKnowledge || !externalTestQuery.trim()) return;
+
+		const external = knowledge?.meta?.external ?? {};
+		const res = await testExternalKnowledgeRetrieval(localStorage.token, external.connection_id, {
+			query: externalTestQuery,
+			source: external.source,
+			count: 5
+		}).catch((e) => {
+			toast.error(`${e}`);
+			return null;
+		});
+
+		if (res) {
+			externalTestResult = res;
 		}
 	};
 
@@ -495,165 +555,15 @@
 	};
 
 	const uploadDirectoryHandler = async () => {
-		// Check if File System Access API is supported
-		const isFileSystemAccessSupported = 'showDirectoryPicker' in window;
-
-		try {
-			if (isFileSystemAccessSupported) {
-				// Modern browsers (Chrome, Edge) implementation
-				await handleModernBrowserUpload();
-			} else {
-				// Firefox fallback
-				await handleFirefoxUpload();
-			}
-		} catch (error) {
-			handleUploadError(error);
+		const entries = await collectDirectoryFiles();
+		if (entries?.length) {
+			await uploadDirectoryEntries(entries);
 		}
 	};
 
 	// Helper function to check if a path contains hidden folders
 	const hasHiddenFolder = (path) => {
 		return path.split('/').some((part) => part.startsWith('.'));
-	};
-
-	// Modern browsers implementation using File System Access API
-	const handleModernBrowserUpload = async () => {
-		const dirHandle = await window.showDirectoryPicker();
-		let totalFiles = 0;
-		let uploadedFiles = 0;
-
-		// Function to update the UI with the progress
-		const updateProgress = () => {
-			const percentage = (uploadedFiles / totalFiles) * 100;
-			toast.info(
-				$i18n.t('Upload Progress: {{uploadedFiles}}/{{totalFiles}} ({{percentage}}%)', {
-					uploadedFiles: uploadedFiles,
-					totalFiles: totalFiles,
-					percentage: percentage.toFixed(2)
-				})
-			);
-		};
-
-		// Recursive function to count all files excluding hidden ones
-		async function countFiles(dirHandle) {
-			for await (const entry of dirHandle.values()) {
-				// Skip hidden files and directories
-				if (entry.name.startsWith('.')) continue;
-
-				if (entry.kind === 'file') {
-					totalFiles++;
-				} else if (entry.kind === 'directory') {
-					// Only process non-hidden directories
-					if (!entry.name.startsWith('.')) {
-						await countFiles(entry);
-					}
-				}
-			}
-		}
-
-		// Recursive function to process directories excluding hidden files and folders
-		async function processDirectory(dirHandle, path = '') {
-			for await (const entry of dirHandle.values()) {
-				// Skip hidden files and directories
-				if (entry.name.startsWith('.')) continue;
-
-				const entryPath = path ? `${path}/${entry.name}` : entry.name;
-
-				// Skip if the path contains any hidden folders
-				if (hasHiddenFolder(entryPath)) continue;
-
-				if (entry.kind === 'file') {
-					const file = await entry.getFile();
-					const fileWithPath = new File([file], entryPath, { type: file.type });
-
-					await uploadFileHandler(fileWithPath);
-					uploadedFiles++;
-					updateProgress();
-				} else if (entry.kind === 'directory') {
-					// Only process non-hidden directories
-					if (!entry.name.startsWith('.')) {
-						await processDirectory(entry, entryPath);
-					}
-				}
-			}
-		}
-
-		await countFiles(dirHandle);
-		updateProgress();
-
-		if (totalFiles > 0) {
-			await processDirectory(dirHandle);
-		} else {
-			console.log('No files to upload.');
-		}
-	};
-
-	// Firefox fallback implementation using traditional file input
-	const handleFirefoxUpload = async () => {
-		return new Promise((resolve, reject) => {
-			// Create hidden file input
-			const input = document.createElement('input');
-			input.type = 'file';
-			input.webkitdirectory = true;
-			input.directory = true;
-			input.multiple = true;
-			input.style.display = 'none';
-
-			// Add input to DOM temporarily
-			document.body.appendChild(input);
-
-			input.onchange = async () => {
-				try {
-					const files = Array.from(input.files)
-						// Filter out files from hidden folders
-						.filter((file) => !hasHiddenFolder(file.webkitRelativePath));
-
-					let totalFiles = files.length;
-					let uploadedFiles = 0;
-
-					// Function to update the UI with the progress
-					const updateProgress = () => {
-						const percentage = (uploadedFiles / totalFiles) * 100;
-						toast.info(
-							$i18n.t('Upload Progress: {{uploadedFiles}}/{{totalFiles}} ({{percentage}}%)', {
-								uploadedFiles: uploadedFiles,
-								totalFiles: totalFiles,
-								percentage: percentage.toFixed(2)
-							})
-						);
-					};
-
-					updateProgress();
-
-					// Process all files
-					for (const file of files) {
-						// Skip hidden files (additional check)
-						if (!file.name.startsWith('.')) {
-							const relativePath = file.webkitRelativePath || file.name;
-							const fileWithPath = new File([file], relativePath, { type: file.type });
-
-							await uploadFileHandler(fileWithPath);
-							uploadedFiles++;
-							updateProgress();
-						}
-					}
-
-					// Clean up
-					document.body.removeChild(input);
-					resolve();
-				} catch (error) {
-					reject(error);
-				}
-			};
-
-			input.onerror = (error) => {
-				document.body.removeChild(input);
-				reject(error);
-			};
-
-			// Trigger file picker
-			input.click();
-		});
 	};
 
 	// Error handler
@@ -666,18 +576,14 @@
 		}
 	};
 
-	// Collect files from a directory without uploading — returns {path, filename, file}[]
-	const collectDirectoryFiles = async (): Promise<Array<{
-		path: string;
-		filename: string;
-		file: File;
-	}> | null> => {
+	// Collect files from a directory without uploading.
+	const collectDirectoryFiles = async (): Promise<DirectoryFileEntry[] | null> => {
 		const isFileSystemAccessSupported = 'showDirectoryPicker' in window;
 
 		try {
 			if (isFileSystemAccessSupported) {
 				const dirHandle = await window.showDirectoryPicker();
-				const collected: Array<{ path: string; filename: string; file: File }> = [];
+				const collected: DirectoryFileEntry[] = [];
 
 				async function traverse(handle: FileSystemDirectoryHandle, dirPath = '') {
 					for await (const entry of handle.values()) {
@@ -694,7 +600,7 @@
 					}
 				}
 
-				await traverse(dirHandle);
+				await traverse(dirHandle, dirHandle.name);
 				return collected;
 			} else {
 				// Firefox fallback
@@ -715,10 +621,8 @@
 
 							const collected = files.map((file) => {
 								const parts = file.webkitRelativePath.split('/');
-								// Remove root dir name, extract path and filename
-								const withoutRoot = parts.slice(1);
-								const filename = withoutRoot.pop() || file.name;
-								const path = withoutRoot.join('/');
+								const filename = parts.pop() || file.name;
+								const path = parts.join('/');
 								return { path, filename, file };
 							});
 
@@ -744,6 +648,106 @@
 		}
 	};
 
+	const buildDirectoryManifest = async (
+		entries: DirectoryFileEntry[]
+	): Promise<DirectoryManifestEntry[]> => {
+		return Promise.all(
+			entries.map(async (entry) => ({
+				...entry,
+				checksum: await computeFileHash(entry.file),
+				size: entry.file.size
+			}))
+		);
+	};
+
+	const createMissingDirectories = async (diff: any) => {
+		if (!knowledge) return {};
+
+		const directoryIdByPath: Record<string, string> = { ...(diff.directory_map || {}) };
+
+		for (const dirPath of diff.mkdir) {
+			const segments = dirPath.split('/');
+			const name = segments.at(-1)!;
+			const parentPath = segments.slice(0, -1).join('/');
+			const parentId = parentPath ? directoryIdByPath[parentPath] : null;
+
+			const directory = await createKnowledgeDirectory(
+				localStorage.token,
+				knowledge.id,
+				name,
+				parentId
+			);
+			if (directory) {
+				directoryIdByPath[dirPath] = directory.id;
+			}
+		}
+
+		return directoryIdByPath;
+	};
+
+	const getDirectoryUploadPath = (path: string) => {
+		const currentPath = breadcrumbs.map((crumb) => crumb.name).join('/');
+		return currentPath && path ? `${currentPath}/${path}` : currentPath || path;
+	};
+
+	const uploadDirectoryEntries = async (entries: DirectoryFileEntry[]) => {
+		if (!knowledge) return;
+
+		try {
+			syncing = $i18n.t('Computing checksums ({{count}} files)', { count: entries.length });
+			const manifest = await buildDirectoryManifest(entries);
+
+			syncing = $i18n.t('Comparing with knowledge base...');
+			const diff = await syncKnowledgeDiff(
+				localStorage.token,
+				id,
+				manifest.map(({ filename, path, checksum, size }) => ({
+					filename,
+					path: getDirectoryUploadPath(path),
+					checksum,
+					size
+				}))
+			);
+
+			if (!diff) {
+				toast.error($i18n.t('Failed to compare files.'));
+				return;
+			}
+
+			const directoryIdByPath = await createMissingDirectories(diff);
+
+			let uploadedCount = 0;
+			for (const entry of manifest) {
+				uploadedCount++;
+				const displayPath = entry.path ? `${entry.path}/${entry.filename}` : entry.filename;
+				syncing = $i18n.t('Uploading {{current}}/{{total}}: {{file}}', {
+					current: uploadedCount,
+					total: manifest.length,
+					file: displayPath
+				});
+
+				const fileObject = new File([entry.file], entry.filename, { type: entry.file.type });
+				await uploadFile(localStorage.token, fileObject, {
+					knowledge_id: knowledge.id,
+					file_hash: entry.checksum,
+					directory_id: entry.path
+						? directoryIdByPath[getDirectoryUploadPath(entry.path)]
+						: currentDirectoryId
+				}).catch((e) => {
+					toast.error(`${e}`);
+					return null;
+				});
+			}
+
+			toast.success($i18n.t('File uploaded successfully'));
+			init();
+		} catch (e) {
+			toast.error(`${e}`);
+		} finally {
+			syncing = null;
+		}
+	};
+
 	// Incremental sync: hash locally → diff on server → upload only what changed
 	const syncDirectoryHandler = async () => {
 		if (!pendingSyncFiles?.length) return;
@@ -753,13 +757,7 @@
 			syncing = $i18n.t('Computing checksums ({{count}} files)', {
 				count: pendingSyncFiles.length
 			});
-			const manifest = await Promise.all(
-				pendingSyncFiles.map(async (entry) => ({
-					...entry,
-					checksum: await computeFileHash(entry.file),
-					size: entry.file.size
-				}))
-			);
+			const manifest = await buildDirectoryManifest(pendingSyncFiles);
 			pendingSyncFiles = null;
 
 			// ── 3. Diff against knowledge base ──
@@ -787,23 +785,7 @@
 			}
 
 			// ── 5. mkdir — create missing directories (parents first) ──
-			const directoryIdByPath: Record<string, string> = { ...(diff.directory_map || {}) };
-			for (const dirPath of diff.mkdir) {
-				const segments = dirPath.split('/');
-				const name = segments.at(-1)!;
-				const parentPath = segments.slice(0, -1).join('/');
-				const parentId = parentPath ? directoryIdByPath[parentPath] : null;
-
-				const directory = await createKnowledgeDirectory(
-					localStorage.token,
-					knowledge.id,
-					name,
-					parentId
-				);
-				if (directory) {
-					directoryIdByPath[dirPath] = directory.id;
-				}
-			}
+			const directoryIdByPath = await createMissingDirectories(diff);
 
 			// ── 6. Upload added + modified files ──
 			const filesToUpload = manifest.filter(
@@ -1007,8 +989,7 @@
 			return;
 		}
 
-		if (isSaving) {
-			console.log('Save operation already in progress, skipping...');
+		if (isSaving || loadingFileContent || !selectedFile?.id) {
 			return;
 		}
 
@@ -1026,11 +1007,7 @@
 
 			if (res) {
 				toast.success($i18n.t('File content updated successfully.'));
-
-				selectedFileId = null;
-				selectedFile = null;
-				selectedFileContent = '';
-				clearSelectedFileImagePreview();
+				closeSelectedFileDrawer();
 
 				await init();
 			}
@@ -1074,6 +1051,53 @@
 		}
 	};
 
+	const readDirectoryEntries = async (reader: any) => {
+		const entries: any[] = [];
+
+		while (true) {
+			const batch = await new Promise<any[]>((resolve, reject) => {
+				reader.readEntries(resolve, reject);
+			});
+
+			if (batch.length === 0) {
+				break;
+			}
+
+			entries.push(...batch);
+		}
+
+		return entries;
+	};
+
+	const collectDroppedEntryFiles = async (
+		entry: any,
+		entryPath = entry.name
+	): Promise<DirectoryFileEntry[]> => {
+		if (entry.name.startsWith('.') || hasHiddenFolder(entryPath)) {
+			return [];
+		}
+
+		if (entry.isFile) {
+			const file = await new Promise<File>((resolve, reject) => {
+				entry.file(resolve, reject);
+			});
+			const parts = entryPath.split('/');
+			const filename = parts.pop() || file.name;
+			return [{ path: parts.join('/'), filename, file }];
+		}
+
+		if (entry.isDirectory) {
+			const reader = entry.createReader();
+			const entries = await readDirectoryEntries(reader);
+			const nested = await Promise.all(
+				entries.map((child) => collectDroppedEntryFiles(child, `${entryPath}/${child.name}`))
+			);
+			return nested.flat();
+		}
+
+		return [];
+	};
+
 	const onDragOver = (e) => {
 		e.preventDefault();
 
@@ -1098,40 +1122,35 @@
 			return;
 		}
 
-		const handleUploadingFileFolder = (items) => {
-			for (const item of items) {
-				if (item.isFile) {
-					item.file((file) => {
-						uploadFileHandler(file);
-					});
-					continue;
-				}
-
-				// Not sure why you have to call webkitGetAsEntry and isDirectory seperate, but it won't work if you try item.webkitGetAsEntry().isDirectory
-				const wkentry = item.webkitGetAsEntry();
-				const isDirectory = wkentry.isDirectory;
-				if (isDirectory) {
-					// Read the directory
-					wkentry.createReader().readEntries(
-						(entries) => {
-							handleUploadingFileFolder(entries);
-						},
-						(error) => {
-							console.error('Error reading directory entries:', error);
-						}
-					);
-				} else {
-					uploadFileHandler(item.getAsFile());
-				}
-			}
-		};
-
 		if (e.dataTransfer?.types?.includes('Files')) {
 			if (e.dataTransfer?.files) {
 				const inputItems = e.dataTransfer?.items;
 
 				if (inputItems && inputItems.length > 0) {
-					handleUploadingFileFolder(inputItems);
+					const directoryEntries: DirectoryFileEntry[] = [];
+					const looseFiles: File[] = [];
+
+					for (const rawItem of Array.from(inputItems)) {
+						const item = rawItem as DataTransferItem & { webkitGetAsEntry?: () => any };
+						const entry = item.webkitGetAsEntry?.();
+
+						if (entry?.isDirectory) {
+							directoryEntries.push(...(await collectDroppedEntryFiles(entry)));
+						} else {
+							const file = item.getAsFile();
+							if (file) {
+								looseFiles.push(file);
+							}
+						}
+					}
+
+					for (const file of looseFiles) {
+						await uploadFileHandler(file);
+					}
+
+					if (directoryEntries.length > 0) {
+						await uploadDirectoryEntries(directoryEntries);
+					}
 				} else {
 					toast.error($i18n.t(`File not found.`));
 				}
@@ -1204,7 +1223,6 @@
 			clearInterval(pendingPollTimer);
 			pendingPollTimer = null;
 		}
-		clearSelectedFileImagePreview();
 		mediaQuery?.removeEventListener('change', handleMediaQuery);
 		const dropZone = document.querySelector('body');
 		dropZone?.removeEventListener('dragover', onDragOver);
@@ -1387,308 +1405,381 @@
 		<div
 			class="mt-2 mb-2.5 py-2 -mx-0 bg-white dark:bg-gray-900 rounded-3xl border border-gray-100/30 dark:border-gray-850/30 flex-1"
 		>
-			<div class="px-3.5 flex flex-1 items-center w-full space-x-2 py-0.5 pb-2">
-				<div class="flex flex-1 items-center">
-					<div class=" self-center ml-1 mr-3">
-						<Search className="size-3.5" />
+			{#if isExternalKnowledge}
+				<div class="p-5 flex flex-col gap-4">
+					<div class="flex flex-wrap gap-2 text-xs">
+						<div class="px-2 py-1 rounded-lg bg-gray-50 dark:bg-gray-850">
+							{$i18n.t('Connected')}
+						</div>
+						<div class="px-2 py-1 rounded-lg bg-gray-50 dark:bg-gray-850">
+							{$i18n.t('Read Only')}
+						</div>
+						<div class="px-2 py-1 rounded-lg bg-gray-50 dark:bg-gray-850">
+							{knowledge?.meta?.external?.provider ?? $i18n.t('Provider')}
+						</div>
+						<div class="px-2 py-1 rounded-lg bg-gray-50 dark:bg-gray-850">
+							{$i18n.t('Service Account')}
+						</div>
 					</div>
-					<input
-						class=" w-full text-sm pr-4 py-1 rounded-r-xl outline-hidden bg-transparent"
-						bind:value={query}
-						aria-label={$i18n.t('Search Collection')}
-						placeholder={$i18n.t('Search Collection')}
-						on:focus={() => {
-							closeSelectedFileDrawer();
-						}}
-					/>
 
-					<Dropdown align="end">
-						<button
-							class="p-1.5 mr-1 rounded-xl text-gray-500 hover:bg-gray-100 dark:hover:bg-gray-800 transition"
-							type="button"
-						>
-							<AdjustmentsHorizontal className="size-3.5" strokeWidth="2" />
-						</button>
+					<div class="grid grid-cols-1 md:grid-cols-2 gap-3 text-sm">
+						<div>
+							<div class="text-xs text-gray-500 mb-1">{$i18n.t('Mapped Source')}</div>
+							<div class="rounded-xl bg-gray-50 dark:bg-gray-850 px-3 py-2">
+								{knowledge?.meta?.external?.source?.name ?? $i18n.t('Not configured')}
+							</div>
+						</div>
+						<div>
+							<div class="text-xs text-gray-500 mb-1">{$i18n.t('Auth Mode')}</div>
+							<div class="rounded-xl bg-gray-50 dark:bg-gray-850 px-3 py-2">
+								{$i18n.t('Admin-managed service account')}
+							</div>
+						</div>
+					</div>
 
-						<div slot="content">
-							<div
-								class="min-w-[180px] rounded-2xl px-1 py-1 border border-gray-100 dark:border-gray-800 z-50 bg-white dark:bg-gray-850 dark:text-white shadow-lg"
+					<div class="text-xs text-gray-500">
+						{$i18n.t(
+							'This knowledge base retrieves from a connected source. Open WebUI can query it, but cannot upload, sync, edit, delete, reset, or reindex its source data.'
+						)}
+					</div>
+
+					<div class="flex flex-col gap-2">
+						<div class="font-medium text-sm">{$i18n.t('Test Query')}</div>
+						<div class="flex gap-2">
+							<input
+								class="w-full text-sm rounded-xl bg-gray-50 dark:bg-gray-850 px-3 py-2 outline-hidden"
+								bind:value={externalTestQuery}
+								placeholder={$i18n.t('Ask this knowledge source a test question')}
+							/>
+							<button
+								class="px-3 py-2 rounded-xl bg-black text-white dark:bg-white dark:text-black text-sm"
+								on:click={externalTestHandler}
 							>
-								<button
-									class="select-none flex gap-2 items-center px-3 py-1.5 text-sm cursor-pointer hover:bg-gray-50 dark:hover:bg-gray-800 rounded-xl w-full"
-									type="button"
-									on:click={() => {
-										includeContent = !includeContent;
-									}}
-								>
-									<Checkbox
-										state={includeContent ? 'checked' : 'unchecked'}
-										on:change={(e) => {
-											includeContent = e.detail === 'checked';
-										}}
-									/>
-									{$i18n.t('File content')}
-								</button>
-							</div>
-						</div>
-					</Dropdown>
-
-					{#if knowledge?.write_access}
-						<div class="flex items-center gap-2">
-							<AddContentMenu
-								onUpload={(data) => {
-									if (data.type === 'directory') {
-										uploadDirectoryHandler();
-									} else if (data.type === 'new_directory') {
-										showNewDirectoryModal = true;
-									} else if (data.type === 'web') {
-										showAddWebpageModal = true;
-									} else if (data.type === 'text') {
-										showAddTextContentModal = true;
-									} else {
-										document.getElementById('files-input').click();
-									}
-								}}
-								onSync={async () => {
-									pendingSyncFiles = await collectDirectoryFiles();
-									if (pendingSyncFiles?.length) {
-										showSyncConfirmModal = true;
-									}
-								}}
-								onReset={() => {
-									showResetConfirm = true;
-								}}
-							/>
-						</div>
-					{/if}
-				</div>
-			</div>
-
-			<div class="px-3 flex justify-between">
-				<div
-					class="flex w-full bg-transparent overflow-x-auto scrollbar-none"
-					on:wheel={(e) => {
-						if (e.deltaY !== 0) {
-							e.preventDefault();
-							e.currentTarget.scrollLeft += e.deltaY;
-						}
-					}}
-				>
-					<div
-						class="flex gap-3 w-fit text-center text-sm rounded-full bg-transparent px-0.5 whitespace-nowrap"
-					>
-						<DropdownOptions
-							align="start"
-							className="flex shrink-0 items-center gap-2 px-3 py-1.5 text-sm bg-gray-50 dark:bg-gray-850 rounded-xl placeholder-gray-400 outline-hidden focus:outline-hidden"
-							bind:value={viewOption}
-							items={[
-								{ value: null, label: $i18n.t('All') },
-								{ value: 'created', label: $i18n.t('Created by you') },
-								{ value: 'shared', label: $i18n.t('Shared with you') }
-							]}
-							onChange={(value) => {
-								if (value) {
-									localStorage.workspaceViewOption = value;
-								} else {
-									delete localStorage.workspaceViewOption;
-								}
-							}}
-						/>
-
-						<DropdownOptions
-							align="start"
-							bind:value={sortKey}
-							placeholder={$i18n.t('Sort')}
-							items={[
-								{ value: 'name', label: $i18n.t('Name') },
-								{ value: 'created_at', label: $i18n.t('Created At') },
-								{ value: 'updated_at', label: $i18n.t('Updated At') }
-							]}
-						/>
-
-						{#if sortKey}
-							<DropdownOptions
-								align="start"
-								bind:value={direction}
-								items={[
-									{ value: 'asc', label: $i18n.t('Asc') },
-									{ value: null, label: $i18n.t('Desc') }
-								]}
-							/>
-						{/if}
-					</div>
-				</div>
-			</div>
-
-			{#if currentDirectoryId !== null}
-				<div class="px-5 mt-2">
-					<KnowledgeBreadcrumbs
-						rootLabel={knowledge.name}
-						{breadcrumbs}
-						onNavigate={(dirId) => navigateToDirectory(dirId)}
-						onMoveFile={(fileId, dirId) => moveFileToDirectoryHandler(fileId, dirId)}
-						onMoveDir={(dirId, targetId) => moveDirectoryHandler(dirId, targetId)}
-					/>
-				</div>
-			{/if}
-
-			{#if syncing}
-				<div class="mx-2.5 mt-2.5 -mb-0.5">
-					<div class="flex items-center gap-2.5 rounded-xl py-2 px-3 bg-gray-50 dark:bg-gray-850">
-						<Spinner className="size-3.5 shrink-0" />
-						<div class="text-xs text-gray-500 dark:text-gray-400 truncate">
-							{syncing}
-						</div>
-					</div>
-				</div>
-			{/if}
-
-			{#if fileItems !== null && fileItemsTotal !== null}
-				<div class="flex flex-row flex-1 gap-3 px-2.5 mt-2">
-					<div class="flex-1 flex">
-						<div class=" flex flex-col w-full space-x-2 rounded-lg h-full">
-							<div class="w-full h-full flex flex-col min-h-full">
-								{#if fileItems.length > 0 || directoryItems.length > 0}
-									<div class=" flex overflow-y-auto h-full w-full scrollbar-hidden text-xs">
-										<Files
-											files={fileItems}
-											directories={directoryItems}
-											{knowledge}
-											{selectedFileId}
-											onClick={(fileId) => {
-												selectedFileId = fileId;
-
-												if (fileItems) {
-													const file = fileItems.find((file) => file.id === selectedFileId);
-													if (file) {
-														fileSelectHandler(file);
-													} else {
-														closeSelectedFileDrawer();
-													}
-												}
-											}}
-											onDelete={(fileId) => {
-												closeSelectedFileDrawer();
-
-												deleteFileHandler(fileId);
-											}}
-											onRename={(fileId, name) => renameFileHandler(fileId, name)}
-											onNavigateDirectory={(dirId) => navigateToDirectory(dirId)}
-											onRenameDirectory={(id, name) => renameDirectoryHandler(id, name)}
-											onDeleteDirectory={(id) => confirmDeleteDirectory(id)}
-											onMoveFileToDirectory={(fileId, dirId) =>
-												moveFileToDirectoryHandler(fileId, dirId)}
-											onMoveDirectoryToDirectory={(dirId, targetId) =>
-												moveDirectoryHandler(dirId, targetId)}
-										/>
-									</div>
-
-									{#if fileItemsTotal > 30}
-										<Pagination bind:page={currentPage} count={fileItemsTotal} perPage={30} />
-									{/if}
-								{:else}
-									<div class="my-3 flex flex-col justify-center text-center text-gray-500 text-xs">
-										<div>
-											{$i18n.t('No content found')}
-										</div>
-									</div>
-								{/if}
-							</div>
+								{$i18n.t('Test')}
+							</button>
 						</div>
 					</div>
 
-					{#if selectedFileId !== null}
-						<Drawer
-							className="h-full"
-							show={selectedFileId !== null}
-							onClose={() => {
-								closeSelectedFileDrawer();
-							}}
-						>
-							<div class="flex flex-col justify-start h-full max-h-full">
-								<div class=" flex flex-col w-full h-full max-h-full">
-									<div class="shrink-0 flex items-center p-2">
-										<div class="mr-2">
-											<button
-												class="w-full text-left text-sm p-1.5 rounded-lg dark:text-gray-300 dark:hover:text-white hover:bg-black/5 dark:hover:bg-gray-850"
-												aria-label={$i18n.t('Close')}
-												on:click={() => {
-													closeSelectedFileDrawer();
-												}}
-											>
-												<ChevronLeft strokeWidth="2.5" />
-											</button>
-										</div>
-										<div class=" flex-1 text-lg line-clamp-1">
-											{selectedFile?.meta?.name}
-										</div>
-
-										{#if knowledge?.write_access && !isSelectedFileImage(selectedFile)}
-											<div>
-												<button
-													class="flex self-center w-fit text-sm py-1 px-2.5 dark:text-gray-300 dark:hover:text-white hover:bg-black/5 dark:hover:bg-white/5 rounded-lg disabled:opacity-50 disabled:cursor-not-allowed"
-													disabled={isSaving}
-													on:click={() => {
-														updateFileContentHandler();
-													}}
-												>
-													{$i18n.t('Save')}
-													{#if isSaving}
-														<div class="ml-2 self-center">
-															<Spinner />
-														</div>
-													{/if}
-												</button>
-											</div>
-										{/if}
+					{#if externalTestResult}
+						<div class="rounded-xl bg-gray-50 dark:bg-gray-850 p-3 text-xs">
+							<div class="font-medium mb-2">{$i18n.t('Preview')}</div>
+							{#each externalTestResult.documents ?? [] as document, idx}
+								<div class="border-t border-gray-100 dark:border-gray-800 py-2">
+									<div class="line-clamp-4">{document}</div>
+									<div class="text-gray-500 mt-1">
+										{externalTestResult.metadatas?.[idx]?.source ?? ''}
 									</div>
-
-									{#key selectedFile.id}
-										{#if isSelectedFileImage(selectedFile)}
-											<div class="min-h-0 flex-1">
-												{#if selectedFileImageLoading}
-													<div class="flex h-full items-center justify-center">
-														<Spinner className="size-4" />
-													</div>
-												{:else if selectedFileImageUrl}
-													<PanzoomContainer
-														className="w-full h-full flex items-center justify-center"
-														options={{ zoomDoubleClickSpeed: 1 }}
-													>
-														<img
-															src={selectedFileImageUrl}
-															alt={getFileName(selectedFile)}
-															class="max-w-full max-h-full object-contain p-3"
-															draggable="false"
-														/>
-													</PanzoomContainer>
-												{:else}
-													<div
-														class="flex h-full items-center justify-center px-3 text-center text-sm text-gray-500 dark:text-gray-400"
-													>
-														{selectedFileImageError ?? $i18n.t('Failed to load image preview.')}
-													</div>
-												{/if}
-											</div>
-										{:else}
-											<textarea
-												class="w-full h-full text-sm outline-none resize-none px-3 py-2"
-												bind:value={selectedFileContent}
-												disabled={!knowledge?.write_access}
-												aria-label={$i18n.t('File content')}
-												placeholder={$i18n.t('Add content here')}
-											></textarea>
-										{/if}
-									{/key}
 								</div>
-							</div>
-						</Drawer>
+							{/each}
+						</div>
 					{/if}
 				</div>
 			{:else}
-				<div class="my-10">
-					<Spinner className="size-4" />
+				<div class="px-3.5 flex flex-1 items-center w-full space-x-2 py-0.5 pb-2">
+					<div class="flex flex-1 items-center">
+						<div class=" self-center ml-1 mr-3">
+							<Search className="size-3.5" />
+						</div>
+						<input
+							class=" w-full text-sm pr-4 py-1 rounded-r-xl outline-hidden bg-transparent"
+							bind:value={query}
+							on:input={handleSearchInput}
+								aria-label={$i18n.t('Search Collection')}
+								placeholder={$i18n.t('Search Collection')}
+								on:focus={() => {
+									closeSelectedFileDrawer();
+								}}
+							/>
+
+						<Dropdown align="end">
+							<button
+								class="p-1.5 mr-1 rounded-xl text-gray-500 hover:bg-gray-100 dark:hover:bg-gray-800 transition"
+								type="button"
+							>
+								<AdjustmentsHorizontal className="size-3.5" strokeWidth="2" />
+							</button>
+
+							<div slot="content">
+								<div
+									class="min-w-[180px] rounded-2xl px-1 py-1 border border-gray-100 dark:border-gray-800 z-50 bg-white dark:bg-gray-850 dark:text-white shadow-lg"
+								>
+									<button
+										class="select-none flex gap-2 items-center px-3 py-1.5 text-sm cursor-pointer hover:bg-gray-50 dark:hover:bg-gray-800 rounded-xl w-full"
+										type="button"
+										on:click={() => {
+											includeContent = !includeContent;
+										}}
+									>
+										<Checkbox
+											state={includeContent ? 'checked' : 'unchecked'}
+											on:change={(e) => {
+												includeContent = e.detail === 'checked';
+											}}
+										/>
+										{$i18n.t('File content')}
+									</button>
+								</div>
+							</div>
+						</Dropdown>
+
+						{#if knowledge?.write_access}
+							<div>
+								<AddContentMenu
+									onUpload={(data) => {
+										if (data.type === 'directory') {
+											uploadDirectoryHandler();
+										} else if (data.type === 'new_directory') {
+											showNewDirectoryModal = true;
+										} else if (data.type === 'web') {
+											showAddWebpageModal = true;
+										} else if (data.type === 'text') {
+											showAddTextContentModal = true;
+										} else {
+											document.getElementById('files-input').click();
+										}
+									}}
+									onSync={async () => {
+										pendingSyncFiles = await collectDirectoryFiles();
+										if (pendingSyncFiles?.length) {
+											showSyncConfirmModal = true;
+										}
+									}}
+									onReset={() => {
+										showResetConfirm = true;
+									}}
+								/>
+							</div>
+						{/if}
+					</div>
 				</div>
+
+				<div class="px-3 flex justify-between">
+					<div
+						class="flex w-full bg-transparent overflow-x-auto scrollbar-none"
+						on:wheel={(e) => {
+							if (e.deltaY !== 0) {
+								e.preventDefault();
+								e.currentTarget.scrollLeft += e.deltaY;
+							}
+						}}
+					>
+						<div
+							class="flex gap-3 w-fit text-center text-sm rounded-full bg-transparent px-0.5 whitespace-nowrap"
+						>
+							<DropdownOptions
+								align="start"
+								className="flex shrink-0 items-center gap-2 px-3 py-1.5 text-sm bg-gray-50 dark:bg-gray-850 rounded-xl placeholder-gray-400 outline-hidden focus:outline-hidden"
+								bind:value={viewOption}
+								items={[
+									{ value: null, label: $i18n.t('All') },
+									{ value: 'created', label: $i18n.t('Created by you') },
+									{ value: 'shared', label: $i18n.t('Shared with you') }
+								]}
+								onChange={(value) => {
+									if (value) {
+										localStorage.workspaceViewOption = value;
+									} else {
+										delete localStorage.workspaceViewOption;
+									}
+								}}
+							/>
+
+							<DropdownOptions
+								align="start"
+								bind:value={sortKey}
+								placeholder={$i18n.t('Sort')}
+								items={[
+									{ value: 'name', label: $i18n.t('Name') },
+									{ value: 'created_at', label: $i18n.t('Created At') },
+									{ value: 'updated_at', label: $i18n.t('Updated At') }
+								]}
+							/>
+
+							{#if sortKey}
+								<DropdownOptions
+									align="start"
+									bind:value={direction}
+									items={[
+										{ value: 'asc', label: $i18n.t('Asc') },
+										{ value: null, label: $i18n.t('Desc') }
+									]}
+								/>
+							{/if}
+						</div>
+					</div>
+				</div>
+
+				{#if currentDirectoryId !== null}
+					<div class="px-5 mt-2">
+						<KnowledgeBreadcrumbs
+							rootLabel={knowledge.name}
+							{breadcrumbs}
+							onNavigate={(dirId) => navigateToDirectory(dirId)}
+							onMoveFile={(fileId, dirId) => moveFileToDirectoryHandler(fileId, dirId)}
+							onMoveDir={(dirId, targetId) => moveDirectoryHandler(dirId, targetId)}
+						/>
+					</div>
+				{/if}
+
+				{#if syncing}
+					<div class="mx-2.5 mt-2.5 -mb-0.5">
+						<div class="flex items-center gap-2.5 rounded-xl py-2 px-3 bg-gray-50 dark:bg-gray-850">
+							<Spinner className="size-3.5 shrink-0" />
+							<div class="text-xs text-gray-500 dark:text-gray-400 truncate">
+								{syncing}
+							</div>
+						</div>
+					</div>
+				{/if}
+
+				{#if fileItems !== null && fileItemsTotal !== null}
+					<div class="flex flex-row flex-1 gap-3 px-2.5 mt-2">
+						<div class="flex-1 flex">
+							<div class=" flex flex-col w-full space-x-2 rounded-lg h-full">
+								<div class="w-full h-full flex flex-col min-h-full">
+									{#if fileItems.length > 0 || directoryItems.length > 0}
+										<div class=" flex overflow-y-auto h-full w-full scrollbar-hidden text-xs">
+											<Files
+												files={fileItems}
+												directories={directoryItems}
+												{knowledge}
+												{selectedFileId}
+												onClick={(fileId) => {
+													selectedFileId = fileId;
+
+													if (fileItems) {
+														const file = fileItems.find((file) => file.id === selectedFileId);
+															if (file) {
+																fileSelectHandler(file);
+															} else {
+																closeSelectedFileDrawer();
+															}
+														}
+													}}
+													onDelete={(fileId) => {
+														closeSelectedFileDrawer();
+														deleteFileHandler(fileId);
+													}}
+												onRename={(fileId, name) => renameFileHandler(fileId, name)}
+												onNavigateDirectory={(dirId) => navigateToDirectory(dirId)}
+												onRenameDirectory={(id, name) => renameDirectoryHandler(id, name)}
+												onDeleteDirectory={(id) => confirmDeleteDirectory(id)}
+												onMoveFileToDirectory={(fileId, dirId) =>
+													moveFileToDirectoryHandler(fileId, dirId)}
+												onMoveDirectoryToDirectory={(dirId, targetId) =>
+													moveDirectoryHandler(dirId, targetId)}
+											/>
+										</div>
+
+										{#if fileItemsTotal > 30}
+											<Pagination bind:page={currentPage} count={fileItemsTotal} perPage={30} />
+										{/if}
+									{:else}
+										<div
+											class="my-3 flex flex-col justify-center text-center text-gray-500 text-xs"
+										>
+											<div>
+												{$i18n.t('No content found')}
+											</div>
+										</div>
+									{/if}
+								</div>
+							</div>
+						</div>
+
+						{#if selectedFileId !== null}
+							<Drawer
+									className="h-full"
+									show={selectedFileId !== null}
+									onClose={() => {
+										closeSelectedFileDrawer();
+									}}
+								>
+								<div class="flex flex-col justify-start h-full max-h-full">
+									<div class=" flex flex-col w-full h-full max-h-full">
+										<div class="shrink-0 flex items-center p-2">
+											<div class="mr-2">
+												<button
+														class="w-full text-left text-sm p-1.5 rounded-lg dark:text-gray-300 dark:hover:text-white hover:bg-black/5 dark:hover:bg-gray-850"
+														aria-label={$i18n.t('Close')}
+														on:click={() => {
+															closeSelectedFileDrawer();
+														}}
+													>
+													<ChevronLeft strokeWidth="2.5" />
+												</button>
+												</div>
+												<div class=" flex-1 text-lg line-clamp-1">
+													{getFileName(selectedFile)}
+												</div>
+
+												{#if knowledge?.write_access && !isSelectedFileImage(selectedFile)}
+													<div>
+													<button
+														class="flex self-center w-fit text-sm py-1 px-2.5 dark:text-gray-300 dark:hover:text-white hover:bg-black/5 dark:hover:bg-white/5 rounded-lg disabled:opacity-50 disabled:cursor-not-allowed"
+														disabled={isSaving || loadingFileContent}
+														on:click={() => {
+															updateFileContentHandler();
+														}}
+													>
+														{$i18n.t('Save')}
+														{#if isSaving}
+															<div class="ml-2 self-center">
+																<Spinner />
+															</div>
+														{/if}
+													</button>
+												</div>
+											{/if}
+											</div>
+
+											{#key selectedFile?.id}
+												{#if isSelectedFileImage(selectedFile)}
+													<div class="min-h-0 flex-1">
+														{#if selectedFileImageLoading}
+															<div class="flex h-full items-center justify-center">
+																<Spinner className="size-4" />
+															</div>
+														{:else if selectedFileImageUrl}
+															<PanzoomContainer
+																className="w-full h-full flex items-center justify-center"
+																options={{ zoomDoubleClickSpeed: 1 }}
+															>
+																<img
+																	src={selectedFileImageUrl}
+																	alt={getFileName(selectedFile)}
+																	class="max-w-full max-h-full object-contain p-3"
+																	draggable="false"
+																/>
+															</PanzoomContainer>
+														{:else}
+															<div
+																class="flex h-full items-center justify-center px-3 text-center text-sm text-gray-500 dark:text-gray-400"
+															>
+																{selectedFileImageError ?? $i18n.t('Failed to load image preview.')}
+															</div>
+														{/if}
+													</div>
+												{:else}
+													<textarea
+														class="w-full h-full text-sm outline-none resize-none px-3 py-2"
+														bind:value={selectedFileContent}
+														disabled={!knowledge?.write_access || loadingFileContent}
+														aria-label={$i18n.t('File content')}
+														placeholder={$i18n.t('Add content here')}
+													></textarea>
+												{/if}
+											{/key}
+									</div>
+								</div>
+							</Drawer>
+						{/if}
+					</div>
+				{:else}
+					<div class="my-10">
+						<Spinner className="size-4" />
+					</div>
+				{/if}
 			{/if}
 		</div>
 	{:else}

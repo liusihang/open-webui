@@ -1,14 +1,31 @@
+import hashlib
 import logging
 import time
-from typing import Optional
+from typing import Any, Optional
 
-from open_webui.internal.db import Base, get_async_db_context
+from open_webui.internal.db import Base, JSONField, get_async_db_context
 from open_webui.models.access_grants import AccessGrantModel, AccessGrants
 from open_webui.models.groups import Groups
 from open_webui.models.users import User, UserModel, UserResponse, Users
 from pydantic import BaseModel, ConfigDict, Field
-from sqlalchemy import JSON, BigInteger, Boolean, Column, String, Text, delete, func, or_, select, update
+from sqlalchemy import (
+    JSON,
+    BigInteger,
+    Boolean,
+    Column,
+    ForeignKey,
+    Index,
+    String,
+    Text,
+    UniqueConstraint,
+    delete,
+    func,
+    or_,
+    select,
+    update,
+)
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.exc import IntegrityError
 
 log = logging.getLogger(__name__)
 
@@ -32,8 +49,40 @@ class Skill(Base):
     created_at = Column(BigInteger)
 
 
+class SkillPackage(Base):
+    __tablename__ = 'skill_package'
+
+    id = Column(String, primary_key=True, unique=True)
+    skill_id = Column(String, ForeignKey('skill.id', ondelete='CASCADE'), nullable=False)
+    bundle_hash = Column(String, nullable=False)
+    manifest = Column(JSONField, nullable=False)
+    storage_path = Column(Text, nullable=False)
+
+    updated_at = Column(BigInteger, nullable=False)
+    created_at = Column(BigInteger, nullable=False)
+
+    __table_args__ = (
+        UniqueConstraint('skill_id', 'bundle_hash', name='uq_skill_package_skill_bundle'),
+        Index('ix_skill_package_skill_id', 'skill_id'),
+        Index('ix_skill_package_bundle_hash', 'bundle_hash'),
+    )
+
+
 class SkillMeta(BaseModel):
     tags: Optional[list[str]] = []
+
+
+class SkillPackageModel(BaseModel):
+    id: str
+    skill_id: str
+    bundle_hash: str
+    manifest: dict[str, Any]
+    storage_path: str
+
+    updated_at: int
+    created_at: int
+
+    model_config = ConfigDict(from_attributes=True)
 
 
 class SkillModel(BaseModel):
@@ -341,5 +390,172 @@ class SkillsTable:
         except Exception:
             return False
 
+    async def upsert_skill_package(
+        self,
+        skill_id: str,
+        bundle_hash: str,
+        manifest: dict[str, Any],
+        storage_path: str,
+        db: Optional[AsyncSession] = None,
+    ) -> Optional[SkillPackageModel]:
+        try:
+            async with get_async_db_context(db) as db:
+                package = await self._upsert_skill_package_row(
+                    db,
+                    skill_id=skill_id,
+                    bundle_hash=bundle_hash,
+                    manifest=manifest,
+                    storage_path=storage_path,
+                )
+                try:
+                    await db.commit()
+                except IntegrityError:
+                    await db.rollback()
+                    package = await self._upsert_skill_package_row(
+                        db,
+                        skill_id=skill_id,
+                        bundle_hash=bundle_hash,
+                        manifest=manifest,
+                        storage_path=storage_path,
+                    )
+                    await db.commit()
+                await db.refresh(package)
+                return SkillPackageModel.model_validate(package)
+        except Exception as e:
+            try:
+                await db.rollback()
+            except Exception:
+                pass
+            log.exception(f'Error upserting skill package: {e}')
+            return None
+
+    async def update_skill_and_upsert_package_by_id(
+        self,
+        id: str,
+        updated: dict,
+        *,
+        bundle_hash: str,
+        manifest: dict[str, Any],
+        storage_path: str,
+        db: Optional[AsyncSession] = None,
+    ) -> Optional[SkillModel]:
+        try:
+            async with get_async_db_context(db) as db:
+                try:
+                    if not await self._update_skill_and_package_rows(
+                        db,
+                        id,
+                        updated,
+                        bundle_hash=bundle_hash,
+                        manifest=manifest,
+                        storage_path=storage_path,
+                    ):
+                        return None
+                    await db.commit()
+                except IntegrityError:
+                    await db.rollback()
+                    if not await self._update_skill_and_package_rows(
+                        db,
+                        id,
+                        updated,
+                        bundle_hash=bundle_hash,
+                        manifest=manifest,
+                        storage_path=storage_path,
+                    ):
+                        return None
+                    await db.commit()
+
+                skill = await db.get(Skill, id)
+                await db.refresh(skill)
+                return await self._to_skill_model(skill, db=db)
+        except Exception as e:
+            try:
+                await db.rollback()
+            except Exception:
+                pass
+            log.exception(f'Error updating skill and package: {e}')
+            return None
+
+    async def _update_skill_and_package_rows(
+        self,
+        db: AsyncSession,
+        id: str,
+        updated: dict,
+        *,
+        bundle_hash: str,
+        manifest: dict[str, Any],
+        storage_path: str,
+    ) -> bool:
+        result = await db.execute(update(Skill).filter_by(id=id).values(**updated, updated_at=int(time.time())))
+        if result.rowcount == 0:
+            await db.rollback()
+            return False
+
+        await self._upsert_skill_package_row(
+            db,
+            skill_id=id,
+            bundle_hash=bundle_hash,
+            manifest=manifest,
+            storage_path=storage_path,
+        )
+        return True
+
+    async def _upsert_skill_package_row(
+        self,
+        db: AsyncSession,
+        *,
+        skill_id: str,
+        bundle_hash: str,
+        manifest: dict[str, Any],
+        storage_path: str,
+    ) -> SkillPackage:
+        now = _skill_package_timestamp()
+        result = await db.execute(select(SkillPackage).filter_by(skill_id=skill_id, bundle_hash=bundle_hash))
+        package = result.scalars().first()
+        if package:
+            package.manifest = manifest
+            package.storage_path = storage_path
+            package.updated_at = now
+            return package
+
+        package = SkillPackage(
+            id=skill_package_id(skill_id, bundle_hash),
+            skill_id=skill_id,
+            bundle_hash=bundle_hash,
+            manifest=manifest,
+            storage_path=storage_path,
+            created_at=now,
+            updated_at=now,
+        )
+        db.add(package)
+        return package
+
+    async def get_latest_skill_package_by_skill_id(
+        self,
+        skill_id: str,
+        db: Optional[AsyncSession] = None,
+    ) -> Optional[SkillPackageModel]:
+        try:
+            async with get_async_db_context(db) as db:
+                result = await db.execute(
+                    select(SkillPackage)
+                    .filter_by(skill_id=skill_id)
+                    .order_by(SkillPackage.updated_at.desc(), SkillPackage.created_at.desc(), SkillPackage.id.desc())
+                    .limit(1)
+                )
+                package = result.scalars().first()
+                return SkillPackageModel.model_validate(package) if package else None
+        except Exception:
+            return None
+
 
 Skills = SkillsTable()
+
+
+def skill_package_id(skill_id: str, bundle_hash: str) -> str:
+    skill_id_digest = hashlib.sha256(skill_id.encode('utf-8')).hexdigest()
+    return f'skillpkg_{skill_id_digest}_{bundle_hash}'
+
+
+def _skill_package_timestamp() -> int:
+    return time.time_ns()

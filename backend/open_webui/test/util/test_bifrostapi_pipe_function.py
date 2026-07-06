@@ -93,6 +93,113 @@ def test_resolve_effective_cache_settings_auto_generates_stable_gpt_prompt_cache
     assert settings_a['prompt_cache_key'] == settings_b['prompt_cache_key']
 
 
+def test_resolve_effective_cache_settings_keeps_explicit_prompt_cache_key():
+    pipe = _load_pipe_class()()
+
+    settings = pipe._resolve_effective_cache_settings(
+        body={
+            'model': 'bifrostapi.openai/gpt-5',
+            'metadata': {'chat_id': 'chat-123'},
+            'prompt_cache_key': 'caller-key',
+        },
+        model='openai/gpt-5',
+        route_mode='responses',
+        system_message={'role': 'system', 'content': 'system prompt'},
+        messages=[{'role': 'user', 'content': 'hello'}],
+        attachments=[],
+        function_specs=[],
+    )
+
+    assert settings['prompt_cache_key'] == 'caller-key'
+
+
+def test_resolve_effective_cache_settings_uses_chat_id_scoped_gpt_prompt_cache_key():
+    pipe = _load_pipe_class()()
+
+    base = pipe._resolve_effective_cache_settings(
+        body={
+            'model': 'bifrostapi.openai/gpt-5',
+            'metadata': {'chat_id': 'chat-123'},
+        },
+        model='openai/gpt-5',
+        route_mode='responses',
+        system_message={'role': 'system', 'content': 'system prompt'},
+        messages=[{'role': 'user', 'content': 'hello'}],
+        attachments=[],
+        function_specs=[],
+    )
+    changed_user = pipe._resolve_effective_cache_settings(
+        body={
+            'model': 'bifrostapi.openai/gpt-5',
+            'metadata': {'chat_id': 'chat-123'},
+        },
+        model='openai/gpt-5',
+        route_mode='responses',
+        system_message={'role': 'system', 'content': 'system prompt'},
+        messages=[{'role': 'user', 'content': 'different user text'}],
+        attachments=[],
+        function_specs=[],
+    )
+    fallback = pipe._resolve_effective_cache_settings(
+        body={'model': 'bifrostapi.openai/gpt-5'},
+        model='openai/gpt-5',
+        route_mode='responses',
+        system_message={'role': 'system', 'content': 'system prompt'},
+        messages=[{'role': 'user', 'content': 'hello'}],
+        attachments=[],
+        function_specs=[],
+    )
+
+    assert base['provider'] == 'openai'
+    assert len(base['prompt_cache_key']) <= 64
+    assert base['prompt_cache_key'] == changed_user['prompt_cache_key']
+    assert base['prompt_cache_key'] != fallback['prompt_cache_key']
+    assert not base['prompt_cache_key'].startswith('owg:')
+
+
+def test_resolve_effective_cache_settings_chat_id_key_ignores_prefix_shape_changes():
+    pipe = _load_pipe_class()()
+
+    base = pipe._resolve_effective_cache_settings(
+        body={
+            'model': 'bifrostapi.openai/gpt-5',
+            'metadata': {'chat_id': 'chat-123'},
+        },
+        model='openai/gpt-5',
+        route_mode='responses',
+        system_message={'role': 'system', 'content': 'system prompt'},
+        messages=[{'role': 'user', 'content': 'hello'}],
+        attachments=[],
+        function_specs=[],
+    )
+    changed_prefix_shape = pipe._resolve_effective_cache_settings(
+        body={
+            'model': 'bifrostapi.openai/gpt-5',
+            'metadata': {'chat_id': 'chat-123'},
+        },
+        model='openai/gpt-5',
+        route_mode='responses',
+        system_message={'role': 'system', 'content': 'rewritten system prompt'},
+        messages=[{'role': 'user', 'content': 'hello with more context'}],
+        attachments=[
+            {
+                'name': 'evidence.png',
+                'kind': 'image',
+                'responses_part': {'type': 'input_image', 'image_url': 'data:image/png;base64,BBB'},
+            }
+        ],
+        function_specs=[
+            {
+                'description': 'Tool shape change',
+                'name': 'tool_a',
+                'parameters': {'type': 'object', 'properties': {'count': {'type': 'integer'}}},
+            }
+        ],
+    )
+
+    assert base['prompt_cache_key'] == changed_prefix_shape['prompt_cache_key']
+
+
 def test_resolve_effective_cache_settings_does_not_auto_generate_non_gpt_prompt_cache_key():
     pipe = _load_pipe_class()()
 
@@ -410,6 +517,64 @@ def test_build_responses_payload_attaches_attachments_and_uses_responses_tool_sh
             'text': '[Attachment: notes.txt]\nnormalized fallback',
         }
         for part in user_message['content']
+    )
+
+
+def test_build_responses_payload_preserves_request_reasoning_effort():
+    pipe = _load_pipe_class()()
+
+    payload = pipe._build_responses_payload(
+        body={
+            'model': 'bifrostapi.ZenMuxOAI/openai/gpt-5.4',
+            'stream': True,
+            'reasoning': {
+                'enabled': True,
+                'effort': 'xhigh',
+                'summary': 'detailed',
+                'max_tokens': 12400,
+            },
+        },
+        model='ZenMuxOAI/openai/gpt-5.4',
+        system_message={'role': 'system', 'content': 'system'},
+        messages=[{'role': 'user', 'content': 'hello'}],
+        attachments=[],
+        function_specs=[],
+    )
+
+    assert payload['reasoning'] == {
+        'enabled': True,
+        'effort': 'xhigh',
+        'summary': 'detailed',
+        'max_tokens': 12400,
+    }
+
+
+def test_build_responses_payload_omits_default_reasoning_without_effort():
+    pipe = _load_pipe_class()()
+    pipe.valves.DEFAULT_REASONING_ENABLED = True
+    pipe.valves.DEFAULT_REASONING_SUMMARY = 'detailed'
+    pipe.valves.DEFAULT_REASONING_EFFORT = ''
+
+    payload = pipe._build_responses_payload(
+        body={
+            'model': 'bifrostapi.ZenMuxOAI/openai/gpt-5.4',
+            'stream': True,
+        },
+        model='ZenMuxOAI/openai/gpt-5.4',
+        system_message={'role': 'system', 'content': 'system'},
+        messages=[{'role': 'user', 'content': 'hello'}],
+        attachments=[],
+        function_specs=[],
+    )
+
+    assert 'reasoning' not in payload
+
+
+def test_reasoning_param_error_detects_empty_level_rejection():
+    pipe = _load_pipe_class()()
+
+    assert pipe._is_reasoning_param_error(
+        'level "" not supported, valid levels: low, medium, high, xhigh'
     )
 
 

@@ -9,7 +9,7 @@ import uuid
 from typing import Any, Iterable, Protocol
 
 from open_webui.internal.db import get_async_db
-from open_webui.models.evidence import KnowledgeEvidences
+from open_webui.models.evidence import KnowledgeEvidences, KnowledgeVectorSpaces
 from open_webui.models.retrieval_chunks import (
     RetrievalChunk,
     compute_chunk_uid,
@@ -24,10 +24,14 @@ from open_webui.models.retrieval_indexes import (
     compute_index_state_id,
     compute_target_config_hash,
 )
-from open_webui.retrieval.evidence_projector import project_evidence_from_job_payload
+from open_webui.retrieval.evidence_projector import (
+    finalize_projected_evidence_from_job_payload,
+    project_evidence_from_job_payload,
+)
 from open_webui.retrieval.lexical.opensearch import OpenSearchLexicalClient
 from open_webui.retrieval.vector.multimodal import (
     MultimodalVectorSpaceError,
+    MultimodalVectorSpaceSelection,
     resolve_multimodal_vector_space,
     upsert_multimodal_evidence_embedding,
 )
@@ -776,6 +780,98 @@ def _get_evidence_embedding_runtime() -> tuple[Any | None, Any | None]:
     return embedding_function, vector_client
 
 
+def _embedding_function_supports_image_payloads(embedding_function: Any) -> bool:
+    if bool(getattr(embedding_function, "_supports_image_payloads", False)):
+        return True
+    return callable(getattr(embedding_function, "_has_image_payload", None))
+
+
+def _get_evidence_vector_space_defaults(embedding_function: Any) -> dict[str, Any]:
+    embedding_model = getattr(embedding_function, "_model", None)
+    vector_backend = None
+
+    try:
+        from open_webui import config as webui_config
+
+        config_embedding_model = getattr(webui_config, "RAG_EMBEDDING_MODEL", None)
+        embedding_model = embedding_model or getattr(config_embedding_model, "value", config_embedding_model)
+        vector_backend = getattr(webui_config, "VECTOR_DB", None) or vector_backend
+    except Exception:
+        pass
+
+    if not vector_backend:
+        try:
+            from open_webui.config import VECTOR_DB
+
+            vector_backend = VECTOR_DB
+        except Exception:
+            vector_backend = "pgvector"
+
+    supports_images = _embedding_function_supports_image_payloads(embedding_function)
+    return {
+        "embedding_model": str(embedding_model or "").strip(),
+        "vector_backend": str(vector_backend or "pgvector").strip() or "pgvector",
+        "supports_image_query": supports_images,
+        "supports_image_evidence": supports_images,
+    }
+
+
+async def _resolve_or_create_evidence_vector_space(
+    *,
+    evidence,
+    embedding_function: Any,
+    db: AsyncSession | None = None,
+) -> MultimodalVectorSpaceSelection:
+    try:
+        return await resolve_multimodal_vector_space(
+            knowledge_id=evidence.knowledge_id,
+            retrieval_profile=evidence.projection_profile,
+            evidence_modality=evidence.modality,
+            db=db,
+        )
+    except MultimodalVectorSpaceError as exc:
+        if exc.code != "vector_space_unavailable":
+            raise
+
+    defaults = _get_evidence_vector_space_defaults(embedding_function)
+    embedding_model = defaults["embedding_model"]
+    if not embedding_model:
+        raise MultimodalVectorSpaceError(
+            "vector_space_unavailable",
+            "Cannot create evidence vector space without an embedding model",
+            details={
+                "knowledge_id": evidence.knowledge_id,
+                "retrieval_profile": evidence.projection_profile,
+            },
+        )
+    if evidence.modality == "image" and not defaults["supports_image_evidence"]:
+        raise MultimodalVectorSpaceError(
+            "unsupported_image_evidence",
+            "Configured evidence embedding runtime does not support image evidence",
+            details={
+                "knowledge_id": evidence.knowledge_id,
+                "retrieval_profile": evidence.projection_profile,
+            },
+        )
+
+    vector_space = await KnowledgeVectorSpaces.create_vector_space(
+        knowledge_id=evidence.knowledge_id,
+        retrieval_profile=evidence.projection_profile,
+        embedding_model=embedding_model,
+        vector_backend=defaults["vector_backend"],
+        supports_text_query=True,
+        supports_text_evidence=True,
+        supports_image_query=defaults["supports_image_query"],
+        supports_image_evidence=defaults["supports_image_evidence"],
+        active=True,
+        db=db,
+    )
+    return MultimodalVectorSpaceSelection(
+        vector_space=vector_space,
+        collection_name=f"{evidence.knowledge_id}:{vector_space.id}",
+    )
+
+
 async def write_projected_evidence_embeddings(
     evidence_refs: list[str],
     *,
@@ -797,10 +893,9 @@ async def write_projected_evidence_embeddings(
             continue
 
         try:
-            vector_space = await resolve_multimodal_vector_space(
-                knowledge_id=evidence.knowledge_id,
-                retrieval_profile=evidence.projection_profile,
-                evidence_modality=evidence.modality,
+            vector_space = await _resolve_or_create_evidence_vector_space(
+                evidence=evidence,
+                embedding_function=embedding_function,
                 db=db,
             )
         except MultimodalVectorSpaceError as exc:
@@ -893,7 +988,7 @@ async def run_retrieval_index_job(job_id: str) -> dict[str, Any]:
             return {"job": updated.model_dump() if updated else None, "result": payload}
 
         if job.index_kind == "project":
-            evidence_result = await project_evidence_from_job_payload(job.payload or {})
+            evidence_result = await project_evidence_from_job_payload(job.payload or {}, activate=False)
             embedding_result = await write_projected_evidence_embeddings(evidence_result.evidence_refs)
             embedding_error = None
             if embedding_result.failures:
@@ -916,6 +1011,16 @@ async def run_retrieval_index_job(job_id: str) -> dict[str, Any]:
                 if evidence_result.failed == 0 and embedding_result.failed == 0 and embedding_error is None
                 else "failed"
             )
+            activation_error = None
+            if final_status == "succeeded":
+                try:
+                    await finalize_projected_evidence_from_job_payload(
+                        job.payload or {},
+                        evidence_result.evidence_refs,
+                    )
+                except Exception as exc:
+                    activation_error = str(exc)
+                    final_status = "failed"
             state_status = "ready" if final_status == "succeeded" else "failed"
             state_count = max(
                 evidence_result.scanned_chunks,
@@ -936,7 +1041,7 @@ async def run_retrieval_index_job(job_id: str) -> dict[str, Any]:
                 error=(
                     evidence_result.failures[0]["error"]
                     if evidence_result.failures
-                    else embedding_error
+                    else embedding_error or activation_error
                 ),
             )
             updated = await RetrievalIndexJobs.update_job_status(
@@ -946,7 +1051,7 @@ async def run_retrieval_index_job(job_id: str) -> dict[str, Any]:
                 error=(
                     evidence_result.failures[0]["error"]
                     if evidence_result.failures
-                    else embedding_error
+                    else embedding_error or activation_error
                 ),
             )
             return {"job": updated.model_dump() if updated else None, "result": payload}

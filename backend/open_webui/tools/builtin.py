@@ -11,18 +11,24 @@ from open_webui.tools.knowledge_fs import kb_exec  # noqa: F401 — re-exported
 import asyncio
 import json
 import logging
+import re
 import time
 import types
+from io import BytesIO
+from pathlib import PurePosixPath
 from typing import Optional
 
 from fastapi import Request
 
+from open_webui.models.access_grants import AccessGrants
 from open_webui.models.channels import Channel, ChannelMember, Channels
 from open_webui.models.chats import Chats
+from open_webui.models.config import Config
 from open_webui.models.groups import Groups
 from open_webui.models.memories import Memories
 from open_webui.models.messages import Message, Messages
 from open_webui.models.notes import Notes
+from open_webui.models.skills import SkillForm, Skills
 from open_webui.models.users import UserModel
 from open_webui.retrieval.evidence import (
     EvidenceToolError,
@@ -42,16 +48,34 @@ from open_webui.routers.images import (
 )
 from open_webui.routers.memories import (
     AddMemoryForm,
+    ListMemoryPathsForm,
     MemoryUpdateModel,
-    QueryMemoryForm,
-    query_memory,
+    ReadMemoryPathForm,
+    SearchMemoriesForm,
+    UpdateMemoriesForm,
+    list_memory_paths as _list_memory_paths,
+    read_memory_path as _read_memory_path,
+    search_memories as _search_memories,
+    update_memories as _update_memories,
     update_memory_by_id,
 )
 from open_webui.routers.memories import (
     add_memory as _add_memory,
 )
 from open_webui.routers.retrieval import search_web as _search_web
+from open_webui.storage.provider import Storage
+from open_webui.utils.access_control import has_permission
 from open_webui.utils.sanitize import sanitize_code
+from open_webui.utils.skill_packages import (
+    build_skill_package_manifest,
+    build_skill_package_zip_bytes,
+    parse_skill_markdown,
+    skill_package_storage_filename,
+)
+from open_webui.utils.terminal_skill_packages import (
+    ensure_skill_synced_to_terminal,
+    read_skill_package_source_from_terminal,
+)
 
 log = logging.getLogger(__name__)
 
@@ -234,10 +258,10 @@ async def search_web(
         return json.dumps({'error': 'Request context not available'})
 
     try:
-        engine = __request__.app.state.config.WEB_SEARCH_ENGINE
+        engine = await Config.get('web.search.engine')
         user = UserModel(**__user__) if __user__ else None
 
-        configured = __request__.app.state.config.WEB_SEARCH_RESULT_COUNT
+        configured = await Config.get('web.search.result_count')
         max_count = 5 if configured is None else configured
         count = max(1, min(count, max_count)) if count is not None else max_count
 
@@ -270,12 +294,12 @@ async def fetch_url(
         return json.dumps({'error': 'Request context not available'})
 
     try:
-        content, _ = await asyncio.to_thread(get_content_from_url, __request__, url)
+        content, _ = await get_content_from_url(__request__, url)
 
         # Truncate if configured (WEB_FETCH_MAX_CONTENT_LENGTH)
         # Guard: content may be None if the web loader silently failed
         if content is not None:
-            max_length = getattr(__request__.app.state.config, 'WEB_FETCH_MAX_CONTENT_LENGTH', None)
+            max_length = await Config.get('web.fetch.max_content_length')
             if max_length and max_length > 0 and len(content) > max_length:
                 content = content[:max_length] + '\n\n[Content truncated...]'
         else:
@@ -437,10 +461,11 @@ async def edit_image(
     __message_id__: str = None,
 ) -> str:
     """
-    Edit existing images based on a text prompt.
+    Transform one or more existing images according to a text prompt.
+    Supports targeted edits such as adding, removing, replacing, inpainting, extending, or compositing image content.
 
-    :param prompt: A description of the changes to make to the images
-    :param image_urls: A list of URLs of the images to edit
+    :param prompt: A description of the transformation to apply to the provided images
+    :param image_urls: Source image URLs to modify or use as composition inputs
     :return: Confirmation that the images were edited, or an error message
     """
     if __request__ is None:
@@ -625,7 +650,7 @@ async def execute_code(
             )
             code = blocking_code + '\n' + code
 
-        engine = getattr(__request__.app.state.config, 'CODE_INTERPRETER_ENGINE', 'pyodide')
+        engine = await Config.get('code_interpreter.engine', 'pyodide')
         if engine == 'pyodide':
             # Execute via frontend pyodide using bidirectional event call
             if __event_call__ is None:
@@ -664,20 +689,14 @@ async def execute_code(
         elif engine == 'jupyter':
             from open_webui.utils.code_interpreter import execute_code_jupyter
 
+            jupyter_auth = await Config.get('code_interpreter.jupyter.auth')
+
             output = await execute_code_jupyter(
-                __request__.app.state.config.CODE_INTERPRETER_JUPYTER_URL,
+                await Config.get('code_interpreter.jupyter.url'),
                 code,
-                (
-                    __request__.app.state.config.CODE_INTERPRETER_JUPYTER_AUTH_TOKEN
-                    if __request__.app.state.config.CODE_INTERPRETER_JUPYTER_AUTH == 'token'
-                    else None
-                ),
-                (
-                    __request__.app.state.config.CODE_INTERPRETER_JUPYTER_AUTH_PASSWORD
-                    if __request__.app.state.config.CODE_INTERPRETER_JUPYTER_AUTH == 'password'
-                    else None
-                ),
-                __request__.app.state.config.CODE_INTERPRETER_JUPYTER_TIMEOUT,
+                (await Config.get('code_interpreter.jupyter.auth_token') if jupyter_auth == 'token' else None),
+                (await Config.get('code_interpreter.jupyter.auth_password') if jupyter_auth == 'password' else None),
+                await Config.get('code_interpreter.jupyter.timeout'),
             )
 
             stdout = output.get('stdout', '')
@@ -743,17 +762,88 @@ async def execute_code(
 # =============================================================================
 
 
-async def search_memories(
-    query: str,
-    count: int = 5,
+async def list_memory_paths(
+    query: str = '',
+    count: int = 100,
+    type: str = 'all',
     __request__: Request = None,
     __user__: dict = None,
 ) -> str:
     """
-    Search the user's stored memories for relevant information.
+    List saved memory paths to find existing memory groups before writing or moving memories.
 
-    :param query: The search query to find relevant memories
+    :param query: Optional query to filter memory paths or contents
+    :param count: Maximum number of paths to return
+    :param type: "user", "context", or "all"
+    :return: JSON with memory paths, counts, children, and update times
+    """
+    try:
+        user = UserModel(**__user__) if __user__ else None
+        result = await _list_memory_paths(
+            ListMemoryPathsForm(
+                query=query or None,
+                type=type if type in {'user', 'context', 'all'} else 'all',
+                limit=count,
+            ),
+            user,
+        )
+        return json.dumps(result, ensure_ascii=False)
+    except Exception as e:
+        log.exception(f'list_memory_paths error: {e}')
+        return json.dumps({'error': str(e)})
+
+
+async def read_memory_path(
+    path: str,
+    count: int = 50,
+    type: str = 'all',
+    include_children: bool = True,
+    __request__: Request = None,
+    __user__: dict = None,
+) -> str:
+    """
+    Read saved memories at a memory path, including nearby parent and child paths.
+
+    :param path: Memory path to read
+    :param count: Maximum number of memories to return
+    :param type: "user", "context", or "all"
+    :param include_children: Include memories under child paths
+    :return: JSON with parent paths, child paths, and memories at the path
+    """
+    try:
+        user = UserModel(**__user__) if __user__ else None
+        result = await _read_memory_path(
+            ReadMemoryPathForm(
+                path=path,
+                type=type if type in {'user', 'context', 'all'} else 'all',
+                include_children=include_children,
+                limit=count,
+            ),
+            user,
+        )
+        return json.dumps(result, ensure_ascii=False)
+    except Exception as e:
+        log.exception(f'read_memory_path error: {e}')
+        return json.dumps({'error': str(e)})
+
+
+async def search_memories(
+    query: str = '',
+    count: int = 5,
+    type: str = 'all',
+    path: Optional[str] = None,
+    memory_id: Optional[str] = None,
+    __request__: Request = None,
+    __user__: dict = None,
+) -> str:
+    """
+    Search or browse saved memories by content, path, type, or memory ID.
+
+    :param query: Optional query to search memory content and path
     :param count: Number of memories to return (default 5)
+    :param type: "user", "context", or "all"
+    :param path: Optional memory path to search around
+    :param memory_id: Optional exact memory ID to read
     :return: JSON with matching memories and their dates
     """
     if __request__ is None:
@@ -762,28 +852,34 @@ async def search_memories(
     try:
         user = UserModel(**__user__) if __user__ else None
 
-        results = await query_memory(
-            __request__,
-            QueryMemoryForm(content=query, k=count),
+        memories = await _search_memories(
+            SearchMemoriesForm(
+                query=query or None,
+                type=type if type in {'user', 'context', 'all'} else 'all',
+                path=path,
+                memory_id=memory_id,
+                limit=count,
+            ),
             user,
         )
 
-        if results and hasattr(results, 'documents') and results.documents:
-            memories = []
-            for doc_idx, doc in enumerate(results.documents[0]):
-                memory_id = None
-                if results.ids and results.ids[0]:
-                    memory_id = results.ids[0][doc_idx]
-                created_at = 'Unknown'
-                if results.metadatas and results.metadatas[0][doc_idx].get('created_at'):
-                    created_at = time.strftime(
-                        '%Y-%m-%d',
-                        time.localtime(results.metadatas[0][doc_idx]['created_at']),
-                    )
-                memories.append({'id': memory_id, 'date': created_at, 'content': doc})
-            return json.dumps(memories, ensure_ascii=False)
-        else:
+        if not memories:
             return json.dumps([])
+
+        return json.dumps(
+            [
+                {
+                    'id': memory.id,
+                    'type': memory.type,
+                    'path': memory.path,
+                    'content': memory.content,
+                    'created_at': time.strftime('%Y-%m-%d', time.localtime(memory.created_at)),
+                    'updated_at': time.strftime('%Y-%m-%d', time.localtime(memory.updated_at)),
+                }
+                for memory in memories
+            ],
+            ensure_ascii=False,
+        )
     except Exception as e:
         log.exception(f'search_memories error: {e}')
         return json.dumps({'error': str(e)})
@@ -791,13 +887,21 @@ async def search_memories(
 
 async def add_memory(
     content: str,
+    type: str = 'user',
+    path: Optional[str] = None,
     __request__: Request = None,
     __user__: dict = None,
 ) -> str:
     """
-    Store a new memory for the user.
+    Save enduring information that can improve future chats.
+
+    Save stable preferences, goals, projects, relationships, habits, and standing instructions.
+    Do not save one-off activity, meals, routine daily events, temporary mood, or other short-lived details
+    unless the user explicitly asks you to remember them.
 
     :param content: The memory content to store
+    :param type: Use "user" for facts/preferences about the user, or "context" for other durable context
+    :param path: Optional stable memory address for grouping related memories
     :return: Confirmation that the memory was stored
     """
     if __request__ is None:
@@ -808,27 +912,75 @@ async def add_memory(
 
         memory = await _add_memory(
             __request__,
-            AddMemoryForm(content=content),
+            AddMemoryForm(content=content, type=Memories.normalize_memory_type(type), path=path),
             user,
         )
 
-        return json.dumps({'status': 'success', 'id': memory.id}, ensure_ascii=False)
+        return json.dumps(
+            {'status': 'success', 'id': memory.id, 'type': memory.type, 'path': memory.path},
+            ensure_ascii=False,
+        )
     except Exception as e:
         log.exception(f'add_memory error: {e}')
+        return json.dumps({'error': str(e)})
+
+
+async def update_memory(
+    operations: list[dict],
+    __request__: Request = None,
+    __user__: dict = None,
+) -> str:
+    """
+    Apply a batch of memory changes after learning enduring information.
+
+    Use type "user" for facts, preferences, or instructions about the user.
+    Use type "context" for other durable context that may help future chats.
+    Do not save one-off activity, meals, routine daily events, temporary mood, or other short-lived details
+    unless the user explicitly asks you to remember them.
+    Path is optional. Use it as a stable memory address to group related memories.
+    Prefer an existing path from list_memory_paths when one fits.
+    Leave path empty when no useful grouping is clear.
+
+    Operation shapes:
+    - {"action": "add", "content": "...", "type": "user"|"context", "path": "..."}
+    - {"action": "replace", "id": "...", "content": "...", "type": "user"|"context", "path": "..."}
+    - {"action": "move", "id": "...", "path": "..."}
+    - {"action": "remove", "id": "..."}
+
+    :param operations: Memory operations to apply in one request
+    :return: JSON with operation results
+    """
+    if __request__ is None:
+        return json.dumps({'error': 'Request context not available'})
+
+    try:
+        user = UserModel(**__user__) if __user__ else None
+        operation_results = await _update_memories(
+            __request__,
+            UpdateMemoriesForm(operations=operations),
+            user,
+        )
+        return json.dumps(operation_results, ensure_ascii=False)
+    except Exception as e:
+        log.exception(f'update_memory error: {e}')
         return json.dumps({'error': str(e)})
 
 
 async def replace_memory_content(
     memory_id: str,
     content: str,
+    type: Optional[str] = None,
+    path: Optional[str] = None,
     __request__: Request = None,
     __user__: dict = None,
 ) -> str:
     """
-    Update the content of an existing memory by its ID.
+    Update an existing saved memory by its ID when its content needs correction.
 
     :param memory_id: The ID of the memory to update
     :param content: The new content for the memory
+    :param type: Optional "user" or "context" type for the updated memory
+    :param path: Optional stable memory address for grouping related memories
     :return: Confirmation that the memory was updated
     """
     if __request__ is None:
@@ -840,12 +992,22 @@ async def replace_memory_content(
         memory = await update_memory_by_id(
             memory_id=memory_id,
             request=__request__,
-            form_data=MemoryUpdateModel(content=content),
+            form_data=MemoryUpdateModel(
+                content=content,
+                type=Memories.normalize_memory_type(type) if type else None,
+                path=path,
+            ),
             user=user,
         )
 
         return json.dumps(
-            {'status': 'success', 'id': memory.id, 'content': memory.content},
+            {
+                'status': 'success',
+                'id': memory.id,
+                'type': memory.type,
+                'path': memory.path,
+                'content': memory.content,
+            },
             ensure_ascii=False,
         )
     except Exception as e:
@@ -859,7 +1021,7 @@ async def delete_memory(
     __user__: dict = None,
 ) -> str:
     """
-    Delete a memory by its ID.
+    Delete a saved memory by its ID.
 
     :param memory_id: The ID of the memory to delete
     :return: Confirmation that the memory was deleted
@@ -890,7 +1052,7 @@ async def list_memories(
     __user__: dict = None,
 ) -> str:
     """
-    List all stored memories for the user.
+    List all stored memories for the user, including IDs and timestamps.
 
     :return: JSON list of all memories with id, content, and dates
     """
@@ -903,16 +1065,18 @@ async def list_memories(
         memories = await Memories.get_memories_by_user_id(user.id)
 
         if memories:
-            result = [
+            memory_rows = [
                 {
                     'id': m.id,
+                    'type': m.type,
+                    'path': m.path,
                     'content': m.content,
                     'created_at': time.strftime('%Y-%m-%d %H:%M', time.localtime(m.created_at)),
                     'updated_at': time.strftime('%Y-%m-%d %H:%M', time.localtime(m.updated_at)),
                 }
                 for m in memories
             ]
-            return json.dumps(result, ensure_ascii=False)
+            return json.dumps(memory_rows, ensure_ascii=False)
         else:
             return json.dumps([])
     except Exception as e:
@@ -934,7 +1098,7 @@ async def search_notes(
     __user__: dict = None,
 ) -> str:
     """
-    Search the user's notes by title and content.
+    Search the user's saved notes by title and content.
 
     :param query: The search query to find matching notes
     :param count: Maximum number of results to return (default: 5)
@@ -1137,7 +1301,7 @@ async def replace_note_content(
     __user__: dict = None,
 ) -> str:
     """
-    Update the content of a note. Use this to modify task lists, add notes, or update content.
+    Update the markdown content, and optionally the title, of an existing note.
 
     :param note_id: The ID of the note to update
     :param content: The new markdown content for the note
@@ -1214,6 +1378,7 @@ async def search_chats(
 ) -> str:
     """
     Search the user's previous chat conversations by title and message content.
+    Helpful for finding details from earlier conversations.
 
     :param query: The search query to find matching chats
     :param count: Maximum number of results to return (default: 5)
@@ -1252,7 +1417,7 @@ async def search_chats(
 
             # Find a matching message snippet
             snippet = ''
-            messages = chat.chat.get('history', {}).get('messages', {})
+            messages = (getattr(chat, 'chat', None) or {}).get('history', {}).get('messages', {})
             lower_query = query.lower()
 
             for msg_id, msg in messages.items():
@@ -1291,7 +1456,8 @@ async def view_chat(
     __user__: dict = None,
 ) -> str:
     """
-    Get the full conversation history of a chat by its ID.
+    Get the full conversation history of a chat by its ID after a relevant
+    previous chat has been identified.
 
     :param chat_id: The ID of the chat to retrieve
     :return: JSON with the chat's id, title, and messages
@@ -1361,7 +1527,7 @@ async def search_channels(
     __user__: dict = None,
 ) -> str:
     """
-    Search for channels by name and description that the user has access to.
+    Search channels by name and description to find accessible team spaces.
 
     :param query: The search query to find matching channels
     :param count: Maximum number of results to return (default: 5)
@@ -1415,7 +1581,8 @@ async def search_channel_messages(
     __user__: dict = None,
 ) -> str:
     """
-    Search for messages in channels the user is a member of, including thread replies.
+    Search messages in channels the user is a member of, including thread replies.
+    Helpful for finding prior team/channel discussion.
 
     :param query: The search query to find matching messages
     :param count: Maximum number of results to return (default: 10)
@@ -1643,7 +1810,8 @@ async def list_knowledge_bases(
     __user__: dict = None,
 ) -> str:
     """
-    List the user's accessible knowledge bases.
+    List the user's accessible knowledge bases so a relevant internal source
+    can be chosen.
 
     :param count: Maximum number of KBs to return (default: 10)
     :param skip: Number of results to skip for pagination (default: 0)
@@ -1701,7 +1869,8 @@ async def search_knowledge_bases(
     __user__: dict = None,
 ) -> str:
     """
-    Search the user's accessible knowledge bases by name and description.
+    Search the user's accessible knowledge bases by name and description to find
+    a relevant internal source.
 
     :param query: The search query to find matching knowledge bases
     :param count: Maximum number of results to return (default: 5)
@@ -1765,6 +1934,7 @@ async def search_knowledge_files(
     """
     Search files by filename across knowledge bases the user has access to.
     When the model has attached knowledge, searches only within attached KBs and files.
+    Helpful when looking for a specific document or file name.
 
     :param query: The search query to find matching files by filename
     :param knowledge_id: Optional KB id to limit search to a specific knowledge base
@@ -1938,6 +2108,7 @@ async def grep_knowledge_files(
     Search for exact text across knowledge files. Returns matching lines with line numbers.
     Unlike query_knowledge_files (semantic/vector search), this performs exact string matching.
     Automatically detects regex patterns (e.g. "error|warn", "version \\d+").
+    Helpful for literal strings, identifiers, error messages, or regex-style searches.
 
     :param pattern: The text pattern to search for (regex auto-detected)
     :param file_id: Optional file ID to search within a single file only
@@ -2716,6 +2887,7 @@ async def query_knowledge_files(
     """
     Search knowledge base files using semantic/vector search. Searches across collections (KBs),
     individual files, and notes that the user has access to.
+    Helpful for internal documentation, uploaded knowledge, and attached model knowledge.
 
     :param query: The search query to find semantically relevant content
     :param knowledge_ids: Optional list of KB ids to limit search to specific knowledge bases
@@ -2795,6 +2967,8 @@ async def query_knowledge_files(
 
         from open_webui.models.knowledge import Knowledges
         from open_webui.models.access_grants import AccessGrants
+        from open_webui.models.notes import Notes
+        from open_webui.retrieval.external import retrieve_external_knowledge
         from open_webui.retrieval.utils import query_collection
 
         user_id = __user__.get('id')
@@ -2802,7 +2976,65 @@ async def query_knowledge_files(
         user_group_ids = [group.id for group in await Groups.get_groups_by_member_id(user_id)]
 
         collection_names = []
-        if knowledge_ids:
+        external_knowledges = []
+        note_results = []  # Notes aren't vectorized, handle separately
+
+        # If model has attached knowledge, use those
+        if __model_knowledge__:
+            for item in __model_knowledge__:
+                item_type = item.get('type')
+                item_id = item.get('id')
+
+                if item_type == 'collection':
+                    # Knowledge base - use KB ID as collection name
+                    knowledge = await Knowledges.get_knowledge_by_id(item_id)
+                    if knowledge and (
+                        user_role == 'admin'
+                        or knowledge.user_id == user_id
+                        or await AccessGrants.has_access(
+                            user_id=user_id,
+                            resource_type='knowledge',
+                            resource_id=knowledge.id,
+                            permission='read',
+                            user_group_ids=set(user_group_ids),
+                        )
+                    ):
+                        if (knowledge.meta or {}).get('source') == 'external':
+                            external_knowledges.append(knowledge)
+                        else:
+                            collection_names.append(item_id)
+
+                elif item_type == 'file':
+                    # Individual file - use file-{id} as collection name
+                    file = await Files.get_file_by_id(item_id)
+                    if file:
+                        collection_names.append(f'file-{item_id}')
+
+                elif item_type == 'note':
+                    # Note - always return full content as context
+                    note = await Notes.get_note_by_id(item_id)
+                    if note and (
+                        user_role == 'admin'
+                        or note.user_id == user_id
+                        or await AccessGrants.has_access(
+                            user_id=user_id,
+                            resource_type='note',
+                            resource_id=note.id,
+                            permission='read',
+                        )
+                    ):
+                        content = note.data.get('content', {}).get('md', '')
+                        note_results.append(
+                            {
+                                'content': content,
+                                'source': note.title,
+                                'note_id': note.id,
+                                'type': 'note',
+                            }
+                        )
+
+        elif knowledge_ids:
+            # User specified specific KBs
             for knowledge_id in knowledge_ids:
                 knowledge = await Knowledges.get_knowledge_by_id(knowledge_id)
                 if knowledge and (
@@ -2816,7 +3048,10 @@ async def query_knowledge_files(
                         user_group_ids=set(user_group_ids),
                     )
                 ):
-                    collection_names.append(knowledge_id)
+                    if (knowledge.meta or {}).get('source') == 'external':
+                        external_knowledges.append(knowledge)
+                    else:
+                        collection_names.append(knowledge_id)
         else:
             result = await Knowledges.search_knowledge_bases(
                 user_id,
@@ -2828,9 +3063,14 @@ async def query_knowledge_files(
                 skip=0,
                 limit=50,
             )
-            collection_names = [knowledge_base.id for knowledge_base in result.items]
+            for knowledge_base in result.items:
+                if (knowledge_base.meta or {}).get('source') == 'external':
+                    external_knowledges.append(knowledge_base)
+                else:
+                    collection_names.append(knowledge_base.id)
 
         chunks = []
+        chunks.extend(note_results)
         if collection_names:
             query_results = await query_collection(
                 __request__,
@@ -2853,7 +3093,35 @@ async def query_knowledge_files(
                         chunk_info['distance'] = distances[idx]
                     chunks.append(chunk_info)
 
-        return json.dumps(chunks[:count], ensure_ascii=False)
+        for knowledge in external_knowledges:
+            query_results = await retrieve_external_knowledge(
+                __request__,
+                knowledge,
+                queries=[query],
+                count=count,
+                user=type('UserContext', (), {'id': user_id, 'role': user_role})(),
+            )
+            documents = query_results.get('documents', [[]])[0]
+            metadatas = query_results.get('metadatas', [[]])[0]
+            distances = query_results.get('distances', [[]])[0]
+
+            for idx, doc in enumerate(documents):
+                metadata = metadatas[idx] if idx < len(metadatas) else {}
+                chunk_info = {
+                    'content': doc,
+                    'source': metadata.get('source', metadata.get('name', knowledge.name)),
+                    'file_id': metadata.get('file_id', f'external-{knowledge.id}'),
+                    'type': 'external',
+                    'knowledge_id': knowledge.id,
+                }
+                if idx < len(distances):
+                    chunk_info['distance'] = distances[idx]
+                chunks.append(chunk_info)
+
+        # Limit to requested count
+        chunks = chunks[:count]
+
+        return json.dumps(chunks, ensure_ascii=False)
     except Exception as e:
         log.exception(f'query_knowledge_files error: {e}')
         return json.dumps({'error': str(e)})
@@ -2937,7 +3205,7 @@ async def query_knowledge_bases(
     """
     Search knowledge bases by semantic similarity to query.
     Finds KBs whose name/description match the meaning of your query.
-    Use this to discover relevant knowledge bases before querying their files.
+    Helpful for discovering which knowledge base to query next.
 
     :param query: Natural language query describing what you're looking for
     :param count: Maximum results (default: 5)
@@ -3034,17 +3302,30 @@ async def query_knowledge_bases(
 # =============================================================================
 
 
-async def view_skill(
+async def read_skill(
     id: str,
     __request__: Request = None,
     __user__: dict = None,
+    __terminal_id__: str = None,
+    __metadata__: dict = None,
+    __oauth_token__: dict = None,
 ) -> str:
     """
-    Load the full instructions of a skill by its id from the available skills manifest.
-    Use this when you need detailed instructions for a skill listed in <available_skills>.
+    Read an existing skill's full instructions by skill id.
+    Use when a skill is available by id but only its name or description is visible,
+    or before applying a package-backed skill that may need files in Open Terminal.
+    For package-backed skills, this also syncs the stored bundle into the active
+    Open Terminal runtime cache before returning absolute package and entrypoint paths.
+    Skill packages are text-only: SKILL.md, skill.json, scripts, templates, and
+    assets may be present only as supported UTF-8 text files; binary assets are not supported.
+    Do not use this to install a new skill or modify an existing skill.
+    Returns JSON with name and content; package-backed skills also include package.path
+    and entrypoints[].path values that can be used with Open Terminal commands.
+    Errors are returned as JSON with an error field; if terminal context is missing
+    for a package-backed skill, retry only after an active Open Terminal is available.
 
-    :param id: The id of the skill to load (as shown in the manifest)
-    :return: The full skill instructions as markdown content
+    :param id: Existing skill id, e.g. "data-cleanup"; use available_skills or a prior install/update result
+    :return: JSON with name/content, optional package.path and entrypoints, or an error field
     """
     if __request__ is None:
         return json.dumps({'error': 'Request context not available'})
@@ -3053,40 +3334,326 @@ async def view_skill(
         return json.dumps({'error': 'User context not available'})
 
     try:
-        from open_webui.models.access_grants import AccessGrants
-        from open_webui.models.skills import Skills
+        skill = await _get_accessible_skill_for_tool(id, __user__, permission='read')
+        package = await Skills.get_latest_skill_package_by_skill_id(skill.id)
+        payload = {'name': skill.name, 'content': skill.content}
 
-        user_id = __user__.get('id')
+        if package:
+            terminal_id = _resolve_terminal_id(__terminal_id__, __metadata__)
+            if not terminal_id:
+                return json.dumps({'error': 'Terminal context is required to sync text-only skill package files'})
 
-        # Direct DB lookup by id (case-insensitive since IDs are stored lowercase)
-        skill = await Skills.get_skill_by_id(id.lower())
+            sync_result = await ensure_skill_synced_to_terminal(
+                __request__,
+                terminal_id,
+                __user__,
+                skill,
+                package,
+                metadata=__metadata__,
+                oauth_token=__oauth_token__,
+            )
+            payload['package'] = {'path': sync_result['path']}
+            payload['entrypoints'] = sync_result['entrypoints']
 
-        if not skill or not skill.is_active:
-            return json.dumps({'error': f"Skill '{id}' not found"})
-
-        # Check user access
-        user_role = __user__.get('role', 'user')
-        if user_role != 'admin' and skill.user_id != user_id:
-            user_group_ids = [group.id for group in await Groups.get_groups_by_member_id(user_id)]
-            if not await AccessGrants.has_access(
-                user_id=user_id,
-                resource_type='skill',
-                resource_id=skill.id,
-                permission='read',
-                user_group_ids=set(user_group_ids),
-            ):
-                return json.dumps({'error': 'Access denied'})
-
-        return json.dumps(
-            {
-                'name': skill.name,
-                'content': skill.content,
-            },
-            ensure_ascii=False,
-        )
+        return json.dumps(payload, ensure_ascii=False)
     except Exception as e:
-        log.exception(f'view_skill error: {e}')
+        log.exception(f'read_skill error: {e}')
         return json.dumps({'error': str(e)})
+
+
+async def install_skill(
+    source_path: str,
+    __request__: Request = None,
+    __user__: dict = None,
+    __terminal_id__: str = None,
+    __metadata__: dict = None,
+    __oauth_token__: dict = None,
+) -> str:
+    """
+    Install a new skill from an absolute source directory in the active Open Terminal.
+    Use when the user asks to add a new skill from files already prepared in their
+    terminal storage. The source directory must contain SKILL.md and may include
+    skill.json, scripts, templates, or assets, but every packaged file must be a
+    supported UTF-8 text file; binary assets are not supported. This stores the skill in OpenWebUI
+    DB/storage but does not return runtime execution paths or sync the runtime cache;
+    call read_skill after installation when package paths or entrypoints are needed.
+    Do not use this for existing skills; use update_skill instead.
+    Returns JSON containing only the new skill id, or an error field with recovery
+    guidance such as using an absolute source path or choosing a non-runtime-cache source.
+
+    :param source_path: Absolute terminal source dir for a text-only package;
+        not relative or under /home/user/.openwebui/skills
+    :return: JSON object with only id on success, or an error field
+    """
+    if __request__ is None:
+        return json.dumps({'error': 'Request context not available'})
+    if not __user__:
+        return json.dumps({'error': 'User context not available'})
+
+    try:
+        terminal_id = _resolve_terminal_id(__terminal_id__, __metadata__)
+        if not terminal_id:
+            return json.dumps({'error': 'Terminal context is required'})
+        if not await _can_manage_workspace_skills(__user__):
+            return json.dumps({'error': 'Access denied'})
+
+        skill_id = await install_skill_from_terminal_source(
+            __request__,
+            __user__,
+            terminal_id,
+            source_path,
+            metadata=__metadata__,
+            oauth_token=__oauth_token__,
+        )
+        return json.dumps({'id': skill_id}, ensure_ascii=False)
+    except Exception as e:
+        log.exception(f'install_skill error: {e}')
+        return json.dumps({'error': str(e)})
+
+
+async def update_skill(
+    id: str,
+    content: Optional[str] = None,
+    source_path: Optional[str] = None,
+    __request__: Request = None,
+    __user__: dict = None,
+    __terminal_id__: str = None,
+    __metadata__: dict = None,
+    __oauth_token__: dict = None,
+) -> str:
+    """
+    Update an existing skill's instructions or replace its package from Open Terminal.
+    Use when the user asks to modify a skill that already exists. Provide exactly one
+    of content or source_path: content performs a text-only SKILL.md instruction update,
+    while source_path replaces the whole package from an absolute Open Terminal source
+    directory containing SKILL.md. Source packages are text-only: skill.json, scripts,
+    templates, and assets may be present only as supported UTF-8 text files; binary assets are not supported.
+    This stores the update in OpenWebUI DB/storage but
+    does not return runtime execution paths or sync the runtime cache; call read_skill
+    after updating when package paths or entrypoints are needed.
+    Do not use this to create a new skill; use install_skill instead.
+    Returns JSON containing only the updated skill id, or an error field explaining
+    what to change before retrying, such as providing exactly one update source.
+
+    :param id: Existing skill id to update, e.g. "data-cleanup"; use available_skills or a prior install/update result
+    :param content: Replacement SKILL.md instruction body; provide only when source_path is not provided
+    :param source_path: Abs terminal source dir with replacement SKILL.md; omit content and avoid runtime cache paths
+    :return: JSON object with only id on success, or an error field
+    """
+    if __request__ is None:
+        return json.dumps({'error': 'Request context not available'})
+    if not __user__:
+        return json.dumps({'error': 'User context not available'})
+
+    try:
+        skill_id = await update_skill_from_tool(
+            __request__,
+            __user__,
+            _resolve_terminal_id(__terminal_id__, __metadata__),
+            id,
+            content=content,
+            source_path=source_path,
+            metadata=__metadata__,
+            oauth_token=__oauth_token__,
+        )
+        return json.dumps({'id': skill_id}, ensure_ascii=False)
+    except Exception as e:
+        log.exception(f'update_skill error: {e}')
+        return json.dumps({'error': str(e)})
+
+
+async def view_skill(
+    id: str,
+    __request__: Request = None,
+    __user__: dict = None,
+    __terminal_id__: str = None,
+    __metadata__: dict = None,
+    __oauth_token__: dict = None,
+) -> str:
+    """Compatibility alias for read_skill."""
+    return await read_skill(
+        id,
+        __request__=__request__,
+        __user__=__user__,
+        __terminal_id__=__terminal_id__,
+        __metadata__=__metadata__,
+        __oauth_token__=__oauth_token__,
+    )
+
+
+async def install_skill_from_terminal_source(
+    request: Request,
+    user: dict,
+    terminal_id: str,
+    source_path: str,
+    *,
+    metadata: dict | None = None,
+    oauth_token: dict | None = None,
+) -> str:
+    files = await read_skill_package_source_from_terminal(
+        request,
+        terminal_id,
+        user,
+        source_path,
+        metadata=metadata,
+        oauth_token=oauth_token,
+    )
+    manifest = build_skill_package_manifest(files)
+    parsed_skill = parse_skill_markdown(files['SKILL.md'])
+    skill_name = parsed_skill.name or _fallback_skill_name_from_source_path(source_path)
+    skill_id = _skill_id_from_name(skill_name)
+
+    if await Skills.get_skill_by_id(skill_id):
+        raise ValueError(f"Skill '{skill_id}' already exists")
+
+    storage_path = await _upload_skill_package_bundle(skill_id, files, manifest)
+    skill = await Skills.insert_new_skill(
+        _user_id(user),
+        SkillForm(
+            id=skill_id,
+            name=skill_name,
+            description=parsed_skill.description,
+            content=parsed_skill.body,
+        ),
+    )
+    if not skill:
+        raise ValueError('Error creating skill')
+
+    package = await Skills.upsert_skill_package(
+        skill.id,
+        manifest.hash,
+        manifest.model_dump(),
+        storage_path,
+    )
+    if not package:
+        raise ValueError('Error storing skill package metadata')
+
+    return skill.id
+
+
+async def update_skill_from_tool(
+    request: Request,
+    user: dict,
+    terminal_id: str | None,
+    skill_id: str,
+    *,
+    content: Optional[str] = None,
+    source_path: Optional[str] = None,
+    metadata: dict | None = None,
+    oauth_token: dict | None = None,
+) -> str:
+    if content is None and source_path is None:
+        raise ValueError('content or source_path is required')
+    if content is not None and source_path is not None:
+        raise ValueError('provide either content or source_path, not both')
+
+    skill = await _get_accessible_skill_for_tool(skill_id, user, permission='write')
+    updated: dict[str, object] = {}
+
+    if source_path is not None:
+        if not terminal_id:
+            raise ValueError('Terminal context is required')
+        files = await read_skill_package_source_from_terminal(
+            request,
+            terminal_id,
+            user,
+            source_path,
+            metadata=metadata,
+            oauth_token=oauth_token,
+        )
+        manifest = build_skill_package_manifest(files)
+        parsed_skill = parse_skill_markdown(files['SKILL.md'])
+        updated['content'] = parsed_skill.body
+        if parsed_skill.name:
+            updated['name'] = parsed_skill.name
+        updated['description'] = parsed_skill.description
+        storage_path = await _upload_skill_package_bundle(skill.id, files, manifest)
+        saved = await Skills.update_skill_and_upsert_package_by_id(
+            skill.id,
+            updated,
+            bundle_hash=manifest.hash,
+            manifest=manifest.model_dump(),
+            storage_path=storage_path,
+        )
+    else:
+        updated['content'] = content
+        saved = await Skills.update_skill_by_id(skill.id, updated)
+    if not saved:
+        raise ValueError('Error updating skill')
+    return saved.id
+
+
+async def _upload_skill_package_bundle(skill_id: str, files: dict[str, str | bytes], manifest) -> str:
+    zip_bytes = build_skill_package_zip_bytes(files)
+    filename = skill_package_storage_filename(skill_id, manifest.hash)
+
+    def _upload() -> str:
+        _, storage_path = Storage.upload_file(
+            BytesIO(zip_bytes),
+            filename,
+            {'resource_type': 'skill_package', 'skill_id': skill_id, 'bundle_hash': manifest.hash},
+        )
+        return storage_path
+
+    return await asyncio.to_thread(_upload)
+
+
+async def _get_accessible_skill_for_tool(id: str, user: dict, *, permission: str):
+    user_id = _user_id(user)
+    skill = await Skills.get_skill_by_id(id.lower())
+    if not skill or not skill.is_active:
+        raise ValueError(f"Skill '{id}' not found")
+
+    user_role = user.get('role', 'user') if isinstance(user, dict) else getattr(user, 'role', 'user')
+    if user_role == 'admin' or skill.user_id == user_id:
+        return skill
+
+    user_group_ids = {group.id for group in await Groups.get_groups_by_member_id(user_id)}
+    if await AccessGrants.has_access(
+        user_id=user_id,
+        resource_type='skill',
+        resource_id=skill.id,
+        permission=permission,
+        user_group_ids=user_group_ids,
+    ):
+        return skill
+
+    raise PermissionError('Access denied')
+
+
+async def _can_manage_workspace_skills(user: dict) -> bool:
+    if (user.get('role') if isinstance(user, dict) else getattr(user, 'role', None)) == 'admin':
+        return True
+    return await has_permission(
+        _user_id(user),
+        'workspace.skills',
+        await Config.get('user.permissions'),
+    )
+
+
+def _resolve_terminal_id(terminal_id: str | None, metadata: dict | None = None) -> str | None:
+    if terminal_id:
+        return terminal_id
+    if isinstance(metadata, dict):
+        value = metadata.get('terminal_id')
+        if isinstance(value, str) and value:
+            return value
+    return None
+
+
+def _skill_id_from_name(name: str) -> str:
+    slug = re.sub(r'[^a-z0-9_-]+', '-', name.lower()).strip('-_')
+    slug = re.sub(r'-{2,}', '-', slug)
+    return slug or 'skill'
+
+
+def _fallback_skill_name_from_source_path(source_path: str) -> str:
+    name = PurePosixPath(source_path).name
+    return name.replace('-', ' ').replace('_', ' ').strip().title() or 'Skill'
+
+
+def _user_id(user: dict) -> str:
+    return user.get('id') if isinstance(user, dict) else getattr(user, 'id')
 
 
 # =============================================================================
@@ -3143,9 +3710,7 @@ async def create_tasks(
     __user__: dict = None,
 ) -> str:
     """
-    Create a task checklist to track progress on multi-step work.
-    Call this once at the start to define all steps, then use
-    update_task to mark each task as you complete it.
+    Create a visible task checklist for multi-step work so progress can be shown in chat.
 
     :param tasks: List of task items. Each item: content (string, required), status (pending|in_progress|completed|cancelled, default pending), id (optional, auto-generated).
     :return: JSON with the full task list and summary counts
@@ -3196,9 +3761,7 @@ async def update_task(
     __user__: dict = None,
 ) -> str:
     """
-    Mark a single task as completed, in_progress, pending, or cancelled.
-    Call this after finishing each step. You MUST call this for every
-    task, including the very last one.
+    Mark a single visible task item as completed, in_progress, pending, or cancelled.
 
     :param id: The task ID to update
     :param status: New status: completed, in_progress, pending, or cancelled (default: completed)
@@ -3638,8 +4201,7 @@ async def search_calendar_events(
 ) -> str:
     """
     Search calendar events, reminders, and scheduled items by text and/or date range.
-    Use this to check what's coming up, find a specific event or reminder, or list
-    the user's schedule for a time period.
+    Helpful for finding upcoming events, reminders, or schedule items.
 
     :param query: Search text to match against event title, description, or location (optional)
     :param start: Only return events starting at or after this datetime, e.g. "2026-04-20 00:00" (optional)

@@ -1,5 +1,7 @@
 import json
+import logging
 import types
+from copy import deepcopy
 
 import pytest
 from starlette.responses import StreamingResponse
@@ -97,6 +99,271 @@ def _tool_call_response():
             }
         ],
     }
+
+
+def _responses_guard_base_form_data():
+    return {
+        'model': 'gpt-test',
+        'prompt_cache_key': 'chat-cache-key',
+        'temperature': 0.2,
+        'text': {'verbosity': 'low'},
+        'truncation': 'auto',
+        'tools': [{'type': 'function', 'name': 'query_knowledge_files'}],
+        'messages': [
+            {'role': 'system', 'content': 'stable instructions'},
+            {'role': 'user', 'content': 'Use the attached docs.'},
+            {
+                'role': 'assistant',
+                'content': '',
+                'tool_calls': [
+                    {
+                        'id': 'call_knowledge',
+                        'type': 'function',
+                        'function': {
+                            'name': 'query_knowledge_files',
+                            'arguments': '{"query":"Transformer layers"}',
+                        },
+                    }
+                ],
+            },
+        ],
+    }
+
+
+def test_cache_debug_can_be_enabled_from_form_data_or_metadata():
+    assert middleware.is_native_tool_cache_debug_enabled({'cache_debug': True}, {}) is True
+    assert middleware.is_native_tool_cache_debug_enabled({'extra_body': {'cache_debug': 'true'}}, {}) is True
+    assert middleware.is_native_tool_cache_debug_enabled({}, {'cache_debug': 1}) is True
+    assert middleware.is_native_tool_cache_debug_enabled({}, {'params': {'cache_debug': '1'}}) is True
+
+    assert middleware.is_native_tool_cache_debug_enabled({}, {}) is False
+    assert middleware.is_native_tool_cache_debug_enabled({'cache_debug': False}, {}) is False
+    assert middleware.is_native_tool_cache_debug_enabled({'extra_body': {'cache_debug': 'false'}}, {}) is False
+
+
+def test_native_tool_continuation_fingerprint_redacts_content_and_reports_shape():
+    form_data = {
+        'model': 'gpt-test',
+        'prompt_cache_key': 'chat-cache-key',
+        'previous_response_id': 'resp_123',
+        'messages': [
+            {'role': 'system', 'content': 'RAW SYSTEM SECRET'},
+            {'role': 'user', 'content': 'RAW USER QUESTION'},
+            {
+                'role': 'tool',
+                'tool_call_id': 'call_knowledge',
+                'content': 'RAW TOOL RESULT',
+            },
+        ],
+        'tools': [{'type': 'function', 'function': {'name': 'query_knowledge_files'}}],
+    }
+
+    fingerprint = middleware.build_native_tool_continuation_request_fingerprint(
+        form_data,
+        metadata={'params': {'function_calling': 'native'}},
+        route_mode='direct_stream',
+        response_data={'usage': {'prompt_tokens_details': {'cached_tokens': 77}}},
+    )
+
+    serialized = json.dumps(fingerprint, sort_keys=True)
+    assert 'RAW SYSTEM SECRET' not in serialized
+    assert 'RAW USER QUESTION' not in serialized
+    assert 'RAW TOOL RESULT' not in serialized
+    assert fingerprint['model'] == 'gpt-test'
+    assert fingerprint['route_mode'] == 'direct_stream'
+    assert fingerprint['prompt_cache_key_hash']
+    assert fingerprint['tools_hash']
+    assert fingerprint['instructions_hash']
+    assert fingerprint['message_count'] == 3
+    assert fingerprint['messages_hash']
+    assert fingerprint['previous_response_id_present'] is True
+    assert fingerprint['continuation_mode'] == 'stateful_unchecked'
+    assert fingerprint['cached_tokens'] == 77
+
+
+def test_native_tool_continuation_fingerprint_logging_is_debug_gated(caplog):
+    form_data = {
+        'model': 'gpt-test',
+        'messages': [{'role': 'user', 'content': 'RAW USER QUESTION'}],
+    }
+    metadata = {'params': {'function_calling': 'native'}}
+
+    with caplog.at_level(logging.INFO, logger=middleware.log.name):
+        middleware.log_native_tool_continuation_request_fingerprint(
+            form_data,
+            metadata=metadata,
+            route_mode='direct_stream',
+        )
+    assert 'native_tool_continuation_request_fingerprint' not in caplog.text
+
+    caplog.clear()
+    form_data['cache_debug'] = True
+    with caplog.at_level(logging.INFO, logger=middleware.log.name):
+        middleware.log_native_tool_continuation_request_fingerprint(
+            form_data,
+            metadata=metadata,
+            route_mode='direct_stream',
+        )
+    assert 'native_tool_continuation_request_fingerprint' in caplog.text
+    assert 'RAW USER QUESTION' not in caplog.text
+
+
+def test_responses_continuation_guard_accepts_exact_append_only_tool_output_delta():
+    previous_form_data = _responses_guard_base_form_data()
+    current_form_data = deepcopy(previous_form_data)
+    current_form_data['messages'].append(
+        {
+            'role': 'tool',
+            'tool_call_id': 'call_knowledge',
+            'content': 'Grounding evidence',
+        }
+    )
+
+    previous_state = middleware.build_responses_continuation_guard_state(
+        previous_form_data,
+        route_mode='websocket_responses_api',
+    )
+    result = middleware.evaluate_responses_continuation_delta(
+        previous_state,
+        current_form_data,
+        route_mode='websocket_responses_api',
+    )
+
+    assert result['accepted'] is True
+    assert result['continuation_mode'] == 'stateful_delta'
+    assert result['reason'] == 'accepted'
+    assert result['delta_messages'] == [current_form_data['messages'][-1]]
+
+
+@pytest.mark.parametrize(
+    ('mutate_current', 'reason'),
+    [
+        (lambda form_data: form_data.update({'model': 'gpt-other'}), 'model_changed'),
+        (lambda form_data: form_data.update({'prompt_cache_key': 'other-cache-key'}), 'prompt_cache_key_changed'),
+        (
+            lambda form_data: form_data.update({'tools': [{'type': 'function', 'name': 'other_tool'}]}),
+            'tools_changed',
+        ),
+        (
+            lambda form_data: form_data['messages'][0].update({'content': 'rewritten instructions'}),
+            'instructions_changed',
+        ),
+        (lambda form_data: form_data.update({'temperature': 0.9}), 'generation_controls_changed'),
+        (lambda form_data: form_data.update({'text': {'verbosity': 'high'}}), 'generation_controls_changed'),
+        (lambda form_data: form_data.update({'truncation': 'disabled'}), 'generation_controls_changed'),
+        (
+            lambda form_data: form_data['messages'][1].update({'content': 'rewritten user prompt'}),
+            'input_not_strict_extension',
+        ),
+    ],
+)
+def test_responses_continuation_guard_rejects_shape_changes(mutate_current, reason):
+    previous_form_data = _responses_guard_base_form_data()
+    current_form_data = deepcopy(previous_form_data)
+    current_form_data['messages'].append(
+        {
+            'role': 'tool',
+            'tool_call_id': 'call_knowledge',
+            'content': 'Grounding evidence',
+        }
+    )
+    mutate_current(current_form_data)
+
+    previous_state = middleware.build_responses_continuation_guard_state(
+        previous_form_data,
+        route_mode='websocket_responses_api',
+    )
+    result = middleware.evaluate_responses_continuation_delta(
+        previous_state,
+        current_form_data,
+        route_mode='websocket_responses_api',
+    )
+
+    assert result['accepted'] is False
+    assert result['continuation_mode'] == 'stateful_rejected'
+    assert result['reason'] == reason
+    assert result['delta_messages'] == []
+
+
+def test_responses_continuation_guard_rejects_without_previous_state():
+    current_form_data = _responses_guard_base_form_data()
+    current_form_data['messages'].append(
+        {
+            'role': 'tool',
+            'tool_call_id': 'call_knowledge',
+            'content': 'Grounding evidence',
+        }
+    )
+
+    result = middleware.evaluate_responses_continuation_delta(
+        None,
+        current_form_data,
+        route_mode='websocket_responses_api',
+    )
+
+    assert result['accepted'] is False
+    assert result['reason'] == 'missing_previous_guard_state'
+
+
+def test_apply_responses_continuation_guard_rejects_previous_response_id_and_preserves_full_replay():
+    previous_form_data = _responses_guard_base_form_data()
+    current_form_data = deepcopy(previous_form_data)
+    current_form_data['messages'][1]['content'] = 'rewritten user prompt'
+    current_form_data['messages'].append(
+        {
+            'role': 'tool',
+            'tool_call_id': 'call_knowledge',
+            'content': 'Grounding evidence',
+        }
+    )
+
+    previous_state = middleware.build_responses_continuation_guard_state(
+        previous_form_data,
+        route_mode='websocket_responses_api',
+    )
+    guarded_form_data, result = middleware.apply_responses_continuation_guard(
+        current_form_data,
+        previous_response_id='resp_123',
+        previous_state=previous_state,
+        route_mode='websocket_responses_api',
+    )
+
+    assert result['accepted'] is False
+    assert result['reason'] == 'input_not_strict_extension'
+    assert 'previous_response_id' not in guarded_form_data
+    assert guarded_form_data['continuation_mode'] == 'stateful_rejected'
+    assert guarded_form_data['messages'] == current_form_data['messages']
+
+
+def test_apply_responses_continuation_guard_accepts_previous_response_id_and_sends_delta_messages():
+    previous_form_data = _responses_guard_base_form_data()
+    current_form_data = deepcopy(previous_form_data)
+    current_form_data['messages'].append(
+        {
+            'role': 'tool',
+            'tool_call_id': 'call_knowledge',
+            'content': 'Grounding evidence',
+        }
+    )
+
+    previous_state = middleware.build_responses_continuation_guard_state(
+        previous_form_data,
+        route_mode='websocket_responses_api',
+    )
+    guarded_form_data, result = middleware.apply_responses_continuation_guard(
+        current_form_data,
+        previous_response_id='resp_123',
+        previous_state=previous_state,
+        route_mode='websocket_responses_api',
+    )
+
+    assert result['accepted'] is True
+    assert guarded_form_data['previous_response_id'] == 'resp_123'
+    assert guarded_form_data['continuation_mode'] == 'stateful_delta'
+    assert guarded_form_data['messages'] == [
+        current_form_data['messages'][0],
+        current_form_data['messages'][-1],
+    ]
 
 
 @pytest.mark.asyncio

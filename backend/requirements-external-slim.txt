@@ -9,7 +9,7 @@
 #   onnxruntime, rapidocr-onnxruntime, opencv-python-headless
 # - local/default vector and unused remote vector clients: chromadb,
 #   weaviate-client, pymilvus, qdrant-client, elasticsearch, pinecone,
-#   oracledb, opensearch-py
+#   oracledb
 # - local browser loader and test/dev-only packages: playwright, docker,
 #   pytest, pytest-docker
 # - optional document parser bundle: unstructured
@@ -31,6 +31,7 @@ bcrypt==5.0.0
 argon2-cffi==25.1.0
 PyJWT[crypto]==2.11.0
 authlib==1.6.10
+joserfc==1.7.1
 
 requests==2.33.1
 aiohttp==3.13.5
@@ -77,6 +78,7 @@ langchain-classic==1.0.1
 langchain-text-splitters==1.1.1
 
 fake-useragent==2.2.0
+opensearch-py==3.1.0
 PyMySQL==1.1.2
 boto3==1.42.62
 pymongo==4.16.0
