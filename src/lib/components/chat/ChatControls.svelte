@@ -135,7 +135,7 @@
 
 		try {
 			const file = new File([blob], name, { type: contentType || 'application/octet-stream' });
-			const uploaded = await uploadFile(localStorage.token, file);
+			const uploaded = await uploadFile(localStorage.token, file, { upload_context: 'chat' });
 			if (!uploaded) throw new Error('Upload failed');
 
 			const idx = files.findIndex((f) => f.itemId === tempItemId);

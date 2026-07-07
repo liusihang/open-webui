@@ -4,11 +4,13 @@ import hashlib
 import json
 import logging
 import os
+import time
 import uuid
 from pathlib import Path
 from typing import Optional
-from urllib.parse import quote
+from urllib.parse import quote, urlencode
 
+import aiohttp
 from fastapi import (
     APIRouter,
     BackgroundTasks,
@@ -24,6 +26,7 @@ from fastapi import (
 from fastapi.responses import FileResponse, StreamingResponse
 from open_webui.config import BYPASS_ADMIN_ACCESS_CONTROL, STORAGE_LOCAL_CACHE, STORAGE_PROVIDER, UPLOAD_DIR
 from open_webui.constants import ERROR_MESSAGES
+from open_webui.env import AIOHTTP_CLIENT_SESSION_SSL
 from open_webui.events import EVENTS, publish_event
 from open_webui.internal.db import get_async_db_context, get_async_session
 from open_webui.models.access_grants import AccessGrants
@@ -44,7 +47,9 @@ from open_webui.retrieval.vector.async_client import ASYNC_VECTOR_DB_CLIENT
 from open_webui.routers.audio import transcribe
 from open_webui.routers.retrieval import ProcessFileForm, process_file
 from open_webui.storage.provider import Storage
+from open_webui.utils.access_control import has_connection_access
 from open_webui.utils.auth import get_admin_user, get_verified_user
+from open_webui.utils.auth import create_terminal_session_token
 from open_webui.utils.misc import strict_match_mime_type
 from pydantic import BaseModel
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -106,6 +111,155 @@ def _cleanup_local_cache(file_path: str) -> None:
             log.debug(f'Cleaned up local cache: {local_path}')
     except OSError as e:
         log.warning(f'Failed to clean up local cache for {file_path}: {e}')
+
+
+def _should_mirror_upload_to_terminal(file_metadata: dict) -> bool:
+    return file_metadata.get('upload_context') == 'chat'
+
+
+def _normalize_terminal_chatfile_directory(directory: str | None) -> str:
+    directory = (directory or 'Chatfile').strip().strip('/')
+    normalized = os.path.normpath(directory)
+    if not normalized or normalized == '.' or normalized.startswith('..') or os.path.isabs(normalized):
+        return 'Chatfile'
+    return normalized.replace('\\', '/')
+
+
+def _terminal_upload_filename(filename: str | None) -> str:
+    sanitized = os.path.basename(filename or 'upload')
+    return sanitized or 'upload'
+
+
+def _bearer_auth_header(token: str) -> dict:
+    return {'Authorization': f'Bearer {token}'} if token else {}
+
+
+async def _get_chat_upload_terminal_connection(user, server_id: str):
+    connections = await Config.get('terminal_server.connections', []) or []
+    user_group_ids = {group.id for group in await Groups.get_groups_by_member_id(user.id)}
+
+    for connection in connections:
+        if not connection.get('enabled', True):
+            continue
+        if server_id and connection.get('id') != server_id:
+            continue
+        if await has_connection_access(user, connection, user_group_ids):
+            return connection
+
+    return None
+
+
+def _build_terminal_headers_and_cookies(request: Request, user, connection: dict) -> tuple[dict, dict]:
+    headers = {'X-User-Id': user.id}
+    cookies = {}
+    auth_type = connection.get('auth_type', 'bearer')
+
+    if auth_type == 'bearer':
+        headers.update(_bearer_auth_header(connection.get('key', '')))
+    elif auth_type == 'session':
+        cookies = getattr(request, 'cookies', {}) or {}
+        headers.update(_bearer_auth_header(create_terminal_session_token(user)))
+    elif auth_type == 'system_oauth':
+        cookies = getattr(request, 'cookies', {}) or {}
+        oauth_token = getattr(request, 'headers', {}).get('x-oauth-access-token', '')
+        if oauth_token:
+            headers.update(_bearer_auth_header(oauth_token))
+
+    return headers, cookies
+
+
+def _terminal_base_url(connection: dict) -> str:
+    base_url = (connection.get('url') or '').rstrip('/')
+    policy_id = connection.get('policy_id')
+    if policy_id:
+        return f"{base_url}/p/{policy_id}"
+    return base_url
+
+
+async def _sync_chat_upload_to_terminal_chatfile(
+    *,
+    request: Request,
+    user,
+    filename: str,
+    contents: bytes,
+) -> dict:
+    synced_at = int(time.time())
+    enabled = await Config.get('chat_upload_terminal.enabled', True)
+    directory = _normalize_terminal_chatfile_directory(await Config.get('chat_upload_terminal.directory', 'Chatfile'))
+    mirror_filename = _terminal_upload_filename(filename)
+    server_id = await Config.get('chat_upload_terminal.server_id', 'terminals')
+
+    base_metadata = {
+        'server_id': server_id,
+        'directory': directory,
+        'filename': mirror_filename,
+        'synced_at': synced_at,
+    }
+
+    if not enabled:
+        return {**base_metadata, 'status': 'skipped', 'reason': 'disabled'}
+
+    connection = await _get_chat_upload_terminal_connection(user, server_id)
+    if not connection:
+        return {**base_metadata, 'status': 'skipped', 'reason': 'terminal connection unavailable'}
+
+    base_url = _terminal_base_url(connection)
+    if not base_url:
+        return {**base_metadata, 'status': 'failed', 'error': 'Terminal server URL is not configured'}
+
+    headers, cookies = _build_terminal_headers_and_cookies(request, user, connection)
+
+    try:
+        timeout = aiohttp.ClientTimeout(total=300, connect=10)
+        async with aiohttp.ClientSession(timeout=timeout, trust_env=True) as session:
+            async with session.post(
+                f'{base_url}/files/mkdir',
+                headers={**headers, 'Content-Type': 'application/json'},
+                cookies=cookies,
+                json={'path': directory},
+                ssl=AIOHTTP_CLIENT_SESSION_SSL,
+            ) as mkdir_response:
+                if mkdir_response.status >= 400:
+                    detail = await mkdir_response.text()
+                    return {
+                        **base_metadata,
+                        'status': 'failed',
+                        'error': f'Terminal Chatfile mkdir failed: HTTP {mkdir_response.status} {detail}'.strip(),
+                    }
+
+            form = aiohttp.FormData()
+            form.add_field(
+                'file',
+                contents,
+                filename=mirror_filename,
+                content_type='application/octet-stream',
+            )
+            upload_url = f'{base_url}/files/upload?{urlencode({"directory": directory})}'
+            async with session.post(
+                upload_url,
+                headers=headers,
+                cookies=cookies,
+                data=form,
+                ssl=AIOHTTP_CLIENT_SESSION_SSL,
+            ) as upload_response:
+                if upload_response.status >= 400:
+                    detail = await upload_response.text()
+                    return {
+                        **base_metadata,
+                        'status': 'failed',
+                        'error': f'Terminal upload failed: HTTP {upload_response.status} {detail}'.strip(),
+                    }
+                payload = await upload_response.json()
+
+        return {
+            **base_metadata,
+            'status': 'synced',
+            'path': payload.get('path'),
+            'size': payload.get('size'),
+        }
+    except Exception as exc:
+        log.exception('Failed to mirror chat upload to Terminal Chatfile: %s', exc)
+        return {**base_metadata, 'status': 'failed', 'error': str(exc)}
 
 
 async def process_uploaded_file(
@@ -387,6 +541,21 @@ async def upload_file_handler(
             ),
             db=db,
         )
+
+        if file_item and _should_mirror_upload_to_terminal(file_metadata):
+            terminal_metadata = await _sync_chat_upload_to_terminal_chatfile(
+                request=request,
+                user=user,
+                filename=name,
+                contents=contents,
+            )
+            updated_file_item = await Files.update_file_metadata_by_id(
+                file_item.id,
+                {'terminal': terminal_metadata},
+                db=db,
+            )
+            if updated_file_item:
+                file_item = updated_file_item
 
         if 'channel_id' in file_metadata:
             channel = await Channels.get_channel_by_id_and_user_id(file_metadata['channel_id'], user.id, db=db)

@@ -666,12 +666,15 @@
 		if (!$temporaryChatEnabled) {
 			try {
 				// If the file is an audio file, provide the language for STT.
-				let metadata = null;
+				let metadata: Record<string, string> = {
+					upload_context: 'chat'
+				};
 				if (
 					(file.type.startsWith('audio/') || file.type.startsWith('video/')) &&
 					$settings?.audio?.stt?.language
 				) {
 					metadata = {
+						...metadata,
 						language: $settings?.audio?.stt?.language
 					};
 				}
