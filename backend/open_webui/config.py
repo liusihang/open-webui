@@ -487,6 +487,23 @@ OPEN_NOTEBOOK_TRANSFORMATION_ABSTRACT = os.getenv('OPEN_NOTEBOOK_TRANSFORMATION_
 OPEN_NOTEBOOK_TRANSFORMATION_KEY_FINDINGS = os.getenv('OPEN_NOTEBOOK_TRANSFORMATION_KEY_FINDINGS', '')
 OPEN_NOTEBOOK_TRANSFORMATION_KEY_DATA = os.getenv('OPEN_NOTEBOOK_TRANSFORMATION_KEY_DATA', '')
 
+ENABLE_AGENT_MODE = os.getenv('ENABLE_AGENT_MODE', 'False').lower() == 'true'
+AGENT_RUNTIME_BASE_URL = os.getenv('AGENT_RUNTIME_BASE_URL', '')
+AGENT_RUNTIME_SERVICE_TOKEN = os.getenv('AGENT_RUNTIME_SERVICE_TOKEN', '')
+AGENT_RUN_DEFAULT_TIMEOUT_SECONDS = int(os.getenv('AGENT_RUN_DEFAULT_TIMEOUT_SECONDS', '300'))
+AGENT_RUN_MAX_MODEL_CALLS = int(os.getenv('AGENT_RUN_MAX_MODEL_CALLS', '25'))
+AGENT_RUN_MAX_TOOL_CALLS = int(os.getenv('AGENT_RUN_MAX_TOOL_CALLS', '50'))
+AGENT_TEAM_MAX_SUBAGENTS = int(os.getenv('AGENT_TEAM_MAX_SUBAGENTS', '5'))
+try:
+    AGENT_SUBAGENT_DEFAULT_BUDGET = json.loads(
+        os.getenv(
+            'AGENT_SUBAGENT_DEFAULT_BUDGET',
+            '{"max_model_calls": 8, "max_tool_calls": 16}',
+        )
+    )
+except json.JSONDecodeError:
+    AGENT_SUBAGENT_DEFAULT_BUDGET = {'max_model_calls': 8, 'max_tool_calls': 16}
+
 CODE_INTERPRETER_ENGINE = os.getenv('CODE_INTERPRETER_ENGINE', 'pyodide')
 
 CODE_INTERPRETER_PROMPT_TEMPLATE = os.getenv('CODE_INTERPRETER_PROMPT_TEMPLATE', '')
@@ -3270,6 +3287,14 @@ DEFAULT_CONFIG = {
     'ldap.group.enable_management': ENABLE_LDAP_GROUP_MANAGEMENT,
     'ldap.group.enable_creation': ENABLE_LDAP_GROUP_CREATION,
     'ldap.server.attribute_for_groups': LDAP_ATTRIBUTE_FOR_GROUPS,
+    'agent.mode.enable': ENABLE_AGENT_MODE,
+    'agent.runtime.base_url': AGENT_RUNTIME_BASE_URL,
+    'agent.runtime.service_token': AGENT_RUNTIME_SERVICE_TOKEN,
+    'agent.run.default_timeout_seconds': AGENT_RUN_DEFAULT_TIMEOUT_SECONDS,
+    'agent.run.max_model_calls': AGENT_RUN_MAX_MODEL_CALLS,
+    'agent.run.max_tool_calls': AGENT_RUN_MAX_TOOL_CALLS,
+    'agent.team.max_subagents': AGENT_TEAM_MAX_SUBAGENTS,
+    'agent.subagent.default_budget': AGENT_SUBAGENT_DEFAULT_BUDGET,
 }
 
 

@@ -110,8 +110,13 @@
 	} from '$lib/components/chat/defaultFeatures';
 	import {
 		buildReasoningPayload,
+		resolveAgentModeRequestModels,
 		type ReasoningDepth
 	} from '$lib/components/chat/agentModeRequest';
+	import {
+		prepareLoadedChatHistory,
+		shouldApplySocketContentEvent
+	} from '$lib/components/chat/historySync';
 	import Messages from '$lib/components/chat/Messages.svelte';
 	import Navbar from '$lib/components/chat/Navbar.svelte';
 	import ChatControls from './ChatControls.svelte';
@@ -157,10 +162,16 @@
 	let selectedModels = [''];
 	let atSelectedModel: Model | undefined;
 	let selectedModelIds = [];
+	$: if (selectedModels.length > 1) {
+		const resolvedAgentModels = resolveAgentModeRequestModels(selectedModels, $config);
+		if (!equal(resolvedAgentModels, selectedModels)) {
+			selectedModels = resolvedAgentModels;
+		}
+	}
 	$: if (atSelectedModel !== undefined) {
-		selectedModelIds = [atSelectedModel.id];
+		selectedModelIds = resolveAgentModeRequestModels([atSelectedModel.id], $config);
 	} else {
-		selectedModelIds = selectedModels;
+		selectedModelIds = resolveAgentModeRequestModels(selectedModels, $config);
 	}
 
 	let selectedToolIds = [];
@@ -660,6 +671,7 @@
 			if (message) {
 				const type = event?.data?.type ?? null;
 				const data = event?.data?.data ?? null;
+				const applySocketContentEvent = shouldApplySocketContentEvent(message, type);
 
 				if (type === 'status') {
 					if (message?.statusHistory) {
@@ -677,7 +689,9 @@
 						}
 					}
 				} else if (type === 'chat:completion') {
-					chatCompletionEventHandler(data, message, event.chat_id);
+					if (applySocketContentEvent) {
+						chatCompletionEventHandler(data, message, event.chat_id);
+					}
 				} else if (type === 'chat:tasks:cancel') {
 					dismissContextCompactionToast();
 					if (event.message_id === history.currentId) {
@@ -691,7 +705,9 @@
 						message.done = true;
 					}
 				} else if (type === 'chat:message:delta' || type === 'message') {
-					message.content += data.content;
+					if (applySocketContentEvent) {
+						message.content += data.content;
+					}
 				} else if (type === 'chat:message' || type === 'replace') {
 					message.content = data.content;
 				} else if (type === 'chat:message:files' || type === 'files') {
@@ -1670,14 +1686,14 @@
 
 				oldSelectedModelIds = structuredClone(selectedModels);
 
-				history =
+				const loadedHistory =
 					(chatContent?.history ?? undefined) !== undefined
 						? chatContent.history
 						: convertMessagesToHistory(chatContent.messages);
 
 				// Sanitize history: repair orphaned references and structurally-malformed
 				// nodes from failed regenerations (#24424, #24157, #20474)
-				sanitizeHistory(history);
+				sanitizeHistory(loadedHistory);
 
 				chatTitle.set(chatContent.title);
 
@@ -1690,20 +1706,6 @@
 				autoScroll = true;
 				await tick();
 
-				// Mark all non-current assistant messages as done
-				if (history.currentId) {
-					for (const message of Object.values(history.messages)) {
-						if (
-							message &&
-							message.role === 'assistant' &&
-							message.id !== history.currentId &&
-							message.done !== false
-						) {
-							message.done = true;
-						}
-					}
-				}
-
 				// Reconcile active tasks with message state:
 				// If the response is already done, remaining tasks are just background
 				// work (follow-ups, title gen) that shouldn't block the input.
@@ -1714,18 +1716,9 @@
 				if (taskIds !== activeTaskIds) {
 					return;
 				}
-				const currentMessage = history.currentId ? history.messages[history.currentId] : null;
-				const responseComplete = currentMessage?.role === 'assistant' && currentMessage?.done;
-
-				if (pendingTaskIds.length > 0 && !responseComplete) {
-					taskIds = pendingTaskIds;
-				} else {
-					taskIds = null;
-					// No active tasks and message incomplete → generation was interrupted
-					if (currentMessage?.role === 'assistant' && !currentMessage.done) {
-						currentMessage.done = true;
-					}
-				}
+				const loadedHistoryState = prepareLoadedChatHistory(history, loadedHistory, pendingTaskIds);
+				history = loadedHistoryState.history;
+				taskIds = loadedHistoryState.taskIds;
 
 				await tick();
 
@@ -2323,6 +2316,7 @@
 			: atSelectedModel !== undefined
 				? [atSelectedModel.id]
 				: selectedModels;
+		selectedModelIds = resolveAgentModeRequestModels(selectedModelIds, $config);
 
 		// Create response messages for each selected model
 		// Build message_ids list: [{model_id, message_id}, ...]
@@ -2718,6 +2712,14 @@
 			if (res.error) {
 				await handleOpenAIError(res.error, responseMessage);
 			} else {
+				if (res.agent_run_id) {
+					responseMessage.agent_run_id = res.agent_run_id;
+					history.messages[responseMessageId] = {
+						...history.messages[responseMessageId],
+						agent_run_id: res.agent_run_id
+					};
+				}
+
 				// Backend returns task_ids (multi-model) or task_id (single model)
 				const newTaskIds = res.task_ids ?? (res.task_id ? [res.task_id] : []);
 				if (newTaskIds.length > 0) {

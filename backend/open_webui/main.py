@@ -128,7 +128,13 @@ from open_webui.events import (
     upsert_event_webhook,
 )
 from open_webui.internal.db import engine, get_async_session
+from open_webui.agent.artifacts import AgentRunArtifactRegistrar
+from open_webui.agent.protocol import AgentEventType
+from open_webui.agent.resources import AgentRunResourceManager
+from open_webui.agent.runtime_client import AgentRuntimeClient, AgentRuntimeError, AgentRuntimeUnavailable
+from open_webui.agent.tool_authority import build_tool_access_envelope
 from open_webui.models.access_grants import AccessGrants
+from open_webui.models.agent_runs import AgentRuns
 from open_webui.models.channels import Channels
 from open_webui.models.chats import ChatForm, Chats
 from open_webui.models.config import Config
@@ -137,6 +143,8 @@ from open_webui.models.messages import Messages
 from open_webui.models.models import Models
 from open_webui.models.users import Users
 from open_webui.routers import (
+    agent_runs,
+    agent_service,
     analytics,
     audio,
     auths,
@@ -197,7 +205,7 @@ from open_webui.tasks import (
     stop_task,
 )  # Import from tasks.py
 from open_webui.utils import logger
-from open_webui.utils.access_control import has_permission
+from open_webui.utils.access_control import has_connection_access, has_permission
 from open_webui.utils.actions import chat_action as chat_action_handler
 from open_webui.utils.asgi_middleware import (
     AuthTokenMiddleware,
@@ -325,6 +333,14 @@ CONFIG_ATTR_ALIASES = {
     'FILE_MAX_COUNT': 'rag.file.max_count',
     'FILE_MAX_SIZE': 'rag.file.max_size',
     'FOLDER_MAX_FILE_COUNT': 'folders.max_file_count',
+    'ENABLE_AGENT_MODE': 'agent.mode.enable',
+    'AGENT_RUNTIME_BASE_URL': 'agent.runtime.base_url',
+    'AGENT_RUNTIME_SERVICE_TOKEN': 'agent.runtime.service_token',
+    'AGENT_RUN_DEFAULT_TIMEOUT_SECONDS': 'agent.run.default_timeout_seconds',
+    'AGENT_RUN_MAX_MODEL_CALLS': 'agent.run.max_model_calls',
+    'AGENT_RUN_MAX_TOOL_CALLS': 'agent.run.max_tool_calls',
+    'AGENT_TEAM_MAX_SUBAGENTS': 'agent.team.max_subagents',
+    'AGENT_SUBAGENT_DEFAULT_BUDGET': 'agent.subagent.default_budget',
     'HYBRID_BM25_WEIGHT': 'rag.hybrid_bm25_weight',
     'LAYER_GENERATION_MAX_CHUNK_TOKENS': 'layered_knowledge.internal.max_chunk_tokens',
     'LAYER_GENERATION_MIN_TAIL_TOKENS': 'layered_knowledge.internal.min_tail_tokens',
@@ -855,6 +871,8 @@ app.state.speech_speaker_embeddings_dataset = None
 #
 ########################################
 
+app.state.AGENT_RUN_RESOURCE_MANAGER = AgentRunResourceManager()
+app.state.AGENT_RUN_ARTIFACT_REGISTRAR = AgentRunArtifactRegistrar(AgentRuns)
 app.state.MODELS = MODELS
 
 # Add the middleware to the app
@@ -930,6 +948,8 @@ app.include_router(utils.router, prefix='/api/v1/utils', tags=['utils'])
 app.include_router(terminals.router, prefix='/api/v1/terminals', tags=['terminals'])
 app.include_router(automations.router, prefix='/api/v1/automations', tags=['automations'])
 app.include_router(calendar.router, prefix='/api/v1/calendars', tags=['calendars'])
+app.include_router(agent_runs.router, prefix='/api/agent/runs', tags=['agent-runs'])
+app.include_router(agent_service.router, prefix='/api/agent/service', tags=['agent-service'])
 
 # SCIM 2.0 API for identity management
 if ENABLE_SCIM:
@@ -1164,6 +1184,348 @@ async def embeddings(request: Request, form_data: dict, user=Depends(get_verifie
         await get_all_models(request, user=user)
     # Use generic dispatcher in utils.embeddings
     return await generate_embeddings(request, form_data, user)
+
+
+def _message_id_entries(message_ids) -> list[tuple[str | None, str | None]]:
+    if isinstance(message_ids, dict):
+        return [(str(model_id), message_id) for model_id, message_id in message_ids.items()]
+    if isinstance(message_ids, list):
+        entries = []
+        for entry in message_ids:
+            if isinstance(entry, dict):
+                model_id = entry.get('model_id')
+                message_id = entry.get('message_id')
+                entries.append((str(model_id) if model_id is not None else None, message_id))
+        return entries
+    return []
+
+
+def _first_assistant_message_id(message_ids) -> str | None:
+    for _model_id, message_id in _message_id_entries(message_ids):
+        if message_id:
+            return message_id
+    return None
+
+
+def _assistant_message_id_for_model(message_ids, model_id: str | None) -> str | None:
+    entries = _message_id_entries(message_ids)
+    if model_id:
+        for entry_model_id, message_id in entries:
+            if entry_model_id == model_id and message_id:
+                return message_id
+
+    fallback_message_id = _first_assistant_message_id(message_ids)
+    if fallback_message_id:
+        log.warning(
+            'Agent Mode could not find assistant message id for leader model=%s; falling back to first assistant message id',
+            model_id,
+        )
+    return fallback_message_id
+
+
+def _is_agent_mode_product_chat(request: Request, metadata: dict, message_ids) -> bool:
+    if getattr(request.state, 'agent_internal_model_call', False):
+        return False
+    if not getattr(request.app.state.config, 'ENABLE_AGENT_MODE', False):
+        return False
+    return bool(
+        metadata.get('chat_id')
+        and metadata.get('user_message_id')
+        and _first_assistant_message_id(message_ids)
+    )
+
+
+async def _first_accessible_system_terminal_id(request: Request, user) -> str | None:
+    connections = getattr(request.app.state.config, 'TERMINAL_SERVER_CONNECTIONS', None) or []
+    for connection in connections:
+        terminal_id = connection.get('id')
+        if not terminal_id or not connection.get('enabled', True):
+            continue
+        try:
+            if await has_connection_access(user, connection):
+                return terminal_id
+        except Exception as exc:
+            log.warning('Failed to check Agent Mode terminal access for %s: %s', terminal_id, exc)
+    return None
+
+
+async def _attach_default_agent_mode_terminal(request: Request, form_data: dict, user) -> None:
+    if form_data.get('terminal_id'):
+        return
+
+    terminal_id = await _first_accessible_system_terminal_id(request, user)
+    if terminal_id:
+        form_data['terminal_id'] = terminal_id
+
+
+def _agent_run_budget(config) -> dict:
+    return {
+        'timeout_seconds': getattr(config, 'AGENT_RUN_DEFAULT_TIMEOUT_SECONDS', None),
+        'max_model_calls': getattr(config, 'AGENT_RUN_MAX_MODEL_CALLS', None),
+        'max_tool_calls': getattr(config, 'AGENT_RUN_MAX_TOOL_CALLS', None),
+        'team_max_subagents': getattr(config, 'AGENT_TEAM_MAX_SUBAGENTS', None),
+        'subagent_default_budget': getattr(config, 'AGENT_SUBAGENT_DEFAULT_BUDGET', None),
+    }
+
+
+def _agent_runtime_model_params(form_data: dict) -> dict:
+    params = {}
+    request_params = form_data.get('params')
+    if isinstance(request_params, dict):
+        params.update({key: value for key, value in request_params.items() if value is not None})
+
+    reasoning = _agent_runtime_reasoning_params(form_data.get('reasoning'))
+    if reasoning:
+        params['reasoning'] = reasoning
+
+    return params
+
+
+def _agent_runtime_reasoning_params(value) -> dict:
+    if not isinstance(value, dict):
+        return {}
+
+    reasoning = {}
+    enabled = value.get('enabled')
+    if isinstance(enabled, bool):
+        reasoning['enabled'] = enabled
+
+    effort = value.get('effort')
+    if isinstance(effort, str) and effort.strip():
+        reasoning['effort'] = effort.strip()
+
+    max_tokens = value.get('max_tokens')
+    if max_tokens not in (None, ''):
+        reasoning['max_tokens'] = max_tokens
+
+    return reasoning
+
+
+def _agent_runtime_payload(
+    *,
+    run,
+    form_data: dict,
+    metadata: dict,
+    user,
+    leader_model_id: str,
+    budget: dict,
+    tool_access_envelope: dict,
+    model_params: dict | None = None,
+) -> dict:
+    model_meta = {}
+    model = metadata.get('model')
+    if isinstance(model, dict):
+        model_meta = model.get('info', {}).get('meta', {}) or {}
+
+    messages = form_data.get('messages')
+    if not isinstance(messages, list):
+        messages = [metadata.get('user_message')] if metadata.get('user_message') else []
+
+    runtime_metadata = {
+        'session_id': metadata.get('session_id'),
+        'features': metadata.get('features') or {},
+        'variables': metadata.get('variables') or {},
+        'stream': form_data.get('stream'),
+    }
+    runtime_model_params = model_params if model_params is not None else _agent_runtime_model_params(form_data)
+    if runtime_model_params:
+        runtime_metadata['model_params'] = runtime_model_params
+
+    return {
+        'run_id': run.id,
+        'chat_id': metadata.get('chat_id'),
+        'user_message_id': metadata.get('user_message_id'),
+        'assistant_message_id': run.assistant_message_id,
+        'leader_model_id': leader_model_id,
+        'user_ref': {
+            'id': user.id,
+            'role': getattr(user, 'role', None),
+        },
+        'budget': budget,
+        'team_cap': budget.get('team_max_subagents'),
+        'default_paths': {
+            'outputs': f'/workspace/agent-runs/{run.id}/outputs',
+            'tmp': f'/workspace/agent-runs/{run.id}/tmp',
+        },
+        'tool_access_envelope': tool_access_envelope,
+        'model_catalog': [
+            {
+                'id': leader_model_id,
+                'role': 'leader',
+                'meta': model_meta,
+            }
+        ],
+        'messages': messages,
+        'metadata': runtime_metadata,
+    }
+
+
+async def _link_agent_run_to_assistant_message(
+    metadata: dict,
+    *,
+    agent_run_id: str,
+    error: dict | None = None,
+) -> None:
+    chat_id = metadata.get('chat_id')
+    assistant_message_id = metadata.get('message_id') or metadata.get('assistant_message_id')
+    if not chat_id or not assistant_message_id:
+        return
+    if chat_id.startswith('local:') or chat_id.startswith('channel:'):
+        return
+
+    update = {
+        'parentId': metadata.get('user_message_id', None),
+        'agent_run_id': agent_run_id,
+    }
+    if error:
+        update['error'] = {'content': error.get('message') or 'Agent runtime unavailable'}
+
+    await Chats.upsert_message_to_chat_by_id_and_message_id(
+        chat_id,
+        assistant_message_id,
+        update,
+    )
+
+
+async def _start_agent_mode_chat(
+    request: Request,
+    form_data: dict,
+    user,
+    metadata: dict,
+    message_ids,
+    model: dict,
+) -> dict:
+    leader_model_id = form_data.get('model') or next(
+        (model_id for model_id, _message_id in _message_id_entries(message_ids) if model_id),
+        None,
+    )
+    assistant_message_id = _assistant_message_id_for_model(message_ids, leader_model_id)
+    if not assistant_message_id:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail='Agent Mode requires an assistant message id',
+        )
+
+    metadata['message_id'] = assistant_message_id
+    metadata['assistant_message_id'] = assistant_message_id
+
+    requested_model_params = _agent_runtime_model_params(form_data)
+    form_data, metadata, _events = await process_chat_payload(request, form_data, user, metadata, model)
+    tool_access_envelope, tool_registry = build_tool_access_envelope(metadata.get('tools') or {})
+    tool_access_metadata = {
+        'session_id': metadata.get('session_id'),
+        'files': metadata.get('files') or [],
+    }
+    terminal_id = metadata.get('terminal_id') or form_data.get('terminal_id')
+    if terminal_id:
+        tool_access_metadata['terminal_id'] = terminal_id
+    skill_ids = metadata.get('skill_ids')
+    if isinstance(skill_ids, list):
+        tool_access_metadata['skill_ids'] = skill_ids
+    tool_access_envelope['metadata'] = tool_access_metadata
+
+    budget = _agent_run_budget(request.app.state.config)
+    run = await AgentRuns.create_run(
+        user_id=user.id,
+        chat_id=metadata['chat_id'],
+        user_message_id=metadata['user_message_id'],
+        assistant_message_id=assistant_message_id,
+        leader_model_id=leader_model_id,
+        budget=budget,
+        participants=[
+            {
+                'id': 'leader',
+                'role': 'leader',
+                'model_id': leader_model_id,
+            }
+        ],
+        tool_access_snapshot=tool_access_envelope,
+        model_catalog_snapshot={'leader_model_id': leader_model_id},
+    )
+    _install_agent_tool_registry(request, run.id, tool_registry)
+    await _link_agent_run_to_assistant_message(metadata, agent_run_id=run.id)
+    run = await AgentRuns.transition_state(
+        run.id,
+        from_states=['queued'],
+        to_state='running',
+        reason='runtime starting',
+    )
+
+    client = AgentRuntimeClient(
+        getattr(request.app.state.config, 'AGENT_RUNTIME_BASE_URL', ''),
+        service_token=getattr(request.app.state.config, 'AGENT_RUNTIME_SERVICE_TOKEN', ''),
+        timeout=getattr(request.app.state.config, 'AGENT_RUN_DEFAULT_TIMEOUT_SECONDS', None),
+    )
+    payload = _agent_runtime_payload(
+        run=run,
+        form_data=form_data,
+        metadata=metadata,
+        user=user,
+        leader_model_id=leader_model_id,
+        budget=budget,
+        tool_access_envelope=tool_access_envelope,
+        model_params=requested_model_params,
+    )
+
+    try:
+        runtime_response = await client.start_run(payload)
+    except (AgentRuntimeUnavailable, AgentRuntimeError) as exc:
+        _remove_agent_tool_registry(request, run.id)
+        error = {
+            'code': getattr(exc, 'code', 'agent_runtime_error'),
+            'message': str(exc),
+        }
+        await AgentRuns.transition_state(
+            run.id,
+            from_states=['queued', 'running'],
+            to_state='failed',
+            reason='runtime start failed',
+            payload={'error': error},
+        )
+        await AgentRuns.append_event(
+            run.id,
+            event_type=AgentEventType.RUN_FAILED.value,
+            participant_id='leader',
+            phase='failed',
+            payload={'error': error},
+        )
+        await _link_agent_run_to_assistant_message(metadata, agent_run_id=run.id, error=error)
+        return {
+            'status': False,
+            'chat_id': metadata['chat_id'],
+            'agent_run_id': run.id,
+            'task_ids': [],
+            'error': error,
+        }
+
+    runtime_session_id = runtime_response.get('runtime_session_id')
+    if runtime_session_id:
+        await AgentRuns.attach_runtime_session(run.id, runtime_session_id)
+    return {
+        'status': True,
+        'chat_id': metadata['chat_id'],
+        'agent_run_id': run.id,
+        'runtime_session_id': runtime_session_id,
+        'task_ids': [],
+    }
+
+
+def _install_agent_tool_registry(request: Request, run_id: str, registry: dict) -> None:
+    if not registry:
+        return
+
+    registries = getattr(request.app.state, 'AGENT_TOOL_REGISTRIES', None)
+    if registries is None:
+        registries = {}
+        request.app.state.AGENT_TOOL_REGISTRIES = registries
+
+    registries[run_id] = dict(registry)
+
+
+def _remove_agent_tool_registry(request: Request, run_id: str) -> None:
+    registries = getattr(request.app.state, 'AGENT_TOOL_REGISTRIES', None)
+    if isinstance(registries, dict):
+        registries.pop(run_id, None)
 
 
 @app.post('/api/chat/completions')
@@ -1623,6 +1985,10 @@ async def chat_completion(
         request.state.metadata = metadata
         form_data['metadata'] = metadata
 
+        if _is_agent_mode_product_chat(request, metadata, message_ids):
+            await _attach_default_agent_mode_terminal(request, form_data, user)
+            return await _start_agent_mode_chat(request, form_data, user, metadata, message_ids, model)
+
     except HTTPException:
         raise
     except Exception as e:
@@ -1971,6 +2337,13 @@ async def stop_tasks_by_chat_id_endpoint(request: Request, chat_id: str, user=De
         if chat is None or (chat.user_id != user.id and user.role != 'admin'):
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=ERROR_MESSAGES.NOT_FOUND)
     result = await stop_item_tasks(request.app.state.redis, chat_id)
+    cancelled_agent_run_ids = await agent_runs.cancel_agent_runs_for_chat(
+        request,
+        chat_id,
+        user=user,
+    )
+    if cancelled_agent_run_ids:
+        result['agent_run_ids'] = cancelled_agent_run_ids
     return result
 
 
@@ -2041,6 +2414,7 @@ async def get_app_config(request: Request):
         'google_drive.enable',
         'onedrive.enable',
         'memories.enable',
+        'agent.mode.enable',
         'ui.default_models',
         'ui.default_pinned_models',
         'ui.prompt_suggestions',
@@ -2112,6 +2486,7 @@ async def get_app_config(request: Request):
                     'enable_google_drive_integration': config.get('google_drive.enable'),
                     'enable_onedrive_integration': config.get('onedrive.enable'),
                     'enable_memories': config.get('memories.enable'),
+                    'enable_agent_mode': config.get('agent.mode.enable'),
                     **(
                         {
                             'enable_onedrive_personal': ENABLE_ONEDRIVE_PERSONAL,

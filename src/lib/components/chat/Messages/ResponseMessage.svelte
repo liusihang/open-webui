@@ -63,6 +63,11 @@
 	import { flyAndScale } from '$lib/utils/transitions';
 	import RegenerateMenu from './ResponseMessage/RegenerateMenu.svelte';
 	import StatusHistory from './ResponseMessage/StatusHistory.svelte';
+	import AgentRunStatusBridge from '../AgentEvents/AgentRunStatusBridge.svelte';
+	import AgentFinalAnswer from '../AgentEvents/AgentFinalAnswer.svelte';
+	import AgentTranscript from '../AgentEvents/AgentTranscript.svelte';
+	import type { AgentTranscriptModel } from '../AgentEvents/types';
+	import { markAgentRunMessageDone } from '../AgentEvents/messageState';
 	import FullHeightIframe from '$lib/components/common/FullHeightIframe.svelte';
 	import OutputEditView from './OutputEditView.svelte';
 	import { getOutputText, replaceOutputMessageText, type OutputItem } from './structuredOutput';
@@ -70,6 +75,7 @@
 	interface MessageType {
 		id: string;
 		model: string;
+		agent_run_id?: string;
 		content: string;
 		output?: OutputItem[];
 		files?: { type: string; url: string }[];
@@ -185,6 +191,9 @@
 	$: visibleResponseContent =
 		getOutputText(message.output) || removeAllDetails(message.content ?? '');
 	$: hasResponseContent = Boolean((message.content ?? '').trim() || message.output?.length);
+	let agentTranscript: AgentTranscriptModel | null = null;
+	let agentFinalAnswer = '';
+	let agentFinalAnswerDone = false;
 
 	let edit = false;
 	let editedContent = '';
@@ -692,7 +701,11 @@
 			<div>
 				<div class="chat-{message.role} w-full min-w-full markdown-prose">
 					<div>
-						{#if model?.info?.meta?.capabilities?.status_updates ?? true}
+						{#if message?.agent_run_id}
+							{#if agentTranscript}
+								<AgentTranscript model={agentTranscript} agentRunId={message.agent_run_id} />
+							{/if}
+						{:else if model?.info?.meta?.capabilities?.status_updates ?? true}
 							<StatusHistory statusHistory={message?.statusHistory} />
 						{/if}
 
@@ -823,7 +836,37 @@
 							class="w-full flex flex-col relative {edit ? 'hidden' : ''}"
 							id="response-content-container"
 						>
-							{#if !hasResponseContent && !message.done && !message.error && !hasVisibleStatus}
+							{#if message.agent_run_id}
+								<AgentRunStatusBridge
+									agentRunId={message.agent_run_id}
+									bind:statusHistory={message.statusHistory}
+									on:final={(event) => {
+										agentFinalAnswer = event.detail.content;
+										agentFinalAnswerDone = event.detail.done;
+									}}
+									on:transcript={(event) => {
+										agentTranscript = event.detail.model;
+									}}
+									on:terminal={async (event) => {
+										if (markAgentRunMessageDone(message, event.detail.runStatus)) {
+											await saveMessage(message.id, structuredClone(message));
+										}
+									}}
+								/>
+							{/if}
+
+							{#if message.agent_run_id && agentFinalAnswer && !(message.content ?? '').trim()}
+								<AgentFinalAnswer
+									agentRunId={message.agent_run_id}
+									content={agentFinalAnswer}
+									done={agentFinalAnswerDone}
+									{history}
+									messageId={message.id}
+									quiet
+								/>
+							{/if}
+
+							{#if !hasResponseContent && !message.done && !message.error && !hasVisibleStatus && !message.agent_run_id}
 								<Skeleton />
 							{:else if hasResponseContent && message.error !== true}
 								<!-- always show message contents even if there's an error -->

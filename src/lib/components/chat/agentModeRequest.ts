@@ -1,5 +1,27 @@
+type AgentModeConfig = {
+	enable_agent_mode?: boolean;
+	features?: Record<string, unknown> & {
+		enable_agent_mode?: boolean;
+	};
+};
+
 export type ReasoningDepth = 'medium' | 'deep' | 'divergent';
 export type ReasoningEffort = 'medium' | 'high' | 'xhigh';
+
+export const isAgentModeRequestConstraintEnabled = (config: AgentModeConfig | undefined): boolean =>
+	config?.features?.enable_agent_mode === true || config?.enable_agent_mode === true;
+
+export const resolveAgentModeRequestModels = (
+	selectedModels: string[],
+	config: AgentModeConfig | undefined
+): string[] => {
+	if (!isAgentModeRequestConstraintEnabled(config)) {
+		return selectedModels;
+	}
+
+	const leaderModelId = selectedModels.find((modelId) => modelId !== '');
+	return leaderModelId ? [leaderModelId] : [''];
+};
 
 export const getReasoningMaxTokens = (depth: ReasoningDepth): number => {
 	if (depth === 'deep') {
