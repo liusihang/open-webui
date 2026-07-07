@@ -62,6 +62,40 @@ def _terminal_connection():
     }
 
 
+async def _terminal_connection_async(request, terminal_server_id, user):
+    return _terminal_connection()
+
+
+@pytest.mark.asyncio
+async def test_get_terminal_connection_awaits_group_and_access_lookup(monkeypatch):
+    groups_called = False
+    access_args = None
+
+    async def _groups_for_user(user_id):
+        nonlocal groups_called
+        groups_called = True
+        assert user_id == 'user-1'
+        return [SimpleNamespace(id='group-1')]
+
+    async def _allow_access(user, connection, user_group_ids):
+        nonlocal access_args
+        access_args = (user.id, connection['id'], set(user_group_ids))
+        return True
+
+    monkeypatch.setattr(onlyoffice_mod.Groups, 'get_groups_by_member_id', _groups_for_user)
+    monkeypatch.setattr(onlyoffice_mod, 'has_connection_access', _allow_access)
+
+    connection = await onlyoffice_mod._get_terminal_connection(
+        _fake_request(terminal_connections=[_terminal_connection()]),
+        'terminals',
+        _fake_user(),
+    )
+
+    assert connection['id'] == 'terminals'
+    assert groups_called is True
+    assert access_args == ('user-1', 'terminals', {'group-1'})
+
+
 def _make_context_token(*, expires_delta=timedelta(hours=2)):
     return onlyoffice_mod.create_token(
         {
@@ -128,7 +162,7 @@ async def test_create_onlyoffice_terminal_edit_session_returns_editable_config(m
     monkeypatch.setattr(
         onlyoffice_mod,
         '_get_terminal_connection',
-        lambda request, terminal_server_id, user: _terminal_connection(),
+        _terminal_connection_async,
     )
 
     response = await onlyoffice_mod.create_onlyoffice_session(
@@ -156,7 +190,7 @@ async def test_create_onlyoffice_terminal_view_session_does_not_force_save(monke
     monkeypatch.setattr(
         onlyoffice_mod,
         '_get_terminal_connection',
-        lambda request, terminal_server_id, user: _terminal_connection(),
+        _terminal_connection_async,
     )
 
     response = await onlyoffice_mod.create_onlyoffice_session(
@@ -212,7 +246,7 @@ async def test_create_onlyoffice_terminal_view_session_supports_common_formats(
     monkeypatch.setattr(
         onlyoffice_mod,
         '_get_terminal_connection',
-        lambda request, terminal_server_id, user: _terminal_connection(),
+        _terminal_connection_async,
     )
 
     response = await onlyoffice_mod.create_onlyoffice_session(
@@ -236,7 +270,7 @@ async def test_terminal_edit_session_embeds_callback_context(monkeypatch):
     monkeypatch.setattr(
         onlyoffice_mod,
         '_get_terminal_connection',
-        lambda request, terminal_server_id, user: _terminal_connection(),
+        _terminal_connection_async,
     )
 
     response = await onlyoffice_mod.create_onlyoffice_session(
@@ -270,7 +304,7 @@ async def test_terminal_edit_session_uses_separate_callback_ttl(monkeypatch):
     monkeypatch.setattr(
         onlyoffice_mod,
         '_get_terminal_connection',
-        lambda request, terminal_server_id, user: _terminal_connection(),
+        _terminal_connection_async,
     )
 
     response = await onlyoffice_mod.create_onlyoffice_session(

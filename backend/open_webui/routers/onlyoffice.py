@@ -366,7 +366,7 @@ def _expand_callback_payload_without_jwt_secret(payload: dict[str, Any]) -> dict
     return expanded
 
 
-def _get_terminal_connection(request: Request, terminal_server_id: str, user):
+async def _get_terminal_connection(request: Request, terminal_server_id: str, user):
     connections = getattr(request.app.state.config, "TERMINAL_SERVER_CONNECTIONS", None) or []
     connection = next((c for c in connections if c.get("id") == terminal_server_id), None)
     if connection is None or not connection.get("enabled", True):
@@ -375,8 +375,8 @@ def _get_terminal_connection(request: Request, terminal_server_id: str, user):
             detail="Terminal server not found.",
         )
 
-    user_group_ids = {group.id for group in Groups.get_groups_by_member_id(user.id)}
-    if not has_connection_access(user, connection, user_group_ids):
+    user_group_ids = {group.id for group in await Groups.get_groups_by_member_id(user.id)}
+    if not await has_connection_access(user, connection, user_group_ids):
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail=ERROR_MESSAGES.ACCESS_PROHIBITED,
@@ -715,7 +715,7 @@ async def create_onlyoffice_session(
             )
 
         terminal_file_path = _normalize_terminal_file_path(form_data.terminal_file_path)
-        connection = _get_terminal_connection(request, form_data.terminal_server_id, user)
+        connection = await _get_terminal_connection(request, form_data.terminal_server_id, user)
         file_ext = Path(terminal_file_path).suffix.lower().lstrip(".")
         if file_ext not in SUPPORTED_OFFICE_FILE_TYPES:
             raise HTTPException(
