@@ -1,13 +1,19 @@
 <script lang="ts">
+	import { getContext } from 'svelte';
+	import type { Writable } from 'svelte/store';
+	import type { i18n as i18nType } from 'i18next';
+
 	import type { AgentTranscriptToolPart } from './types';
 	import AgentDetailSection from './AgentDetailSection.svelte';
 
 	export let part: AgentTranscriptToolPart;
 
+	const i18n = getContext<Writable<i18nType>>('i18n');
+
 	const statusLabel = ($status: AgentTranscriptToolPart['status']): string => {
-		if ($status === 'error') return 'failed';
-		if ($status === 'done') return 'done';
-		return 'running';
+		if ($status === 'error') return $i18n.t('Failed');
+		if ($status === 'done') return $i18n.t('Done');
+		return $i18n.t('Running');
 	};
 </script>
 
@@ -26,12 +32,12 @@
 		{:else}
 			<span class="agent-tool-icon done" aria-hidden="true">✓</span>
 		{/if}
-		<span class="agent-tool-name">{part.toolName ?? 'tool'}</span>
+		<span class="agent-tool-name">{part.toolName ?? $i18n.t('tool')}</span>
 		<span class="agent-tool-status">{statusLabel(part.status)}</span>
 	</div>
 	<div class="agent-tool-summary">{part.summary}</div>
 	<AgentDetailSection
-		label="Debug details"
+		label={$i18n.t('Details')}
 		payload={part.details}
 		metadata={part.metadata}
 		open={part.defaultExpanded}
@@ -64,7 +70,6 @@
 	.agent-tool-status {
 		color: var(--gray-500, #6b7280);
 		font-size: 0.65rem;
-		text-transform: lowercase;
 	}
 	.agent-tool-summary {
 		font-size: 0.72rem;

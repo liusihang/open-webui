@@ -1,4 +1,5 @@
 import type {
+	AgentConnectionState,
 	AgentRunEventMetadata,
 	AgentRunEventPayload,
 	AgentRunEventState,
@@ -36,11 +37,15 @@ const TERMINAL_RUN_STATUSES: ReadonlySet<AgentRunState> = new Set([
  *  - Raw payload is taken from the already-sanitized `items[].details`; this
  *    module must not re-ingest unsanitized payload.
  */
-export const buildAgentTranscriptModel = (state: AgentRunEventState): AgentTranscriptModel => {
+export const buildAgentTranscriptModel = (
+	state: AgentRunEventState,
+	connectionState: AgentConnectionState = 'connected'
+): AgentTranscriptModel => {
 	const parts = buildParts(state);
 
 	return {
 		runStatus: state.runStatus,
+		connectionState,
 		isRunning:
 			state.runStatus === 'running' ||
 			state.runStatus === 'waiting_approval' ||

@@ -9,6 +9,8 @@ export type AgentRunState =
 	| 'cancelled'
 	| 'budget_exceeded';
 
+export type AgentConnectionState = 'connected' | 'reconnecting' | 'disconnected';
+
 export const AGENT_RUN_EVENT_TYPES = [
 	'run.queued',
 	'run.running',
@@ -239,6 +241,7 @@ export type AgentTranscriptSummary = {
 
 export type AgentTranscriptModel = {
 	runStatus: AgentRunState;
+	connectionState: AgentConnectionState;
 	isRunning: boolean;
 	isTerminal: boolean;
 	parts: AgentTranscriptModelPart[];

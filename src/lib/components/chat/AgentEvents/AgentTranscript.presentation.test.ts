@@ -45,12 +45,12 @@ describe('AgentTranscript presentation guardrails', () => {
 		expect(source).not.toMatch(/event_type === 'text\.delta'[\s\S]{0,400}finalText =/);
 	});
 
-	it('keeps tool debug details behind a disclosure in the transcript UI', () => {
+	it('keeps tool details behind a disclosure in the transcript UI', () => {
 		const tool = readSource('./ToolPart.svelte');
 		const detail = readSource('./AgentDetailSection.svelte');
 
 		expect(tool).toContain('AgentDetailSection');
-		expect(tool).toContain('Debug details');
+		expect(tool).toContain("$i18n.t('Details')");
 		expect(detail).toContain('<details');
 		// Debug payload must be formatted as <pre> blocks inside the disclosure,
 		// not inlined into the default view

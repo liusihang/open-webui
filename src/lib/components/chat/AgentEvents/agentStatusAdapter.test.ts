@@ -8,7 +8,7 @@ const thinkingEntry = (overrides: Partial<AgentStatusEntry> = {}): AgentStatusEn
 	id: 'thinking:run',
 	done: false,
 	action: 'agent_thinking',
-	description: '思考中...',
+	description: 'Thinking',
 	kind: 'thinking',
 	seq: 1,
 	created_at: 1_718_000_000,

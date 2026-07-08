@@ -46,8 +46,8 @@
 </script>
 
 {#if entries().length > 0 || metadata.length > 0}
-	<details class="agent-detail-section" {open}>
-		<summary class="agent-detail-summary" on:click|preventDefault={() => (open = !open)}>
+	<details class="agent-detail-section" bind:open>
+		<summary class="agent-detail-summary">
 			<span class="agent-detail-chevron" aria-hidden="true">{open ? '▾' : '▸'}</span>
 			<span class="agent-detail-label">{label}</span>
 		</summary>

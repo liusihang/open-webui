@@ -1,4 +1,8 @@
 <script lang="ts">
+	import { getContext } from 'svelte';
+	import type { Writable } from 'svelte/store';
+	import type { i18n as i18nType } from 'i18next';
+
 	import type { AgentTranscriptModelPart } from './types';
 	import AssistantNotePart from './AssistantNotePart.svelte';
 	import ActionSummaryPart from './ActionSummaryPart.svelte';
@@ -11,6 +15,14 @@
 
 	export let part: AgentTranscriptModelPart;
 	export let agentRunId: string | null = null;
+
+	const i18n = getContext<Writable<i18nType>>('i18n');
+
+	const subagentStatusText = (status: 'running' | 'done' | 'error'): string => {
+		if (status === 'error') return $i18n.t('Failed');
+		if (status === 'done') return $i18n.t('Done');
+		return $i18n.t('Running');
+	};
 </script>
 
 <div class="transcript-part" data-kind={part.kind}>
@@ -39,7 +51,7 @@
 					<span class="transcript-subagent-icon done" aria-hidden="true">✓</span>
 				{/if}
 				<span class="transcript-subagent-name">{part.participantName ?? part.label}</span>
-				<span class="transcript-subagent-status">{part.status}</span>
+				<span class="transcript-subagent-status">{subagentStatusText(part.status)}</span>
 			</div>
 			{#if part.summary}
 				<div class="transcript-subagent-summary">{part.summary}</div>
@@ -48,7 +60,7 @@
 				<div class="transcript-subagent-result">{part.resultSummary}</div>
 			{/if}
 			<AgentDetailSection
-				label="Debug details"
+				label={$i18n.t('Details')}
 				payload={part.details}
 				open={part.defaultExpanded}
 			/>
@@ -101,7 +113,6 @@
 	.transcript-subagent-status {
 		color: var(--gray-500, #6b7280);
 		font-size: 0.65rem;
-		text-transform: lowercase;
 	}
 	.transcript-subagent-spinner {
 		width: 0.55rem;

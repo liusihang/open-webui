@@ -862,7 +862,6 @@
 									done={agentFinalAnswerDone}
 									{history}
 									messageId={message.id}
-									quiet
 								/>
 							{/if}
 

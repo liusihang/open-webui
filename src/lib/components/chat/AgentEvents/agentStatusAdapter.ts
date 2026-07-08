@@ -46,7 +46,7 @@ export type AgentStatusEntry = {
 };
 
 const THINKING_ID = 'thinking:run';
-const THINKING_DESCRIPTION = '思考中...';
+const THINKING_DESCRIPTION = 'Thinking';
 
 export const foldAgentEventIntoStatusHistory = (
 	history: AgentStatusEntry[],
@@ -354,7 +354,7 @@ const upsertSubagent = (
 	const payload = event.payload;
 	const participantId = event.participant_id ?? firstString(payload.participant_id);
 	const id = participantId ? `subagent:${participantId}` : `subagent:seq-${event.seq}`;
-	const name = firstString(payload.participant_name, payload.name) ?? event.summary ?? '助手';
+	const name = firstString(payload.participant_name, payload.name) ?? event.summary ?? 'Assistant';
 	const existing = history.find((entry) => entry.id === id);
 	const detail: AgentStatusDetail | undefined = done
 		? {
@@ -386,7 +386,7 @@ const upsertSubagentError = (
 	const id = participantId ? `subagent:${participantId}` : `subagent:seq-${event.seq}`;
 	const existing = history.find((entry) => entry.id === id);
 	const name =
-		existing?.description ?? firstString(payload.participant_name, payload.name) ?? '助手';
+		existing?.description ?? firstString(payload.participant_name, payload.name) ?? 'Assistant';
 	const error = extractError(payload);
 
 	return upsert(history, id, {
@@ -398,13 +398,13 @@ const upsertSubagentError = (
 		created_at: event.created_at,
 		detail: stripEmptyDetail({
 			...(existing?.detail ?? {}),
-			error: error ?? { message: firstString(payload.error, payload.message) ?? '子助手失败' }
+			error: error ?? { message: firstString(payload.error, payload.message) ?? 'Subagent failed' }
 		})
 	});
 };
 
 const appendStep = (history: AgentStatusEntry[], event: AgentRunEvent): AgentStatusEntry[] => {
-	const description = event.summary?.trim() || '执行步骤';
+	const description = event.summary?.trim() || 'Step';
 	const entry: AgentStatusEntry = {
 		id: `step:${event.seq}`,
 		done: true,

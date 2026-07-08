@@ -1,4 +1,7 @@
 <script lang="ts">
+	import { getContext } from 'svelte';
+	import type { Writable } from 'svelte/store';
+	import type { i18n as i18nType } from 'i18next';
 	import { toast } from 'svelte-sonner';
 
 	import { submitAgentRunUserInput } from '$lib/apis/agentRuns';
@@ -7,6 +10,8 @@
 
 	export let part: AgentTranscriptUserInputPart;
 	export let agentRunId: string | null = null;
+
+	const i18n = getContext<Writable<i18nType>>('i18n');
 
 	type UserInputField = {
 		name: string;
@@ -19,6 +24,7 @@
 
 	let values: Record<string, unknown> = {};
 	let submitting = false;
+	let submitted = false;
 
 	$: fields = schemaFields(part.requestedSchema);
 	$: terminalText = terminalStatusText(part.status);
@@ -33,11 +39,13 @@
 				status,
 				content: status === 'accepted' ? collectContent(fields, values) : undefined
 			});
+			submitted = true;
 		} catch (error) {
 			toast.error(`${error}`);
 			submitting = false;
 			return;
 		}
+		submitting = false;
 	};
 
 	const collectContent = (inputFields: UserInputField[], inputValues: Record<string, unknown>) => {
@@ -92,11 +100,11 @@
 	};
 
 	const terminalStatusText = (status: AgentTranscriptUserInputPart['status']) => {
-		if (status === 'accepted') return 'submitted';
-		if (status === 'declined') return 'declined';
-		if (status === 'cancelled') return 'cancelled';
-		if (status === 'timeout') return 'timed out';
-		return 'waiting';
+		if (status === 'accepted') return $i18n.t('submitted');
+		if (status === 'declined') return $i18n.t('declined');
+		if (status === 'cancelled') return $i18n.t('cancelled');
+		if (status === 'timeout') return $i18n.t('timed out');
+		return $i18n.t('waiting');
 	};
 
 	const stringValue = (value: unknown): string | null =>
@@ -168,14 +176,20 @@
 				</label>
 			{/each}
 			<div class="agent-user-input-actions">
-				<button type="submit" disabled={submitting}>Submit</button>
-				<button type="button" disabled={submitting} on:click={() => void submit('declined')}>
-					Decline
-				</button>
-				{#if part.allowCancel}
-					<button type="button" disabled={submitting} on:click={() => void submit('cancelled')}>
-						Cancel
+				{#if submitted}
+					<span class="agent-user-input-submitted" role="status">
+						{$i18n.t('Submitted')}. {$i18n.t('Waiting for agent\u2026')}
+					</span>
+				{:else}
+					<button type="submit" disabled={submitting}>{$i18n.t('Submit')}</button>
+					<button type="button" disabled={submitting} on:click={() => void submit('declined')}>
+						{$i18n.t('Decline')}
 					</button>
+					{#if part.allowCancel}
+						<button type="button" disabled={submitting} on:click={() => void submit('cancelled')}>
+							{$i18n.t('Cancel')}
+						</button>
+					{/if}
 				{/if}
 			</div>
 		</form>
@@ -276,6 +290,10 @@
 	}
 	.agent-user-input-actions button:disabled {
 		opacity: 0.55;
+	}
+	.agent-user-input-submitted {
+		font-size: 0.68rem;
+		color: var(--gray-500, #6b7280);
 	}
 	.agent-user-input-content {
 		margin: 0;
