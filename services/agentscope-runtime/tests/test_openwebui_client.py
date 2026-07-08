@@ -9,6 +9,34 @@ from pydantic import ValidationError
 from agentscope_runtime.openwebui_client import OpenWebUIClient
 
 
+def test_parse_openai_chunk_preserves_private_reasoning_delta() -> None:
+    from agentscope_runtime.openwebui_client import _parse_openai_chunk
+
+    event = _parse_openai_chunk(
+        {
+            "choices": [
+                {
+                    "delta": {
+                        "reasoning_content": "先检查工具状态。",
+                        "thinking": "ignored because reasoning_content wins",
+                        "content": "公开回答",
+                        "tool_calls": [],
+                    }
+                }
+            ]
+        }
+    )
+
+    assert event == {
+        "type": "chunk",
+        "delta": {
+            "content": "公开回答",
+            "tool_calls": [],
+            "reasoning_content": "先检查工具状态。",
+        },
+    }
+
+
 @pytest.mark.asyncio
 async def test_call_model_uses_dedicated_model_call_timeout(monkeypatch) -> None:
     captured_timeouts = []

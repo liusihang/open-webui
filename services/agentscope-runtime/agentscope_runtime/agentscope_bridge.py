@@ -32,6 +32,11 @@ secrets, or raw tool server credentials inside this AgentScope runtime."""
 
 MODEL_CALL_RETRY_ATTEMPTS = 3
 MODEL_CALL_RETRY_DELAY_SECONDS = 0.05
+PRIVATE_REASONING_REPLAY_MAX_CHARS = 12000
+PRIVATE_REASONING_REPLAY_BLOCKED_MODEL_MARKERS = (
+    "gpt",
+    "openai",
+)
 
 
 class OpenWebUIToolApprovalRequired(BaseException):
@@ -111,6 +116,21 @@ class OpenWebUIBridgeCallbacks(Protocol):
         tool_choice: Any | None = None,
         metadata: dict[str, Any],
     ) -> dict[str, Any]: ...
+
+    def call_model_stream(
+        self,
+        *,
+        run_id: str,
+        idempotency_key: str,
+        participant_id: str,
+        model_call_id: str,
+        model: str,
+        messages: list[dict[str, Any]],
+        params: dict[str, Any],
+        tools: list[dict[str, Any]] | None = None,
+        tool_choice: Any | None = None,
+        metadata: dict[str, Any],
+    ) -> AsyncGenerator[dict[str, Any], None]: ...
 
     async def call_tool(
         self,
@@ -193,6 +213,7 @@ class OpenWebUIAgentScopeModel(ChatModelBase):
         self.default_model_params = dict(default_model_params or {})
         self._next_model_call_index = 1
         self._formatter = OpenAIChatFormatter()
+        self._private_reasoning_parts: list[str] = []
 
     async def _call_api(
         self,
@@ -239,11 +260,16 @@ class OpenWebUIAgentScopeModel(ChatModelBase):
         params = _merge_model_params(self.default_model_params, dict(kwargs))
         idempotency_key = f"model:{self.participant_id}:{model_call_id}:1"
 
-        formatted_messages = await self._format_messages(messages)
+        formatted_messages = _inject_private_reasoning_replay(
+            await self._format_messages(messages),
+            model_name=model_name,
+            reasoning_parts=self._private_reasoning_parts,
+        )
 
         block_id = uuid.uuid4().hex
         text_delta_index = 0
         accumulated_text_parts: list[str] = []
+        accumulated_reasoning_parts: list[str] = []
         accumulated_tool_calls: list[dict[str, Any]] = []
 
         for attempt in range(1, MODEL_CALL_RETRY_ATTEMPTS + 1):
@@ -291,6 +317,9 @@ class OpenWebUIAgentScopeModel(ChatModelBase):
             event_type = event.get("type")
             if event_type == "chunk":
                 delta = event.get("delta") or {}
+                reasoning_content = delta.get("reasoning_content")
+                if isinstance(reasoning_content, str) and reasoning_content:
+                    accumulated_reasoning_parts.append(reasoning_content)
                 content = delta.get("content")
                 if isinstance(content, str) and content:
                     accumulated_text_parts.append(content)
@@ -315,12 +344,19 @@ class OpenWebUIAgentScopeModel(ChatModelBase):
                 full_text = _extract_model_text(response)
                 if full_text and not accumulated_text_parts:
                     accumulated_text_parts.append(full_text)
+                full_reasoning = _extract_model_reasoning_text(response)
+                if full_reasoning and not accumulated_reasoning_parts:
+                    accumulated_reasoning_parts.append(full_reasoning)
                 for tool_call in _extract_tool_calls(response):
                     accumulated_tool_calls.append(tool_call)
             elif event_type == "stream_end":
                 break
 
         full_text = "".join(accumulated_text_parts)
+        full_reasoning = "".join(accumulated_reasoning_parts)
+        if full_reasoning and _raw_private_reasoning_replay_enabled(model_name):
+            self._private_reasoning_parts.append(full_reasoning)
+            self._private_reasoning_parts = _trim_private_reasoning_parts(self._private_reasoning_parts)
         if full_text and self._on_final_text is not None:
             self._on_final_text(self.participant_id, full_text)
         blocks: list[TextBlock | ToolCallBlock] = []
@@ -697,7 +733,77 @@ def _extract_model_text(response: dict[str, Any]) -> str:
                     if isinstance(delta_content, str):
                         return delta_content
     content = response.get("content")
-    return content if isinstance(content, str) else str(payload)
+    if isinstance(content, str):
+        return content
+    return "" if isinstance(payload, dict) else str(payload)
+
+
+def _extract_model_reasoning_text(response: dict[str, Any]) -> str:
+    payload = response.get("response", response)
+    if isinstance(payload, dict):
+        for key in ("reasoning_content", "reasoning", "thinking"):
+            value = payload.get(key)
+            if isinstance(value, str):
+                return value
+        choices = payload.get("choices")
+        if isinstance(choices, list) and choices:
+            choice = choices[0]
+            if isinstance(choice, dict):
+                for container_key in ("message", "delta"):
+                    container = choice.get(container_key)
+                    if not isinstance(container, dict):
+                        continue
+                    for key in ("reasoning_content", "reasoning", "thinking"):
+                        value = container.get(key)
+                        if isinstance(value, str):
+                            return value
+    return ""
+
+
+def _raw_private_reasoning_replay_enabled(model_name: str | None) -> bool:
+    lower = str(model_name or "").lower()
+    return not any(marker in lower for marker in PRIVATE_REASONING_REPLAY_BLOCKED_MODEL_MARKERS)
+
+
+def _inject_private_reasoning_replay(
+    messages: list[dict[str, Any]],
+    *,
+    model_name: str | None,
+    reasoning_parts: list[str],
+) -> list[dict[str, Any]]:
+    if not reasoning_parts or not _raw_private_reasoning_replay_enabled(model_name):
+        return messages
+    reasoning_text = "\n".join(part for part in reasoning_parts if part)
+    if not reasoning_text:
+        return messages
+    replay_message = {
+        "role": "assistant",
+        "content": "",
+        "reasoning_content": reasoning_text[-PRIVATE_REASONING_REPLAY_MAX_CHARS:],
+    }
+    insert_at = len(messages)
+    for index in range(len(messages) - 1, -1, -1):
+        if str(messages[index].get("role") or "").lower() == "user":
+            insert_at = index
+            break
+    return [*messages[:insert_at], replay_message, *messages[insert_at:]]
+
+
+def _trim_private_reasoning_parts(parts: list[str]) -> list[str]:
+    kept: list[str] = []
+    total = 0
+    for part in reversed(parts):
+        if not part:
+            continue
+        remaining = PRIVATE_REASONING_REPLAY_MAX_CHARS - total
+        if remaining <= 0:
+            break
+        if len(part) > remaining:
+            kept.append(part[-remaining:])
+            break
+        kept.append(part)
+        total += len(part)
+    return list(reversed(kept))
 
 
 def _merge_model_params(defaults: dict[str, Any], overrides: dict[str, Any]) -> dict[str, Any]:

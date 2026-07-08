@@ -401,6 +401,135 @@ async def test_model_bridge_preserves_openwebui_tool_calls_as_agentscope_blocks(
 
 
 @pytest.mark.asyncio
+async def test_model_bridge_replays_private_reasoning_content_to_next_model_call() -> None:
+    from agentscope_runtime.agentscope_bridge import OpenWebUIAgentScopeModel
+
+    class ReasoningCallbacks(RecordingBridgeCallbacks):
+        async def call_model_stream(self, **kwargs: object):
+            self.model_calls.append(kwargs)
+            if len(self.model_calls) == 1:
+                yield {
+                    "type": "chunk",
+                    "delta": {
+                        "reasoning_content": "先确认构建产物，再继续。",
+                        "content": None,
+                        "tool_calls": None,
+                    },
+                }
+                yield {
+                    "type": "chunk",
+                    "delta": {
+                        "content": "公开回答。",
+                        "tool_calls": None,
+                    },
+                }
+            else:
+                yield {
+                    "type": "chunk",
+                    "delta": {
+                        "content": "继续回答。",
+                        "tool_calls": None,
+                    },
+                }
+            yield {"type": "stream_end"}
+
+    callbacks = ReasoningCallbacks()
+    model = OpenWebUIAgentScopeModel(
+        run_id="run-private-reasoning",
+        runtime_session_id="rt-run-private-reasoning",
+        participant_id="leader",
+        model_id="qwen3-reasoner",
+        callback_client=callbacks,
+    )
+
+    async for _ in await model([{"role": "user", "content": "第一步"}]):
+        pass
+    async for _ in await model([{"role": "user", "content": "第二步"}]):
+        pass
+
+    assert callbacks.model_calls[0]["messages"] == [{"role": "user", "content": "第一步"}]
+    assert callbacks.model_calls[1]["messages"] == [
+        {
+            "role": "assistant",
+            "content": "",
+            "reasoning_content": "先确认构建产物，再继续。",
+        },
+        {"role": "user", "content": "第二步"},
+    ]
+    assert callbacks.text_deltas == []
+
+
+@pytest.mark.asyncio
+async def test_model_bridge_does_not_raw_replay_private_reasoning_for_gpt_models() -> None:
+    from agentscope_runtime.agentscope_bridge import OpenWebUIAgentScopeModel
+
+    class ReasoningCallbacks(RecordingBridgeCallbacks):
+        async def call_model_stream(self, **kwargs: object):
+            self.model_calls.append(kwargs)
+            yield {
+                "type": "chunk",
+                "delta": {
+                    "reasoning_content": "private gpt reasoning",
+                    "content": "answer",
+                    "tool_calls": None,
+                },
+            }
+            yield {"type": "stream_end"}
+
+    callbacks = ReasoningCallbacks()
+    model = OpenWebUIAgentScopeModel(
+        run_id="run-gpt-private-reasoning",
+        runtime_session_id="rt-run-gpt-private-reasoning",
+        participant_id="leader",
+        model_id="gpt-5.4",
+        callback_client=callbacks,
+    )
+
+    async for _ in await model([{"role": "user", "content": "第一步"}]):
+        pass
+    async for _ in await model([{"role": "user", "content": "第二步"}]):
+        pass
+
+    assert callbacks.model_calls[1]["messages"] == [{"role": "user", "content": "第二步"}]
+    assert callbacks.text_deltas == []
+
+
+@pytest.mark.asyncio
+async def test_model_bridge_does_not_turn_reasoning_only_done_payload_into_public_text() -> None:
+    from agentscope_runtime.agentscope_bridge import OpenWebUIAgentScopeModel
+
+    class ReasoningOnlyCallbacks(RecordingBridgeCallbacks):
+        async def call_model_stream(self, **kwargs: object):
+            self.model_calls.append(kwargs)
+            yield {
+                "type": "done",
+                "payload": {
+                    "response": {
+                        "reasoning_content": "private reasoning only",
+                    }
+                },
+            }
+            yield {"type": "stream_end"}
+
+    callbacks = ReasoningOnlyCallbacks()
+    model = OpenWebUIAgentScopeModel(
+        run_id="run-reasoning-only",
+        runtime_session_id="rt-run-reasoning-only",
+        participant_id="leader",
+        model_id="qwen3-reasoner",
+        callback_client=callbacks,
+    )
+
+    response = None
+    async for chunk in await model([{"role": "user", "content": "第一步"}]):
+        response = chunk
+
+    assert response is not None
+    assert response.content[0].text == ""
+    assert callbacks.text_deltas == []
+
+
+@pytest.mark.asyncio
 async def test_model_bridge_passes_tools_and_tool_choice_as_top_level_callback_fields() -> None:
     from agentscope_runtime.agentscope_bridge import OpenWebUIAgentScopeModel
 

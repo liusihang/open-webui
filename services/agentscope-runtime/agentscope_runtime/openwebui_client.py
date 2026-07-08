@@ -473,6 +473,13 @@ def _parse_openai_chunk(payload: Any) -> dict[str, Any]:
                 content = choice_delta.get("content")
                 if isinstance(content, str):
                     delta["content"] = content
+                reasoning_content = (
+                    choice_delta.get("reasoning_content")
+                    or choice_delta.get("reasoning")
+                    or choice_delta.get("thinking")
+                )
+                if isinstance(reasoning_content, str) and reasoning_content:
+                    delta["reasoning_content"] = reasoning_content
                 tool_calls = choice_delta.get("tool_calls")
                 if isinstance(tool_calls, list):
                     delta["tool_calls"] = tool_calls
