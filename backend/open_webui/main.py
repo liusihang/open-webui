@@ -1301,6 +1301,141 @@ def _agent_runtime_reasoning_params(value) -> dict:
     return reasoning
 
 
+_AGENT_CONTEXT_REPLAY_MAX_RUNS = 3
+_AGENT_CONTEXT_REPLAY_MAX_CHARS = 12000
+_AGENT_CONTEXT_REPLAY_TEXT_EVENT_TYPES = {
+    AgentEventType.TEXT_DELTA.value,
+    AgentEventType.FINAL_DELTA.value,
+}
+_AGENT_CONTEXT_REPLAY_TEXT_BLOCK_KINDS = {
+    'assistant_note',
+    'action_summary',
+}
+_AGENT_CONTEXT_REPLAY_TERMINAL_STATES = {
+    'completed',
+    'failed',
+    'cancelled',
+    'budget_exceeded',
+}
+
+
+def _agent_context_replay_anchor_ids(form_data: dict) -> set[str]:
+    anchor_ids = set()
+    for key in ('parent_id', 'parentId'):
+        value = form_data.get(key)
+        if isinstance(value, str) and value:
+            anchor_ids.add(value)
+
+    for message in form_data.get('messages') or []:
+        if not isinstance(message, dict):
+            continue
+        if str(message.get('role') or '').lower() != 'assistant':
+            continue
+        for key in ('id', 'message_id'):
+            value = message.get(key)
+            if isinstance(value, str) and value:
+                anchor_ids.add(value)
+    return anchor_ids
+
+
+async def _agent_context_replay_messages(
+    *,
+    chat_id: str | None,
+    user_id: str,
+    exclude_run_id: str,
+    anchor_message_ids: set[str],
+) -> list[dict]:
+    if not chat_id or chat_id.startswith(('local:', 'channel:')):
+        return []
+
+    try:
+        runs = await AgentRuns.list_runs_by_chat(chat_id, user_id)
+    except Exception as exc:
+        log.warning('Agent Mode could not load prior run context for chat=%s: %s', chat_id, exc)
+        return []
+
+    selected = []
+    for run in runs:
+        if run.id == exclude_run_id or run.state not in _AGENT_CONTEXT_REPLAY_TERMINAL_STATES:
+            continue
+        if anchor_message_ids and run.assistant_message_id not in anchor_message_ids:
+            continue
+        selected.append(run)
+        if len(selected) >= _AGENT_CONTEXT_REPLAY_MAX_RUNS:
+            break
+
+    messages = []
+    for run in reversed(selected):
+        text = await _agent_context_replay_text(run)
+        if text:
+            messages.append(
+                {
+                    'role': 'assistant',
+                    'name': 'agent_context',
+                    'content': text,
+                    'metadata': {
+                        'agent_context_replay': True,
+                        'agent_run_id': run.id,
+                        'assistant_message_id': run.assistant_message_id,
+                    },
+                }
+            )
+    return messages
+
+
+async def _agent_context_replay_text(run) -> str:
+    try:
+        events = await AgentRuns.list_events(run.id)
+    except Exception as exc:
+        log.warning('Agent Mode could not load prior run events for run=%s: %s', run.id, exc)
+        return ''
+
+    lines = [
+        '[Previous Agent Mode assistant context]',
+        f'run:{run.assistant_message_id or run.id} state:{run.state}',
+    ]
+    for event in events:
+        event_type = str(getattr(event, 'event_type', '') or '')
+        if event_type not in _AGENT_CONTEXT_REPLAY_TEXT_EVENT_TYPES:
+            continue
+        payload = getattr(event, 'payload', None) or {}
+        if not isinstance(payload, dict):
+            continue
+        phase = str(getattr(event, 'phase', '') or payload.get('phase') or 'unknown')
+        if event_type == AgentEventType.TEXT_DELTA.value:
+            block_kind = str(payload.get('block_kind') or '')
+            if block_kind not in _AGENT_CONTEXT_REPLAY_TEXT_BLOCK_KINDS:
+                continue
+            delta = payload.get('delta')
+            if isinstance(delta, str) and delta:
+                lines.append(f'phase:{phase} {block_kind}: {_agent_context_replay_clean_text(delta)}')
+        elif event_type == AgentEventType.FINAL_DELTA.value:
+            delta = payload.get('delta')
+            if isinstance(delta, str) and delta:
+                lines.append(f'phase:{phase} final: {_agent_context_replay_clean_text(delta)}')
+
+    text = '\n'.join(line for line in lines if line.strip())
+    return text[:_AGENT_CONTEXT_REPLAY_MAX_CHARS]
+
+
+def _agent_context_replay_clean_text(value: str) -> str:
+    return ' '.join(value.split())
+
+
+def _inject_agent_context_replay_messages(messages: list, replay_messages: list[dict]) -> list:
+    if not replay_messages:
+        return messages
+
+    merged = [dict(message) if isinstance(message, dict) else message for message in messages]
+    insert_at = len(merged)
+    for index in range(len(merged) - 1, -1, -1):
+        message = merged[index]
+        if isinstance(message, dict) and str(message.get('role') or '').lower() == 'user':
+            insert_at = index
+            break
+    return [*merged[:insert_at], *replay_messages, *merged[insert_at:]]
+
+
 def _agent_runtime_payload(
     *,
     run,
@@ -1311,6 +1446,7 @@ def _agent_runtime_payload(
     budget: dict,
     tool_access_envelope: dict,
     model_params: dict | None = None,
+    context_replay_messages: list[dict] | None = None,
 ) -> dict:
     model_meta = {}
     model = metadata.get('model')
@@ -1320,6 +1456,7 @@ def _agent_runtime_payload(
     messages = form_data.get('messages')
     if not isinstance(messages, list):
         messages = [metadata.get('user_message')] if metadata.get('user_message') else []
+    messages = _inject_agent_context_replay_messages(messages, context_replay_messages or [])
 
     runtime_metadata = {
         'session_id': metadata.get('session_id'),
@@ -1456,6 +1593,12 @@ async def _start_agent_mode_chat(
         service_token=getattr(request.app.state.config, 'AGENT_RUNTIME_SERVICE_TOKEN', ''),
         timeout=getattr(request.app.state.config, 'AGENT_RUN_DEFAULT_TIMEOUT_SECONDS', None),
     )
+    context_replay_messages = await _agent_context_replay_messages(
+        chat_id=metadata.get('chat_id'),
+        user_id=user.id,
+        exclude_run_id=run.id,
+        anchor_message_ids=_agent_context_replay_anchor_ids(form_data),
+    )
     payload = _agent_runtime_payload(
         run=run,
         form_data=form_data,
@@ -1465,6 +1608,7 @@ async def _start_agent_mode_chat(
         budget=budget,
         tool_access_envelope=tool_access_envelope,
         model_params=requested_model_params,
+        context_replay_messages=context_replay_messages,
     )
 
     try:

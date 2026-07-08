@@ -268,6 +268,115 @@ async def test_agent_mode_runtime_payload_preserves_chat_completion_context(
 
 
 @pytest.mark.asyncio
+async def test_agent_mode_runtime_payload_replays_previous_public_agent_items(
+    agent_run_db,
+    chat_entry_patches,
+):
+    previous_run = await AgentRuns.create_run(
+        user_id='user-1',
+        chat_id='chat-1',
+        user_message_id='user-prev',
+        assistant_message_id='assistant-prev',
+        leader_model_id='model-a',
+    )
+    await AgentRuns.transition_state(
+        previous_run.id,
+        from_states=['queued'],
+        to_state='running',
+        reason='test previous run started',
+    )
+    await AgentRuns.append_event(
+        previous_run.id,
+        event_type='text.delta',
+        participant_id='leader',
+        phase='running',
+        payload={
+            'block_id': 'note-1',
+            'block_kind': 'assistant_note',
+            'delta_index': 0,
+            'delta': 'I inspected the migration plan.',
+            'raw_reasoning': 'SECRET_PRIVATE_THOUGHT',
+        },
+    )
+    await AgentRuns.append_event(
+        previous_run.id,
+        event_type='text.delta',
+        participant_id='leader',
+        phase='running',
+        payload={
+            'block_id': 'summary-1',
+            'block_kind': 'action_summary',
+            'delta_index': 0,
+            'delta': 'The runtime image was built successfully.',
+            'reasoning': {'hidden': 'SECRET_REASONING_OBJECT'},
+        },
+    )
+    await AgentRuns.transition_state(
+        previous_run.id,
+        from_states=['running'],
+        to_state='finalizing',
+        reason='test previous run finalizing',
+    )
+    await AgentRuns.append_event(
+        previous_run.id,
+        event_type='final.delta',
+        participant_id='leader',
+        phase='finalizing',
+        payload={
+            'final_stream_id': 'final-1',
+            'delta_index': 0,
+            'delta': 'Previous final answer.',
+            'text': 'Previous final answer.',
+        },
+    )
+    await AgentRuns.transition_state(
+        previous_run.id,
+        from_states=['finalizing'],
+        to_state='completed',
+        reason='test previous run completed',
+        payload={'final_text': 'Previous final answer.'},
+    )
+
+    request = _request(enable_agent_mode=True)
+    form = _chat_form()
+    form['id'] = 'assistant-current'
+    form['parent_id'] = 'assistant-prev'
+    form['messages'] = [
+        {'role': 'user', 'content': 'Build the image.'},
+        {'role': 'assistant', 'content': 'Previous final answer.'},
+        {'role': 'user', 'content': 'Continue from there.'},
+    ]
+    form['user_message'] = {
+        'id': 'user-msg',
+        'parentId': 'assistant-prev',
+        'childrenIds': [],
+        'role': 'user',
+        'content': 'Continue from there.',
+    }
+
+    await main.chat_completion(request, form, _user())
+
+    runtime_payload = chat_entry_patches.runtime_calls[0]
+    replay_messages = [
+        message
+        for message in runtime_payload['messages']
+        if message.get('metadata', {}).get('agent_context_replay')
+    ]
+    assert len(replay_messages) == 1
+    replay_text = replay_messages[0]['content']
+    assert '[Previous Agent Mode assistant context]' in replay_text
+    assert 'run:assistant-prev state:completed' in replay_text
+    assert 'phase:running assistant_note: I inspected the migration plan.' in replay_text
+    assert 'phase:running action_summary: The runtime image was built successfully.' in replay_text
+    assert 'phase:finalizing final: Previous final answer.' in replay_text
+    assert runtime_payload['messages'][-1]['content'] == 'Continue from there.'
+    assert 'SECRET_PRIVATE_THOUGHT' not in replay_text
+    assert 'SECRET_REASONING_OBJECT' not in replay_text
+    assert 'raw_reasoning' not in replay_text
+    assert 'reasoning' not in replay_text
+
+
+@pytest.mark.asyncio
 async def test_agent_mode_runtime_payload_preserves_reasoning_model_params(
     agent_run_db,
     chat_entry_patches,
