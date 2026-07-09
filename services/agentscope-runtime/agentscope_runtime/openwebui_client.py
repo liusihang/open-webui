@@ -59,37 +59,16 @@ class OpenWebUIClient:
             phase=phase,
         )
         url = f"{self._base_url}/api/agent/service/runs/{run_id}/events"
-        headers = {
-            "Authorization": f"Bearer {self._service_token}",
-            "X-Agent-Idempotency-Key": idempotency_key,
-        }
-
-        payload = body.model_dump(mode="json")
-        response = None
-        for attempt in range(2):
-            try:
-                async with httpx.AsyncClient(timeout=self._timeout) as client:
-                    response = await client.post(
-                        url,
-                        headers=headers,
-                        json=payload,
-                    )
-                break
-            except httpx.TimeoutException:
-                if attempt == 1:
-                    raise
-
-        if response.status_code == 409:
-            return _safe_response_json(response) or {
-                "detail": "idempotency_conflict",
-            }
-
-        if response.is_error:
-            raise RuntimeError(
-                "OpenWebUI append-event failed "
-                f"with status {response.status_code}: {response.text}",
-            )
-        return response.json()
+        return await self._post_callback(
+            url,
+            idempotency_key,
+            body.model_dump(mode="json"),
+            retry_operation_in_progress=True,
+            operation_poll_timeout=self._timeout,
+            retry_timeout_attempts=2,
+            accept_idempotency_conflict=True,
+            error_prefix="OpenWebUI append-event failed",
+        )
 
     async def append_final_delta(
         self,
@@ -160,7 +139,14 @@ class OpenWebUIClient:
             payload=payload or {},
         )
         url = f"{self._base_url}/api/agent/service/runs/{run_id}/state-transition"
-        return await self._post_callback(url, idempotency_key, body.model_dump(mode="json"))
+        return await self._post_callback(
+            url,
+            idempotency_key,
+            body.model_dump(mode="json"),
+            retry_operation_in_progress=True,
+            operation_poll_timeout=self._timeout,
+            retry_timeout_attempts=2,
+        )
 
     async def register_subagent(
         self,
@@ -313,6 +299,9 @@ class OpenWebUIClient:
         timeout: float | httpx.Timeout | None = None,
         retry_operation_in_progress: bool = False,
         operation_poll_timeout: float | None = None,
+        retry_timeout_attempts: int = 1,
+        accept_idempotency_conflict: bool = False,
+        error_prefix: str = "OpenWebUI callback failed",
     ) -> dict[str, Any]:
         headers = {
             "Authorization": f"Bearer {self._service_token}",
@@ -324,11 +313,21 @@ class OpenWebUIClient:
             else None
         )
         client_timeout = timeout if timeout is not None else self._timeout
+        timeout_attempts = 0
 
         async with httpx.AsyncClient(timeout=client_timeout) as client:
             while True:
-                response = await client.post(url, headers=headers, json=body)
+                try:
+                    response = await client.post(url, headers=headers, json=body)
+                except httpx.TimeoutException:
+                    timeout_attempts += 1
+                    if timeout_attempts >= retry_timeout_attempts:
+                        raise
+                    continue
                 payload = _safe_response_json(response)
+
+                if accept_idempotency_conflict and response.status_code == 409:
+                    return payload or {"detail": "idempotency_conflict"}
 
                 if (
                     retry_operation_in_progress
@@ -348,8 +347,7 @@ class OpenWebUIClient:
 
         if response.is_error:
             raise RuntimeError(
-                "OpenWebUI callback failed "
-                f"with status {response.status_code}: {response.text}",
+                f"{error_prefix} with status {response.status_code}: {response.text}",
             )
         return payload if payload is not None else response.json()
 

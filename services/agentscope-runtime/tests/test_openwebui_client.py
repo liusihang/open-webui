@@ -244,6 +244,55 @@ async def test_append_event_retries_timeout_with_same_idempotency_key(monkeypatc
 
 
 @pytest.mark.asyncio
+async def test_append_event_polls_operation_in_progress_after_timeout_with_same_idempotency_key(
+    monkeypatch,
+) -> None:
+    calls = []
+
+    class FakeAsyncClient:
+        def __init__(self, *, timeout):
+            self.timeout = timeout
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return None
+
+        async def post(self, url, headers=None, json=None):
+            calls.append({'url': url, 'headers': headers, 'json': json, 'timeout': self.timeout})
+            if len(calls) == 1:
+                raise httpx.ReadTimeout('event append still in flight')
+            if len(calls) == 2:
+                return Response(202, json={'detail': 'operation_in_progress'})
+            return Response(200, json={'seq': 13, 'event_type': 'run.failed'})
+
+    monkeypatch.setattr("agentscope_runtime.openwebui_client.httpx.AsyncClient", FakeAsyncClient)
+    monkeypatch.setattr("agentscope_runtime.openwebui_client.MODEL_CALL_IN_PROGRESS_POLL_SECONDS", 0)
+    client = OpenWebUIClient(
+        base_url="https://openwebui.test",
+        service_token="owui-token",
+        timeout=3.0,
+    )
+
+    response = await client.append_event(
+        run_id="run-1",
+        idempotency_key="evt:session:run-failed",
+        event_type="run.failed",
+        summary="Agent runtime failed.",
+        payload={"runtime_session_id": "session"},
+        participant_id="leader",
+        phase="failed",
+    )
+
+    assert response == {'seq': 13, 'event_type': 'run.failed'}
+    assert len(calls) == 3
+    assert {call['headers']['X-Agent-Idempotency-Key'] for call in calls} == {
+        'evt:session:run-failed'
+    }
+
+
+@pytest.mark.asyncio
 async def test_append_final_delta_uses_openwebui_final_delta_callback() -> None:
     async with respx.mock(assert_all_called=True) as router:
         request = router.post("https://openwebui.test/api/agent/service/runs/run-1/final-delta").mock(
@@ -366,6 +415,54 @@ async def test_transition_state_uses_openwebui_state_transition_callback() -> No
         "to_state": "finalizing",
         "reason": "runtime closed work",
         "payload": {"runtime_session_id": "session"},
+    }
+
+
+@pytest.mark.asyncio
+async def test_transition_state_retries_timeout_and_polls_operation_in_progress_with_same_key(
+    monkeypatch,
+) -> None:
+    calls = []
+
+    class FakeAsyncClient:
+        def __init__(self, *, timeout):
+            self.timeout = timeout
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return None
+
+        async def post(self, url, headers=None, json=None):
+            calls.append({'url': url, 'headers': headers, 'json': json, 'timeout': self.timeout})
+            if len(calls) == 1:
+                raise httpx.ReadTimeout('state transition still in flight')
+            if len(calls) == 2:
+                return Response(202, json={'detail': 'operation_in_progress'})
+            return Response(200, json={'id': 'run-1', 'state': 'failed'})
+
+    monkeypatch.setattr("agentscope_runtime.openwebui_client.httpx.AsyncClient", FakeAsyncClient)
+    monkeypatch.setattr("agentscope_runtime.openwebui_client.MODEL_CALL_IN_PROGRESS_POLL_SECONDS", 0)
+    client = OpenWebUIClient(
+        base_url="https://openwebui.test",
+        service_token="owui-token",
+        timeout=3.0,
+    )
+
+    response = await client.transition_state(
+        run_id="run-1",
+        idempotency_key="state:run-1:failed",
+        from_states=["running"],
+        to_state="failed",
+        reason="runtime finalization failed",
+        payload={"runtime_session_id": "session"},
+    )
+
+    assert response == {'id': 'run-1', 'state': 'failed'}
+    assert len(calls) == 3
+    assert {call['headers']['X-Agent-Idempotency-Key'] for call in calls} == {
+        'state:run-1:failed'
     }
 
 

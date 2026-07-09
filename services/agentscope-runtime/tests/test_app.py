@@ -1844,6 +1844,97 @@ async def test_general_agent_model_call_retries_timeout_until_cached_success() -
 
 
 @pytest.mark.asyncio
+async def test_general_agent_model_call_stream_timeout_reliably_writes_failed_closeout() -> None:
+    class TimeoutModelCallWithTransientFailedCloseoutClient(RecordingOpenWebUIClient):
+        def __init__(self) -> None:
+            super().__init__()
+            self.failed_closeout_operations: list[str] = []
+            self.failed_state_attempts = 0
+            self.run_failed_event_attempts = 0
+
+        async def call_model_stream(self, **kwargs: object):
+            self.model_calls.append({**kwargs, "stream": True})
+            raise httpx.ReadTimeout("model-call stream timed out")
+            yield {"type": "stream_end"}  # pragma: no cover
+
+        async def transition_state(self, **kwargs: object) -> dict:
+            if kwargs["to_state"] == "failed":
+                self.failed_state_attempts += 1
+                if self.failed_state_attempts == 1:
+                    raise httpx.ReadTimeout("failed state callback still in flight")
+            response = await super().transition_state(**kwargs)  # type: ignore[arg-type]
+            if kwargs["to_state"] == "failed":
+                self.failed_closeout_operations.append("state:failed")
+            return response
+
+        async def append_event(self, **kwargs: object) -> dict:
+            if kwargs["event_type"] == "run.failed":
+                self.run_failed_event_attempts += 1
+                if self.run_failed_event_attempts == 1:
+                    raise httpx.ReadTimeout("run.failed callback still in flight")
+            response = await super().append_event(**kwargs)  # type: ignore[arg-type]
+            if kwargs["event_type"] == "run.failed":
+                self.failed_closeout_operations.append("event:run.failed")
+            return response
+
+    openwebui_client = TimeoutModelCallWithTransientFailedCloseoutClient()
+    async with make_client(openwebui_client, auto_finalize_ordinary_qa=True) as client:
+        response = await client.post(
+            "/v1/openwebui/runs",
+            headers={"Authorization": f"Bearer {SERVICE_TOKEN}"},
+            json={
+                "run_id": "run-agentscope-timeout-failed-closeout",
+                "chat_id": "chat-1",
+                "leader_model_id": "model-a",
+                "messages": [{"role": "user", "content": "Use a tool if useful, then answer."}],
+                "tool_access_envelope": {
+                    "tools": [
+                        {
+                            "id": "tool:terminal:main:list_files",
+                            "name": "list_files",
+                            "type": "terminal",
+                            "schema": {
+                                "name": "list_files",
+                                "description": "List files.",
+                                "parameters": {"type": "object", "properties": {}},
+                            },
+                        }
+                    ]
+                },
+            },
+        )
+
+        assert response.status_code == 202
+        for _ in range(120):
+            status = await client.get(
+                "/v1/openwebui/runs/run-agentscope-timeout-failed-closeout/status",
+                headers={"Authorization": f"Bearer {SERVICE_TOKEN}"},
+            )
+            if openwebui_client.failed_closeout_operations == [
+                "state:failed",
+                "event:run.failed",
+            ]:
+                break
+            await asyncio.sleep(0.01)
+
+    assert status.json()["state"] == "failed"
+    assert [call["model_call_id"] for call in openwebui_client.model_calls] == [
+        "model-call-1",
+        "model-call-1",
+        "model-call-1",
+    ]
+    assert openwebui_client.failed_closeout_operations == [
+        "state:failed",
+        "event:run.failed",
+    ]
+    assert [transition["to_state"] for transition in openwebui_client.state_transitions] == ["failed"]
+    assert [event["event_type"] for event in openwebui_client.events] == [
+        "run.running",
+        "run.failed",
+    ]
+
+
+@pytest.mark.asyncio
 async def test_leader_system_prompt_guides_real_files_to_default_outputs_path() -> None:
     openwebui_client = RecordingOpenWebUIClient()
     openwebui_client.model_responses = [

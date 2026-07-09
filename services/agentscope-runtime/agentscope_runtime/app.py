@@ -41,6 +41,14 @@ logger = logging.getLogger(__name__)
 
 MODEL_CALL_QUEUED_RETRY_ATTEMPTS = 3
 MODEL_CALL_QUEUED_RETRY_DELAY_SECONDS = 0.05
+FAILED_CLOSEOUT_RETRY_ATTEMPTS = max(
+    1,
+    int(os.getenv("AGENT_RUNTIME_FAILED_CLOSEOUT_RETRY_ATTEMPTS", "3")),
+)
+FAILED_CLOSEOUT_RETRY_DELAY_SECONDS = max(
+    0.0,
+    float(os.getenv("AGENT_RUNTIME_FAILED_CLOSEOUT_RETRY_DELAY_SECONDS", "0.1")),
+)
 FINAL_DELTA_CHUNK_CHARS = int(os.getenv("AGENT_RUNTIME_FINAL_DELTA_CHUNK_CHARS", "32"))
 FINAL_DELTA_STREAM_CHUNK_CHARS = int(
     os.getenv(
@@ -187,6 +195,7 @@ class RuntimeSession:
     state: str
     cancel_requested: bool = False
     start_accepted: bool = False
+    failed_closeout_completed: bool = False
     request: RunStartRequest | None = None
     created_at: float = field(default_factory=time.time)
     updated_at: float = field(default_factory=time.time)
@@ -1308,7 +1317,7 @@ async def _mark_session_failed(
     stage: str = "unknown",
     payload: dict[str, Any] | None = None,
 ) -> None:
-    if session.state == "failed":
+    if session.state == "failed" and session.failed_closeout_completed:
         return
     session.state = "failed"
     session.updated_at = time.time()
@@ -1319,19 +1328,23 @@ async def _mark_session_failed(
         "message": _format_finalization_error_message(exc, stage),
         "summary": summary,
     }
-    try:
-        await callback_client.transition_state(
+
+    state_written = await _retry_failed_closeout_callback(
+        "state failed",
+        session,
+        lambda: callback_client.transition_state(
             run_id=session.run_id,
             idempotency_key=f"state:{session.run_id}:failed",
             from_states=["queued", "running", "waiting_approval", "waiting_user_input", "finalizing"],
             to_state="failed",
             reason="runtime finalization failed",
             payload={"error": error, **event_payload},
-        )
-    except Exception:
-        pass
-    try:
-        await callback_client.append_event(
+        ),
+    )
+    event_written = await _retry_failed_closeout_callback(
+        "run.failed event",
+        session,
+        lambda: callback_client.append_event(
             run_id=session.run_id,
             idempotency_key=f"evt:{session.runtime_session_id}:run-failed",
             event_type="run.failed",
@@ -1339,9 +1352,47 @@ async def _mark_session_failed(
             payload={"error": error, **event_payload},
             participant_id="leader",
             phase="failed",
-        )
-    except Exception:
-        pass
+        ),
+    )
+    session.failed_closeout_completed = state_written and event_written
+
+
+async def _retry_failed_closeout_callback(
+    operation: str,
+    session: RuntimeSession,
+    callback,
+) -> bool:
+    last_exc: Exception | None = None
+    for attempt in range(1, FAILED_CLOSEOUT_RETRY_ATTEMPTS + 1):
+        try:
+            await callback()
+            return True
+        except Exception as exc:
+            last_exc = exc
+            if attempt >= FAILED_CLOSEOUT_RETRY_ATTEMPTS:
+                break
+            logger.warning(
+                "Runtime failed closeout callback %s failed for run_id=%s "
+                "runtime_session_id=%s attempt=%s/%s: %s",
+                operation,
+                session.run_id,
+                session.runtime_session_id,
+                attempt,
+                FAILED_CLOSEOUT_RETRY_ATTEMPTS,
+                exc,
+            )
+            await asyncio.sleep(FAILED_CLOSEOUT_RETRY_DELAY_SECONDS)
+
+    logger.error(
+        "Runtime could not write failed closeout callback %s for run_id=%s "
+        "runtime_session_id=%s after %s attempts: %s",
+        operation,
+        session.run_id,
+        session.runtime_session_id,
+        FAILED_CLOSEOUT_RETRY_ATTEMPTS,
+        last_exc,
+    )
+    return False
 
 
 def _approval_rejected_message(decision: ApprovalDecisionNotification) -> str:
