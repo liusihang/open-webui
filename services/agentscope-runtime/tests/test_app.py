@@ -1898,6 +1898,83 @@ async def test_leader_system_prompt_guides_real_files_to_default_outputs_path() 
 
 
 @pytest.mark.asyncio
+async def test_leader_system_prompt_includes_agent_context_replay_metadata() -> None:
+    openwebui_client = RecordingOpenWebUIClient()
+    openwebui_client.model_responses = [
+        {
+            "status": "success",
+            "response": {"content": "I will continue from the prior run context."},
+        }
+    ]
+
+    async with make_client(openwebui_client, auto_finalize_ordinary_qa=True) as client:
+        response = await client.post(
+            "/v1/openwebui/runs",
+            headers={"Authorization": f"Bearer {SERVICE_TOKEN}"},
+            json={
+                "run_id": "run-context-replay",
+                "chat_id": "chat-1",
+                "leader_model_id": "model-a",
+                "messages": [{"role": "user", "content": "Continue."}],
+                "metadata": {
+                    "agent_context_replay": [
+                        {
+                            "agent_run_id": "run-prev",
+                            "assistant_message_id": "assistant-prev",
+                            "state": "completed",
+                            "content": (
+                                "run:assistant-prev state:completed\n"
+                                "phase:running assistant_note: I inspected the image.\n"
+                                "phase:running action_summary: Build completed.\n"
+                                "phase:finalizing final: Previous final answer."
+                            ),
+                        }
+                    ]
+                },
+                "tool_access_envelope": {
+                    "tools": [
+                        {
+                            "id": "tool:terminal:main:list_files",
+                            "name": "list_files",
+                            "type": "terminal",
+                            "schema": {
+                                "name": "list_files",
+                                "description": "List files.",
+                                "parameters": {"type": "object", "properties": {}},
+                            },
+                        }
+                    ]
+                },
+            },
+        )
+
+        assert response.status_code == 202
+        for _ in range(40):
+            status = await client.get(
+                "/v1/openwebui/runs/run-context-replay/status",
+                headers={"Authorization": f"Bearer {SERVICE_TOKEN}"},
+            )
+            if status.json()["state"] in {"completed", "failed"}:
+                break
+            await asyncio.sleep(0.01)
+
+    assert status.json()["state"] == "completed"
+    model_messages = openwebui_client.model_calls[0]["messages"]
+    system_text = model_messages[0]["content"][0]["text"]
+    assert [message["role"] for message in model_messages] == ["system", "user"]
+    assert "Previous Agent Mode context for continuity" in system_text
+    assert "Prior Agent Mode run assistant-prev (completed)" in system_text
+    assert "phase:running assistant_note: I inspected the image." in system_text
+    assert "phase:running action_summary: Build completed." in system_text
+    assert "phase:finalizing final: Previous final answer." in system_text
+    assert not any(
+        message["role"] == "assistant"
+        and "run:assistant-prev state:completed" in str(message.get("content"))
+        for message in model_messages
+    )
+
+
+@pytest.mark.asyncio
 async def test_create_subagent_tool_emits_subagent_events_and_integrates_result() -> None:
     openwebui_client = RecordingOpenWebUIClient()
     openwebui_client.model_responses = [

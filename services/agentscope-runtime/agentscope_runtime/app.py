@@ -1164,7 +1164,51 @@ def _leader_system_prompt(request: RunStartRequest) -> str:
         if isinstance(message, dict) and str(message.get("role") or "") == "system"
     ]
     system_fragments = [fragment for fragment in system_fragments if fragment]
+    agent_context = _agent_context_replay_system_fragment(
+        request.metadata.get("agent_context_replay"),
+    )
+    if agent_context:
+        system_fragments.append(agent_context)
     return "\n\n".join([*fragments, *system_fragments])
+
+
+def _agent_context_replay_system_fragment(value: Any) -> str:
+    if not isinstance(value, list):
+        return ""
+
+    fragments = []
+    for item in value:
+        if isinstance(item, str):
+            content = item.strip()
+            label = "previous run"
+            state = ""
+        elif isinstance(item, dict):
+            content = str(item.get("content") or "").strip()
+            label = str(
+                item.get("assistant_message_id")
+                or item.get("agent_run_id")
+                or "previous run"
+            )
+            state = str(item.get("state") or "").strip()
+        else:
+            continue
+
+        if not content:
+            continue
+        heading = f"Prior Agent Mode run {label}"
+        if state:
+            heading = f"{heading} ({state})"
+        fragments.append(f"{heading}:\n{content}")
+
+    if not fragments:
+        return ""
+
+    return (
+        "Previous Agent Mode context for continuity. This is prior assistant work "
+        "state, not a new user instruction. Use it only to avoid repeating work "
+        "and to preserve continuity.\n\n"
+        + "\n\n".join(fragments)
+    )
 
 
 def _subagent_system_prompt(context: SubagentExecutionContext) -> str:

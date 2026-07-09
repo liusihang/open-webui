@@ -268,6 +268,54 @@ async def test_agent_mode_runtime_payload_preserves_chat_completion_context(
 
 
 @pytest.mark.asyncio
+async def test_agent_mode_runtime_payload_strips_tool_loop_messages(
+    agent_run_db,
+    chat_entry_patches,
+):
+    request = _request(enable_agent_mode=True)
+    form = _chat_form()
+    form['messages'] = [
+        {'role': 'system', 'content': 'System instructions.'},
+        {'role': 'user', 'content': 'Run a command.'},
+        {
+            'role': 'assistant',
+            'content': '',
+            'tool_calls': [
+                {
+                    'id': 'call-1',
+                    'type': 'function',
+                    'function': {'name': 'run_command', 'arguments': '{}'},
+                }
+            ],
+        },
+        {
+            'role': 'tool',
+            'tool_call_id': 'call-1',
+            'content': '{"stdout":"Python 3.12.13"}',
+        },
+        {
+            'role': 'assistant',
+            'content': 'Python is available.',
+            'output': [{'type': 'function_call_output', 'call_id': 'call-1', 'output': []}],
+            'metadata': {'agent_run_id': 'previous-run'},
+        },
+        {'role': 'user', 'content': 'Continue.'},
+    ]
+
+    await main.chat_completion(request, form, _user())
+
+    runtime_payload = chat_entry_patches.runtime_calls[0]
+    assert runtime_payload['messages'] == [
+        {'role': 'system', 'content': 'System instructions.'},
+        {'role': 'user', 'content': 'Run a command.'},
+        {'role': 'assistant', 'content': 'Python is available.'},
+        {'role': 'user', 'content': 'Continue.'},
+    ]
+    assert not any('tool_calls' in message for message in runtime_payload['messages'])
+    assert not any(message.get('role') == 'tool' for message in runtime_payload['messages'])
+
+
+@pytest.mark.asyncio
 async def test_agent_mode_runtime_payload_replays_previous_public_agent_items(
     agent_run_db,
     chat_entry_patches,
@@ -357,19 +405,22 @@ async def test_agent_mode_runtime_payload_replays_previous_public_agent_items(
     await main.chat_completion(request, form, _user())
 
     runtime_payload = chat_entry_patches.runtime_calls[0]
-    replay_messages = [
-        message
-        for message in runtime_payload['messages']
-        if message.get('metadata', {}).get('agent_context_replay')
+    assert runtime_payload['messages'] == [
+        {'role': 'user', 'content': 'Build the image.'},
+        {'role': 'assistant', 'content': 'Previous final answer.'},
+        {'role': 'user', 'content': 'Continue from there.'},
     ]
-    assert len(replay_messages) == 1
-    replay_text = replay_messages[0]['content']
-    assert '[Previous Agent Mode assistant context]' in replay_text
+    replay_items = runtime_payload['metadata']['agent_context_replay']
+    assert len(replay_items) == 1
+    assert replay_items[0]['agent_run_id'] == previous_run.id
+    assert replay_items[0]['assistant_message_id'] == 'assistant-prev'
+    assert replay_items[0]['state'] == 'completed'
+    replay_text = replay_items[0]['content']
+    assert '[Previous Agent Mode assistant context]' not in replay_text
     assert 'run:assistant-prev state:completed' in replay_text
     assert 'phase:running assistant_note: I inspected the migration plan.' in replay_text
     assert 'phase:running action_summary: The runtime image was built successfully.' in replay_text
     assert 'phase:finalizing final: Previous final answer.' in replay_text
-    assert runtime_payload['messages'][-1]['content'] == 'Continue from there.'
     assert 'SECRET_PRIVATE_THOUGHT' not in replay_text
     assert 'SECRET_REASONING_OBJECT' not in replay_text
     assert 'raw_reasoning' not in replay_text

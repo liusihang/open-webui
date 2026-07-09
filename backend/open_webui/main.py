@@ -1338,7 +1338,7 @@ def _agent_context_replay_anchor_ids(form_data: dict) -> set[str]:
     return anchor_ids
 
 
-async def _agent_context_replay_messages(
+async def _agent_context_replay_items(
     *,
     chat_id: str | None,
     user_id: str,
@@ -1364,23 +1364,19 @@ async def _agent_context_replay_messages(
         if len(selected) >= _AGENT_CONTEXT_REPLAY_MAX_RUNS:
             break
 
-    messages = []
+    items = []
     for run in reversed(selected):
         text = await _agent_context_replay_text(run)
         if text:
-            messages.append(
+            items.append(
                 {
-                    'role': 'assistant',
-                    'name': 'agent_context',
                     'content': text,
-                    'metadata': {
-                        'agent_context_replay': True,
-                        'agent_run_id': run.id,
-                        'assistant_message_id': run.assistant_message_id,
-                    },
+                    'agent_run_id': run.id,
+                    'assistant_message_id': run.assistant_message_id,
+                    'state': run.state,
                 }
             )
-    return messages
+    return items
 
 
 async def _agent_context_replay_text(run) -> str:
@@ -1390,10 +1386,8 @@ async def _agent_context_replay_text(run) -> str:
         log.warning('Agent Mode could not load prior run events for run=%s: %s', run.id, exc)
         return ''
 
-    lines = [
-        '[Previous Agent Mode assistant context]',
-        f'run:{run.assistant_message_id or run.id} state:{run.state}',
-    ]
+    lines = [f'run:{run.assistant_message_id or run.id} state:{run.state}']
+    final_deltas = []
     for event in events:
         event_type = str(getattr(event, 'event_type', '') or '')
         if event_type not in _AGENT_CONTEXT_REPLAY_TEXT_EVENT_TYPES:
@@ -1412,7 +1406,11 @@ async def _agent_context_replay_text(run) -> str:
         elif event_type == AgentEventType.FINAL_DELTA.value:
             delta = payload.get('delta')
             if isinstance(delta, str) and delta:
-                lines.append(f'phase:{phase} final: {_agent_context_replay_clean_text(delta)}')
+                final_deltas.append(delta)
+
+    final_text = str(getattr(run, 'final_text', '') or ''.join(final_deltas)).strip()
+    if final_text:
+        lines.append(f'phase:finalizing final: {_agent_context_replay_clean_text(final_text)}')
 
     text = '\n'.join(line for line in lines if line.strip())
     return text[:_AGENT_CONTEXT_REPLAY_MAX_CHARS]
@@ -1422,18 +1420,38 @@ def _agent_context_replay_clean_text(value: str) -> str:
     return ' '.join(value.split())
 
 
-def _inject_agent_context_replay_messages(messages: list, replay_messages: list[dict]) -> list:
-    if not replay_messages:
-        return messages
+def _agent_runtime_prompt_messages(messages: list) -> list[dict]:
+    clean_messages = []
+    for message in messages:
+        if not isinstance(message, dict):
+            continue
+        role = str(message.get('role') or '').lower()
+        if role not in {'system', 'user', 'assistant'}:
+            continue
+        content = message.get('content', '')
+        if role == 'assistant' and not _agent_runtime_message_has_text(content):
+            continue
+        clean_messages.append(
+            {
+                'role': role,
+                'content': content,
+            }
+        )
+    return clean_messages
 
-    merged = [dict(message) if isinstance(message, dict) else message for message in messages]
-    insert_at = len(merged)
-    for index in range(len(merged) - 1, -1, -1):
-        message = merged[index]
-        if isinstance(message, dict) and str(message.get('role') or '').lower() == 'user':
-            insert_at = index
-            break
-    return [*merged[:insert_at], *replay_messages, *merged[insert_at:]]
+
+def _agent_runtime_message_has_text(content) -> bool:
+    if isinstance(content, str):
+        return bool(content.strip())
+    if isinstance(content, list):
+        for item in content:
+            if not isinstance(item, dict):
+                continue
+            text = item.get('text')
+            if isinstance(text, str) and text.strip():
+                return True
+        return False
+    return content not in (None, '')
 
 
 def _agent_runtime_payload(
@@ -1446,7 +1464,7 @@ def _agent_runtime_payload(
     budget: dict,
     tool_access_envelope: dict,
     model_params: dict | None = None,
-    context_replay_messages: list[dict] | None = None,
+    context_replay_items: list[dict] | None = None,
 ) -> dict:
     model_meta = {}
     model = metadata.get('model')
@@ -1456,7 +1474,7 @@ def _agent_runtime_payload(
     messages = form_data.get('messages')
     if not isinstance(messages, list):
         messages = [metadata.get('user_message')] if metadata.get('user_message') else []
-    messages = _inject_agent_context_replay_messages(messages, context_replay_messages or [])
+    messages = _agent_runtime_prompt_messages(messages)
 
     runtime_metadata = {
         'session_id': metadata.get('session_id'),
@@ -1467,6 +1485,8 @@ def _agent_runtime_payload(
     runtime_model_params = model_params if model_params is not None else _agent_runtime_model_params(form_data)
     if runtime_model_params:
         runtime_metadata['model_params'] = runtime_model_params
+    if context_replay_items:
+        runtime_metadata['agent_context_replay'] = context_replay_items
 
     return {
         'run_id': run.id,
@@ -1593,7 +1613,7 @@ async def _start_agent_mode_chat(
         service_token=getattr(request.app.state.config, 'AGENT_RUNTIME_SERVICE_TOKEN', ''),
         timeout=getattr(request.app.state.config, 'AGENT_RUN_DEFAULT_TIMEOUT_SECONDS', None),
     )
-    context_replay_messages = await _agent_context_replay_messages(
+    context_replay_items = await _agent_context_replay_items(
         chat_id=metadata.get('chat_id'),
         user_id=user.id,
         exclude_run_id=run.id,
@@ -1608,7 +1628,7 @@ async def _start_agent_mode_chat(
         budget=budget,
         tool_access_envelope=tool_access_envelope,
         model_params=requested_model_params,
-        context_replay_messages=context_replay_messages,
+        context_replay_items=context_replay_items,
     )
 
     try:
