@@ -94,7 +94,10 @@
 	.agent-transcript {
 		display: block;
 		margin: 0.15rem 0 0.45rem;
-		color: var(--gray-600, #4b5563);
+		--agent-transcript-body-color: var(--tw-prose-body, var(--color-gray-800, #1f2937));
+		--agent-transcript-muted-color: var(--tw-prose-captions, var(--color-gray-500, #6b7280));
+		--agent-transcript-tool-color: var(--tw-prose-captions, var(--color-gray-400, #9ca3af));
+		color: var(--agent-transcript-body-color);
 	}
 	.agent-transcript-summary {
 		display: inline-flex;
@@ -105,7 +108,7 @@
 		cursor: pointer;
 		list-style: none;
 		font-size: 0.76rem;
-		color: var(--gray-500, #6b7280);
+		color: var(--agent-transcript-muted-color);
 		user-select: none;
 	}
 	.agent-transcript-summary::-webkit-details-marker {
@@ -113,17 +116,17 @@
 	}
 	.agent-transcript-headline {
 		font-weight: 500;
-		color: var(--gray-500, #6b7280);
+		color: var(--agent-transcript-muted-color);
 	}
 	.agent-transcript-time {
-		color: var(--gray-400, #9ca3af);
+		color: var(--agent-transcript-tool-color);
 	}
 	.agent-transcript-connection {
 		color: var(--amber-600, #d97706);
 		font-size: 0.72rem;
 	}
 	.agent-transcript-chevron {
-		color: var(--gray-400, #9ca3af);
+		color: var(--agent-transcript-tool-color);
 		font-size: 0.9rem;
 		line-height: 1;
 		transform: translateY(-0.02rem);
@@ -142,6 +145,6 @@
 	.agent-transcript-empty {
 		margin: 0;
 		font-size: 0.72rem;
-		color: var(--gray-400, #9ca3af);
+		color: var(--agent-transcript-tool-color);
 	}
 </style>

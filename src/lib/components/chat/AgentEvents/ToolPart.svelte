@@ -65,18 +65,27 @@
 		font-size: 0.75rem;
 	}
 	.agent-tool-name {
-		color: var(--gray-600, #4b5563);
+		color: var(
+			--agent-transcript-tool-color,
+			var(--tw-prose-captions, var(--color-gray-400, #9ca3af))
+		);
 		font-weight: 500;
 	}
 	.agent-tool-summary {
 		font-size: 0.72rem;
-		color: var(--gray-600, #4b5563);
+		color: var(
+			--agent-transcript-tool-color,
+			var(--tw-prose-captions, var(--color-gray-400, #9ca3af))
+		);
 	}
 	.agent-tool-spinner {
 		width: 0.5rem;
 		height: 0.5rem;
-		border: 1.5px solid var(--gray-300, #d1d5db);
-		border-top-color: var(--gray-600, #4b5563);
+		border: 1.5px solid var(--color-gray-300, #d1d5db);
+		border-top-color: var(
+			--agent-transcript-tool-color,
+			var(--tw-prose-captions, var(--color-gray-400, #9ca3af))
+		);
 		border-radius: 9999px;
 		animation: agent-tool-spin 0.8s linear infinite;
 	}
@@ -97,7 +106,10 @@
 	}
 	.agent-tool-icon.done {
 		background: transparent;
-		color: var(--gray-400, #9ca3af);
+		color: var(
+			--agent-transcript-tool-color,
+			var(--tw-prose-captions, var(--color-gray-400, #9ca3af))
+		);
 	}
 	.agent-tool-icon.error {
 		color: var(--red-700, #b91c1c);

@@ -115,4 +115,17 @@ describe('AgentTranscript presentation guardrails', () => {
 		expect(transcript).not.toContain('text-base');
 		expect(transcript).not.toContain('text-lg');
 	});
+
+	it('keeps commentary aligned with the final answer color and tools visually quieter', () => {
+		const transcript = readSource('./AgentTranscript.svelte');
+		const note = readSource('./AssistantNotePart.svelte');
+		const action = readSource('./ActionSummaryPart.svelte');
+		const tool = readSource('./ToolPart.svelte');
+
+		expect(transcript).toContain('--agent-transcript-body-color: var(--tw-prose-body');
+		expect(note).toContain('color: var(--agent-transcript-body-color');
+		expect(action).toContain('color: var(--agent-transcript-body-color');
+		expect(tool).toMatch(/color:\s*var\(\s*--agent-transcript-tool-color/);
+		expect(tool).toContain('--tw-prose-captions');
+	});
 });

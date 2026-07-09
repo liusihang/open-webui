@@ -14,7 +14,7 @@
 	}
 	.agent-action-text {
 		font-size: 0.82rem;
-		color: var(--gray-600, #4b5563);
+		color: var(--agent-transcript-body-color, var(--tw-prose-body, var(--color-gray-800, #1f2937)));
 		line-height: 1.5;
 		white-space: pre-wrap;
 	}

@@ -23,7 +23,7 @@
 		width: 0.42rem;
 		height: 0.42rem;
 		border-radius: 9999px;
-		background: var(--gray-500, #6b7280);
+		background: var(--agent-transcript-muted-color, var(--color-gray-500, #6b7280));
 		animation: agent-note-blink 1.2s ease-in-out infinite;
 	}
 	@keyframes agent-note-blink {
@@ -38,7 +38,7 @@
 	.agent-note-text {
 		grid-column: 1 / -1;
 		font-size: 0.82rem;
-		color: var(--gray-700, #374151);
+		color: var(--agent-transcript-body-color, var(--tw-prose-body, var(--color-gray-800, #1f2937)));
 		line-height: 1.5;
 		white-space: pre-wrap;
 	}
