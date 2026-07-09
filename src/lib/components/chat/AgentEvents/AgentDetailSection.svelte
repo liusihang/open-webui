@@ -1,5 +1,6 @@
 <script lang="ts">
 	import type { AgentRunEventMetadata, AgentRunEventPayload } from './types';
+	import ChevronDown from '$lib/components/icons/ChevronDown.svelte';
 
 	export let label = 'Details';
 	export let payload: AgentRunEventPayload | null = null;
@@ -29,18 +30,22 @@
 			return [];
 		}
 		return Object.entries(payload)
-			.filter(
-				([key]) =>
-					![
-						'chain_of_thought',
-						'debug',
-						'private',
-						'raw',
-						'raw_reasoning',
-						'reasoning',
-						'thought'
-					].includes(key.toLowerCase())
-			)
+			.filter(([key]) => {
+				const normalized = [...key.toLocaleLowerCase()]
+					.filter((character) => /[a-z0-9]/.test(character))
+					.join('');
+				return ![
+					'chain_of_thought',
+					'debug',
+					'private',
+					'raw',
+					'raw_reasoning',
+					'reasoning',
+					'thought'
+				]
+					.map((unsafeKey) => unsafeKey.replaceAll('_', ''))
+					.includes(normalized);
+			})
 			.map(([key, value]) => ({ key, value }));
 	};
 </script>
@@ -48,7 +53,9 @@
 {#if entries().length > 0 || metadata.length > 0}
 	<details class="agent-detail-section" bind:open>
 		<summary class="agent-detail-summary">
-			<span class="agent-detail-chevron" aria-hidden="true">{open ? '▾' : '▸'}</span>
+			<span class="agent-detail-chevron" class:open aria-hidden="true">
+				<ChevronDown className="size-3" strokeWidth="2" />
+			</span>
 			<span class="agent-detail-label">{label}</span>
 		</summary>
 		<div class="agent-detail-body" class:dense>
@@ -86,15 +93,27 @@
 		gap: 0.25rem;
 		cursor: pointer;
 		list-style: none;
-		color: var(--gray-500, #6b7280);
+		color: var(--agent-transcript-muted-color, #6b7280);
 		font-size: 0.7rem;
 		user-select: none;
+		border-radius: 0.35rem;
+		padding: 0.12rem 0.2rem;
+		margin-left: -0.2rem;
+	}
+	.agent-detail-summary:focus-visible {
+		outline: 2px solid var(--agent-transcript-focus-color, #8b5cf6);
+		outline-offset: 1px;
 	}
 	.agent-detail-summary::-webkit-details-marker {
 		display: none;
 	}
 	.agent-detail-chevron {
-		font-size: 0.6rem;
+		display: inline-flex;
+		transform: rotate(-90deg);
+		transition: transform 180ms cubic-bezier(0.25, 1, 0.5, 1);
+	}
+	.agent-detail-chevron.open {
+		transform: rotate(0deg);
 	}
 	.agent-detail-label {
 		letter-spacing: 0.02em;
@@ -102,11 +121,11 @@
 	.agent-detail-body {
 		margin-top: 0.25rem;
 		padding: 0.5rem;
-		background: var(--gray-50, #f9fafb);
-		border-radius: 0.25rem;
-		border: 1px solid var(--gray-100, #f3f4f6);
+		background: var(--agent-transcript-surface-color, #f9fafb);
+		border-radius: 0.5rem;
+		border: 1px solid var(--agent-transcript-border-color, #e5e7eb);
 		font-size: 0.7rem;
-		color: var(--gray-600, #4b5563);
+		color: var(--agent-transcript-muted-color, #4b5563);
 	}
 	.agent-detail-body.dense {
 		padding: 0.4rem 0.5rem;
@@ -122,11 +141,11 @@
 	}
 	.agent-detail-row dt {
 		font-weight: 500;
-		color: var(--gray-500, #6b7280);
+		color: var(--agent-transcript-muted-color, #6b7280);
 	}
 	.agent-detail-row dd {
 		margin: 0;
-		color: var(--gray-700, #374151);
+		color: var(--agent-transcript-body-color, #374151);
 		word-break: break-word;
 	}
 	.agent-detail-payload {
@@ -141,7 +160,7 @@
 		align-items: start;
 	}
 	.agent-detail-payload-key {
-		color: var(--gray-500, #6b7280);
+		color: var(--agent-transcript-muted-color, #6b7280);
 		font-family: var(--font-mono, monospace);
 		font-size: 0.65rem;
 	}
@@ -151,8 +170,13 @@
 		word-break: break-word;
 		font-family: var(--font-mono, monospace);
 		font-size: 0.65rem;
-		color: var(--gray-700, #374151);
+		color: var(--agent-transcript-body-color, #374151);
 		max-height: 12rem;
 		overflow: auto;
+	}
+	@media (prefers-reduced-motion: reduce) {
+		.agent-detail-chevron {
+			transition: none;
+		}
 	}
 </style>

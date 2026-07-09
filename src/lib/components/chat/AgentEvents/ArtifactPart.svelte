@@ -39,19 +39,19 @@
 		font-size: 0.75rem;
 	}
 	.agent-artifact-icon {
-		color: var(--gray-500, #6b7280);
+		color: var(--agent-transcript-muted-color, #6b7280);
 	}
 	.agent-artifact-name {
-		color: var(--gray-800, #1f2937);
+		color: var(--agent-transcript-body-color, #1f2937);
 		font-weight: 500;
 	}
 	.agent-artifact-meta {
-		color: var(--gray-400, #9ca3af);
+		color: var(--agent-transcript-tool-color, #9ca3af);
 		font-size: 0.65rem;
 	}
 	.agent-artifact-path {
 		font-size: 0.7rem;
-		color: var(--gray-500, #6b7280);
+		color: var(--agent-transcript-muted-color, #6b7280);
 		font-family: var(--font-mono, monospace);
 	}
 </style>

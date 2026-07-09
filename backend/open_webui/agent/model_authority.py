@@ -288,7 +288,7 @@ def _model_call_form_data(call: ModelCallRequest) -> dict[str, Any]:
     form_data.update(
         {
             'model': call.model,
-            'messages': call.messages,
+            'messages': _normalize_agent_model_messages(call.messages),
             'stream': call.stream,
         }
     )
@@ -300,6 +300,92 @@ def _model_call_form_data(call: ModelCallRequest) -> dict[str, Any]:
         if isinstance(reasoning, dict) and reasoning:
             form_data['reasoning'] = reasoning
     return form_data
+
+
+def _normalize_agent_model_messages(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    normalized: list[dict[str, Any]] = []
+    pending_tool_calls: list[dict[str, Any]] = []
+
+    for message in messages:
+        if not isinstance(message, dict):
+            continue
+
+        item_type = str(message.get('type') or '')
+        if item_type == 'function_call':
+            tool_call = _agent_tool_call_from_responses_item(message)
+            if tool_call is not None:
+                pending_tool_calls.append(tool_call)
+            continue
+
+        _flush_agent_tool_calls(normalized, pending_tool_calls)
+
+        if item_type == 'function_call_output':
+            tool_message = _agent_tool_message_from_responses_item(message)
+            if tool_message is not None:
+                normalized.append(tool_message)
+            continue
+
+        normalized.append(_clean_agent_model_message(message, item_type=item_type))
+
+    _flush_agent_tool_calls(normalized, pending_tool_calls)
+    return normalized
+
+
+def _flush_agent_tool_calls(
+    normalized: list[dict[str, Any]],
+    pending_tool_calls: list[dict[str, Any]],
+) -> None:
+    if not pending_tool_calls:
+        return
+    normalized.append(
+        {
+            'role': 'assistant',
+            'content': '',
+            'tool_calls': list(pending_tool_calls),
+        }
+    )
+    pending_tool_calls.clear()
+
+
+def _agent_tool_call_from_responses_item(message: dict[str, Any]) -> dict[str, Any] | None:
+    call_id = str(message.get('call_id') or '').strip()
+    name = str(message.get('name') or '').strip()
+    if not call_id or not name:
+        return None
+    return {
+        'id': call_id,
+        'type': 'function',
+        'function': {
+            'name': name,
+            'arguments': _agent_json_string(message.get('arguments', '{}')),
+        },
+    }
+
+
+def _agent_tool_message_from_responses_item(message: dict[str, Any]) -> dict[str, Any] | None:
+    call_id = str(message.get('call_id') or '').strip()
+    if not call_id:
+        return None
+    return {
+        'role': 'tool',
+        'tool_call_id': call_id,
+        'content': _agent_json_string(message.get('output', '')),
+    }
+
+
+def _agent_json_string(value: Any) -> str:
+    if isinstance(value, str):
+        return value
+    return json.dumps(value, ensure_ascii=False, sort_keys=True)
+
+
+def _clean_agent_model_message(message: dict[str, Any], *, item_type: str) -> dict[str, Any]:
+    clean_message = dict(message)
+    if item_type == 'message':
+        clean_message.pop('type', None)
+    clean_message.pop('id', None)
+    clean_message.pop('status', None)
+    return clean_message
 
 
 def _model_access_check_bypassed(user) -> bool:

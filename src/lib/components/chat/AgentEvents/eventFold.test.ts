@@ -305,9 +305,12 @@ describe('foldAgentRunEvents', () => {
 					raw_reasoning: 'hidden raw chain',
 					thought: 'hidden thought',
 					private: 'hidden private text',
+					rawReasoning: 'hidden camel case reasoning',
+					ChainOfThought: 'hidden title case chain',
 					details: {
 						next: 'search docs',
-						chain_of_thought: 'hidden nested chain'
+						chain_of_thought: 'hidden nested chain',
+						RAW_REASONING: 'hidden uppercase reasoning'
 					}
 				}
 			}),

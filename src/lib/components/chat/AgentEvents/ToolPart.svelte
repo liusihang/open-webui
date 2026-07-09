@@ -3,6 +3,7 @@
 	import type { Writable } from 'svelte/store';
 	import type { i18n as i18nType } from 'i18next';
 
+	import CheckCircle from '$lib/components/icons/CheckCircle.svelte';
 	import type { AgentTranscriptToolPart } from './types';
 	import AgentDetailSection from './AgentDetailSection.svelte';
 
@@ -10,9 +11,26 @@
 
 	const i18n = getContext<Writable<i18nType>>('i18n');
 
+	const humanizeToolName = (value: string): string =>
+		value
+			.replace(/[_-]+/g, ' ')
+			.replace(/\s+/g, ' ')
+			.trim()
+			.replace(/^\w/, (character) => character.toLocaleUpperCase());
+
+	const userFacingSummary = ($part: AgentTranscriptToolPart): string | null => {
+		const summary = $part.summary?.trim();
+		if (!summary) return null;
+		return $part.toolName
+			? summary.replaceAll($part.toolName, humanizeToolName($part.toolName))
+			: summary;
+	};
+
 	const actionLabel = ($part: AgentTranscriptToolPart): string => {
-		const name = $part.toolName ?? $i18n.t('tool');
+		const name = $part.toolName ? humanizeToolName($part.toolName) : $i18n.t('tool');
 		if ($part.status === 'error') return `${$i18n.t('Failed')} ${name}`;
+		const summary = userFacingSummary($part);
+		if (summary) return summary;
 		if ($part.status === 'done') return `${$i18n.t('Ran')} ${name}`;
 		return `${$i18n.t('Running')} ${name}`;
 	};
@@ -31,16 +49,18 @@
 		{:else if part.status === 'error'}
 			<span class="agent-tool-icon error" aria-hidden="true">!</span>
 		{:else}
-			<span class="agent-tool-icon done" aria-hidden="true">✓</span>
+			<span class="agent-tool-icon done" aria-hidden="true">
+				<CheckCircle className="size-3.5" strokeWidth="1.8" />
+			</span>
 		{/if}
 		<span class="agent-tool-name">{actionLabel(part)}</span>
 	</div>
 	{#if part.status === 'error' && part.summary}
 		<div class="agent-tool-summary">{part.summary}</div>
 	{/if}
-	{#if part.status === 'error'}
+	{#if part.status !== 'running'}
 		<AgentDetailSection
-			label={$i18n.t('Details')}
+			label={part.status === 'error' ? $i18n.t('Details') : $i18n.t('View details')}
 			payload={part.details}
 			metadata={part.metadata}
 			open={part.defaultExpanded}
@@ -56,7 +76,7 @@
 		margin: 0.08rem 0;
 	}
 	.agent-tool-part.error {
-		color: var(--red-700, #b91c1c);
+		color: var(--agent-transcript-danger-color, #b91c1c);
 	}
 	.agent-tool-row {
 		display: inline-flex;
@@ -112,6 +132,12 @@
 		);
 	}
 	.agent-tool-icon.error {
-		color: var(--red-700, #b91c1c);
+		color: var(--agent-transcript-danger-color, #b91c1c);
+	}
+	@media (prefers-reduced-motion: reduce) {
+		.agent-tool-spinner {
+			animation: none;
+			border-style: dotted;
+		}
 	}
 </style>

@@ -45,4 +45,10 @@
 	.agent-note-part.running .agent-note-text {
 		grid-column: 2;
 	}
+	@media (prefers-reduced-motion: reduce) {
+		.agent-note-pulse {
+			animation: none;
+			opacity: 0.85;
+		}
+	}
 </style>

@@ -2,7 +2,6 @@
 	import { getContext } from 'svelte';
 	import type { Writable } from 'svelte/store';
 	import type { i18n as i18nType } from 'i18next';
-	import { toast } from 'svelte-sonner';
 
 	import { submitAgentRunApproval, type AgentRunApprovalDecision } from '$lib/apis/agentRuns';
 	import type { AgentTranscriptApprovalPart } from './types';
@@ -14,6 +13,7 @@
 
 	let submitting: AgentRunApprovalDecision | null = null;
 	let submitted = false;
+	let submitError: string | null = null;
 
 	const statusText = ($status: AgentTranscriptApprovalPart['status']): string => {
 		if ($status === 'pending') return $i18n.t('awaiting approval');
@@ -25,14 +25,20 @@
 		if (!agentRunId || submitting || submitted || part.status !== 'pending') {
 			return;
 		}
+		submitError = null;
 		submitting = decision;
 		try {
-			await submitAgentRunApproval(localStorage.getItem('token') ?? '', agentRunId, part.approvalId, {
-				decision
-			});
+			await submitAgentRunApproval(
+				localStorage.getItem('token') ?? '',
+				agentRunId,
+				part.approvalId,
+				{
+					decision
+				}
+			);
 			submitted = true;
 		} catch (error) {
-			toast.error(`${error}`);
+			submitError = error instanceof Error ? error.message : `${error}`;
 			submitting = null;
 			return;
 		}
@@ -48,12 +54,17 @@
 	data-approval-id={part.approvalId}
 >
 	<div class="agent-approval-row">
-		<span class="agent-approval-icon" aria-hidden="true">{part.status === 'pending' ? '◆' : '✓'}</span>
+		<span class="agent-approval-icon" aria-hidden="true"
+			>{part.status === 'pending' ? '◆' : '✓'}</span
+		>
 		<span class="agent-approval-action">{part.action ?? part.description}</span>
 		<span class="agent-approval-status">{statusText(part.status)}</span>
 	</div>
 	{#if part.description && part.description !== part.action}
 		<div class="agent-approval-description">{part.description}</div>
+	{/if}
+	{#if submitError}
+		<p class="agent-approval-error" role="alert">{submitError}</p>
 	{/if}
 	{#if part.status === 'pending' && agentRunId}
 		<div class="agent-approval-actions">
@@ -89,19 +100,19 @@
 		display: flex;
 		flex-direction: column;
 		gap: 0.2rem;
-		padding: 0.45rem 0.55rem;
-		border-radius: 0.4rem;
+		padding: 0.65rem 0.7rem;
+		border-radius: 0.75rem;
 		margin: 0.15rem 0;
-		background: var(--amber-50, #fffbeb);
-		border: 1px solid var(--amber-100, #fef3c7);
+		background: var(--agent-transcript-attention-surface, #faf5ff);
+		border: 1px solid var(--agent-transcript-attention-border, #ddd6fe);
 	}
 	.agent-approval-part.approved {
 		background: transparent;
 		border-color: transparent;
 	}
 	.agent-approval-part.rejected {
-		background: var(--red-50, #fef2f2);
-		border-color: var(--red-100, #fee2e2);
+		background: var(--agent-transcript-danger-surface, #fef2f2);
+		border-color: var(--agent-transcript-danger-border, #fee2e2);
 	}
 	.agent-approval-row {
 		display: inline-flex;
@@ -110,23 +121,29 @@
 		font-size: 0.75rem;
 	}
 	.agent-approval-icon {
-		color: var(--amber-500, #f59e0b);
+		color: var(--agent-transcript-warning-color, #d97706);
 		font-size: 0.7rem;
 	}
 	.agent-approval-part.approved .agent-approval-icon {
-		color: var(--gray-400, #9ca3af);
+		color: var(--agent-transcript-success-color, #047857);
 	}
 	.agent-approval-action {
-		color: var(--gray-800, #1f2937);
+		color: var(--agent-transcript-body-color, #1f2937);
 		font-weight: 500;
 	}
 	.agent-approval-status {
-		color: var(--gray-500, #6b7280);
+		color: var(--agent-transcript-muted-color, #6b7280);
 		font-size: 0.65rem;
 	}
 	.agent-approval-description {
 		font-size: 0.72rem;
-		color: var(--gray-600, #4b5563);
+		color: var(--agent-transcript-muted-color, #4b5563);
+	}
+	.agent-approval-error {
+		margin: 0;
+		font-size: 0.72rem;
+		line-height: 1.4;
+		color: var(--agent-transcript-danger-color, #b91c1c);
 	}
 	.agent-approval-actions {
 		display: flex;
@@ -134,24 +151,37 @@
 		gap: 0.35rem;
 	}
 	.agent-approval-actions button {
-		border-radius: 0.25rem;
-		border: 1px solid var(--gray-200, #e5e7eb);
-		background: var(--white, #ffffff);
-		color: var(--gray-700, #374151);
-		font-size: 0.68rem;
+		border-radius: 0.5rem;
+		border: 1px solid var(--agent-transcript-border-color, #e5e7eb);
+		background: var(--agent-transcript-surface-color, #f9f9f9);
+		color: var(--agent-transcript-body-color, #374151);
+		font-size: 0.72rem;
 		font-weight: 500;
-		padding: 0.25rem 0.45rem;
+		padding: 0.34rem 0.58rem;
+		transition:
+			background-color 160ms ease-out,
+			border-color 160ms ease-out;
 	}
 	.agent-approval-actions button.approve {
-		background: var(--gray-900, #111827);
-		border-color: var(--gray-900, #111827);
-		color: var(--white, #ffffff);
+		background: var(--agent-transcript-accent-color, #7c3aed);
+		border-color: var(--agent-transcript-accent-color, #7c3aed);
+		color: #fafafa;
+	}
+	.agent-approval-actions button:hover:not(:disabled) {
+		background: var(--agent-transcript-raised-surface, #f5f5f4);
+	}
+	.agent-approval-actions button.approve:hover:not(:disabled) {
+		filter: brightness(0.94);
+	}
+	.agent-approval-actions button:focus-visible {
+		outline: 2px solid var(--agent-transcript-focus-color, #8b5cf6);
+		outline-offset: 2px;
 	}
 	.agent-approval-actions button:disabled {
 		opacity: 0.55;
 	}
 	.agent-approval-submitted {
 		font-size: 0.68rem;
-		color: var(--gray-500, #6b7280);
+		color: var(--agent-transcript-muted-color, #6b7280);
 	}
 </style>

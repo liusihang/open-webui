@@ -1316,6 +1316,10 @@ _AGENT_CONTEXT_REPLAY_UNSAFE_FIELD_NAMES = {
     'reasoning',
     'thought',
 }
+_AGENT_CONTEXT_REPLAY_NORMALIZED_UNSAFE_FIELD_NAMES = {
+    ''.join(character for character in name.casefold() if character.isalnum())
+    for name in _AGENT_CONTEXT_REPLAY_UNSAFE_FIELD_NAMES
+}
 _AGENT_CONTEXT_REPLAY_TOOL_REQUEST_EVENT_TYPES = {
     AgentEventType.TOOL_REQUESTED.value,
 }
@@ -1469,7 +1473,7 @@ async def _agent_context_replay_messages_and_items(run) -> tuple[list[dict], lis
             total_chars += len(content) + 1
 
     if total_chars <= _AGENT_CONTEXT_REPLAY_MAX_CHARS:
-        return messages, replay_items
+        return messages, _agent_context_replay_trim_items(replay_items)
 
     kept_messages = []
     total = 0
@@ -1530,7 +1534,13 @@ def _agent_context_replay_tool_output(payload: dict, *, failed: bool = False):
 
 def _agent_context_replay_json(value) -> str:
     if isinstance(value, str):
-        return value
+        try:
+            decoded = json.loads(value)
+        except (TypeError, ValueError):
+            return value
+        if not isinstance(decoded, (dict, list)):
+            return value
+        value = decoded
     value = _agent_context_replay_safe_value(value)
     try:
         return json.dumps(value, ensure_ascii=False, sort_keys=True)
@@ -1543,11 +1553,16 @@ def _agent_context_replay_safe_value(value):
         return {
             key: _agent_context_replay_safe_value(nested)
             for key, nested in value.items()
-            if str(key) not in _AGENT_CONTEXT_REPLAY_UNSAFE_FIELD_NAMES
+            if _agent_context_replay_safe_field_name(key)
         }
     if isinstance(value, list):
         return [_agent_context_replay_safe_value(item) for item in value]
     return value
+
+
+def _agent_context_replay_safe_field_name(value) -> bool:
+    normalized = ''.join(character for character in str(value).casefold() if character.isalnum())
+    return normalized not in _AGENT_CONTEXT_REPLAY_NORMALIZED_UNSAFE_FIELD_NAMES
 
 
 def _agent_context_replay_item_size(item: dict) -> int:
@@ -1555,6 +1570,7 @@ def _agent_context_replay_item_size(item: dict) -> int:
 
 
 def _agent_context_replay_trim_items(items: list[dict]) -> list[dict]:
+    items = _agent_context_replay_drop_orphan_tool_items(items)
     kept = []
     total = 0
     for item in reversed(items):
@@ -1570,7 +1586,27 @@ def _agent_context_replay_trim_items(items: list[dict]) -> list[dict]:
         if item_size <= remaining:
             kept.append(item)
             total += item_size + 1
-    return list(reversed(kept))
+    return _agent_context_replay_drop_orphan_tool_items(list(reversed(kept)))
+
+
+def _agent_context_replay_drop_orphan_tool_items(items: list[dict]) -> list[dict]:
+    call_ids = {
+        str(item.get('call_id') or '')
+        for item in items
+        if item.get('type') == 'function_call' and item.get('call_id')
+    }
+    output_ids = {
+        str(item.get('call_id') or '')
+        for item in items
+        if item.get('type') == 'function_call_output' and item.get('call_id')
+    }
+    paired_ids = call_ids & output_ids
+    return [
+        item
+        for item in items
+        if item.get('type') not in {'function_call', 'function_call_output'}
+        or str(item.get('call_id') or '') in paired_ids
+    ]
 
 
 def _agent_context_replay_clean_text(value: str) -> str:

@@ -47,12 +47,13 @@ describe('AgentTranscript presentation guardrails', () => {
 		expect(source).not.toMatch(/event_type === 'text\.delta'[\s\S]{0,400}finalText =/);
 	});
 
-	it('keeps successful tool details out of the default transcript UI', () => {
+	it('keeps successful tool details available through progressive disclosure', () => {
 		const tool = readSource('./ToolPart.svelte');
 		const detail = readSource('./AgentDetailSection.svelte');
 
 		expect(tool).toContain('AgentDetailSection');
-		expect(tool).toMatch(/\{#if part\.status === 'error'\}[\s\S]*AgentDetailSection/);
+		expect(tool).toMatch(/\{#if part\.status !== 'running'[\s\S]*AgentDetailSection/);
+		expect(tool).toContain("$i18n.t('View details')");
 		expect(detail).toContain('<details');
 		// Debug payload must be formatted as <pre> blocks inside the disclosure,
 		// not inlined into the default view
@@ -67,7 +68,7 @@ describe('AgentTranscript presentation guardrails', () => {
 		// Approval actions must be real API-backed controls, not decorative status text
 		expect(approval).toContain('submitAgentRunApproval');
 		expect(approval).toContain("part.status === 'pending'");
-		expect(approval).toContain("<button");
+		expect(approval).toContain('<button');
 		expect(approval).toContain("'approved'");
 		expect(approval).toContain("'rejected'");
 		expect(transcriptPart).toContain('<ApprovalPart {part} {agentRunId} />');
@@ -82,13 +83,24 @@ describe('AgentTranscript presentation guardrails', () => {
 	it('uses a Codex-like collapsible process row instead of a status dashboard', () => {
 		const transcript = readSource('./AgentTranscript.svelte');
 
+		expect(transcript).toContain('import ChevronDown');
 		expect(transcript).toContain('<details class="agent-transcript"');
 		expect(transcript).toContain('<summary class="agent-transcript-summary">');
+		expect(transcript).toContain('<ChevronDown');
 		expect(transcript).toContain('setInterval');
 		expect(transcript).toContain('displayElapsedMs(model, now)');
 		expect(transcript).not.toContain('artifactCount');
 		expect(transcript).not.toContain('approvalCount');
 		expect(transcript).not.toContain('agent-transcript-flag');
+	});
+
+	it('reopens the process disclosure when a new attention state arrives', () => {
+		const transcript = readSource('./AgentTranscript.svelte');
+
+		expect(transcript).toContain('transcriptAttentionKey');
+		expect(transcript).toContain('previousAutoOpenKey');
+		expect(transcript).toMatch(/nextAutoOpenKey[\s\S]*!== previousAutoOpenKey[\s\S]*open = true/);
+		expect(transcript).not.toContain('let initialized = false');
 	});
 
 	it('does not use decorative side stripes in process parts', () => {
@@ -134,6 +146,49 @@ describe('AgentTranscript presentation guardrails', () => {
 		expect(action).toContain('color: var(--agent-transcript-body-color');
 		expect(tool).toMatch(/color:\s*var\(\s*--agent-transcript-tool-color/);
 		expect(tool).toContain('--tw-prose-captions');
+	});
+
+	it('uses shared theme-aware transcript tokens across attention and detail surfaces', () => {
+		const transcript = readSource('./AgentTranscript.svelte');
+		const approval = readSource('./ApprovalPart.svelte');
+		const userInput = readSource('./UserInputPart.svelte');
+		const detail = readSource('./AgentDetailSection.svelte');
+
+		expect(transcript).toContain('--agent-transcript-surface-color');
+		expect(transcript).toContain(':global(.dark) .agent-transcript');
+		expect(approval).toContain('--agent-transcript-attention-surface');
+		expect(userInput).toContain('--agent-transcript-attention-surface');
+		expect(detail).toContain('--agent-transcript-surface-color');
+	});
+
+	it('supports reduced motion and applies the error state to subagent rows', () => {
+		const transcript = readSource('./AgentTranscript.svelte');
+		const note = readSource('./AssistantNotePart.svelte');
+		const tool = readSource('./ToolPart.svelte');
+		const transcriptPart = readSource('./TranscriptPart.svelte');
+
+		expect(transcript).toContain('@media (prefers-reduced-motion: reduce)');
+		expect(note).toContain('@media (prefers-reduced-motion: reduce)');
+		expect(tool).toContain('@media (prefers-reduced-motion: reduce)');
+		expect(transcriptPart).toContain("class:error={part.status === 'error'}");
+	});
+
+	it('uses human-readable tool names and inline recoverable action errors', () => {
+		const tool = readSource('./ToolPart.svelte');
+		const approval = readSource('./ApprovalPart.svelte');
+		const userInput = readSource('./UserInputPart.svelte');
+
+		expect(tool).toContain('humanizeToolName');
+		expect(tool).toContain('userFacingSummary');
+		expect(tool).toMatch(/if \(summary\)[\s\S]*return summary/);
+		expect(approval).toContain('let submitError');
+		expect(approval).toContain('role="alert"');
+		expect(userInput).toContain('let submitError');
+		expect(userInput).toContain('role="alert"');
+		expect(approval).not.toContain('toast.error');
+		expect(userInput).not.toContain('toast.error');
+		expect(approval).toContain(':focus-visible');
+		expect(userInput).toContain(':focus-visible');
 	});
 
 	it('renders ask-user prompts as option rows with a custom answer path', () => {

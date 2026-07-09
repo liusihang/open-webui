@@ -160,6 +160,95 @@ async def test_verified_model_call_uses_provider_path_without_creating_nested_ag
 
 
 @pytest.mark.asyncio
+async def test_model_call_normalizes_responses_items_before_provider_routing(agent_run_db):
+    run = await _create_running_run()
+    request = _trusted_request(enable_agent_mode=True, run_id=run.id)
+    captured = {}
+
+    async def completion_handler(request, form_data, user):
+        captured['messages'] = form_data['messages']
+        return {'id': 'chatcmpl-structured', 'choices': [{'message': {'content': 'done'}}]}
+
+    authority = AgentModelAuthority(
+        operation_store=AgentRuns,
+        completion_handler=completion_handler,
+        user_loader=_user_loader,
+        model_access_checker=_allow_model_access,
+    )
+
+    await authority.execute_model_call(
+        request,
+        ModelCallRequest(
+            run_id=run.id,
+            participant_id='leader',
+            model_call_id='call-structured',
+            model='model-a',
+            messages=[
+                {'role': 'user', 'content': 'Continue.'},
+                {
+                    'type': 'function_call',
+                    'call_id': 'call-1',
+                    'name': 'read_file',
+                    'arguments': '{"path":"README.md"}',
+                },
+                {
+                    'type': 'function_call',
+                    'call_id': 'call-2',
+                    'name': 'list_files',
+                    'arguments': '{}',
+                },
+                {
+                    'type': 'function_call_output',
+                    'call_id': 'call-1',
+                    'output': '{"content":"OpenWebUI"}',
+                },
+                {
+                    'type': 'function_call_output',
+                    'call_id': 'call-2',
+                    'output': '{"files":["README.md"]}',
+                },
+                {
+                    'type': 'message',
+                    'id': 'msg-note-1',
+                    'status': 'completed',
+                    'role': 'assistant',
+                    'content': 'I inspected the workspace.',
+                    'phase': 'commentary',
+                },
+            ],
+            idempotency_key='model:leader:call-structured:1',
+        ),
+    )
+
+    assert captured['messages'] == [
+        {'role': 'user', 'content': 'Continue.'},
+        {
+            'role': 'assistant',
+            'content': '',
+            'tool_calls': [
+                {
+                    'id': 'call-1',
+                    'type': 'function',
+                    'function': {'name': 'read_file', 'arguments': '{"path":"README.md"}'},
+                },
+                {
+                    'id': 'call-2',
+                    'type': 'function',
+                    'function': {'name': 'list_files', 'arguments': '{}'},
+                },
+            ],
+        },
+        {'role': 'tool', 'tool_call_id': 'call-1', 'content': '{"content":"OpenWebUI"}'},
+        {'role': 'tool', 'tool_call_id': 'call-2', 'content': '{"files":["README.md"]}'},
+        {
+            'role': 'assistant',
+            'content': 'I inspected the workspace.',
+            'phase': 'commentary',
+        },
+    ]
+
+
+@pytest.mark.asyncio
 async def test_admin_model_call_uses_product_chat_access_bypass_for_provider_model(
     agent_run_db,
 ):

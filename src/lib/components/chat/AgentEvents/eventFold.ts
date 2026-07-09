@@ -9,15 +9,14 @@ import type {
 	AgentTextBlockKind
 } from './types';
 
-const STRIPPED_DETAIL_KEYS = new Set([
-	'chain_of_thought',
-	'debug',
-	'private',
-	'raw',
-	'raw_reasoning',
-	'reasoning',
-	'thought'
-]);
+const normalizeDetailKey = (key: string): string =>
+	[...key.toLocaleLowerCase()].filter((character) => /[a-z0-9]/.test(character)).join('');
+
+const STRIPPED_DETAIL_KEYS = new Set(
+	['chain_of_thought', 'debug', 'private', 'raw', 'raw_reasoning', 'reasoning', 'thought'].map(
+		normalizeDetailKey
+	)
+);
 
 const AGENT_RUN_EVENT_CATEGORIES: AgentRunEventCategory[] = [
 	'run',
@@ -482,7 +481,7 @@ const sanitizeValue = (value: unknown): unknown => {
 
 	const sanitized: Record<string, unknown> = {};
 	for (const [key, nestedValue] of Object.entries(value)) {
-		if (STRIPPED_DETAIL_KEYS.has(key.toLowerCase())) {
+		if (STRIPPED_DETAIL_KEYS.has(normalizeDetailKey(key))) {
 			continue;
 		}
 

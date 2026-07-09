@@ -1,4 +1,5 @@
 import importlib
+import json
 import os
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -23,6 +24,60 @@ main = importlib.import_module('open_webui.main')
 OPEN_WEBUI_DIR = Path(__file__).resolve().parents[2]
 CONFIG_PATH = OPEN_WEBUI_DIR / 'config.py'
 MAIN_PATH = OPEN_WEBUI_DIR / 'main.py'
+
+
+def test_agent_context_replay_json_sanitizes_json_encoded_private_fields():
+    encoded = main._agent_context_replay_json(
+        '{"stdout":"ok","raw_reasoning":"secret","nested":{"Thought":"hidden"}}'
+    )
+
+    assert json.loads(encoded) == {'nested': {}, 'stdout': 'ok'}
+
+
+def test_agent_context_replay_trim_items_drops_orphaned_tool_items(monkeypatch):
+    message = {
+        'type': 'message',
+        'role': 'assistant',
+        'content': 'Continue from the verified result.',
+        'phase': 'commentary',
+    }
+    unmatched = main._agent_context_replay_trim_items(
+        [
+            {
+                'type': 'function_call',
+                'call_id': 'orphan-call',
+                'name': 'read_file',
+                'arguments': '{}',
+            },
+            message,
+        ]
+    )
+    assert unmatched == [message]
+
+    monkeypatch.setattr(main, '_AGENT_CONTEXT_REPLAY_MAX_CHARS', 240)
+    trimmed = main._agent_context_replay_trim_items(
+        [
+            {
+                'type': 'function_call',
+                'call_id': 'large-call',
+                'name': 'run_command',
+                'arguments': json.dumps({'command': 'x' * 500}),
+            },
+            {
+                'type': 'function_call_output',
+                'call_id': 'large-call',
+                'output': '{"status":"success"}',
+            },
+            message,
+        ]
+    )
+    call_ids = {
+        item['call_id'] for item in trimmed if item.get('type') == 'function_call'
+    }
+    output_ids = {
+        item['call_id'] for item in trimmed if item.get('type') == 'function_call_output'
+    }
+    assert call_ids == output_ids
 
 
 @pytest_asyncio.fixture

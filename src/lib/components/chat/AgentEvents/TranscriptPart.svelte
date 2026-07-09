@@ -41,7 +41,7 @@
 	{:else if part.kind === 'error'}
 		<ErrorPart {part} />
 	{:else if part.kind === 'subagent'}
-		<div class="transcript-subagent">
+		<div class="transcript-subagent" class:error={part.status === 'error'}>
 			<div class="transcript-subagent-row">
 				{#if part.status === 'running'}
 					<span class="transcript-subagent-spinner" aria-hidden="true"></span>
@@ -87,7 +87,7 @@
 		margin: 0.05rem 0;
 	}
 	.transcript-subagent.error {
-		color: var(--red-700, #b91c1c);
+		color: var(--agent-transcript-danger-color, #b91c1c);
 	}
 	.transcript-subagent-row {
 		display: inline-flex;
@@ -96,18 +96,18 @@
 		font-size: 0.75rem;
 	}
 	.transcript-subagent-name {
-		color: var(--gray-800, #1f2937);
+		color: var(--agent-transcript-body-color, #1f2937);
 		font-weight: 500;
 	}
 	.transcript-subagent-status {
-		color: var(--gray-500, #6b7280);
+		color: var(--agent-transcript-muted-color, #6b7280);
 		font-size: 0.65rem;
 	}
 	.transcript-subagent-spinner {
 		width: 0.5rem;
 		height: 0.5rem;
-		border: 1.5px solid var(--gray-300, #d1d5db);
-		border-top-color: var(--gray-600, #4b5563);
+		border: 1.5px solid var(--agent-transcript-border-color, #d1d5db);
+		border-top-color: var(--agent-transcript-muted-color, #4b5563);
 		border-radius: 9999px;
 		animation: transcript-subagent-spin 0.8s linear infinite;
 	}
@@ -128,27 +128,33 @@
 	}
 	.transcript-subagent-icon.done {
 		background: transparent;
-		color: var(--gray-400, #9ca3af);
+		color: var(--agent-transcript-tool-color, #9ca3af);
 	}
 	.transcript-subagent-icon.error {
-		color: var(--red-700, #b91c1c);
+		color: var(--agent-transcript-danger-color, #b91c1c);
 	}
 	.transcript-subagent-summary {
 		font-size: 0.72rem;
-		color: var(--gray-600, #4b5563);
+		color: var(--agent-transcript-muted-color, #4b5563);
 	}
 	.transcript-subagent-result {
 		font-size: 0.7rem;
-		color: var(--gray-500, #6b7280);
+		color: var(--agent-transcript-muted-color, #6b7280);
 	}
 	.transcript-run-row {
 		display: inline-flex;
 		align-items: center;
 		gap: 0.4rem;
 		font-size: 0.7rem;
-		color: var(--gray-500, #6b7280);
+		color: var(--agent-transcript-muted-color, #6b7280);
 	}
 	.transcript-run-label {
 		font-weight: 500;
+	}
+	@media (prefers-reduced-motion: reduce) {
+		.transcript-subagent-spinner {
+			animation: none;
+			border-style: dotted;
+		}
 	}
 </style>
