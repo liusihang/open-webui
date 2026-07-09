@@ -104,9 +104,11 @@ def test_convert_to_responses_payload_preserves_assistant_message_phase():
         'model': 'gpt-5.5',
         'messages': [
             {
+                'id': 'msg-note-1',
                 'role': 'assistant',
                 'content': 'I will inspect the workspace.',
                 'phase': 'commentary',
+                'status': 'completed',
             },
             {'role': 'user', 'content': 'continue'},
         ],
@@ -116,9 +118,11 @@ def test_convert_to_responses_payload_preserves_assistant_message_phase():
 
     assert responses_payload['input'][0] == {
         'type': 'message',
+        'id': 'msg-note-1',
         'role': 'assistant',
         'content': [{'type': 'output_text', 'text': 'I will inspect the workspace.'}],
         'phase': 'commentary',
+        'status': 'completed',
     }
 
 

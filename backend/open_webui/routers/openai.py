@@ -907,7 +907,7 @@ def convert_to_azure_payload(url, payload: dict, api_version: str):
 
 # Fields accepted by the Responses API for each input item type.
 RESPONSES_ALLOWED_FIELDS: dict[str, set[str]] = {
-    'message': {'type', 'role', 'content', 'phase'},
+    'message': {'type', 'id', 'status', 'role', 'content', 'phase'},
     'function_call': {'type', 'call_id', 'name', 'arguments', 'id'},
     'function_call_output': {'type', 'call_id', 'output'},
 }
@@ -937,6 +937,13 @@ def _responses_message_phase(message: dict) -> str | None:
     if phase in {'commentary', 'final_answer'}:
         return phase
     return None
+
+
+def _copy_responses_message_optional_fields(source: dict, item: dict) -> None:
+    for key in ('id', 'status'):
+        value = source.get(key)
+        if isinstance(value, str) and value:
+            item[key] = value
 
 
 def strip_chat_completion_message_phase(messages: list) -> list:
@@ -997,6 +1004,7 @@ def convert_to_responses_payload(payload: dict) -> dict:
                         'role': 'assistant',
                         'content': [{'type': 'output_text', 'text': text}],
                     }
+                    _copy_responses_message_optional_fields(msg, item)
                     phase = _responses_message_phase(msg)
                     if phase:
                         item['phase'] = phase
@@ -1043,6 +1051,7 @@ def convert_to_responses_payload(payload: dict) -> dict:
             content_parts = [{'type': text_type, 'text': str(content)}]
 
         item = {'type': 'message', 'role': role, 'content': content_parts}
+        _copy_responses_message_optional_fields(msg, item)
         phase = _responses_message_phase(msg)
         if phase:
             item['phase'] = phase

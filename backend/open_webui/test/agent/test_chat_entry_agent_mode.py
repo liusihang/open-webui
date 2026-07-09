@@ -348,6 +348,34 @@ async def test_agent_mode_runtime_payload_replays_previous_public_agent_items(
     )
     await AgentRuns.append_event(
         previous_run.id,
+        event_type='tool.requested',
+        participant_id='leader',
+        phase='running',
+        summary='Run command requested',
+        payload={
+            'tool_call_id': 'call-1',
+            'tool_name': 'run_command',
+            'arguments': {'command': 'python3 --version'},
+        },
+    )
+    await AgentRuns.append_event(
+        previous_run.id,
+        event_type='tool.completed',
+        participant_id='leader',
+        phase='running',
+        summary='Run command completed',
+        payload={
+            'tool_call_id': 'call-1',
+            'tool_name': 'run_command',
+            'status': 'success',
+            'result': {
+                'stdout': 'Python 3.12.13',
+                'raw_reasoning': 'SECRET_TOOL_PRIVATE_REASONING',
+            },
+        },
+    )
+    await AgentRuns.append_event(
+        previous_run.id,
         event_type='text.delta',
         participant_id='leader',
         phase='running',
@@ -427,6 +455,37 @@ async def test_agent_mode_runtime_payload_replays_previous_public_agent_items(
             'phase': 'commentary',
         },
         {
+            'role': 'assistant',
+            'content': 'Previous final answer.',
+            'phase': 'final_answer',
+        },
+    ]
+    assert replay_items[0]['items'] == [
+        {
+            'type': 'message',
+            'role': 'assistant',
+            'content': 'I inspected the migration plan.',
+            'phase': 'commentary',
+        },
+        {
+            'type': 'function_call',
+            'call_id': 'call-1',
+            'name': 'run_command',
+            'arguments': '{"command": "python3 --version"}',
+        },
+        {
+            'type': 'function_call_output',
+            'call_id': 'call-1',
+            'output': '{"stdout": "Python 3.12.13"}',
+        },
+        {
+            'type': 'message',
+            'role': 'assistant',
+            'content': 'The runtime image was built successfully.',
+            'phase': 'commentary',
+        },
+        {
+            'type': 'message',
             'role': 'assistant',
             'content': 'Previous final answer.',
             'phase': 'final_answer',

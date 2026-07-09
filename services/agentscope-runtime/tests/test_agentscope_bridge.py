@@ -279,17 +279,26 @@ async def test_bridge_builds_agentscope_template_model_and_tool_callback_boundar
         pass
     second_call_messages = callbacks.model_calls[-1]["messages"]
     assert second_call_messages[0]["role"] == "user"
-    assert all(message.get("phase") != "commentary" for message in second_call_messages)
+    assert second_call_messages[1:] == [
+        {
+            "role": "assistant",
+            "content": "I will use Search with text input.",
+            "phase": "commentary",
+        },
+        {
+            "role": "assistant",
+            "content": "Search completed.",
+            "phase": "commentary",
+        },
+    ]
     replay_text = "\n".join(str(message.get("content") or "") for message in second_call_messages)
-    assert "I will use Search with text input." not in replay_text
-    assert "Search completed." not in replay_text
     assert "Previous Agent Mode public process" not in replay_text
     assert "phase:running" not in replay_text
     assert "agent mode" not in replay_text
 
 
 @pytest.mark.asyncio
-async def test_current_run_public_notes_stay_out_of_current_model_replay() -> None:
+async def test_current_run_public_notes_replay_after_current_tool_results_in_order() -> None:
     from agentscope_runtime.agentscope_bridge import AgentScopeRuntimeBridge
 
     callbacks = RecordingBridgeCallbacks()
@@ -357,12 +366,33 @@ async def test_current_run_public_notes_stay_out_of_current_model_replay() -> No
 
     assert user_index == 0
     assert function_indices == [1, 2, 3, 4]
-    assert all(message.get("phase") != "commentary" for message in messages)
+    assert messages[5:] == [
+        {
+            "role": "assistant",
+            "content": "I will use Get environment.",
+            "phase": "commentary",
+        },
+        {
+            "role": "assistant",
+            "content": "Get environment completed.",
+            "phase": "commentary",
+        },
+        {
+            "role": "assistant",
+            "content": "I will use Get current timestamp.",
+            "phase": "commentary",
+        },
+        {
+            "role": "assistant",
+            "content": "Get current timestamp completed.",
+            "phase": "commentary",
+        },
+    ]
     replay_text = "\n".join(str(message.get("content") or "") for message in messages)
-    assert "I will use Get environment." not in replay_text
-    assert "Get environment completed." not in replay_text
-    assert "I will use Get current timestamp." not in replay_text
-    assert "Get current timestamp completed." not in replay_text
+    assert replay_text.count("I will use Get environment.") == 1
+    assert replay_text.count("Get environment completed.") == 1
+    assert replay_text.count("I will use Get current timestamp.") == 1
+    assert replay_text.count("Get current timestamp completed.") == 1
 
 
 @pytest.mark.asyncio

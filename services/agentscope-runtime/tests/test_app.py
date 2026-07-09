@@ -2059,6 +2059,34 @@ async def test_leader_system_prompt_includes_agent_context_replay_metadata() -> 
                                     "phase": "final_answer",
                                 },
                             ],
+                            "items": [
+                                {
+                                    "role": "assistant",
+                                    "content": "I inspected the image.",
+                                    "phase": "commentary",
+                                },
+                                {
+                                    "type": "function_call",
+                                    "call_id": "call-1",
+                                    "name": "list_files",
+                                    "arguments": "{}",
+                                },
+                                {
+                                    "type": "function_call_output",
+                                    "call_id": "call-1",
+                                    "output": '{"files":["a.txt"]}',
+                                },
+                                {
+                                    "role": "assistant",
+                                    "content": "Build completed.",
+                                    "phase": "commentary",
+                                },
+                                {
+                                    "role": "assistant",
+                                    "content": "Previous final answer.",
+                                    "phase": "final_answer",
+                                },
+                            ],
                         }
                     ]
                 },
@@ -2092,18 +2120,42 @@ async def test_leader_system_prompt_includes_agent_context_replay_metadata() -> 
     assert status.json()["state"] == "completed"
     model_messages = openwebui_client.model_calls[0]["messages"]
     system_text = model_messages[0]["content"][0]["text"]
-    assert [message["role"] for message in model_messages] == [
-        "system",
-        "assistant",
-        "assistant",
-        "assistant",
-        "user",
+    assert model_messages[0]["role"] == "system"
+    assert model_messages[1:-1] == [
+        {
+            "role": "assistant",
+            "content": "I inspected the image.",
+            "phase": "commentary",
+        },
+        {
+            "type": "function_call",
+            "call_id": "call-1",
+            "name": "list_files",
+            "arguments": "{}",
+        },
+        {
+            "type": "function_call_output",
+            "call_id": "call-1",
+            "output": '{"files":["a.txt"]}',
+        },
+        {
+            "role": "assistant",
+            "content": "Build completed.",
+            "phase": "commentary",
+        },
+        {
+            "role": "assistant",
+            "content": "Previous final answer.",
+            "phase": "final_answer",
+        },
     ]
+    assert model_messages[-1]["role"] == "user"
+    assert _msg_text(model_messages[-1]) == "Continue."
     assert "Previous Agent Mode context for continuity" not in system_text
     assert [
         (message.get("phase"), message.get("content"))
         for message in model_messages
-        if message["role"] == "assistant"
+        if message.get("role") == "assistant"
     ] == [
         ("commentary", "I inspected the image."),
         ("commentary", "Build completed."),

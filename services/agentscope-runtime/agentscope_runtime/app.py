@@ -1243,7 +1243,9 @@ def _agent_context_replay_assistant_messages(value: Any) -> list[dict[str, Any]]
     for item in value:
         if not isinstance(item, dict):
             continue
-        item_messages = item.get("messages")
+        item_messages = item.get("items")
+        if not isinstance(item_messages, list):
+            item_messages = item.get("messages")
         if not isinstance(item_messages, list):
             continue
         messages.extend(message for message in item_messages if isinstance(message, dict))

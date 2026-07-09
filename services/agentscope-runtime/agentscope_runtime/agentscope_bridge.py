@@ -274,6 +274,10 @@ class OpenWebUIAgentScopeModel(ChatModelBase):
             model_name=model_name,
             reasoning_parts=self._private_reasoning_parts,
         )
+        formatted_messages = _append_assistant_context_replay(
+            formatted_messages,
+            assistant_messages=self._live_assistant_context(),
+        )
 
         block_id = uuid.uuid4().hex
         text_delta_index = 0
@@ -851,7 +855,7 @@ def _inject_assistant_context_replay(
     replay_messages = [
         normalized
         for message in assistant_messages
-        if (normalized := _normalize_assistant_context_message(message)) is not None
+        if (normalized := _normalize_assistant_context_item(message)) is not None
     ]
     if not replay_messages:
         return messages
@@ -871,7 +875,7 @@ def _append_assistant_context_replay(
     replay_messages = [
         normalized
         for message in assistant_messages
-        if (normalized := _normalize_assistant_context_message(message)) is not None
+        if (normalized := _normalize_assistant_context_item(message)) is not None
     ]
     if not replay_messages:
         return messages
@@ -889,9 +893,40 @@ def _format_public_commentary_message(delta: str) -> dict[str, Any] | None:
     }
 
 
-def _normalize_assistant_context_message(message: dict[str, Any]) -> dict[str, Any] | None:
+def _normalize_assistant_context_item(message: dict[str, Any]) -> dict[str, Any] | None:
     if not isinstance(message, dict):
         return None
+    item_type = str(message.get("type") or "").strip()
+    if item_type == "function_call":
+        call_id = str(message.get("call_id") or "").strip()
+        name = str(message.get("name") or "").strip()
+        if not call_id or not name:
+            return None
+        arguments = message.get("arguments")
+        if not isinstance(arguments, str):
+            arguments = json.dumps(arguments if arguments is not None else {})
+        item = {
+            "type": "function_call",
+            "call_id": call_id,
+            "name": name,
+            "arguments": arguments,
+        }
+        item_id = message.get("id")
+        if isinstance(item_id, str) and item_id:
+            item["id"] = item_id
+        return item
+    if item_type == "function_call_output":
+        call_id = str(message.get("call_id") or "").strip()
+        if not call_id:
+            return None
+        output = message.get("output")
+        if not isinstance(output, str):
+            output = json.dumps(output if output is not None else "")
+        return {
+            "type": "function_call_output",
+            "call_id": call_id,
+            "output": output,
+        }
     if str(message.get("role") or "").lower() != "assistant":
         return None
     clean_content = " ".join(str(message.get("content") or "").split())
@@ -900,31 +935,48 @@ def _normalize_assistant_context_message(message: dict[str, Any]) -> dict[str, A
     phase = str(message.get("phase") or "commentary").strip()
     if phase not in {"commentary", "final_answer"}:
         phase = "commentary"
-    return {
+    item = {
         "role": "assistant",
         "content": clean_content,
         "phase": phase,
     }
+    for key in ("id", "status"):
+        value = message.get(key)
+        if isinstance(value, str) and value:
+            item[key] = value
+    return item
 
 
 def _trim_assistant_context_messages(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
     kept: list[dict[str, Any]] = []
     total = 0
     for message in reversed(messages):
-        normalized = _normalize_assistant_context_message(message)
+        normalized = _normalize_assistant_context_item(message)
         if normalized is None:
             continue
-        content = str(normalized["content"])
+        content = _assistant_context_item_text(normalized)
         remaining = PUBLIC_ASSISTANT_CONTEXT_REPLAY_MAX_CHARS - total
         if remaining <= 0:
             break
         if len(content) > remaining:
+            if normalized.get("role") != "assistant":
+                break
             normalized = {**normalized, "content": content[-remaining:]}
             kept.append(normalized)
             break
         kept.append(normalized)
         total += len(content) + 1
     return list(reversed(kept))
+
+
+def _assistant_context_item_text(item: dict[str, Any]) -> str:
+    if item.get("role") == "assistant":
+        return str(item.get("content") or "")
+    if item.get("type") == "function_call":
+        return f"{item.get('name') or ''} {item.get('arguments') or ''}"
+    if item.get("type") == "function_call_output":
+        return str(item.get("output") or "")
+    return json.dumps(item, ensure_ascii=False, sort_keys=True)
 
 
 def _trim_private_reasoning_parts(parts: list[str]) -> list[str]:

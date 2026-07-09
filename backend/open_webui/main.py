@@ -1303,13 +1303,25 @@ def _agent_runtime_reasoning_params(value) -> dict:
 
 _AGENT_CONTEXT_REPLAY_MAX_RUNS = 3
 _AGENT_CONTEXT_REPLAY_MAX_CHARS = 12000
-_AGENT_CONTEXT_REPLAY_TEXT_EVENT_TYPES = {
-    AgentEventType.TEXT_DELTA.value,
-    AgentEventType.FINAL_DELTA.value,
-}
 _AGENT_CONTEXT_REPLAY_TEXT_BLOCK_KINDS = {
     'assistant_note',
     'action_summary',
+}
+_AGENT_CONTEXT_REPLAY_UNSAFE_FIELD_NAMES = {
+    'chain_of_thought',
+    'debug',
+    'private',
+    'raw',
+    'raw_reasoning',
+    'reasoning',
+    'thought',
+}
+_AGENT_CONTEXT_REPLAY_TOOL_REQUEST_EVENT_TYPES = {
+    AgentEventType.TOOL_REQUESTED.value,
+}
+_AGENT_CONTEXT_REPLAY_TOOL_RESULT_EVENT_TYPES = {
+    AgentEventType.TOOL_COMPLETED.value,
+    AgentEventType.TOOL_FAILED.value,
 }
 _AGENT_CONTEXT_REPLAY_TERMINAL_STATES = {
     'completed',
@@ -1366,11 +1378,12 @@ async def _agent_context_replay_items(
 
     items = []
     for run in reversed(selected):
-        messages = await _agent_context_replay_messages(run)
-        if messages:
+        messages, replay_items = await _agent_context_replay_messages_and_items(run)
+        if messages or replay_items:
             items.append(
                 {
                     'messages': messages,
+                    'items': replay_items,
                     'agent_run_id': run.id,
                     'assistant_message_id': run.assistant_message_id,
                     'state': run.state,
@@ -1380,19 +1393,23 @@ async def _agent_context_replay_items(
 
 
 async def _agent_context_replay_messages(run) -> list[dict]:
+    messages, _ = await _agent_context_replay_messages_and_items(run)
+    return messages
+
+
+async def _agent_context_replay_messages_and_items(run) -> tuple[list[dict], list[dict]]:
     try:
         events = await AgentRuns.list_events(run.id)
     except Exception as exc:
         log.warning('Agent Mode could not load prior run events for run=%s: %s', run.id, exc)
-        return []
+        return [], []
 
     messages = []
+    replay_items = []
     total_chars = 0
     final_deltas = []
     for event in events:
         event_type = str(getattr(event, 'event_type', '') or '')
-        if event_type not in _AGENT_CONTEXT_REPLAY_TEXT_EVENT_TYPES:
-            continue
         payload = getattr(event, 'payload', None) or {}
         if not isinstance(payload, dict):
             continue
@@ -1411,29 +1428,50 @@ async def _agent_context_replay_messages(run) -> list[dict]:
                             'phase': 'commentary',
                         }
                     )
+                    replay_items.append(
+                        {
+                            'type': 'message',
+                            'role': 'assistant',
+                            'content': content,
+                            'phase': 'commentary',
+                        }
+                    )
                     total_chars += len(content) + 1
         elif event_type == AgentEventType.FINAL_DELTA.value:
             delta = payload.get('delta')
             if isinstance(delta, str) and delta:
                 final_deltas.append(delta)
+        elif event_type in _AGENT_CONTEXT_REPLAY_TOOL_REQUEST_EVENT_TYPES:
+            tool_call = _agent_context_replay_tool_call_item(payload)
+            if tool_call:
+                replay_items.append(tool_call)
+                total_chars += _agent_context_replay_item_size(tool_call) + 1
+        elif event_type in _AGENT_CONTEXT_REPLAY_TOOL_RESULT_EVENT_TYPES:
+            tool_output = _agent_context_replay_tool_output_item(
+                payload,
+                failed=event_type == AgentEventType.TOOL_FAILED.value,
+            )
+            if tool_output:
+                replay_items.append(tool_output)
+                total_chars += _agent_context_replay_item_size(tool_output) + 1
 
     final_text = str(getattr(run, 'final_text', '') or ''.join(final_deltas)).strip()
     if final_text:
         content = _agent_context_replay_clean_text(final_text)
         if content:
-            messages.append(
-                {
-                    'role': 'assistant',
-                    'content': content,
-                    'phase': 'final_answer',
-                }
-            )
+            final_message = {
+                'role': 'assistant',
+                'content': content,
+                'phase': 'final_answer',
+            }
+            messages.append(final_message)
+            replay_items.append({'type': 'message', **final_message})
             total_chars += len(content) + 1
 
     if total_chars <= _AGENT_CONTEXT_REPLAY_MAX_CHARS:
-        return messages
+        return messages, replay_items
 
-    kept = []
+    kept_messages = []
     total = 0
     for message in reversed(messages):
         content = str(message.get('content') or '')
@@ -1441,10 +1479,97 @@ async def _agent_context_replay_messages(run) -> list[dict]:
         if remaining <= 0:
             break
         if len(content) > remaining:
-            kept.append({**message, 'content': content[-remaining:]})
+            kept_messages.append({**message, 'content': content[-remaining:]})
             break
-        kept.append(message)
+        kept_messages.append(message)
         total += len(content) + 1
+    kept_messages = list(reversed(kept_messages))
+    return kept_messages, _agent_context_replay_trim_items(replay_items)
+
+
+def _agent_context_replay_tool_call_item(payload: dict) -> dict | None:
+    call_id = _agent_context_replay_call_id(payload)
+    if not call_id:
+        return None
+    name = payload.get('tool_name') or payload.get('name') or payload.get('tool_id') or 'tool'
+    arguments = payload.get('arguments')
+    if arguments is None:
+        arguments = payload.get('input') or {}
+    return {
+        'type': 'function_call',
+        'call_id': call_id,
+        'name': str(name or 'tool'),
+        'arguments': _agent_context_replay_json(arguments),
+    }
+
+
+def _agent_context_replay_tool_output_item(payload: dict, *, failed: bool = False) -> dict | None:
+    call_id = _agent_context_replay_call_id(payload)
+    if not call_id:
+        return None
+    output = _agent_context_replay_tool_output(payload, failed=failed)
+    return {
+        'type': 'function_call_output',
+        'call_id': call_id,
+        'output': _agent_context_replay_json(output),
+    }
+
+
+def _agent_context_replay_call_id(payload: dict) -> str:
+    value = payload.get('tool_call_id') or payload.get('call_id') or payload.get('id')
+    return str(value or '').strip()
+
+
+def _agent_context_replay_tool_output(payload: dict, *, failed: bool = False):
+    for key in ('result', 'output', 'content', 'response'):
+        if key in payload:
+            return payload.get(key)
+    status = payload.get('status') or ('failed' if failed else 'completed')
+    return {'status': status}
+
+
+def _agent_context_replay_json(value) -> str:
+    if isinstance(value, str):
+        return value
+    value = _agent_context_replay_safe_value(value)
+    try:
+        return json.dumps(value, ensure_ascii=False, sort_keys=True)
+    except TypeError:
+        return json.dumps(str(value), ensure_ascii=False)
+
+
+def _agent_context_replay_safe_value(value):
+    if isinstance(value, dict):
+        return {
+            key: _agent_context_replay_safe_value(nested)
+            for key, nested in value.items()
+            if str(key) not in _AGENT_CONTEXT_REPLAY_UNSAFE_FIELD_NAMES
+        }
+    if isinstance(value, list):
+        return [_agent_context_replay_safe_value(item) for item in value]
+    return value
+
+
+def _agent_context_replay_item_size(item: dict) -> int:
+    return len(_agent_context_replay_json(item))
+
+
+def _agent_context_replay_trim_items(items: list[dict]) -> list[dict]:
+    kept = []
+    total = 0
+    for item in reversed(items):
+        item_size = _agent_context_replay_item_size(item)
+        remaining = _AGENT_CONTEXT_REPLAY_MAX_CHARS - total
+        if remaining <= 0:
+            break
+        if item_size > remaining and item.get('role') == 'assistant':
+            content = str(item.get('content') or '')
+            if remaining > 0 and content:
+                kept.append({**item, 'content': content[-remaining:]})
+            break
+        if item_size <= remaining:
+            kept.append(item)
+            total += item_size + 1
     return list(reversed(kept))
 
 
