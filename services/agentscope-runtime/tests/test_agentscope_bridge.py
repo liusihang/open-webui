@@ -267,6 +267,27 @@ async def test_bridge_builds_agentscope_template_model_and_tool_callback_boundar
     assert callbacks.tool_calls[0]["idempotency_key"] == ("tool:subagent:run-bridge:1:tool-call-1:1")
     assert callbacks.tool_calls[0]["arguments"] == {"query": "agent mode"}
 
+    async for _ in await model(
+        [
+            Msg(
+                name="user",
+                content=[TextBlock(text="Continue after the tool.")],
+                role="user",
+            )
+        ],
+    ):
+        pass
+    replay_messages = [
+        message
+        for message in callbacks.model_calls[-1]["messages"]
+        if "Previous Agent Mode public process" in str(message.get("content"))
+    ]
+    assert replay_messages
+    replay_text = str(replay_messages[0]["content"])
+    assert "phase:running assistant_note: I will use Search with text input." in replay_text
+    assert "phase:running action_summary: Search completed." in replay_text
+    assert "agent mode" not in replay_text
+
 
 @pytest.mark.asyncio
 async def test_model_bridge_forwards_default_model_params_to_callback() -> None:

@@ -33,6 +33,7 @@ secrets, or raw tool server credentials inside this AgentScope runtime."""
 MODEL_CALL_RETRY_ATTEMPTS = 3
 MODEL_CALL_RETRY_DELAY_SECONDS = 0.05
 PRIVATE_REASONING_REPLAY_MAX_CHARS = 12000
+PUBLIC_PROCESS_REPLAY_MAX_CHARS = 12000
 PRIVATE_REASONING_REPLAY_BLOCKED_MODEL_MARKERS = (
     "gpt",
     "openai",
@@ -196,6 +197,7 @@ class OpenWebUIAgentScopeModel(ChatModelBase):
         model_id: str,
         callback_client: OpenWebUIBridgeCallbacks,
         on_final_text: Callable[[str, str], None] | None = None,
+        public_process_context: Callable[[], list[str]] | None = None,
         default_model_params: dict[str, Any] | None = None,
     ) -> None:
         super().__init__(
@@ -210,6 +212,7 @@ class OpenWebUIAgentScopeModel(ChatModelBase):
         self.participant_id = participant_id
         self.callback_client = callback_client
         self._on_final_text = on_final_text
+        self._public_process_context = public_process_context or (lambda: [])
         self.default_model_params = dict(default_model_params or {})
         self._next_model_call_index = 1
         self._formatter = OpenAIChatFormatter()
@@ -260,8 +263,12 @@ class OpenWebUIAgentScopeModel(ChatModelBase):
         params = _merge_model_params(self.default_model_params, dict(kwargs))
         idempotency_key = f"model:{self.participant_id}:{model_call_id}:1"
 
-        formatted_messages = _inject_private_reasoning_replay(
+        formatted_messages = _inject_public_process_replay(
             await self._format_messages(messages),
+            process_lines=self._public_process_context(),
+        )
+        formatted_messages = _inject_private_reasoning_replay(
+            formatted_messages,
             model_name=model_name,
             reasoning_parts=self._private_reasoning_parts,
         )
@@ -424,6 +431,7 @@ class OpenWebUIToolProxy(ToolBase):
         input_schema: dict[str, Any],
         callback_client: OpenWebUIBridgeCallbacks,
         allocate_tool_call_id: Callable[[], str],
+        record_public_process_delta: Callable[[str, str, str, str], None] | None = None,
     ) -> None:
         self.run_id = run_id
         self.runtime_session_id = runtime_session_id
@@ -434,6 +442,7 @@ class OpenWebUIToolProxy(ToolBase):
         self.input_schema = input_schema
         self.callback_client = callback_client
         self._allocate_tool_call_id = allocate_tool_call_id
+        self._record_public_process_delta = record_public_process_delta
 
     async def check_permissions(
         self,
@@ -463,6 +472,7 @@ class OpenWebUIToolProxy(ToolBase):
                 "input_categories": _tool_input_categories(kwargs),
             },
         )
+        self._record_public_delta("running", "assistant_note", _public_tool_intent_note(self.name, kwargs))
         await self.callback_client.append_event(
             run_id=self.run_id,
             idempotency_key=f"evt:{self.runtime_session_id}:{self.participant_id}:{tool_call_id}:requested",
@@ -504,6 +514,7 @@ class OpenWebUIToolProxy(ToolBase):
                     "error_type": exc.__class__.__name__,
                 },
             )
+            self._record_public_delta("running", "action_summary", _public_tool_result_summary(self.name, "failed"))
             await self.callback_client.append_event(
                 run_id=self.run_id,
                 idempotency_key=f"evt:{self.runtime_session_id}:{self.participant_id}:{tool_call_id}:failed",
@@ -536,6 +547,11 @@ class OpenWebUIToolProxy(ToolBase):
                     "status": "approval_required",
                 },
             )
+            self._record_public_delta(
+                "running",
+                "action_summary",
+                _public_tool_result_summary(self.name, "approval_required"),
+            )
             raise OpenWebUIToolApprovalRequired(
                 response=response,
                 tool_call_id=tool_call_id,
@@ -558,6 +574,11 @@ class OpenWebUIToolProxy(ToolBase):
                     "tool_name": self.name,
                     "status": "approval_rejected",
                 },
+            )
+            self._record_public_delta(
+                "running",
+                "action_summary",
+                _public_tool_result_summary(self.name, "approval_rejected"),
             )
             raise OpenWebUIToolApprovalRejected(
                 response=response,
@@ -583,6 +604,7 @@ class OpenWebUIToolProxy(ToolBase):
                 "status": status,
             },
         )
+        self._record_public_delta("running", "action_summary", _public_tool_result_summary(self.name, status))
         event_type = "tool.completed" if state == ToolResultState.SUCCESS else "tool.failed"
         await self.callback_client.append_event(
             run_id=self.run_id,
@@ -629,6 +651,11 @@ class OpenWebUIToolProxy(ToolBase):
             },
         )
 
+    def _record_public_delta(self, phase: str, block_kind: str, delta: str) -> None:
+        if self._record_public_process_delta is None:
+            return
+        self._record_public_process_delta(self.participant_id, phase, block_kind, delta)
+
 
 class AgentScopeRuntimeBridge:
     def __init__(
@@ -643,6 +670,7 @@ class AgentScopeRuntimeBridge:
         self.runtime_session_id = runtime_session_id
         self.callback_client = callback_client
         self._final_text_by_participant: dict[str, str] = {}
+        self._public_process_by_participant: dict[str, list[str]] = {}
         self._next_tool_call_index = 1
 
     def build_subagent_template(
@@ -672,6 +700,7 @@ class AgentScopeRuntimeBridge:
             model_id=model_id,
             callback_client=self.callback_client,
             on_final_text=self._record_final_text,
+            public_process_context=lambda: self._public_process_context(participant_id),
             default_model_params=default_model_params,
         )
 
@@ -680,6 +709,23 @@ class AgentScopeRuntimeBridge:
 
     def _record_final_text(self, participant_id: str, text: str) -> None:
         self._final_text_by_participant[participant_id] = text
+
+    def _record_public_process_delta(
+        self,
+        participant_id: str,
+        phase: str,
+        block_kind: str,
+        delta: str,
+    ) -> None:
+        line = _format_public_process_line(phase, block_kind, delta)
+        if not line:
+            return
+        lines = self._public_process_by_participant.setdefault(participant_id, [])
+        lines.append(line)
+        self._public_process_by_participant[participant_id] = _trim_public_process_lines(lines)
+
+    def _public_process_context(self, participant_id: str) -> list[str]:
+        return list(self._public_process_by_participant.get(participant_id, []))
 
     def build_tool_proxy(
         self,
@@ -700,6 +746,7 @@ class AgentScopeRuntimeBridge:
             input_schema=input_schema,
             callback_client=self.callback_client,
             allocate_tool_call_id=self._allocate_tool_call_id,
+            record_public_process_delta=self._record_public_process_delta,
         )
 
     def _allocate_tool_call_id(self) -> str:
@@ -787,6 +834,52 @@ def _inject_private_reasoning_replay(
             insert_at = index
             break
     return [*messages[:insert_at], replay_message, *messages[insert_at:]]
+
+
+def _inject_public_process_replay(
+    messages: list[dict[str, Any]],
+    *,
+    process_lines: list[str],
+) -> list[dict[str, Any]]:
+    process_text = "\n".join(line for line in process_lines if line)
+    if not process_text:
+        return messages
+    replay_message = {
+        "role": "assistant",
+        "content": "[Previous Agent Mode public process]\n" + process_text[-PUBLIC_PROCESS_REPLAY_MAX_CHARS:],
+    }
+    insert_at = len(messages)
+    for index in range(len(messages) - 1, -1, -1):
+        if str(messages[index].get("role") or "").lower() == "user":
+            insert_at = index
+            break
+    return [*messages[:insert_at], replay_message, *messages[insert_at:]]
+
+
+def _format_public_process_line(phase: str, block_kind: str, delta: str) -> str:
+    clean_delta = " ".join(str(delta or "").split())
+    clean_phase = str(phase or "running").strip() or "running"
+    clean_kind = str(block_kind or "assistant_note").strip() or "assistant_note"
+    if not clean_delta:
+        return ""
+    return f"phase:{clean_phase} {clean_kind}: {clean_delta}"
+
+
+def _trim_public_process_lines(lines: list[str]) -> list[str]:
+    kept: list[str] = []
+    total = 0
+    for line in reversed(lines):
+        if not line:
+            continue
+        remaining = PUBLIC_PROCESS_REPLAY_MAX_CHARS - total
+        if remaining <= 0:
+            break
+        if len(line) > remaining:
+            kept.append(line[-remaining:])
+            break
+        kept.append(line)
+        total += len(line) + 1
+    return list(reversed(kept))
 
 
 def _trim_private_reasoning_parts(parts: list[str]) -> list[str]:
