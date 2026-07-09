@@ -19,6 +19,13 @@ export type AgentRunUserInputSubmission = {
 	idempotencyKey?: string;
 };
 
+export type AgentRunApprovalDecision = 'approved' | 'rejected';
+
+export type AgentRunApprovalSubmission = {
+	decision: AgentRunApprovalDecision;
+	idempotencyKey?: string;
+};
+
 export type AgentRunListResponse = {
 	items: AgentRun[];
 	total: number;
@@ -159,7 +166,8 @@ export const submitAgentRunUserInput = async (
 	submission: AgentRunUserInputSubmission
 ): Promise<Record<string, unknown>> => {
 	let error = null;
-	const idempotencyKey = submission.idempotencyKey ?? createIdempotencyKey(userInputId, submission.status);
+	const idempotencyKey =
+		submission.idempotencyKey ?? createIdempotencyKey('user-input', userInputId, submission.status);
 	const res = await fetch(
 		`${AGENT_RUNS_API_BASE_URL}/${encodeURIComponent(runId)}/user-input/${encodeURIComponent(
 			userInputId
@@ -197,10 +205,56 @@ export const submitAgentRunUserInput = async (
 	return res ?? {};
 };
 
-const createIdempotencyKey = (userInputId: string, status: string): string => {
+export const submitAgentRunApproval = async (
+	token: string = '',
+	runId: string,
+	approvalId: string,
+	submission: AgentRunApprovalSubmission
+): Promise<Record<string, unknown>> => {
+	let error = null;
+	const idempotencyKey =
+		submission.idempotencyKey ??
+		createIdempotencyKey('approval', approvalId, submission.decision);
+	const res = await fetch(
+		`${AGENT_RUNS_API_BASE_URL}/${encodeURIComponent(runId)}/approvals/${encodeURIComponent(
+			approvalId
+		)}/decision`,
+		{
+			method: 'POST',
+			credentials: 'include',
+			headers: {
+				...jsonHeaders(token),
+				'X-Agent-Idempotency-Key': idempotencyKey
+			},
+			body: JSON.stringify({
+				run_id: runId,
+				approval_id: approvalId,
+				decision: submission.decision,
+				idempotency_key: idempotencyKey
+			})
+		}
+	)
+		.then(async (res) => {
+			if (!res.ok) throw await res.json();
+			return res.json();
+		})
+		.catch((err) => {
+			error = err?.detail ?? err;
+			console.error(err);
+			return null;
+		});
+
+	if (error) {
+		throw error;
+	}
+
+	return res ?? {};
+};
+
+const createIdempotencyKey = (prefix: string, resourceId: string, status: string): string => {
 	const random =
 		typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function'
 			? crypto.randomUUID()
 			: `${Date.now()}-${Math.random().toString(36).slice(2)}`;
-	return `user-input:${userInputId}:${status}:${random}`;
+	return `${prefix}:${resourceId}:${status}:${random}`;
 };

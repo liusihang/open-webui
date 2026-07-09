@@ -288,7 +288,12 @@ class OpenWebUIClient:
             arguments=arguments or {},
         )
         url = f"{self._base_url}/api/agent/service/runs/{run_id}/tool-call"
-        return await self._post_callback(url, idempotency_key, body.model_dump(mode="json"))
+        return await self._post_callback(
+            url,
+            idempotency_key,
+            body.model_dump(mode="json"),
+            timeout=_user_input_timeout(None, self._timeout),
+        )
 
     async def _post_callback(
         self,

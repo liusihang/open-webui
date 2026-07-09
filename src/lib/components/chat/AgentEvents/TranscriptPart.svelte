@@ -33,7 +33,7 @@
 	{:else if part.kind === 'tool'}
 		<ToolPart {part} />
 	{:else if part.kind === 'approval'}
-		<ApprovalPart {part} />
+		<ApprovalPart {part} {agentRunId} />
 	{:else if part.kind === 'user_input'}
 		<UserInputPart {part} {agentRunId} />
 	{:else if part.kind === 'artifact'}

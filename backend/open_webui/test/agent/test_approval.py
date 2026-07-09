@@ -408,7 +408,7 @@ async def test_destructive_tool_call_waits_for_approval_then_resumes_with_tool_r
 
 
 @pytest.mark.asyncio
-async def test_service_tool_call_returns_immediate_approval_then_same_coordinator_resumes_on_approval():
+async def test_service_tool_call_waits_for_approval_then_returns_tool_result_to_runtime():
     calls = []
 
     async def write_file(path: str, content: str):
@@ -437,21 +437,28 @@ async def test_service_tool_call_returns_immediate_approval_then_same_coordinato
         idempotency_key='tool:leader:call-cross-worker:1',
     )
 
-    approval_required = await execute_agent_run_tool_call(
-        request=_service_request(
-            authority,
-            approval_decision_timeout_seconds=300,
-        ),
-        run_id='run-1',
-        form_data=tool_call,
-        idempotency_key='tool:leader:call-cross-worker:1',
-        authorization='Bearer service-secret',
-        approval_coordinator=request_coordinator,
+    tool_call_task = asyncio.create_task(
+        execute_agent_run_tool_call(
+            request=_service_request(
+                authority,
+                approval_decision_timeout_seconds=300,
+            ),
+            run_id='run-1',
+            form_data=tool_call,
+            idempotency_key='tool:leader:call-cross-worker:1',
+            authorization='Bearer service-secret',
+            approval_coordinator=request_coordinator,
+        )
     )
-    assert approval_required['status'] == 'approval_required'
-    assert approval_required['raw']['approval_id'] == 'approval:run-1:call-cross-worker'
-    assert approval_required['raw']['action'] == 'write_file /workspace/report.txt'
+
+    for _ in range(40):
+        if store.events:
+            break
+        await asyncio.sleep(0.01)
+
     assert [event['event_type'] for event in store.events] == ['approval.requested']
+    assert store.events[0]['payload']['approval_id'] == 'approval:run-1:call-cross-worker'
+    assert store.events[0]['payload']['action'] == 'write_file /workspace/report.txt'
     assert store.state['run-1'] == 'waiting_approval'
     assert calls == []
 
@@ -468,9 +475,11 @@ async def test_service_tool_call_returns_immediate_approval_then_same_coordinato
         idempotency_key='approval:run-1:approval:run-1:call-cross-worker:1',
         approval_coordinator=request_coordinator,
     )
+    tool_response = await asyncio.wait_for(tool_call_task, timeout=1)
 
-    assert decision_response['status'] == 'success'
-    assert json.loads(decision_response['content']) == {
+    assert decision_response['status'] == 'approval_recorded'
+    assert tool_response['status'] == 'success'
+    assert json.loads(tool_response['content']) == {
         'written': '/workspace/report.txt',
         'content': 'replacement',
     }

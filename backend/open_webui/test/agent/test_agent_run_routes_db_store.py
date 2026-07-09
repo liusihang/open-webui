@@ -11,8 +11,9 @@ import pytest
 import pytest_asyncio
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
+from open_webui.agent.approval import AgentApprovalCoordinator
 from open_webui.agent.artifacts import AgentRunArtifactRegistrar
-from open_webui.agent.tool_authority import build_tool_access_envelope
+from open_webui.agent.tool_authority import ToolCallRequest, build_tool_access_envelope
 from open_webui.internal.db import Base
 from open_webui.models.agent_runs import AgentArtifact, AgentRun, AgentRunEvent, AgentRunOperation, AgentRuns
 from open_webui.routers import agent_runs, agent_service
@@ -286,6 +287,76 @@ async def test_agent_run_cancel_marks_cancelled_and_rejects_late_completion(
     assert updated.state == 'cancelled'
     events = await AgentRuns.list_events(run.id)
     assert [event.event_type for event in events] == ['run.cancelled']
+
+
+@pytest.mark.asyncio
+async def test_agent_run_public_approval_decision_records_user_authorized_decision(
+    agent_run_db,
+    app_without_fake_event_store,
+):
+    resume_calls = []
+
+    async def resume_tool():
+        resume_calls.append('resumed')
+        return {'status': 'success', 'content': 'approved tool result'}
+
+    run = await AgentRuns.create_run(
+        user_id='user-1',
+        chat_id='chat-1',
+        user_message_id='msg-user',
+        assistant_message_id='msg-assistant',
+        leader_model_id='model-a',
+    )
+    await AgentRuns.transition_state(
+        run.id,
+        from_states=['queued'],
+        to_state='running',
+        reason='runtime accepted',
+    )
+    coordinator = AgentApprovalCoordinator(AgentRuns)
+    app_without_fake_event_store.state.AGENT_APPROVAL_COORDINATOR = coordinator
+    approval = await coordinator.request_tool_approval(
+        ToolCallRequest(
+            run_id=run.id,
+            participant_id='leader',
+            tool_call_id='call-approval-1',
+            tool_id='tool:terminal:main:write_file',
+            arguments={'path': '/workspace/report.txt', 'content': 'replacement'},
+            idempotency_key='tool:leader:call-approval-1:1',
+        ),
+        {
+            'name': 'write_file',
+            'tool_id': 'terminal:main',
+            'type': 'terminal',
+        },
+        resume=resume_tool,
+    )
+    assert approval is not None
+
+    approval_id = f'approval:{run.id}:call-approval-1'
+    idempotency_key = f'approval:{run.id}:call-approval-1:approved'
+    with TestClient(app_without_fake_event_store) as client:
+        response = client.post(
+            f'/api/agent/runs/{run.id}/approvals/{approval_id}/decision',
+            json={
+                'run_id': run.id,
+                'approval_id': approval_id,
+                'decision': 'approved',
+                'idempotency_key': idempotency_key,
+            },
+            headers={'X-Agent-Idempotency-Key': idempotency_key},
+        )
+
+    assert response.status_code == 200
+    assert response.json()['status'] == 'success'
+    assert resume_calls == ['resumed']
+
+    updated = await AgentRuns.get_run(run.id)
+    assert updated is not None
+    assert updated.state == 'running'
+    events = await AgentRuns.list_events(run.id)
+    assert [event.event_type for event in events] == ['approval.requested', 'approval.completed']
+    assert events[-1].payload['decision'] == 'approved'
 
 
 @pytest.mark.asyncio

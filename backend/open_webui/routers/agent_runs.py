@@ -6,7 +6,15 @@ from typing import Any
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Query, Request, status
 from fastapi.responses import StreamingResponse
-from open_webui.agent.runtime_client import AgentRuntimeClient, AgentRuntimeError
+from open_webui.agent.approval import (
+    AgentApprovalCoordinator,
+    ApprovalDecisionConflict,
+    ApprovalDecisionRequest,
+    ApprovalError,
+    ApprovalNotFound,
+    ApprovalOperationInProgress,
+)
+from open_webui.agent.runtime_client import AgentRuntimeClient, AgentRuntimeError, AgentRuntimeRejected
 from open_webui.agent.events import (
     AgentEventRejected,
     AgentEventStore,
@@ -24,7 +32,7 @@ from open_webui.agent.user_input import (
     UserInputNotFound,
     UserInputOperationInProgress,
 )
-from open_webui.models.agent_runs import AgentRunNotFound, AgentRuns
+from open_webui.models.agent_runs import AgentRunNotFound, AgentRunOperationConflict, AgentRuns
 from open_webui.utils.auth import get_verified_user
 
 router = APIRouter()
@@ -78,6 +86,16 @@ def get_agent_user_input_coordinator(request: Request) -> AgentUserInputCoordina
 
     coordinator = AgentUserInputCoordinator(get_configured_agent_event_store(request) or AgentRuns)
     request.app.state.AGENT_USER_INPUT_COORDINATOR = coordinator
+    return coordinator
+
+
+def get_agent_approval_coordinator(request: Request) -> AgentApprovalCoordinator:
+    coordinator = getattr(request.app.state, 'AGENT_APPROVAL_COORDINATOR', None)
+    if coordinator is not None:
+        return coordinator
+
+    coordinator = AgentApprovalCoordinator(get_configured_agent_event_store(request) or AgentRuns)
+    request.app.state.AGENT_APPROVAL_COORDINATOR = coordinator
     return coordinator
 
 
@@ -242,6 +260,102 @@ async def complete_agent_run_user_input(
         ) from exc
 
 
+@router.post('/{run_id}/approvals/{approval_id}/decision')
+async def decide_agent_run_approval_endpoint(
+    run_id: str,
+    approval_id: str,
+    form_data: ApprovalDecisionRequest,
+    request: Request,
+    idempotency_key: str | None = Header(
+        default=None,
+        alias='X-Agent-Idempotency-Key',
+    ),
+    user=Depends(get_verified_user),
+    coordinator: AgentApprovalCoordinator = Depends(get_agent_approval_coordinator),
+):
+    run = await AgentRuns.get_run(run_id)
+    if run is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail='Agent Run not found',
+        )
+    if run.user_id != user.id and getattr(user, 'role', None) != 'admin':
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail='Agent Run not found',
+        )
+
+    key = _require_matching_idempotency_key(
+        form_data.idempotency_key,
+        idempotency_key,
+    )
+    try:
+        decision = form_data.model_copy(
+            update={
+                'run_id': run_id,
+                'approval_id': approval_id,
+                'idempotency_key': key,
+            }
+        )
+        response = await coordinator.decide(decision)
+        if response.get('status') == 'approval_rejected':
+            await _request_runtime_approval_rejection(request, run_id, approval_id, decision, response)
+        return response
+    except AgentRuntimeRejected as exc:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail={
+                'code': exc.code,
+                'message': str(exc),
+            },
+        ) from exc
+    except AgentRuntimeError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail={
+                'code': exc.code,
+                'message': str(exc),
+            },
+        ) from exc
+    except AgentRunOperationConflict as exc:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail='idempotency_conflict',
+        ) from exc
+    except ApprovalOperationInProgress:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail={
+                'code': ApprovalOperationInProgress.code,
+                'message': 'approval operation is still in progress',
+            },
+        )
+    except ApprovalDecisionConflict as exc:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail={
+                'code': exc.code,
+                'message': str(exc),
+            },
+        ) from exc
+    except ApprovalNotFound as exc:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail={
+                'code': exc.code,
+                'message': str(exc),
+            },
+        ) from exc
+    except ApprovalError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail={
+                'code': getattr(exc, 'code', 'approval_error'),
+                'message': str(exc),
+            },
+        ) from exc
+
+
 async def cancel_agent_runs_for_chat(
     request: Request,
     chat_id: str,
@@ -273,6 +387,38 @@ async def _request_runtime_cancel(request: Request, run_id: str) -> None:
         await client.cancel_run(run_id)
     except AgentRuntimeError as exc:
         log.warning('Agent runtime cancel request failed for run_id=%s: %s', run_id, exc)
+
+
+async def _request_runtime_approval_rejection(
+    request: Request,
+    run_id: str,
+    approval_id: str,
+    decision: ApprovalDecisionRequest,
+    response: dict[str, Any],
+) -> None:
+    payload = {
+        'approval_id': approval_id,
+        'decision': decision.decision,
+        'tool_call_id': response.get('structured_error', {}).get('details', {}).get('tool_call_id'),
+        'tool_id': response.get('structured_error', {}).get('details', {}).get('tool_id'),
+        'tool_name': _approval_tool_name_from_content(response.get('content')),
+        'result': response,
+    }
+    client = AgentRuntimeClient(
+        getattr(request.app.state.config, 'AGENT_RUNTIME_BASE_URL', ''),
+        service_token=getattr(request.app.state.config, 'AGENT_RUNTIME_SERVICE_TOKEN', ''),
+        timeout=getattr(request.app.state.config, 'AGENT_RUN_DEFAULT_TIMEOUT_SECONDS', None),
+    )
+    await client.notify_approval_decision(run_id, payload)
+
+
+def _approval_tool_name_from_content(content: Any) -> str | None:
+    if not isinstance(content, str):
+        return None
+    prefix = 'User rejected approval for '
+    if not content.startswith(prefix):
+        return None
+    return content.removeprefix(prefix).rstrip('.') or None
 
 
 def _agent_run_detail(run) -> AgentRunDetailResponse:

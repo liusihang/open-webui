@@ -1,12 +1,42 @@
 <script lang="ts">
+	import { getContext } from 'svelte';
+	import type { Writable } from 'svelte/store';
+	import type { i18n as i18nType } from 'i18next';
+	import { toast } from 'svelte-sonner';
+
+	import { submitAgentRunApproval, type AgentRunApprovalDecision } from '$lib/apis/agentRuns';
 	import type { AgentTranscriptApprovalPart } from './types';
 
 	export let part: AgentTranscriptApprovalPart;
+	export let agentRunId: string | null = null;
+
+	const i18n = getContext<Writable<i18nType>>('i18n');
+
+	let submitting: AgentRunApprovalDecision | null = null;
+	let submitted = false;
 
 	const statusText = ($status: AgentTranscriptApprovalPart['status']): string => {
-		if ($status === 'pending') return 'awaiting approval';
-		if ($status === 'rejected') return 'rejected';
-		return 'approved';
+		if ($status === 'pending') return $i18n.t('awaiting approval');
+		if ($status === 'rejected') return $i18n.t('rejected');
+		return $i18n.t('approved');
+	};
+
+	const submit = async (decision: AgentRunApprovalDecision) => {
+		if (!agentRunId || submitting || submitted || part.status !== 'pending') {
+			return;
+		}
+		submitting = decision;
+		try {
+			await submitAgentRunApproval(localStorage.getItem('token') ?? '', agentRunId, part.approvalId, {
+				decision
+			});
+			submitted = true;
+		} catch (error) {
+			toast.error(`${error}`);
+			submitting = null;
+			return;
+		}
+		submitting = null;
 	};
 </script>
 
@@ -24,6 +54,33 @@
 	</div>
 	{#if part.description && part.description !== part.action}
 		<div class="agent-approval-description">{part.description}</div>
+	{/if}
+	{#if part.status === 'pending' && agentRunId}
+		<div class="agent-approval-actions">
+			{#if submitted}
+				<span class="agent-approval-submitted" role="status">
+					{$i18n.t('Submitted')}. {$i18n.t('Waiting for agent\u2026')}
+				</span>
+			{:else}
+				<button
+					type="button"
+					class="approve"
+					disabled={submitting !== null}
+					aria-label={$i18n.t('Approve tool action')}
+					on:click={() => void submit('approved')}
+				>
+					{$i18n.t('Approve')}
+				</button>
+				<button
+					type="button"
+					disabled={submitting !== null}
+					aria-label={$i18n.t('Reject tool action')}
+					on:click={() => void submit('rejected')}
+				>
+					{$i18n.t('Reject')}
+				</button>
+			{/if}
+		</div>
 	{/if}
 </div>
 
@@ -70,5 +127,31 @@
 	.agent-approval-description {
 		font-size: 0.72rem;
 		color: var(--gray-600, #4b5563);
+	}
+	.agent-approval-actions {
+		display: flex;
+		align-items: center;
+		gap: 0.35rem;
+	}
+	.agent-approval-actions button {
+		border-radius: 0.25rem;
+		border: 1px solid var(--gray-200, #e5e7eb);
+		background: var(--white, #ffffff);
+		color: var(--gray-700, #374151);
+		font-size: 0.68rem;
+		font-weight: 500;
+		padding: 0.25rem 0.45rem;
+	}
+	.agent-approval-actions button.approve {
+		background: var(--gray-900, #111827);
+		border-color: var(--gray-900, #111827);
+		color: var(--white, #ffffff);
+	}
+	.agent-approval-actions button:disabled {
+		opacity: 0.55;
+	}
+	.agent-approval-submitted {
+		font-size: 0.68rem;
+		color: var(--gray-500, #6b7280);
 	}
 </style>

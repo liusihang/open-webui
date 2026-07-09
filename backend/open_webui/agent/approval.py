@@ -257,16 +257,16 @@ class AgentApprovalCoordinator:
 
         try:
             await self._record_pending_decision(request, pending)
-            if request.decision == 'rejected':
-                response = _approval_rejected_result(
-                    approval_id=request.approval_id,
-                    pending=pending,
-                )
-            elif pending.wait_for_decision:
+            if pending.wait_for_decision:
                 response = _approval_recorded_result(
                     approval_id=request.approval_id,
                     decision=request.decision,
                     tool_name=pending.tool.get('name') or pending.request.tool_id,
+                )
+            elif request.decision == 'rejected':
+                response = _approval_rejected_result(
+                    approval_id=request.approval_id,
+                    pending=pending,
                 )
             else:
                 response = await self._resume_approved_tool(pending)

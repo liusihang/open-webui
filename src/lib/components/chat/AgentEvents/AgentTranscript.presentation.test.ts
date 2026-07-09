@@ -59,12 +59,18 @@ describe('AgentTranscript presentation guardrails', () => {
 		expect(detail).toContain('<pre');
 	});
 
-	it('keeps approval and artifact rows visually quiet and free of fake buttons', () => {
+	it('keeps approval and artifact rows visually quiet while wiring real approval actions', () => {
 		const approval = readSource('./ApprovalPart.svelte');
+		const transcriptPart = readSource('./TranscriptPart.svelte');
 		const artifact = readSource('./ArtifactPart.svelte');
 
-		// Approval must surface status text only; no approve/reject form actions
-		expect(approval).not.toContain('<button');
+		// Approval actions must be real API-backed controls, not decorative status text
+		expect(approval).toContain('submitAgentRunApproval');
+		expect(approval).toContain("part.status === 'pending'");
+		expect(approval).toContain("<button");
+		expect(approval).toContain("'approved'");
+		expect(approval).toContain("'rejected'");
+		expect(transcriptPart).toContain('<ApprovalPart {part} {agentRunId} />');
 		expect(approval).not.toContain('<form');
 		expect(approval).not.toContain('AgentDetailSection');
 		// Artifact must show name/mime quietly without raw metadata by default

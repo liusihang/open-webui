@@ -5,7 +5,8 @@ import {
 	buildAgentRunEventsUrl,
 	createAgentRunEventsSource,
 	getAgentRunEvents,
-	getAgentRuns
+	getAgentRuns,
+	submitAgentRunApproval
 } from './index';
 
 class FakeEventSource {
@@ -101,5 +102,40 @@ describe('agentRuns api helpers', () => {
 			'/api/agent/runs/run-1/events?after_seq=2'
 		);
 		expect(FakeEventSource.instances[0]?.options).toEqual({ withCredentials: true });
+	});
+
+	it('submits approval decisions through the user-facing agent run route', async () => {
+		const fetchMock = vi.fn().mockResolvedValue({
+			ok: true,
+			json: async () => ({ status: 'approval_recorded' })
+		});
+		vi.stubGlobal('fetch', fetchMock);
+
+		const result = await submitAgentRunApproval('token-1', 'run-1', 'approval:run-1:call-1', {
+			decision: 'approved',
+			idempotencyKey: 'approval-key-1'
+		});
+
+		expect(result).toEqual({ status: 'approval_recorded' });
+		expect(fetchMock).toHaveBeenCalledTimes(1);
+		expect(fetchMock.mock.calls[0]?.[0]).toContain(
+			'/api/agent/runs/run-1/approvals/approval%3Arun-1%3Acall-1/decision'
+		);
+		expect(fetchMock.mock.calls[0]?.[1]).toMatchObject({
+			method: 'POST',
+			credentials: 'include',
+			headers: {
+				Accept: 'application/json',
+				'Content-Type': 'application/json',
+				authorization: 'Bearer token-1',
+				'X-Agent-Idempotency-Key': 'approval-key-1'
+			}
+		});
+		expect(JSON.parse(fetchMock.mock.calls[0]?.[1]?.body as string)).toEqual({
+			run_id: 'run-1',
+			approval_id: 'approval:run-1:call-1',
+			decision: 'approved',
+			idempotency_key: 'approval-key-1'
+		});
 	});
 });
