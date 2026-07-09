@@ -863,6 +863,28 @@ def _tool_specs(request: RunStartRequest) -> list[dict[str, Any]]:
     return [tool for tool in tools if isinstance(tool, dict)]
 
 
+def _user_input_requested_schema(
+    requested_schema: dict[str, Any] | None,
+    questions: list[dict[str, Any]] | None,
+) -> dict[str, Any]:
+    schema = dict(requested_schema or {})
+    if questions:
+        schema.setdefault("type", "object")
+        schema["questions"] = questions[:3]
+    if not schema:
+        schema = {
+            "type": "object",
+            "properties": {
+                "response": {
+                    "type": "string",
+                    "title": "Response",
+                }
+            },
+            "required": ["response"],
+        }
+    return schema
+
+
 class RequestUserInputTool(ToolBase):
     name = "request_user_input"
     description = (
@@ -871,7 +893,9 @@ class RequestUserInputTool(ToolBase):
         "secrets, passwords, API keys, tokens, cookies, private credentials, or "
         "information already available in the conversation. Ask one concise question "
         "unless a structured form is necessary. Returns a JSON object with status "
-        "accepted, declined, cancelled, or timeout, and accepted content when provided."
+        "accepted, declined, cancelled, or timeout, and accepted content when provided. "
+        "Prefer questions[].options[] when the user should choose from 2-3 clear options; "
+        "the UI will still allow a custom answer."
     )
     input_schema = {
         "type": "object",
@@ -880,9 +904,38 @@ class RequestUserInputTool(ToolBase):
                 "type": "string",
                 "description": "Concise user-facing question or instruction.",
             },
+            "questions": {
+                "type": "array",
+                "description": "Optional Codex-style choice questions. Prefer 1 question; maximum 3.",
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "id": {"type": "string"},
+                        "header": {"type": "string"},
+                        "question": {"type": "string"},
+                        "response_key": {"type": "string"},
+                        "options": {
+                            "type": "array",
+                            "items": {
+                                "type": "object",
+                                "properties": {
+                                    "id": {"type": "string"},
+                                    "label": {"type": "string"},
+                                    "description": {"type": "string"},
+                                    "value": {},
+                                    "recommended": {"type": "boolean"},
+                                },
+                                "required": ["label"],
+                            },
+                        },
+                        "allow_custom": {"type": "boolean"},
+                    },
+                    "required": ["question", "options"],
+                },
+            },
             "requested_schema": {
                 "type": "object",
-                "description": "JSON schema for the user response. Prefer a small object with 1-3 fields.",
+                "description": "Fallback JSON schema for the user response. Prefer a small object with 1-3 fields.",
             },
             "timeout_seconds": {
                 "type": "number",
@@ -893,7 +946,7 @@ class RequestUserInputTool(ToolBase):
                 "description": "Whether the user may cancel the request.",
             },
         },
-        "required": ["message", "requested_schema"],
+        "required": ["message"],
     }
     is_concurrency_safe = False
     is_read_only = True
@@ -925,7 +978,8 @@ class RequestUserInputTool(ToolBase):
         self,
         *,
         message: str,
-        requested_schema: dict[str, Any],
+        requested_schema: dict[str, Any] | None = None,
+        questions: list[dict[str, Any]] | None = None,
         timeout_seconds: float | None = None,
         allow_cancel: bool = True,
     ) -> ToolChunk:
@@ -941,7 +995,7 @@ class RequestUserInputTool(ToolBase):
                 user_input_id=user_input_id,
                 tool_call_id=tool_call_id,
                 message=message,
-                requested_schema=requested_schema,
+                requested_schema=_user_input_requested_schema(requested_schema, questions),
                 timeout_seconds=timeout_seconds,
                 allow_cancel=allow_cancel,
             )

@@ -13,11 +13,32 @@ from agentscope_runtime.app import (
     _emit_final_answer,
     _msg_text,
     _run_leader_streaming,
+    _user_input_requested_schema,
     create_app,
     create_app_from_env,
 )
 
 SERVICE_TOKEN = "runtime-secret"
+
+
+def test_user_input_requested_schema_wraps_codex_style_questions() -> None:
+    questions = [
+        {
+            "id": "target",
+            "question": "Which target should I use?",
+            "options": [
+                {"label": "Use default", "description": "Fastest path.", "recommended": True},
+                {"label": "Pick manually", "description": "Wait for a precise value."},
+            ],
+        }
+    ]
+
+    assert _user_input_requested_schema(None, questions) == {
+        "type": "object",
+        "questions": questions,
+    }
+    assert _user_input_requested_schema({"type": "object"}, questions)["questions"] == questions
+    assert len(_user_input_requested_schema(None, questions * 4)["questions"]) == 3
 
 
 class RecordingOpenWebUIClient:
@@ -1017,6 +1038,14 @@ async def test_general_agent_exposes_request_user_input_tool_and_continues_after
         if tool.get("type") == "function"
     ]
     assert "request_user_input" in tool_names
+    user_input_tool = next(
+        tool
+        for tool in openwebui_client.model_calls[0]["tools"]
+        if tool.get("type") == "function" and tool["function"]["name"] == "request_user_input"
+    )
+    user_input_params = user_input_tool["function"]["parameters"]
+    assert "questions" in user_input_params["properties"]
+    assert user_input_params["required"] == ["message"]
     assert openwebui_client.user_input_requests == [
         {
             "run_id": "run-user-input-tool",

@@ -1,5 +1,6 @@
 <script lang="ts">
 	import { getContext } from 'svelte';
+	import { onDestroy, onMount } from 'svelte';
 	import type { Writable } from 'svelte/store';
 	import type { i18n as i18nType } from 'i18next';
 
@@ -13,6 +14,8 @@
 
 	let open = false;
 	let initialized = false;
+	let now = Date.now();
+	let tickTimer: ReturnType<typeof setInterval> | null = null;
 
 	$: if (!initialized && model) {
 		open =
@@ -34,11 +37,36 @@
 		return $i18n.t('Processing');
 	};
 
-	const elapsedText = ($model: AgentTranscriptModel): string | null => {
-		if ($model.elapsedMs === null) {
+	onMount(() => {
+		tickTimer = setInterval(() => {
+			if (model && !model.isTerminal && model.startedAt !== null) {
+				now = Date.now();
+			}
+		}, 1000);
+	});
+
+	onDestroy(() => {
+		if (tickTimer !== null) {
+			clearInterval(tickTimer);
+			tickTimer = null;
+		}
+	});
+
+	const displayElapsedMs = ($model: AgentTranscriptModel, currentNow: number): number | null => {
+		if ($model.startedAt === null) {
+			return $model.elapsedMs;
+		}
+		if ($model.isTerminal) {
+			return $model.elapsedMs;
+		}
+		return Math.max(0, currentNow - $model.startedAt);
+	};
+
+	const elapsedText = (elapsedMs: number | null): string | null => {
+		if (elapsedMs === null) {
 			return null;
 		}
-		const totalSeconds = Math.max(0, Math.round($model.elapsedMs / 1000));
+		const totalSeconds = Math.max(0, Math.round(elapsedMs / 1000));
 		const hours = Math.floor(totalSeconds / 3600);
 		const minutes = Math.floor((totalSeconds % 3600) / 60);
 		const seconds = totalSeconds % 60;
@@ -50,6 +78,8 @@
 		}
 		return `${seconds}s`;
 	};
+
+	$: displayedElapsedMs = displayElapsedMs(model, now);
 
 	const connectionText = ($model: AgentTranscriptModel): string | null => {
 		if ($model.isTerminal) {
@@ -68,8 +98,8 @@
 <details class="agent-transcript" data-run-status={model.runStatus} bind:open>
 	<summary class="agent-transcript-summary">
 		<span class="agent-transcript-headline">{headline(model)}</span>
-		{#if elapsedText(model)}
-			<span class="agent-transcript-time">{elapsedText(model)}</span>
+		{#if elapsedText(displayedElapsedMs)}
+			<span class="agent-transcript-time">{elapsedText(displayedElapsedMs)}</span>
 		{/if}
 		{#if connectionText(model)}
 			<span class="agent-transcript-connection" role="status">{connectionText(model)}</span>

@@ -84,7 +84,8 @@ describe('AgentTranscript presentation guardrails', () => {
 
 		expect(transcript).toContain('<details class="agent-transcript"');
 		expect(transcript).toContain('<summary class="agent-transcript-summary">');
-		expect(transcript).toContain('elapsedText(model)');
+		expect(transcript).toContain('setInterval');
+		expect(transcript).toContain('displayElapsedMs(model, now)');
 		expect(transcript).not.toContain('artifactCount');
 		expect(transcript).not.toContain('approvalCount');
 		expect(transcript).not.toContain('agent-transcript-flag');
@@ -133,5 +134,18 @@ describe('AgentTranscript presentation guardrails', () => {
 		expect(action).toContain('color: var(--agent-transcript-body-color');
 		expect(tool).toMatch(/color:\s*var\(\s*--agent-transcript-tool-color/);
 		expect(tool).toContain('--tw-prose-captions');
+	});
+
+	it('renders ask-user prompts as option rows with a custom answer path', () => {
+		const userInput = readSource('./UserInputPart.svelte');
+
+		expect(userInput).toContain('choiceQuestionsFromSchema');
+		expect(userInput).toContain('agent-user-choice-option');
+		expect(userInput).toContain('agent-user-choice-custom');
+		expect(userInput).toContain('selectedOptions');
+		expect(userInput).toContain('customAnswers');
+		expect(userInput).toContain("$i18n.t('Continue')");
+		expect(userInput).toContain("$i18n.t('Skip')");
+		expect(userInput).toContain("$i18n.t('Tell the agent how to adjust')");
 	});
 });
