@@ -144,6 +144,8 @@ describe('AgentTranscript presentation guardrails', () => {
 		expect(userInput).toContain('agent-user-choice-custom');
 		expect(userInput).toContain('selectedOptions');
 		expect(userInput).toContain('customAnswers');
+		expect(userInput).toMatch(/canSubmitChoiceAnswer[\s\S]*selectedOptions\[/);
+		expect(userInput).toMatch(/canSubmitChoiceAnswer[\s\S]*customAnswers\[/);
 		expect(userInput).toContain("$i18n.t('Continue')");
 		expect(userInput).toContain("$i18n.t('Skip')");
 		expect(userInput).toContain("$i18n.t('Tell the agent how to adjust')");

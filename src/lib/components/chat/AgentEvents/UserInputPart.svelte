@@ -52,7 +52,12 @@
 		currentQuestionIndex = choiceQuestions.length - 1;
 	}
 	$: canSubmitChoiceAnswer =
-		choiceQuestions.length === 0 || choiceQuestions.every((question) => questionHasAnswer(question));
+		choiceQuestions.length === 0 ||
+		choiceQuestions.every(
+			(question) =>
+				Boolean(selectedOptions[question.id]) ||
+				Boolean((customAnswers[question.id] ?? '').trim())
+		);
 	$: terminalText = terminalStatusText(part.status);
 
 	const submit = async (status: 'accepted' | 'declined' | 'cancelled') => {
@@ -177,9 +182,6 @@
 		}
 		return questions[Math.min(index, questions.length - 1)];
 	};
-
-	const questionHasAnswer = (question: UserInputChoiceQuestion): boolean =>
-		Boolean(selectedOptions[question.id]) || Boolean((customAnswers[question.id] ?? '').trim());
 
 	const collectChoiceContent = (
 		questions: UserInputChoiceQuestion[],
