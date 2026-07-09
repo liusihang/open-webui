@@ -277,26 +277,19 @@ async def test_bridge_builds_agentscope_template_model_and_tool_callback_boundar
         ],
     ):
         pass
-    commentary_messages = [
-        message
-        for message in callbacks.model_calls[-1]["messages"]
-        if message.get("role") == "assistant" and message.get("phase") == "commentary"
-    ]
-    assert [message.get("content") for message in commentary_messages[-2:]] == [
-        "I will use Search with text input.",
-        "Search completed.",
-    ]
     second_call_messages = callbacks.model_calls[-1]["messages"]
     assert second_call_messages[0]["role"] == "user"
-    assert second_call_messages[-2:] == commentary_messages[-2:]
-    replay_text = "\n".join(str(message.get("content") or "") for message in commentary_messages)
+    assert all(message.get("phase") != "commentary" for message in second_call_messages)
+    replay_text = "\n".join(str(message.get("content") or "") for message in second_call_messages)
+    assert "I will use Search with text input." not in replay_text
+    assert "Search completed." not in replay_text
     assert "Previous Agent Mode public process" not in replay_text
     assert "phase:running" not in replay_text
     assert "agent mode" not in replay_text
 
 
 @pytest.mark.asyncio
-async def test_current_run_public_notes_do_not_precede_current_user_or_tool_history() -> None:
+async def test_current_run_public_notes_stay_out_of_current_model_replay() -> None:
     from agentscope_runtime.agentscope_bridge import AgentScopeRuntimeBridge
 
     callbacks = RecordingBridgeCallbacks()
@@ -361,19 +354,15 @@ async def test_current_run_public_notes_do_not_precede_current_user_or_tool_hist
     function_indices = [
         index for index, message in enumerate(messages) if str(message.get("type") or "").startswith("function_call")
     ]
-    commentary_indices = [
-        index for index, message in enumerate(messages) if message.get("phase") == "commentary"
-    ]
 
     assert user_index == 0
     assert function_indices == [1, 2, 3, 4]
-    assert commentary_indices == [5, 6, 7, 8]
-    assert [messages[index]["content"] for index in commentary_indices] == [
-        "I will use Get environment.",
-        "Get environment completed.",
-        "I will use Get current timestamp.",
-        "Get current timestamp completed.",
-    ]
+    assert all(message.get("phase") != "commentary" for message in messages)
+    replay_text = "\n".join(str(message.get("content") or "") for message in messages)
+    assert "I will use Get environment." not in replay_text
+    assert "Get environment completed." not in replay_text
+    assert "I will use Get current timestamp." not in replay_text
+    assert "Get current timestamp completed." not in replay_text
 
 
 @pytest.mark.asyncio

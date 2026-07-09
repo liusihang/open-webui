@@ -274,10 +274,6 @@ class OpenWebUIAgentScopeModel(ChatModelBase):
             model_name=model_name,
             reasoning_parts=self._private_reasoning_parts,
         )
-        formatted_messages = _append_assistant_context_replay(
-            formatted_messages,
-            assistant_messages=self._live_assistant_context(),
-        )
 
         block_id = uuid.uuid4().hex
         text_delta_index = 0
