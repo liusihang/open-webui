@@ -286,10 +286,94 @@ async def test_bridge_builds_agentscope_template_model_and_tool_callback_boundar
         "I will use Search with text input.",
         "Search completed.",
     ]
+    second_call_messages = callbacks.model_calls[-1]["messages"]
+    assert second_call_messages[0]["role"] == "user"
+    assert second_call_messages[-2:] == commentary_messages[-2:]
     replay_text = "\n".join(str(message.get("content") or "") for message in commentary_messages)
     assert "Previous Agent Mode public process" not in replay_text
     assert "phase:running" not in replay_text
     assert "agent mode" not in replay_text
+
+
+@pytest.mark.asyncio
+async def test_current_run_public_notes_do_not_precede_current_user_or_tool_history() -> None:
+    from agentscope_runtime.agentscope_bridge import AgentScopeRuntimeBridge
+
+    callbacks = RecordingBridgeCallbacks()
+    bridge = AgentScopeRuntimeBridge(
+        run_id="run-order",
+        runtime_session_id="rt-run-order",
+        callback_client=callbacks,
+    )
+    model = bridge.build_model(
+        participant_id="leader",
+        model_id="model-order",
+    )
+
+    environment_tool = bridge.build_tool_proxy(
+        participant_id="leader",
+        tool_id="tool-env",
+        name="get_environment",
+        description="Get environment.",
+        input_schema={"type": "object"},
+    )
+    timestamp_tool = bridge.build_tool_proxy(
+        participant_id="leader",
+        tool_id="tool-time",
+        name="get_current_timestamp",
+        description="Get current timestamp.",
+        input_schema={"type": "object"},
+    )
+    await environment_tool()
+    await timestamp_tool()
+
+    async for _ in await model(
+        [
+            {"role": "user", "content": "测试下多步工具调用"},
+            {
+                "type": "function_call",
+                "call_id": "call_env",
+                "name": "get_environment",
+                "arguments": "{}",
+            },
+            {
+                "type": "function_call",
+                "call_id": "call_time",
+                "name": "get_current_timestamp",
+                "arguments": "{}",
+            },
+            {
+                "type": "function_call_output",
+                "call_id": "call_env",
+                "output": '{"status":"success"}',
+            },
+            {
+                "type": "function_call_output",
+                "call_id": "call_time",
+                "output": '{"status":"success"}',
+            },
+        ],
+    ):
+        pass
+
+    messages = callbacks.model_calls[-1]["messages"]
+    user_index = next(index for index, message in enumerate(messages) if message.get("role") == "user")
+    function_indices = [
+        index for index, message in enumerate(messages) if str(message.get("type") or "").startswith("function_call")
+    ]
+    commentary_indices = [
+        index for index, message in enumerate(messages) if message.get("phase") == "commentary"
+    ]
+
+    assert user_index == 0
+    assert function_indices == [1, 2, 3, 4]
+    assert commentary_indices == [5, 6, 7, 8]
+    assert [messages[index]["content"] for index in commentary_indices] == [
+        "I will use Get environment.",
+        "Get environment completed.",
+        "I will use Get current timestamp.",
+        "Get current timestamp completed.",
+    ]
 
 
 @pytest.mark.asyncio
@@ -473,12 +557,12 @@ async def test_model_bridge_replays_private_reasoning_content_to_next_model_call
 
     assert callbacks.model_calls[0]["messages"] == [{"role": "user", "content": "第一步"}]
     assert callbacks.model_calls[1]["messages"] == [
+        {"role": "user", "content": "第二步"},
         {
             "role": "assistant",
             "content": "",
             "reasoning_content": "先确认构建产物，再继续。",
         },
-        {"role": "user", "content": "第二步"},
     ]
     assert callbacks.text_deltas == []
 

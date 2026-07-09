@@ -198,6 +198,7 @@ class OpenWebUIAgentScopeModel(ChatModelBase):
         callback_client: OpenWebUIBridgeCallbacks,
         on_final_text: Callable[[str, str], None] | None = None,
         assistant_context: Callable[[], list[dict[str, Any]]] | None = None,
+        live_assistant_context: Callable[[], list[dict[str, Any]]] | None = None,
         default_model_params: dict[str, Any] | None = None,
     ) -> None:
         super().__init__(
@@ -213,6 +214,7 @@ class OpenWebUIAgentScopeModel(ChatModelBase):
         self.callback_client = callback_client
         self._on_final_text = on_final_text
         self._assistant_context = assistant_context or (lambda: [])
+        self._live_assistant_context = live_assistant_context or (lambda: [])
         self.default_model_params = dict(default_model_params or {})
         self._next_model_call_index = 1
         self._formatter = OpenAIChatFormatter()
@@ -267,10 +269,14 @@ class OpenWebUIAgentScopeModel(ChatModelBase):
             await self._format_messages(messages),
             assistant_messages=self._assistant_context(),
         )
-        formatted_messages = _inject_private_reasoning_replay(
+        formatted_messages = _append_private_reasoning_replay(
             formatted_messages,
             model_name=model_name,
             reasoning_parts=self._private_reasoning_parts,
+        )
+        formatted_messages = _append_assistant_context_replay(
+            formatted_messages,
+            assistant_messages=self._live_assistant_context(),
         )
 
         block_id = uuid.uuid4().hex
@@ -676,6 +682,7 @@ class AgentScopeRuntimeBridge:
             for participant_id, messages in (assistant_context_by_participant or {}).items()
             if isinstance(messages, list)
         }
+        self._live_assistant_context_by_participant: dict[str, list[dict[str, Any]]] = {}
         self._next_tool_call_index = 1
 
     def build_subagent_template(
@@ -706,6 +713,7 @@ class AgentScopeRuntimeBridge:
             callback_client=self.callback_client,
             on_final_text=self._record_final_text,
             assistant_context=lambda: self._assistant_context(participant_id),
+            live_assistant_context=lambda: self._live_assistant_context(participant_id),
             default_model_params=default_model_params,
         )
 
@@ -725,12 +733,15 @@ class AgentScopeRuntimeBridge:
         message = _format_public_commentary_message(delta)
         if not message:
             return
-        messages = self._assistant_context_by_participant.setdefault(participant_id, [])
+        messages = self._live_assistant_context_by_participant.setdefault(participant_id, [])
         messages.append(message)
-        self._assistant_context_by_participant[participant_id] = _trim_assistant_context_messages(messages)
+        self._live_assistant_context_by_participant[participant_id] = _trim_assistant_context_messages(messages)
 
     def _assistant_context(self, participant_id: str) -> list[dict[str, Any]]:
         return [dict(message) for message in self._assistant_context_by_participant.get(participant_id, [])]
+
+    def _live_assistant_context(self, participant_id: str) -> list[dict[str, Any]]:
+        return [dict(message) for message in self._live_assistant_context_by_participant.get(participant_id, [])]
 
     def build_tool_proxy(
         self,
@@ -817,7 +828,7 @@ def _raw_private_reasoning_replay_enabled(model_name: str | None) -> bool:
     return not any(marker in lower for marker in PRIVATE_REASONING_REPLAY_BLOCKED_MODEL_MARKERS)
 
 
-def _inject_private_reasoning_replay(
+def _append_private_reasoning_replay(
     messages: list[dict[str, Any]],
     *,
     model_name: str | None,
@@ -833,12 +844,7 @@ def _inject_private_reasoning_replay(
         "content": "",
         "reasoning_content": reasoning_text[-PRIVATE_REASONING_REPLAY_MAX_CHARS:],
     }
-    insert_at = len(messages)
-    for index in range(len(messages) - 1, -1, -1):
-        if str(messages[index].get("role") or "").lower() == "user":
-            insert_at = index
-            break
-    return [*messages[:insert_at], replay_message, *messages[insert_at:]]
+    return [*messages, replay_message]
 
 
 def _inject_assistant_context_replay(
@@ -859,6 +865,21 @@ def _inject_assistant_context_replay(
             insert_at = index
             break
     return [*messages[:insert_at], *replay_messages, *messages[insert_at:]]
+
+
+def _append_assistant_context_replay(
+    messages: list[dict[str, Any]],
+    *,
+    assistant_messages: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    replay_messages = [
+        normalized
+        for message in assistant_messages
+        if (normalized := _normalize_assistant_context_message(message)) is not None
+    ]
+    if not replay_messages:
+        return messages
+    return [*messages, *replay_messages]
 
 
 def _format_public_commentary_message(delta: str) -> dict[str, Any] | None:
