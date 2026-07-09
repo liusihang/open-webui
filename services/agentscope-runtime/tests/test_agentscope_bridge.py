@@ -277,15 +277,18 @@ async def test_bridge_builds_agentscope_template_model_and_tool_callback_boundar
         ],
     ):
         pass
-    replay_messages = [
+    commentary_messages = [
         message
         for message in callbacks.model_calls[-1]["messages"]
-        if "Previous Agent Mode public process" in str(message.get("content"))
+        if message.get("role") == "assistant" and message.get("phase") == "commentary"
     ]
-    assert replay_messages
-    replay_text = str(replay_messages[0]["content"])
-    assert "phase:running assistant_note: I will use Search with text input." in replay_text
-    assert "phase:running action_summary: Search completed." in replay_text
+    assert [message.get("content") for message in commentary_messages[-2:]] == [
+        "I will use Search with text input.",
+        "Search completed.",
+    ]
+    replay_text = "\n".join(str(message.get("content") or "") for message in commentary_messages)
+    assert "Previous Agent Mode public process" not in replay_text
+    assert "phase:running" not in replay_text
     assert "agent mode" not in replay_text
 
 

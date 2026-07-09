@@ -33,7 +33,7 @@ secrets, or raw tool server credentials inside this AgentScope runtime."""
 MODEL_CALL_RETRY_ATTEMPTS = 3
 MODEL_CALL_RETRY_DELAY_SECONDS = 0.05
 PRIVATE_REASONING_REPLAY_MAX_CHARS = 12000
-PUBLIC_PROCESS_REPLAY_MAX_CHARS = 12000
+PUBLIC_ASSISTANT_CONTEXT_REPLAY_MAX_CHARS = 12000
 PRIVATE_REASONING_REPLAY_BLOCKED_MODEL_MARKERS = (
     "gpt",
     "openai",
@@ -197,7 +197,7 @@ class OpenWebUIAgentScopeModel(ChatModelBase):
         model_id: str,
         callback_client: OpenWebUIBridgeCallbacks,
         on_final_text: Callable[[str, str], None] | None = None,
-        public_process_context: Callable[[], list[str]] | None = None,
+        assistant_context: Callable[[], list[dict[str, Any]]] | None = None,
         default_model_params: dict[str, Any] | None = None,
     ) -> None:
         super().__init__(
@@ -212,7 +212,7 @@ class OpenWebUIAgentScopeModel(ChatModelBase):
         self.participant_id = participant_id
         self.callback_client = callback_client
         self._on_final_text = on_final_text
-        self._public_process_context = public_process_context or (lambda: [])
+        self._assistant_context = assistant_context or (lambda: [])
         self.default_model_params = dict(default_model_params or {})
         self._next_model_call_index = 1
         self._formatter = OpenAIChatFormatter()
@@ -263,9 +263,9 @@ class OpenWebUIAgentScopeModel(ChatModelBase):
         params = _merge_model_params(self.default_model_params, dict(kwargs))
         idempotency_key = f"model:{self.participant_id}:{model_call_id}:1"
 
-        formatted_messages = _inject_public_process_replay(
+        formatted_messages = _inject_assistant_context_replay(
             await self._format_messages(messages),
-            process_lines=self._public_process_context(),
+            assistant_messages=self._assistant_context(),
         )
         formatted_messages = _inject_private_reasoning_replay(
             formatted_messages,
@@ -664,13 +664,18 @@ class AgentScopeRuntimeBridge:
         run_id: str,
         runtime_session_id: str,
         callback_client: OpenWebUIBridgeCallbacks,
+        assistant_context_by_participant: dict[str, list[dict[str, Any]]] | None = None,
     ) -> None:
         verify_agentscope_runtime_apis()
         self.run_id = run_id
         self.runtime_session_id = runtime_session_id
         self.callback_client = callback_client
         self._final_text_by_participant: dict[str, str] = {}
-        self._public_process_by_participant: dict[str, list[str]] = {}
+        self._assistant_context_by_participant: dict[str, list[dict[str, Any]]] = {
+            str(participant_id): _trim_assistant_context_messages(messages)
+            for participant_id, messages in (assistant_context_by_participant or {}).items()
+            if isinstance(messages, list)
+        }
         self._next_tool_call_index = 1
 
     def build_subagent_template(
@@ -700,7 +705,7 @@ class AgentScopeRuntimeBridge:
             model_id=model_id,
             callback_client=self.callback_client,
             on_final_text=self._record_final_text,
-            public_process_context=lambda: self._public_process_context(participant_id),
+            assistant_context=lambda: self._assistant_context(participant_id),
             default_model_params=default_model_params,
         )
 
@@ -717,15 +722,15 @@ class AgentScopeRuntimeBridge:
         block_kind: str,
         delta: str,
     ) -> None:
-        line = _format_public_process_line(phase, block_kind, delta)
-        if not line:
+        message = _format_public_commentary_message(delta)
+        if not message:
             return
-        lines = self._public_process_by_participant.setdefault(participant_id, [])
-        lines.append(line)
-        self._public_process_by_participant[participant_id] = _trim_public_process_lines(lines)
+        messages = self._assistant_context_by_participant.setdefault(participant_id, [])
+        messages.append(message)
+        self._assistant_context_by_participant[participant_id] = _trim_assistant_context_messages(messages)
 
-    def _public_process_context(self, participant_id: str) -> list[str]:
-        return list(self._public_process_by_participant.get(participant_id, []))
+    def _assistant_context(self, participant_id: str) -> list[dict[str, Any]]:
+        return [dict(message) for message in self._assistant_context_by_participant.get(participant_id, [])]
 
     def build_tool_proxy(
         self,
@@ -836,49 +841,72 @@ def _inject_private_reasoning_replay(
     return [*messages[:insert_at], replay_message, *messages[insert_at:]]
 
 
-def _inject_public_process_replay(
+def _inject_assistant_context_replay(
     messages: list[dict[str, Any]],
     *,
-    process_lines: list[str],
+    assistant_messages: list[dict[str, Any]],
 ) -> list[dict[str, Any]]:
-    process_text = "\n".join(line for line in process_lines if line)
-    if not process_text:
+    replay_messages = [
+        normalized
+        for message in assistant_messages
+        if (normalized := _normalize_assistant_context_message(message)) is not None
+    ]
+    if not replay_messages:
         return messages
-    replay_message = {
-        "role": "assistant",
-        "content": "[Previous Agent Mode public process]\n" + process_text[-PUBLIC_PROCESS_REPLAY_MAX_CHARS:],
-    }
     insert_at = len(messages)
     for index in range(len(messages) - 1, -1, -1):
         if str(messages[index].get("role") or "").lower() == "user":
             insert_at = index
             break
-    return [*messages[:insert_at], replay_message, *messages[insert_at:]]
+    return [*messages[:insert_at], *replay_messages, *messages[insert_at:]]
 
 
-def _format_public_process_line(phase: str, block_kind: str, delta: str) -> str:
+def _format_public_commentary_message(delta: str) -> dict[str, Any] | None:
     clean_delta = " ".join(str(delta or "").split())
-    clean_phase = str(phase or "running").strip() or "running"
-    clean_kind = str(block_kind or "assistant_note").strip() or "assistant_note"
     if not clean_delta:
-        return ""
-    return f"phase:{clean_phase} {clean_kind}: {clean_delta}"
+        return None
+    return {
+        "role": "assistant",
+        "content": clean_delta,
+        "phase": "commentary",
+    }
 
 
-def _trim_public_process_lines(lines: list[str]) -> list[str]:
-    kept: list[str] = []
+def _normalize_assistant_context_message(message: dict[str, Any]) -> dict[str, Any] | None:
+    if not isinstance(message, dict):
+        return None
+    if str(message.get("role") or "").lower() != "assistant":
+        return None
+    clean_content = " ".join(str(message.get("content") or "").split())
+    if not clean_content:
+        return None
+    phase = str(message.get("phase") or "commentary").strip()
+    if phase not in {"commentary", "final_answer"}:
+        phase = "commentary"
+    return {
+        "role": "assistant",
+        "content": clean_content,
+        "phase": phase,
+    }
+
+
+def _trim_assistant_context_messages(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    kept: list[dict[str, Any]] = []
     total = 0
-    for line in reversed(lines):
-        if not line:
+    for message in reversed(messages):
+        normalized = _normalize_assistant_context_message(message)
+        if normalized is None:
             continue
-        remaining = PUBLIC_PROCESS_REPLAY_MAX_CHARS - total
+        content = str(normalized["content"])
+        remaining = PUBLIC_ASSISTANT_CONTEXT_REPLAY_MAX_CHARS - total
         if remaining <= 0:
             break
-        if len(line) > remaining:
-            kept.append(line[-remaining:])
+        if len(content) > remaining:
+            normalized = {**normalized, "content": content[-remaining:]}
+            kept.append(normalized)
             break
-        kept.append(line)
-        total += len(line) + 1
+        kept.append(normalized)
+        total += len(content) + 1
     return list(reversed(kept))
 
 

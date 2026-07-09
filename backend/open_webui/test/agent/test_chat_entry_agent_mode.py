@@ -415,12 +415,27 @@ async def test_agent_mode_runtime_payload_replays_previous_public_agent_items(
     assert replay_items[0]['agent_run_id'] == previous_run.id
     assert replay_items[0]['assistant_message_id'] == 'assistant-prev'
     assert replay_items[0]['state'] == 'completed'
-    replay_text = replay_items[0]['content']
+    assert replay_items[0]['messages'] == [
+        {
+            'role': 'assistant',
+            'content': 'I inspected the migration plan.',
+            'phase': 'commentary',
+        },
+        {
+            'role': 'assistant',
+            'content': 'The runtime image was built successfully.',
+            'phase': 'commentary',
+        },
+        {
+            'role': 'assistant',
+            'content': 'Previous final answer.',
+            'phase': 'final_answer',
+        },
+    ]
+    replay_text = str(replay_items[0])
     assert '[Previous Agent Mode assistant context]' not in replay_text
-    assert 'run:assistant-prev state:completed' in replay_text
-    assert 'phase:running assistant_note: I inspected the migration plan.' in replay_text
-    assert 'phase:running action_summary: The runtime image was built successfully.' in replay_text
-    assert 'phase:finalizing final: Previous final answer.' in replay_text
+    assert 'phase:running' not in replay_text
+    assert 'phase:finalizing' not in replay_text
     assert 'SECRET_PRIVATE_THOUGHT' not in replay_text
     assert 'SECRET_REASONING_OBJECT' not in replay_text
     assert 'raw_reasoning' not in replay_text

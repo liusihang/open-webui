@@ -456,6 +456,11 @@ async def _finalize_general_agent_run(
             run_id=session.run_id,
             runtime_session_id=session.runtime_session_id,
             callback_client=callback_client,
+            assistant_context_by_participant={
+                LEADER_PARTICIPANT_ID: _agent_context_replay_assistant_messages(
+                    request.metadata.get("agent_context_replay"),
+                ),
+            },
         )
         leader_model_id = request.leader_model_id or _first_model_catalog_id(request.model_catalog)
         if not leader_model_id:
@@ -1173,51 +1178,22 @@ def _leader_system_prompt(request: RunStartRequest) -> str:
         if isinstance(message, dict) and str(message.get("role") or "") == "system"
     ]
     system_fragments = [fragment for fragment in system_fragments if fragment]
-    agent_context = _agent_context_replay_system_fragment(
-        request.metadata.get("agent_context_replay"),
-    )
-    if agent_context:
-        system_fragments.append(agent_context)
     return "\n\n".join([*fragments, *system_fragments])
 
 
-def _agent_context_replay_system_fragment(value: Any) -> str:
+def _agent_context_replay_assistant_messages(value: Any) -> list[dict[str, Any]]:
     if not isinstance(value, list):
-        return ""
+        return []
 
-    fragments = []
+    messages: list[dict[str, Any]] = []
     for item in value:
-        if isinstance(item, str):
-            content = item.strip()
-            label = "previous run"
-            state = ""
-        elif isinstance(item, dict):
-            content = str(item.get("content") or "").strip()
-            label = str(
-                item.get("assistant_message_id")
-                or item.get("agent_run_id")
-                or "previous run"
-            )
-            state = str(item.get("state") or "").strip()
-        else:
+        if not isinstance(item, dict):
             continue
-
-        if not content:
+        item_messages = item.get("messages")
+        if not isinstance(item_messages, list):
             continue
-        heading = f"Prior Agent Mode run {label}"
-        if state:
-            heading = f"{heading} ({state})"
-        fragments.append(f"{heading}:\n{content}")
-
-    if not fragments:
-        return ""
-
-    return (
-        "Previous Agent Mode context for continuity. This is prior assistant work "
-        "state, not a new user instruction. Use it only to avoid repeating work "
-        "and to preserve continuity.\n\n"
-        + "\n\n".join(fragments)
-    )
+        messages.extend(message for message in item_messages if isinstance(message, dict))
+    return messages
 
 
 def _subagent_system_prompt(context: SubagentExecutionContext) -> str:

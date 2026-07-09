@@ -1366,11 +1366,11 @@ async def _agent_context_replay_items(
 
     items = []
     for run in reversed(selected):
-        text = await _agent_context_replay_text(run)
-        if text:
+        messages = await _agent_context_replay_messages(run)
+        if messages:
             items.append(
                 {
-                    'content': text,
+                    'messages': messages,
                     'agent_run_id': run.id,
                     'assistant_message_id': run.assistant_message_id,
                     'state': run.state,
@@ -1379,14 +1379,15 @@ async def _agent_context_replay_items(
     return items
 
 
-async def _agent_context_replay_text(run) -> str:
+async def _agent_context_replay_messages(run) -> list[dict]:
     try:
         events = await AgentRuns.list_events(run.id)
     except Exception as exc:
         log.warning('Agent Mode could not load prior run events for run=%s: %s', run.id, exc)
-        return ''
+        return []
 
-    lines = [f'run:{run.assistant_message_id or run.id} state:{run.state}']
+    messages = []
+    total_chars = 0
     final_deltas = []
     for event in events:
         event_type = str(getattr(event, 'event_type', '') or '')
@@ -1395,14 +1396,22 @@ async def _agent_context_replay_text(run) -> str:
         payload = getattr(event, 'payload', None) or {}
         if not isinstance(payload, dict):
             continue
-        phase = str(getattr(event, 'phase', '') or payload.get('phase') or 'unknown')
         if event_type == AgentEventType.TEXT_DELTA.value:
             block_kind = str(payload.get('block_kind') or '')
             if block_kind not in _AGENT_CONTEXT_REPLAY_TEXT_BLOCK_KINDS:
                 continue
             delta = payload.get('delta')
             if isinstance(delta, str) and delta:
-                lines.append(f'phase:{phase} {block_kind}: {_agent_context_replay_clean_text(delta)}')
+                content = _agent_context_replay_clean_text(delta)
+                if content:
+                    messages.append(
+                        {
+                            'role': 'assistant',
+                            'content': content,
+                            'phase': 'commentary',
+                        }
+                    )
+                    total_chars += len(content) + 1
         elif event_type == AgentEventType.FINAL_DELTA.value:
             delta = payload.get('delta')
             if isinstance(delta, str) and delta:
@@ -1410,10 +1419,33 @@ async def _agent_context_replay_text(run) -> str:
 
     final_text = str(getattr(run, 'final_text', '') or ''.join(final_deltas)).strip()
     if final_text:
-        lines.append(f'phase:finalizing final: {_agent_context_replay_clean_text(final_text)}')
+        content = _agent_context_replay_clean_text(final_text)
+        if content:
+            messages.append(
+                {
+                    'role': 'assistant',
+                    'content': content,
+                    'phase': 'final_answer',
+                }
+            )
+            total_chars += len(content) + 1
 
-    text = '\n'.join(line for line in lines if line.strip())
-    return text[:_AGENT_CONTEXT_REPLAY_MAX_CHARS]
+    if total_chars <= _AGENT_CONTEXT_REPLAY_MAX_CHARS:
+        return messages
+
+    kept = []
+    total = 0
+    for message in reversed(messages):
+        content = str(message.get('content') or '')
+        remaining = _AGENT_CONTEXT_REPLAY_MAX_CHARS - total
+        if remaining <= 0:
+            break
+        if len(content) > remaining:
+            kept.append({**message, 'content': content[-remaining:]})
+            break
+        kept.append(message)
+        total += len(content) + 1
+    return list(reversed(kept))
 
 
 def _agent_context_replay_clean_text(value: str) -> str:

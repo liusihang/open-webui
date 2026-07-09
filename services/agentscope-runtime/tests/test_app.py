@@ -2013,12 +2013,23 @@ async def test_leader_system_prompt_includes_agent_context_replay_metadata() -> 
                             "agent_run_id": "run-prev",
                             "assistant_message_id": "assistant-prev",
                             "state": "completed",
-                            "content": (
-                                "run:assistant-prev state:completed\n"
-                                "phase:running assistant_note: I inspected the image.\n"
-                                "phase:running action_summary: Build completed.\n"
-                                "phase:finalizing final: Previous final answer."
-                            ),
+                            "messages": [
+                                {
+                                    "role": "assistant",
+                                    "content": "I inspected the image.",
+                                    "phase": "commentary",
+                                },
+                                {
+                                    "role": "assistant",
+                                    "content": "Build completed.",
+                                    "phase": "commentary",
+                                },
+                                {
+                                    "role": "assistant",
+                                    "content": "Previous final answer.",
+                                    "phase": "final_answer",
+                                },
+                            ],
                         }
                     ]
                 },
@@ -2052,17 +2063,23 @@ async def test_leader_system_prompt_includes_agent_context_replay_metadata() -> 
     assert status.json()["state"] == "completed"
     model_messages = openwebui_client.model_calls[0]["messages"]
     system_text = model_messages[0]["content"][0]["text"]
-    assert [message["role"] for message in model_messages] == ["system", "user"]
-    assert "Previous Agent Mode context for continuity" in system_text
-    assert "Prior Agent Mode run assistant-prev (completed)" in system_text
-    assert "phase:running assistant_note: I inspected the image." in system_text
-    assert "phase:running action_summary: Build completed." in system_text
-    assert "phase:finalizing final: Previous final answer." in system_text
-    assert not any(
-        message["role"] == "assistant"
-        and "run:assistant-prev state:completed" in str(message.get("content"))
+    assert [message["role"] for message in model_messages] == [
+        "system",
+        "assistant",
+        "assistant",
+        "assistant",
+        "user",
+    ]
+    assert "Previous Agent Mode context for continuity" not in system_text
+    assert [
+        (message.get("phase"), message.get("content"))
         for message in model_messages
-    )
+        if message["role"] == "assistant"
+    ] == [
+        ("commentary", "I inspected the image."),
+        ("commentary", "Build completed."),
+        ("final_answer", "Previous final answer."),
+    ]
 
 
 @pytest.mark.asyncio

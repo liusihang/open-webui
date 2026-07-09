@@ -907,7 +907,7 @@ def convert_to_azure_payload(url, payload: dict, api_version: str):
 
 # Fields accepted by the Responses API for each input item type.
 RESPONSES_ALLOWED_FIELDS: dict[str, set[str]] = {
-    'message': {'type', 'role', 'content'},
+    'message': {'type', 'role', 'content', 'phase'},
     'function_call': {'type', 'call_id', 'name', 'arguments', 'id'},
     'function_call_output': {'type', 'call_id', 'output'},
 }
@@ -928,6 +928,29 @@ def _normalize_stored_item(item: dict) -> dict:
         # Unknown type — pass through as-is (e.g. reasoning, extension items).
         return item
     return {k: v for k, v in item.items() if k in allowed}
+
+
+def _responses_message_phase(message: dict) -> str | None:
+    if str(message.get('role') or '').lower() != 'assistant':
+        return None
+    phase = str(message.get('phase') or '').strip()
+    if phase in {'commentary', 'final_answer'}:
+        return phase
+    return None
+
+
+def strip_chat_completion_message_phase(messages: list) -> list:
+    if not isinstance(messages, list):
+        return messages
+    stripped = []
+    for message in messages:
+        if not isinstance(message, dict) or 'phase' not in message:
+            stripped.append(message)
+            continue
+        clean_message = dict(message)
+        clean_message.pop('phase', None)
+        stripped.append(clean_message)
+    return stripped
 
 
 def convert_to_responses_payload(payload: dict) -> dict:
@@ -969,13 +992,15 @@ def convert_to_responses_payload(payload: dict) -> dict:
                     else '\n'.join(p.get('text', '') for p in content if p.get('type') == 'text')
                 )
                 if text.strip():
-                    input_items.append(
-                        {
-                            'type': 'message',
-                            'role': 'assistant',
-                            'content': [{'type': 'output_text', 'text': text}],
-                        }
-                    )
+                    item = {
+                        'type': 'message',
+                        'role': 'assistant',
+                        'content': [{'type': 'output_text', 'text': text}],
+                    }
+                    phase = _responses_message_phase(msg)
+                    if phase:
+                        item['phase'] = phase
+                    input_items.append(item)
             # Convert each tool_call to a function_call input item
             for tool_call in msg['tool_calls']:
                 func = tool_call.get('function', {})
@@ -1017,7 +1042,11 @@ def convert_to_responses_payload(payload: dict) -> dict:
         else:
             content_parts = [{'type': text_type, 'text': str(content)}]
 
-        input_items.append({'type': 'message', 'role': role, 'content': content_parts})
+        item = {'type': 'message', 'role': role, 'content': content_parts}
+        phase = _responses_message_phase(msg)
+        if phase:
+            item['phase'] = phase
+        input_items.append(item)
 
     guarded_stateful_delta = (
         payload.get('previous_response_id') and payload.get('continuation_mode') == 'stateful_delta'
@@ -1262,6 +1291,7 @@ async def generate_chat_completion(
     # For Chat Completions, strip image parts from multimodal tool messages
     # (Chat Completions doesn't support images in tool content).
     if not is_responses and 'messages' in payload:
+        payload['messages'] = strip_chat_completion_message_phase(payload['messages'])
         for message in payload['messages']:
             if message.get('role') == 'tool' and isinstance(message.get('content'), list):
                 message['content'] = ''.join(

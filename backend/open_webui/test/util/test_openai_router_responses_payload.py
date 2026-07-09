@@ -1,4 +1,7 @@
-from open_webui.routers.openai import convert_to_responses_payload
+from open_webui.routers.openai import (
+    convert_to_responses_payload,
+    strip_chat_completion_message_phase,
+)
 
 
 def test_convert_to_responses_payload_preserves_full_replay_for_unguarded_previous_response_id():
@@ -94,3 +97,45 @@ def test_convert_to_responses_payload_preserves_tool_output_images():
             ],
         }
     ]
+
+
+def test_convert_to_responses_payload_preserves_assistant_message_phase():
+    payload = {
+        'model': 'gpt-5.5',
+        'messages': [
+            {
+                'role': 'assistant',
+                'content': 'I will inspect the workspace.',
+                'phase': 'commentary',
+            },
+            {'role': 'user', 'content': 'continue'},
+        ],
+    }
+
+    responses_payload = convert_to_responses_payload(payload)
+
+    assert responses_payload['input'][0] == {
+        'type': 'message',
+        'role': 'assistant',
+        'content': [{'type': 'output_text', 'text': 'I will inspect the workspace.'}],
+        'phase': 'commentary',
+    }
+
+
+def test_strip_chat_completion_message_phase_removes_responses_only_phase():
+    messages = [
+        {
+            'role': 'assistant',
+            'content': 'I will inspect the workspace.',
+            'phase': 'commentary',
+        },
+        {'role': 'user', 'content': 'continue'},
+    ]
+
+    stripped = strip_chat_completion_message_phase(messages)
+
+    assert stripped == [
+        {'role': 'assistant', 'content': 'I will inspect the workspace.'},
+        {'role': 'user', 'content': 'continue'},
+    ]
+    assert messages[0]['phase'] == 'commentary'
