@@ -4975,15 +4975,23 @@
     },
     "black": {
       "name": "black",
-      "version": "26.5.1",
-      "file_name": "black-26.5.1-py3-none-any.whl",
+      "version": "25.1.0",
+      "file_name": "black-25.1.0-py3-none-any.whl",
       "install_dir": "site",
-      "sha256": "4ed7f7da04046d2e488437170797d3b4a4ad83906683bcb7dfc68b673bbce5e2",
+      "sha256": "95e8176dae143ba9097f351d174fdaf0ccd29efb414b362ae3fd72bf0f710717",
       "package_type": "package",
       "imports": [
         "black"
       ],
-      "depends": []
+      "depends": [
+        "click",
+        "mypy_extensions",
+        "packaging",
+        "pathspec",
+        "platformdirs",
+        "tomli",
+        "typing-extensions"
+      ]
     },
     "pathspec": {
       "name": "pathspec",
@@ -5009,15 +5017,45 @@
       ],
       "depends": []
     },
-    "pytokens": {
-      "name": "pytokens",
-      "version": "0.4.1",
-      "file_name": "pytokens-0.4.1-py3-none-any.whl",
+    "seaborn": {
+      "name": "seaborn",
+      "version": "0.13.2",
+      "file_name": "seaborn-0.13.2-py3-none-any.whl",
       "install_dir": "site",
-      "sha256": "26cef14744a8385f35d0e095dc8b3a7583f6c953c2e3d269c7f82484bf5ad2de",
+      "sha256": "636f8336facf092165e27924f223d3c62ca560b1f2bb5dff7ab7fad265361987",
       "package_type": "package",
       "imports": [
-        "pytokens"
+        "seaborn"
+      ],
+      "depends": [
+        "numpy",
+        "pandas",
+        "matplotlib"
+      ]
+    },
+    "openpyxl": {
+      "name": "openpyxl",
+      "version": "3.1.5",
+      "file_name": "openpyxl-3.1.5-py2.py3-none-any.whl",
+      "install_dir": "site",
+      "sha256": "5282c12b107bffeef825f4617dc029afaf41d0ea60823bbb665ef3079dc79de2",
+      "package_type": "package",
+      "imports": [
+        "openpyxl"
+      ],
+      "depends": [
+        "et_xmlfile"
+      ]
+    },
+    "et_xmlfile": {
+      "name": "et_xmlfile",
+      "version": "2.0.0",
+      "file_name": "et_xmlfile-2.0.0-py3-none-any.whl",
+      "install_dir": "site",
+      "sha256": "7a91720bc756843502c3b7504c77b8fe44217c85c537d85037f0f536151b2caa",
+      "package_type": "package",
+      "imports": [
+        "et_xmlfile"
       ],
       "depends": []
     }

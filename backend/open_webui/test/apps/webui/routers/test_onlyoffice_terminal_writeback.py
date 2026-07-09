@@ -66,6 +66,10 @@ async def _terminal_connection_async(request, terminal_server_id, user):
     return _terminal_connection()
 
 
+async def _fake_user_by_id_async(user_id, db=None):
+    return _fake_user()
+
+
 @pytest.mark.asyncio
 async def test_get_terminal_connection_awaits_group_and_access_lookup(monkeypatch):
     groups_called = False
@@ -335,6 +339,69 @@ async def test_terminal_edit_session_uses_separate_callback_ttl(monkeypatch):
     decoded_preview_proxy = onlyoffice_mod.decode_token(preview_proxy_token)
     assert decoded_callback_proxy is not None and decoded_preview_proxy is not None
     assert decoded_callback_proxy['exp'] > decoded_preview_proxy['exp'] + 60 * 30
+
+
+@pytest.mark.asyncio
+async def test_terminal_file_content_awaits_connection_and_streams_upstream(monkeypatch):
+    get_calls = []
+
+    class _FakeClientSession:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+        def get(self, url, headers=None, **kwargs):
+            get_calls.append((url, headers, kwargs))
+            assert url == 'http://terminal.internal/files/view?path=/workspace/demo.docx'
+            assert headers == {
+                'X-User-Id': 'user-1',
+                'Authorization': 'Bearer session-proxy',
+            }
+            return _FakeResponse(
+                status=200,
+                body=b'docx-bytes',
+                headers={
+                    'Content-Type': 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+                    'Content-Disposition': 'attachment; filename="demo.docx"',
+                },
+            )
+
+    token = onlyoffice_mod.create_token(
+        {
+            'scope': 'onlyoffice:terminal_file',
+            'terminal_server_id': 'terminals',
+            'terminal_file_path': '/workspace/demo.docx',
+            'user_id': 'user-1',
+            'mode': 'view',
+            'session_signal': 'sig-1',
+            'session_proxy_token': 'session-proxy',
+        },
+        expires_delta=timedelta(minutes=5),
+    )
+
+    monkeypatch.setattr(onlyoffice_mod.Users, 'get_user_by_id', _fake_user_by_id_async)
+    monkeypatch.setattr(
+        onlyoffice_mod,
+        '_get_terminal_connection',
+        _terminal_connection_async,
+    )
+    monkeypatch.setattr(onlyoffice_mod.aiohttp, 'ClientSession', _FakeClientSession)
+
+    response = await onlyoffice_mod.get_onlyoffice_terminal_file_content(
+        token,
+        _fake_request(),
+        db=None,
+    )
+
+    assert response.body == b'docx-bytes'
+    assert response.media_type == 'application/vnd.openxmlformats-officedocument.wordprocessingml.document'
+    assert response.headers['content-disposition'] == 'attachment; filename="demo.docx"'
+    assert len(get_calls) == 1
 
 
 @pytest.mark.asyncio

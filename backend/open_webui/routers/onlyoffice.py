@@ -855,7 +855,7 @@ async def get_onlyoffice_file_content(
         )
 
     file = _get_file_or_404(file_id, db=db)
-    token_user = Users.get_user_by_id(token_user_id, db=db)
+    token_user = await Users.get_user_by_id(token_user_id, db=db)
     if not token_user:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
@@ -908,7 +908,7 @@ async def get_onlyoffice_terminal_file_content(
             detail="Invalid OnlyOffice terminal access token claims.",
         )
 
-    token_user = Users.get_user_by_id(token_user_id, db=db)
+    token_user = await Users.get_user_by_id(token_user_id, db=db)
     if not token_user:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
@@ -916,7 +916,7 @@ async def get_onlyoffice_terminal_file_content(
         )
 
     terminal_file_path = _normalize_terminal_file_path(terminal_file_path)
-    connection = _get_terminal_connection(request, terminal_server_id, token_user)
+    connection = await _get_terminal_connection(request, terminal_server_id, token_user)
 
     base_url = (connection.get("url") or "").rstrip("/")
     if not base_url:
