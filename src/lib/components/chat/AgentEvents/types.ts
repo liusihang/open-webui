@@ -244,6 +244,9 @@ export type AgentTranscriptModel = {
 	connectionState: AgentConnectionState;
 	isRunning: boolean;
 	isTerminal: boolean;
+	startedAt: number | null;
+	updatedAt: number | null;
+	elapsedMs: number | null;
 	parts: AgentTranscriptModelPart[];
 	final: { content: string; done: boolean } | null;
 	summary: AgentTranscriptSummary;

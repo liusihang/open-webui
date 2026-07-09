@@ -1,6 +1,5 @@
 <script lang="ts">
 	import type { AgentTranscriptArtifactPart } from './types';
-	import AgentDetailSection from './AgentDetailSection.svelte';
 
 	export let part: AgentTranscriptArtifactPart;
 
@@ -23,11 +22,6 @@
 	{#if part.path}
 		<div class="agent-artifact-path">{shortPath(part.path)}</div>
 	{/if}
-	<AgentDetailSection
-		label="Artifact metadata"
-		payload={part.details}
-		open={part.defaultExpanded}
-	/>
 </div>
 
 <style>
@@ -35,11 +29,8 @@
 		display: flex;
 		flex-direction: column;
 		gap: 0.15rem;
-		padding: 0.3rem 0.5rem;
-		border-radius: 0.3rem;
+		padding: 0.2rem 0;
 		margin: 0.15rem 0;
-		background: var(--gray-50, #f9fafb);
-		border-left: 2px solid var(--gray-200, #e5e7eb);
 	}
 	.agent-artifact-row {
 		display: inline-flex;

@@ -42,6 +42,7 @@ export const buildAgentTranscriptModel = (
 	connectionState: AgentConnectionState = 'connected'
 ): AgentTranscriptModel => {
 	const parts = buildParts(state);
+	const timing = summarizeTiming(state);
 
 	return {
 		runStatus: state.runStatus,
@@ -52,12 +53,52 @@ export const buildAgentTranscriptModel = (
 			state.runStatus === 'waiting_user_input' ||
 			state.runStatus === 'finalizing',
 		isTerminal: TERMINAL_RUN_STATUSES.has(state.runStatus),
+		...timing,
 		parts,
 		final: state.finalText
 			? { content: state.finalText, done: TERMINAL_RUN_STATUSES.has(state.runStatus) }
 			: null,
 		summary: summarizeParts(parts)
 	};
+};
+
+const summarizeTiming = (state: AgentRunEventState) => {
+	const timestamps = [
+		...state.items.map((item) => item.createdAt),
+		...state.textBlocks.map((block) => block.createdAt)
+	]
+		.map(timestampToMs)
+		.filter((value): value is number => value !== null);
+
+	if (timestamps.length === 0) {
+		return {
+			startedAt: null,
+			updatedAt: null,
+			elapsedMs: null
+		};
+	}
+
+	const startedAt = Math.min(...timestamps);
+	const updatedAt = TERMINAL_RUN_STATUSES.has(state.runStatus) ? Math.max(...timestamps) : Date.now();
+
+	return {
+		startedAt,
+		updatedAt,
+		elapsedMs: Math.max(0, updatedAt - startedAt)
+	};
+};
+
+const timestampToMs = (value: number | null | undefined): number | null => {
+	if (!Number.isFinite(value ?? Number.NaN) || value === null || value === undefined || value <= 0) {
+		return null;
+	}
+	if (value > 1_000_000_000_000_000) {
+		return Math.round(value / 1_000_000);
+	}
+	if (value > 1_000_000_000_000) {
+		return Math.round(value);
+	}
+	return Math.round(value * 1000);
 };
 
 const summarizeParts = (parts: AgentTranscriptModelPart[]) => {

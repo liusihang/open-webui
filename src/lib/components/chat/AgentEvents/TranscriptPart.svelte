@@ -59,11 +59,13 @@
 			{#if part.resultSummary}
 				<div class="transcript-subagent-result">{part.resultSummary}</div>
 			{/if}
-			<AgentDetailSection
-				label={$i18n.t('Details')}
-				payload={part.details}
-				open={part.defaultExpanded}
-			/>
+			{#if part.status === 'error'}
+				<AgentDetailSection
+					label={$i18n.t('Details')}
+					payload={part.details}
+					open={part.defaultExpanded}
+				/>
+			{/if}
 		</div>
 	{:else if part.kind === 'run'}
 		<div class="transcript-run-row">
@@ -76,34 +78,21 @@
 <style>
 	.transcript-part {
 		position: relative;
-		padding-left: 0.75rem;
-	}
-	.transcript-part::before {
-		content: '';
-		position: absolute;
-		left: 0.18rem;
-		top: 0.4rem;
-		width: 0.28rem;
-		height: 0.28rem;
-		border-radius: 9999px;
-		background: var(--gray-300, #d1d5db);
+		padding-left: 0;
 	}
 	.transcript-subagent {
 		display: flex;
 		flex-direction: column;
-		gap: 0.15rem;
-		padding: 0.3rem 0.4rem;
-		border-radius: 0.3rem;
-		margin: 0.15rem 0;
+		gap: 0.12rem;
+		margin: 0.05rem 0;
 	}
 	.transcript-subagent.error {
-		background: var(--red-50, #fef2f2);
-		border-left: 2px solid var(--red-400, #f87171);
+		color: var(--red-700, #b91c1c);
 	}
 	.transcript-subagent-row {
 		display: inline-flex;
 		align-items: center;
-		gap: 0.4rem;
+		gap: 0.35rem;
 		font-size: 0.75rem;
 	}
 	.transcript-subagent-name {
@@ -115,8 +104,8 @@
 		font-size: 0.65rem;
 	}
 	.transcript-subagent-spinner {
-		width: 0.55rem;
-		height: 0.55rem;
+		width: 0.5rem;
+		height: 0.5rem;
 		border: 1.5px solid var(--gray-300, #d1d5db);
 		border-top-color: var(--gray-600, #4b5563);
 		border-radius: 9999px;
@@ -131,18 +120,17 @@
 		display: inline-flex;
 		align-items: center;
 		justify-content: center;
-		width: 0.85rem;
-		height: 0.85rem;
+		width: 0.8rem;
+		height: 0.8rem;
 		border-radius: 9999px;
 		font-size: 0.6rem;
 		font-weight: 700;
 	}
 	.transcript-subagent-icon.done {
-		background: var(--green-100, #d1fae5);
-		color: var(--green-700, #047857);
+		background: transparent;
+		color: var(--gray-400, #9ca3af);
 	}
 	.transcript-subagent-icon.error {
-		background: var(--red-100, #fee2e2);
 		color: var(--red-700, #b91c1c);
 	}
 	.transcript-subagent-summary {

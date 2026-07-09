@@ -6,7 +6,6 @@
 
 	import { submitAgentRunUserInput } from '$lib/apis/agentRuns';
 	import type { AgentRunEventPayload, AgentTranscriptUserInputPart } from './types';
-	import AgentDetailSection from './AgentDetailSection.svelte';
 
 	export let part: AgentTranscriptUserInputPart;
 	export let agentRunId: string | null = null;
@@ -197,12 +196,6 @@
 		<pre class="agent-user-input-content">{JSON.stringify(part.content, null, 2)}</pre>
 	{/if}
 
-	<AgentDetailSection
-		label="Input details"
-		payload={part.details}
-		metadata={part.metadata}
-		open={part.defaultExpanded}
-	/>
 </div>
 
 <style>
@@ -210,15 +203,15 @@
 		display: flex;
 		flex-direction: column;
 		gap: 0.3rem;
-		padding: 0.4rem 0.5rem;
-		border-radius: 0.3rem;
+		padding: 0.45rem 0.55rem;
+		border-radius: 0.4rem;
 		margin: 0.15rem 0;
-		background: var(--gray-50, #f9fafb);
-		border-left: 2px solid var(--gray-300, #d1d5db);
+		background: transparent;
+		border: 1px solid transparent;
 	}
 	.agent-user-input-part.pending {
 		background: var(--amber-50, #fffbeb);
-		border-left-color: var(--amber-300, #fcd34d);
+		border-color: var(--amber-100, #fef3c7);
 	}
 	.agent-user-input-row {
 		display: inline-flex;

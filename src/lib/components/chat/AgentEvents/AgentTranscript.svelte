@@ -11,48 +11,44 @@
 
 	const i18n = getContext<Writable<i18nType>>('i18n');
 
+	let open = false;
+	let initialized = false;
+
+	$: if (!initialized && model) {
+		open =
+			model.isRunning ||
+			model.summary.hasError ||
+			model.summary.hasPendingApproval ||
+			model.summary.hasPendingUserInput;
+		initialized = true;
+	}
+
 	const headline = ($model: AgentTranscriptModel): string => {
-		const status =
-			$model.runStatus === 'completed'
-				? $i18n.t('Done')
-				: $model.runStatus === 'failed'
-					? $i18n.t('Failed')
-					: $model.runStatus === 'cancelled'
-						? $i18n.t('Cancelled')
-						: $model.runStatus === 'budget_exceeded'
-							? $i18n.t('Budget exceeded')
-							: $model.runStatus === 'waiting_approval'
-								? $i18n.t('Waiting on approval')
-								: $model.runStatus === 'waiting_user_input'
-									? $i18n.t('Waiting for input')
-								: $model.runStatus === 'finalizing'
-									? $i18n.t('Writing final answer')
-									: $i18n.t('Working');
-		const segments: string[] = [status];
-		if ($model.summary.toolCount > 0) {
-			segments.push(`${$model.summary.toolCount} ${$i18n.t('tool')}${$model.summary.toolCount === 1 ? '' : 's'}`);
+		if ($model.runStatus === 'completed') return $i18n.t('Processed');
+		if ($model.runStatus === 'failed') return $i18n.t('Failed');
+		if ($model.runStatus === 'cancelled') return $i18n.t('Cancelled');
+		if ($model.runStatus === 'budget_exceeded') return $i18n.t('Stopped');
+		if ($model.runStatus === 'waiting_approval') return $i18n.t('Waiting for approval');
+		if ($model.runStatus === 'waiting_user_input') return $i18n.t('Waiting for input');
+		if ($model.runStatus === 'finalizing') return $i18n.t('Writing final answer');
+		return $i18n.t('Processing');
+	};
+
+	const elapsedText = ($model: AgentTranscriptModel): string | null => {
+		if ($model.elapsedMs === null) {
+			return null;
 		}
-		if ($model.summary.artifactCount > 0) {
-			segments.push(
-				`${$model.summary.artifactCount} ${$i18n.t('artifact')}${$model.summary.artifactCount === 1 ? '' : 's'}`
-			);
+		const totalSeconds = Math.max(0, Math.round($model.elapsedMs / 1000));
+		const hours = Math.floor(totalSeconds / 3600);
+		const minutes = Math.floor((totalSeconds % 3600) / 60);
+		const seconds = totalSeconds % 60;
+		if (hours > 0) {
+			return `${hours}h ${minutes}m`;
 		}
-		if ($model.summary.approvalCount > 0) {
-			segments.push(
-				`${$model.summary.approvalCount} ${$i18n.t('approval')}${$model.summary.approvalCount === 1 ? '' : 's'}`
-			);
+		if (minutes > 0) {
+			return `${minutes}m ${seconds}s`;
 		}
-		if ($model.summary.userInputCount > 0) {
-			segments.push(
-				`${$model.summary.userInputCount} ${$i18n.t('input')}${$model.summary.userInputCount === 1 ? '' : 's'}`
-			);
-		}
-		if ($model.summary.subagentCount > 0) {
-			segments.push(
-				`${$model.summary.subagentCount} ${$i18n.t('subagent')}${$model.summary.subagentCount === 1 ? '' : 's'}`
-			);
-		}
-		return segments.join(' \u00b7 ');
+		return `${seconds}s`;
 	};
 
 	const connectionText = ($model: AgentTranscriptModel): string | null => {
@@ -69,18 +65,17 @@
 	};
 </script>
 
-<section class="agent-transcript" data-run-status={model.runStatus}>
-	<header class="agent-transcript-header">
+<details class="agent-transcript" data-run-status={model.runStatus} bind:open>
+	<summary class="agent-transcript-summary">
 		<span class="agent-transcript-headline">{headline(model)}</span>
+		{#if elapsedText(model)}
+			<span class="agent-transcript-time">{elapsedText(model)}</span>
+		{/if}
 		{#if connectionText(model)}
 			<span class="agent-transcript-connection" role="status">{connectionText(model)}</span>
 		{/if}
-		{#if model.summary.hasError}
-			<span class="agent-transcript-flag error" aria-hidden="true">{$i18n.t('error')}</span>
-		{:else if model.summary.hasPendingApproval || model.summary.hasPendingUserInput}
-			<span class="agent-transcript-flag pending" aria-hidden="true">{$i18n.t('pending')}</span>
-		{/if}
-	</header>
+		<span class="agent-transcript-chevron" aria-hidden="true">{open ? 'v' : '>'}</span>
+	</summary>
 
 	{#if model.parts.length > 0}
 		<ol class="agent-transcript-timeline">
@@ -93,53 +88,53 @@
 	{:else}
 		<p class="agent-transcript-empty">{$i18n.t('Agent is starting\u2026')}</p>
 	{/if}
-</section>
+</details>
 
 <style>
 	.agent-transcript {
-		display: flex;
-		flex-direction: column;
-		gap: 0.4rem;
-		padding: 0.4rem 0;
-		color: var(--gray-700, #374151);
+		display: block;
+		margin: 0.15rem 0 0.45rem;
+		color: var(--gray-600, #4b5563);
 	}
-	.agent-transcript-header {
+	.agent-transcript-summary {
 		display: inline-flex;
 		align-items: center;
-		gap: 0.5rem;
-		font-size: 0.72rem;
+		gap: 0.35rem;
+		width: fit-content;
+		max-width: 100%;
+		cursor: pointer;
+		list-style: none;
+		font-size: 0.76rem;
 		color: var(--gray-500, #6b7280);
+		user-select: none;
+	}
+	.agent-transcript-summary::-webkit-details-marker {
+		display: none;
 	}
 	.agent-transcript-headline {
 		font-weight: 500;
-		letter-spacing: 0.01em;
+		color: var(--gray-500, #6b7280);
+	}
+	.agent-transcript-time {
+		color: var(--gray-400, #9ca3af);
 	}
 	.agent-transcript-connection {
 		color: var(--amber-600, #d97706);
-		font-size: 0.68rem;
+		font-size: 0.72rem;
 	}
-	.agent-transcript-flag {
-		font-size: 0.6rem;
-		text-transform: uppercase;
-		letter-spacing: 0.05em;
-		padding: 0.05rem 0.35rem;
-		border-radius: 0.2rem;
-	}
-	.agent-transcript-flag.error {
-		background: var(--red-100, #fee2e2);
-		color: var(--red-700, #b91c1c);
-	}
-	.agent-transcript-flag.pending {
-		background: var(--amber-100, #fef3c7);
-		color: var(--amber-700, #b45309);
+	.agent-transcript-chevron {
+		color: var(--gray-400, #9ca3af);
+		font-size: 0.9rem;
+		line-height: 1;
+		transform: translateY(-0.02rem);
 	}
 	.agent-transcript-timeline {
 		list-style: none;
-		margin: 0;
-		padding: 0;
+		margin: 0.45rem 0 0;
+		padding: 0 0 0 0.1rem;
 		display: flex;
 		flex-direction: column;
-		gap: 0.1rem;
+		gap: 0.25rem;
 	}
 	.agent-transcript-timeline-row {
 		position: relative;

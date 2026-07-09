@@ -23,11 +23,11 @@
 		display: flex;
 		flex-direction: column;
 		gap: 0.2rem;
-		padding: 0.4rem 0.5rem;
-		border-radius: 0.3rem;
+		padding: 0.45rem 0.55rem;
+		border-radius: 0.4rem;
 		margin: 0.15rem 0;
 		background: var(--red-50, #fef2f2);
-		border-left: 2px solid var(--red-400, #f87171);
+		border: 1px solid var(--red-100, #fee2e2);
 	}
 	.agent-error-row {
 		display: inline-flex;

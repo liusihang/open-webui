@@ -27,6 +27,8 @@ describe('AgentTranscript presentation guardrails', () => {
 		expect(agentFinal).toContain('<ContentRenderer');
 		// No raw-text streaming card that bypasses ContentRenderer
 		expect(agentFinal).not.toContain('whitespace-pre-wrap');
+		expect(agentFinal).not.toContain('Final answer');
+		expect(agentFinal).not.toContain('agent-run-final-answer');
 	});
 
 	it('does not leak unsafe reasoning/private fields into the transcript model', () => {
@@ -45,12 +47,12 @@ describe('AgentTranscript presentation guardrails', () => {
 		expect(source).not.toMatch(/event_type === 'text\.delta'[\s\S]{0,400}finalText =/);
 	});
 
-	it('keeps tool details behind a disclosure in the transcript UI', () => {
+	it('keeps successful tool details out of the default transcript UI', () => {
 		const tool = readSource('./ToolPart.svelte');
 		const detail = readSource('./AgentDetailSection.svelte');
 
 		expect(tool).toContain('AgentDetailSection');
-		expect(tool).toContain("$i18n.t('Details')");
+		expect(tool).toMatch(/\{#if part\.status === 'error'\}[\s\S]*AgentDetailSection/);
 		expect(detail).toContain('<details');
 		// Debug payload must be formatted as <pre> blocks inside the disclosure,
 		// not inlined into the default view
@@ -64,9 +66,37 @@ describe('AgentTranscript presentation guardrails', () => {
 		// Approval must surface status text only; no approve/reject form actions
 		expect(approval).not.toContain('<button');
 		expect(approval).not.toContain('<form');
-		// Artifact must show name/mime, with long path held for the detail section
+		expect(approval).not.toContain('AgentDetailSection');
+		// Artifact must show name/mime quietly without raw metadata by default
 		expect(artifact).not.toContain('text-base');
 		expect(artifact).toContain('shortPath');
+		expect(artifact).not.toContain('AgentDetailSection');
+	});
+
+	it('uses a Codex-like collapsible process row instead of a status dashboard', () => {
+		const transcript = readSource('./AgentTranscript.svelte');
+
+		expect(transcript).toContain('<details class="agent-transcript"');
+		expect(transcript).toContain('<summary class="agent-transcript-summary">');
+		expect(transcript).toContain('elapsedText(model)');
+		expect(transcript).not.toContain('artifactCount');
+		expect(transcript).not.toContain('approvalCount');
+		expect(transcript).not.toContain('agent-transcript-flag');
+	});
+
+	it('does not use decorative side stripes in process parts', () => {
+		for (const file of [
+			'./AssistantNotePart.svelte',
+			'./ActionSummaryPart.svelte',
+			'./ToolPart.svelte',
+			'./ApprovalPart.svelte',
+			'./UserInputPart.svelte',
+			'./ArtifactPart.svelte',
+			'./ErrorPart.svelte',
+			'./TranscriptPart.svelte'
+		]) {
+			expect(readSource(file)).not.toMatch(/border-left:\s*[2-9]px/);
+		}
 	});
 
 	it('defaults failed tools and error parts to expanded so failures are visible', () => {

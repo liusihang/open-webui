@@ -10,10 +10,11 @@
 
 	const i18n = getContext<Writable<i18nType>>('i18n');
 
-	const statusLabel = ($status: AgentTranscriptToolPart['status']): string => {
-		if ($status === 'error') return $i18n.t('Failed');
-		if ($status === 'done') return $i18n.t('Done');
-		return $i18n.t('Running');
+	const actionLabel = ($part: AgentTranscriptToolPart): string => {
+		const name = $part.toolName ?? $i18n.t('tool');
+		if ($part.status === 'error') return `${$i18n.t('Failed')} ${name}`;
+		if ($part.status === 'done') return `${$i18n.t('Ran')} ${name}`;
+		return `${$i18n.t('Running')} ${name}`;
 	};
 </script>
 
@@ -32,52 +33,48 @@
 		{:else}
 			<span class="agent-tool-icon done" aria-hidden="true">✓</span>
 		{/if}
-		<span class="agent-tool-name">{part.toolName ?? $i18n.t('tool')}</span>
-		<span class="agent-tool-status">{statusLabel(part.status)}</span>
+		<span class="agent-tool-name">{actionLabel(part)}</span>
 	</div>
-	<div class="agent-tool-summary">{part.summary}</div>
-	<AgentDetailSection
-		label={$i18n.t('Details')}
-		payload={part.details}
-		metadata={part.metadata}
-		open={part.defaultExpanded}
-	/>
+	{#if part.status === 'error' && part.summary}
+		<div class="agent-tool-summary">{part.summary}</div>
+	{/if}
+	{#if part.status === 'error'}
+		<AgentDetailSection
+			label={$i18n.t('Details')}
+			payload={part.details}
+			metadata={part.metadata}
+			open={part.defaultExpanded}
+		/>
+	{/if}
 </div>
 
 <style>
 	.agent-tool-part {
 		display: flex;
 		flex-direction: column;
-		gap: 0.15rem;
-		padding: 0.3rem 0.4rem;
-		border-radius: 0.3rem;
-		margin: 0.15rem 0;
+		gap: 0.12rem;
+		margin: 0.08rem 0;
 	}
 	.agent-tool-part.error {
-		background: var(--red-50, #fef2f2);
-		border-left: 2px solid var(--red-400, #f87171);
+		color: var(--red-700, #b91c1c);
 	}
 	.agent-tool-row {
 		display: inline-flex;
 		align-items: center;
-		gap: 0.4rem;
+		gap: 0.35rem;
 		font-size: 0.75rem;
 	}
 	.agent-tool-name {
-		color: var(--gray-800, #1f2937);
+		color: var(--gray-600, #4b5563);
 		font-weight: 500;
-	}
-	.agent-tool-status {
-		color: var(--gray-500, #6b7280);
-		font-size: 0.65rem;
 	}
 	.agent-tool-summary {
 		font-size: 0.72rem;
 		color: var(--gray-600, #4b5563);
 	}
 	.agent-tool-spinner {
-		width: 0.55rem;
-		height: 0.55rem;
+		width: 0.5rem;
+		height: 0.5rem;
 		border: 1.5px solid var(--gray-300, #d1d5db);
 		border-top-color: var(--gray-600, #4b5563);
 		border-radius: 9999px;
@@ -92,18 +89,17 @@
 		display: inline-flex;
 		align-items: center;
 		justify-content: center;
-		width: 0.85rem;
-		height: 0.85rem;
+		width: 0.8rem;
+		height: 0.8rem;
 		border-radius: 9999px;
 		font-size: 0.6rem;
 		font-weight: 700;
 	}
 	.agent-tool-icon.done {
-		background: var(--green-100, #d1fae5);
-		color: var(--green-700, #047857);
+		background: transparent;
+		color: var(--gray-400, #9ca3af);
 	}
 	.agent-tool-icon.error {
-		background: var(--red-100, #fee2e2);
 		color: var(--red-700, #b91c1c);
 	}
 </style>

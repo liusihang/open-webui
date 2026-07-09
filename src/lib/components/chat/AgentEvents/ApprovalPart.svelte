@@ -1,6 +1,5 @@
 <script lang="ts">
 	import type { AgentTranscriptApprovalPart } from './types';
-	import AgentDetailSection from './AgentDetailSection.svelte';
 
 	export let part: AgentTranscriptApprovalPart;
 
@@ -26,12 +25,6 @@
 	{#if part.description && part.description !== part.action}
 		<div class="agent-approval-description">{part.description}</div>
 	{/if}
-	<AgentDetailSection
-		label="Approval details"
-		payload={part.details}
-		metadata={part.metadata}
-		open={part.defaultExpanded}
-	/>
 </div>
 
 <style>
@@ -39,19 +32,19 @@
 		display: flex;
 		flex-direction: column;
 		gap: 0.2rem;
-		padding: 0.35rem 0.5rem;
-		border-radius: 0.3rem;
+		padding: 0.45rem 0.55rem;
+		border-radius: 0.4rem;
 		margin: 0.15rem 0;
 		background: var(--amber-50, #fffbeb);
-		border-left: 2px solid var(--amber-300, #fcd34d);
+		border: 1px solid var(--amber-100, #fef3c7);
 	}
 	.agent-approval-part.approved {
-		background: var(--gray-50, #f9fafb);
-		border-left-color: var(--gray-200, #e5e7eb);
+		background: transparent;
+		border-color: transparent;
 	}
 	.agent-approval-part.rejected {
 		background: var(--red-50, #fef2f2);
-		border-left-color: var(--red-300, #fca5a5);
+		border-color: var(--red-100, #fee2e2);
 	}
 	.agent-approval-row {
 		display: inline-flex;
