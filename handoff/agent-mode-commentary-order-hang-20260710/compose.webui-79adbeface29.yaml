@@ -1,0 +1,4 @@
+services:
+  open-webui-pr7:
+    image: open-webui:agentmode-v0102-79adbeface29-slim
+    pull_policy: never
