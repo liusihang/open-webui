@@ -57,6 +57,10 @@ FINAL_DELTA_STREAM_CHUNK_CHARS = int(
     )
 )
 FINAL_DELTA_STREAM_FLUSH_SECONDS = float(os.getenv("AGENT_RUNTIME_FINAL_DELTA_FLUSH_SECONDS", "0.05"))
+CANCELLATION_POLL_SECONDS = max(
+    0.01,
+    float(os.getenv("AGENT_RUNTIME_CANCELLATION_POLL_SECONDS", "0.1")),
+)
 PROVIDER_CONFIGURATION_UNAVAILABLE_SUMMARY = "The selected model provider is not available for this Agent Mode run."
 
 
@@ -756,12 +760,18 @@ async def _run_leader_streaming(
                     streamed_text="".join(emitted_parts),
                     next_delta_index=next_delta_index,
                 )
-            timeout = None
+            timeout = CANCELLATION_POLL_SECONDS
             if buffered_parts:
-                timeout = max(0.0, FINAL_DELTA_STREAM_FLUSH_SECONDS - buffered_elapsed())
+                timeout = min(
+                    timeout,
+                    max(0.0, FINAL_DELTA_STREAM_FLUSH_SECONDS - buffered_elapsed()),
+                )
             done, _pending = await asyncio.wait({pending_event}, timeout=timeout)
             if pending_event not in done:
-                await flush_buffer()
+                if buffered_parts and buffered_elapsed() >= max(
+                    0.0, FINAL_DELTA_STREAM_FLUSH_SECONDS
+                ):
+                    await flush_buffer()
                 if _is_cancelled(session):
                     return FinalAnswerStreamResult(
                         final_msg=final_msg,
@@ -781,6 +791,16 @@ async def _run_leader_streaming(
     finally:
         if pending_event is not None and not pending_event.done():
             pending_event.cancel()
+            try:
+                await pending_event
+            except asyncio.CancelledError:
+                pass
+        close_stream = getattr(event_iterator, "aclose", None)
+        if callable(close_stream):
+            try:
+                await close_stream()
+            except RuntimeError:
+                pass
     return FinalAnswerStreamResult(
         final_msg=final_msg,
         streamed_text="".join(emitted_parts),

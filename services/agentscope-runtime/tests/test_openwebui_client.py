@@ -37,6 +37,65 @@ def test_parse_openai_chunk_preserves_private_reasoning_delta() -> None:
     }
 
 
+def test_parse_openai_chunk_preserves_valid_assistant_phase() -> None:
+    from agentscope_runtime.openwebui_client import _parse_openai_chunk
+
+    event = _parse_openai_chunk(
+        {
+            "choices": [
+                {
+                    "delta": {
+                        "content": "I will inspect the environment.",
+                        "phase": "commentary",
+                    }
+                }
+            ]
+        }
+    )
+
+    assert event["delta"]["phase"] == "commentary"
+
+
+def test_parse_openai_chunk_omits_invalid_assistant_phase() -> None:
+    from agentscope_runtime.openwebui_client import _parse_openai_chunk
+
+    event = _parse_openai_chunk(
+        {
+            "choices": [
+                {
+                    "delta": {
+                        "content": "Untyped content.",
+                        "phase": "running",
+                    }
+                }
+            ]
+        }
+    )
+
+    assert "phase" not in event["delta"]
+
+
+def test_parse_openai_chunk_preserves_provider_auxiliary_content_marker() -> None:
+    from agentscope_runtime.openwebui_client import _parse_openai_chunk
+
+    event = _parse_openai_chunk(
+        {
+            "choices": [
+                {
+                    "delta": {
+                        "content": "Web search results.",
+                        "content_kind": "provider_auxiliary",
+                        "auxiliary_type": "web_search_result",
+                    }
+                }
+            ]
+        }
+    )
+
+    assert event["delta"]["content_kind"] == "provider_auxiliary"
+    assert event["delta"]["auxiliary_type"] == "web_search_result"
+
+
 @pytest.mark.asyncio
 async def test_call_model_uses_dedicated_model_call_timeout(monkeypatch) -> None:
     captured_timeouts = []

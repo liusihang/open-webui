@@ -114,6 +114,8 @@ When the Bifrost Pipe converts an assistant message to a Responses `message` ite
 
 Function calls and function-call outputs remain separate Responses items. Phase is never placed between a function call and its matching output.
 
+When AgentScope formats a current-run assistant turn as one Chat Completions message containing both `content` and `tool_calls`, the Pipe splits it into a `phase=commentary` message followed by the contiguous function calls. The matching tool outputs remain contiguous after those calls, so the model sees `commentary → calls → outputs` instead of losing the pre-tool text.
+
 ### 2. Correlate phase in the Bifrost Pipe stream
 
 The Pipe stream state records message metadata by both `output_index` and `item_id` when it receives `response.output_item.added`:
@@ -147,6 +149,8 @@ Ordinary chat consumers may ignore the additional field. Agent Mode consumes it 
 
 The callback protocol remains internal; no public API or database migration is required.
 
+Provider-generated display chunks that are not assistant message text, including native web-search result blocks and output-image markdown, carry a separate internal `content_kind=provider_auxiliary` marker. They must not be inferred as model commentary or final-answer text.
+
 ### 4. Split commentary and final text in the model bridge
 
 The bridge maintains separate buffers for:
@@ -168,6 +172,8 @@ The commentary buffer is flushed before the bridge yields the final `ChatRespons
 If a response changes from commentary to final-answer text, commentary is flushed before the first final delta is yielded.
 
 Final-answer deltas remain intermediate `ChatResponse` chunks. AgentScope converts only these chunks to `TextBlockDeltaEvent`, so the existing runtime final-answer streamer remains genuinely incremental.
+
+Provider auxiliary content is persisted separately as an `action_summary` transcript block with `source=provider_auxiliary`. It is flushed before the first final delta but is excluded from AgentScope model text and `_on_final_text`.
 
 `_on_final_text` records final-answer text only. Commentary is retained in the AgentScope response context but is not duplicated through live synthetic replay.
 
@@ -197,6 +203,8 @@ The selected route is known to provide phase before text. Agent Mode must not si
 - Unclassified text without tool calls: fail with a clear `model_phase_missing` protocol error because genuine final streaming cannot be guaranteed.
 - `final_answer` followed by a tool call in the same response: fail with `final_phase_with_tool_call`; do not continue as a normal tool round.
 - Empty response without tool calls: fail with `empty_model_response`.
+- Commentary or provider auxiliary content without a tool call or final answer: fail with `model_final_phase_missing` after persisting the valid public content.
+- Malformed tool-call deltas without a valid function name: fail with `invalid_tool_call`.
 
 These are explicit protocol errors, not fallback answers.
 
@@ -257,6 +265,7 @@ No new frontend protocol is required.
 - Approval required, approved, and rejected paths.
 - User-input pause and resume.
 - Cancellation during commentary and final streaming.
+- Provider-silent cancellation wakes on a bounded poll and closes the active stream iterator.
 - Streaming callback timeout behavior.
 - Replay canonicalization and cross-run call-ID uniqueness.
 - Idempotent transcript and final-delta persistence.

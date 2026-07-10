@@ -3,6 +3,7 @@ import asyncio
 import base64
 import copy
 import hashlib
+import html
 import inspect
 import json
 import logging

@@ -78,6 +78,7 @@ Confirm each failure is caused by current untyped handling.
 ### GREEN
 
 - Maintain commentary, final, and unclassified text buffers per model call.
+- Route Pipe-marked provider auxiliary content through a distinct public transcript block rather than phase inference.
 - Flush commentary through a stable model-authored public transcript callback before tool execution.
 - Yield only final-answer content as intermediate AgentScope text chunks.
 - Construct the final `ChatResponse` with the correct model text and tool blocks for AgentScope memory.
@@ -108,6 +109,7 @@ Add or adapt `services/agentscope-runtime/tests/test_app.py` tests proving:
 - the first final-answer delta starts `finalizing` once;
 - final-answer deltas retain order and incremental delivery;
 - cancellation before final leaves no final output;
+- cancellation interrupts a provider stream that is silent after commentary;
 - protocol errors terminate the run without a fallback answer.
 
 Run the full AgentScope runtime suite.

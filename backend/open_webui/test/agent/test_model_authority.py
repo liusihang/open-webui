@@ -424,6 +424,51 @@ async def test_stream_model_call_promotes_reasoning_params_to_top_level_form_dat
 
 
 @pytest.mark.asyncio
+async def test_stream_model_call_preserves_phase_extension_in_raw_sse(agent_run_db):
+    from starlette.responses import StreamingResponse
+
+    run = await _create_running_run()
+    request = _trusted_request(enable_agent_mode=True, run_id=run.id)
+
+    async def completion_handler(request, form_data, user):
+        async def body():
+            yield (
+                'data: {"choices":[{"delta":{"content":"Checking.",'
+                '"phase":"commentary"}}]}\n\n'
+            )
+
+        return StreamingResponse(body(), media_type='text/event-stream')
+
+    authority = AgentModelAuthority(
+        operation_store=AgentRuns,
+        completion_handler=completion_handler,
+        user_loader=_user_loader,
+        model_access_checker=_allow_model_access,
+    )
+
+    chunks = [
+        chunk
+        async for chunk in authority.stream_model_call(
+            request,
+            ModelCallRequest(
+                run_id=run.id,
+                participant_id='leader',
+                model_call_id='call-stream-phase',
+                model='model-a',
+                messages=[{'role': 'user', 'content': 'hello'}],
+                stream=True,
+                idempotency_key='model:leader:call-stream-phase:1',
+            ),
+        )
+    ]
+
+    wire_text = b''.join(chunks).decode('utf-8')
+    assert '"content":"Checking."' in wire_text
+    assert '"phase":"commentary"' in wire_text
+    assert '"type":"stream_end"' in wire_text
+
+
+@pytest.mark.asyncio
 async def test_model_call_endpoint_rejects_forged_service_callback_without_token(agent_run_db):
     run = await _create_running_run()
     request = _request(enable_agent_mode=True)

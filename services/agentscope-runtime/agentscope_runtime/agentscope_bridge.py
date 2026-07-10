@@ -196,7 +196,6 @@ class OpenWebUIAgentScopeModel(ChatModelBase):
         callback_client: OpenWebUIBridgeCallbacks,
         on_final_text: Callable[[str, str], None] | None = None,
         assistant_context: Callable[[], list[dict[str, Any]]] | None = None,
-        live_assistant_context: Callable[[], list[dict[str, Any]]] | None = None,
         default_model_params: dict[str, Any] | None = None,
     ) -> None:
         super().__init__(
@@ -212,7 +211,6 @@ class OpenWebUIAgentScopeModel(ChatModelBase):
         self.callback_client = callback_client
         self._on_final_text = on_final_text
         self._assistant_context = assistant_context or (lambda: [])
-        self._live_assistant_context = live_assistant_context or (lambda: [])
         self.default_model_params = dict(default_model_params or {})
         self._next_model_call_index = 1
         self._formatter = OpenAIChatFormatter()
@@ -272,16 +270,74 @@ class OpenWebUIAgentScopeModel(ChatModelBase):
             model_name=model_name,
             reasoning_parts=self._private_reasoning_parts,
         )
-        formatted_messages = _append_assistant_context_replay(
-            formatted_messages,
-            assistant_messages=self._live_assistant_context(),
-        )
-
         block_id = uuid.uuid4().hex
-        text_delta_index = 0
-        accumulated_text_parts: list[str] = []
+        final_text_delta_index = 0
+        commentary_parts: list[str] = []
+        auxiliary_parts: list[str] = []
+        auxiliary_types: list[str] = []
+        final_text_parts: list[str] = []
+        unclassified_text_parts: list[str] = []
         accumulated_reasoning_parts: list[str] = []
         accumulated_tool_calls: list[dict[str, Any]] = []
+        commentary_flushed = False
+        auxiliary_flushed = False
+        commentary_block_id = (
+            f"{self.runtime_session_id}:{self.participant_id}:"
+            f"{model_call_id}:model-commentary"
+        )
+        auxiliary_block_id = (
+            f"{self.runtime_session_id}:{self.participant_id}:"
+            f"{model_call_id}:provider-auxiliary"
+        )
+
+        async def flush_commentary() -> None:
+            nonlocal commentary_flushed
+            if commentary_flushed or not commentary_parts:
+                return
+            commentary = "".join(commentary_parts)
+            await self.callback_client.append_text_delta(
+                run_id=self.run_id,
+                idempotency_key=(
+                    f"txt:{self.runtime_session_id}:{self.participant_id}:"
+                    f"{model_call_id}:model-commentary:0"
+                ),
+                block_id=commentary_block_id,
+                block_kind="assistant_note",
+                delta_index=0,
+                delta=commentary,
+                participant_id=self.participant_id,
+                phase="running",
+                payload={
+                    "source": "model",
+                    "model_call_id": model_call_id,
+                    "response_phase": "commentary",
+                },
+            )
+            commentary_flushed = True
+
+        async def flush_auxiliary() -> None:
+            nonlocal auxiliary_flushed
+            if auxiliary_flushed or not auxiliary_parts:
+                return
+            await self.callback_client.append_text_delta(
+                run_id=self.run_id,
+                idempotency_key=(
+                    f"txt:{self.runtime_session_id}:{self.participant_id}:"
+                    f"{model_call_id}:provider-auxiliary:0"
+                ),
+                block_id=auxiliary_block_id,
+                block_kind="action_summary",
+                delta_index=0,
+                delta="".join(auxiliary_parts),
+                participant_id=self.participant_id,
+                phase="running",
+                payload={
+                    "source": "provider_auxiliary",
+                    "model_call_id": model_call_id,
+                    "auxiliary_types": list(dict.fromkeys(auxiliary_types)),
+                },
+            )
+            auxiliary_flushed = True
 
         for attempt in range(1, MODEL_CALL_RETRY_ATTEMPTS + 1):
             stream = self.callback_client.call_model_stream(
@@ -331,30 +387,50 @@ class OpenWebUIAgentScopeModel(ChatModelBase):
                 reasoning_content = delta.get("reasoning_content")
                 if isinstance(reasoning_content, str) and reasoning_content:
                     accumulated_reasoning_parts.append(reasoning_content)
-                content = delta.get("content")
-                if isinstance(content, str) and content:
-                    accumulated_text_parts.append(content)
-                    text_delta_index += 1
-                    yield ChatResponse(
-                        content=[TextBlock(text=content)],
-                        is_last=False,
-                        metadata={
-                            "block_id": block_id,
-                            "delta_index": text_delta_index - 1,
-                        },
-                    )
                 tool_calls = delta.get("tool_calls")
                 if isinstance(tool_calls, list):
                     for tool_call in tool_calls:
                         if isinstance(tool_call, dict):
                             accumulated_tool_calls.append(tool_call)
+                content = delta.get("content")
+                if isinstance(content, str) and content:
+                    phase = delta.get("phase")
+                    if delta.get("content_kind") == "provider_auxiliary":
+                        auxiliary_parts.append(content)
+                        auxiliary_type = str(delta.get("auxiliary_type") or "").strip()
+                        if auxiliary_type:
+                            auxiliary_types.append(auxiliary_type)
+                    elif phase == "commentary":
+                        commentary_parts.append(content)
+                    elif phase == "final_answer":
+                        if accumulated_tool_calls:
+                            raise RuntimeError(
+                                "final_phase_with_tool_call: final-answer text cannot "
+                                "share a model response with tool calls"
+                            )
+                        await flush_commentary()
+                        await flush_auxiliary()
+                        final_text_parts.append(content)
+                        yield ChatResponse(
+                            content=[TextBlock(text=content)],
+                            is_last=False,
+                            metadata={
+                                "block_id": block_id,
+                                "delta_index": final_text_delta_index,
+                            },
+                        )
+                        final_text_delta_index += 1
+                    else:
+                        unclassified_text_parts.append(content)
             elif event_type == "done":
                 # Non-stream fallback: full response in payload.
                 payload = event.get("payload") or {}
                 response = payload.get("response") or payload
                 full_text = _extract_model_text(response)
-                if full_text and not accumulated_text_parts:
-                    accumulated_text_parts.append(full_text)
+                if full_text and not (
+                    commentary_parts or final_text_parts or unclassified_text_parts
+                ):
+                    unclassified_text_parts.append(full_text)
                 full_reasoning = _extract_model_reasoning_text(response)
                 if full_reasoning and not accumulated_reasoning_parts:
                     accumulated_reasoning_parts.append(full_reasoning)
@@ -363,34 +439,71 @@ class OpenWebUIAgentScopeModel(ChatModelBase):
             elif event_type == "stream_end":
                 break
 
-        full_text = "".join(accumulated_text_parts)
-        full_reasoning = "".join(accumulated_reasoning_parts)
-        if full_reasoning and _raw_private_reasoning_replay_enabled(model_name):
-            self._private_reasoning_parts.append(full_reasoning)
-            self._private_reasoning_parts = _trim_private_reasoning_parts(self._private_reasoning_parts)
-        if full_text and self._on_final_text is not None:
-            self._on_final_text(self.participant_id, full_text)
-        blocks: list[TextBlock | ToolCallBlock] = []
-        if full_text:
-            blocks.append(TextBlock(text=full_text))
-        for tool_call in _merge_tool_calls(accumulated_tool_calls):
+        merged_tool_calls = _merge_tool_calls(accumulated_tool_calls)
+        tool_blocks: list[ToolCallBlock] = []
+        for tool_index, tool_call in enumerate(merged_tool_calls, start=1):
             function = tool_call.get("function") if isinstance(tool_call, dict) else None
             if not isinstance(function, dict):
-                continue
+                raise RuntimeError(
+                    "invalid_tool_call: tool call is missing a function payload"
+                )
             name = function.get("name")
             if not isinstance(name, str) or not name:
-                continue
+                raise RuntimeError("invalid_tool_call: tool call is missing a function name")
             raw_arguments = function.get("arguments", "{}")
             if not isinstance(raw_arguments, str):
                 raw_arguments = json.dumps(raw_arguments)
             call_id = tool_call.get("id")
-            blocks.append(
+            tool_blocks.append(
                 ToolCallBlock(
-                    id=str(call_id or f"tool-call-{len(blocks) + 1}"),
+                    id=str(call_id or f"tool-call-{tool_index}"),
                     name=name,
                     input=raw_arguments,
                 )
             )
+        if unclassified_text_parts:
+            if tool_blocks:
+                commentary_parts.extend(unclassified_text_parts)
+            else:
+                await flush_commentary()
+                await flush_auxiliary()
+                raise RuntimeError(
+                    "model_phase_missing: text response did not declare commentary "
+                    "or final_answer"
+                )
+        if final_text_parts and tool_blocks:
+            raise RuntimeError(
+                "final_phase_with_tool_call: final-answer text cannot share a model "
+                "response with tool calls"
+            )
+        await flush_commentary()
+        await flush_auxiliary()
+
+        if (
+            (commentary_parts or auxiliary_parts)
+            and not final_text_parts
+            and not tool_blocks
+        ):
+            raise RuntimeError(
+                "model_final_phase_missing: commentary-only response did not "
+                "declare a tool call or final_answer"
+            )
+        if not commentary_parts and not final_text_parts and not tool_blocks:
+            raise RuntimeError("empty_model_response: model returned no public response")
+
+        commentary_text = "".join(commentary_parts)
+        final_text = "".join(final_text_parts)
+        full_text = commentary_text + final_text
+        full_reasoning = "".join(accumulated_reasoning_parts)
+        if full_reasoning and _raw_private_reasoning_replay_enabled(model_name):
+            self._private_reasoning_parts.append(full_reasoning)
+            self._private_reasoning_parts = _trim_private_reasoning_parts(self._private_reasoning_parts)
+        if final_text and self._on_final_text is not None:
+            self._on_final_text(self.participant_id, final_text)
+        blocks: list[TextBlock | ToolCallBlock] = []
+        if full_text:
+            blocks.append(TextBlock(text=full_text))
+        blocks.extend(tool_blocks)
         if not blocks:
             blocks.append(TextBlock(text=""))
 
@@ -435,7 +548,6 @@ class OpenWebUIToolProxy(ToolBase):
         input_schema: dict[str, Any],
         callback_client: OpenWebUIBridgeCallbacks,
         allocate_tool_call_id: Callable[[], str],
-        record_public_process_delta: Callable[[str, str, str, str], None] | None = None,
     ) -> None:
         self.run_id = run_id
         self.runtime_session_id = runtime_session_id
@@ -446,7 +558,6 @@ class OpenWebUIToolProxy(ToolBase):
         self.input_schema = input_schema
         self.callback_client = callback_client
         self._allocate_tool_call_id = allocate_tool_call_id
-        self._record_public_process_delta = record_public_process_delta
 
     async def check_permissions(
         self,
@@ -460,23 +571,6 @@ class OpenWebUIToolProxy(ToolBase):
 
     async def __call__(self, **kwargs: Any) -> ToolChunk:
         tool_call_id = self._allocate_tool_call_id()
-        await self.callback_client.append_text_delta(
-            run_id=self.run_id,
-            idempotency_key=f"txt:{self.runtime_session_id}:{self.participant_id}:{tool_call_id}:assistant-note:0",
-            block_id=f"{tool_call_id}:assistant-note",
-            block_kind="assistant_note",
-            delta_index=0,
-            delta=_public_tool_intent_note(self.name, kwargs),
-            participant_id=self.participant_id,
-            phase="running",
-            payload={
-                "tool_id": self.tool_id,
-                "tool_call_id": tool_call_id,
-                "tool_name": self.name,
-                "input_categories": _tool_input_categories(kwargs),
-            },
-        )
-        self._record_public_delta("running", "assistant_note", _public_tool_intent_note(self.name, kwargs))
         await self.callback_client.append_event(
             run_id=self.run_id,
             idempotency_key=f"evt:{self.runtime_session_id}:{self.participant_id}:{tool_call_id}:requested",
@@ -501,24 +595,6 @@ class OpenWebUIToolProxy(ToolBase):
                 arguments=kwargs,
             )
         except Exception as exc:
-            await self.callback_client.append_text_delta(
-                run_id=self.run_id,
-                idempotency_key=f"txt:{self.runtime_session_id}:{self.participant_id}:{tool_call_id}:action-summary:0",
-                block_id=f"{tool_call_id}:action-summary",
-                block_kind="action_summary",
-                delta_index=0,
-                delta=_public_tool_result_summary(self.name, "failed"),
-                participant_id=self.participant_id,
-                phase="running",
-                payload={
-                    "tool_id": self.tool_id,
-                    "tool_call_id": tool_call_id,
-                    "tool_name": self.name,
-                    "status": "failed",
-                    "error_type": exc.__class__.__name__,
-                },
-            )
-            self._record_public_delta("running", "action_summary", _public_tool_result_summary(self.name, "failed"))
             await self.callback_client.append_event(
                 run_id=self.run_id,
                 idempotency_key=f"evt:{self.runtime_session_id}:{self.participant_id}:{tool_call_id}:failed",
@@ -535,27 +611,6 @@ class OpenWebUIToolProxy(ToolBase):
             )
             raise
         if _tool_requires_approval(response):
-            await self.callback_client.append_text_delta(
-                run_id=self.run_id,
-                idempotency_key=f"txt:{self.runtime_session_id}:{self.participant_id}:{tool_call_id}:action-summary:0",
-                block_id=f"{tool_call_id}:action-summary",
-                block_kind="action_summary",
-                delta_index=0,
-                delta=_public_tool_result_summary(self.name, "approval_required"),
-                participant_id=self.participant_id,
-                phase="running",
-                payload={
-                    "tool_id": self.tool_id,
-                    "tool_call_id": tool_call_id,
-                    "tool_name": self.name,
-                    "status": "approval_required",
-                },
-            )
-            self._record_public_delta(
-                "running",
-                "action_summary",
-                _public_tool_result_summary(self.name, "approval_required"),
-            )
             raise OpenWebUIToolApprovalRequired(
                 response=response,
                 tool_call_id=tool_call_id,
@@ -563,27 +618,6 @@ class OpenWebUIToolProxy(ToolBase):
                 tool_name=self.name,
             )
         if _tool_approval_rejected(response):
-            await self.callback_client.append_text_delta(
-                run_id=self.run_id,
-                idempotency_key=f"txt:{self.runtime_session_id}:{self.participant_id}:{tool_call_id}:action-summary:0",
-                block_id=f"{tool_call_id}:action-summary",
-                block_kind="action_summary",
-                delta_index=0,
-                delta=_public_tool_result_summary(self.name, "approval_rejected"),
-                participant_id=self.participant_id,
-                phase="running",
-                payload={
-                    "tool_id": self.tool_id,
-                    "tool_call_id": tool_call_id,
-                    "tool_name": self.name,
-                    "status": "approval_rejected",
-                },
-            )
-            self._record_public_delta(
-                "running",
-                "action_summary",
-                _public_tool_result_summary(self.name, "approval_rejected"),
-            )
             raise OpenWebUIToolApprovalRejected(
                 response=response,
                 tool_call_id=tool_call_id,
@@ -591,24 +625,6 @@ class OpenWebUIToolProxy(ToolBase):
                 tool_name=self.name,
             )
         state = _tool_result_state(response)
-        status = str(response.get("status") or state.value)
-        await self.callback_client.append_text_delta(
-            run_id=self.run_id,
-            idempotency_key=f"txt:{self.runtime_session_id}:{self.participant_id}:{tool_call_id}:action-summary:0",
-            block_id=f"{tool_call_id}:action-summary",
-            block_kind="action_summary",
-            delta_index=0,
-            delta=_public_tool_result_summary(self.name, status),
-            participant_id=self.participant_id,
-            phase="running",
-            payload={
-                "tool_id": self.tool_id,
-                "tool_call_id": tool_call_id,
-                "tool_name": self.name,
-                "status": status,
-            },
-        )
-        self._record_public_delta("running", "action_summary", _public_tool_result_summary(self.name, status))
         event_type = "tool.completed" if state == ToolResultState.SUCCESS else "tool.failed"
         await self.callback_client.append_event(
             run_id=self.run_id,
@@ -655,11 +671,6 @@ class OpenWebUIToolProxy(ToolBase):
             },
         )
 
-    def _record_public_delta(self, phase: str, block_kind: str, delta: str) -> None:
-        if self._record_public_process_delta is None:
-            return
-        self._record_public_process_delta(self.participant_id, phase, block_kind, delta)
-
 
 class AgentScopeRuntimeBridge:
     def __init__(
@@ -680,7 +691,6 @@ class AgentScopeRuntimeBridge:
             for participant_id, messages in (assistant_context_by_participant or {}).items()
             if isinstance(messages, list)
         }
-        self._live_assistant_context_by_participant: dict[str, list[dict[str, Any]]] = {}
         self._next_tool_call_index = 1
 
     def build_subagent_template(
@@ -711,7 +721,6 @@ class AgentScopeRuntimeBridge:
             callback_client=self.callback_client,
             on_final_text=self._record_final_text,
             assistant_context=lambda: self._assistant_context(participant_id),
-            live_assistant_context=lambda: self._live_assistant_context(participant_id),
             default_model_params=default_model_params,
         )
 
@@ -721,25 +730,8 @@ class AgentScopeRuntimeBridge:
     def _record_final_text(self, participant_id: str, text: str) -> None:
         self._final_text_by_participant[participant_id] = text
 
-    def _record_public_process_delta(
-        self,
-        participant_id: str,
-        phase: str,
-        block_kind: str,
-        delta: str,
-    ) -> None:
-        message = _format_public_commentary_message(delta)
-        if not message:
-            return
-        messages = self._live_assistant_context_by_participant.setdefault(participant_id, [])
-        messages.append(message)
-        self._live_assistant_context_by_participant[participant_id] = _trim_assistant_context_messages(messages)
-
     def _assistant_context(self, participant_id: str) -> list[dict[str, Any]]:
         return [dict(message) for message in self._assistant_context_by_participant.get(participant_id, [])]
-
-    def _live_assistant_context(self, participant_id: str) -> list[dict[str, Any]]:
-        return [dict(message) for message in self._live_assistant_context_by_participant.get(participant_id, [])]
 
     def build_tool_proxy(
         self,
@@ -760,7 +752,6 @@ class AgentScopeRuntimeBridge:
             input_schema=input_schema,
             callback_client=self.callback_client,
             allocate_tool_call_id=self._allocate_tool_call_id,
-            record_public_process_delta=self._record_public_process_delta,
         )
 
     def _allocate_tool_call_id(self) -> str:
@@ -863,32 +854,6 @@ def _inject_assistant_context_replay(
             insert_at = index
             break
     return [*messages[:insert_at], *replay_messages, *messages[insert_at:]]
-
-
-def _append_assistant_context_replay(
-    messages: list[dict[str, Any]],
-    *,
-    assistant_messages: list[dict[str, Any]],
-) -> list[dict[str, Any]]:
-    replay_messages = [
-        normalized
-        for message in assistant_messages
-        if (normalized := _normalize_assistant_context_item(message)) is not None
-    ]
-    if not replay_messages:
-        return messages
-    return [*messages, *replay_messages]
-
-
-def _format_public_commentary_message(delta: str) -> dict[str, Any] | None:
-    clean_delta = " ".join(str(delta or "").split())
-    if not clean_delta:
-        return None
-    return {
-        "role": "assistant",
-        "content": clean_delta,
-        "phase": "commentary",
-    }
 
 
 def _normalize_assistant_context_item(message: dict[str, Any]) -> dict[str, Any] | None:
@@ -1124,51 +1089,6 @@ def _extract_artifacts(response: dict[str, Any]) -> list[dict[str, Any]]:
     if isinstance(payload, dict) and isinstance(payload.get("artifacts"), list):
         return [artifact for artifact in payload["artifacts"] if isinstance(artifact, dict)]
     return []
-
-
-def _tool_input_categories(arguments: dict[str, Any]) -> list[str]:
-    categories = sorted({_public_value_category(value) for value in arguments.values()})
-    return categories or ["none"]
-
-
-def _public_value_category(value: Any) -> str:
-    if isinstance(value, bool):
-        return "boolean"
-    if isinstance(value, (int, float)) and not isinstance(value, bool):
-        return "number"
-    if isinstance(value, str):
-        return "text"
-    if isinstance(value, list):
-        return "list"
-    if isinstance(value, dict):
-        return "object"
-    if value is None:
-        return "empty"
-    return "value"
-
-
-def _public_tool_intent_note(name: str, arguments: dict[str, Any]) -> str:
-    tool_name = _humanize_tool_name(name)
-    categories = _tool_input_categories(arguments)
-    if categories == ["none"]:
-        return f"I will use {tool_name}."
-    if len(categories) == 1:
-        return f"I will use {tool_name} with {categories[0]} input."
-    return f"I will use {tool_name} with {', '.join(categories)} inputs."
-
-
-def _public_tool_result_summary(name: str, status: str) -> str:
-    tool_name = _humanize_tool_name(name)
-    normalized = status.replace("_", " ").strip().lower() or "completed"
-    if normalized == "success":
-        normalized = "completed"
-    elif normalized == "approval required":
-        normalized = "is waiting for approval"
-    elif normalized == "approval rejected":
-        normalized = "was rejected"
-    elif normalized == "failed":
-        normalized = "failed"
-    return f"{tool_name} {normalized}."
 
 
 def _is_retryable_model_call_callback(exc: Exception) -> bool:

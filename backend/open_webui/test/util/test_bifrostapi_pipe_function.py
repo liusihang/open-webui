@@ -21,6 +21,83 @@ def test_repo_managed_bifrostapi_source_exists_and_compiles():
     assert pipe_cls.__name__ == 'Pipe'
 
 
+def test_responses_input_preserves_valid_assistant_phase():
+    pipe = _load_pipe_class()()
+
+    input_items, instructions = pipe._messages_to_responses_input(
+        [
+            {'role': 'assistant', 'content': 'Checking the environment.', 'phase': 'commentary'},
+            {'role': 'assistant', 'content': 'The environment is ready.', 'phase': 'final_answer'},
+        ],
+        None,
+    )
+
+    assert instructions == ''
+    assert [item.get('phase') for item in input_items] == ['commentary', 'final_answer']
+
+
+def test_responses_input_omits_invalid_or_non_assistant_phase():
+    pipe = _load_pipe_class()()
+
+    input_items, _ = pipe._messages_to_responses_input(
+        [
+            {'role': 'assistant', 'content': 'Unknown phase.', 'phase': 'running'},
+            {'role': 'user', 'content': 'User text.', 'phase': 'commentary'},
+        ],
+        None,
+    )
+
+    assert all('phase' not in item for item in input_items)
+
+
+def test_responses_input_preserves_commentary_before_tool_call_transaction():
+    pipe = _load_pipe_class()()
+
+    input_items, _ = pipe._messages_to_responses_input(
+        [
+            {
+                'role': 'assistant',
+                'content': 'I will inspect the environment.',
+                'tool_calls': [
+                    {
+                        'id': 'call_env',
+                        'type': 'function',
+                        'function': {
+                            'name': 'get_environment',
+                            'arguments': '{}',
+                        },
+                    }
+                ],
+            },
+            {
+                'role': 'tool',
+                'tool_call_id': 'call_env',
+                'content': '{"status":"success"}',
+            },
+        ],
+        None,
+    )
+
+    assert [item['type'] for item in input_items] == [
+        'message',
+        'function_call',
+        'function_call_output',
+    ]
+    assert input_items[0] == {
+        'type': 'message',
+        'role': 'assistant',
+        'content': [
+            {
+                'type': 'output_text',
+                'text': 'I will inspect the environment.',
+            }
+        ],
+        'phase': 'commentary',
+    }
+    assert input_items[1]['call_id'] == 'call_env'
+    assert input_items[2]['call_id'] == 'call_env'
+
+
 def test_resolve_route_mode_auto_prefers_provider_specific_defaults():
     pipe = _load_pipe_class()()
 
@@ -635,6 +712,106 @@ def test_responses_streaming_function_call_arguments_emit_tool_calls_not_content
     )
 
 
+def test_responses_streaming_commentary_phase_precedes_tool_call_chunks():
+    pipe = _load_pipe_class()()
+    state = pipe._new_stream_state()
+    chunks = []
+
+    for event in [
+        {
+            'type': 'response.output_item.added',
+            'output_index': 0,
+            'item': {
+                'type': 'message',
+                'id': 'msg_commentary',
+                'role': 'assistant',
+                'phase': 'commentary',
+                'content': [],
+            },
+        },
+        {
+            'type': 'response.output_text.delta',
+            'output_index': 0,
+            'item_id': 'msg_commentary',
+            'delta': 'I will inspect the environment.',
+        },
+        {
+            'type': 'response.output_item.done',
+            'output_index': 0,
+            'item': {
+                'type': 'message',
+                'id': 'msg_commentary',
+                'role': 'assistant',
+                'phase': 'commentary',
+                'content': [],
+            },
+        },
+        {
+            'type': 'response.output_item.added',
+            'output_index': 1,
+            'item': {
+                'type': 'function_call',
+                'id': 'fc_1',
+                'call_id': 'call_1',
+                'name': 'get_environment',
+                'arguments': '',
+                'status': 'in_progress',
+            },
+        },
+    ]:
+        chunk = pipe._parse_responses_event(event, state)
+        if isinstance(chunk, list):
+            chunks.extend(chunk)
+        elif chunk:
+            chunks.append(chunk)
+
+    assert chunks[0]['choices'][0]['delta'] == {
+        'content': 'I will inspect the environment.',
+        'phase': 'commentary',
+    }
+    assert chunks[1]['choices'][0]['delta']['tool_calls'][0]['function']['name'] == (
+        'get_environment'
+    )
+
+
+def test_responses_streaming_final_answer_phase_is_attached_to_first_text_delta():
+    pipe = _load_pipe_class()()
+    state = pipe._new_stream_state()
+
+    assert (
+        pipe._parse_responses_event(
+            {
+                'type': 'response.output_item.added',
+                'output_index': 1,
+                'item': {
+                    'type': 'message',
+                    'id': 'msg_final',
+                    'role': 'assistant',
+                    'phase': 'final_answer',
+                    'content': [],
+                },
+            },
+            state,
+        )
+        is None
+    )
+
+    chunk = pipe._parse_responses_event(
+        {
+            'type': 'response.output_text.delta',
+            'output_index': 1,
+            'item_id': 'msg_final',
+            'delta': 'Done.',
+        },
+        state,
+    )
+
+    assert chunk['choices'][0]['delta'] == {
+        'content': 'Done.',
+        'phase': 'final_answer',
+    }
+
+
 def test_responses_web_search_lifecycle_emits_status_events_without_results():
     pipe = _load_pipe_class()()
     emitted = []
@@ -685,6 +862,11 @@ def test_responses_web_search_lifecycle_emits_status_events_without_results():
     assert status_events[-1]['data']['query'] == 'weather: Shanghai, China'
     assert source_events == []
     assert all(not chunk['choices'][0]['delta'].get('tool_calls') for chunk in chunks)
+    assert all(
+        chunk['choices'][0]['delta'].get('content_kind') == 'provider_auxiliary'
+        for chunk in chunks
+        if chunk['choices'][0]['delta'].get('content')
+    )
 
     content = ''.join(
         chunk['choices'][0]['delta'].get('content', '')
@@ -731,3 +913,27 @@ def test_responses_web_search_with_results_still_emits_sources():
     )
     assert 'world cup schedule' in content
     assert 'https://example.com/schedule' in content
+    assert all(
+        chunk['choices'][0]['delta'].get('content_kind') == 'provider_auxiliary'
+        for chunk in chunks
+        if chunk['choices'][0]['delta'].get('content')
+    )
+
+
+def test_responses_output_image_is_marked_as_provider_auxiliary_content():
+    pipe = _load_pipe_class()()
+    state = pipe._new_stream_state()
+
+    chunk = pipe._parse_responses_event(
+        {
+            'type': 'response.output_item.done',
+            'item': {
+                'type': 'output_image',
+                'image_url': 'https://example.com/generated.png',
+            },
+        },
+        state,
+    )
+
+    assert chunk['choices'][0]['delta']['content_kind'] == 'provider_auxiliary'
+    assert chunk['choices'][0]['delta']['auxiliary_type'] == 'output_image'

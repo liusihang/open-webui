@@ -3321,6 +3321,18 @@ class Pipe:
                 tool_calls = msg.get("tool_calls")
                 has_tool_calls = isinstance(tool_calls, list) and bool(tool_calls)
                 if has_tool_calls:
+                    assistant_parts = self._content_to_responses_parts(
+                        content, role="assistant"
+                    )
+                    if assistant_parts:
+                        input_items.append(
+                            {
+                                "type": "message",
+                                "role": "assistant",
+                                "content": assistant_parts,
+                                "phase": "commentary",
+                            }
+                        )
                     if degrade_tool_history_to_messages:
                         history_lines = []
                         for tc in tool_calls:
@@ -3375,13 +3387,15 @@ class Pipe:
                     content, role="assistant"
                 )
                 if assistant_parts:
-                    input_items.append(
-                        {
-                            "type": "message",
-                            "role": "assistant",
-                            "content": assistant_parts,
-                        }
-                    )
+                    item = {
+                        "type": "message",
+                        "role": "assistant",
+                        "content": assistant_parts,
+                    }
+                    phase = self._responses_message_phase(msg)
+                    if phase:
+                        item["phase"] = phase
+                    input_items.append(item)
                 continue
 
             user_parts = self._content_to_responses_parts(content, role="user")
@@ -3400,6 +3414,14 @@ class Pipe:
             )
 
         return input_items, instructions
+
+    def _responses_message_phase(self, item: Any) -> str:
+        if not isinstance(item, dict):
+            return ""
+        if str(item.get("role") or "").strip().lower() != "assistant":
+            return ""
+        phase = str(item.get("phase") or "").strip()
+        return phase if phase in ("commentary", "final_answer") else ""
 
     def _normalize_chat_content(self, content: Any, role: str) -> Any:
         if isinstance(content, str):
@@ -4252,6 +4274,8 @@ class Pipe:
             "reasoning_tokens": 0,
             "model_name": "",
             "reasoning_requested": False,
+            "message_phases_by_output_index": {},
+            "message_phases_by_item_id": {},
             "__event_emitter__": __event_emitter__,
         }
 
@@ -5083,7 +5107,54 @@ class Pipe:
             "</details>\n"
         )
         state["text_seen"] = True
-        return [{"choices": [{"delta": {"content": details}}]}]
+        return [
+            self._provider_auxiliary_content_chunk(
+                details,
+                "web_search_result",
+            )
+        ]
+
+    def _record_responses_message_phase(self, event: dict, state: dict) -> None:
+        item = event.get("item") if isinstance(event.get("item"), dict) else {}
+        if str(item.get("type") or "").strip().lower() != "message":
+            return
+        phase = self._responses_message_phase(item)
+        if not phase:
+            return
+        output_index = event.get("output_index")
+        if output_index is not None:
+            state["message_phases_by_output_index"][output_index] = phase
+        item_id = str(item.get("id") or "").strip()
+        if item_id:
+            state["message_phases_by_item_id"][item_id] = phase
+
+    def _responses_text_phase(self, event: dict, state: dict) -> str:
+        item_id = str(event.get("item_id") or "").strip()
+        if item_id:
+            phase = state["message_phases_by_item_id"].get(item_id)
+            if phase:
+                return phase
+        output_index = event.get("output_index")
+        if output_index is not None:
+            return str(
+                state["message_phases_by_output_index"].get(output_index) or ""
+            )
+        return ""
+
+    def _provider_auxiliary_content_chunk(
+        self, content: str, auxiliary_type: str
+    ) -> dict:
+        return {
+            "choices": [
+                {
+                    "delta": {
+                        "content": content,
+                        "content_kind": "provider_auxiliary",
+                        "auxiliary_type": auxiliary_type,
+                    }
+                }
+            ]
+        }
 
     def _parse_responses_event(
         self, event: dict, state: dict
@@ -5099,7 +5170,11 @@ class Pipe:
             delta = self._normalize_stream_delta(event.get("delta"), state, "content")
             if delta:
                 state["text_seen"] = True
-                content_chunk = {"choices": [{"delta": {"content": delta}}]}
+                content_delta = {"content": delta}
+                phase = self._responses_text_phase(event, state)
+                if phase:
+                    content_delta["phase"] = phase
+                content_chunk = {"choices": [{"delta": content_delta}]}
                 placeholder_chunk = self._stream_reasoning_placeholder_chunk(state)
                 if placeholder_chunk:
                     return [placeholder_chunk, content_chunk]
@@ -5112,7 +5187,11 @@ class Pipe:
             delta = self._normalize_stream_delta(event.get("text"), state, "content")
             if delta:
                 state["text_seen"] = True
-                content_chunk = {"choices": [{"delta": {"content": delta}}]}
+                content_delta = {"content": delta}
+                phase = self._responses_text_phase(event, state)
+                if phase:
+                    content_delta["phase"] = phase
+                content_chunk = {"choices": [{"delta": content_delta}]}
                 placeholder_chunk = self._stream_reasoning_placeholder_chunk(state)
                 if placeholder_chunk:
                     return [placeholder_chunk, content_chunk]
@@ -5145,6 +5224,7 @@ class Pipe:
 
         if event_type in ("response.output_item.added", "response.output_item.done"):
             item = event.get("item") if isinstance(event.get("item"), dict) else {}
+            self._record_responses_message_phase(event, state)
             if str(item.get("type") or "").strip().lower() == "function_call":
                 return self._responses_tool_item_to_chunks(
                     item, state, include_args=(event_type.endswith(".done"))
@@ -5165,7 +5245,9 @@ class Pipe:
                 image_md = self._part_to_image_markdown(item)
                 if image_md:
                     state["text_seen"] = True
-                    content_chunk = {"choices": [{"delta": {"content": image_md}}]}
+                    content_chunk = self._provider_auxiliary_content_chunk(
+                        image_md, "output_image"
+                    )
                     placeholder_chunk = self._stream_reasoning_placeholder_chunk(state)
                     if placeholder_chunk:
                         return [placeholder_chunk, content_chunk]
@@ -5194,7 +5276,9 @@ class Pipe:
             )
             if image_md:
                 state["text_seen"] = True
-                content_chunk = {"choices": [{"delta": {"content": image_md}}]}
+                content_chunk = self._provider_auxiliary_content_chunk(
+                    image_md, "output_image"
+                )
                 placeholder_chunk = self._stream_reasoning_placeholder_chunk(state)
                 if placeholder_chunk:
                     return [placeholder_chunk, content_chunk]
@@ -5211,7 +5295,9 @@ class Pipe:
             )
             if image_md:
                 state["text_seen"] = True
-                content_chunk = {"choices": [{"delta": {"content": image_md}}]}
+                content_chunk = self._provider_auxiliary_content_chunk(
+                    image_md, "output_image"
+                )
                 placeholder_chunk = self._stream_reasoning_placeholder_chunk(state)
                 if placeholder_chunk:
                     return [placeholder_chunk, content_chunk]
@@ -6421,6 +6507,11 @@ class Pipe:
         placeholder_chunk = self._stream_reasoning_placeholder_chunk(state)
         if placeholder_chunk:
             chunks.append(placeholder_chunk)
-        chunks.append({"choices": [{"delta": {"content": result_text}}]})
+        chunks.append(
+            self._provider_auxiliary_content_chunk(
+                result_text,
+                "web_search_result",
+            )
+        )
 
         return chunks if chunks else None

@@ -129,7 +129,11 @@ class RecordingBridgeCallbacks:
         # Default mock: emit a single text chunk then stream_end.
         yield {
             "type": "chunk",
-            "delta": {"content": "callback answer", "tool_calls": None},
+            "delta": {
+                "content": "callback answer",
+                "phase": "final_answer",
+                "tool_calls": None,
+            },
         }
         yield {"type": "stream_end"}
 
@@ -267,27 +271,11 @@ async def test_bridge_builds_agentscope_template_model_and_tool_callback_boundar
     assert isinstance(tool_chunk, ToolChunk)
     assert tool_chunk.state == ToolResultState.SUCCESS
     assert tool_chunk.content[0].text == "tool callback answer"
-    assert [record["block_kind"] for record in callbacks.text_deltas] == [
-        "assistant_note",
-        "action_summary",
+    assert callbacks.text_deltas == []
+    assert [event["event_type"] for event in callbacks.events] == [
+        "tool.requested",
+        "tool.completed",
     ]
-    assert "search" in callbacks.text_deltas[0]["delta"].lower()
-    assert "input" in callbacks.text_deltas[0]["delta"].lower()
-    assert "completed" in callbacks.text_deltas[1]["delta"].lower()
-    assert callbacks.text_deltas[0]["delta_index"] == 0
-    assert callbacks.text_deltas[1]["delta_index"] == 0
-    assert callbacks.text_deltas[0]["payload"] == {
-        "tool_id": "tool-search",
-        "tool_call_id": "tool-call-1",
-        "tool_name": "search",
-        "input_categories": ["text"],
-    }
-    assert callbacks.text_deltas[1]["payload"] == {
-        "tool_id": "tool-search",
-        "tool_call_id": "tool-call-1",
-        "tool_name": "search",
-        "status": "success",
-    }
     assert callbacks.tool_calls[0]["idempotency_key"] == ("tool:subagent:run-bridge:1:tool-call-1:1")
     assert callbacks.tool_calls[0]["arguments"] == {"query": "agent mode"}
 
@@ -303,18 +291,7 @@ async def test_bridge_builds_agentscope_template_model_and_tool_callback_boundar
         pass
     second_call_messages = callbacks.model_calls[-1]["messages"]
     assert second_call_messages[0]["role"] == "user"
-    assert second_call_messages[1:] == [
-        {
-            "role": "assistant",
-            "content": "I will use Search with text input.",
-            "phase": "commentary",
-        },
-        {
-            "role": "assistant",
-            "content": "Search completed.",
-            "phase": "commentary",
-        },
-    ]
+    assert second_call_messages[1:] == []
     replay_text = "\n".join(str(message.get("content") or "") for message in second_call_messages)
     assert "Previous Agent Mode public process" not in replay_text
     assert "phase:running" not in replay_text
@@ -322,7 +299,7 @@ async def test_bridge_builds_agentscope_template_model_and_tool_callback_boundar
 
 
 @pytest.mark.asyncio
-async def test_current_run_public_notes_replay_after_current_tool_results_in_order() -> None:
+async def test_current_run_tool_results_do_not_inject_synthetic_assistant_notes() -> None:
     from agentscope_runtime.agentscope_bridge import AgentScopeRuntimeBridge
 
     callbacks = RecordingBridgeCallbacks()
@@ -390,33 +367,11 @@ async def test_current_run_public_notes_replay_after_current_tool_results_in_ord
 
     assert user_index == 0
     assert function_indices == [1, 2, 3, 4]
-    assert messages[5:] == [
-        {
-            "role": "assistant",
-            "content": "I will use Get environment.",
-            "phase": "commentary",
-        },
-        {
-            "role": "assistant",
-            "content": "Get environment completed.",
-            "phase": "commentary",
-        },
-        {
-            "role": "assistant",
-            "content": "I will use Get current timestamp.",
-            "phase": "commentary",
-        },
-        {
-            "role": "assistant",
-            "content": "Get current timestamp completed.",
-            "phase": "commentary",
-        },
-    ]
+    assert messages[5:] == []
+    assert callbacks.text_deltas == []
     replay_text = "\n".join(str(message.get("content") or "") for message in messages)
-    assert replay_text.count("I will use Get environment.") == 1
-    assert replay_text.count("Get environment completed.") == 1
-    assert replay_text.count("I will use Get current timestamp.") == 1
-    assert replay_text.count("Get current timestamp completed.") == 1
+    assert "I will use" not in replay_text
+    assert "completed." not in replay_text
 
 
 @pytest.mark.asyncio
@@ -502,6 +457,7 @@ async def test_model_bridge_preserves_openwebui_tool_calls_as_agentscope_blocks(
                 "type": "chunk",
                 "delta": {
                     "content": "I will search first.",
+                    "phase": "commentary",
                     "tool_calls": [
                         {
                             "id": "call_search_1",
@@ -548,7 +504,411 @@ async def test_model_bridge_preserves_openwebui_tool_calls_as_agentscope_blocks(
     assert tool_calls[0].id == "call_search_1"
     assert tool_calls[0].name == "search_web"
     assert tool_calls[0].input == "{\"query\":\"agent mode\"}"
-    assert callbacks.text_deltas == []
+    assert [item["delta"] for item in callbacks.text_deltas] == ["I will search first."]
+
+
+@pytest.mark.asyncio
+async def test_model_bridge_buffers_model_commentary_before_tool_response() -> None:
+    from agentscope.message import TextBlock, ToolCallBlock
+
+    from agentscope_runtime.agentscope_bridge import OpenWebUIAgentScopeModel
+
+    class CommentaryToolCallbacks(RecordingBridgeCallbacks):
+        async def call_model_stream(self, **kwargs: object):
+            self.model_calls.append(kwargs)
+            yield {
+                "type": "chunk",
+                "delta": {
+                    "content": "I will inspect ",
+                    "phase": "commentary",
+                    "tool_calls": None,
+                },
+            }
+            yield {
+                "type": "chunk",
+                "delta": {
+                    "content": "the environment.",
+                    "phase": "commentary",
+                    "tool_calls": None,
+                },
+            }
+            yield {
+                "type": "chunk",
+                "delta": {
+                    "content": None,
+                    "tool_calls": [
+                        {
+                            "id": "call_env",
+                            "type": "function",
+                            "function": {
+                                "name": "get_environment",
+                                "arguments": "{}",
+                            },
+                        }
+                    ],
+                },
+            }
+            yield {"type": "stream_end"}
+
+    callbacks = CommentaryToolCallbacks()
+    model = OpenWebUIAgentScopeModel(
+        run_id="run-commentary-tool",
+        runtime_session_id="rt-commentary-tool",
+        participant_id="leader",
+        model_id="gpt-5.4",
+        callback_client=callbacks,
+    )
+
+    chunks = [
+        chunk
+        async for chunk in await model(
+            [{"role": "user", "content": "Inspect the environment."}],
+            tools=[
+                {
+                    "type": "function",
+                    "function": {
+                        "name": "get_environment",
+                        "description": "Get environment.",
+                        "parameters": {"type": "object", "properties": {}},
+                    },
+                }
+            ],
+        )
+    ]
+
+    assert len(chunks) == 1
+    assert chunks[0].is_last is True
+    assert [block.text for block in chunks[0].content if isinstance(block, TextBlock)] == [
+        "I will inspect the environment."
+    ]
+    assert [block.name for block in chunks[0].content if isinstance(block, ToolCallBlock)] == [
+        "get_environment"
+    ]
+    assert [(item["block_kind"], item["delta"], item["phase"]) for item in callbacks.text_deltas] == [
+        ("assistant_note", "I will inspect the environment.", "running")
+    ]
+    assert callbacks.text_deltas[0]["payload"] == {
+        "source": "model",
+        "model_call_id": "model-call-1",
+        "response_phase": "commentary",
+    }
+
+
+@pytest.mark.asyncio
+async def test_model_bridge_commentary_block_ids_are_unique_across_runtime_identities() -> None:
+    from agentscope_runtime.agentscope_bridge import OpenWebUIAgentScopeModel
+
+    class CommentaryToolCallbacks(RecordingBridgeCallbacks):
+        async def call_model_stream(self, **kwargs: object):
+            self.model_calls.append(kwargs)
+            participant_id = str(kwargs["participant_id"])
+            yield {
+                "type": "chunk",
+                "delta": {
+                    "content": f"{participant_id} will inspect.",
+                    "phase": "commentary",
+                    "tool_calls": None,
+                },
+            }
+            yield {
+                "type": "chunk",
+                "delta": {
+                    "content": None,
+                    "tool_calls": [
+                        {
+                            "id": f"call-{participant_id}",
+                            "type": "function",
+                            "function": {"name": "get_environment", "arguments": "{}"},
+                        }
+                    ],
+                },
+            }
+            yield {"type": "stream_end"}
+
+    callbacks = CommentaryToolCallbacks()
+    identities = (
+        ("rt-commentary-participants", "leader"),
+        ("rt-commentary-participants", "subagent:run-1:1"),
+        ("rt-commentary-participants-restart", "leader"),
+    )
+    for runtime_session_id, participant_id in identities:
+        model = OpenWebUIAgentScopeModel(
+            run_id="run-commentary-participants",
+            runtime_session_id=runtime_session_id,
+            participant_id=participant_id,
+            model_id="gpt-5.4",
+            callback_client=callbacks,
+        )
+        async for _ in await model(
+            [{"role": "user", "content": "Inspect."}],
+            tools=[
+                {
+                    "type": "function",
+                    "function": {
+                        "name": "get_environment",
+                        "description": "Get environment.",
+                        "parameters": {"type": "object", "properties": {}},
+                    },
+                }
+            ],
+        ):
+            pass
+
+    assert len({item["block_id"] for item in callbacks.text_deltas}) == len(identities)
+
+
+@pytest.mark.asyncio
+async def test_model_bridge_flushes_commentary_before_streaming_final_answer() -> None:
+    from agentscope_runtime.agentscope_bridge import OpenWebUIAgentScopeModel
+
+    class CommentaryFinalCallbacks(RecordingBridgeCallbacks):
+        async def call_model_stream(self, **kwargs: object):
+            self.model_calls.append(kwargs)
+            yield {
+                "type": "chunk",
+                "delta": {
+                    "content": "I checked the result.",
+                    "phase": "commentary",
+                    "tool_calls": None,
+                },
+            }
+            yield {
+                "type": "chunk",
+                "delta": {
+                    "content": "Final ",
+                    "phase": "final_answer",
+                    "tool_calls": None,
+                },
+            }
+            yield {
+                "type": "chunk",
+                "delta": {
+                    "content": "answer.",
+                    "phase": "final_answer",
+                    "tool_calls": None,
+                },
+            }
+            yield {"type": "stream_end"}
+
+    final_texts = []
+    callbacks = CommentaryFinalCallbacks()
+    model = OpenWebUIAgentScopeModel(
+        run_id="run-commentary-final",
+        runtime_session_id="rt-commentary-final",
+        participant_id="leader",
+        model_id="gpt-5.4",
+        callback_client=callbacks,
+        on_final_text=lambda participant_id, text: final_texts.append((participant_id, text)),
+    )
+
+    chunks = [
+        chunk
+        async for chunk in await model([{"role": "user", "content": "Finish."}])
+    ]
+
+    assert [chunk.content[0].text for chunk in chunks[:-1]] == ["Final ", "answer."]
+    assert all(chunk.is_last is False for chunk in chunks[:-1])
+    assert chunks[-1].is_last is True
+    assert callbacks.text_deltas[0]["delta"] == "I checked the result."
+    assert final_texts == [("leader", "Final answer.")]
+
+
+@pytest.mark.asyncio
+async def test_model_bridge_persists_provider_auxiliary_content_before_final_stream() -> None:
+    from agentscope_runtime.agentscope_bridge import OpenWebUIAgentScopeModel
+
+    class AuxiliaryFinalCallbacks(RecordingBridgeCallbacks):
+        async def call_model_stream(self, **kwargs: object):
+            self.model_calls.append(kwargs)
+            yield {
+                "type": "chunk",
+                "delta": {
+                    "content": "Web search results.",
+                    "content_kind": "provider_auxiliary",
+                    "auxiliary_type": "web_search_result",
+                    "tool_calls": None,
+                },
+            }
+            yield {
+                "type": "chunk",
+                "delta": {
+                    "content": "Final answer.",
+                    "phase": "final_answer",
+                    "tool_calls": None,
+                },
+            }
+            yield {"type": "stream_end"}
+
+    callbacks = AuxiliaryFinalCallbacks()
+    model = OpenWebUIAgentScopeModel(
+        run_id="run-auxiliary-final",
+        runtime_session_id="rt-auxiliary-final",
+        participant_id="leader",
+        model_id="gpt-5.4",
+        callback_client=callbacks,
+    )
+
+    chunks = [
+        chunk
+        async for chunk in await model([{"role": "user", "content": "Search, then answer."}])
+    ]
+
+    assert [chunk.content[0].text for chunk in chunks[:-1]] == ["Final answer."]
+    assert [item["delta"] for item in callbacks.text_deltas] == ["Web search results."]
+    assert callbacks.text_deltas[0]["block_kind"] == "action_summary"
+    assert callbacks.text_deltas[0]["payload"] == {
+        "source": "provider_auxiliary",
+        "model_call_id": "model-call-1",
+        "auxiliary_types": ["web_search_result"],
+    }
+
+
+@pytest.mark.asyncio
+async def test_model_bridge_rejects_unclassified_no_tool_text() -> None:
+    from agentscope_runtime.agentscope_bridge import OpenWebUIAgentScopeModel
+
+    callbacks = RecordingBridgeCallbacks()
+
+    async def phase_less_stream(**kwargs: object):
+        callbacks.model_calls.append(kwargs)
+        yield {
+            "type": "chunk",
+            "delta": {"content": "Untyped answer.", "tool_calls": None},
+        }
+        yield {"type": "stream_end"}
+
+    callbacks.call_model_stream = phase_less_stream
+    model = OpenWebUIAgentScopeModel(
+        run_id="run-missing-phase",
+        runtime_session_id="rt-missing-phase",
+        participant_id="leader",
+        model_id="gpt-5.4",
+        callback_client=callbacks,
+    )
+
+    with pytest.raises(RuntimeError, match="model_phase_missing"):
+        async for _ in await model([{"role": "user", "content": "Answer."}]):
+            pass
+
+
+@pytest.mark.asyncio
+async def test_model_bridge_rejects_final_phase_with_tool_call() -> None:
+    from agentscope_runtime.agentscope_bridge import OpenWebUIAgentScopeModel
+
+    class FinalToolCallbacks(RecordingBridgeCallbacks):
+        async def call_model_stream(self, **kwargs: object):
+            self.model_calls.append(kwargs)
+            yield {
+                "type": "chunk",
+                "delta": {
+                    "content": "This is final.",
+                    "phase": "final_answer",
+                    "tool_calls": [
+                        {
+                            "id": "call_bad",
+                            "type": "function",
+                            "function": {"name": "get_environment", "arguments": "{}"},
+                        }
+                    ],
+                },
+            }
+            yield {"type": "stream_end"}
+
+    callbacks = FinalToolCallbacks()
+    model = OpenWebUIAgentScopeModel(
+        run_id="run-final-tool",
+        runtime_session_id="rt-final-tool",
+        participant_id="leader",
+        model_id="gpt-5.4",
+        callback_client=callbacks,
+    )
+
+    with pytest.raises(RuntimeError, match="final_phase_with_tool_call"):
+        async for _ in await model([{"role": "user", "content": "Finish."}]):
+            pass
+
+
+@pytest.mark.asyncio
+async def test_model_bridge_rejects_malformed_tool_call_delta() -> None:
+    from agentscope_runtime.agentscope_bridge import OpenWebUIAgentScopeModel
+
+    class MalformedToolCallbacks(RecordingBridgeCallbacks):
+        async def call_model_stream(self, **kwargs: object):
+            self.model_calls.append(kwargs)
+            yield {
+                "type": "chunk",
+                "delta": {
+                    "content": None,
+                    "tool_calls": [
+                        {
+                            "id": "call-malformed",
+                            "type": "function",
+                            "function": {"arguments": "{}"},
+                        }
+                    ],
+                },
+            }
+            yield {"type": "stream_end"}
+
+    callbacks = MalformedToolCallbacks()
+    model = OpenWebUIAgentScopeModel(
+        run_id="run-malformed-tool",
+        runtime_session_id="rt-malformed-tool",
+        participant_id="leader",
+        model_id="gpt-5.4",
+        callback_client=callbacks,
+    )
+
+    with pytest.raises(RuntimeError, match="invalid_tool_call"):
+        async for _ in await model(
+            [{"role": "user", "content": "Use the tool."}],
+            tools=[
+                {
+                    "type": "function",
+                    "function": {
+                        "name": "get_environment",
+                        "description": "Get environment.",
+                        "parameters": {"type": "object", "properties": {}},
+                    },
+                }
+            ],
+        ):
+            pass
+
+
+@pytest.mark.asyncio
+async def test_model_bridge_rejects_commentary_only_without_tool_or_final() -> None:
+    from agentscope_runtime.agentscope_bridge import OpenWebUIAgentScopeModel
+
+    class CommentaryOnlyCallbacks(RecordingBridgeCallbacks):
+        async def call_model_stream(self, **kwargs: object):
+            self.model_calls.append(kwargs)
+            yield {
+                "type": "chunk",
+                "delta": {
+                    "content": "I checked the available context.",
+                    "phase": "commentary",
+                    "tool_calls": None,
+                },
+            }
+            yield {"type": "stream_end"}
+
+    callbacks = CommentaryOnlyCallbacks()
+    model = OpenWebUIAgentScopeModel(
+        run_id="run-commentary-only",
+        runtime_session_id="rt-commentary-only",
+        participant_id="leader",
+        model_id="gpt-5.4",
+        callback_client=callbacks,
+    )
+
+    with pytest.raises(RuntimeError, match="model_final_phase_missing"):
+        async for _ in await model([{"role": "user", "content": "Answer."}]):
+            pass
+
+    assert [item["delta"] for item in callbacks.text_deltas] == [
+        "I checked the available context."
+    ]
 
 
 @pytest.mark.asyncio
@@ -571,6 +931,7 @@ async def test_model_bridge_replays_private_reasoning_content_to_next_model_call
                     "type": "chunk",
                     "delta": {
                         "content": "公开回答。",
+                        "phase": "final_answer",
                         "tool_calls": None,
                     },
                 }
@@ -579,6 +940,7 @@ async def test_model_bridge_replays_private_reasoning_content_to_next_model_call
                     "type": "chunk",
                     "delta": {
                         "content": "继续回答。",
+                        "phase": "final_answer",
                         "tool_calls": None,
                     },
                 }
@@ -622,6 +984,7 @@ async def test_model_bridge_does_not_raw_replay_private_reasoning_for_gpt_models
                 "delta": {
                     "reasoning_content": "private gpt reasoning",
                     "content": "answer",
+                    "phase": "final_answer",
                     "tool_calls": None,
                 },
             }
@@ -671,12 +1034,9 @@ async def test_model_bridge_does_not_turn_reasoning_only_done_payload_into_publi
         callback_client=callbacks,
     )
 
-    response = None
-    async for chunk in await model([{"role": "user", "content": "第一步"}]):
-        response = chunk
-
-    assert response is not None
-    assert response.content[0].text == ""
+    with pytest.raises(RuntimeError, match="empty_model_response"):
+        async for _ in await model([{"role": "user", "content": "第一步"}]):
+            pass
     assert callbacks.text_deltas == []
 
 
@@ -750,7 +1110,7 @@ async def test_bridge_allocates_unique_tool_call_ids_across_different_tools() ->
 
 
 @pytest.mark.asyncio
-async def test_tool_proxy_emits_public_failure_summary_without_raw_error_details() -> None:
+async def test_tool_proxy_failure_emits_structured_events_without_synthetic_text() -> None:
     from agentscope_runtime.agentscope_bridge import AgentScopeRuntimeBridge
 
     class FailingCallbacks(RecordingBridgeCallbacks):
@@ -775,23 +1135,51 @@ async def test_tool_proxy_emits_public_failure_summary_without_raw_error_details
     with pytest.raises(RuntimeError, match="private backend path"):
         await tool(path="/tmp/private.txt", content="secret value")
 
-    assert [record["block_kind"] for record in callbacks.text_deltas] == [
-        "assistant_note",
-        "action_summary",
+    assert callbacks.text_deltas == []
+    assert [event["event_type"] for event in callbacks.events] == [
+        "tool.requested",
+        "tool.failed",
     ]
-    assert callbacks.text_deltas[0]["payload"] == {
-        "tool_id": "tool:builtin:write_file:write_file",
-        "tool_call_id": "tool-call-1",
-        "tool_name": "write_file",
-        "input_categories": ["text"],
-    }
-    assert callbacks.text_deltas[1]["payload"] == {
-        "tool_id": "tool:builtin:write_file:write_file",
-        "tool_call_id": "tool-call-1",
-        "tool_name": "write_file",
-        "status": "failed",
-        "error_type": "RuntimeError",
-    }
-    rendered_text = "\n".join(record["delta"] for record in callbacks.text_deltas)
-    assert "/secret/raw-output.txt" not in rendered_text
-    assert "secret value" not in rendered_text
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("status", "exception_name"),
+    [
+        ("approval_required", "OpenWebUIToolApprovalRequired"),
+        ("approval_rejected", "OpenWebUIToolApprovalRejected"),
+    ],
+)
+async def test_tool_proxy_approval_emits_no_synthetic_text(
+    status: str,
+    exception_name: str,
+) -> None:
+    import agentscope_runtime.agentscope_bridge as bridge_module
+
+    from agentscope_runtime.agentscope_bridge import AgentScopeRuntimeBridge
+
+    class ApprovalCallbacks(RecordingBridgeCallbacks):
+        async def call_tool(self, **kwargs: object) -> dict:
+            self.tool_calls.append(kwargs)
+            return {"status": status, "content": "approval state"}
+
+    callbacks = ApprovalCallbacks()
+    bridge = AgentScopeRuntimeBridge(
+        run_id=f"run-{status}",
+        runtime_session_id=f"rt-{status}",
+        callback_client=callbacks,
+    )
+    tool = bridge.build_tool_proxy(
+        participant_id="leader",
+        tool_id="tool:shell:run",
+        name="run_command",
+        description="Run a command.",
+        input_schema={"type": "object", "properties": {}},
+    )
+    exception_type = getattr(bridge_module, exception_name)
+
+    with pytest.raises(exception_type):
+        await tool(command="pwd")
+
+    assert callbacks.text_deltas == []
+    assert [event["event_type"] for event in callbacks.events] == ["tool.requested"]

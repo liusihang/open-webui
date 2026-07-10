@@ -476,6 +476,17 @@ def _parse_openai_chunk(payload: Any) -> dict[str, Any]:
                 content = choice_delta.get("content")
                 if isinstance(content, str):
                     delta["content"] = content
+                phase = str(choice_delta.get("phase") or "").strip()
+                if phase in {"commentary", "final_answer"}:
+                    delta["phase"] = phase
+                content_kind = str(choice_delta.get("content_kind") or "").strip()
+                if content_kind == "provider_auxiliary":
+                    delta["content_kind"] = content_kind
+                    auxiliary_type = str(
+                        choice_delta.get("auxiliary_type") or ""
+                    ).strip()
+                    if auxiliary_type:
+                        delta["auxiliary_type"] = auxiliary_type
                 reasoning_content = (
                     choice_delta.get("reasoning_content")
                     or choice_delta.get("reasoning")

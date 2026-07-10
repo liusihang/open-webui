@@ -15,17 +15,17 @@ Implement and verify native model phase passthrough for Agent Mode without an ex
 
 ## Current phase
 
-Phase 1: write Pipe red tests.
+Phase 7: Slim image rebuild, isolated swap, and real acceptance.
 
 ## Phases
 
-1. [in_progress] Bifrost Pipe red/green phase preservation.
-2. [pending] AgentScope callback parser red/green.
-3. [pending] Bridge commentary/final split red/green.
-4. [pending] Remove synthetic tool narration with red/green coverage.
-5. [pending] Runtime lifecycle and backend regression suites.
-6. [pending] Independent review, fixes, and production commit.
-7. [pending] Slim image rebuild, isolated swap, and real acceptance.
+1. [complete] Bifrost Pipe red/green phase preservation.
+2. [complete] AgentScope callback parser red/green.
+3. [complete] Bridge commentary/final split red/green.
+4. [complete] Remove synthetic tool narration with red/green coverage.
+5. [complete] Runtime lifecycle and backend regression suites.
+6. [complete] Independent review, fixes, and production commit.
+7. [in_progress] Slim image rebuild, isolated swap, and real acceptance.
 
 ## Decisions
 

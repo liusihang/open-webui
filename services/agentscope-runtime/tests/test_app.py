@@ -188,15 +188,7 @@ class RecordingOpenWebUIClient:
         tools: list[dict] | None = None,
         tool_choice: object | None = None,
     ):
-        """Stream-shim that wraps the non-streaming ``call_model`` response.
-
-        Tests record their canned responses in ``model_responses`` (or
-        override ``call_model``). This shim runs that path and converts the
-        single response dict into the same SSE-event sequence the production
-        client emits: ``done`` (with the full response payload) followed by
-        ``stream_end``. Subclasses that override ``call_model`` to raise
-        retryable errors get the same retryable surface here.
-        """
+        """Translate canned responses into the phase-aware streaming contract."""
         try:
             response = await self.call_model(
                 run_id=run_id,
@@ -213,7 +205,38 @@ class RecordingOpenWebUIClient:
             )
         except Exception:
             raise
-        yield {"type": "done", "payload": response}
+        response_payload = response.get("response", response)
+        content = None
+        reasoning_content = None
+        tool_calls = None
+        if isinstance(response_payload, str):
+            content = response_payload
+        elif isinstance(response_payload, dict):
+            choices = response_payload.get("choices")
+            if isinstance(choices, list) and choices and isinstance(choices[0], dict):
+                choice = choices[0]
+                message = choice.get("message")
+                if not isinstance(message, dict):
+                    message = choice.get("delta")
+                if isinstance(message, dict):
+                    content = message.get("content")
+                    reasoning_content = message.get("reasoning_content")
+                    tool_calls = message.get("tool_calls")
+            else:
+                content = response_payload.get("content")
+                reasoning_content = response_payload.get("reasoning_content")
+                tool_calls = response_payload.get("tool_calls")
+        delta = {
+            "content": content if isinstance(content, str) else None,
+            "reasoning_content": (
+                reasoning_content if isinstance(reasoning_content, str) else None
+            ),
+            "tool_calls": tool_calls if isinstance(tool_calls, list) else None,
+        }
+        if delta["content"]:
+            delta["phase"] = "commentary" if delta["tool_calls"] else "final_answer"
+        if any(value is not None for value in delta.values()):
+            yield {"type": "chunk", "delta": delta}
         yield {"type": "stream_end"}
 
     async def call_tool(
@@ -821,6 +844,225 @@ async def test_run_leader_streaming_flushes_final_delta_after_latency_threshold(
 
 
 @pytest.mark.asyncio
+async def test_run_leader_streaming_cancellation_interrupts_silent_provider_wait(
+    monkeypatch,
+) -> None:
+    monkeypatch.setattr(runtime_app, "CANCELLATION_POLL_SECONDS", 0.01, raising=False)
+    session = RuntimeSession(
+        run_id="run-cancel-silent-stream",
+        runtime_session_id="rt-run-cancel-silent-stream",
+        state="running",
+    )
+    stream_started = asyncio.Event()
+    stream_closed = asyncio.Event()
+
+    class BlockingLeader:
+        async def reply_stream(self, messages):
+            try:
+                stream_started.set()
+                if False:
+                    yield None
+                await asyncio.Event().wait()
+            finally:
+                stream_closed.set()
+
+    run_task = asyncio.create_task(
+        _run_leader_streaming(
+            BlockingLeader(),
+            session,
+            [],
+        )
+    )
+    await asyncio.wait_for(stream_started.wait(), timeout=1)
+    session.cancel_requested = True
+    session.state = "cancelled"
+
+    result = await asyncio.wait_for(run_task, timeout=0.2)
+
+    assert result.streamed_text == ""
+    assert result.next_delta_index == 0
+    await asyncio.wait_for(stream_closed.wait(), timeout=0.2)
+
+
+@pytest.mark.asyncio
+async def test_general_agent_native_phase_enters_finalizing_only_on_final_delta() -> None:
+    class NativePhaseClient(RecordingOpenWebUIClient):
+        def __init__(self) -> None:
+            super().__init__()
+            self.commentary_written = asyncio.Event()
+            self.release_commentary = asyncio.Event()
+            self.final_started = asyncio.Event()
+            self.release_stream = asyncio.Event()
+
+        async def append_text_delta(self, **kwargs: object) -> dict:
+            result = await super().append_text_delta(**kwargs)  # type: ignore[arg-type]
+            self.commentary_written.set()
+            await self.release_commentary.wait()
+            return result
+
+        async def append_event(self, **kwargs: object) -> dict:
+            result = await super().append_event(**kwargs)  # type: ignore[arg-type]
+            if kwargs["event_type"] == "final.started":
+                self.final_started.set()
+            return result
+
+        async def call_model_stream(self, **kwargs: object):
+            self.model_calls.append(kwargs)
+            yield {
+                "type": "chunk",
+                "delta": {
+                    "content": "I will inspect the environment.",
+                    "phase": "commentary",
+                    "tool_calls": None,
+                },
+            }
+            yield {
+                "type": "chunk",
+                "delta": {
+                    "content": "Final answer.",
+                    "phase": "final_answer",
+                    "tool_calls": None,
+                },
+            }
+            await self.release_stream.wait()
+            yield {"type": "stream_end"}
+
+    openwebui_client = NativePhaseClient()
+    async with make_client(openwebui_client, auto_finalize_ordinary_qa=True) as client:
+        response = await client.post(
+            "/v1/openwebui/runs",
+            headers={"Authorization": f"Bearer {SERVICE_TOKEN}"},
+            json={
+                "run_id": "run-native-phase",
+                "chat_id": "chat-1",
+                "leader_model_id": "model-a",
+                "messages": [{"role": "user", "content": "Inspect, then answer."}],
+                "tool_access_envelope": {
+                    "tools": [
+                        {
+                            "id": "tool:terminal:main:list_files",
+                            "name": "list_files",
+                            "type": "terminal",
+                            "schema": {
+                                "name": "list_files",
+                                "description": "List files.",
+                                "parameters": {"type": "object", "properties": {}},
+                            },
+                        }
+                    ]
+                },
+            },
+        )
+        assert response.status_code == 202
+
+        await asyncio.wait_for(openwebui_client.commentary_written.wait(), timeout=1)
+        status = await client.get(
+            "/v1/openwebui/runs/run-native-phase/status",
+            headers={"Authorization": f"Bearer {SERVICE_TOKEN}"},
+        )
+        assert status.json()["state"] == "running"
+        assert openwebui_client.state_transitions == []
+        assert [event["event_type"] for event in openwebui_client.events] == ["run.running"]
+        assert openwebui_client.final_deltas == []
+        assert openwebui_client.text_deltas[0]["payload"]["response_phase"] == "commentary"
+
+        openwebui_client.release_commentary.set()
+        await asyncio.wait_for(openwebui_client.final_started.wait(), timeout=1)
+        status = await client.get(
+            "/v1/openwebui/runs/run-native-phase/status",
+            headers={"Authorization": f"Bearer {SERVICE_TOKEN}"},
+        )
+        assert status.json()["state"] == "finalizing"
+        assert [transition["to_state"] for transition in openwebui_client.state_transitions] == [
+            "finalizing"
+        ]
+        assert [event["event_type"] for event in openwebui_client.events] == [
+            "run.running",
+            "final.started",
+        ]
+        assert [delta["delta"] for delta in openwebui_client.text_deltas] == [
+            "I will inspect the environment."
+        ]
+
+        openwebui_client.release_stream.set()
+        for _ in range(40):
+            status = await client.get(
+                "/v1/openwebui/runs/run-native-phase/status",
+                headers={"Authorization": f"Bearer {SERVICE_TOKEN}"},
+            )
+            if status.json()["state"] == "completed":
+                break
+            await asyncio.sleep(0.01)
+
+    assert status.json()["state"] == "completed"
+    assert joined_final_delta_text(openwebui_client) == "Final answer."
+    assert [transition["to_state"] for transition in openwebui_client.state_transitions] == [
+        "finalizing",
+        "completed",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_general_agent_native_phase_error_fails_without_final_fallback() -> None:
+    class MissingPhaseClient(RecordingOpenWebUIClient):
+        async def call_model_stream(self, **kwargs: object):
+            self.model_calls.append(kwargs)
+            yield {
+                "type": "chunk",
+                "delta": {"content": "Untyped answer.", "tool_calls": None},
+            }
+            yield {"type": "stream_end"}
+
+    openwebui_client = MissingPhaseClient()
+    async with make_client(openwebui_client, auto_finalize_ordinary_qa=True) as client:
+        response = await client.post(
+            "/v1/openwebui/runs",
+            headers={"Authorization": f"Bearer {SERVICE_TOKEN}"},
+            json={
+                "run_id": "run-native-phase-error",
+                "chat_id": "chat-1",
+                "leader_model_id": "model-a",
+                "messages": [{"role": "user", "content": "Answer."}],
+                "tool_access_envelope": {
+                    "tools": [
+                        {
+                            "id": "tool:terminal:main:list_files",
+                            "name": "list_files",
+                            "type": "terminal",
+                            "schema": {
+                                "name": "list_files",
+                                "description": "List files.",
+                                "parameters": {"type": "object", "properties": {}},
+                            },
+                        }
+                    ]
+                },
+            },
+        )
+        assert response.status_code == 202
+        for _ in range(40):
+            status = await client.get(
+                "/v1/openwebui/runs/run-native-phase-error/status",
+                headers={"Authorization": f"Bearer {SERVICE_TOKEN}"},
+            )
+            if status.json()["state"] == "failed":
+                break
+            await asyncio.sleep(0.01)
+
+    assert status.json()["state"] == "failed"
+    assert len(openwebui_client.model_calls) == 1
+    assert openwebui_client.text_deltas == []
+    assert openwebui_client.final_deltas == []
+    assert [transition["to_state"] for transition in openwebui_client.state_transitions] == ["failed"]
+    assert [event["event_type"] for event in openwebui_client.events] == [
+        "run.running",
+        "run.failed",
+    ]
+    error = openwebui_client.events[-1]["payload"]["error"]
+    assert "model_phase_missing" in error["message"]
+
+
+@pytest.mark.asyncio
 async def test_run_start_with_tool_envelope_drives_tool_artifact_and_final_lifecycle() -> None:
     openwebui_client = RecordingOpenWebUIClient()
     openwebui_client.model_responses = [
@@ -919,42 +1161,38 @@ async def test_run_start_with_tool_envelope_drives_tool_artifact_and_final_lifec
     assert openwebui_client.events[1]["summary"] == "Read a file."
     assert openwebui_client.events[2]["summary"] == "Read file completed."
     assert openwebui_client.events[3]["payload"]["artifact"]["id"] == "artifact-1"
-    assert [delta["block_kind"] for delta in openwebui_client.text_deltas] == [
-        "assistant_note",
-        "action_summary",
-    ]
-    assert openwebui_client.text_deltas[0]["block_id"] == "tool-call-1:assistant-note"
+    assert [delta["block_kind"] for delta in openwebui_client.text_deltas] == ["assistant_note"]
+    assert openwebui_client.text_deltas[0]["block_id"].endswith(
+        ":leader:model-call-1:model-commentary"
+    )
+    assert openwebui_client.text_deltas[0]["delta"] == "I will read the file."
     assert openwebui_client.text_deltas[0]["payload"] == {
-        "tool_call_id": "tool-call-1",
-        "tool_id": "tool:terminal:main:read_file",
-        "tool_name": "read_file",
-        "input_categories": ["text"],
-    }
-    assert openwebui_client.text_deltas[1]["payload"] == {
-        "tool_call_id": "tool-call-1",
-        "tool_id": "tool:terminal:main:read_file",
-        "tool_name": "read_file",
-        "status": "success",
+        "source": "model",
+        "model_call_id": "model-call-1",
+        "response_phase": "commentary",
     }
     rendered_tool_notes = "\n".join(delta["delta"] for delta in openwebui_client.text_deltas)
     assert "/tmp/input.txt" not in rendered_tool_notes
     assert joined_final_delta_text(openwebui_client) == "The file says: tool callback result"
+    assert [transition["to_state"] for transition in openwebui_client.state_transitions] == [
+        "finalizing",
+        "completed",
+    ]
     timeline_labels = [
         entry.get("event_type") or f'{entry["type"]}:{entry.get("block_kind", "")}'.rstrip(":")
         for entry in openwebui_client.timeline
     ]
-    assert timeline_labels[:7] == [
+    assert timeline_labels[:6] == [
         "run.running",
         "text.delta:assistant_note",
         "tool.requested",
-        "text.delta:action_summary",
         "tool.completed",
         "artifact.registered",
         "final.started",
     ]
     assert timeline_labels[-1] == "run.completed"
-    assert timeline_labels[7:-1]
-    assert set(timeline_labels[7:-1]) == {"final.delta"}
+    assert timeline_labels[6:-1]
+    assert set(timeline_labels[6:-1]) == {"final.delta"}
 
 
 @pytest.mark.asyncio

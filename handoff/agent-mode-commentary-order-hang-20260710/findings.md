@@ -42,6 +42,27 @@ seq 6 first output_text.delta, final_answer already known
 - Final-answer content remains the only source of intermediate `TextBlockDeltaEvent`.
 - Existing tool transaction replay canonicalization is retained.
 
+## TDD evidence
+
+- Pipe RED command: `pytest -q backend/open_webui/test/util/test_bifrostapi_pipe_function.py -k phase`.
+- Expected result observed: valid assistant input phases were `None`; commentary and final normalized content deltas lacked `phase`.
+- The invalid/non-assistant phase omission test already passed, so the production change must preserve strict validation rather than copying arbitrary values.
+- Callback parser RED: valid `commentary` phase was absent while invalid phase omission already passed.
+- Callback parser GREEN: valid `commentary|final_answer` is copied from normalized choice deltas; the full client parser file passes 22 tests.
+- Bridge RED: commentary was yielded as final-stream text, unclassified no-tool text did not fail, and `final_answer` plus a tool call did not fail. The four focused tests fail for those exact missing behaviors.
+- Bridge GREEN: commentary is written once through a stable model-call transcript block before tool execution or the first final delta; only `final_answer` yields intermediate AgentScope text, and `_on_final_text` receives final text only.
+- ToolProxy RED proved every success/failure/approval path still generated runtime-authored `assistant_note` / `action_summary` text and same-round replay entries.
+- ToolProxy GREEN removes that text and its live replay cache while retaining structured tool lifecycle events and AgentScope tool results.
+- App integration proves commentary persistence completes while the run is still `running`; `finalizing` begins only after the first `final_answer` TextBlock delta.
+- A phase-less no-tool stream terminates as `run.failed` with `model_phase_missing` and produces neither `final.started` nor `final.delta` fallback output.
+- Expanded backend regression found a separate prior-line defect: `serialize_output()` used `html.escape` in reasoning/tool rendering without importing `html`, causing a real `NameError`; the existing reasoning-line-break test reproduced it.
+- Diff review found a strict-terminal gap: commentary-only/no-tool responses and reasoning-only empty public responses were treated as successful terminal model turns, allowing commentary or emptiness to masquerade as a final answer. They now fail explicitly after any valid commentary is persisted.
+- Same-run request-body tracing found the original ordering bug still existed for AgentScope-formatted assistant messages: when `content` and `tool_calls` coexist, the Pipe emitted only function calls and discarded the model commentary before them.
+- Event persistence and frontend folding are run-global by `block_id`, while model-call counters are per participant; the initial model commentary block id would therefore collide between leader and subagents on `model-call-1`.
+- Independent review found provider-native web-search/image display chunks were still phase-less. They now use a distinct `provider_auxiliary` marker and public `action_summary` block, never model commentary or final output.
+- Cancellation now polls while the provider is silent and explicitly closes the active stream; malformed merged tool calls now fail before empty-response fallback.
+- Commentary and auxiliary block ids include runtime session, participant, and model call, preventing both parallel-subagent and runtime-restart collisions in the run-global event store/UI fold.
+
 ## Relevant files
 
 - `tools/openwebui/functions/bifrostapi.py`
