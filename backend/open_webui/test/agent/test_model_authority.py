@@ -457,6 +457,53 @@ async def test_model_call_endpoint_rejects_forged_service_callback_without_token
 
 
 @pytest.mark.asyncio
+async def test_model_call_stream_endpoint_reuses_single_preflight(agent_run_db):
+    run = await _create_running_run()
+    request = _request(enable_agent_mode=True)
+    counts = {'get_run': 0, 'model_access': 0, 'provider': 0}
+
+    class CountingOperationStore:
+        async def get_run(self, run_id):
+            counts['get_run'] += 1
+            return await AgentRuns.get_run(run_id)
+
+    async def model_access_checker(user, model):
+        counts['model_access'] += 1
+
+    async def completion_handler(request, form_data, user):
+        counts['provider'] += 1
+        return {'id': 'chatcmpl-stream', 'choices': [{'message': {'content': 'hello'}}]}
+
+    authority = AgentModelAuthority(
+        operation_store=CountingOperationStore(),
+        completion_handler=completion_handler,
+        user_loader=_user_loader,
+        model_access_checker=model_access_checker,
+    )
+
+    response = await execute_agent_run_model_call(
+        request,
+        run.id,
+        ModelCallRequest(
+            run_id=run.id,
+            participant_id='leader',
+            model_call_id='call-stream',
+            model='model-a',
+            messages=[{'role': 'user', 'content': 'hello'}],
+            stream=True,
+            idempotency_key='model:leader:call-stream:1',
+        ),
+        idempotency_key='model:leader:call-stream:1',
+        authorization='Bearer test-service-token',
+        authority=authority,
+    )
+    chunks = [chunk async for chunk in response.body_iterator]
+
+    assert chunks
+    assert counts == {'get_run': 1, 'model_access': 1, 'provider': 1}
+
+
+@pytest.mark.asyncio
 async def test_model_call_endpoint_rejects_queued_run_with_state_diagnostics(agent_run_db):
     run = await _create_queued_run()
     request = _request(enable_agent_mode=True)
@@ -477,6 +524,7 @@ async def test_model_call_endpoint_rejects_queued_run_with_state_diagnostics(age
                 model_call_id='call-1',
                 model='model-a',
                 messages=[{'role': 'user', 'content': 'hello'}],
+                stream=True,
                 idempotency_key='model:leader:call-1:1',
             ),
             idempotency_key='model:leader:call-1:1',

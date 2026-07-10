@@ -7,9 +7,6 @@ from collections.abc import AsyncGenerator
 from dataclasses import dataclass
 from typing import Any, Callable, Protocol
 
-import httpx
-from pydantic import BaseModel
-
 from agentscope.app import SubAgentTemplate
 from agentscope.credential import CredentialBase
 from agentscope.formatter import OpenAIChatFormatter
@@ -17,6 +14,7 @@ from agentscope.message import Msg, TextBlock, ToolCallBlock, ToolResultState
 from agentscope.model import ChatModelBase, ChatResponse
 from agentscope.permission import PermissionBehavior, PermissionContext, PermissionDecision
 from agentscope.tool import ToolBase, ToolChunk
+from pydantic import BaseModel
 
 OPENWEBUI_SUBAGENT_SYSTEM_PROMPT = """You are {member_name}, an OpenWebUI-governed \
 subagent in team '{team_name}' led by {leader_name}.
@@ -966,7 +964,27 @@ def _trim_assistant_context_messages(messages: list[dict[str, Any]]) -> list[dic
             break
         kept.append(normalized)
         total += len(content) + 1
-    return list(reversed(kept))
+    return _drop_orphan_assistant_tool_items(list(reversed(kept)))
+
+
+def _drop_orphan_assistant_tool_items(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    call_ids = {
+        str(message.get("call_id") or "")
+        for message in messages
+        if message.get("type") == "function_call" and message.get("call_id")
+    }
+    output_ids = {
+        str(message.get("call_id") or "")
+        for message in messages
+        if message.get("type") == "function_call_output" and message.get("call_id")
+    }
+    paired_ids = call_ids & output_ids
+    return [
+        message
+        for message in messages
+        if message.get("type") not in {"function_call", "function_call_output"}
+        or str(message.get("call_id") or "") in paired_ids
+    ]
 
 
 def _assistant_context_item_text(item: dict[str, Any]) -> str:
@@ -1154,8 +1172,6 @@ def _public_tool_result_summary(name: str, status: str) -> str:
 
 
 def _is_retryable_model_call_callback(exc: Exception) -> bool:
-    if isinstance(exc, httpx.TimeoutException):
-        return True
     message = str(exc)
     return "model_run_rejected" in message and "while queued" in message
 

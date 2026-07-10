@@ -1812,7 +1812,7 @@ async def test_general_agent_model_call_retries_queued_rejection() -> None:
 
 
 @pytest.mark.asyncio
-async def test_general_agent_model_call_retries_timeout_until_cached_success() -> None:
+async def test_general_agent_model_call_timeout_is_not_retried() -> None:
     class TimeoutThenCachedSuccessAgentScopeModelClient(RecordingOpenWebUIClient):
         async def call_model(self, **kwargs: object) -> dict:
             await super().call_model(**kwargs)  # type: ignore[arg-type]
@@ -1861,15 +1861,12 @@ async def test_general_agent_model_call_retries_timeout_until_cached_success() -
                 break
             await asyncio.sleep(0.01)
 
-    assert status.json()["state"] == "completed"
-    assert [call["model_call_id"] for call in openwebui_client.model_calls] == [
-        "model-call-1",
-        "model-call-1",
-    ]
+    assert status.json()["state"] == "failed"
+    assert [call["model_call_id"] for call in openwebui_client.model_calls] == ["model-call-1"]
     assert {call["idempotency_key"] for call in openwebui_client.model_calls} == {"model:leader:model-call-1:1"}
     assert openwebui_client.text_deltas == []
-    assert joined_final_delta_text(openwebui_client) == "cached callback final answer"
-    assert not any(event["event_type"] == "run.failed" for event in openwebui_client.events)
+    assert joined_final_delta_text(openwebui_client) == ""
+    assert any(event["event_type"] == "run.failed" for event in openwebui_client.events)
 
 
 @pytest.mark.asyncio
@@ -1947,11 +1944,7 @@ async def test_general_agent_model_call_stream_timeout_reliably_writes_failed_cl
             await asyncio.sleep(0.01)
 
     assert status.json()["state"] == "failed"
-    assert [call["model_call_id"] for call in openwebui_client.model_calls] == [
-        "model-call-1",
-        "model-call-1",
-        "model-call-1",
-    ]
+    assert [call["model_call_id"] for call in openwebui_client.model_calls] == ["model-call-1"]
     assert openwebui_client.failed_closeout_operations == [
         "state:failed",
         "event:run.failed",

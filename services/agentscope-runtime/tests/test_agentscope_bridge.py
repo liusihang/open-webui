@@ -174,6 +174,30 @@ def test_verified_agentscope_api_surfaces_are_importable_and_stable() -> None:
     assert {"type", "description", "system_prompt_template"} <= set(SubAgentTemplate.model_fields)
 
 
+def test_assistant_context_trim_drops_orphaned_tool_output(monkeypatch) -> None:
+    import agentscope_runtime.agentscope_bridge as bridge
+
+    monkeypatch.setattr(bridge, "PUBLIC_ASSISTANT_CONTEXT_REPLAY_MAX_CHARS", 80)
+
+    trimmed = bridge._trim_assistant_context_messages(
+        [
+            {
+                "type": "function_call",
+                "call_id": "call-large",
+                "name": "run_command",
+                "arguments": "x" * 500,
+            },
+            {
+                "type": "function_call_output",
+                "call_id": "call-large",
+                "output": '{"status":"success"}',
+            },
+        ]
+    )
+
+    assert trimmed == []
+
+
 @pytest.mark.asyncio
 async def test_bridge_builds_agentscope_template_model_and_tool_callback_boundaries() -> None:
     from agentscope.app import SubAgentTemplate

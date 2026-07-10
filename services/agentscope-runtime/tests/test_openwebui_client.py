@@ -92,6 +92,44 @@ async def test_call_model_uses_dedicated_model_call_timeout(monkeypatch) -> None
 
 
 @pytest.mark.asyncio
+async def test_call_model_stream_surfaces_structured_queued_rejection() -> None:
+    url = "https://openwebui.test/api/agent/service/runs/run-queued/model-call"
+    async with respx.mock(assert_all_called=True) as router:
+        router.post(url).mock(
+            return_value=Response(
+                403,
+                json={
+                    "detail": {
+                        "code": "model_run_rejected",
+                        "message": (
+                            "Agent run run-queued cannot execute model calls while queued"
+                        ),
+                        "current_state": "queued",
+                    }
+                },
+            )
+        )
+        client = OpenWebUIClient(
+            base_url="https://openwebui.test",
+            service_token="owui-token",
+        )
+
+        with pytest.raises(
+            RuntimeError,
+            match="model_run_rejected.*while queued",
+        ):
+            async for _ in client.call_model_stream(
+                run_id="run-queued",
+                idempotency_key="model:leader:model-call-1:1",
+                participant_id="leader",
+                model_call_id="model-call-1",
+                model="model-a",
+                messages=[{"role": "user", "content": "hello"}],
+            ):
+                pass
+
+
+@pytest.mark.asyncio
 async def test_append_event_sends_bearer_auth_idempotency_key_and_structured_payload() -> None:
     async with respx.mock(assert_all_called=True) as router:
         request = router.post("https://openwebui.test/api/agent/service/runs/run-1/events").mock(

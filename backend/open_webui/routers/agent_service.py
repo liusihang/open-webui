@@ -1045,8 +1045,13 @@ async def execute_agent_run_model_call(
         # runtime. The runtime is responsible for idempotency at the
         # model_call_id level.
         try:
+            prepared = await authority.prepare_stream_model_call(request, call_payload)
             return StreamingResponse(
-                authority.stream_model_call(request, call_payload),
+                authority.stream_model_call(
+                    request,
+                    call_payload,
+                    prepared=prepared,
+                ),
                 media_type='text/event-stream',
                 headers={
                     'Cache-Control': 'no-cache',

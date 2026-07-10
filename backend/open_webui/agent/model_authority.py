@@ -196,6 +196,8 @@ class AgentModelAuthority:
         self,
         request,
         call: ModelCallRequest,
+        *,
+        prepared: tuple[Any, dict[str, Any]] | None = None,
     ) -> AsyncIterator[bytes]:
         """Stream a model call's provider response as SSE bytes.
 
@@ -208,25 +210,9 @@ class AgentModelAuthority:
         caller (the /model-call endpoint) wraps this in a StreamingResponse
         with text/event-stream content type.
         """
-        self._ensure_trusted_internal_guard(request, call.run_id)
-
-        if not call.idempotency_key:
-            raise ModelAuthorityError('idempotency_key_required')
-
-        run = await self.operation_store.get_run(call.run_id)
-        if run is None:
-            raise ModelRunRejected(f'Agent run not found: {call.run_id}')
-        if run.state != 'running':
-            raise ModelRunRejected(
-                f'Agent run {call.run_id} cannot execute model calls while {run.state}',
-                current_state=run.state,
-            )
-
-        user = await self.user_loader(run.user_id)
-        if user is None:
-            raise ModelRunRejected(f'Agent run user not found: {run.user_id}')
-
-        model = await self._resolve_authorized_model(request, user, call.model)
+        if prepared is None:
+            prepared = await self.prepare_stream_model_call(request, call)
+        user, model = prepared
 
         form_data = _model_call_form_data(call)
         audit_metadata = {
@@ -271,6 +257,33 @@ class AgentModelAuthority:
         # Emit a terminal done event so the agentscope runtime knows the
         # stream has ended even if the provider didn't send [DONE].
         yield _format_model_stream_event('stream_end', {'model_call_id': call.model_call_id})
+
+    async def prepare_stream_model_call(
+        self,
+        request,
+        call: ModelCallRequest,
+    ) -> tuple[Any, dict[str, Any]]:
+        """Validate a streaming model call before response headers are sent."""
+        self._ensure_trusted_internal_guard(request, call.run_id)
+
+        if not call.idempotency_key:
+            raise ModelAuthorityError('idempotency_key_required')
+
+        run = await self.operation_store.get_run(call.run_id)
+        if run is None:
+            raise ModelRunRejected(f'Agent run not found: {call.run_id}')
+        if run.state != 'running':
+            raise ModelRunRejected(
+                f'Agent run {call.run_id} cannot execute model calls while {run.state}',
+                current_state=run.state,
+            )
+
+        user = await self.user_loader(run.user_id)
+        if user is None:
+            raise ModelRunRejected(f'Agent run user not found: {run.user_id}')
+
+        model = await self._resolve_authorized_model(request, user, call.model)
+        return user, model
 
 
 def _format_model_stream_event(event_type: str, payload: dict[str, Any]) -> bytes:

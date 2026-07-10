@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import logging
 import mimetypes
@@ -1383,6 +1384,10 @@ async def _agent_context_replay_items(
     items = []
     for run in reversed(selected):
         messages, replay_items = await _agent_context_replay_messages_and_items(run)
+        replay_items = _agent_context_replay_namespace_tool_call_ids(
+            replay_items,
+            run_id=run.id,
+        )
         if messages or replay_items:
             items.append(
                 {
@@ -1394,6 +1399,35 @@ async def _agent_context_replay_items(
                 }
             )
     return items
+
+
+def _agent_context_replay_namespace_tool_call_ids(
+    items: list[dict],
+    *,
+    run_id: str,
+) -> list[dict]:
+    run_namespace = hashlib.sha256(str(run_id).encode('utf-8')).hexdigest()[:16]
+    active_call_ids: dict[str, str] = {}
+    rewritten = []
+    call_index = 0
+
+    for item in items:
+        item_type = str(item.get('type') or '')
+        original_call_id = str(item.get('call_id') or '')
+        if item_type == 'function_call' and original_call_id:
+            call_index += 1
+            namespaced_call_id = f'replay-{run_namespace}-{call_index}'
+            active_call_ids[original_call_id] = namespaced_call_id
+            rewritten.append({**item, 'call_id': namespaced_call_id})
+            continue
+        if item_type == 'function_call_output' and original_call_id:
+            namespaced_call_id = active_call_ids.pop(original_call_id, None)
+            if namespaced_call_id:
+                rewritten.append({**item, 'call_id': namespaced_call_id})
+            continue
+        rewritten.append(item)
+
+    return rewritten
 
 
 async def _agent_context_replay_messages(run) -> list[dict]:
@@ -1408,9 +1442,7 @@ async def _agent_context_replay_messages_and_items(run) -> tuple[list[dict], lis
         log.warning('Agent Mode could not load prior run events for run=%s: %s', run.id, exc)
         return [], []
 
-    messages = []
     replay_items = []
-    total_chars = 0
     final_deltas = []
     for event in events:
         event_type = str(getattr(event, 'event_type', '') or '')
@@ -1425,22 +1457,16 @@ async def _agent_context_replay_messages_and_items(run) -> tuple[list[dict], lis
             if isinstance(delta, str) and delta:
                 content = _agent_context_replay_clean_text(delta)
                 if content:
-                    messages.append(
-                        {
-                            'role': 'assistant',
-                            'content': content,
-                            'phase': 'commentary',
-                        }
-                    )
                     replay_items.append(
                         {
                             'type': 'message',
                             'role': 'assistant',
                             'content': content,
                             'phase': 'commentary',
+                            '_agent_block_kind': block_kind,
+                            '_agent_tool_call_id': _agent_context_replay_call_id(payload),
                         }
                     )
-                    total_chars += len(content) + 1
         elif event_type == AgentEventType.FINAL_DELTA.value:
             delta = payload.get('delta')
             if isinstance(delta, str) and delta:
@@ -1449,7 +1475,6 @@ async def _agent_context_replay_messages_and_items(run) -> tuple[list[dict], lis
             tool_call = _agent_context_replay_tool_call_item(payload)
             if tool_call:
                 replay_items.append(tool_call)
-                total_chars += _agent_context_replay_item_size(tool_call) + 1
         elif event_type in _AGENT_CONTEXT_REPLAY_TOOL_RESULT_EVENT_TYPES:
             tool_output = _agent_context_replay_tool_output_item(
                 payload,
@@ -1457,7 +1482,8 @@ async def _agent_context_replay_messages_and_items(run) -> tuple[list[dict], lis
             )
             if tool_output:
                 replay_items.append(tool_output)
-                total_chars += _agent_context_replay_item_size(tool_output) + 1
+
+    replay_items = _agent_context_replay_canonicalize_tool_batches(replay_items)
 
     final_text = str(getattr(run, 'final_text', '') or ''.join(final_deltas)).strip()
     if final_text:
@@ -1468,27 +1494,163 @@ async def _agent_context_replay_messages_and_items(run) -> tuple[list[dict], lis
                 'content': content,
                 'phase': 'final_answer',
             }
-            messages.append(final_message)
             replay_items.append({'type': 'message', **final_message})
-            total_chars += len(content) + 1
 
-    if total_chars <= _AGENT_CONTEXT_REPLAY_MAX_CHARS:
-        return messages, _agent_context_replay_trim_items(replay_items)
+    replay_items = _agent_context_replay_trim_items(replay_items)
+    messages = [
+        {
+            key: item[key]
+            for key in ('role', 'content', 'phase')
+            if key in item
+        }
+        for item in replay_items
+        if item.get('role') == 'assistant'
+    ]
+    return messages, replay_items
 
-    kept_messages = []
-    total = 0
-    for message in reversed(messages):
-        content = str(message.get('content') or '')
-        remaining = _AGENT_CONTEXT_REPLAY_MAX_CHARS - total
-        if remaining <= 0:
-            break
-        if len(content) > remaining:
-            kept_messages.append({**message, 'content': content[-remaining:]})
-            break
-        kept_messages.append(message)
-        total += len(content) + 1
-    kept_messages = list(reversed(kept_messages))
-    return kept_messages, _agent_context_replay_trim_items(replay_items)
+
+def _agent_context_replay_canonicalize_tool_batches(items: list[dict]) -> list[dict]:
+    canonical = []
+    pending_intents: dict[str, list[tuple[int, dict]]] = {}
+    pending_summaries: dict[str, list[tuple[int, dict]]] = {}
+    batch = None
+
+    def clean(item: dict) -> dict:
+        return {
+            key: value
+            for key, value in item.items()
+            if key not in {'_agent_block_kind', '_agent_tool_call_id'}
+        }
+
+    def flush_batch(*, allow_incomplete: bool = False) -> None:
+        nonlocal batch
+        if batch is None:
+            return
+
+        call_ids = [entry[1]['call_id'] for entry in batch['calls']]
+        complete_ids = {
+            call_id
+            for call_id in call_ids
+            if call_id in batch['outputs']
+        }
+        if not complete_ids:
+            batch = None
+            return
+
+        fully_complete = len(complete_ids) == len(call_ids)
+
+        def commentary_is_safe(entry: tuple[int, dict]) -> bool:
+            tool_call_id = str(entry[1].get('_agent_tool_call_id') or '')
+            if tool_call_id:
+                return tool_call_id in complete_ids
+            return fully_complete or not allow_incomplete
+
+        canonical.extend(
+            clean(entry[1])
+            for entry in sorted(batch['intents'], key=lambda entry: entry[0])
+            if commentary_is_safe(entry)
+        )
+        canonical.extend(
+            clean(item)
+            for _, item in batch['calls']
+            if item['call_id'] in complete_ids
+        )
+        canonical.extend(
+            clean(item)
+            for _, item in sorted(batch['output_order'], key=lambda entry: entry[0])
+            if item['call_id'] in complete_ids
+        )
+        canonical.extend(
+            clean(entry[1])
+            for entry in sorted(batch['summaries'], key=lambda entry: entry[0])
+            if commentary_is_safe(entry)
+        )
+        batch = None
+
+    for index, item in enumerate(items):
+        item_type = str(item.get('type') or '')
+        if item_type == 'message':
+            block_kind = str(item.get('_agent_block_kind') or '')
+            tool_call_id = str(item.get('_agent_tool_call_id') or '')
+            entry = (index, item)
+            if block_kind == 'assistant_note':
+                if tool_call_id:
+                    if batch is not None and tool_call_id in batch['call_ids']:
+                        batch['intents'].append(entry)
+                    else:
+                        pending_intents.setdefault(tool_call_id, []).append(entry)
+                elif batch is not None:
+                    batch['intents'].append(entry)
+                else:
+                    canonical.append(clean(item))
+                continue
+
+            if block_kind == 'action_summary':
+                if batch is not None:
+                    if tool_call_id in batch['call_ids']:
+                        batch['summaries'].append(entry)
+                    elif not tool_call_id and len(batch['open_ids']) == 1:
+                        only_open_call_id = next(iter(batch['open_ids']))
+                        batch['summaries'].append(
+                            (
+                                index,
+                                {**item, '_agent_tool_call_id': only_open_call_id},
+                            )
+                        )
+                    elif not tool_call_id and batch['open_ids']:
+                        batch['summaries'].append(entry)
+                    elif tool_call_id:
+                        pending_summaries.setdefault(tool_call_id, []).append(entry)
+                    else:
+                        canonical.append(clean(item))
+                elif tool_call_id:
+                    pending_summaries.setdefault(tool_call_id, []).append(entry)
+                else:
+                    canonical.append(clean(item))
+                continue
+
+            canonical.append(clean(item))
+            continue
+
+        if item_type == 'function_call':
+            call_id = str(item.get('call_id') or '')
+            if not call_id:
+                continue
+            if batch is None:
+                batch = {
+                    'calls': [],
+                    'call_ids': set(),
+                    'open_ids': set(),
+                    'outputs': {},
+                    'output_order': [],
+                    'intents': [],
+                    'summaries': [],
+                }
+            if call_id in batch['call_ids']:
+                continue
+            batch['calls'].append((index, item))
+            batch['call_ids'].add(call_id)
+            batch['open_ids'].add(call_id)
+            batch['intents'].extend(pending_intents.pop(call_id, []))
+            batch['summaries'].extend(pending_summaries.pop(call_id, []))
+            continue
+
+        if item_type == 'function_call_output':
+            call_id = str(item.get('call_id') or '')
+            if batch is None or call_id not in batch['call_ids']:
+                continue
+            if call_id not in batch['outputs']:
+                batch['outputs'][call_id] = item
+                batch['output_order'].append((index, item))
+            batch['open_ids'].discard(call_id)
+            if not batch['open_ids']:
+                flush_batch()
+            continue
+
+        canonical.append(clean(item))
+
+    flush_batch(allow_incomplete=True)
+    return canonical
 
 
 def _agent_context_replay_tool_call_item(payload: dict) -> dict | None:

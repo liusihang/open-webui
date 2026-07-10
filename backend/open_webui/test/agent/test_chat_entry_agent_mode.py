@@ -12,10 +12,12 @@ os.environ.setdefault('DATABASE_ENABLE_SESSION_SHARING', 'true')
 import pytest
 import pytest_asyncio
 from open_webui.agent.artifacts import AgentRunArtifactRegistrar
+from open_webui.agent.model_authority import ModelCallRequest, _model_call_form_data
 from open_webui.agent.resources import AgentRunResourceManager
 from open_webui.internal.db import Base
 from open_webui.models.agent_runs import AgentRuns
 from open_webui.routers import agent_runs as agent_runs_router
+from open_webui.routers.openai import convert_to_responses_payload
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 main = importlib.import_module('open_webui.main')
@@ -415,6 +417,19 @@ async def test_agent_mode_runtime_payload_replays_previous_public_agent_items(
     )
     await AgentRuns.append_event(
         previous_run.id,
+        event_type='text.delta',
+        participant_id='leader',
+        phase='running',
+        payload={
+            'block_id': 'summary-1',
+            'block_kind': 'action_summary',
+            'delta_index': 0,
+            'delta': 'The runtime image was built successfully.',
+            'reasoning': {'hidden': 'SECRET_REASONING_OBJECT'},
+        },
+    )
+    await AgentRuns.append_event(
+        previous_run.id,
         event_type='tool.completed',
         participant_id='leader',
         phase='running',
@@ -427,19 +442,6 @@ async def test_agent_mode_runtime_payload_replays_previous_public_agent_items(
                 'stdout': 'Python 3.12.13',
                 'raw_reasoning': 'SECRET_TOOL_PRIVATE_REASONING',
             },
-        },
-    )
-    await AgentRuns.append_event(
-        previous_run.id,
-        event_type='text.delta',
-        participant_id='leader',
-        phase='running',
-        payload={
-            'block_id': 'summary-1',
-            'block_kind': 'action_summary',
-            'delta_index': 0,
-            'delta': 'The runtime image was built successfully.',
-            'reasoning': {'hidden': 'SECRET_REASONING_OBJECT'},
         },
     )
     await AgentRuns.transition_state(
@@ -515,6 +517,13 @@ async def test_agent_mode_runtime_payload_replays_previous_public_agent_items(
             'phase': 'final_answer',
         },
     ]
+    namespaced_call_id = next(
+        item['call_id']
+        for item in replay_items[0]['items']
+        if item.get('type') == 'function_call'
+    )
+    assert namespaced_call_id != 'call-1'
+    assert len(namespaced_call_id) <= 64
     assert replay_items[0]['items'] == [
         {
             'type': 'message',
@@ -524,13 +533,13 @@ async def test_agent_mode_runtime_payload_replays_previous_public_agent_items(
         },
         {
             'type': 'function_call',
-            'call_id': 'call-1',
+            'call_id': namespaced_call_id,
             'name': 'run_command',
             'arguments': '{"command": "python3 --version"}',
         },
         {
             'type': 'function_call_output',
-            'call_id': 'call-1',
+            'call_id': namespaced_call_id,
             'output': '{"stdout": "Python 3.12.13"}',
         },
         {
@@ -554,6 +563,328 @@ async def test_agent_mode_runtime_payload_replays_previous_public_agent_items(
     assert 'SECRET_REASONING_OBJECT' not in replay_text
     assert 'raw_reasoning' not in replay_text
     assert 'reasoning' not in replay_text
+
+    provider_form = _model_call_form_data(
+        ModelCallRequest(
+            run_id='current-run',
+            participant_id='leader',
+            model_call_id='model-call-1',
+            model='model-a',
+            messages=replay_items[0]['items'],
+            stream=True,
+            idempotency_key='model:leader:model-call-1:1',
+        )
+    )
+    provider_payload = convert_to_responses_payload(provider_form)
+    provider_input = provider_payload['input']
+    call_index = next(
+        index
+        for index, item in enumerate(provider_input)
+        if item.get('type') == 'function_call'
+        and item.get('call_id') == namespaced_call_id
+    )
+    assert provider_input[call_index + 1] == {
+        'type': 'function_call_output',
+        'call_id': namespaced_call_id,
+        'output': '{"stdout": "Python 3.12.13"}',
+    }
+    summary_index = next(
+        index
+        for index, item in enumerate(provider_input)
+        if item.get('type') == 'message'
+        and item.get('phase') == 'commentary'
+        and item.get('content') == [
+            {
+                'type': 'output_text',
+                'text': 'The runtime image was built successfully.',
+            }
+        ]
+    )
+    assert summary_index > call_index + 1
+
+
+@pytest.mark.asyncio
+async def test_agent_context_replay_canonicalizes_parallel_and_incomplete_tool_batches(
+    monkeypatch,
+):
+    events = [
+        SimpleNamespace(
+            event_type='text.delta',
+            payload={
+                'block_kind': 'assistant_note',
+                'delta': 'I will use tool one.',
+                'tool_call_id': 'call-1',
+            },
+        ),
+        SimpleNamespace(
+            event_type='tool.requested',
+            payload={
+                'tool_call_id': 'call-1',
+                'tool_name': 'tool_one',
+                'arguments': {'value': 1},
+            },
+        ),
+        SimpleNamespace(
+            event_type='text.delta',
+            payload={
+                'block_kind': 'assistant_note',
+                'delta': 'I will use tool two.',
+                'tool_call_id': 'call-2',
+            },
+        ),
+        SimpleNamespace(
+            event_type='tool.requested',
+            payload={
+                'tool_call_id': 'call-2',
+                'tool_name': 'tool_two',
+                'arguments': {'value': 2},
+            },
+        ),
+        SimpleNamespace(
+            event_type='text.delta',
+            payload={
+                'block_kind': 'action_summary',
+                'delta': 'Tool two failed.',
+                'tool_call_id': 'call-2',
+            },
+        ),
+        SimpleNamespace(
+            event_type='tool.failed',
+            payload={
+                'tool_call_id': 'call-2',
+                'tool_name': 'tool_two',
+                'status': 'failed',
+            },
+        ),
+        SimpleNamespace(
+            event_type='text.delta',
+            payload={
+                'block_kind': 'action_summary',
+                'delta': 'Tool one completed.',
+            },
+        ),
+        SimpleNamespace(
+            event_type='tool.completed',
+            payload={
+                'tool_call_id': 'call-1',
+                'tool_name': 'tool_one',
+                'status': 'success',
+                'result': {'value': 'one'},
+            },
+        ),
+        SimpleNamespace(
+            event_type='text.delta',
+            payload={
+                'block_kind': 'assistant_note',
+                'delta': 'I will use an unfinished tool.',
+                'tool_call_id': 'call-3',
+            },
+        ),
+        SimpleNamespace(
+            event_type='tool.requested',
+            payload={
+                'tool_call_id': 'call-3',
+                'tool_name': 'tool_three',
+                'arguments': {},
+            },
+        ),
+        SimpleNamespace(
+            event_type='text.delta',
+            payload={
+                'block_kind': 'action_summary',
+                'delta': 'The unfinished tool completed.',
+                'tool_call_id': 'call-3',
+            },
+        ),
+    ]
+
+    async def list_events(_run_id):
+        return events
+
+    monkeypatch.setattr(main.AgentRuns, 'list_events', list_events)
+    run = SimpleNamespace(id='previous-run', final_text='Previous final answer.')
+
+    messages, replay_items = await main._agent_context_replay_messages_and_items(run)
+
+    assert replay_items == [
+        {
+            'type': 'message',
+            'role': 'assistant',
+            'content': 'I will use tool one.',
+            'phase': 'commentary',
+        },
+        {
+            'type': 'message',
+            'role': 'assistant',
+            'content': 'I will use tool two.',
+            'phase': 'commentary',
+        },
+        {
+            'type': 'function_call',
+            'call_id': 'call-1',
+            'name': 'tool_one',
+            'arguments': '{"value": 1}',
+        },
+        {
+            'type': 'function_call',
+            'call_id': 'call-2',
+            'name': 'tool_two',
+            'arguments': '{"value": 2}',
+        },
+        {
+            'type': 'function_call_output',
+            'call_id': 'call-2',
+            'output': '{"status": "failed"}',
+        },
+        {
+            'type': 'function_call_output',
+            'call_id': 'call-1',
+            'output': '{"value": "one"}',
+        },
+        {
+            'type': 'message',
+            'role': 'assistant',
+            'content': 'Tool two failed.',
+            'phase': 'commentary',
+        },
+        {
+            'type': 'message',
+            'role': 'assistant',
+            'content': 'Tool one completed.',
+            'phase': 'commentary',
+        },
+        {
+            'type': 'message',
+            'role': 'assistant',
+            'content': 'Previous final answer.',
+            'phase': 'final_answer',
+        },
+    ]
+    assert messages == [
+        {
+            key: item[key]
+            for key in ('role', 'content', 'phase')
+        }
+        for item in replay_items
+        if item.get('role') == 'assistant'
+    ]
+    replay_text = str(replay_items)
+    assert 'call-3' not in replay_text
+    assert 'unfinished tool' not in replay_text
+
+    provider_form = _model_call_form_data(
+        ModelCallRequest(
+            run_id='current-run',
+            participant_id='leader',
+            model_call_id='model-call-parallel',
+            model='model-a',
+            messages=replay_items,
+            stream=True,
+            idempotency_key='model:leader:model-call-parallel:1',
+        )
+    )
+    provider_messages = provider_form['messages']
+    tool_batch_index = next(
+        index
+        for index, message in enumerate(provider_messages)
+        if message.get('tool_calls')
+    )
+    assert [
+        tool_call['id']
+        for tool_call in provider_messages[tool_batch_index]['tool_calls']
+    ] == ['call-1', 'call-2']
+    assert [
+        message.get('tool_call_id')
+        for message in provider_messages[tool_batch_index + 1 : tool_batch_index + 3]
+    ] == ['call-2', 'call-1']
+    assert all(
+        message.get('role') == 'tool'
+        for message in provider_messages[tool_batch_index + 1 : tool_batch_index + 3]
+    )
+
+    responses_input = convert_to_responses_payload(provider_form)['input']
+    first_call_index = next(
+        index
+        for index, item in enumerate(responses_input)
+        if item.get('type') == 'function_call'
+    )
+    assert [
+        item.get('type')
+        for item in responses_input[first_call_index : first_call_index + 4]
+    ] == [
+        'function_call',
+        'function_call',
+        'function_call_output',
+        'function_call_output',
+    ]
+    assert [
+        item.get('call_id')
+        for item in responses_input[first_call_index : first_call_index + 4]
+    ] == ['call-1', 'call-2', 'call-2', 'call-1']
+
+
+@pytest.mark.asyncio
+async def test_agent_context_replay_namespaces_tool_call_ids_across_runs(monkeypatch):
+    runs = [
+        SimpleNamespace(
+            id='run-newer',
+            state='completed',
+            assistant_message_id='assistant-newer',
+        ),
+        SimpleNamespace(
+            id='run-older',
+            state='completed',
+            assistant_message_id='assistant-older',
+        ),
+    ]
+
+    async def list_runs_by_chat(_chat_id, _user_id):
+        return runs
+
+    async def replay_messages_and_items(_run):
+        return [], [
+            {
+                'type': 'function_call',
+                'call_id': 'tool-call-1',
+                'name': 'run_command',
+                'arguments': '{}',
+            },
+            {
+                'type': 'function_call_output',
+                'call_id': 'tool-call-1',
+                'output': '{}',
+            },
+        ]
+
+    monkeypatch.setattr(main.AgentRuns, 'list_runs_by_chat', list_runs_by_chat)
+    monkeypatch.setattr(
+        main,
+        '_agent_context_replay_messages_and_items',
+        replay_messages_and_items,
+    )
+
+    replay = await main._agent_context_replay_items(
+        chat_id='chat-1',
+        user_id='user-1',
+        exclude_run_id='current-run',
+        anchor_message_ids={'assistant-older', 'assistant-newer'},
+    )
+
+    call_ids = [
+        item['call_id']
+        for entry in replay
+        for item in entry['items']
+        if item.get('type') == 'function_call'
+    ]
+    output_ids = [
+        item['call_id']
+        for entry in replay
+        for item in entry['items']
+        if item.get('type') == 'function_call_output'
+    ]
+    assert len(call_ids) == len(set(call_ids)) == 2
+    assert output_ids == call_ids
+    assert all(len(call_id) <= 64 for call_id in call_ids)
 
 
 @pytest.mark.asyncio
