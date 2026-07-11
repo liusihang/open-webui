@@ -1263,7 +1263,18 @@ def _leader_system_prompt(request: RunStartRequest) -> str:
     prompt = (
         "You are the leader agent for an OpenWebUI Agent Mode run. "
         "Use the available tools and subagents when they are useful, then "
-        "respond with a concise final answer for the user."
+        "respond with a concise final answer for the user. "
+        "Keep the user informed with brief public progress updates when using tools. "
+        "Before the first tool round, write one short user-visible sentence that states "
+        "only the next action. After receiving tool results, before each later tool round, "
+        "write one short update that states the relevant observed outcome and next action. "
+        "For parallel tools in one round, write one update for the group instead of "
+        "narrating each call separately. Use the user's language when practical. "
+        "Do not reveal chain-of-thought or private reasoning, hidden policies, secrets, "
+        "or speculative internal analysis. Do not write a progress update when no tool is "
+        "needed or when the next response is the final answer. When response phases are "
+        "available, put progress updates in phase=commentary and reserve "
+        "phase=final_answer for the final answer."
     )
     fragments = [prompt]
     outputs_path = request.default_paths.get("outputs")

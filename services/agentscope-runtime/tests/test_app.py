@@ -2266,6 +2266,61 @@ async def test_leader_system_prompt_guides_real_files_to_default_outputs_path() 
 
 
 @pytest.mark.asyncio
+async def test_leader_system_prompt_requests_brief_public_progress_for_tool_rounds() -> None:
+    openwebui_client = RecordingOpenWebUIClient()
+    openwebui_client.model_responses = [
+        {
+            "status": "success",
+            "response": {"content": "Final answer."},
+        }
+    ]
+
+    async with make_client(openwebui_client, auto_finalize_ordinary_qa=True) as client:
+        response = await client.post(
+            "/v1/openwebui/runs",
+            headers={"Authorization": f"Bearer {SERVICE_TOKEN}"},
+            json={
+                "run_id": "run-public-progress-guidance",
+                "chat_id": "chat-1",
+                "leader_model_id": "model-a",
+                "messages": [{"role": "user", "content": "Inspect the environment."}],
+                "tool_access_envelope": {
+                    "tools": [
+                        {
+                            "id": "tool:terminal:main:get_environment",
+                            "name": "get_environment",
+                            "type": "terminal",
+                            "schema": {
+                                "name": "get_environment",
+                                "description": "Inspect the environment.",
+                                "parameters": {"type": "object", "properties": {}},
+                            },
+                        }
+                    ]
+                },
+            },
+        )
+
+        assert response.status_code == 202
+        for _ in range(40):
+            status = await client.get(
+                "/v1/openwebui/runs/run-public-progress-guidance/status",
+                headers={"Authorization": f"Bearer {SERVICE_TOKEN}"},
+            )
+            if status.json()["state"] in {"completed", "failed"}:
+                break
+            await asyncio.sleep(0.01)
+
+    assert status.json()["state"] == "completed"
+    system_text = openwebui_client.model_calls[0]["messages"][0]["content"][0]["text"]
+    assert "Before the first tool round" in system_text
+    assert "before each later tool round" in system_text
+    assert "one update for the group" in system_text
+    assert "Use the user's language" in system_text
+    assert "Do not reveal chain-of-thought or private reasoning" in system_text
+
+
+@pytest.mark.asyncio
 async def test_leader_system_prompt_includes_agent_context_replay_metadata() -> None:
     openwebui_client = RecordingOpenWebUIClient()
     openwebui_client.model_responses = [
