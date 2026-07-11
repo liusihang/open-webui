@@ -299,6 +299,34 @@ async def test_bridge_builds_agentscope_template_model_and_tool_callback_boundar
 
 
 @pytest.mark.asyncio
+async def test_tool_requested_event_uses_short_user_facing_summary() -> None:
+    from agentscope_runtime.agentscope_bridge import AgentScopeRuntimeBridge
+
+    callbacks = RecordingBridgeCallbacks()
+    bridge = AgentScopeRuntimeBridge(
+        run_id="run-tool-summary",
+        runtime_session_id="rt-run-tool-summary",
+        callback_client=callbacks,
+    )
+    tool = bridge.build_tool_proxy(
+        participant_id="leader",
+        tool_id="tool:terminal:terminals:write_file",
+        name="write_file",
+        description=(
+            "Write complete text content to a file.\n\n"
+            "Use when: creating a new text file or intentionally replacing the whole file."
+        ),
+        input_schema={"type": "object", "properties": {}},
+    )
+
+    await tool(path="/tmp/example.txt", content="example")
+
+    requested = callbacks.events[0]
+    assert requested["event_type"] == "tool.requested"
+    assert requested["summary"] == "Write file requested."
+
+
+@pytest.mark.asyncio
 async def test_current_run_tool_results_do_not_inject_synthetic_assistant_notes() -> None:
     from agentscope_runtime.agentscope_bridge import AgentScopeRuntimeBridge
 

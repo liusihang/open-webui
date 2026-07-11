@@ -1175,7 +1175,7 @@ async def test_run_start_with_tool_envelope_drives_tool_artifact_and_final_lifec
         "final.started",
         "run.completed",
     ]
-    assert openwebui_client.events[1]["summary"] == "Read a file."
+    assert openwebui_client.events[1]["summary"] == "Read file requested."
     assert openwebui_client.events[2]["summary"] == "Read file completed."
     assert openwebui_client.events[3]["payload"]["artifact"]["id"] == "artifact-1"
     assert [delta["block_kind"] for delta in openwebui_client.text_deltas] == ["assistant_note"]

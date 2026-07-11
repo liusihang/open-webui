@@ -584,7 +584,7 @@ class OpenWebUIToolProxy(ToolBase):
             run_id=self.run_id,
             idempotency_key=f"evt:{self.runtime_session_id}:{self.participant_id}:{tool_call_id}:requested",
             event_type="tool.requested",
-            summary=self.description or f"{self.name} requested.",
+            summary=f"{_humanize_tool_name(self.name)} requested.",
             payload={
                 "tool_id": self.tool_id,
                 "tool_call_id": tool_call_id,
