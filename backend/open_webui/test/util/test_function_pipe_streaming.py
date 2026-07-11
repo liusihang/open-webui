@@ -9,6 +9,7 @@ from open_webui.functions import (
     _execute_function_pipe,
     _iterate_function_pipe_result,
     generate_function_chat_completion,
+    get_function_models,
 )
 
 
@@ -30,6 +31,66 @@ async def test_sync_pipe_call_does_not_block_the_event_loop() -> None:
     assert pipe_thread is not None
     assert pipe_thread != caller_thread
     assert await task == 'done'
+
+
+@pytest.mark.asyncio
+async def test_sync_manifold_model_discovery_does_not_block_the_event_loop(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    caller_thread = threading.get_ident()
+    pipes_thread = None
+
+    class FunctionModule:
+        def pipes(self):
+            nonlocal pipes_thread
+            pipes_thread = threading.get_ident()
+            time.sleep(0.05)
+            return [{'id': 'child', 'name': 'Child'}]
+
+    pipe = SimpleNamespace(
+        id='test-manifold',
+        type='pipe',
+        created_at=1,
+    )
+
+    async def get_test_pipes(function_type, active_only):
+        assert function_type == 'pipe'
+        assert active_only is True
+        return [pipe]
+
+    async def get_test_function_module(request, pipe_id):
+        del request
+        assert pipe_id == pipe.id
+        return FunctionModule()
+
+    monkeypatch.setattr(
+        functions_module.Functions,
+        'get_functions_by_type',
+        get_test_pipes,
+    )
+    monkeypatch.setattr(
+        functions_module,
+        'get_function_module_by_id',
+        get_test_function_module,
+    )
+
+    task = asyncio.create_task(get_function_models(SimpleNamespace()))
+    await asyncio.sleep(0.01)
+
+    assert not task.done()
+    assert pipes_thread is not None
+    assert pipes_thread != caller_thread
+    assert await task == [
+        {
+            'id': 'test-manifold.child',
+            'name': 'Child',
+            'object': 'model',
+            'created': 1,
+            'owned_by': 'openai',
+            'pipe': {'type': 'pipe'},
+            'has_user_valves': False,
+        }
+    ]
 
 
 @pytest.mark.asyncio

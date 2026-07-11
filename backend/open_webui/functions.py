@@ -162,10 +162,10 @@ async def get_function_models(request):
                 # Handle pipes being a list, sync function, or async function
                 try:
                     if callable(function_module.pipes):
-                        if asyncio.iscoroutinefunction(function_module.pipes):
-                            sub_pipes = await function_module.pipes()
-                        else:
-                            sub_pipes = function_module.pipes()
+                        sub_pipes = await _execute_function_pipe(
+                            function_module.pipes,
+                            {},
+                        )
                     else:
                         sub_pipes = function_module.pipes
                 except Exception as e:
