@@ -69,7 +69,6 @@
 	} from '$lib/utils';
 	import { AudioQueue } from '$lib/utils/audio';
 	import { getOutputText } from './Messages/structuredOutput';
-	import { createAutoFollowFrameScheduler } from './autoFollow';
 
 	import {
 		archiveChatById,
@@ -1097,7 +1096,6 @@
 
 		return () => {
 			try {
-				autoFollowScrollScheduler.destroy();
 				clearTimeout(saveControlsTimer);
 				saveControls();
 				if (chatIdProp && !$temporaryChatEnabled) {
@@ -1769,17 +1767,6 @@
 	};
 
 	let contentsRAF = null;
-	const autoFollowScrollScheduler = createAutoFollowFrameScheduler({
-		shouldFollow: () => autoScroll,
-		getTarget: () => messagesContainerElement,
-		scroll: (element) => {
-			element.scrollTo({ top: element.scrollHeight, behavior: 'auto' });
-		},
-		requestFrame: (callback) => requestAnimationFrame(callback),
-		cancelFrame: (frameId) => cancelAnimationFrame(frameId),
-		frameCount: 3
-	});
-	const scheduleScrollToBottom = () => autoFollowScrollScheduler.schedule();
 
 	let processingQueueChats = new Set<string>();
 
@@ -2132,9 +2119,6 @@
 		console.log(data);
 		await tick();
 
-		if (autoScroll) {
-			scheduleScrollToBottom();
-		}
 	};
 
 	//////////////////////////
@@ -2977,9 +2961,6 @@
 						history.messages[messageId] = message;
 					}
 
-					if (autoScroll) {
-						scheduleScrollToBottom();
-					}
 				}
 
 				await saveChatHandler(_chatId, history);
@@ -3324,16 +3305,17 @@
 						{#if ($settings?.landingPageMode === 'chat' && !$selectedFolder) || createMessagesList(history, history.currentId).length > 0}
 							<div
 								class=" pb-2.5 flex flex-col justify-between w-full flex-auto overflow-auto h-0 max-w-full z-10 scrollbar-hidden"
+								class:native-auto-follow={autoScroll}
 								id="messages-container"
 								bind:this={messagesContainerElement}
-								on:scroll={(e) => {
+								on:scroll={() => {
 									autoScroll =
 										messagesContainerElement.scrollHeight - messagesContainerElement.scrollTop <=
 										messagesContainerElement.clientHeight + 5;
 									isNearTop = messagesContainerElement.scrollTop <= 100;
 								}}
 							>
-								<div class=" h-full w-full flex flex-col">
+								<div class="min-h-full w-full flex flex-col flex-none">
 									<Messages
 										bind:this={messagesRef}
 										chatId={$chatId}
@@ -3357,7 +3339,6 @@
 										topPadding={true}
 										bottomPadding={files.length > 0}
 										{onSelect}
-										on:contentresize={scheduleScrollToBottom}
 									/>
 								</div>
 							</div>

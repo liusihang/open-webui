@@ -21,11 +21,10 @@
 	import Spinner from '../common/Spinner.svelte';
 
 	import ChatPlaceholder from './ChatPlaceholder.svelte';
-	import { autoFollowResize } from './autoFollow';
 
 	const i18n = getContext('i18n');
 
-	export let className = 'h-full flex pt-8';
+	export let className = 'min-h-full flex pt-8 flex-none';
 
 	export let chatId = '';
 	export let user = $_user;
@@ -505,7 +504,7 @@
 	{#if Object.keys(history?.messages ?? {}).length == 0}
 		<ChatPlaceholder modelIds={selectedModels} {atSelectedModel} {onSelect} />
 	{:else}
-		<div class="w-full pt-2">
+		<div class="w-full pt-2 flex-none">
 			{#key chatId}
 				<section class="w-full" aria-labelledby="chat-conversation">
 					<h2 class="sr-only" id="chat-conversation">{$i18n.t('Chat Conversation')}</h2>
@@ -529,10 +528,6 @@
 						aria-live="polite"
 						aria-relevant="additions"
 						aria-atomic="false"
-						use:autoFollowResize={{
-							shouldFollow: () => autoScroll,
-							scheduleScroll: () => dispatch('contentresize')
-						}}
 					>
 						{#each messages as message, messageIdx (message.id)}
 							<Message
@@ -564,6 +559,7 @@
 							/>
 						{/each}
 					</ul>
+					<div class="chat-scroll-anchor" aria-hidden="true"></div>
 				</section>
 				<div class="pb-18" />
 				{#if bottomPadding}
@@ -573,3 +569,15 @@
 		</div>
 	{/if}
 </div>
+
+<style>
+	:global(#messages-container.native-auto-follow [role='log']) {
+		overflow-anchor: none;
+	}
+
+	.chat-scroll-anchor {
+		overflow-anchor: auto;
+		height: 1px;
+		width: 100%;
+	}
+</style>
