@@ -1041,6 +1041,35 @@ async def test_model_bridge_does_not_turn_reasoning_only_done_payload_into_publi
 
 
 @pytest.mark.asyncio
+async def test_model_bridge_raises_structured_model_stream_error() -> None:
+    from agentscope_runtime.agentscope_bridge import OpenWebUIAgentScopeModel
+
+    class FailingStreamCallbacks(RecordingBridgeCallbacks):
+        async def call_model_stream(self, **kwargs: object):
+            self.model_calls.append(kwargs)
+            yield {
+                "type": "error",
+                "error": {
+                    "message": "provider failed",
+                    "code": "provider_error",
+                },
+            }
+
+    callbacks = FailingStreamCallbacks()
+    model = OpenWebUIAgentScopeModel(
+        run_id="run-stream-error",
+        runtime_session_id="rt-run-stream-error",
+        participant_id="leader",
+        model_id="model-a",
+        callback_client=callbacks,
+    )
+
+    with pytest.raises(RuntimeError, match="model_stream_error: provider failed"):
+        async for _ in await model([{"role": "user", "content": "开始"}]):
+            pass
+
+
+@pytest.mark.asyncio
 async def test_model_bridge_passes_tools_and_tool_choice_as_top_level_callback_fields() -> None:
     from agentscope_runtime.agentscope_bridge import OpenWebUIAgentScopeModel
 

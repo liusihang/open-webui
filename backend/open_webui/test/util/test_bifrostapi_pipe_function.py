@@ -1,4 +1,9 @@
+import asyncio
+import inspect
 from pathlib import Path
+
+import httpx
+import pytest
 
 
 LOCAL_FUNCTION_PATH = (
@@ -21,6 +26,211 @@ def test_repo_managed_bifrostapi_source_exists_and_compiles():
     assert pipe_cls.__name__ == 'Pipe'
 
 
+def test_repo_managed_bifrostapi_stream_transport_is_native_async():
+    pipe_cls = _load_pipe_class()
+
+    assert inspect.isasyncgenfunction(pipe_cls._stream_with_fallback)
+    assert inspect.isasyncgenfunction(pipe_cls._responses_stream_with_fallback)
+
+
+@pytest.mark.asyncio
+async def test_repo_managed_bifrostapi_stream_is_event_loop_safe_and_cancellable(
+    monkeypatch,
+):
+    pipe_cls = _load_pipe_class()
+    pipe = pipe_cls()
+    upstream_waiting = asyncio.Event()
+    upstream_closed = asyncio.Event()
+
+    class FakeResponse:
+        status_code = 200
+
+        async def aiter_lines(self):
+            try:
+                yield 'data: {"type":"response.created"}'
+                upstream_waiting.set()
+                await asyncio.Event().wait()
+            finally:
+                upstream_closed.set()
+
+    class FakeStreamContext:
+        async def __aenter__(self):
+            return FakeResponse()
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return None
+
+    class FakeAsyncClient:
+        def __init__(self, *, timeout):
+            self.timeout = timeout
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return None
+
+        def stream(self, *args, **kwargs):
+            return FakeStreamContext()
+
+    monkeypatch.setattr(httpx, 'AsyncClient', FakeAsyncClient)
+    stream = pipe._responses_stream_with_fallback({'model': 'openai/gpt-5'})
+
+    assert await anext(stream) == ': bifrost-response-created'
+    pending = asyncio.create_task(anext(stream))
+    await asyncio.wait_for(upstream_waiting.wait(), timeout=0.1)
+
+    ticker = asyncio.create_task(asyncio.sleep(0))
+    await asyncio.wait_for(ticker, timeout=0.1)
+    assert not pending.done()
+
+    pending.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await pending
+    await asyncio.wait_for(upstream_closed.wait(), timeout=0.1)
+
+
+@pytest.mark.asyncio
+async def test_responses_failed_terminates_without_synthetic_success_finish(monkeypatch):
+    pipe_cls = _load_pipe_class()
+    pipe = pipe_cls()
+
+    class FakeResponse:
+        status_code = 200
+
+        async def aiter_lines(self):
+            yield (
+                'data: {"type":"response.failed","response":'
+                '{"error":{"message":"provider failed"}}}'
+            )
+
+    class FakeStreamContext:
+        async def __aenter__(self):
+            return FakeResponse()
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return None
+
+    class FakeAsyncClient:
+        def __init__(self, *, timeout):
+            self.timeout = timeout
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return None
+
+        def stream(self, *args, **kwargs):
+            return FakeStreamContext()
+
+    monkeypatch.setattr(httpx, 'AsyncClient', FakeAsyncClient)
+
+    chunks = [
+        chunk
+        async for chunk in pipe._responses_stream_with_fallback(
+            {'model': 'openai/gpt-5'}
+        )
+    ]
+
+    assert chunks == [{'error': {'message': 'provider failed'}}]
+
+
+@pytest.mark.asyncio
+async def test_responses_clean_eof_without_terminal_event_is_a_stream_error(monkeypatch):
+    pipe_cls = _load_pipe_class()
+    pipe = pipe_cls()
+    pipe.valves.SHOW_REASONING_CONTENT = False
+
+    class FakeResponse:
+        status_code = 200
+
+        async def aiter_lines(self):
+            yield 'data: {"type":"response.output_text.delta","delta":"partial"}'
+
+    class FakeStreamContext:
+        async def __aenter__(self):
+            return FakeResponse()
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return None
+
+    class FakeAsyncClient:
+        def __init__(self, *, timeout):
+            self.timeout = timeout
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return None
+
+        def stream(self, *args, **kwargs):
+            return FakeStreamContext()
+
+    monkeypatch.setattr(httpx, 'AsyncClient', FakeAsyncClient)
+
+    chunks = [
+        chunk
+        async for chunk in pipe._responses_stream_with_fallback(
+            {'model': 'openai/gpt-5'}
+        )
+    ]
+
+    assert chunks == [
+        {'choices': [{'delta': {'content': 'partial'}}]},
+        {'error': {'message': 'Responses stream ended before a terminal event'}},
+    ]
+
+
+@pytest.mark.asyncio
+async def test_responses_done_marker_is_terminal_evidence(monkeypatch):
+    pipe_cls = _load_pipe_class()
+    pipe = pipe_cls()
+    pipe.valves.SHOW_REASONING_CONTENT = False
+
+    class FakeResponse:
+        status_code = 200
+
+        async def aiter_lines(self):
+            yield 'data: {"type":"response.output_text.delta","delta":"complete"}'
+            yield 'data: [DONE]'
+
+    class FakeStreamContext:
+        async def __aenter__(self):
+            return FakeResponse()
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return None
+
+    class FakeAsyncClient:
+        def __init__(self, *, timeout):
+            self.timeout = timeout
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return None
+
+        def stream(self, *args, **kwargs):
+            return FakeStreamContext()
+
+    monkeypatch.setattr(httpx, 'AsyncClient', FakeAsyncClient)
+
+    chunks = [
+        chunk
+        async for chunk in pipe._responses_stream_with_fallback(
+            {'model': 'openai/gpt-5'}
+        )
+    ]
+
+    assert chunks == [
+        {'choices': [{'delta': {'content': 'complete'}}]},
+        {'choices': [{'delta': {}, 'finish_reason': 'stop'}]},
+    ]
+
+
 def test_responses_input_preserves_valid_assistant_phase():
     pipe = _load_pipe_class()()
 
@@ -34,6 +244,52 @@ def test_responses_input_preserves_valid_assistant_phase():
 
     assert instructions == ''
     assert [item.get('phase') for item in input_items] == ['commentary', 'final_answer']
+
+
+def test_responses_lifecycle_events_are_forwarded_as_sse_comments():
+    pipe = _load_pipe_class()()
+
+    assert pipe._responses_lifecycle_comment({'type': 'response.created'}) == (
+        ': bifrost-response-created'
+    )
+    assert pipe._responses_lifecycle_comment({'type': 'response.in_progress'}) == (
+        ': bifrost-response-in-progress'
+    )
+    assert pipe._responses_lifecycle_comment({'type': 'response.output_text.delta'}) is None
+
+
+def test_responses_failed_uses_nested_response_error():
+    pipe = _load_pipe_class()()
+    state = pipe._new_stream_state()
+
+    chunk = pipe._parse_responses_event(
+        {
+            'type': 'response.failed',
+            'response': {'error': {'message': 'provider failed'}},
+        },
+        state,
+    )
+
+    assert chunk == {'error': {'message': 'provider failed'}}
+
+
+def test_responses_incomplete_is_a_structured_stream_error():
+    pipe = _load_pipe_class()()
+    state = pipe._new_stream_state()
+
+    chunk = pipe._parse_responses_event(
+        {
+            'type': 'response.incomplete',
+            'response': {
+                'incomplete_details': {'reason': 'max_output_tokens'},
+            },
+        },
+        state,
+    )
+
+    assert chunk == {
+        'error': {'message': 'Response incomplete: max_output_tokens'},
+    }
 
 
 def test_responses_input_omits_invalid_or_non_assistant_phase():

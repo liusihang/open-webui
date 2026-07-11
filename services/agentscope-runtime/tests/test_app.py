@@ -12,6 +12,7 @@ from agentscope_runtime.app import (
     RuntimeStore,
     _emit_final_answer,
     _msg_text,
+    _positive_env_float,
     _run_leader_streaming,
     _user_input_requested_schema,
     create_app,
@@ -467,6 +468,22 @@ async def test_create_app_from_env_uses_operator_runtime_configuration(monkeypat
 
     assert health.status_code == 200
     assert unauthorized.status_code == 401
+
+
+def test_positive_env_float_uses_default_and_accepts_positive_value(monkeypatch) -> None:
+    monkeypatch.delenv("AGENT_RUNTIME_MODEL_CALL_TOTAL_TIMEOUT_SECONDS", raising=False)
+    assert _positive_env_float("AGENT_RUNTIME_MODEL_CALL_TOTAL_TIMEOUT_SECONDS", 300.0) == 300.0
+
+    monkeypatch.setenv("AGENT_RUNTIME_MODEL_CALL_TOTAL_TIMEOUT_SECONDS", "45.5")
+    assert _positive_env_float("AGENT_RUNTIME_MODEL_CALL_TOTAL_TIMEOUT_SECONDS", 300.0) == 45.5
+
+
+@pytest.mark.parametrize("value", ["0", "-1", "not-a-number"])
+def test_positive_env_float_rejects_invalid_values(monkeypatch, value: str) -> None:
+    monkeypatch.setenv("AGENT_RUNTIME_MODEL_CALL_READ_IDLE_TIMEOUT_SECONDS", value)
+
+    with pytest.raises(RuntimeError, match="AGENT_RUNTIME_MODEL_CALL_READ_IDLE_TIMEOUT_SECONDS"):
+        _positive_env_float("AGENT_RUNTIME_MODEL_CALL_READ_IDLE_TIMEOUT_SECONDS", 30.0)
 
 
 @pytest.mark.asyncio

@@ -12,17 +12,18 @@ Design: `docs/plans/2026-07-11-agent-model-stream-liveness-design.md`
 
 ## Checkpoints
 
-1. [in progress] Add red tests for event-loop responsiveness, async Bifrost
+1. [completed] Add red tests for event-loop responsiveness, async Bifrost
    streaming, lifecycle control comments, SSE heartbeat, and layered timeouts.
-2. [pending] Implement the generic sync-iterator compatibility bridge and native
+2. [completed] Implement the generic sync-iterator compatibility bridge and native
    async Bifrost stream with cancellation-safe cleanup.
-3. [pending] Implement lifecycle control comments and the Agent model-call
+3. [completed] Implement lifecycle control comments and the Agent model-call
    liveness wrapper.
-4. [pending] Split AgentScope model-call connect, read-idle, and total timeouts;
+4. [completed] Split AgentScope model-call connect, read-idle, and total timeouts;
    document configuration and error semantics.
-5. [pending] Run focused and expanded backend/runtime suites, static checks, and
-   independent code review; fix verified findings.
-6. [pending] Commit code/tests/docs, rebuild the exact isolated PR7 image, update
+5. [completed] Run focused and expanded backend/runtime suites, static checks, and
+   independent code review; fix verified findings. Fresh final counts are Agent
+   backend 181, AgentScope runtime 112, and Pipe/Bifrost/Responses 40 tests.
+6. [in progress] Commit code/tests/docs, rebuild the exact isolated PR7 image, update
    only the isolated live surfaces, and run bounded slow-stream/browser tests.
 
 ## Completion gates
@@ -34,6 +35,8 @@ Design: `docs/plans/2026-07-11-agent-model-stream-liveness-design.md`
 - Cancellation closes the native Bifrost upstream stream.
 - Commentary/tool/final phase ordering and genuine final streaming remain green.
 - Timeout failures identify connect, idle, or total ownership.
+- OpenWebUI owns streaming operation claims; duplicate callbacks never re-POST
+  the provider and abandoned streams are finalized as failed operations.
 - Isolated PR7 acceptance passes with healthy containers and no restart increase.
 - All requested production changes, tests, API/config docs, and TODO status are
   committed.

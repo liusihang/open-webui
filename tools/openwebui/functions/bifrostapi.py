@@ -1,7 +1,7 @@
 """
 title: Bifrost Unified Manifold Pipe (Chat + Responses + Reasoning Fallback)
 authors: you
-version: 0.2.16
+version: 0.2.17
 required_open_webui_version: 0.8.5
 license: MIT
 """
@@ -30,6 +30,7 @@ import xml.etree.ElementTree as ET
 from typing import Any, Dict, Generator, Iterator, List, Optional, Tuple, Union
 from urllib.parse import urlparse
 
+import httpx
 import requests
 from pydantic import BaseModel, Field
 
@@ -3795,9 +3796,7 @@ class Pipe:
     # Transport helpers
     # -------------------------------------------------------------------------
 
-    def _post(
-        self, endpoint: str, payload: dict, stream: bool = False
-    ) -> Union[requests.Response, str]:
+    def _prepare_post(self, endpoint: str, payload: dict) -> Tuple[str, dict, bytes]:
         url = f"{self._api_base_url()}{endpoint}"
         transport_headers: Dict[str, str] = {}
         debug_requested = False
@@ -3817,20 +3816,30 @@ class Pipe:
         if debug_requested and isinstance(payload_for_post, dict):
             transport_headers["x-bf-send-back-raw-response"] = "true"
         if isinstance(payload_for_post, dict):
-            payload, removed = self._sanitize_upstream_payload(payload_for_post)
+            prepared_payload, removed = self._sanitize_upstream_payload(
+                payload_for_post
+            )
             if removed and self.valves.DEBUG_MODE:
                 self._debug(
                     f"Removed {removed} banned reasoning token(s) before POST {endpoint}"
                 )
         else:
-            payload = payload_for_post
+            prepared_payload = payload_for_post
+        return (
+            url,
+            self._headers(json_content=True, extra_headers=transport_headers),
+            self._utf8_json_bytes(prepared_payload),
+        )
+
+    def _post(
+        self, endpoint: str, payload: dict, stream: bool = False
+    ) -> Union[requests.Response, str]:
         try:
+            url, headers, content = self._prepare_post(endpoint, payload)
             response = requests.post(
                 url,
-                headers=self._headers(
-                    json_content=True, extra_headers=transport_headers
-                ),
-                data=self._utf8_json_bytes(payload),
+                headers=headers,
+                data=content,
                 stream=stream,
                 timeout=(10, self.valves.REQUEST_TIMEOUT_SECS),
             )
@@ -3986,14 +3995,14 @@ class Pipe:
             tool_name_prefix=tool_name_prefix,
         )
 
-    def _auto_stream_with_fallback(
+    async def _auto_stream_with_fallback(
         self,
         responses_payload: dict,
         chat_payload_builder,
         tool_name_prefix: str = "",
         __event_emitter__=None,
-    ) -> Generator[dict, None, None]:
-        yield from self._stream_with_fallback(
+    ):
+        async for chunk in self._stream_with_fallback(
             endpoint="/responses",
             payload=responses_payload,
             mode="responses",
@@ -4001,33 +4010,36 @@ class Pipe:
             endpoint_fallback_builder=chat_payload_builder,
             tool_name_prefix=tool_name_prefix,
             __event_emitter__=__event_emitter__,
-        )
+        ):
+            yield chunk
 
-    def _chat_stream_with_fallback(
+    async def _chat_stream_with_fallback(
         self, payload: dict, tool_name_prefix: str = "", __event_emitter__=None
-    ) -> Generator[dict, None, None]:
-        yield from self._stream_with_fallback(
+    ):
+        async for chunk in self._stream_with_fallback(
             endpoint="/chat/completions",
             payload=payload,
             mode="chat",
             allow_endpoint_fallback=False,
             tool_name_prefix=tool_name_prefix,
             __event_emitter__=__event_emitter__,
-        )
+        ):
+            yield chunk
 
-    def _responses_stream_with_fallback(
+    async def _responses_stream_with_fallback(
         self, payload: dict, tool_name_prefix: str = "", __event_emitter__=None
-    ) -> Generator[dict, None, None]:
-        yield from self._stream_with_fallback(
+    ):
+        async for chunk in self._stream_with_fallback(
             endpoint="/responses",
             payload=payload,
             mode="responses",
             allow_endpoint_fallback=False,
             tool_name_prefix=tool_name_prefix,
             __event_emitter__=__event_emitter__,
-        )
+        ):
+            yield chunk
 
-    def _stream_with_fallback(
+    async def _stream_with_fallback(
         self,
         endpoint: str,
         payload: dict,
@@ -4036,7 +4048,7 @@ class Pipe:
         endpoint_fallback_builder=None,
         tool_name_prefix: str = "",
         __event_emitter__=None,
-    ) -> Generator[dict, None, None]:
+    ):
         current_endpoint = endpoint
         current_payload = payload
         current_mode = mode
@@ -4046,192 +4058,272 @@ class Pipe:
         switched_endpoint = False
 
         while True:
-            response = self._post(current_endpoint, current_payload, stream=True)
-            if isinstance(response, str):
-                yield {"error": {"message": response}}
-                return
-
-            with response as r:
-                if r.status_code >= 400:
-                    text = r.text[:2000]
-
-                    if (
-                        self._retry_without_reasoning_enabled()
-                        and current_payload.get("reasoning")
-                        and self._is_reasoning_param_error(text)
-                    ):
-                        if (
-                            not retried_minimal_reasoning
-                        ) and self._reasoning_payload_has_optional_fields(
-                            current_payload
-                        ):
-                            self._debug(
-                                f"{current_mode} stream rejected rich reasoning; retry with minimal reasoning"
-                            )
-                            current_payload = self._payload_with_minimal_reasoning(
-                                current_payload
-                            )
-                            current_payload, _ = self._sanitize_upstream_payload(
-                                current_payload
-                            )
-                            retried_minimal_reasoning = True
-                            continue
-
-                        if not retried_without_reasoning:
-                            self._debug(
-                                f"{current_mode} stream rejected reasoning; retry without reasoning"
-                            )
-                            current_payload = self._payload_without_reasoning(
-                                current_payload
-                            )
-                            current_payload, _ = self._sanitize_upstream_payload(
-                                current_payload
-                            )
-                            retried_without_reasoning = True
-                            continue
-
-                    if (
-                        self._retry_without_tools_enabled()
-                        and (not retried_without_tools)
-                        and current_payload.get("tools")
-                        and self._is_invalid_params_error(text)
-                    ):
-                        self._debug(
-                            f"{current_mode} stream rejected tool params; retry without tools"
-                        )
-                        current_payload = self._payload_without_tools(current_payload)
-                        current_payload, _ = self._sanitize_upstream_payload(
-                            current_payload
-                        )
-                        retried_without_tools = True
-                        continue
-
-                    if (
-                        allow_endpoint_fallback
-                        and (not switched_endpoint)
-                        and current_endpoint == "/responses"
-                        and self._is_endpoint_missing_text(text)
-                        and callable(endpoint_fallback_builder)
-                    ):
-                        self._debug("responses endpoint missing; auto fallback to chat")
-                        current_endpoint = "/chat/completions"
-                        current_payload = endpoint_fallback_builder()
-                        current_mode = "chat"
-                        switched_endpoint = True
-                        retried_minimal_reasoning = False
-                        retried_without_reasoning = False
-                        retried_without_tools = False
-                        continue
-
-                    yield {
-                        "error": {
-                            "message": f"Error HTTP {r.status_code}: {text[:1200]}"
-                        }
-                    }
-                    return
-
-                finish_sent = False
-                state = self._new_stream_state(__event_emitter__=__event_emitter__)
-                state["tool_name_alias_map"] = self._build_tool_name_alias_map(
-                    current_payload
+            try:
+                url, headers, content = self._prepare_post(
+                    current_endpoint, current_payload
                 )
-                state["tool_name_prefix"] = str(tool_name_prefix or "").strip()
-                state["model_name"] = current_payload.get("model")
-                state["reasoning_requested"] = isinstance(
-                    current_payload.get("reasoning"), dict
+                timeout = httpx.Timeout(
+                    float(self.valves.REQUEST_TIMEOUT_SECS),
+                    connect=10.0,
                 )
-                retry_stream_without_tools = False
+                async with httpx.AsyncClient(timeout=timeout) as client:
+                    async with client.stream(
+                        "POST", url, headers=headers, content=content
+                    ) as r:
+                        if r.status_code >= 400:
+                            text = (await r.aread()).decode(
+                                "utf-8", errors="replace"
+                            )[:2000]
 
-                for raw_line in r.iter_lines():
-                    payload_text = self._extract_sse_data(raw_line)
-                    if not payload_text:
-                        continue
-                    if payload_text == "[DONE]":
-                        break
+                            if (
+                                self._retry_without_reasoning_enabled()
+                                and current_payload.get("reasoning")
+                                and self._is_reasoning_param_error(text)
+                            ):
+                                if (
+                                    not retried_minimal_reasoning
+                                ) and self._reasoning_payload_has_optional_fields(
+                                    current_payload
+                                ):
+                                    self._debug(
+                                        f"{current_mode} stream rejected rich reasoning; retry with minimal reasoning"
+                                    )
+                                    current_payload = (
+                                        self._payload_with_minimal_reasoning(
+                                            current_payload
+                                        )
+                                    )
+                                    current_payload, _ = (
+                                        self._sanitize_upstream_payload(
+                                            current_payload
+                                        )
+                                    )
+                                    retried_minimal_reasoning = True
+                                    continue
 
-                    try:
-                        event = json.loads(payload_text)
-                    except Exception:
-                        continue
-                    if not isinstance(event, dict):
-                        continue
+                                if not retried_without_reasoning:
+                                    self._debug(
+                                        f"{current_mode} stream rejected reasoning; retry without reasoning"
+                                    )
+                                    current_payload = self._payload_without_reasoning(
+                                        current_payload
+                                    )
+                                    current_payload, _ = (
+                                        self._sanitize_upstream_payload(
+                                            current_payload
+                                        )
+                                    )
+                                    retried_without_reasoning = True
+                                    continue
 
-                    if current_mode == "responses":
-                        chunk = self._parse_responses_event(event, state)
-                    else:
-                        chunk = self._parse_chat_event(event, state)
-
-                    if chunk is None:
-                        continue
-                    if (
-                        current_mode == "responses"
-                        and isinstance(chunk, dict)
-                        and isinstance(chunk.get("error"), dict)
-                    ):
-                        stream_error_message = self._as_text(
-                            chunk.get("error", {}).get("message")
-                        )
-                        if (
-                            self._retry_without_tools_enabled()
-                            and (not retried_without_tools)
-                            and current_payload.get("tools")
-                            and (not state.get("text_seen"))
-                            and (not state.get("tool_call_seen"))
-                            and self._is_invalid_params_error(stream_error_message)
-                        ):
-                            self._debug(
-                                f"{current_mode} stream emitted invalid tool params; retry without tools"
-                            )
-                            current_payload = self._payload_without_tools(
-                                current_payload
-                            )
-                            current_payload, _ = self._sanitize_upstream_payload(
-                                current_payload
-                            )
-                            retried_without_tools = True
-                            retry_stream_without_tools = True
-                            break
-                    if isinstance(chunk, list):
-                        for item in chunk:
-                            if item is None:
+                            if (
+                                self._retry_without_tools_enabled()
+                                and (not retried_without_tools)
+                                and current_payload.get("tools")
+                                and self._is_invalid_params_error(text)
+                            ):
+                                self._debug(
+                                    f"{current_mode} stream rejected tool params; retry without tools"
+                                )
+                                current_payload = self._payload_without_tools(
+                                    current_payload
+                                )
+                                current_payload, _ = self._sanitize_upstream_payload(
+                                    current_payload
+                                )
+                                retried_without_tools = True
                                 continue
-                            self._update_stream_usage_state(item, state)
-                            if self._chunk_has_finish_reason(item):
-                                finish_sent = True
-                            yield item
-                    else:
-                        self._update_stream_usage_state(chunk, state)
-                        if self._chunk_has_finish_reason(chunk):
-                            finish_sent = True
-                        yield chunk
 
-                if retry_stream_without_tools:
-                    continue
+                            if (
+                                allow_endpoint_fallback
+                                and (not switched_endpoint)
+                                and current_endpoint == "/responses"
+                                and self._is_endpoint_missing_text(text)
+                                and callable(endpoint_fallback_builder)
+                            ):
+                                self._debug(
+                                    "responses endpoint missing; auto fallback to chat"
+                                )
+                                current_endpoint = "/chat/completions"
+                                current_payload = endpoint_fallback_builder()
+                                current_mode = "chat"
+                                switched_endpoint = True
+                                retried_minimal_reasoning = False
+                                retried_without_reasoning = False
+                                retried_without_tools = False
+                                continue
 
-                if not finish_sent:
-                    if (
-                        self._show_reasoning_enabled()
-                        and (not state.get("reasoning_seen"))
-                        and (not state.get("reasoning_placeholder_emitted"))
-                        and self._should_emit_gpt_reasoning_placeholder(
-                            model=state.get("model_name"),
-                            reasoning_requested=bool(state.get("reasoning_requested")),
-                            usage={
-                                "reasoning_tokens": state.get("reasoning_tokens", 0)
-                            },
+                            yield {
+                                "error": {
+                                    "message": f"Error HTTP {r.status_code}: {text[:1200]}"
+                                }
+                            }
+                            return
+
+                        finish_sent = False
+                        state = self._new_stream_state(
+                            __event_emitter__=__event_emitter__
                         )
-                    ):
-                        placeholder = self._gpt_reasoning_placeholder(
-                            int(state.get("reasoning_tokens") or 0)
+                        state["tool_name_alias_map"] = self._build_tool_name_alias_map(
+                            current_payload
                         )
-                        if placeholder:
+                        state["tool_name_prefix"] = str(tool_name_prefix or "").strip()
+                        state["model_name"] = current_payload.get("model")
+                        state["reasoning_requested"] = isinstance(
+                            current_payload.get("reasoning"), dict
+                        )
+                        retry_stream_without_tools = False
+                        upstream_done = False
+
+                        async for raw_line in r.aiter_lines():
+                            payload_text = self._extract_sse_data(raw_line)
+                            if not payload_text:
+                                continue
+                            if payload_text == "[DONE]":
+                                upstream_done = True
+                                break
+
+                            try:
+                                event = json.loads(payload_text)
+                            except Exception:
+                                continue
+                            if not isinstance(event, dict):
+                                continue
+
+                            if current_mode == "responses":
+                                lifecycle_comment = (
+                                    self._responses_lifecycle_comment(event)
+                                )
+                                if lifecycle_comment:
+                                    yield lifecycle_comment
+                                    continue
+                                chunk = self._parse_responses_event(event, state)
+                            else:
+                                chunk = self._parse_chat_event(event, state)
+
+                            if chunk is None:
+                                continue
+                            if (
+                                current_mode == "responses"
+                                and isinstance(chunk, dict)
+                                and isinstance(chunk.get("error"), dict)
+                            ):
+                                stream_error_message = self._as_text(
+                                    chunk.get("error", {}).get("message")
+                                )
+                                if (
+                                    self._retry_without_tools_enabled()
+                                    and (not retried_without_tools)
+                                    and current_payload.get("tools")
+                                    and (not state.get("text_seen"))
+                                    and (not state.get("tool_call_seen"))
+                                    and self._is_invalid_params_error(
+                                        stream_error_message
+                                    )
+                                ):
+                                    self._debug(
+                                        f"{current_mode} stream emitted invalid tool params; retry without tools"
+                                    )
+                                    current_payload = self._payload_without_tools(
+                                        current_payload
+                                    )
+                                    current_payload, _ = (
+                                        self._sanitize_upstream_payload(
+                                            current_payload
+                                        )
+                                    )
+                                    retried_without_tools = True
+                                    retry_stream_without_tools = True
+                                    break
+                            if (
+                                isinstance(chunk, dict)
+                                and isinstance(chunk.get("error"), dict)
+                            ):
+                                # A provider stream error is terminal. Emitting a
+                                # synthetic ``finish_reason=stop`` after it turns
+                                # a failed response into an apparent success and
+                                # leaves downstream runtimes diagnosing only an
+                                # empty model response.
+                                yield chunk
+                                return
+                            if isinstance(chunk, list):
+                                for item in chunk:
+                                    if item is None:
+                                        continue
+                                    self._update_stream_usage_state(item, state)
+                                    if self._chunk_has_finish_reason(item):
+                                        finish_sent = True
+                                    yield item
+                            else:
+                                self._update_stream_usage_state(chunk, state)
+                                if self._chunk_has_finish_reason(chunk):
+                                    finish_sent = True
+                                yield chunk
+
+                        if retry_stream_without_tools:
+                            continue
+
+                        if (
+                            current_mode == "responses"
+                            and not finish_sent
+                            and not upstream_done
+                        ):
+                            yield {
+                                "error": {
+                                    "message": "Responses stream ended before a terminal event"
+                                }
+                            }
+                            return
+
+                        if not finish_sent:
+                            if (
+                                self._show_reasoning_enabled()
+                                and (not state.get("reasoning_seen"))
+                                and (not state.get("reasoning_placeholder_emitted"))
+                                and self._should_emit_gpt_reasoning_placeholder(
+                                    model=state.get("model_name"),
+                                    reasoning_requested=bool(
+                                        state.get("reasoning_requested")
+                                    ),
+                                    usage={
+                                        "reasoning_tokens": state.get(
+                                            "reasoning_tokens", 0
+                                        )
+                                    },
+                                )
+                            ):
+                                placeholder = self._gpt_reasoning_placeholder(
+                                    int(state.get("reasoning_tokens") or 0)
+                                )
+                                if placeholder:
+                                    yield {
+                                        "choices": [
+                                            {
+                                                "delta": {
+                                                    "reasoning_content": placeholder
+                                                }
+                                            }
+                                        ]
+                                    }
+                            finish = (
+                                "tool_calls"
+                                if state.get("tool_call_seen")
+                                else "stop"
+                            )
                             yield {
                                 "choices": [
-                                    {"delta": {"reasoning_content": placeholder}}
+                                    {"delta": {}, "finish_reason": finish}
                                 ]
                             }
-                    finish = "tool_calls" if state.get("tool_call_seen") else "stop"
-                    yield {"choices": [{"delta": {}, "finish_reason": finish}]}
+                        return
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                yield {
+                    "error": {
+                        "message": f"Error ({type(exc).__name__}): {exc}"
+                    }
+                }
                 return
 
     # -------------------------------------------------------------------------
@@ -4252,6 +4344,14 @@ class Pipe:
             return line[5:].strip()
         if line.startswith("{") and line.endswith("}"):
             return line
+        return None
+
+    def _responses_lifecycle_comment(self, event: dict) -> Optional[str]:
+        event_type = str(event.get("type") or "").strip().lower()
+        if event_type == "response.created":
+            return ": bifrost-response-created"
+        if event_type == "response.in_progress":
+            return ": bifrost-response-in-progress"
         return None
 
     def _new_stream_state(self, __event_emitter__=None) -> dict:
@@ -5317,12 +5417,43 @@ class Pipe:
             return self._responses_tool_args_done_chunk(event, state)
 
         if event_type in ("error", "response.failed"):
-            err = event.get("error") if isinstance(event.get("error"), dict) else event
+            if event_type == "response.failed":
+                response_obj = (
+                    event.get("response")
+                    if isinstance(event.get("response"), dict)
+                    else {}
+                )
+                err = (
+                    response_obj.get("error")
+                    if isinstance(response_obj.get("error"), dict)
+                    else event.get("error")
+                )
+            else:
+                err = event.get("error")
+            if not isinstance(err, dict):
+                err = event
             message = (
                 err.get("message")
                 if isinstance(err, dict) and isinstance(err.get("message"), str)
                 else self._as_text(err)
             )
+            return {"error": {"message": message}}
+
+        if event_type == "response.incomplete":
+            response_obj = (
+                event.get("response")
+                if isinstance(event.get("response"), dict)
+                else {}
+            )
+            incomplete_details = (
+                response_obj.get("incomplete_details")
+                if isinstance(response_obj.get("incomplete_details"), dict)
+                else {}
+            )
+            reason = self._as_text(incomplete_details.get("reason")).strip()
+            message = "Response incomplete"
+            if reason:
+                message = f"{message}: {reason}"
             return {"error": {"message": message}}
 
         if event_type == "response.completed":

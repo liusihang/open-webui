@@ -382,6 +382,15 @@ class OpenWebUIAgentScopeModel(ChatModelBase):
 
         async for event in events_to_consume:
             event_type = event.get("type")
+            if event_type == "error":
+                error = event.get("error")
+                if isinstance(error, dict):
+                    message = str(error.get("message") or "").strip()
+                else:
+                    message = str(error or "").strip()
+                raise RuntimeError(
+                    f"model_stream_error: {message or 'unknown model stream error'}"
+                )
             if event_type == "chunk":
                 delta = event.get("delta") or {}
                 reasoning_content = delta.get("reasoning_content")

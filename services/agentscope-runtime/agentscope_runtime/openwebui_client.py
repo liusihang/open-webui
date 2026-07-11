@@ -30,13 +30,51 @@ class OpenWebUIClient:
         base_url: str,
         service_token: str,
         timeout: float = 10.0,
-        model_call_timeout: float = 60.0,
+        model_call_timeout: float | None = None,
+        model_call_connect_timeout: float | None = None,
+        model_call_read_idle_timeout: float | None = None,
+        model_call_total_timeout: float | None = None,
     ) -> None:
         self._base_url = base_url.rstrip("/")
         self._service_token = service_token
         self._timeout = timeout
-        self._model_call_poll_timeout = model_call_timeout
-        self._model_call_timeout = httpx.Timeout(model_call_timeout, connect=timeout)
+        legacy_timeout = (
+            max(float(model_call_timeout), 0.1)
+            if model_call_timeout is not None
+            else None
+        )
+        connect_timeout = max(
+            float(
+                model_call_connect_timeout
+                if model_call_connect_timeout is not None
+                else timeout
+            ),
+            0.1,
+        )
+        read_idle_timeout = max(
+            float(
+                model_call_read_idle_timeout
+                if model_call_read_idle_timeout is not None
+                else legacy_timeout if legacy_timeout is not None else 30.0
+            ),
+            0.1,
+        )
+        total_timeout = max(
+            float(
+                model_call_total_timeout
+                if model_call_total_timeout is not None
+                else legacy_timeout if legacy_timeout is not None else 300.0
+            ),
+            0.1,
+        )
+        self._model_call_poll_timeout = total_timeout
+        self._model_call_total_timeout = total_timeout
+        self._model_call_timeout = httpx.Timeout(
+            read_idle_timeout,
+            connect=connect_timeout,
+            write=max(float(timeout), 0.1),
+            pool=max(float(timeout), 0.1),
+        )
 
     async def append_event(
         self,
@@ -260,14 +298,31 @@ class OpenWebUIClient:
             metadata=metadata or {},
         )
         url = f"{self._base_url}/api/agent/service/runs/{run_id}/model-call"
-        return await self._post_callback(
-            url,
-            idempotency_key,
-            body.model_dump(mode="json", exclude_none=True),
-            timeout=self._model_call_timeout,
-            retry_operation_in_progress=True,
-            operation_poll_timeout=self._model_call_poll_timeout,
-        )
+        try:
+            async with asyncio.timeout(self._model_call_total_timeout):
+                return await self._post_callback(
+                    url,
+                    idempotency_key,
+                    body.model_dump(mode="json", exclude_none=True),
+                    timeout=self._model_call_timeout,
+                    retry_operation_in_progress=True,
+                    operation_poll_timeout=self._model_call_poll_timeout,
+                )
+        except httpx.ConnectTimeout as exc:
+            raise RuntimeError(
+                "OpenWebUI model-call connect timeout "
+                f"after {self._model_call_timeout.connect} seconds"
+            ) from exc
+        except httpx.ReadTimeout as exc:
+            raise RuntimeError(
+                "OpenWebUI model-call read-idle timeout "
+                f"after {self._model_call_timeout.read} seconds"
+            ) from exc
+        except TimeoutError as exc:
+            raise RuntimeError(
+                "OpenWebUI model-call total timeout "
+                f"after {self._model_call_total_timeout} seconds"
+            ) from exc
 
     async def call_tool(
         self,
@@ -402,30 +457,50 @@ class OpenWebUIClient:
             "Accept": "text/event-stream",
         }
 
-        async with httpx.AsyncClient(timeout=self._model_call_timeout) as client:
-            async with client.stream(
-                "POST",
-                url,
-                headers=headers,
-                json=body.model_dump(mode="json", exclude_none=True),
-            ) as response:
-                if response.status_code == 202:
-                    payload = _safe_response_json_sync(response)
-                    if (
-                        isinstance(payload, dict)
-                        and payload.get("detail") == "operation_in_progress"
-                    ):
-                        raise _ModelCallOperationInProgress(payload)
-                if response.is_error:
-                    text = await response.aread()
-                    raise RuntimeError(
-                        "OpenWebUI model-call stream failed "
-                        f"with status {response.status_code}: "
-                        f"{text.decode('utf-8', 'replace')}",
-                    )
+        try:
+            async with asyncio.timeout(self._model_call_total_timeout):
+                async with httpx.AsyncClient(
+                    timeout=self._model_call_timeout
+                ) as client:
+                    request_body = body.model_dump(mode="json", exclude_none=True)
+                    async with client.stream(
+                        "POST",
+                        url,
+                        headers=headers,
+                        json=request_body,
+                    ) as response:
+                        if response.status_code == 202:
+                            raw_body = await response.aread()
+                            raise RuntimeError(
+                                "OpenWebUI model-call stream was not started; "
+                                f"status 202: {raw_body.decode('utf-8', 'replace')}",
+                            )
+                        if response.is_error:
+                            raw_body = await response.aread()
+                            raise RuntimeError(
+                                "OpenWebUI model-call stream failed "
+                                f"with status {response.status_code}: "
+                                f"{raw_body.decode('utf-8', 'replace')}",
+                            )
 
-                async for event in _iter_sse_events(response):
-                    yield event
+                        async for event in _iter_sse_events(response):
+                            yield event
+                        return
+        except httpx.ConnectTimeout as exc:
+            raise RuntimeError(
+                "OpenWebUI model-call stream connect timeout "
+                f"after {self._model_call_timeout.connect} seconds"
+            ) from exc
+        except httpx.ReadTimeout as exc:
+            raise RuntimeError(
+                "OpenWebUI model-call stream read-idle timeout "
+                f"after {self._model_call_timeout.read} seconds"
+            ) from exc
+        except TimeoutError as exc:
+            raise RuntimeError(
+                "OpenWebUI model-call stream total timeout "
+                f"after {self._model_call_total_timeout} seconds"
+            ) from exc
 
 
 async def _iter_sse_events(response: httpx.Response):
@@ -454,12 +529,35 @@ async def _iter_sse_events(response: httpx.Response):
             payload = json.loads(data)
         except json.JSONDecodeError:
             continue
-        if isinstance(payload, dict) and "type" in payload and "payload" in payload:
-            # OpenWebUI meta event (done/stream_end)
-            yield {"type": payload["type"], "payload": payload["payload"]}
-            continue
+        if isinstance(payload, dict):
+            event_type = str(payload.get("type") or "").strip()
+            if event_type in {"response.failed", "response.incomplete"}:
+                yield {
+                    "type": "error",
+                    "error": _model_stream_event_error(payload, event_type),
+                }
+                return
+            if event_type == "response.completed":
+                yield {"type": "stream_end", "payload": payload}
+                return
+            if event_type in {"done", "stream_end"}:
+                event = {"type": event_type}
+                if "payload" in payload:
+                    event["payload"] = payload["payload"]
+                yield event
+                return
         # OpenAI-style chunk
-        yield _parse_openai_chunk(payload)
+        event = _parse_openai_chunk(payload)
+        yield event
+        if event["type"] == "error":
+            return
+        if event.get("finish_reason"):
+            yield {"type": "stream_end"}
+            return
+    raise RuntimeError(
+        "model_stream_incomplete: OpenWebUI model-call stream ended "
+        "without a terminal event"
+    )
 
 
 def _parse_openai_chunk(payload: Any) -> dict[str, Any]:
@@ -467,10 +565,16 @@ def _parse_openai_chunk(payload: Any) -> dict[str, Any]:
     delta: dict[str, Any] = {"content": None, "tool_calls": None}
     if not isinstance(payload, dict):
         return {"type": "chunk", "delta": delta}
+    error = payload.get("error")
+    if isinstance(error, dict):
+        return {"type": "error", "error": error}
+    if isinstance(error, str) and error:
+        return {"type": "error", "error": {"message": error}}
     choices = payload.get("choices")
     if isinstance(choices, list) and choices:
         choice = choices[0]
         if isinstance(choice, dict):
+            finish_reason = choice.get("finish_reason")
             choice_delta = choice.get("delta")
             if isinstance(choice_delta, dict):
                 content = choice_delta.get("content")
@@ -497,22 +601,41 @@ def _parse_openai_chunk(payload: Any) -> dict[str, Any]:
                 tool_calls = choice_delta.get("tool_calls")
                 if isinstance(tool_calls, list):
                     delta["tool_calls"] = tool_calls
+            if finish_reason:
+                return {
+                    "type": "chunk",
+                    "delta": delta,
+                    "finish_reason": finish_reason,
+                }
     return {"type": "chunk", "delta": delta}
 
 
-def _safe_response_json_sync(response: httpx.Response) -> Any:
+def _model_stream_event_error(
+    payload: dict[str, Any],
+    event_type: str,
+) -> dict[str, Any]:
+    error = payload.get("error")
+    response = payload.get("response")
+    if error is None and isinstance(response, dict):
+        error = response.get("error") or response.get("incomplete_details")
+    if isinstance(error, dict):
+        result = dict(error)
+        result.setdefault("code", event_type)
+        message = str(result.get("message") or result.get("reason") or "").strip()
+        if not message:
+            message = json.dumps(error, ensure_ascii=False, separators=(",", ":"))
+        result["message"] = message or event_type
+        return result
+    if isinstance(error, str) and error:
+        return {"code": event_type, "message": error}
+    return {"code": event_type, "message": event_type}
+
+
+def _safe_json_bytes(raw_body: bytes) -> Any | None:
     try:
-        return response.json()
-    except Exception:
+        return json.loads(raw_body)
+    except (json.JSONDecodeError, UnicodeDecodeError):
         return None
-
-
-class _ModelCallOperationInProgress(RuntimeError):
-    """Internal signal: /model-call returned 202 operation_in_progress."""
-
-    def __init__(self, payload: dict[str, Any]) -> None:
-        super().__init__("operation_in_progress")
-        self.payload = payload
 
 
 def _safe_response_json(response: httpx.Response) -> Any | None:

@@ -1,3 +1,4 @@
+import asyncio
 import json
 
 import httpx
@@ -96,6 +97,27 @@ def test_parse_openai_chunk_preserves_provider_auxiliary_content_marker() -> Non
     assert event["delta"]["auxiliary_type"] == "web_search_result"
 
 
+def test_parse_openai_chunk_preserves_structured_stream_error() -> None:
+    from agentscope_runtime.openwebui_client import _parse_openai_chunk
+
+    event = _parse_openai_chunk(
+        {
+            "error": {
+                "message": "provider failed",
+                "code": "provider_error",
+            }
+        }
+    )
+
+    assert event == {
+        "type": "error",
+        "error": {
+            "message": "provider failed",
+            "code": "provider_error",
+        },
+    }
+
+
 @pytest.mark.asyncio
 async def test_call_model_uses_dedicated_model_call_timeout(monkeypatch) -> None:
     captured_timeouts = []
@@ -148,6 +170,339 @@ async def test_call_model_uses_dedicated_model_call_timeout(monkeypatch) -> None
     assert captured_timeouts[0] == 3.0
     assert captured_timeouts[1].connect == 3.0
     assert captured_timeouts[1].read == 45.0
+
+
+def test_model_call_timeout_layers_are_owned_independently() -> None:
+    client = OpenWebUIClient(
+        base_url="https://openwebui.test",
+        service_token="owui-token",
+        timeout=3.0,
+        model_call_connect_timeout=2.0,
+        model_call_read_idle_timeout=15.0,
+        model_call_total_timeout=120.0,
+    )
+
+    assert client._model_call_timeout.connect == 2.0
+    assert client._model_call_timeout.read == 15.0
+    assert client._model_call_total_timeout == 120.0
+
+
+@pytest.mark.asyncio
+async def test_sse_comments_are_transport_only_and_not_model_chunks() -> None:
+    from agentscope_runtime.openwebui_client import _iter_sse_events
+
+    class CommentedResponse:
+        async def aiter_lines(self):
+            for line in (
+                ': openwebui-stream-start',
+                '',
+                ': bifrost-response-in-progress',
+                '',
+                'data: {"choices":[{"delta":{"content":"hello"}}]}',
+                '',
+                'data: [DONE]',
+            ):
+                yield line
+
+    events = [event async for event in _iter_sse_events(CommentedResponse())]
+
+    assert events == [
+        {
+            'type': 'chunk',
+            'delta': {'content': 'hello', 'tool_calls': None},
+        },
+        {'type': 'stream_end'},
+    ]
+
+
+@pytest.mark.asyncio
+async def test_sse_clean_eof_without_terminal_event_is_protocol_error() -> None:
+    from agentscope_runtime.openwebui_client import _iter_sse_events
+
+    class IncompleteResponse:
+        async def aiter_lines(self):
+            yield 'data: {"choices":[{"delta":{"content":"partial"}}]}'
+            yield ''
+
+    stream = _iter_sse_events(IncompleteResponse())
+    assert await anext(stream) == {
+        'type': 'chunk',
+        'delta': {'content': 'partial', 'tool_calls': None},
+    }
+    with pytest.raises(RuntimeError, match='model_stream_incomplete'):
+        await anext(stream)
+
+
+@pytest.mark.asyncio
+async def test_sse_finish_reason_emits_terminal_event_and_stops() -> None:
+    from agentscope_runtime.openwebui_client import _iter_sse_events
+
+    class FinishedResponse:
+        async def aiter_lines(self):
+            yield 'data: {"choices":[{"delta":{},"finish_reason":"stop"}]}'
+            yield ''
+            yield 'data: {"error":{"message":"must not be consumed"}}'
+
+    events = [event async for event in _iter_sse_events(FinishedResponse())]
+
+    assert events == [
+        {
+            'type': 'chunk',
+            'delta': {'content': None, 'tool_calls': None},
+            'finish_reason': 'stop',
+        },
+        {'type': 'stream_end'},
+    ]
+
+
+@pytest.mark.asyncio
+async def test_sse_meta_done_is_terminal_and_ignores_later_lines() -> None:
+    from agentscope_runtime.openwebui_client import _iter_sse_events
+
+    class DoneResponse:
+        async def aiter_lines(self):
+            yield 'data: {"type":"done","payload":{"response":{"ok":true}}}'
+            yield ''
+            yield 'data: {"error":{"message":"must not be consumed"}}'
+
+    events = [event async for event in _iter_sse_events(DoneResponse())]
+
+    assert events == [
+        {'type': 'done', 'payload': {'response': {'ok': True}}},
+    ]
+
+
+@pytest.mark.asyncio
+async def test_sse_responses_completed_is_terminal_and_ignores_later_lines() -> None:
+    from agentscope_runtime.openwebui_client import _iter_sse_events
+
+    class CompletedResponse:
+        async def aiter_lines(self):
+            yield 'data: {"type":"response.completed","response":{"status":"completed"}}'
+            yield ''
+            yield 'data: {"error":{"message":"must not be consumed"}}'
+
+    events = [event async for event in _iter_sse_events(CompletedResponse())]
+
+    assert events == [
+        {
+            'type': 'stream_end',
+            'payload': {
+                'type': 'response.completed',
+                'response': {'status': 'completed'},
+            },
+        },
+    ]
+
+
+@pytest.mark.asyncio
+async def test_sse_responses_incomplete_is_error_and_ignores_later_lines() -> None:
+    from agentscope_runtime.openwebui_client import _iter_sse_events
+
+    class IncompleteResponse:
+        async def aiter_lines(self):
+            yield (
+                'data: {"type":"response.incomplete","response":'
+                '{"incomplete_details":{"reason":"max_output_tokens"}}}'
+            )
+            yield ''
+            yield 'data: {"type":"response.completed"}'
+
+    events = [event async for event in _iter_sse_events(IncompleteResponse())]
+
+    assert events == [
+        {
+            'type': 'error',
+            'error': {
+                'code': 'response.incomplete',
+                'message': 'max_output_tokens',
+                'reason': 'max_output_tokens',
+            },
+        },
+    ]
+
+
+@pytest.mark.asyncio
+async def test_call_model_stream_does_not_repost_in_progress_operation(
+    monkeypatch,
+) -> None:
+    requests: list[dict[str, object]] = []
+
+    class FakeResponse:
+        def __init__(self, status_code: int, body: bytes, lines=()) -> None:
+            self.status_code = status_code
+            self._body = body
+            self._lines = lines
+
+        @property
+        def is_error(self) -> bool:
+            return self.status_code >= 400
+
+        async def aread(self) -> bytes:
+            return self._body
+
+        async def aiter_lines(self):
+            for line in self._lines:
+                yield line
+
+    class FakeStreamContext:
+        def __init__(self, response: FakeResponse) -> None:
+            self.response = response
+
+        async def __aenter__(self):
+            return self.response
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return None
+
+    class FakeAsyncClient:
+        def __init__(self, *, timeout) -> None:
+            self.timeout = timeout
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return None
+
+        def stream(self, method, url, *, headers, json):
+            requests.append({"method": method, "url": url, "headers": headers, "json": json})
+            return FakeStreamContext(
+                FakeResponse(202, b'{"detail":"operation_in_progress"}')
+            )
+
+    monkeypatch.setattr(
+        "agentscope_runtime.openwebui_client.httpx.AsyncClient",
+        FakeAsyncClient,
+    )
+    client = OpenWebUIClient(
+        base_url="https://openwebui.test",
+        service_token="owui-token",
+        model_call_total_timeout=1.0,
+    )
+
+    with pytest.raises(RuntimeError, match="operation_in_progress"):
+        async for _ in client.call_model_stream(
+            run_id="run-1",
+            idempotency_key="model:leader:model-call-1:1",
+            participant_id="leader",
+            model_call_id="model-call-1",
+            model="model-a",
+            messages=[{"role": "user", "content": "hello"}],
+        ):
+            pass
+
+    assert len(requests) == 1
+    assert {
+        request["headers"]["X-Agent-Idempotency-Key"] for request in requests
+    } == {"model:leader:model-call-1:1"}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("failure", "expected"),
+    [
+        (httpx.ConnectTimeout("connect stalled"), "stream connect timeout after 2.0 seconds"),
+        (httpx.ReadTimeout("stream idle"), "stream read-idle timeout after 15.0 seconds"),
+    ],
+)
+async def test_call_model_stream_names_transport_timeout_owner(
+    monkeypatch,
+    failure: httpx.TimeoutException,
+    expected: str,
+) -> None:
+    class FakeStreamContext:
+        async def __aenter__(self):
+            raise failure
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return None
+
+    class FakeAsyncClient:
+        def __init__(self, *, timeout) -> None:
+            self.timeout = timeout
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return None
+
+        def stream(self, *args, **kwargs):
+            return FakeStreamContext()
+
+    monkeypatch.setattr(
+        "agentscope_runtime.openwebui_client.httpx.AsyncClient",
+        FakeAsyncClient,
+    )
+    client = OpenWebUIClient(
+        base_url="https://openwebui.test",
+        service_token="owui-token",
+        model_call_connect_timeout=2.0,
+        model_call_read_idle_timeout=15.0,
+        model_call_total_timeout=120.0,
+    )
+
+    with pytest.raises(RuntimeError, match=expected):
+        async for _ in client.call_model_stream(
+            run_id="run-1",
+            idempotency_key="model:leader:model-call-1:1",
+            participant_id="leader",
+            model_call_id="model-call-1",
+            model="model-a",
+        ):
+            pass
+
+
+@pytest.mark.asyncio
+async def test_call_model_stream_enforces_total_timeout(monkeypatch) -> None:
+    class FakeResponse:
+        status_code = 200
+        is_error = False
+
+        async def aiter_lines(self):
+            await asyncio.sleep(60)
+            yield "data: [DONE]"
+
+    class FakeStreamContext:
+        async def __aenter__(self):
+            return FakeResponse()
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return None
+
+    class FakeAsyncClient:
+        def __init__(self, *, timeout) -> None:
+            self.timeout = timeout
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return None
+
+        def stream(self, *args, **kwargs):
+            return FakeStreamContext()
+
+    monkeypatch.setattr(
+        "agentscope_runtime.openwebui_client.httpx.AsyncClient",
+        FakeAsyncClient,
+    )
+    client = OpenWebUIClient(
+        base_url="https://openwebui.test",
+        service_token="owui-token",
+        model_call_total_timeout=0.01,
+    )
+
+    with pytest.raises(RuntimeError, match="stream total timeout after 0.1 seconds"):
+        async for _ in client.call_model_stream(
+            run_id="run-1",
+            idempotency_key="model:leader:model-call-1:1",
+            participant_id="leader",
+            model_call_id="model-call-1",
+            model="model-a",
+        ):
+            pass
 
 
 @pytest.mark.asyncio

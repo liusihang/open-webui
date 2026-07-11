@@ -9,7 +9,19 @@ from uuid import uuid4
 from open_webui.agent.compaction import build_compacted_run_summary
 from open_webui.internal.db import Base, get_async_db_context
 from pydantic import BaseModel, ConfigDict, Field
-from sqlalchemy import JSON, BigInteger, Column, Index, Integer, Text, UniqueConstraint, select
+from sqlalchemy import (
+    JSON,
+    BigInteger,
+    Column,
+    Index,
+    Integer,
+    Text,
+    UniqueConstraint,
+    select,
+    update,
+)
+from sqlalchemy.dialects.postgresql import insert as postgresql_insert
+from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -704,22 +716,56 @@ class AgentRunTable:
                 raise AgentRunNotFound(run_id)
 
             now = _now_ns()
-            row = AgentRunOperation(
-                id=str(uuid4()),
-                run_id=run_id,
-                operation_type=operation_type,
-                idempotency_key=idempotency_key,
-                request_hash=request_hash,
-                status='in_progress',
-                created_at=now,
-                updated_at=now,
+            operation_id = str(uuid4())
+            operation_values = {
+                'id': operation_id,
+                'run_id': run_id,
+                'operation_type': operation_type,
+                'idempotency_key': idempotency_key,
+                'request_hash': request_hash,
+                'status': 'in_progress',
+                'created_at': now,
+                'updated_at': now,
+            }
+            dialect_name = db.get_bind().dialect.name
+            if dialect_name == 'sqlite':
+                insert_statement = sqlite_insert(AgentRunOperation)
+            elif dialect_name == 'postgresql':
+                insert_statement = postgresql_insert(AgentRunOperation)
+            else:
+                raise AgentRunError(
+                    f'Atomic agent operation claims are unsupported for database dialect {dialect_name}'
+                )
+
+            inserted = await db.execute(
+                insert_statement.values(**operation_values)
+                .on_conflict_do_nothing(
+                    index_elements=[
+                        AgentRunOperation.run_id,
+                        AgentRunOperation.operation_type,
+                        AgentRunOperation.idempotency_key,
+                    ]
+                )
+                .returning(AgentRunOperation.id)
             )
-            db.add(row)
+            inserted_id = inserted.scalar_one_or_none()
             await db.commit()
-            await db.refresh(row)
+
+            result = await db.execute(
+                select(AgentRunOperation).filter_by(
+                    run_id=run_id,
+                    operation_type=operation_type,
+                    idempotency_key=idempotency_key,
+                )
+            )
+            row = result.scalars().one()
+            if row.request_hash != request_hash:
+                raise AgentRunOperationConflict(
+                    'idempotency key was reused with a different request hash'
+                )
             return AgentRunOperationClaim(
                 operation=AgentRunOperationModel.model_validate(row),
-                created=True,
+                created=inserted_id == operation_id,
             )
 
     async def find_operation_by_idempotency_key(
@@ -756,13 +802,25 @@ class AgentRunTable:
         db: AsyncSession | None = None,
     ) -> AgentRunOperationModel:
         async with get_async_db_context(db) as db:
+            await db.execute(
+                update(AgentRunOperation)
+                .where(
+                    AgentRunOperation.id == operation_id,
+                    AgentRunOperation.status == 'in_progress',
+                )
+                .values(
+                    status='succeeded',
+                    response=response,
+                    error=None,
+                    updated_at=_now_ns(),
+                )
+                .execution_options(synchronize_session=False)
+            )
+            await db.commit()
+            db.expire_all()
             row = await db.get(AgentRunOperation, operation_id)
             if row is None:
                 raise AgentRunNotFound(operation_id)
-            row.status = 'succeeded'
-            row.response = response
-            row.updated_at = _now_ns()
-            await db.commit()
             await db.refresh(row)
             return AgentRunOperationModel.model_validate(row)
 
@@ -773,13 +831,25 @@ class AgentRunTable:
         db: AsyncSession | None = None,
     ) -> AgentRunOperationModel:
         async with get_async_db_context(db) as db:
+            await db.execute(
+                update(AgentRunOperation)
+                .where(
+                    AgentRunOperation.id == operation_id,
+                    AgentRunOperation.status == 'in_progress',
+                )
+                .values(
+                    status='failed',
+                    response=None,
+                    error=error,
+                    updated_at=_now_ns(),
+                )
+                .execution_options(synchronize_session=False)
+            )
+            await db.commit()
+            db.expire_all()
             row = await db.get(AgentRunOperation, operation_id)
             if row is None:
                 raise AgentRunNotFound(operation_id)
-            row.status = 'failed'
-            row.error = error
-            row.updated_at = _now_ns()
-            await db.commit()
             await db.refresh(row)
             return AgentRunOperationModel.model_validate(row)
 

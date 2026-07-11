@@ -6,7 +6,7 @@ from types import SimpleNamespace
 from typing import Any
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Request, status
-from fastapi.responses import JSONResponse, StreamingResponse
+from fastapi.responses import JSONResponse
 from fastapi.security import HTTPAuthorizationCredentials
 from open_webui.agent.approval import (
     AgentApprovalCoordinator,
@@ -28,12 +28,14 @@ from open_webui.agent.events import (
     append_text_delta_async,
 )
 from open_webui.agent.model_authority import (
+    AgentModelStreamingResponse,
     AgentModelAuthority,
     ModelAuthorityError,
     ModelCallRequest,
     ModelGuardRejected,
     ModelNotAllowed,
     ModelOperationInProgress,
+    ModelStreamNotReplayable,
 )
 from open_webui.agent.model_catalog import ModelCatalogError, ModelSelectionNotAllowed
 from open_webui.agent.protocol import (
@@ -1020,6 +1022,63 @@ async def transition_agent_run_state(
         ) from exc
 
 
+async def _execute_stream_agent_model_call(
+    request: Request,
+    call_payload: ModelCallRequest,
+    authority: AgentModelAuthority,
+):
+    # Claim the operation before response headers are sent. A streamed
+    # response cannot be replayed, so duplicate requests are rejected
+    # without invoking the provider a second time.
+    try:
+        prepared = await authority.prepare_stream_model_call(request, call_payload)
+        return AgentModelStreamingResponse(
+            authority.stream_model_call(
+                request,
+                call_payload,
+                prepared=prepared,
+            ),
+            on_close=lambda: authority.finalize_abandoned_stream(prepared),
+            media_type='text/event-stream',
+            headers={
+                'Cache-Control': 'no-cache',
+                'X-Accel-Buffering': 'no',
+            },
+        )
+    except AgentRunOperationConflict as exc:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail='idempotency_conflict',
+        ) from exc
+    except ModelOperationInProgress:
+        return JSONResponse(
+            status_code=status.HTTP_202_ACCEPTED,
+            content={'detail': 'operation_in_progress'},
+            headers={'Retry-After': '1'},
+        )
+    except ModelStreamNotReplayable as exc:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail={
+                'code': exc.code,
+                'message': str(exc),
+                'operation_status': exc.operation_status,
+            },
+        ) from exc
+    except (ModelGuardRejected, ModelNotAllowed, ModelAuthorityError) as exc:
+        detail = {
+            'code': getattr(exc, 'code', 'model_authority_error'),
+            'message': str(exc),
+        }
+        current_state = getattr(exc, 'current_state', None)
+        if current_state is not None:
+            detail['current_state'] = current_state
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail=detail,
+        ) from exc
+
+
 @router.post('/runs/{run_id}/model-call')
 async def execute_agent_run_model_call(
     request: Request,
@@ -1040,47 +1099,7 @@ async def execute_agent_run_model_call(
     )
     call_payload = form_data.model_copy(update={'run_id': run_id, 'idempotency_key': key})
     if call_payload.stream:
-        # Streaming mode: bypass operation store (no canonical response to
-        # cache) and stream provider SSE chunks directly to the agentscope
-        # runtime. The runtime is responsible for idempotency at the
-        # model_call_id level.
-        try:
-            prepared = await authority.prepare_stream_model_call(request, call_payload)
-            return StreamingResponse(
-                authority.stream_model_call(
-                    request,
-                    call_payload,
-                    prepared=prepared,
-                ),
-                media_type='text/event-stream',
-                headers={
-                    'Cache-Control': 'no-cache',
-                    'X-Accel-Buffering': 'no',
-                },
-            )
-        except AgentRunOperationConflict as exc:
-            raise HTTPException(
-                status_code=status.HTTP_409_CONFLICT,
-                detail='idempotency_conflict',
-            ) from exc
-        except ModelOperationInProgress:
-            return JSONResponse(
-                status_code=status.HTTP_202_ACCEPTED,
-                content={'detail': 'operation_in_progress'},
-                headers={'Retry-After': '1'},
-            )
-        except (ModelGuardRejected, ModelNotAllowed, ModelAuthorityError) as exc:
-            detail = {
-                'code': getattr(exc, 'code', 'model_authority_error'),
-                'message': str(exc),
-            }
-            current_state = getattr(exc, 'current_state', None)
-            if current_state is not None:
-                detail['current_state'] = current_state
-            raise HTTPException(
-                status_code=status.HTTP_403_FORBIDDEN,
-                detail=detail,
-            ) from exc
+        return await _execute_stream_agent_model_call(request, call_payload, authority)
 
     try:
         return await execute_agent_model_call(

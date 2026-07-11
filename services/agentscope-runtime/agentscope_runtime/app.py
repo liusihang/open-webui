@@ -246,12 +246,18 @@ def create_app(
     store: RuntimeStore | None = None,
     openwebui_base_url: str | None = None,
     openwebui_service_token: str | None = None,
+    model_call_connect_timeout: float = 10.0,
+    model_call_read_idle_timeout: float = 30.0,
+    model_call_total_timeout: float = 300.0,
     auto_finalize_ordinary_qa: bool = True,
 ) -> FastAPI:
     runtime_store = store or RuntimeStore()
     callback_client = openwebui_client or OpenWebUIClient(
         base_url=openwebui_base_url or "http://127.0.0.1:8080",
         service_token=openwebui_service_token or service_token,
+        model_call_connect_timeout=model_call_connect_timeout,
+        model_call_read_idle_timeout=model_call_read_idle_timeout,
+        model_call_total_timeout=model_call_total_timeout,
     )
 
     def require_service_token(authorization: str | None = Header(default=None)) -> None:
@@ -405,8 +411,30 @@ def create_app_from_env() -> FastAPI:
         service_token=service_token,
         openwebui_base_url=os.getenv("OPENWEBUI_BASE_URL") or "http://127.0.0.1:8080",
         openwebui_service_token=os.getenv("OPENWEBUI_SERVICE_TOKEN") or service_token,
+        model_call_connect_timeout=_positive_env_float(
+            "AGENT_RUNTIME_MODEL_CALL_CONNECT_TIMEOUT_SECONDS", 10.0
+        ),
+        model_call_read_idle_timeout=_positive_env_float(
+            "AGENT_RUNTIME_MODEL_CALL_READ_IDLE_TIMEOUT_SECONDS", 30.0
+        ),
+        model_call_total_timeout=_positive_env_float(
+            "AGENT_RUNTIME_MODEL_CALL_TOTAL_TIMEOUT_SECONDS", 300.0
+        ),
         auto_finalize_ordinary_qa=auto_finalize,
     )
+
+
+def _positive_env_float(name: str, default: float) -> float:
+    raw = os.getenv(name, "").strip()
+    if not raw:
+        return default
+    try:
+        value = float(raw)
+    except ValueError as exc:
+        raise RuntimeError(f"{name} must be a number") from exc
+    if value <= 0:
+        raise RuntimeError(f"{name} must be greater than zero")
+    return value
 
 
 def _status(session: RuntimeSession) -> RunStatusResponse:

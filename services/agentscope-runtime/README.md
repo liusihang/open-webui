@@ -43,6 +43,9 @@ AGENT_RUNTIME_SERVICE_TOKEN=<shared-service-token>
 OPENWEBUI_BASE_URL=http://127.0.0.1:8080
 OPENWEBUI_SERVICE_TOKEN=<shared-service-token>
 AGENT_RUNTIME_AUTO_FINALIZE_ORDINARY_QA=true
+AGENT_RUNTIME_MODEL_CALL_CONNECT_TIMEOUT_SECONDS=10
+AGENT_RUNTIME_MODEL_CALL_READ_IDLE_TIMEOUT_SECONDS=30
+AGENT_RUNTIME_MODEL_CALL_TOTAL_TIMEOUT_SECONDS=300
 ```
 
 `AGENT_RUNTIME_SERVICE_TOKEN` is required by the runtime. OpenWebUI uses the
@@ -53,6 +56,13 @@ set, the runtime reuses `AGENT_RUNTIME_SERVICE_TOKEN`.
 `AGENT_RUNTIME_AUTO_FINALIZE_ORDINARY_QA` defaults to true. Set it to `false`
 only for tests or specialized harnesses that need to keep the runtime session
 open after the initial `run.running` event.
+
+Model callbacks use three independent timeout boundaries. The connect timeout
+limits establishing the OpenWebUI connection, the read-idle timeout limits the
+gap between received stream bytes, and the total timeout is a hard cap for the
+whole callback operation. OpenWebUI emits transport-only SSE heartbeats while
+an upstream model stream is active, so legitimate silent model work does not
+consume the read-idle budget. Heartbeats are not stored as chat content.
 
 ## Install And Start
 

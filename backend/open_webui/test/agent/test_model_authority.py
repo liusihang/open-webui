@@ -1,3 +1,4 @@
+import asyncio
 import os
 from contextlib import asynccontextmanager
 from types import SimpleNamespace
@@ -21,6 +22,7 @@ from open_webui.models.agent_runs import (
     AgentRun,
     AgentRunEvent,
     AgentRunOperation,
+    AgentRunOperationConflict,
     AgentRuns,
 )
 from open_webui.routers.agent_service import execute_agent_run_model_call
@@ -436,6 +438,7 @@ async def test_stream_model_call_preserves_phase_extension_in_raw_sse(agent_run_
                 'data: {"choices":[{"delta":{"content":"Checking.",'
                 '"phase":"commentary"}}]}\n\n'
             )
+            yield 'data: [DONE]\n\n'
 
         return StreamingResponse(body(), media_type='text/event-stream')
 
@@ -465,7 +468,296 @@ async def test_stream_model_call_preserves_phase_extension_in_raw_sse(agent_run_
     wire_text = b''.join(chunks).decode('utf-8')
     assert '"content":"Checking."' in wire_text
     assert '"phase":"commentary"' in wire_text
-    assert '"type":"stream_end"' in wire_text
+    assert 'data: [DONE]' in wire_text
+
+
+@pytest.mark.asyncio
+async def test_stream_model_call_emits_control_heartbeat_while_provider_is_idle(
+    agent_run_db,
+    monkeypatch,
+):
+    from starlette.responses import StreamingResponse
+
+    run = await _create_running_run()
+    request = _trusted_request(enable_agent_mode=True, run_id=run.id)
+    release_provider = asyncio.Event()
+
+    async def completion_handler(request, form_data, user):
+        async def body():
+            await release_provider.wait()
+            yield 'data: {"choices":[{"delta":{"content":"ready"}}]}\n\n'
+            yield 'data: [DONE]\n\n'
+
+        return StreamingResponse(body(), media_type='text/event-stream')
+
+    monkeypatch.setattr(
+        'open_webui.agent.model_authority.AGENT_MODEL_STREAM_HEARTBEAT_SECONDS',
+        0.01,
+    )
+    authority = AgentModelAuthority(
+        operation_store=AgentRuns,
+        completion_handler=completion_handler,
+        user_loader=_user_loader,
+        model_access_checker=_allow_model_access,
+    )
+    stream = authority.stream_model_call(
+        request,
+        ModelCallRequest(
+            run_id=run.id,
+            participant_id='leader',
+            model_call_id='call-stream-heartbeat',
+            model='model-a',
+            messages=[{'role': 'user', 'content': 'hello'}],
+            stream=True,
+            idempotency_key='model:leader:call-stream-heartbeat:1',
+        ),
+    )
+
+    first = await asyncio.wait_for(anext(stream), timeout=0.2)
+    second = await asyncio.wait_for(anext(stream), timeout=0.2)
+    assert first == b': openwebui-stream-start\n\n'
+    assert second == b': openwebui-keep-alive\n\n'
+
+    release_provider.set()
+    remaining = [chunk async for chunk in stream]
+    wire_text = b''.join(remaining).decode('utf-8')
+    assert '"content":"ready"' in wire_text
+    assert 'data: [DONE]' in wire_text
+
+
+@pytest.mark.asyncio
+async def test_stream_model_call_rejects_clean_eof_without_terminal_event(agent_run_db):
+    from starlette.responses import StreamingResponse
+
+    run = await _create_running_run()
+    request = _trusted_request(enable_agent_mode=True, run_id=run.id)
+    call = ModelCallRequest(
+        run_id=run.id,
+        participant_id='leader',
+        model_call_id='call-stream-incomplete',
+        model='model-a',
+        messages=[{'role': 'user', 'content': 'hello'}],
+        stream=True,
+        idempotency_key='model:leader:call-stream-incomplete:1',
+    )
+
+    async def completion_handler(request, form_data, user):
+        async def body():
+            yield 'data: {"choices":[{"delta":{"content":"partial"}}]}\n\n'
+
+        return StreamingResponse(body(), media_type='text/event-stream')
+
+    authority = AgentModelAuthority(
+        operation_store=AgentRuns,
+        completion_handler=completion_handler,
+        user_loader=_user_loader,
+        model_access_checker=_allow_model_access,
+    )
+
+    chunks = [chunk async for chunk in authority.stream_model_call(request, call)]
+
+    assert b'partial' in b''.join(chunks)
+    assert b'stream_end' not in b''.join(chunks)
+    operation = await AgentRuns.find_operation_by_idempotency_key(
+        run.id,
+        operation_type='model.call',
+        idempotency_key=call.idempotency_key,
+    )
+    assert operation is not None
+    assert operation.status == 'failed'
+    assert operation.error is not None
+    assert operation.error['code'] == 'model_stream_incomplete'
+
+
+@pytest.mark.asyncio
+async def test_stream_model_call_commits_success_before_terminal_chunk(agent_run_db):
+    from starlette.responses import StreamingResponse
+
+    run = await _create_running_run()
+    request = _trusted_request(enable_agent_mode=True, run_id=run.id)
+    call = ModelCallRequest(
+        run_id=run.id,
+        participant_id='leader',
+        model_call_id='call-stream-terminal-order',
+        model='model-a',
+        messages=[{'role': 'user', 'content': 'hello'}],
+        stream=True,
+        idempotency_key='model:leader:call-stream-terminal-order:1',
+    )
+
+    async def completion_handler(request, form_data, user):
+        async def body():
+            yield 'data: {"choices":[{"delta":{"content":"complete"}}]}\n\n'
+            yield 'data: [DONE]\n\n'
+
+        return StreamingResponse(body(), media_type='text/event-stream')
+
+    authority = AgentModelAuthority(
+        operation_store=AgentRuns,
+        completion_handler=completion_handler,
+        user_loader=_user_loader,
+        model_access_checker=_allow_model_access,
+    )
+    stream = authority.stream_model_call(request, call)
+
+    try:
+        assert await anext(stream) == b': openwebui-stream-start\n\n'
+        assert b'complete' in await anext(stream)
+        terminal = await anext(stream)
+        assert terminal == b'data: [DONE]\n\n'
+
+        operation = await AgentRuns.find_operation_by_idempotency_key(
+            run.id,
+            operation_type='model.call',
+            idempotency_key=call.idempotency_key,
+        )
+        assert operation is not None
+        assert operation.status == 'succeeded'
+    finally:
+        await stream.aclose()
+
+
+@pytest.mark.asyncio
+async def test_stream_model_call_accepts_responses_completed_terminal_event(agent_run_db):
+    from starlette.responses import StreamingResponse
+
+    run = await _create_running_run()
+    request = _trusted_request(enable_agent_mode=True, run_id=run.id)
+    call = ModelCallRequest(
+        run_id=run.id,
+        participant_id='leader',
+        model_call_id='call-responses-completed',
+        model='model-a',
+        messages=[{'role': 'user', 'content': 'hello'}],
+        stream=True,
+        idempotency_key='model:leader:call-responses-completed:1',
+    )
+
+    async def completion_handler(request, form_data, user):
+        async def body():
+            yield 'data: {"type":"response.output_text.delta","delta":"answer"}\n\n'
+            yield 'data: {"type":"response.completed","response":{"status":"completed"}}\n\n'
+
+        return StreamingResponse(body(), media_type='text/event-stream')
+
+    authority = AgentModelAuthority(
+        operation_store=AgentRuns,
+        completion_handler=completion_handler,
+        user_loader=_user_loader,
+        model_access_checker=_allow_model_access,
+    )
+
+    chunks = [chunk async for chunk in authority.stream_model_call(request, call)]
+
+    wire_text = b''.join(chunks).decode('utf-8')
+    assert 'response.output_text.delta' in wire_text
+    assert 'response.completed' in wire_text
+    operation = await AgentRuns.find_operation_by_idempotency_key(
+        run.id,
+        operation_type='model.call',
+        idempotency_key=call.idempotency_key,
+    )
+    assert operation is not None
+    assert operation.status == 'succeeded'
+    assert operation.error is None
+
+
+@pytest.mark.asyncio
+async def test_stream_model_call_marks_responses_incomplete_failed(agent_run_db):
+    from starlette.responses import StreamingResponse
+
+    run = await _create_running_run()
+    request = _trusted_request(enable_agent_mode=True, run_id=run.id)
+    call = ModelCallRequest(
+        run_id=run.id,
+        participant_id='leader',
+        model_call_id='call-responses-incomplete',
+        model='model-a',
+        messages=[{'role': 'user', 'content': 'hello'}],
+        stream=True,
+        idempotency_key='model:leader:call-responses-incomplete:1',
+    )
+
+    async def completion_handler(request, form_data, user):
+        async def body():
+            yield (
+                'data: {"type":"response.incomplete","response":'
+                '{"incomplete_details":{"reason":"max_output_tokens"}}}\n\n'
+            )
+            yield 'data: {"type":"response.completed"}\n\n'
+
+        return StreamingResponse(body(), media_type='text/event-stream')
+
+    authority = AgentModelAuthority(
+        operation_store=AgentRuns,
+        completion_handler=completion_handler,
+        user_loader=_user_loader,
+        model_access_checker=_allow_model_access,
+    )
+
+    chunks = [chunk async for chunk in authority.stream_model_call(request, call)]
+
+    wire_text = b''.join(chunks).decode('utf-8')
+    assert 'response.incomplete' in wire_text
+    assert 'response.completed' not in wire_text
+    operation = await AgentRuns.find_operation_by_idempotency_key(
+        run.id,
+        operation_type='model.call',
+        idempotency_key=call.idempotency_key,
+    )
+    assert operation is not None
+    assert operation.status == 'failed'
+    assert operation.error is not None
+    assert operation.error['code'] == 'model_stream_error'
+    assert operation.error['message'] == 'max_output_tokens'
+
+
+@pytest.mark.asyncio
+async def test_operation_terminal_state_is_first_writer_wins(agent_run_db):
+    run = await _create_running_run()
+    claim = await AgentRuns.claim_operation(
+        run.id,
+        operation_type='model.call',
+        idempotency_key='model:leader:call-terminal-state:1',
+        request_hash='same-request-hash',
+    )
+
+    await AgentRuns.finish_operation_success(claim.operation.id, {'ok': True})
+    late_failure = await AgentRuns.finish_operation_error(
+        claim.operation.id,
+        {'code': 'late_cleanup', 'message': 'must not overwrite success'},
+    )
+
+    assert late_failure.status == 'succeeded'
+    assert late_failure.response == {'ok': True}
+    assert late_failure.error is None
+
+
+@pytest.mark.asyncio
+async def test_operation_terminal_result_refreshes_stale_caller_session(agent_run_db):
+    run = await _create_running_run()
+    claim = await AgentRuns.claim_operation(
+        run.id,
+        operation_type='model.call',
+        idempotency_key='model:leader:call-terminal-refresh:1',
+        request_hash='same-request-hash',
+    )
+
+    async with agent_run_db() as stale_session:
+        stale_row = await stale_session.get(AgentRunOperation, claim.operation.id)
+        assert stale_row is not None
+        assert stale_row.status == 'in_progress'
+
+        await AgentRuns.finish_operation_success(claim.operation.id, {'ok': True})
+        late_failure = await AgentRuns.finish_operation_error(
+            claim.operation.id,
+            {'code': 'late_cleanup', 'message': 'must not overwrite success'},
+            db=stale_session,
+        )
+
+    assert late_failure.status == 'succeeded'
+    assert late_failure.response == {'ok': True}
+    assert late_failure.error is None
 
 
 @pytest.mark.asyncio
@@ -512,6 +804,15 @@ async def test_model_call_stream_endpoint_reuses_single_preflight(agent_run_db):
             counts['get_run'] += 1
             return await AgentRuns.get_run(run_id)
 
+        async def claim_operation(self, *args, **kwargs):
+            return await AgentRuns.claim_operation(*args, **kwargs)
+
+        async def finish_operation_success(self, *args, **kwargs):
+            return await AgentRuns.finish_operation_success(*args, **kwargs)
+
+        async def finish_operation_error(self, *args, **kwargs):
+            return await AgentRuns.finish_operation_error(*args, **kwargs)
+
     async def model_access_checker(user, model):
         counts['model_access'] += 1
 
@@ -546,6 +847,332 @@ async def test_model_call_stream_endpoint_reuses_single_preflight(agent_run_db):
 
     assert chunks
     assert counts == {'get_run': 1, 'model_access': 1, 'provider': 1}
+
+
+@pytest.mark.asyncio
+async def test_model_call_stream_endpoint_fails_claim_if_response_never_starts(agent_run_db):
+    from starlette.requests import ClientDisconnect
+
+    run = await _create_running_run()
+    request = _request(enable_agent_mode=True)
+    call = ModelCallRequest(
+        run_id=run.id,
+        participant_id='leader',
+        model_call_id='call-stream-not-started',
+        model='model-a',
+        messages=[{'role': 'user', 'content': 'hello'}],
+        stream=True,
+        idempotency_key='model:leader:call-stream-not-started:1',
+    )
+    authority = AgentModelAuthority(
+        operation_store=AgentRuns,
+        completion_handler=_unexpected_completion_handler,
+        user_loader=_user_loader,
+        model_access_checker=_allow_model_access,
+    )
+
+    response = await execute_agent_run_model_call(
+        request,
+        run.id,
+        call,
+        idempotency_key=call.idempotency_key,
+        authorization='Bearer test-service-token',
+        authority=authority,
+    )
+
+    async def receive():
+        return {'type': 'http.disconnect'}
+
+    async def send(message):
+        del message
+        raise OSError('client disconnected before response start')
+
+    with pytest.raises(ClientDisconnect):
+        await response(
+            {'type': 'http', 'asgi': {'spec_version': '2.4'}},
+            receive,
+            send,
+        )
+
+    operation = await AgentRuns.find_operation_by_idempotency_key(
+        run.id,
+        operation_type='model.call',
+        idempotency_key=call.idempotency_key,
+    )
+    assert operation is not None
+    assert operation.status == 'failed'
+    assert operation.error is not None
+    assert operation.error['code'] == 'model_stream_abandoned'
+
+
+@pytest.mark.asyncio
+async def test_model_call_stream_endpoint_cleanup_preserves_success(agent_run_db):
+    from starlette.responses import StreamingResponse
+
+    run = await _create_running_run()
+    request = _request(enable_agent_mode=True)
+    call = ModelCallRequest(
+        run_id=run.id,
+        participant_id='leader',
+        model_call_id='call-stream-cleanup-after-success',
+        model='model-a',
+        messages=[{'role': 'user', 'content': 'hello'}],
+        stream=True,
+        idempotency_key='model:leader:call-stream-cleanup-after-success:1',
+    )
+
+    async def completion_handler(request, form_data, user):
+        async def body():
+            yield 'data: {"choices":[{"delta":{"content":"complete"}}]}\n\n'
+            yield 'data: [DONE]\n\n'
+
+        return StreamingResponse(body(), media_type='text/event-stream')
+
+    authority = AgentModelAuthority(
+        operation_store=AgentRuns,
+        completion_handler=completion_handler,
+        user_loader=_user_loader,
+        model_access_checker=_allow_model_access,
+    )
+    response = await execute_agent_run_model_call(
+        request,
+        run.id,
+        call,
+        idempotency_key=call.idempotency_key,
+        authorization='Bearer test-service-token',
+        authority=authority,
+    )
+    sent_messages = []
+
+    async def receive():
+        return {'type': 'http.disconnect'}
+
+    async def send(message):
+        sent_messages.append(message)
+
+    await response(
+        {'type': 'http', 'asgi': {'spec_version': '2.4'}},
+        receive,
+        send,
+    )
+
+    assert sent_messages[-1] == {'type': 'http.response.body', 'body': b'', 'more_body': False}
+    operation = await AgentRuns.find_operation_by_idempotency_key(
+        run.id,
+        operation_type='model.call',
+        idempotency_key=call.idempotency_key,
+    )
+    assert operation is not None
+    assert operation.status == 'succeeded'
+    assert operation.error is None
+
+
+@pytest.mark.asyncio
+async def test_stream_model_call_claims_once_and_never_reposts_provider(agent_run_db):
+    run = await _create_running_run()
+    provider_calls = 0
+
+    async def completion_handler(request, form_data, user):
+        nonlocal provider_calls
+        provider_calls += 1
+        return {'id': 'chatcmpl-stream', 'choices': [{'message': {'content': 'hello'}}]}
+
+    authority = AgentModelAuthority(
+        operation_store=AgentRuns,
+        completion_handler=completion_handler,
+        user_loader=_user_loader,
+        model_access_checker=_allow_model_access,
+    )
+    call = ModelCallRequest(
+        run_id=run.id,
+        participant_id='leader',
+        model_call_id='call-stream-once',
+        model='model-a',
+        messages=[{'role': 'user', 'content': 'hello'}],
+        stream=True,
+        idempotency_key='model:leader:call-stream-once:1',
+    )
+
+    first = await execute_agent_run_model_call(
+        _request(enable_agent_mode=True),
+        run.id,
+        call,
+        idempotency_key=call.idempotency_key,
+        authorization='Bearer test-service-token',
+        authority=authority,
+    )
+    duplicate_in_progress = await execute_agent_run_model_call(
+        _request(enable_agent_mode=True),
+        run.id,
+        call,
+        idempotency_key=call.idempotency_key,
+        authorization='Bearer test-service-token',
+        authority=authority,
+    )
+
+    assert duplicate_in_progress.status_code == 202
+    assert provider_calls == 0
+
+    chunks = [chunk async for chunk in first.body_iterator]
+    assert chunks
+    assert provider_calls == 1
+
+    with pytest.raises(HTTPException) as exc_info:
+        await execute_agent_run_model_call(
+            _request(enable_agent_mode=True),
+            run.id,
+            call,
+            idempotency_key=call.idempotency_key,
+            authorization='Bearer test-service-token',
+            authority=authority,
+        )
+
+    assert exc_info.value.status_code == 409
+    assert exc_info.value.detail['code'] == 'model_stream_not_replayable'
+    assert provider_calls == 1
+
+
+@pytest.mark.asyncio
+async def test_concurrent_model_call_claims_resolve_unique_key_race(agent_run_db):
+    run = await _create_running_run()
+    start = asyncio.Event()
+
+    async def claim():
+        await start.wait()
+        return await AgentRuns.claim_operation(
+            run.id,
+            operation_type='model.call',
+            idempotency_key='model:leader:call-concurrent:1',
+            request_hash='same-request-hash',
+        )
+
+    first = asyncio.create_task(claim())
+    second = asyncio.create_task(claim())
+    start.set()
+    claims = await asyncio.gather(first, second)
+
+    assert sorted(claim.created for claim in claims) == [False, True]
+    assert claims[0].operation.id == claims[1].operation.id
+
+
+@pytest.mark.asyncio
+async def test_concurrent_model_call_claims_reject_different_request_hash(agent_run_db):
+    run = await _create_running_run()
+    start = asyncio.Event()
+
+    async def claim(request_hash: str):
+        await start.wait()
+        return await AgentRuns.claim_operation(
+            run.id,
+            operation_type='model.call',
+            idempotency_key='model:leader:call-concurrent-conflict:1',
+            request_hash=request_hash,
+        )
+
+    first = asyncio.create_task(claim('request-hash-a'))
+    second = asyncio.create_task(claim('request-hash-b'))
+    start.set()
+    results = await asyncio.gather(first, second, return_exceptions=True)
+
+    claims = [result for result in results if not isinstance(result, BaseException)]
+    conflicts = [
+        result for result in results if isinstance(result, AgentRunOperationConflict)
+    ]
+    assert len(claims) == 1
+    assert claims[0].created is True
+    assert len(conflicts) == 1
+
+    operation = await AgentRuns.find_operation_by_idempotency_key(
+        run.id,
+        operation_type='model.call',
+        idempotency_key='model:leader:call-concurrent-conflict:1',
+    )
+    assert operation is not None
+    assert operation.request_hash in {'request-hash-a', 'request-hash-b'}
+
+
+@pytest.mark.asyncio
+async def test_stream_model_call_marks_provider_sse_error_failed(agent_run_db):
+    from starlette.responses import StreamingResponse
+
+    run = await _create_running_run()
+    request = _trusted_request(enable_agent_mode=True, run_id=run.id)
+    call = ModelCallRequest(
+        run_id=run.id,
+        participant_id='leader',
+        model_call_id='call-stream-provider-error',
+        model='model-a',
+        messages=[{'role': 'user', 'content': 'hello'}],
+        stream=True,
+        idempotency_key='model:leader:call-stream-provider-error:1',
+    )
+
+    async def completion_handler(request, form_data, user):
+        async def body():
+            yield b'data: {"error":{"mess'
+            yield b'age":"provider failed"}}\n\n'
+            yield b'data: [DONE]\n\n'
+
+        return StreamingResponse(body(), media_type='text/event-stream')
+
+    authority = AgentModelAuthority(
+        operation_store=AgentRuns,
+        completion_handler=completion_handler,
+        user_loader=_user_loader,
+        model_access_checker=_allow_model_access,
+    )
+
+    chunks = [chunk async for chunk in authority.stream_model_call(request, call)]
+
+    assert b''.join(chunks).count(b'provider failed') == 1
+    assert b'"type":"stream_end"' not in b''.join(chunks)
+    operation = await AgentRuns.find_operation_by_idempotency_key(
+        run.id,
+        operation_type='model.call',
+        idempotency_key=call.idempotency_key,
+    )
+    assert operation is not None
+    assert operation.status == 'failed'
+    assert operation.error == {
+        'code': 'model_stream_error',
+        'message': 'provider failed',
+    }
+
+
+@pytest.mark.asyncio
+async def test_stream_model_call_marks_operation_failed_when_consumer_closes(agent_run_db):
+    run = await _create_running_run()
+    request = _trusted_request(enable_agent_mode=True, run_id=run.id)
+    call = ModelCallRequest(
+        run_id=run.id,
+        participant_id='leader',
+        model_call_id='call-stream-closed',
+        model='model-a',
+        messages=[{'role': 'user', 'content': 'hello'}],
+        stream=True,
+        idempotency_key='model:leader:call-stream-closed:1',
+    )
+    authority = AgentModelAuthority(
+        operation_store=AgentRuns,
+        completion_handler=_unexpected_completion_handler,
+        user_loader=_user_loader,
+        model_access_checker=_allow_model_access,
+    )
+    prepared = await authority.prepare_stream_model_call(request, call)
+    stream = authority.stream_model_call(request, call, prepared=prepared)
+
+    assert await anext(stream) == b': openwebui-stream-start\n\n'
+    await stream.aclose()
+
+    operation = await AgentRuns.find_operation_by_idempotency_key(
+        run.id,
+        operation_type='model.call',
+        idempotency_key=call.idempotency_key,
+    )
+    assert operation is not None
+    assert operation.status == 'failed'
+    assert operation.error is not None
+    assert operation.error['code'] == 'model_stream_closed'
 
 
 @pytest.mark.asyncio

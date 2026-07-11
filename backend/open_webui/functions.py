@@ -49,6 +49,81 @@ logging.basicConfig(stream=sys.stdout, level=GLOBAL_LOG_LEVEL)
 log = logging.getLogger(__name__)
 
 
+_FUNCTION_PIPE_ITERATION_END = object()
+_FUNCTION_PIPE_CLEANUP_TASKS: set[asyncio.Task] = set()
+
+
+def _next_function_pipe_item(iterator: Iterator):
+    try:
+        return next(iterator)
+    except StopIteration:
+        return _FUNCTION_PIPE_ITERATION_END
+
+
+async def _close_function_pipe_iterator_after_pending_next(
+    iterator: Iterator,
+    pending_next: asyncio.Task | None,
+) -> None:
+    if pending_next is not None:
+        try:
+            await pending_next
+        except (asyncio.CancelledError, Exception):
+            pass
+
+    close = getattr(iterator, 'close', None)
+    if callable(close):
+        try:
+            await asyncio.to_thread(close)
+        except Exception:
+            log.exception('Failed to close cancelled function pipe iterator')
+
+
+def _schedule_function_pipe_iterator_cleanup(
+    iterator: Iterator,
+    pending_next: asyncio.Task | None,
+) -> None:
+    cleanup_task = asyncio.create_task(
+        _close_function_pipe_iterator_after_pending_next(iterator, pending_next)
+    )
+    _FUNCTION_PIPE_CLEANUP_TASKS.add(cleanup_task)
+    cleanup_task.add_done_callback(_FUNCTION_PIPE_CLEANUP_TASKS.discard)
+
+
+async def _execute_function_pipe(pipe, params):
+    """Execute sync pipes outside the event loop while preserving async pipes."""
+    if inspect.iscoroutinefunction(pipe):
+        return await pipe(**params)
+
+    result = await asyncio.to_thread(pipe, **params)
+    if inspect.isawaitable(result):
+        return await result
+    return result
+
+
+async def _iterate_function_pipe_result(res):
+    """Adapt sync and async pipe iterators without blocking the event loop."""
+    if isinstance(res, Iterator):
+        iterator = iter(res)
+        pending_next: asyncio.Task | None = None
+        try:
+            while True:
+                pending_next = asyncio.create_task(
+                    asyncio.to_thread(_next_function_pipe_item, iterator)
+                )
+                item = await asyncio.shield(pending_next)
+                pending_next = None
+                if item is _FUNCTION_PIPE_ITERATION_END:
+                    return
+                yield item
+        finally:
+            _schedule_function_pipe_iterator_cleanup(iterator, pending_next)
+        return
+
+    if hasattr(res, '__aiter__'):
+        async for item in res:
+            yield item
+
+
 async def get_function_module_by_id(request: Request, pipe_id: str):
     function_module, _, _ = await get_function_module_from_cache(request, pipe_id)
 
@@ -145,19 +220,12 @@ async def get_function_models(request):
 
 
 async def generate_function_chat_completion(request, form_data, user, models: dict = {}):
-    async def execute_pipe(pipe, params):
-        if inspect.iscoroutinefunction(pipe):
-            return await pipe(**params)
-        else:
-            return pipe(**params)
-
     async def get_message_content(res: str | Generator | AsyncGenerator) -> str:
         if isinstance(res, str):
             return res
-        if isinstance(res, Generator):
-            return ''.join(map(str, res))
-        if isinstance(res, AsyncGenerator):
-            return ''.join([str(stream) async for stream in res])
+        if isinstance(res, Iterator) or hasattr(res, '__aiter__'):
+            return ''.join([str(stream) async for stream in _iterate_function_pipe_result(res)])
+        return str(res) if res is not None else ''
 
     def process_line(form_data: dict, line):
         if isinstance(line, BaseModel):
@@ -171,11 +239,27 @@ async def generate_function_chat_completion(request, form_data, user, models: di
         except Exception:
             pass
 
+        if isinstance(line, str) and line.startswith(':'):
+            return f'{line.rstrip()}\n\n'
+
+        if not isinstance(line, str):
+            line = str(line)
+
         if line.startswith('data:'):
             return f'{line}\n\n'
         else:
             line = openai_chat_chunk_message_template(form_data['model'], line)
             return f'data: {json.dumps(line)}\n\n'
+
+    def _function_pipe_stream_failed(line) -> bool:
+        if isinstance(line, BaseModel):
+            line = line.model_dump()
+        if not isinstance(line, dict):
+            return False
+        error = line.get('error')
+        return isinstance(error, dict) or (
+            isinstance(error, str) and bool(error.strip())
+        )
 
     def get_pipe_id(form_data: dict) -> str:
         pipe_id = form_data['model']
@@ -290,7 +374,7 @@ async def generate_function_chat_completion(request, form_data, user, models: di
 
         async def stream_content():
             try:
-                res = await execute_pipe(pipe, params)
+                res = await _execute_function_pipe(pipe, params)
 
                 # Directly return if the response is a StreamingResponse
                 if isinstance(res, StreamingResponse):
@@ -310,13 +394,11 @@ async def generate_function_chat_completion(request, form_data, user, models: di
                 message = openai_chat_chunk_message_template(form_data['model'], res)
                 yield f'data: {json.dumps(message)}\n\n'
 
-            if isinstance(res, Iterator):
-                for line in res:
+            if isinstance(res, Iterator) or hasattr(res, '__aiter__'):
+                async for line in _iterate_function_pipe_result(res):
                     yield process_line(form_data, line)
-
-            if isinstance(res, AsyncGenerator):
-                async for line in res:
-                    yield process_line(form_data, line)
+                    if _function_pipe_stream_failed(line):
+                        return
 
             finish_message = openai_chat_chunk_message_template(form_data['model'], '')
             finish_message['choices'][0]['finish_reason'] = 'stop'
@@ -326,7 +408,7 @@ async def generate_function_chat_completion(request, form_data, user, models: di
         return StreamingResponse(stream_content(), media_type='text/event-stream')
     else:
         try:
-            res = await execute_pipe(pipe, params)
+            res = await _execute_function_pipe(pipe, params)
 
         except Exception as e:
             log.error(f'Error: {e}')
