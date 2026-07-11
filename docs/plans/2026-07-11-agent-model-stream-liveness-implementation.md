@@ -24,12 +24,20 @@ Design: `docs/plans/2026-07-11-agent-model-stream-liveness-design.md`
    independent code review; fix verified findings. Fresh final counts are Agent
    backend 181, AgentScope runtime 112, and Pipe/Bifrost/Responses 40 tests.
 6. [in progress] Commit code/tests/docs, rebuild the exact isolated PR7 image, update
-   only the isolated live surfaces, and run bounded slow-stream/browser tests.
+   only the isolated live surfaces, eliminate the cold plugin-loader event-loop
+   stall found during live setup replay, and run bounded slow-stream/browser tests.
 
 ## Completion gates
 
 - The original blocking/timeout behavior is reproduced by tests before fixes.
 - A slow provider cannot block unrelated OpenWebUI event-loop work.
+- Cold Function/Tool source execution and constructors cannot block unrelated
+  OpenWebUI event-loop work, and their process-global initialization remains
+  serialized without consuming the shared default executor's worker capacity.
+- Failed and cancelled cold loads clean up their exact `sys.modules` entry;
+  cancellation cleanup remains independent of the request event loop lifetime;
+  plugin top-level code and synchronous constructors obey the documented
+  loop-independent initialization contract.
 - A live but semantically silent stream stays alive through control comments.
 - Heartbeats never enter assistant text, transcript persistence, or UI output.
 - Cancellation closes the native Bifrost upstream stream.

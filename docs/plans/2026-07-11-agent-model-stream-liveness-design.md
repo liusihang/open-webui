@@ -39,6 +39,10 @@ without becoming assistant text, and timeout ownership must be explicit.
    committed success, and callers refresh the canonical stored result.
 10. A Responses `[DONE]` marker is explicit terminal evidence. It is distinct
     from an unmarked clean EOF, which is a protocol failure rather than success.
+11. Cold plugin source execution and synchronous plugin construction never run
+    on the OpenWebUI event-loop thread. Function and tool initialization retain
+    their former process-wide serial ordering because both can mutate
+    `sys.modules` and other process-global state.
 
 ## Architecture
 
@@ -59,6 +63,32 @@ The generic function bridge advances those iterators in a worker thread instead
 of executing `next()` in the event loop. This is a compatibility boundary, not
 the Bifrost implementation: Bifrost itself remains natively asynchronous so
 downstream cancellation can close its socket.
+
+### Cold plugin initialization boundary
+
+Function and Tool source execution, frontmatter extraction, class selection,
+and synchronous construction run in one dedicated single-worker executor. The
+single worker preserves the previous process-wide ordering without occupying
+the shared asyncio default executor with lock waiters during a cold multi-plugin
+load.
+
+Plugin module top-level code and synchronous constructors must be independent
+of a running asyncio loop and main-thread-only APIs. Async resources and tasks
+must instead be created from the plugin's async operational methods or an
+explicit async lifecycle. Falling back to event-loop-thread initialization
+would restore the service-wide freeze and is therefore not part of the
+compatibility contract. The exact isolated PR7 corpus was audited before this
+contract was adopted: all 26 installed Function/Tool sources parsed and none
+used an event-loop- or main-thread-only API in module/class initialization or
+`__init__`.
+
+Caller cancellation cannot interrupt arbitrary synchronous Python safely. The
+worker is allowed to finish, after which the abandoned module is removed from
+`sys.modules` by identity. That cleanup is attached to the underlying worker
+future rather than the request event loop, so it still runs if the request loop
+has already closed. Failure cleanup catches `BaseException` for the same reason.
+Arbitrary external side effects performed by third-party constructors are
+outside this rollback boundary and remain the plugin author's responsibility.
 
 ### SSE control protocol
 
@@ -137,7 +167,12 @@ endpoint.
 10. Responses `[DONE]` must terminate normally, while clean EOF without a
     protocol terminal event must fail without synthetic success markers.
 11. The exact isolated PR7 image must pass a slow-first-semantic-event probe and
-   remain responsive to an unrelated health/API request during the wait.
+    remain responsive to an unrelated health/API request during the wait.
+12. Cold Function and Tool module loading must leave an unrelated event-loop
+    ticker responsive, execute both source and constructors off-loop, preserve
+    serialized initialization, avoid starving the shared default executor, and
+    remove failed or abandoned modules from `sys.modules`, including when the
+    cancelled request's event loop closes before the worker finishes.
 
 ## Live acceptance boundary
 
