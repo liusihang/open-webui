@@ -43,6 +43,19 @@ without becoming assistant text, and timeout ownership must be explicit.
     on the OpenWebUI event-loop thread. Function and tool initialization retain
     their former process-wide serial ordering because both can mutate
     `sys.modules` and other process-global state.
+12. Synchronous manifold discovery uses the existing off-loop compatibility
+    boundary. An async `pipes()` method stays on its owning server event loop and
+    must use native asynchronous I/O. Moving arbitrary async plugin code to a
+    temporary worker loop is unsafe because loop-bound state, callbacks, and
+    cancellation semantics belong to the server loop.
+13. Before mutation, the installed Anthropic manifold migration is fail-closed:
+    it applies only to the exact audited source hash and exact blocking request
+    snippets. Apply mode requires an explicitly confirmed exclusive maintenance
+    window because the Function API has no conditional-update primitive. It
+    rejects redirects that could forward the administrator token, writes a
+    private durable source backup, rechecks source identity immediately before
+    mutation, and reconciles uncertain POST outcomes by exact API readback.
+    Unknown state stops without an automatic overwrite.
 
 ## Architecture
 
@@ -89,6 +102,38 @@ future rather than the request event loop, so it still runs if the request loop
 has already closed. Failure cleanup catches `BaseException` for the same reason.
 Arbitrary external side effects performed by third-party constructors are
 outside this rollback boundary and remain the plugin author's responsibility.
+
+### Manifold model-discovery contract
+
+Model enumeration calls third-party `pipes()` implementations and waits for a
+finite list. Some installed plugins declare this method `async` while executing
+synchronous network clients inside the coroutine body. Awaiting such a method
+on the Uvicorn loop still blocks the whole service.
+
+The generic bridge keeps synchronous discovery off the server loop. An async
+discovery method is awaited on the server loop and is required to use
+nonblocking I/O, just like the async chat path. This preserves loop ownership,
+streaming, backpressure, and downstream cancellation semantics.
+
+The exact installed Anthropic manifold violated this contract by calling
+`requests.get()` inside `async def pipes()`. A repository-managed migration
+tool replaces only that audited call with `httpx.AsyncClient`, pins the required
+dependency in the Function frontmatter, refuses unexpected source drift, and
+uses the supported Function API with backup and readback verification. The API
+does not expose compare-and-swap or an expected-revision field, so this is not a
+database-level atomic transaction: apply mode requires an exclusive operational
+maintenance window. The tool refuses HTTP redirects, writes the backup with
+mode `0600` and `fsync`, performs a second preflight read, and reconciles a POST
+transport error against the stored source. If readback is neither the original
+nor the exact patch, it reports unknown state and deliberately does not roll
+back over a possible concurrent edit.
+
+There is no safe general-purpose in-process timeout that can kill arbitrary
+blocking Python code. A worker thread can remain permanently occupied, poison a
+fixed executor, delay interpreter shutdown, and execute callbacks after the
+request that created it has gone away. Hard containment for untrusted plugin
+code would require a separate process or service with an explicit lifecycle;
+it is not approximated here with a thread fallback that hides the defect.
 
 ### SSE control protocol
 
@@ -173,6 +218,15 @@ endpoint.
     serialized initialization, avoid starving the shared default executor, and
     remove failed or abandoned modules from `sys.modules`, including when the
     cancelled request's event loop closes before the worker finishes.
+13. The Anthropic migration must reject source-hash or snippet drift, reject
+    partial reapplication, produce syntactically valid source, and replace the
+    exact blocking request with native async HTTP. Apply-mode tests must also
+    reject redirects, require explicit exclusive maintenance, write a durable
+    private backup, reject preflight drift, reconcile uncertain POST outcomes,
+    and stop without overwriting unknown state. On the isolated live stack, its
+    async `pipes()` call must leave an unrelated event-loop ticker responsive.
+    Native async chat Pipe execution remains covered by streaming and
+    cancellation tests.
 
 ## Live acceptance boundary
 
