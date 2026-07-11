@@ -69,6 +69,7 @@
 	} from '$lib/utils';
 	import { AudioQueue } from '$lib/utils/audio';
 	import { getOutputText } from './Messages/structuredOutput';
+	import { createAutoFollowFrameScheduler } from './autoFollow';
 
 	import {
 		archiveChatById,
@@ -1096,6 +1097,7 @@
 
 		return () => {
 			try {
+				autoFollowScrollScheduler.destroy();
 				clearTimeout(saveControlsTimer);
 				saveControls();
 				if (chatIdProp && !$temporaryChatEnabled) {
@@ -1766,16 +1768,18 @@
 		await messagesRef?.scrollToTop();
 	};
 
-	let scrollRAF = null;
 	let contentsRAF = null;
-	const scheduleScrollToBottom = () => {
-		if (!scrollRAF) {
-			scrollRAF = requestAnimationFrame(async () => {
-				scrollRAF = null;
-				await scrollToBottom();
-			});
-		}
-	};
+	const autoFollowScrollScheduler = createAutoFollowFrameScheduler({
+		shouldFollow: () => autoScroll,
+		getTarget: () => messagesContainerElement,
+		scroll: (element) => {
+			element.scrollTo({ top: element.scrollHeight, behavior: 'auto' });
+		},
+		requestFrame: (callback) => requestAnimationFrame(callback),
+		cancelFrame: (frameId) => cancelAnimationFrame(frameId),
+		frameCount: 3
+	});
+	const scheduleScrollToBottom = () => autoFollowScrollScheduler.schedule();
 
 	let processingQueueChats = new Set<string>();
 
@@ -3353,6 +3357,7 @@
 										topPadding={true}
 										bottomPadding={files.length > 0}
 										{onSelect}
+										on:contentresize={scheduleScrollToBottom}
 									/>
 								</div>
 							</div>

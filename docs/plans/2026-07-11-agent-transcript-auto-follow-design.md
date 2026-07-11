@@ -22,16 +22,19 @@ remained at `scrollTop = 0`, leaving the final answer below the visible viewport
 
 ## Chosen design
 
-Bind the message content wrapper in `Chat.svelte` and observe its rendered size
-with a `ResizeObserver`. The observer callback checks the existing `autoScroll`
-flag and calls the existing `scheduleScrollToBottom()` only when follow mode is
-still active. The existing `messages-container` scroll handler remains the sole
-owner of follow-mode changes, so user scrolling keeps the current semantics.
+Observe the actual message `<ul>` in `Messages.svelte`, whose box height grows
+with transcript, final-answer, Markdown, and media content. A generic
+`contentresize` event asks `Chat.svelte` to schedule its existing bottom follow;
+no Agent-specific event is propagated through the component tree. The existing
+`messages-container` scroll handler remains the sole owner of follow-mode changes,
+so user scrolling keeps the current semantics.
 
-The observer lifecycle is owned by `Chat.svelte`: disconnect the previous
-observer when the bound content element changes, and disconnect it during
-component teardown. A small testable helper owns observer creation and cleanup;
-`Chat.svelte` supplies the live `autoScroll` predicate and scroll scheduler.
+The scheduled follow owns a captured container identity and a cancellable
+three-frame chain. Every frame rechecks both `autoScroll` and that the captured
+container is still current before scrolling. Component teardown cancels pending
+work, and a chat switch makes old work fail the identity check. The ResizeObserver
+action owns only observation/update/disconnect lifecycle; a separate testable
+scheduler owns frame coalescing, cancellation, and the user-scroll race.
 
 ## Rejected alternatives
 

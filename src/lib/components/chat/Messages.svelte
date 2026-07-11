@@ -21,6 +21,7 @@
 	import Spinner from '../common/Spinner.svelte';
 
 	import ChatPlaceholder from './ChatPlaceholder.svelte';
+	import { autoFollowResize } from './autoFollow';
 
 	const i18n = getContext('i18n');
 
@@ -523,7 +524,16 @@
 							</div>
 						</Loader>
 					{/if}
-					<ul role="log" aria-live="polite" aria-relevant="additions" aria-atomic="false">
+					<ul
+						role="log"
+						aria-live="polite"
+						aria-relevant="additions"
+						aria-atomic="false"
+						use:autoFollowResize={{
+							shouldFollow: () => autoScroll,
+							scheduleScroll: () => dispatch('contentresize')
+						}}
+					>
 						{#each messages as message, messageIdx (message.id)}
 							<Message
 								{chatId}
