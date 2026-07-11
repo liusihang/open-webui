@@ -9,7 +9,7 @@
 		currentChatPage,
 		temporaryChatEnabled
 	} from '$lib/stores';
-	import { tick, getContext, onMount, onDestroy, createEventDispatcher } from 'svelte';
+	import { tick, getContext, onDestroy, createEventDispatcher } from 'svelte';
 	const dispatch = createEventDispatcher();
 
 	import { toast } from 'svelte-sonner';
@@ -21,6 +21,7 @@
 	import Spinner from '../common/Spinner.svelte';
 
 	import ChatPlaceholder from './ChatPlaceholder.svelte';
+	import { nativeScrollAnchor } from './nativeAutoFollow';
 
 	const i18n = getContext('i18n');
 
@@ -523,12 +524,7 @@
 							</div>
 						</Loader>
 					{/if}
-					<ul
-						role="log"
-						aria-live="polite"
-						aria-relevant="additions"
-						aria-atomic="false"
-					>
+					<ul role="log" aria-live="polite" aria-relevant="additions" aria-atomic="false">
 						{#each messages as message, messageIdx (message.id)}
 							<Message
 								{chatId}
@@ -559,7 +555,11 @@
 							/>
 						{/each}
 					</ul>
-					<div class="chat-scroll-anchor" aria-hidden="true"></div>
+					<div
+						class="chat-scroll-anchor"
+						aria-hidden="true"
+						use:nativeScrollAnchor={autoScroll}
+					></div>
 				</section>
 				<div class="pb-18" />
 				{#if bottomPadding}

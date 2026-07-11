@@ -36,6 +36,12 @@ the off-screen sentinel no longer pulls the viewport. The existing scroll handle
 therefore controls anchor ownership and the jump-button UI, not imperative follow
 scrolling.
 
+The native anchor must be visible once before the browser can select it. When the
+non-empty `Messages` view first mounts, a cancellable one-shot helper scrolls the
+container to its then-current bottom across three animation frames. It stops if
+follow mode has already been disabled and never observes later size changes; all
+subsequent growth remains browser-owned.
+
 ## Rejected alternatives
 
 - Propagating Agent transcript/final events through four component layers would
@@ -53,8 +59,9 @@ scrolling.
 
 ## Verification
 
-1. A focused structural test freezes the normal-flow wrappers, sentinel, and
-   `overflow-anchor` ownership and rejects the removed observer/scheduler path.
+1. Focused tests freeze the normal-flow wrappers, sentinel, conditional
+   `overflow-anchor` ownership, and the cancellable three-frame first-mount arming
+   helper while rejecting the removed continuous observer/scheduler path.
 2. Frontend type/check and relevant Agent transcript tests remain green.
 3. Rebuild the exact committed WebUI image and replace only isolated
    `open-webui-pr7`.
