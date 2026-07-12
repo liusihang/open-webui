@@ -60,6 +60,26 @@ WRAPPED_IN_BAND_RESPONSE_PHASE_PATTERNS = (
         ),
     ),
 )
+LEADING_THINKING_OPEN_RE = re.compile(r"^\s*<thinking>", re.IGNORECASE)
+LEADING_THINKING_ENVELOPE_RE = re.compile(
+    r"^\s*<thinking>(.*?)</thinking>(?:\r?\n)?",
+    re.IGNORECASE | re.DOTALL,
+)
+
+
+def _remove_leading_characters(parts: list[str], count: int) -> list[str]:
+    cleaned: list[str] = []
+    remaining_prefix = count
+    for part in parts:
+        if remaining_prefix >= len(part):
+            remaining_prefix -= len(part)
+            continue
+        if remaining_prefix:
+            part = part[remaining_prefix:]
+            remaining_prefix = 0
+        if part:
+            cleaned.append(part)
+    return cleaned
 
 
 def _strip_in_band_response_phase(
@@ -80,18 +100,22 @@ def _strip_in_band_response_phase(
     if match is None:
         return None, list(parts)
 
-    remaining_prefix = match.end()
-    cleaned: list[str] = []
-    for part in parts:
-        if remaining_prefix >= len(part):
-            remaining_prefix -= len(part)
-            continue
-        if remaining_prefix:
-            part = part[remaining_prefix:]
-            remaining_prefix = 0
-        if part:
-            cleaned.append(part)
-    return phase, cleaned
+    return phase, _remove_leading_characters(parts, match.end())
+
+
+def _strip_leading_thinking_envelope(parts: list[str]) -> tuple[str | None, list[str]]:
+    """Remove one verified leading thinking envelope while preserving answer deltas."""
+    if not parts:
+        return None, []
+    combined = "".join(parts)
+    if LEADING_THINKING_OPEN_RE.match(combined) is None:
+        return None, list(parts)
+    match = LEADING_THINKING_ENVELOPE_RE.match(combined)
+    if match is None:
+        raise RuntimeError(
+            "invalid_model_reasoning_envelope: leading thinking block is not closed"
+        )
+    return match.group(1), _remove_leading_characters(parts, match.end())
 
 
 class OpenWebUIToolApprovalRequired(BaseException):
@@ -598,6 +622,11 @@ class OpenWebUIAgentScopeModel(ChatModelBase):
                 "invalid_model_phase_marker: textual phase marker "
                 f"{final_marker_phase} conflicts with final_answer"
             )
+        leading_reasoning, cleaned_final_parts = _strip_leading_thinking_envelope(
+            cleaned_final_parts
+        )
+        if leading_reasoning:
+            accumulated_reasoning_parts.append(leading_reasoning)
         final_text_parts[:] = cleaned_final_parts
         if final_text_parts and tool_blocks:
             raise RuntimeError(

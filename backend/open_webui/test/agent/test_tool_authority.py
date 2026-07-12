@@ -822,10 +822,11 @@ async def test_service_tool_authority_rebuilds_missing_terminal_registry_from_ru
     assert result['process_refs'][0]['terminal_server_id'] == 'term-1'
 
 
-def test_normalize_tool_result_extracts_terminal_process_refs():
+@pytest.mark.parametrize('process_id_key', ['process_id', 'id'])
+def test_normalize_tool_result_extracts_terminal_process_refs(process_id_key):
     result = normalize_tool_result(
         {
-            'process_id': 'proc-123',
+            process_id_key: 'proc-123',
             'status': 'running',
             'exit_code': None,
             'log_path': '/tmp/process.jsonl',
@@ -851,6 +852,18 @@ def test_normalize_tool_result_extracts_terminal_process_refs():
         }
     ]
     assert 'proc-123' in result['content']
+
+
+def test_normalize_external_run_command_does_not_treat_generic_id_as_terminal_process():
+    result = normalize_tool_result(
+        {'id': 'external-result-1', 'status': 'success'},
+        tool_name='run_command',
+        tool_id='server:external-tool',
+        tool_type='external',
+        arguments={'command': 'echo ok'},
+    )
+
+    assert result['process_refs'] == []
 
 
 @pytest.mark.asyncio

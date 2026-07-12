@@ -1440,6 +1440,209 @@ async def test_model_bridge_strips_verified_wrapped_final_marker_and_preserves_d
 
 
 @pytest.mark.asyncio
+async def test_model_bridge_strips_split_leading_thinking_envelope_from_final() -> None:
+    from agentscope_runtime.agentscope_bridge import OpenWebUIAgentScopeModel
+
+    callbacks = RecordingBridgeCallbacks()
+
+    async def thinking_final_stream(**kwargs: object):
+        callbacks.model_calls.append(kwargs)
+        for content in (
+            "<thi",
+            "nking>private reasoning",
+            "</thinking>\n",
+            "Final ",
+            "answer.",
+        ):
+            yield {
+                "type": "chunk",
+                "delta": {
+                    "content": content,
+                    "phase": "final_answer",
+                    "tool_calls": None,
+                },
+            }
+        yield {"type": "stream_end"}
+
+    callbacks.call_model_stream = thinking_final_stream
+    model = OpenWebUIAgentScopeModel(
+        run_id="run-leading-thinking-final",
+        runtime_session_id="rt-leading-thinking-final",
+        participant_id="leader",
+        model_id="claude-sonnet-4-5",
+        callback_client=callbacks,
+    )
+
+    chunks = [
+        chunk
+        async for chunk in await model([{"role": "user", "content": "Answer."}])
+    ]
+
+    assert [chunk.content[0].text for chunk in chunks[:-1]] == ["Final ", "answer."]
+    assert chunks[-1].content[0].text == "Final answer."
+
+
+@pytest.mark.asyncio
+async def test_model_bridge_replays_stripped_leading_thinking_only_as_private_reasoning() -> None:
+    from agentscope_runtime.agentscope_bridge import OpenWebUIAgentScopeModel
+
+    callbacks = RecordingBridgeCallbacks()
+
+    async def thinking_replay_stream(**kwargs: object):
+        callbacks.model_calls.append(kwargs)
+        if len(callbacks.model_calls) == 1:
+            content_parts = ("<thinking>private", " reasoning</thinking>", "Answer one.")
+        else:
+            content_parts = ("Answer two.",)
+        for content in content_parts:
+            yield {
+                "type": "chunk",
+                "delta": {
+                    "content": content,
+                    "phase": "final_answer",
+                    "tool_calls": None,
+                },
+            }
+        yield {"type": "stream_end"}
+
+    callbacks.call_model_stream = thinking_replay_stream
+    model = OpenWebUIAgentScopeModel(
+        run_id="run-leading-thinking-replay",
+        runtime_session_id="rt-leading-thinking-replay",
+        participant_id="leader",
+        model_id="claude-sonnet-4-5",
+        callback_client=callbacks,
+    )
+
+    first_chunks = [
+        chunk
+        async for chunk in await model([{"role": "user", "content": "First."}])
+    ]
+    async for _ in await model([{"role": "user", "content": "Second."}]):
+        pass
+
+    assert first_chunks[-1].content[0].text == "Answer one."
+    assert callbacks.model_calls[1]["messages"] == [
+        {"role": "user", "content": "Second."},
+        {
+            "role": "assistant",
+            "content": "",
+            "reasoning_content": "private reasoning",
+        },
+    ]
+
+
+@pytest.mark.asyncio
+async def test_model_bridge_preserves_answer_indentation_after_leading_thinking() -> None:
+    from agentscope_runtime.agentscope_bridge import OpenWebUIAgentScopeModel
+
+    callbacks = RecordingBridgeCallbacks()
+
+    async def indented_answer_stream(**kwargs: object):
+        callbacks.model_calls.append(kwargs)
+        for content in ("<thinking>private</thinking>\n", "    code block"):
+            yield {
+                "type": "chunk",
+                "delta": {
+                    "content": content,
+                    "phase": "final_answer",
+                    "tool_calls": None,
+                },
+            }
+        yield {"type": "stream_end"}
+
+    callbacks.call_model_stream = indented_answer_stream
+    model = OpenWebUIAgentScopeModel(
+        run_id="run-leading-thinking-indentation",
+        runtime_session_id="rt-leading-thinking-indentation",
+        participant_id="leader",
+        model_id="claude-sonnet-4-5",
+        callback_client=callbacks,
+    )
+
+    chunks = [
+        chunk
+        async for chunk in await model([{"role": "user", "content": "Answer."}])
+    ]
+
+    assert [chunk.content[0].text for chunk in chunks[:-1]] == ["    code block"]
+    assert chunks[-1].content[0].text == "    code block"
+
+
+@pytest.mark.asyncio
+async def test_model_bridge_preserves_nonleading_literal_thinking_text() -> None:
+    from agentscope_runtime.agentscope_bridge import OpenWebUIAgentScopeModel
+
+    callbacks = RecordingBridgeCallbacks()
+
+    async def nonleading_thinking_stream(**kwargs: object):
+        callbacks.model_calls.append(kwargs)
+        yield {
+            "type": "chunk",
+            "delta": {
+                "content": "Keep <thinking>literal</thinking> visible.",
+                "phase": "final_answer",
+                "tool_calls": None,
+            },
+        }
+        yield {"type": "stream_end"}
+
+    callbacks.call_model_stream = nonleading_thinking_stream
+    model = OpenWebUIAgentScopeModel(
+        run_id="run-nonleading-thinking",
+        runtime_session_id="rt-nonleading-thinking",
+        participant_id="leader",
+        model_id="claude-sonnet-4-5",
+        callback_client=callbacks,
+    )
+
+    chunks = [
+        chunk
+        async for chunk in await model([{"role": "user", "content": "Answer."}])
+    ]
+
+    expected = "Keep <thinking>literal</thinking> visible."
+    assert [chunk.content[0].text for chunk in chunks[:-1]] == [expected]
+    assert chunks[-1].content[0].text == expected
+
+
+@pytest.mark.asyncio
+async def test_model_bridge_rejects_unclosed_leading_thinking_envelope_without_public_output() -> None:
+    from agentscope_runtime.agentscope_bridge import OpenWebUIAgentScopeModel
+
+    callbacks = RecordingBridgeCallbacks()
+
+    async def unclosed_thinking_stream(**kwargs: object):
+        callbacks.model_calls.append(kwargs)
+        for content in ("<thinking>private", " reasoning without a close"):
+            yield {
+                "type": "chunk",
+                "delta": {
+                    "content": content,
+                    "phase": "final_answer",
+                    "tool_calls": None,
+                },
+            }
+        yield {"type": "stream_end"}
+
+    callbacks.call_model_stream = unclosed_thinking_stream
+    model = OpenWebUIAgentScopeModel(
+        run_id="run-unclosed-leading-thinking",
+        runtime_session_id="rt-unclosed-leading-thinking",
+        participant_id="leader",
+        model_id="claude-sonnet-4-5",
+        callback_client=callbacks,
+    )
+
+    emitted = []
+    with pytest.raises(RuntimeError, match="invalid_model_reasoning_envelope"):
+        async for chunk in await model([{"role": "user", "content": "Answer."}]):
+            emitted.append(chunk)
+
+    assert emitted == []
+
+
+@pytest.mark.asyncio
 async def test_model_bridge_keeps_nonleading_wrapped_phase_text() -> None:
     from agentscope_runtime.agentscope_bridge import OpenWebUIAgentScopeModel
 

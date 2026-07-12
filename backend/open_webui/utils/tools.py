@@ -111,6 +111,10 @@ from pydantic.fields import FieldInfo
 log = logging.getLogger(__name__)
 
 
+class RemoteProcessKillFailed(RuntimeError):
+    code = 'remote_process_kill_failed'
+
+
 def normalize_bearer_token(token: Any) -> str:
     return token.strip() if isinstance(token, str) else token or ''
 
@@ -1345,7 +1349,7 @@ async def get_terminal_tools(
 
         async def make_tool_function(fn_name, srv_data, hdrs, cks):
             async def tool_function(**kwargs):
-                return await execute_tool_server(
+                return await execute_terminal_tool_server(
                     url=srv_data['url'],
                     headers=hdrs,
                     cookies=cks,
@@ -1669,6 +1673,182 @@ async def execute_tool_server(
         error = str(err)
         log.warning(f'API Request Error: {error}')
         return ({'error': error}, None)
+
+
+def _terminal_process_id(data: Any) -> str | None:
+    if not isinstance(data, dict):
+        return None
+    process_id = data.get('process_id') or data.get('id')
+    return str(process_id) if process_id else None
+
+
+def _with_terminal_process_id(data: Any, process_id: str) -> Any:
+    if not isinstance(data, dict):
+        return data
+    normalized = dict(data)
+    normalized.setdefault('process_id', process_id)
+    return normalized
+
+
+def _terminal_wait_is_zero(value: Any) -> bool:
+    if isinstance(value, bool):
+        return False
+    try:
+        return float(value) == 0
+    except (OverflowError, TypeError, ValueError):
+        return False
+
+
+def _terminal_run_query_is_valid(params: dict[str, Any]) -> bool:
+    wait = params.get('wait')
+    if 'wait' in params and wait not in (None, ''):
+        if isinstance(wait, bool):
+            return False
+        try:
+            numeric_wait = float(wait)
+        except (OverflowError, TypeError, ValueError):
+            return False
+        if not 0 <= numeric_wait <= 300:
+            return False
+
+    tail = params.get('tail')
+    if 'tail' in params and tail not in (None, ''):
+        if isinstance(tail, bool):
+            return False
+        tail_text = str(tail).strip()
+        if re.fullmatch(r'[+-]?\d+(?:\.0+)?', tail_text) is None:
+            return False
+        numeric_tail = int(tail_text.split('.', maxsplit=1)[0])
+        if numeric_tail < 1:
+            return False
+    return True
+
+
+async def _kill_terminal_process(
+    *,
+    url: str,
+    headers: dict[str, str],
+    cookies: dict[str, str],
+    process_id: str,
+    server_data: dict[str, Any],
+) -> None:
+    kill_task = asyncio.create_task(
+        execute_tool_server(
+            url=url,
+            headers=headers,
+            cookies=cookies,
+            name='kill_process',
+            params={'process_id': process_id},
+            server_data=server_data,
+        )
+    )
+    data, _response_headers = await asyncio.shield(kill_task)
+    error = data.get('error') if isinstance(data, dict) else None
+    if not error:
+        return
+    if re.search(r'\bHTTP error 404\b', str(error), re.IGNORECASE):
+        return
+    raise RemoteProcessKillFailed(
+        f'Failed to terminate terminal process {process_id}: {error}'
+    )
+
+
+async def execute_terminal_tool_server(
+    url: str,
+    headers: dict[str, str],
+    cookies: dict[str, str],
+    name: str,
+    params: dict[str, Any],
+    server_data: dict[str, Any],
+) -> tuple[dict[str, Any], dict[str, Any | None]]:
+    """Execute terminal run_command with process ownership before a long wait."""
+    if name != 'run_command':
+        return await execute_tool_server(
+            url=url,
+            headers=headers,
+            cookies=cookies,
+            name=name,
+            params=params,
+            server_data=server_data,
+        )
+    if not _terminal_run_query_is_valid(params):
+        return await execute_tool_server(
+            url=url,
+            headers=headers,
+            cookies=cookies,
+            name=name,
+            params=params,
+            server_data=server_data,
+        )
+
+    requested_wait_present = 'wait' in params and params.get('wait') not in (None, '')
+    requested_wait = params.get('wait')
+    launch_params = dict(params)
+    launch_params['wait'] = 0
+    launch_task = asyncio.create_task(
+        execute_tool_server(
+            url=url,
+            headers=headers,
+            cookies=cookies,
+            name='run_command',
+            params=launch_params,
+            server_data=server_data,
+        )
+    )
+    try:
+        launch_data, launch_headers = await asyncio.shield(launch_task)
+    except asyncio.CancelledError:
+        launch_data, _launch_headers = await asyncio.shield(launch_task)
+        process_id = _terminal_process_id(launch_data)
+        if process_id is not None:
+            await _kill_terminal_process(
+                url=url,
+                headers=headers,
+                cookies=cookies,
+                process_id=process_id,
+                server_data=server_data,
+            )
+        raise
+
+    process_id = _terminal_process_id(launch_data)
+    if process_id is None:
+        return launch_data, launch_headers
+    launch_data = _with_terminal_process_id(launch_data, process_id)
+    if requested_wait_present and _terminal_wait_is_zero(requested_wait):
+        return launch_data, launch_headers
+
+    status_params: dict[str, Any] = {'process_id': process_id}
+    if requested_wait_present:
+        status_params['wait'] = requested_wait
+    if params.get('tail') not in (None, ''):
+        status_params['tail'] = params['tail']
+    try:
+        status_data, status_headers = await execute_tool_server(
+            url=url,
+            headers=headers,
+            cookies=cookies,
+            name='get_process_status',
+            params=status_params,
+            server_data=server_data,
+        )
+    except asyncio.CancelledError:
+        await _kill_terminal_process(
+            url=url,
+            headers=headers,
+            cookies=cookies,
+            process_id=process_id,
+            server_data=server_data,
+        )
+        raise
+    if isinstance(status_data, dict) and status_data.get('error'):
+        await _kill_terminal_process(
+            url=url,
+            headers=headers,
+            cookies=cookies,
+            process_id=process_id,
+            server_data=server_data,
+        )
+    return _with_terminal_process_id(status_data, process_id), status_headers
 
 
 def get_tool_server_url(url: str | None, path: str) -> str:

@@ -366,7 +366,10 @@ def _extract_process_refs(
 ) -> list[dict[str, Any]]:
     if not isinstance(data, dict):
         return []
+    terminal_result = tool_type == 'terminal' or str(tool_id or '').startswith('terminal:')
     process_id = data.get('process_id')
+    if not process_id and terminal_result:
+        process_id = data.get('id')
     if not process_id:
         return []
     if tool_name != 'run_command' and tool_type != 'terminal':
