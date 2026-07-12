@@ -792,7 +792,7 @@ async def test_model_bridge_persists_provider_auxiliary_content_before_final_str
 
 
 @pytest.mark.asyncio
-async def test_model_bridge_rejects_unclassified_no_tool_text() -> None:
+async def test_model_bridge_classifies_unphased_no_tool_text_as_final_answer() -> None:
     from agentscope_runtime.agentscope_bridge import OpenWebUIAgentScopeModel
 
     callbacks = RecordingBridgeCallbacks()
@@ -814,9 +814,13 @@ async def test_model_bridge_rejects_unclassified_no_tool_text() -> None:
         callback_client=callbacks,
     )
 
-    with pytest.raises(RuntimeError, match="model_phase_missing"):
-        async for _ in await model([{"role": "user", "content": "Answer."}]):
-            pass
+    chunks = [
+        chunk
+        async for chunk in await model([{"role": "user", "content": "Answer."}])
+    ]
+
+    assert [chunk.content[0].text for chunk in chunks] == ["Untyped answer."]
+    assert chunks[0].is_last is True
 
 
 @pytest.mark.asyncio

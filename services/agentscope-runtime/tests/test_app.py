@@ -1020,7 +1020,7 @@ async def test_general_agent_native_phase_enters_finalizing_only_on_final_delta(
 
 
 @pytest.mark.asyncio
-async def test_general_agent_native_phase_error_fails_without_final_fallback() -> None:
+async def test_general_agent_unphased_terminal_text_completes_as_final_answer() -> None:
     class MissingPhaseClient(RecordingOpenWebUIClient):
         async def call_model_stream(self, **kwargs: object):
             self.model_calls.append(kwargs)
@@ -1062,21 +1062,23 @@ async def test_general_agent_native_phase_error_fails_without_final_fallback() -
                 "/v1/openwebui/runs/run-native-phase-error/status",
                 headers={"Authorization": f"Bearer {SERVICE_TOKEN}"},
             )
-            if status.json()["state"] == "failed":
+            if status.json()["state"] in {"completed", "failed"}:
                 break
             await asyncio.sleep(0.01)
 
-    assert status.json()["state"] == "failed"
+    assert status.json()["state"] == "completed"
     assert len(openwebui_client.model_calls) == 1
     assert openwebui_client.text_deltas == []
-    assert openwebui_client.final_deltas == []
-    assert [transition["to_state"] for transition in openwebui_client.state_transitions] == ["failed"]
+    assert joined_final_delta_text(openwebui_client) == "Untyped answer."
+    assert [transition["to_state"] for transition in openwebui_client.state_transitions] == [
+        "finalizing",
+        "completed",
+    ]
     assert [event["event_type"] for event in openwebui_client.events] == [
         "run.running",
-        "run.failed",
+        "final.started",
+        "run.completed",
     ]
-    error = openwebui_client.events[-1]["payload"]["error"]
-    assert "model_phase_missing" in error["message"]
 
 
 @pytest.mark.asyncio

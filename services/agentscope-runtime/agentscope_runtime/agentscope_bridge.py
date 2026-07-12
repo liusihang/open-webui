@@ -474,12 +474,7 @@ class OpenWebUIAgentScopeModel(ChatModelBase):
             if tool_blocks:
                 commentary_parts.extend(unclassified_text_parts)
             else:
-                await flush_commentary()
-                await flush_auxiliary()
-                raise RuntimeError(
-                    "model_phase_missing: text response did not declare commentary "
-                    "or final_answer"
-                )
+                final_text_parts.extend(unclassified_text_parts)
         if final_text_parts and tool_blocks:
             raise RuntimeError(
                 "final_phase_with_tool_call: final-answer text cannot share a model "
