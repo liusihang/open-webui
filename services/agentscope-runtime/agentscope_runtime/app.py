@@ -1259,14 +1259,19 @@ def _msg_text(msg: Any | None) -> str:
     return "".join(parts).strip()
 
 
+def _response_phase_protocol_prompt() -> str:
+    return (
+        "Response phase protocol: every user-visible text response must declare a phase. "
+        "Use phase=commentary for progress text emitted with or before tool use, and use "
+        "phase=final_answer only for the terminal answer when no tool call is emitted."
+    )
+
+
 def _leader_system_prompt(request: RunStartRequest) -> str:
     prompt = (
         "You are the leader agent for an OpenWebUI Agent Mode run. "
         "Use the available tools and subagents when they are useful, then "
-        "respond with a concise final answer for the user. "
-        "Response phase protocol: every user-visible text response must declare a phase. "
-        "Use phase=commentary for progress text emitted with or before tool use, and use "
-        "phase=final_answer only for the terminal answer when no tool call is emitted."
+        f"respond with a concise final answer for the user. {_response_phase_protocol_prompt()}"
     )
     fragments = [prompt]
     outputs_path = request.default_paths.get("outputs")
@@ -1307,7 +1312,7 @@ def _subagent_system_prompt(context: SubagentExecutionContext) -> str:
     return (
         f"You are {context.name}, a focused worker subagent. "
         f"Role: {context.description}. Complete only the delegated task and "
-        "return the useful result to the leader."
+        f"return the useful result to the leader. {_response_phase_protocol_prompt()}"
     )
 
 

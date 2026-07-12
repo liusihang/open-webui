@@ -2323,6 +2323,16 @@ async def test_leader_system_prompt_keeps_phase_protocol_without_hardcoding_publ
     assert "phase=final_answer" in system_text
 
 
+def test_subagent_system_prompt_uses_the_same_structural_phase_protocol() -> None:
+    system_text = runtime_app._subagent_system_prompt(
+        SimpleNamespace(name="researcher", description="Collect evidence.")
+    )
+
+    assert "Response phase protocol" in system_text
+    assert "phase=commentary" in system_text
+    assert "phase=final_answer" in system_text
+
+
 @pytest.mark.asyncio
 async def test_leader_system_prompt_includes_agent_context_replay_metadata() -> None:
     openwebui_client = RecordingOpenWebUIClient()
