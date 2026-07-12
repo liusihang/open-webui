@@ -11,9 +11,11 @@ OLD_WEBUI_OVERRIDE=compose.webui-7dc6afd81f2b.yaml
 OLD_RUNTIME_OVERRIDE=compose.agent-runtime-7dc6afd81f2b.yaml
 MIGRATION_HEAD=e7f8a9b0c1d2
 BACKUP_DIR="$STACK_ROOT/backup-before-2a0c4c988884-$(date +%Y%m%d-%H%M%S)"
+STATUS_PATH="$STACK_ROOT/switch-pr7-2a0c4c988884.status"
 switched=0
 
 cd "$STACK_ROOT"
+printf 'state=running\nstarted_at=%s\n' "$(date --iso-8601=seconds)" >"$STATUS_PATH"
 
 common_compose=(
   docker compose -p openwebui-pr7
@@ -32,10 +34,9 @@ wait_healthy() {
     if [[ "$health" = healthy ]]; then
       return 0
     fi
-    if [[ "$health" = unhealthy ]]; then
+    if [[ "$(docker inspect "$container" --format '{{.State.Running}}')" != true ]]; then
       return 1
     fi
-    test "$(docker inspect "$container" --format '{{.State.Running}}')" = true
     sleep 5
   done
   return 1
@@ -63,6 +64,8 @@ rollback() {
     wait_healthy open-webui-pr7 || true
     wait_healthy openwebui-pr7-agentscope-runtime || true
   fi
+  printf 'state=rolled_back\nexit_code=%s\nfinished_at=%s\nbackup=%s\n' \
+    "$rc" "$(date --iso-8601=seconds)" "$BACKUP_DIR" >"$STATUS_PATH"
   exit "$rc"
 }
 trap rollback ERR
@@ -115,6 +118,8 @@ find "$BACKUP_DIR" -maxdepth 1 -type f ! -name SHA256SUMS -print0 \
 
 switched=0
 trap - ERR
+printf 'state=finished\nexit_code=0\nfinished_at=%s\nbackup=%s\n' \
+  "$(date --iso-8601=seconds)" "$BACKUP_DIR" >"$STATUS_PATH"
 printf 'backup=%s\n' "$BACKUP_DIR"
 docker inspect open-webui-pr7 --format 'webui_id={{.Id}} image_id={{.Image}} health={{.State.Health.Status}} restarts={{.RestartCount}} oom={{.State.OOMKilled}}'
 docker inspect openwebui-pr7-agentscope-runtime --format 'runtime_id={{.Id}} image_id={{.Image}} health={{.State.Health.Status}} restarts={{.RestartCount}} oom={{.State.OOMKilled}}'
