@@ -1,0 +1,4 @@
+services:
+  agentscope-runtime:
+    image: open-webui-pr7-agentscope-runtime:7a3638897078-global-system-prompt
+    build: !reset null
