@@ -58,3 +58,122 @@ Trace every transition that appends `run.failed`, `run.cancelled`, approval comp
 4. The UI stop control cancels an active long-running tool and persistence ends at `run.cancelled` with no later final.
 5. A newly reproduced terminal failure cannot leave the run row non-terminal.
 6. OpenAI multi-tool ordering, replay, five-run concurrency, global prompt persistence, container health, and `UVICORN_WORKERS=1` remain unchanged.
+
+## Approved durable decision execution architecture
+
+Incremental lifecycle fixes proved that handler-local approval and user-input resume cannot simultaneously prevent duplicate destructive execution and recover from process failure. The approved replacement is a resource-level durable decision execution protocol.
+
+### Ownership boundaries
+
+- `AgentRunOperation` remains a caller-idempotency receipt. It is not the execution owner.
+- A new backend table, `agent_run_decision_execution`, owns one canonical decision for each `(run_id, resource_type, resource_id)` and carries the durable outbox state.
+- The AgentScope runtime owns a persistent execution journal and serialized AgentScope checkpoint. Runtime memory is never authoritative for resume deduplication.
+- Backend tool authority remains the only executor of system/terminal tools. Runtime supplies the stable decision execution identity and never bypasses backend tool authorization.
+
+### Backend decision execution record
+
+The record contains a stable `execution_id`, run/resource identity, requested-event sequence, runtime session and checkpoint version, canonical decision payload/fingerprint, outbox status, dispatch lease, retry metadata, runtime prepare response, completion event pointer, runtime outcome, and audit timestamps.
+
+Required constraints:
+
+```text
+PRIMARY KEY (execution_id)
+UNIQUE (run_id, resource_type, resource_id)
+INDEX (status, next_attempt_at)
+```
+
+Different caller idempotency keys with the same canonical decision bind to the same execution. Conflicting decisions for the same approval or user-input resource return a resource conflict before any runtime call or lifecycle event.
+
+The caller operation receipt and canonical execution row are inserted/completed in one database transaction. Recording a decision does not advance the run and does not execute a tool.
+
+### Runtime protocol
+
+Runtime exposes three internal endpoints:
+
+```text
+PUT  /v1/openwebui/runs/{run_id}/executions/{execution_id}
+POST /v1/openwebui/runs/{run_id}/executions/{execution_id}/activate
+GET  /v1/openwebui/runs/{run_id}/executions/{execution_id}
+```
+
+The prepare request includes schema version, runtime session, execution ID, expected checkpoint version, subject ID, command type, canonical payload, and payload fingerprint. Replaying the same execution and payload returns the persisted record; the same execution with another fingerprint is a protocol conflict.
+
+Runtime execution states are:
+
+```text
+new -> prepared -> activated -> applying -> applied
+any non-terminal -> cancelled | failed | indeterminate | unrecoverable
+```
+
+`prepared` means the runtime journal and matching wait checkpoint are durably committed without applying input or executing a tool. `applied` means the resume command has been durably applied once to the Agent checkpoint; it does not claim that the entire run has completed.
+
+### Two-phase ordering
+
+1. The user decision API records the canonical execution and returns its current status, normally HTTP 202.
+2. A backend dispatcher leases the outbox row and sends runtime prepare.
+3. After durable runtime `prepared` acknowledgement, the backend atomically appends the canonical `approval.completed` or `user_input.*` event, advances the run to `running`, and marks the execution `backend_committed`.
+4. The backend activates the same execution ID.
+5. Runtime applies the command exactly once to the persisted checkpoint and continues the Agent.
+6. Backend query/retry reconciles lost prepare/activate responses without generating another decision, lifecycle event, or input injection.
+
+The resulting persisted event order is:
+
+```text
+approval.requested | user_input.requested
+runtime prepared acknowledgement
+approval.completed | user_input.completed|declined|cancelled|expired
+runtime activation
+tool/model events
+final.started
+final.delta*
+run terminal event
+```
+
+### Runtime checkpoint
+
+The runtime stores execution journal and checkpoint data in SQLite on a persistent volume behind a `RuntimeExecutionStore` interface. The checkpoint includes runtime/run identity, `AgentState`, wait kind and subject, checkpoint version, stable tool-call identity, bridge counters required for replay ordering, applied execution identity, cancellation state, and execution outcome.
+
+Backend-facing tools are represented as AgentScope external executions so that a pending tool call remains serializable before a backend side effect. Approval and user-input are explicit durable waits instead of backend process-local closures or long-lived polling coroutines.
+
+### Approval and user-input behavior
+
+- Approval approved: prepare the suspended tool call, commit `approval.completed`, activate, then replay the original backend tool request with the stable execution identity and original tool-call idempotency key.
+- Approval rejected: prepare and commit the decision, activate a rejection result, and never call the tool.
+- User-input accepted/declined/cancelled/expired: one resource-level execution wins; activation injects the result into the checkpoint once.
+- Timeout is recorded by the same durable decision recorder and races through the same unique resource constraint; it is not written by an in-memory polling coroutine.
+
+Old `_PendingApproval.resume`, backend `_resume_approved_tool`, in-memory approval wait registries, and long user-input polling are removed from the authoritative path.
+
+### Dispatch and recovery
+
+- Dispatcher ownership uses a database lease only to decide which backend worker sends a request. It never guesses whether a tool executed.
+- Prepare or activate timeout is reconciled with runtime `GET` before retry.
+- Runtime restart reloads the SQLite journal/checkpoint and returns the persisted execution state.
+- Backend cancellation atomically cancels unacknowledged execution rows; an acknowledged run follows the normal run-cancellation path.
+- A missing or corrupt checkpoint becomes `unrecoverable` and closes the run through one `run.failed` event. It is never guessed or replayed from user text.
+
+### External side-effect guarantee
+
+The protocol provides effectively-once prepare, activation, decision event, and user-input injection. It cannot provide universal exactly-once semantics for arbitrary external side effects when a tool completes externally but its local outcome is not persisted.
+
+For non-idempotent tools, that window becomes `tool_outcome_indeterminate` and automatic replay is prohibited. A tool adapter may opt into safe retry only when it supports the stable execution/tool-call key or an authoritative reconciliation query.
+
+### Implementation split
+
+Backend owner:
+
+- migration and `agent_run_decision_execution` repository;
+- decision recording, resource-level conflicts, dispatcher lease and retry;
+- prepare/activate/query runtime client;
+- lifecycle commit after prepare and cancellation integration;
+- removal of direct approval/user-input resume and long-poll authority.
+
+Runtime owner:
+
+- prepare/activate/query schemas and endpoints;
+- SQLite execution store and persistent volume configuration;
+- checkpoint serialization/recovery;
+- external tool and user-input pause/resume;
+- stable execution replay and indeterminate outcome handling.
+
+The two owners must implement against the exact endpoint and payload contract above, without editing each other's file domains. Integration, migration review, image construction, and live verification remain the primary agent's responsibility.
