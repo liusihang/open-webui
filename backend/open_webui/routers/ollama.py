@@ -41,9 +41,9 @@ from open_webui.utils.auth import get_admin_user, get_verified_user
 from open_webui.utils.headers import get_custom_headers, include_user_info_headers
 from open_webui.utils.misc import calculate_sha256
 from open_webui.utils.payload import (
+    apply_model_system_prompt_to_body,
     apply_model_params_to_body_ollama,
     apply_model_params_to_body_openai,
-    apply_system_prompt_to_body,
 )
 from open_webui.utils.session_pool import cleanup_response, get_session, stream_wrapper
 
@@ -1101,6 +1101,7 @@ async def generate_chat_completion(
 
     model_id = payload['model']
     model_info = await Models.get_model_by_id(model_id)
+    system = None
 
     if model_info is not None:
         if model_info.base_model_id:
@@ -1111,12 +1112,13 @@ async def generate_chat_completion(
         if params:
             system = params.pop('system', None)
             payload = apply_model_params_to_body_ollama(params, payload)
-            if not bypass_system_prompt:
-                payload = await apply_system_prompt_to_body(system, payload, metadata, user)
 
         await check_model_access(user, model_info, bypass_filter)
     else:
         await check_model_access(user, None, bypass_filter)
+
+    if not bypass_system_prompt:
+        payload = await apply_model_system_prompt_to_body(system, payload, metadata, user)
 
     url, url_idx = await get_ollama_url(request, payload['model'], url_idx, user)
     api_config = resolve_api_config((await Config.get('ollama.api_configs', {})), url_idx, url)
@@ -1251,6 +1253,7 @@ async def generate_openai_chat_completion(
 
     model_id = form_data.model
     model_info = await Models.get_model_by_id(model_id)
+    system = None
     if model_info is not None:
         if model_info.base_model_id:
             payload['model'] = model_info.base_model_id
@@ -1259,11 +1262,12 @@ async def generate_openai_chat_completion(
         if params:
             system = params.pop('system', None)
             payload = apply_model_params_to_body_openai(params, payload)
-            payload = await apply_system_prompt_to_body(system, payload, metadata, user)
 
         await check_model_access(user, model_info)
     else:
         await check_model_access(user, None)
+
+    payload = await apply_model_system_prompt_to_body(system, payload, metadata, user)
 
     url, url_idx = await get_ollama_url(request, payload['model'], url_idx, user)
     api_config = resolve_api_config((await Config.get('ollama.api_configs', {})), url_idx, url)

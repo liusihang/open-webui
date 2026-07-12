@@ -54,7 +54,7 @@ from open_webui.utils.openai_payload import (
 )
 from open_webui.utils.payload import (
     apply_model_params_to_body_openai,
-    apply_system_prompt_to_body,
+    apply_model_system_prompt_to_body,
 )
 from open_webui.utils.session_pool import (
     cleanup_response,
@@ -1179,6 +1179,7 @@ async def generate_chat_completion(
 
     model_id = form_data.get('model')
     model_info = await Models.get_model_by_id(model_id)
+    system = None
 
     # Check model info and override the payload
     if model_info:
@@ -1195,12 +1196,13 @@ async def generate_chat_completion(
             system = params.pop('system', None)
 
             payload = apply_model_params_to_body_openai(params, payload)
-            if not bypass_system_prompt:
-                payload = await apply_system_prompt_to_body(system, payload, metadata, user)
 
         await check_model_access(user, model_info, bypass_filter)
     else:
         await check_model_access(user, None, bypass_filter)
+
+    if not bypass_system_prompt:
+        payload = await apply_model_system_prompt_to_body(system, payload, metadata, user)
 
     # Check if model is already in app state cache to avoid expensive get_all_models() call
     models = request.app.state.OPENAI_MODELS

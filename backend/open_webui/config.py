@@ -2263,6 +2263,8 @@ TASK_MODEL_EXTERNAL = os.getenv('TASK_MODEL_EXTERNAL', '')
 
 ENABLE_CONTEXT_COMPACTION = os.getenv('ENABLE_CONTEXT_COMPACTION', 'False').lower() == 'true'
 
+GLOBAL_SYSTEM_PROMPT = os.getenv('GLOBAL_SYSTEM_PROMPT', '')
+
 CONTEXT_COMPACTION_TOKEN_THRESHOLD = int(os.getenv('CONTEXT_COMPACTION_TOKEN_THRESHOLD', '80000'))
 
 CONTEXT_COMPACTION_PROMPT_TEMPLATE = os.getenv('CONTEXT_COMPACTION_PROMPT_TEMPLATE', '')
@@ -3197,6 +3199,7 @@ DEFAULT_CONFIG = {
     'task.model.default': TASK_MODEL,
     'task.model.external': TASK_MODEL_EXTERNAL,
     'chat.context_compaction.enable': ENABLE_CONTEXT_COMPACTION,
+    'chat.global_system_prompt': GLOBAL_SYSTEM_PROMPT,
     'chat.context_compaction.token_threshold': CONTEXT_COMPACTION_TOKEN_THRESHOLD,
     'chat.context_compaction.prompt_template': CONTEXT_COMPACTION_PROMPT_TEMPLATE,
     'task.title.prompt_template': TITLE_GENERATION_PROMPT_TEMPLATE,

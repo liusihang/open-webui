@@ -2,12 +2,27 @@ import copy
 import json
 from typing import Callable, Optional
 
+from open_webui.models.config import Config
 from open_webui.utils.misc import (
     add_or_update_system_message,
     deep_update,
-    replace_system_message_content,
+    get_content_from_message,
+    remove_system_message,
 )
 from open_webui.utils.task import prompt_template, prompt_variables_template
+
+
+def compose_global_system_prompt(global_system_prompt: str, downstream_system_prompt: str) -> str:
+    global_system_prompt = (global_system_prompt or '').strip()
+    if not global_system_prompt:
+        return downstream_system_prompt
+
+    downstream_system_prompt = (downstream_system_prompt or '').strip()
+    administrator_section = f'[ADMINISTRATOR INSTRUCTIONS]\n{global_system_prompt}'
+    if not downstream_system_prompt:
+        return administrator_section
+
+    return f'{administrator_section}\n\n[MODEL INSTRUCTIONS]\n{downstream_system_prompt}'
 
 
 async def resolve_system_prompt(
@@ -48,6 +63,41 @@ async def apply_system_prompt_to_body(
         form_data['messages'] = replace_system_message_content(system, form_data.get('messages', []))
     else:
         form_data['messages'] = add_or_update_system_message(system, form_data.get('messages', []))
+
+    return form_data
+
+
+async def apply_model_system_prompt_to_body(
+    system: Optional[str],
+    form_data: dict,
+    metadata: Optional[dict] = None,
+    user=None,
+) -> dict:
+    if (metadata or {}).get('task'):
+        return await apply_system_prompt_to_body(system, form_data, metadata, user)
+
+    global_system_prompt = await Config.get('chat.global_system_prompt', '')
+    global_system_prompt = await resolve_system_prompt(global_system_prompt, metadata, user)
+    if not global_system_prompt:
+        return await apply_system_prompt_to_body(system, form_data, metadata, user)
+
+    model_system_prompt = await resolve_system_prompt(system, metadata, user)
+    messages = form_data.get('messages', [])
+    current_system_prompts = [
+        get_content_from_message(message)
+        for message in messages
+        if isinstance(message, dict) and message.get('role') == 'system'
+    ]
+    downstream_system_prompt = '\n'.join(prompt for prompt in (model_system_prompt, *current_system_prompts) if prompt)
+    composed_system_prompt = compose_global_system_prompt(
+        global_system_prompt,
+        downstream_system_prompt,
+    )
+
+    form_data['messages'] = add_or_update_system_message(
+        composed_system_prompt,
+        remove_system_message(messages),
+    )
 
     return form_data
 

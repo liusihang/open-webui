@@ -2266,7 +2266,7 @@ async def test_leader_system_prompt_guides_real_files_to_default_outputs_path() 
 
 
 @pytest.mark.asyncio
-async def test_leader_system_prompt_requests_brief_public_progress_for_tool_rounds() -> None:
+async def test_leader_system_prompt_does_not_hardcode_public_progress_policy() -> None:
     openwebui_client = RecordingOpenWebUIClient()
     openwebui_client.model_responses = [
         {
@@ -2313,11 +2313,11 @@ async def test_leader_system_prompt_requests_brief_public_progress_for_tool_roun
 
     assert status.json()["state"] == "completed"
     system_text = openwebui_client.model_calls[0]["messages"][0]["content"][0]["text"]
-    assert "Before the first tool round" in system_text
-    assert "before each later tool round" in system_text
-    assert "one update for the group" in system_text
-    assert "Use the user's language" in system_text
-    assert "Do not reveal chain-of-thought or private reasoning" in system_text
+    assert "Before the first tool round" not in system_text
+    assert "before each later tool round" not in system_text
+    assert "one update for the group" not in system_text
+    assert "Use the user's language" not in system_text
+    assert "Do not reveal chain-of-thought or private reasoning" not in system_text
 
 
 @pytest.mark.asyncio

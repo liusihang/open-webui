@@ -34,7 +34,7 @@ from open_webui.utils.filter import (
     process_filter_functions,
 )
 from open_webui.utils.models import check_model_access, get_all_models
-from open_webui.utils.payload import convert_payload_openai_to_ollama
+from open_webui.utils.payload import apply_model_system_prompt_to_body, convert_payload_openai_to_ollama
 from open_webui.utils.response import (
     convert_response_ollama_to_openai,
     convert_streaming_response_ollama_to_openai,
@@ -56,6 +56,7 @@ async def generate_direct_chat_completion(
     log.info('generate_direct_chat_completion')
 
     metadata = form_data.pop('metadata', {})
+    form_data = await apply_model_system_prompt_to_body(None, form_data, metadata, user)
 
     user_id = metadata.get('user_id')
     session_id = metadata.get('session_id')

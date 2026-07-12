@@ -1,3 +1,5 @@
+import pytest
+from open_webui.utils import payload as payload_utils
 from open_webui.utils.openai_payload import (
     dedupe_system_messages,
     responses_continuation_input_items,
@@ -7,6 +9,123 @@ from open_webui.utils.payload import (
     apply_model_params_to_body_openai,
     convert_payload_openai_to_ollama,
 )
+
+
+def test_compose_global_system_prompt_places_admin_before_model_and_chat_content():
+    composed = payload_utils.compose_global_system_prompt(
+        'Administrator policy.',
+        'Model policy.\nChat policy.',
+    )
+
+    assert composed == (
+        '[ADMINISTRATOR INSTRUCTIONS]\nAdministrator policy.\n\n[MODEL INSTRUCTIONS]\nModel policy.\nChat policy.'
+    )
+
+
+def test_compose_global_system_prompt_preserves_legacy_content_when_global_is_empty():
+    assert payload_utils.compose_global_system_prompt('', 'Model policy.') == 'Model policy.'
+
+
+def test_compose_global_system_prompt_emits_only_admin_section_without_downstream_content():
+    assert payload_utils.compose_global_system_prompt('Administrator policy.', '') == (
+        '[ADMINISTRATOR INSTRUCTIONS]\nAdministrator policy.'
+    )
+
+
+@pytest.mark.asyncio
+async def test_apply_model_system_prompt_reads_global_config_and_composes_one_system_message(monkeypatch):
+    async def fake_config_get(key, default=None):
+        assert key == 'chat.global_system_prompt'
+        return 'Administrator policy.'
+
+    monkeypatch.setattr(payload_utils.Config, 'get', fake_config_get)
+    form_data = {
+        'messages': [
+            {'role': 'system', 'content': 'Chat policy.'},
+            {'role': 'user', 'content': 'Hello'},
+        ]
+    }
+
+    result = await payload_utils.apply_model_system_prompt_to_body(
+        'Model policy.',
+        form_data,
+        metadata={},
+        user=None,
+    )
+
+    assert result['messages'] == [
+        {
+            'role': 'system',
+            'content': (
+                '[ADMINISTRATOR INSTRUCTIONS]\n'
+                'Administrator policy.\n\n'
+                '[MODEL INSTRUCTIONS]\n'
+                'Model policy.\nChat policy.'
+            ),
+        },
+        {'role': 'user', 'content': 'Hello'},
+    ]
+
+
+@pytest.mark.asyncio
+async def test_apply_model_system_prompt_skips_global_prompt_for_internal_tasks(monkeypatch):
+    async def fake_config_get(key, default=None):
+        return 'Administrator policy.'
+
+    monkeypatch.setattr(payload_utils.Config, 'get', fake_config_get)
+    form_data = {
+        'messages': [
+            {'role': 'system', 'content': 'Task policy.'},
+            {'role': 'user', 'content': 'Generate a title'},
+        ]
+    }
+
+    result = await payload_utils.apply_model_system_prompt_to_body(
+        'Model policy.',
+        form_data,
+        metadata={'task': 'title_generation'},
+        user=None,
+    )
+
+    assert result['messages'][0] == {
+        'role': 'system',
+        'content': 'Model policy.\nTask policy.',
+    }
+
+
+@pytest.mark.asyncio
+async def test_apply_model_system_prompt_normalizes_all_system_messages_to_position_zero(monkeypatch):
+    async def fake_config_get(key, default=None):
+        return 'Administrator policy.'
+
+    monkeypatch.setattr(payload_utils.Config, 'get', fake_config_get)
+    form_data = {
+        'messages': [
+            {'role': 'user', 'content': 'Hello'},
+            {'role': 'system', 'content': 'Chat policy A.'},
+            {'role': 'system', 'content': 'Chat policy B.'},
+        ]
+    }
+
+    result = await payload_utils.apply_model_system_prompt_to_body(
+        'Model policy.',
+        form_data,
+        metadata={},
+        user=None,
+    )
+
+    assert result['messages'] == [
+        {
+            'role': 'system',
+            'content': (
+                '[ADMINISTRATOR INSTRUCTIONS]\n'
+                'Administrator policy.\n\n'
+                '[MODEL INSTRUCTIONS]\n'
+                'Model policy.\nChat policy A.\nChat policy B.'
+            ),
+        },
+        {'role': 'user', 'content': 'Hello'},
+    ]
 
 
 def test_sanitize_openai_payload_removes_reasoning_encrypted_content_keys_and_required_entries():

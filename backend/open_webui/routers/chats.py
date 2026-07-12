@@ -49,6 +49,7 @@ router = APIRouter()
 SEARCH_FILTER_PREFIXES = ('tag:', 'folder:', 'pinned:', 'archived:', 'shared:')
 
 CHAT_CONFIG_KEYS = {
+    'GLOBAL_SYSTEM_PROMPT': 'chat.global_system_prompt',
     'ENABLE_CONTEXT_COMPACTION': 'chat.context_compaction.enable',
     'CONTEXT_COMPACTION_TOKEN_THRESHOLD': 'chat.context_compaction.token_threshold',
     'CONTEXT_COMPACTION_PROMPT_TEMPLATE': 'chat.context_compaction.prompt_template',
@@ -56,6 +57,7 @@ CHAT_CONFIG_KEYS = {
 
 
 class ChatConfigForm(BaseModel):
+    GLOBAL_SYSTEM_PROMPT: str | None = None
     ENABLE_CONTEXT_COMPACTION: bool
     CONTEXT_COMPACTION_TOKEN_THRESHOLD: int
     CONTEXT_COMPACTION_PROMPT_TEMPLATE: str
@@ -108,7 +110,11 @@ async def get_chat_config_values() -> dict:
 
 
 def chat_config_updates(data: dict) -> dict:
-    return {CHAT_CONFIG_KEYS[field]: value for field, value in data.items() if field in CHAT_CONFIG_KEYS}
+    return {
+        CHAT_CONFIG_KEYS[field]: value
+        for field, value in data.items()
+        if field in CHAT_CONFIG_KEYS and value is not None
+    }
 
 
 async def require_chat_import_permission(request: Request, user, db: AsyncSession):
