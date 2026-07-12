@@ -819,8 +819,9 @@ async def test_model_bridge_classifies_unphased_no_tool_text_as_final_answer() -
         async for chunk in await model([{"role": "user", "content": "Answer."}])
     ]
 
-    assert [chunk.content[0].text for chunk in chunks] == ["Untyped answer."]
-    assert chunks[0].is_last is True
+    assert [chunk.content[0].text for chunk in chunks[:-1]] == ["Untyped answer."]
+    assert chunks[-1].content[0].text == "Untyped answer."
+    assert chunks[-1].is_last is True
 
 
 @pytest.mark.asyncio
@@ -901,6 +902,100 @@ async def test_model_bridge_preserves_order_when_phase_is_declared_midstream() -
         " third.",
     ]
     assert chunks[-1].content[0].text == "First second third."
+
+
+@pytest.mark.asyncio
+async def test_model_bridge_does_not_emit_final_before_later_tool_conflict() -> None:
+    from agentscope_runtime.agentscope_bridge import OpenWebUIAgentScopeModel
+
+    callbacks = RecordingBridgeCallbacks()
+
+    async def final_then_tool_stream(**kwargs: object):
+        callbacks.model_calls.append(kwargs)
+        yield {
+            "type": "chunk",
+            "delta": {
+                "content": "Premature final.",
+                "phase": "final_answer",
+                "tool_calls": None,
+            },
+        }
+        yield {
+            "type": "chunk",
+            "delta": {
+                "content": "",
+                "tool_calls": [
+                    {
+                        "id": "call_late",
+                        "type": "function",
+                        "function": {
+                            "name": "get_environment",
+                            "arguments": "{}",
+                        },
+                    }
+                ],
+            },
+        }
+        yield {"type": "stream_end"}
+
+    callbacks.call_model_stream = final_then_tool_stream
+    model = OpenWebUIAgentScopeModel(
+        run_id="run-final-then-tool",
+        runtime_session_id="rt-final-then-tool",
+        participant_id="leader",
+        model_id="gpt-5.4",
+        callback_client=callbacks,
+    )
+    yielded = []
+
+    with pytest.raises(RuntimeError, match="final_phase_with_tool_call"):
+        async for chunk in await model([{"role": "user", "content": "Answer."}]):
+            yielded.append(chunk)
+
+    assert yielded == []
+
+
+@pytest.mark.asyncio
+async def test_model_bridge_rejects_commentary_after_final_without_emitting_final() -> None:
+    from agentscope_runtime.agentscope_bridge import OpenWebUIAgentScopeModel
+
+    callbacks = RecordingBridgeCallbacks()
+
+    async def final_then_commentary_stream(**kwargs: object):
+        callbacks.model_calls.append(kwargs)
+        yield {
+            "type": "chunk",
+            "delta": {
+                "content": "Final first.",
+                "phase": "final_answer",
+                "tool_calls": None,
+            },
+        }
+        yield {
+            "type": "chunk",
+            "delta": {
+                "content": "Late commentary.",
+                "phase": "commentary",
+                "tool_calls": None,
+            },
+        }
+        yield {"type": "stream_end"}
+
+    callbacks.call_model_stream = final_then_commentary_stream
+    model = OpenWebUIAgentScopeModel(
+        run_id="run-final-then-commentary",
+        runtime_session_id="rt-final-then-commentary",
+        participant_id="leader",
+        model_id="gpt-5.4",
+        callback_client=callbacks,
+    )
+    yielded = []
+
+    with pytest.raises(RuntimeError, match="invalid_model_phase_transition"):
+        async for chunk in await model([{"role": "user", "content": "Answer."}]):
+            yielded.append(chunk)
+
+    assert yielded == []
 
 
 @pytest.mark.asyncio

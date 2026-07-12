@@ -278,6 +278,7 @@ class OpenWebUIAgentScopeModel(ChatModelBase):
         final_text_parts: list[str] = []
         unclassified_text_parts: list[str] = []
         active_text_phase: str | None = None
+        final_phase_started = False
         accumulated_reasoning_parts: list[str] = []
         accumulated_tool_calls: list[dict[str, Any]] = []
         commentary_flushed = False
@@ -343,11 +344,17 @@ class OpenWebUIAgentScopeModel(ChatModelBase):
         async def classify_text(
             phase: str,
             content: str,
-        ) -> ChatResponse | None:
-            nonlocal final_text_delta_index
+        ) -> None:
+            nonlocal final_phase_started
             if phase == "commentary":
+                if final_phase_started:
+                    raise RuntimeError(
+                        "invalid_model_phase_transition: commentary cannot follow "
+                        "final_answer"
+                    )
                 commentary_parts.append(content)
-                return None
+                return
+            final_phase_started = True
             if accumulated_tool_calls:
                 raise RuntimeError(
                     "final_phase_with_tool_call: final-answer text cannot "
@@ -356,16 +363,6 @@ class OpenWebUIAgentScopeModel(ChatModelBase):
             await flush_commentary()
             await flush_auxiliary()
             final_text_parts.append(content)
-            response = ChatResponse(
-                content=[TextBlock(text=content)],
-                is_last=False,
-                metadata={
-                    "block_id": block_id,
-                    "delta_index": final_text_delta_index,
-                },
-            )
-            final_text_delta_index += 1
-            return response
 
         for attempt in range(1, MODEL_CALL_RETRY_ATTEMPTS + 1):
             stream = self.callback_client.call_model_stream(
@@ -451,9 +448,7 @@ class OpenWebUIAgentScopeModel(ChatModelBase):
                         if phase:
                             if unclassified_text_parts:
                                 for pending_text in unclassified_text_parts:
-                                    pending_response = await classify_text(phase, pending_text)
-                                    if pending_response is not None:
-                                        yield pending_response
+                                    await classify_text(phase, pending_text)
                                 unclassified_text_parts.clear()
                             active_text_phase = phase
                         elif active_text_phase is not None:
@@ -462,9 +457,7 @@ class OpenWebUIAgentScopeModel(ChatModelBase):
                             unclassified_text_parts.append(content)
                             continue
 
-                        response = await classify_text(phase, content)
-                        if response is not None:
-                            yield response
+                        await classify_text(phase, content)
             elif event_type == "done":
                 # Non-stream fallback: full response in payload.
                 payload = event.get("payload") or {}
@@ -528,6 +521,17 @@ class OpenWebUIAgentScopeModel(ChatModelBase):
             )
         if not commentary_parts and not final_text_parts and not tool_blocks:
             raise RuntimeError("empty_model_response: model returned no public response")
+
+        for content in final_text_parts:
+            yield ChatResponse(
+                content=[TextBlock(text=content)],
+                is_last=False,
+                metadata={
+                    "block_id": block_id,
+                    "delta_index": final_text_delta_index,
+                },
+            )
+            final_text_delta_index += 1
 
         commentary_text = "".join(commentary_parts)
         final_text = "".join(final_text_parts)

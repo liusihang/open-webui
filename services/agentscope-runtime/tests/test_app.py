@@ -984,6 +984,11 @@ async def test_general_agent_native_phase_enters_finalizing_only_on_final_delta(
         assert openwebui_client.text_deltas[0]["payload"]["response_phase"] == "commentary"
 
         openwebui_client.release_commentary.set()
+        await asyncio.sleep(0)
+        assert openwebui_client.final_started.is_set() is False
+        assert openwebui_client.final_deltas == []
+
+        openwebui_client.release_stream.set()
         await asyncio.wait_for(openwebui_client.final_started.wait(), timeout=1)
         status = await client.get(
             "/v1/openwebui/runs/run-native-phase/status",
@@ -1001,7 +1006,6 @@ async def test_general_agent_native_phase_enters_finalizing_only_on_final_delta(
             "I will inspect the environment."
         ]
 
-        openwebui_client.release_stream.set()
         for _ in range(40):
             status = await client.get(
                 "/v1/openwebui/runs/run-native-phase/status",
