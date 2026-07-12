@@ -824,6 +824,86 @@ async def test_model_bridge_classifies_unphased_no_tool_text_as_final_answer() -
 
 
 @pytest.mark.asyncio
+async def test_model_bridge_rejects_unknown_explicit_phase() -> None:
+    from agentscope_runtime.agentscope_bridge import OpenWebUIAgentScopeModel
+
+    callbacks = RecordingBridgeCallbacks()
+
+    async def invalid_phase_stream(**kwargs: object):
+        callbacks.model_calls.append(kwargs)
+        yield {
+            "type": "chunk",
+            "delta": {
+                "content": "Invalid phase text.",
+                "phase": "bogus",
+                "tool_calls": None,
+            },
+        }
+        yield {"type": "stream_end"}
+
+    callbacks.call_model_stream = invalid_phase_stream
+    model = OpenWebUIAgentScopeModel(
+        run_id="run-invalid-phase",
+        runtime_session_id="rt-invalid-phase",
+        participant_id="leader",
+        model_id="gpt-5.4",
+        callback_client=callbacks,
+    )
+
+    with pytest.raises(RuntimeError, match="invalid_model_phase"):
+        async for _ in await model([{"role": "user", "content": "Answer."}]):
+            pass
+
+
+@pytest.mark.asyncio
+async def test_model_bridge_preserves_order_when_phase_is_declared_midstream() -> None:
+    from agentscope_runtime.agentscope_bridge import OpenWebUIAgentScopeModel
+
+    callbacks = RecordingBridgeCallbacks()
+
+    async def mixed_phase_stream(**kwargs: object):
+        callbacks.model_calls.append(kwargs)
+        yield {
+            "type": "chunk",
+            "delta": {"content": "First ", "tool_calls": None},
+        }
+        yield {
+            "type": "chunk",
+            "delta": {
+                "content": "second",
+                "phase": "final_answer",
+                "tool_calls": None,
+            },
+        }
+        yield {
+            "type": "chunk",
+            "delta": {"content": " third.", "tool_calls": None},
+        }
+        yield {"type": "stream_end"}
+
+    callbacks.call_model_stream = mixed_phase_stream
+    model = OpenWebUIAgentScopeModel(
+        run_id="run-mixed-phase",
+        runtime_session_id="rt-mixed-phase",
+        participant_id="leader",
+        model_id="gpt-5.4",
+        callback_client=callbacks,
+    )
+
+    chunks = [
+        chunk
+        async for chunk in await model([{"role": "user", "content": "Answer."}])
+    ]
+
+    assert [chunk.content[0].text for chunk in chunks[:-1]] == [
+        "First ",
+        "second",
+        " third.",
+    ]
+    assert chunks[-1].content[0].text == "First second third."
+
+
+@pytest.mark.asyncio
 async def test_model_bridge_rejects_final_phase_with_tool_call() -> None:
     from agentscope_runtime.agentscope_bridge import OpenWebUIAgentScopeModel
 

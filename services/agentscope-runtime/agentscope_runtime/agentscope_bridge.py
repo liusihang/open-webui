@@ -277,6 +277,7 @@ class OpenWebUIAgentScopeModel(ChatModelBase):
         auxiliary_types: list[str] = []
         final_text_parts: list[str] = []
         unclassified_text_parts: list[str] = []
+        active_text_phase: str | None = None
         accumulated_reasoning_parts: list[str] = []
         accumulated_tool_calls: list[dict[str, Any]] = []
         commentary_flushed = False
@@ -338,6 +339,33 @@ class OpenWebUIAgentScopeModel(ChatModelBase):
                 },
             )
             auxiliary_flushed = True
+
+        async def classify_text(
+            phase: str,
+            content: str,
+        ) -> ChatResponse | None:
+            nonlocal final_text_delta_index
+            if phase == "commentary":
+                commentary_parts.append(content)
+                return None
+            if accumulated_tool_calls:
+                raise RuntimeError(
+                    "final_phase_with_tool_call: final-answer text cannot "
+                    "share a model response with tool calls"
+                )
+            await flush_commentary()
+            await flush_auxiliary()
+            final_text_parts.append(content)
+            response = ChatResponse(
+                content=[TextBlock(text=content)],
+                is_last=False,
+                metadata={
+                    "block_id": block_id,
+                    "delta_index": final_text_delta_index,
+                },
+            )
+            final_text_delta_index += 1
+            return response
 
         for attempt in range(1, MODEL_CALL_RETRY_ATTEMPTS + 1):
             stream = self.callback_client.call_model_stream(
@@ -403,34 +431,40 @@ class OpenWebUIAgentScopeModel(ChatModelBase):
                             accumulated_tool_calls.append(tool_call)
                 content = delta.get("content")
                 if isinstance(content, str) and content:
-                    phase = delta.get("phase")
                     if delta.get("content_kind") == "provider_auxiliary":
                         auxiliary_parts.append(content)
                         auxiliary_type = str(delta.get("auxiliary_type") or "").strip()
                         if auxiliary_type:
                             auxiliary_types.append(auxiliary_type)
-                    elif phase == "commentary":
-                        commentary_parts.append(content)
-                    elif phase == "final_answer":
-                        if accumulated_tool_calls:
-                            raise RuntimeError(
-                                "final_phase_with_tool_call: final-answer text cannot "
-                                "share a model response with tool calls"
-                            )
-                        await flush_commentary()
-                        await flush_auxiliary()
-                        final_text_parts.append(content)
-                        yield ChatResponse(
-                            content=[TextBlock(text=content)],
-                            is_last=False,
-                            metadata={
-                                "block_id": block_id,
-                                "delta_index": final_text_delta_index,
-                            },
-                        )
-                        final_text_delta_index += 1
                     else:
-                        unclassified_text_parts.append(content)
+                        raw_phase = delta.get("phase")
+                        phase = (
+                            str(raw_phase).strip()
+                            if raw_phase is not None
+                            else ""
+                        )
+                        if phase and phase not in {"commentary", "final_answer"}:
+                            raise RuntimeError(
+                                "invalid_model_phase: expected commentary or "
+                                f"final_answer, got {phase}"
+                            )
+                        if phase:
+                            if unclassified_text_parts:
+                                for pending_text in unclassified_text_parts:
+                                    pending_response = await classify_text(phase, pending_text)
+                                    if pending_response is not None:
+                                        yield pending_response
+                                unclassified_text_parts.clear()
+                            active_text_phase = phase
+                        elif active_text_phase is not None:
+                            phase = active_text_phase
+                        else:
+                            unclassified_text_parts.append(content)
+                            continue
+
+                        response = await classify_text(phase, content)
+                        if response is not None:
+                            yield response
             elif event_type == "done":
                 # Non-stream fallback: full response in payload.
                 payload = event.get("payload") or {}
