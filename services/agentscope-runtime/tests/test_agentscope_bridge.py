@@ -825,6 +825,203 @@ async def test_model_bridge_classifies_unphased_no_tool_text_as_final_answer() -
 
 
 @pytest.mark.asyncio
+async def test_model_bridge_strips_split_in_band_commentary_marker() -> None:
+    from agentscope_runtime.agentscope_bridge import OpenWebUIAgentScopeModel
+
+    callbacks = RecordingBridgeCallbacks()
+
+    async def phase_marker_stream(**kwargs: object):
+        callbacks.model_calls.append(kwargs)
+        yield {
+            "type": "chunk",
+            "delta": {"content": "phase=comm", "tool_calls": None},
+        }
+        yield {
+            "type": "chunk",
+            "delta": {"content": "entary ", "tool_calls": None},
+        }
+        yield {
+            "type": "chunk",
+            "delta": {"content": "Checking the environment.", "tool_calls": None},
+        }
+        yield {
+            "type": "chunk",
+            "delta": {
+                "content": None,
+                "tool_calls": [
+                    {
+                        "id": "call_environment",
+                        "type": "function",
+                        "function": {
+                            "name": "get_environment",
+                            "arguments": "{}",
+                        },
+                    }
+                ],
+            },
+        }
+        yield {"type": "stream_end"}
+
+    callbacks.call_model_stream = phase_marker_stream
+    model = OpenWebUIAgentScopeModel(
+        run_id="run-in-band-commentary-marker",
+        runtime_session_id="rt-in-band-commentary-marker",
+        participant_id="leader",
+        model_id="gpt-5.4",
+        callback_client=callbacks,
+    )
+
+    chunks = [
+        chunk
+        async for chunk in await model(
+            [{"role": "user", "content": "Inspect."}],
+            tools=[
+                {
+                    "type": "function",
+                    "function": {
+                        "name": "get_environment",
+                        "description": "Get environment.",
+                        "parameters": {"type": "object", "properties": {}},
+                    },
+                }
+            ],
+        )
+    ]
+
+    assert [item["delta"] for item in callbacks.text_deltas] == [
+        "Checking the environment."
+    ]
+    assert chunks[-1].content[0].text == "Checking the environment."
+
+
+@pytest.mark.asyncio
+async def test_model_bridge_strips_split_in_band_final_marker_and_preserves_deltas() -> None:
+    from agentscope_runtime.agentscope_bridge import OpenWebUIAgentScopeModel
+
+    callbacks = RecordingBridgeCallbacks()
+
+    async def phase_marker_stream(**kwargs: object):
+        callbacks.model_calls.append(kwargs)
+        for content in (" phase=final_", "answer\n", "Final ", "answer."):
+            yield {
+                "type": "chunk",
+                "delta": {"content": content, "tool_calls": None},
+            }
+        yield {"type": "stream_end"}
+
+    callbacks.call_model_stream = phase_marker_stream
+    model = OpenWebUIAgentScopeModel(
+        run_id="run-in-band-final-marker",
+        runtime_session_id="rt-in-band-final-marker",
+        participant_id="leader",
+        model_id="gpt-5.4",
+        callback_client=callbacks,
+    )
+
+    chunks = [
+        chunk
+        async for chunk in await model([{"role": "user", "content": "Answer."}])
+    ]
+
+    assert [chunk.content[0].text for chunk in chunks[:-1]] == ["Final ", "answer."]
+    assert chunks[-1].content[0].text == "Final answer."
+
+
+@pytest.mark.asyncio
+async def test_model_bridge_honors_in_band_final_marker_before_tool_validation() -> None:
+    from agentscope_runtime.agentscope_bridge import OpenWebUIAgentScopeModel
+
+    callbacks = RecordingBridgeCallbacks()
+
+    async def final_marker_with_tool_stream(**kwargs: object):
+        callbacks.model_calls.append(kwargs)
+        yield {
+            "type": "chunk",
+            "delta": {"content": "phase=final_answer Premature final.", "tool_calls": None},
+        }
+        yield {
+            "type": "chunk",
+            "delta": {
+                "content": None,
+                "tool_calls": [
+                    {
+                        "id": "call_late",
+                        "type": "function",
+                        "function": {
+                            "name": "get_environment",
+                            "arguments": "{}",
+                        },
+                    }
+                ],
+            },
+        }
+        yield {"type": "stream_end"}
+
+    callbacks.call_model_stream = final_marker_with_tool_stream
+    model = OpenWebUIAgentScopeModel(
+        run_id="run-in-band-final-marker-with-tool",
+        runtime_session_id="rt-in-band-final-marker-with-tool",
+        participant_id="leader",
+        model_id="gpt-5.4",
+        callback_client=callbacks,
+    )
+
+    yielded = []
+    with pytest.raises(RuntimeError, match="final_phase_with_tool_call"):
+        async for chunk in await model([{"role": "user", "content": "Answer."}]):
+            yielded.append(chunk)
+
+    assert yielded == []
+    assert callbacks.text_deltas == []
+
+
+@pytest.mark.asyncio
+async def test_model_bridge_honors_in_band_commentary_before_explicit_final() -> None:
+    from agentscope_runtime.agentscope_bridge import OpenWebUIAgentScopeModel
+
+    callbacks = RecordingBridgeCallbacks()
+
+    async def commentary_marker_then_final_stream(**kwargs: object):
+        callbacks.model_calls.append(kwargs)
+        yield {
+            "type": "chunk",
+            "delta": {
+                "content": "phase=commentary Checking the result.",
+                "tool_calls": None,
+            },
+        }
+        yield {
+            "type": "chunk",
+            "delta": {
+                "content": "Final answer.",
+                "phase": "final_answer",
+                "tool_calls": None,
+            },
+        }
+        yield {"type": "stream_end"}
+
+    callbacks.call_model_stream = commentary_marker_then_final_stream
+    model = OpenWebUIAgentScopeModel(
+        run_id="run-in-band-commentary-before-final",
+        runtime_session_id="rt-in-band-commentary-before-final",
+        participant_id="leader",
+        model_id="gpt-5.4",
+        callback_client=callbacks,
+    )
+
+    chunks = [
+        chunk
+        async for chunk in await model([{"role": "user", "content": "Answer."}])
+    ]
+
+    assert [item["delta"] for item in callbacks.text_deltas] == [
+        "Checking the result."
+    ]
+    assert [chunk.content[0].text for chunk in chunks[:-1]] == ["Final answer."]
+    assert chunks[-1].content[0].text == "Checking the result.Final answer."
+
+
+@pytest.mark.asyncio
 async def test_model_bridge_rejects_unknown_explicit_phase() -> None:
     from agentscope_runtime.agentscope_bridge import OpenWebUIAgentScopeModel
 

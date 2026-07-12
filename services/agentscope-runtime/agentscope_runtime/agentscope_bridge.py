@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import re
 import uuid
 from collections.abc import AsyncGenerator
 from dataclasses import dataclass
@@ -36,6 +37,35 @@ PRIVATE_REASONING_REPLAY_BLOCKED_MODEL_MARKERS = (
     "gpt",
     "openai",
 )
+IN_BAND_RESPONSE_PHASE_RE = re.compile(
+    r"^\s*phase\s*=\s*(commentary|final_answer)\b"
+    r"(?:[ \t]*[:\uff1a-][ \t]*|[ \t\r\n]+)?",
+    re.IGNORECASE,
+)
+
+
+def _strip_in_band_response_phase(
+    parts: list[str],
+) -> tuple[str | None, list[str]]:
+    """Remove one leading textual phase envelope without flattening deltas."""
+    if not parts:
+        return None, []
+    match = IN_BAND_RESPONSE_PHASE_RE.match("".join(parts))
+    if match is None:
+        return None, list(parts)
+
+    remaining_prefix = match.end()
+    cleaned: list[str] = []
+    for part in parts:
+        if remaining_prefix >= len(part):
+            remaining_prefix -= len(part)
+            continue
+        if remaining_prefix:
+            part = part[remaining_prefix:]
+            remaining_prefix = 0
+        if part:
+            cleaned.append(part)
+    return match.group(1).lower(), cleaned
 
 
 class OpenWebUIToolApprovalRequired(BaseException):
@@ -296,6 +326,18 @@ class OpenWebUIAgentScopeModel(ChatModelBase):
             nonlocal commentary_flushed
             if commentary_flushed or not commentary_parts:
                 return
+            marker_phase, cleaned_parts = _strip_in_band_response_phase(
+                commentary_parts
+            )
+            if marker_phase is not None and marker_phase != "commentary":
+                raise RuntimeError(
+                    "invalid_model_phase_marker: textual phase marker "
+                    f"{marker_phase} conflicts with commentary"
+                )
+            commentary_parts[:] = cleaned_parts
+            if not commentary_parts:
+                commentary_flushed = True
+                return
             commentary = "".join(commentary_parts)
             await self.callback_client.append_text_delta(
                 run_id=self.run_id,
@@ -447,8 +489,17 @@ class OpenWebUIAgentScopeModel(ChatModelBase):
                             )
                         if phase:
                             if unclassified_text_parts:
-                                for pending_text in unclassified_text_parts:
-                                    await classify_text(phase, pending_text)
+                                marker_phase, cleaned_parts = (
+                                    _strip_in_band_response_phase(
+                                        unclassified_text_parts
+                                    )
+                                )
+                                pending_phase = marker_phase or phase
+                                for pending_text in cleaned_parts:
+                                    await classify_text(
+                                        pending_phase,
+                                        pending_text,
+                                    )
                                 unclassified_text_parts.clear()
                             active_text_phase = phase
                         elif active_text_phase is not None:
@@ -498,10 +549,25 @@ class OpenWebUIAgentScopeModel(ChatModelBase):
                 )
             )
         if unclassified_text_parts:
-            if tool_blocks:
-                commentary_parts.extend(unclassified_text_parts)
+            marker_phase, cleaned_parts = _strip_in_band_response_phase(
+                unclassified_text_parts
+            )
+            if marker_phase is not None:
+                for pending_text in cleaned_parts:
+                    await classify_text(marker_phase, pending_text)
+            elif tool_blocks:
+                commentary_parts.extend(cleaned_parts)
             else:
-                final_text_parts.extend(unclassified_text_parts)
+                final_text_parts.extend(cleaned_parts)
+        final_marker_phase, cleaned_final_parts = _strip_in_band_response_phase(
+            final_text_parts
+        )
+        if final_marker_phase is not None and final_marker_phase != "final_answer":
+            raise RuntimeError(
+                "invalid_model_phase_marker: textual phase marker "
+                f"{final_marker_phase} conflicts with final_answer"
+            )
+        final_text_parts[:] = cleaned_final_parts
         if final_text_parts and tool_blocks:
             raise RuntimeError(
                 "final_phase_with_tool_call: final-answer text cannot share a model "
