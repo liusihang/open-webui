@@ -56,7 +56,18 @@ async def generate_direct_chat_completion(
     log.info('generate_direct_chat_completion')
 
     metadata = form_data.pop('metadata', {})
-    form_data = await apply_model_system_prompt_to_body(None, form_data, metadata, user)
+    if not getattr(request.state, 'bypass_system_prompt', False):
+        form_data = await apply_model_system_prompt_to_body(
+            None,
+            form_data,
+            metadata,
+            user,
+            bypass_global_system_prompt=getattr(
+                request.state,
+                'bypass_global_system_prompt',
+                False,
+            ),
+        )
 
     user_id = metadata.get('user_id')
     session_id = metadata.get('session_id')
@@ -156,6 +167,7 @@ async def generate_chat_completion(
     user: Any,
     bypass_filter: bool = False,
     bypass_system_prompt: bool = False,
+    bypass_global_system_prompt: bool = False,
 ):
     log.debug(f'generate_chat_completion: {form_data}')
     if BYPASS_MODEL_ACCESS_CONTROL:
@@ -166,6 +178,7 @@ async def generate_chat_completion(
     # them as query parameters.
     request.state.bypass_filter = bypass_filter
     request.state.bypass_system_prompt = bypass_system_prompt
+    request.state.bypass_global_system_prompt = bypass_global_system_prompt
 
     if hasattr(request.state, 'metadata'):
         if 'metadata' not in form_data:
@@ -258,6 +271,7 @@ async def generate_chat_completion(
                     user,
                     bypass_filter=True,
                     bypass_system_prompt=bypass_system_prompt,
+                    bypass_global_system_prompt=bypass_global_system_prompt,
                 )
                 return StreamingResponse(
                     stream_wrapper(response.body_iterator),
@@ -273,6 +287,7 @@ async def generate_chat_completion(
                             user,
                             bypass_filter=True,
                             bypass_system_prompt=bypass_system_prompt,
+                            bypass_global_system_prompt=bypass_global_system_prompt,
                         )
                     ),
                     'selected_model_id': selected_model_id,

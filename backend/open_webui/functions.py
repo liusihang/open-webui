@@ -365,7 +365,17 @@ async def generate_function_chat_completion(request, form_data, user, models: di
             form_data = apply_model_params_to_body_openai(params, form_data)
 
     if not getattr(request.state, 'bypass_system_prompt', False):
-        form_data = await apply_model_system_prompt_to_body(system, form_data, metadata, user)
+        form_data = await apply_model_system_prompt_to_body(
+            system,
+            form_data,
+            metadata,
+            user,
+            bypass_global_system_prompt=getattr(
+                request.state,
+                'bypass_global_system_prompt',
+                False,
+            ),
+        )
 
     pipe_id = get_pipe_id(form_data)
     function_module = await get_function_module_by_id(request, pipe_id)

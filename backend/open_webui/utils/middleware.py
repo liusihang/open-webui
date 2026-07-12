@@ -1689,7 +1689,12 @@ async def chat_completion_tools_handler(
     payload = get_tools_function_calling_payload(body['messages'], task_model_id, tools_function_calling_prompt)
 
     try:
-        response = await generate_chat_completion(request, form_data=payload, user=user)
+        response = await generate_chat_completion(
+            request,
+            form_data=payload,
+            user=user,
+            bypass_global_system_prompt=True,
+        )
         log.debug(f'{response=}')
         content = await get_content_from_response(response)
         log.debug(f'{content=}')

@@ -195,7 +195,12 @@ async def generate_title(request: Request, form_data: dict, user=Depends(get_ver
         raise e
 
     try:
-        return await generate_chat_completion(request, form_data=payload, user=user)
+        return await generate_chat_completion(
+            request,
+            form_data=payload,
+            user=user,
+            bypass_global_system_prompt=True,
+        )
     except Exception as e:
         log.error('Exception occurred', exc_info=True)
         return JSONResponse(
@@ -265,7 +270,12 @@ async def generate_follow_ups(request: Request, form_data: dict, user=Depends(ge
         raise e
 
     try:
-        return await generate_chat_completion(request, form_data=payload, user=user)
+        return await generate_chat_completion(
+            request,
+            form_data=payload,
+            user=user,
+            bypass_global_system_prompt=True,
+        )
     except Exception as e:
         log.error('Exception occurred', exc_info=True)
         return JSONResponse(
@@ -335,7 +345,12 @@ async def generate_chat_tags(request: Request, form_data: dict, user=Depends(get
         raise e
 
     try:
-        return await generate_chat_completion(request, form_data=payload, user=user)
+        return await generate_chat_completion(
+            request,
+            form_data=payload,
+            user=user,
+            bypass_global_system_prompt=True,
+        )
     except Exception as e:
         log.error(f'Error generating chat completion: {e}')
         return JSONResponse(
@@ -399,7 +414,12 @@ async def generate_image_prompt(request: Request, form_data: dict, user=Depends(
         raise e
 
     try:
-        return await generate_chat_completion(request, form_data=payload, user=user)
+        return await generate_chat_completion(
+            request,
+            form_data=payload,
+            user=user,
+            bypass_global_system_prompt=True,
+        )
     except Exception as e:
         log.error('Exception occurred', exc_info=True)
         return JSONResponse(
@@ -481,7 +501,12 @@ async def generate_queries(request: Request, form_data: dict, user=Depends(get_v
         raise e
 
     try:
-        return await generate_chat_completion(request, form_data=payload, user=user)
+        return await generate_chat_completion(
+            request,
+            form_data=payload,
+            user=user,
+            bypass_global_system_prompt=True,
+        )
     except Exception as e:
         return JSONResponse(
             status_code=status.HTTP_400_BAD_REQUEST,
@@ -562,7 +587,12 @@ async def generate_autocompletion(request: Request, form_data: dict, user=Depend
         raise e
 
     try:
-        return await generate_chat_completion(request, form_data=payload, user=user)
+        return await generate_chat_completion(
+            request,
+            form_data=payload,
+            user=user,
+            bypass_global_system_prompt=True,
+        )
     except Exception as e:
         log.error(f'Error generating chat completion: {e}')
         return JSONResponse(
@@ -629,7 +659,12 @@ async def generate_emoji(request: Request, form_data: dict, user=Depends(get_ver
         raise e
 
     try:
-        return await generate_chat_completion(request, form_data=payload, user=user)
+        return await generate_chat_completion(
+            request,
+            form_data=payload,
+            user=user,
+            bypass_global_system_prompt=True,
+        )
     except Exception as e:
         return JSONResponse(
             status_code=status.HTTP_400_BAD_REQUEST,
@@ -682,7 +717,12 @@ async def generate_moa_response(request: Request, form_data: dict, user=Depends(
         raise e
 
     try:
-        return await generate_chat_completion(request, form_data=payload, user=user)
+        return await generate_chat_completion(
+            request,
+            form_data=payload,
+            user=user,
+            bypass_global_system_prompt=True,
+        )
     except Exception as e:
         return JSONResponse(
             status_code=status.HTTP_400_BAD_REQUEST,

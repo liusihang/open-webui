@@ -22,7 +22,6 @@ from open_webui.config import (
     CACHE_DIR,
 )
 from open_webui.constants import ERROR_MESSAGES
-from open_webui.events import EVENTS, publish_event, publish_model_provider_request_failed
 from open_webui.env import (
     AIOHTTP_CLIENT_SESSION_SSL,
     AIOHTTP_CLIENT_TIMEOUT,
@@ -33,6 +32,7 @@ from open_webui.env import (
     FORWARD_SESSION_INFO_HEADER_CHAT_ID,
     MODELS_CACHE_TTL,
 )
+from open_webui.events import EVENTS, publish_event, publish_model_provider_request_failed
 from open_webui.internal.db import get_async_session
 from open_webui.models.access_grants import AccessGrants
 from open_webui.models.config import Config
@@ -55,6 +55,7 @@ from open_webui.utils.openai_payload import (
 from open_webui.utils.payload import (
     apply_model_params_to_body_openai,
     apply_model_system_prompt_to_body,
+    apply_model_system_prompt_to_responses_body,
 )
 from open_webui.utils.session_pool import (
     cleanup_response,
@@ -1202,7 +1203,17 @@ async def generate_chat_completion(
         await check_model_access(user, None, bypass_filter)
 
     if not bypass_system_prompt:
-        payload = await apply_model_system_prompt_to_body(system, payload, metadata, user)
+        payload = await apply_model_system_prompt_to_body(
+            system,
+            payload,
+            metadata,
+            user,
+            bypass_global_system_prompt=getattr(
+                request.state,
+                'bypass_global_system_prompt',
+                False,
+            ),
+        )
 
     # Check if model is already in app state cache to avoid expensive get_all_models() call
     models = request.app.state.OPENAI_MODELS
@@ -1559,9 +1570,28 @@ async def responses(
 
     idx = 0
     model_id = form_data.model
+    model_info = await Models.get_model_by_id(model_id)
+    system = None
+
+    if model_info:
+        if model_info.base_model_id:
+            payload['model'] = model_info.base_model_id
+        system = model_info.params.model_dump().get('system')
 
     # Enforce per-model access control
-    await check_model_access(user, await Models.get_model_by_id(model_id), BYPASS_MODEL_ACCESS_CONTROL)
+    await check_model_access(user, model_info, BYPASS_MODEL_ACCESS_CONTROL)
+
+    payload = await apply_model_system_prompt_to_responses_body(
+        system,
+        payload,
+        payload.get('metadata'),
+        user,
+        bypass_global_system_prompt=getattr(
+            request.state,
+            'bypass_global_system_prompt',
+            False,
+        ),
+    )
 
     body = json.dumps(payload)
 

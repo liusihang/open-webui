@@ -392,6 +392,7 @@ async def _generate_layer_content_async(
         form_data=payload,
         user=_get_layer_generation_user(),
         bypass_filter=True,
+        bypass_global_system_prompt=True,
     )
     content = _extract_chat_completion_content(response)
     if not content:

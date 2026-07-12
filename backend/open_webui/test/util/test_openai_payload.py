@@ -11,6 +11,25 @@ from open_webui.utils.payload import (
 )
 
 
+@pytest.mark.asyncio
+async def test_apply_system_prompt_replace_resolves_and_replaces_existing_content():
+    form_data = {
+        'messages': [
+            {'role': 'system', 'content': 'Old {{VALUE}}'},
+            {'role': 'user', 'content': 'Hello'},
+        ]
+    }
+
+    result = await payload_utils.apply_system_prompt_to_body(
+        'New {{VALUE}}',
+        form_data,
+        metadata={'variables': {'{{VALUE}}': 'resolved'}},
+        replace=True,
+    )
+
+    assert result['messages'][0] == {'role': 'system', 'content': 'New resolved'}
+
+
 def test_compose_global_system_prompt_places_admin_before_model_and_chat_content():
     composed = payload_utils.compose_global_system_prompt(
         'Administrator policy.',
@@ -68,7 +87,7 @@ async def test_apply_model_system_prompt_reads_global_config_and_composes_one_sy
 
 
 @pytest.mark.asyncio
-async def test_apply_model_system_prompt_skips_global_prompt_for_internal_tasks(monkeypatch):
+async def test_apply_model_system_prompt_skips_global_prompt_for_trusted_internal_tasks(monkeypatch):
     async def fake_config_get(key, default=None):
         return 'Administrator policy.'
 
@@ -85,12 +104,37 @@ async def test_apply_model_system_prompt_skips_global_prompt_for_internal_tasks(
         form_data,
         metadata={'task': 'title_generation'},
         user=None,
+        bypass_global_system_prompt=True,
     )
 
     assert result['messages'][0] == {
         'role': 'system',
         'content': 'Model policy.\nTask policy.',
     }
+
+
+@pytest.mark.asyncio
+async def test_apply_model_system_prompt_does_not_trust_client_task_metadata(monkeypatch):
+    async def fake_config_get(key, default=None):
+        return 'Administrator policy.'
+
+    monkeypatch.setattr(payload_utils.Config, 'get', fake_config_get)
+    form_data = {
+        'messages': [
+            {'role': 'system', 'content': 'Chat policy.'},
+            {'role': 'user', 'content': 'Hello'},
+        ]
+    }
+
+    result = await payload_utils.apply_model_system_prompt_to_body(
+        'Model policy.',
+        form_data,
+        metadata={'task': 'forged_task'},
+        user=None,
+        bypass_global_system_prompt=False,
+    )
+
+    assert result['messages'][0]['content'].startswith('[ADMINISTRATOR INSTRUCTIONS]\nAdministrator policy.')
 
 
 @pytest.mark.asyncio
@@ -125,6 +169,80 @@ async def test_apply_model_system_prompt_normalizes_all_system_messages_to_posit
             ),
         },
         {'role': 'user', 'content': 'Hello'},
+    ]
+
+
+@pytest.mark.asyncio
+async def test_apply_model_system_prompt_preserves_every_text_block_in_system_content(monkeypatch):
+    async def fake_config_get(key, default=None):
+        return 'Administrator policy.'
+
+    monkeypatch.setattr(payload_utils.Config, 'get', fake_config_get)
+    form_data = {
+        'messages': [
+            {
+                'role': 'system',
+                'content': [
+                    {'type': 'text', 'text': 'Chat policy A.'},
+                    {'type': 'text', 'text': 'Chat policy B.'},
+                ],
+            },
+            {'role': 'user', 'content': 'Hello'},
+        ]
+    }
+
+    result = await payload_utils.apply_model_system_prompt_to_body(
+        'Model policy.',
+        form_data,
+        metadata={},
+        user=None,
+    )
+
+    assert 'Model policy.\nChat policy A.\nChat policy B.' in result['messages'][0]['content']
+
+
+@pytest.mark.asyncio
+async def test_apply_model_system_prompt_to_responses_composes_instructions(monkeypatch):
+    async def fake_config_get(key, default=None):
+        return 'Administrator policy.'
+
+    monkeypatch.setattr(payload_utils.Config, 'get', fake_config_get)
+    result = await payload_utils.apply_model_system_prompt_to_responses_body(
+        'Model policy.',
+        {'model': 'model-a', 'instructions': 'Request policy.'},
+        metadata={},
+        user=None,
+    )
+
+    assert result['instructions'] == (
+        '[ADMINISTRATOR INSTRUCTIONS]\nAdministrator policy.\n\n[MODEL INSTRUCTIONS]\nModel policy.\nRequest policy.'
+    )
+
+
+@pytest.mark.asyncio
+async def test_apply_model_system_prompt_to_anthropic_preserves_system_blocks(monkeypatch):
+    async def fake_config_get(key, default=None):
+        return 'Administrator policy.'
+
+    monkeypatch.setattr(payload_utils.Config, 'get', fake_config_get)
+    cached_block = {
+        'type': 'text',
+        'text': 'Request policy.',
+        'cache_control': {'type': 'ephemeral'},
+    }
+    result = await payload_utils.apply_model_system_prompt_to_anthropic_body(
+        'Model policy.',
+        {'model': 'model-a', 'system': [cached_block]},
+        metadata={},
+        user=None,
+    )
+
+    assert result['system'] == [
+        {
+            'type': 'text',
+            'text': ('[ADMINISTRATOR INSTRUCTIONS]\nAdministrator policy.\n\n[MODEL INSTRUCTIONS]\nModel policy.'),
+        },
+        cached_block,
     ]
 
 

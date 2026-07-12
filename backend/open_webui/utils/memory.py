@@ -577,6 +577,7 @@ Conversation:
             },
         },
         user=user,
+        bypass_global_system_prompt=True,
     )
 
     if not isinstance(response, dict) or not response.get('choices'):

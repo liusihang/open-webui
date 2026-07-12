@@ -302,7 +302,12 @@ async def _generate_summary(
         },
     }
 
-    response = await generate_chat_completion(request, form_data=payload, user=user)
+    response = await generate_chat_completion(
+        request,
+        form_data=payload,
+        user=user,
+        bypass_global_system_prompt=True,
+    )
     summary = _response_text(response).strip()
     if summary:
         return summary

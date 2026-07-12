@@ -15,12 +15,8 @@ import aiohttp
 from aiocache import cached
 from fastapi import APIRouter, Depends, File, HTTPException, Request, UploadFile
 from fastapi.responses import StreamingResponse
-from pydantic import BaseModel, ConfigDict, validator
-from sqlalchemy.ext.asyncio import AsyncSession
-
 from open_webui.config import UPLOAD_DIR
 from open_webui.constants import ERROR_MESSAGES
-from open_webui.events import EVENTS, publish_event, publish_model_provider_request_failed
 from open_webui.env import (
     AIOHTTP_CLIENT_SESSION_SSL,
     AIOHTTP_CLIENT_TIMEOUT,
@@ -30,6 +26,7 @@ from open_webui.env import (
     FORWARD_SESSION_INFO_HEADER_CHAT_ID,
     MODELS_CACHE_TTL,
 )
+from open_webui.events import EVENTS, publish_event, publish_model_provider_request_failed
 from open_webui.internal.db import get_async_session
 from open_webui.models.access_grants import AccessGrants
 from open_webui.models.config import Config
@@ -41,11 +38,15 @@ from open_webui.utils.auth import get_admin_user, get_verified_user
 from open_webui.utils.headers import get_custom_headers, include_user_info_headers
 from open_webui.utils.misc import calculate_sha256
 from open_webui.utils.payload import (
-    apply_model_system_prompt_to_body,
     apply_model_params_to_body_ollama,
     apply_model_params_to_body_openai,
+    apply_model_system_prompt_to_anthropic_body,
+    apply_model_system_prompt_to_body,
+    apply_model_system_prompt_to_responses_body,
 )
 from open_webui.utils.session_pool import cleanup_response, get_session, stream_wrapper
+from pydantic import BaseModel, ConfigDict, validator
+from sqlalchemy.ext.asyncio import AsyncSession
 
 log = logging.getLogger(__name__)
 
@@ -1118,7 +1119,17 @@ async def generate_chat_completion(
         await check_model_access(user, None, bypass_filter)
 
     if not bypass_system_prompt:
-        payload = await apply_model_system_prompt_to_body(system, payload, metadata, user)
+        payload = await apply_model_system_prompt_to_body(
+            system,
+            payload,
+            metadata,
+            user,
+            bypass_global_system_prompt=getattr(
+                request.state,
+                'bypass_global_system_prompt',
+                False,
+            ),
+        )
 
     url, url_idx = await get_ollama_url(request, payload['model'], url_idx, user)
     api_config = resolve_api_config((await Config.get('ollama.api_configs', {})), url_idx, url)
@@ -1267,7 +1278,17 @@ async def generate_openai_chat_completion(
     else:
         await check_model_access(user, None)
 
-    payload = await apply_model_system_prompt_to_body(system, payload, metadata, user)
+    payload = await apply_model_system_prompt_to_body(
+        system,
+        payload,
+        metadata,
+        user,
+        bypass_global_system_prompt=getattr(
+            request.state,
+            'bypass_global_system_prompt',
+            False,
+        ),
+    )
 
     url, url_idx = await get_ollama_url(request, payload['model'], url_idx, user)
     api_config = resolve_api_config((await Config.get('ollama.api_configs', {})), url_idx, url)
@@ -1312,13 +1333,27 @@ async def generate_anthropic_messages(
     model_id = payload.get('model', '')
 
     model_info = await Models.get_model_by_id(model_id)
+    system = None
     if model_info:
         if model_info.base_model_id:
             payload['model'] = model_info.base_model_id
+        system = model_info.params.model_dump().get('system')
 
         await check_model_access(user, model_info)
     else:
         await check_model_access(user, None)
+
+    payload = await apply_model_system_prompt_to_anthropic_body(
+        system,
+        payload,
+        payload.get('metadata'),
+        user,
+        bypass_global_system_prompt=getattr(
+            request.state,
+            'bypass_global_system_prompt',
+            False,
+        ),
+    )
 
     url, url_idx = await get_ollama_url(request, payload['model'], url_idx, user)
     api_config = (await Config.get('ollama.api_configs', {})).get(
@@ -1372,13 +1407,27 @@ async def generate_responses(
     model_id = form_data.model
 
     model_info = await Models.get_model_by_id(model_id)
+    system = None
     if model_info:
         if model_info.base_model_id:
             payload['model'] = model_info.base_model_id
+        system = model_info.params.model_dump().get('system')
 
         await check_model_access(user, model_info)
     else:
         await check_model_access(user, None)
+
+    payload = await apply_model_system_prompt_to_responses_body(
+        system,
+        payload,
+        payload.get('metadata'),
+        user,
+        bypass_global_system_prompt=getattr(
+            request.state,
+            'bypass_global_system_prompt',
+            False,
+        ),
+    )
 
     url, url_idx = await get_ollama_url(request, payload['model'], url_idx, user)
     api_config = (await Config.get('ollama.api_configs', {})).get(
