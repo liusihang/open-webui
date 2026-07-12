@@ -59,6 +59,7 @@ run_alembic() {
 
 rollback() {
   local rc=$?
+  trap - ERR
   if [[ "$switched" -eq 1 ]]; then
     "${rollback_compose[@]}" up -d --no-deps --force-recreate open-webui-pr7 agentscope-runtime || true
     wait_healthy open-webui-pr7 || true
@@ -105,7 +106,7 @@ test "$(docker inspect open-webui-pr7 --format '{{.RestartCount}}')" = 0
 test "$(docker inspect openwebui-pr7-agentscope-runtime --format '{{.RestartCount}}')" = 0
 test "$(docker inspect open-webui-pr7 --format '{{.State.OOMKilled}}')" = false
 test "$(docker inspect openwebui-pr7-agentscope-runtime --format '{{.State.OOMKilled}}')" = false
-test "$(docker inspect open-webui-pr7-db --format '{{.Id}}')" = "$before_db"
+test "$(docker inspect openwebui-pr7-db --format '{{.Id}}')" = "$before_db"
 test "$(docker inspect openwebui-pr7-redis --format '{{.Id}}')" = "$before_redis"
 test "$(docker inspect open-webui-pr7-terminals --format '{{.Id}}')" = "$before_terminals"
 test "$(docker inspect open-webui --format '{{.Id}}|{{.Image}}|{{.RestartCount}}')" = "$before_main"
