@@ -39,7 +39,12 @@ PRIVATE_REASONING_REPLAY_BLOCKED_MODEL_MARKERS = (
 )
 IN_BAND_RESPONSE_PHASE_RE = re.compile(
     r"^\s*phase\s*=\s*(commentary|final_answer)\b"
-    r"(?:[ \t]*[:\uff1a-][ \t]*|[ \t\r\n]+)?",
+    r"(?:[ \t]*[:\uff1a-][ \t]*|[ \t]*(?:(?:\r\n|\n)){1,2}|[ \t]+)?",
+    re.IGNORECASE,
+)
+BOLD_IN_BAND_RESPONSE_PHASE_RE = re.compile(
+    r"^\s*\*\*[ \t]*phase\s*=\s*(commentary|final_answer)[ \t]*\*\*(?!\*)"
+    r"(?:[ \t]*[:\uff1a-][ \t]*|[ \t]*(?:(?:\r\n|\n)){1,2}|[ \t]+|$)",
     re.IGNORECASE,
 )
 WRAPPED_IN_BAND_RESPONSE_PHASE_PATTERNS = (
@@ -47,7 +52,8 @@ WRAPPED_IN_BAND_RESPONSE_PHASE_PATTERNS = (
         "commentary",
         re.compile(
             r"^\s*\*\*进度说明[ \t]*\([ \t]*phase\s*=\s*commentary\b"
-            r"[ \t]*\)[ \t]*：[ \t]*\*\*[ \t\r\n]*",
+            r"[ \t]*\)[ \t]*：[ \t]*\*\*"
+            r"(?:[ \t]*(?:(?:\r\n|\n)){1,2}|[ \t]+)?",
             re.IGNORECASE,
         ),
     ),
@@ -55,7 +61,8 @@ WRAPPED_IN_BAND_RESPONSE_PHASE_PATTERNS = (
         "final_answer",
         re.compile(
             r"^\s*\*\*总结[ \t]*\([ \t]*phase\s*=\s*final_answer\b"
-            r"[ \t]*\)[ \t]*：[ \t]*\*\*[ \t\r\n]*",
+            r"[ \t]*\)[ \t]*：[ \t]*\*\*"
+            r"(?:[ \t]*(?:(?:\r\n|\n)){1,2}|[ \t]+)?",
             re.IGNORECASE,
         ),
     ),
@@ -92,6 +99,9 @@ def _strip_in_band_response_phase(
     match = IN_BAND_RESPONSE_PHASE_RE.match(combined)
     phase = match.group(1).lower() if match is not None else None
     if match is None:
+        match = BOLD_IN_BAND_RESPONSE_PHASE_RE.match(combined)
+        phase = match.group(1).lower() if match is not None else None
+    if match is None:
         for wrapped_phase, pattern in WRAPPED_IN_BAND_RESPONSE_PHASE_PATTERNS:
             match = pattern.match(combined)
             if match is not None:
@@ -116,6 +126,29 @@ def _strip_leading_thinking_envelope(parts: list[str]) -> tuple[str | None, list
             "invalid_model_reasoning_envelope: leading thinking block is not closed"
         )
     return match.group(1), _remove_leading_characters(parts, match.end())
+
+
+def _normalize_leading_response_envelopes(
+    parts: list[str],
+) -> tuple[str | None, str | None, list[str]]:
+    """Decode one leading phase and one thinking envelope in either order."""
+    marker_phase, cleaned_parts = _strip_in_band_response_phase(parts)
+    private_reasoning, cleaned_parts = _strip_leading_thinking_envelope(
+        cleaned_parts
+    )
+    if marker_phase is None:
+        marker_phase, cleaned_parts = _strip_in_band_response_phase(cleaned_parts)
+    duplicate_phase, _ = _strip_in_band_response_phase(cleaned_parts)
+    if duplicate_phase is not None:
+        raise RuntimeError(
+            "invalid_model_phase_marker: duplicate leading textual phase marker"
+        )
+    duplicate_reasoning, _ = _strip_leading_thinking_envelope(cleaned_parts)
+    if duplicate_reasoning is not None:
+        raise RuntimeError(
+            "invalid_model_reasoning_envelope: duplicate leading thinking envelope"
+        )
+    return marker_phase, private_reasoning, cleaned_parts
 
 
 class OpenWebUIToolApprovalRequired(BaseException):
@@ -363,6 +396,7 @@ class OpenWebUIAgentScopeModel(ChatModelBase):
         active_text_phase: str | None = None
         final_phase_started = False
         accumulated_reasoning_parts: list[str] = []
+        literal_reasoning_parts: list[str] = []
         accumulated_tool_calls: list[dict[str, Any]] = []
         commentary_flushed = False
         auxiliary_flushed = False
@@ -379,14 +413,16 @@ class OpenWebUIAgentScopeModel(ChatModelBase):
             nonlocal commentary_flushed
             if commentary_flushed or not commentary_parts:
                 return
-            marker_phase, cleaned_parts = _strip_in_band_response_phase(
-                commentary_parts
+            marker_phase, private_reasoning, cleaned_parts = (
+                _normalize_leading_response_envelopes(commentary_parts)
             )
             if marker_phase is not None and marker_phase != "commentary":
                 raise RuntimeError(
                     "invalid_model_phase_marker: textual phase marker "
                     f"{marker_phase} conflicts with commentary"
                 )
+            if private_reasoning:
+                literal_reasoning_parts.append(private_reasoning)
             commentary_parts[:] = cleaned_parts
             if not commentary_parts:
                 commentary_flushed = True
@@ -542,11 +578,13 @@ class OpenWebUIAgentScopeModel(ChatModelBase):
                             )
                         if phase:
                             if unclassified_text_parts:
-                                marker_phase, cleaned_parts = (
-                                    _strip_in_band_response_phase(
+                                marker_phase, private_reasoning, cleaned_parts = (
+                                    _normalize_leading_response_envelopes(
                                         unclassified_text_parts
                                     )
                                 )
+                                if private_reasoning:
+                                    literal_reasoning_parts.append(private_reasoning)
                                 pending_phase = marker_phase or phase
                                 for pending_text in cleaned_parts:
                                     await classify_text(
@@ -604,9 +642,11 @@ class OpenWebUIAgentScopeModel(ChatModelBase):
                 )
             )
         if unclassified_text_parts:
-            marker_phase, cleaned_parts = _strip_in_band_response_phase(
-                unclassified_text_parts
+            marker_phase, private_reasoning, cleaned_parts = (
+                _normalize_leading_response_envelopes(unclassified_text_parts)
             )
+            if private_reasoning:
+                literal_reasoning_parts.append(private_reasoning)
             if marker_phase is not None:
                 for pending_text in cleaned_parts:
                     await classify_text(marker_phase, pending_text)
@@ -614,19 +654,16 @@ class OpenWebUIAgentScopeModel(ChatModelBase):
                 commentary_parts.extend(cleaned_parts)
             else:
                 final_text_parts.extend(cleaned_parts)
-        final_marker_phase, cleaned_final_parts = _strip_in_band_response_phase(
-            final_text_parts
+        final_marker_phase, private_reasoning, cleaned_final_parts = (
+            _normalize_leading_response_envelopes(final_text_parts)
         )
         if final_marker_phase is not None and final_marker_phase != "final_answer":
             raise RuntimeError(
                 "invalid_model_phase_marker: textual phase marker "
                 f"{final_marker_phase} conflicts with final_answer"
             )
-        leading_reasoning, cleaned_final_parts = _strip_leading_thinking_envelope(
-            cleaned_final_parts
-        )
-        if leading_reasoning:
-            accumulated_reasoning_parts.append(leading_reasoning)
+        if private_reasoning:
+            literal_reasoning_parts.append(private_reasoning)
         final_text_parts[:] = cleaned_final_parts
         if final_text_parts and tool_blocks:
             raise RuntimeError(
@@ -662,7 +699,9 @@ class OpenWebUIAgentScopeModel(ChatModelBase):
         commentary_text = "".join(commentary_parts)
         final_text = "".join(final_text_parts)
         full_text = commentary_text + final_text
-        full_reasoning = "".join(accumulated_reasoning_parts)
+        full_reasoning = "".join(
+            accumulated_reasoning_parts or literal_reasoning_parts
+        )
         if full_reasoning and _raw_private_reasoning_replay_enabled(model_name):
             self._private_reasoning_parts.append(full_reasoning)
             self._private_reasoning_parts = _trim_private_reasoning_parts(self._private_reasoning_parts)

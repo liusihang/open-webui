@@ -1440,6 +1440,611 @@ async def test_model_bridge_strips_verified_wrapped_final_marker_and_preserves_d
 
 
 @pytest.mark.asyncio
+async def test_model_bridge_normalizes_real_thinking_and_bold_phase_combination() -> None:
+    from agentscope_runtime.agentscope_bridge import OpenWebUIAgentScopeModel
+
+    callbacks = RecordingBridgeCallbacks()
+
+    async def real_combination_stream(**kwargs: object):
+        callbacks.model_calls.append(kwargs)
+        if len(callbacks.model_calls) == 1:
+            yield {
+                "type": "chunk",
+                "delta": {
+                    "content": (
+                        "<thinking>private tool plan</thinking>\n\n"
+                        "**phase=commentary**\n\n公开旁白"
+                    ),
+                    "tool_calls": None,
+                },
+            }
+            yield {
+                "type": "chunk",
+                "delta": {
+                    "content": None,
+                    "tool_calls": [
+                        {
+                            "id": "call_environment",
+                            "type": "function",
+                            "function": {
+                                "name": "get_environment",
+                                "arguments": "{}",
+                            },
+                        }
+                    ],
+                },
+            }
+        else:
+            yield {
+                "type": "chunk",
+                "delta": {
+                    "content": "**phase=final_answer**\n\n正常回答",
+                    "tool_calls": None,
+                },
+            }
+        yield {"type": "stream_end"}
+
+    callbacks.call_model_stream = real_combination_stream
+    model = OpenWebUIAgentScopeModel(
+        run_id="run-real-prefix-combination",
+        runtime_session_id="rt-real-prefix-combination",
+        participant_id="leader",
+        model_id="claude-sonnet-4-5",
+        callback_client=callbacks,
+    )
+
+    first_chunks = [
+        chunk
+        async for chunk in await model(
+            [{"role": "user", "content": "Inspect."}],
+            tools=[
+                {
+                    "type": "function",
+                    "function": {
+                        "name": "get_environment",
+                        "description": "Get environment.",
+                        "parameters": {"type": "object", "properties": {}},
+                    },
+                }
+            ],
+        )
+    ]
+    second_chunks = [
+        chunk
+        async for chunk in await model([{"role": "user", "content": "Finish."}])
+    ]
+
+    assert [item["delta"] for item in callbacks.text_deltas] == ["公开旁白"]
+    assert first_chunks[-1].content[0].text == "公开旁白"
+    assert [chunk.content[0].text for chunk in second_chunks[:-1]] == ["正常回答"]
+    assert second_chunks[-1].content[0].text == "正常回答"
+
+
+@pytest.mark.asyncio
+async def test_model_bridge_normalizes_split_thinking_before_bold_commentary() -> None:
+    from agentscope_runtime.agentscope_bridge import OpenWebUIAgentScopeModel
+
+    callbacks = RecordingBridgeCallbacks()
+
+    async def split_commentary_stream(**kwargs: object):
+        callbacks.model_calls.append(kwargs)
+        if len(callbacks.model_calls) == 1:
+            for content in (
+                "<thi",
+                "nking>private tool plan",
+                "</thinking>\n\n**phase=comm",
+                "entary**\n\n公开旁白",
+            ):
+                yield {
+                    "type": "chunk",
+                    "delta": {"content": content, "tool_calls": None},
+                }
+            yield {
+                "type": "chunk",
+                "delta": {
+                    "content": None,
+                    "tool_calls": [
+                        {
+                            "id": "call_environment",
+                            "type": "function",
+                            "function": {
+                                "name": "get_environment",
+                                "arguments": "{}",
+                            },
+                        }
+                    ],
+                },
+            }
+        else:
+            yield {
+                "type": "chunk",
+                "delta": {
+                    "content": "Follow-up answer.",
+                    "phase": "final_answer",
+                    "tool_calls": None,
+                },
+            }
+        yield {"type": "stream_end"}
+
+    callbacks.call_model_stream = split_commentary_stream
+    model = OpenWebUIAgentScopeModel(
+        run_id="run-split-commentary-prefixes",
+        runtime_session_id="rt-split-commentary-prefixes",
+        participant_id="leader",
+        model_id="claude-sonnet-4-5",
+        callback_client=callbacks,
+    )
+
+    async for _ in await model(
+        [{"role": "user", "content": "Inspect."}],
+        tools=[
+            {
+                "type": "function",
+                "function": {
+                    "name": "get_environment",
+                    "description": "Get environment.",
+                    "parameters": {"type": "object", "properties": {}},
+                },
+            }
+        ],
+    ):
+        pass
+    async for _ in await model([{"role": "user", "content": "Continue."}]):
+        pass
+
+    assert [item["delta"] for item in callbacks.text_deltas] == ["公开旁白"]
+    assert callbacks.model_calls[1]["messages"] == [
+        {"role": "user", "content": "Continue."},
+        {
+            "role": "assistant",
+            "content": "",
+            "reasoning_content": "private tool plan",
+        },
+    ]
+
+
+@pytest.mark.asyncio
+async def test_model_bridge_normalizes_bold_phase_before_thinking_for_both_phases() -> None:
+    from agentscope_runtime.agentscope_bridge import OpenWebUIAgentScopeModel
+
+    callbacks = RecordingBridgeCallbacks()
+
+    async def phase_then_thinking_stream(**kwargs: object):
+        callbacks.model_calls.append(kwargs)
+        yield {
+            "type": "chunk",
+            "delta": {
+                "content": (
+                    "**phase=commentary**\n"
+                    "<thinking>private commentary</thinking>\n公开说明"
+                ),
+                "phase": "commentary",
+                "tool_calls": None,
+            },
+        }
+        yield {
+            "type": "chunk",
+            "delta": {
+                "content": (
+                    "**phase=final_answer**\n"
+                    "<thinking>private final</thinking>\n最终答案"
+                ),
+                "phase": "final_answer",
+                "tool_calls": None,
+            },
+        }
+        yield {"type": "stream_end"}
+
+    callbacks.call_model_stream = phase_then_thinking_stream
+    model = OpenWebUIAgentScopeModel(
+        run_id="run-phase-before-thinking",
+        runtime_session_id="rt-phase-before-thinking",
+        participant_id="leader",
+        model_id="claude-sonnet-4-5",
+        callback_client=callbacks,
+    )
+
+    chunks = [
+        chunk
+        async for chunk in await model([{"role": "user", "content": "Answer."}])
+    ]
+
+    assert [item["delta"] for item in callbacks.text_deltas] == ["公开说明"]
+    assert [chunk.content[0].text for chunk in chunks[:-1]] == ["最终答案"]
+    assert chunks[-1].content[0].text == "公开说明最终答案"
+
+
+@pytest.mark.asyncio
+async def test_model_bridge_rejects_bold_phase_conflict_after_leading_thinking() -> None:
+    from agentscope_runtime.agentscope_bridge import OpenWebUIAgentScopeModel
+
+    callbacks = RecordingBridgeCallbacks()
+
+    async def conflicting_commentary_stream(**kwargs: object):
+        callbacks.model_calls.append(kwargs)
+        yield {
+            "type": "chunk",
+            "delta": {
+                "content": (
+                    "<thinking>private</thinking>\n"
+                    "**phase=final_answer**\nNot commentary."
+                ),
+                "phase": "commentary",
+                "tool_calls": None,
+            },
+        }
+        yield {
+            "type": "chunk",
+            "delta": {
+                "content": None,
+                "tool_calls": [
+                    {
+                        "id": "call_environment",
+                        "type": "function",
+                        "function": {
+                            "name": "get_environment",
+                            "arguments": "{}",
+                        },
+                    }
+                ],
+            },
+        }
+        yield {"type": "stream_end"}
+
+    callbacks.call_model_stream = conflicting_commentary_stream
+    model = OpenWebUIAgentScopeModel(
+        run_id="run-bold-phase-conflict",
+        runtime_session_id="rt-bold-phase-conflict",
+        participant_id="leader",
+        model_id="claude-sonnet-4-5",
+        callback_client=callbacks,
+    )
+
+    emitted = []
+    with pytest.raises(RuntimeError, match="invalid_model_phase_marker"):
+        async for chunk in await model([{"role": "user", "content": "Inspect."}]):
+            emitted.append(chunk)
+
+    assert emitted == []
+    assert callbacks.text_deltas == []
+
+
+@pytest.mark.asyncio
+async def test_model_bridge_rejects_unclosed_leading_thinking_in_commentary() -> None:
+    from agentscope_runtime.agentscope_bridge import OpenWebUIAgentScopeModel
+
+    callbacks = RecordingBridgeCallbacks()
+
+    async def unclosed_commentary_stream(**kwargs: object):
+        callbacks.model_calls.append(kwargs)
+        yield {
+            "type": "chunk",
+            "delta": {
+                "content": "<thinking>private commentary without a close",
+                "phase": "commentary",
+                "tool_calls": None,
+            },
+        }
+        yield {
+            "type": "chunk",
+            "delta": {
+                "content": "Final answer.",
+                "phase": "final_answer",
+                "tool_calls": None,
+            },
+        }
+        yield {"type": "stream_end"}
+
+    callbacks.call_model_stream = unclosed_commentary_stream
+    model = OpenWebUIAgentScopeModel(
+        run_id="run-unclosed-commentary-thinking",
+        runtime_session_id="rt-unclosed-commentary-thinking",
+        participant_id="leader",
+        model_id="claude-sonnet-4-5",
+        callback_client=callbacks,
+    )
+
+    emitted = []
+    with pytest.raises(RuntimeError, match="invalid_model_reasoning_envelope"):
+        async for chunk in await model([{"role": "user", "content": "Answer."}]):
+            emitted.append(chunk)
+
+    assert emitted == []
+    assert callbacks.text_deltas == []
+
+
+@pytest.mark.asyncio
+async def test_model_bridge_rejects_bold_final_with_tool_after_leading_thinking() -> None:
+    from agentscope_runtime.agentscope_bridge import OpenWebUIAgentScopeModel
+
+    callbacks = RecordingBridgeCallbacks()
+
+    async def final_with_tool_stream(**kwargs: object):
+        callbacks.model_calls.append(kwargs)
+        yield {
+            "type": "chunk",
+            "delta": {
+                "content": (
+                    "<thinking>private</thinking>\n"
+                    "**phase=final_answer**\nPremature final."
+                ),
+                "tool_calls": None,
+            },
+        }
+        yield {
+            "type": "chunk",
+            "delta": {
+                "content": None,
+                "tool_calls": [
+                    {
+                        "id": "call_environment",
+                        "type": "function",
+                        "function": {
+                            "name": "get_environment",
+                            "arguments": "{}",
+                        },
+                    }
+                ],
+            },
+        }
+        yield {"type": "stream_end"}
+
+    callbacks.call_model_stream = final_with_tool_stream
+    model = OpenWebUIAgentScopeModel(
+        run_id="run-bold-final-with-tool",
+        runtime_session_id="rt-bold-final-with-tool",
+        participant_id="leader",
+        model_id="claude-sonnet-4-5",
+        callback_client=callbacks,
+    )
+
+    emitted = []
+    with pytest.raises(RuntimeError, match="final_phase_with_tool_call"):
+        async for chunk in await model([{"role": "user", "content": "Inspect."}]):
+            emitted.append(chunk)
+
+    assert emitted == []
+    assert callbacks.text_deltas == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "content",
+    [
+        "Keep **phase=final_answer** literal.",
+        "**phase=final_answer* is unbalanced.",
+        "**phase=final_answer*** has an extra marker star.",
+        "**phase=final_answer**literal text has no separator.",
+        "```text\n**phase=final_answer**\n```",
+        "```xml\n<thinking>literal</thinking>\n```",
+    ],
+)
+async def test_model_bridge_preserves_literal_response_envelope_text(content: str) -> None:
+    from agentscope_runtime.agentscope_bridge import OpenWebUIAgentScopeModel
+
+    callbacks = RecordingBridgeCallbacks()
+
+    async def literal_phase_stream(**kwargs: object):
+        callbacks.model_calls.append(kwargs)
+        yield {
+            "type": "chunk",
+            "delta": {
+                "content": content,
+                "phase": "final_answer",
+                "tool_calls": None,
+            },
+        }
+        yield {"type": "stream_end"}
+
+    callbacks.call_model_stream = literal_phase_stream
+    model = OpenWebUIAgentScopeModel(
+        run_id="run-literal-bold-phase",
+        runtime_session_id="rt-literal-bold-phase",
+        participant_id="leader",
+        model_id="claude-sonnet-4-5",
+        callback_client=callbacks,
+    )
+
+    chunks = [
+        chunk
+        async for chunk in await model([{"role": "user", "content": "Answer."}])
+    ]
+
+    assert [chunk.content[0].text for chunk in chunks[:-1]] == [content]
+    assert chunks[-1].content[0].text == content
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("content", "error_code"),
+    [
+        (
+            "**phase=commentary**\n"
+            "<thinking>private one</thinking>\n"
+            "**phase=commentary**\nPublic commentary.",
+            "invalid_model_phase_marker",
+        ),
+        (
+            "<thinking>private one</thinking>\n"
+            "**phase=commentary**\n"
+            "<thinking>private two</thinking>\nPublic commentary.",
+            "invalid_model_reasoning_envelope",
+        ),
+    ],
+)
+async def test_model_bridge_rejects_duplicate_leading_response_envelopes(
+    content: str,
+    error_code: str,
+) -> None:
+    from agentscope_runtime.agentscope_bridge import OpenWebUIAgentScopeModel
+
+    callbacks = RecordingBridgeCallbacks()
+
+    async def duplicate_envelope_stream(**kwargs: object):
+        callbacks.model_calls.append(kwargs)
+        yield {
+            "type": "chunk",
+            "delta": {
+                "content": content,
+                "phase": "commentary",
+                "tool_calls": None,
+            },
+        }
+        yield {
+            "type": "chunk",
+            "delta": {
+                "content": "Final answer.",
+                "phase": "final_answer",
+                "tool_calls": None,
+            },
+        }
+        yield {"type": "stream_end"}
+
+    callbacks.call_model_stream = duplicate_envelope_stream
+    model = OpenWebUIAgentScopeModel(
+        run_id="run-duplicate-response-envelope",
+        runtime_session_id="rt-duplicate-response-envelope",
+        participant_id="leader",
+        model_id="claude-sonnet-4-5",
+        callback_client=callbacks,
+    )
+
+    emitted = []
+    with pytest.raises(RuntimeError, match=error_code):
+        async for chunk in await model([{"role": "user", "content": "Answer."}]):
+            emitted.append(chunk)
+
+    assert emitted == []
+    assert callbacks.text_deltas == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "content",
+    [
+        "phase=final_answer\n    indented code",
+        "**phase=final_answer**\n    indented code",
+        "**总结 (phase=final_answer)：**\n    indented code",
+    ],
+)
+async def test_model_bridge_preserves_indentation_after_phase_marker(
+    content: str,
+) -> None:
+    from agentscope_runtime.agentscope_bridge import OpenWebUIAgentScopeModel
+
+    callbacks = RecordingBridgeCallbacks()
+
+    async def indented_answer_stream(**kwargs: object):
+        callbacks.model_calls.append(kwargs)
+        yield {
+            "type": "chunk",
+            "delta": {
+                "content": content,
+                "phase": "final_answer",
+                "tool_calls": None,
+            },
+        }
+        yield {"type": "stream_end"}
+
+    callbacks.call_model_stream = indented_answer_stream
+    model = OpenWebUIAgentScopeModel(
+        run_id="run-phase-marker-indentation",
+        runtime_session_id="rt-phase-marker-indentation",
+        participant_id="leader",
+        model_id="claude-sonnet-4-5",
+        callback_client=callbacks,
+    )
+
+    chunks = [
+        chunk
+        async for chunk in await model([{"role": "user", "content": "Answer."}])
+    ]
+
+    assert [chunk.content[0].text for chunk in chunks[:-1]] == ["    indented code"]
+    assert chunks[-1].content[0].text == "    indented code"
+
+
+@pytest.mark.asyncio
+async def test_model_bridge_prefers_structured_reasoning_over_literal_duplicate() -> None:
+    from agentscope_runtime.agentscope_bridge import OpenWebUIAgentScopeModel
+
+    callbacks = RecordingBridgeCallbacks()
+
+    async def duplicated_reasoning_stream(**kwargs: object):
+        callbacks.model_calls.append(kwargs)
+        if len(callbacks.model_calls) == 1:
+            yield {
+                "type": "chunk",
+                "delta": {
+                    "reasoning_content": "same private",
+                    "content": (
+                        "<thinking>same private</thinking>\n"
+                        "**phase=commentary**\nPublic commentary."
+                    ),
+                    "tool_calls": None,
+                },
+            }
+            yield {
+                "type": "chunk",
+                "delta": {
+                    "content": None,
+                    "tool_calls": [
+                        {
+                            "id": "call_environment",
+                            "type": "function",
+                            "function": {
+                                "name": "get_environment",
+                                "arguments": "{}",
+                            },
+                        }
+                    ],
+                },
+            }
+        else:
+            yield {
+                "type": "chunk",
+                "delta": {
+                    "content": "Final answer.",
+                    "phase": "final_answer",
+                    "tool_calls": None,
+                },
+            }
+        yield {"type": "stream_end"}
+
+    callbacks.call_model_stream = duplicated_reasoning_stream
+    model = OpenWebUIAgentScopeModel(
+        run_id="run-structured-reasoning-precedence",
+        runtime_session_id="rt-structured-reasoning-precedence",
+        participant_id="leader",
+        model_id="claude-sonnet-4-5",
+        callback_client=callbacks,
+    )
+
+    async for _ in await model(
+        [{"role": "user", "content": "Inspect."}],
+        tools=[
+            {
+                "type": "function",
+                "function": {
+                    "name": "get_environment",
+                    "description": "Get environment.",
+                    "parameters": {"type": "object", "properties": {}},
+                },
+            }
+        ],
+    ):
+        pass
+    async for _ in await model([{"role": "user", "content": "Continue."}]):
+        pass
+
+    assert callbacks.model_calls[1]["messages"][-1] == {
+        "role": "assistant",
+        "content": "",
+        "reasoning_content": "same private",
+    }
+
+
+@pytest.mark.asyncio
 async def test_model_bridge_strips_split_leading_thinking_envelope_from_final() -> None:
     from agentscope_runtime.agentscope_bridge import OpenWebUIAgentScopeModel
 
