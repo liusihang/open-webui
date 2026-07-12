@@ -60,7 +60,12 @@
 	import { getFolderById } from '$lib/apis/folders';
 	import { getNoteById } from '$lib/apis/notes';
 	import { getSessionUser } from '$lib/apis/auths';
+	import { cancelAgentRun } from '$lib/apis/agentRuns';
 	import { buildSelectedSystemTerminalTools } from './MessageInput/systemTerminalTools';
+	import {
+		createAgentRunStopController,
+		getAgentRunStopAriaLabel
+	} from './AgentEvents/messageState';
 
 	import { WEBUI_BASE_URL, WEBUI_API_BASE_URL, PASTED_TEXT_CHARACTER_LIMIT } from '$lib/constants';
 	import { initiateOAuthRedirect } from '$lib/apis/configs';
@@ -128,6 +133,16 @@
 
 	export let history;
 	export let taskIds = null;
+	const agentRunStopController = createAgentRunStopController({
+		cancelAgentRun: async (runId) => cancelAgentRun(localStorage.getItem('token') ?? '', runId),
+		stopResponse: async () => stopResponse()
+	});
+	let responseStopControlState = {
+		visible: false,
+		disabled: false,
+		ariaBusy: false,
+		agentRunId: null as string | null
+	};
 
 	$: isActive =
 		(taskIds && taskIds.length > 0) ||
@@ -433,6 +448,39 @@
 
 	let loaded = false;
 	let recording = false;
+
+	$: responseStopControlState = agentRunStopController.getControlState({
+		history,
+		isActive: Boolean(isActive),
+		recording,
+		prompt,
+		hasFiles: files.length > 0
+	});
+
+	const refreshResponseStopControlState = () => {
+		responseStopControlState = agentRunStopController.getControlState({
+			history,
+			isActive: Boolean(isActive),
+			recording,
+			prompt,
+			hasFiles: files.length > 0
+		});
+	};
+
+	onMount(() => agentRunStopController.subscribe(refreshResponseStopControlState));
+
+	const requestActiveResponseStop = async () => {
+		const stopRequest = agentRunStopController.requestStop(history);
+		refreshResponseStopControlState();
+
+		try {
+			await stopRequest;
+		} catch (error) {
+			toast.error(error instanceof Error ? error.message : `${error}`);
+		} finally {
+			refreshResponseStopControlState();
+		}
+	};
 
 	let isComposing = false;
 	// Safari has a bug where compositionend is not triggered correctly #16615
@@ -1595,7 +1643,7 @@
 															document.getElementById('suggestions-container');
 
 														if (e.key === 'Escape') {
-															stopResponse();
+															void requestActiveResponseStop();
 														}
 
 														if (prompt === '' && e.key == 'ArrowUp') {
@@ -2037,13 +2085,19 @@
 								</div>
 
 								<div class="self-end flex space-x-1 mr-1 shrink-0 gap-[0.5px]">
-									{#if isActive && prompt === '' && files.length === 0}
+									{#if responseStopControlState.visible}
 										<div class=" flex items-center">
 											<Tooltip content={$i18n.t('Stop')}>
 												<button
-													class="bg-white hover:bg-gray-100 text-gray-800 dark:bg-gray-700 dark:text-white dark:hover:bg-gray-800 transition rounded-full p-1.5"
+													type="button"
+													disabled={responseStopControlState.disabled}
+													aria-label={getAgentRunStopAriaLabel(responseStopControlState, (key) =>
+														$i18n.t(key)
+													)}
+													aria-busy={responseStopControlState.ariaBusy}
+													class="bg-white hover:bg-gray-100 text-gray-800 dark:bg-gray-700 dark:text-white dark:hover:bg-gray-800 transition rounded-full p-1.5 disabled:cursor-not-allowed disabled:opacity-60"
 													on:click={() => {
-														stopResponse();
+														void requestActiveResponseStop();
 													}}
 												>
 													<svg

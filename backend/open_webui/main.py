@@ -42,6 +42,16 @@ from starsessions import (
 )
 from starsessions.stores.redis import RedisStore
 
+from open_webui.agent.artifacts import AgentRunArtifactRegistrar
+from open_webui.agent.decision_execution import agent_decision_dispatcher_loop
+from open_webui.agent.protocol import AgentEventType
+from open_webui.agent.resources import AgentRunResourceManager
+from open_webui.agent.runtime_client import (
+    AgentRuntimeClient,
+    AgentRuntimeError,
+    AgentRuntimeUnavailable,
+)
+from open_webui.agent.tool_authority import build_tool_access_envelope
 from open_webui.config import (
     BYPASS_ADMIN_ACCESS_CONTROL,
     CACHE_DIR,
@@ -129,11 +139,6 @@ from open_webui.events import (
     upsert_event_webhook,
 )
 from open_webui.internal.db import engine, get_async_session
-from open_webui.agent.artifacts import AgentRunArtifactRegistrar
-from open_webui.agent.protocol import AgentEventType
-from open_webui.agent.resources import AgentRunResourceManager
-from open_webui.agent.runtime_client import AgentRuntimeClient, AgentRuntimeError, AgentRuntimeUnavailable
-from open_webui.agent.tool_authority import build_tool_access_envelope
 from open_webui.models.access_grants import AccessGrants
 from open_webui.models.agent_runs import AgentRuns
 from open_webui.models.channels import Channels
@@ -542,6 +547,13 @@ async def lifespan(app: FastAPI):
     await import_legacy_config_json()
     await seed_registered_defaults()
     await initialize_runtime_config(app)
+    if (
+        getattr(app.state.config, 'ENABLE_AGENT_MODE', False)
+        and getattr(app.state.config, 'AGENT_RUNTIME_BASE_URL', '')
+    ):
+        app.state.agent_decision_dispatcher_task = asyncio.create_task(
+            agent_decision_dispatcher_loop(app)
+        )
     await migrate_legacy_webhook_config()
     await publish_event(app, EVENTS.SYSTEM_STARTUP_STARTED, source='system')
 
@@ -593,12 +605,22 @@ async def lifespan(app: FastAPI):
         app.state.redis_task_command_listener.cancel()
     if hasattr(app.state, 'redis_cache_invalidation_listener'):
         app.state.redis_cache_invalidation_listener.cancel()
+    if hasattr(app.state, 'agent_decision_dispatcher_task'):
+        await _cancel_and_await_task(app.state.agent_decision_dispatcher_task)
 
     startup_singleton_lock = getattr(app.state, 'startup_singleton_lock', None)
     if startup_singleton_lock is not None:
         startup_singleton_lock.release()
 
     await publish_event(app, EVENTS.SYSTEM_SHUTDOWN_COMPLETED, source='system')
+
+
+async def _cancel_and_await_task(task: asyncio.Task) -> None:
+    task.cancel()
+    try:
+        await task
+    except asyncio.CancelledError:
+        pass
 
 
 app = FastAPI(
@@ -1956,12 +1978,6 @@ async def _start_agent_mode_chat(
     )
     _install_agent_tool_registry(request, run.id, tool_registry)
     await _link_agent_run_to_assistant_message(metadata, agent_run_id=run.id)
-    run = await AgentRuns.transition_state(
-        run.id,
-        from_states=['queued'],
-        to_state='running',
-        reason='runtime starting',
-    )
 
     client = AgentRuntimeClient(
         getattr(request.app.state.config, 'AGENT_RUNTIME_BASE_URL', ''),
@@ -1994,13 +2010,6 @@ async def _start_agent_mode_chat(
             'code': getattr(exc, 'code', 'agent_runtime_error'),
             'message': str(exc),
         }
-        await AgentRuns.transition_state(
-            run.id,
-            from_states=['queued', 'running'],
-            to_state='failed',
-            reason='runtime start failed',
-            payload={'error': error},
-        )
         await AgentRuns.append_event(
             run.id,
             event_type=AgentEventType.RUN_FAILED.value,

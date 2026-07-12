@@ -5,7 +5,7 @@ import time
 from typing import Any
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Query, Request, status
-from fastapi.responses import StreamingResponse
+from fastapi.responses import JSONResponse, StreamingResponse
 from open_webui.agent.approval import (
     AgentApprovalCoordinator,
     ApprovalDecisionConflict,
@@ -14,7 +14,10 @@ from open_webui.agent.approval import (
     ApprovalNotFound,
     ApprovalOperationInProgress,
 )
-from open_webui.agent.runtime_client import AgentRuntimeClient, AgentRuntimeError, AgentRuntimeRejected
+from open_webui.agent.decision_status import (
+    DecisionExecutionResponse,
+    is_nonterminal_decision_status,
+)
 from open_webui.agent.events import (
     AgentEventRejected,
     AgentEventStore,
@@ -24,6 +27,11 @@ from open_webui.agent.events import (
     resolve_after_seq,
 )
 from open_webui.agent.protocol import AgentEventListResponse, AgentRunDetailResponse
+from open_webui.agent.runtime_client import (
+    AgentRuntimeClient,
+    AgentRuntimeError,
+)
+from open_webui.agent.tool_executions import get_agent_tool_execution_registry
 from open_webui.agent.user_input import (
     AgentUserInputCoordinator,
     UserInputCompletionRequest,
@@ -165,29 +173,25 @@ async def cancel_agent_run(
             detail=f'Agent Run is already {run.state}',
         )
 
-    if run.state == 'cancelled':
-        updated = run
-    else:
-        updated = await AgentRuns.transition_state(
+    execution_registry = get_agent_tool_execution_registry(request.app)
+    async with execution_registry.cancelling_run(run.id):
+        await AgentRuns.cancel_run_with_decision_executions(
             run.id,
-            from_states=ACTIVE_CANCEL_FROM_STATES,
-            to_state='cancelled',
-            reason=reason,
+            runtime_session_id=run.runtime_session_id,
         )
-        await AgentRuns.append_event(
-            run.id,
-            event_type='run.cancelled',
-            participant_id='leader',
-            phase='cancelled',
-            summary='Agent run cancelled.',
-            payload={'runtime_session_id': run.runtime_session_id},
-        )
+        updated = await AgentRuns.get_run(run.id)
+        if updated is None:
+            raise AgentRunNotFound(run.id)
 
     await _request_runtime_cancel(request, run.id)
     return _agent_run_detail(updated)
 
 
-@router.post('/{run_id}/user-input/{user_input_id}')
+@router.post(
+    '/{run_id}/user-input/{user_input_id}',
+    response_model=DecisionExecutionResponse,
+    responses={202: {'model': DecisionExecutionResponse}},
+)
 async def complete_agent_run_user_input(
     run_id: str,
     user_input_id: str,
@@ -217,7 +221,7 @@ async def complete_agent_run_user_input(
         idempotency_key,
     )
     try:
-        return await coordinator.complete(
+        response = await coordinator.complete(
             form_data.model_copy(
                 update={
                     'run_id': run_id,
@@ -226,6 +230,14 @@ async def complete_agent_run_user_input(
                 }
             )
         )
+        if is_nonterminal_decision_status(response.get('execution_status')):
+            return JSONResponse(status_code=status.HTTP_202_ACCEPTED, content=response)
+        return response
+    except AgentRunOperationConflict as exc:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail='idempotency_conflict',
+        ) from exc
     except UserInputOperationInProgress:
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
@@ -260,7 +272,11 @@ async def complete_agent_run_user_input(
         ) from exc
 
 
-@router.post('/{run_id}/approvals/{approval_id}/decision')
+@router.post(
+    '/{run_id}/approvals/{approval_id}/decision',
+    response_model=DecisionExecutionResponse,
+    responses={202: {'model': DecisionExecutionResponse}},
+)
 async def decide_agent_run_approval_endpoint(
     run_id: str,
     approval_id: str,
@@ -298,25 +314,9 @@ async def decide_agent_run_approval_endpoint(
             }
         )
         response = await coordinator.decide(decision)
-        if response.get('status') == 'approval_rejected':
-            await _request_runtime_approval_rejection(request, run_id, approval_id, decision, response)
+        if is_nonterminal_decision_status(response.get('execution_status')):
+            return JSONResponse(status_code=status.HTTP_202_ACCEPTED, content=response)
         return response
-    except AgentRuntimeRejected as exc:
-        raise HTTPException(
-            status_code=status.HTTP_409_CONFLICT,
-            detail={
-                'code': exc.code,
-                'message': str(exc),
-            },
-        ) from exc
-    except AgentRuntimeError as exc:
-        raise HTTPException(
-            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail={
-                'code': exc.code,
-                'message': str(exc),
-            },
-        ) from exc
     except AgentRunOperationConflict as exc:
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
@@ -387,38 +387,6 @@ async def _request_runtime_cancel(request: Request, run_id: str) -> None:
         await client.cancel_run(run_id)
     except AgentRuntimeError as exc:
         log.warning('Agent runtime cancel request failed for run_id=%s: %s', run_id, exc)
-
-
-async def _request_runtime_approval_rejection(
-    request: Request,
-    run_id: str,
-    approval_id: str,
-    decision: ApprovalDecisionRequest,
-    response: dict[str, Any],
-) -> None:
-    payload = {
-        'approval_id': approval_id,
-        'decision': decision.decision,
-        'tool_call_id': response.get('structured_error', {}).get('details', {}).get('tool_call_id'),
-        'tool_id': response.get('structured_error', {}).get('details', {}).get('tool_id'),
-        'tool_name': _approval_tool_name_from_content(response.get('content')),
-        'result': response,
-    }
-    client = AgentRuntimeClient(
-        getattr(request.app.state.config, 'AGENT_RUNTIME_BASE_URL', ''),
-        service_token=getattr(request.app.state.config, 'AGENT_RUNTIME_SERVICE_TOKEN', ''),
-        timeout=getattr(request.app.state.config, 'AGENT_RUN_DEFAULT_TIMEOUT_SECONDS', None),
-    )
-    await client.notify_approval_decision(run_id, payload)
-
-
-def _approval_tool_name_from_content(content: Any) -> str | None:
-    if not isinstance(content, str):
-        return None
-    prefix = 'User rejected approval for '
-    if not content.startswith(prefix):
-        return None
-    return content.removeprefix(prefix).rstrip('.') or None
 
 
 def _agent_run_detail(run) -> AgentRunDetailResponse:

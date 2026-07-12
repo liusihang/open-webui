@@ -1,14 +1,15 @@
 from __future__ import annotations
 
-import hashlib
+import asyncio
 import inspect
 import json
 from collections.abc import Callable
 from typing import Any
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, StrictInt
 
 from open_webui.agent.artifacts import collect_terminal_output_paths
+from open_webui.agent.canonical import CanonicalJSONError, canonical_sha256
 from open_webui.models.agent_runs import AgentRunOperationConflict
 
 NORMALIZED_TOOL_STATUSES = {
@@ -33,6 +34,10 @@ class ToolOperationInProgress(ToolAuthorityError):
     code = 'operation_in_progress'
 
 
+class ToolPayloadInvalid(ToolAuthorityError):
+    code = 'invalid_tool_payload'
+
+
 class ToolCallRequest(BaseModel):
     run_id: str
     user_id: str | None = None
@@ -40,6 +45,7 @@ class ToolCallRequest(BaseModel):
     tool_call_id: str
     tool_id: str
     arguments: dict[str, Any] = Field(default_factory=dict)
+    checkpoint_version: StrictInt | None = None
     idempotency_key: str | None = None
 
 
@@ -125,6 +131,16 @@ def normalize_tool_exception(exc: Exception) -> dict[str, Any]:
     )
 
 
+def normalize_tool_cancellation() -> dict[str, Any]:
+    result = _error_result(
+        'Tool execution was cancelled.',
+        code='tool_cancelled',
+        raw={'type': 'CancelledError'},
+    )
+    result['status'] = 'cancelled'
+    return result
+
+
 class AgentToolAuthority:
     def __init__(
         self,
@@ -181,6 +197,15 @@ class AgentToolAuthority:
                 raw_result=raw_result,
                 response=response,
             )
+        except asyncio.CancelledError:
+            await self.operation_store.finish_operation_error(
+                claim.operation.id,
+                {
+                    'code': 'tool_cancelled',
+                    'message': 'Tool execution was cancelled.',
+                },
+            )
+            raise
         except Exception as exc:
             response = normalize_tool_exception(exc)
 
@@ -258,13 +283,12 @@ def _tool_call_request_hash(request: ToolCallRequest) -> str:
         'arguments': request.arguments,
         'service_principal': 'agentscope-runtime',
     }
-    canonical = json.dumps(
-        payload,
-        ensure_ascii=False,
-        separators=(',', ':'),
-        sort_keys=True,
-    )
-    return hashlib.sha256(canonical.encode('utf-8')).hexdigest()
+    try:
+        return canonical_sha256(payload)
+    except CanonicalJSONError as exc:
+        raise ToolPayloadInvalid(
+            'Tool call payload must contain only finite JSON numbers'
+        ) from exc
 
 
 def _opaque_tool_id(source_tool_id: str, name: str) -> str:

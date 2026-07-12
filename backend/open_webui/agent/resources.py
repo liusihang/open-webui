@@ -6,7 +6,7 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Any, Protocol
 
-from open_webui.agent.protocol import AgentRunState
+from open_webui.agent.protocol import AgentEventType, AgentRunState
 
 TERMINAL_STATES = {
     AgentRunState.COMPLETED,
@@ -15,25 +15,17 @@ TERMINAL_STATES = {
     AgentRunState.BUDGET_EXCEEDED,
 }
 
-NON_TERMINAL_STATES = [
-    AgentRunState.QUEUED,
-    AgentRunState.RUNNING,
-    AgentRunState.WAITING_APPROVAL,
-    AgentRunState.WAITING_USER_INPUT,
-    AgentRunState.FINALIZING,
-]
-
-
 class AgentRunLifecycleStore(Protocol):
     def get_run_state(self, run_id: str) -> AgentRunState: ...
 
-    def transition_state(
+    def append_event(
         self,
         run_id: str,
         *,
-        from_states: list[str],
-        to_state: str,
-        reason: str,
+        event_type: str,
+        participant_id: str | None = None,
+        phase: str | None = None,
+        summary: str | None = None,
         payload: dict[str, Any] | None = None,
     ) -> Any: ...
 
@@ -48,12 +40,6 @@ class _ManagedResource:
     @property
     def label(self) -> str:
         return f'{self.resource_type}:{self.resource_key}'
-
-
-@dataclass(frozen=True)
-class _ApprovalWait:
-    approval_id: str
-    resolve: Callable[[dict[str, Any]], Any]
 
 
 @dataclass(frozen=True)
@@ -74,7 +60,6 @@ class AgentRunCleanupResult:
     terminal_state: str
     cleaned: bool
     closed_resources: list[str] = field(default_factory=list)
-    resolved_approval_waits: list[str] = field(default_factory=list)
     stopped_sse_tails: list[str] = field(default_factory=list)
     retained_process_refs: list[dict[str, Any]] = field(default_factory=list)
     summary: dict[str, Any] | None = None
@@ -93,7 +78,6 @@ def _state(value: str | AgentRunState) -> AgentRunState:
 class AgentRunResourceManager:
     def __init__(self):
         self._resources: dict[str, dict[tuple[str, str], _ManagedResource]] = {}
-        self._approval_waits: dict[str, dict[str, _ApprovalWait]] = {}
         self._sse_tails: dict[str, dict[str, _SseTail]] = {}
         self._terminal_processes: dict[str, list[_TerminalProcess]] = {}
         self._runtime_heartbeats: dict[str, int] = {}
@@ -116,15 +100,6 @@ class AgentRunResourceManager:
             close=close,
             participant_id=participant_id,
         )
-
-    def register_approval_wait(
-        self,
-        run_id: str,
-        approval_id: str,
-        resolve: Callable[[dict[str, Any]], Any],
-    ) -> None:
-        waits = self._approval_waits.setdefault(run_id, {})
-        waits[approval_id] = _ApprovalWait(approval_id=approval_id, resolve=resolve)
 
     def register_sse_tail(
         self,
@@ -184,16 +159,6 @@ class AgentRunResourceManager:
             await _maybe_await(resource.close())
             closed_resources.append(resource.label)
 
-        terminal_result = {
-            'status': state.value,
-            'run_id': run_id,
-            'terminal_state': state.value,
-        }
-        resolved_approval_waits = []
-        for wait in list(self._approval_waits.pop(run_id, {}).values()):
-            await _maybe_await(wait.resolve(terminal_result))
-            resolved_approval_waits.append(wait.approval_id)
-
         stopped_sse_tails = []
         for tail in list(self._sse_tails.pop(run_id, {}).values()):
             await _maybe_await(tail.stop())
@@ -212,7 +177,6 @@ class AgentRunResourceManager:
             terminal_state=state.value,
             cleaned=True,
             closed_resources=closed_resources,
-            resolved_approval_waits=resolved_approval_waits,
             stopped_sse_tails=stopped_sse_tails,
             retained_process_refs=retained_process_refs,
             summary=summary,
@@ -237,11 +201,12 @@ class AgentRunResourceManager:
                 continue
 
             await _maybe_await(
-                store.transition_state(
+                store.append_event(
                     run_id,
-                    from_states=[state.value for state in NON_TERMINAL_STATES],
-                    to_state=AgentRunState.FAILED.value,
-                    reason='runtime heartbeat stale',
+                    event_type=AgentEventType.RUN_FAILED.value,
+                    participant_id='leader',
+                    phase=AgentRunState.FAILED.value,
+                    summary='Agent runtime heartbeat is stale.',
                     payload={
                         'error': {
                             'code': 'agent_runtime_lost',

@@ -2,10 +2,12 @@
 
 Phase 1 of streaming-text rollout: event.append is relaxed so that re-using an
 idempotency key with a different payload returns the originally stored event
-instead of failing the run with a 409. state.transition remains strict.
+instead of failing the run with a 409. state-transition is a compatibility
+adapter over the same canonical lifecycle event write.
 """
 
 import os
+import time
 from contextlib import asynccontextmanager
 from types import SimpleNamespace
 
@@ -174,7 +176,7 @@ async def test_event_append_duplicate_payload_returns_existing_event(
 
 
 @pytest.mark.asyncio
-async def test_state_transition_remains_strict_on_hash_conflict(
+async def test_state_transition_compatibility_adapter_returns_canonical_lifecycle_event(
     agent_run_db,
     app_without_fake_event_store,
 ):
@@ -193,9 +195,9 @@ async def test_state_transition_remains_strict_on_hash_conflict(
             json=body,
             headers=_service_headers('state:run-1:finalizing'),
         )
-        # Same key, different reason — state.transition must still 409 because
-        # the run's state machine correctness depends on a single canonical
-        # transition per idempotency_key.
+        # state-transition is now a compatibility adapter over the canonical
+        # lifecycle event. A retry with presentation-only reason drift returns
+        # the already persisted transition instead of creating another write.
         conflict = client.post(
             f'/api/agent/service/runs/{run_id}/state-transition',
             json={**body, 'reason': 'retry with different reason'},
@@ -203,8 +205,57 @@ async def test_state_transition_remains_strict_on_hash_conflict(
         )
 
     assert first.status_code == 200
-    assert conflict.status_code == 409
-    assert conflict.json()['detail'] == 'idempotency_conflict'
+    assert conflict.status_code == 200
+    assert conflict.json() == first.json()
+    events = await AgentRuns.list_events(run_id)
+    assert [event.event_type for event in events] == ['final.started']
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ('to_state', 'payload', 'expected_event'),
+    [
+        (
+            'waiting_approval',
+            {'approval_id': 'approval-1', 'tool_call_id': 'tool-call-1'},
+            'approval.requested',
+        ),
+        (
+            'waiting_user_input',
+            {'user_input_id': 'input-1', 'tool_call_id': 'tool-call-1'},
+            'user_input.requested',
+        ),
+    ],
+)
+async def test_state_transition_compatibility_adapter_maps_waiting_states(
+    agent_run_db,
+    app_without_fake_event_store,
+    to_state,
+    payload,
+    expected_event,
+):
+    run_id = await _create_running_run()
+    key = f'state:{run_id}:{to_state}'
+    body = {
+        'run_id': run_id,
+        'from_states': ['running'],
+        'to_state': to_state,
+        'reason': 'runtime requested interaction',
+        'payload': payload,
+        'idempotency_key': key,
+    }
+
+    with TestClient(app_without_fake_event_store) as client:
+        response = client.post(
+            f'/api/agent/service/runs/{run_id}/state-transition',
+            json=body,
+            headers=_service_headers(key),
+        )
+
+    assert response.status_code == 200
+    assert response.json()['state'] == to_state
+    events = await AgentRuns.list_events(run_id)
+    assert [event.event_type for event in events] == [expected_event]
 
 
 @pytest.mark.asyncio
@@ -316,9 +367,6 @@ async def test_event_append_in_progress_operation_returns_202(
 
     # Pre-seed an in_progress operation row with the same idempotency_key but
     # a mismatched request_hash so claim_operation will raise Conflict.
-    from open_webui.models.agent_runs import AgentRunOperation
-    import time
-
     async with agent_run_db() as session:
         session.add(
             AgentRunOperation(
@@ -354,6 +402,66 @@ async def test_event_append_in_progress_operation_returns_202(
 
 
 @pytest.mark.asyncio
+async def test_lifecycle_event_append_recovers_matching_in_progress_operation(
+    agent_run_db,
+    app_without_fake_event_store,
+):
+    """An exact retry may take over a lifecycle operation that was claimed
+    before its event transaction began.
+
+    The lifecycle event, resulting state, and operation response must then be
+    committed together so the operation cannot remain permanently in progress.
+    """
+    run = await AgentRuns.create_run(
+        user_id='user-1',
+        chat_id='chat-1',
+        user_message_id='msg-user',
+        assistant_message_id='msg-assistant',
+        leader_model_id='model-a',
+    )
+    body = {
+        'run_id': run.id,
+        'event_type': 'run.running',
+        'phase': 'running',
+        'summary': 'Runtime accepted',
+        'idempotency_key': 'evt:session:recover-claim',
+    }
+    event = agent_service.AgentEventAppend(**body)
+    claim = await AgentRuns.claim_operation(
+        run.id,
+        operation_type='event.append',
+        idempotency_key=body['idempotency_key'],
+        request_hash=agent_service._callback_request_hash('event.append', event),
+    )
+    assert claim.created is True
+    assert claim.operation.status == 'in_progress'
+
+    with TestClient(app_without_fake_event_store) as client:
+        response = client.post(
+            f'/api/agent/service/runs/{run.id}/events',
+            json=body,
+            headers=_service_headers(body['idempotency_key']),
+        )
+
+    assert response.status_code == 200
+    assert response.json()['event_type'] == 'run.running'
+
+    updated = await AgentRuns.get_run(run.id)
+    assert updated is not None
+    assert updated.state == 'running'
+    events = await AgentRuns.list_events(run.id)
+    assert [stored.event_type for stored in events] == ['run.running']
+    operation = await AgentRuns.find_operation_by_idempotency_key(
+        run.id,
+        operation_type='event.append',
+        idempotency_key=body['idempotency_key'],
+    )
+    assert operation is not None
+    assert operation.status == 'succeeded'
+    assert operation.response == response.json()
+
+
+@pytest.mark.asyncio
 async def test_event_append_failed_operation_returns_409(
     agent_run_db,
     app_without_fake_event_store,
@@ -362,9 +470,6 @@ async def test_event_append_failed_operation_returns_409(
     surface the original error as 409, not silently retry.
     """
     run_id = await _create_running_run()
-
-    from open_webui.models.agent_runs import AgentRunOperation
-    import time
 
     async with agent_run_db() as session:
         session.add(

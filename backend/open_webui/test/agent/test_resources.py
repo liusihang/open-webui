@@ -7,6 +7,7 @@ class FakeLifecycleStore:
     def __init__(self):
         self.states = {}
         self.transitions = []
+        self.events = []
 
     def get_run_state(self, run_id):
         return self.states[run_id]
@@ -24,6 +25,30 @@ class FakeLifecycleStore:
         self.states[run_id] = AgentRunState(to_state)
         return {'id': run_id, 'state': to_state, 'payload': payload}
 
+    def append_event(
+        self,
+        run_id,
+        *,
+        event_type,
+        participant_id=None,
+        phase=None,
+        summary=None,
+        payload=None,
+    ):
+        self.events.append(
+            {
+                'run_id': run_id,
+                'event_type': event_type,
+                'participant_id': participant_id,
+                'phase': phase,
+                'summary': summary,
+                'payload': payload or {},
+            }
+        )
+        if event_type == 'run.failed':
+            self.states[run_id] = AgentRunState.FAILED
+        return self.events[-1]
+
 
 @pytest.mark.asyncio
 async def test_terminal_cleanup_closes_resources_once_and_keeps_terminal_processes():
@@ -31,22 +56,15 @@ async def test_terminal_cleanup_closes_resources_once_and_keeps_terminal_process
     calls = {
         'mcp_close': 0,
         'oauth_close': 0,
-        'approval_resolve': 0,
         'sse_stop': 0,
         'kill_process': 0,
         'compact': 0,
     }
-    approval_results = []
-
     async def close_mcp():
         calls['mcp_close'] += 1
 
     def close_oauth():
         calls['oauth_close'] += 1
-
-    def resolve_approval(result):
-        calls['approval_resolve'] += 1
-        approval_results.append(result)
 
     async def stop_sse():
         calls['sse_stop'] += 1
@@ -71,7 +89,6 @@ async def test_terminal_cleanup_closes_resources_once_and_keeps_terminal_process
         resource_key='calendar',
         close=close_oauth,
     )
-    manager.register_approval_wait('run-1', 'approval-1', resolve_approval)
     manager.register_sse_tail('run-1', 'subscriber-1', stop_sse)
     manager.register_terminal_process(
         'run-1',
@@ -98,7 +115,6 @@ async def test_terminal_cleanup_closes_resources_once_and_keeps_terminal_process
 
     assert first.cleaned is True
     assert first.closed_resources == ['mcp_client:mcp-main', 'oauth_session:calendar']
-    assert first.resolved_approval_waits == ['approval-1']
     assert first.stopped_sse_tails == ['subscriber-1']
     assert first.retained_process_refs == [
         {
@@ -114,20 +130,10 @@ async def test_terminal_cleanup_closes_resources_once_and_keeps_terminal_process
     assert calls == {
         'mcp_close': 1,
         'oauth_close': 1,
-        'approval_resolve': 1,
         'sse_stop': 1,
         'kill_process': 0,
         'compact': 1,
     }
-    assert approval_results == [
-        {
-            'status': 'cancelled',
-            'run_id': 'run-1',
-            'terminal_state': 'cancelled',
-        }
-    ]
-
-
 @pytest.mark.asyncio
 async def test_stale_runtime_heartbeat_marks_run_failed_and_runs_cleanup_once():
     now_ns = 2_000_000_000_000
@@ -172,18 +178,14 @@ async def test_stale_runtime_heartbeat_marks_run_failed_and_runs_cleanup_once():
     assert failed == ['stale-run']
     assert failed_again == []
     assert calls == {'close_stale': 1, 'close_completed': 0}
-    assert store.transitions == [
+    assert store.transitions == []
+    assert store.events == [
         {
             'run_id': 'stale-run',
-                'from_states': [
-                    'queued',
-                    'running',
-                    'waiting_approval',
-                    'waiting_user_input',
-                    'finalizing',
-                ],
-            'to_state': 'failed',
-            'reason': 'runtime heartbeat stale',
+            'event_type': 'run.failed',
+            'participant_id': 'leader',
+            'phase': 'failed',
+            'summary': 'Agent runtime heartbeat is stale.',
             'payload': {
                 'error': {
                     'code': 'agent_runtime_lost',

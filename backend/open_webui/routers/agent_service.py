@@ -1,9 +1,8 @@
-import hashlib
+import asyncio
 import inspect
-import json
 import secrets
 from types import SimpleNamespace
-from typing import Any
+from typing import Annotated, Any
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Request, status
 from fastapi.responses import JSONResponse
@@ -16,7 +15,11 @@ from open_webui.agent.approval import (
     ApprovalNotFound,
     ApprovalOperationInProgress,
 )
-from open_webui.agent.runtime_client import AgentRuntimeClient, AgentRuntimeError, AgentRuntimeRejected
+from open_webui.agent.canonical import canonical_sha256
+from open_webui.agent.decision_status import (
+    DecisionExecutionResponse,
+    is_nonterminal_decision_status,
+)
 from open_webui.agent.events import (
     AgentEventError,
     AgentEventStore,
@@ -28,8 +31,8 @@ from open_webui.agent.events import (
     append_text_delta_async,
 )
 from open_webui.agent.model_authority import (
-    AgentModelStreamingResponse,
     AgentModelAuthority,
+    AgentModelStreamingResponse,
     ModelAuthorityError,
     ModelCallRequest,
     ModelGuardRejected,
@@ -54,6 +57,19 @@ from open_webui.agent.subagents import (
     SubagentModelSelectionRequest,
     SubagentRegisterRequest,
 )
+from open_webui.agent.tool_authority import (
+    AgentToolAuthority,
+    ToolAuthorityError,
+    ToolCallRequest,
+    ToolOperationInProgress,
+    ToolPayloadInvalid,
+    build_tool_access_envelope,
+    normalize_tool_cancellation,
+)
+from open_webui.agent.tool_executions import (
+    AgentToolExecutionCancelled,
+    get_agent_tool_execution_registry,
+)
 from open_webui.agent.user_input import (
     AgentUserInputCoordinator,
     UserInputConflict,
@@ -62,14 +78,12 @@ from open_webui.agent.user_input import (
     UserInputOperationInProgress,
     UserInputRequest,
 )
-from open_webui.agent.tool_authority import (
-    AgentToolAuthority,
-    ToolAuthorityError,
-    ToolCallRequest,
-    ToolOperationInProgress,
-    build_tool_access_envelope,
+from open_webui.models.agent_runs import (
+    AgentRunError,
+    AgentRunOperationConflict,
+    AgentRuns,
+    is_lifecycle_event_type,
 )
-from open_webui.models.agent_runs import AgentRunError, AgentRunOperationConflict, AgentRuns
 from open_webui.models.chats import Chats
 from open_webui.models.users import Users
 from open_webui.routers.agent_runs import get_configured_agent_event_store
@@ -722,6 +736,83 @@ async def _append_tool_artifact_registered_events(
         )
 
 
+async def _append_tool_terminal_event(
+    tool_request: ToolCallRequest,
+    response: dict[str, Any],
+    operation_store,
+) -> None:
+    outcome_status = str(response.get('status') or '')
+    if outcome_status == 'approval_required':
+        return
+    succeeded = outcome_status == 'success'
+    event_type = (
+        AgentEventType.TOOL_COMPLETED
+        if succeeded
+        else AgentEventType.TOOL_FAILED
+    )
+    event = AgentEventAppend(
+        run_id=tool_request.run_id,
+        event_type=event_type,
+        participant_id=tool_request.participant_id,
+        phase='running',
+        summary=(
+            f'Tool completed: {tool_request.tool_id}'
+            if succeeded
+            else f'Tool failed: {tool_request.tool_id}'
+        ),
+        payload={
+            'tool_call_id': tool_request.tool_call_id,
+            'tool_id': tool_request.tool_id,
+            'status': outcome_status,
+            'content': response.get('content'),
+            'structured_error': response.get('structured_error'),
+        },
+        idempotency_key=(
+            f'tool.outcome:{tool_request.participant_id}:'
+            f'{tool_request.tool_call_id}'
+        ),
+    )
+    if operation_store is AgentRuns:
+        await _append_agent_event_with_operation(event)
+        return
+
+    claim = await operation_store.claim_operation(
+        event.run_id,
+        operation_type='event.append',
+        idempotency_key=event.idempotency_key or '',
+        request_hash=_callback_request_hash('event.append', event),
+    )
+    if not claim.created:
+        return
+    try:
+        stored = await operation_store.append_event(
+            event.run_id,
+            event_type=event.event_type.value,
+            participant_id=event.participant_id,
+            phase=event.phase,
+            summary=event.summary,
+            payload=event.payload,
+        )
+        response_payload = (
+            stored.model_dump(mode='json')
+            if hasattr(stored, 'model_dump')
+            else dict(stored)
+        )
+        await operation_store.finish_operation_success(
+            claim.operation.id,
+            response_payload,
+        )
+    except Exception as exc:
+        await operation_store.finish_operation_error(
+            claim.operation.id,
+            {
+                'code': getattr(exc, 'code', 'event_append_failed'),
+                'message': str(exc),
+            },
+        )
+        raise
+
+
 @router.post('/runs/{run_id}/subagents')
 async def execute_agent_run_subagent_registration(
     request: Request,
@@ -773,11 +864,7 @@ async def request_agent_run_user_input(
     )
     try:
         payload = form_data.model_copy(update={'run_id': run_id, 'idempotency_key': key})
-        return await coordinator.request_user_input(
-            payload,
-            wait_for_response=True,
-            response_timeout_seconds=payload.timeout_seconds,
-        )
+        return await coordinator.request_user_input(payload)
     except AgentRunOperationConflict as exc:
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
@@ -844,6 +931,14 @@ async def append_agent_run_event(
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
             detail='idempotency_conflict',
+        ) from exc
+    except AgentRunError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail={
+                'code': getattr(exc, 'code', 'agent_run_error'),
+                'message': str(exc),
+            },
         ) from exc
     except AgentServiceOperationInProgress:
         return JSONResponse(
@@ -1142,6 +1237,10 @@ async def execute_agent_run_tool_call(
         alias='X-Agent-Idempotency-Key',
     ),
     authorization: str | None = Header(default=None, alias='Authorization'),
+    decision_execution_id: Annotated[
+        str | None,
+        Header(alias='X-Agent-Decision-Execution-ID'),
+    ] = None,
     approval_coordinator: AgentApprovalCoordinator = Depends(get_agent_approval_coordinator),
 ):
     _require_agent_service_credential(request, authorization)
@@ -1157,28 +1256,49 @@ async def execute_agent_run_tool_call(
     try:
         tool = authority.registry.get(tool_request.tool_id)
         if tool is not None:
+            if decision_execution_id:
+                await approval_coordinator.validate_approved_tool_replay(
+                    tool_request,
+                    decision_execution_id,
+                )
+            else:
+                approval_result = await approval_coordinator.request_tool_approval(
+                    tool_request,
+                    tool,
+                )
+                if approval_result is not None:
+                    return approval_result
 
-            async def resume_tool_call():
-                response = await execute_agent_tool_call(authority, tool_request)
-                await _append_tool_artifact_registered_events(tool_request, response)
-                return response
-
-            approval_result = await approval_coordinator.request_tool_approval(
+        execution_registry = get_agent_tool_execution_registry(request.app)
+        with execution_registry.track_current(run_id):
+            response = await execute_agent_tool_call(
+                authority,
                 tool_request,
-                tool,
-                resume=resume_tool_call,
-                wait_for_decision=True,
-                decision_timeout_seconds=_approval_decision_timeout_seconds(request),
             )
-            if approval_result is not None:
-                return approval_result
-
-        response = await execute_agent_tool_call(
-            authority,
+        await _append_tool_terminal_event(
             tool_request,
+            response,
+            authority.operation_store,
         )
         await _append_tool_artifact_registered_events(tool_request, response)
         return response
+    except asyncio.CancelledError:
+        await asyncio.shield(
+            _append_tool_terminal_event(
+                tool_request,
+                normalize_tool_cancellation(),
+                authority.operation_store,
+            )
+        )
+        raise
+    except AgentToolExecutionCancelled as exc:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail={
+                'code': exc.code,
+                'message': str(exc),
+            },
+        ) from exc
     except AgentRunOperationConflict as exc:
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
@@ -1214,6 +1334,14 @@ async def execute_agent_run_tool_call(
                 'message': str(exc),
             },
         ) from exc
+    except ToolPayloadInvalid as exc:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail={
+                'code': exc.code,
+                'message': str(exc),
+            },
+        ) from exc
     except ToolAuthorityError as exc:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
@@ -1226,6 +1354,7 @@ async def execute_agent_run_tool_call(
 
 async def _append_agent_event_with_operation(event: AgentEventAppend) -> AgentRunEvent:
     key = event.idempotency_key or ''
+    lifecycle_event = is_lifecycle_event_type(event.event_type.value)
     try:
         claim = await AgentRuns.claim_operation(
             event.run_id,
@@ -1243,11 +1372,22 @@ async def _append_agent_event_with_operation(event: AgentEventAppend) -> AgentRu
             raise
         return _cached_event_operation_response(existing)
 
-    if not claim.created:
-        return _cached_event_operation_response(claim.operation)
+    if not claim.created and not (
+        lifecycle_event and claim.operation.status == 'in_progress'
+    ):
+        stored = _cached_event_operation_response(claim.operation)
+        if event.event_type == AgentEventType.RUN_COMPLETED:
+            completed = await AgentRuns.get_run(event.run_id)
+            if completed is not None:
+                await _write_completed_agent_run_message(completed)
+        return stored
 
     try:
-        stored = await append_agent_event_async(AgentRuns, event)
+        stored = await append_agent_event_async(
+            AgentRuns,
+            event,
+            operation_id=(claim.operation.id if lifecycle_event else None),
+        )
     except Exception as exc:
         await AgentRuns.finish_operation_error(
             claim.operation.id,
@@ -1258,10 +1398,15 @@ async def _append_agent_event_with_operation(event: AgentEventAppend) -> AgentRu
         )
         raise
 
-    await AgentRuns.finish_operation_success(
-        claim.operation.id,
-        stored.model_dump(mode='json'),
-    )
+    if not lifecycle_event:
+        await AgentRuns.finish_operation_success(
+            claim.operation.id,
+            stored.model_dump(mode='json'),
+        )
+    if event.event_type == AgentEventType.RUN_COMPLETED:
+        completed = await AgentRuns.get_run(event.run_id)
+        if completed is not None:
+            await _write_completed_agent_run_message(completed)
     return stored
 
 
@@ -1341,38 +1486,102 @@ async def _append_text_delta_with_operation(delta: TextDeltaAppend) -> AgentRunE
 async def _transition_state_with_operation(
     transition: AgentStateTransitionAppend,
 ) -> dict[str, Any]:
-    claim = await AgentRuns.claim_operation(
-        transition.run_id,
-        operation_type='state.transition',
-        idempotency_key=transition.idempotency_key or '',
-        request_hash=_callback_request_hash('state.transition', transition),
+    run = await AgentRuns.get_run(transition.run_id)
+    if run is None:
+        raise AgentRunError(f'Agent run not found: {transition.run_id}')
+    allowed_from = {state.value for state in transition.from_states}
+    if run.state not in allowed_from and run.state != transition.to_state.value:
+        raise AgentRunError(
+            f'Cannot adapt agent run state transition from {run.state}; '
+            f'expected one of {sorted(allowed_from)}'
+        )
+    if (
+        run.state in {'waiting_approval', 'waiting_user_input'}
+        and transition.to_state.value == 'running'
+    ):
+        raise AgentRunError(
+            'Decision transitions require the durable decision execution API'
+        )
+    event_type = _lifecycle_event_type_for_state_transition(
+        current_state=run.state,
+        target_state=transition.to_state.value,
+        payload=transition.payload,
     )
-    if not claim.created:
-        return _cached_state_operation_response(claim.operation)
-
-    try:
-        updated = await AgentRuns.transition_state(
-            transition.run_id,
-            from_states=list(transition.from_states),
-            to_state=transition.to_state,
-            reason=transition.reason,
+    await _append_agent_event_with_operation(
+        AgentEventAppend(
+            run_id=transition.run_id,
+            event_type=event_type,
+            participant_id='leader',
+            phase=transition.to_state.value,
+            summary=_lifecycle_event_summary(event_type, transition.payload),
             payload=transition.payload,
+            idempotency_key=transition.idempotency_key,
         )
-        if updated.state == 'completed':
-            await _write_completed_agent_run_message(updated)
-    except Exception as exc:
-        await AgentRuns.finish_operation_error(
-            claim.operation.id,
-            {
-                'code': getattr(exc, 'code', 'state_transition_failed'),
-                'message': str(exc),
-            },
-        )
-        raise
+    )
+    updated = await AgentRuns.get_run(transition.run_id)
+    if updated is None:
+        raise AgentRunError(f'Agent run not found: {transition.run_id}')
+    return updated.model_dump(mode='json')
 
-    response = updated.model_dump(mode='json')
-    await AgentRuns.finish_operation_success(claim.operation.id, response)
-    return response
+
+def _lifecycle_event_type_for_state_transition(
+    *,
+    current_state: str,
+    target_state: str,
+    payload: dict[str, Any],
+) -> AgentEventType:
+    if target_state == 'finalizing':
+        return AgentEventType.FINAL_STARTED
+    if target_state == 'waiting_approval':
+        return AgentEventType.APPROVAL_REQUESTED
+    if target_state == 'waiting_user_input':
+        return AgentEventType.USER_INPUT_REQUESTED
+    if target_state == 'completed':
+        return AgentEventType.RUN_COMPLETED
+    if target_state == 'failed':
+        return AgentEventType.RUN_FAILED
+    if target_state == 'cancelled':
+        return AgentEventType.RUN_CANCELLED
+    if target_state == 'budget_exceeded':
+        return AgentEventType.RUN_BUDGET_EXCEEDED
+    if target_state == 'running':
+        if current_state == 'waiting_approval' or payload.get('approval_id'):
+            return AgentEventType.APPROVAL_COMPLETED
+        if current_state == 'waiting_user_input' or payload.get('user_input_id'):
+            return {
+                'accepted': AgentEventType.USER_INPUT_COMPLETED,
+                'declined': AgentEventType.USER_INPUT_DECLINED,
+                'cancelled': AgentEventType.USER_INPUT_CANCELLED,
+                'timeout': AgentEventType.USER_INPUT_EXPIRED,
+            }.get(payload.get('status'), AgentEventType.USER_INPUT_COMPLETED)
+        return AgentEventType.RUN_RUNNING
+    raise AgentRunError(
+        f'No lifecycle event maps agent run state transition '
+        f'{current_state} -> {target_state}'
+    )
+
+
+def _lifecycle_event_summary(
+    event_type: AgentEventType,
+    payload: dict[str, Any],
+) -> str:
+    if event_type == AgentEventType.RUN_FAILED:
+        error = payload.get('error') or {}
+        return error.get('summary') or 'Agent run failed.'
+    return {
+        AgentEventType.RUN_RUNNING: 'Agent run started.',
+        AgentEventType.FINAL_STARTED: 'Final answer phase started.',
+        AgentEventType.APPROVAL_REQUESTED: 'Approval requested.',
+        AgentEventType.USER_INPUT_REQUESTED: 'User input requested.',
+        AgentEventType.RUN_COMPLETED: 'Agent run completed.',
+        AgentEventType.RUN_CANCELLED: 'Agent run cancelled.',
+        AgentEventType.RUN_BUDGET_EXCEEDED: 'Agent run budget exceeded.',
+        AgentEventType.APPROVAL_COMPLETED: 'Approval completed.',
+        AgentEventType.USER_INPUT_COMPLETED: 'User input submitted.',
+        AgentEventType.USER_INPUT_DECLINED: 'User input declined.',
+        AgentEventType.USER_INPUT_CANCELLED: 'User input cancelled.',
+        AgentEventType.USER_INPUT_EXPIRED: 'User input timed out.',
+    }[event_type]
 
 
 def _cached_event_operation_response(operation) -> AgentRunEvent:
@@ -1387,20 +1596,6 @@ def _cached_event_operation_response(operation) -> AgentRunEvent:
         }
         raise AgentEventError(error.get('message', 'agent event operation failed'))
     raise AgentEventError(f'Unsupported operation status: {operation.status}')
-
-
-def _cached_state_operation_response(operation) -> dict[str, Any]:
-    if operation.status == 'succeeded' and operation.response is not None:
-        return operation.response
-    if operation.status == 'in_progress':
-        raise AgentServiceOperationInProgress('operation_in_progress')
-    if operation.status == 'failed':
-        error = operation.error or {
-            'code': 'agent_state_operation_failed',
-            'message': 'Agent state operation failed before producing a response.',
-        }
-        raise AgentRunError(error.get('message', 'agent state operation failed'))
-    raise AgentRunError(f'Unsupported operation status: {operation.status}')
 
 
 async def _write_completed_agent_run_message(run) -> None:
@@ -1427,15 +1622,14 @@ def _callback_request_hash(operation_type: str, model: Any) -> str:
         'body': body,
         'service_principal': 'agentscope-runtime',
     }
-    canonical = json.dumps(
-        payload,
-        sort_keys=True,
-        separators=(',', ':'),
-    )
-    return hashlib.sha256(canonical.encode()).hexdigest()
+    return canonical_sha256(payload)
 
 
-@router.post('/runs/{run_id}/approvals/{approval_id}/decision')
+@router.post(
+    '/runs/{run_id}/approvals/{approval_id}/decision',
+    response_model=DecisionExecutionResponse,
+    responses={202: {'model': DecisionExecutionResponse}},
+)
 async def decide_agent_run_approval(
     request: Request,
     run_id: str,
@@ -1445,8 +1639,10 @@ async def decide_agent_run_approval(
         default=None,
         alias='X-Agent-Idempotency-Key',
     ),
+    authorization: Annotated[str | None, Header(alias='Authorization')] = None,
     approval_coordinator: AgentApprovalCoordinator = Depends(get_agent_approval_coordinator),
 ):
+    _require_agent_service_credential(request, authorization)
     key = _require_matching_idempotency_key(
         form_data.idempotency_key,
         idempotency_key,
@@ -1460,25 +1656,9 @@ async def decide_agent_run_approval(
             }
         )
         response = await approval_coordinator.decide(decision)
-        if response.get('status') == 'approval_rejected':
-            await _notify_runtime_approval_decision(request, run_id, approval_id, decision, response)
+        if is_nonterminal_decision_status(response.get('execution_status')):
+            return JSONResponse(status_code=status.HTTP_202_ACCEPTED, content=response)
         return response
-    except AgentRuntimeRejected as exc:
-        raise HTTPException(
-            status_code=status.HTTP_409_CONFLICT,
-            detail={
-                'code': exc.code,
-                'message': str(exc),
-            },
-        ) from exc
-    except AgentRuntimeError as exc:
-        raise HTTPException(
-            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail={
-                'code': exc.code,
-                'message': str(exc),
-            },
-        ) from exc
     except AgentRunOperationConflict as exc:
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
@@ -1487,7 +1667,11 @@ async def decide_agent_run_approval(
     except ApprovalOperationInProgress:
         return JSONResponse(
             status_code=status.HTTP_202_ACCEPTED,
-            content={'detail': 'operation_in_progress'},
+            content={
+                'status': 'operation_in_progress',
+                'execution_id': None,
+                'execution_status': 'operation_in_progress',
+            },
             headers={'Retry-After': '1'},
         )
     except ApprovalDecisionConflict as exc:
@@ -1514,49 +1698,3 @@ async def decide_agent_run_approval(
                 'message': str(exc),
             },
         ) from exc
-
-
-async def _notify_runtime_approval_decision(
-    request: Request,
-    run_id: str,
-    approval_id: str,
-    decision: ApprovalDecisionRequest,
-    response: dict[str, Any],
-) -> None:
-    payload = {
-        'approval_id': approval_id,
-        'decision': decision.decision,
-        'tool_call_id': response.get('structured_error', {}).get('details', {}).get('tool_call_id'),
-        'tool_id': response.get('structured_error', {}).get('details', {}).get('tool_id'),
-        'tool_name': _approval_tool_name_from_content(response.get('content')),
-        'result': response,
-    }
-    client = AgentRuntimeClient(
-        getattr(request.app.state.config, 'AGENT_RUNTIME_BASE_URL', ''),
-        service_token=getattr(request.app.state.config, 'AGENT_RUNTIME_SERVICE_TOKEN', ''),
-        timeout=getattr(request.app.state.config, 'AGENT_RUN_DEFAULT_TIMEOUT_SECONDS', None),
-    )
-    await client.notify_approval_decision(run_id, payload)
-
-
-def _approval_tool_name_from_content(content: Any) -> str | None:
-    if not isinstance(content, str):
-        return None
-    prefix = 'User rejected approval for '
-    if not content.startswith(prefix):
-        return None
-    return content.removeprefix(prefix).rstrip('.') or None
-
-
-def _approval_decision_timeout_seconds(request: Request) -> float:
-    value = getattr(
-        request.app.state.config,
-        'AGENT_APPROVAL_DECISION_TIMEOUT_SECONDS',
-        None,
-    )
-    if value is None:
-        return 300.0
-    try:
-        return max(float(value), 0.0)
-    except (TypeError, ValueError):
-        return 300.0

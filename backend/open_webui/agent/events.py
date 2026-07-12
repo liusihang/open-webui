@@ -90,6 +90,8 @@ def append_agent_event(
 async def append_agent_event_async(
     store,
     event: AgentEventAppend,
+    *,
+    operation_id: str | None = None,
 ) -> AgentRunEvent:
     if (
         await store.has_final_started(event.run_id)
@@ -99,14 +101,25 @@ async def append_agent_event_async(
             f'{event.event_type.value} cannot be appended after final.started'
         )
 
-    stored = await store.append_event(
-        event.run_id,
-        event_type=event.event_type.value,
-        participant_id=event.participant_id,
-        phase=event.phase,
-        summary=event.summary,
-        payload=event.payload,
-    )
+    append_kwargs = {
+        'event_type': event.event_type.value,
+        'participant_id': event.participant_id,
+        'phase': event.phase,
+        'summary': event.summary,
+        'payload': event.payload,
+    }
+    if operation_id is not None:
+        result = await store.append_event_with_result(
+            event.run_id,
+            operation_id=operation_id,
+            **append_kwargs,
+        )
+        stored = result.event
+    else:
+        stored = await store.append_event(
+            event.run_id,
+            **append_kwargs,
+        )
     return _coerce_event(stored)
 
 

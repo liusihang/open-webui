@@ -3,6 +3,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 import {
 	buildAgentRunEventsListUrl,
 	buildAgentRunEventsUrl,
+	cancelAgentRun,
 	createAgentRunEventsSource,
 	getAgentRunEvents,
 	getAgentRuns,
@@ -136,6 +137,29 @@ describe('agentRuns api helpers', () => {
 			approval_id: 'approval:run-1:call-1',
 			decision: 'approved',
 			idempotency_key: 'approval-key-1'
+		});
+	});
+
+	it('cancels an Agent run through the existing authenticated cancel route', async () => {
+		const fetchMock = vi.fn().mockResolvedValue({
+			ok: true,
+			json: async () => ({ id: 'run 1', state: 'cancelled' })
+		});
+		vi.stubGlobal('fetch', fetchMock);
+
+		const result = await cancelAgentRun('token-1', 'run 1');
+
+		expect(result).toEqual({ id: 'run 1', state: 'cancelled' });
+		expect(fetchMock).toHaveBeenCalledTimes(1);
+		expect(fetchMock.mock.calls[0]?.[0]).toContain('/api/agent/runs/run%201/cancel');
+		expect(fetchMock.mock.calls[0]?.[1]).toMatchObject({
+			method: 'POST',
+			credentials: 'include',
+			headers: {
+				Accept: 'application/json',
+				'Content-Type': 'application/json',
+				authorization: 'Bearer token-1'
+			}
 		});
 	});
 });

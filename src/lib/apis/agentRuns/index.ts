@@ -31,6 +31,11 @@ export type AgentRunListResponse = {
 	total: number;
 };
 
+export type AgentRunCancelResponse = Pick<AgentRun, 'id' | 'state'> &
+	Partial<
+		Pick<AgentRun, 'state_version' | 'chat_id' | 'assistant_message_id' | 'summary' | 'error'>
+	>;
+
 const jsonHeaders = (token: string = '') => ({
 	Accept: 'application/json',
 	'Content-Type': 'application/json',
@@ -111,6 +116,33 @@ export const getAgentRunEvents = async (
 	}
 
 	return res?.events ?? [];
+};
+
+export const cancelAgentRun = async (
+	token: string = '',
+	runId: string
+): Promise<AgentRunCancelResponse> => {
+	let error = null;
+	const res = await fetch(`${AGENT_RUNS_API_BASE_URL}/${encodeURIComponent(runId)}/cancel`, {
+		method: 'POST',
+		credentials: 'include',
+		headers: jsonHeaders(token)
+	})
+		.then(async (res) => {
+			if (!res.ok) throw await res.json();
+			return res.json();
+		})
+		.catch((err) => {
+			error = err?.detail ?? err;
+			console.error(err);
+			return null;
+		});
+
+	if (error) {
+		throw error;
+	}
+
+	return res;
 };
 
 const buildAgentRunEventsSearchParams = (options: AgentRunEventsOptions = {}): URLSearchParams => {

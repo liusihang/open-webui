@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import asyncio
-import hashlib
 import json
 from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import suppress
@@ -11,13 +10,13 @@ from typing import Any
 from pydantic import BaseModel, ConfigDict, Field
 from starlette.responses import JSONResponse, Response, StreamingResponse
 
+from open_webui.agent.canonical import canonical_sha256
 from open_webui.config import BYPASS_ADMIN_ACCESS_CONTROL
 from open_webui.env import BYPASS_MODEL_ACCESS_CONTROL
 from open_webui.models.agent_runs import AgentRunOperationConflict
 from open_webui.models.users import Users
 from open_webui.utils.chat import generate_chat_completion
 from open_webui.utils.models import check_model_access, get_all_models
-
 
 AGENT_MODEL_STREAM_HEARTBEAT_SECONDS = 10.0
 
@@ -670,7 +669,7 @@ def _format_model_stream_event(event_type: str, payload: dict[str, Any]) -> byte
         ensure_ascii=False,
         separators=(',', ':'),
     )
-    return f'data: {data}\n\n'.encode('utf-8')
+    return f'data: {data}\n\n'.encode()
 
 
 def _model_call_form_data(call: ModelCallRequest) -> dict[str, Any]:
@@ -812,13 +811,7 @@ def _model_call_request_hash(call: ModelCallRequest) -> str:
         'extra': call.model_extra or {},
         'service_principal': 'agentscope-runtime',
     }
-    canonical = json.dumps(
-        payload,
-        ensure_ascii=False,
-        separators=(',', ':'),
-        sort_keys=True,
-    )
-    return hashlib.sha256(canonical.encode('utf-8')).hexdigest()
+    return canonical_sha256(payload)
 
 
 def _structured_error(exc: Exception) -> dict[str, Any]:

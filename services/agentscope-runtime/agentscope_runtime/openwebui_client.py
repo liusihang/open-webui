@@ -19,7 +19,6 @@ from agentscope_runtime.schemas import (
     UserInputRequest,
 )
 
-
 MODEL_CALL_IN_PROGRESS_POLL_SECONDS = 0.25
 
 
@@ -244,6 +243,7 @@ class OpenWebUIClient:
         participant_id: str,
         user_input_id: str,
         tool_call_id: str,
+        checkpoint_version: int,
         message: str,
         requested_schema: dict[str, Any] | None = None,
         timeout_seconds: float | None = None,
@@ -255,6 +255,7 @@ class OpenWebUIClient:
             participant_id=participant_id,
             user_input_id=user_input_id,
             tool_call_id=tool_call_id,
+            checkpoint_version=checkpoint_version,
             message=message,
             requested_schema=requested_schema or {},
             timeout_seconds=timeout_seconds,
@@ -333,6 +334,8 @@ class OpenWebUIClient:
         tool_call_id: str,
         tool_id: str,
         arguments: dict[str, Any] | None = None,
+        checkpoint_version: int | None = None,
+        decision_execution_id: str | None = None,
     ) -> dict[str, Any]:
         body = ToolCallRequest(
             idempotency_key=idempotency_key,
@@ -341,13 +344,19 @@ class OpenWebUIClient:
             tool_call_id=tool_call_id,
             tool_id=tool_id,
             arguments=arguments or {},
+            checkpoint_version=checkpoint_version,
         )
         url = f"{self._base_url}/api/agent/service/runs/{run_id}/tool-call"
         return await self._post_callback(
             url,
             idempotency_key,
-            body.model_dump(mode="json"),
+            body.model_dump(mode="json", exclude_none=True),
             timeout=_user_input_timeout(None, self._timeout),
+            extra_headers=(
+                {"X-Agent-Decision-Execution-ID": decision_execution_id}
+                if decision_execution_id
+                else None
+            ),
         )
 
     async def _post_callback(
@@ -362,11 +371,13 @@ class OpenWebUIClient:
         retry_timeout_attempts: int = 1,
         accept_idempotency_conflict: bool = False,
         error_prefix: str = "OpenWebUI callback failed",
+        extra_headers: dict[str, str] | None = None,
     ) -> dict[str, Any]:
         headers = {
             "Authorization": f"Bearer {self._service_token}",
             "X-Agent-Idempotency-Key": idempotency_key,
         }
+        headers.update(extra_headers or {})
         deadline = (
             time.monotonic() + operation_poll_timeout
             if operation_poll_timeout is not None

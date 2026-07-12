@@ -1,10 +1,9 @@
 from __future__ import annotations
 
 from enum import StrEnum
-from typing import Any
+from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
-
 
 RAW_CREDENTIAL_FIELD_NAMES = {
     "user_jwt",
@@ -54,7 +53,7 @@ class RunStartRequest(BaseModel):
     metadata: dict[str, Any] = Field(default_factory=dict)
 
     @model_validator(mode="after")
-    def reject_raw_credential_payloads(self) -> "RunStartRequest":
+    def reject_raw_credential_payloads(self) -> RunStartRequest:
         blocked = _find_raw_credential_fields(
             {
                 "user_ref": self.user_ref,
@@ -93,6 +92,33 @@ class ApprovalDecisionNotification(BaseModel):
     result: dict[str, Any] | None = None
 
 
+class RuntimeExecutionPrepareRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    schema_version: Literal[1] = 1
+    execution_id: str
+    runtime_session_id: str
+    expected_checkpoint_version: int = Field(ge=0)
+    subject_id: str
+    command_type: Literal["resume_approval", "resume_user_input"]
+    payload: dict[str, Any] = Field(default_factory=dict)
+    fingerprint: str
+
+
+class RuntimeExecutionResponse(BaseModel):
+    execution_id: str
+    run_id: str
+    runtime_session_id: str
+    subject_id: str
+    command_type: str
+    fingerprint: str
+    state: str
+    checkpoint_version: int
+    duplicate: bool = False
+    outcome: dict[str, Any] | None = None
+    error: dict[str, Any] | None = None
+
+
 class AppendEventRequest(BaseModel):
     idempotency_key: str
     run_id: str
@@ -125,7 +151,7 @@ class TextDeltaRequest(BaseModel):
     payload: dict[str, Any] = Field(default_factory=dict)
 
     @model_validator(mode="after")
-    def reject_unsafe_replay_payload(self) -> "TextDeltaRequest":
+    def reject_unsafe_replay_payload(self) -> TextDeltaRequest:
         blocked = _find_unsafe_replay_fields(self.payload)
         if blocked:
             fields = ", ".join(sorted(blocked))
@@ -148,6 +174,7 @@ class UserInputRequest(BaseModel):
     participant_id: str
     user_input_id: str
     tool_call_id: str
+    checkpoint_version: int = Field(ge=0)
     message: str
     requested_schema: dict[str, Any] = Field(default_factory=dict)
     timeout_seconds: float | None = None
@@ -197,6 +224,7 @@ class ToolCallRequest(BaseModel):
     tool_call_id: str
     tool_id: str
     arguments: dict[str, Any] = Field(default_factory=dict)
+    checkpoint_version: int | None = Field(default=None, ge=0)
 
 
 def _find_raw_credential_fields(value: Any, path: str = "") -> set[str]:

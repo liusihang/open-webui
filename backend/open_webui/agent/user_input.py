@@ -1,25 +1,12 @@
 from __future__ import annotations
 
-import asyncio
-import hashlib
 import inspect
-import json
 from typing import Any, Literal
 
-from pydantic import BaseModel, Field, field_validator, model_validator
+from pydantic import BaseModel, Field, StrictInt, field_validator, model_validator
 
+from open_webui.agent.canonical import canonical_sha256
 from open_webui.agent.protocol import AgentEventType, AgentRunState
-
-
-USER_INPUT_POLL_INTERVAL_SECONDS = 0.05
-DEFAULT_USER_INPUT_TIMEOUT_SECONDS = 300.0
-
-USER_INPUT_TERMINAL_EVENT_TYPES = {
-    AgentEventType.USER_INPUT_COMPLETED.value,
-    AgentEventType.USER_INPUT_DECLINED.value,
-    AgentEventType.USER_INPUT_CANCELLED.value,
-    AgentEventType.USER_INPUT_EXPIRED.value,
-}
 
 SENSITIVE_FIELD_WORDS = {
     'api_key',
@@ -59,6 +46,7 @@ class UserInputRequest(BaseModel):
     requested_schema: dict[str, Any] = Field(default_factory=dict)
     timeout_seconds: float | None = None
     allow_cancel: bool = True
+    checkpoint_version: StrictInt
     idempotency_key: str | None = None
 
     @field_validator('message')
@@ -84,7 +72,7 @@ class UserInputCompletionRequest(BaseModel):
     idempotency_key: str | None = None
 
     @model_validator(mode='after')
-    def accepted_requires_content(self) -> 'UserInputCompletionRequest':
+    def accepted_requires_content(self) -> UserInputCompletionRequest:
         if self.status == 'accepted' and self.content is None:
             raise ValueError('content is required when status is accepted')
         return self
@@ -97,10 +85,6 @@ class AgentUserInputCoordinator:
     async def request_user_input(
         self,
         request: UserInputRequest,
-        *,
-        wait_for_response: bool = True,
-        response_timeout_seconds: float | None = None,
-        poll_interval_seconds: float = USER_INPUT_POLL_INTERVAL_SECONDS,
     ) -> dict[str, Any]:
         if not request.idempotency_key:
             raise UserInputError('idempotency_key_required')
@@ -114,43 +98,27 @@ class AgentUserInputCoordinator:
                 request_hash=request_hash,
             )
         )
-        if not claim.created:
-            cached = _cached_operation_response(claim.operation)
-            if wait_for_response and cached.get('status') == 'requested':
-                requested = await self._find_request(
-                    run_id=request.run_id,
-                    user_input_id=request.user_input_id,
-                )
-                if requested is not None:
-                    return await self._wait_for_response(
-                        request=request,
-                        requested_seq=_event_seq(requested),
-                        timeout_seconds=_timeout_seconds(
-                            response_timeout_seconds,
-                            request.timeout_seconds,
-                        ),
-                        poll_interval_seconds=poll_interval_seconds,
-                    )
-            return cached
-
         response = {
             'status': 'requested',
             'user_input_id': request.user_input_id,
         }
-        try:
-            await _maybe_await(
-                self.store.transition_state(
-                    request.run_id,
-                    from_states=[AgentRunState.RUNNING.value],
-                    to_state=AgentRunState.WAITING_USER_INPUT.value,
-                    reason='agent requested user input',
-                    payload={
-                        'user_input_id': request.user_input_id,
-                        'tool_call_id': request.tool_call_id,
-                    },
-                )
+        if not claim.created:
+            if claim.operation.status != 'in_progress':
+                cached = _cached_operation_response(claim.operation)
+                return cached
+            requested = await self._find_request(
+                run_id=request.run_id,
+                user_input_id=request.user_input_id,
             )
-            requested_event = await _append_user_input_event(
+            if requested is None:
+                raise UserInputOperationInProgress('operation_in_progress')
+            await _maybe_await(
+                self.store.finish_operation_success(claim.operation.id, response)
+            )
+            return response
+
+        try:
+            await _append_user_input_event(
                 self.store,
                 request.run_id,
                 event_type=AgentEventType.USER_INPUT_REQUESTED.value,
@@ -162,17 +130,7 @@ class AgentUserInputCoordinator:
             await _maybe_await(
                 self.store.finish_operation_success(claim.operation.id, response)
             )
-            if not wait_for_response:
-                return response
-            return await self._wait_for_response(
-                request=request,
-                requested_seq=_event_seq(requested_event),
-                timeout_seconds=_timeout_seconds(
-                    response_timeout_seconds,
-                    request.timeout_seconds,
-                ),
-                poll_interval_seconds=poll_interval_seconds,
-            )
+            return response
         except Exception as exc:
             await _maybe_await(
                 self.store.finish_operation_error(
@@ -189,136 +147,45 @@ class AgentUserInputCoordinator:
         if not request.idempotency_key:
             raise UserInputError('idempotency_key_required')
 
-        request_hash = _completion_hash(request)
-        claim = await _maybe_await(
-            self.store.claim_operation(
-                request.run_id,
-                operation_type='user_input.result',
-                idempotency_key=request.idempotency_key,
-                request_hash=request_hash,
-            )
+        requested = await self._find_request(
+            run_id=request.run_id,
+            user_input_id=request.user_input_id,
         )
-        if not claim.created:
-            return _cached_operation_response(claim.operation)
-
-        try:
-            recorded = await self._find_recorded_response(
-                run_id=request.run_id,
-                user_input_id=request.user_input_id,
-                after_seq=0,
+        if requested is None:
+            raise UserInputNotFound(
+                f'Unknown user input request: {request.user_input_id}'
             )
-            if recorded is not None:
-                response = _response_from_recorded(recorded)
-                if response != _completion_response(request):
-                    await _finish_operation_error(
-                        self.store,
-                        claim.operation.id,
-                        code=UserInputConflict.code,
-                        message='user input already has a different result',
-                    )
-                    raise UserInputConflict('user input already has a different result')
-                await _maybe_await(
-                    self.store.finish_operation_success(claim.operation.id, response)
-                )
-                return response
-
-            requested = await self._find_request(
-                run_id=request.run_id,
-                user_input_id=request.user_input_id,
-            )
-            if requested is None:
-                await _finish_operation_error(
-                    self.store,
-                    claim.operation.id,
-                    code=UserInputNotFound.code,
-                    message=f'Unknown user input request: {request.user_input_id}',
-                )
-                raise UserInputNotFound(f'Unknown user input request: {request.user_input_id}')
-
-            response = await self._record_completion(request, requested)
-            await _maybe_await(
-                self.store.finish_operation_success(claim.operation.id, response)
-            )
-            return response
-        except Exception as exc:
-            if not isinstance(exc, (UserInputNotFound, UserInputConflict)):
-                await _finish_operation_error(
-                    self.store,
-                    claim.operation.id,
-                    code=getattr(exc, 'code', 'user_input_result_failed'),
-                    message=str(exc),
-                )
-            raise
-
-    async def _wait_for_response(
-        self,
-        *,
-        request: UserInputRequest,
-        requested_seq: int,
-        timeout_seconds: float,
-        poll_interval_seconds: float,
-    ) -> dict[str, Any]:
-        deadline = asyncio.get_running_loop().time() + max(timeout_seconds, 0.0)
-        while True:
-            recorded = await self._find_recorded_response(
-                run_id=request.run_id,
-                user_input_id=request.user_input_id,
-                after_seq=requested_seq,
-            )
-            if recorded is not None:
-                return _response_from_recorded(recorded)
-
-            now = asyncio.get_running_loop().time()
-            if now >= deadline:
-                completion = UserInputCompletionRequest(
-                    run_id=request.run_id,
-                    user_input_id=request.user_input_id,
-                    status='timeout',
-                    idempotency_key=f'user-input-timeout:{request.user_input_id}',
-                )
-                requested = await self._find_request(
-                    run_id=request.run_id,
-                    user_input_id=request.user_input_id,
-                )
-                if requested is None:
-                    return _completion_response(completion)
-                return await self._record_completion(completion, requested)
-            await asyncio.sleep(min(poll_interval_seconds, max(deadline - now, 0.0)))
-
-    async def _record_completion(
-        self,
-        request: UserInputCompletionRequest,
-        requested: dict[str, Any],
-    ) -> dict[str, Any]:
-        payload = {
-            **(requested.get('payload') or {}),
-            'status': request.status,
-        }
+        payload = {}
         if request.content is not None:
             payload['content'] = request.content
-
-        await _maybe_await(
-            self.store.transition_state(
-                request.run_id,
-                from_states=[AgentRunState.WAITING_USER_INPUT.value],
-                to_state=AgentRunState.RUNNING.value,
-                reason=f'user input {request.status}',
-                payload={
-                    'user_input_id': request.user_input_id,
-                    'status': request.status,
-                },
+        try:
+            recorded = await _maybe_await(
+                self.store.record_decision_execution(
+                    request.run_id,
+                    resource_type='user_input',
+                    resource_id=request.user_input_id,
+                    decision=request.status,
+                    payload=payload,
+                    operation_type='user_input.result',
+                    idempotency_key=request.idempotency_key,
+                    request_hash=_completion_hash(request),
+                )
             )
-        )
-        await _append_user_input_event(
-            self.store,
-            request.run_id,
-            event_type=_completion_event_type(request.status),
-            participant_id=requested.get('participant_id'),
-            phase=AgentRunState.RUNNING.value,
-            summary=_completion_summary(request.status),
-            payload=payload,
-        )
-        return _completion_response(request)
+        except Exception as exc:
+            if getattr(exc, 'code', None) == 'decision_conflict':
+                raise UserInputConflict(str(exc)) from exc
+            raise
+        if recorded.execution is None:
+            response = _response_from_recorded(
+                _event_dict(recorded.historical_event)
+            )
+            response['execution_id'] = None
+            response['execution_status'] = 'historical_completed'
+            return response
+        response = _completion_response(request)
+        response['execution_id'] = recorded.execution.id
+        response['execution_status'] = recorded.execution.status
+        return response
 
     async def _find_request(
         self,
@@ -331,20 +198,6 @@ class AgentUserInputCoordinator:
             user_input_id=user_input_id,
             event_types={AgentEventType.USER_INPUT_REQUESTED.value},
             after_seq=0,
-        )
-
-    async def _find_recorded_response(
-        self,
-        *,
-        run_id: str,
-        user_input_id: str,
-        after_seq: int,
-    ) -> dict[str, Any] | None:
-        return await self._find_event(
-            run_id=run_id,
-            user_input_id=user_input_id,
-            event_types=USER_INPUT_TERMINAL_EVENT_TYPES,
-            after_seq=after_seq,
         )
 
     async def _find_event(
@@ -378,6 +231,7 @@ def _request_event_payload(request: UserInputRequest) -> dict[str, Any]:
         'requested_schema': request.requested_schema,
         'timeout_seconds': request.timeout_seconds,
         'allow_cancel': request.allow_cancel,
+        'checkpoint_version': request.checkpoint_version,
     }
 
 
@@ -411,26 +265,6 @@ def _response_from_recorded(recorded: dict[str, Any]) -> dict[str, Any]:
     return response
 
 
-def _completion_event_type(status: str) -> str:
-    if status == 'accepted':
-        return AgentEventType.USER_INPUT_COMPLETED.value
-    if status == 'declined':
-        return AgentEventType.USER_INPUT_DECLINED.value
-    if status == 'cancelled':
-        return AgentEventType.USER_INPUT_CANCELLED.value
-    return AgentEventType.USER_INPUT_EXPIRED.value
-
-
-def _completion_summary(status: str) -> str:
-    if status == 'accepted':
-        return 'User input submitted'
-    if status == 'declined':
-        return 'User input declined'
-    if status == 'cancelled':
-        return 'User input cancelled'
-    return 'User input timed out'
-
-
 async def _append_user_input_event(
     store,
     run_id: str,
@@ -453,18 +287,6 @@ async def _append_user_input_event(
     )
 
 
-async def _finish_operation_error(store, operation_id: str, *, code: str, message: str) -> None:
-    await _maybe_await(
-        store.finish_operation_error(
-            operation_id,
-            {
-                'code': code,
-                'message': message,
-            },
-        )
-    )
-
-
 def _request_hash(request: UserInputRequest) -> str:
     return _hash_payload(
         {
@@ -477,6 +299,7 @@ def _request_hash(request: UserInputRequest) -> str:
             'requested_schema': request.requested_schema,
             'timeout_seconds': request.timeout_seconds,
             'allow_cancel': request.allow_cancel,
+            'checkpoint_version': request.checkpoint_version,
         }
     )
 
@@ -494,13 +317,7 @@ def _completion_hash(request: UserInputCompletionRequest) -> str:
 
 
 def _hash_payload(payload: dict[str, Any]) -> str:
-    canonical = json.dumps(
-        payload,
-        ensure_ascii=False,
-        separators=(',', ':'),
-        sort_keys=True,
-    )
-    return hashlib.sha256(canonical.encode('utf-8')).hexdigest()
+    return canonical_sha256(payload)
 
 
 def _cached_operation_response(operation) -> dict[str, Any]:
@@ -517,17 +334,6 @@ def _cached_operation_response(operation) -> dict[str, Any]:
     raise UserInputError(f'Unsupported operation status: {operation.status}')
 
 
-def _timeout_seconds(*values: float | None) -> float:
-    for value in values:
-        if value is None:
-            continue
-        try:
-            return max(float(value), 0.0)
-        except (TypeError, ValueError):
-            continue
-    return DEFAULT_USER_INPUT_TIMEOUT_SECONDS
-
-
 async def _maybe_await(value: Any) -> Any:
     if inspect.isawaitable(value):
         return await value
@@ -540,11 +346,6 @@ def _event_dict(event: Any) -> dict[str, Any]:
     if hasattr(event, 'model_dump'):
         return event.model_dump(mode='json')
     return dict(getattr(event, '__dict__', {}))
-
-
-def _event_seq(event: Any) -> int:
-    value = _event_dict(event).get('seq', 0)
-    return value if isinstance(value, int) else 0
 
 
 def _reject_sensitive_schema(schema: Any, path: str = 'requested_schema') -> None:

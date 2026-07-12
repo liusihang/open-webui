@@ -272,10 +272,7 @@ async def test_bridge_builds_agentscope_template_model_and_tool_callback_boundar
     assert tool_chunk.state == ToolResultState.SUCCESS
     assert tool_chunk.content[0].text == "tool callback answer"
     assert callbacks.text_deltas == []
-    assert [event["event_type"] for event in callbacks.events] == [
-        "tool.requested",
-        "tool.completed",
-    ]
+    assert [event["event_type"] for event in callbacks.events] == ["tool.requested"]
     assert callbacks.tool_calls[0]["idempotency_key"] == ("tool:subagent:run-bridge:1:tool-call-1:1")
     assert callbacks.tool_calls[0]["arguments"] == {"query": "agent mode"}
 
@@ -533,6 +530,427 @@ async def test_model_bridge_preserves_openwebui_tool_calls_as_agentscope_blocks(
     assert tool_calls[0].name == "search_web"
     assert tool_calls[0].input == "{\"query\":\"agent mode\"}"
     assert [item["delta"] for item in callbacks.text_deltas] == ["I will search first."]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("raw_arguments", ["", " \t\r\n"])
+@pytest.mark.parametrize("indexed", [False, True])
+async def test_model_bridge_normalizes_blank_tool_arguments_to_empty_object(
+    raw_arguments: str,
+    indexed: bool,
+) -> None:
+    from agentscope.message import ToolCallBlock
+
+    from agentscope_runtime.agentscope_bridge import OpenWebUIAgentScopeModel
+
+    callbacks = RecordingBridgeCallbacks()
+
+    async def blank_arguments_stream(**kwargs: object):
+        callbacks.model_calls.append(kwargs)
+        yield {
+            "type": "chunk",
+            "delta": {
+                "content": None,
+                "tool_calls": [
+                    {
+                        **({"index": 0} if indexed else {}),
+                        "id": "call_environment",
+                        "type": "function",
+                        "function": {
+                            "name": "get_environment",
+                            "arguments": raw_arguments,
+                        },
+                    }
+                ],
+            },
+        }
+        yield {"type": "stream_end"}
+
+    callbacks.call_model_stream = blank_arguments_stream
+    model = OpenWebUIAgentScopeModel(
+        run_id="run-blank-tool-arguments",
+        runtime_session_id="rt-blank-tool-arguments",
+        participant_id="leader",
+        model_id="claude-sonnet-4-5",
+        callback_client=callbacks,
+    )
+
+    response = None
+    async for chunk in await model(
+        [{"role": "user", "content": "Inspect."}],
+        tools=[
+            {
+                "type": "function",
+                "function": {
+                    "name": "get_environment",
+                    "description": "Get environment.",
+                    "parameters": {"type": "object", "properties": {}},
+                },
+            }
+        ],
+    ):
+        response = chunk
+
+    assert response is not None
+    tool_calls = [block for block in response.content if isinstance(block, ToolCallBlock)]
+    assert [block.input for block in tool_calls] == ["{}"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("raw_arguments", "expected_arguments"),
+    [
+        ({"query": "agent mode"}, '{"query": "agent mode"}'),
+        (["agent mode"], '["agent mode"]'),
+        (None, "null"),
+    ],
+)
+async def test_model_bridge_json_serializes_non_string_tool_arguments(
+    raw_arguments: object,
+    expected_arguments: str,
+) -> None:
+    from agentscope.message import ToolCallBlock
+
+    from agentscope_runtime.agentscope_bridge import OpenWebUIAgentScopeModel
+
+    callbacks = RecordingBridgeCallbacks()
+
+    async def non_string_arguments_stream(**kwargs: object):
+        callbacks.model_calls.append(kwargs)
+        yield {
+            "type": "chunk",
+            "delta": {
+                "content": None,
+                "tool_calls": [
+                    {
+                        "id": "call_environment",
+                        "type": "function",
+                        "function": {
+                            "name": "get_environment",
+                            "arguments": raw_arguments,
+                        },
+                    }
+                ],
+            },
+        }
+        yield {"type": "stream_end"}
+
+    callbacks.call_model_stream = non_string_arguments_stream
+    model = OpenWebUIAgentScopeModel(
+        run_id="run-non-string-tool-arguments",
+        runtime_session_id="rt-non-string-tool-arguments",
+        participant_id="leader",
+        model_id="claude-sonnet-4-5",
+        callback_client=callbacks,
+    )
+
+    response = None
+    async for chunk in await model(
+        [{"role": "user", "content": "Inspect."}],
+        tools=[
+            {
+                "type": "function",
+                "function": {
+                    "name": "get_environment",
+                    "description": "Get environment.",
+                    "parameters": {"type": "object", "properties": {}},
+                },
+            }
+        ],
+    ):
+        response = chunk
+
+    assert response is not None
+    tool_calls = [block for block in response.content if isinstance(block, ToolCallBlock)]
+    assert [block.input for block in tool_calls] == [expected_arguments]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("raw_arguments", "expected_arguments"),
+    [
+        ({"query": "agent mode"}, '{"query": "agent mode"}'),
+        (["agent mode"], '["agent mode"]'),
+        (None, "null"),
+    ],
+)
+async def test_model_bridge_json_serializes_indexed_non_string_tool_arguments(
+    raw_arguments: object,
+    expected_arguments: str,
+) -> None:
+    from agentscope.message import ToolCallBlock
+
+    from agentscope_runtime.agentscope_bridge import OpenWebUIAgentScopeModel
+
+    callbacks = RecordingBridgeCallbacks()
+
+    async def indexed_non_string_arguments_stream(**kwargs: object):
+        callbacks.model_calls.append(kwargs)
+        yield {
+            "type": "chunk",
+            "delta": {
+                "content": None,
+                "tool_calls": [
+                    {
+                        "index": 0,
+                        "id": "call_environment",
+                        "type": "function",
+                        "function": {
+                            "name": "get_environment",
+                            "arguments": raw_arguments,
+                        },
+                    }
+                ],
+            },
+        }
+        yield {"type": "stream_end"}
+
+    callbacks.call_model_stream = indexed_non_string_arguments_stream
+    model = OpenWebUIAgentScopeModel(
+        run_id="run-indexed-non-string-tool-arguments",
+        runtime_session_id="rt-indexed-non-string-tool-arguments",
+        participant_id="leader",
+        model_id="claude-sonnet-4-5",
+        callback_client=callbacks,
+    )
+
+    response = None
+    async for chunk in await model(
+        [{"role": "user", "content": "Inspect."}],
+        tools=[
+            {
+                "type": "function",
+                "function": {
+                    "name": "get_environment",
+                    "description": "Get environment.",
+                    "parameters": {"type": "object", "properties": {}},
+                },
+            }
+        ],
+    ):
+        response = chunk
+
+    assert response is not None
+    tool_calls = [block for block in response.content if isinstance(block, ToolCallBlock)]
+    assert [block.input for block in tool_calls] == [expected_arguments]
+
+
+@pytest.mark.asyncio
+async def test_model_bridge_concatenates_indexed_string_argument_fragments() -> None:
+    from agentscope.message import ToolCallBlock
+
+    from agentscope_runtime.agentscope_bridge import OpenWebUIAgentScopeModel
+
+    callbacks = RecordingBridgeCallbacks()
+
+    async def indexed_string_arguments_stream(**kwargs: object):
+        callbacks.model_calls.append(kwargs)
+        yield {
+            "type": "chunk",
+            "delta": {
+                "content": None,
+                "tool_calls": [
+                    {
+                        "index": 0,
+                        "id": "call_search",
+                        "type": "function",
+                        "function": {
+                            "name": "search_web",
+                            "arguments": '{"query":',
+                        },
+                    }
+                ],
+            },
+        }
+        yield {
+            "type": "chunk",
+            "delta": {
+                "content": None,
+                "tool_calls": [
+                    {
+                        "index": 0,
+                        "function": {"arguments": '"agent mode"}'},
+                    }
+                ],
+            },
+        }
+        yield {"type": "stream_end"}
+
+    callbacks.call_model_stream = indexed_string_arguments_stream
+    model = OpenWebUIAgentScopeModel(
+        run_id="run-indexed-string-tool-arguments",
+        runtime_session_id="rt-indexed-string-tool-arguments",
+        participant_id="leader",
+        model_id="gpt-5.4",
+        callback_client=callbacks,
+    )
+
+    response = None
+    async for chunk in await model(
+        [{"role": "user", "content": "Search."}],
+        tools=[
+            {
+                "type": "function",
+                "function": {
+                    "name": "search_web",
+                    "description": "Search the web.",
+                    "parameters": {"type": "object", "properties": {}},
+                },
+            }
+        ],
+    ):
+        response = chunk
+
+    assert response is not None
+    tool_calls = [block for block in response.content if isinstance(block, ToolCallBlock)]
+    assert [block.input for block in tool_calls] == ['{"query":"agent mode"}']
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("first_arguments", "second_arguments"),
+    [
+        ({"scope": "runtime"}, "{}"),
+        ("{}", {"scope": "runtime"}),
+        ("[]", ["runtime"]),
+        ("null", None),
+        ({"scope": "runtime"}, {"scope": "runtime"}),
+        (["runtime"], ["runtime"]),
+        (None, None),
+    ],
+)
+async def test_model_bridge_rejects_unmergeable_indexed_argument_types(
+    first_arguments: object,
+    second_arguments: object,
+) -> None:
+    from agentscope_runtime.agentscope_bridge import OpenWebUIAgentScopeModel
+
+    callbacks = RecordingBridgeCallbacks()
+
+    async def mixed_indexed_arguments_stream(**kwargs: object):
+        callbacks.model_calls.append(kwargs)
+        yield {
+            "type": "chunk",
+            "delta": {
+                "content": None,
+                "tool_calls": [
+                    {
+                        "index": 0,
+                        "id": "call_environment",
+                        "type": "function",
+                        "function": {
+                            "name": "get_environment",
+                            "arguments": first_arguments,
+                        },
+                    }
+                ],
+            },
+        }
+        yield {
+            "type": "chunk",
+            "delta": {
+                "content": None,
+                "tool_calls": [
+                    {
+                        "index": 0,
+                        "function": {"arguments": second_arguments},
+                    }
+                ],
+            },
+        }
+        yield {"type": "stream_end"}
+
+    callbacks.call_model_stream = mixed_indexed_arguments_stream
+    model = OpenWebUIAgentScopeModel(
+        run_id="run-mixed-indexed-tool-arguments",
+        runtime_session_id="rt-mixed-indexed-tool-arguments",
+        participant_id="leader",
+        model_id="claude-sonnet-4-5",
+        callback_client=callbacks,
+    )
+
+    with pytest.raises(RuntimeError, match="cannot merge indexed tool arguments"):
+        async for _ in await model(
+            [{"role": "user", "content": "Inspect."}],
+            tools=[
+                {
+                    "type": "function",
+                    "function": {
+                        "name": "get_environment",
+                        "description": "Get environment.",
+                        "parameters": {"type": "object", "properties": {}},
+                    },
+                }
+            ],
+        ):
+            pass
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("indexed", [False, True])
+async def test_model_bridge_preserves_malformed_nonblank_tool_arguments_for_rejection(
+    indexed: bool,
+) -> None:
+    from agentscope._utils._common import _json_loads_with_repair
+    from agentscope.exception import ToolJSONDecodeError
+    from agentscope.message import ToolCallBlock
+
+    from agentscope_runtime.agentscope_bridge import OpenWebUIAgentScopeModel
+
+    callbacks = RecordingBridgeCallbacks()
+    malformed_arguments = "{bad"
+
+    async def malformed_arguments_stream(**kwargs: object):
+        callbacks.model_calls.append(kwargs)
+        yield {
+            "type": "chunk",
+            "delta": {
+                "content": None,
+                "tool_calls": [
+                    {
+                        **({"index": 0} if indexed else {}),
+                        "id": "call_environment",
+                        "type": "function",
+                        "function": {
+                            "name": "get_environment",
+                            "arguments": malformed_arguments,
+                        },
+                    }
+                ],
+            },
+        }
+        yield {"type": "stream_end"}
+
+    callbacks.call_model_stream = malformed_arguments_stream
+    model = OpenWebUIAgentScopeModel(
+        run_id="run-malformed-tool-arguments",
+        runtime_session_id="rt-malformed-tool-arguments",
+        participant_id="leader",
+        model_id="claude-sonnet-4-5",
+        callback_client=callbacks,
+    )
+
+    response = None
+    async for chunk in await model(
+        [{"role": "user", "content": "Inspect."}],
+        tools=[
+            {
+                "type": "function",
+                "function": {
+                    "name": "get_environment",
+                    "description": "Get environment.",
+                    "parameters": {"type": "object", "properties": {}},
+                },
+            }
+        ],
+    ):
+        response = chunk
+
+    assert response is not None
+    tool_calls = [block for block in response.content if isinstance(block, ToolCallBlock)]
+    assert [block.input for block in tool_calls] == [malformed_arguments]
+    with pytest.raises(ToolJSONDecodeError, match="JSONDecodeError"):
+        _json_loads_with_repair(tool_calls[0].input)
 
 
 @pytest.mark.asyncio
@@ -925,6 +1343,172 @@ async def test_model_bridge_strips_split_in_band_final_marker_and_preserves_delt
 
     assert [chunk.content[0].text for chunk in chunks[:-1]] == ["Final ", "answer."]
     assert chunks[-1].content[0].text == "Final answer."
+
+
+@pytest.mark.asyncio
+async def test_model_bridge_strips_verified_wrapped_commentary_marker() -> None:
+    from agentscope_runtime.agentscope_bridge import OpenWebUIAgentScopeModel
+
+    callbacks = RecordingBridgeCallbacks()
+
+    async def wrapped_commentary_stream(**kwargs: object):
+        callbacks.model_calls.append(kwargs)
+        for content in ("**进度说明 (phase=comm", "entary)：**", "Checking."):
+            yield {
+                "type": "chunk",
+                "delta": {"content": content, "tool_calls": None},
+            }
+        yield {
+            "type": "chunk",
+            "delta": {
+                "content": None,
+                "tool_calls": [
+                    {
+                        "id": "call_environment",
+                        "type": "function",
+                        "function": {
+                            "name": "get_environment",
+                            "arguments": "{}",
+                        },
+                    }
+                ],
+            },
+        }
+        yield {"type": "stream_end"}
+
+    callbacks.call_model_stream = wrapped_commentary_stream
+    model = OpenWebUIAgentScopeModel(
+        run_id="run-wrapped-commentary-marker",
+        runtime_session_id="rt-wrapped-commentary-marker",
+        participant_id="leader",
+        model_id="claude-sonnet-4-5",
+        callback_client=callbacks,
+    )
+
+    chunks = [
+        chunk
+        async for chunk in await model(
+            [{"role": "user", "content": "Inspect."}],
+            tools=[
+                {
+                    "type": "function",
+                    "function": {
+                        "name": "get_environment",
+                        "description": "Get environment.",
+                        "parameters": {"type": "object", "properties": {}},
+                    },
+                }
+            ],
+        )
+    ]
+
+    assert [item["delta"] for item in callbacks.text_deltas] == ["Checking."]
+    assert chunks[-1].content[0].text == "Checking."
+
+
+@pytest.mark.asyncio
+async def test_model_bridge_strips_verified_wrapped_final_marker_and_preserves_deltas() -> None:
+    from agentscope_runtime.agentscope_bridge import OpenWebUIAgentScopeModel
+
+    callbacks = RecordingBridgeCallbacks()
+
+    async def wrapped_final_stream(**kwargs: object):
+        callbacks.model_calls.append(kwargs)
+        for content in ("**总结 (phase=final_", "answer)：**", "Final ", "answer."):
+            yield {
+                "type": "chunk",
+                "delta": {"content": content, "tool_calls": None},
+            }
+        yield {"type": "stream_end"}
+
+    callbacks.call_model_stream = wrapped_final_stream
+    model = OpenWebUIAgentScopeModel(
+        run_id="run-wrapped-final-marker",
+        runtime_session_id="rt-wrapped-final-marker",
+        participant_id="leader",
+        model_id="claude-sonnet-4-5",
+        callback_client=callbacks,
+    )
+
+    chunks = [
+        chunk
+        async for chunk in await model([{"role": "user", "content": "Answer."}])
+    ]
+
+    assert [chunk.content[0].text for chunk in chunks[:-1]] == ["Final ", "answer."]
+    assert chunks[-1].content[0].text == "Final answer."
+
+
+@pytest.mark.asyncio
+async def test_model_bridge_keeps_nonleading_wrapped_phase_text() -> None:
+    from agentscope_runtime.agentscope_bridge import OpenWebUIAgentScopeModel
+
+    callbacks = RecordingBridgeCallbacks()
+
+    async def nonleading_marker_stream(**kwargs: object):
+        callbacks.model_calls.append(kwargs)
+        yield {
+            "type": "chunk",
+            "delta": {
+                "content": "Keep **总结 (phase=final_answer)：** visible.",
+                "phase": "final_answer",
+                "tool_calls": None,
+            },
+        }
+        yield {"type": "stream_end"}
+
+    callbacks.call_model_stream = nonleading_marker_stream
+    model = OpenWebUIAgentScopeModel(
+        run_id="run-nonleading-wrapped-marker",
+        runtime_session_id="rt-nonleading-wrapped-marker",
+        participant_id="leader",
+        model_id="claude-sonnet-4-5",
+        callback_client=callbacks,
+    )
+
+    chunks = [
+        chunk
+        async for chunk in await model([{"role": "user", "content": "Answer."}])
+    ]
+
+    expected = "Keep **总结 (phase=final_answer)：** visible."
+    assert [chunk.content[0].text for chunk in chunks[:-1]] == [expected]
+    assert chunks[-1].content[0].text == expected
+
+
+@pytest.mark.asyncio
+async def test_model_bridge_rejects_wrapped_marker_conflicting_with_explicit_phase() -> None:
+    from agentscope_runtime.agentscope_bridge import OpenWebUIAgentScopeModel
+
+    callbacks = RecordingBridgeCallbacks()
+
+    async def conflicting_marker_stream(**kwargs: object):
+        callbacks.model_calls.append(kwargs)
+        yield {
+            "type": "chunk",
+            "delta": {
+                "content": "**进度说明 (phase=commentary)：**Late note.",
+                "phase": "final_answer",
+                "tool_calls": None,
+            },
+        }
+        yield {"type": "stream_end"}
+
+    callbacks.call_model_stream = conflicting_marker_stream
+    model = OpenWebUIAgentScopeModel(
+        run_id="run-conflicting-wrapped-marker",
+        runtime_session_id="rt-conflicting-wrapped-marker",
+        participant_id="leader",
+        model_id="claude-sonnet-4-5",
+        callback_client=callbacks,
+    )
+
+    yielded = []
+    with pytest.raises(RuntimeError, match="invalid_model_phase_marker"):
+        async for chunk in await model([{"role": "user", "content": "Answer."}]):
+            yielded.append(chunk)
+
+    assert yielded == []
 
 
 @pytest.mark.asyncio
@@ -1569,10 +2153,31 @@ async def test_tool_proxy_failure_emits_structured_events_without_synthetic_text
         await tool(path="/tmp/private.txt", content="secret value")
 
     assert callbacks.text_deltas == []
-    assert [event["event_type"] for event in callbacks.events] == [
-        "tool.requested",
-        "tool.failed",
-    ]
+    assert [event["event_type"] for event in callbacks.events] == ["tool.requested"]
+
+
+@pytest.mark.asyncio
+async def test_tool_proxy_success_leaves_terminal_event_to_backend_owner() -> None:
+    from agentscope_runtime.agentscope_bridge import AgentScopeRuntimeBridge
+
+    callbacks = RecordingBridgeCallbacks()
+    bridge = AgentScopeRuntimeBridge(
+        run_id="run-tool-success",
+        runtime_session_id="rt-run-tool-success",
+        callback_client=callbacks,
+    )
+    tool = bridge.build_tool_proxy(
+        participant_id="leader",
+        tool_id="tool:builtin:read_file:read_file",
+        name="read_file",
+        description="Read a file.",
+        input_schema={"type": "object", "properties": {}},
+    )
+
+    result = await tool(path="/tmp/input.txt")
+
+    assert result.state.value == "success"
+    assert [event["event_type"] for event in callbacks.events] == ["tool.requested"]
 
 
 @pytest.mark.asyncio
@@ -1616,3 +2221,46 @@ async def test_tool_proxy_approval_emits_no_synthetic_text(
 
     assert callbacks.text_deltas == []
     assert [event["event_type"] for event in callbacks.events] == ["tool.requested"]
+
+
+def test_durable_bridge_exposes_backend_tools_as_agentscope_external_executions() -> None:
+    from agentscope_runtime.agentscope_bridge import AgentScopeRuntimeBridge
+
+    bridge = AgentScopeRuntimeBridge(
+        run_id="run-durable",
+        runtime_session_id="rt-run-durable",
+        callback_client=RecordingBridgeCallbacks(),
+        durable_external_tools=True,
+    )
+    tool = bridge.build_tool_proxy(
+        participant_id="leader",
+        tool_id="tool:terminal:main:write_file",
+        name="write_file",
+        description="Write a file",
+        input_schema={"type": "object"},
+    )
+
+    assert tool.is_external_tool is True
+
+
+def test_bridge_checkpoint_state_restores_stable_tool_and_model_counters() -> None:
+    from agentscope_runtime.agentscope_bridge import AgentScopeRuntimeBridge
+
+    callbacks = RecordingBridgeCallbacks()
+    bridge = AgentScopeRuntimeBridge(
+        run_id="run-checkpoint",
+        runtime_session_id="rt-run-checkpoint",
+        callback_client=callbacks,
+        checkpoint_state={
+            "next_tool_call_index": 7,
+            "model_call_indexes": {"leader": 5},
+        },
+    )
+    model = bridge.build_model(participant_id="leader", model_id="model-a")
+
+    assert bridge._allocate_tool_call_id() == "tool-call-7"
+    assert model._allocate_model_call_id() == "model-call-5"
+    assert bridge.snapshot_state() == {
+        "next_tool_call_index": 8,
+        "model_call_indexes": {"leader": 6},
+    }

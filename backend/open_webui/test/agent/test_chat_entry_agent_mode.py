@@ -134,11 +134,15 @@ def _patch_model_and_chat_boundaries(monkeypatch, calls):
         calls.upserts.append((chat_id, message_id, message))
         return message
 
+    async def fake_publish_event(*args, **kwargs):
+        return None
+
     monkeypatch.setattr(main.Models, 'get_model_by_id', fake_get_model_by_id)
     monkeypatch.setattr(main.Config, 'get', fake_config_get)
     monkeypatch.setattr(main.Chats, 'is_chat_owner', fake_is_chat_owner)
     monkeypatch.setattr(main.Chats, 'get_message_by_id_and_message_id', fake_get_message)
     monkeypatch.setattr(main.Chats, 'upsert_message_to_chat_by_id_and_message_id', fake_upsert)
+    monkeypatch.setattr(main, 'publish_event', fake_publish_event)
 
 
 def _patch_legacy_chat_pipeline(monkeypatch, calls):
@@ -177,6 +181,14 @@ def _patch_runtime_client(monkeypatch, calls):
 
         async def start_run(self, payload):
             calls.runtime_calls.append(payload)
+            await AgentRuns.append_event(
+                payload['run_id'],
+                event_type='run.running',
+                participant_id='leader',
+                phase='running',
+                summary='Agent runtime accepted run.',
+                payload={'runtime_session_id': 'runtime-session-1'},
+            )
             return {'accepted': True, 'runtime_session_id': 'runtime-session-1'}
 
     monkeypatch.setattr(main, 'AgentRuntimeClient', RuntimeClient, raising=False)
@@ -271,7 +283,7 @@ async def test_agent_mode_enabled_creates_run_links_message_and_starts_runtime(
 
 
 @pytest.mark.asyncio
-async def test_agent_mode_marks_run_running_before_runtime_start(
+async def test_agent_mode_stays_queued_until_runtime_acceptance_event(
     monkeypatch,
     agent_run_db,
     chat_entry_patches,
@@ -285,6 +297,14 @@ async def test_agent_mode_marks_run_running_before_runtime_start(
         async def start_run(self, payload):
             run = await AgentRuns.get_run(payload['run_id'])
             observed_states.append(run.state)
+            await AgentRuns.append_event(
+                payload['run_id'],
+                event_type='run.running',
+                participant_id='leader',
+                phase='running',
+                summary='Agent runtime accepted run.',
+                payload={'runtime_session_id': 'runtime-session-1'},
+            )
             return {'accepted': True, 'runtime_session_id': 'runtime-session-1'}
 
     monkeypatch.setattr(main, 'AgentRuntimeClient', InspectingRuntimeClient, raising=False)
@@ -292,7 +312,7 @@ async def test_agent_mode_marks_run_running_before_runtime_start(
 
     await main.chat_completion(request, _chat_form(), _user())
 
-    assert observed_states == ['running']
+    assert observed_states == ['queued']
 
 
 @pytest.mark.asyncio

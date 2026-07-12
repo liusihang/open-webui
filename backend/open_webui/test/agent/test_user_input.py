@@ -1,11 +1,11 @@
 import asyncio
 import os
+from types import SimpleNamespace
 
 os.environ.setdefault('WEBUI_SECRET_KEY', 'test-secret')
 os.environ.setdefault('ENABLE_DB_MIGRATIONS', 'false')
 
 import pytest
-
 from open_webui.agent.user_input import (
     AgentUserInputCoordinator,
     UserInputCompletionRequest,
@@ -21,6 +21,7 @@ class FakeUserInputStore:
         self.claims = {}
         self.claim_count = 0
         self.transitions = []
+        self.decision_executions = {}
 
     async def transition_state(self, run_id, *, from_states, to_state, reason, payload=None):
         current = self.state[run_id]
@@ -48,6 +49,15 @@ class FakeUserInputStore:
         summary=None,
         payload=None,
     ):
+        target_state = {
+            'user_input.requested': 'waiting_user_input',
+            'user_input.completed': 'running',
+            'user_input.declined': 'running',
+            'user_input.cancelled': 'running',
+            'user_input.expired': 'running',
+        }.get(event_type)
+        if target_state is not None:
+            self.state[run_id] = target_state
         event = {
             'run_id': run_id,
             'seq': len(self.events) + 1,
@@ -122,6 +132,64 @@ class FakeUserInputStore:
                 return updated
         raise AssertionError(f'unknown operation {operation_id}')
 
+    async def record_decision_execution(
+        self,
+        run_id,
+        *,
+        resource_type,
+        resource_id,
+        decision,
+        payload,
+        operation_type,
+        idempotency_key,
+        request_hash,
+    ):
+        from open_webui.models.agent_runs import AgentRunDecisionConflict
+
+        for event in self.events:
+            if (
+                event['event_type'] in {
+                    'user_input.completed',
+                    'user_input.declined',
+                    'user_input.cancelled',
+                    'user_input.expired',
+                }
+                and event['payload'].get('user_input_id') == resource_id
+            ):
+                return SimpleNamespace(
+                    execution=None,
+                    created=False,
+                    historical_event=SimpleNamespace(**event),
+                )
+        claim = await self.claim_operation(
+            run_id,
+            operation_type=operation_type,
+            idempotency_key=idempotency_key,
+            request_hash=request_hash,
+        )
+        existing = self.decision_executions.get((run_id, resource_type, resource_id))
+        if existing is not None and (
+            existing.decision != decision or existing.payload != payload
+        ):
+            raise AgentRunDecisionConflict('user input already has a different decision')
+        created = existing is None
+        execution = existing or SimpleNamespace(
+            id=f'execution-{len(self.decision_executions) + 1}',
+            decision=decision,
+            payload=payload,
+            status='pending',
+        )
+        self.decision_executions[(run_id, resource_type, resource_id)] = execution
+        await self.finish_operation_success(
+            claim.operation.id,
+            {'execution_id': execution.id, 'execution_status': execution.status},
+        )
+        return SimpleNamespace(
+            execution=execution,
+            created=created,
+            historical_event=None,
+        )
+
 
 def _user_input_request(**overrides):
     data = {
@@ -137,6 +205,7 @@ def _user_input_request(**overrides):
         },
         'timeout_seconds': 300,
         'allow_cancel': True,
+        'checkpoint_version': 9,
         'idempotency_key': 'user-input:leader:tool-call-1:1',
     }
     data.update(overrides)
@@ -150,7 +219,6 @@ async def test_user_input_request_marks_run_waiting_user_input_and_emits_request
 
     response = await coordinator.request_user_input(
         _user_input_request(),
-        wait_for_response=False,
     )
 
     assert response == {'status': 'requested', 'user_input_id': 'input-1'}
@@ -158,62 +226,39 @@ async def test_user_input_request_marks_run_waiting_user_input_and_emits_request
     assert [event['event_type'] for event in store.events] == ['user_input.requested']
     assert store.events[0]['phase'] == 'waiting_user_input'
     assert store.events[0]['payload']['message'] == 'Which file should I update?'
+    assert store.events[0]['payload']['checkpoint_version'] == 9
     assert store.events[0]['payload']['requested_schema']['properties']['file']['title'] == 'Target file'
 
 
 @pytest.mark.asyncio
-async def test_user_input_request_waits_for_cross_coordinator_completion_then_returns_content():
+async def test_user_input_request_returns_immediately_and_completion_records_outbox():
     store = FakeUserInputStore()
     request_coordinator = AgentUserInputCoordinator(store)
     completion_coordinator = AgentUserInputCoordinator(store)
 
-    pending_request = asyncio.create_task(
-        request_coordinator.request_user_input(
-            _user_input_request(user_input_id='input-cross'),
-            wait_for_response=True,
-            response_timeout_seconds=1,
+    requested = await request_coordinator.request_user_input(
+        _user_input_request(user_input_id='input-cross')
+    )
+    submitted = await completion_coordinator.complete(
+        UserInputCompletionRequest(
+            run_id='run-1',
+            user_input_id='input-cross',
+            status='accepted',
+            content={'file': 'README.md'},
+            idempotency_key='user-input-result:input-cross:1',
         )
     )
-    try:
-        for _ in range(20):
-            if any(event['event_type'] == 'user_input.requested' for event in store.events):
-                break
-            await asyncio.sleep(0.01)
 
-        assert pending_request.done() is False
-        assert store.state['run-1'] == 'waiting_user_input'
-
-        submitted = await completion_coordinator.complete(
-            UserInputCompletionRequest(
-                run_id='run-1',
-                user_input_id='input-cross',
-                status='accepted',
-                content={'file': 'README.md'},
-                idempotency_key='user-input-result:input-cross:1',
-            )
-        )
-        result = await asyncio.wait_for(pending_request, timeout=1)
-    finally:
-        if not pending_request.done():
-            pending_request.cancel()
-
-    assert submitted == {
-        'status': 'accepted',
-        'content': {'file': 'README.md'},
-        'user_input_id': 'input-cross',
-    }
-    assert result == submitted
-    assert store.state['run-1'] == 'running'
-    assert [event['event_type'] for event in store.events] == [
-        'user_input.requested',
-        'user_input.completed',
-    ]
-    assert store.events[-1]['payload']['status'] == 'accepted'
-    assert store.events[-1]['payload']['content'] == {'file': 'README.md'}
+    assert requested == {'status': 'requested', 'user_input_id': 'input-cross'}
+    assert submitted['status'] == 'accepted'
+    assert submitted['execution_status'] == 'pending'
+    assert store.state['run-1'] == 'waiting_user_input'
+    assert [event['event_type'] for event in store.events] == ['user_input.requested']
+    assert store.transitions == []
 
 
 @pytest.mark.asyncio
-async def test_duplicate_user_input_request_waits_for_response_instead_of_returning_requested():
+async def test_duplicate_user_input_request_returns_same_requested_response_immediately():
     store = FakeUserInputStore()
     first_coordinator = AgentUserInputCoordinator(store)
     retry_coordinator = AgentUserInputCoordinator(store)
@@ -221,47 +266,32 @@ async def test_duplicate_user_input_request_waits_for_response_instead_of_return
 
     first = await first_coordinator.request_user_input(
         _user_input_request(user_input_id='input-retry'),
-        wait_for_response=False,
     )
     assert first == {'status': 'requested', 'user_input_id': 'input-retry'}
 
-    pending_retry = asyncio.create_task(
-        retry_coordinator.request_user_input(
-            _user_input_request(user_input_id='input-retry'),
-            wait_for_response=True,
-            response_timeout_seconds=1,
+    retry = await retry_coordinator.request_user_input(
+        _user_input_request(user_input_id='input-retry')
+    )
+    submitted = await completion_coordinator.complete(
+        UserInputCompletionRequest(
+            run_id='run-1',
+            user_input_id='input-retry',
+            status='accepted',
+            content={'file': 'README.md'},
+            idempotency_key='user-input-result:input-retry:1',
         )
     )
-    try:
-        await asyncio.sleep(0)
-        assert pending_retry.done() is False
 
-        submitted = await completion_coordinator.complete(
-            UserInputCompletionRequest(
-                run_id='run-1',
-                user_input_id='input-retry',
-                status='accepted',
-                content={'file': 'README.md'},
-                idempotency_key='user-input-result:input-retry:1',
-            )
-        )
-        result = await asyncio.wait_for(pending_retry, timeout=1)
-    finally:
-        if not pending_retry.done():
-            pending_retry.cancel()
-
-    assert result == submitted
-    assert [event['event_type'] for event in store.events] == [
-        'user_input.requested',
-        'user_input.completed',
-    ]
+    assert retry == first
+    assert submitted['execution_status'] == 'pending'
+    assert [event['event_type'] for event in store.events] == ['user_input.requested']
 
 
 @pytest.mark.asyncio
 async def test_user_input_completion_replays_idempotently_and_rejects_conflicts():
     store = FakeUserInputStore()
     coordinator = AgentUserInputCoordinator(store)
-    await coordinator.request_user_input(_user_input_request(), wait_for_response=False)
+    await coordinator.request_user_input(_user_input_request())
 
     completion = UserInputCompletionRequest(
         run_id='run-1',
@@ -274,12 +304,69 @@ async def test_user_input_completion_replays_idempotently_and_rejects_conflicts(
     duplicate = await coordinator.complete(completion)
 
     assert first == duplicate
-    assert [event['event_type'] for event in store.events] == [
-        'user_input.requested',
-        'user_input.completed',
-    ]
+    assert first['execution_status'] == 'pending'
+    assert [event['event_type'] for event in store.events] == ['user_input.requested']
 
     with pytest.raises(AgentRunOperationConflict):
         await coordinator.complete(
             completion.model_copy(update={'content': {'file': 'CHANGELOG.md'}})
         )
+
+
+@pytest.mark.asyncio
+async def test_concurrent_user_input_completion_does_not_take_over_live_operation_owner():
+    store = FakeUserInputStore()
+    coordinator = AgentUserInputCoordinator(store)
+    await coordinator.request_user_input(_user_input_request())
+    completion = UserInputCompletionRequest(
+        run_id='run-1',
+        user_input_id='input-1',
+        status='accepted',
+        content={'file': 'README.md'},
+        idempotency_key='user-input-result:input-1:concurrent',
+    )
+
+    owner = asyncio.create_task(coordinator.complete(completion))
+    contender = asyncio.create_task(
+        coordinator.complete(
+            completion.model_copy(
+                update={'idempotency_key': 'user-input-result:input-1:second'}
+            )
+        )
+    )
+    owner_result, contender_result = await asyncio.gather(
+        owner,
+        contender,
+        return_exceptions=True,
+    )
+
+    assert owner_result['execution_id'] == contender_result['execution_id']
+    assert [event['event_type'] for event in store.events] == ['user_input.requested']
+
+
+@pytest.mark.asyncio
+async def test_user_input_completion_recovers_in_progress_operation_from_event():
+    store = FakeUserInputStore()
+    coordinator = AgentUserInputCoordinator(store)
+    await coordinator.request_user_input(_user_input_request())
+    completion = UserInputCompletionRequest(
+        run_id='run-1',
+        user_input_id='input-1',
+        status='accepted',
+        content={'file': 'README.md'},
+        idempotency_key='user-input-result:input-1:recover',
+    )
+    expected = await coordinator.complete(completion)
+    operation_key = next(
+        key for key in store.claims if key[1] == 'user_input.result'
+    )
+    operation = store.claims[operation_key]
+    store.claims[operation_key] = operation.model_copy(
+        update={'status': 'in_progress', 'response': None}
+    )
+
+    recovered = await AgentUserInputCoordinator(store).complete(completion)
+
+    assert recovered == expected
+    assert store.claims[operation_key].status == 'succeeded'
+    assert [event['event_type'] for event in store.events] == ['user_input.requested']

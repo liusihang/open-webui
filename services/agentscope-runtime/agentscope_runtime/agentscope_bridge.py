@@ -4,9 +4,9 @@ import asyncio
 import json
 import re
 import uuid
-from collections.abc import AsyncGenerator
+from collections.abc import AsyncGenerator, Callable
 from dataclasses import dataclass
-from typing import Any, Callable, Protocol
+from typing import Any, Protocol
 
 from agentscope.app import SubAgentTemplate
 from agentscope.credential import CredentialBase
@@ -42,6 +42,24 @@ IN_BAND_RESPONSE_PHASE_RE = re.compile(
     r"(?:[ \t]*[:\uff1a-][ \t]*|[ \t\r\n]+)?",
     re.IGNORECASE,
 )
+WRAPPED_IN_BAND_RESPONSE_PHASE_PATTERNS = (
+    (
+        "commentary",
+        re.compile(
+            r"^\s*\*\*进度说明[ \t]*\([ \t]*phase\s*=\s*commentary\b"
+            r"[ \t]*\)[ \t]*：[ \t]*\*\*[ \t\r\n]*",
+            re.IGNORECASE,
+        ),
+    ),
+    (
+        "final_answer",
+        re.compile(
+            r"^\s*\*\*总结[ \t]*\([ \t]*phase\s*=\s*final_answer\b"
+            r"[ \t]*\)[ \t]*：[ \t]*\*\*[ \t\r\n]*",
+            re.IGNORECASE,
+        ),
+    ),
+)
 
 
 def _strip_in_band_response_phase(
@@ -50,7 +68,15 @@ def _strip_in_band_response_phase(
     """Remove one leading textual phase envelope without flattening deltas."""
     if not parts:
         return None, []
-    match = IN_BAND_RESPONSE_PHASE_RE.match("".join(parts))
+    combined = "".join(parts)
+    match = IN_BAND_RESPONSE_PHASE_RE.match(combined)
+    phase = match.group(1).lower() if match is not None else None
+    if match is None:
+        for wrapped_phase, pattern in WRAPPED_IN_BAND_RESPONSE_PHASE_PATTERNS:
+            match = pattern.match(combined)
+            if match is not None:
+                phase = wrapped_phase
+                break
     if match is None:
         return None, list(parts)
 
@@ -65,7 +91,7 @@ def _strip_in_band_response_phase(
             remaining_prefix = 0
         if part:
             cleaned.append(part)
-    return match.group(1).lower(), cleaned
+    return phase, cleaned
 
 
 class OpenWebUIToolApprovalRequired(BaseException):
@@ -170,6 +196,8 @@ class OpenWebUIBridgeCallbacks(Protocol):
         tool_call_id: str,
         tool_id: str,
         arguments: dict[str, Any],
+        checkpoint_version: int | None = None,
+        decision_execution_id: str | None = None,
     ) -> dict[str, Any]: ...
 
 
@@ -227,6 +255,7 @@ class OpenWebUIAgentScopeModel(ChatModelBase):
         on_final_text: Callable[[str, str], None] | None = None,
         assistant_context: Callable[[], list[dict[str, Any]]] | None = None,
         default_model_params: dict[str, Any] | None = None,
+        next_model_call_index: int = 1,
     ) -> None:
         super().__init__(
             credential=OpenWebUICallbackCredential(),
@@ -242,7 +271,7 @@ class OpenWebUIAgentScopeModel(ChatModelBase):
         self._on_final_text = on_final_text
         self._assistant_context = assistant_context or (lambda: [])
         self.default_model_params = dict(default_model_params or {})
-        self._next_model_call_index = 1
+        self._next_model_call_index = max(1, int(next_model_call_index))
         self._formatter = OpenAIChatFormatter()
         self._private_reasoning_parts: list[str] = []
 
@@ -540,6 +569,8 @@ class OpenWebUIAgentScopeModel(ChatModelBase):
             raw_arguments = function.get("arguments", "{}")
             if not isinstance(raw_arguments, str):
                 raw_arguments = json.dumps(raw_arguments)
+            elif not raw_arguments.strip():
+                raw_arguments = "{}"
             call_id = tool_call.get("id")
             tool_blocks.append(
                 ToolCallBlock(
@@ -656,6 +687,7 @@ class OpenWebUIToolProxy(ToolBase):
         input_schema: dict[str, Any],
         callback_client: OpenWebUIBridgeCallbacks,
         allocate_tool_call_id: Callable[[], str],
+        durable_external_execution: bool = False,
     ) -> None:
         self.run_id = run_id
         self.runtime_session_id = runtime_session_id
@@ -666,6 +698,7 @@ class OpenWebUIToolProxy(ToolBase):
         self.input_schema = input_schema
         self.callback_client = callback_client
         self._allocate_tool_call_id = allocate_tool_call_id
+        self.is_external_tool = durable_external_execution
 
     async def check_permissions(
         self,
@@ -702,21 +735,7 @@ class OpenWebUIToolProxy(ToolBase):
                 tool_id=self.tool_id,
                 arguments=kwargs,
             )
-        except Exception as exc:
-            await self.callback_client.append_event(
-                run_id=self.run_id,
-                idempotency_key=f"evt:{self.runtime_session_id}:{self.participant_id}:{tool_call_id}:failed",
-                event_type="tool.failed",
-                summary=f"{_humanize_tool_name(self.name)} failed.",
-                payload={
-                    "tool_id": self.tool_id,
-                    "tool_call_id": tool_call_id,
-                    "tool_name": self.name,
-                    "error": {"message": str(exc), "type": exc.__class__.__name__},
-                },
-                participant_id=self.participant_id,
-                phase="running",
-            )
+        except Exception:
             raise
         if _tool_requires_approval(response):
             raise OpenWebUIToolApprovalRequired(
@@ -733,25 +752,6 @@ class OpenWebUIToolProxy(ToolBase):
                 tool_name=self.name,
             )
         state = _tool_result_state(response)
-        event_type = "tool.completed" if state == ToolResultState.SUCCESS else "tool.failed"
-        await self.callback_client.append_event(
-            run_id=self.run_id,
-            idempotency_key=f"evt:{self.runtime_session_id}:{self.participant_id}:{tool_call_id}:completed",
-            event_type=event_type,
-            summary=(
-                f"{_humanize_tool_name(self.name)} completed."
-                if state == ToolResultState.SUCCESS
-                else f"{_humanize_tool_name(self.name)} failed."
-            ),
-            payload={
-                "tool_id": self.tool_id,
-                "tool_call_id": tool_call_id,
-                "tool_name": self.name,
-                "status": response.get("status"),
-            },
-            participant_id=self.participant_id,
-            phase="running",
-        )
         artifacts = _extract_artifacts(response)
         for index, artifact in enumerate(artifacts):
             await self.callback_client.append_event(
@@ -788,6 +788,8 @@ class AgentScopeRuntimeBridge:
         runtime_session_id: str,
         callback_client: OpenWebUIBridgeCallbacks,
         assistant_context_by_participant: dict[str, list[dict[str, Any]]] | None = None,
+        durable_external_tools: bool = False,
+        checkpoint_state: dict[str, Any] | None = None,
     ) -> None:
         verify_agentscope_runtime_apis()
         self.run_id = run_id
@@ -799,7 +801,19 @@ class AgentScopeRuntimeBridge:
             for participant_id, messages in (assistant_context_by_participant or {}).items()
             if isinstance(messages, list)
         }
-        self._next_tool_call_index = 1
+        checkpoint_state = checkpoint_state or {}
+        self._next_tool_call_index = max(
+            1,
+            int(checkpoint_state.get("next_tool_call_index") or 1),
+        )
+        self._model_call_indexes = {
+            str(participant_id): max(1, int(index))
+            for participant_id, index in (
+                checkpoint_state.get("model_call_indexes") or {}
+            ).items()
+        }
+        self._models_by_participant: dict[str, OpenWebUIAgentScopeModel] = {}
+        self._durable_external_tools = durable_external_tools
 
     def build_subagent_template(
         self,
@@ -821,7 +835,7 @@ class AgentScopeRuntimeBridge:
         model_id: str,
         default_model_params: dict[str, Any] | None = None,
     ) -> OpenWebUIAgentScopeModel:
-        return OpenWebUIAgentScopeModel(
+        model = OpenWebUIAgentScopeModel(
             run_id=self.run_id,
             runtime_session_id=self.runtime_session_id,
             participant_id=participant_id,
@@ -830,7 +844,10 @@ class AgentScopeRuntimeBridge:
             on_final_text=self._record_final_text,
             assistant_context=lambda: self._assistant_context(participant_id),
             default_model_params=default_model_params,
+            next_model_call_index=self._model_call_indexes.get(participant_id, 1),
         )
+        self._models_by_participant[participant_id] = model
+        return model
 
     def latest_final_text(self, participant_id: str) -> str:
         return self._final_text_by_participant.get(participant_id, "")
@@ -860,12 +877,26 @@ class AgentScopeRuntimeBridge:
             input_schema=input_schema,
             callback_client=self.callback_client,
             allocate_tool_call_id=self._allocate_tool_call_id,
+            durable_external_execution=self._durable_external_tools,
         )
 
     def _allocate_tool_call_id(self) -> str:
         tool_call_id = f"tool-call-{self._next_tool_call_index}"
         self._next_tool_call_index += 1
         return tool_call_id
+
+    def snapshot_state(self) -> dict[str, Any]:
+        model_indexes = dict(self._model_call_indexes)
+        model_indexes.update(
+            {
+                participant_id: model._next_model_call_index
+                for participant_id, model in self._models_by_participant.items()
+            }
+        )
+        return {
+            "next_tool_call_index": self._next_tool_call_index,
+            "model_call_indexes": model_indexes,
+        }
 
 
 def _extract_model_text(response: dict[str, Any]) -> str:
@@ -1172,8 +1203,20 @@ def _merge_tool_calls(deltas: list[dict[str, Any]]) -> list[dict[str, Any]]:
             if isinstance(delta_function, dict):
                 if "name" in delta_function and delta_function["name"]:
                     function["name"] = delta_function["name"]
-                if "arguments" in delta_function and isinstance(delta_function["arguments"], str):
-                    function["arguments"] = function.get("arguments", "") + delta_function["arguments"]
+                if "arguments" in delta_function:
+                    delta_arguments = delta_function["arguments"]
+                    if "arguments" not in function:
+                        function["arguments"] = delta_arguments
+                    elif isinstance(function["arguments"], str) and isinstance(
+                        delta_arguments,
+                        str,
+                    ):
+                        function["arguments"] += delta_arguments
+                    else:
+                        raise RuntimeError(
+                            "invalid_tool_call: cannot merge indexed tool arguments "
+                            "with mixed or repeated non-string values"
+                        )
         else:
             standalone.append(delta)
     merged = list(by_index.values()) + standalone

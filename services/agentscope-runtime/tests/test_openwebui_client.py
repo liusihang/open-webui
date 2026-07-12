@@ -4,10 +4,9 @@ import json
 import httpx
 import pytest
 import respx
+from agentscope_runtime.openwebui_client import OpenWebUIClient
 from httpx import Response
 from pydantic import ValidationError
-
-from agentscope_runtime.openwebui_client import OpenWebUIClient
 
 
 def test_parse_openai_chunk_preserves_private_reasoning_delta() -> None:
@@ -1205,6 +1204,7 @@ async def test_call_tool_uses_openwebui_tool_call_callback() -> None:
         request.calls.last.request.headers["x-agent-idempotency-key"]
         == "tool:subagent:run-1:1:tool-call-1:1"
     )
+    assert "x-agent-decision-execution-id" not in request.calls.last.request.headers
     assert json.loads(request.calls.last.request.content) == {
         "idempotency_key": "tool:subagent:run-1:1:tool-call-1:1",
         "run_id": "run-1",
@@ -1213,3 +1213,54 @@ async def test_call_tool_uses_openwebui_tool_call_callback() -> None:
         "tool_id": "tool-search",
         "arguments": {"query": "agent mode"},
     }
+
+
+@pytest.mark.asyncio
+async def test_approved_tool_replay_sends_decision_execution_identity_only_in_header() -> None:
+    async with respx.mock(assert_all_called=True) as router:
+        request = router.post(
+            "https://openwebui.test/api/agent/service/runs/run-1/tool-call"
+        ).mock(return_value=Response(200, json={"status": "success", "content": "done"}))
+        client = OpenWebUIClient(
+            base_url="https://openwebui.test",
+            service_token="owui-token",
+        )
+
+        await client.call_tool(
+            run_id="run-1",
+            idempotency_key="tool:leader:provider-call-1:1",
+            participant_id="leader",
+            tool_call_id="provider-call-1",
+            tool_id="tool-write",
+            arguments={"path": "/workspace/report.txt"},
+            decision_execution_id="rex-1",
+        )
+
+    assert request.calls.last.request.headers["x-agent-decision-execution-id"] == "rex-1"
+    assert "execution_id" not in json.loads(request.calls.last.request.content)
+
+
+@pytest.mark.asyncio
+async def test_user_input_request_sends_durable_checkpoint_version() -> None:
+    async with respx.mock(assert_all_called=True) as router:
+        request = router.post(
+            "https://openwebui.test/api/agent/service/runs/run-1/user-input-requests"
+        ).mock(return_value=Response(200, json={"status": "requested"}))
+        client = OpenWebUIClient(
+            base_url="https://openwebui.test",
+            service_token="owui-token",
+        )
+
+        await client.request_user_input(
+            run_id="run-1",
+            idempotency_key="user-input:leader:tool-call-1:1",
+            participant_id="leader",
+            user_input_id="user-input:run-1:tool-call-1",
+            tool_call_id="tool-call-1",
+            message="Choose one",
+            requested_schema={"type": "object"},
+            checkpoint_version=7,
+        )
+
+    body = json.loads(request.calls.last.request.content)
+    assert body["checkpoint_version"] == 7

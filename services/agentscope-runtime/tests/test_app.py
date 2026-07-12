@@ -1,11 +1,15 @@
 import asyncio
 import logging
+import os
+import subprocess
+import sys
+import time
+from pathlib import Path
 from types import SimpleNamespace
 
+import agentscope_runtime.app as runtime_app
 import httpx
 import pytest
-
-import agentscope_runtime.app as runtime_app
 from agentscope_runtime.app import (
     FinalAnswerStreamResult,
     RuntimeSession,
@@ -249,6 +253,8 @@ class RecordingOpenWebUIClient:
         tool_call_id: str,
         tool_id: str,
         arguments: dict,
+        checkpoint_version: int | None = None,
+        decision_execution_id: str | None = None,
     ) -> dict:
         call = {
             "run_id": run_id,
@@ -258,6 +264,10 @@ class RecordingOpenWebUIClient:
             "tool_id": tool_id,
             "arguments": arguments,
         }
+        if checkpoint_version is not None:
+            call["checkpoint_version"] = checkpoint_version
+        if decision_execution_id is not None:
+            call["decision_execution_id"] = decision_execution_id
         self.tool_calls.append(call)
         return {
             "status": "success",
@@ -280,6 +290,7 @@ class RecordingOpenWebUIClient:
         participant_id: str,
         user_input_id: str,
         tool_call_id: str,
+        checkpoint_version: int,
         message: str,
         requested_schema: dict,
         timeout_seconds: float | None = None,
@@ -291,6 +302,7 @@ class RecordingOpenWebUIClient:
             "participant_id": participant_id,
             "user_input_id": user_input_id,
             "tool_call_id": tool_call_id,
+            "checkpoint_version": checkpoint_version,
             "message": message,
             "requested_schema": requested_schema,
             "timeout_seconds": timeout_seconds,
@@ -448,8 +460,11 @@ async def test_health_does_not_require_auth() -> None:
 
 
 @pytest.mark.asyncio
-async def test_create_app_from_env_uses_operator_runtime_configuration(monkeypatch) -> None:
+async def test_create_app_from_env_uses_operator_runtime_configuration(
+    monkeypatch, tmp_path
+) -> None:
     monkeypatch.setenv("AGENT_RUNTIME_SERVICE_TOKEN", "env-token")
+    monkeypatch.setenv("AGENT_RUNTIME_STATE_PATH", str(tmp_path / "runtime.sqlite3"))
     monkeypatch.setenv("OPENWEBUI_BASE_URL", "https://openwebui.internal")
     monkeypatch.setenv("OPENWEBUI_SERVICE_TOKEN", "callback-token")
     monkeypatch.setenv("AGENT_RUNTIME_AUTO_FINALIZE_ORDINARY_QA", "false")
@@ -468,6 +483,143 @@ async def test_create_app_from_env_uses_operator_runtime_configuration(monkeypat
 
     assert health.status_code == 200
     assert unauthorized.status_code == 401
+
+
+def test_create_app_from_env_configures_terminal_checkpoint_cleanup(
+    monkeypatch, tmp_path
+) -> None:
+    captured: dict = {}
+    store_type = runtime_app.SQLiteRuntimeExecutionStore
+
+    def recording_store(path, **kwargs):
+        captured.update(kwargs)
+        return store_type(path, **kwargs)
+
+    monkeypatch.setattr(runtime_app, "SQLiteRuntimeExecutionStore", recording_store)
+    monkeypatch.setenv("AGENT_RUNTIME_SERVICE_TOKEN", "env-token")
+    monkeypatch.setenv("AGENT_RUNTIME_STATE_PATH", str(tmp_path / "runtime.sqlite3"))
+    monkeypatch.setenv("AGENT_RUNTIME_TERMINAL_CHECKPOINT_RETENTION_SECONDS", "123")
+    monkeypatch.setenv("AGENT_RUNTIME_MAX_TERMINAL_CHECKPOINTS", "7")
+
+    create_app_from_env()
+
+    assert captured["terminal_checkpoint_retention_seconds"] == 123
+    assert captured["max_terminal_checkpoints"] == 7
+
+
+def test_create_app_from_env_requires_durable_state_path(monkeypatch) -> None:
+    monkeypatch.setenv("AGENT_RUNTIME_SERVICE_TOKEN", "env-token")
+    monkeypatch.delenv("AGENT_RUNTIME_STATE_PATH", raising=False)
+
+    with pytest.raises(RuntimeError, match="AGENT_RUNTIME_STATE_PATH is required"):
+        create_app_from_env()
+
+
+@pytest.mark.parametrize("worker_env", ["WEB_CONCURRENCY", "UVICORN_WORKERS"])
+def test_create_app_from_env_rejects_multiple_runtime_workers(
+    monkeypatch, tmp_path, worker_env: str
+) -> None:
+    monkeypatch.setenv("AGENT_RUNTIME_SERVICE_TOKEN", "env-token")
+    monkeypatch.setenv("AGENT_RUNTIME_STATE_PATH", str(tmp_path / "runtime.sqlite3"))
+    monkeypatch.delenv("WEB_CONCURRENCY", raising=False)
+    monkeypatch.delenv("UVICORN_WORKERS", raising=False)
+    monkeypatch.setenv(worker_env, "2")
+
+    with pytest.raises(RuntimeError, match=f"{worker_env} must be 1"):
+        create_app_from_env()
+
+
+def test_runtime_readme_requires_durable_path_and_single_worker() -> None:
+    readme = (Path(__file__).parents[1] / "README.md").read_text()
+
+    assert "AGENT_RUNTIME_STATE_PATH=" in readme
+    assert "AGENT_RUNTIME_TERMINAL_CHECKPOINT_RETENTION_SECONDS=" in readme
+    assert "AGENT_RUNTIME_MAX_TERMINAL_CHECKPOINTS=" in readme
+    assert "python -m agentscope_runtime.launcher" in readme
+    assert "--workers 1" in readme
+
+
+def test_runtime_lifespan_lock_rejects_second_process_and_releases_on_shutdown(
+    tmp_path: Path,
+) -> None:
+    service_dir = Path(__file__).parents[1]
+    state_path = tmp_path / "runtime.sqlite3"
+    hold_path = tmp_path / "hold"
+    ready_path = tmp_path / "ready"
+    hold_path.write_text("hold")
+    script = """
+import os
+import time
+from pathlib import Path
+
+from fastapi.testclient import TestClient
+from agentscope_runtime.app import create_app_from_env
+
+with TestClient(create_app_from_env()) as client:
+    assert client.get('/health').status_code == 200
+    ready = os.environ.get('LOCK_READY_PATH')
+    if ready:
+        Path(ready).write_text('ready')
+    hold = os.environ.get('LOCK_HOLD_PATH')
+    while hold and Path(hold).exists():
+        time.sleep(0.02)
+"""
+    env = os.environ.copy()
+    env.update(
+        {
+            "AGENT_RUNTIME_SERVICE_TOKEN": SERVICE_TOKEN,
+            "AGENT_RUNTIME_STATE_PATH": str(state_path),
+            "PYTHONPATH": str(service_dir),
+        }
+    )
+    env.pop("WEB_CONCURRENCY", None)
+    env.pop("UVICORN_WORKERS", None)
+    first_env = {
+        **env,
+        "LOCK_READY_PATH": str(ready_path),
+        "LOCK_HOLD_PATH": str(hold_path),
+    }
+    first = subprocess.Popen(
+        [sys.executable, "-c", script],
+        cwd=service_dir,
+        env=first_env,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+    try:
+        for _ in range(250):
+            if ready_path.exists():
+                break
+            if first.poll() is not None:
+                break
+            time.sleep(0.02)
+        assert ready_path.exists(), first.stderr.read() if first.stderr else ""
+
+        second = subprocess.run(
+            [sys.executable, "-c", script],
+            cwd=service_dir,
+            env=env,
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+        assert second.returncode != 0
+        assert "runtime process lock is already held" in second.stderr
+    finally:
+        hold_path.unlink(missing_ok=True)
+        first_stdout, first_stderr = first.communicate(timeout=10)
+        assert first.returncode == 0, f"{first_stdout}\n{first_stderr}"
+
+    third = subprocess.run(
+        [sys.executable, "-c", script],
+        cwd=service_dir,
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=10,
+    )
+    assert third.returncode == 0, third.stderr
 
 
 def test_positive_env_float_uses_default_and_accepts_positive_value(monkeypatch) -> None:
@@ -575,24 +727,7 @@ async def test_run_start_finalizes_ordinary_qa_through_model_and_final_delta_cal
     assert [call["model_call_id"] for call in openwebui_client.model_calls] == ["model-call-1"]
     assert openwebui_client.model_calls[0]["idempotency_key"] == "model:leader:model-call-1:1"
     assert openwebui_client.model_calls[0]["messages"] == [{"role": "user", "content": "hello"}]
-    assert openwebui_client.state_transitions == [
-        {
-            "run_id": "run-final",
-            "idempotency_key": "state:run-final:finalizing",
-            "from_states": ["running"],
-            "to_state": "finalizing",
-            "reason": "runtime closed work",
-            "payload": {"runtime_session_id": runtime_session_id},
-        },
-        {
-            "run_id": "run-final",
-            "idempotency_key": "state:run-final:completed",
-            "from_states": ["finalizing"],
-            "to_state": "completed",
-            "reason": "runtime final answer completed",
-            "payload": {"runtime_session_id": runtime_session_id},
-        },
-    ]
+    assert openwebui_client.state_transitions == []
     assert openwebui_client.text_deltas == []
     assert openwebui_client.final_deltas == [
         {
@@ -773,7 +908,7 @@ async def test_run_leader_streaming_appends_final_delta_while_reply_stream_is_op
     assert result.streamed_text == "alpha beta"
     assert result.next_delta_index == 2
     assert joined_final_delta_text(openwebui_client) == "alpha beta"
-    assert [transition["to_state"] for transition in openwebui_client.state_transitions] == ["finalizing"]
+    assert openwebui_client.state_transitions == []
     assert [event["event_type"] for event in openwebui_client.events] == ["final.started"]
 
 
@@ -995,9 +1130,7 @@ async def test_general_agent_native_phase_enters_finalizing_only_on_final_delta(
             headers={"Authorization": f"Bearer {SERVICE_TOKEN}"},
         )
         assert status.json()["state"] == "finalizing"
-        assert [transition["to_state"] for transition in openwebui_client.state_transitions] == [
-            "finalizing"
-        ]
+        assert openwebui_client.state_transitions == []
         assert [event["event_type"] for event in openwebui_client.events] == [
             "run.running",
             "final.started",
@@ -1017,10 +1150,7 @@ async def test_general_agent_native_phase_enters_finalizing_only_on_final_delta(
 
     assert status.json()["state"] == "completed"
     assert joined_final_delta_text(openwebui_client) == "Final answer."
-    assert [transition["to_state"] for transition in openwebui_client.state_transitions] == [
-        "finalizing",
-        "completed",
-    ]
+    assert openwebui_client.state_transitions == []
 
 
 @pytest.mark.asyncio
@@ -1074,10 +1204,7 @@ async def test_general_agent_unphased_terminal_text_completes_as_final_answer() 
     assert len(openwebui_client.model_calls) == 1
     assert openwebui_client.text_deltas == []
     assert joined_final_delta_text(openwebui_client) == "Untyped answer."
-    assert [transition["to_state"] for transition in openwebui_client.state_transitions] == [
-        "finalizing",
-        "completed",
-    ]
+    assert openwebui_client.state_transitions == []
     assert [event["event_type"] for event in openwebui_client.events] == [
         "run.running",
         "final.started",
@@ -1176,14 +1303,12 @@ async def test_run_start_with_tool_envelope_drives_tool_artifact_and_final_lifec
     assert [event["event_type"] for event in openwebui_client.events] == [
         "run.running",
         "tool.requested",
-        "tool.completed",
         "artifact.registered",
         "final.started",
         "run.completed",
     ]
     assert openwebui_client.events[1]["summary"] == "Read file requested."
-    assert openwebui_client.events[2]["summary"] == "Read file completed."
-    assert openwebui_client.events[3]["payload"]["artifact"]["id"] == "artifact-1"
+    assert openwebui_client.events[2]["payload"]["artifact"]["id"] == "artifact-1"
     assert [delta["block_kind"] for delta in openwebui_client.text_deltas] == ["assistant_note"]
     assert openwebui_client.text_deltas[0]["block_id"].endswith(
         ":leader:model-call-1:model-commentary"
@@ -1197,25 +1322,21 @@ async def test_run_start_with_tool_envelope_drives_tool_artifact_and_final_lifec
     rendered_tool_notes = "\n".join(delta["delta"] for delta in openwebui_client.text_deltas)
     assert "/tmp/input.txt" not in rendered_tool_notes
     assert joined_final_delta_text(openwebui_client) == "The file says: tool callback result"
-    assert [transition["to_state"] for transition in openwebui_client.state_transitions] == [
-        "finalizing",
-        "completed",
-    ]
+    assert openwebui_client.state_transitions == []
     timeline_labels = [
         entry.get("event_type") or f'{entry["type"]}:{entry.get("block_kind", "")}'.rstrip(":")
         for entry in openwebui_client.timeline
     ]
-    assert timeline_labels[:6] == [
+    assert timeline_labels[:5] == [
         "run.running",
         "text.delta:assistant_note",
         "tool.requested",
-        "tool.completed",
         "artifact.registered",
         "final.started",
     ]
     assert timeline_labels[-1] == "run.completed"
-    assert timeline_labels[6:-1]
-    assert set(timeline_labels[6:-1]) == {"final.delta"}
+    assert timeline_labels[5:-1]
+    assert set(timeline_labels[5:-1]) == {"final.delta"}
 
 
 @pytest.mark.asyncio
@@ -1314,6 +1435,7 @@ async def test_general_agent_exposes_request_user_input_tool_and_continues_after
             "participant_id": "leader",
             "user_input_id": "user-input:run-user-input-tool:tool-call-1",
             "tool_call_id": "tool-call-1",
+            "checkpoint_version": 0,
             "message": "Which file should I update?",
             "requested_schema": {
                 "type": "object",
@@ -1441,7 +1563,6 @@ async def test_general_agent_continues_after_tool_callback_waits_for_approved_re
     assert [event["event_type"] for event in openwebui_client.events] == [
         "run.running",
         "tool.requested",
-        "tool.completed",
         "final.started",
         "run.completed",
     ]
@@ -1919,7 +2040,7 @@ async def test_rejected_approval_notification_marks_waiting_run_failed() -> None
 
         assert decision.status_code == 200
         assert decision.json()["state"] == "failed"
-        assert openwebui_client.state_transitions[-1]["to_state"] == "failed"
+        assert openwebui_client.state_transitions == []
         assert openwebui_client.events[-1]["event_type"] == "run.failed"
         assert openwebui_client.events[-1]["payload"]["error"]["code"] == "approval_rejected"
 
@@ -2136,23 +2257,12 @@ async def test_general_agent_model_call_stream_timeout_reliably_writes_failed_cl
         def __init__(self) -> None:
             super().__init__()
             self.failed_closeout_operations: list[str] = []
-            self.failed_state_attempts = 0
             self.run_failed_event_attempts = 0
 
         async def call_model_stream(self, **kwargs: object):
             self.model_calls.append({**kwargs, "stream": True})
             raise httpx.ReadTimeout("model-call stream timed out")
             yield {"type": "stream_end"}  # pragma: no cover
-
-        async def transition_state(self, **kwargs: object) -> dict:
-            if kwargs["to_state"] == "failed":
-                self.failed_state_attempts += 1
-                if self.failed_state_attempts == 1:
-                    raise httpx.ReadTimeout("failed state callback still in flight")
-            response = await super().transition_state(**kwargs)  # type: ignore[arg-type]
-            if kwargs["to_state"] == "failed":
-                self.failed_closeout_operations.append("state:failed")
-            return response
 
         async def append_event(self, **kwargs: object) -> dict:
             if kwargs["event_type"] == "run.failed":
@@ -2197,20 +2307,14 @@ async def test_general_agent_model_call_stream_timeout_reliably_writes_failed_cl
                 "/v1/openwebui/runs/run-agentscope-timeout-failed-closeout/status",
                 headers={"Authorization": f"Bearer {SERVICE_TOKEN}"},
             )
-            if openwebui_client.failed_closeout_operations == [
-                "state:failed",
-                "event:run.failed",
-            ]:
+            if openwebui_client.failed_closeout_operations == ["event:run.failed"]:
                 break
             await asyncio.sleep(0.01)
 
     assert status.json()["state"] == "failed"
     assert [call["model_call_id"] for call in openwebui_client.model_calls] == ["model-call-1"]
-    assert openwebui_client.failed_closeout_operations == [
-        "state:failed",
-        "event:run.failed",
-    ]
-    assert [transition["to_state"] for transition in openwebui_client.state_transitions] == ["failed"]
+    assert openwebui_client.failed_closeout_operations == ["event:run.failed"]
+    assert openwebui_client.state_transitions == []
     assert [event["event_type"] for event in openwebui_client.events] == [
         "run.running",
         "run.failed",
@@ -2790,7 +2894,7 @@ async def test_provider_auth_error_text_from_model_call_fails_run_without_final_
 
     assert status.json()["state"] == "failed"
     assert openwebui_client.final_deltas == []
-    assert [transition["to_state"] for transition in openwebui_client.state_transitions] == ["failed"]
+    assert openwebui_client.state_transitions == []
 
     failed_event = next(event for event in openwebui_client.events if event["event_type"] == "run.failed")
     error = failed_event["payload"]["error"]
