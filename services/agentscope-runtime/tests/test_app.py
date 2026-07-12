@@ -2266,7 +2266,7 @@ async def test_leader_system_prompt_guides_real_files_to_default_outputs_path() 
 
 
 @pytest.mark.asyncio
-async def test_leader_system_prompt_does_not_hardcode_public_progress_policy() -> None:
+async def test_leader_system_prompt_keeps_phase_protocol_without_hardcoding_public_progress_policy() -> None:
     openwebui_client = RecordingOpenWebUIClient()
     openwebui_client.model_responses = [
         {
@@ -2318,6 +2318,9 @@ async def test_leader_system_prompt_does_not_hardcode_public_progress_policy() -
     assert "one update for the group" not in system_text
     assert "Use the user's language" not in system_text
     assert "Do not reveal chain-of-thought or private reasoning" not in system_text
+    assert "Response phase protocol" in system_text
+    assert "phase=commentary" in system_text
+    assert "phase=final_answer" in system_text
 
 
 @pytest.mark.asyncio

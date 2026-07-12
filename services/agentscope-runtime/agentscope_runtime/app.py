@@ -1263,7 +1263,10 @@ def _leader_system_prompt(request: RunStartRequest) -> str:
     prompt = (
         "You are the leader agent for an OpenWebUI Agent Mode run. "
         "Use the available tools and subagents when they are useful, then "
-        "respond with a concise final answer for the user."
+        "respond with a concise final answer for the user. "
+        "Response phase protocol: every user-visible text response must declare a phase. "
+        "Use phase=commentary for progress text emitted with or before tool use, and use "
+        "phase=final_answer only for the terminal answer when no tool call is emitted."
     )
     fragments = [prompt]
     outputs_path = request.default_paths.get("outputs")
