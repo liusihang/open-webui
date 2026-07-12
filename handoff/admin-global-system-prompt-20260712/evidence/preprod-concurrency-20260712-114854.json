@@ -1,0 +1,198 @@
+{
+  "timestamp": "20260712-114854",
+  "run_count": 5,
+  "model_id": "bifrostapi.Cliproxy/gpt-5.5",
+  "markers": [
+    "GATE4-20260712-114854-0-694565f9",
+    "GATE4-20260712-114854-1-fe7f2e23",
+    "GATE4-20260712-114854-2-d0f434e3",
+    "GATE4-20260712-114854-3-426832a4",
+    "GATE4-20260712-114854-4-76858bb9"
+  ],
+  "tool_id": "preprod_concurrency_20260712_114854",
+  "webui_before": "a666133a919719b64e75afa035d8bfef0855ce89c2d51e24a4e842e8df520276|open-webui:agentmode-v0102-7a3638897078-slim|sha256:8ddb2934e8fbc51c199575fd26bc5017a077f2f82358bccc5d9f26cb297360b7|healthy|0|false",
+  "runtime_before": "bdd591c758acb20cae16ebac329ff1e805fc944a4ee5928cf4a3047d8246d861|open-webui-pr7-agentscope-runtime:890cf8e0ca52-phase-marker-clean|sha256:d13894796c92304c0e0a012eac2441b44e7dcb37948a26676aa195c29383cecf|healthy|0|false",
+  "runs": [
+    {
+      "marker": "GATE4-20260712-114854-0-694565f9",
+      "run_id": "01e59520-4d6e-478f-95ce-0092ce1ed349",
+      "event_count": 10,
+      "event_types": [
+        "run.running",
+        "text.delta",
+        "tool.requested",
+        "tool.completed",
+        "text.delta",
+        "tool.requested",
+        "tool.completed",
+        "final.started",
+        "final.delta",
+        "run.completed"
+      ],
+      "tool_call_ids": [
+        "tool-call-1",
+        "tool-call-2"
+      ],
+      "final_delta_count": 1,
+      "final_text": "Concurrency check completed for marker GATE4-20260712-114854-0-694565f9."
+    },
+    {
+      "marker": "GATE4-20260712-114854-1-fe7f2e23",
+      "run_id": "6c98a80d-ced5-48f0-92f9-5f2dc9f6791b",
+      "event_count": 11,
+      "event_types": [
+        "run.running",
+        "text.delta",
+        "tool.requested",
+        "tool.completed",
+        "text.delta",
+        "tool.requested",
+        "tool.completed",
+        "final.started",
+        "final.delta",
+        "final.delta",
+        "run.completed"
+      ],
+      "tool_call_ids": [
+        "tool-call-1",
+        "tool-call-2"
+      ],
+      "final_delta_count": 2,
+      "final_text": "Completed concurrency gate for marker GATE4-20260712-114854-1-fe7f2e23."
+    },
+    {
+      "marker": "GATE4-20260712-114854-2-d0f434e3",
+      "run_id": "fe632f63-0eb3-4c62-bd03-6b94fb1bb7e3",
+      "event_count": 10,
+      "event_types": [
+        "run.running",
+        "text.delta",
+        "tool.requested",
+        "tool.completed",
+        "text.delta",
+        "tool.requested",
+        "tool.completed",
+        "final.started",
+        "final.delta",
+        "run.completed"
+      ],
+      "tool_call_ids": [
+        "tool-call-1",
+        "tool-call-2"
+      ],
+      "final_delta_count": 1,
+      "final_text": "Concurrency check completed for marker: GATE4-20260712-114854-2-d0f434e3"
+    },
+    {
+      "marker": "GATE4-20260712-114854-3-426832a4",
+      "run_id": "53715b91-c639-45ac-81cd-b81b811f97eb",
+      "event_count": 10,
+      "event_types": [
+        "run.running",
+        "text.delta",
+        "tool.requested",
+        "tool.completed",
+        "text.delta",
+        "tool.requested",
+        "tool.completed",
+        "final.started",
+        "final.delta",
+        "run.completed"
+      ],
+      "tool_call_ids": [
+        "tool-call-1",
+        "tool-call-2"
+      ],
+      "final_delta_count": 1,
+      "final_text": "Completed concurrency gate for marker GATE4-20260712-114854-3-426832a4."
+    },
+    {
+      "marker": "GATE4-20260712-114854-4-76858bb9",
+      "run_id": "dfc7b03b-f7af-40cd-b51e-cbbc829fec0e",
+      "event_count": 10,
+      "event_types": [
+        "run.running",
+        "text.delta",
+        "tool.requested",
+        "tool.completed",
+        "text.delta",
+        "tool.requested",
+        "tool.completed",
+        "final.started",
+        "final.delta",
+        "run.completed"
+      ],
+      "tool_call_ids": [
+        "tool-call-1",
+        "tool-call-2"
+      ],
+      "final_delta_count": 1,
+      "final_text": "Done: GATE4-20260712-114854-4-76858bb9"
+    }
+  ],
+  "raw_tool_call_ids": [
+    "tool-call-1",
+    "tool-call-2",
+    "tool-call-1",
+    "tool-call-2",
+    "tool-call-1",
+    "tool-call-2",
+    "tool-call-1",
+    "tool-call-2",
+    "tool-call-1",
+    "tool-call-2"
+  ],
+  "globally_reused_tool_call_ids": [
+    "tool-call-1",
+    "tool-call-2"
+  ],
+  "scoped_tool_call_ids": [
+    "01e59520-4d6e-478f-95ce-0092ce1ed349:tool-call-1",
+    "01e59520-4d6e-478f-95ce-0092ce1ed349:tool-call-2",
+    "6c98a80d-ced5-48f0-92f9-5f2dc9f6791b:tool-call-1",
+    "6c98a80d-ced5-48f0-92f9-5f2dc9f6791b:tool-call-2",
+    "fe632f63-0eb3-4c62-bd03-6b94fb1bb7e3:tool-call-1",
+    "fe632f63-0eb3-4c62-bd03-6b94fb1bb7e3:tool-call-2",
+    "53715b91-c639-45ac-81cd-b81b811f97eb:tool-call-1",
+    "53715b91-c639-45ac-81cd-b81b811f97eb:tool-call-2",
+    "dfc7b03b-f7af-40cd-b51e-cbbc829fec0e:tool-call-1",
+    "dfc7b03b-f7af-40cd-b51e-cbbc829fec0e:tool-call-2"
+  ],
+  "ok": true,
+  "elapsed_seconds": 30.357,
+  "db_runs": [
+    {
+      "id": "01e59520-4d6e-478f-95ce-0092ce1ed349",
+      "state": "completed",
+      "error": null,
+      "final_text": "Concurrency check completed for marker GATE4-20260712-114854-0-694565f9."
+    },
+    {
+      "id": "53715b91-c639-45ac-81cd-b81b811f97eb",
+      "state": "completed",
+      "error": null,
+      "final_text": "Completed concurrency gate for marker GATE4-20260712-114854-3-426832a4."
+    },
+    {
+      "id": "6c98a80d-ced5-48f0-92f9-5f2dc9f6791b",
+      "state": "completed",
+      "error": null,
+      "final_text": "Completed concurrency gate for marker GATE4-20260712-114854-1-fe7f2e23."
+    },
+    {
+      "id": "dfc7b03b-f7af-40cd-b51e-cbbc829fec0e",
+      "state": "completed",
+      "error": null,
+      "final_text": "Done: GATE4-20260712-114854-4-76858bb9"
+    },
+    {
+      "id": "fe632f63-0eb3-4c62-bd03-6b94fb1bb7e3",
+      "state": "completed",
+      "error": null,
+      "final_text": "Concurrency check completed for marker: GATE4-20260712-114854-2-d0f434e3"
+    }
+  ],
+  "webui_after": "a666133a919719b64e75afa035d8bfef0855ce89c2d51e24a4e842e8df520276|open-webui:agentmode-v0102-7a3638897078-slim|sha256:8ddb2934e8fbc51c199575fd26bc5017a077f2f82358bccc5d9f26cb297360b7|healthy|0|false",
+  "runtime_after": "bdd591c758acb20cae16ebac329ff1e805fc944a4ee5928cf4a3047d8246d861|open-webui-pr7-agentscope-runtime:890cf8e0ca52-phase-marker-clean|sha256:d13894796c92304c0e0a012eac2441b44e7dcb37948a26676aa195c29383cecf|healthy|0|false",
+  "tool_deleted": true
+}
