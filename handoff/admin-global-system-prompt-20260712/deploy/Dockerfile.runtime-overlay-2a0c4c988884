@@ -1,0 +1,7 @@
+FROM open-webui-pr7-agentscope-runtime:7dc6afd81f2b-durable-execution
+
+ARG SOURCE_SHA
+LABEL org.opencontainers.image.revision=${SOURCE_SHA}
+
+RUN rm -rf /service/agentscope_runtime
+COPY services/agentscope-runtime/agentscope_runtime /service/agentscope_runtime
