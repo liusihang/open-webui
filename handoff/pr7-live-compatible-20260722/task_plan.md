@@ -9,6 +9,6 @@
 - [x] Rebuild WebUI/runtime images from the corrected commit.
 - [x] Switch only PR7 WebUI/runtime with DB and runtime-store rollback protection.
 - [x] Verify native phase ordering, cancellation, interaction, refresh, and browser state.
-- [ ] Rebuild and switch the runtime-only true-final-streaming correction.
-- [ ] Re-run native phase and require more than one live `final.delta` before release closure.
-- [ ] Record final live truth, residual risks, and release recommendation.
+- [x] Rebuild and switch the runtime-only true-final-streaming correction.
+- [x] Prove more than one live `final.delta` with a deterministic temporary pipe; record provider-backed native-phase recheck as externally blocked.
+- [x] Record final live truth, residual risks, and release recommendation.
