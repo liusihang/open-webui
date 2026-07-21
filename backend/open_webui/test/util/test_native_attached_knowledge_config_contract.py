@@ -43,9 +43,14 @@ def _config_public_names() -> set[str]:
 def test_native_attached_knowledge_bypass_flag_is_defined_in_config() -> None:
     main_text = MAIN_PATH.read_text()
     config_text = CONFIG_PATH.read_text()
+    config_path = (
+        'layered_knowledge.'
+        'native_attached_knowledge_bypass_legacy_file_retrieval'
+    )
 
-    assert SYMBOL in main_text
-    assert f'{SYMBOL} = ConfigVar(' in config_text
+    assert f'{SYMBOL} = (' in config_text
+    assert f"'{config_path}': {SYMBOL}" in config_text
+    assert f"'{SYMBOL}': '{config_path}'" in main_text
 
 
 def test_main_only_imports_public_names_from_config() -> None:
