@@ -1160,6 +1160,73 @@ async def test_model_bridge_flushes_commentary_before_streaming_final_answer() -
 
 
 @pytest.mark.asyncio
+async def test_model_bridge_yields_explicit_final_delta_before_provider_stream_ends() -> None:
+    from agentscope_runtime.agentscope_bridge import OpenWebUIAgentScopeModel
+
+    provider_started = asyncio.Event()
+    release_provider = asyncio.Event()
+    provider_ended = asyncio.Event()
+
+    class LiveFinalCallbacks(RecordingBridgeCallbacks):
+        async def call_model_stream(self, **kwargs: object):
+            self.model_calls.append(kwargs)
+            provider_started.set()
+            yield {
+                "type": "chunk",
+                "delta": {
+                    "content": "First ",
+                    "phase": "final_answer",
+                    "tool_calls": None,
+                },
+            }
+            await release_provider.wait()
+            yield {
+                "type": "chunk",
+                "delta": {
+                    "content": "second.",
+                    "phase": "final_answer",
+                    "tool_calls": None,
+                },
+            }
+            provider_ended.set()
+            yield {"type": "stream_end"}
+
+    callbacks = LiveFinalCallbacks()
+    model = OpenWebUIAgentScopeModel(
+        run_id="run-live-provider-final",
+        runtime_session_id="rt-live-provider-final",
+        participant_id="leader",
+        model_id="gpt-5.4",
+        callback_client=callbacks,
+    )
+    response_stream = await model([{"role": "user", "content": "Finish."}])
+    first_chunk_task = asyncio.create_task(anext(response_stream))
+
+    try:
+        await asyncio.wait_for(provider_started.wait(), timeout=1.0)
+        first_chunk = await asyncio.wait_for(
+            asyncio.shield(first_chunk_task),
+            timeout=0.1,
+        )
+        assert first_chunk.content[0].text == "First "
+        assert first_chunk.is_last is False
+        assert provider_ended.is_set() is False
+
+        release_provider.set()
+        remaining_chunks = [chunk async for chunk in response_stream]
+        assert [chunk.content[0].text for chunk in remaining_chunks[:-1]] == [
+            "second."
+        ]
+        assert remaining_chunks[-1].content[0].text == "First second."
+        assert remaining_chunks[-1].is_last is True
+    finally:
+        release_provider.set()
+        if not first_chunk_task.done():
+            await first_chunk_task
+        await response_stream.aclose()
+
+
+@pytest.mark.asyncio
 async def test_model_bridge_persists_provider_auxiliary_content_before_final_stream() -> None:
     from agentscope_runtime.agentscope_bridge import OpenWebUIAgentScopeModel
 
@@ -2494,7 +2561,7 @@ async def test_model_bridge_preserves_order_when_phase_is_declared_midstream() -
 
 
 @pytest.mark.asyncio
-async def test_model_bridge_does_not_emit_final_before_later_tool_conflict() -> None:
+async def test_model_bridge_reports_late_tool_conflict_after_streaming_declared_final() -> None:
     from agentscope_runtime.agentscope_bridge import OpenWebUIAgentScopeModel
 
     callbacks = RecordingBridgeCallbacks()
@@ -2541,11 +2608,11 @@ async def test_model_bridge_does_not_emit_final_before_later_tool_conflict() -> 
         async for chunk in await model([{"role": "user", "content": "Answer."}]):
             yielded.append(chunk)
 
-    assert yielded == []
+    assert [chunk.content[0].text for chunk in yielded] == ["Premature final."]
 
 
 @pytest.mark.asyncio
-async def test_model_bridge_rejects_commentary_after_final_without_emitting_final() -> None:
+async def test_model_bridge_rejects_commentary_after_streaming_declared_final() -> None:
     from agentscope_runtime.agentscope_bridge import OpenWebUIAgentScopeModel
 
     callbacks = RecordingBridgeCallbacks()
@@ -2584,7 +2651,7 @@ async def test_model_bridge_rejects_commentary_after_final_without_emitting_fina
         async for chunk in await model([{"role": "user", "content": "Answer."}]):
             yielded.append(chunk)
 
-    assert yielded == []
+    assert [chunk.content[0].text for chunk in yielded] == ["Final first."]
 
 
 @pytest.mark.asyncio

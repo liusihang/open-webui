@@ -151,6 +151,27 @@ def _normalize_leading_response_envelopes(
     return marker_phase, private_reasoning, cleaned_parts
 
 
+def _declared_final_prefix_is_safe_to_stream(parts: list[str]) -> bool:
+    """Return whether a declared final prefix cannot be a private envelope.
+
+    Structured provider phases let ordinary final text stream immediately. A
+    small set of leading characters can still begin one of the legacy textual
+    phase/thinking envelopes, so those prefixes stay buffered until the full
+    response can be normalized without exposing private text.
+    """
+    combined = "".join(parts).lstrip()
+    if not combined or combined[0] in {"<", "*"}:
+        return False
+    if combined[0] not in {"p", "P"}:
+        return True
+    compact = re.sub(r"\s+", "", combined.lower())
+    markers = ("phase=commentary", "phase=final_answer")
+    return not any(
+        marker.startswith(compact) or compact.startswith(marker)
+        for marker in markers
+    )
+
+
 class OpenWebUIToolApprovalRequired(BaseException):
     """Control-flow signal: OpenWebUI paused the run for tool approval."""
 
@@ -395,6 +416,7 @@ class OpenWebUIAgentScopeModel(ChatModelBase):
         unclassified_text_parts: list[str] = []
         active_text_phase: str | None = None
         final_phase_started = False
+        final_streaming_started = False
         accumulated_reasoning_parts: list[str] = []
         literal_reasoning_parts: list[str] = []
         accumulated_tool_calls: list[dict[str, Any]] = []
@@ -475,8 +497,8 @@ class OpenWebUIAgentScopeModel(ChatModelBase):
         async def classify_text(
             phase: str,
             content: str,
-        ) -> None:
-            nonlocal final_phase_started
+        ) -> list[str]:
+            nonlocal final_phase_started, final_streaming_started
             if phase == "commentary":
                 if final_phase_started:
                     raise RuntimeError(
@@ -484,7 +506,7 @@ class OpenWebUIAgentScopeModel(ChatModelBase):
                         "final_answer"
                     )
                 commentary_parts.append(content)
-                return
+                return []
             final_phase_started = True
             if accumulated_tool_calls:
                 raise RuntimeError(
@@ -494,6 +516,25 @@ class OpenWebUIAgentScopeModel(ChatModelBase):
             await flush_commentary()
             await flush_auxiliary()
             final_text_parts.append(content)
+            if final_streaming_started:
+                return [content]
+            if _declared_final_prefix_is_safe_to_stream(final_text_parts):
+                final_streaming_started = True
+                return list(final_text_parts)
+            return []
+
+        def final_delta_response(content: str) -> ChatResponse:
+            nonlocal final_text_delta_index
+            response = ChatResponse(
+                content=[TextBlock(text=content)],
+                is_last=False,
+                metadata={
+                    "block_id": block_id,
+                    "delta_index": final_text_delta_index,
+                },
+            )
+            final_text_delta_index += 1
+            return response
 
         for attempt in range(1, MODEL_CALL_RETRY_ATTEMPTS + 1):
             stream = self.callback_client.call_model_stream(
@@ -587,10 +628,11 @@ class OpenWebUIAgentScopeModel(ChatModelBase):
                                     literal_reasoning_parts.append(private_reasoning)
                                 pending_phase = marker_phase or phase
                                 for pending_text in cleaned_parts:
-                                    await classify_text(
+                                    for final_delta in await classify_text(
                                         pending_phase,
                                         pending_text,
-                                    )
+                                    ):
+                                        yield final_delta_response(final_delta)
                                 unclassified_text_parts.clear()
                             active_text_phase = phase
                         elif active_text_phase is not None:
@@ -599,7 +641,8 @@ class OpenWebUIAgentScopeModel(ChatModelBase):
                             unclassified_text_parts.append(content)
                             continue
 
-                        await classify_text(phase, content)
+                        for final_delta in await classify_text(phase, content):
+                            yield final_delta_response(final_delta)
             elif event_type == "done":
                 # Non-stream fallback: full response in payload.
                 payload = event.get("payload") or {}
@@ -649,7 +692,8 @@ class OpenWebUIAgentScopeModel(ChatModelBase):
                 literal_reasoning_parts.append(private_reasoning)
             if marker_phase is not None:
                 for pending_text in cleaned_parts:
-                    await classify_text(marker_phase, pending_text)
+                    for final_delta in await classify_text(marker_phase, pending_text):
+                        yield final_delta_response(final_delta)
             elif tool_blocks:
                 commentary_parts.extend(cleaned_parts)
             else:
@@ -685,16 +729,8 @@ class OpenWebUIAgentScopeModel(ChatModelBase):
         if not commentary_parts and not final_text_parts and not tool_blocks:
             raise RuntimeError("empty_model_response: model returned no public response")
 
-        for content in final_text_parts:
-            yield ChatResponse(
-                content=[TextBlock(text=content)],
-                is_last=False,
-                metadata={
-                    "block_id": block_id,
-                    "delta_index": final_text_delta_index,
-                },
-            )
-            final_text_delta_index += 1
+        for content in final_text_parts[final_text_delta_index:]:
+            yield final_delta_response(content)
 
         commentary_text = "".join(commentary_parts)
         final_text = "".join(final_text_parts)

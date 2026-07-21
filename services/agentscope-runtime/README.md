@@ -83,6 +83,16 @@ whole callback operation. OpenWebUI emits transport-only SSE heartbeats while
 an upstream model stream is active, so legitimate silent model work does not
 consume the read-idle budget. Heartbeats are not stored as chat content.
 
+Structured `final_answer` model deltas are forwarded to AgentScope before the
+provider SSE ends, allowing OpenWebUI to persist and render `final.delta`
+events while the answer is still being generated. Unphased text and leading
+legacy textual envelopes remain buffered until they can be classified safely;
+this prevents a split `<thinking>` or `phase=...` prefix from leaking into the
+public transcript. Once an explicit final phase has begun, a later tool call or
+commentary block is a provider protocol violation: the run fails, and any
+already-streamed public final prefix remains visible rather than being silently
+retracted.
+
 The runtime store schema is versioned and migrated at startup. Checkpoints are
 bounded by `AGENT_RUNTIME_MAX_CHECKPOINT_BYTES`; terminal execution journal rows
 are pruned by age and capped by `AGENT_RUNTIME_MAX_TERMINAL_EXECUTIONS` to avoid

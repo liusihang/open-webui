@@ -5,8 +5,10 @@
 - [x] Map the minimal newer UI/status-history and `d72ffcaca` hardening changes onto this source line.
 - [x] Port changes semantically and add deployment compatibility/rollback tests.
 - [x] Run focused and full runtime/backend/frontend/build verification.
-- [ ] Commit the corrected source and exact deployment assets.
+- [x] Commit the corrected source and exact deployment assets.
 - [x] Rebuild WebUI/runtime images from the corrected commit.
-- [ ] Switch only PR7 WebUI/runtime with DB and runtime-store rollback protection.
-- [ ] Run native phase, streaming final, cancellation, interaction, refresh, and browser acceptance.
+- [x] Switch only PR7 WebUI/runtime with DB and runtime-store rollback protection.
+- [x] Verify native phase ordering, cancellation, interaction, refresh, and browser state.
+- [ ] Rebuild and switch the runtime-only true-final-streaming correction.
+- [ ] Re-run native phase and require more than one live `final.delta` before release closure.
 - [ ] Record final live truth, residual risks, and release recommendation.
