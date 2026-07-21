@@ -69,9 +69,7 @@ describe('agentRuns api helpers', () => {
 		const result = await getAgentRunEvents('token-1', 'run-1', { afterSeq: 7 });
 
 		expect(result).toEqual(events);
-		expect(fetchMock.mock.calls[0]?.[0]).toContain(
-			'/api/agent/runs/run-1/events/list?after_seq=7'
-		);
+		expect(fetchMock.mock.calls[0]?.[0]).toContain('/api/agent/runs/run-1/events/list?after_seq=7');
 		expect(fetchMock.mock.calls[0]?.[1]).toMatchObject({
 			method: 'GET',
 			credentials: 'include'

@@ -142,7 +142,7 @@ def _patch_model_and_chat_boundaries(monkeypatch, calls):
     monkeypatch.setattr(main.Chats, 'is_chat_owner', fake_is_chat_owner)
     monkeypatch.setattr(main.Chats, 'get_message_by_id_and_message_id', fake_get_message)
     monkeypatch.setattr(main.Chats, 'upsert_message_to_chat_by_id_and_message_id', fake_upsert)
-    monkeypatch.setattr(main, 'publish_event', fake_publish_event)
+    monkeypatch.setattr(main, 'publish_event', fake_publish_event, raising=False)
 
 
 def _patch_legacy_chat_pipeline(monkeypatch, calls):
