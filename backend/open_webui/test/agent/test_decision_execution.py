@@ -1,7 +1,7 @@
 import asyncio
 import os
 import sys
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, suppress
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -23,6 +23,8 @@ from open_webui.models.agent_runs import (
     AgentRuns,
 )
 from sqlalchemy import select, text
+from sqlalchemy.dialects import mysql, postgresql, sqlite
+from sqlalchemy.dialects.mysql.mariadb import MariaDBDialect
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 RUNTIME_PACKAGE_ROOT = Path(__file__).parents[4] / 'services' / 'agentscope-runtime'
@@ -67,7 +69,11 @@ async def decision_db(monkeypatch, tmp_path):
     await engine.dispose()
 
 
-async def _waiting_resource(resource_type: str) -> tuple[str, str]:
+async def _waiting_resource(
+    resource_type: str,
+    *,
+    timeout_seconds: float | None = None,
+) -> tuple[str, str]:
     run = await AgentRuns.create_run(
         user_id='user-1',
         chat_id='chat-1',
@@ -105,20 +111,67 @@ async def _waiting_resource(resource_type: str) -> tuple[str, str]:
         )
     else:
         resource_id = f'user-input:{run.id}:tool-call-1'
+        payload = {
+            'user_input_id': resource_id,
+            'tool_call_id': 'tool-call-1',
+            'checkpoint_version': 7,
+            'allow_cancel': True,
+        }
+        if timeout_seconds is not None:
+            payload['timeout_seconds'] = timeout_seconds
         await AgentRuns.append_event(
             run.id,
             event_type='user_input.requested',
             participant_id='leader',
             phase='waiting_user_input',
             summary='User input requested.',
-            payload={
-                'user_input_id': resource_id,
-                'tool_call_id': 'tool-call-1',
-                'checkpoint_version': 7,
-                'allow_cancel': True,
-            },
+            payload=payload,
         )
     return run.id, resource_id
+
+
+async def _insert_legacy_waiting_user_input(
+    session_factory,
+    *,
+    suffix: str,
+    request_payloads: list[dict],
+) -> tuple[str, str]:
+    run_id = f'legacy-run-{suffix}'
+    async with session_factory() as session:
+        session.add(
+            AgentRun(
+                id=run_id,
+                user_id='user-1',
+                chat_id='chat-1',
+                user_message_id=f'user-message-{suffix}',
+                assistant_message_id=f'assistant-message-{suffix}',
+                state='waiting_user_input',
+                state_version=2,
+                leader_model_id='model-1',
+                runtime_session_id='runtime-session-1',
+                final_text='',
+                pending_user_input_id=None,
+                pending_user_input_expires_at=None,
+                created_at=1,
+                updated_at=1,
+            )
+        )
+        for seq, payload in enumerate(request_payloads, start=1):
+            session.add(
+                AgentRunEvent(
+                    id=f'legacy-event-{suffix}-{seq}',
+                    run_id=run_id,
+                    seq=seq,
+                    event_type='user_input.requested',
+                    participant_id='leader',
+                    phase='waiting_user_input',
+                    summary='User input requested.',
+                    payload=payload,
+                    created_at=seq,
+                )
+            )
+        await session.commit()
+    return run_id, str(request_payloads[-1]['user_input_id'])
 
 
 async def _record(
@@ -142,6 +195,75 @@ async def _record(
     )
 
 
+def _minimal_decision_values() -> dict:
+    return {
+        'id': 'candidate-execution',
+        'run_id': 'run-1',
+        'resource_type': 'user_input',
+        'resource_id': 'input-1',
+        'decision': 'accepted',
+        'command_type': 'resume_user_input',
+        'command_payload': {'status': 'accepted', 'content': 'yes'},
+        'fingerprint': 'fingerprint-1',
+        'runtime_session_id': 'runtime-session-1',
+        'expected_checkpoint_version': 1,
+        'expected_run_state_version': 2,
+        'request_event_seq': 3,
+        'status': 'pending',
+        'attempt_count': 0,
+        'created_at': 1,
+        'updated_at': 1,
+    }
+
+
+@pytest.mark.parametrize('dialect', [mysql.dialect(), MariaDBDialect()])
+def test_mysql_family_decision_insert_is_atomic_noop_on_duplicate(dialect):
+    statement = agent_run_models._decision_execution_insert_statement(
+        dialect.name,
+        _minimal_decision_values(),
+    )
+
+    compiled = str(statement.compile(dialect=dialect)).upper()
+
+    assert 'ON DUPLICATE KEY UPDATE' in compiled
+    assert 'ID = AGENT_RUN_DECISION_EXECUTION.ID' in compiled
+    assert 'RETURNING' not in compiled
+
+
+@pytest.mark.parametrize('dialect', [mysql.dialect(), MariaDBDialect()])
+def test_mysql_family_receipt_insert_is_atomic_noop_on_duplicate(dialect):
+    statement = agent_run_models._decision_receipt_insert_statement(
+        dialect.name,
+        {
+            'id': 'candidate-receipt',
+            'run_id': 'run-1',
+            'operation_type': 'user_input.result',
+            'idempotency_key': 'caller-1',
+            'request_hash': 'hash-1',
+            'status': 'succeeded',
+            'created_at': 1,
+            'updated_at': 1,
+        },
+    )
+
+    compiled = str(statement.compile(dialect=dialect)).upper()
+
+    assert 'ON DUPLICATE KEY UPDATE' in compiled
+    assert 'ID = AGENT_RUN_OPERATION.ID' in compiled
+
+
+def test_mysql_canonical_decision_lookup_is_a_current_locking_read():
+    statement = agent_run_models._canonical_decision_execution_statement(
+        run_id='run-1',
+        resource_type='user_input',
+        resource_id='input-1',
+    )
+
+    compiled = str(statement.compile(dialect=mysql.dialect())).upper()
+
+    assert 'FOR UPDATE' in compiled
+
+
 @pytest.mark.asyncio
 async def test_different_caller_keys_converge_on_one_resource_execution(decision_db):
     run_id, approval_id = await _waiting_resource('approval')
@@ -156,6 +278,30 @@ async def test_different_caller_keys_converge_on_one_resource_execution(decision
     async with decision_db() as session:
         rows = (await session.execute(select(agent_run_models.AgentRunDecisionExecution))).scalars().all()
     assert len(rows) == 1
+
+
+@pytest.mark.asyncio
+async def test_concurrent_caller_keys_return_one_canonical_resource_execution(
+    decision_db,
+):
+    run_id, approval_id = await _waiting_resource('approval')
+
+    first, second = await asyncio.gather(
+        _record(run_id, 'approval', approval_id, 'approved', 'caller-1'),
+        _record(run_id, 'approval', approval_id, 'approved', 'caller-2'),
+    )
+
+    assert first.execution.id == second.execution.id
+    assert {first.created, second.created} == {False, True}
+    async with decision_db() as session:
+        rows = (
+            await session.execute(
+                select(agent_run_models.AgentRunDecisionExecution).where(
+                    agent_run_models.AgentRunDecisionExecution.run_id == run_id
+                )
+            )
+        ).scalars().all()
+    assert [row.id for row in rows] == [first.execution.id]
 
 
 @pytest.mark.asyncio
@@ -240,6 +386,529 @@ async def test_concurrent_same_user_input_receipt_key_inserts_once_on_sqlite(
         ).scalars().all()
     assert len(receipts) == 1
     assert receipts[0].status == 'succeeded'
+
+
+@pytest.mark.asyncio
+async def test_concurrent_opposite_decisions_choose_one_canonical_resource_owner(
+    decision_db,
+):
+    run_id, approval_id = await _waiting_resource('approval')
+
+    results = await asyncio.gather(
+        _record(run_id, 'approval', approval_id, 'approved', 'caller-approved'),
+        _record(run_id, 'approval', approval_id, 'rejected', 'caller-rejected'),
+        return_exceptions=True,
+    )
+
+    successes = [result for result in results if not isinstance(result, Exception)]
+    conflicts = [
+        result
+        for result in results
+        if isinstance(result, agent_run_models.AgentRunDecisionConflict)
+    ]
+    async with decision_db() as session:
+        executions = (
+            await session.execute(
+                select(agent_run_models.AgentRunDecisionExecution).where(
+                    agent_run_models.AgentRunDecisionExecution.run_id == run_id
+                )
+            )
+        ).scalars().all()
+
+    assert len(successes) == 1
+    assert len(conflicts) == 1
+    assert len(executions) == 1
+    assert successes[0].execution.id == executions[0].id
+    assert successes[0].execution.decision == executions[0].decision
+
+
+@pytest.mark.asyncio
+async def test_user_input_deadline_uses_database_clock_not_event_clock(
+    decision_db,
+    monkeypatch,
+):
+    application_now = 9_000_000_000_000_000_000
+    database_now = 4_000_000_000
+
+    monkeypatch.setattr(agent_run_models, '_now_ns', lambda: application_now)
+
+    async def fake_database_now(_db):
+        return database_now
+
+    monkeypatch.setattr(agent_run_models, '_database_now_ns', fake_database_now)
+
+    run_id, input_id = await _waiting_resource(
+        'user_input',
+        timeout_seconds=2.5,
+    )
+
+    requested = (await AgentRuns.list_events(run_id))[-1]
+    async with decision_db() as session:
+        run = await session.get(AgentRun, run_id)
+
+    assert requested.created_at == application_now
+    assert run.pending_user_input_id == input_id
+    assert run.pending_user_input_expires_at == database_now + 2_500_000_000
+
+
+@pytest.mark.parametrize(
+    'dialect',
+    [sqlite.dialect(), postgresql.dialect(), mysql.dialect(), MariaDBDialect()],
+)
+def test_due_user_input_query_is_indexable_and_bounded(dialect):
+    statement = agent_run_models._due_user_input_statement(
+        now_ns=123_000_000_000,
+        limit=17,
+    )
+
+    compiled = str(
+        statement.compile(
+            dialect=dialect,
+            compile_kwargs={'literal_binds': True},
+        )
+    ).upper()
+
+    assert 'FROM AGENT_RUN' in compiled
+    assert 'AGENT_RUN_EVENT' not in compiled
+    assert 'STATE =' in compiled
+    assert 'PENDING_USER_INPUT_EXPIRES_AT <=' in compiled
+    assert 'ORDER BY AGENT_RUN.PENDING_USER_INPUT_EXPIRES_AT' in compiled
+    assert 'LIMIT 17' in compiled
+
+
+@pytest.mark.parametrize(
+    'dialect',
+    [sqlite.dialect(), postgresql.dialect(), mysql.dialect(), MariaDBDialect()],
+)
+def test_legacy_user_input_reconciliation_query_is_sql_limited(dialect):
+    statement = agent_run_models._legacy_user_input_request_statement(limit=19)
+
+    compiled = str(
+        statement.compile(
+            dialect=dialect,
+            compile_kwargs={'literal_binds': True},
+        )
+    ).upper()
+
+    assert 'WAITING_USER_INPUT' in compiled
+    assert 'USER_INPUT.REQUESTED' in compiled
+    assert 'PENDING_USER_INPUT_ID IS NULL' in compiled
+    assert 'LIMIT 19' in compiled
+
+
+@pytest.mark.asyncio
+async def test_legacy_timed_user_input_uses_latest_request_and_database_now(
+    decision_db,
+    monkeypatch,
+):
+    database_now = 7_000_000_000
+
+    async def fake_database_now(_db):
+        return database_now
+
+    monkeypatch.setattr(agent_run_models, '_database_now_ns', fake_database_now)
+    run_id, latest_input_id = await _insert_legacy_waiting_user_input(
+        decision_db,
+        suffix='timed',
+        request_payloads=[
+            {
+                'user_input_id': 'legacy-input-old',
+                'timeout_seconds': 1,
+            },
+            {
+                'user_input_id': 'legacy-input-latest',
+                'timeout_seconds': 30,
+            },
+        ],
+    )
+
+    reconciled = await AgentRuns.reconcile_legacy_user_inputs(limit=10)
+
+    async with decision_db() as session:
+        run = await session.get(AgentRun, run_id)
+    assert reconciled == 1
+    assert run.pending_user_input_id == latest_input_id
+    assert run.pending_user_input_expires_at == database_now + 30_000_000_000
+
+
+@pytest.mark.asyncio
+async def test_legacy_untimed_user_input_reconciles_once_without_deadline(
+    decision_db,
+    monkeypatch,
+):
+    database_now_calls = 0
+
+    async def fake_database_now(_db):
+        nonlocal database_now_calls
+        database_now_calls += 1
+        return 11_000_000_000
+
+    monkeypatch.setattr(agent_run_models, '_database_now_ns', fake_database_now)
+    run_id, input_id = await _insert_legacy_waiting_user_input(
+        decision_db,
+        suffix='untimed',
+        request_payloads=[{'user_input_id': 'legacy-input-untimed'}],
+    )
+
+    first = await AgentRuns.reconcile_legacy_user_inputs(limit=10)
+    second = await AgentRuns.reconcile_legacy_user_inputs(limit=10)
+
+    async with decision_db() as session:
+        run = await session.get(AgentRun, run_id)
+    assert first == 1
+    assert second == 0
+    assert database_now_calls == 2
+    assert run.pending_user_input_id == input_id
+    assert run.pending_user_input_expires_at is None
+
+
+@pytest.mark.asyncio
+async def test_legacy_user_input_reconciliation_applies_limit(decision_db):
+    for index in range(7):
+        await _insert_legacy_waiting_user_input(
+            decision_db,
+            suffix=f'limit-{index}',
+            request_payloads=[
+                {'user_input_id': f'legacy-input-limit-{index}'},
+            ],
+        )
+
+    reconciled = await AgentRuns.reconcile_legacy_user_inputs(limit=3)
+
+    async with decision_db() as session:
+        populated = (
+            await session.execute(
+                select(AgentRun).where(
+                    AgentRun.pending_user_input_id.is_not(None)
+                )
+            )
+        ).scalars().all()
+    assert reconciled == 3
+    assert len(populated) == 3
+
+
+@pytest.mark.asyncio
+async def test_legacy_user_input_reconciliation_is_multi_worker_safe(decision_db):
+    run_id, input_id = await _insert_legacy_waiting_user_input(
+        decision_db,
+        suffix='multi-worker',
+        request_payloads=[
+            {
+                'user_input_id': 'legacy-input-multi-worker',
+                'timeout_seconds': 60,
+            }
+        ],
+    )
+
+    results = await asyncio.gather(
+        AgentRuns.reconcile_legacy_user_inputs(limit=10),
+        AgentRuns.reconcile_legacy_user_inputs(limit=10),
+    )
+
+    async with decision_db() as session:
+        run = await session.get(AgentRun, run_id)
+    assert sum(results) == 1
+    assert run.pending_user_input_id == input_id
+    assert run.pending_user_input_expires_at is not None
+
+
+@pytest.mark.asyncio
+async def test_decision_record_clears_pending_user_input_deadline(decision_db):
+    run_id, input_id = await _waiting_resource(
+        'user_input',
+        timeout_seconds=30,
+    )
+
+    await _record(
+        run_id,
+        'user_input',
+        input_id,
+        'accepted',
+        'user-submit',
+        payload={'content': {'answer': 'A'}},
+    )
+
+    async with decision_db() as session:
+        run = await session.get(AgentRun, run_id)
+    assert run.pending_user_input_id is None
+    assert run.pending_user_input_expires_at is None
+
+
+@pytest.mark.asyncio
+async def test_terminal_transition_clears_pending_user_input_deadline(decision_db):
+    run_id, _input_id = await _waiting_resource(
+        'user_input',
+        timeout_seconds=30,
+    )
+
+    await AgentRuns.append_event(
+        run_id,
+        event_type='run.cancelled',
+        phase='cancelled',
+        payload={'runtime_session_id': 'runtime-session-1'},
+    )
+
+    async with decision_db() as session:
+        run = await session.get(AgentRun, run_id)
+    assert run.pending_user_input_id is None
+    assert run.pending_user_input_expires_at is None
+
+
+@pytest.mark.asyncio
+async def test_due_user_input_timeout_persists_expired_event_and_resumes_run(
+    decision_db,
+):
+    from open_webui.agent.decision_execution import AgentDecisionExecutionDispatcher
+
+    run_id, input_id = await _waiting_resource(
+        'user_input',
+        timeout_seconds=0.01,
+    )
+    requested = (await AgentRuns.list_events(run_id))[-1]
+
+    expired = await AgentRuns.expire_due_user_inputs(
+        now_ns=requested.created_at + 10_000_001,
+    )
+    assert len(expired) == 1
+    assert expired[0].decision == 'timeout'
+
+    result = await AgentDecisionExecutionDispatcher(
+        AgentRuns,
+        StubRuntimeClient(activate_state='applied'),
+        worker_id='timeout-worker',
+    ).dispatch_execution(expired[0].id)
+
+    run = await AgentRuns.get_run(run_id)
+    events = await AgentRuns.list_events(run_id)
+    assert result.status == 'succeeded'
+    assert run is not None
+    assert run.state == 'running'
+    assert [event.event_type for event in events].count('user_input.expired') == 1
+    expired_event = next(
+        event for event in events if event.event_type == 'user_input.expired'
+    )
+    assert expired_event.payload['user_input_id'] == input_id
+    assert expired_event.payload['status'] == 'timeout'
+
+
+@pytest.mark.asyncio
+async def test_restart_scanner_discovers_durable_due_user_input(decision_db):
+    run_id, _input_id = await _waiting_resource(
+        'user_input',
+        timeout_seconds=1,
+    )
+    async with decision_db() as session:
+        run = await session.get(AgentRun, run_id)
+        persisted_deadline = run.pending_user_input_expires_at
+    restarted_store = agent_run_models.AgentRunTable()
+
+    expired = await restarted_store.expire_due_user_inputs(
+        now_ns=persisted_deadline + 1,
+    )
+
+    assert len(expired) == 1
+    assert expired[0].decision == 'timeout'
+
+
+@pytest.mark.asyncio
+async def test_user_submission_and_timeout_race_create_exactly_one_decision(
+    decision_db,
+):
+    run_id, input_id = await _waiting_resource(
+        'user_input',
+        timeout_seconds=0.01,
+    )
+    requested = (await AgentRuns.list_events(run_id))[-1]
+
+    timeout_result, user_result = await asyncio.gather(
+        AgentRuns.expire_due_user_inputs(
+            now_ns=requested.created_at + 10_000_001,
+        ),
+        _record(
+            run_id,
+            'user_input',
+            input_id,
+            'accepted',
+            'user-submit-race',
+            payload={'content': {'answer': 'A'}},
+        ),
+        return_exceptions=True,
+    )
+
+    async with decision_db() as session:
+        rows = (
+            await session.execute(
+                select(agent_run_models.AgentRunDecisionExecution).where(
+                    agent_run_models.AgentRunDecisionExecution.run_id == run_id
+                )
+            )
+        ).scalars().all()
+        run = await session.get(AgentRun, run_id)
+    assert len(rows) == 1
+    assert rows[0].decision in {'accepted', 'timeout'}
+    assert run.pending_user_input_id is None
+    assert run.pending_user_input_expires_at is None
+    assert not (
+        isinstance(timeout_result, Exception)
+        and isinstance(user_result, Exception)
+    )
+
+
+@pytest.mark.asyncio
+async def test_repeated_timeout_scan_is_idempotent(decision_db):
+    run_id, _input_id = await _waiting_resource(
+        'user_input',
+        timeout_seconds=0.01,
+    )
+    requested = (await AgentRuns.list_events(run_id))[-1]
+    due_at = requested.created_at + 10_000_001
+
+    first = await AgentRuns.expire_due_user_inputs(now_ns=due_at)
+    second = await AgentRuns.expire_due_user_inputs(now_ns=due_at)
+
+    async with decision_db() as session:
+        rows = (
+            await session.execute(
+                select(agent_run_models.AgentRunDecisionExecution).where(
+                    agent_run_models.AgentRunDecisionExecution.run_id == run_id
+                )
+            )
+        ).scalars().all()
+    assert len(first) == 1
+    assert second == []
+    assert len(rows) == 1
+    assert rows[0].decision == 'timeout'
+
+
+@pytest.mark.asyncio
+async def test_timeout_scan_applies_sql_limit_with_many_waiting_runs(decision_db):
+    database_now = 50_000_000_000
+    run_count = 125
+    async with decision_db() as session:
+        for index in range(run_count):
+            run_id = f'high-cardinality-run-{index:03d}'
+            input_id = f'user-input:{run_id}:tool-call-1'
+            session.add(
+                AgentRun(
+                    id=run_id,
+                    user_id='user-1',
+                    chat_id='chat-1',
+                    user_message_id=f'user-message-{index}',
+                    assistant_message_id=f'assistant-message-{index}',
+                    state='waiting_user_input',
+                    state_version=2,
+                    leader_model_id='model-1',
+                    runtime_session_id='runtime-session-1',
+                    final_text='',
+                    pending_user_input_id=input_id,
+                    pending_user_input_expires_at=database_now - run_count + index,
+                    created_at=index + 1,
+                    updated_at=index + 1,
+                )
+            )
+            session.add(
+                AgentRunEvent(
+                    id=f'event-{index}',
+                    run_id=run_id,
+                    seq=1,
+                    event_type='user_input.requested',
+                    participant_id='leader',
+                    phase='waiting_user_input',
+                    summary='User input requested.',
+                    payload={
+                        'user_input_id': input_id,
+                        'tool_call_id': 'tool-call-1',
+                        'checkpoint_version': 7,
+                        'allow_cancel': True,
+                        'timeout_seconds': 1,
+                    },
+                    created_at=1,
+                )
+            )
+        await session.commit()
+
+    first = await AgentRuns.expire_due_user_inputs(
+        now_ns=database_now,
+        limit=11,
+    )
+
+    async with decision_db() as session:
+        executions = (
+            await session.execute(
+                select(agent_run_models.AgentRunDecisionExecution)
+            )
+        ).scalars().all()
+        pending = (
+            await session.execute(
+                select(AgentRun).where(
+                    AgentRun.pending_user_input_expires_at.is_not(None)
+                )
+            )
+        ).scalars().all()
+
+    assert len(first) == 11
+    assert len(executions) == 11
+    assert len(pending) == run_count - 11
+
+
+@pytest.mark.asyncio
+async def test_timeout_scanner_exception_does_not_starve_dispatcher(
+    monkeypatch,
+):
+    from open_webui.agent import decision_execution as decision_module
+
+    scan_calls = 0
+    claim_calls = 0
+    scan_order = []
+    dispatcher_reached = asyncio.Event()
+
+    async def reconcile_legacy():
+        scan_order.append('reconcile')
+        return 0
+
+    async def failing_scan():
+        nonlocal scan_calls
+        scan_calls += 1
+        scan_order.append('expire')
+        raise RuntimeError('forced timeout scan failure')
+
+    async def claim_next(**_kwargs):
+        nonlocal claim_calls
+        claim_calls += 1
+        if claim_calls >= 3:
+            dispatcher_reached.set()
+        return None
+
+    monkeypatch.setattr(
+        AgentRuns,
+        'reconcile_legacy_user_inputs',
+        reconcile_legacy,
+    )
+    monkeypatch.setattr(AgentRuns, 'expire_due_user_inputs', failing_scan)
+    monkeypatch.setattr(AgentRuns, 'claim_next_decision_execution', claim_next)
+    app = SimpleNamespace(
+        state=SimpleNamespace(
+            config=SimpleNamespace(
+                AGENT_RUNTIME_BASE_URL='',
+                AGENT_RUNTIME_SERVICE_TOKEN='',
+                AGENT_RUN_DEFAULT_TIMEOUT_SECONDS=1,
+            )
+        )
+    )
+
+    task = asyncio.create_task(
+        decision_module.agent_decision_dispatcher_loop(app, poll_seconds=0.001)
+    )
+    try:
+        await asyncio.wait_for(dispatcher_reached.wait(), timeout=0.2)
+    finally:
+        task.cancel()
+        with suppress(asyncio.CancelledError):
+            await task
+
+    assert scan_calls == 1
+    assert scan_order == ['reconcile', 'expire']
+    assert claim_calls >= 3
 
 
 @pytest.mark.asyncio

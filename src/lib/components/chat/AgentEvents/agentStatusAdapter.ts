@@ -73,12 +73,21 @@ const applyEvent = (history: AgentStatusEntry[], event: AgentRunEvent): AgentSta
 			});
 
 		case 'run.completed':
-			return markThinkingDone(markTextSegmentsDone(history, event), event);
+			return markOutstandingRequestsDone(
+				markThinkingDone(markTextSegmentsDone(history, event), event),
+				event
+			);
 
 		case 'run.failed':
 		case 'run.cancelled':
 		case 'run.budget_exceeded':
-			return appendRunError(markThinkingDone(markTextSegmentsDone(history, event), event), event);
+			return appendRunError(
+				markOutstandingRequestsDone(
+					markThinkingDone(markTextSegmentsDone(history, event), event),
+					event
+				),
+				event
+			);
 
 		case 'text.delta':
 			return upsertText(history, event);
@@ -98,6 +107,15 @@ const applyEvent = (history: AgentStatusEntry[], event: AgentRunEvent): AgentSta
 
 		case 'approval.completed':
 			return updateApprovalDone(history, event);
+
+		case 'user_input.requested':
+			return upsertUserInput(markTextSegmentsDone(history, event), event, false);
+
+		case 'user_input.completed':
+		case 'user_input.declined':
+		case 'user_input.cancelled':
+		case 'user_input.expired':
+			return upsertUserInput(history, event, true);
 
 		case 'artifact.registered':
 			return upsertArtifact(history, event);
@@ -200,6 +218,21 @@ const markTextSegmentsDone = (
 		return { ...entry, done: true, seq: event.seq, created_at: event.created_at };
 	});
 
+	return changed ? next : history;
+};
+
+const markOutstandingRequestsDone = (
+	history: AgentStatusEntry[],
+	event: AgentRunEvent
+): AgentStatusEntry[] => {
+	let changed = false;
+	const next = history.map((entry) => {
+		if (entry.done || (entry.kind !== 'approval' && entry.id.indexOf('user-input:') !== 0)) {
+			return entry;
+		}
+		changed = true;
+		return { ...entry, done: true, seq: event.seq, created_at: event.created_at };
+	});
 	return changed ? next : history;
 };
 
@@ -320,6 +353,46 @@ const updateApprovalDone = (
 	}
 	const updated = { ...history[index], done: true, seq: event.seq, created_at: event.created_at };
 	return history.map((entry, idx) => (idx === index ? updated : entry));
+};
+
+const upsertUserInput = (
+	history: AgentStatusEntry[],
+	event: AgentRunEvent,
+	done: boolean
+): AgentStatusEntry[] => {
+	const payload = event.payload;
+	const userInputId = firstString(payload.user_input_id, payload.id);
+	const id = userInputId ? `user-input:${userInputId}` : `user-input:seq-${event.seq}`;
+	const existing = history.find((entry) => entry.id === id);
+	const terminalDescription =
+		event.event_type === 'user_input.completed'
+			? '已提交用户输入'
+			: event.event_type === 'user_input.declined'
+				? '已拒绝提供用户输入'
+				: event.event_type === 'user_input.expired'
+					? '用户输入已超时'
+					: '用户输入已取消';
+	const description = done
+		? terminalDescription
+		: (firstString(payload.message, payload.prompt, payload.question) ??
+			event.summary ??
+			'需要用户输入');
+	const detail = stripEmptyDetail({
+		input: done
+			? existing?.detail?.input
+			: pickFields(payload, ['message', 'requested_schema', 'allow_cancel']),
+		output: done ? pickFields(payload, ['status', 'content']) : undefined
+	});
+
+	return upsert(history, id, {
+		done,
+		action: 'user_input',
+		description,
+		kind: 'step',
+		seq: event.seq,
+		created_at: event.created_at,
+		detail
+	});
 };
 
 const upsertArtifact = (history: AgentStatusEntry[], event: AgentRunEvent): AgentStatusEntry[] => {

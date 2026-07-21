@@ -12,53 +12,84 @@
 	const i18n = getContext<Writable<i18nType>>('i18n');
 
 	let submitting: AgentRunApprovalDecision | null = null;
-	let submitted = false;
+	let submittedDecision: AgentRunApprovalDecision | null = null;
 	let submitError: string | null = null;
+	let effectiveStatus: AgentTranscriptApprovalPart['status'];
+	const idempotencyKeys: Partial<Record<AgentRunApprovalDecision, string>> = {};
+
+	$: effectiveStatus =
+		part.status !== 'pending'
+			? part.status
+			: submittedDecision === 'approved'
+				? 'approved'
+				: submittedDecision === 'rejected'
+					? 'rejected'
+					: 'pending';
 
 	const statusText = ($status: AgentTranscriptApprovalPart['status']): string => {
 		if ($status === 'pending') return $i18n.t('awaiting approval');
 		if ($status === 'rejected') return $i18n.t('rejected');
+		if ($status === 'stale') return $i18n.t('no longer available');
 		return $i18n.t('approved');
 	};
 
 	const submit = async (decision: AgentRunApprovalDecision) => {
-		if (!agentRunId || submitting || submitted || part.status !== 'pending') {
+		if (!agentRunId || submitting || submittedDecision || part.status !== 'pending') {
 			return;
 		}
 		submitError = null;
 		submitting = decision;
+		const idempotencyKey =
+			idempotencyKeys[decision] ??
+			`approval:${part.approvalId}:${decision}:${createSubmissionNonce()}`;
+		idempotencyKeys[decision] = idempotencyKey;
 		try {
 			await submitAgentRunApproval(
 				localStorage.getItem('token') ?? '',
 				agentRunId,
 				part.approvalId,
 				{
-					decision
+					decision,
+					idempotencyKey
 				}
 			);
-			submitted = true;
+			submittedDecision = decision;
 		} catch (error) {
-			submitError = error instanceof Error ? error.message : `${error}`;
+			submitError = errorMessage(error);
+		} finally {
 			submitting = null;
-			return;
 		}
-		submitting = null;
+	};
+
+	const createSubmissionNonce = (): string =>
+		typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function'
+			? crypto.randomUUID()
+			: `${Date.now()}-${Math.random().toString(36).slice(2)}`;
+
+	const errorMessage = (error: unknown): string => {
+		if (error instanceof Error) return error.message;
+		if (typeof error === 'string') return error;
+		if (typeof error === 'object' && error !== null && 'message' in error) {
+			return String((error as { message: unknown }).message);
+		}
+		return $i18n.t('Unable to submit the approval decision.');
 	};
 </script>
 
 <div
 	class="agent-approval-part"
-	class:pending={part.status === 'pending'}
-	class:approved={part.status === 'approved'}
-	class:rejected={part.status === 'rejected'}
+	class:pending={effectiveStatus === 'pending'}
+	class:approved={effectiveStatus === 'approved'}
+	class:rejected={effectiveStatus === 'rejected'}
+	class:stale={effectiveStatus === 'stale'}
 	data-approval-id={part.approvalId}
 >
 	<div class="agent-approval-row">
 		<span class="agent-approval-icon" aria-hidden="true"
-			>{part.status === 'pending' ? '◆' : '✓'}</span
+			>{effectiveStatus === 'pending' ? '◆' : '✓'}</span
 		>
 		<span class="agent-approval-action">{part.action ?? part.description}</span>
-		<span class="agent-approval-status">{statusText(part.status)}</span>
+		<span class="agent-approval-status">{statusText(effectiveStatus)}</span>
 	</div>
 	{#if part.description && part.description !== part.action}
 		<div class="agent-approval-description">{part.description}</div>
@@ -68,7 +99,7 @@
 	{/if}
 	{#if part.status === 'pending' && agentRunId}
 		<div class="agent-approval-actions">
-			{#if submitted}
+			{#if submittedDecision}
 				<span class="agent-approval-submitted" role="status">
 					{$i18n.t('Submitted')}. {$i18n.t('Waiting for agent\u2026')}
 				</span>
@@ -107,6 +138,10 @@
 		border: 1px solid var(--agent-transcript-attention-border, #ddd6fe);
 	}
 	.agent-approval-part.approved {
+		background: transparent;
+		border-color: transparent;
+	}
+	.agent-approval-part.stale {
 		background: transparent;
 		border-color: transparent;
 	}

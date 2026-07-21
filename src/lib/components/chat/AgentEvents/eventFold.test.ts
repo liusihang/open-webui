@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 
 import { createAgentRunEventState, foldAgentRunEvent, foldAgentRunEvents } from './eventFold';
 import { agentRunEventFixture } from './fixtures';
+import type { AgentRunEvent } from './types';
 
 describe('foldAgentRunEvents', () => {
 	it('orders run events by seq and ignores duplicate or older events', () => {
@@ -417,6 +418,64 @@ describe('foldAgentRunEvents', () => {
 			structured_error: { code: 'permission_denied', message: 'Denied' }
 		});
 		expect(state.items[4].participantId).toBe('subagent-1');
+	});
+
+	it('strips nested debug payloads from public transcript details', () => {
+		const state = foldAgentRunEvents([
+			agentRunEventFixture({
+				seq: 1,
+				event_type: 'tool.completed',
+				payload: {
+					tool_call_id: 'call-1',
+					result: {
+						public: 'safe',
+						debug: { token: 'must-not-leak', trace: ['private-step'] }
+					}
+				}
+			})
+		]);
+
+		expect(state.items[0].details).toEqual({
+			tool_call_id: 'call-1',
+			result: { public: 'safe' }
+		});
+		expect(JSON.stringify(state.items[0].details)).not.toContain('must-not-leak');
+	});
+
+	it('folds every user_input lifecycle event and waiting_user_input run state', () => {
+		let state = foldAgentRunEvent(
+			createAgentRunEventState(),
+			agentRunEventFixture({
+				seq: 1,
+				event_type: 'user_input.requested',
+				summary: '',
+				payload: { user_input_id: 'input-1', message: 'Choose a scope' }
+			})
+		);
+
+		expect(state.runStatus).toBe('waiting_user_input');
+		expect(state.items[0]).toMatchObject({
+			category: 'user_input',
+			label: 'User input',
+			summary: 'Needs your input'
+		});
+
+		for (const [index, eventType] of [
+			'user_input.completed',
+			'user_input.declined',
+			'user_input.cancelled',
+			'user_input.expired'
+		].entries()) {
+			state = foldAgentRunEvent(
+				state,
+				agentRunEventFixture({
+					seq: index + 2,
+					event_type: eventType as AgentRunEvent['event_type'],
+					payload: { user_input_id: `input-${index + 2}` }
+				})
+			);
+			expect(state.runStatus).toBe('running');
+		}
 	});
 
 	it('derives lifecycle status from run and final phase events', () => {

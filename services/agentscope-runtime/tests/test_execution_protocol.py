@@ -15,6 +15,7 @@ from pathlib import Path
 import httpx
 import pytest
 import respx
+from fastapi.testclient import TestClient
 
 SERVICE_TOKEN = "runtime-secret"
 
@@ -132,7 +133,7 @@ def test_store_schema_version_has_migration_seam(tmp_path: Path) -> None:
         version = connection.execute(
             "SELECT value FROM runtime_schema WHERE key='schema_version'"
         ).fetchone()[0]
-        assert version == "1"
+        assert version == "2"
         connection.execute(
             "UPDATE runtime_schema SET value='0' WHERE key='schema_version'"
         )
@@ -142,7 +143,110 @@ def test_store_schema_version_has_migration_seam(tmp_path: Path) -> None:
         migrated = connection.execute(
             "SELECT value FROM runtime_schema WHERE key='schema_version'"
         ).fetchone()[0]
-    assert migrated == "1"
+    assert migrated == "2"
+
+
+def test_store_v1_upgrade_backfills_pending_applied_continuation(tmp_path: Path) -> None:
+    protocol = _protocol()
+    path = tmp_path / "schema-v1-upgrade.sqlite3"
+    with sqlite3.connect(path) as connection:
+        connection.executescript(
+            """
+            CREATE TABLE runtime_schema (
+                key TEXT PRIMARY KEY,
+                value TEXT NOT NULL
+            );
+            INSERT INTO runtime_schema(key, value) VALUES ('schema_version', '1');
+            CREATE TABLE runtime_checkpoint (
+                run_id TEXT PRIMARY KEY,
+                runtime_session_id TEXT NOT NULL UNIQUE,
+                checkpoint_version INTEGER NOT NULL,
+                checkpoint_json TEXT NOT NULL,
+                updated_at REAL NOT NULL
+            );
+            CREATE TABLE runtime_execution (
+                execution_id TEXT PRIMARY KEY,
+                run_id TEXT NOT NULL,
+                runtime_session_id TEXT NOT NULL,
+                subject_id TEXT NOT NULL,
+                command_type TEXT NOT NULL,
+                fingerprint TEXT NOT NULL,
+                payload_json TEXT NOT NULL,
+                state TEXT NOT NULL,
+                checkpoint_version INTEGER NOT NULL,
+                outcome_json TEXT,
+                error_json TEXT,
+                created_at REAL NOT NULL,
+                updated_at REAL NOT NULL,
+                UNIQUE(run_id, command_type, subject_id)
+            );
+            """
+        )
+        checkpoint = _checkpoint(
+            protocol,
+            state="running",
+            checkpoint_version=2,
+            wait_kind=None,
+            wait_subject_id=None,
+            applied_execution_id="rex-legacy",
+            continuation_pending=True,
+        )
+        connection.execute(
+            """
+            INSERT INTO runtime_checkpoint(
+                run_id, runtime_session_id, checkpoint_version,
+                checkpoint_json, updated_at
+            ) VALUES (?, ?, ?, ?, ?)
+            """,
+            (
+                checkpoint.run_id,
+                checkpoint.runtime_session_id,
+                checkpoint.checkpoint_version,
+                checkpoint.model_dump_json(),
+                1.0,
+            ),
+        )
+        connection.execute(
+            """
+            INSERT INTO runtime_execution(
+                execution_id, run_id, runtime_session_id, subject_id,
+                command_type, fingerprint, payload_json, state,
+                checkpoint_version, outcome_json, error_json,
+                created_at, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                "rex-legacy",
+                "run-1",
+                "rt-run-1",
+                "approval-1",
+                "resume_approval",
+                "f" * 64,
+                '{"decision":"rejected"}',
+                "applied",
+                2,
+                '{"kind":"applied"}',
+                None,
+                1.0,
+                1.0,
+            ),
+        )
+
+    store = protocol.SQLiteRuntimeExecutionStore(path)
+
+    with sqlite3.connect(path) as connection:
+        version = connection.execute(
+            "SELECT value FROM runtime_schema WHERE key='schema_version'"
+        ).fetchone()[0]
+        continuation_state = connection.execute(
+            "SELECT continuation_state FROM runtime_execution WHERE execution_id='rex-legacy'"
+        ).fetchone()[0]
+    assert version == "2"
+    assert continuation_state == "pending"
+    assert [
+        candidate.execution.execution_id
+        for candidate in store.list_pending_continuation_recoveries()
+    ] == ["rex-legacy"]
 
 
 def test_corrupt_execution_json_raises_domain_unrecoverable(tmp_path: Path) -> None:
@@ -3034,6 +3138,7 @@ def test_startup_auto_resumes_applied_continuation_after_real_subprocess_crash(
             "checkpoint_state": final.state,
             "continuation_pending": final.continuation_pending,
             "execution_state": execution.state,
+            "continuation_state": execution.continuation_state,
         }))
         """
     )
@@ -3068,7 +3173,98 @@ def test_startup_auto_resumes_applied_continuation_after_real_subprocess_crash(
         "checkpoint_state": "completed",
         "continuation_pending": False,
         "execution_state": "applied",
+        "continuation_state": "completed",
     }
+
+
+@pytest.mark.parametrize(
+    ("checkpoint_damage", "error_code"),
+    [
+        ("corrupt", "checkpoint_unrecoverable"),
+        ("missing", "checkpoint_not_found"),
+    ],
+)
+def test_startup_fail_closes_unrecoverable_pending_continuation_once(
+    tmp_path: Path,
+    checkpoint_damage: str,
+    error_code: str,
+) -> None:
+    protocol = _protocol()
+    from agentscope_runtime.app import create_app
+
+    path = tmp_path / f"startup-{checkpoint_damage}.sqlite3"
+    store = protocol.SQLiteRuntimeExecutionStore(path)
+    checkpoint = _checkpoint(protocol)
+    store.save_checkpoint(checkpoint)
+    command = protocol.RuntimeExecutionCommand.from_mapping(
+        _prepare_body(payload={"decision": "rejected"})
+    )
+    store.prepare(command, run_id=checkpoint.run_id)
+    applying, owner = store.begin_apply(command.execution_id)
+    assert owner is True
+    store.complete_apply(
+        applying.execution_id,
+        protocol.RuntimeApplyResult(
+            checkpoint=checkpoint.model_copy(
+                update={
+                    "state": "running",
+                    "wait_kind": None,
+                    "wait_subject_id": None,
+                    "continuation_pending": True,
+                }
+            ),
+            outcome={"kind": "applied"},
+        ),
+    )
+    with sqlite3.connect(path) as connection:
+        if checkpoint_damage == "corrupt":
+            connection.execute(
+                "UPDATE runtime_checkpoint SET checkpoint_json='{broken' WHERE run_id='run-1'"
+            )
+        else:
+            connection.execute("DELETE FROM runtime_checkpoint WHERE run_id='run-1'")
+
+    class Callbacks:
+        def __init__(self) -> None:
+            self.events: list[dict] = []
+
+        async def append_event(self, **kwargs):
+            self.events.append(kwargs)
+            return {"seq": len(self.events)}
+
+    callbacks = Callbacks()
+
+    async def unused_apply(checkpoint, execution):
+        raise AssertionError("startup recovery must not re-apply execution")
+
+    async def unused_continuation(checkpoint, execution):
+        raise AssertionError("unrecoverable startup recovery must fail close")
+
+    for _restart in range(2):
+        reopened = protocol.SQLiteRuntimeExecutionStore(path)
+        app = create_app(
+            service_token=SERVICE_TOKEN,
+            openwebui_client=callbacks,
+            execution_store=reopened,
+            execution_applier=unused_apply,
+            execution_continuation=unused_continuation,
+            auto_finalize_ordinary_qa=False,
+        )
+        with TestClient(app) as client:
+            assert client.get("/health").status_code == 200
+
+    assert len(callbacks.events) == 1
+    failed = callbacks.events[0]
+    assert failed["event_type"] == "run.failed"
+    assert failed["idempotency_key"] == (
+        "evt:rt-run-1:continuation-recovery-failed:rex-1"
+    )
+    assert failed["payload"]["execution_id"] == "rex-1"
+    assert failed["payload"]["error"]["code"] == error_code
+    execution = protocol.SQLiteRuntimeExecutionStore(path).get_execution("rex-1")
+    assert execution is not None
+    assert execution.state == "unrecoverable"
+    assert execution.continuation_state == "failed"
 
 
 @pytest.mark.asyncio

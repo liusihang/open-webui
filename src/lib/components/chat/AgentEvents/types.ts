@@ -126,13 +126,14 @@ export type AgentRunTextBlock = {
 
 export type AgentTranscriptToolStatus = 'running' | 'done' | 'error';
 
-export type AgentTranscriptApprovalStatus = 'pending' | 'approved' | 'rejected';
+export type AgentTranscriptApprovalStatus = 'pending' | 'approved' | 'rejected' | 'stale';
 export type AgentTranscriptUserInputStatus =
 	| 'pending'
 	| 'accepted'
 	| 'declined'
 	| 'cancelled'
-	| 'timeout';
+	| 'timeout'
+	| 'stale';
 
 export type AgentTranscriptPartBase = {
 	seq: number;

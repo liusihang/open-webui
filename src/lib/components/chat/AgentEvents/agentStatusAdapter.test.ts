@@ -204,6 +204,65 @@ describe('foldAgentEventIntoStatusHistory - approval status', () => {
 	});
 });
 
+describe('foldAgentEventIntoStatusHistory - user input status', () => {
+	it('tracks a pending user input request and marks it done on completion', () => {
+		const requested = agentRunEventFixture({
+			seq: 3,
+			event_type: 'user_input.requested',
+			payload: { user_input_id: 'input-1', message: 'Choose a scope' }
+		});
+		const completed = agentRunEventFixture({
+			seq: 4,
+			event_type: 'user_input.completed',
+			payload: { user_input_id: 'input-1', status: 'accepted', content: { scope: 'small' } }
+		});
+
+		let history = foldAgentEventIntoStatusHistory([thinkingEntry({ seq: 1 })], requested);
+		expect(history.at(-1)).toMatchObject({
+			id: 'user-input:input-1',
+			kind: 'step',
+			done: false,
+			description: 'Choose a scope'
+		});
+
+		history = foldAgentEventIntoStatusHistory(history, completed);
+		expect(history.find((entry) => entry.id === 'user-input:input-1')).toMatchObject({
+			done: true,
+			description: '已提交用户输入'
+		});
+	});
+
+	it.each(['run.completed', 'run.failed', 'run.cancelled'] as const)(
+		'marks unresolved approval and user input entries done on %s',
+		(eventType) => {
+			let history = foldAgentEventIntoStatusHistory(
+				[thinkingEntry({ seq: 1 })],
+				agentRunEventFixture({
+					seq: 2,
+					event_type: 'approval.requested',
+					payload: { approval_id: 'approval-1', action: 'Delete report' }
+				})
+			);
+			history = foldAgentEventIntoStatusHistory(
+				history,
+				agentRunEventFixture({
+					seq: 3,
+					event_type: 'user_input.requested',
+					payload: { user_input_id: 'input-1', message: 'Choose a scope' }
+				})
+			);
+
+			history = foldAgentEventIntoStatusHistory(
+				history,
+				agentRunEventFixture({ seq: 4, event_type: eventType })
+			);
+
+			expect(history.find((entry) => entry.id === 'approval:approval-1')?.done).toBe(true);
+			expect(history.find((entry) => entry.id === 'user-input:input-1')?.done).toBe(true);
+		}
+	);
+});
+
 describe('foldAgentEventIntoStatusHistory - artifact status', () => {
 	it('creates a done artifact entry on artifact.registered', () => {
 		const event = agentRunEventFixture({

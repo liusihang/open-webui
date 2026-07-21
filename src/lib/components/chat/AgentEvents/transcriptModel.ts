@@ -79,7 +79,9 @@ const summarizeTiming = (state: AgentRunEventState) => {
 	}
 
 	const startedAt = Math.min(...timestamps);
-	const updatedAt = TERMINAL_RUN_STATUSES.has(state.runStatus) ? Math.max(...timestamps) : Date.now();
+	const updatedAt = TERMINAL_RUN_STATUSES.has(state.runStatus)
+		? Math.max(...timestamps)
+		: Date.now();
 
 	return {
 		startedAt,
@@ -89,7 +91,12 @@ const summarizeTiming = (state: AgentRunEventState) => {
 };
 
 const timestampToMs = (value: number | null | undefined): number | null => {
-	if (!Number.isFinite(value ?? Number.NaN) || value === null || value === undefined || value <= 0) {
+	if (
+		!Number.isFinite(value ?? Number.NaN) ||
+		value === null ||
+		value === undefined ||
+		value <= 0
+	) {
 		return null;
 	}
 	if (value > 1_000_000_000_000_000) {
@@ -258,10 +265,10 @@ const buildParts = (state: AgentRunEventState): AgentTranscriptModelPart[] => {
 		parts.push(toolAccumulatorToPart(acc));
 	}
 	for (const acc of approvals.values()) {
-		parts.push(approvalAccumulatorToPart(acc));
+		parts.push(approvalAccumulatorToPart(acc, state.runStatus));
 	}
 	for (const acc of userInputs.values()) {
-		parts.push(userInputAccumulatorToPart(acc));
+		parts.push(userInputAccumulatorToPart(acc, state.runStatus));
 	}
 	for (const item of artifacts.values()) {
 		const part = artifactItemToPart(item);
@@ -311,7 +318,9 @@ type SubagentAccumulator = {
 	lastItem: AgentRunEventViewItem;
 };
 
-const textBlockToPart = (block: AgentRunEventState['textBlocks'][number]): AgentTranscriptTextPart => {
+const textBlockToPart = (
+	block: AgentRunEventState['textBlocks'][number]
+): AgentTranscriptTextPart => {
 	const kind = textKindToPartKind(block.kind);
 	return {
 		kind,
@@ -341,9 +350,12 @@ const toolAccumulatorToPart = (acc: ToolAccumulator): AgentTranscriptToolPart =>
 	const last = acc.lastItem;
 	const details = pickRicherDetails(acc.firstItem, acc.lastItem);
 	const toolName =
-		readPayloadString(details, 'tool_name', 'name', 'tool') ?? extractToolNameFromSummary(last.summary);
+		readPayloadString(details, 'tool_name', 'name', 'tool') ??
+		extractToolNameFromSummary(last.summary);
 	const status = resolveToolStatus(last.eventType);
-	const summary = last.summary || (toolName ? `${status === 'error' ? `${toolName} failed` : `Completed ${toolName}`}` : 'Tool');
+	const summary =
+		last.summary ||
+		(toolName ? `${status === 'error' ? `${toolName} failed` : `Completed ${toolName}`}` : 'Tool');
 	return {
 		kind: 'tool',
 		toolCallId: acc.toolCallId,
@@ -361,12 +373,19 @@ const toolAccumulatorToPart = (acc: ToolAccumulator): AgentTranscriptToolPart =>
 	};
 };
 
-const approvalAccumulatorToPart = (acc: ApprovalAccumulator): AgentTranscriptApprovalPart => {
+const approvalAccumulatorToPart = (
+	acc: ApprovalAccumulator,
+	runStatus: AgentRunState
+): AgentTranscriptApprovalPart => {
 	const last = acc.lastItem;
-	const details = pickRicherDetails(acc.firstItem, acc.lastItem);
+	const details = mergeDetails(acc.firstItem, acc.lastItem);
 	const action = readPayloadString(details, 'action', 'description');
 	const status =
-		last.eventType === 'approval.completed' ? resolveApprovalStatus(last.details) : 'pending';
+		last.eventType === 'approval.completed'
+			? resolveApprovalStatus(details)
+			: runStatus === 'waiting_approval'
+				? 'pending'
+				: 'stale';
 	const summary = last.summary || (action ? `Approval: ${action}` : 'Approval requested');
 	return {
 		kind: 'approval',
@@ -384,14 +403,14 @@ const approvalAccumulatorToPart = (acc: ApprovalAccumulator): AgentTranscriptApp
 	};
 };
 
-const userInputAccumulatorToPart = (acc: UserInputAccumulator): AgentTranscriptUserInputPart => {
+const userInputAccumulatorToPart = (
+	acc: UserInputAccumulator,
+	runStatus: AgentRunState
+): AgentTranscriptUserInputPart => {
 	const last = acc.lastItem;
 	const requestDetails = acc.firstItem.details;
-	const details =
-		acc.firstItem.details || acc.lastItem.details
-			? { ...(acc.firstItem.details ?? {}), ...(acc.lastItem.details ?? {}) }
-			: null;
-	const status = resolveUserInputStatus(last);
+	const details = mergeDetails(acc.firstItem, acc.lastItem);
+	const status = resolveUserInputStatus(last, runStatus);
 	const message =
 		readPayloadString(requestDetails, 'message', 'prompt', 'question') ||
 		readPayloadString(details, 'message', 'prompt', 'question') ||
@@ -411,13 +430,11 @@ const userInputAccumulatorToPart = (acc: UserInputAccumulator): AgentTranscriptU
 		createdAt: acc.firstItem.createdAt,
 		participantId: acc.firstItem.participantId,
 		phase: acc.firstItem.phase,
-		defaultExpanded: status !== 'accepted'
+		defaultExpanded: status === 'pending'
 	};
 };
 
-const artifactItemToPart = (
-	item: AgentRunEventViewItem
-): AgentTranscriptArtifactPart | null => {
+const artifactItemToPart = (item: AgentRunEventViewItem): AgentTranscriptArtifactPart | null => {
 	const details = extractArtifactPayload(item.details);
 	if (!details) {
 		return null;
@@ -455,7 +472,11 @@ const subagentAccumulatorToPart = (acc: SubagentAccumulator): AgentTranscriptSub
 				? 'done'
 				: 'running';
 	const resultSummary = readPayloadString(details, 'result_summary', 'content');
-	const summary = last.summary || (participantName ? `${status === 'error' ? `${participantName} failed` : `Completed ${participantName}`}` : 'Subagent');
+	const summary =
+		last.summary ||
+		(participantName
+			? `${status === 'error' ? `${participantName} failed` : `Completed ${participantName}`}`
+			: 'Subagent');
 	return {
 		kind: 'subagent',
 		participantName,
@@ -509,10 +530,11 @@ const resolveApprovalStatus = (
 };
 
 const resolveUserInputStatus = (
-	item: AgentRunEventViewItem
+	item: AgentRunEventViewItem,
+	runStatus: AgentRunState
 ): AgentTranscriptUserInputPart['status'] => {
 	if (item.eventType === 'user_input.requested') {
-		return 'pending';
+		return runStatus === 'waiting_user_input' ? 'pending' : 'stale';
 	}
 	if (item.eventType === 'user_input.declined') {
 		return 'declined';
@@ -528,6 +550,16 @@ const resolveUserInputStatus = (
 		return raw;
 	}
 	return 'accepted';
+};
+
+const mergeDetails = (
+	a: AgentRunEventViewItem,
+	b: AgentRunEventViewItem
+): AgentRunEventPayload | null => {
+	if (a.details || b.details) {
+		return { ...(a.details ?? {}), ...(b.details ?? {}) };
+	}
+	return null;
 };
 
 const extractArtifactPayload = (

@@ -16,6 +16,13 @@ down_revision: str | None = 'f3a4b5c6d7e8'
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 
+EVENT_TYPE_LENGTH = 128
+ID_LENGTH = 128
+KEY_LENGTH = 512
+PATH_LENGTH = 512
+STATUS_LENGTH = 64
+TYPE_LENGTH = 64
+
 
 TABLES = {
     'agent_run',
@@ -60,12 +67,12 @@ def upgrade() -> None:
     if 'agent_run' not in existing_tables:
         op.create_table(
             'agent_run',
-            sa.Column('id', sa.Text(), nullable=False),
-            sa.Column('user_id', sa.Text(), nullable=False),
-            sa.Column('chat_id', sa.Text(), nullable=False),
+            sa.Column('id', sa.String(length=ID_LENGTH), nullable=False),
+            sa.Column('user_id', sa.String(length=ID_LENGTH), nullable=False),
+            sa.Column('chat_id', sa.String(length=ID_LENGTH), nullable=False),
             sa.Column('user_message_id', sa.Text(), nullable=False),
             sa.Column('assistant_message_id', sa.Text(), nullable=False),
-            sa.Column('state', sa.Text(), nullable=False),
+            sa.Column('state', sa.String(length=STATUS_LENGTH), nullable=False),
             sa.Column('state_version', sa.Integer(), nullable=False, server_default='0'),
             sa.Column('leader_model_id', sa.Text(), nullable=False),
             sa.Column('runtime_session_id', sa.Text(), nullable=True),
@@ -76,7 +83,7 @@ def upgrade() -> None:
             sa.Column('process_refs', sa.JSON(), nullable=True),
             sa.Column('summary', sa.JSON(), nullable=True),
             sa.Column('error', sa.JSON(), nullable=True),
-            sa.Column('final_text', sa.Text(), nullable=False, server_default=''),
+            sa.Column('final_text', sa.Text(), nullable=False),
             sa.Column('final_delta_state', sa.JSON(), nullable=True),
             sa.Column('created_at', sa.BigInteger(), nullable=False),
             sa.Column('updated_at', sa.BigInteger(), nullable=False),
@@ -97,10 +104,10 @@ def upgrade() -> None:
     if 'agent_run_event' not in existing_tables:
         op.create_table(
             'agent_run_event',
-            sa.Column('id', sa.Text(), nullable=False),
-            sa.Column('run_id', sa.Text(), nullable=False),
+            sa.Column('id', sa.String(length=ID_LENGTH), nullable=False),
+            sa.Column('run_id', sa.String(length=ID_LENGTH), nullable=False),
             sa.Column('seq', sa.Integer(), nullable=False),
-            sa.Column('event_type', sa.Text(), nullable=False),
+            sa.Column('event_type', sa.String(length=EVENT_TYPE_LENGTH), nullable=False),
             sa.Column('participant_id', sa.Text(), nullable=True),
             sa.Column('phase', sa.Text(), nullable=True),
             sa.Column('summary', sa.Text(), nullable=True),
@@ -119,17 +126,17 @@ def upgrade() -> None:
     if 'agent_artifact' not in existing_tables:
         op.create_table(
             'agent_artifact',
-            sa.Column('id', sa.Text(), nullable=False),
-            sa.Column('run_id', sa.Text(), nullable=False),
-            sa.Column('user_id', sa.Text(), nullable=False),
-            sa.Column('kind', sa.Text(), nullable=False),
+            sa.Column('id', sa.String(length=ID_LENGTH), nullable=False),
+            sa.Column('run_id', sa.String(length=ID_LENGTH), nullable=False),
+            sa.Column('user_id', sa.String(length=ID_LENGTH), nullable=False),
+            sa.Column('kind', sa.String(length=TYPE_LENGTH), nullable=False),
             sa.Column('terminal_server_id', sa.Text(), nullable=True),
-            sa.Column('path', sa.Text(), nullable=False),
+            sa.Column('path', sa.String(length=PATH_LENGTH), nullable=False),
             sa.Column('url', sa.Text(), nullable=True),
             sa.Column('mime_type', sa.Text(), nullable=True),
             sa.Column('size', sa.BigInteger(), nullable=True),
             sa.Column('metadata', sa.JSON(), nullable=True),
-            sa.Column('idempotency_key', sa.Text(), nullable=True),
+            sa.Column('idempotency_key', sa.String(length=KEY_LENGTH), nullable=True),
             sa.Column('created_at', sa.BigInteger(), nullable=False),
             sa.PrimaryKeyConstraint('id', name='pk_agent_artifact'),
             sa.UniqueConstraint('run_id', 'path', 'kind', name='uq_agent_artifact_run_path_kind'),
@@ -145,12 +152,12 @@ def upgrade() -> None:
     if 'agent_run_operation' not in existing_tables:
         op.create_table(
             'agent_run_operation',
-            sa.Column('id', sa.Text(), nullable=False),
-            sa.Column('run_id', sa.Text(), nullable=False),
-            sa.Column('operation_type', sa.Text(), nullable=False),
-            sa.Column('idempotency_key', sa.Text(), nullable=False),
+            sa.Column('id', sa.String(length=ID_LENGTH), nullable=False),
+            sa.Column('run_id', sa.String(length=ID_LENGTH), nullable=False),
+            sa.Column('operation_type', sa.String(length=TYPE_LENGTH), nullable=False),
+            sa.Column('idempotency_key', sa.String(length=KEY_LENGTH), nullable=False),
             sa.Column('request_hash', sa.Text(), nullable=False),
-            sa.Column('status', sa.Text(), nullable=False),
+            sa.Column('status', sa.String(length=STATUS_LENGTH), nullable=False),
             sa.Column('response', sa.JSON(), nullable=True),
             sa.Column('error', sa.JSON(), nullable=True),
             sa.Column('created_at', sa.BigInteger(), nullable=False),

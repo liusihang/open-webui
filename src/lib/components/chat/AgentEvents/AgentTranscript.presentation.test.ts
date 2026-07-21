@@ -71,6 +71,8 @@ describe('AgentTranscript presentation guardrails', () => {
 		expect(approval).toContain('<button');
 		expect(approval).toContain("'approved'");
 		expect(approval).toContain("'rejected'");
+		expect(approval).toContain('idempotencyKey');
+		expect(approval).toContain('no longer available');
 		expect(transcriptPart).toContain('<ApprovalPart {part} {agentRunId} />');
 		expect(approval).not.toContain('<form');
 		expect(approval).not.toContain('AgentDetailSection');
@@ -194,13 +196,18 @@ describe('AgentTranscript presentation guardrails', () => {
 	it('renders ask-user prompts as option rows with a custom answer path', () => {
 		const userInput = readSource('./UserInputPart.svelte');
 
-		expect(userInput).toContain('choiceQuestionsFromSchema');
+		expect(userInput).toContain('parseUserInputSchema');
 		expect(userInput).toContain('agent-user-choice-option');
 		expect(userInput).toContain('agent-user-choice-custom');
 		expect(userInput).toContain('selectedOptions');
 		expect(userInput).toContain('customAnswers');
+		expect(userInput).toContain('idempotencyKey');
+		expect(userInput).toContain('no longer available');
 		expect(userInput).toMatch(/canSubmitChoiceAnswer[\s\S]*selectedOptions\[/);
 		expect(userInput).toMatch(/canSubmitChoiceAnswer[\s\S]*customAnswers\[/);
+		expect(userInput).toContain('aria-pressed={selectedOptions[activeQuestion.id] === option.id}');
+		expect(userInput).toContain('for={customAnswerInputId(part.userInputId, activeQuestion.id)}');
+		expect(userInput).toContain('id={customAnswerInputId(part.userInputId, activeQuestion.id)}');
 		expect(userInput).toContain("$i18n.t('Continue')");
 		expect(userInput).toContain("$i18n.t('Skip')");
 		expect(userInput).toContain("$i18n.t('Tell the agent how to adjust')");

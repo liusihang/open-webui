@@ -1,5 +1,4 @@
 import pytest
-from pydantic import ValidationError
 from open_webui.agent.events import (
     AgentEventRejected,
     AgentEventStore,
@@ -20,6 +19,7 @@ from open_webui.agent.protocol import (
     FinalDeltaAppend,
     TextDeltaAppend,
 )
+from pydantic import ValidationError
 
 
 class FakeAgentEventStore:
@@ -458,7 +458,7 @@ def test_text_delta_rejects_raw_private_reasoning_payload_fields():
         )
 
 
-def test_text_delta_rejects_debug_payload_fields():
+def test_text_delta_rejects_nested_debug_payload_but_allows_unrelated_fields():
     with pytest.raises(ValidationError, match='debug'):
         TextDeltaAppend(
             run_id='run-1',
@@ -467,11 +467,24 @@ def test_text_delta_rejects_debug_payload_fields():
             delta_index=0,
             delta='public summary',
             payload={
-                'safe': {'nested': True},
-                'nested': {'debug': 'private trace'},
+                'safe': [
+                    {'debug': {'thinking': 'SECRET'}},
+                ],
             },
         )
 
+    accepted = TextDeltaAppend(
+        run_id='run-1',
+        block_id='block-1',
+        block_kind='assistant_note',
+        delta_index=0,
+        delta='public summary',
+        payload={
+            'debug_info': {'visible': True},
+            'details': {'status': 'ok'},
+        },
+    )
+    assert accepted.payload['debug_info']['visible'] is True
 
 def test_text_delta_duplicates_are_idempotent():
     store = FakeAgentEventStore()

@@ -44,6 +44,18 @@ const jsonHeaders = (token: string = '') => ({
 
 const AGENT_RUNS_API_BASE_URL = `${WEBUI_BASE_URL}/api/agent/runs`;
 
+export class AgentRunHttpError extends Error {
+	status: number;
+	detail: unknown;
+
+	constructor(status: number, detail: unknown) {
+		super(httpErrorMessage(detail, status));
+		this.name = 'AgentRunHttpError';
+		this.status = status;
+		this.detail = detail;
+	}
+}
+
 export const getAgentRuns = async (
 	token: string = '',
 	options: AgentRunListOptions = {}
@@ -91,31 +103,38 @@ export const getAgentRunEvents = async (
 	runId: string,
 	options: AgentRunEventsOptions = {}
 ): Promise<AgentRunEvent[]> => {
-	let error = null;
-	const res = await fetch(buildAgentRunEventsListUrl(runId, options), {
+	const response = await fetch(buildAgentRunEventsListUrl(runId, options), {
 		method: 'GET',
 		credentials: 'include',
 		headers: jsonHeaders(token)
-	})
-		.then(async (res) => {
-			if (!res.ok) throw await res.json();
-			return res.json();
-		})
-		.catch((err) => {
-			error = err?.detail ?? err;
-			console.error(err);
-			return null;
-		});
-
-	if (error) {
-		throw error;
+	});
+	if (!response.ok) {
+		let detail: unknown = null;
+		try {
+			detail = await response.json();
+		} catch {
+			detail = null;
+		}
+		throw new AgentRunHttpError(response.status, detail);
 	}
+	const res = await response.json();
 
 	if (Array.isArray(res)) {
 		return res;
 	}
 
 	return res?.events ?? [];
+};
+
+const httpErrorMessage = (detail: unknown, status: number): string => {
+	if (typeof detail === 'string' && detail.trim()) return detail;
+	if (typeof detail === 'object' && detail !== null) {
+		const value =
+			(detail as { detail?: unknown; message?: unknown }).detail ??
+			(detail as { message?: unknown }).message;
+		if (typeof value === 'string' && value.trim()) return value;
+	}
+	return `Agent run request failed with HTTP ${status}`;
 };
 
 export const cancelAgentRun = async (
@@ -245,8 +264,7 @@ export const submitAgentRunApproval = async (
 ): Promise<Record<string, unknown>> => {
 	let error = null;
 	const idempotencyKey =
-		submission.idempotencyKey ??
-		createIdempotencyKey('approval', approvalId, submission.decision);
+		submission.idempotencyKey ?? createIdempotencyKey('approval', approvalId, submission.decision);
 	const res = await fetch(
 		`${AGENT_RUNS_API_BASE_URL}/${encodeURIComponent(runId)}/approvals/${encodeURIComponent(
 			approvalId

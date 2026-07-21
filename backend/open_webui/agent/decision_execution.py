@@ -29,6 +29,7 @@ log = logging.getLogger(__name__)
 
 DEFAULT_DECISION_LEASE_SECONDS = 30.0
 DEFAULT_DECISION_HEARTBEAT_SECONDS = 10.0
+DEFAULT_USER_INPUT_TIMEOUT_SCAN_SECONDS = 5.0
 
 
 class AgentDecisionExecutionLeaseLost(AgentRunDecisionConflict):
@@ -412,11 +413,29 @@ def _prepare_payload(execution: AgentRunDecisionExecutionModel) -> dict[str, Any
     }
 
 
+async def _scan_user_input_timeouts() -> None:
+    try:
+        await AgentRuns.reconcile_legacy_user_inputs()
+    except asyncio.CancelledError:
+        raise
+    except Exception:
+        log.exception('Legacy Agent user-input reconciliation failed')
+    try:
+        await AgentRuns.expire_due_user_inputs()
+    except asyncio.CancelledError:
+        raise
+    except Exception:
+        log.exception('Agent user-input timeout scan failed')
+
+
 async def agent_decision_dispatcher_loop(
     app,
     *,
     poll_seconds: float = 0.25,
+    timeout_scan_seconds: float = DEFAULT_USER_INPUT_TIMEOUT_SCAN_SECONDS,
 ) -> None:
+    if timeout_scan_seconds <= 0:
+        raise ValueError('user-input timeout scan interval must be positive')
     client = AgentRuntimeClient(
         getattr(app.state.config, 'AGENT_RUNTIME_BASE_URL', ''),
         service_token=getattr(
@@ -431,7 +450,12 @@ async def agent_decision_dispatcher_loop(
         ),
     )
     dispatcher = AgentDecisionExecutionDispatcher(AgentRuns, client)
+    next_timeout_scan_at = 0.0
     while True:
+        loop_now = asyncio.get_running_loop().time()
+        if loop_now >= next_timeout_scan_at:
+            next_timeout_scan_at = loop_now + timeout_scan_seconds
+            await _scan_user_input_timeouts()
         try:
             execution = await AgentRuns.claim_next_decision_execution(
                 worker_id=dispatcher.worker_id,

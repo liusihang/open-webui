@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 import time
 from dataclasses import dataclass
 from enum import StrEnum
@@ -18,10 +19,12 @@ from sqlalchemy import (
     Column,
     Index,
     Integer,
+    String,
     Text,
     UniqueConstraint,
     and_,
     case,
+    func,
     or_,
     select,
     update,
@@ -29,6 +32,7 @@ from sqlalchemy import (
 from sqlalchemy import (
     text as sql_text,
 )
+from sqlalchemy.dialects.mysql import insert as mysql_insert
 from sqlalchemy.dialects.postgresql import insert as postgresql_insert
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.exc import IntegrityError
@@ -196,6 +200,13 @@ DECISION_RETRY_BASE_SECONDS = 1.0
 DECISION_RETRY_MAX_SECONDS = 60.0
 DECISION_RETRY_JITTER_RATIO = 0.2
 
+AGENT_ID_LENGTH = 128
+AGENT_EVENT_TYPE_LENGTH = 128
+AGENT_KEY_LENGTH = 512
+AGENT_PATH_LENGTH = 512
+AGENT_STATUS_LENGTH = 64
+AGENT_TYPE_LENGTH = 64
+
 
 class AgentRunError(ValueError):
     code = 'agent_run_error'
@@ -220,12 +231,12 @@ class AgentRunNotFound(AgentRunError):
 class AgentRun(Base):
     __tablename__ = 'agent_run'
 
-    id = Column(Text, primary_key=True)
-    user_id = Column(Text, nullable=False, index=True)
-    chat_id = Column(Text, nullable=False, index=True)
+    id = Column(String(AGENT_ID_LENGTH), primary_key=True)
+    user_id = Column(String(AGENT_ID_LENGTH), nullable=False, index=True)
+    chat_id = Column(String(AGENT_ID_LENGTH), nullable=False, index=True)
     user_message_id = Column(Text, nullable=False)
     assistant_message_id = Column(Text, nullable=False)
-    state = Column(Text, nullable=False, index=True)
+    state = Column(String(AGENT_STATUS_LENGTH), nullable=False, index=True)
     state_version = Column(Integer, nullable=False, default=0)
     leader_model_id = Column(Text, nullable=False)
     runtime_session_id = Column(Text, nullable=True)
@@ -238,6 +249,8 @@ class AgentRun(Base):
     error = Column(JSON, nullable=True)
     final_text = Column(Text, nullable=False, default='')
     final_delta_state = Column(JSON, nullable=True)
+    pending_user_input_id = Column(String(AGENT_KEY_LENGTH), nullable=True)
+    pending_user_input_expires_at = Column(BigInteger, nullable=True)
     created_at = Column(BigInteger, nullable=False)
     updated_at = Column(BigInteger, nullable=False)
     started_at = Column(BigInteger, nullable=True)
@@ -247,16 +260,21 @@ class AgentRun(Base):
         Index('ix_agent_run_chat_created', 'chat_id', 'created_at'),
         Index('ix_agent_run_user_created', 'user_id', 'created_at'),
         Index('ix_agent_run_state_updated', 'state', 'updated_at'),
+        Index(
+            'ix_agent_run_user_input_deadline',
+            'state',
+            'pending_user_input_expires_at',
+        ),
     )
 
 
 class AgentRunEvent(Base):
     __tablename__ = 'agent_run_event'
 
-    id = Column(Text, primary_key=True)
-    run_id = Column(Text, nullable=False, index=True)
+    id = Column(String(AGENT_ID_LENGTH), primary_key=True)
+    run_id = Column(String(AGENT_ID_LENGTH), nullable=False, index=True)
     seq = Column(Integer, nullable=False)
-    event_type = Column(Text, nullable=False, index=True)
+    event_type = Column(String(AGENT_EVENT_TYPE_LENGTH), nullable=False, index=True)
     participant_id = Column(Text, nullable=True)
     phase = Column(Text, nullable=True)
     summary = Column(Text, nullable=True)
@@ -273,17 +291,17 @@ class AgentRunEvent(Base):
 class AgentArtifact(Base):
     __tablename__ = 'agent_artifact'
 
-    id = Column(Text, primary_key=True)
-    run_id = Column(Text, nullable=False, index=True)
-    user_id = Column(Text, nullable=False, index=True)
-    kind = Column(Text, nullable=False)
+    id = Column(String(AGENT_ID_LENGTH), primary_key=True)
+    run_id = Column(String(AGENT_ID_LENGTH), nullable=False, index=True)
+    user_id = Column(String(AGENT_ID_LENGTH), nullable=False, index=True)
+    kind = Column(String(AGENT_TYPE_LENGTH), nullable=False)
     terminal_server_id = Column(Text, nullable=True)
-    path = Column(Text, nullable=False)
+    path = Column(String(AGENT_PATH_LENGTH), nullable=False)
     url = Column(Text, nullable=True)
     mime_type = Column(Text, nullable=True)
     size = Column(BigInteger, nullable=True)
     meta = Column('metadata', JSON, nullable=True)
-    idempotency_key = Column(Text, nullable=True)
+    idempotency_key = Column(String(AGENT_KEY_LENGTH), nullable=True)
     created_at = Column(BigInteger, nullable=False)
 
     __table_args__ = (
@@ -296,12 +314,12 @@ class AgentArtifact(Base):
 class AgentRunOperation(Base):
     __tablename__ = 'agent_run_operation'
 
-    id = Column(Text, primary_key=True)
-    run_id = Column(Text, nullable=False, index=True)
-    operation_type = Column(Text, nullable=False, index=True)
-    idempotency_key = Column(Text, nullable=False)
+    id = Column(String(AGENT_ID_LENGTH), primary_key=True)
+    run_id = Column(String(AGENT_ID_LENGTH), nullable=False, index=True)
+    operation_type = Column(String(AGENT_TYPE_LENGTH), nullable=False, index=True)
+    idempotency_key = Column(String(AGENT_KEY_LENGTH), nullable=False)
     request_hash = Column(Text, nullable=False)
-    status = Column(Text, nullable=False)
+    status = Column(String(AGENT_STATUS_LENGTH), nullable=False)
     response = Column(JSON, nullable=True)
     error = Column(JSON, nullable=True)
     created_at = Column(BigInteger, nullable=False)
@@ -316,23 +334,23 @@ class AgentRunOperation(Base):
 class AgentRunDecisionExecution(Base):
     __tablename__ = 'agent_run_decision_execution'
 
-    id = Column(Text, primary_key=True)
-    run_id = Column(Text, nullable=False, index=True)
-    resource_type = Column(Text, nullable=False)
-    resource_id = Column(Text, nullable=False)
-    decision = Column(Text, nullable=False)
-    command_type = Column(Text, nullable=False)
+    id = Column(String(AGENT_ID_LENGTH), primary_key=True)
+    run_id = Column(String(AGENT_ID_LENGTH), nullable=False, index=True)
+    resource_type = Column(String(AGENT_TYPE_LENGTH), nullable=False)
+    resource_id = Column(String(AGENT_KEY_LENGTH), nullable=False)
+    decision = Column(String(AGENT_STATUS_LENGTH), nullable=False)
+    command_type = Column(String(AGENT_TYPE_LENGTH), nullable=False)
     command_payload = Column(JSON, nullable=False)
-    fingerprint = Column(Text, nullable=False)
-    runtime_session_id = Column(Text, nullable=False)
+    fingerprint = Column(String(64), nullable=False)
+    runtime_session_id = Column(String(AGENT_ID_LENGTH), nullable=False)
     expected_checkpoint_version = Column(Integer, nullable=False)
     expected_run_state_version = Column(Integer, nullable=False)
     request_event_seq = Column(Integer, nullable=False)
-    tool_arguments_fingerprint = Column(Text, nullable=True)
-    tool_call_idempotency_key = Column(Text, nullable=True)
-    status = Column(Text, nullable=False, index=True)
-    claim_owner = Column(Text, nullable=True)
-    claim_token = Column(Text, nullable=True)
+    tool_arguments_fingerprint = Column(String(64), nullable=True)
+    tool_call_idempotency_key = Column(String(AGENT_KEY_LENGTH), nullable=True)
+    status = Column(String(AGENT_STATUS_LENGTH), nullable=False, index=True)
+    claim_owner = Column(String(AGENT_ID_LENGTH), nullable=True)
+    claim_token = Column(String(AGENT_ID_LENGTH), nullable=True)
     claimed_at = Column(BigInteger, nullable=True)
     claim_expires_at = Column(BigInteger, nullable=True)
     attempt_count = Column(Integer, nullable=False, default=0)
@@ -340,7 +358,7 @@ class AgentRunDecisionExecution(Base):
     prepare_response = Column(JSON, nullable=True)
     prepared_at = Column(BigInteger, nullable=True)
     backend_committed_at = Column(BigInteger, nullable=True)
-    completion_event_id = Column(Text, nullable=True)
+    completion_event_id = Column(String(AGENT_ID_LENGTH), nullable=True)
     completion_event_seq = Column(Integer, nullable=True)
     activate_response = Column(JSON, nullable=True)
     activated_at = Column(BigInteger, nullable=True)
@@ -536,6 +554,172 @@ def _decision_retry_delay_ns(
     return int(base_delay * multiplier * 1_000_000_000)
 
 
+def _user_input_timeout_ns(payload: dict[str, Any] | None) -> int | None:
+    payload = payload or {}
+    timeout_seconds = payload.get('timeout_seconds')
+    if (
+        isinstance(timeout_seconds, bool)
+        or not isinstance(timeout_seconds, (int, float))
+    ):
+        return None
+    timeout = float(timeout_seconds)
+    if not math.isfinite(timeout) or timeout < 0:
+        return None
+    return int(timeout * 1_000_000_000)
+
+
+def _decision_execution_insert_statement(
+    dialect_name: str,
+    values: dict[str, Any],
+):
+    if dialect_name == 'sqlite':
+        return sqlite_insert(AgentRunDecisionExecution).values(**values).on_conflict_do_nothing(
+            index_elements=[
+                AgentRunDecisionExecution.run_id,
+                AgentRunDecisionExecution.resource_type,
+                AgentRunDecisionExecution.resource_id,
+            ]
+        )
+    if dialect_name == 'postgresql':
+        return postgresql_insert(AgentRunDecisionExecution).values(**values).on_conflict_do_nothing(
+            index_elements=[
+                AgentRunDecisionExecution.run_id,
+                AgentRunDecisionExecution.resource_type,
+                AgentRunDecisionExecution.resource_id,
+            ]
+        )
+    if dialect_name in {'mysql', 'mariadb'}:
+        statement = mysql_insert(AgentRunDecisionExecution).values(**values)
+        return statement.on_duplicate_key_update(
+            id=AgentRunDecisionExecution.id,
+        )
+    raise AgentRunError(
+        f'Atomic decision execution claims are unsupported for database dialect {dialect_name}'
+    )
+
+
+def _decision_receipt_insert_statement(
+    dialect_name: str,
+    values: dict[str, Any],
+):
+    if dialect_name == 'sqlite':
+        return sqlite_insert(AgentRunOperation).values(**values).on_conflict_do_nothing(
+            index_elements=[
+                AgentRunOperation.run_id,
+                AgentRunOperation.operation_type,
+                AgentRunOperation.idempotency_key,
+            ]
+        )
+    if dialect_name == 'postgresql':
+        return postgresql_insert(AgentRunOperation).values(**values).on_conflict_do_nothing(
+            index_elements=[
+                AgentRunOperation.run_id,
+                AgentRunOperation.operation_type,
+                AgentRunOperation.idempotency_key,
+            ]
+        )
+    if dialect_name in {'mysql', 'mariadb'}:
+        statement = mysql_insert(AgentRunOperation).values(**values)
+        return statement.on_duplicate_key_update(id=AgentRunOperation.id)
+    raise AgentRunError(
+        f'Atomic decision receipts are unsupported for database dialect {dialect_name}'
+    )
+
+
+def _canonical_decision_execution_statement(
+    *,
+    run_id: str,
+    resource_type: str,
+    resource_id: str,
+):
+    return (
+        select(AgentRunDecisionExecution)
+        .filter_by(
+            run_id=run_id,
+            resource_type=resource_type,
+            resource_id=resource_id,
+        )
+        .with_for_update()
+    )
+
+
+def _canonical_decision_receipt_statement(
+    *,
+    run_id: str,
+    operation_type: str,
+    idempotency_key: str,
+):
+    return (
+        select(AgentRunOperation)
+        .filter_by(
+            run_id=run_id,
+            operation_type=operation_type,
+            idempotency_key=idempotency_key,
+        )
+        .with_for_update()
+    )
+
+
+def _due_user_input_statement(*, now_ns: int, limit: int):
+    return (
+        select(AgentRun.id, AgentRun.pending_user_input_id)
+        .where(
+            AgentRun.state == AgentRunState.WAITING_USER_INPUT.value,
+            AgentRun.pending_user_input_id.is_not(None),
+            AgentRun.pending_user_input_expires_at.is_not(None),
+            AgentRun.pending_user_input_expires_at <= now_ns,
+        )
+        .order_by(
+            AgentRun.pending_user_input_expires_at.asc(),
+            AgentRun.id.asc(),
+        )
+        .limit(limit)
+    )
+
+
+def _legacy_user_input_request_statement(*, limit: int):
+    request_exists = AgentRunEvent.__table__.alias('legacy_request_exists')
+    candidate_runs = (
+        select(AgentRun.id.label('run_id'))
+        .where(
+            AgentRun.state == AgentRunState.WAITING_USER_INPUT.value,
+            AgentRun.pending_user_input_id.is_(None),
+            select(request_exists.c.id)
+            .where(
+                request_exists.c.run_id == AgentRun.id,
+                request_exists.c.event_type == 'user_input.requested',
+            )
+            .limit(1)
+            .exists(),
+        )
+        .order_by(AgentRun.updated_at.asc(), AgentRun.id.asc())
+        .limit(limit)
+        .subquery('legacy_waiting_user_input_runs')
+    )
+    latest_request = AgentRunEvent.__table__.alias('legacy_latest_request')
+    latest_request_seq = (
+        select(func.max(latest_request.c.seq))
+        .where(
+            latest_request.c.run_id == candidate_runs.c.run_id,
+            latest_request.c.event_type == 'user_input.requested',
+        )
+        .correlate(candidate_runs)
+        .scalar_subquery()
+    )
+    return (
+        select(candidate_runs.c.run_id, AgentRunEvent.payload)
+        .join(
+            AgentRunEvent,
+            and_(
+                AgentRunEvent.run_id == candidate_runs.c.run_id,
+                AgentRunEvent.event_type == 'user_input.requested',
+                AgentRunEvent.seq == latest_request_seq,
+            ),
+        )
+        .order_by(candidate_runs.c.run_id.asc())
+    )
+
+
 def _state(value: str | AgentRunState) -> AgentRunState:
     return value if isinstance(value, AgentRunState) else AgentRunState(value)
 
@@ -632,6 +816,10 @@ def _apply_transition_fields(
     row.state = target.value
     row.state_version = int(row.state_version or 0) + 1
     row.updated_at = now
+
+    if target != AgentRunState.WAITING_USER_INPUT:
+        row.pending_user_input_id = None
+        row.pending_user_input_expires_at = None
 
     if target == AgentRunState.RUNNING and row.started_at is None:
         row.started_at = now
@@ -823,6 +1011,13 @@ async def _prepare_new_event(
     payload: dict[str, Any] | None,
     operation_id: str | None,
 ) -> AgentRunEventAppendResult:
+    deadline_now: int | None = None
+    if event_type == 'user_input.requested':
+        if _state(run.state) == AgentRunState.WAITING_USER_INPUT:
+            raise AgentRunStateError(
+                f'Agent run {run.id} is already waiting for user input'
+            )
+        deadline_now = await _database_now_ns(db)
     result = await db.execute(
         select(AgentRunEvent.seq)
         .filter_by(run_id=run.id)
@@ -848,6 +1043,15 @@ async def _prepare_new_event(
         now=now,
         payload=payload,
     )
+    if event_type == 'user_input.requested':
+        request_payload = payload or {}
+        run.pending_user_input_id = str(request_payload['user_input_id'])
+        timeout_ns = _user_input_timeout_ns(request_payload)
+        run.pending_user_input_expires_at = (
+            deadline_now + timeout_ns
+            if deadline_now is not None and timeout_ns is not None
+            else None
+        )
     if transition_target in TERMINAL_STATES:
         await _compact_terminal_summary_if_needed(
             run,
@@ -993,25 +1197,9 @@ async def _upsert_decision_receipt(
         'updated_at': now,
     }
     dialect_name = db.get_bind().dialect.name
-    if dialect_name == 'sqlite':
-        insert_statement = sqlite_insert(AgentRunOperation)
-    elif dialect_name == 'postgresql':
-        insert_statement = postgresql_insert(AgentRunOperation)
-    else:
-        raise AgentRunError(
-            f'Atomic decision receipts are unsupported for database dialect {dialect_name}'
-        )
-    await db.execute(
-        insert_statement.values(**values).on_conflict_do_nothing(
-            index_elements=[
-                AgentRunOperation.run_id,
-                AgentRunOperation.operation_type,
-                AgentRunOperation.idempotency_key,
-            ]
-        )
-    )
+    await db.execute(_decision_receipt_insert_statement(dialect_name, values))
     receipt_result = await db.execute(
-        select(AgentRunOperation).filter_by(
+        _canonical_decision_receipt_statement(
             run_id=run_id,
             operation_type=operation_type,
             idempotency_key=idempotency_key,
@@ -1288,6 +1476,97 @@ class AgentRunTable:
             )
             return result.scalar() is not None
 
+    async def expire_due_user_inputs(
+        self,
+        *,
+        now_ns: int | None = None,
+        limit: int = 100,
+    ) -> list[AgentRunDecisionExecutionModel]:
+        if limit < 1:
+            return []
+        async with get_async_db_context() as db:
+            database_now = (
+                now_ns if now_ns is not None else await _database_now_ns(db)
+            )
+            result = await db.execute(
+                _due_user_input_statement(
+                    now_ns=database_now,
+                    limit=limit,
+                )
+            )
+            due = [
+                (str(run_id), str(user_input_id))
+                for run_id, user_input_id in result.all()
+            ]
+
+        expired: list[AgentRunDecisionExecutionModel] = []
+        for run_id, user_input_id in due:
+            request_hash = canonical_sha256(
+                {
+                    'operation_type': 'user_input.result',
+                    'run_id': run_id,
+                    'user_input_id': user_input_id,
+                    'status': 'timeout',
+                    'content': None,
+                }
+            )
+            try:
+                recorded = await self.record_decision_execution(
+                    run_id,
+                    resource_type='user_input',
+                    resource_id=user_input_id,
+                    decision='timeout',
+                    payload={},
+                    operation_type='user_input.result',
+                    idempotency_key=f'user-input-timeout:{user_input_id}',
+                    request_hash=request_hash,
+                )
+            except (AgentRunDecisionConflict, AgentRunStateError):
+                continue
+            if recorded.created and recorded.execution is not None:
+                expired.append(recorded.execution)
+        return expired
+
+    async def reconcile_legacy_user_inputs(
+        self,
+        *,
+        limit: int = 100,
+    ) -> int:
+        if limit < 1:
+            return 0
+        async with get_async_db_context() as db:
+            database_now = await _database_now_ns(db)
+            result = await db.execute(
+                _legacy_user_input_request_statement(limit=limit)
+            )
+            reconciled = 0
+            for run_id, payload in result.all():
+                request_payload = payload if isinstance(payload, dict) else {}
+                user_input_id = request_payload.get('user_input_id')
+                if not isinstance(user_input_id, str) or not user_input_id:
+                    continue
+                timeout_ns = _user_input_timeout_ns(request_payload)
+                update_result = await db.execute(
+                    update(AgentRun)
+                    .where(
+                        AgentRun.id == run_id,
+                        AgentRun.state
+                        == AgentRunState.WAITING_USER_INPUT.value,
+                        AgentRun.pending_user_input_id.is_(None),
+                    )
+                    .values(
+                        pending_user_input_id=user_input_id,
+                        pending_user_input_expires_at=(
+                            database_now + timeout_ns
+                            if timeout_ns is not None
+                            else None
+                        ),
+                    )
+                )
+                reconciled += max(int(update_result.rowcount or 0), 0)
+            await db.commit()
+            return reconciled
+
     async def record_decision_execution(  # noqa: C901
         self,
         run_id: str,
@@ -1425,7 +1704,7 @@ class AgentRunTable:
                 'payload': command_payload,
             }
             fingerprint = _decision_payload_fingerprint(wire_without_fingerprint)
-            now = _now_ns()
+            now = await _database_now_ns(db)
             values = {
                 'id': execution_id,
                 'run_id': run_id,
@@ -1447,29 +1726,14 @@ class AgentRunTable:
                 'created_at': now,
                 'updated_at': now,
             }
-            dialect_name = db.get_bind().dialect.name
-            if dialect_name == 'sqlite':
-                insert_statement = sqlite_insert(AgentRunDecisionExecution)
-            elif dialect_name == 'postgresql':
-                insert_statement = postgresql_insert(AgentRunDecisionExecution)
-            else:
-                raise AgentRunError(
-                    f'Atomic decision execution claims are unsupported for database dialect {dialect_name}'
+            await db.execute(
+                _decision_execution_insert_statement(
+                    db.get_bind().dialect.name,
+                    values,
                 )
-            inserted = await db.execute(
-                insert_statement.values(**values)
-                .on_conflict_do_nothing(
-                    index_elements=[
-                        AgentRunDecisionExecution.run_id,
-                        AgentRunDecisionExecution.resource_type,
-                        AgentRunDecisionExecution.resource_id,
-                    ]
-                )
-                .returning(AgentRunDecisionExecution.id)
             )
-            inserted_id = inserted.scalar_one_or_none()
             canonical_result = await db.execute(
-                select(AgentRunDecisionExecution).filter_by(
+                _canonical_decision_execution_statement(
                     run_id=run_id,
                     resource_type=resource_type,
                     resource_id=resource_id,
@@ -1498,6 +1762,10 @@ class AgentRunTable:
                 raise AgentRunDecisionConflict(
                     f'{resource_type} already has a different decision'
                 )
+
+            if resource_type == 'user_input':
+                run.pending_user_input_id = None
+                run.pending_user_input_expires_at = None
 
             response = {
                 'execution_id': execution.id,
@@ -1530,7 +1798,7 @@ class AgentRunTable:
                 await db.refresh(execution)
             return AgentRunDecisionRecordResult(
                 execution=AgentRunDecisionExecutionModel.model_validate(execution),
-                created=inserted_id == execution_id,
+                created=execution.id == execution_id,
             )
 
     async def get_decision_execution(

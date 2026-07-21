@@ -17,6 +17,10 @@ depends_on: str | Sequence[str] | None = None
 
 
 TABLE_NAME = 'agent_run_decision_execution'
+ID_LENGTH = 128
+KEY_LENGTH = 512
+STATUS_LENGTH = 64
+TYPE_LENGTH = 64
 
 
 def _index_names(inspector: sa.Inspector) -> set[str]:
@@ -40,23 +44,23 @@ def upgrade() -> None:
     if TABLE_NAME not in inspector.get_table_names():
         op.create_table(
             TABLE_NAME,
-            sa.Column('id', sa.Text(), nullable=False),
-            sa.Column('run_id', sa.Text(), nullable=False),
-            sa.Column('resource_type', sa.Text(), nullable=False),
-            sa.Column('resource_id', sa.Text(), nullable=False),
-            sa.Column('decision', sa.Text(), nullable=False),
-            sa.Column('command_type', sa.Text(), nullable=False),
+            sa.Column('id', sa.String(length=ID_LENGTH), nullable=False),
+            sa.Column('run_id', sa.String(length=ID_LENGTH), nullable=False),
+            sa.Column('resource_type', sa.String(length=TYPE_LENGTH), nullable=False),
+            sa.Column('resource_id', sa.String(length=KEY_LENGTH), nullable=False),
+            sa.Column('decision', sa.String(length=STATUS_LENGTH), nullable=False),
+            sa.Column('command_type', sa.String(length=TYPE_LENGTH), nullable=False),
             sa.Column('command_payload', sa.JSON(), nullable=False),
-            sa.Column('fingerprint', sa.Text(), nullable=False),
-            sa.Column('runtime_session_id', sa.Text(), nullable=False),
+            sa.Column('fingerprint', sa.String(length=64), nullable=False),
+            sa.Column('runtime_session_id', sa.String(length=ID_LENGTH), nullable=False),
             sa.Column('expected_checkpoint_version', sa.Integer(), nullable=False),
             sa.Column('expected_run_state_version', sa.Integer(), nullable=False),
             sa.Column('request_event_seq', sa.Integer(), nullable=False),
-            sa.Column('tool_arguments_fingerprint', sa.Text(), nullable=True),
-            sa.Column('tool_call_idempotency_key', sa.Text(), nullable=True),
-            sa.Column('status', sa.Text(), nullable=False),
-            sa.Column('claim_owner', sa.Text(), nullable=True),
-            sa.Column('claim_token', sa.Text(), nullable=True),
+            sa.Column('tool_arguments_fingerprint', sa.String(length=64), nullable=True),
+            sa.Column('tool_call_idempotency_key', sa.String(length=KEY_LENGTH), nullable=True),
+            sa.Column('status', sa.String(length=STATUS_LENGTH), nullable=False),
+            sa.Column('claim_owner', sa.String(length=ID_LENGTH), nullable=True),
+            sa.Column('claim_token', sa.String(length=ID_LENGTH), nullable=True),
             sa.Column('claimed_at', sa.BigInteger(), nullable=True),
             sa.Column('claim_expires_at', sa.BigInteger(), nullable=True),
             sa.Column('attempt_count', sa.Integer(), nullable=False, server_default='0'),
@@ -64,7 +68,7 @@ def upgrade() -> None:
             sa.Column('prepare_response', sa.JSON(), nullable=True),
             sa.Column('prepared_at', sa.BigInteger(), nullable=True),
             sa.Column('backend_committed_at', sa.BigInteger(), nullable=True),
-            sa.Column('completion_event_id', sa.Text(), nullable=True),
+            sa.Column('completion_event_id', sa.String(length=ID_LENGTH), nullable=True),
             sa.Column('completion_event_seq', sa.Integer(), nullable=True),
             sa.Column('activate_response', sa.JSON(), nullable=True),
             sa.Column('activated_at', sa.BigInteger(), nullable=True),

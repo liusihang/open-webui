@@ -4,19 +4,21 @@
 	import type { i18n as i18nType } from 'i18next';
 
 	import { submitAgentRunUserInput } from '$lib/apis/agentRuns';
-	import type { AgentRunEventPayload, AgentTranscriptUserInputPart } from './types';
+	import type { AgentTranscriptUserInputPart } from './types';
 	import {
 		collectAcceptedUserInputContent,
 		fieldsWithoutChoiceQuestions,
-		requiredUserInputFieldsComplete,
+		parseUserInputSchema,
 		userInputDisplayEntries,
+		userInputFieldErrors,
 		type UserInputChoiceOption,
-		type UserInputChoiceQuestion,
-		type UserInputField
+		type UserInputChoiceQuestion
 	} from './userInputSchema';
 
 	export let part: AgentTranscriptUserInputPart;
 	export let agentRunId: string | null = null;
+
+	type SubmissionStatus = 'accepted' | 'declined' | 'cancelled';
 
 	const i18n = getContext<Writable<i18nType>>('i18n');
 
@@ -24,65 +26,75 @@
 	let selectedOptions: Record<string, string> = {};
 	let customAnswers: Record<string, string> = {};
 	let currentQuestionIndex = 0;
-	let submitting = false;
-	let submitted = false;
+	let submitting: SubmissionStatus | null = null;
+	let submittedStatus: SubmissionStatus | null = null;
 	let submitError: string | null = null;
+	const idempotencyKeys = new Map<string, string>();
 
-	$: fields = schemaFields(part.requestedSchema);
-	$: choiceQuestions = choiceQuestionsFromSchema(part.requestedSchema, part.message);
+	$: parsedSchema = parseUserInputSchema(part.requestedSchema, part.message);
+	$: fields = parsedSchema.fields;
+	$: choiceQuestions = parsedSchema.questions;
 	$: supplementalFields = fieldsWithoutChoiceQuestions(fields, choiceQuestions);
-	$: supplementalFieldsComplete = requiredUserInputFieldsComplete(supplementalFields, values);
-	$: displayEntries = userInputDisplayEntries(part.content);
+	$: fieldErrors = userInputFieldErrors(supplementalFields, values);
+	$: displayEntries = part.content == null ? [] : userInputDisplayEntries(part.content);
 	$: activeQuestion = currentQuestion(choiceQuestions, currentQuestionIndex);
 	$: if (choiceQuestions.length > 0 && currentQuestionIndex >= choiceQuestions.length) {
 		currentQuestionIndex = choiceQuestions.length - 1;
 	}
 	$: canSubmitChoiceAnswer =
-		supplementalFieldsComplete &&
+		Object.keys(fieldErrors).length === 0 &&
 		(choiceQuestions.length === 0 ||
 			choiceQuestions.every(
 				(question) =>
 					Boolean(selectedOptions[question.id]) ||
 					Boolean((customAnswers[question.id] ?? '').trim())
 			));
-	$: terminalText = terminalStatusText(part.status);
+	$: effectiveStatus = part.status === 'pending' && submittedStatus ? submittedStatus : part.status;
+	$: terminalText = terminalStatusText(effectiveStatus);
 
-	const submit = async (status: 'accepted' | 'declined' | 'cancelled') => {
-		if (!agentRunId || submitting || part.status !== 'pending') {
+	const submit = async (status: SubmissionStatus) => {
+		if (!agentRunId || submitting || submittedStatus || part.status !== 'pending') {
 			return;
 		}
-		if (status === 'accepted' && choiceQuestions.length > 0 && !canSubmitChoiceAnswer) {
+		if (status === 'accepted' && !canSubmitChoiceAnswer) {
 			return;
 		}
+
 		submitError = null;
-		submitting = true;
+		submitting = status;
 		try {
+			const content =
+				status === 'accepted'
+					? collectAcceptedUserInputContent({
+							fields,
+							questions: choiceQuestions,
+							selectedOptions,
+							customAnswers,
+							values
+						})
+					: undefined;
+			const submissionFingerprint = status + ':' + JSON.stringify(content ?? null);
+			const idempotencyKey =
+				idempotencyKeys.get(submissionFingerprint) ??
+				'user-input:' + part.userInputId + ':' + status + ':' + createSubmissionNonce();
+			idempotencyKeys.set(submissionFingerprint, idempotencyKey);
+
 			await submitAgentRunUserInput(
 				localStorage.getItem('token') ?? '',
 				agentRunId,
 				part.userInputId,
 				{
 					status,
-					content: status === 'accepted' ? collectAcceptedContent() : undefined
+					content,
+					idempotencyKey
 				}
 			);
-			submitted = true;
+			submittedStatus = status;
 		} catch (error) {
-			submitError = error instanceof Error ? error.message : `${error}`;
-			submitting = false;
-			return;
+			submitError = errorMessage(error);
+		} finally {
+			submitting = null;
 		}
-		submitting = false;
-	};
-
-	const collectAcceptedContent = () => {
-		return collectAcceptedUserInputContent({
-			fields,
-			questions: choiceQuestions,
-			selectedOptions,
-			customAnswers,
-			values
-		});
 	};
 
 	const setFieldValue = (name: string, value: unknown) => {
@@ -97,8 +109,9 @@
 	const setCustomAnswer = (questionId: string, value: string) => {
 		customAnswers = { ...customAnswers, [questionId]: value };
 		if (value.trim()) {
-			const { [questionId]: _removed, ...rest } = selectedOptions;
-			selectedOptions = rest;
+			const nextSelectedOptions = { ...selectedOptions };
+			delete nextSelectedOptions[questionId];
+			selectedOptions = nextSelectedOptions;
 		}
 	};
 
@@ -115,44 +128,12 @@
 	const checkboxValue = (event: Event): boolean =>
 		(event.currentTarget as HTMLInputElement).checked;
 
-	const textInputValue = (event: Event): string => (event.currentTarget as HTMLInputElement).value;
+	const inputValue = (event: Event): string =>
+		(event.currentTarget as HTMLInputElement | HTMLTextAreaElement).value;
 
-	const schemaFields = (schema: AgentRunEventPayload | null): UserInputField[] => {
-		const required = new Set(
-			Array.isArray(schema?.required)
-				? schema.required.filter((item): item is string => typeof item === 'string')
-				: []
-		);
-		const properties = isPlainObject(schema?.properties) ? schema.properties : null;
-		if (!properties) {
-			if (Array.isArray(schema?.questions)) {
-				return [];
-			}
-			return [
-				{
-					name: 'response',
-					label: 'Response',
-					type: typeof schema?.type === 'string' ? schema.type : 'string',
-					description: null,
-					enumValues: [],
-					required: true
-				}
-			];
-		}
-		return Object.entries(properties).map(([name, definition]) => {
-			const field = isPlainObject(definition) ? definition : {};
-			const enumValues = Array.isArray(field.enum)
-				? field.enum.filter((item): item is string => typeof item === 'string')
-				: [];
-			return {
-				name,
-				label: stringValue(field.title) || name,
-				type: stringValue(field.type) || 'string',
-				description: stringValue(field.description),
-				enumValues,
-				required: required.has(name)
-			};
-		});
+	const numberValue = (event: Event): number | '' => {
+		const value = (event.currentTarget as HTMLInputElement).value;
+		return value === '' ? '' : Number(value);
 	};
 
 	const terminalStatusText = (status: AgentTranscriptUserInputPart['status']) => {
@@ -160,6 +141,7 @@
 		if (status === 'declined') return $i18n.t('declined');
 		if (status === 'cancelled') return $i18n.t('cancelled');
 		if (status === 'timeout') return $i18n.t('timed out');
+		if (status === 'stale') return $i18n.t('no longer available');
 		return $i18n.t('waiting');
 	};
 
@@ -173,158 +155,39 @@
 		return questions[Math.min(index, questions.length - 1)];
 	};
 
-	const choiceQuestionsFromSchema = (
-		schema: AgentRunEventPayload | null,
-		fallbackMessage: string
-	): UserInputChoiceQuestion[] => {
-		if (!isPlainObject(schema)) {
-			return [];
-		}
-
-		const directQuestions = arrayValue(schema.questions)
-			.map((item, index) => choiceQuestionFromObject(item, index, fallbackMessage))
-			.filter((item): item is UserInputChoiceQuestion => item !== null);
-		if (directQuestions.length > 0) {
-			return directQuestions;
-		}
-
-		const properties = isPlainObject(schema.properties) ? schema.properties : null;
-		if (!properties) {
-			return [];
-		}
-
-		return Object.entries(properties)
-			.map(([name, definition], index) =>
-				choiceQuestionFromProperty(name, definition, index, fallbackMessage)
-			)
-			.filter((item): item is UserInputChoiceQuestion => item !== null);
-	};
-
-	const choiceQuestionFromObject = (
-		value: unknown,
-		index: number,
-		fallbackMessage: string
-	): UserInputChoiceQuestion | null => {
-		if (!isPlainObject(value)) {
-			return null;
-		}
-		const options = arrayValue(value.options)
-			.map((option, optionIndex) => choiceOptionFromValue(option, `${index}:${optionIndex}`))
-			.filter((item): item is UserInputChoiceOption => item !== null);
-		if (options.length === 0 && value.allow_custom === false && value.allowCustom === false) {
-			return null;
-		}
-		const id = stringValue(value.id) || stringValue(value.name) || `question_${index + 1}`;
-		return {
-			id,
-			header: stringValue(value.header) || stringValue(value.title),
-			question:
-				stringValue(value.question) ||
-				stringValue(value.message) ||
-				stringValue(value.prompt) ||
-				fallbackMessage,
-			responseKey: stringValue(value.response_key) || stringValue(value.responseKey) || id,
-			options,
-			allowCustom: value.allow_custom !== false && value.allowCustom !== false
-		};
-	};
-
-	const choiceQuestionFromProperty = (
-		name: string,
-		definition: unknown,
-		index: number,
-		fallbackMessage: string
-	): UserInputChoiceQuestion | null => {
-		if (!isPlainObject(definition)) {
-			return null;
-		}
-		const optionValues = [
-			...arrayValue(definition.oneOf),
-			...arrayValue(definition.anyOf),
-			...arrayValue(definition.options),
-			...(isPlainObject(definition.input) ? arrayValue(definition.input.options) : []),
-			...arrayValue(definition.enum)
-		];
-		const options = optionValues
-			.map((option, optionIndex) => choiceOptionFromValue(option, `${index}:${optionIndex}`))
-			.filter((item): item is UserInputChoiceOption => item !== null);
-		if (options.length === 0) {
-			return null;
-		}
-		return {
-			id: name,
-			header: stringValue(definition.title),
-			question: stringValue(definition.description) || fallbackMessage,
-			responseKey: name,
-			options,
-			allowCustom: definition.allow_custom !== false && definition.allowCustom !== false
-		};
-	};
-
-	const choiceOptionFromValue = (
-		value: unknown,
-		fallbackId: string
-	): UserInputChoiceOption | null => {
-		if (typeof value === 'string' || typeof value === 'number' || typeof value === 'boolean') {
-			const label = String(value);
-			return {
-				id: fallbackId,
-				label,
-				description: null,
-				value,
-				recommended: label.toLowerCase().includes('recommended')
-			};
-		}
-		if (!isPlainObject(value)) {
-			return null;
-		}
-		const optionValue =
-			value.value ??
-			value.const ??
-			(Array.isArray(value.enum) && value.enum.length > 0 ? value.enum[0] : undefined);
-		const label =
-			stringValue(value.label) ||
-			stringValue(value.title) ||
-			stringValue(value.name) ||
-			(optionValue !== undefined ? String(optionValue) : null);
-		if (!label) {
-			return null;
-		}
-		return {
-			id: stringValue(value.id) || fallbackId,
-			label,
-			description: stringValue(value.description),
-			value: optionValue ?? label,
-			recommended:
-				value.recommended === true ||
-				value.is_recommended === true ||
-				label.toLowerCase().includes('recommended')
-		};
-	};
-
 	const choiceLabel = (option: UserInputChoiceOption): string =>
-		option.recommended && !option.label.toLowerCase().includes('recommended')
-			? `${option.label} (Recommended)`
-			: option.label;
+		option.recommended ? option.label + ' (Recommended)' : option.label;
 
-	const arrayValue = (value: unknown): unknown[] => (Array.isArray(value) ? value : []);
+	const customAnswerInputId = (userInputId: string, questionId: string): string =>
+		('agent-user-input-custom-' + userInputId + '-' + questionId).replace(/[^a-zA-Z0-9_-]/g, '-');
 
-	const stringValue = (value: unknown): string | null =>
-		typeof value === 'string' && value.length > 0 ? value : null;
+	const fieldErrorId = (userInputId: string, fieldName: string): string =>
+		('agent-user-input-error-' + userInputId + '-' + fieldName).replace(/[^a-zA-Z0-9_-]/g, '-');
 
-	const isPlainObject = (value: unknown): value is AgentRunEventPayload =>
-		typeof value === 'object' && value !== null && !Array.isArray(value);
+	const createSubmissionNonce = (): string =>
+		typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function'
+			? crypto.randomUUID()
+			: String(Date.now()) + '-' + Math.random().toString(36).slice(2);
+
+	const errorMessage = (error: unknown): string => {
+		if (error instanceof Error) return error.message;
+		if (typeof error === 'string') return error;
+		if (typeof error === 'object' && error !== null && 'message' in error) {
+			return String((error as { message: unknown }).message);
+		}
+		return $i18n.t('Unable to submit your response.');
+	};
 </script>
 
 <div
 	class="agent-user-input-part"
-	class:pending={part.status === 'pending'}
-	class:terminal={part.status !== 'pending'}
+	class:pending={effectiveStatus === 'pending'}
+	class:terminal={effectiveStatus !== 'pending'}
 	data-user-input-id={part.userInputId}
 >
 	<div class="agent-user-input-row">
 		<span class="agent-user-input-icon" aria-hidden="true"
-			>{part.status === 'pending' ? '?' : '✓'}</span
+			>{effectiveStatus === 'pending' ? '?' : '✓'}</span
 		>
 		<span class="agent-user-input-message">{part.message}</span>
 		<span class="agent-user-input-status">{terminalText}</span>
@@ -333,7 +196,7 @@
 		<p class="agent-user-input-error" role="alert">{submitError}</p>
 	{/if}
 
-	{#if part.status === 'pending' && agentRunId}
+	{#if part.status === 'pending' && agentRunId && !submittedStatus}
 		{#if activeQuestion}
 			<form
 				class="agent-user-choice-form"
@@ -350,7 +213,7 @@
 							<div class="agent-user-choice-pager" aria-label={$i18n.t('Question navigation')}>
 								<button
 									type="button"
-									disabled={currentQuestionIndex === 0 || submitting}
+									disabled={currentQuestionIndex === 0 || submitting !== null}
 									aria-label={$i18n.t('Previous question')}
 									on:click={() => goToQuestion(-1)}
 								>
@@ -359,7 +222,8 @@
 								<span>{currentQuestionIndex + 1} {$i18n.t('of')} {choiceQuestions.length}</span>
 								<button
 									type="button"
-									disabled={currentQuestionIndex >= choiceQuestions.length - 1 || submitting}
+									disabled={currentQuestionIndex >= choiceQuestions.length - 1 ||
+										submitting !== null}
 									aria-label={$i18n.t('Next question')}
 									on:click={() => goToQuestion(1)}
 								>
@@ -377,7 +241,8 @@
 								type="button"
 								class="agent-user-choice-option"
 								class:selected={selectedOptions[activeQuestion.id] === option.id}
-								disabled={submitting}
+								disabled={submitting !== null}
+								aria-pressed={selectedOptions[activeQuestion.id] === option.id}
 								on:click={() => selectChoice(activeQuestion.id, option.id)}
 							>
 								<span class="agent-user-choice-number">{index + 1}</span>
@@ -390,14 +255,19 @@
 							</button>
 						{/each}
 						{#if activeQuestion.allowCustom}
-							<label class="agent-user-choice-custom">
+							<label
+								class="agent-user-choice-custom"
+								for={customAnswerInputId(part.userInputId, activeQuestion.id)}
+							>
 								<span class="agent-user-choice-custom-icon" aria-hidden="true">✎</span>
 								<input
+									id={customAnswerInputId(part.userInputId, activeQuestion.id)}
 									type="text"
 									value={customAnswers[activeQuestion.id] ?? ''}
-									disabled={submitting}
+									disabled={submitting !== null}
+									aria-label={$i18n.t('Custom answer')}
 									placeholder={$i18n.t('Tell the agent how to adjust')}
-									on:input={(event) => setCustomAnswer(activeQuestion.id, textInputValue(event))}
+									on:input={(event) => setCustomAnswer(activeQuestion.id, inputValue(event))}
 								/>
 							</label>
 						{/if}
@@ -414,49 +284,82 @@
 									<input
 										type="checkbox"
 										checked={values[field.name] === true}
-										disabled={submitting}
+										disabled={submitting !== null}
+										aria-invalid={Boolean(fieldErrors[field.name])}
 										on:change={(event) => setFieldValue(field.name, checkboxValue(event))}
 									/>
 								{:else if field.type === 'number' || field.type === 'integer'}
 									<input
 										type="number"
-										bind:value={values[field.name]}
-										disabled={submitting}
-										required={field.required}
+										step={field.type === 'integer' ? '1' : 'any'}
+										value={values[field.name] ?? ''}
+										disabled={submitting !== null}
+										aria-invalid={Boolean(fieldErrors[field.name])}
+										aria-describedby={fieldErrors[field.name]
+											? fieldErrorId(part.userInputId, field.name)
+											: undefined}
+										on:input={(event) => setFieldValue(field.name, numberValue(event))}
 									/>
+								{:else if field.type === 'array' || field.type === 'object'}
+									<textarea
+										rows="4"
+										value={String(values[field.name] ?? '')}
+										placeholder={field.type === 'array'
+											? 'JSON array, e.g. ["draft", "final"]'
+											: 'JSON object, e.g. {"enabled": true}'}
+										disabled={submitting !== null}
+										aria-invalid={Boolean(fieldErrors[field.name])}
+										aria-describedby={fieldErrors[field.name]
+											? fieldErrorId(part.userInputId, field.name)
+											: undefined}
+										on:input={(event) => setFieldValue(field.name, inputValue(event))}
+									></textarea>
 								{:else}
 									<textarea
 										rows="2"
-										bind:value={values[field.name]}
-										disabled={submitting}
-										required={field.required}
+										value={String(values[field.name] ?? '')}
+										disabled={submitting !== null}
+										aria-invalid={Boolean(fieldErrors[field.name])}
+										aria-describedby={fieldErrors[field.name]
+											? fieldErrorId(part.userInputId, field.name)
+											: undefined}
+										on:input={(event) => setFieldValue(field.name, inputValue(event))}
 									></textarea>
 								{/if}
 								{#if field.description}
 									<span class="agent-user-input-description">{field.description}</span>
+								{/if}
+								{#if fieldErrors[field.name]}
+									<span
+										class="agent-user-input-field-error"
+										id={fieldErrorId(part.userInputId, field.name)}
+										role="alert">{fieldErrors[field.name]}</span
+									>
 								{/if}
 							</label>
 						{/each}
 					</div>
 				{/if}
 				<div class="agent-user-input-actions choice-actions">
-					{#if submitted}
-						<span class="agent-user-input-submitted" role="status">
-							{$i18n.t('Submitted')}. {$i18n.t('Waiting for agent\u2026')}
-						</span>
-					{:else}
-						<button type="button" disabled={submitting} on:click={() => void submit('declined')}>
-							{$i18n.t('Skip')}
-						</button>
-						{#if part.allowCancel}
-							<button type="button" disabled={submitting} on:click={() => void submit('cancelled')}>
-								{$i18n.t('Cancel')}
-							</button>
-						{/if}
-						<button type="submit" disabled={submitting || !canSubmitChoiceAnswer}>
-							{$i18n.t('Continue')}
+					<button
+						type="button"
+						disabled={submitting !== null}
+						on:click={() => void submit('declined')}
+					>
+						{$i18n.t('Skip')}
+					</button>
+					{#if part.allowCancel}
+						<button
+							type="button"
+							disabled={submitting !== null}
+							on:click={() => void submit('cancelled')}
+						>
+							{$i18n.t('Cancel')}
 						</button>
 					{/if}
+					<button type="submit" disabled={submitting !== null || !canSubmitChoiceAnswer}>
+						{$i18n.t('Continue')}
+					</button>
 				</div>
 			</form>
 		{:else}
@@ -473,10 +376,15 @@
 						>
 						{#if field.enumValues.length > 0}
 							<select
-								bind:value={values[field.name]}
-								disabled={submitting}
-								required={field.required}
+								value={String(values[field.name] ?? '')}
+								disabled={submitting !== null}
+								aria-invalid={Boolean(fieldErrors[field.name])}
+								aria-describedby={fieldErrors[field.name]
+									? fieldErrorId(part.userInputId, field.name)
+									: undefined}
+								on:change={(event) => setFieldValue(field.name, inputValue(event))}
 							>
+								<option value="" disabled={field.required}>{$i18n.t('Select')}</option>
 								{#each field.enumValues as option}
 									<option value={option}>{option}</option>
 								{/each}
@@ -485,48 +393,87 @@
 							<input
 								type="checkbox"
 								checked={values[field.name] === true}
-								disabled={submitting}
+								disabled={submitting !== null}
+								aria-invalid={Boolean(fieldErrors[field.name])}
 								on:change={(event) => setFieldValue(field.name, checkboxValue(event))}
 							/>
 						{:else if field.type === 'number' || field.type === 'integer'}
 							<input
 								type="number"
-								bind:value={values[field.name]}
-								disabled={submitting}
-								required={field.required}
+								step={field.type === 'integer' ? '1' : 'any'}
+								value={values[field.name] ?? ''}
+								disabled={submitting !== null}
+								aria-invalid={Boolean(fieldErrors[field.name])}
+								aria-describedby={fieldErrors[field.name]
+									? fieldErrorId(part.userInputId, field.name)
+									: undefined}
+								on:input={(event) => setFieldValue(field.name, numberValue(event))}
 							/>
+						{:else if field.type === 'array' || field.type === 'object'}
+							<textarea
+								rows="4"
+								value={String(values[field.name] ?? '')}
+								placeholder={field.type === 'array'
+									? 'JSON array, e.g. ["draft", "final"]'
+									: 'JSON object, e.g. {"enabled": true}'}
+								disabled={submitting !== null}
+								aria-invalid={Boolean(fieldErrors[field.name])}
+								aria-describedby={fieldErrors[field.name]
+									? fieldErrorId(part.userInputId, field.name)
+									: undefined}
+								on:input={(event) => setFieldValue(field.name, inputValue(event))}
+							></textarea>
 						{:else}
 							<textarea
 								rows="2"
-								bind:value={values[field.name]}
-								disabled={submitting}
-								required={field.required}
+								value={String(values[field.name] ?? '')}
+								disabled={submitting !== null}
+								aria-invalid={Boolean(fieldErrors[field.name])}
+								aria-describedby={fieldErrors[field.name]
+									? fieldErrorId(part.userInputId, field.name)
+									: undefined}
+								on:input={(event) => setFieldValue(field.name, inputValue(event))}
 							></textarea>
 						{/if}
 						{#if field.description}
 							<span class="agent-user-input-description">{field.description}</span>
 						{/if}
+						{#if fieldErrors[field.name]}
+							<span
+								class="agent-user-input-field-error"
+								id={fieldErrorId(part.userInputId, field.name)}
+								role="alert">{fieldErrors[field.name]}</span
+							>
+						{/if}
 					</label>
 				{/each}
 				<div class="agent-user-input-actions">
-					{#if submitted}
-						<span class="agent-user-input-submitted" role="status">
-							{$i18n.t('Submitted')}. {$i18n.t('Waiting for agent\u2026')}
-						</span>
-					{:else}
-						<button type="submit" disabled={submitting}>{$i18n.t('Submit')}</button>
-						<button type="button" disabled={submitting} on:click={() => void submit('declined')}>
-							{$i18n.t('Decline')}
+					<button type="submit" disabled={submitting !== null || !canSubmitChoiceAnswer}
+						>{$i18n.t('Submit')}</button
+					>
+					<button
+						type="button"
+						disabled={submitting !== null}
+						on:click={() => void submit('declined')}
+					>
+						{$i18n.t('Decline')}
+					</button>
+					{#if part.allowCancel}
+						<button
+							type="button"
+							disabled={submitting !== null}
+							on:click={() => void submit('cancelled')}
+						>
+							{$i18n.t('Cancel')}
 						</button>
-						{#if part.allowCancel}
-							<button type="button" disabled={submitting} on:click={() => void submit('cancelled')}>
-								{$i18n.t('Cancel')}
-							</button>
-						{/if}
 					{/if}
 				</div>
 			</form>
 		{/if}
+	{:else if submittedStatus}
+		<p class="agent-user-input-submitted" role="status">
+			{$i18n.t('Submitted')}. {$i18n.t('Waiting for agent\u2026')}
+		</p>
 	{:else if part.content !== null && part.content !== undefined}
 		<div class="agent-user-input-content">
 			{#each displayEntries as entry (entry.label)}
@@ -745,6 +692,10 @@
 	}
 	.agent-user-input-description {
 		color: var(--agent-transcript-muted-color, #6b7280);
+		font-size: 0.65rem;
+	}
+	.agent-user-input-field-error {
+		color: var(--agent-transcript-danger-color, #b91c1c);
 		font-size: 0.65rem;
 	}
 	.agent-user-input-field textarea,

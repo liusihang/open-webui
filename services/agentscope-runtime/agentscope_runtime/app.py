@@ -37,6 +37,7 @@ from agentscope_runtime.agentscope_bridge import (
     OpenWebUIToolApprovalRequired,
 )
 from agentscope_runtime.execution_store import (
+    TERMINAL_CHECKPOINT_STATES,
     RuntimeApplyResult,
     RuntimeCheckpoint,
     RuntimeCheckpointNotFound,
@@ -356,16 +357,46 @@ def create_app(
         if tasks:
             await asyncio.gather(*tasks, return_exceptions=True)
 
-    def dispatch_continuation(record: RuntimeExecutionRecord) -> None:
+    def dispatch_continuation(
+        record: RuntimeExecutionRecord,
+        checkpoint: RuntimeCheckpoint | None = None,
+    ) -> None:
         if continue_execution is None or record.execution_id in continuations_dispatched:
             return
-        checkpoint = execution_store.get_checkpoint(record.run_id) if execution_store else None
+        if checkpoint is None:
+            checkpoint = (
+                execution_store.get_checkpoint(record.run_id) if execution_store else None
+            )
         if checkpoint is None or not checkpoint.continuation_pending:
             return
 
         async def run_continuation() -> None:
             try:
                 await continue_execution(checkpoint, record)
+                if execution_store is not None:
+                    latest = execution_store.get_checkpoint(record.run_id)
+                    if latest is not None and (
+                        not latest.continuation_pending
+                        or latest.cancel_requested
+                        or latest.state
+                        in {
+                            "completed",
+                            "failed",
+                            "cancelled",
+                            "indeterminate",
+                            "unrecoverable",
+                        }
+                    ):
+                        durable_execution = execution_store.get_execution(
+                            record.execution_id
+                        )
+                        if (
+                            durable_execution is not None
+                            and durable_execution.continuation_state == "pending"
+                        ):
+                            execution_store.mark_continuation_completed(
+                                record.execution_id
+                            )
             except asyncio.CancelledError:
                 logger.info(
                     "Durable continuation cancelled and left retryable execution_id=%s",
@@ -388,6 +419,42 @@ def create_app(
         continuation_tasks[record.execution_id] = task
         continuations_dispatched.add(record.execution_id)
 
+    async def fail_close_continuation_recovery(
+        record: RuntimeExecutionRecord,
+        error: dict[str, Any],
+    ) -> None:
+        session = RuntimeSession(
+            run_id=record.run_id,
+            runtime_session_id=record.runtime_session_id,
+            state="failed",
+            start_accepted=True,
+        )
+        written = await _retry_failed_closeout_callback(
+            "continuation recovery run.failed event",
+            session,
+            lambda: callback_client.append_event(
+                run_id=record.run_id,
+                idempotency_key=(
+                    f"evt:{record.runtime_session_id}:"
+                    f"continuation-recovery-failed:{record.execution_id}"
+                ),
+                event_type="run.failed",
+                summary="Agent runtime recovery failed.",
+                payload={
+                    "execution_id": record.execution_id,
+                    "error": error,
+                    "runtime_session_id": record.runtime_session_id,
+                },
+                participant_id="leader",
+                phase="failed",
+            ),
+        )
+        if written and execution_store is not None:
+            execution_store.mark_continuation_failed(
+                record.execution_id,
+                error=error,
+            )
+
     def require_service_token(authorization: str | None = Header(default=None)) -> None:
         if not authorization or not authorization.startswith("Bearer "):
             raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="service token required")
@@ -401,13 +468,51 @@ def create_app(
             process_lock.acquire()
         try:
             if execution_store is not None:
+                recovered_execution_ids: set[str] = set()
+                for recovery in (
+                    execution_store.list_pending_continuation_recoveries()
+                ):
+                    record = recovery.execution
+                    recovered_execution_ids.add(record.execution_id)
+                    checkpoint = recovery.checkpoint
+                    if recovery.error is not None:
+                        await fail_close_continuation_recovery(
+                            record,
+                            recovery.error,
+                        )
+                        continue
+                    if checkpoint is None:
+                        await fail_close_continuation_recovery(
+                            record,
+                            {
+                                "code": RuntimeCheckpointNotFound.code,
+                                "message": (
+                                    "pending continuation has no runtime checkpoint"
+                                ),
+                            },
+                        )
+                        continue
+                    if (
+                        not checkpoint.continuation_pending
+                        or checkpoint.cancel_requested
+                        or checkpoint.state in TERMINAL_CHECKPOINT_STATES
+                        or checkpoint.applied_execution_id != record.execution_id
+                    ):
+                        execution_store.mark_continuation_completed(
+                            record.execution_id
+                        )
+                        continue
+                    dispatch_continuation(record, checkpoint)
                 for checkpoint in execution_store.list_pending_continuations():
                     record = _pending_continuation_record(
                         execution_store,
                         checkpoint,
                     )
-                    if record is not None:
-                        dispatch_continuation(record)
+                    if (
+                        record is not None
+                        and record.execution_id not in recovered_execution_ids
+                    ):
+                        dispatch_continuation(record, checkpoint)
             yield
         finally:
             tasks = {

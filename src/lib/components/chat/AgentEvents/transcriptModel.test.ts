@@ -116,6 +116,30 @@ describe('buildAgentTranscriptModel', () => {
 		expect(resolved.summary.hasPendingApproval).toBe(false);
 	});
 
+	it.each(['run.cancelled', 'run.failed', 'run.completed'] as const)(
+		'marks an unresolved approval stale after %s',
+		(eventType) => {
+			const model = buildAgentTranscriptModel(
+				foldAgentRunEvents([
+					agentRunEventFixture({
+						seq: 1,
+						event_type: 'approval.requested',
+						payload: { approval_id: 'appr-stale', action: 'delete report.txt' }
+					}),
+					agentRunEventFixture({ seq: 2, event_type: eventType })
+				])
+			);
+			const approval = model.parts.find((part) => part.kind === 'approval');
+
+			expect(approval).toMatchObject({
+				kind: 'approval',
+				status: 'stale',
+				defaultExpanded: false
+			});
+			expect(model.summary.hasPendingApproval).toBe(false);
+		}
+	);
+
 	it('groups user input lifecycle by user_input_id and exposes a single inline input part', () => {
 		const pending = buildAgentTranscriptModel(
 			foldAgentRunEvents([
@@ -218,6 +242,57 @@ describe('buildAgentTranscriptModel', () => {
 		expect(input.status).toBe('declined');
 		expect(model.summary.hasError).toBe(false);
 		expect(model.summary.hasPendingUserInput).toBe(false);
+	});
+
+	it.each(['run.failed', 'run.cancelled', 'run.completed'] as const)(
+		'marks unresolved user input stale after %s',
+		(eventType) => {
+			const model = buildAgentTranscriptModel(
+				foldAgentRunEvents([
+					agentRunEventFixture({
+						seq: 1,
+						event_type: 'user_input.requested',
+						payload: { user_input_id: 'input-stale', message: 'Choose a scope' }
+					}),
+					agentRunEventFixture({ seq: 2, event_type: eventType })
+				])
+			);
+			const userInput = model.parts.find((part) => part.kind === 'user_input');
+
+			expect(userInput).toMatchObject({
+				kind: 'user_input',
+				status: 'stale',
+				defaultExpanded: false
+			});
+			expect(model.summary.hasPendingUserInput).toBe(false);
+		}
+	);
+
+	it('keeps only the request matching the exact waiting run status pending', () => {
+		const model = buildAgentTranscriptModel(
+			foldAgentRunEvents([
+				agentRunEventFixture({
+					seq: 1,
+					event_type: 'approval.requested',
+					payload: { approval_id: 'appr-1', action: 'overwrite report.txt' }
+				}),
+				agentRunEventFixture({
+					seq: 2,
+					event_type: 'user_input.requested',
+					payload: { user_input_id: 'input-1', message: 'Choose a scope' }
+				})
+			])
+		);
+
+		expect(model.runStatus).toBe('waiting_user_input');
+		expect(model.parts.find((part) => part.kind === 'approval')).toMatchObject({
+			status: 'stale'
+		});
+		expect(model.parts.find((part) => part.kind === 'user_input')).toMatchObject({
+			status: 'pending'
+		});
+		expect(model.summary.hasPendingApproval).toBe(false);
+		expect(model.summary.hasPendingUserInput).toBe(true);
 	});
 
 	it('renders artifact summary without exposing the raw path as the headline', () => {
@@ -432,8 +507,8 @@ describe('buildAgentTranscriptModel', () => {
 		]);
 
 		const model = buildAgentTranscriptModel(state);
-		const textParts = model.parts.filter((part) =>
-			part.kind === 'assistant_note' || part.kind === 'action_summary'
+		const textParts = model.parts.filter(
+			(part) => part.kind === 'assistant_note' || part.kind === 'action_summary'
 		);
 		expect(textParts.map((part) => part.kind)).toEqual(['assistant_note', 'action_summary']);
 	});
@@ -450,7 +525,11 @@ describe('buildAgentTranscriptModel', () => {
 					block_kind: 'assistant_note'
 				}
 			}),
-			agentRunEventFixture({ seq: 2, event_type: 'final.started', summary: 'Writing final answer' }),
+			agentRunEventFixture({
+				seq: 2,
+				event_type: 'final.started',
+				summary: 'Writing final answer'
+			}),
 			agentRunEventFixture({
 				seq: 3,
 				event_type: 'final.delta',

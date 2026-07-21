@@ -17,7 +17,7 @@ try:
 except ImportError:  # pragma: no cover - exercised through the explicit guard
     fcntl = None  # type: ignore[assignment]
 
-STORE_SCHEMA_VERSION = 1
+STORE_SCHEMA_VERSION = 2
 DEFAULT_MAX_CHECKPOINT_BYTES = 16 * 1024 * 1024
 DEFAULT_TERMINAL_RETENTION_SECONDS = 7 * 24 * 60 * 60
 DEFAULT_MAX_TERMINAL_EXECUTIONS = 10_000
@@ -34,6 +34,7 @@ ExecutionState = Literal[
     "indeterminate",
     "unrecoverable",
 ]
+ContinuationState = Literal["none", "pending", "completed", "failed"]
 TERMINAL_EXECUTION_STATES = {
     "applied",
     "cancelled",
@@ -168,6 +169,8 @@ class RuntimeExecutionRecord(BaseModel):
     payload: dict[str, Any]
     state: ExecutionState
     checkpoint_version: int
+    continuation_state: ContinuationState = "none"
+    continuation_error: dict[str, Any] | None = None
     outcome: dict[str, Any] | None = None
     error: dict[str, Any] | None = None
     duplicate: bool = False
@@ -178,6 +181,14 @@ class RuntimeExecutionRecord(BaseModel):
 class RuntimeApplyResult(BaseModel):
     checkpoint: RuntimeCheckpoint
     outcome: dict[str, Any]
+
+
+class RuntimeContinuationRecovery(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    execution: RuntimeExecutionRecord
+    checkpoint: RuntimeCheckpoint | None = None
+    error: dict[str, Any] | None = None
 
 
 class RuntimeExecutionStore(Protocol):
@@ -194,6 +205,22 @@ class RuntimeExecutionStore(Protocol):
     def get_checkpoint(self, run_id: str) -> RuntimeCheckpoint | None: ...
 
     def list_pending_continuations(self) -> list[RuntimeCheckpoint]: ...
+
+    def list_pending_continuation_recoveries(
+        self,
+    ) -> list[RuntimeContinuationRecovery]: ...
+
+    def mark_continuation_completed(
+        self,
+        execution_id: str,
+    ) -> RuntimeExecutionRecord: ...
+
+    def mark_continuation_failed(
+        self,
+        execution_id: str,
+        *,
+        error: dict[str, Any],
+    ) -> RuntimeExecutionRecord: ...
 
     def cancel_checkpoint(self, run_id: str) -> RuntimeCheckpoint: ...
 
@@ -297,6 +324,8 @@ class SQLiteRuntimeExecutionStore:
                     payload_json TEXT NOT NULL,
                     state TEXT NOT NULL,
                     checkpoint_version INTEGER NOT NULL,
+                    continuation_state TEXT NOT NULL DEFAULT 'none',
+                    continuation_error_json TEXT,
                     outcome_json TEXT,
                     error_json TEXT,
                     created_at REAL NOT NULL,
@@ -336,6 +365,47 @@ class SQLiteRuntimeExecutionStore:
         while version < STORE_SCHEMA_VERSION:
             if version == 0:
                 version = 1
+                continue
+            if version == 1:
+                columns = {
+                    row["name"]
+                    for row in connection.execute(
+                        "PRAGMA table_info(runtime_execution)"
+                    ).fetchall()
+                }
+                if "continuation_state" not in columns:
+                    connection.execute(
+                        "ALTER TABLE runtime_execution "
+                        "ADD COLUMN continuation_state TEXT NOT NULL DEFAULT 'none'"
+                    )
+                if "continuation_error_json" not in columns:
+                    connection.execute(
+                        "ALTER TABLE runtime_execution "
+                        "ADD COLUMN continuation_error_json TEXT"
+                    )
+                connection.execute(
+                    """
+                    UPDATE runtime_execution AS execution
+                    SET continuation_state = CASE
+                        WHEN execution.state != 'applied' THEN 'none'
+                        WHEN EXISTS (
+                            SELECT 1
+                            FROM runtime_checkpoint AS checkpoint
+                            WHERE checkpoint.run_id = execution.run_id
+                              AND json_valid(checkpoint.checkpoint_json) = 1
+                              AND COALESCE(
+                                  json_extract(
+                                      checkpoint.checkpoint_json,
+                                      '$.continuation_pending'
+                                  ),
+                                  0
+                              ) = 0
+                        ) THEN 'completed'
+                        ELSE 'pending'
+                    END
+                    """
+                )
+                version = 2
                 continue
             raise RuntimeCheckpointUnrecoverable(
                 f"runtime store schema {version} has no migration path"
@@ -442,6 +512,126 @@ class SQLiteRuntimeExecutionStore:
                 checkpoints.append(checkpoint)
         return checkpoints
 
+    def list_pending_continuation_recoveries(
+        self,
+    ) -> list[RuntimeContinuationRecovery]:
+        with self._lock, self._connect() as connection:
+            rows = connection.execute(
+                """
+                SELECT execution.*, checkpoint.checkpoint_json
+                FROM runtime_execution AS execution
+                LEFT JOIN runtime_checkpoint AS checkpoint
+                  ON checkpoint.run_id = execution.run_id
+                WHERE execution.continuation_state = 'pending'
+                ORDER BY execution.updated_at, execution.execution_id
+                """
+            ).fetchall()
+        recoveries: list[RuntimeContinuationRecovery] = []
+        for row in rows:
+            execution = self._record(row)
+            raw_checkpoint = row["checkpoint_json"]
+            if raw_checkpoint is None:
+                recoveries.append(
+                    RuntimeContinuationRecovery(
+                        execution=execution,
+                        error={
+                            "code": RuntimeCheckpointNotFound.code,
+                            "message": (
+                                f"no runtime checkpoint for pending continuation "
+                                f"{execution.execution_id}"
+                            ),
+                        },
+                    )
+                )
+                continue
+            try:
+                checkpoint = RuntimeCheckpoint.model_validate_json(raw_checkpoint)
+            except Exception:
+                recoveries.append(
+                    RuntimeContinuationRecovery(
+                        execution=execution,
+                        error={
+                            "code": RuntimeCheckpointUnrecoverable.code,
+                            "message": (
+                                f"checkpoint for pending continuation "
+                                f"{execution.execution_id} cannot be decoded"
+                            ),
+                        },
+                    )
+                )
+                continue
+            recoveries.append(
+                RuntimeContinuationRecovery(
+                    execution=execution,
+                    checkpoint=checkpoint,
+                )
+            )
+        return recoveries
+
+    def mark_continuation_completed(
+        self,
+        execution_id: str,
+    ) -> RuntimeExecutionRecord:
+        now = time.time()
+        with self._lock, self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            row = connection.execute(
+                "SELECT * FROM runtime_execution WHERE execution_id = ?",
+                (execution_id,),
+            ).fetchone()
+            if row is None:
+                raise RuntimeExecutionNotFound(execution_id)
+            record = self._record(row)
+            if record.continuation_state != "pending":
+                connection.commit()
+                return record.model_copy(update={"duplicate": True})
+            connection.execute(
+                """
+                UPDATE runtime_execution
+                SET continuation_state='completed', continuation_error_json=NULL,
+                    updated_at=?
+                WHERE execution_id=? AND continuation_state='pending'
+                """,
+                (now, execution_id),
+            )
+            connection.commit()
+        completed = self.get_execution(execution_id)
+        assert completed is not None
+        return completed
+
+    def mark_continuation_failed(
+        self,
+        execution_id: str,
+        *,
+        error: dict[str, Any],
+    ) -> RuntimeExecutionRecord:
+        now = time.time()
+        with self._lock, self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            row = connection.execute(
+                "SELECT * FROM runtime_execution WHERE execution_id = ?",
+                (execution_id,),
+            ).fetchone()
+            if row is None:
+                raise RuntimeExecutionNotFound(execution_id)
+            record = self._record(row)
+            if record.continuation_state != "pending":
+                connection.commit()
+                return record.model_copy(update={"duplicate": True})
+            connection.execute(
+                """
+                UPDATE runtime_execution
+                SET state='unrecoverable', continuation_state='failed',
+                    continuation_error_json=?, error_json=?, updated_at=?
+                WHERE execution_id=? AND continuation_state='pending'
+                """,
+                (_json(error), _json(error), now, execution_id),
+            )
+            connection.commit()
+        failed = self.get_execution(execution_id)
+        assert failed is not None
+        return failed
+
     def save_checkpoint_cas(
         self,
         checkpoint: RuntimeCheckpoint,
@@ -541,6 +731,15 @@ class SQLiteRuntimeExecutionStore:
                 WHERE run_id=? AND state IN ('prepared', 'activated', 'applying')
                 """,
                 (_json({"code": RuntimeExecutionCancelled.code}), now, run_id),
+            )
+            connection.execute(
+                """
+                UPDATE runtime_execution
+                SET continuation_state='completed', continuation_error_json=NULL,
+                    updated_at=?
+                WHERE run_id=? AND continuation_state='pending'
+                """,
+                (now, run_id),
             )
             connection.commit()
         self.cleanup_terminal_executions()
@@ -782,12 +981,18 @@ class SQLiteRuntimeExecutionStore:
                 """
                 UPDATE runtime_execution
                 SET state='applied', outcome_json=?, error_json=NULL,
-                    checkpoint_version=?, updated_at=?
+                    checkpoint_version=?, continuation_state=?,
+                    continuation_error_json=NULL, updated_at=?
                 WHERE execution_id=?
                 """,
                 (
                     _json(result.outcome),
                     next_checkpoint.checkpoint_version,
+                    (
+                        "pending"
+                        if next_checkpoint.continuation_pending
+                        else "completed"
+                    ),
                     now,
                     execution_id,
                 ),
@@ -843,6 +1048,7 @@ class SQLiteRuntimeExecutionStore:
                 f"""
                 DELETE FROM runtime_execution
                 WHERE state IN ({execution_placeholders})
+                  AND continuation_state != 'pending'
                   AND updated_at < ?
                   AND NOT EXISTS (
                       SELECT 1 FROM runtime_checkpoint
@@ -870,6 +1076,7 @@ class SQLiteRuntimeExecutionStore:
                 WHERE execution_id IN (
                     SELECT execution.execution_id FROM runtime_execution AS execution
                     WHERE execution.state IN ({execution_placeholders})
+                      AND execution.continuation_state != 'pending'
                       AND NOT EXISTS (
                           SELECT 1 FROM runtime_checkpoint
                           WHERE runtime_checkpoint.run_id = execution.run_id
@@ -1017,6 +1224,12 @@ class SQLiteRuntimeExecutionStore:
                 payload=json.loads(row["payload_json"]),
                 state=row["state"],
                 checkpoint_version=row["checkpoint_version"],
+                continuation_state=row["continuation_state"],
+                continuation_error=(
+                    json.loads(row["continuation_error_json"])
+                    if row["continuation_error_json"]
+                    else None
+                ),
                 outcome=json.loads(row["outcome_json"]) if row["outcome_json"] else None,
                 error=json.loads(row["error_json"]) if row["error_json"] else None,
                 duplicate=duplicate,

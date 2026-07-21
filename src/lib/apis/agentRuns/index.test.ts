@@ -7,7 +7,8 @@ import {
 	createAgentRunEventsSource,
 	getAgentRunEvents,
 	getAgentRuns,
-	submitAgentRunApproval
+	submitAgentRunApproval,
+	submitAgentRunUserInput
 } from './index';
 
 class FakeEventSource {
@@ -76,6 +77,23 @@ describe('agentRuns api helpers', () => {
 		});
 	});
 
+	it.each([401, 403, 404])('preserves HTTP status %s on backfill errors', async (status) => {
+		vi.spyOn(console, 'error').mockImplementation(() => undefined);
+		vi.stubGlobal(
+			'fetch',
+			vi.fn().mockResolvedValue({
+				ok: false,
+				status,
+				json: async () => ({ detail: 'backfill unavailable' })
+			})
+		);
+
+		await expect(getAgentRunEvents('token-1', 'run-1')).rejects.toMatchObject({
+			status,
+			message: 'backfill unavailable'
+		});
+	});
+
 	it('builds JSON backfill URLs separately from the SSE stream URL', () => {
 		expect(buildAgentRunEventsListUrl('run 1', { afterSeq: 12 })).toContain(
 			'/api/agent/runs/run%201/events/list?after_seq=12'
@@ -135,6 +153,34 @@ describe('agentRuns api helpers', () => {
 			approval_id: 'approval:run-1:call-1',
 			decision: 'approved',
 			idempotency_key: 'approval-key-1'
+		});
+	});
+
+	it('submits user input with the caller-provided stable idempotency key', async () => {
+		const fetchMock = vi.fn().mockResolvedValue({
+			ok: true,
+			json: async () => ({ status: 'accepted' })
+		});
+		vi.stubGlobal('fetch', fetchMock);
+
+		await submitAgentRunUserInput('token-1', 'run-1', 'input:run-1:call-1', {
+			status: 'accepted',
+			content: { response: 'small' },
+			idempotencyKey: 'user-input-key-1'
+		});
+
+		expect(fetchMock.mock.calls[0]?.[1]).toMatchObject({
+			method: 'POST',
+			headers: expect.objectContaining({
+				'X-Agent-Idempotency-Key': 'user-input-key-1'
+			})
+		});
+		expect(JSON.parse(fetchMock.mock.calls[0]?.[1]?.body as string)).toEqual({
+			run_id: 'run-1',
+			user_input_id: 'input:run-1:call-1',
+			status: 'accepted',
+			content: { response: 'small' },
+			idempotency_key: 'user-input-key-1'
 		});
 	});
 
