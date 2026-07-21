@@ -17,7 +17,7 @@ CONTAINERS=(
 )
 
 cd "$SOURCE_DIR"
-test "$(<"$STAGING_ROOT/source-sha.txt")" = "$SOURCE_SHA"
+test "$(<"$STAGING_ROOT/source-sha-742f686182.txt")" = "$SOURCE_SHA"
 docker inspect "${CONTAINERS[@]}" --format '{{.Name}} {{.Id}}' \
   >"$STAGING_ROOT/containers.before"
 printf 'state=running\nstarted_at=%s\n' "$(date --iso-8601=seconds)" \
