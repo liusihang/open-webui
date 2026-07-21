@@ -100,6 +100,7 @@ validate_local_dir() {
 extract_archive_to_remote_context() {
 	echo "==> Archiving ${COMMIT} to ${REMOTE_HOST}:${REMOTE_CONTEXT_DIR}"
 	COPYFILE_DISABLE=1 COPY_EXTENDED_ATTRIBUTES_DISABLE=1 git archive --format=tar "$COMMIT" -o "$LOCAL_ARCHIVE_TAR"
+	ssh "$REMOTE_HOST" "mkdir -p -- $(shell_quote "$BUILD_DIR")"
 	scp "$LOCAL_ARCHIVE_TAR" "${REMOTE_HOST}:${REMOTE_ARCHIVE_TAR}" >/dev/null
 	ssh "$REMOTE_HOST" "bash -lc 'set -euo pipefail; rm -rf $(shell_quote "$REMOTE_CONTEXT_DIR"); mkdir -p $(shell_quote "$REMOTE_CONTEXT_DIR"); tar -xf $(shell_quote "$REMOTE_ARCHIVE_TAR") -C $(shell_quote "$REMOTE_CONTEXT_DIR"); rm -f $(shell_quote "$REMOTE_ARCHIVE_TAR")'"
 }
