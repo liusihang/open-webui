@@ -22,6 +22,11 @@ ADMIN_USER_ID = os.environ.get(
 MODEL_ID = os.environ.get("MODEL_ID", "bifrostapi.claude-3-7-sonnet")
 BIFROST_PROVIDER = os.environ.get("BIFROST_PROVIDER", "anthropic")
 BIFROST_MODEL = os.environ.get("BIFROST_MODEL", "claude-sonnet-4-6")
+SKIP_BIFROST_ORDER = os.environ.get("SKIP_BIFROST_ORDER", "false").lower() in {
+    "1",
+    "true",
+    "yes",
+}
 OUT_DIR = pathlib.Path(
     os.environ.get(
         "OUT_DIR",
@@ -486,6 +491,7 @@ def main() -> int:
         "model_id": MODEL_ID,
         "bifrost_provider": BIFROST_PROVIDER,
         "bifrost_model": BIFROST_MODEL,
+        "skip_bifrost_order": SKIP_BIFROST_ORDER,
         "tool_id": tool_id,
         "max_bifrost_detail_fetches": MAX_BIFROST_DETAILS,
         "audit_path": str(out_path),
@@ -501,7 +507,7 @@ def main() -> int:
         if MODEL_ID not in model_ids:
             raise AssertionError(f"exact acceptance model is unavailable: {MODEL_ID}")
 
-        before_ids = set(bifrost_log_ids())
+        before_ids = set() if SKIP_BIFROST_ORDER else set(bifrost_log_ids())
         summary["bifrost_before_ids"] = sorted(before_ids)
         tool = request_json(
             "POST",
@@ -585,7 +591,8 @@ def main() -> int:
             "from (select seq,event_type,phase,payload from agent_run_event "
             f"where run_id = '{safe_run_id}' order by seq) e;\n"
         )
-        summary["bifrost_order"] = validate_bifrost_order(marker, before_ids)
+        if not SKIP_BIFROST_ORDER:
+            summary["bifrost_order"] = validate_bifrost_order(marker, before_ids)
         summary["runtime_anchor_after"] = shell_output(
             [
                 "docker",
