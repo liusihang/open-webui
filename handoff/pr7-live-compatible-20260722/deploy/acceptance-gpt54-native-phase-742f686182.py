@@ -64,7 +64,7 @@ def request_json(method: str, path: str, body: Any = None, timeout: int = 60) ->
         raise RuntimeError(f"{method} {path} failed {exc.code}: {raw[:3000]}") from exc
 
 
-def add_gpt54_fallback(content: str) -> str:
+def add_gpt54_fallback(content: str, clone_id: str) -> str:
     needle = '''    def _fallback_models(self) -> List[dict]:
         return [
 '''
@@ -72,7 +72,15 @@ def add_gpt54_fallback(content: str) -> str:
         raise RuntimeError("BifrostAPI fallback model list was not found")
     replacement = needle + '''            {"id": "Cliproxy/gpt-5.4", "name": "Cliproxy/gpt-5.4"},
 '''
-    return content.replace(needle, replacement, 1)
+    content = content.replace(needle, replacement, 1)
+    normalize_needle = '''        model_id = str(raw_model_id or "").strip()
+'''
+    if normalize_needle not in content:
+        raise RuntimeError("BifrostAPI model normalization entrypoint was not found")
+    normalize_replacement = normalize_needle + f'''        if model_id.startswith({clone_id + "."!r}):
+            model_id = model_id.split(".", 1)[1]
+'''
+    return content.replace(normalize_needle, normalize_replacement, 1)
 
 
 def main() -> int:
@@ -92,7 +100,7 @@ def main() -> int:
         )
         if not isinstance(source, dict) or not isinstance(valves, dict):
             raise RuntimeError("failed to read BifrostAPI function or valves")
-        content = add_gpt54_fallback(str(source.get("content") or ""))
+        content = add_gpt54_fallback(str(source.get("content") or ""), clone_id)
         request_json(
             "POST",
             "/api/v1/functions/create",
