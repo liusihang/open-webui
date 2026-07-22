@@ -116,7 +116,7 @@ def main() -> int:
 
         deadline = time.monotonic() + 120
         while time.monotonic() < deadline:
-            models = request_json("GET", "/api/models?refresh=true", timeout=60)
+            models = request_json("GET", "/api/models?refresh=true", timeout=180)
             items = (models.get("data") if isinstance(models, dict) else models) or []
             if model_id in {
                 item.get("id") for item in items if isinstance(item, dict)
