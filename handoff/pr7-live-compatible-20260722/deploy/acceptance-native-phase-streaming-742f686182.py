@@ -501,7 +501,7 @@ def main() -> int:
     result_code = 1
     tool_created = False
     try:
-        models = request_json("GET", "/api/models?refresh=true", timeout=60)
+        models = request_json("GET", "/api/models?refresh=true", timeout=180)
         model_items = (models.get("data") if isinstance(models, dict) else models) or []
         model_ids = {item.get("id") for item in model_items if isinstance(item, dict)}
         if MODEL_ID not in model_ids:
