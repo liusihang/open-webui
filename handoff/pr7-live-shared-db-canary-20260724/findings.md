@@ -64,3 +64,36 @@ Both versions may share the production data plane only as a controlled blue-gree
 
 Use the shared-production model only for a short migration canary. For a long-running dev environment, use a refreshed clone rather than a shared writable database.
 
+## Production promotion readiness assessment
+
+If the goal is to replace production with PR7, promote the existing production
+data plane in place. Do not copy the isolated PR7 database or data directory
+over production.
+
+- Production image `sha256:7ec820b71f...` is based on `f8106c651`; that commit
+  is an ancestor of target WebUI source `4a4e43e206...`. The target also
+  contains the later OnlyOffice integration/fix commits.
+- Target WebUI `sha256:fd6145b041f...` successfully imported against the real
+  production database with migrations disabled and read all 40 users / 3350
+  chats. Production is at `f3`; target migration head is `f8`.
+- Production PostgreSQL is 24 GB and the OpenWebUI bind mount is 32 GB. The
+  host has about 959 GB free, so a database restore rehearsal and at least one
+  file snapshot fit locally. Bifrost owns another 43 GB but is not part of the
+  WebUI image swap and should remain untouched except for a scoped config
+  backup.
+- Production currently uses four Uvicorn workers and about 8.1 GiB in the
+  sampled container. The accepted PR7 configuration uses one WebUI worker and
+  one runtime worker. A representative concurrency/load test is mandatory;
+  do not carry four workers into PR7 until cross-worker config/function cache
+  invalidation is implemented and reverified.
+- Preserve the production `WEBUI_SECRET_KEY`, PostgreSQL, Redis, data mount,
+  public `WEBUI_URL`, OAuth/login settings, Bifrost, and OnlyOffice services.
+  Add only the Agent runtime service, its persistent SQLite volume, shared
+  service token, budgets, and Agent enablement. Do not copy test-only
+  OpenSearch/PaddleOCR/retrieval credentials from the isolated PR7 Compose.
+- Run `f3 -> f8` as one explicit migration-owner job, then keep WebUI automatic
+  migrations disabled. Start the runtime first and the WebUI second.
+- Rollback has two boundaries: before reopening traffic, restore the f3
+  database/files snapshot and old image; after writes resume, avoid snapshot
+  restore and use either a forward fix or a separately rehearsed old-image-on-f8
+  rollback with migrations disabled.

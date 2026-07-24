@@ -23,12 +23,18 @@ Phase 2 — architecture decision; no live mutation authorized yet.
 - [ ] Choose shared-production canary or isolated refreshed dev database.
 - [ ] Decide whether PR7 may write production data or must initially be read-only.
 - [ ] Define traffic/users allowed to access the canary.
+- [x] For final promotion, recommend upgrading the existing production data plane in place rather than promoting the isolated PR7 database/files.
+- [ ] Obtain user authorization for a restored-snapshot rehearsal and maintenance-window cutover.
 - **Status:** in_progress
 
 ### Phase 3: Prepare rollback-safe configuration
 
 - [ ] Back up the production database and data directory.
+- [ ] Restore the backup into a rehearsal database/data snapshot and verify counts/checksums.
 - [ ] Create a single migration-owner procedure for f3→f8.
+- [ ] Preserve the production secret, Redis, file mount, Bifrost, OnlyOffice, URL, and authentication settings; add only Agent/runtime settings.
+- [ ] Add the AgentScope runtime service and persistent runtime-state volume to the production Compose network.
+- [ ] Set WebUI/runtime workers to one for the first release and complete representative concurrency testing.
 - [ ] Align PR7 database, Redis, secret key, and file storage with production if canary mode is selected.
 - [ ] Keep PR7 Agent runtime state separate.
 - [ ] Disable PR7 automatic migrations and prevent duplicate background ownership.
@@ -37,8 +43,11 @@ Phase 2 — architecture decision; no live mutation authorized yet.
 ### Phase 4: Staged verification
 
 - [ ] Run schema compatibility probe against a restored production snapshot.
+- [ ] Apply f3→f8 to the restored snapshot and measure migration/startup time.
 - [ ] Verify login, encrypted valves, files, retrieval/vector data, chats, and Agent runs.
+- [ ] Verify OnlyOffice preview/edit/saveback, Bifrost streaming, knowledge retrieval, web search, code execution, and OAuth/login flows.
 - [ ] Start both versions and verify cross-instance cache invalidation.
+- [ ] Prove old-image-on-f8 compatibility with migrations disabled or declare snapshot restore as the only rollback before reopening traffic.
 - [ ] Execute rollback drill before routing users.
 - **Status:** pending
 
@@ -68,4 +77,3 @@ Phase 2 — architecture decision; no live mutation authorized yet.
 | Error | Attempt | Resolution |
 |---|---:|---|
 | Deep data-directory size inventory did not complete within the command window | 1 | Used exact top-level directory evidence; the presence of local `vector_db`, uploads, and cache is sufficient for the architecture decision. |
-

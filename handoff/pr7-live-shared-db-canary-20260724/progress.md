@@ -23,3 +23,21 @@
 | Data mounts | different host paths |
 | Redis | same URL text, different network-local containers |
 
+## 2026-07-24 production-promotion readiness check
+
+- **Status:** preparation assessment complete; production remains unchanged.
+- Verified production Compose root `/srv/openwebui-migration`, port 80, image
+  `sha256:7ec820b71f...`, database head `f3a4b5c6d7e8`, four WebUI workers,
+  production PostgreSQL/Redis/Bifrost/OnlyOffice membership, and exact mounts.
+- Verified target WebUI `sha256:fd6145b041f...` and Agent runtime
+  `sha256:f7396ba23e...` remain healthy in the isolated stack with zero restarts.
+- Target-image read probe against the live production database passed without
+  migrations. The `f3 -> d6 -> e7 -> f8` chain is additive and creates only
+  Agent-mode state plus Agent user-input deadline fields.
+- Production scale snapshot: 24 GB PostgreSQL, 32 GB OpenWebUI data mount, 40
+  users, 3350 chats, 8502 files, 69 knowledge bases, 13 functions, and 8 tools.
+  No retrieval job was currently running; historical states were succeeded or
+  failed only.
+- Production has about 959 GB free disk. A full restore rehearsal, load test,
+  rollback drill, final write freeze, and explicit migration-owner procedure
+  remain required before cutover.
