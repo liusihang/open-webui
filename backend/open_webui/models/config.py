@@ -17,6 +17,9 @@ from typing import Any, ClassVar
 from fastapi.encoders import jsonable_encoder
 from open_webui.internal.db import Base, get_async_db
 from sqlalchemy import JSON, BigInteger, Column, Text, delete, select
+from sqlalchemy.dialects.mysql import insert as mysql_insert
+from sqlalchemy.dialects.postgresql import insert as postgresql_insert
+from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 
 log = logging.getLogger(__name__)
 
@@ -89,6 +92,16 @@ def _assign_path(target: dict, path: list[str], value: Any) -> None:
 
 def _json_value(value: Any) -> Any:
     return jsonable_encoder(value)
+
+
+def _seed_defaults_statement(dialect_name: str, values: list[dict[str, Any]]):
+    if dialect_name == 'sqlite':
+        return sqlite_insert(Config).values(values).on_conflict_do_nothing(index_elements=['key'])
+    if dialect_name == 'postgresql':
+        return postgresql_insert(Config).values(values).on_conflict_do_nothing(index_elements=['key'])
+    if dialect_name in {'mysql', 'mariadb'}:
+        return mysql_insert(Config).values(values).prefix_with('IGNORE')
+    raise RuntimeError(f'Unsupported database dialect for config default seeding: {dialect_name}')
 
 
 # ── Model ────────────────────────────────────────────────────────────────────
@@ -238,23 +251,23 @@ class Config(Base):
         """Insert keys that don't yet exist in the DB.
 
         Called at startup to ensure all known config keys have values.
-        Existing DB values take precedence over defaults.
+        Existing DB values take precedence over defaults. The insert is atomic
+        so concurrent worker startup cannot race between a read and write.
         """
+        if not defaults:
+            return
+
+        now = int(time.time())
+        values = [
+            {'key': key, 'value': _json_value(value), 'updated_at': now}
+            for key, value in defaults.items()
+        ]
         async with get_async_db() as db:
-            result = await db.execute(select(Config.key))
-            existing_keys = {row[0] for row in result.all()}
-
-            now = int(time.time())
-            new_count = 0
-            for key, value in defaults.items():
-                if key not in existing_keys:
-                    value = _json_value(value)
-                    db.add(Config(key=key, value=value, updated_at=now))
-                    existing_keys.add(key)
-                    new_count += 1
-
+            dialect_name = db.get_bind().dialect.name
+            result = await db.execute(_seed_defaults_statement(dialect_name, values))
+            await db.commit()
+            new_count = max(result.rowcount or 0, 0)
             if new_count:
-                await db.commit()
                 log.info('Seeded %d new config defaults', new_count)
 
     @staticmethod

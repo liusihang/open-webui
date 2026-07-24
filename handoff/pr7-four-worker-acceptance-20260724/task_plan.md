@@ -26,8 +26,9 @@
 | C7 | 隔离栈恢复与最终结论 | completed | 隔离 WebUI 已恢复原镜像和 1 worker，临时 override 已删除；正式 live 前后锚点一致；结论见 findings |
 | C8 | 发布门槛续验 preflight | completed | 当前分支、隔离栈、正式 live、修复镜像、协议/API 与回退路径均已重新读取 |
 | C9 | 4-worker approval/user-input | completed | 四种生命周期、跨 PID 决定/幂等重放、waiting 全新连接恢复、DB decision execution 与精确错误窗均通过；临时资产已清理 |
-| C10 | 发布级回归与制品审计 | in_progress | 执行发布级回归；提交当前证据后从干净 commit 构建完整 slim 镜像，并在完整镜像复验关键门槛 |
-| C11 | 最终恢复与发布决策 | pending | 隔离栈恢复；正式 live 不变；逐项发布门槛无缺口后才给出可切换结论 |
+| C10 | 发布级回归与完整候选复验 | completed | 完整 slim 镜像完成构建；发布级测试、4-worker 缓存、交互、原生流、取消和并发均在该镜像通过 |
+| C11 | 生产快照迁移/回退演练 | in_progress | 从正式 DB/文件只读生成隔离 rehearsal；计时验证 f3→f8、候选启动、生产数据读回、旧镜像-on-f8 与回退路径 |
+| C12 | 切换包、最终恢复与发布决策 | pending | 生成并测试 live 专用 compose/switch/rollback 合约；隔离栈恢复；正式 live 不变；无缺口后才给出可切换结论 |
 
 ## 回退原则
 
@@ -56,9 +57,24 @@
 | 2026-07-25 | 第二轮交互探针在第一个 case 完成后遇到 keep-alive 连接关闭，且初版异常缺少请求标签 | 跨四 worker 连续执行四个 case | 清理遗留 Tool；异常加入 method/path/PID/port；每个 case 开始重新绑定全新四连接，避免把正常 keep-alive 生命周期误判为产品错误 |
 | 2026-07-25 | 首次遗留文件清理要求 `delete_file`，但当前 terminal envelope 不提供该工具 | 精确清理 `/tmp/APPROVAL-APPROVED-4d789291d3.txt` | 从该 run 的 `tool_access_snapshot` 确认可用 `run_command`；改为精确 `rm -- <path>`，仍走真实审批，不扫描目录 |
 | 2026-07-25 | 第二次清理时模型选择了同一临时 Tool 的安全模拟方法而非 terminal `run_command` | 精确 `rm -- <path>` | 清理模式改用不具备文件能力的独立 trigger Tool，并把 run.completed 视为等待审批前的立即失败，避免无意义 300 秒等待 |
+| 2026-07-25 | 完整镜像成功导入后 BuildKit local cache export 长时间停在 `preparing build cache`，目标目录仍 4 KiB | `cache-to type=local,mode=max` | 镜像内容已完成并导入；终止仅剩的 cache exporter，未提升 cache pointer；不重复构建，改以 image ID、build env、源码/镜像文件 hash 和隔离真实运行验收确认制品 |
+| 2026-07-25 | 脱离 Compose 的 slim image import smoke 因缺少真实 pgvector DB 配置/连接而失败 | `docker run ... import agent_service` | 这是 external-services slim 的运行 profile 约束；不使用 dummy DB 作为通过证据，改在隔离 Compose 的真实 DB/Redis/env 上做 import、健康和功能验收 |
+| 2026-07-25 | 完整候选首次缓存探针在首次并行 `/api/models` 上 `TimeoutError` | socket 与收敛窗口均为 20 秒 | 精确复测确认冷启动请求 36.238 秒后 HTTP 200、热请求低于 1.2 秒；把探针 HTTP timeout 提升为 120 秒、cache wait 提升为 180 秒，再以全新 fixture 重跑 |
+| 2026-07-25 | 交互复验后第一次手工 DB 核对误用了不存在的复数表名 `agent_runs` / `agent_decision_executions` | 复用摘要里的概念名而未按 ORM 表名核对 | 从 `models/agent_runs.py` 确认真实表为 `agent_run` / `agent_run_decision_execution` 后重查，四 run 与四 execution 全部符合预期 |
+| 2026-07-25 | rehearsal 预检假设远端安装了 `rsync`，链式命令在 `command -v rsync` 处退出 | 未先独立探测复制能力 | 不安装新依赖；确认同一 ext4 有 946 GiB 可用并支持 `cp --reflink=auto`，改用 coreutils 路径；错误同时记录到 `.learnings/ERRORS.md` |
+| 2026-07-25 | 第一次 `docker run ... python - <<PY` 忘记 `-i`，容器 0 退出但没有执行 stdin 脚本 | 只看 exit code 会造成假通过 | 加 `-i` 后重跑，当前完整候选成功在正式 f3 DB 上只读导入 config，`agent.mode.enable` 默认与 DB 读取均正常，live anchor 未变 |
+| 2026-07-25 | rehearsal runtime 裸 `docker run` 后服务正常监听 8000，但 image 本身没有 Healthcheck，脚本一直等待 `health=none` | 误以为 healthcheck 属于 image，实际由隔离 Compose 提供 | 中止仅该等待；为 rehearsal runtime 显式添加 localhost `/health` 探针和静态契约，再从 candidate 阶段重跑 |
+| 2026-07-25 | rehearsal WebUI 同时接入隔离与正式网络后，通用 hostname `db` 解析到正式 DB `172.18.0.6`；无密码 URL 在认证前失败并触发 worker respawn | 两个网络都存在 `db`/`redis` DNS alias，连接串存在歧义 | 立即删除仅 rehearsal WebUI；正式 DB 未认证、未写入，live anchor 不变；连接串改用唯一容器名 `pr7-live-rehearsal-db` / `pr7-live-rehearsal-redis` 并加入静态契约 |
 
 ## 2026-07-25 续验边界
 
 - 当前目标是补齐“可以发布并切换 live”的全部证据，不执行正式 live 切换本身。
 - 上一轮唯一明确未通过门槛为 approval/user-input 的真实 4-worker 验收；代码/单测或旧运行记录不能代替本轮当前镜像的真实运行。
 - 正式 live 继续保持只读；任何隔离重建前后都记录其 container/image/health/restart/started 锚点。
+
+## 2026-07-25 正式切换拓扑审计
+
+- 正式 `/srv/openwebui-migration/compose.yaml` 只有 WebUI、PostgreSQL、Redis、Bifrost、OnlyOffice；没有 AgentScope runtime 服务或状态卷，也没有 Agent runtime env。
+- 正式 DB 当前 head `f3a4b5c6d7e8`、约 25.57 GB；完整候选/隔离 DB head 为 `f8a9b0c1d2e3`，runtime SQLite schema version 2。
+- 因此“候选运行验收通过”仍不足以直接切换；必须完成生产快照上的 f3→f8 迁移演练、生产 secret/config/files 兼容、runtime 引入和旧镜像回退验证。
+- rehearsal 只能读取正式 DB/数据目录并写入新的隔离路径/容器；不得在 `/srv/openwebui-migration` 写文件，不得执行正式 compose 或重建正式容器。

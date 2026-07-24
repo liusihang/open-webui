@@ -14,6 +14,8 @@ from pathlib import Path
 BASE_URL = "127.0.0.1"
 PORT = 8080
 ADMIN_USER_ID = os.environ.get("ADMIN_USER_ID", "b6826286-1251-4576-b3a0-e109ff085a61")
+HTTP_TIMEOUT_SECONDS = float(os.environ.get("HTTP_TIMEOUT_SECONDS", "120"))
+CACHE_WAIT_TIMEOUT_SECONDS = float(os.environ.get("CACHE_WAIT_TIMEOUT_SECONDS", "180"))
 
 
 class HttpError(RuntimeError):
@@ -23,7 +25,7 @@ class HttpError(RuntimeError):
 class Session:
     def __init__(self, token: str):
         self.sock = socket.create_connection((BASE_URL, PORT), timeout=10)
-        self.sock.settimeout(20)
+        self.sock.settimeout(HTTP_TIMEOUT_SECONDS)
         self.token = token
         self.local_port = self.sock.getsockname()[1]
 
@@ -220,7 +222,12 @@ def all_values(sessions_by_pid: dict[int, Session], method: str, path: str) -> d
         return {pid: future.result() for pid, future in futures.items()}
 
 
-def wait_until(label: str, sessions_by_pid: dict[int, Session], check, timeout: float = 20.0):
+def wait_until(
+    label: str,
+    sessions_by_pid: dict[int, Session],
+    check,
+    timeout: float = CACHE_WAIT_TIMEOUT_SECONDS,
+):
     deadline = time.monotonic() + timeout
     last = None
     while time.monotonic() < deadline:

@@ -148,3 +148,9 @@ model_not_allowed: Model is not available for this run: bifrostapi.Cliproxy/gpt-
 - 第一轮 rejected run 的 `runtime_finalization_failed` 不是审批决定未持久化或 Tool 被误执行；decision execution 已成功提交。问题由探针要求模型在 DENIED tool result 后不输出 final 引起，与当前 durable continuation 设计冲突。修正探针后必须重跑，不能把初版表面 `run.failed` 当作产品通过证据。
 - 修正版 4-worker 交互已证明 approval approved/rejected 与 user-input accepted/cancelled 的正负路径都不依赖发起 worker：决定由另一 PID 提交，幂等重放由第三 PID 完成，waiting 状态可在关闭旧连接后由四条全新连接一致恢复。
 - 当前 interaction gate 不再有 live 功能缺口。剩余发布阻断是制品形态：已验收的是 overlay，必须从最终干净 commit 构建完整 slim 镜像并复验，才能声明具备正式切换条件。
+# Fresh-f8 four-worker startup race
+
+- Real production-snapshot rehearsal found a release-blocking race that the previously warmed isolated DB could not expose: every WebUI worker ran `Config.seed_defaults`, and the old select-then-insert sequence let multiple workers insert the same new default key.
+- The database primary key is the correct coordination boundary. Default seeding must be a single atomic insert-ignore operation; catching a broad transaction failure or relying on worker respawn would hide startup corruption and violate singleton acceptance.
+- A production-like rehearsal must include a freshly migrated clone with the new config keys absent. Reusing a DB already warmed by one-worker startup is insufficient evidence for a four-worker release.
+- Full production restore measured 81m38s from the 7.95 GB custom dump. Post-cutover rollback therefore depends on proven old-image-on-f8 compatibility or a forward fix; full f3 restore is a long disaster-recovery path, not an immediate rollback.
