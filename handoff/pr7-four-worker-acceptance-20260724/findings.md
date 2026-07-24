@@ -132,7 +132,7 @@ model_not_allowed: Model is not available for this run: bifrostapi.Cliproxy/gpt-
 
 覆盖 `test_model_authority.py`、`test_agent_service_rebuild.py`、`test_tool_authority.py`、`test_cache_invalidation.py`、`test_startup_singleton.py`。warnings 为既有测试环境/弃用提示，无新增失败。
 
-## 最终决策
+## 阶段性决策（已被后续 C9-C12 证据取代）
 
 - 隔离验收结论：修复后的 PR7 代码在真实 4-worker 栈上已通过核心缓存、启动单例、Agent/SSE、取消、刷新恢复和受控并发验收，具备继续做 staged promotion 的技术条件。
 - 正式 live 当前不应直接切到修复前 PR7 镜像：本次发现的两个跨 worker 缺陷在修复前都能被真实运行触发；因此“未应用两项修复的立即升级”是 **NO-GO**。
@@ -154,3 +154,19 @@ model_not_allowed: Model is not available for this run: bifrostapi.Cliproxy/gpt-
 - The database primary key is the correct coordination boundary. Default seeding must be a single atomic insert-ignore operation; catching a broad transaction failure or relying on worker respawn would hide startup corruption and violate singleton acceptance.
 - A production-like rehearsal must include a freshly migrated clone with the new config keys absent. Reusing a DB already warmed by one-worker startup is insufficient evidence for a four-worker release.
 - Full production restore measured 81m38s from the 7.95 GB custom dump. Post-cutover rollback therefore depends on proven old-image-on-f8 compatibility or a forward fix; full f3 restore is a long disaster-recovery path, not an immediate rollback.
+
+# Production DB-stored Bifrost Pipe is part of the release artifact
+
+- A code/image-only promotion is insufficient: formal production stores the active `bifrostapi` Pipe in the `function` table, and the production snapshot contains 0.2.16 while the verified branch and isolated stack use 0.2.17.
+- Version 0.2.16 loses assistant commentary that precedes a tool call when it converts OpenWebUI history to Responses input. It also omits response message phase propagation, so a later worker/model continuation cannot reproduce the required commentary -> tool -> commentary sequence.
+- Version 0.2.17 fixes this at the protocol boundary by preserving the assistant commentary message with `phase=commentary` before the function_call and forwarding provider phase on SSE content deltas. This is a data-plane compatibility migration, not a WebUI worker-cache defect.
+- The stored valves hash is identical between production clone and isolated DB. The safe migration unit is therefore function content plus non-secret manifest metadata, with an exact content hash, pre-update backup, post-update readback, cache invalidation/cold restart, and rollback to the prior content.
+- Updating only that unit on the production clone turned two previously failing real native-phase runs into strict PASS: both model routes preserved two commentary messages around two tool rounds and produced five final deltas. This establishes causality rather than correlation.
+
+# Final release decision after production-clone rehearsal
+
+- **GO for a scheduled, explicitly authorized cutover.** The accepted release unit is not image-only: it is WebUI image `sha256:2d3a9138...`, runtime image `sha256:f7396ba...`, f3-to-f8 migration, and the repository-managed Bifrost Pipe 0.2.17 content/manifest update.
+- A fresh production clone proved four stable workers with atomic config seeding, cross-worker cache invalidation, native commentary/tool/final ordering, approval/user-input durability, cancellation, refresh recovery, and controlled concurrency.
+- Fast rollback is the old live image on f8 with Pipe 0.2.17. It was measured at 246 seconds, served the production-clone API surface, and had four stable workers with no startup failure or respawn. Full f3 restore was also performed but took 81m38s, so it is DR rather than the normal rollback path.
+- The live release package is fail-closed, hash-pinned, backup-gated, and includes a non-mutating socket/PID proof. It passed local static tests, remote Compose rendering, and a read-only formal-live preflight. No mutating live action was executed in this task.
+- Final regressions: backend 430 passed, runtime 241 passed, frontend 133 passed. The original isolated stack is back on its original image and one worker; rehearsal containers are removed; formal live remains byte-for-byte anchored at the accepted container/image/start time with restart count zero.

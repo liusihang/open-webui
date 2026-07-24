@@ -22,6 +22,14 @@ ADMIN_USER_ID = os.environ.get(
 MODEL_ID = os.environ.get("MODEL_ID", "bifrostapi.claude-3-7-sonnet")
 BIFROST_PROVIDER = os.environ.get("BIFROST_PROVIDER", "anthropic")
 BIFROST_MODEL = os.environ.get("BIFROST_MODEL", "claude-sonnet-4-6")
+WEBUI_CONTAINER = os.environ.get("WEBUI_CONTAINER", "open-webui-pr7")
+DB_CONTAINER = os.environ.get("DB_CONTAINER", "openwebui-pr7-db")
+DB_USER = os.environ.get("DB_USER", "webui_pr7")
+DB_NAME = os.environ.get("DB_NAME", "webui_pr7")
+RUNTIME_CONTAINER = os.environ.get(
+    "RUNTIME_CONTAINER",
+    "openwebui-pr7-agentscope-runtime",
+)
 SKIP_BIFROST_ORDER = os.environ.get("SKIP_BIFROST_ORDER", "false").lower() in {
     "1",
     "true",
@@ -43,7 +51,7 @@ from open_webui.utils.auth import create_token
 print(create_token({{"id": "{ADMIN_USER_ID}"}}, expires_delta=timedelta(hours=2)))
 '''
     proc = subprocess.run(
-        ["docker", "exec", "-i", "open-webui-pr7", "python", "-"],
+        ["docker", "exec", "-i", WEBUI_CONTAINER, "python", "-"],
         input=script,
         text=True,
         capture_output=True,
@@ -51,7 +59,7 @@ print(create_token({{"id": "{ADMIN_USER_ID}"}}, expires_delta=timedelta(hours=2)
     )
     lines = [line.strip() for line in proc.stdout.splitlines() if line.strip()]
     if not lines:
-        raise RuntimeError("open-webui-pr7 did not return a JWT")
+        raise RuntimeError(f"{WEBUI_CONTAINER} did not return a JWT")
     return lines[-1]
 
 
@@ -91,12 +99,12 @@ def psql_json(sql: str) -> Any:
             "docker",
             "exec",
             "-i",
-            "openwebui-pr7-db",
+            DB_CONTAINER,
             "psql",
             "-U",
-            "webui_pr7",
+            DB_USER,
             "-d",
-            "webui_pr7",
+            DB_NAME,
             "-At",
         ],
         input=sql,
@@ -597,7 +605,7 @@ def main() -> int:
             [
                 "docker",
                 "inspect",
-                "openwebui-pr7-agentscope-runtime",
+                RUNTIME_CONTAINER,
                 "--format",
                 "{{.Config.Image}} {{.Image}} {{.State.Health.Status}} {{.RestartCount}} {{.State.StartedAt}}",
             ]
@@ -606,7 +614,7 @@ def main() -> int:
             [
                 "docker",
                 "inspect",
-                "open-webui-pr7",
+                WEBUI_CONTAINER,
                 "--format",
                 "{{.Config.Image}} {{.Image}} {{.State.Health.Status}} {{.RestartCount}} {{.State.StartedAt}}",
             ]

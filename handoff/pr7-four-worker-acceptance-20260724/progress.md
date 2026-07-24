@@ -240,3 +240,77 @@
 - RED 测试 `test_seed_defaults_is_safe_under_concurrent_worker_startup` 通过 barrier 强制 4 个 session 都先读到缺失 defaults；旧实现稳定得到 3 个 `IntegrityError`、1 成功。
 - 最小修复删除 read-then-insert，改为按 SQLite/PostgreSQL 原生 `INSERT ... ON CONFLICT DO NOTHING`、MySQL/MariaDB `INSERT IGNORE` 的原子批量 seed；已有值不更新。修复后测试通过，并验证后续 seed 不覆盖用户已改值。
 - 聚焦回归：config seed/cache/startup/global-prompt/native-knowledge 共 `17 passed, 5 warnings`。下一步必须从该修复 commit 构建新的完整 slim 镜像，并在同一生产 clone 上重新启动，要求第一次即 4 worker、无 startup failure/respawn。
+
+### C11 修复后完整候选制品
+
+- 修复提交：`5b35e9f1bab3401637c01be3eaf51975ca3d791a`，message `fix(startup): seed config defaults atomically`；未 push。
+- 从该 clean commit 的 `git archive` 构建新完整 image `open-webui:agentmode-v0102-5b35e9f1b-slim-release`；remote build dir `/home/aiserver/staging/openwebui-pr7-agentmode-5b35e9f1b-build-20260725`，frontend production build 约 3m51s 后成功。
+- 新 image ID `sha256:2d3a9138f8a83d18f1e7d72fbb7052b80aba2ddb3f11137a74f52f0f1607bf60`，size `1,989,296,509` bytes，`WEBUI_BUILD_VERSION=5b35e9f1ba`，`USE_EXTERNAL_SERVICES_SLIM_DOCKER=true`。
+- 源码与 image 内关键 hash 完全一致：`models/config.py=68bacf03...92b75`、`agent_service.py=bd6a8430...dfaa4`、`model_authority.py=f63ad179...e5ca4`。
+- image 导入成功后 BuildKit 再次卡在 local cache export；目标 cache dir 仅 4 KiB、buildx 进程 futex wait。已只终止 exporter，旧 cache pointer 未替换；不影响 image 内容或运行。
+- 下一步：用该新完整 image 重建生产 clone rehearsal WebUI；必须从当前已 seed 的 clone之外补一次“新 defaults 缺失”启动验证，或精确删除 clone 中仅本版本新增 defaults 后启动，确保 4 worker 首次同时 seed 时无 respawn。
+
+### C11 修复后 fresh-f8 启动与生产 clone 缓存复验
+
+- 只在 rehearsal clone 删除本版本新增的 9 个 config defaults，并清空 rehearsal Redis；正式 live、正式 DB/Redis 均未写入。
+- `5b35e9f1b` 完整镜像首次 fresh-f8 启动即稳定：worker PIDs `11,12,13,14`，4 次 `Started server process`，0 startup failure、0 child died、0 `UniqueViolation`、0 traceback、restart=0；9 个 defaults 均落库。
+- 启动单例仍为 dependency install 1、singleton skip 3、scheduler 1、tool init 1、terminal init 1。
+- 生产 clone 缓存审计 `/home/aiserver/staging/openwebui-pr7-live-release-rehearsal-20260725/e2e-four-worker-cache-production-clone-20260725-050846.json`：`ok=true`，四 PID 全覆盖，config/function/model/tool cache 创建、更新、删除和清理均通过。
+
+### C11 生产 clone 原生 commentary 阻断定位
+
+- 生产 clone 使用 DB 中 `bifrostapi` content `md5=42c535affdb1a4d145b973fa0d91c52e`、源码版本 `0.2.16`；隔离库与仓库受管文件均为 `md5=0d629a726b022cde297e64679798b97c`、版本 `0.2.17`。两边 valves 指纹完全相同 `5506e9ba05d17eb604b0133252f076ba`，差异不涉及密钥配置。
+- 生产 clone 连续两次真实 run（Cliproxy 与 lucen 直路由）都正常完成两个 Tool call 和多 delta final，但只收到第一轮 commentary：`e2e-agentmode-native-phase-20260725-051155.json`、`e2e-agentmode-native-phase-20260725-051504.json`。
+- 精确 Bifrost 请求历史显示第二轮输入缺少 assistant commentary；WebUI/runtime 无报错，故不是 runtime 丢事件。
+- 精确源码差异证明 `0.2.16` 在 assistant message 同时带 tool_calls 时只传 function_call，丢弃 preceding assistant content；`0.2.17` 在 function_call 前加入 `phase=commentary` 的 assistant message，并在 Responses SSE 中记录/传播 `commentary` 与 `final_answer` phase。
+- `meta.manifest.version` 同样落后：生产 clone `0.2.10-cache.1`，隔离 `0.2.17`。下一 checkpoint 只在 rehearsal clone 把受管 `tools/openwebui/functions/bifrostapi.py` content 与 manifest version 升到 0.2.17，冷启动后重跑严格 native phase；正式 live 继续只读。
+- 两次只读比较命令最初分别误用了 PostgreSQL role `postgres` 和 DB name `openwebui`，均在连接阶段失败、未执行 SQL；随后从 rehearsal 脚本和隔离 DB env 读取实际 role/DB 后成功。该错误不影响 clone 或 live 数据。
+
+### C11 Bifrost Pipe 0.2.17 clone 升级与真实复验
+
+- 受管源 `tools/openwebui/functions/bifrostapi.py` 本地/远端 md5 均为 `0d629a726b022cde297e64679798b97c`，现有 Bifrost focused suite `33 passed`。
+- 首次升级脚本在精确备份校验处提前退出：`psql -At` 在原 content 后附加换行，导致备份文件 md5 与 DB `md5(content)` 不同；断言发生在停容器和 SQL UPDATE 之前，clone row 与服务均未变化。修正为 DB base64 编码后在 host 解码，得到精确旧 content 备份 `md5=42c535affdb1a4d145b973fa0d91c52e`。
+- 只在 rehearsal clone 更新 `function.id=bifrostapi` 的 content 与 `meta.manifest.version`，保留完全相同的 valves；旧 content/meta 以 mode 600 存于 rehearsal audit 目录。更新后 readback：content `0d629...`、valves `5506e9...`、manifest `0.2.17`。
+- rehearsal Redis 清空后冷启动 4-worker 候选与 runtime 均 healthy/restart=0；正式 live 锚点前后不变。
+- 严格 native phase 复验 1：run `c456718d-6db9-4626-8f9d-01e741c5b721`，审计 `e2e-agentmode-native-phase-20260725-052759.json`，Cliproxy/gpt-5.5，两个 commentary + 两个 Tool round + 5 final delta，精确 Bifrost log `849f1276-c7cb-43c7-9af9-0d387b5b860c`，PASS。
+- `bifrostapi.lucen/gpt-5.5` 第一次复验的业务事件已完整通过两个 commentary 和 5 final delta，但 probe 预期 provider=`lucen`，实际 Bifrost 记录 provider=`Cliproxy`，因此只在日志筛选阶段失败；审计 `e2e-agentmode-native-phase-20260725-052902.json`，不是产品失败。
+- 以实际 provider 标签重跑同一 lucen model ID：run `45c90695-0792-42cb-913a-6eced1decf59`，审计 `e2e-agentmode-native-phase-20260725-053022.json`，精确 Bifrost log `3aa61888-9d4c-48cf-812b-12c86e35242b`，两个 commentary + 两个 Tool round + 5 final delta，PASS。
+- 结论：此前生产 clone 的严格 native phase 阻断由 DB-stored Pipe 0.2.16 单独造成；0.2.17 content/manifest 是正式切换必须纳入的显式、可回退数据迁移。
+
+### C11 旧镜像-on-f8 与 forward/rollback/forward
+
+- 在同一生产 f8 clone、生产文件快照和 Pipe 0.2.17 上启动正式旧镜像 `sha256:7ec820b...`，耗时 246 秒后 healthy/restart=0，worker PIDs `11,12,13,14`。
+- API smoke 全部 200：models 59、files_count 8503、knowledge page 30、functions 13、visible tools 9；DB head 保持 `f8a9b0c1d2e3`。当前 clone chat=3356，相比初始 3351 的 5 条增量来自本轮真实 Agent 探针，不是正式 live 写入；user/file/knowledge/function/tool 核心计数不变。
+- 旧镜像启动日志：4 次 server process，0 application startup failure、0 child died、0 `UniqueViolation`、0 traceback、0 ERROR；正式 live 锚点未变。
+- 随后重新启动候选 + runtime，167 秒完成并保持 f8、healthy/restart=0，证明 forward -> old-on-f8 -> forward 可重复。
+- 已执行过同一 dump 的完整 f3 restore，耗时 4898 秒并验证旧镜像/API；再次重复 81 分钟 restore 不增加新的回退覆盖，因此以“已完成的完整 restore + 已完成的 fast old-on-f8”共同作为 DR/快速回退证据。
+
+### C12 live 切换包与只读远端验证
+
+- 新增 release 包：`release/compose.pr7-live.yaml`、`release/pr7-live-release.sh`、`release/four-worker-pid-probe.py`、`release/test-pr7-live-release.sh`、`release/README.md`。
+- 包含：精确 live/compose/.env/image/DB/Pipe hash preflight；在线 custom dump + 文件快照；显式 migration owner；Pipe content+manifest 原子升级与 Redis function/model version bump；runtime 持久状态；4-worker WebUI；API、单例日志和无写入 4-PID post-switch gate；old-image-on-f8 fast rollback；强确认的 f3 full restore。
+- 所有变更入口默认 inert：`switch`、`rollback-fast`、`restore-f3` 分别要求不同的精确确认串；脚本失败时记录 `failed_stage`，默认不自动回退掩盖根因。
+- 本地静态契约与 rehearsal safety contract 均通过；无写入 PID probe 在候选容器用至少 68 个真实 keep-alive 请求命中 `11,12,13,14`。
+- 远端私有 staging 包：`/home/aiserver/staging/openwebui-pr7-live-release-package-20260725`。远端静态测试与正式 live 只读 preflight PASS：live anchor 原样、DB=f3、Pipe=old hash、可用空间 `955,184,136,192` bytes。
+- Compose 真渲染确认：WebUI 候选 image、workers=4、migrations=false、agent mode=true；runtime image `sha256:f7396ba...`、workers=1、状态 bind `/srv/openwebui-migration/data/agentscope-runtime`、健康检查与 db/redis/runtime depends_on 正确。
+- 三个无确认串调用全部 rc=1 fail-closed；`/srv/openwebui-migration/.pr7-release`、runtime data dir 和 runtime container 均未创建，正式 live anchor 未变化。
+
+### C12 最终回归
+
+- Backend Agent/cache/startup/config/Pipe/migration superset：`430 passed, 27 warnings`。
+- AgentScope runtime full suite：`241 passed, 1 warning`。
+- Frontend Agent API/UI 9 files：Node `22.22.0`、pnpm `10.30.3`，`133 passed`。
+- Release static contract、rehearsal safety contract、`git diff --check` 均通过。首次 frontend 命中 Node 24 仅为 engines 环境拒绝，未执行测试；切换到仓库支持的 Node 22 后通过。
+
+### C12 最终恢复与清理
+
+- 原隔离 `open-webui-pr7` 已按起始 Compose 文件集重建为 image `sha256:fd6145b041f...`、`UVICORN_WORKERS=1`、healthy、restart=0；容器内只有 PID 1 的单一 uvicorn 进程。
+- 隔离 runtime `739472bd...`、DB `293be53e...`、Redis `d5012cfb...` 的 container ID/image/start time/health/restart 全部未变；本任务的远端 d67 4-worker override 已删除。
+- 额外 `pr7-live-rehearsal-*` WebUI/runtime/DB/Redis 容器与网络已清理；完整 dump、clone 数据、日志和 audit 仍保存在 `/home/aiserver/staging/openwebui-pr7-live-release-rehearsal-20260725`。
+- 正式 live 最终锚点仍为 container `78faa81d...`、image `sha256:7ec820b...`、healthy、restart=0、started `2026-07-07T03:53:51.178582025Z`；正式 DB/Redis/Compose 未被修改、重启或重建。
+
+### 最终发布决策
+
+- **GO for scheduled cutover**：候选代码、完整 image、生产 f3 快照迁移、fresh-f8 4-worker、Pipe 0.2.17、Agent/SSE/approval/user-input/cancel/refresh/concurrency、旧镜像-on-f8 和切换包均已有真实证据。
+- GO 不是授权当前任务切换正式 live；本任务未执行 live 切换。实际窗口必须重新运行只读 preflight，并在 6 小时内生成新的完整 backup，随后只使用已验证 release 包和精确确认串。
+- 快速回退首选旧镜像-on-f8，实测 246 秒；完整 f3 restore 是约 81 分钟的 DR 路径，不应作为普通回退承诺。

@@ -1,0 +1,5 @@
+services:
+  open-webui-pr7:
+    image: open-webui:agentmode-v0102-5b35e9f1b-slim-release
+    environment:
+      UVICORN_WORKERS: '4'

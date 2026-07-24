@@ -9,6 +9,7 @@ source_text=$(<"$SCRIPT")
 grep -Fq 'REHEARSAL_PREFIX=pr7-live-rehearsal' <<<"$source_text"
 grep -Fq 'EXPECTED_LIVE_CONTAINER_ID=' <<<"$source_text"
 grep -Fq 'EXPECTED_LIVE_IMAGE_ID=' <<<"$source_text"
+grep -Fq 'CANDIDATE_WEBUI_IMAGE=open-webui:agentmode-v0102-5b35e9f1b-slim-release' <<<"$source_text"
 grep -Fq 'assert_live_anchor' <<<"$source_text"
 grep -Fq 'pg_dump' <<<"$source_text"
 grep -Fq 'cp -a --reflink=auto' <<<"$source_text"

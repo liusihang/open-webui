@@ -22,8 +22,8 @@ PG_IMAGE=swr.cn-north-4.myhuaweicloud.com/ddn-k8s/docker.io/pgvector/pgvector:pg
 REDIS_IMAGE=swr.cn-north-4.myhuaweicloud.com/ddn-k8s/docker.io/redis:7-alpine
 OLD_WEBUI_IMAGE=open-webui:live-f8106c651-to-v0102-pr7-b3-7-onlyoffice-mergefix-slim-20260707013738
 OLD_WEBUI_IMAGE_ID=sha256:7ec820b71fa94205b273cb8cd00344a130e1921ae8e643ba6192b0e58933bd45
-CANDIDATE_WEBUI_IMAGE=open-webui:agentmode-v0102-d67e1af818-slim-release
-CANDIDATE_WEBUI_IMAGE_ID=sha256:3dbfd378c03cc2262d8e1855cd19e99fa207aaf9c8adb3e7b2c5c65218db8da8
+CANDIDATE_WEBUI_IMAGE=open-webui:agentmode-v0102-5b35e9f1b-slim-release
+CANDIDATE_WEBUI_IMAGE_ID=sha256:2d3a9138f8a83d18f1e7d72fbb7052b80aba2ddb3f11137a74f52f0f1607bf60
 RUNTIME_IMAGE=open-webui-pr7-agentscope-runtime:742f686182-true-final-stream
 RUNTIME_IMAGE_ID=sha256:f7396ba23e49f934216ba8fc4b38c695b7f639722d852b44234769c66ca7f6e9
 
