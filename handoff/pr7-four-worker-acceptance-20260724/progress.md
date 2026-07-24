@@ -61,6 +61,16 @@
 - 回归：`test_agent_service_rebuild.py` + `test_tool_authority.py`：`39 passed, 18 warnings`；`test_cache_invalidation.py` + `test_startup_singleton.py`：`10 passed, 1 warning`。
 - 下一步：提交本地修复，构建新的隔离 WebUI 镜像，只重建隔离 WebUI，重跑 native/final/cancel/恢复和并发验收。
 
+### C4/C6 第二类跨 worker 缺陷：stale model cache miss
+
+- 修复镜像 `open-webui:agentmode-v0102-b1a2ac825-slim` 部署后，local Tool registry 的 403 已消失；一次 native phase 完整事件顺序为 `run.running -> commentary -> tool.requested/completed -> commentary -> tool.requested/completed -> final.started -> 5 final.delta -> run.completed`。
+- 同一栈的第二次完整运行在第二个 model call 落到另一 worker 时失败：`model_not_allowed: Model is not available for this run: bifrostapi.Cliproxy/gpt-5.5`。该 worker 的 `app.state.MODELS` 非空但过期，原实现仅在整个 cache 为空时调用 model_loader。
+- RED：新增 `test_model_authority_refreshes_nonempty_stale_model_cache_on_miss`，修复前因 `ModelNotAllowed` 失败。
+- GREEN：`_resolve_authorized_model()` 在非空 cache miss 时重新调用一次 model_loader 并重读 `app.state.MODELS`；不改变正常命中路径，也不增加无界重试。
+- model authority 回归：`27 passed, 7 warnings`。
+- 真实 Bifrost 记录中 provider 实际为 `Cliproxy`、model `gpt-5.5`；前一次 native 探针只因 harness 使用 `openai` provider 过滤了 Bifrost 关联，不能把该 harness 失败误报为 Agent 失败。
+- 下一步：构建基于已验收镜像的最小 overlay，只覆盖两份后端文件；隔离重建后重复 native 至少两次，确认 Tool 和 model 两类跨 worker miss 均稳定。
+
 ### Checkpoint 记录格式
 
 每个 checkpoint 追加：命令/时间、结果、证据文件、决策、下一步和回退状态。

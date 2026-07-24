@@ -120,6 +120,41 @@ async def test_model_call_rejects_newly_unauthorized_model(agent_run_db):
 
 
 @pytest.mark.asyncio
+async def test_model_authority_refreshes_nonempty_stale_model_cache_on_miss():
+    request = _trusted_request(enable_agent_mode=True, run_id='run-1')
+    request.app.state.MODELS = {'stale-model': {'id': 'stale-model'}}
+    refreshed = False
+
+    async def refresh_models(request, user):
+        nonlocal refreshed
+        refreshed = True
+        request.app.state.MODELS = {
+            'model-a': {
+                'id': 'model-a',
+                'name': 'Model A',
+                'owned_by': 'openai',
+                'info': {'meta': {}},
+            }
+        }
+
+    authority = AgentModelAuthority(
+        operation_store=AgentRuns,
+        model_loader=refresh_models,
+        user_loader=_user_loader,
+        model_access_checker=_allow_model_access,
+    )
+
+    model = await authority._resolve_authorized_model(
+        request,
+        await _user_loader('user-1'),
+        'model-a',
+    )
+
+    assert refreshed is True
+    assert model['id'] == 'model-a'
+
+
+@pytest.mark.asyncio
 async def test_verified_model_call_uses_provider_path_without_creating_nested_agent_run(
     agent_run_db,
 ):

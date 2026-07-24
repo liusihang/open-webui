@@ -20,9 +20,9 @@
 | C1 | 4-worker 可逆启用 | completed | 保存原配置与回退命令；仅隔离栈启用 4 workers |
 | C2 | worker 覆盖与缓存失效 | completed | 多个 PID 命中；config/function/model/tool/module/content/version cache 跨 worker 一致 |
 | C3 | 启动单例 | completed | 一次性依赖/工具/terminal 预热单例，无重复 scheduler/reconcile/respawn 证据 |
-| C4 | Agent/SSE/控制流 | in_progress | 已复现跨 worker 本地 Tool registry 缺失；修复后需重跑 native/final/cancel/恢复 |
+| C4 | Agent/SSE/控制流 | in_progress | Tool registry 修复后 native 顺序和 5 个 final delta 已通过；又发现 stale model cache miss，修复后需再跑完整控制流 |
 | C5 | 受控并发验收 | pending | 聊天/SSE、知识、文件请求有并发度、延迟、错误率、CPU、内存、连接和异常日志 |
-| C6 | 缺陷修复与回归（仅必要时） | in_progress | 已完成失败测试、最小修复和 39 项 Agent 重建/authority 回归；需隔离镜像验收 |
+| C6 | 缺陷修复与回归（仅必要时） | in_progress | 已完成两轮失败测试与最小修复；当前 27 model authority + 39 rebuild/authority + 10 cache/startup 需重新回归并部署隔离 |
 | C7 | 隔离栈恢复与最终结论 | pending | 恢复原 worker/config；隔离和正式 live 前后证据对齐；给出 go/no-go |
 
 ## 回退原则

@@ -86,6 +86,17 @@ tool_not_allowed: Tool is not available for this run: tool:<local-tool>:<functio
 
 隔离实时配置为 `CHAT_RESPONSE_STREAM_DELTA_CHUNK_SIZE=7`。只产生 2 个 fixture delta 的 local-final-stream 探针被合并成 1 个 final.delta；旧单 worker 结果不能直接当作当前配置真值。后续 native/final 探针必须产生超过 chunk threshold 的真实流，或明确设置每请求 chunk 参数，才能验收“多 delta”。
 
+### 第二类模型缓存缺陷
+
+在 Tool registry 修复镜像上，第一次 native phase 已完成两个工具回调和 5 个 final delta；第二次运行在第二个 model call 触发：
+
+```text
+OpenWebUI model-call -> 403
+model_not_allowed: Model is not available for this run: bifrostapi.Cliproxy/gpt-5.5
+```
+
+根因是 `AgentModelAuthority._resolve_authorized_model()` 只在 `app.state.MODELS` 为空时刷新。多 worker 下非空但过期的进程内模型字典会让 callback worker 拒绝一个已在其他 worker 可用的模型。修复是 miss-only 一次刷新再重读；没有引入兜底选择或无限重试。该修复已通过 27 个 model authority 测试，待隔离 overlay 重新验收。
+
 ## 证据约定
 
 - 不记录任何 token、cookie、密码、完整 Authorization header 或敏感请求体。

@@ -373,6 +373,10 @@ class AgentModelAuthority:
 
         model = (models or {}).get(model_id)
         if model is None:
+            await self.model_loader(request, user)
+            models = getattr(request.app.state, 'MODELS', None)
+            model = (models or {}).get(model_id)
+        if model is None:
             raise ModelNotAllowed(f'Model is not available for this run: {model_id}')
 
         if not _model_access_check_bypassed(user):
