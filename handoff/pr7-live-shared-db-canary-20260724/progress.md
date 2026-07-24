@@ -41,3 +41,15 @@
 - Production has about 959 GB free disk. A full restore rehearsal, load test,
   rollback drill, final write freeze, and explicit migration-owner procedure
   remain required before cutover.
+
+## 2026-07-24 multi-worker correction
+
+- Corrected the earlier wording that cross-worker invalidation was not fixed.
+  Target source `4a4e43e206...` already contains Redis/versioned invalidation
+  for config, function, model, and tool caches plus startup singleton
+  coordination. The deployed PR7 image contains matching file hashes.
+- Fresh focused verification passed: `10 passed, 1 warning` across
+  `test_cache_invalidation.py` and `test_startup_singleton.py`.
+- The remaining gap is deployment acceptance, not implementation: the isolated
+  PR7 WebUI is still configured with `UVICORN_WORKERS=1`, so no real four-worker
+  routing/invalidation/load test has been run on the currently deployed image.

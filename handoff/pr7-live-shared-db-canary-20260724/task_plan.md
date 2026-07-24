@@ -34,7 +34,7 @@ Phase 2 — architecture decision; no live mutation authorized yet.
 - [ ] Create a single migration-owner procedure for f3→f8.
 - [ ] Preserve the production secret, Redis, file mount, Bifrost, OnlyOffice, URL, and authentication settings; add only Agent/runtime settings.
 - [ ] Add the AgentScope runtime service and persistent runtime-state volume to the production Compose network.
-- [ ] Set WebUI/runtime workers to one for the first release and complete representative concurrency testing.
+- [ ] Keep WebUI/runtime workers at one for the first release; separately run a four-WebUI-worker cache invalidation, singleton, SSE, and load acceptance before restoring production worker parity.
 - [ ] Align PR7 database, Redis, secret key, and file storage with production if canary mode is selected.
 - [ ] Keep PR7 Agent runtime state separate.
 - [ ] Disable PR7 automatic migrations and prevent duplicate background ownership.

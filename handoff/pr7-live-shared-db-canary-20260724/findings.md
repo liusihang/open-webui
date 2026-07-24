@@ -83,9 +83,11 @@ over production.
   backup.
 - Production currently uses four Uvicorn workers and about 8.1 GiB in the
   sampled container. The accepted PR7 configuration uses one WebUI worker and
-  one runtime worker. A representative concurrency/load test is mandatory;
-  do not carry four workers into PR7 until cross-worker config/function cache
-  invalidation is implemented and reverified.
+  one runtime worker. Cross-worker config/function/model/tool invalidation and
+  startup-singleton coordination are already implemented in target WebUI
+  source `4a4e43e206...` and present byte-for-byte in the deployed PR7 image.
+  What remains is a representative four-worker live-style validation and load
+  test; keep the first production cutover at one worker until that passes.
 - Preserve the production `WEBUI_SECRET_KEY`, PostgreSQL, Redis, data mount,
   public `WEBUI_URL`, OAuth/login settings, Bifrost, and OnlyOffice services.
   Add only the Agent runtime service, its persistent SQLite volume, shared
