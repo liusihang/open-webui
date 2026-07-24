@@ -212,6 +212,7 @@ async def _rebuild_agent_tool_registry(request: Request, run_id: str) -> dict[st
     rebuilt.update(await _rebuild_builtin_tools(request, run, user, snapshot_tools))
     rebuilt.update(await _rebuild_terminal_tools(request, run, user, snapshot_tools))
     rebuilt.update(await _rebuild_external_tools(request, run, user, snapshot_tools))
+    rebuilt.update(await _rebuild_openwebui_tools(request, run, user, snapshot_tools))
 
     if not rebuilt:
         raise HTTPException(
@@ -447,6 +448,87 @@ async def _rebuild_external_tools(
         available = {name: current_tools[name] for name in available_names}
         _envelope, current_registry = build_tool_access_envelope(available)
         rebuilt.update(_registry_from_snapshot(tools_in_group, current_registry))
+
+    return rebuilt
+
+
+def _openwebui_tool_source_id_from_snapshot(tool: dict[str, Any]) -> str | None:
+    """Extract a local Tool id from an opaque OpenWebUI tool snapshot id."""
+    if tool.get('type') != 'openwebui':
+        return None
+
+    opaque_id = tool.get('id')
+    name = tool.get('name')
+    if not isinstance(opaque_id, str) or not isinstance(name, str):
+        return None
+
+    prefix = 'tool:'
+    suffix = f':{name}'
+    if not opaque_id.startswith(prefix) or not opaque_id.endswith(suffix):
+        return None
+
+    source_id = opaque_id[len(prefix) : -len(suffix)]
+    if not source_id or source_id.startswith(('builtin:', 'terminal:', 'server:')):
+        return None
+    return source_id
+
+
+async def _rebuild_openwebui_tools(
+    request: Request,
+    run,
+    user,
+    snapshot_tools: list[dict[str, Any]],
+) -> dict[str, dict[str, Any]]:
+    """Rebuild local Tool callables on a worker that did not start the run."""
+    requested_by_source: dict[str, list[dict[str, Any]]] = {}
+    for tool in snapshot_tools:
+        source_id = _openwebui_tool_source_id_from_snapshot(tool)
+        if source_id:
+            requested_by_source.setdefault(source_id, []).append(tool)
+
+    if not requested_by_source:
+        return {}
+
+    metadata = _agent_run_metadata(run)
+    extra_params = {
+        '__user__': _user_payload(user),
+        '__metadata__': metadata,
+        '__chat_id__': metadata.get('chat_id'),
+        '__message_id__': metadata.get('assistant_message_id'),
+    }
+    current_tools = await get_tools(
+        request,
+        list(requested_by_source),
+        user,
+        extra_params,
+    )
+    current_tools = current_tools or {}
+
+    rebuilt: dict[str, dict[str, Any]] = {}
+    for source_id, requested in requested_by_source.items():
+        requested_names = {
+            tool.get('name')
+            for tool in requested
+            if isinstance(tool.get('name'), str)
+        }
+        available = {
+            name: tool
+            for name, tool in current_tools.items()
+            if name in requested_names and tool.get('tool_id') == source_id
+        }
+        if not available:
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail={
+                    'code': 'agent_tool_registry_rebuild_failed',
+                    'message': 'Agent OpenWebUI tools are not available in the current server context',
+                    'tool_id': source_id,
+                    'tools': sorted(requested_names),
+                },
+            )
+
+        _envelope, current_registry = build_tool_access_envelope(available)
+        rebuilt.update(_registry_from_snapshot(requested, current_registry))
 
     return rebuilt
 

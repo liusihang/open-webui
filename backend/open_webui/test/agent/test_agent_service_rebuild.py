@@ -93,6 +93,19 @@ def _snapshot_with_builtin_tool(name='write_note'):
     }
 
 
+def _snapshot_with_openwebui_tool(tool_id='local-tool-1', name='local_tool'):
+    return {
+        'id': f'tool:{tool_id}:{name}',
+        'name': name,
+        'type': 'openwebui',
+        'schema': {
+            'name': name,
+            'description': 'Local OpenWebUI tool.',
+            'parameters': {'type': 'object', 'properties': {}},
+        },
+    }
+
+
 def _snapshot_envelope(tools, metadata=None):
     envelope = {'tools': tools}
     if metadata is not None:
@@ -607,6 +620,50 @@ async def test_rebuild_agent_tool_registry_external_only(monkeypatch):
     assert 'tool:server:openapi:ext:search' in result
     assert result['tool:server:openapi:ext:search']['callable'] is search
     assert len(result) == 1
+
+
+@pytest.mark.asyncio
+async def test_rebuild_agent_tool_registry_rebuilds_openwebui_tools(monkeypatch):
+    """A callback worker can rebuild a persisted local Tool registry."""
+    async def local_tool(value: str):
+        return {'value': value}
+
+    calls = []
+
+    async def fake_get_tools(request, tool_ids, user, extra_params):
+        calls.append(tool_ids)
+        return {
+            'local_tool': {
+                'tool_id': 'local-tool-1',
+                'callable': local_tool,
+                'spec': {'name': 'local_tool', 'parameters': {'type': 'object'}},
+            },
+        }
+
+    monkeypatch.setattr('open_webui.routers.agent_service.get_tools', fake_get_tools)
+    monkeypatch.setattr(
+        'open_webui.routers.agent_service.Users', FakeUserStore(_fake_user())
+    )
+
+    run = _fake_run(
+        tool_access_snapshot=_snapshot_envelope([_snapshot_with_openwebui_tool()]),
+        user_id='user-1',
+        chat_id='chat-1',
+        assistant_message_id='msg-1',
+    )
+    request = SimpleNamespace(
+        app=SimpleNamespace(
+            state=SimpleNamespace(
+                AGENT_EVENT_STORE=FakeRunStore(run),
+                AGENT_TOOL_REGISTRIES={},
+            )
+        )
+    )
+
+    result = await _rebuild_agent_tool_registry(request, 'run-1')
+
+    assert calls == [['local-tool-1']]
+    assert result['tool:local-tool-1:local_tool']['callable'] is local_tool
 
 
 @pytest.mark.asyncio
