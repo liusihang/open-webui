@@ -102,3 +102,39 @@ model_not_allowed: Model is not available for this run: bifrostapi.Cliproxy/gpt-
 - 不记录任何 token、cookie、密码、完整 Authorization header 或敏感请求体。
 - Bifrost 日志只按明确 request/session/runtime_session_id 或精确时间窗查询，不做广泛全日志扫描。
 - 所有远端证据记录命令、时间、退出码和脱敏输出；大输出落文件，handoff 只保留摘要与路径。
+
+## 最终四 Worker 验收矩阵（2026-07-24）
+
+| 验收项 | 结果 | 真实证据与边界 |
+|---|---|---|
+| 多 PID 覆盖 | PASS | 32 条保持连接 `/health` 请求映射到 worker `11,12,13,14`，计数 `1,2,4,25`；另有 96 连接 sanity probe 覆盖四 PID |
+| config/function/model/tool/module/content cache | PASS | config、function valves `v1->v2`、tool valves `t1->t2`、function create/delete、tool delete 均由四 worker API 读回一致；Redis version namespace 包含 `config/functions/models/tools` |
+| 启动单例 | PASS | 4 server process；依赖安装 1 次 + 3 skip；startup singleton skip 3；tool init 1；terminal init 1；scheduler worker 1；无 respawn loop |
+| 原生 Agent 时序与多 delta SSE | PASS | 两次真实 native run 均为 commentary/tool/output/commentary/tool/output/final.started/final.delta×5/completed；Bifrost 精确事件索引 0..6 |
+| 取消 | PASS | run `6189705e-a21f-483c-ac62-b7b69649d3aa` 最终 `run.cancelled`，runtime `cancelled`，无 error |
+| 刷新恢复 | PASS | 5 轮刷新读回；四 worker 每轮 14 events、5 final deltas，均 `consistent=true` |
+| approval/user-input | NOT LIVE-VERIFIED | 本轮没有可重复的 live approval/user-input 流程；不能用已有单测代替该项，保留为部署前缺口 |
+| 受控并发 | PASS | 26 个非破坏 API + 2 个 SSE；各 batch 0 HTTP failure，SSE 均 done；资源与精确时间窗异常已记录 |
+| 隔离栈恢复 | PASS | 原 WebUI image/1 worker 恢复，runtime/DB/Redis 未重建，临时 override 删除，均 healthy/restart=0 |
+| 正式 live 不变 | PASS | live container/image/started/health/restart/worker 前后完全一致；只读核对 |
+
+## 根因、修复与提交
+
+1. `b1a2ac82529f027cded8c82e1d9be620af491e23` — `fix(agent): rebuild local tool registry across workers`。根因是 run snapshot 中 `openwebui` 类型的本地 DB Tool 没有纳入 callback worker 的 registry rebuild；修复重建路径复用 `get_tools()` 的 DB、权限和模块加载逻辑，并由失败测试先行证明。
+2. `f2ab0434d` — `fix(agent): refresh stale model cache on worker miss`。根因是非空但过期的进程内 `MODELS` cache miss 不触发 loader；修复只在 miss 时 refresh 一次，再重新授权，不引入无限重试或共享可变 fallback。
+3. `d8b947b9e` — `docs(acceptance): record four-worker findings`；本轮最终 handoff 会在本次验收结束后再提交。
+
+最终聚焦回归：
+
+```text
+76 passed, 18 warnings
+```
+
+覆盖 `test_model_authority.py`、`test_agent_service_rebuild.py`、`test_tool_authority.py`、`test_cache_invalidation.py`、`test_startup_singleton.py`。warnings 为既有测试环境/弃用提示，无新增失败。
+
+## 最终决策
+
+- 隔离验收结论：修复后的 PR7 代码在真实 4-worker 栈上已通过核心缓存、启动单例、Agent/SSE、取消、刷新恢复和受控并发验收，具备继续做 staged promotion 的技术条件。
+- 正式 live 当前不应直接切到修复前 PR7 镜像：本次发现的两个跨 worker 缺陷在修复前都能被真实运行触发；因此“未应用两项修复的立即升级”是 **NO-GO**。
+- 应用 `b1a2ac825` 与 `f2ab0434d` 后，结合正式 live 的常规灰度/回滚窗口，可进入下一步 promotion；本次没有执行 live 切换。由于 approval/user-input 尚未 live-verified，若该能力是发布硬门槛，则其完成前保持 **NO-GO**。
+- 冷启动约 3 分钟，必须在 promotion 计划中保留 readiness/回滚窗口；这不是本次 4-worker 运行失败，但属于运维风险。

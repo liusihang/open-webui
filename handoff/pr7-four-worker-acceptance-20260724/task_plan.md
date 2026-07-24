@@ -20,10 +20,10 @@
 | C1 | 4-worker 可逆启用 | completed | 保存原配置与回退命令；仅隔离栈启用 4 workers |
 | C2 | worker 覆盖与缓存失效 | completed | 多个 PID 命中；config/function/model/tool/module/content/version cache 跨 worker 一致 |
 | C3 | 启动单例 | completed | 一次性依赖/工具/terminal 预热单例，无重复 scheduler/reconcile/respawn 证据 |
-| C4 | Agent/SSE/控制流 | in_progress | Tool registry 修复后 native 顺序和 5 个 final delta 已通过；又发现 stale model cache miss，修复后需再跑完整控制流 |
-| C5 | 受控并发验收 | pending | 聊天/SSE、知识、文件请求有并发度、延迟、错误率、CPU、内存、连接和异常日志 |
-| C6 | 缺陷修复与回归（仅必要时） | in_progress | 已完成两轮失败测试与最小修复；当前 27 model authority + 39 rebuild/authority + 10 cache/startup 需重新回归并部署隔离 |
-| C7 | 隔离栈恢复与最终结论 | pending | 恢复原 worker/config；隔离和正式 live 前后证据对齐；给出 go/no-go |
+| C4 | Agent/SSE/控制流 | completed | 两次 native commentary/tool/output/final 流、5 个 final delta、取消、刷新恢复均通过；approval/user-input 未做 live 流程，作为明确遗留证据缺口记录 |
+| C5 | 受控并发验收 | completed | 26 个非破坏 API 请求 + 2 个 SSE 并发完成；已记录并发度、延迟、CPU、内存、连接和精确时间窗异常 |
+| C6 | 缺陷修复与回归（仅必要时） | completed | 两个跨 worker 缺陷均先 RED 后最小修复；最终聚焦回归 76 passed, 18 warnings；修复 overlay 已完成隔离真实验收 |
+| C7 | 隔离栈恢复与最终结论 | completed | 隔离 WebUI 已恢复原镜像和 1 worker，临时 override 已删除；正式 live 前后锚点一致；结论见 findings |
 
 ## 回退原则
 
