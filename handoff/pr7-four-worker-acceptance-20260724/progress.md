@@ -102,3 +102,57 @@
 - resolved config 恢复为原始 WebUI image `open-webui:agentmode-v0102-4a4e43e206-slim`、runtime image `open-webui-pr7-agentscope-runtime:742f686182-true-final-stream`、两者 `UVICORN_WORKERS=1`；临时两个 4-worker override 已删除。
 - 正式 live 后核对仍为 container `78faa81d479d8c5ef33a85277feeb3dc5de68861c3f25dcaac67285935f9c13e`，image `sha256:7ec820b71fa94205b273cb8cd00344a130e1921ae8e643ba6192b0e58933bd45`，healthy，`UVICORN_WORKERS=4`，restart=0，started `2026-07-07T03:53:51.178582025Z`，与 preflight 完全一致。
 - 回退状态：完成；远端隔离临时 override 已清理，正式 live 未执行写操作、重启、重建或切换。
+
+## 2026-07-25 C8 发布门槛续验启动
+
+- 当前本地 truth surface：`/Users/liusihang/openwebui/.worktrees/pr7-live-compatible-20260722`，branch `codex/pr7-live-compatible-20260722`，HEAD `b55669d9a2d500aa66918c7144aa9d78eccdc43e`，工作树干净。
+- 已重新读取上一轮 handoff；确认唯一明确缺口是 approval/user-input 尚未在修复后的真实 4-worker 栈执行。
+- 历史证据仅用于定位探针：approval 的可靠成功签名是 destructive tool 请求后进入 `approval.requested` / `waiting_approval`，而 user-input 必须走 runtime-native `request_user_input` 与 `user_input.*` 终态；本轮仍需按当前隔离栈重新验证。
+- 下一步：只读核对远端当前锚点和可复用验收脚本，再准备可逆 4-worker override。
+
+### C8 当前远端真值
+
+- 隔离 WebUI 仍为 container `1cd01a28...`、image `sha256:fd6145b...`、healthy、restart=0、`UVICORN_WORKERS=1`；runtime 仍为 container `739472bd...`、image `sha256:f7396ba...`、healthy、restart=0。
+- 正式 live 仍为 container `78faa81d...`、image `sha256:7ec820b...`、healthy、restart=0、`UVICORN_WORKERS=4`，与上一轮最终锚点一致。
+- 修复 overlay `open-webui:agentmode-v0102-f2ab0434d-overlay` 仍存在，image ID `sha256:851d543359ce53717ffe9ee597b321dae62998415ff3b8722af38516da8a558b`，build version `b1a2ac8252-multiworker-overlay`。
+- 本地当前实现同时包含 approval 与 runtime-native user-input 协调器、状态与事件类型；下一步需定位当前 API/探针契约并在 overlay 上做真实生命周期验收。
+
+## C9 第一轮真实 4-worker 交互验收
+
+- 时间窗：`2026-07-25 00:24-00:26 Asia/Shanghai`；审计文件：`/home/aiserver/staging/openwebui-pr7-eea11194ed-test/e2e-agentmode-four-worker-interactions-20260725-002416.json`。
+- 探针将 4 条 keep-alive 连接按容器 worker PID 固定到 `11,12,13,14`，每个等待态和终态都由四 worker 并行读回一致；临时 Tool 只模拟写操作、不写文件，结束后已删除。
+- Approval approved：run `8043f33c-6fb7-4f12-9ac9-e295cf651b0d`；worker 11 启动、13 批准、14 做重复决定；事件为 `run.running -> text.delta -> tool.requested -> approval.requested -> approval.completed -> tool.completed -> final.started -> final.delta -> run.completed`，重复决定为 `historical_completed`。
+- Approval rejected：run `3257cb24-a563-4b59-b46e-76f0687a7306`；worker 12 启动、14 拒绝、11 重放；终态 `approval.completed -> run.failed`，没有 `tool.completed` 或 final，重复决定为 `historical_completed`。
+- User-input accepted：run `620c2cbf-9c89-4221-afcc-85fb3b60d740`；worker 13 启动、11 提交回答、12 重放；事件包含 `user_input.requested -> user_input.completed -> commentary -> tool.requested/completed -> final -> run.completed`，最终答案包含精确回答，重复决定为 `historical_completed`。
+- User-input cancelled：run `716dc0a3-5d29-4adf-9e44-24128bd11763`；worker 14 启动、12 取消、13 重放；事件为 `user_input.requested -> user_input.cancelled -> final -> run.completed`，没有 run/tool failure，重复决定为 `historical_completed`。
+- 第一轮结果 `ok=true`，总耗时 113.779 秒。下一步：在 waiting 状态关闭原连接，重新绑定四个 worker 后完成批准/回答，以证明刷新恢复；随后按上述四个 run ID 精确核对 DB 与 runtime/WebUI 日志。
+
+### Rejection 语义追踪与探针修正
+
+- 精确 DB 核对显示第一轮 rejected run 的受保护 Tool 没有执行，decision execution `status=succeeded`、`attempt_count=1`、`backend_committed=true`；但 run error 为 `runtime_finalization_failed / empty_model_response`，并出现第二次 model call。
+- 根因不在 decision dispatcher：当前 durable runtime 的明确设计是把 rejected approval 注入为 `ToolResultState.DENIED`，设置 `continuation_pending=true`，再让模型生成拒绝后的用户答复。初版探针却要求“拒绝后不要 final”，导致模型在恢复轮返回空公共响应。
+- 初版模型还选择了系统 terminal 的 `write_file`，而非同名临时 Tool；批准 case 在 terminal 中写入了一个 28-byte 临时文件。探针已改为唯一方法名 `protected_release_action(operation='write')`，由参数触发审批分类且实现完全无副作用，避免同名路由歧义。
+- 修正后的 rejection 验收标准：`approval.completed -> final -> run.completed`，无 `tool.completed`、无 `run.failed`，最终答案包含 marker 和 `rejected`。需重新实跑确认假设。
+
+### 第二轮探针连接诊断
+
+- Approval approved 修正版 run `235e80d9-83dd-4649-80ac-185bacffc741` 已通过：无副作用临时 Tool、生效的审批、tool execution、final 和 run.completed 均正确。
+- 该 run 在 `waiting_approval` 时关闭原四连接并重新绑定四个新 local ports；新连接在 PID `11,12,13,14` 均读回 `waiting_approval` 和相同 4 个事件，随后从另一 worker 批准并完成，证明审批等待态可刷新恢复。
+- 第一个 case 后探针某 keep-alive 在读下一响应头时被服务端关闭；因异常缺少 method/path 标签，不能定位具体请求。临时 Tool `pr7_interaction_gate_e72ef9adf68a` 已通过新短连接删除，DB row count=0。
+- 探针已改为每个 case 开始重新绑定四连接，并在连接异常中记录 method/path/PID/local port；将重新执行四个 case。
+
+### 第三轮交互与清理状态
+
+- 修正探针完整通过，审计 `/home/aiserver/staging/openwebui-pr7-eea11194ed-test/e2e-agentmode-four-worker-interactions-20260725-003503.json`；四个 case 全部 `completed`、error=null，decision executions 均 `succeeded`、attempt_count=1、backend_committed=true。
+- Approval approved 和 user-input accepted 均在 waiting 状态关闭旧连接并重新绑定四个新 local ports；四 worker 分别一致恢复 `waiting_approval` / `waiting_user_input` 后，由另一 PID 提交决定并完成。
+- 修正版 rejection run `b2e779d9-0bfa-414f-a001-c7be9edb1a9a` 正常产生 `approval.completed -> final -> run.completed`，无 `tool.completed`、无 run error，确认初版异常是探针指令问题而非 durable rejection 缺陷。
+- 第一次遗留文件清理 run `5075cd9f-486c-47d2-b9ca-4da922307d58` 明确返回当前 terminal 没有 `delete_file`；其 Tool snapshot 显示 `run_command` 可用。改为精确 `rm -- /tmp/APPROVAL-APPROVED-4d789291d3.txt` 后重新清理。
+
+### C9 完成证据
+
+- 权威交互审计：`/home/aiserver/staging/openwebui-pr7-eea11194ed-test/e2e-agentmode-four-worker-interactions-20260725-003503.json`，`ok=true`、worker PIDs `11,12,13,14`、临时 Tool 已删除。
+- 最终四个 run：approved `c14ac229-7231-485d-bfb3-0c86b0374093`；rejected `b2e779d9-0bfa-414f-a001-c7be9edb1a9a`；user-input accepted `ebbe07fc-1e2f-402e-bcdc-745a8d7fba29`；user-input cancelled `ced89943-2dad-4039-a788-bb47b8cdba5a`。
+- DB：四 run 均 `state=completed`、`error=null`、pending_user_input_id=null；四条 decision execution 均 `status=succeeded`、attempt_count=1、backend_committed=true；临时 Tool row count=0。
+- 精确 `2026-07-25 00:35-00:37` 窗口的 WebUI/runtime 日志没有 ReadTimeout、Traceback、ERROR、Exception、runtime_finalization_failed 或 empty_model_response。
+- 初版审批误写文件已通过 run `17d73a06-18a3-4549-b5a5-9bccf23c4eef` 精确清理：terminal `run_command` 执行 `rm -- /tmp/APPROVAL-APPROVED-4d789291d3.txt`，exit_code=0、status=done；审计 `/home/aiserver/staging/openwebui-pr7-eea11194ed-test/e2e-agentmode-terminal-cleanup-20260725-010219.json`，trigger Tool 已删除。
+- C9 complete。下一步：发布级测试、提交当前证据、从该干净 commit 构建完整 external-services slim 候选镜像；overlay 不能作为最终发布制品。

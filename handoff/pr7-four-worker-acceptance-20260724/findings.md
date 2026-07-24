@@ -138,3 +138,13 @@ model_not_allowed: Model is not available for this run: bifrostapi.Cliproxy/gpt-
 - 正式 live 当前不应直接切到修复前 PR7 镜像：本次发现的两个跨 worker 缺陷在修复前都能被真实运行触发；因此“未应用两项修复的立即升级”是 **NO-GO**。
 - 应用 `b1a2ac825` 与 `f2ab0434d` 后，结合正式 live 的常规灰度/回滚窗口，可进入下一步 promotion；本次没有执行 live 切换。由于 approval/user-input 尚未 live-verified，若该能力是发布硬门槛，则其完成前保持 **NO-GO**。
 - 冷启动约 3 分钟，必须在 promotion 计划中保留 readiness/回滚窗口；这不是本次 4-worker 运行失败，但属于运维风险。
+
+## 2026-07-25 发布门槛续验发现
+
+- 修复 overlay 的真实 4-worker approval/user-input 主路径和负路径均通过；这消除了上一轮 `NOT LIVE-VERIFIED` 的主要缺口。
+- 决定提交与 run 启动刻意落在不同 worker，且第三个 worker 的重复请求均从 durable event/decision state 返回 `historical_completed`，没有依赖原 worker 的进程内状态。
+- Approval 拒绝会 fail closed：只产生 `approval.completed` 和 `run.failed`，不执行受保护 Tool；user-input 取消是正常可恢复终态，run 继续给出最终答复，不产生 `run.failed`。
+- 当前仍需补齐 waiting 状态下关闭旧连接后重新连接的恢复证据，以及从最终分支完整源码构建的非 overlay 发布候选镜像。完成这两项前仍不宣称可切换 live。
+- 第一轮 rejected run 的 `runtime_finalization_failed` 不是审批决定未持久化或 Tool 被误执行；decision execution 已成功提交。问题由探针要求模型在 DENIED tool result 后不输出 final 引起，与当前 durable continuation 设计冲突。修正探针后必须重跑，不能把初版表面 `run.failed` 当作产品通过证据。
+- 修正版 4-worker 交互已证明 approval approved/rejected 与 user-input accepted/cancelled 的正负路径都不依赖发起 worker：决定由另一 PID 提交，幂等重放由第三 PID 完成，waiting 状态可在关闭旧连接后由四条全新连接一致恢复。
+- 当前 interaction gate 不再有 live 功能缺口。剩余发布阻断是制品形态：已验收的是 overlay，必须从最终干净 commit 构建完整 slim 镜像并复验，才能声明具备正式切换条件。
