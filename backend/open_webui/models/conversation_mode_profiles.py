@@ -946,6 +946,7 @@ class ConversationModeProfileTable:
                     chat_content.get('history'),
                     patch.get('history'),
                 )
+            updated_chat.pop('mode_profile_revision_id', None)
 
             chat.chat = Chats._clean_null_bytes(updated_chat)
             title = updated_chat['title'] if 'title' in updated_chat else 'New Chat'

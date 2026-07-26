@@ -388,6 +388,130 @@ async def test_atomic_legacy_profile_claim_and_chat_save_commit_together(atomic_
 
 
 @pytest.mark.asyncio
+async def test_atomic_update_removes_legacy_profile_revision_id_from_persisted_chat_json(atomic_profile_db) -> None:
+    legacy = Chat(
+        id='legacy-json-profile-revision',
+        user_id='user-1',
+        title='Legacy',
+        chat={
+            'title': 'Legacy',
+            'mode_profile_revision_id': NEW_REVISION_ID,
+            'history': {'currentId': None, 'messages': {}},
+        },
+        created_at=1,
+        updated_at=1,
+        mode_profile_revision_id=OLD_REVISION_ID,
+    )
+    async with atomic_profile_db() as session:
+        session.add(legacy)
+        await session.commit()
+
+    updated = await ConversationModeProfiles.resolve_and_update_persisted_chat(
+        chat_id=legacy.id,
+        user_id=legacy.user_id,
+        update_patch={'title': 'Sanitized', 'mode_profile_revision_id': NEW_REVISION_ID},
+        requested_mode=None,
+        has_agent_run=False,
+    )
+
+    assert updated is not None
+    assert updated.mode_profile_revision_id == OLD_REVISION_ID
+    assert 'mode_profile_revision_id' not in updated.chat
+
+    async with atomic_profile_db() as session:
+        stored = await session.get(Chat, legacy.id)
+    assert stored.mode_profile_revision_id == OLD_REVISION_ID
+    assert 'mode_profile_revision_id' not in stored.chat
+
+
+@pytest.mark.asyncio
+async def test_router_update_publishes_only_after_repository_commit(atomic_profile_db, monkeypatch) -> None:
+    chat = Chat(
+        id='router-committed-before-event',
+        user_id='user-1',
+        title='Before',
+        chat={'title': 'Before', 'mode': 'chat', 'history': {'currentId': None, 'messages': {}}},
+        created_at=1,
+        updated_at=1,
+        mode_profile_revision_id=OLD_REVISION_ID,
+    )
+    async with atomic_profile_db() as session:
+        session.add(chat)
+        await session.commit()
+
+    events = []
+
+    async def publish(*args, **kwargs):
+        async with atomic_profile_db() as session:
+            stored = await session.get(Chat, chat.id)
+        assert stored.title == 'Committed title'
+        assert stored.chat['title'] == 'Committed title'
+        assert stored.mode_profile_revision_id == OLD_REVISION_ID
+        events.append(kwargs['subject_id'])
+
+    monkeypatch.setattr(chats_router, 'publish_event', publish)
+
+    response = await chats_router.update_chat_by_id(
+        SimpleNamespace(),
+        chat.id,
+        ChatForm(chat={'title': 'Committed title'}),
+        SimpleNamespace(id=chat.user_id),
+        None,
+    )
+
+    assert response.title == 'Committed title'
+    assert events == [chat.id]
+
+
+@pytest.mark.asyncio
+async def test_router_update_does_not_publish_when_repository_transaction_fails(atomic_profile_db, monkeypatch) -> None:
+    chat = Chat(
+        id='router-failed-before-event',
+        user_id='user-1',
+        title='Before',
+        chat={'title': 'Before', 'mode': 'chat', 'history': {'currentId': None, 'messages': {}}},
+        created_at=1,
+        updated_at=1,
+        mode_profile_revision_id=OLD_REVISION_ID,
+    )
+    async with atomic_profile_db() as session:
+        session.add(chat)
+        await session.commit()
+        await session.execute(
+            text(
+                """
+                CREATE TRIGGER reject_router_update
+                BEFORE UPDATE ON chat
+                WHEN OLD.id = 'router-failed-before-event'
+                BEGIN
+                    SELECT RAISE(ABORT, 'forced router repository failure');
+                END;
+                """
+            )
+        )
+        await session.commit()
+
+    events = []
+
+    async def publish(*args, **kwargs):
+        events.append(kwargs['subject_id'])
+
+    monkeypatch.setattr(chats_router, 'publish_event', publish)
+
+    with pytest.raises(chats_router.HTTPException) as exc_info:
+        await chats_router.update_chat_by_id(
+            SimpleNamespace(),
+            chat.id,
+            ChatForm(chat={'title': 'Must not publish'}),
+            SimpleNamespace(id=chat.user_id),
+            None,
+        )
+
+    assert exc_info.value.status_code == 503
+    assert events == []
+
+
+@pytest.mark.asyncio
 async def test_atomic_legacy_profile_claim_rolls_back_when_chat_save_fails(atomic_profile_db) -> None:
     legacy = Chat(
         id='legacy-failed-atomic-update',

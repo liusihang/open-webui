@@ -1160,6 +1160,7 @@ async def get_shared_chat_by_id(
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail=ERROR_MESSAGES.NOT_FOUND)
 
     shared = await SharedChats.get_by_id(share_id, db=db)
+    chat = None
 
     if shared is not None:
         if user.role != 'admin' or not ENABLE_ADMIN_CHAT_ACCESS:

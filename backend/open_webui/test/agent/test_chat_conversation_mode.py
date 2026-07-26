@@ -231,6 +231,55 @@ async def test_shared_get_uses_original_chat_id_for_legacy_agent_run_mode(
 
 
 @pytest.mark.asyncio
+async def test_shared_get_unknown_token_fails_closed_for_an_ordinary_user(monkeypatch) -> None:
+    async def get_shared(share_id, db=None):
+        assert share_id == 'unknown-share-token'
+        return None
+
+    async def unexpected_chat_lookup(*args, **kwargs):
+        raise AssertionError('ordinary users must not fall back to a source chat lookup')
+
+    monkeypatch.setattr(chats_router.SharedChats, 'get_by_id', get_shared)
+    monkeypatch.setattr(chats_router.Chats, 'get_chat_by_id', unexpected_chat_lookup)
+
+    with pytest.raises(chats_router.HTTPException) as exc_info:
+        await chats_router.get_shared_chat_by_id(
+            'unknown-share-token',
+            SimpleNamespace(id='ordinary-user', role='user'),
+            None,
+        )
+
+    assert exc_info.value.status_code == 401
+    assert exc_info.value.detail == chats_router.ERROR_MESSAGES.NOT_FOUND
+
+
+@pytest.mark.asyncio
+async def test_shared_get_unknown_token_keeps_admin_chat_id_fallback(monkeypatch) -> None:
+    stored = _chat_model(mode='chat')
+
+    async def get_shared(share_id, db=None):
+        assert share_id == stored.id
+        return None
+
+    async def get_chat(chat_id, db=None):
+        assert chat_id == stored.id
+        return stored
+
+    monkeypatch.setattr(chats_router.SharedChats, 'get_by_id', get_shared)
+    monkeypatch.setattr(chats_router.Chats, 'get_chat_by_id', get_chat)
+    monkeypatch.setattr(chats_router, 'ENABLE_ADMIN_CHAT_ACCESS', True)
+
+    response = await chats_router.get_shared_chat_by_id(
+        stored.id,
+        SimpleNamespace(id='admin-user', role='admin'),
+        None,
+    )
+
+    assert response.id == stored.id
+    assert response.user_id == stored.user_id
+
+
+@pytest.mark.asyncio
 async def test_concurrent_legacy_mode_claim_allows_only_one_mode(
     monkeypatch,
     tmp_path,
