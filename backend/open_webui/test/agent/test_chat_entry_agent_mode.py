@@ -297,7 +297,7 @@ def _patch_model_and_chat_boundaries(monkeypatch, calls):  # noqa: C901
 
 
 def _patch_legacy_chat_pipeline(monkeypatch, calls):
-    async def fake_process_payload(request, form_data, user, metadata, model):
+    async def fake_process_payload(request, form_data, user, metadata, model, private_context=None):
         calls.process_payload_calls.append(
             {
                 'form_data': dict(form_data),
@@ -1150,7 +1150,7 @@ async def test_agent_mode_runtime_payload_preserves_reasoning_before_payload_pro
     agent_run_db,
     chat_entry_patches,
 ):
-    async def fake_process_payload(request, form_data, user, metadata, model):
+    async def fake_process_payload(request, form_data, user, metadata, model, private_context=None):
         form_data = dict(form_data)
         form_data.pop('reasoning', None)
         form_data.pop('params', None)
@@ -1260,7 +1260,7 @@ async def test_agent_mode_product_chat_auto_attaches_accessible_system_terminal(
     async def fake_has_connection_access(user, connection, user_group_ids=None):
         return connection.get('id') == 'terminal-system-2'
 
-    async def fake_process_payload(request, form_data, user, metadata, model):
+    async def fake_process_payload(request, form_data, user, metadata, model, private_context=None):
         terminal_id = form_data.get('terminal_id')
         chat_entry_patches.process_payload_calls.append(
             {
@@ -1327,7 +1327,7 @@ async def test_agent_mode_product_chat_populates_tool_envelope_and_callback_regi
     async def fake_tool(query: str):
         return {'answer': query}
 
-    async def fake_process_payload(request, form_data, user, metadata, model):
+    async def fake_process_payload(request, form_data, user, metadata, model, private_context=None):
         metadata['tools'] = {
             'lookup_fact': {
                 'tool_id': 'builtin:lookup_fact',
@@ -1434,7 +1434,7 @@ async def test_agent_mode_runtime_unavailable_removes_run_tool_registry(
     async def fake_tool(query: str):
         return {'answer': query}
 
-    async def fake_process_payload(request, form_data, user, metadata, model):
+    async def fake_process_payload(request, form_data, user, metadata, model, private_context=None):
         metadata['tools'] = {
             'lookup_fact': {
                 'tool_id': 'builtin:lookup_fact',

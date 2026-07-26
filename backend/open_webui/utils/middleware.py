@@ -108,7 +108,7 @@ from open_webui.utils.misc import (
     is_string_allowed,
     merge_system_messages,
     prepend_to_first_user_message_content,
-    replace_system_message_content,
+    remove_system_message,
     set_last_user_message_content,
     strip_empty_content_blocks,
 )
@@ -2778,7 +2778,7 @@ async def connect_mcp_server(
     return client, tool_specs
 
 
-async def process_chat_payload(request, form_data, user, metadata, model):
+async def process_chat_payload(request, form_data, user, metadata, model, private_context: dict | None = None):
     # Ensure chat_id is always a string — external API clients may omit it.
     if not isinstance(metadata.get('chat_id'), str):
         metadata['chat_id'] = ''
@@ -3440,6 +3440,15 @@ async def process_chat_payload(request, form_data, user, metadata, model):
     metadata['user_prompt'] = get_last_user_message(form_data['messages'])
     metadata['sources'] = sources[:] if sources else []
 
+    if private_context is not None:
+        private_context['pre_rag_system_anchor'] = '\n\n'.join(
+            content
+            for message in form_data.get('messages', [])
+            if isinstance(message, dict)
+            and message.get('role') == 'system'
+            and (content := get_content_from_message(message))
+        )
+
     # If context is not empty, insert it into the messages
     if sources and prompt:
         form_data['messages'] = await apply_source_context_to_messages(request, form_data['messages'], sources, prompt)
@@ -3819,6 +3828,48 @@ def build_native_tool_continuation_form_data(
             *build_tool_result_messages(results),
         ],
     }
+
+
+async def restore_native_tool_continuation_context(
+    request: Request,
+    form_data: dict,
+    metadata: dict,
+    *,
+    pre_rag_system_anchor: str | None,
+    tool_call_sources: list,
+) -> dict:
+    """Restore the private pre-RAG prefix, then add the current source context once."""
+    if pre_rag_system_anchor is None:
+        return form_data
+
+    restored_form_data = {**form_data}
+    messages = remove_system_message(form_data.get('messages') or [])
+    user_message = metadata.get('user_prompt') or get_last_user_message(messages)
+    if user_message:
+        set_last_user_message_content(user_message, messages)
+    if pre_rag_system_anchor:
+        messages = add_or_update_system_message(pre_rag_system_anchor, messages)
+
+    source_ids = {}
+    source_context = get_source_context(metadata.get('sources', []), source_ids) + get_source_context(
+        tool_call_sources,
+        source_ids,
+        include_content=False,
+    )
+    source_context = source_context.strip()
+    if source_context and user_message:
+        rag_content = await rag_template(
+            await Config.get('rag.template'),
+            source_context,
+            user_message,
+        )
+        if RAG_SYSTEM_CONTEXT:
+            messages = add_or_update_system_message(rag_content, messages, append=True)
+        else:
+            messages = add_or_update_user_message(rag_content, messages, append=False)
+
+    restored_form_data['messages'] = messages
+    return restored_form_data
 
 
 def _cache_debug_value_enabled(value: Any) -> bool:
@@ -4208,6 +4259,13 @@ async def continue_native_tool_calls_non_streaming_response(response, response_d
             results,
             stream=False,
         )
+        form_data = await restore_native_tool_continuation_context(
+            request,
+            form_data,
+            metadata,
+            pre_rag_system_anchor=ctx.get('pre_rag_system_anchor'),
+            tool_call_sources=all_tool_call_sources,
+        )
         log_native_tool_continuation_request_fingerprint(
             form_data,
             metadata=metadata,
@@ -4333,6 +4391,7 @@ async def direct_native_tool_streaming_response_handler(response: StreamingRespo
         form_data = ctx['form_data']
         current_response = response
         iterations = 0
+        all_tool_call_sources = []
 
         citations_enabled = (model.get('info', {}).get('meta', {}).get('capabilities') or {}).get('citations', True)
 
@@ -4368,6 +4427,7 @@ async def direct_native_tool_streaming_response_handler(response: StreamingRespo
                 event_caller=event_caller,
                 citations_enabled=citations_enabled,
             )
+            all_tool_call_sources.extend(tool_call_sources)
 
             if tool_call_sources:
                 yield f'data: {json.dumps({"sources": tool_call_sources})}\n\n'
@@ -4378,6 +4438,13 @@ async def direct_native_tool_streaming_response_handler(response: StreamingRespo
                 response_tool_calls,
                 results,
                 stream=True,
+            )
+            form_data = await restore_native_tool_continuation_context(
+                request,
+                form_data,
+                metadata,
+                pre_rag_system_anchor=ctx.get('pre_rag_system_anchor'),
+                tool_call_sources=all_tool_call_sources,
             )
             log_native_tool_continuation_request_fingerprint(
                 form_data,
@@ -5186,6 +5253,8 @@ async def streaming_chat_response_handler(response, ctx):
 
         # Handle as a background task
         async def response_handler(response, events):
+            nonlocal form_data
+
             def tag_output_handler(content_type, tags, output):
                 """
                 Detect special tags (reasoning, solution, code_interpreter) in streaming
@@ -6192,19 +6261,18 @@ async def streaming_chat_response_handler(response, ctx):
                 tool_call_iterations = 0
                 tool_call_sources = []  # Track citation sources from tool results
                 all_tool_call_sources = []  # Accumulated sources across all iterations
-                user_message = get_last_user_message(form_data['messages'])
 
                 # Check if citations are enabled for this model
                 citations_enabled = (model.get('info', {}).get('meta', {}).get('capabilities') or {}).get(
                     'citations', True
                 )
 
-                # Bound mode profiles carry their pre-RAG composition privately
-                # in ctx, never in provider-visible metadata.
-                original_system_content = ctx.get('pre_rag_system_anchor')
-                if original_system_content is None:
+                # The pre-RAG composition is private ctx state. Keep the legacy
+                # fallback only for callers that did not build a response context.
+                pre_rag_system_anchor = ctx.get('pre_rag_system_anchor')
+                if pre_rag_system_anchor is None:
                     original_system_message = get_system_message(form_data['messages'])
-                    original_system_content = (
+                    pre_rag_system_anchor = (
                         get_content_from_message(original_system_message) if original_system_message else None
                     )
 
@@ -6318,61 +6386,14 @@ async def streaming_chat_response_handler(response, ctx):
                         for source in tool_call_sources:
                             await event_emitter({'type': 'source', 'data': source})
 
-                        # Apply tool source context to messages for the model.
-                        # Restoring to pre-RAG original prevents duplicating
-                        # the RAG template across file and tool sources.
                         all_tool_call_sources.extend(tool_call_sources)
-                        if all_tool_call_sources and user_message:
-                            # Restore pre-RAG message state before re-applying
-                            # to prevent RAG template duplication.
-                            original_user_message = metadata.get('user_prompt') or user_message
-                            set_last_user_message_content(
-                                original_user_message,
-                                form_data['messages'],
-                            )
-                            if original_system_content is not None:
-                                if get_system_message(form_data['messages']):
-                                    replace_system_message_content(
-                                        original_system_content,
-                                        form_data['messages'],
-                                    )
-                                else:
-                                    form_data['messages'] = add_or_update_system_message(
-                                        original_system_content,
-                                        form_data['messages'],
-                                    )
-                            else:
-                                replace_system_message_content('', form_data['messages'])
-
-                            # Build context: file sources with content,
-                            # tool sources as citation markers only.
-                            source_ids = {}
-                            source_context = get_source_context(
-                                metadata.get('sources', []), source_ids
-                            ) + get_source_context(
-                                all_tool_call_sources,
-                                source_ids,
-                                include_content=False,
-                            )
-                            source_context = source_context.strip()
-                            if source_context:
-                                rag_content = await rag_template(
-                                    await Config.get('rag.template'),
-                                    source_context,
-                                    user_message,
-                                )
-                                if RAG_SYSTEM_CONTEXT:
-                                    form_data['messages'] = add_or_update_system_message(
-                                        rag_content,
-                                        form_data['messages'],
-                                        append=True,
-                                    )
-                                else:
-                                    form_data['messages'] = add_or_update_user_message(
-                                        rag_content,
-                                        form_data['messages'],
-                                        append=False,
-                                    )
+                        form_data = await restore_native_tool_continuation_context(
+                            request,
+                            form_data,
+                            metadata,
+                            pre_rag_system_anchor=pre_rag_system_anchor,
+                            tool_call_sources=all_tool_call_sources,
+                        )
                         tool_call_sources.clear()
 
                     citation_metadata = build_citation_map_from_sources(all_tool_call_sources)

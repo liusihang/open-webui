@@ -1333,7 +1333,7 @@ async def _enforce_mode_profile_prompt(
     user,
     model_system_prompt: str | None,
     request_system_prompt: str | None,
-    pre_rag_user_system_prompt: str | None,
+    pre_rag_system_prompt: str | None,
     administrator_variables: Mapping[str, object],
 ) -> tuple[bool, str | None]:
     if revision is None or not revision.system_prompt.strip():
@@ -1356,19 +1356,21 @@ async def _enforce_mode_profile_prompt(
         )
         if prompt and prompt.strip()
     )
-    user_layer = '\n\n'.join(
-        prompt
-        for prompt in (
-            await resolve_system_prompt(request_system_prompt, metadata, user),
-            await resolve_system_prompt(pre_rag_user_system_prompt, metadata, user),
+    request_layer = await resolve_system_prompt(request_system_prompt, metadata, user)
+    lower_layers = '\n\n'.join(prompt for prompt in (model_layer, request_layer) if prompt and prompt.strip())
+    post_pipeline_system_prompt = _system_prompt_text(form_data.get('messages') or [])
+    pre_rag_composed = '\n\n'.join(
+        compose_prompt_layers(
+            administrator=resolved_administrator,
+            model=lower_layers or None,
+            user=pre_rag_system_prompt or None,
         )
-        if prompt and prompt.strip()
     )
     composed = '\n\n'.join(
         compose_prompt_layers(
             administrator=resolved_administrator,
-            model=model_layer or None,
-            user=user_layer or None,
+            model=lower_layers or None,
+            user=post_pipeline_system_prompt or None,
         )
     )
     messages = remove_system_message(form_data.get('messages') or [])
@@ -1378,7 +1380,7 @@ async def _enforce_mode_profile_prompt(
         params.pop('system', None)
     _strip_private_prompt_metadata(metadata)
     _strip_mode_profile_control_fields(form_data)
-    return True, composed or None
+    return True, pre_rag_composed or None
 
 
 def _register_mode_profile_raw_prompt(request: Request, revision) -> None:
@@ -2318,8 +2320,15 @@ async def _start_agent_mode_chat(
     metadata['assistant_message_id'] = assistant_message_id
 
     requested_model_params = _agent_runtime_model_params(form_data)
-    pre_rag_user_system_prompt = _system_prompt_text(form_data.get('messages') or [])
-    form_data, metadata, _events = await process_chat_payload(request, form_data, user, metadata, model)
+    private_context = {}
+    form_data, metadata, _events = await process_chat_payload(
+        request,
+        form_data,
+        user,
+        metadata,
+        model,
+        private_context=private_context,
+    )
     prompt_enforced, _pre_rag_system_anchor = await _enforce_mode_profile_prompt(
         request=request,
         revision=mode_profile_revision,
@@ -2328,7 +2337,7 @@ async def _start_agent_mode_chat(
         user=user,
         model_system_prompt=model_system_prompt,
         request_system_prompt=request_system_prompt,
-        pre_rag_user_system_prompt=pre_rag_user_system_prompt,
+        pre_rag_system_prompt=private_context.get('pre_rag_system_anchor'),
         administrator_variables=administrator_prompt_variables,
     )
     if prompt_enforced:
@@ -3179,8 +3188,15 @@ async def chat_completion(
         effective_request_system_prompt,
     ):
         try:
-            pre_rag_user_system_prompt = _system_prompt_text(form_data.get('messages') or [])
-            form_data, metadata, events = await process_chat_payload(request, form_data, user, metadata, model)
+            private_context = {}
+            form_data, metadata, events = await process_chat_payload(
+                request,
+                form_data,
+                user,
+                metadata,
+                model,
+                private_context=private_context,
+            )
             prompt_enforced, pre_rag_system_anchor = await _enforce_mode_profile_prompt(
                 request=request,
                 revision=mode_profile_revision,
@@ -3189,7 +3205,7 @@ async def chat_completion(
                 user=user,
                 model_system_prompt=effective_model_system_prompt,
                 request_system_prompt=effective_request_system_prompt,
-                pre_rag_user_system_prompt=pre_rag_user_system_prompt,
+                pre_rag_system_prompt=private_context.get('pre_rag_system_anchor'),
                 administrator_variables=administrator_prompt_variables,
             )
 
@@ -3227,7 +3243,9 @@ async def chat_completion(
                 metadata,
                 tasks,
                 events,
-                pre_rag_system_anchor=pre_rag_system_anchor,
+                pre_rag_system_anchor=(
+                    pre_rag_system_anchor if prompt_enforced else private_context.get('pre_rag_system_anchor')
+                ),
             )
 
             return await process_chat_response(response, ctx)

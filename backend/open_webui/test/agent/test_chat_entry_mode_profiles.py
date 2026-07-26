@@ -271,13 +271,19 @@ def profile_entry(monkeypatch):  # noqa: C901
 
         return emit
 
-    async def process_payload(request, form_data, user, metadata, model):
+    async def process_payload(request, form_data, user, metadata, model, private_context=None):
         calls.process_payload_calls.append(
             {
                 'form_data': dict(form_data),
                 'metadata': dict(metadata),
             }
         )
+        if private_context is not None:
+            private_context['pre_rag_system_anchor'] = '\n\n'.join(
+                message['content']
+                for message in form_data.get('messages', [])
+                if message.get('role') == 'system' and isinstance(message.get('content'), str)
+            )
         return form_data, metadata, []
 
     async def provider(request, form_data, user, **kwargs):
@@ -726,7 +732,7 @@ async def test_secondary_fanout_cannot_readd_bound_empty_skill_or_filter_default
     form['skill_ids'] = []
     form['filter_ids'] = []
 
-    async def process_payload(request, form_data, user, metadata, model):
+    async def process_payload(request, form_data, user, metadata, model, private_context=None):
         form_data = dict(form_data)
         metadata = dict(metadata)
         model_meta = model.get('info', {}).get('meta', {})
@@ -1021,6 +1027,46 @@ async def test_bound_administrator_prompt_passes_private_pre_rag_anchor_without_
 
 
 @pytest.mark.asyncio
+async def test_bound_administrator_prompt_preserves_post_pipeline_rag_and_private_pre_rag_anchor(
+    monkeypatch,
+    agent_run_db,
+    profile_entry,
+):
+    _configure_prompt_layers(profile_entry, mode='chat', administrator='Administrator policy')
+    profile_entry.config_values['chat.global_system_prompt'] = 'Global policy'
+    profile_entry.model_info = SimpleNamespace(
+        base_model_id=None,
+        params=SimpleNamespace(model_dump=lambda: {'system': 'Model policy'}),
+    )
+    form = _existing_chat_form(mode='chat')
+    form['params'] = {'system': 'Request policy'}
+
+    async def post_pipeline_payload(request, form_data, user, metadata, model, private_context=None):
+        form_data['messages'] = [
+            {'role': 'system', 'content': 'SKILL SYSTEM CONTEXT'},
+            {'role': 'system', 'content': 'RAG_SYSTEM_CONTEXT'},
+            {'role': 'user', 'content': 'hello'},
+        ]
+        if private_context is not None:
+            private_context['pre_rag_system_anchor'] = 'SKILL SYSTEM CONTEXT'
+        return form_data, metadata, []
+
+    monkeypatch.setattr(main, 'process_chat_payload', post_pipeline_payload)
+
+    await main.chat_completion(_request(enable_agent_mode=True), form, _user())
+
+    provider_form, _provider_kwargs = profile_entry.provider_calls[0]
+    assert _system_content(provider_form['messages']) == (
+        'Administrator policy\n\nGlobal policy\n\nModel policy\n\nRequest policy'
+        '\n\nSKILL SYSTEM CONTEXT\n\nRAG_SYSTEM_CONTEXT'
+    )
+    assert profile_entry.response_contexts[0]['pre_rag_system_anchor'] == (
+        'Administrator policy\n\nGlobal policy\n\nModel policy\n\nRequest policy\n\nSKILL SYSTEM CONTEXT'
+    )
+    assert 'system_prompt' not in provider_form.get('metadata', {})
+
+
+@pytest.mark.asyncio
 async def test_capability_truth_failure_is_non_secret_unavailable_before_writes(
     agent_run_db,
     profile_entry,
@@ -1076,7 +1122,7 @@ async def test_profile_filtered_skills_are_not_readded_from_model_defaults(
     request = _request(enable_agent_mode=True)
     request.app.state.MODELS['model-a']['info']['meta']['skillIds'] = ['model-skill']
 
-    async def process_payload(request, form_data, user, metadata, model):
+    async def process_payload(request, form_data, user, metadata, model, private_context=None):
         form_data = dict(form_data)
         form_data['skill_ids'] = [
             *form_data.get('skill_ids', []),
@@ -1119,7 +1165,7 @@ async def test_profile_filtered_filters_are_not_readded_from_model_defaults(
     request = _request(enable_agent_mode=True)
     request.app.state.MODELS['model-a']['info']['meta']['filterIds'] = ['model-filter']
 
-    async def process_payload(request, form_data, user, metadata, model):
+    async def process_payload(request, form_data, user, metadata, model, private_context=None):
         metadata = dict(metadata)
         metadata['filter_ids'] = [
             *metadata.get('filter_ids', []),
@@ -1145,7 +1191,7 @@ async def test_ordinary_omitted_filters_remain_none_and_keep_model_filters(
     request.app.state.MODELS['model-a']['info']['meta']['filterIds'] = ['model-filter']
     observed = {}
 
-    async def process_payload(request, form_data, user, metadata, model):
+    async def process_payload(request, form_data, user, metadata, model, private_context=None):
         observed['filter_ids'] = metadata.get('filter_ids')
         observed['model_filter_ids'] = model.get('info', {}).get('meta', {}).get('filterIds')
         return form_data, metadata, []
@@ -1176,7 +1222,7 @@ async def test_bound_inherited_filters_remain_none_and_keep_model_filters(
     request.app.state.MODELS['model-a']['info']['meta']['filterIds'] = ['model-filter']
     observed = {}
 
-    async def process_payload(request, form_data, user, metadata, model):
+    async def process_payload(request, form_data, user, metadata, model, private_context=None):
         observed['filter_ids'] = metadata.get('filter_ids')
         observed['model_filter_ids'] = model.get('info', {}).get('meta', {}).get('filterIds')
         return form_data, metadata, []
@@ -1202,7 +1248,7 @@ async def test_bound_explicit_empty_filters_suppress_model_filters(
     request.app.state.MODELS['model-a']['info']['meta']['filterIds'] = ['model-filter']
     observed = {}
 
-    async def process_payload(request, form_data, user, metadata, model):
+    async def process_payload(request, form_data, user, metadata, model, private_context=None):
         observed['filter_ids'] = metadata.get('filter_ids')
         observed['model_filter_ids'] = model.get('info', {}).get('meta', {}).get('filterIds')
         return form_data, metadata, []
@@ -1249,7 +1295,7 @@ async def test_bound_profile_filters_reach_payload_only_after_resolver_authoriza
     request.app.state.MODELS['model-a']['info']['meta']['filterIds'] = ['profile-filter']
     observed = {}
 
-    async def process_payload(request, form_data, user, metadata, model):
+    async def process_payload(request, form_data, user, metadata, model, private_context=None):
         observed['filter_ids'] = metadata.get('filter_ids')
         observed['model_filter_ids'] = model.get('info', {}).get('meta', {}).get('filterIds')
         observed['resolver_ran'] = any(event[0] == 'capability_resolution' for event in profile_entry.events)
@@ -1312,7 +1358,7 @@ async def test_raw_administrator_prompt_is_registered_before_real_payload_debug_
     form = _existing_chat_form(mode='chat')
     form['messages'] = [{'role': 'user', 'content': f'echo {secret}'}]
 
-    async def real_debug_payload(request, form_data, user, metadata, model):
+    async def real_debug_payload(request, form_data, user, metadata, model, private_context=None):
         isolated_metadata = {
             **metadata,
             'chat_id': '',
@@ -1376,7 +1422,7 @@ async def test_bound_administrator_variables_are_private_before_payload_and_prov
 
     original_process_payload = main.process_chat_payload
 
-    async def process_payload_with_derived_prompt(request, form_data, user, metadata, model):
+    async def process_payload_with_derived_prompt(request, form_data, user, metadata, model, private_context=None):
         form_data, metadata, events = await original_process_payload(
             request,
             form_data,
@@ -1432,7 +1478,7 @@ async def test_bound_administrator_variables_are_sanitized_before_real_debug_and
     }
     observed = {}
 
-    async def real_payload(request, form_data, user, metadata, model):
+    async def real_payload(request, form_data, user, metadata, model, private_context=None):
         return await chat_middleware.process_chat_payload(
             request,
             form_data,
@@ -1537,7 +1583,7 @@ async def test_provider_exception_redacts_administrator_prompt_from_http_detail(
     sentinel = 'ADMIN-PROMPT-SECRET-HTTP-b61d'
     _configure_prompt_layers(profile_entry, mode='chat', administrator=sentinel)
 
-    async def direct_payload(request, form_data, user, metadata, model):
+    async def direct_payload(request, form_data, user, metadata, model, private_context=None):
         metadata = dict(metadata)
         metadata.pop('chat_id', None)
         metadata.pop('message_id', None)

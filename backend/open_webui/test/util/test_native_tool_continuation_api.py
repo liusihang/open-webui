@@ -404,6 +404,57 @@ async def test_direct_non_streaming_native_tool_calls_continue_to_final_answer(m
 
 
 @pytest.mark.asyncio
+async def test_non_streaming_native_continuation_restores_unbound_private_anchor_and_reapplies_rag_once(monkeypatch):
+    captured = {}
+
+    async def fake_generate_chat_completion(request, form_data, user, **kwargs):
+        captured['form_data'] = form_data
+        return {
+            'id': 'chatcmpl-final',
+            'object': 'chat.completion',
+            'model': 'gpt-test',
+            'choices': [{'index': 0, 'message': {'role': 'assistant', 'content': 'final'}, 'finish_reason': 'stop'}],
+        }
+
+    async def fake_process_tool_result(request, tool_name, tool_result, tool_type, direct_tool, metadata, user):
+        return str(tool_result), [], []
+
+    async def config_get(key, default=None):
+        return 'RAG {{CONTEXT}}' if key == 'rag.template' else default
+
+    monkeypatch.setattr(middleware, 'generate_chat_completion', fake_generate_chat_completion)
+    monkeypatch.setattr(middleware, 'process_tool_result', fake_process_tool_result)
+    monkeypatch.setattr(middleware.Config, 'get', config_get)
+    monkeypatch.setattr(middleware, 'RAG_SYSTEM_CONTEXT', True)
+
+    ctx = _ctx()
+    ctx['pre_rag_system_anchor'] = 'UNBOUND PIPELINE SYSTEM LAYER'
+    ctx['form_data']['messages'] = [
+        {'role': 'system', 'content': 'STALE INITIAL RAG'},
+        {'role': 'user', 'content': 'Use the attached docs.'},
+    ]
+    ctx['metadata'].update(
+        {
+            'user_prompt': 'Use the attached docs.',
+            'sources': [
+                {
+                    'source': {'id': 'file-1', 'name': 'file-1'},
+                    'document': ['attached evidence'],
+                    'metadata': [{}],
+                }
+            ],
+        }
+    )
+
+    await middleware.non_streaming_chat_response_handler(_tool_call_response(), ctx)
+
+    system_message = captured['form_data']['messages'][0]
+    assert system_message['content'].startswith('UNBOUND PIPELINE SYSTEM LAYER')
+    assert system_message['content'].count('RAG <source') == 1
+    assert 'STALE INITIAL RAG' not in system_message['content']
+
+
+@pytest.mark.asyncio
 async def test_direct_streaming_native_tool_calls_continue_without_final_tool_calls(monkeypatch):
     captured = {}
 
@@ -473,6 +524,81 @@ async def test_direct_streaming_native_tool_calls_continue_without_final_tool_ca
     assert continuation_messages[-2]['role'] == 'assistant'
     assert continuation_messages[-1]['role'] == 'tool'
     assert continuation_messages[-1]['tool_call_id'] == 'call_knowledge'
+
+
+@pytest.mark.asyncio
+async def test_direct_streaming_native_continuation_restores_private_anchor_on_each_iteration(monkeypatch):
+    captured = []
+
+    async def tool_stream(call_id):
+        yield (
+            'data: {"choices":[{"delta":{"tool_calls":[{"index":0,"id":"'
+            + call_id
+            + '","type":"function","function":{"name":"query_knowledge_files",'
+            '"arguments":"{\\"query\\":\\"docs\\"}"}}]}}]}\n\n'
+        )
+        yield 'data: {"choices":[{"delta":{},"finish_reason":"tool_calls"}]}\n\n'
+        yield 'data: [DONE]\n\n'
+
+    async def final_stream():
+        yield 'data: {"choices":[{"delta":{"content":"final"}}]}\n\n'
+        yield 'data: [DONE]\n\n'
+
+    async def fake_generate(request, form_data, user, **kwargs):
+        captured.append(form_data)
+        stream = tool_stream('call-2') if len(captured) == 1 else final_stream()
+        return StreamingResponse(stream, media_type='text/event-stream')
+
+    async def fake_process_tool_result(request, tool_name, tool_result, tool_type, direct_tool, metadata, user):
+        return str(tool_result), [], []
+
+    async def no_filters(*args, **kwargs):
+        return []
+
+    async def config_get(key, default=None):
+        return 'RAG {{CONTEXT}}' if key == 'rag.template' else default
+
+    monkeypatch.setattr(middleware, 'generate_chat_completion', fake_generate)
+    monkeypatch.setattr(middleware, 'process_tool_result', fake_process_tool_result)
+    monkeypatch.setattr(middleware, 'get_sorted_filter_ids', no_filters)
+    monkeypatch.setattr(middleware.Config, 'get', config_get)
+    monkeypatch.setattr(middleware, 'RAG_SYSTEM_CONTEXT', True)
+
+    ctx = _ctx()
+    ctx['form_data'].update(
+        {
+            'stream': True,
+            'messages': [
+                {'role': 'system', 'content': 'STALE INITIAL RAG'},
+                {'role': 'user', 'content': 'Use the attached docs.'},
+            ],
+        }
+    )
+    ctx['pre_rag_system_anchor'] = 'UNBOUND PIPELINE SYSTEM LAYER'
+    ctx['metadata'].update(
+        {
+            'user_prompt': 'Use the attached docs.',
+            'sources': [
+                {
+                    'source': {'id': 'file-1', 'name': 'file-1'},
+                    'document': ['attached evidence'],
+                    'metadata': [{}],
+                }
+            ],
+        }
+    )
+
+    response = StreamingResponse(tool_stream('call-1'), media_type='text/event-stream')
+    result = await middleware.streaming_chat_response_handler(response, ctx)
+    async for _chunk in result.body_iterator:
+        pass
+
+    assert len(captured) == 2
+    for continuation in captured:
+        system_message = continuation['messages'][0]
+        assert system_message['content'].startswith('UNBOUND PIPELINE SYSTEM LAYER')
+        assert system_message['content'].count('RAG <source') == 1
+        assert 'STALE INITIAL RAG' not in system_message['content']
 
 
 @pytest.mark.asyncio
