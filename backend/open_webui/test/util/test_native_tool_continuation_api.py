@@ -704,3 +704,254 @@ async def test_streaming_native_tool_loop_restores_private_pre_rag_anchor_and_ap
     assert 'STALE INITIAL RAG' not in system_message['content']
     assert 'system_prompt' not in captured['form_data'][-1]['metadata']
     assert emitted
+
+
+@pytest.mark.asyncio
+async def test_restore_native_tool_continuation_context_deep_copies_nested_messages_before_mutation(monkeypatch):
+    async def config_get(key, default=None):
+        return 'RAG {{CONTEXT}}' if key == 'rag.template' else default
+
+    monkeypatch.setattr(middleware.Config, 'get', config_get)
+    monkeypatch.setattr(middleware, 'RAG_SYSTEM_CONTEXT', True)
+
+    form_data = {
+        'messages': [
+            {'role': 'system', 'content': 'STALE RAG'},
+            {
+                'role': 'user',
+                'content': [
+                    {'type': 'text', 'text': 'synthetic stale user content'},
+                    {'type': 'image_url', 'image_url': {'url': 'data:image/png;base64,keep-me'}},
+                ],
+            },
+            {
+                'role': 'assistant',
+                'content': None,
+                'tool_calls': [
+                    {
+                        'id': 'call-1',
+                        'function': {'name': 'query_knowledge_files', 'arguments': '{"query":"docs"}'},
+                    }
+                ],
+            },
+        ]
+    }
+    sibling_form_data = {'messages': form_data['messages']}
+    before = deepcopy(form_data)
+
+    restored = await middleware.restore_native_tool_continuation_context(
+        _FakeRequest(),
+        form_data,
+        {
+            'user_prompt': 'Use the attached docs.',
+            'sources': [
+                {
+                    'source': {'id': 'file-1', 'name': 'file-1'},
+                    'document': ['attached evidence'],
+                    'metadata': [{}],
+                }
+            ],
+        },
+        pre_rag_system_anchor='PRIVATE ANCHOR',
+        tool_call_sources=[],
+    )
+
+    assert form_data == before
+    assert sibling_form_data['messages'] == before['messages']
+    assert restored['messages'][1]['content'][0]['text'] == 'Use the attached docs.'
+    assert restored['messages'][1] is not form_data['messages'][1]
+    assert restored['messages'][1]['content'] is not form_data['messages'][1]['content']
+    assert restored['messages'][2]['tool_calls'] is not form_data['messages'][2]['tool_calls']
+
+
+@pytest.mark.asyncio
+async def test_direct_streaming_native_continuation_with_rag_user_context_keeps_one_fresh_turn(monkeypatch):
+    captured = []
+
+    async def tool_stream(call_id):
+        yield (
+            'data: {"choices":[{"delta":{"tool_calls":[{"index":0,"id":"'
+            + call_id
+            + '","type":"function","function":{"name":"query_knowledge_files",'
+            '"arguments":"{\\"query\\":\\"docs\\"}"}}]}}]}\n\n'
+        )
+        yield 'data: {"choices":[{"delta":{},"finish_reason":"tool_calls"}]}\n\n'
+        yield 'data: [DONE]\n\n'
+
+    async def final_stream():
+        yield 'data: {"choices":[{"delta":{"content":"final"}}]}\n\n'
+        yield 'data: [DONE]\n\n'
+
+    async def fake_generate(request, form_data, user, **kwargs):
+        captured.append(form_data)
+        stream = tool_stream('call-2') if len(captured) == 1 else final_stream()
+        return StreamingResponse(stream, media_type='text/event-stream')
+
+    async def fake_process_tool_result(request, tool_name, tool_result, tool_type, direct_tool, metadata, user):
+        return str(tool_result), [], []
+
+    async def no_filters(*args, **kwargs):
+        return []
+
+    async def config_get(key, default=None):
+        return 'RAG {{CONTEXT}}' if key == 'rag.template' else default
+
+    monkeypatch.setattr(middleware, 'generate_chat_completion', fake_generate)
+    monkeypatch.setattr(middleware, 'process_tool_result', fake_process_tool_result)
+    monkeypatch.setattr(middleware, 'get_sorted_filter_ids', no_filters)
+    monkeypatch.setattr(middleware.Config, 'get', config_get)
+    monkeypatch.setattr(middleware, 'RAG_SYSTEM_CONTEXT', False)
+
+    ctx = _ctx()
+    ctx['form_data'].update(
+        {
+            'stream': True,
+            'messages': [
+                {'role': 'system', 'content': 'STALE INITIAL RAG'},
+                {'role': 'user', 'content': 'Use the attached docs.'},
+            ],
+        }
+    )
+    ctx['pre_rag_system_anchor'] = 'UNBOUND PIPELINE SYSTEM LAYER'
+    ctx['metadata'].update(
+        {
+            'user_prompt': 'Use the attached docs.',
+            'sources': [
+                {
+                    'source': {'id': 'file-1', 'name': 'file-1'},
+                    'document': ['attached evidence'],
+                    'metadata': [{}],
+                }
+            ],
+        }
+    )
+
+    result = await middleware.streaming_chat_response_handler(
+        StreamingResponse(tool_stream('call-1'), media_type='text/event-stream'), ctx
+    )
+    async for _chunk in result.body_iterator:
+        pass
+
+    assert len(captured) == 2
+    continuation = captured[-1]['messages']
+    assert [message['role'] for message in continuation] == [
+        'system',
+        'user',
+        'assistant',
+        'tool',
+        'assistant',
+        'tool',
+        'user',
+    ]
+    assert continuation[1]['content'] == 'Use the attached docs.'
+    assert continuation[-1]['content'].count('RAG <source') == 1
+    assert sum(message.get('role') == 'user' for message in continuation) == 2
+
+
+@pytest.mark.asyncio
+async def test_websocket_native_continuation_restores_anchor_and_base_sources_without_citations(monkeypatch):  # noqa: C901
+    captured = []
+    emitted = []
+
+    async def tool_stream(call_id):
+        yield (
+            'data: {"choices":[{"delta":{"tool_calls":[{"index":0,"id":"'
+            + call_id
+            + '","type":"function","function":{"name":"query_knowledge_files",'
+            '"arguments":"{}"}}]}}]}\n\n'
+        )
+        yield 'data: {"choices":[{"delta":{},"finish_reason":"tool_calls"}]}\n\n'
+        yield 'data: [DONE]\n\n'
+
+    async def final_stream():
+        yield 'data: {"choices":[{"delta":{"content":"final"}}]}\n\n'
+        yield 'data: [DONE]\n\n'
+
+    async def fake_execute(_request, _form_data, _user, _metadata, response_tool_calls, **kwargs):
+        call_id = response_tool_calls[0]['id']
+        assert kwargs['citations_enabled'] is False
+        return (
+            [{'tool_call_id': call_id, 'content': f'tool result {call_id}'}],
+            [
+                {
+                    'source': {'id': 'tool-source', 'name': 'tool-source'},
+                    'document': ['tool evidence'],
+                    'metadata': [{}],
+                }
+            ],
+        )
+
+    async def fake_generate(request, form_data, user, **kwargs):
+        captured.append(form_data)
+        if len(captured) == 1:
+            return StreamingResponse(tool_stream('call-2'), media_type='text/event-stream')
+        return StreamingResponse(final_stream(), media_type='text/event-stream')
+
+    async def no_filters(*args, **kwargs):
+        return []
+
+    async def no_oauth(*args, **kwargs):
+        return None
+
+    async def config_get(key, default=None):
+        return 'RAG {{CONTEXT}}' if key == 'rag.template' else default
+
+    async def emit(event):
+        emitted.append(event)
+
+    monkeypatch.setattr(middleware, 'execute_native_tool_calls', fake_execute)
+    monkeypatch.setattr(middleware, 'generate_chat_completion', fake_generate)
+    monkeypatch.setattr(middleware, 'get_sorted_filter_ids', no_filters)
+    monkeypatch.setattr(middleware, 'get_system_oauth_token', no_oauth)
+    monkeypatch.setattr(middleware.Config, 'get', config_get)
+    monkeypatch.setattr(middleware, 'RAG_SYSTEM_CONTEXT', True)
+    monkeypatch.setattr(middleware, 'ENABLE_REALTIME_CHAT_SAVE', False)
+
+    anchor = 'PRIVATE ANCHOR'
+    ctx = _ctx()
+    ctx.update(
+        {
+            'form_data': {
+                'model': 'gpt-test',
+                'stream': True,
+                'messages': [
+                    {'role': 'system', 'content': 'STALE INITIAL RAG'},
+                    {'role': 'user', 'content': 'Use the attached docs.'},
+                ],
+            },
+            'model': {'info': {'meta': {'capabilities': {'citations': False}}}},
+            'metadata': {
+                'chat_id': 'channel:test',
+                'message_id': 'message-1',
+                'session_id': None,
+                'params': {'function_calling': 'native'},
+                'sources': [
+                    {
+                        'source': {'id': 'base-source', 'name': 'base-source'},
+                        'document': ['base evidence'],
+                        'metadata': [{}],
+                    }
+                ],
+                'user_prompt': 'Use the attached docs.',
+            },
+            'event_emitter': emit,
+            'pre_rag_system_anchor': anchor,
+        }
+    )
+
+    result = await middleware.streaming_chat_response_handler(
+        StreamingResponse(tool_stream('call-1'), media_type='text/event-stream'), ctx
+    )
+
+    assert result is None
+    assert len(captured) == 2
+    for continuation in captured:
+        system_message = continuation['messages'][0]
+        assert system_message['content'].startswith(anchor)
+        assert system_message['content'].count('RAG <source') == 1
+        assert 'base evidence' in system_message['content']
+        assert 'tool evidence' not in system_message['content']
+    assert not any(event.get('type') == 'source' for event in emitted)
+    assert not any(
+        event.get('data', {}).get('metadata', {}).get('citation_map') for event in emitted if isinstance(event, dict)
+    )

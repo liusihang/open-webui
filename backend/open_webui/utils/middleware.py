@@ -3837,13 +3837,20 @@ async def restore_native_tool_continuation_context(
     *,
     pre_rag_system_anchor: str | None,
     tool_call_sources: list,
+    continuation_state: dict | None = None,
 ) -> dict:
     """Restore the private pre-RAG prefix, then add the current source context once."""
     if pre_rag_system_anchor is None:
         return form_data
 
+    continuation_state = continuation_state if continuation_state is not None else {}
+    previous_rag_user_message = continuation_state.pop('rag_user_message', None)
+    input_messages = form_data.get('messages') or []
+    if previous_rag_user_message is not None:
+        input_messages = [message for message in input_messages if message is not previous_rag_user_message]
+
     restored_form_data = {**form_data}
-    messages = remove_system_message(form_data.get('messages') or [])
+    messages = remove_system_message(copy.deepcopy(input_messages))
     user_message = metadata.get('user_prompt') or get_last_user_message(messages)
     if user_message:
         set_last_user_message_content(user_message, messages)
@@ -3866,7 +3873,9 @@ async def restore_native_tool_continuation_context(
         if RAG_SYSTEM_CONTEXT:
             messages = add_or_update_system_message(rag_content, messages, append=True)
         else:
-            messages = add_or_update_user_message(rag_content, messages, append=False)
+            rag_user_message = {'role': 'user', 'content': rag_content}
+            messages.append(rag_user_message)
+            continuation_state['rag_user_message'] = rag_user_message
 
     restored_form_data['messages'] = messages
     return restored_form_data
@@ -4222,6 +4231,7 @@ async def continue_native_tool_calls_non_streaming_response(response, response_d
     all_tool_call_sources = []
     current_response = response
     current_response_data = response_data
+    continuation_state = {}
 
     citations_enabled = (model.get('info', {}).get('meta', {}).get('capabilities') or {}).get('citations', True)
 
@@ -4265,6 +4275,7 @@ async def continue_native_tool_calls_non_streaming_response(response, response_d
             metadata,
             pre_rag_system_anchor=ctx.get('pre_rag_system_anchor'),
             tool_call_sources=all_tool_call_sources,
+            continuation_state=continuation_state,
         )
         log_native_tool_continuation_request_fingerprint(
             form_data,
@@ -4392,6 +4403,7 @@ async def direct_native_tool_streaming_response_handler(response: StreamingRespo
         current_response = response
         iterations = 0
         all_tool_call_sources = []
+        continuation_state = {}
 
         citations_enabled = (model.get('info', {}).get('meta', {}).get('capabilities') or {}).get('citations', True)
 
@@ -4445,6 +4457,7 @@ async def direct_native_tool_streaming_response_handler(response: StreamingRespo
                 metadata,
                 pre_rag_system_anchor=ctx.get('pre_rag_system_anchor'),
                 tool_call_sources=all_tool_call_sources,
+                continuation_state=continuation_state,
             )
             log_native_tool_continuation_request_fingerprint(
                 form_data,
@@ -6261,6 +6274,7 @@ async def streaming_chat_response_handler(response, ctx):
                 tool_call_iterations = 0
                 tool_call_sources = []  # Track citation sources from tool results
                 all_tool_call_sources = []  # Accumulated sources across all iterations
+                continuation_state = {}
 
                 # Check if citations are enabled for this model
                 citations_enabled = (model.get('info', {}).get('meta', {}).get('capabilities') or {}).get(
@@ -6381,20 +6395,14 @@ async def streaming_chat_response_handler(response, ctx):
                         }
                     )
 
-                    # Emit citation sources to the frontend for display
+                    # Citations control frontend source events and tool citation
+                    # context, but never private-anchor restoration.
                     if citations_enabled:
                         for source in tool_call_sources:
                             await event_emitter({'type': 'source', 'data': source})
 
                         all_tool_call_sources.extend(tool_call_sources)
-                        form_data = await restore_native_tool_continuation_context(
-                            request,
-                            form_data,
-                            metadata,
-                            pre_rag_system_anchor=pre_rag_system_anchor,
-                            tool_call_sources=all_tool_call_sources,
-                        )
-                        tool_call_sources.clear()
+                    tool_call_sources.clear()
 
                     citation_metadata = build_citation_map_from_sources(all_tool_call_sources)
 
@@ -6435,6 +6443,14 @@ async def streaming_chat_response_handler(response, ctx):
                                 *form_data['messages'],
                                 *tool_messages,
                             ]
+                            new_form_data = await restore_native_tool_continuation_context(
+                                request,
+                                new_form_data,
+                                metadata,
+                                pre_rag_system_anchor=pre_rag_system_anchor,
+                                tool_call_sources=all_tool_call_sources,
+                                continuation_state=continuation_state,
+                            )
                             new_form_data, _guard_result = apply_responses_continuation_guard(
                                 new_form_data,
                                 previous_response_id=last_response_id,
@@ -6479,6 +6495,16 @@ async def streaming_chat_response_handler(response, ctx):
                                     }
                                 )
 
+                            new_form_data = await restore_native_tool_continuation_context(
+                                request,
+                                new_form_data,
+                                metadata,
+                                pre_rag_system_anchor=pre_rag_system_anchor,
+                                tool_call_sources=all_tool_call_sources,
+                                continuation_state=continuation_state,
+                            )
+
+                        form_data = new_form_data
                         res = await generate_chat_completion(
                             request,
                             new_form_data,
