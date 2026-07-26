@@ -33,6 +33,19 @@ if TYPE_CHECKING:
     from loguru import Logger
 
 
+_CONVERSATION_MODE_PROFILE_AUDIT_PATH = '/api/v1/configs/conversation_mode_profiles'
+_REDACTED_AUDIT_BODY = '[REDACTED]'
+
+
+def _redact_http_audit_body(path: str, body: str) -> str:
+    normalized_path = path.lower()
+    if normalized_path == _CONVERSATION_MODE_PROFILE_AUDIT_PATH or normalized_path.startswith(
+        f'{_CONVERSATION_MODE_PROFILE_AUDIT_PATH}/'
+    ):
+        return _REDACTED_AUDIT_BODY
+    return body
+
+
 @dataclass(frozen=True)
 class AuditLogEntry:
     # `Metadata` audit level properties
@@ -271,6 +284,9 @@ class AuditLoggingMiddleware:
                     '"password": "********"',
                     request_body,
                 )
+
+            request_body = _redact_http_audit_body(request.url.path, request_body)
+            response_body = _redact_http_audit_body(request.url.path, response_body)
 
             entry = AuditLogEntry(
                 id=str(uuid.uuid4()),

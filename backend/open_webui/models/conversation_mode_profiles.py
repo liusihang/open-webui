@@ -228,7 +228,7 @@ class ConversationModeProfileBindingIntegrityError(ConversationModeProfileStoreE
 
 
 class ConversationModeProfileHeadModel(BaseModel):
-    model_config = ConfigDict(from_attributes=True, frozen=True)
+    model_config = ConfigDict(from_attributes=True, frozen=True, strict=True)
 
     mode: str
     current_revision_id: str
@@ -239,7 +239,7 @@ class ConversationModeProfileHeadModel(BaseModel):
 
 
 class ConversationModeProfileRevisionModel(BaseModel):
-    model_config = ConfigDict(frozen=True, arbitrary_types_allowed=True)
+    model_config = ConfigDict(frozen=True, arbitrary_types_allowed=True, strict=True)
 
     id: str
     mode: str
@@ -270,14 +270,14 @@ class ConversationModeProfileRevisionModel(BaseModel):
 
 
 class ConversationModeProfileHistorySnapshotModel(BaseModel):
-    model_config = ConfigDict(frozen=True)
+    model_config = ConfigDict(frozen=True, strict=True)
 
     head: ConversationModeProfileHeadModel
     revisions: tuple[ConversationModeProfileRevisionModel, ...]
 
 
 class ConversationModeProfileTemporaryBindingModel(BaseModel):
-    model_config = ConfigDict(from_attributes=True, frozen=True)
+    model_config = ConfigDict(from_attributes=True, frozen=True, strict=True)
 
     id: str
     user_id: str
@@ -290,7 +290,7 @@ class ConversationModeProfileTemporaryBindingModel(BaseModel):
 
 
 class ConversationModeProfileChatBindingModel(BaseModel):
-    model_config = ConfigDict(frozen=True)
+    model_config = ConfigDict(frozen=True, strict=True)
 
     chat_id: str
     user_id: str

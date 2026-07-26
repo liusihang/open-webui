@@ -6,6 +6,7 @@ import json
 import os
 from contextlib import asynccontextmanager
 from types import SimpleNamespace
+from urllib.parse import urlsplit
 
 os.environ.setdefault('WEBUI_SECRET_KEY', 'test-secret')
 os.environ.setdefault('ENABLE_DB_MIGRATIONS', 'false')
@@ -15,6 +16,7 @@ import pytest
 import pytest_asyncio
 from fastapi import FastAPI, HTTPException
 from fastapi.testclient import TestClient
+from loguru import logger
 from open_webui.agent import conversation_mode_profile_service as profile_service
 from open_webui.agent.conversation_mode_profiles import ConversationModeProfile
 from open_webui.internal.db import Base
@@ -34,7 +36,10 @@ from open_webui.models.functions import Function
 from open_webui.models.skills import Skill
 from open_webui.models.tools import Tool
 from open_webui.routers import configs
+from open_webui.utils import audit as audit_module
+from open_webui.utils.audit import AuditLevel, AuditLoggingMiddleware
 from open_webui.utils.auth import get_current_user
+from open_webui.utils.logger import file_format
 from sqlalchemy import delete, update
 from sqlalchemy.exc import OperationalError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
@@ -363,6 +368,202 @@ def test_admin_save_creates_revision_and_prompt_free_audit(route_app, monkeypatc
     rendered_event = json.dumps(event['data'], sort_keys=True)
     for forbidden in ('Administrator policy', 'system_prompt', 'defaults', 'content_hash'):
         assert forbidden not in rendered_event
+
+
+def test_mode_profile_http_audit_bodies_are_redacted(route_app, monkeypatch):
+    prompt_sentinel = 'PRIVATE AUDIT SYSTEM PROMPT SENTINEL'
+    validation_sentinel = 'PRIVATE VALIDATION ECHO SENTINEL'
+    terminal_id = 'private-audit-terminal-id'
+    tool_id = 'private-audit-tool-id'
+    skill_id = 'private-audit-skill-id'
+    filter_id = 'private-audit-filter-id'
+
+    async def seed_private_resources():
+        async with route_app.profile_db() as session:
+            session.add(
+                Tool(
+                    id=tool_id,
+                    user_id='admin-1',
+                    name='Private Audit Tool',
+                    content='def tool(): pass',
+                    specs=[],
+                    meta={},
+                    valves={},
+                    updated_at=100,
+                    created_at=100,
+                )
+            )
+            session.add(
+                Skill(
+                    id=skill_id,
+                    user_id='admin-1',
+                    name='Private Audit Skill',
+                    description='Private audit skill',
+                    content='Private audit skill content',
+                    meta={},
+                    is_active=True,
+                    updated_at=100,
+                    created_at=100,
+                )
+            )
+            session.add(
+                Function(
+                    id=filter_id,
+                    user_id='admin-1',
+                    name='Private Audit Filter',
+                    type='filter',
+                    content='def inlet(body): return body',
+                    meta={},
+                    valves={},
+                    is_active=True,
+                    is_global=False,
+                    updated_at=100,
+                    created_at=100,
+                )
+            )
+            terminal_config = await session.get(Config, 'terminal_server.connections')
+            terminal_config.value = [
+                *terminal_config.value,
+                {
+                    'id': terminal_id,
+                    'name': 'Private Audit Terminal',
+                    'url': 'http://private-audit-terminal.invalid',
+                    'enabled': True,
+                },
+            ]
+            await session.commit()
+
+    class AuditUser:
+        def model_dump(self, *, include):
+            return {
+                'id': 'admin-1',
+                'name': 'Administrator',
+                'email': 'admin@example.com',
+                'role': 'admin',
+            }
+
+    async def get_audit_user(*args, **kwargs):
+        return AuditUser()
+
+    asyncio.run(seed_private_resources())
+    monkeypatch.setattr(audit_module, 'AUDIT_LOG_LEVEL', AuditLevel.REQUEST_RESPONSE.value)
+    monkeypatch.setattr(audit_module, 'get_current_user', get_audit_user)
+    audited_app = AuditLoggingMiddleware(
+        route_app.app,
+        audit_level=AuditLevel.REQUEST_RESPONSE,
+        audit_get_requests=True,
+        included_paths=['configs/conversation_mode_profiles'],
+    )
+
+    persisted_records = []
+    sink_id = logger.add(
+        lambda message: persisted_records.append(str(message)),
+        level='INFO',
+        format=file_format,
+        filter=lambda record: record['extra'].get('auditable') is True,
+    )
+    headers = {'Authorization': 'Bearer audit-token'}
+    try:
+        with TestClient(audited_app) as client:
+            saved = client.post(
+                f'{BASE_PATH}/chat/revisions',
+                headers=headers,
+                json=_save_payload(
+                    CHAT_BASELINE_REVISION_ID,
+                    prompt=prompt_sentinel,
+                    terminal_id=terminal_id,
+                    tool_ids=[tool_id],
+                    skill_ids=[skill_id],
+                    filter_ids=[filter_id],
+                    feature_ids=[],
+                ),
+            )
+            assert saved.status_code == 200
+            saved_revision_id = saved.json()['revision_id']
+
+            current = client.get(f'{BASE_PATH}/chat', headers=headers)
+            detail = client.get(
+                f'{BASE_PATH}/chat/revisions/{saved_revision_id}',
+                headers=headers,
+            )
+            history = client.get(f'{BASE_PATH}/chat/revisions', headers=headers)
+            assert current.status_code == detail.status_code == history.status_code == 200
+
+            baseline_restore = client.post(
+                f'{BASE_PATH}/chat/revisions/{CHAT_BASELINE_REVISION_ID}/restore',
+                headers=headers,
+                json={'expected_current_revision_id': saved_revision_id},
+            )
+            assert baseline_restore.status_code == 200
+            private_restore = client.post(
+                f'{BASE_PATH}/chat/revisions/{saved_revision_id}/restore',
+                headers=headers,
+                json={
+                    'expected_current_revision_id': baseline_restore.json()['revision_id'],
+                },
+            )
+            assert private_restore.status_code == 200
+            assert private_restore.json()['system_prompt'] == prompt_sentinel
+
+            invalid_payload = _save_payload(private_restore.json()['revision_id'])
+            invalid_payload['profile']['system_prompt'] = {
+                'private': validation_sentinel,
+            }
+            invalid = client.post(
+                f'{BASE_PATH}/chat/revisions',
+                headers=headers,
+                json=invalid_payload,
+            )
+            assert invalid.status_code == 422
+    finally:
+        logger.remove(sink_id)
+
+    records = [json.loads(record) for record in persisted_records]
+    actual_metadata = {
+        (
+            record['verb'],
+            urlsplit(record['request_uri']).path,
+            record['response_status_code'],
+        )
+        for record in records
+    }
+    expected_metadata = {
+        ('POST', f'{BASE_PATH}/chat/revisions', 200),
+        ('GET', f'{BASE_PATH}/chat', 200),
+        ('GET', f'{BASE_PATH}/chat/revisions/{saved_revision_id}', 200),
+        ('GET', f'{BASE_PATH}/chat/revisions', 200),
+        (
+            'POST',
+            f'{BASE_PATH}/chat/revisions/{CHAT_BASELINE_REVISION_ID}/restore',
+            200,
+        ),
+        ('POST', f'{BASE_PATH}/chat/revisions/{saved_revision_id}/restore', 200),
+        ('POST', f'{BASE_PATH}/chat/revisions', 422),
+    }
+    assert actual_metadata == expected_metadata
+    assert all(record['user']['id'] == 'admin-1' for record in records)
+    assert all(record['request_object'] == '[REDACTED]' for record in records)
+    assert all(record['response_object'] == '[REDACTED]' for record in records)
+
+    rendered_audit = '\n'.join(persisted_records)
+    for forbidden in (
+        prompt_sentinel,
+        validation_sentinel,
+        terminal_id,
+        tool_id,
+        skill_id,
+        filter_id,
+        'system_prompt',
+        '"defaults"',
+        'content_hash',
+    ):
+        assert forbidden not in rendered_audit
+
+
+def test_mode_profile_http_audit_redaction_is_path_specific():
+    body = '{"safe_config_value":"preserved"}'
+
+    assert audit_module._redact_http_audit_body('/api/v1/configs/other', body) == body
 
 
 @pytest.mark.parametrize(

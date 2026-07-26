@@ -490,6 +490,68 @@ def test_revision_conversion_converts_persisted_type_error_without_row_content()
     assert exc_info.value.__suppress_context__ is True
 
 
+@pytest.mark.parametrize(
+    ('field', 'value'),
+    [
+        ('cutover_at', '321'),
+        ('updated_at', '654'),
+        ('updated_by', b'private-coercible-head-author'),
+    ],
+)
+@pytest.mark.asyncio
+async def test_store_rejects_coercible_malformed_head_metadata(
+    profile_db,
+    field,
+    value,
+) -> None:
+    async with profile_db() as session:
+        head = await session.get(ConversationModeProfileHead, 'chat')
+        setattr(head, field, value)
+
+        with session.no_autoflush:
+            with pytest.raises(ConversationModeProfileIntegrityError) as exc_info:
+                await ConversationModeProfiles.get_head('chat', db=session)
+
+    assert exc_info.value.revision_id == CHAT_BASELINE_REVISION_ID
+    assert str(value) not in str(exc_info.value)
+    assert exc_info.value.__cause__ is None
+    assert exc_info.value.__suppress_context__ is True
+
+
+@pytest.mark.parametrize(
+    ('field', 'value'),
+    [
+        ('revision_number', '321'),
+        ('created_at', '654'),
+        ('created_by', b'private-coercible-revision-author'),
+    ],
+)
+@pytest.mark.asyncio
+async def test_store_rejects_coercible_malformed_revision_metadata(
+    profile_db,
+    field,
+    value,
+) -> None:
+    async with profile_db() as session:
+        revision = await session.get(
+            ConversationModeProfileRevision,
+            CHAT_BASELINE_REVISION_ID,
+        )
+        setattr(revision, field, value)
+
+        with session.no_autoflush:
+            with pytest.raises(ConversationModeProfileIntegrityError) as exc_info:
+                await ConversationModeProfiles.get_revision(
+                    CHAT_BASELINE_REVISION_ID,
+                    db=session,
+                )
+
+    assert exc_info.value.revision_id == CHAT_BASELINE_REVISION_ID
+    assert str(value) not in str(exc_info.value)
+    assert exc_info.value.__cause__ is None
+    assert exc_info.value.__suppress_context__ is True
+
+
 @pytest.mark.asyncio
 async def test_revision_dto_uses_deeply_immutable_phase_a_defaults(profile_db) -> None:
     saved = await ConversationModeProfiles.save_revision(
