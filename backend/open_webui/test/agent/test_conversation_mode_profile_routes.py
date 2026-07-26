@@ -43,6 +43,7 @@ from open_webui.utils.logger import file_format
 from sqlalchemy import delete, update
 from sqlalchemy.exc import OperationalError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
+from starlette.responses import StreamingResponse
 
 BASE_PATH = '/api/v1/configs/conversation_mode_profiles'
 BASELINE_CONTENT = {
@@ -373,6 +374,13 @@ def test_admin_save_creates_revision_and_prompt_free_audit(route_app, monkeypatc
 def test_mode_profile_http_audit_bodies_are_redacted(route_app, monkeypatch):
     prompt_sentinel = 'PRIVATE AUDIT SYSTEM PROMPT SENTINEL'
     validation_sentinel = 'PRIVATE VALIDATION ECHO SENTINEL'
+    query_prompt_sentinel = 'PRIVATE QUERY SYSTEM PROMPT SENTINEL'
+    query_defaults_sentinel = 'PRIVATE QUERY DEFAULTS SENTINEL'
+    streaming_body_sentinel = 'PRIVATE STREAMING BODY SENTINEL'
+    streaming_query_sentinel = 'PRIVATE STREAMING QUERY SENTINEL'
+    exception_body_sentinel = 'PRIVATE UNHANDLED EXCEPTION SENTINEL'
+    exception_query_sentinel = 'PRIVATE EXCEPTION QUERY SENTINEL'
+    unrelated_query_value = 'preserved-query-value'
     terminal_id = 'private-audit-terminal-id'
     tool_id = 'private-audit-tool-id'
     skill_id = 'private-audit-skill-id'
@@ -445,6 +453,21 @@ def test_mode_profile_http_audit_bodies_are_redacted(route_app, monkeypatch):
     async def get_audit_user(*args, **kwargs):
         return AuditUser()
 
+    @route_app.app.get('/api/v1/configs/audit-query-control')
+    async def audit_query_control():
+        return {'ok': True}
+
+    @route_app.app.get(f'{BASE_PATH}/audit/streaming')
+    async def profile_audit_streaming_response():
+        async def body_chunks():
+            yield streaming_body_sentinel
+
+        return StreamingResponse(body_chunks(), media_type='text/plain')
+
+    @route_app.app.get(f'{BASE_PATH}/audit/unhandled')
+    async def profile_audit_unhandled_exception():
+        raise RuntimeError(exception_body_sentinel)
+
     asyncio.run(seed_private_resources())
     monkeypatch.setattr(audit_module, 'AUDIT_LOG_LEVEL', AuditLevel.REQUEST_RESPONSE.value)
     monkeypatch.setattr(audit_module, 'get_current_user', get_audit_user)
@@ -452,7 +475,7 @@ def test_mode_profile_http_audit_bodies_are_redacted(route_app, monkeypatch):
         route_app.app,
         audit_level=AuditLevel.REQUEST_RESPONSE,
         audit_get_requests=True,
-        included_paths=['configs/conversation_mode_profiles'],
+        included_paths=['configs'],
     )
 
     persisted_records = []
@@ -464,7 +487,7 @@ def test_mode_profile_http_audit_bodies_are_redacted(route_app, monkeypatch):
     )
     headers = {'Authorization': 'Bearer audit-token'}
     try:
-        with TestClient(audited_app) as client:
+        with TestClient(audited_app, raise_server_exceptions=False) as client:
             saved = client.post(
                 f'{BASE_PATH}/chat/revisions',
                 headers=headers,
@@ -481,7 +504,14 @@ def test_mode_profile_http_audit_bodies_are_redacted(route_app, monkeypatch):
             assert saved.status_code == 200
             saved_revision_id = saved.json()['revision_id']
 
-            current = client.get(f'{BASE_PATH}/chat', headers=headers)
+            current = client.get(
+                f'{BASE_PATH}/chat',
+                headers=headers,
+                params={
+                    'system_prompt': query_prompt_sentinel,
+                    'defaults': query_defaults_sentinel,
+                },
+            )
             detail = client.get(
                 f'{BASE_PATH}/chat/revisions/{saved_revision_id}',
                 headers=headers,
@@ -515,6 +545,26 @@ def test_mode_profile_http_audit_bodies_are_redacted(route_app, monkeypatch):
                 json=invalid_payload,
             )
             assert invalid.status_code == 422
+
+            unrelated = client.get(
+                '/api/v1/configs/audit-query-control',
+                headers=headers,
+                params={'visible': unrelated_query_value},
+            )
+            streaming = client.get(
+                f'{BASE_PATH}/audit/streaming',
+                headers=headers,
+                params={'defaults': streaming_query_sentinel},
+            )
+            unhandled = client.get(
+                f'{BASE_PATH}/audit/unhandled',
+                headers=headers,
+                params={'system_prompt': exception_query_sentinel},
+            )
+            assert unrelated.status_code == 200
+            assert streaming.status_code == 200
+            assert streaming.text == streaming_body_sentinel
+            assert unhandled.status_code == 500
     finally:
         logger.remove(sink_id)
 
@@ -539,16 +589,40 @@ def test_mode_profile_http_audit_bodies_are_redacted(route_app, monkeypatch):
         ),
         ('POST', f'{BASE_PATH}/chat/revisions/{saved_revision_id}/restore', 200),
         ('POST', f'{BASE_PATH}/chat/revisions', 422),
+        ('GET', '/api/v1/configs/audit-query-control', 200),
+        ('GET', f'{BASE_PATH}/audit/streaming', 200),
+        ('GET', f'{BASE_PATH}/audit/unhandled', 500),
     }
     assert actual_metadata == expected_metadata
     assert all(record['user']['id'] == 'admin-1' for record in records)
-    assert all(record['request_object'] == '[REDACTED]' for record in records)
-    assert all(record['response_object'] == '[REDACTED]' for record in records)
+
+    sensitive_records = [
+        record
+        for record in records
+        if urlsplit(record['request_uri']).path == BASE_PATH
+        or urlsplit(record['request_uri']).path.startswith(f'{BASE_PATH}/')
+    ]
+    assert all(record['request_uri'] == urlsplit(record['request_uri']).path for record in sensitive_records)
+    assert all(record['request_object'] == '[REDACTED]' for record in sensitive_records)
+    assert all(record['response_object'] == '[REDACTED]' for record in sensitive_records)
+
+    unrelated_record = next(
+        record for record in records if urlsplit(record['request_uri']).path == '/api/v1/configs/audit-query-control'
+    )
+    assert urlsplit(unrelated_record['request_uri']).query == f'visible={unrelated_query_value}'
+    assert unrelated_record['request_object'] == ''
+    assert unrelated_record['response_object'] == '{"ok":true}'
 
     rendered_audit = '\n'.join(persisted_records)
     for forbidden in (
         prompt_sentinel,
         validation_sentinel,
+        query_prompt_sentinel,
+        query_defaults_sentinel,
+        streaming_body_sentinel,
+        streaming_query_sentinel,
+        exception_body_sentinel,
+        exception_query_sentinel,
         terminal_id,
         tool_id,
         skill_id,
