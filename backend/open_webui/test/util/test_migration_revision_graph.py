@@ -13,10 +13,10 @@ def _load_script_directory() -> ScriptDirectory:
     return ScriptDirectory.from_config(config)
 
 
-def test_migration_graph_resolves_afc_hotfix_head():
+def test_migration_graph_resolves_mode_profile_head():
     script = _load_script_directory()
 
-    assert script.get_current_head() == 'f8a9b0c1d2e3'
+    assert script.get_current_head() == 'c0d3b4a5e6f7'
     assert script.get_revision('f0a1b2c3d4e5') is not None
     assert script.get_revision('e8c4b9a2d1f0') is not None
     assert script.get_revision('4de81c2a3af1') is not None
@@ -28,6 +28,7 @@ def test_migration_graph_resolves_afc_hotfix_head():
     assert script.get_revision('d6e7f8a9b0c1') is not None
     assert script.get_revision('e7f8a9b0c1d2') is not None
     assert script.get_revision('f8a9b0c1d2e3') is not None
+    assert script.get_revision('c0d3b4a5e6f7') is not None
 
 
 def test_migration_graph_keeps_legacy_knowledge_revision_upgradeable():
@@ -49,6 +50,7 @@ def test_migration_graph_keeps_legacy_knowledge_revision_upgradeable():
     agent_run_revision = script.get_revision('d6e7f8a9b0c1')
     decision_execution_revision = script.get_revision('e7f8a9b0c1d2')
     user_input_deadline_revision = script.get_revision('f8a9b0c1d2e3')
+    mode_profile_revision = script.get_revision('c0d3b4a5e6f7')
 
     assert chunking_revision is not None
     assert bridge_revision is not None
@@ -66,6 +68,7 @@ def test_migration_graph_keeps_legacy_knowledge_revision_upgradeable():
     assert agent_run_revision is not None
     assert decision_execution_revision is not None
     assert user_input_deadline_revision is not None
+    assert mode_profile_revision is not None
     assert chunking_revision.down_revision == 'c3d4e5f6a7b8'
     assert bridge_revision.down_revision == 'd4e5f6a7b8c9'
     assert tasks_revision.down_revision == 'f0a1b2c3d4e5'
@@ -82,6 +85,7 @@ def test_migration_graph_keeps_legacy_knowledge_revision_upgradeable():
     assert agent_run_revision.down_revision == 'f3a4b5c6d7e8'
     assert decision_execution_revision.down_revision == 'd6e7f8a9b0c1'
     assert user_input_deadline_revision.down_revision == 'e7f8a9b0c1d2'
+    assert mode_profile_revision.down_revision == 'f8a9b0c1d2e3'
 
 
 def test_migration_revision_ids_fit_default_alembic_version_column():
