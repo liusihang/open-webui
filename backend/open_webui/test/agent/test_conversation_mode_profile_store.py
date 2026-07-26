@@ -29,7 +29,7 @@ from open_webui.models.conversation_mode_profiles import (
     ConversationModeProfileTemporaryBinding,
     ConversationModeProfileTransactionStateError,
 )
-from sqlalchemy import event, select
+from sqlalchemy import event, select, update
 from sqlalchemy.exc import OperationalError
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 from sqlalchemy.sql import Select
@@ -415,6 +415,79 @@ async def test_store_rejects_tampered_revision_content(profile_db) -> None:
 
     assert exc_info.value.code == 'mode_profile_integrity_error'
     assert exc_info.value.revision_id == CHAT_BASELINE_REVISION_ID
+
+
+@pytest.mark.parametrize('read_path', ['current', 'history'])
+@pytest.mark.parametrize(
+    ('row_type', 'malformed_values'),
+    [
+        ('head', {'updated_at': 'PRIVATE INVALID TIMESTAMP'}),
+        ('head', {'updated_by': b'\xffPRIVATE INVALID AUTHOR'}),
+        ('revision', {'created_at': 'PRIVATE INVALID TIMESTAMP'}),
+        ('revision', {'created_by': b'\xffPRIVATE INVALID AUTHOR'}),
+        ('revision', {'defaults': ['PRIVATE INVALID DEFAULTS']}),
+    ],
+)
+@pytest.mark.asyncio
+async def test_store_converts_malformed_persisted_rows_to_integrity_error(
+    profile_db,
+    read_path,
+    row_type,
+    malformed_values,
+) -> None:
+    model = ConversationModeProfileHead if row_type == 'head' else ConversationModeProfileRevision
+    predicate = (
+        ConversationModeProfileHead.mode == 'chat'
+        if row_type == 'head'
+        else ConversationModeProfileRevision.id == CHAT_BASELINE_REVISION_ID
+    )
+    async with profile_db() as session:
+        await session.execute(update(model).where(predicate).values(**malformed_values))
+        await session.commit()
+
+    with pytest.raises(ConversationModeProfileIntegrityError) as exc_info:
+        if read_path == 'current':
+            await ConversationModeProfiles.get_current_revision('chat')
+        else:
+            await ConversationModeProfiles.get_history_snapshot('chat')
+
+    assert exc_info.value.code == 'mode_profile_integrity_error'
+    assert exc_info.value.revision_id == CHAT_BASELINE_REVISION_ID
+    rendered = str(exc_info.value)
+    assert 'PRIVATE INVALID' not in rendered
+    assert 'system_prompt' not in rendered
+    assert exc_info.value.__cause__ is None
+    assert exc_info.value.__suppress_context__ is True
+
+
+def test_revision_conversion_converts_persisted_type_error_without_row_content() -> None:
+    raw_sentinel = 'PRIVATE INVALID DEFAULT ITERATION'
+
+    class MalformedDefaults(list):
+        def __iter__(self):
+            raise TypeError(raw_sentinel)
+
+    revision = ConversationModeProfileRevision(
+        id=CHAT_BASELINE_REVISION_ID,
+        mode='chat',
+        revision_number=1,
+        schema_version=1,
+        system_prompt='PRIVATE SYSTEM PROMPT',
+        defaults={'tool_ids': MalformedDefaults(['tool-1'])},
+        content_hash='0' * 64,
+        created_at=100,
+        created_by=None,
+        restored_from_revision_id=None,
+    )
+
+    with pytest.raises(ConversationModeProfileIntegrityError) as exc_info:
+        profile_store_module._revision_to_model(revision, expected_mode='chat')
+
+    assert exc_info.value.revision_id == CHAT_BASELINE_REVISION_ID
+    assert raw_sentinel not in str(exc_info.value)
+    assert 'PRIVATE SYSTEM PROMPT' not in str(exc_info.value)
+    assert exc_info.value.__cause__ is None
+    assert exc_info.value.__suppress_context__ is True
 
 
 @pytest.mark.asyncio

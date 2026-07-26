@@ -687,6 +687,61 @@ def test_conflict_refreshes_a_stale_local_head_cache(route_app):
     assert refreshed.json()['system_prompt'] == 'External writer'
 
 
+@pytest.mark.parametrize(
+    ('path', 'row_type', 'malformed_values'),
+    [
+        (f'{BASE_PATH}/chat', 'head', {'updated_at': 'PRIVATE INVALID TIMESTAMP'}),
+        (
+            f'{BASE_PATH}/chat',
+            'revision',
+            {'created_by': b'\xffPRIVATE INVALID AUTHOR'},
+        ),
+        (
+            f'{BASE_PATH}/chat/revisions',
+            'head',
+            {'updated_by': b'\xffPRIVATE INVALID AUTHOR'},
+        ),
+        (
+            f'{BASE_PATH}/chat/revisions',
+            'revision',
+            {'created_at': 'PRIVATE INVALID TIMESTAMP'},
+        ),
+        (
+            f'{BASE_PATH}/chat/revisions',
+            'revision',
+            {'defaults': ['PRIVATE INVALID DEFAULTS']},
+        ),
+    ],
+)
+def test_malformed_persisted_profile_rows_return_controlled_integrity_error(
+    route_app,
+    path,
+    row_type,
+    malformed_values,
+):
+    async def corrupt_row():
+        model = ConversationModeProfileHead if row_type == 'head' else ConversationModeProfileRevision
+        predicate = (
+            ConversationModeProfileHead.mode == 'chat'
+            if row_type == 'head'
+            else ConversationModeProfileRevision.id == CHAT_BASELINE_REVISION_ID
+        )
+        async with route_app.profile_db() as session:
+            await session.execute(update(model).where(predicate).values(**malformed_values))
+            await session.commit()
+
+    asyncio.run(corrupt_row())
+    response = TestClient(route_app.app, raise_server_exceptions=False).get(path)
+
+    assert response.status_code == 500
+    assert response.json()['detail'] == {
+        'code': 'mode_profile_integrity_error',
+        'revision_id': CHAT_BASELINE_REVISION_ID,
+    }
+    assert 'PRIVATE INVALID' not in response.text
+    assert 'system_prompt' not in response.text
+
+
 @pytest.mark.parametrize('operation', ['save', 'restore'])
 @pytest.mark.parametrize('failure', ['database', 'service', 'integrity'])
 def test_conflict_refresh_failure_is_controlled_503(route_app, monkeypatch, operation, failure):
@@ -1090,7 +1145,51 @@ async def test_token_revocation_redis_failure_is_controlled_503(
 
 
 @pytest.mark.asyncio
-async def test_token_revocation_redis_hang_is_bounded_and_controlled_503(
+async def test_app_config_user_lookup_failure_is_controlled_503(
+    profile_db,
+    resource_truth,
+    monkeypatch,
+):
+    main = importlib.import_module('open_webui.main')
+    profile_calls = []
+    raw_sentinel = 'PRIVATE USER LOOKUP DATABASE DETAIL'
+
+    async def valid_token(data, redis):
+        return True
+
+    async def fail_user_lookup(user_id):
+        raise OperationalError('SELECT private user', {}, RuntimeError(raw_sentinel))
+
+    async def public_profiles(app):
+        profile_calls.append(app)
+        return []
+
+    monkeypatch.setattr(main, 'decode_token', lambda token: {'id': 'user-1'})
+    monkeypatch.setattr(main, 'is_valid_token', valid_token)
+    monkeypatch.setattr(main.Users, 'get_user_by_id', fail_user_lookup)
+    monkeypatch.setattr(
+        main,
+        'get_http_authorization_cred',
+        lambda header: SimpleNamespace(credentials='valid-token'),
+    )
+    monkeypatch.setattr(main, 'get_public_conversation_mode_profiles', public_profiles)
+    request = SimpleNamespace(
+        headers={'Authorization': 'Bearer valid-token'},
+        cookies={},
+        app=main.app,
+    )
+
+    with pytest.raises(HTTPException) as exc_info:
+        await main.get_app_config(request)
+
+    assert exc_info.value.status_code == 503
+    assert exc_info.value.detail == {'code': 'auth_user_lookup_unavailable'}
+    assert raw_sentinel not in str(exc_info.value.detail)
+    assert profile_calls == []
+
+
+@pytest.mark.asyncio
+async def test_app_config_allows_healthy_slow_token_revocation_check(
     profile_db,
     resource_truth,
     monkeypatch,
@@ -1099,9 +1198,66 @@ async def test_token_revocation_redis_hang_is_bounded_and_controlled_503(
     user = SimpleNamespace(id='user-1', role='user')
     profile_calls = []
 
+    async def healthy_slow_token_check(data, redis):
+        await asyncio.sleep(0.2)
+        return True
+
+    async def get_user_by_id(user_id):
+        return user if user_id == user.id else None
+
+    async def has_users():
+        return True
+
+    async def get_num_users():
+        return 1
+
+    async def public_profiles(app):
+        profile_calls.append(app)
+        return []
+
+    monkeypatch.setattr(main, 'decode_token', lambda token: {'id': user.id})
+    monkeypatch.setattr(main, 'is_valid_token', healthy_slow_token_check)
+    monkeypatch.setattr(main.Users, 'get_user_by_id', get_user_by_id)
+    monkeypatch.setattr(main.Users, 'has_users', has_users)
+    monkeypatch.setattr(main.Users, 'get_num_users', get_num_users)
+    monkeypatch.setattr(
+        main,
+        'get_http_authorization_cred',
+        lambda header: SimpleNamespace(credentials='valid-token'),
+    )
+    monkeypatch.setattr(main, 'get_public_conversation_mode_profiles', public_profiles)
+    main.app.state.redis = None
+    request = SimpleNamespace(
+        headers={'Authorization': 'Bearer valid-token'},
+        cookies={},
+        app=main.app,
+    )
+
+    assert main.APP_CONFIG_TOKEN_VALIDATION_TIMEOUT_SECONDS == 1.0
+    response = await asyncio.wait_for(main.get_app_config(request), timeout=1.5)
+
+    assert response['conversation_mode_profiles'] == []
+    assert profile_calls == [main.app]
+
+
+@pytest.mark.asyncio
+async def test_token_revocation_redis_hang_is_bounded_and_controlled_503(
+    profile_db,
+    resource_truth,
+    monkeypatch,
+):
+    main = importlib.import_module('open_webui.main')
+    user = SimpleNamespace(id='user-1', role='user')
+    profile_calls = []
+    cancelled = asyncio.Event()
+
     class HangingRedis:
         async def get(self, key):
-            await asyncio.Event().wait()
+            try:
+                await asyncio.Event().wait()
+            except asyncio.CancelledError:
+                cancelled.set()
+                raise
 
     async def public_profiles(app):
         profile_calls.append(app)
@@ -1128,6 +1284,7 @@ async def test_token_revocation_redis_hang_is_bounded_and_controlled_503(
     assert exc_info.value.status_code == 503
     assert exc_info.value.detail == {'code': 'auth_token_validation_unavailable'}
     assert profile_calls == []
+    assert cancelled.is_set()
 
 
 @pytest.mark.asyncio

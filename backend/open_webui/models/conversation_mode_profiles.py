@@ -16,7 +16,7 @@ from open_webui.agent.conversation_mode_profiles import (
     ProfileDefaults,
 )
 from open_webui.internal.db import Base, get_async_db_context
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, ValidationError
 from sqlalchemy import (
     JSON,
     BigInteger,
@@ -366,40 +366,59 @@ def _revision_to_model(
     *,
     expected_mode: str | None = None,
 ) -> ConversationModeProfileRevisionModel:
-    content = {
-        'schema_version': row.schema_version,
-        'system_prompt': row.system_prompt,
-        'defaults': row.defaults,
-    }
+    revision_id = row.id if isinstance(row.id, str) else 'conversation-mode-profile-revision'
     try:
+        content = {
+            'schema_version': row.schema_version,
+            'system_prompt': row.system_prompt,
+            'defaults': row.defaults,
+        }
         profile = ConversationModeProfile.from_mapping(row.mode, content)
-    except ModeProfileValidationError as exc:
-        raise ConversationModeProfileIntegrityError(
-            row.id,
-            f'Conversation mode profile revision {row.id} is invalid: {exc}',
-        ) from exc
-    if expected_mode is not None and profile.mode.value != expected_mode:
-        raise ConversationModeProfileIntegrityError(
-            row.id,
-            f'Conversation mode profile revision {row.id} has mode {profile.mode.value}, expected {expected_mode}',
+        if expected_mode is not None and profile.mode.value != expected_mode:
+            raise ConversationModeProfileIntegrityError(
+                revision_id,
+                f'Conversation mode profile revision {revision_id} has mode '
+                f'{profile.mode.value}, expected {expected_mode}',
+            )
+        if profile.content_hash != row.content_hash:
+            raise ConversationModeProfileIntegrityError(
+                revision_id,
+                f'Conversation mode profile revision {revision_id} failed content hash verification',
+            )
+        return ConversationModeProfileRevisionModel(
+            id=row.id,
+            mode=profile.mode.value,
+            revision_number=row.revision_number,
+            schema_version=profile.schema_version,
+            system_prompt=profile.system_prompt,
+            defaults=profile.defaults,
+            content_hash=row.content_hash,
+            created_at=row.created_at,
+            created_by=row.created_by,
+            restored_from_revision_id=row.restored_from_revision_id,
         )
-    if profile.content_hash != row.content_hash:
+    except ConversationModeProfileIntegrityError:
+        raise
+    except (ModeProfileValidationError, ValidationError, TypeError):
         raise ConversationModeProfileIntegrityError(
-            row.id,
-            f'Conversation mode profile revision {row.id} failed content hash verification',
-        )
-    return ConversationModeProfileRevisionModel(
-        id=row.id,
-        mode=profile.mode.value,
-        revision_number=row.revision_number,
-        schema_version=profile.schema_version,
-        system_prompt=profile.system_prompt,
-        defaults=profile.defaults,
-        content_hash=row.content_hash,
-        created_at=row.created_at,
-        created_by=row.created_by,
-        restored_from_revision_id=row.restored_from_revision_id,
+            revision_id,
+            f'Conversation mode profile revision {revision_id} has invalid persisted data',
+        ) from None
+
+
+def _head_to_model(
+    row: ConversationModeProfileHead,
+) -> ConversationModeProfileHeadModel:
+    revision_id = (
+        row.current_revision_id if isinstance(row.current_revision_id, str) else 'conversation-mode-profile-head'
     )
+    try:
+        return ConversationModeProfileHeadModel.model_validate(row)
+    except (ValidationError, TypeError):
+        raise ConversationModeProfileIntegrityError(
+            revision_id,
+            f'Conversation mode profile head for revision {revision_id} has invalid persisted data',
+        ) from None
 
 
 def _assert_chat_mode_agreement(
@@ -429,7 +448,7 @@ class ConversationModeProfileTable:
             result = await session.execute(
                 select(ConversationModeProfileHead).order_by(ConversationModeProfileHead.mode.asc())
             )
-            return [ConversationModeProfileHeadModel.model_validate(row) for row in result.scalars().all()]
+            return [_head_to_model(row) for row in result.scalars().all()]
 
     async def get_head(
         self,
@@ -439,7 +458,7 @@ class ConversationModeProfileTable:
         normalized_mode = _normalized_mode(mode)
         async with get_async_db_context(db) as session:
             row = await session.get(ConversationModeProfileHead, normalized_mode)
-            return ConversationModeProfileHeadModel.model_validate(row) if row is not None else None
+            return _head_to_model(row) if row is not None else None
 
     async def get_revision(
         self,
@@ -463,13 +482,14 @@ class ConversationModeProfileTable:
             head = await session.get(ConversationModeProfileHead, normalized_mode)
             if head is None:
                 return None
+            head_model = _head_to_model(head)
             row = await session.get(
                 ConversationModeProfileRevision,
-                head.current_revision_id,
+                head_model.current_revision_id,
             )
             if row is None:
                 raise ConversationModeProfileIntegrityError(
-                    head.current_revision_id,
+                    head_model.current_revision_id,
                     f'Conversation mode profile head {normalized_mode} references a missing revision',
                 )
             return _revision_to_model(row, expected_mode=normalized_mode)
@@ -484,13 +504,14 @@ class ConversationModeProfileTable:
             head = await session.get(ConversationModeProfileHead, normalized_mode)
             if head is None:
                 return None
+            head_model = _head_to_model(head)
             row = await session.get(
                 ConversationModeProfileRevision,
-                head.baseline_revision_id,
+                head_model.baseline_revision_id,
             )
             if row is None:
                 raise ConversationModeProfileIntegrityError(
-                    head.baseline_revision_id,
+                    head_model.baseline_revision_id,
                     f'Conversation mode profile head {normalized_mode} references a missing baseline',
                 )
             return _revision_to_model(row, expected_mode=normalized_mode)
@@ -526,6 +547,7 @@ class ConversationModeProfileTable:
             head = (await session.execute(head_statement)).scalars().first()
             if head is None:
                 return None
+            head_model = _head_to_model(head)
 
             revision_rows = (
                 (
@@ -539,13 +561,13 @@ class ConversationModeProfileTable:
                 .all()
             )
             revisions = tuple(_revision_to_model(row, expected_mode=normalized_mode) for row in revision_rows)
-            if not any(revision.id == head.current_revision_id for revision in revisions):
+            if not any(revision.id == head_model.current_revision_id for revision in revisions):
                 raise ConversationModeProfileIntegrityError(
-                    head.current_revision_id,
+                    head_model.current_revision_id,
                     f'Conversation mode profile head {normalized_mode} references a missing revision',
                 )
             return ConversationModeProfileHistorySnapshotModel(
-                head=ConversationModeProfileHeadModel.model_validate(head),
+                head=head_model,
                 revisions=revisions,
             )
 

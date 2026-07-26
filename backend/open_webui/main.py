@@ -3012,7 +3012,17 @@ async def stop_tasks_by_chat_id_endpoint(request: Request, chat_id: str, user=De
 #
 ##################################
 
-APP_CONFIG_TOKEN_VALIDATION_TIMEOUT_SECONDS = 0.1
+APP_CONFIG_TOKEN_VALIDATION_TIMEOUT_SECONDS = 1.0
+
+
+async def _lookup_app_config_user(user_id: str):
+    try:
+        return await Users.get_user_by_id(user_id)
+    except Exception as exc:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail={'code': 'auth_user_lookup_unavailable'},
+        ) from exc
 
 
 async def _get_app_config_user(request: Request):
@@ -3056,7 +3066,7 @@ async def _get_app_config_user(request: Request):
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail='Invalid token',
         )
-    user = await Users.get_user_by_id(data['id'])
+    user = await _lookup_app_config_user(data['id'])
     if user is None:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
