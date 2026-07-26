@@ -4,9 +4,8 @@ import types
 from copy import deepcopy
 
 import pytest
-from starlette.responses import StreamingResponse
-
 from open_webui.utils import middleware
+from starlette.responses import StreamingResponse
 
 
 class _FakeRequest:
@@ -451,9 +450,12 @@ async def test_direct_streaming_native_tool_calls_continue_without_final_tool_ca
     async def fake_process_tool_result(request, tool_name, tool_result, tool_type, direct_tool, metadata, user):
         return str(tool_result), [], []
 
+    async def no_filters(*args, **kwargs):
+        return []
+
     monkeypatch.setattr(middleware, 'generate_chat_completion', fake_generate_chat_completion)
     monkeypatch.setattr(middleware, 'process_tool_result', fake_process_tool_result)
-    monkeypatch.setattr(middleware, 'get_sorted_filter_ids', lambda *args, **kwargs: middleware.asyncio.sleep(0, result=[]))
+    monkeypatch.setattr(middleware, 'get_sorted_filter_ids', no_filters)
 
     ctx = _ctx()
     ctx['form_data']['stream'] = True
@@ -471,3 +473,108 @@ async def test_direct_streaming_native_tool_calls_continue_without_final_tool_ca
     assert continuation_messages[-2]['role'] == 'assistant'
     assert continuation_messages[-1]['role'] == 'tool'
     assert continuation_messages[-1]['tool_call_id'] == 'call_knowledge'
+
+
+@pytest.mark.asyncio
+async def test_streaming_native_tool_loop_restores_private_pre_rag_anchor_and_appends_rag_once(monkeypatch):
+    captured = {}
+
+    async def initial_stream():
+        yield (
+            'data: {"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_knowledge",'
+            '"type":"function","function":{"name":"query_knowledge_files","arguments":"{}"}}]}}]}\n\n'
+        )
+        yield 'data: {"choices":[{"delta":{},"finish_reason":"tool_calls"}]}\n\n'
+        yield 'data: [DONE]\n\n'
+
+    async def second_tool_stream():
+        yield (
+            'data: {"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_knowledge_2",'
+            '"type":"function","function":{"name":"query_knowledge_files","arguments":"{}"}}]}}]}\n\n'
+        )
+        yield 'data: {"choices":[{"delta":{},"finish_reason":"tool_calls"}]}\n\n'
+        yield 'data: [DONE]\n\n'
+
+    async def final_stream():
+        yield 'data: {"choices":[{"delta":{"content":"Grounded final answer."}}]}\n\n'
+        yield 'data: {"choices":[{"delta":{},"finish_reason":"stop"}]}\n\n'
+        yield 'data: [DONE]\n\n'
+
+    async def fake_execute(_request, _form_data, _user, _metadata, response_tool_calls, **kwargs):
+        call_id = response_tool_calls[0]['id']
+        return (
+            [{'tool_call_id': call_id, 'content': f'tool result {call_id}'}],
+            [
+                {
+                    'source': {'id': 'tool-source', 'name': 'tool-source'},
+                    'document': ['tool evidence'],
+                    'metadata': [{}],
+                }
+            ],
+        )
+
+    async def fake_generate(request, form_data, user, **kwargs):
+        captured.setdefault('form_data', []).append(form_data)
+        stream = second_tool_stream if len(captured['form_data']) == 1 else final_stream
+        return StreamingResponse(stream(), media_type='text/event-stream')
+
+    async def no_filters(*args, **kwargs):
+        return []
+
+    async def no_oauth(*args, **kwargs):
+        return None
+
+    async def config_get(key, default=None):
+        return 'RAG {{CONTEXT}}' if key == 'rag.template' else default
+
+    emitted = []
+
+    async def emit(event):
+        emitted.append(event)
+
+    monkeypatch.setattr(middleware, 'execute_native_tool_calls', fake_execute)
+    monkeypatch.setattr(middleware, 'generate_chat_completion', fake_generate)
+    monkeypatch.setattr(middleware, 'get_sorted_filter_ids', no_filters)
+    monkeypatch.setattr(middleware, 'get_system_oauth_token', no_oauth)
+    monkeypatch.setattr(middleware.Config, 'get', config_get)
+    monkeypatch.setattr(middleware, 'RAG_SYSTEM_CONTEXT', True)
+    monkeypatch.setattr(middleware, 'ENABLE_REALTIME_CHAT_SAVE', False)
+
+    anchor = 'ADMINISTRATOR LAYER\nGLOBAL LAYER\nMODEL LAYER\nREQUEST LAYER\nUSER LAYER'
+    ctx = _ctx()
+    ctx.update(
+        {
+            'form_data': {
+                'model': 'gpt-test',
+                'stream': True,
+                'messages': [
+                    {'role': 'system', 'content': 'STALE INITIAL RAG'},
+                    {'role': 'user', 'content': 'Use the attached docs.'},
+                ],
+            },
+            'metadata': {
+                'chat_id': 'channel:test',
+                'message_id': 'message-1',
+                'session_id': None,
+                'params': {'function_calling': 'native'},
+                'sources': [],
+                'user_prompt': 'Use the attached docs.',
+            },
+            'event_emitter': emit,
+            'pre_rag_system_anchor': anchor,
+        }
+    )
+
+    response = StreamingResponse(initial_stream(), media_type='text/event-stream')
+    result = await middleware.streaming_chat_response_handler(response, ctx)
+
+    assert result is None
+
+    assert len(captured['form_data']) == 2
+    system_message = captured['form_data'][-1]['messages'][0]
+    assert system_message['role'] == 'system'
+    assert system_message['content'].startswith(anchor)
+    assert system_message['content'].count('RAG <source') == 1
+    assert 'STALE INITIAL RAG' not in system_message['content']
+    assert 'system_prompt' not in captured['form_data'][-1]['metadata']
+    assert emitted

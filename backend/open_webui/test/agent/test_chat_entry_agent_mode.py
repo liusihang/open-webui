@@ -311,7 +311,7 @@ def _patch_legacy_chat_pipeline(monkeypatch, calls):
         calls.provider_calls.append(form_data)
         return {'provider': True}
 
-    async def fake_build_context(request, form_data, user, model, metadata, tasks, events):
+    async def fake_build_context(request, form_data, user, model, metadata, tasks, events, **kwargs):
         return {'metadata': metadata}
 
     async def fake_process_response(response, ctx):

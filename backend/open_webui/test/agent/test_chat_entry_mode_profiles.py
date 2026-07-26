@@ -100,6 +100,7 @@ def profile_entry(monkeypatch):  # noqa: C901
         chat_inserts=[],
         atomic_inserts=[],
         atomic_expected_revisions=[],
+        response_contexts=[],
         chat_reads=[],
         stored_chats={
             'chat-1': SimpleNamespace(
@@ -284,7 +285,23 @@ def profile_entry(monkeypatch):  # noqa: C901
         calls.provider_calls.append((form_data, kwargs))
         return {'provider': True}
 
-    async def build_context(request, form_data, user, model, metadata, tasks, events):
+    async def build_context(
+        request,
+        form_data,
+        user,
+        model,
+        metadata,
+        tasks,
+        events,
+        *,
+        pre_rag_system_anchor=None,
+    ):
+        calls.response_contexts.append(
+            {
+                'metadata': dict(metadata),
+                'pre_rag_system_anchor': pre_rag_system_anchor,
+            }
+        )
         return {'metadata': metadata}
 
     async def process_response(response, ctx):
@@ -946,6 +963,61 @@ async def test_capability_request_error_is_stable_400_before_any_write(
     assert profile_entry.upserts == []
     assert profile_entry.provider_calls == []
     assert profile_entry.runtime_calls == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('invalid_value', [['not', 'a', 'string'], {'nested': 'value'}])
+async def test_bound_administrator_prompt_rejects_non_string_referenced_variable_before_dispatch(
+    agent_run_db,
+    profile_entry,
+    invalid_value,
+):
+    _configure_prompt_layers(
+        profile_entry,
+        mode='chat',
+        administrator='Administrator policy {{PRIVATE_VALUE}}',
+    )
+    form = _existing_chat_form(mode='chat')
+    form['variables'] = {'{{PRIVATE_VALUE}}': invalid_value}
+
+    with pytest.raises(main.HTTPException) as exc_info:
+        await main.chat_completion(_request(enable_agent_mode=True), form, _user())
+
+    assert exc_info.value.status_code == 400
+    assert exc_info.value.detail == {
+        'code': 'invalid_mode_profile_prompt_variable',
+        'message': 'A conversation mode profile prompt variable is invalid.',
+    }
+    assert 'variables' not in form
+    assert profile_entry.provider_calls == []
+    assert profile_entry.runtime_calls == []
+
+
+@pytest.mark.asyncio
+async def test_bound_administrator_prompt_passes_private_pre_rag_anchor_without_metadata_system_prompt(
+    agent_run_db,
+    profile_entry,
+):
+    _configure_prompt_layers(profile_entry, mode='chat', administrator='Administrator policy')
+    profile_entry.config_values['chat.global_system_prompt'] = 'Global policy'
+    profile_entry.model_info = SimpleNamespace(
+        base_model_id=None,
+        params=SimpleNamespace(model_dump=lambda: {'system': 'Model policy'}),
+    )
+    form = _existing_chat_form(mode='chat')
+    form['params'] = {'system': 'Request policy'}
+    form['messages'] = [
+        {'role': 'system', 'content': 'User policy'},
+        {'role': 'user', 'content': 'hello'},
+    ]
+
+    await main.chat_completion(_request(enable_agent_mode=True), form, _user())
+
+    context = profile_entry.response_contexts[0]
+    assert context['pre_rag_system_anchor'] == (
+        'Administrator policy\n\nGlobal policy\n\nModel policy\n\nRequest policy\n\nUser policy'
+    )
+    assert 'system_prompt' not in context['metadata']
 
 
 @pytest.mark.asyncio

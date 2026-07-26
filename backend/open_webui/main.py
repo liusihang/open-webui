@@ -1333,11 +1333,12 @@ async def _enforce_mode_profile_prompt(
     user,
     model_system_prompt: str | None,
     request_system_prompt: str | None,
+    pre_rag_user_system_prompt: str | None,
     administrator_variables: Mapping[str, object],
-) -> bool:
+) -> tuple[bool, str | None]:
     if revision is None or not revision.system_prompt.strip():
         _strip_mode_profile_control_fields(form_data)
-        return False
+        return False, None
 
     global_system_prompt = await Config.get('chat.global_system_prompt', '')
     administrator_metadata = {**metadata, 'variables': administrator_variables}
@@ -1359,7 +1360,7 @@ async def _enforce_mode_profile_prompt(
         prompt
         for prompt in (
             await resolve_system_prompt(request_system_prompt, metadata, user),
-            await resolve_system_prompt(_system_prompt_text(form_data.get('messages') or []), metadata, user),
+            await resolve_system_prompt(pre_rag_user_system_prompt, metadata, user),
         )
         if prompt and prompt.strip()
     )
@@ -1377,7 +1378,7 @@ async def _enforce_mode_profile_prompt(
         params.pop('system', None)
     _strip_private_prompt_metadata(metadata)
     _strip_mode_profile_control_fields(form_data)
-    return True
+    return True, composed or None
 
 
 def _register_mode_profile_raw_prompt(request: Request, revision) -> None:
@@ -1406,6 +1407,14 @@ def _extract_administrator_prompt_variables(
             value['variables'] = remaining
         else:
             value.pop('variables', None)
+    if any(not isinstance(value, str) for value in protected_variables.values()):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail={
+                'code': 'invalid_mode_profile_prompt_variable',
+                'message': 'A conversation mode profile prompt variable is invalid.',
+            },
+        )
     return MappingProxyType(protected_variables)
 
 
@@ -2309,8 +2318,9 @@ async def _start_agent_mode_chat(
     metadata['assistant_message_id'] = assistant_message_id
 
     requested_model_params = _agent_runtime_model_params(form_data)
+    pre_rag_user_system_prompt = _system_prompt_text(form_data.get('messages') or [])
     form_data, metadata, _events = await process_chat_payload(request, form_data, user, metadata, model)
-    prompt_enforced = await _enforce_mode_profile_prompt(
+    prompt_enforced, _pre_rag_system_anchor = await _enforce_mode_profile_prompt(
         request=request,
         revision=mode_profile_revision,
         form_data=form_data,
@@ -2318,6 +2328,7 @@ async def _start_agent_mode_chat(
         user=user,
         model_system_prompt=model_system_prompt,
         request_system_prompt=request_system_prompt,
+        pre_rag_user_system_prompt=pre_rag_user_system_prompt,
         administrator_variables=administrator_prompt_variables,
     )
     if prompt_enforced:
@@ -3168,8 +3179,9 @@ async def chat_completion(
         effective_request_system_prompt,
     ):
         try:
+            pre_rag_user_system_prompt = _system_prompt_text(form_data.get('messages') or [])
             form_data, metadata, events = await process_chat_payload(request, form_data, user, metadata, model)
-            prompt_enforced = await _enforce_mode_profile_prompt(
+            prompt_enforced, pre_rag_system_anchor = await _enforce_mode_profile_prompt(
                 request=request,
                 revision=mode_profile_revision,
                 form_data=form_data,
@@ -3177,6 +3189,7 @@ async def chat_completion(
                 user=user,
                 model_system_prompt=effective_model_system_prompt,
                 request_system_prompt=effective_request_system_prompt,
+                pre_rag_user_system_prompt=pre_rag_user_system_prompt,
                 administrator_variables=administrator_prompt_variables,
             )
 
@@ -3206,7 +3219,16 @@ async def chat_completion(
                     detail = f'Provider returned HTTP {response.status_code}'
                 raise Exception(detail)
 
-            ctx = await build_chat_response_context(request, form_data, user, model, metadata, tasks, events)
+            ctx = await build_chat_response_context(
+                request,
+                form_data,
+                user,
+                model,
+                metadata,
+                tasks,
+                events,
+                pre_rag_system_anchor=pre_rag_system_anchor,
+            )
 
             return await process_chat_response(response, ctx)
         except asyncio.CancelledError:

@@ -3437,19 +3437,6 @@ async def process_chat_payload(request, form_data, user, metadata, model):
     )
     sources.extend(file_sources)
 
-    # Save the pre-RAG message state so the native tool call loop can
-    # restore to the true original (before file-source injection) rather
-    # than a snapshot that already has the RAG template baked in.
-    system_message = get_system_message(form_data['messages'])
-    system_content = get_content_from_message(system_message) if system_message else ''
-    model_system_prompt = await resolve_system_prompt(
-        (form_data.get('params') or {}).get('system'),
-        metadata,
-        user,
-    )
-    if model_system_prompt:
-        system_content = f'{model_system_prompt}\n{system_content}' if system_content else model_system_prompt
-    metadata['system_prompt'] = system_content or None
     metadata['user_prompt'] = get_last_user_message(form_data['messages'])
     metadata['sources'] = sources[:] if sources else []
 
@@ -3516,7 +3503,17 @@ async def get_event_emitter_and_caller(request, metadata):
     return event_emitter, event_caller
 
 
-async def build_chat_response_context(request, form_data, user, model, metadata, tasks, events):
+async def build_chat_response_context(
+    request,
+    form_data,
+    user,
+    model,
+    metadata,
+    tasks,
+    events,
+    *,
+    pre_rag_system_anchor: str | None = None,
+):
     event_emitter, event_caller = await get_event_emitter_and_caller(request, metadata)
     return {
         'request': request,
@@ -3528,6 +3525,7 @@ async def build_chat_response_context(request, form_data, user, model, metadata,
         'events': events,
         'event_emitter': event_emitter,
         'event_caller': event_caller,
+        'pre_rag_system_anchor': pre_rag_system_anchor,
     }
 
 
@@ -6201,10 +6199,9 @@ async def streaming_chat_response_handler(response, ctx):
                     'citations', True
                 )
 
-                # Use the pre-RAG system content captured before the
-                # initial file-source injection in process_chat_payload.
-                # This ensures restore truly undoes the RAG template.
-                original_system_content = metadata.get('system_prompt')
+                # Bound mode profiles carry their pre-RAG composition privately
+                # in ctx, never in provider-visible metadata.
+                original_system_content = ctx.get('pre_rag_system_anchor')
                 if original_system_content is None:
                     original_system_message = get_system_message(form_data['messages'])
                     original_system_content = (
