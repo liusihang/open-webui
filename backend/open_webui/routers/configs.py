@@ -2,17 +2,40 @@ from __future__ import annotations
 
 import copy
 import logging
-from typing import Optional
+from typing import Any, Optional
 
 import aiohttp
 from fastapi import APIRouter, Depends, HTTPException, Request
 from mcp.shared.auth import OAuthMetadata
+from open_webui.agent.conversation_mode import ConversationMode
+from open_webui.agent.conversation_mode_profile_service import (
+    ModeProfileResourceValidationError,
+    ModeProfileWarning,
+    cache_current_profile_revision,
+    cache_profile_revision,
+    get_cached_current_revision,
+    get_cached_revision,
+    profile_default_counts,
+    validate_conversation_mode_profile,
+)
+from open_webui.agent.conversation_mode_profiles import (
+    INHERIT,
+    ModeProfileValidationError,
+    ProfileInheritance,
+)
 from open_webui.config import BannerModel
 from open_webui.env import AIOHTTP_CLIENT_SESSION_SSL, AIOHTTP_CLIENT_TIMEOUT
 from open_webui.events import EVENTS, publish_event
 from open_webui.models.config import Config
+from open_webui.models.conversation_mode_profiles import (
+    ConversationModeProfileIntegrityError,
+    ConversationModeProfileRevisionConflict,
+    ConversationModeProfileRevisionModel,
+    ConversationModeProfiles,
+)
 from open_webui.models.oauth_sessions import OAuthSessions
 from open_webui.utils.auth import get_admin_user, get_verified_user
+from open_webui.utils.cache_invalidation import invalidate_conversation_mode_profile_head
 from open_webui.utils.headers import get_custom_headers
 from open_webui.utils.mcp.client import MCPClient
 from open_webui.utils.oauth import (
@@ -33,7 +56,7 @@ from open_webui.utils.tools import (
     set_terminal_servers,
     set_tool_servers,
 )
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, Field, StrictInt
 
 router = APIRouter()
 
@@ -76,6 +99,417 @@ async def get_config_values(key_map: dict[str, str]) -> dict:
 
 def config_updates(data: dict, key_map: dict[str, str]) -> dict:
     return {key_map[field]: value for field, value in data.items() if field in key_map}
+
+
+############################
+# Conversation Mode Profiles
+############################
+
+
+class ConversationModeProfileDefaultsForm(BaseModel):
+    terminal_id: ProfileInheritance | str | None = INHERIT
+    tool_ids: ProfileInheritance | list[str] = INHERIT
+    skill_ids: ProfileInheritance | list[str] = INHERIT
+    filter_ids: ProfileInheritance | list[str] = INHERIT
+    feature_ids: ProfileInheritance | list[str] = INHERIT
+
+    model_config = ConfigDict(extra='forbid')
+
+
+class ConversationModeProfileContentForm(BaseModel):
+    schema_version: StrictInt
+    system_prompt: str
+    defaults: ConversationModeProfileDefaultsForm
+
+    model_config = ConfigDict(extra='forbid')
+
+
+class ConversationModeProfileSaveForm(BaseModel):
+    expected_current_revision_id: str
+    profile: ConversationModeProfileContentForm
+
+    model_config = ConfigDict(extra='forbid')
+
+
+class ConversationModeProfileRestoreForm(BaseModel):
+    expected_current_revision_id: str
+
+    model_config = ConfigDict(extra='forbid')
+
+
+class ConversationModeProfileRevisionMetadataResponse(BaseModel):
+    revision_id: str
+    mode: str
+    revision_number: int
+    schema_version: int
+    created_at: int
+    created_by: str | None = None
+    restored_from_revision_id: str | None = None
+    is_current: bool
+
+
+class ConversationModeProfileRevisionResponse(ConversationModeProfileRevisionMetadataResponse):
+    system_prompt: str
+    defaults: ConversationModeProfileDefaultsForm
+    warnings: list[ModeProfileWarning] = Field(default_factory=list)
+
+
+class ConversationModeProfilesResponse(BaseModel):
+    profiles: list[ConversationModeProfileRevisionResponse]
+
+
+class ConversationModeProfileHistoryResponse(BaseModel):
+    mode: str
+    current_revision_id: str
+    revisions: list[ConversationModeProfileRevisionMetadataResponse]
+
+
+def _revision_response(
+    revision: ConversationModeProfileRevisionModel,
+    *,
+    current_revision_id: str,
+    warnings: list[ModeProfileWarning] | None = None,
+) -> dict[str, Any]:
+    return {
+        **_revision_metadata(
+            revision,
+            current_revision_id=current_revision_id,
+        ),
+        'system_prompt': revision.system_prompt,
+        'defaults': revision.defaults.to_dict(),
+        'warnings': [warning.model_dump() for warning in warnings or []],
+    }
+
+
+def _revision_metadata(
+    revision: ConversationModeProfileRevisionModel,
+    *,
+    current_revision_id: str,
+) -> dict[str, Any]:
+    return {
+        'revision_id': revision.id,
+        'mode': revision.mode,
+        'revision_number': revision.revision_number,
+        'schema_version': revision.schema_version,
+        'created_at': revision.created_at,
+        'created_by': revision.created_by,
+        'restored_from_revision_id': revision.restored_from_revision_id,
+        'is_current': revision.id == current_revision_id,
+    }
+
+
+def _profile_validation_error(exc: ModeProfileValidationError) -> HTTPException:
+    return HTTPException(
+        status_code=400,
+        detail={
+            'code': exc.code,
+            'reason': exc.reason,
+            'field': exc.field,
+        },
+    )
+
+
+def _profile_resource_error(exc: ModeProfileResourceValidationError) -> HTTPException:
+    return HTTPException(
+        status_code=400,
+        detail={
+            'code': exc.code,
+            'issues': [issue.model_dump() for issue in exc.issues],
+        },
+    )
+
+
+def _profile_not_found(*, mode: str, revision_id: str | None = None) -> HTTPException:
+    detail = {
+        'code': 'mode_profile_revision_not_found' if revision_id else 'mode_profile_unavailable',
+        'mode': mode,
+    }
+    if revision_id is not None:
+        detail['revision_id'] = revision_id
+    return HTTPException(status_code=404, detail=detail)
+
+
+def _profile_integrity_error(exc: ConversationModeProfileIntegrityError) -> HTTPException:
+    return HTTPException(
+        status_code=500,
+        detail={
+            'code': exc.code,
+            'revision_id': exc.revision_id,
+        },
+    )
+
+
+async def _profile_conflict_error(
+    request: Request,
+    exc: ConversationModeProfileRevisionConflict,
+) -> HTTPException:
+    current = (
+        await get_cached_revision(
+            request.app,
+            exc.actual_revision_id,
+            expected_mode=exc.mode,
+        )
+        if exc.actual_revision_id is not None
+        else None
+    )
+    current_metadata = (
+        {
+            'revision_id': current.id,
+            'revision_number': current.revision_number,
+            'schema_version': current.schema_version,
+            'created_at': current.created_at,
+        }
+        if current is not None
+        else {'revision_id': exc.actual_revision_id}
+    )
+    if current is not None:
+        cache_current_profile_revision(request.app, current)
+    return HTTPException(
+        status_code=409,
+        detail={
+            'code': exc.code,
+            'mode': exc.mode,
+            'expected_current_revision_id': exc.expected_revision_id,
+            'current_revision': current_metadata,
+        },
+    )
+
+
+def _profile_audit_data(
+    *,
+    profile,
+    previous_revision_id: str,
+    revision: ConversationModeProfileRevisionModel,
+    warnings: list[ModeProfileWarning],
+    restored_from_revision_id: str | None = None,
+) -> dict[str, Any]:
+    data = {
+        'mode': revision.mode,
+        'previous_revision_id': previous_revision_id,
+        'revision_id': revision.id,
+        'counts': profile_default_counts(profile),
+        'warning_codes': sorted({warning.code for warning in warnings}),
+    }
+    if restored_from_revision_id is not None:
+        data['restored_from_revision_id'] = restored_from_revision_id
+    return data
+
+
+@router.get(
+    '/conversation_mode_profiles',
+    response_model=ConversationModeProfilesResponse,
+)
+async def get_conversation_mode_profiles(
+    request: Request,
+    user=Depends(get_admin_user),
+):
+    profiles = []
+    for mode in ('agent', 'chat'):
+        try:
+            revision = await get_cached_current_revision(request.app, mode)
+        except ConversationModeProfileIntegrityError as exc:
+            raise _profile_integrity_error(exc) from exc
+        if revision is None:
+            raise _profile_not_found(mode=mode)
+        profiles.append(
+            _revision_response(
+                revision,
+                current_revision_id=revision.id,
+            )
+        )
+    return {'profiles': profiles}
+
+
+@router.get(
+    '/conversation_mode_profiles/{mode}',
+    response_model=ConversationModeProfileRevisionResponse,
+)
+async def get_current_conversation_mode_profile(
+    request: Request,
+    mode: ConversationMode,
+    user=Depends(get_admin_user),
+):
+    try:
+        revision = await get_cached_current_revision(request.app, mode)
+    except ConversationModeProfileIntegrityError as exc:
+        raise _profile_integrity_error(exc) from exc
+    if revision is None:
+        raise _profile_not_found(mode=mode.value)
+    return _revision_response(revision, current_revision_id=revision.id)
+
+
+@router.post(
+    '/conversation_mode_profiles/{mode}/revisions',
+    response_model=ConversationModeProfileRevisionResponse,
+)
+async def save_conversation_mode_profile_revision(
+    request: Request,
+    mode: ConversationMode,
+    form_data: ConversationModeProfileSaveForm,
+    user=Depends(get_admin_user),
+):
+    try:
+        profile, warnings = await validate_conversation_mode_profile(
+            request.app,
+            mode,
+            form_data.profile.model_dump(),
+        )
+    except ModeProfileValidationError as exc:
+        raise _profile_validation_error(exc) from exc
+    except ModeProfileResourceValidationError as exc:
+        raise _profile_resource_error(exc) from exc
+
+    try:
+        revision = await ConversationModeProfiles.save_revision(
+            mode=mode,
+            content=profile.to_content_dict(),
+            expected_current_revision_id=form_data.expected_current_revision_id,
+            created_by=user.id,
+        )
+    except ConversationModeProfileRevisionConflict as exc:
+        raise await _profile_conflict_error(request, exc) from exc
+    except ConversationModeProfileIntegrityError as exc:
+        raise _profile_integrity_error(exc) from exc
+
+    cache_profile_revision(request.app, revision)
+    await invalidate_conversation_mode_profile_head(request.app, mode.value)
+    await publish_event(
+        request,
+        EVENTS.CONFIG_CONVERSATION_MODE_PROFILE_REVISION_CREATED,
+        actor=user,
+        subject_id=revision.id,
+        subject_type='conversation_mode_profile_revision',
+        data=_profile_audit_data(
+            profile=profile,
+            previous_revision_id=form_data.expected_current_revision_id,
+            revision=revision,
+            warnings=warnings,
+        ),
+    )
+    return _revision_response(
+        revision,
+        current_revision_id=revision.id,
+        warnings=warnings,
+    )
+
+
+@router.get(
+    '/conversation_mode_profiles/{mode}/revisions',
+    response_model=ConversationModeProfileHistoryResponse,
+)
+async def get_conversation_mode_profile_history(
+    request: Request,
+    mode: ConversationMode,
+    user=Depends(get_admin_user),
+):
+    try:
+        current = await get_cached_current_revision(request.app, mode)
+        revisions = await ConversationModeProfiles.list_history(mode)
+    except ConversationModeProfileIntegrityError as exc:
+        raise _profile_integrity_error(exc) from exc
+    if current is None:
+        raise _profile_not_found(mode=mode.value)
+    for revision in revisions:
+        cache_profile_revision(request.app, revision)
+    return {
+        'mode': mode.value,
+        'current_revision_id': current.id,
+        'revisions': [_revision_metadata(revision, current_revision_id=current.id) for revision in revisions],
+    }
+
+
+@router.get(
+    '/conversation_mode_profiles/{mode}/revisions/{revision_id}',
+    response_model=ConversationModeProfileRevisionResponse,
+)
+async def get_conversation_mode_profile_revision(
+    request: Request,
+    mode: ConversationMode,
+    revision_id: str,
+    user=Depends(get_admin_user),
+):
+    try:
+        current = await get_cached_current_revision(request.app, mode)
+        revision = await get_cached_revision(
+            request.app,
+            revision_id,
+            expected_mode=mode,
+        )
+    except ConversationModeProfileIntegrityError as exc:
+        raise _profile_integrity_error(exc) from exc
+    if current is None:
+        raise _profile_not_found(mode=mode.value)
+    if revision is None:
+        raise _profile_not_found(mode=mode.value, revision_id=revision_id)
+    return _revision_response(revision, current_revision_id=current.id)
+
+
+@router.post(
+    '/conversation_mode_profiles/{mode}/revisions/{revision_id}/restore',
+    response_model=ConversationModeProfileRevisionResponse,
+)
+async def restore_conversation_mode_profile_revision(
+    request: Request,
+    mode: ConversationMode,
+    revision_id: str,
+    form_data: ConversationModeProfileRestoreForm,
+    user=Depends(get_admin_user),
+):
+    try:
+        source = await get_cached_revision(
+            request.app,
+            revision_id,
+            expected_mode=mode,
+        )
+    except ConversationModeProfileIntegrityError as exc:
+        raise _profile_integrity_error(exc) from exc
+    if source is None:
+        raise _profile_not_found(mode=mode.value, revision_id=revision_id)
+
+    try:
+        profile, warnings = await validate_conversation_mode_profile(
+            request.app,
+            mode,
+            source.content,
+        )
+    except ModeProfileValidationError as exc:
+        raise _profile_validation_error(exc) from exc
+    except ModeProfileResourceValidationError as exc:
+        raise _profile_resource_error(exc) from exc
+
+    try:
+        revision = await ConversationModeProfiles.restore_revision(
+            mode=mode,
+            source_revision_id=revision_id,
+            expected_current_revision_id=form_data.expected_current_revision_id,
+            created_by=user.id,
+        )
+    except ConversationModeProfileRevisionConflict as exc:
+        raise await _profile_conflict_error(request, exc) from exc
+    except ConversationModeProfileIntegrityError as exc:
+        raise _profile_integrity_error(exc) from exc
+
+    cache_profile_revision(request.app, revision)
+    await invalidate_conversation_mode_profile_head(request.app, mode.value)
+    await publish_event(
+        request,
+        EVENTS.CONFIG_CONVERSATION_MODE_PROFILE_REVISION_RESTORED,
+        actor=user,
+        subject_id=revision.id,
+        subject_type='conversation_mode_profile_revision',
+        data=_profile_audit_data(
+            profile=profile,
+            previous_revision_id=form_data.expected_current_revision_id,
+            revision=revision,
+            warnings=warnings,
+            restored_from_revision_id=revision_id,
+        ),
+    )
+    return _revision_response(
+        revision,
+        current_revision_id=revision.id,
+        warnings=warnings,
+    )
 
 
 ############################

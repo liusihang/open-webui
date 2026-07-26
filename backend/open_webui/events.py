@@ -60,6 +60,16 @@ class EventDefinitions(BaseModel):
     CONFIG_UPDATED: EventDefinition = EventDefinition(
         name='config.updated', description='Configuration was updated.', message='Config updated'
     )
+    CONFIG_CONVERSATION_MODE_PROFILE_REVISION_CREATED: EventDefinition = EventDefinition(
+        name='config.conversation_mode_profile.revision_created',
+        description='A conversation mode profile revision was created.',
+        message='Conversation mode profile revision created',
+    )
+    CONFIG_CONVERSATION_MODE_PROFILE_REVISION_RESTORED: EventDefinition = EventDefinition(
+        name='config.conversation_mode_profile.revision_restored',
+        description='A historical conversation mode profile was restored as a new revision.',
+        message='Conversation mode profile revision restored',
+    )
     CONFIG_WEBHOOK_UPDATED: EventDefinition = EventDefinition(
         name='config.webhook.updated',
         description='Event webhook configuration was updated.',

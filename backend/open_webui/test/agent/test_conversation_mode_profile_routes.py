@@ -1,0 +1,655 @@
+from __future__ import annotations
+
+import asyncio
+import importlib
+import json
+import os
+from contextlib import asynccontextmanager
+from types import SimpleNamespace
+
+os.environ.setdefault('WEBUI_SECRET_KEY', 'test-secret')
+os.environ.setdefault('ENABLE_DB_MIGRATIONS', 'false')
+os.environ.setdefault('DATABASE_ENABLE_SESSION_SHARING', 'true')
+
+import pytest
+import pytest_asyncio
+from fastapi import FastAPI
+from fastapi.testclient import TestClient
+from open_webui.agent.conversation_mode_profiles import ConversationModeProfile
+from open_webui.internal.db import Base
+from open_webui.models import conversation_mode_profiles as profile_store_module
+from open_webui.models.access_grants import AccessGrants
+from open_webui.models.config import Config
+from open_webui.models.conversation_mode_profiles import (
+    AGENT_BASELINE_REVISION_ID,
+    CHAT_BASELINE_REVISION_ID,
+    ConversationModeProfileHead,
+    ConversationModeProfileRevision,
+    ConversationModeProfiles,
+)
+from open_webui.models.functions import Functions
+from open_webui.models.skills import Skills
+from open_webui.models.tools import Tools
+from open_webui.routers import configs
+from open_webui.utils.auth import get_current_user
+from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
+
+BASE_PATH = '/api/v1/configs/conversation_mode_profiles'
+BASELINE_CONTENT = {
+    'schema_version': 1,
+    'system_prompt': '',
+    'defaults': {},
+}
+
+
+class FakeRedis:
+    def __init__(self, *, fail: bool = False):
+        self.fail = fail
+        self.values: dict[str, str] = {}
+        self.published: list[tuple[str, str]] = []
+
+    async def get(self, key):
+        if self.fail:
+            raise RuntimeError('redis unavailable')
+        return self.values.get(key)
+
+    async def incr(self, key):
+        if self.fail:
+            raise RuntimeError('redis unavailable')
+        value = int(self.values.get(key, '0')) + 1
+        self.values[key] = str(value)
+        return value
+
+    async def publish(self, channel, payload):
+        if self.fail:
+            raise RuntimeError('redis unavailable')
+        self.published.append((channel, payload))
+
+
+@pytest_asyncio.fixture
+async def profile_db(monkeypatch, tmp_path):
+    engine = create_async_engine(f'sqlite+aiosqlite:///{tmp_path / "profile-routes.sqlite3"}')
+    tables = [
+        ConversationModeProfileRevision.__table__,
+        ConversationModeProfileHead.__table__,
+    ]
+    async with engine.begin() as connection:
+        await connection.run_sync(
+            lambda sync_connection: Base.metadata.create_all(
+                sync_connection,
+                tables=tables,
+            )
+        )
+
+    session_factory = async_sessionmaker(engine, expire_on_commit=False)
+    async with session_factory() as session:
+        for mode, revision_id in (
+            ('chat', CHAT_BASELINE_REVISION_ID),
+            ('agent', AGENT_BASELINE_REVISION_ID),
+        ):
+            profile = ConversationModeProfile.from_mapping(mode, BASELINE_CONTENT)
+            session.add(
+                ConversationModeProfileRevision(
+                    id=revision_id,
+                    mode=mode,
+                    revision_number=1,
+                    schema_version=profile.schema_version,
+                    system_prompt=profile.system_prompt,
+                    defaults=profile.defaults.to_dict(),
+                    content_hash=profile.content_hash,
+                    created_at=100,
+                    created_by=None,
+                    restored_from_revision_id=None,
+                )
+            )
+            session.add(
+                ConversationModeProfileHead(
+                    mode=mode,
+                    current_revision_id=revision_id,
+                    baseline_revision_id=revision_id,
+                    cutover_at=100,
+                    updated_at=100,
+                    updated_by=None,
+                )
+            )
+        await session.commit()
+
+    @asynccontextmanager
+    async def isolated_session(db=None):
+        if db is not None:
+            yield db
+            return
+        async with session_factory() as session:
+            yield session
+
+    monkeypatch.setattr(profile_store_module, 'get_async_db_context', isolated_session)
+    yield session_factory
+    await engine.dispose()
+
+
+@pytest.fixture
+def resource_truth(monkeypatch):
+    state = {
+        'tools': {
+            'tool-1': SimpleNamespace(id='tool-1', is_active=True),
+        },
+        'skills': {
+            'skill-1': SimpleNamespace(id='skill-1', is_active=True),
+        },
+        'functions': {
+            'filter-1': SimpleNamespace(id='filter-1', type='filter', is_active=True),
+        },
+        'terminal_connections': [
+            {
+                'id': 'terminal-1',
+                'name': 'Terminal One',
+                'url': 'http://terminal.invalid',
+                'enabled': True,
+            }
+        ],
+        'feature_flags': {
+            'web.search.enable': True,
+            'code_interpreter.enable': True,
+            'image_generation.enable': True,
+        },
+    }
+
+    async def get_tools_by_ids(ids, db=None):
+        return {tool_id: state['tools'][tool_id] for tool_id in ids if tool_id in state['tools']}
+
+    async def get_skill_by_id(skill_id, db=None):
+        return state['skills'].get(skill_id)
+
+    async def get_functions_by_ids(ids, db=None):
+        return [state['functions'][function_id] for function_id in ids if function_id in state['functions']]
+
+    async def config_get(key, default=None):
+        if key == 'terminal_server.connections':
+            return state['terminal_connections']
+        return state['feature_flags'].get(key, default)
+
+    async def config_get_many(*keys):
+        return {key: await config_get(key) for key in keys}
+
+    monkeypatch.setattr(Tools, 'get_tools_by_ids', get_tools_by_ids)
+    monkeypatch.setattr(Skills, 'get_skill_by_id', get_skill_by_id)
+    monkeypatch.setattr(Functions, 'get_functions_by_ids', get_functions_by_ids)
+    monkeypatch.setattr(Config, 'get', config_get)
+    monkeypatch.setattr(Config, 'get_many', config_get_many)
+    return state
+
+
+@pytest.fixture
+def route_app(profile_db, resource_truth, monkeypatch):
+    app = FastAPI()
+    app.state.redis = FakeRedis()
+    app.state.CONVERSATION_MODE_PROFILE_HEADS = {}
+    app.state.CONVERSATION_MODE_PROFILE_REVISIONS = {}
+    app.state.MODELS = {
+        'model-1': {
+            'id': 'model-1',
+            'info': {
+                'meta': {
+                    'capabilities': {
+                        'function_calling': True,
+                        'web_search': True,
+                        'code_interpreter': True,
+                        'image_generation': True,
+                    }
+                }
+            },
+        }
+    }
+    app.include_router(configs.router, prefix='/api/v1/configs')
+
+    current_user = {
+        'value': SimpleNamespace(
+            id='admin-1',
+            role='admin',
+            name='Administrator',
+            email='admin@example.com',
+        )
+    }
+
+    def override_current_user():
+        return current_user['value']
+
+    app.dependency_overrides[get_current_user] = override_current_user
+    events = []
+
+    async def capture_event(request_or_app, event, **kwargs):
+        events.append({'event': event, **kwargs})
+
+    monkeypatch.setattr(configs, 'publish_event', capture_event)
+    return SimpleNamespace(
+        app=app,
+        client=TestClient(app),
+        current_user=current_user,
+        events=events,
+        resource_truth=resource_truth,
+    )
+
+
+def _profile_content(
+    *,
+    prompt: str = 'Administrator policy',
+    terminal_id='terminal-1',
+    tool_ids=None,
+    skill_ids=None,
+    filter_ids=None,
+    feature_ids=None,
+):
+    return {
+        'schema_version': 1,
+        'system_prompt': prompt,
+        'defaults': {
+            'terminal_id': terminal_id,
+            'tool_ids': ['tool-1'] if tool_ids is None else tool_ids,
+            'skill_ids': ['skill-1'] if skill_ids is None else skill_ids,
+            'filter_ids': ['filter-1'] if filter_ids is None else filter_ids,
+            'feature_ids': ['web_search'] if feature_ids is None else feature_ids,
+        },
+    }
+
+
+def _save_payload(expected_revision_id: str, **content_overrides):
+    return {
+        'expected_current_revision_id': expected_revision_id,
+        'profile': _profile_content(**content_overrides),
+    }
+
+
+@pytest.mark.parametrize(
+    ('method', 'path', 'payload'),
+    [
+        ('get', BASE_PATH, None),
+        ('get', f'{BASE_PATH}/chat', None),
+        ('post', f'{BASE_PATH}/chat/revisions', _save_payload(CHAT_BASELINE_REVISION_ID)),
+        ('get', f'{BASE_PATH}/chat/revisions', None),
+        ('get', f'{BASE_PATH}/chat/revisions/{CHAT_BASELINE_REVISION_ID}', None),
+        (
+            'post',
+            f'{BASE_PATH}/chat/revisions/{CHAT_BASELINE_REVISION_ID}/restore',
+            {'expected_current_revision_id': CHAT_BASELINE_REVISION_ID},
+        ),
+    ],
+)
+def test_private_profile_operations_reject_non_admins(route_app, method, path, payload):
+    route_app.current_user['value'] = SimpleNamespace(id='user-1', role='user')
+
+    kwargs = {'json': payload} if payload is not None else {}
+    response = getattr(route_app.client, method)(path, **kwargs)
+
+    assert response.status_code == 401
+
+
+def test_admin_reads_complete_current_chat_and_agent_profiles(route_app):
+    response = route_app.client.get(BASE_PATH)
+
+    assert response.status_code == 200
+    body = response.json()
+    assert [profile['mode'] for profile in body['profiles']] == ['agent', 'chat']
+    assert all(profile['is_current'] is True for profile in body['profiles'])
+    assert all('system_prompt' in profile for profile in body['profiles'])
+    assert {profile['revision_id'] for profile in body['profiles']} == {
+        AGENT_BASELINE_REVISION_ID,
+        CHAT_BASELINE_REVISION_ID,
+    }
+
+
+def test_admin_save_creates_revision_and_prompt_free_audit(route_app, monkeypatch):
+    access_grant_calls = []
+
+    async def record_access_grant(*args, **kwargs):
+        access_grant_calls.append((args, kwargs))
+
+    monkeypatch.setattr(AccessGrants, 'set_access_grants', record_access_grant)
+    response = route_app.client.post(
+        f'{BASE_PATH}/chat/revisions',
+        json=_save_payload(CHAT_BASELINE_REVISION_ID),
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body['mode'] == 'chat'
+    assert body['revision_number'] == 2
+    assert body['revision_id'] != CHAT_BASELINE_REVISION_ID
+    assert body['system_prompt'] == 'Administrator policy'
+    assert body['created_by'] == 'admin-1'
+    assert access_grant_calls == []
+
+    assert len(route_app.events) == 1
+    event = route_app.events[0]
+    assert event['actor'].id == 'admin-1'
+    assert event['subject_id'] == body['revision_id']
+    assert set(event['data']) == {
+        'mode',
+        'previous_revision_id',
+        'revision_id',
+        'counts',
+        'warning_codes',
+    }
+    rendered_event = json.dumps(event['data'], sort_keys=True)
+    for forbidden in ('Administrator policy', 'system_prompt', 'defaults', 'content_hash'):
+        assert forbidden not in rendered_event
+
+
+@pytest.mark.parametrize(
+    ('field', 'value', 'expected_reason'),
+    [
+        ('tool_ids', ['tool-1', 'tool-1'], 'duplicate_default_identifier'),
+        ('skill_ids', [' skill-1'], 'invalid_default_identifier'),
+        ('feature_ids', ['unsupported-feature'], 'unsupported_feature'),
+    ],
+)
+def test_admin_save_rejects_malformed_and_duplicate_ids(route_app, field, value, expected_reason):
+    payload = _save_payload(CHAT_BASELINE_REVISION_ID)
+    payload['profile']['defaults'][field] = value
+
+    response = route_app.client.post(f'{BASE_PATH}/chat/revisions', json=payload)
+
+    assert response.status_code == 400
+    assert response.json()['detail']['code'] == 'invalid_mode_profile'
+    assert response.json()['detail']['reason'] == expected_reason
+
+
+def test_admin_save_rejects_phase_a_known_conflict(route_app):
+    response = route_app.client.post(
+        f'{BASE_PATH}/chat/revisions',
+        json=_save_payload(
+            CHAT_BASELINE_REVISION_ID,
+            terminal_id='terminal-1',
+            feature_ids=['code_interpreter'],
+        ),
+    )
+
+    assert response.status_code == 400
+    assert response.json()['detail'] == {
+        'code': 'invalid_mode_profile',
+        'reason': 'terminal_code_interpreter_conflict',
+        'field': 'defaults',
+    }
+
+
+@pytest.mark.parametrize('schema_version', [True, '1', 1.0])
+def test_admin_save_does_not_coerce_schema_version(route_app, schema_version):
+    payload = _save_payload(CHAT_BASELINE_REVISION_ID)
+    payload['profile']['schema_version'] = schema_version
+
+    response = route_app.client.post(f'{BASE_PATH}/chat/revisions', json=payload)
+
+    assert response.status_code == 422
+    assert response.json()['detail'][0]['type'] == 'int_type'
+
+
+@pytest.mark.parametrize(
+    ('resource_type', 'mutate_truth', 'payload_overrides', 'expected_issue'),
+    [
+        (
+            'tool',
+            lambda truth: truth['tools'].clear(),
+            {'tool_ids': ['tool-1'], 'skill_ids': [], 'filter_ids': [], 'terminal_id': None},
+            'missing',
+        ),
+        (
+            'skill',
+            lambda truth: setattr(truth['skills']['skill-1'], 'is_active', False),
+            {'tool_ids': [], 'skill_ids': ['skill-1'], 'filter_ids': [], 'terminal_id': None},
+            'inactive',
+        ),
+        (
+            'filter',
+            lambda truth: setattr(truth['functions']['filter-1'], 'is_active', False),
+            {'tool_ids': [], 'skill_ids': [], 'filter_ids': ['filter-1'], 'terminal_id': None},
+            'inactive',
+        ),
+        (
+            'terminal',
+            lambda truth: truth['terminal_connections'][0].update({'enabled': False}),
+            {'tool_ids': [], 'skill_ids': [], 'filter_ids': [], 'terminal_id': 'terminal-1'},
+            'inactive',
+        ),
+    ],
+)
+def test_admin_save_rejects_missing_or_inactive_global_resources(
+    route_app,
+    resource_type,
+    mutate_truth,
+    payload_overrides,
+    expected_issue,
+):
+    mutate_truth(route_app.resource_truth)
+
+    response = route_app.client.post(
+        f'{BASE_PATH}/chat/revisions',
+        json=_save_payload(CHAT_BASELINE_REVISION_ID, **payload_overrides),
+    )
+
+    assert response.status_code == 400
+    detail = response.json()['detail']
+    assert detail['code'] == 'invalid_mode_profile_resource'
+    assert detail['issues'] == [
+        {
+            'resource_type': resource_type,
+            'resource_id': f'{resource_type}-1',
+            'reason': expected_issue,
+        }
+    ]
+
+
+def test_disabled_features_and_model_mismatch_are_structured_warnings(route_app):
+    route_app.resource_truth['feature_flags']['web.search.enable'] = False
+    route_app.app.state.MODELS['model-1']['info']['meta']['capabilities']['web_search'] = False
+
+    response = route_app.client.post(
+        f'{BASE_PATH}/chat/revisions',
+        json=_save_payload(
+            CHAT_BASELINE_REVISION_ID,
+            terminal_id=None,
+            tool_ids=[],
+            skill_ids=[],
+            filter_ids=[],
+            feature_ids=['web_search'],
+        ),
+    )
+
+    assert response.status_code == 200
+    warnings = response.json()['warnings']
+    assert {warning['code'] for warning in warnings} == {
+        'feature_globally_disabled',
+        'model_compatibility_warning',
+    }
+    assert response.json()['defaults']['feature_ids'] == ['web_search']
+
+
+def test_stale_save_returns_stable_conflict_with_refresh_metadata(route_app):
+    first = route_app.client.post(
+        f'{BASE_PATH}/chat/revisions',
+        json=_save_payload(CHAT_BASELINE_REVISION_ID, prompt='First'),
+    )
+    assert first.status_code == 200
+
+    stale = route_app.client.post(
+        f'{BASE_PATH}/chat/revisions',
+        json=_save_payload(CHAT_BASELINE_REVISION_ID, prompt='Stale'),
+    )
+
+    assert stale.status_code == 409
+    detail = stale.json()['detail']
+    assert detail['code'] == 'mode_profile_revision_conflict'
+    assert detail['mode'] == 'chat'
+    assert detail['expected_current_revision_id'] == CHAT_BASELINE_REVISION_ID
+    assert detail['current_revision'] == {
+        'revision_id': first.json()['revision_id'],
+        'revision_number': 2,
+        'schema_version': 1,
+        'created_at': first.json()['created_at'],
+    }
+
+
+def test_conflict_refreshes_a_stale_local_head_cache(route_app):
+    primed = route_app.client.get(f'{BASE_PATH}/chat')
+    assert primed.status_code == 200
+    assert primed.json()['revision_id'] == CHAT_BASELINE_REVISION_ID
+
+    external = asyncio.run(
+        ConversationModeProfiles.save_revision(
+            mode='chat',
+            content={
+                'schema_version': 1,
+                'system_prompt': 'External writer',
+                'defaults': {},
+            },
+            expected_current_revision_id=CHAT_BASELINE_REVISION_ID,
+            created_by='admin-2',
+        )
+    )
+
+    conflict = route_app.client.post(
+        f'{BASE_PATH}/chat/revisions',
+        json=_save_payload(CHAT_BASELINE_REVISION_ID, prompt='Stale writer'),
+    )
+    assert conflict.status_code == 409
+    assert conflict.json()['detail']['current_revision']['revision_id'] == external.id
+
+    refreshed = route_app.client.get(f'{BASE_PATH}/chat')
+    assert refreshed.status_code == 200
+    assert refreshed.json()['revision_id'] == external.id
+    assert refreshed.json()['system_prompt'] == 'External writer'
+
+
+def test_history_detail_and_restore_create_immutable_new_revision(route_app):
+    saved = route_app.client.post(
+        f'{BASE_PATH}/chat/revisions',
+        json=_save_payload(CHAT_BASELINE_REVISION_ID, prompt='Second revision'),
+    )
+    assert saved.status_code == 200
+    saved_revision_id = saved.json()['revision_id']
+
+    history = route_app.client.get(f'{BASE_PATH}/chat/revisions')
+    assert history.status_code == 200
+    history_body = history.json()
+    assert history_body['current_revision_id'] == saved_revision_id
+    assert [revision['revision_number'] for revision in history_body['revisions']] == [2, 1]
+    assert 'system_prompt' not in json.dumps(history_body)
+    assert 'defaults' not in json.dumps(history_body)
+
+    baseline_detail = route_app.client.get(f'{BASE_PATH}/chat/revisions/{CHAT_BASELINE_REVISION_ID}')
+    assert baseline_detail.status_code == 200
+    assert baseline_detail.json()['system_prompt'] == ''
+    assert baseline_detail.json()['is_current'] is False
+
+    restored = route_app.client.post(
+        f'{BASE_PATH}/chat/revisions/{CHAT_BASELINE_REVISION_ID}/restore',
+        json={'expected_current_revision_id': saved_revision_id},
+    )
+    assert restored.status_code == 200
+    assert restored.json()['revision_number'] == 3
+    assert restored.json()['revision_id'] not in {
+        CHAT_BASELINE_REVISION_ID,
+        saved_revision_id,
+    }
+    assert restored.json()['restored_from_revision_id'] == CHAT_BASELINE_REVISION_ID
+    assert restored.json()['system_prompt'] == ''
+
+    old_detail = route_app.client.get(f'{BASE_PATH}/chat/revisions/{saved_revision_id}')
+    assert old_detail.status_code == 200
+    assert old_detail.json()['system_prompt'] == 'Second revision'
+    assert old_detail.json()['restored_from_revision_id'] is None
+
+    restore_event = route_app.events[-1]
+    assert set(restore_event['data']) == {
+        'mode',
+        'previous_revision_id',
+        'revision_id',
+        'restored_from_revision_id',
+        'counts',
+        'warning_codes',
+    }
+    rendered_event = json.dumps(restore_event['data'], sort_keys=True)
+    for forbidden in ('Second revision', 'system_prompt', 'defaults', 'content_hash'):
+        assert forbidden not in rendered_event
+
+
+def test_cache_publication_failure_does_not_rollback_committed_revision(route_app):
+    route_app.app.state.redis = FakeRedis(fail=True)
+    route_app.app.state.CONVERSATION_MODE_PROFILE_HEADS['chat'] = SimpleNamespace(id=CHAT_BASELINE_REVISION_ID)
+
+    response = route_app.client.post(
+        f'{BASE_PATH}/chat/revisions',
+        json=_save_payload(CHAT_BASELINE_REVISION_ID, prompt='Committed without Redis'),
+    )
+
+    assert response.status_code == 200
+    saved_revision_id = response.json()['revision_id']
+    current = route_app.client.get(f'{BASE_PATH}/chat')
+    assert current.status_code == 200
+    assert current.json()['revision_id'] == saved_revision_id
+    assert current.json()['system_prompt'] == 'Committed without Redis'
+
+
+@pytest.mark.asyncio
+async def test_authenticated_app_config_exposes_only_sanitized_current_profiles(
+    profile_db,
+    resource_truth,
+    monkeypatch,
+):
+    main = importlib.import_module('open_webui.main')
+
+    user = SimpleNamespace(id='user-1', role='user')
+
+    async def get_user_by_id(user_id):
+        return user if user_id == user.id else None
+
+    async def has_users():
+        return True
+
+    async def get_num_users():
+        return 1
+
+    monkeypatch.setattr(main.Users, 'get_user_by_id', get_user_by_id)
+    monkeypatch.setattr(main.Users, 'has_users', has_users)
+    monkeypatch.setattr(main.Users, 'get_num_users', get_num_users)
+    monkeypatch.setattr(main, 'decode_token', lambda token: {'id': user.id})
+    monkeypatch.setattr(
+        main,
+        'get_http_authorization_cred',
+        lambda header: SimpleNamespace(credentials='valid-token'),
+    )
+    main.app.state.redis = None
+    main.app.state.CONVERSATION_MODE_PROFILE_HEADS = {}
+    main.app.state.CONVERSATION_MODE_PROFILE_REVISIONS = {}
+
+    authenticated_request = SimpleNamespace(
+        headers={'Authorization': 'Bearer valid-token'},
+        cookies={},
+        app=main.app,
+    )
+    authenticated = await main.get_app_config(authenticated_request)
+
+    profiles = authenticated['conversation_mode_profiles']
+    assert [profile['mode'] for profile in profiles] == ['agent', 'chat']
+    assert all(
+        set(profile)
+        == {
+            'mode',
+            'current_revision_id',
+            'schema_version',
+            'defaults',
+        }
+        for profile in profiles
+    )
+    rendered = json.dumps(profiles, sort_keys=True)
+    for forbidden in (
+        'system_prompt',
+        'content_hash',
+        'created_by',
+        'restored_from',
+        'history',
+        'warning',
+    ):
+        assert forbidden not in rendered
+
+    anonymous_request = SimpleNamespace(headers={}, cookies={}, app=main.app)
+    anonymous = await main.get_app_config(anonymous_request)
+    assert 'conversation_mode_profiles' not in anonymous

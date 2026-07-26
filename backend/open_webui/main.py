@@ -50,6 +50,9 @@ from open_webui.agent.conversation_mode import (
     chat_has_agent_mode_evidence,
     resolve_conversation_mode,
 )
+from open_webui.agent.conversation_mode_profile_service import (
+    get_public_conversation_mode_profiles,
+)
 from open_webui.agent.decision_execution import agent_decision_dispatcher_loop
 from open_webui.agent.protocol import AgentEventType
 from open_webui.agent.resources import AgentRunResourceManager
@@ -3086,6 +3089,11 @@ async def get_app_config(request: Request):
         'ui.pending_user_overlay_content',
         'ui.watermark',
     )
+    conversation_mode_profiles = (
+        await get_public_conversation_mode_profiles(request.app)
+        if user is not None and user.role in ['admin', 'user']
+        else None
+    )
 
     return {
         **({'onboarding': True} if onboarding else {}),
@@ -3155,6 +3163,7 @@ async def get_app_config(request: Request):
         },
         **(
             {
+                'conversation_mode_profiles': conversation_mode_profiles,
                 'default_models': config.get('ui.default_models'),
                 'default_pinned_models': config.get('ui.default_pinned_models'),
                 'default_prompt_suggestions': config.get('ui.prompt_suggestions'),

@@ -13,6 +13,7 @@ from open_webui.env import REDIS_KEY_PREFIX
 log = logging.getLogger(__name__)
 
 CACHE_NAMESPACE_CONFIG = 'config'
+CACHE_NAMESPACE_CONVERSATION_MODE_PROFILE_HEADS = 'conversation_mode_profile_heads'
 CACHE_NAMESPACE_FUNCTIONS = 'functions'
 CACHE_NAMESPACE_MODELS = 'models'
 CACHE_NAMESPACE_TOOLS = 'tools'
@@ -60,6 +61,8 @@ async def apply_cache_invalidation_event(app, event: dict[str, Any]) -> bool:
     elif namespace == CACHE_NAMESPACE_CONFIG:
         await _refresh_runtime_config(app)
         _clear_model_derived_cache(app)
+    elif namespace == CACHE_NAMESPACE_CONVERSATION_MODE_PROFILE_HEADS:
+        _clear_mode_profile_head_cache(app, key)
     else:
         log.debug('Ignoring unknown cache invalidation namespace: %s', namespace)
         return False
@@ -104,6 +107,14 @@ async def get_remote_cache_version(redis, namespace: str, key: str | None = None
 async def invalidate_config_cache(app=None, key: str | None = None) -> None:
     await _broadcast_cache_invalidation(CACHE_NAMESPACE_CONFIG, key, app=app)
     await _broadcast_cache_invalidation(CACHE_NAMESPACE_MODELS, app=app)
+
+
+async def invalidate_conversation_mode_profile_head(app, mode: str) -> None:
+    await _broadcast_cache_invalidation(
+        CACHE_NAMESPACE_CONVERSATION_MODE_PROFILE_HEADS,
+        mode,
+        app=app,
+    )
 
 
 async def invalidate_function_cache(app=None, function_id: str | None = None) -> None:
@@ -398,6 +409,10 @@ def _clear_function_cache(app, function_id: str | None) -> None:
 def _clear_tool_cache(app, tool_id: str | None) -> None:
     _clear_named_cache(app, 'TOOLS', tool_id)
     _clear_named_cache(app, 'TOOL_CONTENTS', tool_id)
+
+
+def _clear_mode_profile_head_cache(app, mode: str | None) -> None:
+    _clear_named_cache(app, 'CONVERSATION_MODE_PROFILE_HEADS', mode)
 
 
 def _clear_named_cache(app, name: str, key: str | None) -> None:
