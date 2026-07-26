@@ -108,7 +108,25 @@ async def agent_run_db(monkeypatch):
 
 @pytest.fixture
 def chat_entry_patches(monkeypatch):
-    calls = SimpleNamespace(provider_calls=[], runtime_calls=[], upserts=[], process_payload_calls=[])
+    calls = SimpleNamespace(
+        provider_calls=[],
+        runtime_calls=[],
+        upserts=[],
+        process_payload_calls=[],
+        chat_updates=[],
+        chat_inserts=[],
+        stored_chats={
+            'chat-1': SimpleNamespace(
+                id='chat-1',
+                user_id='user-1',
+                chat={
+                    'id': 'chat-1',
+                    'mode': 'agent',
+                    'history': {'currentId': None, 'messages': {}},
+                },
+            )
+        },
+    )
     _patch_model_and_chat_boundaries(monkeypatch, calls)
     _patch_legacy_chat_pipeline(monkeypatch, calls)
     _patch_runtime_client(monkeypatch, calls)
@@ -125,6 +143,27 @@ def _patch_model_and_chat_boundaries(monkeypatch, calls):
     async def fake_is_chat_owner(chat_id, user_id):
         return True
 
+    async def fake_get_chat_by_id(chat_id):
+        return calls.stored_chats.get(chat_id)
+
+    async def fake_update_chat_by_id(chat_id, chat):
+        calls.chat_updates.append((chat_id, chat))
+        existing = calls.stored_chats.get(chat_id)
+        if existing is not None:
+            existing.chat = chat
+            return existing
+        return None
+
+    async def fake_insert_new_chat(chat_id, user_id, form_data):
+        stored = SimpleNamespace(
+            id=chat_id,
+            user_id=user_id,
+            chat=form_data.chat,
+        )
+        calls.chat_inserts.append((chat_id, user_id, form_data))
+        calls.stored_chats[chat_id] = stored
+        return stored
+
     async def fake_get_message(chat_id, message_id):
         if message_id == 'user-msg':
             return {'id': 'user-msg', 'childrenIds': []}
@@ -140,6 +179,9 @@ def _patch_model_and_chat_boundaries(monkeypatch, calls):
     monkeypatch.setattr(main.Models, 'get_model_by_id', fake_get_model_by_id)
     monkeypatch.setattr(main.Config, 'get', fake_config_get)
     monkeypatch.setattr(main.Chats, 'is_chat_owner', fake_is_chat_owner)
+    monkeypatch.setattr(main.Chats, 'get_chat_by_id', fake_get_chat_by_id)
+    monkeypatch.setattr(main.Chats, 'update_chat_by_id', fake_update_chat_by_id)
+    monkeypatch.setattr(main.Chats, 'insert_new_chat', fake_insert_new_chat)
     monkeypatch.setattr(main.Chats, 'get_message_by_id_and_message_id', fake_get_message)
     monkeypatch.setattr(main.Chats, 'upsert_message_to_chat_by_id_and_message_id', fake_upsert)
     monkeypatch.setattr(main, 'publish_event', fake_publish_event, raising=False)
@@ -234,14 +276,80 @@ def test_main_app_initializes_agent_run_app_state_helpers():
 
 
 @pytest.mark.asyncio
-async def test_agent_mode_disabled_uses_legacy_chat_path(agent_run_db, chat_entry_patches):
-    request = _request(enable_agent_mode=False)
+async def test_explicit_chat_mode_uses_legacy_path_when_agent_capability_is_enabled(
+    agent_run_db,
+    chat_entry_patches,
+):
+    request = _request(enable_agent_mode=True)
+    chat_entry_patches.stored_chats['chat-1'].chat['mode'] = 'chat'
 
-    response = await main.chat_completion(request, _chat_form(include_session=False), _user())
+    response = await main.chat_completion(
+        request,
+        _chat_form(include_session=False, chat_mode='chat'),
+        _user(),
+    )
+
+    assert response['legacy'] is True
+    assert len(chat_entry_patches.provider_calls) == 1
+    assert 'chat_mode' not in chat_entry_patches.provider_calls[0]
+    assert chat_entry_patches.runtime_calls == []
+    assert await AgentRuns.list_runs_by_chat('chat-1', 'user-1') == []
+
+
+@pytest.mark.asyncio
+async def test_new_chat_without_mode_defaults_to_chat_and_persists_mode(
+    agent_run_db,
+    chat_entry_patches,
+):
+    request = _request(enable_agent_mode=True)
+    form = _chat_form(include_session=False, chat_mode=None)
+    form.pop('chat_id')
+    form['parent_id'] = None
+
+    response = await main.chat_completion(request, form, _user())
 
     assert response['legacy'] is True
     assert len(chat_entry_patches.provider_calls) == 1
     assert chat_entry_patches.runtime_calls == []
+    assert len(chat_entry_patches.chat_inserts) == 1
+    inserted_chat = chat_entry_patches.chat_inserts[0][2].chat
+    assert inserted_chat['mode'] == 'chat'
+
+
+@pytest.mark.asyncio
+async def test_explicit_agent_mode_is_rejected_when_capability_is_disabled(
+    agent_run_db,
+    chat_entry_patches,
+):
+    request = _request(enable_agent_mode=False)
+
+    with pytest.raises(main.HTTPException) as exc_info:
+        await main.chat_completion(request, _chat_form(chat_mode='agent'), _user())
+
+    assert exc_info.value.status_code == 503
+    assert exc_info.value.detail['code'] == 'agent_mode_disabled'
+    assert chat_entry_patches.provider_calls == []
+    assert chat_entry_patches.runtime_calls == []
+    assert chat_entry_patches.upserts == []
+    assert await AgentRuns.list_runs_by_chat('chat-1', 'user-1') == []
+
+
+@pytest.mark.asyncio
+async def test_existing_chat_rejects_conversation_mode_mismatch_before_writes(
+    agent_run_db,
+    chat_entry_patches,
+):
+    request = _request(enable_agent_mode=True)
+    chat_entry_patches.stored_chats['chat-1'].chat['mode'] = 'chat'
+
+    with pytest.raises(main.HTTPException) as exc_info:
+        await main.chat_completion(request, _chat_form(chat_mode='agent'), _user())
+
+    assert exc_info.value.status_code == 409
+    assert exc_info.value.detail['code'] == 'conversation_mode_mismatch'
+    assert chat_entry_patches.provider_calls == []
+    assert chat_entry_patches.runtime_calls == []
+    assert chat_entry_patches.upserts == []
     assert await AgentRuns.list_runs_by_chat('chat-1', 'user-1') == []
 
 
@@ -1381,7 +1489,7 @@ def _user():
     return SimpleNamespace(id='user-1', role='admin')
 
 
-def _chat_form(*, include_session: bool = True):
+def _chat_form(*, include_session: bool = True, chat_mode: str | None = 'agent'):
     form = {
         'model': 'model-a',
         'chat_id': 'chat-1',
@@ -1396,6 +1504,8 @@ def _chat_form(*, include_session: bool = True):
         },
         'stream': True,
     }
+    if chat_mode is not None:
+        form['chat_mode'] = chat_mode
     if include_session:
         form['session_id'] = 'session-1'
     return form

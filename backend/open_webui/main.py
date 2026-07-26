@@ -43,6 +43,13 @@ from starsessions import (
 from starsessions.stores.redis import RedisStore
 
 from open_webui.agent.artifacts import AgentRunArtifactRegistrar
+from open_webui.agent.conversation_mode import (
+    ConversationMode,
+    ConversationModeMismatchError,
+    InvalidConversationModeError,
+    chat_has_agent_mode_evidence,
+    resolve_conversation_mode,
+)
 from open_webui.agent.decision_execution import agent_decision_dispatcher_loop
 from open_webui.agent.protocol import AgentEventType
 from open_webui.agent.resources import AgentRunResourceManager
@@ -1249,7 +1256,7 @@ def _assistant_message_id_for_model(message_ids, model_id: str | None) -> str | 
 def _is_agent_mode_product_chat(request: Request, metadata: dict, message_ids) -> bool:
     if getattr(request.state, 'agent_internal_model_call', False):
         return False
-    if not getattr(request.app.state.config, 'ENABLE_AGENT_MODE', False):
+    if metadata.get('chat_mode') != ConversationMode.AGENT.value:
         return False
     return bool(
         metadata.get('chat_id')
@@ -2069,6 +2076,7 @@ async def chat_completion(
     model_id = form_data.get('model', None)
     model_item = form_data.pop('model_item', {})
     tasks = form_data.pop('background_tasks', None)
+    requested_chat_mode = form_data.pop('chat_mode', None)
 
     metadata = {}
     try:
@@ -2211,6 +2219,79 @@ async def chat_completion(
         if is_new_chat:
             metadata['chat_id'] = str(uuid4())
 
+        existing_chat = None
+        conversation_mode_should_persist = False
+        is_product_conversation_request = bool(
+            not getattr(request.state, 'agent_internal_model_call', False)
+            and metadata.get('chat_id')
+            and metadata.get('user_message_id')
+            and _first_assistant_message_id(message_ids)
+        )
+        if is_product_conversation_request:
+            chat_id = metadata['chat_id']
+            is_persisted_chat = not chat_id.startswith(('local:', 'channel:'))
+            persisted_mode = None
+            has_agent_run = False
+
+            if is_persisted_chat and not is_new_chat:
+                if not await Chats.is_chat_owner(chat_id, user.id) and user.role != 'admin':
+                    raise HTTPException(
+                        status_code=status.HTTP_404_NOT_FOUND,
+                        detail=ERROR_MESSAGES.DEFAULT(),
+                    )
+                existing_chat = await Chats.get_chat_by_id(chat_id)
+                if existing_chat is None:
+                    raise HTTPException(
+                        status_code=status.HTTP_404_NOT_FOUND,
+                        detail=ERROR_MESSAGES.NOT_FOUND,
+                    )
+                persisted_mode = (existing_chat.chat or {}).get('mode')
+                if persisted_mode is None:
+                    has_agent_run = chat_has_agent_mode_evidence(existing_chat.chat)
+                    if not has_agent_run:
+                        has_agent_run = await AgentRuns.has_runs_by_chat(chat_id, user.id)
+
+            try:
+                resolution = resolve_conversation_mode(
+                    requested=requested_chat_mode,
+                    persisted=persisted_mode,
+                    is_new=is_new_chat or not is_persisted_chat,
+                    has_agent_run=has_agent_run,
+                )
+            except InvalidConversationModeError as exc:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail={
+                        'code': exc.code,
+                        'message': str(exc),
+                    },
+                ) from exc
+            except ConversationModeMismatchError as exc:
+                raise HTTPException(
+                    status_code=status.HTTP_409_CONFLICT,
+                    detail={
+                        'code': exc.code,
+                        'message': str(exc),
+                        'requested': exc.requested.value,
+                        'persisted': exc.persisted.value,
+                    },
+                ) from exc
+
+            if (
+                resolution.mode is ConversationMode.AGENT
+                and not getattr(request.app.state.config, 'ENABLE_AGENT_MODE', False)
+            ):
+                raise HTTPException(
+                    status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                    detail={
+                        'code': 'agent_mode_disabled',
+                        'message': 'Agent Mode is disabled for this deployment.',
+                    },
+                )
+
+            metadata['chat_mode'] = resolution.mode.value
+            conversation_mode_should_persist = resolution.should_persist
+
         initial_title_generation = None
         if is_new_chat and tasks and TASKS.TITLE_GENERATION in tasks:
             initial_title_generation = tasks.pop(TASKS.TITLE_GENERATION)
@@ -2294,6 +2375,7 @@ async def chat_completion(
                             chat={
                                 'id': chat_id,
                                 'title': 'New Chat',
+                                'mode': metadata.get('chat_mode', ConversationMode.CHAT.value),
                                 'models': [entry['model_id'] for entry in message_ids],
                                 'history': {
                                     'currentId': all_assistant_ids[0] if all_assistant_ids else user_message_id,
@@ -2386,13 +2468,6 @@ async def chat_completion(
 
                         asyncio.create_task(run_initial_title_generation())
                 else:
-                    # Existing chat — verify ownership
-                    if not await Chats.is_chat_owner(chat_id, user.id) and user.role != 'admin':
-                        raise HTTPException(
-                            status_code=status.HTTP_404_NOT_FOUND,
-                            detail=ERROR_MESSAGES.DEFAULT(),
-                        )
-
                     user_message = metadata.get('user_message') or {}
                     selected_chat_models = user_message.get('models') if isinstance(user_message, dict) else None
                     if not isinstance(selected_chat_models, list) or not selected_chat_models:
@@ -2402,14 +2477,21 @@ async def chat_completion(
                     # The old frontend saveChatHandler did this on every message;
                     # now the backend owns persistence.
                     chat_files = metadata.get('files')
-                    if chat_files is not None or selected_chat_models:
-                        existing_chat = await Chats.get_chat_by_id(chat_id)
+                    if (
+                        chat_files is not None
+                        or selected_chat_models
+                        or conversation_mode_should_persist
+                    ):
+                        if existing_chat is None:
+                            existing_chat = await Chats.get_chat_by_id(chat_id)
                         if existing_chat:
                             updated = {**existing_chat.chat}
                             if chat_files is not None:
                                 updated['files'] = chat_files
                             if selected_chat_models:
                                 updated['models'] = selected_chat_models
+                            if conversation_mode_should_persist:
+                                updated['mode'] = metadata['chat_mode']
                             await Chats.update_chat_by_id(chat_id, updated)
 
                     # Save user message to DB
