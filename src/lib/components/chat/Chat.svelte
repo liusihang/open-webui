@@ -109,8 +109,11 @@
 		shouldEnableImageGenerationByDefault
 	} from '$lib/components/chat/defaultFeatures';
 	import {
-		buildReasoningPayload,
-		resolveAgentModeRequestModels,
+		buildConversationModeReasoningPayload,
+		isAgentModeCapabilityEnabled,
+		normalizeConversationMode,
+		resolveConversationModeRequestModels,
+		type ConversationMode,
 		type ReasoningDepth
 	} from '$lib/components/chat/agentModeRequest';
 	import {
@@ -121,6 +124,7 @@
 	import Navbar from '$lib/components/chat/Navbar.svelte';
 	import ChatControls from './ChatControls.svelte';
 	import EventConfirmDialog from '../common/ConfirmDialog.svelte';
+	import ConversationModeConfirmDialog from '../common/ConfirmDialog.svelte';
 	import DeleteConfirmDialog from '../common/ConfirmDialog.svelte';
 	import WebSearchConfirmDialog from '../common/ConfirmDialog.svelte';
 	import Placeholder from './Placeholder.svelte';
@@ -150,6 +154,8 @@
 	let navbarElement;
 
 	let showEventConfirmation = false;
+	let showConversationModeConfirmation = false;
+	let pendingConversationMode: ConversationMode | null = null;
 	let eventConfirmationTitle = '';
 	let eventConfirmationMessage = '';
 	let eventConfirmationInput = false;
@@ -160,18 +166,15 @@
 	let eventCallback = null;
 
 	let selectedModels = [''];
+	let conversationMode: ConversationMode = 'chat';
+	$: agentModeAvailable = isAgentModeCapabilityEnabled($config);
+	$: agentConversationUnavailable = conversationMode === 'agent' && !agentModeAvailable;
 	let atSelectedModel: Model | undefined;
 	let selectedModelIds = [];
-	$: if (selectedModels.length > 1) {
-		const resolvedAgentModels = resolveAgentModeRequestModels(selectedModels, $config);
-		if (!equal(resolvedAgentModels, selectedModels)) {
-			selectedModels = resolvedAgentModels;
-		}
-	}
 	$: if (atSelectedModel !== undefined) {
-		selectedModelIds = resolveAgentModeRequestModels([atSelectedModel.id], $config);
+		selectedModelIds = resolveConversationModeRequestModels([atSelectedModel.id], conversationMode);
 	} else {
-		selectedModelIds = resolveAgentModeRequestModels(selectedModels, $config);
+		selectedModelIds = resolveConversationModeRequestModels(selectedModels, conversationMode);
 	}
 
 	let selectedToolIds = [];
@@ -247,6 +250,9 @@
 		messages: {},
 		currentId: null
 	};
+	$: conversationModeLocked = Boolean(
+		$chatId || Object.values(history.messages).some((message: any) => message?.role === 'user')
+	);
 
 	let taskIds = null;
 
@@ -329,6 +335,9 @@
 							input.reasoningDepth === 'deep' || input.reasoningDepth === 'divergent'
 								? input.reasoningDepth
 								: 'medium';
+						if (!chatIdProp) {
+							conversationMode = normalizeConversationMode(input.conversationMode);
+						}
 					}
 				} catch (e) {}
 			} else {
@@ -1085,6 +1094,9 @@
 							input.reasoningDepth === 'deep' || input.reasoningDepth === 'divergent'
 								? input.reasoningDepth
 								: 'medium';
+						if (!chatIdProp) {
+							conversationMode = normalizeConversationMode(input.conversationMode);
+						}
 					}
 				} catch (e) {}
 			}
@@ -1202,9 +1214,9 @@
 			}
 
 			// If the file is an audio file, provide the language for STT.
-				let metadata: Record<string, string> = {
-					upload_context: 'chat'
-				};
+			let metadata: Record<string, string> = {
+				upload_context: 'chat'
+			};
 			if (
 				(file.type.startsWith('audio/') || file.type.startsWith('video/')) &&
 				$settings?.audio?.stt?.language
@@ -1408,9 +1420,14 @@
 	// Web functions
 	//////////////////////////
 
-	const initNewChat = async () => {
+	const initNewChat = async (preselectedMode: ConversationMode | null = null) => {
 		console.log('initNewChat');
 		resetWebSearchConfirmation();
+		const requestedMode =
+			preselectedMode ?? normalizeConversationMode($page.url.searchParams.get('mode'));
+		conversationMode = requestedMode;
+		pendingConversationMode = null;
+		chat = null;
 
 		// Mark the outgoing chat as read before resetting; in-place created chats
 		// keep chatIdProp undefined, so navigateHandler never marks them read.
@@ -1674,6 +1691,7 @@
 
 			if (chatContent) {
 				console.log(chatContent);
+				conversationMode = normalizeConversationMode(chatContent?.mode);
 
 				selectedModels =
 					(chatContent?.models ?? undefined) !== undefined
@@ -2024,7 +2042,7 @@
 		if (metadata) {
 			message.metadata = {
 				...(message.metadata ?? {}),
-				...metadata,
+				...metadata
 			};
 		}
 
@@ -2118,7 +2136,6 @@
 
 		console.log(data);
 		await tick();
-
 	};
 
 	//////////////////////////
@@ -2304,7 +2321,7 @@
 			: atSelectedModel !== undefined
 				? [atSelectedModel.id]
 				: selectedModels;
-		selectedModelIds = resolveAgentModeRequestModels(selectedModelIds, $config);
+		selectedModelIds = resolveConversationModeRequestModels(selectedModelIds, conversationMode);
 
 		// Create response messages for each selected model
 		// Build message_ids list: [{model_id, message_id}, ...]
@@ -2517,7 +2534,7 @@
 			$settings?.params?.stream_response ??
 			params?.stream_response ??
 			true;
-		const reasoning = buildReasoningPayload(reasoningDepth);
+		const reasoning = buildConversationModeReasoningPayload(conversationMode, reasoningDepth);
 		// Always include system prompt — backend extracts it and prepends to DB messages.
 		// Only temp chats need conversation messages (persisted chats load from DB).
 		let messages: any[] = [
@@ -2608,6 +2625,7 @@
 			{
 				stream: stream,
 				model: model.id,
+				chat_mode: conversationMode,
 				...(messages.length > 0 ? { messages } : {}),
 				reasoning,
 				params: {
@@ -2960,7 +2978,6 @@
 						mergedResponse.content += value;
 						history.messages[messageId] = message;
 					}
-
 				}
 
 				await saveChatHandler(_chatId, history);
@@ -2981,6 +2998,7 @@
 				{
 					id: _chatId,
 					title: $i18n.t('New Chat'),
+					mode: conversationMode,
 					models: selectedModels,
 					system: $settings.system ?? undefined,
 					params: params,
@@ -3016,6 +3034,7 @@
 		if ($chatId == _chatId) {
 			if (!$temporaryChatEnabled) {
 				chat = await updateChatById(localStorage.token, _chatId, {
+					mode: conversationMode,
 					models: selectedModels,
 					history: history,
 					messages: createMessagesList(history, history.currentId),
@@ -3172,6 +3191,27 @@
 	}}
 />
 
+<ConversationModeConfirmDialog
+	bind:show={showConversationModeConfirmation}
+	title={$i18n.t('Start a new conversation?')}
+	message={$i18n.t(
+		'This conversation mode is fixed. Continue in a new {{MODE}} conversation instead?',
+		{ MODE: pendingConversationMode === 'agent' ? 'Agent' : 'Chat' }
+	)}
+	confirmLabel={$i18n.t('New conversation')}
+	cancelLabel={$i18n.t('Cancel')}
+	on:confirm={async () => {
+		const nextMode = pendingConversationMode;
+		pendingConversationMode = null;
+		if (nextMode) {
+			await goto(`/?mode=${nextMode}`);
+		}
+	}}
+	on:cancel={() => {
+		pendingConversationMode = null;
+	}}
+/>
+
 <DeleteConfirmDialog
 	bind:show={showDeleteConfirm}
 	title={$i18n.t('Delete chat?')}
@@ -3246,6 +3286,7 @@
 							id: $chatId,
 							chat: {
 								title: $chatTitle,
+								mode: conversationMode,
 								models: selectedModels,
 								system: $settings.system ?? undefined,
 								params: params,
@@ -3256,6 +3297,16 @@
 						{history}
 						title={$chatTitle}
 						bind:selectedModels
+						{conversationMode}
+						{conversationModeLocked}
+						{agentModeAvailable}
+						onConversationModeSelect={(mode) => {
+							conversationMode = mode;
+						}}
+						onConversationModeCreateNew={(mode) => {
+							pendingConversationMode = mode;
+							showConversationModeConfirmation = true;
+						}}
 						shareEnabled={!!history.currentId}
 						{initNewChat}
 						scrollToTop={!isNearTop ? scrollToTop : null}
@@ -3277,6 +3328,7 @@
 									{
 										id: uuidv4(),
 										title: title.length > 50 ? `${title.slice(0, 50)}...` : title,
+										mode: conversationMode,
 										models: selectedModels,
 										params: params,
 										history: history,
@@ -3349,6 +3401,12 @@
 										{$i18n.t('Read only')}
 									</div>
 								</div>
+							{:else if agentConversationUnavailable}
+								<div class="pb-6 z-10">
+									<div class="text-xs text-gray-400 dark:text-gray-500 text-center">
+										{$i18n.t('Agent Mode is currently unavailable')}
+									</div>
+								</div>
 							{:else}
 								<div class=" pb-2 {dragged ? 'z-0' : 'z-10'}">
 									<MessageInput
@@ -3414,7 +3472,14 @@
 										}}
 										onChange={(data) => {
 											if (!$temporaryChatEnabled) {
-												saveDraft({ ...data, imageGenerationUserOverride }, $chatId);
+												saveDraft(
+													{
+														...data,
+														conversationMode: conversationMode,
+														imageGenerationUserOverride
+													},
+													$chatId
+												);
 											}
 										}}
 										onImageGenerationToggle={(enabled) => {
@@ -3440,46 +3505,56 @@
 							{/if}
 						{:else}
 							<div class="flex items-center h-full">
-								<Placeholder
-									{history}
-									{selectedModels}
-									bind:messageInput
-									bind:files
-									bind:prompt
-									bind:autoScroll
-									bind:selectedToolIds
-									bind:selectedSkillIds
-									bind:selectedFilterIds
-									bind:imageGenerationEnabled
-									bind:codeInterpreterEnabled
-									bind:webSearchEnabled
-									bind:reasoningDepth
-									bind:atSelectedModel
-									bind:showCommands
-									bind:dragged
-									{pendingOAuthTools}
-									toolServers={$toolServers}
-									{stopResponse}
-									{createMessagePair}
-									{onSelect}
-									{onUpload}
-									onImageGenerationToggle={(enabled) => {
-										imageGenerationUserOverride = enabled;
-									}}
-									onWebSearchToggle={handleWebSearchToggle}
-									onChange={(data) => {
-										if (!$temporaryChatEnabled) {
-											saveDraft({ ...data, imageGenerationUserOverride });
-										}
-									}}
-									on:submit={async (e) => {
-										clearDraft();
-										if (e.detail || files.length > 0) {
-											await tick();
-											submitHandler(e.detail);
-										}
-									}}
-								/>
+								{#if agentConversationUnavailable}
+									<div class="w-full text-sm text-gray-400 dark:text-gray-500 text-center">
+										{$i18n.t('Agent Mode is currently unavailable')}
+									</div>
+								{:else}
+									<Placeholder
+										{history}
+										{selectedModels}
+										bind:messageInput
+										bind:files
+										bind:prompt
+										bind:autoScroll
+										bind:selectedToolIds
+										bind:selectedSkillIds
+										bind:selectedFilterIds
+										bind:imageGenerationEnabled
+										bind:codeInterpreterEnabled
+										bind:webSearchEnabled
+										bind:reasoningDepth
+										bind:atSelectedModel
+										bind:showCommands
+										bind:dragged
+										{pendingOAuthTools}
+										toolServers={$toolServers}
+										{stopResponse}
+										{createMessagePair}
+										{onSelect}
+										{onUpload}
+										onImageGenerationToggle={(enabled) => {
+											imageGenerationUserOverride = enabled;
+										}}
+										onWebSearchToggle={handleWebSearchToggle}
+										onChange={(data) => {
+											if (!$temporaryChatEnabled) {
+												saveDraft({
+													...data,
+													conversationMode: conversationMode,
+													imageGenerationUserOverride
+												});
+											}
+										}}
+										on:submit={async (e) => {
+											clearDraft();
+											if (e.detail || files.length > 0) {
+												await tick();
+												submitHandler(e.detail);
+											}
+										}}
+									/>
+								{/if}
 							</div>
 						{/if}
 					</div>

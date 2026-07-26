@@ -1288,6 +1288,50 @@ class ChatTable:
         except Exception:
             return None
 
+    async def claim_conversation_mode(
+        self,
+        id: str,
+        *,
+        requested: str | None,
+        user_id: str | None,
+        has_agent_run: bool,
+        db: AsyncSession | None = None,
+    ):
+        """Resolve and, when missing, atomically persist a chat's mode."""
+        async with get_async_db_context(db) as session:
+            dialect_name = session.get_bind().dialect.name
+            if dialect_name == 'sqlite' and not session.in_transaction():
+                await session.execute(text('BEGIN IMMEDIATE'))
+
+            stmt = select(Chat).where(Chat.id == id)
+            if user_id is not None:
+                stmt = stmt.where(Chat.user_id == user_id)
+            if dialect_name != 'sqlite':
+                stmt = stmt.with_for_update()
+
+            result = await session.execute(stmt)
+            chat_item = result.scalars().first()
+            if chat_item is None:
+                await session.rollback()
+                return None
+
+            chat_content = dict(chat_item.chat or {})
+            resolution = resolve_conversation_mode(
+                requested=requested,
+                persisted=chat_content.get('mode'),
+                is_new=False,
+                has_agent_run=has_agent_run,
+            )
+            if resolution.should_persist:
+                chat_content['mode'] = resolution.mode.value
+                chat_item.chat = chat_content
+                flag_modified(chat_item, 'chat')
+
+            await session.commit()
+            if resolution.should_persist:
+                await session.refresh(chat_item)
+            return ChatModel.model_validate(chat_item), resolution
+
     async def is_chat_owner(self, id: str, user_id: str, db: AsyncSession | None = None) -> bool:
         """
         Lightweight ownership check — uses EXISTS subquery instead of loading

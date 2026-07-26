@@ -7,20 +7,37 @@ type AgentModeConfig = {
 
 export type ReasoningDepth = 'medium' | 'deep' | 'divergent';
 export type ReasoningEffort = 'medium' | 'high' | 'xhigh';
+export type ConversationMode = 'chat' | 'agent';
 
-export const isAgentModeRequestConstraintEnabled = (config: AgentModeConfig | undefined): boolean =>
+export const isAgentModeCapabilityEnabled = (config: AgentModeConfig | undefined): boolean =>
 	config?.features?.enable_agent_mode === true || config?.enable_agent_mode === true;
 
-export const resolveAgentModeRequestModels = (
+export const isAgentModeRequestConstraintEnabled = isAgentModeCapabilityEnabled;
+
+export const normalizeConversationMode = (value: unknown): ConversationMode =>
+	value === 'agent' ? 'agent' : 'chat';
+
+export const resolveConversationModeRequestModels = (
 	selectedModels: string[],
-	config: AgentModeConfig | undefined
+	conversationMode: ConversationMode
 ): string[] => {
-	if (!isAgentModeRequestConstraintEnabled(config)) {
+	if (conversationMode !== 'agent') {
 		return selectedModels;
 	}
 
 	const leaderModelId = selectedModels.find((modelId) => modelId !== '');
 	return leaderModelId ? [leaderModelId] : [''];
+};
+
+export const resolveAgentModeRequestModels = (
+	selectedModels: string[],
+	config: AgentModeConfig | undefined
+): string[] => {
+	if (!isAgentModeCapabilityEnabled(config)) {
+		return selectedModels;
+	}
+
+	return resolveConversationModeRequestModels(selectedModels, 'agent');
 };
 
 export const getReasoningMaxTokens = (depth: ReasoningDepth): number => {
@@ -52,3 +69,8 @@ export const buildReasoningPayload = (depth: ReasoningDepth) => ({
 	effort: getReasoningEffort(depth),
 	max_tokens: getReasoningMaxTokens(depth)
 });
+
+export const buildConversationModeReasoningPayload = (
+	_conversationMode: ConversationMode,
+	depth: ReasoningDepth
+) => buildReasoningPayload(depth);

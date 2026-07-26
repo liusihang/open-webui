@@ -2232,6 +2232,7 @@ async def chat_completion(
             is_persisted_chat = not chat_id.startswith(('local:', 'channel:'))
             persisted_mode = None
             has_agent_run = False
+            mode_claimed = False
 
             if is_persisted_chat and not is_new_chat:
                 if not await Chats.is_chat_owner(chat_id, user.id) and user.role != 'admin':
@@ -2249,15 +2250,55 @@ async def chat_completion(
                 if persisted_mode is None:
                     has_agent_run = chat_has_agent_mode_evidence(existing_chat.chat)
                     if not has_agent_run:
-                        has_agent_run = await AgentRuns.has_runs_by_chat(chat_id, user.id)
+                        has_agent_run = await AgentRuns.has_runs_by_chat(
+                            chat_id,
+                            existing_chat.user_id,
+                        )
 
             try:
-                resolution = resolve_conversation_mode(
-                    requested=requested_chat_mode,
-                    persisted=persisted_mode,
-                    is_new=is_new_chat or not is_persisted_chat,
-                    has_agent_run=has_agent_run,
-                )
+                if is_persisted_chat and not is_new_chat:
+                    preliminary_resolution = resolve_conversation_mode(
+                        requested=requested_chat_mode,
+                        persisted=persisted_mode,
+                        is_new=False,
+                        has_agent_run=has_agent_run,
+                    )
+                    if (
+                        preliminary_resolution.mode is ConversationMode.AGENT
+                        and not getattr(
+                            request.app.state.config,
+                            'ENABLE_AGENT_MODE',
+                            False,
+                        )
+                    ):
+                        raise HTTPException(
+                            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                            detail={
+                                'code': 'agent_mode_disabled',
+                                'message': 'Agent Mode is disabled for this deployment.',
+                            },
+                        )
+
+                    claimed = await Chats.claim_conversation_mode(
+                        chat_id,
+                        requested=requested_chat_mode,
+                        user_id=None if user.role == 'admin' else user.id,
+                        has_agent_run=has_agent_run,
+                    )
+                    if claimed is None:
+                        raise HTTPException(
+                            status_code=status.HTTP_404_NOT_FOUND,
+                            detail=ERROR_MESSAGES.NOT_FOUND,
+                        )
+                    existing_chat, resolution = claimed
+                    mode_claimed = True
+                else:
+                    resolution = resolve_conversation_mode(
+                        requested=requested_chat_mode,
+                        persisted=persisted_mode,
+                        is_new=is_new_chat or not is_persisted_chat,
+                        has_agent_run=has_agent_run,
+                    )
             except InvalidConversationModeError as exc:
                 raise HTTPException(
                     status_code=status.HTTP_400_BAD_REQUEST,
@@ -2290,7 +2331,9 @@ async def chat_completion(
                 )
 
             metadata['chat_mode'] = resolution.mode.value
-            conversation_mode_should_persist = resolution.should_persist
+            conversation_mode_should_persist = (
+                resolution.should_persist and not mode_claimed
+            )
 
         initial_title_generation = None
         if is_new_chat and tasks and TASKS.TITLE_GENERATION in tasks:

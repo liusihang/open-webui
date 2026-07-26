@@ -22,6 +22,8 @@
 
 	import ShareChatModal from '../chat/ShareChatModal.svelte';
 	import ModelSelector from '../chat/ModelSelector.svelte';
+	import ConversationModeSelector from './ConversationModeSelector.svelte';
+	import type { ConversationMode } from './agentModeRequest';
 	import Tooltip from '../common/Tooltip.svelte';
 	import Menu from '$lib/components/layout/Navbar/Menu.svelte';
 	import UserMenu from '$lib/components/layout/Sidebar/UserMenu.svelte';
@@ -52,6 +54,11 @@
 	export let history;
 	export let selectedModels;
 	export let showModelSelector = true;
+	export let conversationMode: ConversationMode = 'chat';
+	export let conversationModeLocked = false;
+	export let agentModeAvailable = false;
+	export let onConversationModeSelect: (mode: ConversationMode) => void = () => {};
+	export let onConversationModeCreateNew: (mode: ConversationMode) => void = () => {};
 
 	export let onSaveTempChat: () => {};
 	export let archiveChatHandler: (id: string) => void;
@@ -98,6 +105,16 @@
 
 		<div class=" flex max-w-full w-full mx-auto px-1.5 md:px-2 pt-0.5 bg-transparent">
 			<div class="flex items-center w-full max-w-full">
+				<div class="absolute left-1/2 top-1 z-10 -translate-x-1/2 drag-none">
+					<ConversationModeSelector
+						mode={conversationMode}
+						locked={conversationModeLocked}
+						agentAvailable={agentModeAvailable}
+						{readOnly}
+						onSelect={onConversationModeSelect}
+						onCreateNew={onConversationModeCreateNew}
+					/>
+				</div>
 				{#if $mobile && !$showSidebar}
 					<div
 						class="-translate-x-0.5 mr-1 mt-1 self-start flex flex-none items-center text-gray-600 dark:text-gray-400"

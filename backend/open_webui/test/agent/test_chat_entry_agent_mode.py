@@ -115,6 +115,7 @@ def chat_entry_patches(monkeypatch):
         process_payload_calls=[],
         chat_updates=[],
         chat_inserts=[],
+        mode_claims=[],
         stored_chats={
             'chat-1': SimpleNamespace(
                 id='chat-1',
@@ -145,6 +146,28 @@ def _patch_model_and_chat_boundaries(monkeypatch, calls):
 
     async def fake_get_chat_by_id(chat_id):
         return calls.stored_chats.get(chat_id)
+
+    async def fake_claim_conversation_mode(
+        chat_id,
+        *,
+        requested,
+        user_id,
+        has_agent_run,
+        db=None,
+    ):
+        stored = calls.stored_chats.get(chat_id)
+        if stored is None or (user_id is not None and stored.user_id != user_id):
+            return None
+        resolution = main.resolve_conversation_mode(
+            requested=requested,
+            persisted=stored.chat.get('mode'),
+            is_new=False,
+            has_agent_run=has_agent_run,
+        )
+        if resolution.should_persist:
+            stored.chat = {**stored.chat, 'mode': resolution.mode.value}
+        calls.mode_claims.append((chat_id, requested, resolution.mode.value))
+        return stored, resolution
 
     async def fake_update_chat_by_id(chat_id, chat):
         calls.chat_updates.append((chat_id, chat))
@@ -180,6 +203,7 @@ def _patch_model_and_chat_boundaries(monkeypatch, calls):
     monkeypatch.setattr(main.Config, 'get', fake_config_get)
     monkeypatch.setattr(main.Chats, 'is_chat_owner', fake_is_chat_owner)
     monkeypatch.setattr(main.Chats, 'get_chat_by_id', fake_get_chat_by_id)
+    monkeypatch.setattr(main.Chats, 'claim_conversation_mode', fake_claim_conversation_mode)
     monkeypatch.setattr(main.Chats, 'update_chat_by_id', fake_update_chat_by_id)
     monkeypatch.setattr(main.Chats, 'insert_new_chat', fake_insert_new_chat)
     monkeypatch.setattr(main.Chats, 'get_message_by_id_and_message_id', fake_get_message)
@@ -351,6 +375,26 @@ async def test_existing_chat_rejects_conversation_mode_mismatch_before_writes(
     assert chat_entry_patches.runtime_calls == []
     assert chat_entry_patches.upserts == []
     assert await AgentRuns.list_runs_by_chat('chat-1', 'user-1') == []
+
+
+@pytest.mark.asyncio
+async def test_existing_legacy_mode_is_claimed_before_provider_dispatch(
+    agent_run_db,
+    chat_entry_patches,
+):
+    request = _request(enable_agent_mode=True)
+    chat_entry_patches.stored_chats['chat-1'].chat.pop('mode')
+
+    response = await main.chat_completion(
+        request,
+        _chat_form(include_session=False, chat_mode='chat'),
+        _user(),
+    )
+
+    assert response['legacy'] is True
+    assert chat_entry_patches.mode_claims == [('chat-1', 'chat', 'chat')]
+    assert chat_entry_patches.stored_chats['chat-1'].chat['mode'] == 'chat'
+    assert len(chat_entry_patches.provider_calls) == 1
 
 
 @pytest.mark.asyncio

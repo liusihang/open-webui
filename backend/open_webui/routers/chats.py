@@ -1082,18 +1082,19 @@ async def get_shared_chat_by_id(
     if user.role == 'pending':
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail=ERROR_MESSAGES.NOT_FOUND)
 
+    shared = await SharedChats.get_by_id(share_id, db=db)
     chat = await Chats.get_chat_by_share_id(share_id, db=db)
 
     # Fallback: admins can also access any chat directly by chat ID
     if not chat and user.role == 'admin' and ENABLE_ADMIN_CHAT_ACCESS:
         chat = await Chats.get_chat_by_id(share_id, db=db)
+        shared = None
 
     if not chat:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail=ERROR_MESSAGES.NOT_FOUND)
 
     # Look up the original chat_id to check access grants (admins bypass)
     if user.role != 'admin' or not ENABLE_ADMIN_CHAT_ACCESS:
-        shared = await SharedChats.get_by_id(share_id, db=db)
         if shared and shared.user_id != user.id:
             has_grant = await AccessGrants.has_access(
                 user_id=user.id,
@@ -1108,7 +1109,12 @@ async def get_shared_chat_by_id(
                     detail=ERROR_MESSAGES.ACCESS_PROHIBITED,
                 )
 
-    return ChatResponse(**chat.model_dump())
+    return await _chat_response_with_resolved_mode(
+        chat,
+        db,
+        evidence_chat_id=shared.chat_id if shared else None,
+        evidence_user_id=shared.user_id if shared else None,
+    )
 
 
 ############################
@@ -1197,6 +1203,46 @@ async def compact_chat_by_id(
 ############################
 
 
+async def _chat_response_with_resolved_mode(
+    chat,
+    db: AsyncSession | None,
+    *,
+    evidence_chat_id: str | None = None,
+    evidence_user_id: str | None = None,
+) -> ChatResponse:
+    chat_content = dict(chat.chat or {})
+    persisted_mode = chat_content.get('mode')
+    has_agent_run = False
+    if persisted_mode is None:
+        has_agent_run = chat_has_agent_mode_evidence(chat_content)
+        if not has_agent_run:
+            has_agent_run = await AgentRuns.has_runs_by_chat(
+                evidence_chat_id or chat.id,
+                evidence_user_id or chat.user_id,
+                db=db,
+            )
+
+    try:
+        resolution = resolve_conversation_mode(
+            requested=None,
+            persisted=persisted_mode,
+            is_new=False,
+            has_agent_run=has_agent_run,
+        )
+    except InvalidConversationModeError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail={
+                'code': 'invalid_persisted_conversation_mode',
+                'message': str(exc),
+            },
+        ) from exc
+    chat_content['mode'] = resolution.mode.value
+    return ChatResponse(
+        **chat.model_copy(update={'chat': chat_content}).model_dump()
+    )
+
+
 @router.get('/{id}', response_model=ChatResponse | None)
 async def get_chat_by_id(id: str, user=Depends(get_verified_user), db: AsyncSession = Depends(get_async_session)):
     chat = await Chats.get_chat_by_id_and_user_id(id, user.id, db=db)
@@ -1225,7 +1271,7 @@ async def get_chat_by_id(id: str, user=Depends(get_verified_user), db: AsyncSess
                         chat = candidate
 
     if chat:
-        return ChatResponse(**chat.model_dump())
+        return await _chat_response_with_resolved_mode(chat, db)
 
     raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail=ERROR_MESSAGES.NOT_FOUND)
 
@@ -1243,7 +1289,7 @@ async def update_chat_by_id(
     user=Depends(get_verified_user),
     db: AsyncSession = Depends(get_async_session),
 ):
-    chat = await Chats.get_chat_by_id_and_user_id(id, user.id, db=db)
+    chat = await Chats.get_chat_by_id_and_user_id(id, user.id)
     if chat:
         persisted_mode = (chat.chat or {}).get('mode')
         has_agent_run = False
@@ -1253,10 +1299,14 @@ async def update_chat_by_id(
                 has_agent_run = await AgentRuns.has_runs_by_chat(id, user.id, db=db)
 
         try:
-            mode_resolution = resolve_conversation_mode(
-                requested=form_data.chat.get('mode') if 'mode' in form_data.chat else None,
-                persisted=persisted_mode,
-                is_new=False,
+            claimed = await Chats.claim_conversation_mode(
+                id,
+                requested=(
+                    form_data.chat.get('mode')
+                    if 'mode' in form_data.chat
+                    else None
+                ),
+                user_id=user.id,
                 has_agent_run=has_agent_run,
             )
         except InvalidConversationModeError as exc:
@@ -1274,6 +1324,13 @@ async def update_chat_by_id(
                     'persisted': exc.persisted.value,
                 },
             ) from exc
+
+        if claimed is None:
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail=ERROR_MESSAGES.ACCESS_PROHIBITED,
+            )
+        chat, mode_resolution = claimed
 
         updated_chat = {**chat.chat, **form_data.chat}
         updated_chat['mode'] = mode_resolution.mode.value
