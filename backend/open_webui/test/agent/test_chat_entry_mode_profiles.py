@@ -27,6 +27,7 @@ from open_webui.internal.db import Base
 from open_webui.models.agent_runs import AgentRuns
 from open_webui.models.conversation_mode_profiles import (
     ConversationModeProfileIntegrityError,
+    ConversationModeProfileLegacyBindingError,
     ConversationModeProfileRevisionModel,
 )
 from open_webui.utils import middleware as chat_middleware
@@ -100,6 +101,9 @@ def profile_entry(monkeypatch):  # noqa: C901
         chat_inserts=[],
         atomic_inserts=[],
         atomic_expected_revisions=[],
+        lifecycle_resolutions=[],
+        temporary_binding_calls=[],
+        temporary_bindings={},
         response_contexts=[],
         chat_reads=[],
         stored_chats={
@@ -191,6 +195,49 @@ def profile_entry(monkeypatch):  # noqa: C901
         )
         calls.events.append(('mode_claim', resolution.mode.value))
         return stored, resolution
+
+    async def resolve_persisted_binding(
+        *,
+        chat_id,
+        user_id,
+        requested_mode,
+        has_agent_run,
+        db=None,
+    ):
+        stored = calls.stored_chats.get(chat_id)
+        resolution = main.resolve_conversation_mode(
+            requested=requested_mode,
+            persisted=stored.chat.get('mode'),
+            is_new=False,
+            has_agent_run=has_agent_run,
+        )
+        revision_id = stored.mode_profile_revision_id or calls.current[resolution.mode.value].id
+        stored.mode_profile_revision_id = revision_id
+        calls.lifecycle_resolutions.append((chat_id, resolution.mode.value, revision_id))
+        return SimpleNamespace(
+            mode=resolution.mode.value,
+            mode_profile_revision_id=revision_id,
+        )
+
+    async def create_temporary_binding(
+        *,
+        user_id,
+        temporary_conversation_id,
+        mode,
+        expires_at,
+        now=None,
+        db=None,
+    ):
+        key = (user_id, temporary_conversation_id)
+        binding = calls.temporary_bindings.get(key)
+        if binding is None:
+            binding = SimpleNamespace(
+                mode=str(mode),
+                mode_profile_revision_id=calls.current[str(mode)].id,
+            )
+            calls.temporary_bindings[key] = binding
+        calls.temporary_binding_calls.append((key, str(mode), expires_at))
+        return binding
 
     async def insert_chat(
         chat_id,
@@ -349,6 +396,15 @@ def profile_entry(monkeypatch):  # noqa: C901
     monkeypatch.setattr(main.Chats, 'is_chat_owner', is_owner)
     monkeypatch.setattr(main.Chats, 'get_chat_by_id', get_chat)
     monkeypatch.setattr(main.Chats, 'claim_conversation_mode', claim_mode)
+    monkeypatch.setattr(
+        main,
+        'ConversationModeProfiles',
+        SimpleNamespace(
+            resolve_persisted_chat_binding=resolve_persisted_binding,
+            create_temporary_binding=create_temporary_binding,
+        ),
+        raising=False,
+    )
     monkeypatch.setattr(main.Chats, 'insert_new_chat', insert_chat)
     monkeypatch.setattr(
         main,
@@ -545,7 +601,7 @@ async def test_bound_mode_claim_db_failure_is_stable_non_secret_503(
     async def fail_claim(*args, **kwargs):
         raise SQLAlchemyError('private bound claim database detail')
 
-    monkeypatch.setattr(main.Chats, 'claim_conversation_mode', fail_claim)
+    monkeypatch.setattr(main.ConversationModeProfiles, 'resolve_persisted_chat_binding', fail_claim)
 
     with pytest.raises(main.HTTPException) as exc_info:
         await main.chat_completion(
@@ -561,6 +617,73 @@ async def test_bound_mode_claim_db_failure_is_stable_non_secret_503(
     }
     assert 'private bound claim database detail' not in repr(exc_info.value.detail)
     assert profile_entry.provider_calls == []
+
+
+@pytest.mark.asyncio
+async def test_post_cutover_unbound_persisted_chat_fails_before_dispatch(
+    monkeypatch,
+    agent_run_db,
+    profile_entry,
+):
+    profile_entry.stored_chats['chat-1'] = SimpleNamespace(
+        id='chat-1',
+        user_id='user-1',
+        mode_profile_revision_id=None,
+        chat={
+            'id': 'chat-1',
+            'mode': 'chat',
+            'history': {'currentId': None, 'messages': {}},
+        },
+    )
+
+    async def reject_post_cutover(**kwargs):
+        raise ConversationModeProfileLegacyBindingError(chat_id='chat-1')
+
+    monkeypatch.setattr(
+        main.ConversationModeProfiles,
+        'resolve_persisted_chat_binding',
+        reject_post_cutover,
+    )
+
+    with pytest.raises(main.HTTPException) as exc_info:
+        await main.chat_completion(
+            _request(enable_agent_mode=True),
+            _existing_chat_form(mode='chat'),
+            _user(),
+        )
+
+    assert exc_info.value.status_code == 500
+    assert exc_info.value.detail == {
+        'code': 'mode_profile_unbound_conversation',
+        'message': 'The conversation mode profile binding failed integrity verification.',
+    }
+    assert profile_entry.provider_calls == []
+    assert profile_entry.runtime_calls == []
+
+
+@pytest.mark.asyncio
+async def test_local_temporary_chat_binds_once_and_reuses_its_revision_after_head_switch(
+    agent_run_db,
+    profile_entry,
+):
+    form = _existing_chat_form(mode='chat')
+    form['chat_id'] = 'local:temporary-session'
+    form['mode_profile_revision_id'] = 'chat-current'
+
+    await main.chat_completion(_request(enable_agent_mode=True), form, _user())
+    profile_entry.current['chat'] = _revision('chat-new-head', 'chat')
+
+    follow_up = _existing_chat_form(mode='chat')
+    follow_up['chat_id'] = 'local:temporary-session'
+    follow_up['mode_profile_revision_id'] = 'chat-current'
+    await main.chat_completion(_request(enable_agent_mode=True), follow_up, _user())
+
+    assert [call[1] for call in profile_entry.temporary_binding_calls] == ['chat', 'chat']
+    assert profile_entry.temporary_bindings[('user-1', 'local:temporary-session')].mode_profile_revision_id == (
+        'chat-current'
+    )
+    assert ('bound_revision', 'chat-current', 'chat') in profile_entry.events
+    assert ('current_revision', 'chat') not in profile_entry.events
 
 
 @pytest.mark.asyncio

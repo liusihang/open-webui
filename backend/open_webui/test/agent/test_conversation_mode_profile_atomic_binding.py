@@ -12,12 +12,17 @@ from open_webui.agent.conversation_mode_profiles import (
     ProfileDefaults,
 )
 from open_webui.models import chat_messages as chat_messages_module
+from open_webui.models import chats as chats_model_module
+from open_webui.models.automations import AutomationRun
 from open_webui.models.chat_messages import ChatMessage, ChatMessages
-from open_webui.models.chats import Chat, ChatForm, Chats
+from open_webui.models.chats import Chat, ChatForm, ChatImportForm, Chats
 from open_webui.models.conversation_mode_profiles import (
     ConversationModeProfileHead,
     ConversationModeProfileRevision,
+    ConversationModeProfiles,
+    ConversationModeProfileTemporaryBinding,
 )
+from open_webui.models.shared_chats import SharedChat
 from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
@@ -34,8 +39,11 @@ async def atomic_profile_db(tmp_path, monkeypatch):
     async with engine.begin() as connection:
         await connection.run_sync(ConversationModeProfileRevision.__table__.create)
         await connection.run_sync(ConversationModeProfileHead.__table__.create)
+        await connection.run_sync(ConversationModeProfileTemporaryBinding.__table__.create)
         await connection.run_sync(Chat.__table__.create)
         await connection.run_sync(ChatMessage.__table__.create)
+        await connection.run_sync(SharedChat.__table__.create)
+        await connection.run_sync(AutomationRun.__table__.create)
 
     sessions = async_sessionmaker(engine, expire_on_commit=False)
     old_profile = ConversationModeProfile(
@@ -76,6 +84,7 @@ async def atomic_profile_db(tmp_path, monkeypatch):
             yield session
 
     monkeypatch.setattr(profile_service, 'get_async_db_context', session_context)
+    monkeypatch.setattr(chats_model_module, 'get_async_db_context', session_context)
     yield sessions
     await engine.dispose()
 
@@ -318,6 +327,215 @@ async def test_atomic_new_chat_commits_chat_and_initial_messages_together(
             .all()
         )
     assert {message.role for message in messages} == {'user', 'assistant'}
+
+
+@pytest.mark.asyncio
+async def test_atomic_new_chat_transfers_server_temporary_binding_without_reselecting_head(
+    atomic_profile_db,
+):
+    async with atomic_profile_db() as session:
+        temporary = await ConversationModeProfiles.create_temporary_binding(
+            user_id='user-1',
+            temporary_conversation_id='local:save-to-history',
+            mode='chat',
+            expires_at=4_000_000_000,
+            db=session,
+        )
+        await session.commit()
+
+    async with atomic_profile_db() as session:
+        await _begin_write(session)
+        head = await _lock_head(session)
+        head.current_revision_id = NEW_REVISION_ID
+        await session.commit()
+
+    result = await profile_service.insert_new_chat_with_current_mode_profile(
+        _app(),
+        mode='chat',
+        revision_hint=None,
+        chat_id='chat-from-temporary-atomic',
+        user_id='user-1',
+        form_data=_chat_form('chat-from-temporary-atomic'),
+        source_temporary_conversation_id='local:save-to-history',
+    )
+
+    assert result.chat.mode_profile_revision_id == temporary.mode_profile_revision_id
+    assert await _chat_binding(atomic_profile_db, 'chat-from-temporary-atomic') == temporary.mode_profile_revision_id
+    async with atomic_profile_db() as session:
+        assert (
+            await session.scalar(
+                select(ConversationModeProfileTemporaryBinding).where(
+                    ConversationModeProfileTemporaryBinding.user_id == 'user-1',
+                    ConversationModeProfileTemporaryBinding.temporary_conversation_id == 'local:save-to-history',
+                )
+            )
+            is None
+        )
+
+
+@pytest.mark.asyncio
+async def test_atomic_new_chat_rejects_missing_temporary_source_without_creating_chat(
+    atomic_profile_db,
+):
+    with pytest.raises(profile_service.ModeProfileTemporaryBindingError) as exc_info:
+        await profile_service.insert_new_chat_with_current_mode_profile(
+            _app(),
+            mode='chat',
+            revision_hint=None,
+            chat_id='chat-from-missing-temporary',
+            user_id='user-1',
+            form_data=_chat_form('chat-from-missing-temporary'),
+            source_temporary_conversation_id='local:missing',
+        )
+
+    assert exc_info.value.code == 'mode_profile_temporary_binding_missing'
+    assert await _chat_binding(atomic_profile_db, 'chat-from-missing-temporary') is None
+
+
+@pytest.mark.asyncio
+async def test_external_import_ignores_client_revision_and_binds_current_server_revision(
+    atomic_profile_db,
+):
+    async with atomic_profile_db() as session:
+        await _begin_write(session)
+        head = await _lock_head(session)
+        head.current_revision_id = NEW_REVISION_ID
+        await session.commit()
+
+    imported = await profile_service.import_chats_with_mode_profile_bindings(
+        _app(),
+        user_id='user-1',
+        chat_import_forms=[
+            ChatImportForm.model_validate(
+                {
+                    'chat': {
+                        **_chat_form('external-import').chat,
+                        'mode_profile_revision_id': OLD_REVISION_ID,
+                    },
+                    'mode_profile_revision_id': OLD_REVISION_ID,
+                }
+            )
+        ],
+    )
+
+    assert len(imported) == 1
+    assert imported[0].mode_profile_revision_id == NEW_REVISION_ID
+    assert imported[0].chat['mode'] == 'chat'
+    assert 'mode_profile_revision_id' not in imported[0].chat
+
+
+@pytest.mark.asyncio
+async def test_external_import_rolls_back_the_whole_batch_when_any_form_is_invalid(
+    atomic_profile_db,
+):
+    with pytest.raises(ValueError):
+        await profile_service.import_chats_with_mode_profile_bindings(
+            _app(),
+            user_id='user-1',
+            chat_import_forms=[
+                ChatImportForm(chat=_chat_form('import-would-be-first').chat),
+                ChatImportForm(chat={**_chat_form('import-invalid').chat, 'mode': 'unsupported'}),
+            ],
+        )
+
+    async with atomic_profile_db() as session:
+        assert (await session.execute(select(Chat))).scalars().all() == []
+
+
+@pytest.mark.asyncio
+async def test_generic_update_cannot_spoof_or_mutate_a_chat_mode_profile_binding(
+    atomic_profile_db,
+):
+    await profile_service.insert_new_chat_with_current_mode_profile(
+        _app(),
+        mode='chat',
+        revision_hint=None,
+        chat_id='bound-chat-update',
+        user_id='user-1',
+        form_data=_chat_form('bound-chat-update'),
+    )
+
+    updated = await Chats.update_chat_by_id(
+        'bound-chat-update',
+        {
+            **_chat_form('bound-chat-update').chat,
+            'title': 'Updated',
+            'mode_profile_revision_id': NEW_REVISION_ID,
+        },
+    )
+
+    assert updated is not None
+    assert updated.mode_profile_revision_id == OLD_REVISION_ID
+    assert 'mode_profile_revision_id' not in updated.chat
+    assert await _chat_binding(atomic_profile_db, 'bound-chat-update') == OLD_REVISION_ID
+
+
+@pytest.mark.asyncio
+async def test_atomic_new_chat_rejects_expired_or_wrong_mode_temporary_sources_without_writes(
+    atomic_profile_db,
+):
+    async with atomic_profile_db() as session:
+        session.add_all(
+            [
+                ConversationModeProfileTemporaryBinding(
+                    id='temporary-expired',
+                    user_id='user-1',
+                    temporary_conversation_id='local:expired',
+                    mode='chat',
+                    mode_profile_revision_id=OLD_REVISION_ID,
+                    created_at=1,
+                    updated_at=1,
+                    expires_at=1,
+                ),
+                ConversationModeProfileTemporaryBinding(
+                    id='temporary-wrong-mode',
+                    user_id='user-1',
+                    temporary_conversation_id='local:agent',
+                    mode='agent',
+                    mode_profile_revision_id=OLD_REVISION_ID,
+                    created_at=1,
+                    updated_at=1,
+                    expires_at=4_000_000_000,
+                ),
+            ]
+        )
+        await session.commit()
+
+    for temporary_id, expected_code in (
+        ('local:expired', 'mode_profile_temporary_binding_expired'),
+        ('local:agent', 'mode_profile_temporary_binding_mode_mismatch'),
+    ):
+        with pytest.raises(profile_service.ModeProfileTemporaryBindingError) as exc_info:
+            await profile_service.insert_new_chat_with_current_mode_profile(
+                _app(),
+                mode='chat',
+                revision_hint=None,
+                chat_id=f'chat-{temporary_id}',
+                user_id='user-1',
+                form_data=_chat_form(f'chat-{temporary_id}'),
+                source_temporary_conversation_id=temporary_id,
+            )
+        assert exc_info.value.code == expected_code
+        assert await _chat_binding(atomic_profile_db, f'chat-{temporary_id}') is None
+
+
+@pytest.mark.asyncio
+async def test_delete_removes_only_chat_and_keeps_immutable_profile_revision(
+    atomic_profile_db,
+):
+    await profile_service.insert_new_chat_with_current_mode_profile(
+        _app(),
+        mode='chat',
+        revision_hint=None,
+        chat_id='bound-chat-delete',
+        user_id='user-1',
+        form_data=_chat_form('bound-chat-delete'),
+    )
+
+    assert await Chats.delete_chat_by_id('bound-chat-delete') is True
+    async with atomic_profile_db() as session:
+        assert await session.get(Chat, 'bound-chat-delete') is None
+        assert await session.get(ConversationModeProfileRevision, OLD_REVISION_ID) is not None
 
 
 def _revision_row(

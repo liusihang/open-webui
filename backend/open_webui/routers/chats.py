@@ -15,13 +15,18 @@ from open_webui.agent.conversation_mode import (
     normalize_new_conversation_chat,
     resolve_conversation_mode,
 )
+from open_webui.agent.conversation_mode_profile_service import (
+    ModeProfileServiceUnavailableError,
+    ModeProfileTemporaryBindingError,
+    import_chats_with_mode_profile_bindings,
+    insert_new_chat_with_current_mode_profile,
+)
 from open_webui.config import ENABLE_ADMIN_CHAT_ACCESS, ENABLE_ADMIN_EXPORT
 from open_webui.constants import ERROR_MESSAGES
 from open_webui.events import EVENTS, publish_event
 from open_webui.internal.db import get_async_session
 from open_webui.models.access_grants import AccessGrants
 from open_webui.models.agent_runs import AgentRuns
-from open_webui.models.config import Config
 from open_webui.models.chats import (
     AggregateChatStats,
     ChatBody,
@@ -35,6 +40,12 @@ from open_webui.models.chats import (
     ChatTitleIdResponse,
     ChatUsageStatsListResponse,
     MessageStats,
+)
+from open_webui.models.config import Config
+from open_webui.models.conversation_mode_profiles import (
+    ConversationModeProfileIntegrityError,
+    ConversationModeProfileLegacyBindingError,
+    ConversationModeProfiles,
 )
 from open_webui.models.folders import Folders
 from open_webui.models.shared_chats import SharedChatResponse, SharedChats
@@ -665,6 +676,7 @@ async def create_new_chat(
     form_data = ChatForm(
         chat=normalized_chat,
         folder_id=form_data.folder_id,
+        source_temporary_conversation_id=form_data.source_temporary_conversation_id,
     )
 
     # Reject a folder_id that doesn't belong to the caller. Without this the
@@ -683,7 +695,16 @@ async def create_new_chat(
                 )
 
     try:
-        chat = await Chats.insert_new_chat(str(uuid4()), user.id, form_data, db=db)
+        creation = await insert_new_chat_with_current_mode_profile(
+            request.app,
+            mode=normalized_chat['mode'],
+            revision_hint=None,
+            chat_id=str(uuid4()),
+            user_id=user.id,
+            form_data=form_data,
+            source_temporary_conversation_id=form_data.source_temporary_conversation_id,
+        )
+        chat = creation.chat
         await publish_event(
             request,
             EVENTS.CHAT_CREATED,
@@ -692,6 +713,22 @@ async def create_new_chat(
             data={'title': chat.title, 'folder_id': chat.folder_id},
         )
         return ChatResponse(**chat.model_dump())
+    except ModeProfileTemporaryBindingError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail={
+                'code': exc.code,
+                'message': 'The temporary conversation is no longer available. Start a new conversation.',
+            },
+        ) from exc
+    except ModeProfileServiceUnavailableError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail={
+                'code': exc.code,
+                'message': 'The conversation mode profile service is temporarily unavailable.',
+            },
+        ) from exc
     except Exception as e:
         log.exception(e)
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=ERROR_MESSAGES.DEFAULT())
@@ -712,7 +749,11 @@ async def import_chats(
     await require_chat_import_permission(request, user, db)
 
     try:
-        chats = await Chats.import_chats(user.id, form_data.chats, db=db)
+        chats = await import_chats_with_mode_profile_bindings(
+            request.app,
+            user_id=user.id,
+            chat_import_forms=form_data.chats,
+        )
         await publish_event(
             request,
             EVENTS.CHAT_IMPORTED,
@@ -725,6 +766,14 @@ async def import_chats(
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail={'code': exc.code, 'message': str(exc)},
+        ) from exc
+    except ModeProfileServiceUnavailableError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail={
+                'code': exc.code,
+                'message': 'The conversation mode profile service is temporarily unavailable.',
+            },
         ) from exc
     except Exception as e:
         log.exception(e)
@@ -1639,6 +1688,37 @@ class CloneForm(BaseModel):
     title: str | None = None
 
 
+async def _resolve_server_source_mode_profile_revision(chat, db: AsyncSession | None) -> str:
+    chat_content = dict(chat.chat or {})
+    has_agent_run = chat_has_agent_mode_evidence(chat_content)
+    if chat_content.get('mode') is None and not has_agent_run:
+        has_agent_run = await AgentRuns.has_runs_by_chat(chat.id, chat.user_id, db=db)
+    try:
+        binding = await ConversationModeProfiles.resolve_persisted_chat_binding(
+            chat_id=chat.id,
+            user_id=chat.user_id,
+            requested_mode=None,
+            has_agent_run=has_agent_run,
+        )
+    except (ConversationModeProfileIntegrityError, ConversationModeProfileLegacyBindingError) as exc:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail={
+                'code': getattr(exc, 'code', 'mode_profile_binding_invalid'),
+                'message': 'The conversation mode profile binding failed integrity verification.',
+            },
+        ) from exc
+    if binding is None:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail={
+                'code': 'mode_profile_unbound_conversation',
+                'message': 'The conversation mode profile binding is unavailable.',
+            },
+        )
+    return binding.mode_profile_revision_id
+
+
 @router.post('/{id}/clone', response_model=ChatResponse | None)
 async def clone_chat_by_id(
     request: Request,
@@ -1651,6 +1731,7 @@ async def clone_chat_by_id(
 
     chat = await Chats.get_chat_by_id_and_user_id(id, user.id, db=db)
     if chat:
+        source_mode_profile_revision_id = await _resolve_server_source_mode_profile_revision(chat, db)
         updated_chat = {
             **chat.chat,
             'originalChatId': chat.id,
@@ -1658,9 +1739,10 @@ async def clone_chat_by_id(
             'title': form_data.title if form_data.title else f'Clone of {chat.title}',
         }
 
-        chats = await Chats.import_chats(
-            user.id,
-            [
+        chats = await import_chats_with_mode_profile_bindings(
+            request.app,
+            user_id=user.id,
+            chat_import_forms=[
                 ChatImportForm(
                     **{
                         'chat': updated_chat,
@@ -1670,7 +1752,7 @@ async def clone_chat_by_id(
                     }
                 )
             ],
-            db=db,
+            source_mode_profile_revision_ids=[source_mode_profile_revision_id],
         )
 
         if chats:
@@ -1706,21 +1788,28 @@ async def clone_shared_chat_by_id(
 ):
     await require_chat_import_permission(request, user, db)
 
-    chat = await Chats.get_chat_by_share_id(id, db=db)
-
-    # Fallback: admins can also access any chat directly by chat ID
-    if not chat and user.role == 'admin' and ENABLE_ADMIN_CHAT_ACCESS:
+    shared = await SharedChats.get_by_id(id, db=db)
+    if shared is not None:
+        chat = await Chats.get_chat_by_id(shared.chat_id, db=db)
+        if chat is None:
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail=ERROR_MESSAGES.NOT_FOUND,
+            )
+    elif user.role == 'admin' and ENABLE_ADMIN_CHAT_ACCESS:
         chat = await Chats.get_chat_by_id(id, db=db)
-
-    if not chat:
+        if chat is None:
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail=ERROR_MESSAGES.NOT_FOUND,
+            )
+    else:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail=ERROR_MESSAGES.NOT_FOUND,
         )
 
-    # Enforce access grants (owner and admins bypass)
-    shared = await SharedChats.get_by_id(id, db=db)
-    if shared and user.role != 'admin' and shared.user_id != user.id:
+    if shared is not None and user.role != 'admin' and shared.user_id != user.id:
         has_grant = await AccessGrants.has_access(
             user_id=user.id,
             resource_type='shared_chat',
@@ -1734,6 +1823,7 @@ async def clone_shared_chat_by_id(
                 detail=ERROR_MESSAGES.ACCESS_PROHIBITED,
             )
 
+    source_mode_profile_revision_id = await _resolve_server_source_mode_profile_revision(chat, db)
     updated_chat = {
         **chat.chat,
         'originalChatId': chat.id,
@@ -1741,9 +1831,10 @@ async def clone_shared_chat_by_id(
         'title': f'Clone of {chat.title}',
     }
 
-    chats = await Chats.import_chats(
-        user.id,
-        [
+    chats = await import_chats_with_mode_profile_bindings(
+        request.app,
+        user_id=user.id,
+        chat_import_forms=[
             ChatImportForm(
                 **{
                     'chat': updated_chat,
@@ -1753,7 +1844,7 @@ async def clone_shared_chat_by_id(
                 }
             )
         ],
-        db=db,
+        source_mode_profile_revision_ids=[source_mode_profile_revision_id],
     )
 
     if chats:

@@ -9,7 +9,7 @@ from contextlib import asynccontextmanager
 from types import MappingProxyType
 from typing import TYPE_CHECKING, Any
 
-from open_webui.agent.conversation_mode import ConversationMode
+from open_webui.agent.conversation_mode import ConversationMode, resolve_conversation_mode
 from open_webui.agent.conversation_mode_profiles import (
     ConversationModeProfile,
     ModeProfileValidationError,
@@ -227,6 +227,14 @@ class ConversationModeProfileBindingIntegrityError(ConversationModeProfileStoreE
         )
 
 
+class ConversationModeProfileLegacyBindingError(ConversationModeProfileStoreError):
+    code = 'mode_profile_unbound_conversation'
+
+    def __init__(self, *, chat_id: str) -> None:
+        self.chat_id = chat_id
+        super().__init__('Conversation mode profile binding is required for this conversation')
+
+
 class ConversationModeProfileHeadModel(BaseModel):
     model_config = ConfigDict(from_attributes=True, frozen=True, strict=True)
 
@@ -295,6 +303,16 @@ class ConversationModeProfileChatBindingModel(BaseModel):
     chat_id: str
     user_id: str
     mode_profile_revision_id: str
+
+
+class ConversationModeProfilePersistedChatResolutionModel(BaseModel):
+    model_config = ConfigDict(frozen=True, strict=True)
+
+    chat_id: str
+    user_id: str
+    mode: str
+    mode_profile_revision_id: str
+    binding: ConversationModeProfileChatBindingModel
 
 
 def _normalized_mode(mode: ConversationMode | str) -> str:
@@ -833,6 +851,101 @@ class ConversationModeProfileTable:
                 user_id=user_id,
                 revision=revision,
                 dialect_name=dialect_name,
+            )
+
+    async def resolve_persisted_chat_binding(
+        self,
+        *,
+        chat_id: str,
+        user_id: str | None,
+        requested_mode: str | None,
+        has_agent_run: bool,
+        db: AsyncSession | None = None,
+    ) -> ConversationModeProfilePersistedChatResolutionModel | None:
+        """Resolve a persisted chat's immutable profile binding without consulting a later head.
+
+        Unbound chats are only a migration-compatibility case: they must have
+        existed at or before the mode head's cutover and bind to that mode's
+        immutable baseline revision.  The whole decision and write occur in a
+        single write transaction so concurrent workers converge.
+        """
+        async with _write_session(db) as (session, dialect_name):
+            chat = await self._lock_chat(
+                session,
+                chat_id=chat_id,
+                user_id=user_id,
+                dialect_name=dialect_name,
+            )
+            if chat is None:
+                return None
+
+            chat_content = dict(chat.chat) if isinstance(chat.chat, Mapping) else {}
+            resolution = resolve_conversation_mode(
+                requested=requested_mode,
+                persisted=chat_content.get('mode'),
+                is_new=False,
+                has_agent_run=has_agent_run,
+            )
+            mode = resolution.mode.value
+
+            if chat.mode_profile_revision_id is not None:
+                revision_row = await session.get(
+                    ConversationModeProfileRevision,
+                    chat.mode_profile_revision_id,
+                )
+                if revision_row is None:
+                    raise ConversationModeProfileIntegrityError(
+                        chat.mode_profile_revision_id,
+                        f'Conversation mode profile revision {chat.mode_profile_revision_id} is unavailable',
+                    )
+                revision = _revision_to_model(revision_row, expected_mode=mode)
+                binding = ConversationModeProfileChatBindingModel(
+                    chat_id=chat.id,
+                    user_id=chat.user_id,
+                    mode_profile_revision_id=revision.id,
+                )
+                return ConversationModeProfilePersistedChatResolutionModel(
+                    chat_id=chat.id,
+                    user_id=chat.user_id,
+                    mode=mode,
+                    mode_profile_revision_id=revision.id,
+                    binding=binding,
+                )
+
+            head = await self._lock_head(session, mode, dialect_name)
+            if head is None:
+                raise ConversationModeProfileIntegrityError(
+                    '',
+                    f'Conversation mode profile head {mode} is unavailable',
+                )
+            if chat.created_at > head.cutover_at:
+                raise ConversationModeProfileLegacyBindingError(chat_id=chat.id)
+
+            baseline_row = await session.get(
+                ConversationModeProfileRevision,
+                head.baseline_revision_id,
+            )
+            if baseline_row is None:
+                raise ConversationModeProfileIntegrityError(
+                    head.baseline_revision_id,
+                    f'Conversation mode profile baseline revision for {mode} is unavailable',
+                )
+            baseline = _revision_to_model(baseline_row, expected_mode=mode)
+            if resolution.should_persist:
+                chat_content['mode'] = mode
+                chat.chat = chat_content
+            chat.mode_profile_revision_id = baseline.id
+            binding = ConversationModeProfileChatBindingModel(
+                chat_id=chat.id,
+                user_id=chat.user_id,
+                mode_profile_revision_id=baseline.id,
+            )
+            return ConversationModeProfilePersistedChatResolutionModel(
+                chat_id=chat.id,
+                user_id=chat.user_id,
+                mode=mode,
+                mode_profile_revision_id=baseline.id,
+                binding=binding,
             )
 
     async def _recover_temporary_binding_insert_conflict(

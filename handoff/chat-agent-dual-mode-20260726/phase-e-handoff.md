@@ -1,0 +1,59 @@
+# Phase E handoff
+
+Truth surface: `/Users/liusihang/.codex/worktrees/d790/openwebui` on `codex/pr7-chat-agent-dual-mode-20260726`, starting Phase E from `a34613ab3ad1142ef882c3e74432b1d246b104ff`. Phase D passed final independent spec and quality review. Docker image construction, remote deployment, and formal live remain out of scope.
+
+## Scope
+
+Preserve or safely establish immutable mode-profile bindings across legacy persisted chats, temporary conversations, local clone/branch, trusted share-copy, export/import, generic updates, regeneration, and Agent resume. Add temporary-binding expiry cleanup only through the existing startup-singleton path.
+
+## Required invariants
+
+- Pre-cutover unbound conversations claim the migration compatibility baseline for their canonical mode, never the administrator's later current head.
+- Concurrent legacy claims and temporary first requests converge on one valid binding.
+- Temporary follow-ups and save-to-history retain the original temporary binding.
+- Local clone/branch and trusted share-copy preserve the source binding server-side.
+- Share/export may expose only safe audit metadata, never administrator Prompt content.
+- External import cannot choose a revision; it binds the server-selected current revision for the imported canonical mode.
+- Generic updates, autosave, drafts, regeneration, and Agent resume cannot mutate a binding.
+- Expired temporary bindings are cleaned once by startup singleton work; no worker-local scheduler or duplicate loop.
+
+## Checkpoints
+
+- [x] E0 Phase D quality gate approved; verify branch, HEAD, and dirty/untracked boundaries.
+- [x] E1 Read-only integration map complete for every lifecycle entry point and transaction boundary.
+- [x] E2 Add failing lifecycle tests and record exact RED evidence.
+- [x] E3 Implement atomic legacy baseline claiming.
+- [x] E4 Implement temporary binding create/reuse/transfer/expiry cleanup.
+- [x] E5 Implement clone/share/export/import/update/regenerate/resume trust boundaries.
+- [x] E6 Run focused and related regression, lint/format, compile, migration/startup tests, and diff audit.
+- [ ] E7 Independent specification review and code-quality review; fix all Critical/Important findings.
+- [x] E8 Commit only verified Phase E code/docs/tests; do not push.
+
+## Evidence log
+
+- 2026-07-26: created before implementation while Phase D quality review is still running. No Phase E production files changed.
+- 2026-07-26: read-only map confirmed temporary binding storage exists but has no call site in the frontend `local:${socket.id}` first/follow-up/save flow. Clone, trusted share-copy, import, and save-to-history also currently do not transfer or server-rebind the profile revision.
+- 2026-07-26: exact backend anchors are `main.py::chat_completion`, `models/chats.py::{claim_conversation_mode,import_chats,update_chat_by_id}`, `routers/chats.py::{import_chats,clone_chat_by_id,clone_shared_chat_by_id,get_shared_chat_by_id,generate_chat_export_ndjson,update_chat_by_id}`, `models/conversation_mode_profiles.py::{create_temporary_binding,transfer_temporary_binding}`, and `main.py::_run_singleton_startup_tasks`.
+- 2026-07-26: first baseline command omitted `PYTHONPATH=$PWD/backend` and stopped at collection with `ModuleNotFoundError`; no test executed or state changed. Corrected baseline passed 24 tests (`test_startup_singleton.py` plus `test_chat_conversation_mode.py`) with four existing warnings.
+- 2026-07-26: Phase D final gate passed at `a34613ab3`; tracked worktree is clean and only the existing untracked handoff/deploy artifacts remain. Phase E implementation may begin.
+- 2026-07-27: Phase E execution owner reconfirmed the same worktree, branch, and `a34613ab3` start point. Acceptance truth is focused SQLite lifecycle tests plus the existing Chat/Agent/profile/startup regressions; no Docker, remote, formal-live, frontend, or Phase F/G surface is in scope.
+- 2026-07-27: implementation seam chosen before RED: one server-owned lifecycle resolver will atomically claim a pre-cutover legacy Chat baseline or bind/reuse a local temporary conversation. Import/clone/share will pass only server-derived source revision IDs into the model layer; ordinary client forms remain without a revision-id field. Temporary expiry is 24 hours after the latest successful request, and cleanup deletes only expired binding rows through `_run_singleton_startup_tasks`.
+- 2026-07-27: RED-1 `.venv/bin/python -m pytest -q backend/open_webui/test/agent/test_conversation_mode_profile_store.py::test_legacy_chat_claims_its_mode_baseline_and_rejects_post_cutover_unbound_chat` -> 1 failed, expected `AttributeError` for missing `resolve_persisted_chat_binding`; no collection/setup failure. GREEN-1 same command -> 1 passed. The new store resolver uses the existing SQLite `BEGIN IMMEDIATE`/PostgreSQL row-lock transaction machinery, resolves canonical persisted mode, binds only pre-cutover rows to `head.baseline_revision_id`, validates an existing immutable binding, and rejects post-cutover unbound rows with non-secret `mode_profile_unbound_conversation`.
+- 2026-07-27: RED-2 `test_post_cutover_unbound_persisted_chat_fails_before_dispatch` -> failed because the legacy Chat entry still invoked `Chats.claim_conversation_mode` and reached provider dispatch. GREEN-2 plus legacy/bound failure regressions -> 4 passed. `main.py::chat_completion` now resolves the server-owned persistent binding before revision/capability/provider/Agent dispatch; incompatible hints fail 409 before its second read; post-cutover unbound rows fail typed 500.
+- 2026-07-27: RED-3 `test_local_temporary_chat_binds_once_and_reuses_its_revision_after_head_switch` -> failed with no temporary binding calls. GREEN-3 same test -> 1 passed. A local `local:*` product conversation calls the existing atomic temporary-binding create/reuse method with a documented 24-hour TTL, validates mode/hint against the bound immutable revision, and applies that revision to both Chat and Agent paths. No channel binding is created.
+- 2026-07-27: RED-4 startup singleton registration test -> failed because cleanup was absent. GREEN-4 startup test -> passed after adding exactly one `ConversationModeProfiles.cleanup_expired_temporary_bindings()` invocation inside `_run_singleton_startup_tasks`; no scheduler loop was added.
+- 2026-07-27: current combined focused command was 143 passed / 1 failed due to an existing Phase D assertion expecting a now-redundant second Chat read; after moving bound-hint validation before lifecycle resolution, that focused assertion and startup registration test passed. A fresh full focused rerun is still required after the remaining lifecycle work.
+- 2026-07-27: RED/green lifecycle coverage completed for atomic `/new` save-to-history transfer, missing/expired/mode-mismatched temporary sources, server-current external import with client revision stripping and batch rollback, local and SharedChat-original clone preservation, generic update spoof stripping, revision retention after chat deletion, and share/read/export audit-only responses. The new public `/new` field is `source_temporary_conversation_id`; `mode_profile_revision_id` remains absent from request forms.
+- 2026-07-27: `/new` now uses the same SQLite `BEGIN IMMEDIATE` / PostgreSQL-locking profile service transaction as product chat creation. A valid temporary binding selects the immutable temporary revision, writes the Chat and initial messages, deletes the temporary row, and commits once. Missing, expired, and mode mismatch reject with stable non-secret 409 codes and no Chat row.
+- 2026-07-27: external import locks the server current revision for each canonical mode and writes all imported Chats plus initial messages in one transaction; trusted clone paths pass only source revision IDs resolved from the server-owned Chat binding. Shared clone follows `SharedChat.chat_id`, checks grants before copy, and never derives the binding from a snapshot.
+- 2026-07-27: first Phase A–E focused rerun reached 257 pass / 16 fail. Root cause was the older Agent entry fixture still mocking the pre-E `Chats.claim_conversation_mode` seam; the new resolver fell through to the real DB. The fixture now emulates `ConversationModeProfiles.resolve_persisted_chat_binding` and cached revisions. One remaining terminal-default regression showed that an inherited empty profile suppressed legacy Agent terminal auto-attachment; the minimal fix restores auto-attachment only for `INHERIT`, while an explicit profile `terminal_id: null` remains authoritative. Fresh Agent suite: 29 passed.
+- 2026-07-27: final focused command `PYTHONPATH=$PWD/backend .venv/bin/python -m pytest -q backend/open_webui/test/agent/test_conversation_mode_profile_*.py backend/open_webui/test/agent/test_chat_conversation_mode.py backend/open_webui/test/agent/test_chat_entry_mode_profiles.py backend/open_webui/test/agent/test_chat_entry_agent_mode.py backend/open_webui/test/util/test_startup_singleton.py backend/open_webui/test/util/test_conversation_mode_profile_migration.py` -> 273 passed, 11 pre-existing/dependency warnings. `PYTHONPATH=$PWD/backend .venv/bin/python -m compileall -q backend/open_webui` and `git diff --check` both exit 0.
+- 2026-07-27: targeted Ruff run confirms no new import-order, line-length, or complexity finding beyond the repository baseline. Full-file Ruff and format checks remain non-zero because existing `main.py`, `chats.py`, and `routers/chats.py` have unrelated baseline complexity/import/format drift; no broad formatting rewrite was made.
+- 2026-07-27: scoped read-only search found one separate existing backend creator outside the requested endpoint matrix: `utils/automations.py` calls `Chats.insert_new_chat` without a binding and would subsequently fail the post-cutover persisted-chat guard. It is deliberately left as a Minor follow-up rather than silently expanding this Phase E commit.
+- 2026-07-27: committed the verified backend Phase E scope locally as `5467d63dbd126e036c22e892353422b1b5369e86` (`feat: complete phase e mode profile lifecycle`); no push. Only the pre-existing untracked `deploy/` directory and `phase-d-handoff.md` remain outside the commit.
+
+## Current implementation state (not ready to commit)
+
+- Modified backend files: `models/conversation_mode_profiles.py`, `main.py`, `test/agent/test_conversation_mode_profile_store.py`, `test/agent/test_chat_entry_mode_profiles.py`, `test/util/test_startup_singleton.py`.
+- E4/E5/E6 are complete. Remaining work is E7 review and E8 scoped backend-only commit. Do not stage deploy artifacts or unrelated handoff files.
+- Do not commit the current partial state. Preserve the existing untracked `deploy/build-isolated-webui.sh` and all handoff artifacts.

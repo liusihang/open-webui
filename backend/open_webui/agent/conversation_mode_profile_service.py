@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import time
 from collections import OrderedDict
 from collections.abc import Mapping
 from typing import Any
@@ -23,7 +24,7 @@ from open_webui.agent.conversation_mode_profiles import (
 )
 from open_webui.config import BYPASS_ADMIN_ACCESS_CONTROL
 from open_webui.internal.db import get_async_db_context
-from open_webui.models.chats import ChatForm, ChatModel, Chats
+from open_webui.models.chats import Chat, ChatForm, ChatImportForm, ChatModel, Chats
 from open_webui.models.config import Config
 from open_webui.models.conversation_mode_profiles import (
     ConversationModeProfileHead,
@@ -32,7 +33,9 @@ from open_webui.models.conversation_mode_profiles import (
     ConversationModeProfileRevision,
     ConversationModeProfileRevisionModel,
     ConversationModeProfiles,
+    ConversationModeProfileTemporaryBinding,
 )
+from open_webui.models.folders import Folders
 from open_webui.models.functions import Function, Functions
 from open_webui.models.skills import Skill, Skills
 from open_webui.models.tools import Tool, Tools
@@ -95,6 +98,12 @@ class ModeProfileRevisionHintConflictError(ValueError):
         self.authoritative_revision_id = authoritative_revision_id
         self.bound = bound
         super().__init__('Conversation mode profile revision hint is stale or mismatched')
+
+
+class ModeProfileTemporaryBindingError(ValueError):
+    def __init__(self, code: str) -> None:
+        self.code = code
+        super().__init__('Temporary conversation mode profile binding is unavailable')
 
 
 class ModeProfileCapabilityRequestError(ValueError):
@@ -194,6 +203,7 @@ async def insert_new_chat_with_current_mode_profile(
     chat_id: str,
     user_id: str,
     form_data: ChatForm,
+    source_temporary_conversation_id: str | None = None,
 ) -> BoundModeProfileChatCreation:
     normalized_mode = _normalized_mode(mode)
     chat = None
@@ -201,10 +211,29 @@ async def insert_new_chat_with_current_mode_profile(
     async with get_async_db_context() as session:
         try:
             await _begin_bound_chat_transaction(session)
-            revision = await _load_locked_current_revision(
-                session,
-                normalized_mode,
-            )
+            temporary_binding = None
+            if source_temporary_conversation_id is None:
+                revision = await _load_locked_current_revision(
+                    session,
+                    normalized_mode,
+                )
+            else:
+                temporary_binding = await _load_locked_temporary_binding(
+                    session,
+                    user_id=user_id,
+                    temporary_conversation_id=source_temporary_conversation_id,
+                    expected_mode=normalized_mode,
+                )
+                revision_row = await session.get(
+                    ConversationModeProfileRevision,
+                    temporary_binding.mode_profile_revision_id,
+                )
+                if revision_row is None:
+                    raise ConversationModeProfileIntegrityError(
+                        temporary_binding.mode_profile_revision_id,
+                        'Temporary conversation mode profile binding references an unavailable revision',
+                    )
+                revision = _locked_revision_model(revision_row, expected_mode=normalized_mode)
             _validate_locked_revision_ids(
                 revision,
                 revision_hint=revision_hint,
@@ -230,6 +259,8 @@ async def insert_new_chat_with_current_mode_profile(
                 commit=False,
                 strict=True,
             )
+            if temporary_binding is not None:
+                await session.delete(temporary_binding)
             await session.commit()
         except SQLAlchemyError as exc:
             if session.in_transaction():
@@ -245,6 +276,113 @@ async def insert_new_chat_with_current_mode_profile(
 
     cache_profile_revision(app, revision)
     return BoundModeProfileChatCreation(chat=chat, revision=revision)
+
+
+async def _load_locked_temporary_binding(
+    session: AsyncSession,
+    *,
+    user_id: str,
+    temporary_conversation_id: str,
+    expected_mode: str,
+) -> ConversationModeProfileTemporaryBinding:
+    statement = (
+        select(ConversationModeProfileTemporaryBinding)
+        .where(
+            ConversationModeProfileTemporaryBinding.user_id == user_id,
+            ConversationModeProfileTemporaryBinding.temporary_conversation_id == temporary_conversation_id,
+        )
+        .execution_options(populate_existing=True)
+    )
+    if session.get_bind().dialect.name != 'sqlite':
+        statement = statement.with_for_update()
+    binding = (await session.execute(statement)).scalars().first()
+    if binding is None:
+        raise ModeProfileTemporaryBindingError('mode_profile_temporary_binding_missing')
+    if binding.expires_at <= int(time.time()):
+        raise ModeProfileTemporaryBindingError('mode_profile_temporary_binding_expired')
+    if binding.mode != expected_mode:
+        raise ModeProfileTemporaryBindingError('mode_profile_temporary_binding_mode_mismatch')
+    return binding
+
+
+async def import_chats_with_mode_profile_bindings(  # noqa: C901
+    app,
+    *,
+    user_id: str,
+    chat_import_forms: list[ChatImportForm],
+    source_mode_profile_revision_ids: list[str] | None = None,
+) -> list[ChatModel]:
+    """Import chats with server-owned immutable profile bindings in one transaction.
+
+    External imports omit ``source_mode_profile_revision_ids`` and therefore
+    lock each canonical mode's current revision.  Internal copy flows may pass
+    a server-resolved source revision for each form; request models never carry
+    those IDs.
+    """
+    if source_mode_profile_revision_ids is not None and len(source_mode_profile_revision_ids) != len(chat_import_forms):
+        raise ValueError('Source profile revision count must match imported chats')
+
+    imported: list[ChatModel] = []
+    revisions_to_cache: dict[str, ConversationModeProfileRevisionModel] = {}
+    async with get_async_db_context() as session:
+        try:
+            await _begin_bound_chat_transaction(session)
+
+            folder_ids = {form.folder_id for form in chat_import_forms if form.folder_id}
+            existing_folder_ids = {
+                folder_id
+                for folder_id in folder_ids
+                if await Folders.get_folder_by_id_and_user_id(folder_id, user_id, db=session)
+            }
+            for form in chat_import_forms:
+                if form.folder_id and form.folder_id not in existing_folder_ids:
+                    form.folder_id = None
+
+            current_revisions: dict[str, ConversationModeProfileRevisionModel] = {}
+            for index, form in enumerate(chat_import_forms):
+                chat = Chats._chat_import_form_to_chat_model(user_id, form)
+                mode = chat.chat['mode']
+                if source_mode_profile_revision_ids is None:
+                    revision = current_revisions.get(mode)
+                    if revision is None:
+                        revision = await _load_locked_current_revision(session, mode)
+                        current_revisions[mode] = revision
+                else:
+                    source_revision_id = source_mode_profile_revision_ids[index]
+                    revision_row = await session.get(ConversationModeProfileRevision, source_revision_id)
+                    if revision_row is None:
+                        raise ConversationModeProfileIntegrityError(
+                            source_revision_id,
+                            'Source conversation mode profile revision is unavailable',
+                        )
+                    revision = _locked_revision_model(revision_row, expected_mode=mode)
+
+                chat = chat.model_copy(update={'mode_profile_revision_id': revision.id})
+                session.add(Chat(**chat.model_dump()))
+                imported.append(chat)
+                revisions_to_cache[revision.id] = revision
+
+            await session.flush()
+            for chat in imported:
+                await Chats.dual_write_initial_messages(
+                    chat,
+                    db=session,
+                    commit=False,
+                    strict=True,
+                )
+            await session.commit()
+        except SQLAlchemyError as exc:
+            if session.in_transaction():
+                await session.rollback()
+            raise ModeProfileServiceUnavailableError('import_bound_chats') from exc
+        except BaseException:
+            if session.in_transaction():
+                await session.rollback()
+            raise
+
+    for revision in revisions_to_cache.values():
+        cache_profile_revision(app, revision)
+    return imported
 
 
 async def _begin_bound_chat_transaction(session: AsyncSession) -> None:

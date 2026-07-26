@@ -153,6 +153,7 @@ class ChatFileModel(BaseModel):
 class ChatForm(BaseModel):
     chat: dict
     folder_id: str | None = None
+    source_temporary_conversation_id: str | None = None
 
 
 class ChatImportForm(ChatForm):
@@ -466,6 +467,7 @@ class ChatTable:
     def _chat_import_form_to_chat_model(self, user_id: str, form_data: ChatImportForm) -> ChatModel:
         id = str(uuid.uuid4())
         imported_chat = dict(form_data.chat)
+        imported_chat.pop('mode_profile_revision_id', None)
         mode_resolution = resolve_conversation_mode(
             requested=None,
             persisted=imported_chat.get('mode'),
@@ -550,6 +552,8 @@ class ChatTable:
                 if chat_item is None:
                     return None
 
+                chat = dict(chat)
+                chat.pop('mode_profile_revision_id', None)
                 chat_item.chat = self._clean_null_bytes(chat)
                 chat_item.title = self._clean_null_bytes(chat['title']) if 'title' in chat else 'New Chat'
 

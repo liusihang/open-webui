@@ -44,6 +44,16 @@ def test_lifespan_dependency_install_is_guarded_by_run_once():
     assert 'run_startup_once(' in main_source
 
 
+def test_expired_temporary_mode_profile_cleanup_is_only_registered_in_singleton_startup_path():
+    main_source = Path('backend/open_webui/main.py').read_text()
+    singleton_start = main_source.index('async def _run_singleton_startup_tasks')
+    singleton_end = main_source.index('async def _install_tool_and_function_dependencies_once')
+    singleton_source = main_source[singleton_start:singleton_end]
+
+    assert 'ConversationModeProfiles.cleanup_expired_temporary_bindings()' in singleton_source
+    assert main_source.count('cleanup_expired_temporary_bindings()') == 1
+
+
 @pytest.mark.asyncio
 async def test_run_startup_once_skips_after_success_marker(tmp_path):
     from open_webui.utils.startup_singleton import run_startup_once

@@ -166,7 +166,11 @@ from open_webui.models.agent_runs import AgentRuns
 from open_webui.models.channels import Channels
 from open_webui.models.chats import ChatForm, Chats
 from open_webui.models.config import Config
-from open_webui.models.conversation_mode_profiles import ConversationModeProfileIntegrityError
+from open_webui.models.conversation_mode_profiles import (
+    ConversationModeProfileIntegrityError,
+    ConversationModeProfileLegacyBindingError,
+    ConversationModeProfiles,
+)
 from open_webui.models.functions import Functions
 from open_webui.models.messages import Messages
 from open_webui.models.models import Models
@@ -309,6 +313,8 @@ if SAFE_MODE:
 
 logging.basicConfig(stream=sys.stdout, level=GLOBAL_LOG_LEVEL)
 log = logging.getLogger(__name__)
+
+TEMPORARY_MODE_PROFILE_BINDING_TTL_SECONDS = 24 * 60 * 60
 
 
 CONFIG_ATTR_ALIASES = {
@@ -493,6 +499,16 @@ def _build_internal_startup_request(app: FastAPI) -> Request:
 async def _run_singleton_startup_tasks(app: FastAPI) -> None:
     asyncio.create_task(periodic_usage_pool_cleanup())
     asyncio.create_task(periodic_session_pool_cleanup())
+
+    try:
+        expired_mode_profile_bindings = await ConversationModeProfiles.cleanup_expired_temporary_bindings()
+        if expired_mode_profile_bindings:
+            log.info(
+                'Cleaned up %s expired temporary conversation mode profile bindings',
+                expired_mode_profile_bindings,
+            )
+    except SQLAlchemyError:
+        log.exception('Failed to clean up expired temporary conversation mode profile bindings')
 
     from open_webui.utils.automations import scheduler_worker_loop
 
@@ -2678,6 +2694,16 @@ async def chat_completion(
                         is_new=False,
                         has_agent_run=has_agent_run,
                     )
+                    if (
+                        mode_profile_revision_hint is not None
+                        and existing_chat.mode_profile_revision_id is not None
+                        and mode_profile_revision_hint != existing_chat.mode_profile_revision_id
+                    ):
+                        raise ModeProfileRevisionHintConflictError(
+                            hinted_revision_id=mode_profile_revision_hint,
+                            authoritative_revision_id=existing_chat.mode_profile_revision_id,
+                            bound=True,
+                        )
                     if preliminary_resolution.mode is ConversationMode.AGENT and not getattr(
                         request.app.state.config,
                         'ENABLE_AGENT_MODE',
@@ -2691,9 +2717,31 @@ async def chat_completion(
                             },
                         )
 
+                    claimed = await ConversationModeProfiles.resolve_persisted_chat_binding(
+                        chat_id=chat_id,
+                        user_id=None if user.role == 'admin' else user.id,
+                        has_agent_run=has_agent_run,
+                        requested_mode=requested_chat_mode,
+                    )
+                    if claimed is None:
+                        raise HTTPException(
+                            status_code=status.HTTP_404_NOT_FOUND,
+                            detail=ERROR_MESSAGES.NOT_FOUND,
+                        )
+                    existing_chat = await Chats.get_chat_by_id(
+                        chat_id,
+                        repair=False,
+                        strict=True,
+                    )
+                    if existing_chat is None:
+                        raise HTTPException(
+                            status_code=status.HTTP_404_NOT_FOUND,
+                            detail=ERROR_MESSAGES.NOT_FOUND,
+                        )
+                    resolution = preliminary_resolution
                     mode_profile_revision = await _resolve_conversation_mode_profile_revision(
                         request,
-                        mode=preliminary_resolution.mode,
+                        mode=resolution.mode,
                         existing_chat=existing_chat,
                         revision_hint=mode_profile_revision_hint,
                     )
@@ -2706,18 +2754,6 @@ async def chat_completion(
                         form_data=form_data,
                         metadata=metadata,
                     )
-                    claimed = await Chats.claim_conversation_mode(
-                        chat_id,
-                        requested=requested_chat_mode,
-                        user_id=None if user.role == 'admin' else user.id,
-                        has_agent_run=has_agent_run,
-                    )
-                    if claimed is None:
-                        raise HTTPException(
-                            status_code=status.HTTP_404_NOT_FOUND,
-                            detail=ERROR_MESSAGES.NOT_FOUND,
-                        )
-                    existing_chat, resolution = claimed
                     mode_claimed = True
                 else:
                     resolution = resolve_conversation_mode(
@@ -2726,6 +2762,16 @@ async def chat_completion(
                         is_new=is_new_chat or not is_persisted_chat,
                         has_agent_run=has_agent_run,
                     )
+            except ModeProfileRevisionHintConflictError as exc:
+                detail = {
+                    'code': 'mode_profile_binding_mismatch' if exc.bound else exc.code,
+                    'message': 'Refresh the conversation mode profile before retrying.',
+                }
+                if exc.authoritative_revision_id:
+                    detail['bound_revision_id' if exc.bound else 'current_revision_id'] = (
+                        exc.authoritative_revision_id
+                    )
+                raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=detail) from exc
             except InvalidConversationModeError as exc:
                 raise HTTPException(
                     status_code=status.HTTP_400_BAD_REQUEST,
@@ -2742,6 +2788,14 @@ async def chat_completion(
                         'message': str(exc),
                         'requested': exc.requested.value,
                         'persisted': exc.persisted.value,
+                    },
+                ) from exc
+            except ConversationModeProfileLegacyBindingError as exc:
+                raise HTTPException(
+                    status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                    detail={
+                        'code': exc.code,
+                        'message': 'The conversation mode profile binding failed integrity verification.',
                     },
                 ) from exc
             except SQLAlchemyError as exc:
@@ -2771,6 +2825,38 @@ async def chat_completion(
                     request,
                     mode=resolution.mode,
                     existing_chat=None,
+                    revision_hint=mode_profile_revision_hint,
+                )
+                await _apply_mode_profile_capabilities(
+                    request,
+                    revision=mode_profile_revision,
+                    model=model,
+                    user=user,
+                    request_values=mode_profile_capability_request,
+                    form_data=form_data,
+                    metadata=metadata,
+                )
+            elif chat_id.startswith('local:'):
+                temporary_binding = await ConversationModeProfiles.create_temporary_binding(
+                    user_id=user.id,
+                    temporary_conversation_id=chat_id,
+                    mode=resolution.mode,
+                    expires_at=int(time.time()) + TEMPORARY_MODE_PROFILE_BINDING_TTL_SECONDS,
+                )
+                if temporary_binding.mode != resolution.mode.value:
+                    raise HTTPException(
+                        status_code=status.HTTP_409_CONFLICT,
+                        detail={
+                            'code': 'mode_profile_binding_mismatch',
+                            'message': 'Refresh the conversation mode profile before retrying.',
+                        },
+                    )
+                mode_profile_revision = await _resolve_conversation_mode_profile_revision(
+                    request,
+                    mode=resolution.mode,
+                    existing_chat=SimpleNamespace(
+                        mode_profile_revision_id=temporary_binding.mode_profile_revision_id,
+                    ),
                     revision_hint=mode_profile_revision_hint,
                 )
                 await _apply_mode_profile_capabilities(
@@ -3142,7 +3228,7 @@ async def chat_completion(
         form_data['metadata'] = metadata
 
         if _is_agent_mode_product_chat(request, metadata, message_ids):
-            if mode_profile_revision is None:
+            if mode_profile_revision is None or mode_profile_revision.defaults.terminal_id is INHERIT:
                 await _attach_default_agent_mode_terminal(request, form_data, user)
             return await _start_agent_mode_chat(
                 request,

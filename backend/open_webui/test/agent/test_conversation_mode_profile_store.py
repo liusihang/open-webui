@@ -1444,3 +1444,73 @@ async def test_temporary_binding_transfer_claims_chat_and_deletes_temporary_row(
             )
             is None
         )
+
+
+@pytest.mark.asyncio
+async def test_legacy_chat_claims_its_mode_baseline_and_rejects_post_cutover_unbound_chat(profile_db) -> None:
+    async with profile_db() as session:
+        session.add(
+            _chat_row(
+                chat_id='legacy-chat',
+                mode='chat',
+            )
+        )
+        session.add(
+            Chat(
+                id='post-cutover-chat',
+                user_id='user-1',
+                title='Post cutover',
+                chat={
+                    'id': 'post-cutover-chat',
+                    'title': 'Post cutover',
+                    'mode': 'chat',
+                    'history': {'currentId': None, 'messages': {}},
+                },
+                created_at=101,
+                updated_at=101,
+            )
+        )
+        await session.commit()
+
+    current = await ConversationModeProfiles.save_revision(
+        mode='chat',
+        content={'schema_version': 1, 'system_prompt': 'Current only', 'defaults': {}},
+        expected_current_revision_id=CHAT_BASELINE_REVISION_ID,
+        created_by='admin-1',
+        now=102,
+    )
+
+    claimed = await ConversationModeProfiles.resolve_persisted_chat_binding(
+        chat_id='legacy-chat',
+        user_id='user-1',
+        requested_mode=None,
+        has_agent_run=False,
+    )
+
+    assert claimed.mode == 'chat'
+    assert claimed.mode_profile_revision_id == CHAT_BASELINE_REVISION_ID
+    assert claimed.mode_profile_revision_id != current.id
+    assert (
+        await ConversationModeProfiles.get_chat_binding(
+            chat_id='legacy-chat',
+            user_id='user-1',
+        )
+        == claimed.binding
+    )
+
+    with pytest.raises(profile_store_module.ConversationModeProfileLegacyBindingError) as exc_info:
+        await ConversationModeProfiles.resolve_persisted_chat_binding(
+            chat_id='post-cutover-chat',
+            user_id='user-1',
+            requested_mode=None,
+            has_agent_run=False,
+        )
+
+    assert exc_info.value.code == 'mode_profile_unbound_conversation'
+    assert (
+        await ConversationModeProfiles.get_chat_binding(
+            chat_id='post-cutover-chat',
+            user_id='user-1',
+        )
+        is None
+    )

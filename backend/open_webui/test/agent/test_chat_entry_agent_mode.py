@@ -174,6 +174,11 @@ def _patch_model_and_chat_boundaries(monkeypatch, calls):  # noqa: C901
     async def fake_get_current_revision(app, mode):
         return revisions[str(mode)]
 
+    async def fake_get_revision(app, revision_id, *, expected_mode=None):
+        revision = next(revision for revision in revisions.values() if revision.id == revision_id)
+        assert expected_mode is None or revision.mode == expected_mode.value
+        return revision
+
     async def fake_resolve_capabilities(
         app,
         *,
@@ -211,6 +216,28 @@ def _patch_model_and_chat_boundaries(monkeypatch, calls):  # noqa: C901
             stored.chat = {**stored.chat, 'mode': resolution.mode.value}
         calls.mode_claims.append((chat_id, requested, resolution.mode.value))
         return stored, resolution
+
+    async def fake_resolve_persisted_binding(
+        *,
+        chat_id,
+        user_id,
+        requested_mode,
+        has_agent_run,
+    ):
+        claimed = await fake_claim_conversation_mode(
+            chat_id,
+            requested=requested_mode,
+            user_id=user_id,
+            has_agent_run=has_agent_run,
+        )
+        if claimed is None:
+            return None
+        stored, resolution = claimed
+        revision_id = stored.mode_profile_revision_id if hasattr(stored, 'mode_profile_revision_id') else None
+        if revision_id is None:
+            revision_id = revisions[resolution.mode.value].id
+            stored.mode_profile_revision_id = revision_id
+        return SimpleNamespace(mode_profile_revision_id=revision_id)
 
     async def fake_update_chat_by_id(chat_id, chat):
         calls.chat_updates.append((chat_id, chat))
@@ -276,6 +303,7 @@ def _patch_model_and_chat_boundaries(monkeypatch, calls):  # noqa: C901
         'get_cached_current_revision',
         fake_get_current_revision,
     )
+    monkeypatch.setattr(main, 'get_cached_revision', fake_get_revision)
     monkeypatch.setattr(
         main,
         'resolve_mode_profile_capabilities',
@@ -284,6 +312,11 @@ def _patch_model_and_chat_boundaries(monkeypatch, calls):  # noqa: C901
     monkeypatch.setattr(main.Chats, 'is_chat_owner', fake_is_chat_owner)
     monkeypatch.setattr(main.Chats, 'get_chat_by_id', fake_get_chat_by_id)
     monkeypatch.setattr(main.Chats, 'claim_conversation_mode', fake_claim_conversation_mode)
+    monkeypatch.setattr(
+        main,
+        'ConversationModeProfiles',
+        SimpleNamespace(resolve_persisted_chat_binding=fake_resolve_persisted_binding),
+    )
     monkeypatch.setattr(main.Chats, 'update_chat_by_id', fake_update_chat_by_id)
     monkeypatch.setattr(main.Chats, 'insert_new_chat', fake_insert_new_chat)
     monkeypatch.setattr(
