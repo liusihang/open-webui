@@ -162,9 +162,6 @@ def _patch_model_and_chat_boundaries(monkeypatch, calls):  # noqa: C901
     async def fake_config_get(key, default=None):
         return default
 
-    async def fake_current_revision(app, mode):
-        return revisions[str(mode)]
-
     async def fake_is_chat_owner(chat_id, user_id):
         return True
 
@@ -219,6 +216,24 @@ def _patch_model_and_chat_boundaries(monkeypatch, calls):  # noqa: C901
         calls.stored_chats[chat_id] = stored
         return stored
 
+    async def fake_insert_bound_chat(
+        app,
+        *,
+        mode,
+        revision_hint,
+        chat_id,
+        user_id,
+        form_data,
+    ):
+        revision = revisions[str(mode)]
+        chat = await fake_insert_new_chat(
+            chat_id,
+            user_id,
+            form_data,
+            mode_profile_revision_id=revision.id,
+        )
+        return SimpleNamespace(chat=chat, revision=revision)
+
     async def fake_get_message(chat_id, message_id):
         if message_id == 'user-msg':
             return {'id': 'user-msg', 'childrenIds': []}
@@ -233,12 +248,16 @@ def _patch_model_and_chat_boundaries(monkeypatch, calls):  # noqa: C901
 
     monkeypatch.setattr(main.Models, 'get_model_by_id', fake_get_model_by_id)
     monkeypatch.setattr(main.Config, 'get', fake_config_get)
-    monkeypatch.setattr(main, 'get_cached_current_revision', fake_current_revision)
     monkeypatch.setattr(main.Chats, 'is_chat_owner', fake_is_chat_owner)
     monkeypatch.setattr(main.Chats, 'get_chat_by_id', fake_get_chat_by_id)
     monkeypatch.setattr(main.Chats, 'claim_conversation_mode', fake_claim_conversation_mode)
     monkeypatch.setattr(main.Chats, 'update_chat_by_id', fake_update_chat_by_id)
     monkeypatch.setattr(main.Chats, 'insert_new_chat', fake_insert_new_chat)
+    monkeypatch.setattr(
+        main,
+        'insert_new_chat_with_current_mode_profile',
+        fake_insert_bound_chat,
+    )
     monkeypatch.setattr(main.Chats, 'get_message_by_id_and_message_id', fake_get_message)
     monkeypatch.setattr(main.Chats, 'upsert_message_to_chat_by_id_and_message_id', fake_upsert)
     monkeypatch.setattr(main, 'publish_event', fake_publish_event, raising=False)

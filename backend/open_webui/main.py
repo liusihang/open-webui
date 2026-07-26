@@ -54,9 +54,10 @@ from open_webui.agent.conversation_mode_profile_service import (
     ModeProfileCapabilityRequestError,
     ModeProfileRevisionHintConflictError,
     ModeProfileServiceUnavailableError,
-    get_cached_current_revision,
     get_cached_revision,
     get_public_conversation_mode_profiles,
+    insert_new_chat_with_current_mode_profile,
+    redact_mode_profile_administrator_prompt,
     resolve_mode_profile_capabilities,
     verify_conversation_mode_profile_revision,
 )
@@ -1484,17 +1485,10 @@ async def _resolve_conversation_mode_profile_revision(
     request: Request,
     *,
     mode: ConversationMode,
-    is_new_persisted_chat: bool,
     existing_chat,
     revision_hint: str | None,
 ):
     try:
-        if is_new_persisted_chat:
-            return await _load_current_mode_profile_revision(
-                request,
-                mode=mode,
-                revision_hint=revision_hint,
-            )
         return await _load_bound_mode_profile_revision(
             request,
             mode=mode,
@@ -1523,29 +1517,6 @@ async def _resolve_conversation_mode_profile_revision(
         ) from exc
     except ConversationModeProfileIntegrityError as exc:
         _raise_mode_profile_integrity_error(exc)
-
-
-async def _load_current_mode_profile_revision(
-    request: Request,
-    *,
-    mode: ConversationMode,
-    revision_hint: str | None,
-):
-    revision = await get_cached_current_revision(request.app, mode)
-    if revision is None:
-        raise ModeProfileServiceUnavailableError(
-            'read_current_revision',
-            mode=mode.value,
-        )
-    verify_conversation_mode_profile_revision(revision, expected_mode=mode)
-    if revision_hint is not None and revision_hint != revision.id:
-        raise ModeProfileRevisionHintConflictError(
-            hinted_revision_id=revision_hint,
-            authoritative_revision_id=revision.id,
-            bound=False,
-        )
-    return revision
-
 
 async def _load_bound_mode_profile_revision(
     request: Request,
@@ -2350,7 +2321,10 @@ async def _start_agent_mode_chat(
         _remove_agent_tool_registry(request, run.id)
         error = {
             'code': getattr(exc, 'code', 'agent_runtime_error'),
-            'message': str(exc),
+            'message': redact_mode_profile_administrator_prompt(
+                str(exc),
+                mode_profile_revision,
+            ),
         }
         await AgentRuns.append_event(
             run.id,
@@ -2623,7 +2597,6 @@ async def chat_completion(
                     mode_profile_revision = await _resolve_conversation_mode_profile_revision(
                         request,
                         mode=preliminary_resolution.mode,
-                        is_new_persisted_chat=False,
                         existing_chat=existing_chat,
                         revision_hint=mode_profile_revision_hint,
                     )
@@ -2656,23 +2629,6 @@ async def chat_completion(
                         is_new=is_new_chat or not is_persisted_chat,
                         has_agent_run=has_agent_run,
                     )
-                    if is_persisted_chat and is_new_chat:
-                        mode_profile_revision = await _resolve_conversation_mode_profile_revision(
-                            request,
-                            mode=resolution.mode,
-                            is_new_persisted_chat=True,
-                            existing_chat=None,
-                            revision_hint=mode_profile_revision_hint,
-                        )
-                        await _apply_mode_profile_capabilities(
-                            request,
-                            revision=mode_profile_revision,
-                            model=model,
-                            user=user,
-                            request_values=mode_profile_capability_request,
-                            form_data=form_data,
-                            metadata=metadata,
-                        )
             except InvalidConversationModeError as exc:
                 raise HTTPException(
                     status_code=status.HTTP_400_BAD_REQUEST,
@@ -2788,34 +2744,68 @@ async def chat_completion(
                                 'timestamp': int(time.time()),
                             }
 
-                    await Chats.insert_new_chat(
-                        chat_id,
-                        user.id,
-                        ChatForm(
-                            chat={
-                                'id': chat_id,
-                                'title': 'New Chat',
-                                'mode': metadata.get('chat_mode', ConversationMode.CHAT.value),
-                                'models': [entry['model_id'] for entry in message_ids],
-                                'history': {
-                                    'currentId': all_assistant_ids[0] if all_assistant_ids else user_message_id,
-                                    'messages': history_messages,
-                                },
-                                'messages': [
-                                    {'role': 'user', 'content': user_message.get('content', '')},
-                                ]
-                                if user_message_id
-                                else [],
-                                'files': metadata.get('files') or [],
-                                'tags': [],
-                                'timestamp': int(time.time() * 1000),
+                    new_chat_form = ChatForm(
+                        chat={
+                            'id': chat_id,
+                            'title': 'New Chat',
+                            'mode': metadata.get('chat_mode', ConversationMode.CHAT.value),
+                            'models': [entry['model_id'] for entry in message_ids],
+                            'history': {
+                                'currentId': all_assistant_ids[0] if all_assistant_ids else user_message_id,
+                                'messages': history_messages,
                             },
-                            folder_id=metadata.get('folder_id'),
-                        ),
-                        mode_profile_revision_id=(
-                            mode_profile_revision.id if mode_profile_revision is not None else None
-                        ),
+                            'messages': [
+                                {'role': 'user', 'content': user_message.get('content', '')},
+                            ]
+                            if user_message_id
+                            else [],
+                            'files': metadata.get('files') or [],
+                            'tags': [],
+                            'timestamp': int(time.time() * 1000),
+                        },
+                        folder_id=metadata.get('folder_id'),
                     )
+                    try:
+                        creation = await insert_new_chat_with_current_mode_profile(
+                            request.app,
+                            mode=resolution.mode,
+                            revision_hint=mode_profile_revision_hint,
+                            chat_id=chat_id,
+                            user_id=user.id,
+                            form_data=new_chat_form,
+                        )
+                    except ModeProfileRevisionHintConflictError as exc:
+                        raise HTTPException(
+                            status_code=status.HTTP_409_CONFLICT,
+                            detail={
+                                'code': exc.code,
+                                'message': 'Refresh the conversation mode profile before retrying.',
+                                'current_revision_id': exc.authoritative_revision_id,
+                            },
+                        ) from exc
+                    except ModeProfileServiceUnavailableError as exc:
+                        raise HTTPException(
+                            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                            detail={
+                                'code': 'mode_profile_unavailable',
+                                'message': 'The conversation mode profile is unavailable.',
+                            },
+                        ) from exc
+                    except ConversationModeProfileIntegrityError as exc:
+                        _raise_mode_profile_integrity_error(exc)
+
+                    mode_profile_revision = creation.revision
+                    await _apply_mode_profile_capabilities(
+                        request,
+                        revision=mode_profile_revision,
+                        model=model,
+                        user=user,
+                        request_values=mode_profile_capability_request,
+                        form_data=form_data,
+                        metadata=metadata,
+                    )
+                    model = _model_without_bound_profile_skill_defaults(model)
+                    metadata['model'] = model
                     await publish_event(
                         request,
                         EVENTS.CHAT_CREATED,
@@ -3033,13 +3023,21 @@ async def chat_completion(
                 request_system_prompt=request_system_prompt,
             )
 
-    except HTTPException:
+    except HTTPException as exc:
+        exc.detail = redact_mode_profile_administrator_prompt(
+            exc.detail,
+            mode_profile_revision,
+        )
         raise
     except Exception as e:
-        log.warning(f'Error processing chat metadata: {e}')
+        error_detail = redact_mode_profile_administrator_prompt(
+            str(e),
+            mode_profile_revision,
+        )
+        log.warning('Error processing chat metadata: %s', error_detail)
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail=str(e),
+            detail=error_detail,
         )
 
     async def process_chat(request, form_data, user, metadata, model, tasks=None):
@@ -3097,7 +3095,10 @@ async def chat_completion(
                 pass
             raise  # re-raise to ensure proper task cancellation handling
         except Exception as e:
-            error_detail = e.detail if isinstance(e, HTTPException) else str(e)
+            error_detail = redact_mode_profile_administrator_prompt(
+                e.detail if isinstance(e, HTTPException) else str(e),
+                mode_profile_revision,
+            )
             log.error('Error processing chat payload: %s', error_detail)
             if metadata.get('chat_id') and metadata.get('message_id'):
                 # Update the chat message with the error
@@ -3158,9 +3159,21 @@ async def chat_completion(
                         try:
                             await client.disconnect()
                         except BaseException as e:
-                            log.debug(f'Error disconnecting MCP client: {e}')
+                            log.debug(
+                                'Error disconnecting MCP client: %s',
+                                redact_mode_profile_administrator_prompt(
+                                    str(e),
+                                    mode_profile_revision,
+                                ),
+                            )
             except BaseException as e:
-                log.debug(f'Error cleaning up MCP clients: {e}')
+                log.debug(
+                    'Error cleaning up MCP clients: %s',
+                    redact_mode_profile_administrator_prompt(
+                        str(e),
+                        mode_profile_revision,
+                    ),
+                )
 
             # Deregister this task, then emit chat:active=false if no others remain
             try:

@@ -14,7 +14,9 @@ import pytest_asyncio
 from open_webui.agent.conversation_mode_profile_service import (
     ModeProfileCapabilityRequestError,
     ModeProfileCapabilityResolution,
+    ModeProfileRevisionHintConflictError,
     ModeProfileRuntimeWarning,
+    ModeProfileServiceUnavailableError,
 )
 from open_webui.agent.conversation_mode_profiles import (
     ConversationModeProfile,
@@ -85,9 +87,11 @@ def profile_entry(monkeypatch):  # noqa: C901
         events=[],
         provider_calls=[],
         runtime_calls=[],
+        emitted=[],
         upserts=[],
         process_payload_calls=[],
         chat_inserts=[],
+        atomic_inserts=[],
         stored_chats={
             'chat-1': SimpleNamespace(
                 id='chat-1',
@@ -194,6 +198,37 @@ def profile_entry(monkeypatch):  # noqa: C901
         calls.stored_chats[chat_id] = stored
         return stored
 
+    async def insert_bound_chat(
+        app,
+        *,
+        mode,
+        revision_hint,
+        chat_id,
+        user_id,
+        form_data,
+    ):
+        calls.atomic_inserts.append((chat_id, str(mode), revision_hint))
+        calls.events.append(('current_revision', str(mode)))
+        revision = calls.current.get(str(mode))
+        if revision is None:
+            raise ModeProfileServiceUnavailableError(
+                'read_current_revision',
+                mode=str(mode),
+            )
+        if revision_hint is not None and revision_hint != revision.id:
+            raise ModeProfileRevisionHintConflictError(
+                hinted_revision_id=revision_hint,
+                authoritative_revision_id=revision.id,
+                bound=False,
+            )
+        chat = await insert_chat(
+            chat_id,
+            user_id,
+            form_data,
+            mode_profile_revision_id=revision.id,
+        )
+        return SimpleNamespace(chat=chat, revision=revision)
+
     async def get_message(chat_id, message_id):
         if message_id == 'user-msg':
             return {'id': message_id, 'childrenIds': []}
@@ -206,6 +241,12 @@ def profile_entry(monkeypatch):  # noqa: C901
 
     async def publish(*args, **kwargs):
         return None
+
+    async def get_emitter(metadata, update_db=True):
+        async def emit(event):
+            calls.emitted.append(event)
+
+        return emit
 
     async def process_payload(request, form_data, user, metadata, model):
         calls.process_payload_calls.append(
@@ -264,9 +305,16 @@ def profile_entry(monkeypatch):  # noqa: C901
     monkeypatch.setattr(main.Chats, 'get_chat_by_id', get_chat)
     monkeypatch.setattr(main.Chats, 'claim_conversation_mode', claim_mode)
     monkeypatch.setattr(main.Chats, 'insert_new_chat', insert_chat)
+    monkeypatch.setattr(
+        main,
+        'insert_new_chat_with_current_mode_profile',
+        insert_bound_chat,
+        raising=False,
+    )
     monkeypatch.setattr(main.Chats, 'get_message_by_id_and_message_id', get_message)
     monkeypatch.setattr(main.Chats, 'upsert_message_to_chat_by_id_and_message_id', upsert)
     monkeypatch.setattr(main, 'publish_event', publish, raising=False)
+    monkeypatch.setattr(main, 'get_event_emitter', get_emitter)
     monkeypatch.setattr(main, 'process_chat_payload', process_payload)
     monkeypatch.setattr(main, 'chat_completion_handler', provider)
     monkeypatch.setattr(main, 'build_chat_response_context', build_context)
@@ -288,6 +336,7 @@ async def test_new_chat_binds_current_chat_revision_before_dispatch(
     )
 
     assert response['legacy'] is True
+    assert profile_entry.atomic_inserts == [(profile_entry.chat_inserts[0].id, 'chat', None)]
     assert profile_entry.chat_inserts[0].mode_profile_revision_id == 'chat-current'
     assert profile_entry.events.index(('chat_insert', 'chat-current')) < profile_entry.events.index(('provider', None))
 
@@ -304,6 +353,7 @@ async def test_new_agent_binds_current_agent_revision_before_run_and_runtime(
     )
 
     assert response['status'] is True
+    assert profile_entry.atomic_inserts == [(profile_entry.chat_inserts[0].id, 'agent', None)]
     assert profile_entry.chat_inserts[0].mode_profile_revision_id == 'agent-current'
     insert_index = profile_entry.events.index(('chat_insert', 'agent-current'))
     assert insert_index < profile_entry.events.index(('agent_run', profile_entry.chat_inserts[0].id))
@@ -330,14 +380,10 @@ async def test_stale_new_chat_revision_hint_cannot_select_old_revision(
 
 @pytest.mark.asyncio
 async def test_missing_current_revision_is_mode_profile_unavailable_before_writes(
-    monkeypatch,
     agent_run_db,
     profile_entry,
 ):
-    async def missing_current(app, mode):
-        return None
-
-    monkeypatch.setattr(main, 'get_cached_current_revision', missing_current)
+    profile_entry.current['chat'] = None
 
     with pytest.raises(main.HTTPException) as exc_info:
         await main.chat_completion(
@@ -730,6 +776,117 @@ async def test_profile_filtered_skills_are_not_readded_from_model_defaults(
 
     provider_form, _kwargs = profile_entry.provider_calls[0]
     assert provider_form['skill_ids'] == []
+
+
+@pytest.mark.asyncio
+async def test_provider_exception_redacts_administrator_prompt_from_log_message_and_sse(
+    monkeypatch,
+    caplog,
+    agent_run_db,
+    profile_entry,
+):
+    sentinel = 'ADMIN-PROMPT-SECRET-CHAT-7f38'
+    _configure_prompt_layers(profile_entry, mode='chat', administrator=sentinel)
+
+    async def failing_provider(request, form_data, user, **kwargs):
+        raise RuntimeError(f'provider-request-42 rejected composed prompt containing {sentinel}')
+
+    monkeypatch.setattr(main, 'chat_completion_handler', failing_provider)
+    caplog.set_level('ERROR', logger=main.__name__)
+
+    response = await main.chat_completion(
+        _request(enable_agent_mode=True),
+        _existing_chat_form(mode='chat'),
+        _user(),
+    )
+
+    error_state = {
+        'response': response,
+        'logs': caplog.text,
+        'message_writes': profile_entry.upserts,
+        'sse': profile_entry.emitted,
+    }
+    assert sentinel not in repr(error_state)
+    assert 'provider-request-42' in repr(error_state)
+    assert any(event.get('type') == 'chat:message:error' for event in profile_entry.emitted)
+
+
+@pytest.mark.asyncio
+async def test_provider_exception_redacts_administrator_prompt_from_http_detail(
+    monkeypatch,
+    caplog,
+    agent_run_db,
+    profile_entry,
+):
+    sentinel = 'ADMIN-PROMPT-SECRET-HTTP-b61d'
+    _configure_prompt_layers(profile_entry, mode='chat', administrator=sentinel)
+
+    async def direct_payload(request, form_data, user, metadata, model):
+        metadata = dict(metadata)
+        metadata.pop('chat_id', None)
+        metadata.pop('message_id', None)
+        return form_data, metadata, []
+
+    async def failing_provider(request, form_data, user, **kwargs):
+        raise RuntimeError(f'provider-request-43 rejected composed prompt containing {sentinel}')
+
+    monkeypatch.setattr(main, 'process_chat_payload', direct_payload)
+    monkeypatch.setattr(main, 'chat_completion_handler', failing_provider)
+    caplog.set_level('ERROR', logger=main.__name__)
+
+    with pytest.raises(main.HTTPException) as exc_info:
+        await main.chat_completion(
+            _request(enable_agent_mode=True),
+            _existing_chat_form(mode='chat'),
+            _user(),
+        )
+
+    assert sentinel not in repr(exc_info.value.detail)
+    assert sentinel not in caplog.text
+    assert 'provider-request-43' in repr(exc_info.value.detail)
+    assert 'provider-request-43' in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_agent_runtime_exception_redacts_administrator_prompt_from_all_failure_state(
+    monkeypatch,
+    caplog,
+    agent_run_db,
+    profile_entry,
+):
+    sentinel = 'ADMIN-PROMPT-SECRET-AGENT-ae92'
+    _configure_prompt_layers(profile_entry, mode='agent', administrator=sentinel)
+
+    class FailingRuntimeClient:
+        def __init__(self, base_url, service_token=None, timeout=None):
+            pass
+
+        async def start_run(self, payload):
+            profile_entry.runtime_calls.append(payload)
+            raise main.AgentRuntimeError(f'agent-runtime-request-17 rejected composed prompt containing {sentinel}')
+
+    monkeypatch.setattr(main, 'AgentRuntimeClient', FailingRuntimeClient)
+    caplog.set_level('ERROR', logger=main.__name__)
+
+    response = await main.chat_completion(
+        _request(enable_agent_mode=True),
+        _existing_chat_form(mode='agent'),
+        _user(),
+    )
+    run = await AgentRuns.get_run(response['agent_run_id'])
+    events = await AgentRuns.list_events(response['agent_run_id'])
+
+    failure_state = {
+        'response': response,
+        'logs': caplog.text,
+        'message_writes': profile_entry.upserts,
+        'run': run,
+        'events': events,
+        'runtime_metadata': profile_entry.runtime_calls[0]['metadata'],
+    }
+    assert sentinel not in repr(failure_state)
+    assert 'agent-runtime-request-17' in repr(failure_state)
+    assert response['error']['code'] == 'agent_runtime_error'
 
 
 def _configure_prompt_layers(profile_entry, *, mode: str, administrator: str) -> None:

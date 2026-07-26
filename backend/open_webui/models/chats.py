@@ -375,46 +375,82 @@ class ChatTable:
         db: AsyncSession | None = None,
         *,
         mode_profile_revision_id: str | None = None,
+        commit: bool = True,
     ) -> ChatModel | None:
-        async with get_async_db_context(db) as session:
-            normalized_chat = normalize_new_conversation_chat(form_data.chat)
-            chat = ChatModel(
-                **{
-                    'id': id,
-                    'user_id': user_id,
-                    'title': self._clean_null_bytes(
-                        normalized_chat['title'] if 'title' in normalized_chat else 'New Chat'
-                    ),
-                    'chat': self._clean_null_bytes(normalized_chat),
-                    'folder_id': form_data.folder_id,
-                    'mode_profile_revision_id': mode_profile_revision_id,
-                    'created_at': int(time.time()),
-                    'updated_at': int(time.time()),
-                    'last_read_at': int(time.time()),
-                }
+        if not commit:
+            if db is None:
+                raise ValueError('A caller-owned AsyncSession is required when commit is false')
+            return await self._insert_new_chat_in_session(
+                db,
+                id=id,
+                user_id=user_id,
+                form_data=form_data,
+                mode_profile_revision_id=mode_profile_revision_id,
+                commit=False,
             )
 
-            chat_item = Chat(**chat.model_dump())
-            session.add(chat_item)
+        async with get_async_db_context(db) as session:
+            return await self._insert_new_chat_in_session(
+                session,
+                id=id,
+                user_id=user_id,
+                form_data=form_data,
+                mode_profile_revision_id=mode_profile_revision_id,
+                commit=True,
+            )
+
+    async def _insert_new_chat_in_session(
+        self,
+        session: AsyncSession,
+        *,
+        id: str,
+        user_id: str,
+        form_data: ChatForm,
+        mode_profile_revision_id: str | None,
+        commit: bool,
+    ) -> ChatModel | None:
+        normalized_chat = normalize_new_conversation_chat(form_data.chat)
+        chat = ChatModel(
+            **{
+                'id': id,
+                'user_id': user_id,
+                'title': self._clean_null_bytes(normalized_chat['title'] if 'title' in normalized_chat else 'New Chat'),
+                'chat': self._clean_null_bytes(normalized_chat),
+                'folder_id': form_data.folder_id,
+                'mode_profile_revision_id': mode_profile_revision_id,
+                'created_at': int(time.time()),
+                'updated_at': int(time.time()),
+                'last_read_at': int(time.time()),
+            }
+        )
+
+        chat_item = Chat(**chat.model_dump())
+        session.add(chat_item)
+        if commit:
             await session.commit()
             await session.refresh(chat_item)
+        else:
+            await session.flush()
 
-            # Dual-write initial messages to chat_message table
-            try:
-                history = normalized_chat.get('history', {})
-                messages = history.get('messages', {})
-                for message_id, message in messages.items():
-                    if isinstance(message, dict) and message.get('role'):
-                        await ChatMessages.upsert_message(
-                            message_id=message_id,
-                            chat_id=id,
-                            user_id=user_id,
-                            data=message,
-                        )
-            except Exception as e:
-                log.warning(f'Failed to write initial messages to chat_message table: {e}')
+        result = ChatModel.model_validate(chat_item) if chat_item else None
+        if commit and result is not None:
+            await self.dual_write_initial_messages(result)
+        return result
 
-            return ChatModel.model_validate(chat_item) if chat_item else None
+    async def dual_write_initial_messages(self, chat: ChatModel) -> None:
+        try:
+            history = chat.chat.get('history', {})
+            messages = history.get('messages', {})
+            for message_id, message in messages.items():
+                if isinstance(message, dict) and message.get('role'):
+                    await ChatMessages.upsert_message(
+                        message_id=message_id,
+                        chat_id=chat.id,
+                        user_id=chat.user_id,
+                        data=message,
+                    )
+        except Exception as e:
+            log.warning(f'Failed to write initial messages to chat_message table: {e}')
 
     def _chat_import_form_to_chat_model(self, user_id: str, form_data: ChatImportForm) -> ChatModel:
         id = str(uuid.uuid4())
