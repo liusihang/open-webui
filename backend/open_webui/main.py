@@ -28,6 +28,7 @@ from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 from sqlalchemy import text
+from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession
 from starlette.datastructures import Headers
 from starlette.exceptions import HTTPException as StarletteHTTPException
@@ -54,6 +55,7 @@ from open_webui.agent.conversation_mode_profile_service import (
     ModeProfileCapabilityRequestError,
     ModeProfileRevisionHintConflictError,
     ModeProfileServiceUnavailableError,
+    get_cached_current_revision,
     get_cached_revision,
     get_public_conversation_mode_profiles,
     insert_new_chat_with_current_mode_profile,
@@ -289,6 +291,7 @@ from open_webui.utils.oauth import (
     resolve_oauth_client_info,
 )
 from open_webui.utils.payload import resolve_system_prompt
+from open_webui.utils.redaction import register_request_redaction_secrets
 from open_webui.utils.plugin import install_tool_and_function_dependencies
 from open_webui.utils.redis import get_redis_client
 from open_webui.utils.security_headers import SecurityHeadersMiddleware
@@ -570,13 +573,10 @@ async def lifespan(app: FastAPI):
     await import_legacy_config_json()
     await seed_registered_defaults()
     await initialize_runtime_config(app)
-    if (
-        getattr(app.state.config, 'ENABLE_AGENT_MODE', False)
-        and getattr(app.state.config, 'AGENT_RUNTIME_BASE_URL', '')
+    if getattr(app.state.config, 'ENABLE_AGENT_MODE', False) and getattr(
+        app.state.config, 'AGENT_RUNTIME_BASE_URL', ''
     ):
-        app.state.agent_decision_dispatcher_task = asyncio.create_task(
-            agent_decision_dispatcher_loop(app)
-        )
+        app.state.agent_decision_dispatcher_task = asyncio.create_task(agent_decision_dispatcher_loop(app))
     await migrate_legacy_webhook_config()
     await publish_event(app, EVENTS.SYSTEM_STARTUP_STARTED, source='system')
 
@@ -1275,9 +1275,7 @@ def _is_agent_mode_product_chat(request: Request, metadata: dict, message_ids) -
     if metadata.get('chat_mode') != ConversationMode.AGENT.value:
         return False
     return bool(
-        metadata.get('chat_id')
-        and metadata.get('user_message_id')
-        and _first_assistant_message_id(message_ids)
+        metadata.get('chat_id') and metadata.get('user_message_id') and _first_assistant_message_id(message_ids)
     )
 
 
@@ -1303,9 +1301,7 @@ def _strip_mode_profile_control_fields(value) -> None:
             if normalized_key == 'mode_profile_warnings':
                 _strip_mode_profile_control_fields(value[key])
                 continue
-            if normalized_key.startswith(
-                ('mode_profile_', 'conversation_mode_profile_')
-            ):
+            if normalized_key.startswith(('mode_profile_', 'conversation_mode_profile_')):
                 value.pop(key, None)
                 continue
             _strip_mode_profile_control_fields(value[key])
@@ -1326,6 +1322,7 @@ def _system_prompt_text(messages: list[dict]) -> str:
 
 async def _enforce_mode_profile_prompt(
     *,
+    request: Request,
     revision,
     form_data: dict,
     metadata: dict,
@@ -1337,12 +1334,24 @@ async def _enforce_mode_profile_prompt(
         _strip_mode_profile_control_fields(form_data)
         return False
 
+    register_request_redaction_secrets(request, revision.system_prompt)
+    variables = metadata.get('variables')
+    if isinstance(variables, dict):
+        register_request_redaction_secrets(
+            request,
+            *(
+                value
+                for key, value in variables.items()
+                if isinstance(key, str) and key in revision.system_prompt and isinstance(value, str)
+            ),
+        )
     global_system_prompt = await Config.get('chat.global_system_prompt', '')
     resolved_administrator = await resolve_system_prompt(
         revision.system_prompt,
         metadata,
         user,
     )
+    register_request_redaction_secrets(request, resolved_administrator)
     model_layer = '\n\n'.join(
         prompt
         for prompt in (
@@ -1367,11 +1376,7 @@ async def _enforce_mode_profile_prompt(
         )
     )
     messages = remove_system_message(form_data.get('messages') or [])
-    form_data['messages'] = (
-        [{'role': 'system', 'content': composed}, *messages]
-        if composed
-        else messages
-    )
+    form_data['messages'] = [{'role': 'system', 'content': composed}, *messages] if composed else messages
     params = form_data.get('params')
     if isinstance(params, dict):
         params.pop('system', None)
@@ -1393,17 +1398,18 @@ def _mode_profile_capability_request_values(form_data: dict) -> dict:
     return request_values
 
 
-def _model_without_bound_profile_skill_defaults(model: dict) -> dict:
+def _model_without_bound_profile_defaults(model: dict) -> dict:
     info = model.get('info')
     if not isinstance(info, dict):
         return model
     meta = info.get('meta')
-    if not isinstance(meta, dict) or 'skillIds' not in meta:
+    if not isinstance(meta, dict) or not any(key in meta for key in ('skillIds', 'filterIds')):
         return model
     effective_model = {**model}
     effective_info = {**info}
     effective_meta = {**meta}
     effective_meta.pop('skillIds', None)
+    effective_meta.pop('filterIds', None)
     effective_info['meta'] = effective_meta
     effective_model['info'] = effective_info
     return effective_model
@@ -1466,9 +1472,7 @@ async def _apply_mode_profile_capabilities(
     metadata['filter_ids'] = list(resolution.filter_ids)
     metadata['features'] = features
     if resolution.warnings:
-        metadata['mode_profile_warnings'] = [
-            warning.model_dump() for warning in resolution.warnings
-        ]
+        metadata['mode_profile_warnings'] = [warning.model_dump() for warning in resolution.warnings]
 
 
 def _raise_mode_profile_integrity_error(exc: Exception) -> None:
@@ -1489,6 +1493,12 @@ async def _resolve_conversation_mode_profile_revision(
     revision_hint: str | None,
 ):
     try:
+        if existing_chat is None:
+            return await _load_current_mode_profile_revision(
+                request,
+                mode=mode,
+                revision_hint=revision_hint,
+            )
         return await _load_bound_mode_profile_revision(
             request,
             mode=mode,
@@ -1517,6 +1527,29 @@ async def _resolve_conversation_mode_profile_revision(
         ) from exc
     except ConversationModeProfileIntegrityError as exc:
         _raise_mode_profile_integrity_error(exc)
+
+
+async def _load_current_mode_profile_revision(
+    request: Request,
+    *,
+    mode: ConversationMode,
+    revision_hint: str | None,
+):
+    revision = await get_cached_current_revision(request.app, mode)
+    if revision is None:
+        raise ModeProfileServiceUnavailableError(
+            'read_current_revision',
+            mode=mode.value,
+        )
+    verify_conversation_mode_profile_revision(revision, expected_mode=mode)
+    if revision_hint is not None and revision_hint != revision.id:
+        raise ModeProfileRevisionHintConflictError(
+            hinted_revision_id=revision_hint,
+            authoritative_revision_id=revision.id,
+            bound=False,
+        )
+    return revision
+
 
 async def _load_bound_mode_profile_revision(
     request: Request,
@@ -1815,11 +1848,7 @@ async def _agent_context_replay_messages_and_items(run) -> tuple[list[dict], lis
 
     replay_items = _agent_context_replay_trim_items(replay_items)
     messages = [
-        {
-            key: item[key]
-            for key in ('role', 'content', 'phase')
-            if key in item
-        }
+        {key: item[key] for key in ('role', 'content', 'phase') if key in item}
         for item in replay_items
         if item.get('role') == 'assistant'
     ]
@@ -1833,11 +1862,7 @@ def _agent_context_replay_canonicalize_tool_batches(items: list[dict]) -> list[d
     batch = None
 
     def clean(item: dict) -> dict:
-        return {
-            key: value
-            for key, value in item.items()
-            if key not in {'_agent_block_kind', '_agent_tool_call_id'}
-        }
+        return {key: value for key, value in item.items() if key not in {'_agent_block_kind', '_agent_tool_call_id'}}
 
     def flush_batch(*, allow_incomplete: bool = False) -> None:
         nonlocal batch
@@ -1845,11 +1870,7 @@ def _agent_context_replay_canonicalize_tool_batches(items: list[dict]) -> list[d
             return
 
         call_ids = [entry[1]['call_id'] for entry in batch['calls']]
-        complete_ids = {
-            call_id
-            for call_id in call_ids
-            if call_id in batch['outputs']
-        }
+        complete_ids = {call_id for call_id in call_ids if call_id in batch['outputs']}
         if not complete_ids:
             batch = None
             return
@@ -1867,11 +1888,7 @@ def _agent_context_replay_canonicalize_tool_batches(items: list[dict]) -> list[d
             for entry in sorted(batch['intents'], key=lambda entry: entry[0])
             if commentary_is_safe(entry)
         )
-        canonical.extend(
-            clean(item)
-            for _, item in batch['calls']
-            if item['call_id'] in complete_ids
-        )
+        canonical.extend(clean(item) for _, item in batch['calls'] if item['call_id'] in complete_ids)
         canonical.extend(
             clean(item)
             for _, item in sorted(batch['output_order'], key=lambda entry: entry[0])
@@ -2070,9 +2087,7 @@ def _agent_context_replay_trim_items(items: list[dict]) -> list[dict]:
 
 def _agent_context_replay_drop_orphan_tool_items(items: list[dict]) -> list[dict]:
     call_ids = {
-        str(item.get('call_id') or '')
-        for item in items
-        if item.get('type') == 'function_call' and item.get('call_id')
+        str(item.get('call_id') or '') for item in items if item.get('type') == 'function_call' and item.get('call_id')
     }
     output_ids = {
         str(item.get('call_id') or '')
@@ -2248,6 +2263,7 @@ async def _start_agent_mode_chat(
     requested_model_params = _agent_runtime_model_params(form_data)
     form_data, metadata, _events = await process_chat_payload(request, form_data, user, metadata, model)
     prompt_enforced = await _enforce_mode_profile_prompt(
+        request=request,
         revision=mode_profile_revision,
         form_data=form_data,
         metadata=metadata,
@@ -2324,6 +2340,7 @@ async def _start_agent_mode_chat(
             'message': redact_mode_profile_administrator_prompt(
                 str(exc),
                 mode_profile_revision,
+                request=request,
             ),
         }
         await AgentRuns.append_event(
@@ -2555,7 +2572,20 @@ async def chat_completion(
                         status_code=status.HTTP_404_NOT_FOUND,
                         detail=ERROR_MESSAGES.DEFAULT(),
                     )
-                existing_chat = await Chats.get_chat_by_id(chat_id)
+                try:
+                    existing_chat = await Chats.get_chat_by_id(
+                        chat_id,
+                        repair=False,
+                        strict=True,
+                    )
+                except SQLAlchemyError as exc:
+                    raise HTTPException(
+                        status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                        detail={
+                            'code': 'mode_profile_unavailable',
+                            'message': 'The conversation mode profile is unavailable.',
+                        },
+                    ) from exc
                 if existing_chat is None:
                     raise HTTPException(
                         status_code=status.HTTP_404_NOT_FOUND,
@@ -2578,13 +2608,10 @@ async def chat_completion(
                         is_new=False,
                         has_agent_run=has_agent_run,
                     )
-                    if (
-                        preliminary_resolution.mode is ConversationMode.AGENT
-                        and not getattr(
-                            request.app.state.config,
-                            'ENABLE_AGENT_MODE',
-                            False,
-                        )
+                    if preliminary_resolution.mode is ConversationMode.AGENT and not getattr(
+                        request.app.state.config,
+                        'ENABLE_AGENT_MODE',
+                        False,
                     ):
                         raise HTTPException(
                             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
@@ -2648,9 +2675,8 @@ async def chat_completion(
                     },
                 ) from exc
 
-            if (
-                resolution.mode is ConversationMode.AGENT
-                and not getattr(request.app.state.config, 'ENABLE_AGENT_MODE', False)
+            if resolution.mode is ConversationMode.AGENT and not getattr(
+                request.app.state.config, 'ENABLE_AGENT_MODE', False
             ):
                 raise HTTPException(
                     status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
@@ -2661,11 +2687,25 @@ async def chat_completion(
                 )
 
             metadata['chat_mode'] = resolution.mode.value
-            conversation_mode_should_persist = (
-                resolution.should_persist and not mode_claimed
-            )
+            conversation_mode_should_persist = resolution.should_persist and not mode_claimed
+            if is_persisted_chat and is_new_chat:
+                mode_profile_revision = await _resolve_conversation_mode_profile_revision(
+                    request,
+                    mode=resolution.mode,
+                    existing_chat=None,
+                    revision_hint=mode_profile_revision_hint,
+                )
+                await _apply_mode_profile_capabilities(
+                    request,
+                    revision=mode_profile_revision,
+                    model=model,
+                    user=user,
+                    request_values=mode_profile_capability_request,
+                    form_data=form_data,
+                    metadata=metadata,
+                )
             if mode_profile_revision is not None:
-                model = _model_without_bound_profile_skill_defaults(model)
+                model = _model_without_bound_profile_defaults(model)
                 metadata['model'] = model
 
         initial_title_generation = None
@@ -2770,6 +2810,7 @@ async def chat_completion(
                             request.app,
                             mode=resolution.mode,
                             revision_hint=mode_profile_revision_hint,
+                            expected_revision_id=mode_profile_revision.id,
                             chat_id=chat_id,
                             user_id=user.id,
                             form_data=new_chat_form,
@@ -2791,21 +2832,18 @@ async def chat_completion(
                                 'message': 'The conversation mode profile is unavailable.',
                             },
                         ) from exc
+                    except SQLAlchemyError as exc:
+                        raise HTTPException(
+                            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                            detail={
+                                'code': 'mode_profile_unavailable',
+                                'message': 'The conversation mode profile is unavailable.',
+                            },
+                        ) from exc
                     except ConversationModeProfileIntegrityError as exc:
                         _raise_mode_profile_integrity_error(exc)
 
                     mode_profile_revision = creation.revision
-                    await _apply_mode_profile_capabilities(
-                        request,
-                        revision=mode_profile_revision,
-                        model=model,
-                        user=user,
-                        request_values=mode_profile_capability_request,
-                        form_data=form_data,
-                        metadata=metadata,
-                    )
-                    model = _model_without_bound_profile_skill_defaults(model)
-                    metadata['model'] = model
                     await publish_event(
                         request,
                         EVENTS.CHAT_CREATED,
@@ -2890,11 +2928,7 @@ async def chat_completion(
                     # The old frontend saveChatHandler did this on every message;
                     # now the backend owns persistence.
                     chat_files = metadata.get('files')
-                    if (
-                        chat_files is not None
-                        or selected_chat_models
-                        or conversation_mode_should_persist
-                    ):
+                    if chat_files is not None or selected_chat_models or conversation_mode_should_persist:
                         if existing_chat is None:
                             existing_chat = await Chats.get_chat_by_id(chat_id)
                         if existing_chat:
@@ -3027,12 +3061,14 @@ async def chat_completion(
         exc.detail = redact_mode_profile_administrator_prompt(
             exc.detail,
             mode_profile_revision,
+            request=request,
         )
         raise
     except Exception as e:
         error_detail = redact_mode_profile_administrator_prompt(
             str(e),
             mode_profile_revision,
+            request=request,
         )
         log.warning('Error processing chat metadata: %s', error_detail)
         raise HTTPException(
@@ -3040,16 +3076,27 @@ async def chat_completion(
             detail=error_detail,
         )
 
-    async def process_chat(request, form_data, user, metadata, model, tasks=None):
+    async def process_chat(
+        request,
+        form_data,
+        user,
+        metadata,
+        model,
+        tasks,
+        *,
+        effective_model_system_prompt,
+        effective_request_system_prompt,
+    ):
         try:
             form_data, metadata, events = await process_chat_payload(request, form_data, user, metadata, model)
             prompt_enforced = await _enforce_mode_profile_prompt(
+                request=request,
                 revision=mode_profile_revision,
                 form_data=form_data,
                 metadata=metadata,
                 user=user,
-                model_system_prompt=model_system_prompt,
-                request_system_prompt=request_system_prompt,
+                model_system_prompt=effective_model_system_prompt,
+                request_system_prompt=effective_request_system_prompt,
             )
 
             if prompt_enforced:
@@ -3098,6 +3145,7 @@ async def chat_completion(
             error_detail = redact_mode_profile_administrator_prompt(
                 e.detail if isinstance(e, HTTPException) else str(e),
                 mode_profile_revision,
+                request=request,
             )
             log.error('Error processing chat payload: %s', error_detail)
             if metadata.get('chat_id') and metadata.get('message_id'):
@@ -3164,6 +3212,7 @@ async def chat_completion(
                                 redact_mode_profile_administrator_prompt(
                                     str(e),
                                     mode_profile_revision,
+                                    request=request,
                                 ),
                             )
             except BaseException as e:
@@ -3172,6 +3221,7 @@ async def chat_completion(
                     redact_mode_profile_administrator_prompt(
                         str(e),
                         mode_profile_revision,
+                        request=request,
                     ),
                 )
 
@@ -3203,20 +3253,34 @@ async def chat_completion(
                 continue
 
             # Per-model metadata: own message_id + model
+            resolved_model = request.app.state.MODELS.get(target_model_id, model)
             per_model_metadata = {
                 **metadata,
                 'message_id': assistant_message_id,
+                'model': resolved_model,
             }
 
-            # Per-model form_data: own model
+            target_model_info = (
+                model_info if target_model_id == model_id else await Models.get_model_by_id(target_model_id)
+            )
+            target_model_info_params = {
+                **default_model_params,
+                **(target_model_info.params.model_dump() if target_model_info and target_model_info.params else {}),
+            }
+            target_params = {
+                **target_model_info_params,
+                **request_params,
+            }
+
             model_form_data = {
                 **form_data,
                 'model': target_model_id,
                 'metadata': per_model_metadata,
             }
-
-            # Resolve the model object for this specific model
-            resolved_model = request.app.state.MODELS.get(target_model_id, model)
+            if target_params:
+                model_form_data['params'] = target_params
+            else:
+                model_form_data.pop('params', None)
 
             # Only the first model runs chat-level background tasks;
             # subsequent models only run follow-ups.
@@ -3236,6 +3300,8 @@ async def chat_completion(
                         if k not in (TASKS.TITLE_GENERATION, TASKS.TAGS_GENERATION)
                     }
                     or None,
+                    effective_model_system_prompt=target_model_info_params.get('system'),
+                    effective_request_system_prompt=request_system_prompt,
                 ),
                 id=chat_id,
             )
@@ -3259,7 +3325,16 @@ async def chat_completion(
     else:
         # Legacy/direct: single model, synchronous
         metadata['message_id'] = message_ids[0]['message_id']
-        return await process_chat(request, form_data, user, metadata, model, tasks)
+        return await process_chat(
+            request,
+            form_data,
+            user,
+            metadata,
+            model,
+            tasks,
+            effective_model_system_prompt=model_system_prompt,
+            effective_request_system_prompt=request_system_prompt,
+        )
 
 
 # Alias for chat_completion (Legacy)

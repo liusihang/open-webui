@@ -35,6 +35,7 @@ from open_webui.utils.filter import (
 )
 from open_webui.utils.models import check_model_access, get_all_models
 from open_webui.utils.payload import apply_model_system_prompt_to_body, convert_payload_openai_to_ollama
+from open_webui.utils.redaction import redact_request_secrets
 from open_webui.utils.response import (
     convert_response_ollama_to_openai,
     convert_streaming_response_ollama_to_openai,
@@ -108,7 +109,7 @@ async def generate_direct_chat_completion(
             }
         )
 
-        log.info(f'res: {res}')
+        log.info('res: %s', redact_request_secrets(request, res))
 
         if res.get('status', False):
             # Define a generator to stream responses
@@ -128,7 +129,10 @@ async def generate_direct_chat_completion(
                             else:
                                 yield f'data: {data}\n\n'
                 except Exception as e:
-                    log.debug(f'Error in event generator: {e}')
+                    log.debug(
+                        'Error in event generator: %s',
+                        redact_request_secrets(request, str(e)),
+                    )
                     pass
 
             # Define a background task to run the event generator
@@ -169,7 +173,10 @@ async def generate_chat_completion(
     bypass_system_prompt: bool = False,
     bypass_global_system_prompt: bool = False,
 ):
-    log.debug(f'generate_chat_completion: {form_data}')
+    log.debug(
+        'generate_chat_completion: %s',
+        redact_request_secrets(request, form_data),
+    )
     if BYPASS_MODEL_ACCESS_CONTROL:
         bypass_filter = True
 

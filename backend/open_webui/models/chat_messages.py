@@ -164,79 +164,111 @@ class ChatMessageTable:
         user_id: str,
         data: dict,
         db: Optional[AsyncSession] = None,
-    ) -> Optional[ChatMessageModel]:
+        *,
+        commit: bool = True,
+    ) -> ChatMessageModel | None:
         """Insert or update a chat message."""
-        async with get_async_db_context(db) as db:
-            now = int(time.time())
-            timestamp = data.get('timestamp', now)
+        if not commit:
+            if db is None:
+                raise ValueError('A caller-owned AsyncSession is required when commit is false')
+            return await self._upsert_message_in_session(
+                db,
+                message_id=message_id,
+                chat_id=chat_id,
+                user_id=user_id,
+                data=data,
+                commit=False,
+            )
 
-            # Use composite ID: {chat_id}-{message_id}
-            composite_id = f'{chat_id}-{message_id}'
+        async with get_async_db_context(db) as session:
+            return await self._upsert_message_in_session(
+                session,
+                message_id=message_id,
+                chat_id=chat_id,
+                user_id=user_id,
+                data=data,
+                commit=True,
+            )
 
-            existing = await db.get(ChatMessage, composite_id)
-            if existing:
-                # Update existing
-                if 'role' in data:
-                    existing.role = data['role']
-                if 'parent_id' in data or 'parentId' in data:
-                    existing.parent_id = data.get('parent_id') or data.get('parentId')
-                if 'content' in data:
-                    existing.content = data.get('content')
-                if 'output' in data:
-                    existing.output = data.get('output')
-                if 'model_id' in data or 'model' in data:
-                    existing.model_id = data.get('model_id') or data.get('model')
-                if 'files' in data:
-                    existing.files = data.get('files')
-                if 'sources' in data:
-                    existing.sources = data.get('sources')
-                if 'embeds' in data:
-                    existing.embeds = data.get('embeds')
-                if 'done' in data:
-                    existing.done = data.get('done', True)
-                if 'status_history' in data or 'statusHistory' in data:
-                    existing.status_history = data.get('status_history') or data.get('statusHistory')
-                if 'error' in data:
-                    existing.error = data.get('error')
-                if 'context_summary' in data or 'contextSummary' in data:
-                    existing.context_summary = data.get('context_summary') or data.get('contextSummary')
-                # Extract and normalize usage
-                usage = get_usage(data)
-                if usage:
-                    existing_usage = normalize_usage(existing.usage or {}) if existing.usage else {}
-                    existing.usage = existing_usage if usage == existing_usage else merge_usage(existing_usage, usage)
-                existing.updated_at = now
-                await db.commit()
-                await db.refresh(existing)
-                return ChatMessageModel.model_validate(existing)
+    async def _upsert_message_in_session(
+        self,
+        session: AsyncSession,
+        *,
+        message_id: str,
+        chat_id: str,
+        user_id: str,
+        data: dict,
+        commit: bool,
+    ) -> ChatMessageModel | None:
+        now = int(time.time())
+        timestamp = data.get('timestamp', now)
+        composite_id = f'{chat_id}-{message_id}'
+
+        existing = await session.get(ChatMessage, composite_id)
+        if existing:
+            if 'role' in data:
+                existing.role = data['role']
+            if 'parent_id' in data or 'parentId' in data:
+                existing.parent_id = data.get('parent_id') or data.get('parentId')
+            if 'content' in data:
+                existing.content = data.get('content')
+            if 'output' in data:
+                existing.output = data.get('output')
+            if 'model_id' in data or 'model' in data:
+                existing.model_id = data.get('model_id') or data.get('model')
+            if 'files' in data:
+                existing.files = data.get('files')
+            if 'sources' in data:
+                existing.sources = data.get('sources')
+            if 'embeds' in data:
+                existing.embeds = data.get('embeds')
+            if 'done' in data:
+                existing.done = data.get('done', True)
+            if 'status_history' in data or 'statusHistory' in data:
+                existing.status_history = data.get('status_history') or data.get('statusHistory')
+            if 'error' in data:
+                existing.error = data.get('error')
+            if 'context_summary' in data or 'contextSummary' in data:
+                existing.context_summary = data.get('context_summary') or data.get('contextSummary')
+            usage = get_usage(data)
+            if usage:
+                existing_usage = normalize_usage(existing.usage or {}) if existing.usage else {}
+                existing.usage = existing_usage if usage == existing_usage else merge_usage(existing_usage, usage)
+            existing.updated_at = now
+            if commit:
+                await session.commit()
+                await session.refresh(existing)
             else:
-                # Insert new
-                # Extract and normalize usage
-                usage = get_usage(data)
-                message = ChatMessage(
-                    id=composite_id,
-                    chat_id=chat_id,
-                    user_id=user_id,
-                    role=data.get('role', 'user'),
-                    parent_id=data.get('parent_id') or data.get('parentId'),
-                    content=data.get('content'),
-                    output=data.get('output'),
-                    model_id=data.get('model_id') or data.get('model'),
-                    files=data.get('files'),
-                    sources=data.get('sources'),
-                    embeds=data.get('embeds'),
-                    done=data.get('done', True),
-                    status_history=data.get('status_history') or data.get('statusHistory'),
-                    error=data.get('error'),
-                    usage=usage,
-                    context_summary=data.get('context_summary') or data.get('contextSummary'),
-                    created_at=timestamp,
-                    updated_at=now,
-                )
-                db.add(message)
-                await db.commit()
-                await db.refresh(message)
-                return ChatMessageModel.model_validate(message)
+                await session.flush()
+            return ChatMessageModel.model_validate(existing)
+
+        message = ChatMessage(
+            id=composite_id,
+            chat_id=chat_id,
+            user_id=user_id,
+            role=data.get('role', 'user'),
+            parent_id=data.get('parent_id') or data.get('parentId'),
+            content=data.get('content'),
+            output=data.get('output'),
+            model_id=data.get('model_id') or data.get('model'),
+            files=data.get('files'),
+            sources=data.get('sources'),
+            embeds=data.get('embeds'),
+            done=data.get('done', True),
+            status_history=data.get('status_history') or data.get('statusHistory'),
+            error=data.get('error'),
+            usage=get_usage(data),
+            context_summary=data.get('context_summary') or data.get('contextSummary'),
+            created_at=timestamp,
+            updated_at=now,
+        )
+        session.add(message)
+        if commit:
+            await session.commit()
+            await session.refresh(message)
+        else:
+            await session.flush()
+        return ChatMessageModel.model_validate(message)
 
     async def get_message_by_id(self, id: str, db: Optional[AsyncSession] = None) -> Optional[ChatMessageModel]:
         async with get_async_db_context(db) as db:

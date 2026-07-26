@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import importlib
+import json
 import os
 from contextlib import asynccontextmanager
 from types import SimpleNamespace
@@ -28,6 +29,7 @@ from open_webui.models.conversation_mode_profiles import (
     ConversationModeProfileIntegrityError,
     ConversationModeProfileRevisionModel,
 )
+from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 main = importlib.import_module('open_webui.main')
@@ -92,6 +94,8 @@ def profile_entry(monkeypatch):  # noqa: C901
         process_payload_calls=[],
         chat_inserts=[],
         atomic_inserts=[],
+        atomic_expected_revisions=[],
+        chat_reads=[],
         stored_chats={
             'chat-1': SimpleNamespace(
                 id='chat-1',
@@ -119,11 +123,12 @@ def profile_entry(monkeypatch):  # noqa: C901
             'chat.global_system_prompt': '',
         },
         model_info=None,
+        model_infos={},
         capability_resolution=None,
     )
 
     async def get_model_by_id(model_id):
-        return calls.model_info
+        return calls.model_infos.get(model_id, calls.model_info)
 
     async def config_get(key, default=None):
         return calls.config_values.get(key, default)
@@ -165,7 +170,8 @@ def profile_entry(monkeypatch):  # noqa: C901
     async def is_owner(chat_id, user_id):
         return True
 
-    async def get_chat(chat_id):
+    async def get_chat(chat_id, *, repair=True, strict=False):
+        calls.chat_reads.append((chat_id, repair, strict))
         return calls.stored_chats.get(chat_id)
 
     async def claim_mode(chat_id, *, requested, user_id, has_agent_run, db=None):
@@ -206,8 +212,10 @@ def profile_entry(monkeypatch):  # noqa: C901
         chat_id,
         user_id,
         form_data,
+        expected_revision_id=None,
     ):
         calls.atomic_inserts.append((chat_id, str(mode), revision_hint))
+        calls.atomic_expected_revisions.append(expected_revision_id)
         calls.events.append(('current_revision', str(mode)))
         revision = calls.current.get(str(mode))
         if revision is None:
@@ -218,6 +226,12 @@ def profile_entry(monkeypatch):  # noqa: C901
         if revision_hint is not None and revision_hint != revision.id:
             raise ModeProfileRevisionHintConflictError(
                 hinted_revision_id=revision_hint,
+                authoritative_revision_id=revision.id,
+                bound=False,
+            )
+        if expected_revision_id is not None and expected_revision_id != revision.id:
+            raise ModeProfileRevisionHintConflictError(
+                hinted_revision_id=expected_revision_id,
                 authoritative_revision_id=revision.id,
                 bound=False,
             )
@@ -399,6 +413,30 @@ async def test_missing_current_revision_is_mode_profile_unavailable_before_write
 
 
 @pytest.mark.asyncio
+async def test_new_chat_capabilities_are_validated_before_atomic_insert(
+    agent_run_db,
+    profile_entry,
+):
+    profile_entry.capability_resolution = ModeProfileCapabilityRequestError(
+        reason='duplicate_identifier',
+        field='tool_ids',
+    )
+    form = _new_chat_form(mode='chat')
+    form['tool_ids'] = ['tool-1', 'tool-1']
+
+    with pytest.raises(main.HTTPException) as exc_info:
+        await main.chat_completion(_request(enable_agent_mode=True), form, _user())
+
+    assert exc_info.value.status_code == 400
+    assert profile_entry.chat_inserts == []
+    assert profile_entry.atomic_inserts == []
+    assert profile_entry.provider_calls == []
+    assert profile_entry.events.index(('current_revision', 'chat')) < profile_entry.events.index(
+        ('capability_resolution', {'tool_ids': ['tool-1', 'tool-1']})
+    )
+
+
+@pytest.mark.asyncio
 async def test_existing_chat_keeps_bound_old_revision_after_head_switch(
     agent_run_db,
     profile_entry,
@@ -437,6 +475,34 @@ async def test_existing_binding_rejects_request_hint_mismatch_before_writes(
     assert exc_info.value.detail['code'] == 'mode_profile_binding_mismatch'
     assert profile_entry.upserts == []
     assert profile_entry.runtime_calls == []
+    assert profile_entry.chat_reads == [('chat-1', False, True)]
+
+
+@pytest.mark.asyncio
+async def test_atomic_profile_binding_db_failure_is_stable_non_secret_503(
+    monkeypatch,
+    agent_run_db,
+    profile_entry,
+):
+    async def fail_insert(*args, **kwargs):
+        raise SQLAlchemyError('private profile binding database detail')
+
+    monkeypatch.setattr(main, 'insert_new_chat_with_current_mode_profile', fail_insert)
+
+    with pytest.raises(main.HTTPException) as exc_info:
+        await main.chat_completion(
+            _request(enable_agent_mode=True),
+            _new_chat_form(mode='chat'),
+            _user(),
+        )
+
+    assert exc_info.value.status_code == 503
+    assert exc_info.value.detail == {
+        'code': 'mode_profile_unavailable',
+        'message': 'The conversation mode profile is unavailable.',
+    }
+    assert 'private profile binding database detail' not in repr(exc_info.value.detail)
+    assert profile_entry.chat_inserts == []
 
 
 @pytest.mark.asyncio
@@ -497,6 +563,84 @@ async def test_chat_prompt_order_is_administrator_model_global_then_user(
         'bypass_global_system_prompt': True,
     }
     assert 'Administrator prompt.' not in repr(provider_form.get('metadata'))
+
+
+@pytest.mark.asyncio
+async def test_multimodel_fanout_uses_each_models_prompt_and_params(
+    monkeypatch,
+    agent_run_db,
+    profile_entry,
+):
+    _configure_prompt_layers(profile_entry, mode='chat', administrator='Administrator prompt.')
+    profile_entry.model_info = None
+    profile_entry.model_infos = {
+        'model-a': SimpleNamespace(
+            base_model_id=None,
+            params=SimpleNamespace(
+                model_dump=lambda: {
+                    'system': 'Model A prompt.',
+                    'temperature': 0.4,
+                    'top_p': 0.1,
+                }
+            ),
+        ),
+        'model-b': SimpleNamespace(
+            base_model_id=None,
+            params=SimpleNamespace(
+                model_dump=lambda: {
+                    'system': 'Model B prompt.',
+                    'temperature': 0.7,
+                    'top_p': 0.9,
+                }
+            ),
+        ),
+    }
+    request = _request(enable_agent_mode=True)
+    request.app.state.MODELS['model-b'] = {
+        'id': 'model-b',
+        'name': 'Model B',
+        'info': {'meta': {}},
+    }
+    form = _existing_chat_form(mode='chat')
+    form['session_id'] = 'session-1'
+    form['message_ids'] = [
+        {'model_id': 'model-a', 'message_id': 'assistant-a'},
+        {'model_id': 'model-b', 'message_id': 'assistant-b'},
+    ]
+    form['params'] = {'system': 'Request prompt.', 'temperature': 0.2}
+
+    task_counter = 0
+
+    async def run_task(redis, coroutine, id):
+        nonlocal task_counter
+        task_counter += 1
+        await coroutine
+        return f'task-{task_counter}', None
+
+    monkeypatch.setattr(main, 'create_task', run_task)
+
+    response = await main.chat_completion(request, form, _user())
+
+    assert response['task_ids'] == ['task-1', 'task-2']
+    assert len(profile_entry.provider_calls) == 2
+    first_form = profile_entry.provider_calls[0][0]
+    second_form = profile_entry.provider_calls[1][0]
+    assert _system_content(first_form['messages']) == (
+        'Administrator prompt.\n\nGlobal prompt.\n\nModel A prompt.\n\nRequest prompt.'
+    )
+    assert _system_content(second_form['messages']) == (
+        'Administrator prompt.\n\nGlobal prompt.\n\nModel B prompt.\n\nRequest prompt.'
+    )
+    assert first_form['params'] == {
+        'temperature': 0.2,
+        'max_tokens': 100,
+        'top_p': 0.1,
+    }
+    assert second_form['params'] == {
+        'temperature': 0.2,
+        'max_tokens': 100,
+        'top_p': 0.9,
+    }
 
 
 @pytest.mark.asyncio
@@ -779,6 +923,49 @@ async def test_profile_filtered_skills_are_not_readded_from_model_defaults(
 
 
 @pytest.mark.asyncio
+async def test_profile_filtered_filters_are_not_readded_from_model_defaults(
+    monkeypatch,
+    agent_run_db,
+    profile_entry,
+):
+    revision = _revision(
+        'chat-old',
+        'chat',
+        administrator_prompt='Administrator prompt.',
+        defaults=ProfileDefaults(filter_ids=()),
+    )
+    profile_entry.revisions['chat-old'] = revision
+    profile_entry.stored_chats['chat-1'] = SimpleNamespace(
+        id='chat-1',
+        user_id='user-1',
+        mode_profile_revision_id='chat-old',
+        chat={
+            'id': 'chat-1',
+            'mode': 'chat',
+            'history': {'currentId': None, 'messages': {}},
+        },
+    )
+    profile_entry.capability_resolution = ModeProfileCapabilityResolution(filter_ids=[])
+    request = _request(enable_agent_mode=True)
+    request.app.state.MODELS['model-a']['info']['meta']['filterIds'] = ['model-filter']
+
+    async def process_payload(request, form_data, user, metadata, model):
+        metadata = dict(metadata)
+        metadata['filter_ids'] = [
+            *metadata.get('filter_ids', []),
+            *model.get('info', {}).get('meta', {}).get('filterIds', []),
+        ]
+        return form_data, metadata, []
+
+    monkeypatch.setattr(main, 'process_chat_payload', process_payload)
+
+    await main.chat_completion(request, _existing_chat_form(mode='chat'), _user())
+
+    provider_form, _kwargs = profile_entry.provider_calls[0]
+    assert provider_form['metadata']['filter_ids'] == []
+
+
+@pytest.mark.asyncio
 async def test_provider_exception_redacts_administrator_prompt_from_log_message_and_sse(
     monkeypatch,
     caplog,
@@ -809,6 +996,47 @@ async def test_provider_exception_redacts_administrator_prompt_from_log_message_
     assert sentinel not in repr(error_state)
     assert 'provider-request-42' in repr(error_state)
     assert any(event.get('type') == 'chat:message:error' for event in profile_entry.emitted)
+
+
+@pytest.mark.asyncio
+async def test_resolved_and_serialized_administrator_prompt_is_request_scoped_redacted(
+    monkeypatch,
+    caplog,
+    agent_run_db,
+    profile_entry,
+):
+    resolved_secret = 'resolved-admin-value-line-1\nresolved-admin-value-line-2'
+    _configure_prompt_layers(
+        profile_entry,
+        mode='chat',
+        administrator='Administrator {{PRIVATE_VALUE}}',
+    )
+    form = _existing_chat_form(mode='chat')
+    form['variables'] = {'{{PRIVATE_VALUE}}': resolved_secret}
+
+    async def failing_provider(request, form_data, user, **kwargs):
+        serialized = json.dumps(form_data)
+        raise RuntimeError(f'provider-request-serialized rejected payload {serialized}')
+
+    monkeypatch.setattr(main, 'chat_completion_handler', failing_provider)
+    caplog.set_level('ERROR', logger=main.__name__)
+
+    response = await main.chat_completion(
+        _request(enable_agent_mode=True),
+        form,
+        _user(),
+    )
+
+    failure_state = {
+        'response': response,
+        'logs': caplog.text,
+        'message_writes': profile_entry.upserts,
+        'sse': profile_entry.emitted,
+    }
+    failure_blob = json.dumps(failure_state, default=str)
+    assert 'resolved-admin-value-line-1' not in failure_blob
+    assert 'Administrator {{PRIVATE_VALUE}}' not in failure_blob
+    assert 'provider-request-serialized' in failure_blob
 
 
 @pytest.mark.asyncio

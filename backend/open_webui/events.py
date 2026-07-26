@@ -13,6 +13,7 @@ from open_webui.models.config import Config
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 from open_webui.retrieval.web.utils import validate_url
 from open_webui.utils.webhook import post_webhook
+from open_webui.utils.redaction import redact_request_secrets
 
 log = logging.getLogger(__name__)
 
@@ -1107,6 +1108,9 @@ async def publish_event(
 ) -> None:
     app = getattr(request_or_app, 'app', request_or_app)
     request = request_or_app if hasattr(request_or_app, 'app') else None
+    if request is not None:
+        data = redact_request_secrets(request, data)
+        message = redact_request_secrets(request, message)
     event_payload = build_event(
         request_or_app,
         event,

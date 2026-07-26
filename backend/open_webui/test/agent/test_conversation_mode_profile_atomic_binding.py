@@ -11,6 +11,8 @@ from open_webui.agent.conversation_mode_profiles import (
     ConversationModeProfile,
     ProfileDefaults,
 )
+from open_webui.models import chat_messages as chat_messages_module
+from open_webui.models.chat_messages import ChatMessage, ChatMessages
 from open_webui.models.chats import Chat, ChatForm, Chats
 from open_webui.models.conversation_mode_profiles import (
     ConversationModeProfileHead,
@@ -33,6 +35,7 @@ async def atomic_profile_db(tmp_path, monkeypatch):
         await connection.run_sync(ConversationModeProfileRevision.__table__.create)
         await connection.run_sync(ConversationModeProfileHead.__table__.create)
         await connection.run_sync(Chat.__table__.create)
+        await connection.run_sync(ChatMessage.__table__.create)
 
     sessions = async_sessionmaker(engine, expire_on_commit=False)
     old_profile = ConversationModeProfile(
@@ -192,6 +195,33 @@ async def test_atomic_new_chat_stale_hint_is_typed_conflict_without_chat_write(
 
 
 @pytest.mark.asyncio
+async def test_atomic_new_chat_rechecks_prevalidated_revision_and_rejects_head_drift(
+    atomic_profile_db,
+):
+    async with atomic_profile_db() as session:
+        await _begin_write(session)
+        head = await _lock_head(session)
+        head.current_revision_id = NEW_REVISION_ID
+        head.updated_at = 2
+        await session.commit()
+
+    with pytest.raises(profile_service.ModeProfileRevisionHintConflictError) as exc_info:
+        await profile_service.insert_new_chat_with_current_mode_profile(
+            _app(),
+            mode='chat',
+            revision_hint=None,
+            expected_revision_id=OLD_REVISION_ID,
+            chat_id='chat-head-drift',
+            user_id='user-1',
+            form_data=_chat_form('chat-head-drift'),
+        )
+
+    assert exc_info.value.authoritative_revision_id == NEW_REVISION_ID
+    assert exc_info.value.hinted_revision_id == OLD_REVISION_ID
+    assert await _chat_binding(atomic_profile_db, 'chat-head-drift') is None
+
+
+@pytest.mark.asyncio
 async def test_chat_insert_with_caller_session_does_not_commit(
     atomic_profile_db,
 ):
@@ -213,28 +243,81 @@ async def test_chat_insert_with_caller_session_does_not_commit(
 
 
 @pytest.mark.asyncio
-async def test_atomic_new_chat_dual_write_runs_only_after_chat_commit(
+async def test_chat_message_no_commit_always_uses_caller_session(
     atomic_profile_db,
     monkeypatch,
 ):
-    committed_bindings = []
+    @asynccontextmanager
+    async def fail_context(db=None):
+        raise AssertionError('caller-owned no-commit path must not open a context')
+        yield
 
-    async def observe_post_commit(chat):
-        committed_bindings.append(await _chat_binding(atomic_profile_db, chat.id))
+    monkeypatch.setattr(
+        chat_messages_module,
+        'get_async_db_context',
+        fail_context,
+    )
 
-    monkeypatch.setattr(Chats, 'dual_write_initial_messages', observe_post_commit)
+    async with atomic_profile_db() as session:
+        await _begin_write(session)
+        message = await ChatMessages.upsert_message(
+            message_id='message-caller-transaction',
+            chat_id='chat-caller-transaction',
+            user_id='user-1',
+            data={'role': 'user', 'content': 'hello'},
+            db=session,
+            commit=False,
+        )
+        assert message.role == 'user'
+        assert session.in_transaction()
+        await session.rollback()
 
+
+@pytest.mark.asyncio
+async def test_atomic_new_chat_rolls_back_chat_when_initial_message_write_fails(
+    atomic_profile_db,
+    monkeypatch,
+):
+    async def fail_message_write(*args, **kwargs):
+        raise RuntimeError('initial message write failed')
+
+    monkeypatch.setattr(ChatMessages, 'upsert_message', fail_message_write)
+
+    with pytest.raises(RuntimeError, match='initial message write failed'):
+        await profile_service.insert_new_chat_with_current_mode_profile(
+            _app(),
+            mode='chat',
+            revision_hint=None,
+            chat_id='chat-dual-write-failure',
+            user_id='user-1',
+            form_data=_chat_form_with_messages('chat-dual-write-failure'),
+        )
+
+    assert await _chat_binding(atomic_profile_db, 'chat-dual-write-failure') is None
+
+
+@pytest.mark.asyncio
+async def test_atomic_new_chat_commits_chat_and_initial_messages_together(
+    atomic_profile_db,
+):
     result = await profile_service.insert_new_chat_with_current_mode_profile(
         _app(),
         mode='chat',
         revision_hint=None,
-        chat_id='chat-post-commit-dual-write',
+        expected_revision_id=OLD_REVISION_ID,
+        chat_id='chat-dual-write-success',
         user_id='user-1',
-        form_data=_chat_form('chat-post-commit-dual-write'),
+        form_data=_chat_form_with_messages('chat-dual-write-success'),
     )
 
     assert result.chat.mode_profile_revision_id == OLD_REVISION_ID
-    assert committed_bindings == [OLD_REVISION_ID]
+    async with atomic_profile_db() as session:
+        messages = (
+            (await session.execute(select(ChatMessage).where(ChatMessage.chat_id == 'chat-dual-write-success')))
+            .scalars()
+            .all()
+        )
+    assert {message.role for message in messages} == {'user', 'assistant'}
 
 
 def _revision_row(
@@ -302,6 +385,30 @@ def _chat_form(chat_id: str) -> ChatForm:
             'messages': [],
         }
     )
+
+
+def _chat_form_with_messages(chat_id: str) -> ChatForm:
+    form = _chat_form(chat_id)
+    form.chat['history'] = {
+        'currentId': 'assistant-1',
+        'messages': {
+            'user-1': {
+                'id': 'user-1',
+                'role': 'user',
+                'content': 'hello',
+                'childrenIds': ['assistant-1'],
+            },
+            'assistant-1': {
+                'id': 'assistant-1',
+                'role': 'assistant',
+                'content': '',
+                'parentId': 'user-1',
+                'childrenIds': [],
+                'done': False,
+            },
+        },
+    }
+    return form
 
 
 def _app():

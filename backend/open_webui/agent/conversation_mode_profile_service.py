@@ -45,6 +45,7 @@ from open_webui.utils.cache_invalidation import (
     CACHE_NAMESPACE_CONVERSATION_MODE_PROFILE_HEADS,
     ensure_cache_fresh,
 )
+from open_webui.utils.redaction import redact_request_secrets, redact_secrets
 
 FEATURE_CONFIG_KEYS = {
     'web_search': 'web.search.enable',
@@ -144,44 +145,14 @@ class BoundModeProfileChatCreation(BaseModel):
 def redact_mode_profile_administrator_prompt(
     value: Any,
     revision: ConversationModeProfileRevisionModel | None,
+    *,
+    request: Any = None,
 ) -> Any:
+    if request is not None:
+        value = redact_request_secrets(request, value)
     if revision is None or not revision.system_prompt:
         return value
-    secrets = sorted(
-        {
-            secret
-            for secret in (
-                revision.system_prompt,
-                revision.system_prompt.strip(),
-            )
-            if secret
-        },
-        key=len,
-        reverse=True,
-    )
-    return _redact_mode_profile_value(value, secrets)
-
-
-def _redact_mode_profile_value(value: Any, secrets: list[str]) -> Any:
-    if isinstance(value, str):
-        for secret in secrets:
-            value = value.replace(secret, '[administrator prompt redacted]')
-        return value
-    if isinstance(value, Mapping):
-        return {
-            _redact_mode_profile_value(key, secrets): _redact_mode_profile_value(
-                nested,
-                secrets,
-            )
-            for key, nested in value.items()
-        }
-    if isinstance(value, list):
-        return [_redact_mode_profile_value(item, secrets) for item in value]
-    if isinstance(value, tuple):
-        return tuple(_redact_mode_profile_value(item, secrets) for item in value)
-    if isinstance(value, set):
-        return {_redact_mode_profile_value(item, secrets) for item in value}
-    return value
+    return redact_secrets(value, (revision.system_prompt,))
 
 
 def verify_conversation_mode_profile_revision(
@@ -219,6 +190,7 @@ async def insert_new_chat_with_current_mode_profile(
     *,
     mode: ConversationMode | str,
     revision_hint: str | None,
+    expected_revision_id: str | None = None,
     chat_id: str,
     user_id: str,
     form_data: ChatForm,
@@ -228,54 +200,16 @@ async def insert_new_chat_with_current_mode_profile(
     revision = None
     async with get_async_db_context() as session:
         try:
-            dialect_name = session.get_bind().dialect.name
-            if dialect_name == 'sqlite':
-                await session.execute(text('BEGIN IMMEDIATE'))
-            else:
-                await session.begin()
-
-            head_statement = (
-                select(ConversationModeProfileHead)
-                .where(ConversationModeProfileHead.mode == normalized_mode)
-                .execution_options(populate_existing=True)
+            await _begin_bound_chat_transaction(session)
+            revision = await _load_locked_current_revision(
+                session,
+                normalized_mode,
             )
-            if dialect_name != 'sqlite':
-                head_statement = head_statement.with_for_update()
-            head = (await session.execute(head_statement)).scalars().first()
-            if head is None:
-                raise ModeProfileServiceUnavailableError(
-                    'read_current_head',
-                    mode=normalized_mode,
-                )
-            if head.mode != normalized_mode:
-                raise ConversationModeProfileIntegrityError(
-                    head.current_revision_id,
-                    f'Conversation mode profile head {head.mode} does not match {normalized_mode}',
-                )
-
-            revision_row = await session.get(
-                ConversationModeProfileRevision,
-                head.current_revision_id,
-            )
-            if revision_row is None:
-                raise ModeProfileServiceUnavailableError(
-                    'read_current_revision',
-                    mode=normalized_mode,
-                )
-            revision = _locked_revision_model(
-                revision_row,
-                expected_mode=normalized_mode,
-            )
-            verify_conversation_mode_profile_revision(
+            _validate_locked_revision_ids(
                 revision,
-                expected_mode=normalized_mode,
+                revision_hint=revision_hint,
+                expected_revision_id=expected_revision_id,
             )
-            if revision_hint is not None and revision_hint != revision.id:
-                raise ModeProfileRevisionHintConflictError(
-                    hinted_revision_id=revision_hint,
-                    authoritative_revision_id=revision.id,
-                    bound=False,
-                )
 
             chat = await Chats.insert_new_chat(
                 chat_id,
@@ -290,15 +224,87 @@ async def insert_new_chat_with_current_mode_profile(
                     'insert_bound_chat',
                     mode=normalized_mode,
                 )
+            await Chats.dual_write_initial_messages(
+                chat,
+                db=session,
+                commit=False,
+                strict=True,
+            )
             await session.commit()
+        except SQLAlchemyError as exc:
+            if session.in_transaction():
+                await session.rollback()
+            raise ModeProfileServiceUnavailableError(
+                'insert_bound_chat',
+                mode=normalized_mode,
+            ) from exc
         except BaseException:
             if session.in_transaction():
                 await session.rollback()
             raise
 
     cache_profile_revision(app, revision)
-    await Chats.dual_write_initial_messages(chat)
     return BoundModeProfileChatCreation(chat=chat, revision=revision)
+
+
+async def _begin_bound_chat_transaction(session: AsyncSession) -> None:
+    if session.get_bind().dialect.name == 'sqlite':
+        await session.execute(text('BEGIN IMMEDIATE'))
+    else:
+        await session.begin()
+
+
+async def _load_locked_current_revision(
+    session: AsyncSession,
+    normalized_mode: str,
+) -> ConversationModeProfileRevisionModel:
+    head_statement = (
+        select(ConversationModeProfileHead)
+        .where(ConversationModeProfileHead.mode == normalized_mode)
+        .execution_options(populate_existing=True)
+    )
+    if session.get_bind().dialect.name != 'sqlite':
+        head_statement = head_statement.with_for_update()
+    head = (await session.execute(head_statement)).scalars().first()
+    if head is None:
+        raise ModeProfileServiceUnavailableError(
+            'read_current_head',
+            mode=normalized_mode,
+        )
+    if head.mode != normalized_mode:
+        raise ConversationModeProfileIntegrityError(
+            head.current_revision_id,
+            f'Conversation mode profile head {head.mode} does not match {normalized_mode}',
+        )
+
+    revision_row = await session.get(
+        ConversationModeProfileRevision,
+        head.current_revision_id,
+    )
+    if revision_row is None:
+        raise ModeProfileServiceUnavailableError(
+            'read_current_revision',
+            mode=normalized_mode,
+        )
+    return _locked_revision_model(
+        revision_row,
+        expected_mode=normalized_mode,
+    )
+
+
+def _validate_locked_revision_ids(
+    revision: ConversationModeProfileRevisionModel,
+    *,
+    revision_hint: str | None,
+    expected_revision_id: str | None,
+) -> None:
+    for candidate in (revision_hint, expected_revision_id):
+        if candidate is not None and candidate != revision.id:
+            raise ModeProfileRevisionHintConflictError(
+                hinted_revision_id=candidate,
+                authoritative_revision_id=revision.id,
+                bound=False,
+            )
 
 
 def _locked_revision_model(

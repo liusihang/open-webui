@@ -437,7 +437,14 @@ class ChatTable:
             await self.dual_write_initial_messages(result)
         return result
 
-    async def dual_write_initial_messages(self, chat: ChatModel) -> None:
+    async def dual_write_initial_messages(
+        self,
+        chat: ChatModel,
+        db: AsyncSession | None = None,
+        *,
+        commit: bool = True,
+        strict: bool = False,
+    ) -> None:
         try:
             history = chat.chat.get('history', {})
             messages = history.get('messages', {})
@@ -448,8 +455,12 @@ class ChatTable:
                         chat_id=chat.id,
                         user_id=chat.user_id,
                         data=message,
+                        db=db,
+                        commit=commit,
                     )
         except Exception as e:
+            if strict:
+                raise
             log.warning(f'Failed to write initial messages to chat_message table: {e}')
 
     def _chat_import_form_to_chat_model(self, user_id: str, form_data: ChatImportForm) -> ChatModel:
@@ -1284,6 +1295,9 @@ class ChatTable:
         self,
         id: str,
         db: AsyncSession | None = None,
+        *,
+        repair: bool = True,
+        strict: bool = False,
     ) -> ChatModel | None:
         """Fetch a chat by PK, auto-sanitizing null bytes on read."""
         try:
@@ -1292,15 +1306,18 @@ class ChatTable:
                 if chat_item is None:
                     return None
 
-                repaired_history = self._repair_chat_current_id(chat_item.chat or {})
-                if repaired_history:
-                    flag_modified(chat_item, 'chat')
-                if self._sanitize_chat_row(chat_item) or repaired_history:
-                    await session.commit()
-                    await session.refresh(chat_item)
+                if repair:
+                    repaired_history = self._repair_chat_current_id(chat_item.chat or {})
+                    if repaired_history:
+                        flag_modified(chat_item, 'chat')
+                    if self._sanitize_chat_row(chat_item) or repaired_history:
+                        await session.commit()
+                        await session.refresh(chat_item)
 
                 return ChatModel.model_validate(chat_item)
         except Exception:
+            if strict:
+                raise
             return None
 
     async def get_chat_by_share_id(self, id: str, db: AsyncSession | None = None) -> ChatModel | None:

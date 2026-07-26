@@ -12,6 +12,9 @@ os.environ.setdefault('DATABASE_ENABLE_SESSION_SHARING', 'true')
 import pytest
 import pytest_asyncio
 from open_webui.agent.artifacts import AgentRunArtifactRegistrar
+from open_webui.agent.conversation_mode_profile_service import (
+    ModeProfileCapabilityResolution,
+)
 from open_webui.agent.conversation_mode_profiles import (
     ConversationModeProfile,
     ProfileDefaults,
@@ -165,8 +168,27 @@ def _patch_model_and_chat_boundaries(monkeypatch, calls):  # noqa: C901
     async def fake_is_chat_owner(chat_id, user_id):
         return True
 
-    async def fake_get_chat_by_id(chat_id):
+    async def fake_get_chat_by_id(chat_id, **kwargs):
         return calls.stored_chats.get(chat_id)
+
+    async def fake_get_current_revision(app, mode):
+        return revisions[str(mode)]
+
+    async def fake_resolve_capabilities(
+        app,
+        *,
+        profile_defaults,
+        model,
+        user,
+        request_values,
+    ):
+        return ModeProfileCapabilityResolution(
+            terminal_id=request_values.get('terminal_id'),
+            tool_ids=list(request_values.get('tool_ids') or []),
+            skill_ids=list(request_values.get('skill_ids') or []),
+            filter_ids=list(request_values.get('filter_ids') or []),
+            feature_ids=[],
+        )
 
     async def fake_claim_conversation_mode(
         chat_id,
@@ -221,6 +243,7 @@ def _patch_model_and_chat_boundaries(monkeypatch, calls):  # noqa: C901
         *,
         mode,
         revision_hint,
+        expected_revision_id=None,
         chat_id,
         user_id,
         form_data,
@@ -248,6 +271,16 @@ def _patch_model_and_chat_boundaries(monkeypatch, calls):  # noqa: C901
 
     monkeypatch.setattr(main.Models, 'get_model_by_id', fake_get_model_by_id)
     monkeypatch.setattr(main.Config, 'get', fake_config_get)
+    monkeypatch.setattr(
+        main,
+        'get_cached_current_revision',
+        fake_get_current_revision,
+    )
+    monkeypatch.setattr(
+        main,
+        'resolve_mode_profile_capabilities',
+        fake_resolve_capabilities,
+    )
     monkeypatch.setattr(main.Chats, 'is_chat_owner', fake_is_chat_owner)
     monkeypatch.setattr(main.Chats, 'get_chat_by_id', fake_get_chat_by_id)
     monkeypatch.setattr(main.Chats, 'claim_conversation_mode', fake_claim_conversation_mode)

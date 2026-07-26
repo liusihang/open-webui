@@ -44,6 +44,7 @@ from open_webui.utils.payload import (
     apply_model_system_prompt_to_body,
     apply_model_system_prompt_to_responses_body,
 )
+from open_webui.utils.redaction import redact_request_secrets
 from open_webui.utils.session_pool import cleanup_response, get_session, stream_wrapper
 from pydantic import BaseModel, ConfigDict, validator
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -134,20 +135,28 @@ async def send_request(
         if not r.ok:
             try:
                 res = await r.json()
+                safe_res = redact_request_secrets(request, res)
                 await publish_model_provider_request_failed(
                     request,
                     actor=user,
                     provider='ollama',
                     base_url=url,
                     status=r.status,
-                    upstream_error=res,
+                    upstream_error=safe_res,
                 )
-                if 'error' in res:
-                    raise HTTPException(status_code=r.status, detail=res['error'])
-            except HTTPException:
+                if 'error' in safe_res:
+                    raise HTTPException(
+                        status_code=r.status,
+                        detail=safe_res['error'],
+                    )
+            except HTTPException as exc:
+                exc.detail = redact_request_secrets(request, exc.detail)
                 raise
             except Exception as e:
-                log.error(f'Failed to parse error response: {e}')
+                log.error(
+                    'Failed to parse error response: %s',
+                    redact_request_secrets(request, str(e)),
+                )
                 await publish_model_provider_request_failed(
                     request,
                     actor=user,
@@ -179,12 +188,17 @@ async def send_request(
             except Exception:
                 return None
 
-    except HTTPException:
+    except HTTPException as exc:
+        exc.detail = redact_request_secrets(request, exc.detail)
         raise
     except Exception as e:
         raise HTTPException(
             status_code=r.status if r else 500,
-            detail=f'Ollama: {e}' if str(e) else ERROR_MESSAGES.SERVER_CONNECTION_ERROR,
+            detail=(
+                f'Ollama: {redact_request_secrets(request, str(e))}'
+                if str(e)
+                else ERROR_MESSAGES.SERVER_CONNECTION_ERROR
+            ),
         )
     finally:
         if not streaming:
@@ -1092,8 +1106,9 @@ async def generate_chat_completion(
     try:
         form_data = GenerateChatCompletionForm(**form_data)
     except Exception as exc:
-        log.exception(exc)
-        raise HTTPException(status_code=400, detail=str(exc))
+        safe_error = redact_request_secrets(request, str(exc))
+        log.error('Invalid Ollama chat payload: %s', safe_error)
+        raise HTTPException(status_code=400, detail=safe_error)
 
     if isinstance(form_data, BaseModel):
         payload = {**form_data.model_dump(exclude_none=True)}

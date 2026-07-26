@@ -57,6 +57,7 @@ from open_webui.utils.payload import (
     apply_model_system_prompt_to_body,
     apply_model_system_prompt_to_responses_body,
 )
+from open_webui.utils.redaction import redact_request_secrets
 from open_webui.utils.session_pool import (
     cleanup_response,
     get_session,
@@ -1346,13 +1347,15 @@ async def generate_chat_completion(
             # streaming the error back (which hides the error from logs).
             if r.status >= 400:
                 error_body = await r.text()
+                safe_error_body = redact_request_secrets(request, error_body)
                 log.error(
                     'Provider returned HTTP %d with SSE content-type: %s',
                     r.status,
-                    error_body[:1000],
+                    safe_error_body[:1000],
                 )
                 try:
                     error_json = json.loads(error_body)
+                    safe_error_json = redact_request_secrets(request, error_json)
                     await publish_model_provider_request_failed(
                         request,
                         actor=user,
@@ -1361,9 +1364,12 @@ async def generate_chat_completion(
                         api_key=key,
                         status=r.status,
                         requested_model=requested_model,
-                        upstream_error=error_json,
+                        upstream_error=safe_error_json,
                     )
-                    return JSONResponse(status_code=r.status, content=error_json)
+                    return JSONResponse(
+                        status_code=r.status,
+                        content=safe_error_json,
+                    )
                 except json.JSONDecodeError:
                     await publish_model_provider_request_failed(
                         request,
@@ -1373,11 +1379,16 @@ async def generate_chat_completion(
                         api_key=key,
                         status=r.status,
                         requested_model=requested_model,
-                        upstream_error=error_body,
+                        upstream_error=safe_error_body,
                     )
                     return JSONResponse(
                         status_code=r.status,
-                        content={'error': {'message': error_body, 'code': r.status}},
+                        content={
+                            'error': {
+                                'message': safe_error_body,
+                                'code': r.status,
+                            }
+                        },
                     )
 
             streaming = True
@@ -1390,10 +1401,14 @@ async def generate_chat_completion(
             try:
                 response = await r.json()
             except Exception as e:
-                log.error(e)
+                log.error(
+                    'Failed to parse provider response: %s',
+                    redact_request_secrets(request, str(e)),
+                )
                 response = await r.text()
 
             if r.status >= 400:
+                safe_response = redact_request_secrets(request, response)
                 await publish_model_provider_request_failed(
                     request,
                     actor=user,
@@ -1402,12 +1417,18 @@ async def generate_chat_completion(
                     api_key=key,
                     status=r.status,
                     requested_model=requested_model,
-                    upstream_error=response,
+                    upstream_error=safe_response,
                 )
-                if isinstance(response, (dict, list)):
-                    return JSONResponse(status_code=r.status, content=response)
+                if isinstance(safe_response, (dict, list)):
+                    return JSONResponse(
+                        status_code=r.status,
+                        content=safe_response,
+                    )
                 else:
-                    return PlainTextResponse(status_code=r.status, content=response)
+                    return PlainTextResponse(
+                        status_code=r.status,
+                        content=safe_response,
+                    )
 
             # Convert Responses API result to simple format
             if is_responses and isinstance(response, dict):
@@ -1415,7 +1436,10 @@ async def generate_chat_completion(
 
             return response
     except Exception as e:
-        log.exception(e)
+        log.error(
+            'OpenAI-compatible provider request failed: %s',
+            redact_request_secrets(request, str(e)),
+        )
 
         raise HTTPException(
             status_code=r.status if r else 500,
