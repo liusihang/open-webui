@@ -368,7 +368,13 @@ class ChatTable:
         return True
 
     async def insert_new_chat(
-        self, id: str, user_id: str, form_data: ChatForm, db: AsyncSession | None = None
+        self,
+        id: str,
+        user_id: str,
+        form_data: ChatForm,
+        db: AsyncSession | None = None,
+        *,
+        mode_profile_revision_id: str | None = None,
     ) -> ChatModel | None:
         async with get_async_db_context(db) as session:
             normalized_chat = normalize_new_conversation_chat(form_data.chat)
@@ -381,6 +387,7 @@ class ChatTable:
                     ),
                     'chat': self._clean_null_bytes(normalized_chat),
                     'folder_id': form_data.folder_id,
+                    'mode_profile_revision_id': mode_profile_revision_id,
                     'created_at': int(time.time()),
                     'updated_at': int(time.time()),
                     'last_read_at': int(time.time()),

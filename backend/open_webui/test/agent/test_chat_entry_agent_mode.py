@@ -12,10 +12,15 @@ os.environ.setdefault('DATABASE_ENABLE_SESSION_SHARING', 'true')
 import pytest
 import pytest_asyncio
 from open_webui.agent.artifacts import AgentRunArtifactRegistrar
+from open_webui.agent.conversation_mode_profiles import (
+    ConversationModeProfile,
+    ProfileDefaults,
+)
 from open_webui.agent.model_authority import ModelCallRequest, _model_call_form_data
 from open_webui.agent.resources import AgentRunResourceManager
 from open_webui.internal.db import Base
 from open_webui.models.agent_runs import AgentRuns
+from open_webui.models.conversation_mode_profiles import ConversationModeProfileRevisionModel
 from open_webui.routers import agent_runs as agent_runs_router
 from open_webui.routers.openai import convert_to_responses_payload
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
@@ -29,9 +34,7 @@ MAIN_PATH = OPEN_WEBUI_DIR / 'main.py'
 
 
 def test_agent_context_replay_json_sanitizes_json_encoded_private_fields():
-    encoded = main._agent_context_replay_json(
-        '{"stdout":"ok","raw_reasoning":"secret","nested":{"Thought":"hidden"}}'
-    )
+    encoded = main._agent_context_replay_json('{"stdout":"ok","raw_reasoning":"secret","nested":{"Thought":"hidden"}}')
 
     assert json.loads(encoded) == {'nested': {}, 'stdout': 'ok'}
 
@@ -73,12 +76,8 @@ def test_agent_context_replay_trim_items_drops_orphaned_tool_items(monkeypatch):
             message,
         ]
     )
-    call_ids = {
-        item['call_id'] for item in trimmed if item.get('type') == 'function_call'
-    }
-    output_ids = {
-        item['call_id'] for item in trimmed if item.get('type') == 'function_call_output'
-    }
+    call_ids = {item['call_id'] for item in trimmed if item.get('type') == 'function_call'}
+    output_ids = {item['call_id'] for item in trimmed if item.get('type') == 'function_call_output'}
     assert call_ids == output_ids
 
 
@@ -134,12 +133,37 @@ def chat_entry_patches(monkeypatch):
     return calls
 
 
-def _patch_model_and_chat_boundaries(monkeypatch, calls):
+def _patch_model_and_chat_boundaries(monkeypatch, calls):  # noqa: C901
+    def baseline_revision(mode: str):
+        profile = ConversationModeProfile(
+            mode=mode,
+            schema_version=1,
+            system_prompt='',
+            defaults=ProfileDefaults(),
+        )
+        return ConversationModeProfileRevisionModel(
+            id=f'{mode}-baseline',
+            mode=mode,
+            revision_number=1,
+            schema_version=1,
+            system_prompt='',
+            defaults=profile.defaults,
+            content_hash=profile.content_hash,
+            created_at=1,
+            created_by=None,
+            restored_from_revision_id=None,
+        )
+
+    revisions = {mode: baseline_revision(mode) for mode in ('chat', 'agent')}
+
     async def fake_get_model_by_id(model_id):
         return None
 
     async def fake_config_get(key, default=None):
         return default
+
+    async def fake_current_revision(app, mode):
+        return revisions[str(mode)]
 
     async def fake_is_chat_owner(chat_id, user_id):
         return True
@@ -177,10 +201,18 @@ def _patch_model_and_chat_boundaries(monkeypatch, calls):
             return existing
         return None
 
-    async def fake_insert_new_chat(chat_id, user_id, form_data):
+    async def fake_insert_new_chat(
+        chat_id,
+        user_id,
+        form_data,
+        db=None,
+        *,
+        mode_profile_revision_id=None,
+    ):
         stored = SimpleNamespace(
             id=chat_id,
             user_id=user_id,
+            mode_profile_revision_id=mode_profile_revision_id,
             chat=form_data.chat,
         )
         calls.chat_inserts.append((chat_id, user_id, form_data))
@@ -201,6 +233,7 @@ def _patch_model_and_chat_boundaries(monkeypatch, calls):
 
     monkeypatch.setattr(main.Models, 'get_model_by_id', fake_get_model_by_id)
     monkeypatch.setattr(main.Config, 'get', fake_config_get)
+    monkeypatch.setattr(main, 'get_cached_current_revision', fake_current_revision)
     monkeypatch.setattr(main.Chats, 'is_chat_owner', fake_is_chat_owner)
     monkeypatch.setattr(main.Chats, 'get_chat_by_id', fake_get_chat_by_id)
     monkeypatch.setattr(main.Chats, 'claim_conversation_mode', fake_claim_conversation_mode)
@@ -690,9 +723,7 @@ async def test_agent_mode_runtime_payload_replays_previous_public_agent_items(
         },
     ]
     namespaced_call_id = next(
-        item['call_id']
-        for item in replay_items[0]['items']
-        if item.get('type') == 'function_call'
+        item['call_id'] for item in replay_items[0]['items'] if item.get('type') == 'function_call'
     )
     assert namespaced_call_id != 'call-1'
     assert len(namespaced_call_id) <= 64
@@ -752,8 +783,7 @@ async def test_agent_mode_runtime_payload_replays_previous_public_agent_items(
     call_index = next(
         index
         for index, item in enumerate(provider_input)
-        if item.get('type') == 'function_call'
-        and item.get('call_id') == namespaced_call_id
+        if item.get('type') == 'function_call' and item.get('call_id') == namespaced_call_id
     )
     assert provider_input[call_index + 1] == {
         'type': 'function_call_output',
@@ -765,7 +795,8 @@ async def test_agent_mode_runtime_payload_replays_previous_public_agent_items(
         for index, item in enumerate(provider_input)
         if item.get('type') == 'message'
         and item.get('phase') == 'commentary'
-        and item.get('content') == [
+        and item.get('content')
+        == [
             {
                 'type': 'output_text',
                 'text': 'The runtime image was built successfully.',
@@ -933,10 +964,7 @@ async def test_agent_context_replay_canonicalizes_parallel_and_incomplete_tool_b
         },
     ]
     assert messages == [
-        {
-            key: item[key]
-            for key in ('role', 'content', 'phase')
-        }
+        {key: item[key] for key in ('role', 'content', 'phase')}
         for item in replay_items
         if item.get('role') == 'assistant'
     ]
@@ -956,43 +984,29 @@ async def test_agent_context_replay_canonicalizes_parallel_and_incomplete_tool_b
         )
     )
     provider_messages = provider_form['messages']
-    tool_batch_index = next(
-        index
-        for index, message in enumerate(provider_messages)
-        if message.get('tool_calls')
-    )
+    tool_batch_index = next(index for index, message in enumerate(provider_messages) if message.get('tool_calls'))
+    assert [tool_call['id'] for tool_call in provider_messages[tool_batch_index]['tool_calls']] == ['call-1', 'call-2']
     assert [
-        tool_call['id']
-        for tool_call in provider_messages[tool_batch_index]['tool_calls']
-    ] == ['call-1', 'call-2']
-    assert [
-        message.get('tool_call_id')
-        for message in provider_messages[tool_batch_index + 1 : tool_batch_index + 3]
+        message.get('tool_call_id') for message in provider_messages[tool_batch_index + 1 : tool_batch_index + 3]
     ] == ['call-2', 'call-1']
     assert all(
-        message.get('role') == 'tool'
-        for message in provider_messages[tool_batch_index + 1 : tool_batch_index + 3]
+        message.get('role') == 'tool' for message in provider_messages[tool_batch_index + 1 : tool_batch_index + 3]
     )
 
     responses_input = convert_to_responses_payload(provider_form)['input']
-    first_call_index = next(
-        index
-        for index, item in enumerate(responses_input)
-        if item.get('type') == 'function_call'
-    )
-    assert [
-        item.get('type')
-        for item in responses_input[first_call_index : first_call_index + 4]
-    ] == [
+    first_call_index = next(index for index, item in enumerate(responses_input) if item.get('type') == 'function_call')
+    assert [item.get('type') for item in responses_input[first_call_index : first_call_index + 4]] == [
         'function_call',
         'function_call',
         'function_call_output',
         'function_call_output',
     ]
-    assert [
-        item.get('call_id')
-        for item in responses_input[first_call_index : first_call_index + 4]
-    ] == ['call-1', 'call-2', 'call-2', 'call-1']
+    assert [item.get('call_id') for item in responses_input[first_call_index : first_call_index + 4]] == [
+        'call-1',
+        'call-2',
+        'call-2',
+        'call-1',
+    ]
 
 
 @pytest.mark.asyncio
@@ -1042,17 +1056,9 @@ async def test_agent_context_replay_namespaces_tool_call_ids_across_runs(monkeyp
         anchor_message_ids={'assistant-older', 'assistant-newer'},
     )
 
-    call_ids = [
-        item['call_id']
-        for entry in replay
-        for item in entry['items']
-        if item.get('type') == 'function_call'
-    ]
+    call_ids = [item['call_id'] for entry in replay for item in entry['items'] if item.get('type') == 'function_call']
     output_ids = [
-        item['call_id']
-        for entry in replay
-        for item in entry['items']
-        if item.get('type') == 'function_call_output'
+        item['call_id'] for entry in replay for item in entry['items'] if item.get('type') == 'function_call_output'
     ]
     assert len(call_ids) == len(set(call_ids)) == 2
     assert output_ids == call_ids

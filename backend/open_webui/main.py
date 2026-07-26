@@ -51,9 +51,16 @@ from open_webui.agent.conversation_mode import (
     resolve_conversation_mode,
 )
 from open_webui.agent.conversation_mode_profile_service import (
+    ModeProfileCapabilityRequestError,
+    ModeProfileRevisionHintConflictError,
     ModeProfileServiceUnavailableError,
+    get_cached_current_revision,
+    get_cached_revision,
     get_public_conversation_mode_profiles,
+    resolve_mode_profile_capabilities,
+    verify_conversation_mode_profile_revision,
 )
+from open_webui.agent.conversation_mode_profiles import compose_prompt_layers
 from open_webui.agent.decision_execution import agent_decision_dispatcher_loop
 from open_webui.agent.protocol import AgentEventType
 from open_webui.agent.resources import AgentRunResourceManager
@@ -261,6 +268,7 @@ from open_webui.utils.middleware import (
     process_chat_payload,
     process_chat_response,
 )
+from open_webui.utils.misc import get_content_from_message, remove_system_message
 from open_webui.utils.models import (
     check_model_access,
     get_all_base_models,
@@ -279,6 +287,7 @@ from open_webui.utils.oauth import (
     recover_static_oauth_client_metadata,
     resolve_oauth_client_info,
 )
+from open_webui.utils.payload import resolve_system_prompt
 from open_webui.utils.plugin import install_tool_and_function_dependencies
 from open_webui.utils.redis import get_redis_client
 from open_webui.utils.security_headers import SecurityHeadersMiddleware
@@ -1271,6 +1280,308 @@ def _is_agent_mode_product_chat(request: Request, metadata: dict, message_ids) -
     )
 
 
+def _mode_profile_revision_hint(form_data: dict) -> str | None:
+    hint = form_data.pop('mode_profile_revision_id', None)
+    if hint is None:
+        return None
+    if not isinstance(hint, str) or not hint or hint.strip() != hint:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail={
+                'code': 'invalid_mode_profile_revision_hint',
+                'message': 'Mode profile revision hint must be a non-empty identifier.',
+            },
+        )
+    return hint
+
+
+def _strip_mode_profile_control_fields(value) -> None:
+    if isinstance(value, dict):
+        for key in list(value):
+            normalized_key = str(key)
+            if normalized_key == 'mode_profile_warnings':
+                _strip_mode_profile_control_fields(value[key])
+                continue
+            if normalized_key.startswith(
+                ('mode_profile_', 'conversation_mode_profile_')
+            ):
+                value.pop(key, None)
+                continue
+            _strip_mode_profile_control_fields(value[key])
+    elif isinstance(value, list):
+        for item in value:
+            _strip_mode_profile_control_fields(item)
+
+
+def _system_prompt_text(messages: list[dict]) -> str:
+    return '\n\n'.join(
+        content
+        for message in messages
+        if isinstance(message, dict)
+        and message.get('role') == 'system'
+        and (content := get_content_from_message(message))
+    )
+
+
+async def _enforce_mode_profile_prompt(
+    *,
+    revision,
+    form_data: dict,
+    metadata: dict,
+    user,
+    model_system_prompt: str | None,
+    request_system_prompt: str | None,
+) -> bool:
+    if revision is None or not revision.system_prompt.strip():
+        _strip_mode_profile_control_fields(form_data)
+        return False
+
+    global_system_prompt = await Config.get('chat.global_system_prompt', '')
+    resolved_administrator = await resolve_system_prompt(
+        revision.system_prompt,
+        metadata,
+        user,
+    )
+    model_layer = '\n\n'.join(
+        prompt
+        for prompt in (
+            await resolve_system_prompt(global_system_prompt, metadata, user),
+            await resolve_system_prompt(model_system_prompt, metadata, user),
+        )
+        if prompt and prompt.strip()
+    )
+    user_layer = '\n\n'.join(
+        prompt
+        for prompt in (
+            await resolve_system_prompt(request_system_prompt, metadata, user),
+            _system_prompt_text(form_data.get('messages') or []),
+        )
+        if prompt and prompt.strip()
+    )
+    composed = '\n\n'.join(
+        compose_prompt_layers(
+            administrator=resolved_administrator,
+            model=model_layer or None,
+            user=user_layer or None,
+        )
+    )
+    messages = remove_system_message(form_data.get('messages') or [])
+    form_data['messages'] = (
+        [{'role': 'system', 'content': composed}, *messages]
+        if composed
+        else messages
+    )
+    params = form_data.get('params')
+    if isinstance(params, dict):
+        params.pop('system', None)
+    _strip_mode_profile_control_fields(form_data)
+    return True
+
+
+def _mode_profile_capability_request_values(form_data: dict) -> dict:
+    request_values = {}
+    for field in ('tool_ids', 'skill_ids', 'filter_ids', 'terminal_id', 'features'):
+        if field not in form_data:
+            continue
+        value = form_data[field]
+        if isinstance(value, list):
+            value = list(value)
+        elif isinstance(value, dict):
+            value = dict(value)
+        request_values[field] = value
+    return request_values
+
+
+def _model_without_bound_profile_skill_defaults(model: dict) -> dict:
+    info = model.get('info')
+    if not isinstance(info, dict):
+        return model
+    meta = info.get('meta')
+    if not isinstance(meta, dict) or 'skillIds' not in meta:
+        return model
+    effective_model = {**model}
+    effective_info = {**info}
+    effective_meta = {**meta}
+    effective_meta.pop('skillIds', None)
+    effective_info['meta'] = effective_meta
+    effective_model['info'] = effective_info
+    return effective_model
+
+
+async def _apply_mode_profile_capabilities(
+    request: Request,
+    *,
+    revision,
+    model: dict,
+    user,
+    request_values: dict,
+    form_data: dict,
+    metadata: dict,
+) -> None:
+    if revision is None:
+        return
+    try:
+        resolution = await resolve_mode_profile_capabilities(
+            request.app,
+            profile_defaults=revision.defaults,
+            model=model,
+            user=user,
+            request_values=request_values,
+        )
+    except ModeProfileCapabilityRequestError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail={
+                'code': exc.code,
+                'reason': exc.reason,
+                'field': exc.field,
+                'message': 'The requested conversation capabilities are invalid.',
+            },
+        ) from exc
+    except Exception as exc:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail={
+                'code': 'mode_profile_unavailable',
+                'message': 'Conversation capability truth is unavailable.',
+            },
+        ) from exc
+
+    form_data['tool_ids'] = list(resolution.tool_ids)
+    form_data['skill_ids'] = list(resolution.skill_ids)
+    if resolution.terminal_id is None:
+        form_data.pop('terminal_id', None)
+    else:
+        form_data['terminal_id'] = resolution.terminal_id
+
+    raw_features = request_values.get('features')
+    features = dict(raw_features) if isinstance(raw_features, dict) else {}
+    enabled_features = set(resolution.feature_ids)
+    for feature_id in ('web_search', 'code_interpreter', 'image_generation'):
+        features[feature_id] = feature_id in enabled_features
+    form_data['features'] = features
+
+    metadata['tool_ids'] = list(resolution.tool_ids)
+    metadata['filter_ids'] = list(resolution.filter_ids)
+    metadata['features'] = features
+    if resolution.warnings:
+        metadata['mode_profile_warnings'] = [
+            warning.model_dump() for warning in resolution.warnings
+        ]
+
+
+def _raise_mode_profile_integrity_error(exc: Exception) -> None:
+    raise HTTPException(
+        status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+        detail={
+            'code': 'mode_profile_integrity_error',
+            'message': 'The conversation mode profile binding failed integrity verification.',
+        },
+    ) from exc
+
+
+async def _resolve_conversation_mode_profile_revision(
+    request: Request,
+    *,
+    mode: ConversationMode,
+    is_new_persisted_chat: bool,
+    existing_chat,
+    revision_hint: str | None,
+):
+    try:
+        if is_new_persisted_chat:
+            return await _load_current_mode_profile_revision(
+                request,
+                mode=mode,
+                revision_hint=revision_hint,
+            )
+        return await _load_bound_mode_profile_revision(
+            request,
+            mode=mode,
+            existing_chat=existing_chat,
+            revision_hint=revision_hint,
+        )
+    except ModeProfileRevisionHintConflictError as exc:
+        detail = {
+            'code': 'mode_profile_binding_mismatch' if exc.bound else exc.code,
+            'message': 'Refresh the conversation mode profile before retrying.',
+        }
+        if exc.authoritative_revision_id:
+            key = 'bound_revision_id' if exc.bound else 'current_revision_id'
+            detail[key] = exc.authoritative_revision_id
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=detail,
+        ) from exc
+    except ModeProfileServiceUnavailableError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail={
+                'code': 'mode_profile_unavailable',
+                'message': 'The conversation mode profile is unavailable.',
+            },
+        ) from exc
+    except ConversationModeProfileIntegrityError as exc:
+        _raise_mode_profile_integrity_error(exc)
+
+
+async def _load_current_mode_profile_revision(
+    request: Request,
+    *,
+    mode: ConversationMode,
+    revision_hint: str | None,
+):
+    revision = await get_cached_current_revision(request.app, mode)
+    if revision is None:
+        raise ModeProfileServiceUnavailableError(
+            'read_current_revision',
+            mode=mode.value,
+        )
+    verify_conversation_mode_profile_revision(revision, expected_mode=mode)
+    if revision_hint is not None and revision_hint != revision.id:
+        raise ModeProfileRevisionHintConflictError(
+            hinted_revision_id=revision_hint,
+            authoritative_revision_id=revision.id,
+            bound=False,
+        )
+    return revision
+
+
+async def _load_bound_mode_profile_revision(
+    request: Request,
+    *,
+    mode: ConversationMode,
+    existing_chat,
+    revision_hint: str | None,
+):
+    bound_revision_id = getattr(existing_chat, 'mode_profile_revision_id', None)
+    if not bound_revision_id:
+        if revision_hint is not None:
+            raise ModeProfileRevisionHintConflictError(
+                hinted_revision_id=revision_hint,
+                authoritative_revision_id='',
+                bound=True,
+            )
+        return None
+    if revision_hint is not None and revision_hint != bound_revision_id:
+        raise ModeProfileRevisionHintConflictError(
+            hinted_revision_id=revision_hint,
+            authoritative_revision_id=bound_revision_id,
+            bound=True,
+        )
+    revision = await get_cached_revision(
+        request.app,
+        bound_revision_id,
+        expected_mode=mode,
+    )
+    if revision is None:
+        raise ConversationModeProfileIntegrityError(
+            bound_revision_id,
+            f'Conversation mode profile revision {bound_revision_id} is unavailable',
+        )
+    return verify_conversation_mode_profile_revision(revision, expected_mode=mode)
+
+
 async def _first_accessible_system_terminal_id(request: Request, user) -> str | None:
     connections = getattr(request.app.state.config, 'TERMINAL_SERVER_CONNECTIONS', None) or []
     for connection in connections:
@@ -1872,6 +2183,9 @@ def _agent_runtime_payload(
         'variables': metadata.get('variables') or {},
         'stream': form_data.get('stream'),
     }
+    mode_profile_warnings = metadata.get('mode_profile_warnings')
+    if isinstance(mode_profile_warnings, list) and mode_profile_warnings:
+        runtime_metadata['mode_profile_warnings'] = mode_profile_warnings
     runtime_model_params = model_params if model_params is not None else _agent_runtime_model_params(form_data)
     if runtime_model_params:
         runtime_metadata['model_params'] = runtime_model_params
@@ -1941,6 +2255,10 @@ async def _start_agent_mode_chat(
     metadata: dict,
     message_ids,
     model: dict,
+    *,
+    mode_profile_revision=None,
+    model_system_prompt: str | None = None,
+    request_system_prompt: str | None = None,
 ) -> dict:
     leader_model_id = form_data.get('model') or next(
         (model_id for model_id, _message_id in _message_id_entries(message_ids) if model_id),
@@ -1958,6 +2276,17 @@ async def _start_agent_mode_chat(
 
     requested_model_params = _agent_runtime_model_params(form_data)
     form_data, metadata, _events = await process_chat_payload(request, form_data, user, metadata, model)
+    prompt_enforced = await _enforce_mode_profile_prompt(
+        revision=mode_profile_revision,
+        form_data=form_data,
+        metadata=metadata,
+        user=user,
+        model_system_prompt=model_system_prompt,
+        request_system_prompt=request_system_prompt,
+    )
+    if prompt_enforced:
+        requested_model_params.pop('system', None)
+    _strip_mode_profile_control_fields(requested_model_params)
     tool_access_envelope, tool_registry = build_tool_access_envelope(metadata.get('tools') or {})
     tool_access_metadata = {
         'session_id': metadata.get('session_id'),
@@ -2083,6 +2412,9 @@ async def chat_completion(
     model_item = form_data.pop('model_item', {})
     tasks = form_data.pop('background_tasks', None)
     requested_chat_mode = form_data.pop('chat_mode', None)
+    mode_profile_revision_hint = _mode_profile_revision_hint(form_data)
+    _strip_mode_profile_control_fields(form_data)
+    mode_profile_capability_request = _mode_profile_capability_request_values(form_data)
 
     metadata = {}
     try:
@@ -2113,6 +2445,8 @@ async def chat_completion(
             **(model_info.params.model_dump() if model_info and model_info.params else {}),
         }
         request_params = {key: value for key, value in (form_data.get('params') or {}).items() if value is not None}
+        model_system_prompt = model_info_params.get('system')
+        request_system_prompt = request_params.get('system')
         if model_info_params or request_params:
             form_data['params'] = {
                 **model_info_params,
@@ -2226,6 +2560,7 @@ async def chat_completion(
             metadata['chat_id'] = str(uuid4())
 
         existing_chat = None
+        mode_profile_revision = None
         conversation_mode_should_persist = False
         is_product_conversation_request = bool(
             not getattr(request.state, 'agent_internal_model_call', False)
@@ -2285,6 +2620,22 @@ async def chat_completion(
                             },
                         )
 
+                    mode_profile_revision = await _resolve_conversation_mode_profile_revision(
+                        request,
+                        mode=preliminary_resolution.mode,
+                        is_new_persisted_chat=False,
+                        existing_chat=existing_chat,
+                        revision_hint=mode_profile_revision_hint,
+                    )
+                    await _apply_mode_profile_capabilities(
+                        request,
+                        revision=mode_profile_revision,
+                        model=model,
+                        user=user,
+                        request_values=mode_profile_capability_request,
+                        form_data=form_data,
+                        metadata=metadata,
+                    )
                     claimed = await Chats.claim_conversation_mode(
                         chat_id,
                         requested=requested_chat_mode,
@@ -2305,6 +2656,23 @@ async def chat_completion(
                         is_new=is_new_chat or not is_persisted_chat,
                         has_agent_run=has_agent_run,
                     )
+                    if is_persisted_chat and is_new_chat:
+                        mode_profile_revision = await _resolve_conversation_mode_profile_revision(
+                            request,
+                            mode=resolution.mode,
+                            is_new_persisted_chat=True,
+                            existing_chat=None,
+                            revision_hint=mode_profile_revision_hint,
+                        )
+                        await _apply_mode_profile_capabilities(
+                            request,
+                            revision=mode_profile_revision,
+                            model=model,
+                            user=user,
+                            request_values=mode_profile_capability_request,
+                            form_data=form_data,
+                            metadata=metadata,
+                        )
             except InvalidConversationModeError as exc:
                 raise HTTPException(
                     status_code=status.HTTP_400_BAD_REQUEST,
@@ -2340,6 +2708,9 @@ async def chat_completion(
             conversation_mode_should_persist = (
                 resolution.should_persist and not mode_claimed
             )
+            if mode_profile_revision is not None:
+                model = _model_without_bound_profile_skill_defaults(model)
+                metadata['model'] = model
 
         initial_title_generation = None
         if is_new_chat and tasks and TASKS.TITLE_GENERATION in tasks:
@@ -2440,6 +2811,9 @@ async def chat_completion(
                                 'timestamp': int(time.time() * 1000),
                             },
                             folder_id=metadata.get('folder_id'),
+                        ),
+                        mode_profile_revision_id=(
+                            mode_profile_revision.id if mode_profile_revision is not None else None
                         ),
                     )
                     await publish_event(
@@ -2645,8 +3019,19 @@ async def chat_completion(
         form_data['metadata'] = metadata
 
         if _is_agent_mode_product_chat(request, metadata, message_ids):
-            await _attach_default_agent_mode_terminal(request, form_data, user)
-            return await _start_agent_mode_chat(request, form_data, user, metadata, message_ids, model)
+            if mode_profile_revision is None:
+                await _attach_default_agent_mode_terminal(request, form_data, user)
+            return await _start_agent_mode_chat(
+                request,
+                form_data,
+                user,
+                metadata,
+                message_ids,
+                model,
+                mode_profile_revision=mode_profile_revision,
+                model_system_prompt=model_system_prompt,
+                request_system_prompt=request_system_prompt,
+            )
 
     except HTTPException:
         raise
@@ -2660,8 +3045,25 @@ async def chat_completion(
     async def process_chat(request, form_data, user, metadata, model, tasks=None):
         try:
             form_data, metadata, events = await process_chat_payload(request, form_data, user, metadata, model)
+            prompt_enforced = await _enforce_mode_profile_prompt(
+                revision=mode_profile_revision,
+                form_data=form_data,
+                metadata=metadata,
+                user=user,
+                model_system_prompt=model_system_prompt,
+                request_system_prompt=request_system_prompt,
+            )
 
-            response = await chat_completion_handler(request, form_data, user)
+            if prompt_enforced:
+                response = await chat_completion_handler(
+                    request,
+                    form_data,
+                    user,
+                    bypass_system_prompt=True,
+                    bypass_global_system_prompt=True,
+                )
+            else:
+                response = await chat_completion_handler(request, form_data, user)
 
             # When the upstream provider returns an error (e.g. HTTP 400
             # content-filter, quota exceeded), generate_chat_completion
