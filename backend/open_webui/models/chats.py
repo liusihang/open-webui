@@ -8,6 +8,11 @@ import time
 import uuid
 
 # local imports
+from open_webui.agent.conversation_mode import (
+    chat_has_agent_mode_evidence,
+    normalize_new_conversation_chat,
+    resolve_conversation_mode,
+)
 from open_webui.internal.db import Base, JSONField, get_async_db_context
 from open_webui.models.automations import AutomationRun
 from open_webui.models.chat_messages import ChatMessage, ChatMessages
@@ -352,14 +357,15 @@ class ChatTable:
         self, id: str, user_id: str, form_data: ChatForm, db: AsyncSession | None = None
     ) -> ChatModel | None:
         async with get_async_db_context(db) as session:
+            normalized_chat = normalize_new_conversation_chat(form_data.chat)
             chat = ChatModel(
                 **{
                     'id': id,
                     'user_id': user_id,
                     'title': self._clean_null_bytes(
-                        form_data.chat['title'] if 'title' in form_data.chat else 'New Chat'
+                        normalized_chat['title'] if 'title' in normalized_chat else 'New Chat'
                     ),
-                    'chat': self._clean_null_bytes(form_data.chat),
+                    'chat': self._clean_null_bytes(normalized_chat),
                     'folder_id': form_data.folder_id,
                     'created_at': int(time.time()),
                     'updated_at': int(time.time()),
@@ -374,7 +380,7 @@ class ChatTable:
 
             # Dual-write initial messages to chat_message table
             try:
-                history = form_data.chat.get('history', {})
+                history = normalized_chat.get('history', {})
                 messages = history.get('messages', {})
                 for message_id, message in messages.items():
                     if isinstance(message, dict) and message.get('role'):
@@ -391,12 +397,20 @@ class ChatTable:
 
     def _chat_import_form_to_chat_model(self, user_id: str, form_data: ChatImportForm) -> ChatModel:
         id = str(uuid.uuid4())
+        imported_chat = dict(form_data.chat)
+        mode_resolution = resolve_conversation_mode(
+            requested=None,
+            persisted=imported_chat.get('mode'),
+            is_new=False,
+            has_agent_run=chat_has_agent_mode_evidence(imported_chat),
+        )
+        imported_chat['mode'] = mode_resolution.mode.value
         chat = ChatModel(
             **{
                 'id': id,
                 'user_id': user_id,
-                'title': self._clean_null_bytes(form_data.chat['title'] if 'title' in form_data.chat else 'New Chat'),
-                'chat': self._clean_null_bytes(form_data.chat),
+                'title': self._clean_null_bytes(imported_chat['title'] if 'title' in imported_chat else 'New Chat'),
+                'chat': self._clean_null_bytes(imported_chat),
                 'meta': form_data.meta,
                 'pinned': form_data.pinned,
                 'folder_id': form_data.folder_id,

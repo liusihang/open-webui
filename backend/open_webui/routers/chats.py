@@ -8,11 +8,19 @@ from uuid import uuid4
 
 from fastapi import APIRouter, Depends, HTTPException, Request, status
 from fastapi.responses import StreamingResponse
+from open_webui.agent.conversation_mode import (
+    ConversationModeMismatchError,
+    InvalidConversationModeError,
+    chat_has_agent_mode_evidence,
+    normalize_new_conversation_chat,
+    resolve_conversation_mode,
+)
 from open_webui.config import ENABLE_ADMIN_CHAT_ACCESS, ENABLE_ADMIN_EXPORT
 from open_webui.constants import ERROR_MESSAGES
 from open_webui.events import EVENTS, publish_event
 from open_webui.internal.db import get_async_session
 from open_webui.models.access_grants import AccessGrants
+from open_webui.models.agent_runs import AgentRuns
 from open_webui.models.config import Config
 from open_webui.models.chats import (
     AggregateChatStats,
@@ -646,6 +654,19 @@ async def create_new_chat(
     user=Depends(get_verified_user),
     db: AsyncSession = Depends(get_async_session),
 ):
+    try:
+        normalized_chat = normalize_new_conversation_chat(form_data.chat)
+    except InvalidConversationModeError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail={'code': exc.code, 'message': str(exc)},
+        ) from exc
+
+    form_data = ChatForm(
+        chat=normalized_chat,
+        folder_id=form_data.folder_id,
+    )
+
     # Reject a folder_id that doesn't belong to the caller. Without this the
     # row is persisted with a dangling foreign reference — no read path
     # surfaces it across users (all chat reads are user_id-filtered), but
@@ -700,6 +721,11 @@ async def import_chats(
             data={'count': len(chats), 'chat_ids': [chat.id for chat in chats]},
         )
         return chats
+    except InvalidConversationModeError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail={'code': exc.code, 'message': str(exc)},
+        ) from exc
     except Exception as e:
         log.exception(e)
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=ERROR_MESSAGES.DEFAULT())
@@ -1219,7 +1245,38 @@ async def update_chat_by_id(
 ):
     chat = await Chats.get_chat_by_id_and_user_id(id, user.id, db=db)
     if chat:
+        persisted_mode = (chat.chat or {}).get('mode')
+        has_agent_run = False
+        if persisted_mode is None:
+            has_agent_run = chat_has_agent_mode_evidence(chat.chat)
+            if not has_agent_run:
+                has_agent_run = await AgentRuns.has_runs_by_chat(id, user.id, db=db)
+
+        try:
+            mode_resolution = resolve_conversation_mode(
+                requested=form_data.chat.get('mode') if 'mode' in form_data.chat else None,
+                persisted=persisted_mode,
+                is_new=False,
+                has_agent_run=has_agent_run,
+            )
+        except InvalidConversationModeError as exc:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail={'code': exc.code, 'message': str(exc)},
+            ) from exc
+        except ConversationModeMismatchError as exc:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail={
+                    'code': exc.code,
+                    'message': str(exc),
+                    'requested': exc.requested.value,
+                    'persisted': exc.persisted.value,
+                },
+            ) from exc
+
         updated_chat = {**chat.chat, **form_data.chat}
+        updated_chat['mode'] = mode_resolution.mode.value
         if 'history' in form_data.chat:
             updated_chat['history'] = Chats.merge_history(
                 chat.chat.get('history'),

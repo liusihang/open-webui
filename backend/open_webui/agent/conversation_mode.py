@@ -3,29 +3,29 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from enum import Enum
+from enum import StrEnum
 from typing import Any
 
 
-class ConversationMode(str, Enum):
-    CHAT = "chat"
-    AGENT = "agent"
+class ConversationMode(StrEnum):
+    CHAT = 'chat'
+    AGENT = 'agent'
 
 
 class ConversationModeError(ValueError):
-    code = "conversation_mode_error"
+    code = 'conversation_mode_error'
 
 
 class InvalidConversationModeError(ConversationModeError):
-    code = "invalid_conversation_mode"
+    code = 'invalid_conversation_mode'
 
     def __init__(self, value: Any) -> None:
         self.value = value
-        super().__init__(f"Unsupported conversation mode: {value!r}")
+        super().__init__(f'Unsupported conversation mode: {value!r}')
 
 
 class ConversationModeMismatchError(ConversationModeError):
-    code = "conversation_mode_mismatch"
+    code = 'conversation_mode_mismatch'
 
     def __init__(
         self,
@@ -36,7 +36,7 @@ class ConversationModeMismatchError(ConversationModeError):
         self.requested = requested
         self.persisted = persisted
         super().__init__(
-            f"Conversation mode is {persisted.value!r}, not {requested.value!r}"
+            f'Conversation mode is {persisted.value!r}, not {requested.value!r}'
         )
 
 
@@ -61,11 +61,11 @@ def chat_has_agent_mode_evidence(chat: dict[str, Any] | None) -> bool:
     if not isinstance(chat, dict):
         return False
 
-    history = chat.get("history")
+    history = chat.get('history')
     if not isinstance(history, dict):
         return False
 
-    messages = history.get("messages")
+    messages = history.get('messages')
     if isinstance(messages, dict):
         candidates = messages.values()
     elif isinstance(messages, list):
@@ -74,7 +74,7 @@ def chat_has_agent_mode_evidence(chat: dict[str, Any] | None) -> bool:
         return False
 
     return any(
-        isinstance(message, dict) and bool(message.get("agent_run_id"))
+        isinstance(message, dict) and bool(message.get('agent_run_id'))
         for message in candidates
     )
 
@@ -115,3 +115,12 @@ def resolve_conversation_mode(
         mode=canonical,
         should_persist=should_persist,
     )
+
+
+def normalize_new_conversation_chat(chat: dict[str, Any]) -> dict[str, Any]:
+    resolution = resolve_conversation_mode(
+        requested=chat.get('mode'),
+        persisted=None,
+        is_new=True,
+    )
+    return {**chat, 'mode': resolution.mode.value}
