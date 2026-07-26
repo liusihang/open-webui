@@ -16,6 +16,7 @@ from open_webui.agent.conversation_mode import (
 from open_webui.internal.db import Base, JSONField, get_async_db_context
 from open_webui.models.automations import AutomationRun
 from open_webui.models.chat_messages import ChatMessage, ChatMessages
+from open_webui.models.conversation_mode_profiles import ConversationModeProfileRevision
 from open_webui.models.folders import Folders
 from open_webui.models.tags import Tag, TagModel, Tags
 from open_webui.utils.misc import sanitize_data_for_db, sanitize_text_for_db
@@ -69,6 +70,17 @@ class Chat(Base):  # database table mapping for chat entity
 
     last_read_at = Column(BigInteger, nullable=True)
 
+    mode_profile_revision_id = Column(
+        String(36),
+        ForeignKey(
+            ConversationModeProfileRevision.id,
+            name='fk_chat_mode_profile_revision_id',
+            ondelete='RESTRICT',
+        ),
+        nullable=True,
+        index=True,
+    )
+
     __table_args__ = (
         # Performance indexes for common queries
         Index('folder_id_idx', 'folder_id'),
@@ -100,6 +112,7 @@ class ChatModel(BaseModel):
     summary: str | None = None
 
     last_read_at: int | None = None
+    mode_profile_revision_id: str | None = None
 
 
 class ChatFile(Base):
@@ -177,6 +190,7 @@ class ChatResponse(BaseModel):
 
     tasks: list | None = None
     summary: str | None = None
+    mode_profile_revision_id: str | None = None
 
 
 class ChatTitleIdResponse(BaseModel):
