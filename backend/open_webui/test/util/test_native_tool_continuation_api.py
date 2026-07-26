@@ -984,3 +984,221 @@ async def test_websocket_native_continuation_restores_anchor_and_base_sources_wi
     assert not any(
         event.get('data', {}).get('metadata', {}).get('citation_map') for event in emitted if isinstance(event, dict)
     )
+
+
+@pytest.mark.asyncio
+async def test_websocket_native_tool_rounds_keep_current_tool_and_filter_context_once(monkeypatch):  # noqa: C901
+    execute_contexts = []
+    filter_contexts = []
+    provider_requests = []
+
+    async def tool_stream(call_id):
+        yield (
+            'data: {"choices":[{"delta":{"tool_calls":[{"index":0,"id":"'
+            + call_id
+            + '","type":"function","function":{"name":"query_knowledge_files","arguments":"{}"}}]}}]}\n\n'
+        )
+        yield 'data: {"choices":[{"delta":{},"finish_reason":"tool_calls"}]}\n\n'
+        yield 'data: [DONE]\n\n'
+
+    async def final_stream():
+        yield 'data: {"choices":[{"delta":{"content":"final"}}]}\n\n'
+        yield 'data: [DONE]\n\n'
+
+    async def fake_execute(_request, form_data, _user, _metadata, response_tool_calls, **_kwargs):
+        execute_contexts.append(deepcopy(form_data))
+        call_id = response_tool_calls[0]['id']
+        return ([{'tool_call_id': call_id, 'content': f'result for {call_id}'}], [])
+
+    async def fake_generate(_request, form_data, _user, **_kwargs):
+        provider_requests.append(deepcopy(form_data))
+        stream = tool_stream('call-2') if len(provider_requests) == 1 else final_stream()
+        return StreamingResponse(stream, media_type='text/event-stream')
+
+    async def capture_stream_filter(*, form_data, extra_params, **_kwargs):
+        filter_contexts.append((deepcopy(extra_params['__body__']), deepcopy(extra_params['__messages__'])))
+        return form_data, {}
+
+    async def no_filters(*_args, **_kwargs):
+        return []
+
+    async def no_oauth(*_args, **_kwargs):
+        return None
+
+    async def config_get(_key, default=None):
+        return default
+
+    async def emit(_event):
+        pass
+
+    monkeypatch.setattr(middleware, 'execute_native_tool_calls', fake_execute)
+    monkeypatch.setattr(middleware, 'generate_chat_completion', fake_generate)
+    monkeypatch.setattr(middleware, 'process_filter_functions', capture_stream_filter)
+    monkeypatch.setattr(middleware, 'get_sorted_filter_ids', no_filters)
+    monkeypatch.setattr(middleware, 'get_system_oauth_token', no_oauth)
+    monkeypatch.setattr(middleware.Config, 'get', config_get)
+    monkeypatch.setattr(middleware, 'ENABLE_REALTIME_CHAT_SAVE', False)
+
+    ctx = _ctx()
+    ctx['event_emitter'] = emit
+    ctx['metadata'].update({'chat_id': 'channel:test', 'message_id': 'message-1', 'session_id': None})
+
+    assert (
+        await middleware.streaming_chat_response_handler(
+            StreamingResponse(tool_stream('call-1'), media_type='text/event-stream'), ctx
+        )
+        is None
+    )
+
+    assert [context['messages'][-1]['role'] for context in execute_contexts] == ['user', 'tool']
+    second_execute_messages = execute_contexts[1]['messages']
+    assert sum(message.get('role') == 'assistant' for message in second_execute_messages) == 1
+    assert sum(message.get('role') == 'tool' for message in second_execute_messages) == 1
+    assert second_execute_messages[-2]['tool_calls'][0]['id'] == 'call-1'
+    assert second_execute_messages[-1]['tool_call_id'] == 'call-1'
+    assert any(
+        body['messages'][-1].get('tool_call_id') == 'call-1' and messages[-1].get('tool_call_id') == 'call-1'
+        for body, messages in filter_contexts
+    )
+
+    assert len(provider_requests) == 2
+    for request in provider_requests:
+        messages = request['messages']
+        assert sum(message.get('role') == 'assistant' for message in messages) == len(
+            {message.get('tool_calls', [{}])[0].get('id') for message in messages if message.get('role') == 'assistant'}
+        )
+        assert sum(message.get('role') == 'tool' for message in messages) == len(
+            {message.get('tool_call_id') for message in messages if message.get('role') == 'tool'}
+        )
+
+
+@pytest.mark.asyncio
+async def test_websocket_responses_stateful_two_tool_rounds_keep_private_context_and_delta_replay(  # noqa: C901
+    monkeypatch,
+):
+    execute_contexts = []
+    filter_contexts = []
+    provider_requests = []
+
+    def function_call_item(call_id):
+        return {
+            'type': 'function_call',
+            'call_id': call_id,
+            'name': 'query_knowledge_files',
+            'arguments': '{}',
+        }
+
+    async def responses_tool_stream(call_id, response_id):
+        item = function_call_item(call_id)
+        for event in (
+            {'type': 'response.output_item.added', 'output_index': 0, 'item': item},
+            {'type': 'response.completed', 'response': {'id': response_id, 'output': [item]}},
+        ):
+            yield f'data: {json.dumps(event)}\n\n'
+        yield 'data: [DONE]\n\n'
+
+    async def responses_final_stream():
+        message = {
+            'type': 'message',
+            'role': 'assistant',
+            'content': [{'type': 'output_text', 'text': 'final'}],
+        }
+        event = {'type': 'response.completed', 'response': {'id': 'resp-final', 'output': [message]}}
+        yield f'data: {json.dumps(event)}\n\n'
+        yield 'data: [DONE]\n\n'
+
+    async def fake_execute(_request, form_data, _user, _metadata, response_tool_calls, **_kwargs):
+        execute_contexts.append(deepcopy(form_data))
+        call_id = response_tool_calls[0]['id']
+        return ([{'tool_call_id': call_id, 'content': f'result for {call_id}'}], [])
+
+    async def fake_generate(_request, form_data, _user, **_kwargs):
+        provider_requests.append(deepcopy(form_data))
+        if len(provider_requests) == 1:
+            return StreamingResponse(responses_tool_stream('call-2', 'resp-2'), media_type='text/event-stream')
+        return StreamingResponse(responses_final_stream(), media_type='text/event-stream')
+
+    async def capture_stream_filter(*, form_data, extra_params, **_kwargs):
+        filter_contexts.append((deepcopy(extra_params['__body__']), deepcopy(extra_params['__messages__'])))
+        return form_data, {}
+
+    async def no_filters(*_args, **_kwargs):
+        return []
+
+    async def no_oauth(*_args, **_kwargs):
+        return None
+
+    async def config_get(key, default=None):
+        return 'RAG {{CONTEXT}}' if key == 'rag.template' else default
+
+    async def emit(_event):
+        pass
+
+    monkeypatch.setattr(middleware, 'ENABLE_RESPONSES_API_STATEFUL', True)
+    monkeypatch.setattr(middleware, 'execute_native_tool_calls', fake_execute)
+    monkeypatch.setattr(middleware, 'generate_chat_completion', fake_generate)
+    monkeypatch.setattr(middleware, 'process_filter_functions', capture_stream_filter)
+    monkeypatch.setattr(middleware, 'get_sorted_filter_ids', no_filters)
+    monkeypatch.setattr(middleware, 'get_system_oauth_token', no_oauth)
+    monkeypatch.setattr(middleware.Config, 'get', config_get)
+    monkeypatch.setattr(middleware, 'ENABLE_REALTIME_CHAT_SAVE', False)
+    monkeypatch.setattr(middleware, 'RAG_SYSTEM_CONTEXT', True)
+
+    ctx = _ctx()
+    ctx['event_emitter'] = emit
+    ctx['form_data']['messages'].insert(0, {'role': 'system', 'content': 'PRIVATE ANCHOR'})
+    ctx['metadata'].update(
+        {
+            'chat_id': 'channel:test',
+            'message_id': 'message-1',
+            'session_id': None,
+            'sources': [
+                {
+                    'source': {'id': 'base-source', 'name': 'base-source'},
+                    'document': ['base evidence'],
+                    'metadata': [{}],
+                }
+            ],
+            'user_prompt': 'Use the attached docs.',
+        }
+    )
+    ctx['pre_rag_system_anchor'] = 'PRIVATE ANCHOR'
+    ctx['form_data'] = await middleware.restore_native_tool_continuation_context(
+        ctx['request'],
+        ctx['form_data'],
+        ctx['metadata'],
+        pre_rag_system_anchor='PRIVATE ANCHOR',
+        tool_call_sources=[],
+        continuation_state={},
+    )
+
+    assert (
+        await middleware.streaming_chat_response_handler(
+            StreamingResponse(responses_tool_stream('call-1', 'resp-1'), media_type='text/event-stream'), ctx
+        )
+        is None
+    )
+
+    second_execute_messages = execute_contexts[1]['messages']
+    assert sum(message.get('role') == 'assistant' for message in second_execute_messages) == 1
+    assert sum(message.get('role') == 'tool' for message in second_execute_messages) == 1
+    assert second_execute_messages[-2]['tool_calls'][0]['id'] == 'call-1'
+    assert second_execute_messages[-1]['tool_call_id'] == 'call-1'
+    assert any(
+        message.get('tool_call_id') == 'call-1'
+        for body, messages in filter_contexts
+        for message in [*body.get('messages', []), *messages]
+    )
+
+    assert [request.get('previous_response_id') for request in provider_requests] == ['resp-1', 'resp-2']
+    assert all(request['continuation_mode'] == 'stateful_delta' for request in provider_requests)
+    for request in provider_requests:
+        system_message = request['messages'][0]
+        assert system_message['role'] == 'system'
+        assert system_message['content'].startswith('PRIVATE ANCHOR')
+        assert system_message['content'].count('RAG <source') == 1
+        assert 'base evidence' in system_message['content']
+    assert [
+        [message.get('tool_call_id') for message in request['messages'] if message.get('role') == 'tool']
+        for request in provider_requests
+    ] == [['call-1'], ['call-2']]

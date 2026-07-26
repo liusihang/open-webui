@@ -5560,6 +5560,8 @@ async def streaming_chat_response_handler(response, ctx):
             prior_output = []
             last_response_id = None
             responses_continuation_guard_state = None
+            base_form_data = form_data
+            current_form_data = form_data
 
             def full_output():
                 return prior_output + output if prior_output else output
@@ -5570,7 +5572,7 @@ async def streaming_chat_response_handler(response, ctx):
                     return
 
                 guard_messages = [
-                    *form_data.get('messages', []),
+                    *base_form_data.get('messages', []),
                     *convert_output_to_messages(
                         output,
                         raw=True,
@@ -5579,7 +5581,7 @@ async def streaming_chat_response_handler(response, ctx):
                 ]
                 responses_continuation_guard_state = build_responses_continuation_guard_state(
                     {
-                        **form_data,
+                        **base_form_data,
                         'model': model_id,
                         'messages': guard_messages,
                     },
@@ -5634,7 +5636,7 @@ async def streaming_chat_response_handler(response, ctx):
                         },
                     )
 
-                async def stream_body_handler(response, form_data):
+                async def stream_body_handler(response, current_form_data):
                     nonlocal content
                     nonlocal usage
                     nonlocal output
@@ -5725,7 +5727,11 @@ async def streaming_chat_response_handler(response, ctx):
                                 filter_functions=filter_functions,
                                 filter_type='stream',
                                 form_data=data,
-                                extra_params={'__body__': form_data, **extra_params},
+                                extra_params={
+                                    '__body__': current_form_data,
+                                    '__messages__': current_form_data.get('messages', []),
+                                    **extra_params,
+                                },
                             )
 
                             if data:
@@ -6296,7 +6302,7 @@ async def streaming_chat_response_handler(response, ctx):
                             tool_calls.append(_split_tool_calls(responses_api_tool_calls))
 
                 try:
-                    await stream_body_handler(response, form_data)
+                    await stream_body_handler(response, current_form_data)
                     update_responses_continuation_guard_state()
                 finally:
                     if response.background:
@@ -6306,7 +6312,6 @@ async def streaming_chat_response_handler(response, ctx):
                 tool_call_sources = []  # Track citation sources from tool results
                 all_tool_call_sources = []  # Accumulated sources across all iterations
                 continuation_state = {}
-                base_form_data = form_data
 
                 # Check if citations are enabled for this model
                 citations_enabled = (model.get('info', {}).get('meta', {}).get('capabilities') or {}).get(
@@ -6369,7 +6374,7 @@ async def streaming_chat_response_handler(response, ctx):
 
                     results, iteration_tool_call_sources = await execute_native_tool_calls(
                         request,
-                        form_data,
+                        current_form_data,
                         user,
                         metadata,
                         response_tool_calls,
@@ -6483,7 +6488,7 @@ async def streaming_chat_response_handler(response, ctx):
                                 tool_call_sources=all_tool_call_sources,
                                 continuation_state=continuation_state,
                             )
-                            new_form_data, _guard_result = apply_responses_continuation_guard(
+                            provider_form_data, _guard_result = apply_responses_continuation_guard(
                                 new_form_data,
                                 previous_response_id=last_response_id,
                                 previous_state=responses_continuation_guard_state,
@@ -6536,9 +6541,13 @@ async def streaming_chat_response_handler(response, ctx):
                                 continuation_state=continuation_state,
                             )
 
+                            provider_form_data = new_form_data
+
+                        current_form_data = new_form_data
+
                         res = await generate_chat_completion(
                             request,
-                            new_form_data,
+                            provider_form_data,
                             user,
                             bypass_system_prompt=True,
                         )
@@ -6563,7 +6572,7 @@ async def streaming_chat_response_handler(response, ctx):
                                 if not msg_parts or (len(msg_parts) == 1 and not msg_parts[0].get('text', '').strip()):
                                     prior_output.pop()
                             output = []
-                            await stream_body_handler(res, new_form_data)
+                            await stream_body_handler(res, current_form_data)
                             output[:0] = prior_output
                             prior_output = []
                             update_responses_continuation_guard_state()
