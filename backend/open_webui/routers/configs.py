@@ -12,14 +12,14 @@ from open_webui.agent.conversation_mode_profile_service import (
     ModeProfileResourceValidationError,
     ModeProfileServiceUnavailableError,
     ModeProfileWarning,
-    cache_current_profile_revision,
     cache_profile_revision,
     get_cached_conversation_mode_profile_history,
     get_cached_current_revision,
     get_cached_revision,
     profile_default_counts,
+    restore_mode_profile_revision,
+    save_mode_profile_revision,
     validate_conversation_mode_profile,
-    validate_conversation_mode_profile_precommit,
 )
 from open_webui.agent.conversation_mode_profiles import (
     INHERIT,
@@ -34,7 +34,6 @@ from open_webui.models.conversation_mode_profiles import (
     ConversationModeProfileIntegrityError,
     ConversationModeProfileRevisionConflict,
     ConversationModeProfileRevisionModel,
-    ConversationModeProfiles,
 )
 from open_webui.models.oauth_sessions import OAuthSessions
 from open_webui.utils.auth import get_admin_user, get_verified_user
@@ -60,6 +59,7 @@ from open_webui.utils.tools import (
     set_tool_servers,
 )
 from pydantic import BaseModel, ConfigDict, Field, StrictInt
+from sqlalchemy.exc import SQLAlchemyError
 
 router = APIRouter()
 
@@ -242,6 +242,16 @@ def _profile_integrity_error(exc: ConversationModeProfileIntegrityError) -> HTTP
     )
 
 
+def _profile_integrity_unavailable_error(exc: ConversationModeProfileIntegrityError) -> HTTPException:
+    return HTTPException(
+        status_code=503,
+        detail={
+            'code': exc.code,
+            'revision_id': exc.revision_id,
+        },
+    )
+
+
 def _profile_service_error(exc: ModeProfileServiceUnavailableError) -> HTTPException:
     detail = {
         'code': exc.code,
@@ -267,15 +277,27 @@ async def _profile_conflict_error(
     request: Request,
     exc: ConversationModeProfileRevisionConflict,
 ) -> HTTPException:
-    current = (
-        await get_cached_revision(
-            request.app,
-            exc.actual_revision_id,
-            expected_mode=exc.mode,
+    try:
+        current = (
+            await get_cached_revision(
+                request.app,
+                exc.actual_revision_id,
+                expected_mode=exc.mode,
+            )
+            if exc.actual_revision_id is not None
+            else None
         )
-        if exc.actual_revision_id is not None
-        else None
-    )
+    except ModeProfileServiceUnavailableError as refresh_exc:
+        return _profile_service_error(refresh_exc)
+    except ConversationModeProfileIntegrityError as refresh_exc:
+        return _profile_integrity_unavailable_error(refresh_exc)
+    except SQLAlchemyError:
+        return _profile_service_error(
+            ModeProfileServiceUnavailableError(
+                'conflict_refresh',
+                mode=exc.mode,
+            )
+        )
     current_metadata = (
         {
             'revision_id': current.id,
@@ -287,7 +309,7 @@ async def _profile_conflict_error(
         else {'revision_id': exc.actual_revision_id}
     )
     if current is not None:
-        cache_current_profile_revision(request.app, current)
+        cache_profile_revision(request.app, current)
     return HTTPException(
         status_code=409,
         detail={
@@ -383,12 +405,11 @@ async def save_conversation_mode_profile_revision(
     )
 
     try:
-        revision = await ConversationModeProfiles.save_revision(
+        revision = await save_mode_profile_revision(
             mode=mode,
             content=profile.to_content_dict(),
             expected_current_revision_id=form_data.expected_current_revision_id,
             created_by=user.id,
-            precommit_validator=validate_conversation_mode_profile_precommit,
         )
     except ModeProfileResourceValidationError as exc:
         raise _profile_resource_error(exc) from exc
@@ -505,12 +526,11 @@ async def restore_conversation_mode_profile_revision(
     )
 
     try:
-        revision = await ConversationModeProfiles.restore_revision(
+        revision = await restore_mode_profile_revision(
             mode=mode,
             source_revision_id=revision_id,
             expected_current_revision_id=form_data.expected_current_revision_id,
             created_by=user.id,
-            precommit_validator=validate_conversation_mode_profile_precommit,
         )
     except ModeProfileResourceValidationError as exc:
         raise _profile_resource_error(exc) from exc

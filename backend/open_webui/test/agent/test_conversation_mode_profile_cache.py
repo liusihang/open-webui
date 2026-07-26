@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from types import SimpleNamespace
 
 import pytest
@@ -104,10 +105,8 @@ async def test_two_workers_converge_on_changed_mode_without_flushing_old_revisio
     current['chat'] = chat_v2
     await cache_invalidation.invalidate_conversation_mode_profile_head(worker_one, 'chat')
 
-    assert 'chat' not in worker_one.state.CONVERSATION_MODE_PROFILE_HEADS
-    assert 'chat' not in worker_two.state.CONVERSATION_MODE_PROFILE_HEADS
-    assert worker_one.state.CONVERSATION_MODE_PROFILE_HEADS['agent'].id == 'agent-v1'
-    assert worker_two.state.CONVERSATION_MODE_PROFILE_HEADS['agent'].id == 'agent-v1'
+    assert worker_one.state.CONVERSATION_MODE_PROFILE_HEADS == {}
+    assert worker_two.state.CONVERSATION_MODE_PROFILE_HEADS == {}
     assert worker_one.state.CONVERSATION_MODE_PROFILE_REVISIONS['chat-v1'].id == 'chat-v1'
     assert worker_two.state.CONVERSATION_MODE_PROFILE_REVISIONS['chat-v1'].id == 'chat-v1'
 
@@ -127,13 +126,12 @@ async def test_publish_failure_still_clears_local_head_and_preserves_revision_ca
     from open_webui.utils import cache_invalidation
 
     app = _app(FakeRedis(fail=True))
-    app.state.CONVERSATION_MODE_PROFILE_HEADS['chat'] = SimpleNamespace(id='chat-v1')
     app.state.CONVERSATION_MODE_PROFILE_REVISIONS['chat-v1'] = SimpleNamespace(id='chat-v1')
     monkeypatch.setattr(cache_invalidation, '_REGISTERED_APPS', [])
 
     await cache_invalidation.invalidate_conversation_mode_profile_head(app, 'chat')
 
-    assert 'chat' not in app.state.CONVERSATION_MODE_PROFILE_HEADS
+    assert app.state.CONVERSATION_MODE_PROFILE_HEADS == {}
     assert app.state.CONVERSATION_MODE_PROFILE_REVISIONS['chat-v1'].id == 'chat-v1'
 
 
@@ -172,7 +170,7 @@ async def test_unregistered_reader_refreshes_from_database_after_writer_publish_
     head_revision_id['chat'] = chat_v2.id
     await cache_invalidation.invalidate_conversation_mode_profile_head(writer, 'chat')
 
-    assert reader.state.CONVERSATION_MODE_PROFILE_HEADS['chat'].id == chat_v1.id
+    assert reader.state.CONVERSATION_MODE_PROFILE_HEADS == {}
     assert (await service.get_cached_current_revision(reader, 'chat')).id == chat_v2.id
 
 
@@ -317,3 +315,57 @@ def test_revision_cache_repr_does_not_leak_prompt():
 
     assert secret not in repr(revision)
     assert secret not in repr(service.get_profile_revision_cache(app))
+
+
+@pytest.mark.asyncio
+async def test_current_read_bounds_hanging_redis_version_probe_and_uses_database(monkeypatch):
+    from open_webui.agent import conversation_mode_profile_service as service
+
+    class HangingRedis:
+        async def get(self, key):
+            await asyncio.Event().wait()
+
+    app = _app(HangingRedis())
+    revision = _revision('chat-v1', 'chat')
+    head_reads = []
+
+    async def get_head(mode, db=None):
+        head_reads.append(str(mode))
+        return SimpleNamespace(mode='chat', current_revision_id=revision.id)
+
+    async def get_revision(revision_id, expected_mode=None, db=None):
+        return revision
+
+    monkeypatch.setattr(service, 'PROFILE_CACHE_VERSION_TIMEOUT_SECONDS', 0.01, raising=False)
+    monkeypatch.setattr(service.ConversationModeProfiles, 'get_head', get_head)
+    monkeypatch.setattr(service.ConversationModeProfiles, 'get_revision', get_revision)
+
+    current = await asyncio.wait_for(
+        service.get_cached_current_revision(app, 'chat'),
+        timeout=0.2,
+    )
+
+    assert current.id == revision.id
+    assert head_reads == ['chat']
+
+
+@pytest.mark.asyncio
+async def test_current_read_does_not_store_duplicate_full_head_revision(monkeypatch):
+    from open_webui.agent import conversation_mode_profile_service as service
+
+    app = _app(None)
+    revision = _revision('chat-v1', 'chat')
+
+    async def get_head(mode, db=None):
+        return SimpleNamespace(mode='chat', current_revision_id=revision.id)
+
+    async def get_revision(revision_id, expected_mode=None, db=None):
+        return revision
+
+    monkeypatch.setattr(service.ConversationModeProfiles, 'get_head', get_head)
+    monkeypatch.setattr(service.ConversationModeProfiles, 'get_revision', get_revision)
+
+    await service.get_cached_current_revision(app, 'chat')
+
+    assert app.state.CONVERSATION_MODE_PROFILE_HEADS == {}
+    assert app.state.CONVERSATION_MODE_PROFILE_REVISIONS[revision.id].id == revision.id

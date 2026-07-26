@@ -25,7 +25,9 @@ from open_webui.models.conversation_mode_profiles import (
     AGENT_BASELINE_REVISION_ID,
     CHAT_BASELINE_REVISION_ID,
     ConversationModeProfileHead,
+    ConversationModeProfileIntegrityError,
     ConversationModeProfileRevision,
+    ConversationModeProfileRevisionConflict,
     ConversationModeProfiles,
 )
 from open_webui.models.functions import Function
@@ -35,7 +37,7 @@ from open_webui.routers import configs
 from open_webui.utils.auth import get_current_user
 from sqlalchemy import delete, update
 from sqlalchemy.exc import OperationalError
-from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
 BASE_PATH = '/api/v1/configs/conversation_mode_profiles'
 BASELINE_CONTENT = {
@@ -685,6 +687,123 @@ def test_conflict_refreshes_a_stale_local_head_cache(route_app):
     assert refreshed.json()['system_prompt'] == 'External writer'
 
 
+@pytest.mark.parametrize('operation', ['save', 'restore'])
+@pytest.mark.parametrize('failure', ['database', 'service', 'integrity'])
+def test_conflict_refresh_failure_is_controlled_503(route_app, monkeypatch, operation, failure):
+    conflict_revision_id = 'conflict-current-revision'
+    raw_sentinel = 'PRIVATE CONFLICT REFRESH DETAIL'
+    original_get_cached_revision = configs.get_cached_revision
+
+    async def raise_conflict(**kwargs):
+        raise ConversationModeProfileRevisionConflict(
+            mode='chat',
+            expected_revision_id=CHAT_BASELINE_REVISION_ID,
+            actual_revision_id=conflict_revision_id,
+        )
+
+    async def fail_only_conflict_refresh(app, revision_id, *, expected_mode=None):
+        if revision_id != conflict_revision_id:
+            return await original_get_cached_revision(
+                app,
+                revision_id,
+                expected_mode=expected_mode,
+            )
+        if failure == 'database':
+            raise OperationalError('SELECT private conflict state', {}, RuntimeError(raw_sentinel))
+        if failure == 'service':
+            raise profile_service.ModeProfileServiceUnavailableError(
+                'read_revision',
+                mode='chat',
+            )
+        raise ConversationModeProfileIntegrityError(
+            conflict_revision_id,
+            raw_sentinel,
+        )
+
+    monkeypatch.setattr(
+        ConversationModeProfiles,
+        'save_revision' if operation == 'save' else 'restore_revision',
+        raise_conflict,
+    )
+    monkeypatch.setattr(configs, 'get_cached_revision', fail_only_conflict_refresh)
+    client = TestClient(route_app.app, raise_server_exceptions=False)
+
+    if operation == 'save':
+        response = client.post(
+            f'{BASE_PATH}/chat/revisions',
+            json=_save_payload(CHAT_BASELINE_REVISION_ID, prompt='PRIVATE PROMPT SENTINEL'),
+        )
+    else:
+        response = client.post(
+            f'{BASE_PATH}/chat/revisions/{CHAT_BASELINE_REVISION_ID}/restore',
+            json={'expected_current_revision_id': CHAT_BASELINE_REVISION_ID},
+        )
+
+    assert response.status_code == 503
+    if failure == 'integrity':
+        assert response.json()['detail'] == {
+            'code': 'mode_profile_integrity_error',
+            'revision_id': conflict_revision_id,
+        }
+    else:
+        detail = response.json()['detail']
+        assert detail['code'] == 'mode_profile_service_unavailable'
+        assert detail['mode'] == 'chat'
+        assert detail['operation'] == ('conflict_refresh' if failure == 'database' else 'read_revision')
+    assert raw_sentinel not in response.text
+    assert 'PRIVATE PROMPT SENTINEL' not in response.text
+
+
+@pytest.mark.parametrize('operation', ['save', 'restore'])
+@pytest.mark.parametrize('failure_phase', ['head_lock', 'flush', 'commit'])
+def test_persistence_sqlalchemy_failure_is_controlled_503(
+    route_app,
+    monkeypatch,
+    operation,
+    failure_phase,
+):
+    raw_sentinel = 'PRIVATE DATABASE FAILURE DETAIL'
+
+    async def fail_head_lock(session, mode, dialect_name):
+        raise OperationalError('SELECT private head', {}, RuntimeError(raw_sentinel))
+
+    async def fail_flush(self, objects=None):
+        raise OperationalError('INSERT private revision', {}, RuntimeError(raw_sentinel))
+
+    async def fail_commit(self):
+        raise OperationalError('COMMIT private revision', {}, RuntimeError(raw_sentinel))
+
+    if failure_phase == 'head_lock':
+        monkeypatch.setattr(ConversationModeProfiles, '_lock_head', fail_head_lock)
+    elif failure_phase == 'flush':
+        monkeypatch.setattr(AsyncSession, 'flush', fail_flush)
+    else:
+        monkeypatch.setattr(AsyncSession, 'commit', fail_commit)
+
+    client = TestClient(route_app.app, raise_server_exceptions=False)
+    if operation == 'save':
+        response = client.post(
+            f'{BASE_PATH}/chat/revisions',
+            json=_save_payload(CHAT_BASELINE_REVISION_ID, prompt='PRIVATE PROMPT SENTINEL'),
+        )
+    else:
+        response = client.post(
+            f'{BASE_PATH}/chat/revisions/{CHAT_BASELINE_REVISION_ID}/restore',
+            json={'expected_current_revision_id': CHAT_BASELINE_REVISION_ID},
+        )
+
+    assert response.status_code == 503
+    assert response.json()['detail'] == {
+        'code': 'mode_profile_service_unavailable',
+        'operation': f'{operation}_revision',
+        'mode': 'chat',
+    }
+    assert raw_sentinel not in response.text
+    assert 'PRIVATE PROMPT SENTINEL' not in response.text
+    assert asyncio.run(ConversationModeProfiles.get_head('chat')).current_revision_id == CHAT_BASELINE_REVISION_ID
+    assert len(asyncio.run(ConversationModeProfiles.list_history('chat'))) == 1
+
+
 def test_history_detail_and_restore_create_immutable_new_revision(route_app):
     saved = route_app.client.post(
         f'{BASE_PATH}/chat/revisions',
@@ -773,7 +892,6 @@ def test_history_uses_one_repository_snapshot_for_head_and_revisions(route_app, 
 
 def test_cache_publication_failure_does_not_rollback_committed_revision(route_app):
     route_app.app.state.redis = FakeRedis(fail=True)
-    route_app.app.state.CONVERSATION_MODE_PROFILE_HEADS['chat'] = SimpleNamespace(id=CHAT_BASELINE_REVISION_ID)
 
     response = route_app.client.post(
         f'{BASE_PATH}/chat/revisions',
@@ -928,6 +1046,88 @@ async def test_invalid_present_jwt_is_rejected_instead_of_treated_as_anonymous(
 
     assert exc_info.value.status_code == 401
     assert exc_info.value.detail == 'Invalid token'
+
+
+@pytest.mark.asyncio
+async def test_token_revocation_redis_failure_is_controlled_503(
+    profile_db,
+    resource_truth,
+    monkeypatch,
+):
+    main = importlib.import_module('open_webui.main')
+    user = SimpleNamespace(id='user-1', role='user')
+    profile_calls = []
+
+    class FailingRedis:
+        async def get(self, key):
+            raise RuntimeError('PRIVATE REDIS FAILURE DETAIL')
+
+    async def public_profiles(app):
+        profile_calls.append(app)
+        return []
+
+    monkeypatch.setattr(main, 'decode_token', lambda token: {'id': user.id, 'jti': 'token-1', 'iat': 1})
+    monkeypatch.setattr(
+        main,
+        'get_http_authorization_cred',
+        lambda header: SimpleNamespace(credentials='valid-token'),
+    )
+    monkeypatch.setattr(main, 'get_public_conversation_mode_profiles', public_profiles)
+    main.app.state.redis = FailingRedis()
+    request = SimpleNamespace(
+        headers={'Authorization': 'Bearer valid-token'},
+        cookies={},
+        app=main.app,
+    )
+
+    with pytest.raises(HTTPException) as exc_info:
+        await main.get_app_config(request)
+
+    assert exc_info.value.status_code == 503
+    assert exc_info.value.detail == {'code': 'auth_token_validation_unavailable'}
+    assert 'PRIVATE REDIS FAILURE DETAIL' not in str(exc_info.value.detail)
+    assert profile_calls == []
+
+
+@pytest.mark.asyncio
+async def test_token_revocation_redis_hang_is_bounded_and_controlled_503(
+    profile_db,
+    resource_truth,
+    monkeypatch,
+):
+    main = importlib.import_module('open_webui.main')
+    user = SimpleNamespace(id='user-1', role='user')
+    profile_calls = []
+
+    class HangingRedis:
+        async def get(self, key):
+            await asyncio.Event().wait()
+
+    async def public_profiles(app):
+        profile_calls.append(app)
+        return []
+
+    monkeypatch.setattr(main, 'decode_token', lambda token: {'id': user.id, 'jti': 'token-1', 'iat': 1})
+    monkeypatch.setattr(main, 'APP_CONFIG_TOKEN_VALIDATION_TIMEOUT_SECONDS', 0.01, raising=False)
+    monkeypatch.setattr(
+        main,
+        'get_http_authorization_cred',
+        lambda header: SimpleNamespace(credentials='valid-token'),
+    )
+    monkeypatch.setattr(main, 'get_public_conversation_mode_profiles', public_profiles)
+    main.app.state.redis = HangingRedis()
+    request = SimpleNamespace(
+        headers={'Authorization': 'Bearer valid-token'},
+        cookies={},
+        app=main.app,
+    )
+
+    with pytest.raises(HTTPException) as exc_info:
+        await asyncio.wait_for(main.get_app_config(request), timeout=0.2)
+
+    assert exc_info.value.status_code == 503
+    assert exc_info.value.detail == {'code': 'auth_token_validation_unavailable'}
+    assert profile_calls == []
 
 
 @pytest.mark.asyncio

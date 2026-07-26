@@ -3012,6 +3012,8 @@ async def stop_tasks_by_chat_id_endpoint(request: Request, chat_id: str, user=De
 #
 ##################################
 
+APP_CONFIG_TOKEN_VALIDATION_TIMEOUT_SECONDS = 0.1
+
 
 async def _get_app_config_user(request: Request):
     token = None
@@ -3034,7 +3036,22 @@ async def _get_app_config_user(request: Request):
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail='Invalid token',
         ) from exc
-    if data is None or 'id' not in data or not await is_valid_token(data, getattr(request.app.state, 'redis', None)):
+    if data is None or 'id' not in data:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail='Invalid token',
+        )
+    try:
+        token_is_valid = await asyncio.wait_for(
+            is_valid_token(data, getattr(request.app.state, 'redis', None)),
+            timeout=APP_CONFIG_TOKEN_VALIDATION_TIMEOUT_SECONDS,
+        )
+    except Exception as exc:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail={'code': 'auth_token_validation_unavailable'},
+        ) from exc
+    if not token_is_valid:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail='Invalid token',

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from collections import OrderedDict
 from collections.abc import Mapping
 from typing import Any
@@ -39,6 +40,7 @@ FEATURE_CONFIG_KEYS = {
     'image_generation': 'image_generation.enable',
 }
 PROFILE_REVISION_CACHE_MAX_SIZE = 64
+PROFILE_CACHE_VERSION_TIMEOUT_SECONDS = 0.1
 
 
 class ModeProfileResourceIssue(BaseModel):
@@ -75,14 +77,6 @@ class ModeProfileWarning(BaseModel):
     model_ids: list[str] = Field(default_factory=list)
 
 
-def get_profile_head_cache(app) -> dict[str, ConversationModeProfileRevisionModel]:
-    cache = getattr(app.state, 'CONVERSATION_MODE_PROFILE_HEADS', None)
-    if cache is None:
-        cache = {}
-        app.state.CONVERSATION_MODE_PROFILE_HEADS = cache
-    return cache
-
-
 def get_profile_revision_cache(app) -> OrderedDict[str, ConversationModeProfileRevisionModel]:
     cache = getattr(app.state, 'CONVERSATION_MODE_PROFILE_REVISIONS', None)
     if not isinstance(cache, OrderedDict):
@@ -101,21 +95,12 @@ def cache_profile_revision(app, revision: ConversationModeProfileRevisionModel) 
         cache.popitem(last=False)
 
 
-def cache_current_profile_revision(app, revision: ConversationModeProfileRevisionModel) -> None:
-    cache_profile_revision(app, revision)
-    get_profile_head_cache(app)[revision.mode] = revision
-
-
 async def get_cached_current_revision(
     app,
     mode: ConversationMode | str,
 ) -> ConversationModeProfileRevisionModel:
     normalized_mode = _normalized_mode(mode)
-    await ensure_cache_fresh(
-        app,
-        CACHE_NAMESPACE_CONVERSATION_MODE_PROFILE_HEADS,
-        normalized_mode,
-    )
+    await _refresh_profile_cache_version(app, normalized_mode)
     try:
         head = await ConversationModeProfiles.get_head(normalized_mode)
     except SQLAlchemyError as exc:
@@ -144,7 +129,7 @@ async def get_cached_current_revision(
             'read_current_revision',
             mode=normalized_mode,
         )
-    cache_current_profile_revision(app, revision)
+    cache_profile_revision(app, revision)
     return revision
 
 
@@ -233,8 +218,54 @@ async def get_cached_conversation_mode_profile_history(
             snapshot.head.current_revision_id,
             f'Conversation mode profile head {normalized_mode} references a missing revision',
         )
-    cache_current_profile_revision(app, current)
+    cache_profile_revision(app, current)
     return snapshot
+
+
+async def save_mode_profile_revision(
+    *,
+    mode: ConversationMode | str,
+    content: dict[str, Any],
+    expected_current_revision_id: str,
+    created_by: str | None,
+) -> ConversationModeProfileRevisionModel:
+    normalized_mode = _normalized_mode(mode)
+    try:
+        return await ConversationModeProfiles.save_revision(
+            mode=normalized_mode,
+            content=content,
+            expected_current_revision_id=expected_current_revision_id,
+            created_by=created_by,
+            precommit_validator=validate_conversation_mode_profile_precommit,
+        )
+    except SQLAlchemyError as exc:
+        raise ModeProfileServiceUnavailableError(
+            'save_revision',
+            mode=normalized_mode,
+        ) from exc
+
+
+async def restore_mode_profile_revision(
+    *,
+    mode: ConversationMode | str,
+    source_revision_id: str,
+    expected_current_revision_id: str,
+    created_by: str | None,
+) -> ConversationModeProfileRevisionModel:
+    normalized_mode = _normalized_mode(mode)
+    try:
+        return await ConversationModeProfiles.restore_revision(
+            mode=normalized_mode,
+            source_revision_id=source_revision_id,
+            expected_current_revision_id=expected_current_revision_id,
+            created_by=created_by,
+            precommit_validator=validate_conversation_mode_profile_precommit,
+        )
+    except SQLAlchemyError as exc:
+        raise ModeProfileServiceUnavailableError(
+            'restore_revision',
+            mode=normalized_mode,
+        ) from exc
 
 
 async def validate_conversation_mode_profile(
@@ -417,6 +448,20 @@ def _locked_resource_statement(statement, session: AsyncSession, *, lock_rows: b
     if lock_rows and session.get_bind().dialect.name != 'sqlite':
         return statement.with_for_update()
     return statement
+
+
+async def _refresh_profile_cache_version(app, mode: str) -> None:
+    try:
+        await asyncio.wait_for(
+            ensure_cache_fresh(
+                app,
+                CACHE_NAMESPACE_CONVERSATION_MODE_PROFILE_HEADS,
+                mode,
+            ),
+            timeout=PROFILE_CACHE_VERSION_TIMEOUT_SECONDS,
+        )
+    except Exception:
+        return
 
 
 async def _feature_warnings(defaults: ProfileDefaults) -> list[ModeProfileWarning]:
