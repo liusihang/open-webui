@@ -13,6 +13,8 @@ from open_webui.agent.conversation_mode_profiles import (
 )
 from open_webui.models import chat_messages as chat_messages_module
 from open_webui.models import chats as chats_model_module
+from open_webui.models import conversation_mode_profiles as profile_store_module
+from open_webui.models import shared_chats as shared_chats_module
 from open_webui.models.automations import AutomationRun
 from open_webui.models.chat_messages import ChatMessage, ChatMessages
 from open_webui.models.chats import Chat, ChatForm, ChatImportForm, Chats
@@ -23,6 +25,7 @@ from open_webui.models.conversation_mode_profiles import (
     ConversationModeProfileTemporaryBinding,
 )
 from open_webui.models.shared_chats import SharedChat
+from open_webui.routers import chats as chats_router
 from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
@@ -85,6 +88,8 @@ async def atomic_profile_db(tmp_path, monkeypatch):
 
     monkeypatch.setattr(profile_service, 'get_async_db_context', session_context)
     monkeypatch.setattr(chats_model_module, 'get_async_db_context', session_context)
+    monkeypatch.setattr(profile_store_module, 'get_async_db_context', session_context)
+    monkeypatch.setattr(shared_chats_module, 'get_async_db_context', session_context)
     yield sessions
     await engine.dispose()
 
@@ -228,6 +233,94 @@ async def test_atomic_new_chat_rechecks_prevalidated_revision_and_rejects_head_d
     assert exc_info.value.authoritative_revision_id == NEW_REVISION_ID
     assert exc_info.value.hinted_revision_id == OLD_REVISION_ID
     assert await _chat_binding(atomic_profile_db, 'chat-head-drift') is None
+
+
+@pytest.mark.parametrize(
+    'modes',
+    [
+        ('chat', 'agent'),
+        ('agent', 'chat'),
+    ],
+)
+def test_bulk_import_uses_one_canonical_mode_head_lock_order_independent_of_input_order(modes) -> None:
+    forms = [
+        ChatImportForm(chat={**_chat_form(f'import-{index}').chat, 'mode': mode})
+        for index, mode in enumerate(modes)
+    ]
+
+    assert profile_service.canonical_import_mode_head_lock_order(forms) == ('agent', 'chat')
+
+
+@pytest.mark.asyncio
+async def test_shared_snapshot_read_uses_real_source_chat_binding_for_audit_metadata(atomic_profile_db) -> None:
+    source = Chat(
+        id='source-chat',
+        user_id='user-1',
+        title='Source',
+        chat={'title': 'Source', 'mode': 'chat', 'history': {'currentId': None, 'messages': {}}},
+        created_at=1,
+        updated_at=1,
+        mode_profile_revision_id=OLD_REVISION_ID,
+    )
+    snapshot = SharedChat(
+        id='shared-source-chat',
+        chat_id=source.id,
+        user_id=source.user_id,
+        title='Snapshot',
+        chat={'title': 'Snapshot', 'mode': 'chat', 'history': {'currentId': None, 'messages': {}}},
+        created_at=1,
+        updated_at=1,
+    )
+    async with atomic_profile_db() as session:
+        session.add_all([source, snapshot])
+        await session.commit()
+
+    response = await chats_router.get_shared_chat_by_id(
+        snapshot.id,
+        SimpleNamespace(id=source.user_id, role='user'),
+        None,
+    )
+
+    assert response.id == snapshot.id
+    assert response.mode_profile_revision_id == OLD_REVISION_ID
+
+
+@pytest.mark.asyncio
+async def test_shared_snapshot_read_fails_closed_for_post_cutover_unbound_source(atomic_profile_db) -> None:
+    source = Chat(
+        id='unbound-source-chat',
+        user_id='user-1',
+        title='Source',
+        chat={'title': 'Source', 'mode': 'chat', 'history': {'currentId': None, 'messages': {}}},
+        created_at=2,
+        updated_at=2,
+        mode_profile_revision_id=None,
+    )
+    snapshot = SharedChat(
+        id='shared-unbound-source-chat',
+        chat_id=source.id,
+        user_id=source.user_id,
+        title='Snapshot',
+        chat={'title': 'Snapshot', 'mode': 'chat', 'history': {'currentId': None, 'messages': {}}},
+        created_at=2,
+        updated_at=2,
+    )
+    async with atomic_profile_db() as session:
+        session.add_all([source, snapshot])
+        await session.commit()
+
+    with pytest.raises(chats_router.HTTPException) as exc_info:
+        await chats_router.get_shared_chat_by_id(
+            snapshot.id,
+            SimpleNamespace(id=source.user_id, role='user'),
+            None,
+        )
+
+    assert exc_info.value.status_code == 500
+    assert exc_info.value.detail == {
+        'code': 'mode_profile_integrity_error',
+        'message': 'The conversation mode profile binding failed integrity verification.',
+    }
 
 
 @pytest.mark.asyncio

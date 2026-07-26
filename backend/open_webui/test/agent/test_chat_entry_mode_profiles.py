@@ -26,6 +26,7 @@ from open_webui.agent.conversation_mode_profiles import (
 from open_webui.internal.db import Base
 from open_webui.models.agent_runs import AgentRuns
 from open_webui.models.conversation_mode_profiles import (
+    ConversationModeProfileBindingConflict,
     ConversationModeProfileIntegrityError,
     ConversationModeProfileLegacyBindingError,
     ConversationModeProfileRevisionModel,
@@ -684,6 +685,34 @@ async def test_local_temporary_chat_binds_once_and_reuses_its_revision_after_hea
     )
     assert ('bound_revision', 'chat-current', 'chat') in profile_entry.events
     assert ('current_revision', 'chat') not in profile_entry.events
+
+
+@pytest.mark.asyncio
+async def test_local_temporary_binding_conflict_is_stable_409_before_dispatch(
+    monkeypatch,
+    agent_run_db,
+    profile_entry,
+):
+    async def conflict(**kwargs):
+        raise ConversationModeProfileBindingConflict(
+            binding_id='local:temporary-session',
+            expected_revision_id='chat-current',
+            actual_revision_id='agent-current',
+        )
+
+    monkeypatch.setattr(main.ConversationModeProfiles, 'create_temporary_binding', conflict)
+    form = _existing_chat_form(mode='chat')
+    form['chat_id'] = 'local:temporary-session'
+
+    with pytest.raises(main.HTTPException) as exc_info:
+        await main.chat_completion(_request(enable_agent_mode=True), form, _user())
+
+    assert exc_info.value.status_code == 409
+    assert exc_info.value.detail == {
+        'code': 'mode_profile_binding_mismatch',
+        'message': 'Refresh the conversation mode profile before retrying.',
+    }
+    assert profile_entry.provider_calls == []
 
 
 @pytest.mark.asyncio

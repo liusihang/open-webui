@@ -167,6 +167,7 @@ from open_webui.models.channels import Channels
 from open_webui.models.chats import ChatForm, Chats
 from open_webui.models.config import Config
 from open_webui.models.conversation_mode_profiles import (
+    ConversationModeProfileBindingConflict,
     ConversationModeProfileIntegrityError,
     ConversationModeProfileLegacyBindingError,
     ConversationModeProfiles,
@@ -3250,6 +3251,24 @@ async def chat_completion(
             request=request,
         )
         raise
+    except (ConversationModeProfileBindingConflict, ModeProfileRevisionHintConflictError) as exc:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail={
+                'code': 'mode_profile_binding_mismatch',
+                'message': 'Refresh the conversation mode profile before retrying.',
+            },
+        ) from exc
+    except ConversationModeProfileIntegrityError as exc:
+        _raise_mode_profile_integrity_error(exc)
+    except (ModeProfileServiceUnavailableError, SQLAlchemyError) as exc:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail={
+                'code': 'mode_profile_unavailable',
+                'message': 'The conversation mode profile is unavailable.',
+            },
+        ) from exc
     except Exception as e:
         error_detail = redact_mode_profile_administrator_prompt(
             str(e),

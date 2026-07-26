@@ -1,4 +1,7 @@
+import asyncio
+import importlib
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -52,6 +55,34 @@ def test_expired_temporary_mode_profile_cleanup_is_only_registered_in_singleton_
 
     assert 'ConversationModeProfiles.cleanup_expired_temporary_bindings()' in singleton_source
     assert main_source.count('cleanup_expired_temporary_bindings()') == 1
+
+
+@pytest.mark.asyncio
+async def test_singleton_startup_invokes_expired_temporary_mode_profile_cleanup(monkeypatch):
+    main = importlib.import_module('open_webui.main')
+
+    calls = []
+
+    async def cleanup():
+        calls.append('cleanup')
+        return 1
+
+    def discard_task(coroutine):
+        coroutine.close()
+        future = asyncio.get_running_loop().create_future()
+        future.set_result(None)
+        return future
+
+    async def config_get(key, default=None):
+        return default
+
+    monkeypatch.setattr(main.ConversationModeProfiles, 'cleanup_expired_temporary_bindings', cleanup)
+    monkeypatch.setattr(main.asyncio, 'create_task', discard_task)
+    monkeypatch.setattr(main.Config, 'get', config_get)
+
+    await main._run_singleton_startup_tasks(SimpleNamespace())
+
+    assert calls == ['cleanup']
 
 
 @pytest.mark.asyncio

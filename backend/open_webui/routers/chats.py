@@ -16,6 +16,7 @@ from open_webui.agent.conversation_mode import (
     resolve_conversation_mode,
 )
 from open_webui.agent.conversation_mode_profile_service import (
+    ModeProfileRevisionHintConflictError,
     ModeProfileServiceUnavailableError,
     ModeProfileTemporaryBindingError,
     import_chats_with_mode_profile_bindings,
@@ -43,6 +44,7 @@ from open_webui.models.chats import (
 )
 from open_webui.models.config import Config
 from open_webui.models.conversation_mode_profiles import (
+    ConversationModeProfileBindingConflict,
     ConversationModeProfileIntegrityError,
     ConversationModeProfileLegacyBindingError,
     ConversationModeProfiles,
@@ -60,6 +62,7 @@ from open_webui.utils.misc import get_message_list
 from open_webui.utils.models import get_all_models
 from pydantic import BaseModel
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.exc import SQLAlchemyError
 
 log = logging.getLogger(__name__)
 
@@ -73,6 +76,34 @@ CHAT_CONFIG_KEYS = {
     'CONTEXT_COMPACTION_TOKEN_THRESHOLD': 'chat.context_compaction.token_threshold',
     'CONTEXT_COMPACTION_PROMPT_TEMPLATE': 'chat.context_compaction.prompt_template',
 }
+
+
+def _mode_profile_http_exception(exc: Exception) -> HTTPException:
+    if isinstance(exc, (ModeProfileServiceUnavailableError, SQLAlchemyError)):
+        return HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail={
+                'code': 'mode_profile_unavailable',
+                'message': 'The conversation mode profile service is temporarily unavailable.',
+            },
+        )
+    if isinstance(exc, (ConversationModeProfileIntegrityError, ConversationModeProfileLegacyBindingError)):
+        return HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail={
+                'code': 'mode_profile_integrity_error',
+                'message': 'The conversation mode profile binding failed integrity verification.',
+            },
+        )
+    if isinstance(exc, (ConversationModeProfileBindingConflict, ModeProfileRevisionHintConflictError)):
+        return HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail={
+                'code': 'mode_profile_binding_mismatch',
+                'message': 'Refresh the conversation mode profile before retrying.',
+            },
+        )
+    raise exc
 
 
 class ChatConfigForm(BaseModel):
@@ -722,13 +753,11 @@ async def create_new_chat(
             },
         ) from exc
     except ModeProfileServiceUnavailableError as exc:
-        raise HTTPException(
-            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail={
-                'code': exc.code,
-                'message': 'The conversation mode profile service is temporarily unavailable.',
-            },
-        ) from exc
+        raise _mode_profile_http_exception(exc) from exc
+    except ConversationModeProfileIntegrityError as exc:
+        raise _mode_profile_http_exception(exc) from exc
+    except (ConversationModeProfileBindingConflict, ModeProfileRevisionHintConflictError) as exc:
+        raise _mode_profile_http_exception(exc) from exc
     except Exception as e:
         log.exception(e)
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=ERROR_MESSAGES.DEFAULT())
@@ -768,13 +797,11 @@ async def import_chats(
             detail={'code': exc.code, 'message': str(exc)},
         ) from exc
     except ModeProfileServiceUnavailableError as exc:
-        raise HTTPException(
-            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail={
-                'code': exc.code,
-                'message': 'The conversation mode profile service is temporarily unavailable.',
-            },
-        ) from exc
+        raise _mode_profile_http_exception(exc) from exc
+    except ConversationModeProfileIntegrityError as exc:
+        raise _mode_profile_http_exception(exc) from exc
+    except (ConversationModeProfileBindingConflict, ModeProfileRevisionHintConflictError) as exc:
+        raise _mode_profile_http_exception(exc) from exc
     except Exception as e:
         log.exception(e)
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=ERROR_MESSAGES.DEFAULT())
@@ -1134,6 +1161,27 @@ async def get_shared_chat_by_id(
     shared = await SharedChats.get_by_id(share_id, db=db)
     chat = await Chats.get_chat_by_share_id(share_id, db=db)
 
+    if shared is not None:
+        try:
+            source_chat = await Chats.get_chat_by_id(
+                shared.chat_id,
+                db=db,
+                repair=False,
+                strict=True,
+            )
+        except SQLAlchemyError as exc:
+            raise _mode_profile_http_exception(exc) from exc
+        if source_chat is None:
+            raise _mode_profile_http_exception(
+                ConversationModeProfileIntegrityError(
+                    shared.chat_id,
+                    'Shared chat source conversation is unavailable',
+                )
+            )
+        source_revision_id = await _resolve_server_source_mode_profile_revision(source_chat, db)
+        if chat is not None:
+            chat = chat.model_copy(update={'mode_profile_revision_id': source_revision_id})
+
     # Fallback: admins can also access any chat directly by chat ID
     if not chat and user.role == 'admin' and ENABLE_ADMIN_CHAT_ACCESS:
         chat = await Chats.get_chat_by_id(share_id, db=db)
@@ -1348,14 +1396,10 @@ async def update_chat_by_id(
                 has_agent_run = await AgentRuns.has_runs_by_chat(id, user.id, db=db)
 
         try:
-            claimed = await Chats.claim_conversation_mode(
-                id,
-                requested=(
-                    form_data.chat.get('mode')
-                    if 'mode' in form_data.chat
-                    else None
-                ),
+            claimed = await ConversationModeProfiles.resolve_persisted_chat_binding(
+                chat_id=id,
                 user_id=user.id,
+                requested_mode=(form_data.chat.get('mode') if 'mode' in form_data.chat else None),
                 has_agent_run=has_agent_run,
             )
         except InvalidConversationModeError as exc:
@@ -1373,20 +1417,28 @@ async def update_chat_by_id(
                     'persisted': exc.persisted.value,
                 },
             ) from exc
+        except (ConversationModeProfileIntegrityError, ConversationModeProfileLegacyBindingError) as exc:
+            raise _mode_profile_http_exception(exc) from exc
+        except (ConversationModeProfileBindingConflict, ModeProfileRevisionHintConflictError) as exc:
+            raise _mode_profile_http_exception(exc) from exc
+        except (ModeProfileServiceUnavailableError, SQLAlchemyError) as exc:
+            raise _mode_profile_http_exception(exc) from exc
 
         if claimed is None:
             raise HTTPException(
                 status_code=status.HTTP_401_UNAUTHORIZED,
                 detail=ERROR_MESSAGES.ACCESS_PROHIBITED,
             )
-        chat, mode_resolution = claimed
+        mode = claimed.mode
 
-        updated_chat = {**chat.chat, **form_data.chat}
-        updated_chat['mode'] = mode_resolution.mode.value
-        if 'history' in form_data.chat:
+        update_patch = dict(form_data.chat)
+        update_patch.pop('mode_profile_revision_id', None)
+        updated_chat = {**chat.chat, **update_patch}
+        updated_chat['mode'] = mode
+        if 'history' in update_patch:
             updated_chat['history'] = Chats.merge_history(
                 chat.chat.get('history'),
-                form_data.chat.get('history'),
+                update_patch.get('history'),
             )
 
         chat = await Chats.update_chat_by_id(id, updated_chat, db=db)
@@ -1701,13 +1753,11 @@ async def _resolve_server_source_mode_profile_revision(chat, db: AsyncSession | 
             has_agent_run=has_agent_run,
         )
     except (ConversationModeProfileIntegrityError, ConversationModeProfileLegacyBindingError) as exc:
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail={
-                'code': getattr(exc, 'code', 'mode_profile_binding_invalid'),
-                'message': 'The conversation mode profile binding failed integrity verification.',
-            },
-        ) from exc
+        raise _mode_profile_http_exception(exc) from exc
+    except (ConversationModeProfileBindingConflict, ModeProfileRevisionHintConflictError) as exc:
+        raise _mode_profile_http_exception(exc) from exc
+    except (ModeProfileServiceUnavailableError, SQLAlchemyError) as exc:
+        raise _mode_profile_http_exception(exc) from exc
     if binding is None:
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
@@ -1739,21 +1789,31 @@ async def clone_chat_by_id(
             'title': form_data.title if form_data.title else f'Clone of {chat.title}',
         }
 
-        chats = await import_chats_with_mode_profile_bindings(
-            request.app,
-            user_id=user.id,
-            chat_import_forms=[
-                ChatImportForm(
-                    **{
-                        'chat': updated_chat,
-                        'meta': chat.meta,
-                        'pinned': chat.pinned,
-                        'folder_id': chat.folder_id,
-                    }
-                )
-            ],
-            source_mode_profile_revision_ids=[source_mode_profile_revision_id],
-        )
+        try:
+            chats = await import_chats_with_mode_profile_bindings(
+                request.app,
+                user_id=user.id,
+                chat_import_forms=[
+                    ChatImportForm(
+                        **{
+                            'chat': updated_chat,
+                            'meta': chat.meta,
+                            'pinned': chat.pinned,
+                            'folder_id': chat.folder_id,
+                        }
+                    )
+                ],
+                source_mode_profile_revision_ids=[source_mode_profile_revision_id],
+            )
+        except (
+            ConversationModeProfileIntegrityError,
+            ConversationModeProfileLegacyBindingError,
+            ConversationModeProfileBindingConflict,
+            ModeProfileRevisionHintConflictError,
+            ModeProfileServiceUnavailableError,
+            SQLAlchemyError,
+        ) as exc:
+            raise _mode_profile_http_exception(exc) from exc
 
         if chats:
             chat = chats[0]
@@ -1831,21 +1891,31 @@ async def clone_shared_chat_by_id(
         'title': f'Clone of {chat.title}',
     }
 
-    chats = await import_chats_with_mode_profile_bindings(
-        request.app,
-        user_id=user.id,
-        chat_import_forms=[
-            ChatImportForm(
-                **{
-                    'chat': updated_chat,
-                    'meta': chat.meta,
-                    'pinned': chat.pinned,
-                    'folder_id': chat.folder_id,
-                }
-            )
-        ],
-        source_mode_profile_revision_ids=[source_mode_profile_revision_id],
-    )
+    try:
+        chats = await import_chats_with_mode_profile_bindings(
+            request.app,
+            user_id=user.id,
+            chat_import_forms=[
+                ChatImportForm(
+                    **{
+                        'chat': updated_chat,
+                        'meta': chat.meta,
+                        'pinned': chat.pinned,
+                        'folder_id': chat.folder_id,
+                    }
+                )
+            ],
+            source_mode_profile_revision_ids=[source_mode_profile_revision_id],
+        )
+    except (
+        ConversationModeProfileIntegrityError,
+        ConversationModeProfileLegacyBindingError,
+        ConversationModeProfileBindingConflict,
+        ModeProfileRevisionHintConflictError,
+        ModeProfileServiceUnavailableError,
+        SQLAlchemyError,
+    ) as exc:
+        raise _mode_profile_http_exception(exc) from exc
 
     if chats:
         chat = chats[0]

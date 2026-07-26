@@ -26,11 +26,12 @@ from zoneinfo import ZoneInfo
 from dateutil.rrule import rrulestr
 from fastapi import Request
 from fastapi.security import HTTPAuthorizationCredentials
+from open_webui.agent.conversation_mode_profile_service import insert_new_chat_with_current_mode_profile
 from open_webui.constants import ERROR_MESSAGES
 from open_webui.events import EVENTS, publish_event
 from open_webui.internal.db import get_async_db
 from open_webui.models.automations import AutomationModel, AutomationRuns, Automations
-from open_webui.models.chats import ChatForm, Chats
+from open_webui.models.chats import ChatForm
 from open_webui.models.config import Config
 from open_webui.models.users import Users
 from open_webui.utils.auth import create_token
@@ -403,12 +404,16 @@ async def execute_automation(app, automation: AutomationModel) -> None:
         assistant_msg_id = str(uuid4())
 
         chat_id = str(uuid4())
-        chat = await Chats.insert_new_chat(
-            chat_id,
-            automation.user_id,
-            ChatForm(
+        creation = await insert_new_chat_with_current_mode_profile(
+            app,
+            mode='chat',
+            revision_hint=None,
+            chat_id=chat_id,
+            user_id=automation.user_id,
+            form_data=ChatForm(
                 chat={
                     'title': automation.name,
+                    'mode': 'chat',
                     'models': [model_id],
                     'history': {
                         'currentId': assistant_msg_id,
@@ -441,6 +446,7 @@ async def execute_automation(app, automation: AutomationModel) -> None:
                 }
             ),
         )
+        chat = creation.chat
 
         if not chat:
             error = 'Failed to create chat'

@@ -338,15 +338,19 @@ async def import_chats_with_mode_profile_bindings(  # noqa: C901
                 if form.folder_id and form.folder_id not in existing_folder_ids:
                     form.folder_id = None
 
+            chat_models = [
+                Chats._chat_import_form_to_chat_model(user_id, form)
+                for form in chat_import_forms
+            ]
             current_revisions: dict[str, ConversationModeProfileRevisionModel] = {}
-            for index, form in enumerate(chat_import_forms):
-                chat = Chats._chat_import_form_to_chat_model(user_id, form)
+            if source_mode_profile_revision_ids is None:
+                for mode in canonical_import_mode_head_lock_order(chat_import_forms):
+                    current_revisions[mode] = await _load_locked_current_revision(session, mode)
+
+            for index, chat in enumerate(chat_models):
                 mode = chat.chat['mode']
                 if source_mode_profile_revision_ids is None:
-                    revision = current_revisions.get(mode)
-                    if revision is None:
-                        revision = await _load_locked_current_revision(session, mode)
-                        current_revisions[mode] = revision
+                    revision = current_revisions[mode]
                 else:
                     source_revision_id = source_mode_profile_revision_ids[index]
                     revision_row = await session.get(ConversationModeProfileRevision, source_revision_id)
@@ -383,6 +387,17 @@ async def import_chats_with_mode_profile_bindings(  # noqa: C901
     for revision in revisions_to_cache.values():
         cache_profile_revision(app, revision)
     return imported
+
+
+def canonical_import_mode_head_lock_order(
+    chat_import_forms: list[ChatImportForm],
+) -> tuple[str, ...]:
+    """Return each external-import mode in the single global head-lock order."""
+    modes = {
+        Chats._chat_import_form_to_chat_model('mode-lock-order', form).chat['mode']
+        for form in chat_import_forms
+    }
+    return tuple(sorted(modes))
 
 
 async def _begin_bound_chat_transaction(session: AsyncSession) -> None:

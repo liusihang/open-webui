@@ -26,8 +26,8 @@ Preserve or safely establish immutable mode-profile bindings across legacy persi
 - [x] E4 Implement temporary binding create/reuse/transfer/expiry cleanup.
 - [x] E5 Implement clone/share/export/import/update/regenerate/resume trust boundaries.
 - [x] E6 Run focused and related regression, lint/format, compile, migration/startup tests, and diff audit.
-- [ ] E7 Independent specification review and code-quality review; fix all Critical/Important findings.
-- [x] E8 Commit only verified Phase E code/docs/tests; do not push.
+- [x] E7 Independent specification review and code-quality review; remediated all validated Critical/Important findings.
+- [x] E8 Commit only verified Phase E review fixes/tests/handoff locally; do not push.
 
 ## Evidence log
 
@@ -51,9 +51,13 @@ Preserve or safely establish immutable mode-profile bindings across legacy persi
 - 2026-07-27: targeted Ruff run confirms no new import-order, line-length, or complexity finding beyond the repository baseline. Full-file Ruff and format checks remain non-zero because existing `main.py`, `chats.py`, and `routers/chats.py` have unrelated baseline complexity/import/format drift; no broad formatting rewrite was made.
 - 2026-07-27: scoped read-only search found one separate existing backend creator outside the requested endpoint matrix: `utils/automations.py` calls `Chats.insert_new_chat` without a binding and would subsequently fail the post-cutover persisted-chat guard. It is deliberately left as a Minor follow-up rather than silently expanding this Phase E commit.
 - 2026-07-27: committed the verified backend Phase E scope locally as `5467d63dbd126e036c22e892353422b1b5369e86` (`feat: complete phase e mode profile lifecycle`); no push. Only the pre-existing untracked `deploy/` directory and `phase-d-handoff.md` remain outside the commit.
+- 2026-07-27: Phase E review remediation restarted at `3d8db4737` with no tracked worktree changes and the pre-existing untracked `deploy/` directory plus `phase-d-handoff.md` preserved. Confirmed root causes before any edits: automation execution inserts an unbound persisted Chat; batch import locks heads in caller order; shared read projects a snapshot with no source binding; generic update still calls the pre-cutover mode-only claimant. Next checkpoint is test-first RED coverage for the six validated findings; scope excludes frontend, Docker, remote/live, and Phases F-G.
+- 2026-07-27: RED→GREEN review remediation completed. Automation now creates the persisted Chat through `insert_new_chat_with_current_mode_profile(mode='chat')` before completion; the execution test proves the bound creation precedes dispatch. External bulk import derives canonical modes then locks all distinct heads in sorted `agent`, `chat` order before writes; two opposite-order unit proofs pass. Generic update now uses `ConversationModeProfiles.resolve_persisted_chat_binding` before save, preserves its immutable FK, and strips client revision spoofing; post-cutover resolution is therefore enforced by the store resolver.
+- 2026-07-27: route/main error paths now use typed non-secret mapping: integrity and unbound-corruption paths are 500 `mode_profile_integrity_error`; service/SQL availability is 503 `mode_profile_unavailable`; binding and revision conflicts are 409 `mode_profile_binding_mismatch`. Added `/new`, `/import`, local/shared clone, generic update, and local temporary-path coverage.
+- 2026-07-27: production shared snapshot reads now load the original Chat through `SharedChat.chat_id`, resolve its server-owned binding, and copy only `mode_profile_revision_id` into the snapshot response. Missing source returns typed integrity failure. Real SQLite model/router tests verify both source binding audit metadata and closed 500 integrity failure for a post-cutover unbound source, rather than trusting a snapshot-held value. Startup cleanup now has an invocation test for `_run_singleton_startup_tasks`, replacing source-string-only coverage.
+- 2026-07-27: final focused Phase E + A-D/profile/Chat/Agent/import/share/automation/migration/startup regression command passed: 284 passed, 11 existing/dependency warnings. `compileall` and `git diff --check` passed. Targeted Ruff/format checks still report established full-file baseline drift in `main.py`, `routers/chats.py`, and legacy `automations.py` (complexity, old import layout, and legacy style); no broad unrelated format rewrite was made. Final scoped lint/diff and commit remain.
 
-## Current implementation state (not ready to commit)
+## Current implementation state
 
-- Modified backend files: `models/conversation_mode_profiles.py`, `main.py`, `test/agent/test_conversation_mode_profile_store.py`, `test/agent/test_chat_entry_mode_profiles.py`, `test/util/test_startup_singleton.py`.
-- E4/E5/E6 are complete. Remaining work is E7 review and E8 scoped backend-only commit. Do not stage deploy artifacts or unrelated handoff files.
-- Do not commit the current partial state. Preserve the existing untracked `deploy/build-isolated-webui.sh` and all handoff artifacts.
+- The original Phase E implementation is committed at `3d8db4737`; review remediation is present but not yet committed. E4/E5/E6/E7 are complete. E8 backend-only follow-up commit remains. Do not stage deploy artifacts or unrelated handoff files.
+- Preserve the existing untracked `deploy/build-isolated-webui.sh`, `deploy/` contents, and `phase-d-handoff.md`.
