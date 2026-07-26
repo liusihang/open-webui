@@ -123,11 +123,9 @@ class ProfileDefaults:
 
     def to_dict(self) -> dict[str, Any]:
         return {
-            'terminal_id': _serialize_default(self.terminal_id),
-            'tool_ids': _serialize_default(self.tool_ids),
-            'skill_ids': _serialize_default(self.skill_ids),
-            'filter_ids': _serialize_default(self.filter_ids),
-            'feature_ids': _serialize_default(self.feature_ids),
+            field: _serialize_default(value)
+            for field in _DEFAULT_FIELDS
+            if (value := getattr(self, field)) is not INHERIT
         }
 
 
@@ -224,12 +222,23 @@ def resolve_profile_defaults(
 
         resolved[field] = _serialize_default(profile_value)
 
-    if resolved['terminal_id']:
-        resolved['feature_ids'] = [
-            feature_id for feature_id in resolved['feature_ids'] if feature_id != 'code_interpreter'
+    return resolved
+
+
+def arbitrate_profile_defaults(
+    filtered_defaults: Mapping[str, Any],
+) -> dict[str, Any]:
+    arbitrated = dict(filtered_defaults)
+    for field in _COLLECTION_DEFAULT_FIELDS:
+        if field in arbitrated:
+            arbitrated[field] = list(arbitrated[field] or [])
+
+    if arbitrated.get('terminal_id'):
+        arbitrated['feature_ids'] = [
+            feature_id for feature_id in arbitrated.get('feature_ids', []) if feature_id != 'code_interpreter'
         ]
 
-    return resolved
+    return arbitrated
 
 
 def compose_prompt_layers(
@@ -317,7 +326,7 @@ def _normalize_defaults(raw_defaults: Any) -> ProfileDefaults:
 
 
 def _normalize_terminal_value(value: Any) -> TerminalDefault:
-    if value is INHERIT or value == INHERIT.value:
+    if value is INHERIT:
         return INHERIT
     if value is None:
         return None
@@ -330,7 +339,7 @@ def _normalize_collection_value(
     field: str,
     allowed_values: frozenset[str] | None = None,
 ) -> CollectionDefault:
-    if value is INHERIT or value == INHERIT.value:
+    if value is INHERIT:
         return INHERIT
 
     if not isinstance(value, (list, tuple)):

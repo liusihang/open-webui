@@ -4,6 +4,7 @@ from copy import deepcopy
 from dataclasses import FrozenInstanceError
 
 import pytest
+from open_webui.agent import conversation_mode_profiles as mode_profiles
 from open_webui.agent.conversation_mode_profiles import (
     ALLOWED_MODES,
     INHERIT,
@@ -86,6 +87,26 @@ def test_canonical_content_hash_is_stable_across_dictionary_order() -> None:
 
     assert left_profile.content_hash == right_profile.content_hash
     assert len(left_profile.content_hash) == 64
+
+
+def test_content_hash_changes_when_prompt_or_defaults_change() -> None:
+    baseline = ConversationModeProfile.from_mapping('chat', _content())
+    changed_prompt = ConversationModeProfile.from_mapping(
+        'chat',
+        _content(system_prompt='Different administrator prompt'),
+    )
+    changed_defaults = ConversationModeProfile.from_mapping(
+        'chat',
+        _content(defaults={'tool_ids': ['tool-1']}),
+    )
+
+    assert len({baseline.content_hash, changed_prompt.content_hash, changed_defaults.content_hash}) == 3
+
+
+def test_canonical_mapping_represents_inheritance_by_omission() -> None:
+    profile = ConversationModeProfile.from_mapping('chat', _content(defaults={}))
+
+    assert profile.to_content_dict()['defaults'] == {}
 
 
 def test_explicitly_empty_system_prompt_is_valid_and_hashable() -> None:
@@ -229,7 +250,7 @@ def test_explicit_defaults_override_model_metadata() -> None:
         ),
     ],
 )
-def test_effective_terminal_removes_code_interpreter_from_resolved_defaults(
+def test_resolve_preserves_terminal_and_code_interpreter_until_final_arbitration(
     profile_defaults: dict[str, object],
     model_defaults: dict[str, object],
     expected_terminal: str,
@@ -242,7 +263,40 @@ def test_effective_terminal_removes_code_interpreter_from_resolved_defaults(
     resolved = resolve_profile_defaults(profile.defaults, model_defaults)
 
     assert resolved['terminal_id'] == expected_terminal
-    assert 'code_interpreter' not in resolved['feature_ids']
+    assert 'code_interpreter' in resolved['feature_ids']
+
+
+def test_final_arbitration_removes_code_interpreter_when_terminal_remains() -> None:
+    filtered_defaults = {
+        'terminal_id': 'terminal-1',
+        'tool_ids': [],
+        'skill_ids': [],
+        'filter_ids': [],
+        'feature_ids': ['code_interpreter', 'web_search'],
+    }
+
+    arbitrated = mode_profiles.arbitrate_profile_defaults(filtered_defaults)
+
+    assert arbitrated == {
+        **filtered_defaults,
+        'feature_ids': ['web_search'],
+    }
+    assert filtered_defaults['feature_ids'] == ['code_interpreter', 'web_search']
+
+
+def test_final_arbitration_preserves_code_interpreter_when_terminal_was_filtered() -> None:
+    filtered_defaults = {
+        'terminal_id': None,
+        'tool_ids': [],
+        'skill_ids': [],
+        'filter_ids': [],
+        'feature_ids': ['code_interpreter', 'web_search'],
+    }
+
+    arbitrated = mode_profiles.arbitrate_profile_defaults(filtered_defaults)
+
+    assert arbitrated == filtered_defaults
+    assert arbitrated is not filtered_defaults
 
 
 @pytest.mark.parametrize(
@@ -284,7 +338,7 @@ def test_terminal_and_code_interpreter_conflict_is_rejected() -> None:
     assert exc_info.value.reason == 'terminal_code_interpreter_conflict'
 
 
-def test_profile_defaults_constructor_normalizes_inherit_and_collections() -> None:
+def test_profile_defaults_constructor_preserves_literal_inherit_terminal_id() -> None:
     source_tool_ids = ['tool-1']
     defaults = ProfileDefaults(
         terminal_id='inherit',
@@ -296,7 +350,8 @@ def test_profile_defaults_constructor_normalizes_inherit_and_collections() -> No
 
     source_tool_ids.append('tool-2')
 
-    assert defaults.terminal_id is INHERIT
+    assert defaults.terminal_id == 'inherit'
+    assert defaults.terminal_id is not INHERIT
     assert defaults.tool_ids == ('tool-1',)
     assert defaults.skill_ids == ('skill-1',)
     assert defaults.filter_ids == ()
@@ -310,6 +365,7 @@ def test_profile_defaults_constructor_normalizes_inherit_and_collections() -> No
     ('kwargs', 'reason'),
     [
         ({'tool_ids': ['']}, 'invalid_default_identifier'),
+        ({'tool_ids': 'inherit'}, 'invalid_default_value'),
         ({'skill_ids': ['skill-1', 'skill-1']}, 'duplicate_default_identifier'),
         ({'feature_ids': ['unknown_feature']}, 'unsupported_feature'),
     ],
@@ -340,6 +396,13 @@ def test_direct_profile_construction_normalizes_mode_and_keeps_hash_immutable() 
     assert profile.mode.value == 'chat'
     assert profile.defaults.tool_ids == ('tool-1',)
     assert profile.content_hash == original_hash
+
+
+def test_profile_defaults_internal_inherit_sentinel_remains_available() -> None:
+    defaults = ProfileDefaults()
+
+    assert defaults.terminal_id is INHERIT
+    assert defaults.tool_ids is INHERIT
 
 
 @pytest.mark.parametrize(
@@ -451,9 +514,6 @@ def test_public_serialization_omits_private_profile_metadata() -> None:
         'defaults': {
             'terminal_id': 'inherit',
             'tool_ids': ['tool-1'],
-            'skill_ids': 'inherit',
-            'filter_ids': 'inherit',
-            'feature_ids': 'inherit',
         },
     }
     serialized = repr(public).lower()
