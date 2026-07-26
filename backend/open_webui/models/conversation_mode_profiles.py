@@ -32,7 +32,9 @@ from sqlalchemy import (
     select,
     text,
 )
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.sql import Select
 
 if TYPE_CHECKING:
     from open_webui.models.chats import Chat
@@ -325,12 +327,13 @@ async def _managed_write_session(
     *,
     repository_owned: bool,
 ) -> AsyncIterator[tuple[AsyncSession, str]]:
-    dialect_name = await _begin_write_transaction(session)
     try:
+        dialect_name = await _begin_write_transaction(session)
         yield session, dialect_name
+        await session.flush()
         if repository_owned:
             await session.commit()
-    except Exception:
+    except BaseException:
         if session.in_transaction():
             await session.rollback()
         raise
@@ -753,6 +756,47 @@ class ConversationModeProfileTable:
                 dialect_name=dialect_name,
             )
 
+    async def _recover_temporary_binding_insert_conflict(
+        self,
+        session: AsyncSession,
+        *,
+        binding_statement: Select[tuple[ConversationModeProfileTemporaryBinding]],
+        inserted_row: ConversationModeProfileTemporaryBinding,
+        user_id: str,
+        temporary_conversation_id: str,
+        normalized_mode: str,
+        expected_revision_id: str,
+        expires_at: int,
+        timestamp: int,
+        integrity_error: IntegrityError,
+    ) -> ConversationModeProfileTemporaryBindingModel:
+        winner = (await session.execute(binding_statement)).scalars().first()
+        if winner is None:
+            raise ConversationModeProfileIntegrityError(
+                inserted_row.id,
+                'Temporary conversation mode profile binding insert failed without a winning row',
+            ) from integrity_error
+        winner_revision = await session.get(
+            ConversationModeProfileRevision,
+            winner.mode_profile_revision_id,
+            populate_existing=True,
+        )
+        if winner_revision is None:
+            raise ConversationModeProfileIntegrityError(
+                winner.mode_profile_revision_id,
+                f'Temporary binding {winner.id} references a missing revision',
+            ) from integrity_error
+        _revision_to_model(winner_revision, expected_mode=winner.mode)
+        if winner.mode != normalized_mode:
+            raise ConversationModeProfileBindingConflict(
+                binding_id=f'{user_id}:{temporary_conversation_id}',
+                expected_revision_id=expected_revision_id,
+                actual_revision_id=winner.mode_profile_revision_id,
+            ) from integrity_error
+        winner.expires_at = max(winner.expires_at, expires_at)
+        winner.updated_at = timestamp
+        return ConversationModeProfileTemporaryBindingModel.model_validate(winner)
+
     async def create_temporary_binding(
         self,
         *,
@@ -824,7 +868,23 @@ class ConversationModeProfileTable:
                 updated_at=timestamp,
                 expires_at=expires_at,
             )
-            session.add(row)
+            try:
+                async with session.begin_nested():
+                    session.add(row)
+                    await session.flush()
+            except IntegrityError as exc:
+                return await self._recover_temporary_binding_insert_conflict(
+                    session,
+                    binding_statement=binding_statement,
+                    inserted_row=row,
+                    user_id=user_id,
+                    temporary_conversation_id=temporary_conversation_id,
+                    normalized_mode=normalized_mode,
+                    expected_revision_id=head.current_revision_id,
+                    expires_at=expires_at,
+                    timestamp=timestamp,
+                    integrity_error=exc,
+                )
             return ConversationModeProfileTemporaryBindingModel.model_validate(row)
 
     async def get_temporary_binding(

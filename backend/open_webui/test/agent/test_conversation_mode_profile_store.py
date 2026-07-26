@@ -30,7 +30,9 @@ from open_webui.models.conversation_mode_profiles import (
     ConversationModeProfileTransactionStateError,
 )
 from sqlalchemy import event, select
+from sqlalchemy.exc import OperationalError
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
+from sqlalchemy.sql import Select
 
 BASELINE_CONTENT = {
     'schema_version': 1,
@@ -264,6 +266,97 @@ async def _assert_caller_write_rolled_back(method_name: str) -> None:
         )
         return
     raise AssertionError(f'Unsupported write method: {method_name}')
+
+
+async def _assert_caller_write_visible_in_session(
+    method_name: str,
+    session,
+    result: object,
+) -> None:
+    if method_name in {'save', 'restore'}:
+        assert (
+            await session.scalar(
+                select(ConversationModeProfileHead.current_revision_id).where(
+                    ConversationModeProfileHead.mode == 'chat'
+                )
+            )
+            == result.id
+        )
+        return
+    if method_name == 'chat_claim':
+        assert (
+            await session.scalar(select(Chat.mode_profile_revision_id).where(Chat.id == 'caller-chat'))
+            == CHAT_BASELINE_REVISION_ID
+        )
+        return
+    if method_name == 'temporary_create':
+        assert (
+            await session.scalar(
+                select(ConversationModeProfileTemporaryBinding.id).where(
+                    ConversationModeProfileTemporaryBinding.user_id == 'user-1',
+                    ConversationModeProfileTemporaryBinding.temporary_conversation_id == 'caller-temporary',
+                )
+            )
+            == result.id
+        )
+        return
+    if method_name == 'temporary_transfer':
+        assert (
+            await session.scalar(select(Chat.mode_profile_revision_id).where(Chat.id == 'caller-chat'))
+            == CHAT_BASELINE_REVISION_ID
+        )
+        assert (
+            await session.scalar(
+                select(ConversationModeProfileTemporaryBinding.id).where(
+                    ConversationModeProfileTemporaryBinding.user_id == 'user-1',
+                    ConversationModeProfileTemporaryBinding.temporary_conversation_id == 'caller-transfer',
+                )
+            )
+            is None
+        )
+        return
+    if method_name == 'temporary_cleanup':
+        assert result == 1
+        assert (
+            await session.scalar(
+                select(ConversationModeProfileTemporaryBinding.id).where(
+                    ConversationModeProfileTemporaryBinding.user_id == 'user-1',
+                    ConversationModeProfileTemporaryBinding.temporary_conversation_id == 'caller-cleanup',
+                )
+            )
+            is None
+        )
+        return
+    raise AssertionError(f'Unsupported write method: {method_name}')
+
+
+class _EmptyTemporaryBindingResult:
+    def scalars(self):
+        return self
+
+    def first(self):
+        return None
+
+
+def _hide_first_temporary_binding_lookup(session, monkeypatch) -> list[Select]:
+    original_execute = session.execute
+    hidden_statements: list[Select] = []
+
+    async def execute(statement, *args, **kwargs):
+        if (
+            not hidden_statements
+            and isinstance(statement, Select)
+            and any(
+                description.get('entity') is ConversationModeProfileTemporaryBinding
+                for description in statement.column_descriptions
+            )
+        ):
+            hidden_statements.append(statement)
+            return _EmptyTemporaryBindingResult()
+        return await original_execute(statement, *args, **kwargs)
+
+    monkeypatch.setattr(session, 'execute', execute)
+    return hidden_statements
 
 
 def test_chat_models_expose_server_owned_revision_without_form_or_import_authority() -> None:
@@ -824,6 +917,93 @@ async def test_clean_caller_session_write_remains_uncommitted_until_caller_finis
     await _assert_caller_write_rolled_back(method_name)
 
 
+@pytest.mark.parametrize('method_name', CALLER_WRITE_METHODS)
+@pytest.mark.asyncio
+async def test_clean_caller_session_with_autoflush_disabled_flushes_before_return(
+    profile_db,
+    method_name: str,
+) -> None:
+    await _prepare_successful_caller_write(method_name, profile_db)
+    caller_sessions = async_sessionmaker(
+        profile_db.kw['bind'],
+        expire_on_commit=False,
+        autoflush=False,
+    )
+
+    async with caller_sessions() as session:
+        assert session.autoflush is False
+        result = await _invoke_caller_write(method_name, session)
+
+        assert session.in_transaction()
+        await _assert_caller_write_visible_in_session(method_name, session, result)
+        await session.rollback()
+
+    await _assert_caller_write_rolled_back(method_name)
+
+
+@pytest.mark.asyncio
+async def test_sqlite_immediate_begin_failure_clears_attempted_caller_transaction(
+    profile_db,
+) -> None:
+    engine = profile_db.kw['bind']
+    async with engine.connect() as blocker, engine.connect() as caller_connection:
+        await caller_connection.exec_driver_sql('PRAGMA busy_timeout = 0')
+        await caller_connection.commit()
+        await blocker.exec_driver_sql('BEGIN IMMEDIATE')
+        try:
+            caller_sessions = async_sessionmaker(
+                caller_connection,
+                expire_on_commit=False,
+                autoflush=False,
+            )
+            async with caller_sessions() as session:
+                with pytest.raises(OperationalError, match='database is locked'):
+                    await ConversationModeProfiles.save_revision(
+                        mode='chat',
+                        content={
+                            'schema_version': 1,
+                            'system_prompt': 'Never saved',
+                            'defaults': {},
+                        },
+                        expected_current_revision_id=CHAT_BASELINE_REVISION_ID,
+                        created_by='admin-1',
+                        db=session,
+                    )
+
+                assert not session.in_transaction()
+        finally:
+            await blocker.rollback()
+
+
+@pytest.mark.asyncio
+async def test_cancellation_during_managed_write_rolls_back_caller_transaction(
+    profile_db,
+    monkeypatch,
+) -> None:
+    caller_sessions = async_sessionmaker(
+        profile_db.kw['bind'],
+        expire_on_commit=False,
+        autoflush=False,
+    )
+
+    async def cancel_lock(session, mode, dialect_name):
+        raise asyncio.CancelledError
+
+    monkeypatch.setattr(ConversationModeProfiles, '_lock_head', cancel_lock)
+
+    async with caller_sessions() as session:
+        with pytest.raises(asyncio.CancelledError):
+            await ConversationModeProfiles.save_revision(
+                mode='chat',
+                content={'schema_version': 1, 'system_prompt': 'Cancelled', 'defaults': {}},
+                expected_current_revision_id=CHAT_BASELINE_REVISION_ID,
+                created_by='admin-1',
+                db=session,
+            )
+
+        assert not session.in_transaction()
+
+
 @pytest.mark.asyncio
 async def test_clean_caller_session_can_commit_successful_repository_write(profile_db) -> None:
     async with profile_db() as session:
@@ -917,6 +1097,98 @@ async def test_temporary_binding_creation_locks_only_requested_mode_head(profile
     statement, parameters = statements[0]
     assert 'WHERE conversation_mode_profile_head.mode = ?' in ' '.join(statement.split())
     assert parameters == ('agent',)
+
+
+@pytest.mark.asyncio
+async def test_temporary_binding_insert_race_returns_fresh_same_mode_winner(
+    profile_db,
+    monkeypatch,
+) -> None:
+    winner = await ConversationModeProfiles.create_temporary_binding(
+        user_id='race-user',
+        temporary_conversation_id='race-temporary',
+        mode='agent',
+        expires_at=250,
+        now=100,
+    )
+    caller_sessions = async_sessionmaker(
+        profile_db.kw['bind'],
+        expire_on_commit=False,
+        autoflush=False,
+    )
+
+    async with caller_sessions() as session:
+        hidden_statements = _hide_first_temporary_binding_lookup(session, monkeypatch)
+
+        recovered = await ConversationModeProfiles.create_temporary_binding(
+            user_id='race-user',
+            temporary_conversation_id='race-temporary',
+            mode='agent',
+            expires_at=300,
+            now=150,
+            db=session,
+        )
+
+        assert len(hidden_statements) == 1
+        assert recovered.id == winner.id
+        assert recovered.mode_profile_revision_id == winner.mode_profile_revision_id
+        assert recovered.expires_at == 300
+        assert session.in_transaction()
+        assert (
+            await session.scalar(
+                select(ConversationModeProfileTemporaryBinding.id).where(
+                    ConversationModeProfileTemporaryBinding.user_id == 'race-user',
+                    ConversationModeProfileTemporaryBinding.temporary_conversation_id == 'race-temporary',
+                )
+            )
+            == winner.id
+        )
+        await session.rollback()
+
+
+@pytest.mark.asyncio
+async def test_temporary_binding_insert_race_raises_typed_cross_mode_conflict(
+    profile_db,
+    monkeypatch,
+) -> None:
+    winner = await ConversationModeProfiles.create_temporary_binding(
+        user_id='cross-mode-race-user',
+        temporary_conversation_id='cross-mode-race-temporary',
+        mode='agent',
+        expires_at=300,
+        now=100,
+    )
+    caller_sessions = async_sessionmaker(
+        profile_db.kw['bind'],
+        expire_on_commit=False,
+        autoflush=False,
+    )
+
+    async with caller_sessions() as session:
+        hidden_statements = _hide_first_temporary_binding_lookup(session, monkeypatch)
+
+        with pytest.raises(ConversationModeProfileBindingConflict) as exc_info:
+            await ConversationModeProfiles.create_temporary_binding(
+                user_id='cross-mode-race-user',
+                temporary_conversation_id='cross-mode-race-temporary',
+                mode='chat',
+                expires_at=300,
+                now=150,
+                db=session,
+            )
+
+        assert len(hidden_statements) == 1
+        assert exc_info.value.binding_id == 'cross-mode-race-user:cross-mode-race-temporary'
+        assert exc_info.value.expected_revision_id == CHAT_BASELINE_REVISION_ID
+        assert exc_info.value.actual_revision_id == AGENT_BASELINE_REVISION_ID
+        assert not session.in_transaction()
+
+    stored = await ConversationModeProfiles.get_temporary_binding(
+        user_id='cross-mode-race-user',
+        temporary_conversation_id='cross-mode-race-temporary',
+        now=150,
+    )
+    assert stored == winner
 
 
 @pytest.mark.asyncio
