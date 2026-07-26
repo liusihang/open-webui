@@ -44,6 +44,7 @@
 	export let id = '';
 	export let value: string | null = '';
 	export let placeholder = $i18n.t('Select a model');
+	export let selectedLabel: string | null = null;
 	export let searchEnabled = true;
 	export let searchPlaceholder = $i18n.t('Search a model');
 	export let selectionOnly = false;
@@ -534,7 +535,7 @@
 			}}
 		>
 			{#if selectedModel}
-				{selectedModel.label}
+				{selectedLabel ?? selectedModel.label}
 			{:else}
 				{placeholder}
 			{/if}

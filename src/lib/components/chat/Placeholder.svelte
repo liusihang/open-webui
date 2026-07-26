@@ -1,4 +1,5 @@
 <script lang="ts">
+	import type { ReasoningEffort } from './agentModeRequest';
 	import { toast } from 'svelte-sonner';
 	import { marked } from 'marked';
 	import DOMPurify from 'dompurify';
@@ -38,7 +39,7 @@
 	export let autoScroll = false;
 
 	export let atSelectedModel: Model | undefined;
-	export let selectedModels: [''];
+	export let selectedModels: string[];
 
 	export let history;
 
@@ -56,7 +57,7 @@
 	export let imageGenerationEnabled = false;
 	export let codeInterpreterEnabled = false;
 	export let webSearchEnabled = false;
-	export let reasoningDepth: 'medium' | 'deep' | 'divergent' = 'medium';
+	export let reasoningEffort: ReasoningEffort = 'medium';
 
 	export let onUpload: Function = (e) => {};
 	export let onSelect = (e) => {};
@@ -227,7 +228,7 @@
 					<MessageInput
 						bind:this={messageInput}
 						{history}
-						{selectedModels}
+						bind:selectedModels
 						bind:files
 						bind:prompt
 						bind:autoScroll
@@ -237,7 +238,7 @@
 						bind:imageGenerationEnabled
 						bind:codeInterpreterEnabled
 						bind:webSearchEnabled
-						bind:reasoningDepth
+						bind:reasoningEffort
 						bind:atSelectedModel
 						bind:showCommands
 						bind:dragged

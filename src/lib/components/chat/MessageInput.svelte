@@ -110,6 +110,11 @@
 	import Expand from '../icons/Expand.svelte';
 	import QueuedMessageItem from './MessageInput/QueuedMessageItem.svelte';
 	import TaskList from './Messages/ResponseMessage/TaskList.svelte';
+	import ComposerModelSettings from './ComposerModelSettings.svelte';
+	import {
+		resolveConversationModeRequestModels,
+		type ReasoningEffort
+	} from './agentModeRequest';
 
 	const i18n = getContext('i18n');
 
@@ -126,10 +131,13 @@
 	export let uploadPending = false;
 
 	export let atSelectedModel: Model | undefined = undefined;
-	export let selectedModels: [''];
+	export let selectedModels: string[];
 
 	let selectedModelIds = [];
-	$: selectedModelIds = atSelectedModel !== undefined ? [atSelectedModel.id] : selectedModels;
+	$: selectedModelIds =
+		atSelectedModel !== undefined
+			? [atSelectedModel.id]
+			: resolveConversationModeRequestModels(selectedModels, 'chat');
 
 	export let history;
 	export let taskIds = null;
@@ -159,7 +167,7 @@
 	export let imageGenerationEnabled = false;
 	export let webSearchEnabled = false;
 	export let codeInterpreterEnabled = false;
-	export let reasoningDepth: 'medium' | 'deep' | 'divergent' = 'medium';
+	export let reasoningEffort: ReasoningEffort = 'medium';
 
 	export let pendingOAuthTools = [];
 
@@ -205,7 +213,7 @@
 		imageGenerationEnabled,
 		webSearchEnabled,
 		codeInterpreterEnabled,
-		reasoningDepth
+		reasoningEffort
 	});
 
 	const inputVariableHandler = async (text: string): Promise<string> => {
@@ -1880,18 +1888,12 @@
 											</div>
 										{/if}
 
-										<div class="ml-1 flex gap-1.5 shrink-0">
-											<Tooltip content="思考深度" placement="top">
-												<select
-													aria-label="思考深度"
-													bind:value={reasoningDepth}
-													class="h-8 rounded-full border border-gray-200/70 bg-white px-2.5 text-xs text-gray-700 outline-hidden transition-colors hover:border-gray-300 dark:border-gray-700 dark:bg-gray-800 dark:text-gray-200"
-												>
-													<option value="medium">中度思考 (2048)</option>
-													<option value="deep">深度思考 (8126)</option>
-													<option value="divergent">发散性思考 (12400)</option>
-												</select>
-											</Tooltip>
+										<div class="ml-1 shrink-0">
+											<ComposerModelSettings
+												bind:selectedModels
+												bind:reasoningEffort
+												disabled={generating}
+											/>
 										</div>
 
 										<div class="ml-1 flex gap-1.5 shrink-0">
@@ -2201,12 +2203,6 @@
 														class=" bg-black text-white hover:bg-gray-900 dark:bg-white dark:text-black dark:hover:bg-gray-100 transition rounded-full p-1.5 self-center"
 														type="button"
 														on:click={async () => {
-															if (selectedModels.length > 1) {
-																toast.error($i18n.t('Select only one model to call'));
-
-																return;
-															}
-
 															if ($config.audio.stt.engine === 'web') {
 																toast.error(
 																	$i18n.t('Call feature is not supported when using Web STT engine')

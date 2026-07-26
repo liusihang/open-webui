@@ -109,12 +109,13 @@
 		shouldEnableImageGenerationByDefault
 	} from '$lib/components/chat/defaultFeatures';
 	import {
-		buildConversationModeReasoningPayload,
+		buildModelReasoningPayload,
 		isAgentModeCapabilityEnabled,
 		normalizeConversationMode,
+		normalizeReasoningEffort,
 		resolveConversationModeRequestModels,
 		type ConversationMode,
-		type ReasoningDepth
+		type ReasoningEffort
 	} from '$lib/components/chat/agentModeRequest';
 	import {
 		prepareLoadedChatHistory,
@@ -186,7 +187,7 @@
 	let imageGenerationUserOverride: boolean | null = null;
 	let webSearchEnabled = false;
 	let codeInterpreterEnabled = false;
-	let reasoningDepth: ReasoningDepth = 'medium';
+	let reasoningEffort: ReasoningEffort = 'medium';
 	let webSearchActive = false;
 	let showWebSearchConfirm = false;
 	let pendingWebSearchPrompt: string | null = null;
@@ -293,7 +294,7 @@
 		webSearchEnabled = false;
 		imageGenerationEnabled = false;
 		imageGenerationUserOverride = null;
-		reasoningDepth = 'medium';
+		reasoningEffort = 'medium';
 
 		const storageChatInput = sessionStorage.getItem(
 			`chat-input${chatIdProp ? `-${chatIdProp}` : ''}`
@@ -331,10 +332,9 @@
 						webSearchEnabled = input.webSearchEnabled;
 						restoreImageGenerationFromDraft(input);
 						codeInterpreterEnabled = input.codeInterpreterEnabled;
-						reasoningDepth =
-							input.reasoningDepth === 'deep' || input.reasoningDepth === 'divergent'
-								? input.reasoningDepth
-								: 'medium';
+						reasoningEffort = normalizeReasoningEffort(
+							input.reasoningEffort ?? input.reasoningDepth
+						);
 						if (!chatIdProp) {
 							conversationMode = normalizeConversationMode(input.conversationMode);
 						}
@@ -422,7 +422,6 @@
 		imageGenerationEnabled = false;
 		imageGenerationUserOverride = null;
 		codeInterpreterEnabled = false;
-		reasoningDepth = 'medium';
 
 		if (selectedModelIds.filter((id) => id).length > 0) {
 			await setDefaults();
@@ -1076,7 +1075,7 @@
 				imageGenerationEnabled = false;
 				imageGenerationUserOverride = null;
 				codeInterpreterEnabled = false;
-				reasoningDepth = 'medium';
+				reasoningEffort = 'medium';
 
 				try {
 					const input = JSON.parse(storageChatInput);
@@ -1090,10 +1089,9 @@
 						webSearchEnabled = input.webSearchEnabled;
 						restoreImageGenerationFromDraft(input);
 						codeInterpreterEnabled = input.codeInterpreterEnabled;
-						reasoningDepth =
-							input.reasoningDepth === 'deep' || input.reasoningDepth === 'divergent'
-								? input.reasoningDepth
-								: 'medium';
+						reasoningEffort = normalizeReasoningEffort(
+							input.reasoningEffort ?? input.reasoningDepth
+						);
 						if (!chatIdProp) {
 							conversationMode = normalizeConversationMode(input.conversationMode);
 						}
@@ -2534,7 +2532,7 @@
 			$settings?.params?.stream_response ??
 			params?.stream_response ??
 			true;
-		const reasoning = buildConversationModeReasoningPayload(conversationMode, reasoningDepth);
+		const reasoning = buildModelReasoningPayload(model, reasoningEffort);
 		// Always include system prompt — backend extracts it and prepends to DB messages.
 		// Only temp chats need conversation messages (persisted chats load from DB).
 		let messages: any[] = [
@@ -2627,7 +2625,7 @@
 				model: model.id,
 				chat_mode: conversationMode,
 				...(messages.length > 0 ? { messages } : {}),
-				reasoning,
+				...(reasoning ? { reasoning } : {}),
 				params: {
 					...$settings?.params,
 					...params,
@@ -3378,7 +3376,7 @@
 										setInputText={(text) => {
 											messageInput?.setText(text);
 										}}
-										{selectedModels}
+										bind:selectedModels
 										{atSelectedModel}
 										{sendMessage}
 										{showMessage}
@@ -3413,7 +3411,7 @@
 										bind:this={messageInput}
 										{history}
 										{taskIds}
-										{selectedModels}
+										bind:selectedModels
 										bind:files
 										bind:prompt
 										bind:autoScroll
@@ -3424,7 +3422,7 @@
 										bind:codeInterpreterEnabled
 										{pendingOAuthTools}
 										bind:webSearchEnabled
-										bind:reasoningDepth
+										bind:reasoningEffort
 										bind:atSelectedModel
 										bind:showCommands
 										bind:dragged
@@ -3512,7 +3510,7 @@
 								{:else}
 									<Placeholder
 										{history}
-										{selectedModels}
+										bind:selectedModels
 										bind:messageInput
 										bind:files
 										bind:prompt
@@ -3523,7 +3521,7 @@
 										bind:imageGenerationEnabled
 										bind:codeInterpreterEnabled
 										bind:webSearchEnabled
-										bind:reasoningDepth
+										bind:reasoningEffort
 										bind:atSelectedModel
 										bind:showCommands
 										bind:dragged

@@ -882,6 +882,26 @@ def test_build_responses_payload_preserves_request_reasoning_effort():
     }
 
 
+@pytest.mark.parametrize('effort', ['low', 'medium', 'high', 'xhigh'])
+def test_build_responses_payload_preserves_composer_reasoning_effort(effort):
+    pipe = _load_pipe_class()()
+
+    payload = pipe._build_responses_payload(
+        body={
+            'model': 'bifrostapi.ZenMuxOAI/openai/gpt-5.4',
+            'stream': True,
+            'reasoning': {'enabled': True, 'effort': effort},
+        },
+        model='ZenMuxOAI/openai/gpt-5.4',
+        system_message={'role': 'system', 'content': 'system'},
+        messages=[{'role': 'user', 'content': 'hello'}],
+        attachments=[],
+        function_specs=[],
+    )
+
+    assert payload['reasoning'] == {'enabled': True, 'effort': effort}
+
+
 def test_build_responses_payload_omits_default_reasoning_without_effort():
     pipe = _load_pipe_class()()
     pipe.valves.DEFAULT_REASONING_ENABLED = True

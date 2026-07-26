@@ -42,19 +42,30 @@ describe('conversation mode presentation contract', () => {
 			/resolveConversationModeRequestModels\([\s\S]*selectedModelIds,[\s\S]*conversationMode[\s\S]*\)/
 		);
 		expect(chat).toMatch(
-			/buildConversationModeReasoningPayload\([\s\S]*conversationMode,[\s\S]*reasoningDepth[\s\S]*\)/
+			/buildModelReasoningPayload\([\s\S]*model,[\s\S]*reasoningEffort[\s\S]*\)/
 		);
+		expect(chat).toContain('...(reasoning ? { reasoning } : {})');
 		expect(chat).toContain('conversationModeLocked');
 		expect(chat).toContain('pendingConversationMode');
 		expect(chat).not.toContain('selectedModels = resolvedAgentModels');
 		expect(chat).not.toContain("requestedMode === 'agent' && !isAgentModeCapabilityEnabled");
 	});
 
-	it('preserves the existing reasoning-depth control in both modes', () => {
+	it('uses the shared composer reasoning-effort control in both modes', () => {
 		const input = readSource('./MessageInput.svelte');
 
-		expect(input).toContain('aria-label="思考深度"');
+		expect(input).toContain('<ComposerModelSettings');
+		expect(input).toContain('bind:reasoningEffort');
+		expect(input).not.toContain('aria-label="思考深度"');
 		expect(input).not.toContain("{#if conversationMode === 'agent'}");
+	});
+
+	it('preserves a valid reasoning effort when the selected model changes', () => {
+		const chat = readSource('./Chat.svelte');
+		const resetInputBody = chat.match(/const resetInput = async \(\) => \{([\s\S]*?)\n\t\};/)?.[1];
+
+		expect(resetInputBody).toBeDefined();
+		expect(resetInputBody).not.toContain("reasoningEffort = 'medium'");
 	});
 
 	it('keeps unavailable Agent conversations readable but disables their composer', () => {

@@ -5,9 +5,14 @@ type AgentModeConfig = {
 	};
 };
 
-export type ReasoningDepth = 'medium' | 'deep' | 'divergent';
-export type ReasoningEffort = 'medium' | 'high' | 'xhigh';
+export type ReasoningEffort = 'low' | 'medium' | 'high' | 'xhigh';
+export type ReasoningDepth = ReasoningEffort | 'deep' | 'divergent';
 export type ConversationMode = 'chat' | 'agent';
+
+export const REASONING_EFFORTS: ReasoningEffort[] = ['low', 'medium', 'high', 'xhigh'];
+
+const isReasoningEffort = (value: unknown): value is ReasoningEffort =>
+	REASONING_EFFORTS.includes(value as ReasoningEffort);
 
 export const isAgentModeCapabilityEnabled = (config: AgentModeConfig | undefined): boolean =>
 	config?.features?.enable_agent_mode === true || config?.enable_agent_mode === true;
@@ -19,14 +24,10 @@ export const normalizeConversationMode = (value: unknown): ConversationMode =>
 
 export const resolveConversationModeRequestModels = (
 	selectedModels: string[],
-	conversationMode: ConversationMode
+	_conversationMode: ConversationMode
 ): string[] => {
-	if (conversationMode !== 'agent') {
-		return selectedModels;
-	}
-
-	const leaderModelId = selectedModels.find((modelId) => modelId !== '');
-	return leaderModelId ? [leaderModelId] : [''];
+	const selectedModelId = selectedModels.find((modelId) => modelId !== '');
+	return selectedModelId ? [selectedModelId] : [''];
 };
 
 export const resolveAgentModeRequestModels = (
@@ -40,35 +41,72 @@ export const resolveAgentModeRequestModels = (
 	return resolveConversationModeRequestModels(selectedModels, 'agent');
 };
 
-export const getReasoningMaxTokens = (depth: ReasoningDepth): number => {
-	if (depth === 'deep') {
-		return 8126;
+export const normalizeReasoningEffort = (value: unknown): ReasoningEffort => {
+	if (isReasoningEffort(value)) {
+		return value;
 	}
 
-	if (depth === 'divergent') {
-		return 12400;
-	}
-
-	return 2048;
-};
-
-export const getReasoningEffort = (depth: ReasoningDepth): ReasoningEffort => {
-	if (depth === 'deep') {
+	if (value === 'deep') {
 		return 'high';
 	}
 
-	if (depth === 'divergent') {
+	if (value === 'divergent') {
 		return 'xhigh';
 	}
 
 	return 'medium';
 };
 
+export const resolveModelReasoningEfforts = (model: unknown): ReasoningEffort[] => {
+	const modelRecord = model as
+		| {
+				id?: unknown;
+				info?: {
+					meta?: {
+						capabilities?: {
+							reasoning_effort?: unknown;
+						};
+					};
+				};
+		  }
+		| undefined;
+	const configuredEfforts = modelRecord?.info?.meta?.capabilities?.reasoning_effort;
+
+	if (Array.isArray(configuredEfforts)) {
+		return configuredEfforts.filter(isReasoningEffort);
+	}
+
+	const modelId = typeof modelRecord?.id === 'string' ? modelRecord.id : '';
+	if (modelId === 'bifrostapi' || modelId.startsWith('bifrostapi.')) {
+		return [...REASONING_EFFORTS];
+	}
+
+	return [];
+};
+
+export const getReasoningEffort = (depth: ReasoningDepth): ReasoningEffort =>
+	normalizeReasoningEffort(depth);
+
 export const buildReasoningPayload = (depth: ReasoningDepth) => ({
 	enabled: true,
-	effort: getReasoningEffort(depth),
-	max_tokens: getReasoningMaxTokens(depth)
+	effort: getReasoningEffort(depth)
 });
+
+export const buildModelReasoningPayload = (model: unknown, effort: ReasoningDepth) => {
+	const allowedEfforts = resolveModelReasoningEfforts(model);
+	if (allowedEfforts.length === 0) {
+		return undefined;
+	}
+
+	const normalizedEffort = normalizeReasoningEffort(effort);
+	const selectedEffort = allowedEfforts.includes(normalizedEffort)
+		? normalizedEffort
+		: allowedEfforts.includes('medium')
+			? 'medium'
+			: allowedEfforts[0];
+
+	return buildReasoningPayload(selectedEffort);
+};
 
 export const buildConversationModeReasoningPayload = (
 	_conversationMode: ConversationMode,

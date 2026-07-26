@@ -5,6 +5,10 @@ import { describe, expect, it } from 'vitest';
 describe('conversation mode component compilation', () => {
 	it.each([
 		'ConversationModeSelector.svelte',
+		'ComposerModelSettings.svelte',
+		'ReasoningEffortSlider.svelte',
+		'ModelSelector.svelte',
+		'ModelSelector/Selector.svelte',
 		'Navbar.svelte',
 		'Chat.svelte',
 		'MessageInput.svelte',
