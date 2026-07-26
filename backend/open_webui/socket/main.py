@@ -39,6 +39,7 @@ from open_webui.socket.utils import RedisDict, RedisLock, YdocManager
 from open_webui.tasks import create_task, stop_item_tasks
 from open_webui.utils.access_control import has_permission
 from open_webui.utils.auth import decode_token, is_valid_token
+from open_webui.utils.redaction import redact_secrets
 from open_webui.utils.redis import (
     build_sentinel_url,
     get_redis_connection,
@@ -852,7 +853,7 @@ async def disconnect(sid, reason=None):
         # print(f"Unknown session ID {sid} disconnected")
 
 
-async def _make_channel_emitter(request_info):
+async def _make_channel_emitter(request_info, *, redaction_secrets=()):
     """Event emitter that routes pipeline output to a channel message.
 
     Translates chat:completion events into channel message:update socket
@@ -897,6 +898,7 @@ async def _make_channel_emitter(request_info):
             )
 
     async def __channel_emitter__(event_data):
+        event_data = redact_secrets(event_data, redaction_secrets)
         event_type = event_data.get('type')
 
         if event_type == 'chat:completion':
@@ -920,12 +922,13 @@ async def _make_channel_emitter(request_info):
     return __channel_emitter__
 
 
-async def get_event_emitter(request_info, update_db=True):
+async def get_event_emitter(request_info, update_db=True, *, redaction_secrets=()):
     # Channel mode: route pipeline output to channel message updates
     if (request_info.get('chat_id') or '').startswith('channel:'):
-        return await _make_channel_emitter(request_info)
+        return await _make_channel_emitter(request_info, redaction_secrets=redaction_secrets)
 
     async def __event_emitter__(event_data):
+        event_data = redact_secrets(event_data, redaction_secrets)
         user_id = request_info['user_id']
         chat_id = request_info['chat_id']
         message_id = request_info['message_id']
@@ -1049,8 +1052,9 @@ async def get_event_emitter(request_info, update_db=True):
         return None
 
 
-async def get_event_call(request_info):
+async def get_event_call(request_info, *, redaction_secrets=()):
     async def __event_caller__(event_data):
+        event_data = redact_secrets(event_data, redaction_secrets)
         session_id = request_info['session_id']
 
         # session_id is client-supplied; only the requesting user's own live session may be targeted.

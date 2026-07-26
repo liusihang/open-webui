@@ -115,6 +115,10 @@ from open_webui.utils.misc import (
 from open_webui.utils.payload import apply_system_prompt_to_body, resolve_system_prompt
 from open_webui.utils.plugin import load_function_module_by_id
 from open_webui.utils.response import merge_usage, normalize_usage
+from open_webui.utils.redaction import (
+    get_request_redaction_secrets,
+    redact_request_secrets,
+)
 from open_webui.utils.sanitize import sanitize_code
 from open_webui.utils.task import (
     get_task_model_id,
@@ -278,9 +282,7 @@ async def apply_legacy_file_retrieval_if_needed(
     model: dict,
     metadata: Optional[dict],
 ) -> tuple[dict, list[dict]]:
-    file_context_enabled = (model.get('info', {}).get('meta', {}).get('capabilities') or {}).get(
-        'file_context', True
-    )
+    file_context_enabled = (model.get('info', {}).get('meta', {}).get('capabilities') or {}).get('file_context', True)
 
     if not file_context_enabled:
         return form_data, []
@@ -302,9 +304,7 @@ async def apply_legacy_file_retrieval_if_needed(
         retrieval_form_data['metadata'] = retrieval_metadata
 
     try:
-        updated_form_data, flags = await chat_completion_files_handler(
-            request, retrieval_form_data, extra_params, user
-        )
+        updated_form_data, flags = await chat_completion_files_handler(request, retrieval_form_data, extra_params, user)
         if skip_legacy_retrieval:
             form_data['messages'] = updated_form_data.get('messages', form_data.get('messages', []))
             return form_data, flags.get('sources', [])
@@ -1260,7 +1260,9 @@ def get_source_context(sources: list, source_ids: dict = None, include_content: 
             metadata_evidence_ref = meta.get('evidence_ref') if isinstance(meta, dict) else None
             evidence_ref = metadata_evidence_ref or source_evidence_ref
             is_evidence = source_info.get('type') == 'evidence' or bool(evidence_ref)
-            source_id = evidence_ref if is_evidence and evidence_ref else meta.get('source') or source_info.get('id') or 'N/A'
+            source_id = (
+                evidence_ref if is_evidence and evidence_ref else meta.get('source') or source_info.get('id') or 'N/A'
+            )
             if source_id not in source_ids:
                 source_ids[source_id] = len(source_ids) + 1
             src_name = source_info.get('name')
@@ -1453,9 +1455,7 @@ async def process_tool_result(
                             'type': 'image',
                             'url': data_url,
                             **(
-                                {'evidence_ref': file_item.get('evidence_ref')}
-                                if file_item.get('evidence_ref')
-                                else {}
+                                {'evidence_ref': file_item.get('evidence_ref')} if file_item.get('evidence_ref') else {}
                             ),
                             **({'mime_type': file_item.get('mime_type')} if file_item.get('mime_type') else {}),
                         }
@@ -2152,8 +2152,7 @@ async def add_file_context(messages: list, chat_id: str, user) -> list:
         files_with_urls = [
             file
             for file in stored_message.get('files', [])
-            if file.get('url') and not file.get('url').startswith('data:')
-            and not _is_image_attachment(file)
+            if file.get('url') and not file.get('url').startswith('data:') and not _is_image_attachment(file)
         ]
         if not files_with_urls:
             continue
@@ -2818,7 +2817,7 @@ async def process_chat_payload(request, form_data, user, metadata, model):
             metadata['selected_model_id'] = selected_model_id
 
     form_data = apply_params_to_form_data(form_data, model)
-    log.debug(f'form_data: {form_data}')
+    log.debug('form_data: %s', redact_request_secrets(request, form_data))
 
     # Guided regeneration: extract before it reaches the LLM provider
     regeneration_prompt = form_data.pop('regeneration_prompt', None)
@@ -2925,8 +2924,15 @@ async def process_chat_payload(request, form_data, user, metadata, model):
 
     form_data = await convert_url_images_to_base64(form_data, user=user)
 
-    event_emitter = await get_event_emitter(metadata)
-    event_caller = await get_event_call(metadata)
+    redaction_secrets = get_request_redaction_secrets(request)
+    event_emitter = await get_event_emitter(
+        metadata,
+        redaction_secrets=redaction_secrets,
+    )
+    event_caller = await get_event_call(
+        metadata,
+        redaction_secrets=redaction_secrets,
+    )
 
     extra_params = {
         '__event_emitter__': event_emitter,
@@ -3217,13 +3223,9 @@ async def process_chat_payload(request, form_data, user, metadata, model):
         'files': files,
         'features': features,
     }
-    model_knowledge_scope = normalize_knowledge_scope_items(
-        model.get('info', {}).get('meta', {}).get('knowledge')
-    )
+    model_knowledge_scope = normalize_knowledge_scope_items(model.get('info', {}).get('meta', {}).get('knowledge'))
     attached_knowledge_scope = build_attached_knowledge_scope(metadata)
-    effective_knowledge_scope = build_effective_knowledge_scope(
-        metadata, model_knowledge_scope
-    )
+    effective_knowledge_scope = build_effective_knowledge_scope(metadata, model_knowledge_scope)
     effective_knowledge_query_enabled = build_effective_knowledge_query_enabled(
         features.get('attached_knowledge_query', False),
         model_knowledge_scope,
@@ -3489,26 +3491,33 @@ async def process_chat_payload(request, form_data, user, metadata, model):
     return form_data, metadata, events
 
 
-async def get_event_emitter_and_caller(metadata):
+async def get_event_emitter_and_caller(request, metadata):
     event_emitter = None
     event_caller = None
+    redaction_secrets = get_request_redaction_secrets(request)
 
     # event_emitter only needs user_id + chat_id + message_id.
     # It broadcasts to user:{user_id} room AND persists to DB,
     # so it works for backend-initiated calls (automations, API).
     if metadata.get('chat_id') and metadata.get('message_id'):
-        event_emitter = await get_event_emitter(metadata)
+        event_emitter = await get_event_emitter(
+            metadata,
+            redaction_secrets=redaction_secrets,
+        )
 
     # event_caller needs session_id — it calls back to a specific
     # websocket session (used by direct tools, pyodide code interpreter).
     if metadata.get('session_id') and metadata.get('chat_id') and metadata.get('message_id'):
-        event_caller = await get_event_call(metadata)
+        event_caller = await get_event_call(
+            metadata,
+            redaction_secrets=redaction_secrets,
+        )
 
     return event_emitter, event_caller
 
 
 async def build_chat_response_context(request, form_data, user, model, metadata, tasks, events):
-    event_emitter, event_caller = await get_event_emitter_and_caller(metadata)
+    event_emitter, event_caller = await get_event_emitter_and_caller(request, metadata)
     return {
         'request': request,
         'form_data': form_data,
@@ -4283,9 +4292,7 @@ def _accumulate_chat_completion_stream_tool_calls(data: dict, response_tool_call
             response_tool_calls.append(delta_tool_call)
         else:
             delta_name = delta_tool_call.get('function', {}).get('name')
-            delta_arguments = _coerce_function_argument_fragment(
-                delta_tool_call.get('function', {}).get('arguments')
-            )
+            delta_arguments = _coerce_function_argument_fragment(delta_tool_call.get('function', {}).get('arguments'))
             if delta_name:
                 current_response_tool_call.setdefault('function', {})['name'] = delta_name
             if delta_arguments:
@@ -4929,10 +4936,7 @@ async def non_streaming_chat_response_handler(response, ctx):
     if response_data is None:
         return response
 
-    if (
-        metadata.get('params', {}).get('function_calling') == 'native'
-        and get_chat_completion_tool_calls(response_data)
-    ):
+    if metadata.get('params', {}).get('function_calling') == 'native' and get_chat_completion_tool_calls(response_data):
         return await continue_native_tool_calls_non_streaming_response(response, response_data, ctx)
 
     if event_emitter:

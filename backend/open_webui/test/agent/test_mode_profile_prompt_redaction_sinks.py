@@ -7,6 +7,7 @@ import pytest
 from open_webui import events
 from open_webui.routers import ollama, openai
 from open_webui.utils import chat as chat_utils
+from open_webui.utils import middleware
 
 
 class _EventSink:
@@ -15,6 +16,44 @@ class _EventSink:
 
     async def handle_event(self, app, event, request=None):
         self.events.append(event)
+
+
+@pytest.mark.asyncio
+async def test_build_chat_response_context_passes_request_scoped_secrets_to_socket(
+    monkeypatch,
+):
+    secret = 'request-scoped-socket-secret'
+    received = {'emitter': None, 'caller': None}
+
+    async def get_emitter(metadata, update_db=True, redaction_secrets=()):
+        received['emitter'] = tuple(redaction_secrets)
+        return None
+
+    async def get_call(metadata, redaction_secrets=()):
+        received['caller'] = tuple(redaction_secrets)
+        return None
+
+    monkeypatch.setattr(middleware, 'get_event_emitter', get_emitter)
+    monkeypatch.setattr(middleware, 'get_event_call', get_call)
+    request = SimpleNamespace(state=SimpleNamespace(prompt_redaction_secrets=(secret,)))
+    metadata = {
+        'user_id': 'user-1',
+        'chat_id': 'chat-1',
+        'message_id': 'message-1',
+        'session_id': 'session-1',
+    }
+
+    await middleware.build_chat_response_context(
+        request,
+        {},
+        SimpleNamespace(),
+        {},
+        metadata,
+        None,
+        [],
+    )
+
+    assert received == {'emitter': (secret,), 'caller': (secret,)}
 
 
 @pytest.mark.asyncio

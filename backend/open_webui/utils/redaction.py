@@ -22,10 +22,15 @@ def register_request_redaction_secrets(request: Any, *secrets: Any) -> None:
     setattr(state, PROMPT_REDACTION_STATE_ATTRIBUTE, tuple(current))
 
 
-def redact_request_secrets(request: Any, value: Any) -> Any:
+def get_request_redaction_secrets(request: Any) -> tuple[str, ...]:
     state = getattr(request, 'state', None)
-    secrets = getattr(state, PROMPT_REDACTION_STATE_ATTRIBUTE, ()) if state is not None else ()
-    return redact_secrets(value, secrets)
+    if state is None:
+        return ()
+    return tuple(getattr(state, PROMPT_REDACTION_STATE_ATTRIBUTE, ()) or ())
+
+
+def redact_request_secrets(request: Any, value: Any) -> Any:
+    return redact_secrets(value, get_request_redaction_secrets(request))
 
 
 def redact_secrets(value: Any, secrets: Any) -> Any:

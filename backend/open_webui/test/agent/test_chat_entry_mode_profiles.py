@@ -29,6 +29,11 @@ from open_webui.models.conversation_mode_profiles import (
     ConversationModeProfileIntegrityError,
     ConversationModeProfileRevisionModel,
 )
+from open_webui.utils import middleware as chat_middleware
+from open_webui.utils.redaction import (
+    PROMPT_REDACTION_REPLACEMENT,
+    redact_request_secrets,
+)
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
@@ -125,6 +130,7 @@ def profile_entry(monkeypatch):  # noqa: C901
         model_info=None,
         model_infos={},
         capability_resolution=None,
+        emitter_redaction_secrets=[],
     )
 
     async def get_model_by_id(model_id):
@@ -256,7 +262,9 @@ def profile_entry(monkeypatch):  # noqa: C901
     async def publish(*args, **kwargs):
         return None
 
-    async def get_emitter(metadata, update_db=True):
+    async def get_emitter(metadata, update_db=True, redaction_secrets=()):
+        calls.emitter_redaction_secrets.append(tuple(redaction_secrets))
+
         async def emit(event):
             calls.emitted.append(event)
 
@@ -506,6 +514,33 @@ async def test_atomic_profile_binding_db_failure_is_stable_non_secret_503(
 
 
 @pytest.mark.asyncio
+async def test_bound_mode_claim_db_failure_is_stable_non_secret_503(
+    monkeypatch,
+    agent_run_db,
+    profile_entry,
+):
+    async def fail_claim(*args, **kwargs):
+        raise SQLAlchemyError('private bound claim database detail')
+
+    monkeypatch.setattr(main.Chats, 'claim_conversation_mode', fail_claim)
+
+    with pytest.raises(main.HTTPException) as exc_info:
+        await main.chat_completion(
+            _request(enable_agent_mode=True),
+            _existing_chat_form(mode='agent'),
+            _user(),
+        )
+
+    assert exc_info.value.status_code == 503
+    assert exc_info.value.detail == {
+        'code': 'mode_profile_unavailable',
+        'message': 'The conversation mode profile is unavailable.',
+    }
+    assert 'private bound claim database detail' not in repr(exc_info.value.detail)
+    assert profile_entry.provider_calls == []
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize('failure', ['missing', 'corrupt', 'mode_mismatch'])
 async def test_bound_revision_integrity_failure_precedes_messages_runs_and_calls(
     monkeypatch,
@@ -641,6 +676,69 @@ async def test_multimodel_fanout_uses_each_models_prompt_and_params(
         'max_tokens': 100,
         'top_p': 0.9,
     }
+
+
+@pytest.mark.asyncio
+async def test_secondary_fanout_cannot_readd_bound_empty_skill_or_filter_defaults(
+    monkeypatch,
+    agent_run_db,
+    profile_entry,
+):
+    _configure_prompt_layers(profile_entry, mode='chat', administrator='Administrator prompt.')
+    profile_entry.capability_resolution = ModeProfileCapabilityResolution(
+        skill_ids=[],
+        filter_ids=[],
+    )
+    request = _request(enable_agent_mode=True)
+    request.app.state.MODELS['model-b'] = {
+        'id': 'model-b',
+        'name': 'Model B',
+        'info': {
+            'meta': {
+                'skillIds': ['secondary-model-skill'],
+                'filterIds': ['secondary-model-filter'],
+            }
+        },
+    }
+    form = _existing_chat_form(mode='chat')
+    form['session_id'] = 'session-1'
+    form['message_ids'] = [
+        {'model_id': 'model-a', 'message_id': 'assistant-a'},
+        {'model_id': 'model-b', 'message_id': 'assistant-b'},
+    ]
+    form['skill_ids'] = []
+    form['filter_ids'] = []
+
+    async def process_payload(request, form_data, user, metadata, model):
+        form_data = dict(form_data)
+        metadata = dict(metadata)
+        model_meta = model.get('info', {}).get('meta', {})
+        form_data['skill_ids'] = [
+            *form_data.get('skill_ids', []),
+            *model_meta.get('skillIds', []),
+        ]
+        metadata['filter_ids'] = [
+            *(metadata.get('filter_ids') or []),
+            *model_meta.get('filterIds', []),
+        ]
+        return form_data, metadata, []
+
+    task_counter = 0
+
+    async def run_task(redis, coroutine, id):
+        nonlocal task_counter
+        task_counter += 1
+        await coroutine
+        return f'task-{task_counter}', None
+
+    monkeypatch.setattr(main, 'process_chat_payload', process_payload)
+    monkeypatch.setattr(main, 'create_task', run_task)
+
+    await main.chat_completion(request, form, _user())
+
+    second_form = profile_entry.provider_calls[1][0]
+    assert second_form['skill_ids'] == []
+    assert second_form['metadata']['filter_ids'] == []
 
 
 @pytest.mark.asyncio
@@ -966,6 +1064,137 @@ async def test_profile_filtered_filters_are_not_readded_from_model_defaults(
 
 
 @pytest.mark.asyncio
+async def test_ordinary_omitted_filters_remain_none_and_keep_model_filters(
+    monkeypatch,
+    agent_run_db,
+    profile_entry,
+):
+    request = _request(enable_agent_mode=True)
+    request.app.state.MODELS['model-a']['info']['meta']['filterIds'] = ['model-filter']
+    observed = {}
+
+    async def process_payload(request, form_data, user, metadata, model):
+        observed['filter_ids'] = metadata.get('filter_ids')
+        observed['model_filter_ids'] = model.get('info', {}).get('meta', {}).get('filterIds')
+        return form_data, metadata, []
+
+    monkeypatch.setattr(main, 'process_chat_payload', process_payload)
+    form = {
+        'model': 'model-a',
+        'messages': [{'role': 'user', 'content': 'hello'}],
+        'stream': False,
+    }
+
+    await main.chat_completion(request, form, _user())
+
+    assert observed == {
+        'filter_ids': None,
+        'model_filter_ids': ['model-filter'],
+    }
+
+
+@pytest.mark.asyncio
+async def test_bound_inherited_filters_remain_none_and_keep_model_filters(
+    monkeypatch,
+    agent_run_db,
+    profile_entry,
+):
+    _configure_prompt_layers(profile_entry, mode='chat', administrator='Administrator prompt.')
+    request = _request(enable_agent_mode=True)
+    request.app.state.MODELS['model-a']['info']['meta']['filterIds'] = ['model-filter']
+    observed = {}
+
+    async def process_payload(request, form_data, user, metadata, model):
+        observed['filter_ids'] = metadata.get('filter_ids')
+        observed['model_filter_ids'] = model.get('info', {}).get('meta', {}).get('filterIds')
+        return form_data, metadata, []
+
+    monkeypatch.setattr(main, 'process_chat_payload', process_payload)
+
+    await main.chat_completion(request, _existing_chat_form(mode='chat'), _user())
+
+    assert observed == {
+        'filter_ids': None,
+        'model_filter_ids': ['model-filter'],
+    }
+
+
+@pytest.mark.asyncio
+async def test_bound_explicit_empty_filters_suppress_model_filters(
+    monkeypatch,
+    agent_run_db,
+    profile_entry,
+):
+    _configure_prompt_layers(profile_entry, mode='chat', administrator='Administrator prompt.')
+    request = _request(enable_agent_mode=True)
+    request.app.state.MODELS['model-a']['info']['meta']['filterIds'] = ['model-filter']
+    observed = {}
+
+    async def process_payload(request, form_data, user, metadata, model):
+        observed['filter_ids'] = metadata.get('filter_ids')
+        observed['model_filter_ids'] = model.get('info', {}).get('meta', {}).get('filterIds')
+        return form_data, metadata, []
+
+    monkeypatch.setattr(main, 'process_chat_payload', process_payload)
+    form = _existing_chat_form(mode='chat')
+    form['filter_ids'] = []
+
+    await main.chat_completion(request, form, _user())
+
+    assert observed == {
+        'filter_ids': [],
+        'model_filter_ids': None,
+    }
+
+
+@pytest.mark.asyncio
+async def test_bound_profile_filters_reach_payload_only_after_resolver_authorization(
+    monkeypatch,
+    agent_run_db,
+    profile_entry,
+):
+    revision = _revision(
+        'chat-old',
+        'chat',
+        administrator_prompt='Administrator prompt.',
+        defaults=ProfileDefaults(filter_ids=('profile-filter',)),
+    )
+    profile_entry.revisions['chat-old'] = revision
+    profile_entry.stored_chats['chat-1'] = SimpleNamespace(
+        id='chat-1',
+        user_id='user-1',
+        mode_profile_revision_id='chat-old',
+        chat={
+            'id': 'chat-1',
+            'mode': 'chat',
+            'history': {'currentId': None, 'messages': {}},
+        },
+    )
+    profile_entry.capability_resolution = ModeProfileCapabilityResolution(
+        filter_ids=['profile-filter'],
+    )
+    request = _request(enable_agent_mode=True)
+    request.app.state.MODELS['model-a']['info']['meta']['filterIds'] = ['profile-filter']
+    observed = {}
+
+    async def process_payload(request, form_data, user, metadata, model):
+        observed['filter_ids'] = metadata.get('filter_ids')
+        observed['model_filter_ids'] = model.get('info', {}).get('meta', {}).get('filterIds')
+        observed['resolver_ran'] = any(event[0] == 'capability_resolution' for event in profile_entry.events)
+        return form_data, metadata, []
+
+    monkeypatch.setattr(main, 'process_chat_payload', process_payload)
+
+    await main.chat_completion(request, _existing_chat_form(mode='chat'), _user())
+
+    assert observed == {
+        'filter_ids': ['profile-filter'],
+        'model_filter_ids': None,
+        'resolver_ran': True,
+    }
+
+
+@pytest.mark.asyncio
 async def test_provider_exception_redacts_administrator_prompt_from_log_message_and_sse(
     monkeypatch,
     caplog,
@@ -996,6 +1225,70 @@ async def test_provider_exception_redacts_administrator_prompt_from_log_message_
     assert sentinel not in repr(error_state)
     assert 'provider-request-42' in repr(error_state)
     assert any(event.get('type') == 'chat:message:error' for event in profile_entry.emitted)
+    assert any(sentinel in secrets for secrets in profile_entry.emitter_redaction_secrets)
+
+
+@pytest.mark.asyncio
+async def test_raw_administrator_prompt_is_registered_before_real_payload_debug_sink(
+    monkeypatch,
+    caplog,
+    agent_run_db,
+    profile_entry,
+):
+    secret = 'ADMIN-RAW-DEBUG-SINK-9f2e'
+    _configure_prompt_layers(profile_entry, mode='chat', administrator=secret)
+    form = _existing_chat_form(mode='chat')
+    form['messages'] = [{'role': 'user', 'content': f'echo {secret}'}]
+
+    async def real_debug_payload(request, form_data, user, metadata, model):
+        isolated_metadata = {
+            **metadata,
+            'chat_id': '',
+            'user_message_id': None,
+        }
+        return await chat_middleware.process_chat_payload(
+            request,
+            form_data,
+            user,
+            isolated_metadata,
+            model,
+        )
+
+    def stop_after_debug(messages):
+        raise RuntimeError('stop after real payload debug sink')
+
+    monkeypatch.setattr(main, 'process_chat_payload', real_debug_payload)
+    monkeypatch.setattr(chat_middleware, 'strip_compaction_fields', stop_after_debug)
+    caplog.set_level('DEBUG', logger=chat_middleware.__name__)
+
+    await main.chat_completion(
+        _request(enable_agent_mode=True),
+        form,
+        _user(),
+    )
+
+    assert secret not in caplog.text
+    assert PROMPT_REDACTION_REPLACEMENT in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_short_prompt_variable_value_does_not_redact_normal_text(
+    agent_run_db,
+    profile_entry,
+):
+    _configure_prompt_layers(
+        profile_entry,
+        mode='chat',
+        administrator='Policy {{SHORT_VALUE}}',
+    )
+    form = _existing_chat_form(mode='chat')
+    form['variables'] = {'{{SHORT_VALUE}}': 'A'}
+    request = _request(enable_agent_mode=True)
+
+    await main.chat_completion(request, form, _user())
+
+    assert redact_request_secrets(request, 'Policy A') == PROMPT_REDACTION_REPLACEMENT
+    assert redact_request_secrets(request, 'A normal text remains intact.') == 'A normal text remains intact.'
 
 
 @pytest.mark.asyncio

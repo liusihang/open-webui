@@ -63,7 +63,7 @@ from open_webui.agent.conversation_mode_profile_service import (
     resolve_mode_profile_capabilities,
     verify_conversation_mode_profile_revision,
 )
-from open_webui.agent.conversation_mode_profiles import compose_prompt_layers
+from open_webui.agent.conversation_mode_profiles import INHERIT, compose_prompt_layers
 from open_webui.agent.decision_execution import agent_decision_dispatcher_loop
 from open_webui.agent.protocol import AgentEventType
 from open_webui.agent.resources import AgentRunResourceManager
@@ -291,7 +291,10 @@ from open_webui.utils.oauth import (
     resolve_oauth_client_info,
 )
 from open_webui.utils.payload import resolve_system_prompt
-from open_webui.utils.redaction import register_request_redaction_secrets
+from open_webui.utils.redaction import (
+    get_request_redaction_secrets,
+    register_request_redaction_secrets,
+)
 from open_webui.utils.plugin import install_tool_and_function_dependencies
 from open_webui.utils.redis import get_redis_client
 from open_webui.utils.security_headers import SecurityHeadersMiddleware
@@ -1334,17 +1337,6 @@ async def _enforce_mode_profile_prompt(
         _strip_mode_profile_control_fields(form_data)
         return False
 
-    register_request_redaction_secrets(request, revision.system_prompt)
-    variables = metadata.get('variables')
-    if isinstance(variables, dict):
-        register_request_redaction_secrets(
-            request,
-            *(
-                value
-                for key, value in variables.items()
-                if isinstance(key, str) and key in revision.system_prompt and isinstance(value, str)
-            ),
-        )
     global_system_prompt = await Config.get('chat.global_system_prompt', '')
     resolved_administrator = await resolve_system_prompt(
         revision.system_prompt,
@@ -1375,6 +1367,7 @@ async def _enforce_mode_profile_prompt(
             user=user_layer or None,
         )
     )
+    _strip_administrator_prompt_variables(revision.system_prompt, form_data, metadata)
     messages = remove_system_message(form_data.get('messages') or [])
     form_data['messages'] = [{'role': 'system', 'content': composed}, *messages] if composed else messages
     params = form_data.get('params')
@@ -1382,6 +1375,30 @@ async def _enforce_mode_profile_prompt(
         params.pop('system', None)
     _strip_mode_profile_control_fields(form_data)
     return True
+
+
+def _register_mode_profile_raw_prompt(request: Request, revision) -> None:
+    if revision is not None and revision.system_prompt.strip():
+        register_request_redaction_secrets(request, revision.system_prompt)
+
+
+def _strip_administrator_prompt_variables(raw_prompt: str, form_data: dict, metadata: dict) -> None:
+    variable_keys = {
+        key
+        for key, value in (metadata.get('variables') or {}).items()
+        if isinstance(key, str) and key in raw_prompt and isinstance(value, str)
+    }
+    if not variable_keys:
+        return
+    for value in (form_data, metadata):
+        variables = value.get('variables')
+        if not isinstance(variables, dict):
+            continue
+        remaining = {key: item for key, item in variables.items() if key not in variable_keys}
+        if remaining:
+            value['variables'] = remaining
+        else:
+            value.pop('variables', None)
 
 
 def _mode_profile_capability_request_values(form_data: dict) -> dict:
@@ -1398,18 +1415,27 @@ def _mode_profile_capability_request_values(form_data: dict) -> dict:
     return request_values
 
 
-def _model_without_bound_profile_defaults(model: dict) -> dict:
+def _model_without_bound_profile_defaults(
+    model: dict,
+    *,
+    strip_skill_ids: bool,
+    strip_filter_ids: bool,
+) -> dict:
     info = model.get('info')
     if not isinstance(info, dict):
         return model
     meta = info.get('meta')
-    if not isinstance(meta, dict) or not any(key in meta for key in ('skillIds', 'filterIds')):
+    if not isinstance(meta, dict) or not (
+        (strip_skill_ids and 'skillIds' in meta) or (strip_filter_ids and 'filterIds' in meta)
+    ):
         return model
     effective_model = {**model}
     effective_info = {**info}
     effective_meta = {**meta}
-    effective_meta.pop('skillIds', None)
-    effective_meta.pop('filterIds', None)
+    if strip_skill_ids:
+        effective_meta.pop('skillIds', None)
+    if strip_filter_ids:
+        effective_meta.pop('filterIds', None)
     effective_info['meta'] = effective_meta
     effective_model['info'] = effective_info
     return effective_model
@@ -1469,7 +1495,10 @@ async def _apply_mode_profile_capabilities(
     form_data['features'] = features
 
     metadata['tool_ids'] = list(resolution.tool_ids)
-    metadata['filter_ids'] = list(resolution.filter_ids)
+    if 'filter_ids' in request_values or revision.defaults.filter_ids is not INHERIT:
+        metadata['filter_ids'] = list(resolution.filter_ids)
+    else:
+        metadata['filter_ids'] = None
     metadata['features'] = features
     if resolution.warnings:
         metadata['mode_profile_warnings'] = [warning.model_dump() for warning in resolution.warnings]
@@ -2527,7 +2556,7 @@ async def chat_completion(
             'assistant_message_id': form_data.pop('assistant_message_id', None),
             'session_id': form_data.pop('session_id', None),
             'folder_id': form_data.pop('folder_id', None),
-            'filter_ids': form_data.pop('filter_ids', []),
+            'filter_ids': form_data.pop('filter_ids', None),
             'tool_ids': form_data.get('tool_ids', None),
             'tool_servers': tool_servers,
             'files': form_data.get('files', None),
@@ -2674,6 +2703,14 @@ async def chat_completion(
                         'persisted': exc.persisted.value,
                     },
                 ) from exc
+            except SQLAlchemyError as exc:
+                raise HTTPException(
+                    status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                    detail={
+                        'code': 'mode_profile_unavailable',
+                        'message': 'The conversation mode profile is unavailable.',
+                    },
+                ) from exc
 
             if resolution.mode is ConversationMode.AGENT and not getattr(
                 request.app.state.config, 'ENABLE_AGENT_MODE', False
@@ -2705,7 +2742,18 @@ async def chat_completion(
                     metadata=metadata,
                 )
             if mode_profile_revision is not None:
-                model = _model_without_bound_profile_defaults(model)
+                _register_mode_profile_raw_prompt(request, mode_profile_revision)
+                model = _model_without_bound_profile_defaults(
+                    model,
+                    strip_skill_ids=(
+                        'skill_ids' in mode_profile_capability_request
+                        or mode_profile_revision.defaults.skill_ids is not INHERIT
+                    ),
+                    strip_filter_ids=(
+                        'filter_ids' in mode_profile_capability_request
+                        or mode_profile_revision.defaults.filter_ids is not INHERIT
+                    ),
+                )
                 metadata['model'] = model
 
         initial_title_generation = None
@@ -2901,7 +2949,11 @@ async def chat_completion(
                             **metadata,
                             'message_id': all_assistant_ids[0],
                         }
-                        event_emitter = await get_event_emitter(title_metadata, update_db=False)
+                        event_emitter = await get_event_emitter(
+                            title_metadata,
+                            update_db=False,
+                            redaction_secrets=get_request_redaction_secrets(request),
+                        )
                         title_ctx = {
                             'request': request,
                             'form_data': form_data,
@@ -3133,7 +3185,10 @@ async def chat_completion(
             try:
 
                 async def emit_cancel_event():
-                    event_emitter = await get_event_emitter(metadata)
+                    event_emitter = await get_event_emitter(
+                        metadata,
+                        redaction_secrets=get_request_redaction_secrets(request),
+                    )
                     if event_emitter:
                         await event_emitter({'type': 'chat:tasks:cancel'})
 
@@ -3163,7 +3218,10 @@ async def chat_completion(
                             },
                         )
 
-                    event_emitter = await get_event_emitter(metadata)
+                    event_emitter = await get_event_emitter(
+                        metadata,
+                        redaction_secrets=get_request_redaction_secrets(request),
+                    )
                     if event_emitter:
                         await event_emitter(
                             {
@@ -3232,7 +3290,11 @@ async def chat_completion(
                 if chat_id and task_id:
                     await cleanup_task(request.app.state.redis, task_id, chat_id)
                     if not await has_active_tasks(request.app.state.redis, chat_id):
-                        event_emitter = await get_event_emitter(metadata, update_db=False)
+                        event_emitter = await get_event_emitter(
+                            metadata,
+                            update_db=False,
+                            redaction_secrets=get_request_redaction_secrets(request),
+                        )
                         if event_emitter:
                             try:
                                 await asyncio.shield(event_emitter({'type': 'chat:active', 'data': {'active': False}}))
@@ -3254,6 +3316,18 @@ async def chat_completion(
 
             # Per-model metadata: own message_id + model
             resolved_model = request.app.state.MODELS.get(target_model_id, model)
+            if mode_profile_revision is not None:
+                resolved_model = _model_without_bound_profile_defaults(
+                    resolved_model,
+                    strip_skill_ids=(
+                        'skill_ids' in mode_profile_capability_request
+                        or mode_profile_revision.defaults.skill_ids is not INHERIT
+                    ),
+                    strip_filter_ids=(
+                        'filter_ids' in mode_profile_capability_request
+                        or mode_profile_revision.defaults.filter_ids is not INHERIT
+                    ),
+                )
             per_model_metadata = {
                 **metadata,
                 'message_id': assistant_message_id,
@@ -3313,6 +3387,7 @@ async def chat_completion(
             event_emitter = await get_event_emitter(
                 {**metadata, 'message_id': message_ids[0]['message_id']},
                 update_db=False,
+                redaction_secrets=get_request_redaction_secrets(request),
             )
             if event_emitter:
                 await event_emitter({'type': 'chat:active', 'data': {'active': True}})
