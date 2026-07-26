@@ -473,6 +473,80 @@ async def test_revision_dto_repr_redacts_system_prompt(profile_db) -> None:
 
 
 @pytest.mark.asyncio
+async def test_save_precommit_validator_runs_after_head_lock_before_revision_insert(
+    profile_db,
+    monkeypatch,
+) -> None:
+    events = []
+    original_lock_head = ConversationModeProfiles._lock_head
+
+    async def record_head_lock(session, mode, dialect_name):
+        head = await original_lock_head(session, mode, dialect_name)
+        events.append(('head_locked', head.current_revision_id))
+        return head
+
+    async def validate_before_insert(session, profile):
+        revision_ids = list(
+            await session.scalars(
+                select(ConversationModeProfileRevision.id).where(ConversationModeProfileRevision.mode == 'chat')
+            )
+        )
+        events.append(('validated', tuple(revision_ids), profile.system_prompt))
+
+    monkeypatch.setattr(ConversationModeProfiles, '_lock_head', record_head_lock)
+
+    saved = await ConversationModeProfiles.save_revision(
+        mode='chat',
+        content={'schema_version': 1, 'system_prompt': 'Validated', 'defaults': {}},
+        expected_current_revision_id=CHAT_BASELINE_REVISION_ID,
+        created_by='admin-1',
+        precommit_validator=validate_before_insert,
+    )
+
+    assert events == [
+        ('head_locked', CHAT_BASELINE_REVISION_ID),
+        ('validated', (CHAT_BASELINE_REVISION_ID,), 'Validated'),
+    ]
+    assert saved.revision_number == 2
+
+
+@pytest.mark.asyncio
+async def test_restore_precommit_validator_failure_rolls_back_without_new_revision(profile_db) -> None:
+    async def reject_restore(session, profile):
+        raise RuntimeError('precommit rejected')
+
+    with pytest.raises(RuntimeError, match='precommit rejected'):
+        await ConversationModeProfiles.restore_revision(
+            mode='chat',
+            source_revision_id=CHAT_BASELINE_REVISION_ID,
+            expected_current_revision_id=CHAT_BASELINE_REVISION_ID,
+            created_by='admin-1',
+            precommit_validator=reject_restore,
+        )
+
+    assert (await ConversationModeProfiles.get_head('chat')).current_revision_id == CHAT_BASELINE_REVISION_ID
+    assert [revision.revision_number for revision in await ConversationModeProfiles.list_history('chat')] == [1]
+
+
+@pytest.mark.asyncio
+async def test_history_snapshot_returns_matching_head_and_revisions(profile_db) -> None:
+    saved = await ConversationModeProfiles.save_revision(
+        mode='chat',
+        content={'schema_version': 1, 'system_prompt': 'Snapshot', 'defaults': {}},
+        expected_current_revision_id=CHAT_BASELINE_REVISION_ID,
+        created_by='admin-1',
+    )
+
+    snapshot = await ConversationModeProfiles.get_history_snapshot('chat')
+
+    assert snapshot.head.current_revision_id == saved.id
+    assert [revision.id for revision in snapshot.revisions] == [
+        saved.id,
+        CHAT_BASELINE_REVISION_ID,
+    ]
+
+
+@pytest.mark.asyncio
 async def test_save_switches_head_stale_expected_conflicts_and_restore_creates_revision(
     profile_db,
 ) -> None:

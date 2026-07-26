@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import time
 import uuid
-from collections.abc import AsyncIterator, Mapping
+from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
 from contextlib import asynccontextmanager
 from types import MappingProxyType
 from typing import TYPE_CHECKING, Any
@@ -269,6 +269,13 @@ class ConversationModeProfileRevisionModel(BaseModel):
         )
 
 
+class ConversationModeProfileHistorySnapshotModel(BaseModel):
+    model_config = ConfigDict(frozen=True)
+
+    head: ConversationModeProfileHeadModel
+    revisions: tuple[ConversationModeProfileRevisionModel, ...]
+
+
 class ConversationModeProfileTemporaryBindingModel(BaseModel):
     model_config = ConfigDict(from_attributes=True, frozen=True)
 
@@ -502,6 +509,46 @@ class ConversationModeProfileTable:
             )
             return [_revision_to_model(row, expected_mode=normalized_mode) for row in result.scalars().all()]
 
+    async def get_history_snapshot(
+        self,
+        mode: ConversationMode | str,
+        db: AsyncSession | None = None,
+    ) -> ConversationModeProfileHistorySnapshotModel | None:
+        normalized_mode = _normalized_mode(mode)
+        async with get_async_db_context(db) as session:
+            head_statement = (
+                select(ConversationModeProfileHead)
+                .where(ConversationModeProfileHead.mode == normalized_mode)
+                .execution_options(populate_existing=True)
+            )
+            if session.get_bind().dialect.name == 'postgresql':
+                head_statement = head_statement.with_for_update(read=True)
+            head = (await session.execute(head_statement)).scalars().first()
+            if head is None:
+                return None
+
+            revision_rows = (
+                (
+                    await session.execute(
+                        select(ConversationModeProfileRevision)
+                        .where(ConversationModeProfileRevision.mode == normalized_mode)
+                        .order_by(ConversationModeProfileRevision.revision_number.desc())
+                    )
+                )
+                .scalars()
+                .all()
+            )
+            revisions = tuple(_revision_to_model(row, expected_mode=normalized_mode) for row in revision_rows)
+            if not any(revision.id == head.current_revision_id for revision in revisions):
+                raise ConversationModeProfileIntegrityError(
+                    head.current_revision_id,
+                    f'Conversation mode profile head {normalized_mode} references a missing revision',
+                )
+            return ConversationModeProfileHistorySnapshotModel(
+                head=ConversationModeProfileHeadModel.model_validate(head),
+                revisions=revisions,
+            )
+
     async def _lock_head(
         self,
         session: AsyncSession,
@@ -527,6 +574,7 @@ class ConversationModeProfileTable:
         restored_from_revision_id: str | None,
         now: int | None,
         db: AsyncSession | None,
+        precommit_validator: Callable[[AsyncSession, ConversationModeProfile], Awaitable[None]] | None,
     ) -> ConversationModeProfileRevisionModel:
         profile = ConversationModeProfile.from_mapping(mode, content)
         normalized_mode = profile.mode.value
@@ -541,6 +589,7 @@ class ConversationModeProfileTable:
                 restored_from_revision_id=restored_from_revision_id,
                 timestamp=timestamp,
                 dialect_name=dialect_name,
+                precommit_validator=precommit_validator,
             )
             return _revision_to_model(row, expected_mode=normalized_mode)
 
@@ -554,6 +603,7 @@ class ConversationModeProfileTable:
         restored_from_revision_id: str | None,
         timestamp: int,
         dialect_name: str,
+        precommit_validator: Callable[[AsyncSession, ConversationModeProfile], Awaitable[None]] | None = None,
     ) -> ConversationModeProfileRevision:
         normalized_mode = profile.mode.value
         head = await self._lock_head(session, normalized_mode, dialect_name)
@@ -569,6 +619,9 @@ class ConversationModeProfileTable:
                 expected_revision_id=expected_current_revision_id,
                 actual_revision_id=actual_revision_id,
             )
+
+        if precommit_validator is not None:
+            await precommit_validator(session, profile)
 
         revision_number = (
             await session.scalar(
@@ -607,6 +660,7 @@ class ConversationModeProfileTable:
         created_by: str | None,
         now: int | None = None,
         db: AsyncSession | None = None,
+        precommit_validator: Callable[[AsyncSession, ConversationModeProfile], Awaitable[None]] | None = None,
     ) -> ConversationModeProfileRevisionModel:
         return await self._save_revision(
             mode=mode,
@@ -616,6 +670,7 @@ class ConversationModeProfileTable:
             restored_from_revision_id=None,
             now=now,
             db=db,
+            precommit_validator=precommit_validator,
         )
 
     async def restore_revision(
@@ -627,6 +682,7 @@ class ConversationModeProfileTable:
         created_by: str | None,
         now: int | None = None,
         db: AsyncSession | None = None,
+        precommit_validator: Callable[[AsyncSession, ConversationModeProfile], Awaitable[None]] | None = None,
     ) -> ConversationModeProfileRevisionModel:
         normalized_mode = _normalized_mode(mode)
         timestamp = _now_seconds() if now is None else now
@@ -650,6 +706,7 @@ class ConversationModeProfileTable:
                 restored_from_revision_id=source_revision_id,
                 timestamp=timestamp,
                 dialect_name=dialect_name,
+                precommit_validator=precommit_validator,
             )
             return _revision_to_model(row, expected_mode=normalized_mode)
 

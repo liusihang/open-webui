@@ -51,6 +51,7 @@ from open_webui.agent.conversation_mode import (
     resolve_conversation_mode,
 )
 from open_webui.agent.conversation_mode_profile_service import (
+    ModeProfileServiceUnavailableError,
     get_public_conversation_mode_profiles,
 )
 from open_webui.agent.decision_execution import agent_decision_dispatcher_loop
@@ -154,6 +155,7 @@ from open_webui.models.agent_runs import AgentRuns
 from open_webui.models.channels import Channels
 from open_webui.models.chats import ChatForm, Chats
 from open_webui.models.config import Config
+from open_webui.models.conversation_mode_profiles import ConversationModeProfileIntegrityError
 from open_webui.models.functions import Functions
 from open_webui.models.messages import Messages
 from open_webui.models.models import Models
@@ -237,6 +239,7 @@ from open_webui.utils.auth import (
     get_http_authorization_cred,
     get_license_data,
     get_verified_user,
+    is_valid_token,
 )
 from open_webui.utils.chat import (
     chat_completed as chat_completed_handler,
@@ -3010,11 +3013,8 @@ async def stop_tasks_by_chat_id_endpoint(request: Request, chat_id: str, user=De
 ##################################
 
 
-@app.get('/api/config')
-async def get_app_config(request: Request):
-    user = None
+async def _get_app_config_user(request: Request):
     token = None
-
     auth_header = request.headers.get('Authorization')
     if auth_header:
         cred = get_http_authorization_cred(auth_header)
@@ -3023,18 +3023,57 @@ async def get_app_config(request: Request):
 
     if not token and 'token' in request.cookies:
         token = request.cookies.get('token')
+    if not token:
+        return None
 
-    if token:
-        try:
-            data = decode_token(token)
-        except Exception as e:
-            log.debug(e)
-            raise HTTPException(
-                status_code=status.HTTP_401_UNAUTHORIZED,
-                detail='Invalid token',
-            )
-        if data is not None and 'id' in data:
-            user = await Users.get_user_by_id(data['id'])
+    try:
+        data = decode_token(token)
+    except Exception as exc:
+        log.debug(exc)
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail='Invalid token',
+        ) from exc
+    if data is None or 'id' not in data or not await is_valid_token(data, getattr(request.app.state, 'redis', None)):
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail='Invalid token',
+        )
+    user = await Users.get_user_by_id(data['id'])
+    if user is None:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail='Invalid token',
+        )
+    return user
+
+
+async def _get_app_config_conversation_mode_profiles(request: Request, user):
+    if user is None or user.role not in ['admin', 'user']:
+        return None
+    try:
+        return await get_public_conversation_mode_profiles(request.app)
+    except ModeProfileServiceUnavailableError as exc:
+        detail = {
+            'code': exc.code,
+            'operation': exc.operation,
+        }
+        if exc.mode is not None:
+            detail['mode'] = exc.mode
+        raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=detail) from exc
+    except ConversationModeProfileIntegrityError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail={
+                'code': exc.code,
+                'revision_id': exc.revision_id,
+            },
+        ) from exc
+
+
+@app.get('/api/config')
+async def get_app_config(request: Request):
+    user = await _get_app_config_user(request)
 
     onboarding = False
     if user is None:
@@ -3089,11 +3128,7 @@ async def get_app_config(request: Request):
         'ui.pending_user_overlay_content',
         'ui.watermark',
     )
-    conversation_mode_profiles = (
-        await get_public_conversation_mode_profiles(request.app)
-        if user is not None and user.role in ['admin', 'user']
-        else None
-    )
+    conversation_mode_profiles = await _get_app_config_conversation_mode_profiles(request, user)
 
     return {
         **({'onboarding': True} if onboarding else {}),

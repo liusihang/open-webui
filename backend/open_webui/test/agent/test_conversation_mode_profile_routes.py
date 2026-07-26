@@ -13,8 +13,9 @@ os.environ.setdefault('DATABASE_ENABLE_SESSION_SHARING', 'true')
 
 import pytest
 import pytest_asyncio
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException
 from fastapi.testclient import TestClient
+from open_webui.agent import conversation_mode_profile_service as profile_service
 from open_webui.agent.conversation_mode_profiles import ConversationModeProfile
 from open_webui.internal.db import Base
 from open_webui.models import conversation_mode_profiles as profile_store_module
@@ -27,11 +28,13 @@ from open_webui.models.conversation_mode_profiles import (
     ConversationModeProfileRevision,
     ConversationModeProfiles,
 )
-from open_webui.models.functions import Functions
-from open_webui.models.skills import Skills
-from open_webui.models.tools import Tools
+from open_webui.models.functions import Function
+from open_webui.models.skills import Skill
+from open_webui.models.tools import Tool
 from open_webui.routers import configs
 from open_webui.utils.auth import get_current_user
+from sqlalchemy import delete, update
+from sqlalchemy.exc import OperationalError
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 BASE_PATH = '/api/v1/configs/conversation_mode_profiles'
@@ -72,6 +75,10 @@ async def profile_db(monkeypatch, tmp_path):
     tables = [
         ConversationModeProfileRevision.__table__,
         ConversationModeProfileHead.__table__,
+        Tool.__table__,
+        Skill.__table__,
+        Function.__table__,
+        Config.__table__,
     ]
     async with engine.begin() as connection:
         await connection.run_sync(
@@ -112,6 +119,61 @@ async def profile_db(monkeypatch, tmp_path):
                     updated_by=None,
                 )
             )
+        session.add(
+            Tool(
+                id='tool-1',
+                user_id='admin-1',
+                name='Tool One',
+                content='def tool(): pass',
+                specs=[],
+                meta={},
+                valves={},
+                updated_at=100,
+                created_at=100,
+            )
+        )
+        session.add(
+            Skill(
+                id='skill-1',
+                user_id='admin-1',
+                name='Skill One',
+                description='Skill',
+                content='Skill content',
+                meta={},
+                is_active=True,
+                updated_at=100,
+                created_at=100,
+            )
+        )
+        session.add(
+            Function(
+                id='filter-1',
+                user_id='admin-1',
+                name='Filter One',
+                type='filter',
+                content='def inlet(body): return body',
+                meta={},
+                valves={},
+                is_active=True,
+                is_global=False,
+                updated_at=100,
+                created_at=100,
+            )
+        )
+        session.add(
+            Config(
+                key='terminal_server.connections',
+                value=[
+                    {
+                        'id': 'terminal-1',
+                        'name': 'Terminal One',
+                        'url': 'http://terminal.invalid',
+                        'enabled': True,
+                    }
+                ],
+                updated_at=100,
+            )
+        )
         await session.commit()
 
     @asynccontextmanager
@@ -123,6 +185,7 @@ async def profile_db(monkeypatch, tmp_path):
             yield session
 
     monkeypatch.setattr(profile_store_module, 'get_async_db_context', isolated_session)
+    monkeypatch.setattr(profile_service, 'get_async_db_context', isolated_session, raising=False)
     yield session_factory
     await engine.dispose()
 
@@ -130,23 +193,6 @@ async def profile_db(monkeypatch, tmp_path):
 @pytest.fixture
 def resource_truth(monkeypatch):
     state = {
-        'tools': {
-            'tool-1': SimpleNamespace(id='tool-1', is_active=True),
-        },
-        'skills': {
-            'skill-1': SimpleNamespace(id='skill-1', is_active=True),
-        },
-        'functions': {
-            'filter-1': SimpleNamespace(id='filter-1', type='filter', is_active=True),
-        },
-        'terminal_connections': [
-            {
-                'id': 'terminal-1',
-                'name': 'Terminal One',
-                'url': 'http://terminal.invalid',
-                'enabled': True,
-            }
-        ],
         'feature_flags': {
             'web.search.enable': True,
             'code_interpreter.enable': True,
@@ -154,27 +200,9 @@ def resource_truth(monkeypatch):
         },
     }
 
-    async def get_tools_by_ids(ids, db=None):
-        return {tool_id: state['tools'][tool_id] for tool_id in ids if tool_id in state['tools']}
-
-    async def get_skill_by_id(skill_id, db=None):
-        return state['skills'].get(skill_id)
-
-    async def get_functions_by_ids(ids, db=None):
-        return [state['functions'][function_id] for function_id in ids if function_id in state['functions']]
-
-    async def config_get(key, default=None):
-        if key == 'terminal_server.connections':
-            return state['terminal_connections']
-        return state['feature_flags'].get(key, default)
-
     async def config_get_many(*keys):
-        return {key: await config_get(key) for key in keys}
+        return {key: state['feature_flags'].get(key) for key in keys}
 
-    monkeypatch.setattr(Tools, 'get_tools_by_ids', get_tools_by_ids)
-    monkeypatch.setattr(Skills, 'get_skill_by_id', get_skill_by_id)
-    monkeypatch.setattr(Functions, 'get_functions_by_ids', get_functions_by_ids)
-    monkeypatch.setattr(Config, 'get', config_get)
     monkeypatch.setattr(Config, 'get_many', config_get_many)
     return state
 
@@ -226,6 +254,7 @@ def route_app(profile_db, resource_truth, monkeypatch):
         client=TestClient(app),
         current_user=current_user,
         events=events,
+        profile_db=profile_db,
         resource_truth=resource_truth,
     )
 
@@ -383,29 +412,25 @@ def test_admin_save_does_not_coerce_schema_version(route_app, schema_version):
 
 
 @pytest.mark.parametrize(
-    ('resource_type', 'mutate_truth', 'payload_overrides', 'expected_issue'),
+    ('resource_type', 'payload_overrides', 'expected_issue'),
     [
         (
             'tool',
-            lambda truth: truth['tools'].clear(),
             {'tool_ids': ['tool-1'], 'skill_ids': [], 'filter_ids': [], 'terminal_id': None},
             'missing',
         ),
         (
             'skill',
-            lambda truth: setattr(truth['skills']['skill-1'], 'is_active', False),
             {'tool_ids': [], 'skill_ids': ['skill-1'], 'filter_ids': [], 'terminal_id': None},
             'inactive',
         ),
         (
             'filter',
-            lambda truth: setattr(truth['functions']['filter-1'], 'is_active', False),
             {'tool_ids': [], 'skill_ids': [], 'filter_ids': ['filter-1'], 'terminal_id': None},
             'inactive',
         ),
         (
             'terminal',
-            lambda truth: truth['terminal_connections'][0].update({'enabled': False}),
             {'tool_ids': [], 'skill_ids': [], 'filter_ids': [], 'terminal_id': 'terminal-1'},
             'inactive',
         ),
@@ -414,11 +439,23 @@ def test_admin_save_does_not_coerce_schema_version(route_app, schema_version):
 def test_admin_save_rejects_missing_or_inactive_global_resources(
     route_app,
     resource_type,
-    mutate_truth,
     payload_overrides,
     expected_issue,
 ):
-    mutate_truth(route_app.resource_truth)
+    async def mutate_database_truth():
+        async with route_app.profile_db() as session:
+            if resource_type == 'tool':
+                await session.execute(delete(Tool).where(Tool.id == 'tool-1'))
+            elif resource_type == 'skill':
+                await session.execute(update(Skill).where(Skill.id == 'skill-1').values(is_active=False))
+            elif resource_type == 'filter':
+                await session.execute(update(Function).where(Function.id == 'filter-1').values(is_active=False))
+            else:
+                row = await session.get(Config, 'terminal_server.connections')
+                row.value = [{**row.value[0], 'enabled': False}]
+            await session.commit()
+
+    asyncio.run(mutate_database_truth())
 
     response = route_app.client.post(
         f'{BASE_PATH}/chat/revisions',
@@ -435,6 +472,136 @@ def test_admin_save_rejects_missing_or_inactive_global_resources(
             'reason': expected_issue,
         }
     ]
+
+
+@pytest.mark.parametrize(
+    ('resource_type', 'expected_reason'),
+    [
+        ('tool', 'missing'),
+        ('skill', 'inactive'),
+        ('filter', 'inactive'),
+        ('terminal', 'inactive'),
+    ],
+)
+def test_precommit_validation_rejects_resource_drift_after_initial_validation(
+    route_app,
+    monkeypatch,
+    resource_type,
+    expected_reason,
+):
+    original_lock_head = ConversationModeProfiles._lock_head
+
+    async def lock_head_then_drift_resource(session, mode, dialect_name):
+        head = await original_lock_head(session, mode, dialect_name)
+        if resource_type == 'tool':
+            await session.execute(delete(Tool).where(Tool.id == 'tool-1'))
+        elif resource_type == 'skill':
+            await session.execute(update(Skill).where(Skill.id == 'skill-1').values(is_active=False))
+        elif resource_type == 'filter':
+            await session.execute(update(Function).where(Function.id == 'filter-1').values(is_active=False))
+        else:
+            row = await session.get(Config, 'terminal_server.connections')
+            row.value = [{**row.value[0], 'enabled': False}]
+            await session.flush()
+        return head
+
+    monkeypatch.setattr(ConversationModeProfiles, '_lock_head', lock_head_then_drift_resource)
+
+    response = route_app.client.post(
+        f'{BASE_PATH}/chat/revisions',
+        json=_save_payload(CHAT_BASELINE_REVISION_ID),
+    )
+
+    assert response.status_code == 400
+    assert response.json()['detail'] == {
+        'code': 'invalid_mode_profile_resource',
+        'issues': [
+            {
+                'resource_type': resource_type,
+                'resource_id': f'{resource_type}-1',
+                'reason': expected_reason,
+            }
+        ],
+    }
+    current = route_app.client.get(f'{BASE_PATH}/chat')
+    assert current.status_code == 200
+    assert current.json()['revision_id'] == CHAT_BASELINE_REVISION_ID
+
+
+def test_precommit_database_failure_is_service_unavailable(route_app, monkeypatch):
+    original_lock_head = ConversationModeProfiles._lock_head
+
+    async def lock_head_then_break_tool_query(session, mode, dialect_name):
+        head = await original_lock_head(session, mode, dialect_name)
+        original_execute = session.execute
+
+        async def fail_tool_query(statement, *args, **kwargs):
+            if 'FROM tool' in str(statement):
+                raise OperationalError(str(statement), {}, RuntimeError('database unavailable'))
+            return await original_execute(statement, *args, **kwargs)
+
+        monkeypatch.setattr(session, 'execute', fail_tool_query)
+        return head
+
+    monkeypatch.setattr(ConversationModeProfiles, '_lock_head', lock_head_then_break_tool_query)
+
+    response = route_app.client.post(
+        f'{BASE_PATH}/chat/revisions',
+        json=_save_payload(
+            CHAT_BASELINE_REVISION_ID,
+            terminal_id=None,
+            skill_ids=[],
+            filter_ids=[],
+            feature_ids=[],
+        ),
+    )
+
+    assert response.status_code == 503
+    assert response.json()['detail'] == {
+        'code': 'mode_profile_service_unavailable',
+        'operation': 'precommit_resource_validation',
+        'mode': 'chat',
+    }
+
+
+def test_initial_database_failure_is_service_unavailable(route_app, monkeypatch):
+    @asynccontextmanager
+    async def failing_resource_session(db=None):
+        async with route_app.profile_db() as session:
+            original_execute = session.execute
+
+            async def fail_tool_query(statement, *args, **kwargs):
+                if 'FROM tool' in str(statement):
+                    raise OperationalError(str(statement), {}, RuntimeError('database unavailable'))
+                return await original_execute(statement, *args, **kwargs)
+
+            monkeypatch.setattr(session, 'execute', fail_tool_query)
+            yield session
+
+    monkeypatch.setattr(
+        profile_service,
+        'get_async_db_context',
+        failing_resource_session,
+        raising=False,
+    )
+
+    response = route_app.client.post(
+        f'{BASE_PATH}/chat/revisions',
+        json=_save_payload(
+            CHAT_BASELINE_REVISION_ID,
+            terminal_id=None,
+            skill_ids=[],
+            filter_ids=[],
+            feature_ids=[],
+        ),
+    )
+
+    assert response.status_code == 503
+    assert response.json()['detail'] == {
+        'code': 'mode_profile_service_unavailable',
+        'operation': 'initial_resource_validation',
+        'mode': 'chat',
+    }
 
 
 def test_disabled_features_and_model_mismatch_are_structured_warnings(route_app):
@@ -571,6 +738,39 @@ def test_history_detail_and_restore_create_immutable_new_revision(route_app):
         assert forbidden not in rendered_event
 
 
+def test_history_uses_one_repository_snapshot_for_head_and_revisions(route_app, monkeypatch):
+    saved = route_app.client.post(
+        f'{BASE_PATH}/chat/revisions',
+        json=_save_payload(CHAT_BASELINE_REVISION_ID, prompt='Snapshot current'),
+    )
+    assert saved.status_code == 200
+    saved_revision_id = saved.json()['revision_id']
+    revisions = asyncio.run(ConversationModeProfiles.list_history('chat'))
+
+    async def get_history_snapshot(mode, db=None):
+        return SimpleNamespace(
+            head=SimpleNamespace(mode='chat', current_revision_id=saved_revision_id),
+            revisions=tuple(revisions),
+        )
+
+    async def stale_cached_current(app, mode):
+        return next(revision for revision in revisions if revision.id == CHAT_BASELINE_REVISION_ID)
+
+    monkeypatch.setattr(
+        ConversationModeProfiles,
+        'get_history_snapshot',
+        get_history_snapshot,
+        raising=False,
+    )
+    monkeypatch.setattr(configs, 'get_cached_current_revision', stale_cached_current)
+
+    response = route_app.client.get(f'{BASE_PATH}/chat/revisions')
+
+    assert response.status_code == 200
+    assert response.json()['current_revision_id'] == saved_revision_id
+    assert [item['revision_id'] for item in response.json()['revisions'] if item['is_current']] == [saved_revision_id]
+
+
 def test_cache_publication_failure_does_not_rollback_committed_revision(route_app):
     route_app.app.state.redis = FakeRedis(fail=True)
     route_app.app.state.CONVERSATION_MODE_PROFILE_HEADS['chat'] = SimpleNamespace(id=CHAT_BASELINE_REVISION_ID)
@@ -653,3 +853,120 @@ async def test_authenticated_app_config_exposes_only_sanitized_current_profiles(
     anonymous_request = SimpleNamespace(headers={}, cookies={}, app=main.app)
     anonymous = await main.get_app_config(anonymous_request)
     assert 'conversation_mode_profiles' not in anonymous
+
+
+@pytest.mark.asyncio
+async def test_revoked_jwt_is_rejected_before_public_profile_projection(
+    profile_db,
+    resource_truth,
+    monkeypatch,
+):
+    from open_webui import env
+
+    main = importlib.import_module('open_webui.main')
+    user = SimpleNamespace(id='user-1', role='user')
+    revoked_jti = 'revoked-token'
+    redis = FakeRedis()
+    redis.values[f'{env.REDIS_KEY_PREFIX}:auth:token:{revoked_jti}:revoked'] = '1'
+    profile_calls = []
+
+    async def get_user_by_id(user_id):
+        return user if user_id == user.id else None
+
+    async def public_profiles(app):
+        profile_calls.append(app)
+        return []
+
+    monkeypatch.setattr(main.Users, 'get_user_by_id', get_user_by_id)
+    monkeypatch.setattr(
+        main,
+        'decode_token',
+        lambda token: {'id': user.id, 'jti': revoked_jti, 'iat': 1},
+    )
+    monkeypatch.setattr(
+        main,
+        'get_http_authorization_cred',
+        lambda header: SimpleNamespace(credentials='revoked-jwt'),
+    )
+    monkeypatch.setattr(main, 'get_public_conversation_mode_profiles', public_profiles)
+    main.app.state.redis = redis
+
+    request = SimpleNamespace(
+        headers={'Authorization': 'Bearer revoked-jwt'},
+        cookies={},
+        app=main.app,
+    )
+    with pytest.raises(HTTPException) as exc_info:
+        await main.get_app_config(request)
+
+    assert exc_info.value.status_code == 401
+    assert exc_info.value.detail == 'Invalid token'
+    assert profile_calls == []
+
+
+@pytest.mark.asyncio
+async def test_invalid_present_jwt_is_rejected_instead_of_treated_as_anonymous(
+    profile_db,
+    resource_truth,
+    monkeypatch,
+):
+    main = importlib.import_module('open_webui.main')
+    monkeypatch.setattr(main, 'decode_token', lambda token: None)
+    monkeypatch.setattr(
+        main,
+        'get_http_authorization_cred',
+        lambda header: SimpleNamespace(credentials='invalid-jwt'),
+    )
+    request = SimpleNamespace(
+        headers={'Authorization': 'Bearer invalid-jwt'},
+        cookies={},
+        app=main.app,
+    )
+
+    with pytest.raises(HTTPException) as exc_info:
+        await main.get_app_config(request)
+
+    assert exc_info.value.status_code == 401
+    assert exc_info.value.detail == 'Invalid token'
+
+
+@pytest.mark.asyncio
+async def test_public_profile_integrity_failure_maps_to_explicit_503(
+    profile_db,
+    resource_truth,
+    monkeypatch,
+):
+    from open_webui.models.conversation_mode_profiles import ConversationModeProfileIntegrityError
+
+    main = importlib.import_module('open_webui.main')
+    user = SimpleNamespace(id='user-1', role='user')
+
+    async def get_user_by_id(user_id):
+        return user
+
+    async def unavailable_profiles(app):
+        raise ConversationModeProfileIntegrityError('chat-head', 'profile unavailable')
+
+    monkeypatch.setattr(main.Users, 'get_user_by_id', get_user_by_id)
+    monkeypatch.setattr(main, 'decode_token', lambda token: {'id': user.id})
+    monkeypatch.setattr(
+        main,
+        'get_http_authorization_cred',
+        lambda header: SimpleNamespace(credentials='valid-token'),
+    )
+    monkeypatch.setattr(main, 'get_public_conversation_mode_profiles', unavailable_profiles)
+    main.app.state.redis = None
+    request = SimpleNamespace(
+        headers={'Authorization': 'Bearer valid-token'},
+        cookies={},
+        app=main.app,
+    )
+
+    with pytest.raises(HTTPException) as exc_info:
+        await main.get_app_config(request)
+
+    assert exc_info.value.status_code == 503
+    assert exc_info.value.detail == {
+        'code': 'mode_profile_integrity_error',
+        'revision_id': 'chat-head',
+    }

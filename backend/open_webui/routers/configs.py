@@ -10,13 +10,16 @@ from mcp.shared.auth import OAuthMetadata
 from open_webui.agent.conversation_mode import ConversationMode
 from open_webui.agent.conversation_mode_profile_service import (
     ModeProfileResourceValidationError,
+    ModeProfileServiceUnavailableError,
     ModeProfileWarning,
     cache_current_profile_revision,
     cache_profile_revision,
+    get_cached_conversation_mode_profile_history,
     get_cached_current_revision,
     get_cached_revision,
     profile_default_counts,
     validate_conversation_mode_profile,
+    validate_conversation_mode_profile_precommit,
 )
 from open_webui.agent.conversation_mode_profiles import (
     INHERIT,
@@ -239,6 +242,27 @@ def _profile_integrity_error(exc: ConversationModeProfileIntegrityError) -> HTTP
     )
 
 
+def _profile_service_error(exc: ModeProfileServiceUnavailableError) -> HTTPException:
+    detail = {
+        'code': exc.code,
+        'operation': exc.operation,
+    }
+    if exc.mode is not None:
+        detail['mode'] = exc.mode
+    return HTTPException(status_code=503, detail=detail)
+
+
+async def _validated_conversation_mode_profile(request: Request, mode: ConversationMode, content):
+    try:
+        return await validate_conversation_mode_profile(request.app, mode, content)
+    except ModeProfileValidationError as exc:
+        raise _profile_validation_error(exc) from exc
+    except ModeProfileResourceValidationError as exc:
+        raise _profile_resource_error(exc) from exc
+    except ModeProfileServiceUnavailableError as exc:
+        raise _profile_service_error(exc) from exc
+
+
 async def _profile_conflict_error(
     request: Request,
     exc: ConversationModeProfileRevisionConflict,
@@ -307,6 +331,8 @@ async def get_conversation_mode_profiles(
     for mode in ('agent', 'chat'):
         try:
             revision = await get_cached_current_revision(request.app, mode)
+        except ModeProfileServiceUnavailableError as exc:
+            raise _profile_service_error(exc) from exc
         except ConversationModeProfileIntegrityError as exc:
             raise _profile_integrity_error(exc) from exc
         if revision is None:
@@ -331,6 +357,8 @@ async def get_current_conversation_mode_profile(
 ):
     try:
         revision = await get_cached_current_revision(request.app, mode)
+    except ModeProfileServiceUnavailableError as exc:
+        raise _profile_service_error(exc) from exc
     except ConversationModeProfileIntegrityError as exc:
         raise _profile_integrity_error(exc) from exc
     if revision is None:
@@ -348,16 +376,11 @@ async def save_conversation_mode_profile_revision(
     form_data: ConversationModeProfileSaveForm,
     user=Depends(get_admin_user),
 ):
-    try:
-        profile, warnings = await validate_conversation_mode_profile(
-            request.app,
-            mode,
-            form_data.profile.model_dump(),
-        )
-    except ModeProfileValidationError as exc:
-        raise _profile_validation_error(exc) from exc
-    except ModeProfileResourceValidationError as exc:
-        raise _profile_resource_error(exc) from exc
+    profile, warnings = await _validated_conversation_mode_profile(
+        request,
+        mode,
+        form_data.profile.model_dump(),
+    )
 
     try:
         revision = await ConversationModeProfiles.save_revision(
@@ -365,7 +388,12 @@ async def save_conversation_mode_profile_revision(
             content=profile.to_content_dict(),
             expected_current_revision_id=form_data.expected_current_revision_id,
             created_by=user.id,
+            precommit_validator=validate_conversation_mode_profile_precommit,
         )
+    except ModeProfileResourceValidationError as exc:
+        raise _profile_resource_error(exc) from exc
+    except ModeProfileServiceUnavailableError as exc:
+        raise _profile_service_error(exc) from exc
     except ConversationModeProfileRevisionConflict as exc:
         raise await _profile_conflict_error(request, exc) from exc
     except ConversationModeProfileIntegrityError as exc:
@@ -403,18 +431,18 @@ async def get_conversation_mode_profile_history(
     user=Depends(get_admin_user),
 ):
     try:
-        current = await get_cached_current_revision(request.app, mode)
-        revisions = await ConversationModeProfiles.list_history(mode)
+        snapshot = await get_cached_conversation_mode_profile_history(request.app, mode)
+    except ModeProfileServiceUnavailableError as exc:
+        raise _profile_service_error(exc) from exc
     except ConversationModeProfileIntegrityError as exc:
         raise _profile_integrity_error(exc) from exc
-    if current is None:
-        raise _profile_not_found(mode=mode.value)
-    for revision in revisions:
-        cache_profile_revision(request.app, revision)
+    current_revision_id = snapshot.head.current_revision_id
     return {
         'mode': mode.value,
-        'current_revision_id': current.id,
-        'revisions': [_revision_metadata(revision, current_revision_id=current.id) for revision in revisions],
+        'current_revision_id': current_revision_id,
+        'revisions': [
+            _revision_metadata(revision, current_revision_id=current_revision_id) for revision in snapshot.revisions
+        ],
     }
 
 
@@ -435,6 +463,8 @@ async def get_conversation_mode_profile_revision(
             revision_id,
             expected_mode=mode,
         )
+    except ModeProfileServiceUnavailableError as exc:
+        raise _profile_service_error(exc) from exc
     except ConversationModeProfileIntegrityError as exc:
         raise _profile_integrity_error(exc) from exc
     if current is None:
@@ -461,21 +491,18 @@ async def restore_conversation_mode_profile_revision(
             revision_id,
             expected_mode=mode,
         )
+    except ModeProfileServiceUnavailableError as exc:
+        raise _profile_service_error(exc) from exc
     except ConversationModeProfileIntegrityError as exc:
         raise _profile_integrity_error(exc) from exc
     if source is None:
         raise _profile_not_found(mode=mode.value, revision_id=revision_id)
 
-    try:
-        profile, warnings = await validate_conversation_mode_profile(
-            request.app,
-            mode,
-            source.content,
-        )
-    except ModeProfileValidationError as exc:
-        raise _profile_validation_error(exc) from exc
-    except ModeProfileResourceValidationError as exc:
-        raise _profile_resource_error(exc) from exc
+    profile, warnings = await _validated_conversation_mode_profile(
+        request,
+        mode,
+        source.content,
+    )
 
     try:
         revision = await ConversationModeProfiles.restore_revision(
@@ -483,7 +510,12 @@ async def restore_conversation_mode_profile_revision(
             source_revision_id=revision_id,
             expected_current_revision_id=form_data.expected_current_revision_id,
             created_by=user.id,
+            precommit_validator=validate_conversation_mode_profile_precommit,
         )
+    except ModeProfileResourceValidationError as exc:
+        raise _profile_resource_error(exc) from exc
+    except ModeProfileServiceUnavailableError as exc:
+        raise _profile_service_error(exc) from exc
     except ConversationModeProfileRevisionConflict as exc:
         raise await _profile_conflict_error(request, exc) from exc
     except ConversationModeProfileIntegrityError as exc:

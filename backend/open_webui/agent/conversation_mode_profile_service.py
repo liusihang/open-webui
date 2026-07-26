@@ -2,10 +2,14 @@
 
 from __future__ import annotations
 
+from collections import OrderedDict
 from collections.abc import Mapping
 from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field
+from sqlalchemy import select
+from sqlalchemy.exc import SQLAlchemyError
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from open_webui.agent.conversation_mode import ConversationMode
 from open_webui.agent.conversation_mode_profiles import (
@@ -13,15 +17,17 @@ from open_webui.agent.conversation_mode_profiles import (
     ConversationModeProfile,
     ProfileDefaults,
 )
+from open_webui.internal.db import get_async_db_context
 from open_webui.models.config import Config
 from open_webui.models.conversation_mode_profiles import (
+    ConversationModeProfileHistorySnapshotModel,
     ConversationModeProfileIntegrityError,
     ConversationModeProfileRevisionModel,
     ConversationModeProfiles,
 )
-from open_webui.models.functions import Functions
-from open_webui.models.skills import Skills
-from open_webui.models.tools import Tools
+from open_webui.models.functions import Function
+from open_webui.models.skills import Skill
+from open_webui.models.tools import Tool
 from open_webui.utils.cache_invalidation import (
     CACHE_NAMESPACE_CONVERSATION_MODE_PROFILE_HEADS,
     ensure_cache_fresh,
@@ -32,6 +38,7 @@ FEATURE_CONFIG_KEYS = {
     'code_interpreter': 'code_interpreter.enable',
     'image_generation': 'image_generation.enable',
 }
+PROFILE_REVISION_CACHE_MAX_SIZE = 64
 
 
 class ModeProfileResourceIssue(BaseModel):
@@ -48,6 +55,15 @@ class ModeProfileResourceValidationError(ValueError):
     def __init__(self, issues: list[ModeProfileResourceIssue]) -> None:
         self.issues = tuple(issues)
         super().__init__('Conversation mode profile references unavailable resources')
+
+
+class ModeProfileServiceUnavailableError(RuntimeError):
+    code = 'mode_profile_service_unavailable'
+
+    def __init__(self, operation: str, *, mode: str | None = None) -> None:
+        self.operation = operation
+        self.mode = mode
+        super().__init__('Conversation mode profile service is unavailable')
 
 
 class ModeProfileWarning(BaseModel):
@@ -67,16 +83,22 @@ def get_profile_head_cache(app) -> dict[str, ConversationModeProfileRevisionMode
     return cache
 
 
-def get_profile_revision_cache(app) -> dict[str, ConversationModeProfileRevisionModel]:
+def get_profile_revision_cache(app) -> OrderedDict[str, ConversationModeProfileRevisionModel]:
     cache = getattr(app.state, 'CONVERSATION_MODE_PROFILE_REVISIONS', None)
-    if cache is None:
-        cache = {}
+    if not isinstance(cache, OrderedDict):
+        cache = OrderedDict(cache or {})
         app.state.CONVERSATION_MODE_PROFILE_REVISIONS = cache
+    while len(cache) > PROFILE_REVISION_CACHE_MAX_SIZE:
+        cache.popitem(last=False)
     return cache
 
 
 def cache_profile_revision(app, revision: ConversationModeProfileRevisionModel) -> None:
-    get_profile_revision_cache(app)[revision.id] = revision
+    cache = get_profile_revision_cache(app)
+    cache.pop(revision.id, None)
+    cache[revision.id] = revision
+    while len(cache) > PROFILE_REVISION_CACHE_MAX_SIZE:
+        cache.popitem(last=False)
 
 
 def cache_current_profile_revision(app, revision: ConversationModeProfileRevisionModel) -> None:
@@ -87,21 +109,41 @@ def cache_current_profile_revision(app, revision: ConversationModeProfileRevisio
 async def get_cached_current_revision(
     app,
     mode: ConversationMode | str,
-) -> ConversationModeProfileRevisionModel | None:
+) -> ConversationModeProfileRevisionModel:
     normalized_mode = _normalized_mode(mode)
     await ensure_cache_fresh(
         app,
         CACHE_NAMESPACE_CONVERSATION_MODE_PROFILE_HEADS,
         normalized_mode,
     )
-    head_cache = get_profile_head_cache(app)
-    cached = head_cache.get(normalized_mode)
-    if cached is not None:
-        return cached
+    try:
+        head = await ConversationModeProfiles.get_head(normalized_mode)
+    except SQLAlchemyError as exc:
+        raise ModeProfileServiceUnavailableError(
+            'read_current_head',
+            mode=normalized_mode,
+        ) from exc
+    if head is None:
+        raise ModeProfileServiceUnavailableError(
+            'read_current_head',
+            mode=normalized_mode,
+        )
+    if head.mode != normalized_mode:
+        raise ConversationModeProfileIntegrityError(
+            head.current_revision_id,
+            f'Conversation mode profile head {head.mode} does not match {normalized_mode}',
+        )
 
-    revision = await ConversationModeProfiles.get_current_revision(normalized_mode)
+    revision = await get_cached_revision(
+        app,
+        head.current_revision_id,
+        expected_mode=normalized_mode,
+    )
     if revision is None:
-        return None
+        raise ModeProfileServiceUnavailableError(
+            'read_current_revision',
+            mode=normalized_mode,
+        )
     cache_current_profile_revision(app, revision)
     return revision
 
@@ -121,13 +163,26 @@ async def get_cached_revision(
                 revision_id,
                 f'Conversation mode profile revision {revision_id} has mode {cached.mode}, expected {normalized_mode}',
             )
+        revision_cache.move_to_end(revision_id)
         return cached
 
-    revision = await ConversationModeProfiles.get_revision(
-        revision_id,
-        expected_mode=normalized_mode,
-    )
+    try:
+        revision = await ConversationModeProfiles.get_revision(
+            revision_id,
+            expected_mode=normalized_mode,
+        )
+    except SQLAlchemyError as exc:
+        raise ModeProfileServiceUnavailableError(
+            'read_revision',
+            mode=normalized_mode,
+        ) from exc
     if revision is not None:
+        if normalized_mode is not None and revision.mode != normalized_mode:
+            raise ConversationModeProfileIntegrityError(
+                revision_id,
+                f'Conversation mode profile revision {revision_id} has mode '
+                f'{revision.mode}, expected {normalized_mode}',
+            )
         cache_profile_revision(app, revision)
     return revision
 
@@ -137,7 +192,7 @@ async def get_public_conversation_mode_profiles(app) -> list[dict[str, Any]]:
     for mode in ('agent', 'chat'):
         revision = await get_cached_current_revision(app, mode)
         if revision is None:
-            continue
+            raise ModeProfileServiceUnavailableError('public_projection', mode=mode)
         profile = ConversationModeProfile(
             mode=revision.mode,
             schema_version=revision.schema_version,
@@ -145,7 +200,41 @@ async def get_public_conversation_mode_profiles(app) -> list[dict[str, Any]]:
             defaults=revision.defaults,
         )
         profiles.append(profile.to_public_dict(current_revision_id=revision.id))
+    if [profile['mode'] for profile in profiles] != ['agent', 'chat']:
+        raise ModeProfileServiceUnavailableError('public_projection')
     return profiles
+
+
+async def get_cached_conversation_mode_profile_history(
+    app,
+    mode: ConversationMode | str,
+) -> ConversationModeProfileHistorySnapshotModel:
+    normalized_mode = _normalized_mode(mode)
+    try:
+        snapshot = await ConversationModeProfiles.get_history_snapshot(normalized_mode)
+    except SQLAlchemyError as exc:
+        raise ModeProfileServiceUnavailableError(
+            'read_history',
+            mode=normalized_mode,
+        ) from exc
+    if snapshot is None:
+        raise ModeProfileServiceUnavailableError(
+            'read_history',
+            mode=normalized_mode,
+        )
+    for revision in snapshot.revisions:
+        cache_profile_revision(app, revision)
+    current = next(
+        (revision for revision in snapshot.revisions if revision.id == snapshot.head.current_revision_id),
+        None,
+    )
+    if current is None:
+        raise ConversationModeProfileIntegrityError(
+            snapshot.head.current_revision_id,
+            f'Conversation mode profile head {normalized_mode} references a missing revision',
+        )
+    cache_current_profile_revision(app, current)
+    return snapshot
 
 
 async def validate_conversation_mode_profile(
@@ -154,13 +243,49 @@ async def validate_conversation_mode_profile(
     content: Mapping[str, Any],
 ) -> tuple[ConversationModeProfile, list[ModeProfileWarning]]:
     profile = ConversationModeProfile.from_mapping(mode, content)
-    issues = await _resource_issues(profile.defaults)
+    try:
+        async with get_async_db_context() as session:
+            issues = await _transactional_resource_issues(
+                session,
+                profile.defaults,
+                lock_rows=False,
+            )
+    except Exception as exc:
+        raise ModeProfileServiceUnavailableError(
+            'initial_resource_validation',
+            mode=profile.mode.value,
+        ) from exc
     if issues:
         raise ModeProfileResourceValidationError(issues)
 
-    warnings = await _feature_warnings(profile.defaults)
+    try:
+        warnings = await _feature_warnings(profile.defaults)
+    except Exception as exc:
+        raise ModeProfileServiceUnavailableError(
+            'initial_resource_validation',
+            mode=profile.mode.value,
+        ) from exc
     warnings.extend(_model_compatibility_warnings(app, profile.defaults))
     return profile, warnings
+
+
+async def validate_conversation_mode_profile_precommit(
+    session: AsyncSession,
+    profile: ConversationModeProfile,
+) -> None:
+    try:
+        issues = await _transactional_resource_issues(
+            session,
+            profile.defaults,
+            lock_rows=True,
+        )
+    except Exception as exc:
+        raise ModeProfileServiceUnavailableError(
+            'precommit_resource_validation',
+            mode=profile.mode.value,
+        ) from exc
+    if issues:
+        raise ModeProfileResourceValidationError(issues)
 
 
 def profile_default_counts(profile: ConversationModeProfile) -> dict[str, int]:
@@ -174,33 +299,55 @@ def profile_default_counts(profile: ConversationModeProfile) -> dict[str, int]:
     }
 
 
-async def _resource_issues(defaults: ProfileDefaults) -> list[ModeProfileResourceIssue]:
-    issues = await _tool_issues(defaults)
-    issues.extend(await _skill_issues(defaults))
-    issues.extend(await _filter_issues(defaults))
-    issues.extend(await _terminal_issues(defaults))
+async def _transactional_resource_issues(
+    session: AsyncSession,
+    defaults: ProfileDefaults,
+    *,
+    lock_rows: bool,
+) -> list[ModeProfileResourceIssue]:
+    issues = await _transactional_tool_issues(session, defaults, lock_rows=lock_rows)
+    issues.extend(await _transactional_skill_issues(session, defaults, lock_rows=lock_rows))
+    issues.extend(await _transactional_filter_issues(session, defaults, lock_rows=lock_rows))
+    issues.extend(await _transactional_terminal_issues(session, defaults, lock_rows=lock_rows))
     return issues
 
 
-async def _tool_issues(defaults: ProfileDefaults) -> list[ModeProfileResourceIssue]:
+async def _transactional_tool_issues(
+    session: AsyncSession,
+    defaults: ProfileDefaults,
+    *,
+    lock_rows: bool,
+) -> list[ModeProfileResourceIssue]:
     issues: list[ModeProfileResourceIssue] = []
-    if defaults.tool_ids is not INHERIT:
+    if defaults.tool_ids is not INHERIT and defaults.tool_ids:
         tool_ids = list(defaults.tool_ids)
-        tools = await Tools.get_tools_by_ids(tool_ids)
-        for tool_id in tool_ids:
-            tool = tools.get(tool_id)
-            if tool is None:
-                issues.append(_issue('tool', tool_id, 'missing'))
-            elif getattr(tool, 'is_active', True) is False:
-                issues.append(_issue('tool', tool_id, 'inactive'))
+        statement = _locked_resource_statement(
+            select(Tool).where(Tool.id.in_(tool_ids)),
+            session,
+            lock_rows=lock_rows,
+        )
+        tools = {tool.id: tool for tool in (await session.execute(statement)).scalars().all()}
+        issues.extend(_issue('tool', tool_id, 'missing') for tool_id in tool_ids if tool_id not in tools)
     return issues
 
 
-async def _skill_issues(defaults: ProfileDefaults) -> list[ModeProfileResourceIssue]:
+async def _transactional_skill_issues(
+    session: AsyncSession,
+    defaults: ProfileDefaults,
+    *,
+    lock_rows: bool,
+) -> list[ModeProfileResourceIssue]:
     issues: list[ModeProfileResourceIssue] = []
-    if defaults.skill_ids is not INHERIT:
-        for skill_id in defaults.skill_ids:
-            skill = await Skills.get_skill_by_id(skill_id)
+    if defaults.skill_ids is not INHERIT and defaults.skill_ids:
+        skill_ids = list(defaults.skill_ids)
+        statement = _locked_resource_statement(
+            select(Skill).where(Skill.id.in_(skill_ids)),
+            session,
+            lock_rows=lock_rows,
+        )
+        skills = {skill.id: skill for skill in (await session.execute(statement)).scalars().all()}
+        for skill_id in skill_ids:
+            skill = skills.get(skill_id)
             if skill is None:
                 issues.append(_issue('skill', skill_id, 'missing'))
             elif not skill.is_active:
@@ -208,11 +355,21 @@ async def _skill_issues(defaults: ProfileDefaults) -> list[ModeProfileResourceIs
     return issues
 
 
-async def _filter_issues(defaults: ProfileDefaults) -> list[ModeProfileResourceIssue]:
+async def _transactional_filter_issues(
+    session: AsyncSession,
+    defaults: ProfileDefaults,
+    *,
+    lock_rows: bool,
+) -> list[ModeProfileResourceIssue]:
     issues: list[ModeProfileResourceIssue] = []
-    if defaults.filter_ids is not INHERIT:
+    if defaults.filter_ids is not INHERIT and defaults.filter_ids:
         filter_ids = list(defaults.filter_ids)
-        functions = {function.id: function for function in await Functions.get_functions_by_ids(filter_ids)}
+        statement = _locked_resource_statement(
+            select(Function).where(Function.id.in_(filter_ids)),
+            session,
+            lock_rows=lock_rows,
+        )
+        functions = {function.id: function for function in (await session.execute(statement)).scalars().all()}
         for filter_id in filter_ids:
             function = functions.get(filter_id)
             if function is None:
@@ -224,12 +381,29 @@ async def _filter_issues(defaults: ProfileDefaults) -> list[ModeProfileResourceI
     return issues
 
 
-async def _terminal_issues(defaults: ProfileDefaults) -> list[ModeProfileResourceIssue]:
+async def _transactional_terminal_issues(
+    session: AsyncSession,
+    defaults: ProfileDefaults,
+    *,
+    lock_rows: bool,
+) -> list[ModeProfileResourceIssue]:
     issues: list[ModeProfileResourceIssue] = []
     if defaults.terminal_id is not INHERIT and defaults.terminal_id is not None:
-        connections = await Config.get('terminal_server.connections', []) or []
+        statement = _locked_resource_statement(
+            select(Config).where(Config.key == 'terminal_server.connections'),
+            session,
+            lock_rows=lock_rows,
+        ).execution_options(populate_existing=True)
+        row = (await session.execute(statement)).scalars().first()
+        connections = [] if row is None else row.value
+        if not isinstance(connections, list):
+            raise ValueError('Terminal configuration truth is malformed')
         connection = next(
-            (candidate for candidate in connections if candidate.get('id') == defaults.terminal_id),
+            (
+                candidate
+                for candidate in connections
+                if isinstance(candidate, Mapping) and candidate.get('id') == defaults.terminal_id
+            ),
             None,
         )
         if connection is None:
@@ -237,6 +411,12 @@ async def _terminal_issues(defaults: ProfileDefaults) -> list[ModeProfileResourc
         elif not connection.get('enabled', True):
             issues.append(_issue('terminal', defaults.terminal_id, 'inactive'))
     return issues
+
+
+def _locked_resource_statement(statement, session: AsyncSession, *, lock_rows: bool):
+    if lock_rows and session.get_bind().dialect.name != 'sqlite':
+        return statement.with_for_update()
+    return statement
 
 
 async def _feature_warnings(defaults: ProfileDefaults) -> list[ModeProfileWarning]:
