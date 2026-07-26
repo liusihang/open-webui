@@ -193,8 +193,10 @@ Verification:
 
 ### Checkpoint 9 - commit boundary
 
-Status: in progress
+Status: completed
 
 - Preserve unrelated concurrent conversation-profile persistence files and `handoff/chat-agent-dual-mode-20260726/`.
-- Stage only the files listed by this task's scoped commit review.
+- Scoped implementation commit: `0c736a9e4 feat(chat): add composer model reasoning controls`.
+- The staged scope contained only this task's implementation, tests, translations, store typing correction, and task-local handoff files.
+- Final focused verification before commit remained green: frontend `33/33`, Bifrost `37/37`, and staged diff check clean.
 - Do not deploy, restart, or modify formal live.

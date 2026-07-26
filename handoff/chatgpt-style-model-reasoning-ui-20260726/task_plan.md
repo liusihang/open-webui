@@ -6,7 +6,7 @@ Implement a single-model ChatGPT-style composer model/reasoning menu with a sync
 
 ## Current Phase
 
-Phase 6: Documentation and commit
+Complete
 
 ## Phases
 
@@ -74,9 +74,9 @@ Phase 6: Documentation and commit
 
 - [x] Update task-local implementation and verification notes.
 - [x] Inspect the exact dirty scope and preserve unrelated backend/handoff files.
-- [ ] Commit tested implementation in an intentional scoped commit.
+- [x] Commit tested implementation in an intentional scoped commit (`0c736a9e4`).
 - [x] Produce final handoff with the remaining live-deployment boundary.
-- **Status:** in_progress
+- **Status:** complete
 
 ## Key Questions
 

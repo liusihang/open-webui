@@ -119,3 +119,4 @@
 - Production frontend build: passed with `NODE_OPTIONS=--max-old-space-size=8192 npm run build`.
 - Real isolated request: the local mock upstream captured `{"effort": "xhigh", "enabled": true}` and the UI rendered `isolated ok`.
 - Formal live was not modified, restarted, or configured.
+- Scoped implementation commit: `0c736a9e4 feat(chat): add composer model reasoning controls`.

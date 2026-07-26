@@ -81,8 +81,16 @@
 
 | Question | Answer |
 |----------|--------|
-| Where am I? | Phase 6: final scoped commit. |
-| Where am I going? | Stage only this task's files, commit, and hand off without deploying live. |
+| Where am I? | Task complete on the scoped implementation commit. |
+| Where am I going? | Task complete; formal live deployment remains a separate authorization boundary. |
 | What's the goal? | Single-model ChatGPT-style composer controls with four Bifrost effort values. |
 | What have I learned? | See `findings.md`. |
 | What have I done? | Implemented, built, browser-tested, and end-to-end verified the model/reasoning UI and Bifrost request path. |
+
+### Phase 6: Documentation and commit
+
+- **Status:** complete
+- Scoped implementation commit: `0c736a9e4 feat(chat): add composer model reasoning controls`.
+- Final pre-commit verification: frontend `33/33`, Bifrost `37/37`, staged diff check clean.
+- Preserved unrelated `handoff/chat-agent-dual-mode-20260726/` without staging it.
+- Formal live remained untouched.
