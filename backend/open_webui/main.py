@@ -8,8 +8,9 @@ import mimetypes
 import os
 import sys
 import time
+from collections.abc import Mapping
 from contextlib import asynccontextmanager
-from types import SimpleNamespace
+from types import MappingProxyType, SimpleNamespace
 from uuid import uuid4
 
 import aiohttp
@@ -1332,15 +1333,17 @@ async def _enforce_mode_profile_prompt(
     user,
     model_system_prompt: str | None,
     request_system_prompt: str | None,
+    administrator_variables: Mapping[str, object],
 ) -> bool:
     if revision is None or not revision.system_prompt.strip():
         _strip_mode_profile_control_fields(form_data)
         return False
 
     global_system_prompt = await Config.get('chat.global_system_prompt', '')
+    administrator_metadata = {**metadata, 'variables': administrator_variables}
     resolved_administrator = await resolve_system_prompt(
         revision.system_prompt,
-        metadata,
+        administrator_metadata,
         user,
     )
     register_request_redaction_secrets(request, resolved_administrator)
@@ -1356,7 +1359,7 @@ async def _enforce_mode_profile_prompt(
         prompt
         for prompt in (
             await resolve_system_prompt(request_system_prompt, metadata, user),
-            _system_prompt_text(form_data.get('messages') or []),
+            await resolve_system_prompt(_system_prompt_text(form_data.get('messages') or []), metadata, user),
         )
         if prompt and prompt.strip()
     )
@@ -1367,12 +1370,12 @@ async def _enforce_mode_profile_prompt(
             user=user_layer or None,
         )
     )
-    _strip_administrator_prompt_variables(revision.system_prompt, form_data, metadata)
     messages = remove_system_message(form_data.get('messages') or [])
     form_data['messages'] = [{'role': 'system', 'content': composed}, *messages] if composed else messages
     params = form_data.get('params')
     if isinstance(params, dict):
         params.pop('system', None)
+    _strip_private_prompt_metadata(metadata)
     _strip_mode_profile_control_fields(form_data)
     return True
 
@@ -1382,23 +1385,38 @@ def _register_mode_profile_raw_prompt(request: Request, revision) -> None:
         register_request_redaction_secrets(request, revision.system_prompt)
 
 
-def _strip_administrator_prompt_variables(raw_prompt: str, form_data: dict, metadata: dict) -> None:
-    variable_keys = {
-        key
-        for key, value in (metadata.get('variables') or {}).items()
-        if isinstance(key, str) and key in raw_prompt and isinstance(value, str)
-    }
-    if not variable_keys:
-        return
+def _extract_administrator_prompt_variables(
+    raw_prompt: str,
+    form_data: dict,
+    metadata: dict,
+) -> Mapping[str, object]:
+    variables = {}
+    for value in (form_data.get('variables'), metadata.get('variables')):
+        if isinstance(value, dict):
+            variables.update(value)
+
+    protected_keys = {key for key in variables if isinstance(key, str) and key in raw_prompt}
+    protected_variables = {key: variables[key] for key in protected_keys}
     for value in (form_data, metadata):
-        variables = value.get('variables')
-        if not isinstance(variables, dict):
+        current_variables = value.get('variables')
+        if not isinstance(current_variables, dict):
             continue
-        remaining = {key: item for key, item in variables.items() if key not in variable_keys}
+        remaining = {key: item for key, item in current_variables.items() if key not in protected_keys}
         if remaining:
             value['variables'] = remaining
         else:
             value.pop('variables', None)
+    return MappingProxyType(protected_variables)
+
+
+def _strip_private_prompt_metadata(metadata: dict) -> None:
+    for key in (
+        'system_prompt',
+        'resolved_system_prompt',
+        'mode_profile_system_prompt',
+        'mode_profile_resolved_system_prompt',
+    ):
+        metadata.pop(key, None)
 
 
 def _mode_profile_capability_request_values(form_data: dict) -> dict:
@@ -2274,6 +2292,7 @@ async def _start_agent_mode_chat(
     mode_profile_revision=None,
     model_system_prompt: str | None = None,
     request_system_prompt: str | None = None,
+    administrator_prompt_variables: Mapping[str, object] = MappingProxyType({}),
 ) -> dict:
     leader_model_id = form_data.get('model') or next(
         (model_id for model_id, _message_id in _message_id_entries(message_ids) if model_id),
@@ -2299,6 +2318,7 @@ async def _start_agent_mode_chat(
         user=user,
         model_system_prompt=model_system_prompt,
         request_system_prompt=request_system_prompt,
+        administrator_variables=administrator_prompt_variables,
     )
     if prompt_enforced:
         requested_model_params.pop('system', None)
@@ -2581,6 +2601,7 @@ async def chat_completion(
 
         existing_chat = None
         mode_profile_revision = None
+        administrator_prompt_variables: Mapping[str, object] = MappingProxyType({})
         conversation_mode_should_persist = False
         is_product_conversation_request = bool(
             not getattr(request.state, 'agent_internal_model_call', False)
@@ -2743,6 +2764,12 @@ async def chat_completion(
                 )
             if mode_profile_revision is not None:
                 _register_mode_profile_raw_prompt(request, mode_profile_revision)
+                if mode_profile_revision.system_prompt.strip():
+                    administrator_prompt_variables = _extract_administrator_prompt_variables(
+                        mode_profile_revision.system_prompt,
+                        form_data,
+                        metadata,
+                    )
                 model = _model_without_bound_profile_defaults(
                     model,
                     strip_skill_ids=(
@@ -3107,6 +3134,7 @@ async def chat_completion(
                 mode_profile_revision=mode_profile_revision,
                 model_system_prompt=model_system_prompt,
                 request_system_prompt=request_system_prompt,
+                administrator_prompt_variables=administrator_prompt_variables,
             )
 
     except HTTPException as exc:
@@ -3149,6 +3177,7 @@ async def chat_completion(
                 user=user,
                 model_system_prompt=effective_model_system_prompt,
                 request_system_prompt=effective_request_system_prompt,
+                administrator_variables=administrator_prompt_variables,
             )
 
             if prompt_enforced:

@@ -1272,6 +1272,129 @@ async def test_raw_administrator_prompt_is_registered_before_real_payload_debug_
 
 
 @pytest.mark.asyncio
+async def test_bound_administrator_variables_are_private_before_payload_and_provider_layers(
+    monkeypatch,
+    agent_run_db,
+    profile_entry,
+):
+    private_value = 'ADMIN-PRIVATE-VARIABLE-9f2e'
+    shared_value = 'shared-variable-value'
+    private_key = '{{ADMIN_PRIVATE}}'
+    shared_key = '{{SHARED_VALUE}}'
+    _configure_prompt_layers(
+        profile_entry,
+        mode='chat',
+        administrator=f'Administrator {private_key} {shared_key}',
+    )
+    profile_entry.config_values['chat.global_system_prompt'] = f'Global {private_key} {shared_key}'
+    profile_entry.model_info = SimpleNamespace(
+        base_model_id=None,
+        params=SimpleNamespace(model_dump=lambda: {'system': f'Model {private_key} {shared_key}'}),
+    )
+    form = _existing_chat_form(mode='chat')
+    form['params'] = {'system': f'Request {private_key} {shared_key}'}
+    form['messages'] = [
+        {'role': 'system', 'content': f'User {private_key} {shared_key}'},
+        {'role': 'user', 'content': 'hello'},
+    ]
+    form['variables'] = {
+        private_key: private_value,
+        shared_key: shared_value,
+    }
+
+    original_process_payload = main.process_chat_payload
+
+    async def process_payload_with_derived_prompt(request, form_data, user, metadata, model):
+        form_data, metadata, events = await original_process_payload(
+            request,
+            form_data,
+            user,
+            metadata,
+            model,
+        )
+        metadata['system_prompt'] = f'derived {private_value}'
+        return form_data, metadata, events
+
+    monkeypatch.setattr(main, 'process_chat_payload', process_payload_with_derived_prompt)
+
+    await main.chat_completion(_request(enable_agent_mode=True), form, _user())
+
+    payload_boundary = profile_entry.process_payload_calls[0]
+    assert 'variables' not in payload_boundary['form_data']
+    assert 'variables' not in payload_boundary['metadata']
+
+    provider_form, _provider_kwargs = profile_entry.provider_calls[0]
+    provider_metadata = provider_form['metadata']
+    assert 'variables' not in provider_form
+    assert 'variables' not in provider_metadata
+    assert 'system_prompt' not in provider_metadata
+
+    system_prompt = _system_content(provider_form['messages'])
+    assert system_prompt is not None
+    assert f'Administrator {private_value} {shared_value}' in system_prompt
+    for layer in ('Global', 'Model', 'Request', 'User'):
+        assert f'{layer} {private_key} {shared_key}' in system_prompt
+        assert f'{layer} {private_value} {shared_value}' not in system_prompt
+
+
+@pytest.mark.asyncio
+async def test_bound_administrator_variables_are_sanitized_before_real_debug_and_context_compaction(
+    monkeypatch,
+    caplog,
+    agent_run_db,
+    profile_entry,
+):
+    private_value = 'ADMIN-COMPACTION-PRIVATE-8f3d'
+    shared_value = 'shared-variable-value'
+    private_key = '{{ADMIN_PRIVATE}}'
+    shared_key = '{{SHARED_VALUE}}'
+    _configure_prompt_layers(
+        profile_entry,
+        mode='chat',
+        administrator=f'Administrator {private_key}',
+    )
+    form = _existing_chat_form(mode='chat')
+    form['variables'] = {
+        private_key: private_value,
+        shared_key: shared_value,
+    }
+    observed = {}
+
+    async def real_payload(request, form_data, user, metadata, model):
+        return await chat_middleware.process_chat_payload(
+            request,
+            form_data,
+            user,
+            metadata,
+            model,
+        )
+
+    async def compact_messages(request, user, messages, metadata, *args):
+        observed['metadata'] = {
+            **metadata,
+            'variables': dict(metadata.get('variables') or {}),
+        }
+        return messages, None, None
+
+    async def no_db_messages(*args):
+        return []
+
+    def stop_after_compaction(messages):
+        raise RuntimeError('stop after context compaction')
+
+    monkeypatch.setattr(main, 'process_chat_payload', real_payload)
+    monkeypatch.setattr(chat_middleware, 'load_messages_from_db', no_db_messages)
+    monkeypatch.setattr(chat_middleware, 'compact_messages_for_request', compact_messages)
+    monkeypatch.setattr(chat_middleware, 'strip_compaction_fields', stop_after_compaction)
+    caplog.set_level('DEBUG', logger=chat_middleware.__name__)
+
+    await main.chat_completion(_request(enable_agent_mode=True), form, _user())
+
+    assert observed['metadata']['variables'] == {shared_key: shared_value}
+    assert private_value not in caplog.text
+
+
+@pytest.mark.asyncio
 async def test_short_prompt_variable_value_does_not_redact_normal_text(
     agent_run_db,
     profile_entry,
