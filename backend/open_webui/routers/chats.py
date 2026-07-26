@@ -34,6 +34,7 @@ from open_webui.models.chats import (
     ChatForm,
     ChatHistoryStats,
     ChatImportForm,
+    ChatModel,
     ChatResponse,
     Chats,
     ChatsImportForm,
@@ -1159,9 +1160,32 @@ async def get_shared_chat_by_id(
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail=ERROR_MESSAGES.NOT_FOUND)
 
     shared = await SharedChats.get_by_id(share_id, db=db)
-    chat = await Chats.get_chat_by_share_id(share_id, db=db)
 
     if shared is not None:
+        if user.role != 'admin' or not ENABLE_ADMIN_CHAT_ACCESS:
+            if shared.user_id != user.id:
+                has_grant = await AccessGrants.has_access(
+                    user_id=user.id,
+                    resource_type='shared_chat',
+                    resource_id=shared.chat_id,
+                    permission='read',
+                    db=db,
+                )
+                if not has_grant:
+                    raise HTTPException(
+                        status_code=status.HTTP_401_UNAUTHORIZED,
+                        detail=ERROR_MESSAGES.ACCESS_PROHIBITED,
+                    )
+
+        chat = ChatModel(
+            id=shared.id,
+            user_id=shared.user_id,
+            title=shared.title,
+            chat=shared.chat,
+            created_at=shared.created_at,
+            updated_at=shared.updated_at,
+            share_id=shared.id,
+        )
         try:
             source_chat = await Chats.get_chat_by_id(
                 shared.chat_id,
@@ -1179,32 +1203,15 @@ async def get_shared_chat_by_id(
                 )
             )
         source_revision_id = await _resolve_server_source_mode_profile_revision(source_chat, db)
-        if chat is not None:
-            chat = chat.model_copy(update={'mode_profile_revision_id': source_revision_id})
+        chat = chat.model_copy(update={'mode_profile_revision_id': source_revision_id})
 
     # Fallback: admins can also access any chat directly by chat ID
-    if not chat and user.role == 'admin' and ENABLE_ADMIN_CHAT_ACCESS:
+    elif user.role == 'admin' and ENABLE_ADMIN_CHAT_ACCESS:
         chat = await Chats.get_chat_by_id(share_id, db=db)
         shared = None
 
     if not chat:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail=ERROR_MESSAGES.NOT_FOUND)
-
-    # Look up the original chat_id to check access grants (admins bypass)
-    if user.role != 'admin' or not ENABLE_ADMIN_CHAT_ACCESS:
-        if shared and shared.user_id != user.id:
-            has_grant = await AccessGrants.has_access(
-                user_id=user.id,
-                resource_type='shared_chat',
-                resource_id=shared.chat_id,
-                permission='read',
-                db=db,
-            )
-            if not has_grant:
-                raise HTTPException(
-                    status_code=status.HTTP_401_UNAUTHORIZED,
-                    detail=ERROR_MESSAGES.ACCESS_PROHIBITED,
-                )
 
     return await _chat_response_with_resolved_mode(
         chat,
@@ -1386,82 +1393,55 @@ async def update_chat_by_id(
     user=Depends(get_verified_user),
     db: AsyncSession = Depends(get_async_session),
 ):
-    chat = await Chats.get_chat_by_id_and_user_id(id, user.id)
-    if chat:
-        persisted_mode = (chat.chat or {}).get('mode')
-        has_agent_run = False
-        if persisted_mode is None:
-            has_agent_run = chat_has_agent_mode_evidence(chat.chat)
-            if not has_agent_run:
-                has_agent_run = await AgentRuns.has_runs_by_chat(id, user.id, db=db)
-
-        try:
-            claimed = await ConversationModeProfiles.resolve_persisted_chat_binding(
-                chat_id=id,
-                user_id=user.id,
-                requested_mode=(form_data.chat.get('mode') if 'mode' in form_data.chat else None),
-                has_agent_run=has_agent_run,
-            )
-        except InvalidConversationModeError as exc:
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail={'code': exc.code, 'message': str(exc)},
-            ) from exc
-        except ConversationModeMismatchError as exc:
-            raise HTTPException(
-                status_code=status.HTTP_409_CONFLICT,
-                detail={
-                    'code': exc.code,
-                    'message': str(exc),
-                    'requested': exc.requested.value,
-                    'persisted': exc.persisted.value,
-                },
-            ) from exc
-        except (ConversationModeProfileIntegrityError, ConversationModeProfileLegacyBindingError) as exc:
-            raise _mode_profile_http_exception(exc) from exc
-        except (ConversationModeProfileBindingConflict, ModeProfileRevisionHintConflictError) as exc:
-            raise _mode_profile_http_exception(exc) from exc
-        except (ModeProfileServiceUnavailableError, SQLAlchemyError) as exc:
-            raise _mode_profile_http_exception(exc) from exc
-
-        if claimed is None:
-            raise HTTPException(
-                status_code=status.HTTP_401_UNAUTHORIZED,
-                detail=ERROR_MESSAGES.ACCESS_PROHIBITED,
-            )
-        mode = claimed.mode
-
-        update_patch = dict(form_data.chat)
-        update_patch.pop('mode_profile_revision_id', None)
-        updated_chat = {**chat.chat, **update_patch}
-        updated_chat['mode'] = mode
-        if 'history' in update_patch:
-            updated_chat['history'] = Chats.merge_history(
-                chat.chat.get('history'),
-                update_patch.get('history'),
-            )
-
-        chat = await Chats.update_chat_by_id(id, updated_chat, db=db)
-
-        # Reconcile chat_message rows without inferring deletes from missing IDs.
-        # Message deletion has its own endpoint below.
-        messages = (updated_chat.get('history') or {}).get('messages') or {}
-        if messages:
-            await Chats.reconcile_messages_by_chat_id(id, user.id, messages)
-
-        await publish_event(
-            request,
-            EVENTS.CHAT_UPDATED,
-            actor=user,
-            subject_id=id,
-            data={'title': chat.title},
+    try:
+        chat = await ConversationModeProfiles.resolve_and_update_persisted_chat(
+            chat_id=id,
+            user_id=user.id,
+            update_patch=form_data.chat,
+            requested_mode=(form_data.chat.get('mode') if 'mode' in form_data.chat else None),
         )
-        return ChatResponse(**chat.model_dump())
-    else:
+    except InvalidConversationModeError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail={'code': exc.code, 'message': str(exc)},
+        ) from exc
+    except ConversationModeMismatchError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail={
+                'code': exc.code,
+                'message': str(exc),
+                'requested': exc.requested.value,
+                'persisted': exc.persisted.value,
+            },
+        ) from exc
+    except (ConversationModeProfileIntegrityError, ConversationModeProfileLegacyBindingError) as exc:
+        raise _mode_profile_http_exception(exc) from exc
+    except (ConversationModeProfileBindingConflict, ModeProfileRevisionHintConflictError) as exc:
+        raise _mode_profile_http_exception(exc) from exc
+    except (ModeProfileServiceUnavailableError, SQLAlchemyError) as exc:
+        raise _mode_profile_http_exception(exc) from exc
+
+    if chat is None:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail=ERROR_MESSAGES.ACCESS_PROHIBITED,
         )
+
+    # Reconcile chat_message rows without inferring deletes from missing IDs.
+    # Message deletion has its own endpoint below.
+    messages = (chat.chat.get('history') or {}).get('messages') or {}
+    if messages:
+        await Chats.reconcile_messages_by_chat_id(id, user.id, messages)
+
+    await publish_event(
+        request,
+        EVENTS.CHAT_UPDATED,
+        actor=user,
+        subject_id=id,
+        data={'title': chat.title},
+    )
+    return ChatResponse(**chat.model_dump())
 
 
 ############################

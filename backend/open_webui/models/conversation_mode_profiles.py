@@ -37,7 +37,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.sql import Select
 
 if TYPE_CHECKING:
-    from open_webui.models.chats import Chat
+    from open_webui.models.chats import Chat, ChatModel
 
 
 def _baseline_revision_id(mode: str) -> str:
@@ -879,74 +879,159 @@ class ConversationModeProfileTable:
             if chat is None:
                 return None
 
-            chat_content = dict(chat.chat) if isinstance(chat.chat, Mapping) else {}
-            resolution = resolve_conversation_mode(
-                requested=requested_mode,
-                persisted=chat_content.get('mode'),
-                is_new=False,
+            return await self._resolve_locked_persisted_chat_binding(
+                session,
+                chat=chat,
+                requested_mode=requested_mode,
                 has_agent_run=has_agent_run,
+                dialect_name=dialect_name,
             )
-            mode = resolution.mode.value
 
-            if chat.mode_profile_revision_id is not None:
-                revision_row = await session.get(
-                    ConversationModeProfileRevision,
-                    chat.mode_profile_revision_id,
-                )
-                if revision_row is None:
-                    raise ConversationModeProfileIntegrityError(
-                        chat.mode_profile_revision_id,
-                        f'Conversation mode profile revision {chat.mode_profile_revision_id} is unavailable',
+    async def resolve_and_update_persisted_chat(
+        self,
+        *,
+        chat_id: str,
+        user_id: str | None,
+        update_patch: Mapping[str, Any],
+        requested_mode: str | None,
+        has_agent_run: bool | None = None,
+        db: AsyncSession | None = None,
+    ) -> ChatModel | None:
+        """Atomically resolve a persisted binding and save the sanitized chat payload.
+
+        The Chat row lock is acquired before its mode-profile head, matching the
+        resolver's existing lock order.  A caller-owned session remains
+        uncommitted; repository-owned calls commit exactly once on success.
+        """
+        from open_webui.agent.conversation_mode import chat_has_agent_mode_evidence
+        from open_webui.models.chats import ChatModel, Chats
+
+        async with _write_session(db) as (session, dialect_name):
+            chat = await self._lock_chat(
+                session,
+                chat_id=chat_id,
+                user_id=user_id,
+                dialect_name=dialect_name,
+            )
+            if chat is None:
+                return None
+
+            chat_content = dict(chat.chat) if isinstance(chat.chat, Mapping) else {}
+            resolved_has_agent_run = has_agent_run
+            if resolved_has_agent_run is None:
+                resolved_has_agent_run = chat_has_agent_mode_evidence(chat_content)
+                if not resolved_has_agent_run and chat_content.get('mode') is None:
+                    from open_webui.models.agent_runs import AgentRuns
+
+                    resolved_has_agent_run = await AgentRuns.has_runs_by_chat(
+                        chat.id,
+                        chat.user_id,
+                        db=session,
                     )
-                revision = _revision_to_model(revision_row, expected_mode=mode)
-                binding = ConversationModeProfileChatBindingModel(
-                    chat_id=chat.id,
-                    user_id=chat.user_id,
-                    mode_profile_revision_id=revision.id,
-                )
-                return ConversationModeProfilePersistedChatResolutionModel(
-                    chat_id=chat.id,
-                    user_id=chat.user_id,
-                    mode=mode,
-                    mode_profile_revision_id=revision.id,
-                    binding=binding,
-                )
 
-            head = await self._lock_head(session, mode, dialect_name)
-            if head is None:
-                raise ConversationModeProfileIntegrityError(
-                    '',
-                    f'Conversation mode profile head {mode} is unavailable',
-                )
-            if chat.created_at > head.cutover_at:
-                raise ConversationModeProfileLegacyBindingError(chat_id=chat.id)
-
-            baseline_row = await session.get(
-                ConversationModeProfileRevision,
-                head.baseline_revision_id,
+            resolution = await self._resolve_locked_persisted_chat_binding(
+                session,
+                chat=chat,
+                requested_mode=requested_mode,
+                has_agent_run=resolved_has_agent_run,
+                dialect_name=dialect_name,
             )
-            if baseline_row is None:
-                raise ConversationModeProfileIntegrityError(
-                    head.baseline_revision_id,
-                    f'Conversation mode profile baseline revision for {mode} is unavailable',
+
+            patch = dict(update_patch)
+            patch.pop('mode_profile_revision_id', None)
+            updated_chat = {**chat_content, **patch}
+            updated_chat['mode'] = resolution.mode
+            if 'history' in patch:
+                updated_chat['history'] = Chats.merge_history(
+                    chat_content.get('history'),
+                    patch.get('history'),
                 )
-            baseline = _revision_to_model(baseline_row, expected_mode=mode)
-            if resolution.should_persist:
-                chat_content['mode'] = mode
-                chat.chat = chat_content
-            chat.mode_profile_revision_id = baseline.id
+
+            chat.chat = Chats._clean_null_bytes(updated_chat)
+            title = updated_chat['title'] if 'title' in updated_chat else 'New Chat'
+            chat.title = Chats._clean_null_bytes(title)
+            chat.updated_at = _now_seconds()
+            await session.flush()
+            return ChatModel.model_validate(chat)
+
+    async def _resolve_locked_persisted_chat_binding(
+        self,
+        session: AsyncSession,
+        *,
+        chat: Chat,
+        requested_mode: str | None,
+        has_agent_run: bool,
+        dialect_name: str,
+    ) -> ConversationModeProfilePersistedChatResolutionModel:
+        """Resolve one already-locked Chat row without starting another transaction."""
+        chat_content = dict(chat.chat) if isinstance(chat.chat, Mapping) else {}
+        resolution = resolve_conversation_mode(
+            requested=requested_mode,
+            persisted=chat_content.get('mode'),
+            is_new=False,
+            has_agent_run=has_agent_run,
+        )
+        mode = resolution.mode.value
+
+        if chat.mode_profile_revision_id is not None:
+            revision_row = await session.get(
+                ConversationModeProfileRevision,
+                chat.mode_profile_revision_id,
+            )
+            if revision_row is None:
+                raise ConversationModeProfileIntegrityError(
+                    chat.mode_profile_revision_id,
+                    f'Conversation mode profile revision {chat.mode_profile_revision_id} is unavailable',
+                )
+            revision = _revision_to_model(revision_row, expected_mode=mode)
             binding = ConversationModeProfileChatBindingModel(
                 chat_id=chat.id,
                 user_id=chat.user_id,
-                mode_profile_revision_id=baseline.id,
+                mode_profile_revision_id=revision.id,
             )
             return ConversationModeProfilePersistedChatResolutionModel(
                 chat_id=chat.id,
                 user_id=chat.user_id,
                 mode=mode,
-                mode_profile_revision_id=baseline.id,
+                mode_profile_revision_id=revision.id,
                 binding=binding,
             )
+
+        head = await self._lock_head(session, mode, dialect_name)
+        if head is None:
+            raise ConversationModeProfileIntegrityError(
+                '',
+                f'Conversation mode profile head {mode} is unavailable',
+            )
+        if chat.created_at > head.cutover_at:
+            raise ConversationModeProfileLegacyBindingError(chat_id=chat.id)
+
+        baseline_row = await session.get(
+            ConversationModeProfileRevision,
+            head.baseline_revision_id,
+        )
+        if baseline_row is None:
+            raise ConversationModeProfileIntegrityError(
+                head.baseline_revision_id,
+                f'Conversation mode profile baseline revision for {mode} is unavailable',
+            )
+        baseline = _revision_to_model(baseline_row, expected_mode=mode)
+        if resolution.should_persist:
+            chat_content['mode'] = mode
+            chat.chat = chat_content
+        chat.mode_profile_revision_id = baseline.id
+        binding = ConversationModeProfileChatBindingModel(
+            chat_id=chat.id,
+            user_id=chat.user_id,
+            mode_profile_revision_id=baseline.id,
+        )
+        return ConversationModeProfilePersistedChatResolutionModel(
+            chat_id=chat.id,
+            user_id=chat.user_id,
+            mode=mode,
+            mode_profile_revision_id=baseline.id,
+            binding=binding,
+        )
 
     async def _recover_temporary_binding_insert_conflict(
         self,

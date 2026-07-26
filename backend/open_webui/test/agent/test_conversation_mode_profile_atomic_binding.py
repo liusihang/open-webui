@@ -27,6 +27,7 @@ from open_webui.models.conversation_mode_profiles import (
 from open_webui.models.shared_chats import SharedChat
 from open_webui.routers import chats as chats_router
 from sqlalchemy import select, text
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 OLD_REVISION_ID = '00000000-0000-0000-0000-000000000001'
@@ -244,8 +245,7 @@ async def test_atomic_new_chat_rechecks_prevalidated_revision_and_rejects_head_d
 )
 def test_bulk_import_uses_one_canonical_mode_head_lock_order_independent_of_input_order(modes) -> None:
     forms = [
-        ChatImportForm(chat={**_chat_form(f'import-{index}').chat, 'mode': mode})
-        for index, mode in enumerate(modes)
+        ChatImportForm(chat={**_chat_form(f'import-{index}').chat, 'mode': mode}) for index, mode in enumerate(modes)
     ]
 
     assert profile_service.canonical_import_mode_head_lock_order(forms) == ('agent', 'chat')
@@ -321,6 +321,148 @@ async def test_shared_snapshot_read_fails_closed_for_post_cutover_unbound_source
         'code': 'mode_profile_integrity_error',
         'message': 'The conversation mode profile binding failed integrity verification.',
     }
+
+
+@pytest.mark.asyncio
+async def test_shared_snapshot_read_audits_a_legacy_unbound_source_after_authorization(atomic_profile_db) -> None:
+    source = Chat(
+        id='legacy-unbound-source-chat',
+        user_id='user-1',
+        title='Source',
+        chat={'title': 'Source', 'mode': 'chat', 'history': {'currentId': None, 'messages': {}}},
+        created_at=1,
+        updated_at=1,
+        mode_profile_revision_id=None,
+    )
+    snapshot = SharedChat(
+        id='shared-legacy-unbound-source-chat',
+        chat_id=source.id,
+        user_id=source.user_id,
+        title='Snapshot',
+        chat={'title': 'Snapshot', 'mode': 'chat', 'history': {'currentId': None, 'messages': {}}},
+        created_at=1,
+        updated_at=1,
+    )
+    async with atomic_profile_db() as session:
+        session.add_all([source, snapshot])
+        await session.commit()
+
+    response = await chats_router.get_shared_chat_by_id(
+        snapshot.id,
+        SimpleNamespace(id=source.user_id, role='user'),
+        None,
+    )
+
+    assert response.mode_profile_revision_id == OLD_REVISION_ID
+    assert await _chat_binding(atomic_profile_db, source.id) == OLD_REVISION_ID
+
+
+@pytest.mark.asyncio
+async def test_atomic_legacy_profile_claim_and_chat_save_commit_together(atomic_profile_db) -> None:
+    legacy = Chat(
+        id='legacy-atomic-update',
+        user_id='user-1',
+        title='Legacy',
+        chat={'title': 'Legacy', 'history': {'currentId': None, 'messages': {}}},
+        created_at=1,
+        updated_at=1,
+        mode_profile_revision_id=None,
+    )
+    async with atomic_profile_db() as session:
+        session.add(legacy)
+        await session.commit()
+
+    updated = await ConversationModeProfiles.resolve_and_update_persisted_chat(
+        chat_id=legacy.id,
+        user_id=legacy.user_id,
+        update_patch={'title': 'Updated\x00 title', 'mode_profile_revision_id': NEW_REVISION_ID},
+        requested_mode=None,
+        has_agent_run=False,
+    )
+
+    assert updated is not None
+    assert updated.title == 'Updated title'
+    assert updated.chat['mode'] == 'chat'
+    assert updated.mode_profile_revision_id == OLD_REVISION_ID
+    assert await _chat_binding(atomic_profile_db, legacy.id) == OLD_REVISION_ID
+
+
+@pytest.mark.asyncio
+async def test_atomic_legacy_profile_claim_rolls_back_when_chat_save_fails(atomic_profile_db) -> None:
+    legacy = Chat(
+        id='legacy-failed-atomic-update',
+        user_id='user-1',
+        title='Legacy',
+        chat={'title': 'Legacy', 'history': {'currentId': None, 'messages': {}}},
+        created_at=1,
+        updated_at=1,
+        mode_profile_revision_id=None,
+    )
+    async with atomic_profile_db() as session:
+        session.add(legacy)
+        await session.commit()
+        await session.execute(
+            text(
+                """
+                CREATE TRIGGER reject_legacy_atomic_update
+                BEFORE UPDATE ON chat
+                WHEN OLD.id = 'legacy-failed-atomic-update'
+                BEGIN
+                    SELECT RAISE(ABORT, 'forced chat save failure');
+                END;
+                """
+            )
+        )
+        await session.commit()
+
+    with pytest.raises(IntegrityError, match='forced chat save failure'):
+        await ConversationModeProfiles.resolve_and_update_persisted_chat(
+            chat_id=legacy.id,
+            user_id=legacy.user_id,
+            update_patch={'title': 'Must not persist'},
+            requested_mode=None,
+            has_agent_run=False,
+        )
+
+    async with atomic_profile_db() as session:
+        stored = await session.get(Chat, legacy.id)
+    assert stored.title == 'Legacy'
+    assert stored.chat == legacy.chat
+    assert stored.mode_profile_revision_id is None
+
+
+@pytest.mark.asyncio
+async def test_atomic_persisted_update_leaves_a_caller_owned_session_uncommitted(atomic_profile_db) -> None:
+    legacy = Chat(
+        id='legacy-caller-owned-update',
+        user_id='user-1',
+        title='Legacy',
+        chat={'title': 'Legacy', 'history': {'currentId': None, 'messages': {}}},
+        created_at=1,
+        updated_at=1,
+        mode_profile_revision_id=None,
+    )
+    async with atomic_profile_db() as session:
+        session.add(legacy)
+        await session.commit()
+
+    async with atomic_profile_db() as session:
+        updated = await ConversationModeProfiles.resolve_and_update_persisted_chat(
+            chat_id=legacy.id,
+            user_id=legacy.user_id,
+            update_patch={'title': 'Uncommitted'},
+            requested_mode=None,
+            has_agent_run=False,
+            db=session,
+        )
+        assert updated.title == 'Uncommitted'
+        assert session.in_transaction()
+        await session.rollback()
+
+    async with atomic_profile_db() as session:
+        stored = await session.get(Chat, legacy.id)
+    assert stored.title == 'Legacy'
+    assert stored.mode_profile_revision_id is None
 
 
 @pytest.mark.asyncio

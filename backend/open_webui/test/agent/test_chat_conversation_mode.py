@@ -8,6 +8,7 @@ import pytest
 from open_webui.agent.conversation_mode import (
     ConversationModeMismatchError,
     InvalidConversationModeError,
+    chat_has_agent_mode_evidence,
     resolve_conversation_mode,
 )
 from open_webui.agent.conversation_mode_profile_service import ModeProfileServiceUnavailableError
@@ -23,6 +24,7 @@ from open_webui.models.chats import (
 from open_webui.models.conversation_mode_profiles import ConversationModeProfileIntegrityError
 from open_webui.routers import chats as chats_router
 from sqlalchemy import select
+from sqlalchemy.exc import OperationalError
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 
@@ -66,72 +68,54 @@ def _patch_update_boundaries(
 ):
     updates = []
 
-    async def get_chat(chat_id, user_id, db=None):
-        return stored
-
-    async def update_chat(chat_id, updated_chat, db=None):
-        updates.append(updated_chat)
-        return stored.model_copy(
-            update={
-                'chat': updated_chat,
-                'title': updated_chat.get('title', stored.title),
-                'updated_at': stored.updated_at + 1,
-            }
-        )
-
     async def reconcile(*args, **kwargs):
         return None
 
     async def publish(*args, **kwargs):
         return None
 
-    async def has_runs(chat_id, user_id, db=None):
-        return has_agent_run
-
-    async def resolve_binding(
+    async def resolve_and_update(
         *,
         chat_id,
         user_id,
+        update_patch,
         requested_mode,
-        has_agent_run,
         db=None,
     ):
         canonical = stored
         if claimed_mode is not None:
-            canonical = stored.model_copy(
-                update={'chat': {**stored.chat, 'mode': claimed_mode}}
-            )
+            canonical = stored.model_copy(update={'chat': {**stored.chat, 'mode': claimed_mode}})
         resolution = resolve_conversation_mode(
             requested=requested_mode,
             persisted=(canonical.chat or {}).get('mode'),
             is_new=False,
-            has_agent_run=has_agent_run,
+            has_agent_run=has_agent_run or chat_has_agent_mode_evidence(canonical.chat),
         )
-        if resolution.should_persist:
-            canonical = canonical.model_copy(
-                update={
-                    'chat': {
-                        **canonical.chat,
-                        'mode': resolution.mode.value,
-                    }
-                }
+        patch = dict(update_patch)
+        patch.pop('mode_profile_revision_id', None)
+        updated_chat = {**canonical.chat, **patch, 'mode': resolution.mode.value}
+        if 'history' in patch:
+            updated_chat['history'] = Chats.merge_history(
+                canonical.chat.get('history'),
+                patch.get('history'),
             )
-        return SimpleNamespace(
-            mode=resolution.mode.value,
-            mode_profile_revision_id=canonical.mode_profile_revision_id or 'chat-baseline',
+        updates.append(updated_chat)
+        return canonical.model_copy(
+            update={
+                'chat': updated_chat,
+                'title': updated_chat.get('title', canonical.title),
+                'updated_at': canonical.updated_at + 1,
+                'mode_profile_revision_id': canonical.mode_profile_revision_id or 'chat-baseline',
+            }
         )
 
-    monkeypatch.setattr(chats_router.Chats, 'get_chat_by_id_and_user_id', get_chat)
-    monkeypatch.setattr(chats_router.Chats, 'update_chat_by_id', update_chat)
-    monkeypatch.setattr(chats_router.ConversationModeProfiles, 'resolve_persisted_chat_binding', resolve_binding)
+    monkeypatch.setattr(
+        chats_router.ConversationModeProfiles,
+        'resolve_and_update_persisted_chat',
+        resolve_and_update,
+    )
     monkeypatch.setattr(chats_router.Chats, 'reconcile_messages_by_chat_id', reconcile)
     monkeypatch.setattr(chats_router, 'publish_event', publish)
-    monkeypatch.setattr(
-        chats_router,
-        'AgentRuns',
-        SimpleNamespace(has_runs_by_chat=has_runs),
-        raising=False,
-    )
     return updates
 
 
@@ -214,6 +198,10 @@ async def test_shared_get_uses_original_chat_id_for_legacy_agent_run_mode(
             id=share_id,
             chat_id='chat-1',
             user_id='user-1',
+            title=snapshot.title,
+            chat=snapshot.chat,
+            created_at=snapshot.created_at,
+            updated_at=snapshot.updated_at,
         )
 
     async def has_runs(chat_id, user_id, db=None):
@@ -227,7 +215,6 @@ async def test_shared_get_uses_original_chat_id_for_legacy_agent_run_mode(
     async def resolve_source(**kwargs):
         return SimpleNamespace(mode_profile_revision_id='chat-source-revision')
 
-    monkeypatch.setattr(chats_router.Chats, 'get_chat_by_share_id', get_snapshot)
     monkeypatch.setattr(chats_router.SharedChats, 'get_by_id', get_shared)
     monkeypatch.setattr(chats_router.AgentRuns, 'has_runs_by_chat', has_runs)
     monkeypatch.setattr(chats_router.Chats, 'get_chat_by_id', get_source)
@@ -248,7 +235,7 @@ async def test_concurrent_legacy_mode_claim_allows_only_one_mode(
     monkeypatch,
     tmp_path,
 ) -> None:
-    engine = create_async_engine(f"sqlite+aiosqlite:///{tmp_path / 'mode-claim.db'}")
+    engine = create_async_engine(f'sqlite+aiosqlite:///{tmp_path / "mode-claim.db"}')
     session_factory = async_sessionmaker(engine, expire_on_commit=False)
 
     async with engine.begin() as connection:
@@ -291,11 +278,7 @@ async def test_concurrent_legacy_mode_claim_allows_only_one_mode(
     )
 
     successes = [result for result in results if not isinstance(result, Exception)]
-    conflicts = [
-        result
-        for result in results
-        if isinstance(result, ConversationModeMismatchError)
-    ]
+    conflicts = [result for result in results if isinstance(result, ConversationModeMismatchError)]
     assert len(successes) == 1
     assert len(conflicts) == 1
 
@@ -323,6 +306,47 @@ async def test_generic_update_rejects_explicit_mode_mutation(monkeypatch) -> Non
     assert exc_info.value.status_code == 409
     assert exc_info.value.detail['code'] == 'conversation_mode_mismatch'
     assert updates == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('source_state', ['missing', 'corrupt', 'unbound'])
+async def test_shared_read_denial_precedes_all_original_chat_and_profile_access(monkeypatch, source_state) -> None:
+    calls = []
+
+    async def get_shared(share_id, db=None):
+        return SimpleNamespace(id=share_id, chat_id='original-chat', user_id='owner-1')
+
+    async def denied_grant(**kwargs):
+        calls.append(('grant', kwargs['resource_id']))
+        return False
+
+    async def original_chat(*args, **kwargs):
+        calls.append(('original-chat', source_state))
+        raise AssertionError('denied shared reads must not load the original chat')
+
+    async def profile_binding(*args, **kwargs):
+        calls.append(('profile-binding', source_state))
+        raise AssertionError('denied shared reads must not resolve the original binding')
+
+    monkeypatch.setattr(chats_router.SharedChats, 'get_by_id', get_shared)
+    monkeypatch.setattr(chats_router.AccessGrants, 'has_access', denied_grant)
+    monkeypatch.setattr(chats_router.Chats, 'get_chat_by_id', original_chat)
+    monkeypatch.setattr(
+        chats_router.ConversationModeProfiles,
+        'resolve_persisted_chat_binding',
+        profile_binding,
+    )
+
+    with pytest.raises(chats_router.HTTPException) as exc_info:
+        await chats_router.get_shared_chat_by_id(
+            'share-denied',
+            SimpleNamespace(id='other-user', role='user'),
+            None,
+        )
+
+    assert exc_info.value.status_code == 401
+    assert exc_info.value.detail == chats_router.ERROR_MESSAGES.ACCESS_PROHIBITED
+    assert calls == [('grant', 'original-chat')]
 
 
 @pytest.mark.asyncio
@@ -442,21 +466,13 @@ async def test_generic_update_merges_from_atomic_mode_claim_result(monkeypatch) 
 @pytest.mark.asyncio
 async def test_generic_update_resolves_and_claims_profile_binding_before_save(monkeypatch) -> None:
     stored = _chat_model(mode=None)
-    updates = []
-    resolutions = []
+    calls = []
 
-    async def get_chat(chat_id, user_id, db=None):
-        return stored
-
-    async def resolve_binding(**kwargs):
-        resolutions.append(kwargs)
-        return SimpleNamespace(mode='chat', mode_profile_revision_id='chat-baseline')
-
-    async def update_chat(chat_id, updated_chat, db=None):
-        updates.append(updated_chat)
+    async def resolve_and_update(**kwargs):
+        calls.append(kwargs)
         return stored.model_copy(
             update={
-                'chat': updated_chat,
+                'chat': {**stored.chat, 'title': 'Updated', 'mode': 'chat'},
                 'mode_profile_revision_id': 'chat-baseline',
             }
         )
@@ -467,19 +483,17 @@ async def test_generic_update_resolves_and_claims_profile_binding_before_save(mo
     async def reconcile(*args, **kwargs):
         return None
 
-    async def has_runs(*args, **kwargs):
-        return False
-
     async def publish(*args, **kwargs):
         return None
 
-    monkeypatch.setattr(chats_router.Chats, 'get_chat_by_id_and_user_id', get_chat)
-    monkeypatch.setattr(chats_router.Chats, 'update_chat_by_id', update_chat)
     monkeypatch.setattr(chats_router.Chats, 'claim_conversation_mode', old_claim)
-    monkeypatch.setattr(chats_router.ConversationModeProfiles, 'resolve_persisted_chat_binding', resolve_binding)
+    monkeypatch.setattr(
+        chats_router.ConversationModeProfiles,
+        'resolve_and_update_persisted_chat',
+        resolve_and_update,
+    )
     monkeypatch.setattr(chats_router.Chats, 'reconcile_messages_by_chat_id', reconcile)
     monkeypatch.setattr(chats_router, 'publish_event', publish)
-    monkeypatch.setattr(chats_router.AgentRuns, 'has_runs_by_chat', has_runs)
 
     response = await chats_router.update_chat_by_id(
         SimpleNamespace(),
@@ -489,24 +503,42 @@ async def test_generic_update_resolves_and_claims_profile_binding_before_save(mo
         None,
     )
 
-    assert resolutions == [
+    assert calls == [
         {
             'chat_id': stored.id,
             'user_id': stored.user_id,
+            'update_patch': {'title': 'Updated', 'mode_profile_revision_id': 'spoofed'},
             'requested_mode': None,
-            'has_agent_run': False,
-        }
-    ]
-    assert updates == [
-        {
-            'id': 'chat-1',
-            'title': 'Updated',
-            'history': stored.chat['history'],
-            'messages': [],
-            'mode': 'chat',
         }
     ]
     assert response.mode_profile_revision_id == 'chat-baseline'
+
+
+@pytest.mark.asyncio
+async def test_generic_update_maps_database_failures_to_nonsecret_unavailable(monkeypatch) -> None:
+    async def fail_update(*args, **kwargs):
+        raise OperationalError('UPDATE chat', {}, RuntimeError('private database detail'))
+
+    monkeypatch.setattr(
+        chats_router.ConversationModeProfiles,
+        'resolve_and_update_persisted_chat',
+        fail_update,
+    )
+
+    with pytest.raises(chats_router.HTTPException) as exc_info:
+        await chats_router.update_chat_by_id(
+            SimpleNamespace(),
+            'chat-1',
+            ChatForm(chat={'title': 'Updated'}),
+            SimpleNamespace(id='user-1'),
+            None,
+        )
+
+    assert exc_info.value.status_code == 503
+    assert exc_info.value.detail == {
+        'code': 'mode_profile_unavailable',
+        'message': 'The conversation mode profile service is temporarily unavailable.',
+    }
 
 
 @pytest.mark.asyncio
@@ -642,9 +674,7 @@ async def test_create_chat_endpoint_defaults_missing_mode_to_chat(monkeypatch) -
     ):
         captured.append(form_data.chat)
         return SimpleNamespace(
-            chat=_chat_model(mode=form_data.chat.get('mode')).model_copy(
-                update={'id': chat_id, 'chat': form_data.chat}
-            )
+            chat=_chat_model(mode=form_data.chat.get('mode')).model_copy(update={'id': chat_id, 'chat': form_data.chat})
         )
 
     async def publish(*args, **kwargs):
@@ -681,9 +711,7 @@ async def test_create_chat_endpoint_uses_server_validated_temporary_source(monke
         captured['mode'] = mode
         captured['source_temporary_conversation_id'] = source_temporary_conversation_id
         return SimpleNamespace(
-            chat=_chat_model(mode='chat').model_copy(
-                update={'id': chat_id, 'user_id': user_id, 'chat': form_data.chat}
-            )
+            chat=_chat_model(mode='chat').model_copy(update={'id': chat_id, 'user_id': user_id, 'chat': form_data.chat})
         )
 
     async def unexpected_unbound_insert(*args, **kwargs):
@@ -753,9 +781,7 @@ async def test_import_endpoint_preserves_invalid_mode_error_code(monkeypatch) ->
     with pytest.raises(chats_router.HTTPException) as exc_info:
         await chats_router.import_chats(
             SimpleNamespace(app=SimpleNamespace()),
-            ChatsImportForm(
-                chats=[ChatImportForm(chat=_chat_model(mode='work').chat)]
-            ),
+            ChatsImportForm(chats=[ChatImportForm(chat=_chat_model(mode='work').chat)]),
             SimpleNamespace(id='user-1'),
             None,
         )
@@ -893,9 +919,7 @@ async def test_shared_clone_resolves_binding_from_shared_original_not_snapshot(m
 @pytest.mark.asyncio
 async def test_share_read_and_export_expose_only_revision_audit_metadata(monkeypatch) -> None:
     administrator_prompt = 'administrator profile prompt must never be exported'
-    chat = _chat_model(mode='chat').model_copy(
-        update={'mode_profile_revision_id': 'chat-audit-revision'}
-    )
+    chat = _chat_model(mode='chat').model_copy(update={'mode_profile_revision_id': 'chat-audit-revision'})
 
     async def get_owned(chat_id, user_id, db=None):
         return chat
@@ -922,10 +946,15 @@ async def test_share_read_and_export_expose_only_revision_audit_metadata(monkeyp
     )
 
     async def get_shared(share_id, db=None):
-        return SimpleNamespace(id=share_id, chat_id='chat-1', user_id='user-1')
-
-    async def get_by_share_id(share_id, db=None):
-        return chat.model_copy(update={'share_id': share_id})
+        return SimpleNamespace(
+            id=share_id,
+            chat_id='chat-1',
+            user_id='user-1',
+            title=chat.title,
+            chat=chat.chat,
+            created_at=chat.created_at,
+            updated_at=chat.updated_at,
+        )
 
     async def get_source(chat_id, *, db=None, repair=True, strict=False):
         return chat
@@ -934,7 +963,6 @@ async def test_share_read_and_export_expose_only_revision_audit_metadata(monkeyp
         return SimpleNamespace(mode_profile_revision_id='chat-audit-revision')
 
     monkeypatch.setattr(chats_router.SharedChats, 'get_by_id', get_shared)
-    monkeypatch.setattr(chats_router.Chats, 'get_chat_by_share_id', get_by_share_id)
     monkeypatch.setattr(chats_router.Chats, 'get_chat_by_id', get_source)
     monkeypatch.setattr(chats_router.ConversationModeProfiles, 'resolve_persisted_chat_binding', resolve_source)
 
