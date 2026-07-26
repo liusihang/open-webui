@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from dataclasses import dataclass
+from dataclasses import field as dataclass_field
 from enum import StrEnum
 from typing import Any, Final
 
@@ -12,9 +13,7 @@ from open_webui.agent.conversation_mode import ConversationMode
 
 PROFILE_SCHEMA_VERSION: Final = 1
 ALLOWED_MODES: Final = frozenset(mode.value for mode in ConversationMode)
-ALLOWED_FEATURE_IDS: Final = frozenset(
-    {'web_search', 'code_interpreter', 'image_generation'}
-)
+ALLOWED_FEATURE_IDS: Final = frozenset({'web_search', 'code_interpreter', 'image_generation'})
 
 _DEFAULT_FIELDS: Final = (
     'terminal_id',
@@ -29,9 +28,7 @@ _COLLECTION_DEFAULT_FIELDS: Final = (
     'filter_ids',
     'feature_ids',
 )
-_ALLOWED_CONTENT_FIELDS: Final = frozenset(
-    {'schema_version', 'system_prompt', 'defaults'}
-)
+_ALLOWED_CONTENT_FIELDS: Final = frozenset({'schema_version', 'system_prompt', 'defaults'})
 _FORBIDDEN_PROFILE_FIELDS: Final = frozenset(
     {
         'model',
@@ -92,6 +89,38 @@ class ProfileDefaults:
     filter_ids: CollectionDefault = INHERIT
     feature_ids: CollectionDefault = INHERIT
 
+    def __post_init__(self) -> None:
+        object.__setattr__(
+            self,
+            'terminal_id',
+            _normalize_terminal_value(self.terminal_id),
+        )
+        object.__setattr__(
+            self,
+            'tool_ids',
+            _normalize_collection_value(self.tool_ids, field='tool_ids'),
+        )
+        object.__setattr__(
+            self,
+            'skill_ids',
+            _normalize_collection_value(self.skill_ids, field='skill_ids'),
+        )
+        object.__setattr__(
+            self,
+            'filter_ids',
+            _normalize_collection_value(self.filter_ids, field='filter_ids'),
+        )
+        object.__setattr__(
+            self,
+            'feature_ids',
+            _normalize_collection_value(
+                self.feature_ids,
+                field='feature_ids',
+                allowed_values=ALLOWED_FEATURE_IDS,
+            ),
+        )
+        _validate_known_conflicts(self)
+
     def to_dict(self) -> dict[str, Any]:
         return {
             'terminal_id': _serialize_default(self.terminal_id),
@@ -104,10 +133,21 @@ class ProfileDefaults:
 
 @dataclass(frozen=True)
 class ConversationModeProfile:
-    mode: ConversationMode
+    mode: ConversationMode | str
     schema_version: int
-    system_prompt: str
+    system_prompt: str = dataclass_field(repr=False)
     defaults: ProfileDefaults
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, 'mode', _normalize_mode(self.mode))
+        _validate_schema_version(self.schema_version)
+        _validate_system_prompt(self.system_prompt)
+        if not isinstance(self.defaults, ProfileDefaults):
+            raise ModeProfileValidationError(
+                'Mode profile defaults must be ProfileDefaults',
+                reason='invalid_defaults',
+                field='defaults',
+            )
 
     @classmethod
     def from_mapping(
@@ -115,7 +155,6 @@ class ConversationModeProfile:
         mode: ConversationMode | str,
         content: Mapping[str, Any],
     ) -> ConversationModeProfile:
-        normalized_mode = _normalize_mode(mode)
         if not isinstance(content, Mapping):
             raise ModeProfileValidationError(
                 'Mode profile content must be a mapping',
@@ -124,15 +163,6 @@ class ConversationModeProfile:
 
         _validate_content_fields(content)
         schema_version = content.get('schema_version')
-        if (
-            type(schema_version) is not int
-            or schema_version != PROFILE_SCHEMA_VERSION
-        ):
-            raise ModeProfileValidationError(
-                f'Unsupported mode profile schema version: {schema_version!r}',
-                reason='unsupported_schema_version',
-                field='schema_version',
-            )
 
         if 'system_prompt' not in content:
             raise ModeProfileValidationError(
@@ -141,12 +171,6 @@ class ConversationModeProfile:
                 field='system_prompt',
             )
         system_prompt = content['system_prompt']
-        if not isinstance(system_prompt, str):
-            raise ModeProfileValidationError(
-                'Mode profile system_prompt must be a string',
-                reason='invalid_system_prompt',
-                field='system_prompt',
-            )
 
         if 'defaults' not in content:
             raise ModeProfileValidationError(
@@ -155,10 +179,9 @@ class ConversationModeProfile:
                 field='defaults',
             )
         defaults = _normalize_defaults(content['defaults'])
-        _validate_known_conflicts(defaults)
 
         return cls(
-            mode=normalized_mode,
+            mode=mode,
             schema_version=schema_version,
             system_prompt=system_prompt,
             defaults=defaults,
@@ -201,6 +224,11 @@ def resolve_profile_defaults(
 
         resolved[field] = _serialize_default(profile_value)
 
+    if resolved['terminal_id']:
+        resolved['feature_ids'] = [
+            feature_id for feature_id in resolved['feature_ids'] if feature_id != 'code_interpreter'
+        ]
+
     return resolved
 
 
@@ -223,9 +251,7 @@ def compose_prompt_layers(
                 reason='invalid_prompt_layer',
                 field=field,
             )
-    return tuple(
-        prompt for prompt in (administrator, model, user) if prompt is not None
-    )
+    return tuple(prompt for prompt in (administrator, model, user) if prompt is not None and prompt.strip())
 
 
 def _normalize_mode(mode: ConversationMode | str) -> ConversationMode:
@@ -282,49 +308,39 @@ def _normalize_defaults(raw_defaults: Any) -> ProfileDefaults:
             )
 
     return ProfileDefaults(
-        terminal_id=_normalize_terminal_default(raw_defaults),
-        tool_ids=_normalize_collection_default(raw_defaults, 'tool_ids'),
-        skill_ids=_normalize_collection_default(raw_defaults, 'skill_ids'),
-        filter_ids=_normalize_collection_default(raw_defaults, 'filter_ids'),
-        feature_ids=_normalize_collection_default(
-            raw_defaults,
-            'feature_ids',
-            allowed_values=ALLOWED_FEATURE_IDS,
-        ),
+        terminal_id=raw_defaults.get('terminal_id', INHERIT),
+        tool_ids=raw_defaults.get('tool_ids', INHERIT),
+        skill_ids=raw_defaults.get('skill_ids', INHERIT),
+        filter_ids=raw_defaults.get('filter_ids', INHERIT),
+        feature_ids=raw_defaults.get('feature_ids', INHERIT),
     )
 
 
-def _normalize_terminal_default(
-    raw_defaults: Mapping[str, Any],
-) -> TerminalDefault:
-    if 'terminal_id' not in raw_defaults or raw_defaults['terminal_id'] == 'inherit':
+def _normalize_terminal_value(value: Any) -> TerminalDefault:
+    if value is INHERIT or value == INHERIT.value:
         return INHERIT
-    value = raw_defaults['terminal_id']
     if value is None:
         return None
     return _normalize_identifier(value, field='terminal_id')
 
 
-def _normalize_collection_default(
-    raw_defaults: Mapping[str, Any],
-    field: str,
+def _normalize_collection_value(
+    value: Any,
     *,
+    field: str,
     allowed_values: frozenset[str] | None = None,
 ) -> CollectionDefault:
-    if field not in raw_defaults or raw_defaults[field] == 'inherit':
+    if value is INHERIT or value == INHERIT.value:
         return INHERIT
 
-    value = raw_defaults[field]
-    if not isinstance(value, list):
+    if not isinstance(value, (list, tuple)):
         raise ModeProfileValidationError(
-            f'{field} must be inherit or a list of identifiers',
+            f'{field} must be inherit or a collection of identifiers',
             reason='invalid_default_value',
             field=field,
         )
 
-    normalized = tuple(
-        _normalize_identifier(item, field=field) for item in value
-    )
+    normalized = tuple(_normalize_identifier(item, field=field) for item in value)
     if len(normalized) != len(set(normalized)):
         raise ModeProfileValidationError(
             f'{field} contains duplicate identifiers',
@@ -353,6 +369,24 @@ def _normalize_identifier(value: Any, *, field: str) -> str:
             field=field,
         )
     return value
+
+
+def _validate_schema_version(schema_version: Any) -> None:
+    if type(schema_version) is not int or schema_version != PROFILE_SCHEMA_VERSION:
+        raise ModeProfileValidationError(
+            f'Unsupported mode profile schema version: {schema_version!r}',
+            reason='unsupported_schema_version',
+            field='schema_version',
+        )
+
+
+def _validate_system_prompt(system_prompt: Any) -> None:
+    if not isinstance(system_prompt, str):
+        raise ModeProfileValidationError(
+            'Mode profile system_prompt must be a string',
+            reason='invalid_system_prompt',
+            field='system_prompt',
+        )
 
 
 def _validate_known_conflicts(defaults: ProfileDefaults) -> None:

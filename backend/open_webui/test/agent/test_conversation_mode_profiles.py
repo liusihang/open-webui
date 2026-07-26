@@ -1,14 +1,18 @@
 from __future__ import annotations
 
 from copy import deepcopy
+from dataclasses import FrozenInstanceError
 
 import pytest
 from open_webui.agent.conversation_mode_profiles import (
     ALLOWED_MODES,
+    INHERIT,
     PROFILE_SCHEMA_VERSION,
     ConversationModeProfile,
     ModeProfileConflictError,
+    ModeProfileError,
     ModeProfileValidationError,
+    ProfileDefaults,
     compose_prompt_layers,
     resolve_profile_defaults,
 )
@@ -203,6 +207,45 @@ def test_explicit_defaults_override_model_metadata() -> None:
 
 
 @pytest.mark.parametrize(
+    ('profile_defaults', 'model_defaults', 'expected_terminal'),
+    [
+        (
+            {'terminal_id': 'admin-terminal'},
+            {'feature_ids': ['code_interpreter', 'web_search']},
+            'admin-terminal',
+        ),
+        (
+            {'feature_ids': ['code_interpreter', 'image_generation']},
+            {'terminal_id': 'model-terminal'},
+            'model-terminal',
+        ),
+        (
+            {},
+            {
+                'terminal_id': 'model-terminal',
+                'feature_ids': ['code_interpreter', 'web_search'],
+            },
+            'model-terminal',
+        ),
+    ],
+)
+def test_effective_terminal_removes_code_interpreter_from_resolved_defaults(
+    profile_defaults: dict[str, object],
+    model_defaults: dict[str, object],
+    expected_terminal: str,
+) -> None:
+    profile = ConversationModeProfile.from_mapping(
+        'agent',
+        _content(defaults=profile_defaults),
+    )
+
+    resolved = resolve_profile_defaults(profile.defaults, model_defaults)
+
+    assert resolved['terminal_id'] == expected_terminal
+    assert 'code_interpreter' not in resolved['feature_ids']
+
+
+@pytest.mark.parametrize(
     ('field', 'value'),
     [
         ('model_id', 'model-1'),
@@ -241,12 +284,150 @@ def test_terminal_and_code_interpreter_conflict_is_rejected() -> None:
     assert exc_info.value.reason == 'terminal_code_interpreter_conflict'
 
 
+def test_profile_defaults_constructor_normalizes_inherit_and_collections() -> None:
+    source_tool_ids = ['tool-1']
+    defaults = ProfileDefaults(
+        terminal_id='inherit',
+        tool_ids=source_tool_ids,
+        skill_ids=['skill-1'],
+        filter_ids=[],
+        feature_ids=['web_search'],
+    )
+
+    source_tool_ids.append('tool-2')
+
+    assert defaults.terminal_id is INHERIT
+    assert defaults.tool_ids == ('tool-1',)
+    assert defaults.skill_ids == ('skill-1',)
+    assert defaults.filter_ids == ()
+    assert defaults.feature_ids == ('web_search',)
+
+    with pytest.raises(FrozenInstanceError):
+        defaults.tool_ids = ('replacement',)
+
+
+@pytest.mark.parametrize(
+    ('kwargs', 'reason'),
+    [
+        ({'tool_ids': ['']}, 'invalid_default_identifier'),
+        ({'skill_ids': ['skill-1', 'skill-1']}, 'duplicate_default_identifier'),
+        ({'feature_ids': ['unknown_feature']}, 'unsupported_feature'),
+    ],
+)
+def test_profile_defaults_constructor_rejects_invalid_direct_values(
+    kwargs: dict[str, object],
+    reason: str,
+) -> None:
+    with pytest.raises(ModeProfileValidationError) as exc_info:
+        ProfileDefaults(**kwargs)
+
+    assert exc_info.value.code == 'invalid_mode_profile'
+    assert exc_info.value.reason == reason
+
+
+def test_direct_profile_construction_normalizes_mode_and_keeps_hash_immutable() -> None:
+    source_tool_ids = ['tool-1']
+    profile = ConversationModeProfile(
+        mode='chat',
+        schema_version=PROFILE_SCHEMA_VERSION,
+        system_prompt='Administrator prompt',
+        defaults=ProfileDefaults(tool_ids=source_tool_ids),
+    )
+    original_hash = profile.content_hash
+
+    source_tool_ids.append('tool-2')
+
+    assert profile.mode.value == 'chat'
+    assert profile.defaults.tool_ids == ('tool-1',)
+    assert profile.content_hash == original_hash
+
+
+@pytest.mark.parametrize(
+    ('overrides', 'reason'),
+    [
+        ({'mode': 'work'}, 'unsupported_mode'),
+        ({'schema_version': 2}, 'unsupported_schema_version'),
+        ({'system_prompt': None}, 'invalid_system_prompt'),
+        ({'defaults': {}}, 'invalid_defaults'),
+    ],
+)
+def test_direct_profile_construction_cannot_bypass_validation(
+    overrides: dict[str, object],
+    reason: str,
+) -> None:
+    values: dict[str, object] = {
+        'mode': 'chat',
+        'schema_version': PROFILE_SCHEMA_VERSION,
+        'system_prompt': 'Administrator prompt',
+        'defaults': ProfileDefaults(),
+    }
+    values.update(overrides)
+
+    with pytest.raises(ModeProfileValidationError) as exc_info:
+        ConversationModeProfile(**values)
+
+    assert exc_info.value.code == 'invalid_mode_profile'
+    assert exc_info.value.reason == reason
+
+
+def test_profile_repr_does_not_expose_administrator_prompt() -> None:
+    secret = 'administrator-secret-prompt'
+    profile = ConversationModeProfile.from_mapping(
+        'chat',
+        _content(system_prompt=secret),
+    )
+
+    assert secret not in repr(profile)
+
+
 def test_prompt_composition_order_is_administrator_model_then_user() -> None:
     assert compose_prompt_layers(
         administrator='administrator',
         model='model',
         user='user',
     ) == ('administrator', 'model', 'user')
+
+
+def test_empty_and_whitespace_prompt_layers_are_omitted() -> None:
+    assert compose_prompt_layers(
+        administrator='   ',
+        model='model prompt',
+        user='\n\t',
+    ) == ('model prompt',)
+    assert compose_prompt_layers(administrator='') == ()
+
+
+def test_prompt_composition_keeps_administrator_type_validation() -> None:
+    with pytest.raises(ModeProfileValidationError) as exc_info:
+        compose_prompt_layers(administrator=None)
+
+    assert exc_info.value.code == 'invalid_mode_profile'
+    assert exc_info.value.reason == 'invalid_system_prompt'
+
+
+def test_unknown_profile_field_has_general_code_and_specific_reason() -> None:
+    content = _content()
+    content['temperature'] = 0.2
+
+    with pytest.raises(ModeProfileError) as exc_info:
+        ConversationModeProfile.from_mapping('chat', content)
+
+    assert isinstance(exc_info.value, ModeProfileValidationError)
+    assert exc_info.value.code == 'invalid_mode_profile'
+    assert exc_info.value.reason == 'unknown_profile_field'
+    assert exc_info.value.field == 'temperature'
+
+
+def test_unknown_default_field_is_rejected() -> None:
+    with pytest.raises(ModeProfileValidationError) as exc_info:
+        ConversationModeProfile.from_mapping(
+            'chat',
+            _content(defaults={'unknown_ids': []}),
+        )
+
+    assert exc_info.value.code == 'invalid_mode_profile'
+    assert exc_info.value.reason == 'unknown_default_field'
+    assert exc_info.value.field == 'unknown_ids'
 
 
 def test_public_serialization_omits_private_profile_metadata() -> None:
