@@ -41,8 +41,11 @@ Target files:
 Red command:
 
 ```bash
-PYTHONPATH=backend .venv/bin/pytest -q backend/open_webui/test/agent/test_conversation_mode.py
+PYTHONPATH=backend /Users/liusihang/openwebui/.venv/bin/pytest -q \
+  backend/open_webui/test/agent/test_conversation_mode.py
 ```
+
+This Codex worktree does not contain its own virtualenv, so task execution reuses the root checkout's `.venv` while pointing `PYTHONPATH` at the feature worktree.
 
 ### A2. Implement the pure contract
 
@@ -196,7 +199,7 @@ Update `Navbar.svelte` and `Chat.svelte`:
 Backend focused suites:
 
 ```bash
-PYTHONPATH=backend .venv/bin/pytest -q \
+PYTHONPATH=backend /Users/liusihang/openwebui/.venv/bin/pytest -q \
   backend/open_webui/test/agent/test_conversation_mode.py \
   backend/open_webui/test/agent/test_chat_entry_agent_mode.py \
   backend/open_webui/test/agent/test_agent_run_routes_db_store.py \

@@ -1317,6 +1317,24 @@ class AgentRunTable:
             )
             return [AgentRunModel.model_validate(row) for row in result.scalars().all()]
 
+    async def has_runs_by_chat(
+        self,
+        chat_id: str,
+        user_id: str,
+        db: AsyncSession | None = None,
+    ) -> bool:
+        async with get_async_db_context(db) as db:
+            statement = select(
+                select(AgentRun.id)
+                .where(
+                    AgentRun.chat_id == chat_id,
+                    AgentRun.user_id == user_id,
+                )
+                .limit(1)
+                .exists()
+            )
+            return bool((await db.execute(statement)).scalar())
+
     async def list_runs_by_user(
         self,
         user_id: str,

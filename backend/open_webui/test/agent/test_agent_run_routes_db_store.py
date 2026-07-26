@@ -464,6 +464,23 @@ def app_without_fake_event_store():
 
 
 @pytest.mark.asyncio
+async def test_has_runs_by_chat_scopes_evidence_to_chat_and_user(agent_run_db):
+    assert await AgentRuns.has_runs_by_chat('chat-1', 'user-1') is False
+
+    await AgentRuns.create_run(
+        user_id='user-1',
+        chat_id='chat-1',
+        user_message_id='msg-user',
+        assistant_message_id='msg-assistant',
+        leader_model_id='model-a',
+    )
+
+    assert await AgentRuns.has_runs_by_chat('chat-1', 'user-1') is True
+    assert await AgentRuns.has_runs_by_chat('chat-1', 'user-2') is False
+    assert await AgentRuns.has_runs_by_chat('chat-2', 'user-1') is False
+
+
+@pytest.mark.asyncio
 async def test_agent_run_routes_use_agent_runs_db_when_no_fake_event_store(
     agent_run_db,
     app_without_fake_event_store,
