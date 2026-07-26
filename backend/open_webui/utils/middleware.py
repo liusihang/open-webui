@@ -108,7 +108,6 @@ from open_webui.utils.misc import (
     is_string_allowed,
     merge_system_messages,
     prepend_to_first_user_message_content,
-    remove_system_message,
     set_last_user_message_content,
     strip_empty_content_blocks,
 )
@@ -3830,6 +3829,34 @@ def build_native_tool_continuation_form_data(
     }
 
 
+def _set_last_user_message_content_copy_on_write(content: str, messages: list[dict]) -> None:
+    """Replace the last user text without cloning unchanged message payloads."""
+    for index in range(len(messages) - 1, -1, -1):
+        message = messages[index]
+        if message.get('role') != 'user':
+            continue
+
+        message_content = message.get('content')
+        if isinstance(message_content, list):
+            for content_index, part in enumerate(message_content):
+                if not isinstance(part, dict) or part.get('type') != 'text':
+                    continue
+                if part.get('text') == content:
+                    return
+
+                copied_message = dict(message)
+                copied_content = list(message_content)
+                copied_content[content_index] = {**part, 'text': content}
+                copied_message['content'] = copied_content
+                messages[index] = copied_message
+                return
+            return
+
+        if message_content != content:
+            messages[index] = {**message, 'content': content}
+        return
+
+
 async def restore_native_tool_continuation_context(
     request: Request,
     form_data: dict,
@@ -3850,10 +3877,14 @@ async def restore_native_tool_continuation_context(
         input_messages = [message for message in input_messages if message is not previous_rag_user_message]
 
     restored_form_data = {**form_data}
-    messages = remove_system_message(copy.deepcopy(input_messages))
+    messages = [
+        message
+        for message in input_messages
+        if message.get('role') != 'system' and message is not previous_rag_user_message
+    ]
     user_message = metadata.get('user_prompt') or get_last_user_message(messages)
     if user_message:
-        set_last_user_message_content(user_message, messages)
+        _set_last_user_message_content_copy_on_write(user_message, messages)
     if pre_rag_system_anchor:
         messages = add_or_update_system_message(pre_rag_system_anchor, messages)
 
@@ -6275,6 +6306,7 @@ async def streaming_chat_response_handler(response, ctx):
                 tool_call_sources = []  # Track citation sources from tool results
                 all_tool_call_sources = []  # Accumulated sources across all iterations
                 continuation_state = {}
+                base_form_data = form_data
 
                 # Check if citations are enabled for this model
                 citations_enabled = (model.get('info', {}).get('meta', {}).get('capabilities') or {}).get(
@@ -6429,7 +6461,7 @@ async def streaming_chat_response_handler(response, ctx):
 
                     try:
                         new_form_data = {
-                            **form_data,
+                            **base_form_data,
                             'model': model_id,
                             'stream': True,
                             'metadata': metadata,
@@ -6440,7 +6472,7 @@ async def streaming_chat_response_handler(response, ctx):
                                 output, raw=True, reasoning_format=get_reasoning_format(model)
                             )
                             new_form_data['messages'] = [
-                                *form_data['messages'],
+                                *base_form_data['messages'],
                                 *tool_messages,
                             ]
                             new_form_data = await restore_native_tool_continuation_context(
@@ -6477,7 +6509,7 @@ async def streaming_chat_response_handler(response, ctx):
                                     message['content'] = ''.join(text_parts)
 
                             new_form_data['messages'] = [
-                                *form_data['messages'],
+                                *base_form_data['messages'],
                                 *tool_messages,
                             ]
 
@@ -6504,7 +6536,6 @@ async def streaming_chat_response_handler(response, ctx):
                                 continuation_state=continuation_state,
                             )
 
-                        form_data = new_form_data
                         res = await generate_chat_completion(
                             request,
                             new_form_data,

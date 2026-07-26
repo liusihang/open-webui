@@ -601,8 +601,17 @@ async def test_direct_streaming_native_continuation_restores_private_anchor_on_e
         assert 'STALE INITIAL RAG' not in system_message['content']
 
 
+@pytest.mark.parametrize(
+    ('rag_system_context', 'expected_roles'),
+    [
+        (True, ['system', 'user', 'assistant', 'tool', 'assistant', 'tool']),
+        (False, ['system', 'user', 'assistant', 'tool', 'assistant', 'tool', 'user']),
+    ],
+)
 @pytest.mark.asyncio
-async def test_streaming_native_tool_loop_restores_private_pre_rag_anchor_and_appends_rag_once(monkeypatch):
+async def test_websocket_native_continuation_rebuilds_two_iterations_without_duplicate_history(
+    monkeypatch, rag_system_context, expected_roles
+):
     captured = {}
 
     async def initial_stream():
@@ -663,7 +672,7 @@ async def test_streaming_native_tool_loop_restores_private_pre_rag_anchor_and_ap
     monkeypatch.setattr(middleware, 'get_sorted_filter_ids', no_filters)
     monkeypatch.setattr(middleware, 'get_system_oauth_token', no_oauth)
     monkeypatch.setattr(middleware.Config, 'get', config_get)
-    monkeypatch.setattr(middleware, 'RAG_SYSTEM_CONTEXT', True)
+    monkeypatch.setattr(middleware, 'RAG_SYSTEM_CONTEXT', rag_system_context)
     monkeypatch.setattr(middleware, 'ENABLE_REALTIME_CHAT_SAVE', False)
 
     anchor = 'ADMINISTRATOR LAYER\nGLOBAL LAYER\nMODEL LAYER\nREQUEST LAYER\nUSER LAYER'
@@ -697,23 +706,33 @@ async def test_streaming_native_tool_loop_restores_private_pre_rag_anchor_and_ap
     assert result is None
 
     assert len(captured['form_data']) == 2
-    system_message = captured['form_data'][-1]['messages'][0]
+    continuation_messages = captured['form_data'][-1]['messages']
+    assert [message['role'] for message in continuation_messages] == expected_roles
+    assert sum(message['role'] == 'assistant' for message in continuation_messages) == 2
+    assert sum(message['role'] == 'tool' for message in continuation_messages) == 2
+    assert sum(message['role'] == 'user' for message in continuation_messages) == 1 + int(not rag_system_context)
+    assert sum('RAG <source' in str(message.get('content')) for message in continuation_messages) == 1
+
+    system_message = continuation_messages[0]
     assert system_message['role'] == 'system'
     assert system_message['content'].startswith(anchor)
-    assert system_message['content'].count('RAG <source') == 1
     assert 'STALE INITIAL RAG' not in system_message['content']
     assert 'system_prompt' not in captured['form_data'][-1]['metadata']
     assert emitted
 
 
 @pytest.mark.asyncio
-async def test_restore_native_tool_continuation_context_deep_copies_nested_messages_before_mutation(monkeypatch):
+async def test_restore_native_tool_continuation_context_uses_copy_on_write_for_changed_user_content(monkeypatch):
     async def config_get(key, default=None):
         return 'RAG {{CONTEXT}}' if key == 'rag.template' else default
 
     monkeypatch.setattr(middleware.Config, 'get', config_get)
     monkeypatch.setattr(middleware, 'RAG_SYSTEM_CONTEXT', True)
 
+    large_multimodal_payload = {
+        'type': 'input_image',
+        'image_url': {'url': 'data:image/png;base64,keep-this-large-payload-shared'},
+    }
     form_data = {
         'messages': [
             {'role': 'system', 'content': 'STALE RAG'},
@@ -733,6 +752,11 @@ async def test_restore_native_tool_continuation_context_deep_copies_nested_messa
                         'function': {'name': 'query_knowledge_files', 'arguments': '{"query":"docs"}'},
                     }
                 ],
+            },
+            {
+                'role': 'tool',
+                'tool_call_id': 'call-1',
+                'content': [large_multimodal_payload],
             },
         ]
     }
@@ -761,7 +785,12 @@ async def test_restore_native_tool_continuation_context_deep_copies_nested_messa
     assert restored['messages'][1]['content'][0]['text'] == 'Use the attached docs.'
     assert restored['messages'][1] is not form_data['messages'][1]
     assert restored['messages'][1]['content'] is not form_data['messages'][1]['content']
-    assert restored['messages'][2]['tool_calls'] is not form_data['messages'][2]['tool_calls']
+    assert restored['messages'][1]['content'][0] is not form_data['messages'][1]['content'][0]
+    assert restored['messages'][1]['content'][1] is form_data['messages'][1]['content'][1]
+    assert restored['messages'][2] is form_data['messages'][2]
+    assert restored['messages'][2]['tool_calls'] is form_data['messages'][2]['tool_calls']
+    assert restored['messages'][3] is form_data['messages'][3]
+    assert restored['messages'][3]['content'][0] is large_multimodal_payload
 
 
 @pytest.mark.asyncio
