@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import asyncio
 import os
+from collections.abc import Mapping
 from contextlib import asynccontextmanager
+from dataclasses import FrozenInstanceError
 
 os.environ.setdefault('WEBUI_SECRET_KEY', 'test-secret')
 os.environ.setdefault('ENABLE_DB_MIGRATIONS', 'false')
@@ -10,7 +12,7 @@ os.environ.setdefault('DATABASE_ENABLE_SESSION_SHARING', 'true')
 
 import pytest
 import pytest_asyncio
-from open_webui.agent.conversation_mode_profiles import ConversationModeProfile
+from open_webui.agent.conversation_mode_profiles import ConversationModeProfile, ProfileDefaults
 from open_webui.internal.db import Base
 from open_webui.models import conversation_mode_profiles as profile_store_module
 from open_webui.models.chats import Chat, ChatForm, ChatImportForm, ChatModel, ChatResponse
@@ -18,12 +20,14 @@ from open_webui.models.conversation_mode_profiles import (
     AGENT_BASELINE_REVISION_ID,
     CHAT_BASELINE_REVISION_ID,
     ConversationModeProfileBindingConflict,
+    ConversationModeProfileBindingIntegrityError,
     ConversationModeProfileHead,
     ConversationModeProfileIntegrityError,
     ConversationModeProfileRevision,
     ConversationModeProfileRevisionConflict,
     ConversationModeProfiles,
     ConversationModeProfileTemporaryBinding,
+    ConversationModeProfileTransactionStateError,
 )
 from sqlalchemy import event, select
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
@@ -99,24 +103,167 @@ async def profile_db(monkeypatch, tmp_path):
     await engine.dispose()
 
 
-async def _insert_chat(session_factory, *, chat_id: str, user_id: str = 'user-1') -> None:
+def _chat_row(*, chat_id: str, user_id: str = 'user-1', mode: str = 'chat') -> Chat:
+    return Chat(
+        id=chat_id,
+        user_id=user_id,
+        title='Test chat',
+        chat={
+            'id': chat_id,
+            'title': 'Test chat',
+            'mode': mode,
+            'history': {'currentId': None, 'messages': {}},
+        },
+        created_at=1,
+        updated_at=1,
+    )
+
+
+async def _insert_chat(
+    session_factory,
+    *,
+    chat_id: str,
+    user_id: str = 'user-1',
+    mode: str = 'chat',
+) -> None:
     async with session_factory() as session:
-        session.add(
-            Chat(
-                id=chat_id,
-                user_id=user_id,
-                title='Test chat',
-                chat={
-                    'id': chat_id,
-                    'title': 'Test chat',
-                    'mode': 'chat',
-                    'history': {'currentId': None, 'messages': {}},
-                },
-                created_at=1,
-                updated_at=1,
-            )
-        )
+        session.add(_chat_row(chat_id=chat_id, user_id=user_id, mode=mode))
         await session.commit()
+
+
+CALLER_WRITE_METHODS = (
+    'save',
+    'restore',
+    'chat_claim',
+    'temporary_create',
+    'temporary_transfer',
+    'temporary_cleanup',
+)
+
+
+async def _invoke_caller_write(method_name: str, session) -> object:
+    if method_name == 'save':
+        return await ConversationModeProfiles.save_revision(
+            mode='chat',
+            content={'schema_version': 1, 'system_prompt': 'Caller save', 'defaults': {}},
+            expected_current_revision_id=CHAT_BASELINE_REVISION_ID,
+            created_by='admin-1',
+            db=session,
+        )
+    if method_name == 'restore':
+        return await ConversationModeProfiles.restore_revision(
+            mode='chat',
+            source_revision_id=CHAT_BASELINE_REVISION_ID,
+            expected_current_revision_id=CHAT_BASELINE_REVISION_ID,
+            created_by='admin-1',
+            db=session,
+        )
+    if method_name == 'chat_claim':
+        return await ConversationModeProfiles.claim_chat_binding(
+            chat_id='caller-chat',
+            user_id='user-1',
+            revision_id=CHAT_BASELINE_REVISION_ID,
+            db=session,
+        )
+    if method_name == 'temporary_create':
+        return await ConversationModeProfiles.create_temporary_binding(
+            user_id='user-1',
+            temporary_conversation_id='caller-temporary',
+            mode='chat',
+            expires_at=300,
+            now=100,
+            db=session,
+        )
+    if method_name == 'temporary_transfer':
+        return await ConversationModeProfiles.transfer_temporary_binding(
+            user_id='user-1',
+            temporary_conversation_id='caller-transfer',
+            chat_id='caller-chat',
+            now=150,
+            db=session,
+        )
+    if method_name == 'temporary_cleanup':
+        return await ConversationModeProfiles.cleanup_expired_temporary_bindings(
+            now=250,
+            db=session,
+        )
+    raise AssertionError(f'Unsupported write method: {method_name}')
+
+
+async def _prepare_successful_caller_write(method_name: str, session_factory) -> None:
+    if method_name in {'chat_claim', 'temporary_transfer'}:
+        await _insert_chat(session_factory, chat_id='caller-chat')
+    if method_name == 'temporary_transfer':
+        await ConversationModeProfiles.create_temporary_binding(
+            user_id='user-1',
+            temporary_conversation_id='caller-transfer',
+            mode='chat',
+            expires_at=300,
+            now=100,
+        )
+    if method_name == 'temporary_cleanup':
+        await ConversationModeProfiles.create_temporary_binding(
+            user_id='user-1',
+            temporary_conversation_id='caller-cleanup',
+            mode='chat',
+            expires_at=200,
+            now=100,
+        )
+
+
+async def _assert_caller_write_rolled_back(method_name: str) -> None:
+    if method_name in {'save', 'restore'}:
+        head = await ConversationModeProfiles.get_head('chat')
+        assert head.current_revision_id == CHAT_BASELINE_REVISION_ID
+        assert [revision.revision_number for revision in await ConversationModeProfiles.list_history('chat')] == [1]
+        return
+    if method_name == 'chat_claim':
+        assert (
+            await ConversationModeProfiles.get_chat_binding(
+                chat_id='caller-chat',
+                user_id='user-1',
+            )
+            is None
+        )
+        return
+    if method_name == 'temporary_create':
+        assert (
+            await ConversationModeProfiles.get_temporary_binding(
+                user_id='user-1',
+                temporary_conversation_id='caller-temporary',
+                now=100,
+            )
+            is None
+        )
+        return
+    if method_name == 'temporary_transfer':
+        assert (
+            await ConversationModeProfiles.get_chat_binding(
+                chat_id='caller-chat',
+                user_id='user-1',
+            )
+            is None
+        )
+        assert (
+            await ConversationModeProfiles.get_temporary_binding(
+                user_id='user-1',
+                temporary_conversation_id='caller-transfer',
+                now=150,
+            )
+            is not None
+        )
+        return
+    if method_name == 'temporary_cleanup':
+        assert (
+            await ConversationModeProfiles.get_temporary_binding(
+                user_id='user-1',
+                temporary_conversation_id='caller-cleanup',
+                now=150,
+            )
+            is not None
+        )
+        return
+    raise AssertionError(f'Unsupported write method: {method_name}')
 
 
 def test_chat_models_expose_server_owned_revision_without_form_or_import_authority() -> None:
@@ -175,6 +322,61 @@ async def test_store_rejects_tampered_revision_content(profile_db) -> None:
 
     assert exc_info.value.code == 'mode_profile_integrity_error'
     assert exc_info.value.revision_id == CHAT_BASELINE_REVISION_ID
+
+
+@pytest.mark.asyncio
+async def test_revision_dto_uses_deeply_immutable_phase_a_defaults(profile_db) -> None:
+    saved = await ConversationModeProfiles.save_revision(
+        mode='chat',
+        content={
+            'schema_version': 1,
+            'system_prompt': 'Immutable prompt',
+            'defaults': {'tool_ids': ['tool-1']},
+        },
+        expected_current_revision_id=CHAT_BASELINE_REVISION_ID,
+        created_by='admin-1',
+    )
+
+    assert isinstance(saved.defaults, ProfileDefaults)
+    assert saved.defaults.tool_ids == ('tool-1',)
+    with pytest.raises(FrozenInstanceError):
+        saved.defaults.tool_ids = ('changed',)
+
+
+@pytest.mark.asyncio
+async def test_revision_dto_content_projection_is_deeply_immutable(profile_db) -> None:
+    saved = await ConversationModeProfiles.save_revision(
+        mode='chat',
+        content={
+            'schema_version': 1,
+            'system_prompt': 'Immutable prompt',
+            'defaults': {'tool_ids': ['tool-1']},
+        },
+        expected_current_revision_id=CHAT_BASELINE_REVISION_ID,
+        created_by='admin-1',
+    )
+
+    content = saved.content
+    assert isinstance(content, Mapping)
+    assert isinstance(content['defaults'], Mapping)
+    assert content['defaults']['tool_ids'] == ('tool-1',)
+    with pytest.raises(TypeError):
+        content['system_prompt'] = 'changed'
+    with pytest.raises(TypeError):
+        content['defaults']['tool_ids'] = ('changed',)
+
+
+@pytest.mark.asyncio
+async def test_revision_dto_repr_redacts_system_prompt(profile_db) -> None:
+    secret_prompt = 'SECRET ADMINISTRATOR PROMPT'
+    saved = await ConversationModeProfiles.save_revision(
+        mode='chat',
+        content={'schema_version': 1, 'system_prompt': secret_prompt, 'defaults': {}},
+        expected_current_revision_id=CHAT_BASELINE_REVISION_ID,
+        created_by='admin-1',
+    )
+
+    assert secret_prompt not in repr(saved)
 
 
 @pytest.mark.asyncio
@@ -265,6 +467,37 @@ async def test_concurrent_saves_do_not_share_revision_number_or_lose_head_update
         2,
         1,
     ]
+
+
+@pytest.mark.asyncio
+async def test_stale_identity_map_head_is_refreshed_before_optimistic_save(profile_db) -> None:
+    async with profile_db() as stale_session:
+        stale_head = await stale_session.get(ConversationModeProfileHead, 'chat')
+        assert stale_head.current_revision_id == CHAT_BASELINE_REVISION_ID
+        await stale_session.commit()
+
+        saved = await ConversationModeProfiles.save_revision(
+            mode='chat',
+            content={'schema_version': 1, 'system_prompt': 'Other administrator', 'defaults': {}},
+            expected_current_revision_id=CHAT_BASELINE_REVISION_ID,
+            created_by='admin-2',
+        )
+        assert stale_head.current_revision_id == CHAT_BASELINE_REVISION_ID
+
+        with pytest.raises(ConversationModeProfileRevisionConflict) as exc_info:
+            await ConversationModeProfiles.save_revision(
+                mode='chat',
+                content={'schema_version': 1, 'system_prompt': 'Stale administrator', 'defaults': {}},
+                expected_current_revision_id=CHAT_BASELINE_REVISION_ID,
+                created_by='admin-1',
+                db=stale_session,
+            )
+
+        assert exc_info.value.actual_revision_id == saved.id
+        assert not stale_session.in_transaction()
+
+    assert (await ConversationModeProfiles.get_head('chat')).current_revision_id == saved.id
+    assert [revision.revision_number for revision in await ConversationModeProfiles.list_history('chat')] == [2, 1]
 
 
 def test_revision_store_has_no_public_content_update_or_delete_path() -> None:
@@ -361,6 +594,131 @@ async def test_concurrent_persistent_binding_claims_converge_without_silent_over
 
 
 @pytest.mark.asyncio
+async def test_stale_identity_map_chat_is_refreshed_before_binding_claim(profile_db) -> None:
+    await _insert_chat(profile_db, chat_id='stale-chat')
+    newer_revision = await ConversationModeProfiles.save_revision(
+        mode='chat',
+        content={'schema_version': 1, 'system_prompt': 'New revision', 'defaults': {}},
+        expected_current_revision_id=CHAT_BASELINE_REVISION_ID,
+        created_by='admin-1',
+    )
+
+    async with profile_db() as stale_session:
+        stale_chat = await stale_session.get(Chat, 'stale-chat')
+        assert stale_chat.mode_profile_revision_id is None
+        await stale_session.commit()
+
+        await ConversationModeProfiles.claim_chat_binding(
+            chat_id='stale-chat',
+            user_id='user-1',
+            revision_id=CHAT_BASELINE_REVISION_ID,
+        )
+        assert stale_chat.mode_profile_revision_id is None
+
+        with pytest.raises(ConversationModeProfileBindingConflict) as exc_info:
+            await ConversationModeProfiles.claim_chat_binding(
+                chat_id='stale-chat',
+                user_id='user-1',
+                revision_id=newer_revision.id,
+                db=stale_session,
+            )
+
+        assert exc_info.value.actual_revision_id == CHAT_BASELINE_REVISION_ID
+        assert not stale_session.in_transaction()
+
+    stored = await ConversationModeProfiles.get_chat_binding(
+        chat_id='stale-chat',
+        user_id='user-1',
+    )
+    assert stored.mode_profile_revision_id == CHAT_BASELINE_REVISION_ID
+
+
+@pytest.mark.parametrize(
+    ('chat_mode', 'revision_id', 'revision_mode'),
+    [
+        ('chat', AGENT_BASELINE_REVISION_ID, 'agent'),
+        ('agent', CHAT_BASELINE_REVISION_ID, 'chat'),
+    ],
+)
+@pytest.mark.asyncio
+async def test_explicit_chat_mode_rejects_mismatched_revision_claim(
+    profile_db,
+    chat_mode: str,
+    revision_id: str,
+    revision_mode: str,
+) -> None:
+    await _insert_chat(profile_db, chat_id='mode-mismatch-chat', mode=chat_mode)
+
+    with pytest.raises(ConversationModeProfileBindingIntegrityError) as exc_info:
+        await ConversationModeProfiles.claim_chat_binding(
+            chat_id='mode-mismatch-chat',
+            user_id='user-1',
+            revision_id=revision_id,
+        )
+
+    assert exc_info.value.code == 'mode_profile_binding_integrity_error'
+    assert exc_info.value.chat_mode == chat_mode
+    assert exc_info.value.revision_mode == revision_mode
+    assert (
+        await ConversationModeProfiles.get_chat_binding(
+            chat_id='mode-mismatch-chat',
+            user_id='user-1',
+        )
+        is None
+    )
+
+
+@pytest.mark.parametrize(
+    ('chat_mode', 'temporary_mode'),
+    [
+        ('chat', 'agent'),
+        ('agent', 'chat'),
+    ],
+)
+@pytest.mark.asyncio
+async def test_explicit_chat_mode_rejects_mismatched_temporary_transfer(
+    profile_db,
+    chat_mode: str,
+    temporary_mode: str,
+) -> None:
+    await _insert_chat(profile_db, chat_id='temporary-mode-mismatch', mode=chat_mode)
+    temporary = await ConversationModeProfiles.create_temporary_binding(
+        user_id='user-1',
+        temporary_conversation_id='temporary-mode-mismatch',
+        mode=temporary_mode,
+        expires_at=300,
+        now=100,
+    )
+
+    with pytest.raises(ConversationModeProfileBindingIntegrityError) as exc_info:
+        await ConversationModeProfiles.transfer_temporary_binding(
+            user_id='user-1',
+            temporary_conversation_id='temporary-mode-mismatch',
+            chat_id='temporary-mode-mismatch',
+            now=150,
+        )
+
+    assert exc_info.value.code == 'mode_profile_binding_integrity_error'
+    assert exc_info.value.chat_mode == chat_mode
+    assert exc_info.value.revision_mode == temporary_mode
+    assert (
+        await ConversationModeProfiles.get_temporary_binding(
+            user_id='user-1',
+            temporary_conversation_id='temporary-mode-mismatch',
+            now=150,
+        )
+        == temporary
+    )
+    assert (
+        await ConversationModeProfiles.get_chat_binding(
+            chat_id='temporary-mode-mismatch',
+            user_id='user-1',
+        )
+        is None
+    )
+
+
+@pytest.mark.asyncio
 async def test_passed_session_chat_claim_starts_with_sqlite_immediate_transaction(profile_db) -> None:
     await _insert_chat(profile_db, chat_id='chat-passed-session')
     statements: list[str] = []
@@ -406,6 +764,81 @@ async def test_passed_session_restore_starts_with_sqlite_immediate_transaction(p
         event.remove(engine.sync_engine, 'before_cursor_execute', capture_statement)
 
     assert statements[0] == 'BEGIN IMMEDIATE'
+
+
+@pytest.mark.parametrize('method_name', CALLER_WRITE_METHODS)
+@pytest.mark.asyncio
+async def test_write_methods_reject_active_caller_transaction_without_ending_it(
+    profile_db,
+    method_name: str,
+) -> None:
+    async with profile_db() as session:
+        await session.begin()
+
+        with pytest.raises(ConversationModeProfileTransactionStateError) as exc_info:
+            await _invoke_caller_write(method_name, session)
+
+        assert exc_info.value.code == 'mode_profile_transaction_state_error'
+        assert exc_info.value.reason == 'active_transaction'
+        assert session.in_transaction()
+        await session.rollback()
+
+
+@pytest.mark.parametrize('method_name', CALLER_WRITE_METHODS)
+@pytest.mark.asyncio
+async def test_write_methods_reject_pending_caller_work_without_committing_or_rolling_back(
+    profile_db,
+    method_name: str,
+) -> None:
+    unrelated = _chat_row(chat_id=f'unrelated-{method_name}')
+    async with profile_db() as session:
+        session.add(unrelated)
+        assert unrelated in session.new
+
+        with pytest.raises(ConversationModeProfileTransactionStateError) as exc_info:
+            await _invoke_caller_write(method_name, session)
+
+        assert exc_info.value.code == 'mode_profile_transaction_state_error'
+        assert exc_info.value.reason == 'pending_work'
+        assert unrelated in session.new
+        assert session.in_transaction()
+        await session.commit()
+
+    async with profile_db() as verification_session:
+        assert await verification_session.get(Chat, unrelated.id) is not None
+
+
+@pytest.mark.parametrize('method_name', CALLER_WRITE_METHODS)
+@pytest.mark.asyncio
+async def test_clean_caller_session_write_remains_uncommitted_until_caller_finishes(
+    profile_db,
+    method_name: str,
+) -> None:
+    await _prepare_successful_caller_write(method_name, profile_db)
+
+    async with profile_db() as session:
+        await _invoke_caller_write(method_name, session)
+        assert session.in_transaction()
+        await session.rollback()
+
+    await _assert_caller_write_rolled_back(method_name)
+
+
+@pytest.mark.asyncio
+async def test_clean_caller_session_can_commit_successful_repository_write(profile_db) -> None:
+    async with profile_db() as session:
+        saved = await ConversationModeProfiles.save_revision(
+            mode='chat',
+            content={'schema_version': 1, 'system_prompt': 'Caller commits', 'defaults': {}},
+            expected_current_revision_id=CHAT_BASELINE_REVISION_ID,
+            created_by='admin-1',
+            db=session,
+        )
+        assert session.in_transaction()
+        assert (await ConversationModeProfiles.get_head('chat')).current_revision_id == CHAT_BASELINE_REVISION_ID
+        await session.commit()
+
+    assert (await ConversationModeProfiles.get_head('chat')).current_revision_id == saved.id
 
 
 @pytest.mark.asyncio
@@ -457,6 +890,33 @@ async def test_temporary_binding_create_load_refresh_and_expiry_cleanup(profile_
         )
         is None
     )
+
+
+@pytest.mark.asyncio
+async def test_temporary_binding_creation_locks_only_requested_mode_head(profile_db) -> None:
+    statements: list[tuple[str, object]] = []
+    engine = profile_db.kw['bind']
+
+    def capture_statement(connection, cursor, statement, parameters, context, executemany):
+        if 'FROM conversation_mode_profile_head' in statement:
+            statements.append((statement, parameters))
+
+    event.listen(engine.sync_engine, 'before_cursor_execute', capture_statement)
+    try:
+        await ConversationModeProfiles.create_temporary_binding(
+            user_id='user-1',
+            temporary_conversation_id='requested-head-only',
+            mode='agent',
+            expires_at=300,
+            now=100,
+        )
+    finally:
+        event.remove(engine.sync_engine, 'before_cursor_execute', capture_statement)
+
+    assert len(statements) == 1
+    statement, parameters = statements[0]
+    assert 'WHERE conversation_mode_profile_head.mode = ?' in ' '.join(statement.split())
+    assert parameters == ('agent',)
 
 
 @pytest.mark.asyncio

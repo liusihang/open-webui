@@ -4,15 +4,19 @@ from __future__ import annotations
 
 import time
 import uuid
-from typing import Any
+from collections.abc import AsyncIterator, Mapping
+from contextlib import asynccontextmanager
+from types import MappingProxyType
+from typing import TYPE_CHECKING, Any
 
 from open_webui.agent.conversation_mode import ConversationMode
 from open_webui.agent.conversation_mode_profiles import (
     ConversationModeProfile,
     ModeProfileValidationError,
+    ProfileDefaults,
 )
 from open_webui.internal.db import Base, get_async_db_context
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy import (
     JSON,
     BigInteger,
@@ -29,6 +33,9 @@ from sqlalchemy import (
     text,
 )
 from sqlalchemy.ext.asyncio import AsyncSession
+
+if TYPE_CHECKING:
+    from open_webui.models.chats import Chat
 
 
 def _baseline_revision_id(mode: str) -> str:
@@ -170,6 +177,14 @@ class ConversationModeProfileIntegrityError(ConversationModeProfileStoreError):
         super().__init__(message)
 
 
+class ConversationModeProfileTransactionStateError(ConversationModeProfileStoreError):
+    code = 'mode_profile_transaction_state_error'
+
+    def __init__(self, reason: str) -> None:
+        self.reason = reason
+        super().__init__(f'Caller-owned database session has incompatible state: {reason}')
+
+
 class ConversationModeProfileBindingConflict(ConversationModeProfileStoreError):
     code = 'mode_profile_binding_mismatch'
 
@@ -189,6 +204,27 @@ class ConversationModeProfileBindingConflict(ConversationModeProfileStoreError):
         )
 
 
+class ConversationModeProfileBindingIntegrityError(ConversationModeProfileStoreError):
+    code = 'mode_profile_binding_integrity_error'
+
+    def __init__(
+        self,
+        *,
+        chat_id: str,
+        chat_mode: str,
+        revision_id: str,
+        revision_mode: str,
+    ) -> None:
+        self.chat_id = chat_id
+        self.chat_mode = chat_mode
+        self.revision_id = revision_id
+        self.revision_mode = revision_mode
+        super().__init__(
+            f'Chat {chat_id} has explicit mode {chat_mode}, which does not match '
+            f'revision {revision_id} mode {revision_mode}'
+        )
+
+
 class ConversationModeProfileHeadModel(BaseModel):
     model_config = ConfigDict(from_attributes=True, frozen=True)
 
@@ -201,26 +237,34 @@ class ConversationModeProfileHeadModel(BaseModel):
 
 
 class ConversationModeProfileRevisionModel(BaseModel):
-    model_config = ConfigDict(from_attributes=True, frozen=True)
+    model_config = ConfigDict(frozen=True, arbitrary_types_allowed=True)
 
     id: str
     mode: str
     revision_number: int
     schema_version: int
-    system_prompt: str
-    defaults: dict[str, Any]
+    system_prompt: str = Field(repr=False)
+    defaults: ProfileDefaults
     content_hash: str
     created_at: int
     created_by: str | None = None
     restored_from_revision_id: str | None = None
 
     @property
-    def content(self) -> dict[str, Any]:
-        return {
-            'schema_version': self.schema_version,
-            'system_prompt': self.system_prompt,
-            'defaults': dict(self.defaults),
-        }
+    def content(self) -> Mapping[str, Any]:
+        defaults = MappingProxyType(
+            {
+                field: tuple(value) if isinstance(value, list) else value
+                for field, value in self.defaults.to_dict().items()
+            }
+        )
+        return MappingProxyType(
+            {
+                'schema_version': self.schema_version,
+                'system_prompt': self.system_prompt,
+                'defaults': defaults,
+            }
+        )
 
 
 class ConversationModeProfileTemporaryBindingModel(BaseModel):
@@ -261,9 +305,50 @@ def _now_seconds() -> int:
 
 async def _begin_write_transaction(session: AsyncSession) -> str:
     dialect_name = session.get_bind().dialect.name
-    if dialect_name == 'sqlite' and not session.in_transaction():
+    if dialect_name == 'sqlite':
         await session.execute(text('BEGIN IMMEDIATE'))
+    else:
+        await session.begin()
     return dialect_name
+
+
+def _ensure_clean_caller_session(session: AsyncSession) -> None:
+    if session.new or session.dirty or session.deleted:
+        raise ConversationModeProfileTransactionStateError('pending_work')
+    if session.in_transaction():
+        raise ConversationModeProfileTransactionStateError('active_transaction')
+
+
+@asynccontextmanager
+async def _managed_write_session(
+    session: AsyncSession,
+    *,
+    repository_owned: bool,
+) -> AsyncIterator[tuple[AsyncSession, str]]:
+    dialect_name = await _begin_write_transaction(session)
+    try:
+        yield session, dialect_name
+        if repository_owned:
+            await session.commit()
+    except Exception:
+        if session.in_transaction():
+            await session.rollback()
+        raise
+
+
+@asynccontextmanager
+async def _write_session(
+    db: AsyncSession | None,
+) -> AsyncIterator[tuple[AsyncSession, str]]:
+    if db is not None:
+        _ensure_clean_caller_session(db)
+        async with _managed_write_session(db, repository_owned=False) as write_session:
+            yield write_session
+        return
+
+    async with get_async_db_context() as session:
+        async with _managed_write_session(session, repository_owned=True) as write_session:
+            yield write_session
 
 
 def _revision_to_model(
@@ -293,7 +378,36 @@ def _revision_to_model(
             row.id,
             f'Conversation mode profile revision {row.id} failed content hash verification',
         )
-    return ConversationModeProfileRevisionModel.model_validate(row)
+    return ConversationModeProfileRevisionModel(
+        id=row.id,
+        mode=profile.mode.value,
+        revision_number=row.revision_number,
+        schema_version=profile.schema_version,
+        system_prompt=profile.system_prompt,
+        defaults=profile.defaults,
+        content_hash=row.content_hash,
+        created_at=row.created_at,
+        created_by=row.created_by,
+        restored_from_revision_id=row.restored_from_revision_id,
+    )
+
+
+def _assert_chat_mode_agreement(
+    chat: Chat,
+    *,
+    revision_id: str,
+    revision_mode: str,
+) -> None:
+    chat_content = chat.chat if isinstance(chat.chat, Mapping) else {}
+    explicit_mode = chat_content.get('mode')
+    if explicit_mode is None or explicit_mode == revision_mode:
+        return
+    raise ConversationModeProfileBindingIntegrityError(
+        chat_id=chat.id,
+        chat_mode=str(explicit_mode),
+        revision_id=revision_id,
+        revision_mode=revision_mode,
+    )
 
 
 class ConversationModeProfileTable:
@@ -391,7 +505,11 @@ class ConversationModeProfileTable:
         mode: str,
         dialect_name: str,
     ) -> ConversationModeProfileHead | None:
-        statement = select(ConversationModeProfileHead).where(ConversationModeProfileHead.mode == mode)
+        statement = (
+            select(ConversationModeProfileHead)
+            .where(ConversationModeProfileHead.mode == mode)
+            .execution_options(populate_existing=True)
+        )
         if dialect_name != 'sqlite':
             statement = statement.with_for_update()
         return (await session.execute(statement)).scalars().first()
@@ -411,8 +529,7 @@ class ConversationModeProfileTable:
         normalized_mode = profile.mode.value
         timestamp = _now_seconds() if now is None else now
 
-        async with get_async_db_context(db) as session:
-            dialect_name = await _begin_write_transaction(session)
+        async with _write_session(db) as (session, dialect_name):
             row = await self._insert_revision_and_switch_head(
                 session,
                 profile=profile,
@@ -422,7 +539,6 @@ class ConversationModeProfileTable:
                 timestamp=timestamp,
                 dialect_name=dialect_name,
             )
-            await session.commit()
             return _revision_to_model(row, expected_mode=normalized_mode)
 
     async def _insert_revision_and_switch_head(
@@ -439,14 +555,12 @@ class ConversationModeProfileTable:
         normalized_mode = profile.mode.value
         head = await self._lock_head(session, normalized_mode, dialect_name)
         if head is None:
-            await session.rollback()
             raise ConversationModeProfileIntegrityError(
                 expected_current_revision_id,
                 f'Conversation mode profile head {normalized_mode} is unavailable',
             )
         if head.current_revision_id != expected_current_revision_id:
             actual_revision_id = head.current_revision_id
-            await session.rollback()
             raise ConversationModeProfileRevisionConflict(
                 mode=normalized_mode,
                 expected_revision_id=expected_current_revision_id,
@@ -513,14 +627,12 @@ class ConversationModeProfileTable:
     ) -> ConversationModeProfileRevisionModel:
         normalized_mode = _normalized_mode(mode)
         timestamp = _now_seconds() if now is None else now
-        async with get_async_db_context(db) as session:
-            dialect_name = await _begin_write_transaction(session)
+        async with _write_session(db) as (session, dialect_name):
             source_row = await session.get(
                 ConversationModeProfileRevision,
                 source_revision_id,
             )
             if source_row is None:
-                await session.rollback()
                 raise ConversationModeProfileIntegrityError(
                     source_revision_id,
                     f'Conversation mode profile revision {source_revision_id} is unavailable',
@@ -536,7 +648,6 @@ class ConversationModeProfileTable:
                 timestamp=timestamp,
                 dialect_name=dialect_name,
             )
-            await session.commit()
             return _revision_to_model(row, expected_mode=normalized_mode)
 
     async def get_chat_binding(
@@ -568,12 +679,13 @@ class ConversationModeProfileTable:
         chat_id: str,
         user_id: str | None,
         dialect_name: str,
-    ):
+    ) -> Chat | None:
         from open_webui.models.chats import Chat
 
         statement = select(Chat).where(Chat.id == chat_id)
         if user_id is not None:
             statement = statement.where(Chat.user_id == user_id)
+        statement = statement.execution_options(populate_existing=True)
         if dialect_name != 'sqlite':
             statement = statement.with_for_update()
         return (await session.execute(statement)).scalars().first()
@@ -584,9 +696,9 @@ class ConversationModeProfileTable:
         *,
         chat_id: str,
         user_id: str | None,
-        revision_id: str,
+        revision: ConversationModeProfileRevisionModel,
         dialect_name: str,
-    ):
+    ) -> ConversationModeProfileChatBindingModel | None:
         chat = await self._lock_chat(
             session,
             chat_id=chat_id,
@@ -595,12 +707,17 @@ class ConversationModeProfileTable:
         )
         if chat is None:
             return None
+        _assert_chat_mode_agreement(
+            chat,
+            revision_id=revision.id,
+            revision_mode=revision.mode,
+        )
         if chat.mode_profile_revision_id is None:
-            chat.mode_profile_revision_id = revision_id
-        elif chat.mode_profile_revision_id != revision_id:
+            chat.mode_profile_revision_id = revision.id
+        elif chat.mode_profile_revision_id != revision.id:
             raise ConversationModeProfileBindingConflict(
                 binding_id=chat_id,
-                expected_revision_id=revision_id,
+                expected_revision_id=revision.id,
                 actual_revision_id=chat.mode_profile_revision_id,
             )
         return ConversationModeProfileChatBindingModel(
@@ -617,35 +734,24 @@ class ConversationModeProfileTable:
         user_id: str | None = None,
         db: AsyncSession | None = None,
     ) -> ConversationModeProfileChatBindingModel | None:
-        async with get_async_db_context(db) as session:
-            dialect_name = await _begin_write_transaction(session)
+        async with _write_session(db) as (session, dialect_name):
             revision_row = await session.get(
                 ConversationModeProfileRevision,
                 revision_id,
             )
             if revision_row is None:
-                await session.rollback()
                 raise ConversationModeProfileIntegrityError(
                     revision_id,
                     f'Conversation mode profile revision {revision_id} is unavailable',
                 )
             revision = _revision_to_model(revision_row)
-            try:
-                binding = await self._claim_chat_binding_in_session(
-                    session,
-                    chat_id=chat_id,
-                    user_id=user_id,
-                    revision_id=revision.id,
-                    dialect_name=dialect_name,
-                )
-            except ConversationModeProfileBindingConflict:
-                await session.rollback()
-                raise
-            if binding is None:
-                await session.rollback()
-                return None
-            await session.commit()
-            return binding
+            return await self._claim_chat_binding_in_session(
+                session,
+                chat_id=chat_id,
+                user_id=user_id,
+                revision=revision,
+                dialect_name=dialect_name,
+            )
 
     async def create_temporary_binding(
         self,
@@ -662,23 +768,21 @@ class ConversationModeProfileTable:
         if expires_at <= timestamp:
             raise ValueError('Temporary conversation mode profile binding must expire in the future')
 
-        async with get_async_db_context(db) as session:
-            dialect_name = await _begin_write_transaction(session)
-            head_statement = select(ConversationModeProfileHead).order_by(ConversationModeProfileHead.mode.asc())
-            if dialect_name != 'sqlite':
-                head_statement = head_statement.with_for_update()
-            heads = {head.mode: head for head in (await session.execute(head_statement)).scalars().all()}
-            head = heads.get(normalized_mode)
+        async with _write_session(db) as (session, dialect_name):
+            head = await self._lock_head(session, normalized_mode, dialect_name)
             if head is None:
-                await session.rollback()
                 raise ConversationModeProfileIntegrityError(
                     '',
                     f'Conversation mode profile head {normalized_mode} is unavailable',
                 )
 
-            binding_statement = select(ConversationModeProfileTemporaryBinding).where(
-                ConversationModeProfileTemporaryBinding.user_id == user_id,
-                ConversationModeProfileTemporaryBinding.temporary_conversation_id == temporary_conversation_id,
+            binding_statement = (
+                select(ConversationModeProfileTemporaryBinding)
+                .where(
+                    ConversationModeProfileTemporaryBinding.user_id == user_id,
+                    ConversationModeProfileTemporaryBinding.temporary_conversation_id == temporary_conversation_id,
+                )
+                .execution_options(populate_existing=True)
             )
             if dialect_name != 'sqlite':
                 binding_statement = binding_statement.with_for_update()
@@ -691,7 +795,6 @@ class ConversationModeProfileTable:
                 if row.mode != normalized_mode:
                     expected_revision_id = head.current_revision_id
                     actual_revision_id = row.mode_profile_revision_id
-                    await session.rollback()
                     raise ConversationModeProfileBindingConflict(
                         binding_id=f'{user_id}:{temporary_conversation_id}',
                         expected_revision_id=expected_revision_id,
@@ -699,7 +802,6 @@ class ConversationModeProfileTable:
                     )
                 row.expires_at = max(row.expires_at, expires_at)
                 row.updated_at = timestamp
-                await session.commit()
                 return ConversationModeProfileTemporaryBindingModel.model_validate(row)
 
             revision = await session.get(
@@ -707,7 +809,6 @@ class ConversationModeProfileTable:
                 head.current_revision_id,
             )
             if revision is None:
-                await session.rollback()
                 raise ConversationModeProfileIntegrityError(
                     head.current_revision_id,
                     f'Conversation mode profile head {normalized_mode} references a missing revision',
@@ -724,7 +825,6 @@ class ConversationModeProfileTable:
                 expires_at=expires_at,
             )
             session.add(row)
-            await session.commit()
             return ConversationModeProfileTemporaryBindingModel.model_validate(row)
 
     async def get_temporary_binding(
@@ -775,21 +875,22 @@ class ConversationModeProfileTable:
         db: AsyncSession | None = None,
     ) -> ConversationModeProfileChatBindingModel | None:
         timestamp = _now_seconds() if now is None else now
-        async with get_async_db_context(db) as session:
-            dialect_name = await _begin_write_transaction(session)
-            statement = select(ConversationModeProfileTemporaryBinding).where(
-                ConversationModeProfileTemporaryBinding.user_id == user_id,
-                ConversationModeProfileTemporaryBinding.temporary_conversation_id == temporary_conversation_id,
+        async with _write_session(db) as (session, dialect_name):
+            statement = (
+                select(ConversationModeProfileTemporaryBinding)
+                .where(
+                    ConversationModeProfileTemporaryBinding.user_id == user_id,
+                    ConversationModeProfileTemporaryBinding.temporary_conversation_id == temporary_conversation_id,
+                )
+                .execution_options(populate_existing=True)
             )
             if dialect_name != 'sqlite':
                 statement = statement.with_for_update()
             temporary = (await session.execute(statement)).scalars().first()
             if temporary is None:
-                await session.rollback()
                 return None
             if temporary.expires_at <= timestamp:
                 await session.delete(temporary)
-                await session.commit()
                 return None
 
             revision = await session.get(
@@ -797,28 +898,21 @@ class ConversationModeProfileTable:
                 temporary.mode_profile_revision_id,
             )
             if revision is None:
-                await session.rollback()
                 raise ConversationModeProfileIntegrityError(
                     temporary.mode_profile_revision_id,
                     f'Temporary binding {temporary.id} references a missing revision',
                 )
-            _revision_to_model(revision, expected_mode=temporary.mode)
-            try:
-                binding = await self._claim_chat_binding_in_session(
-                    session,
-                    chat_id=chat_id,
-                    user_id=user_id,
-                    revision_id=temporary.mode_profile_revision_id,
-                    dialect_name=dialect_name,
-                )
-            except ConversationModeProfileBindingConflict:
-                await session.rollback()
-                raise
+            revision_model = _revision_to_model(revision, expected_mode=temporary.mode)
+            binding = await self._claim_chat_binding_in_session(
+                session,
+                chat_id=chat_id,
+                user_id=user_id,
+                revision=revision_model,
+                dialect_name=dialect_name,
+            )
             if binding is None:
-                await session.rollback()
                 return None
             await session.delete(temporary)
-            await session.commit()
             return binding
 
     async def cleanup_expired_temporary_bindings(
@@ -828,14 +922,12 @@ class ConversationModeProfileTable:
         db: AsyncSession | None = None,
     ) -> int:
         timestamp = _now_seconds() if now is None else now
-        async with get_async_db_context(db) as session:
-            await _begin_write_transaction(session)
+        async with _write_session(db) as (session, _dialect_name):
             result = await session.execute(
                 delete(ConversationModeProfileTemporaryBinding).where(
                     ConversationModeProfileTemporaryBinding.expires_at <= timestamp
                 )
             )
-            await session.commit()
             return int(result.rowcount or 0)
 
 
