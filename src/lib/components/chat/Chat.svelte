@@ -119,6 +119,7 @@
 	} from '$lib/components/chat/agentModeRequest';
 	import {
 		createConversationModeProfileDraftController,
+		isDirectToolServersPermitted,
 		resolveConversationModeProfile,
 		type ConversationModeProfileAvailability,
 		type ConversationModeProfileSelections
@@ -200,6 +201,10 @@
 	let modeProfileInitializedDraftId = '';
 	let modeProfileRevisionId: string | null = null;
 	let modeProfileWarningSignature = '';
+	let modeProfileBoundWithoutDraft = false;
+	let modeProfileCapabilitiesOverridden = false;
+	let modeProfileControlsReady = false;
+	let modeProfileBoundTerminalId: string | null = null;
 	let webSearchActive = false;
 	let showWebSearchConfirm = false;
 	let pendingWebSearchPrompt: string | null = null;
@@ -244,6 +249,14 @@
 
 	$: if (!webSearchActive) {
 		resetWebSearchConfirmation();
+	}
+
+	$: if (
+		modeProfileBoundWithoutDraft &&
+		modeProfileControlsReady &&
+		$selectedTerminalId !== modeProfileBoundTerminalId
+	) {
+		modeProfileCapabilitiesOverridden = true;
 	}
 
 	let showCommands = false;
@@ -310,10 +323,14 @@
 		imageGenerationUserOverride = null;
 		codeInterpreterEnabled = false;
 		clearSelectedTerminal();
-		modeProfileDraftId = `persistent:${chatIdProp}`;
+		modeProfileDraftId = '';
 		modeProfileInitializedDraftId = '';
 		modeProfileRevisionId = null;
 		modeProfileWarningSignature = '';
+		modeProfileBoundWithoutDraft = false;
+		modeProfileCapabilitiesOverridden = false;
+		modeProfileControlsReady = false;
+		modeProfileBoundTerminalId = null;
 		reasoningEffort = 'medium';
 
 		const storageChatInput = sessionStorage.getItem(
@@ -321,6 +338,7 @@
 		);
 
 		if (chatIdProp && (await loadChat())) {
+			modeProfileBoundWithoutDraft = Boolean(chat?.mode_profile_revision_id) && !storageChatInput;
 			await tick();
 			loading = false;
 			window.setTimeout(() => scrollToBottom(), 0);
@@ -356,6 +374,8 @@
 							typeof input.modeProfileRevisionId === 'string'
 								? input.modeProfileRevisionId
 								: modeProfileRevisionId;
+						modeProfileDraftController.hydrateRevisionHint(modeProfileRevisionId);
+						modeProfileDraftId = `persistent:${chatIdProp}`;
 						reasoningEffort = normalizeReasoningEffort(
 							input.reasoningEffort ?? input.reasoningDepth
 						);
@@ -364,9 +384,13 @@
 						}
 					}
 				} catch (e) {}
-			} else {
+			} else if (!modeProfileBoundWithoutDraft && !storageChatInput) {
 				await setDefaults();
 			}
+			modeProfileBoundTerminalId = $selectedTerminalId;
+			queueMicrotask(() => {
+				modeProfileControlsReady = true;
+			});
 
 			const chatInput = document.getElementById('chat-input');
 			chatInput?.focus();
@@ -433,6 +457,10 @@
 	}
 
 	const onSelectedModelIdsChange = async () => {
+		if (modeProfileBoundWithoutDraft && !modeProfileCapabilitiesOverridden) {
+			oldSelectedModelIds = structuredClone(selectedModelIds);
+			return;
+		}
 		if (modeProfileInitializedDraftId && modeProfileInitializedDraftId === modeProfileDraftId) {
 			applyModeProfileModelChange();
 		} else if (modeProfileRevisionId) {
@@ -497,13 +525,14 @@
 		const features = ($config?.features ?? {}) as Record<string, boolean | undefined>;
 		const canUse = (feature: string) =>
 			$user?.role === 'admin' || ($user?.permissions?.features?.[feature] ?? false);
+		const directTerminalPermitted = isDirectToolServersPermitted($user);
 
 		return {
 			terminalIds: [
 				...availableTerminals
-					.map((server) => server.id ?? server.url)
+					.map((server) => (server.id ? server.id : directTerminalPermitted ? server.url : null))
 					.filter((id): id is string => typeof id === 'string' && id.length > 0),
-				...configuredTerminalServers
+				...(directTerminalPermitted ? configuredTerminalServers : [])
 					.map((server) => server.url)
 					.filter((id): id is string => typeof id === 'string' && id.length > 0)
 			],
@@ -631,6 +660,9 @@
 		modeProfileInitializedDraftId = '';
 		modeProfileRevisionId = null;
 		modeProfileWarningSignature = '';
+		modeProfileBoundWithoutDraft = false;
+		modeProfileCapabilitiesOverridden = false;
+		modeProfileControlsReady = false;
 		clearSelectedTerminal();
 	};
 
@@ -736,7 +768,18 @@
 				);
 				imageGenerationUserOverride = null;
 				const defaultTerminalId = (model.info?.meta as any)?.terminalId;
-				if (typeof defaultTerminalId === 'string' && isTerminalAvailable(defaultTerminalId)) {
+				const directTerminalIds = new Set(
+					((($settings as any)?.terminalServers ?? []) as any[])
+						.map((server) => server?.url)
+						.filter((id): id is string => typeof id === 'string')
+				);
+				if (
+					(model.info?.meta?.capabilities as any)?.function_calling !== false &&
+					(model.info?.meta?.capabilities as any)?.terminal !== false &&
+					typeof defaultTerminalId === 'string' &&
+					isTerminalAvailable(defaultTerminalId) &&
+					(!directTerminalIds.has(defaultTerminalId) || isDirectToolServersPermitted($user))
+				) {
 					selectedTerminalId.set(defaultTerminalId);
 				}
 			}
@@ -2608,7 +2651,7 @@
 		}
 	};
 
-	const getFeatures = () => {
+	const getFeatures = (includeModeProfileCapabilities = true) => {
 		let features = {};
 		const currentModels = atSelectedModel?.id ? [atSelectedModel.id] : selectedModels;
 		const primaryModel = $models.find((m) => m.id === currentModels[0]);
@@ -2616,19 +2659,23 @@
 		if ($config?.features)
 			features = {
 				voice: $showCallOverlay,
-				image_generation: resolveImageGenerationFeature(
-					primaryModel,
-					$config?.features?.enable_image_generation ?? false,
-					hasImageGenerationAccess(),
-					imageGenerationEnabled,
-					imageGenerationUserOverride
-				),
-				code_interpreter:
-					$config?.features?.enable_code_interpreter &&
-					($user?.role === 'admin' || $user?.permissions?.features?.code_interpreter)
-						? codeInterpreterEnabled
-						: false,
-				web_search: webSearchActive
+				...(includeModeProfileCapabilities
+					? {
+							image_generation: resolveImageGenerationFeature(
+								primaryModel,
+								$config?.features?.enable_image_generation ?? false,
+								hasImageGenerationAccess(),
+								imageGenerationEnabled,
+								imageGenerationUserOverride
+							),
+							code_interpreter:
+								$config?.features?.enable_code_interpreter &&
+								($user?.role === 'admin' || $user?.permissions?.features?.code_interpreter)
+									? codeInterpreterEnabled
+									: false,
+							web_search: webSearchActive
+						}
+					: {})
 			};
 
 		if ($settings?.memory ?? $config?.features?.enable_memories ?? false) {
@@ -2791,12 +2838,26 @@
 		// Menu-selected skills are sent as IDs; inline <$skillId|label> mentions stay
 		// in the message so the backend can inject their full content.
 		const skillIds = [...selectedSkillIds];
+		const shouldSendModeProfileCapabilityOverrides =
+			!modeProfileBoundWithoutDraft || modeProfileCapabilitiesOverridden;
+		const directTerminalPermitted = isDirectToolServersPermitted($user);
+		const directTerminalIds = new Set(
+			((($settings as any)?.terminalServers ?? []) as any[])
+				.map((server) => server?.url)
+				.filter((id): id is string => typeof id === 'string')
+		);
 
 		// Use the user-selected terminal from the dropdown
-		const activeTerminalId = $selectedTerminalId ?? null;
+		const activeTerminalId =
+			$selectedTerminalId &&
+			(!directTerminalIds.has($selectedTerminalId) || directTerminalPermitted)
+				? $selectedTerminalId
+				: null;
 
-		// Only send terminal_id if the model has terminal capability enabled
-		const terminalEnabled = model.info?.meta?.capabilities?.terminal ?? true;
+		const modelCapabilities = (model.info?.meta?.capabilities ?? {}) as Record<string, unknown>;
+		const functionCallingEnabled = modelCapabilities.function_calling !== false;
+		// Terminal requires the same function-calling allowance as its resolver path.
+		const terminalEnabled = functionCallingEnabled && modelCapabilities.terminal !== false;
 
 		const res = await generateOpenAIChatCompletion(
 			localStorage.token,
@@ -2815,18 +2876,36 @@
 
 				files: (files?.length ?? 0) > 0 ? files : undefined,
 
-				filter_ids: selectedFilterIds.length > 0 ? selectedFilterIds : undefined,
-				tool_ids: toolIds.length > 0 ? toolIds : undefined,
-				skill_ids: skillIds.length > 0 ? skillIds : undefined,
-				terminal_id: terminalEnabled ? (activeTerminalId ?? undefined) : undefined,
+				filter_ids:
+					shouldSendModeProfileCapabilityOverrides &&
+					functionCallingEnabled &&
+					selectedFilterIds.length > 0
+						? selectedFilterIds
+						: undefined,
+				tool_ids:
+					shouldSendModeProfileCapabilityOverrides && functionCallingEnabled && toolIds.length > 0
+						? toolIds
+						: undefined,
+				skill_ids:
+					shouldSendModeProfileCapabilityOverrides && functionCallingEnabled && skillIds.length > 0
+						? skillIds
+						: undefined,
+				terminal_id:
+					shouldSendModeProfileCapabilityOverrides && terminalEnabled
+						? (activeTerminalId ?? undefined)
+						: undefined,
 				tool_servers: [
-					...($toolServers ?? []).filter(
-						(server, idx) => toolServerIds.includes(idx) || toolServerIds.includes(server?.id)
-					),
+					...(shouldSendModeProfileCapabilityOverrides
+						? ($toolServers ?? []).filter(
+								(server, idx) => toolServerIds.includes(idx) || toolServerIds.includes(server?.id)
+							)
+						: []),
 					// Direct terminal servers — always included when enabled (not routed through selectedToolIds)
-					...($terminalServers ?? []).filter((t) => !t.id)
+					...(shouldSendModeProfileCapabilityOverrides && directTerminalPermitted
+						? ($terminalServers ?? []).filter((t) => !t.id)
+						: [])
 				],
-				features: getFeatures(),
+				features: getFeatures(shouldSendModeProfileCapabilityOverrides),
 				variables: {
 					...getPromptVariables(
 						$user?.name,
@@ -3655,6 +3734,9 @@
 											}));
 										}}
 										onChange={(data) => {
+											if (modeProfileBoundWithoutDraft && modeProfileControlsReady) {
+												modeProfileCapabilitiesOverridden = true;
+											}
 											if (!$temporaryChatEnabled) {
 												saveDraft(
 													{
@@ -3668,9 +3750,13 @@
 											}
 										}}
 										onImageGenerationToggle={(enabled) => {
+											modeProfileCapabilitiesOverridden = true;
 											imageGenerationUserOverride = enabled;
 										}}
-										onWebSearchToggle={handleWebSearchToggle}
+										onWebSearchToggle={(enabled) => {
+											modeProfileCapabilitiesOverridden = true;
+											handleWebSearchToggle(enabled);
+										}}
 										on:submit={async (e) => {
 											clearDraft($chatId);
 											if (e.detail || files.length > 0) {
@@ -3719,10 +3805,17 @@
 										{onSelect}
 										{onUpload}
 										onImageGenerationToggle={(enabled) => {
+											modeProfileCapabilitiesOverridden = true;
 											imageGenerationUserOverride = enabled;
 										}}
-										onWebSearchToggle={handleWebSearchToggle}
+										onWebSearchToggle={(enabled) => {
+											modeProfileCapabilitiesOverridden = true;
+											handleWebSearchToggle(enabled);
+										}}
 										onChange={(data) => {
+											if (modeProfileBoundWithoutDraft && modeProfileControlsReady) {
+												modeProfileCapabilitiesOverridden = true;
+											}
 											if (!$temporaryChatEnabled) {
 												saveDraft({
 													...data,

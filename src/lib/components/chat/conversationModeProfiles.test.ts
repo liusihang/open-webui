@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 
 import {
 	createConversationModeProfileDraftController,
+	isDirectToolServersPermitted,
 	resolveConversationModeProfile,
 	type ConversationModeProfileResolutionInput
 } from './conversationModeProfiles';
@@ -179,6 +180,53 @@ describe('resolveConversationModeProfile', () => {
 		expect(result.effective.terminalId).toBe('profile-terminal');
 		expect(result.effective.featureIds).not.toContain('code_interpreter');
 	});
+
+	it('treats omitted feature capabilities as supported but removes all function capabilities when explicitly disabled', () => {
+		expect(
+			resolve({
+				profile: {
+					mode: 'agent',
+					current_revision_id: 'agent-r7',
+					schema_version: 1,
+					defaults: { feature_ids: ['web_search'] }
+				},
+				model: model({ capabilities: {} })
+			}).effective.featureIds
+		).toEqual(['web_search']);
+
+		const disabled = resolve({
+			phase: 'model_change',
+			currentSelections: {
+				terminalId: 'profile-terminal',
+				toolIds: ['profile-tool'],
+				skillIds: ['profile-skill'],
+				filterIds: ['profile-filter'],
+				featureIds: ['web_search']
+			},
+			model: model({ capabilities: { function_calling: false } })
+		});
+
+		expect(disabled.effective).toEqual({
+			terminalId: null,
+			toolIds: [],
+			skillIds: [],
+			filterIds: [],
+			featureIds: ['web_search']
+		});
+	});
+
+	it('matches TerminalMenu direct-tool permission semantics', () => {
+		expect(isDirectToolServersPermitted({ role: 'admin' })).toBe(true);
+		expect(isDirectToolServersPermitted({ role: 'user', permissions: { features: {} } })).toBe(
+			true
+		);
+		expect(
+			isDirectToolServersPermitted({
+				role: 'user',
+				permissions: { features: { direct_tool_servers: false } }
+			})
+		).toBe(false);
+	});
 });
 
 describe('conversation mode profile draft controller', () => {
@@ -223,6 +271,15 @@ describe('conversation mode profile draft controller', () => {
 		expect(controller.applyModelChange(modelChange)).toMatchObject({ revisionHint: 'agent-r7' });
 		expect(controller.bindCanonicalRevision('agent-bound-r7')).toMatchObject({
 			revisionHint: 'agent-bound-r7'
+		});
+	});
+
+	it('hydrates a restored draft hint before model changes', () => {
+		const controller = createConversationModeProfileDraftController();
+		controller.hydrateRevisionHint('agent-restored-r7');
+
+		expect(controller.applyModelChange(resolve({ phase: 'model_change' }))).toMatchObject({
+			revisionHint: 'agent-restored-r7'
 		});
 	});
 });

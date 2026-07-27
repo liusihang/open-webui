@@ -92,12 +92,22 @@ describe('conversation mode presentation contract', () => {
 		expect(chat).toContain('applyModeProfileInitialization');
 		expect(chat).toContain('applyModeProfileModelChange');
 		expect(chat).toContain('selectedTerminalId.set(null)');
-		expect(chat).toContain('filter_ids: selectedFilterIds');
-		expect(chat).toContain('tool_ids: toolIds');
-		expect(chat).toContain('skill_ids: skillIds');
-		expect(chat).toContain(
-			'terminal_id: terminalEnabled ? (activeTerminalId ?? undefined) : undefined'
-		);
+		expect(chat).toContain('shouldSendModeProfileCapabilityOverrides');
+		expect(chat).toContain('filter_ids:');
+		expect(chat).toContain('tool_ids:');
+		expect(chat).toContain('skill_ids:');
+		expect(chat).toContain('terminal_id:');
 		expect(chat).not.toContain('modeProfileSystemPrompt');
+	});
+
+	it('does not let bound chats or denied users emit implicit capability overrides', () => {
+		const chat = readSource('./Chat.svelte');
+
+		expect(chat).toContain('isDirectToolServersPermitted');
+		expect(chat).toContain('modeProfileBoundWithoutDraft');
+		expect(chat).toContain('modeProfileCapabilitiesOverridden');
+		expect(chat).toContain('shouldSendModeProfileCapabilityOverrides');
+		expect(chat).toContain('directTerminalPermitted');
+		expect(chat).toContain('!modeProfileBoundWithoutDraft && !storageChatInput');
 	});
 });

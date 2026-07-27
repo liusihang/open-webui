@@ -17,6 +17,16 @@ export type ConversationModeProfileWarning = {
 	resourceIds: string[];
 };
 
+export const isDirectToolServersPermitted = (
+	user:
+		| {
+				role?: unknown;
+				permissions?: { features?: { direct_tool_servers?: unknown } };
+		  }
+		| null
+		| undefined
+) => user?.role === 'admin' || user?.permissions?.features?.direct_tool_servers !== false;
+
 type ModelMetadata = {
 	terminalId?: unknown;
 	toolIds?: unknown;
@@ -120,10 +130,14 @@ const profileValue = <T>(
 };
 
 const supportsTerminal = (model: ConversationModeProfileModel | null | undefined) =>
+	metadata(model).capabilities?.function_calling !== false &&
 	metadata(model).capabilities?.terminal !== false;
 
 const supportsFeature = (model: ConversationModeProfileModel | null | undefined, id: string) =>
-	metadata(model).capabilities?.[id] === true;
+	metadata(model).capabilities?.[id] !== false;
+
+const supportsFunctionCalling = (model: ConversationModeProfileModel | null | undefined) =>
+	metadata(model).capabilities?.function_calling !== false;
 
 const supportsFilter = (model: ConversationModeProfileModel | null | undefined, id: string) => {
 	if (!Array.isArray(model?.filters)) return true;
@@ -170,20 +184,19 @@ export const resolveConversationModeProfile = (
 		() => supportsTerminal(input.model)
 	);
 	if (terminal.warning) warnings.push(terminal.warning);
-	const tools = filterSelection('tool_ids', requested.toolIds, input.available.toolIds, () => true);
+	const tools = filterSelection('tool_ids', requested.toolIds, input.available.toolIds, () =>
+		supportsFunctionCalling(input.model)
+	);
 	if (tools.warning) warnings.push(tools.warning);
-	const skills = filterSelection(
-		'skill_ids',
-		requested.skillIds,
-		input.available.skillIds,
-		() => true
+	const skills = filterSelection('skill_ids', requested.skillIds, input.available.skillIds, () =>
+		supportsFunctionCalling(input.model)
 	);
 	if (skills.warning) warnings.push(skills.warning);
 	const filters = filterSelection(
 		'filter_ids',
 		requested.filterIds,
 		input.available.filterIds,
-		(id) => supportsFilter(input.model, id)
+		(id) => supportsFunctionCalling(input.model) && supportsFilter(input.model, id)
 	);
 	if (filters.warning) warnings.push(filters.warning);
 	const features = filterSelection(
@@ -252,6 +265,10 @@ export const createConversationModeProfileDraftController = () => {
 			return current();
 		},
 		bindCanonicalRevision: (revisionHint: string | null | undefined) => {
+			if (typeof revisionHint === 'string' && revisionHint) snapshot.revisionHint = revisionHint;
+			return current();
+		},
+		hydrateRevisionHint: (revisionHint: string | null | undefined) => {
 			if (typeof revisionHint === 'string' && revisionHint) snapshot.revisionHint = revisionHint;
 			return current();
 		},
