@@ -38,14 +38,26 @@ export type TerminalServer = {
 	name: string;
 };
 
-export const getTerminalServers = async (token: string): Promise<TerminalServer[]> => {
-	const res = await fetch(`${WEBUI_API_BASE_URL}/terminals/`, {
-		headers: {
-			Authorization: `Bearer ${token}`
+export const getTerminalServers = async (
+	token: string,
+	{ throwOnError = false }: { throwOnError?: boolean } = {}
+): Promise<TerminalServer[]> => {
+	try {
+		const res = await fetch(`${WEBUI_API_BASE_URL}/terminals/`, {
+			headers: {
+				Authorization: `Bearer ${token}`
+			}
+		});
+		if (!res.ok) throw new Error(`Terminal discovery failed (${res.status})`);
+		const terminals = await res.json();
+		if (!Array.isArray(terminals)) throw new Error('Terminal discovery failed (invalid response)');
+		return terminals;
+	} catch (error) {
+		if (throwOnError) {
+			throw error instanceof Error ? error : new Error('Terminal discovery failed');
 		}
-	}).catch(() => null);
-	if (!res || !res.ok) return [];
-	return res.json().catch(() => []);
+		return [];
+	}
 };
 
 export const getTerminalConfig = async (

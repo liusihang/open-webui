@@ -35,7 +35,7 @@ describe('conversation mode presentation contract', () => {
 
 		expect(chat).toContain("let conversationMode: ConversationMode = 'chat'");
 		expect(chat).toContain('normalizeConversationMode(chatContent?.mode)');
-		expect(chat).toContain('chat_mode: conversationMode');
+		expect(chat).toContain('chat_mode: requestContext.mode');
 		expect(chat).toContain('mode: conversationMode');
 		expect(chat).toContain('conversationMode: conversationMode');
 		expect(chat).toMatch(
@@ -88,7 +88,7 @@ describe('conversation mode presentation contract', () => {
 		expect(chat).toContain("from '$lib/components/chat/conversationModeProfiles'");
 		expect(chat).toContain('conversation_mode_profiles');
 		expect(chat).toContain('modeProfileRevisionId');
-		expect(chat).toContain('mode_profile_revision_id: modeProfileRevisionId');
+		expect(chat).toContain('mode_profile_revision_id: requestContext.revisionHint ?? undefined');
 		expect(chat).toContain('applyModeProfileInitialization');
 		expect(chat).toContain('applyModeProfileModelChange');
 		expect(chat).toContain('selectedTerminalId.set(null)');
@@ -119,7 +119,7 @@ describe('conversation mode presentation contract', () => {
 	it('persists authority in both drafts and tracks only capability changes', () => {
 		const chat = readSource('./Chat.svelte');
 		const observations =
-			chat.match(/modeProfileCapabilityAuthorityController\.observe\(data\)/g) ?? [];
+			chat.match(/modeProfileCapabilityAuthorityController\.observeWithChange\(data\)/g) ?? [];
 		const persistedSnapshots = chat.match(/createModeProfileDraftSnapshot\(data\)/g) ?? [];
 
 		expect(chat).toContain('createConversationModeCapabilityAuthorityController');
@@ -141,7 +141,6 @@ describe('conversation mode presentation contract', () => {
 		const beginModeProfileDraft = chat.match(
 			/const beginModeProfileDraft = \([\s\S]*?\) => \{([\s\S]*?)\n\t\};/
 		)?.[1];
-
 		expect(chat).toContain('parseConversationModeDraft');
 		expect(chat).toContain('getConversationModeDraftCapabilitySnapshot');
 		expect(chat).not.toContain('selectedToolIds = input.selectedToolIds;');
@@ -152,8 +151,8 @@ describe('conversation mode presentation contract', () => {
 			/const restoredRootCapabilitySnapshot\s*=\s*getConversationModeDraftCapabilitySnapshot/
 		);
 		expect(initNewChat).toContain('initialize: restoredRootCapabilitySnapshot === null');
-		expect(initNewChat).toContain(
-			'await restoreModeProfileCapabilitySnapshot(restoredRootCapabilitySnapshot)'
+		expect(initNewChat).toMatch(
+			/await restoreModeProfileCapabilitySnapshot\(\s*restoredRootCapabilitySnapshot,\s*expectedCatalogGeneration\s*\)/
 		);
 		expect(rootDraftRestore).toBeDefined();
 		expect(rootDraftRestore).not.toContain('selectedToolIds =');
@@ -173,11 +172,14 @@ describe('conversation mode presentation contract', () => {
 
 		expect(restoreSnapshot).toBeDefined();
 		expect(restoreSnapshot).toContain('selectedTerminalId.set(snapshot.selections.terminalId)');
-		expect(restoreSnapshot).toContain('await revalidateModeProfileCapabilities()');
-		expect(restoreSnapshot).toContain('await finalizeModeProfileCapabilitySnapshot()');
+		expect(restoreSnapshot).toContain('await revalidateModeProfileCapabilities({');
+		expect(restoreSnapshot).toContain('expectedCatalogGeneration: expectedCatalogGeneration');
+		expect(restoreSnapshot).toContain(
+			'await finalizeModeProfileCapabilitySnapshot(expectedCatalogGeneration)'
+		);
 		expect(navigateHandler).toContain('getConversationModeDraftCapabilitySnapshot');
-		expect(navigateHandler).toContain(
-			'await restoreModeProfileCapabilitySnapshot(restoredCapabilitySnapshot)'
+		expect(navigateHandler).toMatch(
+			/await restoreModeProfileCapabilitySnapshot\(\s*restoredCapabilitySnapshot,\s*expectedCatalogGeneration\s*\)/
 		);
 		expect(
 			navigateHandler?.indexOf(
@@ -194,7 +196,7 @@ describe('conversation mode presentation contract', () => {
 
 		expect(chat).toContain('getConversationModeAvailableToolIds');
 		expect(availability).toBeDefined();
-		expect(availability).toContain('modeProfileExternalCatalog.toolServers');
+		expect(availability).toContain('toolServers: catalogView.toolServers');
 		expect(availability).toContain('directToolServersPermitted: directTerminalPermitted');
 	});
 
@@ -217,7 +219,7 @@ describe('conversation mode presentation contract', () => {
 			/const transitionConversationMode = async \(nextMode: ConversationMode\) => \{([\s\S]*?)\n\t\};/
 		)?.[1];
 		const setDefaults = chat.match(
-			/const setDefaults = async \(\) => \{([\s\S]*?)\n\t\};\n\n\tconst showMessage/
+			/const setDefaults = async \([\s\S]*?\) => \{([\s\S]*?)\n\t\};\n\n\tconst showMessage/
 		)?.[1];
 
 		expect(transition).toBeDefined();
@@ -229,7 +231,9 @@ describe('conversation mode presentation contract', () => {
 		expect(transition?.match(/conversationMode = nextMode/g)).toHaveLength(1);
 		expect(transition).toContain('beginModeProfileDraft({ restoreRootDraft: false })');
 		expect(transition).toContain('await resetInput({ initialize: true })');
-		expect(transition).toContain('await finalizeModeProfileCapabilitySnapshot()');
+		expect(transition).toContain(
+			'await finalizeModeProfileCapabilitySnapshot(expectedCatalogGeneration)'
+		);
 		expect(transition).toContain('loading = false');
 		expect(transition).not.toContain('selectedModels =');
 		expect(transition).not.toContain('reasoningEffort =');
@@ -248,10 +252,10 @@ describe('conversation mode presentation contract', () => {
 			/const createModeProfileDraftSnapshot = \(input: any\) => \(\{([\s\S]*?)\n\t\}\);/
 		)?.[1];
 		const finalize = chat.match(
-			/const finalizeModeProfileCapabilitySnapshot = async \(\) => \{([\s\S]*?)\n\t\};/
+			/const finalizeModeProfileCapabilitySnapshot = async \([\s\S]*?\) => \{([\s\S]*?)\n\t\};/
 		)?.[1];
 		const persistFinalized = chat.match(
-			/const persistFinalizedModeProfileDraftSnapshot = async \(\) => \{([\s\S]*?)\n\t\};/
+			/const persistFinalizedModeProfileDraftSnapshot = async \([\s\S]*?\) => \{([\s\S]*?)\n\t\};/
 		)?.[1];
 		const initNewChat = chat.match(
 			/const initNewChat = async \([\s\S]*?\) => \{([\s\S]*?)\n\t\};\n\n\tconst loadChat/
@@ -262,57 +266,191 @@ describe('conversation mode presentation contract', () => {
 		expect(createDraft).toContain(
 			'modeProfileCapabilitySnapshotVersion: modeProfileControlsReady ? 1 : undefined'
 		);
+		expect(createDraft).toContain('modeProfileCapabilityOverrideFields');
 		expect(finalize).toBeDefined();
 		expect(finalize).toContain('modeProfileBoundTerminalId = $selectedTerminalId');
 		expect(finalize).toContain('modeProfileControlsReady = true');
-		expect(finalize).toContain('await persistFinalizedModeProfileDraftSnapshot()');
+		expect(finalize).toContain(
+			'await persistFinalizedModeProfileDraftSnapshot(expectedCatalogGeneration)'
+		);
 		expect(chat).toContain("modeProfileDraftId.startsWith('draft:') ? null");
 		expect(persistFinalized).toBeDefined();
 		expect(persistFinalized).toContain('getCurrentModeProfileDraftInput()');
 		expect(persistFinalized).not.toContain('latestModeProfileDraftInput');
 		expect(initNewChat).toBeDefined();
-		expect(initNewChat).toContain('await finalizeModeProfileCapabilitySnapshot()');
-		expect(initNewChat?.indexOf('await finalizeModeProfileCapabilitySnapshot()')).toBeGreaterThan(
+		const finalizeCall = 'await finalizeModeProfileCapabilitySnapshot(expectedCatalogGeneration)';
+		expect(initNewChat).toContain(finalizeCall);
+		expect(initNewChat?.indexOf(finalizeCall)).toBeGreaterThan(
 			initNewChat?.indexOf('await resetInput(') ?? Number.MAX_SAFE_INTEGER
 		);
 		expect(chat).toContain('immediate: true');
 		expect(chat).toContain('await modeProfileSetupPromise');
-		expect(chat).toContain('if (settingDefaultsPromise) return settingDefaultsPromise');
+		expect(chat).toContain('const inFlight = settingDefaultsPromise');
+		expect(chat).toContain('inFlight.generation === expectedCatalogGeneration');
 	});
 
-	it('awaits explicit external catalog truth before destructive revalidation and emission', () => {
+	it('caches bounded external discovery while send uses a non-blocking catalog snapshot', () => {
 		const chat = readSource('./Chat.svelte');
-		const ensureCatalogs = chat.match(
-			/const ensureModeProfileExternalCatalogsLoaded = async \([\s\S]*?\) => \{([\s\S]*?)\n\t\};/
+		const refreshCatalogs = chat.match(
+			/const refreshModeProfileExternalCatalogs = \([\s\S]*?\) => \{([\s\S]*?)\n\t\};/
 		)?.[1];
 		const revalidate = chat.match(
-			/const revalidateModeProfileCapabilities = async \(\) => \{([\s\S]*?)\n\t\};/
+			/const revalidateModeProfileCapabilities = async \([\s\S]*?\) => \{([\s\S]*?)\n\t\};/
 		)?.[1];
-		const sendMessageSocket = chat.match(/const sendMessageSocket = async \([\s\S]*?\n\t\};/)?.[0];
+		const triggerRefresh = chat.match(
+			/const triggerModeProfileExternalCatalogRefresh = \([\s\S]*?\) => \{([\s\S]*?)\n\t\};/
+		)?.[1];
+		const requestResolution = chat.match(
+			/const resolveModeProfileRequest = async \([\s\S]*?\) => \{([\s\S]*?)\n\t\};/
+		)?.[1];
 
 		expect(chat).toContain("import { getTerminalServers } from '$lib/apis/terminal'");
-		expect(ensureCatalogs).toBeDefined();
-		expect(ensureCatalogs).toContain('await getTerminalServers(localStorage.token)');
+		expect(chat).toContain('MODE_PROFILE_EXTERNAL_CATALOG_TIMEOUT_MS');
+		expect(chat).toContain('withModeProfileExternalCatalogTimeout');
+		expect(chat).toContain('createConversationModeExternalCatalogCache');
+		expect(chat).toContain('getConversationModeExternalCatalogFingerprint');
+		expect(chat).toContain('MODE_PROFILE_EXTERNAL_CATALOG_MAX_AGE_MS');
+		expect(chat).toContain('modeProfileExternalCatalogCache.shouldRefresh');
+		expect(refreshCatalogs).toBeDefined();
+		expect(refreshCatalogs).toContain('modeProfileExternalCatalogPromises.get(fingerprint)');
+		expect(refreshCatalogs).toContain('modeProfileExternalCatalogCache.begin');
+		expect(refreshCatalogs).toMatch(
+			/withModeProfileExternalCatalogTimeout\([\s\S]*getTerminalServers\(localStorage\.token, \{[\s\S]*throwOnError: true/
+		);
+		expect(refreshCatalogs?.match(/withModeProfileExternalCatalogTimeout\(/g) ?? []).toHaveLength(
+			3
+		);
 		expect(revalidate).toBeDefined();
 		expect(revalidate).toContain('modeProfileControlsReady = false');
-		expect(revalidate).toContain('await ensureModeProfileExternalCatalogsLoaded()');
-		expect(revalidate).toContain('applyModeProfileModelChange()');
+		expect(revalidate).toContain('await refreshModeProfileExternalCatalogs(');
+		expect(revalidate).toContain('await applyModeProfileModelChange(');
 		expect(revalidate).toContain('modeProfileBoundTerminalId = $selectedTerminalId');
-		expect(sendMessageSocket).toContain('await resolveModeProfileRequest(model)');
-		expect(chat).toContain('configuredToolServers: $settings?.toolServers ?? []');
-		expect(chat).toContain('directToolServerCatalogReady: modeProfileExternalCatalog.ready');
+		expect(triggerRefresh).toBeDefined();
+		expect(triggerRefresh).toContain('void refreshModeProfileExternalCatalogs(');
+		expect(triggerRefresh).not.toContain('await refreshModeProfileExternalCatalogs(');
+		expect(triggerRefresh).toContain('shouldRefreshModeProfileExternalCatalog');
+		expect(requestResolution).toBeDefined();
+		expect(requestResolution).toContain('triggerModeProfileExternalCatalogRefresh(');
+		expect(requestResolution).not.toContain('await refreshModeProfileExternalCatalogs(');
+		expect(requestResolution).toContain('getModeProfileExternalCatalogView(');
 	});
 
-	it('builds request-local capabilities from the actual socket model without mutating UI state', () => {
+	it('invalidates background catalog callbacks across conversation and component lifecycles', () => {
+		const chat = readSource('./Chat.svelte');
+		const triggerRefresh = chat.match(
+			/const triggerModeProfileExternalCatalogRefresh = \([\s\S]*?\) => \{([\s\S]*?)\n\t\};/
+		)?.[1];
+		const revalidate = chat.match(
+			/const revalidateModeProfileCapabilities = async \([\s\S]*?\) => \{([\s\S]*?)\n\t\};/
+		)?.[1];
+		const navigateHandler = chat.match(
+			/const navigateHandler = async \(\) => \{([\s\S]*?)\n\t\};\n\n\tconst onSelect/
+		)?.[1];
+		const beginModeProfileDraft = chat.match(
+			/const beginModeProfileDraft = \([\s\S]*?\) => \{([\s\S]*?)\n\t\};/
+		)?.[1];
+		const continueOAuthRedirect = chat.match(
+			/const continueOAuthRedirect = async \([\s\S]*?\) => \{([\s\S]*?)\n\t\};/
+		)?.[1];
+		const applyModelChange = chat.match(
+			/const applyModeProfileModelChange = async \([\s\S]*?\) => \{([\s\S]*?)\n\t\};/
+		)?.[1];
+		const setDefaults = chat.match(
+			/const setDefaults = async \([\s\S]*?\) => \{([\s\S]*?)\n\t\};/
+		)?.[1];
+		const initNewChat = chat.match(
+			/const initNewChat = async \([\s\S]*?\) => \{([\s\S]*?)\n\t\};\n\n\tconst loadChat/
+		)?.[1];
+		const restoreSnapshot = chat.match(
+			/const restoreModeProfileCapabilitySnapshot = async \([\s\S]*?\) => \{([\s\S]*?)\n\t\};/
+		)?.[1];
+		const restoreLegacy = chat.match(
+			/const restoreLegacyModeProfileDraftCapabilities = async \([\s\S]*?\) => \{([\s\S]*?)\n\t\};/
+		)?.[1];
+		const finalize = chat.match(
+			/const finalizeModeProfileCapabilitySnapshot = async \([\s\S]*?\) => \{([\s\S]*?)\n\t\};/
+		)?.[1];
+		const persistFinalized = chat.match(
+			/const persistFinalizedModeProfileDraftSnapshot = async \([\s\S]*?\) => \{([\s\S]*?)\n\t\};/
+		)?.[1];
+		const transition = chat.match(
+			/const transitionConversationMode = async \([\s\S]*?\) => \{([\s\S]*?)\n\t\};/
+		)?.[1];
+
+		expect(chat).toContain('let modeProfileCatalogGeneration = 0');
+		expect(triggerRefresh).toContain('const refreshGeneration = modeProfileCatalogGeneration');
+		expect(triggerRefresh).toContain('refreshGeneration !== modeProfileCatalogGeneration');
+		expect(triggerRefresh).toContain('expectedCatalogGeneration: refreshGeneration');
+		expect(revalidate).toContain('expectedCatalogGeneration');
+		expect(
+			revalidate?.match(/isModeProfileCatalogGenerationCurrent\(/g)?.length ?? 0
+		).toBeGreaterThanOrEqual(4);
+		expect(navigateHandler).toContain('invalidateModeProfileCatalogGeneration()');
+		expect(beginModeProfileDraft).toContain('invalidateModeProfileCatalogGeneration()');
+		expect(applyModelChange).toContain(
+			"applyModeProfileResolution(snapshot, 'model_change', expectedCatalogGeneration)"
+		);
+		expect(continueOAuthRedirect).toContain('expectedCatalogGeneration');
+		expect(continueOAuthRedirect).toMatch(
+			/await tick\(\);[\s\S]*?isModeProfileCatalogGenerationCurrent\(expectedCatalogGeneration\)[\s\S]*?initiateOAuthRedirect/
+		);
+		expect(setDefaults).toContain('expectedCatalogGeneration');
+		expect(
+			setDefaults?.match(/isModeProfileCatalogGenerationCurrent\(/g)?.length ?? 0
+		).toBeGreaterThanOrEqual(3);
+		expect(setDefaults).toContain('continueOAuthRedirect(expectedCatalogGeneration)');
+		expect(setDefaults).toContain(
+			'applyModeProfileInitialization(externalCatalogRequest, expectedCatalogGeneration)'
+		);
+		expect(chat).toContain('filterConversationModeTerminalCandidateIds');
+		expect(chat).toContain('configuredDirectTerminalIds');
+		expect(initNewChat).toContain('const expectedCatalogGeneration = modeProfileCatalogGeneration');
+		expect(initNewChat).toMatch(
+			/await resetInput\([\s\S]*?isModeProfileCatalogGenerationCurrent\(expectedCatalogGeneration\)[\s\S]*?restoreModeProfileCapabilitySnapshot/
+		);
+		expect(initNewChat).toMatch(
+			/restoreLegacyModeProfileDraftCapabilities\([\s\S]*?isModeProfileCatalogGenerationCurrent\(expectedCatalogGeneration\)[\s\S]*?await chatId\.set\(''\)/
+		);
+		expect(initNewChat).toMatch(
+			/restoreModeProfileCapabilitySnapshot\(\s*restoredRootCapabilitySnapshot,\s*expectedCatalogGeneration\s*\)/
+		);
+		expect(initNewChat).toMatch(
+			/restoreLegacyModeProfileDraftCapabilities\(\s*restoredRootDraft,\s*\{[\s\S]*?expectedCatalogGeneration/
+		);
+		expect(initNewChat).toContain(
+			'finalizeModeProfileCapabilitySnapshot(expectedCatalogGeneration)'
+		);
+		expect(restoreSnapshot).toContain('expectedCatalogGeneration');
+		expect(restoreSnapshot).toContain('expectedCatalogGeneration: expectedCatalogGeneration');
+		expect(restoreSnapshot).toContain(
+			'finalizeModeProfileCapabilitySnapshot(expectedCatalogGeneration)'
+		);
+		expect(restoreLegacy).toContain('expectedCatalogGeneration');
+		expect(finalize).toContain('expectedCatalogGeneration');
+		expect(finalize).toContain(
+			'persistFinalizedModeProfileDraftSnapshot(expectedCatalogGeneration)'
+		);
+		expect(persistFinalized).toMatch(
+			/await tick\(\);[\s\S]*?isModeProfileCatalogGenerationCurrent\(expectedCatalogGeneration\)[\s\S]*?saveDraft/
+		);
+		expect(transition).toContain('let expectedCatalogGeneration = modeProfileCatalogGeneration');
+		expect(transition).toContain(
+			'finalizeModeProfileCapabilitySnapshot(expectedCatalogGeneration)'
+		);
+		expect(chat).toMatch(
+			/return \(\) => \{[\s\S]*?invalidateModeProfileCatalogGeneration\(\)[\s\S]*?pageSubscribe\(\)/
+		);
+	});
+
+	it('captures request state before the first await and serializes only from that context', () => {
 		const chat = readSource('./Chat.svelte');
 		const requestResolution = chat.match(
-			/const resolveModeProfileRequest = async \(model: Model\) => \{([\s\S]*?)\n\t\};/
+			/const resolveModeProfileRequest = async \([\s\S]*?\) => \{([\s\S]*?)\n\t\};/
 		)?.[1];
 		const sendMessageSocket = chat.match(/const sendMessageSocket = async \([\s\S]*?\n\t\};/)?.[0];
 
 		expect(requestResolution).toBeDefined();
-		expect(requestResolution).toContain('await ensureModeProfileExternalCatalogsLoaded(model)');
-		expect(requestResolution).toContain('getModeProfileAvailability(model)');
+		expect(requestResolution).toMatch(/getModeProfileAvailability\(\s*requestContext\.model/);
 		expect(requestResolution).toContain('resolveConversationModeRequestCapabilities');
 		expect(requestResolution).not.toContain('applyModeProfileModelChange');
 		expect(requestResolution).not.toContain('modeProfileCapabilityAuthorityController');
@@ -323,15 +461,205 @@ describe('conversation mode presentation contract', () => {
 			/(?:selectedToolIds|selectedSkillIds|selectedFilterIds|webSearchEnabled|codeInterpreterEnabled|imageGenerationEnabled)\s*=/
 		);
 		expect(sendMessageSocket).not.toContain('await revalidateModeProfileCapabilities()');
-		expect(sendMessageSocket).toContain(
-			'const modeProfileRequest = await resolveModeProfileRequest(model)'
+		expect(sendMessageSocket).not.toContain('await modeProfileSetupPromise');
+		expect(sendMessageSocket).toContain('captureConversationModeRequestContext');
+		const captureOffset = sendMessageSocket?.indexOf(
+			'const requestContext = captureConversationModeRequestContext'
+		);
+		const firstAwaitOffset = sendMessageSocket?.indexOf('await ');
+		expect(captureOffset).toBeGreaterThanOrEqual(0);
+		expect(captureOffset).toBeLessThan(firstAwaitOffset ?? -1);
+		expect(sendMessageSocket).toMatch(
+			/const modeProfileRequest = await resolveModeProfileRequest\(\s*requestContext/
 		);
 		expect(sendMessageSocket).toContain('selections: modeProfileRequest.effective');
+		expect(sendMessageSocket).toContain('getConversationModeRequestFeatures');
+		expect(sendMessageSocket).toContain('authority: requestContext.authority');
+		expect(sendMessageSocket).toContain('overrideFields: requestContext.overrideFields');
+		expect(sendMessageSocket).toContain('chat_mode: requestContext.mode');
 		expect(sendMessageSocket).toContain(
-			'features: getFeatures(model, modeProfileRequest.effective)'
+			'mode_profile_revision_id: requestContext.revisionHint ?? undefined'
 		);
+		expect(sendMessageSocket).toContain('model_item: requestContext.model');
+		expect(sendMessageSocket).toContain('requestContext.model.info?.meta?.capabilities?.usage');
+		expect(sendMessageSocket).not.toContain('stream && (model.info?.meta?.capabilities?.usage');
 		expect(chat).toContain('const getModeProfileAvailability = (');
-		expect(chat).toContain('modelOverride: Model | undefined = undefined');
+		expect(chat).toContain('requestContext?: ConversationModeRequestContext');
+	});
+
+	it('wires positive legacy migration for root and existing drafts without replacing ordinary content', () => {
+		const chat = readSource('./Chat.svelte');
+		const navigateHandler = chat.match(
+			/const navigateHandler = async \(\) => \{([\s\S]*?)\n\t\};\n\n\tconst onSelect/
+		)?.[1];
+		const initNewChat = chat.match(
+			/const initNewChat = async \([\s\S]*?\) => \{([\s\S]*?)\n\t\};\n\n\tconst loadChat/
+		)?.[1];
+		const restoreLegacy = chat.match(
+			/const restoreLegacyModeProfileDraftCapabilities = async \([\s\S]*?\) => \{([\s\S]*?)\n\t\};/
+		)?.[1];
+
+		expect(chat).toContain('migrateConversationModeLegacyDraftCapabilities');
+		expect(restoreLegacy).toBeDefined();
+		expect(restoreLegacy).toContain("phase: 'initialize'");
+		expect(restoreLegacy).toContain("phase: 'model_change'");
+		expect(restoreLegacy).toContain('modeProfileCapabilityAuthorityController.markExplicit()');
+		expect(navigateHandler).toMatch(
+			/restoreLegacyModeProfileDraftCapabilities\(\s*restoredDraft,\s*\{[\s\S]*?preserveBoundDefaults: true,[\s\S]*?expectedCatalogGeneration[\s\S]*?\}[\s\S]*?\)/
+		);
+		expect(initNewChat).toMatch(
+			/await restoreLegacyModeProfileDraftCapabilities\(\s*restoredRootDraft,\s*\{[\s\S]*?expectedCatalogGeneration[\s\S]*?\}\s*\)/
+		);
+		expect(navigateHandler).toContain('messageInput?.setText(restoredDraft.prompt)');
+		expect(navigateHandler).toContain('files = restoredDraft.files');
+	});
+
+	it('binds controls autosave responses only to their originating chat generation', () => {
+		const chat = readSource('./Chat.svelte');
+		const saveControls = chat.match(/const saveControls = async \(\) => \{([\s\S]*?)\n\t\};/)?.[1];
+
+		expect(saveControls).toBeDefined();
+		expect(saveControls).toContain('const targetChatId = $chatId');
+		expect(saveControls).toContain(
+			'const expectedCatalogGeneration = modeProfileCatalogGeneration'
+		);
+		expect(saveControls).toContain('updateChatById(localStorage.token, targetChatId');
+		expect(saveControls).toMatch(
+			/if \([\s\S]*?\$chatId !== targetChatId[\s\S]*?!isModeProfileCatalogGenerationCurrent\(expectedCatalogGeneration\)[\s\S]*?\)\s*return;/
+		);
+		expect(saveControls?.indexOf('$chatId !== targetChatId')).toBeLessThan(
+			saveControls?.indexOf('chat = res') ?? -1
+		);
+		expect(saveControls?.indexOf('$chatId !== targetChatId')).toBeLessThan(
+			saveControls?.indexOf('bindCanonicalModeProfileRevision') ?? -1
+		);
+	});
+
+	it('commits loaded chat responses only to their originating navigation generation', () => {
+		const chat = readSource('./Chat.svelte');
+		const loadChat = chat.match(
+			/const loadChat = async \([\s\S]*?\) => \{[\s\S]*?\n\t\};\n\n\tconst scrollToBottom/
+		)?.[0];
+		const navigateHandler = chat.match(
+			/const navigateHandler = async \(\) => \{([\s\S]*?)\n\t\};\n\n\tconst onSelect/
+		)?.[1];
+
+		expect(loadChat).toBeDefined();
+		expect(loadChat).toContain('targetChatId = chatIdProp');
+		expect(loadChat).toContain('expectedCatalogGeneration = modeProfileCatalogGeneration');
+		expect(loadChat).toContain(
+			'const loadedChat = await getChatById(localStorage.token, targetChatId)'
+		);
+		expect(loadChat).toContain(
+			'const loadedTags = await getTagsById(localStorage.token, targetChatId)'
+		);
+		expect(loadChat).not.toContain('chat = await getChatById');
+		expect(loadChat).toMatch(
+			/\$chatId !== targetChatId[\s\S]*?!isModeProfileCatalogGenerationCurrent\(expectedCatalogGeneration\)[\s\S]*?return false;[\s\S]*?chat = loadedChat/
+		);
+		expect(loadChat?.indexOf('chat = loadedChat')).toBeLessThan(
+			loadChat?.indexOf('bindCanonicalModeProfileRevision') ?? -1
+		);
+		expect(navigateHandler).toContain('loadChat(chatIdProp, expectedCatalogGeneration)');
+	});
+
+	it('guards deferred authority, tag refresh, and chat actions by chat generation', () => {
+		const chat = readSource('./Chat.svelte');
+		const navigateHandler = chat.match(
+			/const navigateHandler = async \(\) => \{([\s\S]*?)\n\t\};\n\n\tconst onSelect/
+		)?.[1];
+		const chatEventHandler = chat.match(
+			/const chatEventHandler = async \([\s\S]*?\) => \{([\s\S]*?)\n\t\};\n\n\tconst onMessageHandler/
+		)?.[1];
+		const chatActionHandler = chat.match(
+			/const chatActionHandler = async \([\s\S]*?\) => \{([\s\S]*?)\n\t\};\n\n\tconst getChatEventEmitter/
+		)?.[1];
+
+		expect(navigateHandler).toMatch(
+			/queueMicrotask\(\(\) => \{\s*if \(!isModeProfileCatalogGenerationCurrent\(expectedCatalogGeneration\)\) return;/
+		);
+		expect(chatEventHandler).toContain('const loadedTaggedChat = await getChatById(');
+		expect(chatEventHandler).toContain('const loadedAllTags = await getAllTags(');
+		expect(chatEventHandler).toMatch(
+			/loadedAllTags[\s\S]*?event\.chat_id !== \$chatId[\s\S]*?!isModeProfileCatalogGenerationCurrent\(expectedCatalogGeneration\)[\s\S]*?return;[\s\S]*?chat = loadedTaggedChat[\s\S]*?allTags\.set\(loadedAllTags\)/
+		);
+		expect(chatActionHandler).toContain(
+			'const expectedCatalogGeneration = modeProfileCatalogGeneration'
+		);
+		expect(chatActionHandler).toContain('const targetChatId = _chatId');
+		expect(chatActionHandler).toMatch(
+			/const res = await chatAction[\s\S]*?if \([\s\S]*?\$chatId !== targetChatId[\s\S]*?!isModeProfileCatalogGenerationCurrent\(expectedCatalogGeneration\)[\s\S]*?\)\s*\{\s*return;\s*\}[\s\S]*?history\.messages/
+		);
+		expect(chatActionHandler).not.toContain('chat = await updateChatById');
+		expect(chatActionHandler).toContain('const savedChat = await updateChatById');
+	});
+
+	it('keeps socket completion and queued requests owned by their originating chat generation', () => {
+		const chat = readSource('./Chat.svelte');
+		const chatEventHandler = chat.match(
+			/const chatEventHandler = async \([\s\S]*?\) => \{([\s\S]*?)\n\t\};\n\n\tconst onMessageHandler/
+		)?.[1];
+		const processNextInQueue = chat.match(
+			/const processNextInQueue = async \([\s\S]*?\) => \{([\s\S]*?)\n\t\};\n\n\tconst chatCompletedHandler/
+		)?.[1];
+		const chatCompletedHandler = chat.match(
+			/const chatCompletedHandler = async \([\s\S]*?\) => \{([\s\S]*?)\n\t\};\n\n\tconst chatActionHandler/
+		)?.[1];
+		const chatCompletionEventHandler = chat.match(
+			/const chatCompletionEventHandler = async \([\s\S]*?\) => \{([\s\S]*?)\n\t\};\n\n\t\/\/\/\/\/\/\/\/\/\/\/\/\/\/\/\/\/\/\/\/\/\//
+		)?.[1];
+		const stopResponse = chat.match(
+			/const stopResponse = async \([\s\S]*?\) => \{([\s\S]*?)\n\t\};\n\n\tconst submitMessage/
+		)?.[1];
+
+		expect(chatEventHandler).toMatch(
+			/chatCompletionEventHandler\(\s*data,\s*message,\s*event\.chat_id,\s*expectedCatalogGeneration\s*\)/
+		);
+		expect(chatEventHandler).toContain(
+			'processNextInQueue(event.chat_id, expectedCatalogGeneration)'
+		);
+		expect(chat).toMatch(
+			/const processNextInQueue = async \(\s*targetChatId: string,\s*expectedCatalogGeneration = modeProfileCatalogGeneration\s*\)/
+		);
+		expect(processNextInQueue).toMatch(
+			/\$chatId !== targetChatId[\s\S]*?!isModeProfileCatalogGenerationCurrent\(expectedCatalogGeneration\)[\s\S]*?return;[\s\S]*?chatRequestQueues\.update[\s\S]*?await submitPrompt/
+		);
+		expect(chat).toMatch(
+			/const chatCompletionEventHandler = async \(\s*data,\s*message,\s*targetChatId,\s*expectedCatalogGeneration = modeProfileCatalogGeneration\s*\)/
+		);
+		expect(chatCompletionEventHandler).toContain(
+			'processNextInQueue(targetChatId, expectedCatalogGeneration)'
+		);
+		expect(chatCompletionEventHandler).toMatch(
+			/chatCompletedHandler\(\s*targetChatId,\s*message\.model,\s*message\.id,\s*expectedCatalogGeneration\s*\)/
+		);
+		expect(chatCompletedHandler).toContain('const loadedChats = await getChatList');
+		expect(chatCompletedHandler).toMatch(
+			/const loadedChats = await getChatList[\s\S]*?\$chatId !== targetChatId[\s\S]*?!isModeProfileCatalogGenerationCurrent\(expectedCatalogGeneration\)[\s\S]*?return;[\s\S]*?chats\.set\(loadedChats\)/
+		);
+		expect(stopResponse).toContain('const targetChatId = $chatId');
+		expect(stopResponse).toContain('processNextInQueue(targetChatId, expectedCatalogGeneration)');
+	});
+
+	it('partitions OAuth tools only when applying global UI resolutions', () => {
+		const chat = readSource('./Chat.svelte');
+		const applyResolution = chat.match(
+			/const applyModeProfileResolution = async \([\s\S]*?\) => \{([\s\S]*?)\n\t\};/
+		)?.[1];
+		const requestResolution = chat.match(
+			/const resolveModeProfileRequest = async \([\s\S]*?\) => \{([\s\S]*?)\n\t\};/
+		)?.[1];
+
+		expect(chat).toContain('partitionConversationModeOAuthTools');
+		expect(applyResolution).toBeDefined();
+		expect(applyResolution).toContain('partitionConversationModeOAuthTools');
+		expect(applyResolution).toContain('pendingOAuthTools = oauthPartition.pendingOAuthTools');
+		expect(applyResolution).toContain('await continueOAuthRedirect(expectedCatalogGeneration)');
+		expect(requestResolution).toBeDefined();
+		expect(requestResolution).not.toContain('pendingOAuthTools');
+		expect(chat).toContain('getModeProfileSelectedToolIds');
+		expect(chat).toContain('pendingOAuthTools.map((tool) => tool.id)');
+		expect(chat).toContain('includePendingOAuthTools: false');
 	});
 
 	it('routes every accepted submit caller through one draft-clearing boundary', () => {
@@ -457,7 +785,7 @@ describe('conversation mode presentation contract', () => {
 			/const saveDraft = async \([\s\S]*?\) => \{([\s\S]*?)\n\t\};/
 		)?.[1];
 		const persistFinalized = chat.match(
-			/const persistFinalizedModeProfileDraftSnapshot = async \(\) => \{([\s\S]*?)\n\t\};/
+			/const persistFinalizedModeProfileDraftSnapshot = async \([\s\S]*?\) => \{([\s\S]*?)\n\t\};/
 		)?.[1];
 		const saveAuthority = chat.match(
 			/const saveModeProfileCapabilityAuthority = \(\) => \{([\s\S]*?)\n\t\};/

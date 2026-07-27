@@ -105,10 +105,7 @@
 
 	import Banner from '../common/Banner.svelte';
 	import MessageInput from '$lib/components/chat/MessageInput.svelte';
-	import {
-		resolveImageGenerationFeature,
-		shouldEnableImageGenerationByDefault
-	} from '$lib/components/chat/defaultFeatures';
+	import { shouldEnableImageGenerationByDefault } from '$lib/components/chat/defaultFeatures';
 	import {
 		buildModelReasoningPayload,
 		isAgentModeCapabilityEnabled,
@@ -119,20 +116,31 @@
 		type ReasoningEffort
 	} from '$lib/components/chat/agentModeRequest';
 	import {
+		captureConversationModeRequestContext,
 		createConversationModeCapabilityAuthorityController,
+		createConversationModeExternalCatalogCache,
 		createConversationModeProfileDraftController,
+		filterConversationModeTerminalCandidateIds,
 		getConversationModeAvailableToolIds,
 		getConversationModeDraftCapabilitySnapshot,
+		getConversationModeExternalCatalogFingerprint,
+		getConversationModeRequestFeatures,
 		isDirectToolServersPermitted,
+		migrateConversationModeLegacyDraftCapabilities,
 		parseConversationModeDraft,
+		partitionConversationModeOAuthTools,
 		resolveConversationModeProfile,
 		resolveConversationModeRequestCapabilities,
 		serializeConversationModeCapabilityRequest,
 		serializeConversationModeToolServers,
 		type ConversationModeCapabilityAuthority,
+		type ConversationModeCapabilityOverrideField,
 		type ConversationModeDraftCapabilitySnapshot,
+		type ConversationModePendingOAuthTool,
 		type ConversationModeProfileAvailability,
-		type ConversationModeProfileSelections
+		type ConversationModeProfileSelections,
+		type ConversationModeRequestContext,
+		type ConversationModeToolServer
 	} from '$lib/components/chat/conversationModeProfiles';
 	import type { ConversationModeProfilePublic } from '$lib/apis/configs';
 	import {
@@ -199,7 +207,7 @@
 	let selectedToolIds: string[] = [];
 	let selectedSkillIds: string[] = [];
 	let selectedFilterIds: string[] = [];
-	let pendingOAuthTools = [];
+	let pendingOAuthTools: ConversationModePendingOAuthTool[] = [];
 
 	let imageGenerationEnabled = false;
 	let imageGenerationUserOverride: boolean | null = null;
@@ -217,16 +225,32 @@
 		});
 	let modeProfileCapabilityAuthority: ConversationModeCapabilityAuthority =
 		modeProfileCapabilityAuthorityController.snapshot();
+	let modeProfileCapabilityOverrideFields: ConversationModeCapabilityOverrideField[] | null = null;
 	let modeProfileControlsReady = false;
 	let modeProfileBoundTerminalId: string | null = null;
 	let latestModeProfileDraftInput: any = null;
 	let modeProfileSetupPromise: Promise<void> | null = null;
-	let modeProfileExternalCatalog: {
-		ready: boolean;
-		toolServers: any[];
-		terminalServers: any[];
-	} = { ready: false, toolServers: [], terminalServers: [] };
-	let modeProfileExternalCatalogPromise: Promise<void> | null = null;
+	const modeProfileExternalCatalogCache = createConversationModeExternalCatalogCache();
+	const modeProfileExternalCatalogPromises = new Map<string, Promise<boolean>>();
+	let modeProfileCatalogGeneration = 0;
+	const invalidateModeProfileCatalogGeneration = () => {
+		modeProfileCatalogGeneration += 1;
+	};
+	const isModeProfileCatalogGenerationCurrent = (expectedGeneration?: number) =>
+		expectedGeneration === undefined || expectedGeneration === modeProfileCatalogGeneration;
+	type ModeProfileExternalCatalogRequest = {
+		fingerprint: string;
+		directToolServersPermitted: boolean;
+		terminalCandidateIds: string[];
+		configuredToolServers: any[];
+		configuredTerminalServers: any[];
+		configuredDirectTerminalIds: string[];
+		currentToolServers: ConversationModeToolServer[];
+		currentTerminalServers: ConversationModeToolServer[];
+	};
+	const MODE_PROFILE_EXTERNAL_CATALOG_TIMEOUT_MS = 5000;
+	const MODE_PROFILE_EXTERNAL_CATALOG_MAX_AGE_MS = 60_000;
+	const MODE_PROFILE_EXTERNAL_CATALOG_RETRY_MS = 10_000;
 	let webSearchActive = false;
 	let showWebSearchConfirm = false;
 	let pendingWebSearchPrompt: string | null = null;
@@ -275,6 +299,7 @@
 
 	$: if (modeProfileControlsReady && $selectedTerminalId !== modeProfileBoundTerminalId) {
 		modeProfileCapabilityAuthority = modeProfileCapabilityAuthorityController.markExplicit();
+		modeProfileCapabilityOverrideFields = null;
 		modeProfileBoundTerminalId = $selectedTerminalId;
 		saveModeProfileCapabilityAuthority();
 	}
@@ -321,6 +346,8 @@
 	}
 
 	const navigateHandler = async () => {
+		invalidateModeProfileCatalogGeneration();
+		const expectedCatalogGeneration = modeProfileCatalogGeneration;
 		// Mark the outgoing chat as read before loading the new one.
 		// $chatId still holds the previous chat here — loadChat() updates it.
 		if ($chatId && $chatId !== chatIdProp && !$temporaryChatEnabled) {
@@ -329,6 +356,7 @@
 
 		clearTimeout(saveControlsTimer);
 		await saveControls();
+		if (!isModeProfileCatalogGenerationCurrent(expectedCatalogGeneration)) return;
 		loading = true;
 
 		prompt = '';
@@ -354,6 +382,7 @@
 			existingChat: false
 		});
 		modeProfileCapabilityAuthority = modeProfileCapabilityAuthorityController.snapshot();
+		modeProfileCapabilityOverrideFields = null;
 		reasoningEffort = 'medium';
 
 		const storageChatInput = sessionStorage.getItem(
@@ -375,7 +404,10 @@
 			modeProfileCapabilityAuthority = modeProfileCapabilityAuthorityController.snapshot();
 		}
 
-		if (chatIdProp && (await loadChat())) {
+		const loadedChat = chatIdProp ? await loadChat(chatIdProp, expectedCatalogGeneration) : false;
+		if (!isModeProfileCatalogGenerationCurrent(expectedCatalogGeneration)) return;
+		if (chatIdProp && loadedChat) {
+			let restoredLegacyCapabilities = false;
 			if (restoredDraft && !$temporaryChatEnabled) {
 				messageInput?.setText(restoredDraft.prompt);
 				files = restoredDraft.files;
@@ -384,12 +416,28 @@
 					restoredDraft.reasoningEffort ?? restoredDraft.reasoningDepth
 				);
 				if (restoredCapabilitySnapshot) {
-					await restoreModeProfileCapabilitySnapshot(restoredCapabilitySnapshot);
+					await restoreModeProfileCapabilitySnapshot(
+						restoredCapabilitySnapshot,
+						expectedCatalogGeneration
+					);
+				} else {
+					restoredLegacyCapabilities = await restoreLegacyModeProfileDraftCapabilities(
+						restoredDraft,
+						{
+							preserveBoundDefaults: true,
+							expectedCatalogGeneration
+						}
+					);
 				}
+				if (!isModeProfileCatalogGenerationCurrent(expectedCatalogGeneration)) return;
 			}
-			if (!restoredCapabilitySnapshot) {
+			if (restoredLegacyCapabilities) {
+				await finalizeModeProfileCapabilitySnapshot(expectedCatalogGeneration);
+				if (!isModeProfileCatalogGenerationCurrent(expectedCatalogGeneration)) return;
+			} else if (!restoredCapabilitySnapshot) {
 				modeProfileBoundTerminalId = $selectedTerminalId;
 				queueMicrotask(() => {
+					if (!isModeProfileCatalogGenerationCurrent(expectedCatalogGeneration)) return;
 					modeProfileCapabilityAuthority = modeProfileCapabilityAuthorityController.observe({
 						selectedToolIds,
 						selectedSkillIds,
@@ -403,10 +451,12 @@
 			}
 
 			await tick();
+			if (!isModeProfileCatalogGenerationCurrent(expectedCatalogGeneration)) return;
 			loading = false;
 			window.setTimeout(() => scrollToBottom(), 0);
 
 			await tick();
+			if (!isModeProfileCatalogGenerationCurrent(expectedCatalogGeneration)) return;
 
 			// Mark chat read when initially loading it
 			if (chatIdProp && !$temporaryChatEnabled) {
@@ -417,7 +467,8 @@
 			const lastMessage = history.currentId ? history.messages[history.currentId] : null;
 			const isIdle = !lastMessage || lastMessage.role !== 'assistant' || lastMessage.done;
 			if (isIdle) {
-				await processNextInQueue(chatIdProp);
+				await processNextInQueue(chatIdProp, expectedCatalogGeneration);
+				if (!isModeProfileCatalogGenerationCurrent(expectedCatalogGeneration)) return;
 			}
 
 			const chatInput = document.getElementById('chat-input');
@@ -458,7 +509,7 @@
 		console.log('saveSessionSelectedModels', selectedModels, sessionStorage.selectedModels);
 	};
 
-	const continueOAuthRedirect = async () => {
+	const continueOAuthRedirect = async (expectedCatalogGeneration?: number) => {
 		if (pendingOAuthTools.length === 0) {
 			sessionStorage.removeItem('oauthRedirectInProgressToolId');
 			return;
@@ -476,6 +527,7 @@
 
 		saveSessionSelectedModels();
 		await tick();
+		if (!isModeProfileCatalogGenerationCurrent(expectedCatalogGeneration)) return;
 		initiateOAuthRedirect(nextTool);
 	};
 
@@ -508,16 +560,19 @@
 			oldSelectedModelIds = structuredClone(selectedModelIds);
 			return;
 		}
+		const expectedCatalogGeneration = modeProfileCatalogGeneration;
 		await runModeProfileSetup(async () => {
+			if (!isModeProfileCatalogGenerationCurrent(expectedCatalogGeneration)) return;
 			if (
 				(modeProfileInitializedDraftId && modeProfileInitializedDraftId === modeProfileDraftId) ||
 				modeProfileRevisionId
 			) {
-				await revalidateModeProfileCapabilities();
+				await revalidateModeProfileCapabilities({ expectedCatalogGeneration });
 			} else {
 				modeProfileControlsReady = false;
 				await resetInput({ initialize: Boolean(modeProfileDraftId) });
-				await finalizeModeProfileCapabilitySnapshot();
+				if (!isModeProfileCatalogGenerationCurrent(expectedCatalogGeneration)) return;
+				await finalizeModeProfileCapabilitySnapshot(expectedCatalogGeneration);
 			}
 		});
 		oldSelectedModelIds = structuredClone(selectedModelIds);
@@ -533,23 +588,11 @@
 		imageGenerationUserOverride = null;
 		codeInterpreterEnabled = false;
 		clearSelectedTerminal();
+		if (initialize) modeProfileCapabilityOverrideFields = null;
 
 		if (initialize && selectedModelIds.filter((id) => id).length > 0) {
 			await setDefaults();
 		}
-	};
-
-	/** Check whether a terminal ID references an available system or direct terminal. */
-	const isTerminalAvailable = (tid: string): boolean => {
-		const availableTerminals = modeProfileExternalCatalog.ready
-			? modeProfileExternalCatalog.terminalServers
-			: ($terminalServers ?? []);
-		return (
-			availableTerminals.some((t) => (t.id ? t.id === tid : t.url === tid)) ||
-			(!modeProfileExternalCatalog.ready &&
-				isDirectToolServersPermitted($user) &&
-				($settings?.terminalServers ?? []).some((s) => s.url === tid))
-		);
 	};
 
 	const clearSelectedTerminal = () => {
@@ -573,86 +616,174 @@
 		return profiles?.find((profile) => profile.mode === conversationMode) ?? null;
 	};
 
-	const getModeProfileTerminalCandidates = (modelOverride: Model | undefined = undefined) => {
-		const model = (modelOverride ??
-			atSelectedModel ??
-			$models.find((item) => item.id === selectedModels[0])) as any;
-		const profileTerminalId = getModeProfile()?.defaults?.terminal_id;
-		return [
-			...new Set([$selectedTerminalId, profileTerminalId, model?.info?.meta?.terminalId])
-		].filter((id): id is string => typeof id === 'string' && id.length > 0);
-	};
-
-	const getModeProfileAvailability = (
-		modelOverride: Model | undefined = undefined
-	): ConversationModeProfileAvailability => {
-		const model = (modelOverride ??
-			atSelectedModel ??
-			$models.find((item) => item.id === selectedModels[0])) as any;
-		const availableTerminals = (
-			modeProfileExternalCatalog.ready
-				? modeProfileExternalCatalog.terminalServers
-				: ($terminalServers ?? [])
-		) as any[];
-		const configuredTerminalServers = (($settings as any)?.terminalServers ?? []) as any[];
-		const availableTools = ($tools ?? []) as any[];
-		const availableSkills = ($skills ?? []) as any[];
+	const getModeProfileAvailableFeatureIds = () => {
 		const features = ($config?.features ?? {}) as Record<string, boolean | undefined>;
 		const canUse = (feature: string) =>
 			$user?.role === 'admin' || ($user?.permissions?.features?.[feature] ?? false);
-		const directTerminalPermitted = isDirectToolServersPermitted($user);
+		return [
+			...(features.enable_web_search && canUse('web_search') ? ['web_search'] : []),
+			...(features.enable_code_interpreter && canUse('code_interpreter')
+				? ['code_interpreter']
+				: []),
+			...(features.enable_image_generation && canUse('image_generation')
+				? ['image_generation']
+				: [])
+		];
+	};
+
+	const getModeProfileTerminalCandidates = (
+		modelOverride: Model | undefined = undefined,
+		requestContext?: ConversationModeRequestContext<any>
+	) => {
+		const model = (requestContext?.model ??
+			modelOverride ??
+			atSelectedModel ??
+			$models.find((item) => item.id === selectedModels[0])) as any;
+		const profileTerminalId =
+			requestContext?.profile?.defaults?.terminal_id ?? getModeProfile()?.defaults?.terminal_id;
+		return [
+			...new Set([
+				requestContext?.selections.terminalId ?? $selectedTerminalId,
+				typeof profileTerminalId === 'string' ? profileTerminalId : null,
+				model?.info?.meta?.terminalId
+			])
+		].filter((id): id is string => typeof id === 'string' && id.length > 0);
+	};
+
+	const getModeProfileExternalCatalogRequest = (
+		modelOverride: Model | undefined = undefined,
+		requestContext?: ConversationModeRequestContext<any>
+	): ModeProfileExternalCatalogRequest => {
+		const directToolServersPermitted =
+			requestContext?.directToolServersPermitted ?? isDirectToolServersPermitted($user);
+		const terminalCandidateIds = getModeProfileTerminalCandidates(modelOverride, requestContext);
+		const configuredToolServers = directToolServersPermitted
+			? structuredClone((($settings as any)?.toolServers ?? []) as any[])
+			: [];
+		const configuredTerminalSettings = structuredClone(
+			(($settings as any)?.terminalServers ?? []) as any[]
+		);
+		const configuredDirectTerminalIds = configuredTerminalSettings
+			.map((server) => server?.url)
+			.filter((id): id is string => typeof id === 'string' && id.length > 0);
+		const terminalCandidates = new Set(terminalCandidateIds);
+		const configuredTerminalServers = directToolServersPermitted
+			? configuredTerminalSettings
+					.filter((server) => terminalCandidates.has(server.url))
+					.map((server) => ({
+						url: server.url,
+						auth_type: server.auth_type ?? 'bearer',
+						key: server.key ?? '',
+						path: server.path ?? '/openapi.json',
+						config: { enable: true }
+					}))
+			: [];
+		const fingerprint = getConversationModeExternalCatalogFingerprint({
+			userId: $user?.id ?? null,
+			directToolServersPermitted,
+			configuredToolServers,
+			configuredTerminalServers: configuredTerminalSettings,
+			terminalCandidateIds
+		});
+		return {
+			fingerprint,
+			directToolServersPermitted,
+			terminalCandidateIds,
+			configuredToolServers,
+			configuredTerminalServers,
+			configuredDirectTerminalIds,
+			currentToolServers: structuredClone(($toolServers ?? []) as ConversationModeToolServer[]),
+			currentTerminalServers: structuredClone(
+				($terminalServers ?? []) as ConversationModeToolServer[]
+			)
+		};
+	};
+
+	const getModeProfileExternalCatalogView = (request: ModeProfileExternalCatalogRequest) => {
+		const state = modeProfileExternalCatalogCache.snapshot(request.fingerprint);
+		return {
+			state,
+			toolServers: state.catalog?.toolServers ?? request.currentToolServers,
+			terminalServers: state.catalog?.terminalServers ?? request.currentTerminalServers,
+			directToolServerCatalogReady: state.catalog !== null
+		};
+	};
+
+	const getModeProfileAvailability = (
+		modelOverride: Model | undefined = undefined,
+		requestContext?: ConversationModeRequestContext<any>,
+		externalCatalogRequest: ModeProfileExternalCatalogRequest = getModeProfileExternalCatalogRequest(
+			modelOverride,
+			requestContext
+		)
+	): ConversationModeProfileAvailability => {
+		const model = (requestContext?.model ??
+			modelOverride ??
+			atSelectedModel ??
+			$models.find((item) => item.id === selectedModels[0])) as any;
+		const catalogView = getModeProfileExternalCatalogView(externalCatalogRequest);
+		const availableTerminals = catalogView.terminalServers as any[];
+		const configuredTerminalServers = externalCatalogRequest.configuredTerminalServers;
+		const availableTools = ($tools ?? []) as any[];
+		const availableSkills = ($skills ?? []) as any[];
+		const directTerminalPermitted = externalCatalogRequest.directToolServersPermitted;
 
 		return {
 			terminalIds: [
 				...availableTerminals
 					.map((server) => (server.id ? server.id : directTerminalPermitted ? server.url : null))
 					.filter((id): id is string => typeof id === 'string' && id.length > 0),
-				...(!modeProfileExternalCatalog.ready && directTerminalPermitted
+				...(!catalogView.directToolServerCatalogReady && directTerminalPermitted
 					? configuredTerminalServers
 					: []
 				)
 					.map((server) => server.url)
 					.filter((id): id is string => typeof id === 'string' && id.length > 0),
-				...(!modeProfileExternalCatalog.ready
-					? getModeProfileTerminalCandidates(modelOverride)
-					: []
-				).filter(
-					(id) =>
-						directTerminalPermitted ||
-						!configuredTerminalServers.some((server) => server.url === id)
-				)
+				...(!catalogView.directToolServerCatalogReady
+					? filterConversationModeTerminalCandidateIds({
+							candidateIds: externalCatalogRequest.terminalCandidateIds,
+							configuredDirectTerminalIds: externalCatalogRequest.configuredDirectTerminalIds,
+							directToolServersPermitted: directTerminalPermitted
+						})
+					: [])
 			],
 			toolIds: getConversationModeAvailableToolIds({
 				tools: availableTools,
-				toolServers: modeProfileExternalCatalog.ready
-					? modeProfileExternalCatalog.toolServers
-					: ($toolServers ?? []),
-				configuredToolServers: $settings?.toolServers ?? [],
-				directToolServerCatalogReady: modeProfileExternalCatalog.ready,
+				toolServers: catalogView.toolServers,
+				configuredToolServers: externalCatalogRequest.configuredToolServers,
+				directToolServerCatalogReady: catalogView.directToolServerCatalogReady,
 				directToolServersPermitted: directTerminalPermitted
 			}),
 			skillIds: availableSkills
 				.filter((skill) => skill.is_active)
 				.map((skill) => skill.id)
 				.filter((id): id is string => Boolean(id)),
-			filterIds: (model?.filters ?? [])
+			filterIds: ((model?.filters ?? []) as Array<{ id?: string }>)
 				.map((filter) => filter.id)
 				.filter((id): id is string => Boolean(id)),
-			featureIds: [
-				...($config?.features?.enable_web_search && canUse('web_search') ? ['web_search'] : []),
-				...(features.enable_code_interpreter && canUse('code_interpreter')
-					? ['code_interpreter']
-					: []),
-				...($config?.features?.enable_image_generation && canUse('image_generation')
-					? ['image_generation']
-					: [])
-			]
+			featureIds:
+				requestContext?.featureState.availableFeatureIds ?? getModeProfileAvailableFeatureIds()
 		};
 	};
 
-	const getModeProfileSelections = (): ConversationModeProfileSelections => ({
+	/** Check whether a terminal ID references an available system or direct terminal. */
+	const isTerminalAvailable = (tid: string): boolean =>
+		getModeProfileAvailability().terminalIds.includes(tid);
+
+	const getModeProfileSelectedToolIds = ({
+		includePendingOAuthTools = true
+	}: { includePendingOAuthTools?: boolean } = {}) => [
+		...new Set([
+			...selectedToolIds,
+			...(includePendingOAuthTools ? pendingOAuthTools.map((tool) => tool.id) : [])
+		])
+	];
+
+	const getModeProfileSelections = (
+		options: { includePendingOAuthTools?: boolean } = {}
+	): ConversationModeProfileSelections => ({
 		terminalId: $selectedTerminalId ?? null,
-		toolIds: [...selectedToolIds],
+		toolIds: getModeProfileSelectedToolIds(options),
 		skillIds: [...selectedSkillIds],
 		filterIds: [...selectedFilterIds],
 		featureIds: [
@@ -662,66 +793,86 @@
 		]
 	});
 
-	const ensureModeProfileExternalCatalogsLoaded = async (
-		modelOverride: Model | undefined = undefined
+	const withModeProfileExternalCatalogTimeout = <T,>(promise: Promise<T>, label: string) =>
+		new Promise<T>((resolve, reject) => {
+			const timeout = window.setTimeout(
+				() => reject(new Error(`${label} timed out`)),
+				MODE_PROFILE_EXTERNAL_CATALOG_TIMEOUT_MS
+			);
+			promise.then(
+				(value) => {
+					window.clearTimeout(timeout);
+					resolve(value);
+				},
+				(error) => {
+					window.clearTimeout(timeout);
+					reject(error);
+				}
+			);
+		});
+
+	const refreshModeProfileExternalCatalogs = (
+		request: ModeProfileExternalCatalogRequest,
+		{ force = false }: { force?: boolean } = {}
 	) => {
-		if (modeProfileExternalCatalogPromise) {
-			await modeProfileExternalCatalogPromise;
+		const { fingerprint } = request;
+		const inFlight = modeProfileExternalCatalogPromises.get(fingerprint);
+		if (inFlight) return inFlight;
+		if (!modeProfileExternalCatalogCache.begin(fingerprint, { force })) {
+			return Promise.resolve(false);
 		}
 
 		const loadPromise = (async () => {
-			const directToolServersPermitted = isDirectToolServersPermitted($user);
-			const configuredToolServers = directToolServersPermitted
-				? ((($settings as any)?.toolServers ?? []) as any[])
-				: [];
-			const terminalCandidates = new Set(getModeProfileTerminalCandidates(modelOverride));
-			const configuredTerminalServers = directToolServersPermitted
-				? (((($settings as any)?.terminalServers ?? []) as any[])
-						.filter((server) => terminalCandidates.has(server.url))
-						.map((server) => ({
-							url: server.url,
-							auth_type: server.auth_type ?? 'bearer',
-							key: server.key ?? '',
-							path: server.path ?? '/openapi.json',
-							config: { enable: true }
-						})) as any[])
-				: [];
-
-			const toolServersPromise = getToolServersData(configuredToolServers);
-			const directTerminalsPromise = getToolServersData(configuredTerminalServers);
-			const systemTerminals = await getTerminalServers(localStorage.token);
-			const [loadedToolServers, loadedDirectTerminals] = await Promise.all([
-				toolServersPromise,
-				directTerminalsPromise
-			]);
-
-			modeProfileExternalCatalog = {
-				ready: true,
-				toolServers: (loadedToolServers ?? []).filter((server) => server && !server.error),
-				terminalServers: [
-					...(loadedDirectTerminals ?? []).filter((server) => server && !server.error),
-					...(systemTerminals ?? []).map((terminal) => ({
-						id: terminal.id,
-						url: `${WEBUI_API_BASE_URL}/terminals/${terminal.id}`,
-						name: terminal.name,
-						key: localStorage.token
-					}))
-				]
-			};
+			try {
+				const [loadedToolServers, loadedDirectTerminals, systemTerminals] = await Promise.all([
+					withModeProfileExternalCatalogTimeout(
+						getToolServersData(request.configuredToolServers),
+						'tool server discovery'
+					),
+					withModeProfileExternalCatalogTimeout(
+						getToolServersData(request.configuredTerminalServers),
+						'direct terminal discovery'
+					),
+					withModeProfileExternalCatalogTimeout(
+						getTerminalServers(localStorage.token, { throwOnError: true }),
+						'system terminal discovery'
+					)
+				]);
+				modeProfileExternalCatalogCache.succeed(fingerprint, {
+					toolServers: (loadedToolServers ?? []).filter((server): server is Record<string, any> =>
+						Boolean(server && !server.error)
+					),
+					terminalServers: [
+						...(loadedDirectTerminals ?? []).filter((server): server is Record<string, any> =>
+							Boolean(server && !server.error)
+						),
+						...(systemTerminals ?? []).map((terminal) => ({
+							id: terminal.id,
+							url: `${WEBUI_API_BASE_URL}/terminals/${terminal.id}`,
+							name: terminal.name,
+							key: localStorage.token
+						}))
+					]
+				});
+				return true;
+			} catch (error) {
+				modeProfileExternalCatalogCache.fail(fingerprint, error);
+				console.error('[mode profile catalogs]', error);
+				return false;
+			} finally {
+				modeProfileExternalCatalogPromises.delete(fingerprint);
+			}
 		})();
 
-		modeProfileExternalCatalogPromise = loadPromise;
-		try {
-			await loadPromise;
-		} catch (error) {
-			modeProfileExternalCatalog = { ready: false, toolServers: [], terminalServers: [] };
-			console.error('[mode profile catalogs]', error);
-		} finally {
-			if (modeProfileExternalCatalogPromise === loadPromise) {
-				modeProfileExternalCatalogPromise = null;
-			}
-		}
+		modeProfileExternalCatalogPromises.set(fingerprint, loadPromise);
+		return loadPromise;
 	};
+
+	const shouldRefreshModeProfileExternalCatalog = (request: ModeProfileExternalCatalogRequest) =>
+		modeProfileExternalCatalogCache.shouldRefresh(request.fingerprint, {
+			maxAgeMs: MODE_PROFILE_EXTERNAL_CATALOG_MAX_AGE_MS,
+			retryAfterMs: MODE_PROFILE_EXTERNAL_CATALOG_RETRY_MS
+		});
 
 	const ensureModeProfileCatalogsLoaded = async () => {
 		if (!$tools) tools.set(await getTools(localStorage.token));
@@ -739,8 +890,17 @@
 		}
 	};
 
-	const applyModeProfileResolution = (resolution: any, phase: 'initialize' | 'model_change') => {
-		selectedToolIds = resolution.effective.toolIds;
+	const applyModeProfileResolution = async (
+		resolution: any,
+		phase: 'initialize' | 'model_change',
+		expectedCatalogGeneration?: number
+	) => {
+		const oauthPartition = partitionConversationModeOAuthTools(
+			resolution.effective.toolIds,
+			$tools ?? []
+		);
+		selectedToolIds = oauthPartition.selectedToolIds;
+		pendingOAuthTools = oauthPartition.pendingOAuthTools;
 		selectedSkillIds = resolution.effective.skillIds;
 		selectedFilterIds = resolution.effective.filterIds;
 		webSearchEnabled = resolution.effective.featureIds.includes('web_search');
@@ -763,9 +923,13 @@
 		}
 
 		showModeProfileWarnings(resolution.warnings);
+		await continueOAuthRedirect(expectedCatalogGeneration);
 	};
 
-	const applyModeProfileInitialization = () => {
+	const applyModeProfileInitialization = async (
+		externalCatalogRequest = getModeProfileExternalCatalogRequest(),
+		expectedCatalogGeneration?: number
+	) => {
 		if (!modeProfileDraftId) return;
 		const model = atSelectedModel ?? $models.find((item) => item.id === selectedModels[0]);
 		const snapshot = modeProfileDraftController.initialize(
@@ -774,39 +938,58 @@
 				mode: conversationMode,
 				profile: getModeProfile(),
 				model,
-				available: getModeProfileAvailability(),
+				available: getModeProfileAvailability(undefined, undefined, externalCatalogRequest),
 				phase: 'initialize'
 			})
 		);
 		if (!snapshot.applied) return;
 		modeProfileInitializedDraftId = modeProfileDraftId;
 		modeProfileRevisionId = snapshot.revisionHint;
-		applyModeProfileResolution(snapshot, 'initialize');
+		await applyModeProfileResolution(snapshot, 'initialize', expectedCatalogGeneration);
 	};
 
-	const applyModeProfileModelChange = () => {
+	const applyModeProfileModelChange = async (
+		externalCatalogRequest = getModeProfileExternalCatalogRequest(),
+		expectedCatalogGeneration?: number
+	) => {
 		const model = atSelectedModel ?? $models.find((item) => item.id === selectedModels[0]);
 		const snapshot = modeProfileDraftController.applyModelChange(
 			resolveConversationModeProfile({
 				mode: conversationMode,
 				profile: getModeProfile(),
 				model,
-				available: getModeProfileAvailability(),
+				available: getModeProfileAvailability(undefined, undefined, externalCatalogRequest),
 				currentSelections: getModeProfileSelections(),
 				phase: 'model_change'
 			})
 		);
 		modeProfileRevisionId = snapshot.revisionHint;
-		applyModeProfileResolution(snapshot, 'model_change');
+		await applyModeProfileResolution(snapshot, 'model_change', expectedCatalogGeneration);
 	};
 
-	const revalidateModeProfileCapabilities = async () => {
+	const revalidateModeProfileCapabilities = async ({
+		refreshExternalCatalog = true,
+		expectedCatalogGeneration
+	}: { refreshExternalCatalog?: boolean; expectedCatalogGeneration?: number } = {}) => {
+		if (!isModeProfileCatalogGenerationCurrent(expectedCatalogGeneration)) return;
 		const restoreControlsReady = modeProfileControlsReady;
 		modeProfileControlsReady = false;
 		try {
 			await ensureModeProfileCatalogsLoaded();
-			await ensureModeProfileExternalCatalogsLoaded();
-			applyModeProfileModelChange();
+			if (!isModeProfileCatalogGenerationCurrent(expectedCatalogGeneration)) return;
+			const externalCatalogRequest = getModeProfileExternalCatalogRequest();
+			if (
+				refreshExternalCatalog &&
+				shouldRefreshModeProfileExternalCatalog(externalCatalogRequest)
+			) {
+				const state = modeProfileExternalCatalogCache.snapshot(externalCatalogRequest.fingerprint);
+				await refreshModeProfileExternalCatalogs(externalCatalogRequest, {
+					force: state.status !== 'idle'
+				});
+			}
+			if (!isModeProfileCatalogGenerationCurrent(expectedCatalogGeneration)) return;
+			await applyModeProfileModelChange(externalCatalogRequest, expectedCatalogGeneration);
+			if (!isModeProfileCatalogGenerationCurrent(expectedCatalogGeneration)) return;
 			modeProfileBoundTerminalId = $selectedTerminalId;
 			modeProfileCapabilityAuthority = modeProfileCapabilityAuthorityController.rebase({
 				selectedToolIds,
@@ -817,28 +1000,74 @@
 				imageGenerationEnabled
 			});
 		} finally {
-			if (restoreControlsReady) {
+			if (
+				restoreControlsReady &&
+				isModeProfileCatalogGenerationCurrent(expectedCatalogGeneration)
+			) {
 				modeProfileControlsReady = true;
 			}
 		}
 	};
 
-	const resolveModeProfileRequest = async (model: Model) => {
-		await ensureModeProfileCatalogsLoaded();
-		await ensureModeProfileExternalCatalogsLoaded(model);
-		const resolution = resolveConversationModeRequestCapabilities({
-			authority: modeProfileCapabilityAuthority,
-			mode: conversationMode,
-			profile: getModeProfile(),
-			model,
-			available: getModeProfileAvailability(model),
-			currentSelections: getModeProfileSelections()
+	const triggerModeProfileExternalCatalogRefresh = (
+		externalCatalogRequest: ModeProfileExternalCatalogRequest
+	) => {
+		const state = modeProfileExternalCatalogCache.snapshot(externalCatalogRequest.fingerprint);
+		if (!shouldRefreshModeProfileExternalCatalog(externalCatalogRequest)) return;
+		const refreshGeneration = modeProfileCatalogGeneration;
+		const hadSuccessfulCatalog = state.catalog !== null;
+		const previousCatalog = state.catalog;
+		void refreshModeProfileExternalCatalogs(externalCatalogRequest, {
+			force: state.status !== 'idle'
+		}).then((succeeded) => {
+			if (refreshGeneration !== modeProfileCatalogGeneration) return;
+			const nextCatalog = modeProfileExternalCatalogCache.snapshot(
+				externalCatalogRequest.fingerprint
+			).catalog;
+			if (
+				succeeded &&
+				(!hadSuccessfulCatalog || !equal(previousCatalog, nextCatalog)) &&
+				modeProfileControlsReady &&
+				modeProfileCapabilityAuthority !== 'inherit_bound' &&
+				getModeProfileExternalCatalogRequest().fingerprint === externalCatalogRequest.fingerprint
+			) {
+				void runModeProfileSetup(() =>
+					revalidateModeProfileCapabilities({
+						refreshExternalCatalog: false,
+						expectedCatalogGeneration: refreshGeneration
+					})
+				);
+			}
 		});
-		showModeProfileWarnings(resolution.warnings);
-		return resolution;
 	};
 
-	const finalizeModeProfileCapabilitySnapshot = async () => {
+	const resolveModeProfileRequest = async (
+		requestContext: ConversationModeRequestContext<any>,
+		externalCatalogRequest: ModeProfileExternalCatalogRequest
+	) => {
+		triggerModeProfileExternalCatalogRefresh(externalCatalogRequest);
+		await ensureModeProfileCatalogsLoaded();
+		const catalogView = getModeProfileExternalCatalogView(externalCatalogRequest);
+		const resolution = resolveConversationModeRequestCapabilities({
+			authority: requestContext.authority,
+			mode: requestContext.mode,
+			profile: requestContext.profile,
+			model: requestContext.model,
+			available: getModeProfileAvailability(
+				requestContext.model as Model,
+				requestContext,
+				externalCatalogRequest
+			),
+			currentSelections: requestContext.selections
+		});
+		showModeProfileWarnings(resolution.warnings);
+		return { ...resolution, catalogView };
+	};
+
+	const finalizeModeProfileCapabilitySnapshot = async (
+		expectedCatalogGeneration = modeProfileCatalogGeneration
+	) => {
+		if (!isModeProfileCatalogGenerationCurrent(expectedCatalogGeneration)) return;
 		modeProfileBoundTerminalId = $selectedTerminalId;
 		modeProfileCapabilityAuthority = modeProfileCapabilityAuthorityController.rebase({
 			selectedToolIds,
@@ -849,14 +1078,19 @@
 			imageGenerationEnabled
 		});
 		modeProfileControlsReady = true;
-		await persistFinalizedModeProfileDraftSnapshot();
+		await persistFinalizedModeProfileDraftSnapshot(expectedCatalogGeneration);
 	};
 
 	const restoreModeProfileCapabilitySnapshot = async (
-		snapshot: ConversationModeDraftCapabilitySnapshot
+		snapshot: ConversationModeDraftCapabilitySnapshot,
+		expectedCatalogGeneration = modeProfileCatalogGeneration
 	) => {
 		await runModeProfileSetup(async () => {
+			if (!isModeProfileCatalogGenerationCurrent(expectedCatalogGeneration)) return;
 			modeProfileControlsReady = false;
+			modeProfileCapabilityOverrideFields = snapshot.overrideFields
+				? [...snapshot.overrideFields]
+				: null;
 			selectedToolIds = [...snapshot.selections.toolIds];
 			selectedSkillIds = [...snapshot.selections.skillIds];
 			selectedFilterIds = [...snapshot.selections.filterIds];
@@ -867,9 +1101,73 @@
 			clearSelectedTerminal();
 			selectedTerminalId.set(snapshot.selections.terminalId);
 
-			await revalidateModeProfileCapabilities();
-			await finalizeModeProfileCapabilitySnapshot();
+			await revalidateModeProfileCapabilities({
+				expectedCatalogGeneration: expectedCatalogGeneration
+			});
+			if (!isModeProfileCatalogGenerationCurrent(expectedCatalogGeneration)) return;
+			await finalizeModeProfileCapabilitySnapshot(expectedCatalogGeneration);
 		});
+	};
+
+	const restoreLegacyModeProfileDraftCapabilities = async (
+		draft: any,
+		{
+			preserveBoundDefaults = false,
+			expectedCatalogGeneration = modeProfileCatalogGeneration
+		}: { preserveBoundDefaults?: boolean; expectedCatalogGeneration?: number } = {}
+	) => {
+		if (!isModeProfileCatalogGenerationCurrent(expectedCatalogGeneration)) return false;
+		const positiveMigration = migrateConversationModeLegacyDraftCapabilities(draft, {
+			terminalId: null,
+			toolIds: [],
+			skillIds: [],
+			filterIds: [],
+			featureIds: []
+		});
+		if (!positiveMigration) return false;
+
+		const model = atSelectedModel ?? $models.find((item) => item.id === selectedModels[0]);
+		if (!model) return false;
+		await ensureModeProfileCatalogsLoaded();
+		if (!isModeProfileCatalogGenerationCurrent(expectedCatalogGeneration)) return false;
+		const externalCatalogRequest = getModeProfileExternalCatalogRequest(model);
+		const externalCatalogState = modeProfileExternalCatalogCache.snapshot(
+			externalCatalogRequest.fingerprint
+		);
+		await refreshModeProfileExternalCatalogs(externalCatalogRequest, {
+			force: externalCatalogState.status === 'error'
+		});
+		if (!isModeProfileCatalogGenerationCurrent(expectedCatalogGeneration)) return false;
+		const available = getModeProfileAvailability(model, undefined, externalCatalogRequest);
+		const initializedSelections = preserveBoundDefaults
+			? { terminalId: null, toolIds: [], skillIds: [], filterIds: [], featureIds: [] }
+			: resolveConversationModeProfile({
+					mode: conversationMode,
+					profile: getModeProfile(),
+					model,
+					available,
+					phase: 'initialize'
+				}).effective;
+		const migrated = migrateConversationModeLegacyDraftCapabilities(draft, initializedSelections);
+		if (!migrated) return false;
+		const revalidated = resolveConversationModeProfile({
+			mode: conversationMode,
+			profile: getModeProfile(),
+			model,
+			available,
+			currentSelections: migrated.selections,
+			phase: 'model_change'
+		});
+
+		modeProfileControlsReady = false;
+		modeProfileCapabilityOverrideFields = preserveBoundDefaults
+			? [...(migrated.overrideFields ?? [])]
+			: null;
+		modeProfileCapabilityAuthority = modeProfileCapabilityAuthorityController.markExplicit();
+		await applyModeProfileResolution(revalidated, 'model_change', expectedCatalogGeneration);
+		if (!isModeProfileCatalogGenerationCurrent(expectedCatalogGeneration)) return false;
+		imageGenerationUserOverride = imageGenerationEnabled;
+		return true;
 	};
 
 	const hasImageGenerationAccess = () =>
@@ -881,6 +1179,7 @@
 	const beginModeProfileDraft = ({
 		restoreRootDraft = true
 	}: { restoreRootDraft?: boolean } = {}) => {
+		invalidateModeProfileCatalogGeneration();
 		const storedRootDraft =
 			restoreRootDraft && !chatIdProp ? sessionStorage.getItem('chat-input') : null;
 		const restoredRootDraft = parseConversationModeDraft(storedRootDraft);
@@ -905,6 +1204,7 @@
 			persistedAuthority: restoredRootCapabilitySnapshot?.authority
 		});
 		modeProfileCapabilityAuthority = modeProfileCapabilityAuthorityController.snapshot();
+		modeProfileCapabilityOverrideFields = null;
 		modeProfileDraftController.hydrateRevisionHint(modeProfileRevisionId);
 		clearSelectedTerminal();
 		return restoredRootDraft;
@@ -913,15 +1213,21 @@
 	const transitionConversationMode = async (nextMode: ConversationMode) => {
 		if (conversationModeLocked || nextMode === conversationMode) return;
 		loading = true;
+		let expectedCatalogGeneration = modeProfileCatalogGeneration;
 		try {
 			await runModeProfileSetup(async () => {
+				if (!isModeProfileCatalogGenerationCurrent(expectedCatalogGeneration)) return;
 				conversationMode = nextMode;
 				beginModeProfileDraft({ restoreRootDraft: false });
+				expectedCatalogGeneration = modeProfileCatalogGeneration;
 				await resetInput({ initialize: true });
-				await finalizeModeProfileCapabilitySnapshot();
+				if (!isModeProfileCatalogGenerationCurrent(expectedCatalogGeneration)) return;
+				await finalizeModeProfileCapabilitySnapshot(expectedCatalogGeneration);
 			});
 		} finally {
-			loading = false;
+			if (isModeProfileCatalogGenerationCurrent(expectedCatalogGeneration)) {
+				loading = false;
+			}
 		}
 	};
 
@@ -931,12 +1237,32 @@
 		).revisionHint;
 	};
 
-	let settingDefaultsPromise: Promise<void> | null = null;
-	const setDefaults = async () => {
-		if (settingDefaultsPromise) return settingDefaultsPromise;
+	let settingDefaultsPromise: { generation: number; promise: Promise<void> } | null = null;
+	const setDefaults = async (expectedCatalogGeneration = modeProfileCatalogGeneration) => {
+		if (settingDefaultsPromise) {
+			const inFlight = settingDefaultsPromise;
+			await inFlight.promise;
+			if (
+				inFlight.generation === expectedCatalogGeneration ||
+				!isModeProfileCatalogGenerationCurrent(expectedCatalogGeneration)
+			) {
+				return;
+			}
+		}
+		if (!isModeProfileCatalogGenerationCurrent(expectedCatalogGeneration)) return;
 		const defaultsPromise = (async () => {
 			await ensureModeProfileCatalogsLoaded();
-			await ensureModeProfileExternalCatalogsLoaded();
+			if (!isModeProfileCatalogGenerationCurrent(expectedCatalogGeneration)) return;
+			const externalCatalogRequest = getModeProfileExternalCatalogRequest();
+			const externalCatalogState = modeProfileExternalCatalogCache.snapshot(
+				externalCatalogRequest.fingerprint
+			);
+			if (shouldRefreshModeProfileExternalCatalog(externalCatalogRequest)) {
+				await refreshModeProfileExternalCatalogs(externalCatalogRequest, {
+					force: externalCatalogState.status !== 'idle'
+				});
+			}
+			if (!isModeProfileCatalogGenerationCurrent(expectedCatalogGeneration)) return;
 			if (selectedModelIds.filter((id) => id).length !== 1 && !atSelectedModel) {
 				return;
 			}
@@ -944,32 +1270,19 @@
 			const model = atSelectedModel ?? $models.find((m) => m.id === selectedModelIds[0]);
 			if (model) {
 				if (model.info?.meta?.toolIds) {
+					const availableTools = ($tools ?? []) as any[];
 					const defaultIds = [
 						...new Set(
 							[...(model.info.meta.toolIds ?? [])].filter((id) =>
-								$tools.find((tool) => tool.id === id)
+								availableTools.find((tool) => tool.id === id)
 							)
 						)
 					];
-					const unauthed = [];
-					const authed = [];
-					for (const id of defaultIds) {
-						const tool = $tools.find((item) => item.id === id);
-						if (tool?.authenticated === false) {
-							const parts = id.split(':');
-							unauthed.push({
-								id,
-								name: tool.name ?? id,
-								serverId: parts.at(-1) ?? id,
-								authType: parts.length > 1 ? (parts[0] === 'server' ? parts[1] : parts[0]) : null
-							});
-						} else {
-							authed.push(id);
-						}
-					}
-					selectedToolIds = authed;
-					pendingOAuthTools = unauthed;
-					await continueOAuthRedirect();
+					const oauthPartition = partitionConversationModeOAuthTools(defaultIds, availableTools);
+					selectedToolIds = oauthPartition.selectedToolIds;
+					pendingOAuthTools = oauthPartition.pendingOAuthTools;
+					await continueOAuthRedirect(expectedCatalogGeneration);
+					if (!isModeProfileCatalogGenerationCurrent(expectedCatalogGeneration)) return;
 				} else if ($settings?.tools) {
 					selectedToolIds = $settings.tools;
 				} else {
@@ -1033,15 +1346,19 @@
 					selectedTerminalId.set(defaultTerminalId);
 				}
 			}
+			if (!isModeProfileCatalogGenerationCurrent(expectedCatalogGeneration)) return;
 			if (modeProfileDraftId.startsWith('draft:')) {
-				applyModeProfileInitialization();
+				await applyModeProfileInitialization(externalCatalogRequest, expectedCatalogGeneration);
 			}
 		})();
-		settingDefaultsPromise = defaultsPromise;
+		settingDefaultsPromise = {
+			generation: expectedCatalogGeneration,
+			promise: defaultsPromise
+		};
 		try {
 			await defaultsPromise;
 		} finally {
-			if (settingDefaultsPromise === defaultsPromise) {
+			if (settingDefaultsPromise?.promise === defaultsPromise) {
 				settingDefaultsPromise = null;
 			}
 		}
@@ -1143,9 +1460,16 @@
 
 	const chatEventHandler = async (event, cb) => {
 		console.log(event);
+		const expectedCatalogGeneration = modeProfileCatalogGeneration;
 
 		if (event.chat_id === $chatId) {
 			await tick();
+			if (
+				event.chat_id !== $chatId ||
+				!isModeProfileCatalogGenerationCurrent(expectedCatalogGeneration)
+			) {
+				return;
+			}
 			let message = history.messages[event.message_id];
 
 			if (message) {
@@ -1165,12 +1489,12 @@
 					if (!data?.active) {
 						taskIds = null;
 						if (chatIdProp && !$temporaryChatEnabled && hasPendingAssistantLeaf()) {
-							await loadChat();
+							await loadChat(event.chat_id, expectedCatalogGeneration);
 						}
 					}
 				} else if (type === 'chat:completion') {
 					if (applySocketContentEvent) {
-						chatCompletionEventHandler(data, message, event.chat_id);
+						chatCompletionEventHandler(data, message, event.chat_id, expectedCatalogGeneration);
 					}
 				} else if (type === 'chat:tasks:cancel') {
 					dismissContextCompactionToast();
@@ -1180,7 +1504,7 @@
 						for (const messageId of history.messages[message.parentId].childrenIds) {
 							history.messages[messageId].done = true;
 						}
-						await processNextInQueue($chatId);
+						await processNextInQueue(event.chat_id, expectedCatalogGeneration);
 					} else {
 						message.done = true;
 					}
@@ -1199,7 +1523,19 @@
 
 					// Auto-scroll to the embed once it's rendered in the DOM
 					await tick();
+					if (
+						event.chat_id !== $chatId ||
+						!isModeProfileCatalogGenerationCurrent(expectedCatalogGeneration)
+					) {
+						return;
+					}
 					setTimeout(() => {
+						if (
+							event.chat_id !== $chatId ||
+							!isModeProfileCatalogGenerationCurrent(expectedCatalogGeneration)
+						) {
+							return;
+						}
 						const embedEl = document.getElementById(`${event.message_id}-embeds-container`);
 						if (embedEl) {
 							embedEl.scrollIntoView({ behavior: 'smooth', block: 'center' });
@@ -1236,10 +1572,31 @@
 				} else if (type === 'chat:title') {
 					chatTitle.set(data);
 					currentChatPage.set(1);
-					await chats.set(await getChatList(localStorage.token, $currentChatPage));
+					const loadedChats = await getChatList(localStorage.token, $currentChatPage);
+					if (
+						event.chat_id !== $chatId ||
+						!isModeProfileCatalogGenerationCurrent(expectedCatalogGeneration)
+					) {
+						return;
+					}
+					await chats.set(loadedChats);
 				} else if (type === 'chat:tags') {
-					chat = await getChatById(localStorage.token, $chatId);
-					allTags.set(await getAllTags(localStorage.token));
+					const loadedTaggedChat = await getChatById(localStorage.token, event.chat_id);
+					if (
+						event.chat_id !== $chatId ||
+						!isModeProfileCatalogGenerationCurrent(expectedCatalogGeneration)
+					) {
+						return;
+					}
+					const loadedAllTags = await getAllTags(localStorage.token);
+					if (
+						event.chat_id !== $chatId ||
+						!isModeProfileCatalogGenerationCurrent(expectedCatalogGeneration)
+					) {
+						return;
+					}
+					chat = loadedTaggedChat;
+					allTags.set(loadedAllTags);
 				} else if (type === 'source' || type === 'citation') {
 					if (data?.type === 'code_execution') {
 						// Code execution; update existing code execution by ID, or add new one.
@@ -1296,7 +1653,11 @@
 						const asyncFunction = new Function(`return (async () => { ${data.code} })()`);
 						const result = await asyncFunction(); // Await the result of the async function
 
-						if (cb) {
+						if (
+							event.chat_id === $chatId &&
+							isModeProfileCatalogGenerationCurrent(expectedCatalogGeneration) &&
+							cb
+						) {
 							cb(result);
 						}
 					} catch (error) {
@@ -1320,6 +1681,12 @@
 					console.log('Unknown message type', data);
 				}
 
+				if (
+					event.chat_id !== $chatId ||
+					!isModeProfileCatalogGenerationCurrent(expectedCatalogGeneration)
+				) {
+					return;
+				}
 				history.messages[event.message_id] = message;
 			}
 		} else {
@@ -1448,13 +1815,19 @@
 		if (!hasPendingAssistantLeaf()) {
 			return;
 		}
+		const targetChatId = $chatId;
+		const expectedCatalogGeneration = modeProfileCatalogGeneration;
 
-		const pendingTaskIds = await getTaskIdsByChatId(localStorage.token, $chatId)
+		const pendingTaskIds = await getTaskIdsByChatId(localStorage.token, targetChatId)
 			.then((res) => res?.task_ids ?? [])
 			.catch(() => null);
 
-		if (pendingTaskIds?.length === 0) {
-			await loadChat();
+		if (
+			pendingTaskIds?.length === 0 &&
+			$chatId === targetChatId &&
+			isModeProfileCatalogGenerationCurrent(expectedCatalogGeneration)
+		) {
+			await loadChat(targetChatId, expectedCatalogGeneration);
 		}
 	};
 
@@ -1486,8 +1859,9 @@
 		}
 
 		// Clear stale selectedTerminalId if the referenced terminal no longer exists
+		const mountedExternalCatalogRequest = getModeProfileExternalCatalogRequest();
 		if (
-			modeProfileExternalCatalog.ready &&
+			modeProfileExternalCatalogCache.snapshot(mountedExternalCatalogRequest.fingerprint).catalog &&
 			$selectedTerminalId &&
 			!isTerminalAvailable($selectedTerminalId)
 		) {
@@ -1572,6 +1946,7 @@
 		init();
 
 		return () => {
+			invalidateModeProfileCatalogGeneration();
 			try {
 				clearTimeout(saveControlsTimer);
 				saveControls();
@@ -1893,6 +2268,7 @@
 			preselectedMode ?? normalizeConversationMode($page.url.searchParams.get('mode'));
 		conversationMode = requestedMode;
 		const restoredRootDraft = beginModeProfileDraft();
+		const expectedCatalogGeneration = modeProfileCatalogGeneration;
 		const restoredRootCapabilitySnapshot = getConversationModeDraftCapabilitySnapshot(
 			restoredRootDraft,
 			{ existingChat: false }
@@ -1908,19 +2284,23 @@
 
 		if ($user?.role !== 'admin' && $user?.permissions?.chat?.temporary_enforced) {
 			await temporaryChatEnabled.set(true);
+			if (!isModeProfileCatalogGenerationCurrent(expectedCatalogGeneration)) return;
 		}
 
 		if ($settings?.temporaryChatByDefault ?? false) {
 			if ($temporaryChatEnabled === false) {
 				await temporaryChatEnabled.set(true);
+				if (!isModeProfileCatalogGenerationCurrent(expectedCatalogGeneration)) return;
 			} else if ($temporaryChatEnabled === null) {
 				// if set to null set to false; refer to temp chat toggle click handler
 				await temporaryChatEnabled.set(false);
+				if (!isModeProfileCatalogGenerationCurrent(expectedCatalogGeneration)) return;
 			}
 		}
 
 		if ($user?.role !== 'admin' && !$user?.permissions?.chat?.temporary) {
 			await temporaryChatEnabled.set(false);
+			if (!isModeProfileCatalogGenerationCurrent(expectedCatalogGeneration)) return;
 		}
 
 		const availableModels = $models
@@ -1943,6 +2323,7 @@
 					if (modelSelectorButton) {
 						modelSelectorButton.click();
 						await tick();
+						if (!isModeProfileCatalogGenerationCurrent(expectedCatalogGeneration)) return;
 
 						const modelSelectorInput = document.getElementById('model-search-input');
 						if (modelSelectorInput) {
@@ -2009,9 +2390,12 @@
 
 		if ($mobile) {
 			await showControls.set(false);
+			if (!isModeProfileCatalogGenerationCurrent(expectedCatalogGeneration)) return;
 		}
 		await showCallOverlay.set(false);
+		if (!isModeProfileCatalogGenerationCurrent(expectedCatalogGeneration)) return;
 		await showArtifacts.set(false);
+		if (!isModeProfileCatalogGenerationCurrent(expectedCatalogGeneration)) return;
 
 		if ($page.url.pathname.includes('/c/')) {
 			window.history.replaceState(history.state, '', `/`);
@@ -2020,11 +2404,22 @@
 		autoScroll = true;
 
 		await resetInput({ initialize: restoredRootCapabilitySnapshot === null });
+		if (!isModeProfileCatalogGenerationCurrent(expectedCatalogGeneration)) return;
 		if (restoredRootCapabilitySnapshot) {
-			await restoreModeProfileCapabilitySnapshot(restoredRootCapabilitySnapshot);
+			await restoreModeProfileCapabilitySnapshot(
+				restoredRootCapabilitySnapshot,
+				expectedCatalogGeneration
+			);
+		} else {
+			await restoreLegacyModeProfileDraftCapabilities(restoredRootDraft, {
+				expectedCatalogGeneration
+			});
 		}
+		if (!isModeProfileCatalogGenerationCurrent(expectedCatalogGeneration)) return;
 		await chatId.set('');
+		if (!isModeProfileCatalogGenerationCurrent(expectedCatalogGeneration)) return;
 		await chatTitle.set('');
+		if (!isModeProfileCatalogGenerationCurrent(expectedCatalogGeneration)) return;
 
 		history = {
 			messages: {},
@@ -2038,10 +2433,12 @@
 
 		if ($page.url.searchParams.get('youtube')) {
 			await uploadWeb(`https://www.youtube.com/watch?v=${$page.url.searchParams.get('youtube')}`);
+			if (!isModeProfileCatalogGenerationCurrent(expectedCatalogGeneration)) return;
 		}
 
 		if ($page.url.searchParams.get('load-url')) {
 			await uploadWeb($page.url.searchParams.get('load-url'));
+			if (!isModeProfileCatalogGenerationCurrent(expectedCatalogGeneration)) return;
 		}
 
 		if ($page.url.searchParams.get('web-search') === 'true') {
@@ -2080,9 +2477,11 @@
 			}
 		}
 
-		await finalizeModeProfileCapabilitySnapshot();
+		await finalizeModeProfileCapabilitySnapshot(expectedCatalogGeneration);
+		if (!isModeProfileCatalogGenerationCurrent(expectedCatalogGeneration)) return;
 		loading = false;
 		await tick();
+		if (!isModeProfileCatalogGenerationCurrent(expectedCatalogGeneration)) return;
 
 		if ($page.url.searchParams.get('call') === 'true') {
 			showCallOverlay.set(true);
@@ -2099,6 +2498,7 @@
 				// showControlsSubscribe's initial callback (value=false → set(false))
 				// which runs as a pending microtask after this function.
 				setTimeout(() => {
+					if (!isModeProfileCatalogGenerationCurrent(expectedCatalogGeneration)) return;
 					showCallOverlay.set(true);
 					showControls.set(true);
 				}, 0);
@@ -2125,6 +2525,7 @@
 						messageInput?.setText(query);
 					}
 					await tick();
+					if (!isModeProfileCatalogGenerationCurrent(expectedCatalogGeneration)) return;
 					submitHandler(query || '');
 				}
 			}
@@ -2135,6 +2536,7 @@
 			if (q) {
 				if (($page.url.searchParams.get('submit') ?? 'true') === 'true') {
 					await tick();
+					if (!isModeProfileCatalogGenerationCurrent(expectedCatalogGeneration)) return;
 					submitHandler(q);
 				}
 			}
@@ -2145,84 +2547,125 @@
 		);
 
 		const chatInput = document.getElementById('chat-input');
-		setTimeout(() => chatInput?.focus(), 0);
+		setTimeout(() => {
+			if (!isModeProfileCatalogGenerationCurrent(expectedCatalogGeneration)) return;
+			chatInput?.focus();
+		}, 0);
 	};
 
-	const loadChat = async () => {
-		chatId.set(chatIdProp);
+	const loadChat = async (
+		targetChatId = chatIdProp,
+		expectedCatalogGeneration = modeProfileCatalogGeneration
+	) => {
+		if (!targetChatId || !isModeProfileCatalogGenerationCurrent(expectedCatalogGeneration)) {
+			return false;
+		}
+		chatId.set(targetChatId);
 
 		if ($temporaryChatEnabled) {
 			temporaryChatEnabled.set(false);
 		}
 
-		chat = await getChatById(localStorage.token, $chatId).catch(async (error) => {
-			await goto('/');
+		const loadedChat = await getChatById(localStorage.token, targetChatId).catch((error) => {
+			console.error('[load chat]', error);
 			return null;
 		});
+		if (
+			$chatId !== targetChatId ||
+			!isModeProfileCatalogGenerationCurrent(expectedCatalogGeneration)
+		) {
+			return false;
+		}
+		if (!loadedChat) {
+			await goto('/');
+			return null;
+		}
 
-		if (chat) {
-			tags = await getTagsById(localStorage.token, $chatId).catch(async (error) => {
-				return [];
-			});
+		const loadedTags = await getTagsById(localStorage.token, targetChatId).catch(() => []);
+		if (
+			$chatId !== targetChatId ||
+			!isModeProfileCatalogGenerationCurrent(expectedCatalogGeneration)
+		) {
+			return false;
+		}
+		chat = loadedChat;
+		tags = loadedTags;
 
-			const chatContent = chat.chat;
+		const chatContent = loadedChat.chat;
 
-			if (chatContent) {
-				console.log(chatContent);
-				conversationMode = normalizeConversationMode(chatContent?.mode);
-				bindCanonicalModeProfileRevision(chat?.mode_profile_revision_id);
+		if (chatContent) {
+			console.log(chatContent);
+			conversationMode = normalizeConversationMode(chatContent?.mode);
+			bindCanonicalModeProfileRevision(loadedChat?.mode_profile_revision_id);
 
-				selectedModels =
-					(chatContent?.models ?? undefined) !== undefined
-						? chatContent.models
-						: [chatContent.models ?? ''];
+			selectedModels =
+				(chatContent?.models ?? undefined) !== undefined
+					? chatContent.models
+					: [chatContent.models ?? ''];
 
-				if (!($user?.role === 'admin' || ($user?.permissions?.chat?.multiple_models ?? true))) {
-					selectedModels = selectedModels.length > 0 ? [selectedModels[0]] : [''];
-				}
-
-				oldSelectedModelIds = structuredClone(selectedModels);
-
-				const loadedHistory =
-					(chatContent?.history ?? undefined) !== undefined
-						? chatContent.history
-						: convertMessagesToHistory(chatContent.messages);
-
-				// Sanitize history: repair orphaned references and structurally-malformed
-				// nodes from failed regenerations (#24424, #24157, #20474)
-				sanitizeHistory(loadedHistory);
-
-				chatTitle.set(chatContent.title);
-
-				params = structuredClone(chatContent?.params ?? {});
-				chatFiles = structuredClone(chatContent?.files ?? []);
-
-				// Load tasks from chat-level DB field
-				chatTasks = chat?.tasks ?? [];
-
-				autoScroll = true;
-				await tick();
-
-				// Reconcile active tasks with message state:
-				// If the response is already done, remaining tasks are just background
-				// work (follow-ups, title gen) that shouldn't block the input.
-				const activeTaskIds = taskIds;
-				const pendingTaskIds = await getTaskIdsByChatId(localStorage.token, $chatId)
-					.then((res) => res?.task_ids ?? [])
-					.catch(() => []);
-				if (taskIds !== activeTaskIds) {
-					return;
-				}
-				const loadedHistoryState = prepareLoadedChatHistory(history, loadedHistory, pendingTaskIds);
-				history = loadedHistoryState.history;
-				taskIds = loadedHistoryState.taskIds;
-
-				await tick();
-
-				return true;
-			} else {
-				return null;
+			if (!($user?.role === 'admin' || ($user?.permissions?.chat?.multiple_models ?? true))) {
+				selectedModels = selectedModels.length > 0 ? [selectedModels[0]] : [''];
 			}
+
+			oldSelectedModelIds = structuredClone(selectedModels);
+
+			const loadedHistory =
+				(chatContent?.history ?? undefined) !== undefined
+					? chatContent.history
+					: convertMessagesToHistory(chatContent.messages);
+
+			// Sanitize history: repair orphaned references and structurally-malformed
+			// nodes from failed regenerations (#24424, #24157, #20474)
+			sanitizeHistory(loadedHistory);
+
+			chatTitle.set(chatContent.title);
+
+			params = structuredClone(chatContent?.params ?? {});
+			chatFiles = structuredClone(chatContent?.files ?? []);
+
+			// Load tasks from chat-level DB field
+			chatTasks = loadedChat?.tasks ?? [];
+
+			autoScroll = true;
+			await tick();
+			if (
+				$chatId !== targetChatId ||
+				!isModeProfileCatalogGenerationCurrent(expectedCatalogGeneration)
+			) {
+				return false;
+			}
+
+			// Reconcile active tasks with message state:
+			// If the response is already done, remaining tasks are just background
+			// work (follow-ups, title gen) that shouldn't block the input.
+			const activeTaskIds = taskIds;
+			const pendingTaskIds = await getTaskIdsByChatId(localStorage.token, targetChatId)
+				.then((res) => res?.task_ids ?? [])
+				.catch(() => []);
+			if (
+				$chatId !== targetChatId ||
+				!isModeProfileCatalogGenerationCurrent(expectedCatalogGeneration)
+			) {
+				return false;
+			}
+			if (taskIds !== activeTaskIds) {
+				return;
+			}
+			const loadedHistoryState = prepareLoadedChatHistory(history, loadedHistory, pendingTaskIds);
+			history = loadedHistoryState.history;
+			taskIds = loadedHistoryState.taskIds;
+
+			await tick();
+			if (
+				$chatId !== targetChatId ||
+				!isModeProfileCatalogGenerationCurrent(expectedCatalogGeneration)
+			) {
+				return false;
+			}
+
+			return true;
+		} else {
+			return null;
 		}
 	};
 
@@ -2267,7 +2710,16 @@
 
 	let processingQueueChats = new Set<string>();
 
-	const processNextInQueue = async (targetChatId: string) => {
+	const processNextInQueue = async (
+		targetChatId: string,
+		expectedCatalogGeneration = modeProfileCatalogGeneration
+	) => {
+		if (
+			$chatId !== targetChatId ||
+			!isModeProfileCatalogGenerationCurrent(expectedCatalogGeneration)
+		) {
+			return;
+		}
 		if (processingQueueChats.has(targetChatId)) return;
 
 		const queue = $chatRequestQueues[targetChatId];
@@ -2289,16 +2741,42 @@
 		}
 	};
 
-	const chatCompletedHandler = async (_chatId, modelId, responseMessageId, messages) => {
+	const chatCompletedHandler = async (
+		_chatId,
+		modelId,
+		responseMessageId,
+		expectedCatalogGeneration = modeProfileCatalogGeneration
+	) => {
 		// Backend handles outlet filters and persistence inline.
 		// Just refresh the sidebar chat list.
-		if ($chatId == _chatId && !$temporaryChatEnabled) {
+		const targetChatId = _chatId;
+		if (
+			$chatId === targetChatId &&
+			isModeProfileCatalogGenerationCurrent(expectedCatalogGeneration) &&
+			!$temporaryChatEnabled
+		) {
+			const loadedChats = await getChatList(localStorage.token, 1);
+			if (
+				$chatId !== targetChatId ||
+				!isModeProfileCatalogGenerationCurrent(expectedCatalogGeneration) ||
+				$temporaryChatEnabled
+			) {
+				return;
+			}
 			currentChatPage.set(1);
-			await chats.set(await getChatList(localStorage.token, $currentChatPage));
+			chats.set(loadedChats);
 		}
 	};
 
 	const chatActionHandler = async (_chatId, actionId, modelId, responseMessageId, event = null) => {
+		const targetChatId = _chatId;
+		const expectedCatalogGeneration = modeProfileCatalogGeneration;
+		if (
+			$chatId !== targetChatId ||
+			!isModeProfileCatalogGenerationCurrent(expectedCatalogGeneration)
+		) {
+			return;
+		}
 		const messages = createMessagesList(history, responseMessageId);
 
 		const res = await chatAction(localStorage.token, actionId, {
@@ -2313,14 +2791,25 @@
 			})),
 			...(event ? { event: event } : {}),
 			model_item: $models.find((m) => m.id === modelId),
-			chat_id: _chatId,
+			chat_id: targetChatId,
 			session_id: $socket?.id,
 			id: responseMessageId
 		}).catch((error) => {
-			toast.error(`${error}`);
-			messages.at(-1).error = { content: error };
+			if (
+				$chatId === targetChatId &&
+				isModeProfileCatalogGenerationCurrent(expectedCatalogGeneration)
+			) {
+				toast.error(`${error}`);
+				messages.at(-1).error = { content: error };
+			}
 			return null;
 		});
+		if (
+			$chatId !== targetChatId ||
+			!isModeProfileCatalogGenerationCurrent(expectedCatalogGeneration)
+		) {
+			return;
+		}
 
 		if (res !== null && res.messages) {
 			// Update chat history with the new messages
@@ -2335,18 +2824,32 @@
 			}
 		}
 
-		if ($chatId == _chatId) {
+		if ($chatId === targetChatId) {
 			if (!$temporaryChatEnabled) {
-				chat = await updateChatById(localStorage.token, _chatId, {
+				const savedChat = await updateChatById(localStorage.token, targetChatId, {
 					models: selectedModels,
 					messages: messages,
 					history: history,
 					params: params,
 					files: chatFiles
 				});
+				if (
+					$chatId !== targetChatId ||
+					!isModeProfileCatalogGenerationCurrent(expectedCatalogGeneration)
+				) {
+					return;
+				}
+				chat = savedChat;
 
 				currentChatPage.set(1);
-				await chats.set(await getChatList(localStorage.token, $currentChatPage));
+				const loadedChats = await getChatList(localStorage.token, $currentChatPage);
+				if (
+					$chatId !== targetChatId ||
+					!isModeProfileCatalogGenerationCurrent(expectedCatalogGeneration)
+				) {
+					return;
+				}
+				await chats.set(loadedChats);
 			}
 		}
 	};
@@ -2493,7 +2996,18 @@
 		}
 	};
 
-	const chatCompletionEventHandler = async (data, message, chatId) => {
+	const chatCompletionEventHandler = async (
+		data,
+		message,
+		targetChatId,
+		expectedCatalogGeneration = modeProfileCatalogGeneration
+	) => {
+		if (
+			$chatId !== targetChatId ||
+			!isModeProfileCatalogGenerationCurrent(expectedCatalogGeneration)
+		) {
+			return;
+		}
 		const {
 			id,
 			done,
@@ -2516,6 +3030,12 @@
 
 		if (error) {
 			await handleOpenAIError(error, message);
+			if (
+				$chatId !== targetChatId ||
+				!isModeProfileCatalogGenerationCurrent(expectedCatalogGeneration)
+			) {
+				return;
+			}
 		}
 
 		if (sources && !message?.sources) {
@@ -2582,6 +3102,12 @@
 
 			if ($settings.responseAutoPlayback && !$showCallOverlay) {
 				await tick();
+				if (
+					$chatId !== targetChatId ||
+					!isModeProfileCatalogGenerationCurrent(expectedCatalogGeneration)
+				) {
+					return;
+				}
 				document.getElementById(`speak-button-${message.id}`)?.click();
 			}
 
@@ -2599,6 +3125,12 @@
 			history.messages[message.id] = message;
 
 			await tick();
+			if (
+				$chatId !== targetChatId ||
+				!isModeProfileCatalogGenerationCurrent(expectedCatalogGeneration)
+			) {
+				return;
+			}
 			if (autoScroll) {
 				scrollToBottom();
 			}
@@ -2606,15 +3138,16 @@
 			// Fire-and-forget: run chatCompletedHandler for background work
 			// (outlet filters, chat save, title gen, follow-ups, tags)
 			// without blocking the user from sending new messages.
-			chatCompletedHandler(
-				chatId,
-				message.model,
-				message.id,
-				createMessagesList(history, message.id)
-			);
+			chatCompletedHandler(targetChatId, message.model, message.id, expectedCatalogGeneration);
 
 			// Process next queued request if any
-			await processNextInQueue(chatId);
+			await processNextInQueue(targetChatId, expectedCatalogGeneration);
+			if (
+				$chatId !== targetChatId ||
+				!isModeProfileCatalogGenerationCurrent(expectedCatalogGeneration)
+			) {
+				return;
+			}
 		}
 
 		console.log(data);
@@ -2914,51 +3447,6 @@
 		}
 	};
 
-	const getFeatures = (
-		model: Model,
-		selections: ConversationModeProfileSelections,
-		includeModeProfileCapabilities = true
-	) => {
-		let features = {};
-		const featureEnabled = (featureId: string) => selections.featureIds.includes(featureId);
-		const webSearchEnabledForModel = Boolean(
-			$config?.features?.enable_web_search &&
-			($user?.role === 'admin' || $user?.permissions?.features?.web_search) &&
-			(featureEnabled('web_search') ||
-				(!modeProfileRevisionId &&
-					(model?.info?.meta?.capabilities?.web_search ?? true) &&
-					($settings?.webSearch ?? false) === 'always'))
-		);
-
-		if ($config?.features)
-			features = {
-				voice: $showCallOverlay,
-				...(includeModeProfileCapabilities
-					? {
-							image_generation: resolveImageGenerationFeature(
-								model,
-								$config?.features?.enable_image_generation ?? false,
-								hasImageGenerationAccess(),
-								featureEnabled('image_generation'),
-								featureEnabled('image_generation') ? imageGenerationUserOverride : false
-							),
-							code_interpreter:
-								$config?.features?.enable_code_interpreter &&
-								($user?.role === 'admin' || $user?.permissions?.features?.code_interpreter)
-									? featureEnabled('code_interpreter')
-									: false,
-							web_search: webSearchEnabledForModel
-						}
-					: {})
-			};
-
-		if ($settings?.memory ?? $config?.features?.enable_memories ?? false) {
-			features = { ...features, memory: true };
-		}
-
-		return features;
-	};
-
 	const getStopTokens = () => {
 		const stop = params?.stop ?? $settings?.params?.stop;
 		if (!stop) return undefined;
@@ -2986,10 +3474,40 @@
 			continueResponse?: boolean;
 		} = {}
 	) => {
-		if (modeProfileSetupPromise) {
-			await modeProfileSetupPromise;
-		}
-		const modeProfileRequest = await resolveModeProfileRequest(model);
+		const directToolServersPermitted = isDirectToolServersPermitted($user);
+		const directTerminalIds = ((($settings as any)?.terminalServers ?? []) as any[])
+			.map((server) => server?.url)
+			.filter((id): id is string => typeof id === 'string');
+		const requestContext = captureConversationModeRequestContext({
+			mode: conversationMode,
+			revisionHint: modeProfileRevisionId,
+			authority: modeProfileCapabilityAuthority,
+			profile: getModeProfile(),
+			model,
+			selections: getModeProfileSelections({ includePendingOAuthTools: false }),
+			overrideFields: modeProfileCapabilityOverrideFields,
+			featureState: {
+				availableFeatureIds: getModeProfileAvailableFeatureIds(),
+				voice: Boolean($showCallOverlay),
+				memory: Boolean($settings?.memory ?? $config?.features?.enable_memories ?? false),
+				webSearchAlways: ($settings?.webSearch ?? false) === 'always',
+				imageGenerationUserOverride,
+				imageGenerationGloballyEnabled: Boolean($config?.features?.enable_image_generation),
+				imageGenerationAllowed: hasImageGenerationAccess()
+			},
+			directToolServersPermitted,
+			directTerminalIds
+		});
+		const externalCatalogRequest = getModeProfileExternalCatalogRequest(
+			requestContext.model as Model,
+			requestContext
+		);
+		const reasoning = buildModelReasoningPayload(requestContext.model, reasoningEffort);
+
+		const modeProfileRequest = await resolveModeProfileRequest(
+			requestContext,
+			externalCatalogRequest
+		);
 
 		const responseMessage = _history.messages[responseMessageId];
 		const userMessage = _history.messages[responseMessage.parentId];
@@ -3034,11 +3552,10 @@
 		}
 
 		const stream =
-			model?.info?.params?.stream_response ??
+			requestContext.model?.info?.params?.stream_response ??
 			$settings?.params?.stream_response ??
 			params?.stream_response ??
 			true;
-		const reasoning = buildModelReasoningPayload(model, reasoningEffort);
 		// Always include system prompt — backend extracts it and prepends to DB messages.
 		// Only temp chats need conversation messages (persisted chats load from DB).
 		let messages: any[] = [
@@ -3097,23 +3614,20 @@
 				);
 		}
 
-		const directTerminalPermitted = isDirectToolServersPermitted($user);
-		const directTerminalIds = new Set(
-			((($settings as any)?.terminalServers ?? []) as any[])
-				.map((server) => server?.url)
-				.filter((id): id is string => typeof id === 'string')
-		);
-
-		const modelCapabilities = (model.info?.meta?.capabilities ?? {}) as Record<string, unknown>;
+		const modelCapabilities = (requestContext.model.info?.meta?.capabilities ?? {}) as Record<
+			string,
+			unknown
+		>;
 		const functionCallingEnabled = modelCapabilities.function_calling !== false;
 		// Terminal requires the same function-calling allowance as its resolver path.
 		const terminalEnabled = functionCallingEnabled && modelCapabilities.terminal !== false;
 		const capabilityRequest = serializeConversationModeCapabilityRequest({
-			authority: modeProfileCapabilityAuthority,
+			authority: requestContext.authority,
+			overrideFields: requestContext.overrideFields,
 			selections: modeProfileRequest.effective,
-			features: getFeatures(model, modeProfileRequest.effective),
-			directToolServersPermitted: directTerminalPermitted,
-			directTerminalIds: [...directTerminalIds],
+			features: getConversationModeRequestFeatures(requestContext, modeProfileRequest.effective),
+			directToolServersPermitted: requestContext.directToolServersPermitted,
+			directTerminalIds: requestContext.directTerminalIds,
 			functionCallingEnabled,
 			terminalEnabled
 		});
@@ -3121,22 +3635,18 @@
 			emitToolServers: capabilityRequest.emitToolServers,
 			toolServerIds: capabilityRequest.toolServerIds,
 			terminalId: (capabilityRequest.request as { terminal_id?: unknown }).terminal_id,
-			directToolServersPermitted: directTerminalPermitted,
-			toolServers: modeProfileExternalCatalog.ready
-				? modeProfileExternalCatalog.toolServers
-				: ($toolServers ?? []),
-			terminalServers: modeProfileExternalCatalog.ready
-				? modeProfileExternalCatalog.terminalServers
-				: ($terminalServers ?? [])
+			directToolServersPermitted: requestContext.directToolServersPermitted,
+			toolServers: modeProfileRequest.catalogView.toolServers,
+			terminalServers: modeProfileRequest.catalogView.terminalServers
 		});
 
 		const res = await generateOpenAIChatCompletion(
 			localStorage.token,
 			{
 				stream: stream,
-				model: model.id,
-				chat_mode: conversationMode,
-				mode_profile_revision_id: modeProfileRevisionId ?? undefined,
+				model: requestContext.model.id,
+				chat_mode: requestContext.mode,
+				mode_profile_revision_id: requestContext.revisionHint ?? undefined,
 				...(messages.length > 0 ? { messages } : {}),
 				...(reasoning ? { reasoning } : {}),
 				params: {
@@ -3156,7 +3666,7 @@
 						$user?.email
 					)
 				},
-				model_item: $models.find((m) => m.id === model.id),
+				model_item: requestContext.model,
 
 				session_id: $socket?.id,
 				chat_id: _chatId || undefined,
@@ -3179,7 +3689,7 @@
 					follow_up_generation: $settings?.autoFollowUps ?? true
 				},
 
-				...(stream && (model.info?.meta?.capabilities?.usage ?? false)
+				...(stream && (requestContext.model.info?.meta?.capabilities?.usage ?? false)
 					? {
 							stream_options: {
 								include_usage: true
@@ -3305,9 +3815,11 @@
 	};
 
 	const stopResponse = async (processQueue = true) => {
+		const targetChatId = $chatId;
+		const expectedCatalogGeneration = modeProfileCatalogGeneration;
 		if (taskIds) {
-			if ($chatId) {
-				await stopTasksByChatId(localStorage.token, $chatId).catch((error) => {
+			if (targetChatId) {
+				await stopTasksByChatId(localStorage.token, targetChatId).catch((error) => {
 					toast.error(`${error}`);
 					return null;
 				});
@@ -3318,6 +3830,12 @@
 						return null;
 					});
 				}
+			}
+			if (
+				$chatId !== targetChatId ||
+				!isModeProfileCatalogGenerationCurrent(expectedCatalogGeneration)
+			) {
+				return;
 			}
 
 			taskIds = null;
@@ -3343,8 +3861,13 @@
 			generationController = null;
 		}
 
-		if (processQueue) {
-			await processNextInQueue($chatId);
+		if (
+			processQueue &&
+			targetChatId &&
+			$chatId === targetChatId &&
+			isModeProfileCatalogGenerationCurrent(expectedCatalogGeneration)
+		) {
+			await processNextInQueue(targetChatId, expectedCatalogGeneration);
 		}
 	};
 
@@ -3549,21 +4072,27 @@
 
 	const saveControls = async () => {
 		if (!$chatId || $temporaryChatEnabled) return;
+		const targetChatId = $chatId;
+		const expectedCatalogGeneration = modeProfileCatalogGeneration;
 		const loaded = chat?.chat ?? {};
 		if (equal(params, loaded.params ?? {}) && equal(chatFiles, loaded.files ?? [])) return;
 
-		const res = await updateChatById(localStorage.token, $chatId, {
+		const res = await updateChatById(localStorage.token, targetChatId, {
 			params,
 			files: chatFiles
 		}).catch((err) => {
 			console.error('[controls autosave]', err);
 			return null;
 		});
+		if (
+			!res ||
+			$chatId !== targetChatId ||
+			!isModeProfileCatalogGenerationCurrent(expectedCatalogGeneration)
+		)
+			return;
 		// Refresh the dedupe baseline so a later revert still saves.
-		if (res) {
-			chat = res;
-			bindCanonicalModeProfileRevision(chat?.mode_profile_revision_id);
-		}
+		chat = res;
+		bindCanonicalModeProfileRevision(chat?.mode_profile_revision_id);
 	};
 
 	const MAX_DRAFT_LENGTH = 5000;
@@ -3575,7 +4104,7 @@
 			!Object.values(history.messages).some((message: any) => message?.role === 'user'));
 	const createModeProfileDraftSnapshot = (input: any) => ({
 		...(input ?? {}),
-		selectedToolIds: [...selectedToolIds],
+		selectedToolIds: getModeProfileSelectedToolIds(),
 		selectedSkillIds: [...selectedSkillIds],
 		selectedFilterIds: [...selectedFilterIds],
 		webSearchEnabled,
@@ -3586,6 +4115,9 @@
 		modeProfileCapabilitySnapshotVersion: modeProfileControlsReady ? 1 : undefined,
 		modeProfileCapabilityAuthority: modeProfileControlsReady
 			? modeProfileCapabilityAuthorityController.snapshot()
+			: undefined,
+		modeProfileCapabilityOverrideFields: modeProfileControlsReady
+			? (modeProfileCapabilityOverrideFields ?? undefined)
 			: undefined,
 		selectedTerminalId: $selectedTerminalId ?? null,
 		imageGenerationUserOverride
@@ -3630,9 +4162,13 @@
 		}
 	};
 
-	const persistFinalizedModeProfileDraftSnapshot = async () => {
+	const persistFinalizedModeProfileDraftSnapshot = async (
+		expectedCatalogGeneration = modeProfileCatalogGeneration
+	) => {
 		if ($temporaryChatEnabled || acceptedSubmitDraftPersistenceSuppressed) return;
+		if (!isModeProfileCatalogGenerationCurrent(expectedCatalogGeneration)) return;
 		await tick();
+		if (!isModeProfileCatalogGenerationCurrent(expectedCatalogGeneration)) return;
 		const draftChatId = modeProfileDraftId.startsWith('draft:') ? null : $chatId || null;
 		await saveDraft(
 			createModeProfileDraftSnapshot(getCurrentModeProfileDraftInput()),
@@ -4053,8 +4589,10 @@
 										onChange={(data) => {
 											latestModeProfileDraftInput = data;
 											if (modeProfileControlsReady) {
-												modeProfileCapabilityAuthority =
-													modeProfileCapabilityAuthorityController.observe(data);
+												const observation =
+													modeProfileCapabilityAuthorityController.observeWithChange(data);
+												modeProfileCapabilityAuthority = observation.authority;
+												if (observation.changed) modeProfileCapabilityOverrideFields = null;
 											}
 											if (
 												!acceptedSubmitDraftPersistenceSuppressed &&
@@ -4066,11 +4604,13 @@
 										onImageGenerationToggle={(enabled) => {
 											modeProfileCapabilityAuthority =
 												modeProfileCapabilityAuthorityController.markExplicit();
+											modeProfileCapabilityOverrideFields = null;
 											imageGenerationUserOverride = enabled;
 										}}
 										onWebSearchToggle={(enabled) => {
 											modeProfileCapabilityAuthority =
 												modeProfileCapabilityAuthorityController.markExplicit();
+											modeProfileCapabilityOverrideFields = null;
 											handleWebSearchToggle(enabled);
 										}}
 										on:submit={async (e) => {
@@ -4122,18 +4662,22 @@
 										onImageGenerationToggle={(enabled) => {
 											modeProfileCapabilityAuthority =
 												modeProfileCapabilityAuthorityController.markExplicit();
+											modeProfileCapabilityOverrideFields = null;
 											imageGenerationUserOverride = enabled;
 										}}
 										onWebSearchToggle={(enabled) => {
 											modeProfileCapabilityAuthority =
 												modeProfileCapabilityAuthorityController.markExplicit();
+											modeProfileCapabilityOverrideFields = null;
 											handleWebSearchToggle(enabled);
 										}}
 										onChange={(data) => {
 											latestModeProfileDraftInput = data;
 											if (modeProfileControlsReady) {
-												modeProfileCapabilityAuthority =
-													modeProfileCapabilityAuthorityController.observe(data);
+												const observation =
+													modeProfileCapabilityAuthorityController.observeWithChange(data);
+												modeProfileCapabilityAuthority = observation.authority;
+												if (observation.changed) modeProfileCapabilityOverrideFields = null;
 											}
 											if (
 												!acceptedSubmitDraftPersistenceSuppressed &&

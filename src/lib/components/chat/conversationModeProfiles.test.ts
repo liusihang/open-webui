@@ -14,8 +14,14 @@ import {
 	sanitizeConversationModeSelectedToolIds,
 	serializeConversationModeCapabilityRequest,
 	serializeConversationModeToolServers,
+	type ConversationModeDraft,
 	type ConversationModeProfileResolutionInput
 } from './conversationModeProfiles';
+
+const requiredHelper = <T>(name: string): T => {
+	expect(conversationModeProfiles).toHaveProperty(name);
+	return (conversationModeProfiles as unknown as Record<string, unknown>)[name] as T;
+};
 
 const emptyCapabilities = {
 	selectedToolIds: [],
@@ -26,7 +32,7 @@ const emptyCapabilities = {
 	imageGenerationEnabled: false
 };
 
-const completeDraft = (overrides: Record<string, unknown> = {}) => ({
+const completeDraft = (overrides: Record<string, unknown> = {}): ConversationModeDraft => ({
 	prompt: 'draft prompt',
 	files: [{ id: 'draft-file' }],
 	modeProfileCapabilitySnapshotVersion: 1,
@@ -260,6 +266,35 @@ describe('resolveConversationModeProfile', () => {
 				permissions: { features: { direct_tool_servers: false } }
 			})
 		).toBe(false);
+	});
+
+	it('removes configured direct terminal candidates when permission is revoked', () => {
+		const filterTerminalCandidates = requiredHelper<
+			(input: {
+				candidateIds: readonly string[];
+				configuredDirectTerminalIds: readonly string[];
+				directToolServersPermitted: boolean;
+			}) => string[]
+		>('filterConversationModeTerminalCandidateIds');
+		const input = {
+			candidateIds: ['https://direct-terminal.example', 'system-terminal'],
+			configuredDirectTerminalIds: ['https://direct-terminal.example']
+		};
+
+		expect(filterTerminalCandidates({ ...input, directToolServersPermitted: false })).toEqual([
+			'system-terminal'
+		]);
+		expect(
+			filterTerminalCandidates({
+				candidateIds: input.candidateIds,
+				configuredDirectTerminalIds: [],
+				directToolServersPermitted: false
+			})
+		).toEqual(['system-terminal']);
+		expect(filterTerminalCandidates({ ...input, directToolServersPermitted: true })).toEqual([
+			'https://direct-terminal.example',
+			'system-terminal'
+		]);
 	});
 
 	it('resolves request-local selections against the actual send model without mutating UI input', () => {
@@ -609,16 +644,21 @@ describe('conversation mode capability authority', () => {
 
 	it('ignores prompt, file, and reasoning-only changes while preserving inherit-bound authority', () => {
 		const controller = createConversationModeCapabilityAuthorityController({ existingChat: true });
-		controller.observe({ ...emptyCapabilities, prompt: '', files: [], reasoningEffort: 'medium' });
+		const initialInput = {
+			...emptyCapabilities,
+			prompt: '',
+			files: [],
+			reasoningEffort: 'medium'
+		};
+		const changedInput = {
+			...emptyCapabilities,
+			prompt: 'typed text',
+			files: [{ id: 'file-1' }],
+			reasoningEffort: 'high'
+		};
+		controller.observe(initialInput);
 
-		expect(
-			controller.observe({
-				...emptyCapabilities,
-				prompt: 'typed text',
-				files: [{ id: 'file-1' }],
-				reasoningEffort: 'high'
-			})
-		).toBe('inherit_bound');
+		expect(controller.observe(changedInput)).toBe('inherit_bound');
 	});
 
 	it.each([
@@ -664,6 +704,51 @@ describe('conversation mode capability authority', () => {
 		);
 	});
 
+	it('reports real user changes so a legacy partial override can promote to a full explicit snapshot', () => {
+		const controller = createConversationModeCapabilityAuthorityController({ existingChat: true });
+		const withDetails = (controller as any).observeWithChange;
+
+		expect(withDetails).toBeTypeOf('function');
+		expect(withDetails(emptyCapabilities)).toEqual({ authority: 'inherit_bound', changed: false });
+		expect(withDetails({ ...emptyCapabilities, selectedToolIds: ['user-tool'] })).toEqual({
+			authority: 'explicit',
+			changed: true
+		});
+	});
+
+	it('serializes only legacy-positive fields so an existing bound revision keeps every other default', () => {
+		expect(
+			serializeConversationModeCapabilityRequest({
+				authority: 'explicit',
+				overrideFields: ['tool_ids', 'web_search'],
+				selections: {
+					terminalId: null,
+					toolIds: ['legacy-tool'],
+					skillIds: [],
+					filterIds: []
+				},
+				features: {
+					voice: true,
+					memory: true,
+					web_search: true,
+					code_interpreter: false,
+					image_generation: false
+				},
+				directToolServersPermitted: true,
+				directTerminalIds: [],
+				functionCallingEnabled: true,
+				terminalEnabled: true
+			})
+		).toEqual({
+			request: {
+				tool_ids: ['legacy-tool'],
+				features: { voice: true, memory: true, web_search: true }
+			},
+			toolServerIds: [],
+			emitToolServers: true
+		});
+	});
+
 	it('gates restored direct tool selections and all direct request routing when permission is denied', () => {
 		expect(
 			sanitizeConversationModeSelectedToolIds(
@@ -698,6 +783,23 @@ describe('conversation mode capability authority', () => {
 			toolServerIds: [],
 			emitToolServers: true
 		});
+
+		expect(
+			serializeConversationModeCapabilityRequest({
+				authority: 'explicit',
+				selections: {
+					terminalId: 'https://deleted-direct-terminal.example',
+					toolIds: [],
+					skillIds: [],
+					filterIds: []
+				},
+				features: {},
+				directToolServersPermitted: false,
+				directTerminalIds: [],
+				functionCallingEnabled: true,
+				terminalEnabled: true
+			}).request.terminal_id
+		).toBeNull();
 	});
 
 	it('suppresses direct server emission when function calling is unsupported', () => {
@@ -796,7 +898,12 @@ describe('conversation mode capability authority', () => {
 			directToolServersPermitted: true
 		});
 
-		expect(permittedToolIds).toEqual(['tool-a', 'direct_server:0', 'direct_server:2']);
+		expect(permittedToolIds).toEqual([
+			'tool-a',
+			'tool-denied',
+			'direct_server:0',
+			'direct_server:2'
+		]);
 		expect(
 			resolve({
 				phase: 'model_change',
@@ -873,5 +980,317 @@ describe('conversation mode capability authority', () => {
 				directToolServersPermitted: true
 			})
 		).toEqual(['direct_server:0']);
+	});
+
+	it('uses a stable external-catalog fingerprint across object-key and candidate ordering', () => {
+		type FingerprintInput = {
+			userId: unknown;
+			directToolServersPermitted: boolean;
+			configuredToolServers: readonly unknown[];
+			configuredTerminalServers: readonly unknown[];
+			terminalCandidateIds: readonly string[];
+		};
+		const fingerprint = requiredHelper<(input: FingerprintInput) => string>(
+			'getConversationModeExternalCatalogFingerprint'
+		);
+		const first = fingerprint({
+			userId: 'user-a',
+			directToolServersPermitted: true,
+			configuredToolServers: [
+				{ url: 'https://tool.example', key: 'secret', config: { enable: true } }
+			],
+			configuredTerminalServers: [
+				{ url: 'https://terminal.example', auth_type: 'bearer', enabled: true }
+			],
+			terminalCandidateIds: ['terminal-b', 'terminal-a']
+		});
+		const same = fingerprint({
+			terminalCandidateIds: ['terminal-a', 'terminal-b'],
+			configuredTerminalServers: [
+				{ enabled: true, auth_type: 'bearer', url: 'https://terminal.example' }
+			],
+			configuredToolServers: [
+				{ config: { enable: true }, key: 'secret', url: 'https://tool.example' }
+			],
+			directToolServersPermitted: true,
+			userId: 'user-a'
+		});
+
+		expect(same).toBe(first);
+		expect(
+			fingerprint({
+				userId: 'user-a',
+				directToolServersPermitted: false,
+				configuredToolServers: [],
+				configuredTerminalServers: [],
+				terminalCandidateIds: ['terminal-a', 'terminal-b']
+			})
+		).not.toBe(first);
+	});
+
+	it('tracks idle/loading/ready/error per catalog fingerprint and retains the last success', () => {
+		type Catalog = {
+			toolServers: Array<Record<string, unknown>>;
+			terminalServers: Array<Record<string, unknown>>;
+		};
+		type CatalogState = {
+			status: 'idle' | 'loading' | 'ready' | 'error';
+			fingerprint: string;
+			catalog: Catalog | null;
+			error: string | null;
+		};
+		type CatalogCache = {
+			snapshot: (fingerprint: string) => CatalogState;
+			begin: (fingerprint: string, options?: { force?: boolean; now?: number }) => boolean;
+			succeed: (fingerprint: string, catalog: Catalog, options?: { now?: number }) => CatalogState;
+			fail: (fingerprint: string, error: unknown) => CatalogState;
+			shouldRefresh: (
+				fingerprint: string,
+				options: { maxAgeMs: number; retryAfterMs: number; now?: number }
+			) => boolean;
+		};
+		const createCache = requiredHelper<() => CatalogCache>(
+			'createConversationModeExternalCatalogCache'
+		);
+		const cache = createCache();
+		const successfulCatalog = {
+			toolServers: [{ id: 'tool-server-a' }],
+			terminalServers: [{ id: 'terminal-a' }]
+		};
+
+		expect(cache.snapshot('config-a')).toEqual({
+			status: 'idle',
+			fingerprint: 'config-a',
+			catalog: null,
+			error: null
+		});
+		expect(cache.begin('config-a')).toBe(true);
+		expect(cache.snapshot('config-a').status).toBe('loading');
+		expect(cache.begin('config-a')).toBe(false);
+		expect(cache.succeed('config-a', successfulCatalog)).toMatchObject({
+			status: 'ready',
+			catalog: successfulCatalog,
+			error: null
+		});
+		expect(cache.begin('config-a')).toBe(false);
+		expect(cache.begin('config-a', { force: true })).toBe(true);
+		expect(cache.snapshot('config-a')).toMatchObject({
+			status: 'loading',
+			catalog: successfulCatalog
+		});
+		expect(cache.fail('config-a', new Error('discovery failed'))).toMatchObject({
+			status: 'error',
+			catalog: successfulCatalog,
+			error: 'discovery failed'
+		});
+
+		expect(cache.begin('config-b')).toBe(true);
+		expect(cache.fail('config-b', 'timeout')).toEqual({
+			status: 'error',
+			fingerprint: 'config-b',
+			catalog: null,
+			error: 'timeout'
+		});
+
+		expect(cache.begin('drift', { now: 100 })).toBe(true);
+		cache.succeed('drift', successfulCatalog, { now: 100 });
+		expect(cache.shouldRefresh('drift', { maxAgeMs: 60, retryAfterMs: 10, now: 159 })).toBe(false);
+		expect(cache.shouldRefresh('drift', { maxAgeMs: 60, retryAfterMs: 10, now: 160 })).toBe(true);
+		expect(cache.begin('drift', { force: true, now: 160 })).toBe(true);
+		cache.fail('drift', 'remote drift probe failed');
+		expect(cache.shouldRefresh('drift', { maxAgeMs: 60, retryAfterMs: 10, now: 169 })).toBe(false);
+		expect(cache.shouldRefresh('drift', { maxAgeMs: 60, retryAfterMs: 10, now: 170 })).toBe(true);
+	});
+
+	it('captures an immutable mode-profile request context including feature UI state', () => {
+		type RequestContext = {
+			mode: 'chat' | 'agent';
+			revisionHint: string | null;
+			authority: 'initialized' | 'inherit_bound' | 'explicit';
+			profile: Record<string, unknown> | null;
+			model: Record<string, unknown>;
+			selections: {
+				terminalId: string | null;
+				toolIds: string[];
+				skillIds: string[];
+				filterIds: string[];
+				featureIds: string[];
+			};
+			featureState: {
+				availableFeatureIds: string[];
+				voice: boolean;
+				memory: boolean;
+				webSearchAlways: boolean;
+				imageGenerationUserOverride: boolean | null;
+				imageGenerationGloballyEnabled: boolean;
+				imageGenerationAllowed: boolean;
+			};
+			directToolServersPermitted: boolean;
+			directTerminalIds: string[];
+		};
+		const capture = requiredHelper<(input: RequestContext) => RequestContext>(
+			'captureConversationModeRequestContext'
+		);
+		const input: RequestContext = {
+			mode: 'agent',
+			revisionHint: 'revision-a',
+			authority: 'explicit',
+			profile: {
+				mode: 'agent',
+				current_revision_id: 'profile-revision',
+				schema_version: 1,
+				defaults: { tool_ids: ['profile-tool'] }
+			},
+			model: {
+				id: 'model-a',
+				info: { meta: { capabilities: { function_calling: true } } }
+			},
+			selections: {
+				terminalId: 'terminal-a',
+				toolIds: ['tool-a'],
+				skillIds: ['skill-a'],
+				filterIds: ['filter-a'],
+				featureIds: ['web_search']
+			},
+			featureState: {
+				availableFeatureIds: ['web_search', 'image_generation'],
+				voice: true,
+				memory: true,
+				webSearchAlways: false,
+				imageGenerationUserOverride: null,
+				imageGenerationGloballyEnabled: true,
+				imageGenerationAllowed: true
+			},
+			directToolServersPermitted: true,
+			directTerminalIds: ['terminal-a']
+		};
+		const captured = capture(input);
+
+		input.mode = 'chat';
+		input.revisionHint = 'revision-b';
+		input.selections.toolIds.push('tool-b');
+		input.featureState.availableFeatureIds.length = 0;
+		(input.profile?.defaults as { tool_ids: string[] }).tool_ids.push('profile-tool-b');
+		(
+			input.model.info as { meta: { capabilities: Record<string, boolean> } }
+		).meta.capabilities.function_calling = false;
+
+		expect(captured).toMatchObject({
+			mode: 'agent',
+			revisionHint: 'revision-a',
+			selections: { toolIds: ['tool-a'] },
+			featureState: { availableFeatureIds: ['web_search', 'image_generation'] },
+			profile: { defaults: { tool_ids: ['profile-tool'] } },
+			model: { info: { meta: { capabilities: { function_calling: true } } } }
+		});
+	});
+
+	it('migrates only unambiguous positive legacy capabilities over initialized defaults', () => {
+		type Migration = {
+			authority: 'explicit';
+			selections: {
+				terminalId: string | null;
+				toolIds: string[];
+				skillIds: string[];
+				filterIds: string[];
+				featureIds: string[];
+			};
+		};
+		const migrate = requiredHelper<
+			(
+				draft: ConversationModeDraft | null,
+				initialized: Migration['selections']
+			) => Migration | null
+		>('migrateConversationModeLegacyDraftCapabilities');
+		const initialized = {
+			terminalId: 'default-terminal',
+			toolIds: ['default-tool'],
+			skillIds: ['default-skill'],
+			filterIds: ['default-filter'],
+			featureIds: ['image_generation']
+		};
+
+		expect(
+			migrate(
+				{
+					prompt: 'legacy',
+					files: [],
+					selectedToolIds: ['legacy-tool'],
+					selectedSkillIds: [],
+					selectedFilterIds: ['legacy-filter'],
+					webSearchEnabled: true,
+					codeInterpreterEnabled: false,
+					selectedTerminalId: 'legacy-terminal'
+				},
+				initialized
+			)
+		).toEqual({
+			authority: 'explicit',
+			overrideFields: ['terminal_id', 'tool_ids', 'filter_ids', 'web_search'],
+			selections: {
+				terminalId: 'legacy-terminal',
+				toolIds: ['legacy-tool'],
+				skillIds: ['default-skill'],
+				filterIds: ['legacy-filter'],
+				featureIds: ['image_generation', 'web_search']
+			}
+		});
+		expect(
+			migrate(
+				{
+					prompt: 'legacy content only',
+					files: [{ id: 'ordinary-file' }],
+					selectedToolIds: [],
+					selectedSkillIds: ['valid-skill', 3],
+					selectedFilterIds: [],
+					webSearchEnabled: false,
+					codeInterpreterEnabled: false,
+					imageGenerationEnabled: false,
+					selectedTerminalId: null
+				},
+				initialized
+			)
+		).toBeNull();
+	});
+
+	it('keeps unauthenticated OAuth tools available while partitioning them out of requests', () => {
+		type Tool = { id?: unknown; name?: unknown; authenticated?: unknown };
+		type Partition = {
+			selectedToolIds: string[];
+			pendingOAuthTools: Array<{
+				id: string;
+				name: string;
+				serverId: string;
+				authType: string | null;
+			}>;
+		};
+		const partition = requiredHelper<
+			(selectedToolIds: unknown, tools: readonly Tool[]) => Partition
+		>('partitionConversationModeOAuthTools');
+		const tools = [
+			{ id: 'tool-a', name: 'Tool A', authenticated: true },
+			{ id: 'server:oauth:needs-auth', name: 'OAuth Tool', authenticated: false }
+		];
+
+		expect(
+			getConversationModeAvailableToolIds({
+				tools,
+				toolServers: [],
+				directToolServersPermitted: false
+			})
+		).toEqual(['tool-a', 'server:oauth:needs-auth']);
+		expect(
+			partition(['tool-a', 'server:oauth:needs-auth', 'direct_server:0', 'missing-tool'], tools)
+		).toEqual({
+			selectedToolIds: ['tool-a', 'direct_server:0', 'missing-tool'],
+			pendingOAuthTools: [
+				{
+					id: 'server:oauth:needs-auth',
+					name: 'OAuth Tool',
+					serverId: 'needs-auth',
+					authType: 'oauth'
+				}
+			]
+		});
 	});
 });

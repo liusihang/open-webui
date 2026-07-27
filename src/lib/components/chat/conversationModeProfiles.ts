@@ -17,7 +17,7 @@ export type ConversationModeProfileWarning = {
 	resourceIds: string[];
 };
 
-type ConversationModeCapabilityChange = {
+export type ConversationModeCapabilityChange = {
 	selectedToolIds?: unknown;
 	selectedSkillIds?: unknown;
 	selectedFilterIds?: unknown;
@@ -27,6 +27,19 @@ type ConversationModeCapabilityChange = {
 };
 
 export type ConversationModeCapabilityAuthority = 'initialized' | 'inherit_bound' | 'explicit';
+
+export const conversationModeCapabilityOverrideFields = [
+	'terminal_id',
+	'tool_ids',
+	'skill_ids',
+	'filter_ids',
+	'web_search',
+	'code_interpreter',
+	'image_generation'
+] as const;
+
+export type ConversationModeCapabilityOverrideField =
+	(typeof conversationModeCapabilityOverrideFields)[number];
 
 type ConversationModeCapabilityAuthorityControllerOptions = {
 	existingChat: boolean;
@@ -60,10 +73,21 @@ export const parseConversationModeDraft = (value: string | null): ConversationMo
 export type ConversationModeDraftCapabilitySnapshot = {
 	authority: Exclude<ConversationModeCapabilityAuthority, 'inherit_bound'>;
 	selections: ConversationModeProfileSelections;
+	overrideFields?: ConversationModeCapabilityOverrideField[];
 };
 
 const isStringArray = (value: unknown): value is string[] =>
 	Array.isArray(value) && value.every((item) => typeof item === 'string');
+
+const parseCapabilityOverrideFields = (
+	value: unknown
+): ConversationModeCapabilityOverrideField[] | null => {
+	if (!Array.isArray(value) || value.length === 0) return null;
+	const allowed = new Set<string>(conversationModeCapabilityOverrideFields);
+	if (!value.every((item) => typeof item === 'string' && allowed.has(item))) return null;
+	const normalized = [...new Set(value)] as ConversationModeCapabilityOverrideField[];
+	return normalized.length === value.length ? normalized : null;
+};
 
 export const getConversationModeDraftCapabilitySnapshot = (
 	draft: ConversationModeDraft | null,
@@ -71,6 +95,10 @@ export const getConversationModeDraftCapabilitySnapshot = (
 ): ConversationModeDraftCapabilitySnapshot | null => {
 	if (!draft) return null;
 	const authority = draft.modeProfileCapabilityAuthority;
+	const overrideFields =
+		draft.modeProfileCapabilityOverrideFields === undefined
+			? undefined
+			: parseCapabilityOverrideFields(draft.modeProfileCapabilityOverrideFields);
 	if (
 		draft.modeProfileCapabilitySnapshotVersion !== 1 ||
 		(authority !== 'initialized' && authority !== 'explicit') ||
@@ -81,13 +109,15 @@ export const getConversationModeDraftCapabilitySnapshot = (
 		typeof draft.webSearchEnabled !== 'boolean' ||
 		typeof draft.codeInterpreterEnabled !== 'boolean' ||
 		typeof draft.imageGenerationEnabled !== 'boolean' ||
-		!(typeof draft.selectedTerminalId === 'string' || draft.selectedTerminalId === null)
+		!(typeof draft.selectedTerminalId === 'string' || draft.selectedTerminalId === null) ||
+		overrideFields === null
 	) {
 		return null;
 	}
 
 	return {
 		authority,
+		...(overrideFields ? { overrideFields } : {}),
 		selections: {
 			terminalId: draft.selectedTerminalId,
 			toolIds: [...draft.selectedToolIds],
@@ -135,13 +165,17 @@ export const createConversationModeCapabilityAuthorityController = (
 			? 'inherit_bound'
 			: 'initialized';
 
+	const observeWithChange = (value: ConversationModeCapabilityChange) => {
+		const next = capabilityFingerprint(value);
+		const changed = baseline !== null && next !== baseline;
+		if (baseline === null) baseline = next;
+		else if (changed) authority = 'explicit';
+		return { authority, changed };
+	};
+
 	return {
-		observe: (value: ConversationModeCapabilityChange) => {
-			const next = capabilityFingerprint(value);
-			if (baseline === null) baseline = next;
-			else if (next !== baseline) authority = 'explicit';
-			return authority;
-		},
+		observe: (value: ConversationModeCapabilityChange) => observeWithChange(value).authority,
+		observeWithChange,
 		rebase: (value: ConversationModeCapabilityChange) => {
 			baseline = capabilityFingerprint(value);
 			return authority;
@@ -175,7 +209,6 @@ export const getConversationModeAvailableToolIds = (
 ) => [
 	...new Set([
 		...input.tools
-			.filter((tool) => tool.authenticated !== false)
 			.map((tool) => tool.id)
 			.filter((id): id is string => typeof id === 'string' && id.length > 0),
 		...(input.directToolServersPermitted
@@ -190,8 +223,50 @@ export const getConversationModeAvailableToolIds = (
 	])
 ];
 
+export type ConversationModePendingOAuthTool = {
+	id: string;
+	name: string;
+	serverId: string;
+	authType: string | null;
+};
+
+export const partitionConversationModeOAuthTools = (
+	selectedToolIds: unknown,
+	tools: readonly { id?: unknown; name?: unknown; authenticated?: unknown }[]
+): { selectedToolIds: string[]; pendingOAuthTools: ConversationModePendingOAuthTool[] } => {
+	const toolsById = new Map(
+		tools
+			.filter(
+				(tool): tool is typeof tool & { id: string } =>
+					typeof tool.id === 'string' && tool.id.length > 0
+			)
+			.map((tool) => [tool.id, tool])
+	);
+	const selected: string[] = [];
+	const pending: ConversationModePendingOAuthTool[] = [];
+
+	for (const id of uniqueStrings(selectedToolIds)) {
+		const tool = toolsById.get(id);
+		if (tool?.authenticated !== false) {
+			selected.push(id);
+			continue;
+		}
+
+		const parts = id.split(':');
+		pending.push({
+			id,
+			name: typeof tool.name === 'string' && tool.name ? tool.name : id,
+			serverId: parts.at(-1) ?? id,
+			authType: parts.length > 1 ? (parts[0] === 'server' ? parts[1] : parts[0]) : null
+		});
+	}
+
+	return { selectedToolIds: selected, pendingOAuthTools: pending };
+};
+
 type ConversationModeCapabilityRequestInput = {
 	authority: ConversationModeCapabilityAuthority;
+	overrideFields?: readonly ConversationModeCapabilityOverrideField[] | null;
 	selections: Pick<
 		ConversationModeProfileSelections,
 		'terminalId' | 'toolIds' | 'skillIds' | 'filterIds'
@@ -217,40 +292,187 @@ export const serializeConversationModeCapabilityRequest = (
 		input.selections.toolIds,
 		input.directToolServersPermitted
 	);
-	const emitToolServers = input.functionCallingEnabled;
+	const ownsField = (field: ConversationModeCapabilityOverrideField) =>
+		!input.overrideFields || input.overrideFields.includes(field);
+	const emitToolServers =
+		input.functionCallingEnabled && (ownsField('tool_ids') || ownsField('terminal_id'));
 	const toolServerIds =
-		emitToolServers && input.directToolServersPermitted
+		emitToolServers && ownsField('tool_ids') && input.directToolServersPermitted
 			? selectedToolIds
 					.filter((toolId) => toolId.startsWith('direct_server:'))
 					.map((toolId) => toolId.slice('direct_server:'.length))
 			: [];
 	const directTerminalIds = new Set(input.directTerminalIds);
+	const selectedTerminalIsDirect =
+		input.selections.terminalId !== null &&
+		(directTerminalIds.has(input.selections.terminalId) ||
+			isConversationModeDirectTerminalId(input.selections.terminalId));
 	const terminalId =
 		input.terminalEnabled &&
 		input.selections.terminalId &&
-		(input.directToolServersPermitted || !directTerminalIds.has(input.selections.terminalId))
+		(input.directToolServersPermitted || !selectedTerminalIsDirect)
 			? input.selections.terminalId
 			: null;
 
+	const request: Record<string, unknown> = {};
+	if (ownsField('tool_ids')) {
+		request.tool_ids = input.functionCallingEnabled
+			? selectedToolIds.filter((toolId) => !toolId.startsWith('direct_server:'))
+			: [];
+	}
+	if (ownsField('skill_ids')) {
+		request.skill_ids = input.functionCallingEnabled
+			? uniqueStrings(input.selections.skillIds)
+			: [];
+	}
+	if (ownsField('filter_ids')) {
+		request.filter_ids = input.functionCallingEnabled
+			? uniqueStrings(input.selections.filterIds)
+			: [];
+	}
+	if (ownsField('terminal_id')) request.terminal_id = terminalId;
+	const requestFeatures: Record<string, unknown> = { ...preservedFeatures };
+	for (const featureId of ['web_search', 'code_interpreter', 'image_generation'] as const) {
+		if (ownsField(featureId) && Object.prototype.hasOwnProperty.call(input.features, featureId)) {
+			requestFeatures[featureId] = input.features[featureId];
+		}
+	}
+	request.features = requestFeatures;
+
 	return {
-		request: {
-			tool_ids: input.functionCallingEnabled
-				? selectedToolIds.filter((toolId) => !toolId.startsWith('direct_server:'))
-				: [],
-			skill_ids: input.functionCallingEnabled ? uniqueStrings(input.selections.skillIds) : [],
-			filter_ids: input.functionCallingEnabled ? uniqueStrings(input.selections.filterIds) : [],
-			terminal_id: terminalId,
-			features: input.features
-		},
+		request,
 		toolServerIds,
 		emitToolServers
 	};
 };
 
-type ConversationModeToolServer = {
+export type ConversationModeToolServer = {
 	id?: unknown;
+	info?: unknown;
 	url?: unknown;
 	[key: string]: unknown;
+};
+
+export type ConversationModeExternalCatalog = {
+	toolServers: ConversationModeToolServer[];
+	terminalServers: ConversationModeToolServer[];
+};
+
+export type ConversationModeExternalCatalogStatus = 'idle' | 'loading' | 'ready' | 'error';
+
+export type ConversationModeExternalCatalogState = {
+	status: ConversationModeExternalCatalogStatus;
+	fingerprint: string;
+	catalog: ConversationModeExternalCatalog | null;
+	error: string | null;
+};
+
+type ConversationModeExternalCatalogFingerprintInput = {
+	userId: unknown;
+	directToolServersPermitted: boolean;
+	configuredToolServers: readonly unknown[];
+	configuredTerminalServers: readonly unknown[];
+	terminalCandidateIds: readonly string[];
+};
+
+const stableFingerprintValue = (value: unknown): unknown => {
+	if (Array.isArray(value)) return value.map(stableFingerprintValue);
+	if (value && typeof value === 'object') {
+		return Object.fromEntries(
+			Object.entries(value as Record<string, unknown>)
+				.sort(([left], [right]) => left.localeCompare(right))
+				.map(([key, entry]) => [key, stableFingerprintValue(entry)])
+		);
+	}
+	return value === undefined ? '__undefined__' : value;
+};
+
+export const getConversationModeExternalCatalogFingerprint = (
+	input: ConversationModeExternalCatalogFingerprintInput
+) =>
+	JSON.stringify(
+		stableFingerprintValue({
+			userId: input.userId ?? null,
+			directToolServersPermitted: input.directToolServersPermitted,
+			configuredToolServers: input.configuredToolServers,
+			configuredTerminalServers: input.configuredTerminalServers,
+			terminalCandidateIds: [...new Set(input.terminalCandidateIds)].sort()
+		})
+	);
+
+const copyExternalCatalog = (
+	catalog: ConversationModeExternalCatalog | null
+): ConversationModeExternalCatalog | null => (catalog ? structuredClone(catalog) : null);
+
+export const createConversationModeExternalCatalogCache = () => {
+	const entries = new Map<string, ConversationModeExternalCatalogState>();
+	const lastAttemptAt = new Map<string, number>();
+	const lastSuccessAt = new Map<string, number>();
+	const idle = (fingerprint: string): ConversationModeExternalCatalogState => ({
+		status: 'idle',
+		fingerprint,
+		catalog: null,
+		error: null
+	});
+	const current = (fingerprint: string) => entries.get(fingerprint) ?? idle(fingerprint);
+	const snapshot = (fingerprint: string): ConversationModeExternalCatalogState => {
+		const state = current(fingerprint);
+		return { ...state, catalog: copyExternalCatalog(state.catalog) };
+	};
+
+	return {
+		snapshot,
+		begin: (
+			fingerprint: string,
+			{ force = false, now = Date.now() }: { force?: boolean; now?: number } = {}
+		) => {
+			const state = current(fingerprint);
+			if (state.status === 'loading') return false;
+			if (!force && (state.status === 'ready' || state.status === 'error')) return false;
+			lastAttemptAt.set(fingerprint, now);
+			entries.set(fingerprint, { ...state, status: 'loading', error: null });
+			return true;
+		},
+		succeed: (
+			fingerprint: string,
+			catalog: ConversationModeExternalCatalog,
+			{ now = Date.now() }: { now?: number } = {}
+		) => {
+			lastSuccessAt.set(fingerprint, now);
+			entries.set(fingerprint, {
+				status: 'ready',
+				fingerprint,
+				catalog: copyExternalCatalog(catalog),
+				error: null
+			});
+			return snapshot(fingerprint);
+		},
+		fail: (fingerprint: string, error: unknown) => {
+			const state = current(fingerprint);
+			entries.set(fingerprint, {
+				...state,
+				status: 'error',
+				error: error instanceof Error ? error.message : String(error)
+			});
+			return snapshot(fingerprint);
+		},
+		shouldRefresh: (
+			fingerprint: string,
+			{
+				maxAgeMs,
+				retryAfterMs,
+				now = Date.now()
+			}: { maxAgeMs: number; retryAfterMs: number; now?: number }
+		) => {
+			const state = current(fingerprint);
+			if (state.status === 'idle') return true;
+			if (state.status === 'loading') return false;
+			if (state.status === 'error') {
+				return now - (lastAttemptAt.get(fingerprint) ?? 0) >= retryAfterMs;
+			}
+			return now - (lastSuccessAt.get(fingerprint) ?? 0) >= maxAgeMs;
+		}
+	};
 };
 
 type ConversationModeToolServersInput = {
@@ -315,6 +537,35 @@ export type ConversationModeProfileAvailability = {
 	featureIds: readonly string[];
 };
 
+export type ConversationModeRequestFeatureState = {
+	availableFeatureIds: string[];
+	voice: boolean;
+	memory: boolean;
+	webSearchAlways: boolean;
+	imageGenerationUserOverride: boolean | null;
+	imageGenerationGloballyEnabled: boolean;
+	imageGenerationAllowed: boolean;
+};
+
+export type ConversationModeRequestContext<
+	TModel extends ConversationModeProfileModel = ConversationModeProfileModel
+> = {
+	mode: ConversationMode;
+	revisionHint: string | null;
+	authority: ConversationModeCapabilityAuthority;
+	overrideFields: ConversationModeCapabilityOverrideField[] | null;
+	profile: ConversationModeProfilePublic | null;
+	model: TModel;
+	selections: ConversationModeProfileSelections;
+	featureState: ConversationModeRequestFeatureState;
+	directToolServersPermitted: boolean;
+	directTerminalIds: string[];
+};
+
+export const captureConversationModeRequestContext = <TModel extends ConversationModeProfileModel>(
+	input: ConversationModeRequestContext<TModel>
+): ConversationModeRequestContext<TModel> => structuredClone(input);
+
 export type ConversationModeProfileResolutionInput = {
 	mode: ConversationMode;
 	profile: ConversationModeProfilePublic | null | undefined;
@@ -367,6 +618,79 @@ const uniqueStrings = (value: unknown): string[] =>
 			]
 		: [];
 
+export const filterConversationModeTerminalCandidateIds = (input: {
+	candidateIds: readonly string[];
+	configuredDirectTerminalIds: readonly string[];
+	directToolServersPermitted: boolean;
+}): string[] => {
+	const configuredDirectTerminalIds = new Set(uniqueStrings(input.configuredDirectTerminalIds));
+	return uniqueStrings(input.candidateIds).filter(
+		(id) =>
+			input.directToolServersPermitted ||
+			(!configuredDirectTerminalIds.has(id) && !isConversationModeDirectTerminalId(id))
+	);
+};
+
+export const isConversationModeDirectTerminalId = (id: unknown): id is string => {
+	if (typeof id !== 'string' || id.length === 0) return false;
+	try {
+		const protocol = new URL(id).protocol;
+		return protocol === 'http:' || protocol === 'https:';
+	} catch {
+		return false;
+	}
+};
+
+const positiveStringArray = (value: unknown): string[] | null =>
+	Array.isArray(value) &&
+	value.length > 0 &&
+	value.every((item) => typeof item === 'string' && item.length > 0)
+		? uniqueStrings(value)
+		: null;
+
+export const migrateConversationModeLegacyDraftCapabilities = (
+	draft: ConversationModeDraft | null,
+	initializedSelections: ConversationModeProfileSelections
+): ConversationModeDraftCapabilitySnapshot | null => {
+	if (!draft) return null;
+	const toolIds = positiveStringArray(draft.selectedToolIds);
+	const skillIds = positiveStringArray(draft.selectedSkillIds);
+	const filterIds = positiveStringArray(draft.selectedFilterIds);
+	const terminalId =
+		typeof draft.selectedTerminalId === 'string' && draft.selectedTerminalId.length > 0
+			? draft.selectedTerminalId
+			: null;
+	const positiveFeatureIds = [
+		...(draft.webSearchEnabled === true ? ['web_search'] : []),
+		...(draft.codeInterpreterEnabled === true ? ['code_interpreter'] : []),
+		...(draft.imageGenerationEnabled === true ? ['image_generation'] : [])
+	];
+	if (!toolIds && !skillIds && !filterIds && !terminalId && positiveFeatureIds.length === 0) {
+		return null;
+	}
+
+	const initialized = copySelections(initializedSelections);
+	return {
+		authority: 'explicit',
+		overrideFields: [
+			...(terminalId ? (['terminal_id'] as const) : []),
+			...(toolIds ? (['tool_ids'] as const) : []),
+			...(skillIds ? (['skill_ids'] as const) : []),
+			...(filterIds ? (['filter_ids'] as const) : []),
+			...(draft.webSearchEnabled === true ? (['web_search'] as const) : []),
+			...(draft.codeInterpreterEnabled === true ? (['code_interpreter'] as const) : []),
+			...(draft.imageGenerationEnabled === true ? (['image_generation'] as const) : [])
+		],
+		selections: {
+			terminalId: terminalId ?? initialized.terminalId,
+			toolIds: toolIds ?? initialized.toolIds,
+			skillIds: skillIds ?? initialized.skillIds,
+			filterIds: filterIds ?? initialized.filterIds,
+			featureIds: [...new Set([...initialized.featureIds, ...positiveFeatureIds])]
+		}
+	};
+};
+
 const metadata = (model: ConversationModeProfileModel | null | undefined): ModelMetadata =>
 	(model?.info?.meta as ModelMetadata | undefined) ?? {};
 
@@ -381,6 +705,39 @@ const modelDefaults = (
 		filterIds: uniqueStrings(meta.defaultFilterIds),
 		featureIds: uniqueStrings(meta.defaultFeatureIds)
 	};
+};
+
+export const getConversationModeRequestFeatures = (
+	context: ConversationModeRequestContext,
+	selections: ConversationModeProfileSelections
+): Record<string, boolean> => {
+	const meta = metadata(context.model);
+	const availableFeatures = new Set(context.featureState.availableFeatureIds);
+	const featureEnabled = (featureId: string) => selections.featureIds.includes(featureId);
+	const canUseImageGeneration =
+		context.featureState.imageGenerationGloballyEnabled &&
+		context.featureState.imageGenerationAllowed &&
+		meta.capabilities?.image_generation === true;
+	const imageGeneration = canUseImageGeneration
+		? typeof context.featureState.imageGenerationUserOverride === 'boolean'
+			? context.featureState.imageGenerationUserOverride
+			: featureEnabled('image_generation') ||
+				uniqueStrings(meta.defaultFeatureIds).includes('image_generation')
+		: false;
+	const features: Record<string, boolean> = {
+		voice: context.featureState.voice,
+		image_generation: imageGeneration,
+		code_interpreter:
+			availableFeatures.has('code_interpreter') && featureEnabled('code_interpreter'),
+		web_search:
+			availableFeatures.has('web_search') &&
+			(featureEnabled('web_search') ||
+				(!context.revisionHint &&
+					(meta.capabilities?.web_search ?? true) &&
+					context.featureState.webSearchAlways))
+	};
+	if (context.featureState.memory) features.memory = true;
+	return features;
 };
 
 const profileValue = <T>(
