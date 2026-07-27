@@ -140,7 +140,7 @@ class ConversationModeProfileTemporaryBinding(Base):
         UniqueConstraint(
             'user_id',
             'temporary_conversation_id',
-            name='uq_conversation_mode_profile_temporary_binding_user_conversation',
+            name='uq_conv_mode_profile_temp_user_conversation',
         ),
         Index(
             'ix_conversation_mode_profile_temporary_binding_expires_at',

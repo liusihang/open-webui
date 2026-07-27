@@ -11,6 +11,7 @@ from open_webui.agent.conversation_mode_profiles import ConversationModeProfile
 from open_webui.migrations.versions import (
     c0d3b4a5e6f7_add_conversation_mode_profiles as profile_migration,
 )
+from sqlalchemy.dialects import postgresql
 
 
 def _run_migration(engine: sa.Engine, direction: str) -> None:
@@ -130,7 +131,26 @@ def test_profile_migration_adds_hash_valid_baselines_heads_and_bindings() -> Non
         constraint['name']: constraint['column_names']
         for constraint in inspector.get_unique_constraints('conversation_mode_profile_temporary_binding')
     }
-    assert temporary_uniques['uq_conversation_mode_profile_temporary_binding_user_conversation'] == [
+    postgres_identifier_limit = postgresql.dialect().max_identifier_length
+    profile_schema_identifiers = [
+        item['name']
+        for table_name in (
+            'chat',
+            'conversation_mode_profile_revision',
+            'conversation_mode_profile_head',
+            'conversation_mode_profile_temporary_binding',
+        )
+        for item in (
+            inspector.get_indexes(table_name)
+            + inspector.get_unique_constraints(table_name)
+            + inspector.get_foreign_keys(table_name)
+        )
+        if item.get('name')
+    ]
+    assert all(len(identifier) <= postgres_identifier_limit for identifier in profile_schema_identifiers), (
+        profile_schema_identifiers
+    )
+    assert temporary_uniques['uq_conv_mode_profile_temp_user_conversation'] == [
         'user_id',
         'temporary_conversation_id',
     ]
