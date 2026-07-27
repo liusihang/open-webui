@@ -57,11 +57,56 @@ export const parseConversationModeDraft = (value: string | null): ConversationMo
 	}
 };
 
+export type ConversationModeDraftCapabilitySnapshot = {
+	authority: Exclude<ConversationModeCapabilityAuthority, 'inherit_bound'>;
+	selections: ConversationModeProfileSelections;
+};
+
+const isStringArray = (value: unknown): value is string[] =>
+	Array.isArray(value) && value.every((item) => typeof item === 'string');
+
+export const getConversationModeDraftCapabilitySnapshot = (
+	draft: ConversationModeDraft | null,
+	options: { existingChat: boolean }
+): ConversationModeDraftCapabilitySnapshot | null => {
+	if (!draft) return null;
+	const authority = draft.modeProfileCapabilityAuthority;
+	if (
+		(authority !== 'initialized' && authority !== 'explicit') ||
+		(options.existingChat && authority !== 'explicit') ||
+		!isStringArray(draft.selectedToolIds) ||
+		!isStringArray(draft.selectedSkillIds) ||
+		!isStringArray(draft.selectedFilterIds) ||
+		typeof draft.webSearchEnabled !== 'boolean' ||
+		typeof draft.codeInterpreterEnabled !== 'boolean' ||
+		typeof draft.imageGenerationEnabled !== 'boolean' ||
+		!(typeof draft.selectedTerminalId === 'string' || draft.selectedTerminalId === null)
+	) {
+		return null;
+	}
+
+	return {
+		authority,
+		selections: {
+			terminalId: draft.selectedTerminalId,
+			toolIds: [...draft.selectedToolIds],
+			skillIds: [...draft.selectedSkillIds],
+			filterIds: [...draft.selectedFilterIds],
+			featureIds: [
+				...(draft.webSearchEnabled ? ['web_search'] : []),
+				...(draft.codeInterpreterEnabled ? ['code_interpreter'] : []),
+				...(draft.imageGenerationEnabled ? ['image_generation'] : [])
+			]
+		}
+	};
+};
+
 export const getNewConversationModeDraftCapabilityAuthority = (
 	draft: ConversationModeDraft | null
 ): Exclude<ConversationModeCapabilityAuthority, 'inherit_bound'> | null => {
-	const authority = draft?.modeProfileCapabilityAuthority;
-	return authority === 'initialized' || authority === 'explicit' ? authority : null;
+	return (
+		getConversationModeDraftCapabilitySnapshot(draft, { existingChat: false })?.authority ?? null
+	);
 };
 
 const capabilityFingerprint = (value: ConversationModeCapabilityChange) =>

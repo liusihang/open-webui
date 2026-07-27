@@ -4,6 +4,7 @@ import {
 	createConversationModeCapabilityAuthorityController,
 	createConversationModeProfileDraftController,
 	getConversationModeAvailableToolIds,
+	getConversationModeDraftCapabilitySnapshot,
 	getNewConversationModeDraftCapabilityAuthority,
 	isDirectToolServersPermitted,
 	parseConversationModeDraft,
@@ -22,6 +23,20 @@ const emptyCapabilities = {
 	codeInterpreterEnabled: false,
 	imageGenerationEnabled: false
 };
+
+const completeDraft = (overrides: Record<string, unknown> = {}) => ({
+	prompt: 'draft prompt',
+	files: [{ id: 'draft-file' }],
+	modeProfileCapabilityAuthority: 'explicit',
+	selectedToolIds: ['profile-tool'],
+	selectedSkillIds: ['profile-skill'],
+	selectedFilterIds: ['profile-filter'],
+	webSearchEnabled: true,
+	codeInterpreterEnabled: false,
+	imageGenerationEnabled: false,
+	selectedTerminalId: 'profile-terminal',
+	...overrides
+});
 
 const model = (overrides: Record<string, unknown> = {}) => ({
 	id: 'system-default-model',
@@ -336,19 +351,102 @@ describe('conversation mode capability authority', () => {
 			})
 		).toBeNull();
 		expect(
-			getNewConversationModeDraftCapabilityAuthority({
-				prompt: '',
-				files: [],
-				modeProfileCapabilityAuthority: 'initialized'
-			})
+			getNewConversationModeDraftCapabilityAuthority(
+				completeDraft({ modeProfileCapabilityAuthority: 'initialized' })
+			)
 		).toBe('initialized');
+		expect(getNewConversationModeDraftCapabilityAuthority(completeDraft())).toBe('explicit');
+	});
+
+	it('requires a complete typed capability snapshot before honoring its marker', () => {
+		const rootSnapshot = getConversationModeDraftCapabilitySnapshot(
+			completeDraft({ modeProfileCapabilityAuthority: 'initialized' }),
+			{ existingChat: false }
+		);
+		expect(rootSnapshot).toEqual({
+			authority: 'initialized',
+			selections: {
+				terminalId: 'profile-terminal',
+				toolIds: ['profile-tool'],
+				skillIds: ['profile-skill'],
+				filterIds: ['profile-filter'],
+				featureIds: ['web_search']
+			}
+		});
 		expect(
-			getNewConversationModeDraftCapabilityAuthority({
-				prompt: '',
-				files: [],
-				modeProfileCapabilityAuthority: 'explicit'
+			getConversationModeDraftCapabilitySnapshot(completeDraft(), { existingChat: true })
+		).toMatchObject({ authority: 'explicit' });
+		expect(
+			getConversationModeDraftCapabilitySnapshot(
+				completeDraft({ modeProfileCapabilityAuthority: 'initialized' }),
+				{ existingChat: true }
+			)
+		).toBeNull();
+		expect(
+			getConversationModeDraftCapabilitySnapshot(
+				completeDraft({ modeProfileCapabilityAuthority: 'inherit_bound' }),
+				{ existingChat: false }
+			)
+		).toBeNull();
+
+		for (const field of [
+			'selectedToolIds',
+			'selectedSkillIds',
+			'selectedFilterIds',
+			'webSearchEnabled',
+			'codeInterpreterEnabled',
+			'imageGenerationEnabled',
+			'selectedTerminalId'
+		]) {
+			const incomplete = completeDraft();
+			delete incomplete[field];
+			expect(
+				getConversationModeDraftCapabilitySnapshot(incomplete, { existingChat: false })
+			).toBeNull();
+		}
+		expect(
+			getConversationModeDraftCapabilitySnapshot(
+				completeDraft({ selectedToolIds: ['tool-a', 3] }),
+				{ existingChat: false }
+			)
+		).toBeNull();
+		expect(
+			getConversationModeDraftCapabilitySnapshot(completeDraft({ selectedTerminalId: undefined }), {
+				existingChat: false
 			})
-		).toBe('explicit');
+		).toBeNull();
+	});
+
+	it('revalidates a hydrated authoritative snapshot through model-change rules', () => {
+		const snapshot = getConversationModeDraftCapabilitySnapshot(
+			completeDraft({
+				selectedToolIds: ['profile-tool', 'missing-tool'],
+				selectedTerminalId: 'missing-terminal',
+				codeInterpreterEnabled: true
+			}),
+			{ existingChat: true }
+		);
+		expect(snapshot).not.toBeNull();
+
+		expect(
+			resolve({
+				phase: 'model_change',
+				currentSelections: snapshot!.selections,
+				available
+			})
+		).toMatchObject({
+			effective: {
+				terminalId: null,
+				toolIds: ['profile-tool'],
+				skillIds: ['profile-skill'],
+				filterIds: ['profile-filter'],
+				featureIds: ['web_search', 'code_interpreter']
+			},
+			warnings: expect.arrayContaining([
+				{ field: 'terminal_id', resourceIds: ['missing-terminal'] },
+				{ field: 'tool_ids', resourceIds: ['missing-tool'] }
+			])
+		});
 	});
 
 	it('initializes a new draft as authoritative and serializes explicit empty selections', () => {

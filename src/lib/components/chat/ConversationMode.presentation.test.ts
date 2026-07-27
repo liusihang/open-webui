@@ -110,6 +110,8 @@ describe('conversation mode presentation contract', () => {
 		expect(chat).toContain("modeProfileCapabilityAuthority === 'inherit_bound'");
 		expect(navigateHandler).toBeDefined();
 		expect(navigateHandler).not.toContain('await setDefaults()');
+		expect(navigateHandler).not.toContain('input.modeProfileRevisionId');
+		expect(navigateHandler).not.toContain('hydrateRevisionHint');
 		expect(chat).not.toContain('modeProfileBoundWithoutDraft');
 		expect(chat).not.toContain('modeProfileCapabilitiesOverridden');
 	});
@@ -122,10 +124,13 @@ describe('conversation mode presentation contract', () => {
 			chat.match(
 				/modeProfileCapabilityAuthority:\s*modeProfileCapabilityAuthorityController\.snapshot\(\)/g
 			) ?? [];
+		const persistedTerminals =
+			chat.match(/selectedTerminalId:\s*\$selectedTerminalId \?\? null/g) ?? [];
 
 		expect(chat).toContain('createConversationModeCapabilityAuthorityController');
 		expect(observations).toHaveLength(2);
 		expect(persistedMarkers).toHaveLength(2);
+		expect(persistedTerminals).toHaveLength(3);
 		expect(chat).toContain('modeProfileCapabilityAuthorityController.markExplicit()');
 	});
 
@@ -137,26 +142,52 @@ describe('conversation mode presentation contract', () => {
 		const rootDraftRestore = chat.match(
 			/const init = async \(\) => \{([\s\S]*?)\n\t\t\};\n\t\tinit\(\);/
 		)?.[1];
+		const beginModeProfileDraft = chat.match(
+			/const beginModeProfileDraft = \(\) => \{([\s\S]*?)\n\t\};/
+		)?.[1];
 
-		expect(chat).toContain('sanitizeConversationModeSelectedToolIds');
 		expect(chat).toContain('parseConversationModeDraft');
-		expect(chat).toContain('getNewConversationModeDraftCapabilityAuthority');
+		expect(chat).toContain('getConversationModeDraftCapabilitySnapshot');
 		expect(chat).not.toContain('selectedToolIds = input.selectedToolIds;');
 		expect(chat).not.toContain("Boolean(sessionStorage.getItem('chat-input'))");
 		expect(chat).toContain('const restoredRootDraft = beginModeProfileDraft();');
 		expect(initNewChat).toBeDefined();
 		expect(initNewChat).toMatch(
-			/const restoredRootCapabilityAuthority\s*=\s*getNewConversationModeDraftCapabilityAuthority/
+			/const restoredRootCapabilitySnapshot\s*=\s*getConversationModeDraftCapabilitySnapshot/
 		);
-		expect(initNewChat).toContain('initialize: restoredRootCapabilityAuthority === null');
+		expect(initNewChat).toContain('initialize: restoredRootCapabilitySnapshot === null');
+		expect(initNewChat).toContain(
+			'await restoreModeProfileCapabilitySnapshot(restoredRootCapabilitySnapshot)'
+		);
 		expect(rootDraftRestore).toBeDefined();
-		expect(rootDraftRestore).toContain('if (chatIdProp || restoredRootCapabilityAuthority)');
-		expect(rootDraftRestore).toContain('modeProfileDraftController.hydrateRevisionHint');
-		expect(
-			rootDraftRestore?.indexOf('modeProfileDraftController.hydrateRevisionHint')
-		).toBeGreaterThan(
-			rootDraftRestore?.indexOf('modeProfileRevisionId =') ?? Number.MAX_SAFE_INTEGER
+		expect(rootDraftRestore).not.toContain('selectedToolIds =');
+		expect(rootDraftRestore).not.toContain('modeProfileRevisionId =');
+		expect(beginModeProfileDraft).toBeDefined();
+		expect(beginModeProfileDraft).toContain('modeProfileDraftController.hydrateRevisionHint');
+	});
+
+	it('revalidates complete authoritative snapshots before existing chats can emit', () => {
+		const chat = readSource('./Chat.svelte');
+		const restoreSnapshot = chat.match(
+			/const restoreModeProfileCapabilitySnapshot = async \([\s\S]*?\) => \{([\s\S]*?)\n\t\};/
+		)?.[1];
+		const navigateHandler = chat.match(
+			/const navigateHandler = async \(\) => \{([\s\S]*?)\n\t\};\n\n\tconst onSelect/
+		)?.[1];
+
+		expect(restoreSnapshot).toBeDefined();
+		expect(restoreSnapshot).toContain('selectedTerminalId.set(snapshot.selections.terminalId)');
+		expect(restoreSnapshot).toContain('await ensureModeProfileCatalogsLoaded()');
+		expect(restoreSnapshot).toContain('applyModeProfileModelChange()');
+		expect(navigateHandler).toContain('getConversationModeDraftCapabilitySnapshot');
+		expect(navigateHandler).toContain(
+			'await restoreModeProfileCapabilitySnapshot(restoredCapabilitySnapshot)'
 		);
+		expect(
+			navigateHandler?.indexOf(
+				'await restoreModeProfileCapabilitySnapshot(restoredCapabilitySnapshot)'
+			)
+		).toBeLessThan(navigateHandler?.indexOf('loading = false') ?? -1);
 	});
 
 	it('adds permitted live direct tool server IDs to model-change availability', () => {

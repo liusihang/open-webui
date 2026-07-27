@@ -104,7 +104,6 @@
 	import Banner from '../common/Banner.svelte';
 	import MessageInput from '$lib/components/chat/MessageInput.svelte';
 	import {
-		resolveImageGenerationDraftState,
 		resolveImageGenerationFeature,
 		shouldEnableImageGenerationByDefault
 	} from '$lib/components/chat/defaultFeatures';
@@ -121,14 +120,14 @@
 		createConversationModeCapabilityAuthorityController,
 		createConversationModeProfileDraftController,
 		getConversationModeAvailableToolIds,
-		getNewConversationModeDraftCapabilityAuthority,
+		getConversationModeDraftCapabilitySnapshot,
 		isDirectToolServersPermitted,
 		parseConversationModeDraft,
 		resolveConversationModeProfile,
-		sanitizeConversationModeSelectedToolIds,
 		serializeConversationModeCapabilityRequest,
 		serializeConversationModeToolServers,
 		type ConversationModeCapabilityAuthority,
+		type ConversationModeDraftCapabilitySnapshot,
 		type ConversationModeProfileAvailability,
 		type ConversationModeProfileSelections
 	} from '$lib/components/chat/conversationModeProfiles';
@@ -218,6 +217,7 @@
 	let modeProfileControlsReady = false;
 	let modeProfileBoundTerminalId: string | null = null;
 	let latestModeProfileDraftInput: any = null;
+	let modeProfileCapabilityRestorePromise: Promise<void> | null = null;
 	let webSearchActive = false;
 	let showWebSearchConfirm = false;
 	let pendingWebSearchPrompt: string | null = null;
@@ -351,6 +351,9 @@
 			`chat-input${chatIdProp ? `-${chatIdProp}` : ''}`
 		);
 		const restoredDraft = parseConversationModeDraft(storageChatInput);
+		const restoredCapabilitySnapshot = getConversationModeDraftCapabilitySnapshot(restoredDraft, {
+			existingChat: true
+		});
 		if (storageChatInput && !restoredDraft) {
 			sessionStorage.removeItem(`chat-input${chatIdProp ? `-${chatIdProp}` : ''}`);
 		}
@@ -358,12 +361,38 @@
 			modeProfileCapabilityAuthorityController =
 				createConversationModeCapabilityAuthorityController({
 					existingChat: true,
-					persistedAuthority: restoredDraft?.modeProfileCapabilityAuthority
+					persistedAuthority: restoredCapabilitySnapshot?.authority
 				});
 			modeProfileCapabilityAuthority = modeProfileCapabilityAuthorityController.snapshot();
 		}
 
 		if (chatIdProp && (await loadChat())) {
+			if (restoredDraft && !$temporaryChatEnabled) {
+				messageInput?.setText(restoredDraft.prompt);
+				files = restoredDraft.files;
+				modeProfileDraftId = `persistent:${chatIdProp}`;
+				reasoningEffort = normalizeReasoningEffort(
+					restoredDraft.reasoningEffort ?? restoredDraft.reasoningDepth
+				);
+				if (restoredCapabilitySnapshot) {
+					await restoreModeProfileCapabilitySnapshot(restoredCapabilitySnapshot);
+				}
+			}
+			if (!restoredCapabilitySnapshot) {
+				modeProfileBoundTerminalId = $selectedTerminalId;
+				queueMicrotask(() => {
+					modeProfileCapabilityAuthority = modeProfileCapabilityAuthorityController.observe({
+						selectedToolIds,
+						selectedSkillIds,
+						selectedFilterIds,
+						webSearchEnabled,
+						codeInterpreterEnabled,
+						imageGenerationEnabled
+					});
+					modeProfileControlsReady = true;
+				});
+			}
+
 			await tick();
 			loading = false;
 			window.setTimeout(() => scrollToBottom(), 0);
@@ -381,50 +410,6 @@
 			if (isIdle) {
 				await processNextInQueue(chatIdProp);
 			}
-
-			if (restoredDraft) {
-				try {
-					const input = restoredDraft;
-
-					if (!$temporaryChatEnabled) {
-						messageInput?.setText(input.prompt);
-						files = input.files;
-						selectedToolIds = sanitizeConversationModeSelectedToolIds(
-							input.selectedToolIds,
-							isDirectToolServersPermitted($user)
-						);
-						selectedSkillIds = input.selectedSkillIds ?? [];
-						selectedFilterIds = input.selectedFilterIds ?? [];
-						webSearchEnabled = input.webSearchEnabled;
-						restoreImageGenerationFromDraft(input);
-						codeInterpreterEnabled = input.codeInterpreterEnabled;
-						modeProfileRevisionId =
-							typeof input.modeProfileRevisionId === 'string'
-								? input.modeProfileRevisionId
-								: modeProfileRevisionId;
-						modeProfileDraftController.hydrateRevisionHint(modeProfileRevisionId);
-						modeProfileDraftId = `persistent:${chatIdProp}`;
-						reasoningEffort = normalizeReasoningEffort(
-							input.reasoningEffort ?? input.reasoningDepth
-						);
-						if (!chatIdProp) {
-							conversationMode = normalizeConversationMode(input.conversationMode);
-						}
-					}
-				} catch (e) {}
-			}
-			modeProfileBoundTerminalId = $selectedTerminalId;
-			queueMicrotask(() => {
-				modeProfileCapabilityAuthority = modeProfileCapabilityAuthorityController.observe({
-					selectedToolIds,
-					selectedSkillIds,
-					selectedFilterIds,
-					webSearchEnabled,
-					codeInterpreterEnabled,
-					imageGenerationEnabled
-				});
-				modeProfileControlsReady = true;
-			});
 
 			const chatInput = document.getElementById('chat-input');
 			chatInput?.focus();
@@ -607,6 +592,12 @@
 		]
 	});
 
+	const ensureModeProfileCatalogsLoaded = async () => {
+		if (!$tools) tools.set(await getTools(localStorage.token));
+		if (!$functions) functions.set(await getFunctions(localStorage.token));
+		if (!$skills) skills.set(await getSkills(localStorage.token));
+	};
+
 	const applyModeProfileResolution = (resolution: any, phase: 'initialize' | 'model_change') => {
 		selectedToolIds = resolution.effective.toolIds;
 		selectedSkillIds = resolution.effective.skillIds;
@@ -674,36 +665,64 @@
 		applyModeProfileResolution(snapshot, 'model_change');
 	};
 
+	const restoreModeProfileCapabilitySnapshot = async (
+		snapshot: ConversationModeDraftCapabilitySnapshot
+	) => {
+		const restorePromise = (async () => {
+			modeProfileControlsReady = false;
+			selectedToolIds = [...snapshot.selections.toolIds];
+			selectedSkillIds = [...snapshot.selections.skillIds];
+			selectedFilterIds = [...snapshot.selections.filterIds];
+			webSearchEnabled = snapshot.selections.featureIds.includes('web_search');
+			codeInterpreterEnabled = snapshot.selections.featureIds.includes('code_interpreter');
+			imageGenerationEnabled = snapshot.selections.featureIds.includes('image_generation');
+			imageGenerationUserOverride = imageGenerationEnabled;
+			clearSelectedTerminal();
+			selectedTerminalId.set(snapshot.selections.terminalId);
+
+			await ensureModeProfileCatalogsLoaded();
+			applyModeProfileModelChange();
+			modeProfileBoundTerminalId = $selectedTerminalId;
+			modeProfileCapabilityAuthority = modeProfileCapabilityAuthorityController.observe({
+				selectedToolIds,
+				selectedSkillIds,
+				selectedFilterIds,
+				webSearchEnabled,
+				codeInterpreterEnabled,
+				imageGenerationEnabled
+			});
+			modeProfileControlsReady = true;
+		})();
+		modeProfileCapabilityRestorePromise = restorePromise;
+		try {
+			await restorePromise;
+		} finally {
+			if (modeProfileCapabilityRestorePromise === restorePromise) {
+				modeProfileCapabilityRestorePromise = null;
+			}
+		}
+	};
+
 	const hasImageGenerationAccess = () =>
 		$user?.role === 'admin' || ($user?.permissions?.features?.image_generation ?? false);
 
 	const getPrimaryImageGenerationModel = () =>
 		atSelectedModel ?? $models.find((m) => m.id === selectedModels[0]);
 
-	const restoreImageGenerationFromDraft = (input: any) => {
-		const restored = resolveImageGenerationDraftState(
-			input,
-			getPrimaryImageGenerationModel(),
-			$config?.features?.enable_image_generation ?? false,
-			hasImageGenerationAccess()
-		);
-		imageGenerationEnabled = restored.enabled;
-		imageGenerationUserOverride = restored.userOverride;
-	};
-
 	const beginModeProfileDraft = () => {
 		const storedRootDraft = !chatIdProp ? sessionStorage.getItem('chat-input') : null;
 		const restoredRootDraft = parseConversationModeDraft(storedRootDraft);
-		const restoredRootCapabilityAuthority =
-			getNewConversationModeDraftCapabilityAuthority(restoredRootDraft);
+		const restoredRootCapabilitySnapshot = getConversationModeDraftCapabilitySnapshot(
+			restoredRootDraft,
+			{ existingChat: false }
+		);
 		if (storedRootDraft && !restoredRootDraft) {
 			sessionStorage.removeItem('chat-input');
 		}
 		modeProfileDraftId = `draft:${uuidv4()}`;
 		modeProfileInitializedDraftId = '';
 		modeProfileRevisionId =
-			restoredRootCapabilityAuthority &&
-			typeof restoredRootDraft?.modeProfileRevisionId === 'string'
+			restoredRootCapabilitySnapshot && typeof restoredRootDraft?.modeProfileRevisionId === 'string'
 				? restoredRootDraft.modeProfileRevisionId
 				: null;
 		modeProfileWarningSignature = '';
@@ -711,7 +730,7 @@
 		modeProfileDraftController = createConversationModeProfileDraftController();
 		modeProfileCapabilityAuthorityController = createConversationModeCapabilityAuthorityController({
 			existingChat: false,
-			persistedAuthority: restoredRootCapabilityAuthority
+			persistedAuthority: restoredRootCapabilitySnapshot?.authority
 		});
 		modeProfileCapabilityAuthority = modeProfileCapabilityAuthorityController.snapshot();
 		modeProfileDraftController.hydrateRevisionHint(modeProfileRevisionId);
@@ -731,15 +750,7 @@
 		settingDefaults = true;
 
 		try {
-			if (!$tools) {
-				tools.set(await getTools(localStorage.token));
-			}
-			if (!$functions) {
-				functions.set(await getFunctions(localStorage.token));
-			}
-			if (!$skills) {
-				skills.set(await getSkills(localStorage.token));
-			}
+			await ensureModeProfileCatalogsLoaded();
 			if (selectedModels.length !== 1 && !atSelectedModel) {
 				return;
 			}
@@ -1330,9 +1341,6 @@
 			`chat-input${chatIdProp ? `-${chatIdProp}` : ''}`
 		);
 		const restoredDraft = parseConversationModeDraft(storageChatInput);
-		const restoredRootCapabilityAuthority = !chatIdProp
-			? getNewConversationModeDraftCapabilityAuthority(restoredDraft)
-			: null;
 		if (storageChatInput && !restoredDraft) {
 			sessionStorage.removeItem(`chat-input${chatIdProp ? `-${chatIdProp}` : ''}`);
 		}
@@ -1343,59 +1351,23 @@
 				await tick();
 			}
 
-			if (restoredDraft) {
+			if (restoredDraft && !chatIdProp) {
 				prompt = '';
 				messageInput?.setText('');
 
 				files = [];
-				if (chatIdProp || restoredRootCapabilityAuthority) {
-					selectedToolIds = [];
-					selectedSkillIds = [];
-					selectedFilterIds = [];
-					webSearchEnabled = false;
-					imageGenerationEnabled = false;
-					imageGenerationUserOverride = null;
-					codeInterpreterEnabled = false;
-					clearSelectedTerminal();
-				}
 				reasoningEffort = 'medium';
 
-				try {
-					const input = restoredDraft;
-
-					if (!$temporaryChatEnabled) {
-						messageInput?.setText(input.prompt);
-						files = input.files;
-						if (chatIdProp || restoredRootCapabilityAuthority) {
-							selectedToolIds = sanitizeConversationModeSelectedToolIds(
-								input.selectedToolIds,
-								isDirectToolServersPermitted($user)
-							);
-							selectedSkillIds = input.selectedSkillIds ?? [];
-							selectedFilterIds = input.selectedFilterIds ?? [];
-							webSearchEnabled = input.webSearchEnabled;
-							restoreImageGenerationFromDraft(input);
-							codeInterpreterEnabled = input.codeInterpreterEnabled;
-							modeProfileRevisionId =
-								typeof input.modeProfileRevisionId === 'string'
-									? input.modeProfileRevisionId
-									: modeProfileRevisionId;
-							modeProfileDraftController.hydrateRevisionHint(modeProfileRevisionId);
-							modeProfileCapabilityAuthorityController =
-								createConversationModeCapabilityAuthorityController({
-									existingChat: Boolean(chatIdProp),
-									persistedAuthority: input.modeProfileCapabilityAuthority
-								});
-							modeProfileCapabilityAuthority = modeProfileCapabilityAuthorityController.snapshot();
-						}
-						reasoningEffort = normalizeReasoningEffort(
-							input.reasoningEffort ?? input.reasoningDepth
-						);
-						if (!chatIdProp && typeof input.conversationMode === 'string') {
-							conversationMode = normalizeConversationMode(input.conversationMode);
-						}
+				if (!$temporaryChatEnabled) {
+					messageInput?.setText(restoredDraft.prompt);
+					files = restoredDraft.files;
+					reasoningEffort = normalizeReasoningEffort(
+						restoredDraft.reasoningEffort ?? restoredDraft.reasoningDepth
+					);
+					if (typeof restoredDraft.conversationMode === 'string') {
+						conversationMode = normalizeConversationMode(restoredDraft.conversationMode);
 					}
-				} catch (e) {}
+				}
 			}
 
 			const chatInput = document.getElementById('chat-input');
@@ -1724,8 +1696,10 @@
 			preselectedMode ?? normalizeConversationMode($page.url.searchParams.get('mode'));
 		conversationMode = requestedMode;
 		const restoredRootDraft = beginModeProfileDraft();
-		const restoredRootCapabilityAuthority =
-			getNewConversationModeDraftCapabilityAuthority(restoredRootDraft);
+		const restoredRootCapabilitySnapshot = getConversationModeDraftCapabilitySnapshot(
+			restoredRootDraft,
+			{ existingChat: false }
+		);
 		pendingConversationMode = null;
 		chat = null;
 
@@ -1848,7 +1822,10 @@
 
 		autoScroll = true;
 
-		await resetInput({ initialize: restoredRootCapabilityAuthority === null });
+		await resetInput({ initialize: restoredRootCapabilitySnapshot === null });
+		if (restoredRootCapabilitySnapshot) {
+			await restoreModeProfileCapabilitySnapshot(restoredRootCapabilitySnapshot);
+		}
 		await chatId.set('');
 		await chatTitle.set('');
 
@@ -2792,6 +2769,10 @@
 			continueResponse?: boolean;
 		} = {}
 	) => {
+		if (modeProfileCapabilityRestorePromise) {
+			await modeProfileCapabilityRestorePromise;
+		}
+
 		const responseMessage = _history.messages[responseMessageId];
 		const userMessage = _history.messages[responseMessage.parentId];
 
@@ -3397,6 +3378,7 @@
 				conversationMode,
 				modeProfileRevisionId,
 				modeProfileCapabilityAuthority,
+				selectedTerminalId: $selectedTerminalId ?? null,
 				imageGenerationUserOverride
 			},
 			$chatId || null
@@ -3807,6 +3789,7 @@
 														modeProfileRevisionId,
 														modeProfileCapabilityAuthority:
 															modeProfileCapabilityAuthorityController.snapshot(),
+														selectedTerminalId: $selectedTerminalId ?? null,
 														imageGenerationUserOverride
 													},
 													$chatId
@@ -3893,6 +3876,7 @@
 													modeProfileRevisionId,
 													modeProfileCapabilityAuthority:
 														modeProfileCapabilityAuthorityController.snapshot(),
+													selectedTerminalId: $selectedTerminalId ?? null,
 													imageGenerationUserOverride
 												});
 											}
