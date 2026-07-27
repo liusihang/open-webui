@@ -1,10 +1,12 @@
 import { describe, expect, it } from 'vitest';
 
 import {
-	createConversationModeCapabilityOverrideTracker,
+	createConversationModeCapabilityAuthorityController,
 	createConversationModeProfileDraftController,
 	isDirectToolServersPermitted,
 	resolveConversationModeProfile,
+	sanitizeConversationModeSelectedToolIds,
+	serializeConversationModeCapabilityRequest,
 	type ConversationModeProfileResolutionInput
 } from './conversationModeProfiles';
 
@@ -294,19 +296,110 @@ describe('conversation mode profile draft controller', () => {
 	});
 });
 
-describe('conversation mode capability override tracker', () => {
-	it('ignores prompt, file, and reasoning-only changes', () => {
-		const tracker = createConversationModeCapabilityOverrideTracker();
-		tracker.observe({ ...emptyCapabilities, prompt: '', files: [], reasoningEffort: 'medium' });
+describe('conversation mode capability authority', () => {
+	it('initializes a new draft as authoritative and serializes explicit empty selections', () => {
+		const controller = createConversationModeCapabilityAuthorityController({ existingChat: false });
+
+		expect(controller.snapshot()).toBe('initialized');
+		expect(
+			serializeConversationModeCapabilityRequest({
+				authority: controller.snapshot(),
+				selections: {
+					terminalId: null,
+					toolIds: [],
+					skillIds: [],
+					filterIds: []
+				},
+				features: {
+					voice: false,
+					memory: true,
+					web_search: false,
+					code_interpreter: false,
+					image_generation: false
+				},
+				directToolServersPermitted: true,
+				directTerminalIds: [],
+				functionCallingEnabled: true,
+				terminalEnabled: true
+			})
+		).toEqual({
+			request: {
+				tool_ids: [],
+				skill_ids: [],
+				filter_ids: [],
+				terminal_id: null,
+				features: {
+					voice: false,
+					memory: true,
+					web_search: false,
+					code_interpreter: false,
+					image_generation: false
+				}
+			},
+			toolServerIds: [],
+			emitToolServers: true
+		});
+	});
+
+	it('loads any existing unmarked chat as inherit-bound and omits only controlled request fields', () => {
+		const controller = createConversationModeCapabilityAuthorityController({
+			existingChat: true,
+			persistedAuthority: undefined
+		});
+
+		expect(controller.snapshot()).toBe('inherit_bound');
+		expect(
+			serializeConversationModeCapabilityRequest({
+				authority: controller.snapshot(),
+				selections: {
+					terminalId: 'terminal-a',
+					toolIds: ['tool-a'],
+					skillIds: ['skill-a'],
+					filterIds: ['filter-a']
+				},
+				features: {
+					voice: true,
+					memory: true,
+					web_search: false,
+					code_interpreter: false,
+					image_generation: false
+				},
+				directToolServersPermitted: true,
+				directTerminalIds: [],
+				functionCallingEnabled: true,
+				terminalEnabled: true
+			})
+		).toEqual({
+			request: { features: { voice: true, memory: true } },
+			toolServerIds: [],
+			emitToolServers: false
+		});
+	});
+
+	it.each(['initialized', 'inherit_bound', 'explicit'] as const)(
+		'restores a persisted %s authority marker',
+		(authority) => {
+			expect(
+				createConversationModeCapabilityAuthorityController({
+					existingChat: true,
+					persistedAuthority: authority
+				}).snapshot()
+			).toBe(authority);
+		}
+	);
+
+	it('ignores prompt, file, and reasoning-only changes while preserving inherit-bound authority', () => {
+		const controller = createConversationModeCapabilityAuthorityController({ existingChat: true });
+		controller.observe({ ...emptyCapabilities, prompt: '', files: [], reasoningEffort: 'medium' });
 
 		expect(
-			tracker.observe({
+			controller.observe({
 				...emptyCapabilities,
 				prompt: 'typed text',
 				files: [{ id: 'file-1' }],
 				reasoningEffort: 'high'
 			})
-		).toBe(false);
+		).toBe('inherit_bound');
 	});
 
 	it.each([
@@ -317,13 +410,87 @@ describe('conversation mode capability override tracker', () => {
 		['codeInterpreterEnabled', true],
 		['imageGenerationEnabled', true]
 	] as const)(
-		'opts in for a real %s change and remains explicit after clearing',
+		'latches explicit authority for a real %s change and remains explicit after clearing',
 		(field, value) => {
-			const tracker = createConversationModeCapabilityOverrideTracker();
-			tracker.observe(emptyCapabilities);
+			const controller = createConversationModeCapabilityAuthorityController({
+				existingChat: true
+			});
+			controller.observe(emptyCapabilities);
 
-			expect(tracker.observe({ ...emptyCapabilities, [field]: value })).toBe(true);
-			expect(tracker.observe(emptyCapabilities)).toBe(true);
+			expect(controller.observe({ ...emptyCapabilities, [field]: value })).toBe('explicit');
+			expect(controller.observe(emptyCapabilities)).toBe('explicit');
 		}
 	);
+
+	it('latches explicit authority for Terminal changes', () => {
+		const controller = createConversationModeCapabilityAuthorityController({ existingChat: true });
+
+		expect(controller.markExplicit()).toBe('explicit');
+		expect(controller.snapshot()).toBe('explicit');
+	});
+
+	it('gates restored direct tool selections and all direct request routing when permission is denied', () => {
+		expect(
+			sanitizeConversationModeSelectedToolIds(
+				['tool-a', 'direct_server:2', 'direct_server:stale'],
+				false
+			)
+		).toEqual(['tool-a']);
+
+		expect(
+			serializeConversationModeCapabilityRequest({
+				authority: 'explicit',
+				selections: {
+					terminalId: 'https://direct-terminal.example',
+					toolIds: ['tool-a', 'direct_server:2', 'direct_server:stale'],
+					skillIds: [],
+					filterIds: []
+				},
+				features: {},
+				directToolServersPermitted: false,
+				directTerminalIds: ['https://direct-terminal.example'],
+				functionCallingEnabled: true,
+				terminalEnabled: true
+			})
+		).toEqual({
+			request: {
+				tool_ids: ['tool-a'],
+				skill_ids: [],
+				filter_ids: [],
+				terminal_id: null,
+				features: {}
+			},
+			toolServerIds: [],
+			emitToolServers: true
+		});
+	});
+
+	it('keeps direct server IDs for permitted explicit requests and clears function capabilities when unsupported', () => {
+		expect(
+			serializeConversationModeCapabilityRequest({
+				authority: 'explicit',
+				selections: {
+					terminalId: 'system-terminal',
+					toolIds: ['tool-a', 'direct_server:2', 'direct_server:server-a'],
+					skillIds: ['skill-a'],
+					filterIds: ['filter-a']
+				},
+				features: { web_search: false },
+				directToolServersPermitted: true,
+				directTerminalIds: [],
+				functionCallingEnabled: false,
+				terminalEnabled: false
+			})
+		).toEqual({
+			request: {
+				tool_ids: [],
+				skill_ids: [],
+				filter_ids: [],
+				terminal_id: null,
+				features: { web_search: false }
+			},
+			toolServerIds: ['2', 'server-a'],
+			emitToolServers: true
+		});
+	});
 });

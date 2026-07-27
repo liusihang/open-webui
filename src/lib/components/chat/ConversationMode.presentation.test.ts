@@ -92,33 +92,68 @@ describe('conversation mode presentation contract', () => {
 		expect(chat).toContain('applyModeProfileInitialization');
 		expect(chat).toContain('applyModeProfileModelChange');
 		expect(chat).toContain('selectedTerminalId.set(null)');
-		expect(chat).toContain('shouldSendModeProfileCapabilityOverrides');
-		expect(chat).toContain('filter_ids:');
-		expect(chat).toContain('tool_ids:');
-		expect(chat).toContain('skill_ids:');
-		expect(chat).toContain('terminal_id:');
+		expect(chat).toContain('serializeConversationModeCapabilityRequest');
+		expect(chat).toContain('...capabilityRequest.request');
 		expect(chat).not.toContain('modeProfileSystemPrompt');
 	});
 
-	it('does not let bound chats or denied users emit implicit capability overrides', () => {
+	it('uses one explicit authority state for existing chats and request serialization', () => {
 		const chat = readSource('./Chat.svelte');
+		const navigateHandler = chat.match(
+			/const navigateHandler = async \(\) => \{([\s\S]*?)\n\t\};\n\n\tconst onSelect/
+		)?.[1];
 
 		expect(chat).toContain('isDirectToolServersPermitted');
-		expect(chat).toContain('modeProfileBoundWithoutDraft');
-		expect(chat).toContain('modeProfileCapabilitiesOverridden');
-		expect(chat).toContain('shouldSendModeProfileCapabilityOverrides');
-		expect(chat).toContain('directTerminalPermitted');
-		expect(chat).toContain('!modeProfileBoundWithoutDraft && !storageChatInput');
+		expect(chat).toContain('createConversationModeCapabilityAuthorityController');
+		expect(chat).toContain('serializeConversationModeCapabilityRequest');
+		expect(chat).toContain('existingChat: true');
+		expect(chat).toContain("modeProfileCapabilityAuthority === 'inherit_bound'");
+		expect(navigateHandler).toBeDefined();
+		expect(navigateHandler).not.toContain('await setDefaults()');
+		expect(chat).not.toContain('modeProfileBoundWithoutDraft');
+		expect(chat).not.toContain('modeProfileCapabilitiesOverridden');
 	});
 
-	it('tracks capability-only MessageInput changes without treating prompt edits as overrides', () => {
+	it('persists authority in both drafts and tracks only capability changes', () => {
 		const chat = readSource('./Chat.svelte');
-		const observations = chat.match(/modeProfileCapabilityOverrideTracker\.observe\(data\)/g) ?? [];
+		const observations =
+			chat.match(/modeProfileCapabilityAuthorityController\.observe\(data\)/g) ?? [];
+		const persistedMarkers =
+			chat.match(
+				/modeProfileCapabilityAuthority:\s*modeProfileCapabilityAuthorityController\.snapshot\(\)/g
+			) ?? [];
 
-		expect(chat).toContain('createConversationModeCapabilityOverrideTracker');
+		expect(chat).toContain('createConversationModeCapabilityAuthorityController');
 		expect(observations).toHaveLength(2);
-		expect(chat).not.toMatch(
-			/onChange=\{\(data\) => \{[\s\S]{0,180}modeProfileCapabilitiesOverridden = true/
+		expect(persistedMarkers).toHaveLength(2);
+		expect(chat).toContain('modeProfileCapabilityAuthorityController.markExplicit()');
+	});
+
+	it('sanitizes restored direct tools and hydrates the root draft revision before model changes', () => {
+		const chat = readSource('./Chat.svelte');
+		const rootDraftRestore = chat.match(
+			/const init = async \(\) => \{([\s\S]*?)\n\t\t\};\n\t\tinit\(\);/
+		)?.[1];
+
+		expect(chat).toContain('sanitizeConversationModeSelectedToolIds');
+		expect(chat).not.toContain('selectedToolIds = input.selectedToolIds;');
+		expect(rootDraftRestore).toBeDefined();
+		expect(rootDraftRestore).toContain('modeProfileDraftController.hydrateRevisionHint');
+		expect(
+			rootDraftRestore?.indexOf('modeProfileDraftController.hydrateRevisionHint')
+		).toBeGreaterThan(
+			rootDraftRestore?.indexOf('modeProfileRevisionId =') ?? Number.MAX_SAFE_INTEGER
 		);
+	});
+
+	it('spreads the tri-state capability request contract instead of length-based omission', () => {
+		const chat = readSource('./Chat.svelte');
+		const sendMessageSocket = chat.match(/const sendMessageSocket = async \([\s\S]*?\n\t\};/)?.[0];
+
+		expect(sendMessageSocket).toBeDefined();
+		expect(sendMessageSocket).toContain('serializeConversationModeCapabilityRequest');
+		expect(sendMessageSocket).toContain('...capabilityRequest.request');
+		expect(sendMessageSocket).toContain('capabilityRequest.emitToolServers');
+		expect(sendMessageSocket).not.toMatch(/selected(?:Tool|Skill|Filter)Ids\.length > 0/);
 	});
 });

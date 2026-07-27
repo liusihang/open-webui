@@ -26,6 +26,16 @@ type ConversationModeCapabilityChange = {
 	imageGenerationEnabled?: unknown;
 };
 
+export type ConversationModeCapabilityAuthority = 'initialized' | 'inherit_bound' | 'explicit';
+
+type ConversationModeCapabilityAuthorityControllerOptions = {
+	existingChat: boolean;
+	persistedAuthority?: unknown;
+};
+
+const isCapabilityAuthority = (value: unknown): value is ConversationModeCapabilityAuthority =>
+	value === 'initialized' || value === 'inherit_bound' || value === 'explicit';
+
 const capabilityFingerprint = (value: ConversationModeCapabilityChange) =>
 	JSON.stringify({
 		toolIds: uniqueStrings(value.selectedToolIds).sort(),
@@ -36,17 +46,93 @@ const capabilityFingerprint = (value: ConversationModeCapabilityChange) =>
 		imageGeneration: value.imageGenerationEnabled === true
 	});
 
-export const createConversationModeCapabilityOverrideTracker = () => {
+export const createConversationModeCapabilityAuthorityController = (
+	options: ConversationModeCapabilityAuthorityControllerOptions
+) => {
 	let baseline: string | null = null;
-	let overridden = false;
+	let authority: ConversationModeCapabilityAuthority = isCapabilityAuthority(
+		options.persistedAuthority
+	)
+		? options.persistedAuthority
+		: options.existingChat
+			? 'inherit_bound'
+			: 'initialized';
 
 	return {
 		observe: (value: ConversationModeCapabilityChange) => {
 			const next = capabilityFingerprint(value);
 			if (baseline === null) baseline = next;
-			else if (next !== baseline) overridden = true;
-			return overridden;
-		}
+			else if (next !== baseline) authority = 'explicit';
+			return authority;
+		},
+		markExplicit: () => {
+			authority = 'explicit';
+			return authority;
+		},
+		snapshot: () => authority
+	};
+};
+
+export const sanitizeConversationModeSelectedToolIds = (
+	toolIds: unknown,
+	directToolServersPermitted: boolean
+) =>
+	uniqueStrings(toolIds).filter(
+		(id) => directToolServersPermitted || !id.startsWith('direct_server:')
+	);
+
+type ConversationModeCapabilityRequestInput = {
+	authority: ConversationModeCapabilityAuthority;
+	selections: Pick<
+		ConversationModeProfileSelections,
+		'terminalId' | 'toolIds' | 'skillIds' | 'filterIds'
+	>;
+	features: Record<string, unknown>;
+	directToolServersPermitted: boolean;
+	directTerminalIds: readonly string[];
+	functionCallingEnabled: boolean;
+	terminalEnabled: boolean;
+};
+
+export const serializeConversationModeCapabilityRequest = (
+	input: ConversationModeCapabilityRequestInput
+) => {
+	const preservedFeatures = Object.fromEntries(
+		Object.entries(input.features).filter(([key]) => key === 'voice' || key === 'memory')
+	);
+	if (input.authority === 'inherit_bound') {
+		return { request: { features: preservedFeatures }, toolServerIds: [], emitToolServers: false };
+	}
+
+	const selectedToolIds = sanitizeConversationModeSelectedToolIds(
+		input.selections.toolIds,
+		input.directToolServersPermitted
+	);
+	const toolServerIds = input.directToolServersPermitted
+		? selectedToolIds
+				.filter((toolId) => toolId.startsWith('direct_server:'))
+				.map((toolId) => toolId.slice('direct_server:'.length))
+		: [];
+	const directTerminalIds = new Set(input.directTerminalIds);
+	const terminalId =
+		input.terminalEnabled &&
+		input.selections.terminalId &&
+		(input.directToolServersPermitted || !directTerminalIds.has(input.selections.terminalId))
+			? input.selections.terminalId
+			: null;
+
+	return {
+		request: {
+			tool_ids: input.functionCallingEnabled
+				? selectedToolIds.filter((toolId) => !toolId.startsWith('direct_server:'))
+				: [],
+			skill_ids: input.functionCallingEnabled ? uniqueStrings(input.selections.skillIds) : [],
+			filter_ids: input.functionCallingEnabled ? uniqueStrings(input.selections.filterIds) : [],
+			terminal_id: terminalId,
+			features: input.features
+		},
+		toolServerIds,
+		emitToolServers: true
 	};
 };
 

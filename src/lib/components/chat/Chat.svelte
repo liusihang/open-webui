@@ -118,10 +118,13 @@
 		type ReasoningEffort
 	} from '$lib/components/chat/agentModeRequest';
 	import {
-		createConversationModeCapabilityOverrideTracker,
+		createConversationModeCapabilityAuthorityController,
 		createConversationModeProfileDraftController,
 		isDirectToolServersPermitted,
 		resolveConversationModeProfile,
+		sanitizeConversationModeSelectedToolIds,
+		serializeConversationModeCapabilityRequest,
+		type ConversationModeCapabilityAuthority,
 		type ConversationModeProfileAvailability,
 		type ConversationModeProfileSelections
 	} from '$lib/components/chat/conversationModeProfiles';
@@ -197,16 +200,20 @@
 	let webSearchEnabled = false;
 	let codeInterpreterEnabled = false;
 	let reasoningEffort: ReasoningEffort = 'medium';
-	const modeProfileDraftController = createConversationModeProfileDraftController();
+	let modeProfileDraftController = createConversationModeProfileDraftController();
 	let modeProfileDraftId = '';
 	let modeProfileInitializedDraftId = '';
 	let modeProfileRevisionId: string | null = null;
 	let modeProfileWarningSignature = '';
-	let modeProfileBoundWithoutDraft = false;
-	let modeProfileCapabilitiesOverridden = false;
+	let modeProfileCapabilityAuthorityController =
+		createConversationModeCapabilityAuthorityController({
+			existingChat: false
+		});
+	let modeProfileCapabilityAuthority: ConversationModeCapabilityAuthority =
+		modeProfileCapabilityAuthorityController.snapshot();
 	let modeProfileControlsReady = false;
 	let modeProfileBoundTerminalId: string | null = null;
-	let modeProfileCapabilityOverrideTracker = createConversationModeCapabilityOverrideTracker();
+	let latestModeProfileDraftInput: any = null;
 	let webSearchActive = false;
 	let showWebSearchConfirm = false;
 	let pendingWebSearchPrompt: string | null = null;
@@ -253,12 +260,10 @@
 		resetWebSearchConfirmation();
 	}
 
-	$: if (
-		modeProfileBoundWithoutDraft &&
-		modeProfileControlsReady &&
-		$selectedTerminalId !== modeProfileBoundTerminalId
-	) {
-		modeProfileCapabilitiesOverridden = true;
+	$: if (modeProfileControlsReady && $selectedTerminalId !== modeProfileBoundTerminalId) {
+		modeProfileCapabilityAuthority = modeProfileCapabilityAuthorityController.markExplicit();
+		modeProfileBoundTerminalId = $selectedTerminalId;
+		saveModeProfileCapabilityAuthority();
 	}
 
 	let showCommands = false;
@@ -329,19 +334,34 @@
 		modeProfileInitializedDraftId = '';
 		modeProfileRevisionId = null;
 		modeProfileWarningSignature = '';
-		modeProfileBoundWithoutDraft = false;
-		modeProfileCapabilitiesOverridden = false;
 		modeProfileControlsReady = false;
 		modeProfileBoundTerminalId = null;
-		modeProfileCapabilityOverrideTracker = createConversationModeCapabilityOverrideTracker();
+		modeProfileDraftController = createConversationModeProfileDraftController();
+		modeProfileCapabilityAuthorityController = createConversationModeCapabilityAuthorityController({
+			existingChat: false
+		});
+		modeProfileCapabilityAuthority = modeProfileCapabilityAuthorityController.snapshot();
 		reasoningEffort = 'medium';
 
 		const storageChatInput = sessionStorage.getItem(
 			`chat-input${chatIdProp ? `-${chatIdProp}` : ''}`
 		);
+		let restoredDraft: any = null;
+		if (storageChatInput) {
+			try {
+				restoredDraft = JSON.parse(storageChatInput);
+			} catch (e) {}
+		}
+		if (chatIdProp) {
+			modeProfileCapabilityAuthorityController =
+				createConversationModeCapabilityAuthorityController({
+					existingChat: true,
+					persistedAuthority: restoredDraft?.modeProfileCapabilityAuthority
+				});
+			modeProfileCapabilityAuthority = modeProfileCapabilityAuthorityController.snapshot();
+		}
 
 		if (chatIdProp && (await loadChat())) {
-			modeProfileBoundWithoutDraft = Boolean(chat?.mode_profile_revision_id) && !storageChatInput;
 			await tick();
 			loading = false;
 			window.setTimeout(() => scrollToBottom(), 0);
@@ -360,16 +380,19 @@
 				await processNextInQueue(chatIdProp);
 			}
 
-			if (storageChatInput) {
+			if (restoredDraft) {
 				try {
-					const input = JSON.parse(storageChatInput);
+					const input = restoredDraft;
 
 					if (!$temporaryChatEnabled) {
 						messageInput?.setText(input.prompt);
 						files = input.files;
-						selectedToolIds = input.selectedToolIds;
+						selectedToolIds = sanitizeConversationModeSelectedToolIds(
+							input.selectedToolIds,
+							isDirectToolServersPermitted($user)
+						);
 						selectedSkillIds = input.selectedSkillIds ?? [];
-						selectedFilterIds = input.selectedFilterIds;
+						selectedFilterIds = input.selectedFilterIds ?? [];
 						webSearchEnabled = input.webSearchEnabled;
 						restoreImageGenerationFromDraft(input);
 						codeInterpreterEnabled = input.codeInterpreterEnabled;
@@ -387,12 +410,10 @@
 						}
 					}
 				} catch (e) {}
-			} else if (!modeProfileBoundWithoutDraft && !storageChatInput) {
-				await setDefaults();
 			}
 			modeProfileBoundTerminalId = $selectedTerminalId;
 			queueMicrotask(() => {
-				modeProfileCapabilityOverrideTracker.observe({
+				modeProfileCapabilityAuthority = modeProfileCapabilityAuthorityController.observe({
 					selectedToolIds,
 					selectedSkillIds,
 					selectedFilterIds,
@@ -468,7 +489,7 @@
 	}
 
 	const onSelectedModelIdsChange = async () => {
-		if (modeProfileBoundWithoutDraft && !modeProfileCapabilitiesOverridden) {
+		if (modeProfileCapabilityAuthority === 'inherit_bound') {
 			oldSelectedModelIds = structuredClone(selectedModelIds);
 			return;
 		}
@@ -502,7 +523,8 @@
 	const isTerminalAvailable = (tid: string): boolean => {
 		return (
 			($terminalServers ?? []).some((t) => t.id && t.id === tid) ||
-			($settings?.terminalServers ?? []).some((s) => s.url === tid)
+			(isDirectToolServersPermitted($user) &&
+				($settings?.terminalServers ?? []).some((s) => s.url === tid))
 		);
 	};
 
@@ -667,14 +689,27 @@
 	};
 
 	const beginModeProfileDraft = () => {
+		let restoredRootDraft: any = null;
+		if (!chatIdProp) {
+			try {
+				restoredRootDraft = JSON.parse(sessionStorage.getItem('chat-input') ?? 'null');
+			} catch (e) {}
+		}
 		modeProfileDraftId = `draft:${uuidv4()}`;
 		modeProfileInitializedDraftId = '';
-		modeProfileRevisionId = null;
+		modeProfileRevisionId =
+			typeof restoredRootDraft?.modeProfileRevisionId === 'string'
+				? restoredRootDraft.modeProfileRevisionId
+				: null;
 		modeProfileWarningSignature = '';
-		modeProfileBoundWithoutDraft = false;
-		modeProfileCapabilitiesOverridden = false;
 		modeProfileControlsReady = false;
-		modeProfileCapabilityOverrideTracker = createConversationModeCapabilityOverrideTracker();
+		modeProfileDraftController = createConversationModeProfileDraftController();
+		modeProfileCapabilityAuthorityController = createConversationModeCapabilityAuthorityController({
+			existingChat: false,
+			persistedAuthority: restoredRootDraft?.modeProfileCapabilityAuthority
+		});
+		modeProfileCapabilityAuthority = modeProfileCapabilityAuthorityController.snapshot();
+		modeProfileDraftController.hydrateRevisionHint(modeProfileRevisionId);
 		clearSelectedTerminal();
 	};
 
@@ -1226,13 +1261,17 @@
 		const audioQueueInstance = new AudioQueue(document.getElementById('audioElement'));
 		audioQueue.set(audioQueueInstance);
 
-		// Restore direct terminal enabled states based on persisted selectedTerminalId
+		// Restore direct terminal enabled states based on persisted selectedTerminalId.
+		// A revoked direct-server permission must not reactivate a restored direct terminal.
 		if ($settings?.terminalServers?.length) {
 			settings.set({
 				...$settings,
 				terminalServers: ($settings.terminalServers ?? []).map((s) => ({
 					...s,
-					enabled: $selectedTerminalId !== null && s.url === $selectedTerminalId
+					enabled:
+						isDirectToolServersPermitted($user) &&
+						$selectedTerminalId !== null &&
+						s.url === $selectedTerminalId
 				}))
 			});
 		}
@@ -1312,9 +1351,12 @@
 					if (!$temporaryChatEnabled) {
 						messageInput?.setText(input.prompt);
 						files = input.files;
-						selectedToolIds = input.selectedToolIds;
+						selectedToolIds = sanitizeConversationModeSelectedToolIds(
+							input.selectedToolIds,
+							isDirectToolServersPermitted($user)
+						);
 						selectedSkillIds = input.selectedSkillIds ?? [];
-						selectedFilterIds = input.selectedFilterIds;
+						selectedFilterIds = input.selectedFilterIds ?? [];
 						webSearchEnabled = input.webSearchEnabled;
 						restoreImageGenerationFromDraft(input);
 						codeInterpreterEnabled = input.codeInterpreterEnabled;
@@ -1322,6 +1364,13 @@
 							typeof input.modeProfileRevisionId === 'string'
 								? input.modeProfileRevisionId
 								: modeProfileRevisionId;
+						modeProfileDraftController.hydrateRevisionHint(modeProfileRevisionId);
+						modeProfileCapabilityAuthorityController =
+							createConversationModeCapabilityAuthorityController({
+								existingChat: false,
+								persistedAuthority: input.modeProfileCapabilityAuthority
+							});
+						modeProfileCapabilityAuthority = modeProfileCapabilityAuthorityController.snapshot();
 						reasoningEffort = normalizeReasoningEffort(
 							input.reasoningEffort ?? input.reasoningDepth
 						);
@@ -1780,7 +1829,8 @@
 
 		autoScroll = true;
 
-		await resetInput({ initialize: true });
+		const hasRootDraft = !chatIdProp && Boolean(sessionStorage.getItem('chat-input'));
+		await resetInput({ initialize: !hasRootDraft });
 		await chatId.set('');
 		await chatTitle.set('');
 
@@ -2830,28 +2880,6 @@
 				);
 		}
 
-		const toolIds = [];
-		const toolServerIds = [];
-
-		for (const toolId of selectedToolIds) {
-			if (toolId.startsWith('direct_server:')) {
-				let serverId = toolId.replace('direct_server:', '');
-				// Check if serverId is a number
-				if (!isNaN(parseInt(serverId))) {
-					toolServerIds.push(parseInt(serverId));
-				} else {
-					toolServerIds.push(serverId);
-				}
-			} else {
-				toolIds.push(toolId);
-			}
-		}
-
-		// Menu-selected skills are sent as IDs; inline <$skillId|label> mentions stay
-		// in the message so the backend can inject their full content.
-		const skillIds = [...selectedSkillIds];
-		const shouldSendModeProfileCapabilityOverrides =
-			!modeProfileBoundWithoutDraft || modeProfileCapabilitiesOverridden;
 		const directTerminalPermitted = isDirectToolServersPermitted($user);
 		const directTerminalIds = new Set(
 			((($settings as any)?.terminalServers ?? []) as any[])
@@ -2859,17 +2887,24 @@
 				.filter((id): id is string => typeof id === 'string')
 		);
 
-		// Use the user-selected terminal from the dropdown
-		const activeTerminalId =
-			$selectedTerminalId &&
-			(!directTerminalIds.has($selectedTerminalId) || directTerminalPermitted)
-				? $selectedTerminalId
-				: null;
-
 		const modelCapabilities = (model.info?.meta?.capabilities ?? {}) as Record<string, unknown>;
 		const functionCallingEnabled = modelCapabilities.function_calling !== false;
 		// Terminal requires the same function-calling allowance as its resolver path.
 		const terminalEnabled = functionCallingEnabled && modelCapabilities.terminal !== false;
+		const capabilityRequest = serializeConversationModeCapabilityRequest({
+			authority: modeProfileCapabilityAuthority,
+			selections: {
+				terminalId: $selectedTerminalId ?? null,
+				toolIds: selectedToolIds,
+				skillIds: selectedSkillIds,
+				filterIds: selectedFilterIds
+			},
+			features: getFeatures(),
+			directToolServersPermitted: directTerminalPermitted,
+			directTerminalIds: [...directTerminalIds],
+			functionCallingEnabled,
+			terminalEnabled
+		});
 
 		const res = await generateOpenAIChatCompletion(
 			localStorage.token,
@@ -2888,36 +2923,21 @@
 
 				files: (files?.length ?? 0) > 0 ? files : undefined,
 
-				filter_ids:
-					shouldSendModeProfileCapabilityOverrides &&
-					functionCallingEnabled &&
-					selectedFilterIds.length > 0
-						? selectedFilterIds
-						: undefined,
-				tool_ids:
-					shouldSendModeProfileCapabilityOverrides && functionCallingEnabled && toolIds.length > 0
-						? toolIds
-						: undefined,
-				skill_ids:
-					shouldSendModeProfileCapabilityOverrides && functionCallingEnabled && skillIds.length > 0
-						? skillIds
-						: undefined,
-				terminal_id:
-					shouldSendModeProfileCapabilityOverrides && terminalEnabled
-						? (activeTerminalId ?? undefined)
-						: undefined,
-				tool_servers: [
-					...(shouldSendModeProfileCapabilityOverrides
-						? ($toolServers ?? []).filter(
-								(server, idx) => toolServerIds.includes(idx) || toolServerIds.includes(server?.id)
-							)
-						: []),
-					// Direct terminal servers — always included when enabled (not routed through selectedToolIds)
-					...(shouldSendModeProfileCapabilityOverrides && directTerminalPermitted
-						? ($terminalServers ?? []).filter((t) => !t.id)
-						: [])
-				],
-				features: getFeatures(shouldSendModeProfileCapabilityOverrides),
+				...capabilityRequest.request,
+				tool_servers: capabilityRequest.emitToolServers
+					? [
+							...(directTerminalPermitted
+								? ($toolServers ?? []).filter(
+										(server, idx) =>
+											capabilityRequest.toolServerIds.includes(String(idx)) ||
+											capabilityRequest.toolServerIds.includes(String(server?.id))
+									)
+								: []),
+							...(directTerminalPermitted
+								? ($terminalServers ?? []).filter((terminal) => !terminal.id)
+								: [])
+						]
+					: [],
 				variables: {
 					...getPromptVariables(
 						$user?.name,
@@ -3355,6 +3375,21 @@
 		}
 	};
 
+	const saveModeProfileCapabilityAuthority = () => {
+		if ($temporaryChatEnabled || !latestModeProfileDraftInput) return;
+		const modeProfileCapabilityAuthority = modeProfileCapabilityAuthorityController.snapshot();
+		saveDraft(
+			{
+				...latestModeProfileDraftInput,
+				conversationMode,
+				modeProfileRevisionId,
+				modeProfileCapabilityAuthority,
+				imageGenerationUserOverride
+			},
+			$chatId || null
+		);
+	};
+
 	const clearDraft = async (chatId: string | null = null) => {
 		if (saveDraftTimeout) {
 			clearTimeout(saveDraftTimeout);
@@ -3746,9 +3781,10 @@
 											}));
 										}}
 										onChange={(data) => {
-											if (modeProfileBoundWithoutDraft && modeProfileControlsReady) {
-												modeProfileCapabilitiesOverridden =
-													modeProfileCapabilityOverrideTracker.observe(data);
+											latestModeProfileDraftInput = data;
+											if (modeProfileControlsReady) {
+												modeProfileCapabilityAuthority =
+													modeProfileCapabilityAuthorityController.observe(data);
 											}
 											if (!$temporaryChatEnabled) {
 												saveDraft(
@@ -3756,6 +3792,8 @@
 														...data,
 														conversationMode: conversationMode,
 														modeProfileRevisionId,
+														modeProfileCapabilityAuthority:
+															modeProfileCapabilityAuthorityController.snapshot(),
 														imageGenerationUserOverride
 													},
 													$chatId
@@ -3763,11 +3801,13 @@
 											}
 										}}
 										onImageGenerationToggle={(enabled) => {
-											modeProfileCapabilitiesOverridden = true;
+											modeProfileCapabilityAuthority =
+												modeProfileCapabilityAuthorityController.markExplicit();
 											imageGenerationUserOverride = enabled;
 										}}
 										onWebSearchToggle={(enabled) => {
-											modeProfileCapabilitiesOverridden = true;
+											modeProfileCapabilityAuthority =
+												modeProfileCapabilityAuthorityController.markExplicit();
 											handleWebSearchToggle(enabled);
 										}}
 										on:submit={async (e) => {
@@ -3818,23 +3858,28 @@
 										{onSelect}
 										{onUpload}
 										onImageGenerationToggle={(enabled) => {
-											modeProfileCapabilitiesOverridden = true;
+											modeProfileCapabilityAuthority =
+												modeProfileCapabilityAuthorityController.markExplicit();
 											imageGenerationUserOverride = enabled;
 										}}
 										onWebSearchToggle={(enabled) => {
-											modeProfileCapabilitiesOverridden = true;
+											modeProfileCapabilityAuthority =
+												modeProfileCapabilityAuthorityController.markExplicit();
 											handleWebSearchToggle(enabled);
 										}}
 										onChange={(data) => {
-											if (modeProfileBoundWithoutDraft && modeProfileControlsReady) {
-												modeProfileCapabilitiesOverridden =
-													modeProfileCapabilityOverrideTracker.observe(data);
+											latestModeProfileDraftInput = data;
+											if (modeProfileControlsReady) {
+												modeProfileCapabilityAuthority =
+													modeProfileCapabilityAuthorityController.observe(data);
 											}
 											if (!$temporaryChatEnabled) {
 												saveDraft({
 													...data,
 													conversationMode: conversationMode,
 													modeProfileRevisionId,
+													modeProfileCapabilityAuthority:
+														modeProfileCapabilityAuthorityController.snapshot(),
 													imageGenerationUserOverride
 												});
 											}
