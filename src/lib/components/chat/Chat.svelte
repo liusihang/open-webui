@@ -121,9 +121,11 @@
 		createConversationModeCapabilityAuthorityController,
 		createConversationModeProfileDraftController,
 		isDirectToolServersPermitted,
+		parseConversationModeDraft,
 		resolveConversationModeProfile,
 		sanitizeConversationModeSelectedToolIds,
 		serializeConversationModeCapabilityRequest,
+		serializeConversationModeToolServers,
 		type ConversationModeCapabilityAuthority,
 		type ConversationModeProfileAvailability,
 		type ConversationModeProfileSelections
@@ -346,11 +348,9 @@
 		const storageChatInput = sessionStorage.getItem(
 			`chat-input${chatIdProp ? `-${chatIdProp}` : ''}`
 		);
-		let restoredDraft: any = null;
-		if (storageChatInput) {
-			try {
-				restoredDraft = JSON.parse(storageChatInput);
-			} catch (e) {}
+		const restoredDraft = parseConversationModeDraft(storageChatInput);
+		if (storageChatInput && !restoredDraft) {
+			sessionStorage.removeItem(`chat-input${chatIdProp ? `-${chatIdProp}` : ''}`);
 		}
 		if (chatIdProp) {
 			modeProfileCapabilityAuthorityController =
@@ -689,11 +689,10 @@
 	};
 
 	const beginModeProfileDraft = () => {
-		let restoredRootDraft: any = null;
-		if (!chatIdProp) {
-			try {
-				restoredRootDraft = JSON.parse(sessionStorage.getItem('chat-input') ?? 'null');
-			} catch (e) {}
+		const storedRootDraft = !chatIdProp ? sessionStorage.getItem('chat-input') : null;
+		const restoredRootDraft = parseConversationModeDraft(storedRootDraft);
+		if (storedRootDraft && !restoredRootDraft) {
+			sessionStorage.removeItem('chat-input');
 		}
 		modeProfileDraftId = `draft:${uuidv4()}`;
 		modeProfileInitializedDraftId = '';
@@ -711,6 +710,7 @@
 		modeProfileCapabilityAuthority = modeProfileCapabilityAuthorityController.snapshot();
 		modeProfileDraftController.hydrateRevisionHint(modeProfileRevisionId);
 		clearSelectedTerminal();
+		return restoredRootDraft;
 	};
 
 	const bindCanonicalModeProfileRevision = (revisionId: unknown) => {
@@ -1323,6 +1323,10 @@
 		const storageChatInput = sessionStorage.getItem(
 			`chat-input${chatIdProp ? `-${chatIdProp}` : ''}`
 		);
+		const restoredDraft = parseConversationModeDraft(storageChatInput);
+		if (storageChatInput && !restoredDraft) {
+			sessionStorage.removeItem(`chat-input${chatIdProp ? `-${chatIdProp}` : ''}`);
+		}
 
 		const init = async () => {
 			if (!chatIdProp) {
@@ -1330,7 +1334,7 @@
 				await tick();
 			}
 
-			if (storageChatInput) {
+			if (restoredDraft) {
 				prompt = '';
 				messageInput?.setText('');
 
@@ -1346,7 +1350,7 @@
 				reasoningEffort = 'medium';
 
 				try {
-					const input = JSON.parse(storageChatInput);
+					const input = restoredDraft;
 
 					if (!$temporaryChatEnabled) {
 						messageInput?.setText(input.prompt);
@@ -1706,7 +1710,7 @@
 		const requestedMode =
 			preselectedMode ?? normalizeConversationMode($page.url.searchParams.get('mode'));
 		conversationMode = requestedMode;
-		beginModeProfileDraft();
+		const restoredRootDraft = beginModeProfileDraft();
 		pendingConversationMode = null;
 		chat = null;
 
@@ -1829,8 +1833,7 @@
 
 		autoScroll = true;
 
-		const hasRootDraft = !chatIdProp && Boolean(sessionStorage.getItem('chat-input'));
-		await resetInput({ initialize: !hasRootDraft });
+		await resetInput({ initialize: !restoredRootDraft });
 		await chatId.set('');
 		await chatTitle.set('');
 
@@ -2905,6 +2908,14 @@
 			functionCallingEnabled,
 			terminalEnabled
 		});
+		const toolServersRequest = serializeConversationModeToolServers({
+			emitToolServers: capabilityRequest.emitToolServers,
+			toolServerIds: capabilityRequest.toolServerIds,
+			terminalId: (capabilityRequest.request as { terminal_id?: unknown }).terminal_id,
+			directToolServersPermitted: directTerminalPermitted,
+			toolServers: $toolServers ?? [],
+			terminalServers: $terminalServers ?? []
+		});
 
 		const res = await generateOpenAIChatCompletion(
 			localStorage.token,
@@ -2924,20 +2935,7 @@
 				files: (files?.length ?? 0) > 0 ? files : undefined,
 
 				...capabilityRequest.request,
-				tool_servers: capabilityRequest.emitToolServers
-					? [
-							...(directTerminalPermitted
-								? ($toolServers ?? []).filter(
-										(server, idx) =>
-											capabilityRequest.toolServerIds.includes(String(idx)) ||
-											capabilityRequest.toolServerIds.includes(String(server?.id))
-									)
-								: []),
-							...(directTerminalPermitted
-								? ($terminalServers ?? []).filter((terminal) => !terminal.id)
-								: [])
-						]
-					: [],
+				...toolServersRequest,
 				variables: {
 					...getPromptVariables(
 						$user?.name,

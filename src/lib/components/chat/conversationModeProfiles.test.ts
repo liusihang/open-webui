@@ -4,9 +4,11 @@ import {
 	createConversationModeCapabilityAuthorityController,
 	createConversationModeProfileDraftController,
 	isDirectToolServersPermitted,
+	parseConversationModeDraft,
 	resolveConversationModeProfile,
 	sanitizeConversationModeSelectedToolIds,
 	serializeConversationModeCapabilityRequest,
+	serializeConversationModeToolServers,
 	type ConversationModeProfileResolutionInput
 } from './conversationModeProfiles';
 
@@ -297,6 +299,18 @@ describe('conversation mode profile draft controller', () => {
 });
 
 describe('conversation mode capability authority', () => {
+	it('accepts only structurally valid stored drafts', () => {
+		expect(parseConversationModeDraft(null)).toBeNull();
+		expect(parseConversationModeDraft('{malformed')).toBeNull();
+		expect(parseConversationModeDraft('[]')).toBeNull();
+		expect(parseConversationModeDraft('{}')).toBeNull();
+		expect(
+			parseConversationModeDraft(
+				JSON.stringify({ prompt: '', files: [], modeProfileCapabilityAuthority: 'explicit' })
+			)
+		).toEqual({ prompt: '', files: [], modeProfileCapabilityAuthority: 'explicit' });
+	});
+
 	it('initializes a new draft as authoritative and serializes explicit empty selections', () => {
 		const controller = createConversationModeCapabilityAuthorityController({ existingChat: false });
 
@@ -388,6 +402,15 @@ describe('conversation mode capability authority', () => {
 		}
 	);
 
+	it('rejects a stale inherit-bound marker when restoring a new-chat draft', () => {
+		expect(
+			createConversationModeCapabilityAuthorityController({
+				existingChat: false,
+				persistedAuthority: 'inherit_bound'
+			}).snapshot()
+		).toBe('initialized');
+	});
+
 	it('ignores prompt, file, and reasoning-only changes while preserving inherit-bound authority', () => {
 		const controller = createConversationModeCapabilityAuthorityController({ existingChat: true });
 		controller.observe({ ...emptyCapabilities, prompt: '', files: [], reasoningEffort: 'medium' });
@@ -465,7 +488,7 @@ describe('conversation mode capability authority', () => {
 		});
 	});
 
-	it('keeps direct server IDs for permitted explicit requests and clears function capabilities when unsupported', () => {
+	it('suppresses direct server emission when function calling is unsupported', () => {
 		expect(
 			serializeConversationModeCapabilityRequest({
 				authority: 'explicit',
@@ -489,8 +512,63 @@ describe('conversation mode capability authority', () => {
 				terminal_id: null,
 				features: { web_search: false }
 			},
-			toolServerIds: ['2', 'server-a'],
-			emitToolServers: true
+			toolServerIds: [],
+			emitToolServers: false
 		});
+	});
+
+	it('omits unsupported tool_servers, represents explicit clears, and selects one direct terminal', () => {
+		const toolServers = [
+			{ id: 'server-a', name: 'A' },
+			{ id: 'server-b', name: 'B' }
+		];
+		const terminalServers = [
+			{ url: 'https://terminal-a.example', name: 'Terminal A' },
+			{ url: 'https://terminal-b.example', name: 'Terminal B' },
+			{ id: 'system-terminal', name: 'System Terminal' }
+		];
+
+		expect(
+			serializeConversationModeToolServers({
+				emitToolServers: false,
+				toolServerIds: ['server-a'],
+				terminalId: 'https://terminal-a.example',
+				directToolServersPermitted: true,
+				toolServers,
+				terminalServers
+			})
+		).toEqual({});
+		expect(
+			serializeConversationModeToolServers({
+				emitToolServers: true,
+				toolServerIds: [],
+				terminalId: null,
+				directToolServersPermitted: true,
+				toolServers,
+				terminalServers
+			})
+		).toEqual({ tool_servers: [] });
+		expect(
+			serializeConversationModeToolServers({
+				emitToolServers: true,
+				toolServerIds: ['server-b'],
+				terminalId: 'https://terminal-b.example',
+				directToolServersPermitted: true,
+				toolServers,
+				terminalServers
+			})
+		).toEqual({
+			tool_servers: [toolServers[1], terminalServers[1]]
+		});
+		expect(
+			serializeConversationModeToolServers({
+				emitToolServers: true,
+				toolServerIds: [],
+				terminalId: null,
+				directToolServersPermitted: true,
+				toolServers,
+				terminalServers
+			})
+		).toEqual({ tool_servers: [] });
 	});
 });

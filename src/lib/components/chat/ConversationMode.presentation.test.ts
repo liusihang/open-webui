@@ -136,7 +136,11 @@ describe('conversation mode presentation contract', () => {
 		)?.[1];
 
 		expect(chat).toContain('sanitizeConversationModeSelectedToolIds');
+		expect(chat).toContain('parseConversationModeDraft');
 		expect(chat).not.toContain('selectedToolIds = input.selectedToolIds;');
+		expect(chat).not.toContain("Boolean(sessionStorage.getItem('chat-input'))");
+		expect(chat).toContain('const restoredRootDraft = beginModeProfileDraft();');
+		expect(chat).toContain('initialize: !restoredRootDraft');
 		expect(rootDraftRestore).toBeDefined();
 		expect(rootDraftRestore).toContain('modeProfileDraftController.hydrateRevisionHint');
 		expect(
@@ -152,8 +156,10 @@ describe('conversation mode presentation contract', () => {
 
 		expect(sendMessageSocket).toBeDefined();
 		expect(sendMessageSocket).toContain('serializeConversationModeCapabilityRequest');
+		expect(sendMessageSocket).toContain('serializeConversationModeToolServers');
 		expect(sendMessageSocket).toContain('...capabilityRequest.request');
-		expect(sendMessageSocket).toContain('capabilityRequest.emitToolServers');
+		expect(sendMessageSocket).toContain('...toolServersRequest');
+		expect(sendMessageSocket).not.toContain('tool_servers: capabilityRequest.emitToolServers');
 		expect(sendMessageSocket).not.toMatch(/selected(?:Tool|Skill|Filter)Ids\.length > 0/);
 	});
 });

@@ -36,6 +36,27 @@ type ConversationModeCapabilityAuthorityControllerOptions = {
 const isCapabilityAuthority = (value: unknown): value is ConversationModeCapabilityAuthority =>
 	value === 'initialized' || value === 'inherit_bound' || value === 'explicit';
 
+export type ConversationModeDraft = Record<string, unknown> & {
+	prompt: string;
+	files: unknown[];
+};
+
+export const parseConversationModeDraft = (value: string | null): ConversationModeDraft | null => {
+	if (typeof value !== 'string') return null;
+	try {
+		const parsed = JSON.parse(value);
+		return parsed &&
+			typeof parsed === 'object' &&
+			!Array.isArray(parsed) &&
+			typeof parsed.prompt === 'string' &&
+			Array.isArray(parsed.files)
+			? (parsed as ConversationModeDraft)
+			: null;
+	} catch {
+		return null;
+	}
+};
+
 const capabilityFingerprint = (value: ConversationModeCapabilityChange) =>
 	JSON.stringify({
 		toolIds: uniqueStrings(value.selectedToolIds).sort(),
@@ -50,10 +71,13 @@ export const createConversationModeCapabilityAuthorityController = (
 	options: ConversationModeCapabilityAuthorityControllerOptions
 ) => {
 	let baseline: string | null = null;
-	let authority: ConversationModeCapabilityAuthority = isCapabilityAuthority(
-		options.persistedAuthority
-	)
-		? options.persistedAuthority
+	const persistedAuthority =
+		isCapabilityAuthority(options.persistedAuthority) &&
+		(options.existingChat || options.persistedAuthority !== 'inherit_bound')
+			? options.persistedAuthority
+			: undefined;
+	let authority: ConversationModeCapabilityAuthority = persistedAuthority
+		? persistedAuthority
 		: options.existingChat
 			? 'inherit_bound'
 			: 'initialized';
@@ -108,11 +132,13 @@ export const serializeConversationModeCapabilityRequest = (
 		input.selections.toolIds,
 		input.directToolServersPermitted
 	);
-	const toolServerIds = input.directToolServersPermitted
-		? selectedToolIds
-				.filter((toolId) => toolId.startsWith('direct_server:'))
-				.map((toolId) => toolId.slice('direct_server:'.length))
-		: [];
+	const emitToolServers = input.functionCallingEnabled;
+	const toolServerIds =
+		emitToolServers && input.directToolServersPermitted
+			? selectedToolIds
+					.filter((toolId) => toolId.startsWith('direct_server:'))
+					.map((toolId) => toolId.slice('direct_server:'.length))
+			: [];
 	const directTerminalIds = new Set(input.directTerminalIds);
 	const terminalId =
 		input.terminalEnabled &&
@@ -132,7 +158,42 @@ export const serializeConversationModeCapabilityRequest = (
 			features: input.features
 		},
 		toolServerIds,
-		emitToolServers: true
+		emitToolServers
+	};
+};
+
+type ConversationModeToolServer = {
+	id?: unknown;
+	url?: unknown;
+	[key: string]: unknown;
+};
+
+type ConversationModeToolServersInput = {
+	emitToolServers: boolean;
+	toolServerIds: readonly string[];
+	terminalId: unknown;
+	directToolServersPermitted: boolean;
+	toolServers: readonly ConversationModeToolServer[];
+	terminalServers: readonly ConversationModeToolServer[];
+};
+
+export const serializeConversationModeToolServers = (
+	input: ConversationModeToolServersInput
+): { tool_servers?: ConversationModeToolServer[] } => {
+	if (!input.emitToolServers) return {};
+	if (!input.directToolServersPermitted) return { tool_servers: [] };
+
+	return {
+		tool_servers: [
+			...input.toolServers.filter(
+				(server, index) =>
+					input.toolServerIds.includes(String(index)) ||
+					input.toolServerIds.includes(String(server.id))
+			),
+			...input.terminalServers.filter(
+				(terminal) => !terminal.id && terminal.url === input.terminalId
+			)
+		]
 	};
 };
 
