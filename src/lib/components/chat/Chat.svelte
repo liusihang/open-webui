@@ -118,6 +118,7 @@
 		type ReasoningEffort
 	} from '$lib/components/chat/agentModeRequest';
 	import {
+		createConversationModeCapabilityOverrideTracker,
 		createConversationModeProfileDraftController,
 		isDirectToolServersPermitted,
 		resolveConversationModeProfile,
@@ -205,6 +206,7 @@
 	let modeProfileCapabilitiesOverridden = false;
 	let modeProfileControlsReady = false;
 	let modeProfileBoundTerminalId: string | null = null;
+	let modeProfileCapabilityOverrideTracker = createConversationModeCapabilityOverrideTracker();
 	let webSearchActive = false;
 	let showWebSearchConfirm = false;
 	let pendingWebSearchPrompt: string | null = null;
@@ -331,6 +333,7 @@
 		modeProfileCapabilitiesOverridden = false;
 		modeProfileControlsReady = false;
 		modeProfileBoundTerminalId = null;
+		modeProfileCapabilityOverrideTracker = createConversationModeCapabilityOverrideTracker();
 		reasoningEffort = 'medium';
 
 		const storageChatInput = sessionStorage.getItem(
@@ -389,6 +392,14 @@
 			}
 			modeProfileBoundTerminalId = $selectedTerminalId;
 			queueMicrotask(() => {
+				modeProfileCapabilityOverrideTracker.observe({
+					selectedToolIds,
+					selectedSkillIds,
+					selectedFilterIds,
+					webSearchEnabled,
+					codeInterpreterEnabled,
+					imageGenerationEnabled
+				});
 				modeProfileControlsReady = true;
 			});
 
@@ -663,6 +674,7 @@
 		modeProfileBoundWithoutDraft = false;
 		modeProfileCapabilitiesOverridden = false;
 		modeProfileControlsReady = false;
+		modeProfileCapabilityOverrideTracker = createConversationModeCapabilityOverrideTracker();
 		clearSelectedTerminal();
 	};
 
@@ -3735,7 +3747,8 @@
 										}}
 										onChange={(data) => {
 											if (modeProfileBoundWithoutDraft && modeProfileControlsReady) {
-												modeProfileCapabilitiesOverridden = true;
+												modeProfileCapabilitiesOverridden =
+													modeProfileCapabilityOverrideTracker.observe(data);
 											}
 											if (!$temporaryChatEnabled) {
 												saveDraft(
@@ -3814,7 +3827,8 @@
 										}}
 										onChange={(data) => {
 											if (modeProfileBoundWithoutDraft && modeProfileControlsReady) {
-												modeProfileCapabilitiesOverridden = true;
+												modeProfileCapabilitiesOverridden =
+													modeProfileCapabilityOverrideTracker.observe(data);
 											}
 											if (!$temporaryChatEnabled) {
 												saveDraft({

@@ -1,11 +1,21 @@
 import { describe, expect, it } from 'vitest';
 
 import {
+	createConversationModeCapabilityOverrideTracker,
 	createConversationModeProfileDraftController,
 	isDirectToolServersPermitted,
 	resolveConversationModeProfile,
 	type ConversationModeProfileResolutionInput
 } from './conversationModeProfiles';
+
+const emptyCapabilities = {
+	selectedToolIds: [],
+	selectedSkillIds: [],
+	selectedFilterIds: [],
+	webSearchEnabled: false,
+	codeInterpreterEnabled: false,
+	imageGenerationEnabled: false
+};
 
 const model = (overrides: Record<string, unknown> = {}) => ({
 	id: 'system-default-model',
@@ -282,4 +292,38 @@ describe('conversation mode profile draft controller', () => {
 			revisionHint: 'agent-restored-r7'
 		});
 	});
+});
+
+describe('conversation mode capability override tracker', () => {
+	it('ignores prompt, file, and reasoning-only changes', () => {
+		const tracker = createConversationModeCapabilityOverrideTracker();
+		tracker.observe({ ...emptyCapabilities, prompt: '', files: [], reasoningEffort: 'medium' });
+
+		expect(
+			tracker.observe({
+				...emptyCapabilities,
+				prompt: 'typed text',
+				files: [{ id: 'file-1' }],
+				reasoningEffort: 'high'
+			})
+		).toBe(false);
+	});
+
+	it.each([
+		['selectedToolIds', ['tool-a']],
+		['selectedSkillIds', ['skill-a']],
+		['selectedFilterIds', ['filter-a']],
+		['webSearchEnabled', true],
+		['codeInterpreterEnabled', true],
+		['imageGenerationEnabled', true]
+	] as const)(
+		'opts in for a real %s change and remains explicit after clearing',
+		(field, value) => {
+			const tracker = createConversationModeCapabilityOverrideTracker();
+			tracker.observe(emptyCapabilities);
+
+			expect(tracker.observe({ ...emptyCapabilities, [field]: value })).toBe(true);
+			expect(tracker.observe(emptyCapabilities)).toBe(true);
+		}
+	);
 });

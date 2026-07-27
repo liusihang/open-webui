@@ -110,4 +110,15 @@ describe('conversation mode presentation contract', () => {
 		expect(chat).toContain('directTerminalPermitted');
 		expect(chat).toContain('!modeProfileBoundWithoutDraft && !storageChatInput');
 	});
+
+	it('tracks capability-only MessageInput changes without treating prompt edits as overrides', () => {
+		const chat = readSource('./Chat.svelte');
+		const observations = chat.match(/modeProfileCapabilityOverrideTracker\.observe\(data\)/g) ?? [];
+
+		expect(chat).toContain('createConversationModeCapabilityOverrideTracker');
+		expect(observations).toHaveLength(2);
+		expect(chat).not.toMatch(
+			/onChange=\{\(data\) => \{[\s\S]{0,180}modeProfileCapabilitiesOverridden = true/
+		);
+	});
 });

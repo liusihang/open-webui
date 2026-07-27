@@ -17,6 +17,39 @@ export type ConversationModeProfileWarning = {
 	resourceIds: string[];
 };
 
+type ConversationModeCapabilityChange = {
+	selectedToolIds?: unknown;
+	selectedSkillIds?: unknown;
+	selectedFilterIds?: unknown;
+	webSearchEnabled?: unknown;
+	codeInterpreterEnabled?: unknown;
+	imageGenerationEnabled?: unknown;
+};
+
+const capabilityFingerprint = (value: ConversationModeCapabilityChange) =>
+	JSON.stringify({
+		toolIds: uniqueStrings(value.selectedToolIds).sort(),
+		skillIds: uniqueStrings(value.selectedSkillIds).sort(),
+		filterIds: uniqueStrings(value.selectedFilterIds).sort(),
+		webSearch: value.webSearchEnabled === true,
+		codeInterpreter: value.codeInterpreterEnabled === true,
+		imageGeneration: value.imageGenerationEnabled === true
+	});
+
+export const createConversationModeCapabilityOverrideTracker = () => {
+	let baseline: string | null = null;
+	let overridden = false;
+
+	return {
+		observe: (value: ConversationModeCapabilityChange) => {
+			const next = capabilityFingerprint(value);
+			if (baseline === null) baseline = next;
+			else if (next !== baseline) overridden = true;
+			return overridden;
+		}
+	};
+};
+
 export const isDirectToolServersPermitted = (
 	user:
 		| {

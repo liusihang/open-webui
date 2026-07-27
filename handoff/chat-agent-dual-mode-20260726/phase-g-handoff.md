@@ -22,7 +22,7 @@ Truth surface: `/Users/liusihang/.codex/worktrees/d790/openwebui` on `codex/pr7-
 - [x] G3 Integrate one-time new-chat/temporary initialization and revision hint.
 - [x] G4 Integrate model-change retention and Terminal leakage fixes.
 - [x] G5 Focused frontend tests, real compile checks, formatting, and scope audit.
-- [x] G6 Independent spec/quality review and remediation.
+- [ ] G6 Independent spec/quality review and remediation.
 - [x] G7 Commit verified Phase G files; no push.
 
 ## Evidence log
@@ -44,3 +44,7 @@ Truth surface: `/Users/liusihang/.codex/worktrees/d790/openwebui` on `codex/pr7-
 - 2026-07-27 remediation RED: resolver test failed for omitted feature capability support, missing direct-tool permission helper, and missing controller draft-hint hydration; Chat source integration test failed for missing direct-Terminal/immutable-bound request guards.
 - 2026-07-27 remediation implementation: direct Terminal availability, model defaulting, `terminal_id`, and direct `tool_servers` now use TerminalMenu-compatible permission semantics. Bound chats without drafts omit controlled capability fields and retain voice/memory; explicit composer changes opt into request overrides. Resolver now honors `function_calling === false`, explicit-false feature support, and restored-hint hydration.
 - 2026-07-27 remediation GREEN: focused non-watch 8-file Vitest gate passed 70 tests (the prior 66 plus four new remediation cases); direct `Chat.svelte` compilation, Prettier check, and `git diff --check` passed.
+- 2026-07-27 remediation audit: G6 remains open. Root-cause tracing showed `MessageInput.svelte` invokes `onChange` reactively for prompt/file changes as well as capability changes. The remediation currently marks any such event as a capability override, so merely typing in an existing bound chat can still send empty/false controlled overrides and replace bound defaults. A capability-only change detector and failing regression are required before spec re-review.
+- 2026-07-27 capability-tracker RED: pure tests failed for the missing capability-only tracker across prompt/file/reasoning-only updates and six controlled capability fields; the Chat integration source test failed because both `MessageInput` callbacks still set the override flag directly.
+- 2026-07-27 capability-tracker implementation: added a sticky capability fingerprint that ignores prompt/files/reasoning, establishes a bound-chat baseline, opts in on tool/skill/filter/web-search/code-interpreter/image-generation changes, and remains explicit after returning to empty. Terminal remains independently tracked through `selectedTerminalId`.
+- 2026-07-27 capability-tracker GREEN: focused 8-file non-watch gate passed 78 tests; direct `Chat.svelte` compilation, Prettier check, and `git diff --check` passed. G6 remains unchecked pending independent specification and quality reviews.
