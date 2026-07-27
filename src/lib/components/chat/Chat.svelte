@@ -2739,6 +2739,7 @@
 					...q,
 					[$chatId]: [...(q[$chatId] ?? []), { id: uuidv4(), prompt: userPrompt, files: _files }]
 				}));
+				await clearDraft($chatId || null);
 				// Clear input
 				messageInput?.setText('');
 				prompt = '';
@@ -2760,6 +2761,8 @@
 				return;
 			}
 		}
+
+		await clearDraft($chatId || null);
 
 		// Clear input and submit
 		messageInput?.setText('');
@@ -4047,7 +4050,6 @@
 											handleWebSearchToggle(enabled);
 										}}
 										on:submit={async (e) => {
-											await clearDraft($chatId);
 											if (e.detail || files.length > 0) {
 												await tick();
 
@@ -4114,7 +4116,6 @@
 											}
 										}}
 										on:submit={async (e) => {
-											await clearDraft();
 											if (e.detail || files.length > 0) {
 												await tick();
 												await submitHandler(e.detail);

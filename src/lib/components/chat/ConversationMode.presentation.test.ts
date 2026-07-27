@@ -334,16 +334,81 @@ describe('conversation mode presentation contract', () => {
 		expect(chat).toContain('modelOverride: Model | undefined = undefined');
 	});
 
-	it('awaits first-send draft clearing and suppresses post-clear root autosave', () => {
+	it('routes every accepted submit caller through one draft-clearing boundary', () => {
 		const chat = readSource('./Chat.svelte');
-		const submitHandlers = chat.match(/on:submit=\{async \(e\) => \{([\s\S]*?)\n\t+\}\}/g) ?? [];
+		const callOverlay = readSource('./MessageInput/CallOverlay.svelte');
+		const submitHandler = chat.match(
+			/const submitHandler = async \([\s\S]*?\) => \{([\s\S]*?)\n\t\};\n\n\tconst sendMessage/
+		)?.[1];
+		const suggestion = chat.match(
+			/const onSelect = async \(e\) => \{([\s\S]*?)\n\t\};\n\n\t\$: if/
+		)?.[1];
+		const postMessage = chat.match(
+			/const onMessageHandler = async \([\s\S]*?\) => \{([\s\S]*?)\n\t\};\n\n\tconst savedModelIds/
+		)?.[1];
+		const initNewChat = chat.match(
+			/const initNewChat = async \([\s\S]*?\) => \{([\s\S]*?)\n\t\};\n\n\tconst loadChat/
+		)?.[1];
+		const visibleComposers = chat.match(/on:submit=\{async \(e\) => \{([\s\S]*?)\n\t+\}\}/g) ?? [];
 
+		expect(submitHandler).toBeDefined();
+		expect(submitHandler?.match(/await clearDraft\(\$chatId \|\| null\);/g) ?? []).toHaveLength(2);
 		expect(chat.match(/await clearDraft\([^)]*\);/g) ?? []).toHaveLength(2);
-		expect(submitHandlers).toHaveLength(2);
-		for (const handler of submitHandlers) {
-			expect(handler.indexOf('await clearDraft(')).toBeLessThan(handler.indexOf('submitHandler('));
+		expect(suggestion).toContain('submitHandler(prompt)');
+		expect(postMessage?.match(/submitHandler\(/g) ?? []).toHaveLength(4);
+		expect(initNewChat?.match(/submitHandler\(/g) ?? []).toHaveLength(2);
+		expect(chat).toContain('submitPrompt={submitHandler}');
+		expect(callOverlay).toContain('await submitPrompt(res.text, { _raw: true })');
+		expect(visibleComposers).toHaveLength(2);
+		for (const composer of visibleComposers) {
+			expect(composer).toContain('await submitHandler(e.detail)');
+			expect(composer).not.toContain('clearDraft(');
 		}
 		expect(chat).toContain('shouldAutosaveModeProfileDraft()');
 		expect(chat.match(/if \(shouldAutosaveModeProfileDraft\(\)\)/g) ?? []).toHaveLength(2);
+	});
+
+	it('clears only after validation and web-search confirmation accepts an input', () => {
+		const chat = readSource('./Chat.svelte');
+		const submitHandler = chat.match(
+			/const submitHandler = async \([\s\S]*?\) => \{([\s\S]*?)\n\t\};\n\n\tconst sendMessage/
+		)?.[1];
+		const confirmWebSearch = chat.match(
+			/const confirmWebSearch = async \(\) => \{([\s\S]*?)\n\t\};/
+		)?.[1];
+
+		expect(submitHandler).toBeDefined();
+		const clearOffsets = [
+			...(submitHandler?.matchAll(/await clearDraft\(\$chatId \|\| null\);/g) ?? [])
+		].map((match) => match.index ?? -1);
+		expect(clearOffsets).toHaveLength(2);
+		const [queueClear, normalClear] = clearOffsets;
+		for (const rejectedBeforeAcceptance of [
+			'pendingOAuthTools.length > 0',
+			"userPrompt === '' && files.length === 0",
+			"selectedModels.includes('')",
+			"file.status === 'uploading'",
+			'files.length + chatFiles.length > $config?.file?.max_count',
+			'openWebSearchConfirm()'
+		]) {
+			expect(submitHandler?.indexOf(rejectedBeforeAcceptance)).toBeLessThan(queueClear);
+		}
+		expect(submitHandler?.indexOf('chatRequestQueues.update')).toBeLessThan(queueClear);
+		expect(queueClear).toBeLessThan(
+			submitHandler?.indexOf("messageInput?.setText('')", queueClear) ?? -1
+		);
+		expect(submitHandler?.indexOf('currentMessage.error && !currentMessage.content')).toBeLessThan(
+			normalClear
+		);
+		expect(normalClear).toBeLessThan(
+			submitHandler?.indexOf("messageInput?.setText('')", normalClear) ?? -1
+		);
+		expect(normalClear).toBeLessThan(
+			submitHandler?.indexOf('await submitPrompt', normalClear) ?? -1
+		);
+		expect(confirmWebSearch).toBeDefined();
+		expect(confirmWebSearch?.indexOf('webSearchConfirmed = true')).toBeLessThan(
+			confirmWebSearch?.indexOf('await submitHandler(userPrompt)') ?? -1
+		);
 	});
 });
