@@ -120,17 +120,13 @@ describe('conversation mode presentation contract', () => {
 		const chat = readSource('./Chat.svelte');
 		const observations =
 			chat.match(/modeProfileCapabilityAuthorityController\.observe\(data\)/g) ?? [];
-		const persistedMarkers =
-			chat.match(
-				/modeProfileCapabilityAuthority:\s*modeProfileCapabilityAuthorityController\.snapshot\(\)/g
-			) ?? [];
-		const persistedTerminals =
-			chat.match(/selectedTerminalId:\s*\$selectedTerminalId \?\? null/g) ?? [];
+		const persistedSnapshots = chat.match(/createModeProfileDraftSnapshot\(data\)/g) ?? [];
 
 		expect(chat).toContain('createConversationModeCapabilityAuthorityController');
 		expect(observations).toHaveLength(2);
-		expect(persistedMarkers).toHaveLength(2);
-		expect(persistedTerminals).toHaveLength(3);
+		expect(persistedSnapshots).toHaveLength(2);
+		expect(chat).toContain('selectedTerminalId: $selectedTerminalId ?? null');
+		expect(chat).toContain('modeProfileCapabilityAuthority: modeProfileControlsReady');
 		expect(chat).toContain('modeProfileCapabilityAuthorityController.markExplicit()');
 	});
 
@@ -143,7 +139,7 @@ describe('conversation mode presentation contract', () => {
 			/const init = async \(\) => \{([\s\S]*?)\n\t\t\};\n\t\tinit\(\);/
 		)?.[1];
 		const beginModeProfileDraft = chat.match(
-			/const beginModeProfileDraft = \(\) => \{([\s\S]*?)\n\t\};/
+			/const beginModeProfileDraft = \([\s\S]*?\) => \{([\s\S]*?)\n\t\};/
 		)?.[1];
 
 		expect(chat).toContain('parseConversationModeDraft');
@@ -177,8 +173,8 @@ describe('conversation mode presentation contract', () => {
 
 		expect(restoreSnapshot).toBeDefined();
 		expect(restoreSnapshot).toContain('selectedTerminalId.set(snapshot.selections.terminalId)');
-		expect(restoreSnapshot).toContain('await ensureModeProfileCatalogsLoaded()');
-		expect(restoreSnapshot).toContain('applyModeProfileModelChange()');
+		expect(restoreSnapshot).toContain('await revalidateModeProfileCapabilities()');
+		expect(restoreSnapshot).toContain('await finalizeModeProfileCapabilitySnapshot()');
 		expect(navigateHandler).toContain('getConversationModeDraftCapabilitySnapshot');
 		expect(navigateHandler).toContain(
 			'await restoreModeProfileCapabilitySnapshot(restoredCapabilitySnapshot)'
@@ -198,7 +194,7 @@ describe('conversation mode presentation contract', () => {
 
 		expect(chat).toContain('getConversationModeAvailableToolIds');
 		expect(availability).toBeDefined();
-		expect(availability).toContain('toolServers: $toolServers ?? []');
+		expect(availability).toContain('modeProfileExternalCatalog.toolServers');
 		expect(availability).toContain('directToolServersPermitted: directTerminalPermitted');
 	});
 
@@ -213,5 +209,97 @@ describe('conversation mode presentation contract', () => {
 		expect(sendMessageSocket).toContain('...toolServersRequest');
 		expect(sendMessageSocket).not.toContain('tool_servers: capabilityRequest.emitToolServers');
 		expect(sendMessageSocket).not.toMatch(/selected(?:Tool|Skill|Filter)Ids\.length > 0/);
+	});
+
+	it('treats an unlocked Chat/Agent selection as an awaited profile-boundary transition', () => {
+		const chat = readSource('./Chat.svelte');
+		const transition = chat.match(
+			/const transitionConversationMode = async \(nextMode: ConversationMode\) => \{([\s\S]*?)\n\t\};/
+		)?.[1];
+		const setDefaults = chat.match(
+			/const setDefaults = async \(\) => \{([\s\S]*?)\n\t\};\n\n\tconst showMessage/
+		)?.[1];
+
+		expect(transition).toBeDefined();
+		expect(transition).toContain(
+			'if (conversationModeLocked || nextMode === conversationMode) return'
+		);
+		expect(transition).toContain('loading = true');
+		expect(transition).toContain('conversationMode = nextMode');
+		expect(transition?.match(/conversationMode = nextMode/g)).toHaveLength(1);
+		expect(transition).toContain('beginModeProfileDraft({ restoreRootDraft: false })');
+		expect(transition).toContain('await resetInput({ initialize: true })');
+		expect(transition).toContain('await finalizeModeProfileCapabilitySnapshot()');
+		expect(transition).toContain('loading = false');
+		expect(transition).not.toContain('selectedModels =');
+		expect(transition).not.toContain('reasoningEffort =');
+		expect(transition).not.toContain('files =');
+		expect(transition).not.toContain('prompt =');
+		expect(setDefaults).toContain('selectedModelIds.filter((id) => id).length !== 1');
+		expect(chat).toContain('onConversationModeSelect={transitionConversationMode}');
+		expect(chat).not.toMatch(
+			/onConversationModeSelect=\{\(mode\) => \{\s*conversationMode = mode;/
+		);
+	});
+
+	it('persists only finalized versioned capability snapshots after initialization or restoration', () => {
+		const chat = readSource('./Chat.svelte');
+		const createDraft = chat.match(
+			/const createModeProfileDraftSnapshot = \(input: any\) => \(\{([\s\S]*?)\n\t\}\);/
+		)?.[1];
+		const finalize = chat.match(
+			/const finalizeModeProfileCapabilitySnapshot = async \(\) => \{([\s\S]*?)\n\t\};/
+		)?.[1];
+		const persistFinalized = chat.match(
+			/const persistFinalizedModeProfileDraftSnapshot = async \(\) => \{([\s\S]*?)\n\t\};/
+		)?.[1];
+		const initNewChat = chat.match(
+			/const initNewChat = async \([\s\S]*?\) => \{([\s\S]*?)\n\t\};\n\n\tconst loadChat/
+		)?.[1];
+
+		expect(createDraft).toBeDefined();
+		expect(createDraft).toContain('modeProfileControlsReady');
+		expect(createDraft).toContain(
+			'modeProfileCapabilitySnapshotVersion: modeProfileControlsReady ? 1 : undefined'
+		);
+		expect(finalize).toBeDefined();
+		expect(finalize).toContain('modeProfileBoundTerminalId = $selectedTerminalId');
+		expect(finalize).toContain('modeProfileControlsReady = true');
+		expect(finalize).toContain('await persistFinalizedModeProfileDraftSnapshot()');
+		expect(chat).toContain("modeProfileDraftId.startsWith('draft:') ? null");
+		expect(persistFinalized).toBeDefined();
+		expect(persistFinalized).toContain('getCurrentModeProfileDraftInput()');
+		expect(persistFinalized).not.toContain('latestModeProfileDraftInput');
+		expect(initNewChat).toBeDefined();
+		expect(initNewChat).toContain('await finalizeModeProfileCapabilitySnapshot()');
+		expect(initNewChat?.indexOf('await finalizeModeProfileCapabilitySnapshot()')).toBeGreaterThan(
+			initNewChat?.indexOf('await resetInput(') ?? Number.MAX_SAFE_INTEGER
+		);
+		expect(chat).toContain('immediate: true');
+		expect(chat).toContain('await modeProfileSetupPromise');
+		expect(chat).toContain('if (settingDefaultsPromise) return settingDefaultsPromise');
+	});
+
+	it('awaits explicit external catalog truth before destructive revalidation and emission', () => {
+		const chat = readSource('./Chat.svelte');
+		const ensureCatalogs = chat.match(
+			/const ensureModeProfileExternalCatalogsLoaded = async \([\s\S]*?\) => \{([\s\S]*?)\n\t\};/
+		)?.[1];
+		const revalidate = chat.match(
+			/const revalidateModeProfileCapabilities = async \(\) => \{([\s\S]*?)\n\t\};/
+		)?.[1];
+		const sendMessageSocket = chat.match(/const sendMessageSocket = async \([\s\S]*?\n\t\};/)?.[0];
+
+		expect(chat).toContain("import { getTerminalServers } from '$lib/apis/terminal'");
+		expect(ensureCatalogs).toBeDefined();
+		expect(ensureCatalogs).toContain('await getTerminalServers(localStorage.token)');
+		expect(revalidate).toBeDefined();
+		expect(revalidate).toContain('modeProfileControlsReady = false');
+		expect(revalidate).toContain('await ensureModeProfileExternalCatalogsLoaded()');
+		expect(revalidate).toContain('applyModeProfileModelChange()');
+		expect(revalidate).toContain('modeProfileBoundTerminalId = $selectedTerminalId');
+		expect(sendMessageSocket).toContain('await revalidateModeProfileCapabilities()');
+		expect(chat).toContain('configuredToolServers: $settings?.toolServers ?? []');
+		expect(chat).toContain('directToolServerCatalogReady: modeProfileExternalCatalog.ready');
 	});
 });

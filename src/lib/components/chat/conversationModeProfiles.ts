@@ -72,6 +72,7 @@ export const getConversationModeDraftCapabilitySnapshot = (
 	if (!draft) return null;
 	const authority = draft.modeProfileCapabilityAuthority;
 	if (
+		draft.modeProfileCapabilitySnapshotVersion !== 1 ||
 		(authority !== 'initialized' && authority !== 'explicit') ||
 		(options.existingChat && authority !== 'explicit') ||
 		!isStringArray(draft.selectedToolIds) ||
@@ -141,6 +142,10 @@ export const createConversationModeCapabilityAuthorityController = (
 			else if (next !== baseline) authority = 'explicit';
 			return authority;
 		},
+		rebase: (value: ConversationModeCapabilityChange) => {
+			baseline = capabilityFingerprint(value);
+			return authority;
+		},
 		markExplicit: () => {
 			authority = 'explicit';
 			return authority;
@@ -160,6 +165,8 @@ export const sanitizeConversationModeSelectedToolIds = (
 type ConversationModeAvailableToolIdsInput = {
 	tools: readonly { id?: unknown; authenticated?: unknown }[];
 	toolServers: readonly { info?: unknown }[];
+	configuredToolServers?: readonly { config?: { enable?: unknown } }[];
+	directToolServerCatalogReady?: boolean;
 	directToolServersPermitted: boolean;
 };
 
@@ -172,9 +179,13 @@ export const getConversationModeAvailableToolIds = (
 			.map((tool) => tool.id)
 			.filter((id): id is string => typeof id === 'string' && id.length > 0),
 		...(input.directToolServersPermitted
-			? input.toolServers.flatMap((server, index) =>
-					server.info ? [`direct_server:${index}`] : []
-				)
+			? (input.directToolServerCatalogReady ?? true)
+				? input.toolServers.flatMap((server, index) =>
+						server.info ? [`direct_server:${index}`] : []
+					)
+				: (input.configuredToolServers ?? []).flatMap((server, index) =>
+						server.config?.enable === true ? [`direct_server:${index}`] : []
+					)
 			: [])
 	])
 ];

@@ -27,6 +27,7 @@ const emptyCapabilities = {
 const completeDraft = (overrides: Record<string, unknown> = {}) => ({
 	prompt: 'draft prompt',
 	files: [{ id: 'draft-file' }],
+	modeProfileCapabilitySnapshotVersion: 1,
 	modeProfileCapabilityAuthority: 'explicit',
 	selectedToolIds: ['profile-tool'],
 	selectedSkillIds: ['profile-skill'],
@@ -378,6 +379,18 @@ describe('conversation mode capability authority', () => {
 		).toMatchObject({ authority: 'explicit' });
 		expect(
 			getConversationModeDraftCapabilitySnapshot(
+				completeDraft({ modeProfileCapabilitySnapshotVersion: undefined }),
+				{ existingChat: false }
+			)
+		).toBeNull();
+		expect(
+			getConversationModeDraftCapabilitySnapshot(
+				completeDraft({ modeProfileCapabilitySnapshotVersion: 2 }),
+				{ existingChat: false }
+			)
+		).toBeNull();
+		expect(
+			getConversationModeDraftCapabilitySnapshot(
 				completeDraft({ modeProfileCapabilityAuthority: 'initialized' }),
 				{ existingChat: true }
 			)
@@ -590,6 +603,22 @@ describe('conversation mode capability authority', () => {
 		expect(controller.snapshot()).toBe('explicit');
 	});
 
+	it('rebases resolver-owned changes without treating them as user overrides', () => {
+		const controller = createConversationModeCapabilityAuthorityController({ existingChat: true });
+		controller.observe(emptyCapabilities);
+
+		expect(controller).toHaveProperty('rebase');
+		expect(
+			(controller as any).rebase({ ...emptyCapabilities, selectedToolIds: ['resolved-tool'] })
+		).toBe('inherit_bound');
+		expect(controller.observe({ ...emptyCapabilities, selectedToolIds: ['resolved-tool'] })).toBe(
+			'inherit_bound'
+		);
+		expect(controller.observe({ ...emptyCapabilities, selectedToolIds: ['user-tool'] })).toBe(
+			'explicit'
+		);
+	});
+
 	it('gates restored direct tool selections and all direct request routing when permission is denied', () => {
 		expect(
 			sanitizeConversationModeSelectedToolIds(
@@ -763,5 +792,41 @@ describe('conversation mode capability authority', () => {
 				}).effective.toolIds
 			).toEqual([]);
 		}
+	});
+
+	it('defers destructive direct-tool filtering to configured indices until the live catalog is ready', () => {
+		expect(
+			getConversationModeAvailableToolIds({
+				tools: [],
+				toolServers: [],
+				configuredToolServers: [
+					{ config: { enable: true } },
+					{ config: { enable: false } },
+					{ config: { enable: true } }
+				],
+				directToolServerCatalogReady: false,
+				directToolServersPermitted: true
+			})
+		).toEqual(['direct_server:0', 'direct_server:2']);
+
+		expect(
+			getConversationModeAvailableToolIds({
+				tools: [],
+				toolServers: [],
+				configuredToolServers: [{ config: { enable: true } }],
+				directToolServerCatalogReady: false,
+				directToolServersPermitted: false
+			})
+		).toEqual([]);
+
+		expect(
+			getConversationModeAvailableToolIds({
+				tools: [],
+				toolServers: [{ info: { title: 'Live server' } }],
+				configuredToolServers: [{ config: { enable: true } }, { config: { enable: true } }],
+				directToolServerCatalogReady: true,
+				directToolServersPermitted: true
+			})
+		).toEqual(['direct_server:0']);
 	});
 });

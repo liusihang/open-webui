@@ -91,8 +91,10 @@
 		generateMoACompletion,
 		stopTask,
 		stopTasksByChatId,
-		getTaskIdsByChatId
+		getTaskIdsByChatId,
+		getToolServersData
 	} from '$lib/apis';
+	import { getTerminalServers } from '$lib/apis/terminal';
 	import { getTools } from '$lib/apis/tools';
 	import { getSkills } from '$lib/apis/skills';
 	import { uploadFile } from '$lib/apis/files';
@@ -217,7 +219,13 @@
 	let modeProfileControlsReady = false;
 	let modeProfileBoundTerminalId: string | null = null;
 	let latestModeProfileDraftInput: any = null;
-	let modeProfileCapabilityRestorePromise: Promise<void> | null = null;
+	let modeProfileSetupPromise: Promise<void> | null = null;
+	let modeProfileExternalCatalog: {
+		ready: boolean;
+		toolServers: any[];
+		terminalServers: any[];
+	} = { ready: false, toolServers: [], terminalServers: [] };
+	let modeProfileExternalCatalogPromise: Promise<void> | null = null;
 	let webSearchActive = false;
 	let showWebSearchConfirm = false;
 	let pendingWebSearchPrompt: string | null = null;
@@ -475,18 +483,42 @@
 		onSelectedModelIdsChange();
 	}
 
+	const runModeProfileSetup = async (setup: () => Promise<void>) => {
+		if (modeProfileSetupPromise) {
+			await modeProfileSetupPromise;
+		}
+		const setupPromise = setup();
+		modeProfileSetupPromise = setupPromise;
+		try {
+			await setupPromise;
+		} finally {
+			if (modeProfileSetupPromise === setupPromise) {
+				modeProfileSetupPromise = null;
+			}
+		}
+	};
+
 	const onSelectedModelIdsChange = async () => {
 		if (modeProfileCapabilityAuthority === 'inherit_bound') {
 			oldSelectedModelIds = structuredClone(selectedModelIds);
 			return;
 		}
-		if (modeProfileInitializedDraftId && modeProfileInitializedDraftId === modeProfileDraftId) {
-			applyModeProfileModelChange();
-		} else if (modeProfileRevisionId) {
-			applyModeProfileModelChange();
-		} else {
-			await resetInput({ initialize: Boolean(modeProfileDraftId) });
+		if (!modeProfileControlsReady) {
+			oldSelectedModelIds = structuredClone(selectedModelIds);
+			return;
 		}
+		await runModeProfileSetup(async () => {
+			if (
+				(modeProfileInitializedDraftId && modeProfileInitializedDraftId === modeProfileDraftId) ||
+				modeProfileRevisionId
+			) {
+				await revalidateModeProfileCapabilities();
+			} else {
+				modeProfileControlsReady = false;
+				await resetInput({ initialize: Boolean(modeProfileDraftId) });
+				await finalizeModeProfileCapabilitySnapshot();
+			}
+		});
 		oldSelectedModelIds = structuredClone(selectedModelIds);
 	};
 
@@ -508,9 +540,13 @@
 
 	/** Check whether a terminal ID references an available system or direct terminal. */
 	const isTerminalAvailable = (tid: string): boolean => {
+		const availableTerminals = modeProfileExternalCatalog.ready
+			? modeProfileExternalCatalog.terminalServers
+			: ($terminalServers ?? []);
 		return (
-			($terminalServers ?? []).some((t) => t.id && t.id === tid) ||
-			(isDirectToolServersPermitted($user) &&
+			availableTerminals.some((t) => (t.id ? t.id === tid : t.url === tid)) ||
+			(!modeProfileExternalCatalog.ready &&
+				isDirectToolServersPermitted($user) &&
 				($settings?.terminalServers ?? []).some((s) => s.url === tid))
 		);
 	};
@@ -536,9 +572,21 @@
 		return profiles?.find((profile) => profile.mode === conversationMode) ?? null;
 	};
 
+	const getModeProfileTerminalCandidates = () => {
+		const model = (atSelectedModel ?? $models.find((item) => item.id === selectedModels[0])) as any;
+		const profileTerminalId = getModeProfile()?.defaults?.terminal_id;
+		return [
+			...new Set([$selectedTerminalId, profileTerminalId, model?.info?.meta?.terminalId])
+		].filter((id): id is string => typeof id === 'string' && id.length > 0);
+	};
+
 	const getModeProfileAvailability = (): ConversationModeProfileAvailability => {
 		const model = (atSelectedModel ?? $models.find((item) => item.id === selectedModels[0])) as any;
-		const availableTerminals = ($terminalServers ?? []) as any[];
+		const availableTerminals = (
+			modeProfileExternalCatalog.ready
+				? modeProfileExternalCatalog.terminalServers
+				: ($terminalServers ?? [])
+		) as any[];
 		const configuredTerminalServers = (($settings as any)?.terminalServers ?? []) as any[];
 		const availableTools = ($tools ?? []) as any[];
 		const availableSkills = ($skills ?? []) as any[];
@@ -552,13 +600,25 @@
 				...availableTerminals
 					.map((server) => (server.id ? server.id : directTerminalPermitted ? server.url : null))
 					.filter((id): id is string => typeof id === 'string' && id.length > 0),
-				...(directTerminalPermitted ? configuredTerminalServers : [])
+				...(!modeProfileExternalCatalog.ready && directTerminalPermitted
+					? configuredTerminalServers
+					: []
+				)
 					.map((server) => server.url)
-					.filter((id): id is string => typeof id === 'string' && id.length > 0)
+					.filter((id): id is string => typeof id === 'string' && id.length > 0),
+				...(!modeProfileExternalCatalog.ready ? getModeProfileTerminalCandidates() : []).filter(
+					(id) =>
+						directTerminalPermitted ||
+						!configuredTerminalServers.some((server) => server.url === id)
+				)
 			],
 			toolIds: getConversationModeAvailableToolIds({
 				tools: availableTools,
-				toolServers: $toolServers ?? [],
+				toolServers: modeProfileExternalCatalog.ready
+					? modeProfileExternalCatalog.toolServers
+					: ($toolServers ?? []),
+				configuredToolServers: $settings?.toolServers ?? [],
+				directToolServerCatalogReady: modeProfileExternalCatalog.ready,
 				directToolServersPermitted: directTerminalPermitted
 			}),
 			skillIds: availableSkills
@@ -591,6 +651,65 @@
 			...(codeInterpreterEnabled ? ['code_interpreter'] : [])
 		]
 	});
+
+	const ensureModeProfileExternalCatalogsLoaded = async () => {
+		if (modeProfileExternalCatalogPromise) {
+			await modeProfileExternalCatalogPromise;
+		}
+
+		const loadPromise = (async () => {
+			const directToolServersPermitted = isDirectToolServersPermitted($user);
+			const configuredToolServers = directToolServersPermitted
+				? ((($settings as any)?.toolServers ?? []) as any[])
+				: [];
+			const terminalCandidates = new Set(getModeProfileTerminalCandidates());
+			const configuredTerminalServers = directToolServersPermitted
+				? (((($settings as any)?.terminalServers ?? []) as any[])
+						.filter((server) => terminalCandidates.has(server.url))
+						.map((server) => ({
+							url: server.url,
+							auth_type: server.auth_type ?? 'bearer',
+							key: server.key ?? '',
+							path: server.path ?? '/openapi.json',
+							config: { enable: true }
+						})) as any[])
+				: [];
+
+			const toolServersPromise = getToolServersData(configuredToolServers);
+			const directTerminalsPromise = getToolServersData(configuredTerminalServers);
+			const systemTerminals = await getTerminalServers(localStorage.token);
+			const [loadedToolServers, loadedDirectTerminals] = await Promise.all([
+				toolServersPromise,
+				directTerminalsPromise
+			]);
+
+			modeProfileExternalCatalog = {
+				ready: true,
+				toolServers: (loadedToolServers ?? []).filter((server) => server && !server.error),
+				terminalServers: [
+					...(loadedDirectTerminals ?? []).filter((server) => server && !server.error),
+					...(systemTerminals ?? []).map((terminal) => ({
+						id: terminal.id,
+						url: `${WEBUI_API_BASE_URL}/terminals/${terminal.id}`,
+						name: terminal.name,
+						key: localStorage.token
+					}))
+				]
+			};
+		})();
+
+		modeProfileExternalCatalogPromise = loadPromise;
+		try {
+			await loadPromise;
+		} catch (error) {
+			modeProfileExternalCatalog = { ready: false, toolServers: [], terminalServers: [] };
+			console.error('[mode profile catalogs]', error);
+		} finally {
+			if (modeProfileExternalCatalogPromise === loadPromise) {
+				modeProfileExternalCatalogPromise = null;
+			}
+		}
+	};
 
 	const ensureModeProfileCatalogsLoaded = async () => {
 		if (!$tools) tools.set(await getTools(localStorage.token));
@@ -665,10 +784,47 @@
 		applyModeProfileResolution(snapshot, 'model_change');
 	};
 
+	const revalidateModeProfileCapabilities = async () => {
+		const restoreControlsReady = modeProfileControlsReady;
+		modeProfileControlsReady = false;
+		try {
+			await ensureModeProfileCatalogsLoaded();
+			await ensureModeProfileExternalCatalogsLoaded();
+			applyModeProfileModelChange();
+			modeProfileBoundTerminalId = $selectedTerminalId;
+			modeProfileCapabilityAuthority = modeProfileCapabilityAuthorityController.rebase({
+				selectedToolIds,
+				selectedSkillIds,
+				selectedFilterIds,
+				webSearchEnabled,
+				codeInterpreterEnabled,
+				imageGenerationEnabled
+			});
+		} finally {
+			if (restoreControlsReady) {
+				modeProfileControlsReady = true;
+			}
+		}
+	};
+
+	const finalizeModeProfileCapabilitySnapshot = async () => {
+		modeProfileBoundTerminalId = $selectedTerminalId;
+		modeProfileCapabilityAuthority = modeProfileCapabilityAuthorityController.rebase({
+			selectedToolIds,
+			selectedSkillIds,
+			selectedFilterIds,
+			webSearchEnabled,
+			codeInterpreterEnabled,
+			imageGenerationEnabled
+		});
+		modeProfileControlsReady = true;
+		await persistFinalizedModeProfileDraftSnapshot();
+	};
+
 	const restoreModeProfileCapabilitySnapshot = async (
 		snapshot: ConversationModeDraftCapabilitySnapshot
 	) => {
-		const restorePromise = (async () => {
+		await runModeProfileSetup(async () => {
 			modeProfileControlsReady = false;
 			selectedToolIds = [...snapshot.selections.toolIds];
 			selectedSkillIds = [...snapshot.selections.skillIds];
@@ -680,27 +836,9 @@
 			clearSelectedTerminal();
 			selectedTerminalId.set(snapshot.selections.terminalId);
 
-			await ensureModeProfileCatalogsLoaded();
-			applyModeProfileModelChange();
-			modeProfileBoundTerminalId = $selectedTerminalId;
-			modeProfileCapabilityAuthority = modeProfileCapabilityAuthorityController.observe({
-				selectedToolIds,
-				selectedSkillIds,
-				selectedFilterIds,
-				webSearchEnabled,
-				codeInterpreterEnabled,
-				imageGenerationEnabled
-			});
-			modeProfileControlsReady = true;
-		})();
-		modeProfileCapabilityRestorePromise = restorePromise;
-		try {
-			await restorePromise;
-		} finally {
-			if (modeProfileCapabilityRestorePromise === restorePromise) {
-				modeProfileCapabilityRestorePromise = null;
-			}
-		}
+			await revalidateModeProfileCapabilities();
+			await finalizeModeProfileCapabilitySnapshot();
+		});
 	};
 
 	const hasImageGenerationAccess = () =>
@@ -709,8 +847,11 @@
 	const getPrimaryImageGenerationModel = () =>
 		atSelectedModel ?? $models.find((m) => m.id === selectedModels[0]);
 
-	const beginModeProfileDraft = () => {
-		const storedRootDraft = !chatIdProp ? sessionStorage.getItem('chat-input') : null;
+	const beginModeProfileDraft = ({
+		restoreRootDraft = true
+	}: { restoreRootDraft?: boolean } = {}) => {
+		const storedRootDraft =
+			restoreRootDraft && !chatIdProp ? sessionStorage.getItem('chat-input') : null;
 		const restoredRootDraft = parseConversationModeDraft(storedRootDraft);
 		const restoredRootCapabilitySnapshot = getConversationModeDraftCapabilitySnapshot(
 			restoredRootDraft,
@@ -738,24 +879,38 @@
 		return restoredRootDraft;
 	};
 
+	const transitionConversationMode = async (nextMode: ConversationMode) => {
+		if (conversationModeLocked || nextMode === conversationMode) return;
+		loading = true;
+		try {
+			await runModeProfileSetup(async () => {
+				conversationMode = nextMode;
+				beginModeProfileDraft({ restoreRootDraft: false });
+				await resetInput({ initialize: true });
+				await finalizeModeProfileCapabilitySnapshot();
+			});
+		} finally {
+			loading = false;
+		}
+	};
+
 	const bindCanonicalModeProfileRevision = (revisionId: unknown) => {
 		modeProfileRevisionId = modeProfileDraftController.bindCanonicalRevision(
 			typeof revisionId === 'string' ? revisionId : null
 		).revisionHint;
 	};
 
-	let settingDefaults = false;
+	let settingDefaultsPromise: Promise<void> | null = null;
 	const setDefaults = async () => {
-		if (settingDefaults) return;
-		settingDefaults = true;
-
-		try {
+		if (settingDefaultsPromise) return settingDefaultsPromise;
+		const defaultsPromise = (async () => {
 			await ensureModeProfileCatalogsLoaded();
-			if (selectedModels.length !== 1 && !atSelectedModel) {
+			await ensureModeProfileExternalCatalogsLoaded();
+			if (selectedModelIds.filter((id) => id).length !== 1 && !atSelectedModel) {
 				return;
 			}
 
-			const model = atSelectedModel ?? $models.find((m) => m.id === selectedModels[0]);
+			const model = atSelectedModel ?? $models.find((m) => m.id === selectedModelIds[0]);
 			if (model) {
 				if (model.info?.meta?.toolIds) {
 					const defaultIds = [
@@ -850,8 +1005,14 @@
 			if (modeProfileDraftId.startsWith('draft:')) {
 				applyModeProfileInitialization();
 			}
+		})();
+		settingDefaultsPromise = defaultsPromise;
+		try {
+			await defaultsPromise;
 		} finally {
-			settingDefaults = false;
+			if (settingDefaultsPromise === defaultsPromise) {
+				settingDefaultsPromise = null;
+			}
 		}
 	};
 
@@ -1294,7 +1455,11 @@
 		}
 
 		// Clear stale selectedTerminalId if the referenced terminal no longer exists
-		if ($selectedTerminalId && !isTerminalAvailable($selectedTerminalId)) {
+		if (
+			modeProfileExternalCatalog.ready &&
+			$selectedTerminalId &&
+			!isTerminalAvailable($selectedTerminalId)
+		) {
 			clearSelectedTerminal();
 		}
 
@@ -1347,7 +1512,6 @@
 
 		const init = async () => {
 			if (!chatIdProp) {
-				loading = false;
 				await tick();
 			}
 
@@ -1359,6 +1523,7 @@
 				reasoningEffort = 'medium';
 
 				if (!$temporaryChatEnabled) {
+					prompt = restoredDraft.prompt;
 					messageInput?.setText(restoredDraft.prompt);
 					files = restoredDraft.files;
 					reasoningEffort = normalizeReasoningEffort(
@@ -1691,6 +1856,7 @@
 
 	const initNewChat = async (preselectedMode: ConversationMode | null = null) => {
 		console.log('initNewChat');
+		loading = true;
 		resetWebSearchConfirmation();
 		const requestedMode =
 			preselectedMode ?? normalizeConversationMode($page.url.searchParams.get('mode'));
@@ -1882,6 +2048,10 @@
 				selectedToolIds = [...selectedToolIds, pendingToolId];
 			}
 		}
+
+		await finalizeModeProfileCapabilitySnapshot();
+		loading = false;
+		await tick();
 
 		if ($page.url.searchParams.get('call') === 'true') {
 			showCallOverlay.set(true);
@@ -2769,8 +2939,11 @@
 			continueResponse?: boolean;
 		} = {}
 	) => {
-		if (modeProfileCapabilityRestorePromise) {
-			await modeProfileCapabilityRestorePromise;
+		if (modeProfileSetupPromise) {
+			await modeProfileSetupPromise;
+		}
+		if (modeProfileCapabilityAuthority !== 'inherit_bound') {
+			await revalidateModeProfileCapabilities();
 		}
 
 		const responseMessage = _history.messages[responseMessageId];
@@ -2909,8 +3082,12 @@
 			toolServerIds: capabilityRequest.toolServerIds,
 			terminalId: (capabilityRequest.request as { terminal_id?: unknown }).terminal_id,
 			directToolServersPermitted: directTerminalPermitted,
-			toolServers: $toolServers ?? [],
-			terminalServers: $terminalServers ?? []
+			toolServers: modeProfileExternalCatalog.ready
+				? modeProfileExternalCatalog.toolServers
+				: ($toolServers ?? []),
+			terminalServers: modeProfileExternalCatalog.ready
+				? modeProfileExternalCatalog.terminalServers
+				: ($terminalServers ?? [])
 		});
 
 		const res = await generateOpenAIChatCompletion(
@@ -3351,38 +3528,75 @@
 
 	const MAX_DRAFT_LENGTH = 5000;
 	let saveDraftTimeout: ReturnType<typeof setTimeout> | null = null;
+	const createModeProfileDraftSnapshot = (input: any) => ({
+		...(input ?? {}),
+		selectedToolIds: [...selectedToolIds],
+		selectedSkillIds: [...selectedSkillIds],
+		selectedFilterIds: [...selectedFilterIds],
+		webSearchEnabled,
+		codeInterpreterEnabled,
+		imageGenerationEnabled,
+		conversationMode: conversationMode,
+		modeProfileRevisionId,
+		modeProfileCapabilitySnapshotVersion: modeProfileControlsReady ? 1 : undefined,
+		modeProfileCapabilityAuthority: modeProfileControlsReady
+			? modeProfileCapabilityAuthorityController.snapshot()
+			: undefined,
+		selectedTerminalId: $selectedTerminalId ?? null,
+		imageGenerationUserOverride
+	});
+	const getCurrentModeProfileDraftInput = () => ({
+		prompt,
+		files: files
+			.filter((file) => file.type !== 'image')
+			.map((file) => ({
+				...file,
+				user: undefined,
+				access_grants: undefined
+			})),
+		reasoningEffort
+	});
 
-	const saveDraft = async (draft: any, chatId: string | null = null) => {
+	const saveDraft = async (
+		draft: any,
+		chatId: string | null = null,
+		{ immediate = false }: { immediate?: boolean } = {}
+	) => {
 		if (saveDraftTimeout) {
 			clearTimeout(saveDraftTimeout);
 		}
 
 		if (draft.prompt !== null && draft.prompt.length < MAX_DRAFT_LENGTH) {
-			saveDraftTimeout = setTimeout(async () => {
+			const persistDraft = async () => {
 				await sessionStorage.setItem(
 					`chat-input${chatId ? `-${chatId}` : ''}`,
 					JSON.stringify(draft)
 				);
-			}, 500);
+			};
+			if (immediate) {
+				await persistDraft();
+			} else {
+				saveDraftTimeout = setTimeout(persistDraft, 500);
+			}
 		} else {
 			sessionStorage.removeItem(`chat-input${chatId ? `-${chatId}` : ''}`);
 		}
 	};
 
+	const persistFinalizedModeProfileDraftSnapshot = async () => {
+		if ($temporaryChatEnabled) return;
+		await tick();
+		const draftChatId = modeProfileDraftId.startsWith('draft:') ? null : $chatId || null;
+		await saveDraft(
+			createModeProfileDraftSnapshot(getCurrentModeProfileDraftInput()),
+			draftChatId,
+			{ immediate: true }
+		);
+	};
+
 	const saveModeProfileCapabilityAuthority = () => {
 		if ($temporaryChatEnabled || !latestModeProfileDraftInput) return;
-		const modeProfileCapabilityAuthority = modeProfileCapabilityAuthorityController.snapshot();
-		saveDraft(
-			{
-				...latestModeProfileDraftInput,
-				conversationMode,
-				modeProfileRevisionId,
-				modeProfileCapabilityAuthority,
-				selectedTerminalId: $selectedTerminalId ?? null,
-				imageGenerationUserOverride
-			},
-			$chatId || null
-		);
+		saveDraft(createModeProfileDraftSnapshot(latestModeProfileDraftInput), $chatId || null);
 	};
 
 	const clearDraft = async (chatId: string | null = null) => {
@@ -3604,9 +3818,7 @@
 						{conversationMode}
 						{conversationModeLocked}
 						{agentModeAvailable}
-						onConversationModeSelect={(mode) => {
-							conversationMode = mode;
-						}}
+						onConversationModeSelect={transitionConversationMode}
 						onConversationModeCreateNew={(mode) => {
 							pendingConversationMode = mode;
 							showConversationModeConfirmation = true;
@@ -3782,18 +3994,7 @@
 													modeProfileCapabilityAuthorityController.observe(data);
 											}
 											if (!$temporaryChatEnabled) {
-												saveDraft(
-													{
-														...data,
-														conversationMode: conversationMode,
-														modeProfileRevisionId,
-														modeProfileCapabilityAuthority:
-															modeProfileCapabilityAuthorityController.snapshot(),
-														selectedTerminalId: $selectedTerminalId ?? null,
-														imageGenerationUserOverride
-													},
-													$chatId
-												);
+												saveDraft(createModeProfileDraftSnapshot(data), $chatId);
 											}
 										}}
 										onImageGenerationToggle={(enabled) => {
@@ -3870,15 +4071,7 @@
 													modeProfileCapabilityAuthorityController.observe(data);
 											}
 											if (!$temporaryChatEnabled) {
-												saveDraft({
-													...data,
-													conversationMode: conversationMode,
-													modeProfileRevisionId,
-													modeProfileCapabilityAuthority:
-														modeProfileCapabilityAuthorityController.snapshot(),
-													selectedTerminalId: $selectedTerminalId ?? null,
-													imageGenerationUserOverride
-												});
+												saveDraft(createModeProfileDraftSnapshot(data));
 											}
 										}}
 										on:submit={async (e) => {
