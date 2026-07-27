@@ -49,6 +49,7 @@
 	import AdminViewSelector from './Models/AdminViewSelector.svelte';
 	import TagSelector from '$lib/components/workspace/common/TagSelector.svelte';
 	import Pagination from '$lib/components/common/Pagination.svelte';
+	import ConversationModeProfiles from './Models/ConversationModeProfiles.svelte';
 
 	type ModelListItem = { id: string; name?: string };
 
@@ -376,6 +377,8 @@
 
 <ModelSettingsModal bind:show={showConfigModal} initHandler={init} />
 <ManageModelsModal bind:show={showManageModal} />
+
+<ConversationModeProfiles />
 
 {#if models !== null}
 	{#if selectedModelId === null}

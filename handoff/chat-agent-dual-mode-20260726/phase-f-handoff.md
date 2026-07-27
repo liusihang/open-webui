@@ -1,0 +1,35 @@
+# Phase F handoff
+
+Truth surface: `/Users/liusihang/.codex/worktrees/d790/openwebui` on `codex/pr7-chat-agent-dual-mode-20260726`, starting from `3de824346` after Phase E final approval. Phase F is frontend administrator API/types/UI only. Docker, remote, formal live, and conversation-default integration remain out of scope.
+
+## Required behavior
+
+- Administrator-only Chat and Agent tabs under Admin Settings -> Models.
+- Enforced System Prompt editor and tri-state inherit/explicit controls for Terminal, Tools, Skills, Filters, Web Search, Code Interpreter, and Image Generation.
+- No mode-specific model selector and no Reasoning Depth control.
+- Typed current/save/history/detail/restore API contracts; optimistic concurrency with expected revision ID.
+- Revision metadata/history and restore-as-new-revision behavior.
+- Blocking validation errors, warnings, stale-save conflict refresh, and no Prompt content in ordinary user stores/components.
+- Reuse existing resource selectors where safe; inheritance must be explicit rather than encoded as an empty value.
+
+## Checkpoints
+
+- [x] F0 Verify HEAD, frontend dependency/test baseline, and dirty boundaries.
+- [x] F1 Add API/type RED tests.
+- [x] F2 Add presentation and real Svelte compile RED tests.
+- [x] F3 Implement typed APIs and administrator editor/history UI.
+- [x] F4 Integrate entry into Models settings without changing ordinary model behavior.
+- [x] F5 Focused tests, formatting, compile/build checks, and scope audit.
+- [x] F6 Independent specification and code-quality review; fix all Critical/Important findings.
+- [x] F7 Commit verified Phase F files; no push.
+
+## Evidence log
+
+- 2026-07-27: created before frontend edits. Existing untracked deploy and Phase D handoff must remain untouched.
+- 2026-07-27: verified `HEAD` is `3de8243463a703fc093c1e0792b54e57c45826df`. Existing unrelated state is the modified Phase E handoff plus untracked `deploy/` and `phase-d-handoff.md`; Phase F will not stage or edit them. Focused frontend baseline: 11 passing assertions across the existing global-prompt and conversation-mode compile suites. The backend Phase C routes are present; their current private response does not include `content_hash`, so the frontend will represent it as optional and show an explicit unavailable state rather than fabricate it.
+- 2026-07-27 F1/F2 RED: API, presentation, and compiler tests failed for the absent profile API/client and components (7 behavior failures after test-path corrections). GREEN: 11 Phase F assertions pass, including real Svelte compiler checks for both dedicated components and `Models.svelte` integration.
+- 2026-07-27 F3/F4: added typed `/configs/conversation_mode_profiles` current/save/history/detail/restore client calls; local-only admin draft editor; Chat/Agent tabs; catalog-backed Terminal/Tools/Skills/Filters controls; feature defaults; revision history/detail/restore confirmation; typed 409 preservation/refresh behavior; and the Models entry. No ordinary store or browser logging path receives the administrator Prompt.
+- 2026-07-27 regression remediation: backend revisions serialize inherited defaults by omitting them. A RED presentation assertion caught the editor treating that omission as Override; the revision-read type is now partial and the editor explicitly maps omitted values to `inherit`. Focused suite is green.
+- 2026-07-27 F5: Prettier check and `git diff --check` pass. Focused Vitest/real compiler gate: 22 tests passed across Phase F contracts, presentation, dedicated components, `Models.svelte` integration, and existing conversation/global-prompt compile coverage. `npm run check` still reports the worktree's pre-existing broad diagnostic backlog (previous full run: 9556 errors/275 warnings), but a fresh filtered scan has no diagnostics in the Phase F API or components. Production frontend build remains deferred to Phase H as authorized.
+- 2026-07-27 F6: specification/quality review found and fixed one Important tri-state deserialization defect (omitted inherited defaults had been read as Override). No remaining Critical or Important findings. The configured environment exposes no callable code-review subagent, so this review used a separate requirements/diff/security-boundary pass. Minor: the existing private backend response does not expose `content_hash`; the UI explicitly says `Not provided by server` rather than inventing one.
+- 2026-07-27 F5 final regression: stopped only the stale `npm run test:frontend` Vitest watch session (PIDs 5438/5477) and reran its intended suite non-interactively with `npm exec vitest run`. Result: 2 files, 11 tests passed in 1.16s. F7: committed verified Phase F files locally with `feat(admin): add Chat and Agent profile settings`; no push.
