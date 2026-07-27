@@ -1,12 +1,17 @@
 import { describe, expect, it } from 'vitest';
-import type { ConversationModeProfileRevision } from '$lib/apis/configs';
+import {
+	ModeProfileApiError,
+	type ConversationModeProfileConflict,
+	type ConversationModeProfileRevision
+} from '$lib/apis/configs';
 import {
 	createConversationModeProfileController,
 	catalogItems,
 	decodeDefaults,
 	detailPresentation,
 	modeForTabKey,
-	normalizeProfileError
+	normalizeProfileError,
+	setProfileOperationFailure
 } from './conversationModeProfileState';
 
 const revision = (
@@ -82,6 +87,7 @@ describe('conversation mode profile state', () => {
 		controller.applyRevision('chat', revision('chat', 'chat-1'));
 		controller.applyRevision('agent', revision('agent', 'agent-1'));
 		const request = controller.begin('chat', 'save');
+		if (!request) throw new Error('Expected a Chat save request');
 		const response = deferred<ConversationModeProfileRevision>();
 
 		const pending = response.promise.then((next) => controller.completeSave(request, next));
@@ -117,6 +123,59 @@ describe('conversation mode profile state', () => {
 		controller.begin('chat', 'save');
 		expect(controller.state('chat').error).toBe('');
 		expect(controller.state('chat').conflict).toBeNull();
+	});
+
+	it('retains a conflicted draft and reports a failed refresh without rejecting', async () => {
+		const controller = createConversationModeProfileController();
+		controller.applyRevision('chat', revision('chat', 'chat-1'));
+		controller.updateDraft('chat', (draft) => ({ ...draft, systemPrompt: 'keep this draft' }));
+		const request = controller.begin('chat', 'save');
+		if (!request) throw new Error('Expected a Chat save request');
+		const conflict: ConversationModeProfileConflict = {
+			code: 'mode_profile_revision_conflict',
+			mode: 'chat',
+			expected_current_revision_id: 'chat-1',
+			current_revision: {
+				revision_id: 'chat-2',
+				revision_number: 2,
+				schema_version: 1,
+				created_at: 0
+			}
+		};
+
+		await expect(
+			setProfileOperationFailure({
+				controller,
+				request,
+				error: new ModeProfileApiError(409, conflict),
+				refresh: async () => {
+					throw { detail: { message: 'metadata refresh unavailable' } };
+				}
+			})
+		).resolves.toBeUndefined();
+
+		expect(controller.state('chat').conflict).toContain('chat-2');
+		expect(controller.state('chat').draft?.systemPrompt).toBe('keep this draft');
+		expect(controller.state('chat').dirty).toBe(true);
+		expect(controller.state('chat').loading.save).toBe(false);
+		expect(controller.state('chat').error).toContain('This profile changed while you were editing');
+		expect(controller.state('chat').error).toContain(
+			'Refresh failed: metadata refresh unavailable'
+		);
+	});
+
+	it('gates save and restore for the same mode until the active mutation finishes', () => {
+		const controller = createConversationModeProfileController();
+		controller.applyRevision('chat', revision('chat', 'chat-1'));
+		const save = controller.begin('chat', 'save');
+		if (!save) throw new Error('Expected a Chat save request');
+
+		expect(controller.begin('chat', 'restore')).toBeNull();
+		controller.fail(save, 'save did not complete');
+		expect(controller.begin('chat', 'restore')).toMatchObject({
+			mode: 'chat',
+			operation: 'restore'
+		});
 	});
 
 	it('normalizes string and object errors and exposes private detail only through a local presentation model', () => {
@@ -164,6 +223,13 @@ describe('conversation mode profile state', () => {
 				label: 'Retired tool (inactive)'
 			}
 		]);
+		expect(catalogItems([], ['terminal-no-longer-available'])).toContainEqual({
+			id: 'terminal-no-longer-available',
+			name: 'terminal-no-longer-available',
+			active: false,
+			disabled: true,
+			label: 'terminal-no-longer-available (Unavailable)'
+		});
 		expect(modeForTabKey('chat', 'ArrowRight')).toBe('agent');
 		expect(modeForTabKey('agent', 'Home')).toBe('chat');
 		expect(modeForTabKey('chat', 'End')).toBe('agent');

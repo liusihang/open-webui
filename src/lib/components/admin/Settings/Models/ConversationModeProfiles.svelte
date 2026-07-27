@@ -6,12 +6,9 @@
 		getConversationModeProfileHistory,
 		getConversationModeProfileRevision,
 		getConversationModeProfiles,
-		ModeProfileApiError,
 		restoreConversationModeProfile,
 		saveConversationModeProfile,
-		type ConversationMode,
-		type ConversationModeProfileConflict,
-		type ConversationModeProfileValidationIssue
+		type ConversationMode
 	} from '$lib/apis/configs';
 	import ConversationModeProfileEditor from './ConversationModeProfileEditor.svelte';
 	import {
@@ -20,6 +17,7 @@
 		detailPresentation,
 		modeForTabKey,
 		normalizeProfileError,
+		setProfileOperationFailure,
 		type ModeProfileRequest
 	} from './conversationModeProfileState';
 
@@ -39,6 +37,7 @@
 	$: activeProfile = activeState.profile;
 	$: activeHistory = activeState.history;
 	$: activeDetail = activeState.detail;
+	$: activeMutation = activeState.loading.save || activeState.loading.restore;
 
 	const token = () => localStorage.token;
 	const touch = () => {
@@ -53,13 +52,15 @@
 		touch();
 	};
 
-	const loadHistory = async (mode: ConversationMode) => {
+	const loadHistory = async (mode: ConversationMode, propagateFailure = false) => {
 		const request = controller.begin(mode, 'history');
+		if (!request) return;
 		touch();
 		try {
 			const history = await getConversationModeProfileHistory(token(), request.mode);
 			controller.completeHistory(request, history);
 		} catch (error) {
+			if (propagateFailure) throw error;
 			await setFailure(request, error);
 		} finally {
 			touch();
@@ -67,46 +68,17 @@
 	};
 
 	const refresh = async (mode: ConversationMode) => {
-		await Promise.all([loadProfiles(), loadHistory(mode)]);
+		await Promise.all([loadProfiles(), loadHistory(mode, true)]);
 	};
 
 	const setFailure = async (request: ModeProfileRequest, error: unknown) => {
-		if (!controller.accepts(request)) return;
-		const state = controller.state(request.mode);
-		if (error instanceof ModeProfileApiError) {
-			const detail: unknown = error.detail;
-			controller.fail(request, detail);
-			const objectDetail = detail && typeof detail === 'object' ? detail : null;
-			if (
-				error.status === 409 &&
-				objectDetail &&
-				'code' in objectDetail &&
-				objectDetail.code === 'mode_profile_revision_conflict'
-			) {
-				const conflict = objectDetail as ConversationModeProfileConflict;
-				state.conflict = `Current revision is ${conflict.current_revision.revision_number} (${conflict.current_revision.revision_id}).`;
-				state.error =
-					'This profile changed while you were editing. Current metadata was refreshed; your draft is preserved.';
-				touch();
-				await refresh(request.mode);
-				return;
-			}
-			state.validationIssues =
-				objectDetail && 'issues' in objectDetail && Array.isArray(objectDetail.issues)
-					? (objectDetail.issues as ConversationModeProfileValidationIssue[])
-					: [];
-			state.error =
-				error.status >= 500
-					? 'The profile service could not complete this request. No private prompt content was exposed.'
-					: normalizeProfileError(detail);
-		} else {
-			controller.fail(request, error);
-		}
+		await setProfileOperationFailure({ controller, request, error, refresh });
 		touch();
 	};
 
 	const save = async (mode: ConversationMode) => {
 		const request = controller.begin(mode, 'save');
+		if (!request) return;
 		if (!request.draft || !request.revisionId) {
 			controller.fail(request, 'A current revision is required before saving.');
 			touch();
@@ -134,7 +106,6 @@
 
 	const selectMode = (mode: ConversationMode) => {
 		activeMode = mode;
-		controller.clearFeedback(mode);
 		touch();
 		if (!controller.state(mode).history) void loadHistory(mode);
 	};
@@ -149,6 +120,7 @@
 
 	const loadRevisionDetail = async (mode: ConversationMode, revisionId: string) => {
 		const request = controller.begin(mode, 'detail');
+		if (!request) return;
 		touch();
 		try {
 			const detail = await getConversationModeProfileRevision(token(), request.mode, revisionId);
@@ -165,6 +137,7 @@
 		const request = controller.begin(pendingRestore.mode, 'restore');
 		const revisionId = pendingRestore.revisionId;
 		pendingRestore = null;
+		if (!request) return;
 		if (!request.revisionId) {
 			controller.fail(request, 'A current revision is required before restoring.');
 			touch();
@@ -255,117 +228,129 @@
 		{/each}
 	</div>
 
-	<div
-		id="conversation-mode-panel-{activeMode}"
-		role="tabpanel"
-		aria-labelledby="conversation-mode-tab-{activeMode}"
-	>
-		{#if activeState.conflict}
-			<div
-				class="mb-4 rounded-xl border border-amber-200 bg-amber-50 p-3 text-sm text-amber-900 dark:border-amber-900 dark:bg-amber-950/30 dark:text-amber-100"
-			>
-				<div class="font-medium">Revision conflict</div>
-				<div>{activeState.conflict} Your draft remains local for comparison and retry.</div>
-			</div>
-		{/if}
-		{#if activeState.error}
-			<div
-				class="mb-4 rounded-xl border border-red-200 bg-red-50 p-3 text-sm text-red-800 dark:border-red-900 dark:bg-red-950/30 dark:text-red-200"
-			>
-				{activeState.error}
-			</div>
-		{/if}
+	{#each modes as item (item.mode)}
+		<div
+			id="conversation-mode-panel-{item.mode}"
+			role="tabpanel"
+			aria-labelledby="conversation-mode-tab-{item.mode}"
+			hidden={activeMode !== item.mode}
+		>
+			{#if activeMode === item.mode}
+				{#if activeState.conflict}
+					<div
+						class="mb-4 rounded-xl border border-amber-200 bg-amber-50 p-3 text-sm text-amber-900 dark:border-amber-900 dark:bg-amber-950/30 dark:text-amber-100"
+						role="alert"
+					>
+						<div class="font-medium">Revision conflict</div>
+						<div>{activeState.conflict} Your draft remains local for comparison and retry.</div>
+					</div>
+				{/if}
+				{#if activeState.error}
+					<div
+						class="mb-4 rounded-xl border border-red-200 bg-red-50 p-3 text-sm text-red-800 dark:border-red-900 dark:bg-red-950/30 dark:text-red-200"
+						role="alert"
+					>
+						{activeState.error}
+					</div>
+				{/if}
 
-		{#if initialLoading}
-			<div class="py-8 text-center text-sm text-gray-500">Loading conversation mode defaults…</div>
-		{:else if activeProfile && activeState.draft}
-			<ConversationModeProfileEditor
-				mode={activeMode}
-				draft={activeState.draft}
-				dirty={activeState.dirty}
-				saving={activeState.loading.save || activeState.loading.restore}
-				validationIssues={activeState.validationIssues}
-				warnings={activeState.warnings}
-				onDraftChange={(updater) => {
-					controller.updateDraft(activeMode, updater);
-					touch();
-				}}
-				onSave={save}
-			/>
+				{#if initialLoading}
+					<div class="py-8 text-center text-sm text-gray-500">
+						Loading conversation mode defaults…
+					</div>
+				{:else if activeProfile && activeState.draft}
+					<ConversationModeProfileEditor
+						mode={activeMode}
+						draft={activeState.draft}
+						dirty={activeState.dirty}
+						saving={activeMutation}
+						validationIssues={activeState.validationIssues}
+						warnings={activeState.warnings}
+						onDraftChange={(updater) => {
+							controller.updateDraft(activeMode, updater);
+							touch();
+						}}
+						onSave={save}
+					/>
 
-			<div class="mt-6 border-t border-gray-100 pt-4 dark:border-gray-800">
-				{#if activeDetail}
-					{@const detail = detailPresentation(activeDetail)}
-					<div class="rounded-xl border border-gray-100 p-3 text-xs dark:border-gray-800">
-						<div class="mb-3 flex items-center justify-between gap-2">
-							<h3 class="text-sm font-medium">Revision detail</h3>
-							<button
-								type="button"
-								class="underline"
-								on:click={() => {
-									controller.clearDetail(activeMode);
-									touch();
-								}}>Back to history</button
-							>
-						</div>
-						<h4 class="font-medium">Enforced System Prompt</h4>
-						<pre
-							class="mt-1 whitespace-pre-wrap rounded-lg bg-gray-50 p-2 font-sans dark:bg-gray-850">{detail.systemPrompt}</pre>
-						<h4 class="mt-3 font-medium">Defaults</h4>
-						<ul class="mt-1 list-disc space-y-1 pl-4">
-							{#each detail.defaults as line}<li>{line}</li>{/each}
-						</ul>
-						<h4 class="mt-3 font-medium">Revision metadata</h4>
-						<ul class="mt-1 list-disc space-y-1 pl-4">
-							{#each detail.metadata as line}<li>{line}</li>{/each}
-						</ul>
+					<div class="mt-6 border-t border-gray-100 pt-4 dark:border-gray-800">
+						{#if activeDetail}
+							{@const detail = detailPresentation(activeDetail)}
+							<div class="rounded-xl border border-gray-100 p-3 text-xs dark:border-gray-800">
+								<div class="mb-3 flex items-center justify-between gap-2">
+									<h3 class="text-sm font-medium">Revision detail</h3>
+									<button
+										type="button"
+										class="underline"
+										on:click={() => {
+											controller.clearDetail(activeMode);
+											touch();
+										}}>Back to history</button
+									>
+								</div>
+								<h4 class="font-medium">Enforced System Prompt</h4>
+								<pre
+									class="mt-1 whitespace-pre-wrap rounded-lg bg-gray-50 p-2 font-sans dark:bg-gray-850">{detail.systemPrompt}</pre>
+								<h4 class="mt-3 font-medium">Defaults</h4>
+								<ul class="mt-1 list-disc space-y-1 pl-4">
+									{#each detail.defaults as line}<li>{line}</li>{/each}
+								</ul>
+								<h4 class="mt-3 font-medium">Revision metadata</h4>
+								<ul class="mt-1 list-disc space-y-1 pl-4">
+									{#each detail.metadata as line}<li>{line}</li>{/each}
+								</ul>
+							</div>
+						{:else}
+							<h3 class="mb-2 text-sm font-medium">Revision history</h3>
+							{#if activeState.loading.history}
+								<div class="text-xs text-gray-500">Loading revision history…</div>
+							{:else}
+								<div class="space-y-2">
+									{#each activeHistory?.revisions ?? [] as revision (revision.revision_id)}
+										<div
+											class="flex flex-wrap items-center justify-between gap-2 rounded-xl bg-gray-50 px-3 py-2 text-xs dark:bg-gray-850"
+										>
+											<div>
+												Revision {revision.revision_number} · {revision.revision_id}{revision.is_current
+													? ' (current)'
+													: ''}
+											</div>
+											<div class="flex gap-2">
+												<button
+													type="button"
+													class="underline"
+													disabled={activeState.loading.detail || activeMutation}
+													on:click={() => loadRevisionDetail(activeMode, revision.revision_id)}
+													>View detail</button
+												>
+												{#if !revision.is_current}<button
+														type="button"
+														class="underline"
+														disabled={activeMutation}
+														on:click={() => {
+															pendingRestore = {
+																mode: activeMode,
+																revisionId: revision.revision_id
+															};
+															showRestoreConfirmation = true;
+														}}>Restore as new revision</button
+													>
+												{/if}
+											</div>
+										</div>
+									{/each}
+								</div>
+							{/if}
+						{/if}
 					</div>
 				{:else}
-					<h3 class="mb-2 text-sm font-medium">Revision history</h3>
-					{#if activeState.loading.history}
-						<div class="text-xs text-gray-500">Loading revision history…</div>
-					{:else}
-						<div class="space-y-2">
-							{#each activeHistory?.revisions ?? [] as revision (revision.revision_id)}
-								<div
-									class="flex flex-wrap items-center justify-between gap-2 rounded-xl bg-gray-50 px-3 py-2 text-xs dark:bg-gray-850"
-								>
-									<div>
-										Revision {revision.revision_number} · {revision.revision_id}{revision.is_current
-											? ' (current)'
-											: ''}
-									</div>
-									<div class="flex gap-2">
-										<button
-											type="button"
-											class="underline"
-											disabled={activeState.loading.detail}
-											on:click={() => loadRevisionDetail(activeMode, revision.revision_id)}
-											>View detail</button
-										>
-										{#if !revision.is_current}<button
-												type="button"
-												class="underline"
-												disabled={activeState.loading.restore}
-												on:click={() => {
-													pendingRestore = { mode: activeMode, revisionId: revision.revision_id };
-													showRestoreConfirmation = true;
-												}}>Restore as new revision</button
-											>
-										{/if}
-									</div>
-								</div>
-							{/each}
-						</div>
-					{/if}
+					<div class="py-8 text-center text-sm text-gray-500">
+						Conversation mode defaults are unavailable.
+					</div>
 				{/if}
-			</div>
-		{:else}
-			<div class="py-8 text-center text-sm text-gray-500">
-				Conversation mode defaults are unavailable.
-			</div>
-		{/if}
-	</div>
+			{/if}
+		</div>
+	{/each}
 </section>
 
 <ConfirmDialog

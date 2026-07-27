@@ -124,7 +124,9 @@
 					<option value="override">Override</option>
 				</select>
 				{#if draft.terminal.state === 'override'}
-					<label class="sr-only" for="mode-profile-terminal-select">Terminal selection</label>
+					<label class="mt-2 block text-xs font-medium" for="mode-profile-terminal-select"
+						>Terminal selection</label
+					>
 					<select
 						id="mode-profile-terminal-select"
 						class="mt-2 w-full bg-transparent text-sm"
@@ -239,6 +241,7 @@
 		{#if validationIssues.length > 0}
 			<div
 				class="rounded-xl border border-red-200 bg-red-50 p-3 text-sm text-red-800 dark:border-red-900 dark:bg-red-950/30 dark:text-red-200"
+				role="alert"
 			>
 				<div class="font-medium">Validation errors</div>
 				{#each validationIssues as issue}<div>

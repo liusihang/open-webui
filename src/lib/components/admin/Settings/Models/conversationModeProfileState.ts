@@ -7,6 +7,7 @@ import type {
 	ConversationModeProfileValidationIssue,
 	ConversationModeProfileWarning
 } from '$lib/apis/configs';
+import { ModeProfileApiError } from '$lib/apis/configs';
 
 export type TriState = 'inherit' | 'disabled' | 'override';
 export type ModeProfileOperation = 'save' | 'restore' | 'detail' | 'history';
@@ -204,7 +205,7 @@ export const catalogItems = (value: unknown, selectedIds: string[] = []): Catalo
 	const values = Array.isArray(value)
 		? value
 		: Object.values((value ?? {}) as Record<string, unknown>);
-	return values.flatMap((entry) => {
+	const catalog = values.flatMap((entry) => {
 		if (!entry || typeof entry !== 'object' || !('id' in entry)) return [];
 		const item = entry as Record<string, unknown>;
 		const id = String(item.id);
@@ -213,6 +214,17 @@ export const catalogItems = (value: unknown, selectedIds: string[] = []): Catalo
 		const name = typeof item.name === 'string' && item.name ? item.name : id;
 		return [{ id, name, active, disabled: !active, label: active ? name : `${name} (inactive)` }];
 	});
+	const catalogIds = new Set(catalog.map((item) => item.id));
+	const unavailable = [...new Set(selectedIds)]
+		.filter((id) => !catalogIds.has(id))
+		.map((id) => ({
+			id,
+			name: id,
+			active: false,
+			disabled: true,
+			label: `${id} (Unavailable)`
+		}));
+	return [...catalog, ...unavailable];
 };
 
 export const modeForTabKey = (mode: ConversationMode, key: string): ConversationMode | null => {
@@ -269,7 +281,17 @@ export const createConversationModeProfileController = () => {
 		current.draftVersion += 1;
 	};
 
-	const begin = (mode: ConversationMode, operation: ModeProfileOperation): ModeProfileRequest => {
+	const canBegin = (mode: ConversationMode, operation: ModeProfileOperation) => {
+		const loading = state(mode).loading;
+		if (operation === 'save' || operation === 'restore') return !loading.save && !loading.restore;
+		return !loading[operation];
+	};
+
+	const begin = (
+		mode: ConversationMode,
+		operation: ModeProfileOperation
+	): ModeProfileRequest | null => {
+		if (!canBegin(mode, operation)) return null;
 		const current = state(mode);
 		if (operation === 'save' || operation === 'restore') clearFeedback(mode);
 		current.loading[operation] = true;
@@ -330,6 +352,7 @@ export const createConversationModeProfileController = () => {
 		},
 		applyRevision,
 		updateDraft,
+		canBegin,
 		begin,
 		accepts,
 		completeSave,
@@ -337,4 +360,63 @@ export const createConversationModeProfileController = () => {
 		completeDetail,
 		fail
 	};
+};
+
+type ConversationModeProfileController = ReturnType<typeof createConversationModeProfileController>;
+
+const isRecord = (value: unknown): value is Record<string, unknown> =>
+	!!value && typeof value === 'object' && !Array.isArray(value);
+
+const conflictMessage = (detail: Record<string, unknown>) => {
+	const current = isRecord(detail.current_revision) ? detail.current_revision : null;
+	const revisionNumber = current?.revision_number;
+	const revisionId = current?.revision_id;
+	if (typeof revisionNumber === 'number' && typeof revisionId === 'string' && revisionId) {
+		return `Current revision is ${revisionNumber} (${revisionId}).`;
+	}
+	return 'A newer current revision is available.';
+};
+
+export const setProfileOperationFailure = async ({
+	controller,
+	request,
+	error,
+	refresh
+}: {
+	controller: ConversationModeProfileController;
+	request: ModeProfileRequest;
+	error: unknown;
+	refresh: (mode: ConversationMode) => Promise<void>;
+}): Promise<void> => {
+	if (!controller.accepts(request)) return;
+	const state = controller.state(request.mode);
+	if (!(error instanceof ModeProfileApiError)) {
+		controller.fail(request, error);
+		return;
+	}
+
+	const detail: unknown = error.detail;
+	controller.fail(request, detail);
+	const objectDetail = isRecord(detail) ? detail : null;
+	if (error.status === 409 && objectDetail?.code === 'mode_profile_revision_conflict') {
+		state.conflict = conflictMessage(objectDetail);
+		state.error =
+			'This profile changed while you were editing. Current metadata was refreshed; your draft is preserved.';
+		try {
+			await refresh(request.mode);
+		} catch (refreshError) {
+			if (!controller.accepts(request)) return;
+			state.error = `${state.error} Refresh failed: ${normalizeProfileError(refreshError)}`;
+		}
+		return;
+	}
+
+	state.validationIssues =
+		objectDetail && Array.isArray(objectDetail.issues)
+			? (objectDetail.issues as ConversationModeProfileValidationIssue[])
+			: [];
+	state.error =
+		error.status >= 500
+			? 'The profile service could not complete this request. No private prompt content was exposed.'
+			: normalizeProfileError(detail);
 };
