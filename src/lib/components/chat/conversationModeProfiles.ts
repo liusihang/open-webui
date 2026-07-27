@@ -57,6 +57,13 @@ export const parseConversationModeDraft = (value: string | null): ConversationMo
 	}
 };
 
+export const getNewConversationModeDraftCapabilityAuthority = (
+	draft: ConversationModeDraft | null
+): Exclude<ConversationModeCapabilityAuthority, 'inherit_bound'> | null => {
+	const authority = draft?.modeProfileCapabilityAuthority;
+	return authority === 'initialized' || authority === 'explicit' ? authority : null;
+};
+
 const capabilityFingerprint = (value: ConversationModeCapabilityChange) =>
 	JSON.stringify({
 		toolIds: uniqueStrings(value.selectedToolIds).sort(),
@@ -104,6 +111,28 @@ export const sanitizeConversationModeSelectedToolIds = (
 	uniqueStrings(toolIds).filter(
 		(id) => directToolServersPermitted || !id.startsWith('direct_server:')
 	);
+
+type ConversationModeAvailableToolIdsInput = {
+	tools: readonly { id?: unknown; authenticated?: unknown }[];
+	toolServers: readonly { info?: unknown }[];
+	directToolServersPermitted: boolean;
+};
+
+export const getConversationModeAvailableToolIds = (
+	input: ConversationModeAvailableToolIdsInput
+) => [
+	...new Set([
+		...input.tools
+			.filter((tool) => tool.authenticated !== false)
+			.map((tool) => tool.id)
+			.filter((id): id is string => typeof id === 'string' && id.length > 0),
+		...(input.directToolServersPermitted
+			? input.toolServers.flatMap((server, index) =>
+					server.info ? [`direct_server:${index}`] : []
+				)
+			: [])
+	])
+];
 
 type ConversationModeCapabilityRequestInput = {
 	authority: ConversationModeCapabilityAuthority;

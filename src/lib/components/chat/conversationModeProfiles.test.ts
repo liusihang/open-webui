@@ -3,6 +3,8 @@ import { describe, expect, it } from 'vitest';
 import {
 	createConversationModeCapabilityAuthorityController,
 	createConversationModeProfileDraftController,
+	getConversationModeAvailableToolIds,
+	getNewConversationModeDraftCapabilityAuthority,
 	isDirectToolServersPermitted,
 	parseConversationModeDraft,
 	resolveConversationModeProfile,
@@ -311,6 +313,44 @@ describe('conversation mode capability authority', () => {
 		).toEqual({ prompt: '', files: [], modeProfileCapabilityAuthority: 'explicit' });
 	});
 
+	it('restores legacy draft content without granting capability authority', () => {
+		const legacyDraft = parseConversationModeDraft(
+			JSON.stringify({
+				prompt: 'legacy prompt',
+				files: [{ id: 'legacy-file' }],
+				reasoningEffort: 'high'
+			})
+		);
+
+		expect(legacyDraft).toMatchObject({
+			prompt: 'legacy prompt',
+			files: [{ id: 'legacy-file' }],
+			reasoningEffort: 'high'
+		});
+		expect(getNewConversationModeDraftCapabilityAuthority(legacyDraft)).toBeNull();
+		expect(
+			getNewConversationModeDraftCapabilityAuthority({
+				prompt: '',
+				files: [],
+				modeProfileCapabilityAuthority: 'inherit_bound'
+			})
+		).toBeNull();
+		expect(
+			getNewConversationModeDraftCapabilityAuthority({
+				prompt: '',
+				files: [],
+				modeProfileCapabilityAuthority: 'initialized'
+			})
+		).toBe('initialized');
+		expect(
+			getNewConversationModeDraftCapabilityAuthority({
+				prompt: '',
+				files: [],
+				modeProfileCapabilityAuthority: 'explicit'
+			})
+		).toBe('explicit');
+	});
+
 	it('initializes a new draft as authoritative and serializes explicit empty selections', () => {
 		const controller = createConversationModeCapabilityAuthorityController({ existingChat: false });
 
@@ -570,5 +610,60 @@ describe('conversation mode capability authority', () => {
 				terminalServers
 			})
 		).toEqual({ tool_servers: [] });
+	});
+
+	it('retains only permitted live direct tool IDs across model changes', () => {
+		const toolServers = [
+			{ info: { title: 'Direct A' } },
+			{ url: 'https://missing-info.example' },
+			{ info: { title: 'Direct C' } }
+		];
+		const permittedToolIds = getConversationModeAvailableToolIds({
+			tools: [{ id: 'tool-a' }, { id: 'tool-denied', authenticated: false }],
+			toolServers,
+			directToolServersPermitted: true
+		});
+
+		expect(permittedToolIds).toEqual(['tool-a', 'direct_server:0', 'direct_server:2']);
+		expect(
+			resolve({
+				phase: 'model_change',
+				currentSelections: {
+					terminalId: null,
+					toolIds: ['direct_server:2'],
+					skillIds: [],
+					filterIds: [],
+					featureIds: []
+				},
+				available: { ...available, toolIds: permittedToolIds }
+			}).effective.toolIds
+		).toEqual(['direct_server:2']);
+
+		for (const toolIds of [
+			getConversationModeAvailableToolIds({
+				tools: [],
+				toolServers,
+				directToolServersPermitted: false
+			}),
+			getConversationModeAvailableToolIds({
+				tools: [],
+				toolServers: [{ info: { title: 'Only current server' } }],
+				directToolServersPermitted: true
+			})
+		]) {
+			expect(
+				resolve({
+					phase: 'model_change',
+					currentSelections: {
+						terminalId: null,
+						toolIds: ['direct_server:2'],
+						skillIds: [],
+						filterIds: [],
+						featureIds: []
+					},
+					available: { ...available, toolIds }
+				}).effective.toolIds
+			).toEqual([]);
+		}
 	});
 });

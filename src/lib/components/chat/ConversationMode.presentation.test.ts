@@ -131,23 +131,44 @@ describe('conversation mode presentation contract', () => {
 
 	it('sanitizes restored direct tools and hydrates the root draft revision before model changes', () => {
 		const chat = readSource('./Chat.svelte');
+		const initNewChat = chat.match(
+			/const initNewChat = async \([\s\S]*?\) => \{([\s\S]*?)\n\t\};\n\n\tconst loadChat/
+		)?.[1];
 		const rootDraftRestore = chat.match(
 			/const init = async \(\) => \{([\s\S]*?)\n\t\t\};\n\t\tinit\(\);/
 		)?.[1];
 
 		expect(chat).toContain('sanitizeConversationModeSelectedToolIds');
 		expect(chat).toContain('parseConversationModeDraft');
+		expect(chat).toContain('getNewConversationModeDraftCapabilityAuthority');
 		expect(chat).not.toContain('selectedToolIds = input.selectedToolIds;');
 		expect(chat).not.toContain("Boolean(sessionStorage.getItem('chat-input'))");
 		expect(chat).toContain('const restoredRootDraft = beginModeProfileDraft();');
-		expect(chat).toContain('initialize: !restoredRootDraft');
+		expect(initNewChat).toBeDefined();
+		expect(initNewChat).toMatch(
+			/const restoredRootCapabilityAuthority\s*=\s*getNewConversationModeDraftCapabilityAuthority/
+		);
+		expect(initNewChat).toContain('initialize: restoredRootCapabilityAuthority === null');
 		expect(rootDraftRestore).toBeDefined();
+		expect(rootDraftRestore).toContain('if (chatIdProp || restoredRootCapabilityAuthority)');
 		expect(rootDraftRestore).toContain('modeProfileDraftController.hydrateRevisionHint');
 		expect(
 			rootDraftRestore?.indexOf('modeProfileDraftController.hydrateRevisionHint')
 		).toBeGreaterThan(
 			rootDraftRestore?.indexOf('modeProfileRevisionId =') ?? Number.MAX_SAFE_INTEGER
 		);
+	});
+
+	it('adds permitted live direct tool server IDs to model-change availability', () => {
+		const chat = readSource('./Chat.svelte');
+		const availability = chat.match(
+			/const getModeProfileAvailability = \(\): ConversationModeProfileAvailability => \{([\s\S]*?)\n\t\};/
+		)?.[1];
+
+		expect(chat).toContain('getConversationModeAvailableToolIds');
+		expect(availability).toBeDefined();
+		expect(availability).toContain('toolServers: $toolServers ?? []');
+		expect(availability).toContain('directToolServersPermitted: directTerminalPermitted');
 	});
 
 	it('spreads the tri-state capability request contract instead of length-based omission', () => {

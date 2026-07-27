@@ -120,6 +120,8 @@
 	import {
 		createConversationModeCapabilityAuthorityController,
 		createConversationModeProfileDraftController,
+		getConversationModeAvailableToolIds,
+		getNewConversationModeDraftCapabilityAuthority,
 		isDirectToolServersPermitted,
 		parseConversationModeDraft,
 		resolveConversationModeProfile,
@@ -569,10 +571,11 @@
 					.map((server) => server.url)
 					.filter((id): id is string => typeof id === 'string' && id.length > 0)
 			],
-			toolIds: availableTools
-				.filter((tool) => tool.authenticated !== false)
-				.map((tool) => tool.id)
-				.filter((id): id is string => Boolean(id)),
+			toolIds: getConversationModeAvailableToolIds({
+				tools: availableTools,
+				toolServers: $toolServers ?? [],
+				directToolServersPermitted: directTerminalPermitted
+			}),
 			skillIds: availableSkills
 				.filter((skill) => skill.is_active)
 				.map((skill) => skill.id)
@@ -691,12 +694,15 @@
 	const beginModeProfileDraft = () => {
 		const storedRootDraft = !chatIdProp ? sessionStorage.getItem('chat-input') : null;
 		const restoredRootDraft = parseConversationModeDraft(storedRootDraft);
+		const restoredRootCapabilityAuthority =
+			getNewConversationModeDraftCapabilityAuthority(restoredRootDraft);
 		if (storedRootDraft && !restoredRootDraft) {
 			sessionStorage.removeItem('chat-input');
 		}
 		modeProfileDraftId = `draft:${uuidv4()}`;
 		modeProfileInitializedDraftId = '';
 		modeProfileRevisionId =
+			restoredRootCapabilityAuthority &&
 			typeof restoredRootDraft?.modeProfileRevisionId === 'string'
 				? restoredRootDraft.modeProfileRevisionId
 				: null;
@@ -705,7 +711,7 @@
 		modeProfileDraftController = createConversationModeProfileDraftController();
 		modeProfileCapabilityAuthorityController = createConversationModeCapabilityAuthorityController({
 			existingChat: false,
-			persistedAuthority: restoredRootDraft?.modeProfileCapabilityAuthority
+			persistedAuthority: restoredRootCapabilityAuthority
 		});
 		modeProfileCapabilityAuthority = modeProfileCapabilityAuthorityController.snapshot();
 		modeProfileDraftController.hydrateRevisionHint(modeProfileRevisionId);
@@ -1324,6 +1330,9 @@
 			`chat-input${chatIdProp ? `-${chatIdProp}` : ''}`
 		);
 		const restoredDraft = parseConversationModeDraft(storageChatInput);
+		const restoredRootCapabilityAuthority = !chatIdProp
+			? getNewConversationModeDraftCapabilityAuthority(restoredDraft)
+			: null;
 		if (storageChatInput && !restoredDraft) {
 			sessionStorage.removeItem(`chat-input${chatIdProp ? `-${chatIdProp}` : ''}`);
 		}
@@ -1339,14 +1348,16 @@
 				messageInput?.setText('');
 
 				files = [];
-				selectedToolIds = [];
-				selectedSkillIds = [];
-				selectedFilterIds = [];
-				webSearchEnabled = false;
-				imageGenerationEnabled = false;
-				imageGenerationUserOverride = null;
-				codeInterpreterEnabled = false;
-				clearSelectedTerminal();
+				if (chatIdProp || restoredRootCapabilityAuthority) {
+					selectedToolIds = [];
+					selectedSkillIds = [];
+					selectedFilterIds = [];
+					webSearchEnabled = false;
+					imageGenerationEnabled = false;
+					imageGenerationUserOverride = null;
+					codeInterpreterEnabled = false;
+					clearSelectedTerminal();
+				}
 				reasoningEffort = 'medium';
 
 				try {
@@ -1355,30 +1366,32 @@
 					if (!$temporaryChatEnabled) {
 						messageInput?.setText(input.prompt);
 						files = input.files;
-						selectedToolIds = sanitizeConversationModeSelectedToolIds(
-							input.selectedToolIds,
-							isDirectToolServersPermitted($user)
-						);
-						selectedSkillIds = input.selectedSkillIds ?? [];
-						selectedFilterIds = input.selectedFilterIds ?? [];
-						webSearchEnabled = input.webSearchEnabled;
-						restoreImageGenerationFromDraft(input);
-						codeInterpreterEnabled = input.codeInterpreterEnabled;
-						modeProfileRevisionId =
-							typeof input.modeProfileRevisionId === 'string'
-								? input.modeProfileRevisionId
-								: modeProfileRevisionId;
-						modeProfileDraftController.hydrateRevisionHint(modeProfileRevisionId);
-						modeProfileCapabilityAuthorityController =
-							createConversationModeCapabilityAuthorityController({
-								existingChat: false,
-								persistedAuthority: input.modeProfileCapabilityAuthority
-							});
-						modeProfileCapabilityAuthority = modeProfileCapabilityAuthorityController.snapshot();
+						if (chatIdProp || restoredRootCapabilityAuthority) {
+							selectedToolIds = sanitizeConversationModeSelectedToolIds(
+								input.selectedToolIds,
+								isDirectToolServersPermitted($user)
+							);
+							selectedSkillIds = input.selectedSkillIds ?? [];
+							selectedFilterIds = input.selectedFilterIds ?? [];
+							webSearchEnabled = input.webSearchEnabled;
+							restoreImageGenerationFromDraft(input);
+							codeInterpreterEnabled = input.codeInterpreterEnabled;
+							modeProfileRevisionId =
+								typeof input.modeProfileRevisionId === 'string'
+									? input.modeProfileRevisionId
+									: modeProfileRevisionId;
+							modeProfileDraftController.hydrateRevisionHint(modeProfileRevisionId);
+							modeProfileCapabilityAuthorityController =
+								createConversationModeCapabilityAuthorityController({
+									existingChat: Boolean(chatIdProp),
+									persistedAuthority: input.modeProfileCapabilityAuthority
+								});
+							modeProfileCapabilityAuthority = modeProfileCapabilityAuthorityController.snapshot();
+						}
 						reasoningEffort = normalizeReasoningEffort(
 							input.reasoningEffort ?? input.reasoningDepth
 						);
-						if (!chatIdProp) {
+						if (!chatIdProp && typeof input.conversationMode === 'string') {
 							conversationMode = normalizeConversationMode(input.conversationMode);
 						}
 					}
@@ -1711,6 +1724,8 @@
 			preselectedMode ?? normalizeConversationMode($page.url.searchParams.get('mode'));
 		conversationMode = requestedMode;
 		const restoredRootDraft = beginModeProfileDraft();
+		const restoredRootCapabilityAuthority =
+			getNewConversationModeDraftCapabilityAuthority(restoredRootDraft);
 		pendingConversationMode = null;
 		chat = null;
 
@@ -1833,7 +1848,7 @@
 
 		autoScroll = true;
 
-		await resetInput({ initialize: !restoredRootDraft });
+		await resetInput({ initialize: restoredRootCapabilityAuthority === null });
 		await chatId.set('');
 		await chatTitle.set('');
 
