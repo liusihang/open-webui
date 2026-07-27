@@ -62,7 +62,9 @@ describe('conversation mode presentation contract', () => {
 
 	it('preserves a valid reasoning effort when the selected model changes', () => {
 		const chat = readSource('./Chat.svelte');
-		const resetInputBody = chat.match(/const resetInput = async \(\) => \{([\s\S]*?)\n\t\};/)?.[1];
+		const resetInputBody = chat.match(
+			/const resetInput = async \([\s\S]*?\) => \{([\s\S]*?)\n\t\};/
+		)?.[1];
 
 		expect(resetInputBody).toBeDefined();
 		expect(resetInputBody).not.toContain("reasoningEffort = 'medium'");
@@ -78,5 +80,18 @@ describe('conversation mode presentation contract', () => {
 		expect(chat).toMatch(
 			/\{:else if agentConversationUnavailable\}[\s\S]*Agent Mode is currently unavailable/
 		);
+	});
+
+	it('integrates public mode-profile revisions and capability selections without Prompt or reasoning state', () => {
+		const chat = readSource('./Chat.svelte');
+
+		expect(chat).toContain("from '$lib/components/chat/conversationModeProfiles'");
+		expect(chat).toContain('conversation_mode_profiles');
+		expect(chat).toContain('modeProfileRevisionId');
+		expect(chat).toContain('mode_profile_revision_id: modeProfileRevisionId');
+		expect(chat).toContain('applyModeProfileInitialization');
+		expect(chat).toContain('applyModeProfileModelChange');
+		expect(chat).toContain('selectedTerminalId.set(null)');
+		expect(chat).not.toContain('modeProfileSystemPrompt');
 	});
 });

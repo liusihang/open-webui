@@ -105,8 +105,7 @@
 	import MessageInput from '$lib/components/chat/MessageInput.svelte';
 	import {
 		resolveImageGenerationDraftState,
-		resolveImageGenerationFeature,
-		shouldEnableImageGenerationByDefault
+		resolveImageGenerationFeature
 	} from '$lib/components/chat/defaultFeatures';
 	import {
 		buildModelReasoningPayload,
@@ -117,6 +116,13 @@
 		type ConversationMode,
 		type ReasoningEffort
 	} from '$lib/components/chat/agentModeRequest';
+	import {
+		createConversationModeProfileDraftController,
+		resolveConversationModeProfile,
+		type ConversationModeProfileAvailability,
+		type ConversationModeProfileSelections
+	} from '$lib/components/chat/conversationModeProfiles';
+	import type { ConversationModeProfilePublic } from '$lib/apis/configs';
 	import {
 		prepareLoadedChatHistory,
 		shouldApplySocketContentEvent
@@ -171,16 +177,16 @@
 	$: agentModeAvailable = isAgentModeCapabilityEnabled($config);
 	$: agentConversationUnavailable = conversationMode === 'agent' && !agentModeAvailable;
 	let atSelectedModel: Model | undefined;
-	let selectedModelIds = [];
+	let selectedModelIds: string[] = [];
 	$: if (atSelectedModel !== undefined) {
 		selectedModelIds = resolveConversationModeRequestModels([atSelectedModel.id], conversationMode);
 	} else {
 		selectedModelIds = resolveConversationModeRequestModels(selectedModels, conversationMode);
 	}
 
-	let selectedToolIds = [];
-	let selectedSkillIds = [];
-	let selectedFilterIds = [];
+	let selectedToolIds: string[] = [];
+	let selectedSkillIds: string[] = [];
+	let selectedFilterIds: string[] = [];
 	let pendingOAuthTools = [];
 
 	let imageGenerationEnabled = false;
@@ -188,6 +194,11 @@
 	let webSearchEnabled = false;
 	let codeInterpreterEnabled = false;
 	let reasoningEffort: ReasoningEffort = 'medium';
+	const modeProfileDraftController = createConversationModeProfileDraftController();
+	let modeProfileDraftId = '';
+	let modeProfileInitializedDraftId = '';
+	let modeProfileRevisionId: string | null = null;
+	let modeProfileWarningSignature = '';
 	let webSearchActive = false;
 	let showWebSearchConfirm = false;
 	let pendingWebSearchPrompt: string | null = null;
@@ -204,7 +215,9 @@
 			$config?.features?.enable_web_search &&
 			($user?.role === 'admin' || $user?.permissions?.features?.web_search) &&
 			(webSearchEnabled ||
-				(allModelsSupportWebSearch && ($settings?.webSearch ?? false) === 'always'))
+				(!modeProfileRevisionId &&
+					allModelsSupportWebSearch &&
+					($settings?.webSearch ?? false) === 'always'))
 		);
 	}
 
@@ -294,6 +307,12 @@
 		webSearchEnabled = false;
 		imageGenerationEnabled = false;
 		imageGenerationUserOverride = null;
+		codeInterpreterEnabled = false;
+		clearSelectedTerminal();
+		modeProfileDraftId = `persistent:${chatIdProp}`;
+		modeProfileInitializedDraftId = '';
+		modeProfileRevisionId = null;
+		modeProfileWarningSignature = '';
 		reasoningEffort = 'medium';
 
 		const storageChatInput = sessionStorage.getItem(
@@ -332,6 +351,10 @@
 						webSearchEnabled = input.webSearchEnabled;
 						restoreImageGenerationFromDraft(input);
 						codeInterpreterEnabled = input.codeInterpreterEnabled;
+						modeProfileRevisionId =
+							typeof input.modeProfileRevisionId === 'string'
+								? input.modeProfileRevisionId
+								: modeProfileRevisionId;
 						reasoningEffort = normalizeReasoningEffort(
 							input.reasoningEffort ?? input.reasoningDepth
 						);
@@ -408,12 +431,18 @@
 		onSelectedModelIdsChange();
 	}
 
-	const onSelectedModelIdsChange = () => {
-		resetInput();
+	const onSelectedModelIdsChange = async () => {
+		if (modeProfileInitializedDraftId && modeProfileInitializedDraftId === modeProfileDraftId) {
+			applyModeProfileModelChange();
+		} else if (modeProfileRevisionId) {
+			applyModeProfileModelChange();
+		} else {
+			await resetInput({ initialize: Boolean(modeProfileDraftId) });
+		}
 		oldSelectedModelIds = structuredClone(selectedModelIds);
 	};
 
-	const resetInput = async () => {
+	const resetInput = async ({ initialize = false }: { initialize?: boolean } = {}) => {
 		selectedToolIds = [];
 		selectedSkillIds = [];
 		selectedFilterIds = [];
@@ -422,8 +451,9 @@
 		imageGenerationEnabled = false;
 		imageGenerationUserOverride = null;
 		codeInterpreterEnabled = false;
+		clearSelectedTerminal();
 
-		if (selectedModelIds.filter((id) => id).length > 0) {
+		if (initialize && selectedModelIds.filter((id) => id).length > 0) {
 			await setDefaults();
 		}
 	};
@@ -436,13 +466,155 @@
 		);
 	};
 
+	const clearSelectedTerminal = () => {
+		selectedTerminalId.set(null);
+		const configuredTerminalServers = (($settings as any)?.terminalServers ?? []) as Array<{
+			enabled?: boolean;
+			[key: string]: unknown;
+		}>;
+
+		if (configuredTerminalServers.some((server) => server.enabled)) {
+			settings.set({
+				...($settings as any),
+				terminalServers: configuredTerminalServers.map((server) => ({ ...server, enabled: false }))
+			} as any);
+		}
+	};
+
+	const getModeProfile = (): ConversationModeProfilePublic | null => {
+		const profiles = ($config as { conversation_mode_profiles?: ConversationModeProfilePublic[] })
+			?.conversation_mode_profiles;
+		return profiles?.find((profile) => profile.mode === conversationMode) ?? null;
+	};
+
+	const getModeProfileAvailability = (): ConversationModeProfileAvailability => {
+		const model = (atSelectedModel ?? $models.find((item) => item.id === selectedModels[0])) as any;
+		const availableTerminals = ($terminalServers ?? []) as any[];
+		const configuredTerminalServers = (($settings as any)?.terminalServers ?? []) as any[];
+		const availableTools = ($tools ?? []) as any[];
+		const availableSkills = ($skills ?? []) as any[];
+		const features = ($config?.features ?? {}) as Record<string, boolean | undefined>;
+		const canUse = (feature: string) =>
+			$user?.role === 'admin' || ($user?.permissions?.features?.[feature] ?? false);
+
+		return {
+			terminalIds: [
+				...availableTerminals
+					.map((server) => server.id ?? server.url)
+					.filter((id): id is string => typeof id === 'string' && id.length > 0),
+				...configuredTerminalServers
+					.map((server) => server.url)
+					.filter((id): id is string => typeof id === 'string' && id.length > 0)
+			],
+			toolIds: availableTools
+				.filter((tool) => tool.authenticated !== false)
+				.map((tool) => tool.id)
+				.filter((id): id is string => Boolean(id)),
+			skillIds: availableSkills
+				.filter((skill) => skill.is_active)
+				.map((skill) => skill.id)
+				.filter((id): id is string => Boolean(id)),
+			filterIds: (model?.filters ?? [])
+				.map((filter) => filter.id)
+				.filter((id): id is string => Boolean(id)),
+			featureIds: [
+				...($config?.features?.enable_web_search && canUse('web_search') ? ['web_search'] : []),
+				...(features.enable_code_interpreter && canUse('code_interpreter')
+					? ['code_interpreter']
+					: []),
+				...($config?.features?.enable_image_generation && canUse('image_generation')
+					? ['image_generation']
+					: [])
+			]
+		};
+	};
+
+	const getModeProfileSelections = (): ConversationModeProfileSelections => ({
+		terminalId: $selectedTerminalId ?? null,
+		toolIds: [...selectedToolIds],
+		skillIds: [...selectedSkillIds],
+		filterIds: [...selectedFilterIds],
+		featureIds: [
+			...(webSearchEnabled ? ['web_search'] : []),
+			...(imageGenerationEnabled ? ['image_generation'] : []),
+			...(codeInterpreterEnabled ? ['code_interpreter'] : [])
+		]
+	});
+
+	const applyModeProfileResolution = (resolution: any, phase: 'initialize' | 'model_change') => {
+		selectedToolIds = resolution.effective.toolIds;
+		selectedSkillIds = resolution.effective.skillIds;
+		selectedFilterIds = resolution.effective.filterIds;
+		webSearchEnabled = resolution.effective.featureIds.includes('web_search');
+		imageGenerationEnabled = resolution.effective.featureIds.includes('image_generation');
+		codeInterpreterEnabled = resolution.effective.featureIds.includes('code_interpreter');
+
+		const profile = getModeProfile();
+		if (
+			phase === 'initialize' &&
+			profile &&
+			Object.prototype.hasOwnProperty.call(profile.defaults, 'feature_ids')
+		) {
+			imageGenerationUserOverride = imageGenerationEnabled;
+		}
+
+		clearSelectedTerminal();
+		if (resolution.effective.terminalId) {
+			selectedTerminalId.set(resolution.effective.terminalId);
+			codeInterpreterEnabled = false;
+		}
+
+		const warningSignature = JSON.stringify(resolution.warnings);
+		if (resolution.warnings.length > 0 && warningSignature !== modeProfileWarningSignature) {
+			modeProfileWarningSignature = warningSignature;
+			toast.warning(
+				$i18n.t('Some conversation capabilities are unavailable for the selected model')
+			);
+		}
+	};
+
+	const applyModeProfileInitialization = () => {
+		if (!modeProfileDraftId) return;
+		const model = atSelectedModel ?? $models.find((item) => item.id === selectedModels[0]);
+		const snapshot = modeProfileDraftController.initialize(
+			modeProfileDraftId,
+			resolveConversationModeProfile({
+				mode: conversationMode,
+				profile: getModeProfile(),
+				model,
+				available: getModeProfileAvailability(),
+				phase: 'initialize'
+			})
+		);
+		if (!snapshot.applied) return;
+		modeProfileInitializedDraftId = modeProfileDraftId;
+		modeProfileRevisionId = snapshot.revisionHint;
+		applyModeProfileResolution(snapshot, 'initialize');
+	};
+
+	const applyModeProfileModelChange = () => {
+		const model = atSelectedModel ?? $models.find((item) => item.id === selectedModels[0]);
+		const snapshot = modeProfileDraftController.applyModelChange(
+			resolveConversationModeProfile({
+				mode: conversationMode,
+				profile: getModeProfile(),
+				model,
+				available: getModeProfileAvailability(),
+				currentSelections: getModeProfileSelections(),
+				phase: 'model_change'
+			})
+		);
+		modeProfileRevisionId = snapshot.revisionHint;
+		applyModeProfileResolution(snapshot, 'model_change');
+	};
+
 	const hasImageGenerationAccess = () =>
 		$user?.role === 'admin' || ($user?.permissions?.features?.image_generation ?? false);
 
 	const getPrimaryImageGenerationModel = () =>
 		atSelectedModel ?? $models.find((m) => m.id === selectedModels[0]);
 
-	const restoreImageGenerationFromDraft = (input) => {
+	const restoreImageGenerationFromDraft = (input: any) => {
 		const restored = resolveImageGenerationDraftState(
 			input,
 			getPrimaryImageGenerationModel(),
@@ -451,6 +623,20 @@
 		);
 		imageGenerationEnabled = restored.enabled;
 		imageGenerationUserOverride = restored.userOverride;
+	};
+
+	const beginModeProfileDraft = () => {
+		modeProfileDraftId = `draft:${uuidv4()}`;
+		modeProfileInitializedDraftId = '';
+		modeProfileRevisionId = null;
+		modeProfileWarningSignature = '';
+		clearSelectedTerminal();
+	};
+
+	const bindCanonicalModeProfileRevision = (revisionId: unknown) => {
+		modeProfileRevisionId = modeProfileDraftController.bindCanonicalRevision(
+			typeof revisionId === 'string' ? revisionId : null
+		).revisionHint;
 	};
 
 	let settingDefaults = false;
@@ -474,27 +660,26 @@
 
 			const model = atSelectedModel ?? $models.find((m) => m.id === selectedModels[0]);
 			if (model) {
-				// Set Default Tools
-				if (model?.info?.meta?.toolIds) {
+				if (model.info?.meta?.toolIds) {
 					const defaultIds = [
 						...new Set(
-							[...(model?.info?.meta?.toolIds ?? [])].filter((id) =>
-								$tools.find((t) => t.id === id)
+							[...(model.info.meta.toolIds ?? [])].filter((id) =>
+								$tools.find((tool) => tool.id === id)
 							)
 						)
 					];
-
-					// Separate unauthenticated OAuth tools
 					const unauthed = [];
 					const authed = [];
 					for (const id of defaultIds) {
-						const tool = $tools.find((t) => t.id === id);
-						if (tool && tool.authenticated === false) {
+						const tool = $tools.find((item) => item.id === id);
+						if (tool?.authenticated === false) {
 							const parts = id.split(':');
-							const serverId = parts.at(-1) ?? id;
-							const authType =
-								parts.length > 1 ? (parts[0] === 'server' ? parts[1] : parts[0]) : null;
-							unauthed.push({ id, name: tool.name ?? id, serverId, authType });
+							unauthed.push({
+								id,
+								name: tool.name ?? id,
+								serverId: parts.at(-1) ?? id,
+								authType: parts.length > 1 ? (parts[0] === 'server' ? parts[1] : parts[0]) : null
+							});
 						} else {
 							authed.push(id);
 						}
@@ -508,68 +693,52 @@
 					selectedToolIds = selectedToolIds.filter((id) => !id.startsWith('direct_server:'));
 				}
 
-				// Set Default Skills
-				if (model?.info?.meta?.skillIds) {
-					selectedSkillIds = [
-						...new Set(
-							[...(model?.info?.meta?.skillIds ?? [])].filter((id) =>
-								($skills ?? []).find((s) => s.id === id && s.is_active)
+				selectedSkillIds = model.info?.meta?.skillIds
+					? [
+							...new Set(
+								model.info.meta.skillIds.filter((id) =>
+									($skills ?? []).some((s) => s.id === id && s.is_active)
+								)
 							)
-						)
-					];
-				} else {
-					selectedSkillIds = [];
-				}
-
-				// Set Default Filters (Toggleable only)
-				if (model?.info?.meta?.defaultFilterIds) {
+						]
+					: [];
+				if (model.info?.meta?.defaultFilterIds) {
 					selectedFilterIds = model.info.meta.defaultFilterIds.filter((id) =>
-						model?.filters?.find((f) => f.id === id)
+						model.filters?.some((filter) => filter.id === id)
 					);
 				}
-
-				// Set Default Features
-				if (model?.info?.meta?.defaultFeatureIds) {
+				if (model.info?.meta?.defaultFeatureIds) {
+					const defaults = model.info.meta.defaultFeatureIds;
 					if (
-						model.info?.meta?.capabilities?.['image_generation'] &&
+						model.info.meta.capabilities?.image_generation &&
 						$config?.features?.enable_image_generation &&
-						($user?.role === 'admin' || $user?.permissions?.features?.image_generation)
-					) {
-						imageGenerationEnabled = model.info.meta.defaultFeatureIds.includes('image_generation');
-					}
-
+						hasImageGenerationAccess()
+					)
+						imageGenerationEnabled = defaults.includes('image_generation');
 					if (
-						model.info?.meta?.capabilities?.['web_search'] &&
+						model.info.meta.capabilities?.web_search &&
 						$config?.features?.enable_web_search &&
 						($user?.role === 'admin' || $user?.permissions?.features?.web_search)
-					) {
-						webSearchEnabled = model.info.meta.defaultFeatureIds.includes('web_search');
-					}
-
+					)
+						webSearchEnabled = defaults.includes('web_search');
 					if (
-						model.info?.meta?.capabilities?.['code_interpreter'] &&
+						model.info.meta.capabilities?.code_interpreter &&
 						$config?.features?.enable_code_interpreter &&
 						($user?.role === 'admin' || $user?.permissions?.features?.code_interpreter)
-					) {
-						codeInterpreterEnabled = model.info.meta.defaultFeatureIds.includes('code_interpreter');
-					}
+					)
+						codeInterpreterEnabled = defaults.includes('code_interpreter');
 				}
-
 				imageGenerationEnabled = shouldEnableImageGenerationByDefault(
 					model,
 					$config?.features?.enable_image_generation ?? false,
 					hasImageGenerationAccess()
 				);
 				imageGenerationUserOverride = null;
-
-				// Set Default Terminal — only if the referenced terminal actually exists
-				if (model?.info?.meta?.terminalId) {
-					const tid = model.info.meta.terminalId;
-					if (isTerminalAvailable(tid)) {
-						selectedTerminalId.set(tid);
-					}
+				if (model.info?.meta?.terminalId && isTerminalAvailable(model.info.meta.terminalId)) {
+					selectedTerminalId.set(model.info.meta.terminalId);
 				}
 			}
+			applyModeProfileInitialization();
 		} finally {
 			settingDefaults = false;
 		}
@@ -1011,7 +1180,7 @@
 
 		// Clear stale selectedTerminalId if the referenced terminal no longer exists
 		if ($selectedTerminalId && !isTerminalAvailable($selectedTerminalId)) {
-			selectedTerminalId.set(null);
+			clearSelectedTerminal();
 		}
 
 		const pageSubscribe = page.subscribe(async (p) => {
@@ -1075,6 +1244,7 @@
 				imageGenerationEnabled = false;
 				imageGenerationUserOverride = null;
 				codeInterpreterEnabled = false;
+				clearSelectedTerminal();
 				reasoningEffort = 'medium';
 
 				try {
@@ -1089,6 +1259,10 @@
 						webSearchEnabled = input.webSearchEnabled;
 						restoreImageGenerationFromDraft(input);
 						codeInterpreterEnabled = input.codeInterpreterEnabled;
+						modeProfileRevisionId =
+							typeof input.modeProfileRevisionId === 'string'
+								? input.modeProfileRevisionId
+								: modeProfileRevisionId;
 						reasoningEffort = normalizeReasoningEffort(
 							input.reasoningEffort ?? input.reasoningDepth
 						);
@@ -1424,6 +1598,7 @@
 		const requestedMode =
 			preselectedMode ?? normalizeConversationMode($page.url.searchParams.get('mode'));
 		conversationMode = requestedMode;
+		beginModeProfileDraft();
 		pendingConversationMode = null;
 		chat = null;
 
@@ -1546,7 +1721,7 @@
 
 		autoScroll = true;
 
-		await resetInput();
+		await resetInput({ initialize: true });
 		await chatId.set('');
 		await chatTitle.set('');
 
@@ -1690,6 +1865,7 @@
 			if (chatContent) {
 				console.log(chatContent);
 				conversationMode = normalizeConversationMode(chatContent?.mode);
+				bindCanonicalModeProfileRevision(chat?.mode_profile_revision_id);
 
 				selectedModels =
 					(chatContent?.models ?? undefined) !== undefined
@@ -2624,6 +2800,7 @@
 				stream: stream,
 				model: model.id,
 				chat_mode: conversationMode,
+				mode_profile_revision_id: modeProfileRevisionId ?? undefined,
 				...(messages.length > 0 ? { messages } : {}),
 				...(reasoning ? { reasoning } : {}),
 				params: {
@@ -3009,6 +3186,7 @@
 			);
 
 			_chatId = chat.id;
+			bindCanonicalModeProfileRevision(chat?.mode_profile_revision_id);
 			await chatId.set(_chatId);
 
 			window.history.replaceState(history.state, '', `/c/${_chatId}`);
@@ -3056,7 +3234,10 @@
 			return null;
 		});
 		// Refresh the dedupe baseline so a later revert still saves.
-		if (res) chat = res;
+		if (res) {
+			chat = res;
+			bindCanonicalModeProfileRevision(chat?.mode_profile_revision_id);
+		}
 	};
 
 	const MAX_DRAFT_LENGTH = 5000;
@@ -3337,6 +3518,7 @@
 								);
 
 								if (savedChat) {
+									bindCanonicalModeProfileRevision(savedChat.mode_profile_revision_id);
 									temporaryChatEnabled.set(false);
 									chatId.set(savedChat.id);
 									chats.set(await getChatList(localStorage.token, $currentChatPage));
@@ -3474,6 +3656,7 @@
 													{
 														...data,
 														conversationMode: conversationMode,
+														modeProfileRevisionId,
 														imageGenerationUserOverride
 													},
 													$chatId
@@ -3540,6 +3723,7 @@
 												saveDraft({
 													...data,
 													conversationMode: conversationMode,
+													modeProfileRevisionId,
 													imageGenerationUserOverride
 												});
 											}
