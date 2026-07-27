@@ -2362,7 +2362,6 @@
 	};
 
 	const createMessagePair = async (userPrompt) => {
-		messageInput?.setText('');
 		if (selectedModels.length === 0) {
 			toast.error($i18n.t('Model not selected'));
 		} else {
@@ -2374,7 +2373,10 @@
 				return;
 			}
 
-			await clearDraft($chatId || null);
+			await runAcceptedSubmitDraftCriticalSection(async () => {
+				await messageInput?.setText('');
+				prompt = '';
+			});
 
 			const messages = createMessagesList(history, history.currentId);
 			const parentMessage = messages.length !== 0 ? messages.at(-1) : null;
@@ -2741,11 +2743,11 @@
 					...q,
 					[$chatId]: [...(q[$chatId] ?? []), { id: uuidv4(), prompt: userPrompt, files: _files }]
 				}));
-				await clearDraft($chatId || null);
-				// Clear input
-				messageInput?.setText('');
-				prompt = '';
-				files = [];
+				await runAcceptedSubmitDraftCriticalSection(async () => {
+					await messageInput?.setText('');
+					prompt = '';
+					files = [];
+				});
 				return;
 			} else {
 				// Interrupt: stop current generation and proceed
@@ -2764,14 +2766,12 @@
 			}
 		}
 
-		await clearDraft($chatId || null);
-
-		// Clear input and submit
-		messageInput?.setText('');
-		prompt = '';
 		const _files = structuredClone(files);
-		files = [];
-		messageInput?.setText('');
+		await runAcceptedSubmitDraftCriticalSection(async () => {
+			await messageInput?.setText('');
+			prompt = '';
+			files = [];
+		});
 
 		await submitPrompt(userPrompt, _files);
 	};
@@ -3568,6 +3568,7 @@
 
 	const MAX_DRAFT_LENGTH = 5000;
 	let saveDraftTimeout: ReturnType<typeof setTimeout> | null = null;
+	let acceptedSubmitDraftPersistenceSuppressed = false;
 	const shouldAutosaveModeProfileDraft = () =>
 		!$temporaryChatEnabled &&
 		(Boolean($chatId) ||
@@ -3606,6 +3607,8 @@
 		chatId: string | null = null,
 		{ immediate = false }: { immediate?: boolean } = {}
 	) => {
+		if (acceptedSubmitDraftPersistenceSuppressed) return;
+
 		if (saveDraftTimeout) {
 			clearTimeout(saveDraftTimeout);
 		}
@@ -3628,7 +3631,7 @@
 	};
 
 	const persistFinalizedModeProfileDraftSnapshot = async () => {
-		if ($temporaryChatEnabled) return;
+		if ($temporaryChatEnabled || acceptedSubmitDraftPersistenceSuppressed) return;
 		await tick();
 		const draftChatId = modeProfileDraftId.startsWith('draft:') ? null : $chatId || null;
 		await saveDraft(
@@ -3639,7 +3642,12 @@
 	};
 
 	const saveModeProfileCapabilityAuthority = () => {
-		if ($temporaryChatEnabled || !latestModeProfileDraftInput) return;
+		if (
+			$temporaryChatEnabled ||
+			acceptedSubmitDraftPersistenceSuppressed ||
+			!latestModeProfileDraftInput
+		)
+			return;
 		saveDraft(createModeProfileDraftSnapshot(latestModeProfileDraftInput), $chatId || null);
 	};
 
@@ -3648,6 +3656,17 @@
 			clearTimeout(saveDraftTimeout);
 		}
 		await sessionStorage.removeItem(`chat-input${chatId ? `-${chatId}` : ''}`);
+	};
+
+	const runAcceptedSubmitDraftCriticalSection = async (clearInput: () => void | Promise<void>) => {
+		acceptedSubmitDraftPersistenceSuppressed = true;
+		try {
+			await clearDraft($chatId || null);
+			await clearInput();
+			await tick();
+		} finally {
+			acceptedSubmitDraftPersistenceSuppressed = false;
+		}
 	};
 
 	const moveChatHandler = async (chatId, folderId) => {
@@ -4037,7 +4056,10 @@
 												modeProfileCapabilityAuthority =
 													modeProfileCapabilityAuthorityController.observe(data);
 											}
-											if (shouldAutosaveModeProfileDraft()) {
+											if (
+												!acceptedSubmitDraftPersistenceSuppressed &&
+												shouldAutosaveModeProfileDraft()
+											) {
 												saveDraft(createModeProfileDraftSnapshot(data), $chatId);
 											}
 										}}
@@ -4113,7 +4135,10 @@
 												modeProfileCapabilityAuthority =
 													modeProfileCapabilityAuthorityController.observe(data);
 											}
-											if (shouldAutosaveModeProfileDraft()) {
+											if (
+												!acceptedSubmitDraftPersistenceSuppressed &&
+												shouldAutosaveModeProfileDraft()
+											) {
 												saveDraft(createModeProfileDraftSnapshot(data));
 											}
 										}}

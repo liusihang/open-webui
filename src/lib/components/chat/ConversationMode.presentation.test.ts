@@ -352,7 +352,9 @@ describe('conversation mode presentation contract', () => {
 		const visibleComposers = chat.match(/on:submit=\{async \(e\) => \{([\s\S]*?)\n\t+\}\}/g) ?? [];
 
 		expect(submitHandler).toBeDefined();
-		expect(submitHandler?.match(/await clearDraft\(\$chatId \|\| null\);/g) ?? []).toHaveLength(2);
+		expect(
+			submitHandler?.match(/await runAcceptedSubmitDraftCriticalSection\(/g) ?? []
+		).toHaveLength(2);
 		expect(suggestion).toContain('submitHandler(prompt)');
 		expect(postMessage?.match(/submitHandler\(/g) ?? []).toHaveLength(4);
 		expect(initNewChat?.match(/submitHandler\(/g) ?? []).toHaveLength(2);
@@ -364,7 +366,6 @@ describe('conversation mode presentation contract', () => {
 			expect(composer).not.toContain('clearDraft(');
 		}
 		expect(chat).toContain('shouldAutosaveModeProfileDraft()');
-		expect(chat.match(/if \(shouldAutosaveModeProfileDraft\(\)\)/g) ?? []).toHaveLength(2);
 	});
 
 	it('clears only after validation and web-search confirmation accepts an input', () => {
@@ -377,11 +378,11 @@ describe('conversation mode presentation contract', () => {
 		)?.[1];
 
 		expect(submitHandler).toBeDefined();
-		const clearOffsets = [
-			...(submitHandler?.matchAll(/await clearDraft\(\$chatId \|\| null\);/g) ?? [])
+		const criticalSectionOffsets = [
+			...(submitHandler?.matchAll(/await runAcceptedSubmitDraftCriticalSection\(/g) ?? [])
 		].map((match) => match.index ?? -1);
-		expect(clearOffsets).toHaveLength(2);
-		const [queueClear, normalClear] = clearOffsets;
+		expect(criticalSectionOffsets).toHaveLength(2);
+		const [queueCriticalSection, normalCriticalSection] = criticalSectionOffsets;
 		for (const rejectedBeforeAcceptance of [
 			'pendingOAuthTools.length > 0',
 			"userPrompt === '' && files.length === 0",
@@ -390,20 +391,20 @@ describe('conversation mode presentation contract', () => {
 			'files.length + chatFiles.length > $config?.file?.max_count',
 			'openWebSearchConfirm()'
 		]) {
-			expect(submitHandler?.indexOf(rejectedBeforeAcceptance)).toBeLessThan(queueClear);
+			expect(submitHandler?.indexOf(rejectedBeforeAcceptance)).toBeLessThan(queueCriticalSection);
 		}
-		expect(submitHandler?.indexOf('chatRequestQueues.update')).toBeLessThan(queueClear);
-		expect(queueClear).toBeLessThan(
-			submitHandler?.indexOf("messageInput?.setText('')", queueClear) ?? -1
+		expect(submitHandler?.indexOf('chatRequestQueues.update')).toBeLessThan(queueCriticalSection);
+		expect(queueCriticalSection).toBeLessThan(
+			submitHandler?.indexOf("messageInput?.setText('')", queueCriticalSection) ?? -1
 		);
 		expect(submitHandler?.indexOf('currentMessage.error && !currentMessage.content')).toBeLessThan(
-			normalClear
+			normalCriticalSection
 		);
-		expect(normalClear).toBeLessThan(
-			submitHandler?.indexOf("messageInput?.setText('')", normalClear) ?? -1
+		expect(normalCriticalSection).toBeLessThan(
+			submitHandler?.indexOf("messageInput?.setText('')", normalCriticalSection) ?? -1
 		);
-		expect(normalClear).toBeLessThan(
-			submitHandler?.indexOf('await submitPrompt', normalClear) ?? -1
+		expect(normalCriticalSection).toBeLessThan(
+			submitHandler?.indexOf('await submitPrompt', normalCriticalSection) ?? -1
 		);
 		expect(confirmWebSearch).toBeDefined();
 		expect(confirmWebSearch?.indexOf('webSearchConfirmed = true')).toBeLessThan(
@@ -421,22 +422,69 @@ describe('conversation mode presentation contract', () => {
 		expect(createMessagePair).toBeDefined();
 		expect(input).toContain('on:click={() => createMessagePair(prompt)}');
 		expect(chat.match(/\{createMessagePair\}/g) ?? []).toHaveLength(2);
-		expect(createMessagePair?.match(/await clearDraft\(\$chatId \|\| null\);/g) ?? []).toHaveLength(
-			1
+		expect(
+			createMessagePair?.match(/await runAcceptedSubmitDraftCriticalSection\(/g) ?? []
+		).toHaveLength(1);
+		const criticalSectionOffset =
+			createMessagePair?.indexOf('await runAcceptedSubmitDraftCriticalSection(') ?? -1;
+		expect(createMessagePair?.indexOf('selectedModels.length === 0')).toBeLessThan(
+			criticalSectionOffset
 		);
-		const clearOffset = createMessagePair?.indexOf('await clearDraft($chatId || null)') ?? -1;
-		expect(createMessagePair?.indexOf('selectedModels.length === 0')).toBeLessThan(clearOffset);
 		expect(createMessagePair?.indexOf("toast.error($i18n.t('Model not selected'))")).toBeLessThan(
-			clearOffset
+			criticalSectionOffset
 		);
-		expect(createMessagePair?.indexOf('if (!model)')).toBeLessThan(clearOffset);
+		expect(createMessagePair?.indexOf('if (!model)')).toBeLessThan(criticalSectionOffset);
 		expect(createMessagePair?.indexOf("toast.error($i18n.t('Model not found'))")).toBeLessThan(
-			clearOffset
+			criticalSectionOffset
 		);
-		expect(clearOffset).toBeLessThan(createMessagePair?.indexOf('createMessagesList') ?? -1);
-		expect(clearOffset).toBeLessThan(
+		expect(criticalSectionOffset).toBeLessThan(
+			createMessagePair?.indexOf('createMessagesList') ?? -1
+		);
+		expect(criticalSectionOffset).toBeLessThan(
 			createMessagePair?.indexOf('history.messages[userMessageId]') ?? -1
 		);
-		expect(clearOffset).toBeLessThan(createMessagePair?.indexOf('await initChatHandler') ?? -1);
+		expect(criticalSectionOffset).toBeLessThan(
+			createMessagePair?.indexOf('await initChatHandler') ?? -1
+		);
+	});
+
+	it('suppresses every reactive draft write until accepted input reset onChange has flushed', () => {
+		const chat = readSource('./Chat.svelte');
+		const criticalSection = chat.match(
+			/const runAcceptedSubmitDraftCriticalSection = async \([\s\S]*?\) => \{([\s\S]*?)\n\t\};/
+		)?.[1];
+		const saveDraft = chat.match(
+			/const saveDraft = async \([\s\S]*?\) => \{([\s\S]*?)\n\t\};/
+		)?.[1];
+		const persistFinalized = chat.match(
+			/const persistFinalizedModeProfileDraftSnapshot = async \(\) => \{([\s\S]*?)\n\t\};/
+		)?.[1];
+		const saveAuthority = chat.match(
+			/const saveModeProfileCapabilityAuthority = \(\) => \{([\s\S]*?)\n\t\};/
+		)?.[1];
+
+		expect(criticalSection).toBeDefined();
+		const suppressOffset =
+			criticalSection?.indexOf('acceptedSubmitDraftPersistenceSuppressed = true') ?? -1;
+		const clearOffset = criticalSection?.indexOf('await clearDraft($chatId || null)') ?? -1;
+		const resetOffset = criticalSection?.indexOf('await clearInput()') ?? -1;
+		const tickOffset = criticalSection?.indexOf('await tick()') ?? -1;
+		const releaseOffset =
+			criticalSection?.indexOf('acceptedSubmitDraftPersistenceSuppressed = false') ?? -1;
+		expect(suppressOffset).toBeLessThan(clearOffset);
+		expect(clearOffset).toBeLessThan(resetOffset);
+		expect(resetOffset).toBeLessThan(tickOffset);
+		expect(tickOffset).toBeLessThan(releaseOffset);
+		expect(criticalSection).toContain('finally');
+		expect(criticalSection).not.toContain('submitPrompt');
+		expect(criticalSection).not.toContain('createMessagesList');
+		expect(saveDraft).toContain('if (acceptedSubmitDraftPersistenceSuppressed) return');
+		expect(persistFinalized).toContain('acceptedSubmitDraftPersistenceSuppressed');
+		expect(saveAuthority).toContain('acceptedSubmitDraftPersistenceSuppressed');
+		expect(
+			chat.match(
+				/if \(\s*!acceptedSubmitDraftPersistenceSuppressed\s*&&\s*shouldAutosaveModeProfileDraft\(\)\s*\)/g
+			) ?? []
+		).toHaveLength(2);
 	});
 });
