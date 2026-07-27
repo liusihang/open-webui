@@ -1,0 +1,3 @@
+services:
+  open-webui-pr7:
+    image: open-webui:pr7-chat-agent-dual-mode-1d8dba8a7-slim
