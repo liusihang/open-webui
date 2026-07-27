@@ -9,6 +9,7 @@ import {
 	catalogItems,
 	decodeDefaults,
 	detailPresentation,
+	loadConversationModeProfileHistory,
 	modeForTabKey,
 	normalizeProfileError,
 	setProfileOperationFailure
@@ -38,6 +39,14 @@ const deferred = <T>() => {
 		resolve = nextResolve;
 	});
 	return { promise, resolve };
+};
+
+const deferredRejection = <T>() => {
+	let reject: (reason?: unknown) => void = () => {};
+	const promise = new Promise<T>((_resolve, nextReject) => {
+		reject = nextReject;
+	});
+	return { promise, reject };
 };
 
 describe('conversation mode profile state', () => {
@@ -162,6 +171,72 @@ describe('conversation mode profile state', () => {
 		expect(controller.state('chat').error).toContain(
 			'Refresh failed: metadata refresh unavailable'
 		);
+	});
+
+	it('releases a failed refresh history gate so the conflicted draft can retry history', async () => {
+		const controller = createConversationModeProfileController();
+		controller.applyRevision('chat', revision('chat', 'chat-1'));
+		controller.updateDraft('chat', (draft) => ({ ...draft, systemPrompt: 'keep this draft' }));
+		const saveRequest = controller.begin('chat', 'save');
+		if (!saveRequest) throw new Error('Expected a Chat save request');
+		const historyResponse = deferredRejection<{
+			mode: 'chat';
+			current_revision_id: string;
+			revisions: [];
+		}>();
+		const conflict: ConversationModeProfileConflict = {
+			code: 'mode_profile_revision_conflict',
+			mode: 'chat',
+			expected_current_revision_id: 'chat-1',
+			current_revision: {
+				revision_id: 'chat-2',
+				revision_number: 2,
+				schema_version: 1,
+				created_at: 0
+			}
+		};
+
+		const failure = setProfileOperationFailure({
+			controller,
+			request: saveRequest,
+			error: new ModeProfileApiError(409, conflict),
+			refresh: async (mode) => {
+				const historyRequest = controller.begin(mode, 'history');
+				if (!historyRequest) throw new Error('Expected a refresh history request');
+				await loadConversationModeProfileHistory({
+					controller,
+					request: historyRequest,
+					loadHistory: () => historyResponse.promise,
+					onFailure: async () => {},
+					throwOnError: true
+				});
+			}
+		});
+
+		await Promise.resolve();
+		expect(controller.state('chat').loading.history).toBe(true);
+		historyResponse.reject(new Error('metadata refresh unavailable'));
+		await expect(failure).resolves.toBeUndefined();
+
+		expect(controller.state('chat').conflict).toContain('chat-2');
+		expect(controller.state('chat').draft?.systemPrompt).toBe('keep this draft');
+		expect(controller.state('chat').dirty).toBe(true);
+		expect(controller.state('chat').error).toContain(
+			'Refresh failed: metadata refresh unavailable'
+		);
+		expect(controller.state('chat').loading.history).toBe(false);
+
+		const retryRequest = controller.begin('chat', 'history');
+		if (!retryRequest) throw new Error('Expected a retry history request');
+		await loadConversationModeProfileHistory({
+			controller,
+			request: retryRequest,
+			loadHistory: async () => ({ mode: 'chat', current_revision_id: 'chat-2', revisions: [] }),
+			onFailure: async () => {}
+		});
+
+		expect(controller.state('chat').history?.current_revision_id).toBe('chat-2');
+		expect(controller.state('chat').loading.history).toBe(false);
 	});
 
 	it('gates save and restore for the same mode until the active mutation finishes', () => {

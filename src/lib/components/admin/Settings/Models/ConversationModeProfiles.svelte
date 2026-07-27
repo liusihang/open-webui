@@ -15,6 +15,7 @@
 		contentFromDraft,
 		createConversationModeProfileController,
 		detailPresentation,
+		loadConversationModeProfileHistory,
 		modeForTabKey,
 		normalizeProfileError,
 		setProfileOperationFailure,
@@ -57,11 +58,13 @@
 		if (!request) return;
 		touch();
 		try {
-			const history = await getConversationModeProfileHistory(token(), request.mode);
-			controller.completeHistory(request, history);
-		} catch (error) {
-			if (propagateFailure) throw error;
-			await setFailure(request, error);
+			await loadConversationModeProfileHistory({
+				controller,
+				request,
+				loadHistory: (requestMode) => getConversationModeProfileHistory(token(), requestMode),
+				onFailure: setFailure,
+				throwOnError: propagateFailure
+			});
 		} finally {
 			touch();
 		}

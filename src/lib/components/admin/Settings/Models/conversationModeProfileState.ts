@@ -310,10 +310,15 @@ export const createConversationModeProfileController = () => {
 	const accepts = (request: ModeProfileRequest) =>
 		latest[request.mode][request.operation] === request.id;
 
-	const complete = (request: ModeProfileRequest, apply: (current: ModeProfileState) => void) => {
+	const finish = (request: ModeProfileRequest) => {
 		if (!accepts(request)) return false;
+		state(request.mode).loading[request.operation] = false;
+		return true;
+	};
+
+	const complete = (request: ModeProfileRequest, apply: (current: ModeProfileState) => void) => {
+		if (!finish(request)) return false;
 		const current = state(request.mode);
-		current.loading[request.operation] = false;
 		apply(current);
 		return true;
 	};
@@ -355,6 +360,7 @@ export const createConversationModeProfileController = () => {
 		canBegin,
 		begin,
 		accepts,
+		finish,
 		completeSave,
 		completeHistory,
 		completeDetail,
@@ -363,6 +369,30 @@ export const createConversationModeProfileController = () => {
 };
 
 type ConversationModeProfileController = ReturnType<typeof createConversationModeProfileController>;
+
+export const loadConversationModeProfileHistory = async ({
+	controller,
+	request,
+	loadHistory,
+	onFailure,
+	throwOnError = false
+}: {
+	controller: ConversationModeProfileController;
+	request: ModeProfileRequest;
+	loadHistory: (mode: ConversationMode) => Promise<ConversationModeProfileHistory>;
+	onFailure: (request: ModeProfileRequest, error: unknown) => Promise<void>;
+	throwOnError?: boolean;
+}): Promise<void> => {
+	try {
+		const history = await loadHistory(request.mode);
+		controller.completeHistory(request, history);
+	} catch (error) {
+		if (throwOnError) throw error;
+		await onFailure(request, error);
+	} finally {
+		controller.finish(request);
+	}
+};
 
 const isRecord = (value: unknown): value is Record<string, unknown> =>
 	!!value && typeof value === 'object' && !Array.isArray(value);
