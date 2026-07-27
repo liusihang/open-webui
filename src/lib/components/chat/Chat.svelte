@@ -105,7 +105,8 @@
 	import MessageInput from '$lib/components/chat/MessageInput.svelte';
 	import {
 		resolveImageGenerationDraftState,
-		resolveImageGenerationFeature
+		resolveImageGenerationFeature,
+		shouldEnableImageGenerationByDefault
 	} from '$lib/components/chat/defaultFeatures';
 	import {
 		buildModelReasoningPayload,
@@ -734,11 +735,14 @@
 					hasImageGenerationAccess()
 				);
 				imageGenerationUserOverride = null;
-				if (model.info?.meta?.terminalId && isTerminalAvailable(model.info.meta.terminalId)) {
-					selectedTerminalId.set(model.info.meta.terminalId);
+				const defaultTerminalId = (model.info?.meta as any)?.terminalId;
+				if (typeof defaultTerminalId === 'string' && isTerminalAvailable(defaultTerminalId)) {
+					selectedTerminalId.set(defaultTerminalId);
 				}
 			}
-			applyModeProfileInitialization();
+			if (modeProfileDraftId.startsWith('draft:')) {
+				applyModeProfileInitialization();
+			}
 		} finally {
 			settingDefaults = false;
 		}

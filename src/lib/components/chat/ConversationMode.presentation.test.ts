@@ -92,6 +92,12 @@ describe('conversation mode presentation contract', () => {
 		expect(chat).toContain('applyModeProfileInitialization');
 		expect(chat).toContain('applyModeProfileModelChange');
 		expect(chat).toContain('selectedTerminalId.set(null)');
+		expect(chat).toContain('filter_ids: selectedFilterIds');
+		expect(chat).toContain('tool_ids: toolIds');
+		expect(chat).toContain('skill_ids: skillIds');
+		expect(chat).toContain(
+			'terminal_id: terminalEnabled ? (activeTerminalId ?? undefined) : undefined'
+		);
 		expect(chat).not.toContain('modeProfileSystemPrompt');
 	});
 });
