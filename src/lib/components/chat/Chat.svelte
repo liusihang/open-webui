@@ -2374,6 +2374,8 @@
 				return;
 			}
 
+			await clearDraft($chatId || null);
+
 			const messages = createMessagesList(history, history.currentId);
 			const parentMessage = messages.length !== 0 ? messages.at(-1) : null;
 

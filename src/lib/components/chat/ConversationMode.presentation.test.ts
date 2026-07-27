@@ -353,7 +353,6 @@ describe('conversation mode presentation contract', () => {
 
 		expect(submitHandler).toBeDefined();
 		expect(submitHandler?.match(/await clearDraft\(\$chatId \|\| null\);/g) ?? []).toHaveLength(2);
-		expect(chat.match(/await clearDraft\([^)]*\);/g) ?? []).toHaveLength(2);
 		expect(suggestion).toContain('submitHandler(prompt)');
 		expect(postMessage?.match(/submitHandler\(/g) ?? []).toHaveLength(4);
 		expect(initNewChat?.match(/submitHandler\(/g) ?? []).toHaveLength(2);
@@ -410,5 +409,34 @@ describe('conversation mode presentation contract', () => {
 		expect(confirmWebSearch?.indexOf('webSearchConfirmed = true')).toBeLessThan(
 			confirmWebSearch?.indexOf('await submitHandler(userPrompt)') ?? -1
 		);
+	});
+
+	it('clears the accepted create-message-pair shortcut after model validation and before history mutation', () => {
+		const chat = readSource('./Chat.svelte');
+		const input = readSource('./MessageInput.svelte');
+		const createMessagePair = chat.match(
+			/const createMessagePair = async \(userPrompt\) => \{([\s\S]*?)\n\t\};\n\n\tconst addMessages/
+		)?.[1];
+
+		expect(createMessagePair).toBeDefined();
+		expect(input).toContain('on:click={() => createMessagePair(prompt)}');
+		expect(chat.match(/\{createMessagePair\}/g) ?? []).toHaveLength(2);
+		expect(createMessagePair?.match(/await clearDraft\(\$chatId \|\| null\);/g) ?? []).toHaveLength(
+			1
+		);
+		const clearOffset = createMessagePair?.indexOf('await clearDraft($chatId || null)') ?? -1;
+		expect(createMessagePair?.indexOf('selectedModels.length === 0')).toBeLessThan(clearOffset);
+		expect(createMessagePair?.indexOf("toast.error($i18n.t('Model not selected'))")).toBeLessThan(
+			clearOffset
+		);
+		expect(createMessagePair?.indexOf('if (!model)')).toBeLessThan(clearOffset);
+		expect(createMessagePair?.indexOf("toast.error($i18n.t('Model not found'))")).toBeLessThan(
+			clearOffset
+		);
+		expect(clearOffset).toBeLessThan(createMessagePair?.indexOf('createMessagesList') ?? -1);
+		expect(clearOffset).toBeLessThan(
+			createMessagePair?.indexOf('history.messages[userMessageId]') ?? -1
+		);
+		expect(clearOffset).toBeLessThan(createMessagePair?.indexOf('await initChatHandler') ?? -1);
 	});
 });
