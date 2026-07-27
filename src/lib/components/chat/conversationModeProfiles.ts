@@ -491,6 +491,31 @@ export const resolveConversationModeProfile = (
 	};
 };
 
+type ConversationModeRequestCapabilitiesInput = Omit<
+	ConversationModeProfileResolutionInput,
+	'phase'
+> & {
+	authority: ConversationModeCapabilityAuthority;
+};
+
+export const resolveConversationModeRequestCapabilities = (
+	input: ConversationModeRequestCapabilitiesInput
+): ConversationModeProfileResolution => {
+	const { authority, ...resolutionInput } = input;
+	if (authority === 'inherit_bound') {
+		return {
+			effective: copySelections(input.currentSelections ?? emptySelections()),
+			warnings: [],
+			revisionHint: null
+		};
+	}
+
+	return resolveConversationModeProfile({
+		...resolutionInput,
+		phase: 'model_change'
+	});
+};
+
 export type ConversationModeProfileDraftSnapshot = ConversationModeProfileResolution & {
 	applied: boolean;
 };

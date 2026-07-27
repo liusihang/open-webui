@@ -189,7 +189,7 @@ describe('conversation mode presentation contract', () => {
 	it('adds permitted live direct tool server IDs to model-change availability', () => {
 		const chat = readSource('./Chat.svelte');
 		const availability = chat.match(
-			/const getModeProfileAvailability = \(\): ConversationModeProfileAvailability => \{([\s\S]*?)\n\t\};/
+			/const getModeProfileAvailability = \([\s\S]*?\): ConversationModeProfileAvailability => \{([\s\S]*?)\n\t\};/
 		)?.[1];
 
 		expect(chat).toContain('getConversationModeAvailableToolIds');
@@ -298,8 +298,52 @@ describe('conversation mode presentation contract', () => {
 		expect(revalidate).toContain('await ensureModeProfileExternalCatalogsLoaded()');
 		expect(revalidate).toContain('applyModeProfileModelChange()');
 		expect(revalidate).toContain('modeProfileBoundTerminalId = $selectedTerminalId');
-		expect(sendMessageSocket).toContain('await revalidateModeProfileCapabilities()');
+		expect(sendMessageSocket).toContain('await resolveModeProfileRequest(model)');
 		expect(chat).toContain('configuredToolServers: $settings?.toolServers ?? []');
 		expect(chat).toContain('directToolServerCatalogReady: modeProfileExternalCatalog.ready');
+	});
+
+	it('builds request-local capabilities from the actual socket model without mutating UI state', () => {
+		const chat = readSource('./Chat.svelte');
+		const requestResolution = chat.match(
+			/const resolveModeProfileRequest = async \(model: Model\) => \{([\s\S]*?)\n\t\};/
+		)?.[1];
+		const sendMessageSocket = chat.match(/const sendMessageSocket = async \([\s\S]*?\n\t\};/)?.[0];
+
+		expect(requestResolution).toBeDefined();
+		expect(requestResolution).toContain('await ensureModeProfileExternalCatalogsLoaded(model)');
+		expect(requestResolution).toContain('getModeProfileAvailability(model)');
+		expect(requestResolution).toContain('resolveConversationModeRequestCapabilities');
+		expect(requestResolution).not.toContain('applyModeProfileModelChange');
+		expect(requestResolution).not.toContain('modeProfileCapabilityAuthorityController');
+		expect(requestResolution).not.toContain('modeProfileRevisionId =');
+		expect(requestResolution).not.toContain('modeProfileControlsReady =');
+		expect(requestResolution).not.toContain('saveDraft');
+		expect(requestResolution).not.toMatch(
+			/(?:selectedToolIds|selectedSkillIds|selectedFilterIds|webSearchEnabled|codeInterpreterEnabled|imageGenerationEnabled)\s*=/
+		);
+		expect(sendMessageSocket).not.toContain('await revalidateModeProfileCapabilities()');
+		expect(sendMessageSocket).toContain(
+			'const modeProfileRequest = await resolveModeProfileRequest(model)'
+		);
+		expect(sendMessageSocket).toContain('selections: modeProfileRequest.effective');
+		expect(sendMessageSocket).toContain(
+			'features: getFeatures(model, modeProfileRequest.effective)'
+		);
+		expect(chat).toContain('const getModeProfileAvailability = (');
+		expect(chat).toContain('modelOverride: Model | undefined = undefined');
+	});
+
+	it('awaits first-send draft clearing and suppresses post-clear root autosave', () => {
+		const chat = readSource('./Chat.svelte');
+		const submitHandlers = chat.match(/on:submit=\{async \(e\) => \{([\s\S]*?)\n\t+\}\}/g) ?? [];
+
+		expect(chat.match(/await clearDraft\([^)]*\);/g) ?? []).toHaveLength(2);
+		expect(submitHandlers).toHaveLength(2);
+		for (const handler of submitHandlers) {
+			expect(handler.indexOf('await clearDraft(')).toBeLessThan(handler.indexOf('submitHandler('));
+		}
+		expect(chat).toContain('shouldAutosaveModeProfileDraft()');
+		expect(chat.match(/if \(shouldAutosaveModeProfileDraft\(\)\)/g) ?? []).toHaveLength(2);
 	});
 });

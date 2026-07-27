@@ -1,5 +1,7 @@
 import { describe, expect, it } from 'vitest';
 
+import * as conversationModeProfiles from './conversationModeProfiles';
+
 import {
 	createConversationModeCapabilityAuthorityController,
 	createConversationModeProfileDraftController,
@@ -258,6 +260,49 @@ describe('resolveConversationModeProfile', () => {
 				permissions: { features: { direct_tool_servers: false } }
 			})
 		).toBe(false);
+	});
+
+	it('resolves request-local selections against the actual send model without mutating UI input', () => {
+		expect(conversationModeProfiles).toHaveProperty('resolveConversationModeRequestCapabilities');
+		const resolveRequest = (conversationModeProfiles as any)
+			.resolveConversationModeRequestCapabilities;
+		const currentSelections = {
+			terminalId: null,
+			toolIds: ['profile-tool'],
+			skillIds: ['profile-skill'],
+			filterIds: ['profile-filter'],
+			featureIds: ['web_search', 'code_interpreter']
+		};
+		const originalSelections = structuredClone(currentSelections);
+		const input = {
+			authority: 'explicit',
+			mode: 'agent',
+			profile: null,
+			available,
+			currentSelections
+		};
+
+		expect(resolveRequest({ ...input, model: model() }).effective).toEqual(currentSelections);
+		expect(
+			resolveRequest({
+				...input,
+				model: model({
+					capabilities: {
+						function_calling: false,
+						web_search: false,
+						code_interpreter: false
+					}
+				})
+			}).effective
+		).toEqual({ terminalId: null, toolIds: [], skillIds: [], filterIds: [], featureIds: [] });
+		expect(currentSelections).toEqual(originalSelections);
+		expect(
+			resolveRequest({
+				...input,
+				authority: 'inherit_bound',
+				model: model({ capabilities: { function_calling: false } })
+			})
+		).toMatchObject({ effective: currentSelections, warnings: [] });
 	});
 });
 

@@ -126,6 +126,7 @@
 		isDirectToolServersPermitted,
 		parseConversationModeDraft,
 		resolveConversationModeProfile,
+		resolveConversationModeRequestCapabilities,
 		serializeConversationModeCapabilityRequest,
 		serializeConversationModeToolServers,
 		type ConversationModeCapabilityAuthority,
@@ -572,16 +573,22 @@
 		return profiles?.find((profile) => profile.mode === conversationMode) ?? null;
 	};
 
-	const getModeProfileTerminalCandidates = () => {
-		const model = (atSelectedModel ?? $models.find((item) => item.id === selectedModels[0])) as any;
+	const getModeProfileTerminalCandidates = (modelOverride: Model | undefined = undefined) => {
+		const model = (modelOverride ??
+			atSelectedModel ??
+			$models.find((item) => item.id === selectedModels[0])) as any;
 		const profileTerminalId = getModeProfile()?.defaults?.terminal_id;
 		return [
 			...new Set([$selectedTerminalId, profileTerminalId, model?.info?.meta?.terminalId])
 		].filter((id): id is string => typeof id === 'string' && id.length > 0);
 	};
 
-	const getModeProfileAvailability = (): ConversationModeProfileAvailability => {
-		const model = (atSelectedModel ?? $models.find((item) => item.id === selectedModels[0])) as any;
+	const getModeProfileAvailability = (
+		modelOverride: Model | undefined = undefined
+	): ConversationModeProfileAvailability => {
+		const model = (modelOverride ??
+			atSelectedModel ??
+			$models.find((item) => item.id === selectedModels[0])) as any;
 		const availableTerminals = (
 			modeProfileExternalCatalog.ready
 				? modeProfileExternalCatalog.terminalServers
@@ -606,7 +613,10 @@
 				)
 					.map((server) => server.url)
 					.filter((id): id is string => typeof id === 'string' && id.length > 0),
-				...(!modeProfileExternalCatalog.ready ? getModeProfileTerminalCandidates() : []).filter(
+				...(!modeProfileExternalCatalog.ready
+					? getModeProfileTerminalCandidates(modelOverride)
+					: []
+				).filter(
 					(id) =>
 						directTerminalPermitted ||
 						!configuredTerminalServers.some((server) => server.url === id)
@@ -652,7 +662,9 @@
 		]
 	});
 
-	const ensureModeProfileExternalCatalogsLoaded = async () => {
+	const ensureModeProfileExternalCatalogsLoaded = async (
+		modelOverride: Model | undefined = undefined
+	) => {
 		if (modeProfileExternalCatalogPromise) {
 			await modeProfileExternalCatalogPromise;
 		}
@@ -662,7 +674,7 @@
 			const configuredToolServers = directToolServersPermitted
 				? ((($settings as any)?.toolServers ?? []) as any[])
 				: [];
-			const terminalCandidates = new Set(getModeProfileTerminalCandidates());
+			const terminalCandidates = new Set(getModeProfileTerminalCandidates(modelOverride));
 			const configuredTerminalServers = directToolServersPermitted
 				? (((($settings as any)?.terminalServers ?? []) as any[])
 						.filter((server) => terminalCandidates.has(server.url))
@@ -717,6 +729,16 @@
 		if (!$skills) skills.set(await getSkills(localStorage.token));
 	};
 
+	const showModeProfileWarnings = (warnings: any[]) => {
+		const warningSignature = JSON.stringify(warnings);
+		if (warnings.length > 0 && warningSignature !== modeProfileWarningSignature) {
+			modeProfileWarningSignature = warningSignature;
+			toast.warning(
+				$i18n.t('Some conversation capabilities are unavailable for the selected model')
+			);
+		}
+	};
+
 	const applyModeProfileResolution = (resolution: any, phase: 'initialize' | 'model_change') => {
 		selectedToolIds = resolution.effective.toolIds;
 		selectedSkillIds = resolution.effective.skillIds;
@@ -740,13 +762,7 @@
 			codeInterpreterEnabled = false;
 		}
 
-		const warningSignature = JSON.stringify(resolution.warnings);
-		if (resolution.warnings.length > 0 && warningSignature !== modeProfileWarningSignature) {
-			modeProfileWarningSignature = warningSignature;
-			toast.warning(
-				$i18n.t('Some conversation capabilities are unavailable for the selected model')
-			);
-		}
+		showModeProfileWarnings(resolution.warnings);
 	};
 
 	const applyModeProfileInitialization = () => {
@@ -805,6 +821,21 @@
 				modeProfileControlsReady = true;
 			}
 		}
+	};
+
+	const resolveModeProfileRequest = async (model: Model) => {
+		await ensureModeProfileCatalogsLoaded();
+		await ensureModeProfileExternalCatalogsLoaded(model);
+		const resolution = resolveConversationModeRequestCapabilities({
+			authority: modeProfileCapabilityAuthority,
+			mode: conversationMode,
+			profile: getModeProfile(),
+			model,
+			available: getModeProfileAvailability(model),
+			currentSelections: getModeProfileSelections()
+		});
+		showModeProfileWarnings(resolution.warnings);
+		return resolution;
 	};
 
 	const finalizeModeProfileCapabilitySnapshot = async () => {
@@ -2878,10 +2909,21 @@
 		}
 	};
 
-	const getFeatures = (includeModeProfileCapabilities = true) => {
+	const getFeatures = (
+		model: Model,
+		selections: ConversationModeProfileSelections,
+		includeModeProfileCapabilities = true
+	) => {
 		let features = {};
-		const currentModels = atSelectedModel?.id ? [atSelectedModel.id] : selectedModels;
-		const primaryModel = $models.find((m) => m.id === currentModels[0]);
+		const featureEnabled = (featureId: string) => selections.featureIds.includes(featureId);
+		const webSearchEnabledForModel = Boolean(
+			$config?.features?.enable_web_search &&
+			($user?.role === 'admin' || $user?.permissions?.features?.web_search) &&
+			(featureEnabled('web_search') ||
+				(!modeProfileRevisionId &&
+					(model?.info?.meta?.capabilities?.web_search ?? true) &&
+					($settings?.webSearch ?? false) === 'always'))
+		);
 
 		if ($config?.features)
 			features = {
@@ -2889,18 +2931,18 @@
 				...(includeModeProfileCapabilities
 					? {
 							image_generation: resolveImageGenerationFeature(
-								primaryModel,
+								model,
 								$config?.features?.enable_image_generation ?? false,
 								hasImageGenerationAccess(),
-								imageGenerationEnabled,
-								imageGenerationUserOverride
+								featureEnabled('image_generation'),
+								featureEnabled('image_generation') ? imageGenerationUserOverride : false
 							),
 							code_interpreter:
 								$config?.features?.enable_code_interpreter &&
 								($user?.role === 'admin' || $user?.permissions?.features?.code_interpreter)
-									? codeInterpreterEnabled
+									? featureEnabled('code_interpreter')
 									: false,
-							web_search: webSearchActive
+							web_search: webSearchEnabledForModel
 						}
 					: {})
 			};
@@ -2942,9 +2984,7 @@
 		if (modeProfileSetupPromise) {
 			await modeProfileSetupPromise;
 		}
-		if (modeProfileCapabilityAuthority !== 'inherit_bound') {
-			await revalidateModeProfileCapabilities();
-		}
+		const modeProfileRequest = await resolveModeProfileRequest(model);
 
 		const responseMessage = _history.messages[responseMessageId];
 		const userMessage = _history.messages[responseMessage.parentId];
@@ -3065,13 +3105,8 @@
 		const terminalEnabled = functionCallingEnabled && modelCapabilities.terminal !== false;
 		const capabilityRequest = serializeConversationModeCapabilityRequest({
 			authority: modeProfileCapabilityAuthority,
-			selections: {
-				terminalId: $selectedTerminalId ?? null,
-				toolIds: selectedToolIds,
-				skillIds: selectedSkillIds,
-				filterIds: selectedFilterIds
-			},
-			features: getFeatures(),
+			selections: modeProfileRequest.effective,
+			features: getFeatures(model, modeProfileRequest.effective),
 			directToolServersPermitted: directTerminalPermitted,
 			directTerminalIds: [...directTerminalIds],
 			functionCallingEnabled,
@@ -3528,6 +3563,10 @@
 
 	const MAX_DRAFT_LENGTH = 5000;
 	let saveDraftTimeout: ReturnType<typeof setTimeout> | null = null;
+	const shouldAutosaveModeProfileDraft = () =>
+		!$temporaryChatEnabled &&
+		(Boolean($chatId) ||
+			!Object.values(history.messages).some((message: any) => message?.role === 'user'));
 	const createModeProfileDraftSnapshot = (input: any) => ({
 		...(input ?? {}),
 		selectedToolIds: [...selectedToolIds],
@@ -3993,7 +4032,7 @@
 												modeProfileCapabilityAuthority =
 													modeProfileCapabilityAuthorityController.observe(data);
 											}
-											if (!$temporaryChatEnabled) {
+											if (shouldAutosaveModeProfileDraft()) {
 												saveDraft(createModeProfileDraftSnapshot(data), $chatId);
 											}
 										}}
@@ -4008,11 +4047,11 @@
 											handleWebSearchToggle(enabled);
 										}}
 										on:submit={async (e) => {
-											clearDraft($chatId);
+											await clearDraft($chatId);
 											if (e.detail || files.length > 0) {
 												await tick();
 
-												submitHandler(e.detail);
+												await submitHandler(e.detail);
 											}
 										}}
 									/>
@@ -4070,15 +4109,15 @@
 												modeProfileCapabilityAuthority =
 													modeProfileCapabilityAuthorityController.observe(data);
 											}
-											if (!$temporaryChatEnabled) {
+											if (shouldAutosaveModeProfileDraft()) {
 												saveDraft(createModeProfileDraftSnapshot(data));
 											}
 										}}
 										on:submit={async (e) => {
-											clearDraft();
+											await clearDraft();
 											if (e.detail || files.length > 0) {
 												await tick();
-												submitHandler(e.detail);
+												await submitHandler(e.detail);
 											}
 										}}
 									/>
