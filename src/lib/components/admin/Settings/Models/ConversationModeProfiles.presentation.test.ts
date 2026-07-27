@@ -1,70 +1,59 @@
-import { existsSync, readFileSync } from 'node:fs';
 import { describe, expect, it } from 'vitest';
+import type { ConversationModeProfileRevision } from '$lib/apis/configs';
+import { catalogItems, detailPresentation, modeForTabKey } from './conversationModeProfileState';
 
-const readSource = (name: string) => {
-	const path = new URL(`./${name}`, import.meta.url);
-	return existsSync(path) ? readFileSync(path, 'utf8') : '';
+const revision: ConversationModeProfileRevision = {
+	revision_id: 'revision-2',
+	mode: 'chat',
+	revision_number: 2,
+	schema_version: 1,
+	created_at: 0,
+	created_by: 'admin',
+	restored_from_revision_id: 'revision-1',
+	is_current: true,
+	content_hash: '1234567890abcdef',
+	system_prompt: 'Private administrator prompt',
+	defaults: {
+		terminal_id: null,
+		tool_ids: ['tool-a'],
+		feature_ids: ['web_search']
+	},
+	warnings: []
 };
 
-describe('conversation mode profile presentation contract', () => {
-	it('adds a clear Models entry without replacing the ordinary model list', () => {
-		const models = readFileSync(new URL('../Models.svelte', import.meta.url), 'utf8');
+describe('conversation mode profile presentation model', () => {
+	it('provides the fetched private detail, defaults, hash state, and restore origin for the local detail panel', () => {
+		const detail = detailPresentation(revision);
 
-		expect(models).toContain(
-			"import ConversationModeProfiles from './Models/ConversationModeProfiles.svelte'"
+		expect(detail.systemPrompt).toBe('Private administrator prompt');
+		expect(detail.defaults).toEqual(
+			expect.arrayContaining([
+				'Terminal: Disabled',
+				'Tools: Override (tool-a)',
+				'Feature defaults: Override (Web Search)'
+			])
 		);
-		expect(models).toContain('<ConversationModeProfiles />');
-		expect(models).toContain('id="model-list"');
+		expect(detail.metadata).toEqual(
+			expect.arrayContaining(['Content hash: 1234567890ab…', 'Restored from: revision-1'])
+		);
 	});
 
-	it('has separate Chat and Agent administrator templates with no model or reasoning controls', () => {
-		const source = readSource('ConversationModeProfiles.svelte');
-		const editor = readSource('ConversationModeProfileEditor.svelte');
+	it('keeps inactive selected resources visible but disabled and maps all required tab keys', () => {
+		const items = catalogItems(
+			[
+				{ id: 'tool-a', name: 'Current tool', is_active: true },
+				{ id: 'tool-old', name: 'Old tool', is_active: false }
+			],
+			['tool-old']
+		);
 
-		expect(source).toContain("mode: 'chat'");
-		expect(source).toContain("mode: 'agent'");
-		expect(editor).toContain('Enforced System Prompt');
-		expect(editor).toContain('Inherit');
-		expect(editor).toContain('Override');
-		expect(editor).toContain('Terminal');
-		expect(editor).toContain('Tools');
-		expect(editor).toContain('Skills');
-		expect(editor).toContain('Filters');
-		expect(editor).toContain('Web Search');
-		expect(editor).toContain('Code Interpreter');
-		expect(editor).toContain('Image Generation');
-		expect(editor).not.toContain('ModelSelector');
-		expect(editor).not.toContain('Reasoning Depth');
-	});
-
-	it('shows revision metadata, validation states, conflict refresh, and restore-as-new-revision', () => {
-		const source = readSource('ConversationModeProfiles.svelte');
-		const editor = readSource('ConversationModeProfileEditor.svelte');
-
-		expect(source).toContain('Revision');
-		expect(source).toContain('Content hash');
-		expect(editor).toContain('Unsaved changes');
-		expect(editor).toContain('Validation errors');
-		expect(editor).toContain('Warnings');
-		expect(source).toContain('refreshAfterConflict');
-		expect(source).toContain('Restore as new revision');
-		expect(source).toContain('expectedCurrentRevisionId');
-	});
-
-	it('does not put administrator prompt content into ordinary public stores', () => {
-		const stores = readFileSync(new URL('../../../../stores/index.ts', import.meta.url), 'utf8');
-		const editor = readSource('ConversationModeProfileEditor.svelte');
-
-		expect(stores).not.toContain('modeProfileSystemPrompt');
-		expect(editor).not.toContain("from '$lib/stores'");
-		expect(editor).not.toContain('console.');
-	});
-
-	it('treats omitted backend defaults as inherit rather than an empty override', () => {
-		const editor = readSource('ConversationModeProfileEditor.svelte');
-
-		expect(editor).toContain("defaults.terminal_id ?? 'inherit'");
-		expect(editor).toContain("defaults.tool_ids ?? 'inherit'");
-		expect(editor).toContain("defaults.feature_ids ?? 'inherit'");
+		expect(items.map((item) => [item.label, item.disabled])).toEqual([
+			['Current tool', false],
+			['Old tool (inactive)', true]
+		]);
+		expect(modeForTabKey('chat', 'ArrowRight')).toBe('agent');
+		expect(modeForTabKey('agent', 'ArrowLeft')).toBe('chat');
+		expect(modeForTabKey('agent', 'Home')).toBe('chat');
+		expect(modeForTabKey('chat', 'End')).toBe('agent');
 	});
 });

@@ -13,7 +13,7 @@ describe('conversation mode profile administrator components compile', () => {
 		expect(existsSync(filename)).toBe(true);
 		if (!existsSync(filename)) return;
 		expect(() =>
-			compile(readFileSync(filename, 'utf8'), { filename: filename.pathname, generate: false })
+			compile(readFileSync(filename, 'utf8'), { filename: filename.pathname, generate: 'client' })
 		).not.toThrow();
 	});
 });

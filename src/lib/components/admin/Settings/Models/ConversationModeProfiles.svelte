@@ -10,163 +10,194 @@
 		restoreConversationModeProfile,
 		saveConversationModeProfile,
 		type ConversationMode,
-		type ConversationModeProfileApiFailure,
 		type ConversationModeProfileConflict,
-		type ConversationModeProfileContent,
-		type ConversationModeProfileHistory,
-		type ConversationModeProfileRevision,
-		type ConversationModeProfileValidationIssue,
-		type ConversationModeProfileWarning
+		type ConversationModeProfileValidationIssue
 	} from '$lib/apis/configs';
 	import ConversationModeProfileEditor from './ConversationModeProfileEditor.svelte';
+	import {
+		contentFromDraft,
+		createConversationModeProfileController,
+		detailPresentation,
+		modeForTabKey,
+		normalizeProfileError,
+		type ModeProfileRequest
+	} from './conversationModeProfileState';
 
 	const modes: { mode: ConversationMode; label: string }[] = [
 		{ mode: 'chat', label: 'Chat' },
 		{ mode: 'agent', label: 'Agent' }
 	];
 
+	const controller = createConversationModeProfileController();
 	let activeMode: ConversationMode = 'chat';
-	let profiles: Partial<Record<ConversationMode, ConversationModeProfileRevision>> = {};
-	let histories: Partial<Record<ConversationMode, ConversationModeProfileHistory>> = {};
-	let loading = true;
-	let resetKey = 0;
-	let validationIssues: ConversationModeProfileValidationIssue[] = [];
-	let warnings: ConversationModeProfileWarning[] = [];
-	let conflict: ConversationModeProfileConflict | null = null;
-	let serviceError = '';
-	let selectedRevision: ConversationModeProfileRevision | null = null;
-	let pendingRestoreRevisionId: string | null = null;
+	let initialLoading = true;
+	let profilesRequest = 0;
+	let pendingRestore: { mode: ConversationMode; revisionId: string } | null = null;
 	let showRestoreConfirmation = false;
+	let activeState = controller.state(activeMode);
 
-	$: activeProfile = profiles[activeMode] ?? null;
-	$: activeHistory = histories[activeMode] ?? null;
+	$: activeProfile = activeState.profile;
+	$: activeHistory = activeState.history;
+	$: activeDetail = activeState.detail;
 
 	const token = () => localStorage.token;
+	const touch = () => {
+		activeState = controller.state(activeMode);
+	};
 
 	const loadProfiles = async () => {
+		const request = ++profilesRequest;
 		const response = await getConversationModeProfiles(token());
-		profiles = response.profiles.reduce(
-			(acc, profile) => ({ ...acc, [profile.mode]: profile }),
-			{} as Partial<Record<ConversationMode, ConversationModeProfileRevision>>
-		);
+		if (request !== profilesRequest) return;
+		for (const profile of response.profiles) controller.applyRevision(profile.mode, profile);
+		touch();
 	};
 
 	const loadHistory = async (mode: ConversationMode) => {
-		histories = { ...histories, [mode]: await getConversationModeProfileHistory(token(), mode) };
+		const request = controller.begin(mode, 'history');
+		touch();
+		try {
+			const history = await getConversationModeProfileHistory(token(), request.mode);
+			controller.completeHistory(request, history);
+		} catch (error) {
+			await setFailure(request, error);
+		} finally {
+			touch();
+		}
 	};
 
-	const refresh = async (mode = activeMode) => {
+	const refresh = async (mode: ConversationMode) => {
 		await Promise.all([loadProfiles(), loadHistory(mode)]);
 	};
 
-	const refreshAfterConflict = async () => {
-		// Deliberately do not increment resetKey: the editor keeps its unsaved local draft for comparison/retry.
-		await refresh(activeMode);
+	const setFailure = async (request: ModeProfileRequest, error: unknown) => {
+		if (!controller.accepts(request)) return;
+		const state = controller.state(request.mode);
+		if (error instanceof ModeProfileApiError) {
+			const detail: unknown = error.detail;
+			controller.fail(request, detail);
+			const objectDetail = detail && typeof detail === 'object' ? detail : null;
+			if (
+				error.status === 409 &&
+				objectDetail &&
+				'code' in objectDetail &&
+				objectDetail.code === 'mode_profile_revision_conflict'
+			) {
+				const conflict = objectDetail as ConversationModeProfileConflict;
+				state.conflict = `Current revision is ${conflict.current_revision.revision_number} (${conflict.current_revision.revision_id}).`;
+				state.error =
+					'This profile changed while you were editing. Current metadata was refreshed; your draft is preserved.';
+				touch();
+				await refresh(request.mode);
+				return;
+			}
+			state.validationIssues =
+				objectDetail && 'issues' in objectDetail && Array.isArray(objectDetail.issues)
+					? (objectDetail.issues as ConversationModeProfileValidationIssue[])
+					: [];
+			state.error =
+				error.status >= 500
+					? 'The profile service could not complete this request. No private prompt content was exposed.'
+					: normalizeProfileError(detail);
+		} else {
+			controller.fail(request, error);
+		}
+		touch();
 	};
 
-	const clearFeedback = () => {
-		validationIssues = [];
-		warnings = [];
-		conflict = null;
-		serviceError = '';
-	};
-
-	const setFailure = async (error: unknown) => {
-		if (!(error instanceof ModeProfileApiError)) {
-			serviceError = 'The profile service is unavailable. Please retry.';
+	const save = async (mode: ConversationMode) => {
+		const request = controller.begin(mode, 'save');
+		if (!request.draft || !request.revisionId) {
+			controller.fail(request, 'A current revision is required before saving.');
+			touch();
 			return;
 		}
-
-		const detail = error.detail as
-			| ConversationModeProfileApiFailure
-			| ConversationModeProfileConflict;
-		if (error.status === 409 && detail.code === 'mode_profile_revision_conflict') {
-			conflict = detail as ConversationModeProfileConflict;
-			serviceError =
-				'This profile changed while you were editing. Current data was refreshed; your draft is preserved.';
-			await refreshAfterConflict();
-			return;
-		}
-
-		validationIssues = 'issues' in detail ? (detail.issues ?? []) : [];
-		serviceError =
-			error.status >= 500
-				? 'The profile service could not complete this request. No private prompt content was exposed.'
-				: (detail.code ?? 'Profile validation failed.');
-	};
-
-	const save = async (
-		content: ConversationModeProfileContent,
-		expectedCurrentRevisionId: string
-	) => {
-		clearFeedback();
+		touch();
 		try {
 			const revision = await saveConversationModeProfile(
 				token(),
-				activeMode,
-				expectedCurrentRevisionId,
-				content
+				request.mode,
+				request.revisionId,
+				contentFromDraft(request.draft)
 			);
-			profiles = { ...profiles, [activeMode]: revision };
-			warnings = revision.warnings;
-			resetKey += 1;
-			await loadHistory(activeMode);
-			toast.success('Saved a new conversation mode revision');
-		} catch (error) {
-			await setFailure(error);
-		}
-	};
-
-	const selectMode = async (mode: ConversationMode) => {
-		activeMode = mode;
-		clearFeedback();
-		selectedRevision = null;
-		if (!histories[mode]) {
-			try {
-				await loadHistory(mode);
-			} catch (error) {
-				await setFailure(error);
+			if (controller.completeSave(request, revision)) {
+				touch();
+				await loadHistory(request.mode);
+				toast.success('Saved a new conversation mode revision');
 			}
+		} catch (error) {
+			await setFailure(request, error);
+		} finally {
+			touch();
 		}
 	};
 
-	const loadRevisionDetail = async (revisionId: string) => {
+	const selectMode = (mode: ConversationMode) => {
+		activeMode = mode;
+		controller.clearFeedback(mode);
+		touch();
+		if (!controller.state(mode).history) void loadHistory(mode);
+	};
+
+	const handleTabKeydown = (event: KeyboardEvent) => {
+		const nextMode = modeForTabKey(activeMode, event.key);
+		if (!nextMode) return;
+		event.preventDefault();
+		selectMode(nextMode);
+		setTimeout(() => document.getElementById(`conversation-mode-tab-${nextMode}`)?.focus());
+	};
+
+	const loadRevisionDetail = async (mode: ConversationMode, revisionId: string) => {
+		const request = controller.begin(mode, 'detail');
+		touch();
 		try {
-			selectedRevision = await getConversationModeProfileRevision(token(), activeMode, revisionId);
+			const detail = await getConversationModeProfileRevision(token(), request.mode, revisionId);
+			controller.completeDetail(request, detail);
 		} catch (error) {
-			await setFailure(error);
+			await setFailure(request, error);
+		} finally {
+			touch();
 		}
 	};
 
 	const restore = async () => {
-		if (!pendingRestoreRevisionId || !activeProfile) return;
-		clearFeedback();
+		if (!pendingRestore) return;
+		const request = controller.begin(pendingRestore.mode, 'restore');
+		const revisionId = pendingRestore.revisionId;
+		pendingRestore = null;
+		if (!request.revisionId) {
+			controller.fail(request, 'A current revision is required before restoring.');
+			touch();
+			return;
+		}
+		touch();
 		try {
 			const revision = await restoreConversationModeProfile(
 				token(),
-				activeMode,
-				pendingRestoreRevisionId,
-				activeProfile.revision_id
+				request.mode,
+				revisionId,
+				request.revisionId
 			);
-			profiles = { ...profiles, [activeMode]: revision };
-			warnings = revision.warnings;
-			resetKey += 1;
-			await loadHistory(activeMode);
-			toast.success('Restored content as a new revision');
+			if (controller.completeSave(request, revision)) {
+				touch();
+				await loadHistory(request.mode);
+				toast.success('Restored content as a new revision');
+			}
 		} catch (error) {
-			await setFailure(error);
+			await setFailure(request, error);
 		} finally {
-			pendingRestoreRevisionId = null;
+			touch();
 		}
 	};
 
 	onMount(async () => {
 		try {
-			await refresh();
+			await refresh('chat');
 		} catch (error) {
-			await setFailure(error);
+			controller.state('chat').error = normalizeProfileError(error);
 		} finally {
-			loading = false;
+			initialLoading = false;
+			touch();
 		}
 	});
 </script>
@@ -205,93 +236,136 @@
 		class="mb-4 flex gap-1 rounded-xl bg-gray-50 p-1 dark:bg-gray-850"
 		role="tablist"
 		aria-label="Conversation mode defaults"
+		tabindex="-1"
+		on:keydown={handleTabKeydown}
 	>
 		{#each modes as item (item.mode)}
 			<button
+				id="conversation-mode-tab-{item.mode}"
 				class="rounded-lg px-3 py-1.5 text-sm {activeMode === item.mode
 					? 'bg-white shadow-sm dark:bg-gray-700'
 					: 'text-gray-500'}"
 				type="button"
 				role="tab"
 				aria-selected={activeMode === item.mode}
+				aria-controls="conversation-mode-panel-{item.mode}"
+				tabindex={activeMode === item.mode ? 0 : -1}
 				on:click={() => selectMode(item.mode)}>{item.label}</button
 			>
 		{/each}
 	</div>
 
-	{#if conflict}
-		<div
-			class="mb-4 rounded-xl border border-amber-200 bg-amber-50 p-3 text-sm text-amber-900 dark:border-amber-900 dark:bg-amber-950/30 dark:text-amber-100"
-		>
-			<div class="font-medium">Revision conflict</div>
-			<div>
-				The current revision is {conflict.current_revision.revision_number} ({conflict
-					.current_revision.revision_id}). Your draft remains local for comparison and retry.
+	<div
+		id="conversation-mode-panel-{activeMode}"
+		role="tabpanel"
+		aria-labelledby="conversation-mode-tab-{activeMode}"
+	>
+		{#if activeState.conflict}
+			<div
+				class="mb-4 rounded-xl border border-amber-200 bg-amber-50 p-3 text-sm text-amber-900 dark:border-amber-900 dark:bg-amber-950/30 dark:text-amber-100"
+			>
+				<div class="font-medium">Revision conflict</div>
+				<div>{activeState.conflict} Your draft remains local for comparison and retry.</div>
 			</div>
-		</div>
-	{/if}
-	{#if serviceError}
-		<div
-			class="mb-4 rounded-xl border border-red-200 bg-red-50 p-3 text-sm text-red-800 dark:border-red-900 dark:bg-red-950/30 dark:text-red-200"
-		>
-			{serviceError}
-		</div>
-	{/if}
+		{/if}
+		{#if activeState.error}
+			<div
+				class="mb-4 rounded-xl border border-red-200 bg-red-50 p-3 text-sm text-red-800 dark:border-red-900 dark:bg-red-950/30 dark:text-red-200"
+			>
+				{activeState.error}
+			</div>
+		{/if}
 
-	{#if loading}
-		<div class="py-8 text-center text-sm text-gray-500">Loading conversation mode defaults…</div>
-	{:else if activeProfile}
-		<ConversationModeProfileEditor
-			mode={activeMode}
-			profile={activeProfile}
-			currentRevisionId={activeProfile.revision_id}
-			{resetKey}
-			{validationIssues}
-			{warnings}
-			onSave={save}
-		/>
+		{#if initialLoading}
+			<div class="py-8 text-center text-sm text-gray-500">Loading conversation mode defaults…</div>
+		{:else if activeProfile && activeState.draft}
+			<ConversationModeProfileEditor
+				mode={activeMode}
+				draft={activeState.draft}
+				dirty={activeState.dirty}
+				saving={activeState.loading.save || activeState.loading.restore}
+				validationIssues={activeState.validationIssues}
+				warnings={activeState.warnings}
+				onDraftChange={(updater) => {
+					controller.updateDraft(activeMode, updater);
+					touch();
+				}}
+				onSave={save}
+			/>
 
-		<div class="mt-6 border-t border-gray-100 pt-4 dark:border-gray-800">
-			<h3 class="mb-2 text-sm font-medium">Revision history</h3>
-			<div class="space-y-2">
-				{#each activeHistory?.revisions ?? [] as revision (revision.revision_id)}
-					<div
-						class="flex flex-wrap items-center justify-between gap-2 rounded-xl bg-gray-50 px-3 py-2 text-xs dark:bg-gray-850"
-					>
-						<div>
-							Revision {revision.revision_number} · {revision.revision_id}{revision.is_current
-								? ' (current)'
-								: ''}
-						</div>
-						<div class="flex gap-2">
+			<div class="mt-6 border-t border-gray-100 pt-4 dark:border-gray-800">
+				{#if activeDetail}
+					{@const detail = detailPresentation(activeDetail)}
+					<div class="rounded-xl border border-gray-100 p-3 text-xs dark:border-gray-800">
+						<div class="mb-3 flex items-center justify-between gap-2">
+							<h3 class="text-sm font-medium">Revision detail</h3>
 							<button
 								type="button"
 								class="underline"
-								on:click={() => loadRevisionDetail(revision.revision_id)}>View detail</button
-							>{#if !revision.is_current}<button
-									type="button"
-									class="underline"
-									on:click={() => {
-										pendingRestoreRevisionId = revision.revision_id;
-										showRestoreConfirmation = true;
-									}}>Restore as new revision</button
-								>{/if}
+								on:click={() => {
+									controller.clearDetail(activeMode);
+									touch();
+								}}>Back to history</button
+							>
 						</div>
+						<h4 class="font-medium">Enforced System Prompt</h4>
+						<pre
+							class="mt-1 whitespace-pre-wrap rounded-lg bg-gray-50 p-2 font-sans dark:bg-gray-850">{detail.systemPrompt}</pre>
+						<h4 class="mt-3 font-medium">Defaults</h4>
+						<ul class="mt-1 list-disc space-y-1 pl-4">
+							{#each detail.defaults as line}<li>{line}</li>{/each}
+						</ul>
+						<h4 class="mt-3 font-medium">Revision metadata</h4>
+						<ul class="mt-1 list-disc space-y-1 pl-4">
+							{#each detail.metadata as line}<li>{line}</li>{/each}
+						</ul>
 					</div>
-				{/each}
+				{:else}
+					<h3 class="mb-2 text-sm font-medium">Revision history</h3>
+					{#if activeState.loading.history}
+						<div class="text-xs text-gray-500">Loading revision history…</div>
+					{:else}
+						<div class="space-y-2">
+							{#each activeHistory?.revisions ?? [] as revision (revision.revision_id)}
+								<div
+									class="flex flex-wrap items-center justify-between gap-2 rounded-xl bg-gray-50 px-3 py-2 text-xs dark:bg-gray-850"
+								>
+									<div>
+										Revision {revision.revision_number} · {revision.revision_id}{revision.is_current
+											? ' (current)'
+											: ''}
+									</div>
+									<div class="flex gap-2">
+										<button
+											type="button"
+											class="underline"
+											disabled={activeState.loading.detail}
+											on:click={() => loadRevisionDetail(activeMode, revision.revision_id)}
+											>View detail</button
+										>
+										{#if !revision.is_current}<button
+												type="button"
+												class="underline"
+												disabled={activeState.loading.restore}
+												on:click={() => {
+													pendingRestore = { mode: activeMode, revisionId: revision.revision_id };
+													showRestoreConfirmation = true;
+												}}>Restore as new revision</button
+											>
+										{/if}
+									</div>
+								</div>
+							{/each}
+						</div>
+					{/if}
+				{/if}
 			</div>
-			{#if selectedRevision}
-				<div class="mt-2 rounded-xl border border-gray-100 p-3 text-xs dark:border-gray-800">
-					Private revision detail loaded: revision {selectedRevision.revision_number}. The System
-					Prompt remains in this administrator component only.
-				</div>
-			{/if}
-		</div>
-	{:else}
-		<div class="py-8 text-center text-sm text-gray-500">
-			Conversation mode defaults are unavailable.
-		</div>
-	{/if}
+		{:else}
+			<div class="py-8 text-center text-sm text-gray-500">
+				Conversation mode defaults are unavailable.
+			</div>
+		{/if}
+	</div>
 </section>
 
 <ConfirmDialog
