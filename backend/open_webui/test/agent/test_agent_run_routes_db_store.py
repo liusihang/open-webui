@@ -1,4 +1,5 @@
 import asyncio
+import inspect
 import os
 import socket
 from contextlib import asynccontextmanager
@@ -12,7 +13,7 @@ import httpx
 import pytest
 import pytest_asyncio
 import uvicorn
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException
 from fastapi.testclient import TestClient
 from open_webui.agent.approval import AgentApprovalCoordinator
 from open_webui.agent.artifacts import AgentRunArtifactRegistrar
@@ -461,6 +462,221 @@ def app_without_fake_event_store():
     app.include_router(agent_runs.router, prefix='/api/agent/runs')
     app.include_router(agent_service.router, prefix='/api/agent/service')
     return app
+
+
+READ_ROUTE_NAMES = ('detail', 'events_list', 'events_stream')
+
+
+class SyncAgentRunReadStore:
+    def __init__(self, run):
+        self.run = run
+
+    def get_run(self, run_id):
+        if self.run is not None and self.run.id == run_id:
+            return self.run
+        return None
+
+    def list_events_after(self, run_id, after_seq=0):
+        return []
+
+
+class AsyncAgentRunReadStore(SyncAgentRunReadStore):
+    async def get_run(self, run_id):
+        return super().get_run(run_id)
+
+
+def _configured_read_store(mode, run):
+    if mode == 'sync':
+        return SyncAgentRunReadStore(run)
+    return AsyncAgentRunReadStore(run)
+
+
+def _fake_agent_run(run_id='run-configured', user_id='user-1'):
+    return SimpleNamespace(
+        id=run_id,
+        user_id=user_id,
+        state='running',
+        state_version=1,
+        chat_id='chat-1',
+        assistant_message_id='msg-assistant',
+        summary=None,
+        error=None,
+    )
+
+
+async def _call_agent_run_read_route(route_name, app, run_id, user):
+    request = SimpleNamespace(app=app)
+    if route_name == 'detail':
+        result = await agent_runs.get_agent_run(run_id, request, user=user)
+        if inspect.isawaitable(result):
+            result.close()
+        return result
+    if route_name == 'events_list':
+        return await agent_runs.list_agent_run_events(
+            run_id,
+            request,
+            after_seq=0,
+            user=user,
+        )
+    return await agent_runs.stream_agent_run_events(
+        run_id,
+        request,
+        after_seq=0,
+        last_event_id=None,
+        user=user,
+    )
+
+
+def _assert_agent_run_read_succeeded(route_name, response, run_id):
+    if route_name == 'detail':
+        assert not inspect.isawaitable(response)
+        assert response.id == run_id
+    elif route_name == 'events_list':
+        assert response.events == []
+    else:
+        assert response.status_code == 200
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('route_name', READ_ROUTE_NAMES)
+async def test_agent_run_read_routes_hide_db_run_from_other_user(
+    route_name,
+    agent_run_db,
+    app_without_fake_event_store,
+):
+    run = await AgentRuns.create_run(
+        user_id='user-1',
+        chat_id='chat-1',
+        user_message_id='msg-user',
+        assistant_message_id='msg-assistant',
+        leader_model_id='model-a',
+    )
+
+    with pytest.raises(HTTPException) as exc_info:
+        await _call_agent_run_read_route(
+            route_name,
+            app_without_fake_event_store,
+            run.id,
+            SimpleNamespace(id='user-2', role='user'),
+        )
+
+    assert exc_info.value.status_code == 404
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('route_name', READ_ROUTE_NAMES)
+async def test_agent_run_read_routes_allow_db_admin(
+    route_name,
+    agent_run_db,
+    app_without_fake_event_store,
+):
+    run = await AgentRuns.create_run(
+        user_id='user-1',
+        chat_id='chat-1',
+        user_message_id='msg-user',
+        assistant_message_id='msg-assistant',
+        leader_model_id='model-a',
+    )
+
+    response = await _call_agent_run_read_route(
+        route_name,
+        app_without_fake_event_store,
+        run.id,
+        SimpleNamespace(id='admin-1', role='admin'),
+    )
+
+    _assert_agent_run_read_succeeded(route_name, response, run.id)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('route_name', READ_ROUTE_NAMES)
+async def test_agent_run_read_routes_return_404_for_missing_db_run(
+    route_name,
+    agent_run_db,
+    app_without_fake_event_store,
+):
+    with pytest.raises(HTTPException) as exc_info:
+        await _call_agent_run_read_route(
+            route_name,
+            app_without_fake_event_store,
+            'missing-run',
+            SimpleNamespace(id='user-1', role='user'),
+        )
+
+    assert exc_info.value.status_code == 404
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('store_mode', ('sync', 'async'))
+@pytest.mark.parametrize('route_name', READ_ROUTE_NAMES)
+async def test_agent_run_read_routes_hide_configured_store_run_from_other_user(
+    route_name,
+    store_mode,
+    app_without_fake_event_store,
+):
+    run = _fake_agent_run()
+    app_without_fake_event_store.state.AGENT_EVENT_STORE = _configured_read_store(
+        store_mode,
+        run,
+    )
+
+    with pytest.raises(HTTPException) as exc_info:
+        await _call_agent_run_read_route(
+            route_name,
+            app_without_fake_event_store,
+            run.id,
+            SimpleNamespace(id='user-2', role='user'),
+        )
+
+    assert exc_info.value.status_code == 404
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('store_mode', ('sync', 'async'))
+@pytest.mark.parametrize('route_name', READ_ROUTE_NAMES)
+async def test_agent_run_read_routes_allow_configured_store_admin(
+    route_name,
+    store_mode,
+    app_without_fake_event_store,
+):
+    run = _fake_agent_run()
+    app_without_fake_event_store.state.AGENT_EVENT_STORE = _configured_read_store(
+        store_mode,
+        run,
+    )
+
+    response = await _call_agent_run_read_route(
+        route_name,
+        app_without_fake_event_store,
+        run.id,
+        SimpleNamespace(id='admin-1', role='admin'),
+    )
+
+    _assert_agent_run_read_succeeded(route_name, response, run.id)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('store_mode', ('sync', 'async'))
+@pytest.mark.parametrize('route_name', READ_ROUTE_NAMES)
+async def test_agent_run_read_routes_return_404_for_missing_configured_store_run(
+    route_name,
+    store_mode,
+    app_without_fake_event_store,
+):
+    app_without_fake_event_store.state.AGENT_EVENT_STORE = _configured_read_store(
+        store_mode,
+        None,
+    )
+
+    with pytest.raises(HTTPException) as exc_info:
+        await _call_agent_run_read_route(
+            route_name,
+            app_without_fake_event_store,
+            'missing-run',
+            SimpleNamespace(id='user-1', role='user'),
+        )
+
+    assert exc_info.value.status_code == 404
 
 
 @pytest.mark.asyncio
