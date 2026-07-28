@@ -1,9 +1,19 @@
-import { existsSync, readFileSync } from 'node:fs';
+import { existsSync, readFileSync, readdirSync } from 'node:fs';
 import { compile } from 'svelte/compiler';
 import { describe, expect, it } from 'vitest';
 
 const source = (relativePath: string) =>
 	readFileSync(new URL(relativePath, import.meta.url), 'utf8');
+
+const officialSubagentLocaleKeys = [
+	'Allow delegated sub-agents to keep running while the parent chat continues.',
+	'Allow the AI to delegate tasks to sub-agents. Each sub-agent creates a real chat with full tool access. Uses additional LLM calls.',
+	'background sub-agents',
+	'Delegate focused work to parallel sub-agents',
+	'Enable background sub-agents',
+	'Enable sub-agents',
+	'simultaneous sub-agents'
+] as const;
 
 describe('v0.11 frontend integration guardrails', () => {
 	it.each([
@@ -73,6 +83,25 @@ describe('v0.11 frontend integration guardrails', () => {
 		expect(builtinTools).not.toMatch(/^\s*(files|subagents):\s*\{/m);
 		expect(existsSync(new URL('../admin/Settings/Subagents.svelte', import.meta.url))).toBe(false);
 		expect(existsSync(new URL('./Messages/SubagentResultRow.svelte', import.meta.url))).toBe(false);
+	});
+
+	it('keeps official-only subagent keys out of every locale catalog', () => {
+		const localesUrl = new URL('../../i18n/locales/', import.meta.url);
+		const residue = readdirSync(localesUrl, { withFileTypes: true }).flatMap((entry) => {
+			if (!entry.isDirectory()) {
+				return [];
+			}
+
+			const messages = JSON.parse(
+				readFileSync(new URL(`${entry.name}/translation.json`, localesUrl), 'utf8')
+			) as Record<string, string>;
+
+			return officialSubagentLocaleKeys
+				.filter((key) => Object.hasOwn(messages, key))
+				.map((key) => `${entry.name}: ${key}`);
+		});
+
+		expect(residue).toEqual([]);
 	});
 
 	it('reconciles redesigned admin settings with custom announcements and retrieval controls', () => {
