@@ -46,6 +46,7 @@ from open_webui.models.config import Config
 from open_webui.models.groups import Groups
 from open_webui.models.tools import Tools
 from open_webui.models.users import UserModel
+from open_webui.utils.chat_id import is_saved_chat_id
 from open_webui.socket.terminal_substrate import (
     build_tool_server_headers as build_terminal_proxy_headers,
     tool_server_cache_requires_refresh,
@@ -56,7 +57,6 @@ from open_webui.tools.builtin import (
     create_automation,
     create_calendar_event,
     create_tasks,
-    delegate_task,
     delete_automation,
     delete_calendar_event,
     delete_memory,
@@ -65,18 +65,15 @@ from open_webui.tools.builtin import (
     fetch_url,
     generate_image,
     get_current_timestamp,
-    grep_chat_files,
     grep_knowledge_files,
     install_skill,
     kb_exec,
-    list_chat_files,
     list_automations,
     list_knowledge,
     list_knowledge_bases,
     list_memories,
     list_memory_paths,
     notify,
-    query_chat_files,
     query_knowledge_bases,
     query_knowledge_evidence,
     query_knowledge_files,
@@ -118,6 +115,13 @@ from pydantic import BaseModel, Field, create_model
 from pydantic.fields import FieldInfo
 
 log = logging.getLogger(__name__)
+
+MUTATING_MEMORY_TOOLS = {
+    'add_memory',
+    'delete_memory',
+    'replace_memory_content',
+    'update_memory',
+}
 
 
 class RemoteProcessKillFailed(RuntimeError):
@@ -566,8 +570,6 @@ async def get_builtin_tools(
         'automations.enable',
         'calendar.enable',
         'ui.enable_user_webhooks',
-        'subagents.enable',
-        'subagents.background_enabled',
     )
 
     async def has_user_permission(feature_key: str) -> bool:
@@ -579,37 +581,11 @@ async def get_builtin_tools(
             await Config.get('user.permissions'),
         )
 
-    async def has_user_chat_permission(permission_key: str) -> bool:
-        if user.get('role') == 'admin':
-            return True
-        return await has_permission(
-            user.get('id', ''),
-            f'chat.{permission_key}',
-            await Config.get('user.permissions'),
-        )
-
     # Time utilities - available for date calculations
     if is_builtin_tool_enabled('time'):
         builtin_functions.extend([get_current_timestamp, calculate_timestamp])
 
     metadata = extra_params.get('__metadata__') or {}
-    chat_files = metadata.get('files') or extra_params.get('__files__') or []
-    has_chat_files = any(
-        isinstance(item, dict)
-        and item.get('type', 'file') == 'file'
-        and (item.get('id') or item.get('url'))
-        and not str(item.get('id') or item.get('url')).startswith(('http://', 'https://', 'data:'))
-        for item in chat_files
-    )
-
-    if (
-        is_builtin_tool_enabled('files')
-        and get_model_capability('file_upload')
-        and not get_model_capability('file_context')
-        and has_chat_files
-        and await has_user_chat_permission('file_upload')
-    ):
-        builtin_functions.extend([list_chat_files, query_chat_files, grep_chat_files, view_file])
 
     # Knowledge base tools - conditional injection based on model knowledge
     # If model has attached knowledge (any type), only provide query_knowledge_files
@@ -671,14 +647,6 @@ async def get_builtin_tools(
     # Chats tools - search and fetch user's chat history
     if is_builtin_tool_enabled('chats'):
         builtin_functions.extend([search_chats, view_chat])
-
-    if (
-        is_builtin_tool_enabled('subagents')
-        and config.get('subagents.enable')
-        and getattr(request.state, 'internal', False) is not True
-        and getattr(request.state, 'direct', False) is not True
-    ):
-        builtin_functions.extend([delegate_task, timer])
 
     # Add memory tools when memory is enabled and the model allows this builtin category.
     if (
@@ -744,6 +712,12 @@ async def get_builtin_tools(
     chat = None
     if is_saved_chat_id(chat_id):
         chat = await Chats.get_chat_by_id(chat_id)
+        if (
+            is_builtin_tool_enabled('time')
+            and getattr(getattr(request, 'state', None), 'internal', False) is not True
+            and getattr(getattr(request, 'state', None), 'direct', False) is not True
+        ):
+            builtin_functions.append(timer)
 
     # Notes tools - search, view, create, and update user's notes
     if (chat and (chat.meta or {}).get('internal') is True and (chat.meta or {}).get('type') == 'note') or (
@@ -799,9 +773,7 @@ async def get_builtin_tools(
     ):
         builtin_functions.append(notify)
 
-    if getattr(request.state, 'internal', False) is True:
-        from open_webui.utils.subagents import MUTATING_MEMORY_TOOLS
-
+    if getattr(getattr(request, 'state', None), 'internal', False) is True:
         builtin_functions = [func for func in builtin_functions if func.__name__ not in MUTATING_MEMORY_TOOLS]
 
     for func in builtin_functions:
@@ -824,12 +796,6 @@ async def get_builtin_tools(
         )
 
         spec = get_builtin_tool_spec(func)
-        if func.__name__ == 'delegate_task' and not config.get('subagents.background_enabled'):
-            parameters = spec.get('parameters', {})
-            parameters.get('properties', {}).pop('background', None)
-            if isinstance(parameters.get('required'), list):
-                parameters['required'] = [name for name in parameters['required'] if name != 'background']
-
         tools_dict[func.__name__] = {
             'tool_id': f'builtin:{func.__name__}',
             'callable': callable,

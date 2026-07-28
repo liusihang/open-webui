@@ -7,6 +7,51 @@ import pytest
 from open_webui.routers import retrieval as retrieval_router
 
 
+def _retrieval_config(**overrides):
+    values = {key: None for key in retrieval_router.RETRIEVAL_CONFIG_KEYS}
+    values.update(
+        BYPASS_EMBEDDING_AND_RETRIEVAL=False,
+        ENABLE_RAG_HYBRID_SEARCH=True,
+        ENABLE_RAG_HYBRID_SEARCH_ENRICHED_TEXTS=False,
+        TOP_K=4,
+        TOP_K_RERANKER=4,
+        RELEVANCE_THRESHOLD=0.0,
+        HYBRID_BM25_WEIGHT=0.5,
+        RAG_EMBEDDING_ENGINE='',
+        RAG_EMBEDDING_MODEL='test-embedding',
+        RAG_OPENAI_API_BASE_URL='',
+        RAG_OLLAMA_BASE_URL='',
+        RAG_AZURE_OPENAI_BASE_URL='',
+        RAG_OPENAI_API_KEY='',
+        RAG_OLLAMA_API_KEY='',
+        RAG_AZURE_OPENAI_API_KEY='',
+        RAG_EMBEDDING_BATCH_SIZE=1,
+        RAG_AZURE_OPENAI_API_VERSION='',
+        ENABLE_ASYNC_EMBEDDING=False,
+        RAG_EMBEDDING_CONCURRENT_REQUESTS=0,
+        TEXT_SPLITTER='',
+        CHUNK_SIZE=1000,
+        CHUNK_OVERLAP=0,
+        CHUNK_MIN_SIZE_TARGET=0,
+        ENABLE_MARKDOWN_HEADER_TEXT_SPLITTER=False,
+        TIKTOKEN_ENCODING_NAME='cl100k_base',
+    )
+    values.update(overrides)
+    return retrieval_router.RetrievalConfig(values)
+
+
+@pytest.fixture(autouse=True)
+def _stub_retrieval_config(monkeypatch):
+    async def fake_get_retrieval_config():
+        return _retrieval_config()
+
+    async def fake_publish_event(*args, **kwargs):
+        return None
+
+    monkeypatch.setattr(retrieval_router, 'get_retrieval_config', fake_get_retrieval_config)
+    monkeypatch.setattr(retrieval_router, 'publish_event', fake_publish_event)
+
+
 @pytest.mark.asyncio
 async def test_query_doc_hybrid_form_accepts_weight_and_does_not_pass_user_kwarg(monkeypatch):
     async def fake_validate_collection_access(collection_names, user, access_type="read"):
@@ -157,6 +202,9 @@ async def test_delete_entries_from_collection_deactivates_manifest_chunks(monkey
             }
         )
 
+    async def fake_publish_event(*args, **kwargs):
+        return None
+
     class FakeFiles:
         async def get_file_by_id(self, file_id, db=None):
             return SimpleNamespace(id=file_id, hash="hash-1")
@@ -165,8 +213,10 @@ async def test_delete_entries_from_collection_deactivates_manifest_chunks(monkey
     monkeypatch.setattr(retrieval_router.ASYNC_VECTOR_DB_CLIENT, "has_collection", fake_has_collection)
     monkeypatch.setattr(retrieval_router.ASYNC_VECTOR_DB_CLIENT, "delete", fake_delete)
     monkeypatch.setattr(retrieval_router, "Files", FakeFiles())
+    monkeypatch.setattr(retrieval_router, "publish_event", fake_publish_event)
 
     result = await retrieval_router.delete_entries_from_collection(
+        request=SimpleNamespace(),
         form_data=retrieval_router.DeleteForm(collection_name="knowledge-1", file_id="file-1"),
         user=SimpleNamespace(id="admin", role="admin"),
         db=object(),
@@ -639,6 +689,7 @@ def test_save_docs_to_vector_db_inserts_vector_items_with_chunk_uid_metadata(mon
             )
         ],
         collection_name="kb-1",
+        config=_retrieval_config(),
         metadata={"knowledge_id": "kb-1"},
         split=False,
     )

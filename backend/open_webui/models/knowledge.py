@@ -36,6 +36,7 @@ from sqlalchemy.orm import defer
 
 log = logging.getLogger(__name__)
 
+KNOWLEDGE_SORTABLE_FIELDS = {'name', 'created_at', 'updated_at'}
 KNOWLEDGE_EVIDENCE_MODES = ('legacy_text', 'evidence_dual_write', 'evidence_primary')
 DEFAULT_KNOWLEDGE_EVIDENCE_MODE = 'legacy_text'
 
