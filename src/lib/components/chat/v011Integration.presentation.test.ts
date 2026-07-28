@@ -55,6 +55,7 @@ describe('v0.11 frontend integration guardrails', () => {
 
 	it('keeps the official subagents runtime and excluded chat-file tools out of the frontend', () => {
 		const adminSettings = source('../admin/Settings.svelte');
+		const adminTabIcon = source('../admin/Settings/AdminTabIcon.svelte');
 		const settingsModal = source('./SettingsModal.svelte');
 		const configsApi = source('../../apis/configs/index.ts');
 		const structuredOutput = source('./Messages/structuredOutput.ts');
@@ -62,18 +63,16 @@ describe('v0.11 frontend integration guardrails', () => {
 		const builtinTools = source('../workspace/Models/BuiltinTools.svelte');
 
 		expect(adminSettings).not.toContain('Subagents');
+		expect(adminTabIcon).not.toContain("id === 'subagents'");
+		expect(adminTabIcon).not.toContain('UserCircle');
 		expect(settingsModal).not.toContain('AdminSubagents');
 		expect(configsApi).not.toContain('getSubagentsConfig');
 		expect(configsApi).not.toContain('setSubagentsConfig');
 		expect(structuredOutput).not.toContain("name === 'delegate_task'");
 		expect(userMessage).not.toContain('SubagentResultRow');
 		expect(builtinTools).not.toMatch(/^\s*(files|subagents):\s*\{/m);
-		expect(
-			existsSync(new URL('../admin/Settings/Subagents.svelte', import.meta.url))
-		).toBe(false);
-		expect(
-			existsSync(new URL('./Messages/SubagentResultRow.svelte', import.meta.url))
-		).toBe(false);
+		expect(existsSync(new URL('../admin/Settings/Subagents.svelte', import.meta.url))).toBe(false);
+		expect(existsSync(new URL('./Messages/SubagentResultRow.svelte', import.meta.url))).toBe(false);
 	});
 
 	it('reconciles redesigned admin settings with custom announcements and retrieval controls', () => {
@@ -118,7 +117,7 @@ describe('v0.11 frontend integration guardrails', () => {
 	it('keeps custom and official locale keys from both sides of translation conflicts', () => {
 		for (const locale of ['en-US', 'zh-CN']) {
 			const messages = JSON.parse(
-			source(`../../i18n/locales/${locale}/translation.json`)
+				source(`../../i18n/locales/${locale}/translation.json`)
 			) as Record<string, string>;
 
 			expect(messages).toHaveProperty('Light reasoning');

@@ -21,6 +21,7 @@ depends_on: str | Sequence[str] | None = None
 INDEX_NAME = 'uq_user_email_lower'
 EMAIL_IS_NOT_NULL = sa.text('email IS NOT NULL')
 LOWER_EMAIL = sa.func.lower(sa.column('email'))
+USER_TABLE = sa.table(sa.sql.quoted_name('user', quote=True), sa.column('email'))
 
 
 def _index_exists() -> bool:
@@ -37,20 +38,23 @@ def _index_exists() -> bool:
     return INDEX_NAME in {index['name'] for index in inspector.get_indexes('user')}
 
 
-def _duplicate_emails() -> list:
-    conn = op.get_bind()
-    return conn.execute(
-        sa.text(
-            """
-            SELECT lower(email) AS email, count(*) AS duplicate_count
-            FROM "user"
-            WHERE email IS NOT NULL
-            GROUP BY lower(email)
-            HAVING count(*) > 1
-            ORDER BY lower(email)
-            """
+def _duplicate_email_query() -> sa.Select:
+    normalized_email = sa.func.lower(USER_TABLE.c.email)
+    duplicate_count = sa.func.count()
+    return (
+        sa.select(
+            normalized_email.label('email'),
+            duplicate_count.label('duplicate_count'),
         )
-    ).fetchall()
+        .where(USER_TABLE.c.email.is_not(None))
+        .group_by(normalized_email)
+        .having(duplicate_count > 1)
+        .order_by(normalized_email)
+    )
+
+
+def _duplicate_emails() -> list:
+    return op.get_bind().execute(_duplicate_email_query()).fetchall()
 
 
 def _create_index() -> None:

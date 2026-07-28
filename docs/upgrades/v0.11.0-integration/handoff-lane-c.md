@@ -1,5 +1,7 @@
 # Lane C handoff: Terminal, Skills, files, knowledge, retrieval, and tools
 
+> Historical lane checkpoint: the cross-lane blockers recorded below were resolved in the combined integration. Use `handoff.md` as the authoritative current state.
+
 ## Truth surface
 
 - Worktree: `/Users/liusihang/.codex/worktrees/0ee1/openwebui`
@@ -81,6 +83,8 @@
 | Tool registry / exclusions | `test_v011_lane_c_contracts.py`: 2 failed, 1 passed | `5 passed`; owned F821 clean | included in `260 passed` |
 
 ## Cross-lane integration notes
+
+These notes describe the lane's pre-merge base. They are retained as history; every listed item is resolved in the combined integration and covered by its exclusion/verification guards.
 
 - Lane A: remove official `ENABLE_SUBAGENTS` and `subagents.*` config/defaults from `backend/open_webui/config.py`; retain only custom AgentScope settings, if any. The current base still contains official keys around lines 2160 and 3243-3249.
 - Lane B: remove/replace `backend/open_webui/main.py` import of `open_webui.utils.subagents.process_pending_internal_messages` (current base around line 3542). `utils/timers.py` no longer needs that module.

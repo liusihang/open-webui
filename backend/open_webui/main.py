@@ -2533,6 +2533,7 @@ async def chat_completion(
     mode_profile_capability_request = _mode_profile_capability_request_values(form_data)
 
     metadata = {}
+    mode_profile_revision = None
     try:
         model_info = None
         if not model_item.get('direct', False):
@@ -2627,12 +2628,9 @@ async def chat_completion(
 
         user_message = form_data.pop('user_message', None) or form_data.pop('parent_message', None)
         chat_id = form_data.get('chat_id') or ''
-        chat_variables = form_data.pop('chat_variables', None)
-        if chat_variables is None:
-            existing_chat = await Chats.get_chat_by_id(chat_id) if is_saved_chat_id(chat_id) else None
-            chat_variables = existing_chat.variables if existing_chat else {}
-
-        chat_variables = normalize_chat_variables(chat_variables)
+        requested_chat_variables = form_data.pop('chat_variables', None)
+        chat_variables_provided = requested_chat_variables is not None
+        chat_variables = normalize_chat_variables(requested_chat_variables)
 
         # Drop tool_servers if caller lacks features.direct_tool_servers —
         # mirrors the storage-side strip in user/settings/update.
@@ -2683,7 +2681,6 @@ async def chat_completion(
             metadata['chat_id'] = str(uuid4())
 
         existing_chat = None
-        mode_profile_revision = None
         administrator_prompt_variables: Mapping[str, object] = MappingProxyType({})
         conversation_mode_should_persist = False
         is_product_conversation_request = bool(
@@ -3290,6 +3287,16 @@ async def chat_completion(
                                 },
                             )
 
+        if not chat_variables_provided:
+            variables_chat = existing_chat
+            if variables_chat is None and is_saved_chat_id(metadata.get('chat_id')):
+                variables_chat_id = metadata['chat_id']
+                if user.role == 'admin' or await Chats.is_chat_owner(variables_chat_id, user.id):
+                    variables_chat = await Chats.get_chat_by_id(variables_chat_id)
+            metadata['chat_variables'] = normalize_chat_variables(
+                getattr(variables_chat, 'variables', None) if variables_chat else None
+            )
+
         request.state.metadata = metadata
         form_data['metadata'] = metadata
 
@@ -3580,6 +3587,7 @@ async def chat_completion(
             per_model_metadata = {
                 **metadata,
                 'message_id': assistant_message_id,
+                'task_id': str(uuid4()),
                 'model': resolved_model,
             }
 
@@ -3619,6 +3627,8 @@ async def chat_completion(
                     k: v for k, v in (tasks or {}).items() if k not in (TASKS.TITLE_GENERATION, TASKS.TAGS_GENERATION)
                 }
                 or None,
+                effective_model_system_prompt=target_model_info_params.get('system'),
+                effective_request_system_prompt=request_system_prompt,
             )
             if is_internal:
                 subagent_results.append(await process)
@@ -3626,23 +3636,7 @@ async def chat_completion(
 
             task_id, _ = await create_task(
                 request.app.state.redis,
-                process_chat(
-                    request,
-                    model_form_data,
-                    user,
-                    per_model_metadata,
-                    resolved_model,
-                    tasks
-                    if idx == 0
-                    else {
-                        k: v
-                        for k, v in (tasks or {}).items()
-                        if k not in (TASKS.TITLE_GENERATION, TASKS.TAGS_GENERATION)
-                    }
-                    or None,
-                    effective_model_system_prompt=target_model_info_params.get('system'),
-                    effective_request_system_prompt=request_system_prompt,
-                ),
+                process,
                 id=chat_id,
                 task_id=per_model_metadata['task_id'],
             )

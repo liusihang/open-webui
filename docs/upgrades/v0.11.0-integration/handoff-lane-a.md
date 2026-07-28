@@ -10,6 +10,8 @@
 - No live service, container, remote host, or live database operations are authorized.
 - Ownership is limited to Lane A paths from the delegation. Cross-lane needs are recorded, not edited.
 
+> Historical lane checkpoint: the cross-lane blockers and exclusions recorded below were resolved in the combined integration. Use `handoff.md` as the authoritative current state.
+
 ## Required exclusions
 
 - No official Sub-agents runtime, `delegate_task`, subagent config key, or subagent config endpoint.
@@ -80,7 +82,9 @@
 
 ## Normalized-email deployment preflight
 
-Before running `f0bd01a18a3d` against any deployment clone, execute this read-only query and require zero rows:
+The migration performs this check through a dialect-compiled SQLAlchemy Core query with an explicitly quoted `user` table. Before running `f0bd01a18a3d` against any deployment clone, execute the matching read-only query and require zero rows.
+
+PostgreSQL and SQLite:
 
 ```sql
 SELECT lower(email) AS normalized_email, count(*) AS duplicate_count
@@ -91,9 +95,22 @@ HAVING count(*) > 1
 ORDER BY lower(email);
 ```
 
+MySQL and MariaDB:
+
+```sql
+SELECT lower(email) AS normalized_email, count(*) AS duplicate_count
+FROM `user`
+WHERE email IS NOT NULL
+GROUP BY lower(email)
+HAVING count(*) > 1
+ORDER BY lower(email);
+```
+
 If rows exist, merge or remove the duplicate user records through an explicitly authorized data-remediation plan before migration. The migration itself fails closed with the duplicate values and counts; it does not mutate conflicting users. Its downgrade removes only `uq_user_email_lower`. The integration merge revision has no schema operations in either direction.
 
 ## Cross-lane integration notes
+
+These notes describe the lane's pre-merge base. They are retained as history; every listed item is resolved in the combined integration and covered by its exclusion/verification guards.
 
 - Baseline `backend/open_webui/tools/builtin.py` references `Literal` without importing it. Importing `routers/configs.py` therefore fails during test collection through `utils/tools.py`; Lane A tests isolate the owned router source rather than editing that cross-lane file.
 - Official `delegate_task` runtime wiring remains in `main.py`, `tools/builtin.py`, `utils/subagents.py`, `utils/tools.py`, and `utils/timers.py`; owners of those paths must remove it while preserving custom `open_webui.agent.subagents` and AgentScope service routes.

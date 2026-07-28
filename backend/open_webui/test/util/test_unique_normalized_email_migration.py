@@ -9,6 +9,7 @@ from open_webui.migrations.versions import (
     f0bd01a18a3d_add_unique_normalized_user_email_index as email_migration,
 )
 from sqlalchemy.dialects import mysql, postgresql, sqlite
+from sqlalchemy.dialects.mysql import mariadb
 
 
 def _run_migration(engine: sa.Engine, direction: str) -> None:
@@ -77,6 +78,24 @@ def test_normalized_email_index_fails_closed_on_case_insensitive_duplicates() ->
 
     assert not _sqlite_index_exists(engine)
     engine.dispose()
+
+
+@pytest.mark.parametrize(
+    ('dialect', 'quoted_user_table'),
+    [
+        (postgresql.dialect(), 'FROM "user"'),
+        (sqlite.dialect(), 'FROM "user"'),
+        (mysql.dialect(), 'FROM `user`'),
+        (mariadb.MariaDBDialect(), 'FROM `user`'),
+    ],
+)
+def test_duplicate_email_query_quotes_reserved_user_table_for_each_dialect(
+    dialect: sa.engine.Dialect,
+    quoted_user_table: str,
+) -> None:
+    query = str(email_migration._duplicate_email_query().compile(dialect=dialect))
+
+    assert quoted_user_table in query
 
 
 @pytest.mark.parametrize(

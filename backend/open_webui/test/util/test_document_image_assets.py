@@ -18,7 +18,8 @@ def test_document_image_assets_does_not_expose_pdf_page_snapshot_renderer():
 def test_build_image_assets_from_markdown_uses_materializer_and_page_text(tmp_path):
     source_pdf = tmp_path / 'source.pdf'
     source_pdf.write_bytes(b'%PDF-1.4\n')
-    source_image = tmp_path / 'box-a.png'
+    source_image = tmp_path / 'images' / 'box-a.png'
+    source_image.parent.mkdir()
     Image.new('RGB', (16, 12), color='white').save(source_image)
 
     assets, skipped = build_image_assets_from_markdown(

@@ -1,5 +1,7 @@
 # Lane B handoff: core chat/runtime/provider/multi-worker
 
+> Historical lane checkpoint: the cross-lane blockers recorded below were resolved in the combined integration. Use `handoff.md` as the authoritative current state.
+
 ## Truth surface
 
 - Worktree: `/Users/liusihang/.codex/worktrees/7c77/openwebui`

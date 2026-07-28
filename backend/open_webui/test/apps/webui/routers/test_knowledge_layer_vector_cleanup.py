@@ -70,6 +70,9 @@ async def test_remove_file_from_knowledge_cleans_layer_vectors(monkeypatch):
         deactivated.append(kwargs)
         return 1
 
+    async def fake_publish_event(*args, **kwargs):
+        return None
+
     monkeypatch.setattr(knowledge_mod.Knowledges, "get_knowledge_by_id", fake_get_knowledge, raising=False)
     monkeypatch.setattr(knowledge_mod.Files, "get_file_by_id", fake_get_file, raising=False)
     monkeypatch.setattr(knowledge_mod.Knowledges, "has_file", fake_has_file, raising=False)
@@ -80,8 +83,10 @@ async def test_remove_file_from_knowledge_cleans_layer_vectors(monkeypatch):
     monkeypatch.setattr(knowledge_mod.ASYNC_VECTOR_DB_CLIENT, "has_collection", fake_has_collection, raising=False)
     monkeypatch.setattr(knowledge_mod.Knowledges, "get_file_metadatas_by_id", fake_get_file_metadatas, raising=False)
     monkeypatch.setattr(knowledge_mod, "deactivate_chunks_for_scope", fake_deactivate_active_chunks, raising=False)
+    monkeypatch.setattr(knowledge_mod, "publish_event", fake_publish_event)
 
     response = await knowledge_mod.remove_file_from_knowledge_by_id(
+        request=SimpleNamespace(),
         id="kb-1",
         form_data=knowledge_mod.KnowledgeFileIdForm(file_id="file-1"),
         delete_file=False,
@@ -131,6 +136,9 @@ async def test_delete_knowledge_cleans_layer_vectors(monkeypatch):
         deactivated.append(kwargs)
         return 1
 
+    async def fake_publish_event(*args, **kwargs):
+        return None
+
     monkeypatch.setattr(knowledge_mod.Knowledges, "get_knowledge_by_id", fake_get_knowledge, raising=False)
     monkeypatch.setattr(knowledge_mod.Models, "get_all_models", fake_get_models, raising=False)
     async def fake_has_access(*args, **kwargs):
@@ -143,8 +151,10 @@ async def test_delete_knowledge_cleans_layer_vectors(monkeypatch):
     monkeypatch.setattr(knowledge_mod.ASYNC_VECTOR_DB_CLIENT, "delete_collection", fake_delete_collection, raising=False)
     monkeypatch.setattr(knowledge_mod.Knowledges, "delete_knowledge_by_id", fake_delete_knowledge, raising=False)
     monkeypatch.setattr(knowledge_mod, "deactivate_chunks_for_scope", fake_deactivate_active_chunks, raising=False)
+    monkeypatch.setattr(knowledge_mod, "publish_event", fake_publish_event)
 
     result = await knowledge_mod.delete_knowledge_by_id(
+        request=SimpleNamespace(),
         id="kb-1",
         user=_fake_admin(),
         db=None,

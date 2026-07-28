@@ -131,6 +131,9 @@ async def test_remove_file_from_knowledge_deactivates_manifest_when_vector_clean
         )
         return 1
 
+    async def fake_publish_event(*args, **kwargs):
+        return None
+
     monkeypatch.setattr(knowledge.Knowledges, "get_knowledge_by_id", fake_get_knowledge_by_id)
     monkeypatch.setattr(knowledge.Knowledges, "has_file", fake_true)
     monkeypatch.setattr(knowledge.Knowledges, "remove_file_from_knowledge_by_id", fake_none)
@@ -142,9 +145,11 @@ async def test_remove_file_from_knowledge_deactivates_manifest_when_vector_clean
     monkeypatch.setattr(knowledge.ASYNC_VECTOR_DB_CLIENT, "delete", fake_vector_delete)
     monkeypatch.setattr(knowledge.ASYNC_VECTOR_DB_CLIENT, "has_collection", fake_has_collection)
     monkeypatch.setattr(knowledge, "deactivate_chunks_for_scope", fake_deactivate)
+    monkeypatch.setattr(knowledge, "publish_event", fake_publish_event)
 
     db = object()
     await knowledge.remove_file_from_knowledge_by_id(
+        request=SimpleNamespace(),
         id="knowledge-1",
         form_data=knowledge.KnowledgeFileIdForm(file_id="file-1"),
         delete_file=True,
