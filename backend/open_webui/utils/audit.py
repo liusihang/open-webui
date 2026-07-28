@@ -33,6 +33,29 @@ if TYPE_CHECKING:
     from loguru import Logger
 
 
+_CONVERSATION_MODE_PROFILE_AUDIT_PATH = '/api/v1/configs/conversation_mode_profiles'
+_REDACTED_AUDIT_BODY = '[REDACTED]'
+
+
+def _is_conversation_mode_profile_audit_path(path: str) -> bool:
+    normalized_path = path.lower()
+    return normalized_path == _CONVERSATION_MODE_PROFILE_AUDIT_PATH or normalized_path.startswith(
+        f'{_CONVERSATION_MODE_PROFILE_AUDIT_PATH}/'
+    )
+
+
+def _redact_http_audit_body(path: str, body: str) -> str:
+    if _is_conversation_mode_profile_audit_path(path):
+        return _REDACTED_AUDIT_BODY
+    return body
+
+
+def _request_uri_for_audit(request: Request) -> str:
+    if _is_conversation_mode_profile_audit_path(request.url.path):
+        return request.url.path
+    return str(request.url)
+
+
 @dataclass(frozen=True)
 class AuditLogEntry:
     # `Metadata` audit level properties
@@ -272,12 +295,15 @@ class AuditLoggingMiddleware:
                     request_body,
                 )
 
+            request_body = _redact_http_audit_body(request.url.path, request_body)
+            response_body = _redact_http_audit_body(request.url.path, response_body)
+
             entry = AuditLogEntry(
                 id=str(uuid.uuid4()),
                 user=user,
                 audit_level=self.audit_level.value,
                 verb=request.method,
-                request_uri=str(request.url),
+                request_uri=_request_uri_for_audit(request),
                 response_status_code=context.metadata.get('response_status_code', None),
                 source_ip=request.client.host if request.client else None,
                 user_agent=request.headers.get('user-agent'),

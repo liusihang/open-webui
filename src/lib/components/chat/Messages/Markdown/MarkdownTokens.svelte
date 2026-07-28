@@ -25,12 +25,14 @@
 	import HtmlToken from './HTMLToken.svelte';
 	import Clipboard from '$lib/components/icons/Clipboard.svelte';
 	import ColonFenceBlock from './ColonFenceBlock.svelte';
+	import type { CitationTarget } from '../citations';
 
 	export let id: string;
 	export let tokens: Token[];
 	export let top = true;
 	export let attributes = {};
-	export let sourceIds = [];
+	export let sourceIds: string[] = [];
+	export let citationTargets: CitationTarget[] = [];
 
 	export let done = true;
 
@@ -149,6 +151,7 @@
 				tokens={token.tokens}
 				{done}
 				{sourceIds}
+				{citationTargets}
 				{onSourceClick}
 			/>
 		</svelte:element>
@@ -202,6 +205,7 @@
 												tokens={header.tokens}
 												{done}
 												{sourceIds}
+												{citationTargets}
 												{onSourceClick}
 											/>
 										</div>
@@ -228,6 +232,7 @@
 												tokens={cell.tokens}
 												{done}
 												{sourceIds}
+												{citationTargets}
 												{onSourceClick}
 											/>
 										</div>
@@ -278,6 +283,7 @@
 					{editCodeBlock}
 					{onTaskClick}
 					{sourceIds}
+					{citationTargets}
 					{onSourceClick}
 				/>
 			</blockquote>
@@ -313,6 +319,7 @@
 							{editCodeBlock}
 							{onTaskClick}
 							{sourceIds}
+							{citationTargets}
 							{onSourceClick}
 						/>
 					</li>
@@ -348,6 +355,7 @@
 									{editCodeBlock}
 									{onTaskClick}
 									{sourceIds}
+									{citationTargets}
 									{onSourceClick}
 								/>
 							</div>
@@ -360,6 +368,7 @@
 								{editCodeBlock}
 								{onTaskClick}
 								{sourceIds}
+								{citationTargets}
 								{onSourceClick}
 							/>
 						{/if}
@@ -405,6 +414,7 @@
 									{editCodeBlock}
 									{onTaskClick}
 									{sourceIds}
+									{citationTargets}
 									{onSourceClick}
 								/>
 							</div>
@@ -453,6 +463,7 @@
 						{editCodeBlock}
 						{onTaskClick}
 						{sourceIds}
+						{citationTargets}
 						{onSourceClick}
 					/>
 				</div>
@@ -491,6 +502,7 @@
 					tokens={token.tokens ?? []}
 					{done}
 					{sourceIds}
+					{citationTargets}
 					{onSourceClick}
 				/>
 			</span>
@@ -501,6 +513,7 @@
 					tokens={token.tokens ?? []}
 					{done}
 					{sourceIds}
+					{citationTargets}
 					{onSourceClick}
 				/>
 			</p>
@@ -514,6 +527,7 @@
 						tokens={token.tokens}
 						{done}
 						{sourceIds}
+						{citationTargets}
 						{onSourceClick}
 					/>
 				{:else}
@@ -526,6 +540,7 @@
 				tokens={token.tokens ?? []}
 				{done}
 				{sourceIds}
+				{citationTargets}
 				{onSourceClick}
 			/>
 		{:else}
@@ -547,6 +562,7 @@
 			{done}
 			{editCodeBlock}
 			{sourceIds}
+			{citationTargets}
 			{onTaskClick}
 			{onSourceClick}
 		/>

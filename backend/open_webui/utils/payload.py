@@ -2,12 +2,60 @@ import copy
 import json
 from typing import Callable, Optional
 
+from open_webui.models.config import Config
 from open_webui.utils.misc import (
     add_or_update_system_message,
     deep_update,
+    remove_system_message,
     replace_system_message_content,
 )
 from open_webui.utils.task import prompt_template, prompt_variables_template
+
+
+def compose_global_system_prompt(global_system_prompt: str, downstream_system_prompt: str) -> str:
+    global_system_prompt = (global_system_prompt or '').strip()
+    if not global_system_prompt:
+        return downstream_system_prompt
+
+    downstream_system_prompt = (downstream_system_prompt or '').strip()
+    administrator_section = f'[ADMINISTRATOR INSTRUCTIONS]\n{global_system_prompt}'
+    if not downstream_system_prompt:
+        return administrator_section
+
+    return f'{administrator_section}\n\n[MODEL INSTRUCTIONS]\n{downstream_system_prompt}'
+
+
+def system_message_content_text(content) -> str:
+    if isinstance(content, str):
+        return content
+    if not isinstance(content, list):
+        return ''
+
+    return '\n'.join(
+        str(part.get('text') or '')
+        for part in content
+        if isinstance(part, dict) and part.get('type') in {'text', 'input_text'} and part.get('text')
+    )
+
+
+async def resolve_system_prompt(
+    system: Optional[str],
+    metadata: Optional[dict] = None,
+    user=None,
+) -> str:
+    if not system:
+        return ''
+
+    # Metadata (WebUI Usage)
+    if metadata:
+        variables = metadata.get('variables', {})
+        if variables:
+            system = prompt_variables_template(system, variables)
+
+    # Legacy (API Usage)
+    system = await prompt_template(system, user)
+
+    return system
 
 
 # What goes out cannot be taken back. Let it be shaped
@@ -20,22 +68,118 @@ async def apply_system_prompt_to_body(
     user=None,
     replace: bool = False,
 ) -> dict:
+    system = await resolve_system_prompt(system, metadata, user)
     if not system:
         return form_data
-
-    # Metadata (WebUI Usage)
-    if metadata:
-        variables = metadata.get('variables', {})
-        if variables:
-            system = prompt_variables_template(system, variables)
-
-    # Legacy (API Usage)
-    system = await prompt_template(system, user)
 
     if replace:
         form_data['messages'] = replace_system_message_content(system, form_data.get('messages', []))
     else:
         form_data['messages'] = add_or_update_system_message(system, form_data.get('messages', []))
+
+    return form_data
+
+
+async def apply_model_system_prompt_to_body(
+    system: Optional[str],
+    form_data: dict,
+    metadata: Optional[dict] = None,
+    user=None,
+    bypass_global_system_prompt: bool = False,
+) -> dict:
+    if bypass_global_system_prompt:
+        return await apply_system_prompt_to_body(system, form_data, metadata, user)
+
+    global_system_prompt = await Config.get('chat.global_system_prompt', '')
+    global_system_prompt = await resolve_system_prompt(global_system_prompt, metadata, user)
+    if not global_system_prompt:
+        return await apply_system_prompt_to_body(system, form_data, metadata, user)
+
+    model_system_prompt = await resolve_system_prompt(system, metadata, user)
+    messages = form_data.get('messages', [])
+    current_system_prompts = [
+        system_message_content_text(message.get('content'))
+        for message in messages
+        if isinstance(message, dict) and message.get('role') == 'system'
+    ]
+    downstream_system_prompt = '\n'.join(prompt for prompt in (model_system_prompt, *current_system_prompts) if prompt)
+    composed_system_prompt = compose_global_system_prompt(
+        global_system_prompt,
+        downstream_system_prompt,
+    )
+
+    form_data['messages'] = add_or_update_system_message(
+        composed_system_prompt,
+        remove_system_message(messages),
+    )
+
+    return form_data
+
+
+async def apply_model_system_prompt_to_responses_body(
+    system: Optional[str],
+    form_data: dict,
+    metadata: Optional[dict] = None,
+    user=None,
+    bypass_global_system_prompt: bool = False,
+) -> dict:
+    model_system_prompt = await resolve_system_prompt(system, metadata, user)
+    request_system_prompt = system_message_content_text(form_data.get('instructions'))
+    downstream_system_prompt = '\n'.join(prompt for prompt in (model_system_prompt, request_system_prompt) if prompt)
+
+    if bypass_global_system_prompt:
+        composed_system_prompt = downstream_system_prompt
+    else:
+        global_system_prompt = await Config.get('chat.global_system_prompt', '')
+        global_system_prompt = await resolve_system_prompt(global_system_prompt, metadata, user)
+        composed_system_prompt = compose_global_system_prompt(
+            global_system_prompt,
+            downstream_system_prompt,
+        )
+
+    if composed_system_prompt:
+        form_data['instructions'] = composed_system_prompt
+
+    return form_data
+
+
+async def apply_model_system_prompt_to_anthropic_body(
+    system: Optional[str],
+    form_data: dict,
+    metadata: Optional[dict] = None,
+    user=None,
+    bypass_global_system_prompt: bool = False,
+) -> dict:
+    model_system_prompt = await resolve_system_prompt(system, metadata, user)
+    global_system_prompt = ''
+    if not bypass_global_system_prompt:
+        global_system_prompt = await Config.get('chat.global_system_prompt', '')
+        global_system_prompt = await resolve_system_prompt(global_system_prompt, metadata, user)
+
+    current_system = form_data.get('system')
+    if isinstance(current_system, list):
+        prefix = compose_global_system_prompt(global_system_prompt, model_system_prompt)
+        if prefix:
+            form_data['system'] = [
+                {'type': 'text', 'text': prefix},
+                *current_system,
+            ]
+        return form_data
+
+    downstream_system_prompt = '\n'.join(
+        prompt
+        for prompt in (
+            model_system_prompt,
+            system_message_content_text(current_system),
+        )
+        if prompt
+    )
+    composed_system_prompt = compose_global_system_prompt(
+        global_system_prompt,
+        downstream_system_prompt,
+    )
+    if composed_system_prompt:
+        form_data['system'] = composed_system_prompt
 
     return form_data
 
@@ -47,6 +191,8 @@ def apply_model_params_to_body(params: dict, form_data: dict, mappings: dict[str
 
     for key, value in params.items():
         if value is not None:
+            if key == 'reasoning' and isinstance(form_data.get('reasoning'), dict) and form_data['reasoning']:
+                continue
             if key in mappings:
                 cast_func = mappings[key]
                 if isinstance(cast_func, Callable):
@@ -72,6 +218,7 @@ def remove_open_webui_params(params: dict) -> dict:
         'stream_delta_chunk_size': int,
         'function_calling': str,
         'reasoning_tags': list,
+        'compact_token_threshold': int,
         'system': str,
     }
 
@@ -203,6 +350,7 @@ def convert_messages_openai_to_ollama(messages: list[dict]) -> list[dict]:
     for message in messages:
         # Initialize the new message structure with the role
         new_message = {'role': message['role']}
+        tool_call_id = message.get('tool_call_id', None)
 
         # Preserve Ollama-native 'thinking' field (used by reasoning models,
         # may be injected by filter inlet functions).
@@ -217,8 +365,6 @@ def convert_messages_openai_to_ollama(messages: list[dict]) -> list[dict]:
         if isinstance(content, str) and not tool_calls:
             # If the content is a string, it's pure text
             new_message['content'] = content
-
-            # If message is a tool call, add the tool call id to the message
             if tool_call_id:
                 new_message['tool_call_id'] = tool_call_id
 
@@ -248,17 +394,26 @@ def convert_messages_openai_to_ollama(messages: list[dict]) -> list[dict]:
             # Iterate through the list of content items
             for item in content:
                 # Check if it's a text type
-                if item.get('type') == 'text':
+                if item.get('type') in {'text', 'input_text'}:
                     content_text += item.get('text', '')
 
                 # Check if it's an image URL type
-                elif item.get('type') == 'image_url':
-                    img_url = item.get('image_url', {}).get('url', '')
+                elif item.get('type') in {'image_url', 'input_image'}:
+                    image_url = item.get('image_url', '')
+                    if isinstance(image_url, dict):
+                        img_url = image_url.get('url', '')
+                    elif isinstance(image_url, str):
+                        img_url = image_url
+                    else:
+                        img_url = ''
                     if img_url:
                         # If the image url starts with data:, it's a base64 image and should be trimmed
                         if img_url.startswith('data:'):
                             img_url = img_url.split(',')[-1]
                         images.append(img_url)
+
+            if tool_call_id:
+                new_message['tool_call_id'] = tool_call_id
 
             # Add content text (if any)
             if content_text:

@@ -1,43 +1,35 @@
 from __future__ import annotations
 
 import asyncio
-import inspect
+import hashlib
 import json
 import logging
 import mimetypes
 import os
-import random
-import re
-import shutil
 import sys
 import time
+from collections.abc import Mapping
 from contextlib import asynccontextmanager
-from typing import Optional
-from urllib.parse import parse_qs, urlencode, urlparse
+from types import MappingProxyType, SimpleNamespace
 from uuid import uuid4
 
 import aiohttp
 import anyio.to_thread
-from aiocache import cached
 from fastapi import (
-    BackgroundTasks,
     Depends,
     FastAPI,
-    File,
-    Form,
     HTTPException,
     Request,
-    UploadFile,
     applications,
     status,
 )
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.openapi.docs import get_swagger_ui_html
-from fastapi.responses import FileResponse, JSONResponse, RedirectResponse
+from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
-from redis import Redis
 from sqlalchemy import text
+from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession
 from starlette.datastructures import Headers
 from starlette.exceptions import HTTPException as StarletteHTTPException
@@ -52,373 +44,65 @@ from starsessions import (
 )
 from starsessions.stores.redis import RedisStore
 
+from open_webui.agent.artifacts import AgentRunArtifactRegistrar
+from open_webui.agent.conversation_mode import (
+    ConversationMode,
+    ConversationModeMismatchError,
+    InvalidConversationModeError,
+    chat_has_agent_mode_evidence,
+    resolve_conversation_mode,
+)
+from open_webui.agent.conversation_mode_profile_service import (
+    ModeProfileCapabilityRequestError,
+    ModeProfileRevisionHintConflictError,
+    ModeProfileServiceUnavailableError,
+    get_cached_current_revision,
+    get_cached_revision,
+    get_public_conversation_mode_profiles,
+    insert_new_chat_with_current_mode_profile,
+    redact_mode_profile_administrator_prompt,
+    resolve_mode_profile_capabilities,
+    verify_conversation_mode_profile_revision,
+)
+from open_webui.agent.conversation_mode_profiles import INHERIT, compose_prompt_layers
+from open_webui.agent.decision_execution import agent_decision_dispatcher_loop
+from open_webui.agent.protocol import AgentEventType
+from open_webui.agent.resources import AgentRunResourceManager
+from open_webui.agent.runtime_client import (
+    AgentRuntimeClient,
+    AgentRuntimeError,
+    AgentRuntimeUnavailable,
+)
+from open_webui.agent.tool_authority import build_tool_access_envelope
 from open_webui.config import (
-    ADMIN_EMAIL,
-    API_KEYS_ALLOWED_ENDPOINTS,
-    AUDIO_STT_ALLOWED_EXTENSIONS,
-    AUDIO_STT_AZURE_API_KEY,
-    AUDIO_STT_AZURE_BASE_URL,
-    AUDIO_STT_AZURE_LOCALES,
-    AUDIO_STT_AZURE_MAX_SPEAKERS,
-    AUDIO_STT_AZURE_REGION,
-    # Audio
-    AUDIO_STT_ENGINE,
-    AUDIO_STT_MISTRAL_API_BASE_URL,
-    AUDIO_STT_MISTRAL_API_KEY,
-    AUDIO_STT_MISTRAL_USE_CHAT_COMPLETIONS,
-    AUDIO_STT_MODEL,
-    AUDIO_STT_OPENAI_API_BASE_URL,
-    AUDIO_STT_OPENAI_API_KEY,
-    AUDIO_STT_SUPPORTED_CONTENT_TYPES,
-    AUDIO_TTS_API_KEY,
-    AUDIO_TTS_AZURE_SPEECH_BASE_URL,
-    AUDIO_TTS_AZURE_SPEECH_OUTPUT_FORMAT,
-    AUDIO_TTS_AZURE_SPEECH_REGION,
-    AUDIO_TTS_ENGINE,
-    AUDIO_TTS_MISTRAL_API_BASE_URL,
-    AUDIO_TTS_MISTRAL_API_KEY,
-    AUDIO_TTS_MODEL,
-    AUDIO_TTS_OPENAI_API_BASE_URL,
-    AUDIO_TTS_OPENAI_API_KEY,
-    AUDIO_TTS_OPENAI_PARAMS,
-    AUDIO_TTS_SPLIT_ON,
-    AUDIO_TTS_VOICE,
-    AUTOCOMPLETE_GENERATION_INPUT_MAX_LENGTH,
-    AUTOCOMPLETE_GENERATION_PROMPT_TEMPLATE,
-    # Image
-    AUTOMATIC1111_API_AUTH,
-    AUTOMATIC1111_BASE_URL,
-    AUTOMATIC1111_PARAMS,
-    AUTOMATION_MAX_COUNT,
-    AUTOMATION_MIN_INTERVAL,
-    BING_SEARCH_V7_ENDPOINT,
-    BING_SEARCH_V7_SUBSCRIPTION_KEY,
-    BOCHA_SEARCH_API_KEY,
-    BRAVE_SEARCH_API_KEY,
-    BRAVE_SEARCH_CONTEXT_TOKENS,
     BYPASS_ADMIN_ACCESS_CONTROL,
-    BYPASS_EMBEDDING_AND_RETRIEVAL,
-    BYPASS_WEB_SEARCH_EMBEDDING_AND_RETRIEVAL,
-    BYPASS_WEB_SEARCH_WEB_LOADER,
     CACHE_DIR,
-    CHUNK_MIN_SIZE_TARGET,
-    CHUNK_OVERLAP,
-    CHUNK_SIZE,
-    CODE_EXECUTION_ENGINE,
-    CODE_EXECUTION_JUPYTER_AUTH,
-    CODE_EXECUTION_JUPYTER_AUTH_PASSWORD,
-    CODE_EXECUTION_JUPYTER_AUTH_TOKEN,
-    CODE_EXECUTION_JUPYTER_TIMEOUT,
-    CODE_EXECUTION_JUPYTER_URL,
-    CODE_INTERPRETER_ENGINE,
-    CODE_INTERPRETER_JUPYTER_AUTH,
-    CODE_INTERPRETER_JUPYTER_AUTH_PASSWORD,
-    CODE_INTERPRETER_JUPYTER_AUTH_TOKEN,
-    CODE_INTERPRETER_JUPYTER_TIMEOUT,
-    CODE_INTERPRETER_JUPYTER_URL,
-    CODE_INTERPRETER_PROMPT_TEMPLATE,
-    COMFYUI_API_KEY,
-    COMFYUI_BASE_URL,
-    COMFYUI_WORKFLOW,
-    COMFYUI_WORKFLOW_NODES,
-    CONTENT_EXTRACTION_ENGINE,
     CORS_ALLOW_ORIGIN,
-    DATALAB_MARKER_ADDITIONAL_CONFIG,
-    DATALAB_MARKER_API_BASE_URL,
-    DATALAB_MARKER_API_KEY,
-    DATALAB_MARKER_DISABLE_IMAGE_EXTRACTION,
-    DATALAB_MARKER_FORCE_OCR,
-    DATALAB_MARKER_FORMAT_LINES,
-    DATALAB_MARKER_OUTPUT_FORMAT,
-    DATALAB_MARKER_PAGINATE,
-    DATALAB_MARKER_SKIP_CACHE,
-    DATALAB_MARKER_STRIP_EXISTING_OCR,
-    DATALAB_MARKER_USE_LLM,
-    DDGS_BACKEND,
-    DEEPGRAM_API_KEY,
-    DEFAULT_ARENA_MODEL,
-    DEFAULT_GROUP_ID,
     DEFAULT_LOCALE,
-    DEFAULT_MODEL_METADATA,
-    DEFAULT_MODEL_PARAMS,
-    DEFAULT_MODELS,
-    DEFAULT_PINNED_MODELS,
-    DEFAULT_PROMPT_SUGGESTIONS,
-    DEFAULT_RAG_TEMPLATE,
-    DEFAULT_USER_ROLE,
-    DOCLING_API_KEY,
-    DOCLING_PARAMS,
-    DOCLING_SERVER_URL,
-    DOCUMENT_INTELLIGENCE_ENDPOINT,
-    DOCUMENT_INTELLIGENCE_KEY,
-    DOCUMENT_INTELLIGENCE_MODEL,
     ENABLE_ADMIN_ANALYTICS,
     # Admin
     ENABLE_ADMIN_CHAT_ACCESS,
     ENABLE_ADMIN_EXPORT,
-    ENABLE_API_KEYS,
-    ENABLE_API_KEYS_ENDPOINT_RESTRICTIONS,
-    ENABLE_ASYNC_EMBEDDING,
-    ENABLE_AUTOCOMPLETE_GENERATION,
-    ENABLE_AUTOMATIONS,
-    # Model list
-    ENABLE_BASE_MODELS_CACHE,
-    ENABLE_CALENDAR,
-    ENABLE_CHANNELS,
-    # Code Execution
-    ENABLE_CODE_EXECUTION,
-    ENABLE_CODE_INTERPRETER,
-    ENABLE_COMMUNITY_SHARING,
-    # Direct Connections
-    ENABLE_DIRECT_CONNECTIONS,
-    ENABLE_EVALUATION_ARENA_MODELS,
-    ENABLE_FOLDERS,
-    ENABLE_FOLLOW_UP_GENERATION,
-    ENABLE_GOOGLE_DRIVE_INTEGRATION,
-    ENABLE_IMAGE_EDIT,
-    ENABLE_IMAGE_GENERATION,
-    ENABLE_IMAGE_PROMPT_GENERATION,
-    # WebUI (LDAP)
-    ENABLE_LDAP,
-    ENABLE_LDAP_GROUP_CREATION,
-    # LDAP Group Management
-    ENABLE_LDAP_GROUP_MANAGEMENT,
-    ENABLE_LOGIN_FORM,
-    ENABLE_MARKDOWN_HEADER_TEXT_SPLITTER,
-    ENABLE_MEMORIES,
-    ENABLE_MESSAGE_RATING,
-    ENABLE_NOTES,
-    # WebUI (OAuth)
-    ENABLE_OAUTH_ROLE_MANAGEMENT,
-    # Ollama
-    ENABLE_OLLAMA_API,
     ENABLE_ONEDRIVE_BUSINESS,
-    ENABLE_ONEDRIVE_INTEGRATION,
     ENABLE_ONEDRIVE_PERSONAL,
     # OpenAI
-    ENABLE_OPENAI_API,
-    ENABLE_PASSWORD_CHANGE_FORM,
-    ENABLE_RAG_HYBRID_SEARCH,
-    ENABLE_RAG_HYBRID_SEARCH_ENRICHED_TEXTS,
-    ENABLE_RAG_LOCAL_WEB_FETCH,
-    ENABLE_RETRIEVAL_QUERY_GENERATION,
-    ENABLE_SEARCH_QUERY_GENERATION,
-    ENABLE_SIGNUP,
-    ENABLE_TAGS_GENERATION,
-    ENABLE_TITLE_GENERATION,
-    ENABLE_USER_STATUS,
-    ENABLE_USER_WEBHOOKS,
-    ENABLE_VOICE_MODE_PROMPT,
-    ENABLE_WEB_LOADER_SSL_VERIFICATION,
-    # Retrieval (Web Search)
-    ENABLE_WEB_SEARCH,
-    # Misc
     ENV,
-    EVALUATION_ARENA_MODELS,
-    EXA_API_KEY,
-    EXTERNAL_DOCUMENT_LOADER_API_KEY,
-    EXTERNAL_DOCUMENT_LOADER_URL,
-    EXTERNAL_WEB_LOADER_API_KEY,
-    EXTERNAL_WEB_LOADER_URL,
-    EXTERNAL_WEB_SEARCH_API_KEY,
-    EXTERNAL_WEB_SEARCH_URL,
-    FILE_IMAGE_COMPRESSION_HEIGHT,
-    FILE_IMAGE_COMPRESSION_WIDTH,
-    FIRECRAWL_API_BASE_URL,
-    FIRECRAWL_API_KEY,
-    FIRECRAWL_TIMEOUT,
-    FOLDER_MAX_FILE_COUNT,
-    FOLLOW_UP_GENERATION_PROMPT_TEMPLATE,
     FRONTEND_BUILD_DIR,
     GOOGLE_DRIVE_API_KEY,
     GOOGLE_DRIVE_CLIENT_ID,
-    GOOGLE_PSE_API_KEY,
-    GOOGLE_PSE_ENGINE_ID,
     IFRAME_CSP,
-    IMAGE_EDIT_ENGINE,
-    IMAGE_EDIT_MODEL,
-    IMAGE_EDIT_SIZE,
-    IMAGE_GENERATION_ENGINE,
-    IMAGE_GENERATION_MODEL,
-    IMAGE_PROMPT_GENERATION_PROMPT_TEMPLATE,
-    IMAGE_SIZE,
-    IMAGE_STEPS,
-    IMAGES_EDIT_COMFYUI_API_KEY,
-    IMAGES_EDIT_COMFYUI_BASE_URL,
-    IMAGES_EDIT_COMFYUI_WORKFLOW,
-    IMAGES_EDIT_COMFYUI_WORKFLOW_NODES,
-    IMAGES_EDIT_GEMINI_API_BASE_URL,
-    IMAGES_EDIT_GEMINI_API_KEY,
-    IMAGES_EDIT_OPENAI_API_BASE_URL,
-    IMAGES_EDIT_OPENAI_API_KEY,
-    IMAGES_EDIT_OPENAI_API_VERSION,
-    IMAGES_GEMINI_API_BASE_URL,
-    IMAGES_GEMINI_API_KEY,
-    IMAGES_GEMINI_ENDPOINT_METHOD,
-    IMAGES_OPENAI_API_BASE_URL,
-    IMAGES_OPENAI_API_KEY,
-    IMAGES_OPENAI_API_PARAMS,
-    IMAGES_OPENAI_API_VERSION,
-    JINA_API_BASE_URL,
-    JINA_API_KEY,
-    JWT_EXPIRES_IN,
-    KAGI_SEARCH_API_KEY,
-    LDAP_APP_DN,
-    LDAP_APP_PASSWORD,
-    LDAP_ATTRIBUTE_FOR_GROUPS,
-    LDAP_ATTRIBUTE_FOR_MAIL,
-    LDAP_ATTRIBUTE_FOR_USERNAME,
-    LDAP_CA_CERT_FILE,
-    LDAP_CIPHERS,
-    LDAP_SEARCH_BASE,
-    LDAP_SEARCH_FILTERS,
-    LDAP_SERVER_HOST,
-    LDAP_SERVER_LABEL,
-    LDAP_SERVER_PORT,
-    LDAP_USE_TLS,
-    LDAP_VALIDATE_CERT,
-    MINERU_API_KEY,
-    MINERU_API_MODE,
-    MINERU_API_TIMEOUT,
-    MINERU_API_URL,
-    MINERU_FILE_EXTENSIONS,
-    MINERU_PARAMS,
-    MISTRAL_OCR_API_BASE_URL,
-    MISTRAL_OCR_API_KEY,
-    MODEL_ORDER_LIST,
-    MOJEEK_SEARCH_API_KEY,
-    OAUTH_ADMIN_ROLES,
-    OAUTH_ALLOWED_ROLES,
-    OAUTH_AUTO_REDIRECT,
-    OAUTH_EMAIL_CLAIM,
-    OAUTH_PICTURE_CLAIM,
     OAUTH_PROVIDERS,
-    OAUTH_ROLES_CLAIM,
-    OAUTH_SUB_CLAIM,
-    OAUTH_USERNAME_CLAIM,
-    OLLAMA_API_CONFIGS,
-    OLLAMA_BASE_URLS,
-    OLLAMA_CLOUD_WEB_SEARCH_API_KEY,
     ONEDRIVE_CLIENT_ID_BUSINESS,
     ONEDRIVE_CLIENT_ID_PERSONAL,
     ONEDRIVE_SHAREPOINT_TENANT_ID,
     ONEDRIVE_SHAREPOINT_URL,
-    OPENAI_API_BASE_URLS,
-    OPENAI_API_CONFIGS,
-    OPENAI_API_KEYS,
-    PADDLEOCR_VL_BASE_URL,
-    PADDLEOCR_VL_TOKEN,
-    PDF_EXTRACT_IMAGES,
-    PDF_LOADER_MODE,
-    PENDING_USER_OVERLAY_CONTENT,
-    PENDING_USER_OVERLAY_TITLE,
-    PERPLEXITY_API_KEY,
-    PERPLEXITY_MODEL,
-    PERPLEXITY_SEARCH_API_URL,
-    PERPLEXITY_SEARCH_CONTEXT_USAGE,
-    PLAYWRIGHT_TIMEOUT,
-    PLAYWRIGHT_WS_URL,
-    QUERY_GENERATION_PROMPT_TEMPLATE,
-    RAG_ALLOWED_FILE_EXTENSIONS,
-    RAG_AZURE_OPENAI_API_KEY,
-    RAG_AZURE_OPENAI_API_VERSION,
-    RAG_AZURE_OPENAI_BASE_URL,
-    RAG_EMBEDDING_BATCH_SIZE,
-    RAG_EMBEDDING_CONCURRENT_REQUESTS,
-    RAG_EMBEDDING_ENGINE,
-    RAG_EMBEDDING_MODEL,
-    RAG_EMBEDDING_MODEL_AUTO_UPDATE,
-    RAG_EMBEDDING_MODEL_TRUST_REMOTE_CODE,
-    RAG_EXTERNAL_RERANKER_API_KEY,
-    RAG_EXTERNAL_RERANKER_TIMEOUT,
-    RAG_EXTERNAL_RERANKER_URL,
-    RAG_FILE_MAX_COUNT,
-    RAG_FILE_MAX_SIZE,
-    RAG_FULL_CONTEXT,
-    RAG_HYBRID_BM25_WEIGHT,
-    RAG_OLLAMA_API_KEY,
-    RAG_OLLAMA_BASE_URL,
-    RAG_OPENAI_API_BASE_URL,
-    RAG_OPENAI_API_KEY,
-    RAG_RELEVANCE_THRESHOLD,
-    RAG_RERANKING_BATCH_SIZE,
-    RAG_RERANKING_ENGINE,
-    RAG_RERANKING_MODEL,
-    RAG_RERANKING_MODEL_AUTO_UPDATE,
-    RAG_RERANKING_MODEL_TRUST_REMOTE_CODE,
-    # Retrieval
-    RAG_TEMPLATE,
-    RAG_TEXT_SPLITTER,
-    RAG_TOP_K,
-    RAG_TOP_K_RERANKER,
-    RESPONSE_WATERMARK,
-    SEARCHAPI_API_KEY,
-    SEARCHAPI_ENGINE,
-    SEARXNG_LANGUAGE,
-    SEARXNG_QUERY_URL,
-    SERPAPI_API_KEY,
-    SERPAPI_ENGINE,
-    SERPER_API_KEY,
-    SERPLY_API_KEY,
-    SERPSTACK_API_KEY,
-    SERPSTACK_HTTPS,
-    SHOW_ADMIN_DETAILS,
-    SOUGOU_API_SID,
-    SOUGOU_API_SK,
     STATIC_DIR,
-    TAGS_GENERATION_PROMPT_TEMPLATE,
-    # Tasks
-    TASK_MODEL,
-    TASK_MODEL_EXTERNAL,
-    TAVILY_API_KEY,
-    TAVILY_EXTRACT_DEPTH,
-    # Terminal Server
-    TERMINAL_SERVER_CONNECTIONS,
-    # Thread pool size for FastAPI/AnyIO
     THREAD_POOL_SIZE,
-    TIKA_SERVER_URL,
-    TIKTOKEN_ENCODING_NAME,
-    TITLE_GENERATION_PROMPT_TEMPLATE,
-    # Tool Server Configs
-    TOOL_SERVER_CONNECTIONS,
-    TOOLS_FUNCTION_CALLING_PROMPT_TEMPLATE,
-    UPLOAD_DIR,
-    USER_PERMISSIONS,
-    VOICE_MODE_PROMPT_TEMPLATE,
-    WEB_FETCH_MAX_CONTENT_LENGTH,
-    WEB_LOADER_CONCURRENT_REQUESTS,
-    WEB_LOADER_ENGINE,
-    WEB_LOADER_TIMEOUT,
-    WEB_SEARCH_CONCURRENT_REQUESTS,
-    WEB_SEARCH_DOMAIN_FILTER_LIST,
-    WEB_SEARCH_ENGINE,
-    WEB_SEARCH_RESULT_COUNT,
-    WEB_SEARCH_TRUST_ENV,
-    WEBHOOK_URL,
-    # WebUI
     WEBUI_AUTH,
-    WEBUI_BANNERS,
     WEBUI_NAME,
-    WEBUI_URL,
-    WHISPER_LANGUAGE,
-    WHISPER_MODEL,
-    WHISPER_MODEL_AUTO_UPDATE,
-    WHISPER_MODEL_DIR,
-    WHISPER_VAD_FILTER,
-    YACY_PASSWORD,
-    YACY_QUERY_URL,
-    YACY_USERNAME,
-    YANDEX_WEB_SEARCH_API_KEY,
-    YANDEX_WEB_SEARCH_CONFIG,
-    YANDEX_WEB_SEARCH_URL,
-    YOUCOM_API_KEY,
-    LINKUP_API_KEY,
-    LINKUP_SEARCH_PARAMS,
-    YOUTUBE_LOADER_LANGUAGE,
-    YOUTUBE_LOADER_PROXY_URL,
-    AppConfig,
     async_reset_config,
-    reset_config,
+    import_legacy_config_json,
+    seed_registered_defaults,
 )
 from open_webui.constants import ERROR_MESSAGES, TASKS
 from open_webui.env import (
@@ -433,6 +117,7 @@ from open_webui.env import (
     ENABLE_COMPRESSION_MIDDLEWARE,
     ENABLE_CUSTOM_MODEL_FALLBACK,
     ENABLE_EASTER_EGGS,
+    EXTERNAL_PWA_MANIFEST_URL,
     # OAuth Back-Channel Logout
     ENABLE_OAUTH_BACKCHANNEL_LOGOUT,
     ENABLE_OTEL,
@@ -441,16 +126,15 @@ from open_webui.env import (
     ENABLE_SCIM,
     ENABLE_SIGNUP_PASSWORD_CONFIRMATION,
     ENABLE_STAR_SESSIONS_MIDDLEWARE,
+    ENABLE_PYODIDE_FILE_PERSISTENCE,
     ENABLE_VERSION_UPDATE_CHECK,
     ENABLE_WEBSOCKET_SUPPORT,
-    EXTERNAL_PWA_MANIFEST_URL,
     GLOBAL_LOG_LEVEL,
     INSTANCE_ID,
     LICENSE_KEY,
     LOG_FORMAT,
     MAX_BODY_LOG_SIZE,
     # Redis
-    REDIS_CLUSTER,
     REDIS_KEY_PREFIX,
     REDIS_URL,
     RESET_CONFIG_ON_START,
@@ -461,23 +145,40 @@ from open_webui.env import (
     WEBUI_ADMIN_EMAIL,
     WEBUI_ADMIN_NAME,
     WEBUI_ADMIN_PASSWORD,
-    WEBUI_AUTH_SIGNOUT_REDIRECT_URL,
     WEBUI_AUTH_TRUSTED_EMAIL_HEADER,
-    WEBUI_AUTH_TRUSTED_NAME_HEADER,
     WEBUI_BUILD_HASH,
     WEBUI_SECRET_KEY,
     WEBUI_SESSION_COOKIE_SAME_SITE,
     WEBUI_SESSION_COOKIE_SECURE,
 )
-from open_webui.internal.db import ScopedSession, engine, get_async_session
+from open_webui.events import (
+    EVENTS,
+    delete_event_webhook,
+    get_event_catalog as get_event_catalog_items,
+    get_event_webhooks,
+    migrate_legacy_webhook_config,
+    publish_event,
+    upsert_event_webhook,
+)
+from open_webui.internal.db import engine, get_async_session
 from open_webui.models.access_grants import AccessGrants
+from open_webui.models.agent_runs import AgentRuns
 from open_webui.models.channels import Channels
 from open_webui.models.chats import ChatForm, Chats
+from open_webui.models.config import Config
+from open_webui.models.conversation_mode_profiles import (
+    ConversationModeProfileBindingConflict,
+    ConversationModeProfileIntegrityError,
+    ConversationModeProfileLegacyBindingError,
+    ConversationModeProfiles,
+)
 from open_webui.models.functions import Functions
 from open_webui.models.messages import Messages
 from open_webui.models.models import Models
-from open_webui.models.users import UserModel, Users
+from open_webui.models.users import Users
 from open_webui.routers import (
+    agent_runs,
+    agent_service,
     analytics,
     audio,
     auths,
@@ -497,6 +198,7 @@ from open_webui.routers import (
     models,
     notes,
     ollama,
+    onlyoffice,
     openai,
     pipelines,
     prompts,
@@ -537,6 +239,7 @@ from open_webui.tasks import (
     stop_task,
 )  # Import from tasks.py
 from open_webui.utils import logger
+from open_webui.utils.access_control import has_connection_access, has_permission
 from open_webui.utils.actions import chat_action as chat_action_handler
 from open_webui.utils.asgi_middleware import (
     AuthTokenMiddleware,
@@ -552,493 +255,7 @@ from open_webui.utils.auth import (
     get_http_authorization_cred,
     get_license_data,
     get_verified_user,
-)
-from open_webui.routers import (
-    analytics,
-    audio,
-    images,
-    ollama,
-    onlyoffice,
-    openai,
-    retrieval,
-    pipelines,
-    tasks,
-    auths,
-    channels,
-    chats,
-    notes,
-    folders,
-    configs,
-    groups,
-    files,
-    functions,
-    memories,
-    models,
-    knowledge,
-    prompts,
-    evaluations,
-    skills,
-    tools,
-    users,
-    utils,
-    scim,
-    terminals,
-    automations,
-    calendar,
-)
-
-from open_webui.routers.retrieval import (
-    get_embedding_function,
-    get_reranking_function,
-    get_ef,
-    get_rf,
-)
-
-
-from sqlalchemy.ext.asyncio import AsyncSession
-from open_webui.internal.db import ScopedSession, engine, get_async_session
-
-from open_webui.models.functions import Functions
-from open_webui.models.models import Models
-from open_webui.models.users import UserModel, Users
-from open_webui.models.chats import Chats, ChatForm
-
-from open_webui.config import (
-    # Ollama
-    ENABLE_OLLAMA_API,
-    OLLAMA_BASE_URLS,
-    OLLAMA_API_CONFIGS,
-    # OpenAI
-    ENABLE_OPENAI_API,
-    OPENAI_API_BASE_URLS,
-    OPENAI_API_KEYS,
-    OPENAI_API_CONFIGS,
-    # Direct Connections
-    ENABLE_DIRECT_CONNECTIONS,
-    # Model list
-    ENABLE_BASE_MODELS_CACHE,
-    # Thread pool size for FastAPI/AnyIO
-    THREAD_POOL_SIZE,
-    # Tool Server Configs
-    TOOL_SERVER_CONNECTIONS,
-    # Terminal Server
-    TERMINAL_SERVER_CONNECTIONS,
-    # Code Execution
-    ENABLE_CODE_EXECUTION,
-    CODE_EXECUTION_ENGINE,
-    CODE_EXECUTION_JUPYTER_URL,
-    CODE_EXECUTION_JUPYTER_AUTH,
-    CODE_EXECUTION_JUPYTER_AUTH_TOKEN,
-    CODE_EXECUTION_JUPYTER_AUTH_PASSWORD,
-    CODE_EXECUTION_JUPYTER_TIMEOUT,
-    ENABLE_CODE_INTERPRETER,
-    CODE_INTERPRETER_ENGINE,
-    CODE_INTERPRETER_PROMPT_TEMPLATE,
-    CODE_INTERPRETER_JUPYTER_URL,
-    CODE_INTERPRETER_JUPYTER_AUTH,
-    CODE_INTERPRETER_JUPYTER_AUTH_TOKEN,
-    CODE_INTERPRETER_JUPYTER_AUTH_PASSWORD,
-    CODE_INTERPRETER_JUPYTER_TIMEOUT,
-    ENABLE_MEMORIES,
-    # Image
-    AUTOMATIC1111_API_AUTH,
-    AUTOMATIC1111_BASE_URL,
-    AUTOMATIC1111_PARAMS,
-    COMFYUI_BASE_URL,
-    COMFYUI_API_KEY,
-    COMFYUI_WORKFLOW,
-    COMFYUI_WORKFLOW_NODES,
-    ENABLE_IMAGE_GENERATION,
-    ENABLE_IMAGE_PROMPT_GENERATION,
-    IMAGE_GENERATION_ENGINE,
-    IMAGE_GENERATION_MODEL,
-    IMAGE_SIZE,
-    IMAGE_STEPS,
-    IMAGES_OPENAI_API_BASE_URL,
-    IMAGES_OPENAI_API_VERSION,
-    IMAGES_OPENAI_API_KEY,
-    IMAGES_OPENAI_API_PARAMS,
-    IMAGES_GEMINI_API_BASE_URL,
-    IMAGES_GEMINI_API_KEY,
-    IMAGES_GEMINI_ENDPOINT_METHOD,
-    ENABLE_IMAGE_EDIT,
-    IMAGE_EDIT_ENGINE,
-    IMAGE_EDIT_MODEL,
-    IMAGE_EDIT_SIZE,
-    IMAGES_EDIT_OPENAI_API_BASE_URL,
-    IMAGES_EDIT_OPENAI_API_KEY,
-    IMAGES_EDIT_OPENAI_API_VERSION,
-    IMAGES_EDIT_GEMINI_API_BASE_URL,
-    IMAGES_EDIT_GEMINI_API_KEY,
-    IMAGES_EDIT_COMFYUI_BASE_URL,
-    IMAGES_EDIT_COMFYUI_API_KEY,
-    IMAGES_EDIT_COMFYUI_WORKFLOW,
-    IMAGES_EDIT_COMFYUI_WORKFLOW_NODES,
-    # Audio
-    AUDIO_STT_ENGINE,
-    AUDIO_STT_MODEL,
-    AUDIO_STT_SUPPORTED_CONTENT_TYPES,
-    AUDIO_STT_ALLOWED_EXTENSIONS,
-    AUDIO_STT_OPENAI_API_BASE_URL,
-    AUDIO_STT_OPENAI_API_KEY,
-    AUDIO_STT_AZURE_API_KEY,
-    AUDIO_STT_AZURE_REGION,
-    AUDIO_STT_AZURE_LOCALES,
-    AUDIO_STT_AZURE_BASE_URL,
-    AUDIO_STT_AZURE_MAX_SPEAKERS,
-    AUDIO_STT_MISTRAL_API_KEY,
-    AUDIO_STT_MISTRAL_API_BASE_URL,
-    AUDIO_STT_MISTRAL_USE_CHAT_COMPLETIONS,
-    AUDIO_TTS_ENGINE,
-    AUDIO_TTS_MODEL,
-    AUDIO_TTS_VOICE,
-    AUDIO_TTS_OPENAI_API_BASE_URL,
-    AUDIO_TTS_OPENAI_API_KEY,
-    AUDIO_TTS_OPENAI_PARAMS,
-    AUDIO_TTS_API_KEY,
-    AUDIO_TTS_SPLIT_ON,
-    AUDIO_TTS_AZURE_SPEECH_REGION,
-    AUDIO_TTS_AZURE_SPEECH_BASE_URL,
-    AUDIO_TTS_AZURE_SPEECH_OUTPUT_FORMAT,
-    AUDIO_TTS_MISTRAL_API_KEY,
-    AUDIO_TTS_MISTRAL_API_BASE_URL,
-    PLAYWRIGHT_WS_URL,
-    PLAYWRIGHT_TIMEOUT,
-    FIRECRAWL_API_BASE_URL,
-    FIRECRAWL_API_KEY,
-    FIRECRAWL_TIMEOUT,
-    WEB_LOADER_ENGINE,
-    WEB_LOADER_CONCURRENT_REQUESTS,
-    WEB_LOADER_TIMEOUT,
-    WHISPER_MODEL,
-    WHISPER_VAD_FILTER,
-    WHISPER_LANGUAGE,
-    DEEPGRAM_API_KEY,
-    WHISPER_MODEL_AUTO_UPDATE,
-    WHISPER_MODEL_DIR,
-    # Retrieval
-    RAG_TEMPLATE,
-    DEFAULT_RAG_TEMPLATE,
-    RAG_FULL_CONTEXT,
-    BYPASS_EMBEDDING_AND_RETRIEVAL,
-    RAG_EMBEDDING_MODEL,
-    RAG_EMBEDDING_MODEL_AUTO_UPDATE,
-    RAG_EMBEDDING_MODEL_TRUST_REMOTE_CODE,
-    RAG_RERANKING_ENGINE,
-    RAG_RERANKING_MODEL,
-    RAG_EXTERNAL_RERANKER_URL,
-    RAG_EXTERNAL_RERANKER_API_KEY,
-    RAG_EXTERNAL_RERANKER_TIMEOUT,
-    RAG_RERANKING_BATCH_SIZE,
-    RAG_RERANKING_MODEL_AUTO_UPDATE,
-    RAG_RERANKING_MODEL_TRUST_REMOTE_CODE,
-    RAG_EMBEDDING_ENGINE,
-    RAG_EMBEDDING_BATCH_SIZE,
-    ENABLE_ASYNC_EMBEDDING,
-    RAG_EMBEDDING_CONCURRENT_REQUESTS,
-    RAG_TOP_K,
-    RAG_TOP_K_RERANKER,
-    RAG_RELEVANCE_THRESHOLD,
-    RAG_HYBRID_BM25_WEIGHT,
-    RAG_ALLOWED_FILE_EXTENSIONS,
-    RAG_FILE_MAX_COUNT,
-    RAG_FILE_MAX_SIZE,
-    FILE_IMAGE_COMPRESSION_WIDTH,
-    FILE_IMAGE_COMPRESSION_HEIGHT,
-    RAG_OPENAI_API_BASE_URL,
-    RAG_OPENAI_API_KEY,
-    NATIVE_ATTACHED_KNOWLEDGE_BYPASS_LEGACY_FILE_RETRIEVAL,
-    RAG_AZURE_OPENAI_BASE_URL,
-    RAG_AZURE_OPENAI_API_KEY,
-    RAG_AZURE_OPENAI_API_VERSION,
-    RAG_OLLAMA_BASE_URL,
-    RAG_OLLAMA_API_KEY,
-    CHUNK_OVERLAP,
-    CHUNK_MIN_SIZE_TARGET,
-    CHUNK_SIZE,
-    CONTENT_EXTRACTION_ENGINE,
-    DATALAB_MARKER_API_KEY,
-    DATALAB_MARKER_API_BASE_URL,
-    DATALAB_MARKER_ADDITIONAL_CONFIG,
-    DATALAB_MARKER_SKIP_CACHE,
-    DATALAB_MARKER_FORCE_OCR,
-    DATALAB_MARKER_PAGINATE,
-    DATALAB_MARKER_STRIP_EXISTING_OCR,
-    DATALAB_MARKER_DISABLE_IMAGE_EXTRACTION,
-    DATALAB_MARKER_FORMAT_LINES,
-    DATALAB_MARKER_OUTPUT_FORMAT,
-    MINERU_API_MODE,
-    MINERU_API_URL,
-    MINERU_API_KEY,
-    MINERU_API_TIMEOUT,
-    MINERU_PARAMS,
-    DATALAB_MARKER_USE_LLM,
-    EXTERNAL_DOCUMENT_LOADER_URL,
-    EXTERNAL_DOCUMENT_LOADER_API_KEY,
-    TIKA_SERVER_URL,
-    DOCLING_SERVER_URL,
-    DOCLING_API_KEY,
-    DOCLING_PARAMS,
-    DOCUMENT_INTELLIGENCE_ENDPOINT,
-    DOCUMENT_INTELLIGENCE_KEY,
-    DOCUMENT_INTELLIGENCE_MODEL,
-    MISTRAL_OCR_API_BASE_URL,
-    MISTRAL_OCR_API_KEY,
-    PADDLEOCR_VL_BASE_URL,
-    PADDLEOCR_VL_TOKEN,
-    RAG_TEXT_SPLITTER,
-    ENABLE_MARKDOWN_HEADER_TEXT_SPLITTER,
-    TIKTOKEN_ENCODING_NAME,
-    PDF_EXTRACT_IMAGES,
-    PDF_LOADER_MODE,
-    YOUTUBE_LOADER_LANGUAGE,
-    YOUTUBE_LOADER_PROXY_URL,
-    LAYER_GENERATION_MODEL,
-    LAYER_GENERATION_PROMPT_ABSTRACT,
-    LAYER_GENERATION_MAX_CHUNK_TOKENS,
-    LAYER_GENERATION_MIN_TAIL_TOKENS,
-    OPEN_NOTEBOOK_BASE_URL,
-    OPEN_NOTEBOOK_API_PASSWORD,
-    OPEN_NOTEBOOK_TIMEOUT_SECS,
-    OPEN_NOTEBOOK_TRANSFORMATION_ABSTRACT,
-    OPEN_NOTEBOOK_TRANSFORMATION_KEY_FINDINGS,
-    OPEN_NOTEBOOK_TRANSFORMATION_KEY_DATA,
-    # Retrieval (Web Search)
-    ENABLE_WEB_SEARCH,
-    WEB_SEARCH_ENGINE,
-    BYPASS_WEB_SEARCH_EMBEDDING_AND_RETRIEVAL,
-    BYPASS_WEB_SEARCH_WEB_LOADER,
-    WEB_SEARCH_RESULT_COUNT,
-    WEB_SEARCH_CONCURRENT_REQUESTS,
-    WEB_FETCH_MAX_CONTENT_LENGTH,
-    WEB_SEARCH_TRUST_ENV,
-    WEB_SEARCH_DOMAIN_FILTER_LIST,
-    OLLAMA_CLOUD_WEB_SEARCH_API_KEY,
-    JINA_API_KEY,
-    JINA_API_BASE_URL,
-    SEARCHAPI_API_KEY,
-    SEARCHAPI_ENGINE,
-    SERPAPI_API_KEY,
-    SERPAPI_ENGINE,
-    SEARXNG_QUERY_URL,
-    SEARXNG_LANGUAGE,
-    YACY_QUERY_URL,
-    YACY_USERNAME,
-    YACY_PASSWORD,
-    SERPER_API_KEY,
-    SERPLY_API_KEY,
-    DDGS_BACKEND,
-    SERPSTACK_API_KEY,
-    SERPSTACK_HTTPS,
-    TAVILY_API_KEY,
-    TAVILY_EXTRACT_DEPTH,
-    BING_SEARCH_V7_ENDPOINT,
-    BING_SEARCH_V7_SUBSCRIPTION_KEY,
-    BRAVE_SEARCH_API_KEY,
-    BRAVE_SEARCH_CONTEXT_TOKENS,
-    EXA_API_KEY,
-    PERPLEXITY_API_KEY,
-    PERPLEXITY_MODEL,
-    PERPLEXITY_SEARCH_CONTEXT_USAGE,
-    PERPLEXITY_SEARCH_API_URL,
-    SOUGOU_API_SID,
-    SOUGOU_API_SK,
-    KAGI_SEARCH_API_KEY,
-    MOJEEK_SEARCH_API_KEY,
-    BOCHA_SEARCH_API_KEY,
-    GOOGLE_PSE_API_KEY,
-    GOOGLE_PSE_ENGINE_ID,
-    GOOGLE_DRIVE_CLIENT_ID,
-    GOOGLE_DRIVE_API_KEY,
-    ENABLE_ONEDRIVE_INTEGRATION,
-    ONEDRIVE_CLIENT_ID_PERSONAL,
-    ONEDRIVE_CLIENT_ID_BUSINESS,
-    ONEDRIVE_SHAREPOINT_URL,
-    ONEDRIVE_SHAREPOINT_TENANT_ID,
-    ENABLE_ONEDRIVE_PERSONAL,
-    ENABLE_ONEDRIVE_BUSINESS,
-    ENABLE_RAG_HYBRID_SEARCH,
-    ENABLE_RAG_HYBRID_SEARCH_ENRICHED_TEXTS,
-    ENABLE_RAG_LOCAL_WEB_FETCH,
-    ENABLE_WEB_LOADER_SSL_VERIFICATION,
-    ENABLE_GOOGLE_DRIVE_INTEGRATION,
-    UPLOAD_DIR,
-    EXTERNAL_WEB_SEARCH_URL,
-    EXTERNAL_WEB_SEARCH_API_KEY,
-    EXTERNAL_WEB_LOADER_URL,
-    EXTERNAL_WEB_LOADER_API_KEY,
-    YANDEX_WEB_SEARCH_URL,
-    YANDEX_WEB_SEARCH_API_KEY,
-    YANDEX_WEB_SEARCH_CONFIG,
-    YOUCOM_API_KEY,
-    # WebUI
-    WEBUI_AUTH,
-    WEBUI_NAME,
-    WEBUI_BANNERS,
-    WEBHOOK_URL,
-    ADMIN_EMAIL,
-    SHOW_ADMIN_DETAILS,
-    JWT_EXPIRES_IN,
-    ENABLE_SIGNUP,
-    ENABLE_LOGIN_FORM,
-    ENABLE_PASSWORD_CHANGE_FORM,
-    ENABLE_API_KEYS,
-    ENABLE_API_KEYS_ENDPOINT_RESTRICTIONS,
-    API_KEYS_ALLOWED_ENDPOINTS,
-    ENABLE_FOLDERS,
-    FOLDER_MAX_FILE_COUNT,
-    ENABLE_AUTOMATIONS,
-    AUTOMATION_MAX_COUNT,
-    AUTOMATION_MIN_INTERVAL,
-    ENABLE_CHANNELS,
-    ENABLE_CALENDAR,
-    ENABLE_NOTES,
-    ENABLE_USER_STATUS,
-    ENABLE_COMMUNITY_SHARING,
-    ENABLE_MESSAGE_RATING,
-    ENABLE_USER_WEBHOOKS,
-    ENABLE_EVALUATION_ARENA_MODELS,
-    BYPASS_ADMIN_ACCESS_CONTROL,
-    USER_PERMISSIONS,
-    DEFAULT_USER_ROLE,
-    DEFAULT_GROUP_ID,
-    PENDING_USER_OVERLAY_CONTENT,
-    PENDING_USER_OVERLAY_TITLE,
-    DEFAULT_PROMPT_SUGGESTIONS,
-    DEFAULT_MODELS,
-    DEFAULT_PINNED_MODELS,
-    DEFAULT_ARENA_MODEL,
-    MODEL_ORDER_LIST,
-    DEFAULT_MODEL_METADATA,
-    DEFAULT_MODEL_PARAMS,
-    EVALUATION_ARENA_MODELS,
-    # WebUI (OAuth)
-    ENABLE_OAUTH_ROLE_MANAGEMENT,
-    OAUTH_SUB_CLAIM,
-    OAUTH_ROLES_CLAIM,
-    OAUTH_EMAIL_CLAIM,
-    OAUTH_PICTURE_CLAIM,
-    OAUTH_USERNAME_CLAIM,
-    OAUTH_ALLOWED_ROLES,
-    OAUTH_ADMIN_ROLES,
-    # WebUI (LDAP)
-    ENABLE_LDAP,
-    LDAP_SERVER_LABEL,
-    LDAP_SERVER_HOST,
-    LDAP_SERVER_PORT,
-    LDAP_ATTRIBUTE_FOR_MAIL,
-    LDAP_ATTRIBUTE_FOR_USERNAME,
-    LDAP_SEARCH_FILTERS,
-    LDAP_SEARCH_BASE,
-    LDAP_APP_DN,
-    LDAP_APP_PASSWORD,
-    LDAP_USE_TLS,
-    LDAP_CA_CERT_FILE,
-    LDAP_VALIDATE_CERT,
-    LDAP_CIPHERS,
-    # LDAP Group Management
-    ENABLE_LDAP_GROUP_MANAGEMENT,
-    ENABLE_LDAP_GROUP_CREATION,
-    LDAP_ATTRIBUTE_FOR_GROUPS,
-    # Misc
-    ENV,
-    CACHE_DIR,
-    STATIC_DIR,
-    FRONTEND_BUILD_DIR,
-    CORS_ALLOW_ORIGIN,
-    DEFAULT_LOCALE,
-    OAUTH_PROVIDERS,
-    WEBUI_URL,
-    RESPONSE_WATERMARK,
-    ANNOUNCEMENT_MODAL_ENABLED,
-    ANNOUNCEMENT_MODAL_KEY,
-    ANNOUNCEMENT_MODAL_TITLE,
-    ANNOUNCEMENT_MODAL_CONTENT,
-    IFRAME_CSP,
-    # Admin
-    ENABLE_ADMIN_CHAT_ACCESS,
-    ENABLE_ADMIN_ANALYTICS,
-    BYPASS_ADMIN_ACCESS_CONTROL,
-    ENABLE_ADMIN_EXPORT,
-    # Tasks
-    TASK_MODEL,
-    TASK_MODEL_EXTERNAL,
-    ENABLE_TAGS_GENERATION,
-    ENABLE_TITLE_GENERATION,
-    ENABLE_FOLLOW_UP_GENERATION,
-    ENABLE_SEARCH_QUERY_GENERATION,
-    ENABLE_RETRIEVAL_QUERY_GENERATION,
-    ENABLE_AUTOCOMPLETE_GENERATION,
-    TITLE_GENERATION_PROMPT_TEMPLATE,
-    FOLLOW_UP_GENERATION_PROMPT_TEMPLATE,
-    TAGS_GENERATION_PROMPT_TEMPLATE,
-    IMAGE_PROMPT_GENERATION_PROMPT_TEMPLATE,
-    TOOLS_FUNCTION_CALLING_PROMPT_TEMPLATE,
-    VOICE_MODE_PROMPT_TEMPLATE,
-    ENABLE_VOICE_MODE_PROMPT,
-    QUERY_GENERATION_PROMPT_TEMPLATE,
-    AUTOCOMPLETE_GENERATION_PROMPT_TEMPLATE,
-    AUTOCOMPLETE_GENERATION_INPUT_MAX_LENGTH,
-    AppConfig,
-    reset_config,
-    async_reset_config,
-)
-from open_webui.env import (
-    ENABLE_CUSTOM_MODEL_FALLBACK,
-    LICENSE_KEY,
-    AUDIT_EXCLUDED_PATHS,
-    AUDIT_INCLUDED_PATHS,
-    ENABLE_AUDIT_GET_REQUESTS,
-    AUDIT_LOG_LEVEL,
-    CHANGELOG,
-    REDIS_URL,
-    REDIS_CLUSTER,
-    REDIS_KEY_PREFIX,
-    REDIS_SENTINEL_HOSTS,
-    REDIS_SENTINEL_PORT,
-    GLOBAL_LOG_LEVEL,
-    MAX_BODY_LOG_SIZE,
-    SAFE_MODE,
-    VERSION,
-    DEPLOYMENT_ID,
-    INSTANCE_ID,
-    WEBUI_BUILD_HASH,
-    WEBUI_SECRET_KEY,
-    WEBUI_SESSION_COOKIE_SAME_SITE,
-    WEBUI_SESSION_COOKIE_SECURE,
-    ENABLE_SIGNUP_PASSWORD_CONFIRMATION,
-    WEBUI_AUTH_TRUSTED_EMAIL_HEADER,
-    WEBUI_AUTH_TRUSTED_NAME_HEADER,
-    WEBUI_AUTH_SIGNOUT_REDIRECT_URL,
-    # SCIM
-    ENABLE_SCIM,
-    SCIM_TOKEN,
-    ENABLE_COMPRESSION_MIDDLEWARE,
-    ENABLE_WEBSOCKET_SUPPORT,
-    BYPASS_MODEL_ACCESS_CONTROL,
-    RESET_CONFIG_ON_START,
-    ENABLE_VERSION_UPDATE_CHECK,
-    ENABLE_OTEL,
-    EXTERNAL_PWA_MANIFEST_URL,
-    AIOHTTP_CLIENT_SESSION_SSL,
-    ENABLE_STAR_SESSIONS_MIDDLEWARE,
-    ENABLE_PUBLIC_ACTIVE_USERS_COUNT,
-    # Admin Account Runtime Creation
-    WEBUI_ADMIN_EMAIL,
-    WEBUI_ADMIN_PASSWORD,
-    WEBUI_ADMIN_NAME,
-    ENABLE_EASTER_EGGS,
-    LOG_FORMAT,
-    # OAuth Back-Channel Logout
-    ENABLE_OAUTH_BACKCHANNEL_LOGOUT,
-)
-
-
-from open_webui.utils.models import (
-    get_all_models,
-    get_all_base_models,
-    check_model_access,
-    get_filtered_models,
+    is_valid_token,
 )
 from open_webui.utils.chat import (
     chat_completed as chat_completed_handler,
@@ -1046,13 +263,21 @@ from open_webui.utils.chat import (
 from open_webui.utils.chat import (
     generate_chat_completion as chat_completion_handler,
 )
+from open_webui.utils.cache_invalidation import (
+    install_config_cache_invalidation_hooks,
+    install_model_cache_invalidation_hooks,
+    redis_cache_invalidation_listener,
+    register_cache_invalidation_app,
+)
 from open_webui.utils.embeddings import generate_embeddings
 from open_webui.utils.logger import start_logger
 from open_webui.utils.middleware import (
+    background_tasks_handler,
     build_chat_response_context,
     process_chat_payload,
     process_chat_response,
 )
+from open_webui.utils.misc import get_content_from_message, remove_system_message
 from open_webui.utils.models import (
     check_model_access,
     get_all_base_models,
@@ -1063,16 +288,24 @@ from open_webui.utils.oauth import (
     OAuthClientInformationFull,
     OAuthClientManager,
     OAuthManager,
+    apply_connection_oauth_options,
     decrypt_data,
     encrypt_data,
     get_oauth_client_info_with_dynamic_client_registration,
     get_oauth_client_info_with_static_credentials,
+    recover_static_oauth_client_metadata,
     resolve_oauth_client_info,
 )
+from open_webui.utils.payload import resolve_system_prompt
+from open_webui.utils.redaction import (
+    get_request_redaction_secrets,
+    register_request_redaction_secrets,
+)
 from open_webui.utils.plugin import install_tool_and_function_dependencies
-from open_webui.utils.redis import get_redis_client, get_redis_connection
+from open_webui.utils.redis import get_redis_client
 from open_webui.utils.security_headers import SecurityHeadersMiddleware
 from open_webui.utils.session_pool import get_session
+from open_webui.utils import startup_singleton
 from open_webui.utils.tools import set_terminal_servers, set_tool_servers
 
 if SAFE_MODE:
@@ -1081,6 +314,147 @@ if SAFE_MODE:
 
 logging.basicConfig(stream=sys.stdout, level=GLOBAL_LOG_LEVEL)
 log = logging.getLogger(__name__)
+
+TEMPORARY_MODE_PROFILE_BINDING_TTL_SECONDS = 24 * 60 * 60
+
+
+CONFIG_ATTR_ALIASES = {
+    'API_KEYS_ALLOWED_ENDPOINTS': 'auth.api_keys_allowed_endpoints',
+    'AUTOMATION_MAX_COUNT': 'automations.max_count',
+    'AUTOMATION_MIN_INTERVAL': 'automations.min_interval',
+    'BYPASS_EMBEDDING_AND_RETRIEVAL': 'rag.bypass_embedding_and_retrieval',
+    'BYPASS_WEB_SEARCH_EMBEDDING_AND_RETRIEVAL': 'web.search.bypass_embedding_and_retrieval',
+    'BYPASS_WEB_SEARCH_WEB_LOADER': 'web.search.bypass_web_loader',
+    'CODE_INTERPRETER_ENGINE': 'code_interpreter.engine',
+    'CODE_INTERPRETER_JUPYTER_AUTH': 'code_interpreter.jupyter.auth',
+    'CODE_INTERPRETER_JUPYTER_AUTH_PASSWORD': 'code_interpreter.jupyter.auth_password',
+    'CODE_INTERPRETER_JUPYTER_AUTH_TOKEN': 'code_interpreter.jupyter.auth_token',
+    'CODE_INTERPRETER_JUPYTER_TIMEOUT': 'code_interpreter.jupyter.timeout',
+    'CODE_INTERPRETER_JUPYTER_URL': 'code_interpreter.jupyter.url',
+    'CODE_INTERPRETER_PROMPT_TEMPLATE': 'code_interpreter.prompt_template',
+    'CONTENT_EXTRACTION_ENGINE': 'rag.content_extraction_engine',
+    'DEFAULT_GROUP_ID': 'users.default_group_id',
+    'DEFAULT_MODEL_METADATA': 'models.default_metadata',
+    'DEFAULT_MODEL_PARAMS': 'models.default_params',
+    'DEFAULT_MODELS': 'ui.default_models',
+    'DEFAULT_PINNED_MODELS': 'ui.default_pinned_models',
+    'DEFAULT_PROMPT_SUGGESTIONS': 'ui.prompt_suggestions',
+    'DEFAULT_USER_ROLE': 'users.default_role',
+    'ENABLE_API_KEYS': 'auth.enable_api_keys',
+    'ENABLE_API_KEYS_ENDPOINT_RESTRICTIONS': 'auth.enable_api_keys_endpoint_restrictions',
+    'ENABLE_AUTOMATIONS': 'automations.enable',
+    'ENABLE_BASE_MODELS_CACHE': 'models.base_models_cache',
+    'ENABLE_CALENDAR': 'calendar.enable',
+    'ENABLE_CHANNELS': 'channels.enable',
+    'ENABLE_CODE_EXECUTION': 'code_execution.enable',
+    'ENABLE_CODE_INTERPRETER': 'code_interpreter.enable',
+    'ENABLE_DIRECT_CONNECTIONS': 'direct.enable',
+    'ENABLE_EVALUATION_ARENA_MODELS': 'evaluation.arena.enable',
+    'ENABLE_FOLDERS': 'folders.enable',
+    'ENABLE_GOOGLE_DRIVE_INTEGRATION': 'google_drive.enable',
+    'ENABLE_IMAGE_EDIT': 'images.edit.enable',
+    'ENABLE_IMAGE_GENERATION': 'image_generation.enable',
+    'ENABLE_IMAGE_PROMPT_GENERATION': 'image_generation.prompt.enable',
+    'ENABLE_LOGIN_FORM': 'ui.enable_login_form',
+    'ENABLE_MARKDOWN_HEADER_TEXT_SPLITTER': 'rag.enable_markdown_header_text_splitter',
+    'ENABLE_MEMORIES': 'memories.enable',
+    'ENABLE_MESSAGE_RATING': 'ui.enable_message_rating',
+    'ENABLE_MULTIMODAL_KNOWLEDGE_EVIDENCE': 'rag.enable_multimodal_knowledge_evidence',
+    'ENABLE_NOTES': 'notes.enable',
+    'ENABLE_ONLYOFFICE_PREVIEW': 'onlyoffice.enable_preview',
+    'ENABLE_ONEDRIVE_INTEGRATION': 'onedrive.enable',
+    'ENABLE_RAG_HYBRID_SEARCH': 'rag.enable_hybrid_search',
+    'ENABLE_RAG_HYBRID_SEARCH_ENRICHED_TEXTS': 'rag.enable_hybrid_search_enriched_texts',
+    'ENABLE_SIGNUP': 'ui.enable_signup',
+    'ENABLE_USER_STATUS': 'users.enable_status',
+    'ENABLE_USER_WEBHOOKS': 'ui.enable_user_webhooks',
+    'ENABLE_WEB_LOADER_SSL_VERIFICATION': 'web.loader.ssl_verification',
+    'ENABLE_WEB_SEARCH': 'web.search.enable',
+    'EVALUATION_ARENA_MODELS': 'evaluation.arena.models',
+    'FILE_IMAGE_COMPRESSION_HEIGHT': 'file.image_compression_height',
+    'FILE_IMAGE_COMPRESSION_WIDTH': 'file.image_compression_width',
+    'FILE_MAX_COUNT': 'rag.file.max_count',
+    'FILE_MAX_SIZE': 'rag.file.max_size',
+    'FOLDER_MAX_FILE_COUNT': 'folders.max_file_count',
+    'ENABLE_AGENT_MODE': 'agent.mode.enable',
+    'AGENT_RUNTIME_BASE_URL': 'agent.runtime.base_url',
+    'AGENT_RUNTIME_SERVICE_TOKEN': 'agent.runtime.service_token',
+    'AGENT_RUN_DEFAULT_TIMEOUT_SECONDS': 'agent.run.default_timeout_seconds',
+    'AGENT_RUN_MAX_MODEL_CALLS': 'agent.run.max_model_calls',
+    'AGENT_RUN_MAX_TOOL_CALLS': 'agent.run.max_tool_calls',
+    'AGENT_TEAM_MAX_SUBAGENTS': 'agent.team.max_subagents',
+    'AGENT_SUBAGENT_DEFAULT_BUDGET': 'agent.subagent.default_budget',
+    'HYBRID_BM25_WEIGHT': 'rag.hybrid_bm25_weight',
+    'LAYER_GENERATION_MAX_CHUNK_TOKENS': 'layered_knowledge.internal.max_chunk_tokens',
+    'LAYER_GENERATION_MIN_TAIL_TOKENS': 'layered_knowledge.internal.min_tail_tokens',
+    'LAYER_GENERATION_MODEL': 'layered_knowledge.internal.model',
+    'LAYER_GENERATION_PROMPT_ABSTRACT': 'layered_knowledge.internal.prompt_abstract',
+    'MODEL_ORDER_LIST': 'ui.model_order_list',
+    'NATIVE_ATTACHED_KNOWLEDGE_BYPASS_LEGACY_FILE_RETRIEVAL': 'layered_knowledge.native_attached_knowledge_bypass_legacy_file_retrieval',
+    'ONLYOFFICE_CALLBACK_ALLOWED_HOSTS': 'onlyoffice.callback_allowed_hosts',
+    'ONLYOFFICE_DOCUMENT_SERVER_URL': 'onlyoffice.document_server_url',
+    'ONLYOFFICE_EDIT_CALLBACK_TOKEN_EXPIRES_IN': 'onlyoffice.edit_callback_token_expires_in',
+    'ONLYOFFICE_FILE_TOKEN_EXPIRES_IN': 'onlyoffice.file_token_expires_in',
+    'ONLYOFFICE_JWT_SECRET': 'onlyoffice.jwt_secret',
+    'ONLYOFFICE_PUBLIC_BASE_URL': 'onlyoffice.public_base_url',
+    'OPEN_NOTEBOOK_API_PASSWORD': 'layered_knowledge.open_notebook.api_password',
+    'OPEN_NOTEBOOK_BASE_URL': 'layered_knowledge.open_notebook.base_url',
+    'OPEN_NOTEBOOK_TIMEOUT_SECS': 'layered_knowledge.open_notebook.timeout_secs',
+    'OPEN_NOTEBOOK_TRANSFORMATION_ABSTRACT': 'layered_knowledge.open_notebook.transformations.abstract',
+    'OPEN_NOTEBOOK_TRANSFORMATION_KEY_DATA': 'layered_knowledge.open_notebook.transformations.key_data',
+    'OPEN_NOTEBOOK_TRANSFORMATION_KEY_FINDINGS': 'layered_knowledge.open_notebook.transformations.key_findings',
+    'RAG_FULL_CONTEXT': 'rag.full_context',
+    'RAG_TEMPLATE': 'rag.template',
+    'RELEVANCE_THRESHOLD': 'rag.relevance_threshold',
+    'RESPONSE_WATERMARK': 'ui.watermark',
+    'TASK_MODEL': 'task.model.default',
+    'TASK_MODEL_EXTERNAL': 'task.model.external',
+    'TERMINAL_SERVER_CONNECTIONS': 'terminal_server.connections',
+    'TEXT_SPLITTER': 'rag.text_splitter',
+    'TIKTOKEN_ENCODING_NAME': 'rag.tiktoken_encoding_name',
+    'TOOL_SERVER_CONNECTIONS': 'tool_server.connections',
+    'TOOLS_FUNCTION_CALLING_PROMPT_TEMPLATE': 'task.tools.prompt_template',
+    'TOP_K': 'rag.top_k',
+    'TOP_K_RERANKER': 'rag.top_k_reranker',
+    'USER_PERMISSIONS': 'user.permissions',
+    'WEB_FETCH_MAX_CONTENT_LENGTH': 'web.loader.max_content_length',
+    'WEB_LOADER_CONCURRENT_REQUESTS': 'web.loader.concurrent_requests',
+    'WEB_LOADER_ENGINE': 'web.loader.engine',
+    'WEB_LOADER_TIMEOUT': 'web.loader.timeout',
+    'WEB_SEARCH_CONCURRENT_REQUESTS': 'web.search.concurrent_requests',
+    'WEB_SEARCH_DOMAIN_FILTER_LIST': 'web.search.domain_filter_list',
+    'WEB_SEARCH_ENGINE': 'web.search.engine',
+    'WEB_SEARCH_RESULT_COUNT': 'web.search.result_count',
+    'WEB_SEARCH_TRUST_ENV': 'web.search.trust_env',
+    'WEBHOOK_URL': 'webhook_url',
+    'WEBUI_BANNERS': 'ui.banners',
+    'WEBUI_URL': 'webui.url',
+}
+
+
+class RuntimeConfigCompat(SimpleNamespace):
+    """Read-through compatibility view for legacy app.state.config users."""
+
+    def __init__(self, values: dict):
+        super().__init__()
+        object.__setattr__(self, '_values', values)
+        for attr, key in CONFIG_ATTR_ALIASES.items():
+            if key in values:
+                object.__setattr__(self, attr, values.get(key))
+        for key, value in values.items():
+            attr = key.upper().replace('.', '_').replace('-', '_')
+            if not hasattr(self, attr):
+                object.__setattr__(self, attr, value)
+
+    def __setattr__(self, name: str, value):
+        object.__setattr__(self, name, value)
+        key = CONFIG_ATTR_ALIASES.get(name)
+        if key:
+            self._values[key] = value
+
+
+async def refresh_runtime_config_compat(app: FastAPI):
+    app.state.config = RuntimeConfigCompat(await Config.get_all())
 
 
 class SPAStaticFiles(StaticFiles):
@@ -1096,6 +470,88 @@ class SPAStaticFiles(StaticFiles):
                     return await super().get_response('index.html', scope)
             else:
                 raise ex
+
+
+class CORSStaticFiles(StaticFiles):
+    async def get_response(self, path: str, scope):
+        response = await super().get_response(path, scope)
+        response.headers['Access-Control-Allow-Origin'] = '*'
+        return response
+
+
+def _build_internal_startup_request(app: FastAPI) -> Request:
+    return Request(
+        {
+            'type': 'http',
+            'asgi.version': '3.0',
+            'asgi.spec_version': '2.0',
+            'method': 'GET',
+            'path': '/internal',
+            'query_string': b'',
+            'headers': Headers({}).raw,
+            'client': ('127.0.0.1', 12345),
+            'server': ('127.0.0.1', 80),
+            'scheme': 'http',
+            'app': app,
+        }
+    )
+
+
+async def _run_singleton_startup_tasks(app: FastAPI) -> None:
+    asyncio.create_task(periodic_usage_pool_cleanup())
+    asyncio.create_task(periodic_session_pool_cleanup())
+
+    try:
+        expired_mode_profile_bindings = await ConversationModeProfiles.cleanup_expired_temporary_bindings()
+        if expired_mode_profile_bindings:
+            log.info(
+                'Cleaned up %s expired temporary conversation mode profile bindings',
+                expired_mode_profile_bindings,
+            )
+    except SQLAlchemyError:
+        log.exception('Failed to clean up expired temporary conversation mode profile bindings')
+
+    from open_webui.utils.automations import scheduler_worker_loop
+
+    asyncio.create_task(scheduler_worker_loop(app))
+
+    if await Config.get('models.base_models_cache'):
+        try:
+            await get_all_models(_build_internal_startup_request(app), None)
+        except Exception as e:
+            log.warning(f'Failed to pre-fetch models at startup: {e}')
+
+    # Pre-fetch tool server specs so the first request doesn't pay the latency cost.
+    if len(await Config.get('tool_server.connections', []) or []) > 0:
+        mock_request = _build_internal_startup_request(app)
+
+        log.info('Initializing tool servers...')
+        try:
+            await set_tool_servers(mock_request)
+            log.info(f'Initialized {len(app.state.TOOL_SERVERS)} tool server(s)')
+        except Exception as e:
+            log.warning(f'Failed to initialize tool servers at startup: {e}')
+
+        try:
+            await set_terminal_servers(mock_request)
+            log.info(f'Initialized {len(app.state.TERMINAL_SERVERS)} terminal server(s)')
+        except Exception as e:
+            log.warning(f'Failed to initialize terminal servers at startup: {e}')
+
+
+async def _install_tool_and_function_dependencies_once() -> None:
+    async def install_dependencies() -> None:
+        # This should block startup so functions are not deactivated on first /get_models calls
+        # when the first user lands on the / route.
+        log.info('Installing external dependencies of functions and tools...')
+        await install_tool_and_function_dependencies()
+
+    ran, _ = await startup_singleton.run_startup_once(
+        'tool-function-dependencies',
+        install_dependencies,
+    )
+    if not ran:
+        log.info('External dependencies of functions and tools already installed by another worker; skipping')
 
 
 if LOG_FORMAT != 'json':
@@ -1126,10 +582,24 @@ async def lifespan(app: FastAPI):
     app.state.main_loop = asyncio.get_running_loop()
 
     app.state.instance_id = INSTANCE_ID
+    app.state.refresh_runtime_config = refresh_runtime_config_compat
+    register_cache_invalidation_app(app)
+    install_config_cache_invalidation_hooks()
+    install_model_cache_invalidation_hooks()
     start_logger()
 
     if RESET_CONFIG_ON_START:
         await async_reset_config()
+
+    await import_legacy_config_json()
+    await seed_registered_defaults()
+    await initialize_runtime_config(app)
+    if getattr(app.state.config, 'ENABLE_AGENT_MODE', False) and getattr(
+        app.state.config, 'AGENT_RUNTIME_BASE_URL', ''
+    ):
+        app.state.agent_decision_dispatcher_task = asyncio.create_task(agent_decision_dispatcher_loop(app))
+    await migrate_legacy_webhook_config()
+    await publish_event(app, EVENTS.SYSTEM_STARTUP_STARTED, source='system')
 
     if LICENSE_KEY:
         get_license_data(app, LICENSE_KEY)
@@ -1138,91 +608,37 @@ async def lifespan(app: FastAPI):
     if WEBUI_ADMIN_EMAIL and WEBUI_ADMIN_PASSWORD:
         if await create_admin_user(WEBUI_ADMIN_EMAIL, WEBUI_ADMIN_PASSWORD, WEBUI_ADMIN_NAME):
             # Disable signup since we now have an admin
-            app.state.config.ENABLE_SIGNUP = False
+            await Config.upsert({'ui.enable_signup': False})
 
     if SAFE_MODE:
         await Functions.deactivate_all_functions()
 
-    # This should be blocking (sync) so functions are not deactivated on first /get_models calls
-    # when the first user lands on the / route.
-    log.info('Installing external dependencies of functions and tools...')
-    await install_tool_and_function_dependencies()
+    await _install_tool_and_function_dependencies_once()
 
     app.state.redis = get_redis_client(async_mode=True)
 
     if app.state.redis is not None:
         app.state.redis_task_command_listener = asyncio.create_task(redis_task_command_listener(app))
+        app.state.redis_cache_invalidation_listener = asyncio.create_task(redis_cache_invalidation_listener(app))
 
     if THREAD_POOL_SIZE and THREAD_POOL_SIZE > 0:
         limiter = anyio.to_thread.current_default_thread_limiter()
         limiter.total_tokens = THREAD_POOL_SIZE
 
-    asyncio.create_task(periodic_usage_pool_cleanup())
-    asyncio.create_task(periodic_session_pool_cleanup())
-
-    from open_webui.utils.automations import scheduler_worker_loop
-
-    asyncio.create_task(scheduler_worker_loop(app))
-
-    if app.state.config.ENABLE_BASE_MODELS_CACHE:
-        try:
-            await get_all_models(
-                Request(
-                    # Creating a mock request object to pass to get_all_models
-                    {
-                        'type': 'http',
-                        'asgi.version': '3.0',
-                        'asgi.spec_version': '2.0',
-                        'method': 'GET',
-                        'path': '/internal',
-                        'query_string': b'',
-                        'headers': Headers({}).raw,
-                        'client': ('127.0.0.1', 12345),
-                        'server': ('127.0.0.1', 80),
-                        'scheme': 'http',
-                        'app': app,
-                    }
-                ),
-                None,
-            )
-        except Exception as e:
-            log.warning(f'Failed to pre-fetch models at startup: {e}')
-
-    # Pre-fetch tool server specs so the first request doesn't pay the latency cost
-    if len(app.state.config.TOOL_SERVER_CONNECTIONS) > 0:
-        mock_request = Request(
-            {
-                'type': 'http',
-                'asgi.version': '3.0',
-                'asgi.spec_version': '2.0',
-                'method': 'GET',
-                'path': '/internal',
-                'query_string': b'',
-                'headers': Headers({}).raw,
-                'client': ('127.0.0.1', 12345),
-                'server': ('127.0.0.1', 80),
-                'scheme': 'http',
-                'app': app,
-            }
-        )
-
-        log.info('Initializing tool servers...')
-        try:
-            await set_tool_servers(mock_request)
-            log.info(f'Initialized {len(app.state.TOOL_SERVERS)} tool server(s)')
-        except Exception as e:
-            log.warning(f'Failed to initialize tool servers at startup: {e}')
-
-        try:
-            await set_terminal_servers(mock_request)
-            log.info(f'Initialized {len(app.state.TERMINAL_SERVERS)} terminal server(s)')
-        except Exception as e:
-            log.warning(f'Failed to initialize terminal servers at startup: {e}')
+    startup_singleton_lock = startup_singleton.startup_singleton_lock('lifespan-startup-tasks')
+    if startup_singleton_lock.acquire():
+        app.state.startup_singleton_lock = startup_singleton_lock
+        await _run_singleton_startup_tasks(app)
+    else:
+        log.info('Startup singleton tasks already running in another worker; skipping in this worker')
 
     # Mark application as ready to accept traffic from a startup perspective.
     app.state.startup_complete = True
+    await publish_event(app, EVENTS.SYSTEM_STARTUP_COMPLETED, source='system')
 
     yield
+
+    await publish_event(app, EVENTS.SYSTEM_SHUTDOWN_STARTED, source='system')
 
     # Shutdown: clean up shared resources
     from open_webui.utils.session_pool import close_session
@@ -1231,6 +647,24 @@ async def lifespan(app: FastAPI):
 
     if hasattr(app.state, 'redis_task_command_listener'):
         app.state.redis_task_command_listener.cancel()
+    if hasattr(app.state, 'redis_cache_invalidation_listener'):
+        app.state.redis_cache_invalidation_listener.cancel()
+    if hasattr(app.state, 'agent_decision_dispatcher_task'):
+        await _cancel_and_await_task(app.state.agent_decision_dispatcher_task)
+
+    startup_singleton_lock = getattr(app.state, 'startup_singleton_lock', None)
+    if startup_singleton_lock is not None:
+        startup_singleton_lock.release()
+
+    await publish_event(app, EVENTS.SYSTEM_SHUTDOWN_COMPLETED, source='system')
+
+
+async def _cancel_and_await_task(task: asyncio.Task) -> None:
+    task.cancel()
+    try:
+        await task
+    except asyncio.CancelledError:
+        pass
 
 
 app = FastAPI(
@@ -1253,15 +687,13 @@ oauth_client_manager = OAuthClientManager(app)
 app.state.oauth_client_manager = oauth_client_manager
 
 app.state.instance_id = None
-app.state.config = AppConfig(
-    redis_url=REDIS_URL,
-    redis_cluster=REDIS_CLUSTER,
-    redis_key_prefix=REDIS_KEY_PREFIX,
-)
 app.state.redis = None
+app.state.CACHE_VERSIONS = {}
 
 app.state.WEBUI_NAME = WEBUI_NAME
 app.state.LICENSE_METADATA = None
+app.state.USER_COUNT = None
+app.state.EXTERNAL_PWA_MANIFEST_URL = EXTERNAL_PWA_MANIFEST_URL
 
 
 ########################################
@@ -1283,10 +715,6 @@ if ENABLE_OTEL:
 ########################################
 
 
-app.state.config.ENABLE_OLLAMA_API = ENABLE_OLLAMA_API
-app.state.config.OLLAMA_BASE_URLS = OLLAMA_BASE_URLS
-app.state.config.OLLAMA_API_CONFIGS = OLLAMA_API_CONFIGS
-
 app.state.OLLAMA_MODELS = {}
 
 ########################################
@@ -1295,10 +723,6 @@ app.state.OLLAMA_MODELS = {}
 #
 ########################################
 
-app.state.config.ENABLE_OPENAI_API = ENABLE_OPENAI_API
-app.state.config.OPENAI_API_BASE_URLS = OPENAI_API_BASE_URLS
-app.state.config.OPENAI_API_KEYS = OPENAI_API_KEYS
-app.state.config.OPENAI_API_CONFIGS = OPENAI_API_CONFIGS
 
 app.state.OPENAI_MODELS = {}
 
@@ -1308,7 +732,6 @@ app.state.OPENAI_MODELS = {}
 #
 ########################################
 
-app.state.config.TOOL_SERVER_CONNECTIONS = TOOL_SERVER_CONNECTIONS
 app.state.TOOL_SERVERS = []
 
 ########################################
@@ -1317,7 +740,6 @@ app.state.TOOL_SERVERS = []
 #
 ########################################
 
-app.state.config.TERMINAL_SERVER_CONNECTIONS = TERMINAL_SERVER_CONNECTIONS
 app.state.TERMINAL_SERVERS = []
 
 ########################################
@@ -1326,7 +748,6 @@ app.state.TERMINAL_SERVERS = []
 #
 ########################################
 
-app.state.config.ENABLE_DIRECT_CONNECTIONS = ENABLE_DIRECT_CONNECTIONS
 
 ########################################
 #
@@ -1343,7 +764,6 @@ app.state.SCIM_TOKEN = SCIM_TOKEN
 #
 ########################################
 
-app.state.config.ENABLE_BASE_MODELS_CACHE = ENABLE_BASE_MODELS_CACHE
 app.state.BASE_MODELS = []
 
 ########################################
@@ -1352,359 +772,132 @@ app.state.BASE_MODELS = []
 #
 ########################################
 
-app.state.config.WEBUI_URL = WEBUI_URL
-app.state.config.ENABLE_SIGNUP = ENABLE_SIGNUP
-app.state.config.ENABLE_LOGIN_FORM = ENABLE_LOGIN_FORM
-app.state.config.OAUTH_AUTO_REDIRECT = OAUTH_AUTO_REDIRECT
-app.state.config.ENABLE_PASSWORD_CHANGE_FORM = ENABLE_PASSWORD_CHANGE_FORM
 
-app.state.config.ENABLE_API_KEYS = ENABLE_API_KEYS
-app.state.config.ENABLE_API_KEYS_ENDPOINT_RESTRICTIONS = ENABLE_API_KEYS_ENDPOINT_RESTRICTIONS
-app.state.config.API_KEYS_ALLOWED_ENDPOINTS = API_KEYS_ALLOWED_ENDPOINTS
+async def initialize_runtime_config(app: FastAPI):
+    # Migrate legacy access_control → access_grants on boot.
+    from open_webui.utils.access_control import migrate_access_control
 
-app.state.config.JWT_EXPIRES_IN = JWT_EXPIRES_IN
+    connections = await Config.get('tool_server.connections', []) or []
+    if any('access_control' in c.get('config', {}) for c in connections):
+        for connection in connections:
+            migrate_access_control(connection.get('config', {}))
+        await Config.upsert({'tool_server.connections': connections})
 
-app.state.config.SHOW_ADMIN_DETAILS = SHOW_ADMIN_DETAILS
-app.state.config.ADMIN_EMAIL = ADMIN_EMAIL
+    for tool_server_connection in connections:
+        if tool_server_connection.get('type', 'openapi') == 'mcp':
+            server_id = (tool_server_connection.get('info') or {}).get('id')
+            auth_type = tool_server_connection.get('auth_type', 'none')
 
+            if server_id and auth_type in ('oauth_2.1', 'oauth_2.1_static'):
+                try:
+                    oauth_client_info = resolve_oauth_client_info(tool_server_connection)
+                    oauth_client_info = await recover_static_oauth_client_metadata(
+                        tool_server_connection, oauth_client_info
+                    )
+                    oauth_client_info = apply_connection_oauth_options(tool_server_connection, oauth_client_info)
+                    app.state.oauth_client_manager.add_client(
+                        f'mcp:{server_id}',
+                        OAuthClientInformationFull(**oauth_client_info),
+                    )
+                except Exception as e:
+                    log.error(f'Error adding OAuth client for MCP tool server {server_id}: {e}')
 
-app.state.config.DEFAULT_MODELS = DEFAULT_MODELS
-app.state.config.DEFAULT_PINNED_MODELS = DEFAULT_PINNED_MODELS
-app.state.config.MODEL_ORDER_LIST = MODEL_ORDER_LIST
-app.state.config.DEFAULT_MODEL_METADATA = DEFAULT_MODEL_METADATA
-app.state.config.DEFAULT_MODEL_PARAMS = DEFAULT_MODEL_PARAMS
+    arena_models = await Config.get('evaluation.arena.models', []) or []
+    if any('access_control' in m.get('meta', {}) for m in arena_models):
+        for model in arena_models:
+            migrate_access_control(model.get('meta', {}))
+        await Config.upsert({'evaluation.arena.models': arena_models})
 
+    app.state.EMBEDDING_FUNCTION = None
+    app.state.RERANKING_FUNCTION = None
+    app.state.ef = None
+    app.state.rf = None
+    app.state.YOUTUBE_LOADER_TRANSLATION = None
 
-app.state.config.DEFAULT_PROMPT_SUGGESTIONS = DEFAULT_PROMPT_SUGGESTIONS
-app.state.config.DEFAULT_USER_ROLE = DEFAULT_USER_ROLE
-app.state.config.DEFAULT_GROUP_ID = DEFAULT_GROUP_ID
-
-app.state.config.PENDING_USER_OVERLAY_CONTENT = PENDING_USER_OVERLAY_CONTENT
-app.state.config.PENDING_USER_OVERLAY_TITLE = PENDING_USER_OVERLAY_TITLE
-
-app.state.config.RESPONSE_WATERMARK = RESPONSE_WATERMARK
-app.state.config.ANNOUNCEMENT_MODAL_ENABLED = ANNOUNCEMENT_MODAL_ENABLED
-app.state.config.ANNOUNCEMENT_MODAL_KEY = ANNOUNCEMENT_MODAL_KEY
-app.state.config.ANNOUNCEMENT_MODAL_TITLE = ANNOUNCEMENT_MODAL_TITLE
-app.state.config.ANNOUNCEMENT_MODAL_CONTENT = ANNOUNCEMENT_MODAL_CONTENT
-
-app.state.config.USER_PERMISSIONS = USER_PERMISSIONS
-app.state.config.WEBHOOK_URL = WEBHOOK_URL
-app.state.config.BANNERS = WEBUI_BANNERS
-
-
-app.state.config.ENABLE_FOLDERS = ENABLE_FOLDERS
-app.state.config.FOLDER_MAX_FILE_COUNT = FOLDER_MAX_FILE_COUNT
-app.state.config.ENABLE_AUTOMATIONS = ENABLE_AUTOMATIONS
-app.state.config.AUTOMATION_MAX_COUNT = AUTOMATION_MAX_COUNT
-app.state.config.AUTOMATION_MIN_INTERVAL = AUTOMATION_MIN_INTERVAL
-app.state.config.ENABLE_CHANNELS = ENABLE_CHANNELS
-app.state.config.ENABLE_CALENDAR = ENABLE_CALENDAR
-app.state.config.ENABLE_NOTES = ENABLE_NOTES
-app.state.config.ENABLE_COMMUNITY_SHARING = ENABLE_COMMUNITY_SHARING
-app.state.config.ENABLE_MESSAGE_RATING = ENABLE_MESSAGE_RATING
-app.state.config.ENABLE_USER_WEBHOOKS = ENABLE_USER_WEBHOOKS
-app.state.config.ENABLE_USER_STATUS = ENABLE_USER_STATUS
-
-app.state.config.ENABLE_EVALUATION_ARENA_MODELS = ENABLE_EVALUATION_ARENA_MODELS
-app.state.config.EVALUATION_ARENA_MODELS = EVALUATION_ARENA_MODELS
-
-# Migrate legacy access_control → access_grants on boot
-from open_webui.utils.access_control import has_permission, migrate_access_control
-
-connections = app.state.config.TOOL_SERVER_CONNECTIONS
-if any('access_control' in c.get('config', {}) for c in connections):
-    for connection in connections:
-        migrate_access_control(connection.get('config', {}))
-    app.state.config.TOOL_SERVER_CONNECTIONS = connections
-
-arena_models = app.state.config.EVALUATION_ARENA_MODELS
-if any('access_control' in m.get('meta', {}) for m in arena_models):
-    for model in arena_models:
-        migrate_access_control(model.get('meta', {}))
-    app.state.config.EVALUATION_ARENA_MODELS = arena_models
-
-app.state.config.OAUTH_SUB_CLAIM = OAUTH_SUB_CLAIM
-app.state.config.OAUTH_USERNAME_CLAIM = OAUTH_USERNAME_CLAIM
-app.state.config.OAUTH_PICTURE_CLAIM = OAUTH_PICTURE_CLAIM
-app.state.config.OAUTH_EMAIL_CLAIM = OAUTH_EMAIL_CLAIM
-
-app.state.config.ENABLE_OAUTH_ROLE_MANAGEMENT = ENABLE_OAUTH_ROLE_MANAGEMENT
-app.state.config.OAUTH_ROLES_CLAIM = OAUTH_ROLES_CLAIM
-app.state.config.OAUTH_ALLOWED_ROLES = OAUTH_ALLOWED_ROLES
-app.state.config.OAUTH_ADMIN_ROLES = OAUTH_ADMIN_ROLES
-
-app.state.config.ENABLE_LDAP = ENABLE_LDAP
-app.state.config.LDAP_SERVER_LABEL = LDAP_SERVER_LABEL
-app.state.config.LDAP_SERVER_HOST = LDAP_SERVER_HOST
-app.state.config.LDAP_SERVER_PORT = LDAP_SERVER_PORT
-app.state.config.LDAP_ATTRIBUTE_FOR_MAIL = LDAP_ATTRIBUTE_FOR_MAIL
-app.state.config.LDAP_ATTRIBUTE_FOR_USERNAME = LDAP_ATTRIBUTE_FOR_USERNAME
-app.state.config.LDAP_APP_DN = LDAP_APP_DN
-app.state.config.LDAP_APP_PASSWORD = LDAP_APP_PASSWORD
-app.state.config.LDAP_SEARCH_BASE = LDAP_SEARCH_BASE
-app.state.config.LDAP_SEARCH_FILTERS = LDAP_SEARCH_FILTERS
-app.state.config.LDAP_USE_TLS = LDAP_USE_TLS
-app.state.config.LDAP_CA_CERT_FILE = LDAP_CA_CERT_FILE
-app.state.config.LDAP_VALIDATE_CERT = LDAP_VALIDATE_CERT
-app.state.config.LDAP_CIPHERS = LDAP_CIPHERS
-
-# For LDAP Group Management
-app.state.config.ENABLE_LDAP_GROUP_MANAGEMENT = ENABLE_LDAP_GROUP_MANAGEMENT
-app.state.config.ENABLE_LDAP_GROUP_CREATION = ENABLE_LDAP_GROUP_CREATION
-app.state.config.LDAP_ATTRIBUTE_FOR_GROUPS = LDAP_ATTRIBUTE_FOR_GROUPS
-
-
-app.state.AUTH_TRUSTED_EMAIL_HEADER = WEBUI_AUTH_TRUSTED_EMAIL_HEADER
-app.state.AUTH_TRUSTED_NAME_HEADER = WEBUI_AUTH_TRUSTED_NAME_HEADER
-app.state.WEBUI_AUTH_SIGNOUT_REDIRECT_URL = WEBUI_AUTH_SIGNOUT_REDIRECT_URL
-app.state.EXTERNAL_PWA_MANIFEST_URL = EXTERNAL_PWA_MANIFEST_URL
-
-app.state.USER_COUNT = None
-
-app.state.TOOLS = {}
-app.state.TOOL_CONTENTS = {}
-
-app.state.FUNCTIONS = {}
-app.state.FUNCTION_CONTENTS = {}
-
-########################################
-#
-# RETRIEVAL
-#
-########################################
-
-
-app.state.config.TOP_K = RAG_TOP_K
-app.state.config.TOP_K_RERANKER = RAG_TOP_K_RERANKER
-app.state.config.RELEVANCE_THRESHOLD = RAG_RELEVANCE_THRESHOLD
-app.state.config.HYBRID_BM25_WEIGHT = RAG_HYBRID_BM25_WEIGHT
-
-
-app.state.config.ALLOWED_FILE_EXTENSIONS = RAG_ALLOWED_FILE_EXTENSIONS
-app.state.config.FILE_MAX_SIZE = RAG_FILE_MAX_SIZE
-app.state.config.FILE_MAX_COUNT = RAG_FILE_MAX_COUNT
-app.state.config.FILE_IMAGE_COMPRESSION_WIDTH = FILE_IMAGE_COMPRESSION_WIDTH
-app.state.config.FILE_IMAGE_COMPRESSION_HEIGHT = FILE_IMAGE_COMPRESSION_HEIGHT
-
-
-app.state.config.RAG_FULL_CONTEXT = RAG_FULL_CONTEXT
-app.state.config.BYPASS_EMBEDDING_AND_RETRIEVAL = BYPASS_EMBEDDING_AND_RETRIEVAL
-app.state.config.ENABLE_RAG_HYBRID_SEARCH = ENABLE_RAG_HYBRID_SEARCH
-app.state.config.ENABLE_RAG_HYBRID_SEARCH_ENRICHED_TEXTS = ENABLE_RAG_HYBRID_SEARCH_ENRICHED_TEXTS
-app.state.config.NATIVE_ATTACHED_KNOWLEDGE_BYPASS_LEGACY_FILE_RETRIEVAL = (
-    NATIVE_ATTACHED_KNOWLEDGE_BYPASS_LEGACY_FILE_RETRIEVAL
-)
-app.state.config.ENABLE_WEB_LOADER_SSL_VERIFICATION = ENABLE_WEB_LOADER_SSL_VERIFICATION
-
-app.state.config.CONTENT_EXTRACTION_ENGINE = CONTENT_EXTRACTION_ENGINE
-app.state.config.DATALAB_MARKER_API_KEY = DATALAB_MARKER_API_KEY
-app.state.config.DATALAB_MARKER_API_BASE_URL = DATALAB_MARKER_API_BASE_URL
-app.state.config.DATALAB_MARKER_ADDITIONAL_CONFIG = DATALAB_MARKER_ADDITIONAL_CONFIG
-app.state.config.DATALAB_MARKER_SKIP_CACHE = DATALAB_MARKER_SKIP_CACHE
-app.state.config.DATALAB_MARKER_FORCE_OCR = DATALAB_MARKER_FORCE_OCR
-app.state.config.DATALAB_MARKER_PAGINATE = DATALAB_MARKER_PAGINATE
-app.state.config.DATALAB_MARKER_STRIP_EXISTING_OCR = DATALAB_MARKER_STRIP_EXISTING_OCR
-app.state.config.DATALAB_MARKER_DISABLE_IMAGE_EXTRACTION = DATALAB_MARKER_DISABLE_IMAGE_EXTRACTION
-app.state.config.DATALAB_MARKER_FORMAT_LINES = DATALAB_MARKER_FORMAT_LINES
-app.state.config.DATALAB_MARKER_USE_LLM = DATALAB_MARKER_USE_LLM
-app.state.config.DATALAB_MARKER_OUTPUT_FORMAT = DATALAB_MARKER_OUTPUT_FORMAT
-app.state.config.EXTERNAL_DOCUMENT_LOADER_URL = EXTERNAL_DOCUMENT_LOADER_URL
-app.state.config.EXTERNAL_DOCUMENT_LOADER_API_KEY = EXTERNAL_DOCUMENT_LOADER_API_KEY
-app.state.config.TIKA_SERVER_URL = TIKA_SERVER_URL
-app.state.config.DOCLING_SERVER_URL = DOCLING_SERVER_URL
-app.state.config.DOCLING_API_KEY = DOCLING_API_KEY
-app.state.config.DOCLING_PARAMS = DOCLING_PARAMS
-app.state.config.DOCUMENT_INTELLIGENCE_ENDPOINT = DOCUMENT_INTELLIGENCE_ENDPOINT
-app.state.config.DOCUMENT_INTELLIGENCE_KEY = DOCUMENT_INTELLIGENCE_KEY
-app.state.config.DOCUMENT_INTELLIGENCE_MODEL = DOCUMENT_INTELLIGENCE_MODEL
-app.state.config.MISTRAL_OCR_API_BASE_URL = MISTRAL_OCR_API_BASE_URL
-app.state.config.MISTRAL_OCR_API_KEY = MISTRAL_OCR_API_KEY
-app.state.config.PADDLEOCR_VL_BASE_URL = PADDLEOCR_VL_BASE_URL
-app.state.config.PADDLEOCR_VL_TOKEN = PADDLEOCR_VL_TOKEN
-app.state.config.MINERU_API_MODE = MINERU_API_MODE
-app.state.config.MINERU_API_URL = MINERU_API_URL
-app.state.config.MINERU_API_KEY = MINERU_API_KEY
-app.state.config.MINERU_API_TIMEOUT = MINERU_API_TIMEOUT
-app.state.config.MINERU_PARAMS = MINERU_PARAMS
-app.state.config.MINERU_FILE_EXTENSIONS = MINERU_FILE_EXTENSIONS
-
-app.state.config.TEXT_SPLITTER = RAG_TEXT_SPLITTER
-app.state.config.ENABLE_MARKDOWN_HEADER_TEXT_SPLITTER = ENABLE_MARKDOWN_HEADER_TEXT_SPLITTER
-
-app.state.config.TIKTOKEN_ENCODING_NAME = TIKTOKEN_ENCODING_NAME
-
-app.state.config.CHUNK_SIZE = CHUNK_SIZE
-app.state.config.CHUNK_MIN_SIZE_TARGET = CHUNK_MIN_SIZE_TARGET
-app.state.config.CHUNK_OVERLAP = CHUNK_OVERLAP
-
-
-app.state.config.RAG_EMBEDDING_ENGINE = RAG_EMBEDDING_ENGINE
-app.state.config.RAG_EMBEDDING_MODEL = RAG_EMBEDDING_MODEL
-app.state.config.RAG_EMBEDDING_BATCH_SIZE = RAG_EMBEDDING_BATCH_SIZE
-app.state.config.ENABLE_ASYNC_EMBEDDING = ENABLE_ASYNC_EMBEDDING
-app.state.config.RAG_EMBEDDING_CONCURRENT_REQUESTS = RAG_EMBEDDING_CONCURRENT_REQUESTS
-
-app.state.config.RAG_RERANKING_ENGINE = RAG_RERANKING_ENGINE
-app.state.config.RAG_RERANKING_MODEL = RAG_RERANKING_MODEL
-app.state.config.RAG_EXTERNAL_RERANKER_URL = RAG_EXTERNAL_RERANKER_URL
-app.state.config.RAG_EXTERNAL_RERANKER_API_KEY = RAG_EXTERNAL_RERANKER_API_KEY
-app.state.config.RAG_EXTERNAL_RERANKER_TIMEOUT = RAG_EXTERNAL_RERANKER_TIMEOUT
-app.state.config.RAG_RERANKING_BATCH_SIZE = RAG_RERANKING_BATCH_SIZE
-
-app.state.config.RAG_TEMPLATE = RAG_TEMPLATE
-
-app.state.config.RAG_OPENAI_API_BASE_URL = RAG_OPENAI_API_BASE_URL
-app.state.config.RAG_OPENAI_API_KEY = RAG_OPENAI_API_KEY
-
-app.state.config.RAG_AZURE_OPENAI_BASE_URL = RAG_AZURE_OPENAI_BASE_URL
-app.state.config.RAG_AZURE_OPENAI_API_KEY = RAG_AZURE_OPENAI_API_KEY
-app.state.config.RAG_AZURE_OPENAI_API_VERSION = RAG_AZURE_OPENAI_API_VERSION
-
-app.state.config.RAG_OLLAMA_BASE_URL = RAG_OLLAMA_BASE_URL
-app.state.config.RAG_OLLAMA_API_KEY = RAG_OLLAMA_API_KEY
-
-app.state.config.PDF_EXTRACT_IMAGES = PDF_EXTRACT_IMAGES
-app.state.config.PDF_LOADER_MODE = PDF_LOADER_MODE
-
-app.state.config.YOUTUBE_LOADER_LANGUAGE = YOUTUBE_LOADER_LANGUAGE
-app.state.config.YOUTUBE_LOADER_PROXY_URL = YOUTUBE_LOADER_PROXY_URL
-
-
-app.state.config.ENABLE_WEB_SEARCH = ENABLE_WEB_SEARCH
-app.state.config.WEB_SEARCH_ENGINE = WEB_SEARCH_ENGINE
-app.state.config.WEB_SEARCH_DOMAIN_FILTER_LIST = WEB_SEARCH_DOMAIN_FILTER_LIST
-app.state.config.WEB_SEARCH_RESULT_COUNT = WEB_SEARCH_RESULT_COUNT
-app.state.config.WEB_SEARCH_CONCURRENT_REQUESTS = WEB_SEARCH_CONCURRENT_REQUESTS
-app.state.config.WEB_FETCH_MAX_CONTENT_LENGTH = WEB_FETCH_MAX_CONTENT_LENGTH
-
-app.state.config.WEB_LOADER_ENGINE = WEB_LOADER_ENGINE
-app.state.config.WEB_LOADER_CONCURRENT_REQUESTS = WEB_LOADER_CONCURRENT_REQUESTS
-app.state.config.WEB_LOADER_TIMEOUT = WEB_LOADER_TIMEOUT
-
-app.state.config.WEB_SEARCH_TRUST_ENV = WEB_SEARCH_TRUST_ENV
-app.state.config.BYPASS_WEB_SEARCH_EMBEDDING_AND_RETRIEVAL = BYPASS_WEB_SEARCH_EMBEDDING_AND_RETRIEVAL
-app.state.config.BYPASS_WEB_SEARCH_WEB_LOADER = BYPASS_WEB_SEARCH_WEB_LOADER
-
-app.state.config.ENABLE_GOOGLE_DRIVE_INTEGRATION = ENABLE_GOOGLE_DRIVE_INTEGRATION
-app.state.config.ENABLE_ONEDRIVE_INTEGRATION = ENABLE_ONEDRIVE_INTEGRATION
-
-app.state.config.OLLAMA_CLOUD_WEB_SEARCH_API_KEY = OLLAMA_CLOUD_WEB_SEARCH_API_KEY
-app.state.config.SEARXNG_QUERY_URL = SEARXNG_QUERY_URL
-app.state.config.SEARXNG_LANGUAGE = SEARXNG_LANGUAGE
-app.state.config.YACY_QUERY_URL = YACY_QUERY_URL
-app.state.config.YACY_USERNAME = YACY_USERNAME
-app.state.config.YACY_PASSWORD = YACY_PASSWORD
-app.state.config.GOOGLE_PSE_API_KEY = GOOGLE_PSE_API_KEY
-app.state.config.GOOGLE_PSE_ENGINE_ID = GOOGLE_PSE_ENGINE_ID
-app.state.config.BRAVE_SEARCH_API_KEY = BRAVE_SEARCH_API_KEY
-app.state.config.BRAVE_SEARCH_CONTEXT_TOKENS = BRAVE_SEARCH_CONTEXT_TOKENS
-app.state.config.KAGI_SEARCH_API_KEY = KAGI_SEARCH_API_KEY
-app.state.config.MOJEEK_SEARCH_API_KEY = MOJEEK_SEARCH_API_KEY
-app.state.config.BOCHA_SEARCH_API_KEY = BOCHA_SEARCH_API_KEY
-app.state.config.SERPSTACK_API_KEY = SERPSTACK_API_KEY
-app.state.config.SERPSTACK_HTTPS = SERPSTACK_HTTPS
-app.state.config.SERPER_API_KEY = SERPER_API_KEY
-app.state.config.SERPLY_API_KEY = SERPLY_API_KEY
-app.state.config.DDGS_BACKEND = DDGS_BACKEND
-app.state.config.TAVILY_API_KEY = TAVILY_API_KEY
-app.state.config.SEARCHAPI_API_KEY = SEARCHAPI_API_KEY
-app.state.config.SEARCHAPI_ENGINE = SEARCHAPI_ENGINE
-app.state.config.SERPAPI_API_KEY = SERPAPI_API_KEY
-app.state.config.SERPAPI_ENGINE = SERPAPI_ENGINE
-app.state.config.JINA_API_KEY = JINA_API_KEY
-app.state.config.JINA_API_BASE_URL = JINA_API_BASE_URL
-app.state.config.BING_SEARCH_V7_ENDPOINT = BING_SEARCH_V7_ENDPOINT
-app.state.config.BING_SEARCH_V7_SUBSCRIPTION_KEY = BING_SEARCH_V7_SUBSCRIPTION_KEY
-app.state.config.EXA_API_KEY = EXA_API_KEY
-app.state.config.PERPLEXITY_API_KEY = PERPLEXITY_API_KEY
-app.state.config.PERPLEXITY_MODEL = PERPLEXITY_MODEL
-app.state.config.PERPLEXITY_SEARCH_CONTEXT_USAGE = PERPLEXITY_SEARCH_CONTEXT_USAGE
-app.state.config.PERPLEXITY_SEARCH_API_URL = PERPLEXITY_SEARCH_API_URL
-app.state.config.SOUGOU_API_SID = SOUGOU_API_SID
-app.state.config.SOUGOU_API_SK = SOUGOU_API_SK
-app.state.config.EXTERNAL_WEB_SEARCH_URL = EXTERNAL_WEB_SEARCH_URL
-app.state.config.EXTERNAL_WEB_SEARCH_API_KEY = EXTERNAL_WEB_SEARCH_API_KEY
-app.state.config.EXTERNAL_WEB_LOADER_URL = EXTERNAL_WEB_LOADER_URL
-app.state.config.EXTERNAL_WEB_LOADER_API_KEY = EXTERNAL_WEB_LOADER_API_KEY
-app.state.config.YANDEX_WEB_SEARCH_URL = YANDEX_WEB_SEARCH_URL
-app.state.config.YANDEX_WEB_SEARCH_API_KEY = YANDEX_WEB_SEARCH_API_KEY
-app.state.config.YANDEX_WEB_SEARCH_CONFIG = YANDEX_WEB_SEARCH_CONFIG
-app.state.config.YOUCOM_API_KEY = YOUCOM_API_KEY
-app.state.config.LINKUP_API_KEY = LINKUP_API_KEY
-app.state.config.LINKUP_SEARCH_PARAMS = LINKUP_SEARCH_PARAMS
-
-
-app.state.config.PLAYWRIGHT_WS_URL = PLAYWRIGHT_WS_URL
-app.state.config.PLAYWRIGHT_TIMEOUT = PLAYWRIGHT_TIMEOUT
-app.state.config.FIRECRAWL_API_BASE_URL = FIRECRAWL_API_BASE_URL
-app.state.config.FIRECRAWL_API_KEY = FIRECRAWL_API_KEY
-app.state.config.FIRECRAWL_TIMEOUT = FIRECRAWL_TIMEOUT
-app.state.config.TAVILY_EXTRACT_DEPTH = TAVILY_EXTRACT_DEPTH
-
-app.state.EMBEDDING_FUNCTION = None
-app.state.RERANKING_FUNCTION = None
-app.state.ef = None
-app.state.rf = None
-
-app.state.YOUTUBE_LOADER_TRANSLATION = None
-
-
-try:
-    app.state.ef = get_ef(app.state.config.RAG_EMBEDDING_ENGINE, app.state.config.RAG_EMBEDDING_MODEL)
-    if app.state.config.ENABLE_RAG_HYBRID_SEARCH and not app.state.config.BYPASS_EMBEDDING_AND_RETRIEVAL:
-        app.state.rf = get_rf(
-            app.state.config.RAG_RERANKING_ENGINE,
-            app.state.config.RAG_RERANKING_MODEL,
-            app.state.config.RAG_EXTERNAL_RERANKER_URL,
-            app.state.config.RAG_EXTERNAL_RERANKER_API_KEY,
-            app.state.config.RAG_EXTERNAL_RERANKER_TIMEOUT,
+    try:
+        rag_config = await Config.get_many(
+            'rag.embedding_engine',
+            'rag.embedding_model',
+            'rag.enable_hybrid_search',
+            'rag.bypass_embedding_and_retrieval',
+            'rag.reranking_engine',
+            'rag.reranking_model',
+            'rag.external_reranker_url',
+            'rag.external_reranker_api_key',
+            'rag.external_reranker_timeout',
         )
-    else:
+        app.state.ef = get_ef(rag_config.get('rag.embedding_engine'), rag_config.get('rag.embedding_model'))
+        if rag_config.get('rag.enable_hybrid_search') and not rag_config.get('rag.bypass_embedding_and_retrieval'):
+            app.state.rf = get_rf(
+                rag_config.get('rag.reranking_engine'),
+                rag_config.get('rag.reranking_model'),
+                rag_config.get('rag.external_reranker_url'),
+                rag_config.get('rag.external_reranker_api_key'),
+                rag_config.get('rag.external_reranker_timeout'),
+            )
+        else:
+            app.state.rf = None
+    except Exception as e:
+        log.error(f'Error updating models: {e}')
         app.state.rf = None
-except Exception as e:
-    log.error(f'Error updating models: {e}')
-    pass
 
+    rag_config = await Config.get_many(
+        'rag.embedding_engine',
+        'rag.embedding_model',
+        'rag.openai.api_base_url',
+        'rag.ollama.base_url',
+        'rag.azure_openai.base_url',
+        'rag.openai.api_key',
+        'rag.ollama.api_key',
+        'rag.azure_openai.api_key',
+        'rag.embedding_batch_size',
+        'rag.azure_openai.api_version',
+        'rag.enable_async_embedding',
+        'rag.embedding_concurrent_requests',
+        'rag.reranking_engine',
+        'rag.reranking_model',
+        'rag.reranking_batch_size',
+    )
+    embedding_engine = rag_config.get('rag.embedding_engine')
+    app.state.EMBEDDING_FUNCTION = get_embedding_function(
+        embedding_engine,
+        rag_config.get('rag.embedding_model'),
+        embedding_function=app.state.ef,
+        url=(
+            rag_config.get('rag.openai.api_base_url')
+            if embedding_engine == 'openai'
+            else (
+                rag_config.get('rag.ollama.base_url')
+                if embedding_engine == 'ollama'
+                else rag_config.get('rag.azure_openai.base_url')
+            )
+        ),
+        key=(
+            rag_config.get('rag.openai.api_key')
+            if embedding_engine == 'openai'
+            else (
+                rag_config.get('rag.ollama.api_key')
+                if embedding_engine == 'ollama'
+                else rag_config.get('rag.azure_openai.api_key')
+            )
+        ),
+        embedding_batch_size=rag_config.get('rag.embedding_batch_size'),
+        azure_api_version=(
+            rag_config.get('rag.azure_openai.api_version') if embedding_engine == 'azure_openai' else None
+        ),
+        enable_async=rag_config.get('rag.enable_async_embedding'),
+        concurrent_requests=rag_config.get('rag.embedding_concurrent_requests'),
+    )
 
-app.state.EMBEDDING_FUNCTION = get_embedding_function(
-    app.state.config.RAG_EMBEDDING_ENGINE,
-    app.state.config.RAG_EMBEDDING_MODEL,
-    embedding_function=app.state.ef,
-    url=(
-        app.state.config.RAG_OPENAI_API_BASE_URL
-        if app.state.config.RAG_EMBEDDING_ENGINE == 'openai'
-        else (
-            app.state.config.RAG_OLLAMA_BASE_URL
-            if app.state.config.RAG_EMBEDDING_ENGINE == 'ollama'
-            else app.state.config.RAG_AZURE_OPENAI_BASE_URL
-        )
-    ),
-    key=(
-        app.state.config.RAG_OPENAI_API_KEY
-        if app.state.config.RAG_EMBEDDING_ENGINE == 'openai'
-        else (
-            app.state.config.RAG_OLLAMA_API_KEY
-            if app.state.config.RAG_EMBEDDING_ENGINE == 'ollama'
-            else app.state.config.RAG_AZURE_OPENAI_API_KEY
-        )
-    ),
-    embedding_batch_size=app.state.config.RAG_EMBEDDING_BATCH_SIZE,
-    azure_api_version=(
-        app.state.config.RAG_AZURE_OPENAI_API_VERSION
-        if app.state.config.RAG_EMBEDDING_ENGINE == 'azure_openai'
-        else None
-    ),
-    enable_async=app.state.config.ENABLE_ASYNC_EMBEDDING,
-    concurrent_requests=app.state.config.RAG_EMBEDDING_CONCURRENT_REQUESTS,
-)
+    app.state.RERANKING_FUNCTION = get_reranking_function(
+        rag_config.get('rag.reranking_engine'),
+        rag_config.get('rag.reranking_model'),
+        reranking_function=app.state.rf,
+        reranking_batch_size=rag_config.get('rag.reranking_batch_size'),
+    )
 
-app.state.RERANKING_FUNCTION = get_reranking_function(
-    app.state.config.RAG_RERANKING_ENGINE,
-    app.state.config.RAG_RERANKING_MODEL,
-    reranking_function=app.state.rf,
-    reranking_batch_size=app.state.config.RAG_RERANKING_BATCH_SIZE,
-)
+    await refresh_runtime_config_compat(app)
+
 
 ########################################
 #
@@ -1712,35 +905,6 @@ app.state.RERANKING_FUNCTION = get_reranking_function(
 #
 ########################################
 
-app.state.config.ENABLE_CODE_EXECUTION = ENABLE_CODE_EXECUTION
-app.state.config.CODE_EXECUTION_ENGINE = CODE_EXECUTION_ENGINE
-app.state.config.CODE_EXECUTION_JUPYTER_URL = CODE_EXECUTION_JUPYTER_URL
-app.state.config.CODE_EXECUTION_JUPYTER_AUTH = CODE_EXECUTION_JUPYTER_AUTH
-app.state.config.CODE_EXECUTION_JUPYTER_AUTH_TOKEN = CODE_EXECUTION_JUPYTER_AUTH_TOKEN
-app.state.config.CODE_EXECUTION_JUPYTER_AUTH_PASSWORD = CODE_EXECUTION_JUPYTER_AUTH_PASSWORD
-app.state.config.CODE_EXECUTION_JUPYTER_TIMEOUT = CODE_EXECUTION_JUPYTER_TIMEOUT
-
-app.state.config.ENABLE_CODE_INTERPRETER = ENABLE_CODE_INTERPRETER
-app.state.config.CODE_INTERPRETER_ENGINE = CODE_INTERPRETER_ENGINE
-app.state.config.CODE_INTERPRETER_PROMPT_TEMPLATE = CODE_INTERPRETER_PROMPT_TEMPLATE
-app.state.config.LAYER_GENERATION_MODEL = LAYER_GENERATION_MODEL
-app.state.config.LAYER_GENERATION_PROMPT_ABSTRACT = LAYER_GENERATION_PROMPT_ABSTRACT
-app.state.config.LAYER_GENERATION_MAX_CHUNK_TOKENS = LAYER_GENERATION_MAX_CHUNK_TOKENS
-app.state.config.LAYER_GENERATION_MIN_TAIL_TOKENS = LAYER_GENERATION_MIN_TAIL_TOKENS
-app.state.config.OPEN_NOTEBOOK_BASE_URL = OPEN_NOTEBOOK_BASE_URL
-app.state.config.OPEN_NOTEBOOK_API_PASSWORD = OPEN_NOTEBOOK_API_PASSWORD
-app.state.config.OPEN_NOTEBOOK_TIMEOUT_SECS = OPEN_NOTEBOOK_TIMEOUT_SECS
-app.state.config.OPEN_NOTEBOOK_TRANSFORMATION_ABSTRACT = OPEN_NOTEBOOK_TRANSFORMATION_ABSTRACT
-app.state.config.OPEN_NOTEBOOK_TRANSFORMATION_KEY_FINDINGS = (
-    OPEN_NOTEBOOK_TRANSFORMATION_KEY_FINDINGS
-)
-app.state.config.OPEN_NOTEBOOK_TRANSFORMATION_KEY_DATA = OPEN_NOTEBOOK_TRANSFORMATION_KEY_DATA
-
-app.state.config.CODE_INTERPRETER_JUPYTER_URL = CODE_INTERPRETER_JUPYTER_URL
-app.state.config.CODE_INTERPRETER_JUPYTER_AUTH = CODE_INTERPRETER_JUPYTER_AUTH
-app.state.config.CODE_INTERPRETER_JUPYTER_AUTH_TOKEN = CODE_INTERPRETER_JUPYTER_AUTH_TOKEN
-app.state.config.CODE_INTERPRETER_JUPYTER_AUTH_PASSWORD = CODE_INTERPRETER_JUPYTER_AUTH_PASSWORD
-app.state.config.CODE_INTERPRETER_JUPYTER_TIMEOUT = CODE_INTERPRETER_JUPYTER_TIMEOUT
 
 ########################################
 #
@@ -1748,95 +912,12 @@ app.state.config.CODE_INTERPRETER_JUPYTER_TIMEOUT = CODE_INTERPRETER_JUPYTER_TIM
 #
 ########################################
 
-app.state.config.IMAGE_GENERATION_ENGINE = IMAGE_GENERATION_ENGINE
-app.state.config.ENABLE_IMAGE_GENERATION = ENABLE_IMAGE_GENERATION
-app.state.config.ENABLE_IMAGE_PROMPT_GENERATION = ENABLE_IMAGE_PROMPT_GENERATION
-app.state.config.ENABLE_MEMORIES = ENABLE_MEMORIES
-
-app.state.config.IMAGE_GENERATION_MODEL = IMAGE_GENERATION_MODEL
-app.state.config.IMAGE_SIZE = IMAGE_SIZE
-app.state.config.IMAGE_STEPS = IMAGE_STEPS
-
-app.state.config.IMAGES_OPENAI_API_BASE_URL = IMAGES_OPENAI_API_BASE_URL
-app.state.config.IMAGES_OPENAI_API_VERSION = IMAGES_OPENAI_API_VERSION
-app.state.config.IMAGES_OPENAI_API_KEY = IMAGES_OPENAI_API_KEY
-app.state.config.IMAGES_OPENAI_API_PARAMS = IMAGES_OPENAI_API_PARAMS
-
-app.state.config.IMAGES_GEMINI_API_BASE_URL = IMAGES_GEMINI_API_BASE_URL
-app.state.config.IMAGES_GEMINI_API_KEY = IMAGES_GEMINI_API_KEY
-app.state.config.IMAGES_GEMINI_ENDPOINT_METHOD = IMAGES_GEMINI_ENDPOINT_METHOD
-
-app.state.config.AUTOMATIC1111_BASE_URL = AUTOMATIC1111_BASE_URL
-app.state.config.AUTOMATIC1111_API_AUTH = AUTOMATIC1111_API_AUTH
-app.state.config.AUTOMATIC1111_PARAMS = AUTOMATIC1111_PARAMS
-
-app.state.config.COMFYUI_BASE_URL = COMFYUI_BASE_URL
-app.state.config.COMFYUI_API_KEY = COMFYUI_API_KEY
-app.state.config.COMFYUI_WORKFLOW = COMFYUI_WORKFLOW
-app.state.config.COMFYUI_WORKFLOW_NODES = COMFYUI_WORKFLOW_NODES
-
-
-app.state.config.ENABLE_IMAGE_EDIT = ENABLE_IMAGE_EDIT
-app.state.config.IMAGE_EDIT_ENGINE = IMAGE_EDIT_ENGINE
-app.state.config.IMAGE_EDIT_MODEL = IMAGE_EDIT_MODEL
-app.state.config.IMAGE_EDIT_SIZE = IMAGE_EDIT_SIZE
-app.state.config.IMAGES_EDIT_OPENAI_API_BASE_URL = IMAGES_EDIT_OPENAI_API_BASE_URL
-app.state.config.IMAGES_EDIT_OPENAI_API_KEY = IMAGES_EDIT_OPENAI_API_KEY
-app.state.config.IMAGES_EDIT_OPENAI_API_VERSION = IMAGES_EDIT_OPENAI_API_VERSION
-app.state.config.IMAGES_EDIT_GEMINI_API_BASE_URL = IMAGES_EDIT_GEMINI_API_BASE_URL
-app.state.config.IMAGES_EDIT_GEMINI_API_KEY = IMAGES_EDIT_GEMINI_API_KEY
-app.state.config.IMAGES_EDIT_COMFYUI_BASE_URL = IMAGES_EDIT_COMFYUI_BASE_URL
-app.state.config.IMAGES_EDIT_COMFYUI_API_KEY = IMAGES_EDIT_COMFYUI_API_KEY
-app.state.config.IMAGES_EDIT_COMFYUI_WORKFLOW = IMAGES_EDIT_COMFYUI_WORKFLOW
-app.state.config.IMAGES_EDIT_COMFYUI_WORKFLOW_NODES = IMAGES_EDIT_COMFYUI_WORKFLOW_NODES
-
 
 ########################################
 #
 # AUDIO
 #
 ########################################
-
-app.state.config.STT_ENGINE = AUDIO_STT_ENGINE
-app.state.config.STT_MODEL = AUDIO_STT_MODEL
-app.state.config.STT_SUPPORTED_CONTENT_TYPES = AUDIO_STT_SUPPORTED_CONTENT_TYPES
-app.state.config.STT_ALLOWED_EXTENSIONS = AUDIO_STT_ALLOWED_EXTENSIONS
-
-app.state.config.STT_OPENAI_API_BASE_URL = AUDIO_STT_OPENAI_API_BASE_URL
-app.state.config.STT_OPENAI_API_KEY = AUDIO_STT_OPENAI_API_KEY
-
-app.state.config.WHISPER_MODEL = WHISPER_MODEL
-app.state.config.DEEPGRAM_API_KEY = DEEPGRAM_API_KEY
-
-app.state.config.AUDIO_STT_AZURE_API_KEY = AUDIO_STT_AZURE_API_KEY
-app.state.config.AUDIO_STT_AZURE_REGION = AUDIO_STT_AZURE_REGION
-app.state.config.AUDIO_STT_AZURE_LOCALES = AUDIO_STT_AZURE_LOCALES
-app.state.config.AUDIO_STT_AZURE_BASE_URL = AUDIO_STT_AZURE_BASE_URL
-app.state.config.AUDIO_STT_AZURE_MAX_SPEAKERS = AUDIO_STT_AZURE_MAX_SPEAKERS
-
-app.state.config.AUDIO_STT_MISTRAL_API_KEY = AUDIO_STT_MISTRAL_API_KEY
-app.state.config.AUDIO_STT_MISTRAL_API_BASE_URL = AUDIO_STT_MISTRAL_API_BASE_URL
-app.state.config.AUDIO_STT_MISTRAL_USE_CHAT_COMPLETIONS = AUDIO_STT_MISTRAL_USE_CHAT_COMPLETIONS
-
-app.state.config.TTS_ENGINE = AUDIO_TTS_ENGINE
-
-app.state.config.TTS_MODEL = AUDIO_TTS_MODEL
-app.state.config.TTS_VOICE = AUDIO_TTS_VOICE
-
-app.state.config.TTS_OPENAI_API_BASE_URL = AUDIO_TTS_OPENAI_API_BASE_URL
-app.state.config.TTS_OPENAI_API_KEY = AUDIO_TTS_OPENAI_API_KEY
-app.state.config.TTS_OPENAI_PARAMS = AUDIO_TTS_OPENAI_PARAMS
-
-app.state.config.TTS_API_KEY = AUDIO_TTS_API_KEY
-app.state.config.TTS_SPLIT_ON = AUDIO_TTS_SPLIT_ON
-
-
-app.state.config.TTS_AZURE_SPEECH_REGION = AUDIO_TTS_AZURE_SPEECH_REGION
-app.state.config.TTS_AZURE_SPEECH_BASE_URL = AUDIO_TTS_AZURE_SPEECH_BASE_URL
-app.state.config.TTS_AZURE_SPEECH_OUTPUT_FORMAT = AUDIO_TTS_AZURE_SPEECH_OUTPUT_FORMAT
-
-app.state.config.TTS_MISTRAL_API_KEY = AUDIO_TTS_MISTRAL_API_KEY
-app.state.config.TTS_MISTRAL_API_BASE_URL = AUDIO_TTS_MISTRAL_API_BASE_URL
 
 
 app.state.faster_whisper_model = None
@@ -1851,37 +932,14 @@ app.state.speech_speaker_embeddings_dataset = None
 ########################################
 
 
-app.state.config.TASK_MODEL = TASK_MODEL
-app.state.config.TASK_MODEL_EXTERNAL = TASK_MODEL_EXTERNAL
-
-
-app.state.config.ENABLE_SEARCH_QUERY_GENERATION = ENABLE_SEARCH_QUERY_GENERATION
-app.state.config.ENABLE_RETRIEVAL_QUERY_GENERATION = ENABLE_RETRIEVAL_QUERY_GENERATION
-app.state.config.ENABLE_AUTOCOMPLETE_GENERATION = ENABLE_AUTOCOMPLETE_GENERATION
-app.state.config.ENABLE_TAGS_GENERATION = ENABLE_TAGS_GENERATION
-app.state.config.ENABLE_TITLE_GENERATION = ENABLE_TITLE_GENERATION
-app.state.config.ENABLE_FOLLOW_UP_GENERATION = ENABLE_FOLLOW_UP_GENERATION
-
-
-app.state.config.TITLE_GENERATION_PROMPT_TEMPLATE = TITLE_GENERATION_PROMPT_TEMPLATE
-app.state.config.TAGS_GENERATION_PROMPT_TEMPLATE = TAGS_GENERATION_PROMPT_TEMPLATE
-app.state.config.IMAGE_PROMPT_GENERATION_PROMPT_TEMPLATE = IMAGE_PROMPT_GENERATION_PROMPT_TEMPLATE
-app.state.config.FOLLOW_UP_GENERATION_PROMPT_TEMPLATE = FOLLOW_UP_GENERATION_PROMPT_TEMPLATE
-
-app.state.config.TOOLS_FUNCTION_CALLING_PROMPT_TEMPLATE = TOOLS_FUNCTION_CALLING_PROMPT_TEMPLATE
-app.state.config.QUERY_GENERATION_PROMPT_TEMPLATE = QUERY_GENERATION_PROMPT_TEMPLATE
-app.state.config.AUTOCOMPLETE_GENERATION_PROMPT_TEMPLATE = AUTOCOMPLETE_GENERATION_PROMPT_TEMPLATE
-app.state.config.AUTOCOMPLETE_GENERATION_INPUT_MAX_LENGTH = AUTOCOMPLETE_GENERATION_INPUT_MAX_LENGTH
-app.state.config.VOICE_MODE_PROMPT_TEMPLATE = VOICE_MODE_PROMPT_TEMPLATE
-app.state.config.ENABLE_VOICE_MODE_PROMPT = ENABLE_VOICE_MODE_PROMPT
-
-
 ########################################
 #
 # WEBUI
 #
 ########################################
 
+app.state.AGENT_RUN_RESOURCE_MANAGER = AgentRunResourceManager()
+app.state.AGENT_RUN_ARTIFACT_REGISTRAR = AgentRunArtifactRegistrar(AgentRuns)
 app.state.MODELS = MODELS
 
 # Add the middleware to the app
@@ -1957,6 +1015,8 @@ app.include_router(utils.router, prefix='/api/v1/utils', tags=['utils'])
 app.include_router(terminals.router, prefix='/api/v1/terminals', tags=['terminals'])
 app.include_router(automations.router, prefix='/api/v1/automations', tags=['automations'])
 app.include_router(calendar.router, prefix='/api/v1/calendars', tags=['calendars'])
+app.include_router(agent_runs.router, prefix='/api/agent/runs', tags=['agent-runs'])
+app.include_router(agent_service.router, prefix='/api/agent/service', tags=['agent-service'])
 
 # SCIM 2.0 API for identity management
 if ENABLE_SCIM:
@@ -2013,7 +1073,11 @@ async def get_models(request: Request, refresh: bool = False, user=Depends(get_v
 
         models.append(model)
 
-    model_order_list = request.app.state.config.MODEL_ORDER_LIST
+    # Chat requests resolve models by ID from request.app.state.MODELS, where
+    # duplicate IDs collapse to the last model. Return the same effective list.
+    models = list({model['id']: model for model in models}.values())
+
+    model_order_list = await Config.get('ui.model_order_list')
     if model_order_list:
         model_order_dict = {model_id: i for i, model_id in enumerate(model_order_list)}
         # Sort models by order list priority, with fallback for those not in the list
@@ -2042,6 +1106,12 @@ class ModelUnloadForm(BaseModel):
     model: str
 
 
+def strip_provider_model_prefix(model_id: str, prefix_id: str | None) -> str:
+    if prefix_id and model_id.startswith(f'{prefix_id}.'):
+        return model_id[len(f'{prefix_id}.') :]
+    return model_id
+
+
 @app.post('/api/models/unload')
 async def unload_model(request: Request, form_data: ModelUnloadForm, user=Depends(get_admin_user)):
     """
@@ -2051,23 +1121,34 @@ async def unload_model(request: Request, form_data: ModelUnloadForm, user=Depend
     """
     model_id = form_data.model
 
-    # --- Ollama provider ---
     ollama_models = getattr(request.app.state, 'OLLAMA_MODELS', None) or {}
+    openai_models = getattr(request.app.state, 'OPENAI_MODELS', None) or {}
+
+    seen = set()
+    while model_id not in ollama_models and model_id not in openai_models and model_id not in seen:
+        seen.add(model_id)
+        model_info = await Models.get_model_by_id(model_id)
+        if not model_info or not model_info.base_model_id:
+            break
+        model_id = model_info.base_model_id
+
+    # --- Ollama provider ---
     if model_id in ollama_models:
+        ollama_config = await Config.get_many('ollama.base_urls', 'ollama.api_configs')
+        ollama_base_urls = ollama_config.get('ollama.base_urls') or []
+        ollama_api_configs = ollama_config.get('ollama.api_configs') or {}
         url_indices = ollama_models[model_id].get('urls', [])
         errors = []
         for idx in url_indices:
-            url = request.app.state.config.OLLAMA_BASE_URLS[idx]
-            api_config = request.app.state.config.OLLAMA_API_CONFIGS.get(
+            url = ollama_base_urls[idx]
+            api_config = ollama_api_configs.get(
                 str(idx),
-                request.app.state.config.OLLAMA_API_CONFIGS.get(url, {}),
+                ollama_api_configs.get(url, {}),
             )
             key = api_config.get('key', None)
 
             prefix_id = api_config.get('prefix_id', None)
-            actual_model = model_id
-            if prefix_id and actual_model.startswith(f'{prefix_id}.'):
-                actual_model = actual_model[len(f'{prefix_id}.') :]
+            actual_model = strip_provider_model_prefix(model_id, prefix_id)
 
             payload = json.dumps({'model': actual_model, 'keep_alive': 0, 'prompt': ''})
 
@@ -2097,19 +1178,21 @@ async def unload_model(request: Request, form_data: ModelUnloadForm, user=Depend
         return {'status': True}
 
     # --- OpenAI-compatible providers ---
-    openai_models = getattr(request.app.state, 'OPENAI_MODELS', None) or {}
     if model_id in openai_models:
+        openai_config = await Config.get_many('openai.api_configs', 'openai.api_base_urls', 'openai.api_keys')
+        openai_api_configs = openai_config.get('openai.api_configs') or {}
+        openai_base_urls = openai_config.get('openai.api_base_urls') or []
+        openai_api_keys = openai_config.get('openai.api_keys') or []
         model_info = openai_models[model_id]
         idx = model_info.get('urlIdx')
-        api_config = request.app.state.config.OPENAI_API_CONFIGS.get(str(idx), {})
+        api_config = openai_api_configs.get(str(idx), {})
         provider = api_config.get('provider', '')
-        base_url = request.app.state.config.OPENAI_API_BASE_URLS[idx]
-        key = (
-            request.app.state.config.OPENAI_API_KEYS[idx] if idx < len(request.app.state.config.OPENAI_API_KEYS) else ''
-        )
+        base_url = openai_base_urls[idx]
+        key = openai_api_keys[idx] if idx < len(openai_api_keys) else ''
 
         if provider == 'llama.cpp':
             root_url = base_url.rstrip('/').removesuffix('/v1')
+            actual_model = strip_provider_model_prefix(model_id, api_config.get('prefix_id'))
             try:
                 timeout = aiohttp.ClientTimeout(total=30)
                 async with aiohttp.ClientSession(timeout=timeout, trust_env=True) as session:
@@ -2119,7 +1202,7 @@ async def unload_model(request: Request, form_data: ModelUnloadForm, user=Depend
                     }
                     async with session.post(
                         f'{root_url}/models/unload',
-                        json={'model': model_id},
+                        json={'model': actual_model},
                         headers=headers,
                     ) as r:
                         if not r.ok:
@@ -2170,6 +1253,1228 @@ async def embeddings(request: Request, form_data: dict, user=Depends(get_verifie
     return await generate_embeddings(request, form_data, user)
 
 
+def _message_id_entries(message_ids) -> list[tuple[str | None, str | None]]:
+    if isinstance(message_ids, dict):
+        return [(str(model_id), message_id) for model_id, message_id in message_ids.items()]
+    if isinstance(message_ids, list):
+        entries = []
+        for entry in message_ids:
+            if isinstance(entry, dict):
+                model_id = entry.get('model_id')
+                message_id = entry.get('message_id')
+                entries.append((str(model_id) if model_id is not None else None, message_id))
+        return entries
+    return []
+
+
+def _first_assistant_message_id(message_ids) -> str | None:
+    for _model_id, message_id in _message_id_entries(message_ids):
+        if message_id:
+            return message_id
+    return None
+
+
+def _assistant_message_id_for_model(message_ids, model_id: str | None) -> str | None:
+    entries = _message_id_entries(message_ids)
+    if model_id:
+        for entry_model_id, message_id in entries:
+            if entry_model_id == model_id and message_id:
+                return message_id
+
+    fallback_message_id = _first_assistant_message_id(message_ids)
+    if fallback_message_id:
+        log.warning(
+            'Agent Mode could not find assistant message id for leader model=%s; falling back to first assistant message id',
+            model_id,
+        )
+    return fallback_message_id
+
+
+def _is_agent_mode_product_chat(request: Request, metadata: dict, message_ids) -> bool:
+    if getattr(request.state, 'agent_internal_model_call', False):
+        return False
+    if metadata.get('chat_mode') != ConversationMode.AGENT.value:
+        return False
+    return bool(
+        metadata.get('chat_id') and metadata.get('user_message_id') and _first_assistant_message_id(message_ids)
+    )
+
+
+def _mode_profile_revision_hint(form_data: dict) -> str | None:
+    hint = form_data.pop('mode_profile_revision_id', None)
+    if hint is None:
+        return None
+    if not isinstance(hint, str) or not hint or hint.strip() != hint:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail={
+                'code': 'invalid_mode_profile_revision_hint',
+                'message': 'Mode profile revision hint must be a non-empty identifier.',
+            },
+        )
+    return hint
+
+
+def _strip_mode_profile_control_fields(value) -> None:
+    if isinstance(value, dict):
+        for key in list(value):
+            normalized_key = str(key)
+            if normalized_key == 'mode_profile_warnings':
+                _strip_mode_profile_control_fields(value[key])
+                continue
+            if normalized_key.startswith(('mode_profile_', 'conversation_mode_profile_')):
+                value.pop(key, None)
+                continue
+            _strip_mode_profile_control_fields(value[key])
+    elif isinstance(value, list):
+        for item in value:
+            _strip_mode_profile_control_fields(item)
+
+
+def _system_prompt_text(messages: list[dict]) -> str:
+    return '\n\n'.join(
+        content
+        for message in messages
+        if isinstance(message, dict)
+        and message.get('role') == 'system'
+        and (content := get_content_from_message(message))
+    )
+
+
+async def _enforce_mode_profile_prompt(
+    *,
+    request: Request,
+    revision,
+    form_data: dict,
+    metadata: dict,
+    user,
+    model_system_prompt: str | None,
+    request_system_prompt: str | None,
+    pre_rag_system_prompt: str | None,
+    administrator_variables: Mapping[str, object],
+) -> tuple[bool, str | None]:
+    if revision is None or not revision.system_prompt.strip():
+        _strip_mode_profile_control_fields(form_data)
+        return False, None
+
+    global_system_prompt = await Config.get('chat.global_system_prompt', '')
+    administrator_metadata = {**metadata, 'variables': administrator_variables}
+    resolved_administrator = await resolve_system_prompt(
+        revision.system_prompt,
+        administrator_metadata,
+        user,
+    )
+    register_request_redaction_secrets(request, resolved_administrator)
+    model_layer = '\n\n'.join(
+        prompt
+        for prompt in (
+            await resolve_system_prompt(global_system_prompt, metadata, user),
+            await resolve_system_prompt(model_system_prompt, metadata, user),
+        )
+        if prompt and prompt.strip()
+    )
+    request_layer = await resolve_system_prompt(request_system_prompt, metadata, user)
+    lower_layers = '\n\n'.join(prompt for prompt in (model_layer, request_layer) if prompt and prompt.strip())
+    post_pipeline_system_prompt = _system_prompt_text(form_data.get('messages') or [])
+    pre_rag_composed = '\n\n'.join(
+        compose_prompt_layers(
+            administrator=resolved_administrator,
+            model=lower_layers or None,
+            user=pre_rag_system_prompt or None,
+        )
+    )
+    composed = '\n\n'.join(
+        compose_prompt_layers(
+            administrator=resolved_administrator,
+            model=lower_layers or None,
+            user=post_pipeline_system_prompt or None,
+        )
+    )
+    messages = remove_system_message(form_data.get('messages') or [])
+    form_data['messages'] = [{'role': 'system', 'content': composed}, *messages] if composed else messages
+    params = form_data.get('params')
+    if isinstance(params, dict):
+        params.pop('system', None)
+    _strip_private_prompt_metadata(metadata)
+    _strip_mode_profile_control_fields(form_data)
+    return True, pre_rag_composed or None
+
+
+def _register_mode_profile_raw_prompt(request: Request, revision) -> None:
+    if revision is not None and revision.system_prompt.strip():
+        register_request_redaction_secrets(request, revision.system_prompt)
+
+
+def _extract_administrator_prompt_variables(
+    raw_prompt: str,
+    form_data: dict,
+    metadata: dict,
+) -> Mapping[str, object]:
+    variables = {}
+    for value in (form_data.get('variables'), metadata.get('variables')):
+        if isinstance(value, dict):
+            variables.update(value)
+
+    protected_keys = {key for key in variables if isinstance(key, str) and key in raw_prompt}
+    protected_variables = {key: variables[key] for key in protected_keys}
+    for value in (form_data, metadata):
+        current_variables = value.get('variables')
+        if not isinstance(current_variables, dict):
+            continue
+        remaining = {key: item for key, item in current_variables.items() if key not in protected_keys}
+        if remaining:
+            value['variables'] = remaining
+        else:
+            value.pop('variables', None)
+    if any(not isinstance(value, str) for value in protected_variables.values()):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail={
+                'code': 'invalid_mode_profile_prompt_variable',
+                'message': 'A conversation mode profile prompt variable is invalid.',
+            },
+        )
+    return MappingProxyType(protected_variables)
+
+
+def _strip_private_prompt_metadata(metadata: dict) -> None:
+    for key in (
+        'system_prompt',
+        'resolved_system_prompt',
+        'mode_profile_system_prompt',
+        'mode_profile_resolved_system_prompt',
+    ):
+        metadata.pop(key, None)
+
+
+def _mode_profile_capability_request_values(form_data: dict) -> dict:
+    request_values = {}
+    for field in ('tool_ids', 'skill_ids', 'filter_ids', 'terminal_id', 'features'):
+        if field not in form_data:
+            continue
+        value = form_data[field]
+        if isinstance(value, list):
+            value = list(value)
+        elif isinstance(value, dict):
+            value = dict(value)
+        request_values[field] = value
+    return request_values
+
+
+def _model_without_bound_profile_defaults(
+    model: dict,
+    *,
+    strip_skill_ids: bool,
+    strip_filter_ids: bool,
+) -> dict:
+    info = model.get('info')
+    if not isinstance(info, dict):
+        return model
+    meta = info.get('meta')
+    if not isinstance(meta, dict) or not (
+        (strip_skill_ids and 'skillIds' in meta) or (strip_filter_ids and 'filterIds' in meta)
+    ):
+        return model
+    effective_model = {**model}
+    effective_info = {**info}
+    effective_meta = {**meta}
+    if strip_skill_ids:
+        effective_meta.pop('skillIds', None)
+    if strip_filter_ids:
+        effective_meta.pop('filterIds', None)
+    effective_info['meta'] = effective_meta
+    effective_model['info'] = effective_info
+    return effective_model
+
+
+async def _apply_mode_profile_capabilities(
+    request: Request,
+    *,
+    revision,
+    model: dict,
+    user,
+    request_values: dict,
+    form_data: dict,
+    metadata: dict,
+) -> None:
+    if revision is None:
+        return
+    try:
+        resolution = await resolve_mode_profile_capabilities(
+            request.app,
+            profile_defaults=revision.defaults,
+            model=model,
+            user=user,
+            request_values=request_values,
+        )
+    except ModeProfileCapabilityRequestError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail={
+                'code': exc.code,
+                'reason': exc.reason,
+                'field': exc.field,
+                'message': 'The requested conversation capabilities are invalid.',
+            },
+        ) from exc
+    except Exception as exc:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail={
+                'code': 'mode_profile_unavailable',
+                'message': 'Conversation capability truth is unavailable.',
+            },
+        ) from exc
+
+    form_data['tool_ids'] = list(resolution.tool_ids)
+    form_data['skill_ids'] = list(resolution.skill_ids)
+    if resolution.terminal_id is None:
+        form_data.pop('terminal_id', None)
+    else:
+        form_data['terminal_id'] = resolution.terminal_id
+
+    raw_features = request_values.get('features')
+    features = dict(raw_features) if isinstance(raw_features, dict) else {}
+    enabled_features = set(resolution.feature_ids)
+    for feature_id in ('web_search', 'code_interpreter', 'image_generation'):
+        features[feature_id] = feature_id in enabled_features
+    form_data['features'] = features
+
+    metadata['tool_ids'] = list(resolution.tool_ids)
+    if 'filter_ids' in request_values or revision.defaults.filter_ids is not INHERIT:
+        metadata['filter_ids'] = list(resolution.filter_ids)
+    else:
+        metadata['filter_ids'] = None
+    metadata['features'] = features
+    if resolution.warnings:
+        metadata['mode_profile_warnings'] = [warning.model_dump() for warning in resolution.warnings]
+
+
+def _raise_mode_profile_integrity_error(exc: Exception) -> None:
+    raise HTTPException(
+        status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+        detail={
+            'code': 'mode_profile_integrity_error',
+            'message': 'The conversation mode profile binding failed integrity verification.',
+        },
+    ) from exc
+
+
+async def _resolve_conversation_mode_profile_revision(
+    request: Request,
+    *,
+    mode: ConversationMode,
+    existing_chat,
+    revision_hint: str | None,
+):
+    try:
+        if existing_chat is None:
+            return await _load_current_mode_profile_revision(
+                request,
+                mode=mode,
+                revision_hint=revision_hint,
+            )
+        return await _load_bound_mode_profile_revision(
+            request,
+            mode=mode,
+            existing_chat=existing_chat,
+            revision_hint=revision_hint,
+        )
+    except ModeProfileRevisionHintConflictError as exc:
+        detail = {
+            'code': 'mode_profile_binding_mismatch' if exc.bound else exc.code,
+            'message': 'Refresh the conversation mode profile before retrying.',
+        }
+        if exc.authoritative_revision_id:
+            key = 'bound_revision_id' if exc.bound else 'current_revision_id'
+            detail[key] = exc.authoritative_revision_id
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=detail,
+        ) from exc
+    except ModeProfileServiceUnavailableError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail={
+                'code': 'mode_profile_unavailable',
+                'message': 'The conversation mode profile is unavailable.',
+            },
+        ) from exc
+    except ConversationModeProfileIntegrityError as exc:
+        _raise_mode_profile_integrity_error(exc)
+
+
+async def _load_current_mode_profile_revision(
+    request: Request,
+    *,
+    mode: ConversationMode,
+    revision_hint: str | None,
+):
+    revision = await get_cached_current_revision(request.app, mode)
+    if revision is None:
+        raise ModeProfileServiceUnavailableError(
+            'read_current_revision',
+            mode=mode.value,
+        )
+    verify_conversation_mode_profile_revision(revision, expected_mode=mode)
+    if revision_hint is not None and revision_hint != revision.id:
+        raise ModeProfileRevisionHintConflictError(
+            hinted_revision_id=revision_hint,
+            authoritative_revision_id=revision.id,
+            bound=False,
+        )
+    return revision
+
+
+async def _load_bound_mode_profile_revision(
+    request: Request,
+    *,
+    mode: ConversationMode,
+    existing_chat,
+    revision_hint: str | None,
+):
+    bound_revision_id = getattr(existing_chat, 'mode_profile_revision_id', None)
+    if not bound_revision_id:
+        if revision_hint is not None:
+            raise ModeProfileRevisionHintConflictError(
+                hinted_revision_id=revision_hint,
+                authoritative_revision_id='',
+                bound=True,
+            )
+        return None
+    if revision_hint is not None and revision_hint != bound_revision_id:
+        raise ModeProfileRevisionHintConflictError(
+            hinted_revision_id=revision_hint,
+            authoritative_revision_id=bound_revision_id,
+            bound=True,
+        )
+    revision = await get_cached_revision(
+        request.app,
+        bound_revision_id,
+        expected_mode=mode,
+    )
+    if revision is None:
+        raise ConversationModeProfileIntegrityError(
+            bound_revision_id,
+            f'Conversation mode profile revision {bound_revision_id} is unavailable',
+        )
+    return verify_conversation_mode_profile_revision(revision, expected_mode=mode)
+
+
+async def _first_accessible_system_terminal_id(request: Request, user) -> str | None:
+    connections = getattr(request.app.state.config, 'TERMINAL_SERVER_CONNECTIONS', None) or []
+    for connection in connections:
+        terminal_id = connection.get('id')
+        if not terminal_id or not connection.get('enabled', True):
+            continue
+        try:
+            if await has_connection_access(user, connection):
+                return terminal_id
+        except Exception as exc:
+            log.warning('Failed to check Agent Mode terminal access for %s: %s', terminal_id, exc)
+    return None
+
+
+async def _attach_default_agent_mode_terminal(request: Request, form_data: dict, user) -> None:
+    if form_data.get('terminal_id'):
+        return
+
+    terminal_id = await _first_accessible_system_terminal_id(request, user)
+    if terminal_id:
+        form_data['terminal_id'] = terminal_id
+
+
+def _agent_run_budget(config) -> dict:
+    return {
+        'timeout_seconds': getattr(config, 'AGENT_RUN_DEFAULT_TIMEOUT_SECONDS', None),
+        'max_model_calls': getattr(config, 'AGENT_RUN_MAX_MODEL_CALLS', None),
+        'max_tool_calls': getattr(config, 'AGENT_RUN_MAX_TOOL_CALLS', None),
+        'team_max_subagents': getattr(config, 'AGENT_TEAM_MAX_SUBAGENTS', None),
+        'subagent_default_budget': getattr(config, 'AGENT_SUBAGENT_DEFAULT_BUDGET', None),
+    }
+
+
+def _agent_runtime_model_params(form_data: dict) -> dict:
+    params = {}
+    request_params = form_data.get('params')
+    if isinstance(request_params, dict):
+        params.update({key: value for key, value in request_params.items() if value is not None})
+
+    reasoning = _agent_runtime_reasoning_params(form_data.get('reasoning'))
+    if reasoning:
+        params['reasoning'] = reasoning
+
+    return params
+
+
+def _agent_runtime_reasoning_params(value) -> dict:
+    if not isinstance(value, dict):
+        return {}
+
+    reasoning = {}
+    enabled = value.get('enabled')
+    if isinstance(enabled, bool):
+        reasoning['enabled'] = enabled
+
+    effort = value.get('effort')
+    if isinstance(effort, str) and effort.strip():
+        reasoning['effort'] = effort.strip()
+
+    max_tokens = value.get('max_tokens')
+    if max_tokens not in (None, ''):
+        reasoning['max_tokens'] = max_tokens
+
+    return reasoning
+
+
+_AGENT_CONTEXT_REPLAY_MAX_RUNS = 3
+_AGENT_CONTEXT_REPLAY_MAX_CHARS = 12000
+_AGENT_CONTEXT_REPLAY_TEXT_BLOCK_KINDS = {
+    'assistant_note',
+    'action_summary',
+}
+_AGENT_CONTEXT_REPLAY_UNSAFE_FIELD_NAMES = {
+    'chain_of_thought',
+    'debug',
+    'private',
+    'raw',
+    'raw_reasoning',
+    'reasoning',
+    'thought',
+}
+_AGENT_CONTEXT_REPLAY_NORMALIZED_UNSAFE_FIELD_NAMES = {
+    ''.join(character for character in name.casefold() if character.isalnum())
+    for name in _AGENT_CONTEXT_REPLAY_UNSAFE_FIELD_NAMES
+}
+_AGENT_CONTEXT_REPLAY_TOOL_REQUEST_EVENT_TYPES = {
+    AgentEventType.TOOL_REQUESTED.value,
+}
+_AGENT_CONTEXT_REPLAY_TOOL_RESULT_EVENT_TYPES = {
+    AgentEventType.TOOL_COMPLETED.value,
+    AgentEventType.TOOL_FAILED.value,
+}
+_AGENT_CONTEXT_REPLAY_TERMINAL_STATES = {
+    'completed',
+    'failed',
+    'cancelled',
+    'budget_exceeded',
+}
+
+
+def _agent_context_replay_anchor_ids(form_data: dict) -> set[str]:
+    anchor_ids = set()
+    for key in ('parent_id', 'parentId'):
+        value = form_data.get(key)
+        if isinstance(value, str) and value:
+            anchor_ids.add(value)
+
+    for message in form_data.get('messages') or []:
+        if not isinstance(message, dict):
+            continue
+        if str(message.get('role') or '').lower() != 'assistant':
+            continue
+        for key in ('id', 'message_id'):
+            value = message.get(key)
+            if isinstance(value, str) and value:
+                anchor_ids.add(value)
+    return anchor_ids
+
+
+async def _agent_context_replay_items(
+    *,
+    chat_id: str | None,
+    user_id: str,
+    exclude_run_id: str,
+    anchor_message_ids: set[str],
+) -> list[dict]:
+    if not chat_id or chat_id.startswith(('local:', 'channel:')):
+        return []
+
+    try:
+        runs = await AgentRuns.list_runs_by_chat(chat_id, user_id)
+    except Exception as exc:
+        log.warning('Agent Mode could not load prior run context for chat=%s: %s', chat_id, exc)
+        return []
+
+    selected = []
+    for run in runs:
+        if run.id == exclude_run_id or run.state not in _AGENT_CONTEXT_REPLAY_TERMINAL_STATES:
+            continue
+        if anchor_message_ids and run.assistant_message_id not in anchor_message_ids:
+            continue
+        selected.append(run)
+        if len(selected) >= _AGENT_CONTEXT_REPLAY_MAX_RUNS:
+            break
+
+    items = []
+    for run in reversed(selected):
+        messages, replay_items = await _agent_context_replay_messages_and_items(run)
+        replay_items = _agent_context_replay_namespace_tool_call_ids(
+            replay_items,
+            run_id=run.id,
+        )
+        if messages or replay_items:
+            items.append(
+                {
+                    'messages': messages,
+                    'items': replay_items,
+                    'agent_run_id': run.id,
+                    'assistant_message_id': run.assistant_message_id,
+                    'state': run.state,
+                }
+            )
+    return items
+
+
+def _agent_context_replay_namespace_tool_call_ids(
+    items: list[dict],
+    *,
+    run_id: str,
+) -> list[dict]:
+    run_namespace = hashlib.sha256(str(run_id).encode('utf-8')).hexdigest()[:16]
+    active_call_ids: dict[str, str] = {}
+    rewritten = []
+    call_index = 0
+
+    for item in items:
+        item_type = str(item.get('type') or '')
+        original_call_id = str(item.get('call_id') or '')
+        if item_type == 'function_call' and original_call_id:
+            call_index += 1
+            namespaced_call_id = f'replay-{run_namespace}-{call_index}'
+            active_call_ids[original_call_id] = namespaced_call_id
+            rewritten.append({**item, 'call_id': namespaced_call_id})
+            continue
+        if item_type == 'function_call_output' and original_call_id:
+            namespaced_call_id = active_call_ids.pop(original_call_id, None)
+            if namespaced_call_id:
+                rewritten.append({**item, 'call_id': namespaced_call_id})
+            continue
+        rewritten.append(item)
+
+    return rewritten
+
+
+async def _agent_context_replay_messages(run) -> list[dict]:
+    messages, _ = await _agent_context_replay_messages_and_items(run)
+    return messages
+
+
+async def _agent_context_replay_messages_and_items(run) -> tuple[list[dict], list[dict]]:
+    try:
+        events = await AgentRuns.list_events(run.id)
+    except Exception as exc:
+        log.warning('Agent Mode could not load prior run events for run=%s: %s', run.id, exc)
+        return [], []
+
+    replay_items = []
+    final_deltas = []
+    for event in events:
+        event_type = str(getattr(event, 'event_type', '') or '')
+        payload = getattr(event, 'payload', None) or {}
+        if not isinstance(payload, dict):
+            continue
+        if event_type == AgentEventType.TEXT_DELTA.value:
+            block_kind = str(payload.get('block_kind') or '')
+            if block_kind not in _AGENT_CONTEXT_REPLAY_TEXT_BLOCK_KINDS:
+                continue
+            delta = payload.get('delta')
+            if isinstance(delta, str) and delta:
+                content = _agent_context_replay_clean_text(delta)
+                if content:
+                    replay_items.append(
+                        {
+                            'type': 'message',
+                            'role': 'assistant',
+                            'content': content,
+                            'phase': 'commentary',
+                            '_agent_block_kind': block_kind,
+                            '_agent_tool_call_id': _agent_context_replay_call_id(payload),
+                        }
+                    )
+        elif event_type == AgentEventType.FINAL_DELTA.value:
+            delta = payload.get('delta')
+            if isinstance(delta, str) and delta:
+                final_deltas.append(delta)
+        elif event_type in _AGENT_CONTEXT_REPLAY_TOOL_REQUEST_EVENT_TYPES:
+            tool_call = _agent_context_replay_tool_call_item(payload)
+            if tool_call:
+                replay_items.append(tool_call)
+        elif event_type in _AGENT_CONTEXT_REPLAY_TOOL_RESULT_EVENT_TYPES:
+            tool_output = _agent_context_replay_tool_output_item(
+                payload,
+                failed=event_type == AgentEventType.TOOL_FAILED.value,
+            )
+            if tool_output:
+                replay_items.append(tool_output)
+
+    replay_items = _agent_context_replay_canonicalize_tool_batches(replay_items)
+
+    final_text = str(getattr(run, 'final_text', '') or ''.join(final_deltas)).strip()
+    if final_text:
+        content = _agent_context_replay_clean_text(final_text)
+        if content:
+            final_message = {
+                'role': 'assistant',
+                'content': content,
+                'phase': 'final_answer',
+            }
+            replay_items.append({'type': 'message', **final_message})
+
+    replay_items = _agent_context_replay_trim_items(replay_items)
+    messages = [
+        {key: item[key] for key in ('role', 'content', 'phase') if key in item}
+        for item in replay_items
+        if item.get('role') == 'assistant'
+    ]
+    return messages, replay_items
+
+
+def _agent_context_replay_canonicalize_tool_batches(items: list[dict]) -> list[dict]:
+    canonical = []
+    pending_intents: dict[str, list[tuple[int, dict]]] = {}
+    pending_summaries: dict[str, list[tuple[int, dict]]] = {}
+    batch = None
+
+    def clean(item: dict) -> dict:
+        return {key: value for key, value in item.items() if key not in {'_agent_block_kind', '_agent_tool_call_id'}}
+
+    def flush_batch(*, allow_incomplete: bool = False) -> None:
+        nonlocal batch
+        if batch is None:
+            return
+
+        call_ids = [entry[1]['call_id'] for entry in batch['calls']]
+        complete_ids = {call_id for call_id in call_ids if call_id in batch['outputs']}
+        if not complete_ids:
+            batch = None
+            return
+
+        fully_complete = len(complete_ids) == len(call_ids)
+
+        def commentary_is_safe(entry: tuple[int, dict]) -> bool:
+            tool_call_id = str(entry[1].get('_agent_tool_call_id') or '')
+            if tool_call_id:
+                return tool_call_id in complete_ids
+            return fully_complete or not allow_incomplete
+
+        canonical.extend(
+            clean(entry[1])
+            for entry in sorted(batch['intents'], key=lambda entry: entry[0])
+            if commentary_is_safe(entry)
+        )
+        canonical.extend(clean(item) for _, item in batch['calls'] if item['call_id'] in complete_ids)
+        canonical.extend(
+            clean(item)
+            for _, item in sorted(batch['output_order'], key=lambda entry: entry[0])
+            if item['call_id'] in complete_ids
+        )
+        canonical.extend(
+            clean(entry[1])
+            for entry in sorted(batch['summaries'], key=lambda entry: entry[0])
+            if commentary_is_safe(entry)
+        )
+        batch = None
+
+    for index, item in enumerate(items):
+        item_type = str(item.get('type') or '')
+        if item_type == 'message':
+            block_kind = str(item.get('_agent_block_kind') or '')
+            tool_call_id = str(item.get('_agent_tool_call_id') or '')
+            entry = (index, item)
+            if block_kind == 'assistant_note':
+                if tool_call_id:
+                    if batch is not None and tool_call_id in batch['call_ids']:
+                        batch['intents'].append(entry)
+                    else:
+                        pending_intents.setdefault(tool_call_id, []).append(entry)
+                elif batch is not None:
+                    batch['intents'].append(entry)
+                else:
+                    canonical.append(clean(item))
+                continue
+
+            if block_kind == 'action_summary':
+                if batch is not None:
+                    if tool_call_id in batch['call_ids']:
+                        batch['summaries'].append(entry)
+                    elif not tool_call_id and len(batch['open_ids']) == 1:
+                        only_open_call_id = next(iter(batch['open_ids']))
+                        batch['summaries'].append(
+                            (
+                                index,
+                                {**item, '_agent_tool_call_id': only_open_call_id},
+                            )
+                        )
+                    elif not tool_call_id and batch['open_ids']:
+                        batch['summaries'].append(entry)
+                    elif tool_call_id:
+                        pending_summaries.setdefault(tool_call_id, []).append(entry)
+                    else:
+                        canonical.append(clean(item))
+                elif tool_call_id:
+                    pending_summaries.setdefault(tool_call_id, []).append(entry)
+                else:
+                    canonical.append(clean(item))
+                continue
+
+            canonical.append(clean(item))
+            continue
+
+        if item_type == 'function_call':
+            call_id = str(item.get('call_id') or '')
+            if not call_id:
+                continue
+            if batch is None:
+                batch = {
+                    'calls': [],
+                    'call_ids': set(),
+                    'open_ids': set(),
+                    'outputs': {},
+                    'output_order': [],
+                    'intents': [],
+                    'summaries': [],
+                }
+            if call_id in batch['call_ids']:
+                continue
+            batch['calls'].append((index, item))
+            batch['call_ids'].add(call_id)
+            batch['open_ids'].add(call_id)
+            batch['intents'].extend(pending_intents.pop(call_id, []))
+            batch['summaries'].extend(pending_summaries.pop(call_id, []))
+            continue
+
+        if item_type == 'function_call_output':
+            call_id = str(item.get('call_id') or '')
+            if batch is None or call_id not in batch['call_ids']:
+                continue
+            if call_id not in batch['outputs']:
+                batch['outputs'][call_id] = item
+                batch['output_order'].append((index, item))
+            batch['open_ids'].discard(call_id)
+            if not batch['open_ids']:
+                flush_batch()
+            continue
+
+        canonical.append(clean(item))
+
+    flush_batch(allow_incomplete=True)
+    return canonical
+
+
+def _agent_context_replay_tool_call_item(payload: dict) -> dict | None:
+    call_id = _agent_context_replay_call_id(payload)
+    if not call_id:
+        return None
+    name = payload.get('tool_name') or payload.get('name') or payload.get('tool_id') or 'tool'
+    arguments = payload.get('arguments')
+    if arguments is None:
+        arguments = payload.get('input') or {}
+    return {
+        'type': 'function_call',
+        'call_id': call_id,
+        'name': str(name or 'tool'),
+        'arguments': _agent_context_replay_json(arguments),
+    }
+
+
+def _agent_context_replay_tool_output_item(payload: dict, *, failed: bool = False) -> dict | None:
+    call_id = _agent_context_replay_call_id(payload)
+    if not call_id:
+        return None
+    output = _agent_context_replay_tool_output(payload, failed=failed)
+    return {
+        'type': 'function_call_output',
+        'call_id': call_id,
+        'output': _agent_context_replay_json(output),
+    }
+
+
+def _agent_context_replay_call_id(payload: dict) -> str:
+    value = payload.get('tool_call_id') or payload.get('call_id') or payload.get('id')
+    return str(value or '').strip()
+
+
+def _agent_context_replay_tool_output(payload: dict, *, failed: bool = False):
+    for key in ('result', 'output', 'content', 'response'):
+        if key in payload:
+            return payload.get(key)
+    status = payload.get('status') or ('failed' if failed else 'completed')
+    return {'status': status}
+
+
+def _agent_context_replay_json(value) -> str:
+    if isinstance(value, str):
+        try:
+            decoded = json.loads(value)
+        except (TypeError, ValueError):
+            return value
+        if not isinstance(decoded, (dict, list)):
+            return value
+        value = decoded
+    value = _agent_context_replay_safe_value(value)
+    try:
+        return json.dumps(value, ensure_ascii=False, sort_keys=True)
+    except TypeError:
+        return json.dumps(str(value), ensure_ascii=False)
+
+
+def _agent_context_replay_safe_value(value):
+    if isinstance(value, dict):
+        return {
+            key: _agent_context_replay_safe_value(nested)
+            for key, nested in value.items()
+            if _agent_context_replay_safe_field_name(key)
+        }
+    if isinstance(value, list):
+        return [_agent_context_replay_safe_value(item) for item in value]
+    return value
+
+
+def _agent_context_replay_safe_field_name(value) -> bool:
+    normalized = ''.join(character for character in str(value).casefold() if character.isalnum())
+    return normalized not in _AGENT_CONTEXT_REPLAY_NORMALIZED_UNSAFE_FIELD_NAMES
+
+
+def _agent_context_replay_item_size(item: dict) -> int:
+    return len(_agent_context_replay_json(item))
+
+
+def _agent_context_replay_trim_items(items: list[dict]) -> list[dict]:
+    items = _agent_context_replay_drop_orphan_tool_items(items)
+    kept = []
+    total = 0
+    for item in reversed(items):
+        item_size = _agent_context_replay_item_size(item)
+        remaining = _AGENT_CONTEXT_REPLAY_MAX_CHARS - total
+        if remaining <= 0:
+            break
+        if item_size > remaining and item.get('role') == 'assistant':
+            content = str(item.get('content') or '')
+            if remaining > 0 and content:
+                kept.append({**item, 'content': content[-remaining:]})
+            break
+        if item_size <= remaining:
+            kept.append(item)
+            total += item_size + 1
+    return _agent_context_replay_drop_orphan_tool_items(list(reversed(kept)))
+
+
+def _agent_context_replay_drop_orphan_tool_items(items: list[dict]) -> list[dict]:
+    call_ids = {
+        str(item.get('call_id') or '') for item in items if item.get('type') == 'function_call' and item.get('call_id')
+    }
+    output_ids = {
+        str(item.get('call_id') or '')
+        for item in items
+        if item.get('type') == 'function_call_output' and item.get('call_id')
+    }
+    paired_ids = call_ids & output_ids
+    return [
+        item
+        for item in items
+        if item.get('type') not in {'function_call', 'function_call_output'}
+        or str(item.get('call_id') or '') in paired_ids
+    ]
+
+
+def _agent_context_replay_clean_text(value: str) -> str:
+    return ' '.join(value.split())
+
+
+def _agent_runtime_prompt_messages(messages: list) -> list[dict]:
+    clean_messages = []
+    for message in messages:
+        if not isinstance(message, dict):
+            continue
+        role = str(message.get('role') or '').lower()
+        if role not in {'system', 'user', 'assistant'}:
+            continue
+        content = message.get('content', '')
+        if role == 'assistant' and not _agent_runtime_message_has_text(content):
+            continue
+        clean_messages.append(
+            {
+                'role': role,
+                'content': content,
+            }
+        )
+    return clean_messages
+
+
+def _agent_runtime_message_has_text(content) -> bool:
+    if isinstance(content, str):
+        return bool(content.strip())
+    if isinstance(content, list):
+        for item in content:
+            if not isinstance(item, dict):
+                continue
+            text = item.get('text')
+            if isinstance(text, str) and text.strip():
+                return True
+        return False
+    return content not in (None, '')
+
+
+def _agent_runtime_payload(
+    *,
+    run,
+    form_data: dict,
+    metadata: dict,
+    user,
+    leader_model_id: str,
+    budget: dict,
+    tool_access_envelope: dict,
+    model_params: dict | None = None,
+    context_replay_items: list[dict] | None = None,
+) -> dict:
+    model_meta = {}
+    model = metadata.get('model')
+    if isinstance(model, dict):
+        model_meta = model.get('info', {}).get('meta', {}) or {}
+
+    messages = form_data.get('messages')
+    if not isinstance(messages, list):
+        messages = [metadata.get('user_message')] if metadata.get('user_message') else []
+    messages = _agent_runtime_prompt_messages(messages)
+
+    runtime_metadata = {
+        'session_id': metadata.get('session_id'),
+        'features': metadata.get('features') or {},
+        'variables': metadata.get('variables') or {},
+        'stream': form_data.get('stream'),
+    }
+    mode_profile_warnings = metadata.get('mode_profile_warnings')
+    if isinstance(mode_profile_warnings, list) and mode_profile_warnings:
+        runtime_metadata['mode_profile_warnings'] = mode_profile_warnings
+    runtime_model_params = model_params if model_params is not None else _agent_runtime_model_params(form_data)
+    if runtime_model_params:
+        runtime_metadata['model_params'] = runtime_model_params
+    if context_replay_items:
+        runtime_metadata['agent_context_replay'] = context_replay_items
+
+    return {
+        'run_id': run.id,
+        'chat_id': metadata.get('chat_id'),
+        'user_message_id': metadata.get('user_message_id'),
+        'assistant_message_id': run.assistant_message_id,
+        'leader_model_id': leader_model_id,
+        'user_ref': {
+            'id': user.id,
+            'role': getattr(user, 'role', None),
+        },
+        'budget': budget,
+        'team_cap': budget.get('team_max_subagents'),
+        'default_paths': {
+            'outputs': f'/workspace/agent-runs/{run.id}/outputs',
+            'tmp': f'/workspace/agent-runs/{run.id}/tmp',
+        },
+        'tool_access_envelope': tool_access_envelope,
+        'model_catalog': [
+            {
+                'id': leader_model_id,
+                'role': 'leader',
+                'meta': model_meta,
+            }
+        ],
+        'messages': messages,
+        'metadata': runtime_metadata,
+    }
+
+
+async def _link_agent_run_to_assistant_message(
+    metadata: dict,
+    *,
+    agent_run_id: str,
+    error: dict | None = None,
+) -> None:
+    chat_id = metadata.get('chat_id')
+    assistant_message_id = metadata.get('message_id') or metadata.get('assistant_message_id')
+    if not chat_id or not assistant_message_id:
+        return
+    if chat_id.startswith('local:') or chat_id.startswith('channel:'):
+        return
+
+    update = {
+        'parentId': metadata.get('user_message_id', None),
+        'agent_run_id': agent_run_id,
+    }
+    if error:
+        update['error'] = {'content': error.get('message') or 'Agent runtime unavailable'}
+
+    await Chats.upsert_message_to_chat_by_id_and_message_id(
+        chat_id,
+        assistant_message_id,
+        update,
+    )
+
+
+async def _start_agent_mode_chat(
+    request: Request,
+    form_data: dict,
+    user,
+    metadata: dict,
+    message_ids,
+    model: dict,
+    *,
+    mode_profile_revision=None,
+    model_system_prompt: str | None = None,
+    request_system_prompt: str | None = None,
+    administrator_prompt_variables: Mapping[str, object] = MappingProxyType({}),
+) -> dict:
+    leader_model_id = form_data.get('model') or next(
+        (model_id for model_id, _message_id in _message_id_entries(message_ids) if model_id),
+        None,
+    )
+    assistant_message_id = _assistant_message_id_for_model(message_ids, leader_model_id)
+    if not assistant_message_id:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail='Agent Mode requires an assistant message id',
+        )
+
+    metadata['message_id'] = assistant_message_id
+    metadata['assistant_message_id'] = assistant_message_id
+
+    requested_model_params = _agent_runtime_model_params(form_data)
+    private_context = {}
+    form_data, metadata, _events = await process_chat_payload(
+        request,
+        form_data,
+        user,
+        metadata,
+        model,
+        private_context=private_context,
+    )
+    prompt_enforced, _pre_rag_system_anchor = await _enforce_mode_profile_prompt(
+        request=request,
+        revision=mode_profile_revision,
+        form_data=form_data,
+        metadata=metadata,
+        user=user,
+        model_system_prompt=model_system_prompt,
+        request_system_prompt=request_system_prompt,
+        pre_rag_system_prompt=private_context.get('pre_rag_system_anchor'),
+        administrator_variables=administrator_prompt_variables,
+    )
+    if prompt_enforced:
+        requested_model_params.pop('system', None)
+    _strip_mode_profile_control_fields(requested_model_params)
+    tool_access_envelope, tool_registry = build_tool_access_envelope(metadata.get('tools') or {})
+    tool_access_metadata = {
+        'session_id': metadata.get('session_id'),
+        'files': metadata.get('files') or [],
+    }
+    terminal_id = metadata.get('terminal_id') or form_data.get('terminal_id')
+    if terminal_id:
+        tool_access_metadata['terminal_id'] = terminal_id
+    skill_ids = metadata.get('skill_ids')
+    if isinstance(skill_ids, list):
+        tool_access_metadata['skill_ids'] = skill_ids
+    tool_access_envelope['metadata'] = tool_access_metadata
+
+    budget = _agent_run_budget(request.app.state.config)
+    run = await AgentRuns.create_run(
+        user_id=user.id,
+        chat_id=metadata['chat_id'],
+        user_message_id=metadata['user_message_id'],
+        assistant_message_id=assistant_message_id,
+        leader_model_id=leader_model_id,
+        budget=budget,
+        participants=[
+            {
+                'id': 'leader',
+                'role': 'leader',
+                'model_id': leader_model_id,
+            }
+        ],
+        tool_access_snapshot=tool_access_envelope,
+        model_catalog_snapshot={'leader_model_id': leader_model_id},
+    )
+    _install_agent_tool_registry(request, run.id, tool_registry)
+    await _link_agent_run_to_assistant_message(metadata, agent_run_id=run.id)
+
+    client = AgentRuntimeClient(
+        getattr(request.app.state.config, 'AGENT_RUNTIME_BASE_URL', ''),
+        service_token=getattr(request.app.state.config, 'AGENT_RUNTIME_SERVICE_TOKEN', ''),
+        timeout=getattr(request.app.state.config, 'AGENT_RUN_DEFAULT_TIMEOUT_SECONDS', None),
+    )
+    context_replay_items = await _agent_context_replay_items(
+        chat_id=metadata.get('chat_id'),
+        user_id=user.id,
+        exclude_run_id=run.id,
+        anchor_message_ids=_agent_context_replay_anchor_ids(form_data),
+    )
+    payload = _agent_runtime_payload(
+        run=run,
+        form_data=form_data,
+        metadata=metadata,
+        user=user,
+        leader_model_id=leader_model_id,
+        budget=budget,
+        tool_access_envelope=tool_access_envelope,
+        model_params=requested_model_params,
+        context_replay_items=context_replay_items,
+    )
+
+    try:
+        runtime_response = await client.start_run(payload)
+    except (AgentRuntimeUnavailable, AgentRuntimeError) as exc:
+        _remove_agent_tool_registry(request, run.id)
+        error = {
+            'code': getattr(exc, 'code', 'agent_runtime_error'),
+            'message': redact_mode_profile_administrator_prompt(
+                str(exc),
+                mode_profile_revision,
+                request=request,
+            ),
+        }
+        await AgentRuns.append_event(
+            run.id,
+            event_type=AgentEventType.RUN_FAILED.value,
+            participant_id='leader',
+            phase='failed',
+            payload={'error': error},
+        )
+        await _link_agent_run_to_assistant_message(metadata, agent_run_id=run.id, error=error)
+        return {
+            'status': False,
+            'chat_id': metadata['chat_id'],
+            'agent_run_id': run.id,
+            'task_ids': [],
+            'error': error,
+        }
+
+    runtime_session_id = runtime_response.get('runtime_session_id')
+    if runtime_session_id:
+        await AgentRuns.attach_runtime_session(run.id, runtime_session_id)
+    return {
+        'status': True,
+        'chat_id': metadata['chat_id'],
+        'agent_run_id': run.id,
+        'runtime_session_id': runtime_session_id,
+        'task_ids': [],
+    }
+
+
+def _install_agent_tool_registry(request: Request, run_id: str, registry: dict) -> None:
+    if not registry:
+        return
+
+    registries = getattr(request.app.state, 'AGENT_TOOL_REGISTRIES', None)
+    if registries is None:
+        registries = {}
+        request.app.state.AGENT_TOOL_REGISTRIES = registries
+
+    registries[run_id] = dict(registry)
+
+
+def _remove_agent_tool_registry(request: Request, run_id: str) -> None:
+    registries = getattr(request.app.state, 'AGENT_TOOL_REGISTRIES', None)
+    if isinstance(registries, dict):
+        registries.pop(run_id, None)
+
+
 @app.post('/api/chat/completions')
 @app.post('/api/v1/chat/completions')  # Experimental: Compatibility with OpenAI API
 async def chat_completion(
@@ -2183,6 +2488,10 @@ async def chat_completion(
     model_id = form_data.get('model', None)
     model_item = form_data.pop('model_item', {})
     tasks = form_data.pop('background_tasks', None)
+    requested_chat_mode = form_data.pop('chat_mode', None)
+    mode_profile_revision_hint = _mode_profile_revision_hint(form_data)
+    _strip_mode_profile_control_fields(form_data)
+    mode_profile_capability_request = _mode_profile_capability_request_values(form_data)
 
     metadata = {}
     try:
@@ -2207,18 +2516,26 @@ async def chat_completion(
             request.state.model = model
 
         # Model params: global defaults as base, per-model overrides win
-        default_model_params = getattr(request.app.state.config, 'DEFAULT_MODEL_PARAMS', None) or {}
+        default_model_params = await Config.get('models.default_params', {}) or {}
         model_info_params = {
             **default_model_params,
             **(model_info.params.model_dump() if model_info and model_info.params else {}),
         }
+        request_params = {key: value for key, value in (form_data.get('params') or {}).items() if value is not None}
+        model_system_prompt = model_info_params.get('system')
+        request_system_prompt = request_params.get('system')
+        if model_info_params or request_params:
+            form_data['params'] = {
+                **model_info_params,
+                **request_params,
+            }
 
         # Check base model existence for custom models
         if model_info and model_info.base_model_id:
             base_model_id = model_info.base_model_id
             if base_model_id not in request.app.state.MODELS:
                 if ENABLE_CUSTOM_MODEL_FALLBACK:
-                    default_models = (request.app.state.config.DEFAULT_MODELS or '').split(',')
+                    default_models = ((await Config.get('ui.default_models')) or '').split(',')
 
                     fallback_model_id = default_models[0].strip() if default_models[0] else None
 
@@ -2234,6 +2551,7 @@ async def chat_completion(
         # Chat Params
         stream_delta_chunk_size = form_data.get('params', {}).get('stream_delta_chunk_size')
         reasoning_tags = form_data.get('params', {}).get('reasoning_tags')
+        compact_token_threshold = form_data.get('params', {}).get('compact_token_threshold')
 
         # Model Params
         if model_info_params.get('stream_response') is not None:
@@ -2245,6 +2563,9 @@ async def chat_completion(
         if model_info_params.get('reasoning_tags') is not None:
             reasoning_tags = model_info_params.get('reasoning_tags')
 
+        if model_info_params.get('compact_token_threshold') is not None:
+            compact_token_threshold = model_info_params.get('compact_token_threshold')
+
         # parent_id signals intent:
         #   null   → new chat (root message, no parent)
         #   value  → follow-up (user message's parentId = prev assistant)
@@ -2253,13 +2574,19 @@ async def chat_completion(
         parent_id = form_data.pop('parent_id', None)
         form_data.pop('new_chat', None)  # Legacy field
 
-        # Multi-model: {model_id: assistant_message_id}
-        # Single-model fallback: built from 'model' + 'id'
+        # Multi-model message_ids: list of {model_id, message_id} entries.
+        # Supports both the new array format and legacy dict format for backward compat.
         message_ids = form_data.pop('message_ids', None)
-        if not message_ids:
-            message_ids = {model_id: form_data.pop('id', None)}
-        else:
+        if isinstance(message_ids, list):
+            # New format: [{"model_id": ..., "message_id": ...}, ...]
             form_data.pop('id', None)
+        elif isinstance(message_ids, dict):
+            # Legacy dict format: {model_id: message_id} — convert to list
+            message_ids = [{'model_id': k, 'message_id': v} for k, v in message_ids.items()]
+            form_data.pop('id', None)
+        else:
+            # Single-model fallback
+            message_ids = [{'model_id': model_id, 'message_id': form_data.pop('id', None)}]
 
         user_message = form_data.pop('user_message', None) or form_data.pop('parent_message', None)
 
@@ -2272,20 +2599,21 @@ async def chat_completion(
             and not await has_permission(
                 user.id,
                 'features.direct_tool_servers',
-                request.app.state.config.USER_PERMISSIONS,
+                await Config.get('user.permissions'),
             )
         ):
             tool_servers = None
 
         metadata = {
             'user_id': user.id,
+            'user_agent': request.headers.get('user-agent', '') or '',
             'chat_id': form_data.pop('chat_id', None) or '',
             'user_message': user_message,
             'user_message_id': user_message.get('id') if user_message else None,
             'assistant_message_id': form_data.pop('assistant_message_id', None),
             'session_id': form_data.pop('session_id', None),
             'folder_id': form_data.pop('folder_id', None),
-            'filter_ids': form_data.pop('filter_ids', []),
+            'filter_ids': form_data.pop('filter_ids', None),
             'tool_ids': form_data.get('tool_ids', None),
             'tool_servers': tool_servers,
             'files': form_data.get('files', None),
@@ -2296,13 +2624,11 @@ async def chat_completion(
             'params': {
                 'stream_delta_chunk_size': stream_delta_chunk_size,
                 'reasoning_tags': reasoning_tags,
+                'compact_token_threshold': compact_token_threshold,
                 'function_calling': (
-                    'native'
-                    if (
-                        form_data.get('params', {}).get('function_calling') == 'native'
-                        or model_info_params.get('function_calling') == 'native'
-                    )
-                    else 'default'
+                    form_data.get('params', {}).get('function_calling')
+                    or model_info_params.get('function_calling')
+                    or 'native'
                 ),
             },
         }
@@ -2310,26 +2636,263 @@ async def chat_completion(
         if is_new_chat:
             metadata['chat_id'] = str(uuid4())
 
-        model_meta = model.get('info', {}).get('meta', {}) if isinstance(model, dict) else {}
-        log.info(
-            'Chat completion request metadata chat_id=%s user_message_id=%s assistant_message_ids=%s '
-            'model=%s stream=%s function_calling=%s image_generation=%s default_features=%s '
-            'builtin_image_generation=%s capability_image_generation=%s tool_ids_count=%s '
-            'tool_servers_count=%s session_id_present=%s',
-            metadata.get('chat_id'),
-            metadata.get('user_message_id'),
-            [message_id for message_id in message_ids.values() if message_id],
-            model_id,
-            form_data.get('stream'),
-            metadata.get('params', {}).get('function_calling'),
-            metadata.get('features', {}).get('image_generation'),
-            model_meta.get('defaultFeatureIds'),
-            (model_meta.get('builtinTools') or {}).get('image_generation'),
-            (model_meta.get('capabilities') or {}).get('image_generation'),
-            len(metadata.get('tool_ids') or []),
-            len(metadata.get('tool_servers') or []),
-            bool(metadata.get('session_id')),
+        existing_chat = None
+        mode_profile_revision = None
+        administrator_prompt_variables: Mapping[str, object] = MappingProxyType({})
+        conversation_mode_should_persist = False
+        is_product_conversation_request = bool(
+            not getattr(request.state, 'agent_internal_model_call', False)
+            and metadata.get('chat_id')
+            and metadata.get('user_message_id')
+            and _first_assistant_message_id(message_ids)
         )
+        if is_product_conversation_request:
+            chat_id = metadata['chat_id']
+            is_persisted_chat = not chat_id.startswith(('local:', 'channel:'))
+            persisted_mode = None
+            has_agent_run = False
+            mode_claimed = False
+
+            if is_persisted_chat and not is_new_chat:
+                if not await Chats.is_chat_owner(chat_id, user.id) and user.role != 'admin':
+                    raise HTTPException(
+                        status_code=status.HTTP_404_NOT_FOUND,
+                        detail=ERROR_MESSAGES.DEFAULT(),
+                    )
+                try:
+                    existing_chat = await Chats.get_chat_by_id(
+                        chat_id,
+                        repair=False,
+                        strict=True,
+                    )
+                except SQLAlchemyError as exc:
+                    raise HTTPException(
+                        status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                        detail={
+                            'code': 'mode_profile_unavailable',
+                            'message': 'The conversation mode profile is unavailable.',
+                        },
+                    ) from exc
+                if existing_chat is None:
+                    raise HTTPException(
+                        status_code=status.HTTP_404_NOT_FOUND,
+                        detail=ERROR_MESSAGES.NOT_FOUND,
+                    )
+                persisted_mode = (existing_chat.chat or {}).get('mode')
+                if persisted_mode is None:
+                    has_agent_run = chat_has_agent_mode_evidence(existing_chat.chat)
+                    if not has_agent_run:
+                        has_agent_run = await AgentRuns.has_runs_by_chat(
+                            chat_id,
+                            existing_chat.user_id,
+                        )
+
+            try:
+                if is_persisted_chat and not is_new_chat:
+                    preliminary_resolution = resolve_conversation_mode(
+                        requested=requested_chat_mode,
+                        persisted=persisted_mode,
+                        is_new=False,
+                        has_agent_run=has_agent_run,
+                    )
+                    if (
+                        mode_profile_revision_hint is not None
+                        and existing_chat.mode_profile_revision_id is not None
+                        and mode_profile_revision_hint != existing_chat.mode_profile_revision_id
+                    ):
+                        raise ModeProfileRevisionHintConflictError(
+                            hinted_revision_id=mode_profile_revision_hint,
+                            authoritative_revision_id=existing_chat.mode_profile_revision_id,
+                            bound=True,
+                        )
+                    if preliminary_resolution.mode is ConversationMode.AGENT and not getattr(
+                        request.app.state.config,
+                        'ENABLE_AGENT_MODE',
+                        False,
+                    ):
+                        raise HTTPException(
+                            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                            detail={
+                                'code': 'agent_mode_disabled',
+                                'message': 'Agent Mode is disabled for this deployment.',
+                            },
+                        )
+
+                    claimed = await ConversationModeProfiles.resolve_persisted_chat_binding(
+                        chat_id=chat_id,
+                        user_id=None if user.role == 'admin' else user.id,
+                        has_agent_run=has_agent_run,
+                        requested_mode=requested_chat_mode,
+                    )
+                    if claimed is None:
+                        raise HTTPException(
+                            status_code=status.HTTP_404_NOT_FOUND,
+                            detail=ERROR_MESSAGES.NOT_FOUND,
+                        )
+                    existing_chat = await Chats.get_chat_by_id(
+                        chat_id,
+                        repair=False,
+                        strict=True,
+                    )
+                    if existing_chat is None:
+                        raise HTTPException(
+                            status_code=status.HTTP_404_NOT_FOUND,
+                            detail=ERROR_MESSAGES.NOT_FOUND,
+                        )
+                    resolution = preliminary_resolution
+                    mode_profile_revision = await _resolve_conversation_mode_profile_revision(
+                        request,
+                        mode=resolution.mode,
+                        existing_chat=existing_chat,
+                        revision_hint=mode_profile_revision_hint,
+                    )
+                    await _apply_mode_profile_capabilities(
+                        request,
+                        revision=mode_profile_revision,
+                        model=model,
+                        user=user,
+                        request_values=mode_profile_capability_request,
+                        form_data=form_data,
+                        metadata=metadata,
+                    )
+                    mode_claimed = True
+                else:
+                    resolution = resolve_conversation_mode(
+                        requested=requested_chat_mode,
+                        persisted=persisted_mode,
+                        is_new=is_new_chat or not is_persisted_chat,
+                        has_agent_run=has_agent_run,
+                    )
+            except ModeProfileRevisionHintConflictError as exc:
+                detail = {
+                    'code': 'mode_profile_binding_mismatch' if exc.bound else exc.code,
+                    'message': 'Refresh the conversation mode profile before retrying.',
+                }
+                if exc.authoritative_revision_id:
+                    detail['bound_revision_id' if exc.bound else 'current_revision_id'] = (
+                        exc.authoritative_revision_id
+                    )
+                raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=detail) from exc
+            except InvalidConversationModeError as exc:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail={
+                        'code': exc.code,
+                        'message': str(exc),
+                    },
+                ) from exc
+            except ConversationModeMismatchError as exc:
+                raise HTTPException(
+                    status_code=status.HTTP_409_CONFLICT,
+                    detail={
+                        'code': exc.code,
+                        'message': str(exc),
+                        'requested': exc.requested.value,
+                        'persisted': exc.persisted.value,
+                    },
+                ) from exc
+            except ConversationModeProfileLegacyBindingError as exc:
+                raise HTTPException(
+                    status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                    detail={
+                        'code': exc.code,
+                        'message': 'The conversation mode profile binding failed integrity verification.',
+                    },
+                ) from exc
+            except SQLAlchemyError as exc:
+                raise HTTPException(
+                    status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                    detail={
+                        'code': 'mode_profile_unavailable',
+                        'message': 'The conversation mode profile is unavailable.',
+                    },
+                ) from exc
+
+            if resolution.mode is ConversationMode.AGENT and not getattr(
+                request.app.state.config, 'ENABLE_AGENT_MODE', False
+            ):
+                raise HTTPException(
+                    status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                    detail={
+                        'code': 'agent_mode_disabled',
+                        'message': 'Agent Mode is disabled for this deployment.',
+                    },
+                )
+
+            metadata['chat_mode'] = resolution.mode.value
+            conversation_mode_should_persist = resolution.should_persist and not mode_claimed
+            if is_persisted_chat and is_new_chat:
+                mode_profile_revision = await _resolve_conversation_mode_profile_revision(
+                    request,
+                    mode=resolution.mode,
+                    existing_chat=None,
+                    revision_hint=mode_profile_revision_hint,
+                )
+                await _apply_mode_profile_capabilities(
+                    request,
+                    revision=mode_profile_revision,
+                    model=model,
+                    user=user,
+                    request_values=mode_profile_capability_request,
+                    form_data=form_data,
+                    metadata=metadata,
+                )
+            elif chat_id.startswith('local:'):
+                temporary_binding = await ConversationModeProfiles.create_temporary_binding(
+                    user_id=user.id,
+                    temporary_conversation_id=chat_id,
+                    mode=resolution.mode,
+                    expires_at=int(time.time()) + TEMPORARY_MODE_PROFILE_BINDING_TTL_SECONDS,
+                )
+                if temporary_binding.mode != resolution.mode.value:
+                    raise HTTPException(
+                        status_code=status.HTTP_409_CONFLICT,
+                        detail={
+                            'code': 'mode_profile_binding_mismatch',
+                            'message': 'Refresh the conversation mode profile before retrying.',
+                        },
+                    )
+                mode_profile_revision = await _resolve_conversation_mode_profile_revision(
+                    request,
+                    mode=resolution.mode,
+                    existing_chat=SimpleNamespace(
+                        mode_profile_revision_id=temporary_binding.mode_profile_revision_id,
+                    ),
+                    revision_hint=mode_profile_revision_hint,
+                )
+                await _apply_mode_profile_capabilities(
+                    request,
+                    revision=mode_profile_revision,
+                    model=model,
+                    user=user,
+                    request_values=mode_profile_capability_request,
+                    form_data=form_data,
+                    metadata=metadata,
+                )
+            if mode_profile_revision is not None:
+                _register_mode_profile_raw_prompt(request, mode_profile_revision)
+                if mode_profile_revision.system_prompt.strip():
+                    administrator_prompt_variables = _extract_administrator_prompt_variables(
+                        mode_profile_revision.system_prompt,
+                        form_data,
+                        metadata,
+                    )
+                model = _model_without_bound_profile_defaults(
+                    model,
+                    strip_skill_ids=(
+                        'skill_ids' in mode_profile_capability_request
+                        or mode_profile_revision.defaults.skill_ids is not INHERIT
+                    ),
+                    strip_filter_ids=(
+                        'filter_ids' in mode_profile_capability_request
+                        or mode_profile_revision.defaults.filter_ids is not INHERIT
+                    ),
+                )
+                metadata['model'] = model
+
+        initial_title_generation = None
+        if is_new_chat and tasks and TASKS.TITLE_GENERATION in tasks:
+            initial_title_generation = tasks.pop(TASKS.TITLE_GENERATION)
 
         if metadata.get('chat_id') and user:
             chat_id = metadata['chat_id']
@@ -2362,8 +2925,10 @@ async def chat_completion(
                                 status_code=status.HTTP_403_FORBIDDEN,
                                 detail=ERROR_MESSAGES.DEFAULT(),
                             )
-                target_message_id = list(message_ids.values())[0] if message_ids else None
-                if target_message_id:
+                for entry in message_ids:
+                    target_message_id = entry.get('message_id')
+                    if not target_message_id:
+                        continue
                     target_message = await Messages.get_message_by_id(target_message_id)
                     if target_message and target_message.channel_id != channel.id:
                         raise HTTPException(
@@ -2380,13 +2945,15 @@ async def chat_completion(
                     user_message_id = user_message.get('id') if user_message else None
 
                     history_messages = {}
-                    all_assistant_ids = [assistant_id for assistant_id in message_ids.values() if assistant_id]
+                    all_assistant_ids = [entry['message_id'] for entry in message_ids if entry.get('message_id')]
 
                     if user_message_id and user_message:
                         user_message['childrenIds'] = all_assistant_ids
                         history_messages[user_message_id] = user_message
 
-                    for target_model_id, assistant_message_id in message_ids.items():
+                    for entry in message_ids:
+                        target_model_id = entry['model_id']
+                        assistant_message_id = entry['message_id']
                         if assistant_message_id:
                             history_messages[assistant_message_id] = {
                                 'id': assistant_message_id,
@@ -2399,30 +2966,99 @@ async def chat_completion(
                                 'timestamp': int(time.time()),
                             }
 
-                    await Chats.insert_new_chat(
-                        chat_id,
-                        user.id,
-                        ChatForm(
-                            chat={
-                                'id': chat_id,
-                                'title': 'New Chat',
-                                'models': list(message_ids.keys()),
-                                'history': {
-                                    'currentId': all_assistant_ids[0] if all_assistant_ids else user_message_id,
-                                    'messages': history_messages,
-                                },
-                                'messages': [
-                                    {'role': 'user', 'content': user_message.get('content', '')},
-                                ]
-                                if user_message_id
-                                else [],
-                                'files': metadata.get('files') or [],
-                                'tags': [],
-                                'timestamp': int(time.time() * 1000),
+                    new_chat_form = ChatForm(
+                        chat={
+                            'id': chat_id,
+                            'title': 'New Chat',
+                            'mode': metadata.get('chat_mode', ConversationMode.CHAT.value),
+                            'models': [entry['model_id'] for entry in message_ids],
+                            'history': {
+                                'currentId': all_assistant_ids[0] if all_assistant_ids else user_message_id,
+                                'messages': history_messages,
                             },
-                            folder_id=metadata.get('folder_id'),
-                        ),
+                            'messages': [
+                                {'role': 'user', 'content': user_message.get('content', '')},
+                            ]
+                            if user_message_id
+                            else [],
+                            'files': metadata.get('files') or [],
+                            'tags': [],
+                            'timestamp': int(time.time() * 1000),
+                        },
+                        folder_id=metadata.get('folder_id'),
                     )
+                    try:
+                        creation = await insert_new_chat_with_current_mode_profile(
+                            request.app,
+                            mode=resolution.mode,
+                            revision_hint=mode_profile_revision_hint,
+                            expected_revision_id=mode_profile_revision.id,
+                            chat_id=chat_id,
+                            user_id=user.id,
+                            form_data=new_chat_form,
+                        )
+                    except ModeProfileRevisionHintConflictError as exc:
+                        raise HTTPException(
+                            status_code=status.HTTP_409_CONFLICT,
+                            detail={
+                                'code': exc.code,
+                                'message': 'Refresh the conversation mode profile before retrying.',
+                                'current_revision_id': exc.authoritative_revision_id,
+                            },
+                        ) from exc
+                    except ModeProfileServiceUnavailableError as exc:
+                        raise HTTPException(
+                            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                            detail={
+                                'code': 'mode_profile_unavailable',
+                                'message': 'The conversation mode profile is unavailable.',
+                            },
+                        ) from exc
+                    except SQLAlchemyError as exc:
+                        raise HTTPException(
+                            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                            detail={
+                                'code': 'mode_profile_unavailable',
+                                'message': 'The conversation mode profile is unavailable.',
+                            },
+                        ) from exc
+                    except ConversationModeProfileIntegrityError as exc:
+                        _raise_mode_profile_integrity_error(exc)
+
+                    mode_profile_revision = creation.revision
+                    await publish_event(
+                        request,
+                        EVENTS.CHAT_CREATED,
+                        actor=user,
+                        subject_id=chat_id,
+                        data={'title': 'New Chat'},
+                    )
+                    if user_message_id:
+                        await publish_event(
+                            request,
+                            EVENTS.MESSAGE_CREATED,
+                            actor=user,
+                            subject_id=user_message_id,
+                            data={
+                                'chat_id': chat_id,
+                                'role': 'user',
+                                'content_preview': user_message.get('content', '')[:300],
+                            },
+                        )
+                    for entry in message_ids:
+                        assistant_message_id = entry.get('message_id')
+                        if assistant_message_id:
+                            await publish_event(
+                                request,
+                                EVENTS.MESSAGE_CREATED,
+                                actor=user,
+                                subject_id=assistant_message_id,
+                                data={
+                                    'chat_id': chat_id,
+                                    'role': 'assistant',
+                                    'model': entry.get('model_id'),
+                                },
+                            )
 
                     # Insert chat files from user message if any
                     user_message_files = user_message.get('files', [])
@@ -2441,31 +3077,73 @@ async def chat_completion(
                         except Exception as e:
                             log.debug(f'Error inserting chat files: {e}')
                             pass
-                else:
-                    # Existing chat — verify ownership
-                    if not await Chats.is_chat_owner(chat_id, user.id) and user.role != 'admin':
-                        raise HTTPException(
-                            status_code=status.HTTP_404_NOT_FOUND,
-                            detail=ERROR_MESSAGES.DEFAULT(),
-                        )
 
-                    # Persist chat-level files (knowledge collections, docs, etc.)
+                    if initial_title_generation is not None and all_assistant_ids:
+                        title_metadata = {
+                            **metadata,
+                            'message_id': all_assistant_ids[0],
+                        }
+                        event_emitter = await get_event_emitter(
+                            title_metadata,
+                            update_db=False,
+                            redaction_secrets=get_request_redaction_secrets(request),
+                        )
+                        title_ctx = {
+                            'request': request,
+                            'form_data': form_data,
+                            'user': user,
+                            'metadata': title_metadata,
+                            'tasks': {TASKS.TITLE_GENERATION: initial_title_generation},
+                            'event_emitter': event_emitter,
+                        }
+
+                        async def run_initial_title_generation():
+                            try:
+                                await background_tasks_handler(title_ctx)
+                            except Exception as e:
+                                log.debug(f'Error generating initial chat title: {e}')
+
+                        asyncio.create_task(run_initial_title_generation())
+                else:
+                    user_message = metadata.get('user_message') or {}
+                    selected_chat_models = user_message.get('models') if isinstance(user_message, dict) else None
+                    if not isinstance(selected_chat_models, list) or not selected_chat_models:
+                        selected_chat_models = [entry.get('model_id') for entry in message_ids if entry.get('model_id')]
+
+                    # Persist chat-level fields the frontend used to save on every message.
                     # The old frontend saveChatHandler did this on every message;
                     # now the backend owns persistence.
                     chat_files = metadata.get('files')
-                    if chat_files is not None:
-                        existing_chat = await Chats.get_chat_by_id(chat_id)
+                    if chat_files is not None or selected_chat_models or conversation_mode_should_persist:
+                        if existing_chat is None:
+                            existing_chat = await Chats.get_chat_by_id(chat_id)
                         if existing_chat:
-                            updated = {**existing_chat.chat, 'files': chat_files}
+                            updated = {**existing_chat.chat}
+                            if chat_files is not None:
+                                updated['files'] = chat_files
+                            if selected_chat_models:
+                                updated['models'] = selected_chat_models
+                            if conversation_mode_should_persist:
+                                updated['mode'] = metadata['chat_mode']
                             await Chats.update_chat_by_id(chat_id, updated)
 
                     # Save user message to DB
-                    user_message = metadata.get('user_message') or {}
                     if user_message and user_message.get('id'):
                         await Chats.upsert_message_to_chat_by_id_and_message_id(
                             chat_id,
                             user_message['id'],
                             user_message,
+                        )
+                        await publish_event(
+                            request,
+                            EVENTS.MESSAGE_CREATED,
+                            actor=user,
+                            subject_id=user_message['id'],
+                            data={
+                                'chat_id': chat_id,
+                                'role': user_message.get('role', 'user'),
+                                'content_preview': user_message.get('content', '')[:300],
+                            },
                         )
 
                         # Link grandparent → user message (childrenIds)
@@ -2500,7 +3178,7 @@ async def chat_completion(
 
                     # Save ALL assistant placeholders
                     user_message_id = metadata.get('user_message_id')
-                    all_assistant_ids = [assistant_id for assistant_id in message_ids.values() if assistant_id]
+                    all_assistant_ids = [entry['message_id'] for entry in message_ids if entry.get('message_id')]
 
                     # Link user message → all assistant messages (childrenIds)
                     if user_message_id and all_assistant_ids:
@@ -2517,7 +3195,9 @@ async def chat_completion(
                             )
 
                     # Save each assistant placeholder
-                    for target_model_id, assistant_message_id in message_ids.items():
+                    for entry in message_ids:
+                        target_model_id = entry['model_id']
+                        assistant_message_id = entry['message_id']
                         if assistant_message_id:
                             await Chats.upsert_message_to_chat_by_id_and_message_id(
                                 chat_id,
@@ -2533,24 +3213,117 @@ async def chat_completion(
                                     'timestamp': int(time.time()),
                                 },
                             )
+                            await publish_event(
+                                request,
+                                EVENTS.MESSAGE_CREATED,
+                                actor=user,
+                                subject_id=assistant_message_id,
+                                data={
+                                    'chat_id': chat_id,
+                                    'role': 'assistant',
+                                    'model': target_model_id,
+                                },
+                            )
 
         request.state.metadata = metadata
         form_data['metadata'] = metadata
 
-    except HTTPException:
+        if _is_agent_mode_product_chat(request, metadata, message_ids):
+            if mode_profile_revision is None or mode_profile_revision.defaults.terminal_id is INHERIT:
+                await _attach_default_agent_mode_terminal(request, form_data, user)
+            return await _start_agent_mode_chat(
+                request,
+                form_data,
+                user,
+                metadata,
+                message_ids,
+                model,
+                mode_profile_revision=mode_profile_revision,
+                model_system_prompt=model_system_prompt,
+                request_system_prompt=request_system_prompt,
+                administrator_prompt_variables=administrator_prompt_variables,
+            )
+
+    except HTTPException as exc:
+        exc.detail = redact_mode_profile_administrator_prompt(
+            exc.detail,
+            mode_profile_revision,
+            request=request,
+        )
         raise
+    except (ConversationModeProfileBindingConflict, ModeProfileRevisionHintConflictError) as exc:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail={
+                'code': 'mode_profile_binding_mismatch',
+                'message': 'Refresh the conversation mode profile before retrying.',
+            },
+        ) from exc
+    except ConversationModeProfileIntegrityError as exc:
+        _raise_mode_profile_integrity_error(exc)
+    except (ModeProfileServiceUnavailableError, SQLAlchemyError) as exc:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail={
+                'code': 'mode_profile_unavailable',
+                'message': 'The conversation mode profile is unavailable.',
+            },
+        ) from exc
     except Exception as e:
-        log.warning(f'Error processing chat metadata: {e}')
+        error_detail = redact_mode_profile_administrator_prompt(
+            str(e),
+            mode_profile_revision,
+            request=request,
+        )
+        log.warning('Error processing chat metadata: %s', error_detail)
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail=str(e),
+            detail=error_detail,
         )
 
-    async def process_chat(request, form_data, user, metadata, model, tasks=None):
+    async def process_chat(
+        request,
+        form_data,
+        user,
+        metadata,
+        model,
+        tasks,
+        *,
+        effective_model_system_prompt,
+        effective_request_system_prompt,
+    ):
         try:
-            form_data, metadata, events = await process_chat_payload(request, form_data, user, metadata, model)
+            private_context = {}
+            form_data, metadata, events = await process_chat_payload(
+                request,
+                form_data,
+                user,
+                metadata,
+                model,
+                private_context=private_context,
+            )
+            prompt_enforced, pre_rag_system_anchor = await _enforce_mode_profile_prompt(
+                request=request,
+                revision=mode_profile_revision,
+                form_data=form_data,
+                metadata=metadata,
+                user=user,
+                model_system_prompt=effective_model_system_prompt,
+                request_system_prompt=effective_request_system_prompt,
+                pre_rag_system_prompt=private_context.get('pre_rag_system_anchor'),
+                administrator_variables=administrator_prompt_variables,
+            )
 
-            response = await chat_completion_handler(request, form_data, user)
+            if prompt_enforced:
+                response = await chat_completion_handler(
+                    request,
+                    form_data,
+                    user,
+                    bypass_system_prompt=True,
+                    bypass_global_system_prompt=True,
+                )
+            else:
+                response = await chat_completion_handler(request, form_data, user)
 
             # When the upstream provider returns an error (e.g. HTTP 400
             # content-filter, quota exceeded), generate_chat_completion
@@ -2567,7 +3340,18 @@ async def chat_completion(
                     detail = f'Provider returned HTTP {response.status_code}'
                 raise Exception(detail)
 
-            ctx = await build_chat_response_context(request, form_data, user, model, metadata, tasks, events)
+            ctx = await build_chat_response_context(
+                request,
+                form_data,
+                user,
+                model,
+                metadata,
+                tasks,
+                events,
+                pre_rag_system_anchor=(
+                    pre_rag_system_anchor if prompt_enforced else private_context.get('pre_rag_system_anchor')
+                ),
+            )
 
             return await process_chat_response(response, ctx)
         except asyncio.CancelledError:
@@ -2575,7 +3359,10 @@ async def chat_completion(
             try:
 
                 async def emit_cancel_event():
-                    event_emitter = await get_event_emitter(metadata)
+                    event_emitter = await get_event_emitter(
+                        metadata,
+                        redaction_secrets=get_request_redaction_secrets(request),
+                    )
                     if event_emitter:
                         await event_emitter({'type': 'chat:tasks:cancel'})
 
@@ -2584,7 +3371,11 @@ async def chat_completion(
                 pass
             raise  # re-raise to ensure proper task cancellation handling
         except Exception as e:
-            error_detail = e.detail if isinstance(e, HTTPException) else str(e)
+            error_detail = redact_mode_profile_administrator_prompt(
+                e.detail if isinstance(e, HTTPException) else str(e),
+                mode_profile_revision,
+                request=request,
+            )
             log.error('Error processing chat payload: %s', error_detail)
             if metadata.get('chat_id') and metadata.get('message_id'):
                 # Update the chat message with the error
@@ -2601,7 +3392,10 @@ async def chat_completion(
                             },
                         )
 
-                    event_emitter = await get_event_emitter(metadata)
+                    event_emitter = await get_event_emitter(
+                        metadata,
+                        redaction_secrets=get_request_redaction_secrets(request),
+                    )
                     if event_emitter:
                         await event_emitter(
                             {
@@ -2637,16 +3431,31 @@ async def chat_completion(
             # task's current cancel scope", which propagates as a
             # BaseException through the finally block, discards the response
             # return value, and surfaces as a 500 "No response returned."
-            # MCPClient.disconnect() already catches BaseException internally.
+            # MCPClient.disconnect() suppresses known transport teardown errors
+            # while still propagating real task cancellation.
             try:
                 if mcp_clients := metadata.get('mcp_clients'):
                     for client in reversed(list(mcp_clients.values())):
                         try:
                             await client.disconnect()
                         except BaseException as e:
-                            log.debug(f'Error disconnecting MCP client: {e}')
+                            log.debug(
+                                'Error disconnecting MCP client: %s',
+                                redact_mode_profile_administrator_prompt(
+                                    str(e),
+                                    mode_profile_revision,
+                                    request=request,
+                                ),
+                            )
             except BaseException as e:
-                log.debug(f'Error cleaning up MCP clients: {e}')
+                log.debug(
+                    'Error cleaning up MCP clients: %s',
+                    redact_mode_profile_administrator_prompt(
+                        str(e),
+                        mode_profile_revision,
+                        request=request,
+                    ),
+                )
 
             # Deregister this task, then emit chat:active=false if no others remain
             try:
@@ -2655,7 +3464,11 @@ async def chat_completion(
                 if chat_id and task_id:
                     await cleanup_task(request.app.state.redis, task_id, chat_id)
                     if not await has_active_tasks(request.app.state.redis, chat_id):
-                        event_emitter = await get_event_emitter(metadata, update_db=False)
+                        event_emitter = await get_event_emitter(
+                            metadata,
+                            update_db=False,
+                            redaction_secrets=get_request_redaction_secrets(request),
+                        )
                         if event_emitter:
                             try:
                                 await asyncio.shield(event_emitter({'type': 'chat:active', 'data': {'active': False}}))
@@ -2669,27 +3482,55 @@ async def chat_completion(
         task_ids = []
         chat_id = metadata['chat_id']
 
-        for idx, (target_model_id, assistant_message_id) in enumerate(message_ids.items()):
+        for idx, entry in enumerate(message_ids):
+            target_model_id = entry['model_id']
+            assistant_message_id = entry['message_id']
             if not assistant_message_id:
                 continue
 
             # Per-model metadata: own message_id + model
+            resolved_model = request.app.state.MODELS.get(target_model_id, model)
+            if mode_profile_revision is not None:
+                resolved_model = _model_without_bound_profile_defaults(
+                    resolved_model,
+                    strip_skill_ids=(
+                        'skill_ids' in mode_profile_capability_request
+                        or mode_profile_revision.defaults.skill_ids is not INHERIT
+                    ),
+                    strip_filter_ids=(
+                        'filter_ids' in mode_profile_capability_request
+                        or mode_profile_revision.defaults.filter_ids is not INHERIT
+                    ),
+                )
             per_model_metadata = {
                 **metadata,
                 'message_id': assistant_message_id,
+                'model': resolved_model,
             }
 
-            # Per-model form_data: own model
+            target_model_info = (
+                model_info if target_model_id == model_id else await Models.get_model_by_id(target_model_id)
+            )
+            target_model_info_params = {
+                **default_model_params,
+                **(target_model_info.params.model_dump() if target_model_info and target_model_info.params else {}),
+            }
+            target_params = {
+                **target_model_info_params,
+                **request_params,
+            }
+
             model_form_data = {
                 **form_data,
                 'model': target_model_id,
                 'metadata': per_model_metadata,
             }
+            if target_params:
+                model_form_data['params'] = target_params
+            else:
+                model_form_data.pop('params', None)
 
-            # Resolve the model object for this specific model
-            resolved_model = request.app.state.MODELS.get(target_model_id, model)
-
-            # Only the first model runs title/tags generation;
+            # Only the first model runs chat-level background tasks;
             # subsequent models only run follow-ups.
             task_id, _ = await create_task(
                 request.app.state.redis,
@@ -2707,6 +3548,8 @@ async def chat_completion(
                         if k not in (TASKS.TITLE_GENERATION, TASKS.TAGS_GENERATION)
                     }
                     or None,
+                    effective_model_system_prompt=target_model_info_params.get('system'),
+                    effective_request_system_prompt=request_system_prompt,
                 ),
                 id=chat_id,
             )
@@ -2716,8 +3559,9 @@ async def chat_completion(
         # Emit chat:active=true
         if task_ids:
             event_emitter = await get_event_emitter(
-                {**metadata, 'message_id': list(message_ids.values())[0]},
+                {**metadata, 'message_id': message_ids[0]['message_id']},
                 update_db=False,
+                redaction_secrets=get_request_redaction_secrets(request),
             )
             if event_emitter:
                 await event_emitter({'type': 'chat:active', 'data': {'active': True}})
@@ -2729,8 +3573,17 @@ async def chat_completion(
         }
     else:
         # Legacy/direct: single model, synchronous
-        metadata['message_id'] = list(message_ids.values())[0]
-        return await process_chat(request, form_data, user, metadata, model, tasks)
+        metadata['message_id'] = message_ids[0]['message_id']
+        return await process_chat(
+            request,
+            form_data,
+            user,
+            metadata,
+            model,
+            tasks,
+            effective_model_system_prompt=model_system_prompt,
+            effective_request_system_prompt=request_system_prompt,
+        )
 
 
 # Alias for chat_completion (Legacy)
@@ -2882,6 +3735,13 @@ async def stop_tasks_by_chat_id_endpoint(request: Request, chat_id: str, user=De
         if chat is None or (chat.user_id != user.id and user.role != 'admin'):
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=ERROR_MESSAGES.NOT_FOUND)
     result = await stop_item_tasks(request.app.state.redis, chat_id)
+    cancelled_agent_run_ids = await agent_runs.cancel_agent_runs_for_chat(
+        request,
+        chat_id,
+        user=user,
+    )
+    if cancelled_agent_run_ids:
+        result['agent_run_ids'] = cancelled_agent_run_ids
     return result
 
 
@@ -2891,12 +3751,21 @@ async def stop_tasks_by_chat_id_endpoint(request: Request, chat_id: str, user=De
 #
 ##################################
 
+APP_CONFIG_TOKEN_VALIDATION_TIMEOUT_SECONDS = 1.0
 
-@app.get('/api/config')
-async def get_app_config(request: Request):
-    user = None
+
+async def _lookup_app_config_user(user_id: str):
+    try:
+        return await Users.get_user_by_id(user_id)
+    except Exception as exc:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail={'code': 'auth_user_lookup_unavailable'},
+        ) from exc
+
+
+async def _get_app_config_user(request: Request):
     token = None
-
     auth_header = request.headers.get('Authorization')
     if auth_header:
         cred = get_http_authorization_cred(auth_header)
@@ -2905,24 +3774,131 @@ async def get_app_config(request: Request):
 
     if not token and 'token' in request.cookies:
         token = request.cookies.get('token')
+    if not token:
+        return None
 
-    if token:
-        try:
-            data = decode_token(token)
-        except Exception as e:
-            log.debug(e)
-            raise HTTPException(
-                status_code=status.HTTP_401_UNAUTHORIZED,
-                detail='Invalid token',
-            )
-        if data is not None and 'id' in data:
-            user = await Users.get_user_by_id(data['id'])
+    try:
+        data = decode_token(token)
+    except Exception as exc:
+        log.debug(exc)
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail='Invalid token',
+        ) from exc
+    if data is None or 'id' not in data:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail='Invalid token',
+        )
+    try:
+        token_is_valid = await asyncio.wait_for(
+            is_valid_token(data, getattr(request.app.state, 'redis', None)),
+            timeout=APP_CONFIG_TOKEN_VALIDATION_TIMEOUT_SECONDS,
+        )
+    except Exception as exc:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail={'code': 'auth_token_validation_unavailable'},
+        ) from exc
+    if not token_is_valid:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail='Invalid token',
+        )
+    user = await _lookup_app_config_user(data['id'])
+    if user is None:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail='Invalid token',
+        )
+    return user
+
+
+async def _get_app_config_conversation_mode_profiles(request: Request, user):
+    if user is None or user.role not in ['admin', 'user']:
+        return None
+    try:
+        return await get_public_conversation_mode_profiles(request.app)
+    except ModeProfileServiceUnavailableError as exc:
+        detail = {
+            'code': exc.code,
+            'operation': exc.operation,
+        }
+        if exc.mode is not None:
+            detail['mode'] = exc.mode
+        raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=detail) from exc
+    except ConversationModeProfileIntegrityError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail={
+                'code': exc.code,
+                'revision_id': exc.revision_id,
+            },
+        ) from exc
+
+
+@app.get('/api/config')
+async def get_app_config(request: Request):
+    user = await _get_app_config_user(request)
 
     onboarding = False
     if user is None:
         onboarding = not await Users.has_users()
 
-    user_count = await Users.get_num_users() if app.state.LICENSE_METADATA else None
+    license_metadata = getattr(app.state, 'LICENSE_METADATA', None)
+    user_count = await Users.get_num_users() if license_metadata else None
+    config = await Config.get_many(
+        'oauth.auto_redirect',
+        'ldap.enable',
+        'ui.enable_signup',
+        'ui.enable_login_form',
+        'auth.enable_api_keys',
+        'ui.enable_password_change_form',
+        'direct.enable',
+        'folders.enable',
+        'folders.max_file_count',
+        'channels.enable',
+        'calendar.enable',
+        'automations.enable',
+        'notes.enable',
+        'web.search.enable',
+        'web.search.confirmation.enable',
+        'web.search.confirmation.content',
+        'code_execution.enable',
+        'code_interpreter.enable',
+        'image_generation.enable',
+        'task.autocomplete.enable',
+        'ui.enable_community_sharing',
+        'ui.enable_message_rating',
+        'ui.enable_user_webhooks',
+        'users.enable_status',
+        'google_drive.enable',
+        'onedrive.enable',
+        'memories.enable',
+        'agent.mode.enable',
+        'ui.default_models',
+        'ui.default_pinned_models',
+        'ui.prompt_suggestions',
+        'code_execution.engine',
+        'code_interpreter.engine',
+        'audio.tts.engine',
+        'audio.tts.voice',
+        'audio.tts.split_on',
+        'audio.stt.engine',
+        'rag.file.max_size',
+        'rag.file.max_count',
+        'file.image_compression_width',
+        'file.image_compression_height',
+        'user.permissions',
+        'ui.pending_user_overlay_title',
+        'ui.pending_user_overlay_content',
+        'ui.announcement_modal.enabled',
+        'ui.announcement_modal.key',
+        'ui.announcement_modal.title',
+        'ui.announcement_modal.content',
+        'ui.watermark',
+    )
+    conversation_mode_profiles = await _get_app_config_conversation_mode_profiles(request, user)
 
     return {
         **({'onboarding': True} if onboarding else {}),
@@ -2932,53 +3908,57 @@ async def get_app_config(request: Request):
         'default_locale': str(DEFAULT_LOCALE),
         'oauth': {
             'providers': {name: config.get('name', name) for name, config in OAUTH_PROVIDERS.items()},
-            'auto_redirect': app.state.config.OAUTH_AUTO_REDIRECT,
+            'auto_redirect': config.get('oauth.auto_redirect'),
         },
         'features': {
             # --- Public: required by login/signup page pre-auth ---
             'auth': WEBUI_AUTH,
-            'auth_trusted_header': bool(app.state.AUTH_TRUSTED_EMAIL_HEADER),
+            'auth_trusted_header': bool(WEBUI_AUTH_TRUSTED_EMAIL_HEADER),
             'enable_signup_password_confirmation': ENABLE_SIGNUP_PASSWORD_CONFIRMATION,
-            'enable_ldap': app.state.config.ENABLE_LDAP,
-            'enable_signup': app.state.config.ENABLE_SIGNUP,
-            'enable_login_form': app.state.config.ENABLE_LOGIN_FORM,
+            'enable_ldap': config.get('ldap.enable'),
+            'enable_signup': config.get('ui.enable_signup'),
+            'enable_login_form': config.get('ui.enable_login_form'),
             'enable_websocket': ENABLE_WEBSOCKET_SUPPORT,
             # --- Authenticated: only consumed by logged-in frontend ---
             **(
                 {
-                    'enable_api_keys': app.state.config.ENABLE_API_KEYS,
-                    'enable_password_change_form': app.state.config.ENABLE_PASSWORD_CHANGE_FORM,
+                    'enable_api_keys': config.get('auth.enable_api_keys'),
+                    'enable_password_change_form': config.get('ui.enable_password_change_form'),
                     'enable_version_update_check': ENABLE_VERSION_UPDATE_CHECK,
+                    'enable_pyodide_file_persistence': ENABLE_PYODIDE_FILE_PERSISTENCE,
                     'enable_public_active_users_count': ENABLE_PUBLIC_ACTIVE_USERS_COUNT,
                     'enable_easter_eggs': ENABLE_EASTER_EGGS,
-                    'enable_direct_connections': app.state.config.ENABLE_DIRECT_CONNECTIONS,
-                    'enable_folders': app.state.config.ENABLE_FOLDERS,
-                    'folder_max_file_count': app.state.config.FOLDER_MAX_FILE_COUNT,
-                    'enable_channels': app.state.config.ENABLE_CHANNELS,
-                    'enable_calendar': app.state.config.ENABLE_CALENDAR,
-                    'enable_automations': app.state.config.ENABLE_AUTOMATIONS,
-                    'enable_notes': app.state.config.ENABLE_NOTES,
-                    'enable_web_search': app.state.config.ENABLE_WEB_SEARCH,
-                    'enable_code_execution': app.state.config.ENABLE_CODE_EXECUTION,
-                    'enable_code_interpreter': app.state.config.ENABLE_CODE_INTERPRETER,
-                    'enable_image_generation': app.state.config.ENABLE_IMAGE_GENERATION,
-                    'enable_autocomplete_generation': app.state.config.ENABLE_AUTOCOMPLETE_GENERATION,
-                    'enable_community_sharing': app.state.config.ENABLE_COMMUNITY_SHARING,
-                    'enable_message_rating': app.state.config.ENABLE_MESSAGE_RATING,
-                    'enable_user_webhooks': app.state.config.ENABLE_USER_WEBHOOKS,
-                    'enable_user_status': app.state.config.ENABLE_USER_STATUS,
+                    'enable_direct_connections': config.get('direct.enable'),
+                    'enable_folders': config.get('folders.enable'),
+                    'folder_max_file_count': config.get('folders.max_file_count'),
+                    'enable_channels': config.get('channels.enable'),
+                    'enable_calendar': config.get('calendar.enable'),
+                    'enable_automations': config.get('automations.enable'),
+                    'enable_notes': config.get('notes.enable'),
+                    'enable_web_search': config.get('web.search.enable'),
+                    'enable_web_search_confirmation': config.get('web.search.confirmation.enable'),
+                    'web_search_confirmation_content': config.get('web.search.confirmation.content'),
+                    'enable_code_execution': config.get('code_execution.enable'),
+                    'enable_code_interpreter': config.get('code_interpreter.enable'),
+                    'enable_image_generation': config.get('image_generation.enable'),
+                    'enable_autocomplete_generation': config.get('task.autocomplete.enable'),
+                    'enable_community_sharing': config.get('ui.enable_community_sharing'),
+                    'enable_message_rating': config.get('ui.enable_message_rating'),
+                    'enable_user_webhooks': config.get('ui.enable_user_webhooks'),
+                    'enable_user_status': config.get('users.enable_status'),
                     'enable_admin_export': ENABLE_ADMIN_EXPORT,
                     'enable_admin_chat_access': ENABLE_ADMIN_CHAT_ACCESS,
                     'enable_admin_analytics': ENABLE_ADMIN_ANALYTICS,
-                    'enable_google_drive_integration': app.state.config.ENABLE_GOOGLE_DRIVE_INTEGRATION,
-                    'enable_onedrive_integration': app.state.config.ENABLE_ONEDRIVE_INTEGRATION,
-                    'enable_memories': app.state.config.ENABLE_MEMORIES,
+                    'enable_google_drive_integration': config.get('google_drive.enable'),
+                    'enable_onedrive_integration': config.get('onedrive.enable'),
+                    'enable_memories': config.get('memories.enable'),
+                    'enable_agent_mode': config.get('agent.mode.enable'),
                     **(
                         {
                             'enable_onedrive_personal': ENABLE_ONEDRIVE_PERSONAL,
                             'enable_onedrive_business': ENABLE_ONEDRIVE_BUSINESS,
                         }
-                        if app.state.config.ENABLE_ONEDRIVE_INTEGRATION
+                        if config.get('onedrive.enable')
                         else {}
                     ),
                 }
@@ -2988,61 +3968,62 @@ async def get_app_config(request: Request):
         },
         **(
             {
-                'default_models': app.state.config.DEFAULT_MODELS,
-                'default_pinned_models': app.state.config.DEFAULT_PINNED_MODELS,
-                'default_prompt_suggestions': app.state.config.DEFAULT_PROMPT_SUGGESTIONS,
+                'conversation_mode_profiles': conversation_mode_profiles,
+                'default_models': config.get('ui.default_models'),
+                'default_pinned_models': config.get('ui.default_pinned_models'),
+                'default_prompt_suggestions': config.get('ui.prompt_suggestions'),
                 **({'user_count': user_count} if user_count is not None else {}),
                 'code': {
-                    'engine': app.state.config.CODE_EXECUTION_ENGINE,
-                    'interpreter_engine': app.state.config.CODE_INTERPRETER_ENGINE,
+                    'engine': config.get('code_execution.engine'),
+                    'interpreter_engine': config.get('code_interpreter.engine'),
                 },
                 'audio': {
                     'tts': {
-                        'engine': app.state.config.TTS_ENGINE,
-                        'voice': app.state.config.TTS_VOICE,
-                        'split_on': app.state.config.TTS_SPLIT_ON,
+                        'engine': config.get('audio.tts.engine'),
+                        'voice': config.get('audio.tts.voice'),
+                        'split_on': config.get('audio.tts.split_on'),
                     },
                     'stt': {
-                        'engine': app.state.config.STT_ENGINE,
+                        'engine': config.get('audio.stt.engine'),
                     },
                 },
                 'file': {
-                    'max_size': app.state.config.FILE_MAX_SIZE,
-                    'max_count': app.state.config.FILE_MAX_COUNT,
+                    'max_size': config.get('rag.file.max_size'),
+                    'max_count': config.get('rag.file.max_count'),
                     'image_compression': {
-                        'width': app.state.config.FILE_IMAGE_COMPRESSION_WIDTH,
-                        'height': app.state.config.FILE_IMAGE_COMPRESSION_HEIGHT,
+                        'width': config.get('file.image_compression_width'),
+                        'height': config.get('file.image_compression_height'),
                     },
                 },
-                'permissions': {**app.state.config.USER_PERMISSIONS},
+                'permissions': {**(config.get('user.permissions') or {})},
                 'google_drive': {
-                    'client_id': GOOGLE_DRIVE_CLIENT_ID.value,
-                    'api_key': GOOGLE_DRIVE_API_KEY.value,
+                    'client_id': GOOGLE_DRIVE_CLIENT_ID,
+                    'api_key': GOOGLE_DRIVE_API_KEY,
                 },
                 'onedrive': {
                     'client_id_personal': ONEDRIVE_CLIENT_ID_PERSONAL,
                     'client_id_business': ONEDRIVE_CLIENT_ID_BUSINESS,
-                    'sharepoint_url': ONEDRIVE_SHAREPOINT_URL.value,
-                    'sharepoint_tenant_id': ONEDRIVE_SHAREPOINT_TENANT_ID.value,
+                    'sharepoint_url': ONEDRIVE_SHAREPOINT_URL,
+                    'sharepoint_tenant_id': ONEDRIVE_SHAREPOINT_TENANT_ID,
                 },
                 'ui': {
-                    'pending_user_overlay_title': app.state.config.PENDING_USER_OVERLAY_TITLE,
-                    'pending_user_overlay_content': app.state.config.PENDING_USER_OVERLAY_CONTENT,
-                    'response_watermark': app.state.config.RESPONSE_WATERMARK,
+                    'pending_user_overlay_title': config.get('ui.pending_user_overlay_title'),
+                    'pending_user_overlay_content': config.get('ui.pending_user_overlay_content'),
                     'announcement_modal': {
-                        'enabled': app.state.config.ANNOUNCEMENT_MODAL_ENABLED,
-                        'key': app.state.config.ANNOUNCEMENT_MODAL_KEY,
-                        'title': app.state.config.ANNOUNCEMENT_MODAL_TITLE,
-                        'content': app.state.config.ANNOUNCEMENT_MODAL_CONTENT,
+                        'enabled': config.get('ui.announcement_modal.enabled'),
+                        'key': config.get('ui.announcement_modal.key'),
+                        'title': config.get('ui.announcement_modal.title'),
+                        'content': config.get('ui.announcement_modal.content'),
                     },
+                    'response_watermark': config.get('ui.watermark'),
                     'iframe_csp': IFRAME_CSP,
                 },
-                'license_metadata': app.state.LICENSE_METADATA,
+                'license_metadata': license_metadata,
                 **(
                     {
-                        'active_entries': app.state.USER_COUNT,
+                        'active_entries': user_count,
                     }
-                    if user.role == 'admin'
+                    if user.role == 'admin' and user_count is not None
                     else {}
                 ),
             }
@@ -3051,8 +4032,8 @@ async def get_app_config(request: Request):
                 **(
                     {
                         'ui': {
-                            'pending_user_overlay_title': app.state.config.PENDING_USER_OVERLAY_TITLE,
-                            'pending_user_overlay_content': app.state.config.PENDING_USER_OVERLAY_CONTENT,
+                            'pending_user_overlay_title': config.get('ui.pending_user_overlay_title'),
+                            'pending_user_overlay_content': config.get('ui.pending_user_overlay_content'),
                         }
                     }
                     if user and user.role == 'pending'
@@ -3061,11 +4042,11 @@ async def get_app_config(request: Request):
                 **(
                     {
                         'metadata': {
-                            'login_footer': app.state.LICENSE_METADATA.get('login_footer', ''),
-                            'auth_logo_position': app.state.LICENSE_METADATA.get('auth_logo_position', ''),
+                            'login_footer': license_metadata.get('login_footer', ''),
+                            'auth_logo_position': license_metadata.get('auth_logo_position', ''),
                         }
                     }
-                    if app.state.LICENSE_METADATA
+                    if license_metadata
                     else {}
                 ),
             }
@@ -3073,22 +4054,115 @@ async def get_app_config(request: Request):
     }
 
 
-class UrlForm(BaseModel):
+class EventWebhookForm(BaseModel):
+    name: str | None = None
     url: str
+    enabled: bool = True
+    events: list[str] | None = None
+    targets: list[dict[str, str]] | None = None
 
 
-@app.get('/api/webhook')
-async def get_webhook_url(user=Depends(get_admin_user)):
+class EventWebhookUpdateForm(BaseModel):
+    name: str | None = None
+    url: str | None = None
+    enabled: bool | None = None
+    events: list[str] | None = None
+    targets: list[dict[str, str]] | None = None
+
+
+@app.get('/api/events')
+async def get_event_catalog(user=Depends(get_admin_user)):
     return {
-        'url': app.state.config.WEBHOOK_URL,
+        'schema': VERSION,
+        'events': get_event_catalog_items(),
     }
 
 
-@app.post('/api/webhook')
-async def update_webhook_url(form_data: UrlForm, user=Depends(get_admin_user)):
-    app.state.config.WEBHOOK_URL = form_data.url
-    app.state.WEBHOOK_URL = app.state.config.WEBHOOK_URL
-    return {'url': app.state.config.WEBHOOK_URL}
+@app.get('/api/events/webhooks')
+async def get_event_webhooks_api(user=Depends(get_admin_user)):
+    return await get_event_webhooks()
+
+
+@app.post('/api/events/webhooks')
+async def create_event_webhook(form_data: EventWebhookForm, user=Depends(get_admin_user)):
+    try:
+        webhook = await upsert_event_webhook(
+            {
+                'name': form_data.name,
+                'url': form_data.url,
+                'enabled': form_data.enabled,
+                'events': form_data.events,
+                'targets': form_data.targets,
+            }
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
+
+    await publish_event(
+        app,
+        EVENTS.CONFIG_WEBHOOK_UPDATED,
+        actor=user,
+        subject_id=webhook['id'],
+        subject_type='config',
+        data={
+            'action': 'created',
+            'enabled': webhook.get('enabled'),
+            'events': webhook.get('events'),
+            'targets': webhook.get('targets'),
+        },
+    )
+    return webhook
+
+
+@app.put('/api/events/webhooks/{webhook_id}')
+async def update_event_webhook(webhook_id: str, form_data: EventWebhookUpdateForm, user=Depends(get_admin_user)):
+    webhooks = await get_event_webhooks()
+    existing = next((webhook for webhook in webhooks if webhook.get('id') == webhook_id), None)
+    if not existing:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail='Webhook not found')
+
+    try:
+        webhook = await upsert_event_webhook(
+            {
+                **existing,
+                **form_data.model_dump(exclude_unset=True),
+                'id': webhook_id,
+            }
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
+
+    await publish_event(
+        app,
+        EVENTS.CONFIG_WEBHOOK_UPDATED,
+        actor=user,
+        subject_id=webhook_id,
+        subject_type='config',
+        data={
+            'action': 'updated',
+            'enabled': webhook.get('enabled'),
+            'events': webhook.get('events'),
+            'targets': webhook.get('targets'),
+        },
+    )
+    return webhook
+
+
+@app.delete('/api/events/webhooks/{webhook_id}')
+async def delete_event_webhook_api(webhook_id: str, user=Depends(get_admin_user)):
+    deleted = await delete_event_webhook(webhook_id)
+    if not deleted:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail='Webhook not found')
+
+    await publish_event(
+        app,
+        EVENTS.CONFIG_WEBHOOK_UPDATED,
+        actor=user,
+        subject_id=webhook_id,
+        subject_type='config',
+        data={'action': 'deleted'},
+    )
+    return {'status': True}
 
 
 @app.get('/api/version')
@@ -3154,24 +4228,6 @@ async def get_current_usage(user=Depends(get_verified_user)):
 # --- OAuth Login & Callback ---
 
 
-# Initialize OAuth client manager with any MCP tool servers using OAuth 2.1
-if len(app.state.config.TOOL_SERVER_CONNECTIONS) > 0:
-    for tool_server_connection in app.state.config.TOOL_SERVER_CONNECTIONS:
-        if tool_server_connection.get('type', 'openapi') == 'mcp':
-            server_id = tool_server_connection.get('info', {}).get('id')
-            auth_type = tool_server_connection.get('auth_type', 'none')
-
-            if server_id and auth_type in ('oauth_2.1', 'oauth_2.1_static'):
-                try:
-                    oauth_client_info = resolve_oauth_client_info(tool_server_connection)
-                    app.state.oauth_client_manager.add_client(
-                        f'mcp:{server_id}',
-                        OAuthClientInformationFull(**oauth_client_info),
-                    )
-                except Exception as e:
-                    log.error(f'Error adding OAuth client for MCP tool server {server_id}: {e}')
-                    pass
-
 try:
     if ENABLE_STAR_SESSIONS_MIDDLEWARE:
         redis_session_store = RedisStore(
@@ -3206,9 +4262,10 @@ async def register_client(request, client_id: str) -> bool:
     connection = None
     connection_idx = None
 
-    for idx, conn in enumerate(request.app.state.config.TOOL_SERVER_CONNECTIONS or []):
+    tool_server_connections = await Config.get('tool_server.connections', []) or []
+    for idx, conn in enumerate(tool_server_connections):
         if conn.get('type', 'openapi') == server_type:
-            info = conn.get('info', {})
+            info = conn.get('info') or {}
             if info.get('id') == server_id:
                 connection = conn
                 connection_idx = idx
@@ -3220,12 +4277,15 @@ async def register_client(request, client_id: str) -> bool:
 
     server_url = connection.get('url')
     auth_type = connection.get('auth_type', 'none')
+    oauth_scope = (connection.get('info') or {}).get('oauth_scope') or (connection.get('config') or {}).get(
+        'oauth_scope'
+    )
     oauth_server_key = (connection.get('config') or {}).get('oauth_server_key')
 
     try:
         if auth_type == 'oauth_2.1_static':
             # Static credentials: rebuild from admin-provided credentials + fresh metadata
-            info = connection.get('info', {})
+            info = connection.get('info') or {}
             oauth_client_id = info.get('oauth_client_id') or ''
             oauth_client_secret = info.get('oauth_client_secret') or ''
             if not oauth_client_id or not oauth_client_secret:
@@ -3243,6 +4303,7 @@ async def register_client(request, client_id: str) -> bool:
                 server_url,
                 oauth_client_id=oauth_client_id,
                 oauth_client_secret=oauth_client_secret,
+                oauth_scope=oauth_scope,
             )
         else:
             oauth_client_info = await get_oauth_client_info_with_dynamic_client_registration(
@@ -3250,28 +4311,30 @@ async def register_client(request, client_id: str) -> bool:
                 client_id,
                 server_url,
                 oauth_server_key,
+                oauth_scope=oauth_scope,
             )
     except Exception as e:
         log.error(f'OAuth client re-registration failed for {client_id}: {e}')
         return False
 
     try:
-        connections = request.app.state.config.TOOL_SERVER_CONNECTIONS
+        connections = await Config.get('tool_server.connections', []) or []
         connections[connection_idx] = {
             **connection,
             'info': {
-                **connection.get('info', {}),
+                **(connection.get('info') or {}),
                 'oauth_client_info': encrypt_data(oauth_client_info.model_dump(mode='json')),
             },
         }
-        # Re-assign the full list to trigger AppConfig.__setattr__ → ConfigVar.save()
-        # (in-place list mutation via list[idx] = ... does not trigger __setattr__)
-        request.app.state.config.TOOL_SERVER_CONNECTIONS = connections
+        await Config.upsert({'tool_server.connections': connections})
     except Exception as e:
         log.error(f'Failed to persist updated OAuth client info for tool server {client_id}: {e}')
         return False
 
     oauth_client_manager.remove_client(client_id)
+    oauth_client_info = OAuthClientInformationFull(
+        **apply_connection_oauth_options(connection, oauth_client_info.model_dump(mode='json'))
+    )
     oauth_client_manager.add_client(client_id, oauth_client_info)
     log.info(f'Re-registered OAuth client {client_id} for tool server')
     return True
@@ -3285,8 +4348,8 @@ async def oauth_client_authorize(
     user=Depends(get_verified_user),
 ):
     # ensure_valid_client_registration
-    client = oauth_client_manager.get_client(client_id)
-    client_info = oauth_client_manager.get_client_info(client_id)
+    client = await oauth_client_manager.get_client(client_id)
+    client_info = await oauth_client_manager.get_client_info(client_id)
     if client is None or client_info is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND)
 
@@ -3303,8 +4366,8 @@ async def oauth_client_authorize(
                 detail='Failed to re-register OAuth client',
             )
 
-        client = oauth_client_manager.get_client(client_id)
-        client_info = oauth_client_manager.get_client_info(client_id)
+        client = await oauth_client_manager.get_client(client_id)
+        client_info = await oauth_client_manager.get_client_info(client_id)
         if client is None or client_info is None:
             raise HTTPException(
                 status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
@@ -3377,10 +4440,11 @@ async def oauth_backchannel_logout(
 
 @app.get('/manifest.json')
 async def get_manifest_json():
-    if app.state.EXTERNAL_PWA_MANIFEST_URL:
+    external_pwa_manifest_url = getattr(app.state, 'EXTERNAL_PWA_MANIFEST_URL', None)
+    if external_pwa_manifest_url:
         session = await get_session()
         async with session.get(
-            app.state.EXTERNAL_PWA_MANIFEST_URL,
+            external_pwa_manifest_url,
             ssl=AIOHTTP_CLIENT_SESSION_SSL,
         ) as r:
             r.raise_for_status()
@@ -3417,14 +4481,15 @@ async def get_manifest_json():
 
 @app.get('/opensearch.xml')
 async def get_opensearch_xml():
+    webui_url = await Config.get('webui.url')
     xml_content = rf"""
     <OpenSearchDescription xmlns="http://a9.com/-/spec/opensearch/1.1/" xmlns:moz="http://www.mozilla.org/2006/browser/search/">
     <ShortName>{app.state.WEBUI_NAME}</ShortName>
     <Description>Search {app.state.WEBUI_NAME}</Description>
     <InputEncoding>UTF-8</InputEncoding>
-    <Image width="16" height="16" type="image/x-icon">{app.state.config.WEBUI_URL}/static/favicon.png</Image>
-    <Url type="text/html" method="get" template="{app.state.config.WEBUI_URL}/?q={'{searchTerms}'}"/>
-    <moz:SearchForm>{app.state.config.WEBUI_URL}</moz:SearchForm>
+    <Image width="16" height="16" type="image/x-icon">{webui_url}/static/favicon.png</Image>
+    <Url type="text/html" method="get" template="{webui_url}/?q={'{searchTerms}'}"/>
+    <moz:SearchForm>{webui_url}</moz:SearchForm>
     </OpenSearchDescription>
     """
     return Response(content=xml_content, media_type='application/xml')
@@ -3554,6 +4619,10 @@ applications.get_swagger_ui_html = swagger_ui_html
 
 if os.path.exists(FRONTEND_BUILD_DIR):
     mimetypes.add_type('text/javascript', '.js')
+    pyodide_dir = FRONTEND_BUILD_DIR / 'pyodide'
+    if os.path.exists(pyodide_dir):
+        app.mount('/pyodide', CORSStaticFiles(directory=pyodide_dir), name='pyodide')
+
     app.mount(
         '/',
         SPAStaticFiles(directory=FRONTEND_BUILD_DIR, html=True),

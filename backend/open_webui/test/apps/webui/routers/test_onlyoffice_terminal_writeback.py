@@ -62,6 +62,44 @@ def _terminal_connection():
     }
 
 
+async def _terminal_connection_async(request, terminal_server_id, user):
+    return _terminal_connection()
+
+
+async def _fake_user_by_id_async(user_id, db=None):
+    return _fake_user()
+
+
+@pytest.mark.asyncio
+async def test_get_terminal_connection_awaits_group_and_access_lookup(monkeypatch):
+    groups_called = False
+    access_args = None
+
+    async def _groups_for_user(user_id):
+        nonlocal groups_called
+        groups_called = True
+        assert user_id == 'user-1'
+        return [SimpleNamespace(id='group-1')]
+
+    async def _allow_access(user, connection, user_group_ids):
+        nonlocal access_args
+        access_args = (user.id, connection['id'], set(user_group_ids))
+        return True
+
+    monkeypatch.setattr(onlyoffice_mod.Groups, 'get_groups_by_member_id', _groups_for_user)
+    monkeypatch.setattr(onlyoffice_mod, 'has_connection_access', _allow_access)
+
+    connection = await onlyoffice_mod._get_terminal_connection(
+        _fake_request(terminal_connections=[_terminal_connection()]),
+        'terminals',
+        _fake_user(),
+    )
+
+    assert connection['id'] == 'terminals'
+    assert groups_called is True
+    assert access_args == ('user-1', 'terminals', {'group-1'})
+
+
 def _make_context_token(*, expires_delta=timedelta(hours=2)):
     return onlyoffice_mod.create_token(
         {
@@ -77,12 +115,22 @@ def _make_context_token(*, expires_delta=timedelta(hours=2)):
     )
 
 
+class _FakeContent:
+    def __init__(self, chunks):
+        self._chunks = chunks
+
+    async def iter_chunked(self, chunk_size):
+        for chunk in self._chunks:
+            yield chunk
+
+
 class _FakeResponse:
-    def __init__(self, *, status=200, body=b'', headers=None, json_body=None):
+    def __init__(self, *, status=200, body=b'', body_chunks=None, headers=None, json_body=None):
         self.status = status
         self._body = body
         self.headers = headers or {}
         self._json_body = json_body if json_body is not None else {}
+        self.content = _FakeContent(body_chunks if body_chunks is not None else [body])
 
     async def __aenter__(self):
         return self
@@ -97,12 +145,28 @@ class _FakeResponse:
         return self._json_body
 
 
+class _DownloadOnlyClientSession:
+    def __init__(self, response):
+        self._response = response
+        self.get_calls = []
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, exc_type, exc, tb):
+        return False
+
+    def get(self, url, **kwargs):
+        self.get_calls.append((url, kwargs))
+        return self._response
+
+
 @pytest.mark.asyncio
 async def test_create_onlyoffice_terminal_edit_session_returns_editable_config(monkeypatch):
     monkeypatch.setattr(
         onlyoffice_mod,
         '_get_terminal_connection',
-        lambda request, terminal_server_id, user: _terminal_connection(),
+        _terminal_connection_async,
     )
 
     response = await onlyoffice_mod.create_onlyoffice_session(
@@ -130,7 +194,7 @@ async def test_create_onlyoffice_terminal_view_session_does_not_force_save(monke
     monkeypatch.setattr(
         onlyoffice_mod,
         '_get_terminal_connection',
-        lambda request, terminal_server_id, user: _terminal_connection(),
+        _terminal_connection_async,
     )
 
     response = await onlyoffice_mod.create_onlyoffice_session(
@@ -151,11 +215,66 @@ async def test_create_onlyoffice_terminal_view_session_does_not_force_save(monke
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ('file_ext', 'document_type'),
+    [
+        ('pdf', 'pdf'),
+        ('docm', 'word'),
+        ('dot', 'word'),
+        ('dotm', 'word'),
+        ('dotx', 'word'),
+        ('odt', 'word'),
+        ('ott', 'word'),
+        ('ods', 'cell'),
+        ('ots', 'cell'),
+        ('xlsb', 'cell'),
+        ('xlsm', 'cell'),
+        ('xlt', 'cell'),
+        ('xltm', 'cell'),
+        ('xltx', 'cell'),
+        ('odp', 'slide'),
+        ('otp', 'slide'),
+        ('pot', 'slide'),
+        ('potm', 'slide'),
+        ('potx', 'slide'),
+        ('pps', 'slide'),
+        ('ppsm', 'slide'),
+        ('ppsx', 'slide'),
+        ('pptm', 'slide'),
+        ('rtf', 'word'),
+    ],
+)
+async def test_create_onlyoffice_terminal_view_session_supports_common_formats(
+    monkeypatch, file_ext, document_type
+):
+    monkeypatch.setattr(
+        onlyoffice_mod,
+        '_get_terminal_connection',
+        _terminal_connection_async,
+    )
+
+    response = await onlyoffice_mod.create_onlyoffice_session(
+        onlyoffice_mod.OnlyOfficeSessionForm(
+            source_type='terminal',
+            terminal_server_id='terminals',
+            terminal_file_path=f'/workspace/demo.{file_ext}',
+            mode='view',
+        ),
+        _fake_request(),
+        user=_fake_user(),
+        db=None,
+    )
+
+    assert response['config']['document']['fileType'] == file_ext
+    assert response['config']['documentType'] == document_type
+
+
+@pytest.mark.asyncio
 async def test_terminal_edit_session_embeds_callback_context(monkeypatch):
     monkeypatch.setattr(
         onlyoffice_mod,
         '_get_terminal_connection',
-        lambda request, terminal_server_id, user: _terminal_connection(),
+        _terminal_connection_async,
     )
 
     response = await onlyoffice_mod.create_onlyoffice_session(
@@ -189,7 +308,7 @@ async def test_terminal_edit_session_uses_separate_callback_ttl(monkeypatch):
     monkeypatch.setattr(
         onlyoffice_mod,
         '_get_terminal_connection',
-        lambda request, terminal_server_id, user: _terminal_connection(),
+        _terminal_connection_async,
     )
 
     response = await onlyoffice_mod.create_onlyoffice_session(
@@ -220,6 +339,69 @@ async def test_terminal_edit_session_uses_separate_callback_ttl(monkeypatch):
     decoded_preview_proxy = onlyoffice_mod.decode_token(preview_proxy_token)
     assert decoded_callback_proxy is not None and decoded_preview_proxy is not None
     assert decoded_callback_proxy['exp'] > decoded_preview_proxy['exp'] + 60 * 30
+
+
+@pytest.mark.asyncio
+async def test_terminal_file_content_awaits_connection_and_streams_upstream(monkeypatch):
+    get_calls = []
+
+    class _FakeClientSession:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+        def get(self, url, headers=None, **kwargs):
+            get_calls.append((url, headers, kwargs))
+            assert url == 'http://terminal.internal/files/view?path=/workspace/demo.docx'
+            assert headers == {
+                'X-User-Id': 'user-1',
+                'Authorization': 'Bearer session-proxy',
+            }
+            return _FakeResponse(
+                status=200,
+                body=b'docx-bytes',
+                headers={
+                    'Content-Type': 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+                    'Content-Disposition': 'attachment; filename="demo.docx"',
+                },
+            )
+
+    token = onlyoffice_mod.create_token(
+        {
+            'scope': 'onlyoffice:terminal_file',
+            'terminal_server_id': 'terminals',
+            'terminal_file_path': '/workspace/demo.docx',
+            'user_id': 'user-1',
+            'mode': 'view',
+            'session_signal': 'sig-1',
+            'session_proxy_token': 'session-proxy',
+        },
+        expires_delta=timedelta(minutes=5),
+    )
+
+    monkeypatch.setattr(onlyoffice_mod.Users, 'get_user_by_id', _fake_user_by_id_async)
+    monkeypatch.setattr(
+        onlyoffice_mod,
+        '_get_terminal_connection',
+        _terminal_connection_async,
+    )
+    monkeypatch.setattr(onlyoffice_mod.aiohttp, 'ClientSession', _FakeClientSession)
+
+    response = await onlyoffice_mod.get_onlyoffice_terminal_file_content(
+        token,
+        _fake_request(),
+        db=None,
+    )
+
+    assert response.body == b'docx-bytes'
+    assert response.media_type == 'application/vnd.openxmlformats-officedocument.wordprocessingml.document'
+    assert response.headers['content-disposition'] == 'attachment; filename="demo.docx"'
+    assert len(get_calls) == 1
 
 
 @pytest.mark.asyncio
@@ -277,8 +459,8 @@ async def test_terminal_callback_save_downloads_and_writes_back_via_terminal_api
         async def __aexit__(self, exc_type, exc, tb):
             return False
 
-        def get(self, url, headers=None):
-            call_log.append(('get', url, headers, None))
+        def get(self, url, headers=None, **kwargs):
+            call_log.append(('get', url, headers, kwargs))
             assert url == 'https://onlyoffice.example/cache/edited.docx'
             return _FakeResponse(
                 status=200,
@@ -343,6 +525,102 @@ async def test_terminal_callback_save_downloads_and_writes_back_via_terminal_api
     }
     assert call_log[4][0] == 'delete'
     assert 'path=%2Fworkspace%2Fdemo.docx.onlyoffice-fixed.backup.docx' in call_log[4][1]
+
+
+@pytest.mark.asyncio
+async def test_terminal_callback_rejects_callback_blob_redirect_to_loopback(monkeypatch):
+    response = _FakeResponse(
+        status=302,
+        headers={'Location': 'http://127.0.0.1/latest/meta-data'},
+    )
+    session = _DownloadOnlyClientSession(response)
+    writeback_calls = []
+
+    async def _fake_writeback(**kwargs):
+        writeback_calls.append(kwargs)
+
+    monkeypatch.setattr(
+        onlyoffice_mod.aiohttp,
+        'ClientSession',
+        lambda *args, **kwargs: session,
+    )
+    monkeypatch.setattr(onlyoffice_mod, '_replace_terminal_file_via_temp_upload', _fake_writeback)
+
+    with pytest.raises(HTTPException) as exc_info:
+        await onlyoffice_mod.handle_onlyoffice_terminal_callback(
+            onlyoffice_mod.OnlyOfficeCallbackForm(
+                status=2,
+                key='doc-key-1',
+                url='https://onlyoffice.example/cache/redirected.docx',
+            ),
+            _fake_request(
+                terminal_connections=[_terminal_connection()],
+                callback_allowlist=['onlyoffice.example'],
+                query_params={'context_token': _make_context_token()},
+            ),
+        )
+
+    assert exc_info.value.status_code == 400
+    assert 'redirect' in str(exc_info.value.detail).lower()
+    assert session.get_calls == [
+        ('https://onlyoffice.example/cache/redirected.docx', {'allow_redirects': False})
+    ]
+    assert writeback_calls == []
+
+
+@pytest.mark.asyncio
+async def test_download_onlyoffice_callback_blob_rejects_oversized_content_length(monkeypatch):
+    class _UnexpectedContent:
+        async def iter_chunked(self, chunk_size):
+            raise AssertionError('oversized Content-Length should be rejected before streaming')
+
+    response = _FakeResponse(
+        status=200,
+        body=b'',
+        headers={'Content-Length': '9'},
+    )
+    response.content = _UnexpectedContent()
+    session = _DownloadOnlyClientSession(response)
+
+    monkeypatch.setattr(onlyoffice_mod, 'ONLYOFFICE_EDIT_CALLBACK_MAX_BYTES', 8, raising=False)
+    monkeypatch.setattr(
+        onlyoffice_mod.aiohttp,
+        'ClientSession',
+        lambda *args, **kwargs: session,
+    )
+
+    with pytest.raises(HTTPException) as exc_info:
+        await onlyoffice_mod._download_onlyoffice_callback_blob(
+            'https://onlyoffice.example/cache/too-large.docx'
+        )
+
+    assert exc_info.value.status_code == 413
+    assert 'exceeds' in str(exc_info.value.detail).lower()
+
+
+@pytest.mark.asyncio
+async def test_download_onlyoffice_callback_blob_rejects_chunked_body_over_limit(monkeypatch):
+    response = _FakeResponse(
+        status=200,
+        body_chunks=[b'12345', b'67890'],
+        headers={'Content-Type': 'application/vnd.openxmlformats-officedocument.wordprocessingml.document'},
+    )
+    session = _DownloadOnlyClientSession(response)
+
+    monkeypatch.setattr(onlyoffice_mod, 'ONLYOFFICE_EDIT_CALLBACK_MAX_BYTES', 8, raising=False)
+    monkeypatch.setattr(
+        onlyoffice_mod.aiohttp,
+        'ClientSession',
+        lambda *args, **kwargs: session,
+    )
+
+    with pytest.raises(HTTPException) as exc_info:
+        await onlyoffice_mod._download_onlyoffice_callback_blob(
+            'https://onlyoffice.example/cache/chunked-too-large.docx'
+        )
+
+    assert exc_info.value.status_code == 413
+    assert 'exceeds' in str(exc_info.value.detail).lower()
 
 
 @pytest.mark.asyncio

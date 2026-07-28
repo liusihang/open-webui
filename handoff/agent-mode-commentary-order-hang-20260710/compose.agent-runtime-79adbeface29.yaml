@@ -1,0 +1,5 @@
+services:
+  agentscope-runtime:
+    image: open-webui-pr7-agentscope-runtime:79adbeface29-native-phase
+    build: !reset null
+    pull_policy: never

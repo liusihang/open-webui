@@ -68,6 +68,7 @@
 		displayFileHandler
 	} from '$lib/utils';
 	import { AudioQueue } from '$lib/utils/audio';
+	import { getOutputText } from './Messages/structuredOutput';
 
 	import {
 		archiveChatById,
@@ -90,27 +91,69 @@
 		generateMoACompletion,
 		stopTask,
 		stopTasksByChatId,
-		getTaskIdsByChatId
+		getTaskIdsByChatId,
+		getToolServersData
 	} from '$lib/apis';
+	import { getTerminalServers } from '$lib/apis/terminal';
 	import { getTools } from '$lib/apis/tools';
 	import { getSkills } from '$lib/apis/skills';
 	import { uploadFile } from '$lib/apis/files';
 	import { createOpenAITextStream } from '$lib/apis/streaming';
 	import { getFunctions } from '$lib/apis/functions';
+	import { initiateOAuthRedirect } from '$lib/apis/configs';
 	import { updateFolderById } from '$lib/apis/folders';
 
 	import Banner from '../common/Banner.svelte';
 	import MessageInput from '$lib/components/chat/MessageInput.svelte';
+	import { shouldEnableImageGenerationByDefault } from '$lib/components/chat/defaultFeatures';
 	import {
-		resolveImageGenerationDraftState,
-		resolveImageGenerationFeature,
-		shouldEnableImageGenerationByDefault
-	} from '$lib/components/chat/defaultFeatures';
+		buildModelReasoningPayload,
+		isAgentModeCapabilityEnabled,
+		normalizeConversationMode,
+		normalizeReasoningEffort,
+		resolveConversationModeRequestModels,
+		type ConversationMode,
+		type ReasoningEffort
+	} from '$lib/components/chat/agentModeRequest';
+	import {
+		captureConversationModeRequestContext,
+		createConversationModeCapabilityAuthorityController,
+		createConversationModeExternalCatalogCache,
+		createConversationModeProfileDraftController,
+		filterConversationModeTerminalCandidateIds,
+		getConversationModeAvailableToolIds,
+		getConversationModeDraftCapabilitySnapshot,
+		getConversationModeExternalCatalogFingerprint,
+		getConversationModeRequestFeatures,
+		isDirectToolServersPermitted,
+		migrateConversationModeLegacyDraftCapabilities,
+		parseConversationModeDraft,
+		partitionConversationModeOAuthTools,
+		resolveConversationModeProfile,
+		resolveConversationModeRequestCapabilities,
+		serializeConversationModeCapabilityRequest,
+		serializeConversationModeToolServers,
+		type ConversationModeCapabilityAuthority,
+		type ConversationModeCapabilityOverrideField,
+		type ConversationModeDraftCapabilitySnapshot,
+		type ConversationModePendingOAuthTool,
+		type ConversationModeProfileAvailability,
+		type ConversationModeProfileSelections,
+		type ConversationModeRequestContext,
+		type ConversationModeToolServer
+	} from '$lib/components/chat/conversationModeProfiles';
+	import type { ConversationModeProfilePublic } from '$lib/apis/configs';
+	import {
+		prepareLoadedChatHistory,
+		shouldApplySocketContentEvent
+	} from '$lib/components/chat/historySync';
 	import Messages from '$lib/components/chat/Messages.svelte';
 	import Navbar from '$lib/components/chat/Navbar.svelte';
 	import ChatControls from './ChatControls.svelte';
 	import EventConfirmDialog from '../common/ConfirmDialog.svelte';
+	import ConversationModeConfirmDialog from '../common/ConfirmDialog.svelte';
 	import DeleteConfirmDialog from '../common/ConfirmDialog.svelte';
+	import WebSearchConfirmDialog from '../common/ConfirmDialog.svelte';
 	import Placeholder from './Placeholder.svelte';
 	import FilesOverlay from './MessageInput/FilesOverlay.svelte';
 	import NotificationToast from '../NotificationToast.svelte';
@@ -118,7 +161,6 @@
 	import Tooltip from '../common/Tooltip.svelte';
 	import Sidebar from '../icons/Sidebar.svelte';
 	import Image from '../common/Image.svelte';
-	import { getBanners } from '$lib/apis/configs';
 
 	export let chatIdProp = '';
 
@@ -139,43 +181,141 @@
 	let navbarElement;
 
 	let showEventConfirmation = false;
+	let showConversationModeConfirmation = false;
+	let pendingConversationMode: ConversationMode | null = null;
 	let eventConfirmationTitle = '';
 	let eventConfirmationMessage = '';
 	let eventConfirmationInput = false;
 	let eventConfirmationInputPlaceholder = '';
 	let eventConfirmationInputValue = '';
 	let eventConfirmationInputType = '';
+	let eventConfirmationInputOptions: ({ label?: string; value: string } | string)[] = [];
 	let eventCallback = null;
 
 	let selectedModels = [''];
+	let conversationMode: ConversationMode = 'chat';
+	$: agentModeAvailable = isAgentModeCapabilityEnabled($config);
+	$: agentConversationUnavailable = conversationMode === 'agent' && !agentModeAvailable;
 	let atSelectedModel: Model | undefined;
-	let selectedModelIds = [];
+	let selectedModelIds: string[] = [];
 	$: if (atSelectedModel !== undefined) {
-		selectedModelIds = [atSelectedModel.id];
+		selectedModelIds = resolveConversationModeRequestModels([atSelectedModel.id], conversationMode);
 	} else {
-		selectedModelIds = selectedModels;
+		selectedModelIds = resolveConversationModeRequestModels(selectedModels, conversationMode);
 	}
 
-	let selectedToolIds = [];
-	let selectedSkillIds = [];
-	let selectedFilterIds = [];
-	let pendingOAuthTools = [];
+	let selectedToolIds: string[] = [];
+	let selectedSkillIds: string[] = [];
+	let selectedFilterIds: string[] = [];
+	let pendingOAuthTools: ConversationModePendingOAuthTool[] = [];
 
 	let imageGenerationEnabled = false;
 	let imageGenerationUserOverride: boolean | null = null;
 	let webSearchEnabled = false;
 	let codeInterpreterEnabled = false;
-	type ReasoningDepth = 'medium' | 'deep' | 'divergent';
-	let reasoningDepth: ReasoningDepth = 'medium';
+	let reasoningEffort: ReasoningEffort = 'medium';
+	let modeProfileDraftController = createConversationModeProfileDraftController();
+	let modeProfileDraftId = '';
+	let modeProfileInitializedDraftId = '';
+	let modeProfileRevisionId: string | null = null;
+	let modeProfileWarningSignature = '';
+	let modeProfileCapabilityAuthorityController =
+		createConversationModeCapabilityAuthorityController({
+			existingChat: false
+		});
+	let modeProfileCapabilityAuthority: ConversationModeCapabilityAuthority =
+		modeProfileCapabilityAuthorityController.snapshot();
+	let modeProfileCapabilityOverrideFields: ConversationModeCapabilityOverrideField[] | null = null;
+	let modeProfileControlsReady = false;
+	let modeProfileBoundTerminalId: string | null = null;
+	let latestModeProfileDraftInput: any = null;
+	let modeProfileSetupPromise: Promise<void> | null = null;
+	const modeProfileExternalCatalogCache = createConversationModeExternalCatalogCache();
+	const modeProfileExternalCatalogPromises = new Map<string, Promise<boolean>>();
+	let modeProfileCatalogGeneration = 0;
+	const invalidateModeProfileCatalogGeneration = () => {
+		modeProfileCatalogGeneration += 1;
+	};
+	const isModeProfileCatalogGenerationCurrent = (expectedGeneration?: number) =>
+		expectedGeneration === undefined || expectedGeneration === modeProfileCatalogGeneration;
+	type ModeProfileExternalCatalogRequest = {
+		fingerprint: string;
+		directToolServersPermitted: boolean;
+		terminalCandidateIds: string[];
+		configuredToolServers: any[];
+		configuredTerminalServers: any[];
+		configuredDirectTerminalIds: string[];
+		currentToolServers: ConversationModeToolServer[];
+		currentTerminalServers: ConversationModeToolServer[];
+	};
+	const MODE_PROFILE_EXTERNAL_CATALOG_TIMEOUT_MS = 5000;
+	const MODE_PROFILE_EXTERNAL_CATALOG_MAX_AGE_MS = 60_000;
+	const MODE_PROFILE_EXTERNAL_CATALOG_RETRY_MS = 10_000;
+	let webSearchActive = false;
+	let showWebSearchConfirm = false;
+	let pendingWebSearchPrompt: string | null = null;
+	let webSearchConfirmed = false;
+
+	$: {
+		const currentModels = atSelectedModel?.id ? [atSelectedModel.id] : selectedModels;
+		const allModelsSupportWebSearch =
+			currentModels.filter(
+				(model) => $models.find((m) => m.id === model)?.info?.meta?.capabilities?.web_search ?? true
+			).length === currentModels.length;
+
+		webSearchActive = Boolean(
+			$config?.features?.enable_web_search &&
+			($user?.role === 'admin' || $user?.permissions?.features?.web_search) &&
+			(webSearchEnabled ||
+				(!modeProfileRevisionId &&
+					allModelsSupportWebSearch &&
+					($settings?.webSearch ?? false) === 'always'))
+		);
+	}
+
+	const openWebSearchConfirm = () => {
+		window.setTimeout(() => {
+			showWebSearchConfirm = true;
+		}, 0);
+	};
+
+	const handleWebSearchToggle = (enabled: boolean) => {
+		if (enabled && $config?.features?.enable_web_search_confirmation && !webSearchConfirmed) {
+			webSearchEnabled = false;
+			pendingWebSearchPrompt = null;
+			openWebSearchConfirm();
+		}
+	};
+
+	const resetWebSearchConfirmation = () => {
+		webSearchConfirmed = false;
+		pendingWebSearchPrompt = null;
+		showWebSearchConfirm = false;
+	};
+
+	$: if (!webSearchActive) {
+		resetWebSearchConfirmation();
+	}
+
+	$: if (modeProfileControlsReady && $selectedTerminalId !== modeProfileBoundTerminalId) {
+		modeProfileCapabilityAuthority = modeProfileCapabilityAuthorityController.markExplicit();
+		modeProfileCapabilityOverrideFields = null;
+		modeProfileBoundTerminalId = $selectedTerminalId;
+		saveModeProfileCapabilityAuthority();
+	}
 
 	let showCommands = false;
 
 	let generating = false;
 	let dragged = false;
 	let generationController = null;
+	let contextCompactionToastId = null;
 
 	let chat = null;
 	let tags = [];
+
+	// Read-only when viewing someone else's chat (e.g. via shared folder access)
+	$: readOnly = chat != null && chat.user_id !== $user?.id;
 
 	let chatTasks = [];
 
@@ -183,6 +323,9 @@
 		messages: {},
 		currentId: null
 	};
+	$: conversationModeLocked = Boolean(
+		$chatId || Object.values(history.messages).some((message: any) => message?.role === 'user')
+	);
 
 	let taskIds = null;
 
@@ -203,6 +346,8 @@
 	}
 
 	const navigateHandler = async () => {
+		invalidateModeProfileCatalogGeneration();
+		const expectedCatalogGeneration = modeProfileCatalogGeneration;
 		// Mark the outgoing chat as read before loading the new one.
 		// $chatId still holds the previous chat here — loadChat() updates it.
 		if ($chatId && $chatId !== chatIdProp && !$temporaryChatEnabled) {
@@ -211,6 +356,7 @@
 
 		clearTimeout(saveControlsTimer);
 		await saveControls();
+		if (!isModeProfileCatalogGenerationCurrent(expectedCatalogGeneration)) return;
 		loading = true;
 
 		prompt = '';
@@ -223,18 +369,94 @@
 		webSearchEnabled = false;
 		imageGenerationEnabled = false;
 		imageGenerationUserOverride = null;
-		reasoningDepth = 'medium';
+		codeInterpreterEnabled = false;
+		clearSelectedTerminal();
+		modeProfileDraftId = '';
+		modeProfileInitializedDraftId = '';
+		modeProfileRevisionId = null;
+		modeProfileWarningSignature = '';
+		modeProfileControlsReady = false;
+		modeProfileBoundTerminalId = null;
+		modeProfileDraftController = createConversationModeProfileDraftController();
+		modeProfileCapabilityAuthorityController = createConversationModeCapabilityAuthorityController({
+			existingChat: false
+		});
+		modeProfileCapabilityAuthority = modeProfileCapabilityAuthorityController.snapshot();
+		modeProfileCapabilityOverrideFields = null;
+		reasoningEffort = 'medium';
 
 		const storageChatInput = sessionStorage.getItem(
 			`chat-input${chatIdProp ? `-${chatIdProp}` : ''}`
 		);
+		const restoredDraft = parseConversationModeDraft(storageChatInput);
+		const restoredCapabilitySnapshot = getConversationModeDraftCapabilitySnapshot(restoredDraft, {
+			existingChat: true
+		});
+		if (storageChatInput && !restoredDraft) {
+			sessionStorage.removeItem(`chat-input${chatIdProp ? `-${chatIdProp}` : ''}`);
+		}
+		if (chatIdProp) {
+			modeProfileCapabilityAuthorityController =
+				createConversationModeCapabilityAuthorityController({
+					existingChat: true,
+					persistedAuthority: restoredCapabilitySnapshot?.authority
+				});
+			modeProfileCapabilityAuthority = modeProfileCapabilityAuthorityController.snapshot();
+		}
 
-		if (chatIdProp && (await loadChat())) {
+		const loadedChat = chatIdProp ? await loadChat(chatIdProp, expectedCatalogGeneration) : false;
+		if (!isModeProfileCatalogGenerationCurrent(expectedCatalogGeneration)) return;
+		if (chatIdProp && loadedChat) {
+			let restoredLegacyCapabilities = false;
+			if (restoredDraft && !$temporaryChatEnabled) {
+				messageInput?.setText(restoredDraft.prompt);
+				files = restoredDraft.files;
+				modeProfileDraftId = `persistent:${chatIdProp}`;
+				reasoningEffort = normalizeReasoningEffort(
+					restoredDraft.reasoningEffort ?? restoredDraft.reasoningDepth
+				);
+				if (restoredCapabilitySnapshot) {
+					await restoreModeProfileCapabilitySnapshot(
+						restoredCapabilitySnapshot,
+						expectedCatalogGeneration
+					);
+				} else {
+					restoredLegacyCapabilities = await restoreLegacyModeProfileDraftCapabilities(
+						restoredDraft,
+						{
+							preserveBoundDefaults: true,
+							expectedCatalogGeneration
+						}
+					);
+				}
+				if (!isModeProfileCatalogGenerationCurrent(expectedCatalogGeneration)) return;
+			}
+			if (restoredLegacyCapabilities) {
+				await finalizeModeProfileCapabilitySnapshot(expectedCatalogGeneration);
+				if (!isModeProfileCatalogGenerationCurrent(expectedCatalogGeneration)) return;
+			} else if (!restoredCapabilitySnapshot) {
+				modeProfileBoundTerminalId = $selectedTerminalId;
+				queueMicrotask(() => {
+					if (!isModeProfileCatalogGenerationCurrent(expectedCatalogGeneration)) return;
+					modeProfileCapabilityAuthority = modeProfileCapabilityAuthorityController.observe({
+						selectedToolIds,
+						selectedSkillIds,
+						selectedFilterIds,
+						webSearchEnabled,
+						codeInterpreterEnabled,
+						imageGenerationEnabled
+					});
+					modeProfileControlsReady = true;
+				});
+			}
+
 			await tick();
+			if (!isModeProfileCatalogGenerationCurrent(expectedCatalogGeneration)) return;
 			loading = false;
 			window.setTimeout(() => scrollToBottom(), 0);
 
 			await tick();
+			if (!isModeProfileCatalogGenerationCurrent(expectedCatalogGeneration)) return;
 
 			// Mark chat read when initially loading it
 			if (chatIdProp && !$temporaryChatEnabled) {
@@ -245,30 +467,8 @@
 			const lastMessage = history.currentId ? history.messages[history.currentId] : null;
 			const isIdle = !lastMessage || lastMessage.role !== 'assistant' || lastMessage.done;
 			if (isIdle) {
-				await processNextInQueue(chatIdProp);
-			}
-
-			if (storageChatInput) {
-				try {
-					const input = JSON.parse(storageChatInput);
-
-					if (!$temporaryChatEnabled) {
-						messageInput?.setText(input.prompt);
-						files = input.files;
-						selectedToolIds = input.selectedToolIds;
-						selectedSkillIds = input.selectedSkillIds ?? [];
-						selectedFilterIds = input.selectedFilterIds;
-						webSearchEnabled = input.webSearchEnabled;
-						restoreImageGenerationFromDraft(input);
-						codeInterpreterEnabled = input.codeInterpreterEnabled;
-						reasoningDepth =
-							input.reasoningDepth === 'deep' || input.reasoningDepth === 'divergent'
-								? input.reasoningDepth
-								: 'medium';
-					}
-				} catch (e) {}
-			} else {
-				await setDefaults();
+				await processNextInQueue(chatIdProp, expectedCatalogGeneration);
+				if (!isModeProfileCatalogGenerationCurrent(expectedCatalogGeneration)) return;
 			}
 
 			const chatInput = document.getElementById('chat-input');
@@ -309,17 +509,76 @@
 		console.log('saveSessionSelectedModels', selectedModels, sessionStorage.selectedModels);
 	};
 
+	const continueOAuthRedirect = async (expectedCatalogGeneration?: number) => {
+		if (pendingOAuthTools.length === 0) {
+			sessionStorage.removeItem('oauthRedirectInProgressToolId');
+			return;
+		}
+
+		if (chatIdProp) {
+			return;
+		}
+
+		const nextTool = pendingOAuthTools[0];
+		if (sessionStorage.getItem('oauthRedirectInProgressToolId') === nextTool.id) {
+			sessionStorage.removeItem('oauthRedirectInProgressToolId');
+			return;
+		}
+
+		saveSessionSelectedModels();
+		await tick();
+		if (!isModeProfileCatalogGenerationCurrent(expectedCatalogGeneration)) return;
+		initiateOAuthRedirect(nextTool);
+	};
+
 	let oldSelectedModelIds = [''];
 	$: if (!equal(selectedModelIds, oldSelectedModelIds)) {
 		onSelectedModelIdsChange();
 	}
 
-	const onSelectedModelIdsChange = () => {
-		resetInput();
+	const runModeProfileSetup = async (setup: () => Promise<void>) => {
+		if (modeProfileSetupPromise) {
+			await modeProfileSetupPromise;
+		}
+		const setupPromise = setup();
+		modeProfileSetupPromise = setupPromise;
+		try {
+			await setupPromise;
+		} finally {
+			if (modeProfileSetupPromise === setupPromise) {
+				modeProfileSetupPromise = null;
+			}
+		}
+	};
+
+	const onSelectedModelIdsChange = async () => {
+		if (modeProfileCapabilityAuthority === 'inherit_bound') {
+			oldSelectedModelIds = structuredClone(selectedModelIds);
+			return;
+		}
+		if (!modeProfileControlsReady) {
+			oldSelectedModelIds = structuredClone(selectedModelIds);
+			return;
+		}
+		const expectedCatalogGeneration = modeProfileCatalogGeneration;
+		await runModeProfileSetup(async () => {
+			if (!isModeProfileCatalogGenerationCurrent(expectedCatalogGeneration)) return;
+			if (
+				(modeProfileInitializedDraftId && modeProfileInitializedDraftId === modeProfileDraftId) ||
+				modeProfileRevisionId
+			) {
+				await revalidateModeProfileCapabilities({ expectedCatalogGeneration });
+			} else {
+				modeProfileControlsReady = false;
+				await resetInput({ initialize: Boolean(modeProfileDraftId) });
+				if (!isModeProfileCatalogGenerationCurrent(expectedCatalogGeneration)) return;
+				await finalizeModeProfileCapabilitySnapshot(expectedCatalogGeneration);
+			}
+		});
 		oldSelectedModelIds = structuredClone(selectedModelIds);
 	};
 
-	const resetInput = async () => {
+	const resetInput = async ({ initialize = false }: { initialize?: boolean } = {}) => {
 		selectedToolIds = [];
 		selectedSkillIds = [];
 		selectedFilterIds = [];
@@ -328,19 +587,587 @@
 		imageGenerationEnabled = false;
 		imageGenerationUserOverride = null;
 		codeInterpreterEnabled = false;
-		reasoningDepth = 'medium';
+		clearSelectedTerminal();
+		if (initialize) modeProfileCapabilityOverrideFields = null;
 
-		if (selectedModelIds.filter((id) => id).length > 0) {
+		if (initialize && selectedModelIds.filter((id) => id).length > 0) {
 			await setDefaults();
 		}
 	};
 
-	/** Check whether a terminal ID references an available system or direct terminal. */
-	const isTerminalAvailable = (tid: string): boolean => {
-		return (
-			($terminalServers ?? []).some((t) => t.id && t.id === tid) ||
-			($settings?.terminalServers ?? []).some((s) => s.url === tid)
+	const clearSelectedTerminal = () => {
+		selectedTerminalId.set(null);
+		const configuredTerminalServers = (($settings as any)?.terminalServers ?? []) as Array<{
+			enabled?: boolean;
+			[key: string]: unknown;
+		}>;
+
+		if (configuredTerminalServers.some((server) => server.enabled)) {
+			settings.set({
+				...($settings as any),
+				terminalServers: configuredTerminalServers.map((server) => ({ ...server, enabled: false }))
+			} as any);
+		}
+	};
+
+	const getModeProfile = (): ConversationModeProfilePublic | null => {
+		const profiles = ($config as { conversation_mode_profiles?: ConversationModeProfilePublic[] })
+			?.conversation_mode_profiles;
+		return profiles?.find((profile) => profile.mode === conversationMode) ?? null;
+	};
+
+	const getModeProfileAvailableFeatureIds = () => {
+		const features = ($config?.features ?? {}) as Record<string, boolean | undefined>;
+		const canUse = (feature: string) =>
+			$user?.role === 'admin' || ($user?.permissions?.features?.[feature] ?? false);
+		return [
+			...(features.enable_web_search && canUse('web_search') ? ['web_search'] : []),
+			...(features.enable_code_interpreter && canUse('code_interpreter')
+				? ['code_interpreter']
+				: []),
+			...(features.enable_image_generation && canUse('image_generation')
+				? ['image_generation']
+				: [])
+		];
+	};
+
+	const getModeProfileTerminalCandidates = (
+		modelOverride: Model | undefined = undefined,
+		requestContext?: ConversationModeRequestContext<any>
+	) => {
+		const model = (requestContext?.model ??
+			modelOverride ??
+			atSelectedModel ??
+			$models.find((item) => item.id === selectedModels[0])) as any;
+		const profileTerminalId =
+			requestContext?.profile?.defaults?.terminal_id ?? getModeProfile()?.defaults?.terminal_id;
+		return [
+			...new Set([
+				requestContext?.selections.terminalId ?? $selectedTerminalId,
+				typeof profileTerminalId === 'string' ? profileTerminalId : null,
+				model?.info?.meta?.terminalId
+			])
+		].filter((id): id is string => typeof id === 'string' && id.length > 0);
+	};
+
+	const getModeProfileExternalCatalogRequest = (
+		modelOverride: Model | undefined = undefined,
+		requestContext?: ConversationModeRequestContext<any>
+	): ModeProfileExternalCatalogRequest => {
+		const directToolServersPermitted =
+			requestContext?.directToolServersPermitted ?? isDirectToolServersPermitted($user);
+		const terminalCandidateIds = getModeProfileTerminalCandidates(modelOverride, requestContext);
+		const configuredToolServers = directToolServersPermitted
+			? structuredClone((($settings as any)?.toolServers ?? []) as any[])
+			: [];
+		const configuredTerminalSettings = structuredClone(
+			(($settings as any)?.terminalServers ?? []) as any[]
 		);
+		const configuredDirectTerminalIds = configuredTerminalSettings
+			.map((server) => server?.url)
+			.filter((id): id is string => typeof id === 'string' && id.length > 0);
+		const terminalCandidates = new Set(terminalCandidateIds);
+		const configuredTerminalServers = directToolServersPermitted
+			? configuredTerminalSettings
+					.filter((server) => terminalCandidates.has(server.url))
+					.map((server) => ({
+						url: server.url,
+						auth_type: server.auth_type ?? 'bearer',
+						key: server.key ?? '',
+						path: server.path ?? '/openapi.json',
+						config: { enable: true }
+					}))
+			: [];
+		const fingerprint = getConversationModeExternalCatalogFingerprint({
+			userId: $user?.id ?? null,
+			directToolServersPermitted,
+			configuredToolServers,
+			configuredTerminalServers: configuredTerminalSettings,
+			terminalCandidateIds
+		});
+		return {
+			fingerprint,
+			directToolServersPermitted,
+			terminalCandidateIds,
+			configuredToolServers,
+			configuredTerminalServers,
+			configuredDirectTerminalIds,
+			currentToolServers: structuredClone(($toolServers ?? []) as ConversationModeToolServer[]),
+			currentTerminalServers: structuredClone(
+				($terminalServers ?? []) as ConversationModeToolServer[]
+			)
+		};
+	};
+
+	const getModeProfileExternalCatalogView = (request: ModeProfileExternalCatalogRequest) => {
+		const state = modeProfileExternalCatalogCache.snapshot(request.fingerprint);
+		return {
+			state,
+			toolServers: state.catalog?.toolServers ?? request.currentToolServers,
+			terminalServers: state.catalog?.terminalServers ?? request.currentTerminalServers,
+			directToolServerCatalogReady: state.catalog !== null
+		};
+	};
+
+	const getModeProfileAvailability = (
+		modelOverride: Model | undefined = undefined,
+		requestContext?: ConversationModeRequestContext<any>,
+		externalCatalogRequest: ModeProfileExternalCatalogRequest = getModeProfileExternalCatalogRequest(
+			modelOverride,
+			requestContext
+		)
+	): ConversationModeProfileAvailability => {
+		const model = (requestContext?.model ??
+			modelOverride ??
+			atSelectedModel ??
+			$models.find((item) => item.id === selectedModels[0])) as any;
+		const catalogView = getModeProfileExternalCatalogView(externalCatalogRequest);
+		const availableTerminals = catalogView.terminalServers as any[];
+		const configuredTerminalServers = externalCatalogRequest.configuredTerminalServers;
+		const availableTools = ($tools ?? []) as any[];
+		const availableSkills = ($skills ?? []) as any[];
+		const directTerminalPermitted = externalCatalogRequest.directToolServersPermitted;
+
+		return {
+			terminalIds: [
+				...availableTerminals
+					.map((server) => (server.id ? server.id : directTerminalPermitted ? server.url : null))
+					.filter((id): id is string => typeof id === 'string' && id.length > 0),
+				...(!catalogView.directToolServerCatalogReady && directTerminalPermitted
+					? configuredTerminalServers
+					: []
+				)
+					.map((server) => server.url)
+					.filter((id): id is string => typeof id === 'string' && id.length > 0),
+				...(!catalogView.directToolServerCatalogReady
+					? filterConversationModeTerminalCandidateIds({
+							candidateIds: externalCatalogRequest.terminalCandidateIds,
+							configuredDirectTerminalIds: externalCatalogRequest.configuredDirectTerminalIds,
+							directToolServersPermitted: directTerminalPermitted
+						})
+					: [])
+			],
+			toolIds: getConversationModeAvailableToolIds({
+				tools: availableTools,
+				toolServers: catalogView.toolServers,
+				configuredToolServers: externalCatalogRequest.configuredToolServers,
+				directToolServerCatalogReady: catalogView.directToolServerCatalogReady,
+				directToolServersPermitted: directTerminalPermitted
+			}),
+			skillIds: availableSkills
+				.filter((skill) => skill.is_active)
+				.map((skill) => skill.id)
+				.filter((id): id is string => Boolean(id)),
+			filterIds: ((model?.filters ?? []) as Array<{ id?: string }>)
+				.map((filter) => filter.id)
+				.filter((id): id is string => Boolean(id)),
+			featureIds:
+				requestContext?.featureState.availableFeatureIds ?? getModeProfileAvailableFeatureIds()
+		};
+	};
+
+	/** Check whether a terminal ID references an available system or direct terminal. */
+	const isTerminalAvailable = (tid: string): boolean =>
+		getModeProfileAvailability().terminalIds.includes(tid);
+
+	const getModeProfileSelectedToolIds = ({
+		includePendingOAuthTools = true
+	}: { includePendingOAuthTools?: boolean } = {}) => [
+		...new Set([
+			...selectedToolIds,
+			...(includePendingOAuthTools ? pendingOAuthTools.map((tool) => tool.id) : [])
+		])
+	];
+
+	const getModeProfileSelections = (
+		options: { includePendingOAuthTools?: boolean } = {}
+	): ConversationModeProfileSelections => ({
+		terminalId: $selectedTerminalId ?? null,
+		toolIds: getModeProfileSelectedToolIds(options),
+		skillIds: [...selectedSkillIds],
+		filterIds: [...selectedFilterIds],
+		featureIds: [
+			...(webSearchEnabled ? ['web_search'] : []),
+			...(imageGenerationEnabled ? ['image_generation'] : []),
+			...(codeInterpreterEnabled ? ['code_interpreter'] : [])
+		]
+	});
+
+	const withModeProfileExternalCatalogTimeout = <T,>(promise: Promise<T>, label: string) =>
+		new Promise<T>((resolve, reject) => {
+			const timeout = window.setTimeout(
+				() => reject(new Error(`${label} timed out`)),
+				MODE_PROFILE_EXTERNAL_CATALOG_TIMEOUT_MS
+			);
+			promise.then(
+				(value) => {
+					window.clearTimeout(timeout);
+					resolve(value);
+				},
+				(error) => {
+					window.clearTimeout(timeout);
+					reject(error);
+				}
+			);
+		});
+
+	const refreshModeProfileExternalCatalogs = (
+		request: ModeProfileExternalCatalogRequest,
+		{ force = false }: { force?: boolean } = {}
+	) => {
+		const { fingerprint } = request;
+		const inFlight = modeProfileExternalCatalogPromises.get(fingerprint);
+		if (inFlight) return inFlight;
+		if (!modeProfileExternalCatalogCache.begin(fingerprint, { force })) {
+			return Promise.resolve(false);
+		}
+
+		const loadPromise = (async () => {
+			try {
+				const [loadedToolServers, loadedDirectTerminals, systemTerminals] = await Promise.all([
+					withModeProfileExternalCatalogTimeout(
+						getToolServersData(request.configuredToolServers),
+						'tool server discovery'
+					),
+					withModeProfileExternalCatalogTimeout(
+						getToolServersData(request.configuredTerminalServers),
+						'direct terminal discovery'
+					),
+					withModeProfileExternalCatalogTimeout(
+						getTerminalServers(localStorage.token, { throwOnError: true }),
+						'system terminal discovery'
+					)
+				]);
+				modeProfileExternalCatalogCache.succeed(fingerprint, {
+					toolServers: (loadedToolServers ?? []).filter((server): server is Record<string, any> =>
+						Boolean(server && !server.error)
+					),
+					terminalServers: [
+						...(loadedDirectTerminals ?? []).filter((server): server is Record<string, any> =>
+							Boolean(server && !server.error)
+						),
+						...(systemTerminals ?? []).map((terminal) => ({
+							id: terminal.id,
+							url: `${WEBUI_API_BASE_URL}/terminals/${terminal.id}`,
+							name: terminal.name,
+							key: localStorage.token
+						}))
+					]
+				});
+				return true;
+			} catch (error) {
+				modeProfileExternalCatalogCache.fail(fingerprint, error);
+				console.error('[mode profile catalogs]', error);
+				return false;
+			} finally {
+				modeProfileExternalCatalogPromises.delete(fingerprint);
+			}
+		})();
+
+		modeProfileExternalCatalogPromises.set(fingerprint, loadPromise);
+		return loadPromise;
+	};
+
+	const shouldRefreshModeProfileExternalCatalog = (request: ModeProfileExternalCatalogRequest) =>
+		modeProfileExternalCatalogCache.shouldRefresh(request.fingerprint, {
+			maxAgeMs: MODE_PROFILE_EXTERNAL_CATALOG_MAX_AGE_MS,
+			retryAfterMs: MODE_PROFILE_EXTERNAL_CATALOG_RETRY_MS
+		});
+
+	const ensureModeProfileCatalogsLoaded = async () => {
+		if (!$tools) tools.set(await getTools(localStorage.token));
+		if (!$functions) functions.set(await getFunctions(localStorage.token));
+		if (!$skills) skills.set(await getSkills(localStorage.token));
+	};
+
+	const showModeProfileWarnings = (warnings: any[]) => {
+		const warningSignature = JSON.stringify(warnings);
+		if (warnings.length > 0 && warningSignature !== modeProfileWarningSignature) {
+			modeProfileWarningSignature = warningSignature;
+			toast.warning(
+				$i18n.t('Some conversation capabilities are unavailable for the selected model')
+			);
+		}
+	};
+
+	const applyModeProfileResolution = async (
+		resolution: any,
+		phase: 'initialize' | 'model_change',
+		expectedCatalogGeneration?: number
+	) => {
+		const oauthPartition = partitionConversationModeOAuthTools(
+			resolution.effective.toolIds,
+			$tools ?? []
+		);
+		selectedToolIds = oauthPartition.selectedToolIds;
+		pendingOAuthTools = oauthPartition.pendingOAuthTools;
+		selectedSkillIds = resolution.effective.skillIds;
+		selectedFilterIds = resolution.effective.filterIds;
+		webSearchEnabled = resolution.effective.featureIds.includes('web_search');
+		imageGenerationEnabled = resolution.effective.featureIds.includes('image_generation');
+		codeInterpreterEnabled = resolution.effective.featureIds.includes('code_interpreter');
+
+		const profile = getModeProfile();
+		if (
+			phase === 'initialize' &&
+			profile &&
+			Object.prototype.hasOwnProperty.call(profile.defaults, 'feature_ids')
+		) {
+			imageGenerationUserOverride = imageGenerationEnabled;
+		}
+
+		clearSelectedTerminal();
+		if (resolution.effective.terminalId) {
+			selectedTerminalId.set(resolution.effective.terminalId);
+			codeInterpreterEnabled = false;
+		}
+
+		showModeProfileWarnings(resolution.warnings);
+		await continueOAuthRedirect(expectedCatalogGeneration);
+	};
+
+	const applyModeProfileInitialization = async (
+		externalCatalogRequest = getModeProfileExternalCatalogRequest(),
+		expectedCatalogGeneration?: number
+	) => {
+		if (!modeProfileDraftId) return;
+		const model = atSelectedModel ?? $models.find((item) => item.id === selectedModels[0]);
+		const snapshot = modeProfileDraftController.initialize(
+			modeProfileDraftId,
+			resolveConversationModeProfile({
+				mode: conversationMode,
+				profile: getModeProfile(),
+				model,
+				available: getModeProfileAvailability(undefined, undefined, externalCatalogRequest),
+				phase: 'initialize'
+			})
+		);
+		if (!snapshot.applied) return;
+		modeProfileInitializedDraftId = modeProfileDraftId;
+		modeProfileRevisionId = snapshot.revisionHint;
+		await applyModeProfileResolution(snapshot, 'initialize', expectedCatalogGeneration);
+	};
+
+	const applyModeProfileModelChange = async (
+		externalCatalogRequest = getModeProfileExternalCatalogRequest(),
+		expectedCatalogGeneration?: number
+	) => {
+		const model = atSelectedModel ?? $models.find((item) => item.id === selectedModels[0]);
+		const snapshot = modeProfileDraftController.applyModelChange(
+			resolveConversationModeProfile({
+				mode: conversationMode,
+				profile: getModeProfile(),
+				model,
+				available: getModeProfileAvailability(undefined, undefined, externalCatalogRequest),
+				currentSelections: getModeProfileSelections(),
+				phase: 'model_change'
+			})
+		);
+		modeProfileRevisionId = snapshot.revisionHint;
+		await applyModeProfileResolution(snapshot, 'model_change', expectedCatalogGeneration);
+	};
+
+	const revalidateModeProfileCapabilities = async ({
+		refreshExternalCatalog = true,
+		expectedCatalogGeneration
+	}: { refreshExternalCatalog?: boolean; expectedCatalogGeneration?: number } = {}) => {
+		if (!isModeProfileCatalogGenerationCurrent(expectedCatalogGeneration)) return;
+		const restoreControlsReady = modeProfileControlsReady;
+		modeProfileControlsReady = false;
+		try {
+			await ensureModeProfileCatalogsLoaded();
+			if (!isModeProfileCatalogGenerationCurrent(expectedCatalogGeneration)) return;
+			const externalCatalogRequest = getModeProfileExternalCatalogRequest();
+			if (
+				refreshExternalCatalog &&
+				shouldRefreshModeProfileExternalCatalog(externalCatalogRequest)
+			) {
+				const state = modeProfileExternalCatalogCache.snapshot(externalCatalogRequest.fingerprint);
+				await refreshModeProfileExternalCatalogs(externalCatalogRequest, {
+					force: state.status !== 'idle'
+				});
+			}
+			if (!isModeProfileCatalogGenerationCurrent(expectedCatalogGeneration)) return;
+			await applyModeProfileModelChange(externalCatalogRequest, expectedCatalogGeneration);
+			if (!isModeProfileCatalogGenerationCurrent(expectedCatalogGeneration)) return;
+			modeProfileBoundTerminalId = $selectedTerminalId;
+			modeProfileCapabilityAuthority = modeProfileCapabilityAuthorityController.rebase({
+				selectedToolIds,
+				selectedSkillIds,
+				selectedFilterIds,
+				webSearchEnabled,
+				codeInterpreterEnabled,
+				imageGenerationEnabled
+			});
+		} finally {
+			if (
+				restoreControlsReady &&
+				isModeProfileCatalogGenerationCurrent(expectedCatalogGeneration)
+			) {
+				modeProfileControlsReady = true;
+			}
+		}
+	};
+
+	const triggerModeProfileExternalCatalogRefresh = (
+		externalCatalogRequest: ModeProfileExternalCatalogRequest
+	) => {
+		const state = modeProfileExternalCatalogCache.snapshot(externalCatalogRequest.fingerprint);
+		if (!shouldRefreshModeProfileExternalCatalog(externalCatalogRequest)) return;
+		const refreshGeneration = modeProfileCatalogGeneration;
+		const hadSuccessfulCatalog = state.catalog !== null;
+		const previousCatalog = state.catalog;
+		void refreshModeProfileExternalCatalogs(externalCatalogRequest, {
+			force: state.status !== 'idle'
+		}).then((succeeded) => {
+			if (refreshGeneration !== modeProfileCatalogGeneration) return;
+			const nextCatalog = modeProfileExternalCatalogCache.snapshot(
+				externalCatalogRequest.fingerprint
+			).catalog;
+			if (
+				succeeded &&
+				(!hadSuccessfulCatalog || !equal(previousCatalog, nextCatalog)) &&
+				modeProfileControlsReady &&
+				modeProfileCapabilityAuthority !== 'inherit_bound' &&
+				getModeProfileExternalCatalogRequest().fingerprint === externalCatalogRequest.fingerprint
+			) {
+				void runModeProfileSetup(() =>
+					revalidateModeProfileCapabilities({
+						refreshExternalCatalog: false,
+						expectedCatalogGeneration: refreshGeneration
+					})
+				);
+			}
+		});
+	};
+
+	const resolveModeProfileRequest = async (
+		requestContext: ConversationModeRequestContext<any>,
+		externalCatalogRequest: ModeProfileExternalCatalogRequest
+	) => {
+		triggerModeProfileExternalCatalogRefresh(externalCatalogRequest);
+		await ensureModeProfileCatalogsLoaded();
+		const catalogView = getModeProfileExternalCatalogView(externalCatalogRequest);
+		const resolution = resolveConversationModeRequestCapabilities({
+			authority: requestContext.authority,
+			mode: requestContext.mode,
+			profile: requestContext.profile,
+			model: requestContext.model,
+			available: getModeProfileAvailability(
+				requestContext.model as Model,
+				requestContext,
+				externalCatalogRequest
+			),
+			currentSelections: requestContext.selections
+		});
+		showModeProfileWarnings(resolution.warnings);
+		return { ...resolution, catalogView };
+	};
+
+	const finalizeModeProfileCapabilitySnapshot = async (
+		expectedCatalogGeneration = modeProfileCatalogGeneration
+	) => {
+		if (!isModeProfileCatalogGenerationCurrent(expectedCatalogGeneration)) return;
+		modeProfileBoundTerminalId = $selectedTerminalId;
+		modeProfileCapabilityAuthority = modeProfileCapabilityAuthorityController.rebase({
+			selectedToolIds,
+			selectedSkillIds,
+			selectedFilterIds,
+			webSearchEnabled,
+			codeInterpreterEnabled,
+			imageGenerationEnabled
+		});
+		modeProfileControlsReady = true;
+		await persistFinalizedModeProfileDraftSnapshot(expectedCatalogGeneration);
+	};
+
+	const restoreModeProfileCapabilitySnapshot = async (
+		snapshot: ConversationModeDraftCapabilitySnapshot,
+		expectedCatalogGeneration = modeProfileCatalogGeneration
+	) => {
+		await runModeProfileSetup(async () => {
+			if (!isModeProfileCatalogGenerationCurrent(expectedCatalogGeneration)) return;
+			modeProfileControlsReady = false;
+			modeProfileCapabilityOverrideFields = snapshot.overrideFields
+				? [...snapshot.overrideFields]
+				: null;
+			selectedToolIds = [...snapshot.selections.toolIds];
+			selectedSkillIds = [...snapshot.selections.skillIds];
+			selectedFilterIds = [...snapshot.selections.filterIds];
+			webSearchEnabled = snapshot.selections.featureIds.includes('web_search');
+			codeInterpreterEnabled = snapshot.selections.featureIds.includes('code_interpreter');
+			imageGenerationEnabled = snapshot.selections.featureIds.includes('image_generation');
+			imageGenerationUserOverride = imageGenerationEnabled;
+			clearSelectedTerminal();
+			selectedTerminalId.set(snapshot.selections.terminalId);
+
+			await revalidateModeProfileCapabilities({
+				expectedCatalogGeneration: expectedCatalogGeneration
+			});
+			if (!isModeProfileCatalogGenerationCurrent(expectedCatalogGeneration)) return;
+			await finalizeModeProfileCapabilitySnapshot(expectedCatalogGeneration);
+		});
+	};
+
+	const restoreLegacyModeProfileDraftCapabilities = async (
+		draft: any,
+		{
+			preserveBoundDefaults = false,
+			expectedCatalogGeneration = modeProfileCatalogGeneration
+		}: { preserveBoundDefaults?: boolean; expectedCatalogGeneration?: number } = {}
+	) => {
+		if (!isModeProfileCatalogGenerationCurrent(expectedCatalogGeneration)) return false;
+		const positiveMigration = migrateConversationModeLegacyDraftCapabilities(draft, {
+			terminalId: null,
+			toolIds: [],
+			skillIds: [],
+			filterIds: [],
+			featureIds: []
+		});
+		if (!positiveMigration) return false;
+
+		const model = atSelectedModel ?? $models.find((item) => item.id === selectedModels[0]);
+		if (!model) return false;
+		await ensureModeProfileCatalogsLoaded();
+		if (!isModeProfileCatalogGenerationCurrent(expectedCatalogGeneration)) return false;
+		const externalCatalogRequest = getModeProfileExternalCatalogRequest(model);
+		const externalCatalogState = modeProfileExternalCatalogCache.snapshot(
+			externalCatalogRequest.fingerprint
+		);
+		await refreshModeProfileExternalCatalogs(externalCatalogRequest, {
+			force: externalCatalogState.status === 'error'
+		});
+		if (!isModeProfileCatalogGenerationCurrent(expectedCatalogGeneration)) return false;
+		const available = getModeProfileAvailability(model, undefined, externalCatalogRequest);
+		const initializedSelections = preserveBoundDefaults
+			? { terminalId: null, toolIds: [], skillIds: [], filterIds: [], featureIds: [] }
+			: resolveConversationModeProfile({
+					mode: conversationMode,
+					profile: getModeProfile(),
+					model,
+					available,
+					phase: 'initialize'
+				}).effective;
+		const migrated = migrateConversationModeLegacyDraftCapabilities(draft, initializedSelections);
+		if (!migrated) return false;
+		const revalidated = resolveConversationModeProfile({
+			mode: conversationMode,
+			profile: getModeProfile(),
+			model,
+			available,
+			currentSelections: migrated.selections,
+			phase: 'model_change'
+		});
+
+		modeProfileControlsReady = false;
+		modeProfileCapabilityOverrideFields = preserveBoundDefaults
+			? [...(migrated.overrideFields ?? [])]
+			: null;
+		modeProfileCapabilityAuthority = modeProfileCapabilityAuthorityController.markExplicit();
+		await applyModeProfileResolution(revalidated, 'model_change', expectedCatalogGeneration);
+		if (!isModeProfileCatalogGenerationCurrent(expectedCatalogGeneration)) return false;
+		imageGenerationUserOverride = imageGenerationEnabled;
+		return true;
 	};
 
 	const hasImageGenerationAccess = () =>
@@ -349,121 +1176,195 @@
 	const getPrimaryImageGenerationModel = () =>
 		atSelectedModel ?? $models.find((m) => m.id === selectedModels[0]);
 
-	const restoreImageGenerationFromDraft = (input) => {
-		const restored = resolveImageGenerationDraftState(
-			input,
-			getPrimaryImageGenerationModel(),
-			$config?.features?.enable_image_generation ?? false,
-			hasImageGenerationAccess()
+	const beginModeProfileDraft = ({
+		restoreRootDraft = true
+	}: { restoreRootDraft?: boolean } = {}) => {
+		invalidateModeProfileCatalogGeneration();
+		const storedRootDraft =
+			restoreRootDraft && !chatIdProp ? sessionStorage.getItem('chat-input') : null;
+		const restoredRootDraft = parseConversationModeDraft(storedRootDraft);
+		const restoredRootCapabilitySnapshot = getConversationModeDraftCapabilitySnapshot(
+			restoredRootDraft,
+			{ existingChat: false }
 		);
-		imageGenerationEnabled = restored.enabled;
-		imageGenerationUserOverride = restored.userOverride;
+		if (storedRootDraft && !restoredRootDraft) {
+			sessionStorage.removeItem('chat-input');
+		}
+		modeProfileDraftId = `draft:${uuidv4()}`;
+		modeProfileInitializedDraftId = '';
+		modeProfileRevisionId =
+			restoredRootCapabilitySnapshot && typeof restoredRootDraft?.modeProfileRevisionId === 'string'
+				? restoredRootDraft.modeProfileRevisionId
+				: null;
+		modeProfileWarningSignature = '';
+		modeProfileControlsReady = false;
+		modeProfileDraftController = createConversationModeProfileDraftController();
+		modeProfileCapabilityAuthorityController = createConversationModeCapabilityAuthorityController({
+			existingChat: false,
+			persistedAuthority: restoredRootCapabilitySnapshot?.authority
+		});
+		modeProfileCapabilityAuthority = modeProfileCapabilityAuthorityController.snapshot();
+		modeProfileCapabilityOverrideFields = null;
+		modeProfileDraftController.hydrateRevisionHint(modeProfileRevisionId);
+		clearSelectedTerminal();
+		return restoredRootDraft;
 	};
 
-	const setDefaults = async () => {
-		if (!$tools) {
-			tools.set(await getTools(localStorage.token));
-		}
-		if (!$functions) {
-			functions.set(await getFunctions(localStorage.token));
-		}
-		if (!$skills) {
-			skills.set(await getSkills(localStorage.token));
-		}
-		if (selectedModels.length !== 1 && !atSelectedModel) {
-			return;
-		}
-
-		const model = atSelectedModel ?? $models.find((m) => m.id === selectedModels[0]);
-		if (model) {
-			// Set Default Tools
-			if (model?.info?.meta?.toolIds) {
-				const defaultIds = [
-					...new Set(
-						[...(model?.info?.meta?.toolIds ?? [])].filter((id) => $tools.find((t) => t.id === id))
-					)
-				];
-
-				// Separate unauthenticated OAuth tools
-				const unauthed = [];
-				const authed = [];
-				for (const id of defaultIds) {
-					const tool = $tools.find((t) => t.id === id);
-					if (tool && tool.authenticated === false) {
-						const parts = id.split(':');
-						const serverId = parts.at(-1) ?? id;
-						const authType =
-							parts.length > 1 ? (parts[0] === 'server' ? parts[1] : parts[0]) : null;
-						unauthed.push({ id, name: tool.name ?? id, serverId, authType });
-					} else {
-						authed.push(id);
-					}
-				}
-				selectedToolIds = authed;
-				pendingOAuthTools = unauthed;
-			} else if ($settings?.tools) {
-				selectedToolIds = $settings.tools;
-			} else {
-				selectedToolIds = selectedToolIds.filter((id) => !id.startsWith('direct_server:'));
+	const transitionConversationMode = async (nextMode: ConversationMode) => {
+		if (conversationModeLocked || nextMode === conversationMode) return;
+		loading = true;
+		let expectedCatalogGeneration = modeProfileCatalogGeneration;
+		try {
+			await runModeProfileSetup(async () => {
+				if (!isModeProfileCatalogGenerationCurrent(expectedCatalogGeneration)) return;
+				conversationMode = nextMode;
+				beginModeProfileDraft({ restoreRootDraft: false });
+				expectedCatalogGeneration = modeProfileCatalogGeneration;
+				await resetInput({ initialize: true });
+				if (!isModeProfileCatalogGenerationCurrent(expectedCatalogGeneration)) return;
+				await finalizeModeProfileCapabilitySnapshot(expectedCatalogGeneration);
+			});
+		} finally {
+			if (isModeProfileCatalogGenerationCurrent(expectedCatalogGeneration)) {
+				loading = false;
 			}
+		}
+	};
 
-			// Set Default Skills
-			if (model?.info?.meta?.skillIds) {
-				selectedSkillIds = [
-					...new Set(
-						[...(model?.info?.meta?.skillIds ?? [])].filter((id) =>
-							($skills ?? []).find((s) => s.id === id && s.is_active)
-						)
-					)
-				];
-			} else {
-				selectedSkillIds = [];
+	const bindCanonicalModeProfileRevision = (revisionId: unknown) => {
+		modeProfileRevisionId = modeProfileDraftController.bindCanonicalRevision(
+			typeof revisionId === 'string' ? revisionId : null
+		).revisionHint;
+	};
+
+	let settingDefaultsPromise: { generation: number; promise: Promise<void> } | null = null;
+	const setDefaults = async (expectedCatalogGeneration = modeProfileCatalogGeneration) => {
+		if (settingDefaultsPromise) {
+			const inFlight = settingDefaultsPromise;
+			await inFlight.promise;
+			if (
+				inFlight.generation === expectedCatalogGeneration ||
+				!isModeProfileCatalogGenerationCurrent(expectedCatalogGeneration)
+			) {
+				return;
 			}
-
-			// Set Default Filters (Toggleable only)
-			if (model?.info?.meta?.defaultFilterIds) {
-				selectedFilterIds = model.info.meta.defaultFilterIds.filter((id) =>
-					model?.filters?.find((f) => f.id === id)
-				);
-			}
-
-			// Set Default Features
-			if (model?.info?.meta?.defaultFeatureIds) {
-				if (
-					model.info?.meta?.capabilities?.['web_search'] &&
-					$config?.features?.enable_web_search &&
-					($user?.role === 'admin' || $user?.permissions?.features?.web_search)
-				) {
-					webSearchEnabled = model.info.meta.defaultFeatureIds.includes('web_search');
-				}
-
-				if (
-					model.info?.meta?.capabilities?.['code_interpreter'] &&
-					$config?.features?.enable_code_interpreter &&
-					($user?.role === 'admin' || $user?.permissions?.features?.code_interpreter)
-				) {
-					codeInterpreterEnabled = model.info.meta.defaultFeatureIds.includes('code_interpreter');
-				}
-			}
-
-			imageGenerationEnabled = shouldEnableImageGenerationByDefault(
-				model,
-				$config?.features?.enable_image_generation ?? false,
-				$user?.role === 'admin' || ($user?.permissions?.features?.image_generation ?? false)
+		}
+		if (!isModeProfileCatalogGenerationCurrent(expectedCatalogGeneration)) return;
+		const defaultsPromise = (async () => {
+			await ensureModeProfileCatalogsLoaded();
+			if (!isModeProfileCatalogGenerationCurrent(expectedCatalogGeneration)) return;
+			const externalCatalogRequest = getModeProfileExternalCatalogRequest();
+			const externalCatalogState = modeProfileExternalCatalogCache.snapshot(
+				externalCatalogRequest.fingerprint
 			);
-			imageGenerationUserOverride = null;
+			if (shouldRefreshModeProfileExternalCatalog(externalCatalogRequest)) {
+				await refreshModeProfileExternalCatalogs(externalCatalogRequest, {
+					force: externalCatalogState.status !== 'idle'
+				});
+			}
+			if (!isModeProfileCatalogGenerationCurrent(expectedCatalogGeneration)) return;
+			if (selectedModelIds.filter((id) => id).length !== 1 && !atSelectedModel) {
+				return;
+			}
 
-			// Set Default Terminal — only if the referenced terminal actually exists
-			if (model?.info?.meta?.terminalId) {
-				const tid = model.info.meta.terminalId;
-				if (isTerminalAvailable(tid)) {
-					selectedTerminalId.set(tid);
+			const model = atSelectedModel ?? $models.find((m) => m.id === selectedModelIds[0]);
+			if (model) {
+				if (model.info?.meta?.toolIds) {
+					const availableTools = ($tools ?? []) as any[];
+					const defaultIds = [
+						...new Set(
+							[...(model.info.meta.toolIds ?? [])].filter((id) =>
+								availableTools.find((tool) => tool.id === id)
+							)
+						)
+					];
+					const oauthPartition = partitionConversationModeOAuthTools(defaultIds, availableTools);
+					selectedToolIds = oauthPartition.selectedToolIds;
+					pendingOAuthTools = oauthPartition.pendingOAuthTools;
+					await continueOAuthRedirect(expectedCatalogGeneration);
+					if (!isModeProfileCatalogGenerationCurrent(expectedCatalogGeneration)) return;
+				} else if ($settings?.tools) {
+					selectedToolIds = $settings.tools;
+				} else {
+					selectedToolIds = selectedToolIds.filter((id) => !id.startsWith('direct_server:'));
 				}
+
+				selectedSkillIds = model.info?.meta?.skillIds
+					? [
+							...new Set(
+								model.info.meta.skillIds.filter((id) =>
+									($skills ?? []).some((s) => s.id === id && s.is_active)
+								)
+							)
+						]
+					: [];
+				if (model.info?.meta?.defaultFilterIds) {
+					selectedFilterIds = model.info.meta.defaultFilterIds.filter((id) =>
+						model.filters?.some((filter) => filter.id === id)
+					);
+				}
+				if (model.info?.meta?.defaultFeatureIds) {
+					const defaults = model.info.meta.defaultFeatureIds;
+					if (
+						model.info.meta.capabilities?.image_generation &&
+						$config?.features?.enable_image_generation &&
+						hasImageGenerationAccess()
+					)
+						imageGenerationEnabled = defaults.includes('image_generation');
+					if (
+						model.info.meta.capabilities?.web_search &&
+						$config?.features?.enable_web_search &&
+						($user?.role === 'admin' || $user?.permissions?.features?.web_search)
+					)
+						webSearchEnabled = defaults.includes('web_search');
+					if (
+						model.info.meta.capabilities?.code_interpreter &&
+						$config?.features?.enable_code_interpreter &&
+						($user?.role === 'admin' || $user?.permissions?.features?.code_interpreter)
+					)
+						codeInterpreterEnabled = defaults.includes('code_interpreter');
+				}
+				imageGenerationEnabled = shouldEnableImageGenerationByDefault(
+					model,
+					$config?.features?.enable_image_generation ?? false,
+					hasImageGenerationAccess()
+				);
+				imageGenerationUserOverride = null;
+				const defaultTerminalId = (model.info?.meta as any)?.terminalId;
+				const directTerminalIds = new Set(
+					((($settings as any)?.terminalServers ?? []) as any[])
+						.map((server) => server?.url)
+						.filter((id): id is string => typeof id === 'string')
+				);
+				if (
+					(model.info?.meta?.capabilities as any)?.function_calling !== false &&
+					(model.info?.meta?.capabilities as any)?.terminal !== false &&
+					typeof defaultTerminalId === 'string' &&
+					isTerminalAvailable(defaultTerminalId) &&
+					(!directTerminalIds.has(defaultTerminalId) || isDirectToolServersPermitted($user))
+				) {
+					selectedTerminalId.set(defaultTerminalId);
+				}
+			}
+			if (!isModeProfileCatalogGenerationCurrent(expectedCatalogGeneration)) return;
+			if (modeProfileDraftId.startsWith('draft:')) {
+				await applyModeProfileInitialization(externalCatalogRequest, expectedCatalogGeneration);
+			}
+		})();
+		settingDefaultsPromise = {
+			generation: expectedCatalogGeneration,
+			promise: defaultsPromise
+		};
+		try {
+			await defaultsPromise;
+		} finally {
+			if (settingDefaultsPromise?.promise === defaultsPromise) {
+				settingDefaultsPromise = null;
 			}
 		}
 	};
 
-	const showMessage = async (message, scroll = true) => {
+	const showMessage = async (message, scroll = true, save = true) => {
 		const _chatId = JSON.parse(JSON.stringify($chatId));
 		let _messageId = JSON.parse(JSON.stringify(message.id));
 
@@ -496,7 +1397,9 @@
 		await tick();
 		await tick();
 
-		saveChatHandler(_chatId, history);
+		if (save) {
+			saveChatHandler(_chatId, history);
+		}
 	};
 
 	const updateLastReadAt = (id) => {
@@ -518,16 +1421,61 @@
 		}
 	};
 
+	const dismissContextCompactionToast = () => {
+		if (contextCompactionToastId !== null) {
+			toast.dismiss(contextCompactionToastId);
+			contextCompactionToastId = null;
+		}
+	};
+
+	const handleContextCompactionStatus = (status) => {
+		if (status?.action !== 'context_compaction') {
+			return;
+		}
+
+		if (status?.done) {
+			if (contextCompactionToastId !== null) {
+				if (status?.error) {
+					toast.error($i18n.t('Context compaction failed'), {
+						id: contextCompactionToastId,
+						duration: 3000
+					});
+				} else {
+					toast.success($i18n.t('Context compacted'), {
+						id: contextCompactionToastId,
+						duration: 1800
+					});
+				}
+				contextCompactionToastId = null;
+			}
+			return;
+		}
+
+		if (contextCompactionToastId === null) {
+			contextCompactionToastId = toast.loading($i18n.t('Compacting context'), {
+				duration: Infinity
+			});
+		}
+	};
+
 	const chatEventHandler = async (event, cb) => {
 		console.log(event);
+		const expectedCatalogGeneration = modeProfileCatalogGeneration;
 
 		if (event.chat_id === $chatId) {
 			await tick();
+			if (
+				event.chat_id !== $chatId ||
+				!isModeProfileCatalogGenerationCurrent(expectedCatalogGeneration)
+			) {
+				return;
+			}
 			let message = history.messages[event.message_id];
 
 			if (message) {
 				const type = event?.data?.type ?? null;
 				const data = event?.data?.data ?? null;
+				const applySocketContentEvent = shouldApplySocketContentEvent(message, type);
 
 				if (type === 'status') {
 					if (message?.statusHistory) {
@@ -535,21 +1483,35 @@
 					} else {
 						message.statusHistory = [data];
 					}
+				} else if (type === 'context_compaction') {
+					handleContextCompactionStatus(data);
+				} else if (type === 'chat:active') {
+					if (!data?.active) {
+						taskIds = null;
+						if (chatIdProp && !$temporaryChatEnabled && hasPendingAssistantLeaf()) {
+							await loadChat(event.chat_id, expectedCatalogGeneration);
+						}
+					}
 				} else if (type === 'chat:completion') {
-					chatCompletionEventHandler(data, message, event.chat_id);
+					if (applySocketContentEvent) {
+						chatCompletionEventHandler(data, message, event.chat_id, expectedCatalogGeneration);
+					}
 				} else if (type === 'chat:tasks:cancel') {
+					dismissContextCompactionToast();
 					if (event.message_id === history.currentId) {
 						taskIds = null;
 						// Set all response messages to done
 						for (const messageId of history.messages[message.parentId].childrenIds) {
 							history.messages[messageId].done = true;
 						}
-						await processNextInQueue($chatId);
+						await processNextInQueue(event.chat_id, expectedCatalogGeneration);
 					} else {
 						message.done = true;
 					}
 				} else if (type === 'chat:message:delta' || type === 'message') {
-					message.content += data.content;
+					if (applySocketContentEvent) {
+						message.content += data.content;
+					}
 				} else if (type === 'chat:message' || type === 'replace') {
 					message.content = data.content;
 				} else if (type === 'chat:message:files' || type === 'files') {
@@ -561,7 +1523,19 @@
 
 					// Auto-scroll to the embed once it's rendered in the DOM
 					await tick();
+					if (
+						event.chat_id !== $chatId ||
+						!isModeProfileCatalogGenerationCurrent(expectedCatalogGeneration)
+					) {
+						return;
+					}
 					setTimeout(() => {
+						if (
+							event.chat_id !== $chatId ||
+							!isModeProfileCatalogGenerationCurrent(expectedCatalogGeneration)
+						) {
+							return;
+						}
 						const embedEl = document.getElementById(`${event.message_id}-embeds-container`);
 						if (embedEl) {
 							embedEl.scrollIntoView({ behavior: 'smooth', block: 'center' });
@@ -598,10 +1572,31 @@
 				} else if (type === 'chat:title') {
 					chatTitle.set(data);
 					currentChatPage.set(1);
-					await chats.set(await getChatList(localStorage.token, $currentChatPage));
+					const loadedChats = await getChatList(localStorage.token, $currentChatPage);
+					if (
+						event.chat_id !== $chatId ||
+						!isModeProfileCatalogGenerationCurrent(expectedCatalogGeneration)
+					) {
+						return;
+					}
+					await chats.set(loadedChats);
 				} else if (type === 'chat:tags') {
-					chat = await getChatById(localStorage.token, $chatId);
-					allTags.set(await getAllTags(localStorage.token));
+					const loadedTaggedChat = await getChatById(localStorage.token, event.chat_id);
+					if (
+						event.chat_id !== $chatId ||
+						!isModeProfileCatalogGenerationCurrent(expectedCatalogGeneration)
+					) {
+						return;
+					}
+					const loadedAllTags = await getAllTags(localStorage.token);
+					if (
+						event.chat_id !== $chatId ||
+						!isModeProfileCatalogGenerationCurrent(expectedCatalogGeneration)
+					) {
+						return;
+					}
+					chat = loadedTaggedChat;
+					allTags.set(loadedAllTags);
 				} else if (type === 'source' || type === 'citation') {
 					if (data?.type === 'code_execution') {
 						// Code execution; update existing code execution by ID, or add new one.
@@ -646,6 +1641,7 @@
 
 					eventConfirmationInput = false;
 					showEventConfirmation = true;
+					eventConfirmationInputOptions = [];
 
 					eventConfirmationTitle = data.title;
 					eventConfirmationMessage = data.message;
@@ -657,7 +1653,11 @@
 						const asyncFunction = new Function(`return (async () => { ${data.code} })()`);
 						const result = await asyncFunction(); // Await the result of the async function
 
-						if (cb) {
+						if (
+							event.chat_id === $chatId &&
+							isModeProfileCatalogGenerationCurrent(expectedCatalogGeneration) &&
+							cb
+						) {
 							cb(result);
 						}
 					} catch (error) {
@@ -673,13 +1673,20 @@
 					eventConfirmationMessage = data.message;
 					eventConfirmationInputPlaceholder = data.placeholder;
 					eventConfirmationInputValue = data?.value ?? '';
-					eventConfirmationInputType = data?.type ?? '';
+					eventConfirmationInputType = data?.input?.type ?? data?.type ?? '';
+					eventConfirmationInputOptions = data?.input?.options ?? data?.options ?? [];
 				} else if (type.startsWith('terminal:')) {
 					terminalEventHandler(type, data);
 				} else {
 					console.log('Unknown message type', data);
 				}
 
+				if (
+					event.chat_id !== $chatId ||
+					!isModeProfileCatalogGenerationCurrent(expectedCatalogGeneration)
+				) {
+					return;
+				}
 				history.messages[event.message_id] = message;
 			}
 		} else {
@@ -794,44 +1801,77 @@
 		} catch {}
 	};
 
+	const hasPendingAssistantLeaf = () =>
+		Object.values(history.messages).some(
+			(message) =>
+				message?.role === 'assistant' && !message.done && (message.childrenIds?.length ?? 0) === 0
+		);
+
+	const handleSocketConnect = async () => {
+		if (!chatIdProp || $temporaryChatEnabled) {
+			return;
+		}
+
+		if (!hasPendingAssistantLeaf()) {
+			return;
+		}
+		const targetChatId = $chatId;
+		const expectedCatalogGeneration = modeProfileCatalogGeneration;
+
+		const pendingTaskIds = await getTaskIdsByChatId(localStorage.token, targetChatId)
+			.then((res) => res?.task_ids ?? [])
+			.catch(() => null);
+
+		if (
+			pendingTaskIds?.length === 0 &&
+			$chatId === targetChatId &&
+			isModeProfileCatalogGenerationCurrent(expectedCatalogGeneration)
+		) {
+			await loadChat(targetChatId, expectedCatalogGeneration);
+		}
+	};
+
 	onMount(() => {
 		loading = true;
 		console.log('mounted');
 		window.addEventListener('message', onMessageHandler);
 		$socket?.on('events', chatEventHandler);
+		$socket?.on('connect', handleSocketConnect);
 
 		$audioQueue?.destroy();
 
 		const audioQueueInstance = new AudioQueue(document.getElementById('audioElement'));
 		audioQueue.set(audioQueueInstance);
 
-		// Restore direct terminal enabled states based on persisted selectedTerminalId
+		// Restore direct terminal enabled states based on persisted selectedTerminalId.
+		// A revoked direct-server permission must not reactivate a restored direct terminal.
 		if ($settings?.terminalServers?.length) {
 			settings.set({
 				...$settings,
 				terminalServers: ($settings.terminalServers ?? []).map((s) => ({
 					...s,
-					enabled: $selectedTerminalId !== null && s.url === $selectedTerminalId
+					enabled:
+						isDirectToolServersPermitted($user) &&
+						$selectedTerminalId !== null &&
+						s.url === $selectedTerminalId
 				}))
 			});
 		}
 
 		// Clear stale selectedTerminalId if the referenced terminal no longer exists
-		if ($selectedTerminalId && !isTerminalAvailable($selectedTerminalId)) {
-			selectedTerminalId.set(null);
+		const mountedExternalCatalogRequest = getModeProfileExternalCatalogRequest();
+		if (
+			modeProfileExternalCatalogCache.snapshot(mountedExternalCatalogRequest.fingerprint).catalog &&
+			$selectedTerminalId &&
+			!isTerminalAvailable($selectedTerminalId)
+		) {
+			clearSelectedTerminal();
 		}
 
 		const pageSubscribe = page.subscribe(async (p) => {
 			if (p.url.pathname === '/') {
 				await tick();
 				initNewChat();
-
-				// Re-fetch banners on navigation to homepage so newly configured banners appear
-				try {
-					banners.set(await getBanners(localStorage.token).catch(() => []));
-				} catch (e) {
-					console.error('Failed to refresh banners:', e);
-				}
 			}
 
 			stopAudio();
@@ -870,45 +1910,34 @@
 		const storageChatInput = sessionStorage.getItem(
 			`chat-input${chatIdProp ? `-${chatIdProp}` : ''}`
 		);
+		const restoredDraft = parseConversationModeDraft(storageChatInput);
+		if (storageChatInput && !restoredDraft) {
+			sessionStorage.removeItem(`chat-input${chatIdProp ? `-${chatIdProp}` : ''}`);
+		}
 
 		const init = async () => {
 			if (!chatIdProp) {
-				loading = false;
 				await tick();
 			}
 
-			if (storageChatInput) {
+			if (restoredDraft && !chatIdProp) {
 				prompt = '';
 				messageInput?.setText('');
 
 				files = [];
-				selectedToolIds = [];
-				selectedSkillIds = [];
-				selectedFilterIds = [];
-				webSearchEnabled = false;
-				imageGenerationEnabled = false;
-				imageGenerationUserOverride = null;
-				codeInterpreterEnabled = false;
-				reasoningDepth = 'medium';
+				reasoningEffort = 'medium';
 
-				try {
-					const input = JSON.parse(storageChatInput);
-
-					if (!$temporaryChatEnabled) {
-						messageInput?.setText(input.prompt);
-						files = input.files;
-						selectedToolIds = input.selectedToolIds;
-						selectedSkillIds = input.selectedSkillIds ?? [];
-						selectedFilterIds = input.selectedFilterIds;
-						webSearchEnabled = input.webSearchEnabled;
-						restoreImageGenerationFromDraft(input);
-						codeInterpreterEnabled = input.codeInterpreterEnabled;
-						reasoningDepth =
-							input.reasoningDepth === 'deep' || input.reasoningDepth === 'divergent'
-								? input.reasoningDepth
-								: 'medium';
+				if (!$temporaryChatEnabled) {
+					prompt = restoredDraft.prompt;
+					messageInput?.setText(restoredDraft.prompt);
+					files = restoredDraft.files;
+					reasoningEffort = normalizeReasoningEffort(
+						restoredDraft.reasoningEffort ?? restoredDraft.reasoningDepth
+					);
+					if (typeof restoredDraft.conversationMode === 'string') {
+						conversationMode = normalizeConversationMode(restoredDraft.conversationMode);
 					}
-				} catch (e) {}
+				}
 			}
 
 			const chatInput = document.getElementById('chat-input');
@@ -917,6 +1946,7 @@
 		init();
 
 		return () => {
+			invalidateModeProfileCatalogGeneration();
 			try {
 				clearTimeout(saveControlsTimer);
 				saveControls();
@@ -928,6 +1958,8 @@
 				selectedFolderSubscribe();
 				window.removeEventListener('message', onMessageHandler);
 				$socket?.off('events', chatEventHandler);
+				$socket?.off('connect', handleSocketConnect);
+				dismissContextCompactionToast();
 				audioQueueInstance?.destroy();
 				audioQueue.set(null);
 			} catch (e) {
@@ -1022,12 +2054,15 @@
 			}
 
 			// If the file is an audio file, provide the language for STT.
-			let metadata = null;
+			let metadata: Record<string, string> = {
+				upload_context: 'chat'
+			};
 			if (
 				(file.type.startsWith('audio/') || file.type.startsWith('video/')) &&
 				$settings?.audio?.stt?.language
 			) {
 				metadata = {
+					...metadata,
 					language: $settings?.audio?.stt?.language
 				};
 			}
@@ -1134,14 +2169,51 @@
 
 	$: onHistoryChange(history);
 
+	const dispatchCallOverlayAudio = (message, final = false) => {
+		if (!$showCallOverlay) {
+			return;
+		}
+
+		const messageContentParts = getMessageContentParts(
+			getOutputText(message?.output) || removeAllDetails(message?.content ?? ''),
+			$config?.audio?.tts?.split_on ?? 'punctuation'
+		);
+		if (!final) {
+			messageContentParts.pop();
+		}
+
+		const nextContentPart = messageContentParts.at(-1) ?? '';
+		if (!nextContentPart || (!final && nextContentPart === message.lastSentence)) {
+			return;
+		}
+
+		if (!final) {
+			message.lastSentence = nextContentPart;
+		}
+
+		eventTarget.dispatchEvent(
+			new CustomEvent('chat', {
+				detail: {
+					id: message.id,
+					content: nextContentPart
+				}
+			})
+		);
+	};
+
 	const getContents = () => {
 		const messages = history ? createMessagesList(history, history.currentId) : [];
 		let contents = [];
 		messages.forEach((message) => {
-			if (message?.role !== 'user' && message?.content) {
-				const { codeBlocks: codeBlocks, htmlGroups: htmlGroups } = getCodeBlockContents(
-					message.content
-				);
+			if (message?.role !== 'user') {
+				const messageContent =
+					getOutputText(message?.output) || removeAllDetails(message?.content ?? '');
+				if (!messageContent.trim()) {
+					return;
+				}
+
+				const { codeBlocks: codeBlocks, htmlGroups: htmlGroups } =
+					getCodeBlockContents(messageContent);
 
 				if (htmlGroups && htmlGroups.length > 0) {
 					htmlGroups.forEach((group) => {
@@ -1188,23 +2260,47 @@
 	// Web functions
 	//////////////////////////
 
-	const initNewChat = async () => {
+	const initNewChat = async (preselectedMode: ConversationMode | null = null) => {
 		console.log('initNewChat');
+		loading = true;
+		resetWebSearchConfirmation();
+		const requestedMode =
+			preselectedMode ?? normalizeConversationMode($page.url.searchParams.get('mode'));
+		conversationMode = requestedMode;
+		const restoredRootDraft = beginModeProfileDraft();
+		const expectedCatalogGeneration = modeProfileCatalogGeneration;
+		const restoredRootCapabilitySnapshot = getConversationModeDraftCapabilitySnapshot(
+			restoredRootDraft,
+			{ existingChat: false }
+		);
+		pendingConversationMode = null;
+		chat = null;
+
+		// Mark the outgoing chat as read before resetting; in-place created chats
+		// keep chatIdProp undefined, so navigateHandler never marks them read.
+		if ($chatId && !$temporaryChatEnabled) {
+			updateLastReadAt($chatId);
+		}
+
 		if ($user?.role !== 'admin' && $user?.permissions?.chat?.temporary_enforced) {
 			await temporaryChatEnabled.set(true);
+			if (!isModeProfileCatalogGenerationCurrent(expectedCatalogGeneration)) return;
 		}
 
 		if ($settings?.temporaryChatByDefault ?? false) {
 			if ($temporaryChatEnabled === false) {
 				await temporaryChatEnabled.set(true);
+				if (!isModeProfileCatalogGenerationCurrent(expectedCatalogGeneration)) return;
 			} else if ($temporaryChatEnabled === null) {
 				// if set to null set to false; refer to temp chat toggle click handler
 				await temporaryChatEnabled.set(false);
+				if (!isModeProfileCatalogGenerationCurrent(expectedCatalogGeneration)) return;
 			}
 		}
 
 		if ($user?.role !== 'admin' && !$user?.permissions?.chat?.temporary) {
 			await temporaryChatEnabled.set(false);
+			if (!isModeProfileCatalogGenerationCurrent(expectedCatalogGeneration)) return;
 		}
 
 		const availableModels = $models
@@ -1227,6 +2323,7 @@
 					if (modelSelectorButton) {
 						modelSelectorButton.click();
 						await tick();
+						if (!isModeProfileCatalogGenerationCurrent(expectedCatalogGeneration)) return;
 
 						const modelSelectorInput = document.getElementById('model-search-input');
 						if (modelSelectorInput) {
@@ -1293,9 +2390,12 @@
 
 		if ($mobile) {
 			await showControls.set(false);
+			if (!isModeProfileCatalogGenerationCurrent(expectedCatalogGeneration)) return;
 		}
 		await showCallOverlay.set(false);
+		if (!isModeProfileCatalogGenerationCurrent(expectedCatalogGeneration)) return;
 		await showArtifacts.set(false);
+		if (!isModeProfileCatalogGenerationCurrent(expectedCatalogGeneration)) return;
 
 		if ($page.url.pathname.includes('/c/')) {
 			window.history.replaceState(history.state, '', `/`);
@@ -1303,9 +2403,23 @@
 
 		autoScroll = true;
 
-		await resetInput();
+		await resetInput({ initialize: restoredRootCapabilitySnapshot === null });
+		if (!isModeProfileCatalogGenerationCurrent(expectedCatalogGeneration)) return;
+		if (restoredRootCapabilitySnapshot) {
+			await restoreModeProfileCapabilitySnapshot(
+				restoredRootCapabilitySnapshot,
+				expectedCatalogGeneration
+			);
+		} else {
+			await restoreLegacyModeProfileDraftCapabilities(restoredRootDraft, {
+				expectedCatalogGeneration
+			});
+		}
+		if (!isModeProfileCatalogGenerationCurrent(expectedCatalogGeneration)) return;
 		await chatId.set('');
+		if (!isModeProfileCatalogGenerationCurrent(expectedCatalogGeneration)) return;
 		await chatTitle.set('');
+		if (!isModeProfileCatalogGenerationCurrent(expectedCatalogGeneration)) return;
 
 		history = {
 			messages: {},
@@ -1319,10 +2433,12 @@
 
 		if ($page.url.searchParams.get('youtube')) {
 			await uploadWeb(`https://www.youtube.com/watch?v=${$page.url.searchParams.get('youtube')}`);
+			if (!isModeProfileCatalogGenerationCurrent(expectedCatalogGeneration)) return;
 		}
 
 		if ($page.url.searchParams.get('load-url')) {
 			await uploadWeb($page.url.searchParams.get('load-url'));
+			if (!isModeProfileCatalogGenerationCurrent(expectedCatalogGeneration)) return;
 		}
 
 		if ($page.url.searchParams.get('web-search') === 'true') {
@@ -1361,6 +2477,12 @@
 			}
 		}
 
+		await finalizeModeProfileCapabilitySnapshot(expectedCatalogGeneration);
+		if (!isModeProfileCatalogGenerationCurrent(expectedCatalogGeneration)) return;
+		loading = false;
+		await tick();
+		if (!isModeProfileCatalogGenerationCurrent(expectedCatalogGeneration)) return;
+
 		if ($page.url.searchParams.get('call') === 'true') {
 			showCallOverlay.set(true);
 			showControls.set(true);
@@ -1376,6 +2498,7 @@
 				// showControlsSubscribe's initial callback (value=false → set(false))
 				// which runs as a pending microtask after this function.
 				setTimeout(() => {
+					if (!isModeProfileCatalogGenerationCurrent(expectedCatalogGeneration)) return;
 					showCallOverlay.set(true);
 					showControls.set(true);
 				}, 0);
@@ -1402,6 +2525,7 @@
 						messageInput?.setText(query);
 					}
 					await tick();
+					if (!isModeProfileCatalogGenerationCurrent(expectedCatalogGeneration)) return;
 					submitHandler(query || '');
 				}
 			}
@@ -1412,6 +2536,7 @@
 			if (q) {
 				if (($page.url.searchParams.get('submit') ?? 'true') === 'true') {
 					await tick();
+					if (!isModeProfileCatalogGenerationCurrent(expectedCatalogGeneration)) return;
 					submitHandler(q);
 				}
 			}
@@ -1422,101 +2547,125 @@
 		);
 
 		const chatInput = document.getElementById('chat-input');
-		setTimeout(() => chatInput?.focus(), 0);
+		setTimeout(() => {
+			if (!isModeProfileCatalogGenerationCurrent(expectedCatalogGeneration)) return;
+			chatInput?.focus();
+		}, 0);
 	};
 
-	const loadChat = async () => {
-		chatId.set(chatIdProp);
+	const loadChat = async (
+		targetChatId = chatIdProp,
+		expectedCatalogGeneration = modeProfileCatalogGeneration
+	) => {
+		if (!targetChatId || !isModeProfileCatalogGenerationCurrent(expectedCatalogGeneration)) {
+			return false;
+		}
+		chatId.set(targetChatId);
 
 		if ($temporaryChatEnabled) {
 			temporaryChatEnabled.set(false);
 		}
 
-		chat = await getChatById(localStorage.token, $chatId).catch(async (error) => {
-			await goto('/');
+		const loadedChat = await getChatById(localStorage.token, targetChatId).catch((error) => {
+			console.error('[load chat]', error);
 			return null;
 		});
+		if (
+			$chatId !== targetChatId ||
+			!isModeProfileCatalogGenerationCurrent(expectedCatalogGeneration)
+		) {
+			return false;
+		}
+		if (!loadedChat) {
+			await goto('/');
+			return null;
+		}
 
-		if (chat) {
-			tags = await getTagsById(localStorage.token, $chatId).catch(async (error) => {
-				return [];
-			});
+		const loadedTags = await getTagsById(localStorage.token, targetChatId).catch(() => []);
+		if (
+			$chatId !== targetChatId ||
+			!isModeProfileCatalogGenerationCurrent(expectedCatalogGeneration)
+		) {
+			return false;
+		}
+		chat = loadedChat;
+		tags = loadedTags;
 
-			const chatContent = chat.chat;
+		const chatContent = loadedChat.chat;
 
-			if (chatContent) {
-				console.log(chatContent);
+		if (chatContent) {
+			console.log(chatContent);
+			conversationMode = normalizeConversationMode(chatContent?.mode);
+			bindCanonicalModeProfileRevision(loadedChat?.mode_profile_revision_id);
 
-				selectedModels =
-					(chatContent?.models ?? undefined) !== undefined
-						? chatContent.models
-						: [chatContent.models ?? ''];
+			selectedModels =
+				(chatContent?.models ?? undefined) !== undefined
+					? chatContent.models
+					: [chatContent.models ?? ''];
 
-				if (!($user?.role === 'admin' || ($user?.permissions?.chat?.multiple_models ?? true))) {
-					selectedModels = selectedModels.length > 0 ? [selectedModels[0]] : [''];
-				}
-
-				oldSelectedModelIds = structuredClone(selectedModels);
-
-				history =
-					(chatContent?.history ?? undefined) !== undefined
-						? chatContent.history
-						: convertMessagesToHistory(chatContent.messages);
-
-				// Sanitize history: repair orphaned references and structurally-malformed
-				// nodes from failed regenerations (#24424, #24157, #20474)
-				sanitizeHistory(history);
-
-				chatTitle.set(chatContent.title);
-
-				params = chatContent?.params ?? {};
-				chatFiles = chatContent?.files ?? [];
-
-				// Load tasks from chat-level DB field
-				chatTasks = chat?.tasks ?? [];
-
-				autoScroll = true;
-				await tick();
-
-				// Mark all non-current assistant messages as done
-				if (history.currentId) {
-					for (const message of Object.values(history.messages)) {
-						if (
-							message &&
-							message.role === 'assistant' &&
-							message.id !== history.currentId &&
-							message.done !== false
-						) {
-							message.done = true;
-						}
-					}
-				}
-
-				// Reconcile active tasks with message state:
-				// If the response is already done, remaining tasks are just background
-				// work (follow-ups, title gen) that shouldn't block the input.
-				const pendingTaskIds = await getTaskIdsByChatId(localStorage.token, $chatId)
-					.then((res) => res?.task_ids ?? [])
-					.catch(() => []);
-				const currentMessage = history.currentId ? history.messages[history.currentId] : null;
-				const responseComplete = currentMessage?.role === 'assistant' && currentMessage?.done;
-
-				if (pendingTaskIds.length > 0 && !responseComplete) {
-					taskIds = pendingTaskIds;
-				} else {
-					taskIds = null;
-					// No active tasks and message incomplete → generation was interrupted
-					if (currentMessage?.role === 'assistant' && !currentMessage.done) {
-						currentMessage.done = true;
-					}
-				}
-
-				await tick();
-
-				return true;
-			} else {
-				return null;
+			if (!($user?.role === 'admin' || ($user?.permissions?.chat?.multiple_models ?? true))) {
+				selectedModels = selectedModels.length > 0 ? [selectedModels[0]] : [''];
 			}
+
+			oldSelectedModelIds = structuredClone(selectedModels);
+
+			const loadedHistory =
+				(chatContent?.history ?? undefined) !== undefined
+					? chatContent.history
+					: convertMessagesToHistory(chatContent.messages);
+
+			// Sanitize history: repair orphaned references and structurally-malformed
+			// nodes from failed regenerations (#24424, #24157, #20474)
+			sanitizeHistory(loadedHistory);
+
+			chatTitle.set(chatContent.title);
+
+			params = structuredClone(chatContent?.params ?? {});
+			chatFiles = structuredClone(chatContent?.files ?? []);
+
+			// Load tasks from chat-level DB field
+			chatTasks = loadedChat?.tasks ?? [];
+
+			autoScroll = true;
+			await tick();
+			if (
+				$chatId !== targetChatId ||
+				!isModeProfileCatalogGenerationCurrent(expectedCatalogGeneration)
+			) {
+				return false;
+			}
+
+			// Reconcile active tasks with message state:
+			// If the response is already done, remaining tasks are just background
+			// work (follow-ups, title gen) that shouldn't block the input.
+			const activeTaskIds = taskIds;
+			const pendingTaskIds = await getTaskIdsByChatId(localStorage.token, targetChatId)
+				.then((res) => res?.task_ids ?? [])
+				.catch(() => []);
+			if (
+				$chatId !== targetChatId ||
+				!isModeProfileCatalogGenerationCurrent(expectedCatalogGeneration)
+			) {
+				return false;
+			}
+			if (taskIds !== activeTaskIds) {
+				return;
+			}
+			const loadedHistoryState = prepareLoadedChatHistory(history, loadedHistory, pendingTaskIds);
+			history = loadedHistoryState.history;
+			taskIds = loadedHistoryState.taskIds;
+
+			await tick();
+			if (
+				$chatId !== targetChatId ||
+				!isModeProfileCatalogGenerationCurrent(expectedCatalogGeneration)
+			) {
+				return false;
+			}
+
+			return true;
+		} else {
+			return null;
 		}
 	};
 
@@ -1557,20 +2706,20 @@
 		await messagesRef?.scrollToTop();
 	};
 
-	let scrollRAF = null;
 	let contentsRAF = null;
-	const scheduleScrollToBottom = () => {
-		if (!scrollRAF) {
-			scrollRAF = requestAnimationFrame(async () => {
-				scrollRAF = null;
-				await scrollToBottom();
-			});
-		}
-	};
 
 	let processingQueueChats = new Set<string>();
 
-	const processNextInQueue = async (targetChatId: string) => {
+	const processNextInQueue = async (
+		targetChatId: string,
+		expectedCatalogGeneration = modeProfileCatalogGeneration
+	) => {
+		if (
+			$chatId !== targetChatId ||
+			!isModeProfileCatalogGenerationCurrent(expectedCatalogGeneration)
+		) {
+			return;
+		}
 		if (processingQueueChats.has(targetChatId)) return;
 
 		const queue = $chatRequestQueues[targetChatId];
@@ -1592,17 +2741,42 @@
 		}
 	};
 
-	const chatCompletedHandler = async (_chatId, modelId, responseMessageId, messages) => {
+	const chatCompletedHandler = async (
+		_chatId,
+		modelId,
+		responseMessageId,
+		expectedCatalogGeneration = modeProfileCatalogGeneration
+	) => {
 		// Backend handles outlet filters and persistence inline.
 		// Just refresh the sidebar chat list.
-		if ($chatId == _chatId && !$temporaryChatEnabled) {
+		const targetChatId = _chatId;
+		if (
+			$chatId === targetChatId &&
+			isModeProfileCatalogGenerationCurrent(expectedCatalogGeneration) &&
+			!$temporaryChatEnabled
+		) {
+			const loadedChats = await getChatList(localStorage.token, 1);
+			if (
+				$chatId !== targetChatId ||
+				!isModeProfileCatalogGenerationCurrent(expectedCatalogGeneration) ||
+				$temporaryChatEnabled
+			) {
+				return;
+			}
 			currentChatPage.set(1);
-			await chats.set(await getChatList(localStorage.token, $currentChatPage));
+			chats.set(loadedChats);
 		}
-		taskIds = null;
 	};
 
 	const chatActionHandler = async (_chatId, actionId, modelId, responseMessageId, event = null) => {
+		const targetChatId = _chatId;
+		const expectedCatalogGeneration = modeProfileCatalogGeneration;
+		if (
+			$chatId !== targetChatId ||
+			!isModeProfileCatalogGenerationCurrent(expectedCatalogGeneration)
+		) {
+			return;
+		}
 		const messages = createMessagesList(history, responseMessageId);
 
 		const res = await chatAction(localStorage.token, actionId, {
@@ -1617,14 +2791,25 @@
 			})),
 			...(event ? { event: event } : {}),
 			model_item: $models.find((m) => m.id === modelId),
-			chat_id: _chatId,
+			chat_id: targetChatId,
 			session_id: $socket?.id,
 			id: responseMessageId
 		}).catch((error) => {
-			toast.error(`${error}`);
-			messages.at(-1).error = { content: error };
+			if (
+				$chatId === targetChatId &&
+				isModeProfileCatalogGenerationCurrent(expectedCatalogGeneration)
+			) {
+				toast.error(`${error}`);
+				messages.at(-1).error = { content: error };
+			}
 			return null;
 		});
+		if (
+			$chatId !== targetChatId ||
+			!isModeProfileCatalogGenerationCurrent(expectedCatalogGeneration)
+		) {
+			return;
+		}
 
 		if (res !== null && res.messages) {
 			// Update chat history with the new messages
@@ -1639,18 +2824,32 @@
 			}
 		}
 
-		if ($chatId == _chatId) {
+		if ($chatId === targetChatId) {
 			if (!$temporaryChatEnabled) {
-				chat = await updateChatById(localStorage.token, _chatId, {
+				const savedChat = await updateChatById(localStorage.token, targetChatId, {
 					models: selectedModels,
 					messages: messages,
 					history: history,
 					params: params,
 					files: chatFiles
 				});
+				if (
+					$chatId !== targetChatId ||
+					!isModeProfileCatalogGenerationCurrent(expectedCatalogGeneration)
+				) {
+					return;
+				}
+				chat = savedChat;
 
 				currentChatPage.set(1);
-				await chats.set(await getChatList(localStorage.token, $currentChatPage));
+				const loadedChats = await getChatList(localStorage.token, $currentChatPage);
+				if (
+					$chatId !== targetChatId ||
+					!isModeProfileCatalogGenerationCurrent(expectedCatalogGeneration)
+				) {
+					return;
+				}
+				await chats.set(loadedChats);
 			}
 		}
 	};
@@ -1666,7 +2865,6 @@
 	};
 
 	const createMessagePair = async (userPrompt) => {
-		messageInput?.setText('');
 		if (selectedModels.length === 0) {
 			toast.error($i18n.t('Model not selected'));
 		} else {
@@ -1677,6 +2875,11 @@
 				toast.error($i18n.t('Model not found'));
 				return;
 			}
+
+			await runAcceptedSubmitDraftCriticalSection(async () => {
+				await messageInput?.setText('');
+				prompt = '';
+			});
 
 			const messages = createMessagesList(history, history.currentId);
 			const parentMessage = messages.length !== 0 ? messages.at(-1) : null;
@@ -1793,26 +2996,64 @@
 		}
 	};
 
-	const chatCompletionEventHandler = async (data, message, chatId) => {
-		const { id, done, choices, content, output, sources, selected_model_id, error, usage } = data;
+	const chatCompletionEventHandler = async (
+		data,
+		message,
+		targetChatId,
+		expectedCatalogGeneration = modeProfileCatalogGeneration
+	) => {
+		if (
+			$chatId !== targetChatId ||
+			!isModeProfileCatalogGenerationCurrent(expectedCatalogGeneration)
+		) {
+			return;
+		}
+		const {
+			id,
+			done,
+			choices,
+			content,
+			output,
+			sources,
+			metadata,
+			selected_model_id,
+			error,
+			usage
+		} = data;
 
 		// Store raw OR-aligned output items from backend
 		if (output) {
 			message.output = output;
+			message.content = getOutputText(output);
+			dispatchCallOverlayAudio(message);
 		}
 
 		if (error) {
 			await handleOpenAIError(error, message);
+			if (
+				$chatId !== targetChatId ||
+				!isModeProfileCatalogGenerationCurrent(expectedCatalogGeneration)
+			) {
+				return;
+			}
 		}
 
 		if (sources && !message?.sources) {
 			message.sources = sources;
 		}
 
-		if (choices) {
+		if (metadata) {
+			message.metadata = {
+				...(message.metadata ?? {}),
+				...metadata
+			};
+		}
+
+		if (choices && !output) {
 			if (choices[0]?.message?.content) {
 				// Non-stream response
 				message.content += choices[0]?.message?.content;
+				dispatchCallOverlayAudio(message);
 			} else {
 				// Stream response
 				let value = choices[0]?.delta?.content ?? '';
@@ -1824,67 +3065,19 @@
 					if (navigator.vibrate && ($settings?.hapticFeedback ?? false)) {
 						navigator.vibrate(5);
 					}
-
-					// Emit chat event for TTS (only when call overlay is active)
-					if ($showCallOverlay) {
-						const messageContentParts = getMessageContentParts(
-							removeAllDetails(message.content),
-							$config?.audio?.tts?.split_on ?? 'punctuation'
-						);
-						messageContentParts.pop();
-
-						// dispatch only last sentence and make sure it hasn't been dispatched before
-						if (
-							messageContentParts.length > 0 &&
-							messageContentParts[messageContentParts.length - 1] !== message.lastSentence
-						) {
-							message.lastSentence = messageContentParts[messageContentParts.length - 1];
-							eventTarget.dispatchEvent(
-								new CustomEvent('chat', {
-									detail: {
-										id: message.id,
-										content: messageContentParts[messageContentParts.length - 1]
-									}
-								})
-							);
-						}
-					}
+					dispatchCallOverlayAudio(message);
 				}
 			}
 		}
 
-		if (content) {
+		if (content && !output) {
 			// REALTIME_CHAT_SAVE is disabled
 			message.content = content;
 
 			if (navigator.vibrate && ($settings?.hapticFeedback ?? false)) {
 				navigator.vibrate(5);
 			}
-
-			// Emit chat event for TTS (only when call overlay is active)
-			if ($showCallOverlay) {
-				const messageContentParts = getMessageContentParts(
-					removeAllDetails(message.content),
-					$config?.audio?.tts?.split_on ?? 'punctuation'
-				);
-				messageContentParts.pop();
-
-				// dispatch only last sentence and make sure it hasn't been dispatched before
-				if (
-					messageContentParts.length > 0 &&
-					messageContentParts[messageContentParts.length - 1] !== message.lastSentence
-				) {
-					message.lastSentence = messageContentParts[messageContentParts.length - 1];
-					eventTarget.dispatchEvent(
-						new CustomEvent('chat', {
-							detail: {
-								id: message.id,
-								content: messageContentParts[messageContentParts.length - 1]
-							}
-						})
-					);
-				}
-			}
+			dispatchCallOverlayAudio(message);
 		}
 
 		if (selected_model_id) {
@@ -1900,36 +3093,31 @@
 
 		if (done) {
 			message.done = true;
+			const visibleContent =
+				getOutputText(message?.output) || removeAllDetails(message?.content ?? '');
 
 			if ($settings.responseAutoCopy) {
-				copyToClipboard(message.content);
+				copyToClipboard(visibleContent);
 			}
 
 			if ($settings.responseAutoPlayback && !$showCallOverlay) {
 				await tick();
+				if (
+					$chatId !== targetChatId ||
+					!isModeProfileCatalogGenerationCurrent(expectedCatalogGeneration)
+				) {
+					return;
+				}
 				document.getElementById(`speak-button-${message.id}`)?.click();
 			}
 
 			// Emit chat event for TTS (only when call overlay is active)
-			if ($showCallOverlay) {
-				let lastMessageContentPart =
-					getMessageContentParts(
-						removeAllDetails(message.content),
-						$config?.audio?.tts?.split_on ?? 'punctuation'
-					)?.at(-1) ?? '';
-				if (lastMessageContentPart) {
-					eventTarget.dispatchEvent(
-						new CustomEvent('chat', {
-							detail: { id: message.id, content: lastMessageContentPart }
-						})
-					);
-				}
-			}
+			dispatchCallOverlayAudio(message, true);
 			eventTarget.dispatchEvent(
 				new CustomEvent('chat:finish', {
 					detail: {
 						id: message.id,
-						content: message.content
+						content: visibleContent
 					}
 				})
 			);
@@ -1937,6 +3125,12 @@
 			history.messages[message.id] = message;
 
 			await tick();
+			if (
+				$chatId !== targetChatId ||
+				!isModeProfileCatalogGenerationCurrent(expectedCatalogGeneration)
+			) {
+				return;
+			}
 			if (autoScroll) {
 				scrollToBottom();
 			}
@@ -1944,23 +3138,20 @@
 			// Fire-and-forget: run chatCompletedHandler for background work
 			// (outlet filters, chat save, title gen, follow-ups, tags)
 			// without blocking the user from sending new messages.
-			chatCompletedHandler(
-				chatId,
-				message.model,
-				message.id,
-				createMessagesList(history, message.id)
-			);
+			chatCompletedHandler(targetChatId, message.model, message.id, expectedCatalogGeneration);
 
 			// Process next queued request if any
-			await processNextInQueue(chatId);
+			await processNextInQueue(targetChatId, expectedCatalogGeneration);
+			if (
+				$chatId !== targetChatId ||
+				!isModeProfileCatalogGenerationCurrent(expectedCatalogGeneration)
+			) {
+				return;
+			}
 		}
 
 		console.log(data);
 		await tick();
-
-		if (autoScroll) {
-			scheduleScrollToBottom();
-		}
 	};
 
 	//////////////////////////
@@ -2062,6 +3253,16 @@
 			return;
 		}
 
+		if (
+			$config?.features?.enable_web_search_confirmation &&
+			webSearchActive &&
+			!webSearchConfirmed
+		) {
+			pendingWebSearchPrompt = userPrompt ?? '';
+			openWebSearchConfirm();
+			return;
+		}
+
 		// Check if the assistant is still generating the main response
 		// (don't block on background tasks like title gen, follow-ups, tags)
 		const lastMessage = history.currentId ? history.messages[history.currentId] : null;
@@ -2075,10 +3276,11 @@
 					...q,
 					[$chatId]: [...(q[$chatId] ?? []), { id: uuidv4(), prompt: userPrompt, files: _files }]
 				}));
-				// Clear input
-				messageInput?.setText('');
-				prompt = '';
-				files = [];
+				await runAcceptedSubmitDraftCriticalSection(async () => {
+					await messageInput?.setText('');
+					prompt = '';
+					files = [];
+				});
 				return;
 			} else {
 				// Interrupt: stop current generation and proceed
@@ -2097,12 +3299,12 @@
 			}
 		}
 
-		// Clear input and submit
-		messageInput?.setText('');
-		prompt = '';
 		const _files = structuredClone(files);
-		files = [];
-		messageInput?.setText('');
+		await runAcceptedSubmitDraftCriticalSection(async () => {
+			await messageInput?.setText('');
+			prompt = '';
+			files = [];
+		});
 
 		await submitPrompt(userPrompt, _files);
 	};
@@ -2136,10 +3338,12 @@
 			: atSelectedModel !== undefined
 				? [atSelectedModel.id]
 				: selectedModels;
+		selectedModelIds = resolveConversationModeRequestModels(selectedModelIds, conversationMode);
 
 		// Create response messages for each selected model
-		// Build message_ids map: {model_id: assistant_message_id}
-		const messageIdsMap: Record<string, string> = {};
+		// Build message_ids list: [{model_id, message_id}, ...]
+		// Uses an array instead of a dict to support duplicate model IDs in side-by-side chat.
+		const messageIdsList: Array<{ model_id: string; message_id: string }> = [];
 		for (const [_modelIdx, modelId] of selectedModelIds.entries()) {
 			const model = $models.filter((m) => m.id === modelId).at(0);
 
@@ -2171,7 +3375,7 @@
 				}
 
 				responseMessageIds[`${modelId}-${modelIdx ? modelIdx : _modelIdx}`] = responseMessageId;
-				messageIdsMap[modelId] = responseMessageId;
+				messageIdsList.push({ model_id: modelId, message_id: responseMessageId });
 			}
 		}
 		history = history;
@@ -2217,7 +3421,7 @@
 		// Single request — backend fans out to all models
 		const primaryModelId = selectedModelIds[0];
 		const primaryModel = $models.filter((m) => m.id === primaryModelId).at(0);
-		const primaryResponseMessageId = messageIdsMap[primaryModelId];
+		const primaryResponseMessageId = messageIdsList[0]?.message_id;
 
 		if (primaryModel && primaryResponseMessageId) {
 			const chatEventEmitter = await getChatEventEmitter(primaryModel.id, _chatId);
@@ -2233,7 +3437,7 @@
 					primaryResponseMessageId,
 					_chatId,
 					{
-						messageIdsMap: selectedModelIds.length > 1 ? messageIdsMap : undefined,
+						messageIdsList: selectedModelIds.length > 1 ? messageIdsList : undefined,
 						regenerationPrompt
 					}
 				);
@@ -2241,62 +3445,6 @@
 				if (chatEventEmitter) clearInterval(chatEventEmitter);
 			}
 		}
-	};
-
-	const getFeatures = () => {
-		let features = {};
-		const currentModels = atSelectedModel?.id ? [atSelectedModel.id] : selectedModels;
-		const primaryModel = $models.find((m) => m.id === currentModels[0]);
-
-		if ($config?.features)
-			features = {
-				voice: $showCallOverlay,
-				image_generation: resolveImageGenerationFeature(
-					primaryModel,
-					$config?.features?.enable_image_generation ?? false,
-					hasImageGenerationAccess(),
-					imageGenerationEnabled,
-					imageGenerationUserOverride
-				),
-				code_interpreter:
-					$config?.features?.enable_code_interpreter &&
-					($user?.role === 'admin' || $user?.permissions?.features?.code_interpreter)
-						? codeInterpreterEnabled
-						: false,
-				web_search:
-					$config?.features?.enable_web_search &&
-					($user?.role === 'admin' || $user?.permissions?.features?.web_search)
-						? webSearchEnabled
-						: false
-			};
-
-		if (
-			currentModels.filter(
-				(model) => $models.find((m) => m.id === model)?.info?.meta?.capabilities?.web_search ?? true
-			).length === currentModels.length
-		) {
-			if ($config?.features?.enable_web_search && ($settings?.webSearch ?? false) === 'always') {
-				features = { ...features, web_search: true };
-			}
-		}
-
-		if ($settings?.memory ?? false) {
-			features = { ...features, memory: true };
-		}
-
-		return features;
-	};
-
-	const getReasoningMaxTokens = (depth: ReasoningDepth): number => {
-		if (depth === 'deep') {
-			return 8126;
-		}
-
-		if (depth === 'divergent') {
-			return 12400;
-		}
-
-		return 2048;
 	};
 
 	const getStopTokens = () => {
@@ -2317,15 +3465,50 @@
 		responseMessageId,
 		_chatId,
 		{
-			messageIdsMap,
+			messageIdsList,
 			regenerationPrompt,
 			continueResponse = false
 		}: {
-			messageIdsMap?: Record<string, string>;
+			messageIdsList?: Array<{ model_id: string; message_id: string }>;
 			regenerationPrompt?: string | null;
 			continueResponse?: boolean;
 		} = {}
 	) => {
+		const directToolServersPermitted = isDirectToolServersPermitted($user);
+		const directTerminalIds = ((($settings as any)?.terminalServers ?? []) as any[])
+			.map((server) => server?.url)
+			.filter((id): id is string => typeof id === 'string');
+		const requestContext = captureConversationModeRequestContext({
+			mode: conversationMode,
+			revisionHint: modeProfileRevisionId,
+			authority: modeProfileCapabilityAuthority,
+			profile: getModeProfile(),
+			model,
+			selections: getModeProfileSelections({ includePendingOAuthTools: false }),
+			overrideFields: modeProfileCapabilityOverrideFields,
+			featureState: {
+				availableFeatureIds: getModeProfileAvailableFeatureIds(),
+				voice: Boolean($showCallOverlay),
+				memory: Boolean($settings?.memory ?? $config?.features?.enable_memories ?? false),
+				webSearchAlways: ($settings?.webSearch ?? false) === 'always',
+				imageGenerationUserOverride,
+				imageGenerationGloballyEnabled: Boolean($config?.features?.enable_image_generation),
+				imageGenerationAllowed: hasImageGenerationAccess()
+			},
+			directToolServersPermitted,
+			directTerminalIds
+		});
+		const externalCatalogRequest = getModeProfileExternalCatalogRequest(
+			requestContext.model as Model,
+			requestContext
+		);
+		const reasoning = buildModelReasoningPayload(requestContext.model, reasoningEffort);
+
+		const modeProfileRequest = await resolveModeProfileRequest(
+			requestContext,
+			externalCatalogRequest
+		);
+
 		const responseMessage = _history.messages[responseMessageId];
 		const userMessage = _history.messages[responseMessage.parentId];
 
@@ -2369,17 +3552,13 @@
 		}
 
 		const stream =
-			model?.info?.params?.stream_response ??
+			requestContext.model?.info?.params?.stream_response ??
 			$settings?.params?.stream_response ??
 			params?.stream_response ??
 			true;
-		const reasoning = {
-			enabled: true,
-			max_tokens: getReasoningMaxTokens(reasoningDepth)
-		};
 		// Always include system prompt — backend extracts it and prepends to DB messages.
 		// Only temp chats need conversation messages (persisted chats load from DB).
-		let messages = [
+		let messages: any[] = [
 			params?.system || $settings.system
 				? { role: 'system', content: `${params?.system ?? $settings?.system ?? ''}` }
 				: undefined
@@ -2390,112 +3569,86 @@
 				...messages,
 				..._messages.map((message) => ({
 					...message,
-					content: processDetails(message.content),
-					...(message.output ? { output: message.output } : {})
+					...(message.output && message.role === 'assistant'
+						? { output: message.output }
+						: { content: processDetails(message.content) })
 				}))
 			].filter((message) => message);
 
 			messages = messages
-				.map((message, idx, arr) => {
+				.map((message) => {
 					const imageFiles = (message?.files ?? []).filter(
 						(file) => file.type === 'image' || (file?.content_type ?? '').startsWith('image/')
 					);
 
+					if (message.output && message.role === 'assistant') {
+						return { role: message.role, output: message.output };
+					}
+
+					if (message.role === 'user' && imageFiles.length > 0) {
+						return {
+							role: message.role,
+							content: [
+								{
+									type: 'text',
+									text: message?.merged?.content ?? message.content
+								},
+								...imageFiles.map((file) => ({
+									type: 'image_url',
+									image_url: {
+										url: file.url
+									}
+								}))
+							]
+						};
+					}
+
 					return {
 						role: message.role,
-						...(message.output ? { output: message.output } : {}),
-						...(message.role === 'user' && imageFiles.length > 0
-							? {
-									content: [
-										{
-											type: 'text',
-											text: message?.merged?.content ?? message.content
-										},
-										...imageFiles.map((file) => ({
-											type: 'image_url',
-											image_url: {
-												url: file.url
-											}
-										}))
-									]
-								}
-							: {
-									content: message?.merged?.content ?? message.content
-								})
+						content: message?.merged?.content ?? message.content
 					};
 				})
-				.filter((message) => message?.role === 'user' || message?.content?.trim());
+				.filter(
+					(message) =>
+						message?.role === 'user' || message?.content?.trim() || message?.output?.length
+				);
 		}
 
-		const toolIds = [];
-		const toolServerIds = [];
-
-		for (const toolId of selectedToolIds) {
-			if (toolId.startsWith('direct_server:')) {
-				let serverId = toolId.replace('direct_server:', '');
-				// Check if serverId is a number
-				if (!isNaN(parseInt(serverId))) {
-					toolServerIds.push(parseInt(serverId));
-				} else {
-					toolServerIds.push(serverId);
-				}
-			} else {
-				toolIds.push(toolId);
-			}
-		}
-
-		// Parse skill mentions (<$skillId|label>) from user messages
-		const skillMentionRegex = /<\$([^|>]+)\|?[^>]*>/g;
-		const skillIds = [...selectedSkillIds];
-		const mentionSkillIds = [];
-		for (const message of messages) {
-			const content =
-				typeof message.content === 'string' ? message.content : (message.content?.[0]?.text ?? '');
-			for (const match of content.matchAll(skillMentionRegex)) {
-				if (!mentionSkillIds.includes(match[1])) {
-					mentionSkillIds.push(match[1]);
-				}
-				if (!skillIds.includes(match[1])) {
-					skillIds.push(match[1]);
-				}
-			}
-		}
-
-		// Strip skill mentions from message content
-		if (mentionSkillIds.length > 0) {
-			messages = messages.map((message) => {
-				if (typeof message.content === 'string') {
-					return {
-						...message,
-						content: message.content.replace(/<\$[^>]+>/g, '').trim()
-					};
-				} else if (Array.isArray(message.content)) {
-					return {
-						...message,
-						content: message.content.map((part) =>
-							part.type === 'text'
-								? { ...part, text: part.text.replace(/<\$[^>]+>/g, '').trim() }
-								: part
-						)
-					};
-				}
-				return message;
-			});
-		}
-
-		// Use the user-selected terminal from the dropdown
-		const activeTerminalId = $selectedTerminalId ?? null;
-
-		// Only send terminal_id if the model has terminal capability enabled
-		const terminalEnabled = model.info?.meta?.capabilities?.terminal ?? true;
+		const modelCapabilities = (requestContext.model.info?.meta?.capabilities ?? {}) as Record<
+			string,
+			unknown
+		>;
+		const functionCallingEnabled = modelCapabilities.function_calling !== false;
+		// Terminal requires the same function-calling allowance as its resolver path.
+		const terminalEnabled = functionCallingEnabled && modelCapabilities.terminal !== false;
+		const capabilityRequest = serializeConversationModeCapabilityRequest({
+			authority: requestContext.authority,
+			overrideFields: requestContext.overrideFields,
+			selections: modeProfileRequest.effective,
+			features: getConversationModeRequestFeatures(requestContext, modeProfileRequest.effective),
+			directToolServersPermitted: requestContext.directToolServersPermitted,
+			directTerminalIds: requestContext.directTerminalIds,
+			functionCallingEnabled,
+			terminalEnabled
+		});
+		const toolServersRequest = serializeConversationModeToolServers({
+			emitToolServers: capabilityRequest.emitToolServers,
+			toolServerIds: capabilityRequest.toolServerIds,
+			terminalId: (capabilityRequest.request as { terminal_id?: unknown }).terminal_id,
+			directToolServersPermitted: requestContext.directToolServersPermitted,
+			toolServers: modeProfileRequest.catalogView.toolServers,
+			terminalServers: modeProfileRequest.catalogView.terminalServers
+		});
 
 		const res = await generateOpenAIChatCompletion(
 			localStorage.token,
 			{
 				stream: stream,
-				model: model.id,
+				model: requestContext.model.id,
+				chat_mode: requestContext.mode,
+				mode_profile_revision_id: requestContext.revisionHint ?? undefined,
 				...(messages.length > 0 ? { messages } : {}),
-				reasoning,
+				...(reasoning ? { reasoning } : {}),
 				params: {
 					...$settings?.params,
 					...params,
@@ -2504,18 +3657,8 @@
 
 				files: (files?.length ?? 0) > 0 ? files : undefined,
 
-				filter_ids: selectedFilterIds.length > 0 ? selectedFilterIds : undefined,
-				tool_ids: toolIds.length > 0 ? toolIds : undefined,
-				skill_ids: skillIds.length > 0 ? skillIds : undefined,
-				terminal_id: terminalEnabled ? (activeTerminalId ?? undefined) : undefined,
-				tool_servers: [
-					...($toolServers ?? []).filter(
-						(server, idx) => toolServerIds.includes(idx) || toolServerIds.includes(server?.id)
-					),
-					// Direct terminal servers — always included when enabled (not routed through selectedToolIds)
-					...($terminalServers ?? []).filter((t) => !t.id)
-				],
-				features: getFeatures(),
+				...capabilityRequest.request,
+				...toolServersRequest,
 				variables: {
 					...getPromptVariables(
 						$user?.name,
@@ -2523,14 +3666,14 @@
 						$user?.email
 					)
 				},
-				model_item: $models.find((m) => m.id === model.id),
+				model_item: requestContext.model,
 
 				session_id: $socket?.id,
 				chat_id: _chatId || undefined,
 				folder_id: $selectedFolder?.id ?? undefined,
 
 				id: responseMessageId,
-				...(messageIdsMap ? { message_ids: messageIdsMap } : {}),
+				...(messageIdsList ? { message_ids: messageIdsList } : {}),
 				parent_id: userMessage?.parentId ?? null,
 				user_message: userMessage,
 				...(regenerationPrompt ? { regeneration_prompt: regenerationPrompt } : {}),
@@ -2546,7 +3689,7 @@
 					follow_up_generation: $settings?.autoFollowUps ?? true
 				},
 
-				...(stream && (model.info?.meta?.capabilities?.usage ?? false)
+				...(stream && (requestContext.model.info?.meta?.capabilities?.usage ?? false)
 					? {
 							stream_options: {
 								include_usage: true
@@ -2586,12 +3729,18 @@
 			if (res.error) {
 				await handleOpenAIError(res.error, responseMessage);
 			} else {
+				if (res.agent_run_id) {
+					responseMessage.agent_run_id = res.agent_run_id;
+					history.messages[responseMessageId] = {
+						...history.messages[responseMessageId],
+						agent_run_id: res.agent_run_id
+					};
+				}
+
 				// Backend returns task_ids (multi-model) or task_id (single model)
 				const newTaskIds = res.task_ids ?? (res.task_id ? [res.task_id] : []);
-				if (taskIds) {
-					taskIds.push(...newTaskIds);
-				} else {
-					taskIds = newTaskIds;
+				if (newTaskIds.length > 0) {
+					taskIds = [...(taskIds ?? []), ...newTaskIds];
 				}
 
 				// Backend returns chat_id for new chats — set store + URL.
@@ -2666,9 +3815,11 @@
 	};
 
 	const stopResponse = async (processQueue = true) => {
+		const targetChatId = $chatId;
+		const expectedCatalogGeneration = modeProfileCatalogGeneration;
 		if (taskIds) {
-			if ($chatId) {
-				await stopTasksByChatId(localStorage.token, $chatId).catch((error) => {
+			if (targetChatId) {
+				await stopTasksByChatId(localStorage.token, targetChatId).catch((error) => {
 					toast.error(`${error}`);
 					return null;
 				});
@@ -2679,6 +3830,12 @@
 						return null;
 					});
 				}
+			}
+			if (
+				$chatId !== targetChatId ||
+				!isModeProfileCatalogGenerationCurrent(expectedCatalogGeneration)
+			) {
+				return;
 			}
 
 			taskIds = null;
@@ -2704,8 +3861,13 @@
 			generationController = null;
 		}
 
-		if (processQueue) {
-			await processNextInQueue($chatId);
+		if (
+			processQueue &&
+			targetChatId &&
+			$chatId === targetChatId &&
+			isModeProfileCatalogGenerationCurrent(expectedCatalogGeneration)
+		) {
+			await processNextInQueue(targetChatId, expectedCatalogGeneration);
 		}
 	};
 
@@ -2840,10 +4002,6 @@
 						mergedResponse.content += value;
 						history.messages[messageId] = message;
 					}
-
-					if (autoScroll) {
-						scheduleScrollToBottom();
-					}
 				}
 
 				await saveChatHandler(_chatId, history);
@@ -2864,6 +4022,7 @@
 				{
 					id: _chatId,
 					title: $i18n.t('New Chat'),
+					mode: conversationMode,
 					models: selectedModels,
 					system: $settings.system ?? undefined,
 					params: params,
@@ -2876,6 +4035,7 @@
 			);
 
 			_chatId = chat.id;
+			bindCanonicalModeProfileRevision(chat?.mode_profile_revision_id);
 			await chatId.set(_chatId);
 
 			window.history.replaceState(history.state, '', `/c/${_chatId}`);
@@ -2899,6 +4059,7 @@
 		if ($chatId == _chatId) {
 			if (!$temporaryChatEnabled) {
 				chat = await updateChatById(localStorage.token, _chatId, {
+					mode: conversationMode,
 					models: selectedModels,
 					history: history,
 					messages: createMessagesList(history, history.currentId),
@@ -2911,32 +4072,119 @@
 
 	const saveControls = async () => {
 		if (!$chatId || $temporaryChatEnabled) return;
+		const targetChatId = $chatId;
+		const expectedCatalogGeneration = modeProfileCatalogGeneration;
 		const loaded = chat?.chat ?? {};
 		if (equal(params, loaded.params ?? {}) && equal(chatFiles, loaded.files ?? [])) return;
 
-		await updateChatById(localStorage.token, $chatId, { params, files: chatFiles }).catch((err) =>
-			console.error('[controls autosave]', err)
-		);
+		const res = await updateChatById(localStorage.token, targetChatId, {
+			params,
+			files: chatFiles
+		}).catch((err) => {
+			console.error('[controls autosave]', err);
+			return null;
+		});
+		if (
+			!res ||
+			$chatId !== targetChatId ||
+			!isModeProfileCatalogGenerationCurrent(expectedCatalogGeneration)
+		)
+			return;
+		// Refresh the dedupe baseline so a later revert still saves.
+		chat = res;
+		bindCanonicalModeProfileRevision(chat?.mode_profile_revision_id);
 	};
 
 	const MAX_DRAFT_LENGTH = 5000;
 	let saveDraftTimeout: ReturnType<typeof setTimeout> | null = null;
+	let acceptedSubmitDraftPersistenceSuppressed = false;
+	const shouldAutosaveModeProfileDraft = () =>
+		!$temporaryChatEnabled &&
+		(Boolean($chatId) ||
+			!Object.values(history.messages).some((message: any) => message?.role === 'user'));
+	const createModeProfileDraftSnapshot = (input: any) => ({
+		...(input ?? {}),
+		selectedToolIds: getModeProfileSelectedToolIds(),
+		selectedSkillIds: [...selectedSkillIds],
+		selectedFilterIds: [...selectedFilterIds],
+		webSearchEnabled,
+		codeInterpreterEnabled,
+		imageGenerationEnabled,
+		conversationMode: conversationMode,
+		modeProfileRevisionId,
+		modeProfileCapabilitySnapshotVersion: modeProfileControlsReady ? 1 : undefined,
+		modeProfileCapabilityAuthority: modeProfileControlsReady
+			? modeProfileCapabilityAuthorityController.snapshot()
+			: undefined,
+		modeProfileCapabilityOverrideFields: modeProfileControlsReady
+			? (modeProfileCapabilityOverrideFields ?? undefined)
+			: undefined,
+		selectedTerminalId: $selectedTerminalId ?? null,
+		imageGenerationUserOverride
+	});
+	const getCurrentModeProfileDraftInput = () => ({
+		prompt,
+		files: files
+			.filter((file) => file.type !== 'image')
+			.map((file) => ({
+				...file,
+				user: undefined,
+				access_grants: undefined
+			})),
+		reasoningEffort
+	});
 
-	const saveDraft = async (draft: any, chatId: string | null = null) => {
+	const saveDraft = async (
+		draft: any,
+		chatId: string | null = null,
+		{ immediate = false }: { immediate?: boolean } = {}
+	) => {
+		if (acceptedSubmitDraftPersistenceSuppressed) return;
+
 		if (saveDraftTimeout) {
 			clearTimeout(saveDraftTimeout);
 		}
 
 		if (draft.prompt !== null && draft.prompt.length < MAX_DRAFT_LENGTH) {
-			saveDraftTimeout = setTimeout(async () => {
+			const persistDraft = async () => {
 				await sessionStorage.setItem(
 					`chat-input${chatId ? `-${chatId}` : ''}`,
 					JSON.stringify(draft)
 				);
-			}, 500);
+			};
+			if (immediate) {
+				await persistDraft();
+			} else {
+				saveDraftTimeout = setTimeout(persistDraft, 500);
+			}
 		} else {
 			sessionStorage.removeItem(`chat-input${chatId ? `-${chatId}` : ''}`);
 		}
+	};
+
+	const persistFinalizedModeProfileDraftSnapshot = async (
+		expectedCatalogGeneration = modeProfileCatalogGeneration
+	) => {
+		if ($temporaryChatEnabled || acceptedSubmitDraftPersistenceSuppressed) return;
+		if (!isModeProfileCatalogGenerationCurrent(expectedCatalogGeneration)) return;
+		await tick();
+		if (!isModeProfileCatalogGenerationCurrent(expectedCatalogGeneration)) return;
+		const draftChatId = modeProfileDraftId.startsWith('draft:') ? null : $chatId || null;
+		await saveDraft(
+			createModeProfileDraftSnapshot(getCurrentModeProfileDraftInput()),
+			draftChatId,
+			{ immediate: true }
+		);
+	};
+
+	const saveModeProfileCapabilityAuthority = () => {
+		if (
+			$temporaryChatEnabled ||
+			acceptedSubmitDraftPersistenceSuppressed ||
+			!latestModeProfileDraftInput
+		)
+			return;
+		saveDraft(createModeProfileDraftSnapshot(latestModeProfileDraftInput), $chatId || null);
 	};
 
 	const clearDraft = async (chatId: string | null = null) => {
@@ -2944,6 +4192,17 @@
 			clearTimeout(saveDraftTimeout);
 		}
 		await sessionStorage.removeItem(`chat-input${chatId ? `-${chatId}` : ''}`);
+	};
+
+	const runAcceptedSubmitDraftCriticalSection = async (clearInput: () => void | Promise<void>) => {
+		acceptedSubmitDraftPersistenceSuppressed = true;
+		try {
+			await clearDraft($chatId || null);
+			await clearInput();
+			await tick();
+		} finally {
+			acceptedSubmitDraftPersistenceSuppressed = false;
+		}
 	};
 
 	const moveChatHandler = async (chatId, folderId) => {
@@ -2984,6 +4243,18 @@
 
 	let showDeleteConfirm = false;
 
+	const confirmWebSearch = async () => {
+		const userPrompt = pendingWebSearchPrompt;
+		pendingWebSearchPrompt = null;
+		webSearchConfirmed = true;
+
+		if (userPrompt !== null) {
+			await submitHandler(userPrompt);
+		} else {
+			webSearchEnabled = true;
+		}
+	};
+
 	const deleteChatHandler = async (id: string) => {
 		showDeleteConfirm = true;
 	};
@@ -3020,6 +4291,44 @@
 
 <audio id="audioElement" style="display: none;"></audio>
 
+<WebSearchConfirmDialog
+	bind:show={showWebSearchConfirm}
+	title={$i18n.t('Use Web Search?')}
+	message={($config?.features?.web_search_confirmation_content ?? '').trim() !== ''
+		? ($config?.features?.web_search_confirmation_content ?? '')
+		: $i18n.t('Your query will be sent to the configured web search provider.')}
+	confirmLabel={$i18n.t('Continue')}
+	cancelLabel={$i18n.t('Cancel')}
+	on:confirm={confirmWebSearch}
+	on:cancel={() => {
+		if (pendingWebSearchPrompt === null) {
+			webSearchEnabled = false;
+		}
+		pendingWebSearchPrompt = null;
+	}}
+/>
+
+<ConversationModeConfirmDialog
+	bind:show={showConversationModeConfirmation}
+	title={$i18n.t('Start a new conversation?')}
+	message={$i18n.t(
+		'This conversation mode is fixed. Continue in a new {{MODE}} conversation instead?',
+		{ MODE: pendingConversationMode === 'agent' ? 'Agent' : 'Chat' }
+	)}
+	confirmLabel={$i18n.t('New conversation')}
+	cancelLabel={$i18n.t('Cancel')}
+	on:confirm={async () => {
+		const nextMode = pendingConversationMode;
+		pendingConversationMode = null;
+		if (nextMode) {
+			await goto(`/?mode=${nextMode}`);
+		}
+	}}
+	on:cancel={() => {
+		pendingConversationMode = null;
+	}}
+/>
+
 <DeleteConfirmDialog
 	bind:show={showDeleteConfirm}
 	title={$i18n.t('Delete chat?')}
@@ -3040,8 +4349,11 @@
 	inputPlaceholder={eventConfirmationInputPlaceholder}
 	inputValue={eventConfirmationInputValue}
 	inputType={eventConfirmationInputType}
+	inputOptions={eventConfirmationInputOptions}
 	on:confirm={(e) => {
-		if (e.detail) {
+		if (eventConfirmationInput) {
+			eventCallback(e.detail);
+		} else if (e.detail) {
 			eventCallback(e.detail);
 		} else {
 			eventCallback(true);
@@ -3086,10 +4398,12 @@
 					<FilesOverlay show={dragged} />
 					<Navbar
 						bind:this={navbarElement}
+						{readOnly}
 						chat={{
 							id: $chatId,
 							chat: {
 								title: $chatTitle,
+								mode: conversationMode,
 								models: selectedModels,
 								system: $settings.system ?? undefined,
 								params: params,
@@ -3100,6 +4414,14 @@
 						{history}
 						title={$chatTitle}
 						bind:selectedModels
+						{conversationMode}
+						{conversationModeLocked}
+						{agentModeAvailable}
+						onConversationModeSelect={transitionConversationMode}
+						onConversationModeCreateNew={(mode) => {
+							pendingConversationMode = mode;
+							showConversationModeConfirmation = true;
+						}}
 						shareEnabled={!!history.currentId}
 						{initNewChat}
 						scrollToTop={!isNearTop ? scrollToTop : null}
@@ -3121,6 +4443,7 @@
 									{
 										id: uuidv4(),
 										title: title.length > 50 ? `${title.slice(0, 50)}...` : title,
+										mode: conversationMode,
 										models: selectedModels,
 										params: params,
 										history: history,
@@ -3131,6 +4454,7 @@
 								);
 
 								if (savedChat) {
+									bindCanonicalModeProfileRevision(savedChat.mode_profile_revision_id);
 									temporaryChatEnabled.set(false);
 									chatId.set(savedChat.id);
 									chats.set(await getChatList(localStorage.token, $currentChatPage));
@@ -3149,26 +4473,28 @@
 						{#if ($settings?.landingPageMode === 'chat' && !$selectedFolder) || createMessagesList(history, history.currentId).length > 0}
 							<div
 								class=" pb-2.5 flex flex-col justify-between w-full flex-auto overflow-auto h-0 max-w-full z-10 scrollbar-hidden"
+								class:native-auto-follow={autoScroll}
 								id="messages-container"
 								bind:this={messagesContainerElement}
-								on:scroll={(e) => {
+								on:scroll={() => {
 									autoScroll =
 										messagesContainerElement.scrollHeight - messagesContainerElement.scrollTop <=
 										messagesContainerElement.clientHeight + 5;
 									isNearTop = messagesContainerElement.scrollTop <= 100;
 								}}
 							>
-								<div class=" h-full w-full flex flex-col">
+								<div class="min-h-full w-full flex flex-col flex-none">
 									<Messages
 										bind:this={messagesRef}
 										chatId={$chatId}
+										{readOnly}
 										bind:history
 										bind:autoScroll
 										bind:prompt
 										setInputText={(text) => {
 											messageInput?.setText(text);
 										}}
-										{selectedModels}
+										bind:selectedModels
 										{atSelectedModel}
 										{sendMessage}
 										{showMessage}
@@ -3185,133 +4511,189 @@
 								</div>
 							</div>
 
-							<div class=" pb-2 {dragged ? 'z-0' : 'z-10'}">
-								<MessageInput
-									bind:this={messageInput}
-									{history}
-									{taskIds}
-									{selectedModels}
-									bind:files
-									bind:prompt
-									bind:autoScroll
-									bind:selectedToolIds
-									bind:selectedSkillIds
-									bind:selectedFilterIds
-									bind:imageGenerationEnabled
-									bind:codeInterpreterEnabled
-									{pendingOAuthTools}
-									bind:webSearchEnabled
-									bind:reasoningDepth
-									bind:atSelectedModel
-									bind:showCommands
-									bind:dragged
-									toolServers={$toolServers}
-									{generating}
-									{stopResponse}
-									{createMessagePair}
-									{onUpload}
-									onImageGenerationToggle={(enabled) => {
-										imageGenerationUserOverride = enabled;
-									}}
-									messageQueue={$chatRequestQueues[$chatId] ?? []}
-									{chatTasks}
-									onQueueSendNow={async (id) => {
-										const queue = $chatRequestQueues[$chatId] ?? [];
-										const item = queue.find((m) => m.id === id);
-										if (item) {
-											// Remove from queue
-											chatRequestQueues.update((q) => ({
-												...q,
-												[$chatId]: queue.filter((m) => m.id !== id)
-											}));
-											await stopResponse(false);
-											await tick();
-											await submitPrompt(item.prompt, item.files);
-										}
-									}}
-									onQueueEdit={(id) => {
-										const queue = $chatRequestQueues[$chatId] ?? [];
-										const item = queue.find((m) => m.id === id);
-										if (item) {
-											// Remove from queue
-											chatRequestQueues.update((q) => ({
-												...q,
-												[$chatId]: queue.filter((m) => m.id !== id)
-											}));
-											// Set files and restore prompt to input
-											files = item.files;
-											messageInput?.setText(item.prompt);
-										}
-									}}
-									onQueueDelete={(id) => {
-										const queue = $chatRequestQueues[$chatId] ?? [];
-										chatRequestQueues.update((q) => ({
-											...q,
-											[$chatId]: queue.filter((m) => m.id !== id)
-										}));
-									}}
-									onChange={(data) => {
-										if (!$temporaryChatEnabled) {
-											saveDraft({ ...data, imageGenerationUserOverride }, $chatId);
-										}
-									}}
-									on:submit={async (e) => {
-										clearDraft($chatId);
-										if (e.detail || files.length > 0) {
-											await tick();
-
-											submitHandler(e.detail);
-										}
-									}}
-								/>
-
-								<div
-									class="absolute bottom-1 text-xs text-gray-500 text-center line-clamp-1 right-0 left-0"
-								>
-									<!-- {$i18n.t('LLMs can make mistakes. Verify important information.')} -->
+							{#if readOnly}
+								<div class="pb-6 z-10">
+									<div class="text-xs text-gray-400 dark:text-gray-500 text-center">
+										{$i18n.t('Read only')}
+									</div>
 								</div>
-							</div>
+							{:else if agentConversationUnavailable}
+								<div class="pb-6 z-10">
+									<div class="text-xs text-gray-400 dark:text-gray-500 text-center">
+										{$i18n.t('Agent Mode is currently unavailable')}
+									</div>
+								</div>
+							{:else}
+								<div class=" pb-2 {dragged ? 'z-0' : 'z-10'}">
+									<MessageInput
+										bind:this={messageInput}
+										{history}
+										{taskIds}
+										bind:selectedModels
+										bind:files
+										bind:prompt
+										bind:autoScroll
+										bind:selectedToolIds
+										bind:selectedSkillIds
+										bind:selectedFilterIds
+										bind:imageGenerationEnabled
+										bind:codeInterpreterEnabled
+										{pendingOAuthTools}
+										bind:webSearchEnabled
+										bind:reasoningEffort
+										bind:atSelectedModel
+										bind:showCommands
+										bind:dragged
+										toolServers={$toolServers}
+										{generating}
+										{stopResponse}
+										{createMessagePair}
+										{onUpload}
+										messageQueue={$chatRequestQueues[$chatId] ?? []}
+										{chatTasks}
+										onQueueSendNow={async (id) => {
+											const queue = $chatRequestQueues[$chatId] ?? [];
+											const item = queue.find((m) => m.id === id);
+											if (item) {
+												// Remove from queue
+												chatRequestQueues.update((q) => ({
+													...q,
+													[$chatId]: queue.filter((m) => m.id !== id)
+												}));
+												await stopResponse(false);
+												await tick();
+												await submitPrompt(item.prompt, item.files);
+											}
+										}}
+										onQueueEdit={(id) => {
+											const queue = $chatRequestQueues[$chatId] ?? [];
+											const item = queue.find((m) => m.id === id);
+											if (item) {
+												// Remove from queue
+												chatRequestQueues.update((q) => ({
+													...q,
+													[$chatId]: queue.filter((m) => m.id !== id)
+												}));
+												// Set files and restore prompt to input
+												files = item.files;
+												messageInput?.setText(item.prompt);
+											}
+										}}
+										onQueueDelete={(id) => {
+											const queue = $chatRequestQueues[$chatId] ?? [];
+											chatRequestQueues.update((q) => ({
+												...q,
+												[$chatId]: queue.filter((m) => m.id !== id)
+											}));
+										}}
+										onChange={(data) => {
+											latestModeProfileDraftInput = data;
+											if (modeProfileControlsReady) {
+												const observation =
+													modeProfileCapabilityAuthorityController.observeWithChange(data);
+												modeProfileCapabilityAuthority = observation.authority;
+												if (observation.changed) modeProfileCapabilityOverrideFields = null;
+											}
+											if (
+												!acceptedSubmitDraftPersistenceSuppressed &&
+												shouldAutosaveModeProfileDraft()
+											) {
+												saveDraft(createModeProfileDraftSnapshot(data), $chatId);
+											}
+										}}
+										onImageGenerationToggle={(enabled) => {
+											modeProfileCapabilityAuthority =
+												modeProfileCapabilityAuthorityController.markExplicit();
+											modeProfileCapabilityOverrideFields = null;
+											imageGenerationUserOverride = enabled;
+										}}
+										onWebSearchToggle={(enabled) => {
+											modeProfileCapabilityAuthority =
+												modeProfileCapabilityAuthorityController.markExplicit();
+											modeProfileCapabilityOverrideFields = null;
+											handleWebSearchToggle(enabled);
+										}}
+										on:submit={async (e) => {
+											if (e.detail || files.length > 0) {
+												await tick();
+
+												await submitHandler(e.detail);
+											}
+										}}
+									/>
+
+									<div
+										class="absolute bottom-1 text-xs text-gray-500 text-center line-clamp-1 right-0 left-0"
+									>
+										<!-- {$i18n.t('LLMs can make mistakes. Verify important information.')} -->
+									</div>
+								</div>
+							{/if}
 						{:else}
 							<div class="flex items-center h-full">
-								<Placeholder
-									{history}
-									{selectedModels}
-									bind:messageInput
-									bind:files
-									bind:prompt
-									bind:autoScroll
-									bind:selectedToolIds
-									bind:selectedSkillIds
-									bind:selectedFilterIds
-									bind:imageGenerationEnabled
-									bind:codeInterpreterEnabled
-									bind:webSearchEnabled
-									bind:reasoningDepth
-									bind:atSelectedModel
-									bind:showCommands
-									bind:dragged
-									{pendingOAuthTools}
-									toolServers={$toolServers}
-									{stopResponse}
-									{createMessagePair}
-									{onSelect}
-									{onUpload}
-									onImageGenerationToggle={(enabled) => {
-										imageGenerationUserOverride = enabled;
-									}}
-									onChange={(data) => {
-										if (!$temporaryChatEnabled) {
-											saveDraft({ ...data, imageGenerationUserOverride });
-										}
-									}}
-									on:submit={async (e) => {
-										clearDraft();
-										if (e.detail || files.length > 0) {
-											await tick();
-											submitHandler(e.detail);
-										}
-									}}
-								/>
+								{#if agentConversationUnavailable}
+									<div class="w-full text-sm text-gray-400 dark:text-gray-500 text-center">
+										{$i18n.t('Agent Mode is currently unavailable')}
+									</div>
+								{:else}
+									<Placeholder
+										{history}
+										bind:selectedModels
+										bind:messageInput
+										bind:files
+										bind:prompt
+										bind:autoScroll
+										bind:selectedToolIds
+										bind:selectedSkillIds
+										bind:selectedFilterIds
+										bind:imageGenerationEnabled
+										bind:codeInterpreterEnabled
+										bind:webSearchEnabled
+										bind:reasoningEffort
+										bind:atSelectedModel
+										bind:showCommands
+										bind:dragged
+										{pendingOAuthTools}
+										toolServers={$toolServers}
+										{stopResponse}
+										{createMessagePair}
+										{onSelect}
+										{onUpload}
+										onImageGenerationToggle={(enabled) => {
+											modeProfileCapabilityAuthority =
+												modeProfileCapabilityAuthorityController.markExplicit();
+											modeProfileCapabilityOverrideFields = null;
+											imageGenerationUserOverride = enabled;
+										}}
+										onWebSearchToggle={(enabled) => {
+											modeProfileCapabilityAuthority =
+												modeProfileCapabilityAuthorityController.markExplicit();
+											modeProfileCapabilityOverrideFields = null;
+											handleWebSearchToggle(enabled);
+										}}
+										onChange={(data) => {
+											latestModeProfileDraftInput = data;
+											if (modeProfileControlsReady) {
+												const observation =
+													modeProfileCapabilityAuthorityController.observeWithChange(data);
+												modeProfileCapabilityAuthority = observation.authority;
+												if (observation.changed) modeProfileCapabilityOverrideFields = null;
+											}
+											if (
+												!acceptedSubmitDraftPersistenceSuppressed &&
+												shouldAutosaveModeProfileDraft()
+											) {
+												saveDraft(createModeProfileDraftSnapshot(data));
+											}
+										}}
+										on:submit={async (e) => {
+											if (e.detail || files.length > 0) {
+												await tick();
+												await submitHandler(e.detail);
+											}
+										}}
+									/>
+								{/if}
 							</div>
 						{/if}
 					</div>

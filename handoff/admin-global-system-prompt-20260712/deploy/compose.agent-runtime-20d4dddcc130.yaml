@@ -1,0 +1,4 @@
+services:
+  agentscope-runtime:
+    image: open-webui-pr7-agentscope-runtime:20d4dddcc130-phase-validation
+    build: !reset null

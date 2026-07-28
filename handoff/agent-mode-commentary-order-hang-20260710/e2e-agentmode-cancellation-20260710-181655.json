@@ -1,0 +1,35 @@
+{
+  "audit_path": "/home/aiserver/staging/openwebui-pr7-eea11194ed-test/deploy-79adbeface29-20260710-163830/e2e-agentmode-cancellation-20260710-181655.json",
+  "backend_state_after_grace": "cancelled",
+  "cancel_response_seconds": 0.1959,
+  "cancel_response_state": "cancelled",
+  "chat_start_seconds": 1.558,
+  "elapsed_seconds": 7.697,
+  "event_types_after_grace": [
+    "run.running",
+    "run.cancelled"
+  ],
+  "isolated_webui_anchor_after": "open-webui:agentmode-v0102-79adbeface29-slim sha256:cb820a2a93c0778e5f707ff284b4af8414a115e2f751256a4d54df90e0a28076 healthy 0 2026-07-10T09:58:44.23556717Z",
+  "live_anchor_after": "open-webui:live-f8106c651-to-v0102-pr7-b3-7-onlyoffice-mergefix-slim-20260707013738 sha256:7ec820b71fa94205b273cb8cd00344a130e1921ae8e643ba6192b0e58933bd45 healthy 0 2026-07-07T03:53:51.178582025Z",
+  "marker": "CANCEL-E2E-20260710-181655-f296d428",
+  "model_id": "bifrostapi.Cliproxy/gpt-5.5",
+  "ok": true,
+  "run_id": "f02c49fa-8a9c-463b-976f-de78607f0820",
+  "runtime_after_cancel": {
+    "cancel_requested": true,
+    "run_id": "f02c49fa-8a9c-463b-976f-de78607f0820",
+    "runtime_session_id": "rt_f02c49fa-8a9c-463b-976f-de78607f0820_HsEipxRqwPQ",
+    "state": "cancelled"
+  },
+  "runtime_after_grace": {
+    "cancel_requested": true,
+    "run_id": "f02c49fa-8a9c-463b-976f-de78607f0820",
+    "runtime_session_id": "rt_f02c49fa-8a9c-463b-976f-de78607f0820_HsEipxRqwPQ",
+    "state": "cancelled"
+  },
+  "runtime_anchor_after": "open-webui-pr7-agentscope-runtime:79adbeface29-native-phase sha256:aa8cab6a3f697663245a7e1c1589d68d5d01c2be8eba24523a1271152286b701 healthy 0 2026-07-10T09:55:00.739764174Z",
+  "timestamp": "20260710-181655",
+  "tool_deleted": true,
+  "tool_id": "e2e_cancel_20260710_181655",
+  "tool_specs": null
+}

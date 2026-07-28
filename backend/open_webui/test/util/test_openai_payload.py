@@ -1,8 +1,249 @@
+import pytest
+from open_webui.utils import payload as payload_utils
 from open_webui.utils.openai_payload import (
     dedupe_system_messages,
     responses_continuation_input_items,
     sanitize_openai_payload,
 )
+from open_webui.utils.payload import (
+    apply_model_params_to_body_openai,
+    convert_payload_openai_to_ollama,
+)
+
+
+@pytest.mark.asyncio
+async def test_apply_system_prompt_replace_resolves_and_replaces_existing_content():
+    form_data = {
+        'messages': [
+            {'role': 'system', 'content': 'Old {{VALUE}}'},
+            {'role': 'user', 'content': 'Hello'},
+        ]
+    }
+
+    result = await payload_utils.apply_system_prompt_to_body(
+        'New {{VALUE}}',
+        form_data,
+        metadata={'variables': {'{{VALUE}}': 'resolved'}},
+        replace=True,
+    )
+
+    assert result['messages'][0] == {'role': 'system', 'content': 'New resolved'}
+
+
+def test_compose_global_system_prompt_places_admin_before_model_and_chat_content():
+    composed = payload_utils.compose_global_system_prompt(
+        'Administrator policy.',
+        'Model policy.\nChat policy.',
+    )
+
+    assert composed == (
+        '[ADMINISTRATOR INSTRUCTIONS]\nAdministrator policy.\n\n[MODEL INSTRUCTIONS]\nModel policy.\nChat policy.'
+    )
+
+
+def test_compose_global_system_prompt_preserves_legacy_content_when_global_is_empty():
+    assert payload_utils.compose_global_system_prompt('', 'Model policy.') == 'Model policy.'
+
+
+def test_compose_global_system_prompt_emits_only_admin_section_without_downstream_content():
+    assert payload_utils.compose_global_system_prompt('Administrator policy.', '') == (
+        '[ADMINISTRATOR INSTRUCTIONS]\nAdministrator policy.'
+    )
+
+
+@pytest.mark.asyncio
+async def test_apply_model_system_prompt_reads_global_config_and_composes_one_system_message(monkeypatch):
+    async def fake_config_get(key, default=None):
+        assert key == 'chat.global_system_prompt'
+        return 'Administrator policy.'
+
+    monkeypatch.setattr(payload_utils.Config, 'get', fake_config_get)
+    form_data = {
+        'messages': [
+            {'role': 'system', 'content': 'Chat policy.'},
+            {'role': 'user', 'content': 'Hello'},
+        ]
+    }
+
+    result = await payload_utils.apply_model_system_prompt_to_body(
+        'Model policy.',
+        form_data,
+        metadata={},
+        user=None,
+    )
+
+    assert result['messages'] == [
+        {
+            'role': 'system',
+            'content': (
+                '[ADMINISTRATOR INSTRUCTIONS]\n'
+                'Administrator policy.\n\n'
+                '[MODEL INSTRUCTIONS]\n'
+                'Model policy.\nChat policy.'
+            ),
+        },
+        {'role': 'user', 'content': 'Hello'},
+    ]
+
+
+@pytest.mark.asyncio
+async def test_apply_model_system_prompt_skips_global_prompt_for_trusted_internal_tasks(monkeypatch):
+    async def fake_config_get(key, default=None):
+        return 'Administrator policy.'
+
+    monkeypatch.setattr(payload_utils.Config, 'get', fake_config_get)
+    form_data = {
+        'messages': [
+            {'role': 'system', 'content': 'Task policy.'},
+            {'role': 'user', 'content': 'Generate a title'},
+        ]
+    }
+
+    result = await payload_utils.apply_model_system_prompt_to_body(
+        'Model policy.',
+        form_data,
+        metadata={'task': 'title_generation'},
+        user=None,
+        bypass_global_system_prompt=True,
+    )
+
+    assert result['messages'][0] == {
+        'role': 'system',
+        'content': 'Model policy.\nTask policy.',
+    }
+
+
+@pytest.mark.asyncio
+async def test_apply_model_system_prompt_does_not_trust_client_task_metadata(monkeypatch):
+    async def fake_config_get(key, default=None):
+        return 'Administrator policy.'
+
+    monkeypatch.setattr(payload_utils.Config, 'get', fake_config_get)
+    form_data = {
+        'messages': [
+            {'role': 'system', 'content': 'Chat policy.'},
+            {'role': 'user', 'content': 'Hello'},
+        ]
+    }
+
+    result = await payload_utils.apply_model_system_prompt_to_body(
+        'Model policy.',
+        form_data,
+        metadata={'task': 'forged_task'},
+        user=None,
+        bypass_global_system_prompt=False,
+    )
+
+    assert result['messages'][0]['content'].startswith('[ADMINISTRATOR INSTRUCTIONS]\nAdministrator policy.')
+
+
+@pytest.mark.asyncio
+async def test_apply_model_system_prompt_normalizes_all_system_messages_to_position_zero(monkeypatch):
+    async def fake_config_get(key, default=None):
+        return 'Administrator policy.'
+
+    monkeypatch.setattr(payload_utils.Config, 'get', fake_config_get)
+    form_data = {
+        'messages': [
+            {'role': 'user', 'content': 'Hello'},
+            {'role': 'system', 'content': 'Chat policy A.'},
+            {'role': 'system', 'content': 'Chat policy B.'},
+        ]
+    }
+
+    result = await payload_utils.apply_model_system_prompt_to_body(
+        'Model policy.',
+        form_data,
+        metadata={},
+        user=None,
+    )
+
+    assert result['messages'] == [
+        {
+            'role': 'system',
+            'content': (
+                '[ADMINISTRATOR INSTRUCTIONS]\n'
+                'Administrator policy.\n\n'
+                '[MODEL INSTRUCTIONS]\n'
+                'Model policy.\nChat policy A.\nChat policy B.'
+            ),
+        },
+        {'role': 'user', 'content': 'Hello'},
+    ]
+
+
+@pytest.mark.asyncio
+async def test_apply_model_system_prompt_preserves_every_text_block_in_system_content(monkeypatch):
+    async def fake_config_get(key, default=None):
+        return 'Administrator policy.'
+
+    monkeypatch.setattr(payload_utils.Config, 'get', fake_config_get)
+    form_data = {
+        'messages': [
+            {
+                'role': 'system',
+                'content': [
+                    {'type': 'text', 'text': 'Chat policy A.'},
+                    {'type': 'text', 'text': 'Chat policy B.'},
+                ],
+            },
+            {'role': 'user', 'content': 'Hello'},
+        ]
+    }
+
+    result = await payload_utils.apply_model_system_prompt_to_body(
+        'Model policy.',
+        form_data,
+        metadata={},
+        user=None,
+    )
+
+    assert 'Model policy.\nChat policy A.\nChat policy B.' in result['messages'][0]['content']
+
+
+@pytest.mark.asyncio
+async def test_apply_model_system_prompt_to_responses_composes_instructions(monkeypatch):
+    async def fake_config_get(key, default=None):
+        return 'Administrator policy.'
+
+    monkeypatch.setattr(payload_utils.Config, 'get', fake_config_get)
+    result = await payload_utils.apply_model_system_prompt_to_responses_body(
+        'Model policy.',
+        {'model': 'model-a', 'instructions': 'Request policy.'},
+        metadata={},
+        user=None,
+    )
+
+    assert result['instructions'] == (
+        '[ADMINISTRATOR INSTRUCTIONS]\nAdministrator policy.\n\n[MODEL INSTRUCTIONS]\nModel policy.\nRequest policy.'
+    )
+
+
+@pytest.mark.asyncio
+async def test_apply_model_system_prompt_to_anthropic_preserves_system_blocks(monkeypatch):
+    async def fake_config_get(key, default=None):
+        return 'Administrator policy.'
+
+    monkeypatch.setattr(payload_utils.Config, 'get', fake_config_get)
+    cached_block = {
+        'type': 'text',
+        'text': 'Request policy.',
+        'cache_control': {'type': 'ephemeral'},
+    }
+    result = await payload_utils.apply_model_system_prompt_to_anthropic_body(
+        'Model policy.',
+        {'model': 'model-a', 'system': [cached_block]},
+        metadata={},
+        user=None,
+    )
+
+    assert result['system'] == [
+        {
+            'type': 'text',
+            'text': ('[ADMINISTRATOR INSTRUCTIONS]\nAdministrator policy.\n\n[MODEL INSTRUCTIONS]\nModel policy.'),
+        },
+        cached_block,
+    ]
 
 
 def test_sanitize_openai_payload_removes_reasoning_encrypted_content_keys_and_required_entries():
@@ -79,3 +320,78 @@ def test_responses_continuation_input_items_keeps_latest_user_turn():
     trimmed = responses_continuation_input_items(input_items)
 
     assert trimmed == [input_items[-1]]
+
+
+def test_convert_payload_openai_to_ollama_preserves_tool_input_images():
+    payload = {
+        'model': 'llama3.1',
+        'messages': [
+            {
+                'role': 'tool',
+                'tool_call_id': 'call_evidence',
+                'content': [
+                    {'type': 'input_text', 'text': 'Evidence summary'},
+                    {'type': 'input_image', 'image_url': 'data:image/png;base64,AAAA'},
+                ],
+            }
+        ],
+    }
+
+    ollama_payload = convert_payload_openai_to_ollama(payload)
+
+    assert ollama_payload['messages'] == [
+        {
+            'role': 'tool',
+            'tool_call_id': 'call_evidence',
+            'content': 'Evidence summary',
+            'images': ['AAAA'],
+        }
+    ]
+
+
+def test_apply_model_params_preserves_explicit_reasoning_payload():
+    form_data = {
+        'model': 'bifrostapi.Cliproxy/gpt-5.5',
+        'messages': [{'role': 'user', 'content': 'answer with marker'}],
+        'reasoning': {
+            'enabled': True,
+            'effort': 'high',
+            'max_tokens': 8126,
+        },
+    }
+    model_params = {
+        'temperature': 0.2,
+        'reasoning': {
+            'effort': None,
+            'summary': 'detailed',
+        },
+    }
+
+    payload = apply_model_params_to_body_openai(model_params, form_data)
+
+    assert payload['temperature'] == 0.2
+    assert payload['reasoning'] == {
+        'enabled': True,
+        'effort': 'high',
+        'max_tokens': 8126,
+    }
+
+
+def test_apply_model_params_applies_default_reasoning_when_request_has_none():
+    form_data = {
+        'model': 'bifrostapi.Cliproxy/gpt-5.5',
+        'messages': [{'role': 'user', 'content': 'hello'}],
+    }
+    model_params = {
+        'reasoning': {
+            'effort': 'medium',
+            'summary': 'auto',
+        },
+    }
+
+    payload = apply_model_params_to_body_openai(model_params, form_data)
+
+    assert payload['reasoning'] == {
+        'effort': 'medium',
+        'summary': 'auto',
+    }

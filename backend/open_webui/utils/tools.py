@@ -15,9 +15,7 @@ from typing import (
     Callable,
     Optional,
     Type,
-    Union,
     get_args,
-    get_origin,
     get_type_hints,
 )
 from urllib.parse import quote, urlencode
@@ -42,6 +40,7 @@ from open_webui.env import (
     REDIS_KEY_PREFIX,
 )
 from open_webui.models.access_grants import AccessGrants
+from open_webui.models.config import Config
 from open_webui.models.groups import Groups
 from open_webui.models.tools import Tools
 from open_webui.models.users import UserModel
@@ -64,13 +63,18 @@ from open_webui.tools.builtin import (
     generate_image,
     get_current_timestamp,
     grep_knowledge_files,
+    install_skill,
     kb_exec,
     list_automations,
     list_knowledge,
     list_knowledge_bases,
     list_memories,
+    list_memory_paths,
     query_knowledge_bases,
+    query_knowledge_evidence,
     query_knowledge_files,
+    read_skill,
+    read_memory_path,
     replace_memory_content,
     replace_note_content,
     search_calendar_events,
@@ -83,29 +87,41 @@ from open_webui.tools.builtin import (
     search_notes,
     search_web,
     toggle_automation,
+    update_skill,
     update_automation,
     update_calendar_event,
+    update_memory,
     update_task,
     view_channel_message,
     view_channel_thread,
-    query_knowledge_abstract,
-    query_knowledge_full_text,
-    view_knowledge_layers,
     view_chat,
     view_note,
     view_file,
     view_knowledge_file,
-    view_skill,
     write_note,
 )
 from open_webui.utils.access_control import has_access, has_connection_access, has_permission
+from open_webui.utils.auth import create_terminal_session_token
 from open_webui.utils.headers import get_custom_headers, include_user_info_headers
 from open_webui.utils.misc import is_string_allowed
-from open_webui.utils.plugin import load_tool_module_by_id
+from open_webui.utils.plugin import get_tool_contents_cache, get_tools_cache, load_tool_module_by_id
 from pydantic import BaseModel, Field, create_model
 from pydantic.fields import FieldInfo
 
 log = logging.getLogger(__name__)
+
+
+class RemoteProcessKillFailed(RuntimeError):
+    code = 'remote_process_kill_failed'
+
+
+def normalize_bearer_token(token: Any) -> str:
+    return token.strip() if isinstance(token, str) else token or ''
+
+
+def bearer_auth_header(token: Any) -> dict[str, str]:
+    token = normalize_bearer_token(token)
+    return {'Authorization': f'Bearer {token}'} if token else {}
 
 
 async def build_tool_server_headers(
@@ -176,6 +192,28 @@ async def get_async_tool_function_and_apply_extra_params(
     function: Callable, extra_params: dict
 ) -> Callable[..., Awaitable]:
     sig = inspect.signature(function)
+    try:
+        type_hints = get_type_hints(function)
+    except Exception:
+        type_hints = {}
+
+    def coerce_kwargs(kwargs):
+        for name, value in kwargs.items():
+            if name not in sig.parameters or value is None:
+                continue
+
+            annotation = type_hints.get(name, sig.parameters[name].annotation)
+            args = set(get_args(annotation))
+            if isinstance(value, str) and (annotation is int or args == {int, type(None)}):
+                kwargs[name] = int(value)
+            elif (
+                isinstance(value, (int, float))
+                and not isinstance(value, bool)
+                and (annotation is str or args == {str, type(None)})
+            ):
+                kwargs[name] = str(value)
+        return kwargs
+
     extra_params = {k: v for k, v in extra_params.items() if k in sig.parameters}
     partial_func = partial(function, **extra_params)
 
@@ -195,12 +233,12 @@ async def get_async_tool_function_and_apply_extra_params(
         # wrap the functools.partial as python-genai has trouble with it
         # https://github.com/googleapis/python-genai/issues/907
         async def new_function(*args, **kwargs):
-            return await partial_func(*args, **kwargs)
+            return await partial_func(*args, **coerce_kwargs(kwargs))
 
     else:
         # Make it a coroutine function when it is not already
         async def new_function(*args, **kwargs):
-            return partial_func(*args, **kwargs)
+            return partial_func(*args, **coerce_kwargs(kwargs))
 
     update_wrapper(new_function, function)
     new_function.__signature__ = new_sig
@@ -256,11 +294,13 @@ async def get_tools(request: Request, tool_ids: list[str], user: UserModel, extr
                 log.warning(f'Access denied to tool {tool_id} for user {user.id}')
                 continue
 
-            module = request.app.state.TOOLS.get(tool_id)
-            if module is None or request.app.state.TOOL_CONTENTS.get(tool_id) != tool.content:
+            tools_cache = get_tools_cache(request)
+            tool_contents_cache = get_tool_contents_cache(request)
+            module = tools_cache.get(tool_id)
+            if module is None or tool_contents_cache.get(tool_id) != tool.content:
                 module, _ = await load_tool_module_by_id(tool_id, content=tool.content)
-                request.app.state.TOOLS[tool_id] = module
-                request.app.state.TOOL_CONTENTS[tool_id] = tool.content
+                tools_cache[tool_id] = module
+                tool_contents_cache[tool_id] = tool.content
 
             __user__ = {
                 **extra_params['__user__'],
@@ -356,7 +396,7 @@ async def get_tools(request: Request, tool_ids: list[str], user: UserModel, extr
                         continue
 
                     tool_server_idx = tool_server_data.get('idx', 0)
-                    connections = request.app.state.config.TOOL_SERVER_CONNECTIONS
+                    connections = await Config.get('tool_server.connections', [])
                     if tool_server_idx >= len(connections):
                         log.warning(
                             f'Tool server index {tool_server_idx} out of range '
@@ -462,6 +502,16 @@ async def get_builtin_tools(
 
     # Helper to check user-level feature permission (admins always pass)
     user = extra_params.get('__user__', {})
+    config = await Config.get_many(
+        'web.search.enable',
+        'image_generation.enable',
+        'images.edit.enable',
+        'code_interpreter.enable',
+        'notes.enable',
+        'channels.enable',
+        'automations.enable',
+        'calendar.enable',
+    )
 
     async def has_user_permission(feature_key: str) -> bool:
         if user.get('role') == 'admin':
@@ -469,7 +519,7 @@ async def get_builtin_tools(
         return await has_permission(
             user.get('id', ''),
             f'features.{feature_key}',
-            request.app.state.config.USER_PERMISSIONS,
+            await Config.get('user.permissions'),
         )
 
     # Time utilities - available for date calculations
@@ -504,13 +554,11 @@ async def get_builtin_tools(
                 builtin_functions.append(search_knowledge_bases)
         elif model_knowledge:
             builtin_functions.extend([list_knowledge, search_knowledge_files, grep_knowledge_files])
-            builtin_functions.append(query_knowledge_abstract)
             builtin_functions.append(query_knowledge_files)
-            builtin_functions.append(query_knowledge_full_text)
 
             knowledge_types = {item.get('type') for item in model_knowledge}
             if 'file' in knowledge_types or 'collection' in knowledge_types:
-                builtin_functions.extend([view_file, view_knowledge_file, view_knowledge_layers])
+                builtin_functions.extend([view_file, view_knowledge_file])
             if 'note' in knowledge_types:
                 builtin_functions.append(view_note)
         else:
@@ -526,30 +574,43 @@ async def get_builtin_tools(
                 ]
             )
 
+        if model_knowledge:
+            if query_knowledge_evidence not in builtin_functions:
+                insert_at = (
+                    builtin_functions.index(query_knowledge_files)
+                    if query_knowledge_files in builtin_functions
+                    else len(builtin_functions)
+                )
+                builtin_functions.insert(insert_at, query_knowledge_evidence)
+
     # Chats tools - search and fetch user's chat history
     if is_builtin_tool_enabled('chats'):
         builtin_functions.extend([search_chats, view_chat])
 
-    # Add memory tools if builtin category enabled AND enabled for this chat
+    # Add memory tools when memory is enabled and the model allows this builtin category.
     if (
         is_builtin_tool_enabled('memory')
-        and (features.get('memory') or get_model_capability('memory', False))
+        and features.get('memory')
+        and get_model_capability('memory')
         and await has_user_permission('memories')
     ):
         builtin_functions.extend(
             [
                 search_memories,
+                list_memory_paths,
+                read_memory_path,
+                list_memories,
+                update_memory,
                 add_memory,
                 replace_memory_content,
                 delete_memory,
-                list_memories,
             ]
         )
 
     # Add web search tools if builtin category enabled AND enabled globally AND model has web_search capability
     if (
         is_builtin_tool_enabled('web_search')
-        and getattr(request.app.state.config, 'ENABLE_WEB_SEARCH', False)
+        and config.get('web.search.enable')
         and get_model_capability('web_search')
         and features.get('web_search')
         and await has_user_permission('web_search')
@@ -559,7 +620,7 @@ async def get_builtin_tools(
     # Add image generation/edit tools if builtin category enabled AND enabled globally AND model has image_generation capability
     if (
         is_builtin_tool_enabled('image_generation')
-        and getattr(request.app.state.config, 'ENABLE_IMAGE_GENERATION', False)
+        and config.get('image_generation.enable')
         and get_model_capability('image_generation')
         and features.get('image_generation')
         and await has_user_permission('image_generation')
@@ -567,7 +628,7 @@ async def get_builtin_tools(
         builtin_functions.append(generate_image)
     if (
         is_builtin_tool_enabled('image_generation')
-        and getattr(request.app.state.config, 'ENABLE_IMAGE_EDIT', False)
+        and config.get('images.edit.enable')
         and get_model_capability('image_generation')
         and features.get('image_generation')
         and await has_user_permission('image_generation')
@@ -577,7 +638,7 @@ async def get_builtin_tools(
     # Add code interpreter tool if builtin category enabled AND enabled globally AND model has code_interpreter capability
     if (
         is_builtin_tool_enabled('code_interpreter')
-        and getattr(request.app.state.config, 'ENABLE_CODE_INTERPRETER', True)
+        and config.get('code_interpreter.enable')
         and get_model_capability('code_interpreter')
         and features.get('code_interpreter')
         and await has_user_permission('code_interpreter')
@@ -585,19 +646,11 @@ async def get_builtin_tools(
         builtin_functions.append(execute_code)
 
     # Notes tools - search, view, create, and update user's notes
-    if (
-        is_builtin_tool_enabled('notes')
-        and getattr(request.app.state.config, 'ENABLE_NOTES', False)
-        and await has_user_permission('notes')
-    ):
+    if is_builtin_tool_enabled('notes') and config.get('notes.enable') and await has_user_permission('notes'):
         builtin_functions.extend([search_notes, view_note, write_note, replace_note_content])
 
     # Channels tools - search channels and messages
-    if (
-        is_builtin_tool_enabled('channels')
-        and getattr(request.app.state.config, 'ENABLE_CHANNELS', False)
-        and await has_user_permission('channels')
-    ):
+    if is_builtin_tool_enabled('channels') and config.get('channels.enable') and await has_user_permission('channels'):
         builtin_functions.extend(
             [
                 search_channels,
@@ -607,9 +660,14 @@ async def get_builtin_tools(
             ]
         )
 
-    # Skills tools - view_skill allows model to load full skill instructions on demand
-    if extra_params.get('__skill_ids__'):
-        builtin_functions.append(view_skill)
+    # Skills tools - read existing skills and install/update terminal package sources.
+    terminal_id = extra_params.get('__terminal_id__')
+    if not terminal_id and isinstance(metadata, dict):
+        terminal_id = metadata.get('terminal_id')
+    if is_builtin_tool_enabled('skills') and (extra_params.get('__skill_ids__') or terminal_id):
+        builtin_functions.append(read_skill)
+        if terminal_id:
+            builtin_functions.extend([install_skill, update_skill])
 
     # Task management - break down complex work into trackable steps
     if is_builtin_tool_enabled('tasks'):
@@ -618,7 +676,7 @@ async def get_builtin_tools(
     # Automation tools - create and manage scheduled automations from chat
     if (
         is_builtin_tool_enabled('automations')
-        and getattr(request.app.state.config, 'ENABLE_AUTOMATIONS', False)
+        and config.get('automations.enable')
         and await has_user_permission('automations')
     ):
         builtin_functions.extend(
@@ -626,11 +684,7 @@ async def get_builtin_tools(
         )
 
     # Calendar tools - search/create/update/delete events
-    if (
-        is_builtin_tool_enabled('calendar')
-        and getattr(request.app.state.config, 'ENABLE_CALENDAR', False)
-        and await has_user_permission('calendar')
-    ):
+    if is_builtin_tool_enabled('calendar') and config.get('calendar.enable') and await has_user_permission('calendar'):
         builtin_functions.extend(
             [search_calendar_events, create_calendar_event, update_calendar_event, delete_calendar_event]
         )
@@ -644,6 +698,9 @@ async def get_builtin_tools(
                 '__event_emitter__': extra_params.get('__event_emitter__'),
                 '__event_call__': extra_params.get('__event_call__'),
                 '__metadata__': extra_params.get('__metadata__'),
+                '__oauth_token__': extra_params.get('__oauth_token__'),
+                '__terminal_id__': terminal_id,
+                '__skill_ids__': extra_params.get('__skill_ids__'),
                 '__chat_id__': extra_params.get('__chat_id__'),
                 '__message_id__': extra_params.get('__message_id__'),
                 '__model_knowledge__': model_knowledge,
@@ -979,8 +1036,9 @@ async def set_tool_servers(
     oauth_token: Optional[dict] = None,
 ):
     try:
+        connections = await Config.get('tool_server.connections', []) or []
         request.app.state.TOOL_SERVERS = await get_tool_servers_data(
-            request.app.state.config.TOOL_SERVER_CONNECTIONS,
+            connections,
             session_token=session_token,
             oauth_token=oauth_token,
         )
@@ -1014,9 +1072,10 @@ async def get_tool_servers(
             except Exception as e:
                 log.error(f'Error fetching tool_servers from Redis: {e}')
 
+        connections = await Config.get('tool_server.connections', []) or []
         if not tool_servers or tool_server_cache_requires_refresh(
             tool_servers,
-            request.app.state.config.TOOL_SERVER_CONNECTIONS or [],
+            connections,
             session_token=session_token,
             oauth_token=oauth_token,
         ):
@@ -1099,7 +1158,7 @@ async def set_terminal_servers(
     oauth_token: Optional[dict] = None,
 ):
     """Load and cache OpenAPI specs from all TERMINAL_SERVER_CONNECTIONS."""
-    connections = request.app.state.config.TERMINAL_SERVER_CONNECTIONS or []
+    connections = await Config.get('terminal_server.connections', []) or []
 
     # Build server configs compatible with get_tool_servers_data
     # Terminal connections store id/name at top level; translate to info dict
@@ -1121,7 +1180,7 @@ async def set_terminal_servers(
         server_configs.append(
             {
                 'url': base_url,
-                'key': connection.get('key', ''),
+                'key': normalize_bearer_token(connection.get('key', '')),
                 'auth_type': connection.get('auth_type', 'bearer'),
                 'path': connection.get('path', '/openapi.json'),
                 'spec_type': 'url',
@@ -1187,6 +1246,7 @@ async def get_terminal_servers(
         except Exception as e:
             log.error(f'Error fetching terminal_servers from Redis: {e}')
 
+    connections = await Config.get('terminal_server.connections', []) or []
     if not terminal_servers or tool_server_cache_requires_refresh(
         terminal_servers,
         [
@@ -1195,7 +1255,7 @@ async def get_terminal_servers(
                 'enabled': connection.get('enabled', True),
                 'auth_type': connection.get('auth_type', 'bearer'),
             }
-            for connection in (request.app.state.config.TERMINAL_SERVER_CONNECTIONS or [])
+            for connection in connections
         ],
         session_token=session_token,
         oauth_token=oauth_token,
@@ -1222,7 +1282,7 @@ async def get_terminal_tools(
     - Loads specs from cache
     - Builds callables that route through the terminal proxy
     """
-    connections = request.app.state.config.TERMINAL_SERVER_CONNECTIONS or []
+    connections = await Config.get('terminal_server.connections', []) or []
     connection = next((c for c in connections if c.get('id') == terminal_id), None)
     if connection is None:
         log.warning(f'Terminal server not found: {terminal_id}')
@@ -1233,10 +1293,13 @@ async def get_terminal_tools(
         log.warning(f'Access denied to terminal {terminal_id} for user {user.id}')
         return {}
 
+    auth_type = connection.get('auth_type', 'bearer')
+    terminal_session_token = create_terminal_session_token(user) if auth_type == 'session' else None
+
     # Find the cached spec data for this terminal
     terminal_servers = await get_terminal_servers(
         request,
-        session_token=getattr(getattr(request.state, 'token', None), 'credentials', None),
+        session_token=terminal_session_token,
         oauth_token=extra_params.get('__oauth_token__', None),
     )
     server_data = next((s for s in terminal_servers if s.get('id') == terminal_id), None)
@@ -1249,20 +1312,19 @@ async def get_terminal_tools(
         return {}
 
     # Build auth headers
-    auth_type = connection.get('auth_type', 'bearer')
     cookies = {}
     headers = {'Content-Type': 'application/json', 'X-User-Id': user.id}
 
     if auth_type == 'bearer':
-        headers['Authorization'] = f'Bearer {connection.get("key", "")}'
+        headers.update(bearer_auth_header(connection.get('key', '')))
     elif auth_type == 'session':
         cookies = request.cookies
-        headers['Authorization'] = f'Bearer {request.state.token.credentials}'
+        headers.update(bearer_auth_header(terminal_session_token))
     elif auth_type == 'system_oauth':
         cookies = request.cookies
         oauth_token = extra_params.get('__oauth_token__', None)
         if oauth_token:
-            headers['Authorization'] = f'Bearer {oauth_token.get("access_token", "")}'
+            headers.update(bearer_auth_header(oauth_token.get('access_token', '')))
     # auth_type == "none": no Authorization header
 
     system_prompt = server_data.get('system_prompt')
@@ -1287,7 +1349,7 @@ async def get_terminal_tools(
 
         async def make_tool_function(fn_name, srv_data, hdrs, cks):
             async def tool_function(**kwargs):
-                return await execute_tool_server(
+                return await execute_terminal_tool_server(
                     url=srv_data['url'],
                     headers=hdrs,
                     cookies=cks,
@@ -1611,6 +1673,182 @@ async def execute_tool_server(
         error = str(err)
         log.warning(f'API Request Error: {error}')
         return ({'error': error}, None)
+
+
+def _terminal_process_id(data: Any) -> str | None:
+    if not isinstance(data, dict):
+        return None
+    process_id = data.get('process_id') or data.get('id')
+    return str(process_id) if process_id else None
+
+
+def _with_terminal_process_id(data: Any, process_id: str) -> Any:
+    if not isinstance(data, dict):
+        return data
+    normalized = dict(data)
+    normalized.setdefault('process_id', process_id)
+    return normalized
+
+
+def _terminal_wait_is_zero(value: Any) -> bool:
+    if isinstance(value, bool):
+        return False
+    try:
+        return float(value) == 0
+    except (OverflowError, TypeError, ValueError):
+        return False
+
+
+def _terminal_run_query_is_valid(params: dict[str, Any]) -> bool:
+    wait = params.get('wait')
+    if 'wait' in params and wait not in (None, ''):
+        if isinstance(wait, bool):
+            return False
+        try:
+            numeric_wait = float(wait)
+        except (OverflowError, TypeError, ValueError):
+            return False
+        if not 0 <= numeric_wait <= 300:
+            return False
+
+    tail = params.get('tail')
+    if 'tail' in params and tail not in (None, ''):
+        if isinstance(tail, bool):
+            return False
+        tail_text = str(tail).strip()
+        if re.fullmatch(r'[+-]?\d+(?:\.0+)?', tail_text) is None:
+            return False
+        numeric_tail = int(tail_text.split('.', maxsplit=1)[0])
+        if numeric_tail < 1:
+            return False
+    return True
+
+
+async def _kill_terminal_process(
+    *,
+    url: str,
+    headers: dict[str, str],
+    cookies: dict[str, str],
+    process_id: str,
+    server_data: dict[str, Any],
+) -> None:
+    kill_task = asyncio.create_task(
+        execute_tool_server(
+            url=url,
+            headers=headers,
+            cookies=cookies,
+            name='kill_process',
+            params={'process_id': process_id},
+            server_data=server_data,
+        )
+    )
+    data, _response_headers = await asyncio.shield(kill_task)
+    error = data.get('error') if isinstance(data, dict) else None
+    if not error:
+        return
+    if re.search(r'\bHTTP error 404\b', str(error), re.IGNORECASE):
+        return
+    raise RemoteProcessKillFailed(
+        f'Failed to terminate terminal process {process_id}: {error}'
+    )
+
+
+async def execute_terminal_tool_server(
+    url: str,
+    headers: dict[str, str],
+    cookies: dict[str, str],
+    name: str,
+    params: dict[str, Any],
+    server_data: dict[str, Any],
+) -> tuple[dict[str, Any], dict[str, Any | None]]:
+    """Execute terminal run_command with process ownership before a long wait."""
+    if name != 'run_command':
+        return await execute_tool_server(
+            url=url,
+            headers=headers,
+            cookies=cookies,
+            name=name,
+            params=params,
+            server_data=server_data,
+        )
+    if not _terminal_run_query_is_valid(params):
+        return await execute_tool_server(
+            url=url,
+            headers=headers,
+            cookies=cookies,
+            name=name,
+            params=params,
+            server_data=server_data,
+        )
+
+    requested_wait_present = 'wait' in params and params.get('wait') not in (None, '')
+    requested_wait = params.get('wait')
+    launch_params = dict(params)
+    launch_params['wait'] = 0
+    launch_task = asyncio.create_task(
+        execute_tool_server(
+            url=url,
+            headers=headers,
+            cookies=cookies,
+            name='run_command',
+            params=launch_params,
+            server_data=server_data,
+        )
+    )
+    try:
+        launch_data, launch_headers = await asyncio.shield(launch_task)
+    except asyncio.CancelledError:
+        launch_data, _launch_headers = await asyncio.shield(launch_task)
+        process_id = _terminal_process_id(launch_data)
+        if process_id is not None:
+            await _kill_terminal_process(
+                url=url,
+                headers=headers,
+                cookies=cookies,
+                process_id=process_id,
+                server_data=server_data,
+            )
+        raise
+
+    process_id = _terminal_process_id(launch_data)
+    if process_id is None:
+        return launch_data, launch_headers
+    launch_data = _with_terminal_process_id(launch_data, process_id)
+    if requested_wait_present and _terminal_wait_is_zero(requested_wait):
+        return launch_data, launch_headers
+
+    status_params: dict[str, Any] = {'process_id': process_id}
+    if requested_wait_present:
+        status_params['wait'] = requested_wait
+    if params.get('tail') not in (None, ''):
+        status_params['tail'] = params['tail']
+    try:
+        status_data, status_headers = await execute_tool_server(
+            url=url,
+            headers=headers,
+            cookies=cookies,
+            name='get_process_status',
+            params=status_params,
+            server_data=server_data,
+        )
+    except asyncio.CancelledError:
+        await _kill_terminal_process(
+            url=url,
+            headers=headers,
+            cookies=cookies,
+            process_id=process_id,
+            server_data=server_data,
+        )
+        raise
+    if isinstance(status_data, dict) and status_data.get('error'):
+        await _kill_terminal_process(
+            url=url,
+            headers=headers,
+            cookies=cookies,
+            process_id=process_id,
+            server_data=server_data,
+        )
+    return _with_terminal_process_id(status_data, process_id), status_headers
 
 
 def get_tool_server_url(url: str | None, path: str) -> str:

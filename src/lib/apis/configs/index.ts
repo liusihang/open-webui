@@ -1,7 +1,179 @@
 import { WEBUI_API_BASE_URL, WEBUI_BASE_URL } from '$lib/constants';
 import type { Banner } from '$lib/types';
 
-export const importConfig = async (token: string, config) => {
+export type ConversationMode = 'chat' | 'agent';
+
+/** `inherit` is omitted on the wire; null/[] are intentional empty overrides. */
+export type ConversationModeProfileDefault<T> = 'inherit' | T;
+
+export type ConversationModeProfileDefaults = {
+	terminal_id: ConversationModeProfileDefault<string | null>;
+	tool_ids: ConversationModeProfileDefault<string[]>;
+	skill_ids: ConversationModeProfileDefault<string[]>;
+	filter_ids: ConversationModeProfileDefault<string[]>;
+	feature_ids: ConversationModeProfileDefault<string[]>;
+};
+
+export type ConversationModeProfileContent = {
+	schema_version: number;
+	/** Private administrator-only content. Do not put this value in a store. */
+	system_prompt: string;
+	defaults: ConversationModeProfileDefaults;
+};
+
+export type ConversationModeProfilePublic = {
+	mode: ConversationMode;
+	current_revision_id: string;
+	schema_version: number;
+	defaults: Partial<ConversationModeProfileDefaults>;
+};
+
+export type ConversationModeProfileWarning = {
+	code: string;
+	field: string;
+	resource_ids: string[];
+	model_ids: string[];
+};
+
+export type ConversationModeProfileRevisionMetadata = {
+	revision_id: string;
+	mode: ConversationMode;
+	revision_number: number;
+	schema_version: number;
+	created_at: number;
+	created_by: string | null;
+	restored_from_revision_id: string | null;
+	is_current: boolean;
+	/** Optional until the private backend response exposes the verified hash. */
+	content_hash?: string | null;
+};
+
+export type ConversationModeProfileRevision = ConversationModeProfileRevisionMetadata & {
+	/** Private administrator-only content. */
+	system_prompt: string;
+	/** Omitted fields are the server's canonical representation of inherit. */
+	defaults: Partial<ConversationModeProfileDefaults>;
+	warnings: ConversationModeProfileWarning[];
+};
+
+export type ConversationModeProfilesResponse = {
+	profiles: ConversationModeProfileRevision[];
+};
+
+export type ConversationModeProfileHistory = {
+	mode: ConversationMode;
+	current_revision_id: string;
+	revisions: ConversationModeProfileRevisionMetadata[];
+};
+
+export type ConversationModeProfileValidationIssue = {
+	resource_type: string;
+	resource_id: string;
+	reason: string;
+};
+
+export type ConversationModeProfileConflict = {
+	code: 'mode_profile_revision_conflict';
+	mode: ConversationMode;
+	expected_current_revision_id: string;
+	current_revision: Pick<
+		ConversationModeProfileRevisionMetadata,
+		'revision_id' | 'revision_number' | 'schema_version' | 'created_at'
+	>;
+};
+
+export type ConversationModeProfileApiFailure = {
+	code?: string;
+	reason?: string;
+	field?: string | null;
+	issues?: ConversationModeProfileValidationIssue[];
+	operation?: string;
+	mode?: ConversationMode;
+	revision_id?: string;
+};
+
+export class ModeProfileApiError extends Error {
+	constructor(
+		public readonly status: number,
+		public readonly detail: ConversationModeProfileApiFailure | ConversationModeProfileConflict
+	) {
+		super(detail.code ?? 'mode_profile_request_failed');
+		this.name = 'ModeProfileApiError';
+	}
+}
+
+const modeProfileHeaders = (token: string) => ({
+	'Content-Type': 'application/json',
+	Authorization: `Bearer ${token}`
+});
+
+const requestConversationModeProfile = async <T>(
+	token: string,
+	path: string,
+	init: RequestInit = {}
+): Promise<T> => {
+	const response = await fetch(`${WEBUI_API_BASE_URL}/configs/conversation_mode_profiles${path}`, {
+		...init,
+		headers: { ...modeProfileHeaders(token), ...init.headers }
+	});
+	const payload = await response.json().catch(() => null);
+
+	if (!response.ok) {
+		throw new ModeProfileApiError(response.status, payload?.detail ?? payload ?? {});
+	}
+
+	return payload as T;
+};
+
+export const getConversationModeProfiles = (token: string) =>
+	requestConversationModeProfile<ConversationModeProfilesResponse>(token, '');
+
+export const getConversationModeProfile = (token: string, mode: ConversationMode) =>
+	requestConversationModeProfile<ConversationModeProfileRevision>(token, `/${mode}`);
+
+export const saveConversationModeProfile = (
+	token: string,
+	mode: ConversationMode,
+	expectedCurrentRevisionId: string,
+	profile: ConversationModeProfileContent
+) =>
+	requestConversationModeProfile<ConversationModeProfileRevision>(token, `/${mode}/revisions`, {
+		method: 'POST',
+		body: JSON.stringify({
+			expected_current_revision_id: expectedCurrentRevisionId,
+			profile
+		})
+	});
+
+export const getConversationModeProfileHistory = (token: string, mode: ConversationMode) =>
+	requestConversationModeProfile<ConversationModeProfileHistory>(token, `/${mode}/revisions`);
+
+export const getConversationModeProfileRevision = (
+	token: string,
+	mode: ConversationMode,
+	revisionId: string
+) =>
+	requestConversationModeProfile<ConversationModeProfileRevision>(
+		token,
+		`/${mode}/revisions/${revisionId}`
+	);
+
+export const restoreConversationModeProfile = (
+	token: string,
+	mode: ConversationMode,
+	revisionId: string,
+	expectedCurrentRevisionId: string
+) =>
+	requestConversationModeProfile<ConversationModeProfileRevision>(
+		token,
+		`/${mode}/revisions/${revisionId}/restore`,
+		{
+			method: 'POST',
+			body: JSON.stringify({ expected_current_revision_id: expectedCurrentRevisionId })
+		}
+	);
+
+export const importConfig = async (token: string, config: object) => {
 	let error = null;
 
 	const res = await fetch(`${WEBUI_API_BASE_URL}/configs/import`, {
@@ -275,7 +447,8 @@ export const putOrchestratorPolicy = async (
 	url: string,
 	key: string,
 	policyId: string,
-	policyData: object
+	policyData: object,
+	authType: string = 'bearer'
 ): Promise<object | null> => {
 	let error = null;
 
@@ -288,8 +461,94 @@ export const putOrchestratorPolicy = async (
 		body: JSON.stringify({
 			url: url.replace(/\/$/, ''),
 			key,
+			auth_type: authType,
 			policy_id: policyId,
 			policy_data: policyData
+		})
+	})
+		.then(async (res) => {
+			if (!res.ok) throw await res.json();
+			return res.json();
+		})
+		.catch((err) => {
+			console.error(err);
+			error = err.detail;
+			return null;
+		});
+
+	if (error) {
+		throw error;
+	}
+
+	return res;
+};
+
+export const putOrchestratorLifecycle = async (
+	token: string,
+	url: string,
+	key: string,
+	policyId: string,
+	lifecycleData: object,
+	authType: string = 'bearer'
+): Promise<object | null> => {
+	let error = null;
+
+	const res = await fetch(`${WEBUI_API_BASE_URL}/configs/terminal_servers/lifecycle`, {
+		method: 'POST',
+		headers: {
+			'Content-Type': 'application/json',
+			Authorization: `Bearer ${token}`
+		},
+		body: JSON.stringify({
+			url: url.replace(/\/$/, ''),
+			key,
+			auth_type: authType,
+			policy_id: policyId,
+			lifecycle_data: lifecycleData
+		})
+	})
+		.then(async (res) => {
+			if (!res.ok) throw await res.json();
+			return res.json();
+		})
+		.catch((err) => {
+			console.error(err);
+			error = err.detail;
+			return null;
+		});
+
+	if (error) {
+		throw error;
+	}
+
+	return res;
+};
+
+export const refreshOrchestratorTerminals = async (
+	token: string,
+	url: string,
+	key: string,
+	body: {
+		user_id?: string;
+		policy_id?: string;
+		only_idle?: boolean;
+		reset?: boolean;
+	},
+	authType: string = 'bearer'
+): Promise<object | null> => {
+	let error = null;
+
+	const res = await fetch(`${WEBUI_API_BASE_URL}/configs/terminal_servers/refresh`, {
+		method: 'POST',
+		headers: {
+			'Content-Type': 'application/json',
+			Authorization: `Bearer ${token}`
+		},
+		body: JSON.stringify({
+			url: url.replace(/\/$/, ''),
+			key,
+			auth_type: authType,
+			...body
 		})
 	})
 		.then(async (res) => {
@@ -379,6 +638,7 @@ type RegisterOAuthClientForm = {
 	client_name?: string;
 	client_secret?: string;
 	oauth_server_url?: string;
+	oauth_scope?: string;
 };
 
 export const registerOAuthClient = async (
@@ -419,6 +679,17 @@ export const registerOAuthClient = async (
 export const getOAuthClientAuthorizationUrl = (clientId: string, type: null | string = null) => {
 	const oauthClientId = type ? `${type}:${clientId}` : clientId;
 	return `${WEBUI_BASE_URL}/oauth/clients/${oauthClientId}/authorize`;
+};
+
+export const initiateOAuthRedirect = (tool: {
+	id: string;
+	serverId: string;
+	authType?: string | null;
+}) => {
+	sessionStorage.setItem('pendingOAuthToolId', tool.id);
+	sessionStorage.setItem('oauthRedirectInProgressToolId', tool.id);
+	const authUrl = getOAuthClientAuthorizationUrl(tool.serverId, tool.authType ?? 'mcp');
+	window.open(authUrl, '_self', 'noopener');
 };
 
 export const getCodeExecutionConfig = async (token: string) => {

@@ -5,6 +5,7 @@
 	import { settings, config } from '$lib/stores';
 	import { injectCsp } from '$lib/utils/csp';
 	import { isCodeFile } from '$lib/utils/codeHighlight';
+	import { isOnlyOfficePreviewFile } from '$lib/utils/filePreviewTypes';
 	import { initMermaid, renderMermaidDiagram } from '$lib/utils';
 	import Spinner from '../../common/Spinner.svelte';
 	import PDFViewer from '../../common/PDFViewer.svelte';
@@ -110,14 +111,13 @@
 	const CSV_EXTS = new Set(['csv', 'tsv']);
 	const HTML_EXTS = new Set(['html', 'htm']);
 	const JSON_EXTS = new Set(['json', 'jsonc', 'jsonl', 'json5']);
-	const OFFICE_EXTS = new Set(['docx', 'xlsx', 'pptx']);
 	const getExt = (path: string | null) => path?.split('.').pop()?.toLowerCase() ?? '';
 
 	$: isMarkdown = MD_EXTS.has(getExt(selectedFile));
 	$: isCsv = CSV_EXTS.has(getExt(selectedFile));
 	$: isHtml = HTML_EXTS.has(getExt(selectedFile));
 	$: isJson = JSON_EXTS.has(getExt(selectedFile));
-	$: isOfficeFile = OFFICE_EXTS.has(getExt(selectedFile));
+	$: isOfficeFile = isOnlyOfficePreviewFile({ name: selectedFile });
 	$: isSvg = getExt(selectedFile) === 'svg';
 	$: isNotebook = getExt(selectedFile) === 'ipynb';
 	$: isCode = isCodeFile(selectedFile);
@@ -328,14 +328,10 @@
 				{$i18n.t('Your browser does not support the audio tag.')}
 			</audio>
 		</div>
-	{:else if filePdfData !== null}
-		<PDFViewer bind:this={pdfViewerRef} data={filePdfData} className="w-full h-full" />
-	{:else if fileSqliteData !== null}
-		<SqliteView data={fileSqliteData} />
-	{:else if canUseOnlyOffice}
-		<div class="flex flex-col h-full">
-			<div class="relative flex-1 min-h-0">
-				<OnlyOfficeViewer
+		{:else if canUseOnlyOffice}
+			<div class="flex flex-col h-full">
+				<div class="relative flex-1 min-h-0">
+					<OnlyOfficeViewer
 					fileId={onlyOfficeFileId ?? ''}
 					terminalServerId={onlyOfficeTerminalServerId ?? ''}
 					terminalFilePath={onlyOfficeTerminalFilePath ?? ''}
@@ -348,9 +344,13 @@
 							$i18n.t('OnlyOffice preview failed. Falling back to built-in preview.');
 					}}
 				/>
+				</div>
 			</div>
-		</div>
-	{:else if fileOfficeHtml !== null}
+		{:else if filePdfData !== null}
+			<PDFViewer bind:this={pdfViewerRef} data={filePdfData} className="w-full h-full" />
+		{:else if fileSqliteData !== null}
+			<SqliteView data={fileSqliteData} />
+		{:else if fileOfficeHtml !== null}
 		<div class="flex flex-col h-full">
 			{#if onlyOfficeError}
 				<div

@@ -9,11 +9,11 @@
 		currentChatPage,
 		temporaryChatEnabled
 	} from '$lib/stores';
-	import { tick, getContext, onMount, onDestroy, createEventDispatcher } from 'svelte';
+	import { tick, getContext, onDestroy, createEventDispatcher } from 'svelte';
 	const dispatch = createEventDispatcher();
 
 	import { toast } from 'svelte-sonner';
-	import { getChatList, updateChatById } from '$lib/apis/chats';
+	import { deleteChatMessageById, getChatList, updateChatById } from '$lib/apis/chats';
 	import { copyToClipboard, extractCurlyBraceWords } from '$lib/utils';
 
 	import Message from './Messages/Message.svelte';
@@ -21,10 +21,11 @@
 	import Spinner from '../common/Spinner.svelte';
 
 	import ChatPlaceholder from './ChatPlaceholder.svelte';
+	import { nativeScrollAnchor } from './nativeAutoFollow';
 
 	const i18n = getContext('i18n');
 
-	export let className = 'h-full flex pt-8';
+	export let className = 'min-h-full flex pt-8 flex-none';
 
 	export let chatId = '';
 	export let user = $_user;
@@ -173,7 +174,7 @@
 				messages: messages
 			});
 
-			// Refresh local message content from backend (e.g. re-derived via serialize_output)
+			// Keep local plain-content edits aligned with the saved chat response.
 			if (res?.chat?.history?.messages) {
 				for (const [id, msg] of Object.entries(res.chat.history.messages)) {
 					if (history.messages[id] && (msg as any).content) {
@@ -391,8 +392,8 @@
 					parentId: parentId,
 					childrenIds: [],
 					files: undefined,
-					content: content,
-					output: output ?? undefined,
+					content: output !== undefined ? '' : content,
+					...(output !== undefined ? { output } : {}),
 					timestamp: Math.floor(Date.now() / 1000) // Unix epoch
 				};
 
@@ -410,10 +411,13 @@
 				await updateChat();
 			} else {
 				// Edit response message
-				history.messages[messageId].originalContent = history.messages[messageId].content;
-				history.messages[messageId].content = content;
+				if (content !== undefined) {
+					history.messages[messageId].originalContent = history.messages[messageId].content;
+					history.messages[messageId].content = content;
+				}
 				if (output !== undefined) {
 					history.messages[messageId].output = output;
+					history.messages[messageId].content = '';
 				}
 				await updateChat();
 			}
@@ -463,7 +467,27 @@
 			delete history.messages[id];
 		});
 
-		showMessage({ id: parentMessageId }, false);
+		let nextMessageId = parentMessageId;
+		let nextChildrenIds =
+			nextMessageId === null
+				? Object.keys(history.messages).filter((id) => history.messages[id].parentId === null)
+				: (history.messages[nextMessageId]?.childrenIds ?? []);
+		while (nextChildrenIds.length > 0) {
+			nextMessageId = nextChildrenIds.at(-1);
+			nextChildrenIds = history.messages[nextMessageId]?.childrenIds ?? [];
+		}
+		history.currentId = nextMessageId;
+		history = history;
+
+		if (!$temporaryChatEnabled) {
+			const res = await deleteChatMessageById(localStorage.token, chatId, messageId);
+			if (res?.chat?.history) {
+				history = res.chat.history;
+			}
+
+			currentChatPage.set(1);
+			await chats.set(await getChatList(localStorage.token, $currentChatPage));
+		}
 	};
 
 	const triggerScroll = () => {
@@ -481,7 +505,7 @@
 	{#if Object.keys(history?.messages ?? {}).length == 0}
 		<ChatPlaceholder modelIds={selectedModels} {atSelectedModel} {onSelect} />
 	{:else}
-		<div class="w-full pt-2">
+		<div class="w-full pt-2 flex-none">
 			{#key chatId}
 				<section class="w-full" aria-labelledby="chat-conversation">
 					<h2 class="sr-only" id="chat-conversation">{$i18n.t('Chat Conversation')}</h2>
@@ -531,6 +555,11 @@
 							/>
 						{/each}
 					</ul>
+					<div
+						class="chat-scroll-anchor"
+						aria-hidden="true"
+						use:nativeScrollAnchor={autoScroll}
+					></div>
 				</section>
 				<div class="pb-18" />
 				{#if bottomPadding}
@@ -540,3 +569,15 @@
 		</div>
 	{/if}
 </div>
+
+<style>
+	:global(#messages-container.native-auto-follow [role='log']) {
+		overflow-anchor: none;
+	}
+
+	.chat-scroll-anchor {
+		overflow-anchor: auto;
+		height: 1px;
+		width: 100%;
+	}
+</style>

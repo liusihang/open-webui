@@ -8,16 +8,33 @@ from uuid import uuid4
 
 from fastapi import APIRouter, Depends, HTTPException, Request, status
 from fastapi.responses import StreamingResponse
+from open_webui.agent.conversation_mode import (
+    ConversationModeMismatchError,
+    InvalidConversationModeError,
+    chat_has_agent_mode_evidence,
+    normalize_new_conversation_chat,
+    resolve_conversation_mode,
+)
+from open_webui.agent.conversation_mode_profile_service import (
+    ModeProfileRevisionHintConflictError,
+    ModeProfileServiceUnavailableError,
+    ModeProfileTemporaryBindingError,
+    import_chats_with_mode_profile_bindings,
+    insert_new_chat_with_current_mode_profile,
+)
 from open_webui.config import ENABLE_ADMIN_CHAT_ACCESS, ENABLE_ADMIN_EXPORT
 from open_webui.constants import ERROR_MESSAGES
+from open_webui.events import EVENTS, publish_event
 from open_webui.internal.db import get_async_session
 from open_webui.models.access_grants import AccessGrants
+from open_webui.models.agent_runs import AgentRuns
 from open_webui.models.chats import (
     AggregateChatStats,
     ChatBody,
     ChatForm,
     ChatHistoryStats,
     ChatImportForm,
+    ChatModel,
     ChatResponse,
     Chats,
     ChatsImportForm,
@@ -26,21 +43,140 @@ from open_webui.models.chats import (
     ChatUsageStatsListResponse,
     MessageStats,
 )
+from open_webui.models.config import Config
+from open_webui.models.conversation_mode_profiles import (
+    ConversationModeProfileBindingConflict,
+    ConversationModeProfileIntegrityError,
+    ConversationModeProfileLegacyBindingError,
+    ConversationModeProfiles,
+)
 from open_webui.models.folders import Folders
 from open_webui.models.shared_chats import SharedChatResponse, SharedChats
 from open_webui.models.tags import TagModel, Tags
 from open_webui.socket.main import get_event_emitter
-from open_webui.tasks import stop_item_tasks
+from open_webui.tasks import has_active_tasks, stop_item_tasks
 from open_webui.utils.access_control import filter_allowed_access_grants, has_permission
+from open_webui.utils.access_control.folders import has_folder_access
 from open_webui.utils.auth import get_admin_user, get_verified_user
-from open_webui.utils.middleware import serialize_output
+from open_webui.utils.context_compaction import compact_chat_branch
 from open_webui.utils.misc import get_message_list
+from open_webui.utils.models import get_all_models
 from pydantic import BaseModel
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.exc import SQLAlchemyError
 
 log = logging.getLogger(__name__)
 
 router = APIRouter()
+
+SEARCH_FILTER_PREFIXES = ('tag:', 'folder:', 'pinned:', 'archived:', 'shared:')
+
+CHAT_CONFIG_KEYS = {
+    'GLOBAL_SYSTEM_PROMPT': 'chat.global_system_prompt',
+    'ENABLE_CONTEXT_COMPACTION': 'chat.context_compaction.enable',
+    'CONTEXT_COMPACTION_TOKEN_THRESHOLD': 'chat.context_compaction.token_threshold',
+    'CONTEXT_COMPACTION_PROMPT_TEMPLATE': 'chat.context_compaction.prompt_template',
+}
+
+
+def _mode_profile_http_exception(exc: Exception) -> HTTPException:
+    if isinstance(exc, (ModeProfileServiceUnavailableError, SQLAlchemyError)):
+        return HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail={
+                'code': 'mode_profile_unavailable',
+                'message': 'The conversation mode profile service is temporarily unavailable.',
+            },
+        )
+    if isinstance(exc, (ConversationModeProfileIntegrityError, ConversationModeProfileLegacyBindingError)):
+        return HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail={
+                'code': 'mode_profile_integrity_error',
+                'message': 'The conversation mode profile binding failed integrity verification.',
+            },
+        )
+    if isinstance(exc, (ConversationModeProfileBindingConflict, ModeProfileRevisionHintConflictError)):
+        return HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail={
+                'code': 'mode_profile_binding_mismatch',
+                'message': 'Refresh the conversation mode profile before retrying.',
+            },
+        )
+    raise exc
+
+
+class ChatConfigForm(BaseModel):
+    GLOBAL_SYSTEM_PROMPT: str | None = None
+    ENABLE_CONTEXT_COMPACTION: bool
+    CONTEXT_COMPACTION_TOKEN_THRESHOLD: int
+    CONTEXT_COMPACTION_PROMPT_TEMPLATE: str
+
+
+class CompactChatForm(BaseModel):
+    model: str | None = None
+
+
+def chat_search_content_text(text: str) -> str:
+    words = text.lower().strip().split(' ')
+    return ' '.join(word for word in words if not word.startswith(SEARCH_FILTER_PREFIXES)).strip()
+
+
+def chat_search_snippet(chat: dict, search_text: str, max_length: int = 200) -> str | None:
+    if not search_text:
+        return None
+
+    messages = chat.get('messages', [])
+    if isinstance(messages, dict):
+        messages = messages.values()
+
+    for message in messages:
+        if not isinstance(message, dict):
+            continue
+
+        content = message.get('content')
+        if not isinstance(content, str):
+            continue
+
+        index = content.lower().find(search_text)
+        if index == -1:
+            continue
+
+        start = max(index - max_length // 2, 0)
+        end = min(start + max_length, len(content))
+        if index + len(search_text) > end:
+            end = min(index + len(search_text), len(content))
+            start = max(end - max_length, 0)
+
+        snippet = ' '.join(content[start:end].split())
+        return f'{"..." if start else ""}{snippet}{"..." if end < len(content) else ""}'
+
+    return None
+
+
+async def get_chat_config_values() -> dict:
+    values = await Config.get_many(*CHAT_CONFIG_KEYS.values())
+    return {field: values[storage_key] for field, storage_key in CHAT_CONFIG_KEYS.items() if storage_key in values}
+
+
+def chat_config_updates(data: dict) -> dict:
+    return {
+        CHAT_CONFIG_KEYS[field]: value
+        for field, value in data.items()
+        if field in CHAT_CONFIG_KEYS and value is not None
+    }
+
+
+async def require_chat_import_permission(request: Request, user, db: AsyncSession):
+    if user.role != 'admin' and not await has_permission(
+        user.id, 'chat.import', await Config.get('user.permissions'), db=db
+    ):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail=ERROR_MESSAGES.ACCESS_PROHIBITED,
+        )
+
 
 ############################
 # GetChatList
@@ -400,7 +536,7 @@ async def export_chat_stats(
     user=Depends(get_verified_user),
 ):
     # Check if the user has permission to share/export chats
-    if (user.role != 'admin') and (not request.app.state.config.ENABLE_COMMUNITY_SHARING):
+    if (user.role != 'admin') and (not await Config.get('ui.enable_community_sharing')):
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail=ERROR_MESSAGES.ACCESS_PROHIBITED,
@@ -449,7 +585,7 @@ async def export_single_chat_stats(
     Returns ChatStatsExport for the specified chat.
     """
     # Check if the user has permission to share/export chats
-    if (user.role != 'admin') and (not request.app.state.config.ENABLE_COMMUNITY_SHARING):
+    if (user.role != 'admin') and (not await Config.get('ui.enable_community_sharing')):
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail=ERROR_MESSAGES.ACCESS_PROHIBITED,
@@ -495,15 +631,21 @@ async def delete_all_user_chats(
     user=Depends(get_verified_user),
     db: AsyncSession = Depends(get_async_session),
 ):
-    if user.role == 'user' and not await has_permission(
-        user.id, 'chat.delete', request.app.state.config.USER_PERMISSIONS
-    ):
+    if user.role == 'user' and not await has_permission(user.id, 'chat.delete', await Config.get('user.permissions')):
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail=ERROR_MESSAGES.ACCESS_PROHIBITED,
         )
 
     result = await Chats.delete_chats_by_user_id(user.id, db=db)
+    if result:
+        await publish_event(
+            request,
+            EVENTS.CHAT_DELETED_ALL,
+            actor=user,
+            subject_id=user.id,
+            subject_type='user',
+        )
     return result
 
 
@@ -550,10 +692,25 @@ async def get_user_chat_list_by_user_id(
 
 @router.post('/new', response_model=ChatResponse | None)
 async def create_new_chat(
+    request: Request,
     form_data: ChatForm,
     user=Depends(get_verified_user),
     db: AsyncSession = Depends(get_async_session),
 ):
+    try:
+        normalized_chat = normalize_new_conversation_chat(form_data.chat)
+    except InvalidConversationModeError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail={'code': exc.code, 'message': str(exc)},
+        ) from exc
+
+    form_data = ChatForm(
+        chat=normalized_chat,
+        folder_id=form_data.folder_id,
+        source_temporary_conversation_id=form_data.source_temporary_conversation_id,
+    )
+
     # Reject a folder_id that doesn't belong to the caller. Without this the
     # row is persisted with a dangling foreign reference — no read path
     # surfaces it across users (all chat reads are user_id-filtered), but
@@ -561,14 +718,47 @@ async def create_new_chat(
     # to assume the column is clean. Also catches non-UUID / nonexistent IDs.
     if form_data.folder_id is not None:
         if not await Folders.get_folder_by_id_and_user_id(form_data.folder_id, user.id, db=db):
-            raise HTTPException(
-                status_code=status.HTTP_404_NOT_FOUND,
-                detail=ERROR_MESSAGES.NOT_FOUND,
-            )
+            # Check shared folder write access
+            shared_folder = await Folders.get_folder_by_id(form_data.folder_id, db=db)
+            if not shared_folder or not await has_folder_access(user.id, shared_folder, 'write', db):
+                raise HTTPException(
+                    status_code=status.HTTP_404_NOT_FOUND,
+                    detail=ERROR_MESSAGES.NOT_FOUND,
+                )
 
     try:
-        chat = await Chats.insert_new_chat(str(uuid4()), user.id, form_data, db=db)
+        creation = await insert_new_chat_with_current_mode_profile(
+            request.app,
+            mode=normalized_chat['mode'],
+            revision_hint=None,
+            chat_id=str(uuid4()),
+            user_id=user.id,
+            form_data=form_data,
+            source_temporary_conversation_id=form_data.source_temporary_conversation_id,
+        )
+        chat = creation.chat
+        await publish_event(
+            request,
+            EVENTS.CHAT_CREATED,
+            actor=user,
+            subject_id=chat.id,
+            data={'title': chat.title, 'folder_id': chat.folder_id},
+        )
         return ChatResponse(**chat.model_dump())
+    except ModeProfileTemporaryBindingError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail={
+                'code': exc.code,
+                'message': 'The temporary conversation is no longer available. Start a new conversation.',
+            },
+        ) from exc
+    except ModeProfileServiceUnavailableError as exc:
+        raise _mode_profile_http_exception(exc) from exc
+    except ConversationModeProfileIntegrityError as exc:
+        raise _mode_profile_http_exception(exc) from exc
+    except (ConversationModeProfileBindingConflict, ModeProfileRevisionHintConflictError) as exc:
+        raise _mode_profile_http_exception(exc) from exc
     except Exception as e:
         log.exception(e)
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=ERROR_MESSAGES.DEFAULT())
@@ -581,16 +771,65 @@ async def create_new_chat(
 
 @router.post('/import', response_model=list[ChatResponse])
 async def import_chats(
+    request: Request,
     form_data: ChatsImportForm,
     user=Depends(get_verified_user),
     db: AsyncSession = Depends(get_async_session),
 ):
+    await require_chat_import_permission(request, user, db)
+
     try:
-        chats = await Chats.import_chats(user.id, form_data.chats, db=db)
+        chats = await import_chats_with_mode_profile_bindings(
+            request.app,
+            user_id=user.id,
+            chat_import_forms=form_data.chats,
+        )
+        await publish_event(
+            request,
+            EVENTS.CHAT_IMPORTED,
+            actor=user,
+            subject_type='chat.import',
+            data={'count': len(chats), 'chat_ids': [chat.id for chat in chats]},
+        )
         return chats
+    except InvalidConversationModeError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail={'code': exc.code, 'message': str(exc)},
+        ) from exc
+    except ModeProfileServiceUnavailableError as exc:
+        raise _mode_profile_http_exception(exc) from exc
+    except ConversationModeProfileIntegrityError as exc:
+        raise _mode_profile_http_exception(exc) from exc
+    except (ConversationModeProfileBindingConflict, ModeProfileRevisionHintConflictError) as exc:
+        raise _mode_profile_http_exception(exc) from exc
     except Exception as e:
         log.exception(e)
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=ERROR_MESSAGES.DEFAULT())
+
+
+############################
+# ChatConfig
+############################
+
+
+@router.get('/config', response_model=ChatConfigForm)
+async def get_chat_config(user=Depends(get_admin_user)):
+    return await get_chat_config_values()
+
+
+@router.post('/config', response_model=ChatConfigForm)
+async def set_chat_config(form_data: ChatConfigForm, user=Depends(get_admin_user)):
+    threshold = max(1, int(form_data.CONTEXT_COMPACTION_TOKEN_THRESHOLD))
+    await Config.upsert(
+        chat_config_updates(
+            {
+                **form_data.model_dump(),
+                'CONTEXT_COMPACTION_TOKEN_THRESHOLD': threshold,
+            }
+        )
+    )
+    return await get_chat_config_values()
 
 
 ############################
@@ -611,10 +850,10 @@ async def search_user_chats(
     limit = 60
     skip = (page - 1) * limit
 
-    chat_list = [
-        ChatTitleIdResponse(**chat.model_dump())
-        for chat in await Chats.get_chats_by_user_id_and_search_text(user.id, text, skip=skip, limit=limit, db=db)
-    ]
+    search_text = chat_search_content_text(text)
+    chat_list = []
+    for chat in await Chats.get_chats_by_user_id_and_search_text(user.id, text, skip=skip, limit=limit, db=db):
+        chat_list.append(ChatTitleIdResponse(**chat.model_dump(), snippet=chat_search_snippet(chat.chat, search_text)))
 
     # Delete tag if no chat is found
     words = text.strip().split(' ')
@@ -801,13 +1040,31 @@ async def get_archived_session_user_chat_list(
 
 
 ############################
+# GetArchivedChatsCount
+############################
+
+
+@router.get('/archived/count', response_model=int)
+async def get_archived_session_user_chat_count(
+    user=Depends(get_verified_user),
+    db: AsyncSession = Depends(get_async_session),
+):
+    return await Chats.count_archived_chats_by_user_id(user.id, db=db)
+
+
+############################
 # ArchiveAllChats
 ############################
 
 
 @router.post('/archive/all', response_model=bool)
-async def archive_all_chats(user=Depends(get_verified_user), db: AsyncSession = Depends(get_async_session)):
-    return await Chats.archive_all_chats_by_user_id(user.id, db=db)
+async def archive_all_chats(
+    request: Request, user=Depends(get_verified_user), db: AsyncSession = Depends(get_async_session)
+):
+    result = await Chats.archive_all_chats_by_user_id(user.id, db=db)
+    if result:
+        await publish_event(request, EVENTS.CHAT_ARCHIVED, actor=user, subject_id=user.id, subject_type='user')
+    return result
 
 
 ############################
@@ -816,13 +1073,46 @@ async def archive_all_chats(user=Depends(get_verified_user), db: AsyncSession = 
 
 
 @router.post('/unarchive/all', response_model=bool)
-async def unarchive_all_chats(user=Depends(get_verified_user), db: AsyncSession = Depends(get_async_session)):
-    return await Chats.unarchive_all_chats_by_user_id(user.id, db=db)
+async def unarchive_all_chats(
+    request: Request, user=Depends(get_verified_user), db: AsyncSession = Depends(get_async_session)
+):
+    result = await Chats.unarchive_all_chats_by_user_id(user.id, db=db)
+    if result:
+        await publish_event(request, EVENTS.CHAT_UNARCHIVED, actor=user, subject_id=user.id, subject_type='user')
+    return result
 
 
 ############################
-# GetSharedChats
+# UnshareAllChats
 ############################
+
+
+@router.delete('/share/all', response_model=bool)
+async def unshare_all_chats(
+    request: Request, user=Depends(get_verified_user), db: AsyncSession = Depends(get_async_session)
+):
+    # Collect chat_ids that have shares so we can clear share_id and access grants
+    shared_list = await SharedChats.get_by_user_id(user.id, db=db)
+    chat_ids = [s.chat_id for s in shared_list]
+
+    # Delete all shared_chat rows for this user
+    result = await SharedChats.delete_all_by_user_id(user.id, db=db)
+
+    # Clear share_id on the original chats and remove access grants
+    for chat_id in chat_ids:
+        await Chats.update_chat_share_id_by_id(chat_id, None, db=db)
+        await AccessGrants.set_access_grants('shared_chat', chat_id, [], db=db)
+
+    if result:
+        await publish_event(
+            request,
+            EVENTS.CHAT_UNSHARED,
+            actor=user,
+            subject_id=user.id,
+            subject_type='user',
+            data={'count': len(chat_ids), 'chat_ids': chat_ids},
+        )
+    return result
 
 
 @router.get('/shared', response_model=list[SharedChatResponse])
@@ -869,33 +1159,67 @@ async def get_shared_chat_by_id(
     if user.role == 'pending':
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail=ERROR_MESSAGES.NOT_FOUND)
 
-    chat = await Chats.get_chat_by_share_id(share_id, db=db)
+    shared = await SharedChats.get_by_id(share_id, db=db)
+    chat = None
+
+    if shared is not None:
+        if user.role != 'admin' or not ENABLE_ADMIN_CHAT_ACCESS:
+            if shared.user_id != user.id:
+                has_grant = await AccessGrants.has_access(
+                    user_id=user.id,
+                    resource_type='shared_chat',
+                    resource_id=shared.chat_id,
+                    permission='read',
+                    db=db,
+                )
+                if not has_grant:
+                    raise HTTPException(
+                        status_code=status.HTTP_401_UNAUTHORIZED,
+                        detail=ERROR_MESSAGES.ACCESS_PROHIBITED,
+                    )
+
+        chat = ChatModel(
+            id=shared.id,
+            user_id=shared.user_id,
+            title=shared.title,
+            chat=shared.chat,
+            created_at=shared.created_at,
+            updated_at=shared.updated_at,
+            share_id=shared.id,
+        )
+        try:
+            source_chat = await Chats.get_chat_by_id(
+                shared.chat_id,
+                db=db,
+                repair=False,
+                strict=True,
+            )
+        except SQLAlchemyError as exc:
+            raise _mode_profile_http_exception(exc) from exc
+        if source_chat is None:
+            raise _mode_profile_http_exception(
+                ConversationModeProfileIntegrityError(
+                    shared.chat_id,
+                    'Shared chat source conversation is unavailable',
+                )
+            )
+        source_revision_id = await _resolve_server_source_mode_profile_revision(source_chat, db)
+        chat = chat.model_copy(update={'mode_profile_revision_id': source_revision_id})
 
     # Fallback: admins can also access any chat directly by chat ID
-    if not chat and user.role == 'admin' and ENABLE_ADMIN_CHAT_ACCESS:
+    elif user.role == 'admin' and ENABLE_ADMIN_CHAT_ACCESS:
         chat = await Chats.get_chat_by_id(share_id, db=db)
+        shared = None
 
     if not chat:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail=ERROR_MESSAGES.NOT_FOUND)
 
-    # Look up the original chat_id to check access grants (admins bypass)
-    if user.role != 'admin' or not ENABLE_ADMIN_CHAT_ACCESS:
-        shared = await SharedChats.get_by_id(share_id, db=db)
-        if shared and shared.user_id != user.id:
-            has_grant = await AccessGrants.has_access(
-                user_id=user.id,
-                resource_type='shared_chat',
-                resource_id=shared.chat_id,
-                permission='read',
-                db=db,
-            )
-            if not has_grant:
-                raise HTTPException(
-                    status_code=status.HTTP_401_UNAUTHORIZED,
-                    detail=ERROR_MESSAGES.ACCESS_PROHIBITED,
-                )
-
-    return ChatResponse(**chat.model_dump())
+    return await _chat_response_with_resolved_mode(
+        chat,
+        db,
+        evidence_chat_id=shared.chat_id if shared else None,
+        evidence_user_id=shared.user_id if shared else None,
+    )
 
 
 ############################
@@ -928,8 +1252,100 @@ async def get_user_chat_list_by_tag_name(
 
 
 ############################
+# CompactChat
+############################
+
+
+@router.post('/{id}/compact')
+async def compact_chat_by_id(
+    request: Request,
+    id: str,
+    form_data: CompactChatForm | None = None,
+    user=Depends(get_verified_user),
+    db: AsyncSession = Depends(get_async_session),
+):
+    chat = await Chats.get_chat_by_id_and_user_id(id, user.id, db=db)
+    if not chat:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail=ERROR_MESSAGES.NOT_FOUND)
+
+    if await has_active_tasks(request.app.state.redis, id):
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail='Wait for the current response to finish before compacting.',
+        )
+
+    if not request.app.state.MODELS:
+        await get_all_models(request, user=user)
+
+    history = (chat.chat or {}).get('history') or {}
+    messages_map = await Chats.get_messages_map_by_chat_id(id)
+    message_list = get_message_list(messages_map or history.get('messages') or {}, history.get('currentId'))
+    model_id = (form_data.model if form_data else None) or next(
+        (message.get('model') for message in reversed(message_list) if message.get('model')),
+        None,
+    )
+
+    if not model_id:
+        chat_models = (chat.chat or {}).get('models') or []
+        model_id = chat_models[0] if chat_models else None
+    if not model_id:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail='No model found for context compaction.')
+
+    result = await compact_chat_branch(request, user, chat, model_id, request.app.state.MODELS)
+    if result.get('compacted'):
+        await publish_event(
+            request,
+            EVENTS.CHAT_COMPACTED,
+            actor=user,
+            subject_id=id,
+            data={'dropped_messages': result.get('dropped_messages')},
+        )
+    return result
+
+
+############################
 # GetChatById
 ############################
+
+
+async def _chat_response_with_resolved_mode(
+    chat,
+    db: AsyncSession | None,
+    *,
+    evidence_chat_id: str | None = None,
+    evidence_user_id: str | None = None,
+) -> ChatResponse:
+    chat_content = dict(chat.chat or {})
+    persisted_mode = chat_content.get('mode')
+    has_agent_run = False
+    if persisted_mode is None:
+        has_agent_run = chat_has_agent_mode_evidence(chat_content)
+        if not has_agent_run:
+            has_agent_run = await AgentRuns.has_runs_by_chat(
+                evidence_chat_id or chat.id,
+                evidence_user_id or chat.user_id,
+                db=db,
+            )
+
+    try:
+        resolution = resolve_conversation_mode(
+            requested=None,
+            persisted=persisted_mode,
+            is_new=False,
+            has_agent_run=has_agent_run,
+        )
+    except InvalidConversationModeError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail={
+                'code': 'invalid_persisted_conversation_mode',
+                'message': str(exc),
+            },
+        ) from exc
+    chat_content['mode'] = resolution.mode.value
+    return ChatResponse(
+        **chat.model_copy(update={'chat': chat_content}).model_dump()
+    )
 
 
 @router.get('/{id}', response_model=ChatResponse | None)
@@ -951,8 +1367,16 @@ async def get_chat_by_id(id: str, user=Depends(get_verified_user), db: AsyncSess
             if has_grant:
                 chat = await Chats.get_chat_by_id(id, db=db)
 
+            # Check folder-based access (shared folders)
+            if not chat:
+                candidate = await Chats.get_chat_by_id(id, db=db)
+                if candidate and candidate.folder_id:
+                    folder = await Folders.get_folder_by_id(candidate.folder_id, db=db)
+                    if folder and await has_folder_access(user.id, folder, 'read', db):
+                        chat = candidate
+
     if chat:
-        return ChatResponse(**chat.model_dump())
+        return await _chat_response_with_resolved_mode(chat, db)
 
     raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail=ERROR_MESSAGES.NOT_FOUND)
 
@@ -964,40 +1388,61 @@ async def get_chat_by_id(id: str, user=Depends(get_verified_user), db: AsyncSess
 
 @router.post('/{id}', response_model=ChatResponse | None)
 async def update_chat_by_id(
+    request: Request,
     id: str,
     form_data: ChatForm,
     user=Depends(get_verified_user),
     db: AsyncSession = Depends(get_async_session),
 ):
-    chat = await Chats.get_chat_by_id_and_user_id(id, user.id, db=db)
-    if chat:
-        updated_chat = {**chat.chat, **form_data.chat}
+    try:
+        chat = await ConversationModeProfiles.resolve_and_update_persisted_chat(
+            chat_id=id,
+            user_id=user.id,
+            update_patch=form_data.chat,
+            requested_mode=(form_data.chat.get('mode') if 'mode' in form_data.chat else None),
+        )
+    except InvalidConversationModeError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail={'code': exc.code, 'message': str(exc)},
+        ) from exc
+    except ConversationModeMismatchError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail={
+                'code': exc.code,
+                'message': str(exc),
+                'requested': exc.requested.value,
+                'persisted': exc.persisted.value,
+            },
+        ) from exc
+    except (ConversationModeProfileIntegrityError, ConversationModeProfileLegacyBindingError) as exc:
+        raise _mode_profile_http_exception(exc) from exc
+    except (ConversationModeProfileBindingConflict, ModeProfileRevisionHintConflictError) as exc:
+        raise _mode_profile_http_exception(exc) from exc
+    except (ModeProfileServiceUnavailableError, SQLAlchemyError) as exc:
+        raise _mode_profile_http_exception(exc) from exc
 
-        # Re-derive content from output for assistant messages so that frontend
-        # edits to output items are reflected in content. Only when output
-        # actually changed — otherwise content set independently of output
-        # (e.g. a `replace` event or an outlet filter footer) would be reverted.
-        existing_messages = (chat.chat.get('history') or {}).get('messages') or {}
-        for msg_id, msg in updated_chat.get('history', {}).get('messages', {}).items():
-            if msg.get('role') == 'assistant' and msg.get('output'):
-                if msg.get('output') != existing_messages.get(msg_id, {}).get('output'):
-                    msg['content'] = serialize_output(msg['output'])
-
-        chat = await Chats.update_chat_by_id(id, updated_chat, db=db)
-
-        # Reconcile chat_message rows with the committed blob.
-        # This is the only caller where the frontend pushes a full
-        # history with potential edits, deletions, or new branches.
-        messages = (updated_chat.get('history') or {}).get('messages') or {}
-        if messages:
-            await Chats.reconcile_messages_by_chat_id(id, user.id, messages)
-
-        return ChatResponse(**chat.model_dump())
-    else:
+    if chat is None:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail=ERROR_MESSAGES.ACCESS_PROHIBITED,
         )
+
+    # Reconcile chat_message rows without inferring deletes from missing IDs.
+    # Message deletion has its own endpoint below.
+    messages = (chat.chat.get('history') or {}).get('messages') or {}
+    if messages:
+        await Chats.reconcile_messages_by_chat_id(id, user.id, messages)
+
+    await publish_event(
+        request,
+        EVENTS.CHAT_UPDATED,
+        actor=user,
+        subject_id=id,
+        data={'title': chat.title},
+    )
+    return ChatResponse(**chat.model_dump())
 
 
 ############################
@@ -1009,6 +1454,7 @@ class MessageForm(BaseModel):
 
 @router.post('/{id}/messages/{message_id}', response_model=ChatResponse | None)
 async def update_chat_message_by_id(
+    request: Request,
     id: str,
     message_id: str,
     form_data: MessageForm,
@@ -1058,6 +1504,52 @@ async def update_chat_message_by_id(
             }
         )
 
+    await publish_event(
+        request,
+        EVENTS.MESSAGE_UPDATED,
+        actor=user,
+        subject_id=message_id,
+        data={'chat_id': id, 'content_preview': form_data.content[:300]},
+    )
+    return ChatResponse(**chat.model_dump())
+
+
+@router.delete('/{id}/messages/{message_id}', response_model=ChatResponse | None)
+async def delete_chat_message_by_id(
+    request: Request,
+    id: str,
+    message_id: str,
+    user=Depends(get_verified_user),
+    db: AsyncSession = Depends(get_async_session),
+):
+    chat = await Chats.get_chat_by_id(id, db=db)
+
+    if not chat:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail=ERROR_MESSAGES.ACCESS_PROHIBITED,
+        )
+
+    if chat.user_id != user.id and user.role != 'admin':
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail=ERROR_MESSAGES.ACCESS_PROHIBITED,
+        )
+
+    chat = await Chats.delete_message_from_chat_by_id_and_message_id(id, message_id)
+    if not chat:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail=ERROR_MESSAGES.ACCESS_PROHIBITED,
+        )
+
+    await publish_event(
+        request,
+        EVENTS.MESSAGE_DELETED,
+        actor=user,
+        subject_id=message_id,
+        data={'chat_id': id},
+    )
     return ChatResponse(**chat.model_dump())
 
 
@@ -1071,6 +1563,7 @@ class EventForm(BaseModel):
 
 @router.post('/{id}/messages/{message_id}/event', response_model=bool | None)
 async def send_chat_message_event_by_id(
+    request: Request,
     id: str,
     message_id: str,
     form_data: EventForm,
@@ -1104,6 +1597,13 @@ async def send_chat_message_event_by_id(
             await event_emitter(form_data.model_dump())
         else:
             return False
+        await publish_event(
+            request,
+            EVENTS.MESSAGE_EVENT_RECEIVED,
+            actor=user,
+            subject_id=message_id,
+            data={'chat_id': id, 'event_type': form_data.type},
+        )
         return True
     except Exception:
         return False
@@ -1136,9 +1636,17 @@ async def delete_chat_by_id(
 
         result = await Chats.delete_chat_by_id(id, db=db)
 
+        if result:
+            await publish_event(
+                request,
+                EVENTS.CHAT_DELETED,
+                actor=user,
+                subject_id=id,
+                data={'owner_id': chat.user_id},
+            )
         return result
     else:
-        if not await has_permission(user.id, 'chat.delete', request.app.state.config.USER_PERMISSIONS):
+        if not await has_permission(user.id, 'chat.delete', await Config.get('user.permissions')):
             raise HTTPException(
                 status_code=status.HTTP_401_UNAUTHORIZED,
                 detail=ERROR_MESSAGES.ACCESS_PROHIBITED,
@@ -1153,6 +1661,14 @@ async def delete_chat_by_id(
         await Chats.delete_orphan_tags_for_user(chat.meta.get('tags', []), user.id, threshold=1, db=db)
 
         result = await Chats.delete_chat_by_id_and_user_id(id, user.id, db=db)
+        if result:
+            await publish_event(
+                request,
+                EVENTS.CHAT_DELETED,
+                actor=user,
+                subject_id=id,
+                data={'owner_id': user.id},
+            )
         return result
 
 
@@ -1178,10 +1694,19 @@ async def get_pinned_status_by_id(
 
 
 @router.post('/{id}/pin', response_model=ChatResponse | None)
-async def pin_chat_by_id(id: str, user=Depends(get_verified_user), db: AsyncSession = Depends(get_async_session)):
+async def pin_chat_by_id(
+    request: Request, id: str, user=Depends(get_verified_user), db: AsyncSession = Depends(get_async_session)
+):
     chat = await Chats.get_chat_by_id_and_user_id(id, user.id, db=db)
     if chat:
         chat = await Chats.toggle_chat_pinned_by_id(id, db=db)
+        await publish_event(
+            request,
+            EVENTS.CHAT_PINNED if chat.pinned else EVENTS.CHAT_UNPINNED,
+            actor=user,
+            subject_id=id,
+            subject_type='chat',
+        )
         return chat
     else:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail=ERROR_MESSAGES.DEFAULT())
@@ -1196,15 +1721,48 @@ class CloneForm(BaseModel):
     title: str | None = None
 
 
+async def _resolve_server_source_mode_profile_revision(chat, db: AsyncSession | None) -> str:
+    chat_content = dict(chat.chat or {})
+    has_agent_run = chat_has_agent_mode_evidence(chat_content)
+    if chat_content.get('mode') is None and not has_agent_run:
+        has_agent_run = await AgentRuns.has_runs_by_chat(chat.id, chat.user_id, db=db)
+    try:
+        binding = await ConversationModeProfiles.resolve_persisted_chat_binding(
+            chat_id=chat.id,
+            user_id=chat.user_id,
+            requested_mode=None,
+            has_agent_run=has_agent_run,
+        )
+    except (ConversationModeProfileIntegrityError, ConversationModeProfileLegacyBindingError) as exc:
+        raise _mode_profile_http_exception(exc) from exc
+    except (ConversationModeProfileBindingConflict, ModeProfileRevisionHintConflictError) as exc:
+        raise _mode_profile_http_exception(exc) from exc
+    except (ModeProfileServiceUnavailableError, SQLAlchemyError) as exc:
+        raise _mode_profile_http_exception(exc) from exc
+    if binding is None:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail={
+                'code': 'mode_profile_unbound_conversation',
+                'message': 'The conversation mode profile binding is unavailable.',
+            },
+        )
+    return binding.mode_profile_revision_id
+
+
 @router.post('/{id}/clone', response_model=ChatResponse | None)
 async def clone_chat_by_id(
+    request: Request,
     form_data: CloneForm,
     id: str,
     user=Depends(get_verified_user),
     db: AsyncSession = Depends(get_async_session),
 ):
+    await require_chat_import_permission(request, user, db)
+
     chat = await Chats.get_chat_by_id_and_user_id(id, user.id, db=db)
     if chat:
+        source_mode_profile_revision_id = await _resolve_server_source_mode_profile_revision(chat, db)
         updated_chat = {
             **chat.chat,
             'originalChatId': chat.id,
@@ -1212,23 +1770,41 @@ async def clone_chat_by_id(
             'title': form_data.title if form_data.title else f'Clone of {chat.title}',
         }
 
-        chats = await Chats.import_chats(
-            user.id,
-            [
-                ChatImportForm(
-                    **{
-                        'chat': updated_chat,
-                        'meta': chat.meta,
-                        'pinned': chat.pinned,
-                        'folder_id': chat.folder_id,
-                    }
-                )
-            ],
-            db=db,
-        )
+        try:
+            chats = await import_chats_with_mode_profile_bindings(
+                request.app,
+                user_id=user.id,
+                chat_import_forms=[
+                    ChatImportForm(
+                        **{
+                            'chat': updated_chat,
+                            'meta': chat.meta,
+                            'pinned': chat.pinned,
+                            'folder_id': chat.folder_id,
+                        }
+                    )
+                ],
+                source_mode_profile_revision_ids=[source_mode_profile_revision_id],
+            )
+        except (
+            ConversationModeProfileIntegrityError,
+            ConversationModeProfileLegacyBindingError,
+            ConversationModeProfileBindingConflict,
+            ModeProfileRevisionHintConflictError,
+            ModeProfileServiceUnavailableError,
+            SQLAlchemyError,
+        ) as exc:
+            raise _mode_profile_http_exception(exc) from exc
 
         if chats:
             chat = chats[0]
+            await publish_event(
+                request,
+                EVENTS.CHAT_CLONED,
+                actor=user,
+                subject_id=chat.id,
+                data={'original_chat_id': id},
+            )
             return ChatResponse(**chat.model_dump())
         else:
             raise HTTPException(
@@ -1246,23 +1822,35 @@ async def clone_chat_by_id(
 
 @router.post('/{id}/clone/shared', response_model=ChatResponse | None)
 async def clone_shared_chat_by_id(
-    id: str, user=Depends(get_verified_user), db: AsyncSession = Depends(get_async_session)
+    request: Request,
+    id: str,
+    user=Depends(get_verified_user),
+    db: AsyncSession = Depends(get_async_session),
 ):
-    chat = await Chats.get_chat_by_share_id(id, db=db)
+    await require_chat_import_permission(request, user, db)
 
-    # Fallback: admins can also access any chat directly by chat ID
-    if not chat and user.role == 'admin' and ENABLE_ADMIN_CHAT_ACCESS:
+    shared = await SharedChats.get_by_id(id, db=db)
+    if shared is not None:
+        chat = await Chats.get_chat_by_id(shared.chat_id, db=db)
+        if chat is None:
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail=ERROR_MESSAGES.NOT_FOUND,
+            )
+    elif user.role == 'admin' and ENABLE_ADMIN_CHAT_ACCESS:
         chat = await Chats.get_chat_by_id(id, db=db)
-
-    if not chat:
+        if chat is None:
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail=ERROR_MESSAGES.NOT_FOUND,
+            )
+    else:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail=ERROR_MESSAGES.NOT_FOUND,
         )
 
-    # Enforce access grants (owner and admins bypass)
-    shared = await SharedChats.get_by_id(id, db=db)
-    if shared and user.role != 'admin' and shared.user_id != user.id:
+    if shared is not None and user.role != 'admin' and shared.user_id != user.id:
         has_grant = await AccessGrants.has_access(
             user_id=user.id,
             resource_type='shared_chat',
@@ -1276,6 +1864,7 @@ async def clone_shared_chat_by_id(
                 detail=ERROR_MESSAGES.ACCESS_PROHIBITED,
             )
 
+    source_mode_profile_revision_id = await _resolve_server_source_mode_profile_revision(chat, db)
     updated_chat = {
         **chat.chat,
         'originalChatId': chat.id,
@@ -1283,20 +1872,31 @@ async def clone_shared_chat_by_id(
         'title': f'Clone of {chat.title}',
     }
 
-    chats = await Chats.import_chats(
-        user.id,
-        [
-            ChatImportForm(
-                **{
-                    'chat': updated_chat,
-                    'meta': chat.meta,
-                    'pinned': chat.pinned,
-                    'folder_id': chat.folder_id,
-                }
-            )
-        ],
-        db=db,
-    )
+    try:
+        chats = await import_chats_with_mode_profile_bindings(
+            request.app,
+            user_id=user.id,
+            chat_import_forms=[
+                ChatImportForm(
+                    **{
+                        'chat': updated_chat,
+                        'meta': chat.meta,
+                        'pinned': chat.pinned,
+                        'folder_id': chat.folder_id,
+                    }
+                )
+            ],
+            source_mode_profile_revision_ids=[source_mode_profile_revision_id],
+        )
+    except (
+        ConversationModeProfileIntegrityError,
+        ConversationModeProfileLegacyBindingError,
+        ConversationModeProfileBindingConflict,
+        ModeProfileRevisionHintConflictError,
+        ModeProfileServiceUnavailableError,
+        SQLAlchemyError,
+    ) as exc:
+        raise _mode_profile_http_exception(exc) from exc
 
     if chats:
         chat = chats[0]
@@ -1334,6 +1934,13 @@ async def archive_chat_by_id(
             # Unarchived — ensure tag rows exist
             await Tags.ensure_tags_exist(tag_ids, user.id, db=db)
 
+        await publish_event(
+            request,
+            EVENTS.CHAT_ARCHIVED if chat.archived else EVENTS.CHAT_UNARCHIVED,
+            actor=user,
+            subject_id=id,
+            subject_type='chat',
+        )
         return ChatResponse(**chat.model_dump())
     else:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail=ERROR_MESSAGES.DEFAULT())
@@ -1349,9 +1956,7 @@ async def share_chat_by_id(
     user=Depends(get_verified_user),
     db: AsyncSession = Depends(get_async_session),
 ):
-    if user.role != 'admin' and not await has_permission(
-        user.id, 'chat.share', request.app.state.config.USER_PERMISSIONS
-    ):
+    if user.role != 'admin' and not await has_permission(user.id, 'chat.share', await Config.get('user.permissions')):
         raise HTTPException(status.HTTP_401_UNAUTHORIZED, detail=ERROR_MESSAGES.ACCESS_PROHIBITED)
 
     chat = await Chats.get_chat_by_id_and_user_id(id, user.id, db=db)
@@ -1363,6 +1968,13 @@ async def share_chat_by_id(
         shared = await SharedChats.update(chat.share_id, db=db)
         if shared:
             chat = await Chats.get_chat_by_id(id, db=db)
+            await publish_event(
+                request,
+                EVENTS.CHAT_SHARED,
+                actor=user,
+                subject_id=id,
+                data={'share_id': chat.share_id, 'updated': True},
+            )
             return ChatResponse(**chat.model_dump())
 
     # Create a new share
@@ -1374,6 +1986,13 @@ async def share_chat_by_id(
     if not chat:
         raise HTTPException(status.HTTP_500_INTERNAL_SERVER_ERROR, detail=ERROR_MESSAGES.DEFAULT())
 
+    await publish_event(
+        request,
+        EVENTS.CHAT_SHARED,
+        actor=user,
+        subject_id=id,
+        data={'share_id': shared.id},
+    )
     return ChatResponse(**chat.model_dump())
 
 
@@ -1382,19 +2001,26 @@ async def share_chat_by_id(
 
 @router.delete('/{id}/share', response_model=bool | None)
 async def delete_shared_chat_by_id(
-    id: str, user=Depends(get_verified_user), db: AsyncSession = Depends(get_async_session)
+    request: Request, id: str, user=Depends(get_verified_user), db: AsyncSession = Depends(get_async_session)
 ):
     chat = await Chats.get_chat_by_id_and_user_id(id, user.id, db=db)
     if not chat:
         raise HTTPException(status.HTTP_401_UNAUTHORIZED, detail=ERROR_MESSAGES.ACCESS_PROHIBITED)
 
-    if not chat.share_id:
-        return False
-
     await SharedChats.delete_by_chat_id(id, db=db)
-    await Chats.update_chat_share_id_by_id(id, None, db=db)
+
+    if chat.share_id:
+        await Chats.update_chat_share_id_by_id(id, None, db=db)
+
     await AccessGrants.set_access_grants('shared_chat', id, [], db=db)
 
+    await publish_event(
+        request,
+        EVENTS.CHAT_UNSHARED,
+        actor=user,
+        subject_id=id,
+        data={'share_id': chat.share_id},
+    )
     return True
 
 
@@ -1426,7 +2052,7 @@ async def update_shared_chat_access_by_id(
         )
 
     form_data.access_grants = await filter_allowed_access_grants(
-        request.app.state.config.USER_PERMISSIONS,
+        await Config.get('user.permissions'),
         user.id,
         user.role,
         form_data.access_grants,
@@ -1482,6 +2108,7 @@ class ChatFolderIdForm(BaseModel):
 
 @router.post('/{id}/folder', response_model=ChatResponse | None)
 async def update_chat_folder_id_by_id(
+    request: Request,
     id: str,
     form_data: ChatFolderIdForm,
     user=Depends(get_verified_user),
@@ -1493,12 +2120,22 @@ async def update_chat_folder_id_by_id(
         # folder_id values. None is allowed (moves the chat out of any folder).
         if form_data.folder_id is not None:
             if not await Folders.get_folder_by_id_and_user_id(form_data.folder_id, user.id, db=db):
-                raise HTTPException(
-                    status_code=status.HTTP_404_NOT_FOUND,
-                    detail=ERROR_MESSAGES.NOT_FOUND,
-                )
+                # Check shared folder write access
+                shared_folder = await Folders.get_folder_by_id(form_data.folder_id, db=db)
+                if not shared_folder or not await has_folder_access(user.id, shared_folder, 'write', db):
+                    raise HTTPException(
+                        status_code=status.HTTP_404_NOT_FOUND,
+                        detail=ERROR_MESSAGES.NOT_FOUND,
+                    )
 
         chat = await Chats.update_chat_folder_id_by_id_and_user_id(id, user.id, form_data.folder_id, db=db)
+        await publish_event(
+            request,
+            EVENTS.CHAT_FOLDER_UPDATED,
+            actor=user,
+            subject_id=id,
+            data={'folder_id': form_data.folder_id},
+        )
         return ChatResponse(**chat.model_dump())
     else:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail=ERROR_MESSAGES.DEFAULT())
@@ -1526,6 +2163,7 @@ async def get_chat_tags_by_id(id: str, user=Depends(get_verified_user), db: Asyn
 
 @router.post('/{id}/tags', response_model=list[TagModel])
 async def add_tag_by_id_and_tag_name(
+    request: Request,
     id: str,
     form_data: TagForm,
     user=Depends(get_verified_user),
@@ -1544,6 +2182,13 @@ async def add_tag_by_id_and_tag_name(
 
         if tag_id not in tags:
             await Chats.add_chat_tag_by_id_and_user_id_and_tag_name(id, user.id, form_data.name, db=db)
+            await publish_event(
+                request,
+                EVENTS.CHAT_TAG_ADDED,
+                actor=user,
+                subject_id=id,
+                data={'tag': form_data.name},
+            )
 
         chat = await Chats.get_chat_by_id_and_user_id(id, user.id, db=db)
         tags = chat.meta.get('tags', [])
@@ -1559,6 +2204,7 @@ async def add_tag_by_id_and_tag_name(
 
 @router.delete('/{id}/tags', response_model=list[TagModel])
 async def delete_tag_by_id_and_tag_name(
+    request: Request,
     id: str,
     form_data: TagForm,
     user=Depends(get_verified_user),
@@ -1567,6 +2213,13 @@ async def delete_tag_by_id_and_tag_name(
     chat = await Chats.get_chat_by_id_and_user_id(id, user.id, db=db)
     if chat:
         await Chats.delete_tag_by_id_and_user_id_and_tag_name(id, user.id, form_data.name, db=db)
+        await publish_event(
+            request,
+            EVENTS.CHAT_TAG_REMOVED,
+            actor=user,
+            subject_id=id,
+            data={'tag': form_data.name},
+        )
 
         if await Chats.count_chats_by_tag_name_and_user_id(form_data.name, user.id, db=db) == 0:
             await Tags.delete_tag_by_name_and_user_id(form_data.name, user.id, db=db)

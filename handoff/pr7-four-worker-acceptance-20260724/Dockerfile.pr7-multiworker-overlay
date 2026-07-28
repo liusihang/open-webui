@@ -1,0 +1,6 @@
+FROM open-webui:agentmode-v0102-b1a2ac825-slim
+
+ENV WEBUI_BUILD_VERSION=b1a2ac8252-multiworker-overlay
+
+COPY backend/open_webui/routers/agent_service.py /app/backend/open_webui/routers/agent_service.py
+COPY backend/open_webui/agent/model_authority.py /app/backend/open_webui/agent/model_authority.py

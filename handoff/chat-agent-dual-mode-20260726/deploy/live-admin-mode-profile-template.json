@@ -1,0 +1,30 @@
+{
+  "chat": {
+    "expected_current_revision_id": "__READ_AFTER_UPGRADE__",
+    "profile": {
+      "schema_version": 1,
+      "system_prompt": "",
+      "defaults": {
+        "terminal_id": null,
+        "tool_ids": [],
+        "skill_ids": [],
+        "filter_ids": "inherit",
+        "feature_ids": "inherit"
+      }
+    }
+  },
+  "agent": {
+    "expected_current_revision_id": "__READ_AFTER_UPGRADE__",
+    "profile": {
+      "schema_version": 1,
+      "system_prompt": "",
+      "defaults": {
+        "terminal_id": "terminals",
+        "tool_ids": ["sub_agent"],
+        "skill_ids": [],
+        "filter_ids": "inherit",
+        "feature_ids": "inherit"
+      }
+    }
+  }
+}

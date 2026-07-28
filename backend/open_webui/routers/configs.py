@@ -2,37 +2,566 @@ from __future__ import annotations
 
 import copy
 import logging
-from typing import Optional
+from typing import Any, Optional
 
 import aiohttp
 from fastapi import APIRouter, Depends, HTTPException, Request
 from mcp.shared.auth import OAuthMetadata
-from open_webui.config import BannerModel, async_save_config, get_config, save_config
+from open_webui.agent.conversation_mode import ConversationMode
+from open_webui.agent.conversation_mode_profile_service import (
+    ModeProfileResourceValidationError,
+    ModeProfileServiceUnavailableError,
+    ModeProfileWarning,
+    cache_profile_revision,
+    get_cached_conversation_mode_profile_history,
+    get_cached_current_revision,
+    get_cached_revision,
+    profile_default_counts,
+    restore_mode_profile_revision,
+    save_mode_profile_revision,
+    validate_conversation_mode_profile,
+)
+from open_webui.agent.conversation_mode_profiles import (
+    INHERIT,
+    ModeProfileValidationError,
+    ProfileInheritance,
+)
+from open_webui.config import BannerModel
 from open_webui.env import AIOHTTP_CLIENT_SESSION_SSL, AIOHTTP_CLIENT_TIMEOUT
+from open_webui.events import EVENTS, publish_event
+from open_webui.models.config import Config
+from open_webui.models.conversation_mode_profiles import (
+    ConversationModeProfileIntegrityError,
+    ConversationModeProfileRevisionConflict,
+    ConversationModeProfileRevisionModel,
+)
 from open_webui.models.oauth_sessions import OAuthSessions
 from open_webui.utils.auth import get_admin_user, get_verified_user
+from open_webui.utils.cache_invalidation import invalidate_conversation_mode_profile_head
 from open_webui.utils.headers import get_custom_headers
 from open_webui.utils.mcp.client import MCPClient
 from open_webui.utils.oauth import (
     OAuthClientInformationFull,
+    apply_connection_oauth_options,
     decrypt_data,
     encrypt_data,
     get_discovery_urls,
     get_oauth_client_info_with_dynamic_client_registration,
     get_oauth_client_info_with_static_credentials,
+    recover_static_oauth_client_metadata,
     resolve_oauth_client_info,
 )
 from open_webui.utils.tools import (
+    bearer_auth_header,
     get_tool_server_data,
     get_tool_server_url,
     set_terminal_servers,
     set_tool_servers,
 )
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, Field, StrictInt
+from sqlalchemy.exc import SQLAlchemyError
 
 router = APIRouter()
 
 log = logging.getLogger(__name__)
+
+CONNECTIONS_CONFIG_KEYS = {
+    'ENABLE_DIRECT_CONNECTIONS': 'direct.enable',
+    'ENABLE_BASE_MODELS_CACHE': 'models.base_models_cache',
+}
+CODE_EXECUTION_CONFIG_KEYS = {
+    'ENABLE_CODE_EXECUTION': 'code_execution.enable',
+    'CODE_EXECUTION_ENGINE': 'code_execution.engine',
+    'CODE_EXECUTION_JUPYTER_URL': 'code_execution.jupyter.url',
+    'CODE_EXECUTION_JUPYTER_AUTH': 'code_execution.jupyter.auth',
+    'CODE_EXECUTION_JUPYTER_AUTH_TOKEN': 'code_execution.jupyter.auth_token',
+    'CODE_EXECUTION_JUPYTER_AUTH_PASSWORD': 'code_execution.jupyter.auth_password',
+    'CODE_EXECUTION_JUPYTER_TIMEOUT': 'code_execution.jupyter.timeout',
+    'ENABLE_CODE_INTERPRETER': 'code_interpreter.enable',
+    'CODE_INTERPRETER_ENGINE': 'code_interpreter.engine',
+    'CODE_INTERPRETER_PROMPT_TEMPLATE': 'code_interpreter.prompt_template',
+    'CODE_INTERPRETER_JUPYTER_URL': 'code_interpreter.jupyter.url',
+    'CODE_INTERPRETER_JUPYTER_AUTH': 'code_interpreter.jupyter.auth',
+    'CODE_INTERPRETER_JUPYTER_AUTH_TOKEN': 'code_interpreter.jupyter.auth_token',
+    'CODE_INTERPRETER_JUPYTER_AUTH_PASSWORD': 'code_interpreter.jupyter.auth_password',
+    'CODE_INTERPRETER_JUPYTER_TIMEOUT': 'code_interpreter.jupyter.timeout',
+}
+MODELS_CONFIG_KEYS = {
+    'DEFAULT_MODELS': 'ui.default_models',
+    'DEFAULT_PINNED_MODELS': 'ui.default_pinned_models',
+    'MODEL_ORDER_LIST': 'ui.model_order_list',
+    'DEFAULT_MODEL_METADATA': 'models.default_metadata',
+    'DEFAULT_MODEL_PARAMS': 'models.default_params',
+}
+
+
+async def get_config_values(key_map: dict[str, str]) -> dict:
+    values = await Config.get_many(*key_map.values())
+    return {field: values[storage_key] for field, storage_key in key_map.items() if storage_key in values}
+
+
+def config_updates(data: dict, key_map: dict[str, str]) -> dict:
+    return {key_map[field]: value for field, value in data.items() if field in key_map}
+
+
+############################
+# Conversation Mode Profiles
+############################
+
+
+class ConversationModeProfileDefaultsForm(BaseModel):
+    terminal_id: ProfileInheritance | str | None = INHERIT
+    tool_ids: ProfileInheritance | list[str] = INHERIT
+    skill_ids: ProfileInheritance | list[str] = INHERIT
+    filter_ids: ProfileInheritance | list[str] = INHERIT
+    feature_ids: ProfileInheritance | list[str] = INHERIT
+
+    model_config = ConfigDict(extra='forbid')
+
+
+class ConversationModeProfileContentForm(BaseModel):
+    schema_version: StrictInt
+    system_prompt: str
+    defaults: ConversationModeProfileDefaultsForm
+
+    model_config = ConfigDict(extra='forbid')
+
+
+class ConversationModeProfileSaveForm(BaseModel):
+    expected_current_revision_id: str
+    profile: ConversationModeProfileContentForm
+
+    model_config = ConfigDict(extra='forbid')
+
+
+class ConversationModeProfileRestoreForm(BaseModel):
+    expected_current_revision_id: str
+
+    model_config = ConfigDict(extra='forbid')
+
+
+class ConversationModeProfileRevisionMetadataResponse(BaseModel):
+    revision_id: str
+    mode: str
+    revision_number: int
+    schema_version: int
+    created_at: int
+    created_by: str | None = None
+    restored_from_revision_id: str | None = None
+    is_current: bool
+
+
+class ConversationModeProfileRevisionResponse(ConversationModeProfileRevisionMetadataResponse):
+    system_prompt: str
+    defaults: ConversationModeProfileDefaultsForm
+    warnings: list[ModeProfileWarning] = Field(default_factory=list)
+
+
+class ConversationModeProfilesResponse(BaseModel):
+    profiles: list[ConversationModeProfileRevisionResponse]
+
+
+class ConversationModeProfileHistoryResponse(BaseModel):
+    mode: str
+    current_revision_id: str
+    revisions: list[ConversationModeProfileRevisionMetadataResponse]
+
+
+def _revision_response(
+    revision: ConversationModeProfileRevisionModel,
+    *,
+    current_revision_id: str,
+    warnings: list[ModeProfileWarning] | None = None,
+) -> dict[str, Any]:
+    return {
+        **_revision_metadata(
+            revision,
+            current_revision_id=current_revision_id,
+        ),
+        'system_prompt': revision.system_prompt,
+        'defaults': revision.defaults.to_dict(),
+        'warnings': [warning.model_dump() for warning in warnings or []],
+    }
+
+
+def _revision_metadata(
+    revision: ConversationModeProfileRevisionModel,
+    *,
+    current_revision_id: str,
+) -> dict[str, Any]:
+    return {
+        'revision_id': revision.id,
+        'mode': revision.mode,
+        'revision_number': revision.revision_number,
+        'schema_version': revision.schema_version,
+        'created_at': revision.created_at,
+        'created_by': revision.created_by,
+        'restored_from_revision_id': revision.restored_from_revision_id,
+        'is_current': revision.id == current_revision_id,
+    }
+
+
+def _profile_validation_error(exc: ModeProfileValidationError) -> HTTPException:
+    return HTTPException(
+        status_code=400,
+        detail={
+            'code': exc.code,
+            'reason': exc.reason,
+            'field': exc.field,
+        },
+    )
+
+
+def _profile_resource_error(exc: ModeProfileResourceValidationError) -> HTTPException:
+    return HTTPException(
+        status_code=400,
+        detail={
+            'code': exc.code,
+            'issues': [issue.model_dump() for issue in exc.issues],
+        },
+    )
+
+
+def _profile_not_found(*, mode: str, revision_id: str | None = None) -> HTTPException:
+    detail = {
+        'code': 'mode_profile_revision_not_found' if revision_id else 'mode_profile_unavailable',
+        'mode': mode,
+    }
+    if revision_id is not None:
+        detail['revision_id'] = revision_id
+    return HTTPException(status_code=404, detail=detail)
+
+
+def _profile_integrity_error(exc: ConversationModeProfileIntegrityError) -> HTTPException:
+    return HTTPException(
+        status_code=500,
+        detail={
+            'code': exc.code,
+            'revision_id': exc.revision_id,
+        },
+    )
+
+
+def _profile_integrity_unavailable_error(exc: ConversationModeProfileIntegrityError) -> HTTPException:
+    return HTTPException(
+        status_code=503,
+        detail={
+            'code': exc.code,
+            'revision_id': exc.revision_id,
+        },
+    )
+
+
+def _profile_service_error(exc: ModeProfileServiceUnavailableError) -> HTTPException:
+    detail = {
+        'code': exc.code,
+        'operation': exc.operation,
+    }
+    if exc.mode is not None:
+        detail['mode'] = exc.mode
+    return HTTPException(status_code=503, detail=detail)
+
+
+async def _validated_conversation_mode_profile(request: Request, mode: ConversationMode, content):
+    try:
+        return await validate_conversation_mode_profile(request.app, mode, content)
+    except ModeProfileValidationError as exc:
+        raise _profile_validation_error(exc) from exc
+    except ModeProfileResourceValidationError as exc:
+        raise _profile_resource_error(exc) from exc
+    except ModeProfileServiceUnavailableError as exc:
+        raise _profile_service_error(exc) from exc
+
+
+async def _profile_conflict_error(
+    request: Request,
+    exc: ConversationModeProfileRevisionConflict,
+) -> HTTPException:
+    try:
+        current = (
+            await get_cached_revision(
+                request.app,
+                exc.actual_revision_id,
+                expected_mode=exc.mode,
+            )
+            if exc.actual_revision_id is not None
+            else None
+        )
+    except ModeProfileServiceUnavailableError as refresh_exc:
+        return _profile_service_error(refresh_exc)
+    except ConversationModeProfileIntegrityError as refresh_exc:
+        return _profile_integrity_unavailable_error(refresh_exc)
+    except SQLAlchemyError:
+        return _profile_service_error(
+            ModeProfileServiceUnavailableError(
+                'conflict_refresh',
+                mode=exc.mode,
+            )
+        )
+    current_metadata = (
+        {
+            'revision_id': current.id,
+            'revision_number': current.revision_number,
+            'schema_version': current.schema_version,
+            'created_at': current.created_at,
+        }
+        if current is not None
+        else {'revision_id': exc.actual_revision_id}
+    )
+    if current is not None:
+        cache_profile_revision(request.app, current)
+    return HTTPException(
+        status_code=409,
+        detail={
+            'code': exc.code,
+            'mode': exc.mode,
+            'expected_current_revision_id': exc.expected_revision_id,
+            'current_revision': current_metadata,
+        },
+    )
+
+
+def _profile_audit_data(
+    *,
+    profile,
+    previous_revision_id: str,
+    revision: ConversationModeProfileRevisionModel,
+    warnings: list[ModeProfileWarning],
+    restored_from_revision_id: str | None = None,
+) -> dict[str, Any]:
+    data = {
+        'mode': revision.mode,
+        'previous_revision_id': previous_revision_id,
+        'revision_id': revision.id,
+        'counts': profile_default_counts(profile),
+        'warning_codes': sorted({warning.code for warning in warnings}),
+    }
+    if restored_from_revision_id is not None:
+        data['restored_from_revision_id'] = restored_from_revision_id
+    return data
+
+
+@router.get(
+    '/conversation_mode_profiles',
+    response_model=ConversationModeProfilesResponse,
+)
+async def get_conversation_mode_profiles(
+    request: Request,
+    user=Depends(get_admin_user),
+):
+    profiles = []
+    for mode in ('agent', 'chat'):
+        try:
+            revision = await get_cached_current_revision(request.app, mode)
+        except ModeProfileServiceUnavailableError as exc:
+            raise _profile_service_error(exc) from exc
+        except ConversationModeProfileIntegrityError as exc:
+            raise _profile_integrity_error(exc) from exc
+        if revision is None:
+            raise _profile_not_found(mode=mode)
+        profiles.append(
+            _revision_response(
+                revision,
+                current_revision_id=revision.id,
+            )
+        )
+    return {'profiles': profiles}
+
+
+@router.get(
+    '/conversation_mode_profiles/{mode}',
+    response_model=ConversationModeProfileRevisionResponse,
+)
+async def get_current_conversation_mode_profile(
+    request: Request,
+    mode: ConversationMode,
+    user=Depends(get_admin_user),
+):
+    try:
+        revision = await get_cached_current_revision(request.app, mode)
+    except ModeProfileServiceUnavailableError as exc:
+        raise _profile_service_error(exc) from exc
+    except ConversationModeProfileIntegrityError as exc:
+        raise _profile_integrity_error(exc) from exc
+    if revision is None:
+        raise _profile_not_found(mode=mode.value)
+    return _revision_response(revision, current_revision_id=revision.id)
+
+
+@router.post(
+    '/conversation_mode_profiles/{mode}/revisions',
+    response_model=ConversationModeProfileRevisionResponse,
+)
+async def save_conversation_mode_profile_revision(
+    request: Request,
+    mode: ConversationMode,
+    form_data: ConversationModeProfileSaveForm,
+    user=Depends(get_admin_user),
+):
+    profile, warnings = await _validated_conversation_mode_profile(
+        request,
+        mode,
+        form_data.profile.model_dump(),
+    )
+
+    try:
+        revision = await save_mode_profile_revision(
+            mode=mode,
+            content=profile.to_content_dict(),
+            expected_current_revision_id=form_data.expected_current_revision_id,
+            created_by=user.id,
+        )
+    except ModeProfileResourceValidationError as exc:
+        raise _profile_resource_error(exc) from exc
+    except ModeProfileServiceUnavailableError as exc:
+        raise _profile_service_error(exc) from exc
+    except ConversationModeProfileRevisionConflict as exc:
+        raise await _profile_conflict_error(request, exc) from exc
+    except ConversationModeProfileIntegrityError as exc:
+        raise _profile_integrity_error(exc) from exc
+
+    cache_profile_revision(request.app, revision)
+    await invalidate_conversation_mode_profile_head(request.app, mode.value)
+    await publish_event(
+        request,
+        EVENTS.CONFIG_CONVERSATION_MODE_PROFILE_REVISION_CREATED,
+        actor=user,
+        subject_id=revision.id,
+        subject_type='conversation_mode_profile_revision',
+        data=_profile_audit_data(
+            profile=profile,
+            previous_revision_id=form_data.expected_current_revision_id,
+            revision=revision,
+            warnings=warnings,
+        ),
+    )
+    return _revision_response(
+        revision,
+        current_revision_id=revision.id,
+        warnings=warnings,
+    )
+
+
+@router.get(
+    '/conversation_mode_profiles/{mode}/revisions',
+    response_model=ConversationModeProfileHistoryResponse,
+)
+async def get_conversation_mode_profile_history(
+    request: Request,
+    mode: ConversationMode,
+    user=Depends(get_admin_user),
+):
+    try:
+        snapshot = await get_cached_conversation_mode_profile_history(request.app, mode)
+    except ModeProfileServiceUnavailableError as exc:
+        raise _profile_service_error(exc) from exc
+    except ConversationModeProfileIntegrityError as exc:
+        raise _profile_integrity_error(exc) from exc
+    current_revision_id = snapshot.head.current_revision_id
+    return {
+        'mode': mode.value,
+        'current_revision_id': current_revision_id,
+        'revisions': [
+            _revision_metadata(revision, current_revision_id=current_revision_id) for revision in snapshot.revisions
+        ],
+    }
+
+
+@router.get(
+    '/conversation_mode_profiles/{mode}/revisions/{revision_id}',
+    response_model=ConversationModeProfileRevisionResponse,
+)
+async def get_conversation_mode_profile_revision(
+    request: Request,
+    mode: ConversationMode,
+    revision_id: str,
+    user=Depends(get_admin_user),
+):
+    try:
+        current = await get_cached_current_revision(request.app, mode)
+        revision = await get_cached_revision(
+            request.app,
+            revision_id,
+            expected_mode=mode,
+        )
+    except ModeProfileServiceUnavailableError as exc:
+        raise _profile_service_error(exc) from exc
+    except ConversationModeProfileIntegrityError as exc:
+        raise _profile_integrity_error(exc) from exc
+    if current is None:
+        raise _profile_not_found(mode=mode.value)
+    if revision is None:
+        raise _profile_not_found(mode=mode.value, revision_id=revision_id)
+    return _revision_response(revision, current_revision_id=current.id)
+
+
+@router.post(
+    '/conversation_mode_profiles/{mode}/revisions/{revision_id}/restore',
+    response_model=ConversationModeProfileRevisionResponse,
+)
+async def restore_conversation_mode_profile_revision(
+    request: Request,
+    mode: ConversationMode,
+    revision_id: str,
+    form_data: ConversationModeProfileRestoreForm,
+    user=Depends(get_admin_user),
+):
+    try:
+        source = await get_cached_revision(
+            request.app,
+            revision_id,
+            expected_mode=mode,
+        )
+    except ModeProfileServiceUnavailableError as exc:
+        raise _profile_service_error(exc) from exc
+    except ConversationModeProfileIntegrityError as exc:
+        raise _profile_integrity_error(exc) from exc
+    if source is None:
+        raise _profile_not_found(mode=mode.value, revision_id=revision_id)
+
+    profile, warnings = await _validated_conversation_mode_profile(
+        request,
+        mode,
+        source.content,
+    )
+
+    try:
+        revision = await restore_mode_profile_revision(
+            mode=mode,
+            source_revision_id=revision_id,
+            expected_current_revision_id=form_data.expected_current_revision_id,
+            created_by=user.id,
+        )
+    except ModeProfileResourceValidationError as exc:
+        raise _profile_resource_error(exc) from exc
+    except ModeProfileServiceUnavailableError as exc:
+        raise _profile_service_error(exc) from exc
+    except ConversationModeProfileRevisionConflict as exc:
+        raise await _profile_conflict_error(request, exc) from exc
+    except ConversationModeProfileIntegrityError as exc:
+        raise _profile_integrity_error(exc) from exc
+
+    cache_profile_revision(request.app, revision)
+    await invalidate_conversation_mode_profile_head(request.app, mode.value)
+    await publish_event(
+        request,
+        EVENTS.CONFIG_CONVERSATION_MODE_PROFILE_REVISION_RESTORED,
+        actor=user,
+        subject_id=revision.id,
+        subject_type='conversation_mode_profile_revision',
+        data=_profile_audit_data(
+            profile=profile,
+            previous_revision_id=form_data.expected_current_revision_id,
+            revision=revision,
+            warnings=warnings,
+            restored_from_revision_id=revision_id,
+        ),
+    )
+    return _revision_response(
+        revision,
+        current_revision_id=revision.id,
+        warnings=warnings,
+    )
 
 
 ############################
@@ -48,9 +577,15 @@ class ImportConfigForm(BaseModel):
 
 @router.post('/import', response_model=dict)
 async def import_config(request: Request, form_data: ImportConfigForm, user=Depends(get_admin_user)):
-    await async_save_config(form_data.config)
-    request.app.state.config._sync_to_redis()
-    return get_config()
+    await Config.upsert(form_data.config)
+    await publish_event(
+        request,
+        EVENTS.CONFIG_IMPORTED,
+        actor=user,
+        subject_id='import',
+        data={'keys': list(form_data.config.keys())},
+    )
+    return await Config.get_all()
 
 
 ############################
@@ -60,7 +595,12 @@ async def import_config(request: Request, form_data: ImportConfigForm, user=Depe
 
 @router.get('/export', response_model=dict)
 async def export_config(user=Depends(get_admin_user)):
-    return get_config()
+    return await Config.get_all()
+
+
+@router.get('/namespace/{namespace}', response_model=dict)
+async def get_config_namespace(namespace: str, user=Depends(get_admin_user)):
+    return await Config.get_namespace(namespace)
 
 
 ############################
@@ -75,10 +615,7 @@ class ConnectionsConfigForm(BaseModel):
 
 @router.get('/connections', response_model=ConnectionsConfigForm)
 async def get_connections_config(request: Request, user=Depends(get_admin_user)):
-    return {
-        'ENABLE_DIRECT_CONNECTIONS': request.app.state.config.ENABLE_DIRECT_CONNECTIONS,
-        'ENABLE_BASE_MODELS_CACHE': request.app.state.config.ENABLE_BASE_MODELS_CACHE,
-    }
+    return await get_config_values(CONNECTIONS_CONFIG_KEYS)
 
 
 @router.post('/connections', response_model=ConnectionsConfigForm)
@@ -87,13 +624,17 @@ async def set_connections_config(
     form_data: ConnectionsConfigForm,
     user=Depends(get_admin_user),
 ):
-    request.app.state.config.ENABLE_DIRECT_CONNECTIONS = form_data.ENABLE_DIRECT_CONNECTIONS
-    request.app.state.config.ENABLE_BASE_MODELS_CACHE = form_data.ENABLE_BASE_MODELS_CACHE
-
-    return {
-        'ENABLE_DIRECT_CONNECTIONS': request.app.state.config.ENABLE_DIRECT_CONNECTIONS,
-        'ENABLE_BASE_MODELS_CACHE': request.app.state.config.ENABLE_BASE_MODELS_CACHE,
-    }
+    await Config.upsert(config_updates(form_data.model_dump(), CONNECTIONS_CONFIG_KEYS))
+    values = await get_config_values(CONNECTIONS_CONFIG_KEYS)
+    await publish_event(
+        request,
+        EVENTS.CONFIG_CONNECTIONS_UPDATED,
+        actor=user,
+        subject_id='connections',
+        subject_type='config',
+        data=values,
+    )
+    return values
 
 
 class OAuthClientRegistrationForm(BaseModel):
@@ -102,6 +643,7 @@ class OAuthClientRegistrationForm(BaseModel):
     client_name: str | None = None
     client_secret: str | None = None
     oauth_server_url: str | None = None
+    oauth_scope: str | None = None
 
 
 @router.post('/oauth/clients/register')
@@ -126,10 +668,11 @@ async def register_oauth_client(
                 oauth_server_url,
                 oauth_client_id=form_data.client_id,
                 oauth_client_secret=form_data.client_secret,
+                oauth_scope=form_data.oauth_scope,
             )
         else:
             oauth_client_info = await get_oauth_client_info_with_dynamic_client_registration(
-                request, oauth_client_id, oauth_server_url
+                request, oauth_client_id, oauth_server_url, oauth_scope=form_data.oauth_scope
             )
         return {
             'status': True,
@@ -167,9 +710,7 @@ class ToolServersConfigForm(BaseModel):
 
 @router.get('/tool_servers', response_model=ToolServersConfigForm)
 async def get_tool_servers_config(request: Request, user=Depends(get_admin_user)):
-    return {
-        'TOOL_SERVER_CONNECTIONS': request.app.state.config.TOOL_SERVER_CONNECTIONS,
-    }
+    return {'TOOL_SERVER_CONNECTIONS': await Config.get('tool_server.connections')}
 
 
 @router.post('/tool_servers', response_model=ToolServersConfigForm)
@@ -178,13 +719,14 @@ async def set_tool_servers_config(
     form_data: ToolServersConfigForm,
     user=Depends(get_admin_user),
 ):
-    for connection in request.app.state.config.TOOL_SERVER_CONNECTIONS:
+    existing_connections = await Config.get('tool_server.connections', []) or []
+    for connection in existing_connections:
         server_type = connection.get('type', 'openapi')
         auth_type = connection.get('auth_type', 'none')
 
         if auth_type in ('oauth_2.1', 'oauth_2.1_static'):
             # Remove existing OAuth clients for tool servers
-            server_id = connection.get('info', {}).get('id')
+            server_id = (connection.get('info') or {}).get('id')
             client_key = f'{server_type}:{server_id}'
 
             try:
@@ -193,21 +735,22 @@ async def set_tool_servers_config(
                 pass
 
     # Set new tool server connections
-    request.app.state.config.TOOL_SERVER_CONNECTIONS = [
-        connection.model_dump() for connection in form_data.TOOL_SERVER_CONNECTIONS
-    ]
+    connections = [connection.model_dump() for connection in form_data.TOOL_SERVER_CONNECTIONS]
+    await Config.upsert({'tool_server.connections': connections})
 
     await set_tool_servers(request)
 
-    for connection in request.app.state.config.TOOL_SERVER_CONNECTIONS:
+    for connection in connections:
         server_type = connection.get('type', 'openapi')
         if server_type == 'mcp':
-            server_id = connection.get('info', {}).get('id')
+            server_id = (connection.get('info') or {}).get('id')
             auth_type = connection.get('auth_type', 'none')
 
             if auth_type in ('oauth_2.1', 'oauth_2.1_static') and server_id:
                 try:
                     oauth_client_info = resolve_oauth_client_info(connection)
+                    oauth_client_info = await recover_static_oauth_client_metadata(connection, oauth_client_info)
+                    oauth_client_info = apply_connection_oauth_options(connection, oauth_client_info)
                     request.app.state.oauth_client_manager.add_client(
                         f'{server_type}:{server_id}',
                         OAuthClientInformationFull(**oauth_client_info),
@@ -216,9 +759,15 @@ async def set_tool_servers_config(
                     log.debug(f'Failed to add OAuth client for MCP tool server: {e}')
                     continue
 
-    return {
-        'TOOL_SERVER_CONNECTIONS': request.app.state.config.TOOL_SERVER_CONNECTIONS,
-    }
+    await publish_event(
+        request,
+        EVENTS.CONFIG_TOOL_SERVERS_UPDATED,
+        actor=user,
+        subject_id='tool_server.connections',
+        subject_type='config',
+        data={'count': len(connections), 'types': [connection.get('type', 'openapi') for connection in connections]},
+    )
+    return {'TOOL_SERVER_CONNECTIONS': connections}
 
 
 class TerminalServerConnection(BaseModel):
@@ -249,9 +798,7 @@ class TerminalServersConfigForm(BaseModel):
 
 @router.get('/terminal_servers')
 async def get_terminal_servers_config(request: Request, user=Depends(get_admin_user)):
-    return {
-        'TERMINAL_SERVER_CONNECTIONS': request.app.state.config.TERMINAL_SERVER_CONNECTIONS,
-    }
+    return {'TERMINAL_SERVER_CONNECTIONS': await Config.get('terminal_server.connections')}
 
 
 @router.post('/terminal_servers')
@@ -260,15 +807,20 @@ async def set_terminal_servers_config(
     form_data: TerminalServersConfigForm,
     user=Depends(get_admin_user),
 ):
-    request.app.state.config.TERMINAL_SERVER_CONNECTIONS = [
-        connection.model_dump() for connection in form_data.TERMINAL_SERVER_CONNECTIONS
-    ]
+    connections = [connection.model_dump() for connection in form_data.TERMINAL_SERVER_CONNECTIONS]
+    await Config.upsert({'terminal_server.connections': connections})
 
     await set_terminal_servers(request)
 
-    return {
-        'TERMINAL_SERVER_CONNECTIONS': request.app.state.config.TERMINAL_SERVER_CONNECTIONS,
-    }
+    await publish_event(
+        request,
+        EVENTS.CONFIG_TERMINAL_SERVERS_UPDATED,
+        actor=user,
+        subject_id='terminal_server.connections',
+        subject_type='config',
+        data={'count': len(connections)},
+    )
+    return {'TERMINAL_SERVER_CONNECTIONS': connections}
 
 
 @router.post('/terminal_servers/verify')
@@ -287,7 +839,7 @@ async def verify_terminal_server_connection(
 
     headers = {}
     if form_data.auth_type == 'bearer' and form_data.key:
-        headers['Authorization'] = f'Bearer {form_data.key}'
+        headers.update(bearer_auth_header(form_data.key))
 
     try:
         async with aiohttp.ClientSession(
@@ -328,6 +880,24 @@ class TerminalServerPolicyForm(BaseModel):
     policy_data: dict
 
 
+class TerminalServerLifecycleForm(BaseModel):
+    url: str
+    key: str | None = ''
+    auth_type: str | None = 'bearer'
+    policy_id: str
+    lifecycle_data: dict
+
+
+class TerminalServerRefreshForm(BaseModel):
+    url: str
+    key: str | None = ''
+    auth_type: str | None = 'bearer'
+    user_id: str | None = None
+    policy_id: str | None = None
+    only_idle: bool = True
+    reset: bool = False
+
+
 @router.post('/terminal_servers/policy')
 async def put_terminal_server_policy(
     request: Request, form_data: TerminalServerPolicyForm, user=Depends(get_admin_user)
@@ -341,7 +911,7 @@ async def put_terminal_server_policy(
 
     headers = {'Content-Type': 'application/json'}
     if form_data.auth_type == 'bearer' and form_data.key:
-        headers['Authorization'] = f'Bearer {form_data.key}'
+        headers.update(bearer_auth_header(form_data.key))
 
     try:
         async with aiohttp.ClientSession(
@@ -361,6 +931,91 @@ async def put_terminal_server_policy(
     except Exception as e:
         log.debug(f'Failed to save policy to terminal server: {e}')
         raise HTTPException(status_code=400, detail='Failed to save policy to terminal server')
+
+
+@router.post('/terminal_servers/lifecycle')
+async def put_terminal_server_lifecycle(
+    request: Request, form_data: TerminalServerLifecycleForm, user=Depends(get_admin_user)
+):
+    """
+    Proxy a policy lifecycle PUT to an orchestrator terminal server.
+    """
+    base_url = (form_data.url or '').rstrip('/')
+    if not base_url:
+        raise HTTPException(status_code=400, detail='Terminal server URL is required')
+
+    headers = {'Content-Type': 'application/json'}
+    if form_data.auth_type == 'bearer' and form_data.key:
+        headers.update(bearer_auth_header(form_data.key))
+
+    try:
+        async with aiohttp.ClientSession(
+            trust_env=True,
+            timeout=aiohttp.ClientTimeout(total=AIOHTTP_CLIENT_TIMEOUT),
+        ) as session:
+            lifecycle_url = f'{base_url}/api/v1/policies/{form_data.policy_id}/lifecycle'
+            async with session.put(
+                lifecycle_url,
+                headers=headers,
+                json=form_data.lifecycle_data,
+                ssl=AIOHTTP_CLIENT_SESSION_SSL,
+            ) as resp:
+                if resp.ok:
+                    return await resp.json()
+                detail = await resp.text()
+                raise HTTPException(status_code=resp.status, detail=detail)
+    except HTTPException:
+        raise
+    except Exception as e:
+        log.debug(f'Failed to save lifecycle to terminal server: {e}')
+        raise HTTPException(status_code=400, detail='Failed to save lifecycle to terminal server')
+
+
+@router.post('/terminal_servers/refresh')
+async def refresh_terminal_server_terminals(
+    request: Request, form_data: TerminalServerRefreshForm, user=Depends(get_admin_user)
+):
+    """
+    Proxy a terminal refresh request to an orchestrator terminal server.
+    """
+    base_url = (form_data.url or '').rstrip('/')
+    if not base_url:
+        raise HTTPException(status_code=400, detail='Terminal server URL is required')
+
+    headers = {'Content-Type': 'application/json'}
+    if form_data.auth_type == 'bearer' and form_data.key:
+        headers.update(bearer_auth_header(form_data.key))
+
+    body = {
+        'only_idle': form_data.only_idle,
+        'reset': form_data.reset,
+    }
+    if form_data.user_id:
+        body['user_id'] = form_data.user_id
+    if form_data.policy_id:
+        body['policy_id'] = form_data.policy_id
+
+    try:
+        async with aiohttp.ClientSession(
+            trust_env=True,
+            timeout=aiohttp.ClientTimeout(total=AIOHTTP_CLIENT_TIMEOUT),
+        ) as session:
+            refresh_url = f'{base_url}/api/v1/terminals/refresh'
+            async with session.post(
+                refresh_url,
+                headers=headers,
+                json=body,
+                ssl=AIOHTTP_CLIENT_SESSION_SSL,
+            ) as resp:
+                if resp.ok:
+                    return await resp.json()
+                detail = await resp.text()
+                raise HTTPException(status_code=resp.status, detail=detail)
+    except HTTPException:
+        raise
+    except Exception as e:
+        log.debug(f'Failed to refresh terminals: {e}')
+        raise HTTPException(status_code=400, detail='Failed to refresh terminals')
 
 
 @router.post('/tool_servers/verify')
@@ -518,67 +1173,29 @@ class CodeInterpreterConfigForm(BaseModel):
 
 @router.get('/code_execution', response_model=CodeInterpreterConfigForm)
 async def get_code_execution_config(request: Request, user=Depends(get_admin_user)):
-    return {
-        'ENABLE_CODE_EXECUTION': request.app.state.config.ENABLE_CODE_EXECUTION,
-        'CODE_EXECUTION_ENGINE': request.app.state.config.CODE_EXECUTION_ENGINE,
-        'CODE_EXECUTION_JUPYTER_URL': request.app.state.config.CODE_EXECUTION_JUPYTER_URL,
-        'CODE_EXECUTION_JUPYTER_AUTH': request.app.state.config.CODE_EXECUTION_JUPYTER_AUTH,
-        'CODE_EXECUTION_JUPYTER_AUTH_TOKEN': request.app.state.config.CODE_EXECUTION_JUPYTER_AUTH_TOKEN,
-        'CODE_EXECUTION_JUPYTER_AUTH_PASSWORD': request.app.state.config.CODE_EXECUTION_JUPYTER_AUTH_PASSWORD,
-        'CODE_EXECUTION_JUPYTER_TIMEOUT': request.app.state.config.CODE_EXECUTION_JUPYTER_TIMEOUT,
-        'ENABLE_CODE_INTERPRETER': request.app.state.config.ENABLE_CODE_INTERPRETER,
-        'CODE_INTERPRETER_ENGINE': request.app.state.config.CODE_INTERPRETER_ENGINE,
-        'CODE_INTERPRETER_PROMPT_TEMPLATE': request.app.state.config.CODE_INTERPRETER_PROMPT_TEMPLATE,
-        'CODE_INTERPRETER_JUPYTER_URL': request.app.state.config.CODE_INTERPRETER_JUPYTER_URL,
-        'CODE_INTERPRETER_JUPYTER_AUTH': request.app.state.config.CODE_INTERPRETER_JUPYTER_AUTH,
-        'CODE_INTERPRETER_JUPYTER_AUTH_TOKEN': request.app.state.config.CODE_INTERPRETER_JUPYTER_AUTH_TOKEN,
-        'CODE_INTERPRETER_JUPYTER_AUTH_PASSWORD': request.app.state.config.CODE_INTERPRETER_JUPYTER_AUTH_PASSWORD,
-        'CODE_INTERPRETER_JUPYTER_TIMEOUT': request.app.state.config.CODE_INTERPRETER_JUPYTER_TIMEOUT,
-    }
+    return await get_config_values(CODE_EXECUTION_CONFIG_KEYS)
 
 
 @router.post('/code_execution', response_model=CodeInterpreterConfigForm)
 async def set_code_execution_config(
     request: Request, form_data: CodeInterpreterConfigForm, user=Depends(get_admin_user)
 ):
-    request.app.state.config.ENABLE_CODE_EXECUTION = form_data.ENABLE_CODE_EXECUTION
-
-    request.app.state.config.CODE_EXECUTION_ENGINE = form_data.CODE_EXECUTION_ENGINE
-    request.app.state.config.CODE_EXECUTION_JUPYTER_URL = form_data.CODE_EXECUTION_JUPYTER_URL
-    request.app.state.config.CODE_EXECUTION_JUPYTER_AUTH = form_data.CODE_EXECUTION_JUPYTER_AUTH
-    request.app.state.config.CODE_EXECUTION_JUPYTER_AUTH_TOKEN = form_data.CODE_EXECUTION_JUPYTER_AUTH_TOKEN
-    request.app.state.config.CODE_EXECUTION_JUPYTER_AUTH_PASSWORD = form_data.CODE_EXECUTION_JUPYTER_AUTH_PASSWORD
-    request.app.state.config.CODE_EXECUTION_JUPYTER_TIMEOUT = form_data.CODE_EXECUTION_JUPYTER_TIMEOUT
-
-    request.app.state.config.ENABLE_CODE_INTERPRETER = form_data.ENABLE_CODE_INTERPRETER
-    request.app.state.config.CODE_INTERPRETER_ENGINE = form_data.CODE_INTERPRETER_ENGINE
-    request.app.state.config.CODE_INTERPRETER_PROMPT_TEMPLATE = form_data.CODE_INTERPRETER_PROMPT_TEMPLATE
-
-    request.app.state.config.CODE_INTERPRETER_JUPYTER_URL = form_data.CODE_INTERPRETER_JUPYTER_URL
-
-    request.app.state.config.CODE_INTERPRETER_JUPYTER_AUTH = form_data.CODE_INTERPRETER_JUPYTER_AUTH
-
-    request.app.state.config.CODE_INTERPRETER_JUPYTER_AUTH_TOKEN = form_data.CODE_INTERPRETER_JUPYTER_AUTH_TOKEN
-    request.app.state.config.CODE_INTERPRETER_JUPYTER_AUTH_PASSWORD = form_data.CODE_INTERPRETER_JUPYTER_AUTH_PASSWORD
-    request.app.state.config.CODE_INTERPRETER_JUPYTER_TIMEOUT = form_data.CODE_INTERPRETER_JUPYTER_TIMEOUT
-
-    return {
-        'ENABLE_CODE_EXECUTION': request.app.state.config.ENABLE_CODE_EXECUTION,
-        'CODE_EXECUTION_ENGINE': request.app.state.config.CODE_EXECUTION_ENGINE,
-        'CODE_EXECUTION_JUPYTER_URL': request.app.state.config.CODE_EXECUTION_JUPYTER_URL,
-        'CODE_EXECUTION_JUPYTER_AUTH': request.app.state.config.CODE_EXECUTION_JUPYTER_AUTH,
-        'CODE_EXECUTION_JUPYTER_AUTH_TOKEN': request.app.state.config.CODE_EXECUTION_JUPYTER_AUTH_TOKEN,
-        'CODE_EXECUTION_JUPYTER_AUTH_PASSWORD': request.app.state.config.CODE_EXECUTION_JUPYTER_AUTH_PASSWORD,
-        'CODE_EXECUTION_JUPYTER_TIMEOUT': request.app.state.config.CODE_EXECUTION_JUPYTER_TIMEOUT,
-        'ENABLE_CODE_INTERPRETER': request.app.state.config.ENABLE_CODE_INTERPRETER,
-        'CODE_INTERPRETER_ENGINE': request.app.state.config.CODE_INTERPRETER_ENGINE,
-        'CODE_INTERPRETER_PROMPT_TEMPLATE': request.app.state.config.CODE_INTERPRETER_PROMPT_TEMPLATE,
-        'CODE_INTERPRETER_JUPYTER_URL': request.app.state.config.CODE_INTERPRETER_JUPYTER_URL,
-        'CODE_INTERPRETER_JUPYTER_AUTH': request.app.state.config.CODE_INTERPRETER_JUPYTER_AUTH,
-        'CODE_INTERPRETER_JUPYTER_AUTH_TOKEN': request.app.state.config.CODE_INTERPRETER_JUPYTER_AUTH_TOKEN,
-        'CODE_INTERPRETER_JUPYTER_AUTH_PASSWORD': request.app.state.config.CODE_INTERPRETER_JUPYTER_AUTH_PASSWORD,
-        'CODE_INTERPRETER_JUPYTER_TIMEOUT': request.app.state.config.CODE_INTERPRETER_JUPYTER_TIMEOUT,
-    }
+    await Config.upsert(config_updates(form_data.model_dump(), CODE_EXECUTION_CONFIG_KEYS))
+    values = await get_config_values(CODE_EXECUTION_CONFIG_KEYS)
+    await publish_event(
+        request,
+        EVENTS.CONFIG_CODE_EXECUTION_UPDATED,
+        actor=user,
+        subject_id='code_execution',
+        subject_type='config',
+        data={
+            'code_execution_enabled': values.get('ENABLE_CODE_EXECUTION'),
+            'code_execution_engine': values.get('CODE_EXECUTION_ENGINE'),
+            'code_interpreter_enabled': values.get('ENABLE_CODE_INTERPRETER'),
+            'code_interpreter_engine': values.get('CODE_INTERPRETER_ENGINE'),
+        },
+    )
+    return values
 
 
 ############################
@@ -595,35 +1212,32 @@ class ModelsConfigForm(BaseModel):
 @router.get('/models/defaults')
 async def get_models_defaults(request: Request, user=Depends(get_verified_user)):
     return {
-        'DEFAULT_MODEL_METADATA': request.app.state.config.DEFAULT_MODEL_METADATA,
+        'DEFAULT_MODEL_METADATA': await Config.get('models.default_metadata'),
     }
 
 
 @router.get('/models', response_model=ModelsConfigForm)
 async def get_models_config(request: Request, user=Depends(get_admin_user)):
-    return {
-        'DEFAULT_MODELS': request.app.state.config.DEFAULT_MODELS,
-        'DEFAULT_PINNED_MODELS': request.app.state.config.DEFAULT_PINNED_MODELS,
-        'MODEL_ORDER_LIST': request.app.state.config.MODEL_ORDER_LIST,
-        'DEFAULT_MODEL_METADATA': request.app.state.config.DEFAULT_MODEL_METADATA,
-        'DEFAULT_MODEL_PARAMS': request.app.state.config.DEFAULT_MODEL_PARAMS,
-    }
+    return await get_config_values(MODELS_CONFIG_KEYS)
 
 
 @router.post('/models', response_model=ModelsConfigForm)
 async def set_models_config(request: Request, form_data: ModelsConfigForm, user=Depends(get_admin_user)):
-    request.app.state.config.DEFAULT_MODELS = form_data.DEFAULT_MODELS
-    request.app.state.config.DEFAULT_PINNED_MODELS = form_data.DEFAULT_PINNED_MODELS
-    request.app.state.config.MODEL_ORDER_LIST = form_data.MODEL_ORDER_LIST
-    request.app.state.config.DEFAULT_MODEL_METADATA = form_data.DEFAULT_MODEL_METADATA
-    request.app.state.config.DEFAULT_MODEL_PARAMS = form_data.DEFAULT_MODEL_PARAMS
-    return {
-        'DEFAULT_MODELS': request.app.state.config.DEFAULT_MODELS,
-        'DEFAULT_PINNED_MODELS': request.app.state.config.DEFAULT_PINNED_MODELS,
-        'MODEL_ORDER_LIST': request.app.state.config.MODEL_ORDER_LIST,
-        'DEFAULT_MODEL_METADATA': request.app.state.config.DEFAULT_MODEL_METADATA,
-        'DEFAULT_MODEL_PARAMS': request.app.state.config.DEFAULT_MODEL_PARAMS,
-    }
+    await Config.upsert(config_updates(form_data.model_dump(), MODELS_CONFIG_KEYS))
+    values = await get_config_values(MODELS_CONFIG_KEYS)
+    await publish_event(
+        request,
+        EVENTS.CONFIG_MODELS_UPDATED,
+        actor=user,
+        subject_id='models',
+        subject_type='config',
+        data={
+            'default_models': values.get('DEFAULT_MODELS'),
+            'default_pinned_models': values.get('DEFAULT_PINNED_MODELS'),
+            'model_order_count': len(values.get('MODEL_ORDER_LIST') or []),
+        },
+    )
+    return values
 
 
 class PromptSuggestion(BaseModel):
@@ -642,8 +1256,17 @@ async def set_default_suggestions(
     user=Depends(get_admin_user),
 ):
     data = form_data.model_dump()
-    request.app.state.config.DEFAULT_PROMPT_SUGGESTIONS = data['suggestions']
-    return request.app.state.config.DEFAULT_PROMPT_SUGGESTIONS
+    await Config.upsert({'ui.prompt_suggestions': data['suggestions']})
+    suggestions = await Config.get('ui.prompt_suggestions')
+    await publish_event(
+        request,
+        EVENTS.CONFIG_SUGGESTIONS_UPDATED,
+        actor=user,
+        subject_id='ui.prompt_suggestions',
+        subject_type='config',
+        data={'count': len(suggestions or [])},
+    )
+    return suggestions
 
 
 ############################
@@ -662,8 +1285,17 @@ async def set_banners(
     user=Depends(get_admin_user),
 ):
     data = form_data.model_dump()
-    request.app.state.config.BANNERS = data['banners']
-    return request.app.state.config.BANNERS
+    await Config.upsert({'ui.banners': data['banners']})
+    banners = await Config.get('ui.banners')
+    await publish_event(
+        request,
+        EVENTS.CONFIG_BANNERS_UPDATED,
+        actor=user,
+        subject_id='ui.banners',
+        subject_type='config',
+        data={'count': len(banners or [])},
+    )
+    return banners
 
 
 @router.get('/banners', response_model=list[BannerModel])
@@ -671,4 +1303,4 @@ async def get_banners(
     request: Request,
     user=Depends(get_verified_user),
 ):
-    return request.app.state.config.BANNERS
+    return await Config.get('ui.banners')

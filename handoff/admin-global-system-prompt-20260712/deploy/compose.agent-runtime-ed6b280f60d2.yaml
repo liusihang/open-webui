@@ -1,0 +1,26 @@
+services:
+  agentscope-runtime:
+    image: open-webui-pr7-agentscope-runtime:ed6b280f60d2-response-envelopes
+    build: !reset null
+    command:
+      - uv
+      - run
+      - python
+      - -m
+      - agentscope_runtime.launcher
+      - --host
+      - 0.0.0.0
+      - --port
+      - "8000"
+      - --workers
+      - "1"
+    environment:
+      AGENT_RUNTIME_STATE_PATH: /var/lib/agentscope-runtime/runtime-state.sqlite3
+      UVICORN_WORKERS: "1"
+      WEB_CONCURRENCY: "1"
+    volumes:
+      - agentscope-runtime-state:/var/lib/agentscope-runtime
+
+volumes:
+  agentscope-runtime-state:
+    name: openwebui-pr7-agentscope-runtime-state

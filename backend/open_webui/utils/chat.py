@@ -34,7 +34,8 @@ from open_webui.utils.filter import (
     process_filter_functions,
 )
 from open_webui.utils.models import check_model_access, get_all_models
-from open_webui.utils.payload import convert_payload_openai_to_ollama
+from open_webui.utils.payload import apply_model_system_prompt_to_body, convert_payload_openai_to_ollama
+from open_webui.utils.redaction import redact_request_secrets
 from open_webui.utils.response import (
     convert_response_ollama_to_openai,
     convert_streaming_response_ollama_to_openai,
@@ -56,6 +57,18 @@ async def generate_direct_chat_completion(
     log.info('generate_direct_chat_completion')
 
     metadata = form_data.pop('metadata', {})
+    if not getattr(request.state, 'bypass_system_prompt', False):
+        form_data = await apply_model_system_prompt_to_body(
+            None,
+            form_data,
+            metadata,
+            user,
+            bypass_global_system_prompt=getattr(
+                request.state,
+                'bypass_global_system_prompt',
+                False,
+            ),
+        )
 
     user_id = metadata.get('user_id')
     session_id = metadata.get('session_id')
@@ -96,7 +109,7 @@ async def generate_direct_chat_completion(
             }
         )
 
-        log.info(f'res: {res}')
+        log.info('res: %s', redact_request_secrets(request, res))
 
         if res.get('status', False):
             # Define a generator to stream responses
@@ -116,7 +129,10 @@ async def generate_direct_chat_completion(
                             else:
                                 yield f'data: {data}\n\n'
                 except Exception as e:
-                    log.debug(f'Error in event generator: {e}')
+                    log.debug(
+                        'Error in event generator: %s',
+                        redact_request_secrets(request, str(e)),
+                    )
                     pass
 
             # Define a background task to run the event generator
@@ -155,8 +171,12 @@ async def generate_chat_completion(
     user: Any,
     bypass_filter: bool = False,
     bypass_system_prompt: bool = False,
+    bypass_global_system_prompt: bool = False,
 ):
-    log.debug(f'generate_chat_completion: {form_data}')
+    log.debug(
+        'generate_chat_completion: %s',
+        redact_request_secrets(request, form_data),
+    )
     if BYPASS_MODEL_ACCESS_CONTROL:
         bypass_filter = True
 
@@ -165,6 +185,7 @@ async def generate_chat_completion(
     # them as query parameters.
     request.state.bypass_filter = bypass_filter
     request.state.bypass_system_prompt = bypass_system_prompt
+    request.state.bypass_global_system_prompt = bypass_global_system_prompt
 
     if hasattr(request.state, 'metadata'):
         if 'metadata' not in form_data:
@@ -237,6 +258,12 @@ async def generate_chat_completion(
 
             form_data['model'] = selected_model_id
 
+            # bypass_filter recursion below skips the line-200 check; gate the resolved model here.
+            if not bypass_filter and user.role == 'user':
+                selected_model = request.app.state.MODELS.get(selected_model_id)
+                if selected_model:
+                    await check_model_access(user, selected_model)
+
         if selected_model_id:
             if form_data.get('stream') == True:
 
@@ -251,6 +278,7 @@ async def generate_chat_completion(
                     user,
                     bypass_filter=True,
                     bypass_system_prompt=bypass_system_prompt,
+                    bypass_global_system_prompt=bypass_global_system_prompt,
                 )
                 return StreamingResponse(
                     stream_wrapper(response.body_iterator),
@@ -266,6 +294,7 @@ async def generate_chat_completion(
                             user,
                             bypass_filter=True,
                             bypass_system_prompt=bypass_system_prompt,
+                            bypass_global_system_prompt=bypass_global_system_prompt,
                         )
                     ),
                     'selected_model_id': selected_model_id,

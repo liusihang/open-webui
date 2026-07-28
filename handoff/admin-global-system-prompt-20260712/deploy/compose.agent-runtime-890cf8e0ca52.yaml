@@ -1,0 +1,4 @@
+services:
+  agentscope-runtime:
+    image: open-webui-pr7-agentscope-runtime:890cf8e0ca52-phase-marker-clean
+    build: !reset null

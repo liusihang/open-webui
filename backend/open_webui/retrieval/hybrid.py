@@ -1,0 +1,474 @@
+from __future__ import annotations
+
+import asyncio
+import logging
+import math
+import os
+import re
+from dataclasses import dataclass
+from numbers import Number
+from typing import Any, Awaitable, Callable, Iterable
+
+from langchain_core.documents import Document
+
+from open_webui.models.retrieval_chunks import fetch_active_chunks_by_chunk_uid
+from open_webui.retrieval.lexical.opensearch import LexicalSearchHit, OpenSearchLexicalClient
+
+log = logging.getLogger(__name__)
+
+RRF_RANK_CONSTANT = 60
+COMPARATIVE_CANDIDATE_MIN_LIMIT = 100
+COMPARATIVE_CANDIDATE_MAX_LIMIT = 200
+COMPARATIVE_CANDIDATE_MULTIPLIER = 10
+RAG_EMBEDDING_QUERY_PREFIX = os.getenv("RAG_EMBEDDING_QUERY_PREFIX", None)
+RAG_EMBEDDING_CONTENT_PREFIX = os.getenv("RAG_EMBEDDING_CONTENT_PREFIX", None)
+COMPARATIVE_QUERY_PATTERN = re.compile(
+    r"\b(compare|comparison|contrast|different|difference|differences|versus|vs\.?|between|across|cross[- ]document)\b"
+    r"|比较|对比|区别|差异|相比|分别|异同",
+    re.IGNORECASE,
+)
+
+
+class HybridSearchFailed(RuntimeError):
+    pass
+
+
+class HybridManifestNotReady(RuntimeError):
+    pass
+
+
+@dataclass(frozen=True)
+class RrfCandidate:
+    chunk_uid: str
+    score: float
+    first_rank: int
+    first_seen: int
+
+
+_LEXICAL_CLIENT: OpenSearchLexicalClient | None = None
+
+
+def get_lexical_client() -> OpenSearchLexicalClient:
+    global _LEXICAL_CLIENT
+    if _LEXICAL_CLIENT is None:
+        _LEXICAL_CLIENT = OpenSearchLexicalClient()
+    return _LEXICAL_CLIENT
+
+
+def _clamp_weight(value: float | None) -> float:
+    if value is None:
+        return 0.0
+    return min(1.0, max(0.0, float(value)))
+
+
+def merge_rrf_by_chunk_uid(
+    *,
+    vector_chunk_uids: Iterable[str],
+    lexical_chunk_uids: Iterable[str],
+    vector_weight: float,
+    lexical_weight: float,
+    rank_constant: int = RRF_RANK_CONSTANT,
+) -> list[RrfCandidate]:
+    scores: dict[str, float] = {}
+    first_rank: dict[str, int] = {}
+    first_seen: dict[str, int] = {}
+    seen_counter = 0
+
+    def add_branch(chunk_uids: Iterable[str], weight: float) -> None:
+        nonlocal seen_counter
+        if weight <= 0:
+            return
+        seen_in_branch = set()
+        for rank, chunk_uid in enumerate(chunk_uids, start=1):
+            if not chunk_uid or chunk_uid in seen_in_branch:
+                continue
+            seen_in_branch.add(chunk_uid)
+            if chunk_uid not in first_seen:
+                seen_counter += 1
+                first_seen[chunk_uid] = seen_counter
+            scores[chunk_uid] = scores.get(chunk_uid, 0.0) + weight / (rank_constant + rank)
+            first_rank[chunk_uid] = min(first_rank.get(chunk_uid, rank), rank)
+
+    add_branch(vector_chunk_uids, vector_weight)
+    add_branch(lexical_chunk_uids, lexical_weight)
+
+    candidates = [
+        RrfCandidate(
+            chunk_uid=chunk_uid,
+            score=score,
+            first_rank=first_rank[chunk_uid],
+            first_seen=first_seen[chunk_uid],
+        )
+        for chunk_uid, score in scores.items()
+    ]
+    return sorted(
+        candidates,
+        key=lambda candidate: (
+            -candidate.score,
+            candidate.first_rank,
+            candidate.first_seen,
+            candidate.chunk_uid,
+        ),
+    )
+
+
+async def query_manifest_hybrid_search(
+    *,
+    collection_names: list[str],
+    queries: list[str],
+    embedding_function,
+    k: int,
+    reranking_function,
+    k_reranker: int,
+    r: float,
+    hybrid_bm25_weight: float,
+    vector_client: Any | None = None,
+    lexical_client: Any | None = None,
+    hydrate_chunks: Callable[[list[str]], Awaitable[list[Any]]] | None = None,
+) -> dict:
+    queries = [query for query in queries if query]
+    if not queries or not collection_names or k <= 0:
+        return {"distances": [[]], "documents": [[]], "metadatas": [[]]}
+
+    lexical_weight = _clamp_weight(hybrid_bm25_weight)
+    vector_weight = 1.0 - lexical_weight
+    primary_query = queries[0]
+    base_limit = max(k, k_reranker or k)
+    branch_limit = _candidate_limit_for_query(query=primary_query, base_limit=base_limit)
+    selection_window = branch_limit if _is_comparative_query(primary_query) else base_limit
+    if vector_client is None:
+        from open_webui.retrieval.vector.async_client import ASYNC_VECTOR_DB_CLIENT
+
+        vector_client = ASYNC_VECTOR_DB_CLIENT
+    if lexical_weight > 0 and lexical_client is None:
+        lexical_client = get_lexical_client()
+    hydrate_chunks = hydrate_chunks or fetch_active_chunks_by_chunk_uid
+
+    query_embeddings = None
+    if vector_weight > 0:
+        query_embeddings = await embedding_function(queries, prefix=RAG_EMBEDDING_QUERY_PREFIX)
+        query_embeddings = _normalize_query_embeddings(query_embeddings, len(queries))
+
+    vector_chunk_uids: list[str] = []
+    lexical_chunk_uids: list[str] = []
+    missing_vector_chunk_uid_count = 0
+    errors = []
+
+    for query_index, query in enumerate(queries):
+        for collection_name in collection_names:
+            if vector_weight > 0:
+                try:
+                    vector_result = await vector_client.search(
+                        collection_name=collection_name,
+                        vectors=[query_embeddings[query_index]],
+                        limit=branch_limit,
+                    )
+                    chunk_uids, missing_count = _chunk_uids_from_vector_result(
+                        vector_result, collection_name=collection_name
+                    )
+                    missing_vector_chunk_uid_count += missing_count
+                    vector_chunk_uids.extend(chunk_uids)
+                except Exception as exc:
+                    log.warning(
+                        "hybrid vector search failed for collection %s: %s",
+                        collection_name,
+                        exc,
+                        exc_info=True,
+                    )
+                    errors.append(exc)
+
+            if lexical_weight > 0:
+                try:
+                    lexical_hits = await asyncio.to_thread(
+                        lexical_client.search,
+                        query,
+                        collection_ids=[collection_name],
+                        k=branch_limit,
+                    )
+                    lexical_chunk_uids.extend(hit.chunk_uid for hit in lexical_hits if hit.chunk_uid)
+                except Exception as exc:
+                    log.warning(
+                        "hybrid lexical search failed for collection %s: %s",
+                        collection_name,
+                        exc,
+                        exc_info=True,
+                    )
+                    errors.append(exc)
+
+    candidates = merge_rrf_by_chunk_uid(
+        vector_chunk_uids=vector_chunk_uids,
+        lexical_chunk_uids=lexical_chunk_uids,
+        vector_weight=vector_weight,
+        lexical_weight=lexical_weight,
+    )
+    if not candidates and errors:
+        raise HybridSearchFailed("Hybrid search failed for all branches") from errors[-1]
+    if not candidates and missing_vector_chunk_uid_count:
+        raise HybridManifestNotReady(
+            f"Hybrid manifest is not ready: {missing_vector_chunk_uid_count} vector hit(s) missing chunk_uid"
+        )
+
+    hydrated_chunks = await _hydrate_candidates_until_enough(
+        candidates=candidates,
+        hydrate_chunks=hydrate_chunks,
+        target_count=branch_limit,
+        batch_size=branch_limit,
+    )
+    if candidates and not hydrated_chunks:
+        raise HybridManifestNotReady("Hybrid manifest is not ready: no active manifest rows for candidates")
+    candidate_by_uid = {candidate.chunk_uid: candidate for candidate in candidates}
+    documents = [
+        Document(
+            page_content=chunk.text or "",
+            metadata=_metadata_from_chunk(chunk, candidate_by_uid[chunk.chunk_uid].score),
+        )
+        for chunk in hydrated_chunks
+        if chunk.chunk_uid in candidate_by_uid
+    ]
+
+    if reranking_function is not None:
+        documents = await _rerank_documents(
+            documents,
+            query=primary_query,
+            reranking_function=reranking_function,
+            top_n=selection_window,
+            r_score=r,
+        )
+        documents = _select_final_documents(documents, query=primary_query, k=k)
+    else:
+        documents = await _semantic_compress_documents(
+            documents,
+            query=primary_query,
+            embedding_function=embedding_function,
+            query_embedding=query_embeddings[0] if query_embeddings else None,
+            top_n=selection_window,
+            r_score=r,
+        )
+        documents = _select_final_documents(documents, query=primary_query, k=k)
+
+    return {
+        "distances": [[document.metadata.get("score") for document in documents]],
+        "documents": [[document.page_content for document in documents]],
+        "metadatas": [[document.metadata for document in documents]],
+    }
+
+
+def _select_final_documents(documents: list[Document], *, query: str, k: int) -> list[Document]:
+    if not documents or k <= 0:
+        return []
+    if not _should_diversify_sources(query=query, documents=documents, k=k):
+        return documents[:k]
+    return _diversify_by_source(documents, k=k)
+
+
+def _candidate_limit_for_query(*, query: str, base_limit: int) -> int:
+    base_limit = max(1, base_limit)
+    if not _is_comparative_query(query):
+        return base_limit
+    widened = max(
+        base_limit,
+        base_limit * COMPARATIVE_CANDIDATE_MULTIPLIER,
+        COMPARATIVE_CANDIDATE_MIN_LIMIT,
+    )
+    return min(widened, COMPARATIVE_CANDIDATE_MAX_LIMIT)
+
+
+def _is_comparative_query(query: str) -> bool:
+    return bool(COMPARATIVE_QUERY_PATTERN.search(query or ""))
+
+
+def _should_diversify_sources(*, query: str, documents: list[Document], k: int) -> bool:
+    if k < 2 or not _is_comparative_query(query):
+        return False
+
+    source_keys = {_document_source_key(document) for document in documents}
+    source_keys.discard("")
+    return len(source_keys) > 1
+
+
+def _diversify_by_source(documents: list[Document], *, k: int) -> list[Document]:
+    selected: list[Document] = []
+    selected_indexes: set[int] = set()
+    selected_sources: set[str] = set()
+
+    for index, document in enumerate(documents):
+        source_key = _document_source_key(document)
+        if not source_key or source_key in selected_sources:
+            continue
+        selected.append(document)
+        selected_indexes.add(index)
+        selected_sources.add(source_key)
+        if len(selected) >= k:
+            return selected
+
+    for index, document in enumerate(documents):
+        if index in selected_indexes:
+            continue
+        selected.append(document)
+        if len(selected) >= k:
+            return selected
+
+    return selected
+
+
+def _document_source_key(document: Document) -> str:
+    metadata = document.metadata if isinstance(document.metadata, dict) else {}
+    return str(
+        metadata.get("file_id")
+        or metadata.get("source")
+        or metadata.get("name")
+        or metadata.get("chunk_uid")
+        or ""
+    )
+
+
+def _normalize_query_embeddings(value: Any, query_count: int) -> list[list[float | int]]:
+    if query_count == 1 and _looks_like_embedding_vector(value):
+        return [value]
+    return value
+
+
+def _looks_like_embedding_vector(value: Any) -> bool:
+    return isinstance(value, list) and (not value or isinstance(value[0], Number))
+
+
+def _chunk_uids_from_vector_result(vector_result: Any, *, collection_name: str) -> tuple[list[str], int]:
+    if not vector_result or not getattr(vector_result, "metadatas", None):
+        return [], 0
+
+    metadatas = vector_result.metadatas[0] if vector_result.metadatas else []
+    chunk_uids = []
+    missing_chunk_uid_count = 0
+    for metadata in metadatas:
+        chunk_uid = metadata.get("chunk_uid") if isinstance(metadata, dict) else None
+        if not chunk_uid:
+            missing_chunk_uid_count += 1
+            continue
+        chunk_uids.append(chunk_uid)
+
+    if missing_chunk_uid_count:
+        log.warning(
+            "Skipped %d vector hit(s) without chunk_uid for collection %s",
+            missing_chunk_uid_count,
+            collection_name,
+        )
+    return chunk_uids, missing_chunk_uid_count
+
+
+def _metadata_from_chunk(chunk: Any, score: float) -> dict[str, Any]:
+    metadata = getattr(chunk, "metadata_", None)
+    if not isinstance(metadata, dict):
+        metadata = {}
+    metadata = dict(metadata)
+    metadata.setdefault("chunk_uid", chunk.chunk_uid)
+    metadata["score"] = score
+    return metadata
+
+
+async def _hydrate_candidates_until_enough(
+    *,
+    candidates: list[RrfCandidate],
+    hydrate_chunks: Callable[[list[str]], Awaitable[list[Any]]],
+    target_count: int,
+    batch_size: int,
+) -> list[Any]:
+    if not candidates:
+        return []
+
+    target_count = max(1, target_count)
+    batch_size = max(1, batch_size)
+    hydrated_chunks = []
+    seen_chunk_uids = set()
+    for start in range(0, len(candidates), batch_size):
+        chunk_uids = [candidate.chunk_uid for candidate in candidates[start : start + batch_size]]
+        requested_chunk_uids = set(chunk_uids)
+        for chunk in await hydrate_chunks(chunk_uids):
+            if chunk.chunk_uid not in requested_chunk_uids:
+                continue
+            if chunk.chunk_uid in seen_chunk_uids:
+                continue
+            seen_chunk_uids.add(chunk.chunk_uid)
+            hydrated_chunks.append(chunk)
+            if len(hydrated_chunks) >= target_count:
+                return hydrated_chunks
+    return hydrated_chunks
+
+
+async def _semantic_compress_documents(
+    documents: list[Document],
+    *,
+    query: str,
+    embedding_function,
+    query_embedding: list[float | int] | None,
+    top_n: int,
+    r_score: float,
+) -> list[Document]:
+    if not documents:
+        return []
+
+    if query_embedding is None:
+        query_embedding = await embedding_function(query, RAG_EMBEDDING_QUERY_PREFIX)
+    doc_texts = [document.page_content for document in documents]
+    document_embeddings = await embedding_function(doc_texts, RAG_EMBEDDING_CONTENT_PREFIX)
+    scores = _cosine_scores(query_embedding, document_embeddings)
+    docs_with_scores = list(zip(documents, scores))
+    if r_score:
+        docs_with_scores = [(document, score) for document, score in docs_with_scores if score >= r_score]
+
+    ranked = sorted(docs_with_scores, key=lambda item: item[1], reverse=True)
+    final_documents = []
+    for document, score in ranked[:top_n]:
+        metadata = dict(document.metadata)
+        metadata["score"] = score
+        final_documents.append(Document(page_content=document.page_content, metadata=metadata))
+    return final_documents
+
+
+def _cosine_scores(
+    query_embedding: list[float | int],
+    document_embeddings: list[list[float | int]],
+) -> list[float]:
+    return [_cosine_similarity(query_embedding, document_embedding) for document_embedding in document_embeddings]
+
+
+def _cosine_similarity(left: list[float | int], right: list[float | int]) -> float:
+    left_values = [float(value) for value in left]
+    right_values = [float(value) for value in right]
+    numerator = sum(left_value * right_value for left_value, right_value in zip(left_values, right_values))
+    left_norm = math.sqrt(sum(value * value for value in left_values))
+    right_norm = math.sqrt(sum(value * value for value in right_values))
+    if left_norm == 0 or right_norm == 0:
+        return 0.0
+    return numerator / (left_norm * right_norm)
+
+
+async def _rerank_documents(
+    documents: list[Document],
+    *,
+    query: str,
+    reranking_function,
+    top_n: int,
+    r_score: float,
+) -> list[Document]:
+    if not documents:
+        return []
+
+    scores = await asyncio.to_thread(reranking_function, query, documents)
+    if scores is None:
+        log.warning("No valid scores found from reranking function. Returning RRF-ranked documents.")
+        return documents[:top_n]
+
+    if hasattr(scores, "tolist"):
+        scores = scores.tolist()
+
+    docs_with_scores = list(zip(documents, scores))
+    if r_score:
+        docs_with_scores = [(document, score) for document, score in docs_with_scores if score >= r_score]
+
+    ranked = sorted(docs_with_scores, key=lambda item: item[1], reverse=True)
+    final_documents = []
+    for document, score in ranked[:top_n]:
+        metadata = dict(document.metadata)
+        metadata["score"] = score
+        final_documents.append(Document(page_content=document.page_content, metadata=metadata))
+    return final_documents

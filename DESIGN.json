@@ -1,0 +1,82 @@
+{
+  "schemaVersion": 2,
+  "generatedAt": "2026-07-10T02:20:00+08:00",
+  "title": "Design System: OpenWebUI Agent Mode",
+  "extensions": {
+    "colorMeta": {
+      "attention": {
+        "role": "primary",
+        "displayName": "Workbench Violet",
+        "canonical": "#7c3aed",
+        "tonalRamp": ["#ede9fe", "#c4b5fd", "#7c3aed", "#5b21b6"]
+      },
+      "surface-light": {
+        "role": "neutral",
+        "displayName": "Paper Gray",
+        "canonical": "oklch(0.98 0 0)",
+        "tonalRamp": ["#f9f9f9", "#ececec", "#d4d4d4"]
+      },
+      "surface-dark": {
+        "role": "neutral",
+        "displayName": "Workbench Charcoal",
+        "canonical": "oklch(0.2 0 0)",
+        "tonalRamp": ["#333333", "#292929", "#202020"]
+      }
+    },
+    "typographyMeta": {
+      "body": {
+        "displayName": "Conversation Body",
+        "purpose": "Agent commentary, prompts, and assistant answers."
+      },
+      "label": {
+        "displayName": "Process Label",
+        "purpose": "State, elapsed time, tool names, and disclosure labels."
+      }
+    },
+    "shadows": [],
+    "motion": [
+      {
+        "name": "state-transition",
+        "value": "180ms cubic-bezier(0.25, 1, 0.5, 1)",
+        "purpose": "Chevron, focus, and disclosure state feedback."
+      }
+    ],
+    "breakpoints": [
+      { "name": "sm", "value": "640px" },
+      { "name": "md", "value": "768px" }
+    ]
+  },
+  "components": [],
+  "narrative": {
+    "northStar": "The Calm Workbench",
+    "overview": "A neutral, answer-first conversation surface with quiet process narration and explicit attention states.",
+    "keyCharacteristics": [
+      "Answer-first hierarchy",
+      "Progressive technical disclosure",
+      "Explicit approval and input states",
+      "Theme-native responsive behavior"
+    ],
+    "rules": [
+      {
+        "name": "The Attention Rarity Rule",
+        "body": "Saturated color is reserved for focus, selection, required action, warning, failure, and confirmed success.",
+        "section": "colors"
+      },
+      {
+        "name": "The Flat Transcript Rule",
+        "body": "Routine progress is not wrapped in cards; bounded panels are reserved for interaction, recovery, and details.",
+        "section": "elevation"
+      }
+    ],
+    "dos": [
+      "Keep the final answer primary.",
+      "Auto-surface states that require user attention.",
+      "Reuse OpenWebUI controls and theme tokens."
+    ],
+    "donts": [
+      "Do not create a status dashboard inside the message.",
+      "Do not use nested cards, glass surfaces, neon gradients, or decorative motion.",
+      "Do not expose private reasoning or raw protocol fields."
+    ]
+  }
+}

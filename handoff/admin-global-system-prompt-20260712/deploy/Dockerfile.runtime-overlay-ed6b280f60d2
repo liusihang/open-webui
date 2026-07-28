@@ -1,0 +1,7 @@
+FROM open-webui-pr7-agentscope-runtime:2a0c4c988884-final-privacy-cancel
+
+ARG SOURCE_SHA
+LABEL org.opencontainers.image.revision=${SOURCE_SHA}
+
+RUN rm -rf /service/agentscope_runtime
+COPY services/agentscope-runtime/agentscope_runtime /service/agentscope_runtime

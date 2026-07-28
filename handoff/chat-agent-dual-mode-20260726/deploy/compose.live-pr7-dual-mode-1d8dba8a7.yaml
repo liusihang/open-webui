@@ -1,0 +1,67 @@
+services:
+  agentscope-runtime:
+    image: open-webui-pr7-agentscope-runtime:742f686182-true-final-stream
+    container_name: openwebui-agentscope-runtime
+    restart: unless-stopped
+    command:
+      - uv
+      - run
+      - python
+      - -m
+      - agentscope_runtime.launcher
+      - --host
+      - 0.0.0.0
+      - --port
+      - "8000"
+      - --workers
+      - "1"
+    env_file:
+      - ${PR7_RUNTIME_ENV_FILE:?PR7_RUNTIME_ENV_FILE is required}
+    environment:
+      AGENT_RUNTIME_AUTO_FINALIZE_ORDINARY_QA: "true"
+      AGENT_RUNTIME_SERVICE_TOKEN: ${AGENT_RUNTIME_SERVICE_TOKEN:?AGENT_RUNTIME_SERVICE_TOKEN is required}
+      OPENWEBUI_SERVICE_TOKEN: ${OPENWEBUI_SERVICE_TOKEN:?OPENWEBUI_SERVICE_TOKEN is required}
+      OPENWEBUI_BASE_URL: http://open-webui:8080
+      AGENT_RUNTIME_STATE_PATH: /var/lib/agentscope-runtime/runtime-state.sqlite3
+      UVICORN_WORKERS: "1"
+      WEB_CONCURRENCY: "1"
+      HTTP_PROXY: ${PR7_HTTP_PROXY:-}
+      HTTPS_PROXY: ${PR7_HTTPS_PROXY:-}
+      ALL_PROXY: ${PR7_ALL_PROXY:-}
+      http_proxy: ${PR7_HTTP_PROXY:-}
+      https_proxy: ${PR7_HTTPS_PROXY:-}
+      all_proxy: ${PR7_ALL_PROXY:-}
+      NO_PROXY: ${PR7_NO_PROXY:?PR7_NO_PROXY is required}
+      no_proxy: ${PR7_NO_PROXY:?PR7_NO_PROXY is required}
+    volumes:
+      - ${PR7_RUNTIME_STATE_DIR:?PR7_RUNTIME_STATE_DIR is required}:/var/lib/agentscope-runtime
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - >-
+          python -c "import json,urllib.request,sys;
+          sys.exit(0 if json.load(urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=10)).get('status') == 'ok' else 1)"
+      interval: 15s
+      timeout: 10s
+      retries: 10
+      start_period: 20s
+
+  open-webui:
+    image: open-webui:pr7-chat-agent-dual-mode-1d8dba8a7-slim
+    env_file:
+      - ${PR7_RUNTIME_ENV_FILE:?PR7_RUNTIME_ENV_FILE is required}
+    environment:
+      ENABLE_DB_MIGRATIONS: "false"
+      UVICORN_WORKERS: "4"
+      ENABLE_AGENT_MODE: "true"
+      AGENT_RUNTIME_BASE_URL: http://agentscope-runtime:8000
+      AGENT_RUNTIME_SERVICE_TOKEN: ${AGENT_RUNTIME_SERVICE_TOKEN:?AGENT_RUNTIME_SERVICE_TOKEN is required}
+      AGENT_RUN_DEFAULT_TIMEOUT_SECONDS: "900"
+      AGENT_RUN_MAX_MODEL_CALLS: "24"
+      AGENT_RUN_MAX_TOOL_CALLS: "48"
+      AGENT_TEAM_MAX_SUBAGENTS: "8"
+      NO_PROXY: ${PR7_NO_PROXY:?PR7_NO_PROXY is required}
+      no_proxy: ${PR7_NO_PROXY:?PR7_NO_PROXY is required}
+    depends_on:
+      agentscope-runtime:
+        condition: service_healthy

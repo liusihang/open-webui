@@ -1,0 +1,6 @@
+services:
+  open-webui-pr7:
+    image: open-webui:agentmode-v0102-d67e1af818-slim-release
+    pull_policy: never
+    environment:
+      UVICORN_WORKERS: "4"

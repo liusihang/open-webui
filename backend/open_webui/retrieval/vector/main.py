@@ -10,6 +10,11 @@ class VectorItem(BaseModel):
     vector: List[float | int]
     metadata: Any
 
+    def __getitem__(self, key: str) -> Any:
+        if key in {'id', 'text', 'vector', 'metadata'}:
+            return getattr(self, key)
+        raise KeyError(key)
+
 
 class GetResult(BaseModel):
     ids: Optional[List[List[str]]]
@@ -62,6 +67,18 @@ class VectorDBBase(ABC):
     ) -> Optional[SearchResult]:
         """Search for similar vectors in a collection."""
         pass
+
+    def hybrid_search(
+        self,
+        collection_name: str,
+        query: str,
+        vectors: List[List[Union[float, int]]],
+        filter: Optional[Dict] = None,
+        limit: int = 10,
+        hybrid_bm25_weight: float = 0.5,
+    ) -> Optional[SearchResult]:
+        """Search using a backend-native hybrid keyword/vector implementation when available."""
+        return None
 
     @abstractmethod
     def query(self, collection_name: str, filter: Dict, limit: Optional[int] = None) -> Optional[GetResult]:

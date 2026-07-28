@@ -1,4 +1,9 @@
+import asyncio
+import inspect
 from pathlib import Path
+
+import httpx
+import pytest
 
 
 LOCAL_FUNCTION_PATH = (
@@ -19,6 +24,334 @@ def test_repo_managed_bifrostapi_source_exists_and_compiles():
     assert LOCAL_FUNCTION_PATH.exists()
     pipe_cls = _load_pipe_class()
     assert pipe_cls.__name__ == 'Pipe'
+
+
+def test_repo_managed_bifrostapi_stream_transport_is_native_async():
+    pipe_cls = _load_pipe_class()
+
+    assert inspect.isasyncgenfunction(pipe_cls._stream_with_fallback)
+    assert inspect.isasyncgenfunction(pipe_cls._responses_stream_with_fallback)
+
+
+@pytest.mark.asyncio
+async def test_repo_managed_bifrostapi_stream_is_event_loop_safe_and_cancellable(
+    monkeypatch,
+):
+    pipe_cls = _load_pipe_class()
+    pipe = pipe_cls()
+    upstream_waiting = asyncio.Event()
+    upstream_closed = asyncio.Event()
+
+    class FakeResponse:
+        status_code = 200
+
+        async def aiter_lines(self):
+            try:
+                yield 'data: {"type":"response.created"}'
+                upstream_waiting.set()
+                await asyncio.Event().wait()
+            finally:
+                upstream_closed.set()
+
+    class FakeStreamContext:
+        async def __aenter__(self):
+            return FakeResponse()
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return None
+
+    class FakeAsyncClient:
+        def __init__(self, *, timeout):
+            self.timeout = timeout
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return None
+
+        def stream(self, *args, **kwargs):
+            return FakeStreamContext()
+
+    monkeypatch.setattr(httpx, 'AsyncClient', FakeAsyncClient)
+    stream = pipe._responses_stream_with_fallback({'model': 'openai/gpt-5'})
+
+    assert await anext(stream) == ': bifrost-response-created'
+    pending = asyncio.create_task(anext(stream))
+    await asyncio.wait_for(upstream_waiting.wait(), timeout=0.1)
+
+    ticker = asyncio.create_task(asyncio.sleep(0))
+    await asyncio.wait_for(ticker, timeout=0.1)
+    assert not pending.done()
+
+    pending.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await pending
+    await asyncio.wait_for(upstream_closed.wait(), timeout=0.1)
+
+
+@pytest.mark.asyncio
+async def test_responses_failed_terminates_without_synthetic_success_finish(monkeypatch):
+    pipe_cls = _load_pipe_class()
+    pipe = pipe_cls()
+
+    class FakeResponse:
+        status_code = 200
+
+        async def aiter_lines(self):
+            yield (
+                'data: {"type":"response.failed","response":'
+                '{"error":{"message":"provider failed"}}}'
+            )
+
+    class FakeStreamContext:
+        async def __aenter__(self):
+            return FakeResponse()
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return None
+
+    class FakeAsyncClient:
+        def __init__(self, *, timeout):
+            self.timeout = timeout
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return None
+
+        def stream(self, *args, **kwargs):
+            return FakeStreamContext()
+
+    monkeypatch.setattr(httpx, 'AsyncClient', FakeAsyncClient)
+
+    chunks = [
+        chunk
+        async for chunk in pipe._responses_stream_with_fallback(
+            {'model': 'openai/gpt-5'}
+        )
+    ]
+
+    assert chunks == [{'error': {'message': 'provider failed'}}]
+
+
+@pytest.mark.asyncio
+async def test_responses_clean_eof_without_terminal_event_is_a_stream_error(monkeypatch):
+    pipe_cls = _load_pipe_class()
+    pipe = pipe_cls()
+    pipe.valves.SHOW_REASONING_CONTENT = False
+
+    class FakeResponse:
+        status_code = 200
+
+        async def aiter_lines(self):
+            yield 'data: {"type":"response.output_text.delta","delta":"partial"}'
+
+    class FakeStreamContext:
+        async def __aenter__(self):
+            return FakeResponse()
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return None
+
+    class FakeAsyncClient:
+        def __init__(self, *, timeout):
+            self.timeout = timeout
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return None
+
+        def stream(self, *args, **kwargs):
+            return FakeStreamContext()
+
+    monkeypatch.setattr(httpx, 'AsyncClient', FakeAsyncClient)
+
+    chunks = [
+        chunk
+        async for chunk in pipe._responses_stream_with_fallback(
+            {'model': 'openai/gpt-5'}
+        )
+    ]
+
+    assert chunks == [
+        {'choices': [{'delta': {'content': 'partial'}}]},
+        {'error': {'message': 'Responses stream ended before a terminal event'}},
+    ]
+
+
+@pytest.mark.asyncio
+async def test_responses_done_marker_is_terminal_evidence(monkeypatch):
+    pipe_cls = _load_pipe_class()
+    pipe = pipe_cls()
+    pipe.valves.SHOW_REASONING_CONTENT = False
+
+    class FakeResponse:
+        status_code = 200
+
+        async def aiter_lines(self):
+            yield 'data: {"type":"response.output_text.delta","delta":"complete"}'
+            yield 'data: [DONE]'
+
+    class FakeStreamContext:
+        async def __aenter__(self):
+            return FakeResponse()
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return None
+
+    class FakeAsyncClient:
+        def __init__(self, *, timeout):
+            self.timeout = timeout
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return None
+
+        def stream(self, *args, **kwargs):
+            return FakeStreamContext()
+
+    monkeypatch.setattr(httpx, 'AsyncClient', FakeAsyncClient)
+
+    chunks = [
+        chunk
+        async for chunk in pipe._responses_stream_with_fallback(
+            {'model': 'openai/gpt-5'}
+        )
+    ]
+
+    assert chunks == [
+        {'choices': [{'delta': {'content': 'complete'}}]},
+        {'choices': [{'delta': {}, 'finish_reason': 'stop'}]},
+    ]
+
+
+def test_responses_input_preserves_valid_assistant_phase():
+    pipe = _load_pipe_class()()
+
+    input_items, instructions = pipe._messages_to_responses_input(
+        [
+            {'role': 'assistant', 'content': 'Checking the environment.', 'phase': 'commentary'},
+            {'role': 'assistant', 'content': 'The environment is ready.', 'phase': 'final_answer'},
+        ],
+        None,
+    )
+
+    assert instructions == ''
+    assert [item.get('phase') for item in input_items] == ['commentary', 'final_answer']
+
+
+def test_responses_lifecycle_events_are_forwarded_as_sse_comments():
+    pipe = _load_pipe_class()()
+
+    assert pipe._responses_lifecycle_comment({'type': 'response.created'}) == (
+        ': bifrost-response-created'
+    )
+    assert pipe._responses_lifecycle_comment({'type': 'response.in_progress'}) == (
+        ': bifrost-response-in-progress'
+    )
+    assert pipe._responses_lifecycle_comment({'type': 'response.output_text.delta'}) is None
+
+
+def test_responses_failed_uses_nested_response_error():
+    pipe = _load_pipe_class()()
+    state = pipe._new_stream_state()
+
+    chunk = pipe._parse_responses_event(
+        {
+            'type': 'response.failed',
+            'response': {'error': {'message': 'provider failed'}},
+        },
+        state,
+    )
+
+    assert chunk == {'error': {'message': 'provider failed'}}
+
+
+def test_responses_incomplete_is_a_structured_stream_error():
+    pipe = _load_pipe_class()()
+    state = pipe._new_stream_state()
+
+    chunk = pipe._parse_responses_event(
+        {
+            'type': 'response.incomplete',
+            'response': {
+                'incomplete_details': {'reason': 'max_output_tokens'},
+            },
+        },
+        state,
+    )
+
+    assert chunk == {
+        'error': {'message': 'Response incomplete: max_output_tokens'},
+    }
+
+
+def test_responses_input_omits_invalid_or_non_assistant_phase():
+    pipe = _load_pipe_class()()
+
+    input_items, _ = pipe._messages_to_responses_input(
+        [
+            {'role': 'assistant', 'content': 'Unknown phase.', 'phase': 'running'},
+            {'role': 'user', 'content': 'User text.', 'phase': 'commentary'},
+        ],
+        None,
+    )
+
+    assert all('phase' not in item for item in input_items)
+
+
+def test_responses_input_preserves_commentary_before_tool_call_transaction():
+    pipe = _load_pipe_class()()
+
+    input_items, _ = pipe._messages_to_responses_input(
+        [
+            {
+                'role': 'assistant',
+                'content': 'I will inspect the environment.',
+                'tool_calls': [
+                    {
+                        'id': 'call_env',
+                        'type': 'function',
+                        'function': {
+                            'name': 'get_environment',
+                            'arguments': '{}',
+                        },
+                    }
+                ],
+            },
+            {
+                'role': 'tool',
+                'tool_call_id': 'call_env',
+                'content': '{"status":"success"}',
+            },
+        ],
+        None,
+    )
+
+    assert [item['type'] for item in input_items] == [
+        'message',
+        'function_call',
+        'function_call_output',
+    ]
+    assert input_items[0] == {
+        'type': 'message',
+        'role': 'assistant',
+        'content': [
+            {
+                'type': 'output_text',
+                'text': 'I will inspect the environment.',
+            }
+        ],
+        'phase': 'commentary',
+    }
+    assert input_items[1]['call_id'] == 'call_env'
+    assert input_items[2]['call_id'] == 'call_env'
 
 
 def test_resolve_route_mode_auto_prefers_provider_specific_defaults():
@@ -91,6 +424,113 @@ def test_resolve_effective_cache_settings_auto_generates_stable_gpt_prompt_cache
     assert settings_a['prompt_cache_key'].startswith('owg:')
     assert len(settings_a['prompt_cache_key']) == 64
     assert settings_a['prompt_cache_key'] == settings_b['prompt_cache_key']
+
+
+def test_resolve_effective_cache_settings_keeps_explicit_prompt_cache_key():
+    pipe = _load_pipe_class()()
+
+    settings = pipe._resolve_effective_cache_settings(
+        body={
+            'model': 'bifrostapi.openai/gpt-5',
+            'metadata': {'chat_id': 'chat-123'},
+            'prompt_cache_key': 'caller-key',
+        },
+        model='openai/gpt-5',
+        route_mode='responses',
+        system_message={'role': 'system', 'content': 'system prompt'},
+        messages=[{'role': 'user', 'content': 'hello'}],
+        attachments=[],
+        function_specs=[],
+    )
+
+    assert settings['prompt_cache_key'] == 'caller-key'
+
+
+def test_resolve_effective_cache_settings_uses_chat_id_scoped_gpt_prompt_cache_key():
+    pipe = _load_pipe_class()()
+
+    base = pipe._resolve_effective_cache_settings(
+        body={
+            'model': 'bifrostapi.openai/gpt-5',
+            'metadata': {'chat_id': 'chat-123'},
+        },
+        model='openai/gpt-5',
+        route_mode='responses',
+        system_message={'role': 'system', 'content': 'system prompt'},
+        messages=[{'role': 'user', 'content': 'hello'}],
+        attachments=[],
+        function_specs=[],
+    )
+    changed_user = pipe._resolve_effective_cache_settings(
+        body={
+            'model': 'bifrostapi.openai/gpt-5',
+            'metadata': {'chat_id': 'chat-123'},
+        },
+        model='openai/gpt-5',
+        route_mode='responses',
+        system_message={'role': 'system', 'content': 'system prompt'},
+        messages=[{'role': 'user', 'content': 'different user text'}],
+        attachments=[],
+        function_specs=[],
+    )
+    fallback = pipe._resolve_effective_cache_settings(
+        body={'model': 'bifrostapi.openai/gpt-5'},
+        model='openai/gpt-5',
+        route_mode='responses',
+        system_message={'role': 'system', 'content': 'system prompt'},
+        messages=[{'role': 'user', 'content': 'hello'}],
+        attachments=[],
+        function_specs=[],
+    )
+
+    assert base['provider'] == 'openai'
+    assert len(base['prompt_cache_key']) <= 64
+    assert base['prompt_cache_key'] == changed_user['prompt_cache_key']
+    assert base['prompt_cache_key'] != fallback['prompt_cache_key']
+    assert not base['prompt_cache_key'].startswith('owg:')
+
+
+def test_resolve_effective_cache_settings_chat_id_key_ignores_prefix_shape_changes():
+    pipe = _load_pipe_class()()
+
+    base = pipe._resolve_effective_cache_settings(
+        body={
+            'model': 'bifrostapi.openai/gpt-5',
+            'metadata': {'chat_id': 'chat-123'},
+        },
+        model='openai/gpt-5',
+        route_mode='responses',
+        system_message={'role': 'system', 'content': 'system prompt'},
+        messages=[{'role': 'user', 'content': 'hello'}],
+        attachments=[],
+        function_specs=[],
+    )
+    changed_prefix_shape = pipe._resolve_effective_cache_settings(
+        body={
+            'model': 'bifrostapi.openai/gpt-5',
+            'metadata': {'chat_id': 'chat-123'},
+        },
+        model='openai/gpt-5',
+        route_mode='responses',
+        system_message={'role': 'system', 'content': 'rewritten system prompt'},
+        messages=[{'role': 'user', 'content': 'hello with more context'}],
+        attachments=[
+            {
+                'name': 'evidence.png',
+                'kind': 'image',
+                'responses_part': {'type': 'input_image', 'image_url': 'data:image/png;base64,BBB'},
+            }
+        ],
+        function_specs=[
+            {
+                'description': 'Tool shape change',
+                'name': 'tool_a',
+                'parameters': {'type': 'object', 'properties': {'count': {'type': 'integer'}}},
+            }
+        ],
+    )
+
+    assert base['prompt_cache_key'] == changed_prefix_shape['prompt_cache_key']
 
 
 def test_resolve_effective_cache_settings_does_not_auto_generate_non_gpt_prompt_cache_key():
@@ -413,6 +853,84 @@ def test_build_responses_payload_attaches_attachments_and_uses_responses_tool_sh
     )
 
 
+def test_build_responses_payload_preserves_request_reasoning_effort():
+    pipe = _load_pipe_class()()
+
+    payload = pipe._build_responses_payload(
+        body={
+            'model': 'bifrostapi.ZenMuxOAI/openai/gpt-5.4',
+            'stream': True,
+            'reasoning': {
+                'enabled': True,
+                'effort': 'xhigh',
+                'summary': 'detailed',
+                'max_tokens': 12400,
+            },
+        },
+        model='ZenMuxOAI/openai/gpt-5.4',
+        system_message={'role': 'system', 'content': 'system'},
+        messages=[{'role': 'user', 'content': 'hello'}],
+        attachments=[],
+        function_specs=[],
+    )
+
+    assert payload['reasoning'] == {
+        'enabled': True,
+        'effort': 'xhigh',
+        'summary': 'detailed',
+        'max_tokens': 12400,
+    }
+
+
+@pytest.mark.parametrize('effort', ['low', 'medium', 'high', 'xhigh'])
+def test_build_responses_payload_preserves_composer_reasoning_effort(effort):
+    pipe = _load_pipe_class()()
+
+    payload = pipe._build_responses_payload(
+        body={
+            'model': 'bifrostapi.ZenMuxOAI/openai/gpt-5.4',
+            'stream': True,
+            'reasoning': {'enabled': True, 'effort': effort},
+        },
+        model='ZenMuxOAI/openai/gpt-5.4',
+        system_message={'role': 'system', 'content': 'system'},
+        messages=[{'role': 'user', 'content': 'hello'}],
+        attachments=[],
+        function_specs=[],
+    )
+
+    assert payload['reasoning'] == {'enabled': True, 'effort': effort}
+
+
+def test_build_responses_payload_omits_default_reasoning_without_effort():
+    pipe = _load_pipe_class()()
+    pipe.valves.DEFAULT_REASONING_ENABLED = True
+    pipe.valves.DEFAULT_REASONING_SUMMARY = 'detailed'
+    pipe.valves.DEFAULT_REASONING_EFFORT = ''
+
+    payload = pipe._build_responses_payload(
+        body={
+            'model': 'bifrostapi.ZenMuxOAI/openai/gpt-5.4',
+            'stream': True,
+        },
+        model='ZenMuxOAI/openai/gpt-5.4',
+        system_message={'role': 'system', 'content': 'system'},
+        messages=[{'role': 'user', 'content': 'hello'}],
+        attachments=[],
+        function_specs=[],
+    )
+
+    assert 'reasoning' not in payload
+
+
+def test_reasoning_param_error_detects_empty_level_rejection():
+    pipe = _load_pipe_class()()
+
+    assert pipe._is_reasoning_param_error(
+        'level "" not supported, valid levels: low, medium, high, xhigh'
+    )
+
+
 def test_responses_streaming_function_call_arguments_emit_tool_calls_not_content():
     pipe = _load_pipe_class()()
     state = pipe._new_stream_state()
@@ -468,3 +986,230 @@ def test_responses_streaming_function_call_arguments_emit_tool_calls_not_content
     assert ''.join(delta['function'].get('arguments', '') for delta in tool_call_deltas) == (
         '{"prompt": "A quiet mountain lake"}'
     )
+
+
+def test_responses_streaming_commentary_phase_precedes_tool_call_chunks():
+    pipe = _load_pipe_class()()
+    state = pipe._new_stream_state()
+    chunks = []
+
+    for event in [
+        {
+            'type': 'response.output_item.added',
+            'output_index': 0,
+            'item': {
+                'type': 'message',
+                'id': 'msg_commentary',
+                'role': 'assistant',
+                'phase': 'commentary',
+                'content': [],
+            },
+        },
+        {
+            'type': 'response.output_text.delta',
+            'output_index': 0,
+            'item_id': 'msg_commentary',
+            'delta': 'I will inspect the environment.',
+        },
+        {
+            'type': 'response.output_item.done',
+            'output_index': 0,
+            'item': {
+                'type': 'message',
+                'id': 'msg_commentary',
+                'role': 'assistant',
+                'phase': 'commentary',
+                'content': [],
+            },
+        },
+        {
+            'type': 'response.output_item.added',
+            'output_index': 1,
+            'item': {
+                'type': 'function_call',
+                'id': 'fc_1',
+                'call_id': 'call_1',
+                'name': 'get_environment',
+                'arguments': '',
+                'status': 'in_progress',
+            },
+        },
+    ]:
+        chunk = pipe._parse_responses_event(event, state)
+        if isinstance(chunk, list):
+            chunks.extend(chunk)
+        elif chunk:
+            chunks.append(chunk)
+
+    assert chunks[0]['choices'][0]['delta'] == {
+        'content': 'I will inspect the environment.',
+        'phase': 'commentary',
+    }
+    assert chunks[1]['choices'][0]['delta']['tool_calls'][0]['function']['name'] == (
+        'get_environment'
+    )
+
+
+def test_responses_streaming_final_answer_phase_is_attached_to_first_text_delta():
+    pipe = _load_pipe_class()()
+    state = pipe._new_stream_state()
+
+    assert (
+        pipe._parse_responses_event(
+            {
+                'type': 'response.output_item.added',
+                'output_index': 1,
+                'item': {
+                    'type': 'message',
+                    'id': 'msg_final',
+                    'role': 'assistant',
+                    'phase': 'final_answer',
+                    'content': [],
+                },
+            },
+            state,
+        )
+        is None
+    )
+
+    chunk = pipe._parse_responses_event(
+        {
+            'type': 'response.output_text.delta',
+            'output_index': 1,
+            'item_id': 'msg_final',
+            'delta': 'Done.',
+        },
+        state,
+    )
+
+    assert chunk['choices'][0]['delta'] == {
+        'content': 'Done.',
+        'phase': 'final_answer',
+    }
+
+
+def test_responses_web_search_lifecycle_emits_status_events_without_results():
+    pipe = _load_pipe_class()()
+    emitted = []
+    state = pipe._new_stream_state(__event_emitter__=emitted.append)
+    chunks = []
+
+    for event in [
+        {
+            'type': 'response.output_item.added',
+            'item': {
+                'id': 'ws_1',
+                'type': 'web_search_call',
+                'status': 'in_progress',
+            },
+        },
+        {
+            'type': 'response.web_search_call.searching',
+            'item_id': 'ws_1',
+        },
+        {
+            'type': 'response.output_item.done',
+            'item': {
+                'id': 'ws_1',
+                'type': 'web_search_call',
+                'status': 'completed',
+                'action': {
+                    'type': 'search',
+                    'query': 'weather: Shanghai, China',
+                    'queries': ['weather: Shanghai, China'],
+                },
+            },
+        },
+    ]:
+        chunk = pipe._parse_responses_event(event, state)
+        if isinstance(chunk, list):
+            chunks.extend(chunk)
+        elif chunk:
+            chunks.append(chunk)
+
+    status_events = [event for event in emitted if event.get('type') == 'status']
+    source_events = [event for event in emitted if event.get('type') == 'source']
+    assert [event['data']['status'] for event in status_events] == [
+        'in_progress',
+        'in_progress',
+        'complete',
+    ]
+    assert all(event['data']['action'] == 'web_search' for event in status_events)
+    assert status_events[-1]['data']['query'] == 'weather: Shanghai, China'
+    assert source_events == []
+    assert all(not chunk['choices'][0]['delta'].get('tool_calls') for chunk in chunks)
+    assert all(
+        chunk['choices'][0]['delta'].get('content_kind') == 'provider_auxiliary'
+        for chunk in chunks
+        if chunk['choices'][0]['delta'].get('content')
+    )
+
+    content = ''.join(
+        chunk['choices'][0]['delta'].get('content', '')
+        for chunk in chunks
+        if chunk.get('choices')
+    )
+    assert 'Web Search' in content
+    assert 'weather: Shanghai, China' in content
+
+
+def test_responses_web_search_with_results_still_emits_sources():
+    pipe = _load_pipe_class()()
+    emitted = []
+    state = pipe._new_stream_state(__event_emitter__=emitted.append)
+
+    chunks = pipe._parse_responses_event(
+        {
+            'type': 'response.output_item.done',
+            'item': {
+                'id': 'ws_2',
+                'type': 'web_search_call',
+                'status': 'completed',
+                'query': 'world cup schedule',
+                'results': [
+                    {
+                        'title': 'Schedule',
+                        'url': 'https://example.com/schedule',
+                        'text': 'Match schedule summary',
+                    }
+                ],
+            },
+        },
+        state,
+    )
+
+    assert isinstance(chunks, list)
+    source_events = [event for event in emitted if event.get('type') == 'source']
+    assert len(source_events) == 1
+    assert source_events[0]['data']['source']['url'] == 'https://example.com/schedule'
+    content = ''.join(
+        chunk['choices'][0]['delta'].get('content', '')
+        for chunk in chunks
+        if chunk.get('choices')
+    )
+    assert 'world cup schedule' in content
+    assert 'https://example.com/schedule' in content
+    assert all(
+        chunk['choices'][0]['delta'].get('content_kind') == 'provider_auxiliary'
+        for chunk in chunks
+        if chunk['choices'][0]['delta'].get('content')
+    )
+
+
+def test_responses_output_image_is_marked_as_provider_auxiliary_content():
+    pipe = _load_pipe_class()()
+    state = pipe._new_stream_state()
+
+    chunk = pipe._parse_responses_event(
+        {
+            'type': 'response.output_item.done',
+            'item': {
+                'type': 'output_image',
+                'image_url': 'https://example.com/generated.png',
+            },
+        },
+        state,
+    )
+
+    assert chunk['choices'][0]['delta']['content_kind'] == 'provider_auxiliary'
+    assert chunk['choices'][0]['delta']['auxiliary_type'] == 'output_image'

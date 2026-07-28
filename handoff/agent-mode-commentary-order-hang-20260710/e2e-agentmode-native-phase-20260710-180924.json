@@ -1,0 +1,513 @@
+{
+  "audit_path": "/home/aiserver/staging/openwebui-pr7-eea11194ed-test/deploy-79adbeface29-20260710-163830/e2e-agentmode-native-phase-20260710-180924.json",
+  "base_url": "http://127.0.0.1:18085",
+  "bifrost_before_ids": [
+    "33af5e7d-5b7c-411a-a8f0-e6da9907fcc2",
+    "430d1f18-2cff-4dac-a325-b6f24c04adbb",
+    "7eb2a70d-3c88-44bc-9b5f-60748704fbbb",
+    "a298f00d-20b7-4b67-9508-0d5da3d7c8e4",
+    "ed2a16c3-63f7-42c1-b5e3-e4a894ed5260"
+  ],
+  "bifrost_order": {
+    "detail_fetch_count": 1,
+    "detail_ids_inspected": [
+      "26708825-124e-4735-b6a3-d7508659eca6"
+    ],
+    "history_summary": [
+      {
+        "call_id": null,
+        "index": 0,
+        "name": null,
+        "phase": null,
+        "role": "user",
+        "text": "Native phase E2E marker NATIVE-PHASE-20260710-180924-26a35497. Before every tool call, write one short sentence explaining only the next action. First call native_phase_step_one with the exact marker. Then, only after reading its result, ca",
+        "type": "message"
+      },
+      {
+        "call_id": null,
+        "index": 1,
+        "name": null,
+        "phase": "commentary",
+        "role": "assistant",
+        "text": "I will start by calling step one with the exact marker.",
+        "type": "message"
+      },
+      {
+        "call_id": "call_JZ9JiqcZ9VGUfUtzkrTvCcyE",
+        "index": 2,
+        "name": "native_phase_step_one",
+        "phase": null,
+        "role": null,
+        "text": "{\"marker\": \"NATIVE-PHASE-20260710-180924-26a35497\"}",
+        "type": "function_call"
+      },
+      {
+        "call_id": "call_JZ9JiqcZ9VGUfUtzkrTvCcyE",
+        "index": 3,
+        "name": null,
+        "phase": null,
+        "role": null,
+        "text": "{\"marker\":\"NATIVE-PHASE-20260710-180924-26a35497\",\"status\":\"ok\",\"step\":1,\"token\":\"[REDACTED_SECRET_TOKEN]\"}",
+        "type": "function_call_output"
+      },
+      {
+        "call_id": null,
+        "index": 4,
+        "name": null,
+        "phase": "commentary",
+        "role": "assistant",
+        "text": "I will now call step two using the secret token returned by step one.",
+        "type": "message"
+      },
+      {
+        "call_id": "call_4j7i8fJcJEkL6dd6diE2UMCe",
+        "index": 5,
+        "name": "native_phase_step_two",
+        "phase": null,
+        "role": null,
+        "text": "{\"token\": \"[REDACTED_SECRET_TOKEN]\"}",
+        "type": "function_call"
+      },
+      {
+        "call_id": "call_4j7i8fJcJEkL6dd6diE2UMCe",
+        "index": 6,
+        "name": null,
+        "phase": null,
+        "role": null,
+        "text": "{\"marker\":\"NATIVE-PHASE-20260710-180924-26a35497\",\"status\":\"ok\",\"step\":2}",
+        "type": "function_call_output"
+      }
+    ],
+    "log_id": "26708825-124e-4735-b6a3-d7508659eca6",
+    "model": "gpt-5.5",
+    "new_log_ids": [
+      "26708825-124e-4735-b6a3-d7508659eca6",
+      "0b54d803-1dd4-40f8-b130-bf583b9fc22f",
+      "d90b07f3-b835-4749-8bd1-448059658d5a",
+      "635299c5-b276-495a-bf9f-7b65af18c749",
+      "67f03c47-aaf5-49c0-ba7c-00ebf95fabbf"
+    ],
+    "object": "responses_stream",
+    "provider": "Cliproxy",
+    "timestamp": "2026-07-10T10:09:44.629599271Z",
+    "verified_indices": {
+      "call_one": 2,
+      "call_two": 5,
+      "commentary_one": 1,
+      "commentary_two": 4,
+      "output_one": 3,
+      "output_two": 6,
+      "user": 0
+    }
+  },
+  "bifrost_url": "http://127.0.0.1:18080",
+  "chat_response": {
+    "agent_run_id": "7fe13f44-63c1-48d0-ae43-ac427d5b1a6d",
+    "chat_id": "6eab5843-5306-4816-93fa-b94f3717cd82",
+    "runtime_session_id": "rt_7fe13f44-63c1-48d0-ae43-ac427d5b1a6d_x0H5FtpVzA8",
+    "status": true,
+    "task_ids": []
+  },
+  "db_events": [
+    {
+      "event_type": "run.running",
+      "payload": {
+        "runtime_session_id": "rt_7fe13f44-63c1-48d0-ae43-ac427d5b1a6d_x0H5FtpVzA8"
+      },
+      "phase": "running",
+      "seq": 1
+    },
+    {
+      "event_type": "text.delta",
+      "payload": {
+        "block_id": "rt_7fe13f44-63c1-48d0-ae43-ac427d5b1a6d_x0H5FtpVzA8:leader:model-call-1:model-commentary",
+        "block_kind": "assistant_note",
+        "delta": "I will start by calling step one with the exact marker.",
+        "delta_index": 0,
+        "model_call_id": "model-call-1",
+        "response_phase": "commentary",
+        "source": "model",
+        "text": "I will start by calling step one with the exact marker."
+      },
+      "phase": "running",
+      "seq": 2
+    },
+    {
+      "event_type": "tool.requested",
+      "payload": {
+        "arguments": {
+          "marker": "NATIVE-PHASE-20260710-180924-26a35497"
+        },
+        "tool_call_id": "tool-call-1",
+        "tool_id": "tool:e2e_native_phase_20260710_180924:native_phase_step_one",
+        "tool_name": "native_phase_step_one"
+      },
+      "phase": "running",
+      "seq": 3
+    },
+    {
+      "event_type": "tool.completed",
+      "payload": {
+        "status": "success",
+        "tool_call_id": "tool-call-1",
+        "tool_id": "tool:e2e_native_phase_20260710_180924:native_phase_step_one",
+        "tool_name": "native_phase_step_one"
+      },
+      "phase": "running",
+      "seq": 4
+    },
+    {
+      "event_type": "text.delta",
+      "payload": {
+        "block_id": "rt_7fe13f44-63c1-48d0-ae43-ac427d5b1a6d_x0H5FtpVzA8:leader:model-call-2:model-commentary",
+        "block_kind": "assistant_note",
+        "delta": "I will now call step two using the secret token returned by step one.",
+        "delta_index": 0,
+        "model_call_id": "model-call-2",
+        "response_phase": "commentary",
+        "source": "model",
+        "text": "I will now call step two using the secret token returned by step one."
+      },
+      "phase": "running",
+      "seq": 5
+    },
+    {
+      "event_type": "tool.requested",
+      "payload": {
+        "arguments": {
+          "token": "[REDACTED_SECRET_TOKEN]"
+        },
+        "tool_call_id": "tool-call-2",
+        "tool_id": "tool:e2e_native_phase_20260710_180924:native_phase_step_two",
+        "tool_name": "native_phase_step_two"
+      },
+      "phase": "running",
+      "seq": 6
+    },
+    {
+      "event_type": "tool.completed",
+      "payload": {
+        "status": "success",
+        "tool_call_id": "tool-call-2",
+        "tool_id": "tool:e2e_native_phase_20260710_180924:native_phase_step_two",
+        "tool_name": "native_phase_step_two"
+      },
+      "phase": "running",
+      "seq": 7
+    },
+    {
+      "event_type": "final.started",
+      "payload": {
+        "runtime_session_id": "rt_7fe13f44-63c1-48d0-ae43-ac427d5b1a6d_x0H5FtpVzA8"
+      },
+      "phase": "finalizing",
+      "seq": 8
+    },
+    {
+      "event_type": "final.delta",
+      "payload": {
+        "delta": "The native phase E2E marker is NATIVE-PHASE-20260710-180924-26a35497. Step 1 was completed successfully",
+        "delta_index": 0,
+        "final_stream_id": "answer",
+        "runtime_session_id": "rt_7fe13f44-63c1-48d0-ae43-ac427d5b1a6d_x0H5FtpVzA8",
+        "text": "The native phase E2E marker is NATIVE-PHASE-20260710-180924-26a35497. Step 1 was completed successfully"
+      },
+      "phase": "finalizing",
+      "seq": 9
+    },
+    {
+      "event_type": "final.delta",
+      "payload": {
+        "delta": " by calling `native_phase_step_one` with the exact marker. Step 2 was completed successfully only",
+        "delta_index": 1,
+        "final_stream_id": "answer",
+        "runtime_session_id": "rt_7fe13f44-63c1-48d0-ae43-ac427d5b1a6d_x0H5FtpVzA8",
+        "text": "The native phase E2E marker is NATIVE-PHASE-20260710-180924-26a35497. Step 1 was completed successfully by calling `native_phase_step_one` with the exact marker. Step 2 was completed successfully only"
+      },
+      "phase": "finalizing",
+      "seq": 10
+    },
+    {
+      "event_type": "final.delta",
+      "payload": {
+        "delta": " after reading the token returned from Step 1. The secret token was not guessed or reused before",
+        "delta_index": 2,
+        "final_stream_id": "answer",
+        "runtime_session_id": "rt_7fe13f44-63c1-48d0-ae43-ac427d5b1a6d_x0H5FtpVzA8",
+        "text": "The native phase E2E marker is NATIVE-PHASE-20260710-180924-26a35497. Step 1 was completed successfully by calling `native_phase_step_one` with the exact marker. Step 2 was completed successfully only after reading the token returned from Step 1. The secret token was not guessed or reused before"
+      },
+      "phase": "finalizing",
+      "seq": 11
+    },
+    {
+      "event_type": "final.delta",
+      "payload": {
+        "delta": " Step 1 returned. Both numbered steps succeeded in the required order.",
+        "delta_index": 3,
+        "final_stream_id": "answer",
+        "runtime_session_id": "rt_7fe13f44-63c1-48d0-ae43-ac427d5b1a6d_x0H5FtpVzA8",
+        "text": "The native phase E2E marker is NATIVE-PHASE-20260710-180924-26a35497. Step 1 was completed successfully by calling `native_phase_step_one` with the exact marker. Step 2 was completed successfully only after reading the token returned from Step 1. The secret token was not guessed or reused before Step 1 returned. Both numbered steps succeeded in the required order."
+      },
+      "phase": "finalizing",
+      "seq": 12
+    },
+    {
+      "event_type": "run.completed",
+      "payload": {
+        "runtime_session_id": "rt_7fe13f44-63c1-48d0-ae43-ac427d5b1a6d_x0H5FtpVzA8"
+      },
+      "phase": "completed",
+      "seq": 13
+    }
+  ],
+  "elapsed_seconds": 31.767,
+  "event_validation": {
+    "commentary_model_call_ids": [
+      "model-call-1",
+      "model-call-2"
+    ],
+    "commentary_text": [
+      "I will start by calling step one with the exact marker.",
+      "I will now call step two using the secret token returned by step one."
+    ],
+    "event_labels": [
+      "run.running",
+      "text.delta:assistant_note:model-call-1",
+      "tool.requested",
+      "tool.completed",
+      "text.delta:assistant_note:model-call-2",
+      "tool.requested",
+      "tool.completed",
+      "final.started",
+      "final.delta",
+      "final.delta",
+      "final.delta",
+      "final.delta",
+      "run.completed"
+    ],
+    "final_delta_count": 4,
+    "final_delta_indices": [
+      0,
+      1,
+      2,
+      3
+    ],
+    "final_text": "The native phase E2E marker is NATIVE-PHASE-20260710-180924-26a35497. Step 1 was completed successfully by calling `native_phase_step_one` with the exact marker. Step 2 was completed successfully only after reading the token returned from Step 1. The secret token was not guessed or reused before Step 1 returned. Both numbered steps succeeded in the required order."
+  },
+  "events": [
+    {
+      "created_at": 1783678170977024292,
+      "event_type": "run.running",
+      "participant_id": "leader",
+      "payload": {
+        "runtime_session_id": "rt_7fe13f44-63c1-48d0-ae43-ac427d5b1a6d_x0H5FtpVzA8"
+      },
+      "phase": "running",
+      "run_id": "7fe13f44-63c1-48d0-ae43-ac427d5b1a6d",
+      "seq": 1,
+      "summary": "Agent runtime accepted run."
+    },
+    {
+      "created_at": 1783678176232533898,
+      "event_type": "text.delta",
+      "participant_id": "leader",
+      "payload": {
+        "block_id": "rt_7fe13f44-63c1-48d0-ae43-ac427d5b1a6d_x0H5FtpVzA8:leader:model-call-1:model-commentary",
+        "block_kind": "assistant_note",
+        "delta": "I will start by calling step one with the exact marker.",
+        "delta_index": 0,
+        "model_call_id": "model-call-1",
+        "response_phase": "commentary",
+        "source": "model",
+        "text": "I will start by calling step one with the exact marker."
+      },
+      "phase": "running",
+      "run_id": "7fe13f44-63c1-48d0-ae43-ac427d5b1a6d",
+      "seq": 2,
+      "summary": null
+    },
+    {
+      "created_at": 1783678176506417283,
+      "event_type": "tool.requested",
+      "participant_id": "leader",
+      "payload": {
+        "arguments": {
+          "marker": "NATIVE-PHASE-20260710-180924-26a35497"
+        },
+        "tool_call_id": "tool-call-1",
+        "tool_id": "tool:e2e_native_phase_20260710_180924:native_phase_step_one",
+        "tool_name": "native_phase_step_one"
+      },
+      "phase": "running",
+      "run_id": "7fe13f44-63c1-48d0-ae43-ac427d5b1a6d",
+      "seq": 3,
+      "summary": "Start the native phase ordering fixture and return a secret continuation token.\n\n        "
+    },
+    {
+      "created_at": 1783678177057522789,
+      "event_type": "tool.completed",
+      "participant_id": "leader",
+      "payload": {
+        "status": "success",
+        "tool_call_id": "tool-call-1",
+        "tool_id": "tool:e2e_native_phase_20260710_180924:native_phase_step_one",
+        "tool_name": "native_phase_step_one"
+      },
+      "phase": "running",
+      "run_id": "7fe13f44-63c1-48d0-ae43-ac427d5b1a6d",
+      "seq": 4,
+      "summary": "Native phase step one completed."
+    },
+    {
+      "created_at": 1783678183400539175,
+      "event_type": "text.delta",
+      "participant_id": "leader",
+      "payload": {
+        "block_id": "rt_7fe13f44-63c1-48d0-ae43-ac427d5b1a6d_x0H5FtpVzA8:leader:model-call-2:model-commentary",
+        "block_kind": "assistant_note",
+        "delta": "I will now call step two using the secret token returned by step one.",
+        "delta_index": 0,
+        "model_call_id": "model-call-2",
+        "response_phase": "commentary",
+        "source": "model",
+        "text": "I will now call step two using the secret token returned by step one."
+      },
+      "phase": "running",
+      "run_id": "7fe13f44-63c1-48d0-ae43-ac427d5b1a6d",
+      "seq": 5,
+      "summary": null
+    },
+    {
+      "created_at": 1783678183773385562,
+      "event_type": "tool.requested",
+      "participant_id": "leader",
+      "payload": {
+        "arguments": {
+          "token": "[REDACTED_SECRET_TOKEN]"
+        },
+        "tool_call_id": "tool-call-2",
+        "tool_id": "tool:e2e_native_phase_20260710_180924:native_phase_step_two",
+        "tool_name": "native_phase_step_two"
+      },
+      "phase": "running",
+      "run_id": "7fe13f44-63c1-48d0-ae43-ac427d5b1a6d",
+      "seq": 6,
+      "summary": "Complete the native phase ordering fixture with the token returned by step one.\n\n        "
+    },
+    {
+      "created_at": 1783678184340205780,
+      "event_type": "tool.completed",
+      "participant_id": "leader",
+      "payload": {
+        "status": "success",
+        "tool_call_id": "tool-call-2",
+        "tool_id": "tool:e2e_native_phase_20260710_180924:native_phase_step_two",
+        "tool_name": "native_phase_step_two"
+      },
+      "phase": "running",
+      "run_id": "7fe13f44-63c1-48d0-ae43-ac427d5b1a6d",
+      "seq": 7,
+      "summary": "Native phase step two completed."
+    },
+    {
+      "created_at": 1783678191898661913,
+      "event_type": "final.started",
+      "participant_id": "leader",
+      "payload": {
+        "runtime_session_id": "rt_7fe13f44-63c1-48d0-ae43-ac427d5b1a6d_x0H5FtpVzA8"
+      },
+      "phase": "finalizing",
+      "run_id": "7fe13f44-63c1-48d0-ae43-ac427d5b1a6d",
+      "seq": 8,
+      "summary": "Final answer phase started."
+    },
+    {
+      "created_at": 1783678192171851863,
+      "event_type": "final.delta",
+      "participant_id": "leader",
+      "payload": {
+        "delta": "The native phase E2E marker is NATIVE-PHASE-20260710-180924-26a35497. Step 1 was completed successfully",
+        "delta_index": 0,
+        "final_stream_id": "answer",
+        "runtime_session_id": "rt_7fe13f44-63c1-48d0-ae43-ac427d5b1a6d_x0H5FtpVzA8",
+        "text": "The native phase E2E marker is NATIVE-PHASE-20260710-180924-26a35497. Step 1 was completed successfully"
+      },
+      "phase": "finalizing",
+      "run_id": "7fe13f44-63c1-48d0-ae43-ac427d5b1a6d",
+      "seq": 9,
+      "summary": null
+    },
+    {
+      "created_at": 1783678192431173118,
+      "event_type": "final.delta",
+      "participant_id": "leader",
+      "payload": {
+        "delta": " by calling `native_phase_step_one` with the exact marker. Step 2 was completed successfully only",
+        "delta_index": 1,
+        "final_stream_id": "answer",
+        "runtime_session_id": "rt_7fe13f44-63c1-48d0-ae43-ac427d5b1a6d_x0H5FtpVzA8",
+        "text": "The native phase E2E marker is NATIVE-PHASE-20260710-180924-26a35497. Step 1 was completed successfully by calling `native_phase_step_one` with the exact marker. Step 2 was completed successfully only"
+      },
+      "phase": "finalizing",
+      "run_id": "7fe13f44-63c1-48d0-ae43-ac427d5b1a6d",
+      "seq": 10,
+      "summary": null
+    },
+    {
+      "created_at": 1783678192828620292,
+      "event_type": "final.delta",
+      "participant_id": "leader",
+      "payload": {
+        "delta": " after reading the token returned from Step 1. The secret token was not guessed or reused before",
+        "delta_index": 2,
+        "final_stream_id": "answer",
+        "runtime_session_id": "rt_7fe13f44-63c1-48d0-ae43-ac427d5b1a6d_x0H5FtpVzA8",
+        "text": "The native phase E2E marker is NATIVE-PHASE-20260710-180924-26a35497. Step 1 was completed successfully by calling `native_phase_step_one` with the exact marker. Step 2 was completed successfully only after reading the token returned from Step 1. The secret token was not guessed or reused before"
+      },
+      "phase": "finalizing",
+      "run_id": "7fe13f44-63c1-48d0-ae43-ac427d5b1a6d",
+      "seq": 11,
+      "summary": null
+    },
+    {
+      "created_at": 1783678193081466358,
+      "event_type": "final.delta",
+      "participant_id": "leader",
+      "payload": {
+        "delta": " Step 1 returned. Both numbered steps succeeded in the required order.",
+        "delta_index": 3,
+        "final_stream_id": "answer",
+        "runtime_session_id": "rt_7fe13f44-63c1-48d0-ae43-ac427d5b1a6d_x0H5FtpVzA8",
+        "text": "The native phase E2E marker is NATIVE-PHASE-20260710-180924-26a35497. Step 1 was completed successfully by calling `native_phase_step_one` with the exact marker. Step 2 was completed successfully only after reading the token returned from Step 1. The secret token was not guessed or reused before Step 1 returned. Both numbered steps succeeded in the required order."
+      },
+      "phase": "finalizing",
+      "run_id": "7fe13f44-63c1-48d0-ae43-ac427d5b1a6d",
+      "seq": 12,
+      "summary": null
+    },
+    {
+      "created_at": 1783678193716478687,
+      "event_type": "run.completed",
+      "participant_id": "leader",
+      "payload": {
+        "runtime_session_id": "rt_7fe13f44-63c1-48d0-ae43-ac427d5b1a6d_x0H5FtpVzA8"
+      },
+      "phase": "completed",
+      "run_id": "7fe13f44-63c1-48d0-ae43-ac427d5b1a6d",
+      "seq": 13,
+      "summary": "Agent run completed."
+    }
+  ],
+  "isolated_webui_anchor_after": "open-webui:agentmode-v0102-79adbeface29-slim sha256:cb820a2a93c0778e5f707ff284b4af8414a115e2f751256a4d54df90e0a28076 healthy 0 2026-07-10T09:58:44.23556717Z",
+  "live_anchor_after": "open-webui:live-f8106c651-to-v0102-pr7-b3-7-onlyoffice-mergefix-slim-20260707013738 sha256:7ec820b71fa94205b273cb8cd00344a130e1921ae8e643ba6192b0e58933bd45 healthy 0 2026-07-07T03:53:51.178582025Z",
+  "marker": "NATIVE-PHASE-20260710-180924-26a35497",
+  "max_bifrost_detail_fetches": 3,
+  "model_id": "bifrostapi.Cliproxy/gpt-5.5",
+  "ok": true,
+  "run_id": "7fe13f44-63c1-48d0-ae43-ac427d5b1a6d",
+  "runtime_anchor_after": "open-webui-pr7-agentscope-runtime:79adbeface29-native-phase sha256:aa8cab6a3f697663245a7e1c1589d68d5d01c2be8eba24523a1271152286b701 healthy 0 2026-07-10T09:55:00.739764174Z",
+  "timestamp": "20260710-180924",
+  "tool_deleted": true,
+  "tool_id": "e2e_native_phase_20260710_180924",
+  "tool_specs": null
+}

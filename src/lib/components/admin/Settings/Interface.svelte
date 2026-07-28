@@ -1,5 +1,6 @@
 <script lang="ts">
 	import { getModels, getTaskConfig, updateTaskConfig } from '$lib/apis';
+	import { getChatConfig, updateChatConfig } from '$lib/apis/chats';
 	import { config, settings } from '$lib/stores';
 	import { createEventDispatcher, onMount, getContext } from 'svelte';
 	import { toast } from 'svelte-sonner';
@@ -25,6 +26,7 @@
 		IMAGE_PROMPT_GENERATION_PROMPT_TEMPLATE: '',
 		ENABLE_AUTOCOMPLETE_GENERATION: true,
 		AUTOCOMPLETE_GENERATION_INPUT_MAX_LENGTH: -1,
+		AUTOCOMPLETE_GENERATION_PROMPT_TEMPLATE: '',
 		TAGS_GENERATION_PROMPT_TEMPLATE: '',
 		ENABLE_TAGS_GENERATION: true,
 		ENABLE_SEARCH_QUERY_GENERATION: true,
@@ -35,8 +37,18 @@
 		VOICE_MODE_PROMPT_TEMPLATE: ''
 	};
 
+	let chatConfig = {
+		GLOBAL_SYSTEM_PROMPT: '',
+		ENABLE_CONTEXT_COMPACTION: false,
+		CONTEXT_COMPACTION_TOKEN_THRESHOLD: 80000,
+		CONTEXT_COMPACTION_PROMPT_TEMPLATE: ''
+	};
+
 	const updateInterfaceHandler = async () => {
-		taskConfig = await updateTaskConfig(localStorage.token, taskConfig);
+		[taskConfig, chatConfig] = await Promise.all([
+			updateTaskConfig(localStorage.token, taskConfig),
+			updateChatConfig(localStorage.token, chatConfig)
+		]);
 	};
 
 	let workspaceModels = null;
@@ -46,7 +58,10 @@
 
 	const init = async () => {
 		try {
-			taskConfig = await getTaskConfig(localStorage.token);
+			[taskConfig, chatConfig] = await Promise.all([
+				getTaskConfig(localStorage.token),
+				getChatConfig(localStorage.token)
+			]);
 
 			workspaceModels = await getBaseModels(localStorage.token);
 			baseModels = await getModels(localStorage.token, null, false);
@@ -83,7 +98,7 @@
 	});
 </script>
 
-{#if models !== null && taskConfig}
+{#if models !== null && taskConfig && chatConfig}
 	<form
 		class="flex flex-col h-full justify-between space-y-3 text-sm"
 		on:submit|preventDefault={() => {
@@ -92,6 +107,32 @@
 		}}
 	>
 		<div class="  overflow-y-scroll scrollbar-hidden h-full pr-1.5">
+			<div class="mb-5">
+				<div class="mt-0.5 mb-2.5 text-base font-medium">
+					{$i18n.t('Model Instructions')}
+				</div>
+
+				<hr class="border-gray-100/30 dark:border-gray-850/30 my-2" />
+
+				<div class="mb-1 text-xs font-medium">{$i18n.t('Global System Prompt')}</div>
+				<p class="mb-2 max-w-[72ch] text-xs leading-5 text-gray-500 dark:text-gray-400">
+					{$i18n.t(
+						'Prepended to system instructions for every ordinary chat and Agent Mode run. Model-specific prompts are applied afterward.'
+					)}
+				</p>
+				<Textarea
+					bind:value={chatConfig.GLOBAL_SYSTEM_PROMPT}
+					rows={6}
+					ariaLabel={$i18n.t('Global System Prompt')}
+					placeholder={$i18n.t('Enter administrator instructions applied to all chat models')}
+				/>
+				<p class="mt-1.5 max-w-[72ch] text-xs leading-5 text-gray-500 dark:text-gray-400">
+					{$i18n.t(
+						'This guides model behavior and does not replace backend permissions or tool access controls.'
+					)}
+				</p>
+			</div>
+
 			<div class="mb-3.5">
 				<div class=" mt-0.5 mb-2.5 text-base font-medium">{$i18n.t('Tasks')}</div>
 
@@ -208,6 +249,63 @@
 						</select>
 					</div>
 				</div>
+
+				<hr class=" border-gray-100/30 dark:border-gray-850/30 my-3" />
+
+				<div class="mb-2.5 flex w-full items-center justify-between">
+					<div class=" self-center text-xs font-medium">
+						{$i18n.t('Context Compaction')}
+					</div>
+
+					<Switch bind:state={chatConfig.ENABLE_CONTEXT_COMPACTION} />
+				</div>
+
+				{#if chatConfig.ENABLE_CONTEXT_COMPACTION}
+					<div class="mb-2.5">
+						<div class=" mb-1 text-xs font-medium">{$i18n.t('Token Threshold')}</div>
+
+						<Tooltip
+							content={$i18n.t(
+								'Older messages are summarized when estimated context exceeds this token limit.'
+							)}
+							placement="top-start"
+						>
+							<input
+								type="number"
+								min="1"
+								step="1"
+								class="w-full rounded-lg py-2 px-4 text-sm bg-gray-50 dark:text-gray-300 dark:bg-gray-850 outline-hidden"
+								bind:value={chatConfig.CONTEXT_COMPACTION_TOKEN_THRESHOLD}
+							/>
+						</Tooltip>
+					</div>
+
+					<div class="mb-2.5">
+						<div class=" mb-1 text-xs font-medium">{$i18n.t('Context Compaction Prompt')}</div>
+
+						<Tooltip
+							content={$i18n.t('Leave empty to use the default prompt, or enter a custom prompt')}
+							placement="top-start"
+						>
+							<Textarea
+								bind:value={chatConfig.CONTEXT_COMPACTION_PROMPT_TEMPLATE}
+								placeholder={$i18n.t(
+									'Leave empty to use the default prompt, or enter a custom prompt'
+								)}
+							/>
+						</Tooltip>
+						<div class="mt-1 text-xs text-gray-500 dark:text-gray-400">
+							{$i18n.t('Available variables')}:
+							<code>{'{{PREVIOUS_SUMMARY}}'}</code>,
+							<code>{'{{COMPACTED_MESSAGES}}'}</code>,
+							<code>{'{{RECENT_MESSAGES}}'}</code>,
+							<code>{'{{MESSAGES}}'}</code>,
+							<code>{'{{CURRENT_DATE}}'}</code>
+						</div>
+					</div>
+				{/if}
+
+				<hr class=" border-gray-100/30 dark:border-gray-850/30 my-3" />
 
 				<div class="mb-2.5 flex w-full items-center justify-between">
 					<div class=" self-center text-xs font-medium">
@@ -369,6 +467,21 @@
 								class="w-full outline-hidden bg-transparent"
 								bind:value={taskConfig.AUTOCOMPLETE_GENERATION_INPUT_MAX_LENGTH}
 								placeholder={$i18n.t('-1 for no limit, or a positive integer for a specific limit')}
+							/>
+						</Tooltip>
+					</div>
+					<div class="mb-2.5">
+						<div class=" mb-1 text-xs font-medium">{$i18n.t('Autocomplete Generation Prompt')}</div>
+
+						<Tooltip
+							content={$i18n.t('Leave empty to use the default prompt, or enter a custom prompt')}
+							placement="top-start"
+						>
+							<Textarea
+								bind:value={taskConfig.AUTOCOMPLETE_GENERATION_PROMPT_TEMPLATE}
+								placeholder={$i18n.t(
+									'Leave empty to use the default prompt, or enter a custom prompt'
+								)}
 							/>
 						</Tooltip>
 					</div>

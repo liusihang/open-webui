@@ -1,5 +1,6 @@
 import json
 import logging
+from functools import wraps
 from typing import Any, Dict, List, Optional, Tuple
 
 from open_webui.config import (
@@ -24,7 +25,7 @@ from open_webui.retrieval.vector.main import (
     VectorDBBase,
     VectorItem,
 )
-from open_webui.retrieval.vector.utils import process_metadata
+from open_webui.retrieval.vector.utils import merge_hybrid_search_results, process_metadata
 from open_webui.utils.misc import sanitize_text_for_db
 from pgvector.sqlalchemy import HALFVEC, Vector
 from sqlalchemy import (
@@ -44,7 +45,7 @@ from sqlalchemy import (
     values,
 )
 from sqlalchemy.dialects.postgresql import JSONB, array
-from sqlalchemy.exc import NoSuchTableError
+from sqlalchemy.exc import NoSuchTableError, OperationalError
 from sqlalchemy.ext.mutable import MutableDict
 from sqlalchemy.orm import declarative_base, scoped_session, sessionmaker
 from sqlalchemy.pool import NullPool, QueuePool
@@ -58,6 +59,35 @@ VECTOR_OPCLASS = 'halfvec_cosine_ops' if USE_HALFVEC else 'vector_cosine_ops'
 Base = declarative_base()
 
 log = logging.getLogger(__name__)
+
+
+def _retry_invalidated_read(default):
+    def decorator(operation):
+        @wraps(operation)
+        def wrapped(self, *args, **kwargs):
+            for attempt in range(2):
+                try:
+                    return operation(self, *args, **kwargs)
+                except OperationalError as e:
+                    try:
+                        self.session.rollback()
+                    except Exception:
+                        if not e.connection_invalidated:
+                            raise
+                    if attempt == 0 and e.connection_invalidated:
+                        self.session.remove()
+                        log.warning(
+                            'Invalidated database connection during %s; retrying once',
+                            operation.__name__,
+                        )
+                        continue
+                    log.exception('Error during %s: %s', operation.__name__, e)
+                    return default
+            return default
+
+        return wrapped
+
+    return decorator
 
 
 def pgcrypto_encrypt(val, key):
@@ -153,6 +183,7 @@ class PgvectorClient(VectorDBBase):
 
             index_method, index_options = self._vector_index_configuration()
             self._ensure_vector_index(index_method, index_options)
+            self._ensure_text_search_index()
 
             self.session.execute(
                 text(
@@ -235,6 +266,19 @@ class PgvectorClient(VectorDBBase):
                 index_method,
                 f' {index_options}' if index_options else '',
             )
+
+    def _ensure_text_search_index(self) -> None:
+        if PGVECTOR_PGCRYPTO:
+            return
+
+        self.session.execute(
+            text("""
+                CREATE INDEX IF NOT EXISTS idx_document_chunk_text_search
+                ON document_chunk
+                USING GIN (to_tsvector('simple', coalesce(text, '')));
+                """)
+        )
+        log.info("Ensured text search index 'idx_document_chunk_text_search'.")
 
     def check_vector_length(self) -> None:
         """
@@ -393,6 +437,7 @@ class PgvectorClient(VectorDBBase):
             log.exception(f'Error during upsert: {e}')
             raise
 
+    @_retry_invalidated_read(default=None)
     def search(
         self,
         collection_name: str,
@@ -491,6 +536,15 @@ class PgvectorClient(VectorDBBase):
 
             result_proxy = self.session.execute(stmt)
             results = result_proxy.all()
+            if self._should_retry_exact_scan(results, limit, num_queries):
+                try:
+                    self.session.execute(text('SET LOCAL enable_indexscan = off'))
+                    exact_result_proxy = self.session.execute(stmt)
+                    exact_results = exact_result_proxy.all()
+                    if len(exact_results) > len(results):
+                        results = exact_results
+                except Exception as exact_exc:
+                    log.warning('Exact pgvector fallback failed; returning ANN results: %s', exact_exc)
 
             ids = [[] for _ in range(num_queries)]
             distances = [[] for _ in range(num_queries)]
@@ -498,6 +552,7 @@ class PgvectorClient(VectorDBBase):
             metadatas = [[] for _ in range(num_queries)]
 
             if not results:
+                self.session.rollback()  # read-only transaction
                 return SearchResult(
                     ids=ids,
                     distances=distances,
@@ -516,11 +571,86 @@ class PgvectorClient(VectorDBBase):
 
             self.session.rollback()  # read-only transaction
             return SearchResult(ids=ids, distances=distances, documents=documents, metadatas=metadatas)
+        except OperationalError:
+            raise
         except Exception as e:
             self.session.rollback()
             log.exception(f'Error during search: {e}')
             return None
 
+    @staticmethod
+    def _should_retry_exact_scan(results: list[Any], limit: int | None, num_queries: int) -> bool:
+        return limit is not None and limit > 0 and len(results) < limit * max(1, num_queries)
+
+    @_retry_invalidated_read(default=None)
+    def hybrid_search(
+        self,
+        collection_name: str,
+        query: str,
+        vectors: List[List[float]],
+        filter: Optional[Dict[str, Any]] = None,
+        limit: int = 10,
+        hybrid_bm25_weight: float = 0.5,
+    ) -> Optional[SearchResult]:
+        if PGVECTOR_PGCRYPTO or filter:
+            return None
+
+        try:
+            limit = max(1, limit)
+            vectors = [self.adjust_vector_length(vector) for vector in vectors] if vectors else []
+            num_queries = len(vectors) if vectors else 1
+            bm25_weight = min(max(hybrid_bm25_weight, 0.0), 1.0)
+            vector_weight = 1.0 - bm25_weight
+
+            vector_result = None
+            if vector_weight > 0 and vectors:
+                vector_result = self.search(collection_name=collection_name, vectors=vectors, limit=limit)
+
+            fts_results = []
+            if bm25_weight > 0 and query and query.strip():
+                fts_rows = self.session.execute(
+                    text("""
+                        WITH fts_query AS (
+                            SELECT plainto_tsquery('simple', :query) AS query
+                        )
+                        SELECT
+                            document_chunk.id AS id,
+                            document_chunk.text AS text,
+                            document_chunk.vmetadata AS vmetadata,
+                            ts_rank_cd(
+                                to_tsvector('simple', coalesce(document_chunk.text, '')),
+                                fts_query.query
+                            ) AS rank
+                        FROM document_chunk, fts_query
+                        WHERE document_chunk.collection_name = :collection_name
+                          AND to_tsvector('simple', coalesce(document_chunk.text, '')) @@ fts_query.query
+                        ORDER BY rank DESC
+                        LIMIT :limit
+                    """),
+                    {
+                        'collection_name': collection_name,
+                        'query': query,
+                        'limit': limit,
+                    },
+                )
+                fts_results = [dict(row) for row in fts_rows.mappings().all()]
+                self.session.rollback()
+
+            return merge_hybrid_search_results(
+                vector_result=vector_result,
+                fts_results=fts_results,
+                num_queries=num_queries,
+                limit=limit,
+                hybrid_bm25_weight=hybrid_bm25_weight,
+            )
+        except OperationalError:
+            raise
+        except Exception as e:
+            self.session.rollback()
+            log.exception(f'Error during hybrid search: {e}')
+            return None
+
+    @_retry_invalidated_read(default=None)
     def query(self, collection_name: str, filter: Dict[str, Any], limit: Optional[int] = None) -> Optional[GetResult]:
         try:
             if PGVECTOR_PGCRYPTO:
@@ -552,6 +682,7 @@ class PgvectorClient(VectorDBBase):
                 results = query.all()
 
             if not results:
+                self.session.rollback()  # read-only transaction
                 return None
 
             ids = [[result.id for result in results]]
@@ -564,11 +695,14 @@ class PgvectorClient(VectorDBBase):
                 documents=documents,
                 metadatas=metadatas,
             )
+        except OperationalError:
+            raise
         except Exception as e:
             self.session.rollback()
             log.exception(f'Error during query: {e}')
             return None
 
+    @_retry_invalidated_read(default=None)
     def get(self, collection_name: str, limit: Optional[int] = None) -> Optional[GetResult]:
         try:
             if PGVECTOR_PGCRYPTO:
@@ -591,6 +725,7 @@ class PgvectorClient(VectorDBBase):
                 results = query.all()
 
                 if not results:
+                    self.session.rollback()
                     return None
 
                 ids = [[result.id for result in results]]
@@ -599,6 +734,8 @@ class PgvectorClient(VectorDBBase):
 
             self.session.rollback()  # read-only transaction
             return GetResult(ids=ids, documents=documents, metadatas=metadatas)
+        except OperationalError:
+            raise
         except Exception as e:
             self.session.rollback()
             log.exception(f'Error during get: {e}')
@@ -652,6 +789,7 @@ class PgvectorClient(VectorDBBase):
     def close(self) -> None:
         pass
 
+    @_retry_invalidated_read(default=False)
     def has_collection(self, collection_name: str) -> bool:
         try:
             exists = (
@@ -660,6 +798,8 @@ class PgvectorClient(VectorDBBase):
             )
             self.session.rollback()  # read-only transaction
             return exists
+        except OperationalError:
+            raise
         except Exception as e:
             self.session.rollback()
             log.exception(f'Error checking collection existence: {e}')

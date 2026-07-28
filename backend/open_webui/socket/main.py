@@ -38,7 +38,8 @@ from open_webui.models.users import UserNameResponse, Users
 from open_webui.socket.utils import RedisDict, RedisLock, YdocManager
 from open_webui.tasks import create_task, stop_item_tasks
 from open_webui.utils.access_control import has_permission
-from open_webui.utils.auth import decode_token
+from open_webui.utils.auth import decode_token, is_valid_token
+from open_webui.utils.redaction import redact_secrets
 from open_webui.utils.redis import (
     build_sentinel_url,
     get_redis_connection,
@@ -94,6 +95,10 @@ else:
 # Timeout duration in seconds
 TIMEOUT_DURATION = 3
 SESSION_POOL_TIMEOUT = 120  # seconds without heartbeat before session is reaped
+SESSION_CLEANUP_LOCK_RENEW_INTERVAL = min(
+    SESSION_POOL_TIMEOUT,
+    max(1, WEBSOCKET_REDIS_LOCK_TIMEOUT // 2),
+)
 
 # Dictionary to maintain the user pool
 
@@ -182,7 +187,7 @@ async def periodic_session_pool_cleanup():
                 if entry and now - entry.get('last_seen_at', 0) > SESSION_POOL_TIMEOUT:
                     log.warning(f'Reaping orphaned session {sid} (user {entry.get("id")})')
                     del SESSION_POOL[sid]
-            await asyncio.sleep(SESSION_POOL_TIMEOUT)
+            await asyncio.sleep(SESSION_CLEANUP_LOCK_RENEW_INTERVAL)
     finally:
         session_release_func()
 
@@ -342,9 +347,12 @@ async def usage(sid, data):
 async def connect(sid, environ, auth):
     user = None
     if auth and 'token' in auth:
+        scope = (environ or {}).get('asgi.scope') or {}
+        fastapi_app = scope.get('app')
+        redis = getattr(getattr(fastapi_app, 'state', None), 'redis', None) or REDIS
         data = decode_token(auth['token'])
 
-        if data is not None and 'id' in data:
+        if data is not None and 'id' in data and await is_valid_token(data, redis):
             user = await Users.get_user_by_id(data['id'])
 
         if user:
@@ -369,8 +377,12 @@ async def user_join(sid, data):
     if not auth or 'token' not in auth:
         return
 
+    environ = sio.get_environ(sid) or {}
+    scope = environ.get('asgi.scope') or {}
+    fastapi_app = scope.get('app')
+    redis = getattr(getattr(fastapi_app, 'state', None), 'redis', None) or REDIS
     token_data = decode_token(auth['token'])
-    if token_data is None or 'id' not in token_data:
+    if token_data is None or 'id' not in token_data or not await is_valid_token(token_data, redis):
         return
 
     user = await Users.get_user_by_id(token_data['id'])
@@ -416,8 +428,12 @@ async def join_channel(sid, data):
     if not auth or 'token' not in auth:
         return
 
+    environ = sio.get_environ(sid) or {}
+    scope = environ.get('asgi.scope') or {}
+    fastapi_app = scope.get('app')
+    redis = getattr(getattr(fastapi_app, 'state', None), 'redis', None) or REDIS
     data = decode_token(auth['token'])
-    if data is None or 'id' not in data:
+    if data is None or 'id' not in data or not await is_valid_token(data, redis):
         return
 
     user = await Users.get_user_by_id(data['id'])
@@ -438,8 +454,12 @@ async def join_note(sid, data):
     if not auth or 'token' not in auth:
         return
 
+    environ = sio.get_environ(sid) or {}
+    scope = environ.get('asgi.scope') or {}
+    fastapi_app = scope.get('app')
+    redis = getattr(getattr(fastapi_app, 'state', None), 'redis', None) or REDIS
     token_data = decode_token(auth['token'])
-    if token_data is None or 'id' not in token_data:
+    if token_data is None or 'id' not in token_data or not await is_valid_token(token_data, redis):
         return
 
     user = await Users.get_user_by_id(token_data['id'])
@@ -757,11 +777,13 @@ async def yjs_document_update(sid, data):
 @sio.on('ydoc:document:leave')
 async def yjs_document_leave(sid, data):
     """Handle user leaving a document"""
+    user = SESSION_POOL.get(sid)
+    if not user:  # authenticated session required (parity with sibling handlers)
+        return
     try:
         document_id = normalize_document_id(data['document_id'])
-        user_id = data.get('user_id', sid)
 
-        log.info(f'User {user_id} leaving document {document_id}')
+        log.info(f'User {user["id"]} leaving document {document_id}')
 
         # Remove user from the document
         await YDOC_MANAGER.remove_user(document_id=document_id, user_id=sid)
@@ -769,10 +791,10 @@ async def yjs_document_leave(sid, data):
         # Leave Socket.IO room
         await sio.leave_room(sid, f'doc_{document_id}')
 
-        # Notify other users
+        # Notify other users; user_id is the authenticated identity, not client-supplied
         await sio.emit(
             'ydoc:user:left',
-            {'document_id': document_id, 'user_id': user_id},
+            {'document_id': document_id, 'user_id': user['id']},
             room=f'doc_{document_id}',
         )
 
@@ -787,16 +809,21 @@ async def yjs_document_leave(sid, data):
 @sio.on('ydoc:awareness:update')
 async def yjs_awareness_update(sid, data):
     """Handle awareness updates (cursors, selections, etc.)"""
+    user = SESSION_POOL.get(sid)
+    if not user:  # authenticated session required (parity with sibling handlers)
+        return
     try:
-        document_id = data['document_id']
-        user_id = data.get('user_id', sid)
+        document_id = normalize_document_id(data['document_id'])
+        room = f'doc_{document_id}'
+        if room not in sio.rooms(sid):  # must have joined the document first
+            return
         update = data['update']
 
-        # Broadcast awareness update to all other users in the document
+        # Broadcast to the room; user_id is the authenticated identity, not client-supplied
         await sio.emit(
             'ydoc:awareness:update',
-            {'document_id': document_id, 'user_id': user_id, 'update': update},
-            room=f'doc_{document_id}',
+            {'document_id': document_id, 'user_id': user['id'], 'update': update},
+            room=room,
             skip_sid=sid,
         )
 
@@ -826,7 +853,7 @@ async def disconnect(sid, reason=None):
         # print(f"Unknown session ID {sid} disconnected")
 
 
-async def _make_channel_emitter(request_info):
+async def _make_channel_emitter(request_info, *, redaction_secrets=()):
     """Event emitter that routes pipeline output to a channel message.
 
     Translates chat:completion events into channel message:update socket
@@ -841,11 +868,14 @@ async def _make_channel_emitter(request_info):
     async def _emit_channel_update(content: str, done: bool = False):
         from open_webui.models.messages import MessageForm, Messages
 
+        msg = await Messages.get_message_by_id(message_id)
+        if not msg or msg.channel_id != channel_id:
+            return
+
         update_form = MessageForm(content=content)
         if done:
             # Merge done flag into existing meta (preserve model_id etc.)
-            msg = await Messages.get_message_by_id(message_id)
-            existing_meta = (msg.meta or {}) if msg else {}
+            existing_meta = msg.meta or {}
             update_form = MessageForm(
                 content=content,
                 meta={**existing_meta, 'done': True},
@@ -868,6 +898,7 @@ async def _make_channel_emitter(request_info):
             )
 
     async def __channel_emitter__(event_data):
+        event_data = redact_secrets(event_data, redaction_secrets)
         event_type = event_data.get('type')
 
         if event_type == 'chat:completion':
@@ -891,12 +922,13 @@ async def _make_channel_emitter(request_info):
     return __channel_emitter__
 
 
-async def get_event_emitter(request_info, update_db=True):
+async def get_event_emitter(request_info, update_db=True, *, redaction_secrets=()):
     # Channel mode: route pipeline output to channel message updates
     if (request_info.get('chat_id') or '').startswith('channel:'):
-        return await _make_channel_emitter(request_info)
+        return await _make_channel_emitter(request_info, redaction_secrets=redaction_secrets)
 
     async def __event_emitter__(event_data):
+        event_data = redact_secrets(event_data, redaction_secrets)
         user_id = request_info['user_id']
         chat_id = request_info['chat_id']
         message_id = request_info['message_id']
@@ -1020,13 +1052,15 @@ async def get_event_emitter(request_info, update_db=True):
         return None
 
 
-async def get_event_call(request_info):
+async def get_event_call(request_info, *, redaction_secrets=()):
     async def __event_caller__(event_data):
+        event_data = redact_secrets(event_data, redaction_secrets)
         session_id = request_info['session_id']
 
-        # Fast-fail if the client has disconnected.
-        if session_id not in SESSION_POOL:
-            log.warning(f'Event caller: session {session_id} no longer connected')
+        # session_id is client-supplied; only the requesting user's own live session may be targeted.
+        session = SESSION_POOL.get(session_id)
+        if session is None or session.get('id') != request_info.get('user_id'):
+            log.warning(f'Event caller: session {session_id} not owned by requesting user or disconnected')
             return {'error': 'Client session disconnected.'}
 
         try:

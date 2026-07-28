@@ -1,0 +1,6 @@
+services:
+  open-webui-pr7:
+    image: open-webui:agentmode-v0102-f2ab0434d-overlay
+    pull_policy: never
+    environment:
+      UVICORN_WORKERS: "4"
