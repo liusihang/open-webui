@@ -150,7 +150,7 @@ async def test_openai_responses_route_composes_global_instructions(monkeypatch):
         status = 200
         headers = {'Content-Type': 'application/json'}
 
-        async def json(self):
+        async def json(self, loads=None):
             return {'ok': True}
 
         async def text(self):

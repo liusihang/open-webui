@@ -265,6 +265,12 @@ from open_webui.utils.chat import (
 from open_webui.utils.chat import (
     generate_chat_completion as chat_completion_handler,
 )
+from open_webui.utils.chat_id import (
+    get_temporary_chat_session_id,
+    is_saved_chat_id,
+    is_temporary_chat_id,
+)
+from open_webui.utils.chat_variables import normalize_chat_variables
 from open_webui.utils.cache_invalidation import (
     install_config_cache_invalidation_hooks,
     install_model_cache_invalidation_hooks,
@@ -281,6 +287,7 @@ from open_webui.utils.middleware import (
     process_chat_response,
 )
 from open_webui.utils.misc import get_content_from_message, remove_system_message
+from open_webui.utils.model_ids import strip_provider_model_prefix
 from open_webui.utils.models import (
     check_model_access,
     get_all_base_models,
@@ -307,7 +314,7 @@ from open_webui.utils.redaction import (
 from open_webui.utils.plugin import install_tool_and_function_dependencies
 from open_webui.utils.redis import get_redis_client
 from open_webui.utils.security_headers import SecurityHeadersMiddleware
-from open_webui.utils.session_pool import get_session
+from open_webui.utils.session_pool import cleanup_response, get_session, stream_wrapper
 from open_webui.utils import startup_singleton
 from open_webui.utils.tools import set_terminal_servers, set_tool_servers
 
@@ -2496,6 +2503,17 @@ def _remove_agent_tool_registry(request: Request, run_id: str) -> None:
         registries.pop(run_id, None)
 
 
+async def _set_direct_model(request: Request, model_item: dict, user) -> None:
+    model_meta = (model_item.get('info') or {}).get('meta') or {}
+    knowledge_items = model_meta.get('knowledge')
+    if knowledge_items:
+        from open_webui.utils.access_control.files import get_accessible_folder_files
+
+        model_meta['knowledge'] = await get_accessible_folder_files(knowledge_items, user)
+    request.state.direct = True
+    request.state.model = model_item
+
+
 @app.post('/api/chat/completions')
 @app.post('/api/v1/chat/completions')  # Experimental: Compatibility with OpenAI API
 async def chat_completion(
@@ -3531,34 +3549,6 @@ async def chat_completion(
                                 pass
             except Exception:
                 pass
-
-            try:
-                chat_id = metadata.get('chat_id')
-                if (
-                    chat_id
-                    and getattr(request.state, 'internal', False) is not True
-                    and not await has_active_tasks(request.app.state.redis, chat_id)
-                ):
-                    from open_webui.utils.subagents import process_pending_internal_messages
-
-                    await process_pending_internal_messages(
-                        request,
-                        chat_id,
-                        user.id,
-                        {
-                            'model_id': metadata.get('model_id') or form_data.get('model'),
-                            'session_id': metadata.get('session_id'),
-                            'tool_ids': metadata.get('tool_ids') or [],
-                            'skill_ids': metadata.get('skill_ids') or [],
-                            'system_prompt': metadata.get('system_prompt'),
-                            'filter_ids': metadata.get('filter_ids') or [],
-                            'terminal_id': metadata.get('terminal_id'),
-                            'features': metadata.get('features') or {},
-                            'variables': metadata.get('variables') or {},
-                        },
-                    )
-            except Exception:
-                log.exception('Failed to process pending internal messages for chat %s', metadata.get('chat_id'))
 
     # Fan out: one task per model
     if metadata.get('session_id') and metadata.get('chat_id'):

@@ -48,7 +48,7 @@ from open_webui.utils.payload import (
     apply_model_system_prompt_to_responses_body,
 )
 from open_webui.utils.redaction import redact_request_secrets
-from open_webui.utils.session_pool import cleanup_response, get_session, stream_wrapper
+from open_webui.utils.session_pool import cleanup_response, get_client_timeout, get_session, stream_wrapper
 from pydantic import BaseModel, ConfigDict, validator
 from sqlalchemy.ext.asyncio import AsyncSession
 

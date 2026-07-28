@@ -233,7 +233,14 @@ class ChatResponse(BaseModel):
 
     tasks: list | None = None
     summary: str | None = None
+    current_message_id: str | None = None
+    context_usage: dict | None = None
     mode_profile_revision_id: str | None = None
+
+    @field_validator('variables', mode='before')
+    @classmethod
+    def normalize_variables(cls, value):
+        return value if isinstance(value, dict) else {}
 
 
 class ChatTitleIdResponse(BaseModel):
@@ -434,6 +441,7 @@ class ChatTable:
         db: AsyncSession | None = None,
         *,
         mode_profile_revision_id: str | None = None,
+        internal_meta: dict | None = None,
         commit: bool = True,
     ) -> ChatModel | None:
         if not commit:
@@ -445,6 +453,7 @@ class ChatTable:
                 user_id=user_id,
                 form_data=form_data,
                 mode_profile_revision_id=mode_profile_revision_id,
+                internal_meta=internal_meta,
                 commit=False,
             )
 
@@ -455,6 +464,7 @@ class ChatTable:
                 user_id=user_id,
                 form_data=form_data,
                 mode_profile_revision_id=mode_profile_revision_id,
+                internal_meta=internal_meta,
                 commit=True,
             )
 
@@ -466,6 +476,7 @@ class ChatTable:
         user_id: str,
         form_data: ChatForm,
         mode_profile_revision_id: str | None,
+        internal_meta: dict | None,
         commit: bool,
     ) -> ChatModel | None:
         normalized_chat = normalize_new_conversation_chat(form_data.chat)
@@ -476,6 +487,9 @@ class ChatTable:
                 'title': self._clean_null_bytes(normalized_chat['title'] if 'title' in normalized_chat else 'New Chat'),
                 'chat': self._clean_null_bytes(normalized_chat),
                 'folder_id': form_data.folder_id,
+                'meta': internal_meta or {},
+                'variables': form_data.variables or {},
+                'current_message_id': self.get_current_message_id(normalized_chat),
                 'mode_profile_revision_id': mode_profile_revision_id,
                 'created_at': int(time.time()),
                 'updated_at': int(time.time()),
@@ -495,6 +509,50 @@ class ChatTable:
         if commit and result is not None:
             await self.dual_write_initial_messages(result)
         return result
+
+    async def get_internal_chat_ids_by_parent_id(self, parent_chat_id: str, user_id: str) -> list[str]:
+        async with get_async_db_context() as session:
+            result = await session.execute(
+                select(Chat.id).where(
+                    Chat.user_id == user_id,
+                    Chat.meta['internal'].as_boolean().is_(True),
+                    Chat.meta['parent_chat_id'].as_string() == parent_chat_id,
+                )
+            )
+            return list(result.scalars().all())
+
+    async def get_internal_chat_by_note_id(
+        self, note_id: str, user_id: str, db: AsyncSession | None = None
+    ) -> ChatModel | None:
+        async with get_async_db_context(db) as session:
+            result = await session.execute(
+                select(Chat)
+                .where(
+                    Chat.user_id == user_id,
+                    Chat.meta['internal'].as_boolean().is_(True),
+                    Chat.meta['type'].as_string() == 'note',
+                    Chat.meta['note_id'].as_string() == note_id,
+                )
+                .order_by(Chat.updated_at.desc(), Chat.created_at.desc())
+            )
+            chat = result.scalars().first()
+            return ChatModel.model_validate(chat) if chat else None
+
+    async def get_internal_chats_by_note_id(
+        self, note_id: str, user_id: str, db: AsyncSession | None = None
+    ) -> list[ChatModel]:
+        async with get_async_db_context(db) as session:
+            result = await session.execute(
+                select(Chat)
+                .where(
+                    Chat.user_id == user_id,
+                    Chat.meta['internal'].as_boolean().is_(True),
+                    Chat.meta['type'].as_string() == 'note',
+                    Chat.meta['note_id'].as_string() == note_id,
+                )
+                .order_by(Chat.updated_at.desc(), Chat.created_at.desc())
+            )
+            return [ChatModel.model_validate(chat) for chat in result.scalars().all()]
 
     async def dual_write_initial_messages(
         self,

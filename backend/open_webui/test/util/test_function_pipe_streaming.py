@@ -181,7 +181,13 @@ async def test_streaming_pipe_error_is_not_followed_by_success_terminators(
         get_test_function_module,
     )
 
-    request = SimpleNamespace(cookies=None)
+    request = SimpleNamespace(
+        cookies=None,
+        state=SimpleNamespace(
+            bypass_system_prompt=True,
+            bypass_global_system_prompt=True,
+        ),
+    )
     user = SimpleNamespace(id='test-user')
     response = await generate_function_chat_completion(
         request,

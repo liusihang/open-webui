@@ -37,7 +37,10 @@ from open_webui.models.users import UserNameResponse, Users
 from open_webui.socket.utils import RedisDict, RedisLock, YdocManager
 from open_webui.tasks import create_task, stop_item_tasks
 from open_webui.utils.access_control import has_permission
-from open_webui.utils.auth import decode_token, is_valid_token
+from open_webui.utils.auth import get_verified_user_by_token
+from open_webui.utils.chat_id import is_saved_chat_id
+from open_webui.utils.json_codec import SOCKETIO_JSON
+from open_webui.utils.misc import get_output_text
 from open_webui.utils.redaction import redact_secrets
 from open_webui.utils.redis import (
     build_sentinel_url,
@@ -190,15 +193,18 @@ async def periodic_session_pool_cleanup():
                     log.warning('Unable to renew session cleanup lock. Retrying cleanup ownership.')
                     break
 
-            now = int(time.time())
-            for sid in list(SESSION_POOL.keys()):
-                entry = SESSION_POOL.get(sid)
-                if entry and now - entry.get('last_seen_at', 0) > SESSION_POOL_TIMEOUT:
-                    log.warning(f'Reaping orphaned session {sid} (user {entry.get("id")})')
-                    del SESSION_POOL[sid]
-            await asyncio.sleep(SESSION_CLEANUP_LOCK_RENEW_INTERVAL)
-    finally:
-        session_release_func()
+                now = int(time.time())
+                for sid in list(SESSION_POOL.keys()):
+                    entry = SESSION_POOL.get(sid)
+                    if entry and now - entry.get('last_seen_at', 0) > SESSION_POOL_TIMEOUT:
+                        log.warning(f'Reaping orphaned session {sid} (user {entry.get("id")})')
+                        try:
+                            del SESSION_POOL[sid]
+                        except KeyError:
+                            pass
+                await asyncio.sleep(SESSION_CLEANUP_LOCK_RENEW_INTERVAL)
+        finally:
+            session_release_func()
 
 
 async def periodic_usage_pool_cleanup():

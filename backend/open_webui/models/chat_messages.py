@@ -272,6 +272,8 @@ class ChatMessageTable:
                 existing.sources = data.get('sources')
             if 'embeds' in data:
                 existing.embeds = data.get('embeds')
+            if 'meta' in data:
+                existing.meta = data.get('meta')
             if 'done' in data:
                 existing.done = data.get('done', True)
             if 'status_history' in data or 'statusHistory' in data:
@@ -304,6 +306,7 @@ class ChatMessageTable:
             files=data.get('files'),
             sources=data.get('sources'),
             embeds=data.get('embeds'),
+            meta=data.get('meta'),
             done=data.get('done', True),
             status_history=data.get('status_history') or data.get('statusHistory'),
             error=data.get('error'),
