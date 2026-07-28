@@ -123,3 +123,7 @@ The prepared smoke model is `gpt-5.5`; it passed isolated real inference but mus
 ## Cutover payload supersession — 2026-07-28
 
 The historical staged-default table above records the 2026-07-27 preparation state. Before the authorized cutover, latest-image acceptance proved that `web_search_and_crawl` is not reproducible because the immutable candidate lacks `crawl4ai`; the isolated database also lacked `get-available-resources`. The reviewed live payload is therefore superseded by the exact accepted defaults: Chat empty capabilities, Agent Terminal `terminals` plus tool `sub_agent`, no Skills, empty prompts, and inherited filter/feature defaults.
+
+The 2026-07-28 read-only live preflight also proved that formal live had no AgentScope runtime and that the six-line candidate override supplied no runtime URL/token. The controlled package was corrected before cutover to create a dedicated `openwebui-agentscope-runtime` on the formal network with an owner-only token env and persistent state. The isolated runtime remains isolated and is never reused by live.
+
+The first guarded runtime-prepare attempt then proved `/srv/openwebui-migration/data` is root-owned and not writable by the Docker-operator account. It stopped before token generation or container creation. The reviewed default state path was moved to owner-only persistent storage at `/home/aiserver/staging/pr7-live-prep-20260727/runtime-state`; no sudo, chmod, or chown was applied to `/srv`.

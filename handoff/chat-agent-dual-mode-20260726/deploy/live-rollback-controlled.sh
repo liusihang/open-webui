@@ -5,8 +5,12 @@ STACK_DIR=${STACK_DIR:-/srv/openwebui-migration}
 COMPOSE_FILE=${COMPOSE_FILE:-${STACK_DIR}/compose.yaml}
 RELEASE_DIR=${RELEASE_DIR:-/home/aiserver/staging/pr7-live-prep-20260727/release}
 MIGRATION_SCRIPT=${MIGRATION_SCRIPT:-${RELEASE_DIR}/live-migrate-controlled.sh}
+OVERRIDE_FILE=${OVERRIDE_FILE:-${RELEASE_DIR}/compose.live-pr7-dual-mode-1d8dba8a7.yaml}
+PROJECT_NAME=${PROJECT_NAME:-openwebui-migration}
+RUNTIME_ENV_FILE=${RUNTIME_ENV_FILE:-/home/aiserver/staging/pr7-live-prep-20260727/private/runtime.env}
 WEB_CONTAINER=${WEB_CONTAINER:-open-webui}
 DB_CONTAINER=${DB_CONTAINER:-openwebui-db}
+RUNTIME_CONTAINER=${RUNTIME_CONTAINER:-openwebui-agentscope-runtime}
 EXPECTED_COMPOSE_SHA256=${EXPECTED_COMPOSE_SHA256:-7fff73a9037687460bd6c27669e9224203241546928173106c9999d6b3425da1}
 EXPECTED_OLD_IMAGE_ID=${EXPECTED_OLD_IMAGE_ID:-sha256:7ec820b71fa94205b273cb8cd00344a130e1921ae8e643ba6192b0e58933bd45}
 SOURCE_REVISION=${SOURCE_REVISION:-f3a4b5c6d7e8}
@@ -38,6 +42,16 @@ database_revision() {
   docker exec -i "${DB_CONTAINER}" psql -X -v ON_ERROR_STOP=1 -U "${db_user}" -d "${db_name}" -At <<'SQL'
 SELECT version_num FROM alembic_version;
 SQL
+}
+
+compose_candidate() {
+  docker compose \
+    --project-name "${PROJECT_NAME}" \
+    --env-file "${STACK_DIR}/.env" \
+    --env-file "${RUNTIME_ENV_FILE}" \
+    -f "${COMPOSE_FILE}" \
+    -f "${OVERRIDE_FILE}" \
+    "$@"
 }
 
 current_revision=$(database_revision)
@@ -89,6 +103,19 @@ worker_pids=$(awk -v master_pid="${master_pid}" '$2 == master_pid && $0 !~ /reso
 worker_count=$(awk 'NF {count += 1} END {print count + 0}' <<< "${worker_pids}")
 if [[ -z "${master_pid}" || "${worker_count}" != 4 ]]; then
   echo rollback_worker_verification_failed
+  exit 1
+fi
+
+if docker inspect "${RUNTIME_CONTAINER}" >/dev/null 2>&1; then
+  if [[ ! -f "${RUNTIME_ENV_FILE}" ]]; then
+    echo rollback_runtime_env_missing
+    exit 1
+  fi
+  compose_candidate stop agentscope-runtime
+  compose_candidate rm -f agentscope-runtime
+fi
+if docker inspect "${RUNTIME_CONTAINER}" >/dev/null 2>&1; then
+  echo rollback_runtime_removal_failed
   exit 1
 fi
 

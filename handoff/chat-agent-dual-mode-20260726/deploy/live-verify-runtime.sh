@@ -5,9 +5,12 @@ STACK_DIR=${STACK_DIR:-/srv/openwebui-migration}
 COMPOSE_FILE=${COMPOSE_FILE:-${STACK_DIR}/compose.yaml}
 WEB_CONTAINER=${WEB_CONTAINER:-open-webui}
 DB_CONTAINER=${DB_CONTAINER:-openwebui-db}
+RUNTIME_CONTAINER=${RUNTIME_CONTAINER:-openwebui-agentscope-runtime}
 EXPECTED_IMAGE_ID=${EXPECTED_IMAGE_ID:?EXPECTED_IMAGE_ID is required}
 EXPECTED_REVISION=${EXPECTED_REVISION:?EXPECTED_REVISION is required}
 EXPECTED_WORKERS=${EXPECTED_WORKERS:-4}
+EXPECT_RUNTIME=${EXPECT_RUNTIME:-false}
+EXPECTED_RUNTIME_IMAGE_ID=${EXPECTED_RUNTIME_IMAGE_ID:-sha256:f7396ba23e49f934216ba8fc4b38c695b7f639722d852b44234769c66ca7f6e9}
 
 anchor=$(docker inspect "${WEB_CONTAINER}" --format 'container_id={{.Id}} image_ref={{.Config.Image}} image_id={{.Image}} status={{.State.Status}} health={{if .State.Health}}{{.State.Health.Status}}{{else}}none{{end}} restarts={{.RestartCount}} started={{.State.StartedAt}}')
 printf '%s\n' "${anchor}"
@@ -51,6 +54,22 @@ if [[ "${worker_count}" != "${EXPECTED_WORKERS}" ]]; then
 fi
 
 docker exec "${WEB_CONTAINER}" curl -fsS http://127.0.0.1:8080/health >/dev/null
+if [[ "${EXPECT_RUNTIME}" == true ]]; then
+  if [[ "$(docker inspect "${RUNTIME_CONTAINER}" --format '{{.Image}}')" != "${EXPECTED_RUNTIME_IMAGE_ID}" ]]; then
+    echo runtime_image_verification_failed
+    exit 1
+  fi
+  if [[ "$(docker inspect "${RUNTIME_CONTAINER}" --format '{{if .State.Health}}{{.State.Health.Status}}{{else}}none{{end}}')" != healthy ]]; then
+    echo runtime_health_verification_failed
+    exit 1
+  fi
+  if [[ "$(docker inspect "${RUNTIME_CONTAINER}" --format '{{.RestartCount}}')" != 0 ]]; then
+    echo runtime_restart_verification_failed
+    exit 1
+  fi
+  docker exec "${WEB_CONTAINER}" python -c "import json,urllib.request; assert json.load(urllib.request.urlopen('http://agentscope-runtime:8000/health', timeout=10))['status'] == 'ok'"
+  docker inspect "${RUNTIME_CONTAINER}" --format 'runtime={{.Id}} {{.Image}} {{.State.Status}} {{.State.Health.Status}} {{.RestartCount}} {{.State.StartedAt}}'
+fi
 printf 'compose_sha256=%s\n' "$(sha256sum "${COMPOSE_FILE}" | awk '{print $1}')"
 printf 'revision=%s\n' "${revision}"
 printf 'workers=%s\n' "${worker_count}"

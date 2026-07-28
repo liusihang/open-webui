@@ -2,24 +2,26 @@
 
 ## Scope and immutable anchors
 
-Target truth surface: `aiserver:/srv/openwebui-migration`, service/container `open-webui` only.
+Target truth surface: `aiserver:/srv/openwebui-migration`, existing service/container `open-webui` plus the dedicated formal `agentscope-runtime` required by Agent mode.
 
 - Current live image ID: `sha256:7ec820b71fa94205b273cb8cd00344a130e1921ae8e643ba6192b0e58933bd45`
 - Current Compose SHA-256: `7fff73a9037687460bd6c27669e9224203241546928173106c9999d6b3425da1`
 - Current database revision: `f3a4b5c6d7e8`
 - Candidate image ID: `sha256:ab6d8f1816a40750a98bdcb18e5a7bd419869c43825a66631acc7f718e6f469b`
 - Candidate source revision: `1d8dba8a77e6e8adc5952891bac83a2a7c5a4804`
+- AgentScope runtime image ID: `sha256:f7396ba23e49f934216ba8fc4b38c695b7f639722d852b44234769c66ca7f6e9`
 - Candidate database revision: `c0d3b4a5e6f7`
 - Final worker count: 4
 - Final migration policy: explicit one-off Alembic; candidate WebUI starts with `ENABLE_DB_MIGRATIONS=false`.
 
-Do not modify the base Compose file. The candidate is selected only by the prepared override. Do not restart DB, Redis, Bifrost, OnlyOffice, or AgentScope runtime. Do not query broad Bifrost logs.
+Do not modify the base Compose file. The candidate and its dedicated formal AgentScope runtime are selected only by the prepared override. Do not restart DB, Redis, Bifrost, OnlyOffice, or the isolated PR7 runtime. Do not query broad Bifrost logs.
 
 ## Prepared artifacts
 
 - `live-prep-backup.sh`: online custom-format backup with checksum/list/live-anchor verification.
 - `live-prep-rehearse-migration.sh`: disposable restore plus `f3 -> c0 -> f3` rehearsal.
 - `compose.live-pr7-dual-mode-1d8dba8a7.yaml`: exact image, four workers, migrations disabled at app startup.
+- `live-prepare-runtime-controlled.sh`: creates an owner-only shared-token env and persistent runtime state under `/home/aiserver/staging/pr7-live-prep-20260727`, then starts the dedicated formal runtime; verifies exact image, one worker, health, token wiring, and formal network attachment without changing WebUI. It does not change ownership or permissions under root-owned `/srv`.
 - `live-migrate-controlled.sh`: guarded explicit forward/downgrade migration.
 - `live-enter-maintenance-controlled.sh`: guarded stop of only the old WebUI after the fresh backup.
 - `live-deploy-controlled.sh`: guarded WebUI-only candidate recreation and health/PID checks.
@@ -49,39 +51,41 @@ Do not modify the base Compose file. The candidate is selected only by the prepa
 5. Copy the release artifacts to `/home/aiserver/staging/pr7-live-prep-20260727/release`, validate permissions, and run Compose `config --quiet` with the base plus override.
 6. The staged initial profile is the exact latest-stack accepted payload: Chat with explicit empty Terminal/tool/skill defaults, and Agent with Terminal `terminals`, tool `sub_agent`, and no Skills; both System Prompts are initially empty. `web_search_and_crawl` is excluded because the immutable image lacks its `crawl4ai` dependency. Run the focused template contract plus DB-backed validator before cutover and the authenticated sanitized inventory after upgrade. Administrators may revise this proposal later through the admin UI. Do not add model or Reasoning Depth fields.
 7. Prepared smoke model: `gpt-5.5`, which produced real isolated Chat/Agent output. Re-prove a real provider response immediately before formal cutover; do not use the isolated `gpt-5-codex-mini` route unless its provider error has been independently fixed.
+8. The formal stack initially has no AgentScope runtime. Never reuse or attach `openwebui-pr7-agentscope-runtime` from the isolated network. Run the guarded runtime preparation only after the fresh backup; it creates `openwebui-agentscope-runtime` on `openwebui-migration_default` and leaves the old WebUI serving while runtime health is proven.
 
 ## Forward sequence
 
 1. Record live container ID, image ID, health, restart count, start time, Compose checksum, DB revision, four worker PIDs, and exact change-window start.
-2. Announce the short maintenance window, then run `live-enter-maintenance-controlled.sh`. It stops only the old WebUI; DB, Redis, Bifrost, OnlyOffice, and runtimes remain running. Do not allow ordinary traffic between migration and post-deploy smoke acceptance.
-3. Run `live-migrate-controlled.sh` with action `upgrade`, the verified fresh manifest, and the exact confirmation phrase embedded in the script. The stopped container remains available as the environment/network source.
-4. Verify revision `c0d3b4a5e6f7` before recreating WebUI.
-5. Run `live-deploy-controlled.sh` with its exact confirmation phrase. It recreates only `open-webui` using base plus override.
-6. Require healthy status, candidate image ID, restart count zero, four real `spawn_main` worker PIDs, `ENABLE_DB_MIGRATIONS=false`, and internal `/health` success.
-7. Authenticated API gates:
+2. Run `live-prepare-runtime-controlled.sh` with its exact confirmation. Require dedicated runtime image/health/restart/token/network checks while old WebUI remains serving.
+3. Re-prove the selected provider through old live, announce the short maintenance window, then run `live-enter-maintenance-controlled.sh`. It stops only the old WebUI; DB, Redis, Bifrost, OnlyOffice, and the prepared runtime remain running. Do not allow ordinary traffic between migration and post-deploy smoke acceptance.
+4. Run `live-migrate-controlled.sh` with action `upgrade`, the verified fresh manifest, and the exact confirmation phrase embedded in the script. The stopped container remains available as the environment/network source.
+5. Verify revision `c0d3b4a5e6f7` before recreating WebUI.
+6. Run `live-deploy-controlled.sh` with its exact confirmation phrase. It recreates only `open-webui` using base plus override and refuses to run unless the dedicated runtime is already healthy.
+7. Require healthy status, candidate image ID, restart count zero, four real `spawn_main` worker PIDs, `ENABLE_DB_MIGRATIONS=false`, exact runtime URL/token parity, and WebUI -> runtime health success.
+8. Authenticated API gates:
    - public `/api/config` succeeds and does not expose System Prompts;
    - administrator Chat/Agent profile GET/history/detail succeeds;
    - models, terminals, tools, skills, functions, knowledge, and files routes succeed.
-8. Real browser/inference gates:
+9. Real browser/inference gates:
    - top Chat/Agent selector is visible only before conversation creation;
    - Chat mode binds and produces multi-delta SSE output with intended empty defaults;
    - Agent mode binds and produces commentary -> tool call -> tool output -> final multi-delta output;
    - cancellation and one approval/user-input flow complete;
    - refresh recovers in-flight Agent state;
    - two concurrent SSE streams finish with `[DONE]` and no `runtime_finalization`/`ReadTimeout`.
-9. Run the DB resource validator again, then apply the reviewed administrator profile revisions with `live-apply-admin-profiles.py`. It reads current revision IDs immediately before save and performs 16 repeated sanitized head reads; retain the stronger pinned-four-worker probe as the final cache-invalidation evidence before releasing traffic.
+10. Run the DB resource validator again, then apply the reviewed administrator profile revisions with `live-apply-admin-profiles.py`. It reads current revision IDs immediately before save and performs 16 repeated sanitized head reads; retain the stronger pinned-four-worker probe as the final cache-invalidation evidence before releasing traffic.
    - The backend has no atomic two-mode save API. The helper saves Agent first and Chat second. If the second save fails, remain in maintenance, report the partial revision explicitly, and restore through the immutable history endpoint before releasing traffic; do not hide the failure with automatic compensation.
-10. Observe the exact change window for worker exits/respawns, migration/profile errors, SSE failures, CPU/memory, DB connections, and Redis blocked clients. Query Bifrost only by exact request/session/time window if a provider failure needs attribution.
+11. Observe the exact change window for worker exits/respawns, migration/profile errors, SSE failures, runtime errors, CPU/memory, DB connections, and Redis blocked clients. Query Bifrost only by exact request/session/time window if a provider failure needs attribution.
 
 ## Rollback boundary
 
 Rollback is not an image-only operation. The old image does not know revision `c0d3b4a5e6f7` while automatic migrations are enabled in the base Compose configuration.
 
-- Before general traffic is released: stop only WebUI, run guarded candidate downgrade `c0 -> f3`, then recreate only WebUI from the base Compose file.
+- Before general traffic is released: stop only WebUI, run guarded candidate downgrade `c0 -> f3`, recreate only WebUI from the base Compose file, then stop/remove only the newly introduced formal runtime container. Preserve its owner-only env/state for diagnosis or a forward retry.
 - The downgrade drops new Agent-run and conversation-mode-profile schema/data. The rollback script therefore requires an explicit data-loss acknowledgement.
 - After general traffic is released and new feature data exists, do not automatically downgrade. Stop and decide between a forward fix and restoring the pre-cutover dump; report the exact affected interval first.
 
-Rollback acceptance is old image ID `sha256:7ec820b71fa94205b273cb8cd00344a130e1921ae8e643ba6192b0e58933bd45`, healthy, restart count zero, four workers, DB revision `f3a4b5c6d7e8`, and unchanged unrelated services.
+Rollback acceptance is old image ID `sha256:7ec820b71fa94205b273cb8cd00344a130e1921ae8e643ba6192b0e58933bd45`, healthy, restart count zero, four workers, DB revision `f3a4b5c6d7e8`, formal runtime container absent, and unchanged unrelated services.
 
 ## Completion evidence
 
