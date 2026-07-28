@@ -63,7 +63,7 @@
 |---|---|---|---|---|
 | A | `019fa8e1-7325-7230-a1d6-5925284c7f5c` | `/Users/liusihang/.codex/worktrees/fc9a/openwebui` | Restore v0.11 HTTP orjson activation and Chat/ChatMessage Alembic metadata imports | in progress |
 | B | `019fa8e1-7328-7d60-ae12-156dd036a773` | `/Users/liusihang/.codex/worktrees/9d34/openwebui` | Enforce Agent run owner/admin reads and missing-run 404 contracts | in progress |
-| C | `019fa8e1-7326-7250-847e-b82616a7e495` | `/Users/liusihang/.codex/worktrees/2df6/openwebui` | Remove excluded official Sub-agents locale residue and strengthen the guard | in progress |
+| C | `019fa8e1-7326-7250-847e-b82616a7e495` | `/Users/liusihang/.codex/worktrees/2df6/openwebui` | Remove excluded official Sub-agents locale residue and strengthen the guard | merged as `93f0d831f` |
 
 - All repair tasks start from integration HEAD `51ac3be552df87c9a87bd3f647905a47b4588ee1` and own disjoint files.
 - Each task must use test-first RED/GREEN evidence, commit its changes, and maintain a repair-specific handoff.
@@ -108,3 +108,14 @@
 - The five official target columns and three target indexes checked by the v0.11 migration branch are not yet present, which is consistent with the current custom-only revision.
 - The integrated migration graph has one merge head `a11c0d3f0bd0`, merging current custom head `c0d3b4a5e6f7` with official branch head `f0bd01a18a3d`.
 - Before touching the test database, create and checksum a PostgreSQL custom-format backup, restore it into a disposable rehearsal database, and run the candidate image's Alembic upgrade there first.
+
+### Build preflight checkpoint
+
+- Remote builder `codex-pr7-slim-cache` is running BuildKit `v0.31.2` with the `docker-container` driver.
+- The validated local BuildKit cache root is `/home/aiserver/.cache/openwebui-pr7-slim-buildx` (`13 GB`) with a current cache pointer available.
+- Docker Hub through the local Clash proxy failed its TLS probe, so the build must not depend on direct Docker Hub metadata access.
+- The following Daocloud mirror manifests resolved successfully and will be used only in the remote staged Dockerfile:
+  - Dockerfile frontend: `sha256:87999aa3d42bdc6bea60565083ee17e86d1f3339802f543c0d03998580f9cb89`
+  - Node 22 Alpine: `sha256:2289fb1fba0f4633b08ec47b94a89c7e20b829fc5679f9b7b298eaa2f1ed8b7e`
+  - Python 3.11 slim Bookworm: `sha256:b18992999dbe963a45a8a4da40ac2b1975be1a776d939d098c647482bcad5cba`
+- The integration worktree has a `58 MB` generated `static/pyodide` cache matching the current lock; it may be overlaid onto the clean archive as a validated dependency seed, while the committed source remains the image revision authority.
