@@ -473,6 +473,17 @@
 					>
 						<Switch bind:state={RAGConfig.PDF_EXTRACT_IMAGES} ariaLabelledbyId={labelId} />
 					</AdminSettingRow>
+					<AdminSettingRow
+						label={$i18n.t('PDF Loader Mode')}
+						description={$i18n.t(
+							'Page mode creates one document per page. Single mode keeps pages together for chunking across boundaries.'
+						)}
+					>
+						<SettingsSelect bind:value={RAGConfig.PDF_LOADER_MODE}>
+							<option value="page">{$i18n.t('Page')}</option>
+							<option value="single">{$i18n.t('Single')}</option>
+						</SettingsSelect>
+					</AdminSettingRow>
 
 						<div class="flex w-full mt-2">
 							<div class="flex-1 flex justify-between">
@@ -492,7 +503,17 @@
 							</div>
 						</div>
 
-						{#if RAGConfig.CONTENT_EXTRACTION_ENGINE === ''}
+				{:else if RAGConfig.CONTENT_EXTRACTION_ENGINE === 'datalab_marker'}
+					<AdminSettingField
+						label={$i18n.t('API Base URL')}
+						description={$i18n.t('Datalab Marker service endpoint used for document parsing.')}
+					>
+						<input
+							class={inputClass}
+							placeholder={$i18n.t('Enter Datalab Marker API Base URL')}
+							bind:value={RAGConfig.DATALAB_MARKER_API_BASE_URL}
+						/>
+					</AdminSettingField>
 							<div class="flex w-full mt-1">
 								<div class="flex-1 flex justify-between">
 									<div class=" self-center text-xs font-medium">
@@ -1025,273 +1046,7 @@
 								/>
 							</div>
 						{/if}
-					</div>
 
-					<AdminSettingField
-						label={$i18n.t('Headers')}
-						description={$i18n.t('Additional JSON headers sent to the external document loader.')}
-					>
-						<Tooltip
-							content={$i18n.t(
-								'Enter additional headers in JSON format (e.g. {"X-Custom-Header": "value"}'
-							)}
-						>
-							<Textarea
-								className={textareaClass}
-								bind:value={RAGConfig.EXTERNAL_DOCUMENT_LOADER_HEADERS}
-								placeholder={$i18n.t('Enter additional headers in JSON format')}
-								required={false}
-							/>
-						</Tooltip>
-						<button
-							type="button"
-							class="mt-1 text-[0.6875rem] text-gray-400 transition-colors hover:text-gray-700 dark:text-gray-600 dark:hover:text-gray-300"
-							on:click={() =>
-								(showExternalDocumentLoaderHeadersHint = !showExternalDocumentLoaderHeadersHint)}
-						>
-							{$i18n.t('Header variables')}
-						</button>
-						{#if showExternalDocumentLoaderHeadersHint}
-							<div class="mt-1 text-[0.6875rem] leading-5 text-gray-500 dark:text-gray-400">
-								<div>{$i18n.t('No additional headers are sent unless configured.')}</div>
-								<div>
-									{$i18n.t('Example')}:
-									<code class="text-gray-700 dark:text-gray-300"
-										>{'{"X-OpenWebUI-File-Id": "{{FILE_ID}}"}'}</code
-									>
-								</div>
-								<div>
-									{$i18n.t('Available variables')}:
-									<code class="text-gray-700 dark:text-gray-300">{'{{FILE_ID}}'}</code>,
-									<code class="text-gray-700 dark:text-gray-300">{'{{FILE_NAME}}'}</code>,
-									<code class="text-gray-700 dark:text-gray-300">{'{{FILE_CONTENT_TYPE}}'}</code>
-								</div>
-							</div>
-						{/if}
-					</AdminSettingField>
-				{:else if RAGConfig.CONTENT_EXTRACTION_ENGINE === 'tika'}
-					<AdminSettingField
-						label={$i18n.t('Tika Server URL')}
-						description={$i18n.t('Tika server endpoint used for content extraction.')}
-					>
-						<input
-							class={inputClass}
-							placeholder={$i18n.t('Enter Tika Server URL')}
-							bind:value={RAGConfig.TIKA_SERVER_URL}
-						/>
-					</AdminSettingField>
-				{:else if RAGConfig.CONTENT_EXTRACTION_ENGINE === 'docling'}
-					<div class="grid grid-cols-1 gap-x-3 gap-y-2.5 sm:grid-cols-2">
-						<AdminSettingField
-							label={$i18n.t('Docling Server URL')}
-							description={$i18n.t('Docling service endpoint used for parsing.')}
-						>
-							<input
-								class={inputClass}
-								placeholder={$i18n.t('Enter Docling Server URL')}
-								bind:value={RAGConfig.DOCLING_SERVER_URL}
-							/>
-						</AdminSettingField>
-						<AdminSettingField
-							label={$i18n.t('API Key')}
-							description={$i18n.t('API key sent to Docling.')}
-						>
-							<SensitiveInput
-								variant="settings"
-								placeholder={$i18n.t('Enter Docling API Key')}
-								bind:value={RAGConfig.DOCLING_API_KEY}
-								required={false}
-							/>
-						</AdminSettingField>
-					</div>
-
-					<AdminSettingField
-						label={$i18n.t('Parameters')}
-						description={$i18n.t('Additional Docling parameters in JSON format.')}
-					>
-						<Textarea
-							className={textareaClass}
-							bind:value={RAGConfig.DOCLING_PARAMS}
-							placeholder={$i18n.t('Enter additional parameters in JSON format')}
-							minSize={100}
-						/>
-					</AdminSettingField>
-				{:else if RAGConfig.CONTENT_EXTRACTION_ENGINE === 'document_intelligence'}
-					<div class="grid grid-cols-1 gap-x-3 gap-y-2.5 sm:grid-cols-2">
-						<AdminSettingField
-							label={$i18n.t('Endpoint')}
-							description={$i18n.t('Document Intelligence endpoint used for parsing.')}
-						>
-							<input
-								class={inputClass}
-								placeholder={$i18n.t('Enter Document Intelligence Endpoint')}
-								bind:value={RAGConfig.DOCUMENT_INTELLIGENCE_ENDPOINT}
-							/>
-						</AdminSettingField>
-						<AdminSettingField
-							label={$i18n.t('Key')}
-							description={$i18n.t('Credential used for Document Intelligence.')}
-						>
-							<SensitiveInput
-								variant="settings"
-								placeholder={$i18n.t('Enter Document Intelligence Key')}
-								bind:value={RAGConfig.DOCUMENT_INTELLIGENCE_KEY}
-								required={false}
-							/>
-						</AdminSettingField>
-					</div>
-
-					<AdminSettingField
-						label={$i18n.t('Document Intelligence Model')}
-						description={$i18n.t('Model name used by Document Intelligence.')}
-					>
-						<input
-							class={inputClass}
-							placeholder={$i18n.t('Enter Document Intelligence Model')}
-							bind:value={RAGConfig.DOCUMENT_INTELLIGENCE_MODEL}
-						/>
-					</AdminSettingField>
-				{:else if RAGConfig.CONTENT_EXTRACTION_ENGINE === 'mistral_ocr'}
-					<div class="grid grid-cols-1 gap-x-3 gap-y-2.5 sm:grid-cols-2">
-						<AdminSettingField
-							label={$i18n.t('API Base URL')}
-							description={$i18n.t('Mistral OCR service endpoint.')}
-						>
-							<input
-								class={inputClass}
-								placeholder={$i18n.t('Enter Mistral API Base URL')}
-								bind:value={RAGConfig.MISTRAL_OCR_API_BASE_URL}
-							/>
-						</AdminSettingField>
-						<AdminSettingField
-							label={$i18n.t('API Key')}
-							description={$i18n.t('API key sent to Mistral OCR.')}
-						>
-							<SensitiveInput
-								variant="settings"
-								placeholder={$i18n.t('Enter Mistral API Key')}
-								bind:value={RAGConfig.MISTRAL_OCR_API_KEY}
-							/>
-						</AdminSettingField>
-					</div>
-					<AdminSettingRow
-						label={$i18n.t('Use Base64')}
-						description={$i18n.t('Send PDFs as base64 data URLs instead of uploading first.')}
-						let:labelId
-					>
-						<Switch bind:state={RAGConfig.MISTRAL_OCR_USE_BASE64} ariaLabelledbyId={labelId} />
-					</AdminSettingRow>
-				{:else if RAGConfig.CONTENT_EXTRACTION_ENGINE === 'paddleocr_vl'}
-					<div class="grid grid-cols-1 gap-x-3 gap-y-2.5 sm:grid-cols-2">
-						<AdminSettingField
-							label={$i18n.t('API Base URL')}
-							description={$i18n.t('PaddleOCR-vl service endpoint.')}
-						>
-							<input
-								class={inputClass}
-								placeholder={$i18n.t('Enter PaddleOCR-vl API Base URL')}
-								bind:value={RAGConfig.PADDLEOCR_VL_BASE_URL}
-							/>
-						</AdminSettingField>
-						<AdminSettingField
-							label={$i18n.t('API Token')}
-							description={$i18n.t('API token sent to PaddleOCR-vl.')}
-						>
-							<SensitiveInput
-								variant="settings"
-								placeholder={$i18n.t('Enter PaddleOCR-vl API Token')}
-								bind:value={RAGConfig.PADDLEOCR_VL_TOKEN}
-								required={false}
-							/>
-						</AdminSettingField>
-					</div>
-				{:else if RAGConfig.CONTENT_EXTRACTION_ENGINE === 'mineru'}
-					<AdminSettingRow
-						label={$i18n.t('API Mode')}
-						description={$i18n.t('Choose the local or cloud MinerU API mode.')}
-					>
-						<SettingsSelect
-							bind:value={RAGConfig.MINERU_API_MODE}
-							on:change={() => {
-								const cloudUrl = 'https://mineru.net/api/v4';
-								const localUrl = 'http://localhost:8000';
-
-								if (RAGConfig.MINERU_API_MODE === 'cloud') {
-									if (!RAGConfig.MINERU_API_URL || RAGConfig.MINERU_API_URL === localUrl) {
-										RAGConfig.MINERU_API_URL = cloudUrl;
-									}
-								} else {
-									if (!RAGConfig.MINERU_API_URL || RAGConfig.MINERU_API_URL === cloudUrl) {
-										RAGConfig.MINERU_API_URL = localUrl;
-									}
-								}
-							}}
-						>
-							<option value="local">{$i18n.t('local')}</option>
-							<option value="cloud">{$i18n.t('cloud')}</option>
-						</SettingsSelect>
-					</AdminSettingRow>
-
-					<AdminSettingField
-						label={$i18n.t('API URL')}
-						description={$i18n.t('MinerU API endpoint for the selected mode.')}
-					>
-						<input
-							class={inputClass}
-							placeholder={RAGConfig.MINERU_API_MODE === 'cloud'
-								? $i18n.t('https://mineru.net/api/v4')
-								: $i18n.t('http://localhost:8000')}
-							bind:value={RAGConfig.MINERU_API_URL}
-						/>
-					</AdminSettingField>
-
-					<AdminSettingField
-						label={$i18n.t('API Key')}
-						description={$i18n.t('API key used for MinerU cloud mode.')}
-					>
-						<SensitiveInput
-							variant="settings"
-							placeholder={$i18n.t('Enter MinerU API Key')}
-							bind:value={RAGConfig.MINERU_API_KEY}
-						/>
-					</AdminSettingField>
-
-					<AdminSettingRow
-						label={$i18n.t('API Timeout')}
-						description={$i18n.t('Maximum time in seconds to wait for MinerU API responses.')}
-					>
-						<input
-							class="w-16 rounded-lg border border-gray-100/50 bg-gray-50/40 px-2 text-right text-xs text-gray-700 outline-hidden transition-colors focus:border-blue-400 dark:border-white/[0.04] dark:bg-white/[0.03] dark:text-gray-300 dark:focus:border-blue-500"
-							type="number"
-							min="1"
-							bind:value={RAGConfig.MINERU_API_TIMEOUT}
-							placeholder="60"
-						/>
-					</AdminSettingRow>
-
-					<AdminSettingField
-						label={$i18n.t('Parameters')}
-						description={$i18n.t('Advanced MinerU parsing parameters in JSON format.')}
-					>
-						<Textarea
-							className={textareaClass}
-							bind:value={RAGConfig.MINERU_PARAMS}
-							placeholder={`{\n  "enable_ocr": false,\n  "enable_formula": true,\n  "enable_table": true,\n  "language": "en",\n  "model_version": "pipeline",\n  "page_ranges": ""\n}`}
-							minSize={100}
-						/>
-					</AdminSettingField>
-
-					<AdminSettingField
-						label={$i18n.t('File Extensions')}
-						description={$i18n.t('Comma-separated extensions MinerU should handle.')}
-					>
-						<input
-							class={inputClass}
-							placeholder={$i18n.t('pdf, docx, pptx, xlsx')}
-							bind:value={RAGConfig.MINERU_FILE_EXTENSIONS}
-						/>
-					</AdminSettingField>
-				{/if}
 
 				<AdminSettingRow
 					label={$i18n.t('Bypass Embedding and Retrieval')}

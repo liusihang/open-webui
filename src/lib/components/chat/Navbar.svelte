@@ -40,7 +40,7 @@
 	import Knobs from '../icons/Knobs.svelte';
 	import { isTemporaryChatId } from '$lib/utils/chatId';
 
-	const i18n = getContext('i18n');
+	const i18n: any = getContext('i18n');
 
 	export let initNewChat: Function;
 	export let readOnly: boolean = false;
@@ -50,6 +50,7 @@
 
 	export let chat;
 	export let history;
+	export let title = '';
 	export let selectedModels;
 	export let showModelSelector = true;
 	export let conversationMode: ConversationMode = 'chat';
@@ -63,7 +64,7 @@
 	export let deleteChatHandler: (id: string) => void;
 	export let moveChatHandler: (id: string, folderId: string) => void;
 
-	let closedBannerIds = [];
+	let closedBannerIds: string[] = [];
 
 	const getDismissedBannerIds = (): string[] => {
 		try {
@@ -86,7 +87,7 @@
 		initNewChat();
 	}}
 	aria-label="New Chat"
-/>
+></button>
 
 <nav
 	class="sticky top-0 z-30 w-full {$mobile

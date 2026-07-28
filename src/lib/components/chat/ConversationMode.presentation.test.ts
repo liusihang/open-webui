@@ -100,7 +100,7 @@ describe('conversation mode presentation contract', () => {
 	it('uses one explicit authority state for existing chats and request serialization', () => {
 		const chat = readSource('./Chat.svelte');
 		const navigateHandler = chat.match(
-			/const navigateHandler = async \(\) => \{([\s\S]*?)\n\t\};\n\n\tconst onSelect/
+			/const navigateHandler = async \(\) => \{([\s\S]*?)\n\t\};\n\n\tconst initEmbeddedDraft/
 		)?.[1];
 
 		expect(chat).toContain('isDirectToolServersPermitted');
@@ -633,9 +633,9 @@ describe('conversation mode presentation contract', () => {
 		expect(chatCompletionEventHandler).toMatch(
 			/chatCompletedHandler\(\s*targetChatId,\s*message\.model,\s*message\.id,\s*expectedCatalogGeneration\s*\)/
 		);
-		expect(chatCompletedHandler).toContain('const loadedChats = await getChatList');
+		expect(chatCompletedHandler).toContain('await refreshChatList(localStorage.token)');
 		expect(chatCompletedHandler).toMatch(
-			/const loadedChats = await getChatList[\s\S]*?\$chatId !== targetChatId[\s\S]*?!isModeProfileCatalogGenerationCurrent\(expectedCatalogGeneration\)[\s\S]*?return;[\s\S]*?chats\.set\(loadedChats\)/
+			/\$chatId === targetChatId[\s\S]*?isModeProfileCatalogGenerationCurrent\(expectedCatalogGeneration\)[\s\S]*?!\$temporaryChatEnabled[\s\S]*?await refreshChatList\(localStorage\.token\)/
 		);
 		expect(stopResponse).toContain('const targetChatId = $chatId');
 		expect(stopResponse).toContain('processNextInQueue(targetChatId, expectedCatalogGeneration)');
@@ -688,11 +688,14 @@ describe('conversation mode presentation contract', () => {
 		expect(initNewChat?.match(/submitHandler\(/g) ?? []).toHaveLength(2);
 		expect(chat).toContain('submitPrompt={submitHandler}');
 		expect(callOverlay).toContain('await submitPrompt(res.text, { _raw: true })');
-		expect(visibleComposers).toHaveLength(2);
+		expect(visibleComposers).toHaveLength(3);
 		for (const composer of visibleComposers) {
-			expect(composer).toContain('await submitHandler(e.detail)');
+			expect(composer).toContain('await submitHandler(');
 			expect(composer).not.toContain('clearDraft(');
 		}
+		expect(visibleComposers.some((composer) => composer.includes('withSelectedText(e.detail)'))).toBe(
+			true
+		);
 		expect(chat).toContain('shouldAutosaveModeProfileDraft()');
 	});
 
@@ -749,7 +752,7 @@ describe('conversation mode presentation contract', () => {
 
 		expect(createMessagePair).toBeDefined();
 		expect(input).toContain('on:click={() => createMessagePair(prompt)}');
-		expect(chat.match(/\{createMessagePair\}/g) ?? []).toHaveLength(2);
+		expect(chat.match(/\{createMessagePair\}/g) ?? []).toHaveLength(3);
 		expect(
 			createMessagePair?.match(/await runAcceptedSubmitDraftCriticalSection\(/g) ?? []
 		).toHaveLength(1);
