@@ -696,6 +696,10 @@ async def _cancel_and_await_task(task: asyncio.Task) -> None:
         pass
 
 
+# Opt-in (ENABLE_ORJSON): orjson for request-body parsing and JSONResponse bodies;
+# response_model routes keep FastAPI's Pydantic fast path either way.
+apply_orjson_http_json()
+
 app = FastAPI(
     title='Open WebUI',
     docs_url='/docs' if ENV == 'dev' else None,
