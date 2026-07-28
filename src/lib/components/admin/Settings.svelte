@@ -23,7 +23,6 @@
 	import Analytics from './Analytics.svelte';
 	import CodeExecution from './Settings/CodeExecution.svelte';
 	import Integrations from './Settings/Integrations.svelte';
-	import Subagents from './Settings/Subagents.svelte';
 
 	import Search from '../icons/Search.svelte';
 	import AdminTabIcon from './Settings/AdminTabIcon.svelte';
@@ -41,7 +40,6 @@
 			'authentication',
 			'connections',
 			'models',
-			'subagents',
 			'evaluations',
 			'analytics',
 			'integrations',
@@ -146,12 +144,6 @@
 				'import',
 				'export'
 			]
-		},
-		{
-			id: 'subagents',
-			title: 'Sub-agents',
-			route: '/admin/settings/subagents',
-			keywords: ['sub-agents', 'subagents', 'delegation', 'background', 'agents']
 		},
 		{
 			id: 'evaluations',
@@ -377,7 +369,6 @@
 			<!-- {$i18n.t('Authentication')} -->
 			<!-- {$i18n.t('Connections')} -->
 			<!-- {$i18n.t('Models')} -->
-			<!-- {$i18n.t('Sub-agents')} -->
 			<!-- {$i18n.t('Evaluations')} -->
 			<!-- {$i18n.t('Analytics')} -->
 			<!-- {$i18n.t('Integrations')} -->
@@ -425,8 +416,6 @@
 					/>
 				{:else if selectedTab === 'models'}
 					<Models />
-				{:else if selectedTab === 'subagents'}
-					<Subagents />
 				{:else if selectedTab === 'evaluations'}
 					<Evaluations />
 				{:else if selectedTab === 'analytics'}

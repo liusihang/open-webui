@@ -127,20 +127,7 @@ function buildToolCallToken(item: OutputItem, toolOutputByCallId: Record<string,
 	const callId = item.call_id ?? '';
 	const resultItem = toolOutputByCallId[callId];
 	const isDone = isDoneStatus(item.status) || !!resultItem;
-	let name = item.name ?? '';
-	if (name === 'delegate_task') {
-		try {
-			const args =
-				typeof item.arguments === 'string'
-					? JSON.parse(item.arguments || '{}')
-					: (item.arguments ?? {});
-			const task = typeof args.task === 'string' && args.task ? args.task : '?';
-			const label = args.background ? 'Background sub-agent' : 'Sub-agent';
-			name = `${label}: "${task.length > 60 ? `${task.slice(0, 60)}...` : task}"`;
-		} catch {
-			name = 'Sub-agent';
-		}
-	}
+	const name = item.name ?? '';
 
 	return {
 		summary: isDone ? 'Tool Executed' : 'Executing...',

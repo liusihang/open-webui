@@ -42,6 +42,7 @@
 
 	let chatConfig = {
 		GLOBAL_SYSTEM_PROMPT: '',
+		CONTEXT_COMPACTION_MODEL: '',
 		ENABLE_CONTEXT_COMPACTION: false,
 		CONTEXT_COMPACTION_TOKEN_THRESHOLD: 80000,
 		CONTEXT_COMPACTION_TOKEN_CAP: 80000,
@@ -149,38 +150,33 @@
 			dispatch('save');
 		}}
 	>
-		<div class="  overflow-y-scroll scrollbar-hidden h-full pr-1.5">
-			<div class="mb-5">
-				<div class="mt-0.5 mb-2.5 text-base font-medium">
-					{$i18n.t('Model Instructions')}
-				</div>
-
-				<hr class="border-gray-100/30 dark:border-gray-850/30 my-2" />
-
-				<div class="mb-1 text-xs font-medium">{$i18n.t('Global System Prompt')}</div>
-				<p class="mb-2 max-w-[72ch] text-xs leading-5 text-gray-500 dark:text-gray-400">
-					{$i18n.t(
-						'Prepended to system instructions for every ordinary chat and Agent Mode run. Model-specific prompts are applied afterward.'
-					)}
-				</p>
-				<Textarea
-					bind:value={chatConfig.GLOBAL_SYSTEM_PROMPT}
-					rows={6}
-					ariaLabel={$i18n.t('Global System Prompt')}
-					placeholder={$i18n.t('Enter administrator instructions applied to all chat models')}
-				/>
-				<p class="mt-1.5 max-w-[72ch] text-xs leading-5 text-gray-500 dark:text-gray-400">
-					{$i18n.t(
-						'This guides model behavior and does not replace backend permissions or tool access controls.'
-					)}
-				</p>
-			</div>
-
-			<div class="mb-3.5">
-				<div class=" mt-0.5 mb-2.5 text-base font-medium">{$i18n.t('Tasks')}</div>
+		<h2 class="text-sm font-medium text-gray-900 dark:text-white mb-4">
+			{$i18n.t('Interface')}
+		</h2>
 
 		<div class="flex-1 min-h-0 overflow-y-auto scrollbar-hover pr-1.5">
-			<AdminSettingSection title={$i18n.t('Tasks')} first>
+			<AdminSettingSection title={$i18n.t('Model Instructions')} first>
+				<AdminSettingField
+					label={$i18n.t('Global System Prompt')}
+					description={$i18n.t(
+						'Prepended to system instructions for every ordinary chat and Agent Mode run. Model-specific prompts are applied afterward.'
+					)}
+				>
+					<Textarea
+						bind:value={chatConfig.GLOBAL_SYSTEM_PROMPT}
+						rows={6}
+						ariaLabel={$i18n.t('Global System Prompt')}
+						placeholder={$i18n.t('Enter administrator instructions applied to all chat models')}
+					/>
+					<p class="mt-1.5 max-w-[72ch] text-xs leading-5 text-gray-500 dark:text-gray-400">
+						{$i18n.t(
+							'This guides model behavior and does not replace backend permissions or tool access controls.'
+						)}
+					</p>
+				</AdminSettingField>
+			</AdminSettingSection>
+
+			<AdminSettingSection title={$i18n.t('Tasks')}>
 				<div>
 					<div class="mb-2">
 						<div class="text-xs text-gray-600 dark:text-gray-400">{$i18n.t('Task Model')}</div>

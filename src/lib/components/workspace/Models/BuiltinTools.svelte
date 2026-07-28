@@ -4,7 +4,7 @@
 	import Tooltip from '$lib/components/common/Tooltip.svelte';
 	import { marked } from 'marked';
 
-	const i18n = getContext('i18n');
+	const i18n: any = getContext('i18n');
 
 	const toolLabels = {
 		time: {
@@ -26,10 +26,6 @@
 		knowledge: {
 			label: $i18n.t('Knowledge Base'),
 			description: $i18n.t('Browse and query knowledge bases')
-		},
-		files: {
-			label: $i18n.t('Files'),
-			description: $i18n.t('List, search, and read files attached to the current chat')
 		},
 		channels: {
 			label: $i18n.t('Channels'),
@@ -62,10 +58,6 @@
 		calendar: {
 			label: $i18n.t('Calendar'),
 			description: $i18n.t('List calendars, search, create, update, and delete calendar events')
-		},
-		subagents: {
-			label: $i18n.t('Sub-agents'),
-			description: $i18n.t('Delegate focused work to parallel sub-agents')
 		}
 	};
 

@@ -17,6 +17,10 @@
 	import Textarea from '$lib/components/common/Textarea.svelte';
 	import Banners from './Interface/Banners.svelte';
 	import Events from './Events.svelte';
+	import AdminSettingField from './AdminSettingField.svelte';
+	import AdminSettingRow from './AdminSettingRow.svelte';
+	import AdminSettingSection from './AdminSettingSection.svelte';
+	import Plus from '$lib/components/icons/Plus.svelte';
 	import { normalizeAnnouncementConfig, validateAnnouncementConfig } from './announcementConfig';
 
 	const i18n: any = getContext('i18n');
@@ -340,6 +344,36 @@
 					<Switch bind:state={adminConfig.ENABLE_USER_STATUS} ariaLabelledbyId={labelId} />
 				</AdminSettingRow>
 
+				<AdminSettingField
+					label={$i18n.t('Response Watermark')}
+					description={$i18n.t('Append a watermark to assistant responses when configured.')}
+				>
+					<Textarea
+						className={textareaClass}
+						placeholder={$i18n.t('Enter a watermark for the response. Leave empty for none.')}
+						bind:value={adminConfig.RESPONSE_WATERMARK}
+					/>
+				</AdminSettingField>
+
+				<AdminSettingField
+					label={$i18n.t('WebUI URL')}
+					description={$i18n.t(
+						'Enter the public URL of your WebUI. This URL will be used to generate links in the notifications.'
+					)}
+				>
+					<input
+						class={inputClass}
+						type="text"
+						placeholder={`e.g.) "http://localhost:3000"`}
+						bind:value={adminConfig.WEBUI_URL}
+					/>
+				</AdminSettingField>
+			</AdminSettingSection>
+
+			<Events />
+
+			<AdminSettingSection title={$i18n.t('UI')}>
+				<div>
 					<div class="mb-2.5 flex w-full items-center justify-between pr-2">
 						<div class="self-center text-xs font-medium">
 							{$i18n.t('Enable Announcement Popup')}

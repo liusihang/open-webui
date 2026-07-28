@@ -889,31 +889,6 @@ export const setModelsConfig = async (token: string, config: object) => {
 	return res;
 };
 
-export const getSubagentsConfig = async (token: string) => {
-	const res = await fetch(`${WEBUI_API_BASE_URL}/configs/subagents`, {
-		method: 'GET',
-		headers: {
-			'Content-Type': 'application/json',
-			Authorization: `Bearer ${token}`
-		}
-	});
-	if (!res.ok) throw await res.json();
-	return res.json();
-};
-
-export const setSubagentsConfig = async (token: string, config: object) => {
-	const res = await fetch(`${WEBUI_API_BASE_URL}/configs/subagents`, {
-		method: 'POST',
-		headers: {
-			'Content-Type': 'application/json',
-			Authorization: `Bearer ${token}`
-		},
-		body: JSON.stringify(config)
-	});
-	if (!res.ok) throw await res.json();
-	return res.json();
-};
-
 export const setDefaultPromptSuggestions = async (token: string, promptSuggestions: string) => {
 	let error = null;
 
