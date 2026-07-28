@@ -81,7 +81,7 @@
 
 ## Repository state
 
-- Branch: `codex/pr7-chat-agent-dual-mode-20260726` at `90683a1a2`.
+- Branch: `codex/pr7-chat-agent-dual-mode-20260726`; implementation commit `6ba5c1398`.
 - Existing unrelated dirty files under the older dual-mode handoff, `.playwright-cli/`, and `output/` must remain untouched.
 
 ## Remote preflight — 2026-07-28 13:46 +08:00
@@ -98,3 +98,47 @@
 - Formal live worker PIDs remain `520375 521504 525837 528771` under master `115044`.
 - Both WebUI containers currently have matching source/build metadata, so the isolated stack is a faithful first hotpatch target.
 - No remote state was changed; only `/tmp/pr7-announcement-preflight.sh` was uploaded and executed read-only.
+
+## Isolated acceptance matrix
+
+| Requirement | Evidence | Result |
+|---|---|---|
+| Admin management entry | Real Chinese General page showed enable/key/title/Markdown controls and saved successfully | PASS |
+| Existing data migration | Old enabled announcement values appeared immediately after code recovery | PASS |
+| Four-worker consistency | Four distinct PIDs returned the same announcement SHA via authenticated `/api/config` | PASS |
+| Ordinary-user first display | Dedicated `user` role received v1 modal | PASS |
+| Markdown safety/rendering | Probe `**Markdown**` rendered as a `strong` node through the sanitized modal | PASS |
+| Once per key | Close + reload did not re-show | PASS |
+| Server persistence | Deleted localStorage acknowledgement; reload still did not re-show | PASS |
+| Manual re-publish | Admin changed key v1 → v2; ordinary user immediately received v2 | PASS |
+| Browser stability | Admin and user sessions both reported zero console errors | PASS |
+| Non-disruptive hotpatch | 350/350 health probes, zero traceback, immutable container anchors | PASS |
+| E2E cleanup | Full admin config snapshot restored, then identical on all four workers | PASS |
+
+The isolated stack now carries commit `6ba5c1398` as an in-place source/static hotpatch. It remains non-durable across container recreation until a later image includes the commit.
+
+## Formal live acceptance matrix
+
+| Requirement | Evidence | Result |
+|---|---|---|
+| No rebuild/recreate | Source/static hotpatch plus readiness-gated worker rotation; container/image/start time unchanged | PASS |
+| Availability during rotation | 508/508 continuous `/health` requests succeeded | PASS |
+| Four-worker readiness | Container PIDs `10531 10762 10886 11017` each accepted targeted real requests | PASS |
+| Existing announcement convergence | 16 requests covered all four PIDs with prior hash `c51f511a...` | PASS |
+| Publish/readback | Protected admin API saved key `2026-07-chat-agent-memory-v1`; readback hash `4d602987...` | PASS |
+| Published convergence | A second 16-request probe covered all four PIDs with hash `4d602987...` | PASS |
+| Real public browser | `https://ai.shuofang.cloud` rendered the Chat/Agent/memory Markdown modal | PASS |
+| Content contract | Fixed mode, default model, per-mode System Prompt/Terminal/tools/Skills, temporary adjustment, and memory guidance all present; no Reasoning Depth copy | PASS |
+| Browser stability | Zero console errors; acknowledgement controls were not clicked | PASS |
+| User-state preservation | Post-browser settings readback reported `announcement_acknowledged=false` | PASS |
+| Final anomaly window | `06:58:00Z–07:04:33Z`: zero traceback, worker death/start, ReadTimeout, runtime-finalization marker, HTTP 5xx, or ERROR | PASS |
+| Credential cleanup | Local and remote short-lived tokens/identity files removed; token-free config snapshots retained | PASS |
+
+The two PaddleOCR-VL failures seen during the earlier worker-rotation window were two independent file-upload background tasks rejected by the existing remote-origin allowlist. Each exception was printed as a chained pair of traceback markers. They did not terminate workers: the only four child deaths were the four planned old PIDs, each followed by exactly one replacement start.
+
+## Final runtime state and durability
+
+- WebUI remains container `ae1b858332b7...`, image `sha256:ab6d8f1816a...`, started `2026-07-28T03:19:21.700659218Z`, healthy, restart 0.
+- AgentScope remains container `2f96c76d462a...`, image `sha256:f7396ba23e49...`, healthy, restart 0.
+- Installed static index SHA-256 is `8f116431...`; preserved pgvector hotpatch SHA-256 is `2ce35641...`; all replaced files are `root:root`.
+- The live announcement is active and should remain active. The hotpatch itself is intentionally non-durable: a future container recreate from the unchanged image would discard commit `6ba5c1398`, so the next immutable image must include it before any planned recreate/restart.

@@ -147,7 +147,8 @@ def main() -> None:
                     'target_worker_pid': target_pid,
                     'worker_pids': pids,
                     'worker_session_ports': {
-                        str(pid): selected[pid].local_port for pid in pids
+                        str(pid): session.local_port
+                        for pid, session in selected.items()
                     },
                     'request_count_lower_bound': len(sessions) + len(selected),
                 },

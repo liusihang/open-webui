@@ -15,11 +15,12 @@ Restore the previously implemented administrator-configurable announcement popup
 ## Phases
 
 1. Project-context discovery and regression localization — complete
-2. RED contract tests for config, API projection, and admin UI — in progress
-3. Minimal recovery on the current DB-backed config architecture — pending
-4. Focused regression, frontend build, and commit — pending
-5. Isolated-stack static/source hotpatch and real-browser E2E — pending
-6. Guarded live hotpatch with immutable container anchors — pending
+2. RED contract tests for config, API projection, and admin UI — complete
+3. Minimal recovery on the current DB-backed config architecture — complete
+4. Focused regression, frontend build, and commit — complete (`6ba5c1398`)
+5. Isolated-stack static/source hotpatch and real-browser E2E — complete
+6. Guarded live hotpatch with immutable container anchors — complete
+7. Publish the release announcement, real-browser verify, and remove auth artifacts — complete
 
 ## Resolved decisions
 
@@ -48,3 +49,6 @@ Restore the previously implemented administrator-configurable announcement popup
 - Before remote hotpatch, archive every replaced backend/static artifact with checksums.
 - Restore the archived artifact set in place and rotate workers readiness-gated if acceptance fails.
 - Never recreate either container as part of this task.
+- Formal-live rollback source/static backup: `/home/aiserver/staging/pr7-announcement-hotpatch-6ba5c1398/live/backup/`.
+- Formal-live announcement rollback snapshot: `/home/aiserver/staging/pr7-announcement-hotpatch-6ba5c1398/live/private/admin-config.before-publish.json`.
+- The currently published announcement is intentionally retained; rollback was prepared and not invoked.
