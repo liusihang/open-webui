@@ -12,7 +12,7 @@ DB_CONTAINER='openwebui-pr7-db'
 DB_USER='webui_pr7'
 SOURCE_DB='webui_pr7'
 REHEARSAL_DB='webui_pr7_v011_rehearsal_4d3543438b'
-TEST_NETWORK='shared_network'
+TEST_NETWORK='openwebui-pr7_default'
 SOURCE_REVISION='c0d3b4a5e6f7'
 TARGET_REVISION='a11c0d3f0bd0'
 
@@ -165,7 +165,28 @@ run_alembic upgrade head | tee "${STATE_DIR}/rehearsal-upgrade-1.log"
 assert_target_schema_present "${REHEARSAL_DB}"
 assert_rows_match "${REHEARSAL_DB}"
 
-run_alembic downgrade "${SOURCE_REVISION}" | tee "${STATE_DIR}/rehearsal-downgrade.log"
+# The two branches share a pre-v0.11 ancestor. Alembic cannot remove the
+# official branch back to that ancestor without also selecting descendants on
+# the custom branch. Rehearse the actual rollback mechanism instead: replace
+# only the disposable database with the verified pre-upgrade snapshot.
+{
+  printf 'backup=%s\n' "${backup}"
+  printf 'backup_sha256=%s\n' "$(cut -d' ' -f1 "${backup}.sha256")"
+  printf 'restore_started_at=%s\n' "$(date --iso-8601=seconds)"
+} >"${STATE_DIR}/rehearsal-restore-rollback.log"
+docker exec "${DB_CONTAINER}" dropdb \
+  --username "${DB_USER}" \
+  "${REHEARSAL_DB}"
+docker exec "${DB_CONTAINER}" createdb \
+  --username "${DB_USER}" \
+  --owner "${DB_USER}" \
+  "${REHEARSAL_DB}"
+docker exec -i "${DB_CONTAINER}" pg_restore \
+  --username "${DB_USER}" \
+  --dbname "${REHEARSAL_DB}" \
+  --no-owner \
+  --no-privileges <"${backup}"
+printf 'restore_completed_at=%s\n' "$(date --iso-8601=seconds)" >>"${STATE_DIR}/rehearsal-restore-rollback.log"
 [[ "$(db_scalar "${REHEARSAL_DB}" 'SELECT version_num FROM alembic_version ORDER BY version_num;')" == "${SOURCE_REVISION}" ]]
 assert_target_schema_absent "${REHEARSAL_DB}"
 assert_rows_match "${REHEARSAL_DB}"

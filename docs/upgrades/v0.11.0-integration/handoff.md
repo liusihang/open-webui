@@ -144,3 +144,15 @@
   - created `2026-07-28T14:07:25.670357275Z`; size `2056352528` bytes
 - Frontend and image layer export completed successfully. BuildKit reported transient local cache-export layer-lock warnings after the image had already loaded; the build returned success, its status marker says `complete/verified`, and the independently inspected image metadata matches the requested source.
 - The secret-free, exact-target deployment and rollback artifacts are stored under `docs/upgrades/v0.11.0-integration/deployment/`. Formal live is not a target of these scripts.
+- The first rehearsal invocation exited before backup or database mutation because the preflight network name `shared_network` was stale. Direct container inspection established the actual shared network `openwebui-pr7_default`, Compose project `openwebui-pr7`, and service `open-webui-pr7`; the scripts now pin the verified network.
+- The next disposable rehearsal upgraded successfully to `a11c0d3f0bd0`. A direct `downgrade c0d3b4a5e6f7` then correctly removed the merge node but left both parent heads (`c0d3b4a5e6f7` and `f0bd01a18a3d`) stamped, so the single-head assertion stopped the script. A follow-up disposable attempt tested explicit `<official-revision>-1` relative targets while asserting the custom head before every step.
+- The explicit relative walk safely removed official revisions until the final official child of the common branchpoint. At that boundary Alembic also selected and began downgrading the custom descendants, confirming that schema downgrade is not a safe rollback mechanism for this merged graph. This occurred only in the disposable rehearsal database; the real test database remained at `c0d3b4a5e6f7` throughout. The authoritative rollback is now exact replacement from the checksummed, quiesced PostgreSQL custom-format backup; rehearsal must prove upgrade, snapshot restore, and re-upgrade.
+
+### PostgreSQL rehearsal checkpoint
+
+- Completed at `2026-07-28T22:49:10+08:00` against disposable database `webui_pr7_v011_rehearsal_4d3543438b`; the real test WebUI remained online and its database remained at `c0d3b4a5e6f7`.
+- Custom-format source backup: `webui_pr7-pre-v011-rehearsal-20260728T224338+0800.dump`, SHA-256 `c14ceca7d42b4daee1b50cd9a69e1d2013b64d6241fe1539aaa08a3f91f94989`; `pg_restore --list` passed before restore.
+- Candidate migration upgraded the restored copy to the single merge head `a11c0d3f0bd0`; all five expected columns and all three expected indexes were present.
+- Snapshot rollback dropped and recreated only the disposable database from the verified backup, restoring revision `c0d3b4a5e6f7` with all target v0.11 columns/indexes absent.
+- A second candidate migration returned the restored database to `a11c0d3f0bd0`.
+- Data anchors stayed identical across restore, upgrade, rollback restore, and re-upgrade: `334` chats, `455` Agent runs, `4011` Agent run events.

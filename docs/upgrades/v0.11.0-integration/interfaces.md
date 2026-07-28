@@ -36,4 +36,4 @@
 - Custom Alembic head at the integration parent: `c0d3b4a5e6f7`.
 - Official v0.11 head: `f0bd01a18a3d`.
 - Integration head: `a11c0d3f0bd0`, an explicit merge of the custom and official branches.
-- Deployment requires a duplicate normalized-email preflight and upgrade/downgrade/re-upgrade evidence on a restored database copy before any target database is migrated.
+- Deployment requires a duplicate normalized-email preflight and upgrade/snapshot-restore/re-upgrade evidence on a restored database copy before any target database is migrated. A branch-targeted Alembic downgrade must not be used when it would traverse the custom branch back to the branches' shared ancestor.
