@@ -44,25 +44,24 @@ async def get_function_module(request, function_id, load_from_db=True, function=
     return function_module
 
 
-async def get_sorted_filter_ids(request, model: dict, enabled_filter_ids: list = None):
-    async def get_priority(function_id):
-        try:
-            function_module = await get_function_module(request, function_id)
-            if function_module and hasattr(function_module, 'Valves'):
-                valves_db = await Functions.get_function_valves_by_id(function_id)
-                valves = function_module.Valves(**(valves_db if valves_db else {}))
-                return getattr(valves, 'priority', 0)
-        except Exception:
-            pass
-        return 0
-
-    filter_ids = [function.id for function in await Functions.get_global_filter_functions()]
+def get_model_filter_ids(model, active_filters, enabled_filter_ids: list | None = None):
+    filter_ids = [fid for fid, is_global in active_filters if is_global]
     if enabled_filter_ids is not None:
         filter_ids.extend(enabled_filter_ids)
-    elif 'info' in model and 'meta' in model['info']:
+    elif isinstance(model, dict) and 'info' in model and 'meta' in model['info']:
         filter_ids.extend(model['info']['meta'].get('filterIds', []))
     filter_ids = list(set(filter_ids))
-    active_filter_ids = {function.id for function in await Functions.get_functions_by_type('filter', active_only=True)}
+    active_filter_ids = {fid for fid, _ in active_filters}
+    return [fid for fid in filter_ids if fid in active_filter_ids]
+
+
+async def resolve_filter_pipeline(request, model: dict, enabled_filter_ids: list = None):
+    if not ENABLE_PLUGINS:
+        return [], []
+
+    active_filters = await Functions.get_active_filter_ids()
+    filter_ids = get_model_filter_ids(model, active_filters, enabled_filter_ids)
+    functions_by_id = {function.id: function for function in await Functions.get_functions_by_ids(filter_ids)}
 
     async def get_active_status(filter_id):
         function_module = await get_function_module(request, filter_id, function=functions_by_id.get(filter_id))

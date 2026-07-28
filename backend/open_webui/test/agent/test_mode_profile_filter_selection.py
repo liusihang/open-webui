@@ -12,26 +12,32 @@ def filter_selection(monkeypatch):
         toggle_ids=set(),
     )
 
-    async def get_global_filter_functions():
-        return [SimpleNamespace(id=filter_id) for filter_id in state.global_ids]
+    async def get_active_filter_ids():
+        return [(filter_id, filter_id in state.global_ids) for filter_id in state.active_ids]
 
-    async def get_functions_by_type(function_type, active_only=False):
-        assert function_type == 'filter'
-        assert active_only is True
-        return [SimpleNamespace(id=filter_id) for filter_id in state.active_ids]
+    async def get_functions_by_ids(function_ids):
+        return [SimpleNamespace(id=function_id) for function_id in function_ids]
 
-    async def get_module(request, function_id, load_from_db=True):
+    async def get_function_valves_by_ids(function_ids):
+        return {function_id: {} for function_id in function_ids}
+
+    async def get_module(request, function_id, load_from_db=True, function=None):
         return SimpleNamespace(toggle=function_id in state.toggle_ids)
 
     monkeypatch.setattr(
         filter_utils.Functions,
-        'get_global_filter_functions',
-        get_global_filter_functions,
+        'get_active_filter_ids',
+        get_active_filter_ids,
     )
     monkeypatch.setattr(
         filter_utils.Functions,
-        'get_functions_by_type',
-        get_functions_by_type,
+        'get_functions_by_ids',
+        get_functions_by_ids,
+    )
+    monkeypatch.setattr(
+        filter_utils.Functions,
+        'get_function_valves_by_ids',
+        get_function_valves_by_ids,
     )
     monkeypatch.setattr(filter_utils, 'get_function_module', get_module)
     return state

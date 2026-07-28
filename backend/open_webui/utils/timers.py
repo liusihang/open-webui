@@ -34,6 +34,7 @@ _TIME_UNITS_NS = {
     'd': 24 * 60 * 60 * 1_000_000_000,
 }
 _timer_locks: dict[str, asyncio.Lock] = {}
+_timer_parent_locks: dict[str, asyncio.Lock] = {}
 
 
 def parse_timer_at(value: str) -> int:
@@ -231,7 +232,6 @@ async def execute_due_timer(app, timer_id: str, claim_id: str | None = None) -> 
     lock = _timer_locks.setdefault(timer_id, asyncio.Lock())
     async with lock:
         from open_webui.socket.main import sio
-        from open_webui.utils.subagents import _parent_locks
 
         timer = await Chats.get_chat_by_id(timer_id)
         if not timer:
@@ -276,7 +276,7 @@ async def execute_due_timer(app, timer_id: str, claim_id: str | None = None) -> 
         user_message = None
         assistant_message = None
         message_list = []
-        parent_lock = _parent_locks.setdefault(parent_chat_id, asyncio.Lock())
+        parent_lock = _timer_parent_locks.setdefault(parent_chat_id, asyncio.Lock())
         async with parent_lock:
             async with get_async_db() as db:
                 stmt = select(Chat).where(Chat.id == parent_chat_id, Chat.user_id == timer.user_id)

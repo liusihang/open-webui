@@ -30,7 +30,9 @@ def test_legacy_chat_config_submission_does_not_overwrite_global_system_prompt()
     )
 
     assert chats.chat_config_updates(form.model_dump()) == {
+        'chat.context_compaction.model': '',
         'chat.context_compaction.enable': False,
         'chat.context_compaction.token_threshold': 80000,
+        'chat.context_compaction.retention_percentage': 40,
         'chat.context_compaction.prompt_template': '',
     }

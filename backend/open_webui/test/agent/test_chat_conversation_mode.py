@@ -369,6 +369,10 @@ async def test_shared_read_denial_precedes_all_original_chat_and_profile_access(
         calls.append(('grant', kwargs['resource_id']))
         return False
 
+    async def closed_share(**kwargs):
+        calls.append(('open', kwargs['resource_id']))
+        return False
+
     async def original_chat(*args, **kwargs):
         calls.append(('original-chat', source_state))
         raise AssertionError('denied shared reads must not load the original chat')
@@ -379,6 +383,7 @@ async def test_shared_read_denial_precedes_all_original_chat_and_profile_access(
 
     monkeypatch.setattr(chats_router.SharedChats, 'get_by_id', get_shared)
     monkeypatch.setattr(chats_router.AccessGrants, 'has_access', denied_grant)
+    monkeypatch.setattr(chats_router.AccessGrants, 'has_anyone_access', closed_share)
     monkeypatch.setattr(chats_router.Chats, 'get_chat_by_id', original_chat)
     monkeypatch.setattr(
         chats_router.ConversationModeProfiles,
@@ -395,7 +400,7 @@ async def test_shared_read_denial_precedes_all_original_chat_and_profile_access(
 
     assert exc_info.value.status_code == 401
     assert exc_info.value.detail == chats_router.ERROR_MESSAGES.ACCESS_PROHIBITED
-    assert calls == [('grant', 'original-chat')]
+    assert calls == [('grant', 'original-chat'), ('open', 'original-chat')]
 
 
 @pytest.mark.asyncio

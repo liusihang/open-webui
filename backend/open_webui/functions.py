@@ -222,7 +222,10 @@ async def get_function_models(request):
     return pipe_models
 
 
-async def generate_function_chat_completion(request, form_data, user, models: dict = {}):
+async def generate_function_chat_completion(request, form_data, user, models: dict | None = None):
+    if models is None:
+        models = {}
+
     async def get_message_content(res: str | Generator | AsyncGenerator) -> str:
         if isinstance(res, str):
             return res
@@ -371,14 +374,15 @@ async def generate_function_chat_completion(request, form_data, user, models: di
             system = params.pop('system', None)
             form_data = apply_model_params_to_body_openai(params, form_data)
 
-    if not getattr(request.state, 'bypass_system_prompt', False):
+    request_state = getattr(request, 'state', None)
+    if not getattr(request_state, 'bypass_system_prompt', False):
         form_data = await apply_model_system_prompt_to_body(
             system,
             form_data,
             metadata,
             user,
             bypass_global_system_prompt=getattr(
-                request.state,
+                request_state,
                 'bypass_global_system_prompt',
                 False,
             ),

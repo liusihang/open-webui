@@ -15,10 +15,11 @@ async def test_files_event_appends_existing_message_files(monkeypatch):
         assert (chat_id, message_id) == ('chat-1', 'message-1')
         return {'files': [{'type': 'image', 'url': '/old.png'}]}
 
-    async def fake_upsert(chat_id, message_id, payload):
-        upserts.append((chat_id, message_id, payload))
+    async def fake_upsert(chat_id, message_id, payload, **kwargs):
+        upserts.append((chat_id, message_id, payload, kwargs))
 
     monkeypatch.setattr(socket_main.sio, 'emit', fake_emit)
+    monkeypatch.setattr(socket_main, 'WEBSOCKET_MANAGER', 'redis')
     monkeypatch.setattr(socket_main.Chats, 'get_message_by_id_and_message_id', fake_get_message)
     monkeypatch.setattr(socket_main.Chats, 'upsert_message_to_chat_by_id_and_message_id', fake_upsert)
 
@@ -32,6 +33,7 @@ async def test_files_event_appends_existing_message_files(monkeypatch):
             'chat-1',
             'message-1',
             {'files': [{'type': 'image', 'url': '/new.png'}, {'type': 'image', 'url': '/old.png'}]},
+            {'touch': False},
         )
     ]
 
@@ -48,10 +50,11 @@ async def test_chat_message_files_event_replaces_message_files(monkeypatch):
         assert (chat_id, message_id) == ('chat-1', 'message-1')
         return {'files': [{'type': 'image', 'url': '/old.png'}]}
 
-    async def fake_upsert(chat_id, message_id, payload):
-        upserts.append((chat_id, message_id, payload))
+    async def fake_upsert(chat_id, message_id, payload, **kwargs):
+        upserts.append((chat_id, message_id, payload, kwargs))
 
     monkeypatch.setattr(socket_main.sio, 'emit', fake_emit)
+    monkeypatch.setattr(socket_main, 'WEBSOCKET_MANAGER', 'redis')
     monkeypatch.setattr(socket_main.Chats, 'get_message_by_id_and_message_id', fake_get_message)
     monkeypatch.setattr(socket_main.Chats, 'upsert_message_to_chat_by_id_and_message_id', fake_upsert)
 
@@ -60,7 +63,9 @@ async def test_chat_message_files_event_replaces_message_files(monkeypatch):
     await emitter({'type': 'chat:message:files', 'data': {'files': [{'type': 'image', 'url': '/new.png'}]}})
 
     assert emitted
-    assert upserts == [('chat-1', 'message-1', {'files': [{'type': 'image', 'url': '/new.png'}]})]
+    assert upserts == [
+        ('chat-1', 'message-1', {'files': [{'type': 'image', 'url': '/new.png'}]}, {'touch': False})
+    ]
 
 
 @pytest.mark.asyncio

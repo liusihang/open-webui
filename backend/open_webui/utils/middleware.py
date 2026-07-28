@@ -451,7 +451,7 @@ def get_citation_source_from_tool_result(
     - document: list of document contents
     - metadata: list of metadata objects with source, file_id, name fields
 
-    Returns a list of sources (usually one, but query_knowledge_files/query_chat_files may return multiple).
+    Returns a list of sources (usually one, but query_knowledge_files may return multiple).
     """
     _EXPECTS_LIST = {'search_web', 'query_knowledge_files'}
     _EXPECTS_DICT = {'view_knowledge_file', 'view_file', 'query_knowledge_evidence'}
@@ -542,7 +542,7 @@ def get_citation_source_from_tool_result(
                 }
             ]
 
-        elif tool_name in ('query_knowledge_files', 'query_chat_files'):
+        elif tool_name == 'query_knowledge_files':
             chunks = tool_result
 
             # Group chunks by source for better citation display
@@ -3578,17 +3578,28 @@ async def process_chat_payload(request, form_data, user, metadata, model, privat
     )
     sources.extend(file_sources)
 
+    system_content = '\n\n'.join(
+        content
+        for message in form_data.get('messages', [])
+        if isinstance(message, dict)
+        and message.get('role') == 'system'
+        and (content := get_content_from_message(message))
+    )
+    resolved_model_system_prompt = await resolve_system_prompt(
+        model_system_prompt,
+        metadata,
+        user,
+    )
+    if resolved_model_system_prompt:
+        system_content = (
+            f'{resolved_model_system_prompt}\n{system_content}' if system_content else resolved_model_system_prompt
+        )
+    metadata['system_prompt'] = system_content or None
     metadata['user_prompt'] = get_last_user_message(form_data['messages'])
     metadata['sources'] = sources[:] if sources else []
 
     if private_context is not None:
-        private_context['pre_rag_system_anchor'] = '\n\n'.join(
-            content
-            for message in form_data.get('messages', [])
-            if isinstance(message, dict)
-            and message.get('role') == 'system'
-            and (content := get_content_from_message(message))
-        )
+        private_context['pre_rag_system_anchor'] = system_content
 
     # If context is not empty, insert it into the messages
     if sources and prompt:
@@ -5188,6 +5199,9 @@ async def non_streaming_chat_response_handler(response, ctx):
     if response_data is None:
         return response
 
+    chat_id = metadata.get('chat_id') or ''
+    save_to_chat = is_saved_chat_id(chat_id)
+
     if metadata.get('params', {}).get('function_calling') == 'native' and get_chat_completion_tool_calls(response_data):
         return await continue_native_tool_calls_non_streaming_response(response, response_data, ctx)
 
@@ -5443,6 +5457,8 @@ async def streaming_chat_response_handler(response, ctx):
         # Handle as a background task
         async def response_handler(response, events):
             nonlocal form_data
+            filter_context = FilterContext()
+            tag_scan_positions = {}
 
             def tag_output_handler(content_type, tags, output):
                 """
@@ -5752,6 +5768,30 @@ async def streaming_chat_response_handler(response, ctx):
             def full_output():
                 return prior_output + output if prior_output else output
 
+            def get_message_error_content(error):
+                if isinstance(error, HTTPException):
+                    error = error.detail
+                elif isinstance(error, dict):
+                    error = error.get('detail', error)
+                else:
+                    error = str(error)
+
+                return error if isinstance(error, (str, dict)) else str(error)
+
+            async def emit_message_error(error_content):
+                if save_to_chat:
+                    await Chats.upsert_message_to_chat_by_id_and_message_id(
+                        metadata['chat_id'],
+                        metadata['message_id'],
+                        {'error': {'content': error_content}},
+                    )
+                await event_emitter(
+                    {
+                        'type': 'chat:message:error',
+                        'data': {'error': {'content': error_content}},
+                    }
+                )
+
             def update_responses_continuation_guard_state():
                 nonlocal responses_continuation_guard_state
                 if not ENABLE_RESPONSES_API_STATEFUL or not last_response_id:
@@ -5824,7 +5864,7 @@ async def streaming_chat_response_handler(response, ctx):
                         )
 
                 async def stream_body_handler(response, current_form_data):
-                    nonlocal content
+                    nonlocal content_parts
                     nonlocal usage
                     nonlocal output
                     nonlocal prior_output
@@ -5871,7 +5911,15 @@ async def streaming_chat_response_handler(response, ctx):
                         if delta_count >= delta_chunk_size:
                             await flush_pending_delta_data(delta_chunk_size)
 
-                    filter_extra_params = {'__body__': form_data, **extra_params} if filter_functions else None
+                    filter_extra_params = (
+                        {
+                            '__body__': current_form_data,
+                            '__messages__': current_form_data.get('messages', []),
+                            **extra_params,
+                        }
+                        if filter_functions
+                        else None
+                    )
 
                     async for line in response.body_iterator:
                         line = line.decode('utf-8', 'replace') if isinstance(line, bytes) else line
@@ -5912,17 +5960,15 @@ async def streaming_chat_response_handler(response, ctx):
                         try:
                             data = JSONCodec.loads(data)
 
-                            data, _ = await process_filter_functions(
-                                request=request,
-                                filter_functions=filter_functions,
-                                filter_type='stream',
-                                form_data=data,
-                                extra_params={
-                                    '__body__': current_form_data,
-                                    '__messages__': current_form_data.get('messages', []),
-                                    **extra_params,
-                                },
-                            )
+                            if filter_functions:
+                                data, _ = await process_filter_functions(
+                                    request=request,
+                                    filter_context=filter_context,
+                                    filter_functions=filter_functions,
+                                    filter_type='stream',
+                                    form_data=data,
+                                    extra_params=filter_extra_params,
+                                )
 
                             if data:
                                 if 'event' in data and not getattr(request.state, 'direct', False):
