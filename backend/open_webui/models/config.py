@@ -49,8 +49,10 @@ API_CONFIG_FIELDS = (
     'auth_type',
     'headers',
     'azure',
+    'api_type',
     'api_version',
     'extra_params',
+    'passthrough_params',
 )
 
 

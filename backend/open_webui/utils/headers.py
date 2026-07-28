@@ -14,8 +14,11 @@ from open_webui.env import (
     FORWARD_USER_INFO_HEADER_USER_NAME,
     FORWARD_USER_INFO_HEADER_USER_ROLE,
 )
+from open_webui.models.groups import Groups
 
 log = logging.getLogger(__name__)
+
+USER_GROUPS_PLACEHOLDERS = ('{{USER_GROUPS}}', '{{USER_GROUP_IDS}}')
 
 
 def _get_user_value(user: Any, key: str) -> str:
@@ -66,7 +69,36 @@ def include_user_info_headers(headers: dict, user: Optional[Any] = None) -> dict
     }
 
 
-def get_custom_headers(custom_headers: dict, user=None, metadata: dict = None, request=None) -> dict:
+def custom_headers_require_user_groups(custom_headers: Optional[dict]) -> bool:
+    if not custom_headers or not isinstance(custom_headers, dict):
+        return False
+    return any(
+        placeholder in str(value) for value in custom_headers.values() for placeholder in USER_GROUPS_PLACEHOLDERS
+    )
+
+
+async def get_user_groups_for_custom_headers(
+    custom_headers: Optional[dict], user: Optional[Any] = None
+) -> Optional[list]:
+    """Fetch the user's groups only when a header value actually references a groups placeholder."""
+    if user is None or not custom_headers_require_user_groups(custom_headers):
+        return None
+
+    try:
+        return await Groups.get_groups_by_member_id(user.id)
+    except Exception:
+        log.exception('Failed to resolve user groups for custom headers')
+        return None
+
+
+async def get_custom_headers(custom_headers: dict, user=None, metadata: dict = None, request=None) -> dict:
+    user_groups = await get_user_groups_for_custom_headers(custom_headers, user)
+    return parse_custom_headers(custom_headers, user, metadata, request=request, user_groups=user_groups)
+
+
+def parse_custom_headers(
+    custom_headers: dict, user=None, metadata: dict = None, request=None, user_groups: Optional[list] = None
+) -> dict:
     if not custom_headers or not isinstance(custom_headers, dict):
         return {}
 
