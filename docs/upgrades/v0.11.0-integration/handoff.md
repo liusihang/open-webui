@@ -61,7 +61,7 @@
 
 | Repair | Thread | Worktree | Scope | Status |
 |---|---|---|---|---|
-| A | `019fa8e1-7325-7230-a1d6-5925284c7f5c` | `/Users/liusihang/.codex/worktrees/fc9a/openwebui` | Restore v0.11 HTTP orjson activation and Chat/ChatMessage Alembic metadata imports | in progress |
+| A | `019fa8e1-7325-7230-a1d6-5925284c7f5c` | `/Users/liusihang/.codex/worktrees/fc9a/openwebui` | Restore v0.11 HTTP orjson activation and Chat/ChatMessage Alembic metadata imports | merged as `8b30479f2` |
 | B | `019fa8e1-7328-7d60-ae12-156dd036a773` | `/Users/liusihang/.codex/worktrees/9d34/openwebui` | Enforce Agent run owner/admin reads and missing-run 404 contracts | in progress |
 | C | `019fa8e1-7326-7250-847e-b82616a7e495` | `/Users/liusihang/.codex/worktrees/2df6/openwebui` | Remove excluded official Sub-agents locale residue and strengthen the guard | merged as `93f0d831f` |
 
