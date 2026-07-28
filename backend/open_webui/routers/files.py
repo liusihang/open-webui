@@ -51,6 +51,7 @@ from open_webui.utils.access_control import has_connection_access
 from open_webui.utils.auth import get_admin_user, get_verified_user
 from open_webui.utils.auth import create_terminal_session_token
 from open_webui.utils.misc import strict_match_mime_type
+from open_webui.utils.terminals import get_terminal_server_url
 from pydantic import BaseModel
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -113,6 +114,25 @@ def _cleanup_local_cache(file_path: str) -> None:
         log.warning(f'Failed to clean up local cache for {file_path}: {e}')
 
 
+def _matches_configured_mime_type(supported: list[str] | str, content_type: str) -> bool:
+    if isinstance(supported, str):
+        supported = supported.split(',')
+    supported = [item.strip() for item in (supported or []) if item.strip()]
+    if not supported:
+        return False
+    return bool(strict_match_mime_type(supported, content_type))
+
+
+def _media_supported_for_extraction(
+    content_extraction_engine: str | None,
+    supported: list[str] | str | None,
+    content_type: str,
+) -> bool:
+    if supported is None:
+        return content_extraction_engine == 'external'
+    return bool(content_extraction_engine and _matches_configured_mime_type(supported, content_type))
+
+
 def _should_mirror_upload_to_terminal(file_metadata: dict) -> bool:
     return file_metadata.get('upload_context') == 'chat'
 
@@ -149,7 +169,7 @@ async def _get_chat_upload_terminal_connection(user, server_id: str):
     return None
 
 
-def _build_terminal_headers_and_cookies(request: Request, user, connection: dict) -> tuple[dict, dict]:
+async def _build_terminal_headers_and_cookies(request: Request, user, connection: dict) -> tuple[dict, dict]:
     headers = {'X-User-Id': user.id}
     cookies = {}
     auth_type = connection.get('auth_type', 'bearer')
@@ -161,19 +181,21 @@ def _build_terminal_headers_and_cookies(request: Request, user, connection: dict
         headers.update(_bearer_auth_header(create_terminal_session_token(user)))
     elif auth_type == 'system_oauth':
         cookies = getattr(request, 'cookies', {}) or {}
-        oauth_token = getattr(request, 'headers', {}).get('x-oauth-access-token', '')
+        oauth_token = None
+        try:
+            oauth_session_id = cookies.get('oauth_session_id')
+            if oauth_session_id:
+                oauth_token = await request.app.state.oauth_manager.get_oauth_token(user.id, oauth_session_id)
+        except Exception as exc:
+            log.error('Error getting OAuth token for Terminal Chatfile mirror: %s', exc)
         if oauth_token:
-            headers.update(_bearer_auth_header(oauth_token))
+            headers.update(_bearer_auth_header(oauth_token.get('access_token', '')))
 
     return headers, cookies
 
 
 def _terminal_base_url(connection: dict) -> str:
-    base_url = (connection.get('url') or '').rstrip('/')
-    policy_id = connection.get('policy_id')
-    if policy_id:
-        return f"{base_url}/p/{policy_id}"
-    return base_url
+    return get_terminal_server_url(connection)
 
 
 async def _sync_chat_upload_to_terminal_chatfile(
@@ -207,7 +229,7 @@ async def _sync_chat_upload_to_terminal_chatfile(
     if not base_url:
         return {**base_metadata, 'status': 'failed', 'error': 'Terminal server URL is not configured'}
 
-    headers, cookies = _build_terminal_headers_and_cookies(request, user, connection)
+    headers, cookies = await _build_terminal_headers_and_cookies(request, user, connection)
 
     try:
         timeout = aiohttp.ClientTimeout(total=300, connect=10)

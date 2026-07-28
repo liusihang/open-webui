@@ -32,8 +32,9 @@ from open_webui.retrieval.loaders.office_image_assets import (
     OfficeImageAssetExtraction,
     extract_office_image_assets,
 )
-from open_webui.retrieval.loaders.paddleocr_vl import PaddleOCRVLLoader
+from open_webui.retrieval.loaders.paddleocr_vl import PADDLEOCR_VL_SUPPORTED_EXTENSIONS, PaddleOCRVLLoader
 from open_webui.retrieval.loaders.pdf_image_assets import PdfImageAssetExtraction, extract_pdf_image_assets
+from open_webui.utils.headers import get_user_groups_for_custom_headers
 
 logging.basicConfig(stream=sys.stdout, level=GLOBAL_LOG_LEVEL)
 log = logging.getLogger(__name__)

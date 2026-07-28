@@ -20,6 +20,7 @@ from open_webui.models.config import Config
 from open_webui.models.groups import Groups
 from open_webui.utils.access_control import has_connection_access
 from open_webui.utils.auth import create_terminal_session_token, get_verified_user
+from open_webui.utils.terminals import get_terminal_server_url
 from open_webui.utils.tools import bearer_auth_header
 from starlette.background import BackgroundTask
 
@@ -84,6 +85,27 @@ async def list_terminal_servers(request: Request, user=Depends(get_verified_user
 
 
 PROXY_METHODS = ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'HEAD', 'OPTIONS']
+
+
+def _build_upstream_websocket_request(
+    *,
+    connection: dict,
+    session_id: str,
+    user_id: str,
+    session_token: str,
+) -> tuple[str, dict | None]:
+    base_url = get_terminal_server_url(connection)
+    normalized_connection = {
+        **connection,
+        'url': base_url,
+        'policy_id': None,
+    }
+    return build_upstream_terminal_ws_request(
+        connection=normalized_connection,
+        session_id=session_id,
+        user_id=user_id,
+        client_token=session_token,
+    )
 
 
 @router.api_route('/{server_id}/{path:path}', methods=PROXY_METHODS)
@@ -217,7 +239,7 @@ async def _resolve_authenticated_connection(ws: WebSocket, server_id: str):
     The client must send ``{"type": "auth", "token": "<jwt>"}`` as its first
     message after connecting.
 
-    Returns ``(user, connection, token)`` on success, or ``None`` after closing *ws*
+    Returns ``(user, connection)`` on success, or ``None`` after closing *ws*
     with an appropriate error code.
     """
     import asyncio
@@ -260,7 +282,7 @@ async def _resolve_authenticated_connection(ws: WebSocket, server_id: str):
         await ws.close(code=4003, reason='Access denied')
         return None
 
-    return user, connection, token
+    return user, connection
 
 
 @router.websocket('/{server_id}/api/terminals/{session_id}')
@@ -280,7 +302,7 @@ async def ws_terminal(
     result = await _resolve_authenticated_connection(ws, server_id)
     if result is None:
         return
-    user, connection, _client_token = result
+    user, connection = result
 
     base_url = get_terminal_server_url(connection)
     if not base_url:
@@ -288,11 +310,11 @@ async def ws_terminal(
         return
 
     upstream_session_token = create_terminal_session_token(user) if connection.get('auth_type') == 'session' else ''
-    upstream_url, upstream_first_message = build_upstream_terminal_ws_request(
+    upstream_url, upstream_first_message = _build_upstream_websocket_request(
         connection=connection,
         session_id=session_id,
         user_id=user.id,
-        client_token=upstream_session_token,
+        session_token=upstream_session_token,
     )
 
     app = ws.scope.get('app')

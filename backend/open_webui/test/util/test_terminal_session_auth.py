@@ -455,3 +455,56 @@ async def test_terminal_proxy_uses_minted_jwt_instead_of_request_token(monkeypat
     assert captured['minted_for_user'] == 'user-1'
     assert captured['request']['headers']['Authorization'] == 'Bearer minted-token-for-user-1'
     assert captured['request']['cookies'] == {'token': 'cookie-token'}
+
+
+@pytest.mark.asyncio
+async def test_terminal_websocket_auth_returns_verified_user_and_connection(monkeypatch):
+    connection = _connection()
+    user = _user()
+
+    class FakeWebSocket:
+        def __init__(self):
+            self.app = SimpleNamespace(state=SimpleNamespace(redis=None))
+            self.closed = []
+
+        async def receive_text(self):
+            return '{"type":"auth","token":"client-token"}'
+
+        async def close(self, **kwargs):
+            self.closed.append(kwargs)
+
+    async def fake_verified_user_by_token(token, redis):
+        assert token == 'client-token'
+        assert redis is None
+        return user
+
+    monkeypatch.setattr(terminals_mod.Config, 'get', _config_get)
+    monkeypatch.setattr(terminals_mod.Groups, 'get_groups_by_member_id', _allowed_groups)
+    monkeypatch.setattr(terminals_mod, 'has_connection_access', _allow_access)
+    monkeypatch.setattr(auth_mod, 'get_verified_user_by_token', fake_verified_user_by_token)
+
+    websocket = FakeWebSocket()
+    result = await terminals_mod._resolve_authenticated_connection(websocket, connection['id'])
+
+    assert result == (user, connection)
+    assert websocket.closed == []
+
+
+def test_terminal_websocket_policy_path_is_encoded_once():
+    connection = {
+        **_connection(),
+        'policy_id': 'team/shared',
+    }
+
+    upstream_url, first_message = terminals_mod._build_upstream_websocket_request(
+        connection=connection,
+        session_id='session/with separators',
+        user_id='user-1',
+        session_token='minted-session-token',
+    )
+
+    assert upstream_url == (
+        'ws://terminal.internal/p/team%2Fshared/api/terminals/'
+        'session%2Fwith%20separators?user_id=user-1&token=minted-session-token'
+    )
+    assert first_message is None

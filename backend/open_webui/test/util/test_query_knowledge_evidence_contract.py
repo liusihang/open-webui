@@ -201,7 +201,12 @@ async def test_query_knowledge_evidence_rejects_raw_url_path_and_data_refs_even_
 
 
 @pytest.mark.asyncio
-async def test_get_builtin_tools_adds_evidence_tool_for_any_scoped_knowledge() -> None:
+async def test_get_builtin_tools_adds_evidence_tool_for_any_scoped_knowledge(monkeypatch) -> None:
+    async def fake_get_many(*keys):
+        return {key: False for key in keys}
+
+    monkeypatch.setattr('open_webui.utils.tools.Config.get_many', fake_get_many)
+
     request = _FakeRequest()
     model = {
         'info': {

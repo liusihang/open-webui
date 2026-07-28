@@ -1,34 +1,11 @@
-import os
-import sqlite3
-import tempfile
-from types import SimpleNamespace
-
-os.environ.setdefault("WEBUI_SECRET_KEY", "test-secret")
-os.environ.setdefault("ENABLE_DB_MIGRATIONS", "false")
-_db_file = tempfile.NamedTemporaryFile(suffix=".db", delete=False)
-_db_file.close()
-os.environ.setdefault("DATABASE_URL", f"sqlite:///{_db_file.name}")
-
-with sqlite3.connect(_db_file.name) as conn:
-    conn.execute(
-        """
-        CREATE TABLE IF NOT EXISTS config (
-            id INTEGER PRIMARY KEY,
-            data JSON NOT NULL,
-            version INTEGER NOT NULL DEFAULT 0,
-            created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-            updated_at DATETIME
-        )
-        """
-    )
-
 from langchain_core.documents import Document
 
 from open_webui.routers import retrieval
 
 
-def _request(**overrides):
-    config = SimpleNamespace(
+def _config(**overrides):
+    values = {key: None for key in retrieval.RETRIEVAL_CONFIG_KEYS}
+    values.update(
         TEXT_SPLITTER="character",
         CHUNK_SIZE=800,
         CHUNK_OVERLAP=120,
@@ -38,9 +15,8 @@ def _request(**overrides):
         RAG_EMBEDDING_ENGINE="openai",
         RAG_EMBEDDING_MODEL="text-embedding-3-large",
     )
-    for key, value in overrides.items():
-        setattr(config, key, value)
-    return SimpleNamespace(app=SimpleNamespace(state=SimpleNamespace(config=config)))
+    values.update(overrides)
+    return retrieval.RetrievalConfig(values)
 
 
 def test_vector_metadata_records_deterministic_chunker_and_embedding_signatures():
@@ -50,8 +26,8 @@ def test_vector_metadata_records_deterministic_chunker_and_embedding_signatures(
     ]
 
     metadatas = retrieval._build_vector_metadatas(
-        _request(),
         docs,
+        _config(),
         metadata={"file_id": "file-1", "hash": "hash-1"},
     )
 
@@ -78,11 +54,11 @@ def test_vector_metadata_records_deterministic_chunker_and_embedding_signatures(
 def test_vector_metadata_hashes_change_when_chunker_or_embedding_config_changes():
     docs = [Document(page_content="alpha", metadata={})]
 
-    baseline = retrieval._build_vector_metadatas(_request(), docs)[0]
-    changed_chunker = retrieval._build_vector_metadatas(_request(CHUNK_SIZE=1200), docs)[0]
+    baseline = retrieval._build_vector_metadatas(docs, _config())[0]
+    changed_chunker = retrieval._build_vector_metadatas(docs, _config(CHUNK_SIZE=1200))[0]
     changed_embedding = retrieval._build_vector_metadatas(
-        _request(RAG_EMBEDDING_MODEL="new-2048d-embedding"),
         docs,
+        _config(RAG_EMBEDDING_MODEL="new-2048d-embedding"),
     )[0]
 
     assert baseline["chunker_config_hash"] != changed_chunker["chunker_config_hash"]
