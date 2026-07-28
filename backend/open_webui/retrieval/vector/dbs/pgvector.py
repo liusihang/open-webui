@@ -44,7 +44,7 @@ from sqlalchemy import (
     values,
 )
 from sqlalchemy.dialects.postgresql import JSONB, array
-from sqlalchemy.exc import NoSuchTableError
+from sqlalchemy.exc import NoSuchTableError, OperationalError
 from sqlalchemy.ext.mutable import MutableDict
 from sqlalchemy.orm import declarative_base, scoped_session, sessionmaker
 from sqlalchemy.pool import NullPool, QueuePool
@@ -649,39 +649,51 @@ class PgvectorClient(VectorDBBase):
             return None
 
     def get(self, collection_name: str, limit: Optional[int] = None) -> Optional[GetResult]:
-        try:
-            if PGVECTOR_PGCRYPTO:
-                stmt = select(
-                    DocumentChunk.id,
-                    pgcrypto_decrypt(DocumentChunk.text, PGVECTOR_PGCRYPTO_KEY, Text).label('text'),
-                    pgcrypto_decrypt(DocumentChunk.vmetadata, PGVECTOR_PGCRYPTO_KEY, JSONB).label('vmetadata'),
-                ).where(DocumentChunk.collection_name == collection_name)
-                if limit is not None:
-                    stmt = stmt.limit(limit)
-                results = self.session.execute(stmt).all()
-                ids = [[row.id for row in results]]
-                documents = [[row.text for row in results]]
-                metadatas = [[row.vmetadata for row in results]]
-            else:
-                query = self.session.query(DocumentChunk).filter(DocumentChunk.collection_name == collection_name)
-                if limit is not None:
-                    query = query.limit(limit)
+        for attempt in range(2):
+            try:
+                if PGVECTOR_PGCRYPTO:
+                    stmt = select(
+                        DocumentChunk.id,
+                        pgcrypto_decrypt(DocumentChunk.text, PGVECTOR_PGCRYPTO_KEY, Text).label('text'),
+                        pgcrypto_decrypt(DocumentChunk.vmetadata, PGVECTOR_PGCRYPTO_KEY, JSONB).label('vmetadata'),
+                    ).where(DocumentChunk.collection_name == collection_name)
+                    if limit is not None:
+                        stmt = stmt.limit(limit)
+                    results = self.session.execute(stmt).all()
+                    ids = [[row.id for row in results]]
+                    documents = [[row.text for row in results]]
+                    metadatas = [[row.vmetadata for row in results]]
+                else:
+                    query = self.session.query(DocumentChunk).filter(DocumentChunk.collection_name == collection_name)
+                    if limit is not None:
+                        query = query.limit(limit)
 
-                results = query.all()
+                    results = query.all()
 
-                if not results:
-                    return None
+                    if not results:
+                        self.session.rollback()
+                        return None
 
-                ids = [[result.id for result in results]]
-                documents = [[result.text for result in results]]
-                metadatas = [[result.vmetadata for result in results]]
+                    ids = [[result.id for result in results]]
+                    documents = [[result.text for result in results]]
+                    metadatas = [[result.vmetadata for result in results]]
 
-            self.session.rollback()  # read-only transaction
-            return GetResult(ids=ids, documents=documents, metadatas=metadatas)
-        except Exception as e:
-            self.session.rollback()
-            log.exception(f'Error during get: {e}')
-            return None
+                self.session.rollback()  # read-only transaction
+                return GetResult(ids=ids, documents=documents, metadatas=metadatas)
+            except OperationalError as e:
+                self.session.rollback()
+                if attempt == 0 and e.connection_invalidated:
+                    self.session.remove()
+                    log.warning('Invalidated database connection during get; retrying once')
+                    continue
+                log.exception(f'Error during get: {e}')
+                return None
+            except Exception as e:
+                self.session.rollback()
+                log.exception(f'Error during get: {e}')
+                return None
+
+        return None
 
     def delete(
         self,
