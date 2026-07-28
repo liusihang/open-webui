@@ -83,3 +83,34 @@ async def test_seed_defaults_is_safe_under_concurrent_worker_startup(tmp_path, m
     assert existing.value is False
 
     await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_seed_defaults_skips_keys_when_database_persistence_is_disabled(tmp_path, monkeypatch):
+    engine = create_async_engine(f'sqlite+aiosqlite:///{tmp_path / "config-filtered.db"}')
+    async with engine.begin() as connection:
+        await connection.run_sync(Config.__table__.create)
+
+    session_factory = async_sessionmaker(engine, expire_on_commit=False)
+
+    @asynccontextmanager
+    async def db_context():
+        async with session_factory() as session:
+            yield session
+
+    monkeypatch.setattr(config_models, 'get_async_db', db_context)
+    monkeypatch.setattr(Config, 'PERSISTENT_ENABLED', True)
+    monkeypatch.setattr(Config, 'OAUTH_PERSISTENT_ENABLED', False)
+
+    await Config.seed_defaults(
+        {
+            'oauth.enable_signup': True,
+            'ui.watermark': 'custom',
+        }
+    )
+
+    async with session_factory() as session:
+        rows = (await session.execute(select(Config).order_by(Config.key))).scalars().all()
+
+    assert [(row.key, row.value) for row in rows] == [('ui.watermark', 'custom')]
+    await engine.dispose()

@@ -93,17 +93,6 @@ MODELS_CONFIG_KEYS = {
     'DEFAULT_MODEL_METADATA': 'models.default_metadata',
     'DEFAULT_MODEL_PARAMS': 'models.default_params',
 }
-SUBAGENTS_CONFIG_KEYS = {
-    'ENABLE_SUBAGENTS': 'subagents.enable',
-    'SUBAGENTS_BACKGROUND_ENABLED': 'subagents.background_enabled',
-    'SUBAGENTS_MAX_CONCURRENT': 'subagents.max_concurrent',
-    'SUBAGENTS_MAX_ASYNC': 'subagents.max_async',
-    'SUBAGENTS_MAX_ITERATIONS': 'subagents.max_iterations',
-    'SUBAGENTS_MAX_OUTPUT': 'subagents.max_output',
-    'SUBAGENTS_SYSTEM_PROMPT': 'subagents.system_prompt',
-}
-
-
 async def get_config_values(key_map: dict[str, str]) -> dict:
     values = await Config.get_many(*key_map.values())
     return {field: values[storage_key] for field, storage_key in key_map.items() if storage_key in values}
@@ -1246,40 +1235,6 @@ async def set_models_config(request: Request, form_data: ModelsConfigForm, user=
             'default_pinned_models': values.get('DEFAULT_PINNED_MODELS'),
             'model_order_count': len(values.get('MODEL_ORDER_LIST') or []),
         },
-    )
-    return values
-
-
-class SubagentsConfigForm(BaseModel):
-    ENABLE_SUBAGENTS: bool
-    SUBAGENTS_BACKGROUND_ENABLED: bool
-    SUBAGENTS_MAX_CONCURRENT: int
-    SUBAGENTS_MAX_ASYNC: int
-    SUBAGENTS_MAX_ITERATIONS: int
-    SUBAGENTS_MAX_OUTPUT: int
-    SUBAGENTS_SYSTEM_PROMPT: str
-
-
-@router.get('/subagents', response_model=SubagentsConfigForm)
-async def get_subagents_config(user=Depends(get_admin_user)):
-    return await get_config_values(SUBAGENTS_CONFIG_KEYS)
-
-
-@router.post('/subagents', response_model=SubagentsConfigForm)
-async def set_subagents_config(
-    request: Request,
-    form_data: SubagentsConfigForm,
-    user=Depends(get_admin_user),
-):
-    await Config.upsert(config_updates(form_data.model_dump(), SUBAGENTS_CONFIG_KEYS))
-    values = await get_config_values(SUBAGENTS_CONFIG_KEYS)
-    await publish_event(
-        request,
-        EVENTS.CONFIG_UPDATED,
-        actor=user,
-        subject_id='subagents',
-        subject_type='config',
-        data={'enabled': values.get('ENABLE_SUBAGENTS')},
     )
     return values
 
