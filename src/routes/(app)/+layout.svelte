@@ -260,8 +260,8 @@
 		}
 
 		clearChatInputStorage();
+		void checkLocalDBChats();
 		await Promise.all([
-			checkLocalDBChats(),
 			setBanners().catch((e) => console.error('Failed to load banners:', e)),
 			setTools().catch((e) => console.error('Failed to load tools:', e)),
 			setUserSettings(async () => {

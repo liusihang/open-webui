@@ -155,6 +155,22 @@ describe('v0.11 frontend integration guardrails', () => {
 		expect(emptyChatsBranch).not.toContain("await deleteDB('Chats')");
 	});
 
+	it('does not gate app loading on the legacy Chats IndexedDB request', () => {
+		const layout = source('../../../routes/(app)/+layout.svelte');
+		const onMountStart = layout.indexOf('onMount(async () => {');
+		const startupStart = layout.indexOf('\n\t\tclearChatInputStorage();', onMountStart);
+		const startupEnd = layout.indexOf('\n\t\tselectedTerminalId.set', startupStart);
+		const startup = layout.slice(startupStart, startupEnd);
+		const blockingStartup = startup.match(/await Promise\.all\(\[([\s\S]*?)\]\);/)?.[1];
+
+		expect(onMountStart).toBeGreaterThanOrEqual(0);
+		expect(startupStart).toBeGreaterThanOrEqual(0);
+		expect(startupEnd).toBeGreaterThan(startupStart);
+		expect(startup).toContain('void checkLocalDBChats();');
+		expect(blockingStartup).toBeDefined();
+		expect(blockingStartup).not.toContain('checkLocalDBChats()');
+	});
+
 	it('keeps custom and official locale keys from both sides of translation conflicts', () => {
 		for (const locale of ['en-US', 'zh-CN']) {
 			const messages = JSON.parse(
