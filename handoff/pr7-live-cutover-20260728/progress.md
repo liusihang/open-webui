@@ -184,3 +184,22 @@ Complete read-only preflight, resolve the exact deployment/rollback commands, an
 - Original worker 11 was then gracefully replaced by PID 2067 while workers 12/13/14 continued serving. Uvicorn did not emit `Application startup complete` for 2067 within the conservative log-marker timeout, so the guard stopped before touching worker 12.
 - Exact socket-to-PID evidence then proved PID 2067 was already serving real `/health` requests. A targeted rerun also covered all four current PIDs 12/13/14/2067 in 36 requests. Therefore the missing log line is not a readiness failure; the gate is changed from log presence to direct targeted request proof.
 - No container restart/recreate occurred, and the remaining three original workers are still untouched pending the revised guard.
+
+## Checkpoint 5d — all workers hot-reloaded; broader read-path defect found
+
+- Revised targeted-PID rotation completed for old workers 12/13/14. Final container PIDs are 2067/5347/5633/5811; every replacement accepted a directly mapped `/health` request before the next signal.
+- During the final three replacements, the continuous host `/health` monitor recorded 441/441 HTTP 200 responses, with zero failures. Container/image/start time stayed exact, health remained healthy, and restart count remained 0.
+- A one-off live semantic probe terminated only its own checked-out read connection and proved the installed `get()` retry recovers and returns a row.
+- Post-hotpatch concurrency passed 28/28 with zero errors: models 8, knowledge list 4, knowledge search 4, files list 4, files count 4, and two concurrent completed Chat SSE streams.
+- Final log audit found two traceback blocks from one `PgvectorClient.search()` OperationalError at 12:13:17, after the file copy but before any worker had reloaded it. This is not a new post-reload failure, but proves the root defect affects multiple idempotent pgvector read methods, not only `get()`.
+- Decision: do not declare the first patch complete. Add a failing `search()` invalidated-connection test and centralize one-retry handling across idempotent pgvector reads; writes remain non-retried.
+
+## Checkpoint 5 complete — final hotpatch accepted
+
+- RED/GREEN expanded the retry from `get()` to all idempotent pgvector read paths. Five focused invalidated-connection tests passed; non-invalidated errors and the one-retry cap remain covered.
+- The complete pgvector test file initially exposed a pre-existing merge regression: the HNSW underfill exact-scan test survived, but its implementation did not. Restored the prior bounded fallback; final file result is `7 passed, 1 warning`.
+- Final installed source SHA-256 is `2ce35641...`; owner-only backup run is `20260728T045907Z`.
+- Final four replacement workers are host PIDs `520375 521504 525837 528771`; every one accepted a targeted real request. Rotation monitor: 781 total `/health`, 0 failures; container/image/start time unchanged, restart 0.
+- Final live reconnect probe passed both `get()` and `search()` after terminating only two probe-owned checked-out read connections.
+- Final concurrency: 28/28, zero errors; two SSE streams completed. Final six-minute observation: 13/13 stable samples. Exact final log gate: four planned replacements/starts, zero traceback, zero pgvector read error, zero runtime/read timeout.
+- Runtime decision: retain current live at four workers. Durability decision: do not recreate from the old image; build a future immutable image from `8a9395179` before any planned restart/recreate.

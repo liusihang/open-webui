@@ -36,11 +36,11 @@ Before mutation, record the live compose checksum, container ID, image/tag/diges
    - Confirm exact image ID, health, restart count, four stable worker PIDs, and DB revision.
    - Verify authentication, Chat, Agent, SSE, and critical read paths against formal live.
    - Inspect only exact deployment-time log windows; no broad Bifrost log scans.
-5. **Observation and decision** — in progress
+5. **Observation and decision** — complete
    - Observe health, workers, resource use, errors, and restarts for a bounded window.
    - Roll back on any gate failure; otherwise retain the new live release.
    - Per user direction, do not rebuild/recreate the running service for the pgvector issue. Prepare a tested single-file hotpatch and only use a verified graceful sequential worker reload; otherwise stop before signalling workers.
-6. **Documentation and handoff** — pending
+6. **Documentation and handoff** — complete
    - Record commands, evidence, backups, and final state.
    - Commit only verified handoff/script changes; do not push.
 
@@ -60,4 +60,4 @@ Before mutation, record the live compose checksum, container ID, image/tag/diges
 
 ## Current decision
 
-Fresh rollback backup is verified. Prepare the dedicated formal runtime while old live serves, then run the provider gate and enter maintenance only if runtime is exact and healthy.
+Formal live is accepted and retained on PR7 with four workers. The running container is hotpatched and must not be recreated from the current image; build an immutable image from commit `8a9395179` before the next planned restart/recreate.

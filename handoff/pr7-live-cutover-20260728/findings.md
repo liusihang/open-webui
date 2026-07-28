@@ -122,3 +122,15 @@
 - Uvicorn's `Application startup complete` log marker was absent for the first replacement even after it had begun accepting requests. Treating the log as the sole readiness truth produced a safe false negative.
 - The stronger truth surface is an established keep-alive socket mapped through `/proc/<pid>/fd` and `/proc/<pid>/net/tcp`, followed by a second HTTP 200 `/health` on that same socket. PID 2067 passed this direct proof; one targeted sample also reached all current workers 12/13/14/2067.
 - Subsequent replacements are gated on the newly created PID accepting a mapped real request, plus four process entries, container health/restart/hash anchors, and host `/health`. Missing log text no longer blocks an otherwise proven-ready worker.
+
+## Retry scope correction
+
+- The same stale checked-out connection failure occurred in `PgvectorClient.search()` at 12:13:17, proving a `get()`-only retry treats one symptom rather than the read-path class of failure.
+- Safe scope is all idempotent vector reads (`search`, `hybrid_search`, `query`, `get`, and `has_collection`) behind one invalidated-connection retry helper. Insert/upsert/delete/reset remain unchanged and never auto-retry.
+- The 12:13 event was executed by an original worker that had imported the pre-hotpatch module; it predates the first worker reload. It still invalidates a final go decision until the broader read helper is tested, reinstalled, and all four current workers are reloaded again.
+
+## Final live decision
+
+- The centralized read retry and restored exact-scan fallback are loaded by all four final workers and proven by targeted sockets, real self-invalidated reads, concurrent knowledge/file/model/SSE traffic, and a stable six-minute window.
+- Current live runtime is GO and remains in service. No rollback was invoked.
+- The image itself is not yet durable because the source file was copied into the existing container. A container recreate would discard the fix. Therefore any future recreate/restart from image `sha256:ab6d8f...` is NO-GO until an immutable image is built from commit `8a9395179` and reaccepted.
