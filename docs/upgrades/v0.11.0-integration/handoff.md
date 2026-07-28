@@ -120,3 +120,15 @@
   - Node 22 Alpine: `sha256:2289fb1fba0f4633b08ec47b94a89c7e20b829fc5679f9b7b298eaa2f1ed8b7e`
   - Python 3.11 slim Bookworm: `sha256:b18992999dbe963a45a8a4da40ac2b1975be1a776d939d098c647482bcad5cba`
 - The integration worktree has a `58 MB` generated `static/pyodide` cache matching the current lock; it may be overlaid onto the clean archive as a validated dependency seed, while the committed source remains the image revision authority.
+
+### Post-merge verification checkpoint
+
+- The three repair commits and their handoffs are present together on the integration branch.
+- Focused Agent run read/event/main-route slice: `103 passed`, `35 deselected`, `12 warnings`.
+- Startup/orjson/Alembic/dependency/migration-graph contracts: `8 passed`, `1 warning`.
+- A fresh SQLite database upgraded from empty to `a11c0d3f0bd0`; `alembic current` and `alembic heads` both report the same single merge head.
+- Full backend suite on that migrated isolated database: `1256 passed`, `15 warnings` in `29.79s`.
+- Full frontend suite with Node `v22.22.0`: `35/35` files and `386/386` tests passed.
+- Production frontend build with Node `v22.22.0` and an 8 GB heap: Pyodide `314.0.3` cache reused, `6408` modules transformed, adapter-static wrote `build`, and the build completed in `1m11s`.
+- Changed Python files compile; Ruff `F821`, Prettier for the locale/test scope, and `git diff --check` pass. Prettier emits only the repository's existing `pluginSearchDirs` deprecation warning.
+- The source worktree remained clean after the full backend suite and production frontend build.
