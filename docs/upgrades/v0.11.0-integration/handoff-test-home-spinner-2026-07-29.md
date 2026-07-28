@@ -8,9 +8,39 @@ Determine why `http://192.168.2.238:18085/` remains on the initial loading spinn
 
 - Authorization: received 2026-07-29 after root-cause diagnosis.
 - Truth surface: source worktree, resulting hot-patch image on `aiserver`, isolated `open-webui-pr7` container, and a real authenticated browser against port 18085.
-- Current checkpoint: preflight; no test-stack mutation has occurred in the fix phase yet.
-- Intended image path: build frontend assets once, layer only those assets plus any required runtime source files onto the currently running image, and recreate only `open-webui-pr7`.
+- Current checkpoint: second hot-patch accepted on the isolated test stack, including the exact permanently blocked IndexedDB E2E that reproduced the user's post-login spinner.
+- Implemented image path: built frontend assets once, layered only `/app/build` onto the locked v0.11 test base image, and recreated only `open-webui-pr7`.
 - Stop/rollback condition: wrong source/image/compose target, failed focused tests or frontend build, unhealthy replacement container, wrong image at runtime, or failed empty-IndexedDB browser regression.
+
+### Reopened after user retest
+
+- User truth surface: after the first hot-patch, the user's existing browser still remained on the post-login spinner at port 18085.
+- Previous acceptance gap: the browser regression covered a valid empty database whose `open()` resolved; it did not cover a permanently pending `indexedDB.open()`/legacy-database request.
+- Source gap: `checkLocalDBChats()` is still an awaited member of the app-layout startup `Promise.all`, so any browser-local IndexedDB request that never resolves still keeps `loaded=false` forever.
+- Current checkpoint: complete. The stronger condition was reproduced, guarded by a failing test, fixed by moving the optional legacy check out of the blocking startup gate, and accepted in the same injected browser context.
+- Current service mutation in this reopened phase: only `open-webui-pr7` was recreated onto `open-webui:v011-hotfix-fd8fe181823d`; formal live and dependent services were not restarted.
+
+### Fix checkpoint 4: permanently blocked IndexedDB request
+
+- Reproduced against the first hot-patch image with a real `IDBOpenDBRequest` held permanently in the `blocked` state. The browser showed the same sidebar-plus-central-spinner UI.
+- During that reproduction, auth/config/banner/tools/settings/models requests all returned 200 and the browser console had no error; the only diagnostic entry confirmed that `Chats` had been redirected to the blocked upgrade request.
+- Screenshot before the second fix: `output/playwright/v011-home-spinner-20260729/blocked-open-before-second-hotfix.png`.
+- Root cause: the optional legacy migration call `checkLocalDBChats()` remained inside the awaited app-startup `Promise.all`, so a browser-level IndexedDB request with no success/error event kept `loaded=false` forever.
+- TDD red: the focused integration suite ran 27 tests with exactly one expected failure proving the legacy call was still in the blocking startup gate.
+- Minimal fix: start `checkLocalDBChats()` with `void` before the blocking network initialization set; the migration UI may still appear when the request eventually resolves, but it can no longer prevent the app from rendering.
+- TDD green: the same suite passed 27/27.
+- Source fix: commit `fd8fe181823dd0e71071a025cac74ef95e05489a` (`fix(frontend): decouple legacy chat database startup`).
+- Build checkpoint: the first production-build attempt reached chunk rendering but hit Node's default heap limit and exited 134. No image was packaged from that failed output; after host-memory verification, the successful retry used an explicit 8 GB V8 heap.
+- Build completion: `NODE_OPTIONS=--max-old-space-size=8192 APP_BUILD_HASH=fd8fe181823d ./node_modules/.bin/vite build` completed successfully in 57.83 seconds. `build/_app/version.json` contains the full source commit and the emitted source map contains the non-blocking `void checkLocalDBChats()` call.
+- Second hot-patch artifact: `output/playwright/v011-home-spinner-20260729/openwebui-v011-hotfix-fd8fe181823d-context.tar.gz`, SHA-256 `4aa2a886a982178df46a5f937dde42230a0bbf923508c045e1a2062a68a933d9`.
+- Second thin image: `open-webui:v011-hotfix-fd8fe181823d`, image ID `sha256:c05f9e01b67bb33f409a53eaf53ac2073fcc189f9e23607ccc870a8444252874`, size 2,312,420,436 bytes. It is based directly on `open-webui:v011-test-4d3543438b-slim`, not stacked on the first hot-patch image.
+- Deployment overlay: `/home/aiserver/staging/openwebui-pr7-eea11194ed-test/compose.webui-v011-hotfix-fd8fe181823d.yaml`; durable source copies are `deployment/Dockerfile.hotpatch-fd8fe181823d` and `deployment/compose.webui-v011-hotfix-fd8fe181823d.yaml`.
+- Rollback: `/home/aiserver/staging/openwebui-pr7-eea11194ed-test/backups/pre-hotpatch-fd8fe181823d/rollback-open-webui-pr7.sh` restores the pre-second-hot-patch Compose surface.
+- Runtime acceptance: the test container is healthy with restart count 0, frontend version `fd8fe181823d…`, Redis keepalive and 30-second health check enabled, all three health/version endpoints successful, and authenticated `/api/models` returned 35 models.
+- Strong E2E acceptance: the retained second browser page still held `__codex_blocked_chatdb__` version 1 open, while an intercepted `indexedDB.open('Chats')` on the main page remained `readyState=pending`. Despite that exact fault, the authenticated home page rendered its navigation, mode controls, selected model, composer, and suggestions.
+- Strong E2E network/console evidence: all initialization APIs returned HTTP 200; the console contained only the expected `[codex-diagnostic]` info message, with 0 errors and 0 warnings. Screenshot: `output/playwright/v011-home-spinner-20260729/blocked-open-after-second-hotfix.png`.
+- Clean-session E2E also rendered the complete authenticated home page with all initialization APIs at HTTP 200 and 0 console errors/warnings. Screenshot: `output/playwright/v011-home-spinner-20260729/clean-session-after-second-hotfix.png`.
+- Post-deployment log audit found 0 runtime error signatures; health remained healthy, restart count 0, and `OOMKilled=false`. Formal live remained healthy on the unchanged image ID `sha256:ab6d8f1816a40750a98bdcb18e5a7bd419869c43825a66631acc7f718e6f469b` with restart count 0.
 
 ### Fix checkpoint 1: source and TDD
 
@@ -53,7 +83,7 @@ Determine why `http://192.168.2.238:18085/` remains on the initial loading spinn
 
 - Browser: a fresh Playwright session against the exact LAN URL, including DOM snapshot, console errors, failed requests, and screenshot.
 - Live service: `aiserver` container `open-webui-pr7`, its exact image/health/restart state, request logs, and relevant API responses.
-- Source: `/Users/liusihang/openwebui/.worktrees/v011-upstream-integration-base`, image source commit `4d3543438b6b147ae60f17a9b57b2355a0a026d0`.
+- Source: `/Users/liusihang/openwebui/.worktrees/v011-upstream-integration-base`, accepted hot-patch source commit `fd8fe181823dd0e71071a025cac74ef95e05489a`.
 
 ## Completed actions
 
@@ -79,14 +109,16 @@ Determine why `http://192.168.2.238:18085/` remains on the initial loading spinn
 | Identify the first failing browser/runtime boundary | complete | `checkLocalDBChats()` self-deadlocks while deleting its still-open empty `Chats` database                                                                                          |
 | Correlate with exact container/API/log evidence     | complete | All blocking APIs can be 200 during the spinner; forced `/api/models` 500 does not prevent rendering                                                                               |
 | State root cause and minimal fix options            | complete | Immediate recovery: clear the site's `Chats` IndexedDB/site data. Product fix: close `DB` before deletion and avoid making legacy local-chat cleanup an unbounded app-loading gate |
+| Permanently blocked IndexedDB regression            | complete | A real pending `IDBOpenDBRequest` remains pending while the full authenticated home page renders; console has 0 errors and 0 warnings                                              |
+| Second thin hot-patch deployment                    | complete | Test container runs image ID `c05f9e01…`, is healthy with restart count 0, and formal live is unchanged                                                                            |
 
 ## Current state
 
-- Root cause of the reported permanent spinner is the browser-local empty `Chats` IndexedDB self-deadlock.
-- The empty IndexedDB self-deadlock and integration-only missing `handledSettingsUrl` declaration are fixed in source commit `af2d1b348085…` and verified in the deployed frontend.
+- Root cause of the reported permanent spinner is allowing optional legacy `Chats` IndexedDB migration/cleanup to remain in the blocking app-startup gate. An empty database exposed a self-deadlock, while a permanently pending open request exposed the broader unbounded-wait failure.
+- The missing `handledSettingsUrl` declaration and empty-database self-deadlock are fixed in `af2d1b348085…`; the broader startup-gate fix is in `fd8fe181823d…`. Both commits are present in the deployed frontend.
 - The test deployment now guards cached Redis sockets with a 30-second health check and TCP keepalive; the reconnect mechanism passed an isolated forced-idle-timeout probe.
-- Test service `open-webui-pr7` runs the thin hot-patch image. Formal live remains unchanged.
+- Test service `open-webui-pr7` runs thin hot-patch image `open-webui:v011-hotfix-fd8fe181823d` and passed both strong injected-fault and clean-session E2E. Formal live remains unchanged.
 
 ## Next step
 
-Have the user retry the existing browser session at `http://192.168.2.238:18085/`. If it still displays cached old assets, perform a hard refresh once; clearing site data is no longer required for the empty-IndexedDB condition. Decide separately whether and when to promote the source commit and Redis Compose settings beyond the isolated test stack.
+Have the user retry the existing browser session at `http://192.168.2.238:18085/`. The deployed build no longer waits for legacy IndexedDB before rendering, including when its open request never settles. Promotion beyond the isolated test stack remains a separate authorization decision.
