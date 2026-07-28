@@ -54,3 +54,57 @@
 - Run authenticated browser acceptance and isolated multi-worker runtime acceptance on a disposable integration environment before any separately authorized live cutover.
 - `npm ci` reports 23 findings in the locked dependency tree (2 low, 11 moderate, 9 high, 1 critical); they are inherited from the integrated lock and were not auto-fixed because that would be a separate dependency change.
 - Existing repository-wide Svelte strict-type/a11y warnings remain; the production build and full frontend tests pass, but this integration does not claim a warning-free `svelte-check` baseline.
+
+## Independent review follow-up (2026-07-28)
+
+### Repair tasks
+
+| Repair | Thread | Worktree | Scope | Status |
+|---|---|---|---|---|
+| A | `019fa8e1-7325-7230-a1d6-5925284c7f5c` | `/Users/liusihang/.codex/worktrees/fc9a/openwebui` | Restore v0.11 HTTP orjson activation and Chat/ChatMessage Alembic metadata imports | in progress |
+| B | `019fa8e1-7328-7d60-ae12-156dd036a773` | `/Users/liusihang/.codex/worktrees/9d34/openwebui` | Enforce Agent run owner/admin reads and missing-run 404 contracts | in progress |
+| C | `019fa8e1-7326-7250-847e-b82616a7e495` | `/Users/liusihang/.codex/worktrees/2df6/openwebui` | Remove excluded official Sub-agents locale residue and strengthen the guard | in progress |
+
+- All repair tasks start from integration HEAD `51ac3be552df87c9a87bd3f647905a47b4588ee1` and own disjoint files.
+- Each task must use test-first RED/GREEN evidence, commit its changes, and maintain a repair-specific handoff.
+- The root checkout remains outside the repair truth surface.
+
+### Isolated test-stack preflight
+
+- Scope: only `aiserver:/home/aiserver/staging/openwebui-pr7-eea11194ed-test`, service `open-webui-pr7`; formal `open-webui` remains read-only.
+- Preflight time: `2026-07-28T21:20:18+08:00`.
+- Test rollback container/image:
+  - container ID `715d9301220d94b8e4bb1d58a01b67c17358fca7d7bb1ad2465885b2b22af714`
+  - tag `open-webui:pr7-chat-agent-dual-mode-1d8dba8a7-slim`
+  - image ID `sha256:ab6d8f1816a40750a98bdcb18e5a7bd419869c43825a66631acc7f718e6f469b`
+  - `running`, `healthy`, restart count `0`; `/health` and `/health/db` both returned true.
+- Formal live anchor: container `open-webui`, the same image ID, `running`, `healthy`, restart count `0`. It must remain unchanged before and after the isolated cutover.
+- AgentScope runtime anchor: `openwebui-pr7-agentscope-runtime`, image ID `sha256:f7396ba23e49f934216ba8fc4b38c695b7f639722d852b44234769c66ca7f6e9`, `running`, `healthy`, restart count `0`.
+- The test WebUI was created from this exact Compose layer order; the base file alone is not the runtime truth:
+  1. `compose.yaml`
+  2. `compose.webui-rebuild-eaff69b0d317.yaml`
+  3. `compose.webui-eaff69-no-migrations.yaml`
+  4. `compose.webui-4a4e43e206.yaml`
+  5. `compose.agent-runtime-742f686182.yaml`
+  6. `compose.latest-candidate.yaml`
+- Deployment will preserve the first five layers, add a new v0.11 WebUI-only override, and recreate only `open-webui-pr7` with `--no-deps --force-recreate`.
+
+### Planned rebuild/deployment parameters
+
+- Source ref: pending merged and verified repair commit on `codex/v011-upstream-integration-base`.
+- Build input: clean `git archive` of that exact commit.
+- Build host: `aiserver`.
+- Image tag: pending `open-webui:v011-test-<short-sha>`.
+- Profile: external-services slim, matching the isolated stack's current WebUI profile.
+- Proxy/mirror: Clash `http://192.168.2.201:7897` and the already validated domestic base-image mirrors when required.
+- Acceptance: image inspect, Alembic/boot completion, container healthy with restart count zero, `/health`, `/health/db`, `/api/version`, four-worker process evidence, AgentScope runtime preservation, focused feature probes, and formal-live before/after identity.
+- Rollback: recreate only `open-webui-pr7` with the recorded previous image and Compose layer set if health, migration, logs, or probes fail.
+
+### Migration preflight checkpoint
+
+- The isolated PostgreSQL database is `webui_pr7`, currently at Alembic revision `c0d3b4a5e6f7`, size `421 MB`.
+- Data anchors before deployment: `334` chats, `455` Agent runs, and `4011` Agent run events.
+- Normalized-email duplicate preflight returned zero rows, so the v0.11 unique lower-email index is not blocked by current test data.
+- The five official target columns and three target indexes checked by the v0.11 migration branch are not yet present, which is consistent with the current custom-only revision.
+- The integrated migration graph has one merge head `a11c0d3f0bd0`, merging current custom head `c0d3b4a5e6f7` with official branch head `f0bd01a18a3d`.
+- Before touching the test database, create and checksum a PostgreSQL custom-format backup, restore it into a disposable rehearsal database, and run the candidate image's Alembic upgrade there first.
