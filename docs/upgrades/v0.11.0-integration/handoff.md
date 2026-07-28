@@ -132,3 +132,15 @@
 - Production frontend build with Node `v22.22.0` and an 8 GB heap: Pyodide `314.0.3` cache reused, `6408` modules transformed, adapter-static wrote `build`, and the build completed in `1m11s`.
 - Changed Python files compile; Ruff `F821`, Prettier for the locale/test scope, and `git diff --check` pass. Prettier emits only the repository's existing `pluginSearchDirs` deprecation warning.
 - The source worktree remained clean after the full backend suite and production frontend build.
+
+### Exact-source test image checkpoint
+
+- Image source authority: committed source `4d3543438b6b147ae60f17a9b57b2355a0a026d0`; clean archive checksum `e070a21b6ff99a80264fefb868095fed8f3cff390d5bafccaab76b9af740904f`.
+- Remote build completed at `2026-07-28T22:21:59+08:00` and produced `open-webui:v011-test-4d3543438b-slim`.
+- Independent image inspection passed:
+  - image ID `sha256:4cc390c27e677220516c8c627c1d490001cf89f8d9183dff41548792606dbd5b`
+  - OCI source revision `4d3543438b6b147ae60f17a9b57b2355a0a026d0`
+  - `WEBUI_BUILD_VERSION=4d3543438b`
+  - created `2026-07-28T14:07:25.670357275Z`; size `2056352528` bytes
+- Frontend and image layer export completed successfully. BuildKit reported transient local cache-export layer-lock warnings after the image had already loaded; the build returned success, its status marker says `complete/verified`, and the independently inspected image metadata matches the requested source.
+- The secret-free, exact-target deployment and rollback artifacts are stored under `docs/upgrades/v0.11.0-integration/deployment/`. Formal live is not a target of these scripts.

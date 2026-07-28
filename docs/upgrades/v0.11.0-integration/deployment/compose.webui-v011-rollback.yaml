@@ -1,0 +1,6 @@
+services:
+  open-webui-pr7:
+    image: open-webui:pr7-chat-agent-dual-mode-1d8dba8a7-slim
+    environment:
+      ENABLE_DB_MIGRATIONS: "false"
+      UVICORN_WORKERS: "4"

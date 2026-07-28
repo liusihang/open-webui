@@ -33,6 +33,7 @@
 
 ## Migration contract
 
-- Custom Alembic head: `f8a9b0c1d2e3`.
+- Custom Alembic head at the integration parent: `c0d3b4a5e6f7`.
 - Official v0.11 head: `f0bd01a18a3d`.
-- Integration must produce one explicit compatible head, with duplicate normalized-email preflight and production-clone upgrade/rollback evidence before live deployment.
+- Integration head: `a11c0d3f0bd0`, an explicit merge of the custom and official branches.
+- Deployment requires a duplicate normalized-email preflight and upgrade/downgrade/re-upgrade evidence on a restored database copy before any target database is migrated.

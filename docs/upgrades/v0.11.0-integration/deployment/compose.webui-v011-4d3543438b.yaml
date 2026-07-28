@@ -1,0 +1,7 @@
+services:
+  open-webui-pr7:
+    image: open-webui:v011-test-4d3543438b-slim
+    environment:
+      ENABLE_DB_MIGRATIONS: "false"
+      ENABLE_ORJSON: "true"
+      UVICORN_WORKERS: "4"

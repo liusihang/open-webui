@@ -30,3 +30,7 @@ This integration brings official `open-webui/open-webui@v0.11.0` into the custom
 | D | Frontend/UI/accessibility | `src/`, frontend tests and assets |
 
 Each lane must commit its work and create a lane-specific handoff in this directory. Cross-lane file changes must be reported, not silently taken over.
+
+## Isolated deployment artifacts
+
+The `deployment/` directory contains the exact, secret-free Compose overrides and remote scripts used for the `aiserver` test-stack image inspection, PostgreSQL backup/rehearsal, WebUI-only cutover, runtime verification, and rollback. The scripts are intentionally pinned to source commit `4d3543438b6b147ae60f17a9b57b2355a0a026d0` and the named isolated stack; they are not formal-live deployment scripts.

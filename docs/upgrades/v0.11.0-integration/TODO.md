@@ -21,5 +21,9 @@
 - [x] Run production frontend build.
 - [x] Run automated Chat/Agent protocol, Terminal/Skill/OnlyOffice/retrieval/provider acceptance.
 - [x] Resolve read-only integration review findings and add regression guards.
+- [x] Build and independently inspect the exact-source external-services test image.
+- [ ] Back up the isolated PostgreSQL database and rehearse upgrade, downgrade, and re-upgrade on a restored copy.
+- [ ] Upgrade only the isolated test WebUI service and preserve its database, Redis, AgentScope runtime, and formal-live anchors.
+- [ ] Complete authenticated Agent-run authorization, orjson, health, version, four-worker, and AgentScope acceptance probes.
 - [ ] Run authenticated browser acceptance on a disposable integration environment.
 - [ ] Run isolated four-worker acceptance before any separately authorized live upgrade.
