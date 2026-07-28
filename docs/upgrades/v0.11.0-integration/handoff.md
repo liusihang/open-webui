@@ -62,12 +62,13 @@
 | Repair | Thread | Worktree | Scope | Status |
 |---|---|---|---|---|
 | A | `019fa8e1-7325-7230-a1d6-5925284c7f5c` | `/Users/liusihang/.codex/worktrees/fc9a/openwebui` | Restore v0.11 HTTP orjson activation and Chat/ChatMessage Alembic metadata imports | merged as `8b30479f2` |
-| B | `019fa8e1-7328-7d60-ae12-156dd036a773` | `/Users/liusihang/.codex/worktrees/9d34/openwebui` | Enforce Agent run owner/admin reads and missing-run 404 contracts | in progress |
+| B | `019fa8e1-7328-7d60-ae12-156dd036a773` | `/Users/liusihang/.codex/worktrees/9d34/openwebui` | Enforce Agent run owner/admin reads and missing-run 404 contracts | merged as `e70cb6a1f` |
 | C | `019fa8e1-7326-7250-847e-b82616a7e495` | `/Users/liusihang/.codex/worktrees/2df6/openwebui` | Remove excluded official Sub-agents locale residue and strengthen the guard | merged as `93f0d831f` |
 
 - All repair tasks start from integration HEAD `51ac3be552df87c9a87bd3f647905a47b4588ee1` and own disjoint files.
 - Each task must use test-first RED/GREEN evidence, commit its changes, and maintain a repair-specific handoff.
 - The root checkout remains outside the repair truth surface.
+- All three repair commits are now integrated. Their recorded RED/GREEN evidence is preserved in `handoff-review-fix-a.md`, `handoff-review-fix-b.md`, and `handoff-review-fix-c.md`.
 
 ### Isolated test-stack preflight
 
