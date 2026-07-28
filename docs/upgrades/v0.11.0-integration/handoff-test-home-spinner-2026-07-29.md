@@ -46,6 +46,7 @@ Determine why `http://192.168.2.238:18085/` remains on the initial loading spinn
 - Browser regression: seeded the exact valid-but-empty version-1 `Chats` IndexedDB used to reproduce the bug, authenticated, and loaded port 18085. The complete home UI rendered; all initialization APIs returned 200; console reported 0 errors and 0 warnings.
 - Settings regression: navigating to `/?settings=general` opened the General settings dialog, stripped the query parameter as designed, and left the console at 0 errors and 0 warnings.
 - Browser screenshot: `output/playwright/v011-home-spinner-20260729/empty-chats-hotfix-home.png`.
+- Post-acceptance container log audit found 0 `Traceback`, `Broken pipe`, `ERROR`, or unhandled-exception signatures; health remained healthy, restart count 0, and `OOMKilled=false`.
 - Formal-live after-anchor: container `open-webui` remains healthy on the same image ID `ab6d8f1816a…`, restart count 0.
 
 ## Truth surfaces
