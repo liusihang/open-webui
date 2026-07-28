@@ -1827,6 +1827,14 @@ PENDING_USER_OVERLAY_TITLE = os.getenv('PENDING_USER_OVERLAY_TITLE', '')
 
 PENDING_USER_OVERLAY_CONTENT = os.getenv('PENDING_USER_OVERLAY_CONTENT', '')
 
+ANNOUNCEMENT_MODAL_ENABLED = os.getenv('ANNOUNCEMENT_MODAL_ENABLED', 'False').lower() == 'true'
+
+ANNOUNCEMENT_MODAL_KEY = os.getenv('ANNOUNCEMENT_MODAL_KEY', '')
+
+ANNOUNCEMENT_MODAL_TITLE = os.getenv('ANNOUNCEMENT_MODAL_TITLE', '')
+
+ANNOUNCEMENT_MODAL_CONTENT = os.getenv('ANNOUNCEMENT_MODAL_CONTENT', '')
+
 
 RESPONSE_WATERMARK = os.getenv('RESPONSE_WATERMARK', '')
 
@@ -3175,6 +3183,10 @@ DEFAULT_CONFIG = {
     'ui.default_group_id': DEFAULT_GROUP_ID,
     'ui.pending_user_overlay_title': PENDING_USER_OVERLAY_TITLE,
     'ui.pending_user_overlay_content': PENDING_USER_OVERLAY_CONTENT,
+    'ui.announcement_modal.enabled': ANNOUNCEMENT_MODAL_ENABLED,
+    'ui.announcement_modal.key': ANNOUNCEMENT_MODAL_KEY,
+    'ui.announcement_modal.title': ANNOUNCEMENT_MODAL_TITLE,
+    'ui.announcement_modal.content': ANNOUNCEMENT_MODAL_CONTENT,
     'ui.watermark': RESPONSE_WATERMARK,
     'user.permissions': USER_PERMISSIONS,
     'folders.enable': ENABLE_FOLDERS,

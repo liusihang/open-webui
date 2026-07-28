@@ -3892,6 +3892,10 @@ async def get_app_config(request: Request):
         'user.permissions',
         'ui.pending_user_overlay_title',
         'ui.pending_user_overlay_content',
+        'ui.announcement_modal.enabled',
+        'ui.announcement_modal.key',
+        'ui.announcement_modal.title',
+        'ui.announcement_modal.content',
         'ui.watermark',
     )
     conversation_mode_profiles = await _get_app_config_conversation_mode_profiles(request, user)
@@ -4005,6 +4009,12 @@ async def get_app_config(request: Request):
                 'ui': {
                     'pending_user_overlay_title': config.get('ui.pending_user_overlay_title'),
                     'pending_user_overlay_content': config.get('ui.pending_user_overlay_content'),
+                    'announcement_modal': {
+                        'enabled': config.get('ui.announcement_modal.enabled'),
+                        'key': config.get('ui.announcement_modal.key'),
+                        'title': config.get('ui.announcement_modal.title'),
+                        'content': config.get('ui.announcement_modal.content'),
+                    },
                     'response_watermark': config.get('ui.watermark'),
                     'iframe_csp': IFRAME_CSP,
                 },

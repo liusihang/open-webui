@@ -73,7 +73,7 @@ from open_webui.utils.groups import apply_default_group_assignment
 from open_webui.utils.misc import parse_duration, validate_email_format
 from open_webui.utils.rate_limit import RateLimiter
 from open_webui.utils.redis import get_redis_client
-from pydantic import BaseModel
+from pydantic import BaseModel, model_validator
 from sqlalchemy.ext.asyncio import AsyncSession
 
 router = APIRouter()
@@ -111,8 +111,21 @@ ADMIN_CONFIG_KEYS = {
     'ENABLE_USER_STATUS': 'users.enable_status',
     'PENDING_USER_OVERLAY_TITLE': 'ui.pending_user_overlay_title',
     'PENDING_USER_OVERLAY_CONTENT': 'ui.pending_user_overlay_content',
+    'ANNOUNCEMENT_MODAL_ENABLED': 'ui.announcement_modal.enabled',
+    'ANNOUNCEMENT_MODAL_KEY': 'ui.announcement_modal.key',
+    'ANNOUNCEMENT_MODAL_TITLE': 'ui.announcement_modal.title',
+    'ANNOUNCEMENT_MODAL_CONTENT': 'ui.announcement_modal.content',
     'RESPONSE_WATERMARK': 'ui.watermark',
 }
+
+ANNOUNCEMENT_ADMIN_CONFIG_FIELDS = frozenset(
+    {
+        'ANNOUNCEMENT_MODAL_ENABLED',
+        'ANNOUNCEMENT_MODAL_KEY',
+        'ANNOUNCEMENT_MODAL_TITLE',
+        'ANNOUNCEMENT_MODAL_CONTENT',
+    }
+)
 
 LDAP_SERVER_CONFIG_KEYS = {
     'label': 'ldap.server.label',
@@ -1149,12 +1162,33 @@ class AdminConfig(BaseModel):
     ENABLE_USER_STATUS: bool
     PENDING_USER_OVERLAY_TITLE: str | None = None
     PENDING_USER_OVERLAY_CONTENT: str | None = None
+    ANNOUNCEMENT_MODAL_ENABLED: bool = False
+    ANNOUNCEMENT_MODAL_KEY: str | None = None
+    ANNOUNCEMENT_MODAL_TITLE: str | None = None
+    ANNOUNCEMENT_MODAL_CONTENT: str | None = None
     RESPONSE_WATERMARK: str | None = None
+
+    @model_validator(mode='after')
+    def validate_enabled_announcement(self):
+        if not self.ANNOUNCEMENT_MODAL_ENABLED:
+            return self
+        if not (self.ANNOUNCEMENT_MODAL_KEY or '').strip():
+            raise ValueError('Announcement version key is required when the popup is enabled.')
+        if not (self.ANNOUNCEMENT_MODAL_CONTENT or '').strip():
+            raise ValueError('Announcement content is required when the popup is enabled.')
+        return self
+
+
+def admin_config_updates(form_data: AdminConfig) -> dict:
+    data = form_data.model_dump()
+    for field in ANNOUNCEMENT_ADMIN_CONFIG_FIELDS - form_data.model_fields_set:
+        data.pop(field, None)
+    return config_updates(data, ADMIN_CONFIG_KEYS)
 
 
 @router.post('/admin/config')
 async def update_admin_config(request: Request, form_data: AdminConfig, user=Depends(get_admin_user)):
-    updates = config_updates(form_data.model_dump(), ADMIN_CONFIG_KEYS)
+    updates = admin_config_updates(form_data)
     updates['folders.max_file_count'] = int(form_data.FOLDER_MAX_FILE_COUNT) if form_data.FOLDER_MAX_FILE_COUNT else ''
     updates['automations.max_count'] = int(form_data.AUTOMATION_MAX_COUNT) if form_data.AUTOMATION_MAX_COUNT else ''
     updates['automations.min_interval'] = (
