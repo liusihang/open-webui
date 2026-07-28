@@ -49,9 +49,9 @@
 
 ## Residual deployment gates
 
-- No production clone or live database was used. Run Lane A's normalized-email duplicate preflight and migration rehearsal on an authorized clone before deployment.
-- Validate the functional email index on the deployment's actual MariaDB/MySQL/PostgreSQL engine; MariaDB may require the documented generated-column alternative.
-- Run authenticated browser acceptance and isolated multi-worker runtime acceptance on a disposable integration environment before any separately authorized live cutover.
+- Formal live was not used. Before any separately authorized formal-live cutover, repeat the normalized-email duplicate preflight, checksummed quiesced backup, and snapshot-restore rehearsal against an authorized formal-live clone.
+- The functional normalized-email index is now validated on the isolated target's PostgreSQL engine. A future MariaDB/MySQL target still requires its own engine-specific validation; MariaDB may require the documented generated-column alternative.
+- Isolated four-worker and AgentScope runtime acceptance is complete. Authenticated browser acceptance remains a separate formal-live gate.
 - `npm ci` reports 23 findings in the locked dependency tree (2 low, 11 moderate, 9 high, 1 critical); they are inherited from the integrated lock and were not auto-fixed because that would be a separate dependency change.
 - Existing repository-wide Svelte strict-type/a11y warnings remain; the production build and full frontend tests pass, but this integration does not claim a warning-free `svelte-check` baseline.
 
@@ -90,16 +90,16 @@
   6. `compose.latest-candidate.yaml`
 - Deployment will preserve the first five layers, add a new v0.11 WebUI-only override, and recreate only `open-webui-pr7` with `--no-deps --force-recreate`.
 
-### Planned rebuild/deployment parameters
+### Executed rebuild/deployment parameters
 
-- Source ref: pending merged and verified repair commit on `codex/v011-upstream-integration-base`.
-- Build input: clean `git archive` of that exact commit.
+- Source ref: `4d3543438b6b147ae60f17a9b57b2355a0a026d0` on `codex/v011-upstream-integration-base`.
+- Build input: clean `git archive` of that exact commit, plus only the validated generated Pyodide dependency seed.
 - Build host: `aiserver`.
-- Image tag: pending `open-webui:v011-test-<short-sha>`.
+- Image tag: `open-webui:v011-test-4d3543438b-slim`; image ID `sha256:4cc390c27e677220516c8c627c1d490001cf89f8d9183dff41548792606dbd5b`.
 - Profile: external-services slim, matching the isolated stack's current WebUI profile.
 - Proxy/mirror: Clash `http://192.168.2.201:7897` and the already validated domestic base-image mirrors when required.
-- Acceptance: image inspect, Alembic/boot completion, container healthy with restart count zero, `/health`, `/health/db`, `/api/version`, four-worker process evidence, AgentScope runtime preservation, focused feature probes, and formal-live before/after identity.
-- Rollback: recreate only `open-webui-pr7` with the recorded previous image and Compose layer set if health, migration, logs, or probes fail.
+- Acceptance completed: image inspect, Alembic/boot completion, healthy container with restart count zero, `/health`, `/health/db`, `/api/version`, four-worker process/effect evidence, real Chat and AgentScope inference, focused security/performance probes, and formal-live before/after identity.
+- Rollback: stop only `open-webui-pr7`, restore `webui_pr7` from the checksummed quiesced custom-format backup, then recreate only that service with recorded old image ID `sha256:ab6d8f1816a40750a98bdcb18e5a7bd419869c43825a66631acc7f718e6f469b`. Snapshot restore and re-upgrade were proven on the disposable database.
 
 ### Migration preflight checkpoint
 
@@ -156,3 +156,32 @@
 - Snapshot rollback dropped and recreated only the disposable database from the verified backup, restoring revision `c0d3b4a5e6f7` with all target v0.11 columns/indexes absent.
 - A second candidate migration returned the restored database to `a11c0d3f0bd0`.
 - Data anchors stayed identical across restore, upgrade, rollback restore, and re-upgrade: `334` chats, `455` Agent runs, `4011` Agent run events.
+
+### Isolated test-stack cutover checkpoint
+
+- Cutover completed at `2026-07-28T22:54:03+08:00`; only Compose service `open-webui-pr7` was recreated.
+- Quiesced real-database backup: `webui_pr7-pre-v011-quiesced-20260728T225027+0800.dump`, SHA-256 `84ac134b697819ef4231edb755e7c077397bc2a0945fcb5886a5bffe37fa5349`; its restore list passed before migration.
+- Real test database is at single head `a11c0d3f0bd0`, with data anchors unchanged at `334` chats, `455` Agent runs, and `4011` Agent run events.
+- Test WebUI container `2dd503fda40eb30c8df905df8287b99858c81707731717c2610ef010c027efc0` runs candidate image ID `sha256:4cc390c27e677220516c8c627c1d490001cf89f8d9183dff41548792606dbd5b`, is healthy, and has restart count zero.
+- Before/after anchors for all non-WebUI containers in Compose project `openwebui-pr7` are byte-identical. Formal-live container `open-webui` is also byte-identical before/after.
+- `/health` and `/health/db` return status true; `/api/version` reports `0.11.0` and deployment ID `pr7-6bca8dc71-test`.
+- Runtime import proves both `Request.json` and `JSONResponse.render` are patched by `open_webui.utils.json_response` with `ENABLE_ORJSON=true`.
+- AgentRun authorization probe: ordinary-user detail/list/SSE are all `404`; owner-admin detail/list/SSE are all `200`.
+- Four Uvicorn worker PIDs are present with no worker-death lifecycle or container restart evidence.
+- The legacy pinned-worker acceptance's first run closed an idle keep-alive socket while the preceding worker refreshed its model catalog; container health, worker PIDs, restart count, and WebUI/AgentScope error scans stayed clean. The v0.11 runner preserves the same assertions but performs already-pinned worker reads concurrently.
+
+### Four-worker and AgentScope acceptance checkpoint
+
+- The v0.11 acceptance runner completed with `ok: true`; evidence SHA-256 is `97b550613db4ce5a5d61d4bcdabcd5e289d6ebbc87f7986369546ebb676aafec`.
+- It pinned worker PIDs `11`, `12`, `13`, and `14`; every worker independently exposed model `bifrostapi.Cliproxy/gpt-5.5`, the same Chat/Agent profile revisions and defaults, and no public system prompt.
+- Real Chat streaming completed with `[DONE]`, 11 content deltas, and the requested marker.
+- A real AgentScope-backed run `d030be5f-ccaf-41eb-86d8-69cd7f9d8424` completed in `7.366s`; its event list includes `run.running`, `final.started`, `final.delta`, and `run.completed`, with the requested final marker.
+- The test runner's profile writes are revisioned and its worker test restores the prior Agent profile before returning; this is isolated test-stack state only.
+
+### Final isolated-stack audit
+
+- Completed at `2026-07-28T23:01:03+08:00` after the real Chat/Agent acceptance.
+- Candidate container remains `running`, `healthy`, restart count `0`, on exact image/source/build metadata; active worker PIDs are `11`, `12`, `13`, and `14`.
+- Database remains at `a11c0d3f0bd0`, with five target columns, three target indexes, and zero normalized-email duplicates. Post-acceptance counts are `334` chats, `456` Agent runs, and `4015` Agent run events; the one run and four events above the quiesced anchors are the recorded Agent acceptance run.
+- The quiesced rollback backup checksum was revalidated. Container logs since cold start contain no traceback, worker-death, segmentation-fault, or out-of-memory signal.
+- Current non-WebUI Compose anchors still match the pre-cutover file byte-for-byte, and formal-live container `open-webui` still matches its pre-cutover anchor byte-for-byte.
