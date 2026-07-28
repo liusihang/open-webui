@@ -7,15 +7,48 @@ expected_image_id=${EXPECTED_IMAGE_ID:-sha256:ab6d8f1816a40750a98bdcb18e5a7bd419
 expected_patch_sha=${EXPECTED_PATCH_SHA:?EXPECTED_PATCH_SHA is required}
 target=/app/backend/open_webui/retrieval/vector/dbs/pgvector.py
 health_url=${HEALTH_URL:-http://127.0.0.1/health}
+verify_only=${VERIFY_ONLY:-false}
+
+process_rows() {
+  docker exec -i "$container" python - <<'PY'
+from pathlib import Path
+
+for process_dir in Path('/proc').iterdir():
+    if not process_dir.name.isdigit():
+        continue
+    try:
+        status = (process_dir / 'status').read_text()
+        ppid = next(
+            line.split(':', 1)[1].strip()
+            for line in status.splitlines()
+            if line.startswith('PPid:')
+        )
+        command = (process_dir / 'cmdline').read_bytes().replace(b'\0', b' ').decode(errors='replace').strip()
+    except (FileNotFoundError, PermissionError, ProcessLookupError, StopIteration):
+        continue
+    print(f'{process_dir.name}\t{ppid}\t{command}')
+PY
+}
 
 workers() {
-  docker exec "$container" ps -eo pid=,ppid=,args= |
+  process_rows |
     awk -v master="$master_pid" '$2 == master && /multiprocessing.spawn/ {print $1}' |
     sort -n
 }
 
 worker_count() {
   workers | awk 'END {print NR + 0}'
+}
+
+terminate_worker() {
+  local worker_pid=$1
+  docker exec -i "$container" python - "$worker_pid" <<'PY'
+import os
+import signal
+import sys
+
+os.kill(int(sys.argv[1]), signal.SIGTERM)
+PY
 }
 
 ready_count() {
@@ -72,8 +105,7 @@ actual_image_id=$(docker inspect "$container" --format '{{.Image}}')
   exit 1
 }
 
-master_pid=$(docker exec "$container" ps -eo pid=,args= |
-  awk '/python3 -m uvicorn/ && /--workers 4/ {print $1; exit}')
+master_pid=$(process_rows | awk '/python3 -m uvicorn/ && /--workers 4/ {print $1; exit}')
 [[ -n "$master_pid" ]] || {
   echo uvicorn_master_missing
   exit 1
@@ -86,7 +118,20 @@ mapfile -t original_workers < <(workers)
   exit 1
 }
 
-assert_anchor
+if ! assert_anchor; then
+  echo initial_anchor_failed
+  echo "master_pid=$master_pid"
+  echo "workers=$(workers | tr '\n' ',')"
+  docker inspect "$container" --format 'container_id={{.Id}} image_id={{.Image}} health={{.State.Health.Status}} restart_count={{.RestartCount}} started_at={{.State.StartedAt}}'
+  docker exec "$container" sha256sum "$target"
+  exit 1
+fi
+if [[ "$verify_only" == true ]]; then
+  echo anchor_verified
+  echo "master_pid=$master_pid"
+  echo "workers=${original_workers[*]}"
+  exit 0
+fi
 availability_monitor &
 monitor_pid=$!
 
@@ -103,7 +148,7 @@ for old_pid in "${original_workers[@]}"; do
   }
 
   echo "replacing_worker=$old_pid"
-  docker exec "$container" kill -TERM "$old_pid"
+  terminate_worker "$old_pid"
   expected_ready=$((expected_ready + 1))
 
   replacement_ready=false
