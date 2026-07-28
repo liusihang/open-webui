@@ -20,11 +20,19 @@ depends_on: str | Sequence[str] | None = None
 
 INDEX_NAME = 'uq_user_email_lower'
 EMAIL_IS_NOT_NULL = sa.text('email IS NOT NULL')
-LOWER_EMAIL = sa.text('lower(email)')
+LOWER_EMAIL = sa.func.lower(sa.column('email'))
 
 
 def _index_exists() -> bool:
     conn = op.get_bind()
+    if conn.dialect.name == 'sqlite':
+        return (
+            conn.execute(
+                sa.text("SELECT 1 FROM sqlite_master WHERE type = 'index' AND name = :name"),
+                {'name': INDEX_NAME},
+            ).first()
+            is not None
+        )
     inspector = sa.inspect(conn)
     return INDEX_NAME in {index['name'] for index in inspector.get_indexes('user')}
 

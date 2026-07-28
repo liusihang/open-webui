@@ -13,10 +13,16 @@ def _load_script_directory() -> ScriptDirectory:
     return ScriptDirectory.from_config(config)
 
 
-def test_migration_graph_resolves_mode_profile_head():
+def test_migration_graph_resolves_single_v011_integration_head():
     script = _load_script_directory()
 
-    assert script.get_current_head() == 'c0d3b4a5e6f7'
+    assert script.get_current_head() == 'a11c0d3f0bd0'
+    integration_revision = script.get_revision('a11c0d3f0bd0')
+    assert integration_revision is not None
+    assert set(integration_revision.down_revision) == {
+        'c0d3b4a5e6f7',
+        'f0bd01a18a3d',
+    }
     assert script.get_revision('f0a1b2c3d4e5') is not None
     assert script.get_revision('e8c4b9a2d1f0') is not None
     assert script.get_revision('4de81c2a3af1') is not None
@@ -29,6 +35,7 @@ def test_migration_graph_resolves_mode_profile_head():
     assert script.get_revision('e7f8a9b0c1d2') is not None
     assert script.get_revision('f8a9b0c1d2e3') is not None
     assert script.get_revision('c0d3b4a5e6f7') is not None
+    assert script.get_revision('f0bd01a18a3d') is not None
 
 
 def test_migration_graph_keeps_legacy_knowledge_revision_upgradeable():

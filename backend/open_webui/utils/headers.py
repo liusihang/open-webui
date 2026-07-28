@@ -132,6 +132,8 @@ def parse_custom_headers(
         '{{USER_NAME}}': _get_user_value(user, 'name').strip() if user else '',
         '{{USER_EMAIL}}': _get_user_value(user, 'email').strip() if user else '',
         '{{USER_ROLE}}': _get_user_value(user, 'role') if user else '',
+        '{{USER_GROUPS}}': ','.join(group.name.strip() for group in user_groups) if user_groups else '',
+        '{{USER_GROUP_IDS}}': ','.join(group.id for group in user_groups) if user_groups else '',
         '{{USER_AGENT}}': user_agent,
     }
 
