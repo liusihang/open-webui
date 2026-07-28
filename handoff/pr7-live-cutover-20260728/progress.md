@@ -167,3 +167,11 @@ Complete read-only preflight, resolve the exact deployment/rollback commands, an
 - RED: a focused fake-session test proved an invalidated `OperationalError` returned `None` without retry; a non-invalidated database error remained a no-retry case.
 - GREEN: `get()` now rolls back, removes the invalid scoped session, and retries exactly once only when SQLAlchemy marks the connection invalidated. The focused pair passed `2 passed, 1 deselected`.
 - The first test command failed during collection because the lightweight local environment lacked the runtime `pgvector` package; the same test was rerun with an ephemeral `uv --with pgvector` dependency. No project dependency metadata was changed.
+
+## Checkpoint 5b — hotpatch/reload mechanics verified before live mutation
+
+- Live remains container `ae1b8583...`, image `sha256:ab6d8f...`, healthy, restart 0, with original host worker PIDs `115305 115306 115308 115309`.
+- Installed Uvicorn is 0.41.0. Its HUP path is sequential `terminate -> join -> start`, but does not wait for each replacement to complete application startup before moving to the next process.
+- To preserve serving capacity, the selected path replaces the four original workers one at a time through graceful `SIGTERM`, waits for the supervisor-created replacement plus an additional `Application startup complete` marker, four-worker count, container health, and `/health` before continuing.
+- A continuous host-port health monitor will run through all four replacements. Any anchor/hash/health/count failure stops the sequence; no container recreate or image rebuild is part of the procedure.
+- The local patched file SHA-256 is `11af129ee58ac85002dbf1764aae648adf3f4c001c3ed9af4374ab5ad808fade`; installation is guarded by the exact original SHA-256 `c5520a79...` and creates an owner-only host backup/manifest before replacement.

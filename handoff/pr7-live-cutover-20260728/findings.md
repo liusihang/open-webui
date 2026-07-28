@@ -110,3 +110,9 @@
 - The observed SQLAlchemy `OperationalError` marks the connection invalidated, but `PgvectorClient.get()` previously caught every exception, logged a traceback, and returned `None`. That converts a transient stale-connection event into a degraded knowledge read.
 - The smallest safe recovery is limited to the idempotent read method: rollback, discard the invalid scoped session, and retry once. Non-invalidated errors are not retried, and write paths remain unchanged.
 - Empty non-encrypted reads now also close their read-only transaction before returning `None`; this matches the successful-read transaction cleanup contract.
+
+## Reload decision
+
+- Uvicorn 0.41.0 HUP is process-sequential but not readiness-gated: it starts one replacement and immediately proceeds to terminate the next original worker.
+- A manually readiness-gated worker rotation is lower risk for this live service: each original worker receives graceful `SIGTERM`; the supervisor's five-second health loop detects exit and starts exactly one replacement; the next original worker is left untouched until four workers, a new startup-complete log marker, container health, and the host `/health` endpoint all converge.
+- The expected `Child process [...] died` supervisor messages are planned replacements, not a respawn loop. Exactly four and only within the controlled timestamp window are acceptable.
