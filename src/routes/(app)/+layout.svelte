@@ -59,6 +59,7 @@
 	let localDBChats = [];
 
 	let version;
+	let handledSettingsUrl = '';
 	let showAdminAnnouncementModal = false;
 	let pendingAdminAnnouncementModal = false;
 
@@ -84,7 +85,11 @@
 			localDBChats = chats.map((item, idx) => chats[chats.length - 1 - idx]);
 
 			if (localDBChats.length === 0) {
-				await deleteDB('Chats');
+				DB.close();
+				DB = null;
+				void deleteDB('Chats').catch((error) => {
+					console.warn('Failed to delete empty local Chats database', error);
+				});
 			}
 		} catch (error) {
 			// IndexedDB Not Found

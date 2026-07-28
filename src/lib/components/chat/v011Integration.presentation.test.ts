@@ -140,7 +140,19 @@ describe('v0.11 frontend integration guardrails', () => {
 
 		expect(layout).toContain('showAdminAnnouncementModal');
 		expect(layout).toContain('pendingAdminAnnouncementModal');
-		expect(layout).toContain('handledSettingsUrl');
+		expect(layout).toContain("let handledSettingsUrl = '';");
+	});
+
+	it('does not block app loading while deleting an empty legacy Chats database', () => {
+		const layout = source('../../../routes/(app)/+layout.svelte');
+		const emptyChatsBranch = layout.match(
+			/if \(localDBChats\.length === 0\) \{([\s\S]*?)\n\s*\}/
+		)?.[1];
+
+		expect(emptyChatsBranch).toBeDefined();
+		expect(emptyChatsBranch).toContain('DB.close();');
+		expect(emptyChatsBranch).toContain("void deleteDB('Chats')");
+		expect(emptyChatsBranch).not.toContain("await deleteDB('Chats')");
 	});
 
 	it('keeps custom and official locale keys from both sides of translation conflicts', () => {
