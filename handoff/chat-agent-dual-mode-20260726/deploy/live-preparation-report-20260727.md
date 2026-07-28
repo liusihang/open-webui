@@ -119,3 +119,7 @@ No formal upgrade is authorized by this preparation. A later cutover still requi
 The migration/release package is complete and technically ready for a separately authorized controlled cutover. The preparation also exposed a real operational flaw in the rehearsal method: same-host full restore can destabilize current workers. Therefore readiness is conditional on never repeating that restore on formal live storage; only the fresh dump and measured two-minute forward migration belong in the cutover window.
 
 The prepared smoke model is `gpt-5.5`; it passed isolated real inference but must be revalidated against the formal provider route immediately before cutover. Model selection remains outside Chat/Agent profile defaults.
+
+## Cutover payload supersession — 2026-07-28
+
+The historical staged-default table above records the 2026-07-27 preparation state. Before the authorized cutover, latest-image acceptance proved that `web_search_and_crawl` is not reproducible because the immutable candidate lacks `crawl4ai`; the isolated database also lacked `get-available-resources`. The reviewed live payload is therefore superseded by the exact accepted defaults: Chat empty capabilities, Agent Terminal `terminals` plus tool `sub_agent`, no Skills, empty prompts, and inherited filter/feature defaults.

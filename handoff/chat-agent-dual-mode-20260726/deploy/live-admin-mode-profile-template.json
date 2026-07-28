@@ -20,8 +20,8 @@
       "system_prompt": "",
       "defaults": {
         "terminal_id": "terminals",
-        "tool_ids": ["web_search_and_crawl", "sub_agent"],
-        "skill_ids": ["get-available-resources"],
+        "tool_ids": ["sub_agent"],
+        "skill_ids": [],
         "filter_ids": "inherit",
         "feature_ids": "inherit"
       }

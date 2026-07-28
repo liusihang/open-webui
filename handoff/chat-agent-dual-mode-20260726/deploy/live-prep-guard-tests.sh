@@ -59,6 +59,8 @@ expect_guard \
   "${tmp_dir}/profiles.out" \
   python3 "${RELEASE_DIR}/live-apply-admin-profiles.py"
 
+"${RELEASE_DIR}/test-live-admin-mode-profile-template.sh" > "${tmp_dir}/profile-template.out"
+
 resolved_image=$(docker compose -f "${COMPOSE_FILE}" -f "${OVERRIDE_FILE}" config --format json | jq -r '.services["open-webui"].image')
 resolved_workers=$(docker compose -f "${COMPOSE_FILE}" -f "${OVERRIDE_FILE}" config --format json | jq -r '.services["open-webui"].environment.UVICORN_WORKERS')
 resolved_migrations=$(docker compose -f "${COMPOSE_FILE}" -f "${OVERRIDE_FILE}" config --format json | jq -r '.services["open-webui"].environment.ENABLE_DB_MIGRATIONS')
@@ -84,4 +86,5 @@ fi
 
 printf 'guard_tests=passed\n'
 printf 'compose_override=passed\n'
+printf 'profile_template=accepted_latest_stack_defaults\n'
 printf 'live_anchor_unchanged=yes\n'
