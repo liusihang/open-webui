@@ -75,6 +75,13 @@ class FakeGetQuery:
             raise outcome
         return outcome
 
+    def first(self):
+        self.session.query_count += 1
+        outcome = self.session.outcomes.pop(0)
+        if isinstance(outcome, Exception):
+            raise outcome
+        return outcome
+
 
 class FakeGetSession:
     def __init__(self, outcomes):
@@ -91,6 +98,19 @@ class FakeGetSession:
 
     def remove(self):
         self.remove_count += 1
+
+
+class FakeInvalidatedSearchSession(FakeGetSession):
+    def __init__(self, outcomes):
+        super().__init__(outcomes)
+        self.execute_count = 0
+
+    def execute(self, statement):
+        self.execute_count += 1
+        outcome = self.outcomes.pop(0)
+        if isinstance(outcome, Exception):
+            raise outcome
+        return FakeExecuteResult(outcome)
 
 
 def _connection_invalidated_error():
@@ -138,6 +158,54 @@ def test_pgvector_get_stops_after_one_invalidated_connection_retry():
     )
 
     assert client.get(collection_name='collection-1') is None
+    assert client.session.query_count == 2
+    assert client.session.rollback_count == 2
+    assert client.session.remove_count == 1
+
+
+def test_pgvector_search_retries_once_after_invalidated_connection(monkeypatch):
+    client = pgvector.PgvectorClient.__new__(pgvector.PgvectorClient)
+    client.session = FakeInvalidatedSearchSession(
+        [_connection_invalidated_error(), [_row(1)]]
+    )
+    monkeypatch.setattr(client, 'adjust_vector_length', lambda vector: vector)
+
+    result = client.search(
+        collection_name='collection-1',
+        vectors=[[0.1, 0.2]],
+        limit=1,
+    )
+
+    assert result.ids == [['vector-1']]
+    assert client.session.execute_count == 2
+    assert client.session.rollback_count == 2
+    assert client.session.remove_count == 1
+
+
+def test_pgvector_query_retries_once_after_invalidated_connection():
+    rows = [SimpleNamespace(id='vector-1', text='text 1', vmetadata={'kind': 'safe'})]
+    client = pgvector.PgvectorClient.__new__(pgvector.PgvectorClient)
+    client.session = FakeGetSession([_connection_invalidated_error(), rows])
+
+    result = client.query(
+        collection_name='collection-1',
+        filter={'kind': 'safe'},
+        limit=1,
+    )
+
+    assert result.ids == [['vector-1']]
+    assert client.session.query_count == 2
+    assert client.session.rollback_count == 2
+    assert client.session.remove_count == 1
+
+
+def test_pgvector_has_collection_retries_once_after_invalidated_connection():
+    client = pgvector.PgvectorClient.__new__(pgvector.PgvectorClient)
+    client.session = FakeGetSession(
+        [_connection_invalidated_error(), SimpleNamespace(id='vector-1')]
+    )
+
+    assert client.has_collection('collection-1') is True
     assert client.session.query_count == 2
     assert client.session.rollback_count == 2
     assert client.session.remove_count == 1

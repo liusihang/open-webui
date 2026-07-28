@@ -1,5 +1,6 @@
 import json
 import logging
+from functools import wraps
 from typing import Any, Dict, List, Optional, Tuple
 
 from open_webui.config import (
@@ -58,6 +59,35 @@ VECTOR_OPCLASS = 'halfvec_cosine_ops' if USE_HALFVEC else 'vector_cosine_ops'
 Base = declarative_base()
 
 log = logging.getLogger(__name__)
+
+
+def _retry_invalidated_read(default):
+    def decorator(operation):
+        @wraps(operation)
+        def wrapped(self, *args, **kwargs):
+            for attempt in range(2):
+                try:
+                    return operation(self, *args, **kwargs)
+                except OperationalError as e:
+                    try:
+                        self.session.rollback()
+                    except Exception:
+                        if not e.connection_invalidated:
+                            raise
+                    if attempt == 0 and e.connection_invalidated:
+                        self.session.remove()
+                        log.warning(
+                            'Invalidated database connection during %s; retrying once',
+                            operation.__name__,
+                        )
+                        continue
+                    log.exception('Error during %s: %s', operation.__name__, e)
+                    return default
+            return default
+
+        return wrapped
+
+    return decorator
 
 
 def pgcrypto_encrypt(val, key):
@@ -407,6 +437,7 @@ class PgvectorClient(VectorDBBase):
             log.exception(f'Error during upsert: {e}')
             raise
 
+    @_retry_invalidated_read(default=None)
     def search(
         self,
         collection_name: str,
@@ -512,6 +543,7 @@ class PgvectorClient(VectorDBBase):
             metadatas = [[] for _ in range(num_queries)]
 
             if not results:
+                self.session.rollback()  # read-only transaction
                 return SearchResult(
                     ids=ids,
                     distances=distances,
@@ -530,11 +562,14 @@ class PgvectorClient(VectorDBBase):
 
             self.session.rollback()  # read-only transaction
             return SearchResult(ids=ids, distances=distances, documents=documents, metadatas=metadatas)
+        except OperationalError:
+            raise
         except Exception as e:
             self.session.rollback()
             log.exception(f'Error during search: {e}')
             return None
 
+    @_retry_invalidated_read(default=None)
     def hybrid_search(
         self,
         collection_name: str,
@@ -595,11 +630,14 @@ class PgvectorClient(VectorDBBase):
                 limit=limit,
                 hybrid_bm25_weight=hybrid_bm25_weight,
             )
+        except OperationalError:
+            raise
         except Exception as e:
             self.session.rollback()
             log.exception(f'Error during hybrid search: {e}')
             return None
 
+    @_retry_invalidated_read(default=None)
     def query(self, collection_name: str, filter: Dict[str, Any], limit: Optional[int] = None) -> Optional[GetResult]:
         try:
             if PGVECTOR_PGCRYPTO:
@@ -631,6 +669,7 @@ class PgvectorClient(VectorDBBase):
                 results = query.all()
 
             if not results:
+                self.session.rollback()  # read-only transaction
                 return None
 
             ids = [[result.id for result in results]]
@@ -643,57 +682,51 @@ class PgvectorClient(VectorDBBase):
                 documents=documents,
                 metadatas=metadatas,
             )
+        except OperationalError:
+            raise
         except Exception as e:
             self.session.rollback()
             log.exception(f'Error during query: {e}')
             return None
 
+    @_retry_invalidated_read(default=None)
     def get(self, collection_name: str, limit: Optional[int] = None) -> Optional[GetResult]:
-        for attempt in range(2):
-            try:
-                if PGVECTOR_PGCRYPTO:
-                    stmt = select(
-                        DocumentChunk.id,
-                        pgcrypto_decrypt(DocumentChunk.text, PGVECTOR_PGCRYPTO_KEY, Text).label('text'),
-                        pgcrypto_decrypt(DocumentChunk.vmetadata, PGVECTOR_PGCRYPTO_KEY, JSONB).label('vmetadata'),
-                    ).where(DocumentChunk.collection_name == collection_name)
-                    if limit is not None:
-                        stmt = stmt.limit(limit)
-                    results = self.session.execute(stmt).all()
-                    ids = [[row.id for row in results]]
-                    documents = [[row.text for row in results]]
-                    metadatas = [[row.vmetadata for row in results]]
-                else:
-                    query = self.session.query(DocumentChunk).filter(DocumentChunk.collection_name == collection_name)
-                    if limit is not None:
-                        query = query.limit(limit)
+        try:
+            if PGVECTOR_PGCRYPTO:
+                stmt = select(
+                    DocumentChunk.id,
+                    pgcrypto_decrypt(DocumentChunk.text, PGVECTOR_PGCRYPTO_KEY, Text).label('text'),
+                    pgcrypto_decrypt(DocumentChunk.vmetadata, PGVECTOR_PGCRYPTO_KEY, JSONB).label('vmetadata'),
+                ).where(DocumentChunk.collection_name == collection_name)
+                if limit is not None:
+                    stmt = stmt.limit(limit)
+                results = self.session.execute(stmt).all()
+                ids = [[row.id for row in results]]
+                documents = [[row.text for row in results]]
+                metadatas = [[row.vmetadata for row in results]]
+            else:
+                query = self.session.query(DocumentChunk).filter(DocumentChunk.collection_name == collection_name)
+                if limit is not None:
+                    query = query.limit(limit)
 
-                    results = query.all()
+                results = query.all()
 
-                    if not results:
-                        self.session.rollback()
-                        return None
+                if not results:
+                    self.session.rollback()
+                    return None
 
-                    ids = [[result.id for result in results]]
-                    documents = [[result.text for result in results]]
-                    metadatas = [[result.vmetadata for result in results]]
+                ids = [[result.id for result in results]]
+                documents = [[result.text for result in results]]
+                metadatas = [[result.vmetadata for result in results]]
 
-                self.session.rollback()  # read-only transaction
-                return GetResult(ids=ids, documents=documents, metadatas=metadatas)
-            except OperationalError as e:
-                self.session.rollback()
-                if attempt == 0 and e.connection_invalidated:
-                    self.session.remove()
-                    log.warning('Invalidated database connection during get; retrying once')
-                    continue
-                log.exception(f'Error during get: {e}')
-                return None
-            except Exception as e:
-                self.session.rollback()
-                log.exception(f'Error during get: {e}')
-                return None
-
-        return None
+            self.session.rollback()  # read-only transaction
+            return GetResult(ids=ids, documents=documents, metadatas=metadatas)
+        except OperationalError:
+            raise
+        except Exception as e:
+            self.session.rollback()
+            log.exception(f'Error during get: {e}')
+            return None
 
     def delete(
         self,
@@ -743,6 +776,7 @@ class PgvectorClient(VectorDBBase):
     def close(self) -> None:
         pass
 
+    @_retry_invalidated_read(default=False)
     def has_collection(self, collection_name: str) -> bool:
         try:
             exists = (
@@ -751,6 +785,8 @@ class PgvectorClient(VectorDBBase):
             )
             self.session.rollback()  # read-only transaction
             return exists
+        except OperationalError:
+            raise
         except Exception as e:
             self.session.rollback()
             log.exception(f'Error checking collection existence: {e}')
