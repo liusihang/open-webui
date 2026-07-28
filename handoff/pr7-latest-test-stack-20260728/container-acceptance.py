@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import datetime as dt
 import json
+import os
 import sys
 import time
 import urllib.error
@@ -17,7 +18,7 @@ sys.path.insert(0, '/tmp')
 import pr7_dual_mode_four_worker_probe as worker_probe  # noqa: E402
 
 BASE_URL = 'http://127.0.0.1:8080'
-ADMIN_USER_ID = 'b6826286-1251-4576-b3a0-e109ff085a61'
+ADMIN_USER_ID = os.environ.get('ADMIN_USER_ID', 'b6826286-1251-4576-b3a0-e109ff085a61')
 OPENER = urllib.request.build_opener(urllib.request.ProxyHandler({}))
 
 DESIRED_PROFILES: dict[str, dict[str, Any]] = {

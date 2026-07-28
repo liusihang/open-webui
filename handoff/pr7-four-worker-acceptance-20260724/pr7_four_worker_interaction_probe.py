@@ -169,6 +169,18 @@ def pin_sessions(token: str, pids: list[int]) -> dict[int, Session]:
                         selected[pid] = candidate
                         break
             if len(selected) == len(pids):
+                expired: set[Session] = set()
+                for candidate in selected.values():
+                    try:
+                        status, _ = candidate.request("GET", "/health")
+                        if status != 200:
+                            raise RuntimeError(f"final pinned health returned {status}")
+                    except Exception:
+                        candidate.close()
+                        expired.add(candidate)
+                if expired:
+                    sessions = [candidate for candidate in sessions if candidate not in expired]
+                    continue
                 for pid, candidate in selected.items():
                     candidate.worker_pid = pid
                 for candidate in sessions:
@@ -326,10 +338,20 @@ def start_agent_run(
     prompt: str,
     tool_id: str,
 ) -> str:
+    status, profile = session.request(
+        "GET",
+        "/api/v1/configs/conversation_mode_profiles/agent",
+    )
+    expect_status(status, {200}, profile, "read Agent mode profile")
+    revision_id = (profile or {}).get("revision_id")
+    if not isinstance(revision_id, str) or not revision_id:
+        raise AssertionError("Agent mode profile revision is missing")
     user_message_id = f"msg-user-{uuid.uuid4().hex}"
     assistant_message_id = f"msg-assistant-{uuid.uuid4().hex}"
     body = {
         "model": MODEL_ID,
+        "chat_mode": "agent",
+        "mode_profile_revision_id": revision_id,
         "messages": [{"role": "user", "content": prompt}],
         "stream": False,
         "params": {"function_calling": "native", "temperature": 0},

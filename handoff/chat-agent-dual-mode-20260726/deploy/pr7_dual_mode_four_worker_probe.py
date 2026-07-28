@@ -163,6 +163,16 @@ def pin_sessions(  # noqa: C901
                         selected[pid] = candidate
                         break
             if len(selected) == len(pids):
+                expired: set[Session] = set()
+                for candidate in selected.values():
+                    try:
+                        expect(candidate, 'GET', '/health')
+                    except Exception:
+                        candidate.close()
+                        expired.add(candidate)
+                if expired:
+                    sessions = [candidate for candidate in sessions if candidate not in expired]
+                    continue
                 retained = list(selected.values())
                 for candidate in sessions:
                     if candidate not in retained:
