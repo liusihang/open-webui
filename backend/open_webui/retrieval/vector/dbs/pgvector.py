@@ -536,6 +536,15 @@ class PgvectorClient(VectorDBBase):
 
             result_proxy = self.session.execute(stmt)
             results = result_proxy.all()
+            if self._should_retry_exact_scan(results, limit, num_queries):
+                try:
+                    self.session.execute(text('SET LOCAL enable_indexscan = off'))
+                    exact_result_proxy = self.session.execute(stmt)
+                    exact_results = exact_result_proxy.all()
+                    if len(exact_results) > len(results):
+                        results = exact_results
+                except Exception as exact_exc:
+                    log.warning('Exact pgvector fallback failed; returning ANN results: %s', exact_exc)
 
             ids = [[] for _ in range(num_queries)]
             distances = [[] for _ in range(num_queries)]
@@ -568,6 +577,10 @@ class PgvectorClient(VectorDBBase):
             self.session.rollback()
             log.exception(f'Error during search: {e}')
             return None
+
+    @staticmethod
+    def _should_retry_exact_scan(results: list[Any], limit: int | None, num_queries: int) -> bool:
+        return limit is not None and limit > 0 and len(results) < limit * max(1, num_queries)
 
     @_retry_invalidated_read(default=None)
     def hybrid_search(
