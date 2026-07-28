@@ -175,3 +175,12 @@ Complete read-only preflight, resolve the exact deployment/rollback commands, an
 - To preserve serving capacity, the selected path replaces the four original workers one at a time through graceful `SIGTERM`, waits for the supervisor-created replacement plus an additional `Application startup complete` marker, four-worker count, container health, and `/health` before continuing.
 - A continuous host-port health monitor will run through all four replacements. Any anchor/hash/health/count failure stops the sequence; no container recreate or image rebuild is part of the procedure.
 - The local patched file SHA-256 is `11af129ee58ac85002dbf1764aae648adf3f4c001c3ed9af4374ab5ad808fade`; installation is guarded by the exact original SHA-256 `c5520a79...` and creates an owner-only host backup/manifest before replacement.
+
+## Checkpoint 5c — file installed; first worker replaced without downtime
+
+- The guarded single-file install passed. Run ID `20260728T041200Z`; owner-only backup `/home/aiserver/staging/pr7-live-prep-20260727/hotpatches/20260728T041200Z/pgvector.py.before`; installed SHA-256 `11af129e...`.
+- Container/image/health/restart anchors remained exact after the file copy. Existing workers continued running the already-imported old module until individually replaced.
+- The first rotation invocation stopped before worker signals because the slim image lacks `ps`; PID discovery was changed to `/proc` parsing and a verify-only remote run proved master PID 1 and workers 11/12/13/14.
+- Original worker 11 was then gracefully replaced by PID 2067 while workers 12/13/14 continued serving. Uvicorn did not emit `Application startup complete` for 2067 within the conservative log-marker timeout, so the guard stopped before touching worker 12.
+- Exact socket-to-PID evidence then proved PID 2067 was already serving real `/health` requests. A targeted rerun also covered all four current PIDs 12/13/14/2067 in 36 requests. Therefore the missing log line is not a readiness failure; the gate is changed from log presence to direct targeted request proof.
+- No container restart/recreate occurred, and the remaining three original workers are still untouched pending the revised guard.

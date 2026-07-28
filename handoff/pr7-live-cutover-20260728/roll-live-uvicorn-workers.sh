@@ -5,9 +5,12 @@ container=${LIVE_WEBUI_CONTAINER:-open-webui}
 expected_container_id=${EXPECTED_CONTAINER_ID:-ae1b858332b7bbe252359d46e610a7b595fa6bad36b459187955737cb386e255}
 expected_image_id=${EXPECTED_IMAGE_ID:-sha256:ab6d8f1816a40750a98bdcb18e5a7bd419869c43825a66631acc7f718e6f469b}
 expected_patch_sha=${EXPECTED_PATCH_SHA:?EXPECTED_PATCH_SHA is required}
+expected_ready_probe_sha=${EXPECTED_READY_PROBE_SHA:?EXPECTED_READY_PROBE_SHA is required}
 target=/app/backend/open_webui/retrieval/vector/dbs/pgvector.py
+ready_probe=/tmp/pr7-live-worker-ready-probe.py
 health_url=${HEALTH_URL:-http://127.0.0.1/health}
 verify_only=${VERIFY_ONLY:-false}
+workers_to_replace_csv=${WORKERS_TO_REPLACE_CSV:-}
 
 process_rows() {
   docker exec -i "$container" python - <<'PY'
@@ -57,17 +60,19 @@ ready_count() {
 }
 
 assert_anchor() {
-  local actual_container_id actual_image_id health restart_count installed_sha
+  local actual_container_id actual_image_id health restart_count installed_sha ready_probe_sha
   actual_container_id=$(docker inspect "$container" --format '{{.Id}}')
   actual_image_id=$(docker inspect "$container" --format '{{.Image}}')
   health=$(docker inspect "$container" --format '{{.State.Health.Status}}')
   restart_count=$(docker inspect "$container" --format '{{.RestartCount}}')
   installed_sha=$(docker exec "$container" sha256sum "$target" | awk '{print $1}')
+  ready_probe_sha=$(docker exec "$container" sha256sum "$ready_probe" | awk '{print $1}')
   [[ "$actual_container_id" == "$expected_container_id" ]] || return 1
   [[ "$actual_image_id" == "$expected_image_id" ]] || return 1
   [[ "$health" == healthy ]] || return 1
   [[ "$restart_count" == 0 ]] || return 1
   [[ "$installed_sha" == "$expected_patch_sha" ]] || return 1
+  [[ "$ready_probe_sha" == "$expected_ready_probe_sha" ]] || return 1
   [[ $(worker_count) == 4 ]] || return 1
   curl --fail --silent --show-error --max-time 5 "$health_url" >/dev/null || return 1
 }
@@ -117,6 +122,17 @@ mapfile -t original_workers < <(workers)
   echo original_worker_count_not_four
   exit 1
 }
+if [[ -n "$workers_to_replace_csv" ]]; then
+  IFS=',' read -r -a rotation_workers <<< "$workers_to_replace_csv"
+else
+  rotation_workers=("${original_workers[@]}")
+fi
+for requested_pid in "${rotation_workers[@]}"; do
+  [[ " ${original_workers[*]} " == *" $requested_pid "* ]] || {
+    echo "requested_worker_missing=$requested_pid"
+    exit 1
+  }
+done
 
 if ! assert_anchor; then
   echo initial_anchor_failed
@@ -138,10 +154,11 @@ monitor_pid=$!
 echo "rotation_started=$rotation_started"
 echo "master_pid=$master_pid"
 echo "original_workers=${original_workers[*]}"
+echo "rotation_workers=${rotation_workers[*]}"
 
-expected_ready=0
-for old_pid in "${original_workers[@]}"; do
-  current_workers=" $(workers | tr '\n' ' ')"
+for old_pid in "${rotation_workers[@]}"; do
+  mapfile -t before_workers < <(workers)
+  current_workers=" ${before_workers[*]} "
   [[ "$current_workers" == *" $old_pid "* ]] || {
     echo "expected_old_worker_missing=$old_pid"
     exit 1
@@ -149,13 +166,20 @@ for old_pid in "${original_workers[@]}"; do
 
   echo "replacing_worker=$old_pid"
   terminate_worker "$old_pid"
-  expected_ready=$((expected_ready + 1))
 
   replacement_ready=false
   for _ in $(seq 1 240); do
-    current_workers=" $(workers | tr '\n' ' ')"
-    if [[ $(worker_count) == 4 && "$current_workers" != *" $old_pid "* && $(ready_count) -ge $expected_ready ]]; then
-      if assert_anchor; then
+    mapfile -t after_workers < <(workers)
+    current_workers=" ${after_workers[*]} "
+    replacement_pid=
+    for candidate_pid in "${after_workers[@]}"; do
+      if [[ " ${before_workers[*]} " != *" $candidate_pid "* ]]; then
+        replacement_pid=$candidate_pid
+        break
+      fi
+    done
+    if [[ ${#after_workers[@]} == 4 && "$current_workers" != *" $old_pid "* && -n "$replacement_pid" ]]; then
+      if probe_output=$(docker exec "$container" python "$ready_probe" "$replacement_pid" 2>&1) && assert_anchor; then
         replacement_ready=true
         break
       fi
@@ -166,7 +190,8 @@ for old_pid in "${original_workers[@]}"; do
     echo "replacement_not_ready_for=$old_pid"
     exit 1
   }
-  echo "replacement_ready_for=$old_pid workers=$(workers | tr '\n' ',')"
+  echo "replacement_ready_for=$old_pid replacement_pid=$replacement_pid workers=$(workers | tr '\n' ',')"
+  echo "targeted_probe=$probe_output"
 done
 
 sleep 5

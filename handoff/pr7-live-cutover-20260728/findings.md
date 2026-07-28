@@ -116,3 +116,9 @@
 - Uvicorn 0.41.0 HUP is process-sequential but not readiness-gated: it starts one replacement and immediately proceeds to terminate the next original worker.
 - A manually readiness-gated worker rotation is lower risk for this live service: each original worker receives graceful `SIGTERM`; the supervisor's five-second health loop detects exit and starts exactly one replacement; the next original worker is left untouched until four workers, a new startup-complete log marker, container health, and the host `/health` endpoint all converge.
 - The expected `Child process [...] died` supervisor messages are planned replacements, not a respawn loop. Exactly four and only within the controlled timestamp window are acceptable.
+
+## Readiness truth surface correction
+
+- Uvicorn's `Application startup complete` log marker was absent for the first replacement even after it had begun accepting requests. Treating the log as the sole readiness truth produced a safe false negative.
+- The stronger truth surface is an established keep-alive socket mapped through `/proc/<pid>/fd` and `/proc/<pid>/net/tcp`, followed by a second HTTP 200 `/health` on that same socket. PID 2067 passed this direct proof; one targeted sample also reached all current workers 12/13/14/2067.
+- Subsequent replacements are gated on the newly created PID accepting a mapped real request, plus four process entries, container health/restart/hash anchors, and host `/health`. Missing log text no longer blocks an otherwise proven-ready worker.
