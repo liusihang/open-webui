@@ -8,9 +8,34 @@ Determine why `http://192.168.2.238:18085/` remains on the initial loading spinn
 
 - Authorization: received 2026-07-29 after root-cause diagnosis.
 - Truth surface: source worktree, resulting hot-patch image on `aiserver`, isolated `open-webui-pr7` container, and a real authenticated browser against port 18085.
-- Current checkpoint: second hot-patch accepted on the isolated test stack, including the exact permanently blocked IndexedDB E2E that reproduced the user's post-login spinner.
+- Current checkpoint: accepted in the user's real Microsoft Edge profile after the expanded-sidebar import fix and a forced reload onto the new immutable assets.
 - Implemented image path: built frontend assets once, layered only `/app/build` onto the locked v0.11 test base image, and recreated only `open-webui-pr7`.
 - Stop/rollback condition: wrong source/image/compose target, failed focused tests or frontend build, unhealthy replacement container, wrong image at runtime, or failed empty-IndexedDB browser regression.
+
+### Reopened after real Edge retest
+
+- User evidence at 2026-07-29 08:54: the existing authenticated Edge tab at `http://192.168.2.238:18085/` renders navigation/sidebar and `PR7 Test User`, while the main content remains a central spinner.
+- This disproves the second completion claim. The injected pending-IndexedDB E2E proved only that one known startup blocker was removed; it did not identify the still-pending boundary in the user's actual browser profile.
+- Truth surface is now the user's existing Edge tab plus matching `open-webui-pr7` request/log evidence. New Playwright contexts are comparison controls only and cannot establish completion.
+- Real Edge console evidence: `Uncaught ReferenceError: Dropdown is not defined` at `Sidebar.svelte:1523:8`; DevTools readback also confirmed persisted `localStorage.sidebar === 'true'`.
+- Deterministic control reproduction: a newly authenticated Playwright session with `sidebar=true` produced the identical spinner and `Dropdown is not defined`, while every initialization API returned HTTP 200. Screenshot: `output/playwright/v011-home-spinner-20260729/expanded-sidebar-before-third-hotfix.png`.
+- Root cause: merge commit `1f93cd9a3` resolved the Sidebar import conflict as either official chat-menu imports or the custom OpenClaw import. It kept OpenClaw but dropped official `Dropdown`, `DropdownMenu`, `CheckIcon`, and `MoreHorizontalIcon` imports even though the official action-slot markup remained.
+- Previous E2E gap: both accepted Playwright snapshots had a collapsed sidebar, so the action slot containing the undefined components was never instantiated.
+- TDD red: the focused integration suite ran 28 tests with exactly one expected failure listing all four missing official imports. Minimal fix restored those imports alongside the custom OpenClaw import; the same suite then passed 28/28.
+- Source fix commit: `98ae1cd6071d5434f080c98e8195884b391af124` (`fix(frontend): restore expanded sidebar imports`).
+- Production build: Vite completed successfully in 57.08 seconds with an 8 GB V8 heap. `build/_app/version.json` equals the full source commit and its source map contains the restored Sidebar imports.
+- Third hot-patch artifact: `output/playwright/v011-home-spinner-20260729/openwebui-v011-hotfix-98ae1cd6071d-context.tar.gz`, SHA-256 `7e825836deb1d05cbbdfaf932a587e05da4db3cf68bab2bde9a66d73407562d1`.
+- Third thin image: `open-webui:v011-hotfix-98ae1cd6071d`, image ID `sha256:38a2aa1b41fd1107254ca8ff36f0d1059ff4d3d0d79bf6b480a2c610520cbe6f`, size 2,312,420,687 bytes. It is based directly on the original locked v0.11 test image rather than stacking earlier frontend hot-patches.
+- Deployment overlay: `/home/aiserver/staging/openwebui-pr7-eea11194ed-test/compose.webui-v011-hotfix-98ae1cd6071d.yaml`; durable copies are `deployment/Dockerfile.hotpatch-98ae1cd6071d` and `deployment/compose.webui-v011-hotfix-98ae1cd6071d.yaml`.
+- The durable YAML copy is Prettier-normalized to single quotes while the remote heredoc uses double quotes; the lexical difference is limited to quoting, and image plus both environment values are identical.
+- Rollback: `/home/aiserver/staging/openwebui-pr7-eea11194ed-test/backups/pre-hotpatch-98ae1cd6071d/rollback-open-webui-pr7.sh` restores the second hot-patch Compose surface and image.
+- Runtime acceptance: `open-webui-pr7` is healthy with restart count 0, frontend version `98ae1cd6071d…`, Redis keepalive and health-check settings intact, all health/version endpoints successful, and authenticated `/api/models` returned 35 models. Formal live remains healthy on unchanged image ID `sha256:ab6d8f1816a40750a98bdcb18e5a7bd419869c43825a66631acc7f718e6f469b`.
+- Expanded-sidebar E2E: a fresh authenticated context with `localStorage.sidebar='true'` rendered the complete chat list and home composer. All initialization APIs returned HTTP 200 and the console had 0 errors and 0 warnings. Screenshot: `output/playwright/v011-home-spinner-20260729/expanded-sidebar-after-third-hotfix.png`.
+- Cached-page finding: the retained pre-fix Playwright page continued executing old chunk `nodes/2.BSccNmZS.js` after a normal `goto`, so it correctly remained broken until a cache-bypassing reload. This was old frontend execution, not the new image.
+- Real Edge acceptance: the user's existing profile was force-reloaded without clearing login or site data. The exact tab then rendered the expanded sidebar, chat action menu, conversation mode controls, selected model, composer, and suggestions. DevTools read back frontend version `98ae1cd6071d5434f080c98e8195884b391af124` and new main chunk `nodes/2.BDS2JQ8V.js`.
+- Real Edge interaction: the sidebar “More” dropdown opened and exposed `Mark all as read`, directly exercising all four restored components. `Dropdown is not defined` is absent; the remaining console errors originate from the Zotero extension's `chrome-extension://` scripts, not OpenWebUI.
+- Final container log audit: 0 runtime error signatures, health `healthy`, restart count 0, and `OOMKilled=false`.
+- Current checkpoint: complete on the exact user-reported Edge truth surface. DevTools was closed and the tab was left on the fully rendered home page.
 
 ### Reopened after user retest
 
@@ -81,9 +106,9 @@ Determine why `http://192.168.2.238:18085/` remains on the initial loading spinn
 
 ## Truth surfaces
 
-- Browser: a fresh Playwright session against the exact LAN URL, including DOM snapshot, console errors, failed requests, and screenshot.
+- Browser: the user's existing authenticated Microsoft Edge profile is authoritative; expanded-sidebar Playwright sessions provide deterministic before/after controls with DOM, console, request, and screenshot evidence.
 - Live service: `aiserver` container `open-webui-pr7`, its exact image/health/restart state, request logs, and relevant API responses.
-- Source: `/Users/liusihang/openwebui/.worktrees/v011-upstream-integration-base`, accepted hot-patch source commit `fd8fe181823dd0e71071a025cac74ef95e05489a`.
+- Source: `/Users/liusihang/openwebui/.worktrees/v011-upstream-integration-base`, accepted hot-patch source commit `98ae1cd6071d5434f080c98e8195884b391af124`.
 
 ## Completed actions
 
@@ -111,14 +136,17 @@ Determine why `http://192.168.2.238:18085/` remains on the initial loading spinn
 | State root cause and minimal fix options            | complete | Immediate recovery: clear the site's `Chats` IndexedDB/site data. Product fix: close `DB` before deletion and avoid making legacy local-chat cleanup an unbounded app-loading gate |
 | Permanently blocked IndexedDB regression            | complete | A real pending `IDBOpenDBRequest` remains pending while the full authenticated home page renders; console has 0 errors and 0 warnings                                              |
 | Second thin hot-patch deployment                    | complete | Test container runs image ID `c05f9e01…`, is healthy with restart count 0, and formal live is unchanged                                                                            |
+| Expanded-sidebar regression                         | complete | Before: `Dropdown is not defined` and spinner. After: chat list plus full home render, initialization APIs all 200, console 0 errors/warnings                                      |
+| Exact Microsoft Edge profile                        | complete | Edge loaded version `98ae1cd6071d…` and chunk `2.BDS2JQ8V.js`; expanded sidebar and its “More” dropdown work, with no OpenWebUI console error                                      |
+| Third thin hot-patch deployment                     | complete | Test image ID `38a2aa1b…` is healthy with restart count 0 and no runtime error signatures; formal live remains unchanged                                                           |
 
 ## Current state
 
-- Root cause of the reported permanent spinner is allowing optional legacy `Chats` IndexedDB migration/cleanup to remain in the blocking app-startup gate. An empty database exposed a self-deadlock, while a permanently pending open request exposed the broader unbounded-wait failure.
-- The missing `handledSettingsUrl` declaration and empty-database self-deadlock are fixed in `af2d1b348085…`; the broader startup-gate fix is in `fd8fe181823d…`. Both commits are present in the deployed frontend.
+- Three independently confirmed frontend failures contributed to post-login initialization: missing `handledSettingsUrl`, blocking legacy IndexedDB migration, and missing expanded-sidebar component imports from the v0.11 merge conflict.
+- The first two defects are fixed in `af2d1b348085…` and `fd8fe181823d…`; the exact real-Edge defect is fixed in `98ae1cd6071d…`. All three commits are present in the deployed frontend.
 - The test deployment now guards cached Redis sockets with a 30-second health check and TCP keepalive; the reconnect mechanism passed an isolated forced-idle-timeout probe.
-- Test service `open-webui-pr7` runs thin hot-patch image `open-webui:v011-hotfix-fd8fe181823d` and passed both strong injected-fault and clean-session E2E. Formal live remains unchanged.
+- Test service `open-webui-pr7` runs thin hot-patch image `open-webui:v011-hotfix-98ae1cd6071d` and passed the user's real Edge profile plus expanded-sidebar and injected-IndexedDB controls. Formal live remains unchanged.
 
 ## Next step
 
-Have the user retry the existing browser session at `http://192.168.2.238:18085/`. The deployed build no longer waits for legacy IndexedDB before rendering, including when its open request never settles. Promotion beyond the isolated test stack remains a separate authorization decision.
+No further action is required for the current test browser: the user's Edge tab was left on the complete home page. Promotion beyond the isolated test stack remains a separate authorization decision.
