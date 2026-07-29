@@ -15,9 +15,9 @@ Verify the isolated v0.11 test stack end to end after the frontend hot-patches, 
 
 - Owner: root thread.
 - Started: 2026-07-29 09:51 Asia/Shanghai.
-- Current checkpoint: reopened. New/temporary Chat and Agent flows remain previously green, but persisted historical-chat detail loading was not covered and the user reproduced an infinite spinner at `/c/05464d8b-52ed-447c-8717-5ff18dc27efb`. Root-cause investigation and a failing regression test are in progress; prior whole-product completion wording is withdrawn until this path passes in a fresh browser context.
+- Current checkpoint: complete after reopening. The named persisted historical chat now renders in both a fresh authenticated Playwright context and the user's existing Edge profile; the final browser/network/runtime audit is green.
 - Stop condition: any application console error, failed required request, wrong runtime image/version, unhealthy/restarted container, formal-live drift, or a core flow that cannot complete.
-- Runtime rollback anchor: `/home/aiserver/staging/openwebui-pr7-eea11194ed-test/backups/pre-hotpatch-e3a9c97dd059/rollback-open-webui-pr7.sh`.
+- Runtime rollback anchor: `/home/aiserver/staging/openwebui-pr7-eea11194ed-test/backups/pre-hotpatch-0bb586c8699d/rollback-open-webui-pr7.sh`.
 - Test-only default-model rollback: `/home/aiserver/staging/openwebui-pr7-eea11194ed-test/backups/pre-default-model-e3a9c97dd059-retry3/rollback-test-default-model.sh`.
 
 ## Persisted historical-chat regression
@@ -31,7 +31,11 @@ Verify the isolated v0.11 test stack end to end after the frontend hot-patches, 
 - First persisted-chat thin image: `open-webui:v011-hotfix-c764e6ec2c01`, image ID `sha256:c7970f571cdd6b6556403bee0b403f822e73ce8160d8c64b3953a8f97246598a`, source `c764e6ec2c01db17e2f6897e3201cacec59e2fd6`. It replaced only `/app/build`; test container `3b9bdd3db68e...` became healthy with restart count 0, DB head remained `a11c0d3f0bd0`, and formal live remained byte-for-byte unchanged.
 - First post-fix E2E proved the original blocker resolved: the named chat and task endpoints both returned 200, the exact URL remained selected, the historical title rendered, and two persisted messages appeared. This surfaced a second issue rather than the spinner: the chat is read-only for the test user, but the frontend still called the owner-only tags endpoint and logged its expected 401.
 - Second TDD red/green: a new guardrail first failed because tags were unconditional; the minimal fix loads tags only when `loadedChat.user_id === $user?.id`, otherwise it uses `[]`. Focused tests now pass 104/104 and the full Node 22 frontend suite passes 394/394.
-- Current checkpoint: commit the read-only tag fix, rebuild/redeploy the same thin frontend layer from the new commit, and repeat the named old-chat E2E with ownership-aware editable/read-only assertions plus zero browser/network/runtime errors.
+- Final persisted-chat image: `open-webui:v011-hotfix-0bb586c8699d`, image ID `sha256:bdbd84db321857ee8a8cd29326dd000b4c51d77256c2805fe2e817b987ffa63a`, source `0bb586c8699d34c211a5a3686ab61bfe10f2ac90`. Test container `74eff7a80690...` is healthy with restart count 0 and `OOMKilled=false`.
+- Final fresh-context E2E: frontend version matched `0bb586c8699d...`; chat detail and task endpoints returned 200; exact URL/title and two persisted messages rendered; the minted test identity correctly saw the foreign chat as read-only; owner-only tag requests, console errors/warnings, page errors, failed responses, and request failures were all zero. Screenshot: `output/playwright/v011-persisted-chat-spinner-20260729/persisted-chat-success-0bb586c8699d.png`.
+- Exact user Edge profile: before refresh it still displayed the cached spinner; a normal refresh loaded the historical title, both messages, chat actions, model controls, and owned-chat composer at the same URL. No login or site data was cleared.
+- Final runtime evidence: `/home/aiserver/staging/openwebui-pr7-eea11194ed-test/evidence/v011-persisted-chat-0bb586c8699d-20260729-132800`; manifest SHA-256 `88a3b85588af6cd4808cd31c6ccb64961d20d85ea305ac933bac175c914ee30b`. Health/DB/version passed, DB head remained `a11c0d3f0bd0`, and the post-deploy log window contained zero fatal, HTTP 5xx, or suspicious error lines.
+- Current checkpoint: complete. Formal-live promotion remains a separate authorization and was not performed.
 
 ## Hard contracts
 
@@ -41,17 +45,17 @@ Verify the isolated v0.11 test stack end to end after the frontend hot-patches, 
 
 ## Acceptance matrix
 
-| Area                              | Required evidence                                                                                                                                      | Status  |
-| --------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------ | ------- |
-| Runtime identity and health       | Exact image/version, `/health`, `/health/db`, model catalog, restart/OOM/log audit                                                                     | passed  |
-| Authentication and navigation     | Authenticated home, expanded/collapsed sidebar, search, Notes, Workspace, settings/admin routes                                                        | passed  |
-| Chat and provider path            | Temporary chat, real streamed inference, model/reasoning controls, no console/request failure                                                          | passed  |
-| Custom AgentScope path            | Agent mode entry plus preserved runtime/event behavior using existing acceptance probes                                                                | passed  |
-| Sidebar/channels/folders/history  | Chat list/action menu, channels, folders and pagination passed; persisted historical-chat detail load is now a blocking regression under investigation | blocked |
-| Notes/workspace/admin             | Route rendering and representative API data for models, knowledge, prompts, tools, functions, skills                                                   | passed  |
-| Terminal/retrieval/tool contracts | Existing focused suites plus runtime catalog/permission probes; exclusions remain absent                                                               | passed  |
-| Security/config/migrations        | Existing focused suites, migration head/runtime DB checks, config/auth endpoints                                                                       | passed  |
-| Regression and exclusions         | Focused/full automated tests, production-source exclusion scan, browser console/log audit                                                              | passed  |
+| Area                              | Required evidence                                                                                                                                   | Status |
+| --------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------- | ------ |
+| Runtime identity and health       | Exact image/version, `/health`, `/health/db`, model catalog, restart/OOM/log audit                                                                  | passed |
+| Authentication and navigation     | Authenticated home, expanded/collapsed sidebar, search, Notes, Workspace, settings/admin routes                                                     | passed |
+| Chat and provider path            | Temporary chat, real streamed inference, model/reasoning controls, no console/request failure                                                       | passed |
+| Custom AgentScope path            | Agent mode entry plus preserved runtime/event behavior using existing acceptance probes                                                             | passed |
+| Sidebar/channels/folders/history  | Chat list/action menu, channels, folders, pagination, and persisted historical-chat detail loading in fresh Playwright plus the user's Edge profile | passed |
+| Notes/workspace/admin             | Route rendering and representative API data for models, knowledge, prompts, tools, functions, skills                                                | passed |
+| Terminal/retrieval/tool contracts | Existing focused suites plus runtime catalog/permission probes; exclusions remain absent                                                            | passed |
+| Security/config/migrations        | Existing focused suites, migration head/runtime DB checks, config/auth endpoints                                                                    | passed |
+| Regression and exclusions         | Focused/full automated tests, production-source exclusion scan, browser console/log audit                                                           | passed |
 
 ## Final accepted source and runtime
 
@@ -59,8 +63,10 @@ Verify the isolated v0.11 test stack end to end after the frontend hot-patches, 
   - `17cf77c906d2`: recognize v0.11 temporary chat IDs.
   - `93032060d9d59170b9f9c5dbb13e43c929eab9c6`: restore socket event dispatch, including the missing event `type` binding and guarded reload/list behavior.
   - `e3a9c97dd059aa814ea4d34bf1aca910923cf2e8`: isolate stored mode-profile drafts so a Chat revision cannot be submitted as an Agent revision.
-- Final test image: `open-webui:v011-hotfix-e3a9c97dd059`, image ID `sha256:5a541612b86655ac1423b5e88109c47ff818819d99315cf7e51fa9a764e9ac05`, source label `e3a9c97dd059aa814ea4d34bf1aca910923cf2e8`.
-- Final test container: `8716ccc26419e06660d2a4b431d32675909d5c8eabe9e290eb95d7f46776fe03`, healthy, restart count 0.
+  - `c764e6ec2c01db17e2f6897e3201cacec59e2fd6`: restore persisted chats with the mode-aware draft helper after loading their canonical mode.
+  - `0bb586c8699d34c211a5a3686ab61bfe10f2ac90`: skip owner-only tag reads for authorized read-only chats.
+- Final test image: `open-webui:v011-hotfix-0bb586c8699d`, image ID `sha256:bdbd84db321857ee8a8cd29326dd000b4c51d77256c2805fe2e817b987ffa63a`, source label `0bb586c8699d34c211a5a3686ab61bfe10f2ac90`.
+- Final test container: `74eff7a80690af0e1335e168a0dd0aeccfce2d584a99bf25549058f2697e26ef`, healthy, restart count 0, `OOMKilled=false`.
 - Formal-live container remained read-only throughout: `ae1b858332b7bbe252359d46e610a7b595fa6bad36b459187955737cb386e255`, image `sha256:ab6d8f1816a40750a98bdcb18e5a7bd419869c43825a66631acc7f718e6f469b`, healthy, restart count 0.
 - Runtime database head remained `a11c0d3f0bd0`.
 
@@ -68,6 +74,7 @@ Verify the isolated v0.11 test stack end to end after the frontend hot-patches, 
 
 - Authenticated route/interaction matrix passed for home with expanded/collapsed sidebar, search, More menu, Chat/Agent toggle, Notes, Workspace models/knowledge/prompts/skills/tools, Calendar, Automations, admin users/evaluations/functions, all five admin settings sections, and user general settings. Required content rendered with no redirect, 404, console error, page error, HTTP error, or request failure.
 - Temporary Chat used `bifrostapi.Cliproxy/gpt-5.5`, returned HTTP 200 with `temporary:ks3Wdl34i7uZyK0uAAAD`, and rendered `V011_CHAT_UI_OK_93032060` with zero browser errors.
+- Persisted historical-chat acceptance passed at `/c/05464d8b-52ed-447c-8717-5ff18dc27efb`: chat/task 200, exact title and two messages rendered, correct editable/read-only behavior by identity, no tag-access error, and zero browser/network failures. The user's existing Edge tab also rendered the conversation after a normal refresh.
 - Temporary Agent deliberately started with an existing Chat draft. The request correctly replaced Chat revision `ecbc1341-534d-4630-b69b-78a98a5032af` with configured Agent revision `3118a971-b710-4845-b9d1-9c807e15bb16`; run `e7409ac2-b4cb-44b1-860e-557991279872` completed and rendered `V011_AGENT_UI_OK_93032060`. It created exactly the four required Agent events and no Chat row.
 - Final UI evidence: `/home/aiserver/staging/openwebui-pr7-eea11194ed-test/evidence/v011-ui-functional-e3a9c97dd059-20260729-114700`; manifest SHA-256 `7807a5b2bc1bea3f40a4bf006d7d2093c6e986c30b92463831dbcc9dcc908452`.
 - Screenshots: `output/playwright/v011-functional-acceptance-20260729/final-home-expanded-e3a9c97d.png`, `final-home-collapsed-e3a9c97d.png`, and `default-model-temporary-chat-success-e3a9c97d.png`.
@@ -86,7 +93,7 @@ Verify the isolated v0.11 test stack end to end after the frontend hot-patches, 
 
 - Historical preflight runtime image: `sha256:38a2aa1b41fd1107254ca8ff36f0d1059ff4d3d0d79bf6b480a2c610520cbe6f`, frontend source `98ae1cd6071d5434f080c98e8195884b391af124`, healthy, restart count 0.
 - Formal-live anchor: image `sha256:ab6d8f1816a40750a98bdcb18e5a7bd419869c43825a66631acc7f718e6f469b`, healthy, restart count 0.
-- Final full frontend suite under Node `v22.22.0`: `35/35` files and `392/392` tests passed; production build completed after all fixes.
+- Final full frontend suite under Node `v22.22.0`: `35/35` files and `394/394` tests passed; the final production build completed from `0bb586c8699d...` after all fixes.
 - Production-source exclusion scan: no `delegate_task`, official Sub-agents config/runtime symbols, or `list_chat_files`, `grep_chat_files`, `query_chat_files` matches.
 - Fresh isolated SQLite upgraded from empty to the unique merge head `a11c0d3f0bd0`; `alembic current` and `alembic heads` agree.
 - Full backend suite on that migrated database: `1256/1256` tests passed with `72` warnings in `30.25s`.
@@ -105,4 +112,4 @@ Verify the isolated v0.11 test stack end to end after the frontend hot-patches, 
 
 ## Disposition
 
-Functional acceptance is reopened because the persisted historical-chat detail path was missing from the earlier matrix and now reproduces an infinite spinner. Do not promote to formal live until the named historical chat loads in a fresh browser context with clean browser/network/runtime evidence. Formal-live promotion remains separately authorized and has not been performed.
+Functional acceptance of the isolated test stack is complete, including the previously missing persisted historical-chat detail path. The named chat passed fresh-browser E2E and the user's existing Edge profile now renders it after refresh. Formal-live promotion remains separately authorized and has not been performed.
