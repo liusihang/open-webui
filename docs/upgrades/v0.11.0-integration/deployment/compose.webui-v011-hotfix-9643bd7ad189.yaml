@@ -1,0 +1,6 @@
+services:
+  open-webui-pr7:
+    image: open-webui:v011-hotfix-9643bd7ad189
+    environment:
+      REDIS_HEALTH_CHECK_INTERVAL: '30'
+      REDIS_SOCKET_KEEPALIVE: 'true'

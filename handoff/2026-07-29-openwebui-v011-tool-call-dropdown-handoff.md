@@ -23,11 +23,18 @@ Find and fix why clicking the tool-call analysis summary on the authenticated te
 - Focused GREEN: `v011Integration.presentation.test.ts` passes 33/33 under Node 22.
 - Full frontend GREEN: 35 test files and 395/395 tests passed under Node 22.
 - Production build succeeded with 6408 modules transformed and the static adapter completed. Existing repository-wide Svelte warnings remain unchanged; the build exited successfully.
+- Committed the root fix and regression guardrail as `9643bd7ad189ddc1e65fd6996d8b5c047e6e06e8` (`fix(frontend): restore tool call detail expansion`).
+- Rebuilt the static frontend with the exact commit as `APP_BUILD_HASH`, packaged a 112 MiB thin-build context with SHA-256 `e4857ecdba9dad7b40424f6510878345ff6730eeb7156fdc06eb96a082a51127`, and layered it on the prior accepted image without rebuilding backend dependencies.
+- Deployed only `open-webui-pr7` as `open-webui:v011-hotfix-9643bd7ad189`; image ID `sha256:c5fecd259933068ac435e37c4698ed84a027e67fab58817b41b813052dd6aaca`.
+- The replacement container `2390111a9f70...` reached healthy with restart count 0 and `OOMKilled=false`; DB revision remains `a11c0d3f0bd0`.
+- Formal `open-webui` remained on image `sha256:ab6d8f1816a40750a98bdcb18e5a7bd419869c43825a66631acc7f718e6f469b`, healthy with restart count 0; non-target compose containers were unchanged.
+- Post-deploy exact-chat E2E passed: frontend version is the exact source commit; outer summary changed `false -> true`; four visible tool cards rendered; all four opened with non-empty Output; `error`, `unhandledrejection`, and post-clear console arrays were empty.
+- Temporary browser authentication files were removed locally and remotely, and the browser session was closed.
 
 ## Checkpoint
 
 - Root cause and minimal source fix are complete.
-- Source verification is complete. Commit, thin-image hotpatch, and post-deploy E2E remain.
+- Complete. The test stack is fixed and accepted; formal-live promotion remains separately authorized and was not performed.
 
 ## Verification results
 
@@ -37,13 +44,18 @@ Find and fix why clicking the tool-call analysis summary on the authenticated te
 - Focused test GREEN: 33 passed.
 - Full frontend suite: 395 passed.
 - Production build: passed, 6408 modules transformed.
+- Browser version: `9643bd7ad189ddc1e65fd6996d8b5c047e6e06e8`.
+- Exact click E2E: `summaryBefore=false`, `summaryAfter=true`, one tool body with Input/Output, zero captured errors/rejections.
+- Multi-tool E2E: 4/4 visible cards (`get_current_timestamp`, `create_tasks`, `search_calendar_events`, `list_automations`) opened with Output, zero captured errors/rejections, empty cleared console.
+- Visual proof: `output/playwright/v011-tool-call-dropdown-20260729/expanded-details-viewport-success-9643bd7ad189.png`.
+- Runtime final audit: healthy, restart count 0, DB head `a11c0d3f0bd0`, no fatal/HTTP 5xx since deploy.
+- Runtime evidence: `/home/aiserver/staging/openwebui-pr7-eea11194ed-test/evidence/v011-tool-call-dropdown-9643bd7ad189-20260729-142000`.
+- Rollback: `/home/aiserver/staging/openwebui-pr7-eea11194ed-test/backups/pre-hotpatch-9643bd7ad189/rollback-open-webui-pr7.sh`.
 
 ## Current state
 
-In progress. No live change has been made yet for this defect.
+Complete on the isolated test stack. Formal live was not changed.
 
 ## Next steps
 
-1. Commit only the component, regression test, and this handoff/task evidence.
-2. Build a thin frontend-only image from the exact current test image, preserving a rollback anchor.
-3. Deploy only `open-webui-pr7`, verify health/version/logs, and rerun the exact click E2E after refresh.
+No remaining action for this defect. Continue the broader functional acceptance matrix or request formal-live promotion separately.
