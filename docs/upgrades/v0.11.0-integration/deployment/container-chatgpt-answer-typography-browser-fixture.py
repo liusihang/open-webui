@@ -16,7 +16,7 @@ from open_webui.utils.auth import create_token
 
 BASE_URL = 'http://127.0.0.1:8080'
 ADMIN_USER_ID = 'b6826286-1251-4576-b3a0-e109ff085a61'
-EMAIL = 'codex.typography.d3d05066b497@example.com'
+EMAIL = 'codex.typography.7684618281df@example.com'
 OPENER = urllib.request.build_opener(urllib.request.ProxyHandler({}))
 
 
@@ -93,7 +93,7 @@ def create_fixture(password: str) -> dict[str, Any]:
 		'role': 'assistant',
 		'content': (
 			'# ChatGPT 排版对照\n\n'
-			'这是第一段正文，用于检查 **16px 字号**、24px 行高和强调文本。\n\n'
+			'这是第一段正文，用于检查 **16px 字号**、pre-v0.11 行高和强调文本。\n\n'
 			'这是第二段正文，用于检查相邻段落之间的留白是否自然。\n\n'
 			'## 二级标题\n\n'
 			'- 第一条列表内容\n'

@@ -2,11 +2,11 @@
 set -euo pipefail
 
 source_root='/Users/liusihang/openwebui/.worktrees/v011-upstream-integration-base'
-source_commit='4934cdf59bbf2d7661d138d7dc7959bd83e93dfb'
-short_commit='4934cdf59bbf'
-evidence_root="${source_root}/output/playwright/v011-chatgpt-answer-typography-20260729"
+source_commit='7684618281df7a9adbd4217d127c3abb284cc261'
+short_commit='7684618281df'
+evidence_root="${source_root}/output/playwright/v011-pre-v011-answer-typography-sidebar-20260729"
 dockerfile="${source_root}/docs/upgrades/v0.11.0-integration/deployment/Dockerfile.hotpatch-${short_commit}"
-artifact="${evidence_root}/openwebui-v011-hotfix-${short_commit}-context.tar.gz"
+artifact="${evidence_root}/openwebui-v011-hotfix-${short_commit}-r3-context.tar.gz"
 context_dir="$(mktemp -d /tmp/openwebui-v011-hotpatch-${short_commit}.XXXXXX)"
 
 cleanup() {

@@ -3,10 +3,10 @@ set -euo pipefail
 
 action="${1:?usage: remote-22-manage-chatgpt-answer-typography-browser-fixture.sh create|share|repair|cleanup}"
 web_container='open-webui-pr7'
-expected_web_image='sha256:13d2290cbd506929155f2435c94850f716c7bd66b47710c3c5ba7937789209a3'
+expected_web_image='sha256:e6749eb2fc8a4222a1a8965318abcc322a055e6f7a75f303e5e41bddb73505bb'
 staged_probe='/tmp/container-chatgpt-answer-typography-browser-fixture.py'
 remote_password_file='/tmp/openwebui-chatgpt-answer-typography-e2e-password.txt'
-evidence_dir='/home/aiserver/staging/openwebui-pr7-eea11194ed-test/evidence/v011-chatgpt-answer-typography-d3d05066b497-20260729-143400'
+evidence_dir='/home/aiserver/staging/openwebui-pr7-eea11194ed-test/evidence/v011-pre-v011-answer-typography-sidebar-7684618281df-r4-20260729-183400'
 fixture_json="${evidence_dir}/browser-fixture.json"
 cleanup_json="${evidence_dir}/browser-fixture-cleanup.json"
 share_json="${evidence_dir}/browser-fixture-share.json"

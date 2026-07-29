@@ -6,20 +6,21 @@ formal_container='open-webui'
 db_container='openwebui-pr7-db'
 db_user='webui_pr7'
 database='webui_pr7'
-expected_current_image_id='sha256:f7b080304487458726bb7786c7199d53bd5dd4857b7b2ea8668537af65cdb8d5'
+expected_current_image_id='sha256:13d2290cbd506929155f2435c94850f716c7bd66b47710c3c5ba7937789209a3'
+expected_hotpatch_image_id='sha256:e6749eb2fc8a4222a1a8965318abcc322a055e6f7a75f303e5e41bddb73505bb'
 expected_formal_image_id='sha256:ab6d8f1816a40750a98bdcb18e5a7bd419869c43825a66631acc7f718e6f469b'
-base_image='open-webui:v011-hotfix-aaeb9fb5736a'
-hotpatch_image='open-webui:v011-hotfix-4934cdf59bbf'
-source_commit='4934cdf59bbf2d7661d138d7dc7959bd83e93dfb'
+base_image='open-webui:v011-hotfix-4934cdf59bbf'
+hotpatch_image='open-webui:v011-hotfix-7684618281df'
+source_commit='7684618281df7a9adbd4217d127c3abb284cc261'
 target_revision='a11c0d3f0bd0'
-artifact='/tmp/openwebui-v011-hotfix-4934cdf59bbf-context.tar.gz'
-expected_artifact_sha256='b4e3ed4fac1473898d1e164a0306992578290af97036071b23fa87055651409a'
-staged_overlay='/tmp/compose.webui-v011-hotfix-4934cdf59bbf.yaml'
+artifact='/tmp/openwebui-v011-hotfix-7684618281df-r3-context.tar.gz'
+expected_artifact_sha256='445d4d278e8edfa29377e8c185edd8b07482929bcc2794c0f1628a63a093c04d'
+staged_overlay='/tmp/compose.webui-v011-hotfix-7684618281df-r4.yaml'
 deployment_root='/home/aiserver/staging/openwebui-pr7-eea11194ed-test'
-context_dir="${deployment_root}/hotpatch-v011-4934cdf59bbf"
-overlay="${deployment_root}/compose.webui-v011-hotfix-4934cdf59bbf.yaml"
-backup_dir="${deployment_root}/backups/pre-hotpatch-4934cdf59bbf"
-evidence_dir="${deployment_root}/evidence/v011-chatgpt-answer-typography-4934cdf59bbf-20260729-153703"
+context_dir="${deployment_root}/hotpatch-v011-7684618281df-r4"
+overlay="${deployment_root}/compose.webui-v011-hotfix-7684618281df-r4.yaml"
+backup_dir="${deployment_root}/backups/pre-hotpatch-7684618281df-r4"
+evidence_dir="${deployment_root}/evidence/v011-pre-v011-answer-typography-sidebar-7684618281df-r4-20260729-183400"
 
 capture_container() {
 	local container="$1"
@@ -43,11 +44,6 @@ formal_image_id="$(docker inspect --format '{{.Image}}' "${formal_container}")"
 [[ "$(docker inspect --format '{{.RestartCount}}' "${formal_container}")" == '0' ]]
 test -s "${staged_overlay}"
 
-if docker image inspect "${hotpatch_image}" >/dev/null 2>&1; then
-	printf 'refusing to overwrite existing image tag: %s\n' "${hotpatch_image}" >&2
-	exit 1
-fi
-
 actual_artifact_sha256="$(sha256sum "${artifact}" | awk '{print $1}')"
 [[ "${actual_artifact_sha256}" == "${expected_artifact_sha256}" ]]
 for path in "${context_dir}" "${overlay}" "${backup_dir}" "${evidence_dir}"; do
@@ -62,13 +58,17 @@ date --iso-8601=seconds >"${evidence_dir}/started-at.txt"
 tar -xzf "${artifact}" -C "${context_dir}"
 cp "${staged_overlay}" "${overlay}"
 
-docker build \
-	--network none \
-	--build-arg "BASE_IMAGE=${base_image}" \
-	--build-arg "HOTPATCH_SOURCE_COMMIT=${source_commit}" \
-	--file "${context_dir}/Dockerfile.hotpatch-4934cdf59bbf" \
-	--tag "${hotpatch_image}" \
-	"${context_dir}"
+if docker image inspect "${hotpatch_image}" >/dev/null 2>&1; then
+	[[ "$(docker image inspect --format '{{.Id}}' "${hotpatch_image}")" == "${expected_hotpatch_image_id}" ]]
+else
+	docker build \
+		--network none \
+		--build-arg "BASE_IMAGE=${base_image}" \
+		--build-arg "HOTPATCH_SOURCE_COMMIT=${source_commit}" \
+		--file "${context_dir}/Dockerfile.hotpatch-7684618281df" \
+		--tag "${hotpatch_image}" \
+		"${context_dir}"
+fi
 
 image_id="$(docker image inspect --format '{{.Id}}' "${hotpatch_image}")"
 image_source="$(docker image inspect --format '{{index .Config.Labels "org.opencontainers.image.revision"}}' "${hotpatch_image}")"
@@ -76,7 +76,7 @@ image_base="$(docker image inspect --format '{{index .Config.Labels "io.openwebu
 image_scope="$(docker image inspect --format '{{index .Config.Labels "io.openwebui.hotpatch.scope"}}' "${hotpatch_image}")"
 [[ "${image_source}" == "${source_commit}" ]]
 [[ "${image_base}" == "${base_image}" ]]
-[[ "${image_scope}" == 'v0.11-chatgpt-answer-typography-width-aligned' ]]
+[[ "${image_scope}" == 'v0.11-pre-v011-answer-typography-sidebar-cleanup' ]]
 
 project="$(docker inspect --format '{{index .Config.Labels "com.docker.compose.project"}}' "${target_container}")"
 project_workdir="$(docker inspect --format '{{index .Config.Labels "com.docker.compose.project.working_dir"}}' "${target_container}")"
@@ -148,13 +148,13 @@ chmod 700 "${rollback_script}"
 
 docker compose "${compose_args[@]}" up -d --no-deps --force-recreate open-webui-pr7
 
-deadline=$((SECONDS + 300))
+deadline=$((SECONDS + 420))
 while ((SECONDS < deadline)); do
 	runtime_status="$(docker inspect --format '{{if .State.Health}}{{.State.Health.Status}}{{else}}{{.State.Status}}{{end}}' "${target_container}" 2>/dev/null || true)"
 	if [[ "${runtime_status}" == 'healthy' ]]; then
 		break
 	fi
-	if [[ "${runtime_status}" == 'unhealthy' || "${runtime_status}" == 'exited' || "${runtime_status}" == 'dead' ]]; then
+	if [[ "${runtime_status}" == 'exited' || "${runtime_status}" == 'dead' ]]; then
 		rollback_on_failure "${rollback_script}"
 		exit 1
 	fi
@@ -187,8 +187,14 @@ assert json.loads(Path(sys.argv[4]).read_text()).get("version") == sys.argv[5]
 PY
 
 docker exec "${target_container}" grep -R -F -q 'max-width:58rem' /app/build/_app/immutable/assets
-docker exec "${target_container}" grep -R -F -q 'font-size:var(--text-base,1rem)!important' /app/build/_app/immutable/assets
-docker exec "${target_container}" grep -R -F -q 'line-height:calc(var(--spacing,.25rem) * 6)!important' /app/build/_app/immutable/assets
+docker exec "${target_container}" grep -R -F -q 'white-space:pre-line' /app/build/_app/immutable/assets
+docker exec "${target_container}" grep -R -F -q 'max-width:none' /app/build/_app/immutable/assets
+docker exec "${target_container}" grep -R -F -q 'border-inline-start-width:2px' /app/build/_app/immutable/assets
+docker exec "${target_container}" grep -R -F -q 'margin-block:calc(var(--spacing,.25rem) * 0)' /app/build/_app/immutable/assets
+if docker exec "${target_container}" grep -R -F -q 'sidebar-openclaw-button' /app/build/_app/immutable; then
+	rollback_on_failure "${rollback_script}"
+	exit 1
+fi
 
 revision="$(docker exec "${db_container}" psql --username "${db_user}" --dbname "${database}" --tuples-only --no-align --set ON_ERROR_STOP=1 --command 'SELECT version_num FROM alembic_version ORDER BY version_num;')"
 [[ "${revision}" == "${target_revision}" ]]

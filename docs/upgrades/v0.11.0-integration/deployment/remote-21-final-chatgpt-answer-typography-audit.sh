@@ -3,11 +3,11 @@ set -euo pipefail
 
 web_container='open-webui-pr7'
 formal_container='open-webui'
-expected_web_image='sha256:13d2290cbd506929155f2435c94850f716c7bd66b47710c3c5ba7937789209a3'
+expected_web_image='sha256:e6749eb2fc8a4222a1a8965318abcc322a055e6f7a75f303e5e41bddb73505bb'
 expected_formal_image='sha256:ab6d8f1816a40750a98bdcb18e5a7bd419869c43825a66631acc7f718e6f469b'
-expected_source='4934cdf59bbf2d7661d138d7dc7959bd83e93dfb'
+expected_source='7684618281df7a9adbd4217d127c3abb284cc261'
 admin_id='b6826286-1251-4576-b3a0-e109ff085a61'
-evidence_dir='/home/aiserver/staging/openwebui-pr7-eea11194ed-test/evidence/v011-chatgpt-answer-typography-4934cdf59bbf-20260729-153703'
+evidence_dir='/home/aiserver/staging/openwebui-pr7-eea11194ed-test/evidence/v011-pre-v011-answer-typography-sidebar-7684618281df-r4-20260729-183400'
 staged_functional_probe='/tmp/container-functional-api-probe.py'
 staged_chat_probe='/tmp/container-chatgpt-answer-typography-api-probe.py'
 
@@ -39,8 +39,11 @@ assert json.loads(sys.argv[4]).get("version") == sys.argv[5]
 PY
 
 docker exec "${web_container}" grep -R -F -q 'max-width:58rem' /app/build/_app/immutable/assets
-docker exec "${web_container}" grep -R -F -q 'font-size:var(--text-base,1rem)!important' /app/build/_app/immutable/assets
-docker exec "${web_container}" grep -R -F -q 'line-height:calc(var(--spacing,.25rem) * 6)!important' /app/build/_app/immutable/assets
+docker exec "${web_container}" grep -R -F -q 'white-space:pre-line' /app/build/_app/immutable/assets
+docker exec "${web_container}" grep -R -F -q 'max-width:none' /app/build/_app/immutable/assets
+docker exec "${web_container}" grep -R -F -q 'border-inline-start-width:2px' /app/build/_app/immutable/assets
+docker exec "${web_container}" grep -R -F -q 'margin-block:calc(var(--spacing,.25rem) * 0)' /app/build/_app/immutable/assets
+! docker exec "${web_container}" grep -R -F -q 'sidebar-openclaw-button' /app/build/_app/immutable
 
 docker cp "${staged_functional_probe}" "${web_container}:/tmp/container-functional-api-probe.py"
 docker cp "${staged_chat_probe}" "${web_container}:/tmp/container-chatgpt-answer-typography-api-probe.py"
@@ -75,7 +78,8 @@ fi
 	printf 'formal_image=%s\n' "${expected_formal_image}"
 	printf 'formal_health=healthy\n'
 	printf 'formal_restart_count=0\n'
-	printf 'runtime_css=16px-24px-58rem\n'
+	printf 'runtime_css=pre-v011-prose-rhythm-58rem\n'
+	printf 'sidebar_openclaw_asset=absent\n'
 	printf 'functional_api=pass\n'
 	printf 'persisted_chat_api=pass\n'
 	printf 'recent_fatal_or_5xx=0\n'
