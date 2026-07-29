@@ -148,6 +148,22 @@ describe('v0.11 frontend integration guardrails', () => {
 		expect(navbar).toContain("export let title = ''");
 	});
 
+	it('keeps official socket event dispatch inside the guarded chat generation', () => {
+		const chat = source('./Chat.svelte');
+		const chatEventHandler = chat.match(
+			/const chatEventHandler = async \([\s\S]*?\) => \{([\s\S]*?)\n\t\};\n\n\tconst onMessageHandler/
+		)?.[1];
+
+		expect(chatEventHandler).toBeDefined();
+		expect(chatEventHandler).toContain('const type = event?.data?.type ?? null;');
+		expect(chatEventHandler).toContain(
+			'await loadChat(event.chat_id, expectedCatalogGeneration);'
+		);
+		expect(chatEventHandler).toMatch(
+			/const type = event\?\.data\?\.type \?\? null;[\s\S]*?event\.chat_id !== \$chatId[\s\S]*?!isModeProfileCatalogGenerationCurrent\(expectedCatalogGeneration\)[\s\S]*?if \(type === 'chat:reload'\)[\s\S]*?if \(type === 'chat:list'\)[\s\S]*?let message = history\.messages\[event\.message_id\]/
+		);
+	});
+
 	it('keeps custom settings announcements while restoring URL-driven v0.11 settings', () => {
 		const layout = source('../../../routes/(app)/+layout.svelte');
 

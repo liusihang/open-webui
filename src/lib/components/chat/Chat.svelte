@@ -1792,10 +1792,18 @@
 
 		if (event.chat_id === $chatId) {
 			await tick();
+			const type = event?.data?.type ?? null;
 			if (
 				event.chat_id !== $chatId ||
 				!isModeProfileCatalogGenerationCurrent(expectedCatalogGeneration)
 			) {
+				return;
+			}
+			if (type === 'chat:reload') {
+				await loadChat(event.chat_id, expectedCatalogGeneration);
+				return;
+			}
+			if (type === 'chat:list') {
 				return;
 			}
 			let message = history.messages[event.message_id];
