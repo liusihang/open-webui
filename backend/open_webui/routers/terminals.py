@@ -5,6 +5,7 @@ Routes:
   *    /{server_id}/{path:path}  — proxy request to terminal server
 """
 
+import asyncio
 import logging
 import posixpath
 from urllib.parse import unquote
@@ -12,12 +13,12 @@ from urllib.parse import unquote
 import aiohttp
 from fastapi import APIRouter, Depends, Request, Response, WebSocket
 from fastapi.responses import JSONResponse, StreamingResponse
-from open_webui.socket.terminal_substrate import build_upstream_terminal_ws_request
 from open_webui.config import TERMINAL_PROXY_HEADERS
-from open_webui.events import EVENTS, publish_event
 from open_webui.env import AIOHTTP_CLIENT_SESSION_SSL
+from open_webui.events import EVENTS, publish_event
 from open_webui.models.config import Config
 from open_webui.models.groups import Groups
+from open_webui.socket.terminal_substrate import build_upstream_terminal_ws_request
 from open_webui.utils.access_control import has_connection_access
 from open_webui.utils.auth import create_terminal_session_token, get_verified_user
 from open_webui.utils.terminals import get_terminal_server_url
@@ -30,6 +31,8 @@ router = APIRouter()
 
 STREAMING_CONTENT_TYPES = ('application/octet-stream', 'image/', 'application/pdf')
 STRIPPED_RESPONSE_HEADERS = frozenset(('transfer-encoding', 'connection', 'content-encoding', 'content-length'))
+SESSION_TERMINAL_TRANSIENT_STATUSES = frozenset((500, 502, 503, 504))
+SESSION_TERMINAL_RETRY_DELAYS = (0.5, 1.0, 2.0, 3.0)
 
 
 def _sanitize_proxy_path(path: str) -> str | None:
@@ -182,14 +185,28 @@ async def proxy_terminal(
     )
 
     try:
-        upstream_response = await session.request(
-            method=request.method,
-            url=target_url,
-            headers=headers,
-            cookies=cookies,
-            data=body or None,
-            ssl=AIOHTTP_CLIENT_SESSION_SSL,
-        )
+        for attempt in range(len(SESSION_TERMINAL_RETRY_DELAYS) + 1):
+            upstream_response = await session.request(
+                method=request.method,
+                url=target_url,
+                headers=headers,
+                cookies=cookies,
+                data=body or None,
+                ssl=AIOHTTP_CLIENT_SESSION_SSL,
+            )
+
+            should_retry = (
+                auth_type == 'session'
+                and request.method in ('GET', 'HEAD')
+                and upstream_response.status in SESSION_TERMINAL_TRANSIENT_STATUSES
+                and attempt < len(SESSION_TERMINAL_RETRY_DELAYS)
+            )
+            if not should_retry:
+                break
+
+            await upstream_response.read()
+            await upstream_response.release()
+            await asyncio.sleep(SESSION_TERMINAL_RETRY_DELAYS[attempt])
 
         upstream_content_type = upstream_response.headers.get('content-type', '')
         filtered_headers = {
@@ -258,7 +275,7 @@ async def _resolve_authenticated_connection(ws: WebSocket, server_id: str):
         if user is None:
             await ws.close(code=4001, reason='Invalid token')
             return None
-    except (asyncio.TimeoutError, json.JSONDecodeError):
+    except (TimeoutError, json.JSONDecodeError):
         await ws.close(code=4001, reason='Auth timeout or invalid payload')
         return None
     except Exception:
