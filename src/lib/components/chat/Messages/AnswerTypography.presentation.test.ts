@@ -3,8 +3,16 @@ import { describe, expect, it } from 'vitest';
 
 const appCss = readFileSync(new URL('../../../../app.css', import.meta.url), 'utf8');
 const messageSource = readFileSync(new URL('./Message.svelte', import.meta.url), 'utf8');
+const contentRendererSource = readFileSync(
+	new URL('./ContentRenderer.svelte', import.meta.url),
+	'utf8'
+);
 
 const markdownProse = appCss.match(/\.markdown-prose\s*\{([\s\S]*?)\n\}/)?.[1] ?? '';
+const renderedAssistantMarkdownBranch =
+	contentRendererSource.match(
+		/\{:else if \$settings\?\.renderMarkdownInAssistantMessages[\s\S]*?\}([\s\S]*?)\{:else\}/
+	)?.[1] ?? '';
 
 describe('assistant answer typography', () => {
 	it('uses the ChatGPT reading size instead of the compact v0.11 typography', () => {
@@ -31,5 +39,11 @@ describe('assistant answer typography', () => {
 	it('uses the ChatGPT-sized default answer column', () => {
 		expect(messageSource).toContain("'max-w-[48rem]'");
 		expect(messageSource).not.toContain("'max-w-[58rem]'");
+	});
+
+	it('applies the answer typography contract to ordinary assistant markdown', () => {
+		expect(renderedAssistantMarkdownBranch).toMatch(
+			/<div class="markdown-prose">[\s\S]*?<Markdown/
+		);
 	});
 });

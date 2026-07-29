@@ -288,23 +288,25 @@
 			onPreview={previewHandler}
 		/>
 	{:else if $settings?.renderMarkdownInAssistantMessages ?? true}
-		<Markdown
-			{id}
-			content={formatMessageContent(content)}
-			{model}
-			{save}
-			{preview}
-			{done}
-			{editCodeBlock}
-			{topPadding}
-			{sourceIds}
-			{citationTargets}
-			{onSourceClick}
-			{onTaskClick}
-			{onSave}
-			onUpdate={markdownUpdateHandler}
-			onPreview={previewHandler}
-		/>
+		<div class="markdown-prose">
+			<Markdown
+				{id}
+				content={formatMessageContent(content)}
+				{model}
+				{save}
+				{preview}
+				{done}
+				{editCodeBlock}
+				{topPadding}
+				{sourceIds}
+				{citationTargets}
+				{onSourceClick}
+				{onTaskClick}
+				{onSave}
+				onUpdate={markdownUpdateHandler}
+				onPreview={previewHandler}
+			/>
+		</div>
 	{:else}
 		{@const extracted = extractDetailsBlocks(content)}
 
