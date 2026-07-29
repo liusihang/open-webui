@@ -550,8 +550,8 @@ describe('conversation mode presentation contract', () => {
 		expect(loadChat).toContain(
 			'const loadedChat = await getChatById(localStorage.token, targetChatId)'
 		);
-		expect(loadChat).toContain(
-			'const loadedTags = await getTagsById(localStorage.token, targetChatId)'
+		expect(loadChat).toMatch(
+			/const loadedTags =\s*loadedChat\.user_id === \$user\?\.id\s*\? await getTagsById\(localStorage\.token, targetChatId\)\.catch\(\(\) => \[\]\)\s*: \[\]/
 		);
 		expect(loadChat).not.toContain('chat = await getChatById');
 		expect(loadChat).toMatch(

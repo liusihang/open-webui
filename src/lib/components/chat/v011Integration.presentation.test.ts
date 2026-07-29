@@ -195,6 +195,18 @@ describe('v0.11 frontend integration guardrails', () => {
 		);
 	});
 
+	it('does not request owner-only tags for a read-only persisted chat', () => {
+		const chat = source('./Chat.svelte');
+		const loadChat = chat.match(
+			/const loadChat = async \([\s\S]*?\) => \{[\s\S]*?\n\t\};\n\n\tconst scrollToBottom/
+		)?.[0];
+
+		expect(loadChat).toBeDefined();
+		expect(loadChat).toMatch(
+			/loadedChat\.user_id === \$user\?\.id\s*\? await getTagsById\(localStorage\.token, targetChatId\)[\s\S]*?: \[\]/
+		);
+	});
+
 	it('keeps custom settings announcements while restoring URL-driven v0.11 settings', () => {
 		const layout = source('../../../routes/(app)/+layout.svelte');
 

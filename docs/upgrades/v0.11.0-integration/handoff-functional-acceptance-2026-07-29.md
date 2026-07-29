@@ -28,7 +28,10 @@ Verify the isolated v0.11 test stack end to end after the frontend hot-patches, 
 - TDD red: the new persisted-chat guardrail produced exactly 1 expected failure while the other 30 v0.11 integration tests passed.
 - Minimal source fix: load the chat first so its canonical mode is known, then resolve its stored capability snapshot with `getConversationModeDraftCapabilitySnapshotForMode(..., conversationMode, { existingChat: true })`; legacy capability restoration is also mode-gated while ordinary prompt/files restoration remains unchanged.
 - TDD green: `v011Integration.presentation`, `ConversationMode.presentation`, and `conversationModeProfiles` now pass 103/103.
-- Current checkpoint: source fix is green in focused tests. Build, thin-image deployment, named old-chat browser E2E, runtime/log audit, and final commit are still pending.
+- First persisted-chat thin image: `open-webui:v011-hotfix-c764e6ec2c01`, image ID `sha256:c7970f571cdd6b6556403bee0b403f822e73ce8160d8c64b3953a8f97246598a`, source `c764e6ec2c01db17e2f6897e3201cacec59e2fd6`. It replaced only `/app/build`; test container `3b9bdd3db68e...` became healthy with restart count 0, DB head remained `a11c0d3f0bd0`, and formal live remained byte-for-byte unchanged.
+- First post-fix E2E proved the original blocker resolved: the named chat and task endpoints both returned 200, the exact URL remained selected, the historical title rendered, and two persisted messages appeared. This surfaced a second issue rather than the spinner: the chat is read-only for the test user, but the frontend still called the owner-only tags endpoint and logged its expected 401.
+- Second TDD red/green: a new guardrail first failed because tags were unconditional; the minimal fix loads tags only when `loadedChat.user_id === $user?.id`, otherwise it uses `[]`. Focused tests now pass 104/104 and the full Node 22 frontend suite passes 394/394.
+- Current checkpoint: commit the read-only tag fix, rebuild/redeploy the same thin frontend layer from the new commit, and repeat the named old-chat E2E with ownership-aware editable/read-only assertions plus zero browser/network/runtime errors.
 
 ## Hard contracts
 

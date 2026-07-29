@@ -2939,7 +2939,10 @@
 			return null;
 		}
 
-		const loadedTags = await getTagsById(localStorage.token, targetChatId).catch(() => []);
+		const loadedTags =
+			loadedChat.user_id === $user?.id
+				? await getTagsById(localStorage.token, targetChatId).catch(() => [])
+				: [];
 		if (
 			$chatId !== targetChatId ||
 			!isModeProfileCatalogGenerationCurrent(expectedCatalogGeneration)
