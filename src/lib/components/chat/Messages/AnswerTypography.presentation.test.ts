@@ -36,9 +36,9 @@ describe('assistant answer typography', () => {
 		expect(markdownProse).toContain('prose-li:my-0');
 	});
 
-	it('uses the ChatGPT-sized default answer column', () => {
-		expect(messageSource).toContain("'max-w-[48rem]'");
-		expect(messageSource).not.toContain("'max-w-[58rem]'");
+	it('keeps the answer column aligned with the default input width', () => {
+		expect(messageSource).toContain("'max-w-[58rem]'");
+		expect(messageSource).not.toContain("'max-w-[48rem]'");
 	});
 
 	it('applies the answer typography contract to ordinary assistant markdown', () => {
