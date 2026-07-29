@@ -15,25 +15,33 @@ const renderedAssistantMarkdownBranch =
 	)?.[1] ?? '';
 
 describe('assistant answer typography', () => {
-	it('uses the ChatGPT reading size instead of the compact v0.11 typography', () => {
-		expect(markdownProse).toContain('!text-base');
-		expect(markdownProse).toContain('!leading-6');
-		expect(markdownProse).toContain('prose-p:leading-6');
+	it('restores the pre-v0.11 prose type scale and default leading', () => {
+		expect(markdownProse).toContain('prose dark:prose-invert');
+		expect(markdownProse).toContain('max-w-none');
+		expect(markdownProse).toContain('break-words');
+		expect(markdownProse).not.toContain('!text-base');
 		expect(markdownProse).not.toContain('!text-[0.9375rem]');
-		expect(markdownProse).not.toContain('leading-relaxed');
+		expect(markdownProse).not.toContain('!leading-6');
+		expect(markdownProse).not.toContain('prose-p:leading-6');
 	});
 
-	it('keeps ChatGPT-like paragraph, heading, list, and emphasis rhythm', () => {
-		expect(markdownProse).toContain('prose-p:my-1');
-		expect(markdownProse).toContain('[&_p+p]:!my-4');
+	it('restores the pre-v0.11 paragraph, heading, list, and block rhythm', () => {
+		expect(markdownProse).toContain('prose-blockquote:border-s-2');
+		expect(markdownProse).toContain('prose-blockquote:not-italic');
+		expect(markdownProse).toContain('prose-p:my-0');
+		expect(markdownProse).toContain('prose-headings:my-1');
 		expect(markdownProse).toContain('prose-headings:font-semibold');
-		expect(markdownProse).toContain('prose-h1:text-2xl');
-		expect(markdownProse).toContain('prose-h2:text-xl');
-		expect(markdownProse).toContain('prose-h3:text-lg');
-		expect(markdownProse).toContain('prose-strong:font-semibold');
-		expect(markdownProse).toContain('prose-ul:my-0');
-		expect(markdownProse).toContain('prose-ol:my-0');
-		expect(markdownProse).toContain('prose-li:my-0');
+		expect(markdownProse).toContain('prose-pre:my-0');
+		expect(markdownProse).toContain('prose-table:my-0');
+		expect(markdownProse).toContain('prose-blockquote:my-0');
+		expect(markdownProse).toContain('prose-ul:-my-0');
+		expect(markdownProse).toContain('prose-ol:-my-0');
+		expect(markdownProse).toContain('prose-li:-my-0');
+		expect(markdownProse).toContain('whitespace-pre-line');
+		expect(markdownProse).not.toContain('[&_p+p]:!my-4');
+		expect(markdownProse).not.toContain('prose-h1:text-2xl');
+		expect(markdownProse).not.toContain('prose-h2:text-xl');
+		expect(markdownProse).not.toContain('prose-h3:text-lg');
 	});
 
 	it('keeps the answer column aligned with the default input width', () => {

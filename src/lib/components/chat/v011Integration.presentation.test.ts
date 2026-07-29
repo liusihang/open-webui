@@ -63,17 +63,19 @@ describe('v0.11 frontend integration guardrails', () => {
 		);
 	});
 
-	it('keeps official chat-menu imports alongside the custom OpenClaw quick entry', () => {
+	it('keeps official chat-menu imports without the removed OpenClaw quick entry', () => {
 		const sidebar = source('../layout/Sidebar.svelte');
 		const requiredImports = [
 			"import Dropdown from '../common/Dropdown.svelte';",
 			"import DropdownMenu from '../common/DropdownMenu.svelte';",
 			"import CheckIcon from '../icons/Check.svelte';",
-			"import MoreHorizontalIcon from './Sidebar/icons/MoreHorizontal.svelte';",
-			"import { OPENCLAW_LABEL, resolveOpenClawChannelId } from './Sidebar/openclaw';"
+			"import MoreHorizontalIcon from './Sidebar/icons/MoreHorizontal.svelte';"
 		];
 
 		expect(requiredImports.filter((statement) => !sidebar.includes(statement))).toEqual([]);
+		expect(sidebar).not.toContain("from './Sidebar/openclaw'");
+		expect(sidebar).not.toContain('sidebar-openclaw-button');
+		expect(sidebar).not.toContain('OPENCLAW_LABEL');
 	});
 
 	it('keeps the official subagents runtime and excluded chat-file tools out of the frontend', () => {

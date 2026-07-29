@@ -92,7 +92,6 @@
 	import DropdownMenu from '../common/DropdownMenu.svelte';
 	import CheckIcon from '../icons/Check.svelte';
 	import MoreHorizontalIcon from './Sidebar/icons/MoreHorizontal.svelte';
-	import { OPENCLAW_LABEL, resolveOpenClawChannelId } from './Sidebar/openclaw';
 
 	const BREAKPOINT = 768;
 	const DEFAULT_PINNED_ITEMS = ['notes', 'workspace'];
@@ -127,7 +126,6 @@
 	let showPinnedNotes = false;
 	let showChannels = false;
 	let showFolders = false;
-	let openClawResolving = false;
 	let showSharedFolders = false;
 	let showChatsMenu = false;
 
@@ -838,27 +836,6 @@
 		await tick();
 	};
 
-	const openOpenClawHandler = async () => {
-		if (openClawResolving) {
-			return;
-		}
-
-		openClawResolving = true;
-		const resolvedChannelId = await resolveOpenClawChannelId(localStorage.token).catch((error) => {
-			toast.error(`${error}`);
-			return null;
-		});
-		openClawResolving = false;
-
-		if (!resolvedChannelId) {
-			toast.error(`${OPENCLAW_LABEL} channel is unavailable.`);
-			return;
-		}
-
-		goto(`/channels/${resolvedChannelId}`);
-		await itemClickHandler();
-	};
-
 	const isWindows = /Windows/i.test(navigator.userAgent);
 </script>
 
@@ -1257,35 +1234,6 @@
 							<HotkeyHint name="search" className=" group-hover:visible invisible" />
 						</button>
 					</div>
-
-					{#if $config?.features?.enable_channels && ($user?.role === 'admin' || ($user?.permissions?.features?.channels ?? true))}
-						<div class="px-[0.4375rem] flex justify-center text-gray-800 dark:text-gray-200">
-							<button
-								id="sidebar-openclaw-button"
-								class="group grow flex items-center space-x-3 rounded-2xl px-2.5 py-2 hover:bg-gray-100 dark:hover:bg-gray-900 transition outline-none"
-								on:click={async (e) => {
-									e.stopImmediatePropagation();
-									e.preventDefault();
-
-									await openOpenClawHandler();
-								}}
-								draggable="false"
-								aria-label={OPENCLAW_LABEL}
-							>
-								<div class="self-center">
-									<div
-										class="flex size-4.5 items-center justify-center rounded-lg bg-gradient-to-br from-emerald-500 to-cyan-500 text-[9px] font-semibold text-white shadow-sm"
-									>
-										🦞
-									</div>
-								</div>
-
-								<div class="flex flex-1 self-center translate-y-[0.5px]">
-									<div class="self-center text-sm font-primary">{OPENCLAW_LABEL}</div>
-								</div>
-							</button>
-						</div>
-					{/if}
 
 					<div id="pinned-menu-items-list">
 						{#each pinnedItems as itemId (itemId)}
