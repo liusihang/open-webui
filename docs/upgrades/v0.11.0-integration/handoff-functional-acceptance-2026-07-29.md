@@ -15,10 +15,20 @@ Verify the isolated v0.11 test stack end to end after the frontend hot-patches, 
 
 - Owner: root thread.
 - Started: 2026-07-29 09:51 Asia/Shanghai.
-- Current checkpoint: complete. Source, production build, four-worker runtime, authenticated browser routes, real temporary Chat, real temporary Agent, default-model behavior, persistence boundaries, and final logs are green.
+- Current checkpoint: reopened. New/temporary Chat and Agent flows remain previously green, but persisted historical-chat detail loading was not covered and the user reproduced an infinite spinner at `/c/05464d8b-52ed-447c-8717-5ff18dc27efb`. Root-cause investigation and a failing regression test are in progress; prior whole-product completion wording is withdrawn until this path passes in a fresh browser context.
 - Stop condition: any application console error, failed required request, wrong runtime image/version, unhealthy/restarted container, formal-live drift, or a core flow that cannot complete.
 - Runtime rollback anchor: `/home/aiserver/staging/openwebui-pr7-eea11194ed-test/backups/pre-hotpatch-e3a9c97dd059/rollback-open-webui-pr7.sh`.
 - Test-only default-model rollback: `/home/aiserver/staging/openwebui-pr7-eea11194ed-test/backups/pre-default-model-e3a9c97dd059-retry3/rollback-test-default-model.sh`.
+
+## Persisted historical-chat regression
+
+- User reproduction: `/c/05464d8b-52ed-447c-8717-5ff18dc27efb` renders the authenticated sidebar but leaves the main chat pane on a permanent spinner.
+- Fresh authenticated Playwright reproduction matched the user-visible state and reported `ReferenceError: getConversationModeDraftCapabilitySnapshot is not defined` from the chat bundle. No `/api/v1/chats/{id}` request was issued, so the failure is before the API/database boundary.
+- Root cause: commit `e3a9c97dd059` replaced the imported draft-snapshot helper with `getConversationModeDraftCapabilitySnapshotForMode`, but the persisted-chat `navigateHandler` retained one unconditional call to the removed identifier. New and temporary conversations never execute that path, which is why the previous acceptance missed it.
+- TDD red: the new persisted-chat guardrail produced exactly 1 expected failure while the other 30 v0.11 integration tests passed.
+- Minimal source fix: load the chat first so its canonical mode is known, then resolve its stored capability snapshot with `getConversationModeDraftCapabilitySnapshotForMode(..., conversationMode, { existingChat: true })`; legacy capability restoration is also mode-gated while ordinary prompt/files restoration remains unchanged.
+- TDD green: `v011Integration.presentation`, `ConversationMode.presentation`, and `conversationModeProfiles` now pass 103/103.
+- Current checkpoint: source fix is green in focused tests. Build, thin-image deployment, named old-chat browser E2E, runtime/log audit, and final commit are still pending.
 
 ## Hard contracts
 
@@ -28,17 +38,17 @@ Verify the isolated v0.11 test stack end to end after the frontend hot-patches, 
 
 ## Acceptance matrix
 
-| Area | Required evidence | Status |
-| --- | --- | --- |
-| Runtime identity and health | Exact image/version, `/health`, `/health/db`, model catalog, restart/OOM/log audit | passed |
-| Authentication and navigation | Authenticated home, expanded/collapsed sidebar, search, Notes, Workspace, settings/admin routes | passed |
-| Chat and provider path | Temporary chat, real streamed inference, model/reasoning controls, no console/request failure | passed |
-| Custom AgentScope path | Agent mode entry plus preserved runtime/event behavior using existing acceptance probes | passed |
-| Sidebar/channels/folders/history | Chat list/action menu, channels, folders, pagination and OpenClaw entry without runtime error | passed |
-| Notes/workspace/admin | Route rendering and representative API data for models, knowledge, prompts, tools, functions, skills | passed |
-| Terminal/retrieval/tool contracts | Existing focused suites plus runtime catalog/permission probes; exclusions remain absent | passed |
-| Security/config/migrations | Existing focused suites, migration head/runtime DB checks, config/auth endpoints | passed |
-| Regression and exclusions | Focused/full automated tests, production-source exclusion scan, browser console/log audit | passed |
+| Area                              | Required evidence                                                                                                                                      | Status  |
+| --------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------ | ------- |
+| Runtime identity and health       | Exact image/version, `/health`, `/health/db`, model catalog, restart/OOM/log audit                                                                     | passed  |
+| Authentication and navigation     | Authenticated home, expanded/collapsed sidebar, search, Notes, Workspace, settings/admin routes                                                        | passed  |
+| Chat and provider path            | Temporary chat, real streamed inference, model/reasoning controls, no console/request failure                                                          | passed  |
+| Custom AgentScope path            | Agent mode entry plus preserved runtime/event behavior using existing acceptance probes                                                                | passed  |
+| Sidebar/channels/folders/history  | Chat list/action menu, channels, folders and pagination passed; persisted historical-chat detail load is now a blocking regression under investigation | blocked |
+| Notes/workspace/admin             | Route rendering and representative API data for models, knowledge, prompts, tools, functions, skills                                                   | passed  |
+| Terminal/retrieval/tool contracts | Existing focused suites plus runtime catalog/permission probes; exclusions remain absent                                                               | passed  |
+| Security/config/migrations        | Existing focused suites, migration head/runtime DB checks, config/auth endpoints                                                                       | passed  |
+| Regression and exclusions         | Focused/full automated tests, production-source exclusion scan, browser console/log audit                                                              | passed  |
 
 ## Final accepted source and runtime
 
@@ -92,4 +102,4 @@ Verify the isolated v0.11 test stack end to end after the frontend hot-patches, 
 
 ## Disposition
 
-Functional acceptance of the isolated test stack is complete. No known v0.11 core blocker remains on the tested surfaces. Formal-live promotion is a separate explicitly authorized operation and has not been performed.
+Functional acceptance is reopened because the persisted historical-chat detail path was missing from the earlier matrix and now reproduces an infinite spinner. Do not promote to formal live until the named historical chat loads in a fresh browser context with clean browser/network/runtime evidence. Formal-live promotion remains separately authorized and has not been performed.

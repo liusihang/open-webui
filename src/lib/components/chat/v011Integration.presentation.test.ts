@@ -156,9 +156,7 @@ describe('v0.11 frontend integration guardrails', () => {
 
 		expect(chatEventHandler).toBeDefined();
 		expect(chatEventHandler).toContain('const type = event?.data?.type ?? null;');
-		expect(chatEventHandler).toContain(
-			'await loadChat(event.chat_id, expectedCatalogGeneration);'
-		);
+		expect(chatEventHandler).toContain('await loadChat(event.chat_id, expectedCatalogGeneration);');
 		expect(chatEventHandler).toMatch(
 			/const type = event\?\.data\?\.type \?\? null;[\s\S]*?event\.chat_id !== \$chatId[\s\S]*?!isModeProfileCatalogGenerationCurrent\(expectedCatalogGeneration\)[\s\S]*?if \(type === 'chat:reload'\)[\s\S]*?if \(type === 'chat:list'\)[\s\S]*?let message = history\.messages\[event\.message_id\]/
 		);
@@ -175,6 +173,25 @@ describe('v0.11 frontend integration guardrails', () => {
 		);
 		expect(chat).toMatch(
 			/isConversationModeDraftCompatible\(restoredRootDraft, conversationMode\)[\s\S]*?\? restoredRootDraft[\s\S]*?: null/
+		);
+	});
+
+	it('restores persisted drafts with the mode-aware helper after loading the chat mode', () => {
+		const chat = source('./Chat.svelte');
+		const navigateHandler = chat.match(
+			/const navigateHandler = async \(\) => \{([\s\S]*?)\n\t\};\n\n\tconst initEmbeddedDraft/
+		)?.[1];
+
+		expect(navigateHandler).toBeDefined();
+		expect(navigateHandler).not.toMatch(/\bgetConversationModeDraftCapabilitySnapshot\(/);
+		expect(navigateHandler).toMatch(
+			/getConversationModeDraftCapabilitySnapshotForMode\(\s*restoredDraft,\s*conversationMode,\s*\{ existingChat: true \}\s*\)/
+		);
+		expect(
+			navigateHandler?.indexOf('getConversationModeDraftCapabilitySnapshotForMode(')
+		).toBeGreaterThan(navigateHandler?.indexOf('const loadedChat =') ?? -1);
+		expect(navigateHandler).toMatch(
+			/restoreLegacyModeProfileDraftCapabilities\(\s*isConversationModeDraftCompatible\(restoredDraft, conversationMode\)[\s\S]*?\? restoredDraft[\s\S]*?: null,\s*\{[\s\S]*?preserveBoundDefaults: true,[\s\S]*?expectedCatalogGeneration[\s\S]*?\}[\s\S]*?\)/
 		);
 	});
 

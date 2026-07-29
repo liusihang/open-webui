@@ -505,7 +505,7 @@ describe('conversation mode presentation contract', () => {
 		expect(restoreLegacy).toContain("phase: 'model_change'");
 		expect(restoreLegacy).toContain('modeProfileCapabilityAuthorityController.markExplicit()');
 		expect(navigateHandler).toMatch(
-			/restoreLegacyModeProfileDraftCapabilities\(\s*restoredDraft,\s*\{[\s\S]*?preserveBoundDefaults: true,[\s\S]*?expectedCatalogGeneration[\s\S]*?\}[\s\S]*?\)/
+			/restoreLegacyModeProfileDraftCapabilities\(\s*isConversationModeDraftCompatible\(restoredDraft, conversationMode\)[\s\S]*?\? restoredDraft[\s\S]*?: null,\s*\{[\s\S]*?preserveBoundDefaults: true,[\s\S]*?expectedCatalogGeneration[\s\S]*?\}[\s\S]*?\)/
 		);
 		expect(initNewChat).toMatch(
 			/await restoreLegacyModeProfileDraftCapabilities\(\s*isConversationModeDraftCompatible\(restoredRootDraft, conversationMode\)[\s\S]*?\? restoredRootDraft[\s\S]*?: null,\s*\{[\s\S]*?expectedCatalogGeneration[\s\S]*?\}\s*\)/
@@ -693,9 +693,9 @@ describe('conversation mode presentation contract', () => {
 			expect(composer).toContain('await submitHandler(');
 			expect(composer).not.toContain('clearDraft(');
 		}
-		expect(visibleComposers.some((composer) => composer.includes('withSelectedText(e.detail)'))).toBe(
-			true
-		);
+		expect(
+			visibleComposers.some((composer) => composer.includes('withSelectedText(e.detail)'))
+		).toBe(true);
 		expect(chat).toContain('shouldAutosaveModeProfileDraft()');
 	});
 

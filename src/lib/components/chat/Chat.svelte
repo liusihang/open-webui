@@ -671,24 +671,25 @@
 			`chat-input${chatIdProp ? `-${chatIdProp}` : ''}`
 		);
 		const restoredDraft = parseConversationModeDraft(storageChatInput);
-		const restoredCapabilitySnapshot = getConversationModeDraftCapabilitySnapshot(restoredDraft, {
-			existingChat: true
-		});
 		if (storageChatInput && !restoredDraft) {
 			sessionStorage.removeItem(`chat-input${chatIdProp ? `-${chatIdProp}` : ''}`);
 		}
-		if (chatIdProp) {
+
+		const loadedChat = chatIdProp ? await loadChat(chatIdProp, expectedCatalogGeneration) : false;
+		if (!isModeProfileCatalogGenerationCurrent(expectedCatalogGeneration)) return;
+		if (chatIdProp && loadedChat) {
+			const restoredCapabilitySnapshot = getConversationModeDraftCapabilitySnapshotForMode(
+				restoredDraft,
+				conversationMode,
+				{ existingChat: true }
+			);
 			modeProfileCapabilityAuthorityController =
 				createConversationModeCapabilityAuthorityController({
 					existingChat: true,
 					persistedAuthority: restoredCapabilitySnapshot?.authority
 				});
 			modeProfileCapabilityAuthority = modeProfileCapabilityAuthorityController.snapshot();
-		}
 
-		const loadedChat = chatIdProp ? await loadChat(chatIdProp, expectedCatalogGeneration) : false;
-		if (!isModeProfileCatalogGenerationCurrent(expectedCatalogGeneration)) return;
-		if (chatIdProp && loadedChat) {
 			let restoredLegacyCapabilities = false;
 			if (restoredDraft && !$temporaryChatEnabled) {
 				messageInput?.setText(restoredDraft.prompt);
@@ -704,7 +705,9 @@
 					);
 				} else {
 					restoredLegacyCapabilities = await restoreLegacyModeProfileDraftCapabilities(
-						restoredDraft,
+						isConversationModeDraftCompatible(restoredDraft, conversationMode)
+							? restoredDraft
+							: null,
 						{
 							preserveBoundDefaults: true,
 							expectedCatalogGeneration
@@ -4957,108 +4960,108 @@
 				/>
 			{/if}
 
-				<PaneGroup direction="horizontal" class="w-full h-full">
-					<Pane defaultSize={50} minSize={30} class="h-full flex relative max-w-full flex-col">
-						<FilesOverlay show={dragged} />
-						{#if embedded}
-							<div
-								class="h-10 shrink-0 flex items-center justify-between gap-2 border-b border-gray-50/80 px-3 text-gray-700 dark:border-gray-850/40 dark:text-gray-200"
-							>
-								<div class="flex min-w-0 items-center gap-2">
-									<EmbeddedChatHistoryDropdown
-										title={embeddedHeaderTitle}
-										chats={embeddedChats}
-										canCreateNew={!!onNewEmbeddedChat &&
-											Object.keys(history?.messages ?? {}).length > 0}
-										{loading}
-										onNewChat={onNewEmbeddedChat}
-										onSelectChat={onSelectEmbeddedChat}
-										onDeleteChat={onDeleteEmbeddedChat}
-									/>
-								</div>
-								<Tooltip content={$i18n.t('Close')} placement="bottom">
-									<button
-										type="button"
-										class="rounded-md p-1 text-gray-500 transition hover:text-gray-900 dark:hover:text-white"
-										on:click={() => onCloseEmbedded?.()}
-										aria-label={$i18n.t('Close')}
-									>
-										<XMark className="size-4" strokeWidth="2" />
-									</button>
-								</Tooltip>
+			<PaneGroup direction="horizontal" class="w-full h-full">
+				<Pane defaultSize={50} minSize={30} class="h-full flex relative max-w-full flex-col">
+					<FilesOverlay show={dragged} />
+					{#if embedded}
+						<div
+							class="h-10 shrink-0 flex items-center justify-between gap-2 border-b border-gray-50/80 px-3 text-gray-700 dark:border-gray-850/40 dark:text-gray-200"
+						>
+							<div class="flex min-w-0 items-center gap-2">
+								<EmbeddedChatHistoryDropdown
+									title={embeddedHeaderTitle}
+									chats={embeddedChats}
+									canCreateNew={!!onNewEmbeddedChat &&
+										Object.keys(history?.messages ?? {}).length > 0}
+									{loading}
+									onNewChat={onNewEmbeddedChat}
+									onSelectChat={onSelectEmbeddedChat}
+									onDeleteChat={onDeleteEmbeddedChat}
+								/>
 							</div>
-						{:else}
-							<Navbar
-								bind:this={navbarElement}
-								{readOnly}
-								chat={{
-									id: $chatId,
-									chat: {
-										title: $chatTitle,
-										mode: conversationMode,
-										models: selectedModels,
-										system: $settings.system ?? undefined,
-										params,
-										history,
-										timestamp: Date.now()
+							<Tooltip content={$i18n.t('Close')} placement="bottom">
+								<button
+									type="button"
+									class="rounded-md p-1 text-gray-500 transition hover:text-gray-900 dark:hover:text-white"
+									on:click={() => onCloseEmbedded?.()}
+									aria-label={$i18n.t('Close')}
+								>
+									<XMark className="size-4" strokeWidth="2" />
+								</button>
+							</Tooltip>
+						</div>
+					{:else}
+						<Navbar
+							bind:this={navbarElement}
+							{readOnly}
+							chat={{
+								id: $chatId,
+								chat: {
+									title: $chatTitle,
+									mode: conversationMode,
+									models: selectedModels,
+									system: $settings.system ?? undefined,
+									params,
+									history,
+									timestamp: Date.now()
+								}
+							}}
+							{history}
+							title={$chatTitle}
+							bind:selectedModels
+							{conversationMode}
+							{conversationModeLocked}
+							{agentModeAvailable}
+							onConversationModeSelect={transitionConversationMode}
+							onConversationModeCreateNew={(mode) => {
+								pendingConversationMode = mode;
+								showConversationModeConfirmation = true;
+							}}
+							shareEnabled={!!history.currentId}
+							{initNewChat}
+							scrollToTop={!isNearTop ? scrollToTop : null}
+							{archiveChatHandler}
+							{deleteChatHandler}
+							{moveChatHandler}
+							onSaveTempChat={async () => {
+								try {
+									if (!history?.currentId || !Object.keys(history.messages).length) {
+										toast.error($i18n.t('No conversation to save'));
+										return;
 									}
-								}}
-								{history}
-								title={$chatTitle}
-								bind:selectedModels
-								{conversationMode}
-								{conversationModeLocked}
-								{agentModeAvailable}
-								onConversationModeSelect={transitionConversationMode}
-								onConversationModeCreateNew={(mode) => {
-									pendingConversationMode = mode;
-									showConversationModeConfirmation = true;
-								}}
-								shareEnabled={!!history.currentId}
-								{initNewChat}
-								scrollToTop={!isNearTop ? scrollToTop : null}
-								{archiveChatHandler}
-								{deleteChatHandler}
-								{moveChatHandler}
-								onSaveTempChat={async () => {
-									try {
-										if (!history?.currentId || !Object.keys(history.messages).length) {
-											toast.error($i18n.t('No conversation to save'));
-											return;
-										}
-										const messages = createMessagesList(history, history.currentId);
-										const title =
-											messages.find((m) => m.role === 'user')?.content ?? $i18n.t('New Chat');
-										const savedChat = await createNewChat(
-											localStorage.token,
-											{
-												id: uuidv4(),
-												title: title.length > 50 ? `${title.slice(0, 50)}...` : title,
-												mode: conversationMode,
-												models: selectedModels,
-												params,
-												history,
-												messages,
-												timestamp: Date.now()
-											},
-											null,
-											chatVariables
-										);
-										if (savedChat) {
-											bindCanonicalModeProfileRevision(savedChat.mode_profile_revision_id);
-											temporaryChatEnabled.set(false);
-											chatId.set(savedChat.id);
-											await refreshChatList(localStorage.token);
-											await goto(`/c/${savedChat.id}`);
-											toast.success($i18n.t('Conversation saved successfully'));
-										}
-									} catch (error) {
-										console.error('Failed to save temporary chat:', error);
-										toast.error($i18n.t('Failed to save conversation'));
+									const messages = createMessagesList(history, history.currentId);
+									const title =
+										messages.find((m) => m.role === 'user')?.content ?? $i18n.t('New Chat');
+									const savedChat = await createNewChat(
+										localStorage.token,
+										{
+											id: uuidv4(),
+											title: title.length > 50 ? `${title.slice(0, 50)}...` : title,
+											mode: conversationMode,
+											models: selectedModels,
+											params,
+											history,
+											messages,
+											timestamp: Date.now()
+										},
+										null,
+										chatVariables
+									);
+									if (savedChat) {
+										bindCanonicalModeProfileRevision(savedChat.mode_profile_revision_id);
+										temporaryChatEnabled.set(false);
+										chatId.set(savedChat.id);
+										await refreshChatList(localStorage.token);
+										await goto(`/c/${savedChat.id}`);
+										toast.success($i18n.t('Conversation saved successfully'));
 									}
-								}}
-							/>
-						{/if}
+								} catch (error) {
+									console.error('Failed to save temporary chat:', error);
+									toast.error($i18n.t('Failed to save conversation'));
+								}
+							}}
+						/>
+					{/if}
 					<div id="chat-pane" class="flex flex-col flex-auto z-10 w-full @container overflow-auto">
 						{#if ($settings?.landingPageMode === 'chat' && !$selectedFolder) || createMessagesList(history, history.currentId).length > 0}
 							<div
