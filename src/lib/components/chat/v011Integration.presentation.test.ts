@@ -98,6 +98,13 @@ describe('v0.11 frontend integration guardrails', () => {
 		expect(existsSync(new URL('./Messages/SubagentResultRow.svelte', import.meta.url))).toBe(false);
 	});
 
+	it('keeps the tool-call detail label renderer bound when a grouped call is expanded', () => {
+		const toolCallDisplay = source('../common/ToolCallDisplay.svelte');
+
+		expect(toolCallDisplay).toContain("import Markdown from '../chat/Messages/Markdown.svelte';");
+		expect(toolCallDisplay).toContain('<Markdown');
+	});
+
 	it('keeps official-only subagent keys out of every locale catalog', () => {
 		const localesUrl = new URL('../../i18n/locales/', import.meta.url);
 		const residue = readdirSync(localesUrl, { withFileTypes: true }).flatMap((entry) => {
