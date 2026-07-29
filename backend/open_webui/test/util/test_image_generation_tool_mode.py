@@ -70,6 +70,18 @@ async def test_image_generation_feature_enables_native_tool_without_forced_gener
     async def no_legacy_files(**kwargs):
         return kwargs['form_data'], []
 
+    async def config_get(key, default=None):
+        values = {
+            'task.model.default': '',
+            'task.model.external': '',
+            'user.permissions': {},
+        }
+        assert key in values
+        return values[key]
+
+    async def allow_permission(*args, **kwargs):
+        return True
+
     forced_calls = []
 
     async def forced_image_handler(*args, **kwargs):
@@ -103,6 +115,8 @@ async def test_image_generation_feature_enables_native_tool_without_forced_gener
     monkeypatch.setattr(middleware, 'add_file_context', passthrough_messages)
     monkeypatch.setattr(middleware, 'get_builtin_tools', builtin_tools)
     monkeypatch.setattr(middleware, 'apply_legacy_file_retrieval_if_needed', no_legacy_files)
+    monkeypatch.setattr(middleware.Config, 'get', config_get)
+    monkeypatch.setattr(middleware, 'has_permission', allow_permission)
 
     form_data, metadata, events = await middleware.process_chat_payload(
         _request(model),

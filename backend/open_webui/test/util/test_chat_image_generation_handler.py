@@ -36,6 +36,10 @@ async def test_chat_image_generation_uses_request_messages_when_chat_row_is_miss
     async def missing_chat(chat_id, user_id):
         return None
 
+    async def config_get(key, default=None):
+        assert key == 'image_generation.prompt.enable'
+        return False
+
     captured = {}
 
     async def fake_image_generations(request, form_data, metadata=None, user=None):
@@ -45,6 +49,7 @@ async def test_chat_image_generation_uses_request_messages_when_chat_row_is_miss
 
     monkeypatch.setattr(middleware.Chats, 'get_chat_by_id_and_user_id', missing_chat)
     monkeypatch.setattr(middleware, 'image_generations', fake_image_generations)
+    monkeypatch.setattr(middleware.Config, 'get', config_get)
 
     form_data = {
         'model': 'model-1',
@@ -102,6 +107,10 @@ async def test_chat_image_generation_downgrades_jsonresponse_prompt_generation_w
     async def bad_prompt_response(request, payload, user):
         return JSONResponse({'detail': 'planning failed'}, status_code=400)
 
+    async def config_get(key, default=None):
+        assert key == 'image_generation.prompt.enable'
+        return True
+
     captured = {}
 
     async def fake_image_generations(request, form_data, metadata=None, user=None):
@@ -117,6 +126,7 @@ async def test_chat_image_generation_downgrades_jsonresponse_prompt_generation_w
     monkeypatch.setattr(middleware, 'generate_image_prompt', bad_prompt_response)
     monkeypatch.setattr(middleware, 'image_generations', fake_image_generations)
     monkeypatch.setattr(middleware.log, 'exception', fake_exception)
+    monkeypatch.setattr(middleware.Config, 'get', config_get)
 
     await middleware.chat_image_generation_handler(
         _request(prompt_generation=True),
