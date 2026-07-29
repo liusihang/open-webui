@@ -2098,6 +2098,39 @@ async def test_agent_service_state_transition_completed_writes_only_final_text_t
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    'chat_id',
+    ['local:legacy-session', 'temporary:browser-session', 'channel:channel-1'],
+)
+async def test_agent_service_completed_run_skips_non_saved_chat_writeback(
+    monkeypatch,
+    chat_id,
+):
+    chat_updates = []
+
+    async def fake_upsert_message(actual_chat_id, message_id, message):
+        chat_updates.append((actual_chat_id, message_id, message))
+
+    monkeypatch.setattr(
+        agent_service_router,
+        'Chats',
+        SimpleNamespace(upsert_message_to_chat_by_id_and_message_id=fake_upsert_message),
+        raising=False,
+    )
+
+    await agent_service_router._write_completed_agent_run_message(
+        SimpleNamespace(
+            id='run-1',
+            chat_id=chat_id,
+            assistant_message_id='assistant-1',
+            final_text='done',
+        )
+    )
+
+    assert chat_updates == []
+
+
+@pytest.mark.asyncio
 async def test_agent_service_callbacks_require_service_credential(
     agent_run_db,
     app_without_fake_event_store,

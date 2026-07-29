@@ -1151,6 +1151,56 @@ async def test_agent_context_replay_namespaces_tool_call_ids_across_runs(monkeyp
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    'chat_id',
+    ['local:legacy-session', 'temporary:browser-session', 'channel:channel-1'],
+)
+async def test_agent_context_replay_skips_non_saved_chats(monkeypatch, chat_id):
+    list_calls = []
+
+    async def list_runs_by_chat(actual_chat_id, user_id):
+        list_calls.append((actual_chat_id, user_id))
+        return []
+
+    monkeypatch.setattr(main.AgentRuns, 'list_runs_by_chat', list_runs_by_chat)
+
+    replay = await main._agent_context_replay_items(
+        chat_id=chat_id,
+        user_id='user-1',
+        exclude_run_id='current-run',
+        anchor_message_ids=set(),
+    )
+
+    assert replay == []
+    assert list_calls == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    'chat_id',
+    ['local:legacy-session', 'temporary:browser-session', 'channel:channel-1'],
+)
+async def test_agent_run_link_skips_non_saved_chats(monkeypatch, chat_id):
+    upserts = []
+
+    async def upsert(chat_id, message_id, update):
+        upserts.append((chat_id, message_id, update))
+
+    monkeypatch.setattr(main.Chats, 'upsert_message_to_chat_by_id_and_message_id', upsert)
+
+    await main._link_agent_run_to_assistant_message(
+        {
+            'chat_id': chat_id,
+            'message_id': 'assistant-1',
+            'user_message_id': 'user-1',
+        },
+        agent_run_id='run-1',
+    )
+
+    assert upserts == []
+
+
+@pytest.mark.asyncio
 async def test_agent_mode_runtime_payload_preserves_reasoning_model_params(
     agent_run_db,
     chat_entry_patches,

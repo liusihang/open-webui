@@ -88,6 +88,7 @@ from open_webui.models.chats import Chats
 from open_webui.models.users import Users
 from open_webui.routers.agent_runs import get_configured_agent_event_store
 from open_webui.utils.auth import create_terminal_session_token
+from open_webui.utils.chat_id import is_saved_chat_id
 from open_webui.utils.tools import get_builtin_tools, get_terminal_tools, get_tools
 
 router = APIRouter()
@@ -1683,7 +1684,7 @@ def _cached_event_operation_response(operation) -> AgentRunEvent:
 async def _write_completed_agent_run_message(run) -> None:
     if not run.chat_id or not run.assistant_message_id:
         return
-    if run.chat_id.startswith('local:') or run.chat_id.startswith('channel:'):
+    if not is_saved_chat_id(run.chat_id):
         return
 
     await Chats.upsert_message_to_chat_by_id_and_message_id(

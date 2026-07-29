@@ -1819,7 +1819,7 @@ async def _agent_context_replay_items(
     exclude_run_id: str,
     anchor_message_ids: set[str],
 ) -> list[dict]:
-    if not chat_id or chat_id.startswith(('local:', 'channel:')):
+    if not is_saved_chat_id(chat_id):
         return []
 
     try:
@@ -2324,7 +2324,7 @@ async def _link_agent_run_to_assistant_message(
     assistant_message_id = metadata.get('message_id') or metadata.get('assistant_message_id')
     if not chat_id or not assistant_message_id:
         return
-    if chat_id.startswith('local:') or chat_id.startswith('channel:'):
+    if not is_saved_chat_id(chat_id):
         return
 
     update = {
@@ -2695,7 +2695,7 @@ async def chat_completion(
         )
         if is_product_conversation_request:
             chat_id = metadata['chat_id']
-            is_persisted_chat = not chat_id.startswith(('local:', 'channel:'))
+            is_persisted_chat = is_saved_chat_id(chat_id)
             persisted_mode = None
             has_agent_run = False
             mode_claimed = False
@@ -2884,7 +2884,7 @@ async def chat_completion(
                     form_data=form_data,
                     metadata=metadata,
                 )
-            elif chat_id.startswith('local:'):
+            elif is_temporary_chat_id(chat_id):
                 temporary_binding = await ConversationModeProfiles.create_temporary_binding(
                     user_id=user.id,
                     temporary_conversation_id=chat_id,

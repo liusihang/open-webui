@@ -712,24 +712,29 @@ async def test_post_cutover_unbound_persisted_chat_fails_before_dispatch(
 
 
 @pytest.mark.asyncio
-async def test_local_temporary_chat_binds_once_and_reuses_its_revision_after_head_switch(
+@pytest.mark.parametrize(
+    'temporary_chat_id',
+    ['local:temporary-session', 'temporary:temporary-session'],
+)
+async def test_temporary_chat_binds_once_and_reuses_its_revision_after_head_switch(
     agent_run_db,
     profile_entry,
+    temporary_chat_id,
 ):
     form = _existing_chat_form(mode='chat')
-    form['chat_id'] = 'local:temporary-session'
+    form['chat_id'] = temporary_chat_id
     form['mode_profile_revision_id'] = 'chat-current'
 
     await main.chat_completion(_request(enable_agent_mode=True), form, _user())
     profile_entry.current['chat'] = _revision('chat-new-head', 'chat')
 
     follow_up = _existing_chat_form(mode='chat')
-    follow_up['chat_id'] = 'local:temporary-session'
+    follow_up['chat_id'] = temporary_chat_id
     follow_up['mode_profile_revision_id'] = 'chat-current'
     await main.chat_completion(_request(enable_agent_mode=True), follow_up, _user())
 
     assert [call[1] for call in profile_entry.temporary_binding_calls] == ['chat', 'chat']
-    assert profile_entry.temporary_bindings[('user-1', 'local:temporary-session')].mode_profile_revision_id == (
+    assert profile_entry.temporary_bindings[('user-1', temporary_chat_id)].mode_profile_revision_id == (
         'chat-current'
     )
     assert ('bound_revision', 'chat-current', 'chat') in profile_entry.events
