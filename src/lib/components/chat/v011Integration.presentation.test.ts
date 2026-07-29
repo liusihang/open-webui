@@ -164,6 +164,20 @@ describe('v0.11 frontend integration guardrails', () => {
 		);
 	});
 
+	it('does not restore a Chat profile revision into a new Agent draft', () => {
+		const chat = source('./Chat.svelte');
+
+		expect(
+			chat.match(/getConversationModeDraftCapabilitySnapshotForMode\(/g)?.length
+		).toBeGreaterThanOrEqual(2);
+		expect(chat).toMatch(
+			/getConversationModeDraftCapabilitySnapshotForMode\(\s*restoredRootDraft,\s*conversationMode,\s*\{ existingChat: false \}/
+		);
+		expect(chat).toMatch(
+			/isConversationModeDraftCompatible\(restoredRootDraft, conversationMode\)[\s\S]*?\? restoredRootDraft[\s\S]*?: null/
+		);
+	});
+
 	it('keeps custom settings announcements while restoring URL-driven v0.11 settings', () => {
 		const layout = source('../../../routes/(app)/+layout.svelte');
 

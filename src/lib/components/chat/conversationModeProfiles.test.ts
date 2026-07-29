@@ -510,6 +510,30 @@ describe('conversation mode capability authority', () => {
 		).toBeNull();
 	});
 
+	it('does not restore mode-bound capabilities into a different conversation mode', () => {
+		const isCompatible = requiredHelper<
+			(draft: ConversationModeDraft | null, mode: 'chat' | 'agent') => boolean
+		>('isConversationModeDraftCompatible');
+		const snapshotForMode = requiredHelper<
+			(
+				draft: ConversationModeDraft | null,
+				mode: 'chat' | 'agent',
+				options: { existingChat: boolean }
+			) => ReturnType<typeof getConversationModeDraftCapabilitySnapshot>
+		>('getConversationModeDraftCapabilitySnapshotForMode');
+		const chatDraft = completeDraft({
+			conversationMode: 'chat',
+			modeProfileRevisionId: 'chat-r2'
+		});
+
+		expect(isCompatible(chatDraft, 'chat')).toBe(true);
+		expect(isCompatible(chatDraft, 'agent')).toBe(false);
+		expect(isCompatible(completeDraft(), 'agent')).toBe(true);
+		expect(snapshotForMode(chatDraft, 'chat', { existingChat: false })).not.toBeNull();
+		expect(snapshotForMode(chatDraft, 'agent', { existingChat: false })).toBeNull();
+		expect(snapshotForMode(completeDraft(), 'agent', { existingChat: false })).toBeNull();
+	});
+
 	it('revalidates a hydrated authoritative snapshot through model-change rules', () => {
 		const snapshot = getConversationModeDraftCapabilitySnapshot(
 			completeDraft({

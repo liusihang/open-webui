@@ -415,7 +415,7 @@ describe('conversation mode presentation contract', () => {
 			/restoreModeProfileCapabilitySnapshot\(\s*restoredRootCapabilitySnapshot,\s*expectedCatalogGeneration\s*\)/
 		);
 		expect(initNewChat).toMatch(
-			/restoreLegacyModeProfileDraftCapabilities\(\s*restoredRootDraft,\s*\{[\s\S]*?expectedCatalogGeneration/
+			/restoreLegacyModeProfileDraftCapabilities\(\s*isConversationModeDraftCompatible\(restoredRootDraft, conversationMode\)[\s\S]*?\? restoredRootDraft[\s\S]*?: null,\s*\{[\s\S]*?expectedCatalogGeneration/
 		);
 		expect(initNewChat).toContain(
 			'finalizeModeProfileCapabilitySnapshot(expectedCatalogGeneration)'
@@ -508,7 +508,7 @@ describe('conversation mode presentation contract', () => {
 			/restoreLegacyModeProfileDraftCapabilities\(\s*restoredDraft,\s*\{[\s\S]*?preserveBoundDefaults: true,[\s\S]*?expectedCatalogGeneration[\s\S]*?\}[\s\S]*?\)/
 		);
 		expect(initNewChat).toMatch(
-			/await restoreLegacyModeProfileDraftCapabilities\(\s*restoredRootDraft,\s*\{[\s\S]*?expectedCatalogGeneration[\s\S]*?\}\s*\)/
+			/await restoreLegacyModeProfileDraftCapabilities\(\s*isConversationModeDraftCompatible\(restoredRootDraft, conversationMode\)[\s\S]*?\? restoredRootDraft[\s\S]*?: null,\s*\{[\s\S]*?expectedCatalogGeneration[\s\S]*?\}\s*\)/
 		);
 		expect(navigateHandler).toContain('messageInput?.setText(restoredDraft.prompt)');
 		expect(navigateHandler).toContain('files = restoredDraft.files');

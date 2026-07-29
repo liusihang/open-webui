@@ -121,9 +121,10 @@
 		createConversationModeProfileDraftController,
 		filterConversationModeTerminalCandidateIds,
 		getConversationModeAvailableToolIds,
-		getConversationModeDraftCapabilitySnapshot,
+		getConversationModeDraftCapabilitySnapshotForMode,
 		getConversationModeExternalCatalogFingerprint,
 		getConversationModeRequestFeatures,
+		isConversationModeDraftCompatible,
 		isDirectToolServersPermitted,
 		migrateConversationModeLegacyDraftCapabilities,
 		parseConversationModeDraft,
@@ -1511,8 +1512,9 @@
 		const storedRootDraft =
 			restoreRootDraft && !chatIdProp ? sessionStorage.getItem('chat-input') : null;
 		const restoredRootDraft = parseConversationModeDraft(storedRootDraft);
-		const restoredRootCapabilitySnapshot = getConversationModeDraftCapabilitySnapshot(
+		const restoredRootCapabilitySnapshot = getConversationModeDraftCapabilitySnapshotForMode(
 			restoredRootDraft,
+			conversationMode,
 			{ existingChat: false }
 		);
 		if (storedRootDraft && !restoredRootDraft) {
@@ -2614,8 +2616,9 @@
 		conversationMode = requestedMode;
 		const restoredRootDraft = beginModeProfileDraft();
 		const expectedCatalogGeneration = modeProfileCatalogGeneration;
-		const restoredRootCapabilitySnapshot = getConversationModeDraftCapabilitySnapshot(
+		const restoredRootCapabilitySnapshot = getConversationModeDraftCapabilitySnapshotForMode(
 			restoredRootDraft,
+			conversationMode,
 			{ existingChat: false }
 		);
 		pendingConversationMode = null;
@@ -2756,9 +2759,14 @@
 				expectedCatalogGeneration
 			);
 		} else {
-			await restoreLegacyModeProfileDraftCapabilities(restoredRootDraft, {
-				expectedCatalogGeneration
-			});
+			await restoreLegacyModeProfileDraftCapabilities(
+				isConversationModeDraftCompatible(restoredRootDraft, conversationMode)
+					? restoredRootDraft
+					: null,
+				{
+					expectedCatalogGeneration
+				}
+			);
 		}
 		if (!isModeProfileCatalogGenerationCurrent(expectedCatalogGeneration)) return;
 		await chatId.set('');
