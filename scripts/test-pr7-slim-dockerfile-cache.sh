@@ -12,6 +12,7 @@ dockerfile_source="$(cat "$DOCKERFILE")"
 
 grep -q '^# syntax=docker/dockerfile:1$' <<<"$dockerfile_source"
 grep -q -- '--mount=type=cache,target=/root/.npm' <<<"$dockerfile_source"
+grep -q '^ENV NODE_OPTIONS="--max-old-space-size=8192"$' <<<"$dockerfile_source"
 grep -q -- '--mount=type=cache,target=/var/cache/apt,sharing=locked' <<<"$dockerfile_source"
 grep -q -- '--mount=type=cache,target=/var/lib/apt/lists,sharing=locked' <<<"$dockerfile_source"
 grep -q -- '--mount=type=cache,target=/root/.cache/pip' <<<"$dockerfile_source"

@@ -40,17 +40,26 @@ Perform a fresh, comprehensive release audit of the customized v0.11 integration
 - Fresh full backend rerun: `1286 passed`, with only pre-existing deprecation/test-key warnings.
 - Full fatal Ruff set (`E9,F63,F7,F82`) passed; changed-test Ruff passed after excluding their pre-existing import-order and complexity findings; Ruff format check passed.
 - Full `svelte-check` still reports the exact known baseline of `8195 errors and 216 warnings in 352 files`. This is not represented as a pass; no frontend source changed in this task. Production build and real browser E2E remain mandatory release gates.
+- The first production frontend build reached chunk rendering and then exhausted Node's default approximately 4 GB heap. The identical build on Node `22.22.0` with an 8 GB heap completed successfully in `1m 12s`; both generated version files contain exact source `4c426d8f6da4ad811bc61de6ff78e7b6270e1e5f`.
+- Added a RED/GREEN Dockerfile contract requiring the frontend build stage to set `NODE_OPTIONS=--max-old-space-size=8192`, so the full remote image build uses the proven resource boundary rather than an operational one-off.
+- Fresh authenticated isolated-stack browser acceptance passed:
+  - Home rendered with the composer and zero active spinners.
+  - New `openai/gpt-5.5` chat called `get_current_timestamp`, rendered its expandable input/output detail, and returned exact marker `V011_RELEASE_TOOL_OK`.
+  - Returning home and directly reopening the saved chat rendered the message/tool history with zero spinners and no `Unexpected token`, invalid-JSON, or Internal Server Error text.
+  - Agent mode returned exact marker `V011_RELEASE_AGENT_OK`; direct history reopen preserved Agent mode and rendered with zero spinners.
+  - Browser console ended with 0 errors and 0 warnings; all dynamic API requests shown by Playwright were HTTP 200.
+  - The two temporary chats, local auth state, and remote auth helpers were deleted and their absence verified. Screenshots remain under `output/playwright/v011-release-20260730/.playwright-cli/`.
 
 ## Checkpoints
 
-| Checkpoint                                | Status      | Evidence / next verification                                                                                                     |
-| ----------------------------------------- | ----------- | -------------------------------------------------------------------------------------------------------------------------------- |
-| C0 source and runtime inventory           | completed   | Exact source, test container, formal-live container, health, workers, image IDs, compose roots, and checksums recorded.          |
-| C1 code-review findings resolved          | completed   | Current source/tests prove security findings fixed; exclusions intentional; terminal empty-subpath issue classified as baseline. |
-| C2 source test and build gates            | in progress | Backend 1286/1286 and frontend 400/400 pass; lint gates pass; production build remains.                                          |
-| C3 isolated browser/runtime acceptance    | pending     | Run fresh authenticated E2E and log audit on port 18085.                                                                         |
-| C4 immutable image and rollback readiness | pending     | Build/inspect candidate; create live backups before any switch.                                                                  |
-| C5 formal live cutover and acceptance     | pending     | Recreate only `open-webui`, then prove cold-start and core flows.                                                                |
+| Checkpoint                                | Status    | Evidence / next verification                                                                                                      |
+| ----------------------------------------- | --------- | --------------------------------------------------------------------------------------------------------------------------------- |
+| C0 source and runtime inventory           | completed | Exact source, test container, formal-live container, health, workers, image IDs, compose roots, and checksums recorded.           |
+| C1 code-review findings resolved          | completed | Current source/tests prove security findings fixed; exclusions intentional; terminal empty-subpath issue classified as baseline.  |
+| C2 source test and build gates            | completed | Backend 1286/1286, frontend 400/400, fatal lint, formatting, and production build pass; global svelte-check baseline is recorded. |
+| C3 isolated browser/runtime acceptance    | completed | Chat/tool/detail/history and Agent/history E2E passed with zero spinners or console errors; fixtures cleaned.                     |
+| C4 immutable image and rollback readiness | pending   | Build/inspect candidate; create live backups before any switch.                                                                   |
+| C5 formal live cutover and acceptance     | pending   | Recreate only `open-webui`, then prove cold-start and core flows.                                                                 |
 
 ## Current state
 
@@ -58,4 +67,4 @@ Release decision is **not yet made**. No formal-live mutation has occurred in th
 
 ## Next step
 
-Complete the source and remote read-only inventory, then resolve or dismiss every independent-review finding with current code/test evidence.
+Commit the reproducible Docker build heap contract, then create and inspect the immutable full slim image from a clean archive.
