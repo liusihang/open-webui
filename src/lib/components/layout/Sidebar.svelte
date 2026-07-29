@@ -88,6 +88,10 @@
 	import WorkspaceIcon from './Sidebar/icons/Workspace.svelte';
 	import { slide } from 'svelte/transition';
 	import HotkeyHint from '../common/HotkeyHint.svelte';
+	import Dropdown from '../common/Dropdown.svelte';
+	import DropdownMenu from '../common/DropdownMenu.svelte';
+	import CheckIcon from '../icons/Check.svelte';
+	import MoreHorizontalIcon from './Sidebar/icons/MoreHorizontal.svelte';
 	import { OPENCLAW_LABEL, resolveOpenClawChannelId } from './Sidebar/openclaw';
 
 	const BREAKPOINT = 768;
