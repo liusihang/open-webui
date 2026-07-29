@@ -43,6 +43,13 @@ Verify the isolated v0.11 test stack end to end after the frontend hot-patches, 
 - Official duplicate Sub-agents runtime/UI and `list_chat_files`, `grep_chat_files`, `query_chat_files` must remain absent.
 - Avoid destructive or broad state changes. Prefer temporary chats and read-only route/API checks; record any test data before creating it.
 
+## Product decision: commentary in Chat mode
+
+- On 2026-07-29, the user explicitly accepted model-native `commentary` in ordinary Chat mode as a valuable behavior and directed that it be retained.
+- The behavior comes from the fork's pre-v0.11 Responses/Agent phase transport, including commit `79adbeface297292a39320bb86ee3543d11f2959`; it is not an official v0.11 feature.
+- Do not classify Chat-mode commentary as a mode-isolation regression and do not filter it from visible output merely because it is outside Agent mode.
+- Future changes must preserve both surfaces: ordinary Chat may show provider-native commentary, while Agent mode keeps its structured commentary/final-answer transcript semantics.
+
 ## Acceptance matrix
 
 | Area                              | Required evidence                                                                                                                                   | Status |
