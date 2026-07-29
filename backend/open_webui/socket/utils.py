@@ -3,14 +3,18 @@
 from __future__ import annotations
 
 import hashlib
+import logging
 import uuid
 
 import pycrdt as Y
 from open_webui.env import REDIS_KEY_PREFIX
 from open_webui.utils.json_codec import JSONCodec
 from open_webui.utils.redis import get_redis_connection
+from redis.exceptions import ConnectionError as RedisConnectionError
+from redis.exceptions import TimeoutError as RedisTimeoutError
 
 YDOC_KEY_PREFIX = f'{REDIS_KEY_PREFIX}:ydoc:documents'
+log = logging.getLogger(__name__)
 
 
 class RedisLock:
@@ -74,12 +78,23 @@ class RedisDict:
             decode_responses=True,
         )
 
+    def _read(self, operation, *args, **kwargs):
+        try:
+            return operation(*args, **kwargs)
+        except (RedisConnectionError, RedisTimeoutError) as error:
+            log.warning(
+                'Transient Redis read failure for %s (%s); retrying once',
+                self.name,
+                type(error).__name__,
+            )
+            return operation(*args, **kwargs)
+
     def __setitem__(self, key, value):
         serialized_value = JSONCodec.dumps(value)
         self.redis.hset(self.name, key, serialized_value)
 
     def __getitem__(self, key):
-        value = self.redis.hget(self.name, key)
+        value = self._read(self.redis.hget, self.name, key)
         if value is None:
             raise KeyError(key)
         return JSONCodec.loads(value)
@@ -90,19 +105,22 @@ class RedisDict:
             raise KeyError(key)
 
     def __contains__(self, key):
-        return self.redis.hexists(self.name, key)
+        return self._read(self.redis.hexists, self.name, key)
 
     def __len__(self):
-        return self.redis.hlen(self.name)
+        return self._read(self.redis.hlen, self.name)
 
     def keys(self):
-        return self.redis.hkeys(self.name)
+        return self._read(self.redis.hkeys, self.name)
 
     def values(self):
-        return [JSONCodec.loads(v) for v in self.redis.hvals(self.name)]
+        return [JSONCodec.loads(v) for v in self._read(self.redis.hvals, self.name)]
 
     def items(self):
-        return [(k, JSONCodec.loads(v)) for k, v in self.redis.hgetall(self.name).items()]
+        return [
+            (k, JSONCodec.loads(v))
+            for k, v in self._read(self.redis.hgetall, self.name).items()
+        ]
 
     def set(self, mapping: dict):
         if not mapping:
@@ -129,7 +147,7 @@ class RedisDict:
 
         # Fetch existing keys before writing so we know which ones to remove.
         # HKEYS is cheap — it transfers only short key strings, not large JSON values.
-        existing_keys = set(self.redis.hkeys(self.name))
+        existing_keys = set(self._read(self.redis.hkeys, self.name))
         new_keys = set(mapping.keys())
         keys_to_remove = existing_keys - new_keys
 
