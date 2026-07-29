@@ -34,6 +34,7 @@ Determine why `http://192.168.2.238:18085/` remains on the initial loading spinn
 - Cached-page finding: the retained pre-fix Playwright page continued executing old chunk `nodes/2.BSccNmZS.js` after a normal `goto`, so it correctly remained broken until a cache-bypassing reload. This was old frontend execution, not the new image.
 - Real Edge acceptance: the user's existing profile was force-reloaded without clearing login or site data. The exact tab then rendered the expanded sidebar, chat action menu, conversation mode controls, selected model, composer, and suggestions. DevTools read back frontend version `98ae1cd6071d5434f080c98e8195884b391af124` and new main chunk `nodes/2.BDS2JQ8V.js`.
 - Real Edge interaction: the sidebar “More” dropdown opened and exposed `Mark all as read`, directly exercising all four restored components. `Dropdown is not defined` is absent; the remaining console errors originate from the Zotero extension's `chrome-extension://` scripts, not OpenWebUI.
+- After acceptance and DevTools closure, a later redundant read-only state capture was blocked because the Mac had automatically locked. No unlock was attempted; the last unlocked Edge state was the fully rendered accepted page described above.
 - Final container log audit: 0 runtime error signatures, health `healthy`, restart count 0, and `OOMKilled=false`.
 - Current checkpoint: complete on the exact user-reported Edge truth surface. DevTools was closed and the tab was left on the fully rendered home page.
 
