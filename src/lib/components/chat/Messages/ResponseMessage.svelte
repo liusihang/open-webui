@@ -67,7 +67,7 @@
 	import AgentFinalAnswer from '../AgentEvents/AgentFinalAnswer.svelte';
 	import AgentTranscript from '../AgentEvents/AgentTranscript.svelte';
 	import type { AgentTranscriptModel } from '../AgentEvents/types';
-	import { markAgentRunMessageDone } from '../AgentEvents/messageState';
+	import { applyAgentRunFinalContent, markAgentRunMessageDone } from '../AgentEvents/messageState';
 	import FullHeightIframe from '$lib/components/common/FullHeightIframe.svelte';
 	import OutputEditView from './OutputEditView.svelte';
 	import { getOutputText, replaceOutputMessageText, type OutputItem } from './structuredOutput';
@@ -198,6 +198,7 @@
 	let agentTranscript: AgentTranscriptModel | null = null;
 	let agentFinalAnswer = '';
 	let agentFinalAnswerDone = false;
+	let agentFinalContentPendingPersist = false;
 
 	let edit = false;
 	let editedContent = '';
@@ -833,12 +834,17 @@
 									on:final={(event) => {
 										agentFinalAnswer = event.detail.content;
 										agentFinalAnswerDone = event.detail.done;
+										agentFinalContentPendingPersist =
+											applyAgentRunFinalContent(message, event.detail.content) ||
+											agentFinalContentPendingPersist;
 									}}
 									on:transcript={(event) => {
 										agentTranscript = event.detail.model;
 									}}
 									on:terminal={async (event) => {
-										if (markAgentRunMessageDone(message, event.detail.runStatus)) {
+										const markedDone = markAgentRunMessageDone(message, event.detail.runStatus);
+										if (markedDone || agentFinalContentPendingPersist) {
+											agentFinalContentPendingPersist = false;
 											await saveMessage(message.id, structuredClone(message));
 										}
 									}}
