@@ -1340,6 +1340,113 @@ async def test_run_start_with_tool_envelope_drives_tool_artifact_and_final_lifec
 
 
 @pytest.mark.asyncio
+async def test_general_agent_recovers_one_pre_event_incomplete_chunked_disconnect_after_tool() -> None:
+    class IncompleteChunkedFinalizationClient(RecordingOpenWebUIClient):
+        async def call_model_stream(self, **kwargs: object):
+            self.model_calls.append({**kwargs, "stream": True})
+            call_number = len(self.model_calls)
+            if call_number == 1:
+                yield {
+                    "type": "chunk",
+                    "delta": {
+                        "content": "I will run pwd.",
+                        "phase": "commentary",
+                        "tool_calls": [
+                            {
+                                "id": "call_pwd",
+                                "type": "function",
+                                "function": {
+                                    "name": "run_command",
+                                    "arguments": '{"command":"pwd"}',
+                                },
+                            }
+                        ],
+                    },
+                }
+                yield {"type": "stream_end"}
+                return
+            if call_number == 2:
+                raise httpx.RemoteProtocolError(
+                    "peer closed connection without sending complete message body "
+                    "(incomplete chunked read)"
+                )
+            yield {
+                "type": "chunk",
+                "delta": {
+                    "content": "The working directory has been checked.",
+                    "phase": "final_answer",
+                    "tool_calls": None,
+                },
+            }
+            yield {"type": "stream_end"}
+
+    openwebui_client = IncompleteChunkedFinalizationClient()
+    async with make_client(openwebui_client, auto_finalize_ordinary_qa=True) as client:
+        response = await client.post(
+            "/v1/openwebui/runs",
+            headers={"Authorization": f"Bearer {SERVICE_TOKEN}"},
+            json={
+                "run_id": "run-incomplete-chunked-after-tool",
+                "chat_id": "chat-1",
+                "leader_model_id": "model-a",
+                "messages": [{"role": "user", "content": "Run pwd, then answer."}],
+                "tool_access_envelope": {
+                    "tools": [
+                        {
+                            "id": "tool:terminal:terminals:run_command",
+                            "name": "run_command",
+                            "type": "terminal",
+                            "schema": {
+                                "name": "run_command",
+                                "description": "Run a terminal command.",
+                                "parameters": {
+                                    "type": "object",
+                                    "properties": {"command": {"type": "string"}},
+                                    "required": ["command"],
+                                },
+                            },
+                        }
+                    ]
+                },
+            },
+        )
+
+        assert response.status_code == 202
+        for _ in range(80):
+            status = await client.get(
+                "/v1/openwebui/runs/run-incomplete-chunked-after-tool/status",
+                headers={"Authorization": f"Bearer {SERVICE_TOKEN}"},
+            )
+            if status.json()["state"] in {"completed", "failed"}:
+                break
+            await asyncio.sleep(0.01)
+
+    assert status.json()["state"] == "completed"
+    assert [call["model_call_id"] for call in openwebui_client.model_calls] == [
+        "model-call-1",
+        "model-call-2",
+        "model-call-2",
+    ]
+    assert [call["idempotency_key"] for call in openwebui_client.model_calls] == [
+        "model:leader:model-call-1:1",
+        "model:leader:model-call-2:1",
+        "model:leader:model-call-2:2",
+    ]
+    assert openwebui_client.tool_calls == [
+        {
+            "run_id": "run-incomplete-chunked-after-tool",
+            "idempotency_key": "tool:leader:tool-call-1:1",
+            "participant_id": "leader",
+            "tool_call_id": "tool-call-1",
+            "tool_id": "tool:terminal:terminals:run_command",
+            "arguments": {"command": "pwd"},
+        }
+    ]
+    assert joined_final_delta_text(openwebui_client) == "The working directory has been checked."
+    assert not any(event["event_type"] == "run.failed" for event in openwebui_client.events)
+
+
+@pytest.mark.asyncio
 async def test_general_agent_exposes_request_user_input_tool_and_continues_after_answer() -> None:
     openwebui_client = RecordingOpenWebUIClient()
     openwebui_client.model_responses = [
