@@ -27,6 +27,31 @@ class FlakyRedisRead:
         return execute
 
 
+class InMemoryRedisHash:
+    def __init__(self):
+        self.hashes = {}
+
+    def hkeys(self, name):
+        return list(self.hashes.get(name, {}))
+
+    def hset(self, name, key=None, value=None, mapping=None):
+        values = self.hashes.setdefault(name, {})
+        if mapping is not None:
+            values.update(mapping)
+        else:
+            values[key] = value
+
+    def hdel(self, name, *keys):
+        values = self.hashes.get(name, {})
+        removed = sum(key in values for key in keys)
+        for key in keys:
+            values.pop(key, None)
+        return removed
+
+    def hget(self, name, key):
+        return self.hashes.get(name, {}).get(key)
+
+
 @pytest.mark.parametrize('error_type', [RedisConnectionError, RedisTimeoutError])
 @pytest.mark.parametrize(
     ('method_name', 'result', 'operation', 'expected'),
@@ -82,3 +107,21 @@ def test_redis_dict_retries_transient_reads_only_once(monkeypatch: pytest.Monkey
         len(value)
 
     assert redis.calls == 2
+
+
+def test_redis_dict_set_keeps_models_published_by_another_worker(monkeypatch: pytest.MonkeyPatch):
+    redis = InMemoryRedisHash()
+    monkeypatch.setattr(socket_utils, 'get_redis_connection', lambda *_args, **_kwargs: redis)
+
+    worker_one = socket_utils.RedisDict('open-webui:models', 'redis://redis:6379/0')
+    worker_two = socket_utils.RedisDict('open-webui:models', 'redis://redis:6379/0')
+
+    worker_one.set(
+        {
+            'shared-model': {'id': 'shared-model'},
+            'bifrostapi.Cliproxy/gpt-5.5': {'id': 'bifrostapi.Cliproxy/gpt-5.5'},
+        }
+    )
+    worker_two.set({'shared-model': {'id': 'shared-model'}})
+
+    assert worker_two['bifrostapi.Cliproxy/gpt-5.5'] == {'id': 'bifrostapi.Cliproxy/gpt-5.5'}

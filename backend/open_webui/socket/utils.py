@@ -124,7 +124,6 @@ class RedisDict:
 
     def set(self, mapping: dict):
         if not mapping:
-            self.redis.delete(self.name)
             self._last_signature = None
             return
 
@@ -145,18 +144,11 @@ class RedisDict:
         if signature == self._last_signature:
             return
 
-        # Fetch existing keys before writing so we know which ones to remove.
-        # HKEYS is cheap — it transfers only short key strings, not large JSON values.
-        existing_keys = set(self._read(self.redis.hkeys, self.name))
-        new_keys = set(mapping.keys())
-        keys_to_remove = existing_keys - new_keys
-
-        # HSET first (add/update all new values), then HDEL (remove stale keys).
-        # We never DELETE the whole hash — this eliminates the race window
-        # where concurrent readers would see an empty models dict.
+        # A worker's local discovery snapshot can be partial or stale relative
+        # to another worker. Publish its verified models atomically, but never
+        # treat omitted keys as globally authoritative removals. Explicit cache
+        # invalidation uses clear() when the provider configuration changes.
         self.redis.hset(self.name, mapping=serialized)
-        if keys_to_remove:
-            self.redis.hdel(self.name, *keys_to_remove)
 
         self._last_signature = signature
 
