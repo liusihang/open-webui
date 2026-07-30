@@ -192,9 +192,15 @@ export const markAgentRunMessageDone = (
  */
 export const applyAgentRunFinalContent = (
 	message: AgentRunMessage | undefined,
-	content: string
+	content: string,
+	previousFinalContent = ''
 ): boolean => {
-	if (!message?.agent_run_id || !content.trim() || message.content?.trim()) {
+	if (
+		!message?.agent_run_id ||
+		!content.trim() ||
+		(message.content?.trim() && message.content !== previousFinalContent) ||
+		message.content === content
+	) {
 		return false;
 	}
 

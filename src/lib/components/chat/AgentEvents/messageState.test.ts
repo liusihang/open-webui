@@ -82,6 +82,21 @@ describe('applyAgentRunFinalContent', () => {
 		expect(applyAgentRunFinalContent(message, 'Recovered final answer.')).toBe(true);
 		expect(message).toMatchObject({ content: 'Recovered final answer.', done: true });
 	});
+
+	it('updates only the matching prior Agent final fragment as later deltas extend it', () => {
+		const message = {
+			id: 'assistant-1',
+			role: 'assistant',
+			content: 'First final fragment',
+			done: false,
+			agent_run_id: 'run-1'
+		};
+
+		expect(
+			applyAgentRunFinalContent(message, 'First final fragment, now complete.', 'First final fragment')
+		).toBe(true);
+		expect(message.content).toBe('First final fragment, now complete.');
+	});
 });
 
 describe('Agent Run cancellation state', () => {

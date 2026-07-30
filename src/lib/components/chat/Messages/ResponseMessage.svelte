@@ -832,10 +832,15 @@
 									agentRunId={message.agent_run_id}
 									bind:statusHistory={message.statusHistory}
 									on:final={(event) => {
+										const previousAgentFinalAnswer = agentFinalAnswer;
 										agentFinalAnswer = event.detail.content;
 										agentFinalAnswerDone = event.detail.done;
 										agentFinalContentPendingPersist =
-											applyAgentRunFinalContent(message, event.detail.content) ||
+											applyAgentRunFinalContent(
+												message,
+												event.detail.content,
+												previousAgentFinalAnswer
+											) ||
 											agentFinalContentPendingPersist;
 									}}
 									on:transcript={(event) => {
