@@ -164,6 +164,18 @@ export const mergeServerMessage = (
 		incomingMessage.done !== true &&
 		incomingContentString.length < existingContent.length;
 
+	// Agent final text is assembled locally from durable final.delta events. The
+	// chat record can already be marked done while its persisted snapshot still
+	// contains an earlier fragment, so the normal streaming-only guard is not
+	// sufficient for a same-run replay.
+	const incomingContentIsShorterAgentRunSnapshot =
+		typeof incomingContentString === 'string' &&
+		Boolean(existingContent) &&
+		existingMessage.agent_run_id === incomingMessage.agent_run_id &&
+		Boolean(incomingMessage.agent_run_id) &&
+		incomingMessage.role === 'assistant' &&
+		incomingContentString.length < existingContent.length;
+
 	const mergedMessage = {
 		...existingMessage,
 		...(!incomingContentIsEmpty &&
@@ -183,7 +195,8 @@ export const mergeServerMessage = (
 	if (
 		(existingContent && incomingContentIsEmpty) ||
 		(existingContent && incomingContentIsPlaceholder) ||
-		incomingContentIsShorterStreamingSnapshot
+		incomingContentIsShorterStreamingSnapshot ||
+		incomingContentIsShorterAgentRunSnapshot
 	) {
 		mergedMessage.content = existingContent;
 	}

@@ -29,6 +29,27 @@ describe('mergeServerMessage', () => {
 		expect(merged.content).toBe('longer partial answer');
 	});
 
+	it('does not roll back a longer Agent final answer to a shorter completed snapshot from the same run', () => {
+		const merged = mergeServerMessage(
+			{
+				id: 'a',
+				content: 'Complete final answer from the Agent.',
+				role: 'assistant',
+				done: true,
+				agent_run_id: 'run-1'
+			},
+			{
+				id: 'a',
+				content: 'Complete final',
+				role: 'assistant',
+				done: true,
+				agent_run_id: 'run-1'
+			}
+		);
+
+		expect(merged.content).toBe('Complete final answer from the Agent.');
+	});
+
 	it('keeps local status history when server snapshot status history is empty', () => {
 		const existingStatusHistory = [{ action: 'tool', description: 'Running', done: false }];
 		const merged = mergeServerMessage(
