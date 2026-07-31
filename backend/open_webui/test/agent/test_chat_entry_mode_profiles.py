@@ -427,6 +427,55 @@ def profile_entry(monkeypatch):  # noqa: C901
 
 
 @pytest.mark.asyncio
+async def test_unauthorized_chat_is_rejected_before_chat_variables_fallback_read(
+    monkeypatch,
+    profile_entry,
+):
+    authorization_events = []
+
+    async def allow_model_access(*args, **kwargs):
+        return None
+
+    async def deny_owner(chat_id, user_id):
+        authorization_events.append(('owner_check', chat_id, user_id))
+        return False
+
+    async def reject_chat_read(*args, **kwargs):
+        authorization_events.append(('chat_read', args, kwargs))
+        raise AssertionError('chat content was read before authorization')
+
+    monkeypatch.setattr(main, 'check_model_access', allow_model_access)
+    monkeypatch.setattr(main.Chats, 'is_chat_owner', deny_owner)
+    monkeypatch.setattr(main.Chats, 'get_chat_by_id', reject_chat_read)
+
+    with pytest.raises(main.HTTPException) as exc_info:
+        await main.chat_completion(
+            _request(enable_agent_mode=True),
+            _existing_chat_form(mode='chat'),
+            SimpleNamespace(id='other-user', role='user'),
+        )
+
+    assert exc_info.value.status_code == 404
+    assert authorization_events == [('owner_check', 'chat-1', 'other-user')]
+    assert profile_entry.provider_calls == []
+
+
+@pytest.mark.asyncio
+async def test_missing_model_error_is_not_masked_by_profile_error_redaction_state(
+    profile_entry,
+):
+    form = _existing_chat_form(mode='chat')
+    form['model'] = 'missing-model'
+
+    with pytest.raises(main.HTTPException) as exc_info:
+        await main.chat_completion(_request(enable_agent_mode=True), form, _user())
+
+    assert exc_info.value.status_code == 400
+    assert exc_info.value.detail == 'Model not found'
+    assert profile_entry.provider_calls == []
+
+
+@pytest.mark.asyncio
 async def test_new_chat_binds_current_chat_revision_before_dispatch(
     agent_run_db,
     profile_entry,
@@ -663,24 +712,29 @@ async def test_post_cutover_unbound_persisted_chat_fails_before_dispatch(
 
 
 @pytest.mark.asyncio
-async def test_local_temporary_chat_binds_once_and_reuses_its_revision_after_head_switch(
+@pytest.mark.parametrize(
+    'temporary_chat_id',
+    ['local:temporary-session', 'temporary:temporary-session'],
+)
+async def test_temporary_chat_binds_once_and_reuses_its_revision_after_head_switch(
     agent_run_db,
     profile_entry,
+    temporary_chat_id,
 ):
     form = _existing_chat_form(mode='chat')
-    form['chat_id'] = 'local:temporary-session'
+    form['chat_id'] = temporary_chat_id
     form['mode_profile_revision_id'] = 'chat-current'
 
     await main.chat_completion(_request(enable_agent_mode=True), form, _user())
     profile_entry.current['chat'] = _revision('chat-new-head', 'chat')
 
     follow_up = _existing_chat_form(mode='chat')
-    follow_up['chat_id'] = 'local:temporary-session'
+    follow_up['chat_id'] = temporary_chat_id
     follow_up['mode_profile_revision_id'] = 'chat-current'
     await main.chat_completion(_request(enable_agent_mode=True), follow_up, _user())
 
     assert [call[1] for call in profile_entry.temporary_binding_calls] == ['chat', 'chat']
-    assert profile_entry.temporary_bindings[('user-1', 'local:temporary-session')].mode_profile_revision_id == (
+    assert profile_entry.temporary_bindings[('user-1', temporary_chat_id)].mode_profile_revision_id == (
         'chat-current'
     )
     assert ('bound_revision', 'chat-current', 'chat') in profile_entry.events
@@ -776,10 +830,12 @@ async def test_chat_prompt_order_is_administrator_model_global_then_user(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize('internal', [False, True])
 async def test_multimodel_fanout_uses_each_models_prompt_and_params(
     monkeypatch,
     agent_run_db,
     profile_entry,
+    internal,
 ):
     _configure_prompt_layers(profile_entry, mode='chat', administrator='Administrator prompt.')
     profile_entry.model_info = None
@@ -806,6 +862,7 @@ async def test_multimodel_fanout_uses_each_models_prompt_and_params(
         ),
     }
     request = _request(enable_agent_mode=True)
+    request.state.internal = internal
     request.app.state.MODELS['model-b'] = {
         'id': 'model-b',
         'name': 'Model B',
@@ -819,22 +876,32 @@ async def test_multimodel_fanout_uses_each_models_prompt_and_params(
     ]
     form['params'] = {'system': 'Request prompt.', 'temperature': 0.2}
 
-    task_counter = 0
+    scheduled_task_ids = []
 
-    async def run_task(redis, coroutine, id):
-        nonlocal task_counter
-        task_counter += 1
+    async def run_task(redis, coroutine, id, task_id=None):
+        assert id == 'chat-1'
+        assert task_id
+        scheduled_task_ids.append(task_id)
         await coroutine
-        return f'task-{task_counter}', None
+        return task_id, None
 
     monkeypatch.setattr(main, 'create_task', run_task)
 
     response = await main.chat_completion(request, form, _user())
 
-    assert response['task_ids'] == ['task-1', 'task-2']
     assert len(profile_entry.provider_calls) == 2
     first_form = profile_entry.provider_calls[0][0]
     second_form = profile_entry.provider_calls[1][0]
+    metadata_task_ids = [first_form['metadata']['task_id'], second_form['metadata']['task_id']]
+    assert all(metadata_task_ids)
+    assert len(set(metadata_task_ids)) == 2
+    if internal:
+        assert response['task_ids'] == []
+        assert len(response['results']) == 2
+        assert scheduled_task_ids == []
+    else:
+        assert response['task_ids'] == scheduled_task_ids
+        assert scheduled_task_ids == metadata_task_ids
     assert _system_content(first_form['messages']) == (
         'Administrator prompt.\n\nGlobal prompt.\n\nModel A prompt.\n\nRequest prompt.'
     )
@@ -900,7 +967,7 @@ async def test_secondary_fanout_cannot_readd_bound_empty_skill_or_filter_default
 
     task_counter = 0
 
-    async def run_task(redis, coroutine, id):
+    async def run_task(redis, coroutine, id, task_id=None):
         nonlocal task_counter
         task_counter += 1
         await coroutine

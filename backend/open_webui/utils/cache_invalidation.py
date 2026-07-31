@@ -9,6 +9,7 @@ from functools import wraps
 from typing import Any
 
 from open_webui.env import REDIS_KEY_PREFIX
+from open_webui.socket.utils import RedisDict
 
 log = logging.getLogger(__name__)
 
@@ -445,6 +446,14 @@ def _clear_model_derived_cache(app) -> None:
 
     models = getattr(app.state, 'MODELS', None)
     if models is None:
+        return
+    if isinstance(models, RedisDict):
+        # MODELS is already one shared hash. Every worker receives the same
+        # invalidation event, so deleting it here lets a late worker erase a
+        # catalog that another worker has just repopulated. Resetting
+        # BASE_MODELS above still makes each worker rebuild its derived list;
+        # RedisDict.set() publishes verified entries without making the
+        # shared catalog transiently empty.
         return
     try:
         models.clear()

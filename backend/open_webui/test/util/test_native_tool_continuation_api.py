@@ -506,7 +506,7 @@ async def test_direct_streaming_native_tool_calls_continue_without_final_tool_ca
 
     monkeypatch.setattr(middleware, 'generate_chat_completion', fake_generate_chat_completion)
     monkeypatch.setattr(middleware, 'process_tool_result', fake_process_tool_result)
-    monkeypatch.setattr(middleware, 'get_sorted_filter_ids', no_filters)
+    monkeypatch.setattr(middleware, 'get_filter_functions', no_filters)
 
     ctx = _ctx()
     ctx['form_data']['stream'] = True
@@ -560,7 +560,7 @@ async def test_direct_streaming_native_continuation_restores_private_anchor_on_e
 
     monkeypatch.setattr(middleware, 'generate_chat_completion', fake_generate)
     monkeypatch.setattr(middleware, 'process_tool_result', fake_process_tool_result)
-    monkeypatch.setattr(middleware, 'get_sorted_filter_ids', no_filters)
+    monkeypatch.setattr(middleware, 'get_filter_functions', no_filters)
     monkeypatch.setattr(middleware.Config, 'get', config_get)
     monkeypatch.setattr(middleware, 'RAG_SYSTEM_CONTEXT', True)
 
@@ -669,7 +669,7 @@ async def test_websocket_native_continuation_rebuilds_two_iterations_without_dup
 
     monkeypatch.setattr(middleware, 'execute_native_tool_calls', fake_execute)
     monkeypatch.setattr(middleware, 'generate_chat_completion', fake_generate)
-    monkeypatch.setattr(middleware, 'get_sorted_filter_ids', no_filters)
+    monkeypatch.setattr(middleware, 'get_filter_functions', no_filters)
     monkeypatch.setattr(middleware, 'get_system_oauth_token', no_oauth)
     monkeypatch.setattr(middleware.Config, 'get', config_get)
     monkeypatch.setattr(middleware, 'RAG_SYSTEM_CONTEXT', rag_system_context)
@@ -827,7 +827,7 @@ async def test_direct_streaming_native_continuation_with_rag_user_context_keeps_
 
     monkeypatch.setattr(middleware, 'generate_chat_completion', fake_generate)
     monkeypatch.setattr(middleware, 'process_tool_result', fake_process_tool_result)
-    monkeypatch.setattr(middleware, 'get_sorted_filter_ids', no_filters)
+    monkeypatch.setattr(middleware, 'get_filter_functions', no_filters)
     monkeypatch.setattr(middleware.Config, 'get', config_get)
     monkeypatch.setattr(middleware, 'RAG_SYSTEM_CONTEXT', False)
 
@@ -930,7 +930,7 @@ async def test_websocket_native_continuation_restores_anchor_and_base_sources_wi
 
     monkeypatch.setattr(middleware, 'execute_native_tool_calls', fake_execute)
     monkeypatch.setattr(middleware, 'generate_chat_completion', fake_generate)
-    monkeypatch.setattr(middleware, 'get_sorted_filter_ids', no_filters)
+    monkeypatch.setattr(middleware, 'get_filter_functions', no_filters)
     monkeypatch.setattr(middleware, 'get_system_oauth_token', no_oauth)
     monkeypatch.setattr(middleware.Config, 'get', config_get)
     monkeypatch.setattr(middleware, 'RAG_SYSTEM_CONTEXT', True)
@@ -1019,8 +1019,8 @@ async def test_websocket_native_tool_rounds_keep_current_tool_and_filter_context
         filter_contexts.append((deepcopy(extra_params['__body__']), deepcopy(extra_params['__messages__'])))
         return form_data, {}
 
-    async def no_filters(*_args, **_kwargs):
-        return []
+    async def one_filter(*_args, **_kwargs):
+        return [object()]
 
     async def no_oauth(*_args, **_kwargs):
         return None
@@ -1034,7 +1034,7 @@ async def test_websocket_native_tool_rounds_keep_current_tool_and_filter_context
     monkeypatch.setattr(middleware, 'execute_native_tool_calls', fake_execute)
     monkeypatch.setattr(middleware, 'generate_chat_completion', fake_generate)
     monkeypatch.setattr(middleware, 'process_filter_functions', capture_stream_filter)
-    monkeypatch.setattr(middleware, 'get_sorted_filter_ids', no_filters)
+    monkeypatch.setattr(middleware, 'get_filter_functions', one_filter)
     monkeypatch.setattr(middleware, 'get_system_oauth_token', no_oauth)
     monkeypatch.setattr(middleware.Config, 'get', config_get)
     monkeypatch.setattr(middleware, 'ENABLE_REALTIME_CHAT_SAVE', False)
@@ -1122,8 +1122,8 @@ async def test_websocket_responses_stateful_two_tool_rounds_keep_private_context
         filter_contexts.append((deepcopy(extra_params['__body__']), deepcopy(extra_params['__messages__'])))
         return form_data, {}
 
-    async def no_filters(*_args, **_kwargs):
-        return []
+    async def one_filter(*_args, **_kwargs):
+        return [object()]
 
     async def no_oauth(*_args, **_kwargs):
         return None
@@ -1138,7 +1138,7 @@ async def test_websocket_responses_stateful_two_tool_rounds_keep_private_context
     monkeypatch.setattr(middleware, 'execute_native_tool_calls', fake_execute)
     monkeypatch.setattr(middleware, 'generate_chat_completion', fake_generate)
     monkeypatch.setattr(middleware, 'process_filter_functions', capture_stream_filter)
-    monkeypatch.setattr(middleware, 'get_sorted_filter_ids', no_filters)
+    monkeypatch.setattr(middleware, 'get_filter_functions', one_filter)
     monkeypatch.setattr(middleware, 'get_system_oauth_token', no_oauth)
     monkeypatch.setattr(middleware.Config, 'get', config_get)
     monkeypatch.setattr(middleware, 'ENABLE_REALTIME_CHAT_SAVE', False)

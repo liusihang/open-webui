@@ -1,0 +1,11 @@
+ARG BASE_IMAGE=open-webui:v011-test-4d3543438b-slim
+FROM ${BASE_IMAGE}
+
+ARG BASE_IMAGE
+ARG HOTPATCH_SOURCE_COMMIT
+LABEL org.opencontainers.image.revision="${HOTPATCH_SOURCE_COMMIT}" \
+      io.openwebui.hotpatch.base-image="${BASE_IMAGE}" \
+      io.openwebui.hotpatch.scope="v0.11-nonblocking-legacy-indexeddb-startup"
+
+RUN rm -rf /app/build && mkdir -p /app/build
+COPY --chown=0:0 build/ /app/build/

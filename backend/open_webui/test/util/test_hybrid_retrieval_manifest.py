@@ -120,12 +120,11 @@ async def test_collection_hybrid_wrapper_falls_back_to_vector_only_when_manifest
     async def fake_manifest_hybrid(**kwargs):
         raise HybridManifestNotReady("legacy vector rows missing chunk_uid")
 
-    async def fake_query_collection(request, **kwargs):
-        assert request is None
+    async def fake_native_hybrid_search(**kwargs):
         return {"distances": [[0.9]], "documents": [["vector fallback"]], "metadatas": [[{"source": "vector"}]]}
 
     monkeypatch.setattr(retrieval_utils, "query_manifest_hybrid_search", fake_manifest_hybrid)
-    monkeypatch.setattr(retrieval_utils, "query_collection", fake_query_collection)
+    monkeypatch.setattr(retrieval_utils, "query_doc_with_native_hybrid_search", fake_native_hybrid_search)
 
     result = await retrieval_utils.query_collection_with_hybrid_search(
         collection_names=["collection-1"],
@@ -148,13 +147,22 @@ async def test_doc_hybrid_wrapper_falls_back_to_vector_only_when_manifest_not_re
 
     search_calls = []
 
-    async def fake_vector_search(collection_name, vectors, filter=None, limit=10):
+    async def fake_vector_search(
+        collection_name,
+        query,
+        vectors,
+        filter=None,
+        limit=10,
+        hybrid_bm25_weight=0.5,
+    ):
         search_calls.append(
             {
                 "collection_name": collection_name,
+                "query": query,
                 "vectors": vectors,
                 "filter": filter,
                 "limit": limit,
+                "hybrid_bm25_weight": hybrid_bm25_weight,
             }
         )
         return SearchResult(
@@ -165,10 +173,12 @@ async def test_doc_hybrid_wrapper_falls_back_to_vector_only_when_manifest_not_re
         )
 
     monkeypatch.setattr(retrieval_utils, "query_manifest_hybrid_search", fake_manifest_hybrid)
-    monkeypatch.setattr(retrieval_utils.ASYNC_VECTOR_DB_CLIENT, "search", fake_vector_search)
+    monkeypatch.setattr(retrieval_utils.ASYNC_VECTOR_DB_CLIENT, "hybrid_search", fake_vector_search)
+    monkeypatch.setattr(retrieval_utils, "_supports_native_hybrid_search", lambda: True)
 
     result = await retrieval_utils.query_doc_with_hybrid_search(
         collection_name="collection-1",
+        collection_result=None,
         query="legacy",
         embedding_function=FakeEmbedder(),
         k=1,
@@ -178,19 +188,18 @@ async def test_doc_hybrid_wrapper_falls_back_to_vector_only_when_manifest_not_re
         hybrid_bm25_weight=0.5,
     )
 
-    assert result == {
-        "ids": [["vector-1"]],
-        "documents": [["vector fallback"]],
-        "metadatas": [[{"source": "vector"}]],
-        "distances": [[0.9]],
-    }
+    assert result["documents"] == [["vector fallback"]]
+    assert result["metadatas"][0][0]["source"] == "vector"
+    assert result["metadatas"][0][0]["score"] == result["distances"][0][0]
     assert search_calls == [
-            {
-                "collection_name": "collection-1",
-                "vectors": [[1.0, 0.25]],
-                "filter": None,
-                "limit": 1,
-            }
+        {
+            "collection_name": "collection-1",
+            "query": "legacy",
+            "vectors": [[1.0, 0.25]],
+            "filter": None,
+            "limit": 1,
+            "hybrid_bm25_weight": 0.5,
+        }
     ]
 
 

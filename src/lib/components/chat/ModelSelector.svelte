@@ -13,6 +13,12 @@
 	export let disabled = false;
 
 	export let showSetDefault = true;
+	export let triggerClassName = 'text-lg';
+	export let className = undefined;
+	export let placement: 'top' | 'bottom' | 'auto' = 'bottom';
+	export let align: 'start' | 'end' = 'start';
+
+	let compareModels = selectedModels.length > 1;
 
 	$: selectedModelName =
 		$models.find((model) => model.id === (selectedModels[0] ?? ''))?.name ??
@@ -57,6 +63,10 @@
 			selectedModels = selectedModels;
 		}
 	}
+
+	$: if (selectedModels.length > 1 && !compareModels) {
+		compareModels = true;
+	}
 </script>
 
 <div
@@ -87,7 +97,7 @@
 {#if showSetDefault}
 	<div
 		class="relative text-left mt-[1px] ml-1 text-[0.7rem] text-gray-600 dark:text-gray-400 font-primary"
-	>
-		<button on:click={saveDefaultModel}> {$i18n.t('Set as default')}</button>
-	</div>
-{/if}
+		>
+			<button on:click={saveDefaultModel}> {$i18n.t('Set as default')}</button>
+		</div>
+	{/if}

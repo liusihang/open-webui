@@ -5,6 +5,7 @@ Routes:
   *    /{server_id}/{path:path}  — proxy request to terminal server
 """
 
+import asyncio
 import logging
 import posixpath
 from urllib.parse import unquote
@@ -12,15 +13,15 @@ from urllib.parse import unquote
 import aiohttp
 from fastapi import APIRouter, Depends, Request, Response, WebSocket
 from fastapi.responses import JSONResponse, StreamingResponse
-from open_webui.socket.terminal_substrate import build_upstream_terminal_ws_request
 from open_webui.config import TERMINAL_PROXY_HEADERS
-from open_webui.events import EVENTS, publish_event
 from open_webui.env import AIOHTTP_CLIENT_SESSION_SSL
+from open_webui.events import EVENTS, publish_event
 from open_webui.models.config import Config
 from open_webui.models.groups import Groups
-from open_webui.models.users import Users
+from open_webui.socket.terminal_substrate import build_upstream_terminal_ws_request
 from open_webui.utils.access_control import has_connection_access
 from open_webui.utils.auth import create_terminal_session_token, get_verified_user
+from open_webui.utils.terminals import get_terminal_server_url
 from open_webui.utils.tools import bearer_auth_header
 from starlette.background import BackgroundTask
 
@@ -30,6 +31,8 @@ router = APIRouter()
 
 STREAMING_CONTENT_TYPES = ('application/octet-stream', 'image/', 'application/pdf')
 STRIPPED_RESPONSE_HEADERS = frozenset(('transfer-encoding', 'connection', 'content-encoding', 'content-length'))
+SESSION_TERMINAL_TRANSIENT_STATUSES = frozenset((500, 502, 503, 504))
+SESSION_TERMINAL_RETRY_DELAYS = (0.5, 1.0, 2.0, 3.0)
 
 
 def _sanitize_proxy_path(path: str) -> str | None:
@@ -49,6 +52,10 @@ def _sanitize_proxy_path(path: str) -> str | None:
         decoded = once
     # Fail closed: still encoded after the cap means the upstream would decode further into traversal.
     if unquote(decoded) != decoded:
+        return None
+    # posixpath splits on '/' only, so 'a/..\..\b' survives normpath as one component.
+    # Upstreams that treat '\' as a separator would resolve it, so reject outright.
+    if '\\' in decoded:
         return None
     had_trailing_slash = decoded.endswith('/')
     normalized = posixpath.normpath(decoded)
@@ -83,6 +90,27 @@ async def list_terminal_servers(request: Request, user=Depends(get_verified_user
 PROXY_METHODS = ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'HEAD', 'OPTIONS']
 
 
+def _build_upstream_websocket_request(
+    *,
+    connection: dict,
+    session_id: str,
+    user_id: str,
+    session_token: str,
+) -> tuple[str, dict | None]:
+    base_url = get_terminal_server_url(connection)
+    normalized_connection = {
+        **connection,
+        'url': base_url,
+        'policy_id': None,
+    }
+    return build_upstream_terminal_ws_request(
+        connection=normalized_connection,
+        session_id=session_id,
+        user_id=user_id,
+        client_token=session_token,
+    )
+
+
 @router.api_route('/{server_id}/{path:path}', methods=PROXY_METHODS)
 async def proxy_terminal(
     server_id: str,
@@ -97,11 +125,14 @@ async def proxy_terminal(
     if connection is None:
         return JSONResponse({'error': f"Terminal server '{server_id}' not found"}, status_code=404)
 
+    if not connection.get('enabled', True):
+        return JSONResponse({'error': 'Terminal server disabled'}, status_code=403)
+
     user_group_ids = {group.id for group in await Groups.get_groups_by_member_id(user.id)}
     if not await has_connection_access(user, connection, user_group_ids):
         return JSONResponse({'error': 'Access denied'}, status_code=403)
 
-    base_url = (connection.get('url') or '').rstrip('/')
+    base_url = get_terminal_server_url(connection)
     if not base_url:
         return JSONResponse({'error': 'Terminal server URL not configured'}, status_code=503)
 
@@ -110,11 +141,6 @@ async def proxy_terminal(
         return JSONResponse({'error': 'Invalid path'}, status_code=400)
 
     target_url = f'{base_url}/{safe_path}'
-
-    # Route through orchestrator policy endpoint if policy_id is set
-    policy_id = connection.get('policy_id')
-    if policy_id:
-        target_url = f'{base_url}/p/{policy_id}/{safe_path}'
 
     if request.query_params:
         target_url += f'?{request.query_params}'
@@ -134,9 +160,18 @@ async def proxy_terminal(
         headers.update(bearer_auth_header(create_terminal_session_token(user)))
     elif auth_type == 'system_oauth':
         cookies = request.cookies
-        oauth_token = request.headers.get('x-oauth-access-token', '')
+        # Resolve the token server-side from the caller's OAuth session; never trust a client header.
+        oauth_token = None
+        try:
+            if request.cookies.get('oauth_session_id', None):
+                oauth_token = await request.app.state.oauth_manager.get_oauth_token(
+                    user.id,
+                    request.cookies.get('oauth_session_id', None),
+                )
+        except Exception as e:
+            log.error(f'Error getting OAuth token: {e}')
         if oauth_token:
-            headers.update(bearer_auth_header(oauth_token))
+            headers.update(bearer_auth_header(oauth_token.get('access_token', '')))
     # auth_type == "none": no Authorization header
 
     content_type = request.headers.get('content-type')
@@ -150,14 +185,28 @@ async def proxy_terminal(
     )
 
     try:
-        upstream_response = await session.request(
-            method=request.method,
-            url=target_url,
-            headers=headers,
-            cookies=cookies,
-            data=body or None,
-            ssl=AIOHTTP_CLIENT_SESSION_SSL,
-        )
+        for attempt in range(len(SESSION_TERMINAL_RETRY_DELAYS) + 1):
+            upstream_response = await session.request(
+                method=request.method,
+                url=target_url,
+                headers=headers,
+                cookies=cookies,
+                data=body or None,
+                ssl=AIOHTTP_CLIENT_SESSION_SSL,
+            )
+
+            should_retry = (
+                auth_type == 'session'
+                and request.method in ('GET', 'HEAD')
+                and upstream_response.status in SESSION_TERMINAL_TRANSIENT_STATUSES
+                and attempt < len(SESSION_TERMINAL_RETRY_DELAYS)
+            )
+            if not should_retry:
+                break
+
+            await upstream_response.read()
+            await upstream_response.release()
+            await asyncio.sleep(SESSION_TERMINAL_RETRY_DELAYS[attempt])
 
         upstream_content_type = upstream_response.headers.get('content-type', '')
         filtered_headers = {
@@ -207,13 +256,13 @@ async def _resolve_authenticated_connection(ws: WebSocket, server_id: str):
     The client must send ``{"type": "auth", "token": "<jwt>"}`` as its first
     message after connecting.
 
-    Returns ``(user, connection, token)`` on success, or ``None`` after closing *ws*
+    Returns ``(user, connection)`` on success, or ``None`` after closing *ws*
     with an appropriate error code.
     """
     import asyncio
     import json
 
-    from open_webui.utils.auth import decode_token, is_valid_token
+    from open_webui.utils.auth import get_verified_user_by_token
 
     # First-message authentication
     try:
@@ -222,16 +271,11 @@ async def _resolve_authenticated_connection(ws: WebSocket, server_id: str):
         if payload.get('type') != 'auth':
             await ws.close(code=4001, reason='Expected auth message')
             return None
-        token = payload.get('token', '')
-        data = decode_token(token)
-        if data is None or 'id' not in data or not await is_valid_token(data, getattr(ws.app.state, 'redis', None)):
+        user = await get_verified_user_by_token(payload.get('token', ''), getattr(ws.app.state, 'redis', None))
+        if user is None:
             await ws.close(code=4001, reason='Invalid token')
             return None
-        user = await Users.get_user_by_id(data['id'])
-        if user is None:
-            await ws.close(code=4001, reason='User not found')
-            return None
-    except (asyncio.TimeoutError, json.JSONDecodeError):
+    except (TimeoutError, json.JSONDecodeError):
         await ws.close(code=4001, reason='Auth timeout or invalid payload')
         return None
     except Exception:
@@ -246,12 +290,16 @@ async def _resolve_authenticated_connection(ws: WebSocket, server_id: str):
         await ws.close(code=4004, reason='Terminal server not found')
         return None
 
+    if not connection.get('enabled', True):
+        await ws.close(code=4003, reason='Terminal server disabled')
+        return None
+
     user_group_ids = {group.id for group in await Groups.get_groups_by_member_id(user.id)}
     if not await has_connection_access(user, connection, user_group_ids):
         await ws.close(code=4003, reason='Access denied')
         return None
 
-    return user, connection, token
+    return user, connection
 
 
 @router.websocket('/{server_id}/api/terminals/{session_id}')
@@ -271,19 +319,19 @@ async def ws_terminal(
     result = await _resolve_authenticated_connection(ws, server_id)
     if result is None:
         return
-    user, connection, _client_token = result
+    user, connection = result
 
-    base_url = (connection.get('url') or '').rstrip('/')
+    base_url = get_terminal_server_url(connection)
     if not base_url:
         await ws.close(code=4003, reason='Terminal server URL not configured')
         return
 
     upstream_session_token = create_terminal_session_token(user) if connection.get('auth_type') == 'session' else ''
-    upstream_url, upstream_first_message = build_upstream_terminal_ws_request(
+    upstream_url, upstream_first_message = _build_upstream_websocket_request(
         connection=connection,
         session_id=session_id,
         user_id=user.id,
-        client_token=upstream_session_token,
+        session_token=upstream_session_token,
     )
 
     app = ws.scope.get('app')

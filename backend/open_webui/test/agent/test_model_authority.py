@@ -155,6 +155,37 @@ async def test_model_authority_refreshes_nonempty_stale_model_cache_on_miss():
 
 
 @pytest.mark.asyncio
+async def test_model_authority_uses_fresh_catalog_result_when_shared_state_is_empty():
+    request = _trusted_request(enable_agent_mode=True, run_id='run-1')
+    request.app.state.MODELS = {}
+
+    async def refresh_models(_request, _user):
+        return [
+            {
+                'id': 'bifrostapi.Cliproxy/gpt-5.5',
+                'name': 'openai/gpt-5.5',
+                'owned_by': 'openai',
+                'info': {'meta': {}},
+            }
+        ]
+
+    authority = AgentModelAuthority(
+        operation_store=AgentRuns,
+        model_loader=refresh_models,
+        user_loader=_user_loader,
+        model_access_checker=_allow_model_access,
+    )
+
+    model = await authority._resolve_authorized_model(
+        request,
+        await _user_loader('user-1'),
+        'bifrostapi.Cliproxy/gpt-5.5',
+    )
+
+    assert model['id'] == 'bifrostapi.Cliproxy/gpt-5.5'
+
+
+@pytest.mark.asyncio
 async def test_verified_model_call_uses_provider_path_without_creating_nested_agent_run(
     agent_run_db,
 ):

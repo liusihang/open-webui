@@ -1,6 +1,7 @@
 import type { AgentRunState } from './types';
 
 type AgentRunMessage = {
+	content?: string;
 	done?: boolean;
 	agent_run_id?: string;
 };
@@ -178,5 +179,31 @@ export const markAgentRunMessageDone = (
 	}
 
 	message.done = true;
+	return true;
+};
+
+/**
+ * Materializes a replayed Agent final answer in the canonical assistant node.
+ *
+ * Agent runs stream their final response independently of normal chat deltas.
+ * The terminal-event save path persists this same object, so populate it before
+ * that event arrives. Existing content wins because it may already be a newer
+ * durable server snapshot.
+ */
+export const applyAgentRunFinalContent = (
+	message: AgentRunMessage | undefined,
+	content: string,
+	previousFinalContent = ''
+): boolean => {
+	if (
+		!message?.agent_run_id ||
+		!content.trim() ||
+		(message.content?.trim() && message.content !== previousFinalContent) ||
+		message.content === content
+	) {
+		return false;
+	}
+
+	message.content = content;
 	return true;
 };

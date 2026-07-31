@@ -225,6 +225,24 @@ export const chatCompletion = async (
 	return [res, controller];
 };
 
+const parseOpenAIErrorResponse = async (response: Response) => {
+	const text = await response.text();
+	const contentType = response.headers.get('content-type')?.toLowerCase() ?? '';
+
+	if (contentType.includes('json')) {
+		try {
+			return JSON.parse(text);
+		} catch {
+			// Fall through to the readable response body below.
+		}
+	}
+
+	return {
+		detail:
+			text.trim() || `${response.status}${response.statusText ? ` ${response.statusText}` : ''}`
+	};
+};
+
 export const generateOpenAIChatCompletion = async (
 	token: string = '',
 	body: object,
@@ -242,7 +260,7 @@ export const generateOpenAIChatCompletion = async (
 		body: JSON.stringify(body)
 	})
 		.then(async (res) => {
-			if (!res.ok) throw await res.json();
+			if (!res.ok) throw await parseOpenAIErrorResponse(res);
 			return res.json();
 		})
 		.catch((err) => {

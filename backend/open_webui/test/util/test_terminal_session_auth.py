@@ -455,3 +455,168 @@ async def test_terminal_proxy_uses_minted_jwt_instead_of_request_token(monkeypat
     assert captured['minted_for_user'] == 'user-1'
     assert captured['request']['headers']['Authorization'] == 'Bearer minted-token-for-user-1'
     assert captured['request']['cookies'] == {'token': 'cookie-token'}
+
+
+@pytest.mark.asyncio
+async def test_session_terminal_proxy_retries_transient_get_until_workspace_is_ready(monkeypatch):
+    statuses = [500, 503, 200]
+    calls = []
+
+    class FakeResponse:
+        headers = {'content-type': 'application/json'}
+
+        def __init__(self, status):
+            self.status = status
+
+        async def read(self):
+            return b'{"ready": true}' if self.status == 200 else b'not ready'
+
+        async def release(self):
+            return None
+
+    class FakeSession:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        async def request(self, **kwargs):
+            calls.append(kwargs)
+            return FakeResponse(statuses.pop(0))
+
+        async def close(self):
+            return None
+
+    async def no_sleep(_delay):
+        return None
+
+    async def body():
+        return b''
+
+    monkeypatch.setattr(terminals_mod.Config, 'get', _config_get)
+    monkeypatch.setattr(terminals_mod.Groups, 'get_groups_by_member_id', _allowed_groups)
+    monkeypatch.setattr(terminals_mod, 'has_connection_access', _allow_access)
+    monkeypatch.setattr(terminals_mod.aiohttp, 'ClientSession', FakeSession)
+    monkeypatch.setattr(asyncio, 'sleep', no_sleep)
+
+    request = _request()
+    request.body = body
+
+    response = await terminals_mod.proxy_terminal(
+        'terminals',
+        'files/list',
+        request,
+        user=_user(),
+    )
+
+    assert response.status_code == 200
+    assert response.body == b'{"ready": true}'
+    assert len(calls) == 3
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(('method', 'expected_calls'), [('GET', 5), ('POST', 1)])
+async def test_session_terminal_proxy_retry_is_bounded_and_never_retries_writes(
+    monkeypatch,
+    method,
+    expected_calls,
+):
+    calls = []
+
+    class FakeResponse:
+        status = 500
+        headers = {'content-type': 'application/json'}
+
+        async def read(self):
+            return b'not ready'
+
+        async def release(self):
+            return None
+
+    class FakeSession:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        async def request(self, **kwargs):
+            calls.append(kwargs)
+            return FakeResponse()
+
+        async def close(self):
+            return None
+
+    async def no_sleep(_delay):
+        return None
+
+    async def body():
+        return b''
+
+    monkeypatch.setattr(terminals_mod.Config, 'get', _config_get)
+    monkeypatch.setattr(terminals_mod.Groups, 'get_groups_by_member_id', _allowed_groups)
+    monkeypatch.setattr(terminals_mod, 'has_connection_access', _allow_access)
+    monkeypatch.setattr(terminals_mod.aiohttp, 'ClientSession', FakeSession)
+    monkeypatch.setattr(asyncio, 'sleep', no_sleep)
+
+    request = _request()
+    request.method = method
+    request.body = body
+
+    response = await terminals_mod.proxy_terminal(
+        'terminals',
+        'files/list',
+        request,
+        user=_user(),
+    )
+
+    assert response.status_code == 500
+    assert len(calls) == expected_calls
+
+
+@pytest.mark.asyncio
+async def test_terminal_websocket_auth_returns_verified_user_and_connection(monkeypatch):
+    connection = _connection()
+    user = _user()
+
+    class FakeWebSocket:
+        def __init__(self):
+            self.app = SimpleNamespace(state=SimpleNamespace(redis=None))
+            self.closed = []
+
+        async def receive_text(self):
+            return '{"type":"auth","token":"client-token"}'
+
+        async def close(self, **kwargs):
+            self.closed.append(kwargs)
+
+    async def fake_verified_user_by_token(token, redis):
+        assert token == 'client-token'
+        assert redis is None
+        return user
+
+    monkeypatch.setattr(terminals_mod.Config, 'get', _config_get)
+    monkeypatch.setattr(terminals_mod.Groups, 'get_groups_by_member_id', _allowed_groups)
+    monkeypatch.setattr(terminals_mod, 'has_connection_access', _allow_access)
+    monkeypatch.setattr(auth_mod, 'get_verified_user_by_token', fake_verified_user_by_token)
+
+    websocket = FakeWebSocket()
+    result = await terminals_mod._resolve_authenticated_connection(websocket, connection['id'])
+
+    assert result == (user, connection)
+    assert websocket.closed == []
+
+
+def test_terminal_websocket_policy_path_is_encoded_once():
+    connection = {
+        **_connection(),
+        'policy_id': 'team/shared',
+    }
+
+    upstream_url, first_message = terminals_mod._build_upstream_websocket_request(
+        connection=connection,
+        session_id='session/with separators',
+        user_id='user-1',
+        session_token='minted-session-token',
+    )
+
+    assert upstream_url == (
+        'ws://terminal.internal/p/team%2Fshared/api/terminals/'
+        'session%2Fwith%20separators?user_id=user-1&token=minted-session-token'
+    )
+    assert first_message is None

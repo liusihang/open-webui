@@ -17,7 +17,6 @@
 
 	import {
 		chatId,
-		chats,
 		config,
 		type Model,
 		models,
@@ -31,7 +30,6 @@
 		audioQueue,
 		showControls,
 		showCallOverlay,
-		currentChatPage,
 		temporaryChatEnabled,
 		mobile,
 		chatTitle,
@@ -43,7 +41,6 @@
 		terminalServers,
 		functions,
 		selectedFolder,
-		pinnedChats,
 		showEmbeds,
 		selectedTerminalId,
 		showFileNavPath,
@@ -51,6 +48,7 @@
 		chatRequestQueues,
 		desktopEvent
 	} from '$lib/stores';
+	import { refreshChatList, refreshFolderChatLists } from '$lib/stores/chatList';
 
 	import { WEBUI_API_BASE_URL } from '$lib/constants';
 
@@ -68,16 +66,17 @@
 		displayFileHandler
 	} from '$lib/utils';
 	import { AudioQueue } from '$lib/utils/audio';
+	import { createTemporaryChatId, isTemporaryChatId } from '$lib/utils/chatId';
 	import { getOutputText } from './Messages/structuredOutput';
 
 	import {
 		archiveChatById,
+		compactChatById,
 		createNewChat,
 		deleteChatById,
+		forkChatById,
 		getAllTags,
 		getChatById,
-		getChatList,
-		getPinnedChatList,
 		getTagsById,
 		updateChatById,
 		updateChatFolderIdById
@@ -122,9 +121,10 @@
 		createConversationModeProfileDraftController,
 		filterConversationModeTerminalCandidateIds,
 		getConversationModeAvailableToolIds,
-		getConversationModeDraftCapabilitySnapshot,
+		getConversationModeDraftCapabilitySnapshotForMode,
 		getConversationModeExternalCatalogFingerprint,
 		getConversationModeRequestFeatures,
+		isConversationModeDraftCompatible,
 		isDirectToolServersPermitted,
 		migrateConversationModeLegacyDraftCapabilities,
 		parseConversationModeDraft,
@@ -158,13 +158,34 @@
 	import FilesOverlay from './MessageInput/FilesOverlay.svelte';
 	import NotificationToast from '../NotificationToast.svelte';
 	import Spinner from '../common/Spinner.svelte';
+	import Modal from '../common/Modal.svelte';
+	import { isEmbedWindow } from '../common/FullHeightIframe.svelte';
 	import Tooltip from '../common/Tooltip.svelte';
 	import Sidebar from '../icons/Sidebar.svelte';
 	import Image from '../common/Image.svelte';
+	import XMark from '../icons/XMark.svelte';
+	import EmbeddedChatHistoryDropdown from './EmbeddedChatHistoryDropdown.svelte';
+	import InputVariablesModal from './MessageInput/InputVariablesModal.svelte';
 
 	export let chatIdProp = '';
+	export let embedded = false;
+	export let embeddedTitle = '';
+	export let embeddedChats = [];
+	export let embeddedDraftKey = '';
+	export let suggestedPrompts = [];
+	export let selectedText = '';
+	export let onInsertToNote: ((content: string) => void) | null = null;
+	export let onCloseEmbedded: (() => void) | null = null;
+	export let onNewEmbeddedChat: (() => void | Promise<void>) | null = null;
+	export let onCreateEmbeddedChat: (() => any | Promise<any>) | null = null;
+	export let onSelectEmbeddedChat: ((chatId: string) => void | Promise<void>) | null = null;
+	export let onDeleteEmbeddedChat: ((chatId: string) => void | Promise<void>) | null = null;
+	export let onEmbeddedChatTitle: ((chatId: string, title: string) => void | Promise<void>) | null =
+		null;
 
 	let loading = true;
+	$: chatContainerId = embedded ? 'note-chat-container' : 'chat-container';
+	$: messageInputDropzoneId = embedded ? 'note-chat-input-dropzone' : 'chat-pane';
 
 	const eventTarget = new EventTarget();
 	let controlPane: Pane | undefined;
@@ -203,6 +224,140 @@
 	} else {
 		selectedModelIds = resolveConversationModeRequestModels(selectedModels, conversationMode);
 	}
+	let serverContextUsage = null;
+	let contextUsage = null;
+
+	const getAvailableModelIds = () =>
+		$models.filter((m) => !(m?.info?.meta?.hidden ?? false)).map((m) => m.id);
+	const getDefaultModelIds = () =>
+		$config?.default_models ? $config.default_models.split(',') : [];
+	const normalizeSelectedModels = (modelIds: string[] = []) => {
+		const availableModels = getAvailableModelIds();
+		const defaultModels = getDefaultModelIds();
+		let normalized = (modelIds ?? []).filter(
+			(modelId) => modelId && availableModels.includes(modelId)
+		);
+
+		if (normalized.length === 0 && $settings?.models?.length) {
+			normalized = $settings.models.filter((modelId) => availableModels.includes(modelId));
+		}
+		if (normalized.length === 0 && defaultModels.length > 0) {
+			normalized = defaultModels.filter((modelId) => availableModels.includes(modelId));
+		}
+		if (normalized.length === 0) {
+			normalized = availableModels.length > 0 ? [availableModels[0]] : [''];
+		}
+
+		return normalized;
+	};
+
+	$: {
+		const modelSearchParam =
+			$page.url.searchParams.get('models') || $page.url.searchParams.get('model');
+
+		if (
+			chatIdProp === '' &&
+			$models.length > 0 &&
+			!selectedModels?.some((modelId) => modelId) &&
+			!modelSearchParam
+		) {
+			const fallbackModels = normalizeSelectedModels(selectedModels);
+			if (!equal(fallbackModels, selectedModels)) {
+				selectedModels = fallbackModels;
+			}
+		}
+	}
+
+	const estimateTokens = (value) => {
+		if (value === null || value === undefined || value === '') {
+			return 0;
+		}
+		if (typeof value !== 'string') {
+			try {
+				value = JSON.stringify(value);
+			} catch {
+				value = String(value);
+			}
+		}
+		return Math.max(1, Math.floor(value.length / 4));
+	};
+
+	const estimateMessagesTokens = (messages) =>
+		messages.reduce((total, message) => {
+			let next = total + 4 + estimateTokens(message.content);
+			next += estimateTokens(message.output);
+			next += estimateTokens(message.tool_calls);
+			next += estimateTokens(message.files);
+			return next;
+		}, 0);
+
+	$: contextCompactionEnabled = Boolean($config?.features?.enable_context_compaction);
+
+	const getContextThreshold = () => {
+		const chatThreshold = Number(params?.compact_token_threshold);
+		if (Number.isFinite(chatThreshold) && chatThreshold > 0) {
+			return chatThreshold;
+		}
+
+		const modelId = atSelectedModel?.id ?? selectedModels.find((id) => id);
+		const model = $models.find((item) => item.id === modelId);
+		const threshold = Number(model?.info?.params?.compact_token_threshold);
+		return Number.isFinite(threshold) && threshold > 0 ? threshold : null;
+	};
+
+	const getContextUsage = () => {
+		if (!history?.currentId) {
+			return null;
+		}
+
+		const messages = createMessagesList(history, history.currentId);
+		const threshold = contextCompactionEnabled
+			? (getContextThreshold() ?? serverContextUsage?.threshold ?? null)
+			: null;
+		const systemTokens = estimateTokens($settings?.system ?? '');
+		let estimatedTokens = systemTokens;
+		let hasUsageCheckpoint = false;
+		let summary = '';
+		let startIdx = 0;
+
+		for (let idx = 0; idx < messages.length; idx += 1) {
+			const value = messages[idx]?.contextSummary ?? messages[idx]?.context_summary;
+			if (typeof value === 'string' && value.trim()) {
+				summary = value;
+				startIdx = idx;
+			}
+		}
+
+		const activeMessages = messages.slice(startIdx);
+
+		for (let idx = activeMessages.length - 1; idx >= 0; idx -= 1) {
+			const usage = activeMessages[idx]?.usage ?? activeMessages[idx]?.info?.usage;
+			const inputTokens = usage?.input_tokens ?? usage?.prompt_tokens;
+			if (inputTokens) {
+				hasUsageCheckpoint = true;
+				estimatedTokens =
+					Number(inputTokens || 0) +
+					Number(usage.output_tokens ?? usage.completion_tokens ?? 0) +
+					estimateMessagesTokens(activeMessages.slice(idx + 1));
+				break;
+			}
+		}
+
+		if (!hasUsageCheckpoint) {
+			estimatedTokens += estimateTokens(summary) + estimateMessagesTokens(activeMessages);
+		}
+
+		return {
+			tokens: estimatedTokens,
+			estimated_tokens: estimatedTokens,
+			threshold,
+			percent: threshold > 0 ? Math.max(0, Math.round((estimatedTokens / threshold) * 100)) : null,
+			source: 'estimated'
+		};
+	};
+
+	$: contextUsage = getContextUsage() ?? (contextCompactionEnabled ? serverContextUsage : null);
+	$: embeddedHeaderTitle = embeddedTitle || $chatTitle || $i18n.t('Chat');
 
 	let selectedToolIds: string[] = [];
 	let selectedSkillIds: string[] = [];
@@ -334,9 +489,135 @@
 	let chatFiles = [];
 	let files = [];
 	let params = {};
+	let chatVariables = {};
+	let showChatVariablesModal = false;
+	let loadedChatIdProp = '';
+	let currentDraftKey = '';
 
-	$: if (chatIdProp) {
+	const mergeChatVariableSchemas = (modelIds = [], availableModels = []) => {
+		const byKey: Record<string, any> = {};
+		const conflicts: any[] = [];
+
+		for (const modelId of modelIds.filter(Boolean)) {
+			const fields =
+				availableModels.find((model) => model.id === modelId)?.info?.meta?.chat_variables_schema
+					?.fields ?? [];
+			for (const rawField of fields) {
+				const field = {
+					...rawField,
+					type: rawField?.type ?? 'text',
+					required: Boolean(rawField?.required)
+				};
+				if (!field?.key) continue;
+				const { required, ...shape } = field;
+
+				const existing = byKey[field.key];
+				if (!existing) {
+					byKey[field.key] = {
+						field,
+						modelIds: [modelId],
+						shape
+					};
+					continue;
+				}
+
+				if (!equal(existing.shape, shape)) {
+					conflicts.push({
+						key: field.key,
+						modelIds: [...existing.modelIds, modelId]
+					});
+					continue;
+				}
+
+				existing.field = {
+					...existing.field,
+					required: existing.field.required || field.required
+				};
+				existing.modelIds.push(modelId);
+			}
+		}
+
+		return {
+			fields: Object.values(byKey).map((item: any) => item.field),
+			conflicts
+		};
+	};
+
+	const hasValue = (value) => value !== undefined && value !== null && value !== '';
+
+	const getChatVariablesForm = (modelIds = [], values = {}, availableModels = []) => {
+		const { fields, conflicts } = mergeChatVariableSchemas(modelIds, availableModels);
+		const empty =
+			fields.length > 0 &&
+			fields.every((field) => !hasValue(values?.[field.key]) && !hasValue(field.default));
+		const missing = fields.some(
+			(field) => field.required && !hasValue(values?.[field.key]) && !hasValue(field.default)
+		);
+		const variables = fields.reduce(
+			(acc, field) => {
+				const { key, ...inputField } = field;
+				acc[key] = {
+					...inputField,
+					default: hasValue(values?.[key]) ? values[key] : inputField.default
+				};
+				return acc;
+			},
+			{} as Record<string, any>
+		);
+
+		return { conflicts, empty, missing, variables };
+	};
+
+	const saveChatVariables = async (values) => {
+		chatVariables = { ...chatVariables, ...values };
+
+		if ($chatId && !$temporaryChatEnabled && !isTemporaryChatId($chatId)) {
+			const res = await updateChatById(localStorage.token, $chatId, {}, chatVariables).catch(
+				(err) => {
+					console.error('[chat variables save]', err);
+					toast.error($i18n.t('Failed to save chat variables'));
+					return null;
+				}
+			);
+			if (res) chat = res;
+		}
+	};
+
+	const mergeFiles = (current, incoming) => {
+		const seen = new Set();
+		return [...(incoming ?? []), ...(current ?? [])].filter((file) => {
+			const key = `${file?.type ?? ''}:${file?.id ?? file?.url ?? file?.name ?? ''}`;
+			if (seen.has(key)) return false;
+			seen.add(key);
+			return true;
+		});
+	};
+	const withSelectedText = (text: string) =>
+		embedded && selectedText?.trim()
+			? `${text}\n\nSelected note text for replace_note_content operations:\n${selectedText.trim()}`
+			: text;
+	const noteChatDebug = (message: string, data: Record<string, unknown> = {}) => {
+		if (!embedded) return;
+		console.info('[note-chat]', message, {
+			chatIdProp,
+			activeChatId: $chatId,
+			loading,
+			...data
+		});
+	};
+
+	$: if (chatIdProp && chatIdProp !== loadedChatIdProp) {
+		noteChatDebug('chatIdProp changed; loading linked chat', {
+			previousChatIdProp: loadedChatIdProp
+		});
+		loadedChatIdProp = chatIdProp;
 		navigateHandler();
+	}
+
+	$: if (embedded && embeddedDraftKey && embeddedDraftKey !== currentDraftKey) {
+		noteChatDebug('embedded draft requested', { embeddedDraftKey });
+		currentDraftKey = embeddedDraftKey;
+		initEmbeddedDraft();
 	}
 
 	let saveControlsTimer;
@@ -351,6 +632,7 @@
 		// Mark the outgoing chat as read before loading the new one.
 		// $chatId still holds the previous chat here — loadChat() updates it.
 		if ($chatId && $chatId !== chatIdProp && !$temporaryChatEnabled) {
+			noteChatDebug('marking outgoing chat read', { outgoingChatId: $chatId });
 			updateLastReadAt($chatId);
 		}
 
@@ -389,24 +671,25 @@
 			`chat-input${chatIdProp ? `-${chatIdProp}` : ''}`
 		);
 		const restoredDraft = parseConversationModeDraft(storageChatInput);
-		const restoredCapabilitySnapshot = getConversationModeDraftCapabilitySnapshot(restoredDraft, {
-			existingChat: true
-		});
 		if (storageChatInput && !restoredDraft) {
 			sessionStorage.removeItem(`chat-input${chatIdProp ? `-${chatIdProp}` : ''}`);
 		}
-		if (chatIdProp) {
+
+		const loadedChat = chatIdProp ? await loadChat(chatIdProp, expectedCatalogGeneration) : false;
+		if (!isModeProfileCatalogGenerationCurrent(expectedCatalogGeneration)) return;
+		if (chatIdProp && loadedChat) {
+			const restoredCapabilitySnapshot = getConversationModeDraftCapabilitySnapshotForMode(
+				restoredDraft,
+				conversationMode,
+				{ existingChat: true }
+			);
 			modeProfileCapabilityAuthorityController =
 				createConversationModeCapabilityAuthorityController({
 					existingChat: true,
 					persistedAuthority: restoredCapabilitySnapshot?.authority
 				});
 			modeProfileCapabilityAuthority = modeProfileCapabilityAuthorityController.snapshot();
-		}
 
-		const loadedChat = chatIdProp ? await loadChat(chatIdProp, expectedCatalogGeneration) : false;
-		if (!isModeProfileCatalogGenerationCurrent(expectedCatalogGeneration)) return;
-		if (chatIdProp && loadedChat) {
 			let restoredLegacyCapabilities = false;
 			if (restoredDraft && !$temporaryChatEnabled) {
 				messageInput?.setText(restoredDraft.prompt);
@@ -422,7 +705,9 @@
 					);
 				} else {
 					restoredLegacyCapabilities = await restoreLegacyModeProfileDraftCapabilities(
-						restoredDraft,
+						isConversationModeDraftCompatible(restoredDraft, conversationMode)
+							? restoredDraft
+							: null,
 						{
 							preserveBoundDefaults: true,
 							expectedCatalogGeneration
@@ -453,6 +738,7 @@
 			await tick();
 			if (!isModeProfileCatalogGenerationCurrent(expectedCatalogGeneration)) return;
 			loading = false;
+			noteChatDebug('embedded chat loading false');
 			window.setTimeout(() => scrollToBottom(), 0);
 
 			await tick();
@@ -473,9 +759,55 @@
 
 			const chatInput = document.getElementById('chat-input');
 			chatInput?.focus();
-		} else {
+		} else if (!embedded) {
 			await goto('/');
+		} else {
+			loading = false;
+			console.warn('[note-chat] embedded load failed; clearing spinner', {
+				chatIdProp,
+				activeChatId: $chatId
+			});
 		}
+	};
+
+	const initEmbeddedDraft = async () => {
+		clearTimeout(saveControlsTimer);
+		await saveControls();
+
+		if ($chatId && !$temporaryChatEnabled) {
+			updateLastReadAt($chatId);
+		}
+
+		loading = true;
+		loadedChatIdProp = '';
+		chat = null;
+		tags = [];
+		taskIds = null;
+		chatTasks = [];
+		serverContextUsage = null;
+		history = {
+			messages: {},
+			currentId: null
+		};
+		params = {};
+		chatVariables = {};
+		chatFiles = [];
+		files = [];
+		selectedToolIds = [];
+		selectedSkillIds = [];
+		selectedFilterIds = [];
+		webSearchEnabled = false;
+		imageGenerationEnabled = false;
+		codeInterpreterEnabled = false;
+		prompt = '';
+		messageInput?.setText('');
+		await chatId.set('');
+		await chatTitle.set('');
+
+		await setDefaults();
+		loading = false;
+		await tick();
+		document.getElementById('chat-input')?.focus();
 	};
 
 	const onSelect = async (e) => {
@@ -1183,8 +1515,9 @@
 		const storedRootDraft =
 			restoreRootDraft && !chatIdProp ? sessionStorage.getItem('chat-input') : null;
 		const restoredRootDraft = parseConversationModeDraft(storedRootDraft);
-		const restoredRootCapabilitySnapshot = getConversationModeDraftCapabilitySnapshot(
+		const restoredRootCapabilitySnapshot = getConversationModeDraftCapabilitySnapshotForMode(
 			restoredRootDraft,
+			conversationMode,
 			{ existingChat: false }
 		);
 		if (storedRootDraft && !restoredRootDraft) {
@@ -1464,16 +1797,23 @@
 
 		if (event.chat_id === $chatId) {
 			await tick();
+			const type = event?.data?.type ?? null;
 			if (
 				event.chat_id !== $chatId ||
 				!isModeProfileCatalogGenerationCurrent(expectedCatalogGeneration)
 			) {
 				return;
 			}
+			if (type === 'chat:reload') {
+				await loadChat(event.chat_id, expectedCatalogGeneration);
+				return;
+			}
+			if (type === 'chat:list') {
+				return;
+			}
 			let message = history.messages[event.message_id];
 
 			if (message) {
-				const type = event?.data?.type ?? null;
 				const data = event?.data?.data ?? null;
 				const applySocketContentEvent = shouldApplySocketContentEvent(message, type);
 
@@ -1490,6 +1830,9 @@
 						taskIds = null;
 						if (chatIdProp && !$temporaryChatEnabled && hasPendingAssistantLeaf()) {
 							await loadChat(event.chat_id, expectedCatalogGeneration);
+						}
+						if ($chatId && !$temporaryChatEnabled) {
+							updateLastReadAt($chatId);
 						}
 					}
 				} else if (type === 'chat:completion') {
@@ -1546,9 +1889,7 @@
 				} else if (type === 'chat:message:follow_ups') {
 					message.followUps = data.follow_ups;
 
-					if (autoScroll) {
-						scrollToBottom('smooth');
-					}
+					scheduleResponseScrollToBottom();
 				} else if (type === 'chat:outlet') {
 					// Outlet filter ran on backend — sync in-memory state
 					const outletMessages = data.messages ?? [];
@@ -1571,15 +1912,16 @@
 					message.favorite = data.favorite;
 				} else if (type === 'chat:title') {
 					chatTitle.set(data);
-					currentChatPage.set(1);
-					const loadedChats = await getChatList(localStorage.token, $currentChatPage);
+					if (embedded && event.chat_id) {
+						await onEmbeddedChatTitle?.(event.chat_id, data);
+					}
 					if (
 						event.chat_id !== $chatId ||
 						!isModeProfileCatalogGenerationCurrent(expectedCatalogGeneration)
 					) {
 						return;
 					}
-					await chats.set(loadedChats);
+					await refreshChatList(localStorage.token);
 				} else if (type === 'chat:tags') {
 					const loadedTaggedChat = await getChatById(localStorage.token, event.chat_id);
 					if (
@@ -1697,18 +2039,18 @@
 
 	const onMessageHandler = async (event: {
 		origin: string;
+		source: unknown;
 		data: { type: string; text: string };
 	}) => {
 		const isSameOrigin = event.origin === window.origin;
 		const type = event.data?.type;
 
-		// Prompt-driving message types let an embedding page control the chat
-		// input / submission.  Cross-origin sources are only trusted when the
-		// user has explicitly opted in via the "iframe Sandbox Allow Same
-		// Origin" interface setting (the same toggle that governs whether
-		// rendered iframes receive `allow-same-origin`).
+		// Prompt-driving types are trusted only same-origin, from our own embed iframes
+		// (opaque srcdoc origin, submission still confirmed below) or via explicit opt-in.
 		const promptTypes = ['input:prompt', 'input:prompt:submit', 'action:submit'];
-		const isTrusted = isSameOrigin || ($settings?.iframeSandboxAllowSameOrigin ?? false);
+		const isOwnEmbed = isEmbedWindow(event.source);
+		const isTrusted =
+			isSameOrigin || isOwnEmbed || ($settings?.iframeSandboxAllowSameOrigin ?? false);
 
 		// Non-prompt message types are always restricted to same-origin only.
 		if (!isSameOrigin && !promptTypes.includes(type)) {
@@ -1808,7 +2150,8 @@
 		);
 
 	const handleSocketConnect = async () => {
-		if (!chatIdProp || $temporaryChatEnabled) {
+		// Gate on $chatId, not chatIdProp: chats started from the home page keep an empty chatIdProp
+		if (!$chatId || $temporaryChatEnabled) {
 			return;
 		}
 
@@ -1869,7 +2212,7 @@
 		}
 
 		const pageSubscribe = page.subscribe(async (p) => {
-			if (p.url.pathname === '/') {
+			if (p.url.pathname === '/' || p.url.pathname.startsWith('/folders/')) {
 				await tick();
 				initNewChat();
 			}
@@ -1956,6 +2299,13 @@
 				pageSubscribe();
 				showControlsSubscribe();
 				selectedFolderSubscribe();
+
+				// Clear the selected chat when leaving the chat surface (e.g. navigating
+				// to the admin panel), otherwise the previously-viewed chat stays selected
+				// in the sidebar and deleting/archiving it wrongly navigates away.
+				chatId.set('');
+				chatTitle.set('');
+
 				window.removeEventListener('message', onMessageHandler);
 				$socket?.off('events', chatEventHandler);
 				$socket?.off('connect', handleSocketConnect);
@@ -2269,8 +2619,9 @@
 		conversationMode = requestedMode;
 		const restoredRootDraft = beginModeProfileDraft();
 		const expectedCatalogGeneration = modeProfileCatalogGeneration;
-		const restoredRootCapabilitySnapshot = getConversationModeDraftCapabilitySnapshot(
+		const restoredRootCapabilitySnapshot = getConversationModeDraftCapabilitySnapshotForMode(
 			restoredRootDraft,
+			conversationMode,
 			{ existingChat: false }
 		);
 		pendingConversationMode = null;
@@ -2397,7 +2748,7 @@
 		await showArtifacts.set(false);
 		if (!isModeProfileCatalogGenerationCurrent(expectedCatalogGeneration)) return;
 
-		if ($page.url.pathname.includes('/c/')) {
+		if (!embedded && $page.url.pathname.includes('/c/')) {
 			window.history.replaceState(history.state, '', `/`);
 		}
 
@@ -2411,9 +2762,14 @@
 				expectedCatalogGeneration
 			);
 		} else {
-			await restoreLegacyModeProfileDraftCapabilities(restoredRootDraft, {
-				expectedCatalogGeneration
-			});
+			await restoreLegacyModeProfileDraftCapabilities(
+				isConversationModeDraftCompatible(restoredRootDraft, conversationMode)
+					? restoredRootDraft
+					: null,
+				{
+					expectedCatalogGeneration
+				}
+			);
 		}
 		if (!isModeProfileCatalogGenerationCurrent(expectedCatalogGeneration)) return;
 		await chatId.set('');
@@ -2428,6 +2784,7 @@
 
 		chatFiles = [];
 		params = {};
+		chatVariables = {};
 		taskIds = null;
 		chatTasks = [];
 
@@ -2563,6 +2920,7 @@
 		chatId.set(targetChatId);
 
 		if ($temporaryChatEnabled) {
+			noteChatDebug('loadChat disabling temporary chat');
 			temporaryChatEnabled.set(false);
 		}
 
@@ -2581,7 +2939,10 @@
 			return null;
 		}
 
-		const loadedTags = await getTagsById(localStorage.token, targetChatId).catch(() => []);
+		const loadedTags =
+			loadedChat.user_id === $user?.id
+				? await getTagsById(localStorage.token, targetChatId).catch(() => [])
+				: [];
 		if (
 			$chatId !== targetChatId ||
 			!isModeProfileCatalogGenerationCurrent(expectedCatalogGeneration)
@@ -2667,6 +3028,10 @@
 		} else {
 			return null;
 		}
+		console.warn('[note-chat] no chat returned from getChatById', {
+			chatIdProp,
+			activeChatId: $chatId
+		});
 	};
 
 	const scrollToBottom = async (behavior = 'auto') => {
@@ -2706,7 +3071,17 @@
 		await messagesRef?.scrollToTop();
 	};
 
+	const shouldAutoScrollResponse = () =>
+		autoScroll && ($settings?.scrollOnResponseGeneration ?? true);
+	let scrollRAF: number | null = null;
 	let contentsRAF = null;
+	const scheduleResponseScrollToBottom = () => {
+		if (!shouldAutoScrollResponse() || scrollRAF !== null) return;
+		scrollRAF = requestAnimationFrame(async () => {
+			scrollRAF = null;
+			await scrollToBottom();
+		});
+	};
 
 	let processingQueueChats = new Set<string>();
 
@@ -2755,16 +3130,7 @@
 			isModeProfileCatalogGenerationCurrent(expectedCatalogGeneration) &&
 			!$temporaryChatEnabled
 		) {
-			const loadedChats = await getChatList(localStorage.token, 1);
-			if (
-				$chatId !== targetChatId ||
-				!isModeProfileCatalogGenerationCurrent(expectedCatalogGeneration) ||
-				$temporaryChatEnabled
-			) {
-				return;
-			}
-			currentChatPage.set(1);
-			chats.set(loadedChats);
+			await refreshChatList(localStorage.token);
 		}
 	};
 
@@ -2784,7 +3150,7 @@
 			messages: messages.map((m) => ({
 				id: m.id,
 				role: m.role,
-				content: m.content,
+				content: getOutputText(m.output) || m.content,
 				info: m.info ? m.info : undefined,
 				timestamp: m.timestamp,
 				...(m.sources ? { sources: m.sources } : {})
@@ -2841,15 +3207,7 @@
 				}
 				chat = savedChat;
 
-				currentChatPage.set(1);
-				const loadedChats = await getChatList(localStorage.token, $currentChatPage);
-				if (
-					$chatId !== targetChatId ||
-					!isModeProfileCatalogGenerationCurrent(expectedCatalogGeneration)
-				) {
-					return;
-				}
-				await chats.set(loadedChats);
+				await refreshChatList(localStorage.token);
 			}
 		}
 	};
@@ -3207,6 +3565,113 @@
 		await sendMessage(history, userMessageId);
 	};
 
+	const handleManualCompact = async () => {
+		if (!contextCompactionEnabled) {
+			toast.message($i18n.t('Context compaction is disabled'));
+			return;
+		}
+
+		if (!$chatId || !history?.currentId) {
+			toast.message($i18n.t('No chat to compact'));
+			return;
+		}
+
+		const currentMessage = history.messages?.[history.currentId];
+		if (
+			generating ||
+			taskIds?.length ||
+			(currentMessage?.role === 'assistant' && !currentMessage.done)
+		) {
+			toast.warning($i18n.t('Wait for the current response to finish before compacting.'));
+			return;
+		}
+
+		const model = atSelectedModel?.id ?? selectedModels.find((modelId) => modelId);
+		const toastId = toast.loading($i18n.t('Compacting context...'));
+
+		try {
+			const result = await compactChatById(localStorage.token, $chatId, model);
+			serverContextUsage = result?.context_usage ?? serverContextUsage;
+
+			if (result?.compacted) {
+				toast.success($i18n.t('Context compacted'), { id: toastId });
+			} else {
+				const skippedReason =
+					result?.reason === 'too_short'
+						? $i18n.t('Chat is too short to compact')
+						: result?.reason === 'empty'
+							? $i18n.t('No chat to compact')
+							: result?.reason === 'disabled'
+								? $i18n.t('Context compaction is disabled')
+								: $i18n.t('Nothing to compact');
+				toast.message(skippedReason, { id: toastId });
+			}
+
+			await loadChat();
+		} catch (error) {
+			const message = error?.detail ?? error?.message ?? $i18n.t('Context compaction failed');
+			toast.error(message, { id: toastId });
+		} finally {
+			messageInput?.setText('');
+			prompt = '';
+			document.getElementById('chat-input')?.focus();
+		}
+	};
+
+	const handleStatusCommand = () => {
+		messageInput?.showStatus();
+		messageInput?.setText('');
+		prompt = '';
+		document.getElementById('chat-input')?.focus();
+	};
+
+	const handleForkChat = async (messageId: string | null = null) => {
+		if (!$chatId || !history?.currentId) {
+			toast.message($i18n.t('No chat to fork'));
+			return;
+		}
+		if (!($user?.role === 'admin' || ($user?.permissions?.chat?.import ?? true))) {
+			toast.error($i18n.t('Access prohibited'));
+			return;
+		}
+
+		const currentMessage = history.messages?.[history.currentId];
+		if (
+			generating ||
+			taskIds?.length ||
+			(currentMessage?.role === 'assistant' && !currentMessage.done)
+		) {
+			toast.warning($i18n.t('Wait for the current response to finish before forking.'));
+			return;
+		}
+
+		const toastId = toast.loading($i18n.t('Forking chat...'));
+
+		try {
+			const result = await forkChatById(
+				localStorage.token,
+				$chatId,
+				messageId ?? history.currentId
+			);
+
+			if (result?.id) {
+				if (!embedded) {
+					await goto(`/c/${result.id}`);
+					await refreshChatList(localStorage.token, { refreshPinned: true });
+				}
+				toast.success($i18n.t('Chat forked'), { id: toastId });
+			} else {
+				toast.error($i18n.t('Failed to fork chat'), { id: toastId });
+			}
+		} catch (error) {
+			toast.error(`${error}`, { id: toastId });
+		} finally {
+			messageInput?.setText('');
+			prompt = '';
+			document.getElementById('chat-input')?.focus();
+		}
+	};
+
 	const submitHandler = async (userPrompt, { _raw = false } = {}) => {
 		console.log('submitHandler', userPrompt, $chatId);
 
@@ -3216,6 +3681,19 @@
 
 		if (!equal(selectedModels, _selectedModels)) {
 			selectedModels = _selectedModels;
+		}
+
+		if (String(userPrompt).trim() === '/compact') {
+			await handleManualCompact();
+			return;
+		}
+		if (String(userPrompt).trim() === '/status') {
+			handleStatusCommand();
+			return;
+		}
+		if (String(userPrompt).trim() === '/fork') {
+			await handleForkChat();
+			return;
 		}
 
 		if (pendingOAuthTools.length > 0) {
@@ -3228,6 +3706,16 @@
 		}
 		if (selectedModels.includes('')) {
 			toast.error($i18n.t('Model not selected'));
+			return;
+		}
+		const form = getChatVariablesForm(selectedModelIds, chatVariables, $models);
+		if (form.conflicts.length > 0) {
+			showChatVariablesModal = true;
+			toast.error($i18n.t('Chat Variables have conflicting model definitions'));
+			return;
+		}
+		if (form.missing || form.empty) {
+			showChatVariablesModal = true;
 			return;
 		}
 
@@ -3341,9 +3829,11 @@
 		selectedModelIds = resolveConversationModeRequestModels(selectedModelIds, conversationMode);
 
 		// Create response messages for each selected model
-		// Build message_ids list: [{model_id, message_id}, ...]
+		// Build message_ids list: [{model_id, message_id, modelIdx}, ...]
 		// Uses an array instead of a dict to support duplicate model IDs in side-by-side chat.
-		const messageIdsList: Array<{ model_id: string; message_id: string }> = [];
+		// modelIdx identifies each side-by-side column so the backend can persist it; without
+		// it, duplicate models collapse into one another when the chat is reloaded.
+		const messageIdsList: Array<{ model_id: string; message_id: string; modelIdx: number }> = [];
 		for (const [_modelIdx, modelId] of selectedModelIds.entries()) {
 			const model = $models.filter((m) => m.id === modelId).at(0);
 
@@ -3375,15 +3865,36 @@
 				}
 
 				responseMessageIds[`${modelId}-${modelIdx ? modelIdx : _modelIdx}`] = responseMessageId;
-				messageIdsList.push({ model_id: modelId, message_id: responseMessageId });
+				messageIdsList.push({
+					model_id: modelId,
+					message_id: responseMessageId,
+					modelIdx: modelIdx ? modelIdx : _modelIdx
+				});
 			}
 		}
 		history = history;
 
-		// New chat — backend generates the chat_id on first request
+		// Empty embedded drafts create their backing chat only when the first message is sent.
 		if (!_chatId) {
-			if ($temporaryChatEnabled) {
-				_chatId = `local:${$socket?.id}`;
+			if (embedded && onCreateEmbeddedChat) {
+				const createdChat = await onCreateEmbeddedChat();
+				if (!createdChat?.id) {
+					toast.error($i18n.t('Failed to create chat'));
+					return;
+				}
+
+				chat = createdChat;
+				_chatId = createdChat.id;
+				loadedChatIdProp = _chatId;
+				await chatId.set(_chatId);
+				await chatTitle.set(createdChat?.chat?.title ?? createdChat?.title ?? $i18n.t('Chat'));
+
+				params = structuredClone(createdChat?.chat?.params ?? {});
+				delete params.note_id;
+				chatFiles = mergeFiles(chatFiles, createdChat?.chat?.files ?? []);
+				await onSelectEmbeddedChat?.(_chatId);
+			} else if ($temporaryChatEnabled) {
+				_chatId = createTemporaryChatId($socket?.id);
 				await chatId.set(_chatId);
 			}
 			await tick();
@@ -3437,7 +3948,11 @@
 					primaryResponseMessageId,
 					_chatId,
 					{
-						messageIdsList: selectedModelIds.length > 1 ? messageIdsList : undefined,
+						// Always forward the message_ids list (not just for multi-model sends) so the
+						// backend persists each response's modelIdx — including single-column
+						// regenerations in a duplicate-model chat, which would otherwise lose their
+						// column identity and collapse on reload.
+						messageIdsList: messageIdsList.length > 0 ? messageIdsList : undefined,
 						regenerationPrompt
 					}
 				);
@@ -3639,6 +4154,8 @@
 			toolServers: modeProfileRequest.catalogView.toolServers,
 			terminalServers: modeProfileRequest.catalogView.terminalServers
 		});
+		const useChatVariablesFallback =
+			!_chatId || $temporaryChatEnabled || isTemporaryChatId(_chatId);
 
 		const res = await generateOpenAIChatCompletion(
 			localStorage.token,
@@ -3666,6 +4183,7 @@
 						$user?.email
 					)
 				},
+				...(useChatVariablesFallback ? { chat_variables: chatVariables } : {}),
 				model_item: requestContext.model,
 
 				session_id: $socket?.id,
@@ -3680,7 +4198,11 @@
 				...(continueResponse ? { assistant_message_id: responseMessageId } : {}),
 
 				background_tasks: {
-					...(!$temporaryChatEnabled && !_chatId && (userMessage?.parentId ?? null) === null
+					...(!$temporaryChatEnabled &&
+					(!_chatId ||
+						(embedded &&
+							(userMessage?.parentId ?? null) === null &&
+							createMessagesList(_history, responseMessageId).length === 2))
 						? {
 								title_generation: $settings?.title?.auto ?? true,
 								tags_generation: $settings?.autoTags ?? true
@@ -3749,10 +4271,9 @@
 				// and causing spurious toast notifications / state duplication).
 				if (res.chat_id && $chatId !== res.chat_id && $chatId === _chatId) {
 					await chatId.set(res.chat_id);
-					if (!$temporaryChatEnabled) {
+					if (!$temporaryChatEnabled && !embedded) {
 						window.history.replaceState(history.state, '', `/c/${res.chat_id}`);
-						currentChatPage.set(1);
-						await chats.set(await getChatList(localStorage.token, $currentChatPage));
+						await refreshChatList(localStorage.token);
 
 						// Persist chat-level params (system prompt, advanced
 						// params) that the backend doesn't receive in the
@@ -3769,7 +4290,7 @@
 		}
 
 		await tick();
-		scrollToBottom();
+		scheduleResponseScrollToBottom();
 	};
 
 	const handleOpenAIError = async (error, responseMessage) => {
@@ -3850,7 +4371,7 @@
 
 			history.messages[history.currentId] = responseMessage;
 
-			if (autoScroll) {
+			if (shouldAutoScrollResponse()) {
 				scrollToBottom();
 			}
 		}
@@ -4015,6 +4536,7 @@
 
 	const initChatHandler = async (history) => {
 		let _chatId = $chatId;
+		const selectedFolderId = $selectedFolder?.id;
 
 		if (!$temporaryChatEnabled) {
 			chat = await createNewChat(
@@ -4031,23 +4553,31 @@
 					tags: [],
 					timestamp: Date.now()
 				},
-				$selectedFolder?.id
+				$selectedFolder?.id,
+				chatVariables
 			);
 
 			_chatId = chat.id;
 			bindCanonicalModeProfileRevision(chat?.mode_profile_revision_id);
 			await chatId.set(_chatId);
 
-			window.history.replaceState(history.state, '', `/c/${_chatId}`);
+			if (!embedded) {
+				window.history.replaceState(history.state, '', `/c/${_chatId}`);
+			}
 
 			await tick();
 
-			await chats.set(await getChatList(localStorage.token, $currentChatPage));
-			currentChatPage.set(1);
+			if (!embedded) {
+				await refreshChatList(localStorage.token);
+			}
+
+			if (selectedFolderId) {
+				await refreshFolderChatLists(selectedFolderId, chat);
+			}
 
 			selectedFolder.set(null);
 		} else {
-			_chatId = `local:${$socket?.id}`; // Use socket id for temporary chat
+			_chatId = createTemporaryChatId($socket?.id);
 			await chatId.set(_chatId);
 		}
 		await tick();
@@ -4215,9 +4745,8 @@
 			);
 
 			if (res) {
-				currentChatPage.set(1);
-				await chats.set(await getChatList(localStorage.token, $currentChatPage));
-				await pinnedChats.set(await getPinnedChatList(localStorage.token));
+				await refreshChatList(localStorage.token, { refreshPinned: true });
+				await refreshFolderChatLists();
 
 				toast.success($i18n.t('Chat moved successfully'));
 			}
@@ -4229,11 +4758,10 @@
 	const archiveChatHandler = async (id: string) => {
 		try {
 			await archiveChatById(localStorage.token, id);
-			currentChatPage.set(1);
 			initNewChat();
 			await goto('/');
-			chats.set(await getChatList(localStorage.token, $currentChatPage));
-			pinnedChats.set(await getPinnedChatList(localStorage.token));
+			await refreshChatList(localStorage.token, { refreshPinned: true });
+			await refreshFolderChatLists();
 			toast.success($i18n.t('Chat archived.'));
 		} catch (error) {
 			console.error('Error archiving chat:', error);
@@ -4266,11 +4794,9 @@
 		try {
 			const res = await deleteChatById(localStorage.token, id);
 			if (res) {
-				currentChatPage.set(1);
 				initNewChat();
 				await goto('/');
-				chats.set(await getChatList(localStorage.token, $currentChatPage));
-				pinnedChats.set(await getPinnedChatList(localStorage.token));
+				await refreshChatList(localStorage.token, { refreshPinned: true });
 				allTags.set(await getAllTags(localStorage.token));
 				toast.success($i18n.t('Chat deleted.'));
 			}
@@ -4284,12 +4810,53 @@
 <svelte:head>
 	<title>
 		{$settings.showChatTitleInTab !== false && $chatTitle
-			? `${$chatTitle.length > 30 ? `${$chatTitle.slice(0, 30)}...` : $chatTitle} • ${$WEBUI_NAME}`
+			? `${$chatTitle.length > 30 ? `${$chatTitle.slice(0, 30)}...` : $chatTitle} / ${$WEBUI_NAME}`
 			: `${$WEBUI_NAME}`}
 	</title>
 </svelte:head>
 
 <audio id="audioElement" style="display: none;"></audio>
+
+{#if getChatVariablesForm(selectedModelIds, chatVariables, $models).conflicts.length > 0}
+	<Modal bind:show={showChatVariablesModal} size="md">
+		<div>
+			<div class="flex justify-between px-4 pt-3 pb-1 dark:text-gray-300">
+				<div class="self-center text-sm font-medium">{$i18n.t('Chat Variables')}</div>
+				<button
+					class="self-center rounded-lg p-1 text-gray-500 transition hover:bg-gray-50 hover:text-gray-700 dark:text-gray-400 dark:hover:bg-gray-800 dark:hover:text-gray-200"
+					on:click={() => {
+						showChatVariablesModal = false;
+					}}
+				>
+					<XMark className="size-4" />
+				</button>
+			</div>
+
+			<div class="px-5 pb-4 text-sm text-gray-600 dark:text-gray-300">
+				<div class="mb-2 text-xs text-gray-500 dark:text-gray-400">
+					{$i18n.t('Selected models define incompatible Chat Variables.')}
+				</div>
+				<div class="flex flex-col gap-1">
+					{#each getChatVariablesForm(selectedModelIds, chatVariables, $models).conflicts as conflict}
+						<div class="rounded-lg border border-red-200 px-3 py-2 text-xs dark:border-red-900/60">
+							<div class="font-medium text-red-600 dark:text-red-400">{conflict.key}</div>
+							<div class="mt-1 text-gray-500 dark:text-gray-400">
+								{conflict.modelIds.join(', ')}
+							</div>
+						</div>
+					{/each}
+				</div>
+			</div>
+		</div>
+	</Modal>
+{:else}
+	<InputVariablesModal
+		bind:show={showChatVariablesModal}
+		title={$i18n.t('Chat Variables')}
+		variables={getChatVariablesForm(selectedModelIds, chatVariables, $models).variables}
+		onSave={saveChatVariables}
+	/>
+{/if}
 
 <WebSearchConfirmDialog
 	bind:show={showWebSearchConfirm}
@@ -4337,7 +4904,7 @@
 	}}
 >
 	<div class=" text-sm text-gray-500 flex-1 line-clamp-3">
-		{$i18n.t('This will delete')} <span class="  font-semibold">{$chatTitle}</span>.
+		{$i18n.t('This will delete')} <span class="  font-normal">{$chatTitle}</span>.
 	</div>
 </DeleteConfirmDialog>
 
@@ -4365,14 +4932,17 @@
 />
 
 <div
-	class="h-screen max-h-[100dvh] transition-width duration-200 ease-in-out {$showSidebar
+	class="{embedded
+		? 'h-full'
+		: 'h-screen max-h-[100dvh]'} transition-width duration-200 ease-in-out {$showSidebar &&
+	!embedded
 		? '  md:max-w-[calc(100%-var(--sidebar-width))]'
 		: ' '} w-full max-w-full flex flex-col"
-	id="chat-container"
+	id={chatContainerId}
 >
 	{#if !loading}
 		<div in:fade={{ duration: 50 }} class="w-full h-full flex flex-col">
-			{#if $selectedFolder && $selectedFolder?.meta?.background_image_url}
+			{#if !embedded && $selectedFolder && $selectedFolder?.meta?.background_image_url}
 				<div
 					class="absolute top-0 left-0 w-full h-full bg-cover bg-center bg-no-repeat"
 					style="background-image: url({$selectedFolder?.meta?.background_image_url})  "
@@ -4381,7 +4951,7 @@
 				<div
 					class="absolute top-0 left-0 w-full h-full bg-linear-to-t from-white to-white/85 dark:from-gray-900 dark:to-gray-900/90 z-0"
 				/>
-			{:else if $settings?.backgroundImageUrl ?? $config?.license_metadata?.background_image_url ?? null}
+			{:else if !embedded && ($settings?.backgroundImageUrl ?? $config?.license_metadata?.background_image_url ?? null)}
 				<div
 					class="absolute top-0 left-0 w-full h-full bg-cover bg-center bg-no-repeat"
 					style="background-image: url({$settings?.backgroundImageUrl ??
@@ -4396,79 +4966,105 @@
 			<PaneGroup direction="horizontal" class="w-full h-full">
 				<Pane defaultSize={50} minSize={30} class="h-full flex relative max-w-full flex-col">
 					<FilesOverlay show={dragged} />
-					<Navbar
-						bind:this={navbarElement}
-						{readOnly}
-						chat={{
-							id: $chatId,
-							chat: {
-								title: $chatTitle,
-								mode: conversationMode,
-								models: selectedModels,
-								system: $settings.system ?? undefined,
-								params: params,
-								history: history,
-								timestamp: Date.now()
-							}
-						}}
-						{history}
-						title={$chatTitle}
-						bind:selectedModels
-						{conversationMode}
-						{conversationModeLocked}
-						{agentModeAvailable}
-						onConversationModeSelect={transitionConversationMode}
-						onConversationModeCreateNew={(mode) => {
-							pendingConversationMode = mode;
-							showConversationModeConfirmation = true;
-						}}
-						shareEnabled={!!history.currentId}
-						{initNewChat}
-						scrollToTop={!isNearTop ? scrollToTop : null}
-						{archiveChatHandler}
-						{deleteChatHandler}
-						{moveChatHandler}
-						onSaveTempChat={async () => {
-							try {
-								if (!history?.currentId || !Object.keys(history.messages).length) {
-									toast.error($i18n.t('No conversation to save'));
-									return;
+					{#if embedded}
+						<div
+							class="h-10 shrink-0 flex items-center justify-between gap-2 border-b border-gray-50/80 px-3 text-gray-700 dark:border-gray-850/40 dark:text-gray-200"
+						>
+							<div class="flex min-w-0 items-center gap-2">
+								<EmbeddedChatHistoryDropdown
+									title={embeddedHeaderTitle}
+									chats={embeddedChats}
+									canCreateNew={!!onNewEmbeddedChat &&
+										Object.keys(history?.messages ?? {}).length > 0}
+									{loading}
+									onNewChat={onNewEmbeddedChat}
+									onSelectChat={onSelectEmbeddedChat}
+									onDeleteChat={onDeleteEmbeddedChat}
+								/>
+							</div>
+							<Tooltip content={$i18n.t('Close')} placement="bottom">
+								<button
+									type="button"
+									class="rounded-md p-1 text-gray-500 transition hover:text-gray-900 dark:hover:text-white"
+									on:click={() => onCloseEmbedded?.()}
+									aria-label={$i18n.t('Close')}
+								>
+									<XMark className="size-4" strokeWidth="2" />
+								</button>
+							</Tooltip>
+						</div>
+					{:else}
+						<Navbar
+							bind:this={navbarElement}
+							{readOnly}
+							chat={{
+								id: $chatId,
+								chat: {
+									title: $chatTitle,
+									mode: conversationMode,
+									models: selectedModels,
+									system: $settings.system ?? undefined,
+									params,
+									history,
+									timestamp: Date.now()
 								}
-								const messages = createMessagesList(history, history.currentId);
-								const title =
-									messages.find((m) => m.role === 'user')?.content ?? $i18n.t('New Chat');
-
-								const savedChat = await createNewChat(
-									localStorage.token,
-									{
-										id: uuidv4(),
-										title: title.length > 50 ? `${title.slice(0, 50)}...` : title,
-										mode: conversationMode,
-										models: selectedModels,
-										params: params,
-										history: history,
-										messages: messages,
-										timestamp: Date.now()
-									},
-									null
-								);
-
-								if (savedChat) {
-									bindCanonicalModeProfileRevision(savedChat.mode_profile_revision_id);
-									temporaryChatEnabled.set(false);
-									chatId.set(savedChat.id);
-									chats.set(await getChatList(localStorage.token, $currentChatPage));
-
-									await goto(`/c/${savedChat.id}`);
-									toast.success($i18n.t('Conversation saved successfully'));
+							}}
+							{history}
+							title={$chatTitle}
+							bind:selectedModels
+							{conversationMode}
+							{conversationModeLocked}
+							{agentModeAvailable}
+							onConversationModeSelect={transitionConversationMode}
+							onConversationModeCreateNew={(mode) => {
+								pendingConversationMode = mode;
+								showConversationModeConfirmation = true;
+							}}
+							shareEnabled={!!history.currentId}
+							{initNewChat}
+							scrollToTop={!isNearTop ? scrollToTop : null}
+							{archiveChatHandler}
+							{deleteChatHandler}
+							{moveChatHandler}
+							onSaveTempChat={async () => {
+								try {
+									if (!history?.currentId || !Object.keys(history.messages).length) {
+										toast.error($i18n.t('No conversation to save'));
+										return;
+									}
+									const messages = createMessagesList(history, history.currentId);
+									const title =
+										messages.find((m) => m.role === 'user')?.content ?? $i18n.t('New Chat');
+									const savedChat = await createNewChat(
+										localStorage.token,
+										{
+											id: uuidv4(),
+											title: title.length > 50 ? `${title.slice(0, 50)}...` : title,
+											mode: conversationMode,
+											models: selectedModels,
+											params,
+											history,
+											messages,
+											timestamp: Date.now()
+										},
+										null,
+										chatVariables
+									);
+									if (savedChat) {
+										bindCanonicalModeProfileRevision(savedChat.mode_profile_revision_id);
+										temporaryChatEnabled.set(false);
+										chatId.set(savedChat.id);
+										await refreshChatList(localStorage.token);
+										await goto(`/c/${savedChat.id}`);
+										toast.success($i18n.t('Conversation saved successfully'));
+									}
+								} catch (error) {
+									console.error('Failed to save temporary chat:', error);
+									toast.error($i18n.t('Failed to save conversation'));
 								}
-							} catch (error) {
-								console.error('Error saving conversation:', error);
-								toast.error($i18n.t('Failed to save conversation'));
-							}
-						}}
-					/>
-
+							}}
+						/>
+					{/if}
 					<div id="chat-pane" class="flex flex-col flex-auto z-10 w-full @container overflow-auto">
 						{#if ($settings?.landingPageMode === 'chat' && !$selectedFolder) || createMessagesList(history, history.currentId).length > 0}
 							<div
@@ -4496,6 +5092,7 @@
 										}}
 										bind:selectedModels
 										{atSelectedModel}
+										className={embedded ? 'h-full flex pt-4' : 'h-full flex pt-18'}
 										{sendMessage}
 										{showMessage}
 										{submitMessage}
@@ -4504,9 +5101,12 @@
 										{mergeResponses}
 										{chatActionHandler}
 										{addMessages}
-										topPadding={true}
+										allowDelete={!(generating || taskIds?.length)}
+										forkHandler={handleForkChat}
+										topPadding={!embedded}
 										bottomPadding={files.length > 0}
 										{onSelect}
+										{onInsertToNote}
 									/>
 								</div>
 							</div>
@@ -4524,7 +5124,10 @@
 									</div>
 								</div>
 							{:else}
-								<div class=" pb-2 {dragged ? 'z-0' : 'z-10'}">
+								<div
+									id={embedded ? messageInputDropzoneId : undefined}
+									class=" pb-2 {dragged ? 'z-0' : 'z-10'}"
+								>
 									<MessageInput
 										bind:this={messageInput}
 										{history}
@@ -4544,6 +5147,13 @@
 										bind:atSelectedModel
 										bind:showCommands
 										bind:dragged
+										dropzoneId={messageInputDropzoneId}
+										chatId={$chatId}
+										{contextUsage}
+										{contextCompactionEnabled}
+										compactHandler={handleManualCompact}
+										statusHandler={handleStatusCommand}
+										forkHandler={handleForkChat}
 										toolServers={$toolServers}
 										{generating}
 										{stopResponse}
@@ -4629,6 +5239,77 @@
 									</div>
 								</div>
 							{/if}
+						{:else if embedded}
+							<div class="flex h-full min-h-0 flex-col justify-end">
+								{#if suggestedPrompts.length > 0}
+									<div class="flex flex-1 items-end px-5 pb-8">
+										<div class="w-full">
+											<div class="mb-2 text-[12px] text-gray-300 dark:text-gray-700">
+												{$i18n.t('Suggested prompts')}
+											</div>
+											<div class="flex flex-col">
+												{#each suggestedPrompts as suggestion}
+													<button
+														type="button"
+														class="flex min-h-8 w-full items-center justify-between py-1 text-left text-[13px] leading-5 text-gray-500 transition hover:text-gray-700 dark:text-gray-500 dark:hover:text-gray-300"
+														on:click={async () => {
+															await tick();
+															await submitHandler(withSelectedText(suggestion));
+														}}
+													>
+														<span class="min-w-0 truncate">{suggestion}</span>
+													</button>
+												{/each}
+											</div>
+										</div>
+									</div>
+								{/if}
+								<div id={embedded ? messageInputDropzoneId : undefined} class="pb-2 z-10">
+									<MessageInput
+										bind:this={messageInput}
+										{history}
+										{taskIds}
+										bind:selectedModels
+										bind:files
+										bind:prompt
+										bind:autoScroll
+										bind:selectedToolIds
+										bind:selectedSkillIds
+										bind:selectedFilterIds
+										bind:imageGenerationEnabled
+										bind:codeInterpreterEnabled
+										{pendingOAuthTools}
+										bind:webSearchEnabled
+										bind:atSelectedModel
+										bind:showCommands
+										bind:dragged
+										dropzoneId={messageInputDropzoneId}
+										chatId={$chatId}
+										{contextUsage}
+										{contextCompactionEnabled}
+										compactHandler={handleManualCompact}
+										statusHandler={handleStatusCommand}
+										forkHandler={handleForkChat}
+										toolServers={$toolServers}
+										{generating}
+										{stopResponse}
+										{createMessagePair}
+										{onUpload}
+										messageQueue={$chatRequestQueues[$chatId] ?? []}
+										{chatTasks}
+										onWebSearchToggle={handleWebSearchToggle}
+										on:chatVariables={() => {
+											showChatVariablesModal = true;
+										}}
+										on:submit={async (e) => {
+											if (e.detail || files.length > 0) {
+												await tick();
+												await submitHandler(withSelectedText(e.detail));
+											}
+										}}
+									/>
+								</div>
+							</div>
 						{:else}
 							<div class="flex items-center h-full">
 								{#if agentConversationUnavailable}
@@ -4699,28 +5380,31 @@
 					</div>
 				</Pane>
 
-				<ChatControls
-					bind:this={controlPaneComponent}
-					bind:history
-					bind:chatFiles
-					bind:params
-					bind:files
-					bind:pane={controlPane}
-					chatId={$chatId}
-					modelId={selectedModelIds?.at(0) ?? null}
-					models={selectedModelIds.reduce((a, e, i, arr) => {
-						const model = $models.find((m) => m.id === e);
-						if (model) {
-							return [...a, model];
-						}
-						return a;
-					}, [])}
-					submitPrompt={submitHandler}
-					{stopResponse}
-					{showMessage}
-					{eventTarget}
-					{codeInterpreterEnabled}
-				/>
+				{#if !embedded}
+					<ChatControls
+						bind:this={controlPaneComponent}
+						bind:history
+						bind:chatFiles
+						bind:params
+						bind:files
+						bind:pane={controlPane}
+						chatId={$chatId}
+						modelId={selectedModelIds?.at(0) ?? null}
+						models={selectedModelIds.reduce((a, e, i, arr) => {
+							const model = $models.find((m) => m.id === e);
+							if (model) {
+								return [...a, model];
+							}
+							return a;
+						}, [])}
+						submitPrompt={submitHandler}
+						{stopResponse}
+						{showMessage}
+						{eventTarget}
+						{codeInterpreterEnabled}
+						containerId={chatContainerId}
+					/>
+				{/if}
 			</PaneGroup>
 		</div>
 	{:else if loading}

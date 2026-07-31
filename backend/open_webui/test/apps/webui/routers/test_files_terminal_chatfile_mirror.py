@@ -166,3 +166,49 @@ def test_terminal_chatfile_mirror_requires_chat_upload_context():
     assert files_router._should_mirror_upload_to_terminal({'knowledge_id': 'kb-1'}) is False
     assert files_router._should_mirror_upload_to_terminal({'channel_id': 'channel-1'}) is False
     assert files_router._should_mirror_upload_to_terminal({}) is False
+
+
+def test_terminal_chatfile_policy_id_is_encoded_as_one_path_segment():
+    assert (
+        files_router._terminal_base_url(
+            {
+                'url': 'http://terminal.internal/',
+                'policy_id': 'team/shared',
+            }
+        )
+        == 'http://terminal.internal/p/team%2Fshared'
+    )
+
+
+@pytest.mark.asyncio
+async def test_terminal_chatfile_system_oauth_is_resolved_server_side(monkeypatch):
+    captured = {}
+
+    class _OAuthManager:
+        async def get_oauth_token(self, user_id, session_id):
+            captured['oauth_lookup'] = (user_id, session_id)
+            return {'access_token': 'server-side-token'}
+
+    request = SimpleNamespace(
+        app=SimpleNamespace(state=SimpleNamespace(oauth_manager=_OAuthManager())),
+        cookies={'oauth_session_id': 'oauth-session'},
+        headers={'x-oauth-access-token': 'attacker-controlled-token'},
+    )
+    connection = {
+        'id': 'terminals',
+        'url': 'http://terminal.internal',
+        'auth_type': 'system_oauth',
+    }
+
+    headers, cookies = await files_router._build_terminal_headers_and_cookies(
+        request,
+        _fake_user(),
+        connection,
+    )
+
+    assert captured['oauth_lookup'] == ('user-1', 'oauth-session')
+    assert headers == {
+        'X-User-Id': 'user-1',
+        'Authorization': 'Bearer server-side-token',
+    }
+    assert cookies == {'oauth_session_id': 'oauth-session'}

@@ -93,8 +93,6 @@ MODELS_CONFIG_KEYS = {
     'DEFAULT_MODEL_METADATA': 'models.default_metadata',
     'DEFAULT_MODEL_PARAMS': 'models.default_params',
 }
-
-
 async def get_config_values(key_map: dict[str, str]) -> dict:
     values = await Config.get_many(*key_map.values())
     return {field: values[storage_key] for field, storage_key in key_map.items() if storage_key in values}
@@ -682,7 +680,7 @@ async def register_oauth_client(
         log.debug(f'Failed to register OAuth client: {e}')
         raise HTTPException(
             status_code=400,
-            detail=f'Failed to register OAuth client',
+            detail=f'Failed to register OAuth client: {e}',
         )
 
 
@@ -784,10 +782,8 @@ class TerminalServerConnection(BaseModel):
 
     config: dict | None = None
 
-    # Orchestrator policy fields
-    server_type: str | None = None  # "orchestrator", "terminal"
+    server_type: str | None = None
     policy_id: str | None = None
-    policy: dict | None = None  # cached policy data
 
     model_config = ConfigDict(extra='allow')
 
@@ -807,7 +803,9 @@ async def set_terminal_servers_config(
     form_data: TerminalServersConfigForm,
     user=Depends(get_admin_user),
 ):
-    connections = [connection.model_dump() for connection in form_data.TERMINAL_SERVER_CONNECTIONS]
+    connections = [
+        connection.model_dump(exclude={'policy', 'lifecycle'}) for connection in form_data.TERMINAL_SERVER_CONNECTIONS
+    ]
     await Config.upsert({'terminal_server.connections': connections})
 
     await set_terminal_servers(request)
@@ -877,7 +875,7 @@ class TerminalServerPolicyForm(BaseModel):
     key: str | None = ''
     auth_type: str | None = 'bearer'
     policy_id: str
-    policy_data: dict
+    policy_data: dict | None = None
 
 
 class TerminalServerLifecycleForm(BaseModel):
@@ -885,7 +883,7 @@ class TerminalServerLifecycleForm(BaseModel):
     key: str | None = ''
     auth_type: str | None = 'bearer'
     policy_id: str
-    lifecycle_data: dict
+    lifecycle_data: dict | None = None
 
 
 class TerminalServerRefreshForm(BaseModel):
@@ -902,9 +900,7 @@ class TerminalServerRefreshForm(BaseModel):
 async def put_terminal_server_policy(
     request: Request, form_data: TerminalServerPolicyForm, user=Depends(get_admin_user)
 ):
-    """
-    Proxy a policy PUT to an orchestrator terminal server.
-    """
+    """Proxy a policy read or update to an orchestrator terminal server."""
     base_url = (form_data.url or '').rstrip('/')
     if not base_url:
         raise HTTPException(status_code=400, detail='Terminal server URL is required')
@@ -919,8 +915,12 @@ async def put_terminal_server_policy(
             timeout=aiohttp.ClientTimeout(total=AIOHTTP_CLIENT_TIMEOUT),
         ) as session:
             policy_url = f'{base_url}/api/v1/policies/{form_data.policy_id}'
-            async with session.put(
-                policy_url, headers=headers, json=form_data.policy_data, ssl=AIOHTTP_CLIENT_SESSION_SSL
+            async with session.request(
+                'GET' if form_data.policy_data is None else 'PUT',
+                policy_url,
+                headers=headers,
+                json=form_data.policy_data,
+                ssl=AIOHTTP_CLIENT_SESSION_SSL,
             ) as resp:
                 if resp.ok:
                     return await resp.json()
@@ -929,17 +929,15 @@ async def put_terminal_server_policy(
     except HTTPException:
         raise
     except Exception as e:
-        log.debug(f'Failed to save policy to terminal server: {e}')
-        raise HTTPException(status_code=400, detail='Failed to save policy to terminal server')
+        log.debug(f'Failed to access policy on terminal server: {e}')
+        raise HTTPException(status_code=400, detail='Failed to access policy on terminal server')
 
 
 @router.post('/terminal_servers/lifecycle')
 async def put_terminal_server_lifecycle(
     request: Request, form_data: TerminalServerLifecycleForm, user=Depends(get_admin_user)
 ):
-    """
-    Proxy a policy lifecycle PUT to an orchestrator terminal server.
-    """
+    """Proxy a lifecycle read or update to an orchestrator terminal server."""
     base_url = (form_data.url or '').rstrip('/')
     if not base_url:
         raise HTTPException(status_code=400, detail='Terminal server URL is required')
@@ -954,7 +952,8 @@ async def put_terminal_server_lifecycle(
             timeout=aiohttp.ClientTimeout(total=AIOHTTP_CLIENT_TIMEOUT),
         ) as session:
             lifecycle_url = f'{base_url}/api/v1/policies/{form_data.policy_id}/lifecycle'
-            async with session.put(
+            async with session.request(
+                'GET' if form_data.lifecycle_data is None else 'PUT',
                 lifecycle_url,
                 headers=headers,
                 json=form_data.lifecycle_data,
@@ -967,8 +966,8 @@ async def put_terminal_server_lifecycle(
     except HTTPException:
         raise
     except Exception as e:
-        log.debug(f'Failed to save lifecycle to terminal server: {e}')
-        raise HTTPException(status_code=400, detail='Failed to save lifecycle to terminal server')
+        log.debug(f'Failed to access lifecycle on terminal server: {e}')
+        raise HTTPException(status_code=400, detail='Failed to access lifecycle on terminal server')
 
 
 @router.post('/terminal_servers/refresh')
@@ -1090,7 +1089,7 @@ async def verify_tool_servers_config(request: Request, form_data: ToolServerConn
                     if form_data.headers and isinstance(form_data.headers, dict):
                         if headers is None:
                             headers = {}
-                        custom_headers = get_custom_headers(form_data.headers, user)
+                        custom_headers = await get_custom_headers(form_data.headers, user)
                         headers.update(custom_headers)
 
                     await client.connect(form_data.url, headers=headers)
@@ -1135,7 +1134,7 @@ async def verify_tool_servers_config(request: Request, form_data: ToolServerConn
             if form_data.headers and isinstance(form_data.headers, dict):
                 if headers is None:
                     headers = {}
-                custom_headers = get_custom_headers(form_data.headers, user)
+                custom_headers = await get_custom_headers(form_data.headers, user)
                 headers.update(custom_headers)
 
             url = get_tool_server_url(form_data.url, form_data.path)

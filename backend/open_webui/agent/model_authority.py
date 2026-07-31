@@ -367,13 +367,11 @@ class AgentModelAuthority:
 
     async def _resolve_authorized_model(self, request, user, model_id: str) -> dict[str, Any]:
         models = getattr(request.app.state, 'MODELS', None)
-        if not models:
-            await self.model_loader(request, user)
-            models = getattr(request.app.state, 'MODELS', None)
-
         model = (models or {}).get(model_id)
         if model is None:
-            await self.model_loader(request, user)
+            loaded_models = await self.model_loader(request, user)
+            model = _model_from_catalog(loaded_models, model_id)
+        if model is None:
             models = getattr(request.app.state, 'MODELS', None)
             model = (models or {}).get(model_id)
         if model is None:
@@ -387,7 +385,6 @@ class AgentModelAuthority:
                 raise ModelNotAllowed(str(message)) from exc
 
         return model
-
     async def _execute_provider_model_call(
         self,
         request,
@@ -664,6 +661,24 @@ class AgentModelAuthority:
             model=model,
             operation_id=claim.operation.id,
         )
+
+
+def _model_from_catalog(models: Any, model_id: str) -> dict[str, Any] | None:
+    """Resolve a model from the loader result without depending on cache writes."""
+    if isinstance(models, dict):
+        direct = models.get(model_id)
+        if isinstance(direct, dict):
+            return direct
+        candidates = models.get('data')
+        if not isinstance(candidates, list):
+            candidates = models.values()
+    else:
+        candidates = models or []
+
+    for candidate in candidates:
+        if isinstance(candidate, dict) and candidate.get('id') == model_id:
+            return candidate
+    return None
 
 
 def _format_model_stream_event(event_type: str, payload: dict[str, Any]) -> bytes:

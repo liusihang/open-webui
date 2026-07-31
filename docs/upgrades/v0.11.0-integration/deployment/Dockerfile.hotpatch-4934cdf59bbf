@@ -1,0 +1,20 @@
+ARG BASE_IMAGE=open-webui:v011-hotfix-aaeb9fb5736a
+FROM ${BASE_IMAGE}
+
+ARG BASE_IMAGE
+ARG HOTPATCH_SOURCE_COMMIT
+LABEL org.opencontainers.image.revision="${HOTPATCH_SOURCE_COMMIT}" \
+      io.openwebui.hotpatch.base-image="${BASE_IMAGE}" \
+      io.openwebui.hotpatch.scope="v0.11-chatgpt-answer-typography-width-aligned"
+
+ENV WEBUI_BUILD_VERSION="${HOTPATCH_SOURCE_COMMIT}"
+
+COPY --chown=0:0 build /app/build
+
+RUN test -s /app/build/index.html \
+    && test -s /app/build/_app/version.json \
+    && grep -F -q "${HOTPATCH_SOURCE_COMMIT}" /app/build/_app/version.json \
+    && grep -R -F -q 'max-width:58rem' /app/build/_app/immutable/assets \
+    && grep -R -F -q 'font-size:var(--text-base,1rem)!important' /app/build/_app/immutable/assets \
+    && grep -R -F -q 'line-height:calc(var(--spacing,.25rem) * 6)!important' /app/build/_app/immutable/assets \
+    && grep -R -F -q 'markdown-prose' /app/build/_app/immutable

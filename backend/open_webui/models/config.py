@@ -49,8 +49,10 @@ API_CONFIG_FIELDS = (
     'auth_type',
     'headers',
     'azure',
+    'api_type',
     'api_version',
     'extra_params',
+    'passthrough_params',
 )
 
 
@@ -261,7 +263,10 @@ class Config(Base):
         values = [
             {'key': key, 'value': _json_value(value), 'updated_at': now}
             for key, value in defaults.items()
+            if Config.persistent_enabled_for(key)
         ]
+        if not values:
+            return
         async with get_async_db() as db:
             dialect_name = db.get_bind().dialect.name
             result = await db.execute(_seed_defaults_statement(dialect_name, values))

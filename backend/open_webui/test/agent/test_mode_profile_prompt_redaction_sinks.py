@@ -118,6 +118,10 @@ async def test_openai_provider_error_log_response_and_event_are_request_redacted
     async def cleanup(value):
         return None
 
+    async def config_get(key, default=None):
+        assert key == 'openai.enable'
+        return True
+
     sink = _EventSink()
     monkeypatch.setattr(events, 'EVENT_SINKS', [sink])
     monkeypatch.setattr(openai.Models, 'get_model_by_id', no_model)
@@ -126,6 +130,7 @@ async def test_openai_provider_error_log_response_and_event_are_request_redacted
     monkeypatch.setattr(openai, 'get_headers_and_cookies', headers)
     monkeypatch.setattr(openai, 'get_session', session)
     monkeypatch.setattr(openai, 'cleanup_response', cleanup)
+    monkeypatch.setattr(openai.Config, 'get', config_get)
 
     request = SimpleNamespace(
         app=SimpleNamespace(

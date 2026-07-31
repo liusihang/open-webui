@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from 'vitest';
 
 import {
 	AGENT_RUN_PENDING_REGISTRY_LIMIT,
+	applyAgentRunFinalContent,
 	createAgentRunStopController,
 	getActiveAgentRunId,
 	getAgentRunStopAriaLabel,
@@ -35,6 +36,66 @@ describe('markAgentRunMessageDone', () => {
 
 		expect(changed).toBe(false);
 		expect(message.done).toBe(false);
+	});
+});
+
+describe('applyAgentRunFinalContent', () => {
+	it('writes a replayed final answer into an empty Agent assistant message for terminal persistence', () => {
+		const message = {
+			id: 'assistant-1',
+			role: 'assistant',
+			content: '',
+			done: false,
+			agent_run_id: 'run-1'
+		};
+
+		const changed = applyAgentRunFinalContent(message, 'The final answer from the Agent.');
+
+		expect(changed).toBe(true);
+		expect(message.content).toBe('The final answer from the Agent.');
+	});
+
+	it('never replaces already persisted assistant content with replayed Agent events', () => {
+		const message = {
+			id: 'assistant-1',
+			role: 'assistant',
+			content: 'Already persisted answer.',
+			done: true,
+			agent_run_id: 'run-1'
+		};
+
+		const changed = applyAgentRunFinalContent(message, 'A stale replayed answer.');
+
+		expect(changed).toBe(false);
+		expect(message.content).toBe('Already persisted answer.');
+	});
+
+	it('recovers final content even when the backend has already marked the empty node done', () => {
+		const message = {
+			id: 'assistant-1',
+			role: 'assistant',
+			content: '',
+			done: true,
+			agent_run_id: 'run-1'
+		};
+
+		expect(applyAgentRunFinalContent(message, 'Recovered final answer.')).toBe(true);
+		expect(message).toMatchObject({ content: 'Recovered final answer.', done: true });
+	});
+
+	it('updates only the matching prior Agent final fragment as later deltas extend it', () => {
+		const message = {
+			id: 'assistant-1',
+			role: 'assistant',
+			content: 'First final fragment',
+			done: false,
+			agent_run_id: 'run-1'
+		};
+
+		expect(
+			applyAgentRunFinalContent(message, 'First final fragment, now complete.', 'First final fragment')
+		).toBe(true);
+		expect(message.content).toBe('First final fragment, now complete.');
 	});
 });
 

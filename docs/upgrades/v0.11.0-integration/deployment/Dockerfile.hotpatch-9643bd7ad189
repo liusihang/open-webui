@@ -1,0 +1,16 @@
+ARG BASE_IMAGE=open-webui:v011-hotfix-0bb586c8699d
+FROM ${BASE_IMAGE}
+
+ARG BASE_IMAGE
+ARG HOTPATCH_SOURCE_COMMIT
+LABEL org.opencontainers.image.revision="${HOTPATCH_SOURCE_COMMIT}" \
+      io.openwebui.hotpatch.base-image="${BASE_IMAGE}" \
+      io.openwebui.hotpatch.scope="v0.11-tool-call-detail-expansion"
+
+ENV WEBUI_BUILD_VERSION="${HOTPATCH_SOURCE_COMMIT}"
+
+COPY --chown=0:0 build /app/build
+
+RUN test -s /app/build/index.html \
+    && test -s /app/build/_app/version.json \
+    && grep -F -q "${HOTPATCH_SOURCE_COMMIT}" /app/build/_app/version.json

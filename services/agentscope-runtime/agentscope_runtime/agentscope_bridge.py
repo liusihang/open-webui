@@ -2,12 +2,14 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import re
 import uuid
 from collections.abc import AsyncGenerator, Callable
 from dataclasses import dataclass
 from typing import Any, Protocol
 
+import httpx
 from agentscope.app import SubAgentTemplate
 from agentscope.credential import CredentialBase
 from agentscope.formatter import OpenAIChatFormatter
@@ -16,6 +18,8 @@ from agentscope.model import ChatModelBase, ChatResponse
 from agentscope.permission import PermissionBehavior, PermissionContext, PermissionDecision
 from agentscope.tool import ToolBase, ToolChunk
 from pydantic import BaseModel
+
+logger = logging.getLogger(__name__)
 
 OPENWEBUI_SUBAGENT_SYSTEM_PROMPT = """You are {member_name}, an OpenWebUI-governed \
 subagent in team '{team_name}' led by {leader_name}.
@@ -536,10 +540,12 @@ class OpenWebUIAgentScopeModel(ChatModelBase):
             final_text_delta_index += 1
             return response
 
+        reconnect_attempted = False
+        stream_idempotency_key = idempotency_key
         for attempt in range(1, MODEL_CALL_RETRY_ATTEMPTS + 1):
             stream = self.callback_client.call_model_stream(
                 run_id=self.run_id,
-                idempotency_key=idempotency_key,
+                idempotency_key=stream_idempotency_key,
                 participant_id=self.participant_id,
                 model_call_id=model_call_id,
                 model=model_name,
@@ -571,6 +577,22 @@ class OpenWebUIAgentScopeModel(ChatModelBase):
                 except Exception:
                     pass
                 if attempt < MODEL_CALL_RETRY_ATTEMPTS and _is_retryable_model_call_callback(exc):
+                    await asyncio.sleep(MODEL_CALL_RETRY_DELAY_SECONDS)
+                    continue
+                if (
+                    attempt < MODEL_CALL_RETRY_ATTEMPTS
+                    and not reconnect_attempted
+                    and _is_retryable_pre_event_stream_disconnect(exc)
+                ):
+                    reconnect_attempted = True
+                    stream_idempotency_key = f"model:{self.participant_id}:{model_call_id}:2"
+                    logger.warning(
+                        "Retrying model stream after pre-event incomplete-chunked "
+                        "disconnect for run_id=%s participant_id=%s model_call_id=%s",
+                        self.run_id,
+                        self.participant_id,
+                        model_call_id,
+                    )
                     await asyncio.sleep(MODEL_CALL_RETRY_DELAY_SECONDS)
                     continue
                 raise
@@ -1349,6 +1371,16 @@ def _extract_artifacts(response: dict[str, Any]) -> list[dict[str, Any]]:
 def _is_retryable_model_call_callback(exc: Exception) -> bool:
     message = str(exc)
     return "model_run_rejected" in message and "while queued" in message
+
+
+def _is_retryable_pre_event_stream_disconnect(exc: Exception) -> bool:
+    if not isinstance(exc, httpx.RemoteProtocolError):
+        return False
+    message = str(exc).lower()
+    return (
+        "peer closed connection" in message
+        and "incomplete chunked" in message
+    )
 
 
 async def _prepend_event(

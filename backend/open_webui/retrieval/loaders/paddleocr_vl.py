@@ -32,6 +32,8 @@ DEFAULT_MAX_JSONL_LINES = 10_000
 DEFAULT_MAX_JSONL_REDIRECTS = 5
 PADDLEOCR_VL_JOBS_PATH = '/api/v2/ocr/jobs'
 TERMINAL_FAILURE_STATES = {'failed', 'error', 'cancelled', 'canceled'}
+PADDLEOCR_VL_IMAGE_EXTENSIONS = ['png', 'jpg', 'jpeg', 'bmp', 'tiff', 'webp']
+PADDLEOCR_VL_SUPPORTED_EXTENSIONS = ['pdf', *PADDLEOCR_VL_IMAGE_EXTENSIONS]
 
 
 class PaddleOCRVLLoader:

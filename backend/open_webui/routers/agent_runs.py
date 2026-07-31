@@ -1,4 +1,5 @@
 import asyncio
+import inspect
 import logging
 import os
 import time
@@ -107,37 +108,38 @@ def get_agent_approval_coordinator(request: Request) -> AgentApprovalCoordinator
     return coordinator
 
 
+async def _maybe_await(value):
+    if inspect.isawaitable(value):
+        return await value
+    return value
+
+
+async def _get_authorized_agent_run(request: Request, run_id: str, *, user):
+    store = get_configured_agent_event_store(request)
+    run_store = store if getattr(store, 'get_run', None) is not None else AgentRuns
+    try:
+        run = await _maybe_await(run_store.get_run(run_id))
+    except AgentRunNotFound:
+        run = None
+    if run is None or (
+        getattr(run, 'user_id', None) != user.id
+        and getattr(user, 'role', None) != 'admin'
+    ):
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail='Agent Run not found',
+        )
+    return run
+
+
 @router.get('/{run_id}', response_model=AgentRunDetailResponse)
 async def get_agent_run(
     run_id: str,
     request: Request,
     user=Depends(get_verified_user),
 ):
-    store = get_configured_agent_event_store(request)
-    if hasattr(store, 'get_run'):
-        return store.get_run(run_id)
-
-    if store is not None:
-        return AgentRunDetailResponse(
-            id=run_id,
-            state=store.get_run_state(run_id),
-        )
-
-    run = await AgentRuns.get_run(run_id)
-    if run is None:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail='Agent Run not found',
-        )
-    return AgentRunDetailResponse(
-        id=run.id,
-        state=run.state,
-        state_version=run.state_version,
-        chat_id=run.chat_id,
-        assistant_message_id=run.assistant_message_id,
-        summary=run.summary,
-        error=run.error,
-    )
+    run = await _get_authorized_agent_run(request, run_id, user=user)
+    return _agent_run_detail(run)
 
 
 @router.post('/{run_id}/cancel', response_model=AgentRunDetailResponse)
@@ -408,6 +410,7 @@ async def list_agent_run_events(
     after_seq: int = Query(default=0, ge=0),
     user=Depends(get_verified_user),
 ):
+    await _get_authorized_agent_run(request, run_id, user=user)
     store = get_configured_agent_event_store(request)
     if store is not None:
         events = list_events_for_reconnect(store, run_id, after_seq=after_seq)
@@ -437,6 +440,7 @@ async def stream_agent_run_events(
     last_event_id: str | None = Header(default=None, alias='Last-Event-ID'),
     user=Depends(get_verified_user),
 ):
+    await _get_authorized_agent_run(request, run_id, user=user)
     try:
         resolved_after_seq = resolve_after_seq(
             after_seq=after_seq,

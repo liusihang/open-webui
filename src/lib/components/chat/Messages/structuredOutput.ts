@@ -127,6 +127,7 @@ function buildToolCallToken(item: OutputItem, toolOutputByCallId: Record<string,
 	const callId = item.call_id ?? '';
 	const resultItem = toolOutputByCallId[callId];
 	const isDone = isDoneStatus(item.status) || !!resultItem;
+	const name = item.name ?? '';
 
 	return {
 		summary: isDone ? 'Tool Executed' : 'Executing...',
@@ -134,7 +135,7 @@ function buildToolCallToken(item: OutputItem, toolOutputByCallId: Record<string,
 		attributes: {
 			type: 'tool_calls',
 			id: callId,
-			name: item.name ?? '',
+			name,
 			done: isDone ? 'true' : 'false',
 			arguments: stringifyAttribute(item.arguments ?? ''),
 			files: stringifyAttribute(resultItem?.files),

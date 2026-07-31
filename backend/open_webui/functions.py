@@ -20,7 +20,7 @@ from starlette.responses import Response, StreamingResponse
 
 from open_webui.config import BYPASS_ADMIN_ACCESS_CONTROL
 from open_webui.constants import ERROR_MESSAGES
-from open_webui.env import BYPASS_MODEL_ACCESS_CONTROL, GLOBAL_LOG_LEVEL
+from open_webui.env import BYPASS_MODEL_ACCESS_CONTROL, ENABLE_PLUGINS, GLOBAL_LOG_LEVEL
 from open_webui.models.functions import Functions
 from open_webui.models.models import Models
 from open_webui.models.users import UserModel
@@ -144,6 +144,9 @@ async def get_function_module_by_id(request: Request, pipe_id: str):
 
 
 async def get_function_models(request):
+    if not ENABLE_PLUGINS:
+        return []
+
     pipes = await Functions.get_functions_by_type('pipe', active_only=True)
     pipe_models = []
 
@@ -219,7 +222,10 @@ async def get_function_models(request):
     return pipe_models
 
 
-async def generate_function_chat_completion(request, form_data, user, models: dict = {}):
+async def generate_function_chat_completion(request, form_data, user, models: dict | None = None):
+    if models is None:
+        models = {}
+
     async def get_message_content(res: str | Generator | AsyncGenerator) -> str:
         if isinstance(res, str):
             return res
@@ -286,6 +292,10 @@ async def generate_function_chat_completion(request, form_data, user, models: di
                 params['__user__']['valves'] = function_module.UserValves()
 
         return params
+
+    # Copy so the base-model substitution below doesn't leak into the caller's
+    # payload, which the tool-call continuation re-submits. Mirrors the routers.
+    form_data = {**form_data}
 
     model_id = form_data.get('model')
     model_info = await Models.get_model_by_id(model_id)
@@ -364,14 +374,15 @@ async def generate_function_chat_completion(request, form_data, user, models: di
             system = params.pop('system', None)
             form_data = apply_model_params_to_body_openai(params, form_data)
 
-    if not getattr(request.state, 'bypass_system_prompt', False):
+    request_state = getattr(request, 'state', None)
+    if not getattr(request_state, 'bypass_system_prompt', False):
         form_data = await apply_model_system_prompt_to_body(
             system,
             form_data,
             metadata,
             user,
             bypass_global_system_prompt=getattr(
-                request.state,
+                request_state,
                 'bypass_global_system_prompt',
                 False,
             ),

@@ -1,4 +1,4 @@
-# External-services slim runtime for OpenWebUI v0.9.5.
+# External-services slim runtime for the custom OpenWebUI v0.11.0 integration.
 # Keep the default requirements.txt unchanged; this file is only selected when
 # USE_EXTERNAL_SERVICES_SLIM=true during Docker build.
 #
@@ -6,7 +6,7 @@
 # - local ML/runtime stacks: torch/torchvision/torchaudio, transformers,
 #   sentence-transformers, accelerate, sentencepiece, einops, colbert-ai
 # - local STT/TTS/OCR stacks: faster-whisper, ctranslate2, soundfile,
-#   onnxruntime, rapidocr-onnxruntime, opencv-python-headless
+#   onnxruntime, rapidocr, opencv-python-headless
 # - local/default vector and unused remote vector clients: chromadb,
 #   weaviate-client, pymilvus, qdrant-client, elasticsearch, pinecone,
 #   oracledb
@@ -14,27 +14,29 @@
 #   pytest, pytest-docker
 # - optional document parser bundle: unstructured
 
-fastapi==0.135.1
-uvicorn[standard]==0.41.0
+fastapi==0.136.3
+uvicorn[standard]==0.51.0
 typer==0.20.0
-pydantic==2.12.5
-python-multipart==0.0.22
+pydantic==2.13.4
+python-multipart==0.0.32
 itsdangerous==2.2.0
 python-dotenv==1.2.1
 PyYAML==6.0.3
 black==26.3.1
 
-python-socketio==5.16.1
-python-jose==3.5.0
-cryptography==46.0.5
+python-socketio==5.16.2
+orjson==3.11.9
+cryptography==48.0.0
 bcrypt==5.0.0
 argon2-cffi==25.1.0
-PyJWT[crypto]==2.11.0
-authlib==1.6.10
-joserfc==1.7.1
+PyJWT[crypto]==2.13.0
+authlib==1.7.2
+joserfc==1.7.4
 
-requests==2.33.1
+requests==2.34.2
+regex==2026.5.9
 aiohttp==3.13.5
+aiodns==4.0.4
 async-timeout==5.0.1
 aiocache==0.12.3
 aiofiles==25.1.0
@@ -56,7 +58,8 @@ peewee==3.19.0
 peewee-migrate==1.14.3
 
 pycrdt==0.12.47
-redis==7.4.0
+redis==8.0.1
+hiredis==3.4.0
 
 APScheduler==3.11.2
 RestrictedPython==8.1
@@ -95,6 +98,7 @@ msoffcrypto-tool==6.0.0
 nltk==3.9.3
 Markdown==3.10.2
 beautifulsoup4==4.14.3
+lxml==6.1.1
 pypandoc==1.16.2
 pandas==3.0.1
 openpyxl==3.1.5

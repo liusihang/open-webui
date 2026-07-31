@@ -2,6 +2,8 @@ from types import SimpleNamespace
 
 import pytest
 
+from open_webui.socket import utils as socket_utils
+
 
 class FakeRedis:
     def __init__(self, values=None):
@@ -27,6 +29,14 @@ class FakeFunctions:
     async def update_function_by_id(self, function_id, updated, db=None):
         self.calls.append((function_id, updated))
         return SimpleNamespace(id=function_id)
+
+
+class RecordingRedisHash:
+    def __init__(self):
+        self.delete_calls = []
+
+    def delete(self, name):
+        self.delete_calls.append(name)
 
 
 @pytest.mark.asyncio
@@ -58,6 +68,29 @@ async def test_config_event_refreshes_runtime_config_and_model_cache():
     assert app.state.BASE_MODELS == []
     assert app.state.MODELS == {}
     assert app.state.CACHE_VERSIONS['config:ui.default_models'] == '2'
+
+
+@pytest.mark.asyncio
+async def test_model_event_keeps_shared_redis_model_catalog_published(monkeypatch):
+    from open_webui.utils.cache_invalidation import apply_cache_invalidation_event
+
+    redis = RecordingRedisHash()
+    monkeypatch.setattr(socket_utils, 'get_redis_connection', lambda *_args, **_kwargs: redis)
+    app = _app_state()
+    app.state.BASE_MODELS = [{'id': 'stale-base'}]
+    app.state.MODELS = socket_utils.RedisDict('open-webui:models', 'redis://redis:6379/0')
+
+    await apply_cache_invalidation_event(
+        app,
+        {
+            'namespace': 'models',
+            'key': None,
+            'version': '2',
+        },
+    )
+
+    assert app.state.BASE_MODELS == []
+    assert redis.delete_calls == []
 
 
 @pytest.mark.asyncio

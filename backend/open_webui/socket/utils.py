@@ -3,18 +3,35 @@
 from __future__ import annotations
 
 import hashlib
-import json
+import logging
 import uuid
 
 import pycrdt as Y
-from open_webui.utils.redis import get_redis_connection
 from open_webui.env import REDIS_KEY_PREFIX
+from open_webui.utils.json_codec import JSONCodec
+from open_webui.utils.redis import get_redis_connection
+from redis.exceptions import ConnectionError as RedisConnectionError
+from redis.exceptions import TimeoutError as RedisTimeoutError
 
 YDOC_KEY_PREFIX = f'{REDIS_KEY_PREFIX}:ydoc:documents'
+log = logging.getLogger(__name__)
 
 
 class RedisLock:
     """Distributed lock backed by a Redis SET with NX/EX semantics."""
+
+    _RENEW_SCRIPT = """
+    if redis.call('get', KEYS[1]) == ARGV[1] then
+        return redis.call('expire', KEYS[1], ARGV[2])
+    end
+    return 0
+    """
+    _RELEASE_SCRIPT = """
+    if redis.call('get', KEYS[1]) == ARGV[1] then
+        return redis.call('del', KEYS[1])
+    end
+    return 0
+    """
 
     def __init__(
         self,
@@ -41,13 +58,10 @@ class RedisLock:
         return self.lock_obtained
 
     def renew_lock(self):
-        # xx=True will only set this key if it _has_ already been set
-        return self.redis.set(self.lock_name, self.lock_id, xx=True, ex=self.timeout_secs)
+        return bool(self.redis.eval(self._RENEW_SCRIPT, 1, self.lock_name, self.lock_id, self.timeout_secs))
 
     def release_lock(self):
-        lock_value = self.redis.get(self.lock_name)
-        if lock_value and lock_value == self.lock_id:
-            self.redis.delete(self.lock_name)
+        self.redis.eval(self._RELEASE_SCRIPT, 1, self.lock_name, self.lock_id)
 
 
 class RedisDict:
@@ -64,15 +78,26 @@ class RedisDict:
             decode_responses=True,
         )
 
+    def _read(self, operation, *args, **kwargs):
+        try:
+            return operation(*args, **kwargs)
+        except (RedisConnectionError, RedisTimeoutError) as error:
+            log.warning(
+                'Transient Redis read failure for %s (%s); retrying once',
+                self.name,
+                type(error).__name__,
+            )
+            return operation(*args, **kwargs)
+
     def __setitem__(self, key, value):
-        serialized_value = json.dumps(value)
+        serialized_value = JSONCodec.dumps(value)
         self.redis.hset(self.name, key, serialized_value)
 
     def __getitem__(self, key):
-        value = self.redis.hget(self.name, key)
+        value = self._read(self.redis.hget, self.name, key)
         if value is None:
             raise KeyError(key)
-        return json.loads(value)
+        return JSONCodec.loads(value)
 
     def __delitem__(self, key):
         result = self.redis.hdel(self.name, key)
@@ -80,49 +105,50 @@ class RedisDict:
             raise KeyError(key)
 
     def __contains__(self, key):
-        return self.redis.hexists(self.name, key)
+        return self._read(self.redis.hexists, self.name, key)
 
     def __len__(self):
-        return self.redis.hlen(self.name)
+        return self._read(self.redis.hlen, self.name)
 
     def keys(self):
-        return self.redis.hkeys(self.name)
+        return self._read(self.redis.hkeys, self.name)
 
     def values(self):
-        return [json.loads(v) for v in self.redis.hvals(self.name)]
+        return [JSONCodec.loads(v) for v in self._read(self.redis.hvals, self.name)]
 
     def items(self):
-        return [(k, json.loads(v)) for k, v in self.redis.hgetall(self.name).items()]
+        return [
+            (k, JSONCodec.loads(v))
+            for k, v in self._read(self.redis.hgetall, self.name).items()
+        ]
 
     def set(self, mapping: dict):
         if not mapping:
-            self.redis.delete(self.name)
             self._last_signature = None
             return
 
         # Serialize values once — reused for both the fingerprint and the write.
-        serialized = {k: json.dumps(v) for k, v in mapping.items()}
+        serialized = {k: JSONCodec.dumps(v) for k, v in mapping.items()}
+        digest = hashlib.sha256()
+        for key in sorted(serialized):
+            digest.update(key.encode())
+            digest.update(b'\0')
+            digest.update(serialized[key].encode())
+            digest.update(b'\0')
+        signature = digest.hexdigest()
 
         # Skip the write when the prepared mapping is identical to the last one
         # this process wrote.  The check is per-instance (not distributed), but
         # still eliminates the majority of redundant writes because each pod
         # typically produces the same model list on consecutive refreshes.
-        signature = hashlib.sha256(json.dumps(serialized, sort_keys=True).encode()).hexdigest()
         if signature == self._last_signature:
             return
 
-        # Fetch existing keys before writing so we know which ones to remove.
-        # HKEYS is cheap — it transfers only short key strings, not large JSON values.
-        existing_keys = set(self.redis.hkeys(self.name))
-        new_keys = set(mapping.keys())
-        keys_to_remove = existing_keys - new_keys
-
-        # HSET first (add/update all new values), then HDEL (remove stale keys).
-        # We never DELETE the whole hash — this eliminates the race window
-        # where concurrent readers would see an empty models dict.
+        # A worker's local discovery snapshot can be partial or stale relative
+        # to another worker. Publish its verified models atomically, but never
+        # treat omitted keys as globally authoritative removals. Explicit cache
+        # invalidation uses clear() when the provider configuration changes.
         self.redis.hset(self.name, mapping=serialized)
-        if keys_to_remove:
-            self.redis.hdel(self.name, *keys_to_remove)
 
         self._last_signature = signature
 
@@ -166,7 +192,7 @@ class YdocManager:
         document_id = document_id.replace(':', '_')
         if self._redis:
             redis_key = f'{self._redis_key_prefix}:{document_id}:updates'
-            await self._redis.rpush(redis_key, json.dumps(list(update)))
+            await self._redis.rpush(redis_key, JSONCodec.dumps(list(update)))
             list_len = await self._redis.llen(redis_key)
             if list_len >= self.COMPACTION_THRESHOLD:
                 await self._compact_updates_redis(document_id)
@@ -186,8 +212,8 @@ class YdocManager:
         mid = len(all_updates) // 2
         ydoc = Y.Doc()
         for raw in all_updates[:mid]:
-            ydoc.apply_update(bytes(json.loads(raw)))
-        snapshot = json.dumps(list(ydoc.get_update()))
+            ydoc.apply_update(bytes(JSONCodec.loads(raw)))
+        snapshot = JSONCodec.dumps(list(ydoc.get_update()))
         pipe = self._redis.pipeline()
         pipe.delete(redis_key)
         pipe.rpush(redis_key, snapshot, *all_updates[mid:])
@@ -210,7 +236,7 @@ class YdocManager:
         if self._redis:
             redis_key = f'{self._redis_key_prefix}:{document_id}:updates'
             updates = await self._redis.lrange(redis_key, 0, -1)
-            return [bytes(json.loads(update)) for update in updates]
+            return [bytes(JSONCodec.loads(update)) for update in updates]
         else:
             return self._updates.get(document_id, [])
 

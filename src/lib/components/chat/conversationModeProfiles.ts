@@ -132,6 +132,20 @@ export const getConversationModeDraftCapabilitySnapshot = (
 	};
 };
 
+export const isConversationModeDraftCompatible = (
+	draft: ConversationModeDraft | null,
+	mode: ConversationMode
+): boolean => draft?.conversationMode === undefined || draft.conversationMode === mode;
+
+export const getConversationModeDraftCapabilitySnapshotForMode = (
+	draft: ConversationModeDraft | null,
+	mode: ConversationMode,
+	options: { existingChat: boolean }
+): ConversationModeDraftCapabilitySnapshot | null =>
+	draft?.conversationMode === mode
+		? getConversationModeDraftCapabilitySnapshot(draft, options)
+		: null;
+
 export const getNewConversationModeDraftCapabilityAuthority = (
 	draft: ConversationModeDraft | null
 ): Exclude<ConversationModeCapabilityAuthority, 'inherit_bound'> | null => {
