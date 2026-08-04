@@ -1380,6 +1380,174 @@ async def test_model_bridge_strips_split_in_band_commentary_marker() -> None:
 
 
 @pytest.mark.asyncio
+async def test_model_bridge_strips_bracketed_commentary_marker() -> None:
+    from agentscope_runtime.agentscope_bridge import OpenWebUIAgentScopeModel
+
+    callbacks = RecordingBridgeCallbacks()
+
+    async def bracketed_phase_marker_stream(**kwargs: object):
+        callbacks.model_calls.append(kwargs)
+        for content in (
+            "【phase=comm",
+            "entary】收到确认。我将保留原始文件不变。",
+        ):
+            yield {
+                "type": "chunk",
+                "delta": {"content": content, "tool_calls": None},
+            }
+        yield {
+            "type": "chunk",
+            "delta": {
+                "content": None,
+                "tool_calls": [
+                    {
+                        "id": "call_environment",
+                        "type": "function",
+                        "function": {
+                            "name": "get_environment",
+                            "arguments": "{}",
+                        },
+                    }
+                ],
+            },
+        }
+        yield {"type": "stream_end"}
+
+    callbacks.call_model_stream = bracketed_phase_marker_stream
+    model = OpenWebUIAgentScopeModel(
+        run_id="run-bracketed-commentary-marker",
+        runtime_session_id="rt-bracketed-commentary-marker",
+        participant_id="leader",
+        model_id="gpt-5.6-terra",
+        callback_client=callbacks,
+    )
+
+    chunks = [
+        chunk
+        async for chunk in await model(
+            [{"role": "user", "content": "Inspect."}],
+            tools=[
+                {
+                    "type": "function",
+                    "function": {
+                        "name": "get_environment",
+                        "description": "Get environment.",
+                        "parameters": {"type": "object", "properties": {}},
+                    },
+                }
+            ],
+        )
+    ]
+
+    assert [item["delta"] for item in callbacks.text_deltas] == [
+        "收到确认。我将保留原始文件不变。"
+    ]
+    assert chunks[-1].content[0].text == "收到确认。我将保留原始文件不变。"
+
+
+@pytest.mark.asyncio
+async def test_model_bridge_buffers_bracketed_final_marker_before_streaming() -> None:
+    from agentscope_runtime.agentscope_bridge import OpenWebUIAgentScopeModel
+
+    callbacks = RecordingBridgeCallbacks()
+
+    async def bracketed_final_marker_stream(**kwargs: object):
+        callbacks.model_calls.append(kwargs)
+        for content in ("【phase=final_", "answer】Final answer."):
+            yield {
+                "type": "chunk",
+                "delta": {
+                    "content": content,
+                    "phase": "final_answer",
+                    "tool_calls": None,
+                },
+            }
+        yield {"type": "stream_end"}
+
+    callbacks.call_model_stream = bracketed_final_marker_stream
+    model = OpenWebUIAgentScopeModel(
+        run_id="run-bracketed-final-marker",
+        runtime_session_id="rt-bracketed-final-marker",
+        participant_id="leader",
+        model_id="gpt-5.6-terra",
+        callback_client=callbacks,
+    )
+
+    chunks = [
+        chunk
+        async for chunk in await model([{"role": "user", "content": "Answer."}])
+    ]
+
+    assert [chunk.content[0].text for chunk in chunks[:-1]] == ["Final answer."]
+    assert chunks[-1].content[0].text == "Final answer."
+
+
+@pytest.mark.asyncio
+async def test_model_bridge_streams_ordinary_bracketed_final_text() -> None:
+    from agentscope_runtime.agentscope_bridge import OpenWebUIAgentScopeModel
+
+    provider_started = asyncio.Event()
+    release_provider = asyncio.Event()
+    provider_ended = asyncio.Event()
+
+    class OrdinaryBracketedFinalCallbacks(RecordingBridgeCallbacks):
+        async def call_model_stream(self, **kwargs: object):
+            self.model_calls.append(kwargs)
+            provider_started.set()
+            yield {
+                "type": "chunk",
+                "delta": {
+                    "content": "【note】",
+                    "phase": "final_answer",
+                    "tool_calls": None,
+                },
+            }
+            await release_provider.wait()
+            yield {
+                "type": "chunk",
+                "delta": {
+                    "content": "Final answer.",
+                    "phase": "final_answer",
+                    "tool_calls": None,
+                },
+            }
+            provider_ended.set()
+            yield {"type": "stream_end"}
+
+    callbacks = OrdinaryBracketedFinalCallbacks()
+    model = OpenWebUIAgentScopeModel(
+        run_id="run-ordinary-bracketed-final",
+        runtime_session_id="rt-ordinary-bracketed-final",
+        participant_id="leader",
+        model_id="gpt-5.6-terra",
+        callback_client=callbacks,
+    )
+    response_stream = await model([{"role": "user", "content": "Answer."}])
+    first_chunk_task = asyncio.create_task(anext(response_stream))
+
+    try:
+        await asyncio.wait_for(provider_started.wait(), timeout=1.0)
+        first_chunk = await asyncio.wait_for(
+            asyncio.shield(first_chunk_task), timeout=0.1
+        )
+        assert first_chunk.content[0].text == "【note】"
+        assert first_chunk.is_last is False
+        assert provider_ended.is_set() is False
+
+        release_provider.set()
+        remaining_chunks = [chunk async for chunk in response_stream]
+        assert [chunk.content[0].text for chunk in remaining_chunks[:-1]] == [
+            "Final answer."
+        ]
+        assert remaining_chunks[-1].content[0].text == "【note】Final answer."
+    finally:
+        release_provider.set()
+        if not first_chunk_task.done():
+            await first_chunk_task
+        await response_stream.aclose()
+
+
+@pytest.mark.asyncio
 async def test_model_bridge_strips_split_in_band_final_marker_and_preserves_deltas() -> None:
     from agentscope_runtime.agentscope_bridge import OpenWebUIAgentScopeModel
 
