@@ -47,6 +47,11 @@ BOLD_IN_BAND_RESPONSE_PHASE_RE = re.compile(
     r"(?:[ \t]*[:\uff1a-][ \t]*|[ \t]*(?:(?:\r\n|\n)){1,2}|[ \t]+|$)",
     re.IGNORECASE,
 )
+BRACKETED_IN_BAND_RESPONSE_PHASE_RE = re.compile(
+    r"^\s*【[ \t]*phase\s*=\s*(commentary|final_answer)\b[ \t]*】"
+    r"(?:[ \t]*[:\uff1a-][ \t]*|[ \t]*(?:(?:\r\n|\n)){1,2}|[ \t]+|$)?",
+    re.IGNORECASE,
+)
 WRAPPED_IN_BAND_RESPONSE_PHASE_PATTERNS = (
     (
         "commentary",
@@ -100,6 +105,9 @@ def _strip_in_band_response_phase(
     phase = match.group(1).lower() if match is not None else None
     if match is None:
         match = BOLD_IN_BAND_RESPONSE_PHASE_RE.match(combined)
+        phase = match.group(1).lower() if match is not None else None
+    if match is None:
+        match = BRACKETED_IN_BAND_RESPONSE_PHASE_RE.match(combined)
         phase = match.group(1).lower() if match is not None else None
     if match is None:
         for wrapped_phase, pattern in WRAPPED_IN_BAND_RESPONSE_PHASE_PATTERNS:
@@ -162,6 +170,16 @@ def _declared_final_prefix_is_safe_to_stream(parts: list[str]) -> bool:
     combined = "".join(parts).lstrip()
     if not combined or combined[0] in {"<", "*"}:
         return False
+    if combined[0] == "【":
+        compact = re.sub(r"\s+", "", combined.lower())
+        bracketed_markers = (
+            "【phase=commentary】",
+            "【phase=final_answer】",
+        )
+        return not any(
+            marker.startswith(compact) or compact.startswith(marker)
+            for marker in bracketed_markers
+        )
     if combined[0] not in {"p", "P"}:
         return True
     compact = re.sub(r"\s+", "", combined.lower())
