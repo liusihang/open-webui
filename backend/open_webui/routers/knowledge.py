@@ -62,6 +62,9 @@ PAGE_ITEM_COUNT = 30
 
 
 async def delete_file_resource(file: FileModel, db: AsyncSession) -> bool:
+    from open_webui.retrieval.integration import deactivate
+    await db.commit()
+    await deactivate(None, file.id)
     try:
         file_collection = f'file-{file.id}'
         if await ASYNC_VECTOR_DB_CLIENT.has_collection(collection_name=file_collection):
@@ -1658,6 +1661,9 @@ async def remove_file_from_knowledge_by_id(
             detail=ERROR_MESSAGES.NOT_FOUND,
         )
 
+    from open_webui.retrieval.integration import deactivate
+    await db.commit()
+    await deactivate(request, form_data.file_id, knowledge_id=id)
     await Knowledges.remove_file_from_knowledge_by_id(knowledge_id=id, file_id=form_data.file_id, db=db)
 
     # Remove content from the vector database
@@ -1730,6 +1736,11 @@ async def delete_knowledge_by_id(
         )
 
     log.info('Deleting knowledge base: %s (name: %s)', id, knowledge.name)
+    from open_webui.retrieval.integration import deactivate
+    linked_files = await Knowledges.get_files_by_id(id, db=db)
+    await db.commit()
+    for linked_file in linked_files:
+        await deactivate(request, linked_file.id, knowledge_id=id)
 
     # Get all models
     models = await Models.get_all_models(db=db)
@@ -1822,7 +1833,12 @@ async def reset_knowledge_by_id(
             detail=ERROR_MESSAGES.ACCESS_PROHIBITED,
         )
 
-    files = await Knowledges.get_files_by_id(id, db=db) if not ENABLE_KNOWLEDGE_FILE_RETENTION else []
+    from open_webui.retrieval.integration import deactivate
+    linked_files = await Knowledges.get_files_by_id(id, db=db)
+    await db.commit()
+    for linked_file in linked_files:
+        await deactivate(request, linked_file.id, knowledge_id=id)
+    files = linked_files if not ENABLE_KNOWLEDGE_FILE_RETENTION else []
 
     try:
         await ASYNC_VECTOR_DB_CLIENT.delete_collection(collection_name=id)
@@ -2015,6 +2031,9 @@ async def sync_knowledge_cleanup(
         if not await Knowledges.has_file(id, file_id, db=db):
             continue
 
+        from open_webui.retrieval.integration import deactivate
+        await db.commit()
+        await deactivate(None, file_id, knowledge_id=id)
         await Knowledges.remove_file_from_knowledge_by_id(id, file_id, db=db)
 
         try:
@@ -2350,6 +2369,10 @@ async def delete_knowledge_directory(
 
     # Collect before delete_directory drops the KnowledgeFile rows
     files = [] if move_files else await Knowledges.get_files_by_id_and_directory_id(id, dir_id, db=db)
+    from open_webui.retrieval.integration import deactivate
+    await db.commit()
+    for file in files:
+        await deactivate(request, file.id, knowledge_id=id)
 
     success = await Knowledges.delete_directory(
         directory_id=dir_id,

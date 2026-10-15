@@ -2,6 +2,10 @@
 	import { getContext, onDestroy, onMount } from 'svelte';
 	import { toast } from 'svelte-sonner';
 	import DOMPurify from 'dompurify';
+	import { getRetrievalStatus, retryImageIndex } from '$lib/apis/evidence';
+	import { config } from '$lib/stores';
+	import OnlyOfficeViewer from '$lib/components/common/OnlyOfficeViewer.svelte';
+	import { isOnlyOfficePreviewFile } from '$lib/utils/filePreviewTypes';
 	import { isCodeFile } from '$lib/utils/codeHighlight';
 	import {
 		FileContentError,
@@ -44,6 +48,26 @@
 	let excelSheetNames: string[] = [];
 	let indexedEditor: FileCodeEditor;
 	let mounted = false;
+	let retrievalStatus: any;
+	let statusTimer: ReturnType<typeof setTimeout>;
+	const statusController = new AbortController();
+	const loadStatus = async () => {
+		try {
+			retrievalStatus = await getRetrievalStatus(localStorage.token, file.id!, statusController.signal);
+			if (!statusController.signal.aborted && ['pending', 'processing', 'indexing'].includes(retrievalStatus.images))
+				statusTimer = setTimeout(loadStatus, 3000);
+		} catch (_) { /* Existing files without an index keep the normal preview. */ }
+	};
+	const retryImages = async () => {
+		try { await retryImageIndex(localStorage.token, file.id!); await loadStatus(); }
+		catch (error) { toast.error(String(error)); }
+	};
+	let onlyOffice = false;
+	$: onlyOfficeAvailable =
+		!!$config?.features?.enable_onlyoffice_preview &&
+		!noOriginal &&
+		!!file.id &&
+		isOnlyOfficePreviewFile(file);
 	$: name = fileName(file);
 	$: noOriginal = file.has_original === false || !!state.originalUnavailable;
 	$: if (
@@ -210,8 +234,11 @@
 	};
 	onMount(() => {
 		mounted = true;
+		loadStatus();
 	});
 	onDestroy(() => {
+		statusController.abort();
+		clearTimeout(statusTimer);
 		++request;
 		controller?.abort();
 		indexedController?.abort();
@@ -220,6 +247,15 @@
 </script>
 
 <div class="flex h-full min-h-0 min-w-0 flex-1 flex-col bg-white dark:bg-gray-900">
+	{#if retrievalStatus && retrievalStatus.text !== 'unindexed'}
+		<div role="status" class="border-b px-3 py-2 text-xs text-gray-500 dark:border-gray-800">
+			索引版本 {retrievalStatus.version} · 文字：{retrievalStatus.text} · 图片：{retrievalStatus.images}
+			{#if ['failed', 'partial'].includes(retrievalStatus.images)}（文字可独立使用；图片尚未全部就绪）{/if}
+			{#if writeAccess && retrievalStatus.image_retryable !== false && ['failed', 'partial'].includes(retrievalStatus.images)}
+				<button type="button" class="ml-2 underline" on:click={retryImages}>重试图片索引</button>
+			{/if}
+		</div>
+	{/if}
 	<div class="flex h-8 shrink-0 items-center gap-1 px-2.5 text-xs dark:bg-black">
 		{#if mobile}<button
 				type="button"
@@ -228,6 +264,17 @@
 				on:click={onClose}><ChevronLeft className="size-3.5" />{$i18n.t('Back')}</button
 			>{/if}
 		<span class="min-w-0 flex-1 truncate text-gray-500" title={name}>{name}</span>
+		{#if onlyOfficeAvailable}
+			<button
+				type="button"
+				class="shrink-0 px-1 py-0.5 text-gray-500"
+				aria-pressed={onlyOffice && state.mode === 'preview'}
+				on:click={() => {
+					onlyOffice = !onlyOffice;
+					state.mode = 'preview';
+				}}>OnlyOffice</button
+			>
+		{/if}
 		{#if !noOriginal && (originalLoaded || previewError)}<button
 				type="button"
 				class="shrink-0 px-1 py-0.5 {state.mode === 'preview' ? '' : 'text-gray-400'}"
@@ -288,7 +335,16 @@
 		>
 	</div>
 	{#if state.mode === 'preview'}
-		{#if previewError}<div class="p-4 text-xs text-gray-500">
+		{#if onlyOffice && onlyOfficeAvailable}
+			{#key file.id}
+				<OnlyOfficeViewer
+					fileId={file.id!}
+					readOnly
+					className="w-full h-full min-h-[24rem]"
+					on:error={() => (onlyOffice = false)}
+				/>
+			{/key}
+		{:else if previewError}<div class="p-4 text-xs text-gray-500">
 				<p role="alert">{previewError}</p>
 				<button class="mt-2" type="button" on:click={loadOriginal}>{$i18n.t('Retry')}</button>
 			</div>

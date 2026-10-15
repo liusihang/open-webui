@@ -233,6 +233,7 @@ type OllamaModelDetails = {
 };
 
 type Settings = {
+	pipeReasoningEfforts?: Record<string, string>;
 	pinnedModels?: string[];
 	toolServers?: never[];
 	detectArtifacts?: boolean;
@@ -375,6 +376,7 @@ type Config = {
 		enable_admin_analytics: boolean;
 		enable_context_compaction?: boolean;
 		enable_tool_permissions?: boolean;
+		enable_onlyoffice_preview?: boolean;
 		enable_community_sharing: boolean;
 		enable_memories: boolean;
 		enable_plugins?: boolean;

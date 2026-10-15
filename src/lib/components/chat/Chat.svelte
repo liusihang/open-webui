@@ -71,6 +71,7 @@
 	import { AudioQueue } from '$lib/utils/audio';
 	import { RealtimeCall, getBridgeTurnState, type BridgeSubmission } from '$lib/utils/realtime';
 	import { createTemporaryChatId, isTemporaryChatId } from '$lib/utils/chatId';
+	import { buildPipeReasoningPayload, chatUploadMetadata } from '$lib/utils/pipeReasoning';
 	import {
 		applyResponseStreamEvent,
 		getOutputText,
@@ -1404,6 +1405,18 @@
 	};
 	$: syncChatRoom($socket, $chatId, $temporaryChatEnabled);
 
+	const adoptNewChatId = (id, draftId) => {
+		chatRequestQueues.update((q) => {
+			if (!q[draftId]?.length) return q;
+			const { [draftId]: pendingQueue, ...rest } = q;
+			return { ...rest, [id]: [...pendingQueue, ...(rest[id] ?? [])] };
+		});
+		chatId.set(id);
+		if (!$temporaryChatEnabled && !embedded) {
+			window.history.replaceState(window.history.state, '', `/c/${id}`);
+		}
+	};
+
 	const chatEventHandler = async (event, cb) => {
 		console.log(event);
 		if (event.shared && event.user_id === $user?.id && event.data?.type !== 'chat:messages') return;
@@ -1446,11 +1459,16 @@
 			return;
 		}
 
-		// A new chat's title can arrive before its id; the response message already exists.
+		// A new chat's title or completion can arrive before its HTTP acknowledgement.
+		// Only its own locally created assistant may receive these early events.
 		if (
 			event.chat_id === $chatId ||
-			(!$chatId && event?.data?.type === 'chat:title' && history.messages[event.message_id])
+			(!$chatId &&
+				!event.shared &&
+				history.messages[event.message_id]?.role === 'assistant' &&
+				history.messages[event.message_id]?.user_id === $user?.id)
 		) {
+			if (!$chatId && event.chat_id) adoptNewChatId(event.chat_id, $chatId);
 			await tick();
 			const type = event?.data?.type ?? null;
 			if (type === 'typing') {
@@ -2031,12 +2049,13 @@
 			}
 
 			// If the file is an audio file, provide the language for STT.
-			let metadata = null;
+			let metadata = chatUploadMetadata(selectedModelIds);
 			if (
 				(file.type.startsWith('audio/') || file.type.startsWith('video/')) &&
 				$settings?.audio?.stt?.language
 			) {
 				metadata = {
+					...metadata,
 					language: $settings?.audio?.stt?.language
 				};
 			}
@@ -3987,6 +4006,11 @@
 			)
 		);
 		// Remove duplicates
+		// Stored image IDs are retrieval inputs, not target file collections. The
+		// server authorizes them and advertises only IDs to the knowledge tool.
+		files.push(...(userMessage?.files ?? [])
+			.filter((item) => item.id && isRasterImageContentType(item?.content_type))
+			.map((item) => ({ type: 'image', id: item.id, name: item.name, content_type: item.content_type })));
 		files = files.filter((item, index, array) => array.findIndex((i) => equal(i, item)) === index);
 
 		scrollToBottom();
@@ -4109,6 +4133,7 @@
 			{
 				stream: stream,
 				model: model.id,
+				...buildPipeReasoningPayload(model, $settings?.pipeReasoningEfforts?.[model.id]),
 				...(messages.length > 0 ? { messages } : {}),
 				params: {
 					...$settings?.params,
@@ -4212,25 +4237,39 @@
 				await handleOpenAIError(res.error, responseMessage);
 			} else {
 				// Backend returns task_ids (multi-model) or task_id (single model)
-				onToolCallResolved(res);
+				// Any chat can finish over the socket before this acknowledgement.
+				// Match this submission, not a queued turn or a chat navigated to later.
+				const ackMatchesChat = _chatId
+					? $chatId === _chatId && (!res.chat_id || res.chat_id === _chatId)
+					: !$chatId || $chatId === res.chat_id;
+				const submittedResponseIds = messageIdsList?.map((item) => item.message_id) ?? [
+					responseMessageId
+				];
+				if (
+					ackMatchesChat &&
+					submittedResponseIds.some((id) => {
+						const message = history.messages[id];
+						return (
+							message?.role === 'assistant' &&
+							!message.done &&
+							(message.user_id ?? chat?.user_id) === $user?.id
+						);
+					})
+				) {
+					onToolCallResolved(res);
+				}
 
 				// Backend returns chat_id for new chats — set store + URL.
 				// Only update if the user hasn't navigated to a different chat
 				// while the request was in flight (prevents overwriting $chatId
 				// and causing spurious toast notifications / state duplication).
-				if (res.chat_id && $chatId !== res.chat_id && $chatId === _chatId) {
-					chatRequestQueues.update((q) => {
-						if (!q[_chatId]?.length) return q;
-
-						const { [_chatId]: pendingQueue, ...rest } = q;
-						return {
-							...rest,
-							[res.chat_id]: [...pendingQueue, ...(rest[res.chat_id] ?? [])]
-						};
-					});
-					await chatId.set(res.chat_id);
+				if (
+					res.chat_id &&
+					(($chatId !== res.chat_id && $chatId === _chatId) ||
+						(!_chatId && $chatId === res.chat_id))
+				) {
+					adoptNewChatId(res.chat_id, _chatId);
 					if (!$temporaryChatEnabled && !embedded) {
-						window.history.replaceState(window.history.state, '', `/c/${res.chat_id}`);
 						await refreshChatList(localStorage.token);
 
 						// Persist chat-level params (system prompt, advanced

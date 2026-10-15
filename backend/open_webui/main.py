@@ -171,6 +171,7 @@ from open_webui.routers import (
     notes,
     notifications,
     ollama,
+    onlyoffice,
     openai,
     pipelines,
     prompts,
@@ -388,6 +389,8 @@ async def lifespan(app: FastAPI):
 
     await validate_mfa_configuration()
     await initialize_runtime_config(app)
+    from open_webui.retrieval.integration import start_recovery
+    await start_recovery(app)
     await migrate_legacy_webhook_config()
     await publish_event(app, EVENTS.SYSTEM_STARTUP_STARTED, source='system')
 
@@ -502,6 +505,8 @@ async def lifespan(app: FastAPI):
     yield
 
     await publish_event(app, EVENTS.SYSTEM_SHUTDOWN_STARTED, source='system')
+    from open_webui.retrieval.integration import stop_recovery
+    await stop_recovery(app)
 
     # Shutdown: clean up shared resources
     from open_webui.utils.session_pool import close_session
@@ -907,6 +912,7 @@ if ENABLE_ADMIN_ANALYTICS:
     app.include_router(analytics.router, prefix='/api/v1/analytics', tags=['analytics'])
 app.include_router(utils.router, prefix='/api/v1/utils', tags=['utils'])
 app.include_router(terminals.router, prefix='/api/v1/terminals', tags=['terminals'])
+app.include_router(onlyoffice.router, prefix='/api/v1/onlyoffice', tags=['onlyoffice'])
 app.include_router(automations.router, prefix='/api/v1/automations', tags=['automations'])
 app.include_router(calendar.router, prefix='/api/v1/calendars', tags=['calendars'])
 
@@ -2329,6 +2335,7 @@ async def get_app_config(request: Request):
         'calendar.enable',
         'automations.enable',
         'notes.enable',
+        'onlyoffice.enable_preview',
         'chat.context_compaction.enable',
         'chat.tool_permissions.enable',
         'web.search.enable',
@@ -2424,6 +2431,7 @@ async def get_app_config(request: Request):
                     'enable_calendar': config.get('calendar.enable'),
                     'enable_automations': config.get('automations.enable'),
                     'enable_notes': config.get('notes.enable'),
+                    'enable_onlyoffice_preview': config.get('onlyoffice.enable_preview', False),
                     'enable_context_compaction': config.get('chat.context_compaction.enable'),
                     'enable_tool_permissions': config.get('chat.tool_permissions.enable'),
                     'enable_web_search': config.get('web.search.enable'),

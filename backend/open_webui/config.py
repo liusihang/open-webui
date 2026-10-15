@@ -403,6 +403,18 @@ terminal_server_connections = JSONCodec.loads(os.getenv('TERMINAL_SERVER_CONNECT
 
 TERMINAL_SERVER_CONNECTIONS = terminal_server_connections
 
+# OnlyOffice remains an optional external document service. Never expose its JWT
+# secret in the frontend config response.
+ENABLE_ONLYOFFICE_PREVIEW = os.getenv('ENABLE_ONLYOFFICE_PREVIEW', 'False').lower() == 'true'
+ONLYOFFICE_DOCUMENT_SERVER_URL = os.getenv('ONLYOFFICE_DOCUMENT_SERVER_URL', '')
+ONLYOFFICE_PUBLIC_BASE_URL = os.getenv('ONLYOFFICE_PUBLIC_BASE_URL', '')
+ONLYOFFICE_JWT_SECRET = os.getenv('ONLYOFFICE_JWT_SECRET', '')
+ONLYOFFICE_FILE_TOKEN_EXPIRES_IN = os.getenv('ONLYOFFICE_FILE_TOKEN_EXPIRES_IN', '5m')
+ONLYOFFICE_EDIT_CALLBACK_TOKEN_EXPIRES_IN = os.getenv('ONLYOFFICE_EDIT_CALLBACK_TOKEN_EXPIRES_IN', '8h')
+ONLYOFFICE_CALLBACK_ALLOWED_HOSTS = [
+    host.strip() for host in os.getenv('ONLYOFFICE_CALLBACK_ALLOWED_HOSTS', '').split(',') if host.strip()
+]
+
 try:
     TERMINAL_PROXY_HEADERS = JSONCodec.loads(os.getenv('TERMINAL_PROXY_HEADERS', '{}'))
 except Exception:
@@ -2883,6 +2895,13 @@ DEFAULT_CONFIG = {
     'tool_server.connections': TOOL_SERVER_CONNECTIONS,
     'oauth.client.timeout': OAUTH_CLIENT_TIMEOUT,
     'terminal_server.connections': TERMINAL_SERVER_CONNECTIONS,
+    'onlyoffice.enable_preview': ENABLE_ONLYOFFICE_PREVIEW,
+    'onlyoffice.document_server_url': ONLYOFFICE_DOCUMENT_SERVER_URL,
+    'onlyoffice.public_base_url': ONLYOFFICE_PUBLIC_BASE_URL,
+    'onlyoffice.jwt_secret': ONLYOFFICE_JWT_SECRET,
+    'onlyoffice.file_token_expires_in': ONLYOFFICE_FILE_TOKEN_EXPIRES_IN,
+    'onlyoffice.edit_callback_token_expires_in': ONLYOFFICE_EDIT_CALLBACK_TOKEN_EXPIRES_IN,
+    'onlyoffice.callback_allowed_hosts': ONLYOFFICE_CALLBACK_ALLOWED_HOSTS,
     'code_execution.enable': ENABLE_CODE_EXECUTION,
     'code_execution.engine': CODE_EXECUTION_ENGINE,
     'code_execution.jupyter.url': CODE_EXECUTION_JUPYTER_URL,
@@ -2945,6 +2964,27 @@ DEFAULT_CONFIG = {
     'rag.mistral_ocr_use_base64': MISTRAL_OCR_USE_BASE64,
     'rag.paddleocr_vl_base_url': PADDLEOCR_VL_BASE_URL,
     'rag.paddleocr_vl_token': PADDLEOCR_VL_TOKEN,
+    # Existing Live keys remain persistent. No extractor/provider is changed here.
+    'rag.extract_document_image_assets': os.getenv('EXTRACT_DOCUMENT_IMAGE_ASSETS', 'false').lower() == 'true',
+    'rag.document_image_asset_root': os.getenv('DOCUMENT_IMAGE_ASSET_ROOT', ''),
+    'rag.pdf_image_asset_source': os.getenv('PDF_IMAGE_ASSET_SOURCE', 'parser'),
+    'rag.document_image_asset_allowed_origins': [],
+    'rag.paddleocr_vl_api_mode': os.getenv('PADDLEOCR_VL_API_MODE', 'layout'),
+    'rag.paddleocr_vl_model': os.getenv('PADDLEOCR_VL_MODEL', 'PaddleOCR-VL-1.6'),
+    'rag.paddleocr_vl_optional_payload': {},
+    'rag.paddleocr_vl_request_timeout': 30,
+    'rag.paddleocr_vl_download_timeout': 60,
+    'rag.paddleocr_vl_poll_timeout': 300,
+    'rag.paddleocr_vl_poll_interval': 2,
+    'rag.paddleocr_vl_allowed_remote_origins': [],
+    # An administrator must select an explicitly verified encoding space. Merely
+    # naming Qwen or having 2048 columns never promotes historical vectors.
+    'rag.evidence_vector_space_id': '',
+    'rag.opensearch_url': os.getenv('OPENSEARCH_URI', ''),
+    'rag.opensearch_index': os.getenv('OPENSEARCH_INDEX', 'openwebui-evidence-v1'),
+    'rag.opensearch_username': os.getenv('OPENSEARCH_USERNAME', ''),
+    'rag.opensearch_password': os.getenv('OPENSEARCH_PASSWORD', ''),
+    'rag.opensearch_verify_ssl': True,
     'rag.bypass_embedding_and_retrieval': BYPASS_EMBEDDING_AND_RETRIEVAL,
     'rag.top_k': RAG_TOP_K,
     'rag.top_k_reranker': RAG_TOP_K_RERANKER,

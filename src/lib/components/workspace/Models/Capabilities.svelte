@@ -22,6 +22,12 @@
 			label: $i18n.t('settings.admin.models.capabilities.fileContext.label'),
 			description: $i18n.t('settings.admin.models.capabilities.fileContext.description')
 		},
+		native_pdf: {
+			label: $i18n.t('Native PDF input'),
+			description: $i18n.t(
+				'Enable only after confirming that this model and its current route support native PDF input. Otherwise, PDFs use text extraction.'
+			)
+		},
 		web_search: {
 			label: $i18n.t('settings.admin.models.capabilities.webSearch.label'),
 			description: $i18n.t('settings.admin.models.capabilities.webSearch.description')
@@ -69,7 +75,7 @@
 	export let disabled = false;
 	const featureKeys: Capability[] = ['web_search', 'image_generation', 'code_interpreter'];
 	$: visibleCapabilities = (Object.keys(capabilityLabels) as Capability[]).filter(
-		(key) => key !== 'file_context' || capabilities.file_upload
+		(key) => !['file_context', 'native_pdf'].includes(key) || capabilities.file_upload
 	);
 	$: enabledCapabilityIds = visibleCapabilities.filter((key) => capabilities[key]);
 	$: availableFeatures = featureKeys.filter((key) => capabilities[key]);

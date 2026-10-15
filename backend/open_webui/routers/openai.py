@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import copy
 import hashlib
 import logging
 import re
@@ -1170,27 +1171,36 @@ def convert_to_azure_payload(url, payload: dict, api_version: str):
 
 # Fields accepted by the Responses API for each input item type.
 RESPONSES_ALLOWED_FIELDS: dict[str, set[str]] = {
-    'message': {'type', 'role', 'content'},
+    'message': {'type', 'id', 'role', 'content', 'phase'},
     'function_call': {'type', 'call_id', 'name', 'arguments', 'id'},
     'function_call_output': {'type', 'call_id', 'output'},
+    'reasoning': {'type', 'id', 'summary', 'content', 'encrypted_content'},
 }
 
 
 def _normalize_stored_item(item: dict) -> dict:
     """Strip local-only fields from a stored output item before replaying it.
 
-    Open WebUI stores extra bookkeeping fields (``id``, ``status``,
+    Open WebUI stores extra bookkeeping fields (``status``,
     ``started_at``, ``ended_at``, ``duration``, ``_tag_type``,
-    ``attributes``, ``summary``, etc.) that the Responses API does
-    not accept.  This helper returns a copy containing only the
-    fields the API understands.
+    ``attributes``, etc.). Native ids, phase and encrypted reasoning are
+    protocol fields and must survive stateless replay.
     """
     item_type = item.get('type', '')
     allowed = RESPONSES_ALLOWED_FIELDS.get(item_type)
     if allowed is None:
-        # Unknown type — pass through as-is (e.g. reasoning, extension items).
+        # Other native item types (e.g. web_search_call) keep their upstream fields.
         return item
-    return {k: v for k, v in item.items() if k in allowed}
+    normalized = {k: v for k, v in item.items() if k in allowed}
+    for key in ('content', 'summary'):
+        if isinstance(normalized.get(key), list):
+            normalized[key] = [
+                {k: v for k, v in part.items() if k in {'type', 'text', 'annotations', 'logprobs', 'refusal'}}
+                if isinstance(part, dict)
+                else part
+                for part in normalized[key]
+            ]
+    return normalized
 
 
 def convert_to_responses_payload(payload: dict) -> dict:
@@ -1212,7 +1222,11 @@ def convert_to_responses_payload(payload: dict) -> dict:
         # Check for stored output items (from previous Responses API turn)
         stored_output = msg.get('output')
         if stored_output and isinstance(stored_output, list):
-            input_items.extend(_normalize_stored_item(item) for item in stored_output)
+            input_items.extend(
+                _normalize_stored_item(item)
+                for item in stored_output
+                if isinstance(item, dict) and not item.get('type', '').startswith('open_webui:')
+            )
             continue
 
         if role == 'system':
@@ -1449,7 +1463,10 @@ async def generate_chat_completion(
             system = params.pop('system', None)
 
             payload = apply_model_params_to_body_openai(params, payload)
-            if not bypass_system_prompt:
+            prepared_messages = getattr(request.state, 'responses_system_prompt_messages', None)
+            if not bypass_system_prompt and not (
+                prepared_messages is not None and prepared_messages is form_data.get('messages')
+            ):
                 payload = await apply_system_prompt_to_body(system, payload, metadata, user)
 
         await check_model_access(user, model_info, bypass_filter)
@@ -1475,6 +1492,11 @@ async def generate_chat_completion(
 
     prefix_id = api_config.get('prefix_id', None)
     payload['model'] = strip_provider_model_prefix(payload['model'], prefix_id)
+
+    if api_config.get('api_type') == 'responses':
+        # Reasoning dispatch changes system -> developer. Keep that provider
+        # decoration off the original replay/compaction history (and checkpoints).
+        payload['messages'] = copy.deepcopy(payload.get('messages', []))
 
     # Add user info to the payload if the model is a pipeline
     if 'pipeline' in model and model.get('pipeline'):

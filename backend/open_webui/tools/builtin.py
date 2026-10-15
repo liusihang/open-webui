@@ -3156,6 +3156,105 @@ async def list_knowledge(
 
 
 async def query_knowledge_files(
+    query: str = '',
+    knowledge_ids: Optional[list[str]] = None,
+    count: int = 5,
+    query_image_refs: Optional[list[str]] = None,
+    modalities: Optional[list[str]] = None,
+    __request__: Request = None,
+    __user__: dict = None,
+    __model_knowledge__: list[dict] = None,
+    __metadata__: dict = None,
+    __model__: dict = None,
+) -> str:
+    """Search authorized attached knowledge and files, returning stable text/image evidence.
+
+    :param query: Text question; may be empty when a query image is supplied.
+    :param knowledge_ids: Stored KB IDs. Narrows attached scope; with no attachments choose IDs using knowledge browsing tools.
+    :param count: Maximum evidence results, 1 to 25.
+    :param query_image_refs: At most one uploaded image file ID or authorized image evidence/asset reference. Never a URL, path or base64.
+    :param modalities: Target types: text, image, or both. Defaults to both.
+    :return: JSON items with evidence_ref, content, source, real location, and warnings. Text-only models have not seen image pixels.
+    """
+    if __request__ is None or not __user__:
+        return JSONCodec.dumps({'error': 'Authenticated request context is required'})
+    from open_webui.retrieval.integration import model_images, request_scope, services, split_external_scope
+    try:
+        user = UserModel(**__user__)
+        metadata = __metadata__ if __metadata__ is not None else {}
+        scope = await request_scope(user, model_knowledge=__model_knowledge__ or (),
+                                    metadata=metadata, knowledge_ids=knowledge_ids, query_image_refs=query_image_refs or ())
+        if knowledge_ids is not None:
+            metadata['rag_selected_knowledge_ids'] = list(scope.knowledge_ids)
+        scope, external = await split_external_scope(scope)
+        notes = [entry for entry in [*(__model_knowledge__ or []), *(metadata.get('folder_knowledge') or []),
+                                      *(metadata.get('files') or [])]
+                 if isinstance(entry, dict) and entry.get('type') == 'note' and entry.get('id')]
+        nonlocal_items = external + (notes if knowledge_ids is None else [])
+        if not scope.knowledge_ids and not scope.file_ids and not nonlocal_items:
+            return JSONCodec.dumps({'items': [], 'warnings': ['No authorized knowledge selected. Choose a knowledge base ID first.']})
+        _, evidence, _, state = await services(__request__, user=user)
+        seen = set(metadata.get('rag_seen_refs') or ())
+        result = await evidence.search(query_text=query, query_image_refs=query_image_refs or (),
+                                      modalities=modalities or ('text', 'image'), count=count,
+                                      user=user, resolved_scope=scope, seen_refs=seen) if (scope.knowledge_ids or scope.file_ids) else {'items': [], 'warnings': []}
+        if nonlocal_items and query.strip() and not query_image_refs:
+            # This legacy helper is restricted to official notes/external
+            # connectors. Local document vectors never take this second path.
+            legacy = JSONCodec.loads(await _query_knowledge_files_legacy(query, count=count,
+                __request__=__request__, __user__=__user__, __model_knowledge__=nonlocal_items))
+            if isinstance(legacy, list):
+                result['legacy_items'] = legacy
+            else:
+                result['warnings'].append('External knowledge or note lookup failed.')
+        metadata['rag_seen_refs'] = list(seen)
+        result['encoding_space'] = state
+        capabilities = ((__model__ or {}).get('info', {}).get('meta', {}).get('capabilities') or {})
+        __request__.state.rag_model_images = await model_images(
+            __request__, result['items'], user=user, scope=scope, vision=capabilities.get('vision', False))
+        return JSONCodec.dumps(result, ensure_ascii=False)
+    except Exception as exc:
+        log.warning('Unified knowledge search failed: %s', type(exc).__name__)
+        return JSONCodec.dumps({'error': str(exc) if isinstance(exc, (ValueError, PermissionError)) else 'Knowledge search failed',
+                                'error_type': type(exc).__name__})
+
+
+async def view_knowledge_evidence(
+    evidence_refs: list[str],
+    __request__: Request = None,
+    __user__: dict = None,
+    __model_knowledge__: list[dict] = None,
+    __metadata__: dict = None,
+    __model__: dict = None,
+) -> str:
+    """Read stored evidence references in the current authorized knowledge scope.
+
+    :param evidence_refs: Stable evidence_ref values returned by query_knowledge_files. Old versions are not redirected.
+    :return: Authorized text/image descriptions and source locations. Images are visible only to vision-capable models.
+    """
+    if __request__ is None or not __user__:
+        return JSONCodec.dumps({'error': 'Authenticated request context is required'})
+    from open_webui.retrieval.integration import model_images, request_scope, services
+    try:
+        user = UserModel(**__user__)
+        metadata = __metadata__ if __metadata__ is not None else {}
+        scope = await request_scope(user, model_knowledge=__model_knowledge__ or (), metadata=metadata)
+        # A user who discovered a KB may read its returned refs in this turn too.
+        if not scope.knowledge_ids and metadata.get('rag_selected_knowledge_ids'):
+            scope = await request_scope(user, knowledge_ids=metadata['rag_selected_knowledge_ids'])
+        _, evidence, _, _ = await services(__request__, user=user)
+        seen = set(metadata.get('rag_seen_refs') or ())
+        result = await evidence.read(evidence_refs, user=user, resolved_scope=scope, seen_refs=seen)
+        metadata['rag_seen_refs'] = list(seen)
+        capabilities = ((__model__ or {}).get('info', {}).get('meta', {}).get('capabilities') or {})
+        __request__.state.rag_model_images = await model_images(
+            __request__, result['items'], user=user, scope=scope, vision=capabilities.get('vision', False))
+        return JSONCodec.dumps(result, ensure_ascii=False)
+    except Exception as exc:
+        return JSONCodec.dumps({'error': 'Evidence is unavailable', 'error_type': type(exc).__name__})
+
+
+async def _query_knowledge_files_legacy(
     query: str,
     knowledge_ids: Optional[list[str]] = None,
     count: int = 5,

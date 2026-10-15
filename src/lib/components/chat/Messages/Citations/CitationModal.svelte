@@ -10,6 +10,7 @@
 
 	import XMark from '$lib/components/icons/XMark.svelte';
 	import Textarea from '$lib/components/common/Textarea.svelte';
+	import EvidencePreview from './EvidencePreview.svelte';
 
 	const i18n = getContext('i18n');
 
@@ -67,6 +68,7 @@
 
 	const getTextFragmentUrl = (doc: any): string | null => {
 		const { metadata, source, document: content } = doc ?? {};
+		if (metadata?.evidence_ref) return null;
 		const { file_id, page } = metadata ?? {};
 		const sourceUrl = source?.url;
 
@@ -102,7 +104,7 @@
 			<div class=" text-sm font-medium self-center flex items-center">
 				{#if citation?.source?.name}
 					{@const document = mergedDocuments?.[0]}
-					{#if document?.metadata?.file_id || isValidHttpUrl(document.source?.url)}
+					{#if !document?.metadata?.evidence_ref && (document?.metadata?.file_id || isValidHttpUrl(document.source?.url))}
 						<Tooltip
 							className="w-fit"
 							content={isValidHttpUrl(document.source?.url)
@@ -147,6 +149,9 @@
 			>
 				{#each mergedDocuments as document, documentIdx}
 					<div class="flex flex-col w-full gap-2">
+						{#if document.metadata?.evidence_ref && show}
+							<EvidencePreview metadata={document.metadata} />
+						{/if}
 						{#if document.metadata?.parameters}
 							<div>
 								<div class="text-sm font-normal dark:text-gray-300 mb-1">
@@ -178,7 +183,7 @@
 									{$i18n.t('Content')}
 								{/if}
 
-								{#if showRelevance && document.distance !== undefined}
+								{#if showRelevance && document.distance !== undefined && document.metadata?.score_type !== 'rrf'}
 									<Tooltip
 										className="w-fit"
 										content={$i18n.t('Relevance')}

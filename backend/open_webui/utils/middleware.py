@@ -126,6 +126,7 @@ from open_webui.utils.misc import (
     set_last_user_message_content,
     strip_empty_content_blocks,
 )
+from open_webui.utils.native_pdf import carry_native_pdf_parts, is_native_pdf_attachment, prepare_native_pdf_attachments
 from open_webui.utils.oauth import get_system_oauth_token
 from open_webui.utils.payload import apply_params_to_form_data, apply_system_prompt_to_body, resolve_system_prompt
 from open_webui.utils.plugin import load_function_module_by_id
@@ -460,6 +461,13 @@ def get_citation_source_from_tool_result(
             pass  # keep tool_result as-is (e.g. fetch_url returns plain text)
         if isinstance(tool_result, dict) and 'error' in tool_result:
             return []
+        if tool_name in ('query_knowledge_files', 'view_knowledge_evidence') and isinstance(tool_result, dict):
+            from open_webui.retrieval.integration import citation_sources
+            sources = citation_sources(tool_result.get('items') or [])
+            if tool_result.get('legacy_items'):
+                sources.extend(get_citation_source_from_tool_result('query_chat_files', tool_params,
+                    tool_result['legacy_items'], tool_id))
+            return sources
 
         if tool_name in ('view_knowledge_file', 'view_file'):
             if not isinstance(tool_result, dict):
@@ -1214,6 +1222,10 @@ async def process_tool_result(
                         }
 
     tool_result_files = []
+    if tool_type == 'builtin' and tool_function_name in ('query_knowledge_files', 'view_knowledge_evidence'):
+        for part in getattr(request.state, 'rag_model_images', ()):
+            tool_result_files.append({'type': 'image', 'url': part['image_url'], 'rag_llm_only': True})
+        request.state.rag_model_images = []
 
     # Detect base64 image data URIs from tool results (e.g. binary image
     # responses from execute_tool_server).  Move the data URI to
@@ -2083,7 +2095,62 @@ async def chat_completion_files_handler(
     __event_emitter__ = extra_params['__event_emitter__']
     sources = []
 
-    files = [item for item in (body.get('metadata', {}).get('files', None) or []) if item.get('type') != 'filesystem']
+    metadata = body.get('metadata') or {}
+    files = [
+        item
+        for item in (metadata.get('files') or [])
+        if item.get('type') != 'filesystem' and not is_native_pdf_attachment(item, metadata)
+    ]
+    from open_webui.retrieval.integration import authorized_query_images, citation_sources, model_images, request_scope, services, split_external_scope
+    query_images = await authorized_query_images(user, metadata.get('files') or [])
+    attached = get_attached_knowledge(extra_params.get('__model__') or {}, metadata)
+    scope = await request_scope(user, model_knowledge=attached, metadata=metadata, query_image_refs=query_images)
+    scope, external = await split_external_scope(scope)
+    native_owner = (
+        metadata.get('params', {}).get('function_calling') != 'legacy'
+        and 'query_knowledge_files' in (metadata.get('tools') or {})
+    )
+    if scope.knowledge_ids or scope.file_ids:
+        if not native_owner:
+            try:
+                _, evidence, _, state = await services(request, user=user)
+                seen = set(metadata.get('rag_seen_refs') or ())
+                result = await evidence.search(query_text=get_last_user_message(body['messages']) or '',
+                    query_image_refs=query_images,
+                    count=min(int(await Config.get('rag.top_k') or 5), 50), user=user,
+                    resolved_scope=scope, seen_refs=seen)
+                metadata['rag_seen_refs'] = list(seen)
+                sources.extend(citation_sources(result['items']))
+                images = await model_images(request, result['items'], user=user, scope=scope,
+                    vision=((extra_params.get('__model__') or {}).get('info', {}).get('meta', {}).get('capabilities') or {}).get('vision', False))
+                if images:
+                    for message in reversed(body['messages']):
+                        if message.get('role') == 'user':
+                            content = message.get('content', '')
+                            message['content'] = ([{'type': 'text', 'text': content}] if isinstance(content, str) else content) + [
+                                {'type': 'image_url', 'image_url': {'url': part['image_url']}} for part in images]
+                            break
+                if result['warnings']:
+                    await __event_emitter__({'type': 'status', 'data': {'action': 'knowledge_search',
+                        'description': '; '.join(result['warnings']), 'done': True}})
+            except Exception as exc:
+                await __event_emitter__({'type': 'status', 'data': {'action': 'knowledge_search',
+                    'description': 'Knowledge index is not ready: ' + type(exc).__name__, 'done': True, 'error': True}})
+        # Local KB/files never run the old search as well. Other attachment
+        # types (web, notes, external providers) keep their official handling.
+        files = [item for item in files if not (
+            item.get('type', 'file') == 'file' and item.get('id') in scope.file_ids
+            or item.get('type') == 'collection' and item.get('id') in scope.knowledge_ids
+            or item.get('type') == 'folder')]
+    if native_owner:
+        external_ids = {item['id'] for item in external}
+        files = [item for item in files if not (item.get('type') == 'collection' and item.get('id') in external_ids)]
+    else:
+        files.extend(item for item in external if not any(f.get('id') == item['id'] for f in files))
+    files = [item for item in files if item.get('type') != 'image' and item.get('id') not in query_images]
+    if not files:
+        return body, {'sources': sources}
+    unified_sources = sources
     if files:
         # Check if all files are in full context mode
         all_full_context = all(item.get('context') == 'full' for item in files)
@@ -2144,7 +2211,7 @@ async def chat_completion_files_handler(
                 'rag.full_context',
             )
             # Directly await async get_sources_from_items (no thread needed - fully async now)
-            sources = await get_sources_from_items(
+            sources = unified_sources + await get_sources_from_items(
                 request=request,
                 items=files,
                 queries=queries,
@@ -2303,16 +2370,43 @@ def strip_reasoning_details(output: list) -> list:
     ]
 
 
+async def uses_responses_api(request, model: dict) -> bool:
+    """Match the server-resolved connection, not the model's owner/name."""
+    if getattr(request.state, 'direct', False) or model.get('pipe') or model.get('owned_by') == 'ollama':
+        return False
+    from open_webui.routers.openai import get_openai_connection
+
+    model_id = getattr(request, 'base_model_id', None) or (model.get('info') or {}).get('base_model_id') or model['id']
+    provider_model = request.app.state.OPENAI_MODELS.get(model_id)
+    if not provider_model or 'urlIdx' not in provider_model:
+        return False
+    _, _, config = await get_openai_connection(provider_model['urlIdx'])
+    return config.get('api_type') == 'responses'
+
+
+def get_tool_loop_output_messages(
+    output: list[dict], responses_api: bool = False, reasoning_format: str | None = None
+) -> list[dict]:
+    if responses_api:
+        # The caller supplies accumulated output for the entire assistant turn. Replace
+        # this envelope on later iterations; don't append the same calls twice.
+        return [
+            {'role': 'assistant', 'content': get_output_text(output), 'output': output, '_responses_tool_turn': True}
+        ]
+    return convert_output_to_messages(output, raw=True, reasoning_format=reasoning_format, flatten_tool_images=True)
+
+
 def process_messages_with_output(
     messages: list[dict],
     reasoning_format: str | None = None,
     include_file_context: bool = False,
+    responses_api: bool = False,
 ) -> list[dict]:
     """
     Process messages with OR-aligned output items for LLM consumption.
 
-    For assistant messages with 'output' field, produces properly formatted
-    OpenAI-style messages (tool_calls + tool results). Strips 'output' before LLM.
+    Chat connections reconstruct tool_calls/tool results. Responses connections
+    keep native output items in an envelope until the router builds its input.
     """
     processed = []
 
@@ -2345,6 +2439,15 @@ def process_messages_with_output(
             processed.extend(speech)
             continue
         if message.get('role') == 'assistant' and message.get('output'):
+            if responses_api:
+                # Keep the original item sequence until the Responses router
+                # removes local bookkeeping. Rendered content must not be replayed
+                # in addition to this output (it is only a UI/context view).
+                processed.append(
+                    {'role': 'assistant', 'content': message.get('content', ''), 'output': message['output']}
+                )
+                processed.extend(speech)
+                continue
             # Use output items for clean OpenAI-format messages
             output_messages = convert_output_to_messages(
                 message['output'],
@@ -2360,7 +2463,16 @@ def process_messages_with_output(
                 continue
 
         clean_message = dict(message)
-        for key in ('id', 'output', 'model', 'contextSummary', 'context_summary', 'usage', 'meta'):
+        for key in (
+            'id',
+            'output',
+            'model',
+            'contextSummary',
+            'context_summary',
+            'usage',
+            'meta',
+            '_responses_tool_turn',
+        ):
             clean_message.pop(key, None)
         processed.append(clean_message)
         processed.extend(speech)
@@ -2394,7 +2506,47 @@ def sanitize_tool_pairs(messages: list[dict]) -> list[dict]:
     return sanitized
 
 
+async def prepare_responses_system_prompt(request, form_data, metadata, user):
+    """Resolve the active model default before history/compaction, not at provider dispatch."""
+    chat_context = metadata.get('chat_context')
+    explicit_params = (
+        (chat_context.get('params') or {}) if isinstance(chat_context, dict) else (form_data.get('params') or {})
+    )
+    if 'system' in explicit_params:
+        system = await resolve_system_prompt(explicit_params['system'], metadata, user)
+        if get_system_message(form_data.get('messages', [])):
+            form_data['messages'] = replace_system_message_content(system, form_data['messages'])
+        elif system:
+            form_data['messages'] = add_or_update_system_message(system, form_data.get('messages', []))
+        return form_data
+
+    # Chat controls/User Settings already supply a system message. It is an
+    # explicit override, unlike a contextSummary checkpoint added later.
+    if get_system_message(form_data.get('messages', [])) and (
+        not isinstance(chat_context, dict) or get_system_message(chat_context.get('messages', []))
+    ):
+        return await apply_system_prompt_to_body(
+            get_content_from_message(get_system_message(form_data['messages'])),
+            form_data,
+            metadata,
+            user,
+            replace=True,
+        )
+
+    # The public catalog deliberately strips private params; read the selected
+    # workspace model, not its inherited provider/base model or sanitized info.
+    model_info = await Models.get_model_by_id(form_data['model'])
+    params = model_info.params.model_dump() if model_info and model_info.params else {}
+    if 'system' not in params:
+        params = await Config.get('models.default_params', {}) or {}
+    return await apply_system_prompt_to_body(params.get('system'), form_data, metadata, user)
+
+
 async def process_chat_payload(request, form_data, user, metadata, model):
+    # This list is server-resolved for every request; client markers are not
+    # retrieval bypasses, and old Live markers still undergo authorization.
+    metadata.pop('native_pdf_file_ids', None)
+    metadata.pop('rag_query_image_refs', None)
     # Ensure chat_id is always a string — external API clients may omit it.
     if not isinstance(metadata.get('chat_id'), str):
         metadata['chat_id'] = ''
@@ -2432,8 +2584,13 @@ async def process_chat_payload(request, form_data, user, metadata, model):
             form_data['model'] = selected_model_id
             metadata['selected_model_id'] = selected_model_id
 
-    # Keep the template before apply_params_to_form_data consumes the model parameters.
-    model_system_prompt_template = (form_data.get('params') or {}).get('system')
+    responses_api = await uses_responses_api(request, model)
+    # Responses keep one resolved prompt in the actual replay history. The
+    # router must not inject a second default, nor mutate this into developer.
+    if responses_api:
+        form_data = await prepare_responses_system_prompt(request, form_data, metadata, user)
+    # Other providers retain the existing late application/snapshot contract.
+    model_system_prompt_template = None if responses_api else (form_data.get('params') or {}).get('system')
 
     form_data = apply_params_to_form_data(form_data, model)
     log.debug('form_data: %s', form_data)
@@ -2542,6 +2699,13 @@ async def process_chat_payload(request, form_data, user, metadata, model):
             message for message in form_data['messages'] if message.get('id') != pending_assistant_message.get('id')
         ]
 
+    # Provider content is request-local. In particular, do not mutate the
+    # user_message retained in metadata into a base64-bearing snapshot.
+    form_data['messages'] = copy.deepcopy(form_data.get('messages', []))
+    metadata['native_pdf_file_ids'] = await prepare_native_pdf_attachments(
+        request, form_data.get('messages', []), form_data.get('files'), user, model
+    )
+
     # Process messages with OR-aligned output items for clean LLM messages
     for message in form_data.get('messages', []):
         output = message.get('output')
@@ -2554,6 +2718,7 @@ async def process_chat_payload(request, form_data, user, metadata, model):
         form_data.get('messages', []),
         reasoning_format=get_reasoning_format(model),
         include_file_context=metadata['include_file_context'],
+        responses_api=await uses_responses_api(request, model),
     )
     form_data['messages'] = sanitize_tool_pairs(form_data['messages'])
 
@@ -2619,6 +2784,7 @@ async def process_chat_payload(request, form_data, user, metadata, model):
             folder = None
 
         if folder and folder.data:
+            metadata['folder_knowledge'] = await get_owner_accessible_folder_files(folder)
             if 'system_prompt' in folder.data:
                 form_data = await apply_system_prompt_to_body(folder.data['system_prompt'], form_data, metadata, user)
             if 'files' in folder.data:
@@ -3012,6 +3178,10 @@ async def process_chat_payload(request, form_data, user, metadata, model):
             'features': features,
         }
     )
+    from open_webui.retrieval.integration import authorized_query_images
+    latest_user = next((m for m in reversed(form_data.get('messages', [])) if m.get('role') == 'user'), {})
+    image_entries = [*(files or []), *(latest_user.get('files') or [])]
+    metadata['rag_query_image_refs'] = await authorized_query_images(user, image_entries)
     form_data['metadata'] = metadata
 
     # When the caller provides an explicit `tools` key in the request body,
@@ -3367,7 +3537,11 @@ async def process_chat_payload(request, form_data, user, metadata, model):
         if assistant_message.get('model') != model['id'] and isinstance(assistant_message.get('output'), list):
             assistant_message['output'] = strip_reasoning_details(assistant_message['output'])
         form_data['messages'].extend(
-            process_messages_with_output([assistant_message], reasoning_format=get_reasoning_format(model))
+            process_messages_with_output(
+                [assistant_message],
+                reasoning_format=get_reasoning_format(model),
+                responses_api=await uses_responses_api(request, model),
+            )
         )
         await convert_url_images_to_base64(form_data, user=user)
 
@@ -3385,6 +3559,11 @@ async def process_chat_payload(request, form_data, user, metadata, model):
             raise Exception(f'{e}')
 
     form_data = normalize_messages_for_model(form_data)
+
+    if responses_api:
+        # Server-only identity binding, not a client-supplied bypass flag. Task
+        # summary requests have their own list and still resolve their defaults.
+        request.state.responses_system_prompt_messages = form_data['messages']
 
     return form_data, metadata, events, False
 
@@ -3531,7 +3710,11 @@ async def resume_tool_calls(request, form_data, user, model, metadata, message) 
         'messages': copy.deepcopy(
             [
                 *form_data['messages'],
-                *process_messages_with_output([assistant_message], reasoning_format=get_reasoning_format(model)),
+                *process_messages_with_output(
+                    [assistant_message],
+                    reasoning_format=get_reasoning_format(model),
+                    responses_api=await uses_responses_api(request, model),
+                ),
             ]
         ),
     }
@@ -3621,7 +3804,7 @@ async def resume_tool_calls(request, form_data, user, model, metadata, message) 
             display_files = []
             for file_item in files:
                 if file_item.get('type') == 'image' and file_item.get('url', '').startswith('data:'):
-                    image_url = await store_tool_result_image(request, file_item['url'], metadata, user)
+                    image_url = file_item['url'] if file_item.get('rag_llm_only') else await store_tool_result_image(request, file_item['url'], metadata, user)
                     output_parts.append({'type': 'input_image', 'image_url': image_url})
                 else:
                     display_files.append(file_item)
@@ -4460,6 +4643,7 @@ async def streaming_chat_response_handler(response, ctx):
 
     user = ctx['user']
     model = ctx['model']
+    responses_api = await uses_responses_api(request, request.app.state.MODELS.get(form_data['model']) or model)
 
     metadata = ctx['metadata']
     events = ctx['events']
@@ -6109,6 +6293,7 @@ async def streaming_chat_response_handler(response, ctx):
                                 'view_file',
                                 'view_knowledge_file',
                                 'query_knowledge_files',
+                                'view_knowledge_evidence',
                                 'query_chat_files',
                             ]
                             and tool_result
@@ -6146,7 +6331,7 @@ async def streaming_chat_response_handler(response, ctx):
                         for file_item in result.get('files', []):
                             if file_item.get('type') == 'image' and file_item.get('url', '').startswith('data:'):
                                 # LLM-only: add as input_image part, not frontend display output.
-                                image_url = await store_tool_result_image(request, file_item['url'], metadata, user)
+                                image_url = file_item['url'] if file_item.get('rag_llm_only') else await store_tool_result_image(request, file_item['url'], metadata, user)
                                 output_parts.append({'type': 'input_image', 'image_url': image_url})
                             else:
                                 display_files.append(file_item)
@@ -6251,11 +6436,10 @@ async def streaming_chat_response_handler(response, ctx):
                             )
                             new_form_data['previous_response_id'] = last_response_id
                         else:
-                            tool_messages = convert_output_to_messages(
-                                output,
-                                raw=True,
+                            tool_messages = get_tool_loop_output_messages(
+                                full_output() if responses_api else output,
+                                responses_api=responses_api,
                                 reasoning_format=get_reasoning_format(model),
-                                flatten_tool_images=True,
                             )
 
                             # Chat Completions providers don't support multimodal
@@ -6278,7 +6462,12 @@ async def streaming_chat_response_handler(response, ctx):
                                     message.update(user_prompt)
                             messages = [
                                 *[message for message in form_data['messages'] if message.get('role') == 'system'],
-                                *[message for message in messages if message.get('role') != 'system'],
+                                *[
+                                    message
+                                    for message in messages
+                                    if message.get('role') != 'system'
+                                    and not (responses_api and message.get('_responses_tool_turn'))
+                                ],
                                 *tool_messages,
                             ]
 
@@ -6315,7 +6504,9 @@ async def streaming_chat_response_handler(response, ctx):
                                 log.exception('Tool loop context compaction failed; keeping the current context')
 
                             # Use the existing checkpoint format internally and strip it from the provider payload.
-                            new_form_data['messages'] = process_messages_with_output(messages)
+                            new_form_data['messages'] = process_messages_with_output(
+                                messages, responses_api=responses_api
+                            )
                             context_summary = next(
                                 (message['contextSummary'] for message in messages if message.get('contextSummary')),
                                 None,
@@ -6341,6 +6532,7 @@ async def streaming_chat_response_handler(response, ctx):
                                 extra_params=extra_params,
                             )
 
+                        new_form_data = carry_native_pdf_parts(new_form_data, form_data['messages'])
                         new_form_data = normalize_messages_for_model(new_form_data)
 
                         res = await generate_chat_completion(
@@ -6560,6 +6752,7 @@ async def streaming_chat_response_handler(response, ctx):
                                     extra_params=extra_params,
                                 )
 
+                            new_form_data = carry_native_pdf_parts(new_form_data, form_data['messages'])
                             new_form_data = normalize_messages_for_model(new_form_data)
 
                             res = await generate_chat_completion(

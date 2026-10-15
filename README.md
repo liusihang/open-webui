@@ -1,5 +1,11 @@
 # Open WebUI 👋
 
+> This fork's `main` is based on Open WebUI **v0.12.0**, with selected native
+> Responses, document preview, memory-review and multimodal retrieval changes.
+> See [fork-specific features, configuration and migration limits](docs/fork-v0120.md)
+> before deployment. Runtime credentials, provider settings and user data are not
+> included in this repository. The upstream README follows below.
+
 ![GitHub stars](https://img.shields.io/github/stars/open-webui/open-webui?style=social)
 ![GitHub forks](https://img.shields.io/github/forks/open-webui/open-webui?style=social)
 ![GitHub watchers](https://img.shields.io/github/watchers/open-webui/open-webui?style=social)

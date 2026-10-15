@@ -6,7 +6,9 @@
 
 	import { formatFileSize, getLineCount, safeLinkUrl } from '$lib/utils';
 	import { WEBUI_API_BASE_URL } from '$lib/constants';
-	import { settings } from '$lib/stores';
+	import { config, settings } from '$lib/stores';
+	import OnlyOfficeViewer from './OnlyOfficeViewer.svelte';
+	import { isOnlyOfficePreviewFile } from '$lib/utils/filePreviewTypes';
 	import { getKnowledgeById } from '$lib/apis/knowledge';
 	import { getFileById, getFileContentById } from '$lib/apis/files';
 
@@ -45,6 +47,11 @@
 	let isPptx = false;
 
 	let selectedTab = '';
+	$: onlyOfficeAvailable =
+		!!$config?.features?.enable_onlyoffice_preview &&
+		item?.type === 'file' &&
+		!!item?.id &&
+		isOnlyOfficePreviewFile(item);
 	let excelWorkbook: WorkBook | null = null;
 	let excelSheetNames: string[] = [];
 	let selectedSheet = '';
@@ -391,7 +398,7 @@
 					</div>
 				{/if}
 
-				{#if isAudio || isPDF || isExcel || isCode || isMarkdown || isDocx || isPptx}
+				{#if isAudio || isPDF || isExcel || isCode || isMarkdown || isDocx || isPptx || onlyOfficeAvailable}
 					<div
 						class="flex mb-2.5 scrollbar-none overflow-x-auto w-full border-b border-gray-50 dark:border-gray-850/30 text-center text-sm font-normal bg-transparent dark:text-gray-200"
 					>
@@ -414,10 +421,21 @@
 								selectedTab = 'preview';
 							}}>{$i18n.t('Preview')}</button
 						>
+						{#if onlyOfficeAvailable}
+							<button
+								type="button"
+								class="min-w-fit py-1.5 px-4 border-b {selectedTab === 'onlyoffice'
+									? ''
+									: 'border-transparent text-gray-400'}"
+								on:click={() => (selectedTab = 'onlyoffice')}>OnlyOffice</button
+							>
+						{/if}
 					</div>
 				{/if}
 
-				{#if isImage}
+				{#if selectedTab === 'onlyoffice' && onlyOfficeAvailable}
+					<OnlyOfficeViewer fileId={item.id} readOnly on:error={() => (selectedTab = 'preview')} />
+				{:else if isImage}
 					<div class="relative w-full max-h-[70vh] overflow-hidden">
 						<div class="absolute top-2 right-2 z-10">
 							<Tooltip content={$i18n.t('Reset view')}>

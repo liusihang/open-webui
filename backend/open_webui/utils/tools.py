@@ -74,6 +74,7 @@ from open_webui.tools.builtin import (
     query_chat_files,
     query_knowledge_bases,
     query_knowledge_files,
+    view_knowledge_evidence,
     read_memory_path,
     replace_memory_content,
     replace_note_content,
@@ -115,6 +116,7 @@ from open_webui.utils.headers import (
 from open_webui.utils.json_codec import JSONCodec
 from open_webui.utils.mcp.client import MCPClient, OAuthTokenAuth
 from open_webui.utils.misc import is_string_allowed
+from open_webui.utils.native_pdf import is_native_pdf_attachment
 from open_webui.utils.oauth import get_system_oauth_token
 from open_webui.utils.plugin import (
     get_tool_contents_cache,
@@ -566,7 +568,17 @@ def get_attached_knowledge(model: dict, metadata: dict) -> list[dict]:
         ('model', model_meta.get('knowledge') or []),
         ('folder', metadata.get('folder_knowledge') or []),
     ):
+        normalized = []
         for item in items:
+            if not isinstance(item, dict):
+                continue
+            if not item.get('id') and item.get('collection_name'):
+                normalized.append({**item, 'type': 'collection', 'id': item['collection_name']})
+            elif not item.get('id') and isinstance(item.get('collection_names'), list):
+                normalized.extend({**item, 'type': 'collection', 'id': identity} for identity in item['collection_names'])
+            else:
+                normalized.append(item)
+        for item in normalized:
             if not isinstance(item, dict):
                 continue
             key = (item.get('type'), item.get('id'))
@@ -575,23 +587,18 @@ def get_attached_knowledge(model: dict, metadata: dict) -> list[dict]:
             knowledge.append({**item, 'source': source})
             seen.add(key)
 
-    file_context_enabled = (model_meta.get('capabilities') or {}).get('file_context', True)
-    if not file_context_enabled:
-        for item in metadata.get('files') or []:
-            if not isinstance(item, dict) or item.get('type') not in ('collection', 'note'):
-                continue
-            key = (item.get('type'), item.get('id'))
-            if not all(key) or key in seen:
-                continue
-            knowledge.append(
-                {
-                    'type': item.get('type'),
-                    'id': item.get('id'),
-                    'name': item.get('name'),
-                    'source': 'chat',
-                }
-            )
-            seen.add(key)
+    # Native knowledge tools own local file/KB retrieval, irrespective of the
+    # automatic-context capability. Folder/model/chat scopes must all survive.
+    for item in metadata.get('files') or []:
+        if not isinstance(item, dict) or item.get('type', 'file') not in ('collection', 'note', 'file'):
+            continue
+        if is_native_pdf_attachment(item, metadata):
+            continue
+        key = (item.get('type', 'file'), item.get('id'))
+        if not all(key) or key in seen:
+            continue
+        knowledge.append({'type': key[0], 'id': item['id'], 'name': item.get('name'), 'source': 'chat'})
+        seen.add(key)
 
     return knowledge
 
@@ -666,6 +673,7 @@ async def get_builtin_tools(
         isinstance(item, dict)
         and item.get('type', 'file') == 'file'
         and (item.get('id') or item.get('url'))
+        and not is_native_pdf_attachment(item, metadata)
         and not str(item.get('id') or item.get('url')).startswith(('http://', 'https://', 'data:'))
         for item in chat_files
     )
@@ -677,13 +685,16 @@ async def get_builtin_tools(
         and has_chat_files
         and await has_user_chat_permission('file_upload')
     ):
-        builtin_functions.extend([list_chat_files, query_chat_files, grep_chat_files, view_file])
+        builtin_functions.extend([list_chat_files, grep_chat_files, view_file])
+        if not is_builtin_tool_enabled('knowledge'):
+            builtin_functions.append(query_chat_files)
 
     # Knowledge base tools - conditional injection based on model knowledge
     # If model has attached knowledge (any type), only provide query_knowledge_files
     # Otherwise, provide all KB browsing tools
     model_knowledge = get_attached_knowledge(model, metadata)
     if is_builtin_tool_enabled('knowledge'):
+        builtin_functions.append(view_knowledge_evidence)
         from open_webui.env import ENABLE_KB_EXEC
 
         if ENABLE_KB_EXEC:
@@ -865,11 +876,17 @@ async def get_builtin_tools(
                 '__chat_id__': extra_params.get('__chat_id__'),
                 '__message_id__': extra_params.get('__message_id__'),
                 '__model_knowledge__': model_knowledge,
+                '__model__': model,
             },
             get_builtin_function_introspection(func),
         )
 
         spec = get_builtin_tool_spec(func)
+        if func.__name__ == 'query_knowledge_files' and metadata.get('rag_query_image_refs'):
+            spec = copy.deepcopy(spec)
+            spec['description'] += ('\nAuthorized uploaded query image file IDs for this turn: '
+                                    + JSONCodec.dumps(metadata['rag_query_image_refs'])
+                                    + '. Use query_image_refs for image-based knowledge search; these are inputs, not target KBs.')
         if func.__name__ == 'delegate_task' and not config.get('subagents.background_enabled'):
             parameters = spec.get('parameters', {})
             parameters.get('properties', {}).pop('background', None)

@@ -34,6 +34,7 @@
 	import AdminSettingField from './AdminSettingField.svelte';
 	import AdminSettingRow from './AdminSettingRow.svelte';
 	import AdminSettingSection from './AdminSettingSection.svelte';
+	import EvidenceSettings from './EvidenceSettings.svelte';
 
 	const i18n: any = getContext('i18n');
 
@@ -412,6 +413,7 @@
 	}}
 />
 
+<EvidenceSettings />
 <form
 	class="flex h-full flex-col justify-between text-sm"
 	on:submit|preventDefault={() => {

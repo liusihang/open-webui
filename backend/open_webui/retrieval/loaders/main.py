@@ -4,6 +4,7 @@ import logging
 import os
 import sys
 import zipfile
+from pathlib import Path
 
 import ftfy
 import requests
@@ -354,6 +355,8 @@ class Loader:
     def load(self, filename: str, file_content_type: str, file_path: str) -> list[Document]:
         loader = self._get_loader(filename, file_content_type, file_path)
         docs = loader.load()
+        if self.config.get('rag.extract_document_image_assets', False):
+            self._attach_document_image_assets(filename, file_path, docs)
         # ftfy's auto mode unescapes entities on every line before the first literal '<', rewriting the document.
         return [
             Document(
@@ -364,6 +367,48 @@ class Loader:
             )
             for doc in docs
         ]
+
+    def _image_asset_root(self):
+        configured = self.config.get('rag.document_image_asset_root')
+        if configured:
+            return Path(configured)
+        from open_webui.config import UPLOAD_DIR
+
+        return Path(UPLOAD_DIR) / 'document-image-assets'
+
+    def _attach_document_image_assets(self, filename, file_path, docs):
+        """Reuse parser assets; native Office/local PDF are explicit supplements."""
+        suffix = Path(filename).suffix.lower()
+        extraction = None
+        source_id = self.metadata.get('file_id') or str(Path(file_path).resolve())
+        if suffix in ('.docx', '.pptx', '.xlsx') and not any(doc.metadata.get('document_image_assets') for doc in docs):
+            from open_webui.retrieval.loaders.office_image_assets import extract_office_image_assets
+
+            extraction = extract_office_image_assets(
+                file_path, asset_root=self._image_asset_root(), source_id=source_id
+            )
+        elif suffix == '.pdf' and self.config.get('rag.pdf_image_asset_source', 'parser') == 'local':
+            from open_webui.retrieval.loaders.pdf_image_assets import extract_pdf_image_assets
+
+            extraction = extract_pdf_image_assets(
+                file_path,
+                asset_root=self._image_asset_root(),
+                source_id=source_id,
+                page_text_by_index={
+                    doc.metadata['page']: doc.page_content for doc in docs if type(doc.metadata.get('page')) is int
+                },
+            )
+        if extraction is not None:
+            if not docs:
+                docs.append(Document(page_content='', metadata={'_metadata_only': True}))
+            docs[0].metadata.setdefault('document_image_assets', []).extend(extraction.assets)
+            docs[0].metadata.setdefault('document_image_assets_skipped', []).extend(extraction.skipped)
+        elif suffix == '.pdf' and not any('document_image_assets' in doc.metadata for doc in docs):
+            # Do not silently OCR the PDF again when its selected parser does not
+            # return assets. The text remains usable with a clear partial state.
+            if not docs:
+                docs.append(Document(page_content='', metadata={'_metadata_only': True}))
+            docs[0].metadata['document_image_assets_skipped'] = [{'reason': 'selected_parser_has_no_image_assets'}]
 
     async def aload(self, filename: str, file_content_type: str, file_path: str) -> list[Document]:
         """
@@ -693,6 +738,12 @@ class Loader:
                 params=self.config['rag.mineru_params'],
                 timeout=mineru_timeout,
                 max_markdown_bytes=MINERU_MAX_MARKDOWN_BYTES,
+                extract_images=self.config.get('rag.extract_document_image_assets', False)
+                and not (file_ext == 'pdf' and self.config.get('rag.pdf_image_asset_source', 'parser') == 'local'),
+                asset_root=self._image_asset_root()
+                if self.config.get('rag.extract_document_image_assets', False)
+                else None,
+                source_id=self.metadata.get('file_id'),
             )
         elif (
             self.engine == 'mistral_ocr'
@@ -716,9 +767,26 @@ class Loader:
                 api_url=self.config['rag.paddleocr_vl_base_url'],
                 token=self.config['rag.paddleocr_vl_token'],
                 file_path=file_path,
+                api_mode=self.config.get('rag.paddleocr_vl_api_mode', 'layout'),
+                model=self.config.get('rag.paddleocr_vl_model', 'PaddleOCR-VL-1.6'),
+                optional_payload=self.config.get('rag.paddleocr_vl_optional_payload', {}),
+                extract_images=self.config.get('rag.extract_document_image_assets', False)
+                and not (file_ext == 'pdf' and self.config.get('rag.pdf_image_asset_source', 'parser') == 'local'),
+                asset_root=self._image_asset_root()
+                if self.config.get('rag.extract_document_image_assets', False)
+                else None,
+                source_id=self.metadata.get('file_id'),
+                allowed_remote_origins=tuple(self.config.get('rag.paddleocr_vl_allowed_remote_origins', []))
+                + tuple(self.config.get('rag.document_image_asset_allowed_origins', [])),
+                request_timeout_s=self.config.get('rag.paddleocr_vl_request_timeout', 30),
+                download_timeout_s=self.config.get('rag.paddleocr_vl_download_timeout', 60),
+                poll_timeout_s=self.config.get('rag.paddleocr_vl_poll_timeout', 300),
+                poll_interval_s=self.config.get('rag.paddleocr_vl_poll_interval', 2),
             )
         else:
             if USE_SLIM:
+                if file_ext == 'docx':
+                    return DocxLoader(file_path)
                 if file_ext == 'csv':
                     return CSVLoaderWithSummary(file_path, filename, self._detect_text_encoding(file_path))
                 if file_ext in ['htm', 'html']:

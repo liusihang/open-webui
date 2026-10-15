@@ -20,7 +20,7 @@ from fastapi import (
     UploadFile,
     status,
 )
-from fastapi.responses import FileResponse, StreamingResponse
+from fastapi.responses import FileResponse, Response, StreamingResponse
 from open_webui.config import BYPASS_ADMIN_ACCESS_CONTROL, STORAGE_LOCAL_CACHE, STORAGE_PROVIDER, UPLOAD_DIR
 from open_webui.constants import ERROR_MESSAGES
 from open_webui.events import EVENTS, publish_event
@@ -45,16 +45,141 @@ from open_webui.routers.retrieval import ProcessFileForm, process_file
 from open_webui.storage.provider import Storage
 from open_webui.utils.auth import get_admin_user, get_verified_user
 from open_webui.utils.misc import strict_match_mime_type
+from open_webui.utils.native_pdf import should_defer_pdf_processing
+from open_webui.utils.access_control.files import has_access_to_file
+from open_webui.utils.json_codec import JSONCodec
 from pydantic import BaseModel
 from sqlalchemy.ext.asyncio import AsyncSession
 
+router = APIRouter()
 log = logging.getLogger(__name__)
 
-router = APIRouter()
+
+async def _evidence_for_file(request, file_id, ref, user):
+    from open_webui.retrieval.integration import services
+    from open_webui.retrieval.evidence import resolve_scope
+    scope = await resolve_scope(user, file_ids=(file_id,))
+    _, evidence, _, _ = await services(request)
+    result = await evidence.read([ref], user=user, resolved_scope=scope)
+    item = next((i for i in result['items'] if i.get('status') == 'ready'
+                 and i.get('source', {}).get('file_id') == file_id), None)
+    if not item:
+        raise HTTPException(404, 'Evidence is unavailable or its source has changed')
+    return evidence, scope, item
 
 
-from open_webui.utils.access_control.files import has_access_to_file
-from open_webui.utils.json_codec import JSONCodec
+@router.get('/{id}/retrieval/status')
+async def get_retrieval_status(id: str, user=Depends(get_verified_user)):
+    from open_webui.retrieval.evidence import resolve_scope
+    if id not in (await resolve_scope(user, file_ids=(id,))).file_ids:
+        raise HTTPException(404, 'File not found')
+    file = await Files.get_file_by_id(id)
+    if not file:
+        raise HTTPException(404, 'File not found')
+    cached = (file.data or {}).get('retrieval_status')
+    if cached:
+        return cached
+    # Selected-vector imports deliberately do not restore the old file.data cache.
+    # Report durable current-version mappings without making an encoder call or
+    # equating stored vectors with a compatible, selected search space.
+    from sqlalchemy import func, select
+    from open_webui.models.evidence import KnowledgeEvidence, KnowledgeEvidenceEmbedding
+    from open_webui.models.evidence import stable_id
+    from open_webui.models.retrieval_indexes import RetrievalIndexState
+    async with get_async_db_context() as db:
+        state = await db.get(RetrievalIndexState, stable_id('file', file_id=id))
+        if state is None:
+            return {'text': 'unindexed', 'images': 'unindexed'}
+        if state.status == 'deleted':
+            return {'version': state.file_version, 'text': 'deleted', 'images': 'deleted',
+                    'status_source': 'sql', 'image_retryable': False}
+        rows = (await db.execute(select(
+            KnowledgeEvidence.modality, KnowledgeEvidenceEmbedding.embedding_status,
+            func.count(func.distinct(KnowledgeEvidence.id)),
+        ).outerjoin(KnowledgeEvidenceEmbedding,
+            KnowledgeEvidenceEmbedding.evidence_id == KnowledgeEvidence.id
+        ).where(KnowledgeEvidence.file_id == id,
+                KnowledgeEvidence.file_version == state.file_version,
+                KnowledgeEvidence.is_active.is_(True), KnowledgeEvidence.deleted_at.is_(None)
+        ).group_by(KnowledgeEvidence.modality, KnowledgeEvidenceEmbedding.embedding_status))).all()
+    def modality_status(modality):
+        statuses = {status for kind, status, count in rows if kind == modality and count}
+        if not statuses:
+            return 'unindexed'
+        if 'quarantined' in statuses:
+            return 'quarantined'
+        if statuses == {'ready'}:
+            return 'indexed'  # Stored mapping, not a claim that the current encoder can search it.
+        return 'unassigned' if statuses == {None} else 'partial'
+    return {'version': state.file_version, 'text': modality_status('text'),
+            'images': modality_status('image'), 'status_source': 'sql',
+            'image_retryable': False, 'searchable_evidence_count': 0,
+            'indexed_evidence_count': sum(count for _, status, count in rows if status),
+            'message': '已有索引；隔离项的编码空间尚未确认，无需重新上传或重建。'}
+
+
+@router.post('/{id}/retrieval/retry-images')
+async def retry_file_image_index(request: Request, id: str, user=Depends(get_verified_user),
+                                db: AsyncSession = Depends(get_async_session)):
+    from sqlalchemy import select
+    from open_webui.models.retrieval_indexes import EXECUTOR_VERSION, RetrievalIndexJob
+    from open_webui.retrieval.integration import complete_images, services, spawn, update_status
+    file = await Files.get_file_by_id(id, db=db)
+    if not file or not (file.user_id == user.id or user.role == 'admin' or await has_access_to_file(id, 'write', user, db=db)):
+        raise HTTPException(404, 'File not found')
+    version = (file.data or {}).get('retrieval_version')
+    jobs = (await db.scalars(select(RetrievalIndexJob).where(
+        RetrievalIndexJob.file_id == id, RetrievalIndexJob.file_version == version,
+        RetrievalIndexJob.executor_version == EXECUTOR_VERSION, RetrievalIndexJob.index_kind == 'image',
+        RetrievalIndexJob.status.in_(('pending', 'failed')),
+        RetrievalIndexJob.retry_count < RetrievalIndexJob.max_retries,
+    ).limit(100))).all()
+    await db.commit()
+    indexer, _, space_id, _ = await services(request)
+    if not space_id:
+        raise HTTPException(409, 'Select a verified encoding space compatible with the current encoder first')
+    if jobs:
+        await update_status(id, version, images='pending')
+    for job in jobs:
+        payload = job.payload or {}
+        job_id = await indexer.enqueue_assets(file_id=id, file_version=version, collection_name=job.collection_name,
+            assets=payload.get('assets', []), knowledge_id=job.knowledge_id, space_id=space_id, source_name=file.filename)
+        spawn(request, complete_images(request, file_id=id, version=version, collection=job.collection_name,
+            assets=payload.get('assets', []), skipped=(file.data or {}).get('document_image_assets_skipped') or [],
+            knowledge_id=job.knowledge_id, source_name=file.filename, job_id=job_id))
+    return {'scheduled': len(jobs), 'version': version}
+
+
+@router.get('/{id}/evidence/{ref}')
+async def get_file_evidence(request: Request, id: str, ref: str, user=Depends(get_verified_user)):
+    _, _, item = await _evidence_for_file(request, id, ref, user)
+    return item
+
+
+@router.get('/{id}/evidence/{ref}/content')
+@router.get('/{id}/evidence/{ref}/thumbnail')
+async def get_file_evidence_image(request: Request, id: str, ref: str, user=Depends(get_verified_user)):
+    evidence, scope, _ = await _evidence_for_file(request, id, ref, user)
+    try:
+        content, mime = await evidence.image_content(ref, user=user, resolved_scope=scope)
+        if request.url.path.endswith('/thumbnail'):
+            import io
+            from PIL import Image
+            def thumbnail():
+                with Image.open(io.BytesIO(content)) as image:
+                    image = image.convert('RGB')
+                    image.thumbnail((480, 480))
+                    output = io.BytesIO()
+                    image.save(output, 'JPEG', quality=80)
+                    return output.getvalue()
+            content, mime = await asyncio.to_thread(thumbnail), 'image/jpeg'
+        # Read authorization again after IO/resize; no permanent/public asset URLs.
+        await _evidence_for_file(request, id, ref, user)
+        return Response(content=content, media_type=mime,
+                        headers={'Cache-Control': 'private, no-store', 'X-Content-Type-Options': 'nosniff'})
+    except (ValueError, PermissionError, OSError):
+        raise HTTPException(404, 'Image evidence is unavailable')
+
 
 ############################
 # Upload File
@@ -184,7 +309,8 @@ async def process_uploaded_file(
                         db=db_session,
                     )
                 else:
-                    raise Exception(f'File type {content_type} is not supported for processing')
+                    # Image evidence uses the uploaded image itself; no second OCR.
+                    await process_file(request, ProcessFileForm(file_id=file_item.id), user=user, db=db_session)
 
             else:
                 # Documents, or media files explicitly enabled for the
@@ -341,7 +467,9 @@ async def upload_file_handler(
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail=ERROR_MESSAGES.DEFAULT('Invalid metadata format'),
             )
-    file_metadata = metadata if metadata else {}
+    file_metadata = dict(metadata) if isinstance(metadata, dict) else {}
+    # Only the backend may decide whether a file was stored without parsing.
+    file_metadata.pop('native_model_file', None)
 
     try:
         unsanitized_filename = file.filename
@@ -399,6 +527,13 @@ async def upload_file_handler(
                 detail=ERROR_MESSAGES.FILE_TOO_LARGE(size=f'{max_size} MB'),
             )
 
+        native_pdf = should_defer_pdf_processing(
+            file_metadata, name, file.content_type, contents, request.app.state.MODELS
+        )
+        if native_pdf:
+            process = False
+            file_metadata['native_model_file'] = True
+
         # SHA-256 of raw uploaded bytes for incremental sync diffing.
         # If the client pre-computed and sent file_hash, use that.
         file_hash = file_metadata.get('file_hash') or await asyncio.to_thread(
@@ -413,7 +548,7 @@ async def upload_file_handler(
                     'filename': name,
                     'path': file_path,
                     'data': {
-                        **({'status': 'pending'} if process else {}),
+                        **({'status': 'pending'} if process else {'status': 'completed'} if native_pdf else {}),
                     },
                     'meta': {
                         'name': name,
@@ -576,6 +711,13 @@ async def count_files(
 async def delete_all_files(
     request: Request, user=Depends(get_admin_user), db: AsyncSession = Depends(get_async_session)
 ):
+    from sqlalchemy import select
+    from open_webui.models.files import File as FileRow
+    from open_webui.retrieval.integration import deactivate
+    identities = list(await db.scalars(select(FileRow.id)))
+    await db.commit()
+    for identity in identities:
+        await deactivate(request, identity)
     result = await Files.delete_all_files(db=db)
     if result:
         try:
@@ -1034,6 +1176,9 @@ async def delete_file_by_id(
 
     if file.user_id == user.id or user.role == 'admin' or await has_access_to_file(id, 'write', user, db=db):
         # Clean up KB associations and embeddings before deleting
+        from open_webui.retrieval.integration import deactivate
+        await db.commit()
+        await deactivate(request, id)
         knowledges = await Knowledges.get_knowledges_by_file_id(id, db=db)
         for knowledge in knowledges:
             # Remove KB-file relationship

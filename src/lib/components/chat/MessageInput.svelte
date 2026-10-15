@@ -82,6 +82,8 @@
 	import VoiceRecording from './MessageInput/VoiceRecording.svelte';
 	import ModelSelector from './ModelSelector.svelte';
 	import ModelControls from './MessageInput/ModelControls.svelte';
+	import PipeReasoningControls from './MessageInput/PipeReasoningControls.svelte';
+	import { chatUploadMetadata } from '$lib/utils/pipeReasoning';
 
 	import ToolServersModal from './ToolServersModal.svelte';
 	import SkillsModal from './SkillsModal.svelte';
@@ -1020,12 +1022,13 @@
 		if (!$temporaryChatEnabled) {
 			try {
 				// If the file is an audio file, provide the language for STT.
-				let metadata = null;
+				let metadata = chatUploadMetadata(selectedModelIds);
 				if (
 					(file.type.startsWith('audio/') || file.type.startsWith('video/')) &&
 					$settings?.audio?.stt?.language
 				) {
 					metadata = {
+						...metadata,
 						language: $settings?.audio?.stt?.language
 					};
 				}
@@ -2648,6 +2651,7 @@
 										/>
 									</div>
 									<ModelControls selectedModels={selectedModelIds} />
+									<PipeReasoningControls selectedModels={selectedModelIds} />
 
 									{#if isActive && prompt === '' && files.length === 0}
 										<div class=" flex items-center">

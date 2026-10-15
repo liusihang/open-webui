@@ -16,6 +16,7 @@
 	import { getContext, onMount, onDestroy, tick } from 'svelte';
 	import {
 		terminalServers,
+		config,
 		settings,
 		showFileNavPath,
 		showFileNavDir,
@@ -61,6 +62,7 @@
 	import PortList from './FileNav/PortList.svelte';
 	import PortPreview from './FileNav/PortPreview.svelte';
 	import TerminalDock from './TerminalDock.svelte';
+	import { isOnlyOfficePreviewFile } from '$lib/utils/filePreviewTypes';
 
 	const i18n = getContext('i18n');
 
@@ -295,6 +297,23 @@
 	// ── File preview state ───────────────────────────────────────────────
 	let selectedFile: string | null = null;
 	let selectedFileWritable = true;
+	$: onlyOfficeTerminal = ($terminalServers ?? []).find(
+		(server) => server.url === selectedTerminal?.url
+	);
+	$: onlyOfficeAvailable =
+		!!$config?.features?.enable_onlyoffice_preview &&
+		!!onlyOfficeTerminal &&
+		!!selectedFile &&
+		isOnlyOfficePreviewFile({ name: selectedFile });
+	$: onlyOfficeHref = onlyOfficeAvailable
+		? '/office-preview?' +
+			new URLSearchParams({
+				terminal_server_id: onlyOfficeTerminal!.id,
+				terminal_file_path: selectedFile!,
+				mode: selectedFileWritable ? 'edit' : 'view',
+				...(chatId ? { chat_id: chatId } : {})
+			}).toString()
+		: '';
 	let previewPort: number | null = null;
 	let fileContent: string | null = null;
 	let fileImageUrl: string | null = null;
@@ -1846,6 +1865,14 @@
 					}}
 				/>
 			{:else if selectedFile !== null}
+				{#if onlyOfficeAvailable}
+					<a
+						class="shrink-0 px-3 py-1.5 text-xs text-gray-500 hover:underline"
+						href={onlyOfficeHref}
+						target="_blank"
+						rel="noopener noreferrer">OnlyOffice</a
+					>
+				{/if}
 				<FilePreview
 					bind:this={filePreviewRef}
 					bind:editing

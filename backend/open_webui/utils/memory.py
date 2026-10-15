@@ -5,7 +5,7 @@ import logging
 import re
 from typing import Any
 
-from fastapi import HTTPException
+from fastapi import HTTPException, Request
 from open_webui.models.config import Config
 from open_webui.models.memories import Memories
 from open_webui.utils.access_control import has_permission
@@ -466,7 +466,8 @@ async def review_memory_after_turn(
         try:
             done_task.result()
         except Exception as e:
-            log.debug('Memory review failed: %s', e)
+            # Upstream errors can contain request content; log only the failure class.
+            log.warning('Memory review failed (%s)', type(e).__name__)
 
     task.add_done_callback(log_failure)
 
@@ -510,9 +511,25 @@ async def _review_memory(
             assistant_final = f'{assistant_final[:1000]}\n...(truncated)...\n{assistant_final[-400:]}'
         transcript_lines.append(f'assistant_final: {assistant_final}')
 
-    model_id = model.get('id') if isinstance(model, dict) else form_data.get('model')
+    review_model_id = (await Config.get('task.model.external') or '').strip()
+    model_id = review_model_id or (model.get('id') if isinstance(model, dict) else form_data.get('model'))
+    review_request = request
+    if review_model_id:
+        # Chat routing metadata (notably arena/direct model selection) belongs to
+        # the source conversation, not the independently selected reviewer.
+        review_request = Request(
+            {
+                **request.scope,
+                'state': {
+                    key: value
+                    for key, value in request.scope.get('state', {}).items()
+                    if key not in {'metadata', 'model', 'direct'}
+                },
+            },
+            receive=request.receive,
+        )
     operations = await _generate_memory_operations(
-        request=request,
+        request=review_request,
         user=user,
         model_id=model_id,
         metadata=metadata,

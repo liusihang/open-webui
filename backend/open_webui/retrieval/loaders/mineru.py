@@ -1,13 +1,22 @@
+import base64
+import json
 import logging
 import os
 import tempfile
 import time
 import zipfile
+from pathlib import Path, PurePosixPath
 from typing import List, Optional
 
 import requests
 from fastapi import HTTPException, status
 from langchain_core.documents import Document
+from open_webui.retrieval.document_image_assets import (
+    ImageAssetExtraction,
+    ImageAssetStore,
+    extract_markdown_image_assets,
+    safe_relative_reference,
+)
 
 log = logging.getLogger(__name__)
 
@@ -29,6 +38,9 @@ class MinerULoader:
         params: dict = None,
         timeout: Optional[int] = 300,
         max_markdown_bytes: Optional[int] = None,
+        extract_images: bool = False,
+        asset_root: str | Path | None = None,
+        source_id: str | None = None,
     ):
         self.file_path = file_path
         self.api_mode = api_mode.lower()
@@ -36,9 +48,15 @@ class MinerULoader:
         self.api_key = api_key
         self.timeout = timeout
         self.max_markdown_bytes = max_markdown_bytes
+        self.extract_images = extract_images
+        self.asset_root = asset_root
+        self.source_id = source_id or str(Path(file_path).resolve())
+        self.image_extraction = ImageAssetExtraction()
+        if extract_images and asset_root is None:
+            raise ValueError('MinerU image extraction requires a private asset root')
 
         # Parse params dict with defaults
-        self.params = params or {}
+        self.params = dict(params or {})
         self.enable_ocr = self.params.get('enable_ocr', False)
         self.enable_formula = self.params.get('enable_formula', True)
         self.enable_table = self.params.get('enable_table', True)
@@ -61,6 +79,7 @@ class MinerULoader:
         Routes to Cloud or Local API based on api_mode.
         """
         try:
+            self.image_extraction = ImageAssetExtraction()
             if self.api_mode == 'cloud':
                 return self._load_cloud_api()
             else:
@@ -82,6 +101,7 @@ class MinerULoader:
         form_data = {
             **self.params,
             'return_md': 'true',
+            **({'return_images': 'true', 'return_content_list': 'true'} if self.extract_images else {}),
         }
 
         # Page ranges (Local API uses start_page_id and end_page_id)
@@ -173,6 +193,10 @@ class MinerULoader:
             'version': result.get('version', 'unknown'),
         }
 
+        if self.extract_images:
+            self._materialize_images(file_result.get('images'), file_result.get('content_list'), markdown_content)
+            metadata.update(self._asset_metadata())
+
         return [Document(page_content=markdown_content, metadata=metadata)]
 
     def _load_cloud_api(self) -> List[Document]:
@@ -204,6 +228,8 @@ class MinerULoader:
             'api_mode': 'cloud',
             'batch_id': batch_id,
         }
+        if self.extract_images:
+            metadata.update(self._asset_metadata())
 
         return [Document(page_content=markdown_content, metadata=metadata)]
 
@@ -292,7 +318,7 @@ class MinerULoader:
         """
         Upload file to presigned URL (no authentication needed).
         """
-        log.info(f'Uploading file to presigned URL')
+        log.info('Uploading file to presigned URL')
 
         try:
             with open(self.file_path, 'rb') as f:
@@ -421,7 +447,7 @@ class MinerULoader:
         Download ZIP file from CDN and extract markdown content.
         Returns the markdown content as a string.
         """
-        log.info('Downloading results from: %s', zip_url)
+        log.info('Downloading MinerU result archive')
 
         try:
             response = requests.get(zip_url, timeout=60)
@@ -488,6 +514,11 @@ class MinerULoader:
                         status.HTTP_502_BAD_GATEWAY,
                         detail=error_msg,
                     )
+                if self.extract_images:
+                    try:
+                        self._materialize_zip_images(zip_ref, markdown_content)
+                    except Exception:
+                        self.image_extraction.skipped.append({'reason': 'mineru_archive_images_failed'})
         except zipfile.BadZipFile as e:
             raise HTTPException(
                 status.HTTP_502_BAD_GATEWAY,
@@ -517,3 +548,75 @@ class MinerULoader:
 
         log.info('Successfully extracted markdown content (%s characters)', len(markdown_content))
         return markdown_content
+
+    def _asset_metadata(self):
+        return {
+            'document_image_assets': self.image_extraction.assets,
+            'document_image_assets_skipped': self.image_extraction.skipped,
+        }
+
+    def _materialize_zip_images(self, archive, markdown):
+        entries = archive.infolist()
+        if len(entries) > 3000 or sum(entry.file_size for entry in entries) > 200 * 1024 * 1024:
+            raise ValueError('mineru_archive_budget_exceeded')
+        for entry in entries:
+            safe_relative_reference(entry.filename)
+        content_list = None
+        for entry in entries:
+            if entry.filename.endswith('_content_list.json') and entry.file_size <= 10 * 1024 * 1024:
+                content_list = json.loads(archive.read(entry))
+                break
+        images = {}
+        for entry in entries:
+            if 'images' not in PurePosixPath(entry.filename).parts or entry.is_dir():
+                continue
+            if len(images) >= 200 or entry.file_size > 20 * 1024 * 1024:
+                self.image_extraction.skipped.append({'reason': 'mineru_image_budget_exceeded'})
+                continue
+            # Keep the archive prefix; content-list matching also handles the
+            # common images/name.jpg path without that enclosing directory.
+            images[entry.filename] = base64.b64encode(archive.read(entry)).decode('ascii')
+        self._materialize_images(images, content_list, markdown)
+
+    def _materialize_images(self, images, content_list, markdown):
+        try:
+            if isinstance(content_list, str):
+                content_list = json.loads(content_list)
+            rows = content_list if isinstance(content_list, list) else []
+            store = ImageAssetStore(self.asset_root, self.source_id)
+            for reference, value in images.items() if isinstance(images, dict) else []:
+                matching = next(
+                    (
+                        row
+                        for row in rows
+                        if isinstance(row, dict)
+                        and row.get('img_path')
+                        and (reference == row['img_path'] or reference.endswith('/' + row['img_path']))
+                    ),
+                    {},
+                )
+                page_index = matching.get('page_idx')
+                if type(page_index) is not int or page_index < 0:
+                    page_index = None
+                extraction = extract_markdown_image_assets(
+                    {'text': markdown, 'images': {reference: value}},
+                    store=store,
+                    page_index=page_index,
+                    backend='mineru',
+                    resource_base_url=self.api_url,
+                    # Local API returns inline base64; no extra remote origins.
+                    allowed_origins=(),
+                )
+                captions = matching.get('image_caption') or []
+                for asset in extraction.assets:
+                    asset['anchor'] = {'parser_image_path': reference}
+                    if isinstance(captions, list):
+                        asset['caption'] = '\n'.join(str(item) for item in captions)[:4096]
+                    elif isinstance(captions, str):
+                        asset['caption'] = captions[:4096]
+                self.image_extraction.assets.extend(extraction.assets)
+                self.image_extraction.skipped.extend(extraction.skipped)
+            if not images and ('![' in markdown or '<img' in markdown.lower()):
+                self.image_extraction.skipped.append({'reason': 'parser_image_resources_missing'})
+        except Exception:
+            self.image_extraction.skipped.append({'reason': 'mineru_images_invalid'})
