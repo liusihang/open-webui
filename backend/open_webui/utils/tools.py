@@ -1441,6 +1441,11 @@ async def set_terminal_servers(request: Request):
         if not connection.get('url'):
             continue
 
+        # Session schemas need the current verified caller, not an anonymous
+        # startup request or a shared credential/prompt cache.
+        if connection.get('auth_type') == 'session':
+            continue
+
         enabled = connection.get('enabled', True)
 
         base_url = get_terminal_server_url(connection)
@@ -1549,8 +1554,27 @@ async def get_terminal_tools(
     if not await has_connection_access(user, connection, user_group_ids):
         raise RuntimeError(f'Access denied to terminal {terminal_id}')
 
-    # Find the cached spec data for this terminal
-    terminal_servers = await get_terminal_servers(request)
+    if connection.get('auth_type') == 'session':
+        credentials = normalize_bearer_token(getattr(getattr(request.state, 'token', None), 'credentials', ''))
+        if not credentials:
+            raise RuntimeError(f"Terminal server '{terminal_id}' requires session credentials")
+        # Keep the result request-local. The token is only used for discovery
+        # and call headers; neither schema nor private prompt enters Redis.
+        terminal_servers = await get_tool_servers_data(
+            [
+                {
+                    'url': get_terminal_server_url(connection),
+                    'key': credentials,
+                    'auth_type': 'bearer',
+                    'path': connection.get('path', '/openapi.json'),
+                    'spec_type': 'url',
+                    'config': {'enable': True},
+                    'info': {'id': terminal_id, 'name': connection.get('name', '')},
+                }
+            ]
+        )
+    else:
+        terminal_servers = await get_terminal_servers(request)
     server_data = next((server for server in terminal_servers if server.get('id') == terminal_id), None)
     if server_data is None:
         raise RuntimeError(f"Terminal server '{terminal_id}' is unavailable")
