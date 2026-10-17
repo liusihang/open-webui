@@ -1,5 +1,19 @@
 # v0.12.3 + Intelligent UI validation
 
+## Acceptance follow-up (2026-10-17)
+
+- Fixed equality filters conflating a missing `null` cell with the literal string
+  `"null"`. Regression tests cover linked tables, charts and sum/count metrics,
+  while retaining non-null numeric/boolean string normalization.
+- Routed native UI system copy, errors, plural row counts and accessible labels
+  through the existing i18n context. Added Simplified/Traditional Chinese copy and
+  retained English fallback; model-provided titles, labels and data remain unchanged.
+- The follow-up passed 201 frontend tests, 20 mounted interaction tests and 269
+  isolated Python tests with no skips. Chromium checks used the actual components,
+  authenticated state route and SQLite in a dedicated synthetic host, including
+  the null-filter regression and Chinese rendering. This is not a full-app chat
+  journey, production deployment, or production PostgreSQL migration acceptance.
+
 ## Verified locally
 
 - Official v0.12.3 is an ancestor of the integration branch through a real merge;

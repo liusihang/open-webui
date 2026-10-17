@@ -1,5 +1,7 @@
 <script lang="ts">
 	import { getContext, type Snippet } from 'svelte';
+	import type { Readable } from 'svelte/store';
+	import type { i18n as I18n } from 'i18next';
 	import { chartData, chartPointCount } from '$lib/utils/intelligent-ui/data';
 	import DataView from './DataView.svelte';
 	import MatrixChart from './MatrixChart.svelte';
@@ -10,6 +12,7 @@
 		children
 	}: { element: { type: string; props: any; children?: string[] }; children?: Snippet } = $props();
 	const context = getContext<IntelligentUIBlockContext>(INTELLIGENT_UI_BLOCK);
+	const i18n = getContext<Readable<I18n>>('i18n');
 	let componentProps = $derived(element.props);
 	// Include the control definition so edited/regenerated content never inherits an incompatible value.
 	let controlKey = $derived(
@@ -37,7 +40,7 @@
 	);
 	let numberDraft = $state<string | null>(null);
 	let sending = $state(false);
-	let sendError = $state('');
+	let sendError = $state(false);
 	let data: any[] = $derived(
 		element.type === 'Chart' && context.spec()
 			? chartData(context.spec()!, componentProps, context.read)
@@ -90,13 +93,13 @@
 	async function followUp() {
 		if (sending || !context.canFollowUp() || !componentProps.followUp) return;
 		sending = true;
-		sendError = '';
+		sendError = false;
 		try {
 			await context.followUp(
 				`${componentProps.followUp}\n\nSelected parameter: ${componentProps.title} = ${value}${componentProps.unit ? ` ${componentProps.unit}` : ''}.`
 			);
 		} catch {
-			sendError = 'The follow-up could not be sent. Please try again.';
+			sendError = true;
 		} finally {
 			sending = false;
 		}
@@ -128,7 +131,7 @@
 			</h3>{/if}
 		<div
 			role="tablist"
-			aria-label={componentProps.title ?? 'View options'}
+			aria-label={componentProps.title ?? $i18n.t('View options')}
 			class="flex gap-1 overflow-x-auto rounded-lg bg-gray-100 p-1 dark:bg-gray-800"
 		>
 			{#each componentProps.__tabs ?? [] as tab, index}<button
@@ -242,14 +245,15 @@
 		</svg>
 		<details class="text-xs text-gray-500 dark:text-gray-400">
 			<summary class="cursor-pointer rounded focus-visible:outline-indigo-500"
-				>View values{componentProps.unit ? ` (${componentProps.unit})` : ''}</summary
+				>{$i18n.t('View values')}{componentProps.unit ? ` (${componentProps.unit})` : ''}</summary
 			>
 			<div class="mt-2 max-h-60 overflow-auto">
 				<table class="w-full text-left">
 					<thead
 						><tr
-							><th scope="col" class="py-1">Label</th><th scope="col" class="py-1 text-right"
-								>Value</th
+							><th scope="col" class="py-1">{$i18n.t('Label')}</th><th
+								scope="col"
+								class="py-1 text-right">{$i18n.t('Value')}</th
 							></tr
 						></thead
 					><tbody
@@ -325,12 +329,14 @@
 		</label>
 		<p class="text-xs text-gray-500 dark:text-gray-400">
 			{componentProps.stateKey
-				? 'Updates linked views locally. No model request is sent.'
-				: 'Adjusting this control stays local. It does not recalculate the model’s answer.'}
+				? $i18n.t('Updates linked views locally. No model request is sent.')
+				: $i18n.t(
+						'Adjusting this control stays local. It does not recalculate the model’s answer.'
+					)}
 		</p>
 		{#if componentProps.followUp}
 			<p class="whitespace-pre-wrap text-sm text-gray-600 dark:text-gray-300">
-				<span class="font-medium">Follow-up question:</span>
+				<span class="font-medium">{$i18n.t('Follow-up question:')}</span>
 				{componentProps.followUp}
 			</p>
 			<button
@@ -338,16 +344,19 @@
 				onclick={followUp}
 				disabled={!context.canFollowUp() || sending}
 				class="rounded-lg bg-indigo-600 px-3 py-2 text-sm font-medium text-white hover:bg-indigo-500 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-indigo-500 disabled:cursor-not-allowed disabled:opacity-40"
-				>{sending ? 'Sending…' : 'Ask model with this value'}</button
+				>{sending ? $i18n.t('Sending…') : $i18n.t('Ask model with this value')}</button
 			>{/if}
 		{#if sendError}<p role="alert" class="text-xs text-red-600 dark:text-red-400">
-				{sendError}
+				{$i18n.t('The follow-up could not be sent. Please try again.')}
 			</p>{/if}
 	</section>
 {/if}
 
 {#if element.type === 'Chart' && pointCount > data.length}
 	<p class="mt-2 text-xs text-gray-500 dark:text-gray-400" role="status">
-		Showing first {data.length} of {pointCount} matching points.
+		{$i18n.t('Showing first {{shown}} of {{total}} matching points.', {
+			shown: data.length,
+			total: pointCount
+		})}
 	</p>
 {/if}

@@ -101,6 +101,42 @@ function spec(): Spec {
 }
 
 describe('intelligent-ui linked local data', () => {
+	it.each(['null', 7, true, false])(
+		'excludes missing cells from equality filtering while normalizing non-null %s values',
+		(value) => {
+			const source = spec();
+			source.datasets!.samples = [
+				{ id: 'missing', name: 'Missing', group: null, score: 100 },
+				{ id: 'absent', name: 'Absent', score: 200 },
+				{ id: 'literal', name: 'Literal', group: String(value), score: 10 },
+				{ id: 'typed', name: 'Typed', group: value, score: 20 }
+			];
+			const select = source.elements.group;
+			if (select.type !== 'Select') throw new Error('Expected Select fixture');
+			select.props.value = String(value);
+			select.props.options = [
+				{ label: 'All groups', value: 'all' },
+				{ label: 'Selected group', value: String(value) }
+			];
+			const equality: Filter[] = [{ field: 'group', op: 'eq', stateKey: 'group' }];
+			const view = parseIntelligentUI(JSON.stringify(source), true);
+			expect(view.error).toBeNull();
+			expect(
+				tableRows(view.spec!, { ...table, filters: equality }, defaults).map((row) => row.id)
+			).toEqual(['literal', 'typed']);
+			expect(chartData(view.spec!, { ...chart, filters: equality }, defaults)).toEqual([
+				{ label: 'Literal', value: 10 },
+				{ label: 'Typed', value: 20 }
+			]);
+			expect(
+				metricValue(view.spec!, { ...metric, aggregation: 'sum', filters: equality }, defaults)
+			).toBe(30);
+			expect(
+				metricValue(view.spec!, { ...metric, aggregation: 'count', filters: equality }, defaults)
+			).toBe(2);
+		}
+	);
+
 	it('updates a chart, metric, and table together from real Select and NumberInput state', () => {
 		const parsed = parseIntelligentUI(JSON.stringify(spec()), true);
 		expect(parsed.error).toBeNull();

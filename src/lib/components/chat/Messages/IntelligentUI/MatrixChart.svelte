@@ -1,4 +1,8 @@
 <script lang="ts">
+	import { getContext } from 'svelte';
+	import type { Readable } from 'svelte/store';
+	import type { i18n as I18n } from 'i18next';
+	const i18n = getContext<Readable<I18n>>('i18n');
 	let { view, data }: { view: any; data: any[] } = $props();
 	let minX = $derived(Math.min(0, ...data.map((point) => Number(point.x)).filter(Number.isFinite)));
 	let maxX = $derived(Math.max(0, ...data.map((point) => Number(point.x)).filter(Number.isFinite)));
@@ -83,18 +87,18 @@
 			{/if}
 		</svg>
 	{:else}<p class="rounded-lg bg-gray-50 p-4 text-sm text-gray-500 dark:bg-gray-800">
-			No matching chart data
+			{$i18n.t('No matching chart data')}
 		</p>{/if}
 	<details class="text-xs text-gray-500 dark:text-gray-400">
 		<summary class="cursor-pointer rounded focus-visible:outline-indigo-500"
-			>View values{view.unit ? ` (${view.unit})` : ''}</summary
+			>{$i18n.t('View values')}{view.unit ? ` (${view.unit})` : ''}</summary
 		>
 		<div class="mt-2 max-h-60 overflow-auto">
 			<table class="w-full text-left">
 				<thead
 					><tr
 						><th scope="col">X</th><th scope="col">Y</th>{#if view.kind === 'heatmap'}<th
-								scope="col">Value</th
+								scope="col">{$i18n.t('Value')}</th
 							>{/if}</tr
 					></thead
 				><tbody

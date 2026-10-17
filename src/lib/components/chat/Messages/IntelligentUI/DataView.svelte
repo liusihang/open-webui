@@ -1,9 +1,12 @@
 <script lang="ts">
 	import { getContext } from 'svelte';
+	import type { Readable } from 'svelte/store';
+	import type { i18n as I18n } from 'i18next';
 	import { metricValue, tableRows } from '$lib/utils/intelligent-ui/data';
 	import { INTELLIGENT_UI_BLOCK, type IntelligentUIBlockContext } from './context';
 	let { kind, view }: { kind: string; view: any } = $props();
 	const context = getContext<IntelligentUIBlockContext>(INTELLIGENT_UI_BLOCK);
+	const i18n = getContext<Readable<I18n>>('i18n');
 	const format = (value: unknown) =>
 		value === null || value === undefined
 			? '—'
@@ -60,22 +63,24 @@
 		{#if view.description}<p class="mt-2 text-xs text-gray-500 dark:text-gray-400">
 				{view.description}
 			</p>{/if}
-		{#if metric === null}<p class="mt-1 text-xs text-gray-500">No matching numeric data</p>{/if}
+		{#if metric === null}<p class="mt-1 text-xs text-gray-500">
+				{$i18n.t('No matching numeric data')}
+			</p>{/if}
 	</section>
 {:else}
 	<section class="min-w-0 space-y-3" data-table={view.__key}>
 		<div class="flex flex-wrap items-center justify-between gap-2">
 			<h3 class="text-sm font-semibold text-gray-900 dark:text-gray-100">{view.title}</h3>
 			<span aria-live="polite" class="text-xs text-gray-500"
-				>{rows.length} {rows.length === 1 ? 'row' : 'rows'}</span
+				>{$i18n.t('{{count}} row', { count: rows.length })}</span
 			>
 		</div>
 		{#if view.searchable}<label class="block"
-				><span class="sr-only">Search {view.title}</span><input
+				><span class="sr-only">{$i18n.t('Search {{title}}', { title: view.title })}</span><input
 					type="search"
 					value={search}
 					maxlength="160"
-					placeholder="Search table…"
+					placeholder={$i18n.t('Search table…')}
 					class="w-full rounded-lg border border-gray-200 bg-white px-3 py-2 text-sm text-gray-900 focus:border-indigo-500 focus:outline-none dark:border-gray-700 dark:bg-gray-900 dark:text-gray-100"
 					oninput={(event) =>
 						context.write(`search:${view.__key}`, event.currentTarget.value.slice(0, 160))}
@@ -86,7 +91,8 @@
 				<caption class="sr-only">{view.title}</caption><thead
 					class="sticky top-0 bg-gray-50 text-xs text-gray-600 dark:bg-gray-800 dark:text-gray-300"
 					><tr>
-						{#if view.selectable}<th scope="col" class="p-3"><span class="sr-only">Select</span></th
+						{#if view.selectable}<th scope="col" class="p-3"
+								><span class="sr-only">{$i18n.t('Select')}</span></th
 							>{/if}
 						{#each view.columns as column}<th
 								scope="col"
@@ -120,7 +126,10 @@
 									><input
 										type="radio"
 										name={`${view.__scope}-${view.__key}-selection`}
-										aria-label={`Select row ${index + 1} in ${view.title}`}
+										aria-label={$i18n.t('Select row {{number}} in {{title}}', {
+											number: index + 1,
+											title: view.title
+										})}
 										checked={selected === String(row[view.rowKey])}
 										class="accent-indigo-600"
 										onchange={() =>
@@ -135,13 +144,14 @@
 				>
 			</table>
 			{#if rows.length === 0}<p class="p-5 text-center text-sm text-gray-500">
-					No matching rows
+					{$i18n.t('No matching rows')}
 				</p>{/if}
 		</div>
 		{#if view.selectable && selected !== ''}<button
 				type="button"
 				class="rounded text-xs font-medium text-indigo-600 focus-visible:outline-indigo-500 dark:text-indigo-400"
-				onclick={() => context.writeShared(view.selectionKey, '')}>Clear selection</button
+				onclick={() => context.writeShared(view.selectionKey, '')}
+				>{$i18n.t('Clear selection')}</button
 			>{/if}
 	</section>
 {/if}

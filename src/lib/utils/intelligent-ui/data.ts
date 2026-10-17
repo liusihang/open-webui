@@ -125,7 +125,7 @@ export function filteredRows(
 			if (current === undefined) return false;
 			switch (filter.op) {
 				case 'eq':
-					return String(current) === String(value);
+					return current !== null && String(current) === String(value);
 				case 'gte':
 					return finite(current) && finite(value) && current >= value;
 				case 'lte':

@@ -122,6 +122,48 @@ const tableCount = (root: HTMLElement) =>
 const barCount = (root: HTMLElement) => root.querySelectorAll('svg rect').length;
 
 describe('shared local data views', () => {
+	it('excludes null categories from linked table, chart and metric equality filters', () => {
+		const spec: any = structuredClone(linkedSpec);
+		spec.datasets.products = [
+			{ id: 'missing', region: null, price: 100, score: 1 },
+			{ id: 'literal', region: 'null', price: 20, score: 2 }
+		];
+		spec.elements.region.props.value = 'null';
+		spec.elements.region.props.options = [
+			{ label: 'All regions', value: 'all' },
+			{ label: 'Literal null', value: 'null' }
+		];
+		const root = setup(stream(spec));
+		expect(tableCount(root)).toBe(1);
+		expect(barCount(root)).toBe(1);
+		expect(total(root)).toBe('20');
+		expect(root.querySelector('[data-table] tbody')?.textContent).not.toContain('100');
+	});
+	it('uses Chinese system copy and accessible labels without translating model data', async () => {
+		const spec: any = structuredClone(linkedSpec);
+		spec.elements.slider.props.followUp = 'Keep this model-generated question.';
+		const root = setup(stream(spec), {
+			locale: 'zh-CN',
+			onFollowUp: async () => {
+				throw new Error('Fixture failure');
+			}
+		});
+		expect(root.textContent).toContain('3 行');
+		expect(root.querySelector('input[type="search"]')?.getAttribute('placeholder')).toBe(
+			'搜索表格…'
+		);
+		expect(root.querySelector('input[type="radio"]')?.getAttribute('aria-label')).toBe(
+			'选择 Products 中的第 1 行'
+		);
+		expect(root.textContent).toContain('Products');
+		expect(root.textContent).toContain('追问：');
+		const action = [...root.querySelectorAll('button')].find((button) =>
+			button.textContent?.includes('用此值向模型提问')
+		)!;
+		action.click();
+		await vi.waitFor(() => expect(root.textContent).toContain('追问发送失败，请重试。'));
+		expect(root.textContent).toContain('Keep this model-generated question.');
+	});
 	it('links selection and numeric controls to table, chart and metric without model calls', async () => {
 		const onFollowUp = vi.fn();
 		const onWrite = vi.fn();

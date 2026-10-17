@@ -205,7 +205,7 @@
 				snapshot.messageId,
 				snapshot.state
 			),
-		() => toast.error('Could not save interactive view state.')
+		() => toast.error($i18n.t('Could not save interactive view state.'))
 	);
 	setContext<IntelligentUIHost>(INTELLIGENT_UI_HOST, {
 		canWrite: canWriteIntelligentUI,

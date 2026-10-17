@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { render } from 'svelte/server';
 import IntelligentUIBlock from './IntelligentUIBlock.svelte';
+import { createTestI18n } from './test-i18n';
 
 const block = (type: string, props: Record<string, unknown>) =>
 	[
@@ -8,11 +9,33 @@ const block = (type: string, props: Record<string, unknown>) =>
 		JSON.stringify({ op: 'add', path: '/elements/view', value: { type, props, children: [] } })
 	].join('\n');
 
-function html(source: string, done = true) {
-	return render(IntelligentUIBlock, { props: { source, done, blockId: 'message:block:0' } }).body;
+function html(source: string, done = true, locale = 'en-US') {
+	return render(IntelligentUIBlock, {
+		props: { source, done, blockId: 'message:block:0' },
+		context: new Map([['i18n', createTestI18n(locale)]])
+	}).body;
 }
 
 describe('trusted Intelligent UI rendering', () => {
+	it.each([
+		['zh-CN', '交互视图', '查看数据', '正在生成交互视图…'],
+		['zh-TW', '互動檢視', '檢視資料', '正在產生互動檢視…']
+	])(
+		'localizes system labels and pending state with the bundled %s dictionary',
+		(locale, title, data, pending) => {
+			const result = html('', false, locale);
+			expect(result).toContain(title);
+			expect(result).toContain(data);
+			expect(result).toContain(pending);
+			expect(result).not.toContain('Preparing interactive view');
+		}
+	);
+	it('localizes the invalid-data fallback without translating or executing model content', () => {
+		const result = html(block('Iframe', { src: '<script>example</script>' }), true, 'zh-CN');
+		expect(result).toContain('无法显示此交互视图。下方保留了原始数据。');
+		expect(result).toContain('Iframe');
+		expect(result).not.toContain('<script>example</script>');
+	});
 	it('renders a chart through json-render with accessible exact values', () => {
 		const result = html(
 			block('Chart', {
