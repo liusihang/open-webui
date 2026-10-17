@@ -3,6 +3,7 @@
 import base64
 import io
 import math
+import re
 from numbers import Real
 
 import aiohttp
@@ -111,3 +112,60 @@ class EvidenceEmbeddingAdapter:
             async with session.post(url, headers=headers, json=payload, ssl=AIOHTTP_CLIENT_SESSION_SSL) as response:
                 response.raise_for_status()
                 return await response.json()
+
+
+class LegacyReadEmbeddingAdapter(EvidenceEmbeddingAdapter):
+    """Explicit raw-v1 query compatibility, never an index-writing encoder.
+
+    These vectors have observed compatibility, not a verified weights revision.
+    A separately fingerprinted, server-registered profile binds source metadata
+    and bounded comparison evidence without relabelling old vectors as verified.
+    """
+
+    def validate_space(self, space, *, image=False, document=False):
+        config = space.encoding_config or {}
+        if (
+            document
+            or space.verification_status != 'legacy_read_only'
+            or config.get('protocol') != 'legacy_raw_v1'
+            or config.get('engine') != 'openai'
+            or config.get('model') != self.model
+            or space.model_revision is not None
+            or config.get('text_api_base_url') != self.url
+            or config.get('query_prefix') is not None
+            or not isinstance(config.get('source_metadata_hashes'), list)
+            or not config.get('source_metadata_hashes')
+            or any(not isinstance(h, str) or not re.fullmatch('[0-9a-f]{64}', h)
+                   for h in config.get('source_metadata_hashes', []))
+            or not re.fullmatch('[0-9a-f]{64}', str(config.get('compatibility_evidence_sha256') or ''))
+            or not space.active
+            or space.config_fingerprint != self.config_fingerprint
+            or space.embedding_model != self.model
+            or space.embedding_dim != self.dimensions
+            or space.distance_metric != 'cosine'
+        ):
+            raise ValueError('legacy profile is unavailable, incompatible or read-only')
+        if not getattr(space, 'supports_' + ('image_query' if image else 'text_query')):
+            raise ValueError('legacy profile does not support this query modality')
+
+
+class QueryEmbeddingRouter:
+    """Select a query encoder by exact space identity; no global encoder fallback."""
+
+    def __init__(self, adapters):
+        self.adapters = dict(adapters)
+
+    def _adapter(self, space):
+        adapter = self.adapters.get(space.id)
+        if adapter is None:
+            raise ValueError('no compatible query encoder for this space')
+        return adapter
+
+    def validate_space(self, space, *, image=False, document=False):
+        if document:
+            raise ValueError('query router cannot index documents')
+        return self._adapter(space).validate_space(space, image=image)
+
+    async def encode(self, *, space, document=False, **kwargs):
+        self.validate_space(space, image=kwargs.get('image_bytes') is not None, document=document)
+        return await self._adapter(space).encode(space=space, **kwargs)

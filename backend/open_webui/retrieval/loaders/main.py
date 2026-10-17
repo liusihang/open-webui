@@ -787,6 +787,10 @@ class Loader:
             if USE_SLIM:
                 if file_ext == 'docx':
                     return DocxLoader(file_path)
+                if file_ext in ('pptx', 'xlsx'):
+                    from open_webui.retrieval.loaders.office_text import OfficeTextLoader
+
+                    return OfficeTextLoader(file_path, file_ext)
                 if file_ext == 'csv':
                     return CSVLoaderWithSummary(file_path, filename, self._detect_text_encoding(file_path))
                 if file_ext in ['htm', 'html']:

@@ -340,7 +340,7 @@ class EvidenceService:
                         Embedding.embedding_status == 'ready',
                         Embedding.content_hash == Evidence.content_hash,
                         Space.active.is_(True),
-                        Space.verification_status == 'verified',
+                        Space.verification_status.in_(('verified', 'legacy_read_only')),
                         Space.embedding_dim == 2048,
                         or_(
                             and_(Evidence.modality == 'text', Space.supports_text_evidence.is_(True)),
@@ -395,7 +395,7 @@ class EvidenceService:
             warnings.append('Bounded candidate scan exhausted after source/space filtering.')
         return ranking, warnings, succeeded, scores
 
-    async def _rankings(self, groups, refs, query_text, image_bytes, mime, user, count, seen_refs):
+    async def _rankings(self, groups, refs, query_text, image_bytes, mime, user, count, seen_refs, vector_scores=None):
         warnings, rankings, encoded, space_scores = [], [], {}, {}
         successful = 0
         for (_, collection), group in groups.items():
@@ -420,6 +420,8 @@ class EvidenceService:
                 merged[ref] = max(merged.get(ref, -math.inf), score)
         for scores in space_scores.values():
             rankings.append(sorted(scores, key=scores.get, reverse=True))
+        if vector_scores is not None:
+            vector_scores.update(space_scores)
         if self.lexical_enabled and query_text.strip():
             try:
                 if not self.lexical_factory:
@@ -470,6 +472,7 @@ class EvidenceService:
         user,
         resolved_scope,
         seen_refs=None,
+        include_vector_scores=False,
     ):
         self._validate_query(query_text, query_image_refs, modalities, count)
         scope = await self._scope(user, resolved_scope)
@@ -485,7 +488,14 @@ class EvidenceService:
             return {'items': [], 'warnings': []}
         if not groups and not (self.lexical_enabled and query_text.strip()):
             return {'items': [], 'warnings': ['No verified compatible vector space is available.']}
-        ranked, warnings = await self._rankings(groups, refs, query_text, image_bytes, mime, user, count, seen_refs)
+        vector_scores = {} if include_vector_scores else None
+        ranked, warnings = await self._rankings(
+            groups, refs, query_text, image_bytes, mime, user, count, seen_refs, vector_scores=vector_scores
+        )
+        warnings.extend(
+            'Legacy raw-v1 compatibility results; historical encoder revision is unverified.'
+            for group in groups.values() if group['space'].verification_status == 'legacy_read_only'
+        )
         # Revocation/update during a slow encoding/DB request wins before reranker/LLM exposure.
         final_scope = await self._scope(user, scope)
         final_rows = await self._rows(final_scope, refs=[ref for ref, _ in ranked], modalities=modalities)
@@ -494,6 +504,10 @@ class EvidenceService:
             if ref in final_rows:
                 item = self._item(final_rows[ref], final_scope)
                 item.update(score=score, score_type='rrf')
+                if vector_scores is not None:
+                    item['vector_scores'] = {
+                        space: scores[ref] for space, scores in vector_scores.items() if ref in scores
+                    }
                 items.append(item)
         items = await self._rerank(query_text, items)
         # A reranker can be slow as well; recheck on the final hand-off to the model.

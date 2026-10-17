@@ -52,8 +52,19 @@ async def compact_messages_for_request(
     system_prompt: str = '',
 ) -> tuple[list[dict], str | None, bool]:
     config = await _load_config()
-    if not config['enable']:
-        return messages, None, False
+    from open_webui.utils.native_compaction import uses_native_compaction
+
+    if (
+        not config['enable']
+        or model_id in config.get('summary_excluded_models', [])
+        or await uses_native_compaction(request, models.get(model_id) or {'id': model_id})
+    ):
+        # Disabled/native modes use the full transcript. Remove old text-only
+        # markers from the request copy so the tool loop cannot re-inject them.
+        return [
+            {key: value for key, value in message.items() if key not in {'contextSummary', 'context_summary'}}
+            for message in messages
+        ], None, False
 
     system_messages = [messages[0]] if messages and messages[0].get('role') == 'system' else []
     messages = messages[1:] if system_messages else messages
@@ -156,6 +167,13 @@ async def compact_chat_branch(request, user, chat: Any, model_id: str, models: d
     config = await _load_config()
     if not config['enable']:
         return {'ok': True, 'compacted': False, 'reason': 'disabled'}
+    if model_id in config.get('summary_excluded_models', []):
+        return {'ok': True, 'compacted': False, 'reason': 'text_summary_disabled_for_model'}
+
+    from open_webui.utils.native_compaction import uses_native_compaction
+
+    if await uses_native_compaction(request, models.get(model_id) or {'id': model_id}):
+        return {'ok': True, 'compacted': False, 'reason': 'native_compaction_runs_on_next_request'}
 
     chat_data = chat.chat or {}
     history = chat_data.get('history') or {}
@@ -207,6 +225,7 @@ async def _load_config() -> dict:
         'chat.context_compaction.token_cap',
         'chat.context_compaction.retention_percentage',
         'chat.context_compaction.prompt_template',
+        'chat.context_compaction.summary_excluded_models',
     )
     token_threshold = _parse_positive_int(values.get('chat.context_compaction.token_threshold')) or 80000
     return {
@@ -215,6 +234,7 @@ async def _load_config() -> dict:
         'token_cap': _parse_positive_int(values.get('chat.context_compaction.token_cap')) or token_threshold,
         'retention_percentage': _clamp_retention_percentage(values.get('chat.context_compaction.retention_percentage')),
         'prompt_template': values.get('chat.context_compaction.prompt_template', '') or '',
+        'summary_excluded_models': values.get('chat.context_compaction.summary_excluded_models') or [],
     }
 
 

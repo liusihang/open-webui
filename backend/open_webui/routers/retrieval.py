@@ -1294,6 +1294,9 @@ def can_merge_chunks(a: Document, b: Document) -> bool:
     if a.metadata.get('source') != b.metadata.get('source'):
         return False
 
+    if a.metadata.get('anchor') != b.metadata.get('anchor'):
+        return False
+
     a_file_id = a.metadata.get('file_id')
     b_file_id = b.metadata.get('file_id')
 
@@ -2915,6 +2918,14 @@ async def query_doc_handler(
     await _validate_collection_access([form_data.collection_name], user)
 
     try:
+        from open_webui.retrieval.integration import query_local_collection
+
+        local_result = await query_local_collection(
+            request, collection_name=form_data.collection_name, query=form_data.query,
+            count=form_data.k or config['rag.top_k'], user=user,
+        )
+        if local_result is not None:
+            return local_result
         if config['rag.enable_hybrid_search'] and (form_data.hybrid is None or form_data.hybrid):
             return await query_doc_with_hybrid_search(
                 collection_name=form_data.collection_name,

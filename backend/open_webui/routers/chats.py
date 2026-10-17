@@ -61,6 +61,7 @@ CHAT_CONFIG_KEYS = {
     'CONTEXT_COMPACTION_TOKEN_CAP': 'chat.context_compaction.token_cap',
     'CONTEXT_COMPACTION_RETENTION_PERCENTAGE': 'chat.context_compaction.retention_percentage',
     'CONTEXT_COMPACTION_PROMPT_TEMPLATE': 'chat.context_compaction.prompt_template',
+    'CONTEXT_COMPACTION_SUMMARY_EXCLUDED_MODELS': 'chat.context_compaction.summary_excluded_models',
     'ENABLE_TOOL_PERMISSIONS': 'chat.tool_permissions.enable',
     'ENABLE_TOOL_SEARCH': 'chat.tool_search.enable',
     'TOOL_SEARCH_DEFER_THRESHOLD': 'chat.tool_search.defer_threshold',
@@ -205,6 +206,7 @@ class ChatConfigForm(BaseModel):
     CONTEXT_COMPACTION_TOKEN_CAP: int | None = None
     CONTEXT_COMPACTION_RETENTION_PERCENTAGE: int | None = None
     CONTEXT_COMPACTION_PROMPT_TEMPLATE: str
+    CONTEXT_COMPACTION_SUMMARY_EXCLUDED_MODELS: list[str] = []
     ENABLE_TOOL_PERMISSIONS: bool = False
     ENABLE_TOOL_SEARCH: bool = False
     TOOL_SEARCH_DEFER_THRESHOLD: int = 400
@@ -266,6 +268,8 @@ async def get_chat_config_values() -> dict:
         config['CONTEXT_COMPACTION_TOKEN_CAP'] = config.get('CONTEXT_COMPACTION_TOKEN_THRESHOLD', 80000)
     if config.get('CONTEXT_COMPACTION_RETENTION_PERCENTAGE') is None:
         config['CONTEXT_COMPACTION_RETENTION_PERCENTAGE'] = 40
+    if config.get('CONTEXT_COMPACTION_SUMMARY_EXCLUDED_MODELS') is None:
+        config['CONTEXT_COMPACTION_SUMMARY_EXCLUDED_MODELS'] = []
     return config
 
 

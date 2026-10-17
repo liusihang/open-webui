@@ -20,7 +20,12 @@ from open_webui.models.retrieval_indexes import RetrievalIndexState as State
 from open_webui.retrieval.evidence import EvidenceService, resolve_scope
 from open_webui.retrieval.indexing import IndexingService
 from open_webui.retrieval.vector.async_client import ASYNC_VECTOR_DB_CLIENT
-from open_webui.retrieval.vector.embedding_adapter import MAX_IMAGE_BYTES, EvidenceEmbeddingAdapter
+from open_webui.retrieval.vector.embedding_adapter import (
+    MAX_IMAGE_BYTES,
+    EvidenceEmbeddingAdapter,
+    LegacyReadEmbeddingAdapter,
+    QueryEmbeddingRouter,
+)
 from PIL import Image
 from sqlalchemy import select
 
@@ -110,6 +115,47 @@ async def controlled_asset_reader(asset, *, root):
     return await asyncio.to_thread(read)
 
 
+async def _legacy_query_adapters(request, config):
+    versioned_suffix = '/qwen3vl-retrieval-v1/v1'
+    configured_url = (config.get('rag.openai.api_base_url') or '').rstrip('/')
+    if not (
+        config.get('rag.embedding_engine') == 'openai'
+        and configured_url.endswith(versioned_suffix)
+        and request is not None
+        and getattr(request.app.state, 'EMBEDDING_FUNCTION', None)
+    ):
+        return {}
+    from open_webui.retrieval.utils import get_embedding_function
+
+    raw_url = configured_url[:-len(versioned_suffix)] + '/v1'
+    async with get_async_db() as session:
+        spaces = (
+            await session.scalars(select(Space).where(
+                Space.active.is_(True), Space.verification_status == 'legacy_read_only',
+                Space.embedding_model == config.get('rag.embedding_model'), Space.embedding_dim == 2048,
+            ))
+        ).all()
+    adapters = {}
+    for space in spaces:
+        adapter = LegacyReadEmbeddingAdapter(
+            text_embedding_function=get_embedding_function(
+                'openai', space.embedding_model, getattr(request.app.state, 'ef', None),
+                raw_url, config.get('rag.openai.api_key') or '',
+                config.get('rag.embedding_batch_size') or 1,
+                enable_async=config.get('rag.enable_async_embedding', True),
+                concurrent_requests=config.get('rag.embedding_concurrent_requests') or 0,
+            ),
+            model=space.embedding_model, url=raw_url,
+            key=config.get('rag.openai.api_key') or '', config_fingerprint=space.config_fingerprint,
+        )
+        try:
+            adapter.validate_space(space)
+        except ValueError:
+            continue
+        adapters[space.id] = adapter
+    return adapters
+
+
 async def services(request, *, db=None, user=None):
     """Re-read settings per operation; an admin model change cannot reuse a stale encoder."""
     config = await Config.get_many(*SERVICE_CONFIG_KEYS)
@@ -188,6 +234,11 @@ async def services(request, *, db=None, user=None):
     )
     indexer = IndexingService(**kwargs)
 
+    # Read compatibility is per space. New uploads retain ONLY the selected
+    # verified adapter above; legacy profiles cannot become an indexing target.
+    adapters = {space_id: embedding} if embedding is not None else {}
+    adapters.update(await _legacy_query_adapters(request, config))
+
     async def rerank(query, items):
         from langchain_core.documents import Document
 
@@ -199,7 +250,9 @@ async def services(request, *, db=None, user=None):
         )
         return [i for i, _ in sorted(zip(items, scores), key=lambda pair: pair[1], reverse=True)]
 
-    evidence = EvidenceService(**kwargs, reranker=rerank)
+    evidence = EvidenceService(
+        **{**kwargs, 'embedding': QueryEmbeddingRouter(adapters) if adapters else None}, reranker=rerank
+    )
     return (
         indexer,
         evidence,
@@ -345,6 +398,50 @@ async def split_external_scope(scope):
         else:
             local.append(identity)
     return ResolvedScope(tuple(local), scope.file_ids), external
+
+
+def collection_search_result(items):
+    """Keep pgvector's normalized cosine scores, never substitute RRF values.
+
+    RRF determines order across spaces. A score belongs only to the explicitly
+    named space; if one evidence has several mappings choose a deterministic
+    space rather than compare cosines across incompatible encoders. Lexical-only
+    hits have no cosine score and do not enter this legacy vector response.
+    """
+    from open_webui.retrieval.vector.main import SearchResult
+
+    ids, distances, documents, metadatas = [], [], [], []
+    for item in items:
+        scores = item.get('vector_scores') or {}
+        if not scores:
+            continue
+        space_id = sorted(scores)[0]
+        similarity = scores[space_id]
+        ids.append(item['evidence_ref'])
+        distances.append(similarity)
+        documents.append(item['content'])
+        metadatas.append({
+            **item['source'], 'evidence_ref': item['evidence_ref'], 'modality': item['modality'],
+            'citation_key': item['citation_key'], 'score_type': 'normalized_cosine_similarity',
+            'vector_space_id': space_id, 'rrf_score': item['score'], 'rank_type': 'rrf',
+        })
+    return SearchResult(ids=[ids], distances=[distances], documents=[documents], metadatas=[metadatas])
+
+
+async def query_local_collection(request, *, collection_name, query, count, user):
+    """The public query/doc and Native knowledge tools share local-space routing."""
+    from open_webui.models.knowledge import Knowledges
+
+    knowledge = await Knowledges.get_knowledge_by_id(collection_name)
+    if not knowledge or (knowledge.meta or {}).get('source') == 'external':
+        return None  # Preserve the official nonlocal/external route.
+    scope = await resolve_scope(user, knowledge_ids=(collection_name,))
+    _, evidence, _, _ = await services(request, user=user)
+    result = await evidence.search(
+        query_text=query, modalities=('text',), count=min(max(count, 1), 50),
+        user=user, resolved_scope=scope, include_vector_scores=True,
+    )
+    return collection_search_result(result['items'])
 
 
 def citation_sources(items):

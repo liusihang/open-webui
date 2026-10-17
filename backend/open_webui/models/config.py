@@ -53,6 +53,8 @@ API_CONFIG_FIELDS = (
     'api_version',
     'extra_params',
     'passthrough_params',
+    'native_compaction_models',
+    'native_compaction_protocol',
 )
 
 
