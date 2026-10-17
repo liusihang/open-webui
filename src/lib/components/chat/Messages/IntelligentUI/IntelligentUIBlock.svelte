@@ -1,12 +1,14 @@
 <script lang="ts">
 	import { getContext, setContext } from 'svelte';
 	import { CatalogRenderer } from '@json-render/svelte';
-	import { parseIntelligentUI } from '$lib/utils/intelligent-ui';
+	import { parseIntelligentUI, intelligentUIHash } from '$lib/utils/intelligent-ui';
+	import { resolveSharedValue } from '$lib/utils/intelligent-ui/data';
 	import Element from './Element.svelte';
 	import {
 		INTELLIGENT_UI_HOST,
 		INTELLIGENT_UI_BLOCK,
 		type IntelligentUIHost,
+		type InteractionValue,
 		type InteractionState
 	} from './context';
 
@@ -20,37 +22,80 @@
 	let showSource = $state(false);
 	const registry = {
 		Stack: Element,
+		Grid: Element,
+		Tabs: Element,
+		DataTable: Element,
+		MetricCard: Element,
+		Select: Element,
+		NumberInput: Element,
 		Chart: Element,
 		ComparisonCards: Element,
 		Explanation: Element,
 		ParameterSlider: Element
 	};
 	let parsed = $derived(parseIntelligentUI(source, done));
-	let renderSpec = $derived(
-		parsed.spec
-			? {
-					...parsed.spec,
-					elements: Object.fromEntries(
-						Object.entries(parsed.spec.elements).map(([key, element]) => [
-							key,
-							{ ...element, props: { ...element.props, __key: key } }
-						])
-					)
-				}
-			: null
-	);
-
+	const read = (key: string, fallback: InteractionValue): InteractionValue => {
+		const value = local[key] ?? host?.read(blockId)?.[key];
+		return typeof value === typeof fallback &&
+			(typeof value !== 'number' || Number.isFinite(value)) &&
+			(typeof value !== 'string' || (value.length <= 256 && !/[\u0000-\u001f\u007f]/.test(value)))
+			? value
+			: fallback;
+	};
+	const write = (key: string, value: InteractionValue) => {
+		if (
+			key.length > 512 ||
+			(typeof value === 'string' && (value.length > 256 || /[\u0000-\u001f\u007f]/.test(value))) ||
+			(typeof value === 'number' && !Number.isFinite(value))
+		)
+			return;
+		local = { ...host?.read(blockId), ...local, [key]: value };
+		if (host?.canWrite()) host.write(blockId, { ...local });
+	};
+	let renderSpec = $derived.by(() => {
+		if (!parsed.spec) return null;
+		return {
+			...parsed.spec,
+			elements: Object.fromEntries(
+				Object.entries(parsed.spec.elements).map(([key, element]) => {
+					const tabs =
+						element.type === 'Tabs'
+							? element.children.map((child, index) => ({
+									id: child,
+									label: element.props.labels[index]
+								}))
+							: undefined;
+					const requested = tabs ? read(`tab:${key}`, tabs[0]?.id ?? '') : undefined;
+					const selected = tabs?.find((tab) => tab.id === requested)?.id ?? tabs?.[0]?.id;
+					return [
+						key,
+						{
+							...element,
+							...(tabs ? { children: selected ? [selected] : [] } : {}),
+							props: {
+								...element.props,
+								__key: key,
+								__scope: intelligentUIHash(blockId),
+								...(tabs ? { __tabs: tabs, __selected: selected } : {})
+							}
+						}
+					];
+				})
+			)
+		};
+	});
 	setContext(INTELLIGENT_UI_BLOCK, {
-		read: (key: string, fallback: number | boolean) => {
-			const value = local[key] ?? host?.read(blockId)?.[key];
-			return typeof value === typeof fallback &&
-				(typeof value !== 'number' || Number.isFinite(value))
-				? value
-				: fallback;
-		},
-		write: (key: string, value: number | boolean) => {
-			local = { ...host?.read(blockId), ...local, [key]: value };
-			if (host?.canWrite()) host.write(blockId, { ...local });
+		spec: () => parsed.spec,
+		read,
+		write,
+		shared: (stateKey: string) =>
+			parsed.spec ? resolveSharedValue(parsed.spec, stateKey, read) : undefined,
+		writeShared: (stateKey: string, value: InteractionValue) => {
+			if (!parsed.spec) return;
+			const normalized = resolveSharedValue(parsed.spec, stateKey, (key, fallback) =>
+				key === `shared:${stateKey}` ? value : read(key, fallback)
+			);
+			if (normalized !== undefined) write(`shared:${stateKey}`, normalized);
 		},
 		canFollowUp: () => Boolean(done && !parsed.error && host?.canFollowUp()),
 		followUp: async (prompt: string) => {

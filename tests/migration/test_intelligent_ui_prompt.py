@@ -35,7 +35,19 @@ class IntelligentUIPromptTests(unittest.TestCase):
 
     def test_catalog_and_fallback_documented(self):
         prompt = MODULE.INTELLIGENT_UI_PROMPT
-        for component in ['Stack', 'Chart', 'ComparisonCards', 'Explanation', 'ParameterSlider']:
+        for component in [
+            'Stack',
+            'Grid',
+            'Tabs',
+            'Chart',
+            'ComparisonCards',
+            'Explanation',
+            'ParameterSlider',
+            'Select',
+            'NumberInput',
+            'DataTable',
+            'MetricCard',
+        ]:
             self.assertIn(component, prompt)
         self.assertIn('fallback', prompt)
         self.assertIn('never calls the model', prompt)

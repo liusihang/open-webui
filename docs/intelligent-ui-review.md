@@ -7,7 +7,9 @@ Reviewed against the Open WebUI v0.12.3 integration on 2026-10-17.
 No blocking issue remains in the reviewed code and focused tests. This review
 covered the parser, native component renderer, Markdown and Responses rendering
 integration, opt-in prompt, interaction permissions, persistence, and follow-up
-submission guards. It does not constitute a production deployment validation.
+submission guards. The expanded review also covered Grid, Tabs, DataTable,
+MetricCard, scatter/heatmap charts, Select, NumberInput, and linked local controls.
+It does not constitute a production deployment validation.
 
 The implementation uses the actual `@json-render/svelte` `CatalogRenderer` with a
 fixed native registry. It does not execute generated JavaScript or HTML. Exact
@@ -26,6 +28,14 @@ question is visible before submission. Read-only views can explore controls
 without persisting state or submitting a model request. Invalid specifications
 fall back to escaped source data.
 
+Linked controls operate on bounded datasets within one UI fence. Shared values
+update tables, charts, and fixed count/sum/mean/min/max aggregates without a model
+request. Separate fences retain independent state. Empty counts return zero;
+other aggregates with no matching numeric data show a no-data result. Invalid
+restored options fall back to declared defaults, and numeric controls respect
+their range and step. Table search and sorting are local, with stable ordering
+and absent values last. Tabs support keyboard navigation and restored selection.
+
 ## Verified corrections
 
 - Owner chats remain writable after reload even when the API labels them
@@ -42,20 +52,31 @@ fall back to escaped source data.
   target after awaiting persistence.
 - Oversized integers fail state validation cleanly rather than overflowing the
   finite-number check.
+- Selectable row IDs reject empty values and collisions after string
+  normalization, including numeric/string collisions. Duplicate heatmap
+  coordinates are rejected rather than silently overlapped or aggregated.
+- Persistable option and selection strings reject control characters consistently
+  with the backend. Nonselectable tables cannot shadow a shared selection provider.
+- NumberInput retains partially typed values until change, blur, or Enter, then
+  normalizes the committed value and updates linked controls. Sequential typing
+  is covered by a mounted regression.
+- Dataset charts disclose when they show the first 128 matching points while a
+  table or aggregate includes more rows.
 
 ## Independently observed test results
 
-- Parser and bounds: **75 passed**
-- Markdown streaming seam: **5 passed**
+- Parser and bounds: **102 passed**
+- Dataset filtering, chart conversion, aggregation, sorting, and state: **39 passed**
+- Markdown streaming seam: **6 passed**
 - Server-rendered native components: **6 passed**
 - Captured-target persistence queue: **4 passed**
 - Ownership/read-only permissions: **3 passed**
-- Mounted Svelte/jsdom interactions: **7 passed**
+- Mounted Svelte/jsdom interactions: **18 passed**
 - Python opt-in prompt tests: **5 passed**
-- Python state validator and atomic-update method tests: **6 passed**
+- Python state validator and atomic-update method tests: **7 passed**
 - `git diff --check`: passed
 
-Total: **100 frontend tests and 11 Python tests passed**. The Python atomic-update
+Total: **178 frontend tests and 12 Python tests passed**. The Python atomic-update
 tests execute the actual method extracted from the source with mocked storage;
 they are not live database integration tests. The final visible follow-up label
 was also inspected as escaped Svelte text.

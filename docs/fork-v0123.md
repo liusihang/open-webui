@@ -48,5 +48,6 @@ upgrade on a copy of the actual deployment first, particularly if it uses native
 Responses, OnlyOffice, external parsers, or existing evidence indexes.
 
 Intelligent UI is optional and defaults to off. It adds native Svelte rendering
-and an explicit presentation prompt without installing a community Python plugin
+and an explicit presentation prompt, including bounded linked tables/charts/metrics,
+without installing a community Python plugin
 or relaxing iframe permissions. See its guide and the validation report.

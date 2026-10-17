@@ -4,6 +4,7 @@
 	import { INTELLIGENT_UI_HOST, type IntelligentUIHost, type InteractionState } from './context';
 	let {
 		initialSource,
+		secondSource = '{"op":"add","path":"/root","value":"explanation"}\n{"op":"add","path":"/elements/explanation","value":{"type":"Explanation","props":{"title":"Second view","content":"Second explanation"},"children":[]}}',
 		initialDone = true,
 		writable = true,
 		saved = {},
@@ -11,6 +12,7 @@
 		onFollowUp = async () => {}
 	}: {
 		initialSource: string;
+		secondSource?: string;
 		initialDone?: boolean;
 		writable?: boolean;
 		saved?: Record<string, InteractionState>;
@@ -35,9 +37,5 @@
 <p>Text before the first view.</p>
 <IntelligentUIBlock {source} {done} blockId="first" />
 <p>Text between the two views.</p>
-<IntelligentUIBlock
-	source={'{"op":"add","path":"/root","value":"explanation"}\n{"op":"add","path":"/elements/explanation","value":{"type":"Explanation","props":{"title":"Second view","content":"Second explanation"},"children":[]}}'}
-	done={true}
-	blockId="second"
-/>
+<IntelligentUIBlock source={secondSource} done={true} blockId="second" />
 <p>Text after the second view.</p>

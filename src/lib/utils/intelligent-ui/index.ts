@@ -1,12 +1,55 @@
+import {
+	chartData,
+	metricValue,
+	tableRows,
+	type BarLinePoint,
+	type ScatterPoint,
+	type HeatmapPoint
+} from './data';
+
 /** The deliberately small, data-only subset accepted from model-generated UI fences. */
+export type DatasetCell = string | number | boolean | null;
+export type DatasetRow = Record<string, DatasetCell>;
+export type Filter = {
+	field: string;
+	op: 'eq' | 'gte' | 'lte' | 'contains';
+	stateKey: string;
+	ignoreValue?: string;
+};
 export type StackProps = { title?: string };
-export type ChartProps = {
-	title: string;
-	description?: string;
+export type GridProps = { title?: string; columns: number };
+export type TabsProps = { title?: string; labels: string[] };
+export type ChartKind = 'bar' | 'line' | 'scatter' | 'heatmap';
+type ChartCommonProps = { title: string; description?: string; unit?: string };
+export type BarLineChartProps = ChartCommonProps & {
 	kind: 'bar' | 'line';
 	data: { label: string; value: number }[];
-	unit?: string;
+	dataSource?: never;
 };
+export type ScatterChartProps = ChartCommonProps & {
+	kind: 'scatter';
+	data: { x: number; y: number; label?: string }[];
+	dataSource?: never;
+};
+export type HeatmapChartProps = ChartCommonProps & {
+	kind: 'heatmap';
+	data: { x: string; y: string; value: number }[];
+	dataSource?: never;
+};
+export type DatasetChartProps = ChartCommonProps & {
+	kind: ChartKind;
+	dataSource: string;
+	xField: string;
+	yField: string;
+	valueField?: string;
+	filters?: Filter[];
+	data?: never;
+};
+export type ChartProps =
+	| BarLineChartProps
+	| ScatterChartProps
+	| HeatmapChartProps
+	| DatasetChartProps;
 export type ComparisonCardsProps = {
 	title: string;
 	items: {
@@ -24,16 +67,63 @@ export type ParameterSliderProps = {
 	value: number;
 	unit?: string;
 	followUp?: string;
+	stateKey?: string;
 };
+export type NumberInputProps = {
+	title: string;
+	stateKey: string;
+	min: number;
+	max: number;
+	step: number;
+	value: number;
+	unit?: string;
+};
+export type SelectProps = {
+	title: string;
+	stateKey: string;
+	value: string;
+	options: { label: string; value: string }[];
+};
+export type DataTableProps = {
+	title: string;
+	dataSource: string;
+	columns: { key: string; label: string }[];
+	filters?: Filter[];
+	searchable?: boolean;
+	sortable?: boolean;
+	selectable?: boolean;
+	rowKey?: string;
+	selectionKey?: string;
+};
+type MetricCommonProps = { title: string; description?: string; unit?: string };
+export type StaticMetricCardProps = MetricCommonProps & { value: number; dataSource?: never };
+export type DatasetMetricCardProps = MetricCommonProps & {
+	dataSource: string;
+	aggregation: 'count' | 'sum' | 'mean' | 'min' | 'max';
+	field?: string;
+	filters?: Filter[];
+	value?: never;
+};
+export type MetricCardProps = StaticMetricCardProps | DatasetMetricCardProps;
 
 type ElementOf<T extends string, P> = { type: T; props: P; children: string[] };
 export type IntelligentUIElement =
 	| ElementOf<'Stack', StackProps>
+	| ElementOf<'Grid', GridProps>
+	| ElementOf<'Tabs', TabsProps>
 	| ElementOf<'Chart', ChartProps>
 	| ElementOf<'ComparisonCards', ComparisonCardsProps>
 	| ElementOf<'Explanation', ExplanationProps>
-	| ElementOf<'ParameterSlider', ParameterSliderProps>;
-export type Spec = { root: string; elements: Record<string, IntelligentUIElement> };
+	| ElementOf<'ParameterSlider', ParameterSliderProps>
+	| ElementOf<'NumberInput', NumberInputProps>
+	| ElementOf<'Select', SelectProps>
+	| ElementOf<'DataTable', DataTableProps>
+	| ElementOf<'MetricCard', MetricCardProps>;
+export type Spec = {
+	root: string;
+	elements: Record<string, IntelligentUIElement>;
+	datasets?: Record<string, DatasetRow[]>;
+};
 export type IntelligentUISpec = Spec;
 export type ParseResult = {
 	spec: Spec | null;
@@ -51,6 +141,14 @@ export const INTELLIGENT_UI_LIMITS = Object.freeze({
 	chartPoints: 128,
 	cards: 12,
 	attributes: 16,
+	datasets: 4,
+	datasetRows: 256,
+	datasetFields: 16,
+	tableCells: 8192,
+	cellText: 256,
+	filters: 16,
+	selectOptions: 32,
+	tabs: 8,
 	title: 160,
 	description: 2048,
 	content: 16 * 1024,
@@ -106,6 +204,12 @@ function string(
 	);
 }
 
+/** Values persisted as shared state use the backend's stricter control-character rule. */
+function stateString(value: unknown, max: number): asserts value is string {
+	string(value, max);
+	requireValid(!/[\u0000-\u001F\u007F]/.test(value), 'Invalid persisted state text.');
+}
+
 function optionalString(object: Record<string, unknown>, key: string, max?: number) {
 	if (own(object, key)) string(object[key], max);
 }
@@ -136,6 +240,66 @@ function inspectKeys(value: unknown, depth = 0) {
 	}
 }
 
+function optionalId(object: Record<string, unknown>, key: string) {
+	if (own(object, key)) safeId(object[key]);
+}
+
+function filters(value: unknown) {
+	array(value, INTELLIGENT_UI_LIMITS.filters);
+	for (const entry of value) {
+		const filter = fields(entry, ['field', 'op', 'stateKey'], ['ignoreValue']);
+		safeId(filter.field);
+		safeId(filter.stateKey);
+		requireValid(
+			['eq', 'gte', 'lte', 'contains'].includes(filter.op as string),
+			'Unsupported filter operation.'
+		);
+		optionalString(filter, 'ignoreValue', INTELLIGENT_UI_LIMITS.cellText);
+		requireValid(
+			!own(filter, 'ignoreValue') || filter.op === 'eq',
+			'Only equality filters support an ignored value.'
+		);
+	}
+}
+
+function optionalFilters(props: Record<string, unknown>) {
+	if (own(props, 'filters')) filters(props.filters);
+}
+
+function dataset(value: unknown): DatasetRow[] {
+	array(value, INTELLIGENT_UI_LIMITS.datasetRows);
+	for (const row of value) {
+		requireValid(isObject(row), 'Expected a dataset row.');
+		requireValid(
+			Object.keys(row).length <= INTELLIGENT_UI_LIMITS.datasetFields,
+			'Too many dataset fields.'
+		);
+		for (const [key, cell] of Object.entries(row)) {
+			safeId(key);
+			if (typeof cell === 'string') string(cell, INTELLIGENT_UI_LIMITS.cellText);
+			else if (typeof cell === 'number') number(cell);
+			else requireValid(cell === null || typeof cell === 'boolean', 'Unsupported dataset cell.');
+		}
+	}
+	return value as DatasetRow[];
+}
+
+function numericControl(props: Record<string, unknown>) {
+	string(props.title);
+	for (const key of ['min', 'max', 'step', 'value']) number(props[key]);
+	const { min, max, step, value } = props as NumberInputProps;
+	requireValid(
+		min < max &&
+			step > 0 &&
+			step <= max - min &&
+			Number.isFinite((max - min) / step) &&
+			value >= min &&
+			value <= max,
+		'Invalid numeric control range, step, or value.'
+	);
+	optionalString(props, 'unit', 64);
+}
+
 function element(value: unknown): IntelligentUIElement {
 	const node = fields(value, ['type', 'props', 'children']);
 	array(node.children, INTELLIGENT_UI_LIMITS.nodes);
@@ -145,8 +309,8 @@ function element(value: unknown): IntelligentUIElement {
 		'Duplicate child identifiers.'
 	);
 	requireValid(
-		node.type === 'Stack' || node.children.length === 0,
-		'Only Stack may have children.'
+		['Stack', 'Grid', 'Tabs'].includes(node.type as string) || node.children.length === 0,
+		'Only layout components may have children.'
 	);
 	let props: Record<string, unknown>;
 	switch (node.type) {
@@ -154,19 +318,79 @@ function element(value: unknown): IntelligentUIElement {
 			props = fields(node.props, [], ['title']);
 			optionalString(props, 'title');
 			break;
-		case 'Chart':
-			props = fields(node.props, ['title', 'kind', 'data'], ['description', 'unit']);
+		case 'Grid':
+			props = fields(node.props, ['columns'], ['title']);
+			optionalString(props, 'title');
+			requireValid(
+				Number.isInteger(props.columns) && Number(props.columns) >= 1 && Number(props.columns) <= 4,
+				'Invalid grid columns.'
+			);
+			break;
+		case 'Tabs':
+			props = fields(node.props, ['labels'], ['title']);
+			optionalString(props, 'title');
+			array(props.labels, INTELLIGENT_UI_LIMITS.tabs);
+			props.labels.forEach((label) => string(label));
+			requireValid(
+				props.labels.length === node.children.length,
+				'Each tab needs one label and child.'
+			);
+			break;
+		case 'Chart': {
+			requireValid(isObject(node.props), 'Expected chart properties.');
+			const fromDataset = own(node.props, 'dataSource');
+			props = fields(
+				node.props,
+				fromDataset
+					? ['title', 'kind', 'dataSource', 'xField', 'yField']
+					: ['title', 'kind', 'data'],
+				fromDataset ? ['description', 'unit', 'valueField', 'filters'] : ['description', 'unit']
+			);
 			string(props.title);
 			optionalString(props, 'description', INTELLIGENT_UI_LIMITS.description);
 			optionalString(props, 'unit', 64);
-			requireValid(props.kind === 'bar' || props.kind === 'line', 'Unsupported chart kind.');
-			array(props.data, INTELLIGENT_UI_LIMITS.chartPoints);
-			for (const entry of props.data) {
-				const point = fields(entry, ['label', 'value']);
-				string(point.label);
-				number(point.value);
+			requireValid(
+				['bar', 'line', 'scatter', 'heatmap'].includes(props.kind as string),
+				'Unsupported chart kind.'
+			);
+			if (fromDataset) {
+				for (const key of ['dataSource', 'xField', 'yField']) safeId(props[key]);
+				optionalId(props, 'valueField');
+				optionalFilters(props);
+				requireValid(
+					props.kind !== 'heatmap' || own(props, 'valueField'),
+					'A heatmap needs a value field.'
+				);
+				requireValid(
+					props.kind === 'heatmap' || !own(props, 'valueField'),
+					'Only heatmaps support a value field.'
+				);
+			} else {
+				array(props.data, INTELLIGENT_UI_LIMITS.chartPoints);
+				const coordinates = new Set<string>();
+				for (const entry of props.data) {
+					if (props.kind === 'scatter') {
+						const point = fields(entry, ['x', 'y'], ['label']);
+						number(point.x);
+						number(point.y);
+						optionalString(point, 'label');
+					} else if (props.kind === 'heatmap') {
+						const point = fields(entry, ['x', 'y', 'value']);
+						string(point.x);
+						string(point.y);
+						number(point.value);
+						const coordinate = JSON.stringify([point.x, point.y]);
+						requireValid(!coordinates.has(coordinate), 'Duplicate heatmap coordinates.');
+						coordinates.add(coordinate);
+					} else {
+						const point = fields(entry, ['label', 'value']);
+						string(point.label);
+						number(point.value);
+					}
+				}
 			}
 			break;
+		}
 		case 'ComparisonCards':
 			props = fields(node.props, ['title', 'items']);
 			string(props.title);
@@ -191,22 +415,97 @@ function element(value: unknown): IntelligentUIElement {
 			string(props.content, INTELLIGENT_UI_LIMITS.content);
 			break;
 		case 'ParameterSlider':
-			props = fields(node.props, ['title', 'min', 'max', 'step', 'value'], ['unit', 'followUp']);
-			string(props.title);
-			for (const key of ['min', 'max', 'step', 'value']) number(props[key]);
-			const { min, max, step, value: current } = props as ParameterSliderProps;
-			requireValid(
-				min < max &&
-					step > 0 &&
-					step <= max - min &&
-					Number.isFinite((max - min) / step) &&
-					current >= min &&
-					current <= max,
-				'Invalid slider range, step, or value.'
+			props = fields(
+				node.props,
+				['title', 'min', 'max', 'step', 'value'],
+				['unit', 'followUp', 'stateKey']
 			);
-			optionalString(props, 'unit', 64);
+			numericControl(props);
+			optionalId(props, 'stateKey');
 			optionalString(props, 'followUp', INTELLIGENT_UI_LIMITS.description);
 			break;
+		case 'NumberInput':
+			props = fields(node.props, ['title', 'stateKey', 'min', 'max', 'step', 'value'], ['unit']);
+			numericControl(props);
+			safeId(props.stateKey);
+			break;
+		case 'Select': {
+			props = fields(node.props, ['title', 'stateKey', 'value', 'options']);
+			string(props.title);
+			safeId(props.stateKey);
+			stateString(props.value, 128);
+			array(props.options, INTELLIGENT_UI_LIMITS.selectOptions);
+			const values = new Set<string>();
+			for (const entry of props.options) {
+				const option = fields(entry, ['label', 'value']);
+				string(option.label);
+				stateString(option.value, 128);
+				requireValid(!values.has(option.value), 'Duplicate select option values.');
+				values.add(option.value);
+			}
+			requireValid(values.has(props.value), 'The select value must match an option.');
+			break;
+		}
+		case 'DataTable':
+			props = fields(
+				node.props,
+				['title', 'dataSource', 'columns'],
+				['filters', 'searchable', 'sortable', 'selectable', 'rowKey', 'selectionKey']
+			);
+			string(props.title);
+			safeId(props.dataSource);
+			array(props.columns, INTELLIGENT_UI_LIMITS.datasetFields);
+			requireValid(props.columns.length > 0, 'A table needs at least one column.');
+			const columnKeys = new Set<string>();
+			for (const entry of props.columns) {
+				const column = fields(entry, ['key', 'label']);
+				safeId(column.key);
+				string(column.label);
+				requireValid(!columnKeys.has(column.key), 'Duplicate table columns.');
+				columnKeys.add(column.key);
+			}
+			optionalFilters(props);
+			for (const key of ['searchable', 'sortable', 'selectable']) {
+				if (own(props, key))
+					requireValid(typeof props[key] === 'boolean', 'Expected a boolean option.');
+			}
+			optionalId(props, 'rowKey');
+			optionalId(props, 'selectionKey');
+			requireValid(
+				props.selectable !== true || (own(props, 'rowKey') && own(props, 'selectionKey')),
+				'Selectable tables need row and selection keys.'
+			);
+			requireValid(
+				props.selectable === true || (!own(props, 'rowKey') && !own(props, 'selectionKey')),
+				'Only selectable tables support row and selection keys.'
+			);
+			break;
+		case 'MetricCard': {
+			requireValid(isObject(node.props), 'Expected metric properties.');
+			const fromDataset = own(node.props, 'dataSource');
+			props = fields(
+				node.props,
+				fromDataset ? ['title', 'dataSource', 'aggregation'] : ['title', 'value'],
+				fromDataset ? ['description', 'unit', 'field', 'filters'] : ['description', 'unit']
+			);
+			string(props.title);
+			optionalString(props, 'description', INTELLIGENT_UI_LIMITS.description);
+			optionalString(props, 'unit', 64);
+			if (fromDataset) {
+				safeId(props.dataSource);
+				requireValid(
+					['count', 'sum', 'mean', 'min', 'max'].includes(props.aggregation as string),
+					'Unsupported metric aggregation.'
+				);
+				optionalId(props, 'field');
+				requireValid(
+					props.aggregation === 'count' || own(props, 'field'),
+					'This metric needs a numeric field.'
+				);
+				optionalFilters(props);
+			} else number(props.value);
+			break;
+		}
 		default:
 			throw new InvalidUI('Unsupported UI component.');
 	}
@@ -214,9 +513,159 @@ function element(value: unknown): IntelligentUIElement {
 	return node as IntelligentUIElement;
 }
 
-type DraftSpec = { root: string | null; elements: Record<string, IntelligentUIElement> };
+type DraftSpec = {
+	root: string | null;
+	elements: Record<string, IntelligentUIElement>;
+	datasets?: Record<string, DatasetRow[]>;
+};
+
+/** Object key order is irrelevant when matching repeated shared-control definitions. */
+function canonical(value: unknown): string {
+	if (Array.isArray(value)) return `[${value.map(canonical).join(',')}]`;
+	if (isObject(value))
+		return `{${Object.keys(value)
+			.sort()
+			.map((key) => `${JSON.stringify(key)}:${canonical(value[key])}`)
+			.join(',')}}`;
+	return JSON.stringify(value);
+}
+
+function validateReferences(draft: DraftSpec) {
+	const states = new Map<string, string>();
+	const ignoreValues = new Map<string, Set<string>>();
+	const reachable = new Set<string>();
+	const reachableStates = new Set<string>();
+	function visit(id: string) {
+		if (reachable.has(id) || !own(draft.elements, id)) return;
+		reachable.add(id);
+		draft.elements[id].children.forEach(visit);
+	}
+	if (draft.root !== null) visit(draft.root);
+	for (const [id, node] of Object.entries(draft.elements)) {
+		let key: string | undefined;
+		let definition: unknown;
+		if (node.type === 'Select') {
+			key = node.props.stateKey;
+			const values = node.props.options.map((option) => option.value).sort();
+			definition = { type: 'select', value: node.props.value, values };
+			ignoreValues.set(key, new Set(values));
+		} else if (node.type === 'ParameterSlider' || node.type === 'NumberInput') {
+			key = node.props.stateKey;
+			const { min, max, step, value } = node.props;
+			definition = { type: 'number', min, max, step, value };
+		} else if (node.type === 'DataTable' && node.props.selectable) {
+			key = node.props.selectionKey;
+			definition = {
+				type: 'selection',
+				dataSource: node.props.dataSource,
+				rowKey: node.props.rowKey
+			};
+			if (key)
+				ignoreValues.set(
+					key,
+					new Set([
+						'',
+						...(draft.datasets?.[node.props.dataSource] ?? []).flatMap((row) => {
+							const value = row[node.props.rowKey!];
+							return value === null || value === undefined ? [] : [String(value)];
+						})
+					])
+				);
+		}
+		if (key !== undefined) {
+			const signature = canonical(definition);
+			requireValid(
+				!states.has(key) || states.get(key) === signature,
+				'Conflicting shared-state definitions.'
+			);
+			states.set(key, signature);
+			if (reachable.has(id)) reachableStates.add(key);
+		}
+	}
+	for (const [id, node] of Object.entries(draft.elements)) {
+		if (node.type !== 'Chart' && node.type !== 'MetricCard' && node.type !== 'DataTable') continue;
+		const props = node.props;
+		if (props.dataSource === undefined) continue;
+		requireValid(
+			draft.datasets && own(draft.datasets, props.dataSource),
+			'The finished UI references a missing dataset.'
+		);
+		const rows = draft.datasets[props.dataSource];
+		const fieldExists = (field: string) => {
+			// Empty datasets have no declared schema; a future replacement may provide the fields.
+			requireValid(
+				rows.length === 0 || rows.some((row) => own(row, field)),
+				'The finished UI references a missing dataset field.'
+			);
+		};
+		if (node.type === 'Chart') {
+			const chart = props as DatasetChartProps;
+			fieldExists(chart.xField);
+			fieldExists(chart.yField);
+			if (chart.valueField !== undefined) fieldExists(chart.valueField);
+			if (chart.kind === 'heatmap') {
+				const coordinates = new Set<string>();
+				for (const row of rows) {
+					const x = row[chart.xField],
+						y = row[chart.yField],
+						value = row[chart.valueField!];
+					if (
+						x === null ||
+						x === undefined ||
+						y === null ||
+						y === undefined ||
+						typeof value !== 'number' ||
+						!Number.isFinite(value)
+					)
+						continue;
+					const coordinate = JSON.stringify([String(x), String(y)]);
+					requireValid(!coordinates.has(coordinate), 'Duplicate heatmap coordinates.');
+					coordinates.add(coordinate);
+				}
+			}
+		} else if (node.type === 'MetricCard') {
+			const metric = props as DatasetMetricCardProps;
+			if (metric.field !== undefined) fieldExists(metric.field);
+		} else {
+			const table = props as DataTableProps;
+			table.columns.forEach((column) => fieldExists(column.key));
+			if (table.rowKey !== undefined) fieldExists(table.rowKey);
+			if (table.selectable) {
+				const keys = new Set<string>();
+				for (const row of rows) {
+					const key = row[table.rowKey!];
+					if (typeof key === 'string') stateString(key, INTELLIGENT_UI_LIMITS.cellText);
+					requireValid(
+						key !== null && key !== undefined && String(key) !== '' && !keys.has(String(key)),
+						'Selectable table row keys must be unique and non-empty.'
+					);
+					keys.add(String(key));
+				}
+			}
+		}
+		for (const filter of (props as DatasetChartProps | DatasetMetricCardProps | DataTableProps)
+			.filters ?? []) {
+			fieldExists(filter.field);
+			requireValid(states.has(filter.stateKey), 'The finished UI references missing filter state.');
+			if (reachable.has(id))
+				requireValid(
+					reachableStates.has(filter.stateKey),
+					'A visible filter needs a visible state provider.'
+				);
+			if (filter.ignoreValue !== undefined)
+				requireValid(
+					ignoreValues.get(filter.stateKey)?.has(filter.ignoreValue),
+					'The ignored filter value must match a state option.'
+				);
+		}
+	}
+}
 
 function validateGraph(draft: DraftSpec, done: boolean) {
+	requireValid(
+		Object.keys(draft.datasets ?? {}).length <= INTELLIGENT_UI_LIMITS.datasets,
+		'Too many datasets.'
+	);
 	const ids = Object.keys(draft.elements);
 	requireValid(ids.length <= INTELLIGENT_UI_LIMITS.nodes, 'Too many UI elements.');
 	const heights = new Map<string, number>();
@@ -239,6 +688,7 @@ function validateGraph(draft: DraftSpec, done: boolean) {
 	if (done) {
 		requireValid(draft.root !== null, 'The finished UI has no root.');
 		requireValid(own(draft.elements, draft.root), 'The finished UI references a missing root.');
+		validateReferences(draft);
 	}
 }
 
@@ -247,19 +697,44 @@ function reachableSpec(draft: DraftSpec): Spec | null {
 	if (draft.root === null || !own(draft.elements, draft.root)) return null;
 	const elements: Spec['elements'] = {};
 	let renderedNodes = 0;
+	let renderedTableCells = 0;
 	function visit(id: string) {
 		requireValid(
 			++renderedNodes <= INTELLIGENT_UI_LIMITS.nodes,
 			'The UI expands to too many elements.'
 		);
 		const node = draft.elements[id];
+		if (node.type === 'DataTable') {
+			renderedTableCells +=
+				(draft.datasets?.[node.props.dataSource]?.length ?? 0) * node.props.columns.length;
+			requireValid(
+				renderedTableCells <= INTELLIGENT_UI_LIMITS.tableCells,
+				'The UI expands to too many table cells.'
+			);
+		}
 		const children = node.children.filter((child) => own(draft.elements, child));
-		elements[id] = { ...node, children };
+		elements[id] =
+			node.type === 'Tabs'
+				? {
+						...node,
+						props: {
+							...node.props,
+							labels: node.props.labels.filter((_, index) =>
+								own(draft.elements, node.children[index])
+							)
+						},
+						children
+					}
+				: { ...node, children };
 		// Count repeated subtrees too: a small acyclic graph can otherwise expand exponentially.
 		children.forEach(visit);
 	}
 	visit(draft.root);
-	return { root: draft.root, elements };
+	return {
+		root: draft.root,
+		elements,
+		...(draft.datasets === undefined ? {} : { datasets: draft.datasets })
+	};
 }
 
 function apply(value: unknown, draft: DraftSpec) {
@@ -271,18 +746,21 @@ function apply(value: unknown, draft: DraftSpec) {
 		draft.root = patch.value;
 	} else {
 		requireValid(typeof patch.path === 'string', 'Invalid UI patch path.');
-		const match = /^\/elements\/([a-zA-Z][a-zA-Z0-9_-]{0,63})$/.exec(patch.path);
-		requireValid(match !== null, 'Only whole root or element updates are supported.');
-		const id = match[1];
+		const match = /^\/(elements|datasets)\/([a-zA-Z][a-zA-Z0-9_-]{0,63})$/.exec(patch.path);
+		requireValid(match !== null, 'Only whole root, element, or dataset updates are supported.');
+		const id = match[2];
 		safeId(id);
-		draft.elements[id] = element(patch.value);
+		if (match[1] === 'datasets') {
+			draft.datasets ??= {};
+			draft.datasets[id] = dataset(patch.value);
+		} else draft.elements[id] = element(patch.value);
 	}
 	validateGraph(draft, false);
 }
 
 function fullSpec(value: unknown): DraftSpec {
 	inspectKeys(value);
-	const spec = fields(value, ['root', 'elements']);
+	const spec = fields(value, ['root', 'elements'], ['datasets']);
 	safeId(spec.root);
 	requireValid(isObject(spec.elements), 'Expected an element map.');
 	requireValid(
@@ -294,7 +772,16 @@ function fullSpec(value: unknown): DraftSpec {
 		safeId(id);
 		elements[id] = element(value);
 	}
-	return { root: spec.root, elements };
+	const draft: DraftSpec = { root: spec.root, elements };
+	if (own(spec, 'datasets')) {
+		requireValid(isObject(spec.datasets), 'Expected a dataset map.');
+		draft.datasets = {};
+		for (const [id, rows] of Object.entries(spec.datasets)) {
+			safeId(id);
+			draft.datasets[id] = dataset(rows);
+		}
+	}
+	return draft;
 }
 
 const incomplete = Symbol('incomplete');
@@ -415,13 +902,56 @@ function fallbackText(spec: Spec | null): string {
 		const node = spec!.elements[id];
 		if (node.props.title) lines.push(node.props.title);
 		switch (node.type) {
-			case 'Chart':
+			case 'Chart': {
 				if (node.props.description) lines.push(node.props.description);
-				for (const point of node.props.data) {
-					lines.push(
-						`${point.label}: ${point.value}${node.props.unit ? ` ${node.props.unit}` : ''}`
-					);
+				const points = chartData(spec!, node.props, (_, fallback) => fallback);
+				if (node.props.kind === 'scatter') {
+					for (const point of points as ScatterPoint[])
+						lines.push(`${point.label ? `${point.label}: ` : ''}(${point.x}, ${point.y})`);
+				} else if (node.props.kind === 'heatmap') {
+					for (const point of points as HeatmapPoint[])
+						lines.push(
+							`${point.x}, ${point.y}: ${point.value}${node.props.unit ? ` ${node.props.unit}` : ''}`
+						);
+				} else {
+					for (const point of points as BarLinePoint[])
+						lines.push(
+							`${point.label}: ${point.value}${node.props.unit ? ` ${node.props.unit}` : ''}`
+						);
 				}
+				break;
+			}
+			case 'MetricCard': {
+				if (node.props.description) lines.push(node.props.description);
+				const value = metricValue(spec!, node.props, (_, fallback) => fallback);
+				lines.push(
+					value === null
+						? 'No numeric data'
+						: `${value}${node.props.unit ? ` ${node.props.unit}` : ''}`
+				);
+				break;
+			}
+			case 'DataTable':
+				lines.push(node.props.columns.map((column) => column.label).join(' | '));
+				for (const row of tableRows(spec!, node.props, (_, fallback) => fallback))
+					lines.push(
+						node.props.columns
+							.map((column) =>
+								row[column.key] === null || row[column.key] === undefined
+									? ''
+									: String(row[column.key])
+							)
+							.join(' | ')
+					);
+				break;
+			case 'Select':
+				lines.push(
+					node.props.options.find((option) => option.value === node.props.value)?.label ??
+						node.props.value
+				);
+				break;
+			case 'Tabs':
+				lines.push(...node.props.labels);
 				break;
 			case 'ComparisonCards':
 				for (const card of node.props.items) {
@@ -434,6 +964,7 @@ function fallbackText(spec: Spec | null): string {
 				lines.push(node.props.content);
 				break;
 			case 'ParameterSlider':
+			case 'NumberInput':
 				lines.push(
 					`${node.props.value}${node.props.unit ? ` ${node.props.unit}` : ''} (${node.props.min}–${node.props.max})`
 				);
@@ -448,7 +979,7 @@ function fallbackText(spec: Spec | null): string {
 /**
  * Parse a fence body, or a single surrounding ```intelligent-ui fence.
  * This is a bounded patch dialect, not a general JSON Patch interpreter. Both add
- * and replace assign a whole root/element; no expressions or actions are evaluated.
+ * and replace assign a whole root/element/dataset; no expressions or actions are evaluated.
  * Reparse the accumulated body on every update. Only an unfinished final JSONL
  * record may be buffered; malformed/unsupported data always fails closed.
  */
@@ -490,7 +1021,7 @@ export function parseIntelligentUI(source: string, done: boolean): ParseResult {
 			const value: unknown = JSON.parse(body);
 			if (isObject(value) && own(value, 'op')) apply(value, draft);
 			else draft = fullSpec(value);
-		} else if (/^\s*\{(?:[\t ]*\r?\n|\s*"(?:root|elements)"\s*:|\s*$)/.test(body)) {
+		} else if (/^\s*\{(?:[\t ]*\r?\n|\s*"(?:root|elements|datasets)"\s*:|\s*$)/.test(body)) {
 			// A pretty-printed full-spec fallback must arrive as one complete object.
 			requireValid(state === 'incomplete' && !done, 'Invalid or incomplete UI JSON.');
 			return { spec: null, error: null, pending: true, fallback: '' };

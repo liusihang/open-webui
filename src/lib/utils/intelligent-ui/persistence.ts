@@ -1,7 +1,7 @@
 /** A narrow metadata snapshot, captured independently of reactive navigation state. */
 export type PersistedIntelligentUIState = {
 	version: 1;
-	blocks: Record<string, Record<string, number | boolean>>;
+	blocks: Record<string, Record<string, string | number | boolean>>;
 };
 
 export type MessageStateSnapshot = {

@@ -1,7 +1,8 @@
+import type { Spec } from '$lib/utils/intelligent-ui';
 /** Host callbacks are supplied only by an assistant message, never by model data. */
 export const INTELLIGENT_UI_HOST = Symbol('intelligent-ui-host');
 export const INTELLIGENT_UI_BLOCK = Symbol('intelligent-ui-block');
-export type InteractionValue = number | boolean;
+export type InteractionValue = string | number | boolean;
 export type InteractionState = Record<string, InteractionValue>;
 export interface IntelligentUIHost {
 	canWrite: () => boolean;
@@ -11,6 +12,9 @@ export interface IntelligentUIHost {
 	followUp: (prompt: string) => Promise<void>;
 }
 export interface IntelligentUIBlockContext {
+	spec: () => Spec | null;
+	shared: (stateKey: string) => InteractionValue | undefined;
+	writeShared: (stateKey: string, value: InteractionValue) => void;
 	read: (key: string, fallback: InteractionValue) => InteractionValue;
 	write: (key: string, value: InteractionValue) => void;
 	canFollowUp: () => boolean;

@@ -16,16 +16,21 @@ Example request:
 > monthly budget and a button to ask a follow-up using that budget. Clearly label
 > the plan data as hypothetical.
 
-The initial component set is deliberately small:
+The registered component catalog includes:
 
-- Bar/line charts with grounded labels and numeric values.
-- Comparison cards with descriptions and attributes.
-- Expandable explanations.
-- Parameter sliders with optional explicit follow-up questions.
-- A Stack for grouping these components.
+- Stack and responsive Grid layouts; Tabs for switching between child views.
+- Bar, line, scatter and heatmap charts with grounded numeric data.
+- DataTable with optional local search, sorting and row selection.
+- MetricCard with a literal value or a filtered dataset aggregation.
+- Comparison cards and expandable explanations.
+- Select, NumberInput and ParameterSlider controls.
+- Explicit follow-up questions on sliders; all other filtering remains local.
 
-Moving a slider changes local presentation state. It does not execute code, make
-a model request, or automatically recalculate an unrelated chart. Only clicking
+Controls with a `stateKey` share local state within their fenced block. Dataset
+views with matching declared filters update immediately when those values change;
+sliders and number inputs with a matching numeric definition can share one value.
+Moving a control does not execute code, make a model request, or recalculate an
+unrelated chart that has no declared binding. Only clicking
 the visible follow-up button invokes the normal chat submission flow. A native
 component registry defines all rendering and interactions; generated HTML or
 JavaScript is not executed.
@@ -56,14 +61,52 @@ Category B is larger in this example. Here is a separate explanation:
 ```
 ````
 
-The protocol accepts only `add`/`replace` of `/root` or whole
-`/elements/<safe-id>` records. It rejects arbitrary JSON-pointer edits, unknown
-components/properties, handlers, bindings, remote-resource fields, executable
+The protocol accepts only `add`/`replace` of `/root`, whole
+`/elements/<safe-id>` records, or whole `/datasets/<safe-id>` datasets. It rejects arbitrary JSON-pointer edits, unknown
+components/properties, handlers, arbitrary bindings, remote-resource fields, executable
 directives, cycles, and
 oversized structures. This is a bounded protocol, not the full json-render
 expression/action language. Plain strings containing URL or HTML-like text remain
 escaped text, not links or executable markup. The renderer uses `@json-render/svelte`'s
 `CatalogRenderer`, not its single-text/single-spec chat transport.
+
+## Linked data and controls
+
+A block can declare up to four static datasets using `/datasets/ID` operations.
+A dataset contains up to 256 rows, 16 fields per row, and primitive cells only.
+It is not a URL or a server query. All data and definitions still fit within the
+128 KiB block limit. The model must state when displayed rows are a subset.
+
+Dataset views use `dataSource` plus optional filters of the form
+`{field, op, stateKey, ignoreValue?}`. The supported operations are `eq`, `gte`,
+`lte` and `contains`. `ignoreValue` is supported only with `eq`; for Select state
+it must match an option, such as an explicit All option. Select defaults must
+also match an option. Row keys and selection keys are only valid on selectable
+tables. These
+are predefined operations, not JavaScript expressions or a general formula engine.
+Equality compares non-null primitive cells and the control value by their string
+representation, so numeric row IDs can match persisted row selections. Selectable
+row keys must remain unique after this normalization and cannot be empty.
+Heatmap coordinates must be unique; duplicate cells are rejected rather than
+silently overlaid or summed.
+
+A Select can filter a table, chart and metric together. A numeric budget control
+can filter rows by cost; a table row selection can supply a string key for another
+view's filter. DataTable's own search and sorting affect that table; cross-view
+filtering must be declared explicitly. Metric aggregations are count, sum, mean,
+min and max. Missing/non-numeric cells are omitted from numeric views; empty
+aggregations display no data, while count displays zero.
+
+Number inputs retain draft text while typing and apply the value on change, blur,
+or Enter; step normalization must not overwrite partially typed numbers. Dataset
+charts display at most 128 valid points and disclose when additional points are
+not drawn. Tables and metrics still use the full matching dataset (at most 256
+rows), so the visible chart subset is not an aggregation limit.
+
+Shared state is **per fenced UI block**. Put linked controls and views under the
+same Stack/Grid/Tabs tree. Separate UI fences remain independent even when they
+use the same state-key spelling. This preserves stable component isolation across
+ordinary prose, multiple Responses output items, chat reloads and forks.
 
 ## Persistence and fallback
 

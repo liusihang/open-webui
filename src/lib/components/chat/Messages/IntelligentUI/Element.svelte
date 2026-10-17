@@ -1,5 +1,8 @@
 <script lang="ts">
 	import { getContext, type Snippet } from 'svelte';
+	import { chartData, chartPointCount } from '$lib/utils/intelligent-ui/data';
+	import DataView from './DataView.svelte';
+	import MatrixChart from './MatrixChart.svelte';
 	import { INTELLIGENT_UI_BLOCK, type IntelligentUIBlockContext } from './context';
 
 	let {
@@ -22,12 +25,29 @@
 	let value = $derived(
 		Math.min(
 			componentProps.max,
-			Math.max(componentProps.min, Number(context.read(controlKey, componentProps.value)))
+			Math.max(
+				componentProps.min,
+				Number(
+					componentProps.stateKey
+						? (context.shared(componentProps.stateKey) ?? componentProps.value)
+						: context.read(controlKey, componentProps.value)
+				)
+			)
 		)
 	);
+	let numberDraft = $state<string | null>(null);
 	let sending = $state(false);
 	let sendError = $state('');
-	let data = $derived(componentProps.data ?? []);
+	let data: any[] = $derived(
+		element.type === 'Chart' && context.spec()
+			? chartData(context.spec()!, componentProps, context.read)
+			: []
+	);
+	let pointCount = $derived(
+		element.type === 'Chart' && context.spec()
+			? chartPointCount(context.spec()!, componentProps, context.read)
+			: 0
+	);
 	let low = $derived(Math.min(0, ...data.map((point: any) => point.value)));
 	let high = $derived(Math.max(0, ...data.map((point: any) => point.value)));
 	let span = $derived(high - low || 1);
@@ -43,6 +63,29 @@
 	);
 	const format = (n: number) =>
 		new Intl.NumberFormat(undefined, { maximumFractionDigits: 5 }).format(n);
+
+	const writeNumber = (next: number) => {
+		if (!Number.isFinite(next)) return;
+		if (componentProps.stateKey) context.writeShared(componentProps.stateKey, next);
+		else context.write(controlKey, next);
+	};
+	const commitNumber = () => {
+		if (numberDraft !== null && numberDraft.trim() !== '') writeNumber(Number(numberDraft));
+		numberDraft = null;
+	};
+	const changeTab = (event: KeyboardEvent, index: number) => {
+		const tabs = componentProps.__tabs ?? [];
+		let next = index;
+		if (event.key === 'ArrowRight') next = (index + 1) % tabs.length;
+		else if (event.key === 'ArrowLeft') next = (index + tabs.length - 1) % tabs.length;
+		else if (event.key === 'Home') next = 0;
+		else if (event.key === 'End') next = tabs.length - 1;
+		else return;
+		event.preventDefault();
+		context.write(`tab:${componentProps.__key}`, tabs[next].id);
+		const list = (event.currentTarget as HTMLButtonElement).parentElement;
+		(list?.querySelectorAll('button')[next] as HTMLButtonElement)?.focus();
+	};
 
 	async function followUp() {
 		if (sending || !context.canFollowUp() || !componentProps.followUp) return;
@@ -67,6 +110,84 @@
 			</h3>{/if}
 		{#if children}{@render children()}{/if}
 	</section>
+{:else if element.type === 'Grid'}
+	<section class="space-y-3">
+		{#if componentProps.title}<h3 class="text-base font-semibold text-gray-900 dark:text-gray-100">
+				{componentProps.title}
+			</h3>{/if}
+		<div
+			class={`grid grid-cols-1 gap-4 ${({ 1: '', 2: 'sm:grid-cols-2', 3: 'sm:grid-cols-2 lg:grid-cols-3', 4: 'sm:grid-cols-2 lg:grid-cols-4' } as Record<number, string>)[componentProps.columns]}`}
+		>
+			{#if children}{@render children()}{/if}
+		</div>
+	</section>
+{:else if element.type === 'Tabs'}
+	<section class="min-w-0 space-y-4">
+		{#if componentProps.title}<h3 class="text-sm font-semibold text-gray-900 dark:text-gray-100">
+				{componentProps.title}
+			</h3>{/if}
+		<div
+			role="tablist"
+			aria-label={componentProps.title ?? 'View options'}
+			class="flex gap-1 overflow-x-auto rounded-lg bg-gray-100 p-1 dark:bg-gray-800"
+		>
+			{#each componentProps.__tabs ?? [] as tab, index}<button
+					type="button"
+					role="tab"
+					id={`${componentProps.__scope}-${componentProps.__key}-tab-${tab.id}`}
+					aria-controls={`${componentProps.__scope}-${componentProps.__key}-panel`}
+					aria-selected={componentProps.__selected === tab.id}
+					tabindex={componentProps.__selected === tab.id ? 0 : -1}
+					class={`shrink-0 rounded-md px-3 py-2 text-sm font-medium focus-visible:outline-indigo-500 ${componentProps.__selected === tab.id ? 'bg-white text-indigo-600 shadow-sm dark:bg-gray-700 dark:text-indigo-300' : 'text-gray-500 dark:text-gray-400'}`}
+					onclick={() => context.write(`tab:${componentProps.__key}`, tab.id)}
+					onkeydown={(event) => changeTab(event, index)}>{tab.label}</button
+				>{/each}
+		</div>
+		<div
+			role="tabpanel"
+			tabindex="0"
+			id={`${componentProps.__scope}-${componentProps.__key}-panel`}
+			aria-labelledby={`${componentProps.__scope}-${componentProps.__key}-tab-${componentProps.__selected}`}
+			class="min-w-0 rounded focus-visible:outline-indigo-500"
+		>
+			{#if children}{@render children()}{/if}
+		</div>
+	</section>
+{:else if element.type === 'Select'}
+	<label class="block space-y-2"
+		><span class="text-sm font-medium text-gray-900 dark:text-gray-100">{componentProps.title}</span
+		><select
+			value={String(context.shared(componentProps.stateKey) ?? componentProps.value)}
+			class="w-full rounded-lg border border-gray-200 bg-white px-3 py-2 text-sm text-gray-900 focus:border-indigo-500 focus:outline-none dark:border-gray-700 dark:bg-gray-900 dark:text-gray-100"
+			onchange={(event) => context.writeShared(componentProps.stateKey, event.currentTarget.value)}
+			>{#each componentProps.options as option}<option value={option.value}>{option.label}</option
+				>{/each}</select
+		></label
+	>
+{:else if element.type === 'NumberInput'}
+	<label class="block space-y-2"
+		><span class="text-sm font-medium text-gray-900 dark:text-gray-100"
+			>{componentProps.title}{componentProps.unit ? ` (${componentProps.unit})` : ''}</span
+		><input
+			type="number"
+			min={componentProps.min}
+			max={componentProps.max}
+			step={componentProps.step}
+			value={numberDraft ?? value}
+			class="w-full rounded-lg border border-gray-200 bg-white px-3 py-2 text-sm tabular-nums text-gray-900 focus:border-indigo-500 focus:outline-none dark:border-gray-700 dark:bg-gray-900 dark:text-gray-100"
+			oninput={(event) => (numberDraft = event.currentTarget.value)}
+			onchange={commitNumber}
+			onblur={commitNumber}
+			onkeydown={(event) => {
+				if (event.key === 'Enter') commitNumber();
+				else if (event.key === 'Escape') numberDraft = null;
+			}}
+		/></label
+	>
+{:else if element.type === 'DataTable' || element.type === 'MetricCard'}
+	<DataView kind={element.type} view={componentProps} />
+{:else if element.type === 'Chart' && (componentProps.kind === 'scatter' || componentProps.kind === 'heatmap')}
+	<MatrixChart view={componentProps} {data} />
 {:else if element.type === 'Chart'}
 	<section class="min-w-0 space-y-3">
 		<div>
@@ -196,14 +317,16 @@
 				{value}
 				aria-valuetext={`${format(value)} ${componentProps.unit ?? ''}`}
 				class="mt-4 w-full cursor-pointer accent-indigo-600"
-				oninput={(event) => context.write(controlKey, Number(event.currentTarget.value))}
+				oninput={(event) => writeNumber(Number(event.currentTarget.value))}
 			/>
 			<span class="mt-1 flex justify-between text-xs text-gray-500 dark:text-gray-400"
 				><span>{format(componentProps.min)}</span><span>{format(componentProps.max)}</span></span
 			>
 		</label>
 		<p class="text-xs text-gray-500 dark:text-gray-400">
-			Adjusting this control stays local. It does not recalculate the model’s answer.
+			{componentProps.stateKey
+				? 'Updates linked views locally. No model request is sent.'
+				: 'Adjusting this control stays local. It does not recalculate the model’s answer.'}
 		</p>
 		{#if componentProps.followUp}
 			<p class="whitespace-pre-wrap text-sm text-gray-600 dark:text-gray-300">
@@ -221,4 +344,10 @@
 				{sendError}
 			</p>{/if}
 	</section>
+{/if}
+
+{#if element.type === 'Chart' && pointCount > data.length}
+	<p class="mt-2 text-xs text-gray-500 dark:text-gray-400" role="status">
+		Showing first {data.length} of {pointCount} matching points.
+	</p>
 {/if}

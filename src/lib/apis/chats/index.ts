@@ -1381,7 +1381,7 @@ export const updateChatMessageIntelligentUI = async (
 	token: string,
 	id: string,
 	messageId: string,
-	state: { version: 1; blocks: Record<string, Record<string, boolean | number>> }
+	state: { version: 1; blocks: Record<string, Record<string, boolean | number | string>> }
 ) => {
 	const response = await fetch(
 		`${WEBUI_API_BASE_URL}/chats/${encodeURIComponent(id)}/messages/${encodeURIComponent(messageId)}`,

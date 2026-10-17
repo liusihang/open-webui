@@ -33,7 +33,7 @@ class StateTests(unittest.TestCase):
             {'version': 1, 'blocks': {}, 'spec': {}},
             {'version': 1, 'blocks': {'constructor': {}}},
         ]
-        for value in ['script', None, [], {}, float('nan'), float('inf'), 10**1000]:
+        for value in ['x' * 257, 'invalid\x00value', None, [], {}, float('nan'), float('inf'), 10**1000]:
             invalid.append({'version': 1, 'blocks': {'b': {'x': value}}})
         invalid.extend(
             [
@@ -45,6 +45,10 @@ class StateTests(unittest.TestCase):
         for state in invalid:
             with self.subTest(state=str(state)[:150]), self.assertRaises(ValueError):
                 ui.validate_intelligent_ui_state(state)
+
+    def test_bounded_selection_strings(self):
+        state = {'version': 1, 'blocks': {'b': {'shared:group': 'All', 'shared:selection': ''}}}
+        self.assertEqual(ui.validate_intelligent_ui_state(state), state)
 
     def test_encoded_byte_limit(self):
         state = {'version': 1, 'blocks': {str(i): {('界' * 500) + str(j): 1 for j in range(64)} for i in range(2)}}

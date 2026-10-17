@@ -83,3 +83,49 @@ describe('intelligent-ui Markdown lexer seam', () => {
 		expect(tokens.filter((token) => token.lang === 'intelligent-ui')).toHaveLength(1);
 	});
 });
+
+describe('expanded intelligent-ui Markdown streaming seam', () => {
+	it('preserves partial dataset replacement and tabs through every arriving character', () => {
+		const rows = [{ id: 'one', label: 'A', value: 10 }];
+		const updated = [{ id: 'two', label: 'B', value: 20 }];
+		const operations = [
+			{ op: 'add', path: '/root', value: 'main' },
+			{
+				op: 'add',
+				path: '/elements/main',
+				value: { type: 'Tabs', props: { labels: ['Chart'] }, children: ['chart'] }
+			},
+			{
+				op: 'add',
+				path: '/elements/chart',
+				value: {
+					type: 'Chart',
+					props: {
+						title: 'Amounts',
+						kind: 'bar',
+						dataSource: 'rows',
+						xField: 'label',
+						yField: 'value'
+					},
+					children: []
+				}
+			},
+			{ op: 'add', path: '/datasets/rows', value: rows }
+		]
+			.map((operation) => JSON.stringify(operation))
+			.join('\n');
+		const replacement = JSON.stringify({ op: 'replace', path: '/datasets/rows', value: updated });
+		const tail = `${replacement}\n\`\`\``;
+		for (let index = 0; index <= tail.length; index++) {
+			const [token] = codeTokens(
+				`Text before.\n\n\`\`\`intelligent-ui\n${operations}\n${tail.slice(0, index)}`
+			);
+			const result = parseIntelligentUI(token.text, false);
+			expect(result.error, `expanded prefix ${index}`).toBeNull();
+			expect(result.spec?.elements.main.children).toEqual(['chart']);
+			expect(result.spec?.datasets?.rows).toEqual(index < replacement.length ? rows : updated);
+		}
+		const [token] = codeTokens(fence(`${operations}\n${replacement}`));
+		expect(parseIntelligentUI(token.text, true).error).toBeNull();
+	});
+});

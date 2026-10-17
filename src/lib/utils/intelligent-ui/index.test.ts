@@ -417,3 +417,812 @@ describe('intelligent-ui allowlist and bounds', () => {
 		expect(intelligentUIHash(valid)).toMatch(/^[a-z0-9]+$/);
 	});
 });
+
+const datasetRows = [
+	{ id: 'a', group: 'North', month: 'Jan', amount: 10, quantity: 2, active: true },
+	{ id: 'b', group: 'South', month: 'Feb', amount: null, quantity: 3, active: false }
+];
+const selectControl: IntelligentUIElement = {
+	type: 'Select',
+	props: {
+		title: 'Region',
+		stateKey: 'region',
+		value: 'all',
+		options: [
+			{ label: 'All', value: 'all' },
+			{ label: 'North', value: 'North' }
+		]
+	},
+	children: []
+};
+const dataChart: IntelligentUIElement = {
+	type: 'Chart',
+	props: {
+		title: 'Amount',
+		kind: 'bar',
+		dataSource: 'records',
+		xField: 'group',
+		yField: 'amount',
+		filters: [{ field: 'group', op: 'eq', stateKey: 'region', ignoreValue: 'all' }]
+	},
+	children: []
+};
+const table: IntelligentUIElement = {
+	type: 'DataTable',
+	props: {
+		title: 'Rows',
+		dataSource: 'records',
+		columns: [
+			{ key: 'group', label: 'Region' },
+			{ key: 'amount', label: 'Amount' }
+		],
+		searchable: true,
+		sortable: true,
+		selectable: true,
+		rowKey: 'id',
+		selectionKey: 'selectedRow'
+	},
+	children: []
+};
+const expandedSpec = (): Spec => ({
+	root: 'main',
+	datasets: { records: structuredClone(datasetRows) },
+	elements: {
+		main: {
+			type: 'Grid',
+			props: { title: 'Dashboard', columns: 2 },
+			children: [
+				'select',
+				'number',
+				'tabs',
+				'table',
+				'metric',
+				'staticMetric',
+				'scatter',
+				'heatmap',
+				'slider'
+			]
+		},
+		select: structuredClone(selectControl),
+		number: {
+			type: 'NumberInput',
+			props: {
+				title: 'Minimum',
+				stateKey: 'minimum',
+				min: 0,
+				max: 100,
+				step: 1,
+				value: 0,
+				unit: 'USD'
+			},
+			children: []
+		},
+		tabs: {
+			type: 'Tabs',
+			props: { title: 'Views', labels: ['Bars', 'Heatmap'] },
+			children: ['chart', 'datasetHeatmap']
+		},
+		chart: structuredClone(dataChart),
+		datasetHeatmap: {
+			type: 'Chart',
+			props: {
+				title: 'Map',
+				kind: 'heatmap',
+				dataSource: 'records',
+				xField: 'group',
+				yField: 'month',
+				valueField: 'amount'
+			},
+			children: []
+		},
+		table: structuredClone(table),
+		metric: {
+			type: 'MetricCard',
+			props: {
+				title: 'Total',
+				dataSource: 'records',
+				aggregation: 'sum',
+				field: 'amount',
+				filters: [{ field: 'amount', op: 'gte', stateKey: 'minimum' }]
+			},
+			children: []
+		},
+		staticMetric: {
+			type: 'MetricCard',
+			props: { title: 'Target', value: 42, unit: 'USD', description: 'Current target' },
+			children: []
+		},
+		scatter: {
+			type: 'Chart',
+			props: { title: 'Scatter', kind: 'scatter', data: [{ x: 1, y: 2, label: 'A' }] },
+			children: []
+		},
+		heatmap: {
+			type: 'Chart',
+			props: { title: 'Heatmap', kind: 'heatmap', data: [{ x: 'A', y: 'B', value: 3 }] },
+			children: []
+		},
+		slider: {
+			type: 'ParameterSlider',
+			props: { title: 'Quantity', stateKey: 'quantity', min: 0, max: 10, step: 1, value: 2 },
+			children: []
+		}
+	}
+});
+const expandedSource = (mutate: (value: Spec) => void) => {
+	const value = expandedSpec();
+	mutate(value);
+	return JSON.stringify(value);
+};
+
+describe('intelligent-ui expanded data-only protocol', () => {
+	it('preserves all expanded nodes and datasets, with plain-text fallback for each family', () => {
+		const value = expandedSpec();
+		const result = parseIntelligentUI(JSON.stringify(value), true);
+		expect(result.error).toBeNull();
+		expect(result.spec).toEqual(value);
+		for (const text of [
+			'Dashboard',
+			'Region',
+			'Minimum',
+			'Bars',
+			'Heatmap',
+			'Rows',
+			'Total',
+			'42 USD',
+			'A: (1, 2)',
+			'A, B: 3'
+		])
+			expect(result.fallback).toContain(text);
+	});
+
+	it('accepts whole dataset add/replace patches, and buffers every partial update character', () => {
+		const lines = [
+			root,
+			element('main', stack(['chart', 'select'])),
+			element('chart', dataChart),
+			element('select', selectControl),
+			patch('/datasets/records', datasetRows)
+		];
+		const before = lines.join('\n');
+		const replacement = [{ ...datasetRows[0], amount: 55 }];
+		const update = patch('/datasets/records', replacement, 'replace');
+		for (let index = 0; index <= update.length; index++) {
+			const result = parseIntelligentUI(`${before}\n${update.slice(0, index)}`, false);
+			expect(result.error, `dataset patch prefix ${index}`).toBeNull();
+			expect(result.spec?.datasets?.records).toEqual(
+				index < update.length ? datasetRows : replacement
+			);
+		}
+		expect(parseIntelligentUI(`${before}\n${update}`, true).spec?.datasets?.records).toEqual(
+			replacement
+		);
+	});
+
+	it('buffers every prefix of an expanded stream with late references and dataset-first full specs', () => {
+		const lines = [
+			root,
+			element('main', stack(['chart', 'select'])),
+			element('chart', dataChart),
+			patch('/datasets/records', datasetRows),
+			element('select', selectControl)
+		];
+		const source = lines.join('\n');
+		for (let index = 0; index <= source.length; index++)
+			expect(
+				parseIntelligentUI(source.slice(0, index), false).error,
+				`stream prefix ${index}`
+			).toBeNull();
+		const full = JSON.stringify({
+			datasets: { records: datasetRows },
+			root: 'main',
+			elements: { main: explanation }
+		});
+		for (let index = 0; index <= full.length; index++)
+			expect(
+				parseIntelligentUI(full.slice(0, index), false).error,
+				`full-spec prefix ${index}`
+			).toBeNull();
+		expect(parseIntelligentUI(source, true).error).toBeNull();
+	});
+
+	it('keeps Tabs labels attached to their matching children during out-of-order arrival', () => {
+		const source = [
+			root,
+			element('main', {
+				type: 'Tabs',
+				props: { labels: ['Later', 'Ready'] },
+				children: ['later', 'ready']
+			}),
+			element('ready', explanation)
+		].join('\n');
+		const result = parseIntelligentUI(source, false);
+		expect(result.spec?.elements.main).toEqual({
+			type: 'Tabs',
+			props: { labels: ['Ready'] },
+			children: ['ready']
+		});
+		expect(
+			parseIntelligentUI(`${source}\n${element('later', explanation)}`, true).spec?.elements.main
+				.props
+		).toEqual({ labels: ['Later', 'Ready'] });
+	});
+
+	it('defers dataset, field, state, and selected-row reference validation until done', () => {
+		for (const mutate of [
+			(value: Spec) => {
+				delete value.datasets;
+			},
+			(value: Spec) => {
+				value.datasets!.records = [{ unrelated: 1 }];
+			},
+			(value: Spec) => {
+				value.elements.select = explanation;
+			},
+			(value: Spec) => {
+				value.datasets!.records[1].id = 'a';
+			}
+		]) {
+			const source = expandedSource(mutate);
+			expect(parseIntelligentUI(source, false).error).toBeNull();
+			rejected(source);
+		}
+	});
+
+	it('allows empty datasets and heterogeneous rows but requires every referenced field somewhere', () => {
+		expect(
+			parseIntelligentUI(
+				expandedSource((value) => {
+					value.datasets!.records = [];
+				}),
+				true
+			).error
+		).toBeNull();
+		const source = expandedSource((value) => {
+			const { rowKey, selectionKey, ...props } = table.props;
+			value.elements.table = { ...table, props: { ...props, selectable: false } };
+			value.datasets!.records = [{ group: 'A', month: 'Jan', id: 'a' }, { amount: null }];
+		});
+		expect(parseIntelligentUI(source, true).error).toBeNull();
+		rejected(
+			expandedSource((value) => {
+				value.datasets!.records.forEach((row) => delete row.month);
+			})
+		);
+	});
+
+	it('allows only compatible shared control contracts, regardless of object-key order', () => {
+		const good = expandedSource((value) => {
+			value.elements.main.children.push('duplicate');
+			value.elements.duplicate = {
+				...selectControl,
+				props: {
+					options: selectControl.props.options,
+					value: 'all',
+					stateKey: 'region',
+					title: 'Region'
+				}
+			};
+		});
+		expect(parseIntelligentUI(good, true).error).toBeNull();
+		for (const changed of [
+			{ ...selectControl.props, value: 'North' },
+			{ ...selectControl.props, options: [{ label: 'All regions', value: 'all' }] }
+		]) {
+			const source = expandedSource((value) => {
+				value.elements.duplicate = { type: 'Select', props: changed, children: [] };
+			});
+			expect(parseIntelligentUI(source, false).error).toBeNull();
+			rejected(source);
+		}
+		rejected(
+			expandedSource((value) => {
+				value.elements.select = {
+					...selectControl,
+					props: { ...selectControl.props, stateKey: 'selectedRow' }
+				};
+			})
+		);
+	});
+
+	it('allows shared numeric controls and display-only Select differences', () => {
+		const source = expandedSource((value) => {
+			value.elements.main.children.push('duplicateNumber', 'duplicateSelect');
+			value.elements.duplicateNumber = {
+				type: 'ParameterSlider',
+				props: {
+					title: 'Another label',
+					stateKey: 'minimum',
+					min: 0,
+					max: 100,
+					step: 1,
+					value: 0,
+					unit: 'dollars'
+				},
+				children: []
+			};
+			value.elements.duplicateSelect = {
+				type: 'Select',
+				props: {
+					title: 'Another region label',
+					stateKey: 'region',
+					value: 'all',
+					options: [
+						{ label: 'Northern region', value: 'North' },
+						{ label: 'All regions', value: 'all' }
+					]
+				},
+				children: []
+			};
+		});
+		expect(parseIntelligentUI(source, true).error).toBeNull();
+		for (const change of [{ min: -1 }, { max: 101 }, { step: 2 }, { value: 1 }]) {
+			rejected(
+				expandedSource((value) => {
+					value.elements.duplicate = {
+						type: 'ParameterSlider',
+						props: {
+							title: 'Duplicate',
+							stateKey: 'minimum',
+							min: 0,
+							max: 100,
+							step: 1,
+							value: 0,
+							...change
+						},
+						children: []
+					};
+				})
+			);
+		}
+	});
+
+	it('requires filter state providers to be reachable and validates ignored options', () => {
+		rejected(
+			expandedSource((value) => {
+				value.elements.main.children = value.elements.main.children.filter((id) => id !== 'select');
+			})
+		);
+		rejected(
+			expandedSource((value) => {
+				const chart = value.elements.chart;
+				if (chart.type === 'Chart' && chart.props.dataSource)
+					chart.props.filters![0].ignoreValue = 'unknown';
+			})
+		);
+		const selection = expandedSource((value) => {
+			value.elements.metric = {
+				type: 'MetricCard',
+				props: {
+					title: 'Selected',
+					dataSource: 'records',
+					aggregation: 'count',
+					filters: [{ field: 'id', op: 'eq', stateKey: 'selectedRow', ignoreValue: '' }]
+				},
+				children: []
+			};
+		});
+		expect(parseIntelligentUI(selection, true).error).toBeNull();
+	});
+
+	it('rejects overlapping heatmap coordinates, including stringified dataset collisions', () => {
+		rejected(
+			spec({
+				type: 'Chart',
+				props: {
+					title: 'Heat',
+					kind: 'heatmap',
+					data: [
+						{ x: 'a', y: 'b', value: 1 },
+						{ x: 'a', y: 'b', value: 2 }
+					]
+				},
+				children: []
+			})
+		);
+		const source = expandedSource((value) => {
+			value.datasets!.records[0].group = 1;
+			value.datasets!.records[1].group = '1';
+			value.datasets!.records[1].month = 'Jan';
+			value.datasets!.records[1].amount = 20;
+		});
+		expect(parseIntelligentUI(source, false).error).toBeNull();
+		rejected(source);
+		// Null/invalid numeric cells are omitted, so they cannot overlap a visible tile.
+		expect(
+			parseIntelligentUI(
+				expandedSource((value) => {
+					value.datasets!.records[1].group = 'North';
+					value.datasets!.records[1].month = 'Jan';
+				}),
+				true
+			).error
+		).toBeNull();
+	});
+
+	it('accepts table-selection state as a filter source and validates stringified unique row keys', () => {
+		const source = expandedSource((value) => {
+			value.elements.metric = {
+				type: 'MetricCard',
+				props: {
+					title: 'Selected count',
+					dataSource: 'records',
+					aggregation: 'count',
+					filters: [{ field: 'id', op: 'eq', stateKey: 'selectedRow' }]
+				},
+				children: []
+			};
+		});
+		expect(parseIntelligentUI(source, true).error).toBeNull();
+		for (const key of [null, undefined])
+			rejected(
+				expandedSource((value) => {
+					if (key === undefined) delete value.datasets!.records[0].id;
+					else value.datasets!.records[0].id = key;
+				})
+			);
+		rejected(
+			expandedSource((value) => {
+				value.datasets!.records[0].id = 1;
+				value.datasets!.records[1].id = '1';
+			})
+		);
+	});
+
+	it.each(['eq', 'gte', 'lte', 'contains'])('allows the bounded filter operation %s', (op) => {
+		const source = expandedSource((value) => {
+			const node = value.elements.chart;
+			if (node.type === 'Chart' && node.props.dataSource) {
+				node.props.filters![0].op = op as 'eq';
+				if (op !== 'eq') delete node.props.filters![0].ignoreValue;
+			}
+		});
+		expect(parseIntelligentUI(source, true).error).toBeNull();
+	});
+
+	it('allows all dataset chart kinds and metric aggregation kinds', () => {
+		for (const kind of ['bar', 'line', 'scatter', 'heatmap'] as const) {
+			const source = expandedSource((value) => {
+				value.elements.chart = {
+					type: 'Chart',
+					props: {
+						title: 'Plot',
+						kind,
+						dataSource: 'records',
+						xField: 'quantity',
+						yField: 'amount',
+						...(kind === 'heatmap' ? { valueField: 'amount' } : {})
+					},
+					children: []
+				};
+			});
+			expect(parseIntelligentUI(source, true).error).toBeNull();
+		}
+		for (const aggregation of ['count', 'sum', 'mean', 'min', 'max'] as const) {
+			const source = expandedSource((value) => {
+				value.elements.metric = {
+					type: 'MetricCard',
+					props: {
+						title: 'Metric',
+						dataSource: 'records',
+						aggregation,
+						...(aggregation === 'count' ? {} : { field: 'amount' })
+					},
+					children: []
+				};
+			});
+			expect(parseIntelligentUI(source, true).error).toBeNull();
+		}
+	});
+
+	it('rejects mixed inline/dataset sources, unsupported fields, and unsafe filter expressions', () => {
+		const wrongNodes = [
+			{
+				type: 'Chart',
+				props: {
+					title: 'X',
+					kind: 'bar',
+					data: [],
+					dataSource: 'records',
+					xField: 'group',
+					yField: 'amount'
+				},
+				children: []
+			},
+			{
+				type: 'Chart',
+				props: {
+					title: 'X',
+					kind: 'heatmap',
+					dataSource: 'records',
+					xField: 'group',
+					yField: 'month'
+				},
+				children: []
+			},
+			{
+				type: 'MetricCard',
+				props: { title: 'X', value: 1, dataSource: 'records', aggregation: 'count' },
+				children: []
+			},
+			{
+				type: 'MetricCard',
+				props: { title: 'X', dataSource: 'records', aggregation: 'sum' },
+				children: []
+			},
+			{
+				type: 'MetricCard',
+				props: { title: 'X', dataSource: 'records', aggregation: 'median', field: 'amount' },
+				children: []
+			},
+			{
+				...dataChart,
+				props: {
+					...dataChart.props,
+					filters: [{ field: 'amount', op: 'eval', stateKey: 'minimum' }]
+				}
+			},
+			{
+				...dataChart,
+				props: {
+					...dataChart.props,
+					filters: [{ field: 'amount', op: 'eq', stateKey: 'minimum', expression: 'alert(1)' }]
+				}
+			},
+			{ ...selectControl, props: { ...selectControl.props, onChange: 'alert(1)' } },
+			{ ...table, props: { ...table.props, selectable: 'yes' } },
+			{
+				...table,
+				props: {
+					title: 'X',
+					dataSource: 'records',
+					columns: [{ key: 'group', label: 'Group' }],
+					selectable: true
+				}
+			}
+		];
+		for (const node of wrongNodes) rejected(spec(node));
+	});
+
+	it.each(['bar', 'line', 'scatter'])('rejects unused valueField on dataset %s charts', (kind) => {
+		rejected(
+			spec({
+				type: 'Chart',
+				props: {
+					title: 'Chart',
+					kind,
+					dataSource: 'records',
+					xField: 'group',
+					yField: 'amount',
+					valueField: 'quantity'
+				},
+				children: []
+			})
+		);
+	});
+
+	it('enforces Grid, Tabs, Select, table-column and filter bounds', () => {
+		for (const columns of [0, 5, 1.5, '2'])
+			rejected(spec({ type: 'Grid', props: { columns }, children: [] }));
+		for (const columns of [1, 4])
+			expect(
+				parseIntelligentUI(spec({ type: 'Grid', props: { columns }, children: [] }), true).error
+			).toBeNull();
+		rejected(spec({ type: 'Tabs', props: { labels: ['Only one'] }, children: [] }));
+		rejected(
+			spec({
+				type: 'Tabs',
+				props: { labels: Array(9).fill('Tab') },
+				children: Array.from({ length: 9 }, (_, i) => `child${i}`)
+			})
+		);
+		for (const options of [
+			[],
+			[
+				{ label: 'A', value: 'all' },
+				{ label: 'B', value: 'all' }
+			],
+			[{ label: 'A', value: 'x'.repeat(129) }],
+			Array.from({ length: 33 }, (_, i) => ({ label: `${i}`, value: `${i}` }))
+		])
+			rejected(spec({ ...selectControl, props: { ...selectControl.props, options } }));
+		rejected(spec({ ...selectControl, props: { ...selectControl.props, value: 'missing' } }));
+		rejected(
+			spec({
+				...table,
+				props: {
+					...table.props,
+					columns: [
+						{ key: 'id', label: 'ID' },
+						{ key: 'id', label: 'Again' }
+					]
+				}
+			})
+		);
+		rejected(spec({ ...table, props: { ...table.props, columns: [] } }));
+		rejected(
+			spec({
+				...dataChart,
+				props: {
+					...dataChart.props,
+					filters: Array(17).fill({ field: 'group', op: 'eq', stateKey: 'region' })
+				}
+			})
+		);
+	});
+
+	it('enforces bounded dataset maps, rows, cells, identifiers and primitive data only', () => {
+		const withRows = (rows: unknown) =>
+			JSON.stringify({
+				root: 'main',
+				elements: { main: explanation },
+				datasets: { records: rows }
+			});
+		expect(
+			parseIntelligentUI(
+				withRows(
+					Array.from({ length: 256 }, () => ({
+						text: 'x'.repeat(256),
+						numeric: 1,
+						boolean: true,
+						empty: null
+					}))
+				),
+				true
+			).error
+		).toBeNull();
+		for (const rows of [
+			Array(257).fill({ value: 1 }),
+			[{ value: 'x'.repeat(257) }],
+			[Object.fromEntries(Array.from({ length: 17 }, (_, i) => [`field${i}`, i]))],
+			[{ value: {} }],
+			[{ value: [] }],
+			[{ value: 1e13 }],
+			[{ 'bad.field': 1 }],
+			[{ '0field': 1 }],
+			[null],
+			{ value: 1 }
+		])
+			rejected(withRows(rows));
+		rejected(
+			JSON.stringify({
+				root: 'main',
+				elements: { main: explanation },
+				datasets: Object.fromEntries(Array.from({ length: 5 }, (_, i) => [`data${i}`, []]))
+			})
+		);
+		rejected(`${valid}\n${patch('/datasets/records/0', {})}`);
+		rejected(`${valid}\n${patch('/datasets/constructor', [])}`);
+		rejected(
+			'{"root":"main","elements":{"main":{"type":"Stack","props":{},"children":[]}},"datasets":{"records":[{"__proto__":{}}]}}'
+		);
+		rejected(
+			'{"root":"main","elements":{"main":{"type":"Stack","props":{},"children":[]}},"datasets":{"records":[{"value":1e400}]}}'
+		);
+	});
+
+	it('bounds total rendered table cells across shared and repeated datasets', () => {
+		const columns = Array.from({ length: 16 }, (_, index) => ({
+			key: `field${index}`,
+			label: `Field ${index}`
+		}));
+		const rows = Array.from({ length: 256 }, () =>
+			Object.fromEntries(columns.map(({ key }) => [key, 1]))
+		);
+		const node: IntelligentUIElement = {
+			type: 'DataTable',
+			props: { title: 'Rows', dataSource: 'records', columns },
+			children: []
+		};
+		const value: Spec = {
+			root: 'main',
+			datasets: { records: rows },
+			elements: { main: stack(['first', 'second']), first: node, second: node }
+		};
+		expect(parseIntelligentUI(JSON.stringify(value), true).error).toBeNull();
+		value.elements.main.children.push('third');
+		value.elements.third = node;
+		rejected(JSON.stringify(value));
+		rejected(JSON.stringify(value), false);
+		// The same table rendered under separate stacks also counts more than once.
+		value.elements = {
+			main: stack(['left', 'right']),
+			left: stack(['first', 'second']),
+			right: stack(['first']),
+			first: node,
+			second: node
+		};
+		rejected(JSON.stringify(value));
+	});
+
+	it('matches persisted state restrictions without banning ordinary multi-line dataset text', () => {
+		for (const value of ['line\nbreak', 'tab\tvalue', 'return\rvalue', 'delete\u007Fvalue']) {
+			rejected(
+				spec({
+					type: 'Select',
+					props: { title: 'State', stateKey: 'state', value, options: [{ label: 'Label', value }] },
+					children: []
+				})
+			);
+			rejected(
+				expandedSource((spec) => {
+					spec.datasets!.records[0].id = value;
+				})
+			);
+		}
+		expect(
+			parseIntelligentUI(
+				expandedSource((spec) => {
+					spec.datasets!.records[0].group = 'First line\nSecond line\tColumn';
+				}),
+				true
+			).error
+		).toBeNull();
+		expect(
+			parseIntelligentUI(
+				spec({
+					type: 'Select',
+					props: {
+						title: 'State',
+						stateKey: 'state',
+						value: 'ok',
+						options: [{ label: 'Multi\nline label', value: 'ok' }]
+					},
+					children: []
+				}),
+				true
+			).error
+		).toBeNull();
+	});
+
+	it('forbids selection keys on nonselectable tables, including omitted selectable', () => {
+		const base = { title: 'Rows', dataSource: 'records', columns: [{ key: 'id', label: 'ID' }] };
+		for (const selectable of [undefined, false]) {
+			for (const keys of [
+				{ rowKey: 'id' },
+				{ selectionKey: 'selection' },
+				{ rowKey: 'id', selectionKey: 'selection' }
+			]) {
+				rejected(
+					spec({
+						type: 'DataTable',
+						props: { ...base, ...(selectable === undefined ? {} : { selectable }), ...keys },
+						children: []
+					})
+				);
+			}
+		}
+	});
+
+	it('reserves empty selection state and restricts ignoreValue to equality filters', () => {
+		rejected(
+			expandedSource((value) => {
+				value.datasets!.records[0].id = '';
+			})
+		);
+		for (const op of ['contains', 'gte', 'lte'])
+			rejected(
+				spec({
+					...dataChart,
+					props: {
+						...dataChart.props,
+						filters: [{ field: 'group', op, stateKey: 'region', ignoreValue: 'all' }]
+					}
+				})
+			);
+	});
+
+	it('rejects invalid NumberInput ranges and unsafe state/field identifiers', () => {
+		rejected(
+			spec({
+				type: 'NumberInput',
+				props: { title: 'X', stateKey: 'number', min: 0, max: 10, step: 0, value: 2 },
+				children: []
+			})
+		);
+		for (const stateKey of ['$state', 'constructor', '/number', '0number'])
+			rejected(spec({ ...selectControl, props: { ...selectControl.props, stateKey } }));
+		for (const xField of ['__proto__', 'constructor', 'a.b'])
+			rejected(spec({ ...dataChart, props: { ...dataChart.props, xField } }));
+	});
+});

@@ -228,7 +228,11 @@
 					.filter(
 						([key, value]) =>
 							key.length <= 512 &&
-							(typeof value === 'boolean' || (typeof value === 'number' && Number.isFinite(value)))
+							(typeof value === 'boolean' ||
+								(typeof value === 'string' &&
+									value.length <= 256 &&
+									!/[\x00-\x1f\x7f]/.test(value)) ||
+								(typeof value === 'number' && Number.isFinite(value) && Math.abs(value) <= 1e12))
 					)
 			);
 			const existing =
