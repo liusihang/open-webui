@@ -127,3 +127,24 @@ integration tests, whose module initialization needs the backend dependency set:
 ```sh
 python -m pytest -q backend/tests/test_native_pdf.py tests/onlyoffice/test_onlyoffice_port.py tests/migration/test_responses_native_history.py tests/migration/test_responses_cumulative_history.py tests/migration/test_memory_review_task_model.py
 ```
+
+## Official v0.12.3 upgrade
+
+The current source integrates official v0.12.3 (`91ea4e3421d1d8069f13d4a463fcb5986d94ea60`)
+while retaining the custom features and deployment constraints above. The original
+v0.12.0 acceptance results describe that earlier baseline, not an acceptance claim
+for every new upstream feature.
+
+Migration `d41e823f01ac` joins the existing evidence revision and the official
+v0.12.3 migration head. The already-published evidence revision's parent is
+unchanged, allowing both existing fork installations and new installations to
+converge through the normal Alembic upgrade process. Back up databases before any
+operator-run upgrade; merging source does not run migrations or deploy services.
+
+MinerU 4.x V1 inline image output is materialized before text sanitization when
+image extraction is enabled. Remote image URLs are not fetched; page numbers are
+left unknown when V1 does not provide them. Responses replay retains native IDs,
+phase and encrypted reasoning together with upstream tool-search provider-call
+restoration. OnlyOffice remains available alongside the upstream file-comment
+preview, and new-chat acknowledgement handling retains both the fork's early
+socket race protection and upstream draft/filesystem-session preservation.

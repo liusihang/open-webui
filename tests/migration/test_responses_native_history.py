@@ -66,6 +66,7 @@ def history():
 def scope():
     result = {'copy': copy, 'Optional': Optional, 'JSONCodec': SimpleNamespace(dumps=json.dumps)}
     for name in (
+        'get_provider_function',
         'get_paired_tool_call_ids',
         'reconcile_tool_pairs',
         'convert_output_to_messages',
@@ -114,6 +115,16 @@ class NativeHistoryTests(unittest.TestCase):
             {'messages': [{'role': 'assistant', 'output': history()}]},
         )['input']
         self.assertEqual(items[1].get('phase'), 'commentary')
+
+    def test_replay_restores_provider_tool_search_call_and_keeps_native_id(self):
+        output = history()
+        output[2]['provider_function'] = {'name': 'tool_search', 'arguments': {'query': 'time'}}
+        items = self.replay(output)
+        call = next(item for item in items if item['type'] == 'function_call')
+        self.assertEqual(call['name'], 'tool_search')
+        self.assertEqual(json.loads(call['arguments']), {'query': 'time'})
+        self.assertEqual(call['id'], 'fc_real')
+        self.assertNotIn('provider_function', call)
 
     def test_saved_output_preserves_native_items_order_phase_ids_and_encrypted(self):
         original = history()
@@ -262,6 +273,7 @@ class NativeHistoryTests(unittest.TestCase):
                 'output': output,
                 'full_output': lambda: output,
                 'responses_api': True,
+                'response_usage': {},
                 'model': {},
                 'metadata': {},
                 'new_form_data': {},

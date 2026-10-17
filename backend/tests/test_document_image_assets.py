@@ -360,6 +360,7 @@ def test_mineru_archive_images_persist_after_zip_closes(tmp_path, source, png):
 
 
 def test_mineru_local_load_keeps_text_when_image_is_broken(monkeypatch, tmp_path, source):
+    monkeypatch.setattr(MinerULoader, '_is_v1_api', lambda self: False)
     post = Mock(
         return_value=response(
             {
@@ -450,3 +451,34 @@ def test_loader_attaches_office_and_explicit_local_pdf_only(monkeypatch, tmp_pat
     assert result[0].page_content == 'Text remains usable'
     assert result[0].metadata['document_image_assets_skipped'][0]['reason'] == 'selected_parser_has_no_image_assets'
     assert local.call_count == 0
+
+
+@pytest.mark.parametrize('html', [False, True])
+def test_mineru_v1_materializes_inline_images_before_stripping(monkeypatch, tmp_path, source, png, html):
+    encoded = 'data:image/png;base64,' + base64.b64encode(png).decode()
+    markdown = f'<img src="{encoded}" alt="Figure caption">' if html else f'![Figure caption]({encoded})'
+    downloaded = Mock(content=markdown.encode())
+    request = Mock(side_effect=[
+        response({'id': 'upload'}), response({}), response({'file': {'id': 'file'}}),
+        response({'job_id': 'job', 'status': 'completed', 'tier': 'pipeline',
+                  'files': [{'output_files': {'markdown': {'file_id': 'markdown'}}}]}),
+        downloaded,
+    ])
+    monkeypatch.setattr(MinerULoader, '_is_v1_api', lambda self: True)
+    monkeypatch.setattr(MinerULoader, '_request_v1_api', request)
+    loader = MinerULoader(str(source), extract_images=True, asset_root=tmp_path / 'assets')
+    docs = loader.load()
+    asset = docs[0].metadata['document_image_assets'][0]
+    assert Path(asset['storage_uri']).read_bytes() == png
+    assert asset['caption'] == 'Figure caption'
+    assert asset['page_index'] is None
+    assert 'base64' not in json.dumps(docs[0].metadata)
+    assert 'base64' not in docs[0].page_content
+    if html:
+        assert docs[0].metadata['_metadata_only'] is True
+
+
+def test_mineru_v1_inline_assets_do_not_fetch_remote_images(tmp_path, source, png):
+    loader = MinerULoader(str(source), extract_images=True, asset_root=tmp_path / 'assets')
+    loader._materialize_v1_images('<img src="https://private.invalid/image.png">![remote](https://private.invalid/a)')
+    assert loader.image_extraction.assets == []

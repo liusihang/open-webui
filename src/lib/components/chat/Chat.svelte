@@ -1,4 +1,5 @@
 <script lang="ts">
+	import type { TerminalContext } from '$lib/types';
 	import { v4 as uuidv4 } from 'uuid';
 	import { toast } from 'svelte-sonner';
 
@@ -70,6 +71,8 @@
 	} from '$lib/utils';
 	import { AudioQueue } from '$lib/utils/audio';
 	import { RealtimeCall, getBridgeTurnState, type BridgeSubmission } from '$lib/utils/realtime';
+	import { acquireWakeLock } from '$lib/utils/wakeLock';
+	import { routeAvatarAnimation } from '$lib/utils/voice-avatar';
 	import { createTemporaryChatId, isTemporaryChatId } from '$lib/utils/chatId';
 	import { buildPipeReasoningPayload, chatUploadMetadata } from '$lib/utils/pipeReasoning';
 	import {
@@ -79,6 +82,7 @@
 	} from './Messages/structuredOutput';
 
 	import {
+		addTagById,
 		archiveChatById,
 		compactChatById,
 		createNewChat,
@@ -92,6 +96,7 @@
 		updateChatById,
 		updateChatFolderIdById
 	} from '$lib/apis/chats';
+	import type { FilesystemFile } from '$lib/apis/terminal';
 	import { generateOpenAIChatCompletion, getErrorMessage } from '$lib/apis/openai';
 	import { processUrl, processWebSearch } from '$lib/apis/retrieval';
 	import {
@@ -101,6 +106,8 @@
 		updateUserSettings
 	} from '$lib/apis/users';
 	import {
+		generateTitle,
+		generateTags,
 		generateQueries,
 		chatAction,
 		generateMoACompletion,
@@ -408,6 +415,7 @@
 
 	// Non-owners may reply when the sharing mode allows it, but cannot save chat edits.
 	$: isShared = chat != null && chat.user_id !== $user?.id;
+	$: if (isShared && $showCallOverlay) showCallOverlay.set(false);
 	$: canClone = isShared && ($user?.role === 'admin' || ($user?.permissions?.chat?.import ?? true));
 	let cloning = false;
 
@@ -468,6 +476,21 @@
 	let prompt = '';
 	let chatFiles = [];
 	let files: any[] = [];
+	let terminalContext: TerminalContext | null = null;
+	const askFile = async (instruction: string, file: FilesystemFile) => {
+		const attachments = [structuredClone(file)];
+		const last = history.currentId ? history.messages[history.currentId] : null;
+		if (last?.role === 'assistant' && !last.done) {
+			chatRequestQueues.update((queues) => ({
+				...queues,
+				[$chatId]: [
+					...(queues[$chatId] ?? []),
+					{ id: uuidv4(), prompt: instruction, files: attachments }
+				]
+			}));
+		} else await submitPrompt(instruction, attachments);
+	};
+
 	let params = {};
 	let chatVariables = {};
 	let showChatVariablesModal = false;
@@ -900,7 +923,7 @@
 			await tick();
 			loading = false;
 			noteChatDebug('embedded chat loading false');
-			window.setTimeout(() => scrollToBottom(), 0);
+			if (!$page.url.searchParams.has('message')) window.setTimeout(() => scrollToBottom(), 0);
 
 			await tick();
 
@@ -933,6 +956,7 @@
 	};
 
 	const initEmbeddedDraft = async () => {
+		terminalContext = null;
 		clearTimeout(saveControlsTimer);
 		await saveControls();
 
@@ -1057,15 +1081,18 @@
 
 	let lastTerminalSkillSelector: string | null = null;
 	$: if ($selectedTerminalId !== lastTerminalSkillSelector) {
+		terminalContext = null;
 		selectedSkillIds = selectedSkillIds.filter((id) => !id.startsWith('terminal:'));
 		terminalSkills.set([]);
 		lastTerminalSkillSelector = $selectedTerminalId;
 	}
 
-	let settingDefaults = false;
+	let settingDefaults: Promise<void> | null = null;
 	const setDefaults = async () => {
-		if (settingDefaults) return;
-		settingDefaults = true;
+		// Concurrent callers must wait, or the earlier run overwrites what they write afterwards
+		if (settingDefaults) return settingDefaults;
+		let resolveDefaults = () => {};
+		settingDefaults = new Promise<void>((resolve) => (resolveDefaults = resolve));
 
 		try {
 			if (!$tools) {
@@ -1208,9 +1235,22 @@
 				}
 			}
 		} finally {
-			settingDefaults = false;
+			settingDefaults = null;
+			resolveDefaults();
 		}
 	};
+
+	let revealedSearchMessage = '';
+	$: if (!embedded && !loading && messagesRef && chat && chat.id === $page.params.id) {
+		const target = $page.url.searchParams.get('message');
+		const key = `${chat.id}:${target}`;
+		if (target && history.messages[target] && key !== revealedSearchMessage) {
+			revealedSearchMessage = key;
+			autoScroll = false;
+			history.currentId = getDeepestChildId(history, target);
+			tick().then(() => messagesRef?.scrollToMessage(target));
+		} else if (!target) revealedSearchMessage = '';
+	}
 
 	const showMessage = async (message, scroll = true, save = true) => {
 		const _chatId = JSON.parse(JSON.stringify($chatId));
@@ -1243,7 +1283,16 @@
 		});
 	};
 
-	const terminalEventHandler = (type: string, data: any) => {
+	const terminalEventHandler = (type: string, data: any, message: any) => {
+		const attachment = history.messages[message?.parentId]?.files?.find(
+			(file: any) => file.type === 'filesystem'
+		);
+		if (attachment) {
+			if (attachment.terminal_id && attachment.terminal_id !== $selectedTerminalId) return;
+			if (type === 'terminal:display_file' && terminalContext?.file?.path === data.path)
+				showFileNavDir.set(data.path);
+			return;
+		}
 		if (type === 'terminal:display_file') {
 			if (!data?.path) return;
 			if ($settings?.terminalFileDisplay === 'inline') return;
@@ -1251,7 +1300,7 @@
 		} else if (type === 'terminal:write_file' || type === 'terminal:replace_file_content') {
 			if (!data?.path) return;
 			showFileNavDir.set(data.path);
-		} else if (type === 'terminal:run_command') {
+		} else if (type === 'terminal:run_command' && !terminalContext?.file) {
 			showFileNavDir.set('/');
 		}
 	};
@@ -1294,6 +1343,8 @@
 	};
 
 	let joinedChatId = '';
+	let liveParticipants: { id: string; name: string }[] = [];
+	const clearPresence = () => (liveParticipants = []);
 	let chatRefresh: { id: string; promise: Promise<void> } | null = null;
 	let typingUsers: { id: string; name: string }[] = [];
 	let typingUsersTimeout: Record<string, ReturnType<typeof setTimeout>> = {};
@@ -1332,7 +1383,17 @@
 	) => {
 		const currentId = history.currentId;
 		const next = incoming?.messages ?? {};
+		// An edited prompt adds a sibling; other viewers should keep their selected branch.
+		const hasNewBranch = Object.values(next).some(
+			(message: any) =>
+				message.role === 'user' &&
+				!history.messages[message.id] &&
+				Object.values(history.messages).some(
+					(existing: any) => existing.role === 'user' && existing.parentId === message.parentId
+				)
+		);
 		const follow =
+			!hasNewBranch &&
 			!generating &&
 			!(
 				taskIds?.length &&
@@ -1379,6 +1440,7 @@
 				mergeChatMessages(fresh.chat.history, baseline);
 			} catch (error) {
 				if ($chatId === id && joinedChatId === id) {
+					clearPresence();
 					chat = null;
 					history = { messages: {}, currentId: null };
 					if (!embedded) await goto('/');
@@ -1392,15 +1454,20 @@
 	};
 
 	const syncChatRoom = (socket: typeof $socket, id: string, temporary: boolean) => {
-		const next = socket && id && !temporary && !isTemporaryChatId(id) ? id : '';
+		const next = socket?.connected && id && !temporary && !isTemporaryChatId(id) ? id : '';
 		if (next === joinedChatId) return;
 		clearTyping();
-		if (joinedChatId)
-			socket?.emit('events:chat', { chat_id: joinedChatId, data: { type: 'leave' } });
+		clearPresence();
+		if (joinedChatId && socket?.connected)
+			socket.emit('events:chat', { chat_id: joinedChatId, data: { type: 'leave' } });
 		joinedChatId = next;
-		if (next)
-			socket?.emit('events:chat', { chat_id: next, data: { type: 'join' } }, () => {
-				if ($chatId === next) void refreshChat();
+		const connectionId = socket?.id;
+		if (next && socket)
+			socket.emit('events:chat', { chat_id: next, data: { type: 'join' } }, (accepted: boolean) => {
+				if (!socket.connected || socket.id !== connectionId || $chatId !== next) return;
+				if (!accepted) clearPresence();
+				// A refused join can mean access was lost; the refresh then sends the reader home.
+				void refreshChat();
 			});
 	};
 	$: syncChatRoom($socket, $chatId, $temporaryChatEnabled);
@@ -1409,7 +1476,20 @@
 		chatRequestQueues.update((q) => {
 			if (!q[draftId]?.length) return q;
 			const { [draftId]: pendingQueue, ...rest } = q;
-			return { ...rest, [id]: [...pendingQueue, ...(rest[id] ?? [])] };
+			return {
+				...rest,
+				[id]: [
+					...pendingQueue.map((entry) => ({
+						...entry,
+						files: entry.files.map((file) =>
+							file.type === 'filesystem' && file.session_id == null
+								? { ...file, session_id: id }
+								: file
+						)
+					})),
+					...(rest[id] ?? [])
+				]
+			};
 		});
 		chatId.set(id);
 		if (!$temporaryChatEnabled && !embedded) {
@@ -1418,7 +1498,27 @@
 	};
 
 	const chatEventHandler = async (event, cb) => {
+		if (event?.data?.type === 'chat:presence') {
+			if (!$socket?.connected || event.chat_id !== $chatId || event.chat_id !== joinedChatId)
+				return;
+			liveParticipants = (event.data.data?.users ?? []).filter(
+				(person: { id: string; name: string }) => person.id !== $user?.id
+			);
+			return;
+		}
 		console.log(event);
+		if (event?.data?.type === 'voice:play_animation') {
+			cb?.(
+				routeAvatarAnimation(eventTarget, event, {
+					active: $showCallOverlay && callMode === 'current' && selectedModelIds.length === 1,
+					chatId: $chatId,
+					modelId: selectedModelIds[0],
+					messageId: history.currentId,
+					message: history.messages[event.message_id]
+				})
+			);
+			return;
+		}
 		if (event.shared && event.user_id === $user?.id && event.data?.type !== 'chat:messages') return;
 		const interactionType = event?.data?.type;
 		const interactionData = event?.data?.data;
@@ -1716,7 +1816,7 @@
 					eventConfirmationInputType = data?.input?.type ?? data?.type ?? '';
 					eventConfirmationInputOptions = data?.input?.options ?? data?.options ?? [];
 				} else if (type.startsWith('terminal:')) {
-					terminalEventHandler(type, data);
+					terminalEventHandler(type, data, message);
 				} else {
 					console.log('Unknown message type', data);
 				}
@@ -1846,6 +1946,7 @@
 		$socket?.on('events', chatEventHandler);
 		$socket?.on('connect', handleSocketConnect);
 		$socket?.on('disconnect', clearTyping);
+		$socket?.on('disconnect', clearPresence);
 		$socket?.on('disconnect', cancelBrowserInteractions);
 
 		$audioQueue?.destroy();
@@ -1943,8 +2044,9 @@
 				// to the admin panel), otherwise the previously-viewed chat stays selected
 				// in the sidebar and deleting/archiving it wrongly navigates away.
 				clearTyping();
-				if (joinedChatId)
-					$socket?.emit('events:chat', { chat_id: joinedChatId, data: { type: 'leave' } });
+				clearPresence();
+				if (joinedChatId && $socket?.connected)
+					$socket.emit('events:chat', { chat_id: joinedChatId, data: { type: 'leave' } });
 				joinedChatId = '';
 				chatId.set('');
 				chatTitle.set('');
@@ -1953,6 +2055,7 @@
 				$socket?.off('events', chatEventHandler);
 				$socket?.off('connect', handleSocketConnect);
 				$socket?.off('disconnect', clearTyping);
+				$socket?.off('disconnect', clearPresence);
 				$socket?.off('disconnect', cancelBrowserInteractions);
 				dismissContextCompactionToast();
 				audioQueueInstance?.destroy();
@@ -2216,9 +2319,53 @@
 
 	let callMode = 'current';
 	let bridge: RealtimeCall;
+	let releaseCallWakeLock = () => {};
+	const updateCallWakeLock = (active: boolean) => {
+		releaseCallWakeLock();
+		releaseCallWakeLock = active ? acquireWakeLock() : () => {};
+	};
+	$: callInProgress =
+		($showCallOverlay && callMode === 'current') || !!(bridge?.connected || bridge?.connecting);
+	$: updateCallWakeLock(callInProgress);
+	onDestroy(() => releaseCallWakeLock());
+
 	const bridgeCancellations = new Map<string, () => void>();
 	const visibleMessageText = (message: any) =>
 		getOutputText(message?.output) || removeAllDetails(message?.content ?? '');
+
+	const generateVoiceChatMetadata = async (
+		_chatId: string,
+		modelId: string,
+		content: string,
+		initialTitle: string
+	) => {
+		const token = localStorage.token;
+		const messages = [{ role: 'user', content }];
+		const autoTitle = $settings?.title?.auto ?? true;
+		const autoTags = $settings?.autoTags ?? true;
+		const title = autoTitle
+			? await generateTitle(token, modelId, messages, _chatId).catch((error) => {
+					console.error('Could not generate voice chat title', error);
+					return null;
+				})
+			: null;
+		const savedChat = await getChatById(token, _chatId);
+		if (savedChat.title === initialTitle) {
+			const updated = await updateChatById(token, _chatId, {
+				title: title || content.slice(0, 100)
+			});
+			if ($chatId === _chatId) {
+				chatTitle.set(updated.title);
+				if (embedded) await onEmbeddedChatTitle?.(_chatId, updated.title);
+			}
+			await refreshChatList(token);
+		}
+		if (autoTags) {
+			const tags = await generateTags(token, modelId, messages, _chatId);
+			for (const tag of tags) await addTagById(token, _chatId, tag);
+			allTags.set(await getAllTags(token));
+		}
+	};
 
 	const addVoiceMessage = async (
 		role: string,
@@ -2264,8 +2411,16 @@
 		}
 		if (history.currentId === parentId) history.currentId = id;
 		history = history;
-		if (!$chatId) await initChatHandler(history);
-		else if (!$temporaryChatEnabled) {
+		if (!$chatId) {
+			const modelId = selectedModelIds[0];
+			const _chatId = await initChatHandler(history);
+			if (!$temporaryChatEnabled) {
+				// Realtime replies need no chat completion; start metadata work at chat creation.
+				void generateVoiceChatMetadata(_chatId, modelId, content, chat.title).catch((error) => {
+					console.error('Could not save voice chat metadata', error);
+				});
+			}
+		} else if (!$temporaryChatEnabled) {
 			// Patch only the new message, so a running backend turn keeps its current output.
 			await updateChatById(localStorage.token, $chatId, {
 				history: { currentId: history.currentId, messages: changedMessages }
@@ -2467,6 +2622,8 @@
 	//////////////////////////
 
 	const openCallOverlay = () => {
+		if (isShared) return;
+
 		if (!($user?.role === 'admin' || ($user?.permissions?.chat?.call ?? true))) {
 			return;
 		}
@@ -2491,6 +2648,7 @@
 	};
 
 	const initNewChat = async () => {
+		if ($chatId) terminalContext = null;
 		cancelBrowserInteractions();
 		bridge?.end();
 		console.log('initNewChat');
@@ -2626,7 +2784,10 @@
 
 		// resetInput() must stay last: the selected model's defaults override the draft's selection.
 		await restoreChatInput(sessionStorage.getItem('chat-input'));
+		const previousChatId = $chatId;
 		await resetInput();
+		// A chat opened in the meantime keeps its id
+		if ($chatId !== previousChatId) return;
 		await chatId.set('');
 		await chatTitle.set('');
 
@@ -2734,6 +2895,7 @@
 	};
 
 	const loadChat = async () => {
+		if (chatIdProp && chatIdProp !== $chatId) terminalContext = null;
 		noteChatDebug('loadChat start');
 		// chatIdProp is empty for chats started from the home page (URL set via replaceState)
 		chatId.set(chatIdProp || $chatId);
@@ -2966,10 +3128,10 @@
 	let processingQueueChats = new Set<string>();
 
 	const processNextInQueue = async (targetChatId: string) => {
-		if (processingQueueChats.has(targetChatId)) return;
+		if (processingQueueChats.has(targetChatId) || targetChatId !== $chatId) return;
 
 		const queue = $chatRequestQueues[targetChatId];
-		if (!queue || queue.length === 0) return;
+		if (!queue || queue.length === 0 || queue[0].error) return;
 		const lastMessage = history.currentId ? history.messages[history.currentId] : null;
 		if (
 			(lastMessage && lastMessage.role === 'assistant' && !lastMessage.done) ||
@@ -2981,7 +3143,11 @@
 		}
 
 		processingQueueChats.add(targetChatId);
-		const queuedMessages = [...queue];
+		const boundary = queue.findIndex((entry) =>
+			entry.files.some((file: any) => file.type === 'filesystem')
+		);
+		const queuedMessages =
+			boundary === 0 ? queue.slice(0, 1) : boundary < 0 ? [...queue] : queue.slice(0, boundary);
 		const queuedMessageIds = new Set(queuedMessages.map((m) => m.id));
 		try {
 			const combinedPrompt = queuedMessages.map((m) => m.prompt).join('\n\n');
@@ -2997,7 +3163,10 @@
 			console.error(error);
 			chatRequestQueues.update((q) => ({
 				...q,
-				[targetChatId]: [...queuedMessages, ...(q[targetChatId] ?? [])]
+				[targetChatId]: [
+					...queuedMessages.map((entry) => ({ ...entry, error: String(error) })),
+					...(q[targetChatId] ?? [])
+				]
 			}));
 		} finally {
 			processingQueueChats.delete(targetChatId);
@@ -3023,6 +3192,12 @@
 			await stopResponse(false);
 			await tick();
 			await submitPrompt(item.prompt, item.files);
+		} catch (error) {
+			toast.error(String(error));
+			chatRequestQueues.update((q) => ({
+				...q,
+				[targetChatId]: [{ ...item, error: String(error) }, ...(q[targetChatId] ?? [])]
+			}));
 		} finally {
 			processingQueueChats.delete(targetChatId);
 			// Completion can arrive before submitPrompt returns, while the queue is locked.
@@ -3136,10 +3311,32 @@
 		if (selectedModels.length === 0) {
 			toast.error($i18n.t('Model not selected'));
 		} else {
-			const modelId = selectedModels[0];
-			const model = $models.filter((m) => m.id === modelId).at(0);
+			const userMessageId = uuidv4();
 
-			if (!model) {
+			const responseMessages = [];
+			for (const [modelIdx, modelId] of selectedModels.entries()) {
+				const model = $models.filter((m) => m.id === modelId).at(0);
+
+				if (model) {
+					const responseMessageId = uuidv4();
+					responseMessages.push({
+						id: responseMessageId,
+						parentId: userMessageId,
+						childrenIds: [],
+						role: 'assistant',
+						user_id: $user?.id,
+						content: `[RESPONSE] ${responseMessageId}`,
+						done: true,
+
+						model: modelId,
+						modelName: model.name ?? model.id,
+						modelIdx: modelIdx,
+						timestamp: Math.floor(Date.now() / 1000)
+					});
+				}
+			}
+
+			if (responseMessages.length === 0) {
 				toast.error($i18n.t('Model not found'));
 				return;
 			}
@@ -3147,33 +3344,16 @@
 			const messages = createMessagesList(history, history.currentId);
 			const parentMessage = messages.length !== 0 ? messages.at(-1) : null;
 
-			const userMessageId = uuidv4();
-			const responseMessageId = uuidv4();
-
 			const userMessage = {
 				id: userMessageId,
 				parentId: parentMessage ? parentMessage.id : null,
-				childrenIds: [responseMessageId],
+				childrenIds: responseMessages.map((m) => m.id),
 				role: 'user',
 				user_id: $user?.id,
 				user: { id: $user?.id, name: $user?.name },
 				content: userPrompt ? userPrompt : `[PROMPT] ${userMessageId}`,
-				timestamp: Math.floor(Date.now() / 1000)
-			};
-
-			const responseMessage = {
-				id: responseMessageId,
-				parentId: userMessageId,
-				childrenIds: [],
-				role: 'assistant',
-				user_id: $user?.id,
-				content: `[RESPONSE] ${responseMessageId}`,
-				done: true,
-
-				model: modelId,
-				modelName: model.name ?? model.id,
-				modelIdx: 0,
-				timestamp: Math.floor(Date.now() / 1000)
+				timestamp: Math.floor(Date.now() / 1000),
+				models: selectedModels
 			};
 
 			if (parentMessage) {
@@ -3181,9 +3361,11 @@
 				history.messages[parentMessage.id] = parentMessage;
 			}
 			history.messages[userMessageId] = userMessage;
-			history.messages[responseMessageId] = responseMessage;
+			for (const responseMessage of responseMessages) {
+				history.messages[responseMessage.id] = responseMessage;
+			}
 
-			history.currentId = responseMessageId;
+			history.currentId = responseMessages.at(-1).id;
 
 			await tick();
 
@@ -3466,7 +3648,9 @@
 
 		saveSessionSelectedModels();
 
-		return await sendMessage(history, userMessageId, { modelId: bridgeRequest?.modelId ?? null });
+		return await sendMessage(history, userMessageId, {
+			modelId: bridgeRequest?.modelId ?? null
+		});
 	};
 
 	const handleManualCompact = async () => {
@@ -3750,7 +3934,11 @@
 		files = [];
 		messageInput?.setText('');
 
-		return (await submitPrompt(userPrompt, _files, bridgeRequest)) ?? { status: 'rejected' };
+		return (
+			(await submitPrompt(userPrompt, _files, bridgeRequest)) ?? {
+				status: 'rejected'
+			}
+		);
 	};
 
 	const sendMessage = async (
@@ -3768,6 +3956,21 @@
 			regenerationPrompt?: string | null;
 		} = {}
 	) => {
+		const parent = _history.messages[parentId];
+		if (parent?.files?.some((file: any) => file.type === 'filesystem')) {
+			const attached = parent.files.filter((file: any) => file.type === 'filesystem');
+			const terminal = attached.find((file: any) => file.terminal_id)?.terminal_id;
+			if (
+				attached.some(
+					(file: any) =>
+						(file.terminal_id && file.terminal_id !== terminal) ||
+						(file.session_id && file.session_id !== $chatId)
+				)
+			)
+				throw new Error('Attached files must belong to this chat and the same terminal.');
+			if (terminal && !isTerminalAvailable(terminal))
+				throw new Error('The attached file’s terminal is unavailable.');
+		}
 		if (autoScroll) {
 			scrollToBottom();
 		}
@@ -3936,7 +4139,7 @@
 
 		if ($config?.features)
 			features = {
-				voice: $showCallOverlay && callMode === 'current',
+				voice: ($showCallOverlay && callMode === 'current') || !!bridge?.connected,
 				image_generation:
 					$config?.features?.enable_image_generation &&
 					($user?.role === 'admin' || $user?.permissions?.features?.image_generation)
@@ -3986,6 +4189,10 @@
 	) => {
 		const responseMessage = _history.messages[responseMessageId];
 		const userMessage = _history.messages[responseMessage.parentId];
+		const filesystemAttachment = userMessage?.files?.find(
+			(file: any) => file.type === 'filesystem'
+		);
+		const requestTerminalId = filesystemAttachment?.terminal_id ?? $selectedTerminalId;
 
 		const chatMessageFiles = _messages
 			.filter((message) => message.files)
@@ -4118,8 +4325,8 @@
 			}
 		}
 
-		// Menu-selected skills are sent as IDs; inline <$skillId|label> mentions stay
-		// in the message so the backend can inject their full content.
+		// Menu-selected skills and inline <$skillId|label> mentions both load instructions.
+		// Keep mentions in the message so the backend can resolve them.
 		const skillIds = [...selectedSkillIds];
 
 		// Only send terminal_id if the model has terminal capability enabled
@@ -4154,7 +4361,7 @@
 						: $config?.features?.enable_tools
 				),
 				skill_ids: skillIds.length > 0 ? skillIds : undefined,
-				terminal_id: terminalEnabled && $selectedTerminalId ? $selectedTerminalId : undefined,
+				terminal_id: terminalEnabled && requestTerminalId ? requestTerminalId : undefined,
 				tool_servers: $config?.features?.enable_tool_servers
 					? [
 							...($toolServers ?? []).filter(
@@ -4163,7 +4370,10 @@
 							// Direct terminal servers — always included when enabled (not routed through selectedToolIds)
 							...(terminalEnabled
 								? ($terminalServers ?? [])
-										.filter((server) => !server.id)
+										.filter(
+											(server) =>
+												!server.id && (!filesystemAttachment || server.url === requestTerminalId)
+										)
 										.map((server) => ({ ...server, is_terminal: true }))
 								: [])
 						]
@@ -4232,6 +4442,8 @@
 			return null;
 		});
 
+		if (filesystemAttachment && (!res || res.error))
+			throw new Error('File request failed. Retry from the message or queue.');
 		if (res) {
 			if (res.error) {
 				await handleOpenAIError(res.error, responseMessage);
@@ -4268,8 +4480,15 @@
 					(($chatId !== res.chat_id && $chatId === _chatId) ||
 						(!_chatId && $chatId === res.chat_id))
 				) {
+					for (const file of userMessage?.files ?? [])
+						if (file.type === 'filesystem' && file.session_id == null)
+							file.session_id = res.chat_id;
+					for (const file of history.messages[userMessage.id]?.files ?? [])
+						if (file.type === 'filesystem' && file.session_id == null)
+							file.session_id = res.chat_id;
 					adoptNewChatId(res.chat_id, _chatId);
 					if (!$temporaryChatEnabled && !embedded) {
+						saveDraft(getChatInputDraft(), res.chat_id, false);
 						await refreshChatList(localStorage.token);
 
 						// Persist chat-level params (system prompt, advanced
@@ -4311,6 +4530,7 @@
 		const responseMessage = messageId ? history.messages[messageId] : null;
 		if (responseMessage && (responseMessage.user_id ?? chat?.user_id ?? $user?.id) !== $user?.id)
 			return;
+		eventTarget.dispatchEvent(new CustomEvent('voice:cancel_animation'));
 		cancelBrowserInteractions();
 		if (bridge?.connected && responseMessage) responseMessage.bridgeStopping = true;
 		const hasTaskIds = (taskIds?.length ?? 0) > 0;
@@ -4426,12 +4646,12 @@
 		}
 	};
 
-	const continueResponse = async () => {
+	const continueResponse = async (message) => {
 		console.log('continueResponse');
 		const _chatId = JSON.parse(JSON.stringify($chatId));
 
-		if (history.currentId && history.messages[history.currentId].done == true) {
-			const responseMessage = history.messages[history.currentId];
+		if (history.messages[message.id].done == true) {
+			const responseMessage = history.messages[message.id];
 			responseMessage.done = false;
 			await tick();
 
@@ -4530,6 +4750,7 @@
 			await chatId.set(_chatId);
 
 			if (!embedded) {
+				saveDraft(getChatInputDraft(), _chatId, false);
 				window.history.replaceState(window.history.state, '', `/c/${_chatId}`);
 			}
 
@@ -4940,6 +5161,7 @@
 						</div>
 					{:else}
 						<Navbar
+							{liveParticipants}
 							bind:this={navbarElement}
 							readOnly={isShared}
 							chat={{
@@ -5009,6 +5231,7 @@
 								id="messages-container"
 								bind:this={messagesContainerElement}
 								on:scroll={(e) => {
+									if (!messagesContainerElement) return;
 									autoScroll =
 										messagesContainerElement.scrollHeight - messagesContainerElement.scrollTop <=
 										messagesContainerElement.clientHeight + 5;
@@ -5070,9 +5293,11 @@
 									class=" pb-2 {dragged ? 'z-0' : 'z-10'}"
 								>
 									<MessageInput
+										{terminalContext}
 										{typingUsers}
 										on:typing={(event) => emitTyping(event.detail)}
 										callActive={!!(bridge?.connected || bridge?.connecting)}
+										callEnabled={!isShared}
 										bind:this={messageInput}
 										{history}
 										{taskIds}
@@ -5165,9 +5390,11 @@
 								{/if}
 								<div id={embedded ? messageInputDropzoneId : undefined} class="pb-2 z-10">
 									<MessageInput
+										{terminalContext}
 										{typingUsers}
 										on:typing={(event) => emitTyping(event.detail)}
 										callActive={!!(bridge?.connected || bridge?.connecting)}
+										callEnabled={!isShared}
 										bind:this={messageInput}
 										{history}
 										{taskIds}
@@ -5229,7 +5456,9 @@
 						{:else}
 							<div class="flex items-center h-full">
 								<Placeholder
+									{terminalContext}
 									callActive={!!(bridge?.connected || bridge?.connecting)}
+									callEnabled={!isShared}
 									bind:selectedModelIdx
 									{history}
 									bind:selectedModels
@@ -5284,6 +5513,7 @@
 
 				{#if !embedded}
 					<ChatControls
+						bind:terminalContext
 						bind:history
 						bind:chatFiles
 						bind:params
@@ -5299,6 +5529,7 @@
 							return a;
 						}, [])}
 						submitPrompt={submitHandler}
+						onAskFile={askFile}
 						{stopResponse}
 						{bridge}
 						bind:callMode

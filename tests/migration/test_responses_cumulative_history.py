@@ -57,6 +57,7 @@ class CumulativeHistoryTests(unittest.TestCase):
             messages=[{'role': 'user', 'content': 'original context'}],
             form_data={'messages': [{'role': 'user', 'content': 'original context'}]},
             responses_api=responses_api,
+            response_usage={},
             model={},
             metadata={},
             new_form_data={},
