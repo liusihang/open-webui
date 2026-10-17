@@ -23,6 +23,11 @@ async function runSmoke(parentMode) {
 	const page = await browser.newPage();
 	try {
 		const external = [];
+		const escapedSockets = [];
+		await page.routeWebSocket('wss://blocked.example/**', (socket) => {
+			escapedSockets.push(socket.url());
+			socket.close();
+		});
 		// Capture navigation from before app creation; frame-list order is not an identity contract.
 		const navigations = [];
 		const frameIds = new Map();
@@ -65,14 +70,20 @@ async function runSmoke(parentMode) {
 					{
 						title: 'Threshold demo',
 						stateKeys: ['threshold'],
-						html: '<div id="bar">Bar</div><p id="label">Waiting</p><canvas id="plot" width="120" height="60"></canvas><button id="add">Increase</button><p id="network"></p><p id="access"></p><img src="https://blocked.example/image"><iframe src="https://blocked.example/frame"></iframe><a href="https://blocked.example/link">Link</a>',
+						html: '<div id="bar">Bar</div><p id="label">Waiting</p><canvas id="plot" width="120" height="60"></canvas><button id="add">Increase</button><p id="network"></p><p id="access"></p><p id="socket"></p><p id="nested"></p><img src="https://blocked.example/image"><iframe src="https://blocked.example/frame"></iframe><a href="https://blocked.example/link">Link</a>',
 						css: '#bar{height:12px;background:#336699}body{background-image:url(https://blocked.example/css)}',
 						js: `
 ui.onState(state => { const n=Number(state.threshold)||0; ui.setText('label','Threshold '+n);ui.setStyle('bar','width',n+'%');ui.draw('plot',[['clear'],['rect',0,0,n,30,'#336699']]); });
 ui.on('add','click',()=>ui.setState('threshold',(Number(ui.getState('threshold'))||0)+10));
 fetch('https://blocked.example/fetch').then(()=>ui.setText('network','BAD')).catch(()=>ui.setText('network','blocked'));
 try { importScripts('https://blocked.example/import.js'); } catch {}
-try { new WebSocket('wss://blocked.example/socket'); } catch {}
+try { const socket = new WebSocket('wss://blocked.example/socket'); socket.onopen=()=>ui.setText('socket','opened'); socket.onerror=()=>ui.setText('socket','blocked'); } catch { ui.setText('socket','blocked'); }
+try {
+ const nestedSource = "let imports; try { importScripts('https://blocked.example/nested-import.js'); imports='allowed'; } catch { imports='blocked'; } fetch('https://blocked.example/nested-fetch').then(()=> 'allowed',()=> 'blocked').then(fetchStatus=>postMessage({fetch:fetchStatus,imports,access:typeof window+':'+typeof document+':'+typeof parent}));";
+ const nested = new Worker(URL.createObjectURL(new Blob([nestedSource],{type:'text/javascript'})));
+ nested.onmessage=({data})=>{ui.setText('nested',JSON.stringify(data));nested.terminate();};
+ nested.onerror=()=>ui.setText('nested','worker-error');
+} catch { ui.setText('nested','construction-blocked'); }
 ui.setText('access',typeof window+':'+typeof document+':'+typeof parent);
 try { self.location='https://blocked.example/navigation'; } catch {}
 ui.setState('undeclared','rejected');
@@ -134,6 +145,23 @@ ui.setState('undeclared','rejected');
 		);
 		assert.equal(await app.locator('#network').textContent(), 'blocked');
 		assert.equal(await app.locator('#access').textContent(), 'undefined:undefined:undefined');
+		await app.locator('#socket').filter({ hasText: 'blocked' }).waitFor();
+		assert.equal(
+			await app.locator('#socket').textContent(),
+			'blocked',
+			'Worker WebSocket must fail, never open'
+		);
+		await app.locator('#nested').filter({ hasText: /.+/ }).waitFor();
+		const nestedResult = await app.locator('#nested').textContent();
+		// Construction denial is safe; if nested code runs, it must inherit all restrictions.
+		if (nestedResult !== 'construction-blocked') {
+			assert.deepEqual(
+				JSON.parse(nestedResult),
+				{ fetch: 'blocked', imports: 'blocked', access: 'undefined:undefined:undefined' },
+				'Nested worker must retain CSP and have no DOM'
+			);
+		}
+		console.log('Nested worker result:', parentMode, nestedResult);
 		assert.equal(await app.locator('img,iframe,a').count(), 0);
 		await app.locator('#add').click();
 		await page.waitForFunction(() =>
@@ -152,7 +180,53 @@ ui.setState('undeclared','rejected');
 		);
 		await app.locator('#label').filter({ hasText: 'Threshold 70' }).waitFor();
 		assert.equal(await app.locator('#bar').evaluate((n) => n.style.width), '70%');
+		// Real postMessage transport, not synthetic MessageEvents: wrong source and wrong token.
+		await page.evaluate(
+			({ token }) => {
+				window.postMessage(
+					{ channel: 'intelligent-ui-app', token, type: 'write', key: 'threshold', value: 999 },
+					'*'
+				);
+				document
+					.querySelector('#app')
+					.contentWindow.postMessage(
+						{
+							channel: 'intelligent-ui-app',
+							token: 'wrong-token',
+							type: 'state',
+							state: { threshold: 999 }
+						},
+						'*'
+					);
+			},
+			{ token }
+		);
+		await appFrame.evaluate(() =>
+			parent.postMessage(
+				{
+					channel: 'intelligent-ui-app',
+					token: 'wrong-token',
+					type: 'write',
+					key: 'threshold',
+					value: 888
+				},
+				'*'
+			)
+		);
 		await page.waitForTimeout(500);
+		assert.deepEqual(
+			await page.evaluate(() => window.writes),
+			[{ key: 'threshold', value: 50 }],
+			'Forged source/token writes must be ignored'
+		);
+		assert.equal(
+			await app.locator('#label').textContent(),
+			'Threshold 70',
+			'Wrong-token state must be ignored'
+		);
+		assert.equal(await app.locator('#bar').evaluate((n) => n.style.width), '70%');
+		assert.deepEqual(escapedSockets, [], 'No WebSocket handshake may escape worker CSP');
+
 		assert.deepEqual(external, [], 'No HTTP request may escape HTML, CSS, or worker code');
 		assert.equal(appFrame.isDetached(), false, `App frame detached: ${diagnostics()}`);
 		assert.equal(
