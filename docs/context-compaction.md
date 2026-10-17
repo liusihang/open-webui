@@ -26,9 +26,9 @@ model, including opaque-state continuation. In that connection's admin
 
 ```json
 {
-  "api_type": "responses",
-  "native_compaction_models": ["gpt-6.1-sol", "gpt-6-astra"],
-  "native_compaction_protocol": "codex_v2"
+	"api_type": "responses",
+	"native_compaction_models": ["gpt-6.1-sol", "gpt-6-astra"],
+	"native_compaction_protocol": "codex_v2"
 }
 ```
 

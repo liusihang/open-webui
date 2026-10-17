@@ -8,7 +8,13 @@
 	import { toast } from 'svelte-sonner';
 
 	import { createEventDispatcher, onDestroy } from 'svelte';
-	import { onMount, tick, getContext } from 'svelte';
+	import { onMount, tick, getContext, setContext } from 'svelte';
+	import {
+		INTELLIGENT_UI_HOST,
+		canPersistIntelligentUI,
+		type IntelligentUIHost,
+		type InteractionState
+	} from './IntelligentUI/context';
 	import type { Writable } from 'svelte/store';
 	import type { i18n as i18nType, t } from 'i18next';
 
@@ -17,10 +23,12 @@
 	const dispatch = createEventDispatcher();
 
 	import { createNewFeedback, getFeedbackById, updateFeedbackById } from '$lib/apis/evaluations';
-	import { getChatById } from '$lib/apis/chats';
+	import { getChatById, updateChatMessageIntelligentUI } from '$lib/apis/chats';
+	import { createMessageStateSaver } from '$lib/utils/intelligent-ui/persistence';
 	import { generateTags } from '$lib/apis';
 
 	import {
+		chatId as activeChatId,
 		audioQueue,
 		config,
 		models,
@@ -77,6 +85,10 @@
 		model: string;
 		content: string;
 		output?: OutputItem[];
+		meta?: {
+			intelligent_ui?: { version: 1; blocks: Record<string, InteractionState> };
+			[key: string]: unknown;
+		};
 		files?: { type: string; url: string }[];
 		timestamp: number;
 		role: string;
@@ -182,6 +194,87 @@
 	export let editCodeBlock = true;
 	export let topPadding = false;
 	export let onInsertToNote: ((content: string) => void) | null = null;
+
+	let intelligentUIFollowUpPending = false;
+	const canWriteIntelligentUI = () => canPersistIntelligentUI(message, readOnly, $user?.id);
+	const intelligentUIStateSaver = createMessageStateSaver(
+		(snapshot) =>
+			updateChatMessageIntelligentUI(
+				snapshot.token,
+				snapshot.chatId,
+				snapshot.messageId,
+				snapshot.state
+			),
+		() => toast.error('Could not save interactive view state.')
+	);
+	setContext<IntelligentUIHost>(INTELLIGENT_UI_HOST, {
+		canWrite: canWriteIntelligentUI,
+		canFollowUp: () =>
+			!intelligentUIFollowUpPending &&
+			canWriteIntelligentUI() &&
+			!message.error &&
+			Boolean(history.messages[history.currentId]?.done),
+		read: (block) =>
+			history.messages[messageId]?.meta?.intelligent_ui?.version === 1
+				? (history.messages[messageId].meta.intelligent_ui.blocks?.[block] ?? {})
+				: {},
+		write: (block, state) => {
+			if (!canWriteIntelligentUI() || block.length > 512) return;
+			const source = history.messages[messageId];
+			if (!source) return;
+			const safeState = Object.fromEntries(
+				Object.entries(state)
+					.slice(0, 64)
+					.filter(
+						([key, value]) =>
+							key.length <= 512 &&
+							(typeof value === 'boolean' || (typeof value === 'number' && Number.isFinite(value)))
+					)
+			);
+			const existing =
+				source.meta?.intelligent_ui?.version === 1 ? (source.meta.intelligent_ui.blocks ?? {}) : {};
+			if (!Object.hasOwn(existing, block) && Object.keys(existing).length >= 64) return;
+			if (JSON.stringify(existing[block]) === JSON.stringify(safeState)) return;
+			source.meta = {
+				...source.meta,
+				intelligent_ui: { version: 1, blocks: { ...existing, [block]: safeState } }
+			};
+			history.messages = { ...history.messages, [messageId]: source };
+			if (!$temporaryChatEnabled)
+				intelligentUIStateSaver.schedule({
+					chatId,
+					messageId,
+					token: localStorage.token,
+					state: source.meta.intelligent_ui
+				});
+		},
+		followUp: async (prompt) => {
+			if (
+				intelligentUIFollowUpPending ||
+				!canWriteIntelligentUI() ||
+				message.error ||
+				!history.messages[history.currentId]?.done
+			)
+				return;
+			const targetChatId = chatId;
+			const targetMessageId = message.id;
+			intelligentUIFollowUpPending = true;
+			try {
+				await intelligentUIStateSaver.flush();
+				if (
+					targetChatId !== $activeChatId ||
+					chatId !== targetChatId ||
+					message.id !== targetMessageId ||
+					!canWriteIntelligentUI() ||
+					!history.messages[history.currentId]?.done
+				)
+					return;
+				await submitMessage(targetMessageId, prompt.slice(0, 4096));
+			} finally {
+				intelligentUIFollowUpPending = false;
+			}
+		}
+	});
 
 	let citationsElement: HTMLDivElement;
 
@@ -666,6 +759,7 @@
 	});
 
 	onDestroy(() => {
+		void intelligentUIStateSaver.flush();
 		if (buttonsContainerElement) {
 			buttonsContainerElement.removeEventListener('wheel', buttonsWheelHandler);
 		}

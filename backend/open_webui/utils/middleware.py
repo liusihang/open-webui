@@ -54,6 +54,7 @@ from open_webui.models.folders import Folders
 from open_webui.models.models import Models
 from open_webui.models.notes import Notes
 from open_webui.models.users import UserModel, Users
+from open_webui.utils.intelligent_ui import get_intelligent_ui_prompt
 from open_webui.retrieval.utils import filter_source_metadata, get_sources_from_items
 from open_webui.routers.images import (
     CreateImageForm,
@@ -447,7 +448,14 @@ def _split_tool_calls(
     return expanded
 
 
-CITATION_TOOL_NAMES = ('fetch_url', 'view_file', 'view_knowledge_file', 'query_knowledge_files', 'view_knowledge_evidence', 'query_chat_files')
+CITATION_TOOL_NAMES = (
+    'fetch_url',
+    'view_file',
+    'view_knowledge_file',
+    'query_knowledge_files',
+    'view_knowledge_evidence',
+    'query_chat_files',
+)
 
 
 def get_citation_source_from_tool_result(
@@ -472,10 +480,14 @@ def get_citation_source_from_tool_result(
             return []
         if tool_name in ('query_knowledge_files', 'view_knowledge_evidence') and isinstance(tool_result, dict):
             from open_webui.retrieval.integration import citation_sources
+
             sources = citation_sources(tool_result.get('items') or [])
             if tool_result.get('legacy_items'):
-                sources.extend(get_citation_source_from_tool_result('query_chat_files', tool_params,
-                    tool_result['legacy_items'], tool_id))
+                sources.extend(
+                    get_citation_source_from_tool_result(
+                        'query_chat_files', tool_params, tool_result['legacy_items'], tool_id
+                    )
+                )
             return sources
 
         if tool_name in ('view_knowledge_file', 'view_file'):
@@ -1725,47 +1737,90 @@ async def chat_completion_files_handler(
         for item in (metadata.get('files') or [])
         if item.get('type') != 'filesystem' and not is_native_pdf_attachment(item, metadata)
     ]
-    from open_webui.retrieval.integration import authorized_query_images, citation_sources, model_images, request_scope, services, split_external_scope
+    from open_webui.retrieval.integration import (
+        authorized_query_images,
+        citation_sources,
+        model_images,
+        request_scope,
+        services,
+        split_external_scope,
+    )
+
     query_images = await authorized_query_images(user, metadata.get('files') or [])
     attached = get_attached_knowledge(extra_params.get('__model__') or {}, metadata)
     scope = await request_scope(user, model_knowledge=attached, metadata=metadata, query_image_refs=query_images)
     scope, external = await split_external_scope(scope)
-    native_owner = (
-        metadata.get('params', {}).get('function_calling') != 'legacy'
-        and 'query_knowledge_files' in (metadata.get('tools') or {})
+    native_owner = metadata.get('params', {}).get('function_calling') != 'legacy' and 'query_knowledge_files' in (
+        metadata.get('tools') or {}
     )
     if scope.knowledge_ids or scope.file_ids:
         if not native_owner:
             try:
                 _, evidence, _, state = await services(request, user=user)
                 seen = set(metadata.get('rag_seen_refs') or ())
-                result = await evidence.search(query_text=get_last_user_message(body['messages']) or '',
+                result = await evidence.search(
+                    query_text=get_last_user_message(body['messages']) or '',
                     query_image_refs=query_images,
-                    count=min(int(await Config.get('rag.top_k') or 5), 50), user=user,
-                    resolved_scope=scope, seen_refs=seen)
+                    count=min(int(await Config.get('rag.top_k') or 5), 50),
+                    user=user,
+                    resolved_scope=scope,
+                    seen_refs=seen,
+                )
                 metadata['rag_seen_refs'] = list(seen)
                 sources.extend(citation_sources(result['items']))
-                images = await model_images(request, result['items'], user=user, scope=scope,
-                    vision=((extra_params.get('__model__') or {}).get('info', {}).get('meta', {}).get('capabilities') or {}).get('vision', False))
+                images = await model_images(
+                    request,
+                    result['items'],
+                    user=user,
+                    scope=scope,
+                    vision=(
+                        (extra_params.get('__model__') or {}).get('info', {}).get('meta', {}).get('capabilities') or {}
+                    ).get('vision', False),
+                )
                 if images:
                     for message in reversed(body['messages']):
                         if message.get('role') == 'user':
                             content = message.get('content', '')
-                            message['content'] = ([{'type': 'text', 'text': content}] if isinstance(content, str) else content) + [
-                                {'type': 'image_url', 'image_url': {'url': part['image_url']}} for part in images]
+                            message['content'] = (
+                                [{'type': 'text', 'text': content}] if isinstance(content, str) else content
+                            ) + [{'type': 'image_url', 'image_url': {'url': part['image_url']}} for part in images]
                             break
                 if result['warnings']:
-                    await __event_emitter__({'type': 'status', 'data': {'action': 'knowledge_search',
-                        'description': '; '.join(result['warnings']), 'done': True}})
+                    await __event_emitter__(
+                        {
+                            'type': 'status',
+                            'data': {
+                                'action': 'knowledge_search',
+                                'description': '; '.join(result['warnings']),
+                                'done': True,
+                            },
+                        }
+                    )
             except Exception as exc:
-                await __event_emitter__({'type': 'status', 'data': {'action': 'knowledge_search',
-                    'description': 'Knowledge index is not ready: ' + type(exc).__name__, 'done': True, 'error': True}})
+                await __event_emitter__(
+                    {
+                        'type': 'status',
+                        'data': {
+                            'action': 'knowledge_search',
+                            'description': 'Knowledge index is not ready: ' + type(exc).__name__,
+                            'done': True,
+                            'error': True,
+                        },
+                    }
+                )
         # Local KB/files never run the old search as well. Other attachment
         # types (web, notes, external providers) keep their official handling.
-        files = [item for item in files if not (
-            item.get('type', 'file') == 'file' and item.get('id') in scope.file_ids
-            or item.get('type') == 'collection' and item.get('id') in scope.knowledge_ids
-            or item.get('type') == 'folder')]
+        files = [
+            item
+            for item in files
+            if not (
+                item.get('type', 'file') == 'file'
+                and item.get('id') in scope.file_ids
+                or item.get('type') == 'collection'
+                and item.get('id') in scope.knowledge_ids
+                or item.get('type') == 'folder'
+            )
+        ]
     if native_owner:
         external_ids = {item['id'] for item in external}
         files = [item for item in files if not (item.get('type') == 'collection' and item.get('id') in external_ids)]
@@ -2503,6 +2558,10 @@ async def process_chat_payload(request, form_data, user, metadata, model):
                     form_data['messages'],
                 )
 
+        ui_prompt = get_intelligent_ui_prompt(features)
+        if ui_prompt:
+            form_data['messages'] = add_or_update_system_message(ui_prompt, form_data.get('messages', []), append=True)
+
         if (
             'memory' in features
             and features['memory']
@@ -2804,6 +2863,7 @@ async def process_chat_payload(request, form_data, user, metadata, model):
         }
     )
     from open_webui.retrieval.integration import authorized_query_images
+
     latest_user = next((m for m in reversed(form_data.get('messages', [])) if m.get('role') == 'user'), {})
     image_entries = [*(files or []), *(latest_user.get('files') or [])]
     metadata['rag_query_image_refs'] = await authorized_query_images(user, image_entries)
@@ -3440,7 +3500,11 @@ async def resume_tool_calls(request, form_data, user, model, metadata, message) 
             display_files = []
             for file_item in files:
                 if file_item.get('type') == 'image' and file_item.get('url', '').startswith('data:'):
-                    image_url = file_item['url'] if file_item.get('rag_llm_only') else await store_tool_result_image(request, file_item['url'], metadata, user)
+                    image_url = (
+                        file_item['url']
+                        if file_item.get('rag_llm_only')
+                        else await store_tool_result_image(request, file_item['url'], metadata, user)
+                    )
                     output_parts.append({'type': 'input_image', 'image_url': image_url})
                 else:
                     display_files.append(file_item)
@@ -5988,7 +6052,11 @@ async def streaming_chat_response_handler(response, ctx):
                         for file_item in result.get('files', []):
                             if file_item.get('type') == 'image' and file_item.get('url', '').startswith('data:'):
                                 # LLM-only: add as input_image part, not frontend display output.
-                                image_url = file_item['url'] if file_item.get('rag_llm_only') else await store_tool_result_image(request, file_item['url'], metadata, user)
+                                image_url = (
+                                    file_item['url']
+                                    if file_item.get('rag_llm_only')
+                                    else await store_tool_result_image(request, file_item['url'], metadata, user)
+                                )
                                 output_parts.append({'type': 'input_image', 'image_url': image_url})
                             else:
                                 display_files.append(file_item)
@@ -6182,9 +6250,17 @@ async def streaming_chat_response_handler(response, ctx):
                                             'type': 'open_webui:context_compaction',
                                             'id': output_id('cc'),
                                             'call_id': next(
-                                                message['tool_calls'][0]['id']
+                                                call['call_id'] if responses_api else call['id']
                                                 for message in messages
-                                                if message.get('tool_calls')
+                                                for call in (
+                                                    [
+                                                        item
+                                                        for item in message.get('output', [])
+                                                        if item.get('type') == 'function_call' and item.get('call_id')
+                                                    ]
+                                                    if responses_api
+                                                    else message.get('tool_calls', [])
+                                                )
                                             ),
                                             'summary': context_summary,
                                         }
@@ -6202,12 +6278,12 @@ async def streaming_chat_response_handler(response, ctx):
                                 None,
                             )
                             if context_summary:
-                                new_form_data['messages'].insert(
-                                    1
-                                    if new_form_data['messages']
-                                    and new_form_data['messages'][0].get('role') == 'system'
-                                    else 0,
-                                    {'role': 'system', 'content': f'[CONVERSATION SUMMARY]\n{context_summary}'},
+                                # Append on the provider request copy, preserving the resolved
+                                # base prompt without accumulating summaries in replay history.
+                                new_form_data['messages'] = add_or_update_system_message(
+                                    f'[CONVERSATION SUMMARY]\n{context_summary}',
+                                    merge_system_messages(new_form_data['messages']),
+                                    append=True,
                                 )
 
                         new_form_data = await convert_url_images_to_base64(new_form_data, user=user)

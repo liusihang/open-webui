@@ -242,6 +242,7 @@ type OllamaModelDetails = {
 };
 
 type Settings = {
+	intelligentUI?: boolean;
 	pipeReasoningEfforts?: Record<string, string>;
 	pinnedModels?: string[];
 	toolServers?: never[];

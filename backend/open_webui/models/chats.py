@@ -1323,6 +1323,31 @@ class ChatTable:
                 turn[parent_id] = history['messages'][parent_id]
             return {'messages': turn, 'currentId': history['currentId']}
 
+    async def update_intelligent_ui_state(
+        self, id: str, message_id: str, user_id: str, state: dict
+    ) -> ChatModel | None:
+        """Patch only UI state under the chat lock; never recreate a deleted message."""
+        async with self._chat_transaction(id) as (session, chat_item):
+            if chat_item is None or chat_item.user_id != user_id:
+                return None
+            chat = deepcopy(chat_item.chat or {})
+            message = (chat.get('history', {}).get('messages') or {}).get(message_id)
+            if (
+                not isinstance(message, dict)
+                or message.get('role') != 'assistant'
+                or message.get('done') is not True
+                or (message.get('user_id') or chat_item.user_id) != user_id
+            ):
+                return None
+            meta = message.get('meta') if isinstance(message.get('meta'), dict) else {}
+            message['meta'] = {**meta, 'intelligent_ui': deepcopy(state)}
+            await ChatMessages.upsert_message(message_id, id, user_id, message, db=session)
+            chat_item.chat = chat
+            flag_modified(chat_item, 'chat')
+            # UI presentation state must not move the active branch or unread timestamp.
+            updated_chat = ChatModel.model_validate(chat_item)
+        return updated_chat
+
     async def upsert_message_to_chat_by_id_and_message_id(
         self, id: str, message_id: str, message: dict, *, touch: bool = True
     ) -> ChatModel | None:

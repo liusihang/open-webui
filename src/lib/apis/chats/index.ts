@@ -1376,6 +1376,29 @@ export const deleteChatMessageById = async (token: string, id: string, messageId
 	return res;
 };
 
+/** Persist only control state to the captured message; never send a stale chat graph. */
+export const updateChatMessageIntelligentUI = async (
+	token: string,
+	id: string,
+	messageId: string,
+	state: { version: 1; blocks: Record<string, Record<string, boolean | number>> }
+) => {
+	const response = await fetch(
+		`${WEBUI_API_BASE_URL}/chats/${encodeURIComponent(id)}/messages/${encodeURIComponent(messageId)}`,
+		{
+			method: 'POST',
+			headers: {
+				Accept: 'application/json',
+				'Content-Type': 'application/json',
+				...(token && { authorization: `Bearer ${token}` })
+			},
+			body: JSON.stringify({ intelligent_ui: state })
+		}
+	);
+	if (!response.ok) throw getErrorDetail(await response.json());
+	return response.json();
+};
+
 export const resolveChatMessageToolCall = async (
 	token: string,
 	id: string,

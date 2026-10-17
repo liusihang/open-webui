@@ -33,6 +33,7 @@
 	import { toast } from 'svelte-sonner';
 
 	import CodeBlock from '$lib/components/chat/Messages/CodeBlock.svelte';
+	import IntelligentUIBlock from '../IntelligentUI/IntelligentUIBlock.svelte';
 	import MarkdownInlineTokens from '$lib/components/chat/Messages/Markdown/MarkdownInlineTokens.svelte';
 	import KatexRenderer from './KatexRenderer.svelte';
 	import AlertRenderer, { alertComponent } from './AlertRenderer.svelte';
@@ -206,7 +207,13 @@
 			/>
 		</svelte:element>
 	{:else if token.type === 'code'}
-		{#if markdown?.document || token.codeBlockStyle !== 'indented'}
+		{#if !markdown?.document && $settings?.intelligentUI === true && token.lang?.trim() === 'intelligent-ui'}
+			<IntelligentUIBlock
+				source={token.text ?? ''}
+				{done}
+				blockId={`${chatId && id.startsWith(chatId + '-') ? id.slice(chatId.length + 1) : id}:${tokenIdx}`}
+			/>
+		{:else if markdown?.document || token.codeBlockStyle !== 'indented'}
 			<CodeBlock
 				id={`${id}-${tokenIdx}`}
 				className={markdown?.document ? 'document-code-block' : ''}

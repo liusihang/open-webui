@@ -13,6 +13,7 @@ from open_webui.config import (
     ENABLE_ADMIN_EXPORT,
 )
 from open_webui.constants import ERROR_MESSAGES
+from open_webui.utils.intelligent_ui import validate_intelligent_ui_state
 from open_webui.events import EVENTS, publish_event
 from open_webui.internal.db import get_async_session
 from open_webui.models.access_grants import AccessGrants
@@ -1492,6 +1493,7 @@ async def update_chat_by_id(
 class MessageForm(BaseModel):
     content: str | None = None
     voice: dict | None = None
+    intelligent_ui: dict | None = None
 
 
 @router.post('/{id}/messages/{message_id}', response_model=ChatResponse | None)
@@ -1516,6 +1518,18 @@ async def update_chat_message_by_id(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail=ERROR_MESSAGES.ACCESS_PROHIBITED,
         )
+
+    if form_data.intelligent_ui is not None:
+        if form_data.content is not None or form_data.voice is not None:
+            raise HTTPException(400, 'Interactive state must be updated separately')
+        try:
+            ui_state = validate_intelligent_ui_state(form_data.intelligent_ui)
+        except ValueError as exc:
+            raise HTTPException(400, str(exc)) from exc
+        updated = await Chats.update_intelligent_ui_state(id, message_id, user.id, ui_state)
+        if updated is None:
+            raise HTTPException(409, 'Interactive state requires an owned, completed assistant message')
+        return ChatResponse.model_validate(updated, from_attributes=True)
 
     updates = {}
     if form_data.content is not None:

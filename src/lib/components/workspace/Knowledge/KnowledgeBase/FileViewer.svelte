@@ -53,14 +53,27 @@
 	const statusController = new AbortController();
 	const loadStatus = async () => {
 		try {
-			retrievalStatus = await getRetrievalStatus(localStorage.token, file.id!, statusController.signal);
-			if (!statusController.signal.aborted && ['pending', 'processing', 'indexing'].includes(retrievalStatus.images))
+			retrievalStatus = await getRetrievalStatus(
+				localStorage.token,
+				file.id!,
+				statusController.signal
+			);
+			if (
+				!statusController.signal.aborted &&
+				['pending', 'processing', 'indexing'].includes(retrievalStatus.images)
+			)
 				statusTimer = setTimeout(loadStatus, 3000);
-		} catch (_) { /* Existing files without an index keep the normal preview. */ }
+		} catch (_) {
+			/* Existing files without an index keep the normal preview. */
+		}
 	};
 	const retryImages = async () => {
-		try { await retryImageIndex(localStorage.token, file.id!); await loadStatus(); }
-		catch (error) { toast.error(String(error)); }
+		try {
+			await retryImageIndex(localStorage.token, file.id!);
+			await loadStatus();
+		} catch (error) {
+			toast.error(String(error));
+		}
 	};
 	let onlyOffice = false;
 	$: onlyOfficeAvailable =

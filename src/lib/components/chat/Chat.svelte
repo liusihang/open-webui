@@ -4157,6 +4157,10 @@
 			features = { ...features, memory: true };
 		}
 
+		if ($settings?.intelligentUI === true) {
+			features = { ...features, intelligent_ui: true };
+		}
+
 		return features;
 	};
 
@@ -4215,9 +4219,16 @@
 		// Remove duplicates
 		// Stored image IDs are retrieval inputs, not target file collections. The
 		// server authorizes them and advertises only IDs to the knowledge tool.
-		files.push(...(userMessage?.files ?? [])
-			.filter((item) => item.id && isRasterImageContentType(item?.content_type))
-			.map((item) => ({ type: 'image', id: item.id, name: item.name, content_type: item.content_type })));
+		files.push(
+			...(userMessage?.files ?? [])
+				.filter((item) => item.id && isRasterImageContentType(item?.content_type))
+				.map((item) => ({
+					type: 'image',
+					id: item.id,
+					name: item.name,
+					content_type: item.content_type
+				}))
+		);
 		files = files.filter((item, index, array) => array.findIndex((i) => equal(i, item)) === index);
 
 		scrollToBottom();

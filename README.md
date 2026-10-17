@@ -1,8 +1,9 @@
 # Open WebUI 👋
 
-> This fork's `main` is based on Open WebUI **v0.12.0**, with selected native
+> This integration is based on Open WebUI **v0.12.3**, with selected native
 > Responses, document preview, memory-review and multimodal retrieval changes.
-> See [fork-specific features, configuration and migration limits](docs/fork-v0120.md)
+> See [upgrade and retained custom features](docs/fork-v0123.md) and
+> [Intelligent UI setup](docs/intelligent-ui.md)
 > before deployment. Runtime credentials, provider settings and user data are not
 > included in this repository. The upstream README follows below.
 
