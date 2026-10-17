@@ -18,10 +18,25 @@ RAW_URL = 'http://192.168.1.164:8080/v1'
 TEXT_METADATA_HASH = '7873dd4c25f5cef9e2aad33bef0bbff945079a56ac621a44490e443433d4cda2'
 IMAGE_METADATA_HASH = '7ceb543b7b2f88f8c6a02d1268e1bf3cdbfdf732e9a0576370bc78ad0c017c4a'
 METADATA_KEYS = {
-    'file_id', 'vector_id', 'hash', 'file_hash', 'content_hash', 'embedding_config',
-    'embedding_config_hash', 'page_index', 'page', 'start_index', 'chunk_index',
-    'anchor', 'modality', 'vector_role', 'asset_ref', 'evidence_ref',
-    'projection_config_hash', 'vector_space_id', 'knowledge_id',
+    'file_id',
+    'vector_id',
+    'hash',
+    'file_hash',
+    'content_hash',
+    'embedding_config',
+    'embedding_config_hash',
+    'page_index',
+    'page',
+    'start_index',
+    'chunk_index',
+    'anchor',
+    'modality',
+    'vector_role',
+    'asset_ref',
+    'evidence_ref',
+    'projection_config_hash',
+    'vector_space_id',
+    'knowledge_id',
 }
 
 
@@ -40,7 +55,8 @@ def accepted_vector(vector, *, image=False):
     try:
         values = json.loads(vector['vector'])
         if (
-            len(values) != 2048 or not any(values)
+            len(values) != 2048
+            or not any(values)
             or any(isinstance(x, bool) or not isinstance(x, (int, float)) or not math.isfinite(x) for x in values)
         ):
             return False
@@ -89,36 +105,50 @@ def source_snapshot(conn, knowledge_ids, file_ids, limit):
             conn,
             'SELECT id,collection_name,text,vector::text AS vector,vmetadata FROM document_chunk '
             "WHERE collection_name=%s AND vmetadata->>'file_id'=%s ORDER BY id",
-            (kb, file_id), limit,
+            (kb, file_id),
+            limit,
         )
         count = 0
         for vector in vectors:
             metadata = copy.decode(vector['vmetadata'])
-            if (
-                metadata.get('modality', 'text') != 'text'
-                or metadata.get('vector_role') not in (None, 'text_chunk_dense')
+            if metadata.get('modality', 'text') != 'text' or metadata.get('vector_role') not in (
+                None,
+                'text_chunk_dense',
             ):
                 continue
             if not isinstance(vector['text'], str) or not vector['text'].strip():
                 continue
             # Hash metadata, where present, must refer to this immutable file.
-            if (
-                metadata.get('hash') not in (None, file['hash'])
-                or metadata.get('file_hash') not in (None, file['meta'].get('file_hash'))
+            if metadata.get('hash') not in (None, file['hash']) or metadata.get('file_hash') not in (
+                None,
+                file['meta'].get('file_hash'),
             ):
                 raise copy.ReuseError('old raw collection file hash conflict')
             content_hash = hashlib.sha256(vector['text'].encode()).hexdigest()
             chunker = copy.digest({'protocol': 'legacy_manifest_from_original_vector_id'})
             uid = copy.stable('chunk', legacy_vector_id=vector['id'], file_id=file_id, version=version, knowledge_id=kb)
             now = bundle['captured_at']
-            bundle['chunks'].append({
-                'chunk_uid': uid, 'collection_id': None, 'knowledge_id': kb,
-                'collection_name': kb, 'file_id': file_id, 'file_version': version, 'chunk_version': 1,
-                'chunk_index': metadata.get('chunk_index'), 'start_index': metadata.get('start_index'),
-                'content_hash': content_hash, 'chunker_config_hash': chunker, 'text': vector['text'],
-                'metadata': {k: v for k, v in metadata.items() if k in METADATA_KEYS} | {'vector_id': vector['id']},
-                'is_active': True, 'deleted_at': None, 'created_at': now, 'updated_at': now,
-            })
+            bundle['chunks'].append(
+                {
+                    'chunk_uid': uid,
+                    'collection_id': None,
+                    'knowledge_id': kb,
+                    'collection_name': kb,
+                    'file_id': file_id,
+                    'file_version': version,
+                    'chunk_version': 1,
+                    'chunk_index': metadata.get('chunk_index'),
+                    'start_index': metadata.get('start_index'),
+                    'content_hash': content_hash,
+                    'chunker_config_hash': chunker,
+                    'text': vector['text'],
+                    'metadata': {k: v for k, v in metadata.items() if k in METADATA_KEYS} | {'vector_id': vector['id']},
+                    'is_active': True,
+                    'deleted_at': None,
+                    'created_at': now,
+                    'updated_at': now,
+                }
+            )
             bundle['vectors'].append(vector)
             count += 1
         bundle['legacy_fallback'].append({'knowledge_id': kb, 'file_id': file_id, 'rows': count})
@@ -135,9 +165,9 @@ def source_snapshot(conn, knowledge_ids, file_ids, limit):
     for vector in bundle['vectors']:
         metadata = copy.decode(vector['vmetadata'])
         source = source_files[metadata['file_id']]
-        if (
-            metadata.get('hash') not in (None, source['hash'])
-            or metadata.get('file_hash') not in (None, source['meta'].get('file_hash'))
+        if metadata.get('hash') not in (None, source['hash']) or metadata.get('file_hash') not in (
+            None,
+            source['meta'].get('file_hash'),
         ):
             raise copy.ReuseError('original vector hash differs from its matching source hash field')
     bundle['source_closure'] = dict(closure)
@@ -148,8 +178,11 @@ def profile(evidence_sha256, *, images, now):
     if not isinstance(evidence_sha256, str) or len(evidence_sha256) != 64:
         raise copy.ReuseError('explicit compatibility evidence hash required')
     config = {
-        'protocol': 'legacy_raw_v1', 'text_api_base_url': RAW_URL,
-        'engine': 'openai', 'model': MODEL, 'query_prefix': None,
+        'protocol': 'legacy_raw_v1',
+        'text_api_base_url': RAW_URL,
+        'engine': 'openai',
+        'model': MODEL,
+        'query_prefix': None,
         'source_metadata_hashes': [TEXT_METADATA_HASH] + ([IMAGE_METADATA_HASH] if images else []),
         'compatibility_evidence_sha256': evidence_sha256,
         'provenance': 'observed_compatibility_not_verified_revision',
@@ -159,12 +192,21 @@ def profile(evidence_sha256, *, images, now):
         dict(model=MODEL, revision=None, dimensions=2048, encoding=config, supports_images=images)
     )
     return dict(
-        id='legacy_raw_' + fingerprint, embedding_model=MODEL, model_revision=None,
-        embedding_dim=2048, distance_metric='cosine', config_fingerprint=fingerprint,
-        encoding_config=config, verification_status='legacy_read_only',
-        supports_text_query=True, supports_image_query=images,
-        supports_text_evidence=True, supports_image_evidence=images,
-        active=True, created_at=now, updated_at=now,
+        id='legacy_raw_' + fingerprint,
+        embedding_model=MODEL,
+        model_revision=None,
+        embedding_dim=2048,
+        distance_metric='cosine',
+        config_fingerprint=fingerprint,
+        encoding_config=config,
+        verification_status='legacy_read_only',
+        supports_text_query=True,
+        supports_image_query=images,
+        supports_text_evidence=True,
+        supports_image_evidence=images,
+        active=True,
+        created_at=now,
+        updated_at=now,
     )
 
 
@@ -186,7 +228,8 @@ def build_plan(bundle, evidence_sha256):
         image = evidence['modality'] == 'image'
         vector_id = (
             old_images.get(evidence['evidence_ref'])
-            if image else chunks[evidence['retrieval_chunk_uid']]['metadata']['vector_id']
+            if image
+            else chunks[evidence['retrieval_chunk_uid']]['metadata']['vector_id']
         )
         vector = vectors.get(vector_id)
         if not vector or not accepted_vector(vector, image=image):
@@ -198,14 +241,22 @@ def build_plan(bundle, evidence_sha256):
             if not old_space or old_space['embedding_model'] != MODEL:
                 rejected['unaccepted_image_space'] += 1
                 continue
-        maps.append(dict(
-            id=copy.stable('mapping', ref=evidence['evidence_ref'], space=space['id']),
-            evidence_id=evidence['id'], evidence_ref=evidence['evidence_ref'], vector_space_id=space['id'],
-            vector_backend_collection=vector['collection_name'], vector_backend_id=vector['id'],
-            content_hash=evidence['content_hash'], config_fingerprint=space['config_fingerprint'],
-            embedding_status='ready', embedding_error=None,
-            created_at=bundle['captured_at'], updated_at=bundle['captured_at'],
-        ))
+        maps.append(
+            dict(
+                id=copy.stable('mapping', ref=evidence['evidence_ref'], space=space['id']),
+                evidence_id=evidence['id'],
+                evidence_ref=evidence['evidence_ref'],
+                vector_space_id=space['id'],
+                vector_backend_collection=vector['collection_name'],
+                vector_backend_id=vector['id'],
+                content_hash=evidence['content_hash'],
+                config_fingerprint=space['config_fingerprint'],
+                embedding_status='ready',
+                embedding_error=None,
+                created_at=bundle['captured_at'],
+                updated_at=bundle['captured_at'],
+            )
+        )
     # Unknown source rows are not promoted or silently indexed by a new model.
     tables['knowledge_evidence_embedding'] = maps
     tables['knowledge_vector_space'] = [space] if maps else []
@@ -255,9 +306,15 @@ def main(argv=None):
         try:
             if args.mode == 'export':
                 bundle = source_snapshot(conn, args.knowledge_id, args.file_id, args.max_rows)
-                result = copy.export_bundle(bundle, args.bundle_dir, asset_root=args.asset_root) if args.apply else {
-                    'dry_run': True, **copy.preflight_report(bundle), 'source_closure': bundle['source_closure'],
-                }
+                result = (
+                    copy.export_bundle(bundle, args.bundle_dir, asset_root=args.asset_root)
+                    if args.apply
+                    else {
+                        'dry_run': True,
+                        **copy.preflight_report(bundle),
+                        'source_closure': bundle['source_closure'],
+                    }
+                )
             else:
                 bundle = copy.load_bundle(args.bundle_dir)
                 plan = build_plan(bundle, args.compatibility_evidence_sha256)
@@ -280,6 +337,13 @@ if __name__ == '__main__':
         main()
     except Exception as error:
         # psycopg diagnostic payloads can contain real documents; never print them.
-        print(json.dumps({'failed': True, 'category': type(error).__name__,
-                          'reason': str(error) if isinstance(error, copy.ReuseError) else 'restricted diagnostic'}))
+        print(
+            json.dumps(
+                {
+                    'failed': True,
+                    'category': type(error).__name__,
+                    'reason': str(error) if isinstance(error, copy.ReuseError) else 'restricted diagnostic',
+                }
+            )
+        )
         raise SystemExit(1) from None

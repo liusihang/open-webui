@@ -61,10 +61,14 @@ async def compact_messages_for_request(
     ):
         # Disabled/native modes use the full transcript. Remove old text-only
         # markers from the request copy so the tool loop cannot re-inject them.
-        return [
-            {key: value for key, value in message.items() if key not in {'contextSummary', 'context_summary'}}
-            for message in messages
-        ], None, False
+        return (
+            [
+                {key: value for key, value in message.items() if key not in {'contextSummary', 'context_summary'}}
+                for message in messages
+            ],
+            None,
+            False,
+        )
 
     system_messages = [messages[0]] if messages and messages[0].get('role') == 'system' else []
     messages = messages[1:] if system_messages else messages
@@ -323,30 +327,59 @@ def _build_context_usage(tokens: int, threshold: int) -> dict:
 
 
 def _apply_latest_summary_checkpoint(messages: list[dict]) -> tuple[list[dict], str | None]:
-    summary = None
-    summary_idx = None
-
-    for idx, message in enumerate(messages):
+    for idx in range(len(messages) - 1, -1, -1):
+        message = messages[idx]
         value = message.get('contextSummary') or message.get('context_summary')
         if isinstance(value, str) and value.strip():
-            summary = value
-            summary_idx = idx
+            return messages[idx:], value
 
-    if summary_idx is None:
-        return messages, None
-    return messages[summary_idx:], summary
+        marker = next(
+            (
+                item
+                for item in reversed(message.get('output') or [])
+                if item.get('type') == 'open_webui:context_compaction'
+            ),
+            None,
+        )
+        if not marker:
+            continue
+
+        # A tool-loop checkpoint can retain output from an earlier reply.
+        for cut_idx in range(idx, -1, -1):
+            output = messages[cut_idx].get('output') or []
+            start = next(
+                (
+                    position
+                    for position, item in enumerate(output)
+                    if item.get('type') == 'function_call' and item.get('call_id') == marker['call_id']
+                ),
+                None,
+            )
+            if start is not None:
+                while start and output[start - 1].get('type') != 'function_call_output':
+                    start -= 1
+                return [
+                    *messages[max(0, cut_idx - 1) : cut_idx],
+                    {
+                        **messages[cut_idx],
+                        'output': [
+                            item for item in output[start:] if item.get('type') != 'open_webui:context_compaction'
+                        ],
+                    },
+                    *messages[cut_idx + 1 :],
+                ], marker['summary']
+
+    return messages, None
 
 
 def _exceeds_token_threshold(messages: list[dict], system_prompt: str, summary: str | None, threshold: int) -> bool:
     if threshold <= 0:
         return False
 
-    # Expanded tool histories include fresh results and rebuilt prompts absent from prior usage.
-    if not any(message.get('role') == 'tool' for message in messages):
-        for idx in range(len(messages) - 1, -1, -1):
-            usage = messages[idx].get('usage') or (messages[idx].get('info') or {}).get('usage')
-            if isinstance(usage, dict) and (tokens := _usage_token_count(usage)):
-                return tokens + _estimate_messages_tokens(messages[idx + 1 :]) > threshold
+    for idx in range(len(messages) - 1, -1, -1):
+        usage = messages[idx].get('usage') or (messages[idx].get('info') or {}).get('usage')
+        if isinstance(usage, dict) and (tokens := _usage_token_count(usage)):
+            return tokens + _estimate_messages_tokens(messages[idx + 1 :]) > threshold
 
     estimated = _estimate_tokens(system_prompt) + _estimate_tokens(summary or '') + _estimate_messages_tokens(messages)
     return estimated > threshold

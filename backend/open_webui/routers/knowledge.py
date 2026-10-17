@@ -63,6 +63,7 @@ PAGE_ITEM_COUNT = 30
 
 async def delete_file_resource(file: FileModel, db: AsyncSession) -> bool:
     from open_webui.retrieval.integration import deactivate
+
     await db.commit()
     await deactivate(None, file.id)
     try:
@@ -1662,6 +1663,7 @@ async def remove_file_from_knowledge_by_id(
         )
 
     from open_webui.retrieval.integration import deactivate
+
     await db.commit()
     await deactivate(request, form_data.file_id, knowledge_id=id)
     await Knowledges.remove_file_from_knowledge_by_id(knowledge_id=id, file_id=form_data.file_id, db=db)
@@ -1737,6 +1739,7 @@ async def delete_knowledge_by_id(
 
     log.info('Deleting knowledge base: %s (name: %s)', id, knowledge.name)
     from open_webui.retrieval.integration import deactivate
+
     linked_files = await Knowledges.get_files_by_id(id, db=db)
     await db.commit()
     for linked_file in linked_files:
@@ -1834,6 +1837,7 @@ async def reset_knowledge_by_id(
         )
 
     from open_webui.retrieval.integration import deactivate
+
     linked_files = await Knowledges.get_files_by_id(id, db=db)
     await db.commit()
     for linked_file in linked_files:
@@ -2032,6 +2036,7 @@ async def sync_knowledge_cleanup(
             continue
 
         from open_webui.retrieval.integration import deactivate
+
         await db.commit()
         await deactivate(None, file_id, knowledge_id=id)
         await Knowledges.remove_file_from_knowledge_by_id(id, file_id, db=db)
@@ -2370,6 +2375,7 @@ async def delete_knowledge_directory(
     # Collect before delete_directory drops the KnowledgeFile rows
     files = [] if move_files else await Knowledges.get_files_by_id_and_directory_id(id, dir_id, db=db)
     from open_webui.retrieval.integration import deactivate
+
     await db.commit()
     for file in files:
         await deactivate(request, file.id, knowledge_id=id)
@@ -2408,7 +2414,7 @@ async def delete_knowledge_directory(
         subject_id=dir_id,
         data={'knowledge_id': id, 'move_files': move_files},
     )
-    return {'status': True}
+    return {'status': True, 'file_ids': [file.id for file in files]}
 
 
 @router.post('/{id}/file/move')

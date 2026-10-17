@@ -85,8 +85,16 @@ from open_webui.retrieval.vector.async_client import ASYNC_VECTOR_DB_CLIENT
 from open_webui.retrieval.vector.factory import get_vector_db_client
 from open_webui.retrieval.vector.utils import filter_metadata
 from open_webui.retrieval.integration import (
-    ASSET_CONFIG_KEYS, SERVICE_CONFIG_KEYS, accept_version, collect_assets,
-    complete_images, services, spawn, update_status, version_asset_root, serialize_file_processing,
+    ASSET_CONFIG_KEYS,
+    SERVICE_CONFIG_KEYS,
+    accept_version,
+    collect_assets,
+    complete_images,
+    services,
+    spawn,
+    update_status,
+    version_asset_root,
+    serialize_file_processing,
 )
 from open_webui.retrieval.web.azure import search_azure
 from open_webui.retrieval.web.bing import search_bing
@@ -447,12 +455,21 @@ async def get_evidence_config(request: Request, user=Depends(get_admin_user)):
     from open_webui.internal.db import get_async_db
     from open_webui.models.evidence import KnowledgeVectorSpace
     from sqlalchemy import select
+
     settings = await Config.get_many(*ASSET_CONFIG_KEYS, 'rag.evidence_vector_space_id')
     async with get_async_db() as session:
         rows = (await session.scalars(select(KnowledgeVectorSpace).order_by(KnowledgeVectorSpace.id))).all()
-        spaces = [{'id': s.id, 'model': s.embedding_model, 'revision': s.model_revision,
-                   'dimensions': s.embedding_dim, 'status': s.verification_status,
-                   'supports_images': s.supports_image_query and s.supports_image_evidence} for s in rows]
+        spaces = [
+            {
+                'id': s.id,
+                'model': s.embedding_model,
+                'revision': s.model_revision,
+                'dimensions': s.embedding_dim,
+                'status': s.verification_status,
+                'supports_images': s.supports_image_query and s.supports_image_evidence,
+            }
+            for s in rows
+        ]
     _, _, _, runtime = await services(request)
     return {'settings': settings, 'spaces': spaces, 'runtime': runtime}
 
@@ -467,18 +484,26 @@ async def update_evidence_config(request: Request, settings: dict, user=Depends(
             raise HTTPException(400, 'Expected a bounded string setting')
     if settings.get('rag.document_image_asset_root'):
         from open_webui.config import DATA_DIR
+
         root = Path(settings['rag.document_image_asset_root'])
-        if not root.is_absolute() or root.resolve() in (Path('/'), Path(DATA_DIR).resolve(), Path(UPLOAD_DIR).resolve()):
+        if not root.is_absolute() or root.resolve() in (
+            Path('/'),
+            Path(DATA_DIR).resolve(),
+            Path(UPLOAD_DIR).resolve(),
+        ):
             raise HTTPException(400, 'Choose a private image asset directory, not a broad data/upload root')
     if settings.get('rag.pdf_image_asset_source', 'parser') not in ('parser', 'local'):
         raise HTTPException(400, 'PDF image source must be parser or local')
     if settings.get('rag.paddleocr_vl_api_mode', 'layout') not in ('layout', 'jobs'):
         raise HTTPException(400, 'PaddleOCR mode must be layout or jobs')
-    if 'rag.extract_document_image_assets' in settings and not isinstance(settings['rag.extract_document_image_assets'], bool):
+    if 'rag.extract_document_image_assets' in settings and not isinstance(
+        settings['rag.extract_document_image_assets'], bool
+    ):
         raise HTTPException(400, 'Image extraction must be boolean')
     for name in ('rag.document_image_asset_allowed_origins', 'rag.paddleocr_vl_allowed_remote_origins'):
         if name in settings:
             from open_webui.retrieval.document_image_assets import _origin
+
             try:
                 if not isinstance(settings[name], list) or len(settings[name]) > 32:
                     raise ValueError('origin list required')
@@ -488,15 +513,20 @@ async def update_evidence_config(request: Request, settings: dict, user=Depends(
                 raise HTTPException(400, 'Expected explicit HTTP(S) resource origins')
     for name in ('request_timeout', 'download_timeout', 'poll_timeout', 'poll_interval'):
         value = settings.get('rag.paddleocr_vl_' + name)
-        if value is not None and (isinstance(value, bool) or not isinstance(value, (int, float)) or not 0 < value <= 3600):
+        if value is not None and (
+            isinstance(value, bool) or not isinstance(value, (int, float)) or not 0 < value <= 3600
+        ):
             raise HTTPException(400, 'PaddleOCR timeouts must be positive and bounded')
     identity = settings.get('rag.evidence_vector_space_id')
     if identity:
         from open_webui.internal.db import get_async_db
         from open_webui.models.evidence import KnowledgeVectorSpace
+
         async with get_async_db() as session:
             if not await session.get(KnowledgeVectorSpace, identity):
-                raise HTTPException(400, 'Select an existing encoding space; verification is a separate provenance step')
+                raise HTTPException(
+                    400, 'Select an existing encoding space; verification is a separate provenance step'
+                )
     await Config.upsert(settings)
     return await get_evidence_config(request, user)
 
@@ -516,18 +546,26 @@ async def register_evidence_space(request: Request, form_data: EvidenceSpaceForm
     """Explicit operator provenance step. No auto-verification or embedding request."""
     if form_data.verified:
         config = await Config.get_many('rag.embedding_engine', 'rag.embedding_model', 'rag.openai.api_base_url')
-        if (config['rag.embedding_engine'] != 'openai' or form_data.embedding_model != config['rag.embedding_model']
+        if (
+            config['rag.embedding_engine'] != 'openai'
+            or form_data.embedding_model != config['rag.embedding_model']
             or form_data.encoding_config.get('text_api_base_url') != config['rag.openai.api_base_url']
             or form_data.encoding_config.get('query_prefix') != RAG_EMBEDDING_QUERY_PREFIX
-            or form_data.encoding_config.get('document_prefix') != RAG_EMBEDDING_CONTENT_PREFIX):
+            or form_data.encoding_config.get('document_prefix') != RAG_EMBEDDING_CONTENT_PREFIX
+        ):
             raise HTTPException(400, 'Verified space must match the configured text encoder and its provenance')
     try:
         from open_webui.retrieval.indexing import IndexingService
+
         space = await IndexingService().register_space(**form_data.model_dump())
     except ValueError as exc:
         raise HTTPException(400, str(exc))
-    return {'id': space.id, 'status': space.verification_status, 'dimensions': space.embedding_dim,
-            'config_fingerprint': space.config_fingerprint}
+    return {
+        'id': space.id,
+        'status': space.verification_status,
+        'dimensions': space.embedding_dim,
+        'config_fingerprint': space.config_fingerprint,
+    }
 
 
 @router.get('/embedding')
@@ -1565,8 +1603,11 @@ def save_docs_to_vector_db(
     metadatas = [
         {
             **doc.metadata,
-            **({'page_index': doc.metadata['page']} if type(doc.metadata.get('page')) is int
-               and 'page_index' not in doc.metadata else {}),
+            **(
+                {'page_index': doc.metadata['page']}
+                if type(doc.metadata.get('page')) is int and 'page_index' not in doc.metadata
+                else {}
+            ),
             **(metadata if metadata else {}),
             'embedding_config': {
                 'engine': config['rag.embedding_engine'],
@@ -1756,8 +1797,11 @@ async def process_file(
                     # A KB association maps the actual per-file vector identities;
                     # adding an already indexed file never embeds its text again.
                     reuse_items = [
-                        {'id': identity, 'text': file_result.documents[0][idx],
-                         'metadata': file_result.metadatas[0][idx]}
+                        {
+                            'id': identity,
+                            'text': file_result.documents[0][idx],
+                            'metadata': file_result.metadatas[0][idx],
+                        }
                         for idx, identity in enumerate(file_result.ids[0])
                     ]
                     collection_names = []
@@ -1790,11 +1834,14 @@ async def process_file(
                     file_path = await asyncio.to_thread(Storage.get_file, file_path)
                     if ((file.meta or {}).get('content_type') or '').startswith('image/'):
                         from open_webui.retrieval.document_image_assets import ImageAssetStore, MAX_IMAGE_BYTES
+
                         def store_image():
                             with open(file_path, 'rb') as stream:
                                 content = stream.read(MAX_IMAGE_BYTES + 1)
                             return ImageAssetStore(config['rag.document_image_asset_root'], file.id).put(
-                                content, backend='upload', origin_reference='uploaded-image')
+                                content, backend='upload', origin_reference='uploaded-image'
+                            )
+
                         assets = [await asyncio.to_thread(store_image)]
                         docs = []
                     else:
@@ -1841,8 +1888,11 @@ async def process_file(
             log.debug('text_content: %s', text_content)
             await Files.update_file_data_by_id(
                 file.id,
-                {'content': text_content, 'document_image_assets': assets,
-                 'document_image_assets_skipped': skipped_assets},
+                {
+                    'content': text_content,
+                    'document_image_assets': assets,
+                    'document_image_assets_skipped': skipped_assets,
+                },
                 db=db,
             )
             hash = calculate_sha256_string(text_content)
@@ -1900,25 +1950,50 @@ async def process_file(
                     # not independently re-split text or manufactured vector IDs.
                     indexer, _, space_id, space_status = await services(request)
                     await indexer.index_file(
-                        file_id=file.id, file_version=version, collection_name=file_collection_name,
+                        file_id=file.id,
+                        file_version=version,
+                        collection_name=file_collection_name,
                         chunks=reuse_items if reuse_items is not None else saved_items,
-                        knowledge_id=form_data.collection_name, space_id=space_id,
-                        chunker_config={k: config.get(k) for k in ('rag.chunk_size', 'rag.chunk_overlap', 'rag.text_splitter')},
+                        knowledge_id=form_data.collection_name,
+                        space_id=space_id,
+                        chunker_config={
+                            k: config.get(k) for k in ('rag.chunk_size', 'rag.chunk_overlap', 'rag.text_splitter')
+                        },
                         source_name=file.filename,
                     )
-                    await update_status(file.id, version, text='ready' if space_id else 'quarantined',
-                                        space=space_status, images='pending' if assets else 'failed' if skipped_assets else 'none')
+                    await update_status(
+                        file.id,
+                        version,
+                        text='ready' if space_id else 'quarantined',
+                        space=space_status,
+                        images='pending' if assets else 'failed' if skipped_assets else 'none',
+                    )
                     if assets:
                         # Persist the pending job before returning text-ready. A
                         # crash before the background task begins is recoverable.
                         job_id = await indexer.enqueue_assets(
-                            file_id=file.id, file_version=version, collection_name=file_collection_name,
-                            assets=assets, knowledge_id=form_data.collection_name, space_id=space_id,
+                            file_id=file.id,
+                            file_version=version,
+                            collection_name=file_collection_name,
+                            assets=assets,
+                            knowledge_id=form_data.collection_name,
+                            space_id=space_id,
                             source_name=file.filename,
                         )
-                        spawn(request, complete_images(request, file_id=file.id, version=version,
-                              collection=file_collection_name, assets=assets, skipped=skipped_assets,
-                              knowledge_id=form_data.collection_name, source_name=file.filename, job_id=job_id))
+                        spawn(
+                            request,
+                            complete_images(
+                                request,
+                                file_id=file.id,
+                                version=version,
+                                collection=file_collection_name,
+                                assets=assets,
+                                skipped=skipped_assets,
+                                knowledge_id=form_data.collection_name,
+                                source_name=file.filename,
+                                job_id=job_id,
+                            ),
+                        )
                     log.info('added %s items to collection %s', len(docs), collection_name)
 
                     if result:
@@ -2921,8 +2996,11 @@ async def query_doc_handler(
         from open_webui.retrieval.integration import query_local_collection
 
         local_result = await query_local_collection(
-            request, collection_name=form_data.collection_name, query=form_data.query,
-            count=form_data.k or config['rag.top_k'], user=user,
+            request,
+            collection_name=form_data.collection_name,
+            query=form_data.query,
+            count=form_data.k or config['rag.top_k'],
+            user=user,
         )
         if local_result is not None:
             return local_result
@@ -3213,8 +3291,12 @@ async def process_files_batch(
         for entry in form_data.files:
             try:
                 async with get_async_db() as session:
-                    await process_file(request, ProcessFileForm(file_id=entry.id, collection_name=collection_name),
-                                       user=user, db=session)
+                    await process_file(
+                        request,
+                        ProcessFileForm(file_id=entry.id, collection_name=collection_name),
+                        user=user,
+                        db=session,
+                    )
                 results.append(BatchProcessFilesResult(file_id=entry.id, status='completed'))
             except Exception as exc:
                 errors.append(BatchProcessFilesResult(file_id=entry.id, status='failed', error=type(exc).__name__))

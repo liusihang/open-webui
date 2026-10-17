@@ -20,6 +20,8 @@ describe('native PDF capability configuration', () => {
 		expect(source).toContain('this model and its current route support native PDF input');
 		expect(source).toContain('PDFs use text extraction');
 		expect(source).toContain('bind:checked={capabilities[key]}');
-		expect(() => compile(source, { filename: 'Capabilities.svelte', generate: 'client' })).not.toThrow();
+		expect(() =>
+			compile(source, { filename: 'Capabilities.svelte', generate: 'client' })
+		).not.toThrow();
 	});
 });

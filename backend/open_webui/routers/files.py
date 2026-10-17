@@ -58,11 +58,14 @@ log = logging.getLogger(__name__)
 async def _evidence_for_file(request, file_id, ref, user):
     from open_webui.retrieval.integration import services
     from open_webui.retrieval.evidence import resolve_scope
+
     scope = await resolve_scope(user, file_ids=(file_id,))
     _, evidence, _, _ = await services(request)
     result = await evidence.read([ref], user=user, resolved_scope=scope)
-    item = next((i for i in result['items'] if i.get('status') == 'ready'
-                 and i.get('source', {}).get('file_id') == file_id), None)
+    item = next(
+        (i for i in result['items'] if i.get('status') == 'ready' and i.get('source', {}).get('file_id') == file_id),
+        None,
+    )
     if not item:
         raise HTTPException(404, 'Evidence is unavailable or its source has changed')
     return evidence, scope, item
@@ -71,6 +74,7 @@ async def _evidence_for_file(request, file_id, ref, user):
 @router.get('/{id}/retrieval/status')
 async def get_retrieval_status(id: str, user=Depends(get_verified_user)):
     from open_webui.retrieval.evidence import resolve_scope
+
     if id not in (await resolve_scope(user, file_ids=(id,))).file_ids:
         raise HTTPException(404, 'File not found')
     file = await Files.get_file_by_id(id)
@@ -86,22 +90,37 @@ async def get_retrieval_status(id: str, user=Depends(get_verified_user)):
     from open_webui.models.evidence import KnowledgeEvidence, KnowledgeEvidenceEmbedding
     from open_webui.models.evidence import stable_id
     from open_webui.models.retrieval_indexes import RetrievalIndexState
+
     async with get_async_db_context() as db:
         state = await db.get(RetrievalIndexState, stable_id('file', file_id=id))
         if state is None:
             return {'text': 'unindexed', 'images': 'unindexed'}
         if state.status == 'deleted':
-            return {'version': state.file_version, 'text': 'deleted', 'images': 'deleted',
-                    'status_source': 'sql', 'image_retryable': False}
-        rows = (await db.execute(select(
-            KnowledgeEvidence.modality, KnowledgeEvidenceEmbedding.embedding_status,
-            func.count(func.distinct(KnowledgeEvidence.id)),
-        ).outerjoin(KnowledgeEvidenceEmbedding,
-            KnowledgeEvidenceEmbedding.evidence_id == KnowledgeEvidence.id
-        ).where(KnowledgeEvidence.file_id == id,
-                KnowledgeEvidence.file_version == state.file_version,
-                KnowledgeEvidence.is_active.is_(True), KnowledgeEvidence.deleted_at.is_(None)
-        ).group_by(KnowledgeEvidence.modality, KnowledgeEvidenceEmbedding.embedding_status))).all()
+            return {
+                'version': state.file_version,
+                'text': 'deleted',
+                'images': 'deleted',
+                'status_source': 'sql',
+                'image_retryable': False,
+            }
+        rows = (
+            await db.execute(
+                select(
+                    KnowledgeEvidence.modality,
+                    KnowledgeEvidenceEmbedding.embedding_status,
+                    func.count(func.distinct(KnowledgeEvidence.id)),
+                )
+                .outerjoin(KnowledgeEvidenceEmbedding, KnowledgeEvidenceEmbedding.evidence_id == KnowledgeEvidence.id)
+                .where(
+                    KnowledgeEvidence.file_id == id,
+                    KnowledgeEvidence.file_version == state.file_version,
+                    KnowledgeEvidence.is_active.is_(True),
+                    KnowledgeEvidence.deleted_at.is_(None),
+                )
+                .group_by(KnowledgeEvidence.modality, KnowledgeEvidenceEmbedding.embedding_status)
+            )
+        ).all()
+
     def modality_status(modality):
         statuses = {status for kind, status, count in rows if kind == modality and count}
         if not statuses:
@@ -111,29 +130,47 @@ async def get_retrieval_status(id: str, user=Depends(get_verified_user)):
         if statuses == {'ready'}:
             return 'indexed'  # Stored mapping, not a claim that the current encoder can search it.
         return 'unassigned' if statuses == {None} else 'partial'
-    return {'version': state.file_version, 'text': modality_status('text'),
-            'images': modality_status('image'), 'status_source': 'sql',
-            'image_retryable': False, 'searchable_evidence_count': 0,
-            'indexed_evidence_count': sum(count for _, status, count in rows if status),
-            'message': '已有索引；隔离项的编码空间尚未确认，无需重新上传或重建。'}
+
+    return {
+        'version': state.file_version,
+        'text': modality_status('text'),
+        'images': modality_status('image'),
+        'status_source': 'sql',
+        'image_retryable': False,
+        'searchable_evidence_count': 0,
+        'indexed_evidence_count': sum(count for _, status, count in rows if status),
+        'message': '已有索引；隔离项的编码空间尚未确认，无需重新上传或重建。',
+    }
 
 
 @router.post('/{id}/retrieval/retry-images')
-async def retry_file_image_index(request: Request, id: str, user=Depends(get_verified_user),
-                                db: AsyncSession = Depends(get_async_session)):
+async def retry_file_image_index(
+    request: Request, id: str, user=Depends(get_verified_user), db: AsyncSession = Depends(get_async_session)
+):
     from sqlalchemy import select
     from open_webui.models.retrieval_indexes import EXECUTOR_VERSION, RetrievalIndexJob
     from open_webui.retrieval.integration import complete_images, services, spawn, update_status
+
     file = await Files.get_file_by_id(id, db=db)
-    if not file or not (file.user_id == user.id or user.role == 'admin' or await has_access_to_file(id, 'write', user, db=db)):
+    if not file or not (
+        file.user_id == user.id or user.role == 'admin' or await has_access_to_file(id, 'write', user, db=db)
+    ):
         raise HTTPException(404, 'File not found')
     version = (file.data or {}).get('retrieval_version')
-    jobs = (await db.scalars(select(RetrievalIndexJob).where(
-        RetrievalIndexJob.file_id == id, RetrievalIndexJob.file_version == version,
-        RetrievalIndexJob.executor_version == EXECUTOR_VERSION, RetrievalIndexJob.index_kind == 'image',
-        RetrievalIndexJob.status.in_(('pending', 'failed')),
-        RetrievalIndexJob.retry_count < RetrievalIndexJob.max_retries,
-    ).limit(100))).all()
+    jobs = (
+        await db.scalars(
+            select(RetrievalIndexJob)
+            .where(
+                RetrievalIndexJob.file_id == id,
+                RetrievalIndexJob.file_version == version,
+                RetrievalIndexJob.executor_version == EXECUTOR_VERSION,
+                RetrievalIndexJob.index_kind == 'image',
+                RetrievalIndexJob.status.in_(('pending', 'failed')),
+                RetrievalIndexJob.retry_count < RetrievalIndexJob.max_retries,
+            )
+            .limit(100)
+        )
+    ).all()
     await db.commit()
     indexer, _, space_id, _ = await services(request)
     if not space_id:
@@ -142,11 +179,29 @@ async def retry_file_image_index(request: Request, id: str, user=Depends(get_ver
         await update_status(id, version, images='pending')
     for job in jobs:
         payload = job.payload or {}
-        job_id = await indexer.enqueue_assets(file_id=id, file_version=version, collection_name=job.collection_name,
-            assets=payload.get('assets', []), knowledge_id=job.knowledge_id, space_id=space_id, source_name=file.filename)
-        spawn(request, complete_images(request, file_id=id, version=version, collection=job.collection_name,
-            assets=payload.get('assets', []), skipped=(file.data or {}).get('document_image_assets_skipped') or [],
-            knowledge_id=job.knowledge_id, source_name=file.filename, job_id=job_id))
+        job_id = await indexer.enqueue_assets(
+            file_id=id,
+            file_version=version,
+            collection_name=job.collection_name,
+            assets=payload.get('assets', []),
+            knowledge_id=job.knowledge_id,
+            space_id=space_id,
+            source_name=file.filename,
+        )
+        spawn(
+            request,
+            complete_images(
+                request,
+                file_id=id,
+                version=version,
+                collection=job.collection_name,
+                assets=payload.get('assets', []),
+                skipped=(file.data or {}).get('document_image_assets_skipped') or [],
+                knowledge_id=job.knowledge_id,
+                source_name=file.filename,
+                job_id=job_id,
+            ),
+        )
     return {'scheduled': len(jobs), 'version': version}
 
 
@@ -165,6 +220,7 @@ async def get_file_evidence_image(request: Request, id: str, ref: str, user=Depe
         if request.url.path.endswith('/thumbnail'):
             import io
             from PIL import Image
+
             def thumbnail():
                 with Image.open(io.BytesIO(content)) as image:
                     image = image.convert('RGB')
@@ -172,11 +228,15 @@ async def get_file_evidence_image(request: Request, id: str, ref: str, user=Depe
                     output = io.BytesIO()
                     image.save(output, 'JPEG', quality=80)
                     return output.getvalue()
+
             content, mime = await asyncio.to_thread(thumbnail), 'image/jpeg'
         # Read authorization again after IO/resize; no permanent/public asset URLs.
         await _evidence_for_file(request, id, ref, user)
-        return Response(content=content, media_type=mime,
-                        headers={'Cache-Control': 'private, no-store', 'X-Content-Type-Options': 'nosniff'})
+        return Response(
+            content=content,
+            media_type=mime,
+            headers={'Cache-Control': 'private, no-store', 'X-Content-Type-Options': 'nosniff'},
+        )
     except (ValueError, PermissionError, OSError):
         raise HTTPException(404, 'Image evidence is unavailable')
 
@@ -714,6 +774,7 @@ async def delete_all_files(
     from sqlalchemy import select
     from open_webui.models.files import File as FileRow
     from open_webui.retrieval.integration import deactivate
+
     identities = list(await db.scalars(select(FileRow.id)))
     await db.commit()
     for identity in identities:
@@ -1177,6 +1238,7 @@ async def delete_file_by_id(
     if file.user_id == user.id or user.role == 'admin' or await has_access_to_file(id, 'write', user, db=db):
         # Clean up KB associations and embeddings before deleting
         from open_webui.retrieval.integration import deactivate
+
         await db.commit()
         await deactivate(request, id)
         knowledges = await Knowledges.get_knowledges_by_file_id(id, db=db)

@@ -73,6 +73,7 @@ class InterfaceSettings(BaseModel):
     autoFollowUps: bool | None = None
     highContrastMode: bool | None = None
     detectArtifacts: bool | None = None
+    intelligentUI: bool | None = None
     responseAutoCopy: bool | None = None
     showUsername: bool | None = None
     showUpdateToast: bool | None = None
@@ -814,6 +815,10 @@ class UsersTable:
                 return None
             for key, value in updated.items():
                 setattr(user, key, value)
+            if 'email' in updated:
+                from open_webui.models.auths import Auth
+
+                await session.execute(update(Auth).where(Auth.id == id).values(email=updated['email']))
             await session.commit()
             return UserModel.model_validate(user)
 

@@ -1,0 +1,46 @@
+name: Intelligent UI integration
+
+on:
+  pull_request:
+    branches: [main, dev]
+  push:
+    branches: [main, dev]
+
+permissions:
+  contents: read
+
+jobs:
+  deterministic-tests:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      CYPRESS_INSTALL_BINARY: '0'
+      PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD: '1'
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
+        with:
+          node-version: '22'
+          cache: npm
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+      - name: Install frozen frontend dependencies
+        run: npm ci --ignore-scripts --no-audit --no-fund
+      - name: Prepare SvelteKit
+        run: npx svelte-kit sync
+      - name: Frontend and protocol regression tests
+        run: npm run test:frontend -- --run
+      - name: Mounted native UI interaction tests
+        run: npm run test:intelligent-ui
+      - name: Presentation prompt and atomic state tests
+        run: |
+          python3 tests/migration/test_intelligent_ui_prompt.py
+          python3 tests/migration/test_intelligent_ui_state.py
+      - name: Retained Responses and migration seam regressions
+        run: |
+          python3 tests/migration/test_responses_native_history.py
+          python3 tests/migration/test_responses_cumulative_history.py
+          python3 tests/migration/test_responses_text_compaction.py
+          python3 tests/migration/test_native_compaction.py
+          python3 tests/migration/test_v0123_merge.py

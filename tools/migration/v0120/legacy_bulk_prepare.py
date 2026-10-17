@@ -4,6 +4,7 @@ The raw SQLite archive preserves selected original rows, including rejected rows
 Only the existing, evidence-backed legacy family enters bounded import shards.
 No embeddings, source writes, runtime configuration changes, or implicit apply.
 """
+
 from __future__ import annotations
 
 import argparse
@@ -25,20 +26,53 @@ import rag_reuse as reuse
 
 FORMAT = 'owui-legacy-bulk-v1'
 EVIDENCE_SHA = 'ace5e678a8498238b89ac0c5d366fdb617d8914b548437acf597226831e23d26'
-KEYS = dict(knowledge='id', knowledge_file='id', file='id', user='id',
-            access_grant='id', retrieval_chunk='chunk_uid', knowledge_evidence='id',
-            knowledge_evidence_asset='id', knowledge_vector_space='id',
-            knowledge_evidence_embedding='id', document_chunk='id')
-JSON_COLUMNS = {'knowledge': {'data', 'meta'}, 'file': {'data', 'meta'},
-                'document_chunk': {'vmetadata'}}
-INTEGER_COLUMNS = {'created_at', 'updated_at', 'row_id', 'file_version', 'chunk_version',
-                   'chunk_index', 'start_index', 'page_index', 'width', 'height', 'embedding_dim',
-                   'active_chunk_count', 'indexed_chunk_count'}
-BOOLEAN_COLUMNS = {'is_active', 'active', 'supports_text_query', 'supports_image_query',
-                   'supports_text_evidence', 'supports_image_evidence', 'supports_multivector'}
+KEYS = dict(
+    knowledge='id',
+    knowledge_file='id',
+    file='id',
+    user='id',
+    access_grant='id',
+    retrieval_chunk='chunk_uid',
+    knowledge_evidence='id',
+    knowledge_evidence_asset='id',
+    knowledge_vector_space='id',
+    knowledge_evidence_embedding='id',
+    document_chunk='id',
+)
+JSON_COLUMNS = {'knowledge': {'data', 'meta'}, 'file': {'data', 'meta'}, 'document_chunk': {'vmetadata'}}
+INTEGER_COLUMNS = {
+    'created_at',
+    'updated_at',
+    'row_id',
+    'file_version',
+    'chunk_version',
+    'chunk_index',
+    'start_index',
+    'page_index',
+    'width',
+    'height',
+    'embedding_dim',
+    'active_chunk_count',
+    'indexed_chunk_count',
+}
+BOOLEAN_COLUMNS = {
+    'is_active',
+    'active',
+    'supports_text_query',
+    'supports_image_query',
+    'supports_text_evidence',
+    'supports_image_evidence',
+    'supports_multivector',
+}
 SMALL_TABLES = ['knowledge', 'knowledge_file', 'knowledge_vector_space', 'user', 'access_grant']
-LARGE_TABLES = ['file', 'retrieval_chunk', 'knowledge_evidence', 'knowledge_evidence_asset',
-                'knowledge_evidence_embedding', 'document_chunk']
+LARGE_TABLES = [
+    'file',
+    'retrieval_chunk',
+    'knowledge_evidence',
+    'knowledge_evidence_asset',
+    'knowledge_evidence_embedding',
+    'document_chunk',
+]
 
 
 def extract_dump(args):
@@ -47,8 +81,11 @@ def extract_dump(args):
     if not args.dump_file or not args.dump_receipt:
         raise reuse.ReuseError('explicit owner dump and receipt required')
     receipt = json.loads(args.dump_receipt.read_text())
-    if (receipt.get('database') != reuse.SOURCE_DATABASE or receipt.get('returncode') != 0
-            or args.dump_file.stat().st_size != receipt.get('bytes')):
+    if (
+        receipt.get('database') != reuse.SOURCE_DATABASE
+        or receipt.get('returncode') != 0
+        or args.dump_file.stat().st_size != receipt.get('bytes')
+    ):
         raise reuse.ReuseError('owner dump receipt or archive size differs')
     large = args.mode == 'extract-large'
     output = root / ('large.sql' if large else 'small.sql')
@@ -56,14 +93,23 @@ def extract_dump(args):
     for table in LARGE_TABLES if large else SMALL_TABLES:
         command.extend(['--table', table])
     command.append(str(args.dump_file))
-    with open(output, 'xb') as handle, open(root / ('large-stderr.log' if large else 'small-stderr.log'), 'xb') as errors:
+    with (
+        open(output, 'xb') as handle,
+        open(root / ('large-stderr.log' if large else 'small-stderr.log'), 'xb') as errors,
+    ):
         os.chmod(output, 0o600)
         os.chmod(errors.name, 0o600)
         result = subprocess.run(command, stdout=handle, stderr=errors, check=False)
     if result.returncode:
         raise reuse.ReuseError('offline pg_restore stream extraction failed')
-    summary = {'stage': args.mode, 'bytes': output.stat().st_size, 'sha256': file_sha(output),
-               'dump_owner_sha256': receipt['sha256'], 'database_calls': 0, 'source_writes': 0}
+    summary = {
+        'stage': args.mode,
+        'bytes': output.stat().st_size,
+        'sha256': file_sha(output),
+        'dump_owner_sha256': receipt['sha256'],
+        'database_calls': 0,
+        'source_writes': 0,
+    }
     private_write(root / ('large-extract.json' if large else 'small-extract.json'), summary)
     print(json.dumps(summary), flush=True)
 
@@ -72,8 +118,8 @@ def copy_field(value):
     """Decode PostgreSQL COPY TEXT, without interpreting Python/JSON escapes."""
     if value == b'\\N':
         return None
-    special = {b'b': b'\b', b'f': b'\f', b'n': b'\n', b'r': b'\r',
-               b't': b'\t', b'v': b'\v', b'\\': b'\\'}
+    special = {b'b': b'\b', b'f': b'\f', b'n': b'\n', b'r': b'\r', b't': b'\t', b'v': b'\v', b'\\': b'\\'}
+
     def replace(match):
         code = match.group(1)
         if code in special:
@@ -83,13 +129,14 @@ def copy_field(value):
         if code[:1] in b'01234567':
             return bytes([int(code, 8)])
         return code
+
     return re.sub(rb'\\([0-7]{1,3}|x[0-9a-fA-F]{1,2}|.)', replace, value).decode('utf8')
 
 
 def dump_rows(path, only_tables=None):
     """Read only pg_restore --data-only COPY streams, never execute dump SQL."""
     table, columns = None, None
-    with (nullcontext(path) if hasattr(path, 'read') else open(path, 'rb')) as handle:
+    with nullcontext(path) if hasattr(path, 'read') else open(path, 'rb') as handle:
         for line in handle:
             if table is None:
                 match = re.fullmatch(rb'COPY public\."?([A-Za-z_][A-Za-z_0-9]*)"? \((.+)\) FROM stdin;\r?\n', line)
@@ -129,14 +176,20 @@ def archive_direct(args):
     resume = getattr(args, 'resume', False)
     root = private_root(args.root, create=not resume)
     owner = json.loads(args.dump_receipt.read_text())
-    if (owner.get('database') != reuse.SOURCE_DATABASE or owner.get('returncode') != 0
-            or args.dump_file.stat().st_size != owner.get('bytes')):
+    if (
+        owner.get('database') != reuse.SOURCE_DATABASE
+        or owner.get('returncode') != 0
+        or args.dump_file.stat().st_size != owner.get('bytes')
+    ):
         raise reuse.ReuseError('owner dump receipt or archive size differs')
     if not args.small_data:
         raise reuse.ReuseError('already completed owner-dump small COPY extraction required')
     if resume:
         checkpoint = json.loads((root / 'resume-checkpoint.json').read_text())
-        if checkpoint['dump_sha256'] != owner['sha256'] or file_sha(root / 'source.sqlite') != checkpoint['sqlite_sha256']:
+        if (
+            checkpoint['dump_sha256'] != owner['sha256']
+            or file_sha(root / 'source.sqlite') != checkpoint['sqlite_sha256']
+        ):
             raise reuse.ReuseError('resume checkpoint source identity or SQLite hash differs')
     conn = store(root / 'source.sqlite', create=not resume)
     if resume:
@@ -144,14 +197,24 @@ def archive_direct(args):
         conn.execute('PRAGMA synchronous=NORMAL')
         conn.execute('PRAGMA wal_autocheckpoint=2048')
         conn.execute('PRAGMA cache_size=-32768')
-    receipt = {'format': FORMAT, 'source': {'database': reuse.SOURCE_DATABASE,
-               'system_identifier': reuse.SOURCE_SYSTEM_ID},
-               'snapshot': {'started': owner['started'], 'finished': owner['finished'],
-                            'consistency': owner['consistency'], 'exact_snapshot_instant_unknown': True},
-               'dump_sha256': owner['sha256'], 'started_at': int(time.time()),
-               'counts': Counter(), 'source_writes': 0, 'embedding_calls': 0,
-               'origin': 'single original-TOC-order pg_restore COPY stream from owner-verified complete dump',
-               'archive_hash_not_reread': True, 'file_data_full_preserved_by_business_import': True}
+    receipt = {
+        'format': FORMAT,
+        'source': {'database': reuse.SOURCE_DATABASE, 'system_identifier': reuse.SOURCE_SYSTEM_ID},
+        'snapshot': {
+            'started': owner['started'],
+            'finished': owner['finished'],
+            'consistency': owner['consistency'],
+            'exact_snapshot_instant_unknown': True,
+        },
+        'dump_sha256': owner['sha256'],
+        'started_at': int(time.time()),
+        'counts': Counter(),
+        'source_writes': 0,
+        'embedding_calls': 0,
+        'origin': 'single original-TOC-order pg_restore COPY stream from owner-verified complete dump',
+        'archive_hash_not_reread': True,
+        'file_data_full_preserved_by_business_import': True,
+    }
     receipt['resumed_from_checkpoint'] = checkpoint if resume else None
     receipt['replayed_rows_checked_same'] = 0
     digests = {kind: hashlib.sha256() for kind in KEYS}
@@ -186,8 +249,10 @@ def archive_direct(args):
             if kind != previous:
                 conn.commit()
                 if previous:
-                    print(json.dumps({'stage': 'offline-decode', 'table': previous,
-                                      'rows': receipt['counts'][previous]}), flush=True)
+                    print(
+                        json.dumps({'stage': 'offline-decode', 'table': previous, 'rows': receipt['counts'][previous]}),
+                        flush=True,
+                    )
                 previous = kind
             if kind == 'knowledge':
                 kids.add(row['id'])
@@ -207,7 +272,9 @@ def archive_direct(args):
                     continue
                 data = reuse.decode(row.get('data'))
                 content = data.get('content')
-                row['processed_content_sha'] = hashlib.sha256(content.encode()).hexdigest() if isinstance(content, str) else None
+                row['processed_content_sha'] = (
+                    hashlib.sha256(content.encode()).hexdigest() if isinstance(content, str) else None
+                )
                 row['data'] = {'retrieval_version': data.get('retrieval_version')}
             elif kind in ('retrieval_chunk', 'knowledge_evidence', 'knowledge_evidence_asset'):
                 if row.get('knowledge_id') not in kids:
@@ -219,9 +286,11 @@ def archive_direct(args):
                     collections.add(row['vector_backend_collection'])
             elif kind == 'document_chunk':
                 metadata = reuse.decode(row['vmetadata'])
-                if (row['collection_name'] not in collections
-                        and metadata.get('vector_space_id') not in sids
-                        and not (metadata.get('modality') == 'image' and metadata.get('vector_role') == 'image_dense')):
+                if (
+                    row['collection_name'] not in collections
+                    and metadata.get('vector_space_id') not in sids
+                    and not (metadata.get('modality') == 'image' and metadata.get('vector_role') == 'image_dense')
+                ):
                     continue
             inserted = put(conn, kind, row, allow_same=resume)
             receipt['replayed_rows_checked_same'] += int(not inserted)
@@ -260,8 +329,17 @@ def archive_direct(args):
     receipt['archive_bytes'] = (root / 'source.sqlite').stat().st_size
     receipt['archive_sha256'] = file_sha(root / 'source.sqlite')
     private_write(root / 'source-receipt.json', receipt)
-    print(json.dumps({'stage': 'offline-source-complete', 'counts': receipt['counts'],
-                      'archive_bytes': receipt['archive_bytes'], 'archive_sha256': receipt['archive_sha256']}), flush=True)
+    print(
+        json.dumps(
+            {
+                'stage': 'offline-source-complete',
+                'counts': receipt['counts'],
+                'archive_bytes': receipt['archive_bytes'],
+                'archive_sha256': receipt['archive_sha256'],
+            }
+        ),
+        flush=True,
+    )
 
 
 def archive_dump(args):
@@ -275,11 +353,18 @@ def archive_dump(args):
     if not args.small_data or not args.large_data or not args.dump_sha256 or not args.snapshot_note:
         raise reuse.ReuseError('explicit offline dump streams, checksum and snapshot provenance required')
     conn = store(root / 'source.sqlite', create=True)
-    receipt = {'format': FORMAT, 'source': {'database': reuse.SOURCE_DATABASE,
-               'system_identifier': reuse.SOURCE_SYSTEM_ID}, 'snapshot': args.snapshot_note,
-               'dump_sha256': args.dump_sha256, 'started_at': int(time.time()),
-               'counts': Counter(), 'digests': {}, 'source_writes': 0, 'embedding_calls': 0,
-               'origin': 'verified pg_dump offline COPY streams; source identity supplied by owner receipt'}
+    receipt = {
+        'format': FORMAT,
+        'source': {'database': reuse.SOURCE_DATABASE, 'system_identifier': reuse.SOURCE_SYSTEM_ID},
+        'snapshot': args.snapshot_note,
+        'dump_sha256': args.dump_sha256,
+        'started_at': int(time.time()),
+        'counts': Counter(),
+        'digests': {},
+        'source_writes': 0,
+        'embedding_calls': 0,
+        'origin': 'verified pg_dump offline COPY streams; source identity supplied by owner receipt',
+    }
     receipt['copy_streams'] = {
         'small': {'bytes': args.small_data.stat().st_size, 'sha256': file_sha(args.small_data)},
         'large': {'bytes': args.large_data.stat().st_size, 'sha256': file_sha(args.large_data)},
@@ -311,7 +396,9 @@ def archive_dump(args):
                 continue
             data = reuse.decode(row.get('data'))
             content = data.get('content')
-            row['processed_content_sha'] = hashlib.sha256(content.encode()).hexdigest() if isinstance(content, str) else None
+            row['processed_content_sha'] = (
+                hashlib.sha256(content.encode()).hexdigest() if isinstance(content, str) else None
+            )
             row['data'] = {'retrieval_version': data.get('retrieval_version')}
         elif kind in ('retrieval_chunk', 'knowledge_evidence', 'knowledge_evidence_asset'):
             if row.get('knowledge_id') not in kids:
@@ -339,8 +426,17 @@ def archive_dump(args):
     receipt['archive_bytes'] = (root / 'source.sqlite').stat().st_size
     receipt['archive_sha256'] = file_sha(root / 'source.sqlite')
     private_write(root / 'source-receipt.json', receipt)
-    print(json.dumps({'stage': 'offline-source-complete', 'counts': receipt['counts'],
-                      'archive_bytes': receipt['archive_bytes'], 'archive_sha256': receipt['archive_sha256']}), flush=True)
+    print(
+        json.dumps(
+            {
+                'stage': 'offline-source-complete',
+                'counts': receipt['counts'],
+                'archive_bytes': receipt['archive_bytes'],
+                'archive_sha256': receipt['archive_sha256'],
+            }
+        ),
+        flush=True,
+    )
 
 
 def encode(value):
@@ -362,7 +458,9 @@ def store(path, create=False):
     if create:
         os.chmod(path, 0o600)
         conn.execute('PRAGMA journal_mode=DELETE')
-        conn.execute('CREATE TABLE records(kind TEXT,id TEXT,kb TEXT,file TEXT,active INTEGER,role TEXT,col TEXT,payload BLOB,PRIMARY KEY(kind,id))')
+        conn.execute(
+            'CREATE TABLE records(kind TEXT,id TEXT,kb TEXT,file TEXT,active INTEGER,role TEXT,col TEXT,payload BLOB,PRIMARY KEY(kind,id))'
+        )
         conn.execute('CREATE INDEX records_scope ON records(kind,kb,file)')
         conn.execute('CREATE INDEX records_collection ON records(kind,col,file)')
     return conn
@@ -382,9 +480,13 @@ def put(conn, kind, row, allow_same=False):
     if uid is None:
         raise reuse.ReuseError('source row primary identity missing: ' + kind)
     values = (
-        kind, str(uid), row.get('knowledge_id'), row.get('file_id') or metadata.get('file_id'),
+        kind,
+        str(uid),
+        row.get('knowledge_id'),
+        row.get('file_id') or metadata.get('file_id'),
         int(bool(row.get('is_active', True)) and row.get('deleted_at') is None),
-        row.get('vector_role') or metadata.get('vector_role'), row.get('collection_name'),
+        row.get('vector_role') or metadata.get('vector_role'),
+        row.get('collection_name'),
         zlib.compress(encode(row), 1),
     )
     try:
@@ -393,8 +495,9 @@ def put(conn, kind, row, allow_same=False):
     except sqlite3.IntegrityError:
         if not allow_same:
             raise
-        previous = conn.execute('SELECT kb,file,active,role,col,payload FROM records WHERE kind=? AND id=?',
-                                (kind, str(uid))).fetchone()
+        previous = conn.execute(
+            'SELECT kb,file,active,role,col,payload FROM records WHERE kind=? AND id=?', (kind, str(uid))
+        ).fetchone()
         if previous is None or previous[:-1] != values[2:-1] or zlib.decompress(previous[-1]) != encode(row):
             raise reuse.ReuseError('resume row identity/content conflict') from None
         return False
@@ -430,8 +533,11 @@ def checkpoint_scratch(args):
     source_root = private_root(args.source_root)
     proc = Path('/proc') / str(args.source_pid)
     command = (proc / 'cmdline').read_bytes()
-    if (b'legacy_bulk_prepare.py' not in command or b'archive-direct' not in command
-            or str(source_root).encode() not in command):
+    if (
+        b'legacy_bulk_prepare.py' not in command
+        or b'archive-direct' not in command
+        or str(source_root).encode() not in command
+    ):
         raise reuse.ReuseError('checkpoint owner PID identity differs')
     children = []
     for child in Path('/proc').iterdir():
@@ -465,12 +571,19 @@ def checkpoint_scratch(args):
             raise reuse.ReuseError('SSD checkpoint full-row digest differs')
         counts = target.execute('SELECT kind,count(*) FROM records GROUP BY kind').fetchall()
         target.close()
-        checkpoint = {'dump_sha256': owner['sha256'], 'source_hdd_root': str(source_root),
-                      'source_owner_pid': args.source_pid, 'source_child_pids': children,
-                      'full_row_digest': after, 'counts': counts, 'created_at': int(time.time()),
-                      'sqlite_sha256': file_sha(root / 'source.sqlite'),
-                      'sqlite_bytes': (root / 'source.sqlite').stat().st_size,
-                      'original_hdd_preserved': True, 'archive_rehashed': False}
+        checkpoint = {
+            'dump_sha256': owner['sha256'],
+            'source_hdd_root': str(source_root),
+            'source_owner_pid': args.source_pid,
+            'source_child_pids': children,
+            'full_row_digest': after,
+            'counts': counts,
+            'created_at': int(time.time()),
+            'sqlite_sha256': file_sha(root / 'source.sqlite'),
+            'sqlite_bytes': (root / 'source.sqlite').stat().st_size,
+            'original_hdd_preserved': True,
+            'archive_rehashed': False,
+        }
         private_write(root / 'resume-checkpoint.json', checkpoint)
         source.execute('ROLLBACK')
         source.close()
@@ -495,15 +608,24 @@ def export(args):
     """One repeatable-read snapshot; each cursor FETCH is bounded to 32 rows."""
     root = private_root(args.root, create=True)
     archive = store(root / 'source.sqlite', create=True)
-    receipt = {'format': FORMAT, 'started_at': int(time.time()), 'counts': {}, 'digests': {},
-               'embedding_calls': 0, 'source_writes': 0, 'fetch_rows': 32}
+    receipt = {
+        'format': FORMAT,
+        'started_at': int(time.time()),
+        'counts': {},
+        'digests': {},
+        'embedding_calls': 0,
+        'source_writes': 0,
+        'fetch_rows': 32,
+    }
     with reuse.connect() as source:
         reuse.begin(source)
         source.execute("SET LOCAL application_name='owui-legacy-bulk-readonly-20261017'")
         receipt['source'] = reuse.identity(source)
         reuse.validate_identity(receipt['source'])
         reuse.check_vector_column(source)
-        receipt['snapshot'] = source.execute('SELECT txid_current_snapshot()::text,transaction_timestamp()::text').fetchone()
+        receipt['snapshot'] = source.execute(
+            'SELECT txid_current_snapshot()::text,transaction_timestamp()::text'
+        ).fetchone()
         knowledge = reuse.rows(source, 'SELECT * FROM knowledge ORDER BY id')
         kids = [row['id'] for row in knowledge]
         links = reuse.rows(source, 'SELECT * FROM knowledge_file WHERE knowledge_id=ANY(%s)', (kids,))
@@ -522,14 +644,22 @@ def export(args):
             # The independent business migration preserves complete file.data.
             # Compute its processed-text hash in PostgreSQL and export only the
             # retrieval version, not megabytes of duplicate parsed content.
-            ('file', "SELECT id,user_id,hash,updated_at,path,meta,"
-             "jsonb_build_object('retrieval_version',data->'retrieval_version') AS data,"
-             "encode(sha256(convert_to(data->>'content','UTF8')),'hex') AS processed_content_sha "
-             'FROM file WHERE id=ANY(%s)', (fids,)),
+            (
+                'file',
+                'SELECT id,user_id,hash,updated_at,path,meta,'
+                "jsonb_build_object('retrieval_version',data->'retrieval_version') AS data,"
+                "encode(sha256(convert_to(data->>'content','UTF8')),'hex') AS processed_content_sha "
+                'FROM file WHERE id=ANY(%s)',
+                (fids,),
+            ),
             ('retrieval_chunk', 'SELECT * FROM retrieval_chunk WHERE knowledge_id=ANY(%s)', (kids,)),
             ('knowledge_evidence', 'SELECT * FROM knowledge_evidence WHERE knowledge_id=ANY(%s)', (kids,)),
             ('knowledge_evidence_asset', 'SELECT * FROM knowledge_evidence_asset WHERE knowledge_id=ANY(%s)', (kids,)),
-            ('knowledge_evidence_embedding', 'SELECT * FROM knowledge_evidence_embedding WHERE vector_space_id=ANY(%s)', (sids,)),
+            (
+                'knowledge_evidence_embedding',
+                'SELECT * FROM knowledge_evidence_embedding WHERE vector_space_id=ANY(%s)',
+                (sids,),
+            ),
         ]
         for index, (kind, sql, params) in enumerate(queries):
             digest, count = hashlib.sha256(), 0
@@ -548,17 +678,26 @@ def export(args):
             print(json.dumps({'stage': 'export', 'table': kind, 'rows': count}), flush=True)
         # Include original KB/file collections and actual image mapping collections.
         # Keep projected rows in the raw archive but never use projected text as originals.
-        collections = sorted(set(kids + fids + [
-            row['vector_backend_collection']
-            for row in saved(archive, 'knowledge_evidence_embedding')
-            if row.get('vector_role') == 'image_dense' and row.get('vector_backend_collection')
-        ]))
+        collections = sorted(
+            set(
+                kids
+                + fids
+                + [
+                    row['vector_backend_collection']
+                    for row in saved(archive, 'knowledge_evidence_embedding')
+                    if row.get('vector_role') == 'image_dense' and row.get('vector_backend_collection')
+                ]
+            )
+        )
         digest, count = hashlib.sha256(), 0
         for offset in range(0, len(collections), 32):
-            chosen = collections[offset:offset + 32]
+            chosen = collections[offset : offset + 32]
             with source.cursor(name='vectors_' + str(offset)) as cursor:
-                cursor.execute('SELECT id,collection_name,text,vector::text AS vector,vmetadata '
-                               'FROM document_chunk WHERE collection_name=ANY(%s)', (chosen,))
+                cursor.execute(
+                    'SELECT id,collection_name,text,vector::text AS vector,vmetadata '
+                    'FROM document_chunk WHERE collection_name=ANY(%s)',
+                    (chosen,),
+                )
                 names = [desc.name for desc in cursor.description]
                 while batch := cursor.fetchmany(8):
                     for values in batch:
@@ -567,14 +706,27 @@ def export(args):
                         digest.update(encode(row) + b'\n')
                         count += 1
                     archive.commit()
-            print(json.dumps({'stage': 'export-vectors', 'collections_done': min(offset + 32, len(collections)),
-                              'collections_total': len(collections), 'rows': count}), flush=True)
+            print(
+                json.dumps(
+                    {
+                        'stage': 'export-vectors',
+                        'collections_done': min(offset + 32, len(collections)),
+                        'collections_total': len(collections),
+                        'rows': count,
+                    }
+                ),
+                flush=True,
+            )
         receipt['counts']['document_chunk'] = count
         receipt['digests']['document_chunk'] = digest.hexdigest()
         receipt['collection_ids'] = collections
-        receipt['schema'] = reuse.rows(source, 'SELECT table_name,column_name,data_type,udt_name '
-                                       'FROM information_schema.columns WHERE table_schema=\'public\' '
-                                       'AND table_name=ANY(%s) ORDER BY table_name,ordinal_position', (list(KEYS),))
+        receipt['schema'] = reuse.rows(
+            source,
+            'SELECT table_name,column_name,data_type,udt_name '
+            "FROM information_schema.columns WHERE table_schema='public' "
+            'AND table_name=ANY(%s) ORDER BY table_name,ordinal_position',
+            (list(KEYS),),
+        )
         receipt['completed_at'] = int(time.time())
         source.execute('ROLLBACK')
     archive.commit()
@@ -585,8 +737,17 @@ def export(args):
     receipt['archive_bytes'] = (root / 'source.sqlite').stat().st_size
     receipt['archive_sha256'] = file_sha(root / 'source.sqlite')
     private_write(root / 'source-receipt.json', receipt)
-    print(json.dumps({'stage': 'source-complete', 'counts': receipt['counts'],
-                      'archive_bytes': receipt['archive_bytes'], 'archive_sha256': receipt['archive_sha256']}), flush=True)
+    print(
+        json.dumps(
+            {
+                'stage': 'source-complete',
+                'counts': receipt['counts'],
+                'archive_bytes': receipt['archive_bytes'],
+                'archive_sha256': receipt['archive_sha256'],
+            }
+        ),
+        flush=True,
+    )
 
 
 def file_sha(path):
@@ -609,7 +770,9 @@ def fetch_ids(conn, kind, identities):
 def closed_file(file):
     data, meta = reuse.decode(file.get('data')), reuse.decode(file.get('meta'))
     content = data.get('content')
-    calculated = hashlib.sha256(content.encode()).hexdigest() if isinstance(content, str) else file.get('processed_content_sha')
+    calculated = (
+        hashlib.sha256(content.encode()).hexdigest() if isinstance(content, str) else file.get('processed_content_sha')
+    )
     if calculated is None or calculated != file['hash']:
         return None, 'processed_content_hash_not_closed'
     version = data.get('retrieval_version') or 1
@@ -620,21 +783,36 @@ def closed_file(file):
 
 def vector_closed(vector, file, meta):
     value = reuse.decode(vector['vmetadata'])
-    return (value.get('file_id') in (None, file['id'])
-            and value.get('hash') in (None, file['hash'])
-            and value.get('file_hash') in (None, meta.get('file_hash')))
+    return (
+        value.get('file_id') in (None, file['id'])
+        and value.get('hash') in (None, file['hash'])
+        and value.get('file_hash') in (None, meta.get('file_hash'))
+    )
 
 
 def fallback_chunk(vector, kb, file, version, now):
     metadata = reuse.decode(vector['vmetadata'])
-    return dict(chunk_uid=reuse.stable('chunk', legacy_vector_id=vector['id'], file_id=file['id'],
-                                       version=version, knowledge_id=kb),
-                collection_id=None, knowledge_id=kb, collection_name=kb, file_id=file['id'],
-                file_version=version, chunk_version=1, chunk_index=metadata.get('chunk_index'),
-                start_index=metadata.get('start_index'), content_hash=hashlib.sha256(vector['text'].encode()).hexdigest(),
-                chunker_config_hash=reuse.digest({'protocol': 'legacy_manifest_from_original_vector_id'}),
-                text=vector['text'], metadata={k: v for k, v in metadata.items() if k in legacy.METADATA_KEYS}
-                | {'vector_id': vector['id']}, is_active=True, deleted_at=None, created_at=now, updated_at=now)
+    return dict(
+        chunk_uid=reuse.stable(
+            'chunk', legacy_vector_id=vector['id'], file_id=file['id'], version=version, knowledge_id=kb
+        ),
+        collection_id=None,
+        knowledge_id=kb,
+        collection_name=kb,
+        file_id=file['id'],
+        file_version=version,
+        chunk_version=1,
+        chunk_index=metadata.get('chunk_index'),
+        start_index=metadata.get('start_index'),
+        content_hash=hashlib.sha256(vector['text'].encode()).hexdigest(),
+        chunker_config_hash=reuse.digest({'protocol': 'legacy_manifest_from_original_vector_id'}),
+        text=vector['text'],
+        metadata={k: v for k, v in metadata.items() if k in legacy.METADATA_KEYS} | {'vector_id': vector['id']},
+        is_active=True,
+        deleted_at=None,
+        created_at=now,
+        updated_at=now,
+    )
 
 
 def asset_copy(asset, source_root, destination, source_prefix=None):
@@ -688,13 +866,19 @@ def prepare(args):
     coverage, shards, totals = [], [], Counter()
     for kbrow in knowledge:
         kb = kbrow['id']
-        report = {'knowledge_id': kb, 'owner_present': kbrow['user_id'] in users,
-                  'files': [], 'totals': Counter(), 'isolated': Counter()}
+        report = {
+            'knowledge_id': kb,
+            'owner_present': kbrow['user_id'] in users,
+            'files': [],
+            'totals': Counter(),
+            'isolated': Counter(),
+        }
         report['source_active_image_evidence'] = sum(
-            row['modality'] == 'image'
-            for row in saved(conn, 'knowledge_evidence', 'kb=? AND active=1', (kb,)))
+            row['modality'] == 'image' for row in saved(conn, 'knowledge_evidence', 'kb=? AND active=1', (kb,))
+        )
         report['source_manifest_rows'] = conn.execute(
-            "SELECT count(*) FROM records WHERE kind='retrieval_chunk' AND kb=?", (kb,)).fetchone()[0]
+            "SELECT count(*) FROM records WHERE kind='retrieval_chunk' AND kb=?", (kb,)
+        ).fetchone()[0]
         kb_spaces = [row for row in spaces if row['knowledge_id'] == kb]
         for link in sorted((row for row in links if row['knowledge_id'] == kb), key=lambda row: row['file_id']):
             fid = link['file_id']
@@ -718,8 +902,10 @@ def prepare(args):
             if not manifests:
                 for vector in saved(conn, 'document_chunk', 'col=? AND file=?', (kb, fid)):
                     metadata = reuse.decode(vector['vmetadata'])
-                    if (metadata.get('modality', 'text') != 'text'
-                            or metadata.get('vector_role') not in (None, 'text_chunk_dense')):
+                    if metadata.get('modality', 'text') != 'text' or metadata.get('vector_role') not in (
+                        None,
+                        'text_chunk_dense',
+                    ):
                         continue
                     if not vector_closed(vector, file, meta):
                         detail['isolated']['raw_vector_matching_hash_conflict'] += 1
@@ -740,24 +926,29 @@ def prepare(args):
             detail['source_images'], detail['source_assets'] = len(images), len(assets)
             # Asset bytes, including unaccepted families, are archived separately.
             for asset in assets:
-                name, error = asset_copy(asset, args.source_asset_root, asset_root,
-                                         getattr(args, 'source_asset_prefix', None))
+                name, error = asset_copy(
+                    asset, args.source_asset_root, asset_root, getattr(args, 'source_asset_prefix', None)
+                )
                 asset['bundle_file'] = name
                 if error:
                     detail['isolated'][error] += 1
             # Bounded shards: at most 350 text + 350 image rows and their mappings.
-            groups = [(chunks[n:n + 350], []) for n in range(0, len(chunks), 350)]
+            groups = [(chunks[n : n + 350], []) for n in range(0, len(chunks), 350)]
             for n in range(0, len(images), 350):
-                groups.append((chunks[:1], images[n:n + 350]))
+                groups.append((chunks[:1], images[n : n + 350]))
             if images and not chunks:
                 detail['isolated']['image_without_current_text_version_seed'] += len(images)
             accepted_refs = {'text': set(), 'image': set()}
             unique_ids = {table: set() for table in reuse.TABLE_KEYS}
             for group_chunks, group_images in groups:
                 chunk_ids = {row['chunk_uid'] for row in group_chunks}
-                selected_evidence = [row for row in evidence if row.get('retrieval_chunk_uid') in chunk_ids and row['modality'] == 'text'] + group_images
+                selected_evidence = [
+                    row for row in evidence if row.get('retrieval_chunk_uid') in chunk_ids and row['modality'] == 'text'
+                ] + group_images
                 selected_maps = [row for image in group_images for row in maps_by_ref.get(image['evidence_ref'], [])]
-                selected_assets = [asset_by_id[row['asset_id']] for row in group_images if row.get('asset_id') in asset_by_id]
+                selected_assets = [
+                    asset_by_id[row['asset_id']] for row in group_images if row.get('asset_id') in asset_by_id
+                ]
                 vector_ids = [reuse.decode(row['metadata']).get('vector_id') for row in group_chunks]
                 vector_ids.extend(row['vector_backend_id'] for row in selected_maps)
                 vectors = fetch_ids(conn, 'document_chunk', [uid for uid in vector_ids if uid])
@@ -767,13 +958,21 @@ def prepare(args):
                         good_vectors.append(vector)
                     else:
                         detail['isolated']['original_vector_matching_hash_conflict'] += 1
-                bundle = {'format': reuse.FORMAT, 'source': source_receipt['source'], 'captured_at': now,
-                          'scope': {'knowledge_ids': [kb], 'file_ids': [fid], 'limit': 2000},
-                          'links': [{'knowledge_id': kb, 'file_id': fid}],
-                          'files': [{key: file[key] for key in ('id', 'hash', 'updated_at')}],
-                          'chunks': group_chunks, 'evidence': selected_evidence, 'assets': selected_assets,
-                          'mappings': selected_maps, 'spaces': kb_spaces, 'vectors': good_vectors,
-                          'source_closure': {'active_manifest_current_file_snapshot_closed': len(group_chunks)}}
+                bundle = {
+                    'format': reuse.FORMAT,
+                    'source': source_receipt['source'],
+                    'captured_at': now,
+                    'scope': {'knowledge_ids': [kb], 'file_ids': [fid], 'limit': 2000},
+                    'links': [{'knowledge_id': kb, 'file_id': fid}],
+                    'files': [{key: file[key] for key in ('id', 'hash', 'updated_at')}],
+                    'chunks': group_chunks,
+                    'evidence': selected_evidence,
+                    'assets': selected_assets,
+                    'mappings': selected_maps,
+                    'spaces': kb_spaces,
+                    'vectors': good_vectors,
+                    'source_closure': {'active_manifest_current_file_snapshot_closed': len(group_chunks)},
+                }
                 plan = legacy.build_plan(bundle, EVIDENCE_SHA)
                 # One existing canonical raw-v1 read profile, even in text-only shards.
                 for mapping in plan['tables']['knowledge_evidence_embedding']:
@@ -798,37 +997,74 @@ def prepare(args):
                 # avoid writing a second copy of every wide vector per shard.
                 context = {key: bundle[key] for key in ('format', 'source', 'captured_at', 'scope', 'files', 'links')}
                 private_write(shard_root / name, {'format': FORMAT, 'bundle': context, 'plan': plan})
-                shard = {'name': name, 'sha256': file_sha(shard_root / name), 'bytes': (shard_root / name).stat().st_size,
-                         'knowledge_id': kb, 'file_id': fid,
-                         'rows': {table: len(rows) for table, rows in plan['tables'].items()}}
+                shard = {
+                    'name': name,
+                    'sha256': file_sha(shard_root / name),
+                    'bytes': (shard_root / name).stat().st_size,
+                    'knowledge_id': kb,
+                    'file_id': fid,
+                    'rows': {table: len(rows) for table, rows in plan['tables'].items()},
+                }
                 shards.append(shard)
                 totals.update(shard['rows'])
                 detail['isolated'].update(plan['isolated'])
             detail['accepted_text'], detail['accepted_images'] = len(accepted_refs['text']), len(accepted_refs['image'])
             detail['unique_plan_rows'] = {table: len(identities) for table, identities in unique_ids.items()}
             report['files'].append(detail)
-            report['totals'].update({'accepted_text': detail['accepted_text'], 'accepted_images': detail['accepted_images'],
-                                     'source_images': detail['source_images'], 'source_assets': detail['source_assets'],
-                                     'current_text_manifests': len(chunks)})
+            report['totals'].update(
+                {
+                    'accepted_text': detail['accepted_text'],
+                    'accepted_images': detail['accepted_images'],
+                    'source_images': detail['source_images'],
+                    'source_assets': detail['source_assets'],
+                    'current_text_manifests': len(chunks),
+                }
+            )
             report['isolated'].update(detail['isolated'])
         report['text_searchable'] = report['totals']['accepted_text'] > 0
         report['image_searchable'] = report['totals']['accepted_images'] > 0
-        report['all_source_images_searchable'] = report['totals']['accepted_images'] == report['source_active_image_evidence']
-        report['raw_rows_archived'] = conn.execute('SELECT count(*) FROM records WHERE kind=\'document_chunk\' AND col=?', (kb,)).fetchone()[0]
+        report['all_source_images_searchable'] = (
+            report['totals']['accepted_images'] == report['source_active_image_evidence']
+        )
+        report['raw_rows_archived'] = conn.execute(
+            "SELECT count(*) FROM records WHERE kind='document_chunk' AND col=?", (kb,)
+        ).fetchone()[0]
         coverage.append(report)
-        print(json.dumps({'stage': 'prepare', 'knowledge_done': len(coverage), 'knowledge_total': len(knowledge),
-                          'text': report['totals']['accepted_text'], 'images': report['totals']['accepted_images'],
-                          'isolated': dict(report['isolated']), 'shards': len(shards)}), flush=True)
-    asset_files = [{'name': path.name, 'bytes': path.stat().st_size, 'sha256': file_sha(path)}
-                   for path in sorted(asset_root.iterdir())]
-    result = {'format': FORMAT, 'source': source_receipt['source'], 'source_snapshot': source_receipt['snapshot'],
-              'source_archive_sha256': source_receipt['archive_sha256'], 'compatibility_evidence_sha256': EVIDENCE_SHA,
-              'required_target_schema': 'c92e41b7d630', 'canonical_profile': canonical_space['id'],
-              'coverage': coverage, 'shards': shards, 'asset_files': asset_files,
-              'planned_rows_including_replayed_seed_rows': totals,
-              'files': [{key: row[key] for key in ('id', 'hash', 'updated_at')} for row in files.values()],
-              'links': [{'knowledge_id': row['knowledge_id'], 'file_id': row['file_id']} for row in links],
-              'source_writes': 0, 'embedding_calls': 0}
+        print(
+            json.dumps(
+                {
+                    'stage': 'prepare',
+                    'knowledge_done': len(coverage),
+                    'knowledge_total': len(knowledge),
+                    'text': report['totals']['accepted_text'],
+                    'images': report['totals']['accepted_images'],
+                    'isolated': dict(report['isolated']),
+                    'shards': len(shards),
+                }
+            ),
+            flush=True,
+        )
+    asset_files = [
+        {'name': path.name, 'bytes': path.stat().st_size, 'sha256': file_sha(path)}
+        for path in sorted(asset_root.iterdir())
+    ]
+    result = {
+        'format': FORMAT,
+        'source': source_receipt['source'],
+        'source_snapshot': source_receipt['snapshot'],
+        'source_archive_sha256': source_receipt['archive_sha256'],
+        'compatibility_evidence_sha256': EVIDENCE_SHA,
+        'required_target_schema': 'c92e41b7d630',
+        'canonical_profile': canonical_space['id'],
+        'coverage': coverage,
+        'shards': shards,
+        'asset_files': asset_files,
+        'planned_rows_including_replayed_seed_rows': totals,
+        'files': [{key: row[key] for key in ('id', 'hash', 'updated_at')} for row in files.values()],
+        'links': [{'knowledge_id': row['knowledge_id'], 'file_id': row['file_id']} for row in links],
+        'source_writes': 0,
+        'embedding_calls': 0,
+    }
     unique_counts = Counter()
     for report in coverage:
         for detail in report['files']:
@@ -838,9 +1074,19 @@ def prepare(args):
     result['unique_counts_assumption_closed'] = len({row['file_id'] for row in links}) == len(links)
     private_write(root / 'manifest.json', result)
     conn.close()
-    print(json.dumps({'stage': 'prepared', 'knowledge': len(coverage), 'text_searchable_kb': sum(row['text_searchable'] for row in coverage),
-                      'image_searchable_kb': sum(row['image_searchable'] for row in coverage), 'shards': len(shards),
-                      'planned_rows': totals}), flush=True)
+    print(
+        json.dumps(
+            {
+                'stage': 'prepared',
+                'knowledge': len(coverage),
+                'text_searchable_kb': sum(row['text_searchable'] for row in coverage),
+                'image_searchable_kb': sum(row['image_searchable'] for row in coverage),
+                'shards': len(shards),
+                'planned_rows': totals,
+            }
+        ),
+        flush=True,
+    )
 
 
 def finalize_bundle(args):
@@ -863,10 +1109,16 @@ def finalize_bundle(args):
     if digest.hexdigest() != expected or file_sha(path) != expected:
         raise reuse.ReuseError('HDD final raw archive readback hash differs')
     private_write(root / 'source-receipt.json', receipt)
-    summary = {'stage': 'bundle-complete', 'raw_archive_bytes': path.stat().st_size,
-               'raw_archive_sha256': expected, 'manifest_sha256': file_sha(root / 'manifest.json'),
-               'shards': len(manifest['shards']), 'assets': len(manifest['asset_files']),
-               'source_writes': 0, 'embedding_calls': 0}
+    summary = {
+        'stage': 'bundle-complete',
+        'raw_archive_bytes': path.stat().st_size,
+        'raw_archive_sha256': expected,
+        'manifest_sha256': file_sha(root / 'manifest.json'),
+        'shards': len(manifest['shards']),
+        'assets': len(manifest['asset_files']),
+        'source_writes': 0,
+        'embedding_calls': 0,
+    }
     private_write(root / 'complete-safe.json', summary)
     print(json.dumps(summary), flush=True)
 
@@ -894,8 +1146,14 @@ def complete_assets(args):
         name, error = asset_copy(asset, args.source_asset_root, root / 'assets', args.source_asset_prefix)
         if error:
             counts[error] += 1
-            pending.append({'asset_id': asset['id'], 'knowledge_id': asset['knowledge_id'],
-                            'file_id': asset['file_id'], 'reason': error})
+            pending.append(
+                {
+                    'asset_id': asset['id'],
+                    'knowledge_id': asset['knowledge_id'],
+                    'file_id': asset['file_id'],
+                    'reason': error,
+                }
+            )
             continue
         path = root / 'assets' / name
         known[name] = {'name': name, 'bytes': path.stat().st_size, 'sha256': asset['sha256']}
@@ -908,9 +1166,15 @@ def complete_assets(args):
     os.link(root / 'manifest.json', root / 'manifest-before-asset-completion.json')
     private_write(root / 'manifest-with-assets.json', manifest)
     os.replace(root / 'manifest-with-assets.json', root / 'manifest.json')
-    summary = {'stage': 'asset-tree-released', 'counts': counts, 'pending': len(pending),
-               'previous_manifest_sha256': previous_sha, 'manifest_sha256': file_sha(root / 'manifest.json'),
-               'all_existing_target_tree_reads_finished': True, 'target_writes': 0}
+    summary = {
+        'stage': 'asset-tree-released',
+        'counts': counts,
+        'pending': len(pending),
+        'previous_manifest_sha256': previous_sha,
+        'manifest_sha256': file_sha(root / 'manifest.json'),
+        'all_existing_target_tree_reads_finished': True,
+        'target_writes': 0,
+    }
     private_write(root / 'asset-tree-release-safe.json', summary)
     print(json.dumps(summary), flush=True)
 
@@ -925,8 +1189,10 @@ def import_shards(args):
     manifest = json.loads((root / 'manifest.json').read_text())
     if not args.expected_target_database or not args.expected_target_system_id or not args.asset_root:
         raise reuse.ReuseError('explicit target database, cluster identity and image asset root required')
-    if (args.expected_target_database in ('webui_db', 'user_test')
-            or args.expected_target_system_id in (reuse.SOURCE_SYSTEM_ID, '7696569975694159911')):
+    if args.expected_target_database in ('webui_db', 'user_test') or args.expected_target_system_id in (
+        reuse.SOURCE_SYSTEM_ID,
+        '7696569975694159911',
+    ):
         raise reuse.ReuseError('existing Live and test targets forbidden')
     if file_sha(root / 'source.sqlite') != manifest['source_archive_sha256']:
         raise reuse.ReuseError('source archive checksum differs')
@@ -958,16 +1224,40 @@ def import_shards(args):
                 conn.execute('ROLLBACK')
                 raise
             completed.update(result['counts'])
-            print(json.dumps({'stage': 'applied' if args.apply else 'dry-run', 'shard_index': index,
-                              'shard_sha256': item['sha256'], 'target': actual,
-                              'counts': result['counts'], 'embedding_calls': 0}), flush=True)
+            print(
+                json.dumps(
+                    {
+                        'stage': 'applied' if args.apply else 'dry-run',
+                        'shard_index': index,
+                        'shard_sha256': item['sha256'],
+                        'target': actual,
+                        'counts': result['counts'],
+                        'embedding_calls': 0,
+                    }
+                ),
+                flush=True,
+            )
     print(json.dumps({'stage': 'import-complete', 'applied': args.apply, 'counts': completed}), flush=True)
 
 
 def main():
     os.umask(0o077)
     cli = argparse.ArgumentParser(description=__doc__)
-    cli.add_argument('mode', choices=['export', 'extract-small', 'extract-large', 'archive-direct', 'archive-dump', 'checkpoint-scratch', 'prepare', 'complete-assets', 'finalize-bundle', 'import'])
+    cli.add_argument(
+        'mode',
+        choices=[
+            'export',
+            'extract-small',
+            'extract-large',
+            'archive-direct',
+            'archive-dump',
+            'checkpoint-scratch',
+            'prepare',
+            'complete-assets',
+            'finalize-bundle',
+            'import',
+        ],
+    )
     cli.add_argument('--root', type=Path, required=True)
     cli.add_argument('--source-asset-root', type=Path)
     cli.add_argument('--source-asset-prefix', type=Path)
@@ -1016,6 +1306,14 @@ if __name__ == '__main__':
     try:
         main()
     except Exception as error:
-        print(json.dumps({'failed': True, 'category': type(error).__name__,
-                          'reason': str(error) if isinstance(error, reuse.ReuseError) else 'restricted diagnostic'}), flush=True)
+        print(
+            json.dumps(
+                {
+                    'failed': True,
+                    'category': type(error).__name__,
+                    'reason': str(error) if isinstance(error, reuse.ReuseError) else 'restricted diagnostic',
+                }
+            ),
+            flush=True,
+        )
         raise SystemExit(1) from None

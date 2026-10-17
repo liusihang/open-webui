@@ -101,6 +101,7 @@ from open_webui.tools.builtin import (
     view_note,
     view_skill,
     read_skill_file,
+    grep_skill_files,
     create_skill,
     update_skill_files,
     write_note,
@@ -131,6 +132,7 @@ from open_webui.utils.terminals import (
     terminal_context_config,
     terminal_context_id,
 )
+from open_webui.utils.voice_avatar import avatar_animation_tools
 from pydantic import BaseModel, Field, create_model
 from pydantic.fields import FieldInfo
 
@@ -575,7 +577,9 @@ def get_attached_knowledge(model: dict, metadata: dict) -> list[dict]:
             if not item.get('id') and item.get('collection_name'):
                 normalized.append({**item, 'type': 'collection', 'id': item['collection_name']})
             elif not item.get('id') and isinstance(item.get('collection_names'), list):
-                normalized.extend({**item, 'type': 'collection', 'id': identity} for identity in item['collection_names'])
+                normalized.extend(
+                    {**item, 'type': 'collection', 'id': identity} for identity in item['collection_names']
+                )
             else:
                 normalized.append(item)
         for item in normalized:
@@ -659,6 +663,41 @@ async def get_builtin_tools(
             f'chat.{permission_key}',
             await Config.get('user.permissions'),
         )
+
+    gestures = (model.get('info', {}).get('meta', {}).get('voice_avatar') or {}).get('gestures', [])
+    event_call = extra_params.get('__event_call__')
+    if (
+        features.get('voice')
+        and gestures
+        and event_call
+        and get_model_capability('builtin_tools')
+        and not getattr(request.state, 'internal', False)
+        and await has_user_chat_permission('call')
+    ):
+        spec = avatar_animation_tools(gestures)[0]
+        spec.pop('type')
+        names = set(spec['parameters']['properties']['name']['enum'])
+
+        async def play_animation(name: str):
+            if not isinstance(name, str) or name not in names:
+                return {'status': 'unavailable'}
+            try:
+                result = await asyncio.wait_for(
+                    event_call({'type': 'voice:play_animation', 'data': {'name': name, 'model_id': model['id']}}),
+                    timeout=3,
+                )
+                if isinstance(result, dict) and result.get('status') in {'started', 'cancelled', 'unavailable'}:
+                    return {'status': result['status']}
+            except Exception:
+                pass
+            return {'status': 'unavailable'}
+
+        tools_dict['play_animation'] = {
+            'tool_id': 'builtin:play_animation',
+            'callable': play_animation,
+            'spec': spec,
+            'type': 'builtin',
+        }
 
     # Time utilities - available for date calculations
     if is_builtin_tool_enabled('time'):
@@ -822,9 +861,14 @@ async def get_builtin_tools(
             ]
         )
 
-    # Skills tools - view_skill loads bounded instructions, with read_skill_file for continuation.
+    # Skills tools - overview, targeted search, and bounded reads of relevant passages.
+    skill_ids = sorted(set(extra_params.get('__skill_ids__') or []))
+    workspace_skill_ids = [skill_id for skill_id in skill_ids if not skill_id.startswith('terminal:')]
     if is_builtin_tool_enabled('skills'):
-        builtin_functions.extend([view_skill, read_skill_file, update_skill_files])
+        if skill_ids:
+            builtin_functions.extend([view_skill, read_skill_file, grep_skill_files])
+        if workspace_skill_ids:
+            builtin_functions.append(update_skill_files)
         if user.get('role') == 'admin' or await has_permission(
             user.get('id', ''), 'workspace.skills', await Config.get('user.permissions')
         ):
@@ -884,9 +928,11 @@ async def get_builtin_tools(
         spec = get_builtin_tool_spec(func)
         if func.__name__ == 'query_knowledge_files' and metadata.get('rag_query_image_refs'):
             spec = copy.deepcopy(spec)
-            spec['description'] += ('\nAuthorized uploaded query image file IDs for this turn: '
-                                    + JSONCodec.dumps(metadata['rag_query_image_refs'])
-                                    + '. Use query_image_refs for image-based knowledge search; these are inputs, not target KBs.')
+            spec['description'] += (
+                '\nAuthorized uploaded query image file IDs for this turn: '
+                + JSONCodec.dumps(metadata['rag_query_image_refs'])
+                + '. Use query_image_refs for image-based knowledge search; these are inputs, not target KBs.'
+            )
         if func.__name__ == 'delegate_task' and not config.get('subagents.background_enabled'):
             parameters = spec.get('parameters', {})
             parameters.get('properties', {}).pop('background', None)
@@ -1300,7 +1346,13 @@ async def get_tool_servers(request: Request):
                 data = await request.app.state.redis.get(f'{REDIS_KEY_PREFIX}:tool_servers')
                 if data is not None:
                     tool_servers = JSONCodec.loads(data)
-                    request.app.state.TOOL_SERVERS = tool_servers
+                    if tool_servers or not any(
+                        connection.get('config', {}).get('enable') and connection.get('type', 'openapi') == 'openapi'
+                        for connection in await Config.get('tool_server.connections', []) or []
+                    ):
+                        request.app.state.TOOL_SERVERS = tool_servers
+                    else:
+                        tool_servers = None
             except Exception as e:
                 log.error(f'Error fetching tool_servers from Redis: {e}')
 

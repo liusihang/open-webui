@@ -47,6 +47,7 @@
 	let highContrastMode = false;
 
 	let detectArtifacts = true;
+	let intelligentUI = false;
 	let displayMultiModelResponsesInTabs = false;
 
 	let richTextInput = true;
@@ -246,8 +247,10 @@
 		}
 
 		saveSettings({
-			imageCompressionSize: imageCompressionSize,
-			fontFamily
+			...(isDefaultSetting('imageCompressionSize') ? {} : { imageCompressionSize }),
+			...(isDefaultSetting('fontFamily') && fontFamily === defaultFontFamily()
+				? {}
+				: { fontFamily })
 		});
 	};
 
@@ -331,6 +334,7 @@
 		displayMultiModelResponsesInTabs = currentSettings?.displayMultiModelResponsesInTabs ?? false;
 		chatFadeStreamingText = currentSettings?.chatFadeStreamingText ?? true;
 
+		intelligentUI = currentSettings?.intelligentUI ?? false;
 		richTextInput = currentSettings?.richTextInput ?? true;
 		showFormattingToolbar = currentSettings?.showFormattingToolbar ?? false;
 		insertPromptAsRichText = currentSettings?.insertPromptAsRichText ?? false;
@@ -973,6 +977,27 @@
 		</div>
 		<p class={settingDescriptionClass}>
 			{$i18n.t('settings.personal.interface.fadeEffectForStreamingText.description')}
+		</p>
+	</div>
+
+	<div>
+		<div class={settingRowClass}>
+			<div id="intelligent-ui-label" class={settingLabelClass}>{$i18n.t('Intelligent UI')}</div>
+			<div class={settingControlClass}>
+				<Switch
+					ariaLabelledbyId="intelligent-ui-label"
+					bind:state={intelligentUI}
+					inherited={isDefaultSetting('intelligentUI')}
+					on:change={() => {
+						saveSettings({ intelligentUI });
+					}}
+				/>
+			</div>
+		</div>
+		<p class={settingDescriptionClass}>
+			{$i18n.t(
+				'Let the model mix text with native interactive charts, cards, explanations and sliders. No generated scripts are executed.'
+			)}
 		</p>
 	</div>
 
