@@ -458,12 +458,22 @@ def test_mineru_v1_materializes_inline_images_before_stripping(monkeypatch, tmp_
     encoded = 'data:image/png;base64,' + base64.b64encode(png).decode()
     markdown = f'<img src="{encoded}" alt="Figure caption">' if html else f'![Figure caption]({encoded})'
     downloaded = Mock(content=markdown.encode())
-    request = Mock(side_effect=[
-        response({'id': 'upload'}), response({}), response({'file': {'id': 'file'}}),
-        response({'job_id': 'job', 'status': 'completed', 'tier': 'pipeline',
-                  'files': [{'output_files': {'markdown': {'file_id': 'markdown'}}}]}),
-        downloaded,
-    ])
+    request = Mock(
+        side_effect=[
+            response({'id': 'upload'}),
+            response({}),
+            response({'file': {'id': 'file'}}),
+            response(
+                {
+                    'job_id': 'job',
+                    'status': 'completed',
+                    'tier': 'pipeline',
+                    'files': [{'output_files': {'markdown': {'file_id': 'markdown'}}}],
+                }
+            ),
+            downloaded,
+        ]
+    )
     monkeypatch.setattr(MinerULoader, '_is_v1_api', lambda self: True)
     monkeypatch.setattr(MinerULoader, '_request_v1_api', request)
     loader = MinerULoader(str(source), extract_images=True, asset_root=tmp_path / 'assets')

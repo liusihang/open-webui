@@ -127,26 +127,35 @@ async def _legacy_query_adapters(request, config):
         return {}
     from open_webui.retrieval.utils import get_embedding_function
 
-    raw_url = configured_url[:-len(versioned_suffix)] + '/v1'
+    raw_url = configured_url[: -len(versioned_suffix)] + '/v1'
     async with get_async_db() as session:
         spaces = (
-            await session.scalars(select(Space).where(
-                Space.active.is_(True), Space.verification_status == 'legacy_read_only',
-                Space.embedding_model == config.get('rag.embedding_model'), Space.embedding_dim == 2048,
-            ))
+            await session.scalars(
+                select(Space).where(
+                    Space.active.is_(True),
+                    Space.verification_status == 'legacy_read_only',
+                    Space.embedding_model == config.get('rag.embedding_model'),
+                    Space.embedding_dim == 2048,
+                )
+            )
         ).all()
     adapters = {}
     for space in spaces:
         adapter = LegacyReadEmbeddingAdapter(
             text_embedding_function=get_embedding_function(
-                'openai', space.embedding_model, getattr(request.app.state, 'ef', None),
-                raw_url, config.get('rag.openai.api_key') or '',
+                'openai',
+                space.embedding_model,
+                getattr(request.app.state, 'ef', None),
+                raw_url,
+                config.get('rag.openai.api_key') or '',
                 config.get('rag.embedding_batch_size') or 1,
                 enable_async=config.get('rag.enable_async_embedding', True),
                 concurrent_requests=config.get('rag.embedding_concurrent_requests') or 0,
             ),
-            model=space.embedding_model, url=raw_url,
-            key=config.get('rag.openai.api_key') or '', config_fingerprint=space.config_fingerprint,
+            model=space.embedding_model,
+            url=raw_url,
+            key=config.get('rag.openai.api_key') or '',
+            config_fingerprint=space.config_fingerprint,
         )
         try:
             adapter.validate_space(space)
@@ -420,11 +429,18 @@ def collection_search_result(items):
         ids.append(item['evidence_ref'])
         distances.append(similarity)
         documents.append(item['content'])
-        metadatas.append({
-            **item['source'], 'evidence_ref': item['evidence_ref'], 'modality': item['modality'],
-            'citation_key': item['citation_key'], 'score_type': 'normalized_cosine_similarity',
-            'vector_space_id': space_id, 'rrf_score': item['score'], 'rank_type': 'rrf',
-        })
+        metadatas.append(
+            {
+                **item['source'],
+                'evidence_ref': item['evidence_ref'],
+                'modality': item['modality'],
+                'citation_key': item['citation_key'],
+                'score_type': 'normalized_cosine_similarity',
+                'vector_space_id': space_id,
+                'rrf_score': item['score'],
+                'rank_type': 'rrf',
+            }
+        )
     return SearchResult(ids=[ids], distances=[distances], documents=[documents], metadatas=[metadatas])
 
 
@@ -438,8 +454,12 @@ async def query_local_collection(request, *, collection_name, query, count, user
     scope = await resolve_scope(user, knowledge_ids=(collection_name,))
     _, evidence, _, _ = await services(request, user=user)
     result = await evidence.search(
-        query_text=query, modalities=('text',), count=min(max(count, 1), 50),
-        user=user, resolved_scope=scope, include_vector_scores=True,
+        query_text=query,
+        modalities=('text',),
+        count=min(max(count, 1), 50),
+        user=user,
+        resolved_scope=scope,
+        include_vector_scores=True,
     )
     return collection_search_result(result['items'])
 

@@ -18,25 +18,54 @@ SPEC.loader.exec_module(legacy)
 def fixture_plan(*, text_ok=True, image_ok=False):
     tables = {key: [] for key in legacy.copy.TABLE_KEYS}
     tables['document_chunk'] = [
-        {'id': 'text-v', 'collection_name': 'kb', 'vector': json.dumps([1.0] + [0.0] * 2047),
-         'vmetadata': {'embedding_config': {'engine': 'openai', 'model': legacy.MODEL},
-                       'embedding_config_hash': legacy.TEXT_METADATA_HASH if text_ok else 'unknown'}},
-        {'id': 'image-v', 'collection_name': 'kb', 'vector': json.dumps([1.0] + [0.0] * 2047),
-         'vmetadata': {'projection_config_hash': legacy.IMAGE_METADATA_HASH if image_ok else 'unknown',
-                       'modality': 'image', 'vector_role': 'image_dense', 'vector_space_id': 'old'}},
+        {
+            'id': 'text-v',
+            'collection_name': 'kb',
+            'vector': json.dumps([1.0] + [0.0] * 2047),
+            'vmetadata': {
+                'embedding_config': {'engine': 'openai', 'model': legacy.MODEL},
+                'embedding_config_hash': legacy.TEXT_METADATA_HASH if text_ok else 'unknown',
+            },
+        },
+        {
+            'id': 'image-v',
+            'collection_name': 'kb',
+            'vector': json.dumps([1.0] + [0.0] * 2047),
+            'vmetadata': {
+                'projection_config_hash': legacy.IMAGE_METADATA_HASH if image_ok else 'unknown',
+                'modality': 'image',
+                'vector_role': 'image_dense',
+                'vector_space_id': 'old',
+            },
+        },
     ]
     tables['retrieval_chunk'] = [{'chunk_uid': 'chunk', 'metadata': {'vector_id': 'text-v'}}]
     tables['knowledge_evidence'] = [
-        {'id': 'text-e', 'evidence_ref': 'text-ref', 'modality': 'text', 'retrieval_chunk_uid': 'chunk',
-         'asset_id': None, 'file_id': 'text-file', 'content_hash': 'text-hash'},
-        {'id': 'image-e', 'evidence_ref': 'image-ref', 'modality': 'image', 'retrieval_chunk_uid': None,
-         'asset_id': 'asset', 'file_id': 'image-file', 'content_hash': 'image-hash'},
+        {
+            'id': 'text-e',
+            'evidence_ref': 'text-ref',
+            'modality': 'text',
+            'retrieval_chunk_uid': 'chunk',
+            'asset_id': None,
+            'file_id': 'text-file',
+            'content_hash': 'text-hash',
+        },
+        {
+            'id': 'image-e',
+            'evidence_ref': 'image-ref',
+            'modality': 'image',
+            'retrieval_chunk_uid': None,
+            'asset_id': 'asset',
+            'file_id': 'image-file',
+            'content_hash': 'image-hash',
+        },
     ]
     tables['knowledge_evidence_asset'] = [{'id': 'asset'}]
     tables['retrieval_index_state'] = [{'file_id': 'text-file'}, {'file_id': 'image-file'}]
     bundle = {
         'source_closure': {'active_manifest_current_file_snapshot_closed': 1},
-        'chunks': [{}], 'captured_at': 1,
+        'chunks': [{}],
+        'captured_at': 1,
         'mappings': [{'evidence_ref': 'image-ref', 'vector_backend_id': 'image-v', 'vector_role': 'image_dense'}],
         'spaces': [{'id': 'old', 'embedding_model': legacy.MODEL}],
     }

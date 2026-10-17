@@ -392,6 +392,7 @@ async def lifespan(app: FastAPI):
     await validate_mfa_configuration()
     await initialize_runtime_config(app)
     from open_webui.retrieval.integration import start_recovery
+
     await start_recovery(app)
     await migrate_legacy_webhook_config()
     await publish_event(app, EVENTS.SYSTEM_STARTUP_STARTED, source='system')
@@ -511,6 +512,7 @@ async def lifespan(app: FastAPI):
 
     await publish_event(app, EVENTS.SYSTEM_SHUTDOWN_STARTED, source='system')
     from open_webui.retrieval.integration import stop_recovery
+
     await stop_recovery(app)
     await app_connections.close()
 

@@ -577,7 +577,9 @@ def get_attached_knowledge(model: dict, metadata: dict) -> list[dict]:
             if not item.get('id') and item.get('collection_name'):
                 normalized.append({**item, 'type': 'collection', 'id': item['collection_name']})
             elif not item.get('id') and isinstance(item.get('collection_names'), list):
-                normalized.extend({**item, 'type': 'collection', 'id': identity} for identity in item['collection_names'])
+                normalized.extend(
+                    {**item, 'type': 'collection', 'id': identity} for identity in item['collection_names']
+                )
             else:
                 normalized.append(item)
         for item in normalized:
@@ -926,9 +928,11 @@ async def get_builtin_tools(
         spec = get_builtin_tool_spec(func)
         if func.__name__ == 'query_knowledge_files' and metadata.get('rag_query_image_refs'):
             spec = copy.deepcopy(spec)
-            spec['description'] += ('\nAuthorized uploaded query image file IDs for this turn: '
-                                    + JSONCodec.dumps(metadata['rag_query_image_refs'])
-                                    + '. Use query_image_refs for image-based knowledge search; these are inputs, not target KBs.')
+            spec['description'] += (
+                '\nAuthorized uploaded query image file IDs for this turn: '
+                + JSONCodec.dumps(metadata['rag_query_image_refs'])
+                + '. Use query_image_refs for image-based knowledge search; these are inputs, not target KBs.'
+            )
         if func.__name__ == 'delegate_task' and not config.get('subagents.background_enabled'):
             parameters = spec.get('parameters', {})
             parameters.get('properties', {}).pop('background', None)

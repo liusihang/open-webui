@@ -494,7 +494,8 @@ class EvidenceService:
         )
         warnings.extend(
             'Legacy raw-v1 compatibility results; historical encoder revision is unverified.'
-            for group in groups.values() if group['space'].verification_status == 'legacy_read_only'
+            for group in groups.values()
+            if group['space'].verification_status == 'legacy_read_only'
         )
         # Revocation/update during a slow encoding/DB request wins before reranker/LLM exposure.
         final_scope = await self._scope(user, scope)

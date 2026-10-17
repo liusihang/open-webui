@@ -422,6 +422,7 @@ async def test_pending_parse_is_not_restarted_and_parse_errors_not_hidden(enviro
 @pytest.fixture
 def retrieval_environment(monkeypatch):
     """Use the real scope filter without importing the application's SQL graph."""
+
     async def resolve(user, *, knowledge_ids=(), file_ids=()):
         return SimpleNamespace(knowledge_ids=tuple(knowledge_ids), file_ids=tuple(file_ids))
 
@@ -443,7 +444,9 @@ def retrieval_environment(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_retrieval_filters_only_confirmed_native_pdf_keeps_knowledge_and_other_files(environment, retrieval_environment):
+async def test_retrieval_filters_only_confirmed_native_pdf_keeps_knowledge_and_other_files(
+    environment, retrieval_environment
+):
     handler = source_function(
         'utils/middleware.py',
         'chat_completion_files_handler',

@@ -3179,44 +3179,76 @@ async def query_knowledge_files(
     if __request__ is None or not __user__:
         return JSONCodec.dumps({'error': 'Authenticated request context is required'})
     from open_webui.retrieval.integration import model_images, request_scope, services, split_external_scope
+
     try:
         user = UserModel(**__user__)
         metadata = __metadata__ if __metadata__ is not None else {}
-        scope = await request_scope(user, model_knowledge=__model_knowledge__ or (),
-                                    metadata=metadata, knowledge_ids=knowledge_ids, query_image_refs=query_image_refs or ())
+        scope = await request_scope(
+            user,
+            model_knowledge=__model_knowledge__ or (),
+            metadata=metadata,
+            knowledge_ids=knowledge_ids,
+            query_image_refs=query_image_refs or (),
+        )
         if knowledge_ids is not None:
             metadata['rag_selected_knowledge_ids'] = list(scope.knowledge_ids)
         scope, external = await split_external_scope(scope)
-        notes = [entry for entry in [*(__model_knowledge__ or []), *(metadata.get('folder_knowledge') or []),
-                                      *(metadata.get('files') or [])]
-                 if isinstance(entry, dict) and entry.get('type') == 'note' and entry.get('id')]
+        notes = [
+            entry
+            for entry in [
+                *(__model_knowledge__ or []),
+                *(metadata.get('folder_knowledge') or []),
+                *(metadata.get('files') or []),
+            ]
+            if isinstance(entry, dict) and entry.get('type') == 'note' and entry.get('id')
+        ]
         nonlocal_items = external + (notes if knowledge_ids is None else [])
         if not scope.knowledge_ids and not scope.file_ids and not nonlocal_items:
-            return JSONCodec.dumps({'items': [], 'warnings': ['No authorized knowledge selected. Choose a knowledge base ID first.']})
+            return JSONCodec.dumps(
+                {'items': [], 'warnings': ['No authorized knowledge selected. Choose a knowledge base ID first.']}
+            )
         _, evidence, _, state = await services(__request__, user=user)
         seen = set(metadata.get('rag_seen_refs') or ())
-        result = await evidence.search(query_text=query, query_image_refs=query_image_refs or (),
-                                      modalities=modalities or ('text', 'image'), count=count,
-                                      user=user, resolved_scope=scope, seen_refs=seen) if (scope.knowledge_ids or scope.file_ids) else {'items': [], 'warnings': []}
+        result = (
+            await evidence.search(
+                query_text=query,
+                query_image_refs=query_image_refs or (),
+                modalities=modalities or ('text', 'image'),
+                count=count,
+                user=user,
+                resolved_scope=scope,
+                seen_refs=seen,
+            )
+            if (scope.knowledge_ids or scope.file_ids)
+            else {'items': [], 'warnings': []}
+        )
         if nonlocal_items and query.strip() and not query_image_refs:
             # This legacy helper is restricted to official notes/external
             # connectors. Local document vectors never take this second path.
-            legacy = JSONCodec.loads(await _query_knowledge_files_legacy(query, count=count,
-                __request__=__request__, __user__=__user__, __model_knowledge__=nonlocal_items))
+            legacy = JSONCodec.loads(
+                await _query_knowledge_files_legacy(
+                    query, count=count, __request__=__request__, __user__=__user__, __model_knowledge__=nonlocal_items
+                )
+            )
             if isinstance(legacy, list):
                 result['legacy_items'] = legacy
             else:
                 result['warnings'].append('External knowledge or note lookup failed.')
         metadata['rag_seen_refs'] = list(seen)
         result['encoding_space'] = state
-        capabilities = ((__model__ or {}).get('info', {}).get('meta', {}).get('capabilities') or {})
+        capabilities = (__model__ or {}).get('info', {}).get('meta', {}).get('capabilities') or {}
         __request__.state.rag_model_images = await model_images(
-            __request__, result['items'], user=user, scope=scope, vision=capabilities.get('vision', False))
+            __request__, result['items'], user=user, scope=scope, vision=capabilities.get('vision', False)
+        )
         return JSONCodec.dumps(result, ensure_ascii=False)
     except Exception as exc:
         log.warning('Unified knowledge search failed: %s', type(exc).__name__)
-        return JSONCodec.dumps({'error': str(exc) if isinstance(exc, (ValueError, PermissionError)) else 'Knowledge search failed',
-                                'error_type': type(exc).__name__})
+        return JSONCodec.dumps(
+            {
+                'error': str(exc) if isinstance(exc, (ValueError, PermissionError)) else 'Knowledge search failed',
+                'error_type': type(exc).__name__,
+            }
+        )
 
 
 async def view_knowledge_evidence(
@@ -3235,6 +3267,7 @@ async def view_knowledge_evidence(
     if __request__ is None or not __user__:
         return JSONCodec.dumps({'error': 'Authenticated request context is required'})
     from open_webui.retrieval.integration import model_images, request_scope, services
+
     try:
         user = UserModel(**__user__)
         metadata = __metadata__ if __metadata__ is not None else {}
@@ -3246,9 +3279,10 @@ async def view_knowledge_evidence(
         seen = set(metadata.get('rag_seen_refs') or ())
         result = await evidence.read(evidence_refs, user=user, resolved_scope=scope, seen_refs=seen)
         metadata['rag_seen_refs'] = list(seen)
-        capabilities = ((__model__ or {}).get('info', {}).get('meta', {}).get('capabilities') or {})
+        capabilities = (__model__ or {}).get('info', {}).get('meta', {}).get('capabilities') or {}
         __request__.state.rag_model_images = await model_images(
-            __request__, result['items'], user=user, scope=scope, vision=capabilities.get('vision', False))
+            __request__, result['items'], user=user, scope=scope, vision=capabilities.get('vision', False)
+        )
         return JSONCodec.dumps(result, ensure_ascii=False)
     except Exception as exc:
         return JSONCodec.dumps({'error': 'Evidence is unavailable', 'error_type': type(exc).__name__})

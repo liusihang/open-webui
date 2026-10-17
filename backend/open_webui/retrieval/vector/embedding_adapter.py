@@ -135,8 +135,10 @@ class LegacyReadEmbeddingAdapter(EvidenceEmbeddingAdapter):
             or config.get('query_prefix') is not None
             or not isinstance(config.get('source_metadata_hashes'), list)
             or not config.get('source_metadata_hashes')
-            or any(not isinstance(h, str) or not re.fullmatch('[0-9a-f]{64}', h)
-                   for h in config.get('source_metadata_hashes', []))
+            or any(
+                not isinstance(h, str) or not re.fullmatch('[0-9a-f]{64}', h)
+                for h in config.get('source_metadata_hashes', [])
+            )
             or not re.fullmatch('[0-9a-f]{64}', str(config.get('compatibility_evidence_sha256') or ''))
             or not space.active
             or space.config_fingerprint != self.config_fingerprint

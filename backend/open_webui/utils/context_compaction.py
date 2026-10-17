@@ -61,10 +61,14 @@ async def compact_messages_for_request(
     ):
         # Disabled/native modes use the full transcript. Remove old text-only
         # markers from the request copy so the tool loop cannot re-inject them.
-        return [
-            {key: value for key, value in message.items() if key not in {'contextSummary', 'context_summary'}}
-            for message in messages
-        ], None, False
+        return (
+            [
+                {key: value for key, value in message.items() if key not in {'contextSummary', 'context_summary'}}
+                for message in messages
+            ],
+            None,
+            False,
+        )
 
     system_messages = [messages[0]] if messages and messages[0].get('role') == 'system' else []
     messages = messages[1:] if system_messages else messages

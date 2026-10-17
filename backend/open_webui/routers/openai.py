@@ -1587,8 +1587,16 @@ async def generate_chat_completion(
 
         headers = native_compaction_headers(headers, api_config, payload.get('model'))
         payload = await compact_responses_payload(
-            request, user, payload, metadata, api_config=api_config,
-            request_url=request_url, connection_index=idx, api_key=key, headers=headers, cookies=cookies,
+            request,
+            user,
+            payload,
+            metadata,
+            api_config=api_config,
+            request_url=request_url,
+            connection_index=idx,
+            api_key=key,
+            headers=headers,
+            cookies=cookies,
         )
     # For Chat Completions, strip image parts from multimodal tool messages
     # (Chat Completions doesn't support images in tool content).

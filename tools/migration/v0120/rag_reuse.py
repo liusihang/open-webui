@@ -223,11 +223,15 @@ def source_snapshot(conn, knowledge_ids, file_ids, limit, *, payload=False):
     vectors = []
     ordered_ids = sorted(ids)
     for offset in range(0, len(ordered_ids), 64):
-        selected = ordered_ids[offset:offset + 64]
-        vectors.extend(bounded(
-            conn, f'SELECT {fields} FROM document_chunk WHERE id=ANY(%s) ORDER BY id',
-            (selected,), min(64, limit),
-        ))
+        selected = ordered_ids[offset : offset + 64]
+        vectors.extend(
+            bounded(
+                conn,
+                f'SELECT {fields} FROM document_chunk WHERE id=ANY(%s) ORDER BY id',
+                (selected,),
+                min(64, limit),
+            )
+        )
     if any(not allowed_collection(v['collection_name']) for v in vectors):
         raise ReuseError('excluded vector collection')
     return {

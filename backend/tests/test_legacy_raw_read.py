@@ -26,7 +26,8 @@ spec.loader.exec_module(legacy_copy)
 def adapter(space):
     return LegacyReadEmbeddingAdapter(
         text_embedding_function=AsyncMock(return_value=[1.0] + [0.0] * 2047),
-        model=space.embedding_model, url=legacy_copy.RAW_URL,
+        model=space.embedding_model,
+        url=legacy_copy.RAW_URL,
         config_fingerprint=space.config_fingerprint,
     )
 
@@ -59,11 +60,17 @@ async def test_legacy_real_sql_query_acl_and_revision_warning(db, stack):
     assert not (await stack.search.search('query', user=OWNER, resolved_scope=SCOPE))['items']
 
 
-@pytest.mark.parametrize('changed', [
-    {'verification_status': 'verified'}, {'active': False}, {'embedding_dim': 384},
-    {'embedding_model': 'other'}, {'config_fingerprint': 'other'},
-    {'encoding_config': {}},
-])
+@pytest.mark.parametrize(
+    'changed',
+    [
+        {'verification_status': 'verified'},
+        {'active': False},
+        {'embedding_dim': 384},
+        {'embedding_model': 'other'},
+        {'config_fingerprint': 'other'},
+        {'encoding_config': {}},
+    ],
+)
 def test_legacy_adapter_rejects_wrong_profile(changed):
     from types import SimpleNamespace
 
@@ -79,10 +86,13 @@ def test_legacy_adapter_rejects_wrong_profile(changed):
 def test_source_family_accepts_actual_dimension_but_not_wrong_metadata():
     import json
 
-    vector = {'vector': json.dumps([1.0] + [0.0] * 2047), 'vmetadata': {
-        'embedding_config': "{'engine': 'openai', 'model': 'Qwen3-VL-Embedding-2B'}",
-        'embedding_config_hash': legacy_copy.TEXT_METADATA_HASH,
-    }}
+    vector = {
+        'vector': json.dumps([1.0] + [0.0] * 2047),
+        'vmetadata': {
+            'embedding_config': "{'engine': 'openai', 'model': 'Qwen3-VL-Embedding-2B'}",
+            'embedding_config_hash': legacy_copy.TEXT_METADATA_HASH,
+        },
+    }
     assert legacy_copy.accepted_vector(vector)
     vector['vmetadata']['embedding_config_hash'] = 'unobserved'
     assert not legacy_copy.accepted_vector(vector)
@@ -110,8 +120,11 @@ async def test_runtime_legacy_wiring_is_query_only_and_bound_to_current_endpoint
     monkeypatch.setattr(integration, 'get_async_db', session)
     encode = AsyncMock(return_value=[1.0] + [0.0] * 2047)
     monkeypatch.setattr(utils, 'get_embedding_function', lambda *a, **k: encode)
-    config = {'rag.embedding_engine': 'openai', 'rag.embedding_model': legacy_copy.MODEL,
-              'rag.openai.api_base_url': legacy_copy.RAW_URL.replace('/v1', '/qwen3vl-retrieval-v1/v1')}
+    config = {
+        'rag.embedding_engine': 'openai',
+        'rag.embedding_model': legacy_copy.MODEL,
+        'rag.openai.api_base_url': legacy_copy.RAW_URL.replace('/v1', '/qwen3vl-retrieval-v1/v1'),
+    }
     request = SimpleNamespace(app=SimpleNamespace(state=SimpleNamespace(EMBEDDING_FUNCTION=encode)))
     adapters = await integration._legacy_query_adapters(request, config)
     assert space.id in adapters
@@ -125,8 +138,12 @@ def test_search_result_keeps_cosine_metric_not_rrf_and_unknown_anchor():
     from open_webui.retrieval.integration import collection_search_result
 
     item = {
-        'evidence_ref': 'ref', 'content': 'stored text', 'source': {'file_id': 'f', 'anchor': None},
-        'modality': 'text', 'citation_key': 'citation', 'score': 1 / 61,
+        'evidence_ref': 'ref',
+        'content': 'stored text',
+        'source': {'file_id': 'f', 'anchor': None},
+        'modality': 'text',
+        'citation_key': 'citation',
+        'score': 1 / 61,
         'vector_scores': {'legacy-space': 0.97},
     }
     result = collection_search_result([item, {**item, 'vector_scores': {}}])
