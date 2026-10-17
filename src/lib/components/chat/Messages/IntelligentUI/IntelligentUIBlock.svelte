@@ -4,8 +4,10 @@
 	import type { i18n as I18n } from 'i18next';
 	import { CatalogRenderer } from '@json-render/svelte';
 	import { parseIntelligentUI, intelligentUIHash } from '$lib/utils/intelligent-ui';
+	import { validInteractionValue } from '$lib/utils/intelligent-ui/state-value';
 	import { resolveSharedValue } from '$lib/utils/intelligent-ui/data';
 	import Element from './Element.svelte';
+	import { EXTENDED_TYPES } from '$lib/utils/intelligent-ui/extended';
 	import {
 		INTELLIGENT_UI_HOST,
 		INTELLIGENT_UI_BLOCK,
@@ -25,6 +27,10 @@
 	let local = $state<InteractionState>({});
 	let showSource = $state(false);
 	const registry = {
+		...Object.fromEntries(EXTENDED_TYPES.map((type) => [type, Element])),
+		AppBlock: Element,
+		WritingBlock: Element,
+		CodeBlock: Element,
 		Stack: Element,
 		Grid: Element,
 		Tabs: Element,
@@ -40,19 +46,11 @@
 	let parsed = $derived(parseIntelligentUI(source, done));
 	const read = (key: string, fallback: InteractionValue): InteractionValue => {
 		const value = local[key] ?? host?.read(blockId)?.[key];
-		return typeof value === typeof fallback &&
-			(typeof value !== 'number' || Number.isFinite(value)) &&
-			(typeof value !== 'string' || (value.length <= 256 && !/[\u0000-\u001f\u007f]/.test(value)))
-			? value
-			: fallback;
+		return typeof value === typeof fallback && validInteractionValue(key, value) ? value : fallback;
 	};
 	const write = (key: string, value: InteractionValue) => {
-		if (
-			key.length > 512 ||
-			(typeof value === 'string' && (value.length > 256 || /[\u0000-\u001f\u007f]/.test(value))) ||
-			(typeof value === 'number' && !Number.isFinite(value))
-		)
-			return;
+		if (!key || key.length > 512 || !validInteractionValue(key, value)) return;
+		if (local[key] === value && (!host?.canWrite() || host.read(blockId)?.[key] === value)) return;
 		local = { ...host?.read(blockId), ...local, [key]: value };
 		if (host?.canWrite()) host.write(blockId, { ...local });
 	};
@@ -71,15 +69,40 @@
 							: undefined;
 					const requested = tabs ? read(`tab:${key}`, tabs[0]?.id ?? '') : undefined;
 					const selected = tabs?.find((tab) => tab.id === requested)?.id ?? tabs?.[0]?.id;
+					const index =
+						element.type === 'Carousel'
+							? Math.min(
+									element.children.length - 1,
+									Math.max(0, Math.floor(Number(read(`carousel:${key}`, 0))))
+								)
+							: 0;
+					const branch =
+						element.type === 'Conditional'
+							? resolveSharedValue(parsed.spec!, element.props.stateKey, read) ===
+								element.props.equals
+								? 0
+								: 1
+							: 0;
+					const displayedChildren = tabs
+						? selected
+							? [selected]
+							: []
+						: element.type === 'Carousel'
+							? element.children.slice(index, index + 1)
+							: element.type === 'Conditional'
+								? element.children.slice(branch, branch + 1)
+								: element.children;
 					return [
 						key,
 						{
 							...element,
-							...(tabs ? { children: selected ? [selected] : [] } : {}),
+							children: displayedChildren,
 							props: {
 								...element.props,
 								__key: key,
 								__scope: intelligentUIHash(blockId),
+								__index: index,
+								__count: element.children.length,
 								...(tabs ? { __tabs: tabs, __selected: selected } : {})
 							}
 						}
@@ -89,6 +112,7 @@
 		};
 	});
 	setContext(INTELLIGENT_UI_BLOCK, {
+		isDone: () => done,
 		spec: () => parsed.spec,
 		read,
 		write,

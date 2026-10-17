@@ -12,6 +12,7 @@ export interface IntelligentUIHost {
 	followUp: (prompt: string) => Promise<void>;
 }
 export interface IntelligentUIBlockContext {
+	isDone: () => boolean;
 	spec: () => Spec | null;
 	shared: (stateKey: string) => InteractionValue | undefined;
 	writeShared: (stateKey: string, value: InteractionValue) => void;

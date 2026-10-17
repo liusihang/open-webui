@@ -2,7 +2,14 @@
 	import { getContext, type Snippet } from 'svelte';
 	import type { Readable } from 'svelte/store';
 	import type { i18n as I18n } from 'i18next';
-	import { chartData, chartPointCount } from '$lib/utils/intelligent-ui/data';
+	import { EXTENDED_TYPES } from '$lib/utils/intelligent-ui/extended';
+	import { resolveRichSeries, normalizeRichSeries } from '$lib/utils/intelligent-ui/rich-chart';
+	import ExtendedElement from './ExtendedElement.svelte';
+	import AppBlock from './AppBlock.svelte';
+	import WritingBlock from './WritingBlock.svelte';
+	import CodeContentBlock from './CodeContentBlock.svelte';
+	import RichChart from './RichChart.svelte';
+	import { chartData, chartPointCount, filteredRows } from '$lib/utils/intelligent-ui/data';
 	import DataView from './DataView.svelte';
 	import MatrixChart from './MatrixChart.svelte';
 	import { INTELLIGENT_UI_BLOCK, type IntelligentUIBlockContext } from './context';
@@ -51,18 +58,50 @@
 			? chartPointCount(context.spec()!, componentProps, context.read)
 			: 0
 	);
-	let low = $derived(Math.min(0, ...data.map((point: any) => point.value)));
-	let high = $derived(Math.max(0, ...data.map((point: any) => point.value)));
-	let span = $derived(high - low || 1);
-	const chartY = (n: number) => 170 - ((n - low) / span) * 150;
-	const chartX = (index: number) => 24 + (index + 0.5) * (552 / Math.max(data.length, 1));
-	let line = $derived(
-		data
-			.map(
-				(point: any, index: number) =>
-					`${index ? 'L' : 'M'} ${chartX(index)} ${chartY(point.value)}`
-			)
-			.join(' ')
+	let series = $derived(
+		componentProps.series
+			? componentProps.dataSource && context.spec()
+				? resolveRichSeries(
+						filteredRows(
+							context.spec()!,
+							componentProps.dataSource,
+							componentProps.filters,
+							context.read
+						),
+						componentProps.xField,
+						componentProps.series
+					)
+				: componentProps.series
+			: undefined
+	);
+	let totalPoints = $derived.by(() => {
+		if (!componentProps.series) return pointCount;
+		if (!componentProps.dataSource)
+			return componentProps.series.reduce((n: number, item: any) => n + item.data.length, 0);
+		const rows = context.spec()
+			? filteredRows(
+					context.spec()!,
+					componentProps.dataSource,
+					componentProps.filters,
+					context.read
+				)
+			: [];
+		return componentProps.series.reduce(
+			(n: number, item: any) =>
+				n +
+				rows.filter(
+					(row) =>
+						row[componentProps.xField] != null &&
+						typeof row[item.yField] === 'number' &&
+						Number.isFinite(row[item.yField])
+				).length,
+			0
+		);
+	});
+	let shownPoints = $derived(
+		series
+			? normalizeRichSeries(data, series).reduce((n, item) => n + item.data.length, 0)
+			: data.length
 	);
 	const format = (n: number) =>
 		new Intl.NumberFormat(undefined, { maximumFractionDigits: 5 }).format(n);
@@ -106,7 +145,15 @@
 	}
 </script>
 
-{#if element.type === 'Stack'}
+{#if EXTENDED_TYPES.includes(element.type as any)}
+	<ExtendedElement {element} {children} />
+{:else if element.type === 'AppBlock'}
+	<AppBlock view={componentProps} />
+{:else if element.type === 'WritingBlock'}
+	<WritingBlock view={componentProps} />
+{:else if element.type === 'CodeBlock'}
+	<CodeContentBlock view={componentProps} />
+{:else if element.type === 'Stack'}
 	<section class="space-y-5">
 		{#if componentProps.title}<h3 class="text-base font-semibold text-gray-900 dark:text-gray-100">
 				{componentProps.title}
@@ -192,81 +239,7 @@
 {:else if element.type === 'Chart' && (componentProps.kind === 'scatter' || componentProps.kind === 'heatmap')}
 	<MatrixChart view={componentProps} {data} />
 {:else if element.type === 'Chart'}
-	<section class="min-w-0 space-y-3">
-		<div>
-			<h3 class="text-sm font-semibold text-gray-900 dark:text-gray-100">{componentProps.title}</h3>
-			{#if componentProps.description}<p class="mt-1 text-sm text-gray-500 dark:text-gray-400">
-					{componentProps.description}
-				</p>{/if}
-		</div>
-		<svg
-			viewBox="0 0 600 210"
-			role="img"
-			aria-label={componentProps.title}
-			class="w-full overflow-visible text-indigo-500 dark:text-indigo-400"
-		>
-			<title>{componentProps.title}</title>
-			<desc
-				>{data
-					.map((point: any) => `${point.label}: ${point.value} ${componentProps.unit ?? ''}`)
-					.join('; ')}</desc
-			>
-			<line x1="24" y1={chartY(0)} x2="576" y2={chartY(0)} stroke="currentColor" opacity="0.2" />
-			{#if componentProps.kind === 'line'}<path
-					d={line}
-					fill="none"
-					stroke="currentColor"
-					stroke-width="2.5"
-					stroke-linejoin="round"
-				/>{/if}
-			{#each data as point, index}
-				{#if componentProps.kind === 'bar'}
-					<rect
-						x={chartX(index) - Math.min(36, 400 / data.length) / 2}
-						y={Math.min(chartY(point.value), chartY(0))}
-						width={Math.min(36, 400 / data.length)}
-						height={Math.max(1, Math.abs(chartY(point.value) - chartY(0)))}
-						rx="3"
-						fill="currentColor"
-						><title>{point.label}: {format(point.value)} {componentProps.unit ?? ''}</title></rect
-					>
-				{:else}<circle cx={chartX(index)} cy={chartY(point.value)} r="3.5" fill="currentColor"
-						><title>{point.label}: {format(point.value)} {componentProps.unit ?? ''}</title></circle
-					>{/if}
-				{#if data.length <= 12}<text
-						x={chartX(index)}
-						y="195"
-						text-anchor="middle"
-						font-size="10"
-						fill="currentColor"
-						>{point.label.length > 12 ? `${point.label.slice(0, 11)}…` : point.label}</text
-					>{/if}
-			{/each}
-		</svg>
-		<details class="text-xs text-gray-500 dark:text-gray-400">
-			<summary class="cursor-pointer rounded focus-visible:outline-indigo-500"
-				>{$i18n.t('View values')}{componentProps.unit ? ` (${componentProps.unit})` : ''}</summary
-			>
-			<div class="mt-2 max-h-60 overflow-auto">
-				<table class="w-full text-left">
-					<thead
-						><tr
-							><th scope="col" class="py-1">{$i18n.t('Label')}</th><th
-								scope="col"
-								class="py-1 text-right">{$i18n.t('Value')}</th
-							></tr
-						></thead
-					><tbody
-						>{#each data as point}<tr class="border-t border-gray-100 dark:border-gray-800"
-								><th scope="row" class="py-1 font-normal">{point.label}</th><td
-									class="py-1 text-right tabular-nums">{format(point.value)}</td
-								></tr
-							>{/each}</tbody
-					>
-				</table>
-			</div>
-		</details>
-	</section>
+	<RichChart view={componentProps} {data} {series} />
 {:else if element.type === 'ComparisonCards'}
 	<section class="space-y-3">
 		<h3 class="text-sm font-semibold text-gray-900 dark:text-gray-100">{componentProps.title}</h3>
@@ -352,11 +325,11 @@
 	</section>
 {/if}
 
-{#if element.type === 'Chart' && pointCount > data.length}
+{#if element.type === 'Chart' && totalPoints > shownPoints}
 	<p class="mt-2 text-xs text-gray-500 dark:text-gray-400" role="status">
 		{$i18n.t('Showing first {{shown}} of {{total}} matching points.', {
-			shown: data.length,
-			total: pointCount
+			shown: shownPoints,
+			total: totalPoints
 		})}
 	</p>
 {/if}

@@ -1,3 +1,4 @@
+import { extendedSharedValue } from './extended';
 import type {
 	ChartProps,
 	DataTableProps,
@@ -60,6 +61,8 @@ export function resolveSharedValue(
 	read: SharedStateReader
 ): SharedValue | undefined {
 	for (const element of Object.values(spec.elements).slice(0, MAX_ELEMENTS)) {
+		const extended = extendedSharedValue(element, stateKey, read);
+		if (extended !== undefined) return extended;
 		if (element.type === 'Select' && element.props.stateKey === stateKey) {
 			const { value, options } = element.props;
 			const saved = read(`shared:${stateKey}`, value);
@@ -158,6 +161,7 @@ function matchingChartData(spec: Spec, props: ChartProps, read: SharedStateReade
 		switch (props.kind) {
 			case 'bar':
 			case 'line':
+			case 'pie':
 				return (points as BarLinePoint[])
 					.filter((point) => typeof point.label === 'string' && finite(point.value))
 					.map((point) => ({ label: point.label, value: point.value }));
@@ -177,7 +181,7 @@ function matchingChartData(spec: Spec, props: ChartProps, read: SharedStateReade
 		}
 	}
 	const rows = filteredRows(spec, props.dataSource, props.filters, read);
-	if (props.kind === 'bar' || props.kind === 'line') {
+	if (props.kind === 'bar' || props.kind === 'line' || props.kind === 'pie') {
 		return rows.flatMap((row): BarLinePoint[] => {
 			const label = cell(row, props.xField);
 			const value = cell(row, props.yField);

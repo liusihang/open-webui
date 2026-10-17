@@ -1,0 +1,42 @@
+name: Expanded Intelligent UI
+
+on:
+  pull_request:
+    paths:
+      - 'src/lib/components/chat/Messages/IntelligentUI/**'
+      - 'src/lib/components/chat/Messages/ResponseMessage.svelte'
+      - 'src/lib/utils/intelligent-ui/**'
+      - 'backend/open_webui/utils/intelligent_ui.py'
+      - 'tests/intelligent-ui/**'
+      - '.github/workflows/intelligent-ui-expanded.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  catalog-and-sandbox:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - run: npm ci --ignore-scripts --no-audit --no-fund
+        env:
+          CYPRESS_INSTALL_BINARY: '0'
+      - run: npx svelte-kit sync
+      - run: npx vitest run src/lib/utils/intelligent-ui src/lib/components/chat/Messages/IntelligentUI/IntelligentUIBlock.test.ts --pool forks --poolOptions.forks.singleFork
+      - run: npm run test:intelligent-ui
+      - run: python tests/intelligent-ui/test_state.py
+      - name: Install official Playwright and Chromium for security smoke
+        run: |
+          npm install --no-save --package-lock=false --ignore-scripts playwright@1.56.1
+          npx playwright install --with-deps chromium
+      - name: Verify actual opaque iframe and worker boundary
+        run: node tests/intelligent-ui/app-sandbox.chromium.mjs
