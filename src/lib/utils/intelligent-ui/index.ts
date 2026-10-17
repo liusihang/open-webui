@@ -1,5 +1,21 @@
 import {
+	EXTENDED_TYPES,
+	EXTENDED_CONTROL_TYPES,
+	extendedStateReferences,
+	validatePressableChildren,
+	validateExtendedElement,
+	type ExtendedElement
+} from './extended';
+import { validateIsolatedBlock, type IsolatedBlockElement } from './blocks';
+import {
+	validateRichChart,
+	resolveRichSeries,
+	type RichSeries,
+	type RichSeriesField
+} from './rich-chart';
+import {
 	chartData,
+	filteredRows,
 	metricValue,
 	tableRows,
 	type BarLinePoint,
@@ -19,10 +35,11 @@ export type Filter = {
 export type StackProps = { title?: string };
 export type GridProps = { title?: string; columns: number };
 export type TabsProps = { title?: string; labels: string[] };
-export type ChartKind = 'bar' | 'line' | 'scatter' | 'heatmap';
-type ChartCommonProps = { title: string; description?: string; unit?: string };
+export type ChartKind = 'bar' | 'line' | 'scatter' | 'heatmap' | 'pie';
+type ChartCommonProps = { title: string; description?: string; unit?: string; donut?: boolean };
 export type BarLineChartProps = ChartCommonProps & {
-	kind: 'bar' | 'line';
+	kind: 'bar' | 'line' | 'pie';
+	series?: RichSeries[];
 	data: { label: string; value: number }[];
 	dataSource?: never;
 };
@@ -42,6 +59,7 @@ export type DatasetChartProps = ChartCommonProps & {
 	xField: string;
 	yField: string;
 	valueField?: string;
+	series?: RichSeriesField[];
 	filters?: Filter[];
 	data?: never;
 };
@@ -108,6 +126,9 @@ export type MetricCardProps = StaticMetricCardProps | DatasetMetricCardProps;
 
 type ElementOf<T extends string, P> = { type: T; props: P; children: string[] };
 export type IntelligentUIElement =
+	| ExtendedElement
+	| IsolatedBlockElement
+	| ElementOf<'CodeBlock', { title?: string; language: string; code: string }>
 	| ElementOf<'Stack', StackProps>
 	| ElementOf<'Grid', GridProps>
 	| ElementOf<'Tabs', TabsProps>
@@ -308,12 +329,26 @@ function element(value: unknown): IntelligentUIElement {
 		new Set(node.children).size === node.children.length,
 		'Duplicate child identifiers.'
 	);
+	if (EXTENDED_TYPES.includes(node.type as any)) return validateExtendedElement(node);
 	requireValid(
 		['Stack', 'Grid', 'Tabs'].includes(node.type as string) || node.children.length === 0,
 		'Only layout components may have children.'
 	);
 	let props: Record<string, unknown>;
 	switch (node.type) {
+		case 'AppBlock':
+		case 'WritingBlock':
+			validateIsolatedBlock(node.type, node.props);
+			break;
+		case 'CodeBlock':
+			props = fields(node.props, ['language', 'code'], ['title']);
+			optionalString(props, 'title');
+			string(props.code, INTELLIGENT_UI_LIMITS.content);
+			requireValid(
+				typeof props.language === 'string' && /^[a-zA-Z0-9_+-]{1,32}$/.test(props.language),
+				'Invalid code language.'
+			);
+			break;
 		case 'Stack':
 			props = fields(node.props, [], ['title']);
 			optionalString(props, 'title');
@@ -344,16 +379,21 @@ function element(value: unknown): IntelligentUIElement {
 				fromDataset
 					? ['title', 'kind', 'dataSource', 'xField', 'yField']
 					: ['title', 'kind', 'data'],
-				fromDataset ? ['description', 'unit', 'valueField', 'filters'] : ['description', 'unit']
+				fromDataset
+					? ['description', 'unit', 'valueField', 'filters', 'series', 'donut']
+					: ['description', 'unit', 'series', 'donut']
 			);
 			string(props.title);
 			optionalString(props, 'description', INTELLIGENT_UI_LIMITS.description);
 			optionalString(props, 'unit', 64);
 			requireValid(
-				['bar', 'line', 'scatter', 'heatmap'].includes(props.kind as string),
+				['bar', 'line', 'scatter', 'heatmap', 'pie'].includes(props.kind as string),
 				'Unsupported chart kind.'
 			);
+			validateRichChart(props);
 			if (fromDataset) {
+				for (const series of (props.series as RichSeriesField[] | undefined) ?? [])
+					safeId(series.yField);
 				for (const key of ['dataSource', 'xField', 'yField']) safeId(props[key]);
 				optionalId(props, 'valueField');
 				optionalFilters(props);
@@ -531,6 +571,7 @@ function canonical(value: unknown): string {
 }
 
 function validateReferences(draft: DraftSpec) {
+	validatePressableChildren(draft.elements);
 	const states = new Map<string, string>();
 	const ignoreValues = new Map<string, Set<string>>();
 	const reachable = new Set<string>();
@@ -544,11 +585,21 @@ function validateReferences(draft: DraftSpec) {
 	for (const [id, node] of Object.entries(draft.elements)) {
 		let key: string | undefined;
 		let definition: unknown;
-		if (node.type === 'Select') {
+		if (node.type === 'Select' || node.type === 'RadioGroup' || node.type === 'SegmentedControl') {
 			key = node.props.stateKey;
 			const values = node.props.options.map((option) => option.value).sort();
 			definition = { type: 'select', value: node.props.value, values };
 			ignoreValues.set(key, new Set(values));
+		} else if (EXTENDED_CONTROL_TYPES.includes(node.type)) {
+			const props = node.props as any;
+			key = props.stateKey;
+			definition = {
+				type: node.type,
+				value: props.value,
+				maxLength: props.maxLength,
+				min: props.min,
+				max: props.max
+			};
 		} else if (node.type === 'ParameterSlider' || node.type === 'NumberInput') {
 			key = node.props.stateKey;
 			const { min, max, step, value } = node.props;
@@ -583,6 +634,16 @@ function validateReferences(draft: DraftSpec) {
 		}
 	}
 	for (const [id, node] of Object.entries(draft.elements)) {
+		const references =
+			node.type === 'AppBlock' ? (node.props.stateKeys ?? []) : extendedStateReferences(node);
+		for (const reference of references) {
+			requireValid(states.has(reference), 'The finished UI references missing shared state.');
+			if (reachable.has(id))
+				requireValid(
+					reachableStates.has(reference),
+					'A visible view needs a reachable state provider.'
+				);
+		}
 		if (node.type !== 'Chart' && node.type !== 'MetricCard' && node.type !== 'DataTable') continue;
 		const props = node.props;
 		if (props.dataSource === undefined) continue;
@@ -602,6 +663,14 @@ function validateReferences(draft: DraftSpec) {
 			const chart = props as DatasetChartProps;
 			fieldExists(chart.xField);
 			fieldExists(chart.yField);
+			for (const series of chart.series ?? []) fieldExists(series.yField);
+			if (chart.kind === 'pie')
+				requireValid(
+					rows.every(
+						(row) => typeof row[chart.yField] !== 'number' || Number(row[chart.yField]) >= 0
+					),
+					'Pie values cannot be negative.'
+				);
 			if (chart.valueField !== undefined) fieldExists(chart.valueField);
 			if (chart.kind === 'heatmap') {
 				const coordinates = new Set<string>();
@@ -730,6 +799,7 @@ function reachableSpec(draft: DraftSpec): Spec | null {
 		children.forEach(visit);
 	}
 	visit(draft.root);
+	validatePressableChildren(elements);
 	return {
 		root: draft.root,
 		elements,
@@ -900,10 +970,29 @@ function fallbackText(spec: Spec | null): string {
 	const lines: string[] = [];
 	function visit(id: string) {
 		const node = spec!.elements[id];
-		if (node.props.title) lines.push(node.props.title);
+		if ('title' in node.props && node.props.title) lines.push(node.props.title);
 		switch (node.type) {
 			case 'Chart': {
 				if (node.props.description) lines.push(node.props.description);
+				if ('series' in node.props && node.props.series) {
+					const series =
+						node.props.dataSource !== undefined
+							? resolveRichSeries(
+									filteredRows(
+										spec!,
+										node.props.dataSource,
+										node.props.filters,
+										(_, fallback) => fallback
+									),
+									node.props.xField,
+									node.props.series
+								)
+							: node.props.series;
+					for (const item of series)
+						for (const point of item.data)
+							lines.push(`${item.name} / ${point.label}: ${point.value}`);
+					break;
+				}
 				const points = chartData(spec!, node.props, (_, fallback) => fallback);
 				if (node.props.kind === 'scatter') {
 					for (const point of points as ScatterPoint[])
@@ -944,6 +1033,37 @@ function fallbackText(spec: Spec | null): string {
 							.join(' | ')
 					);
 				break;
+			case 'WritingBlock':
+				lines.push(node.props.content);
+				break;
+			case 'CodeBlock':
+				lines.push(node.props.code);
+				break;
+			case 'Math':
+				lines.push(node.props.expression);
+				break;
+			case 'Text':
+				lines.push(node.props.text);
+				break;
+			case 'Image':
+				lines.push(node.props.alt, node.props.caption ?? '');
+				break;
+			case 'ImageGallery':
+				for (const image of node.props.images) lines.push(image.alt, image.caption ?? '');
+				break;
+			case 'Flow':
+				for (const step of node.props.steps) lines.push(step.title, step.description ?? '');
+				break;
+			case 'Input':
+			case 'Textarea':
+			case 'DatePicker':
+				lines.push(node.props.value);
+				break;
+			case 'Checkbox':
+				lines.push(String(node.props.value));
+				break;
+			case 'RadioGroup':
+			case 'SegmentedControl':
 			case 'Select':
 				lines.push(
 					node.props.options.find((option) => option.value === node.props.value)?.label ??

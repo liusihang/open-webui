@@ -24,6 +24,7 @@
 
 	import { createNewFeedback, getFeedbackById, updateFeedbackById } from '$lib/apis/evaluations';
 	import { getChatById, updateChatMessageIntelligentUI } from '$lib/apis/chats';
+	import { mergeInteractionState } from '$lib/utils/intelligent-ui/state-value';
 	import { createMessageStateSaver } from '$lib/utils/intelligent-ui/persistence';
 	import { generateTags } from '$lib/apis';
 
@@ -222,27 +223,19 @@
 			if (!canWriteIntelligentUI() || block.length > 512) return;
 			const source = history.messages[messageId];
 			if (!source) return;
-			const safeState = Object.fromEntries(
-				Object.entries(state)
-					.slice(0, 64)
-					.filter(
-						([key, value]) =>
-							key.length <= 512 &&
-							(typeof value === 'boolean' ||
-								(typeof value === 'string' &&
-									value.length <= 256 &&
-									!/[\x00-\x1f\x7f]/.test(value)) ||
-								(typeof value === 'number' && Number.isFinite(value) && Math.abs(value) <= 1e12))
-					)
-			);
 			const existing =
 				source.meta?.intelligent_ui?.version === 1 ? (source.meta.intelligent_ui.blocks ?? {}) : {};
-			if (!Object.hasOwn(existing, block) && Object.keys(existing).length >= 64) return;
-			if (JSON.stringify(existing[block]) === JSON.stringify(safeState)) return;
-			source.meta = {
-				...source.meta,
-				intelligent_ui: { version: 1, blocks: { ...existing, [block]: safeState } }
-			};
+			if (JSON.stringify(existing[block]) === JSON.stringify(state)) return;
+			let next;
+			try {
+				next = mergeInteractionState(existing, block, state);
+			} catch {
+				toast.error(
+					$i18n.t('Interactive state is full. Recent edits remain local; copy them before leaving.')
+				);
+				return;
+			}
+			source.meta = { ...source.meta, intelligent_ui: next };
 			history.messages = { ...history.messages, [messageId]: source };
 			if (!$temporaryChatEnabled)
 				intelligentUIStateSaver.schedule({

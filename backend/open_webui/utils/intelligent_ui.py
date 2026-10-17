@@ -8,7 +8,7 @@ import json
 import math
 import re
 
-INTELLIGENT_UI_PROMPT = """[INTELLIGENT UI PRESENTATION, version 1]
+INTELLIGENT_UI_PROMPT = """[INTELLIGENT UI PRESENTATION, version 2]
 You may mix ordinary Markdown and interactive native components in this answer.
 Choose plain text for simple answers. Use components only when they make a
 comparison, explanation, data set, or adjustable value easier to understand.
@@ -87,13 +87,74 @@ Table, Chart and MetricCard with the same source and filters update together
 locally, with zero model requests. Only explicit follow-up buttons call the model.
 Shared state and datasets are scoped to ONE fenced block; place linked controls
 and views together under Stack/Grid/Tabs. Different fences remain independent.
-No arbitrary formulas, JavaScript, network requests or general expression language.
+No arbitrary formulas, network requests or general expression language. JavaScript is
+permitted only inside the isolated AppBlock worker described below.
 
-Keep interfaces small: at most 24 elements, 32 chart data points, 6 comparison
+Expanded presentation catalog (all state and actions remain local to this fence):
+- WritingBlock: {title, content, format?: "text"|"markdown"}; children []. Editable,
+  copyable, expandable draft. Whole-element replace may append streamed content;
+  edits are saved separately from the model's original text.
+- CodeBlock: {title?, language, code}; children []. Reuses the code editor and
+  syntax highlighting. language:"mermaid" renders a diagram. Code execution and
+  external preview are not enabled by this component. Ordinary Markdown fences
+  continue to use the existing message code tools.
+- AppBlock: {title, html, css?, js?, height?:160..900, stateKeys?:[safe ID]}; children [].
+  This is a sandboxed visualization, not a website. HTML is restricted to inert
+  text/layout/forms without submit plus canvas/progress/meter; no links, images,
+  script tags, handlers, embedded frames or external resources. CSS is local.
+  JS runs in an isolated worker AFTER generation finishes, not in a DOM window.
+  Use ONLY the provided ui API: ui.onState(state=>...), ui.getState(key),
+  ui.setState(key,value), ui.on(elementId,"click"|"input"|"change",value=>...),
+  ui.setText(id,text), ui.setValue(id,value), ui.setStyle(id,property,value),
+  ui.draw(canvasId,commands). Declare every shared key in stateKeys and a native
+  control in this fence. No fetch, imports, document, window or external APIs.
+  setStyle accepts width/height/minWidth/minHeight/maxWidth/maxHeight (bounded px/%),
+  color/backgroundColor/borderColor (#RGB or #RRGGBB). Canvas commands:
+  ["clear"], ["rect",x,y,w,h,"#RRGGBB"], ["circle",x,y,r,"#RRGGBB"],
+  ["line",x1,y1,x2,y2,"#RRGGBB",width], ["text",text,x,y,"#RRGGBB",fontSize].
+  At most 256 commands; coordinates bounded to ±2000; no raw canvas context.
+- Chart kind:"pie" uses data:[{label,value}] (nonnegative values), optional donut:true.
+  Bar/line can add series:[{name,data:[{label,value}]}] with data:[]; for datasets,
+  series:[{name,yField}] uses the shared xField (keep yField as default). At most
+  8 series and 128 total drawn points. Series labels must be unique. Charts have
+  keyboard/pointer tooltips, legends and an exact-value table.
+- Card: {title?,description?}; children are IDs. Combine with responsive Grid.
+- Carousel: {title?}; 1..32 children, arrow buttons switch cards.
+- Flow: {title?,steps:[{title,description?}]}; children []; at most 16 steps.
+- Popover: {label,title?}; children are IDs; click opens, Escape/outside click closes.
+- Math: {expression:LaTeX string,display?:boolean}; children []; no trusted commands.
+- Image: {src:public HTTPS URL,alt,caption?,source?:public HTTPS URL}; children [].
+- ImageGallery: {title?,images:[{src,alt,caption?,source?}]}; children []; max12.
+  Only use grounded real source URLs; no local/IP/credentialed URLs or fabricated sources.
+- SVG: {svg,label}; children []. Inert svg/g/path/rect/circle/ellipse/line/polyline/
+  polygon/text/title/desc only; double-quoted geometry/color attributes; no CSS,
+  href, external resources, scripts, foreignObject, animation, entities or handlers.
+- Icon: {name:"info"|"check"|"warning"|"star"|"arrow-right"|"heart",label}; children [].
+- Input or Textarea: {title,stateKey,value:string,placeholder?,maxLength?:1..256}; children [].
+- Checkbox: {title,stateKey,value:boolean}; children [].
+- DatePicker: {title,stateKey,value:"YYYY-MM-DD" or "",min?,max?}; children [].
+- RadioGroup or SegmentedControl: {title,stateKey,value,options:[{label,value}]};
+  children []; value must match one of at most 32 unique choices.
+- Text: {text,bindings?:[{token,stateKey}]}; children []. Literal {{token}} placeholders
+  display declared control state without evaluating code. Example text:"Count: {{n}}",
+  bindings:[{token:"n",stateKey:"count"}]. Use for real-time form summaries.
+- Button: {label,actions:[action]}; children []. Pressable has the same props and
+  optional non-interactive children; the whole card is keyboard/click activatable.
+  Actions: {type:"set",stateKey,value}, {type:"increment",stateKey,amount},
+  {type:"toggle",stateKey}, {type:"copy-state",stateKey,from},
+  {type:"copy",keys:[stateKey]}. copy writes selected parameter JSON to clipboard
+  only on the user's click. All targets must be declared native controls, normalized
+  to their allowed types/ranges/options. No network requests or model calls.
+- Conditional: {stateKey,equals:string|number|boolean}; first child when equal,
+  optional second child otherwise. Use with a SegmentedControl for summary/detail.
+Video and map components are not part of this catalog.
+
+Keep interfaces small: prefer at most 24 elements (hard limit 64), 32 chart data points, 6 comparison
 cards, and short labels. Prefer one useful component to a large dashboard.
-Use plain strings, not HTML, scripts, URLs, Markdown links or executable code.
-No arbitrary event handlers, actions, general bindings, computed expressions, loops, remote
-resources or additional properties are supported. Never promise that a UI action
+Use plain strings except explicit WritingBlock Markdown, CodeBlock code, SVG markup,
+AppBlock HTML/CSS/worker JS and Image source URL fields. Only the listed bounded
+actions and bindings are supported; never add arbitrary event handlers, dynamic
+expressions or extra properties. No real-world operations are performed by these views. Never promise that a UI action
 has executed a real-world operation. All values must be grounded in the answer.
 The surrounding system and user instructions still apply.
 [/INTELLIGENT UI PRESENTATION]"""
@@ -126,7 +187,10 @@ def validate_intelligent_ui_state(state: object) -> dict:
         for key, value in values.items():
             if not isinstance(key, str) or not 1 <= len(key) <= 512 or key in forbidden:
                 raise ValueError('Invalid interactive control identifier')
-            valid_string = isinstance(value, str) and len(value) <= 256 and not re.search(r'[\x00-\x1f\x7f]', value)
+            multiline = key.startswith(('writing:', 'shared:'))
+            max_length = 16384 if key.startswith('writing:') else 256
+            forbidden_chars = r'[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]' if multiline else r'[\x00-\x1f\x7f]'
+            valid_string = isinstance(value, str) and len(value) <= max_length and not re.search(forbidden_chars, value)
             if (
                 type(value) is not bool
                 and not valid_string
@@ -136,6 +200,6 @@ def validate_intelligent_ui_state(state: object) -> dict:
             clean_values[key] = value
         clean[block] = clean_values
     result = {'version': 1, 'blocks': clean}
-    if len(json.dumps(result, ensure_ascii=False).encode('utf-8')) > 131072:
+    if len(json.dumps(result, ensure_ascii=False, separators=(',', ':')).encode('utf-8')) > 131072:
         raise ValueError('Interactive state is too large')
     return result

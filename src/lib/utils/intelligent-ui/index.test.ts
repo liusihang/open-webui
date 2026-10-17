@@ -171,8 +171,8 @@ describe('intelligent-ui streaming protocol', () => {
 			`${valid}\n${patch('/elements/main', { ...explanation, props: { title: 'New', content: 'New' } }, 'replace')}`,
 			true
 		);
-		expect(first.spec?.elements.main.props.title).toBe('What changes?');
-		expect(second.spec?.elements.main.props.title).toBe('New');
+		expect((first.spec?.elements.main.props as { title?: string })?.title).toBe('What changes?');
+		expect((second.spec?.elements.main.props as { title?: string })?.title).toBe('New');
 	});
 });
 

@@ -205,3 +205,69 @@ starting the application or opening a database. Mounted tests cover unified-conf
 rendering and existing controls/state behavior. These checks do not establish a
 live deployment, real-provider output quality, or cross-session configuration delivery.
 Streaming transport is unchanged and is not re-tested as part of the setting move.
+
+## Expanded content blocks and local compositions
+
+The version-2 presentation catalog adds WritingBlock, CodeBlock, isolated AppBlock,
+Card, Carousel, Flow, Popover, Math, Image/ImageGallery, inert SVG/Icon, Input,
+Textarea, Checkbox, RadioGroup, DatePicker, SegmentedControl, Button, Pressable,
+Text bindings and Conditional. Video and maps are intentionally excluded.
+Existing tables, linked datasets, filters, metrics, tabs, slider/number controls,
+scatter/heatmaps, administrator settings and ordinary message Markdown remain.
+
+WritingBlock provides edit/copy/expand, safe Markdown, streamed append reconciliation,
+and conversation-scoped draft persistence (16 KiB). Regenerated revisions do not
+silently replace local edits. Input/Textarea shared values are bounded to256 chars;
+multiline is supported. All writes use the existing owner-only state endpoint,
+128 KiB envelope limit, and read-only/share guards. No database migration is needed.
+
+Charts accept kind `pie` and `donut:true`. Bar/line multi-series use
+`series:[{name,data:[{label,value}]}]` with `data:[]`, or dataset series
+`[{name,yField}]` alongside `dataSource`, `xField`, and default `yField`.
+Each named inline series has unique category labels. At most8 series and128
+rendered points are allowed. Tooltips work with pointer and keyboard focus, legends
+can hide/show series, and tables expose exact values. Negative pie values are rejected.
+
+### Local form and conditional example
+
+All values below are fictional UI examples. One fence shares one state scope:
+
+```intelligent-ui
+{"op":"add","path":"/root","value":"root"}
+{"op":"add","path":"/elements/root","value":{"type":"Stack","props":{"title":"Example preferences"},"children":["name","paired","count","summary","copy","mode","view"]}}
+{"op":"add","path":"/elements/name","value":{"type":"Input","props":{"title":"Project","stateKey":"name","value":"Demo"},"children":[]}}
+{"op":"add","path":"/elements/paired","value":{"type":"Checkbox","props":{"title":"Paired view","stateKey":"paired","value":true},"children":[]}}
+{"op":"add","path":"/elements/count","value":{"type":"ParameterSlider","props":{"title":"Items","stateKey":"count","min":1,"max":100,"step":1,"value":12},"children":[]}}
+{"op":"add","path":"/elements/summary","value":{"type":"Text","props":{"text":"{{name}}: {{count}} items; paired={{paired}}","bindings":[{"token":"name","stateKey":"name"},{"token":"count","stateKey":"count"},{"token":"paired","stateKey":"paired"}]},"children":[]}}
+{"op":"add","path":"/elements/copy","value":{"type":"Button","props":{"label":"Copy parameters","actions":[{"type":"copy","keys":["name","count","paired"]}]},"children":[]}}
+{"op":"add","path":"/elements/mode","value":{"type":"SegmentedControl","props":{"title":"View","stateKey":"mode","value":"summary","options":[{"label":"Summary","value":"summary"},{"label":"Details","value":"details"}]},"children":[]}}
+{"op":"add","path":"/elements/view","value":{"type":"Conditional","props":{"stateKey":"mode","equals":"summary"},"children":["brief","detail"]}}
+{"op":"add","path":"/elements/brief","value":{"type":"Card","props":{"title":"Summary","description":"A compact example."},"children":[]}}
+{"op":"add","path":"/elements/detail","value":{"type":"Card","props":{"title":"Details","description":"More example information."},"children":[]}}
+```
+
+### Isolated AppBlock example and security boundary
+
+AppBlock displays sanitized HTML/CSS in an opaque-origin iframe (`allow-scripts`
+only). Generated JavaScript runs in a separate worker, not the iframe DOM realm.
+The iframe bootstrap exposes a bounded text/value/style/canvas bridge. The worker
+has no main-page DOM, cookies, chat API, tokens, follow-up callbacks or navigation
+capability. CSP denies networking and external resources. Only declared shared
+keys are passed, never writing drafts or the complete conversation state. Parent
+writes validate source window, opaque origin, unpredictable token, type and bounds.
+Generation must finish before any app code runs. There is no arbitrary `document`
+or `window` API; this deliberate API is necessary to prevent self-navigation-based
+exfiltration, which a plain sandboxed arbitrary-JS iframe does not prevent.
+
+```intelligent-ui
+{"op":"add","path":"/root","value":"root"}
+{"op":"add","path":"/elements/root","value":{"type":"Stack","props":{},"children":["threshold","app"]}}
+{"op":"add","path":"/elements/threshold","value":{"type":"ParameterSlider","props":{"title":"Threshold","stateKey":"threshold","min":0,"max":100,"step":1,"value":70,"unit":"%"},"children":[]}}
+{"op":"add","path":"/elements/app","value":{"type":"AppBlock","props":{"title":"Threshold visualization","height":240,"stateKeys":["threshold"],"html":"<p id=\"label\">Threshold</p><div class=\"track\"><div id=\"bar\"></div></div><canvas id=\"plot\" width=\"600\" height=\"100\"></canvas>","css":".track{background:#e5e7eb;border-radius:8px;overflow:hidden}#bar{height:18px;background:#6366f1}","js":"ui.onState(s=>{const n=Number(s.threshold);ui.setText('label',n+'%');ui.setStyle('bar','width',n+'%');ui.draw('plot',[['clear'],['line',10,70,590,70,'#94a3b8',2],['circle',10+n*5.8,50,12,'#6366f1'],['text','Threshold '+n,10,20,'#334155',14]]);});"},"children":[]}}
+```
+
+Images accept public HTTPS URLs with no credentials, literal IPs, local hosts or
+nonstandard ports. Loading is lazy, referrers are suppressed, failures show alt
+text, and source links open with noopener/noreferrer. SVG accepts inert geometry
+only; Math uses untrusted bounded KaTeX. None of these components authorizes
+external account actions, persistent database work, model requests or file writes.
