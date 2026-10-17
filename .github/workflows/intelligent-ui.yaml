@@ -44,5 +44,6 @@ jobs:
           python3 tests/migration/test_responses_text_compaction.py
           python3 tests/migration/test_system_prompt_order.py
           python3 tests/migration/test_prompt_cache.py
+          python3 tests/migration/test_terminal_session_discovery.py
           python3 tests/migration/test_native_compaction.py
           python3 tests/migration/test_v0123_merge.py
