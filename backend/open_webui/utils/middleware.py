@@ -215,6 +215,52 @@ def normalize_messages_for_model(form_data: dict) -> dict:
     return form_data
 
 
+def context_summary_message(summary: str | None) -> str:
+    return f'[CONVERSATION SUMMARY]\n{summary}' if summary else ''
+
+
+def apply_context_summary(messages: list[dict], summary: str | None, metadata: dict) -> list[dict]:
+    """Update the request-local text-summary slot, not arbitrary summary-looking text.
+
+    The prefix and original summary are captured immediately after UI instructions.
+    Built-in memory/tools/sources append after that boundary. Tool rounds start from
+    that same original prompt, so replacing its known slot never accumulates summaries.
+    A late model default can also prefix the source-free snapshot on legacy routes.
+    """
+    messages = merge_system_messages(messages)
+    slot = metadata.get('_context_summary_prompt')
+    if slot:
+        system_message = get_system_message(messages)
+        content = system_message.get('content', '') if system_message else ''
+        prefix = slot['prefix']
+        original = context_summary_message(slot['summary'])
+        replacement = context_summary_message(summary)
+        prefixes = [prefix]
+        for key in ('model_prefix', 'provider_prefix'):
+            if slot.get(key):
+                prefixes.insert(0, '\n'.join(part for part in (slot[key], prefix) if part))
+        for before in prefixes:
+            expected = '\n'.join(part for part in (before, original) if part)
+            if content == expected or (expected and content.startswith(expected + '\n')) or not expected:
+                after = content[len(expected) :]
+                updated = '\n'.join(part for part in (before, replacement) if part)
+                # With no previous prefix/summary, the existing suffix has no separator yet.
+                if not expected and updated and after:
+                    after = '\n' + after
+                elif not updated:
+                    after = after.removeprefix('\n')
+                if system_message:
+                    system_message['content'] = updated + after
+                    return messages
+                return add_or_update_system_message(updated, messages) if updated else messages
+
+    # Bypassed payload processing or a plugin rewrote the captured boundary. Do not
+    # remove, split or deduplicate unknown text. Retain the previous append contract.
+    return (
+        add_or_update_system_message(context_summary_message(summary), messages, append=True) if summary else messages
+    )
+
+
 async def publish_chat_finished_event(
     request: Request, user: UserModel, metadata: dict, title: str, content: str, output: list | None = None
 ):
@@ -1720,7 +1766,7 @@ async def chat_image_generation_handler(request: Request, form_data: dict, extra
             system_message_content = f'<context>Image generation was attempted but failed because of an error. The system is currently unable to generate the image. Tell the user that the following error occurred: {error_message}</context>'
 
     if system_message_content:
-        form_data['messages'] = add_or_update_system_message(system_message_content, form_data['messages'])
+        form_data['messages'] = add_or_update_system_message(system_message_content, form_data['messages'], append=True)
 
     return form_data
 
@@ -2226,6 +2272,7 @@ async def process_chat_payload(request, form_data, user, metadata, model):
     # retrieval bypasses, and old Live markers still undergo authorization.
     metadata.pop('native_pdf_file_ids', None)
     metadata.pop('rag_query_image_refs', None)
+    metadata.pop('_context_summary_prompt', None)
     # Ensure chat_id is always a string — external API clients may omit it.
     if not isinstance(metadata.get('chat_id'), str):
         metadata['chat_id'] = ''
@@ -2263,6 +2310,13 @@ async def process_chat_payload(request, form_data, user, metadata, model):
             form_data['model'] = selected_model_id
             metadata['selected_model_id'] = selected_model_id
 
+    # Flatten system text once before variable resolution or append-style helpers;
+    # multi-part system text must not lose later parts or repeat injected sections.
+    original_system = get_system_message(form_data.get('messages', []))
+    form_data['messages'] = merge_system_messages(form_data.get('messages', []))
+    if original_system and not get_system_message(form_data['messages']):
+        # An explicit empty system is still an override during base selection.
+        form_data['messages'].insert(0, {'role': 'system', 'content': ''})
     responses_api = await uses_responses_api(request, model)
     # Responses keep one resolved prompt in the actual replay history. The
     # router must not inject a second default, nor mutate this into developer.
@@ -2349,6 +2403,7 @@ async def process_chat_payload(request, form_data, user, metadata, model):
     if regeneration_prompt:
         form_data['messages'].append({'role': 'user', 'content': regeneration_prompt})
 
+    context_summary = None
     if is_saved_chat_id(chat_id) and user_message_id:
         system_message = get_system_message(form_data.get('messages', []))
         chat_system_prompt = get_content_from_message(system_message) if system_message else ''
@@ -2363,12 +2418,6 @@ async def process_chat_payload(request, form_data, user, metadata, model):
                 request.app.state.MODELS,
                 chat_system_prompt,
             )
-            if context_summary:
-                form_data['messages'] = add_or_update_system_message(
-                    f'[CONVERSATION SUMMARY]\n{context_summary}',
-                    form_data['messages'],
-                    append=True,
-                )
         except Exception:
             log.exception('Context compaction failed; continuing with full chat history')
 
@@ -2411,6 +2460,7 @@ async def process_chat_payload(request, form_data, user, metadata, model):
             pass
 
     form_data = await convert_url_images_to_base64(form_data, user=user)
+    form_data['messages'] = merge_system_messages(form_data.get('messages', []))
 
     event_emitter = await get_event_emitter(metadata)
     event_caller = await get_event_call(metadata)
@@ -2465,7 +2515,9 @@ async def process_chat_payload(request, form_data, user, metadata, model):
         if folder and folder.data:
             metadata['folder_knowledge'] = await get_owner_accessible_folder_files(folder)
             if 'system_prompt' in folder.data:
-                form_data = await apply_system_prompt_to_body(folder.data['system_prompt'], form_data, metadata, user)
+                form_data = await apply_system_prompt_to_body(
+                    folder.data['system_prompt'], form_data, metadata, user, append=True
+                )
             if 'files' in folder.data:
                 if metadata.get('params', {}).get('function_calling') == 'legacy':
                     form_data['files'] = [
@@ -2556,12 +2608,23 @@ async def process_chat_payload(request, form_data, user, metadata, model):
                 form_data['messages'] = add_or_update_system_message(
                     template,
                     form_data['messages'],
+                    append=True,
                 )
 
-        ui_prompt = get_intelligent_ui_prompt(features)
-        if ui_prompt:
-            form_data['messages'] = add_or_update_system_message(ui_prompt, form_data.get('messages', []), append=True)
+    ui_prompt = get_intelligent_ui_prompt(await Config.get('ui.enable_intelligent_ui'))
+    if ui_prompt:
+        form_data['messages'] = add_or_update_system_message(ui_prompt, form_data.get('messages', []), append=True)
 
+    form_data['messages'] = merge_system_messages(form_data.get('messages', []))
+    system_message = get_system_message(form_data['messages'])
+    metadata['_context_summary_prompt'] = {
+        'prefix': get_content_from_message(system_message) if system_message else '',
+        'summary': None,
+    }
+    form_data['messages'] = apply_context_summary(form_data['messages'], context_summary, metadata)
+    metadata['_context_summary_prompt']['summary'] = context_summary
+
+    if features:
         if (
             'memory' in features
             and features['memory']
@@ -2829,6 +2892,12 @@ async def process_chat_payload(request, form_data, user, metadata, model):
     resolved_skill_ids = {s.id for s in available_skills} | {s['id'] for s in terminal_skills}
     chat_context['mentioned_skill_ids'] = sorted(mentioned_skill_ids & resolved_skill_ids)
     strip_skill_mentions(form_data.get('messages', []), resolved_skill_ids)
+    # This built-in transform also touches system text. Keep the captured boundary
+    # in sync without interpreting or searching the rendered prompt.
+    summary_slot = metadata['_context_summary_prompt']
+    summary_parts = [{'content': summary_slot['prefix']}, {'content': summary_slot['summary']}]
+    strip_skill_mentions(summary_parts, resolved_skill_ids)
+    summary_slot.update(prefix=summary_parts[0]['content'], summary=summary_parts[1]['content'])
 
     prompt = get_last_user_message(form_data['messages'])
 
@@ -3184,6 +3253,7 @@ async def process_chat_payload(request, form_data, user, metadata, model):
             if base_system_prompt
             else resolved_model_system_prompt
         )
+    metadata['_context_summary_prompt']['model_prefix'] = resolved_model_system_prompt
     metadata['base_system_prompt'] = base_system_prompt or None
     metadata['base_user_prompt'] = get_last_user_message(form_data['messages'])
     metadata['sources'] = sources[:] if sources else []
@@ -6278,12 +6348,10 @@ async def streaming_chat_response_handler(response, ctx):
                                 None,
                             )
                             if context_summary:
-                                # Append on the provider request copy, preserving the resolved
-                                # base prompt without accumulating summaries in replay history.
-                                new_form_data['messages'] = add_or_update_system_message(
-                                    f'[CONVERSATION SUMMARY]\n{context_summary}',
-                                    merge_system_messages(new_form_data['messages']),
-                                    append=True,
+                                # Only the provider copy receives the latest summary. Memory,
+                                # tool instructions and rebuilt RAG stay after the known slot.
+                                new_form_data['messages'] = apply_context_summary(
+                                    new_form_data['messages'], context_summary, metadata
                                 )
 
                         new_form_data = await convert_url_images_to_base64(new_form_data, user=user)

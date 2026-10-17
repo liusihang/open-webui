@@ -4157,10 +4157,6 @@
 			features = { ...features, memory: true };
 		}
 
-		if ($settings?.intelligentUI === true) {
-			features = { ...features, intelligent_ui: true };
-		}
-
 		return features;
 	};
 

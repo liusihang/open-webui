@@ -23,6 +23,9 @@ class TextCompactionContinuationTests(unittest.TestCase):
         for name in ('get_content_from_message', 'update_message_content', 'add_or_update_system_message'):
             FIXTURE.load_function(FIXTURE.MISC, name, scope)
         FIXTURE.load_function(FIXTURE.MIDDLEWARE, 'get_tool_loop_output_messages', scope)
+        FIXTURE.load_function(FIXTURE.MISC, 'get_system_message', scope)
+        FIXTURE.load_function(FIXTURE.MIDDLEWARE, 'context_summary_message', scope)
+        FIXTURE.load_function(FIXTURE.MIDDLEWARE, 'apply_context_summary', scope)
         system = {'role': 'system', 'content': 'BASE INSTRUCTIONS\nINTELLIGENT UI INSTRUCTIONS'}
         original_system = copy.deepcopy(system)
         output = FIXTURE.history()

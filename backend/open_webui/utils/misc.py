@@ -661,7 +661,15 @@ def merge_system_messages(messages: list[dict]) -> list[dict]:
 
     for message in messages:
         if message.get('role') == 'system':
-            content = get_content_from_message(message)
+            content = message.get('content')
+            if isinstance(content, list):
+                content = '\n'.join(
+                    part['text']
+                    for part in content
+                    if isinstance(part, dict) and part.get('type') == 'text' and part.get('text')
+                )
+            else:
+                content = get_content_from_message(message)
             if content:
                 system_contents.append(content)
         else:

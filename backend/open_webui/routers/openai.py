@@ -49,6 +49,7 @@ from open_webui.utils.payload import (
     apply_model_params_to_body_openai,
     apply_system_prompt_to_body,
 )
+from open_webui.utils.prompt_cache import apply_default_prompt_cache_key
 from open_webui.utils.session_pool import (
     cleanup_response,
     get_client_timeout,
@@ -1585,6 +1586,19 @@ async def generate_chat_completion(
     if is_responses:
         from open_webui.utils.native_compaction import compact_responses_payload, native_compaction_headers
 
+        if not (
+            getattr(request.state, 'direct', False)
+            or getattr(request.state, 'internal', False)
+            or model.get('pipeline')
+        ):
+            payload = apply_default_prompt_cache_key(
+                payload,
+                metadata,
+                api_config=api_config,
+                user_id=getattr(user, 'id', None),
+                connection_index=idx,
+                base_url=url,
+            )
         headers = native_compaction_headers(headers, api_config, payload.get('model'))
         payload = await compact_responses_payload(
             request,

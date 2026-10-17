@@ -170,7 +170,16 @@ async def _compact_upstream(
         compact_url = request_url
         # Codex remote_compaction_v2 uses normal Responses streaming, not the
         # public context_management option or legacy unary /compact endpoint.
-        fields = ('model', 'input', 'instructions', 'tools', 'parallel_tool_calls', 'reasoning', 'include')
+        fields = (
+            'model',
+            'input',
+            'instructions',
+            'tools',
+            'parallel_tool_calls',
+            'reasoning',
+            'include',
+            'prompt_cache_key',
+        )
         body = {key: copy.deepcopy(payload[key]) for key in fields if key in payload}
         body.update(stream=True, store=False)
         body['input'].append({'type': 'compaction_trigger'})

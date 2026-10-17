@@ -280,6 +280,15 @@
 
 			<AdminSettingSection title={$i18n.t('settings.admin.general.sections.features.title')}>
 				<AdminSettingRow
+					label={$i18n.t('Intelligent UI')}
+					description={$i18n.t(
+						'Let the model mix text with native interactive charts, cards, explanations and sliders. No generated scripts are executed.'
+					)}
+					let:labelId
+				>
+					<Switch bind:state={adminConfig.ENABLE_INTELLIGENT_UI} ariaLabelledbyId={labelId} />
+				</AdminSettingRow>
+				<AdminSettingRow
 					label={$i18n.t('settings.admin.general.communitySharing.label')}
 					description={$i18n.t('settings.admin.general.communitySharing.description')}
 					let:labelId

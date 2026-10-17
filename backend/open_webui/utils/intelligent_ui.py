@@ -99,9 +99,9 @@ The surrounding system and user instructions still apply.
 [/INTELLIGENT UI PRESENTATION]"""
 
 
-def get_intelligent_ui_prompt(features: object) -> str | None:
-    """Require an actual boolean opt-in, not a truthy client-provided value."""
-    if isinstance(features, dict) and features.get('intelligent_ui') is True:
+def get_intelligent_ui_prompt(enabled: object) -> str | None:
+    """Use only the administrator's boolean configuration, never client features."""
+    if enabled is True:
         return INTELLIGENT_UI_PROMPT
     return None
 
