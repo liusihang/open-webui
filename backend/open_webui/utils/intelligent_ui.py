@@ -9,153 +9,142 @@ import math
 import re
 
 INTELLIGENT_UI_PROMPT = """[INTELLIGENT UI PRESENTATION, version 2]
-You may mix ordinary Markdown and interactive native components in this answer.
-Choose plain text for simple answers. Use components only when they make a
-comparison, explanation, data set, or adjustable value easier to understand.
-Keep useful explanatory text before or after each component as a readable
-fallback. Do not invent data. Label hypothetical examples and uncertainties.
+Use native UI when it materially helps comparison, editing or exploration;
+otherwise use Markdown. Honor the user's requested format. Keep a short textual
+fallback without repeating entire charts/tables/drafts. Ground values and URLs;
+label hypothetical data and uncertainty. Never invent observations or sources.
 
-Place each independent UI in its own fenced code block with language
-intelligent-ui. Text and multiple UI blocks may alternate in any order.
-Inside the fence emit one complete JSON object per line, without commentary.
-Each line is an operation:
+Choose the simplest useful presentation:
+- Facts/concepts: text/formulas. Comparisons: Markdown tables; DataTable only
+  when search/sort/filter/selection is useful.
+- Quantities/trends/relationships: bar/line/scatter; use heatmap for a matrix,
+  pie/donut for nonnegative parts of a whole, not precise comparisons.
+- Editable prose: WritingBlock. Code: normal fences; CodeBlock for a separate
+  editable item. Mermaid/Flow for static diagrams/steps.
+- Parameter exploration: controls linked to dataset views. Similar visual
+  options: Card/Carousel (usually 3–8); use tables for precise comparisons.
+- Prefer native components; AppBlock only for necessary computation/visuals
+  they cannot express. Do not duplicate native/custom views.
+Start with one purpose and only necessary views/controls.
+
+OUTPUT
+Text and multiple UI blocks may alternate. Use an intelligent-ui fence per
+independent view: one complete JSON object per line, no commentary inside.
+Only add/replace of /root, a whole /elements/ID or /datasets/ID is supported:
 {"op":"add","path":"/root","value":"chart"}
-{"op":"add","path":"/elements/chart","value":{"type":"Chart","props":{"title":"Example values","kind":"bar","data":[{"label":"A","value":3},{"label":"B","value":5}]},"children":[]}}
-Close the fence and continue ordinary text when appropriate. Complete each line
-before starting the next so the interface can display incrementally.
+{"op":"add","path":"/elements/chart","value":{"type":"Chart","props":{"title":"Example","kind":"bar","data":[{"label":"A","value":3}]},"children":[]}}
+Every element has exactly type, props,
+children. Children are element IDs; leaves use []. Root is an element ID.
+Safe IDs start with a letter, then letters/digits/_/-, max 64; no prototype keys.
+This applies to element/dataset/state/field IDs.
+In the catalog, ? marks optional props; untyped fields are strings; numbers are
+finite. Only listed props, bindings and actions are allowed, not expressions.
 
-Only add/replace of /root, a whole /elements/ID, or a whole /datasets/ID is supported. IDs start with
-a letter and contain only letters, digits, underscores or hyphens. Each element
-has exactly type, props and children. The root is an element ID. Use these types:
-- Stack: props {title?: string}; children are element IDs in display order.
-- Chart: props {title: string, description?: string, kind: "bar"|"line",
-  data: [{label: string, value: finite number}], unit?: string}; children [].
-- ComparisonCards: props {title: string, items: [{title: string,
-  description: string, attributes?: [{label: string, value: string}]}]}; children [].
-- Explanation: props {title: string, content: string}; children [].
-- ParameterSlider: props {title: string, min: finite number, max: finite number,
-  step: positive finite number, value: finite number, unit?: string,
-  followUp?: string}; children []. min < max, and value must be within the range.
-  followUp is a short question the user may explicitly submit with the chosen
-  value. Moving the slider never calls the model. With stateKey it updates linked
-  dataset views locally; without stateKey it only changes its own value.
+LAYOUT AND CONTENT (leaves unless children are specified)
+- Stack: {title?}; children in display order.
+- Grid: {title?,columns:integer 1..4}; children in display order.
+- Tabs: {title?,labels:[string]}; one child per label.
+- Card: {title?,description?}; children. Carousel: {title?}; 1..32 children.
+- Popover: {label,title?}; children for supplementary information.
+- Conditional: {stateKey,equals:string|number|boolean}; first child if equal,
+  optional second child otherwise.
+- Explanation: {title,content}.
+- ComparisonCards: {title,items:[{title,description,attributes?:[{label,value}]}]}.
+- WritingBlock: {title,content,format?:"text"|"markdown"}; editable/copyable/
+  expandable. Whole-element replace can extend generated text; user edits
+  are saved separately and must not be overwritten.
+- CodeBlock: {title?,language,code}; editor/highlighting; language:"mermaid"
+  renders a diagram. No execution/external preview; normal code fences keep
+  their existing tools.
+- Flow: {title?,steps:[{title,description?}]}; max 16 steps.
+- Math: {expression:LaTeX string,display?:boolean}; no trusted commands.
+- Image: {src:public HTTPS URL,alt,caption?,source?:public HTTPS URL}.
+- ImageGallery: {title?,images:[{src,alt,caption?,source?}]}; max 12, same URL rules.
+  No local/IP/credentialed URLs.
+- SVG: {svg,label}; only inert svg/g/path/rect/circle/ellipse/line/polyline/
+  polygon/text/title/desc with double-quoted geometry/color attributes. No CSS,
+  href/resources/scripts/foreignObject/animation/entities/handlers.
+- Icon: {name:"info"|"check"|"warning"|"star"|"arrow-right"|"heart",label}.
+- Text: {text,bindings?:[{token,stateKey}]}; literal {{token}} substitutions,
+  e.g. text:"Count: {{n}}", bindings:[{token:"n",stateKey:"count"}].
 
-Additional native components:
-- Grid: props {title?: string, columns: integer 1..4}; children are element IDs.
-- Tabs: props {title?: string, labels: [string]}; one child per tab label.
-- Select: props {title: string, stateKey: safe ID, value: string,
-  options: [{label: string, value: string}]}; unique option values without control characters; value must match an option; children [].
-- NumberInput: props {title: string, stateKey: safe ID, min: number, max: number,
-  step: positive number, value: number, unit?: string}; children []. Values apply on
-  change, blur or Enter; slider values update immediately.
-- ParameterSlider additionally accepts optional stateKey to share its numeric value.
-- DataTable: props {title: string, dataSource: dataset ID,
-  columns: [{key: field ID, label: string}], filters?: [filter],
-  searchable?: boolean, sortable?: boolean, selectable?: boolean,
-  rowKey?: field ID, selectionKey?: safe ID}; children []. Selection requires
-  unique non-empty, non-null rowKey values and selectionKey; these properties are
-  permitted only when selectable is true. The selected row key becomes
-  shared string state. An empty string means no row is selected.
-- MetricCard: props {title: string, description?: string, unit?: string,
-  value: number} OR {title: string, description?: string, unit?: string,
-  dataSource: dataset ID, aggregation: "count"|"sum"|"mean"|"min"|"max",
-  field?: field ID, filters?: [filter]}; field required except count; children [].
+CONTROLS AND ACTIONS
+- ParameterSlider: {title,min:number,max:number,step:positive number,
+  value:number,unit?,stateKey?,followUp?}. NumberInput has the same numeric
+  props, requires stateKey and has no followUp. min<max, min<=value<=max.
+  Slider updates immediately; NumberInput applies on change/blur/Enter.
+- Select/RadioGroup/SegmentedControl: {title,stateKey,value,
+  options:[{label,value}]}; value matches a unique option, max 32 options,
+  no control characters in option values.
+- Input/Textarea: {title,stateKey,value,placeholder?,maxLength?:integer 1..256}.
+- Checkbox: {title,stateKey,value:boolean}.
+- DatePicker: {title,stateKey,value:"YYYY-MM-DD" or "",min?,max?}.
+- Button: {label,actions:[action]}. Pressable uses the same props and may have
+  non-interactive children; the whole card supports click/keyboard.
+  Actions: {type:"set",stateKey,value:string|number|boolean},
+  {type:"increment",stateKey,amount:number}, {type:"toggle",stateKey},
+  {type:"copy-state",stateKey,from}, {type:"copy",keys:[stateKey]}.
+  Targets must be declared native controls; values respect their types/ranges/
+  options. copy writes parameter JSON to clipboard only on user click.
 
-Chart also supports kind "scatter" with data [{x: number,y: number,label?: string}],
-and "heatmap" with data [{x: string,y: string,value: number}]. Instead of inline
-Chart data, a Chart can have dataSource, xField, yField, filters, and valueField
-(required and permitted only for heatmap). Never supply both data and dataSource.
-Heatmap coordinates must be unique; repeated cells are rejected, not aggregated.
+DATA AND CHARTS
+- Chart: {title,kind:"bar"|"line"|"scatter"|"heatmap"|"pie",description?,unit?}
+  plus exactly one source: data:[points] OR dataSource:dataset ID with xField,
+  yField, filters?. Only heatmap requires/permits valueField with dataSource.
+  Inline points: bar/line/pie {label,value:number}; scatter {x:number,y:number,
+  label?}; heatmap {x:string,y:string,value:number}. Heatmap cells are unique,
+  not aggregated. Pie values >=0; donut:true is permitted only for pie.
+  Bar/line inline series:[{name,data:[{label,value:number}]}] requires data:[];
+  dataset series:[{name,yField}] shares xField and keeps a default yField.
+  Series names are unique; max 8 series. Tooltips, legends and an exact-value
+  table are built in.
+- DataTable: {title,dataSource,columns:[{key,label}],filters?,searchable?:boolean,
+  sortable?:boolean,selectable?:boolean,rowKey?,selectionKey?}. Selection requires
+  unique nonempty/non-null rowKey values and selectionKey; both props are only
+  allowed with selectable:true. Selected row key is shared string state;
+  "" means no selection. Row-key strings cannot contain control characters.
+- MetricCard: {title,description?,unit?} plus either {value:number} or
+  {dataSource,aggregation:"count"|"sum"|"mean"|"min"|"max",field?,filters?}.
+  field is required except for count.
+Datasets contain primitive string/number/boolean/null cells and safe field IDs:
+{"op":"add","path":"/datasets/plans","value":[{"name":"A","cost":10},{"name":"B","cost":30}]}
+A filter is {field,op:"eq"|"gte"|"lte"|"contains",stateKey,ignoreValue?}.
+ignoreValue is only for eq and must match a Select option when a Select supplies
+the state. For example, a budget control drives
+{field:"cost",op:"lte",stateKey:"budget"}; a category Select can use
+{field:"group",op:"eq",stateKey:"group",ignoreValue:"all"} with an "all" option.
+Controls sharing a key must declare consistent defaults and definitions.
+Table/Chart/MetricCard sharing a source and filters update together locally.
+Changing a control never calls the model; only an explicit follow-up (followUp)
+may submit a new question. Without stateKey a slider controls only itself.
+State and datasets belong to ONE fence; place linked controls/views together
+under Stack/Grid/Tabs. Different fences are independent.
 
-For actual linked controls, add a bounded static dataset using a complete line:
-{"op":"add","path":"/datasets/plans","value":[{"name":"A","cost":10,"group":"small"},{"name":"B","cost":30,"group":"large"}]}
-Dataset fields use safe IDs and primitive string/number/boolean/null cells only.
-Selectable row-key strings cannot contain control characters.
-At most 4 datasets with 256 rows and 16 fields each; prefer small examples or
-selected relevant rows and explain any truncation. Dataset charts draw at most
-128 valid points with a count notice; table/metric filters may cover all 256 rows.
-Do not fabricate observations.
-A filter is {field: field ID, op: "eq"|"gte"|"lte"|"contains", stateKey: safe ID,
-ignoreValue?: string}. ignoreValue is allowed only with eq and must match a
-Select option when that state is supplied by a Select. Controls declare the
-stateKey and its default value.
-Multiple controls sharing a key must have consistent defaults and definitions.
-Example: a Select defaults to "all" and offers "all", "small", "large";
-views use {field:"group",op:"eq",stateKey:"group",ignoreValue:"all"}.
-A budget NumberInput can drive {field:"cost",op:"lte",stateKey:"budget"}.
-Table, Chart and MetricCard with the same source and filters update together
-locally, with zero model requests. Only explicit follow-up buttons call the model.
-Shared state and datasets are scoped to ONE fenced block; place linked controls
-and views together under Stack/Grid/Tabs. Different fences remain independent.
-No arbitrary formulas, network requests or general expression language. JavaScript is
-permitted only inside the isolated AppBlock worker described below.
+APPBLOCK
+AppBlock: {title,html,css?,js?,height?:integer 160..900,stateKeys?:[safe ID]}.
+Use inert text/layout/input controls plus canvas/progress/meter, not a website.
+No form tags, links, images, scripts, inline handlers, frames or external resources.
+CSS is local. JS may compute locally in an isolated worker AFTER generation
+finishes, never in a DOM window. Declare each shared stateKeys entry with a
+native control in this fence. Native bindings have no formula evaluator.
+Use only ui.onState(state=>...), ui.getState(key), ui.setState(key,value),
+ui.on(id,"click"|"input"|"change",value=>...), ui.setText(id,text),
+ui.setValue(id,value), ui.setStyle(id,property,value), ui.draw(canvasId,commands).
+No fetch/imports/document/window/external APIs or raw canvas context.
+setStyle allows width/height/minWidth/minHeight/maxWidth/maxHeight (bounded px/%),
+color/backgroundColor/borderColor (#RGB/#RRGGBB). Canvas commands:
+["clear"], ["rect",x,y,w,h,"#RRGGBB"], ["circle",x,y,r,"#RRGGBB"],
+["line",x1,y1,x2,y2,"#RRGGBB",width], ["text",text,x,y,"#RRGGBB",fontSize].
+Max 256 commands; coordinates bounded to ±2000.
 
-Expanded presentation catalog (all state and actions remain local to this fence):
-- WritingBlock: {title, content, format?: "text"|"markdown"}; children []. Editable,
-  copyable, expandable draft. Whole-element replace may append streamed content;
-  edits are saved separately from the model's original text.
-- CodeBlock: {title?, language, code}; children []. Reuses the code editor and
-  syntax highlighting. language:"mermaid" renders a diagram. Code execution and
-  external preview are not enabled by this component. Ordinary Markdown fences
-  continue to use the existing message code tools.
-- AppBlock: {title, html, css?, js?, height?:160..900, stateKeys?:[safe ID]}; children [].
-  This is a sandboxed visualization, not a website. HTML is restricted to inert
-  text/layout/forms without submit plus canvas/progress/meter; no links, images,
-  script tags, handlers, embedded frames or external resources. CSS is local.
-  JS runs in an isolated worker AFTER generation finishes, not in a DOM window.
-  Use ONLY the provided ui API: ui.onState(state=>...), ui.getState(key),
-  ui.setState(key,value), ui.on(elementId,"click"|"input"|"change",value=>...),
-  ui.setText(id,text), ui.setValue(id,value), ui.setStyle(id,property,value),
-  ui.draw(canvasId,commands). Declare every shared key in stateKeys and a native
-  control in this fence. No fetch, imports, document, window or external APIs.
-  setStyle accepts width/height/minWidth/minHeight/maxWidth/maxHeight (bounded px/%),
-  color/backgroundColor/borderColor (#RGB or #RRGGBB). Canvas commands:
-  ["clear"], ["rect",x,y,w,h,"#RRGGBB"], ["circle",x,y,r,"#RRGGBB"],
-  ["line",x1,y1,x2,y2,"#RRGGBB",width], ["text",text,x,y,"#RRGGBB",fontSize].
-  At most 256 commands; coordinates bounded to ±2000; no raw canvas context.
-- Chart kind:"pie" uses data:[{label,value}] (nonnegative values), optional donut:true.
-  Bar/line can add series:[{name,data:[{label,value}]}] with data:[]; for datasets,
-  series:[{name,yField}] uses the shared xField (keep yField as default). At most
-  8 series and 128 total drawn points. Series labels must be unique. Charts have
-  keyboard/pointer tooltips, legends and an exact-value table.
-- Card: {title?,description?}; children are IDs. Combine with responsive Grid.
-- Carousel: {title?}; 1..32 children, arrow buttons switch cards.
-- Flow: {title?,steps:[{title,description?}]}; children []; at most 16 steps.
-- Popover: {label,title?}; children are IDs; click opens, Escape/outside click closes.
-- Math: {expression:LaTeX string,display?:boolean}; children []; no trusted commands.
-- Image: {src:public HTTPS URL,alt,caption?,source?:public HTTPS URL}; children [].
-- ImageGallery: {title?,images:[{src,alt,caption?,source?}]}; children []; max12.
-  Only use grounded real source URLs; no local/IP/credentialed URLs or fabricated sources.
-- SVG: {svg,label}; children []. Inert svg/g/path/rect/circle/ellipse/line/polyline/
-  polygon/text/title/desc only; double-quoted geometry/color attributes; no CSS,
-  href, external resources, scripts, foreignObject, animation, entities or handlers.
-- Icon: {name:"info"|"check"|"warning"|"star"|"arrow-right"|"heart",label}; children [].
-- Input or Textarea: {title,stateKey,value:string,placeholder?,maxLength?:1..256}; children [].
-- Checkbox: {title,stateKey,value:boolean}; children [].
-- DatePicker: {title,stateKey,value:"YYYY-MM-DD" or "",min?,max?}; children [].
-- RadioGroup or SegmentedControl: {title,stateKey,value,options:[{label,value}]};
-  children []; value must match one of at most 32 unique choices.
-- Text: {text,bindings?:[{token,stateKey}]}; children []. Literal {{token}} placeholders
-  display declared control state without evaluating code. Example text:"Count: {{n}}",
-  bindings:[{token:"n",stateKey:"count"}]. Use for real-time form summaries.
-- Button: {label,actions:[action]}; children []. Pressable has the same props and
-  optional non-interactive children; the whole card is keyboard/click activatable.
-  Actions: {type:"set",stateKey,value}, {type:"increment",stateKey,amount},
-  {type:"toggle",stateKey}, {type:"copy-state",stateKey,from},
-  {type:"copy",keys:[stateKey]}. copy writes selected parameter JSON to clipboard
-  only on the user's click. All targets must be declared native controls, normalized
-  to their allowed types/ranges/options. No network requests or model calls.
-- Conditional: {stateKey,equals:string|number|boolean}; first child when equal,
-  optional second child otherwise. Use with a SegmentedControl for summary/detail.
+LIMITS
+Prefer <=24 elements, 32 chart points, 6 comparison cards and short labels;
+hard max 64 elements. Max 4 datasets, 256 rows/16 fields each. Charts draw at most
+128 points with a count notice; table/metric filters can use all 256 rows.
+Disclose truncation. Strings are plain except the explicit Markdown/code/SVG/
+HTML/CSS/JS/URL fields above.
+UI views perform no real-world operations; never claim a click executed one.
 Video and map components are not part of this catalog.
-
-Keep interfaces small: prefer at most 24 elements (hard limit 64), 32 chart data points, 6 comparison
-cards, and short labels. Prefer one useful component to a large dashboard.
-Use plain strings except explicit WritingBlock Markdown, CodeBlock code, SVG markup,
-AppBlock HTML/CSS/worker JS and Image source URL fields. Only the listed bounded
-actions and bindings are supported; never add arbitrary event handlers, dynamic
-expressions or extra properties. No real-world operations are performed by these views. Never promise that a UI action
-has executed a real-world operation. All values must be grounded in the answer.
 The surrounding system and user instructions still apply.
 [/INTELLIGENT UI PRESENTATION]"""
 
