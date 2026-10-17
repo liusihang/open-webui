@@ -122,6 +122,7 @@ ADMIN_CONFIG_KEYS = {
     'JWT_EXPIRES_IN': 'auth.jwt_expiry',
     'ENABLE_COMMUNITY_SHARING': 'ui.enable_community_sharing',
     'ENABLE_MESSAGE_RATING': 'ui.enable_message_rating',
+    'ENABLE_INTELLIGENT_UI': 'ui.enable_intelligent_ui',
     'ENABLE_FOLDERS': 'folders.enable',
     'FOLDER_MAX_FILE_COUNT': 'folders.max_file_count',
     'AUTOMATION_MAX_COUNT': 'automations.max_count',
@@ -1175,6 +1176,7 @@ class AdminConfig(MfaConfigForm):
     JWT_EXPIRES_IN: str
     ENABLE_COMMUNITY_SHARING: bool
     ENABLE_MESSAGE_RATING: bool
+    ENABLE_INTELLIGENT_UI: bool = True
     ENABLE_FOLDERS: bool
     FOLDER_MAX_FILE_COUNT: int | str | None = None
     AUTOMATION_MAX_COUNT: int | str | None = None
@@ -1231,6 +1233,8 @@ async def update_admin_config(request: Request, form_data: AdminConfig, user=Dep
             updates.pop(key, None)
     if 'ENABLE_LOGIN_FORM' not in form_data.model_fields_set:
         updates.pop('ui.enable_login_form', None)
+    if 'ENABLE_INTELLIGENT_UI' not in form_data.model_fields_set:
+        updates.pop('ui.enable_intelligent_ui', None)
     if 'ENABLE_ENCRYPTED_CHANNELS' not in form_data.model_fields_set:
         updates.pop('channels.encryption.enable', None)
     if 'ENABLE_APPS' not in form_data.model_fields_set:

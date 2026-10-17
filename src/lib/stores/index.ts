@@ -242,7 +242,6 @@ type OllamaModelDetails = {
 };
 
 type Settings = {
-	intelligentUI?: boolean;
 	pipeReasoningEfforts?: Record<string, string>;
 	pinnedModels?: string[];
 	toolServers?: never[];
@@ -370,6 +369,7 @@ type Config = {
 	default_prompt_suggestions: PromptSuggestion[] | null;
 	default_prompt_suggestions_i18n?: Record<string, { suggestion_prompts: PromptSuggestion[] }>;
 	features: {
+		enable_intelligent_ui?: boolean;
 		enable_encrypted_channels?: boolean;
 		slim?: boolean;
 		auth: boolean;

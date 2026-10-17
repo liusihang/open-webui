@@ -72,6 +72,7 @@ async def apply_system_prompt_to_body(
     metadata: Optional[dict] = None,
     user=None,
     replace: bool = False,
+    append: bool = False,
 ) -> dict:
     system = await resolve_system_prompt(system, metadata, user)
     if not system:
@@ -80,7 +81,12 @@ async def apply_system_prompt_to_body(
     if replace:
         form_data['messages'] = replace_system_message_content(system, form_data.get('messages', []))
     else:
-        form_data['messages'] = add_or_update_system_message(system, form_data.get('messages', []))
+        form_data['messages'] = add_or_update_system_message(system, form_data.get('messages', []), append=append)
+        if not append and metadata and metadata.get('_context_summary_prompt'):
+            # Legacy providers prepend their model prompt at dispatch, sometimes
+            # mutating the shared message. Keep this known prefix for tool rounds
+            # that do not rebuild source context from the earlier snapshot.
+            metadata['_context_summary_prompt']['provider_prefix'] = system
 
     return form_data
 

@@ -29,7 +29,7 @@
 	import { resolveChatMessageToolCall } from '$lib/apis/chats';
 
 	import { WEBUI_BASE_URL } from '$lib/constants';
-	import { settings } from '$lib/stores';
+	import { config, settings } from '$lib/stores';
 	import { toast } from 'svelte-sonner';
 
 	import CodeBlock from '$lib/components/chat/Messages/CodeBlock.svelte';
@@ -207,7 +207,7 @@
 			/>
 		</svelte:element>
 	{:else if token.type === 'code'}
-		{#if !markdown?.document && $settings?.intelligentUI === true && token.lang?.trim() === 'intelligent-ui'}
+		{#if !markdown?.document && $config?.features?.enable_intelligent_ui === true && token.lang?.trim() === 'intelligent-ui'}
 			<IntelligentUIBlock
 				source={token.text ?? ''}
 				{done}

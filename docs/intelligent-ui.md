@@ -2,9 +2,26 @@
 
 ## Enable and use
 
-Open **Settings → Interface → Intelligent UI** (中文：设置 → 界面 → 智能交互界面).
-The setting defaults to off. Turn it on for a model that can follow structured
-output instructions, then start or continue a chat. Plain text remains appropriate
+Open **Admin Panel → Settings → General → Features → Intelligent UI**
+(中文：管理员面板 → 设置 → 常规 → 功能 → 智能交互界面).
+The setting defaults to **on** and applies to all users. Only administrators can
+change it; it is not a personal Interface preference. The database-backed key is
+`ui.enable_intelligent_ui`, exposed in the admin API as `ENABLE_INTELLIGENT_UI`.
+`ENABLE_INTELLIGENT_UI` sets the initial environment default (true when unset);
+an existing administrator-saved value takes precedence. An admin API update that
+omits the field preserves the saved value.
+
+For logged-in users, `features.enable_intelligent_ui` in the backend configuration
+controls rendering. Legacy personal `ui.intelligentUI` values are ignored, including
+stored `false`; no user-settings cleanup is needed. The server reads the administrator
+configuration directly before appending the existing component instructions to the
+system message. Request feature flags cannot enable or disable this injection.
+Turning it off also displays existing UI fences as ordinary code without deleting
+their specifications or saved interaction state. Existing configuration refresh
+behavior applies; other open sessions receive the value when they reload configuration.
+
+Use a model that can follow structured output instructions, then start or continue
+a chat. Plain text remains appropriate
 for simple questions; the model receives a small component catalog and chooses
 whether to use it. No new provider endpoint, API credential, external UI service,
 iframe permission, or model-specific tool-calling protocol is required.
@@ -15,6 +32,49 @@ Example request:
 > introduction, continue with a short explanation, then add a slider for my
 > monthly budget and a button to ask a follow-up using that budget. Clearly label
 > the plan data as hypothetical.
+
+## System instruction order
+
+The built-in request assembler emits the following text in order, including only
+sections that are enabled and available:
+
+1. The selected base system prompt, using the existing prompt-selection rules.
+2. Optional folder instructions, then optional voice instructions.
+3. Intelligent UI component instructions, when the administrator setting is on.
+4. The optional text conversation summary.
+5. Optional memory context.
+6. Optional tool/skill instructions and attached-knowledge catalog.
+7. Optional RAG system context.
+
+The base prompt is not a forced concatenation of global, personal and model
+defaults. Existing provider-specific selection/override rules remain unchanged.
+Empty sections add no placeholders. Turning Intelligent UI off omits only its
+section. Tool schemas remain in `tools`; terminal AGENTS.md instructions retain
+their separate user-message contract. When `RAG_SYSTEM_CONTEXT=false`, retrieval
+context remains on the user side instead of moving into this system sequence.
+
+Local tool continuations retain the same order. A text-summary update replaces
+only the summary boundary captured after the static prefix; memory, tool text
+and rebuilt source context follow it. It does not scan for or deduplicate strings
+that resemble summary markers in a user's base prompt. The boundary is
+request-local server metadata, not provider data or visible chat history.
+Native opaque Responses compaction is a separate path: its encrypted items,
+checkpoints, thresholds and prefix/hash validation are unchanged, and no text
+summary is fabricated from opaque items.
+
+This ordering keeps the selected base/folder/voice/UI prefix byte-stable when only
+summary, memory or source data changes. No per-round IDs, timestamps or new cache
+keys are introduced by this assembler. Explicit cache parameters, tool order,
+existing user isolation and Responses continuation behavior are preserved; actual
+upstream cache-hit rates depend on the provider and are not established by local tests.
+At the final native GPT Responses boundary, a separate missing-only
+[cache routing key](prompt-caching.md) keeps eligible saved chats stable across turns
+and Codex V2 compaction without changing this instruction order.
+Third-party filters can still rewrite instructions. If a filter invalidates the
+captured summary boundary, unknown text is preserved and the existing append
+fallback applies; arbitrary plugin rewrites are outside the built-in order guarantee.
+
+## Component catalog
 
 The registered component catalog includes:
 
@@ -128,10 +188,20 @@ claims or turn unsupported output into a correct answer.
 
 - `npm run test:frontend -- --run`: standard frontend and protocol/SSR tests.
 - `npm run test:intelligent-ui`: mounted Svelte interaction tests in jsdom.
-- `python3 tests/migration/test_intelligent_ui_prompt.py`: opt-in and prompt seams.
+- `python3 tests/migration/test_intelligent_ui_prompt.py`: request bypass prevention,
+  personal-setting removal, and append-only prompt seams.
+- `python3 tests/migration/test_intelligent_ui_config.py`: actual admin form,
+  authenticated read/write routes and logged-in feature-response seams with
+  in-memory boundaries (requires FastAPI, Pydantic and HTTPX).
 - `python3 tests/migration/test_intelligent_ui_state.py`: state bounds and atomic persistence.
 
 Use Node 22, as required by the upstream engine range. No live provider call is
 part of these deterministic tests. See the integration validation report for
 observed results and remaining deployment checks. This feature does not require
 enabling iframe same-origin access.
+
+The administrator-setting regression uses isolated production-code seams without
+starting the application or opening a database. Mounted tests cover unified-config
+rendering and existing controls/state behavior. These checks do not establish a
+live deployment, real-provider output quality, or cross-session configuration delivery.
+Streaming transport is unchanged and is not re-tested as part of the setting move.
