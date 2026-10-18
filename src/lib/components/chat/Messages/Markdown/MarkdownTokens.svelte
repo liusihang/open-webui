@@ -46,6 +46,7 @@
 	import HtmlToken from './HTMLToken.svelte';
 	import Clipboard from '$lib/components/icons/Clipboard.svelte';
 	import ColonFenceBlock from './ColonFenceBlock.svelte';
+	import { inlineText } from './inlineText';
 
 	export let id: string;
 	export let chatId = '';
@@ -157,20 +158,12 @@
 		(displayTokens[0]?.type === 'paragraph' || displayTokens[0]?.type === 'text');
 
 	const exportTableToCSVHandler = (token, tokenIdx = 0) => {
-		// Extract header row text, decode HTML entities, and escape for CSV.
-		const header = token.header.map(
-			(headerCell) => `"${decode(headerCell.text).replace(/"/g, '""')}"`
-		);
-
-		// Create an array for rows that will hold the mapped cell text.
-		const rows = token.rows.map((row) =>
-			row.map((cell) => {
-				// Map tokens into a single text
-				const cellContent = cell.tokens.map((token) => token.text).join('');
-				// Decode HTML entities and escape double quotes, wrap in double quotes
-				return `"${decode(cellContent).replace(/"/g, '""')}"`;
-			})
-		);
+		// Use the same inline serialization for headings and rows, including nested
+		// emphasis/links and citation tokens (which intentionally have no text).
+		const cells = (row) =>
+			row.map((cell) => `"${decode(inlineText(cell.tokens)).replace(/"/g, '""')}"`);
+		const header = cells(token.header);
+		const rows = token.rows.map(cells);
 
 		// Combine header and rows
 		const csvData = [header, ...rows];
