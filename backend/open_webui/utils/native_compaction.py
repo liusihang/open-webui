@@ -38,7 +38,11 @@ def _estimate_native_tokens(value) -> int:
     text = value if isinstance(value, str) else json.dumps(value, ensure_ascii=False)
     if not text:
         return 0
-    return max(1, len(text) // 4, len(tiktoken.get_encoding('o200k_base').encode_ordinary(text)))
+    # Bound tokenizer work for long unbroken text on the single-worker path.
+    # Chunk boundaries can change the estimate slightly; no content is pruned.
+    encoding = tiktoken.get_encoding('o200k_base')
+    tokens = sum(len(encoding.encode_ordinary(text[start : start + 4096])) for start in range(0, len(text), 4096))
+    return max(1, len(text) // 4, tokens)
 
 
 def native_compaction_enabled(config: dict, provider_model_id: str) -> bool:

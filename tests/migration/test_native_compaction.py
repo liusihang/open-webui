@@ -429,7 +429,7 @@ class CodexV2Tests(unittest.TestCase):
         # Real reachable tool output: char/4 stays below 120K, o200k exceeds it.
         # The current user and opaque/history content must not be truncated.
         self.v2()
-        self.payload['input'][3]['output'] = '病毒衣壳蛋白消毒耐受性\n' * 11000
+        self.payload['input'][3]['output'] = '病毒衣壳蛋白消毒耐受性' * 11000
         self.config.update(token_threshold=120000, token_cap=120000)
         self.assertLess(len(json.dumps(self.payload['input'], ensure_ascii=False)) // 4, 120000)
         self.assertGreater(self.scope['_estimate_native_tokens'](self.payload['input']), 120000)
@@ -447,7 +447,7 @@ class CodexV2Tests(unittest.TestCase):
         # the Responses seam. The old completed turns can now be compacted.
         batch = [
             {'type': 'function_call', 'call_id': 'new', 'name': 'lookup', 'arguments': '{}'},
-            {'type': 'function_call_output', 'call_id': 'new', 'output': '病毒衣壳蛋白消毒耐受性\n' * 11000},
+            {'type': 'function_call_output', 'call_id': 'new', 'output': '病毒衣壳蛋白消毒耐受性' * 11000},
         ]
         result = self.run_request(self.payload | {'input': self.payload['input'] + batch})
         self.scope['_compact_upstream'].assert_awaited_once()
@@ -462,6 +462,29 @@ class CodexV2Tests(unittest.TestCase):
             ),
             120013,
         )
+
+    def test_native_tokenizer_work_is_bounded_for_unbroken_text(self):
+        fixtures = [
+            '病毒衣壳蛋白消毒耐受性' * 11000,
+            'x' * 180000,
+            'AbCdEf0123456789+/' * 12000,
+        ]
+        for text in fixtures:
+            with self.subTest(length=len(text)):
+                parts = []
+
+                def encode(chunk):
+                    self.assertLessEqual(len(chunk), 4096)
+                    parts.append(chunk)
+                    return [0] * len(chunk)
+
+                with patch('tiktoken.get_encoding', return_value=SimpleNamespace(encode_ordinary=encode)):
+                    self.assertEqual(self.scope['_estimate_native_tokens'](text), len(text))
+                self.assertEqual(''.join(parts), text, 'Every character is counted without truncating opaque content')
+
+    def test_chunked_native_estimate_retains_character_floor(self):
+        with patch('tiktoken.get_encoding', return_value=SimpleNamespace(encode_ordinary=lambda text: [0])):
+            self.assertEqual(self.scope['_estimate_native_tokens']('x' * 180000), 45000)
 
     def test_switching_protocol_does_not_replay_standalone_checkpoint(self):
         self.run_request()
