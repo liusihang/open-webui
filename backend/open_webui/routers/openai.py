@@ -1725,6 +1725,9 @@ async def generate_chat_completion(
 
             # Convert Responses API result to simple format
             if is_responses and isinstance(response, dict):
+                from open_webui.utils.native_compaction import save_native_token_usage
+
+                await save_native_token_usage(user, metadata or {}, response)
                 response = convert_responses_result(response)
 
             return response

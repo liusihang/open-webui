@@ -22,27 +22,129 @@ log = logging.getLogger(__name__)
 CHECKPOINT_KEY = 'native_compaction'
 FAILURE_RETRY_SECONDS = 300
 PROTOCOLS = ('responses_compact', 'codex_v2')
+USAGE_KEY = 'native_token_usage'
+# Budget heuristics, not model billing constants. Ported from OpenAI Codex
+# context_manager/history.rs at 8c076942cb70fba8e5c4732c23f1faabc4aed484.
+RESIZED_IMAGE_TOKENS = 1844
+UNKNOWN_MEDIA_TOKENS = 2**63 - 1
 
 
 def _estimate_native_tokens(value) -> int:
-    """Count serialized native input without the char/4 multilingual blind spot.
+    """Budget structured content, never tokenize binary transport as prose.
 
-    o200k is a local estimate, not a claim about a gateway's exact tokenizer.
-    Retain the old estimate as a floor; never prune opaque or client content.
-    tiktoken is an existing backend dependency and caches the encoding itself.
+    Codex uses 1844 for resized images and a separate encrypted-state heuristic.
+    Neither is an exact Luna tokenizer. A bound observed usage supersedes these
+    estimates in _native_request_size. Only the local counting projection is
+    changed; original text, media, and opaque bytes are never edited.
     """
     import tiktoken
 
     if value is None:
         return 0
-    text = value if isinstance(value, str) else json.dumps(value, ensure_ascii=False)
+    media_tokens = 0
+
+    def project(part):
+        nonlocal media_tokens
+        if isinstance(part, list):
+            return [project(entry) for entry in part]
+        if not isinstance(part, dict):
+            return part
+        kind = part.get('type', '')
+        if kind in ('input_image', 'image_url'):
+            media_tokens += _native_image_tokens(part)
+            return {'type': kind}
+        if kind in ('input_file', 'file'):
+            media_tokens += _native_file_tokens(part.get('file', part))
+            return {'type': kind}
+        if kind in ('input_audio', 'audio', 'input_video', 'video'):
+            # No verified local budget for this modality. Fail conservatively
+            # at the trigger only; no fetch, omission, or payload mutation.
+            media_tokens += UNKNOWN_MEDIA_TOKENS
+            return {'type': kind}
+        projected = {}
+        for key, entry in part.items():
+            if key == 'encrypted_content' and isinstance(entry, str):
+                # Separate Codex heuristics for compaction, reasoning and
+                # encrypted tool content. None recovers semantic token counts.
+                encoded = len(entry)
+                if kind in ('compaction', 'context_compaction'):
+                    budget = (encoded + 11) // 12
+                elif kind == 'reasoning':
+                    budget = (max(0, encoded * 3 // 4 - 650) + 3) // 4
+                else:
+                    budget = (encoded * 9 + 63) // 64
+                media_tokens += max(1, budget) if entry else 0
+            elif kind == 'image_generation_call' and key == 'result' and isinstance(entry, str):
+                media_tokens += RESIZED_IMAGE_TOKENS if entry else 0
+            else:
+                projected[key] = project(entry)
+        return projected
+
+    projection = project(value)
+    text = projection if isinstance(projection, str) else json.dumps(projection, ensure_ascii=False)
     if not text:
         return 0
     # Bound tokenizer work for long unbroken text on the single-worker path.
     # Chunk boundaries can change the estimate slightly; no content is pruned.
     encoding = tiktoken.get_encoding('o200k_base')
     tokens = sum(len(encoding.encode_ordinary(text[start : start + 4096])) for start in range(0, len(text), 4096))
-    return max(1, len(text) // 4, tokens)
+    return max(1, len(text) // 4, tokens) + media_tokens
+
+
+def _native_image_tokens(part: dict) -> int:
+    """Codex resized/original budgets. Never fetch URLs or inspect pixel data."""
+    import base64
+    import io
+    import math
+
+    from PIL import Image
+
+    url = part.get('image_url', '')
+    detail = part.get('detail', 'auto')
+    if isinstance(url, dict):
+        detail, url = url.get('detail', detail), url.get('url', '')
+    if detail != 'original':
+        return RESIZED_IMAGE_TOKENS
+    try:
+        if not isinstance(url, str) or not url.startswith('data:image/') or ';base64,' not in url:
+            return 10000  # Original patch cap when dimensions cannot be read.
+        raw = base64.b64decode(url.split(',', 1)[1], validate=True)
+        with Image.open(io.BytesIO(raw)) as image:
+            width, height = image.size
+        return min(10000, math.ceil(width / 32) * math.ceil(height / 32))
+    except Exception:
+        return 10000
+
+
+def _native_file_tokens(part: dict) -> int:
+    """Native PDFs contain extracted text AND a page image (OpenAI file guide).
+
+    Existing pypdf only; no URL fetch/upload/parser fallback. Unknown, encrypted,
+    oversized or unreadable documents have no finite verified local budget.
+    An observed bound usage can still handle them on subsequent valid replays.
+    """
+    import base64
+    import io
+
+    from pypdf import PdfReader
+
+    data = part.get('file_data', '') if isinstance(part, dict) else ''
+    if not isinstance(data, str) or not data.startswith('data:application/pdf;base64,'):
+        return UNKNOWN_MEDIA_TOKENS
+    # Matches the existing authorized native-PDF upload limit, not a new limit
+    # on what is sent. The provider still receives the entire original object.
+    if len(data) > (25 * 1024 * 1024 + 2) // 3 * 4 + 64:
+        return UNKNOWN_MEDIA_TOKENS
+    try:
+        raw = base64.b64decode(data.split(',', 1)[1], validate=True)
+        if not raw.startswith(b'%PDF-'):
+            return UNKNOWN_MEDIA_TOKENS
+        reader = PdfReader(io.BytesIO(raw))
+        if reader.is_encrypted:
+            return UNKNOWN_MEDIA_TOKENS
+        return sum(RESIZED_IMAGE_TOKENS + _estimate_native_tokens(page.extract_text() or '') for page in reader.pages)
+    except Exception:
+        return UNKNOWN_MEDIA_TOKENS
 
 
 def native_compaction_enabled(config: dict, provider_model_id: str) -> bool:
@@ -313,6 +415,121 @@ async def _save_failure(chat_id: str, anchor: str, message_map: dict, state: dic
         log.warning('Could not save native compaction failure state for chat=%s', chat_id)
 
 
+def _native_usage_settings(payload: dict) -> str:
+    return _digest({key: value for key, value in payload.items() if key not in ('input', 'stream', 'stream_options')})
+
+
+def _native_request_size(active, original, payload, metadata, branch, binding) -> int:
+    """Prefer single-call observed input + suffix, only on an exact replay.
+
+    Normal message.usage is cumulative across tool calls, so is NOT an anchor.
+    Cached input is already included in input_tokens; it is never subtracted.
+    Old dynamic retrieval remains in the observed baseline; add this turn's
+    retrieval in full, a conservative allowance rather than a subtraction.
+    """
+    dynamic = _estimate_native_tokens(metadata.get('_dynamic_memory_context'))
+    settings = _native_usage_settings(payload)
+    for message in reversed(branch):
+        anchor = (message.get('meta') or {}).get(USAGE_KEY)
+        if not isinstance(anchor, dict) or message.get('done') is not True or message.get('error'):
+            continue
+        count, tokens = anchor.get('active_count'), anchor.get('input_tokens')
+        if (
+            _matches_prefix(anchor, original, binding)
+            and anchor.get('settings') == settings
+            and isinstance(count, int)
+            and 0 < count <= len(active)
+            and anchor.get('active_hash') == _digest(active[:count])
+            and isinstance(tokens, int)
+            and not isinstance(tokens, bool)
+            and tokens > 0
+        ):
+            suffix = active[count:]
+            # The previous reply was not in its own input. Its actual output
+            # usage bounds retained reasoning/opaque more reliably than a
+            # ciphertext heuristic. Everything from the next user onward is
+            # new input and is counted separately, including tools/media.
+            next_user = next((index for index, item in enumerate(suffix) if item.get('role') == 'user'), len(suffix))
+            output_tokens = anchor.get('output_tokens', 0)
+            if not isinstance(output_tokens, int) or isinstance(output_tokens, bool) or output_tokens < 0:
+                output_tokens = 0
+            return (
+                tokens
+                + max(output_tokens if next_user else 0, _estimate_native_tokens(suffix[:next_user]))
+                + _estimate_native_tokens(suffix[next_user:])
+                + dynamic
+            )
+    return (
+        _estimate_native_tokens(active)
+        + _estimate_native_tokens(payload.get('instructions'))
+        + _estimate_native_tokens(payload.get('tools'))
+        + _estimate_native_tokens(payload.get('text'))
+        + dynamic
+    )
+
+
+def _stamp_native_usage(metadata, result, original, binding, user):
+    # This private, server-only metadata is removed before provider serialization.
+    # It contains hashes/counts, not content, media, encrypted state or credentials.
+    metadata['_native_token_usage'] = {
+        'version': 2,
+        'binding': binding,
+        'owner': _digest(user.id),
+        'model': result['model'],
+        'prefix_count': len(original),
+        'prefix_hash': _digest(original),
+        'active_count': len(result['input']),
+        'active_hash': _digest(result['input']),
+        'settings': _native_usage_settings(result),
+    }
+    return result
+
+
+async def save_native_token_usage(user, metadata: dict, response: dict):
+    """Save only this completed Responses call, before cumulative usage merging.
+
+    Missing/failed observations fall back to local budgets. No schema, ledger,
+    extra upstream request, or dependence on output/ciphertext token ratios.
+    """
+    stamp = metadata.pop('_native_token_usage', None)
+    if not isinstance(stamp, dict) or stamp.get('owner') != _digest(user.id):
+        return
+    if not isinstance(response, dict) or not isinstance(response.get('usage'), dict):
+        return
+    tokens = response['usage'].get('input_tokens')
+    if (
+        response.get('status', 'completed') != 'completed'
+        or response.get('model') != stamp.get('model')
+        or not isinstance(tokens, int)
+        or isinstance(tokens, bool)
+        or tokens <= 0
+    ):
+        return
+    try:
+        message_map, branch = await _branch_for_request(metadata, user)
+        anchor = metadata.get('assistant_message_id') or metadata.get('message_id')
+        if anchor not in message_map or not any(
+            message.get('id') == anchor and message.get('role') == 'assistant' for message in branch
+        ):
+            return
+        output_tokens = response['usage'].get('output_tokens', 0)
+        if not isinstance(output_tokens, int) or isinstance(output_tokens, bool) or output_tokens < 0:
+            output_tokens = 0
+        await Chats.upsert_message_to_chat_by_id_and_message_id(
+            metadata['chat_id'],
+            anchor,
+            {
+                'meta': {
+                    **(message_map[anchor].get('meta') or {}),
+                    USAGE_KEY: {**stamp, 'input_tokens': tokens, 'output_tokens': output_tokens},
+                }
+            },
+            touch=False,
+        )
+    except Exception:
+        log.warning('Could not save native token usage for chat=%s', metadata.get('chat_id'))
+
+
 async def compact_responses_payload(
     request,
     user,
@@ -332,9 +549,13 @@ async def compact_responses_payload(
     compact window is never fed through text normalization. No provider output
     item is pruned. Failures retain the last usable window (or full transcript).
     """
+    import asyncio
+
     from open_webui.utils.context_compaction import _load_config, _resolve_token_threshold
 
-    metadata = metadata or {}
+    if metadata is None:
+        metadata = {}
+    metadata.pop('_native_token_usage', None)
     if not native_compaction_enabled(api_config, payload.get('model')) or metadata.get('task'):
         return payload
     config = await _load_config()
@@ -359,14 +580,12 @@ async def compact_responses_payload(
     result = {**payload, 'input': active}
 
     threshold = _resolve_token_threshold(config['token_threshold'], config['token_cap'], metadata)
-    size = (
-        _estimate_native_tokens(active)
-        + _estimate_native_tokens(payload.get('instructions'))
-        + _estimate_native_tokens(payload.get('tools'))
-        # Ephemeral retrieval still contributes to request size, but must not
-        # become part of the canonical prefix or the upstream opaque window.
-        + _estimate_native_tokens(metadata.get('_dynamic_memory_context'))
-    )
+    # Existing branch loading validates owner. Also bind observations explicitly
+    # to that owner without changing the compaction checkpoint binding contract.
+    usage_binding = _digest([binding, user.id])
+    # PDF decoding/text extraction and long-text tokenization must not monopolize
+    # the API event loop. This only computes a budget; it makes no network call.
+    size = await asyncio.to_thread(_native_request_size, active, original, payload, metadata, branch, usage_binding)
     # V2 compacts completed prior turns. Keep the current user turn (and any
     # associated ongoing tool batch) after the new window, never before opaque
     # state or deleted as if it were an old assistant trajectory.
@@ -374,7 +593,7 @@ async def compact_responses_payload(
     no_new_input = checkpoint and checkpoint['prefix_count'] >= prefix_count
     recent_failure = any(state.get('retry_after', 0) > time.time() for state in states)
     if size <= threshold or not prefix_count or no_new_input or recent_failure or _has_pending_calls(active):
-        return result
+        return _stamp_native_usage(metadata, result, original, usage_binding, user)
 
     # Persist on an existing assistant placeholder, otherwise the current user.
     anchor = next(
@@ -386,7 +605,7 @@ async def compact_responses_payload(
         None,
     )
     if not anchor:
-        return result
+        return _stamp_native_usage(metadata, result, original, usage_binding, user)
     state = {
         'version': 2,
         'protocol': protocol,
@@ -418,6 +637,8 @@ async def compact_responses_payload(
         log.warning('Native context compaction failed for chat=%s; retaining original window', chat_id)
         await _save_failure(chat_id, anchor, message_map, state, states)
         await _emit(metadata, 'Native context compaction failed; previous context retained', done=True, error=True)
-        return result
+        return _stamp_native_usage(metadata, result, original, usage_binding, user)
     await _emit(metadata, 'Context compacted (native Responses)', done=True)
-    return {**payload, 'input': copy.deepcopy(output) + suffix}
+    return _stamp_native_usage(
+        metadata, {**payload, 'input': copy.deepcopy(output) + suffix}, original, usage_binding, user
+    )

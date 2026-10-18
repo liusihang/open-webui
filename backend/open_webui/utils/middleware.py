@@ -2308,6 +2308,7 @@ async def process_chat_payload(request, form_data, user, metadata, model):
     metadata.pop('_context_summary_prompt', None)
     metadata.pop('_dynamic_memory_context', None)
     metadata.pop('_dynamic_memory_user_count', None)
+    metadata.pop('_native_token_usage', None)
     # Ensure chat_id is always a string — external API clients may omit it.
     if not isinstance(metadata.get('chat_id'), str):
         metadata['chat_id'] = ''
@@ -5162,6 +5163,10 @@ async def streaming_chat_response_handler(response, ctx):
                                 # Check for Responses API events
                                 elif data.get('type', '').startswith('response.') or data.get('type', '') == 'error':
                                     response_data_type = data.get('type', '')
+                                    if response_data_type == 'response.completed':
+                                        from open_webui.utils.native_compaction import save_native_token_usage
+
+                                        await save_native_token_usage(user, metadata, data.get('response') or {})
                                     response_data_is_delta = response_data_type.endswith('.delta')
                                     output, response_metadata = handle_responses_streaming_event(data, output)
 
