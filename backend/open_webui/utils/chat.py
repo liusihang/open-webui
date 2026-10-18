@@ -32,6 +32,7 @@ from open_webui.utils.filter import (
     process_filter_functions,
 )
 from open_webui.utils.json_codec import JSONCodec
+from open_webui.utils.memory import apply_dynamic_memory_context
 from open_webui.utils.models import check_model_access, get_all_models
 from open_webui.utils.payload import apply_system_prompt_to_body, convert_payload_openai_to_ollama
 from open_webui.utils.response import (
@@ -54,6 +55,7 @@ async def generate_direct_chat_completion(
 ):
     log.info('generate_direct_chat_completion')
 
+    form_data = apply_dynamic_memory_context(form_data, form_data.get('metadata'))
     metadata = form_data.pop('metadata', {})
 
     user_id = metadata.get('user_id')
@@ -279,7 +281,9 @@ async def generate_chat_completion(
 
         if model.get('pipe'):
             # Below does not require bypass_filter because this is the only route the uses this function and it is already bypassing the filter
-            return await generate_function_chat_completion(request, form_data, user=user, models=models)
+            return await generate_function_chat_completion(
+                request, apply_dynamic_memory_context(form_data, metadata), user=user, models=models
+            )
         if model.get('owned_by') == 'ollama':
             # Apply before Ollama conversion so tool follow-ups keep the model system prompt
             if not bypass_system_prompt:
@@ -290,7 +294,7 @@ async def generate_chat_completion(
                 request.state.bypass_system_prompt = True
 
             # Using /ollama/api/chat endpoint
-            form_data = convert_payload_openai_to_ollama(form_data)
+            form_data = convert_payload_openai_to_ollama(apply_dynamic_memory_context(form_data, metadata))
             response = await generate_ollama_chat_completion(
                 request=request,
                 form_data=form_data,

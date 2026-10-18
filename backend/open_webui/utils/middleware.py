@@ -2306,6 +2306,8 @@ async def process_chat_payload(request, form_data, user, metadata, model):
     metadata.pop('native_pdf_file_ids', None)
     metadata.pop('rag_query_image_refs', None)
     metadata.pop('_context_summary_prompt', None)
+    metadata.pop('_dynamic_memory_context', None)
+    metadata.pop('_dynamic_memory_user_count', None)
     # Ensure chat_id is always a string — external API clients may omit it.
     if not isinstance(metadata.get('chat_id'), str):
         metadata['chat_id'] = ''
@@ -2670,7 +2672,7 @@ async def process_chat_payload(request, form_data, user, metadata, model):
                 'features.memories',
                 await Config.get('user.permissions'),
             ):
-                form_data = await add_memory_context(request, form_data, user, model)
+                form_data = await add_memory_context(request, form_data, user, model, metadata=metadata)
 
         if 'web_search' in features and features['web_search'] and await Config.get('web.search.enable'):
             # features is client-supplied; re-check the permission the native FC path enforces.
@@ -3317,6 +3319,9 @@ async def process_chat_payload(request, form_data, user, metadata, model):
                 },
             }
         )
+
+    if metadata.get('_dynamic_memory_context'):
+        metadata['_dynamic_memory_user_count'] = sum(message.get('role') == 'user' for message in form_data['messages'])
 
     if pending_assistant_message is not None:
         if await resume_tool_calls(request, form_data, user, model, metadata, pending_assistant_message):
@@ -6379,6 +6384,23 @@ async def streaming_chat_response_handler(response, ctx):
                                 log.exception('Tool loop context compaction failed; keeping the current context')
 
                             # Use the existing checkpoint format internally and strip it from the provider payload.
+                            if metadata.get('_dynamic_memory_context') and user_prompt is not None:
+                                # Text compaction can move the current user ahead of
+                                # retained tool history; keep the final-only data on
+                                # that user, not a generated tool-image user message.
+                                anchor = next(
+                                    (
+                                        i
+                                        for i in range(len(messages) - 1, -1, -1)
+                                        if messages[i].get('role') == 'user'
+                                        and messages[i].get('content') == user_prompt.get('content')
+                                    ),
+                                    None,
+                                )
+                                if anchor is not None:
+                                    metadata['_dynamic_memory_user_count'] = sum(
+                                        message.get('role') == 'user' for message in messages[: anchor + 1]
+                                    )
                             new_form_data['messages'] = process_messages_with_output(
                                 messages, responses_api=responses_api
                             )

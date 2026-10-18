@@ -363,6 +363,9 @@ async def compact_responses_payload(
         _estimate_native_tokens(active)
         + _estimate_native_tokens(payload.get('instructions'))
         + _estimate_native_tokens(payload.get('tools'))
+        # Ephemeral retrieval still contributes to request size, but must not
+        # become part of the canonical prefix or the upstream opaque window.
+        + _estimate_native_tokens(metadata.get('_dynamic_memory_context'))
     )
     # V2 compacts completed prior turns. Keep the current user turn (and any
     # associated ongoing tool batch) after the new window, never before opaque

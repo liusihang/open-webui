@@ -200,6 +200,7 @@ class RouterPromptCacheTests(unittest.IsolatedAsyncioTestCase):
         ):
             FIXTURE.load_function(ROUTER, name, self.scope)
         FIXTURE.load_function(UTILS / 'model_ids.py', 'strip_provider_model_prefix', self.scope)
+        FIXTURE.load_function(UTILS / 'memory.py', 'apply_dynamic_memory_context', self.scope)
         FIXTURE.load_function(UTILS / 'misc.py', 'deep_update', self.scope)
         for name in ('remove_open_webui_params', 'apply_model_params_to_body', 'apply_model_params_to_body_openai'):
             FIXTURE.load_function(UTILS / 'payload.py', name, self.scope)
