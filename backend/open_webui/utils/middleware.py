@@ -2136,6 +2136,10 @@ async def uses_responses_api(request, model: dict) -> bool:
 
     model_id = getattr(request, 'base_model_id', None) or (model.get('info') or {}).get('base_model_id') or model['id']
     provider_model = request.app.state.OPENAI_MODELS.get(model_id)
+    if not provider_model and model_id == model['id'] and 'urlIdx' in model:
+        # Base models may already be in the shared catalog while this worker's
+        # provider catalog is cold. Use the same server-resolved connection.
+        provider_model = model
     if not provider_model or 'urlIdx' not in provider_model:
         return False
     _, _, config = await get_openai_connection(provider_model['urlIdx'])
@@ -5166,7 +5170,11 @@ async def streaming_chat_response_handler(response, ctx):
                                     if response_data_type == 'response.completed':
                                         from open_webui.utils.native_compaction import save_native_token_usage
 
-                                        await save_native_token_usage(user, metadata, data.get('response') or {})
+                                        await save_native_token_usage(
+                                            user,
+                                            getattr(response, '_native_token_usage_metadata', metadata),
+                                            data.get('response') or {},
+                                        )
                                     response_data_is_delta = response_data_type.endswith('.delta')
                                     output, response_metadata = handle_responses_streaming_event(data, output)
 

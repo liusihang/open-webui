@@ -1694,11 +1694,16 @@ async def generate_chat_completion(
                     )
 
             streaming = True
-            return StreamingResponse(
+            response = StreamingResponse(
                 stream_wrapper(r),
                 status_code=r.status,
                 headers=_clean_proxy_headers(r.headers),
             )
+            if is_responses and isinstance(metadata, dict):
+                # The dispatcher merges metadata into a request-local copy.
+                # Keep its final stamp on this Response, not shared request.state.
+                response._native_token_usage_metadata = metadata
+            return response
         else:
             try:
                 response = await r.json(loads=JSONCodec.loads)
