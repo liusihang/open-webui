@@ -1303,8 +1303,10 @@ def convert_openapi_to_tool_payload(openapi_spec):
                         if resolved_schema.get('properties'):
                             tool['parameters']['properties'].update(resolved_schema['properties'])
                             if 'required' in resolved_schema:
+                                # Keep the source order while deduplicating. A set makes
+                                # the same provider schema depend on the worker hash seed.
                                 tool['parameters']['required'] = list(
-                                    set(tool['parameters']['required'] + resolved_schema['required'])
+                                    dict.fromkeys(tool['parameters']['required'] + resolved_schema['required'])
                                 )
                         elif resolved_schema.get('type') == 'array':
                             tool['parameters'] = resolved_schema  # special case for array

@@ -89,7 +89,9 @@ class NativeCompactionTests(unittest.TestCase):
         module._resolve_token_threshold = lambda threshold, cap, metadata: min(
             metadata.get('params', {}).get('compact_token_threshold', threshold), cap
         )
-        module._estimate_tokens = lambda value: len(json.dumps(value)) // 4 if value else 0
+        estimator_scope = {'Any': Any, 'JSONCodec': SimpleNamespace(dumps=json.dumps)}
+        load(TEXT, estimator_scope, '_estimate_tokens')
+        module._estimate_tokens = estimator_scope['_estimate_tokens']
         self.patch = patch.dict('sys.modules', {'open_webui.utils.context_compaction': module})
         self.patch.start()
         self.addCleanup(self.patch.stop)
@@ -192,6 +194,10 @@ class NativeCompactionTests(unittest.TestCase):
         self.config['token_threshold'] = 80000
         cases = [
             ({'instructions': 'new system'}, {}),
+            (
+                {'model': 'gpt-6-astra'},
+                {'api_config': {'api_type': 'responses', 'native_compaction_models': ['gpt-6.1-sol', 'gpt-6-astra']}},
+            ),
             ({}, {'connection_index': 3}),
             ({}, {'api_key': 'changed-key'}),
             ({}, {'request_url': 'https://other.invalid/v1/responses'}),
@@ -418,6 +424,44 @@ class CodexV2Tests(unittest.TestCase):
         self.v2([item('new user ' * 200)])
         self.assertEqual(self.run_request()['input'], self.payload['input'])
         self.scope['_compact_upstream'].assert_not_awaited()
+
+    def test_cjk_history_above_threshold_reaches_native_dispatch(self):
+        # Real reachable tool output: char/4 stays below 120K, o200k exceeds it.
+        # The current user and opaque/history content must not be truncated.
+        self.v2()
+        self.payload['input'][3]['output'] = '病毒衣壳蛋白消毒耐受性\n' * 11000
+        self.config.update(token_threshold=120000, token_cap=120000)
+        self.assertLess(len(json.dumps(self.payload['input'], ensure_ascii=False)) // 4, 120000)
+        self.assertGreater(self.scope['_estimate_native_tokens'](self.payload['input']), 120000)
+        original = copy.deepcopy(self.payload)
+        self.run_request()
+        self.scope['_compact_upstream'].assert_awaited_once()
+        self.assertEqual(self.payload, original)
+
+    def test_tool_continuation_dispatch_checks_new_completed_prior_history(self):
+        self.v2()
+        self.config.update(token_threshold=120000, token_cap=120000)
+        self.run_request()
+        self.scope['_compact_upstream'].assert_not_awaited()
+        # Same user turn, complete native function batch, dispatched again at
+        # the Responses seam. The old completed turns can now be compacted.
+        batch = [
+            {'type': 'function_call', 'call_id': 'new', 'name': 'lookup', 'arguments': '{}'},
+            {'type': 'function_call_output', 'call_id': 'new', 'output': '病毒衣壳蛋白消毒耐受性\n' * 11000},
+        ]
+        result = self.run_request(self.payload | {'input': self.payload['input'] + batch})
+        self.scope['_compact_upstream'].assert_awaited_once()
+        self.assertEqual(result['input'][-3:], self.payload['input'][-1:] + batch)
+
+    def test_usage_cached_tokens_are_not_subtracted(self):
+        scope = {}
+        load(TEXT, scope, '_usage_token_count')
+        self.assertEqual(
+            scope['_usage_token_count'](
+                {'input_tokens': 120001, 'output_tokens': 12, 'input_tokens_details': {'cached_tokens': 119000}}
+            ),
+            120013,
+        )
 
     def test_switching_protocol_does_not_replay_standalone_checkpoint(self):
         self.run_request()

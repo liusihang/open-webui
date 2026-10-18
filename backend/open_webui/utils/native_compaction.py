@@ -24,6 +24,23 @@ FAILURE_RETRY_SECONDS = 300
 PROTOCOLS = ('responses_compact', 'codex_v2')
 
 
+def _estimate_native_tokens(value) -> int:
+    """Count serialized native input without the char/4 multilingual blind spot.
+
+    o200k is a local estimate, not a claim about a gateway's exact tokenizer.
+    Retain the old estimate as a floor; never prune opaque or client content.
+    tiktoken is an existing backend dependency and caches the encoding itself.
+    """
+    import tiktoken
+
+    if value is None:
+        return 0
+    text = value if isinstance(value, str) else json.dumps(value, ensure_ascii=False)
+    if not text:
+        return 0
+    return max(1, len(text) // 4, len(tiktoken.get_encoding('o200k_base').encode_ordinary(text)))
+
+
 def native_compaction_enabled(config: dict, provider_model_id: str) -> bool:
     """Only an administrator's exact connection allowlist enables this protocol."""
     allowed = config.get('native_compaction_models')
@@ -311,7 +328,7 @@ async def compact_responses_payload(
     compact window is never fed through text normalization. No provider output
     item is pruned. Failures retain the last usable window (or full transcript).
     """
-    from open_webui.utils.context_compaction import _estimate_tokens, _load_config, _resolve_token_threshold
+    from open_webui.utils.context_compaction import _load_config, _resolve_token_threshold
 
     metadata = metadata or {}
     if not native_compaction_enabled(api_config, payload.get('model')) or metadata.get('task'):
@@ -339,9 +356,9 @@ async def compact_responses_payload(
 
     threshold = _resolve_token_threshold(config['token_threshold'], config['token_cap'], metadata)
     size = (
-        _estimate_tokens(active)
-        + _estimate_tokens(payload.get('instructions'))
-        + _estimate_tokens(payload.get('tools'))
+        _estimate_native_tokens(active)
+        + _estimate_native_tokens(payload.get('instructions'))
+        + _estimate_native_tokens(payload.get('tools'))
     )
     # V2 compacts completed prior turns. Keep the current user turn (and any
     # associated ongoing tool batch) after the new window, never before opaque
