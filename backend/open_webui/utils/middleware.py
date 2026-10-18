@@ -16,7 +16,7 @@ import textwrap
 import time
 from concurrent.futures import ThreadPoolExecutor
 from typing import Any, Optional
-from urllib.parse import unquote
+from urllib.parse import unquote, urlsplit
 from uuid import uuid4
 
 from aiocache import cached
@@ -987,6 +987,39 @@ async def process_tool_result(
                     tool_result.remove(item)
 
     tool_result = extract_base64_images(tool_result, tool_result_files)
+
+    # The local search tool's explicit media contract contains image URLs, not
+    # page/source URLs. Reuse native tool attachments without fetching images.
+    if (
+        tool_type in ('', 'local')  # DB tools have no explicit type in get_tools.
+        and not direct_tool
+        and tool_function_name in ('search_web', 'gpt_web_search')
+        and isinstance(tool_result, dict)
+        and isinstance(tool_result.get('media'), list)
+    ):
+        seen_urls = {item.get('url') for item in tool_result_files}
+        for item in tool_result['media']:
+            if len(tool_result_files) >= 5:
+                break
+            if not isinstance(item, dict) or item.get('type') != 'image':
+                continue
+            url = item.get('url')
+            if not isinstance(url, str) or len(url) > 2048 or re.search(r'[\s\x00-\x1f\x7f]', url):
+                continue
+            try:
+                parsed_url = urlsplit(url)
+                valid = (
+                    parsed_url.scheme in ('http', 'https')
+                    and parsed_url.hostname
+                    and not parsed_url.username
+                    and not parsed_url.password
+                )
+                parsed_url.port  # Reject malformed ports before provider submission.
+            except ValueError:
+                continue
+            if valid and url not in seen_urls:
+                tool_result_files.append({'type': 'image', 'url': url})
+                seen_urls.add(url)
 
     if isinstance(tool_result, list):
         tool_result = {'results': tool_result}
@@ -3569,16 +3602,18 @@ async def resume_tool_calls(request, form_data, user, model, metadata, message) 
             item['status'] = 'failed' if _is_tool_result_error(content) else 'completed'
             display_files = []
             for file_item in files:
+                vision_enabled = (model.get('info', {}).get('meta', {}).get('capabilities') or {}).get('vision', False)
                 if file_item.get('type') == 'image' and file_item.get('url', '').startswith('data:'):
                     image_url = (
                         file_item['url']
                         if file_item.get('rag_llm_only')
                         else await store_tool_result_image(request, file_item['url'], metadata, user)
                     )
-                    output_parts.append({'type': 'input_image', 'image_url': image_url})
+                    if vision_enabled:
+                        output_parts.append({'type': 'input_image', 'image_url': image_url})
                 else:
                     display_files.append(file_item)
-                    if file_item.get('type') == 'image' and file_item.get('url'):
+                    if vision_enabled and file_item.get('type') == 'image' and file_item.get('url'):
                         output_parts.append({'type': 'input_image', 'image_url': file_item['url']})
 
             result_item = {
@@ -6120,6 +6155,9 @@ async def streaming_chat_response_handler(response, ctx):
                         # Data-URI images: LLM only. File-URL images: LLM and frontend. Other files: frontend.
                         display_files = []
                         for file_item in result.get('files', []):
+                            vision_enabled = (model.get('info', {}).get('meta', {}).get('capabilities') or {}).get(
+                                'vision', False
+                            )
                             if file_item.get('type') == 'image' and file_item.get('url', '').startswith('data:'):
                                 # LLM-only: add as input_image part, not frontend display output.
                                 image_url = (
@@ -6127,10 +6165,11 @@ async def streaming_chat_response_handler(response, ctx):
                                     if file_item.get('rag_llm_only')
                                     else await store_tool_result_image(request, file_item['url'], metadata, user)
                                 )
-                                output_parts.append({'type': 'input_image', 'image_url': image_url})
+                                if vision_enabled:
+                                    output_parts.append({'type': 'input_image', 'image_url': image_url})
                             else:
                                 display_files.append(file_item)
-                                if file_item.get('type') == 'image' and file_item.get('url'):
+                                if vision_enabled and file_item.get('type') == 'image' and file_item.get('url'):
                                     output_parts.append({'type': 'input_image', 'image_url': file_item['url']})
 
                         output.append(

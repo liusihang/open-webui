@@ -4,6 +4,7 @@
 
 	import Markdown from './Markdown.svelte';
 	import StructuredOutputRenderer from './StructuredOutputRenderer.svelte';
+	import { createSearchCitationFormatter, removeNativeCitations } from './searchCitations';
 	import {
 		artifactCode,
 		chatId as currentChatId,
@@ -14,7 +15,7 @@
 		showEmbeds
 	} from '$lib/stores';
 	import FloatingButtons from '../ContentRenderer/FloatingButtons.svelte';
-	import { createMessagesList, replaceOutsideCode } from '$lib/utils';
+	import { createMessagesList } from '$lib/utils';
 
 	/**
 	 * Extracts all top-level <details>...</details> blocks from content,
@@ -131,13 +132,13 @@
 		sourceIds = result;
 	};
 
+	// Display-only adaptation. Keep saved content, tool outputs and copy/edit data intact.
+	$: searchCitationFormatter = createSearchCitationFormatter(output);
 	/** @param {string} messageContent */
-	const formatMessageContent = (messageContent) =>
+	$: formatMessageContent = (messageContent) =>
 		model?.info?.meta?.capabilities?.citations == false
-			? replaceOutsideCode(messageContent, (segment) =>
-					segment.replace(/\s*(\[(?:\d+(?:#[^,\]\s]+)?(?:,\s*\d+(?:#[^,\]\s]+)?)*)\])+/g, '')
-				)
-			: messageContent;
+			? removeNativeCitations(searchCitationFormatter(messageContent))
+			: searchCitationFormatter(messageContent);
 
 	let autoOpenedArtifactIds = new Set();
 

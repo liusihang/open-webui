@@ -1,3 +1,5 @@
+import { Lexer, Tokenizer, type TokenizerThis } from 'marked';
+
 export function citationExtension() {
 	return {
 		name: 'citation',
@@ -9,18 +11,33 @@ export function citationExtension() {
 			return src.search(/\[\d/);
 		},
 
-		tokenizer(src: string) {
-			// Avoid matching footnotes
-			if (/^\[\^/.test(src)) return;
+		tokenizer(this: TokenizerThis, src: string) {
+			// Link labels are text owned by that link, never native source buttons.
+			if (this.lexer.state.inLink) return;
+			if (!/^\[\d/.test(src)) return;
 
-			// Match ONE OR MORE adjacent [1], [1,2], or [1#foo] blocks
-			// Example matched: "[1][2,3][4#bar]"
-			// We allow: digits, commas, spaces, and # followed by non-control chars (excluding ] and ,)
-			const rule = /^(\[(?:\d+(?:#[^,\]\s]+)?(?:,\s*\d+(?:#[^,\]\s]+)?)*)\])+/;
-			const match = rule.exec(src);
-			if (!match) return;
+			// Use marked's own link grammar (including reference definitions), not a
+			// lookahead for "(". Its public tokenizer shares the current inline lexer.
+			const markdown = new Tokenizer();
+			new Lexer({ ...this.lexer.options, tokenizer: markdown });
+			markdown.lexer = this.lexer;
+			const linkAt = (text: string) => {
+				const link = markdown.link(text) ?? markdown.reflink(text, this.lexer.tokens.links);
+				return link?.type === 'link' ? link : undefined;
+			};
+			const link = linkAt(src);
+			if (link) return link;
 
-			const raw = match[0];
+			const rule = /^\[(?:\d+(?:#[^,\]\s]+)?(?:,\s*\d+(?:#[^,\]\s]+)?)*)\]/;
+			let raw = '';
+			let remaining = src;
+			let match: RegExpExecArray | null;
+			while ((match = rule.exec(remaining))) {
+				if (raw && linkAt(remaining)) break;
+				raw += match[0];
+				remaining = remaining.slice(match[0].length);
+			}
+			if (!raw) return;
 
 			// Extract ALL bracket groups inside the big match
 			const groupRegex = /\[([^\]]+)\]/g;
