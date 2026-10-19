@@ -8,7 +8,10 @@ export default mergeConfig(
 		resolve: { conditions: ['browser'] },
 		test: {
 			environment: 'jsdom',
-			include: ['src/lib/components/chat/Messages/IntelligentUI/*.browser.ts'],
+			include: [
+				'src/lib/components/chat/Messages/IntelligentUI/*.browser.ts',
+				'src/lib/components/chat/Messages/StructuredOutputRenderer.browser.ts'
+			],
 			pool: 'forks',
 			poolOptions: { forks: { singleFork: true } }
 		}

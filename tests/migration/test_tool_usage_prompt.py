@@ -157,6 +157,39 @@ class ToolUsagePromptTests(unittest.IsolatedAsyncioTestCase):
         payload = self.case.serialize(body)
         self.assertEqual(payload['input'][0]['content'][0]['text'].count(policy), 1)
 
+    async def test_progress_guidance_is_selective_public_and_uses_native_phases(self):
+        tree = ast.parse((ROOT / 'backend/open_webui/utils/tools.py').read_text())
+        policy = next(
+            ast.literal_eval(n.value)
+            for n in tree.body
+            if isinstance(n, ast.Assign)
+            and any(isinstance(t, ast.Name) and t.id == 'TOOL_USAGE_PROMPT' for t in n.targets)
+        )
+        for phrase in (
+            'multi-step or long tool work',
+            'meaningful findings',
+            'skip routine calls',
+            'group parallel work',
+            'not private reasoning or sensitive data',
+            'Where supported',
+            'native commentary',
+            'final_answer',
+            'never print phase markers',
+        ):
+            self.assertIn(phrase, policy)
+        self.assertNotIn('before each', policy)
+        self.case.s['TOOL_USAGE_PROMPT'] = policy
+        for responses, model in ((True, 'gpt-6-luna'), (False, 'non-gpt-chat')):
+            with self.subTest(responses=responses):
+                body, _ = await self.case.assemble()
+                payload = self.case.serialize(body, model=model, responses=responses)
+                self.assertEqual(json.dumps(payload).count(json.dumps(policy)[1:-1]), 1)
+                # A static instruction is not an unsupported Chat API parameter,
+                # nor a fabricated phase on historical assistant messages.
+                self.assertNotIn('phase', payload)
+                for item in payload.get('input', payload.get('messages', [])):
+                    self.assertNotIn('phase', item)
+
 
 if __name__ == '__main__':
     unittest.main()
