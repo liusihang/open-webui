@@ -76,6 +76,15 @@ def test_existing_data_uri_extraction_is_unchanged():
     assert run_media({'media': [image]}) == [image]
 
 
+def test_terminal_display_reference_is_not_automatically_sent_as_a_model_vision_input():
+    result = {
+        'source': 'open_terminal',
+        'path': '/home/user/chart.png',
+        'image_url': '/api/v1/files/11111111-1111-4111-8111-111111111111/content',
+    }
+    assert run_media(result, name='display_file', tool_type='terminal') == []
+
+
 def test_both_native_loops_respect_existing_vision_capability():
     tree = ast.parse(SOURCE.read_text())
     loops = [

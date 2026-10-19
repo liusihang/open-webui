@@ -5,11 +5,12 @@ import asyncio
 import copy
 import json
 import os
+import sys
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 import unittest
-from unittest.mock import AsyncMock, Mock
+from unittest.mock import AsyncMock, Mock, patch
 
 ROOT = Path(os.environ.get('OWUI_TEST_ROOT', Path(__file__).resolve().parents[2]))
 SOURCE = ROOT / 'backend/open_webui/utils/tools.py'
@@ -193,6 +194,92 @@ class TerminalSessionDiscoveryTests(unittest.IsolatedAsyncioTestCase):
                 await self.resolve(credential=credential)
         self.scope['get_tool_servers_data'].assert_not_awaited()
         self.cache.assert_not_awaited()
+
+    async def display_image_tools(self):
+        discover = self.scope['get_tool_servers_data'].side_effect
+
+        async def discover_images(configs):
+            servers = await discover(configs)
+            for server in servers:
+                server['specs'].extend(
+                    [
+                        {
+                            'name': name,
+                            'description': name,
+                            'parameters': {'type': 'object', 'properties': {'path': {'type': 'string'}}},
+                        }
+                        for name in ('display_file', 'read_file')
+                    ]
+                )
+            return servers
+
+        self.scope['get_tool_servers_data'].side_effect = discover_images
+        self.scope['Config'].get.side_effect = lambda key, default=None: (
+            True if key == 'ui.enable_intelligent_ui' else self.connections
+        )
+        self.scope['is_saved_chat_id'] = lambda chat_id: bool(chat_id)
+        self.scope['log'].warning = Mock()
+        return (await self.resolve())[0]
+
+    async def test_display_image_exports_ui_reference_with_same_user_and_session_without_vision_input(self):
+        tools = await self.display_image_tools()
+        path = '/home/user/chart.png'
+        execute = self.scope['execute_tool_server']
+        execute.side_effect = [
+            ({'path': path, 'exists': True}, {'Content-Type': 'application/json'}),
+            ('data:image/png;base64,aGVsbG8=', {'Content-Type': 'image/png'}),
+        ]
+        url = '/api/v1/files/11111111-1111-4111-8111-111111111111/content'
+        upload = AsyncMock(return_value=url)
+        with patch.dict(sys.modules, {'open_webui.utils.files': SimpleNamespace(get_file_url_from_base64=upload)}):
+            result, headers = await tools['display_file']['callable'](path=path)
+        self.assertEqual(result['image_url'], url)
+        self.assertNotIn('data:image', json.dumps(result))
+        self.assertEqual(headers, {'Content-Type': 'application/json'})
+        calls = execute.await_args_list
+        self.assertEqual([call.kwargs['name'] for call in calls], ['display_file', 'read_file'])
+        self.assertEqual(calls[0].kwargs['headers'], calls[1].kwargs['headers'])
+        self.assertEqual(calls[1].kwargs['headers']['X-User-Id'], 'user-a')
+        self.assertEqual(calls[1].kwargs['headers']['X-Session-Id'], 'chat-user-a')
+        self.assertEqual(calls[1].kwargs['params'], {'path': path})
+        self.assertEqual(upload.await_args.args[2]['chat_id'], 'chat-user-a')
+        self.assertEqual(upload.await_args.args[3].id, 'user-a')
+
+    async def test_display_nonimage_or_missing_file_does_not_export(self):
+        tools = await self.display_image_tools()
+        for result in (
+            {'path': '/home/user/report.pdf', 'exists': True},
+            {'path': '/home/user/chart.png', 'exists': False},
+        ):
+            execute = self.scope['execute_tool_server']
+            execute.reset_mock(side_effect=True)
+            execute.return_value = (result, {})
+            returned = await tools['display_file']['callable'](path=result['path'])
+            self.assertEqual(returned, (result, {}))
+            execute.assert_awaited_once()
+
+    async def test_disabled_intelligent_ui_does_not_export_an_image(self):
+        tools = await self.display_image_tools()
+        self.scope['Config'].get.return_value = False
+        self.scope['Config'].get.side_effect = None
+        result = ({'path': '/home/user/chart.png', 'exists': True}, {})
+        execute = self.scope['execute_tool_server']
+        execute.side_effect = None
+        execute.return_value = result
+        self.assertEqual(await tools['display_file']['callable'](path='/home/user/chart.png'), result)
+        execute.assert_awaited_once()
+
+    async def test_display_image_export_failure_preserves_existing_preview_with_explicit_error(self):
+        tools = await self.display_image_tools()
+        path = '/home/user/chart.png'
+        self.scope['execute_tool_server'].side_effect = [
+            ({'path': path, 'exists': True}, {}),
+            ({'error': 'missing'}, None),
+        ]
+        result, _ = await tools['display_file']['callable'](path=path)
+        self.assertTrue(result['exists'])
+        self.assertIn('image_export_error', result)
+        self.assertNotIn('image_url', result)
 
     async def test_startup_skips_session_and_never_caches_private_prompt(self):
         result = await self.scope['set_terminal_servers'](self.request(None))

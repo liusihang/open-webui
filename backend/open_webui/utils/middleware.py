@@ -2025,20 +2025,20 @@ async def chat_completion_files_handler(
 
 
 async def convert_url_images_to_base64(form_data, user=None):
-    messages = form_data.get('messages', [])
+    """Resolve images in the provider copy, including native tool results, not stored history."""
+    resolved = {}
 
-    for message in messages:
-        content = message.get('content')
+    async def convert_parts(content):
         if not isinstance(content, list):
-            continue
-
+            return content
         new_content = []
-
         for item in content:
             if not isinstance(item, dict) or item.get('type') not in ('image_url', 'input_image'):
                 new_content.append(item)
                 continue
-
+            if item.get('file_id') and not item.get('image_url'):
+                new_content.append(item)
+                continue
             image_url_data = item.get('image_url', {})
             if isinstance(image_url_data, dict):
                 image_url = image_url_data.get('url') or ''
@@ -2046,32 +2046,48 @@ async def convert_url_images_to_base64(form_data, user=None):
                 image_url = image_url_data
             else:
                 image_url = ''
+            if not isinstance(image_url, str):
+                image_url = ''
             if image_url.startswith('data:image/'):
                 new_content.append(item)
                 continue
 
-            try:
-                base64_data = await get_image_base64_from_url(image_url, user=user)
-                if base64_data and isinstance(image_url_data, str):
-                    new_content.append({**item, 'image_url': base64_data})
-                elif base64_data:
-                    image_url_payload = {'url': base64_data}
-                    if isinstance(image_url_data, dict) and image_url_data.get('detail'):
-                        image_url_payload['detail'] = image_url_data['detail']
-                    new_content.append(
-                        {
-                            'type': item['type'],
-                            'image_url': image_url_payload,
-                        }
-                    )
-                else:
-                    new_content.append(item)
-            except Exception as e:
-                log.debug('Error converting image URL to base64: %s', e)
-                new_content.append(item)
+            if image_url not in resolved:
+                try:
+                    resolved[image_url] = await get_image_base64_from_url(image_url, user=user)
+                except Exception:
+                    resolved[image_url] = None
+            base64_data = resolved[image_url]
+            if base64_data:
+                image_url_payload = (
+                    {**image_url_data, 'url': base64_data} if isinstance(image_url_data, dict) else base64_data
+                )
+                new_content.append({**item, 'image_url': image_url_payload})
+            else:
+                # Do not send an unreadable/private file reference as a provider URL.
+                new_content.append(
+                    {
+                        'type': 'input_text' if item['type'] == 'input_image' else 'text',
+                        'text': '[Image unavailable: it could not be read with the current user permissions. '
+                        'This image has not been visually inspected.]',
+                    }
+                )
+        return new_content
 
-        message['content'] = new_content
-
+    messages = []
+    for message in form_data.get('messages', []):
+        prepared = dict(message)
+        if isinstance(message.get('content'), list):
+            prepared['content'] = await convert_parts(message['content'])
+        if isinstance(message.get('output'), list):
+            prepared['output'] = [
+                {**item, 'output': await convert_parts(item.get('output'))}
+                if isinstance(item, dict) and item.get('type') == 'function_call_output'
+                else item
+                for item in message['output']
+            ]
+        messages.append(prepared)
+    form_data['messages'] = messages
     return form_data
 
 
@@ -3688,10 +3704,14 @@ async def resume_tool_calls(request, form_data, user, model, metadata, message) 
                     )
                     if vision_enabled:
                         output_parts.append({'type': 'input_image', 'image_url': image_url})
+                    if isinstance(image_url, str) and image_url.startswith('/api/v1/files/'):
+                        output_parts[0]['text'] += f'\nImage available for display: {image_url}'
                 else:
                     display_files.append(file_item)
                     if vision_enabled and file_item.get('type') == 'image' and file_item.get('url'):
                         output_parts.append({'type': 'input_image', 'image_url': file_item['url']})
+                    if file_item.get('type') == 'image' and file_item.get('url', '').startswith('/api/v1/files/'):
+                        output_parts[0]['text'] += f'\nImage available for display: {file_item["url"]}'
 
             result_item = {
                 'type': 'function_call_output',
@@ -6252,10 +6272,16 @@ async def streaming_chat_response_handler(response, ctx):
                                 )
                                 if vision_enabled:
                                     output_parts.append({'type': 'input_image', 'image_url': image_url})
+                                if isinstance(image_url, str) and image_url.startswith('/api/v1/files/'):
+                                    output_parts[0]['text'] += f'\nImage available for display: {image_url}'
                             else:
                                 display_files.append(file_item)
                                 if vision_enabled and file_item.get('type') == 'image' and file_item.get('url'):
                                     output_parts.append({'type': 'input_image', 'image_url': file_item['url']})
+                                if file_item.get('type') == 'image' and file_item.get('url', '').startswith(
+                                    '/api/v1/files/'
+                                ):
+                                    output_parts[0]['text'] += f'\nImage available for display: {file_item["url"]}'
 
                         output.append(
                             {

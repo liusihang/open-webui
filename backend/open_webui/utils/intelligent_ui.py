@@ -59,9 +59,12 @@ LAYOUT AND CONTENT (leaves unless children are specified)
   their existing tools.
 - Flow: {title?,steps:[{title,description?}]}; max 16 steps.
 - Math: {expression:LaTeX string,display?:boolean}; no trusted commands.
-- Image: {src:public HTTPS URL,alt,caption?,source?:public HTTPS URL}.
+- Image: {src,alt,caption?,source?:public HTTPS URL}. src is a public HTTPS URL
+  or the exact /api/v1/files/<file-id>/content reference returned by a tool.
 - ImageGallery: {title?,images:[{src,alt,caption?,source?}]}; max 12, same URL rules.
-  No local/IP/credentialed URLs.
+  Reuse tool-provided image references; never guess file IDs or terminal paths.
+  No arbitrary local/IP/credentialed URLs or inline base64. Displaying an image
+  does not require sending it to the model for visual analysis.
 - SVG: {svg,label}; only inert svg/g/path/rect/circle/ellipse/line/polyline/
   polygon/text/title/desc with double-quoted geometry/color attributes. No CSS,
   href/resources/scripts/foreignObject/animation/entities/handlers.

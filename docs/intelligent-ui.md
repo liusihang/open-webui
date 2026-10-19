@@ -215,6 +215,18 @@ Text bindings and Conditional. Video and maps are intentionally excluded.
 Existing tables, linked datasets, filters, metrics, tabs, slider/number controls,
 scatter/heatmaps, administrator settings and ordinary message Markdown remain.
 
+Image and ImageGallery accept public HTTPS image URLs and exact, tool-returned
+`/api/v1/files/<uuid>/content` references. Internal images use the existing authenticated
+file API and its owner/read-grant checks; their bytes are displayed through temporary
+browser blob URLs, canceled and revoked when the component changes or unmounts.
+Only raster image responses are displayed. Arbitrary local paths, terminal proxy URLs,
+query credentials and inline data URLs are not accepted. Source links remain public HTTPS.
+Tool image results expose the stored file reference for UI composition; displaying a
+file does not itself require another model vision call. Provider requests separately
+resolve images in ordinary messages and native tool output to image data, without
+rewriting stored conversation history. Unreadable images become explicit unavailable
+text, not malformed provider URLs. No database migration or public file access is needed.
+
 WritingBlock provides edit/copy/expand, safe Markdown, streamed append reconciliation,
 and conversation-scoped draft persistence (16 KiB). Regenerated revisions do not
 silently replace local edits. Input/Textarea shared values are bounded to256 chars;

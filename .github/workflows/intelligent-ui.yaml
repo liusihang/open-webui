@@ -42,6 +42,7 @@ jobs:
           pip install tiktoken==0.13.0 pillow==12.3.0 pypdf==6.21.1
           node --test tests/migration/test_connection_submit.mjs
           python3 tests/migration/test_responses_native_history.py
+          python3 tests/migration/test_tool_image_replay.py
           python3 tests/migration/test_responses_cumulative_history.py
           python3 tests/migration/test_responses_text_compaction.py
           python3 tests/migration/test_system_prompt_order.py

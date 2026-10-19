@@ -5,7 +5,6 @@ import copy
 import importlib.util
 import json
 from pathlib import Path
-from types import SimpleNamespace
 import unittest
 from unittest.mock import AsyncMock
 
@@ -147,7 +146,7 @@ class ToolUsagePromptTests(unittest.IsolatedAsyncioTestCase):
             None,
         )
         self.assertIsInstance(policy, str)
-        self.assertLess(len(policy), 1200)
+        self.assertLess(len(policy), 1400)
         for phrase in ('current context', 'wording', 'semantic search', 'compaction', 'untrusted'):
             self.assertIn(phrase, policy)
         self.assertNotIn('file_id', policy)
@@ -166,6 +165,8 @@ class ToolUsagePromptTests(unittest.IsolatedAsyncioTestCase):
             and any(isinstance(t, ast.Name) and t.id == 'TOOL_USAGE_PROMPT' for t in n.targets)
         )
         for phrase in (
+            'think privately',
+            'brief public plan before acting',
             'multi-step or long tool work',
             'meaningful findings',
             'skip routine calls',
@@ -175,6 +176,8 @@ class ToolUsagePromptTests(unittest.IsolatedAsyncioTestCase):
             'native commentary',
             'final_answer',
             'never print phase markers',
+            'otherwise use brief text',
+            'Answer simple questions directly',
         ):
             self.assertIn(phrase, policy)
         self.assertNotIn('before each', policy)
@@ -189,6 +192,20 @@ class ToolUsagePromptTests(unittest.IsolatedAsyncioTestCase):
                 self.assertNotIn('phase', payload)
                 for item in payload.get('input', payload.get('messages', [])):
                     self.assertNotIn('phase', item)
+
+    def test_deployed_default_prompt_requires_private_planning_then_public_plan(self):
+        prompt = (ROOT / 'docs/default-system-prompt.md').read_text().strip()
+        self.assertTrue(prompt.startswith('你是与我平等协作的资深科学家'))
+        for phrase in (
+            '必须先在内部思考',
+            '在首次执行或调用工具之前',
+            '用 commentary 简要说明目标和计划，再开始执行',
+            '不展示私有推理或敏感信息',
+            '其他模型用一小段普通文字说明计划',
+            '简单问题直接回答',
+        ):
+            self.assertIn(phrase, prompt)
+        self.assertEqual(prompt.count('必须先在内部思考'), 1)
 
 
 if __name__ == '__main__':
