@@ -39,7 +39,7 @@ jobs:
           python3 tests/migration/test_intelligent_ui_state.py
       - name: Retained Responses and migration seam regressions
         run: |
-          pip install tiktoken==0.13.0
+          pip install tiktoken==0.13.0 pillow==12.3.0 pypdf==6.21.1
           node --test tests/migration/test_connection_submit.mjs
           python3 tests/migration/test_responses_native_history.py
           python3 tests/migration/test_responses_cumulative_history.py
@@ -50,4 +50,6 @@ jobs:
           python3 tests/migration/test_tool_schema_stability.py
           python3 tests/migration/test_native_compaction.py
           python3 tests/migration/test_dynamic_memory_tail.py
+          python3 tests/migration/test_native_multimodal_tokens.py
+          python3 tests/migration/test_native_dispatch_binding.py
           python3 tests/migration/test_v0123_merge.py
