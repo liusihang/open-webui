@@ -66,8 +66,10 @@ class MultimodalTokenTests(unittest.TestCase):
         self.assertEqual(self.scope['_compact_upstream'].await_count, 1)
         self.assertEqual(json.dumps(self.payload, ensure_ascii=False), original)
         window = self.map['a1']['meta']['native_compaction']['output']
-        self.assertEqual(window[:2], self.payload['input'][:2])
-        self.assertEqual(window[-1], self.compacted[-1])
+        # The provider's complete window replaces old client images too; only
+        # the retained source transcript keeps the large image transport.
+        self.assertEqual(len(window), len(self.compacted))
+        self.assertEqual(window, self.compacted)
 
     def test_pdf_bytes_not_tokenized_and_pages_are_not_omitted(self):
         def pdf(pages):

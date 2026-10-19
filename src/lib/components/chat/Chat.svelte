@@ -2190,7 +2190,7 @@
 			files = files.filter((f) => f.itemId !== tempItemId);
 			toast.error(
 				$i18n.t('Error uploading file: {{error}}', {
-					error: e.message || 'Unknown error'
+					error: fileItem.error
 				})
 			);
 		}

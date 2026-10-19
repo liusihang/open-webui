@@ -486,7 +486,9 @@ class IdleToolPruningLifecycleTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(replayed[0]['content'], message['content'])
         self.assertEqual(replayed[0]['output'][0], message['output'][0])
         self.assertNotIn('contextSummary', replayed[0])
-        self.assertNotIn('native_compaction', replayed[0]['meta'])
+        # Keep the opaque checkpoint available; native dispatch validates its
+        # exact masked prefix before using it, independently of text summaries.
+        self.assertEqual(replayed[0]['meta']['native_compaction'], message['meta']['native_compaction'])
         replayed[0]['meta']['keep']['x'].append(3)
         self.assertEqual(original, expected_input)
 
@@ -615,28 +617,34 @@ class IdleToolPruningLifecycleTests(unittest.IsolatedAsyncioTestCase):
         # A subsequent provider request re-masks the unchanged stored output.
         self.assertEqual(self.pruning.mask_current_output(raw_output, metadata), request_output)
 
-    async def test_text_and_native_compaction_short_circuit_without_summaries(self):
-        load_config = AsyncMock(side_effect=AssertionError('Must not request summary settings or model'))
-        context = module_with(
-            'open_webui.utils.context_compaction',
-            _load_config=load_config,
-            _resolve_token_threshold=lambda *args: 1,
+    async def test_sqlite_replay_preserves_matching_text_checkpoint_and_rejects_changed_masks(self):
+        message = tool_message('a1')
+        masks = {self.key(message): {'chars': 4}}
+        signature = self.pruning.pruning_signature([message], masks)
+        message['contextSummary'] = 'summary of the masked transcript'
+        message['meta'] = {'context_summary_pruning': signature}
+        message['output'].append(
+            {
+                'type': 'open_webui:context_compaction',
+                'call_id': 'a1-call',
+                'summary': 'same safe summary',
+                'pruning': signature,
+            }
         )
-        with patch.dict(sys.modules, {'open_webui.utils.context_compaction': context}):
-            compact_text = load_node(BACKEND / 'utils/context_compaction.py', 'compact_messages_for_request', {})
-            compact_native = load_node(BACKEND / 'utils/native_compaction.py', 'compact_responses_payload', {})
-            messages = [tool_message('a1')]
-            metadata = {'idle_tool_output_pruning': True, '_native_token_usage': 123}
-            result = await compact_text(None, None, messages, metadata, MODEL, {})
-            self.assertIs(result[0], messages)
-            self.assertEqual(result[1:], (None, False))
-            payload = {'model': MODEL, 'input': copy.deepcopy(messages)}
-            native = await compact_native(
-                None, None, payload, metadata, api_config={}, request_url='', connection_index=0, api_key='', headers={}
-            )
-            self.assertIs(native, payload)
-            self.assertNotIn('_native_token_usage', metadata)
-            load_config.assert_not_awaited()
+        original = await self.seed(messages=[message], state={'last_activity': BASE_TIME, 'masks': masks})
+        metadata = {}
+        replay = await self.pruning.replay_messages('chat', original, metadata)
+        self.assertEqual(replay[0]['contextSummary'], message['contextSummary'])
+        self.assertEqual(replay[0]['output'][-1]['pruning'], signature)
+        self.assertEqual(metadata['_idle_tool_pruning_signature'], signature)
+        before = await self.transcript()
+        self.now += 1561
+        await self.pruning.begin_request('chat', 'a1', MODEL)
+        changed = await self.pruning.replay_messages('chat', original, metadata)
+        self.assertNotIn('contextSummary', changed[0])
+        self.assertFalse(any(item['type'] == 'open_webui:context_compaction' for item in changed[0]['output']))
+        self.assertNotEqual(metadata['_idle_tool_pruning_signature'], signature)
+        self.assertEqual(await self.transcript(), before)
 
 
 class IdleToolPruningMigrationTests(unittest.TestCase):

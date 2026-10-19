@@ -397,16 +397,16 @@ class CodexV2Tests(unittest.TestCase):
             item('what was the fact?'),
         ]
 
-    def test_v2_retains_client_messages_then_full_output_then_current_input(self):
+    def test_v2_uses_complete_provider_window_then_current_input(self):
         self.v2()
         original = copy.deepcopy(self.payload['input'])
         result = self.run_request()
-        self.assertEqual(result['input'], original[:2] + self.compacted + original[-1:])
+        self.assertEqual(result['input'], self.compacted + original[-1:])
         state = self.map['a1']['meta']['native_compaction']
         self.assertEqual(state['protocol'], 'codex_v2')
         self.assertEqual(state['version'], 2)
         self.assertEqual(state['prefix_count'], 5)
-        self.assertEqual(state['output'], original[:2] + self.compacted)
+        self.assertEqual(state['output'], self.compacted)
         self.assertEqual(self.scope['_compact_upstream'].await_args.args[0]['input'], original[:-1])
         self.assertEqual(self.scope['_compact_upstream'].await_args.kwargs['protocol'], 'codex_v2')
 
@@ -496,7 +496,7 @@ class CodexV2Tests(unittest.TestCase):
         config = self.kwargs['api_config'] | {'native_compaction_protocol': 'other'}
         self.assertFalse(self.scope['native_compaction_enabled'](config, self.payload['model']))
 
-    def test_v2_keeps_images_client_developer_and_all_ordered_output(self):
+    def test_v2_compacts_old_client_images_and_preserves_all_ordered_provider_output(self):
         image = {'type': 'input_image', 'image_url': 'data:image/png;base64,synthetic'}
         self.v2(
             [
@@ -508,9 +508,8 @@ class CodexV2Tests(unittest.TestCase):
         )
         extra = item('provider retained output', 'assistant')
         self.compacted.append(extra)
-        self.assertEqual(
-            self.run_request()['input'], self.payload['input'][:2] + self.compacted + self.payload['input'][-1:]
-        )
+        self.assertEqual(self.run_request()['input'], self.compacted + self.payload['input'][-1:])
+        self.assertEqual(self.scope['_compact_upstream'].await_args.args[0]['input'], self.payload['input'][:-1])
 
     def test_v2_failed_recompact_retains_accepted_persisted_window(self):
         self.v2()

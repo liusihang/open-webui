@@ -1121,12 +1121,14 @@
 		} else {
 			// If temporary chat is enabled, we just add the file to the list without uploading it.
 
-			const content = await extractContentFromFile(file).catch((error) => {
-				toast.error(
-					$i18n.t('Failed to extract content from the file: {{error}}', { error: error })
-				);
-				return null;
-			});
+			const content = await extractContentFromFile(file, { uploadContext: 'chat' }).catch(
+				(error) => {
+					toast.error(
+						$i18n.t('Failed to extract content from the file: {{error}}', { error: error })
+					);
+					return null;
+				}
+			);
 
 			if (content === null) {
 				fileItem.status = 'error';

@@ -153,14 +153,48 @@ def plan_masks(messages: list[dict], masks: dict, budget: int, model_id: str) ->
     return planned, encoding.name if encoding else 'unavailable:omit-results'
 
 
-def apply_masks(messages: list[dict], masks: dict) -> list[dict]:
-    """Copy before pruning, including nested output, images and checkpoint data."""
-    messages = copy.deepcopy(messages)
+def pruning_signature(messages: list[dict], masks: dict) -> str | None:
+    """Bind text summaries to masks on this branch, not unrelated siblings.
+
+    Compute before replacing result bodies: their identities hash original text.
+    A missing signature denotes the legacy, unpruned transcript.
+    """
+    if not masks:
+        return None
+    relevant = {}
     for message in messages:
+        if not message.get('id'):
+            continue
+        for index, item in enumerate(message.get('output') or []):
+            if isinstance(item, dict) and item.get('type') in {'function_call_output', 'open_webui:code_interpreter'}:
+                key = result_key(message, item, index)
+                if key in masks:
+                    relevant[key] = masks[key]
+    return hashlib.sha256(json.dumps(relevant, sort_keys=True).encode()).hexdigest() if relevant else None
+
+
+def _prepare_checkpoint_replay(message: dict, signature: str | None) -> None:
+    if (message.get('meta') or {}).get('context_summary_pruning') != signature:
         message.pop('contextSummary', None)
         message.pop('context_summary', None)
-        if isinstance(message.get('meta'), dict):
-            message['meta'].pop('native_compaction', None)
+    if signature:
+        # Saved usage observed the unpruned window, not this replay. Text
+        # compaction must budget the masked copy instead of that old total.
+        message.pop('usage', None)
+        if isinstance(message.get('info'), dict):
+            message['info'].pop('usage', None)
+
+
+def apply_masks(messages: list[dict], masks: dict, *, signature: str | None = None) -> list[dict]:
+    """Mask a deep request copy, retaining only compatible text checkpoints.
+
+    Native windows independently validate the exact masked provider prefix.
+    Never discard them merely because pruning is enabled.
+    """
+    signature = signature or pruning_signature(messages, masks)
+    messages = copy.deepcopy(messages)
+    for message in messages:
+        _prepare_checkpoint_replay(message, signature)
         if message.get('role') != 'assistant' or not isinstance(message.get('output'), list):
             continue
         for index, item in enumerate(message['output']):
@@ -184,7 +218,9 @@ def apply_masks(messages: list[dict], masks: dict) -> list[dict]:
         message['output'] = [
             item
             for item in message['output']
-            if not isinstance(item, dict) or item.get('type') != 'open_webui:context_compaction'
+            if not isinstance(item, dict)
+            or item.get('type') != 'open_webui:context_compaction'
+            or item.get('pruning') == signature
         ]
     return messages
 
@@ -250,7 +286,11 @@ def mask_current_output(output: list[dict], metadata: dict) -> list[dict]:
         'role': 'assistant',
         'output': output,
     }
-    return apply_masks([message], metadata.get('_idle_tool_pruning_masks', {}))[0]['output']
+    return apply_masks(
+        [message],
+        metadata.get('_idle_tool_pruning_masks', {}),
+        signature=metadata.get('_idle_tool_pruning_signature'),
+    )[0]['output']
 
 
 async def replay_messages(chat_id: str, messages: list[dict], metadata: dict | None = None) -> list[dict]:
@@ -261,6 +301,8 @@ async def replay_messages(chat_id: str, messages: list[dict], metadata: dict | N
     async with get_async_db() as session:
         state = await session.scalar(select(Chat.tool_pruning).where(Chat.id == chat_id))
     masks = (state or {}).get('masks', {})
+    signature = pruning_signature(messages, masks)
     if metadata is not None:
         metadata['_idle_tool_pruning_masks'] = masks
-    return apply_masks(messages, masks)
+        metadata['_idle_tool_pruning_signature'] = signature
+    return apply_masks(messages, masks, signature=signature)

@@ -578,7 +578,13 @@ class PromptOrderTests(unittest.IsolatedAsyncioTestCase):
                 call = self.s['_generate_summary'].await_args.args
                 self.assertEqual(call[6], 'OLDER_SUMMARY' if previous else None)
                 stored = self.s['Chats'].upsert_message_to_chat_by_id_and_message_id.await_args
-                self.assertEqual(stored.args[2], {'contextSummary': 'GENERATED_SUMMARY'})
+                self.assertEqual(
+                    stored.args[2],
+                    {
+                        'contextSummary': 'GENERATED_SUMMARY',
+                        'meta': {'context_summary_pruning': None},
+                    },
+                )
 
     async def test_rag_user_side_contract(self):
         self.s['RAG_SYSTEM_CONTEXT'] = False

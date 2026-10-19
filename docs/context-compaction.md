@@ -1,15 +1,40 @@
 # Context compaction
 
+## Direct chat PDF limit
+
+Each PDF directly attached to a chat is limited to **20 pages inclusive**,
+regardless of the selected model. Larger documents must be uploaded to a
+knowledge base and referenced from there. New ordinary chat uploads are checked
+from actual PDF bytes before file storage, database insertion, parsing or
+embedding; client-supplied page counts are not trusted. Corrupt or encrypted
+PDFs that cannot be reliably counted are rejected with a readable error.
+
+Reattaching an existing stored PDF to a new chat/turn is checked as well.
+Server-loaded historical attachments and validated Continue/approval recovery
+are not treated as new uploads. Existing long documents are not deleted or
+silently truncated, and can still be included in a one-time native compaction.
+Knowledge-base and channel uploads do not use this chat page limit. The existing
+25 MiB native-PDF size limit is unchanged.
+
+Temporary chats extract PDFs in the browser rather than uploading to the file
+API, so their chat UI checks the PDF parser's page count before extracting text.
+This UI check does not pretend to enforce a page count on arbitrary text sent
+directly to a stateless API. Terminal filesystem uploads are workspace files,
+not native chat PDF inputs, and are not subject to this chat-only page limit.
+
 ## Idle tool-output pruning (default)
 
-Saved chats now default to deterministic tool-output pruning instead of summary
+Saved chats default to deterministic tool-output pruning before context
 compaction. After **more than 26 minutes** without a chat request/activity, the
 next new turn retains at most **4000 tokens of original completed tool-result
 text in aggregate**, newest results first. This is neither a character limit nor
-a per-tool limit. No LLM summary is generated and there is no frontend pause or
-confirmation. All user messages and assistant prose, including commentary,
-remain in the request. The full original messages and tool results remain in the
-database and UI.
+a per-tool limit. Pruning itself makes no model call and needs no frontend pause
+or confirmation. It leaves user messages and assistant prose, including
+commentary, unchanged. The resulting request still goes through the normal
+context-compaction threshold: explicitly configured GPT/native targets use the
+same chat model's encrypted native compaction; other models use the text-summary
+pipeline below. The full original messages and tool results remain in the
+database and UI, regardless of either request-only reduction.
 
 Configuration is available through environment defaults and the existing admin
 `GET/POST /api/v1/chats/config` endpoint (GET the current config, change the desired
@@ -21,12 +46,22 @@ fields, then POST it):
 
 The database keys are `chat.idle_tool_pruning.enable`, `.idle_seconds`, and
 `.token_budget`. Existing admin UI saves preserve these fields when omitted.
-This mode takes precedence over automatic/manual text summaries and native
-Responses compaction, including old checkpoints. Disable it to restore the
-existing compaction behavior described below. This precedence applies from the
-first request, not only after an idle episode: old summaries cannot silently
-remove dialogue or reintroduce discarded results. Disabling does not erase masks;
-reenabling resumes them for unchanged results.
+This mode does not disable automatic/manual text summaries or native Responses
+compaction. Requests with no eligible tool results still check the configured
+total-context threshold (currently `120000` in the deployment). Disabling pruning
+does not erase masks; reenabling resumes them for unchanged results.
+
+Text-summary checkpoints and tool-loop markers carry a server-only signature of
+the masks relevant to the selected branch. Unchanged masks reuse the existing
+summary; an unrelated sibling's mask does not invalidate it. If relevant masks
+change, old summaries are ignored in the request copy and rebuilt from the
+already-masked transcript when the threshold is exceeded. Legacy summaries are
+compatible only with an unmasked branch. Native checkpoints already bind to the
+exact provider input prefix: they are reused when that prefix is unchanged and
+ignored when a masked result changes it. Neither path restores a stale opaque or
+text summary containing newly discarded results. Saved pre-pruning text usage is
+not used as the size of a masked replay; native single-call usage anchors also
+require an exact matching input/window hash.
 
 ### Retention and safety details
 
@@ -66,11 +101,13 @@ reenabling resumes them for unchanged results.
   other branches. Concurrent requests serialize the idle decision, so only the
   first can create a new episode. Temporary/unsaved chats are unchanged.
 
-User- or assistant-prose-heavy chats can still exceed an upstream context window.
-This feature intentionally does not silently summarize or remove that dialogue.
-
-With idle tool-output pruning disabled, automatic compaction uses the existing admin **Interface → Context compaction**
-switch and token threshold. It does not delete the original chat transcript.
+Automatic compaction uses the existing admin **Interface → Context compaction**
+switch and token threshold, with or without idle pruning. Pruning does not limit
+total user prose or attachments before compaction. Native compaction uses the
+provider's complete returned window; it does not automatically reattach old user
+messages or PDFs that were compacted. Current uncompressed input or provider-
+retained items can still exceed the threshold. No original chat transcript or
+stored attachment is deleted.
 The threshold triggers compaction; it is not a hard maximum request size.
 
 ## Text summaries
@@ -115,18 +152,18 @@ The protocol is explicit and has no automatic fallback:
   streaming `/responses`, `store=false`, one final `compaction_trigger`, and
   `x-codex-beta-features: remote_compaction_v2`. This is not public API
   `context_management`, and does not call the old Codex unary endpoint.
-  Only completed prior turns are compacted. Every client user/developer/system
-  message in that prior window is preserved verbatim, including images; old
-  assistant/tool trajectories are replaced by the complete ordered done output.
+  Only completed prior turns are compacted. The complete ordered done output
+  replaces that prior window; the client does not prepend old user messages,
+  images or PDF files. Items explicitly retained by the provider stay unchanged.
   Exactly one nonempty opaque compaction item and `response.completed` are
-  required. The current user turn is appended after this constructed window.
+  required. The current user turn and its ongoing tool batch are appended after
+  this returned window, including any newly attached file in that current turn.
 
 Both protocols use the **same resolved model as the chat Responses request**. They
 do not select the text-summary model or the external task model. An upstream
 which rewrites compaction to another model does not meet this contract and must
 not be marked as verified.
-The complete next window (returned canonical output for standalone, constructed
-client-content-plus-output for Codex v2) is saved separately in the message's
+The complete returned next window is saved separately in the message's
 `meta.native_compaction` checkpoint. Nothing is decrypted or converted to a text
 summary. Next requests replay that whole window followed by new input.
 `store=false` is preserved. Native mode and text-summary mode do not run on the
@@ -138,15 +175,18 @@ Checkpoints bind to version, protocol, exact original input prefix, resolved mod
 connection, endpoint, credential and instructions. Branch changes, edited prefixes or route
 changes therefore fall back to the retained full transcript, not incompatible
 encrypted state. Tool call/result batches must be complete before compaction.
+Legacy Codex-v2 checkpoints made with the old client-message/PDF prepend policy
+have a different binding and are rebuilt once when compaction is needed. Their
+stored data is not edited or decrypted. Unchanged new checkpoints remain reusable.
 On failure the previous valid window or full transcript is retained, a failure
 status is emitted, and the same branch has a five-minute retry cooldown. Failed
 native calls do not fall back to summarizing opaque content. Original chat
 messages remain the recovery source.
 
-Limitations: token counting is estimated; Codex-v2 savings depend on the old
-assistant/tool share. All user text and attachments remain, so a user/RAG-heavy
-window can still be large. This deliberately does not copy Codex's client-message
-64k/image pruning policy. No cross-account or cross-provider compatibility of
+Limitations: token counting is estimated. Current uncompressed input and items
+explicitly retained by the provider can still make a window large. Compaction
+is not a lossless file archive; exact later page details may require reading the
+stored source again. No cross-account or cross-provider compatibility of
 encrypted state is assumed. A gateway which rotates accounts behind the same URL/key must itself
 provide a compatible continuation route. Maximum-window stress, that gateway
 behavior, and native model quality require real upstream acceptance, not only
@@ -155,6 +195,7 @@ unit tests. Merely saving the configuration is not proof of provider support.
 Protocol reference: OpenAI's Compaction guide and Responses compact API reference
 at `https://developers.openai.com/api/docs/guides/compaction` and
 `https://developers.openai.com/api/reference/resources/responses/methods/compact`.
-The separate Codex-v2 request and retained-client-window policy is based on
+The separate Codex-v2 request/stream contract is based on
 OpenAI Codex 0.154.0 `compact_remote_v2.rs` and `compact_remote_v2_attempt.rs`;
-the contracts must not be interchanged.
+its complete-output window policy is verified separately against the configured
+Sub2API route. The contracts must not be interchanged.

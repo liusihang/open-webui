@@ -4,10 +4,11 @@ import ast
 import asyncio
 import copy
 import importlib.util
+import sys
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, Mock
+from unittest.mock import AsyncMock, Mock, patch
 
 ROOT = Path(__file__).resolve().parents[2]
 SPEC = importlib.util.spec_from_file_location(
@@ -15,10 +16,15 @@ SPEC = importlib.util.spec_from_file_location(
 )
 FIXTURE = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(FIXTURE)
+IDLE_SPEC = importlib.util.spec_from_file_location(
+    'text_continuation_pruning', ROOT / 'backend/open_webui/utils/idle_tool_pruning.py'
+)
+IDLE = importlib.util.module_from_spec(IDLE_SPEC)
+IDLE_SPEC.loader.exec_module(IDLE)
 
 
 class TextCompactionContinuationTests(unittest.TestCase):
-    def exercise(self, responses_api):
+    def exercise(self, responses_api, pruning=False):
         scope = FIXTURE.scope()
         for name in ('get_content_from_message', 'update_message_content', 'add_or_update_system_message'):
             FIXTURE.load_function(FIXTURE.MISC, name, scope)
@@ -29,6 +35,14 @@ class TextCompactionContinuationTests(unittest.TestCase):
         system = {'role': 'system', 'content': 'BASE INSTRUCTIONS\nINTELLIGENT UI INSTRUCTIONS'}
         original_system = copy.deepcopy(system)
         output = FIXTURE.history()
+        metadata = {}
+        if pruning:
+            metadata = {
+                'idle_tool_output_pruning': True,
+                'assistant_message_id': 'current',
+                '_idle_tool_pruning_signature': 'existing-branch-signature',
+                '_idle_tool_pruning_masks': {},
+            }
         errors = Mock()
         emitted = AsyncMock()
         scope.update(
@@ -39,7 +53,7 @@ class TextCompactionContinuationTests(unittest.TestCase):
             responses_api=responses_api,
             response_usage={},
             model={},
-            metadata={},
+            metadata=metadata,
             new_form_data={},
             user=None,
             model_id='m',
@@ -72,13 +86,15 @@ class TextCompactionContinuationTests(unittest.TestCase):
             ),
             scope,
         )
-        asyncio.run(scope['run']())
+        with patch.dict(sys.modules, {'open_webui.utils.idle_tool_pruning': IDLE}):
+            asyncio.run(scope['run']())
         errors.assert_not_called()
         emitted.assert_awaited_once()
         marker = output[-1]
         self.assertEqual(marker['type'], 'open_webui:context_compaction')
         self.assertEqual(marker['call_id'], 'call_real')
         self.assertEqual(marker['summary'], 'Retained summary')
+        self.assertEqual(marker['pruning'], metadata.get('_idle_tool_pruning_signature'))
         self.assertEqual(system, original_system)
         request_messages = scope['new_form_data']['messages']
         systems = [message for message in request_messages if message['role'] == 'system']
@@ -91,11 +107,23 @@ class TextCompactionContinuationTests(unittest.TestCase):
             self.assertNotIn('open_webui:context_compaction', str(payload))
             self.assertEqual(payload['input'][0]['encrypted_content'], 'opaque')
 
+        if pruning:
+            replayed = IDLE.mask_current_output(output, metadata)
+            self.assertEqual(replayed[-1], marker)
+            metadata['_idle_tool_pruning_signature'] = 'changed-branch-signature'
+            self.assertNotIn(marker, IDLE.mask_current_output(output, metadata))
+
     def test_responses_marker_and_base_instructions_survive_text_compaction(self):
         self.exercise(True)
 
     def test_chat_marker_and_base_instructions_still_survive_text_compaction(self):
         self.exercise(False)
+
+    def test_responses_text_marker_binding_survives_masked_tool_loop_and_continue(self):
+        self.exercise(True, pruning=True)
+
+    def test_chat_text_marker_binding_survives_masked_tool_loop_and_continue(self):
+        self.exercise(False, pruning=True)
 
 
 if __name__ == '__main__':
