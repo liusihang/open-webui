@@ -270,18 +270,6 @@ def _compaction_prefix_count(original: list[dict], protocol: str) -> int:
     return next((index for index in range(len(original) - 1, -1, -1) if original[index].get('role') == 'user'), 0)
 
 
-def _next_window(compact_input: list[dict], output: list[dict], protocol: str) -> list[dict]:
-    if protocol != 'codex_v2':
-        return output
-    # Retain all client content, including images, without token pruning. Only
-    # old assistant/tool trajectories and older opaque state are replaced.
-    return [
-        copy.deepcopy(item)
-        for item in compact_input
-        if item.get('type', 'message') == 'message' and item.get('role') in ('user', 'developer', 'system')
-    ] + output
-
-
 async def _compact_upstream(
     payload: dict, request_url: str, headers: dict, cookies, *, protocol: str = 'responses_compact'
 ) -> list[dict]:
@@ -556,10 +544,6 @@ async def compact_responses_payload(
     if metadata is None:
         metadata = {}
     metadata.pop('_native_token_usage', None)
-    if metadata.get('idle_tool_output_pruning'):
-        # Opaque checkpoints may contain erased tool payloads. This mode always
-        # replays its full dialogue with deterministic result masks instead.
-        return payload
     if not native_compaction_enabled(api_config, payload.get('model')) or metadata.get('task'):
         return payload
     config = await _load_config()
@@ -577,9 +561,19 @@ async def compact_responses_payload(
     if not branch:
         return payload
     protocol = api_config.get('native_compaction_protocol', 'responses_compact')
-    binding = _digest(
-        [protocol, connection_index, request_url, _digest(api_key), payload['model'], payload.get('instructions', '')]
-    )
+    binding_parts = [
+        protocol,
+        connection_index,
+        request_url,
+        _digest(api_key),
+        payload['model'],
+        payload.get('instructions', ''),
+    ]
+    if protocol == 'codex_v2':
+        # Old v2 windows prepended every client message/PDF to provider output.
+        # Rebuild those checkpoints once; never mutate their opaque content.
+        binding_parts.append('canonical_output_v1')
+    binding = _digest(binding_parts)
     active, checkpoint, states = _restore_window(branch, original, binding)
     result = {**payload, 'input': active}
 
@@ -624,7 +618,9 @@ async def compact_responses_payload(
         output = await _compact_upstream(
             {**result, 'input': compact_input}, request_url, headers, cookies, protocol=protocol
         )
-        output = _next_window(compact_input, output, protocol)
+        # Both protocols return the next window. Keep every returned item in
+        # order, but do not prepend old client messages/PDFs the provider has
+        # compacted. The current, uncompressed user/tool suffix stays below.
         state['output'] = copy.deepcopy(output)
         state['status'] = 'completed'
         # Saving is part of success. A failed save cannot silently shorten a

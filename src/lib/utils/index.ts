@@ -1924,7 +1924,10 @@ async function ensurePDFjsLoaded() {
 	return window.pdfjsLib;
 }
 
-export const extractContentFromFile = async (file: File) => {
+export const extractContentFromFile = async (
+	file: File,
+	options: { uploadContext?: 'chat' } = {}
+) => {
 	// Known text file extensions for extra fallback
 	const textExtensions = [
 		'.txt',
@@ -1951,14 +1954,28 @@ export const extractContentFromFile = async (file: File) => {
 		const pdfjsLib = await ensurePDFjsLoaded();
 		const arrayBuffer = await file.arrayBuffer();
 		const pdf = await pdfjsLib.getDocument({ data: arrayBuffer }).promise;
-		let allText = '';
-		for (let pageNum = 1; pageNum <= pdf.numPages; pageNum++) {
-			const page = await pdf.getPage(pageNum);
-			const content = await page.getTextContent();
-			const strings = content.items.map((item: any) => item.str);
-			allText += strings.join(' ') + '\n';
+		try {
+			if (options.uploadContext === 'chat') {
+				if (!Number.isSafeInteger(pdf.numPages) || pdf.numPages < 1) {
+					throw new Error('无法读取此 PDF 的页数。请修复文件后重试，或上传到知识库后引用。');
+				}
+				if (pdf.numPages > 20) {
+					throw new Error(
+						`此 PDF 共 ${pdf.numPages} 页，聊天直接上传最多允许 20 页。请上传到知识库后引用。`
+					);
+				}
+			}
+			let allText = '';
+			for (let pageNum = 1; pageNum <= pdf.numPages; pageNum++) {
+				const page = await pdf.getPage(pageNum);
+				const content = await page.getTextContent();
+				const strings = content.items.map((item: any) => item.str);
+				allText += strings.join(' ') + '\n';
+			}
+			return allText;
+		} finally {
+			await pdf.destroy();
 		}
-		return allText;
 	}
 
 	// Reads file as text using FileReader
@@ -2071,9 +2088,10 @@ export const extractContentFromFile = async (file: File) => {
 
 	const type = file.type || '';
 	const ext = getExtension(file.name);
+	const header = options.uploadContext === 'chat' ? await file.slice(0, 1024).text() : '';
 
 	// PDF check
-	if (type === 'application/pdf' || ext === '.pdf') {
+	if (type === 'application/pdf' || ext === '.pdf' || header.includes('%PDF-')) {
 		return await extractPdfText(file);
 	}
 

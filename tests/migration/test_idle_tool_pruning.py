@@ -1,14 +1,13 @@
 """Actual token budgets and provider replay, without app startup or an LLM."""
 
 import ast
-import asyncio
 import copy
 import importlib.util
 import json
 import sys
 import unittest
 from pathlib import Path
-from unittest.mock import AsyncMock, patch
+from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parents[2]
 
@@ -240,7 +239,7 @@ class PruningTests(unittest.TestCase):
         self.assertIn('Checking.', json.dumps(replay))
         self.assertNotIn(' legacy' * 5, json.dumps(replay))
 
-    def test_compaction_checkpoints_removed_only_on_request_copy(self):
+    def test_legacy_checkpoints_preserved_when_no_result_is_masked(self):
         message = assistant('a', ' result')
         message.update(
             contextSummary='OLD_SUMMARY',
@@ -251,8 +250,7 @@ class PruningTests(unittest.TestCase):
         original = copy.deepcopy(message)
         result = pruning.apply_masks([message], {})[0]
         self.assertEqual(message, original)
-        self.assertNotIn('OLD_', json.dumps(result))
-        self.assertEqual(result['meta'], {'other': 'keep'})
+        self.assertEqual(result, original)
 
     def test_unknown_model_uses_real_fallback_with_warning(self):
         pruning.resolve_encoding.cache_clear()
@@ -277,23 +275,17 @@ class PruningTests(unittest.TestCase):
         self.assertEqual(visible_content(result[0]), '')
         self.assertEqual(result[1], pending)
 
-    def test_text_compaction_and_native_checkpoint_bypass_before_external_work(self):
-        scope = {'Any': object, '_load_config': AsyncMock(side_effect=AssertionError('should not load summaries'))}
-        compact = native.load_function(
-            ROOT / 'backend/open_webui/utils/context_compaction.py', 'compact_messages_for_request', scope
-        )
-        messages = [assistant('a', ' keep')]
-        returned = asyncio.run(compact(None, None, messages, {'idle_tool_output_pruning': True}, 'model', {}))
-        self.assertEqual(returned, (messages, None, False))
+    def test_pruning_does_not_bypass_native_compaction_or_its_prefix_validation(self):
         compaction = load_module('native_compaction_fixture', ROOT / 'tests/migration/test_native_compaction.py')
         fixture = compaction.NativeCompactionTests()
         fixture.setUp()
         try:
             fixture.metadata['idle_tool_output_pruning'] = True
             fixture.map['u1']['meta']['native_compaction'] = {'output': 'old opaque tool payload'}
-            self.assertEqual(fixture.run_request(), fixture.payload)
-            fixture.scope['_compact_upstream'].assert_not_awaited()
-            fixture.chats.get_messages_map_by_chat_id.assert_not_awaited()
+            result = fixture.run_request()
+            self.assertEqual(result['input'], fixture.compacted)
+            fixture.scope['_compact_upstream'].assert_awaited_once()
+            fixture.chats.get_messages_map_by_chat_id.assert_awaited_once()
         finally:
             fixture.doCleanups()
 

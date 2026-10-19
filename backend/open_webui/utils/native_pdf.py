@@ -12,6 +12,7 @@ from weakref import WeakValueDictionary
 from fastapi import HTTPException
 
 CHAT_NATIVE_PDF_MAX_BYTES = 25 * 1024 * 1024
+CHAT_PDF_MAX_PAGES = 20
 _parse_locks: WeakValueDictionary[str, asyncio.Lock] = WeakValueDictionary()
 
 
@@ -22,6 +23,56 @@ def supports_native_pdf(model: dict | None) -> bool:
 def is_pdf(filename: str, content_type: str | None) -> bool:
     mime = str(content_type or '').split(';', 1)[0].strip().lower()
     return mime == 'application/pdf' or str(filename or '').lower().endswith('.pdf')
+
+
+def validate_chat_pdf_upload(metadata: dict, filename: str, content_type: str | None, stream) -> int | None:
+    """Admit new chat PDFs from their bytes before persisting or indexing them.
+
+    Knowledge/channel uploads keep their existing parser path. Client page
+    counts and model capabilities are deliberately irrelevant to admission.
+    Restore the stream even when admission fails, so storage reads the original
+    bytes on success. No decryption is attempted, including empty passwords.
+    """
+    if metadata.get('upload_context') != 'chat' or metadata.get('knowledge_id') or metadata.get('channel_id'):
+        return None
+    position = stream.tell()
+    try:
+        stream.seek(0)
+        header = stream.read(1024)
+        if not is_pdf(filename, content_type) and b'%PDF-' not in header:
+            return None
+        stream.seek(0)
+        from pypdf import PdfReader
+
+        class PageCountReader(PdfReader):
+            def _handle_encryption(self, password):
+                # PdfReader otherwise tries an empty password during its
+                # constructor. Reject at that hook, before any decryption.
+                raise HTTPException(
+                    status_code=400,
+                    detail='此 PDF 已加密，无法核验页数。请上传未加密且不超过 20 页的 PDF，或上传到知识库后引用。',
+                )
+
+        try:
+            reader = PageCountReader(stream, strict=True)
+            pages = len(reader.pages)
+            if pages < 1:
+                raise ValueError('PDF has no pages')
+        except HTTPException:
+            raise
+        except Exception as exc:
+            raise HTTPException(
+                status_code=400,
+                detail='无法读取此 PDF 的页数，文件可能已损坏或格式不受支持。请修复文件后重试，或上传到知识库后引用。',
+            ) from exc
+        if pages > CHAT_PDF_MAX_PAGES:
+            raise HTTPException(
+                status_code=400,
+                detail=f'此 PDF 共 {pages} 页，聊天直接上传最多允许 {CHAT_PDF_MAX_PAGES} 页。请上传到知识库后引用。',
+            )
+        return pages
+    finally:
+        stream.seek(position)
 
 
 def should_defer_pdf_processing(
@@ -68,6 +119,29 @@ def is_native_pdf_attachment(item: dict, metadata: dict) -> bool:
         and not is_knowledge_attachment(item)
         and attachment_file_id(item) in (metadata.get('native_pdf_file_ids') or [])
     )
+
+
+def chat_pdf_admission_ids(
+    files: list[dict] | None, current_user_message: dict | None, historical_messages: list[dict]
+) -> set[str]:
+    """Select new direct attachments, not old PDFs replayed from server history.
+
+    The caller supplies the pre-compaction server-loaded history. Client history
+    must not populate this exemption set. Explicitly attaching an old file to
+    the current user message still counts as a new attachment.
+    """
+
+    def direct_ids(items):
+        return {
+            attachment_file_id(item)
+            for item in (items or [])
+            if isinstance(item, dict) and not is_knowledge_attachment(item) and attachment_file_id(item)
+        }
+
+    historical_ids = set().union(
+        *(direct_ids(message.get('files')) for message in historical_messages if message.get('role') == 'user')
+    )
+    return direct_ids((current_user_message or {}).get('files')) | (direct_ids(files) - historical_ids)
 
 
 def _append_parts(message: dict, parts: list[dict]) -> None:
@@ -180,16 +254,39 @@ async def _process_pdf_fallback(request, record, user):
     return record
 
 
-async def _resolve_chat_pdf(request, file_id, blocked_ids, user, model):
+async def _resolve_chat_pdf(request, file_id, blocked_ids, user, model, *, validate_new_attachment=False):
     from open_webui.models.files import Files
     from open_webui.models.knowledge import Knowledges
     from open_webui.utils.access_control.files import has_access_to_file
 
     record = await Files.get_file_by_id(file_id)
-    if not record or not is_pdf(record.filename, (record.meta or {}).get('content_type')):
+    if not record:
+        return None, None
+    pdf_record = is_pdf(record.filename, (record.meta or {}).get('content_type'))
+    if not pdf_record and not validate_new_attachment:
         return None, None
     if not (record.user_id == user.id or user.role == 'admin' or await has_access_to_file(file_id, 'read', user)):
         raise HTTPException(status_code=404, detail='PDF attachment not found or not accessible.')
+
+    if validate_new_attachment:
+        from open_webui.storage.provider import Storage
+
+        def validate_stored_file():
+            if not record.path and not pdf_record:
+                return
+            try:
+                with Path(Storage.get_file(record.path)).open('rb') as stream:
+                    validate_chat_pdf_upload(
+                        {'upload_context': 'chat'}, record.filename, (record.meta or {}).get('content_type'), stream
+                    )
+            except (OSError, TypeError, ValueError) as exc:
+                raise HTTPException(
+                    status_code=400, detail='无法读取附件以核验 PDF 页数。请重新上传文件，或上传到知识库后引用。'
+                ) from exc
+
+        await asyncio.to_thread(validate_stored_file)
+    if not pdf_record:
+        return None, None
 
     stored = (record.meta or {}).get('data') or {}
     stored = stored if isinstance(stored, dict) else {}
@@ -231,7 +328,15 @@ def _place_native_parts(messages, native_parts):
         _append_parts(target, remaining)
 
 
-async def prepare_native_pdf_attachments(request, messages: list[dict], files: list[dict] | None, user, model: dict):
+async def prepare_native_pdf_attachments(
+    request,
+    messages: list[dict],
+    files: list[dict] | None,
+    user,
+    model: dict,
+    *,
+    new_attachment_ids: set[str] | None = None,
+):
     """Authorize using server records, then inject native parts or parse fallback.
 
     Called before message ``files`` are stripped. Returns confirmed native IDs
@@ -258,7 +363,14 @@ async def prepare_native_pdf_attachments(request, messages: list[dict], files: l
         if not file_id or file_id in seen or is_knowledge_attachment(item):
             continue
         seen.add(file_id)
-        record, part = await _resolve_chat_pdf(request, file_id, blocked_ids, user, model)
+        record, part = await _resolve_chat_pdf(
+            request,
+            file_id,
+            blocked_ids,
+            user,
+            model,
+            validate_new_attachment=file_id in (new_attachment_ids or ()),
+        )
         if part:
             native_parts[file_id] = part
         elif record:

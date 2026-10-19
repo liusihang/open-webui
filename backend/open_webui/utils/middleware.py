@@ -2382,6 +2382,12 @@ async def process_chat_payload(request, form_data, user, metadata, model):
     chat_id = metadata.get('chat_id')
     user_message_id = metadata.get('user_message_id')
     pending_assistant_message = None
+    # Keep attachment admission separate from replay/compaction: only server
+    # history can exempt old PDFs; current explicit attachments are checked.
+    pdf_history_messages = []
+    pdf_current_message = next(
+        (message for message in reversed(form_data.get('messages', [])) if message.get('role') == 'user'), None
+    )
     chat = await Chats.get_chat_by_id(chat_id) if is_saved_chat_id(chat_id) else None
     is_note_chat = bool(chat and (chat.meta or {}).get('internal') is True and (chat.meta or {}).get('type') == 'note')
     use_builtin_tools = is_note_chat or (
@@ -2396,12 +2402,21 @@ async def process_chat_payload(request, form_data, user, metadata, model):
     if is_saved_chat_id(chat_id) and user_message_id:
         db_messages = await load_messages_from_db(chat_id, user_message_id)
         if db_messages:
+            pdf_current_message = next(
+                (message for message in db_messages if message.get('id') == user_message_id), None
+            )
+            pdf_history_messages = [message for message in db_messages if message.get('id') != user_message_id]
             # Continue: frontend sends assistant_message_id when continuing
             # an existing response. Load its content so the LLM sees prior output.
             assistant_message_id = metadata.get('assistant_message_id')
             if assistant_message_id:
                 assistant_message = await Chats.get_message_by_id_and_message_id(chat_id, assistant_message_id)
                 if assistant_message and (assistant_message.get('content') or assistant_message.get('output')):
+                    # Continue/approval resumes an existing server response, not
+                    # a new upload. Preserve even pre-limit historical PDFs.
+                    if assistant_message.get('parentId') == user_message_id:
+                        pdf_history_messages = list(db_messages)
+                        pdf_current_message = None
                     output = assistant_message.get('output') or []
                     if (
                         metadata.get('tool_approval_resume') != 'model'
@@ -2448,9 +2463,9 @@ async def process_chat_payload(request, form_data, user, metadata, model):
     if regeneration_prompt:
         form_data['messages'].append({'role': 'user', 'content': regeneration_prompt})
 
-    # This mode owns replay reduction: text/native summaries must not restore
-    # removed tool payloads or erase user/assistant dialogue. Keep the full DB
-    # transcript and mask its deep request copy before image/tool conversion.
+    # Mask the full DB transcript's deep request copy before compaction and
+    # image/tool conversion. Compatible checkpoints still reduce long dialogue;
+    # changed masks invalidate summaries/native windows, not original history.
     metadata['idle_tool_output_pruning'] = bool(
         is_saved_chat_id(chat_id) and await Config.get('chat.idle_tool_pruning.enable', True)
     )
@@ -2458,6 +2473,14 @@ async def process_chat_payload(request, form_data, user, metadata, model):
         from open_webui.utils.idle_tool_pruning import replay_messages
 
         form_data['messages'] = await replay_messages(chat_id, form_data.get('messages', []), metadata)
+
+    from open_webui.utils.native_pdf import chat_pdf_admission_ids
+
+    new_pdf_attachment_ids = (
+        set()
+        if chat_id.startswith('channel:')
+        else chat_pdf_admission_ids(form_data.get('files'), pdf_current_message, pdf_history_messages)
+    )
 
     context_summary = None
     if is_saved_chat_id(chat_id) and user_message_id:
@@ -2496,7 +2519,12 @@ async def process_chat_payload(request, form_data, user, metadata, model):
     # user_message retained in metadata into a base64-bearing snapshot.
     form_data['messages'] = copy.deepcopy(form_data.get('messages', []))
     metadata['native_pdf_file_ids'] = await prepare_native_pdf_attachments(
-        request, form_data.get('messages', []), form_data.get('files'), user, model
+        request,
+        form_data.get('messages', []),
+        form_data.get('files'),
+        user,
+        model,
+        new_attachment_ids=new_pdf_attachment_ids,
     )
 
     # Process messages with OR-aligned output items for clean LLM messages
@@ -6411,7 +6439,14 @@ async def streaming_chat_response_handler(response, ctx):
                                     checkpoint = next(
                                         idx for idx, message in enumerate(messages) if message.get('role') != 'system'
                                     )
-                                    messages[checkpoint] = {**messages[checkpoint], 'contextSummary': context_summary}
+                                    messages[checkpoint] = {
+                                        **messages[checkpoint],
+                                        'contextSummary': context_summary,
+                                        'meta': {
+                                            **(messages[checkpoint].get('meta') or {}),
+                                            'context_summary_pruning': metadata.get('_idle_tool_pruning_signature'),
+                                        },
+                                    }
                                     output.append(
                                         {
                                             'type': 'open_webui:context_compaction',
@@ -6430,6 +6465,7 @@ async def streaming_chat_response_handler(response, ctx):
                                                 )
                                             ),
                                             'summary': context_summary,
+                                            'pruning': metadata.get('_idle_tool_pruning_signature'),
                                         }
                                     )
                                     await emit_output()

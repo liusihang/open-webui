@@ -51,11 +51,6 @@ async def compact_messages_for_request(
     models: dict,
     system_prompt: str = '',
 ) -> tuple[list[dict], str | None, bool]:
-    if metadata.get('idle_tool_output_pruning'):
-        # Already replayed from the complete transcript with durable tool masks.
-        # Also applies inside the tool loop; never summarize this mode.
-        return messages, None, False
-
     config = await _load_config()
     from open_webui.utils.native_compaction import uses_native_compaction
 
@@ -143,7 +138,13 @@ async def compact_messages_for_request(
         await Chats.upsert_message_to_chat_by_id_and_message_id(
             chat_id,
             checkpoint_message_id,
-            {'contextSummary': summary},
+            {
+                'contextSummary': summary,
+                'meta': {
+                    **(recent_messages[0].get('meta') or {}),
+                    'context_summary_pruning': metadata.get('_idle_tool_pruning_signature'),
+                },
+            },
             touch=False,
         )
 
@@ -173,8 +174,6 @@ async def compact_messages_for_request(
 
 
 async def compact_chat_branch(request, user, chat: Any, model_id: str, models: dict) -> dict:
-    if await Config.get('chat.idle_tool_pruning.enable', True):
-        return {'ok': True, 'compacted': False, 'reason': 'idle_tool_pruning_preserves_dialogue'}
     config = await _load_config()
     if not config['enable']:
         return {'ok': True, 'compacted': False, 'reason': 'disabled'}
@@ -200,7 +199,13 @@ async def compact_chat_branch(request, user, chat: Any, model_id: str, models: d
     if not messages_map:
         messages_map = history.get('messages') or {}
 
-    messages, previous_summary = _apply_latest_summary_checkpoint(get_message_list(messages_map, current_id))
+    messages = get_message_list(messages_map, current_id)
+    metadata = {}
+    if await Config.get('chat.idle_tool_pruning.enable', True):
+        from open_webui.utils.idle_tool_pruning import replay_messages
+
+        messages = await replay_messages(chat.id, messages, metadata)
+    messages, previous_summary = _apply_latest_summary_checkpoint(messages)
     compacted_messages = messages[:-1]
     recent_messages = messages[-1:]
     if not compacted_messages or not recent_messages:
@@ -217,7 +222,16 @@ async def compact_chat_branch(request, user, chat: Any, model_id: str, models: d
         config['prompt_template'],
     )
     await Chats.upsert_message_to_chat_by_id_and_message_id(
-        chat.id, current_id, {'contextSummary': summary}, touch=False
+        chat.id,
+        current_id,
+        {
+            'contextSummary': summary,
+            'meta': {
+                **((messages_map.get(current_id) or {}).get('meta') or {}),
+                'context_summary_pruning': metadata.get('_idle_tool_pruning_signature'),
+            },
+        },
+        touch=False,
     )
 
     return {

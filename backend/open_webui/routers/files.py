@@ -45,7 +45,7 @@ from open_webui.routers.retrieval import ProcessFileForm, process_file
 from open_webui.storage.provider import Storage
 from open_webui.utils.auth import get_admin_user, get_verified_user
 from open_webui.utils.misc import strict_match_mime_type
-from open_webui.utils.native_pdf import should_defer_pdf_processing
+from open_webui.utils.native_pdf import should_defer_pdf_processing, validate_chat_pdf_upload
 from open_webui.utils.access_control.files import has_access_to_file
 from open_webui.utils.json_codec import JSONCodec
 from pydantic import BaseModel
@@ -548,6 +548,11 @@ async def upload_file_handler(
                     status_code=status.HTTP_400_BAD_REQUEST,
                     detail=ERROR_MESSAGES.DEFAULT(f'File type {file_extension} is not allowed'),
                 )
+
+        # Admission precedes durable storage, DB insertion and extraction. This
+        # applies to all chat models, even when processing was disabled by the
+        # caller; knowledge/channel uploads are intentionally exempt.
+        await asyncio.to_thread(validate_chat_pdf_upload, file_metadata, filename, file.content_type, file.file)
 
         # Prefer readable storage names for admins, but fall back if the filesystem rejects it.
         id = str(uuid.uuid4())

@@ -24,7 +24,9 @@ from open_webui.utils.native_pdf import (
     prepare_native_pdf_attachments,
     should_defer_pdf_processing,
     supports_native_pdf,
+    validate_chat_pdf_upload,
 )
+from pypdf import PdfWriter
 
 PDF_MODEL = {'info': {'meta': {'capabilities': {'native_pdf': True}}}}
 TEXT_MODEL = {'info': {'meta': {'capabilities': {'vision': True}}}}
@@ -200,12 +202,18 @@ async def test_actual_upload_handler_status_and_parse_branch(environment, metada
             'Files': SimpleNamespace(insert_new_file=insert),
             'FileForm': SimpleNamespace,
             'should_defer_pdf_processing': should_defer_pdf_processing,
+            'validate_chat_pdf_upload': validate_chat_pdf_upload,
             'process_uploaded_file': parser,
         },
     )
     request = SimpleNamespace(app=SimpleNamespace(state=SimpleNamespace(MODELS={'pdf': PDF_MODEL, 'text': TEXT_MODEL})))
     user = SimpleNamespace(id='owner', role='user', name='test', email='test@example.invalid')
-    file = UploadFile(filename='paper.pdf', file=io.BytesIO(PDF_BYTES))
+    writer = PdfWriter()
+    writer.add_blank_page(width=72, height=72)
+    pdf = io.BytesIO()
+    writer.write(pdf)
+    pdf.seek(0)
+    file = UploadFile(filename='paper.pdf', file=pdf)
     await handler(
         request,
         file=file,
@@ -219,6 +227,77 @@ async def test_actual_upload_handler_status_and_parse_branch(environment, metada
     assert inserted[0].data['status'] == ('completed' if native else 'pending')
     assert inserted[0].meta['data'].get('native_model_file') is (True if native else None)
     assert parser.await_count == (0 if native else 1)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('model', [PDF_MODEL, TEXT_MODEL])
+async def test_new_existing_file_id_cannot_bypass_page_limit(environment, model):
+    writer = PdfWriter()
+    for _ in range(21):
+        writer.add_blank_page(width=72, height=72)
+    writer.write(environment.path)
+    with pytest.raises(HTTPException) as error:
+        await prepare_native_pdf_attachments(
+            None,
+            [{'role': 'user', 'files': [attachment()]}],
+            [attachment()],
+            environment.user,
+            model,
+            new_attachment_ids={'pdf-id'},
+        )
+    assert error.value.status_code == 400
+    assert '21' in error.value.detail and '知识库' in error.value.detail
+    environment.process.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('model', [PDF_MODEL, TEXT_MODEL])
+async def test_historical_large_pdf_is_not_rejected_during_follow_up(environment, model):
+    writer = PdfWriter()
+    for _ in range(150):
+        writer.add_blank_page(width=72, height=72)
+    writer.write(environment.path)
+    assert await prepare_native_pdf_attachments(
+        None,
+        [{'role': 'user', 'files': [attachment()], 'content': 'Old upload'}, {'role': 'user', 'content': 'Continue'}],
+        [attachment()],
+        environment.user,
+        model,
+        new_attachment_ids=set(),
+    ) == (['pdf-id'] if model == PDF_MODEL else [])
+    assert environment.process.await_count == (0 if model == PDF_MODEL else 1)
+
+
+@pytest.mark.asyncio
+async def test_new_attachment_checks_access_before_reading_page_count(environment):
+    environment.user.id = 'unauthorized'
+    with pytest.raises(HTTPException) as error:
+        await prepare_native_pdf_attachments(
+            None,
+            [{'role': 'user', 'files': [attachment()]}],
+            [attachment()],
+            environment.user,
+            PDF_MODEL,
+            new_attachment_ids={'pdf-id'},
+        )
+    assert error.value.status_code == 404
+    environment.process.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_damaged_existing_file_cannot_bypass_new_attachment_check(environment):
+    with pytest.raises(HTTPException) as error:
+        await prepare_native_pdf_attachments(
+            None,
+            [{'role': 'user', 'files': [attachment()]}],
+            [attachment()],
+            environment.user,
+            PDF_MODEL,
+            new_attachment_ids={'pdf-id'},
+        )
+    assert error.value.status_code == 400
+    assert '页数' in error.value.detail
+    environment.process.assert_not_awaited()
 
 
 @pytest.mark.asyncio
