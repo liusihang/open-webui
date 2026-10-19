@@ -1582,7 +1582,20 @@ async def chat_completion(
                         if any(entry.get('message_id') != assistant_message_id for entry in message_ids):
                             raise HTTPException(status_code=400, detail='Invalid response ID.')
                         metadata['user_message_id'] = message.get('parentId')
-                    else:
+
+                    # Capture server activity before insert_chat_turn touches the
+                    # chat timestamp. No transcript content is modified here.
+                    from open_webui.utils.idle_tool_pruning import begin_request
+
+                    metadata['idle_tool_output_pruning'] = await begin_request(
+                        chat_id,
+                        assistant_message_id or user_message.get('id') or user_message.get('parentId'),
+                        (model.get('info') or {}).get('base_model_id') or model_id,
+                        parent_id=user_message.get('parentId'),
+                        active=await has_active_tasks(request.app.state.redis, chat_id),
+                        resume=bool(assistant_message_id or metadata.get('tool_approval_resume')),
+                    )
+                    if not assistant_message_id:
                         turn = await Chats.insert_chat_turn(chat_id, user, user_message, message_ids)
                         event_emitter = await get_event_emitter(
                             {**metadata, 'message_id': turn['currentId']}, update_db=False
@@ -1744,6 +1757,14 @@ async def chat_completion(
                         except Exception:
                             log.exception('Failed to publish chat failed event')
         finally:
+            if is_saved_chat_id(metadata.get('chat_id')):
+                try:
+                    from open_webui.utils.idle_tool_pruning import finish_request
+
+                    await asyncio.shield(finish_request(metadata['chat_id']))
+                except Exception:
+                    log.exception('Failed to record chat request activity')
+
             # Clean up MCP clients.  Each client is isolated so one
             # failure doesn't skip the rest.
             #

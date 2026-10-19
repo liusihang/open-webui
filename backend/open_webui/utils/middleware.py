@@ -2148,8 +2148,12 @@ async def uses_responses_api(request, model: dict) -> bool:
 
 
 def get_tool_loop_output_messages(
-    output: list[dict], responses_api: bool = False, reasoning_format: str | None = None
+    output: list[dict], responses_api: bool = False, reasoning_format: str | None = None, metadata: dict | None = None
 ) -> list[dict]:
+    if metadata and metadata.get('idle_tool_output_pruning'):
+        from open_webui.utils.idle_tool_pruning import mask_current_output
+
+        output = mask_current_output(output, metadata)
     if responses_api:
         # The caller supplies accumulated output for the entire assistant turn. Replace
         # this envelope on later iterations; don't append the same calls twice.
@@ -2444,6 +2448,17 @@ async def process_chat_payload(request, form_data, user, metadata, model):
     if regeneration_prompt:
         form_data['messages'].append({'role': 'user', 'content': regeneration_prompt})
 
+    # This mode owns replay reduction: text/native summaries must not restore
+    # removed tool payloads or erase user/assistant dialogue. Keep the full DB
+    # transcript and mask its deep request copy before image/tool conversion.
+    metadata['idle_tool_output_pruning'] = bool(
+        is_saved_chat_id(chat_id) and await Config.get('chat.idle_tool_pruning.enable', True)
+    )
+    if metadata['idle_tool_output_pruning']:
+        from open_webui.utils.idle_tool_pruning import replay_messages
+
+        form_data['messages'] = await replay_messages(chat_id, form_data.get('messages', []), metadata)
+
     context_summary = None
     if is_saved_chat_id(chat_id) and user_message_id:
         system_message = get_system_message(form_data.get('messages', []))
@@ -2464,6 +2479,15 @@ async def process_chat_payload(request, form_data, user, metadata, model):
 
     # Compact the full chain, but prepare history separately from the response being resumed.
     if pending_assistant_message is not None:
+        if metadata.get('idle_tool_output_pruning'):
+            pending_assistant_message = next(
+                (
+                    message
+                    for message in form_data['messages']
+                    if message.get('id') == pending_assistant_message.get('id')
+                ),
+                pending_assistant_message,
+            )
         form_data['messages'] = [
             message for message in form_data['messages'] if message.get('id') != pending_assistant_message.get('id')
         ]
@@ -3341,6 +3365,12 @@ async def process_chat_payload(request, form_data, user, metadata, model):
         if await resume_tool_calls(request, form_data, user, model, metadata, pending_assistant_message):
             return form_data, metadata, events, True
         assistant_message = dict(pending_assistant_message)
+        if metadata.get('idle_tool_output_pruning'):
+            from open_webui.utils.idle_tool_pruning import mask_current_output
+
+            # Resume completed tools using canonical DB/UI output, then mask
+            # only the provider copy. Never write these masks back as results.
+            assistant_message['output'] = mask_current_output(assistant_message.get('output') or [], metadata)
         if assistant_message.get('model') != model['id'] and isinstance(assistant_message.get('output'), list):
             assistant_message['output'] = strip_reasoning_details(assistant_message['output'])
         form_data['messages'].extend(
@@ -6301,6 +6331,7 @@ async def streaming_chat_response_handler(response, ctx):
                                 full_output() if responses_api else output,
                                 responses_api=responses_api,
                                 reasoning_format=get_reasoning_format(model),
+                                metadata=metadata,
                             )
 
                             # Chat Completions providers don't support multimodal
@@ -6650,11 +6681,10 @@ async def streaming_chat_response_handler(response, ctx):
                                 'metadata': metadata,
                                 'messages': [
                                     *messages,
-                                    *convert_output_to_messages(
+                                    *get_tool_loop_output_messages(
                                         output,
-                                        raw=True,
                                         reasoning_format=get_reasoning_format(model),
-                                        flatten_tool_images=True,
+                                        metadata=metadata,
                                     ),
                                 ],
                             }
@@ -6874,6 +6904,16 @@ async def streaming_chat_response_handler(response, ctx):
                 # Separate the error frame from any unfinished upstream event.
                 yield f'\n\ndata: {JSONCodec.dumps({"error": {"message": "Chat completion stream failed"}})}\n\n'
                 yield 'data: [DONE]\n\n'
+            finally:
+                # The no-emitter API stream outlives process_chat's response
+                # handoff. Record its actual end, including disconnect/cancel.
+                if save_to_chat:
+                    try:
+                        from open_webui.utils.idle_tool_pruning import finish_request
+
+                        await asyncio.shield(finish_request(chat_id))
+                    except Exception:
+                        log.exception('Failed to record streaming chat activity')
 
         return StreamingResponse(
             stream_wrapper(response.body_iterator, events),

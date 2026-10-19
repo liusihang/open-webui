@@ -556,6 +556,10 @@ async def compact_responses_payload(
     if metadata is None:
         metadata = {}
     metadata.pop('_native_token_usage', None)
+    if metadata.get('idle_tool_output_pruning'):
+        # Opaque checkpoints may contain erased tool payloads. This mode always
+        # replays its full dialogue with deterministic result masks instead.
+        return payload
     if not native_compaction_enabled(api_config, payload.get('model')) or metadata.get('task'):
         return payload
     config = await _load_config()

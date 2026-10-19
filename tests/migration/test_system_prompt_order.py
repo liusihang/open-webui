@@ -52,6 +52,9 @@ class PromptOrderTests(unittest.IsolatedAsyncioTestCase):
     def setUp(self):
         self.s = FIXTURE.scope()
         self.values = {
+            # These fixtures exercise the legacy compaction and prompt pipeline.
+            # Enabled idle-tool pruning has its own integration fixtures.
+            'chat.idle_tool_pruning.enable': False,
             'ui.enable_intelligent_ui': True,
             'task.voice.prompt.enable': True,
             'task.voice.prompt_template': 'VOICE_TOKEN',
