@@ -2251,6 +2251,10 @@ CONTEXT_COMPACTION_MODEL = os.getenv('CONTEXT_COMPACTION_MODEL', '')
 
 ENABLE_CONTEXT_COMPACTION = os.getenv('ENABLE_CONTEXT_COMPACTION', 'False').lower() == 'true'
 
+ENABLE_IDLE_TOOL_OUTPUT_PRUNING = os.getenv('ENABLE_IDLE_TOOL_OUTPUT_PRUNING', 'True').lower() == 'true'
+IDLE_TOOL_OUTPUT_PRUNING_IDLE_SECONDS = max(1, int(os.getenv('IDLE_TOOL_OUTPUT_PRUNING_IDLE_SECONDS', '1560')))
+IDLE_TOOL_OUTPUT_PRUNING_TOKEN_BUDGET = max(0, int(os.getenv('IDLE_TOOL_OUTPUT_PRUNING_TOKEN_BUDGET', '4000')))
+
 ENABLE_TOOL_PERMISSIONS = os.getenv('ENABLE_TOOL_PERMISSIONS', 'False').lower() == 'true'
 
 CONTEXT_COMPACTION_TOKEN_THRESHOLD = int(os.getenv('CONTEXT_COMPACTION_TOKEN_THRESHOLD', '80000'))
@@ -3273,6 +3277,9 @@ DEFAULT_CONFIG = {
     'chat.context_compaction.token_cap': CONTEXT_COMPACTION_TOKEN_CAP,
     'chat.context_compaction.retention_percentage': CONTEXT_COMPACTION_RETENTION_PERCENTAGE,
     'chat.context_compaction.prompt_template': CONTEXT_COMPACTION_PROMPT_TEMPLATE,
+    'chat.idle_tool_pruning.enable': ENABLE_IDLE_TOOL_OUTPUT_PRUNING,
+    'chat.idle_tool_pruning.idle_seconds': IDLE_TOOL_OUTPUT_PRUNING_IDLE_SECONDS,
+    'chat.idle_tool_pruning.token_budget': IDLE_TOOL_OUTPUT_PRUNING_TOKEN_BUDGET,
     'chat.tool_permissions.enable': ENABLE_TOOL_PERMISSIONS,
     'chat.tool_search.enable': ENABLE_TOOL_SEARCH,
     'chat.tool_search.defer_threshold': TOOL_SEARCH_DEFER_THRESHOLD,

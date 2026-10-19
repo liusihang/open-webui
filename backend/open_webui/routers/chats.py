@@ -48,7 +48,7 @@ from open_webui.utils.context_compaction import compact_chat_branch, get_chat_co
 from open_webui.utils.json_codec import JSONCodec
 from open_webui.utils.misc import get_message_list
 from open_webui.utils.models import get_all_models
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from sqlalchemy.ext.asyncio import AsyncSession
 
 log = logging.getLogger(__name__)
@@ -63,6 +63,9 @@ CHAT_CONFIG_KEYS = {
     'CONTEXT_COMPACTION_RETENTION_PERCENTAGE': 'chat.context_compaction.retention_percentage',
     'CONTEXT_COMPACTION_PROMPT_TEMPLATE': 'chat.context_compaction.prompt_template',
     'CONTEXT_COMPACTION_SUMMARY_EXCLUDED_MODELS': 'chat.context_compaction.summary_excluded_models',
+    'ENABLE_IDLE_TOOL_OUTPUT_PRUNING': 'chat.idle_tool_pruning.enable',
+    'IDLE_TOOL_OUTPUT_PRUNING_IDLE_SECONDS': 'chat.idle_tool_pruning.idle_seconds',
+    'IDLE_TOOL_OUTPUT_PRUNING_TOKEN_BUDGET': 'chat.idle_tool_pruning.token_budget',
     'ENABLE_TOOL_PERMISSIONS': 'chat.tool_permissions.enable',
     'ENABLE_TOOL_SEARCH': 'chat.tool_search.enable',
     'TOOL_SEARCH_DEFER_THRESHOLD': 'chat.tool_search.defer_threshold',
@@ -208,6 +211,9 @@ class ChatConfigForm(BaseModel):
     CONTEXT_COMPACTION_RETENTION_PERCENTAGE: int | None = None
     CONTEXT_COMPACTION_PROMPT_TEMPLATE: str
     CONTEXT_COMPACTION_SUMMARY_EXCLUDED_MODELS: list[str] = []
+    ENABLE_IDLE_TOOL_OUTPUT_PRUNING: bool = True
+    IDLE_TOOL_OUTPUT_PRUNING_IDLE_SECONDS: int = Field(default=1560, ge=1)
+    IDLE_TOOL_OUTPUT_PRUNING_TOKEN_BUDGET: int = Field(default=4000, ge=0)
     ENABLE_TOOL_PERMISSIONS: bool = False
     ENABLE_TOOL_SEARCH: bool = False
     TOOL_SEARCH_DEFER_THRESHOLD: int = 400
@@ -913,7 +919,18 @@ async def set_chat_config(form_data: ChatConfigForm, user=Depends(get_admin_user
     await Config.upsert(
         chat_config_updates(
             {
-                **form_data.model_dump(),
+                **form_data.model_dump(
+                    exclude={
+                        'ENABLE_IDLE_TOOL_OUTPUT_PRUNING',
+                        'IDLE_TOOL_OUTPUT_PRUNING_IDLE_SECONDS',
+                        'IDLE_TOOL_OUTPUT_PRUNING_TOKEN_BUDGET',
+                    }
+                ),
+                **{
+                    key: value
+                    for key, value in form_data.model_dump(exclude_unset=True).items()
+                    if key.startswith(('ENABLE_IDLE_TOOL_', 'IDLE_TOOL_'))
+                },
                 'CONTEXT_COMPACTION_MODEL': form_data.CONTEXT_COMPACTION_MODEL or '',
                 'CONTEXT_COMPACTION_TOKEN_THRESHOLD': threshold,
                 'CONTEXT_COMPACTION_TOKEN_CAP': token_cap,

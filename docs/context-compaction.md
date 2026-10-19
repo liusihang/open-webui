@@ -1,6 +1,75 @@
 # Context compaction
 
-Automatic compaction uses the existing admin **Interface → Context compaction**
+## Idle tool-output pruning (default)
+
+Saved chats now default to deterministic tool-output pruning instead of summary
+compaction. After **more than 26 minutes** without a chat request/activity, the
+next new turn retains at most **4000 tokens of original completed tool-result
+text in aggregate**, newest results first. This is neither a character limit nor
+a per-tool limit. No LLM summary is generated and there is no frontend pause or
+confirmation. All user messages and assistant prose, including commentary,
+remain in the request. The full original messages and tool results remain in the
+database and UI.
+
+Configuration is available through environment defaults and the existing admin
+`GET/POST /api/v1/chats/config` endpoint (GET the current config, change the desired
+fields, then POST it):
+
+- `ENABLE_IDLE_TOOL_OUTPUT_PRUNING`: `true` by default
+- `IDLE_TOOL_OUTPUT_PRUNING_IDLE_SECONDS`: `1560`, minimum `1`
+- `IDLE_TOOL_OUTPUT_PRUNING_TOKEN_BUDGET`: `4000`, minimum `0`
+
+The database keys are `chat.idle_tool_pruning.enable`, `.idle_seconds`, and
+`.token_budget`. Existing admin UI saves preserve these fields when omitted.
+This mode takes precedence over automatic/manual text summaries and native
+Responses compaction, including old checkpoints. Disable it to restore the
+existing compaction behavior described below. This precedence applies from the
+first request, not only after an idle episode: old summaries cannot silently
+remove dialogue or reintroduce discarded results. Disabling does not erase masks;
+reenabling resumes them for unchanged results.
+
+### Retention and safety details
+
+- Only completed assistant turns with completed, paired function results or
+  completed legacy code-interpreter results are eligible. Call IDs, names,
+  arguments, code, ordering and result envelopes remain intact. The last result
+  that fits partially retains its text prefix; older result bodies become empty
+  `input_text` parts (or an empty legacy interpreter result). A partial result
+  gets a short `[truncated]` marker. The source-content budget excludes these
+  small markers and protocol framing; it is not a total request-size cap.
+- Tool-result images and other non-text payload parts from eligible old turns
+  are omitted before conversion to synthetic user/image messages. A text
+  tokenizer cannot reliably budget their provider-specific cost. Genuine user
+  attachments and new tool images remain untouched.
+- A real `tiktoken` encoding is selected for known model IDs. Unknown/custom or
+  prefixed IDs use `cl100k_base` with a warning: this is a local tokenizer budget,
+  **not an exact provider token count**. If tokenizer data cannot be loaded,
+  eligible old result bodies are conservatively omitted (zero retained source
+  tokens), with an error log; there is no character-count approximation or LLM
+  fallback. Tokenization runs off the event loop.
+- The server records activity before inserting the next turn and after request
+  completion, cancellation or failure. UI/title/read-status changes do not
+  reset that clock. On the first request after migration only, the existing
+  server chat timestamp bootstraps the clock. Client timestamps are ignored.
+  Active registered work, Continue/approval-resume requests and a pending
+  assistant on the selected branch never start a new pruning episode.
+- Durable server-only masks are stored separately from the chat transcript and
+  serialized with chat writes (SQLite immediate transaction / PostgreSQL row
+  lock). They identify each original result and retain only prefix offsets,
+  not copied result content. Subsequent requests and tool-loop continuations
+  reuse the masks; new output remains until a later idle episode. Repeated
+  episodes may shrink a mask but never expand it. Changing the model or removing
+  a newer result does not refill old output. Edited result bodies are new
+  evidence; stable IDs survive inserted commentary.
+- Only the requested branch is considered. Sibling-only results are untouched;
+  masks of genuinely shared ancestor results also apply to those ancestors on
+  other branches. Concurrent requests serialize the idle decision, so only the
+  first can create a new episode. Temporary/unsaved chats are unchanged.
+
+User- or assistant-prose-heavy chats can still exceed an upstream context window.
+This feature intentionally does not silently summarize or remove that dialogue.
+
+With idle tool-output pruning disabled, automatic compaction uses the existing admin **Interface → Context compaction**
 switch and token threshold. It does not delete the original chat transcript.
 The threshold triggers compaction; it is not a hard maximum request size.
 

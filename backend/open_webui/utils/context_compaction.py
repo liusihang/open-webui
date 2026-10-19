@@ -51,6 +51,11 @@ async def compact_messages_for_request(
     models: dict,
     system_prompt: str = '',
 ) -> tuple[list[dict], str | None, bool]:
+    if metadata.get('idle_tool_output_pruning'):
+        # Already replayed from the complete transcript with durable tool masks.
+        # Also applies inside the tool loop; never summarize this mode.
+        return messages, None, False
+
     config = await _load_config()
     from open_webui.utils.native_compaction import uses_native_compaction
 
@@ -168,6 +173,8 @@ async def compact_messages_for_request(
 
 
 async def compact_chat_branch(request, user, chat: Any, model_id: str, models: dict) -> dict:
+    if await Config.get('chat.idle_tool_pruning.enable', True):
+        return {'ok': True, 'compacted': False, 'reason': 'idle_tool_pruning_preserves_dialogue'}
     config = await _load_config()
     if not config['enable']:
         return {'ok': True, 'compacted': False, 'reason': 'disabled'}
