@@ -210,9 +210,15 @@ class EvidenceService:
             if ref not in rows:
                 # Indistinguishable absent/unauthorized/old version; never redirect to new content.
                 items.append({'evidence_ref': ref, 'status': 'unavailable'})
-            elif seen_refs is None or ref not in seen_refs:
+            else:
                 items.append(self._item(rows[ref], scope))
-        return {'items': self._deduplicate(items, seen_refs), 'warnings': []}
+        # Explicit reads must work even after search/read returned the reference.
+        # Deduplicate this response only, while retaining history for later searches.
+        read_refs = set()
+        items = self._deduplicate(items, read_refs)
+        if seen_refs is not None:
+            seen_refs.update(read_refs)
+        return {'items': items, 'warnings': []}
 
     async def resolve_query_image(self, reference, *, user, resolved_scope):  # noqa: C901
         """Accept a stored asset/evidence ID or uploaded file ID; authorize before reading bytes."""

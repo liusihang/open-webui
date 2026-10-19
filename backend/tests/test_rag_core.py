@@ -345,7 +345,8 @@ async def test_update_text_publishes_without_old_images_and_rejects_stale_versio
         space_id=stack.space.id,
     )
     assert result['text_mapped'] == 1 and result['images']['status'] == 'failed'
-    read = await stack.search.read(old_refs, user=READER, resolved_scope=SCOPE)
+    read = await stack.search.read(old_refs, user=READER, resolved_scope=SCOPE, seen_refs=set(old_refs))
+    assert [item['evidence_ref'] for item in read['items']] == old_refs
     assert all(item['status'] == 'unavailable' for item in read['items'])
     visible = await stack.search._rows(SCOPE)
     assert all(parts[0].file_version == 2 for parts in visible.values())
@@ -454,6 +455,31 @@ async def test_same_turn_dedup_keeps_different_document_identity(db, stack):
     first = await stack.search.search('square', user=READER, resolved_scope=SCOPE, seen_refs=seen)
     assert len(first['items']) == 1
     assert (await stack.search.search('square', user=READER, resolved_scope=SCOPE, seen_refs=seen))['items'] == []
+
+
+@pytest.mark.asyncio
+async def test_explicit_evidence_read_after_search_and_repeated_read(db, stack):
+    await seed(stack)
+    seen = set()
+    found = await stack.search.search('square', user=READER, resolved_scope=SCOPE, seen_refs=seen)
+    ref = found['items'][0]['evidence_ref']
+    first = await stack.search.read([ref, ref], user=READER, resolved_scope=SCOPE, seen_refs=seen)
+    assert len(first['items']) == 1
+    assert first['items'][0]['content'] == text_chunk()['text']
+    assert (await stack.search.read([ref], user=READER, resolved_scope=SCOPE, seen_refs=seen)) == first
+    assert (await stack.search.search('square', user=READER, resolved_scope=SCOPE, seen_refs=seen))['items'] == []
+
+
+@pytest.mark.asyncio
+async def test_explicit_evidence_reread_rechecks_revoked_access(db, stack):
+    await seed(stack)
+    seen = set()
+    found = await stack.search.search('square', user=READER, resolved_scope=SCOPE, seen_refs=seen)
+    ref = found['items'][0]['evidence_ref']
+    await db.execute(delete(AccessGrant))
+    await db.commit()
+    reread = await stack.search.read([ref], user=READER, resolved_scope=SCOPE, seen_refs=seen)
+    assert reread == {'items': [{'evidence_ref': ref, 'status': 'unavailable'}], 'warnings': []}
 
 
 @pytest.mark.asyncio
