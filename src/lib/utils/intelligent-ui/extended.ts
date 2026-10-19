@@ -99,7 +99,15 @@ const array = (v: unknown, max: number): any[] =>
 	Array.isArray(v) && v.length > 0 && v.length <= max ? v : fail();
 const optional = (p: Record<string, any>, k: string, max = 512) =>
 	p[k] === undefined ? {} : { [k]: str(p[k], max) };
-export function safeImageUrl(input: unknown): string {
+// Only the canonical file-content route is accepted; never arbitrary same-origin URLs or paths.
+export function imageFileId(src: string): string | null {
+	return (
+		/^\/api\/v1\/files\/([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})\/content$/i.exec(
+			src
+		)?.[1] ?? null
+	);
+}
+function publicImageUrl(input: unknown): string {
 	const raw = required(input, 2048);
 	let u: URL;
 	try {
@@ -122,6 +130,10 @@ export function safeImageUrl(input: unknown): string {
 		return fail();
 	return u.href;
 }
+export function safeImageUrl(input: unknown): string {
+	const raw = required(input, 2048);
+	return imageFileId(raw) ? raw : publicImageUrl(raw);
+}
 const image = (v: unknown): ImageProps => {
 	const p = obj(v);
 	fields(p, ['src', 'alt', 'caption', 'source']);
@@ -129,7 +141,7 @@ const image = (v: unknown): ImageProps => {
 		src: safeImageUrl(p.src),
 		alt: str(p.alt, 512),
 		...optional(p, 'caption'),
-		...(p.source === undefined ? {} : { source: safeImageUrl(p.source) })
+		...(p.source === undefined ? {} : { source: publicImageUrl(p.source) })
 	};
 };
 const date = (v: unknown): string => {

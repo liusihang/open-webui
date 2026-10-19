@@ -90,6 +90,29 @@ describe('bounded extended UI protocol', () => {
 		])
 			expect(() => safeImageUrl(url)).toThrow();
 	});
+	it('accepts exact authenticated file references in Image and ImageGallery, not source links', () => {
+		const src = '/api/v1/files/11111111-1111-4111-8111-111111111111/content';
+		expect(safeImageUrl(src)).toBe(src);
+		expect(validate(node('Image', { src, alt: 'Terminal plot' })).props).toMatchObject({ src });
+		expect(validate(node('ImageGallery', { images: [{ src, alt: 'Plot' }] })).props).toMatchObject({
+			images: [{ src, alt: 'Plot' }]
+		});
+		expect(() => validate(node('Image', { src, alt: 'Plot', source: src }))).toThrow();
+	});
+	it.each([
+		'/home/user/plot.png',
+		'file:///home/user/plot.png',
+		'//example.org/plot.png',
+		'/api/v1/files/not-a-file-id/content',
+		'/api/v1/files/11111111-1111-4111-8111-111111111111/content?token=secret',
+		'/api/v1/files/11111111-1111-4111-8111-111111111111/content/html',
+		'/api/v1/files/11111111-1111-4111-8111-111111111111/../content',
+		'/api/v1/terminals/terminals/files/view?path=/home/user/plot.png',
+		'/api/v1/files/%2e%2e/content',
+		' /api/v1/files/11111111-1111-4111-8111-111111111111/content'
+	])('rejects noncanonical internal image reference %s', (src) => {
+		expect(() => safeImageUrl(src)).toThrow();
+	});
 	it('strictly allows only inert SVG geometry', () => {
 		const svg =
 			'<svg viewBox="0 0 20 20"><title>Shape</title><circle cx="10" cy="10" r="8" fill="currentColor"/></svg>';

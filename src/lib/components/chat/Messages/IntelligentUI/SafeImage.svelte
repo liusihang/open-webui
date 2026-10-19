@@ -4,13 +4,42 @@
 	import type { i18n as I18n } from 'i18next';
 	const i18n = getContext<Readable<I18n>>('i18n');
 	import type { ImageProps } from '$lib/utils/intelligent-ui/extended';
+	import { imageFileId } from '$lib/utils/intelligent-ui/extended';
+	import { getFileBlobById } from '$lib/apis/files';
 	let { image }: { image: ImageProps } = $props();
 	let loaded = $state(false);
 	let failed = $state(false);
+	let fileSrc = $state('');
+	let displaySrc = $derived(imageFileId(image.src) ? fileSrc : image.src);
 	$effect(() => {
-		image.src;
+		const fileId = imageFileId(image.src);
 		loaded = false;
 		failed = false;
+		fileSrc = '';
+		if (!fileId) return;
+		const controller = new AbortController();
+		let active = true;
+		let objectUrl = '';
+		void (async () => {
+			try {
+				const blob = await getFileBlobById(localStorage.token ?? '', fileId, {
+					signal: controller.signal
+				});
+				if (!active) return;
+				if (!/^image\/(png|jpeg|gif|webp|avif|bmp|x-icon|vnd\.microsoft\.icon)$/i.test(blob.type)) {
+					throw new Error('Not a supported raster image');
+				}
+				objectUrl = URL.createObjectURL(blob);
+				fileSrc = objectUrl;
+			} catch {
+				if (active) failed = true;
+			}
+		})();
+		return () => {
+			active = false;
+			controller.abort();
+			if (objectUrl) URL.revokeObjectURL(objectUrl);
+		};
 	});
 </script>
 
@@ -21,19 +50,19 @@
 			{#if !loaded}<span class="absolute text-sm text-gray-500" role="status"
 					>{$i18n.t('Loading image…')}</span
 				>{/if}
-			<img
-				src={image.src}
-				alt={image.alt}
-				loading="lazy"
-				decoding="async"
-				referrerpolicy="no-referrer"
-				class="relative max-h-96 w-full object-contain"
-				onload={() => (loaded = true)}
-				onerror={() => {
-					failed = true;
-					loaded = false;
-				}}
-			/>
+			{#if displaySrc}<img
+					src={displaySrc}
+					alt={image.alt}
+					loading="lazy"
+					decoding="async"
+					referrerpolicy="no-referrer"
+					class="relative max-h-96 w-full object-contain"
+					onload={() => (loaded = true)}
+					onerror={() => {
+						failed = true;
+						loaded = false;
+					}}
+				/>{/if}
 		{/if}
 	</div>
 	{#if image.caption || image.source}<figcaption class="space-y-1 p-3 text-sm">
