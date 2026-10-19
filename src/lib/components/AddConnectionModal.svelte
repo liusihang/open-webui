@@ -232,10 +232,13 @@
 		// remove trailing slash from url
 		url = url.replace(/\/$/, '');
 
-		const connection = {
+		const nextConnection = {
+			...connection,
 			url,
 			key,
 			config: {
+				// Preserve admin/API-only capabilities and permissions when editing UI fields.
+				...connection?.config,
 				enable: enable,
 				tags: tags,
 				prefix_id: prefixId,
@@ -245,14 +248,14 @@
 				...(!direct && !ollama ? { forward_cookies: forwardCookies } : {}),
 				headers: headers ? JSON.parse(headers) : undefined,
 				passthrough_params: parsePassthroughParams(passthroughParams),
-				...(provider ? { provider } : {}),
-				...(!ollama && azure ? { azure: true } : {}),
-				...(azure ? { api_version: apiVersion } : {}),
-				...(apiType ? { api_type: apiType } : {})
+				provider: provider || undefined,
+				azure: !ollama && azure ? true : undefined,
+				api_version: azure ? apiVersion : undefined,
+				api_type: apiType || undefined
 			}
 		};
 
-		await onSubmit(connection);
+		await onSubmit(nextConnection);
 
 		loading = false;
 		show = false;

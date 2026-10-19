@@ -2136,6 +2136,10 @@ async def uses_responses_api(request, model: dict) -> bool:
 
     model_id = getattr(request, 'base_model_id', None) or (model.get('info') or {}).get('base_model_id') or model['id']
     provider_model = request.app.state.OPENAI_MODELS.get(model_id)
+    if not provider_model and model_id == model['id'] and 'urlIdx' in model:
+        # Base models may already be in the shared catalog while this worker's
+        # provider catalog is cold. Use the same server-resolved connection.
+        provider_model = model
     if not provider_model or 'urlIdx' not in provider_model:
         return False
     _, _, config = await get_openai_connection(provider_model['urlIdx'])
@@ -2306,6 +2310,9 @@ async def process_chat_payload(request, form_data, user, metadata, model):
     metadata.pop('native_pdf_file_ids', None)
     metadata.pop('rag_query_image_refs', None)
     metadata.pop('_context_summary_prompt', None)
+    metadata.pop('_dynamic_memory_context', None)
+    metadata.pop('_dynamic_memory_user_count', None)
+    metadata.pop('_native_token_usage', None)
     # Ensure chat_id is always a string — external API clients may omit it.
     if not isinstance(metadata.get('chat_id'), str):
         metadata['chat_id'] = ''
@@ -2670,7 +2677,7 @@ async def process_chat_payload(request, form_data, user, metadata, model):
                 'features.memories',
                 await Config.get('user.permissions'),
             ):
-                form_data = await add_memory_context(request, form_data, user, model)
+                form_data = await add_memory_context(request, form_data, user, model, metadata=metadata)
 
         if 'web_search' in features and features['web_search'] and await Config.get('web.search.enable'):
             # features is client-supplied; re-check the permission the native FC path enforces.
@@ -3317,6 +3324,9 @@ async def process_chat_payload(request, form_data, user, metadata, model):
                 },
             }
         )
+
+    if metadata.get('_dynamic_memory_context'):
+        metadata['_dynamic_memory_user_count'] = sum(message.get('role') == 'user' for message in form_data['messages'])
 
     if pending_assistant_message is not None:
         if await resume_tool_calls(request, form_data, user, model, metadata, pending_assistant_message):
@@ -5157,6 +5167,14 @@ async def streaming_chat_response_handler(response, ctx):
                                 # Check for Responses API events
                                 elif data.get('type', '').startswith('response.') or data.get('type', '') == 'error':
                                     response_data_type = data.get('type', '')
+                                    if response_data_type == 'response.completed':
+                                        from open_webui.utils.native_compaction import save_native_token_usage
+
+                                        await save_native_token_usage(
+                                            user,
+                                            getattr(response, '_native_token_usage_metadata', metadata),
+                                            data.get('response') or {},
+                                        )
                                     response_data_is_delta = response_data_type.endswith('.delta')
                                     output, response_metadata = handle_responses_streaming_event(data, output)
 
@@ -6379,6 +6397,23 @@ async def streaming_chat_response_handler(response, ctx):
                                 log.exception('Tool loop context compaction failed; keeping the current context')
 
                             # Use the existing checkpoint format internally and strip it from the provider payload.
+                            if metadata.get('_dynamic_memory_context') and user_prompt is not None:
+                                # Text compaction can move the current user ahead of
+                                # retained tool history; keep the final-only data on
+                                # that user, not a generated tool-image user message.
+                                anchor = next(
+                                    (
+                                        i
+                                        for i in range(len(messages) - 1, -1, -1)
+                                        if messages[i].get('role') == 'user'
+                                        and messages[i].get('content') == user_prompt.get('content')
+                                    ),
+                                    None,
+                                )
+                                if anchor is not None:
+                                    metadata['_dynamic_memory_user_count'] = sum(
+                                        message.get('role') == 'user' for message in messages[: anchor + 1]
+                                    )
                             new_form_data['messages'] = process_messages_with_output(
                                 messages, responses_api=responses_api
                             )
