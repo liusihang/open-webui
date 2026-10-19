@@ -47,6 +47,31 @@ class PruningTests(unittest.TestCase):
     def plan(self, messages, budget=4000, masks=None):
         return pruning.plan_masks(messages, masks or {}, budget, 'gpt-4')[0]
 
+    def test_pruning_preserves_terminal_and_ui_system_prompts(self):
+        terminal_tree = ast.parse((ROOT / 'backend/open_webui/utils/terminals.py').read_text())
+        terminal_prompt = ast.literal_eval(
+            next(
+                node.value
+                for node in terminal_tree.body
+                if isinstance(node, ast.Assign)
+                and any(
+                    isinstance(target, ast.Name) and target.id == 'TERMINAL_SYSTEM_PROMPT' for target in node.targets
+                )
+            )
+        )
+        ui = load_module('idle_pruning_ui_prompt', ROOT / 'backend/open_webui/utils/intelligent_ui.py')
+        system = {
+            'role': 'system',
+            'content': 'Base instructions.\n' + ui.INTELLIGENT_UI_PROMPT + '\n' + terminal_prompt,
+        }
+        user = {'role': 'user', 'content': 'Continue analysing my files.'}
+        history = [system, user, assistant('terminal', ' original terminal output' * 3000)]
+        original = copy.deepcopy(history)
+        result = pruning.apply_masks(history, self.plan(history, 40))
+        self.assertEqual(result[:2], [system, user])
+        self.assertEqual(history, original)
+        self.assertLessEqual(len(self.encoding.encode(visible_content(result[-1]))), 40)
+
     def test_4000_aggregate_tokens_not_characters_or_per_result(self):
         history = [assistant('old', ' old' * 3500), assistant('new', ' new' * 3000)]
         original = copy.deepcopy(history)

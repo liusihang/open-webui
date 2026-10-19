@@ -17,6 +17,17 @@ SOURCE = ROOT / 'backend/open_webui/utils/tools.py'
 
 class TerminalSessionDiscoveryTests(unittest.IsolatedAsyncioTestCase):
     def setUp(self):
+        terminal_tree = ast.parse((ROOT / 'backend/open_webui/utils/terminals.py').read_text())
+        self.terminal_prompt = ast.literal_eval(
+            next(
+                node.value
+                for node in terminal_tree.body
+                if isinstance(node, ast.Assign)
+                and any(
+                    isinstance(target, ast.Name) and target.id == 'TERMINAL_SYSTEM_PROMPT' for target in node.targets
+                )
+            )
+        )
         self.session = {
             'id': 'session',
             'url': 'http://terminals.internal',
@@ -120,6 +131,10 @@ class TerminalSessionDiscoveryTests(unittest.IsolatedAsyncioTestCase):
             terminal_context_id=lambda conn, meta, context: None,
             terminal_context_config=lambda conn, context: {},
             TERMINAL_CONTEXT_HEADER='X-Terminal-Context-Id',
+            TERMINAL_SYSTEM_PROMPT=self.terminal_prompt,
+            is_terminal_orchestrator=lambda connection: (
+                connection.get('server_type') == 'orchestrator' or bool(connection.get('policy_id'))
+            ),
             get_terminal_cwd=AsyncMock(side_effect=cwd),
             get_terminal_system_prompt=AsyncMock(side_effect=prompt),
             add_terminal_display_file_inline_param=lambda spec: copy.deepcopy(spec),
@@ -147,11 +162,12 @@ class TerminalSessionDiscoveryTests(unittest.IsolatedAsyncioTestCase):
             self.request(credential), terminal, SimpleNamespace(id=user), {'__metadata__': {'chat_id': 'chat-' + user}}
         )
 
-    async def test_two_users_fetch_separate_schema_prompt_and_command_credentials(self):
+    async def test_two_users_share_guidance_but_not_schema_cwd_or_command_credentials(self):
         frozen = copy.deepcopy(self.state.TERMINAL_SERVERS)
         first, prompt_a = await self.resolve()
         second, prompt_b = await self.resolve('user-b', 'session-JWT-B')
-        self.assertEqual((prompt_a, prompt_b), ('prompt-user-a', 'prompt-user-b'))
+        self.assertEqual((prompt_a, prompt_b), (self.terminal_prompt, self.terminal_prompt))
+        self.scope['get_terminal_system_prompt'].assert_not_awaited()
         self.assertIn('schema-user-a', first['run_command']['spec']['description'])
         self.assertIn('/home/user-a', first['run_command']['spec']['description'])
         self.assertIn('schema-user-b', second['run_command']['spec']['description'])
@@ -190,11 +206,47 @@ class TerminalSessionDiscoveryTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_bearer_direct_still_uses_existing_shared_schema(self):
         tools, prompt = await self.resolve(terminal='direct')
+        self.assertEqual(prompt, 'prompt-direct')
         self.cache.assert_awaited_once()
         self.scope['get_tool_servers_data'].assert_not_awaited()
         self.assertIn('cached-direct', tools['run_command']['spec']['description'])
         await tools['run_command']['callable'](command='true')
         self.assertEqual(self.calls[0]['headers']['Authorization'], 'Bearer static-direct-key')
+
+    async def test_managed_prompt_does_not_require_working_directory_fetch(self):
+        self.session['config'] = {'working_directory_context': False}
+        _, prompt = await self.resolve()
+        self.assertEqual(prompt, self.terminal_prompt)
+        self.scope['get_terminal_cwd'].assert_not_awaited()
+        self.scope['get_terminal_system_prompt'].assert_not_awaited()
+
+    async def test_explicit_orchestrator_without_policy_uses_managed_prompt(self):
+        self.session.pop('policy_id')
+        self.session['server_type'] = 'orchestrator'
+        _, prompt = await self.resolve()
+        self.assertEqual(prompt, self.terminal_prompt)
+
+    async def test_other_session_terminal_keeps_its_own_prompt(self):
+        self.session.pop('policy_id')
+        _, prompt = await self.resolve()
+        self.assertEqual(prompt, 'prompt-user-a')
+
+    async def test_managed_prompt_contains_the_requested_workflow(self):
+        _, prompt = await self.resolve()
+        for fragment in (
+            'Open WebUI 的 Open Terminal 为你提供可执行命令、运行代码和处理文件的计算环境。',
+            '先检查当前附件和工作区',
+            '每次命令使用新的 shell',
+            '没有输出本身不能证明成功',
+            '等待超时不表示进程被终止',
+            'next_offset',
+            '维护一份简短进度记录',
+            '保留无关的用户改动',
+            '不能自行扩大任务或操作权限',
+            '通过可用的 display_file 工具交付',
+        ):
+            self.assertIn(fragment, prompt)
+        self.assertNotIn('that typically means it succeeded', prompt)
 
     async def test_permissions_win_before_network(self):
         self.scope['has_connection_access'].return_value = False
