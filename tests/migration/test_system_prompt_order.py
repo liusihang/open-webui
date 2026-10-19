@@ -112,6 +112,7 @@ class PromptOrderTests(unittest.IsolatedAsyncioTestCase):
             ENABLE_FUNCTIONS=False,
             ENABLE_TOOL_SERVERS=True,
             DEFAULT_VOICE_MODE_PROMPT_TEMPLATE='DEFAULT_VOICE_TOKEN',
+            TOOL_USAGE_PROMPT='TOOL_USAGE_TOKEN',
             get_intelligent_ui_prompt=lambda enabled: 'UI_TOKEN' if enabled is True else None,
             apply_skills_create_prompt=lambda *args, **kwargs: False,
             has_prior_user_message=lambda msgs: True,

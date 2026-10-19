@@ -15,6 +15,7 @@ ROOT = Path(__file__).resolve().parents[2]
 MIDDLEWARE = ROOT / 'backend/open_webui/utils/middleware.py'
 MISC = ROOT / 'backend/open_webui/utils/misc.py'
 ROUTER = ROOT / 'backend/open_webui/routers/openai.py'
+RESPONSE = ROOT / 'backend/open_webui/utils/response.py'
 
 
 def load_function(path, name, scope):
@@ -109,6 +110,87 @@ class NativeHistoryTests(unittest.TestCase):
         messages = self.s['sanitize_tool_pairs'](messages)
         body = self.s['normalize_messages_for_model']({'messages': messages})
         return self.s['convert_to_responses_payload'](body)['input']
+
+    def stream(self, events):
+        load_function(RESPONSE, 'deep_merge', self.s)
+        reduce_event = load_function(RESPONSE, 'handle_responses_streaming_event', self.s)
+        output, snapshots, metadata = [], [], []
+        for event in events:
+            output, update = reduce_event(event, output)
+            snapshots.append(copy.deepcopy(output))
+            metadata.append(update)
+        return output, snapshots, metadata
+
+    def test_native_commentary_stream_tool_continuation_and_final_replay(self):
+        _, commentary, call, result, final = history()
+        output, snapshots, metadata = self.stream(
+            [
+                {
+                    'type': 'response.output_item.added',
+                    'output_index': 0,
+                    'item': {**commentary, 'content': [], 'status': 'in_progress'},
+                },
+                {'type': 'response.output_text.delta', 'output_index': 0, 'delta': 'Checking.'},
+                {'type': 'response.output_item.done', 'output_index': 0, 'item': commentary},
+                {'type': 'response.output_item.added', 'output_index': 1, 'item': call},
+                {'type': 'response.completed', 'response': {'id': 'r1', 'output': [commentary, call]}},
+            ]
+        )
+        self.assertEqual(snapshots[1][0]['phase'], 'commentary')
+        self.assertEqual(snapshots[1][0]['content'][0]['text'], 'Checking.')
+        self.assertFalse(any(update and update.get('done') for update in metadata[:-1]))
+        self.assertTrue(metadata[-1]['done'])  # Provider response ended, not the application tool loop.
+        following, _, _ = self.stream(
+            [
+                {
+                    'type': 'response.output_item.added',
+                    'output_index': 0,
+                    'item': {**final, 'content': [], 'status': 'in_progress'},
+                },
+                {'type': 'response.output_text.delta', 'output_index': 0, 'delta': '42'},
+                {'type': 'response.output_item.done', 'output_index': 0, 'item': final},
+                {'type': 'response.completed', 'response': {'id': 'r2', 'output': [final]}},
+            ]
+        )
+        saved_output = [*output, result, *following]
+        frozen = copy.deepcopy(saved_output)
+        items = self.replay(saved_output)
+        self.assertEqual(
+            [item['type'] for item in items], ['message', 'function_call', 'function_call_output', 'message']
+        )
+        self.assertEqual([item['phase'] for item in items if item['type'] == 'message'], ['commentary', 'final_answer'])
+        self.assertEqual(items[1]['call_id'], items[2]['call_id'])
+        self.assertEqual(json.dumps(items).count('Checking.'), 1)
+        self.assertEqual(saved_output, frozen)
+
+    def test_phase_arriving_on_output_item_done_survives_stream_and_reopen(self):
+        commentary = history()[1]
+        initial = {k: v for k, v in commentary.items() if k != 'phase'}
+        output, snapshots, _ = self.stream(
+            [
+                {'type': 'response.output_item.added', 'output_index': 0, 'item': {**initial, 'content': []}},
+                {'type': 'response.output_text.delta', 'output_index': 0, 'delta': 'Checking.'},
+                {'type': 'response.output_item.done', 'output_index': 0, 'item': commentary},
+                {'type': 'response.completed', 'response': {'id': 'r1', 'output': []}},
+            ]
+        )
+        self.assertNotIn('phase', snapshots[1][0])
+        self.assertEqual(snapshots[2][0]['phase'], 'commentary')
+        self.assertEqual(self.replay(output)[0]['phase'], 'commentary')
+        self.assertEqual(self.replay(output)[0]['content'][0]['text'], 'Checking.')
+
+    def test_plain_progress_text_and_tool_calls_do_not_invent_native_phase(self):
+        output, _, _ = self.stream(
+            [
+                {'type': 'response.output_text.delta', 'output_index': 0, 'item_id': 'msg_plain', 'delta': 'Checking.'},
+                {'type': 'response.output_item.added', 'output_index': 1, 'item': history()[2]},
+                {'type': 'response.completed', 'response': {'id': 'r1', 'output': []}},
+            ]
+        )
+        output.append(history()[3])
+        items = self.replay(output)
+        self.assertEqual(items[0]['content'][0]['text'], 'Checking.')
+        self.assertNotIn('phase', items[0])
 
     def test_router_stored_item_keeps_phase(self):
         items = self.s['convert_to_responses_payload'](

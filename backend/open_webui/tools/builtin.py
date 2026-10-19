@@ -2180,7 +2180,9 @@ async def search_knowledge_files(
     """
     Search files by filename across knowledge bases the user has access to.
     When the model has attached knowledge, searches only within attached KBs and files.
-    Helpful when looking for a specific document or file name.
+    Use when a filename is known but its file ID is not. This does not search file contents:
+    use grep_knowledge_files for known words or clauses, query_knowledge_files for meaning.
+    With a known file ID and location, read directly instead of searching again.
 
     :param query: The search query to find matching files by filename
     :param knowledge_id: Optional KB id to limit search to a specific knowledge base
@@ -2372,6 +2374,8 @@ def _grep_file_models(
     pattern: str,
     case_insensitive: bool = False,
     count_only: bool = False,
+    *,
+    read_tool: str = 'view_knowledge_file',
 ) -> str:
     from open_webui.tools.knowledge_fs import build_matcher
 
@@ -2379,9 +2383,16 @@ def _grep_file_models(
     if err:
         return JSONCodec.dumps({'error': err})
 
+    # Context is a locator, not a replacement for reading a whole clause/document.
+    # Bound both wide searches and a single very long extracted PDF line.
+    max_lines = 250
+    max_chars = max(1, min(VIEW_FILE_DEFAULT_MAX_CHARS, VIEW_FILE_MAX_CHARS, 10_000))
+    max_line_chars = 1_000
     results = []
     total_matches = 0
+    selected_matches = 0
     counts = []
+    context_truncated = False
 
     for file in files_to_search:
         content = ''
@@ -2392,16 +2403,39 @@ def _grep_file_models(
 
         lines = content.split('\n')
         file_matches = 0
+        selected_lines = set()
 
-        for i, line in enumerate(lines, 1):
+        for i, line in enumerate(lines):
             if matches(line):
                 file_matches += 1
                 total_matches += 1
-                if not count_only and len(results) < KNOWLEDGE_GREP_MAX_MATCHES:
-                    results.append(f'{file.id}  {file.filename}:{i}: {line}')
+                if not count_only and selected_matches < min(KNOWLEDGE_GREP_MAX_MATCHES, max_lines):
+                    selected_lines.add(i)
+                    selected_matches += 1
 
         if file_matches > 0 and count_only:
             counts.append(f'{file.id}  {file.filename}: {file_matches}')
+
+        if selected_lines:
+            # Merge overlapping two-line windows within this file. Matching lines
+            # keep their original colon format; surrounding lines use dashes.
+            context_lines = {
+                index
+                for matched in selected_lines
+                for index in range(max(0, matched - 2), min(len(lines), matched + 3))
+            }
+            for index in sorted(context_lines):
+                if len(results) >= max_lines:
+                    context_truncated = True
+                    break
+                is_match = index in selected_lines
+                sep = ':' if is_match else '-'
+                prefix = f'{file.id}  {file.filename}{sep}{index + 1}{sep} '
+                line = lines[index]
+                if len(line) > max_line_chars:
+                    line = line[:max_line_chars] + ' [line truncated]'
+                    context_truncated = True
+                results.append((prefix + line, is_match))
 
     if count_only:
         if not counts:
@@ -2411,10 +2445,29 @@ def _grep_file_models(
     if not results:
         return f'No matches for "{pattern}"'
 
-    output = '\n'.join(results)
-    if total_matches > KNOWLEDGE_GREP_MAX_MATCHES:
-        output += f'\n[{KNOWLEDGE_GREP_MAX_MATCHES} of {total_matches} matches shown — use file_id to narrow]'
-    return output
+    notice = (
+        f'[Output truncated: {{shown}} of {total_matches} matches shown; '
+        f'narrow file_id/pattern or use {read_tool} with file_id and '
+        'start_line/end_line for full text.]'
+    )
+    # Reserve enough room for an honest notice, including when a row's filename
+    # is unusually large. Never silently slice a source row or its identifiers.
+    available = max(0, max_chars - len(notice.format(shown=total_matches)) - 1)
+    output_lines = []
+    shown_matches = 0
+    used = 0
+    for line, is_match in results:
+        size = len(line) + (1 if output_lines else 0)
+        if used + size > available:
+            context_truncated = True
+            break
+        output_lines.append(line)
+        used += size
+        shown_matches += int(is_match)
+    output = '\n'.join(output_lines)
+    if context_truncated or shown_matches < total_matches:
+        output += ('\n' if output else '') + notice.format(shown=shown_matches)
+    return output[:max_chars]
 
 
 async def list_chat_files(
@@ -2469,6 +2522,8 @@ async def grep_chat_files(
     """
     Search exact text across files attached to the current chat.
     Pass file_id from the attached_files block to search one file.
+    Returns matching lines and up to two nearby lines per side, within an output budget.
+    For complete clauses, use view_file with the indicated file ID and start_line/end_line.
     Auto-detected regex uses RE2 syntax; no lookarounds/backreferences, and shorthand classes are ASCII-only.
 
     :param pattern: The text pattern to search for
@@ -2507,7 +2562,9 @@ async def grep_chat_files(
         if not files_to_search:
             return JSONCodec.dumps({'error': 'No accessible files found'})
 
-        return await asyncio.to_thread(_grep_file_models, files_to_search, pattern, case_insensitive, count_only)
+        return await asyncio.to_thread(
+            _grep_file_models, files_to_search, pattern, case_insensitive, count_only, read_tool='view_file'
+        )
     except Exception as e:
         log.exception(f'grep_chat_files error: {e}')
         return JSONCodec.dumps({'error': str(e)})
@@ -2643,17 +2700,19 @@ async def grep_knowledge_files(
     __model_knowledge__: Optional[list[dict]] = None,
 ) -> str:
     """
-    Search for exact text across knowledge files. Returns matching lines with line numbers.
-    Unlike query_knowledge_files (semantic/vector search), this performs exact string matching.
-    Automatically detects regex patterns (e.g. "error|warn", "version \\d+").
+    Locate known words, quotations, identifiers or clause numbers in knowledge files.
+    Returns matching lines (filename:line:) and nearby context (filename-line-), with file IDs.
+    Output is bounded; for complete clauses read the indicated file/line range with view_knowledge_file.
+    Prefer plain text, e.g. A6.3. For unknown wording or cross-document meaning use query_knowledge_files.
+    Regex is auto-detected (e.g. "error|warn", "A6[.]3|A6[.]4"); avoid double-escaping
+    backslashes when constructing JSON. The decoded pattern is not unescaped a second time.
     Regex uses RE2 syntax; no lookarounds/backreferences, and shorthand character classes are ASCII-only.
-    Helpful for literal strings, identifiers, error messages, or regex-style searches.
 
     :param pattern: The text pattern to search for (regex auto-detected)
     :param file_id: Optional file ID to search within a single file only
     :param case_insensitive: If true, ignore case when matching (default: false)
     :param count_only: If true, return only match counts per file (default: false)
-    :return: Matching lines with file IDs, filenames, and line numbers
+    :return: Matching lines and up to two nearby lines per side, deduplicated within each file; truncation is marked
     """
     if __request__ is None:
         return JSONCodec.dumps({'error': 'Request context not available'})
@@ -2879,6 +2938,9 @@ async def view_knowledge_file(
 ) -> str:
     """
     Get the content of a file from a knowledge base. Supports pagination for large files.
+    With a known file ID and location, read the relevant start_line/end_line directly.
+    Reuse sufficient content already in the conversation; reread when needed for exact wording,
+    missing details after compression, changed files, or a whole-document review.
 
     :param file_id: The ID of the file to retrieve
     :param offset: Character offset to start reading from (default: 0)
@@ -3023,7 +3085,8 @@ async def list_knowledge(
 ) -> str:
     """
     List knowledge bases, files, and notes attached to the current model.
-    Use this first to discover what knowledge is available before querying or reading files.
+    Use only when the available sources or their IDs are unknown or need confirmation.
+    Skip discovery when the needed sources are already known; it is not required each turn.
     Without knowledge_id: returns KB summaries (name, description, file_count)
     plus standalone files and notes — no file listing inside KBs.
     With knowledge_id: includes paginated file listing for that specific KB.
@@ -3168,6 +3231,9 @@ async def query_knowledge_files(
     __model__: dict = None,
 ) -> str:
     """Search authorized attached knowledge and files, returning stable text/image evidence.
+    Use for unknown wording, cross-document questions or text/image semantic search.
+    For known filenames use search_knowledge_files; for exact words/clauses use grep_knowledge_files.
+    Read a known file/location directly. Reuse already sufficient evidence instead of repeating a search.
 
     :param query: Text question; may be empty when a query image is supplied.
     :param knowledge_ids: Stored KB IDs. Narrows attached scope; with no attachments choose IDs using knowledge browsing tools.

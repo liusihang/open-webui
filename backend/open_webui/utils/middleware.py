@@ -154,6 +154,7 @@ from open_webui.utils.task import (
 from open_webui.utils.tool_approval import complete_tool_call, pending_tool_calls
 from open_webui.utils.tool_search import apply_tool_search, resolve_tool_call
 from open_webui.utils.tools import (
+    TOOL_USAGE_PROMPT,
     connect_mcp_server,
     get_attached_knowledge,
     get_builtin_tools,
@@ -3150,6 +3151,7 @@ async def process_chat_payload(request, form_data, user, metadata, model):
         # Inject builtin tools for native function calling based on enabled features and model capability.
         # Only inject when the request originates from the UI (identified by session_id).
         # API callers don't expect hidden tools; they can explicitly request tools via tool_ids.
+        knowledge_catalog_prompt = None
         if use_builtin_tools:
             if model_builtin_tools.get('knowledge', True):
                 from html import escape
@@ -3166,10 +3168,8 @@ async def process_chat_payload(request, form_data, user, metadata, model):
                     knowledge_tags.append(f'<knowledge {attrs}/>')
 
                 if knowledge_tags:
-                    form_data['messages'] = add_or_update_system_message(
-                        '<attached_knowledge>\n' + '\n'.join(knowledge_tags) + '\n</attached_knowledge>',
-                        form_data['messages'],
-                        append=True,
+                    knowledge_catalog_prompt = (
+                        '<attached_knowledge>\n' + '\n'.join(knowledge_tags) + '\n</attached_knowledge>'
                     )
 
             builtin_tools = await get_builtin_tools(
@@ -3242,6 +3242,15 @@ async def process_chat_payload(request, form_data, user, metadata, model):
         for name in shell_tools:
             if not connected or name not in selected:
                 tools_dict.pop(name)
+
+        # Keep fixed guidance in the existing tool section, before the catalog.
+        # Explicit caller tools, legacy selection and tool-free requests opt out.
+        if tools_dict and use_builtin_tools and metadata.get('params', {}).get('function_calling') != 'legacy':
+            form_data['messages'] = add_or_update_system_message(TOOL_USAGE_PROMPT, form_data['messages'], append=True)
+        if knowledge_catalog_prompt:
+            form_data['messages'] = add_or_update_system_message(
+                knowledge_catalog_prompt, form_data['messages'], append=True
+            )
 
         if tools_dict:
             # Always store resolved tools in metadata so downstream consumers

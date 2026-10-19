@@ -45,6 +45,9 @@ jobs:
           python3 tests/migration/test_responses_cumulative_history.py
           python3 tests/migration/test_responses_text_compaction.py
           python3 tests/migration/test_system_prompt_order.py
+          python3 tests/migration/test_tool_usage_prompt.py
+          python3 tests/migration/test_evidence_reread.py
+          python3 tests/migration/test_knowledge_tool_guidance.py
           python3 tests/migration/test_prompt_cache.py
           python3 tests/migration/test_terminal_session_discovery.py
           python3 tests/migration/test_tool_schema_stability.py

@@ -37,6 +37,57 @@ function setup(props: any) {
 }
 
 describe('Intelligent UI interactions', () => {
+	it('exposes only writing actions and preserves editing, copying and expansion without an outer card', async () => {
+		const writeText = vi.fn().mockResolvedValue(undefined);
+		Object.defineProperty(navigator, 'clipboard', { configurable: true, value: { writeText } });
+		const onWrite = vi.fn();
+		const onFollowUp = vi.fn();
+		const source = [
+			JSON.stringify({ op: 'add', path: '/root', value: 'draft' }),
+			JSON.stringify({
+				op: 'add',
+				path: '/elements/draft',
+				value: {
+					type: 'WritingBlock',
+					props: { title: 'Draft', content: 'Original draft.' },
+					children: []
+				}
+			})
+		].join('\n');
+		const target = setup({ initialSource: source, onWrite, onFollowUp });
+		const root = target.querySelector('[data-intelligent-ui="first"]')!;
+		expect(root.textContent).not.toMatch(/Interactive view|View data|Hide data/);
+		expect([...root.querySelectorAll('button')].map((button) => button.textContent)).toEqual([
+			'Edit',
+			'Copy',
+			'Expand'
+		]);
+		expect(root.classList.contains('border')).toBe(false);
+		expect(root.classList.contains('shadow-sm')).toBe(false);
+		expect(root.querySelectorAll('[data-writing-block]')).toHaveLength(1);
+		const button = (label: string) =>
+			[...root.querySelectorAll('button')].find((item) => item.textContent === label)!;
+		button('Edit').click();
+		await tick();
+		const input = root.querySelector('textarea')!;
+		input.value = 'Revised draft.';
+		input.dispatchEvent(new Event('input', { bubbles: true }));
+		await tick();
+		button('Copy').click();
+		button('Expand').click();
+		await tick();
+		expect(writeText).toHaveBeenCalledWith('Revised draft.');
+		expect(onWrite).toHaveBeenCalledWith('first', { 'writing:draft': 'Revised draft.' });
+		expect(button('Collapse').getAttribute('aria-expanded')).toBe('true');
+		expect(onFollowUp).not.toHaveBeenCalled();
+	});
+	it('shows a readable failure without a source-data escape hatch', () => {
+		const target = setup({ initialSource: '{"unsupported_ui_source":"private-marker"}' });
+		const root = target.querySelector('[data-intelligent-ui="first"]')!;
+		expect(root.textContent).toContain('Please ask for a text response.');
+		expect(root.textContent).not.toContain('private-marker');
+		expect(root.querySelector('button, pre, iframe, script')).toBeNull();
+	});
 	it('keeps slider changes local until one explicit model action', async () => {
 		const onWrite = vi.fn();
 		const onFollowUp = vi.fn(async (_prompt: string) => {});

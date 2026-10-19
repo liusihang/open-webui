@@ -7,6 +7,7 @@
 	import { toast } from 'svelte-sonner';
 
 	import Markdown from './Markdown.svelte';
+	import Commentary from './Commentary.svelte';
 	import ConsecutiveDetailsGroup from './Markdown/ConsecutiveDetailsGroup.svelte';
 	import {
 		buildOutputDisplayItems,
@@ -68,36 +69,59 @@
 	} text-gray-500 hover:text-gray-700 dark:hover:text-gray-300 transition`;
 
 	$: displayItems = buildOutputDisplayItems(output) as OutputDisplayItem[];
+	// An empty final item is not an answer. Keep commentary visible for interrupted/partial replies.
+	$: hasAnswerText = displayItems.some((item) => item.type === 'message' && item.text.trim());
 </script>
 
 {#each displayItems as displayItem (displayItem.id)}
-	{#if displayItem.type === 'message'}
-		{#if renderMarkdown}
-			<div class="markdown-prose">
-				<Markdown
-					id={`${id}-${displayItem.id}`}
-					{chatId}
-					{messageId}
-					content={formatMessageContent(displayItem.text)}
-					{model}
-					{save}
-					{preview}
-					{compactPreview}
-					{done}
-					{allowEmbeds}
-					{editCodeBlock}
-					{topPadding}
-					{sourceIds}
-					{onSourceClick}
-					{onTaskClick}
-					{onToolCallResolved}
-					{onSave}
-					{onUpdate}
-					{onPreview}
-				/>
-			</div>
+	{#if displayItem.type === 'message' || displayItem.type === 'commentary'}
+		{#snippet messageContent()}
+			{#if renderMarkdown}
+				<div
+					class={displayItem.type === 'commentary'
+						? `${compactPreview ? 'markdown-prose-xs' : 'markdown-prose-sm'} !text-gray-600 dark:!text-gray-400`
+						: 'markdown-prose'}
+				>
+					<Markdown
+						id={`${id}-${displayItem.id}`}
+						{chatId}
+						{messageId}
+						content={formatMessageContent(displayItem.text)}
+						{model}
+						{save}
+						{preview}
+						{compactPreview}
+						{done}
+						{allowEmbeds}
+						{editCodeBlock}
+						{topPadding}
+						{sourceIds}
+						{onSourceClick}
+						{onTaskClick}
+						{onToolCallResolved}
+						{onSave}
+						{onUpdate}
+						{onPreview}
+					/>
+				</div>
+			{:else}
+				<div
+					class="whitespace-pre-wrap {displayItem.type === 'commentary'
+						? compactPreview
+							? 'text-xs'
+							: 'text-sm'
+						: 'text-[0.9375rem]'}"
+				>
+					{displayItem.text}
+				</div>
+			{/if}
+		{/snippet}
+		{#if displayItem.type === 'commentary'}
+			<Commentary collapsed={done && hasAnswerText} {compactPreview}>
+				{@render messageContent()}
+			</Commentary>
 		{:else}
-			<div class="whitespace-pre-wrap text-[0.9375rem]">{displayItem.text}</div>
+			{@render messageContent()}
 		{/if}
 	{:else if displayItem.type === 'detail_group'}
 		<ConsecutiveDetailsGroup

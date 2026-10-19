@@ -8,6 +8,8 @@ export type OutputContentPart = {
 
 export type OutputItem = {
 	type?: string;
+	role?: string;
+	phase?: string;
 	id?: string;
 	call_id?: string;
 	name?: string;
@@ -47,6 +49,11 @@ export type OutputDetailToken = {
 export type OutputDisplayItem =
 	| {
 			type: 'message';
+			id: string;
+			text: string;
+	  }
+	| {
+			type: 'commentary';
 			id: string;
 			text: string;
 	  }
@@ -414,7 +421,7 @@ export function buildOutputDisplayItems(output: OutputItem[] = []): OutputDispla
 			if (text.trim()) {
 				flushDetails();
 				displayItems.push({
-					type: 'message',
+					type: item.role === 'assistant' && item.phase === 'commentary' ? 'commentary' : 'message',
 					id: item.id ?? `message-${index}`,
 					text
 				});
