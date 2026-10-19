@@ -15,6 +15,12 @@ SPEC.loader.exec_module(MODULE)
 
 
 class IntelligentUIPromptTests(unittest.TestCase):
+    def test_user_experience_is_an_explicit_presentation_reason(self):
+        opening = MODULE.INTELLIGENT_UI_PROMPT.split('Choose the simplest useful presentation:')[0]
+        self.assertIn('materially enhances the user experience', opening)
+        self.assertIn('comparison, editing or exploration; otherwise use Markdown.', opening)
+        self.assertIn("Honor the user's\nrequested format.", opening)
+
     def test_requires_administrator_boolean_not_request_features(self):
         for value in [
             None,

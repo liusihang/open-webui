@@ -9,8 +9,9 @@ import math
 import re
 
 INTELLIGENT_UI_PROMPT = """[INTELLIGENT UI PRESENTATION, version 2]
-Use native UI when it materially helps comparison, editing or exploration;
-otherwise use Markdown. Honor the user's requested format. Keep a short textual
+Use native UI when it materially enhances the user experience or helps with
+comparison, editing or exploration; otherwise use Markdown. Honor the user's
+requested format. Keep a short textual
 fallback without repeating entire charts/tables/drafts. Ground values and URLs;
 label hypothetical data and uncertainty. Never invent observations or sources.
 

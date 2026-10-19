@@ -127,7 +127,9 @@ from open_webui.utils.plugin import (
 )
 from open_webui.utils.terminals import (
     TERMINAL_CONTEXT_HEADER,
+    TERMINAL_SYSTEM_PROMPT,
     get_terminal_server_url,
+    is_terminal_orchestrator,
     terminal_context_available,
     terminal_context_config,
     terminal_context_id,
@@ -1634,10 +1636,15 @@ async def get_terminal_tools(
     if context_id:
         headers[TERMINAL_CONTEXT_HEADER] = context_id
 
-    # Fetch live with the user's credentials so prompt changes apply without a restart
+    # Managed Open Terminal guidance is stable and versioned with Open WebUI.
+    # Other terminal connections retain their own server-provided instructions.
     connection_config = connection.get('config') or {}
     terminal_cwd = None
-    if connection_config.get('working_directory_context', True):
+    if is_terminal_orchestrator(connection):
+        system_prompt = TERMINAL_SYSTEM_PROMPT
+        if connection_config.get('working_directory_context', True):
+            terminal_cwd = await get_terminal_cwd(server_data['url'], headers, cookies)
+    elif connection_config.get('working_directory_context', True):
         terminal_cwd, system_prompt = await asyncio.gather(
             get_terminal_cwd(server_data['url'], headers, cookies),
             get_terminal_system_prompt(server_data['url'], headers, cookies),
