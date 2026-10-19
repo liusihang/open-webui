@@ -202,10 +202,19 @@ class PromptOrderTests(unittest.IsolatedAsyncioTestCase):
             'compact_messages_for_request',
         ):
             FIXTURE.load_function(UTILS / 'context_compaction.py', name, self.s)
+        # Keep standalone seam tests independent of application installation.
+        # Execute the real pure admission helpers without importing FastAPI or
+        # the full backend, just as the other payload helpers above are loaded.
+        pdf_scope = {}
+        for name in ('attachment_file_id', 'is_knowledge_attachment', 'chat_pdf_admission_ids'):
+            FIXTURE.load_function(UTILS / 'native_pdf.py', name, pdf_scope)
         self.native = AsyncMock(return_value=False)
         self.modules = patch.dict(
             sys.modules,
             {
+                'open_webui.utils.native_pdf': module(
+                    'open_webui.utils.native_pdf', chat_pdf_admission_ids=pdf_scope['chat_pdf_admission_ids']
+                ),
                 'open_webui.utils.native_compaction': module(
                     'open_webui.utils.native_compaction', uses_native_compaction=self.native
                 ),
