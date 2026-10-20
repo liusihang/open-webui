@@ -60,10 +60,19 @@ class IntelligentUIPromptTests(unittest.TestCase):
 
     def test_free_native_color_contract_is_explicit_and_bounded(self):
         prompt = MODULE.INTELLIGENT_UI_PROMPT
-        for text in ('Choose colors freely', 'optional starting points', 'color must not be the only meaning',
-                     'Color is "#RGB" or "#RRGGBB"', 'appearance?', 'spans?', 'categoryColors:',
-                     'point > categoryColors > series', 'cell > row > column > table',
-                     'never displayed row indexes', 'Invalid dataset colors are ignored'):
+        for text in (
+            'Choose colors freely',
+            'optional starting points',
+            'color must not be the only meaning',
+            'Color is "#RGB" or "#RRGGBB"',
+            'appearance?',
+            'spans?',
+            'categoryColors:',
+            'point > categoryColors > series',
+            'cell > row > column > table',
+            'never displayed row indexes',
+            'Invalid dataset colors are ignored',
+        ):
             self.assertIn(text, prompt)
 
     def test_requires_administrator_boolean_not_request_features(self):
