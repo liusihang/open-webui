@@ -6,14 +6,20 @@ on:
     paths:
       - 'tools/search/**'
       - 'backend/open_webui/utils/middleware.py'
+      - 'backend/open_webui/utils/tools.py'
+      - 'backend/open_webui/tools/builtin.py'
       - 'backend/tests/test_search_media_contract.py'
+      - 'tests/migration/test_query_image_cache.py'
       - '.github/workflows/search-tools.yaml'
   push:
     branches: [main, dev]
     paths:
       - 'tools/search/**'
       - 'backend/open_webui/utils/middleware.py'
+      - 'backend/open_webui/utils/tools.py'
+      - 'backend/open_webui/tools/builtin.py'
       - 'backend/tests/test_search_media_contract.py'
+      - 'tests/migration/test_query_image_cache.py'
       - '.github/workflows/search-tools.yaml'
 
 permissions:
@@ -29,8 +35,10 @@ jobs:
         with:
           python-version: '3.11'
       - name: Install isolated test dependencies
-        run: python -m pip install 'pydantic>=2,<3' aiohttp pytest
+        run: python -m pip install 'pydantic>=2,<3' 'langchain-core==1.4.8' aiohttp pytest
       - name: Verify search formats and provenance without upstream requests
         run: python -m unittest discover -s tools/search/tests -p 'test_*.py'
       - name: Verify native search media and vision capability contract
         run: python -m pytest -q backend/tests/test_search_media_contract.py
+      - name: Verify image attachments keep native tool definitions stable
+        run: python tests/migration/test_query_image_cache.py

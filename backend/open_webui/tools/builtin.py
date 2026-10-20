@@ -3238,7 +3238,7 @@ async def query_knowledge_files(
     :param query: Text question; may be empty when a query image is supplied.
     :param knowledge_ids: Stored KB IDs. Narrows attached scope; with no attachments choose IDs using knowledge browsing tools.
     :param count: Maximum evidence results, 1 to 25.
-    :param query_image_refs: At most one uploaded image file ID or authorized image evidence/asset reference. Never a URL, path or base64.
+    :param query_image_refs: For image-based search only: at most one image ID from attached_files, or an authorized image evidence/asset reference. Omit for text-only search. Never a URL, path or base64.
     :param modalities: Target types: text, image, or both. Defaults to both.
     :return: JSON items with evidence_ref, content, source, real location, and warnings. Text-only models have not seen image pixels.
     """
