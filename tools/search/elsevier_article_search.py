@@ -1,10 +1,10 @@
 """
 title: Elsevier Article Search
 author: shuofang
-version: 0.9.8
+version: 0.9.10
 license: MIT
 required_open_webui_version: 0.7.0
-description: Use this tool to search and retrieve academic literature from Elsevier (Scopus & ScienceDirect). Trigger this tool when the user asks to find research papers, authors, abstracts, or Elsevier full-text articles. Core capabilities: 1. Article Search (official API recall, optional bounded query expansion, optional rerank, canonical DOI output, and article-level RAG where one article is one chunk); 2. Author Search; 3. Abstract Retrieval; 4. Full-Text Retrieval through the official Elsevier API, followed by article-level RAG with embedding and reranking. Recommended flow: send 2-3 intent-level queries to search_articles, let this tool merge + dedupe + article-RAG + rerank, then pass a selected Elsevier DOI or ScienceDirect PII into get_article_fulltext.
+description: Search scholarly articles, authors and abstracts through Scopus and ScienceDirect, and retrieve Elsevier full text. RAG splits available abstracts or full-text sections into approximately 500-word chunks before lexical/dense retrieval and optional reranking; the default return is the top 5 evidence chunks with citation metadata. Use search_articles to discover papers, then a returned DOI or PII with get_article_fulltext for body evidence.
 """
 
 from __future__ import annotations
@@ -17,6 +17,7 @@ import re
 import time
 import uuid
 import xml.etree.ElementTree as ET
+from bisect import bisect_right
 from collections import Counter, OrderedDict
 from threading import Lock
 from typing import Any, Dict, List, Optional, Tuple
@@ -106,16 +107,22 @@ class Tools:
             description='How many top merged search candidates to rerank when SEARCH_RERANK_ENABLED is true.',
         )
         RAG_TOP_K: int = Field(
-            default=8,
+            default=5,
+            ge=1,
+            le=30,
             description='Default number of evidence chunks returned in RAG mode.',
         )
-        RAG_CHUNK_SIZE: int = Field(
-            default=1200,
-            description='Target chunk size (characters) for full-text RAG indexing.',
+        RAG_CHUNK_WORDS: int = Field(
+            default=500,
+            ge=50,
+            le=2000,
+            description='Target evidence chunk size in English whitespace-separated words, before indexing and retrieval.',
         )
-        RAG_CHUNK_OVERLAP: int = Field(
-            default=200,
-            description='Chunk overlap (characters) for full-text RAG indexing.',
+        RAG_CHUNK_OVERLAP_WORDS: int = Field(
+            default=50,
+            ge=0,
+            le=500,
+            description='Word overlap between adjacent evidence chunks, clamped below the chunk size.',
         )
         RAG_BM25_CANDIDATES: int = Field(
             default=24,
@@ -586,12 +593,14 @@ class Tools:
     async def _emit_citations(self, emitter, results: List[Dict[str, Any]]) -> None:
         if emitter is None:
             return
+        seen = set()
         for result in results:
             url = result.get('url', '')
             title = result.get('title', 'Article')
             snippet = result.get('abstract') or result.get('snippet') or title
-            if not url:
+            if not url or url in seen:
                 continue
+            seen.add(url)
             await emitter(
                 {
                     'type': 'citation',
@@ -968,45 +977,49 @@ class Tools:
 
     def _build_search_article_rag_chunks(self, results: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         chunks: List[Dict[str, Any]] = []
-        chunk_counter = 0
-        for row in results:
+        for article_number, row in enumerate(results, start=1):
             if not isinstance(row, dict):
                 continue
-            text = self._normalize_block_text(self._build_search_article_rag_document(row))
+            abstract = self._normalize_block_text(str(row.get('abstract', '') or row.get('snippet', '')))
+            text = abstract or self._normalize_block_text(self._build_search_article_rag_document(row))
             if not text:
                 continue
 
-            chunk_counter += 1
-            title = self._normalize_text(str(row.get('title', '') or f'Result {chunk_counter}'))
+            title = self._normalize_text(str(row.get('title', '') or f'Result {article_number}'))
             doi = self._normalize_doi(row.get('doi', ''))
             url = self._normalize_text(str(row.get('url', '') or (f'https://doi.org/{doi}' if doi else '')))
-            chunks.append(
-                {
-                    'chunk_id': f'a{chunk_counter}',
-                    'section_title': title or f'Result {chunk_counter}',
-                    'section_type': 'article',
-                    'part_index': 1,
-                    'char_start': 0,
-                    'char_end': len(text),
-                    'text': text,
-                    'title': title,
-                    'doi': doi,
-                    'url': url,
-                    'database': self._normalize_text(str(row.get('database', ''))),
-                    'authors': self._normalize_text(str(row.get('authors', ''))),
-                    'journal': self._normalize_text(str(row.get('journal', ''))),
-                    'year': self._normalize_text(str(row.get('year', ''))),
-                    'matched_query': self._normalize_text(str(row.get('matched_query', ''))),
-                }
-            )
+            parts = self._split_text_for_rag(text, self.valves.RAG_CHUNK_WORDS, self.valves.RAG_CHUNK_OVERLAP_WORDS)
+            for part_index, part in enumerate(parts, start=1):
+                chunks.append(
+                    {
+                        'chunk_id': f'a{article_number}p{part_index}',
+                        'article_id': doi or url or f'a{article_number}',
+                        'section_title': title,
+                        'section_type': 'abstract' if abstract else 'metadata',
+                        'part_index': part_index,
+                        'char_start': part['start'],
+                        'char_end': part['end'],
+                        'text': part['text'],
+                        'title': title,
+                        'doi': doi,
+                        'url': url,
+                        'database': self._normalize_text(str(row.get('database', ''))),
+                        'authors': self._normalize_text(str(row.get('authors', ''))),
+                        'journal': self._normalize_text(str(row.get('journal', ''))),
+                        'year': self._normalize_text(str(row.get('year', ''))),
+                        'matched_query': self._normalize_text(str(row.get('matched_query', ''))),
+                    }
+                )
         return chunks
 
     def _build_search_article_rag_index(self, *, results: List[Dict[str, Any]]) -> Dict[str, Any]:
         chunks = self._build_search_article_rag_chunks(results)
         if not chunks:
-            raise RuntimeError('No article-level chunks were built from search results.')
+            raise RuntimeError('No evidence chunks were built from search results.')
 
-        chunk_texts = [chunk['text'] for chunk in chunks]
+        chunk_texts = [
+            self._build_search_article_rag_document({**chunk, 'abstract': chunk['text']}) for chunk in chunks
+        ]
         bm25_index = self._build_bm25_index([self._tokenize_for_bm25(text) for text in chunk_texts])
 
         dense_vectors: List[List[float]] = []
@@ -1068,7 +1081,9 @@ class Tools:
             evidence['year'] = chunk.get('year', '')
 
         result.setdefault('index_stats', {})
-        result['index_stats']['article_count'] = len(chunk_map)
+        result['index_stats']['article_count'] = len(
+            {chunk.get('article_id', chunk['chunk_id']) for chunk in chunk_map.values()}
+        )
         return result
 
     # ------------------------------------------------------------------
@@ -2528,46 +2543,63 @@ class Tools:
         return scores
 
     def _split_text_for_rag(self, text: str, chunk_size: int, overlap: int) -> List[Dict[str, Any]]:
+        """Split normalized source text by words, retaining exact source offsets."""
         cleaned = self._normalize_block_text(text)
         if not cleaned:
             return []
 
-        target_size = max(400, int(chunk_size))
+        words = list(re.finditer(r'\S+', cleaned))
+        word_ends = [word.end() for word in words]
+        target_size = max(1, int(chunk_size))
         target_overlap = max(0, min(int(overlap), target_size - 1))
-        min_split_pos = int(target_size * 0.6)
         chunks: List[Dict[str, Any]] = []
-        start = 0
-        text_len = len(cleaned)
-
-        while start < text_len:
-            tentative_end = min(text_len, start + target_size)
-            end = tentative_end
-            if tentative_end < text_len:
-                split_window_start = min(tentative_end, start + min_split_pos)
-                window = cleaned[split_window_start:tentative_end]
-                split_offsets = [window.rfind(marker) for marker in ['\n\n', '. ', '; ', ': ', ', ', ' ']]
-                best_offset = max(split_offsets)
-                if best_offset > 0:
-                    end = split_window_start + best_offset + 1
-
-            chunk_text = cleaned[start:end].strip()
-            if chunk_text:
-                chunks.append(
-                    {
-                        'text': chunk_text,
-                        'start': start,
-                        'end': end,
-                    }
-                )
-
-            if end >= text_len:
+        word_start = 0
+        while word_start < len(words):
+            word_end = min(word_start + target_size, len(words))
+            start, end = words[word_start].start(), words[word_end - 1].end()
+            if word_end < len(words):
+                tail = words[max(word_start, word_end - min(50, target_size // 5))].start()
+                endings = list(re.finditer(r'[.!?](?=\s|$)|\n\s*\n', cleaned[tail:end]))
+                if endings:
+                    end = tail + endings[-1].end()
+                    end = len(cleaned[:end].rstrip())
+                    word_end = bisect_right(word_ends, end)
+            chunks.append({'text': cleaned[start:end], 'start': start, 'end': end})
+            if word_end >= len(words):
                 break
-            start = max(end - target_overlap, start + 1)
+            word_start = max(word_end - target_overlap, word_start + 1)
         return chunks
 
+    def _compact_rag_evidence(self, evidence: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        """Project ranked chunks without cutting or re-selecting their text."""
+        fields = (
+            'rank',
+            'chunk_id',
+            'section_title',
+            'section_type',
+            'part_index',
+            'title',
+            'doi',
+            'url',
+            'database',
+            'authors',
+            'journal',
+            'year',
+            'text',
+            'char_start',
+            'char_end',
+        )
+        compact = []
+        for item in evidence:
+            result = {key: item[key] for key in fields if item.get(key) not in (None, '')}
+            if result.get('title') == result.get('section_title'):
+                result.pop('section_title', None)
+            compact.append(result)
+        return compact
+
     def _build_rag_chunks(self, parsed: Dict[str, Any]) -> List[Dict[str, Any]]:
-        chunk_size = max(400, int(self.valves.RAG_CHUNK_SIZE))
-        overlap = max(0, min(int(self.valves.RAG_CHUNK_OVERLAP), chunk_size - 1))
+        chunk_size = int(self.valves.RAG_CHUNK_WORDS)
+        overlap = min(int(self.valves.RAG_CHUNK_OVERLAP_WORDS), chunk_size - 1)
         chunks: List[Dict[str, Any]] = []
         chunk_counter = 0
 
@@ -2627,11 +2659,11 @@ class Tools:
 
     def _fulltext_rag_signature(self) -> str:
         pieces = [
-            'v1',
+            'v2-words',
             self.valves.EMBEDDING_API_BASE.strip().lower(),
             self.valves.EMBEDDING_MODEL.strip(),
-            str(int(self.valves.RAG_CHUNK_SIZE)),
-            str(int(self.valves.RAG_CHUNK_OVERLAP)),
+            str(int(self.valves.RAG_CHUNK_WORDS)),
+            str(int(self.valves.RAG_CHUNK_OVERLAP_WORDS)),
             str(bool(self.valves.RAG_KEEP_METHODS_GRANULAR)),
         ]
         return '|'.join(pieces)
@@ -3113,7 +3145,6 @@ class Tools:
             signature=signature,
             content_hash=content_hash,
         )
-        cache_hit = rag_index is not None
         if rag_index is None:
             rag_index = await asyncio.to_thread(
                 self._build_fulltext_rag_index,
@@ -3141,19 +3172,12 @@ class Tools:
         )
 
         result = {
-            **base_result,
+            **{key: value for key, value in base_result.items() if key != 'abstract'},
             'content_format': f'{content_prefix}_rag',
             'query': rag_result.get('query', clean_query),
             'top_k': rag_result.get('top_k', 0),
-            'evidence_chunks': rag_result.get('evidence_chunks', []),
-            'answer_context': rag_result.get('answer_context', ''),
+            'evidence_chunks': self._compact_rag_evidence(rag_result.get('evidence_chunks', [])),
             'retrieval_mode': rag_result.get('retrieval_mode', 'bm25_only'),
-            'rerank_applied': bool(rag_result.get('rerank_applied', False)),
-            'rerank_candidates': int(rag_result.get('rerank_candidates', 0) or 0),
-            'index_stats': {
-                **rag_result.get('index_stats', {}),
-                'cache_hit': cache_hit,
-            },
         }
         embedding_warning = rag_result.get('embedding_warning', '')
         if embedding_warning:
@@ -3164,8 +3188,6 @@ class Tools:
         rerank_warning = rag_result.get('rerank_warning', '')
         if rerank_warning:
             result.setdefault('warnings', []).append(f'rerank unavailable: {rerank_warning}')
-        if result.get('evidence_chunks'):
-            result['snippet'] = self._truncate_text(str(result['evidence_chunks'][0].get('text', '')), 320)
         if return_full_text:
             result['full_text'] = full_text
         return result
@@ -3217,14 +3239,14 @@ class Tools:
         - If the user asks for abstracts/summaries of the search results, set `enrich_top_n` to 3 or 5 to fetch them in one go.
         - This tool returns article basics such as title, authors, journal, date, URL, and a canonical DOI when available.
         - Recommended workflow: use `search_articles` first, read the returned DOI, then pass that DOI into `get_article_abstract` or `get_article_fulltext` if necessary.
-        - Default behavior is retrieval orchestration: accept 2-3 intent-level queries, merge hits, dedupe by DOI/PII/title, then run article-level RAG (one article = one chunk) and rerank.
+        - Merge and dedupe search hits, split available abstracts into roughly 500-word evidence chunks, then retrieve and rerank. Default: top 5 chunks; several chunks may come from one paper.
         - Prefer explicit `queries` input from the calling model over hidden query expansion.
         - `mode="list"` is a compatibility/debug path.
         - Do NOT use this tool if the user already provides a specific DOI; use `get_article_abstract` or `get_article_fulltext` instead.
 
         :param query: Single general search query (fallback input when `queries` is not provided).
         :param queries: Preferred input. Provide 2-3 complementary query strings inferred from user intent.
-        :param mode: 'rag' (default) for article-level RAG over merged search results, or 'list' for compatibility/debug result lists.
+        :param mode: 'rag' (default) for evidence retrieval over search-result abstracts, or 'list' for result lists.
         :param database: 'scopus', 'sciencedirect', or 'both'. Let system default unless specified.
         :param max_results: Number of results to return (1-25).
         :param sort: Sorting order (e.g., '-citedby' for most cited, '-date' for newest).
@@ -3237,7 +3259,7 @@ class Tools:
         :param year: Specific publication year (e.g., 2023).
         :param keywords: Specific keywords that must be present.
         :param doi: Specific DOI. (Note: if you have a DOI, calling `get_article_abstract` is usually better).
-        :param top_k: In `mode="rag"`, number of article chunks to return.
+        :param top_k: Number of evidence chunks to return in RAG mode; default 5, not necessarily 5 papers.
         :param bm25_candidates: In `mode="rag"`, BM25 candidate pool size before fusion.
         :param dense_candidates: In `mode="rag"`, dense candidate pool size before fusion.
         :param include_results: In `mode="rag"`, include the full merged search result list. Default False keeps output concise.
@@ -3393,7 +3415,7 @@ class Tools:
         )
         resolved_rrf_k = max(1, int(self.valves.RAG_RRF_K))
 
-        await self._emit_status(__event_emitter__, 'Building article-level search RAG index...', False)
+        await self._emit_status(__event_emitter__, 'Building search evidence RAG index...', False)
         rag_index = await asyncio.to_thread(
             self._build_search_article_rag_index,
             results=response['results'],
@@ -3415,33 +3437,9 @@ class Tools:
             'content_format': 'search_article_rag',
             'query': rag_result.get('query', rag_query),
             'top_k': rag_result.get('top_k', 0),
-            'evidence_chunks': rag_result.get('evidence_chunks', []),
-            'answer_context': rag_result.get('answer_context', ''),
+            'evidence_chunks': self._compact_rag_evidence(rag_result.get('evidence_chunks', [])),
             'retrieval_mode': rag_result.get('retrieval_mode', 'bm25_only'),
-            'rerank_applied': bool(rag_result.get('rerank_applied', False)),
-            'rerank_candidates': int(rag_result.get('rerank_candidates', 0) or 0),
-            'index_stats': {
-                **rag_result.get('index_stats', {}),
-                'search_result_count': int(response.get('result_count', 0) or 0),
-            },
-            'source_queries': response.get('source_queries', {}),
-            'source_query_variants': response.get('source_query_variants', {}),
-            'search_rerank': response.get('search_rerank', {}),
             'result_count': response.get('result_count', 0),
-            'candidate_articles': [
-                {
-                    'title': row.get('title', ''),
-                    'doi': row.get('doi', ''),
-                    'url': row.get('url', ''),
-                    'journal': row.get('journal', ''),
-                    'year': row.get('year', ''),
-                    'database': row.get('database', ''),
-                }
-                for row in self._as_list(response.get('results', []))
-                if isinstance(row, dict)
-            ],
-            'totals_by_database': response.get('totals_by_database', {}),
-            'used_backends': response.get('used_backends', {}),
             'warnings': list(response.get('warnings', [])),
             'partial_errors': response.get('partial_errors', []),
         }
@@ -3474,11 +3472,11 @@ class Tools:
             await self._emit_citations(__event_emitter__, citation_rows)
         await self._emit_status(
             __event_emitter__,
-            f'Article-level RAG evidence retrieved (top {rag_payload.get("top_k", 0)}).',
+            f'Search RAG evidence retrieved (top {rag_payload.get("top_k", 0)}).',
             True,
         )
 
-        return json.dumps(rag_payload, ensure_ascii=False, indent=2)
+        return json.dumps(rag_payload, ensure_ascii=False, separators=(',', ':'))
 
     async def search_authors(
         self,
@@ -3709,7 +3707,10 @@ class Tools:
                 article_url=resolved_article_url,
                 __event_emitter__=__event_emitter__,
             )
-            await self._emit_citations(__event_emitter__, [result])
+            citation = dict(result)
+            if result.get('evidence_chunks'):
+                citation['snippet'] = self._truncate_text(result['evidence_chunks'][0]['text'], 320)
+            await self._emit_citations(__event_emitter__, [citation])
             if resolved_mode == 'rag':
                 await self._emit_status(
                     __event_emitter__,
@@ -3718,7 +3719,7 @@ class Tools:
                 )
             else:
                 await self._emit_status(__event_emitter__, 'XML full text preview retrieved.', True)
-            return json.dumps(result, ensure_ascii=False, indent=2)
+            return json.dumps(result, ensure_ascii=False, separators=(',', ':'))
         except Exception as exc:
             error_msg = str(exc)
             tip = ''

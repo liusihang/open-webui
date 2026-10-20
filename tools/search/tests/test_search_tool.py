@@ -1,8 +1,8 @@
 import asyncio
 import json
 import unittest
-from unittest.mock import patch
 from types import SimpleNamespace
+from unittest.mock import patch
 
 from tools.search import gpt_web_search as src
 
@@ -41,6 +41,53 @@ class ToolTests(unittest.TestCase):
         self.assertEqual(body['settings']['search_context_size'], 'medium')
         self.assertEqual(body['settings']['allowed_callers'], ['direct'])
         self.assertEqual(body['input'], 'context')
+
+    def test_low_frequency_legacy_parameters_remain_accepted(self):
+        commands = {
+            'finance': [{'ticker': 'MSFT', 'type': 'equity', 'market': 'USA'}],
+            'weather': [{'location': 'Shanghai', 'duration': 3}],
+            'sports': [{'fn': 'standings', 'league': 'nba'}],
+            'time': [{'utc_offset': '+08:00'}],
+        }
+        settings = {
+            'user_location': {'country': 'CN', 'city': 'Shanghai'},
+            'image_settings': {'caption': True, 'max_results': 2},
+        }
+        body = self.tool._request(commands=commands, settings=settings, input='Legacy context')
+        self.assertEqual(body['commands']['finance'], commands['finance'])
+        self.assertEqual(body['commands']['weather'], commands['weather'])
+        self.assertEqual(body['commands']['sports'][0]['tool'], 'sports')
+        self.assertEqual(body['commands']['time'], commands['time'])
+        self.assertEqual(body['settings']['user_location']['city'], 'Shanghai')
+        self.assertEqual(body['settings']['image_settings'], settings['image_settings'])
+        self.assertEqual(body['input'], 'Legacy context')
+
+    def test_model_visible_objects_work_with_the_full_request_validator(self):
+        commands = src.WebCommands.model_validate(
+            {
+                'search_query': [{'q': 'test', 'domains': ['iana.org'], 'recency': 7}],
+                'image_query': [{'q': 'test image'}],
+                'response_length': 'short',
+            }
+        )
+        settings = src.WebSettings.model_validate(
+            {
+                'search_context_size': 'medium',
+                'filters': {'allowed_domains': ['iana.org']},
+            }
+        )
+        body = self.tool._request(commands=commands, settings=settings)
+        self.assertEqual(body['commands'], commands.model_dump(exclude_none=True))
+        self.assertEqual(body['settings']['filters'], {'allowed_domains': ['iana.org']})
+        self.assertEqual(body['settings']['search_context_size'], 'medium')
+
+    def test_common_models_do_not_advertise_legacy_or_unknown_options(self):
+        for commands in [{'finance': []}, {'unknown': []}]:
+            with self.subTest(commands=commands), self.assertRaises(ValueError):
+                src.WebCommands.model_validate(commands)
+        for settings in [{'user_location': {'country': 'CN'}}, {'API_KEY': 'override'}]:
+            with self.subTest(settings=settings), self.assertRaises(ValueError):
+                src.WebSettings.model_validate(settings)
 
     def test_reject_management_and_unknown(self):
         for setting in [
@@ -300,6 +347,14 @@ class ToolTests(unittest.TestCase):
     def test_invalid_arguments_no_network(self):
         result = asyncio.run(self.tool.search_web(commands={'image_query': [{'q': 'x', 'admin': True}]}))
         self.assertEqual(result['error']['code'], 'invalid_arguments')
+
+    def test_commands_array_error_explains_the_expected_object_without_network(self):
+        with patch.object(src.aiohttp, 'ClientSession') as session:
+            result = asyncio.run(self.tool.search_web(commands=[{'search_query': [{'q': 'test'}]}]))
+        session.assert_not_called()
+        self.assertEqual(result['error']['code'], 'invalid_arguments')
+        self.assertIn('commands must be an object', result['error']['message'])
+        self.assertIn('search_query', result['error']['message'])
 
 
 if __name__ == '__main__':
