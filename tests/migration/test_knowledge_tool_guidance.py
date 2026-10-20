@@ -6,6 +6,7 @@ uses Python re only for the simple RE2-compatible patterns exercised here.
 
 import ast
 import asyncio
+import importlib.util
 import json
 import logging
 import re
@@ -40,6 +41,9 @@ def build_matcher(pattern, case_insensitive=False):
 
 
 def load_scope():
+    spec = importlib.util.spec_from_file_location('knowledge_helpers', SOURCE.with_name('knowledge_tools.py'))
+    helpers = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(helpers)
     scope = {
         'Optional': Optional,
         'Request': object,
@@ -52,9 +56,16 @@ def load_scope():
         'KNOWLEDGE_GREP_MAX_MATCHES': 50,
         'VIEW_FILE_DEFAULT_MAX_CHARS': 10_000,
         'VIEW_FILE_MAX_CHARS': 100_000,
+        'knowledge_entries': helpers.knowledge_entries,
+        'is_native_pdf_attachment': lambda *args: False,
     }
     module = ast.Module(
-        body=[FUNCTIONS['_grep_file_models'], FUNCTIONS['grep_knowledge_files'], FUNCTIONS['grep_chat_files']],
+        body=[
+            FUNCTIONS['_grep_file_models'],
+            FUNCTIONS['_knowledge_source_files'],
+            FUNCTIONS['grep_knowledge_files'],
+            FUNCTIONS['grep_chat_files'],
+        ],
         type_ignores=[],
     )
     exec(compile(module, str(SOURCE), 'exec'), scope)

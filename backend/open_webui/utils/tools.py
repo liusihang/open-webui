@@ -636,6 +636,7 @@ async def get_builtin_tools(
     """
     tools_dict = {}
     builtin_functions = []
+    compatibility_functions = []
     features = features or {}
     model = model or {}
 
@@ -737,58 +738,35 @@ async def get_builtin_tools(
         for item in chat_files
     )
 
-    if (
+    file_tools_enabled = (
         is_builtin_tool_enabled('files')
         and get_model_capability('file_upload')
         and not get_model_capability('file_context')
         and has_chat_files
         and await has_user_chat_permission('file_upload')
-    ):
-        builtin_functions.extend([list_chat_files, grep_chat_files, view_file])
-        if not is_builtin_tool_enabled('knowledge'):
-            builtin_functions.append(query_chat_files)
+    )
+    if file_tools_enabled:
+        compatibility_functions.extend([list_chat_files, grep_chat_files, query_chat_files, view_file])
 
-    # Knowledge base tools - conditional injection based on model knowledge
-    # If model has attached knowledge (any type), only provide query_knowledge_files
-    # Otherwise, provide all KB browsing tools
+    # One model-facing interface for files and KBs. Old names remain executable
+    # for saved/approved calls but are not advertised or put in tool search.
     model_knowledge = get_attached_knowledge(model, metadata)
-    if is_builtin_tool_enabled('knowledge'):
-        builtin_functions.append(view_knowledge_evidence)
+    knowledge_enabled = is_builtin_tool_enabled('knowledge')
+    if knowledge_enabled or file_tools_enabled:
+        builtin_functions.extend(
+            [search_knowledge_files, grep_knowledge_files, query_knowledge_files, view_knowledge_file]
+        )
+    if knowledge_enabled:
+        builtin_functions.append(search_knowledge_bases)
+        compatibility_functions.extend(
+            [list_knowledge_bases, query_knowledge_bases, list_knowledge, view_file, view_knowledge_evidence]
+        )
         from open_webui.env import ENABLE_KB_EXEC
 
         if ENABLE_KB_EXEC:
             builtin_functions.append(kb_exec)
-            builtin_functions.append(query_knowledge_files)
-            # Notes attached to the model need view_note since kb_exec is file-only
-            if model_knowledge:
-                knowledge_types = {item.get('type') for item in model_knowledge}
-                if 'note' in knowledge_types:
-                    builtin_functions.append(view_note)
-            if not model_knowledge:
-                builtin_functions.append(query_knowledge_bases)
-                builtin_functions.append(search_knowledge_bases)
-        elif model_knowledge:
-            builtin_functions.extend(
-                [list_knowledge, search_knowledge_files, grep_knowledge_files, query_knowledge_files]
-            )
-
-            knowledge_types = {item.get('type') for item in model_knowledge}
-            if 'file' in knowledge_types or 'collection' in knowledge_types:
-                builtin_functions.extend([view_file, view_knowledge_file])
-            if 'note' in knowledge_types:
-                builtin_functions.append(view_note)
-        else:
-            builtin_functions.extend(
-                [
-                    list_knowledge_bases,
-                    search_knowledge_bases,
-                    query_knowledge_bases,
-                    grep_knowledge_files,
-                    search_knowledge_files,
-                    query_knowledge_files,
-                    view_knowledge_file,
-                ]
-            )
+        if any(item.get('type') == 'note' for item in model_knowledge):
+            builtin_functions.append(view_note)
 
     # Chats tools - search and fetch user's chat history
     if is_builtin_tool_enabled('chats'):
@@ -927,7 +905,10 @@ async def get_builtin_tools(
 
         builtin_functions = [func for func in builtin_functions if func.__name__ not in MUTATING_MEMORY_TOOLS]
 
-    for func in builtin_functions:
+    hidden_names = {func.__name__ for func in compatibility_functions}
+    hidden_names.difference_update(func.__name__ for func in builtin_functions)
+    functions = {func.__name__: func for func in [*builtin_functions, *compatibility_functions]}
+    for name, func in sorted(functions.items()):
         callable = await get_async_tool_function_and_apply_extra_params(
             func,
             {
@@ -941,6 +922,7 @@ async def get_builtin_tools(
                 '__message_id__': extra_params.get('__message_id__'),
                 '__model_knowledge__': model_knowledge,
                 '__model__': model,
+                '__knowledge_enabled__': knowledge_enabled,
             },
             get_builtin_function_introspection(func),
         )
@@ -958,6 +940,7 @@ async def get_builtin_tools(
             'callable': callable,
             'spec': spec,
             'type': 'builtin',
+            **({'hidden': True} if name in hidden_names else {}),
         }
 
     return tools_dict

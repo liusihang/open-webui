@@ -65,8 +65,10 @@ from open_webui.routers.retrieval import search_web as _search_web
 from open_webui.socket.main import sio
 from open_webui.tasks import stop_item_tasks
 from open_webui.tools.knowledge_fs import kb_exec  # noqa: F401 — re-exported
+from open_webui.tools.knowledge_tools import file_content_page, knowledge_entries, model_evidence_result
 from open_webui.utils.chat_id import is_saved_chat_id
 from open_webui.utils.json_codec import JSONCodec
+from open_webui.utils.native_pdf import is_native_pdf_attachment
 from open_webui.utils.notifications import notify_target
 from open_webui.utils.sanitize import sanitize_code
 from open_webui.utils.skill_files import SkillFile, SkillFileOperation, skill_content_page, skill_overview
@@ -2064,62 +2066,21 @@ async def list_knowledge_bases(
     :param skip: Number of results to skip for pagination (default: 0)
     :return: JSON with KBs containing id, name, description, and file_count
     """
-    if __request__ is None:
-        return JSONCodec.dumps({'error': 'Request context not available'})
-
-    if not __user__:
-        return JSONCodec.dumps({'error': 'User context not available'})
-
-    try:
-        from open_webui.models.knowledge import Knowledges
-
-        user_id = __user__.get('id')
-        user_group_ids = [group.id for group in await Groups.get_groups_by_member_id(user_id, include_inherited=True)]
-
-        result = await Knowledges.search_knowledge_bases(
-            user_id,
-            filter={
-                'query': '',
-                'user_id': user_id,
-                'group_ids': user_group_ids,
-            },
-            skip=skip,
-            limit=count,
-        )
-
-        knowledge_bases = []
-        for knowledge_base in result.items:
-            files = await Knowledges.get_files_by_id(knowledge_base.id)
-            file_count = len(files) if files else 0
-
-            knowledge_bases.append(
-                {
-                    'id': knowledge_base.id,
-                    'name': knowledge_base.name,
-                    'description': knowledge_base.description or '',
-                    'file_count': file_count,
-                    'updated_at': knowledge_base.updated_at,
-                }
-            )
-
-        return JSONCodec.dumps(knowledge_bases, ensure_ascii=False)
-    except Exception as e:
-        log.exception(f'list_knowledge_bases error: {e}')
-        return JSONCodec.dumps({'error': str(e)})
+    return await search_knowledge_bases('', count=count, skip=skip, __request__=__request__, __user__=__user__)
 
 
 async def search_knowledge_bases(
-    query: str,
+    query: str = '',
     count: int = 5,
     skip: int = 0,
     __request__: Request = None,
     __user__: dict = None,
 ) -> str:
     """
-    Search the user's accessible knowledge bases by name and description to find
-    a relevant internal source.
+    Find accessible knowledge bases by name/description; an empty query lists them.
+    Use only when the source is unknown; do not rediscover an already selected KB.
 
-    :param query: The search query to find matching knowledge bases
+    :param query: Name/description keywords; omit to list accessible knowledge bases
     :param count: Maximum number of results to return (default: 5)
     :param skip: Number of results to skip for pagination (default: 0)
     :return: JSON with matching KBs containing id, name, description, and file_count
@@ -2149,7 +2110,7 @@ async def search_knowledge_bases(
 
         knowledge_bases = []
         for knowledge_base in result.items:
-            files = await Knowledges.get_files_by_id(knowledge_base.id)
+            files = await Knowledges.get_file_metadatas_by_id(knowledge_base.id)
             file_count = len(files) if files else 0
 
             knowledge_bases.append(
@@ -2169,22 +2130,25 @@ async def search_knowledge_bases(
 
 
 async def search_knowledge_files(
-    query: str,
+    query: str = '',
     knowledge_id: Optional[str] = None,
     count: int = 5,
     skip: int = 0,
     __request__: Request = None,
     __user__: dict = None,
     __model_knowledge__: Optional[list[dict]] = None,
+    __metadata__: dict = None,
+    __files__: Optional[list[dict]] = None,
+    __knowledge_enabled__: bool = True,
 ) -> str:
     """
-    Search files by filename across knowledge bases the user has access to.
-    When the model has attached knowledge, searches only within attached KBs and files.
+    Find or list files by filename within selected knowledge and chat attachments.
+    An empty query lists files. With no selected source, browse authorized KB file metadata.
     Use when a filename is known but its file ID is not. This does not search file contents:
     use grep_knowledge_files for known words or clauses, query_knowledge_files for meaning.
     With a known file ID and location, read directly instead of searching again.
 
-    :param query: The search query to find matching files by filename
+    :param query: Filename keywords; omit to list files, never file contents
     :param knowledge_id: Optional KB id to limit search to a specific knowledge base
     :param count: Maximum number of results to return (default: 5)
     :param skip: Number of results to skip for pagination (default: 0)
@@ -2205,12 +2169,23 @@ async def search_knowledge_files(
         user_role = __user__.get('role', 'user')
         user_group_ids = [group.id for group in await Groups.get_groups_by_member_id(user_id, include_inherited=True)]
 
-        # When model has attached knowledge, scope to attached KBs/files only
-        if __model_knowledge__:
+        entries = knowledge_entries(
+            __model_knowledge__ or (),
+            __metadata__,
+            __files__,
+            knowledge_enabled=__knowledge_enabled__,
+            native_pdf=is_native_pdf_attachment,
+        )
+        count, skip = min(200, max(1, int(count))), max(0, int(skip))
+        if knowledge_id and not __knowledge_enabled__:
+            return JSONCodec.dumps({'error': 'Knowledge tools are disabled'})
+
+        # Scope before querying; metadata-only browsing must not search unrelated attachments.
+        if entries:
             attached_kb_ids = set()
             attached_file_ids = set()
 
-            for item in __model_knowledge__:
+            for item in entries:
                 item_type = item.get('type')
                 item_id = item.get('id')
                 if item_type == 'collection':
@@ -2227,7 +2202,7 @@ async def search_knowledge_files(
             all_files = []
 
             # Search within attached KBs
-            for kb_id in attached_kb_ids:
+            for kb_id in sorted(attached_kb_ids):
                 knowledge = await Knowledges.get_knowledge_by_id(kb_id)
                 if not knowledge:
                     continue
@@ -2267,9 +2242,13 @@ async def search_knowledge_files(
             # Search within directly attached files (filename match)
             if not knowledge_id and attached_file_ids:
                 query_lower = query.lower() if query else ''
-                for file_id in attached_file_ids:
+                for file_id in sorted(attached_file_ids):
                     file = await Files.get_file_by_id(file_id)
-                    if file and (not query_lower or query_lower in file.filename.lower()):
+                    if (
+                        file
+                        and await _has_read_access_to_file(file, __user__)
+                        and (not query_lower or query_lower in file.filename.lower())
+                    ):
                         all_files.append(
                             {
                                 'id': file.id,
@@ -2279,9 +2258,12 @@ async def search_knowledge_files(
                         )
 
             # Apply pagination across combined results
-            all_files = all_files[skip : skip + count]
+            all_files = list({row['id']: row for row in all_files}.values())
+            all_files = sorted(all_files, key=lambda row: (-(row['updated_at'] or 0), row['id']))[skip : skip + count]
             return JSONCodec.dumps(all_files, ensure_ascii=False)
 
+        if not __knowledge_enabled__:
+            return JSONCodec.dumps([])
         # No attached knowledge - search all accessible KBs
         if knowledge_id:
             # search_files_by_id does not enforce knowledge_id ownership; mirror the attached-KB check above.
@@ -2578,116 +2560,87 @@ async def query_chat_files(
     __user__: dict = None,
     __files__: list[dict] = None,
 ) -> str:
-    """
-    Search files attached to the current chat using semantic/vector search.
-    Pass file_id from the attached_files block to search one file, or omit it to search all attached chat files.
-
-    :param query: The search query to find semantically relevant content
-    :param file_id: Optional attached file ID to search within a single file
-    :param count: Maximum number of results to return, capped by the server RAG top k
-    :return: JSON with relevant chunks containing content, source filename, and relevance score
-    """
-    if __request__ is None:
-        return JSONCodec.dumps({'error': 'Request context not available'})
-
-    if not __user__:
-        return JSONCodec.dumps({'error': 'User context not available'})
-
+    """Compatibility entry for attached-file semantic search through the unified evidence path."""
+    if __request__ is None or not __user__:
+        return JSONCodec.dumps({'error': 'Authenticated request context is required'})
     if isinstance(file_id, str) and file_id.lower() in ('none', 'null', ''):
         file_id = None
-    if isinstance(count, str):
-        if count.lower() in ('none', 'null', ''):
-            count = None
-        else:
-            try:
-                count = int(count)
-            except ValueError:
-                count = None
+    attached = [item.get('id') or item.get('url') for item in __files__ or [] if isinstance(item, dict)]
+    if file_id and file_id not in attached:
+        return JSONCodec.dumps({'error': 'File not found'})
+    accessible = await _get_accessible_chat_files(__files__, __user__, file_id)
+    if not accessible:
+        return JSONCodec.dumps({'error': 'No accessible files found'})
+    top_k = await Config.get('rag.top_k') or 5
+    count = top_k if count is None else max(1, min(int(count), top_k))
+    return await query_knowledge_files(
+        query,
+        count=count,
+        file_ids=[file_id] if file_id else None,
+        __request__=__request__,
+        __user__=__user__,
+        __knowledge_enabled__=False,
+        __metadata__={'files': [item for item, _ in accessible]},
+    )
 
-    try:
-        from open_webui.retrieval.utils import get_sources_from_items
 
-        attached_ids = set()
-        for item in __files__ or []:
-            if not isinstance(item, dict) or item.get('type', 'file') != 'file':
-                continue
-            fid = item.get('id') or item.get('url')
-            if isinstance(fid, str) and fid and not fid.startswith(('http://', 'https://', 'data:')):
-                attached_ids.add(fid)
+async def _knowledge_source_files(
+    user, *, model_knowledge=(), metadata=None, files=(), file_id=None, knowledge_id=None, knowledge_enabled=True
+):
+    """Resolve selected sources once for exact-search adapters; never scan all KBs."""
+    from open_webui.models.files import Files
+    from open_webui.models.knowledge import Knowledges
 
-        if not attached_ids:
-            return JSONCodec.dumps({'error': 'No files are attached to this chat'})
-        if file_id and file_id not in attached_ids:
-            return JSONCodec.dumps({'error': 'File not found'})
+    entries = knowledge_entries(
+        model_knowledge, metadata, files, knowledge_enabled=knowledge_enabled, native_pdf=is_native_pdf_attachment
+    )
+    if file_id:
+        if not knowledge_enabled and not any(item['type'] == 'file' and item['id'] == file_id for item in entries):
+            raise PermissionError('File not found')
+        file = await Files.get_file_by_id(file_id)
+        if not file or not await _has_read_access_to_file(file, user):
+            raise PermissionError('File not found')
+        if knowledge_id:
+            raise ValueError('Use file_id or knowledge_id, not both')
+        selected = [item for item in entries if item['type'] in ('file', 'collection')]
+        if selected and not any(item['type'] == 'file' and item['id'] == file_id for item in selected):
+            for item in selected:
+                if item['type'] == 'collection' and await Knowledges.has_file(item['id'], file_id):
+                    break
+            else:
+                raise PermissionError('File is outside the selected scope')
+        return [file]
+    from open_webui.models.access_grants import AccessGrants
 
-        accessible = await _get_accessible_chat_files(__files__, __user__, file_id)
-        if not accessible:
-            return JSONCodec.dumps({'error': 'No accessible files found'})
-
-        file_items = [{**item} for item, _ in accessible]
-        rag_config = await Config.get_many(
-            'rag.top_k',
-            'rag.top_k_reranker',
-            'rag.relevance_threshold',
-            'rag.hybrid_bm25_weight',
-            'rag.enable_hybrid_search',
-            'rag.full_context',
-        )
-        top_k = rag_config.get('rag.top_k') or 5
-        count = top_k if count is None else max(1, min(count, top_k))
-        full_context = all(item.get('context') == 'full' for item in file_items) or rag_config.get('rag.full_context')
-
-        embedding_function = getattr(__request__.app.state, 'EMBEDDING_FUNCTION', None)
-        if not embedding_function and not full_context:
-            return JSONCodec.dumps({'error': 'Embedding function not configured'})
-
-        user_model = UserModel(**__user__)
-        sources = await get_sources_from_items(
-            request=__request__,
-            items=file_items,
-            queries=[query],
-            embedding_function=(
-                lambda queries, prefix: (
-                    embedding_function(queries, prefix=prefix, user=user_model) if embedding_function else None
+    if knowledge_id:
+        if not knowledge_enabled or (
+            entries and not any(item['type'] == 'collection' and item['id'] == knowledge_id for item in entries)
+        ):
+            raise PermissionError('Knowledge base is outside the selected scope')
+        entries = [{'type': 'collection', 'id': knowledge_id}]
+    found = {}
+    group_ids = {group.id for group in await Groups.get_groups_by_member_id(user['id'], include_inherited=True)}
+    for entry in entries:
+        if entry['type'] == 'file':
+            file = await Files.get_file_by_id(entry['id'])
+            if file and await _has_read_access_to_file(file, user):
+                found[file.id] = file
+        elif entry['type'] == 'collection':
+            kb = await Knowledges.get_knowledge_by_id(entry['id'])
+            if kb and (
+                user.get('role') == 'admin'
+                or kb.user_id == user['id']
+                or await AccessGrants.has_access(
+                    user_id=user['id'],
+                    resource_type='knowledge',
+                    resource_id=kb.id,
+                    permission='read',
+                    user_group_ids=group_ids,
                 )
-            ),
-            k=count,
-            reranking_function=(
-                (lambda q, docs: __request__.app.state.RERANKING_FUNCTION(q, docs, user=user_model))
-                if getattr(__request__.app.state, 'RERANKING_FUNCTION', None)
-                else None
-            ),
-            k_reranker=rag_config.get('rag.top_k_reranker'),
-            r=rag_config.get('rag.relevance_threshold'),
-            hybrid_bm25_weight=rag_config.get('rag.hybrid_bm25_weight'),
-            hybrid_search=rag_config.get('rag.enable_hybrid_search'),
-            full_context=full_context,
-            user=user_model,
-        )
-
-        chunks = []
-        for source in sources or []:
-            documents = source.get('document') or []
-            metadatas = source.get('metadata') or []
-            distances = source.get('distances') or []
-            source_info = source.get('source') or {}
-
-            for idx, doc in enumerate(documents):
-                metadata = metadatas[idx] if idx < len(metadatas) and isinstance(metadatas[idx], dict) else {}
-                chunk = {
-                    **filter_source_metadata(metadata),
-                    'content': doc,
-                    'source': metadata.get('source', metadata.get('name', source_info.get('name', 'Unknown'))),
-                    'file_id': metadata.get('file_id', source_info.get('id', '')),
-                }
-                if idx < len(distances):
-                    chunk['distance'] = distances[idx]
-                chunks.append(chunk)
-
-        return JSONCodec.dumps(chunks[:count], ensure_ascii=False)
-    except Exception as e:
-        log.exception(f'query_chat_files error: {e}')
-        return JSONCodec.dumps({'error': str(e)})
+            ):
+                for file in await Knowledges.get_files_by_id(kb.id):
+                    found[file.id] = file
+    return list(found.values())
 
 
 async def grep_knowledge_files(
@@ -2695,12 +2648,16 @@ async def grep_knowledge_files(
     file_id: Optional[str] = None,
     case_insensitive: bool = False,
     count_only: bool = False,
+    knowledge_id: Optional[str] = None,
     __request__: Request = None,
     __user__: dict = None,
     __model_knowledge__: Optional[list[dict]] = None,
+    __metadata__: dict = None,
+    __files__: Optional[list[dict]] = None,
+    __knowledge_enabled__: bool = True,
 ) -> str:
     """
-    Locate known words, quotations, identifiers or clause numbers in knowledge files.
+    Locate exact words, quotations, identifiers or clauses in selected files and chat attachments.
     Returns matching lines (filename:line:) and nearby context (filename-line-), with file IDs.
     Output is bounded; for complete clauses read the indicated file/line range with view_knowledge_file.
     Prefer plain text, e.g. A6.3. For unknown wording or cross-document meaning use query_knowledge_files.
@@ -2712,6 +2669,7 @@ async def grep_knowledge_files(
     :param file_id: Optional file ID to search within a single file only
     :param case_insensitive: If true, ignore case when matching (default: false)
     :param count_only: If true, return only match counts per file (default: false)
+    :param knowledge_id: Optional authorized KB ID; narrows selected scope and excludes other attachments
     :return: Matching lines and up to two nearby lines per side, deduplicated within each file; truncation is marked
     """
     if __request__ is None:
@@ -2724,90 +2682,23 @@ async def grep_knowledge_files(
         return JSONCodec.dumps({'error': 'Pattern is required'})
 
     try:
-        from open_webui.models.files import Files
-        from open_webui.models.knowledge import Knowledges
-
-        user_id = __user__.get('id')
-        user_role = __user__.get('role', 'user')
-        user_group_ids = [group.id for group in await Groups.get_groups_by_member_id(user_id, include_inherited=True)]
-
-        # Collect files to search
-        files_to_search = []
-
-        if file_id:
-            # Single file mode — verify access
-            file = await Files.get_file_by_id(file_id)
-            if file:
-                if not await _has_read_access_to_file(file, __user__, __model_knowledge__):
-                    return JSONCodec.dumps({'error': 'File not found'})
-                files_to_search.append(file)
-        elif __model_knowledge__:
-            # Scoped to model's attached knowledge
-            from open_webui.models.access_grants import AccessGrants
-
-            seen_ids = set()
-            for item in __model_knowledge__:
-                item_type = item.get('type')
-                item_id = item.get('id')
-                if item_type == 'file' and item_id not in seen_ids:
-                    file = await Files.get_file_by_id(item_id)
-                    if file:
-                        files_to_search.append(file)
-                        seen_ids.add(item_id)
-                elif item_type == 'collection':
-                    knowledge = await Knowledges.get_knowledge_by_id(item_id)
-                    if not knowledge:
-                        continue
-                    # Verify user can access this KB
-                    if not (
-                        user_role == 'admin'
-                        or knowledge.user_id == user_id
-                        or await AccessGrants.has_access(
-                            user_id=user_id,
-                            resource_type='knowledge',
-                            resource_id=knowledge.id,
-                            permission='read',
-                            user_group_ids=set(user_group_ids),
-                        )
-                    ):
-                        continue
-                    kb_files = await Knowledges.get_files_by_id(item_id)
-                    if kb_files:
-                        for f in kb_files:
-                            if f.id not in seen_ids:
-                                files_to_search.append(f)
-                                seen_ids.add(f.id)
-        else:
-            # All accessible knowledge bases — use the same search pattern as list_knowledge_bases
-            result = await Knowledges.search_knowledge_bases(
-                user_id,
-                filter={
-                    'query': '',
-                    'user_id': user_id,
-                    'group_ids': user_group_ids,
-                },
-                skip=0,
-                limit=200,
-            )
-            seen_ids = set()
-            for kb in result.items:
-                file_ids = []
-                # Get files attached to this KB
-                files_from_kb = await Knowledges.get_files_by_id(kb.id)
-                if files_from_kb:
-                    file_ids = [f.id for f in files_from_kb]
-                for fid in file_ids:
-                    if fid not in seen_ids:
-                        file = await Files.get_file_by_id(fid)
-                        if file:
-                            files_to_search.append(file)
-                            seen_ids.add(fid)
+        files_to_search = await _knowledge_source_files(
+            __user__,
+            model_knowledge=__model_knowledge__ or (),
+            metadata=__metadata__,
+            files=__files__ or (),
+            file_id=file_id,
+            knowledge_id=knowledge_id,
+            knowledge_enabled=__knowledge_enabled__,
+        )
 
         if not files_to_search:
             return JSONCodec.dumps({'error': 'No accessible files found'})
 
         return await asyncio.to_thread(_grep_file_models, files_to_search, pattern, case_insensitive, count_only)
 
+    except (ValueError, PermissionError) as e:
+        return JSONCodec.dumps({'error': str(e)})
     except Exception as e:
         log.exception(f'grep_knowledge_files error: {e}')
         return JSONCodec.dumps({'error': str(e)})
@@ -2823,256 +2714,130 @@ async def view_file(
     __request__: Request = None,
     __user__: dict = None,
     __model_knowledge__: Optional[list[dict]] = None,
+    __metadata__: dict = None,
+    __files__: Optional[list[dict]] = None,
+    __knowledge_enabled__: bool = True,
 ) -> str:
-    """
-    Get the content of a file by its ID. Supports pagination for large files.
-
-    :param file_id: The ID of the file to retrieve
-    :param offset: Character offset to start reading from (default: 0)
-    :param max_chars: Maximum characters to return (a server-side hard cap applies)
-    :param line_numbers: If true, prefix each line with its 1-indexed line number
-    :param start_line: Optional 1-indexed start line (overrides offset/max_chars when set)
-    :param end_line: Optional 1-indexed end line (inclusive)
-    :return: JSON with the file's id, filename, content, and pagination metadata if truncated
-    """
-    if __request__ is None:
-        return JSONCodec.dumps({'error': 'Request context not available'})
-
-    if not __user__:
-        return JSONCodec.dumps({'error': 'User context not available'})
-
-    # Coerce parameters from LLM tool calls (may come as strings)
-    if isinstance(offset, str):
-        try:
-            offset = int(offset)
-        except ValueError:
-            offset = 0
-    if isinstance(max_chars, str):
-        try:
-            max_chars = int(max_chars)
-        except ValueError:
-            max_chars = VIEW_FILE_DEFAULT_MAX_CHARS
-
-    # Enforce hard cap
-    max_chars = min(max(max_chars, 1), VIEW_FILE_MAX_CHARS)
-    offset = max(offset, 0)
-
-    try:
-        from open_webui.models.files import Files
-
-        file = await Files.get_file_by_id(file_id)
-        if not file:
-            return JSONCodec.dumps({'error': 'File not found'})
-
-        if not await _has_read_access_to_file(file, __user__, __model_knowledge__):
-            return JSONCodec.dumps({'error': 'File not found'})
-
-        content = ''
-        if file.data:
-            content = file.data.get('content', '')
-
-        total_chars = len(content)
-
-        # Line-based addressing (overrides char-based offset/max_chars)
-        if start_line is not None:
-            all_lines = content.split('\n')
-            total_lines = len(all_lines)
-            s = max(1, int(start_line)) - 1  # 1-indexed to 0-indexed
-            e = min(total_lines, int(end_line) if end_line else s + 100)
-            selected = all_lines[s:e]
-            sliced = '\n'.join(f'{s + i + 1}: {line}' for i, line in enumerate(selected))
-            is_truncated = e < total_lines
-            result = {
-                'id': file.id,
-                'filename': file.filename,
-                'content': sliced,
-                'updated_at': file.updated_at,
-                'created_at': file.created_at,
-                'total_lines': total_lines,
-                'showing_lines': f'{s + 1}-{e}',
-            }
-            if is_truncated:
-                result['truncated'] = True
-                result['next_start_line'] = e + 1
-            return JSONCodec.dumps(result, ensure_ascii=False)
-
-        sliced = content[offset : offset + max_chars]
-        is_truncated = (offset + len(sliced)) < total_chars
-
-        if line_numbers:
-            start_ln = content[:offset].count('\n') + 1
-            lines = sliced.split('\n')
-            sliced = '\n'.join(f'{start_ln + i}: {line}' for i, line in enumerate(lines))
-
-        result = {
-            'id': file.id,
-            'filename': file.filename,
-            'content': sliced,
-            'updated_at': file.updated_at,
-            'created_at': file.created_at,
-        }
-
-        if is_truncated or offset > 0:
-            result['truncated'] = is_truncated
-            result['total_chars'] = total_chars
-            result['returned_chars'] = len(sliced)
-            result['offset'] = offset
-            if is_truncated:
-                result['next_offset'] = offset + len(sliced)
-
-        return JSONCodec.dumps(result, ensure_ascii=False)
-    except Exception as e:
-        log.exception(f'view_file error: {e}')
-        return JSONCodec.dumps({'error': str(e)})
+    """Compatibility entry for saved calls; use view_knowledge_file for new calls."""
+    return await view_knowledge_file(
+        file_id,
+        offset=offset,
+        max_chars=max_chars,
+        line_numbers=line_numbers,
+        start_line=start_line,
+        end_line=end_line,
+        __request__=__request__,
+        __user__=__user__,
+        __model_knowledge__=__model_knowledge__,
+        __metadata__=__metadata__,
+        __files__=__files__,
+        __knowledge_enabled__=__knowledge_enabled__,
+    )
 
 
 async def view_knowledge_file(
-    file_id: str,
+    file_id: Optional[str] = None,
     offset: int = 0,
     max_chars: int = VIEW_FILE_DEFAULT_MAX_CHARS,
     line_numbers: bool = False,
     start_line: Optional[int] = None,
     end_line: Optional[int] = None,
+    evidence_refs: Optional[list[str]] = None,
     __request__: Request = None,
     __user__: dict = None,
+    __model_knowledge__: Optional[list[dict]] = None,
+    __metadata__: dict = None,
+    __files__: Optional[list[dict]] = None,
+    __model__: dict = None,
+    __knowledge_enabled__: bool = True,
 ) -> str:
-    """
-    Get the content of a file from a knowledge base. Supports pagination for large files.
-    With a known file ID and location, read the relevant start_line/end_line directly.
-    Reuse sufficient content already in the conversation; reread when needed for exact wording,
+    """Read a known authorized file/location, or a batch of stable evidence references.
+    Reuse sufficient content already in the conversation; reread for exact wording,
     missing details after compression, changed files, or a whole-document review.
+    File reads return parsed text; evidence reads also preserve versioned image evidence.
 
-    :param file_id: The ID of the file to retrieve
-    :param offset: Character offset to start reading from (default: 0)
-    :param max_chars: Maximum characters to return (a server-side hard cap applies)
-    :param line_numbers: If true, prefix each line with its 1-indexed line number
-    :param start_line: Optional 1-indexed start line (overrides offset/max_chars when set)
-    :param end_line: Optional 1-indexed end line (inclusive)
-    :return: JSON with the file's id, filename, content, and pagination metadata if truncated
+    :param file_id: File ID to read; use this OR evidence_refs, not both.
+    :param offset: Character offset within the file or a single evidence body; use next_offset to continue.
+    :param max_chars: Total returned text budget across the call; a server-side hard cap applies.
+    :param line_numbers: Prefix file text with real line numbers.
+    :param start_line: Optional 1-indexed file line; overrides offset.
+    :param end_line: Optional inclusive final file line.
+    :param evidence_refs: Stored evidence_ref values from query_knowledge_files, not URLs or paths.
+    :return: File text with pagination, or authorized text/image evidence with source locations and warnings.
     """
     if __request__ is None:
         return JSONCodec.dumps({'error': 'Request context not available'})
-
     if not __user__:
         return JSONCodec.dumps({'error': 'User context not available'})
-
-    # Coerce parameters from LLM tool calls (may come as strings)
-    if isinstance(offset, str):
-        try:
-            offset = int(offset)
-        except ValueError:
-            offset = 0
-    if isinstance(max_chars, str):
-        try:
-            max_chars = int(max_chars)
-        except ValueError:
-            max_chars = VIEW_FILE_DEFAULT_MAX_CHARS
-
-    # Enforce hard cap
-    max_chars = min(max(max_chars, 1), VIEW_FILE_MAX_CHARS)
-    offset = max(offset, 0)
-
+    __request__.state.rag_model_images = []
     try:
-        from open_webui.models.access_grants import AccessGrants
-        from open_webui.models.files import Files
+        offset = max(0, int(offset))
+        max_chars = min(max(1, int(max_chars)), VIEW_FILE_MAX_CHARS)
+        if evidence_refs is not None:
+            if file_id or start_line is not None or end_line is not None or line_numbers:
+                raise ValueError('Use file_id and file positions OR evidence_refs, not both')
+            if offset and len(evidence_refs) != 1:
+                raise ValueError('An evidence offset requires exactly one evidence_ref')
+            return await view_knowledge_evidence(
+                evidence_refs,
+                __request__=__request__,
+                __user__=__user__,
+                __model_knowledge__=__model_knowledge__,
+                __metadata__=__metadata__,
+                __files__=__files__,
+                __model__=__model__,
+                __knowledge_enabled__=__knowledge_enabled__,
+                max_chars=max_chars,
+                offset=offset,
+            )
+        if not file_id:
+            raise ValueError('Provide file_id or evidence_refs')
         from open_webui.models.knowledge import Knowledges
+        from open_webui.models.access_grants import AccessGrants
 
-        user_id = __user__.get('id')
-        user_role = __user__.get('role', 'user')
-        user_group_ids = [group.id for group in await Groups.get_groups_by_member_id(user_id, include_inherited=True)]
-
-        file = await Files.get_file_by_id(file_id)
-        if not file:
-            return JSONCodec.dumps({'error': 'File not found'})
-
-        # Check access via any KB containing this file
-        knowledges = await Knowledges.get_knowledges_by_file_id(file_id)
-        has_knowledge_access = False
+        file = (
+            await _knowledge_source_files(
+                __user__,
+                file_id=file_id,
+                model_knowledge=__model_knowledge__ or (),
+                metadata=__metadata__,
+                files=__files__ or (),
+                knowledge_enabled=__knowledge_enabled__,
+            )
+        )[0]
         knowledge_info = None
-
-        for knowledge_base in knowledges:
+        groups = {group.id for group in await Groups.get_groups_by_member_id(__user__['id'], include_inherited=True)}
+        for kb in await Knowledges.get_knowledges_by_file_id(file_id):
             if (
-                user_role == 'admin'
-                or knowledge_base.user_id == user_id
+                __user__.get('role') == 'admin'
+                or kb.user_id == __user__['id']
                 or await AccessGrants.has_access(
-                    user_id=user_id,
+                    user_id=__user__['id'],
                     resource_type='knowledge',
-                    resource_id=knowledge_base.id,
+                    resource_id=kb.id,
                     permission='read',
-                    user_group_ids=set(user_group_ids),
+                    user_group_ids=groups,
                 )
             ):
-                has_knowledge_access = True
-                knowledge_info = {'id': knowledge_base.id, 'name': knowledge_base.name}
+                knowledge_info = {'id': kb.id, 'name': kb.name}
                 break
-
-        if not has_knowledge_access:
-            if file.user_id != user_id and user_role != 'admin':
-                return JSONCodec.dumps({'error': 'Access denied'})
-
-        content = ''
-        if file.data:
-            content = file.data.get('content', '')
-
-        total_chars = len(content)
-
-        # Line-based addressing (overrides char-based offset/max_chars)
-        if start_line is not None:
-            all_lines = content.split('\n')
-            total_lines = len(all_lines)
-            s = max(1, int(start_line)) - 1
-            e = min(total_lines, int(end_line) if end_line else s + 100)
-            selected = all_lines[s:e]
-            sliced = '\n'.join(f'{s + i + 1}: {line}' for i, line in enumerate(selected))
-            is_truncated = e < total_lines
-            result = {
-                'id': file.id,
-                'filename': file.filename,
-                'content': sliced,
-                'updated_at': file.updated_at,
-                'created_at': file.created_at,
-                'total_lines': total_lines,
-                'showing_lines': f'{s + 1}-{e}',
-            }
-            if knowledge_info:
-                result['knowledge_id'] = knowledge_info['id']
-                result['knowledge_name'] = knowledge_info['name']
-            if is_truncated:
-                result['truncated'] = True
-                result['next_start_line'] = e + 1
-            return JSONCodec.dumps(result, ensure_ascii=False)
-
-        sliced = content[offset : offset + max_chars]
-        is_truncated = (offset + len(sliced)) < total_chars
-
-        if line_numbers:
-            start_ln = content[:offset].count('\n') + 1
-            lines = sliced.split('\n')
-            sliced = '\n'.join(f'{start_ln + i}: {line}' for i, line in enumerate(lines))
-
-        result = {
-            'id': file.id,
-            'filename': file.filename,
-            'content': sliced,
-            'updated_at': file.updated_at,
-            'created_at': file.created_at,
-        }
-        if knowledge_info:
-            result['knowledge_id'] = knowledge_info['id']
-            result['knowledge_name'] = knowledge_info['name']
-
-        if is_truncated or offset > 0:
-            result['truncated'] = is_truncated
-            result['total_chars'] = total_chars
-            result['returned_chars'] = len(sliced)
-            result['offset'] = offset
-            if is_truncated:
-                result['next_offset'] = offset + len(sliced)
-
-        return JSONCodec.dumps(result, ensure_ascii=False)
-    except Exception as e:
-        log.exception(f'view_knowledge_file error: {e}')
-        return JSONCodec.dumps({'error': str(e)})
+        return JSONCodec.dumps(
+            file_content_page(
+                file,
+                offset=offset,
+                max_chars=max_chars,
+                line_numbers=line_numbers,
+                start_line=start_line,
+                end_line=end_line,
+                knowledge=knowledge_info,
+            ),
+            ensure_ascii=False,
+        )
+    except (ValueError, TypeError, PermissionError) as exc:
+        return JSONCodec.dumps({'error': str(exc)})
+    except Exception as exc:
+        log.exception('view_knowledge_file error')
+        return JSONCodec.dumps({'error': str(exc)})
 
 
 async def list_knowledge(
@@ -3224,11 +2989,14 @@ async def query_knowledge_files(
     count: int = 5,
     query_image_refs: Optional[list[str]] = None,
     modalities: Optional[list[str]] = None,
+    file_ids: Optional[list[str]] = None,
     __request__: Request = None,
     __user__: dict = None,
     __model_knowledge__: list[dict] = None,
     __metadata__: dict = None,
     __model__: dict = None,
+    __files__: Optional[list[dict]] = None,
+    __knowledge_enabled__: bool = True,
 ) -> str:
     """Search authorized attached knowledge and files, returning stable text/image evidence.
     Use for unknown wording, cross-document questions or text/image semantic search.
@@ -3240,35 +3008,54 @@ async def query_knowledge_files(
     :param count: Maximum evidence results, 1 to 25.
     :param query_image_refs: For image-based search only: at most one image ID from attached_files, or an authorized image evidence/asset reference. Omit for text-only search. Never a URL, path or base64.
     :param modalities: Target types: text, image, or both. Defaults to both.
+    :param file_ids: Optional file IDs to narrow the selected scope; use this OR knowledge_ids.
     :return: JSON items with evidence_ref, content, source, real location, and warnings. Text-only models have not seen image pixels.
     """
     if __request__ is None or not __user__:
         return JSONCodec.dumps({'error': 'Authenticated request context is required'})
+    __request__.state.rag_model_images = []
     from open_webui.retrieval.integration import model_images, request_scope, services, split_external_scope
 
     try:
         user = UserModel(**__user__)
         metadata = __metadata__ if __metadata__ is not None else {}
+        if knowledge_ids is not None and not __knowledge_enabled__:
+            raise PermissionError('Knowledge tools are disabled')
+        entries = knowledge_entries(
+            __model_knowledge__ or (),
+            metadata,
+            __files__,
+            knowledge_enabled=__knowledge_enabled__,
+            native_pdf=is_native_pdf_attachment,
+        )
+        if (
+            not __knowledge_enabled__
+            and file_ids is not None
+            and any(
+                identity not in {entry['id'] for entry in entries if entry['type'] == 'file'} for identity in file_ids
+            )
+        ):
+            raise PermissionError('File is outside the chat attachments')
         scope = await request_scope(
             user,
-            model_knowledge=__model_knowledge__ or (),
-            metadata=metadata,
+            metadata={**metadata, 'folder_knowledge': [], 'files': entries},
             knowledge_ids=knowledge_ids,
             query_image_refs=query_image_refs or (),
+            file_ids=file_ids,
         )
         if knowledge_ids is not None:
             metadata['rag_selected_knowledge_ids'] = list(scope.knowledge_ids)
+        if file_ids is not None:
+            metadata['rag_selected_file_ids'] = list(scope.file_ids)
         scope, external = await split_external_scope(scope)
         notes = [
             entry
             for entry in [
-                *(__model_knowledge__ or []),
-                *(metadata.get('folder_knowledge') or []),
-                *(metadata.get('files') or []),
+                *entries,
             ]
             if isinstance(entry, dict) and entry.get('type') == 'note' and entry.get('id')
         ]
-        nonlocal_items = external + (notes if knowledge_ids is None else [])
+        nonlocal_items = external + (notes if knowledge_ids is None and file_ids is None else [])
         if not scope.knowledge_ids and not scope.file_ids and not nonlocal_items:
             return JSONCodec.dumps(
                 {'items': [], 'warnings': ['No authorized knowledge selected. Choose a knowledge base ID first.']}
@@ -3306,7 +3093,10 @@ async def query_knowledge_files(
         __request__.state.rag_model_images = await model_images(
             __request__, result['items'], user=user, scope=scope, vision=capabilities.get('vision', False)
         )
-        return JSONCodec.dumps(result, ensure_ascii=False)
+        return JSONCodec.dumps(
+            model_evidence_result(result, max_chars=min(VIEW_FILE_DEFAULT_MAX_CHARS, VIEW_FILE_MAX_CHARS)),
+            ensure_ascii=False,
+        )
     except Exception as exc:
         log.warning('Unified knowledge search failed: %s', type(exc).__name__)
         return JSONCodec.dumps(
@@ -3319,28 +3109,51 @@ async def query_knowledge_files(
 
 async def view_knowledge_evidence(
     evidence_refs: list[str],
+    max_chars: int = VIEW_FILE_DEFAULT_MAX_CHARS,
+    offset: int = 0,
     __request__: Request = None,
     __user__: dict = None,
     __model_knowledge__: list[dict] = None,
     __metadata__: dict = None,
     __model__: dict = None,
+    __files__: Optional[list[dict]] = None,
+    __knowledge_enabled__: bool = True,
 ) -> str:
     """Read stored evidence references in the current authorized knowledge scope.
 
     :param evidence_refs: Stable evidence_ref values returned by query_knowledge_files. Old versions are not redirected.
+    :param max_chars: Total text budget across the batch, capped by the server.
+    :param offset: Offset within a single evidence body; zero for batches.
     :return: Authorized text/image descriptions and source locations. Images are visible only to vision-capable models.
     """
     if __request__ is None or not __user__:
         return JSONCodec.dumps({'error': 'Authenticated request context is required'})
+    __request__.state.rag_model_images = []
     from open_webui.retrieval.integration import model_images, request_scope, services
 
     try:
         user = UserModel(**__user__)
         metadata = __metadata__ if __metadata__ is not None else {}
-        scope = await request_scope(user, model_knowledge=__model_knowledge__ or (), metadata=metadata)
+        if offset and len(evidence_refs) != 1:
+            raise ValueError('An evidence offset requires exactly one evidence_ref')
+        entries = knowledge_entries(
+            __model_knowledge__ or (),
+            metadata,
+            __files__,
+            knowledge_enabled=__knowledge_enabled__,
+            native_pdf=is_native_pdf_attachment,
+        )
+        scope = await request_scope(user, metadata={**metadata, 'folder_knowledge': [], 'files': entries})
         # A user who discovered a KB may read its returned refs in this turn too.
-        if not scope.knowledge_ids and metadata.get('rag_selected_knowledge_ids'):
+        if __knowledge_enabled__ and not scope.knowledge_ids and metadata.get('rag_selected_knowledge_ids'):
             scope = await request_scope(user, knowledge_ids=metadata['rag_selected_knowledge_ids'])
+        elif (
+            __knowledge_enabled__
+            and not scope.file_ids
+            and not scope.knowledge_ids
+            and metadata.get('rag_selected_file_ids')
+        ):
+            scope = await request_scope(user, file_ids=metadata['rag_selected_file_ids'])
         _, evidence, _, _ = await services(__request__, user=user)
         seen = set(metadata.get('rag_seen_refs') or ())
         result = await evidence.read(evidence_refs, user=user, resolved_scope=scope, seen_refs=seen)
@@ -3349,7 +3162,10 @@ async def view_knowledge_evidence(
         __request__.state.rag_model_images = await model_images(
             __request__, result['items'], user=user, scope=scope, vision=capabilities.get('vision', False)
         )
-        return JSONCodec.dumps(result, ensure_ascii=False)
+        return JSONCodec.dumps(
+            model_evidence_result(result, offset=offset, max_chars=min(max(1, int(max_chars)), VIEW_FILE_MAX_CHARS)),
+            ensure_ascii=False,
+        )
     except Exception as exc:
         return JSONCodec.dumps({'error': 'Evidence is unavailable', 'error_type': type(exc).__name__})
 

@@ -8,8 +8,12 @@ on:
       - 'backend/open_webui/utils/middleware.py'
       - 'backend/open_webui/utils/tools.py'
       - 'backend/open_webui/tools/builtin.py'
+      - 'backend/open_webui/tools/knowledge_tools.py'
       - 'backend/tests/test_search_media_contract.py'
       - 'tests/migration/test_query_image_cache.py'
+      - 'tests/migration/test_unified_knowledge_tools.py'
+      - 'tests/migration/test_knowledge_tool_guidance.py'
+      - 'tests/migration/test_evidence_reread.py'
       - '.github/workflows/search-tools.yaml'
   push:
     branches: [main, dev]
@@ -18,8 +22,12 @@ on:
       - 'backend/open_webui/utils/middleware.py'
       - 'backend/open_webui/utils/tools.py'
       - 'backend/open_webui/tools/builtin.py'
+      - 'backend/open_webui/tools/knowledge_tools.py'
       - 'backend/tests/test_search_media_contract.py'
       - 'tests/migration/test_query_image_cache.py'
+      - 'tests/migration/test_unified_knowledge_tools.py'
+      - 'tests/migration/test_knowledge_tool_guidance.py'
+      - 'tests/migration/test_evidence_reread.py'
       - '.github/workflows/search-tools.yaml'
 
 permissions:
@@ -42,3 +50,8 @@ jobs:
         run: python -m pytest -q backend/tests/test_search_media_contract.py
       - name: Verify image attachments keep native tool definitions stable
         run: python tests/migration/test_query_image_cache.py
+      - name: Verify unified knowledge sources, bounded reads and explicit evidence rereads
+        run: |
+          python tests/migration/test_unified_knowledge_tools.py
+          python tests/migration/test_knowledge_tool_guidance.py
+          python tests/migration/test_evidence_reread.py
