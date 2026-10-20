@@ -1,4 +1,6 @@
 <script lang="ts">
+	import './colors.css';
+	import { resolvedAppearance, type Appearance } from '$lib/utils/intelligent-ui/colors';
 	import { getContext, setContext } from 'svelte';
 	import type { Readable } from 'svelte/store';
 	import type { i18n as I18n } from 'i18next';
@@ -54,60 +56,103 @@
 	};
 	let renderSpec = $derived.by(() => {
 		if (!parsed.spec) return null;
-		return {
-			...parsed.spec,
-			elements: Object.fromEntries(
-				Object.entries(parsed.spec.elements).map(([key, element]) => {
-					const tabs =
-						element.type === 'Tabs'
-							? element.children.map((child, index) => ({
-									id: child,
-									label: element.props.labels[index]
-								}))
-							: undefined;
-					const requested = tabs ? read(`tab:${key}`, tabs[0]?.id ?? '') : undefined;
-					const selected = tabs?.find((tab) => tab.id === requested)?.id ?? tabs?.[0]?.id;
-					const index =
-						element.type === 'Carousel'
-							? Math.min(
-									element.children.length - 1,
-									Math.max(0, Math.floor(Number(read(`carousel:${key}`, 0))))
-								)
-							: 0;
-					const branch =
-						element.type === 'Conditional'
-							? resolveSharedValue(parsed.spec!, element.props.stateKey, read) ===
-								element.props.equals
-								? 0
-								: 1
-							: 0;
-					const displayedChildren = tabs
-						? selected
-							? [selected]
-							: []
-						: element.type === 'Carousel'
-							? element.children.slice(index, index + 1)
-							: element.type === 'Conditional'
-								? element.children.slice(branch, branch + 1)
-								: element.children;
-					return [
-						key,
-						{
-							...element,
-							children: displayedChildren,
-							props: {
-								...element.props,
-								__key: key,
-								__scope: intelligentUIHash(blockId),
-								__index: index,
-								__count: element.children.length,
-								...(tabs ? { __tabs: tabs, __selected: selected } : {})
-							}
-						}
-					];
-				})
-			)
+		// Resolve presentation per rendered path, not per element ID: shared subtrees
+		// can appear under differently colored parents. Persistence keeps original IDs.
+		const surfaces = new Set([
+			'Card',
+			'Carousel',
+			'Popover',
+			'Flow',
+			'Button',
+			'Pressable',
+			'Input',
+			'Textarea',
+			'Checkbox',
+			'RadioGroup',
+			'DatePicker',
+			'SegmentedControl',
+			'Chart',
+			'DataTable',
+			'MetricCard',
+			'Explanation',
+			'ParameterSlider',
+			'Select',
+			'NumberInput'
+		]);
+		const elements: Record<
+			string,
+			{ type: string; children: string[]; props: Record<string, unknown> }
+		> = {};
+		const render = (key: string, path: string, parent?: Appearance): string => {
+			const element = parsed.spec!.elements[key];
+			const own =
+				'appearance' in element.props
+					? (element.props.appearance as Appearance | undefined)
+					: undefined;
+			const appearance =
+				parent || own || surfaces.has(element.type)
+					? resolvedAppearance(
+							surfaces.has(element.type)
+								? {
+										...(parent?.accent ? { accent: parent.accent } : {}),
+										...(parent?.palette ? { palette: parent.palette } : {}),
+										...own
+									}
+								: { ...parent, ...own },
+							{ surface: surfaces.has(element.type), strong: element.type === 'Button' }
+						)
+					: undefined;
+			const tabs =
+				element.type === 'Tabs'
+					? element.children.map((child, index) => ({
+							id: child,
+							label: element.props.labels[index]
+						}))
+					: undefined;
+			const requested = tabs ? read(`tab:${key}`, tabs[0]?.id ?? '') : undefined;
+			const selected = tabs?.find((tab) => tab.id === requested)?.id ?? tabs?.[0]?.id;
+			const index =
+				element.type === 'Carousel'
+					? Math.min(
+							element.children.length - 1,
+							Math.max(0, Math.floor(Number(read(`carousel:${key}`, 0))))
+						)
+					: 0;
+			const branch =
+				element.type === 'Conditional'
+					? resolveSharedValue(parsed.spec!, element.props.stateKey, read) === element.props.equals
+						? 0
+						: 1
+					: 0;
+			const displayed = tabs
+				? selected
+					? [selected]
+					: []
+				: element.type === 'Carousel'
+					? element.children.slice(index, index + 1)
+					: element.type === 'Conditional'
+						? element.children.slice(branch, branch + 1)
+						: element.children;
+			const renderKey = `${key}__${path}`;
+			elements[renderKey] = {
+				...element,
+				children: displayed.map((child) =>
+					render(child, `${path}_${element.children.indexOf(child)}`, appearance)
+				),
+				props: {
+					...element.props,
+					...(appearance ? { __appearance: appearance } : {}),
+					__key: key,
+					__scope: intelligentUIHash(`${blockId}:${path}`),
+					__index: index,
+					__count: element.children.length,
+					...(tabs ? { __tabs: tabs, __selected: selected } : {})
+				}
+			};
+			return renderKey;
 		};
+		const root = render(parsed.spec.root, '0');
+		return { ...parsed.spec, root, elements };
 	});
 	setContext(INTELLIGENT_UI_BLOCK, {
 		isDone: () => done,

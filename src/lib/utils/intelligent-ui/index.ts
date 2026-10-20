@@ -1,4 +1,14 @@
 import {
+	validateAppearance,
+	validateColor,
+	validatePalette,
+	type Appearance,
+	type ColorValue,
+	type Palette,
+	type RowStyle,
+	type CellStyle
+} from './colors';
+import {
 	EXTENDED_TYPES,
 	EXTENDED_CONTROL_TYPES,
 	extendedStateReferences,
@@ -32,25 +42,34 @@ export type Filter = {
 	stateKey: string;
 	ignoreValue?: string;
 };
-export type StackProps = { title?: string };
-export type GridProps = { title?: string; columns: number };
-export type TabsProps = { title?: string; labels: string[] };
+export type StackProps = { title?: string; appearance?: Appearance };
+export type GridProps = { title?: string; columns: number; appearance?: Appearance };
+export type TabsProps = { title?: string; labels: string[]; appearance?: Appearance };
 export type ChartKind = 'bar' | 'line' | 'scatter' | 'heatmap' | 'pie';
-type ChartCommonProps = { title: string; description?: string; unit?: string; donut?: boolean };
+type ChartCommonProps = {
+	title: string;
+	description?: string;
+	unit?: string;
+	donut?: boolean;
+	appearance?: Appearance;
+	palette?: Palette;
+	categoryColors?: { id: string; color: ColorValue }[];
+};
+export type PointColors = { id?: string; color?: ColorValue };
 export type BarLineChartProps = ChartCommonProps & {
 	kind: 'bar' | 'line' | 'pie';
 	series?: RichSeries[];
-	data: { label: string; value: number }[];
+	data: ({ label: string; value: number } & PointColors)[];
 	dataSource?: never;
 };
 export type ScatterChartProps = ChartCommonProps & {
 	kind: 'scatter';
-	data: { x: number; y: number; label?: string }[];
+	data: ({ x: number; y: number; label?: string } & PointColors)[];
 	dataSource?: never;
 };
 export type HeatmapChartProps = ChartCommonProps & {
 	kind: 'heatmap';
-	data: { x: string; y: string; value: number }[];
+	data: ({ x: string; y: string; value: number } & PointColors)[];
 	dataSource?: never;
 };
 export type DatasetChartProps = ChartCommonProps & {
@@ -59,6 +78,8 @@ export type DatasetChartProps = ChartCommonProps & {
 	xField: string;
 	yField: string;
 	valueField?: string;
+	idField?: string;
+	colorField?: string;
 	series?: RichSeriesField[];
 	filters?: Filter[];
 	data?: never;
@@ -70,14 +91,17 @@ export type ChartProps =
 	| DatasetChartProps;
 export type ComparisonCardsProps = {
 	title: string;
+	appearance?: Appearance;
 	items: {
 		title: string;
 		description: string;
+		appearance?: Appearance;
 		attributes?: { label: string; value: string }[];
 	}[];
 };
-export type ExplanationProps = { title: string; content: string };
+export type ExplanationProps = { title: string; content: string; appearance?: Appearance };
 export type ParameterSliderProps = {
+	appearance?: Appearance;
 	title: string;
 	min: number;
 	max: number;
@@ -88,6 +112,7 @@ export type ParameterSliderProps = {
 	stateKey?: string;
 };
 export type NumberInputProps = {
+	appearance?: Appearance;
 	title: string;
 	stateKey: string;
 	min: number;
@@ -97,15 +122,19 @@ export type NumberInputProps = {
 	unit?: string;
 };
 export type SelectProps = {
+	appearance?: Appearance;
 	title: string;
 	stateKey: string;
 	value: string;
 	options: { label: string; value: string }[];
 };
 export type DataTableProps = {
+	appearance?: Appearance;
 	title: string;
 	dataSource: string;
-	columns: { key: string; label: string }[];
+	columns: { key: string; label: string; appearance?: Appearance }[];
+	rowStyles?: RowStyle[];
+	cellStyles?: CellStyle[];
 	filters?: Filter[];
 	searchable?: boolean;
 	sortable?: boolean;
@@ -113,7 +142,12 @@ export type DataTableProps = {
 	rowKey?: string;
 	selectionKey?: string;
 };
-type MetricCommonProps = { title: string; description?: string; unit?: string };
+type MetricCommonProps = {
+	title: string;
+	description?: string;
+	unit?: string;
+	appearance?: Appearance;
+};
 export type StaticMetricCardProps = MetricCommonProps & { value: number; dataSource?: never };
 export type DatasetMetricCardProps = MetricCommonProps & {
 	dataSource: string;
@@ -321,6 +355,24 @@ function numericControl(props: Record<string, unknown>) {
 	optionalString(props, 'unit', 64);
 }
 
+function nativeFields(value: unknown, required: string[], optional: string[] = []) {
+	const props = fields(value, required, [...optional, 'appearance']);
+	if (own(props, 'appearance')) validateAppearance(props.appearance);
+	return props;
+}
+
+function pointColors(point: Record<string, unknown>, ids: Set<string>) {
+	if (own(point, 'color')) validateColor(point.color);
+	if (own(point, 'id')) {
+		stateString(point.id, 256);
+		requireValid(
+			point.id.trim() !== '' && !ids.has(point.id),
+			'Chart point IDs must be unique and non-empty.'
+		);
+		ids.add(point.id);
+	}
+}
+
 function element(value: unknown): IntelligentUIElement {
 	const node = fields(value, ['type', 'props', 'children']);
 	array(node.children, INTELLIGENT_UI_LIMITS.nodes);
@@ -350,11 +402,11 @@ function element(value: unknown): IntelligentUIElement {
 			);
 			break;
 		case 'Stack':
-			props = fields(node.props, [], ['title']);
+			props = nativeFields(node.props, [], ['title']);
 			optionalString(props, 'title');
 			break;
 		case 'Grid':
-			props = fields(node.props, ['columns'], ['title']);
+			props = nativeFields(node.props, ['columns'], ['title']);
 			optionalString(props, 'title');
 			requireValid(
 				Number.isInteger(props.columns) && Number(props.columns) >= 1 && Number(props.columns) <= 4,
@@ -362,7 +414,7 @@ function element(value: unknown): IntelligentUIElement {
 			);
 			break;
 		case 'Tabs':
-			props = fields(node.props, ['labels'], ['title']);
+			props = nativeFields(node.props, ['labels'], ['title']);
 			optionalString(props, 'title');
 			array(props.labels, INTELLIGENT_UI_LIMITS.tabs);
 			props.labels.forEach((label) => string(label));
@@ -374,14 +426,25 @@ function element(value: unknown): IntelligentUIElement {
 		case 'Chart': {
 			requireValid(isObject(node.props), 'Expected chart properties.');
 			const fromDataset = own(node.props, 'dataSource');
-			props = fields(
+			props = nativeFields(
 				node.props,
 				fromDataset
 					? ['title', 'kind', 'dataSource', 'xField', 'yField']
 					: ['title', 'kind', 'data'],
 				fromDataset
-					? ['description', 'unit', 'valueField', 'filters', 'series', 'donut']
-					: ['description', 'unit', 'series', 'donut']
+					? [
+							'description',
+							'unit',
+							'valueField',
+							'filters',
+							'series',
+							'donut',
+							'palette',
+							'categoryColors',
+							'idField',
+							'colorField'
+						]
+					: ['description', 'unit', 'series', 'donut', 'palette', 'categoryColors']
 			);
 			string(props.title);
 			optionalString(props, 'description', INTELLIGENT_UI_LIMITS.description);
@@ -390,12 +453,25 @@ function element(value: unknown): IntelligentUIElement {
 				['bar', 'line', 'scatter', 'heatmap', 'pie'].includes(props.kind as string),
 				'Unsupported chart kind.'
 			);
+			if (own(props, 'palette')) validatePalette(props.palette);
+			if (own(props, 'categoryColors')) {
+				array(props.categoryColors, INTELLIGENT_UI_LIMITS.chartPoints);
+				const ids = new Set<string>();
+				for (const entry of props.categoryColors) {
+					const category = fields(entry, ['id', 'color']);
+					pointColors(category, ids);
+				}
+			}
 			validateRichChart(props);
 			if (fromDataset) {
-				for (const series of (props.series as RichSeriesField[] | undefined) ?? [])
+				for (const series of (props.series as RichSeriesField[] | undefined) ?? []) {
 					safeId(series.yField);
+					if (series.colorField !== undefined) safeId(series.colorField);
+				}
 				for (const key of ['dataSource', 'xField', 'yField']) safeId(props[key]);
 				optionalId(props, 'valueField');
+				optionalId(props, 'idField');
+				optionalId(props, 'colorField');
 				optionalFilters(props);
 				requireValid(
 					props.kind !== 'heatmap' || own(props, 'valueField'),
@@ -408,14 +484,16 @@ function element(value: unknown): IntelligentUIElement {
 			} else {
 				array(props.data, INTELLIGENT_UI_LIMITS.chartPoints);
 				const coordinates = new Set<string>();
+				const pointIds = new Set<string>();
 				for (const entry of props.data) {
+					pointColors(entry as Record<string, unknown>, pointIds);
 					if (props.kind === 'scatter') {
-						const point = fields(entry, ['x', 'y'], ['label']);
+						const point = fields(entry, ['x', 'y'], ['label', 'id', 'color']);
 						number(point.x);
 						number(point.y);
 						optionalString(point, 'label');
 					} else if (props.kind === 'heatmap') {
-						const point = fields(entry, ['x', 'y', 'value']);
+						const point = fields(entry, ['x', 'y', 'value'], ['id', 'color']);
 						string(point.x);
 						string(point.y);
 						number(point.value);
@@ -423,7 +501,7 @@ function element(value: unknown): IntelligentUIElement {
 						requireValid(!coordinates.has(coordinate), 'Duplicate heatmap coordinates.');
 						coordinates.add(coordinate);
 					} else {
-						const point = fields(entry, ['label', 'value']);
+						const point = fields(entry, ['label', 'value'], ['id', 'color']);
 						string(point.label);
 						number(point.value);
 					}
@@ -432,11 +510,11 @@ function element(value: unknown): IntelligentUIElement {
 			break;
 		}
 		case 'ComparisonCards':
-			props = fields(node.props, ['title', 'items']);
+			props = nativeFields(node.props, ['title', 'items']);
 			string(props.title);
 			array(props.items, INTELLIGENT_UI_LIMITS.cards);
 			for (const entry of props.items) {
-				const card = fields(entry, ['title', 'description'], ['attributes']);
+				const card = nativeFields(entry, ['title', 'description'], ['attributes']);
 				string(card.title);
 				string(card.description, INTELLIGENT_UI_LIMITS.description);
 				if (own(card, 'attributes')) {
@@ -450,12 +528,12 @@ function element(value: unknown): IntelligentUIElement {
 			}
 			break;
 		case 'Explanation':
-			props = fields(node.props, ['title', 'content']);
+			props = nativeFields(node.props, ['title', 'content']);
 			string(props.title);
 			string(props.content, INTELLIGENT_UI_LIMITS.content);
 			break;
 		case 'ParameterSlider':
-			props = fields(
+			props = nativeFields(
 				node.props,
 				['title', 'min', 'max', 'step', 'value'],
 				['unit', 'followUp', 'stateKey']
@@ -465,12 +543,16 @@ function element(value: unknown): IntelligentUIElement {
 			optionalString(props, 'followUp', INTELLIGENT_UI_LIMITS.description);
 			break;
 		case 'NumberInput':
-			props = fields(node.props, ['title', 'stateKey', 'min', 'max', 'step', 'value'], ['unit']);
+			props = nativeFields(
+				node.props,
+				['title', 'stateKey', 'min', 'max', 'step', 'value'],
+				['unit']
+			);
 			numericControl(props);
 			safeId(props.stateKey);
 			break;
 		case 'Select': {
-			props = fields(node.props, ['title', 'stateKey', 'value', 'options']);
+			props = nativeFields(node.props, ['title', 'stateKey', 'value', 'options']);
 			string(props.title);
 			safeId(props.stateKey);
 			stateString(props.value, 128);
@@ -486,11 +568,20 @@ function element(value: unknown): IntelligentUIElement {
 			requireValid(values.has(props.value), 'The select value must match an option.');
 			break;
 		}
-		case 'DataTable':
-			props = fields(
+		case 'DataTable': {
+			props = nativeFields(
 				node.props,
 				['title', 'dataSource', 'columns'],
-				['filters', 'searchable', 'sortable', 'selectable', 'rowKey', 'selectionKey']
+				[
+					'filters',
+					'searchable',
+					'sortable',
+					'selectable',
+					'rowKey',
+					'selectionKey',
+					'rowStyles',
+					'cellStyles'
+				]
 			);
 			string(props.title);
 			safeId(props.dataSource);
@@ -498,7 +589,7 @@ function element(value: unknown): IntelligentUIElement {
 			requireValid(props.columns.length > 0, 'A table needs at least one column.');
 			const columnKeys = new Set<string>();
 			for (const entry of props.columns) {
-				const column = fields(entry, ['key', 'label']);
+				const column = nativeFields(entry, ['key', 'label']);
 				safeId(column.key);
 				string(column.label);
 				requireValid(!columnKeys.has(column.key), 'Duplicate table columns.');
@@ -516,14 +607,38 @@ function element(value: unknown): IntelligentUIElement {
 				'Selectable tables need row and selection keys.'
 			);
 			requireValid(
-				props.selectable === true || (!own(props, 'rowKey') && !own(props, 'selectionKey')),
-				'Only selectable tables support row and selection keys.'
+				props.selectable === true || !own(props, 'selectionKey'),
+				'Only selectable tables support selection keys.'
 			);
+			for (const name of ['rowStyles', 'cellStyles'] as const) {
+				if (!own(props, name)) continue;
+				requireValid(own(props, 'rowKey'), 'Table row/cell colors need a stable rowKey.');
+				array(props[name], name === 'rowStyles' ? 256 : 512);
+				const targets = new Set<string>();
+				for (const entry of props[name] as unknown[]) {
+					const rule = fields(
+						entry,
+						name === 'rowStyles' ? ['id', 'appearance'] : ['rowId', 'column', 'appearance']
+					);
+					const id = rule[name === 'rowStyles' ? 'id' : 'rowId'];
+					stateString(id, 256);
+					requireValid(id !== '', 'Table style IDs cannot be empty.');
+					validateAppearance(rule.appearance);
+					if (name === 'cellStyles') {
+						safeId(rule.column);
+						requireValid(columnKeys.has(rule.column), 'Cell style references an unknown column.');
+					}
+					const target = JSON.stringify([id, rule.column]);
+					requireValid(!targets.has(target), 'Duplicate table style target.');
+					targets.add(target);
+				}
+			}
 			break;
+		}
 		case 'MetricCard': {
 			requireValid(isObject(node.props), 'Expected metric properties.');
 			const fromDataset = own(node.props, 'dataSource');
-			props = fields(
+			props = nativeFields(
 				node.props,
 				fromDataset ? ['title', 'dataSource', 'aggregation'] : ['title', 'value'],
 				fromDataset ? ['description', 'unit', 'field', 'filters'] : ['description', 'unit']
@@ -663,7 +778,26 @@ function validateReferences(draft: DraftSpec) {
 			const chart = props as DatasetChartProps;
 			fieldExists(chart.xField);
 			fieldExists(chart.yField);
-			for (const series of chart.series ?? []) fieldExists(series.yField);
+			for (const series of chart.series ?? []) {
+				fieldExists(series.yField);
+				if (series.colorField) fieldExists(series.colorField);
+			}
+			if (chart.colorField) fieldExists(chart.colorField);
+			if (chart.idField) {
+				fieldExists(chart.idField);
+				const ids = new Set<string>();
+				for (const row of rows) {
+					const id = row[chart.idField];
+					if (typeof id === 'string') stateString(id, 256);
+					requireValid(
+						(typeof id === 'string' || typeof id === 'number') &&
+							String(id).trim() !== '' &&
+							!ids.has(String(id)),
+						'Chart dataset IDs must be unique and non-empty.'
+					);
+					ids.add(String(id));
+				}
+			}
 			if (chart.kind === 'pie')
 				requireValid(
 					rows.every(
@@ -699,17 +833,21 @@ function validateReferences(draft: DraftSpec) {
 			const table = props as DataTableProps;
 			table.columns.forEach((column) => fieldExists(column.key));
 			if (table.rowKey !== undefined) fieldExists(table.rowKey);
-			if (table.selectable) {
+			if (table.rowKey) {
 				const keys = new Set<string>();
 				for (const row of rows) {
 					const key = row[table.rowKey!];
 					if (typeof key === 'string') stateString(key, INTELLIGENT_UI_LIMITS.cellText);
 					requireValid(
 						key !== null && key !== undefined && String(key) !== '' && !keys.has(String(key)),
-						'Selectable table row keys must be unique and non-empty.'
+						'Table row keys must be unique and non-empty.'
 					);
 					keys.add(String(key));
 				}
+				for (const rule of table.rowStyles ?? [])
+					requireValid(keys.has(rule.id), 'Row style references an unknown row.');
+				for (const rule of table.cellStyles ?? [])
+					requireValid(keys.has(rule.rowId), 'Cell style references an unknown row.');
 			}
 		}
 		for (const filter of (props as DatasetChartProps | DatasetMetricCardProps | DataTableProps)
@@ -985,7 +1123,8 @@ function fallbackText(spec: Spec | null): string {
 										(_, fallback) => fallback
 									),
 									node.props.xField,
-									node.props.series
+									node.props.series,
+									node.props
 								)
 							: node.props.series;
 					for (const item of series)
