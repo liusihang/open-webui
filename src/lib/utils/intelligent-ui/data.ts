@@ -1,4 +1,5 @@
 import { extendedSharedValue } from './extended';
+import { chartMetadata, chartRowMetadata, type ChartColorMetadata } from './rich-chart';
 import type {
 	ChartProps,
 	DataTableProps,
@@ -11,9 +12,9 @@ import type {
 
 export type SharedValue = string | number | boolean;
 export type SharedStateReader = (key: string, fallback: SharedValue) => SharedValue;
-export type BarLinePoint = { label: string; value: number };
-export type ScatterPoint = { x: number; y: number; label?: string };
-export type HeatmapPoint = { x: string; y: string; value: number };
+export type BarLinePoint = { label: string; value: number } & ChartColorMetadata;
+export type ScatterPoint = { x: number; y: number; label?: string } & ChartColorMetadata;
+export type HeatmapPoint = { x: string; y: string; value: number } & ChartColorMetadata;
 export type ChartData = BarLinePoint[] | ScatterPoint[] | HeatmapPoint[];
 export type TableSort = { field: string; direction: 'asc' | 'desc' };
 
@@ -164,11 +165,16 @@ function matchingChartData(spec: Spec, props: ChartProps, read: SharedStateReade
 			case 'pie':
 				return (points as BarLinePoint[])
 					.filter((point) => typeof point.label === 'string' && finite(point.value))
-					.map((point) => ({ label: point.label, value: point.value }));
+					.map((point) => ({ label: point.label, value: point.value, ...chartMetadata(point) }));
 			case 'scatter':
 				return (points as ScatterPoint[])
 					.filter((point) => finite(point.x) && finite(point.y))
-					.map(({ x, y, label }) => ({ x, y, ...(label === undefined ? {} : { label }) }));
+					.map((point) => ({
+						x: point.x,
+						y: point.y,
+						...(point.label === undefined ? {} : { label: point.label }),
+						...chartMetadata(point)
+					}));
 			case 'heatmap':
 				return uniqueHeatmap(
 					(points as HeatmapPoint[])
@@ -176,7 +182,12 @@ function matchingChartData(spec: Spec, props: ChartProps, read: SharedStateReade
 							(point) =>
 								typeof point.x === 'string' && typeof point.y === 'string' && finite(point.value)
 						)
-						.map(({ x, y, value }) => ({ x, y, value }))
+						.map((point) => ({
+							x: point.x,
+							y: point.y,
+							value: point.value,
+							...chartMetadata(point)
+						}))
 				);
 		}
 	}
@@ -186,7 +197,7 @@ function matchingChartData(spec: Spec, props: ChartProps, read: SharedStateReade
 			const label = cell(row, props.xField);
 			const value = cell(row, props.yField);
 			return label !== null && label !== undefined && finite(value)
-				? [{ label: String(label), value }]
+				? [{ label: String(label), value, ...chartRowMetadata(row, props) }]
 				: [];
 		});
 	}
@@ -194,7 +205,7 @@ function matchingChartData(spec: Spec, props: ChartProps, read: SharedStateReade
 		return rows.flatMap((row): ScatterPoint[] => {
 			const x = cell(row, props.xField);
 			const y = cell(row, props.yField);
-			return finite(x) && finite(y) ? [{ x, y }] : [];
+			return finite(x) && finite(y) ? [{ x, y, ...chartRowMetadata(row, props) }] : [];
 		});
 	}
 	return uniqueHeatmap(
@@ -203,7 +214,7 @@ function matchingChartData(spec: Spec, props: ChartProps, read: SharedStateReade
 			const y = cell(row, props.yField);
 			const value = props.valueField ? cell(row, props.valueField) : undefined;
 			return x !== null && x !== undefined && y !== null && y !== undefined && finite(value)
-				? [{ x: String(x), y: String(y), value }]
+				? [{ x: String(x), y: String(y), value, ...chartRowMetadata(row, props) }]
 				: [];
 		})
 	);

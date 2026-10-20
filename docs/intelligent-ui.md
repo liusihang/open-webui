@@ -283,3 +283,69 @@ nonstandard ports. Loading is lazy, referrers are suppressed, failures show alt
 text, and source links open with noopener/noreferrer. SVG accepts inert geometry
 only; Math uses untrusted bounded KaTeX. None of these components authorizes
 external account actions, persistent database work, model requests or file writes.
+
+## Free native colors and local design
+
+Models may choose any validated hex color. The optional `default`, `ocean`,
+`forest` and `sunset` palettes are conveniences, not restrictions. Colors never
+change the surrounding app theme or permit arbitrary CSS. Existing colorless
+specifications remain valid.
+
+- `Color` is `"#RGB"`, `"#RRGGBB"`, or exactly `{ "light": "#hex", "dark": "#hex" }`.
+  Both theme keys are required. CSS names/functions/URLs, alpha channels and
+  unknown keys are rejected. Dataset color fields contain hex strings only.
+- `appearance` has optional `foreground`, `background`, `border`, `accent` colors
+  and an optional `palette`. It is supported on Stack, Grid, Tabs, Card, Carousel,
+  Popover, Flow, Icon, Text, ComparisonCards, Explanation, MetricCard, Chart,
+  DataTable and native controls. Flow steps, ComparisonCards items and table
+  columns also accept `appearance`. It is not an escape hatch for SVG, Math,
+  Image, ImageGallery, Conditional, CodeBlock, WritingBlock or AppBlock.
+- Text can use `spans: [{ text, color?, bold? }]` (at most 64 spans, 16,000 total
+  characters). Spans replace the displayed `text`; the required `text` is the
+  plain-text fallback. Existing declared `{{token}}` bindings apply within each
+  span. All content is escaped text, never HTML.
+- Charts accept `palette`, `categoryColors: [{ id, color }]`, point `id`/`color`,
+  and series `id`/`color`. Category identity is point ID, otherwise the label,
+  otherwise the serialized `[x,y]` coordinate. IDs are nonempty, max 256 characters,
+  with no controls; explicit IDs cannot repeat within a list. Series identity is
+  its ID or name. Point color takes precedence over category color, then series
+  color, then a deterministic palette choice. Bar/line defaults are series-based;
+  pie/scatter defaults are category-based. Line strokes and series swatches keep
+  their series color even when an individual point is highlighted. Heatmaps keep
+  a quantitative default gradient, with individual overrides allowed.
+- Dataset charts additionally accept `idField` and `colorField`; a series may
+  override `colorField`. Row IDs must be unique nonempty strings/numbers. The
+  renderer reads only own row properties and ignores malformed color cells.
+- Tables accept column `appearance`, `rowStyles: [{ id, appearance }]`, and
+  `cellStyles: [{ rowId, column, appearance }]`. Row/cell rules require `rowKey`,
+  which is also allowed on nonselectable tables. Rules use the exact string form
+  of a unique, nonempty, non-null row key, so styling follows the record through
+  sorting, searching and shared filters. Unknown targets and duplicate rules
+  are rejected. Up to 256 row rules and 512 cell rules are allowed. Each channel
+  merges in this order: table < column < row < cell. Column colors also style
+  their headers. `selectionKey` still requires `selectable:true`.
+
+The renderer expands three-digit hex, selects light/dark values with the app's
+class-based theme, and adjusts foregrounds against known opaque native surfaces
+(to at least 4.5:1 in the tested helper) and chart marks against their surface
+(to at least 3:1). Hue may shift toward black or white for readability. Native
+ancestor surface information is propagated to nested text and spans. Borders,
+custom SVGs, overlapping content and every possible composition are not covered
+by a universal contrast guarantee. Retain labels/values/symbols, never communicate
+status by color alone. Favor restrained tints, a clear hierarchy and consistent
+category IDs/colors across related views.
+
+### Colored comparison example
+
+These are illustrative values, not live measurements. Notice that each category
+uses the same chosen color in its chart and table, and the text carries meaning
+without depending on color.
+
+```intelligent-ui
+{"op":"add","path":"/root","value":"root"}
+{"op":"add","path":"/datasets/plans","value":[{"id":"basic","name":"Basic","cost":12},{"id":"pro","name":"Pro","cost":24}]}
+{"op":"add","path":"/elements/root","value":{"type":"Stack","props":{"title":"Illustrative plan comparison"},"children":["summary","chart","table"]}}
+{"op":"add","path":"/elements/summary","value":{"type":"Text","props":{"text":"Basic costs less; Pro provides more capacity.","spans":[{"text":"Basic costs less","color":{"light":"#0f766e","dark":"#5eead4"},"bold":true},{"text":"; Pro provides more capacity."}]},"children":[]}}
+{"op":"add","path":"/elements/chart","value":{"type":"Chart","props":{"title":"Monthly cost","kind":"bar","unit":"USD","data":[{"id":"basic","label":"Basic","value":12},{"id":"pro","label":"Pro","value":24}],"categoryColors":[{"id":"basic","color":{"light":"#0f766e","dark":"#5eead4"}},{"id":"pro","color":{"light":"#7c3aed","dark":"#c4b5fd"}}]},"children":[]}}
+{"op":"add","path":"/elements/table","value":{"type":"DataTable","props":{"title":"Exact costs","dataSource":"plans","rowKey":"id","sortable":true,"columns":[{"key":"name","label":"Plan"},{"key":"cost","label":"USD / month"}],"rowStyles":[{"id":"basic","appearance":{"foreground":{"light":"#0f766e","dark":"#5eead4"},"background":{"light":"#f0fdfa","dark":"#102d2b"}}},{"id":"pro","appearance":{"foreground":{"light":"#7c3aed","dark":"#c4b5fd"},"background":{"light":"#faf5ff","dark":"#2b1b40"}}}],"cellStyles":[{"rowId":"basic","column":"cost","appearance":{"foreground":{"light":"#115e59","dark":"#99f6e4"}}}]},"children":[]}}
+```

@@ -1,0 +1,57 @@
+/* Every colored node has complete, validated local variables; nested components cannot leak styles. */
+.iui-surface,
+.iui-ink,
+.iui-accent,
+.iui-strong {
+	--iui-fg: var(--iui-fg-light);
+	--iui-bg: var(--iui-bg-light);
+	--iui-border: var(--iui-border-light);
+	--iui-accent: var(--iui-accent-light);
+}
+.dark .iui-surface,
+.dark .iui-ink,
+.dark .iui-accent,
+.dark .iui-strong {
+	--iui-fg: var(--iui-fg-dark);
+	--iui-bg: var(--iui-bg-dark);
+	--iui-border: var(--iui-border-dark);
+	--iui-accent: var(--iui-accent-dark);
+}
+.iui-surface,
+.iui-strong {
+	color: var(--iui-fg);
+	background-color: var(--iui-bg);
+	border-color: var(--iui-border);
+	accent-color: var(--iui-accent);
+}
+.iui-ink {
+	color: var(--iui-fg);
+}
+.iui-accent {
+	color: var(--iui-accent);
+	accent-color: var(--iui-accent);
+}
+.iui-surface :is(input, select, textarea):focus-visible,
+.iui-strong:focus-visible {
+	outline: 2px solid var(--iui-accent);
+	outline-offset: 3px;
+}
+
+/* The app's global checkbox skin fixes blue with appearance:none. Restore the
+   native checkmark here so accent-color and the browser's mark contrast apply. */
+.intelligent-ui input.iui-accent[type='checkbox'] {
+	appearance: auto;
+	background-color: initial;
+	border-color: initial;
+	accent-color: var(--iui-accent);
+}
+.intelligent-ui input.iui-accent[type='checkbox']::after {
+	display: none;
+}
+
+.iui-layout-surface {
+	border-width: 1px;
+	border-style: solid;
+	border-radius: 1rem;
+	padding: 1rem;
+}

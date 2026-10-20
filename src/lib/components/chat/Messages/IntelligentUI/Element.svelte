@@ -2,6 +2,7 @@
 	import { getContext, type Snippet } from 'svelte';
 	import type { Readable } from 'svelte/store';
 	import type { i18n as I18n } from 'i18next';
+	import { appearanceStyle } from '$lib/utils/intelligent-ui/colors';
 	import { EXTENDED_TYPES } from '$lib/utils/intelligent-ui/extended';
 	import { resolveRichSeries, normalizeRichSeries } from '$lib/utils/intelligent-ui/rich-chart';
 	import ExtendedElement from './ExtendedElement.svelte';
@@ -20,7 +21,10 @@
 	}: { element: { type: string; props: any; children?: string[] }; children?: Snippet } = $props();
 	const context = getContext<IntelligentUIBlockContext>(INTELLIGENT_UI_BLOCK);
 	const i18n = getContext<Readable<I18n>>('i18n');
-	let componentProps = $derived(element.props);
+	let componentProps = $derived({
+		...element.props,
+		appearance: element.props.__appearance ?? element.props.appearance
+	});
 	// Include the control definition so edited/regenerated content never inherits an incompatible value.
 	let controlKey = $derived(
 		JSON.stringify([
@@ -69,7 +73,8 @@
 							context.read
 						),
 						componentProps.xField,
-						componentProps.series
+						componentProps.series,
+						componentProps
 					)
 				: componentProps.series
 			: undefined
@@ -154,15 +159,33 @@
 {:else if element.type === 'CodeBlock'}
 	<CodeContentBlock view={componentProps} />
 {:else if element.type === 'Stack'}
-	<section class="space-y-5">
-		{#if componentProps.title}<h3 class="text-base font-semibold text-gray-900 dark:text-gray-100">
+	<section
+		class="iui-ink space-y-6"
+		class:iui-surface={Boolean(
+			element.props.appearance?.background || element.props.appearance?.border
+		)}
+		class:iui-layout-surface={Boolean(
+			element.props.appearance?.background || element.props.appearance?.border
+		)}
+		style={appearanceStyle(componentProps.appearance)}
+	>
+		{#if componentProps.title}<h3 class="text-base font-semibold tracking-tight">
 				{componentProps.title}
 			</h3>{/if}
 		{#if children}{@render children()}{/if}
 	</section>
 {:else if element.type === 'Grid'}
-	<section class="space-y-3">
-		{#if componentProps.title}<h3 class="text-base font-semibold text-gray-900 dark:text-gray-100">
+	<section
+		class="iui-ink space-y-4"
+		class:iui-surface={Boolean(
+			element.props.appearance?.background || element.props.appearance?.border
+		)}
+		class:iui-layout-surface={Boolean(
+			element.props.appearance?.background || element.props.appearance?.border
+		)}
+		style={appearanceStyle(componentProps.appearance)}
+	>
+		{#if componentProps.title}<h3 class="text-base font-semibold tracking-tight">
 				{componentProps.title}
 			</h3>{/if}
 		<div
@@ -172,14 +195,24 @@
 		</div>
 	</section>
 {:else if element.type === 'Tabs'}
-	<section class="min-w-0 space-y-4">
-		{#if componentProps.title}<h3 class="text-sm font-semibold text-gray-900 dark:text-gray-100">
+	<section
+		class="iui-ink min-w-0 space-y-4"
+		class:iui-surface={Boolean(
+			element.props.appearance?.background || element.props.appearance?.border
+		)}
+		class:iui-layout-surface={Boolean(
+			element.props.appearance?.background || element.props.appearance?.border
+		)}
+		style={appearanceStyle(componentProps.appearance)}
+	>
+		{#if componentProps.title}<h3 class="text-sm font-semibold tracking-tight">
 				{componentProps.title}
 			</h3>{/if}
 		<div
 			role="tablist"
 			aria-label={componentProps.title ?? $i18n.t('View options')}
-			class="flex gap-1 overflow-x-auto rounded-lg bg-gray-100 p-1 dark:bg-gray-800"
+			class="iui-surface flex gap-1 overflow-x-auto rounded-xl border p-1"
+			style={appearanceStyle(componentProps.appearance, { surface: true })}
 		>
 			{#each componentProps.__tabs ?? [] as tab, index}<button
 					type="button"
@@ -188,7 +221,16 @@
 					aria-controls={`${componentProps.__scope}-${componentProps.__key}-panel`}
 					aria-selected={componentProps.__selected === tab.id}
 					tabindex={componentProps.__selected === tab.id ? 0 : -1}
-					class={`shrink-0 rounded-md px-3 py-2 text-sm font-medium focus-visible:outline-indigo-500 ${componentProps.__selected === tab.id ? 'bg-white text-indigo-600 shadow-sm dark:bg-gray-700 dark:text-indigo-300' : 'text-gray-500 dark:text-gray-400'}`}
+					class={`iui-surface shrink-0 rounded-lg px-3 py-2 text-sm font-medium focus-visible:outline-indigo-500 ${componentProps.__selected === tab.id ? 'shadow-sm' : ''}`}
+					style={appearanceStyle(
+						{
+							...componentProps.appearance,
+							...(componentProps.__selected === tab.id
+								? { background: componentProps.appearance?.accent ?? '#6366f1' }
+								: {})
+						},
+						{ surface: true }
+					)}
 					onclick={() => context.write(`tab:${componentProps.__key}`, tab.id)}
 					onkeydown={(event) => changeTab(event, index)}>{tab.label}</button
 				>{/each}
@@ -204,19 +246,23 @@
 		</div>
 	</section>
 {:else if element.type === 'Select'}
-	<label class="block space-y-2"
-		><span class="text-sm font-medium text-gray-900 dark:text-gray-100">{componentProps.title}</span
-		><select
+	<label
+		class="iui-surface block space-y-2 rounded-xl p-3"
+		style={appearanceStyle(componentProps.appearance)}
+		><span class="text-sm font-medium">{componentProps.title}</span><select
 			value={String(context.shared(componentProps.stateKey) ?? componentProps.value)}
-			class="w-full rounded-lg border border-gray-200 bg-white px-3 py-2 text-sm text-gray-900 focus:border-indigo-500 focus:outline-none dark:border-gray-700 dark:bg-gray-900 dark:text-gray-100"
+			class="iui-surface w-full rounded-xl border px-3 py-2.5 text-sm"
+			style={appearanceStyle(componentProps.appearance, { surface: true })}
 			onchange={(event) => context.writeShared(componentProps.stateKey, event.currentTarget.value)}
 			>{#each componentProps.options as option}<option value={option.value}>{option.label}</option
 				>{/each}</select
 		></label
 	>
 {:else if element.type === 'NumberInput'}
-	<label class="block space-y-2"
-		><span class="text-sm font-medium text-gray-900 dark:text-gray-100"
+	<label
+		class="iui-surface block space-y-2 rounded-xl p-3"
+		style={appearanceStyle(componentProps.appearance)}
+		><span class="text-sm font-medium"
 			>{componentProps.title}{componentProps.unit ? ` (${componentProps.unit})` : ''}</span
 		><input
 			type="number"
@@ -224,7 +270,8 @@
 			max={componentProps.max}
 			step={componentProps.step}
 			value={numberDraft ?? value}
-			class="w-full rounded-lg border border-gray-200 bg-white px-3 py-2 text-sm tabular-nums text-gray-900 focus:border-indigo-500 focus:outline-none dark:border-gray-700 dark:bg-gray-900 dark:text-gray-100"
+			class="iui-surface w-full rounded-xl border px-3 py-2.5 text-sm tabular-nums"
+			style={appearanceStyle(componentProps.appearance, { surface: true })}
 			oninput={(event) => (numberDraft = event.currentTarget.value)}
 			onchange={commitNumber}
 			onblur={commitNumber}
@@ -241,22 +288,35 @@
 {:else if element.type === 'Chart'}
 	<RichChart view={componentProps} {data} {series} />
 {:else if element.type === 'ComparisonCards'}
-	<section class="space-y-3">
-		<h3 class="text-sm font-semibold text-gray-900 dark:text-gray-100">{componentProps.title}</h3>
+	<section
+		class="iui-ink space-y-4"
+		class:iui-surface={Boolean(
+			element.props.appearance?.background || element.props.appearance?.border
+		)}
+		class:iui-layout-surface={Boolean(
+			element.props.appearance?.background || element.props.appearance?.border
+		)}
+		style={appearanceStyle(componentProps.appearance)}
+	>
+		<h3 class="text-sm font-semibold tracking-tight">{componentProps.title}</h3>
 		<div class="grid grid-cols-1 gap-3 sm:grid-cols-2">
 			{#each componentProps.items as item}<article
-					class="rounded-xl border border-gray-200 bg-gray-50/60 p-4 dark:border-gray-700 dark:bg-gray-800/40"
+					class="iui-surface rounded-2xl border p-5 shadow-sm"
+					style={appearanceStyle(
+						{ ...componentProps.appearance, ...item.appearance },
+						{ surface: true }
+					)}
 				>
-					<h4 class="text-sm font-semibold text-gray-900 dark:text-gray-100">{item.title}</h4>
-					<p class="mt-2 whitespace-pre-wrap text-sm text-gray-600 dark:text-gray-300">
+					<h4 class="text-sm font-semibold tracking-tight">{item.title}</h4>
+					<p class="mt-2 whitespace-pre-wrap text-sm leading-relaxed">
 						{item.description}
 					</p>
 					{#if item.attributes?.length}<dl class="mt-3 space-y-2">
 							{#each item.attributes as attribute}<div
 									class="flex flex-wrap justify-between gap-x-3 gap-y-1 text-xs"
 								>
-									<dt class="text-gray-500 dark:text-gray-400">{attribute.label}</dt>
-									<dd class="font-medium text-gray-800 dark:text-gray-200">{attribute.value}</dd>
+									<dt class="text-xs">{attribute.label}</dt>
+									<dd class="font-medium">{attribute.value}</dd>
 								</div>{/each}
 						</dl>{/if}
 				</article>{/each}
@@ -264,25 +324,28 @@
 	</section>
 {:else if element.type === 'Explanation'}
 	<details
-		class="rounded-xl border border-gray-200 px-4 py-3 dark:border-gray-700"
+		class="iui-surface rounded-2xl border px-4 py-3"
+		style={appearanceStyle(componentProps.appearance, { surface: true })}
 		open={Boolean(context.read(controlKey, false))}
 		ontoggle={(event) => context.write(controlKey, event.currentTarget.open)}
 	>
-		<summary
-			class="cursor-pointer rounded text-sm font-medium text-gray-900 focus-visible:outline-indigo-500 dark:text-gray-100"
+		<summary class="cursor-pointer rounded text-sm font-medium focus-visible:outline-indigo-500"
 			>{componentProps.title}</summary
 		>
-		<p class="mt-3 whitespace-pre-wrap text-sm leading-relaxed text-gray-600 dark:text-gray-300">
+		<p class="mt-3 whitespace-pre-wrap text-sm leading-relaxed">
 			{componentProps.content}
 		</p>
 	</details>
 {:else if element.type === 'ParameterSlider'}
-	<section class="space-y-4 rounded-xl bg-gray-50 p-4 dark:bg-gray-800/50">
+	<section
+		class="iui-surface space-y-4 rounded-2xl border p-5"
+		style={appearanceStyle(componentProps.appearance, { surface: true })}
+	>
 		<label class="block"
 			><span class="flex items-center justify-between gap-3 text-sm"
-				><span class="font-medium text-gray-900 dark:text-gray-100">{componentProps.title}</span
-				><span
-					class="rounded-md bg-white px-2 py-1 font-semibold tabular-nums text-indigo-600 shadow-sm dark:bg-gray-900 dark:text-indigo-400"
+				><span class="font-medium">{componentProps.title}</span><span
+					class="iui-accent rounded-md px-2 py-1 font-semibold tabular-nums"
+					style={appearanceStyle(componentProps.appearance, { surface: true })}
 					>{format(value)} {componentProps.unit ?? ''}</span
 				></span
 			>
@@ -293,14 +356,15 @@
 				step={componentProps.step}
 				{value}
 				aria-valuetext={`${format(value)} ${componentProps.unit ?? ''}`}
-				class="mt-4 w-full cursor-pointer accent-indigo-600"
+				class="mt-4 w-full cursor-pointer"
+				style="accent-color:var(--iui-accent)"
 				oninput={(event) => writeNumber(Number(event.currentTarget.value))}
 			/>
-			<span class="mt-1 flex justify-between text-xs text-gray-500 dark:text-gray-400"
+			<span class="mt-1 flex justify-between text-xs"
 				><span>{format(componentProps.min)}</span><span>{format(componentProps.max)}</span></span
 			>
 		</label>
-		<p class="text-xs text-gray-500 dark:text-gray-400">
+		<p class="text-xs">
 			{componentProps.stateKey
 				? $i18n.t('Updates linked views locally. No model request is sent.')
 				: $i18n.t(
@@ -308,7 +372,7 @@
 					)}
 		</p>
 		{#if componentProps.followUp}
-			<p class="whitespace-pre-wrap text-sm text-gray-600 dark:text-gray-300">
+			<p class="whitespace-pre-wrap text-sm">
 				<span class="font-medium">{$i18n.t('Follow-up question:')}</span>
 				{componentProps.followUp}
 			</p>
@@ -316,7 +380,8 @@
 				type="button"
 				onclick={followUp}
 				disabled={!context.canFollowUp() || sending}
-				class="rounded-lg bg-indigo-600 px-3 py-2 text-sm font-medium text-white hover:bg-indigo-500 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-indigo-500 disabled:cursor-not-allowed disabled:opacity-40"
+				class="iui-strong rounded-xl px-3 py-2 text-sm font-medium transition hover:brightness-110 disabled:cursor-not-allowed disabled:opacity-40"
+				style={appearanceStyle(componentProps.appearance, { strong: true })}
 				>{sending ? $i18n.t('Sending…') : $i18n.t('Ask model with this value')}</button
 			>{/if}
 		{#if sendError}<p role="alert" class="text-xs text-red-600 dark:text-red-400">

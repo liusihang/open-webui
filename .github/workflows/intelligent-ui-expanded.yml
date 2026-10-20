@@ -40,3 +40,20 @@ jobs:
           npx playwright install --with-deps chromium
       - name: Verify actual opaque iframe and worker boundary
         run: node tests/intelligent-ui/app-sandbox.chromium.mjs
+      - name: Verify native color interactions, contrast, and responsive rendering in Chromium
+        run: |
+          npx vite --config tests/intelligent-ui/colors-fixture/vite.config.ts > /tmp/colors-fixture.log 2>&1 &
+          fixture_pid=$!
+          trap 'kill "$fixture_pid" || true' EXIT
+          for attempt in $(seq 1 60); do
+            if curl -fsS http://127.0.0.1:4174/ >/dev/null; then break; fi
+            sleep 1
+          done
+          node tests/intelligent-ui/colors-fixture/capture.mjs
+      - name: Save real native color screenshots and verification report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: intelligent-ui-native-colors
+          path: artifacts/intelligent-ui-colors/
+          if-no-files-found: warn

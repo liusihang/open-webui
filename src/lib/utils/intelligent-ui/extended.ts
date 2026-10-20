@@ -1,4 +1,7 @@
 /** Bounded data-only presentation and form components. No model-authored executable code. */
+import { validateAppearance, validateColor, type Appearance, type ColorValue } from './colors';
+type Styled<Props> = Props & { appearance?: Appearance };
+export type TextSpan = { text: string; color?: ColorValue; bold?: boolean };
 export type Primitive = string | number | boolean;
 export type Action =
 	| { type: 'set'; stateKey: string; value: Primitive }
@@ -7,43 +10,56 @@ export type Action =
 	| { type: 'copy-state'; stateKey: string; from: string }
 	| { type: 'copy'; keys: string[] };
 export type ImageProps = { src: string; alt: string; caption?: string; source?: string };
-export type ChoiceProps = {
+export type ChoiceProps = Styled<{
 	title: string;
 	stateKey: string;
 	value: string;
 	options: { label: string; value: string }[];
-};
+}>;
 export type ExtendedProps = {
-	Card: { title?: string; description?: string };
-	Carousel: { title?: string };
-	Flow: { title?: string; steps: { title: string; description?: string }[] };
-	Popover: { label: string; title?: string };
+	Card: Styled<{ title?: string; description?: string }>;
+	Carousel: Styled<{ title?: string }>;
+	Flow: Styled<{ title?: string; steps: Styled<{ title: string; description?: string }>[] }>;
+	Popover: Styled<{ label: string; title?: string }>;
 	SVG: { svg: string; label: string };
-	Icon: { name: 'info' | 'check' | 'warning' | 'star' | 'arrow-right' | 'heart'; label: string };
+	Icon: Styled<{
+		name: 'info' | 'check' | 'warning' | 'star' | 'arrow-right' | 'heart';
+		label: string;
+	}>;
 	Math: { expression: string; display: boolean };
 	Image: ImageProps;
 	ImageGallery: { title?: string; images: ImageProps[] };
-	Input: {
+	Input: Styled<{
 		title: string;
 		stateKey: string;
 		value: string;
 		placeholder?: string;
 		maxLength: number;
-	};
-	Textarea: {
+	}>;
+	Textarea: Styled<{
 		title: string;
 		stateKey: string;
 		value: string;
 		placeholder?: string;
 		maxLength: number;
-	};
-	Checkbox: { title: string; stateKey: string; value: boolean };
+	}>;
+	Checkbox: Styled<{ title: string; stateKey: string; value: boolean }>;
 	RadioGroup: ChoiceProps;
 	SegmentedControl: ChoiceProps;
-	DatePicker: { title: string; stateKey: string; value: string; min?: string; max?: string };
-	Button: { label: string; actions: Action[] };
-	Pressable: { label: string; actions: Action[] };
-	Text: { text: string; bindings: { token: string; stateKey: string }[] };
+	DatePicker: Styled<{
+		title: string;
+		stateKey: string;
+		value: string;
+		min?: string;
+		max?: string;
+	}>;
+	Button: Styled<{ label: string; actions: Action[] }>;
+	Pressable: Styled<{ label: string; actions: Action[] }>;
+	Text: Styled<{
+		text: string;
+		bindings: { token: string; stateKey: string }[];
+		spans?: TextSpan[];
+	}>;
 	Conditional: { stateKey: string; equals: Primitive };
 };
 export type ExtendedType = keyof ExtendedProps;
@@ -259,6 +275,23 @@ export function sanitizeSvg(input: unknown): string {
 	if (!root || stack.length || source.slice(end).trim()) fail();
 	return source;
 }
+/** Plain text only. Styling cannot introduce markup, arbitrary CSS, URLs or extra attributes. */
+function textSpans(input: unknown): TextSpan[] {
+	let length = 0;
+	if (!Array.isArray(input) || input.length > 64) fail();
+	return (input as unknown[]).map((value) => {
+		const span = obj(value);
+		fields(span, ['text', 'color', 'bold']);
+		const text = str(span.text, 16000);
+		length += text.length;
+		if (length > 16000 || (span.bold !== undefined && typeof span.bold !== 'boolean')) fail();
+		return {
+			text,
+			...(span.color === undefined ? {} : { color: validateColor(span.color) }),
+			...(span.bold === undefined ? {} : { bold: span.bold })
+		};
+	});
+}
 export function validateExtendedElement(input: unknown): ExtendedElement {
 	const e = obj(input);
 	fields(e, ['type', 'props', 'children']);
@@ -274,27 +307,31 @@ export function validateExtendedElement(input: unknown): ExtendedElement {
 	let result: Record<string, any> = {};
 	switch (e.type as ExtendedType) {
 		case 'Card':
-			fields(p, ['title', 'description']);
+			fields(p, ['title', 'description', 'appearance']);
 			result = { ...optional(p, 'title'), ...optional(p, 'description', 2000) };
 			break;
 		case 'Carousel':
-			fields(p, ['title']);
+			fields(p, ['title', 'appearance']);
 			if (!children.length) fail();
 			result = optional(p, 'title');
 			break;
 		case 'Flow':
-			fields(p, ['title', 'steps']);
+			fields(p, ['title', 'steps', 'appearance']);
 			result = {
 				...optional(p, 'title'),
 				steps: array(p.steps, 16).map((v) => {
 					const s = obj(v);
-					fields(s, ['title', 'description']);
-					return { title: required(s.title), ...optional(s, 'description', 2000) };
+					fields(s, ['title', 'description', 'appearance']);
+					return {
+						title: required(s.title),
+						...optional(s, 'description', 2000),
+						...(s.appearance === undefined ? {} : { appearance: validateAppearance(s.appearance) })
+					};
 				})
 			};
 			break;
 		case 'Popover':
-			fields(p, ['label', 'title']);
+			fields(p, ['label', 'title', 'appearance']);
 			result = { label: required(p.label), ...optional(p, 'title') };
 			break;
 		case 'SVG':
@@ -302,7 +339,7 @@ export function validateExtendedElement(input: unknown): ExtendedElement {
 			result = { svg: sanitizeSvg(p.svg), label: required(p.label) };
 			break;
 		case 'Icon':
-			fields(p, ['name', 'label']);
+			fields(p, ['name', 'label', 'appearance']);
 			if (!['info', 'check', 'warning', 'star', 'arrow-right', 'heart'].includes(p.name)) fail();
 			result = { name: p.name, label: required(p.label) };
 			break;
@@ -320,7 +357,7 @@ export function validateExtendedElement(input: unknown): ExtendedElement {
 			break;
 		case 'Input':
 		case 'Textarea': {
-			fields(p, ['title', 'stateKey', 'value', 'placeholder', 'maxLength']);
+			fields(p, ['title', 'stateKey', 'value', 'placeholder', 'maxLength', 'appearance']);
 			const max = p.maxLength ?? 256;
 			if (!Number.isInteger(max) || max < 1 || max > 256) fail();
 			result = {
@@ -334,13 +371,13 @@ export function validateExtendedElement(input: unknown): ExtendedElement {
 			break;
 		}
 		case 'Checkbox':
-			fields(p, ['title', 'stateKey', 'value']);
+			fields(p, ['title', 'stateKey', 'value', 'appearance']);
 			if (typeof p.value !== 'boolean') fail();
 			result = { title: required(p.title), stateKey: key(p.stateKey), value: p.value };
 			break;
 		case 'RadioGroup':
 		case 'SegmentedControl': {
-			fields(p, ['title', 'stateKey', 'value', 'options']);
+			fields(p, ['title', 'stateKey', 'value', 'options', 'appearance']);
 			const options = array(p.options, 32).map((v) => {
 				const o = obj(v);
 				fields(o, ['label', 'value']);
@@ -355,7 +392,7 @@ export function validateExtendedElement(input: unknown): ExtendedElement {
 			break;
 		}
 		case 'DatePicker': {
-			fields(p, ['title', 'stateKey', 'value', 'min', 'max']);
+			fields(p, ['title', 'stateKey', 'value', 'min', 'max', 'appearance']);
 			const value = date(p.value ?? '');
 			const min = p.min === undefined ? undefined : date(p.min);
 			const max = p.max === undefined ? undefined : date(p.max);
@@ -372,7 +409,7 @@ export function validateExtendedElement(input: unknown): ExtendedElement {
 		}
 		case 'Button':
 		case 'Pressable':
-			fields(p, ['label', 'actions']);
+			fields(p, ['label', 'actions', 'appearance']);
 			result = {
 				label: required(p.label),
 				actions: array(p.actions, 8).map((v) => {
@@ -408,9 +445,10 @@ export function validateExtendedElement(input: unknown): ExtendedElement {
 			};
 			break;
 		case 'Text':
-			fields(p, ['text', 'bindings']);
+			fields(p, ['text', 'bindings', 'spans', 'appearance']);
 			result = {
 				text: str(p.text, 8000),
+				...(p.spans === undefined ? {} : { spans: textSpans(p.spans) }),
 				bindings:
 					p.bindings === undefined
 						? []
@@ -439,6 +477,7 @@ export function validateExtendedElement(input: unknown): ExtendedElement {
 		children.length
 	)
 		fail();
+	if (p.appearance !== undefined) result.appearance = validateAppearance(p.appearance);
 	return { type: e.type, props: result, children } as ExtendedElement;
 }
 export function extendedSharedValue(
