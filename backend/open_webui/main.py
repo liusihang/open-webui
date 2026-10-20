@@ -258,7 +258,7 @@ from open_webui.utils.middleware import (
     process_chat_response,
     publish_chat_failed_event,
 )
-from open_webui.utils.misc import get_response_error_detail, merge_model_params
+from open_webui.utils.misc import get_exception_error_detail, get_response_error_detail, merge_model_params
 from open_webui.utils.model_ids import strip_provider_model_prefix
 from open_webui.utils.models import (
     check_model_access,
@@ -1667,6 +1667,7 @@ async def chat_completion(
 
     async def process_chat(request, form_data, user, metadata, model, tasks=None):
         error_detail = None
+        error_type = None
         try:
             try:
                 if not metadata.get('direct'):
@@ -1719,12 +1720,19 @@ async def chat_completion(
                     pass
                 raise  # re-raise to ensure proper task cancellation handling
             except Exception as e:
-                error_detail = e.detail if isinstance(e, HTTPException) else str(e)
+                error_type = type(e).__name__
+                error_detail = get_exception_error_detail(e)
                 if not (metadata.get('session_id') and metadata.get('chat_id')):
                     raise
             finally:
                 if error_detail is not None:
-                    log.error('Error processing chat payload: %s', error_detail)
+                    log.error(
+                        'Error processing chat payload (%s, chat_id=%s, message_id=%s): %s',
+                        error_type or 'ProviderError',
+                        metadata.get('chat_id'),
+                        metadata.get('message_id'),
+                        error_detail,
+                    )
                     if metadata.get('chat_id') and metadata.get('message_id'):
                         if is_saved_chat_id(metadata['chat_id']):
                             try:
