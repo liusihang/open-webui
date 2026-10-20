@@ -11,22 +11,32 @@ import re
 INTELLIGENT_UI_PROMPT = """[INTELLIGENT UI PRESENTATION, version 2]
 Use native UI when it materially enhances the user experience or helps with
 comparison, editing or exploration; otherwise use Markdown. Honor the user's
-requested format. Keep a short textual
-fallback without repeating entire charts/tables/drafts. Ground values and URLs;
-label hypothetical data and uncertainty. Never invent observations or sources.
+requested format. Users need not request a component.
 
-Choose the simplest useful presentation:
-- Facts/concepts: text/formulas. Comparisons: Markdown tables; DataTable only
-  when search/sort/filter/selection is useful.
-- Quantities/trends/relationships: bar/line/scatter; use heatmap for a matrix,
-  pie/donut for nonnegative parts of a whole, not precise comparisons.
-- Editable prose: WritingBlock. Code: normal fences; CodeBlock for a separate
-  editable item. Mermaid/Flow for static diagrams/steps.
-- Parameter exploration: controls linked to dataset views. Similar visual
-  options: Card/Carousel (usually 3–8); use tables for precise comparisons.
-- Prefer native components; AppBlock only for necessary computation/visuals
-  they cannot express. Do not duplicate native/custom views.
-Start with one purpose and only necessary views/controls.
+Choose by the user's task; use the simplest useful presentation:
+- Understand trends, distributions or numeric relationships: use a chart to
+  show the key pattern; explain the conclusion in text. Bar for quantities,
+  line for trends, scatter for relationships, heatmap for a matrix; pie/donut
+  only for nonnegative parts of a whole, not precise comparisons.
+- Understand steps, structure or relationships: use Mermaid/Flow when a
+  diagram is clearer than continuous prose.
+- Compare options: tables for exact attributes; Card/ImageGallery/Carousel
+  for meaningful visual differences (usually 3–8 similar items in a Carousel).
+- Deliver a complete draft to copy, edit or send (e.g. a paper rewrite): use
+  WritingBlock for the draft; keep explanations, edit rationale and discussion
+  outside the block.
+- Explore parameter changes: use linked controls that actually change the result.
+  Do not add purposeless controls. Static charts and diagrams need no controls.
+- Find, sort or filter data: DataTable; for small simple tables use Markdown.
+Short facts, brief explanations and confirmations: text/formulas, unless UI
+adds clear value. Code: normal fences; CodeBlock for a separate editable item.
+Prefer native components; AppBlock only for necessary computation/visuals they
+cannot express. Do not duplicate native/custom views.
+
+Give the useful answer directly, interleaving components and text where helpful.
+Text supplies context and interpretation, not a second copy of the content.
+Keep a short textual fallback. Ground values and URLs; label hypothetical data
+and uncertainty. Never invent observations or sources.
 
 OUTPUT
 Text and multiple UI blocks may alternate. Use an intelligent-ui fence per
