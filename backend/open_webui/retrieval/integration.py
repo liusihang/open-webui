@@ -364,11 +364,13 @@ async def complete_images(request, *, file_id, version, collection, assets, skip
         await update_status(file_id, version, images='failed', image_error=type(exc).__name__, image_retryable=True)
 
 
-async def request_scope(user, *, model_knowledge=(), metadata=None, knowledge_ids=None, query_image_refs=()):
+async def request_scope(
+    user, *, model_knowledge=(), metadata=None, knowledge_ids=None, query_image_refs=(), file_ids=None
+):
     """Merge server attachments; explicit IDs can narrow, never expand a bound scope."""
     metadata = metadata or {}
     entries = [*model_knowledge, *(metadata.get('folder_knowledge') or []), *(metadata.get('files') or [])]
-    kb_ids, file_ids = [], []
+    kb_ids, selected_files = [], []
     for item in entries:
         if not isinstance(item, dict):
             continue
@@ -385,13 +387,34 @@ async def request_scope(user, *, model_knowledge=(), metadata=None, knowledge_id
             from open_webui.utils.native_pdf import is_native_pdf_attachment
 
             if not is_native_pdf_attachment(item, metadata):
-                file_ids.append(identity)
+                selected_files.append(identity)
     if knowledge_ids is not None:
         if not isinstance(knowledge_ids, list) or any(not isinstance(k, str) for k in knowledge_ids):
             raise ValueError('knowledge_ids must be a list of stored knowledge IDs')
-        kb_ids = [k for k in kb_ids if k in knowledge_ids] if (kb_ids or file_ids) else knowledge_ids
-        file_ids = []  # An explicit KB restriction must not leak other attachments.
-    return await resolve_scope(user, knowledge_ids=kb_ids, file_ids=file_ids)
+        if file_ids is not None:
+            raise ValueError('Use knowledge_ids or file_ids, not both')
+        kb_ids = [k for k in kb_ids if k in knowledge_ids] if (kb_ids or selected_files) else knowledge_ids
+        selected_files = []  # An explicit KB restriction must not leak other attachments.
+    if file_ids is not None:
+        if not isinstance(file_ids, list) or any(not isinstance(f, str) or not f for f in file_ids):
+            raise ValueError('file_ids must be a list of stored file IDs')
+        if kb_ids or selected_files:
+            from open_webui.models.knowledge import Knowledges
+
+            narrowed = []
+            for identity in dict.fromkeys(file_ids):
+                if identity in selected_files:
+                    narrowed.append(identity)
+                else:
+                    for kb_id in kb_ids:
+                        if await Knowledges.has_file(kb_id, identity):
+                            narrowed.append(identity)
+                            break
+            selected_files = narrowed
+        else:
+            selected_files = file_ids
+        kb_ids = []
+    return await resolve_scope(user, knowledge_ids=kb_ids, file_ids=selected_files)
 
 
 async def split_external_scope(scope):

@@ -17,6 +17,7 @@ from open_webui.internal import db as internal_db
 from open_webui.models.access_grants import AccessGrant
 from open_webui.models.evidence import KnowledgeEvidence
 from open_webui.models.files import File, Files
+from open_webui.models.knowledge import KnowledgeFile
 from open_webui.models.retrieval_indexes import RetrievalIndexJob
 from open_webui.models.users import UserModel
 from open_webui.retrieval import integration
@@ -481,6 +482,7 @@ async def test_query_schema_scope_and_forbidden_image_arguments(db, app_stack):
         'count',
         'query_image_refs',
         'modalities',
+        'file_ids',
     }
     await upload(s, db)
     result = json.loads(
@@ -739,3 +741,116 @@ async def test_uploaded_query_image_can_search_selected_kb_as_independent_input(
         'query-image'
     ]
     assert await integration.authorized_query_images(user('stranger'), [{'type': 'image', 'id': 'query-image'}]) == []
+
+
+@pytest.mark.asyncio
+async def test_file_scope_narrows_selected_kb_and_does_not_expand_to_another_upload(db, app_stack):
+    s = app_stack
+    selected = [{'type': 'collection', 'id': 'kb'}]
+    scope = await integration.request_scope(s.owner, model_knowledge=selected, file_ids=['file'])
+    assert scope.file_ids == ('file',) and scope.knowledge_ids == ()
+    db.add(File(id='other', user_id='owner', filename='other.txt', meta={}, data={}, created_at=1, updated_at=1))
+    await db.commit()
+    rejected = await integration.request_scope(s.owner, model_knowledge=selected, file_ids=['other'])
+    assert rejected.file_ids == () and rejected.knowledge_ids == ()
+    with pytest.raises(ValueError, match='not both'):
+        await integration.request_scope(s.owner, knowledge_ids=['kb'], file_ids=['file'])
+    await db.execute(delete(KnowledgeFile).where(KnowledgeFile.file_id == 'file'))
+    await db.commit()
+    removed = await integration.request_scope(s.owner, model_knowledge=selected, file_ids=['file'])
+    assert removed.file_ids == ()
+
+
+@pytest.mark.asyncio
+async def test_chat_and_knowledge_search_use_same_versioned_evidence_and_citations(db, app_stack):
+    s = app_stack
+    await upload(s, db)
+    await wait_images(s)
+    context = {'__request__': s.request, '__user__': s.owner.model_dump()}
+    attached = [{'type': 'file', 'id': 'file'}]
+    legacy = json.loads(await builtin.query_chat_files('blue', __files__=attached, **context))
+    canonical = json.loads(
+        await builtin.query_knowledge_files('blue', file_ids=['file'], __metadata__={'files': attached}, **context)
+    )
+    assert legacy['items'] and canonical['items']
+    assert {i['evidence_ref'] for i in legacy['items']} == {i['evidence_ref'] for i in canonical['items']}
+    assert all('preview' not in i and 'score' not in i for i in canonical['items'])
+    assert len(s.text_calls) == 3  # One index operation, two queries; no re-index.
+    for name, result in [('query_chat_files', legacy), ('query_knowledge_files', canonical)]:
+        sources = middleware.get_citation_source_from_tool_result(name, {}, json.dumps(result))
+        assert sources and sources[0]['metadata'][0]['evidence_ref']
+
+
+@pytest.mark.asyncio
+async def test_canonical_evidence_reader_keeps_image_channel_and_explicit_reread(db, app_stack):
+    s = app_stack
+    await upload(s, db)
+    await wait_images(s)
+    metadata = {'files': [{'type': 'file', 'id': 'file'}]}
+    context = {
+        '__request__': s.request,
+        '__user__': s.owner.model_dump(),
+        '__metadata__': metadata,
+        '__model__': {'info': {'meta': {'capabilities': {'vision': True}}}},
+    }
+    found = json.loads(await builtin.query_knowledge_files('blue', **context))
+    refs = [item['evidence_ref'] for item in found['items']]
+    assert len(refs) == 2
+    for _ in range(2):
+        result = await builtin.view_knowledge_file(evidence_refs=refs, **context)
+        assert len(json.loads(result)['items']) == 2
+        sources = middleware.get_citation_source_from_tool_result('view_knowledge_file', {}, result)
+        assert sources[0]['metadata'][0]['evidence_ref']
+        parsed, media, _ = await middleware.process_tool_result(
+            s.request, 'view_knowledge_file', result, 'builtin', metadata=metadata, user=s.owner
+        )
+        assert media and media[0]['rag_llm_only']
+        assert 'data:image/' not in middleware.tool_result_content(parsed)
+    await builtin.view_knowledge_file('file', **context)
+    assert s.request.state.rag_model_images == []
+
+
+@pytest.mark.asyncio
+async def test_canonical_file_and_evidence_reads_recheck_revoked_acl(db, app_stack):
+    s = app_stack
+    await upload(s, db)
+    await wait_images(s)
+    context = {
+        '__request__': s.request,
+        '__user__': user('reader').model_dump(),
+        '__metadata__': {'files': [{'type': 'file', 'id': 'file'}]},
+        '__knowledge_enabled__': False,
+    }
+    found = json.loads(await builtin.query_knowledge_files('blue', **context))
+    assert found['items']
+    refs = [item['evidence_ref'] for item in found['items']]
+    assert 'error' not in json.loads(await builtin.view_knowledge_file('file', **context))
+    await db.execute(delete(AccessGrant).where(AccessGrant.id == 'grant'))
+    await db.commit()
+    assert 'error' in json.loads(await builtin.view_knowledge_file('file', **context))
+    assert 'error' in json.loads(await builtin.grep_knowledge_files('blue', **context))
+    assert json.loads(await builtin.search_knowledge_files(**context)) == []
+    revoked = json.loads(await builtin.view_knowledge_file(evidence_refs=refs, **context))
+    assert {item['evidence_ref'] for item in revoked['items']} == set(refs)
+    assert all(item['status'] == 'unavailable' and 'content' not in item for item in revoked['items'])
+    assert s.request.state.rag_model_images == []
+
+
+@pytest.mark.asyncio
+async def test_file_restriction_does_not_also_query_selected_notes(db, app_stack, monkeypatch):
+    s = app_stack
+    await upload(s, db)
+    await wait_images(s)
+    old_path = AsyncMock(side_effect=AssertionError('Unselected notes must not be queried'))
+    monkeypatch.setattr(builtin, '_query_knowledge_files_legacy', old_path)
+    result = json.loads(
+        await builtin.query_knowledge_files(
+            'blue',
+            file_ids=['file'],
+            __request__=s.request,
+            __user__=s.owner.model_dump(),
+            __metadata__={'files': [{'type': 'file', 'id': 'file'}, {'type': 'note', 'id': 'unselected-note'}]},
+        )
+    )
+    assert result['items']
+    old_path.assert_not_awaited()

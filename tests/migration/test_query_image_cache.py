@@ -45,6 +45,7 @@ def tool_scope():
         Field=Field,
         create_model=create_model,
         VIEW_FILE_DEFAULT_MAX_CHARS=10_000,
+        VIEW_FILE_MAX_CHARS=100_000,
         copy=copy,
         inspect=inspect,
         re=re,
@@ -58,6 +59,12 @@ def tool_scope():
         Config=SimpleNamespace(get_many=AsyncMock(return_value={}), get=AsyncMock(return_value={})),
         is_native_pdf_attachment=lambda *args: False,
     )
+    helper_spec = importlib.util.spec_from_file_location(
+        'query_cache_knowledge_helpers', BUILTIN.with_name('knowledge_tools.py')
+    )
+    helper = importlib.util.module_from_spec(helper_spec)
+    helper_spec.loader.exec_module(helper)
+    scope.update(knowledge_entries=helper.knowledge_entries, model_evidence_result=helper.model_evidence_result)
     for name in (
         'list_knowledge',
         'search_knowledge_files',
@@ -69,6 +76,9 @@ def tool_scope():
         'list_knowledge_bases',
         'search_knowledge_bases',
         'query_knowledge_bases',
+        'list_chat_files',
+        'grep_chat_files',
+        'query_chat_files',
     ):
         LOAD(BUILTIN, name, scope)
     for name in (
@@ -141,6 +151,80 @@ class QueryImageCacheTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(specs[1], specs[2])
         self.assertNotIn(IMAGE_A, specs[0])
         self.assertNotIn(IMAGE_B, specs[1])
+
+    async def test_only_five_canonical_knowledge_interfaces_are_advertised(self):
+        tools = await self.resolve([])
+        visible = {name for name, tool in tools.items() if not tool.get('hidden')}
+        self.assertEqual(
+            visible,
+            {
+                'search_knowledge_bases',
+                'search_knowledge_files',
+                'grep_knowledge_files',
+                'query_knowledge_files',
+                'view_knowledge_file',
+            },
+        )
+        for alias in (
+            'list_knowledge',
+            'list_knowledge_bases',
+            'query_knowledge_bases',
+            'view_file',
+            'view_knowledge_evidence',
+        ):
+            self.assertTrue(tools[alias]['hidden'])
+            self.assertTrue(callable(tools[alias]['callable']))
+        for tool in tools.values():
+            self.assertFalse(any(name.startswith('__') for name in tool['spec']['parameters']['properties']))
+
+    async def test_selected_sources_do_not_change_visible_knowledge_definitions(self):
+        snapshots = []
+        for sources in ([], [{'type': 'collection', 'id': 'kb'}], [{'type': 'file', 'id': 'file'}]):
+            self.case.model['info']['meta']['knowledge'] = sources
+            tools = await self.resolve([])
+            snapshots.append(json.dumps([tool['spec'] for tool in tools.values() if not tool.get('hidden')]))
+        self.assertEqual(snapshots[0], snapshots[1])
+        self.assertEqual(snapshots[1], snapshots[2])
+
+    async def test_file_only_tools_keep_chat_scope_and_hide_old_names(self):
+        meta = self.case.model['info']['meta']
+        meta['builtinTools'].update(knowledge=False, files=True)
+        meta['capabilities'] = {'file_context': False, 'file_upload': True}
+        meta['knowledge'] = [{'type': 'collection', 'id': 'not-available'}]
+        tools = await self.scope['get_builtin_tools'](
+            self.case.request,
+            {'__user__': {'id': 'owner', 'role': 'admin'}, '__metadata__': {'files': [{'id': 'file', 'type': 'file'}]}},
+            model=self.case.model,
+        )
+        self.assertEqual(
+            {name for name, tool in tools.items() if not tool.get('hidden')},
+            {'search_knowledge_files', 'grep_knowledge_files', 'query_knowledge_files', 'view_knowledge_file'},
+        )
+        for name in ('query_knowledge_files', 'view_knowledge_file', 'view_file'):
+            self.assertFalse(tools[name]['callable'].__extra_params__['__knowledge_enabled__'])
+        self.assertTrue(tools['query_chat_files']['hidden'])
+        self.assertNotIn('search_knowledge_bases', tools)
+
+    async def test_both_feature_categories_disabled_expose_no_knowledge_tools(self):
+        self.case.model['info']['meta']['builtinTools']['knowledge'] = False
+        self.assertEqual(await self.resolve([]), {})
+
+    async def test_provider_payloads_advertise_only_canonical_knowledge_names(self):
+        body, metadata = await self.case.assemble(
+            tools=False, folder=False, voice=False, summary=False, memory=False, rag=False
+        )
+        expected = {
+            'search_knowledge_bases',
+            'search_knowledge_files',
+            'grep_knowledge_files',
+            'query_knowledge_files',
+            'view_knowledge_file',
+        }
+        self.assertEqual({tool['function']['name'] for tool in body['tools']}, expected)
+        self.assertTrue(metadata['tools']['view_file']['hidden'])
+        for responses in (False, True):
+            payload = self.case.serialize(body, responses=responses)
+            self.assertEqual({tool.get('name') or tool['function']['name'] for tool in payload['tools']}, expected)
 
     async def test_attachment_hint_is_static_and_query_argument_remains_explicit(self):
         tools = await self.resolve([IMAGE_A])
@@ -237,7 +321,8 @@ class QueryImageCacheTests(unittest.IsolatedAsyncioTestCase):
         tools = await self.resolve([IMAGE_B])
         query = tools['query_knowledge_files']['callable']
         with patch.dict(sys.modules, {'open_webui.retrieval.integration': integration}):
-            await query('text-only lookup')
+            result = json.loads(await query('text-only lookup'))
+            self.assertNotIn('error', result)
             self.assertEqual(evidence.search.await_args.kwargs['query_image_refs'], ())
             await query('', query_image_refs=[IMAGE_A])
             self.assertEqual(evidence.search.await_args.kwargs['query_image_refs'], [IMAGE_A])

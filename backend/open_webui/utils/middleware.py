@@ -525,7 +525,12 @@ def get_citation_source_from_tool_result(
             pass  # keep tool_result as-is (e.g. fetch_url returns plain text)
         if isinstance(tool_result, dict) and 'error' in tool_result:
             return []
-        if tool_name in ('query_knowledge_files', 'view_knowledge_evidence') and isinstance(tool_result, dict):
+        if tool_name in (
+            'query_knowledge_files',
+            'query_chat_files',
+            'view_knowledge_evidence',
+            'view_knowledge_file',
+        ) and (isinstance(tool_result, dict) and 'items' in tool_result):
             from open_webui.retrieval.integration import citation_sources
 
             sources = citation_sources(tool_result.get('items') or [])
@@ -905,7 +910,12 @@ async def process_tool_result(
                         }
 
     tool_result_files = []
-    if tool_type == 'builtin' and tool_function_name in ('query_knowledge_files', 'view_knowledge_evidence'):
+    if tool_type == 'builtin' and tool_function_name in (
+        'query_knowledge_files',
+        'query_chat_files',
+        'view_knowledge_evidence',
+        'view_knowledge_file',
+    ):
         for part in getattr(request.state, 'rag_model_images', ()):
             tool_result_files.append({'type': 'image', 'url': part['image_url'], 'rag_llm_only': True})
         request.state.rag_model_images = []
@@ -1167,7 +1177,7 @@ async def chat_completion_tools_handler(
     skip_files = False
     sources = []
 
-    specs = [tool['spec'] for tool in tools.values()]
+    specs = [tool['spec'] for tool in tools.values() if not tool.get('hidden')]
     tools_specs = JSONCodec.dumps(specs, ensure_ascii=False)
 
     tools_prompt_template = task_config.get('task.tools.prompt_template')
@@ -3346,7 +3356,7 @@ async def process_chat_payload(request, form_data, user, metadata, model):
                 form_data['tools'] = [
                     {'type': 'function', 'function': tool.get('spec', {})}
                     for name, tool in tools_dict.items()
-                    if name not in deferred
+                    if name not in deferred and not tool.get('hidden')
                 ]
                 if inlet_filter_tools:
                     form_data['tools'].extend(inlet_filter_tools)
