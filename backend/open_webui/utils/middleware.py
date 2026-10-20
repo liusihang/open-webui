@@ -2329,7 +2329,6 @@ async def process_chat_payload(request, form_data, user, metadata, model):
     # This list is server-resolved for every request; client markers are not
     # retrieval bypasses, and old Live markers still undergo authorization.
     metadata.pop('native_pdf_file_ids', None)
-    metadata.pop('rag_query_image_refs', None)
     metadata.pop('_context_summary_prompt', None)
     metadata.pop('_dynamic_memory_context', None)
     metadata.pop('_dynamic_memory_user_count', None)
@@ -3040,11 +3039,6 @@ async def process_chat_payload(request, form_data, user, metadata, model):
             'features': features,
         }
     )
-    from open_webui.retrieval.integration import authorized_query_images
-
-    latest_user = next((m for m in reversed(form_data.get('messages', [])) if m.get('role') == 'user'), {})
-    image_entries = [*(files or []), *(latest_user.get('files') or [])]
-    metadata['rag_query_image_refs'] = await authorized_query_images(user, image_entries)
     form_data['metadata'] = metadata
 
     # When the caller provides an explicit `tools` key in the request body,

@@ -945,14 +945,8 @@ async def get_builtin_tools(
             get_builtin_function_introspection(func),
         )
 
+        # Per-turn image IDs already travel in user attachment tags, not tool definitions.
         spec = get_builtin_tool_spec(func)
-        if func.__name__ == 'query_knowledge_files' and metadata.get('rag_query_image_refs'):
-            spec = copy.deepcopy(spec)
-            spec['description'] += (
-                '\nAuthorized uploaded query image file IDs for this turn: '
-                + JSONCodec.dumps(metadata['rag_query_image_refs'])
-                + '. Use query_image_refs for image-based knowledge search; these are inputs, not target KBs.'
-            )
         if func.__name__ == 'delegate_task' and not config.get('subagents.background_enabled'):
             parameters = spec.get('parameters', {})
             parameters.get('properties', {}).pop('background', None)
