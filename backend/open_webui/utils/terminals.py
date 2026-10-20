@@ -23,6 +23,8 @@ TERMINAL_CONTEXT_TYPES = {'chat', 'automation'}
 TERMINAL_CONTEXT_ID_SOURCES = {'chat': 'chat_id', 'automation': 'automation_id'}
 TERMINAL_CHAT_UPLOAD_MODES = {'default', 'filesystem'}
 MAX_AGENTS_MD_BYTES = 32 * 1024
+TERMINAL_STARTUP_TIMEOUT = 60
+TERMINAL_STARTUP_NOTICE_DELAY = 1
 
 TERMINAL_SYSTEM_PROMPT = (
     'Open WebUI 的 Open Terminal 为你提供可执行命令、运行代码和处理文件的计算环境。'
@@ -160,7 +162,9 @@ def terminal_chat_uploads(connection: dict) -> str:
     return value if value in TERMINAL_CHAT_UPLOAD_MODES else 'default'
 
 
-async def get_terminal_json(request, user, metadata: dict, path: str, extra_params: dict | None = None):
+async def get_terminal_json(
+    request, user, metadata: dict, path: str, extra_params: dict | None = None, *, timeout: float | None = None
+):
     """Read from an admin terminal on the backend or a personal terminal in its browser."""
     if not ENABLE_TOOL_SERVERS:
         return None
@@ -210,8 +214,10 @@ async def get_terminal_json(request, user, metadata: dict, path: str, extra_para
             headers['X-Session-Id'] = metadata['chat_id']
         if context_id:
             headers[TERMINAL_CONTEXT_HEADER] = context_id
-        timeout = aiohttp.ClientTimeout(total=AIOHTTP_CLIENT_TIMEOUT_TOOL_SERVER_DATA)
-        async with aiohttp.ClientSession(timeout=timeout, trust_env=True) as session:
+        client_timeout = aiohttp.ClientTimeout(
+            total=AIOHTTP_CLIENT_TIMEOUT_TOOL_SERVER_DATA if timeout is None else timeout
+        )
+        async with aiohttp.ClientSession(timeout=client_timeout, trust_env=True) as session:
             async with session.get(
                 f'{get_terminal_server_url(connection)}{path}',
                 headers=headers,
@@ -231,6 +237,71 @@ async def get_terminal_json(request, user, metadata: dict, path: str, extra_para
         )
         return result.get('data') if isinstance(result, dict) else None
     return None
+
+
+async def prepare_terminal(request, user, metadata: dict, extra_params: dict | None = None):
+    """Wait for a managed user's runtime before short metadata reads can time out.
+
+    Readiness is request-local: no shared user credentials or availability cache.
+    Fast, already-running terminals emit no extra status history.
+    """
+    from fastapi import HTTPException
+    from open_webui.models.config import Config
+
+    if not ENABLE_TOOL_SERVERS or not metadata.get('terminal_id'):
+        return
+    connections = await Config.get('terminal_server.connections', []) or []
+    connection = next((item for item in connections if item.get('id') == metadata['terminal_id']), None)
+    if not connection or not is_terminal_orchestrator(connection):
+        return
+
+    emitter = (extra_params or {}).get('__event_emitter__')
+    reported = False
+    ready = False
+
+    async def emit_status(description, *, done, error=False):
+        try:
+            await emitter(
+                {
+                    'type': 'status',
+                    'data': {
+                        'action': 'terminal_startup',
+                        'description': description,
+                        'done': done,
+                        'error': error,
+                    },
+                }
+            )
+        except Exception as exc:
+            log.warning('Failed to emit terminal readiness status (%s)', type(exc).__name__)
+
+    async def show_pending():
+        nonlocal reported
+        await asyncio.sleep(TERMINAL_STARTUP_NOTICE_DELAY)
+        reported = True
+        await emit_status('Preparing terminal', done=False)
+
+    notice = asyncio.create_task(show_pending()) if emitter else None
+    try:
+        health = await get_terminal_json(
+            request, user, metadata, '/health', extra_params, timeout=TERMINAL_STARTUP_TIMEOUT
+        )
+        if health is None:
+            raise RuntimeError('Terminal health check failed')
+        ready = True
+    except Exception as exc:
+        detail = (
+            f'Terminal preparation timed out after {TERMINAL_STARTUP_TIMEOUT} seconds. Please retry.'
+            if isinstance(exc, TimeoutError)
+            else f'Terminal preparation failed ({type(exc).__name__}). Please retry.'
+        )
+        raise HTTPException(status_code=503, detail=detail) from exc
+    finally:
+        if notice:
+            notice.cancel()
+            await asyncio.gather(notice, return_exceptions=True)
+        if reported:
+            await emit_status('Terminal ready' if ready else 'Terminal preparation failed', done=True, error=not ready)
 
 
 async def get_terminal_agents_md(request, user, metadata: dict, extra_params: dict | None = None) -> str | None:

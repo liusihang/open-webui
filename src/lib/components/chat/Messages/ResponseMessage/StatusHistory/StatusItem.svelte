@@ -142,6 +142,8 @@
 						{$i18n.t('Generating search query')}
 					{:else if status?.description === 'Searching the web'}
 						{$i18n.t('Searching the web')}
+					{:else if status?.action === 'terminal_startup'}
+						{$i18n.t(status.description)}
 					{:else}
 						{status?.description}
 					{/if}

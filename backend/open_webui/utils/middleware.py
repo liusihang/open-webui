@@ -2810,6 +2810,13 @@ async def process_chat_payload(request, form_data, user, metadata, model):
     files = form_data.pop('files', None)
     form_data.pop('folder_id', None)
     metadata['terminal_id'] = terminal_id
+    terminal_capability = (model.get('info', {}).get('meta', {}).get('capabilities') or {}).get('terminal', True)
+    resolve_terminal = terminal_capability and payload_tools is None
+    if terminal_id and resolve_terminal:
+        from open_webui.utils.terminals import prepare_terminal
+
+        await prepare_terminal(request, user, metadata, extra_params)
+
     can_author_skills = (
         use_builtin_tools
         and (model.get('info', {}).get('meta', {}).get('builtinTools') or {}).get('skills', True)
@@ -2951,13 +2958,23 @@ async def process_chat_payload(request, form_data, user, metadata, model):
                     f'<description>{skill.description or ""}</description>\n</skill>\n'
                 )
 
-        listed = (
-            await get_terminal_json(request, user, metadata, '/skills', extra_params)
-            if terminal_id or terminal_skill_ids
-            else None
-        )
+        listed = None
+        if (terminal_id or terminal_skill_ids) and resolve_terminal:
+            try:
+                listed = await get_terminal_json(request, user, metadata, '/skills', extra_params)
+            except Exception as exc:
+                # Automatic discovery is optional; a selected skill must not be silently omitted.
+                if terminal_skill_ids:
+                    raise HTTPException(
+                        status_code=503, detail='Could not load the selected terminal skills. Please retry.'
+                    ) from exc
+                log.warning('Skipping automatic terminal skill discovery (%s)', type(exc).__name__)
 
         listed_terminal_skills = listed if isinstance(listed, list) else []
+        if terminal_skill_ids and not set(terminal_skill_ids).issubset(
+            skill.get('id') for skill in listed_terminal_skills if isinstance(skill, dict)
+        ):
+            raise HTTPException(status_code=503, detail='The selected terminal skills are unavailable. Please retry.')
 
         if terminal_id and use_builtin_tools and model_builtin_tools.get('skills', True):
             terminal_skills = listed_terminal_skills
@@ -2985,6 +3002,10 @@ async def process_chat_payload(request, form_data, user, metadata, model):
                         ),
                         form_data['messages'],
                         append=True,
+                    )
+                else:
+                    raise HTTPException(
+                        status_code=503, detail='Could not load the selected terminal skill. Please retry.'
                     )
             else:
                 skill_manifest += format_terminal_skill_manifest_entry(skill)
@@ -3148,7 +3169,6 @@ async def process_chat_payload(request, form_data, user, metadata, model):
 
         # Resolve terminal tools if terminal_id is set (outside tool_ids check
         # so system terminals work even when no other tools are selected)
-        terminal_capability = (model.get('info', {}).get('meta', {}).get('capabilities') or {}).get('terminal', True)
         terminal_connection_ids = {
             connection.get('id') for connection in await Config.get('terminal_server.connections', []) or []
         }

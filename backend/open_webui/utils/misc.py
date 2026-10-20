@@ -40,6 +40,22 @@ def merge_model_params(base: dict, override: dict) -> dict:
     return params
 
 
+def get_exception_error_detail(error: Exception) -> str:
+    """Keep useful errors, but never persist an empty exception message."""
+    detail = getattr(error, 'detail', None)
+    if detail:
+        if not isinstance(detail, str):
+            return JSONCodec.dumps(detail)
+        if detail.strip():
+            return detail
+    message = str(error).strip()
+    if message:
+        return message
+    if isinstance(error, TimeoutError):
+        return 'The chat request timed out. Please retry.'
+    return f'Chat processing failed ({type(error).__name__}).'
+
+
 def get_response_error_detail(response: object) -> str:
     status_code = getattr(response, 'status_code', None)
     fallback = f'Provider returned HTTP {status_code}' if status_code else 'Provider returned an error'
