@@ -16,10 +16,47 @@ SPEC.loader.exec_module(MODULE)
 
 class IntelligentUIPromptTests(unittest.TestCase):
     def test_user_experience_is_an_explicit_presentation_reason(self):
-        opening = MODULE.INTELLIGENT_UI_PROMPT.split('Choose the simplest useful presentation:')[0]
+        opening = MODULE.INTELLIGENT_UI_PROMPT.split('\nOUTPUT\n')[0]
         self.assertIn('materially enhances the user experience', opening)
         self.assertIn('comparison, editing or exploration; otherwise use Markdown.', opening)
         self.assertIn("Honor the user's\nrequested format.", opening)
+
+    def test_selection_starts_from_the_users_task_without_waiting_for_component_requests(self):
+        policy = ' '.join(MODULE.INTELLIGENT_UI_PROMPT.split('\nOUTPUT\n')[0].split())
+        self.assertIn("Choose by the user's task", policy)
+        self.assertIn('Users need not request a component', policy)
+        for task in (
+            'trends, distributions or numeric relationships',
+            'steps, structure or relationships',
+            'Compare options',
+            'complete draft',
+            'Explore parameter changes',
+            'Find, sort or filter data',
+        ):
+            self.assertIn(task, policy)
+
+    def test_finished_writing_and_edit_explanations_have_separate_places(self):
+        policy = ' '.join(MODULE.INTELLIGENT_UI_PROMPT.split('\nOUTPUT\n')[0].split())
+        self.assertIn('complete draft to copy, edit or send', policy)
+        self.assertIn('paper rewrite', policy)
+        self.assertIn('WritingBlock for the draft', policy)
+        self.assertIn('explanations, edit rationale and discussion outside', policy)
+
+    def test_controls_need_a_real_effect_and_static_views_do_not_need_buttons(self):
+        policy = ' '.join(MODULE.INTELLIGENT_UI_PROMPT.split('\nOUTPUT\n')[0].split())
+        self.assertIn('controls that actually change the result', policy)
+        self.assertIn('Do not add purposeless controls', policy)
+        self.assertIn('Static charts and diagrams need no controls', policy)
+        self.assertIn('Short facts, brief explanations and confirmations', policy)
+
+    def test_comparison_data_lookup_and_useful_prose_are_not_duplicated(self):
+        policy = ' '.join(MODULE.INTELLIGENT_UI_PROMPT.split('\nOUTPUT\n')[0].split())
+        self.assertIn('tables for exact attributes', policy)
+        self.assertIn('visual differences', policy)
+        self.assertIn('Find, sort or filter data: DataTable', policy)
+        self.assertIn('small simple tables use Markdown', policy)
+        self.assertIn('Give the useful answer directly', policy)
+        self.assertIn('not a second copy of the content', policy)
 
     def test_requires_administrator_boolean_not_request_features(self):
         for value in [
