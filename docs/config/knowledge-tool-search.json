@@ -1,21 +1,21 @@
 {
-  "chat.tool_search.enable": true,
-  "chat.tool_search.defer_threshold": 0,
-  "chat.tool_search.defer_builtin_tools": true,
-  "chat.tool_search.always_loaded": [
-    "get_environment",
-    "run_command",
-    "get_process_status",
-    "read_file",
-    "write_file",
-    "apply_patch",
-    "display_file",
-    "ask_user",
-    "get_current_timestamp",
-    "search_web",
-    "search_knowledge_files",
-    "grep_knowledge_files",
-    "query_knowledge_files",
-    "view_knowledge_file"
-  ]
+	"chat.tool_search.enable": true,
+	"chat.tool_search.defer_threshold": 0,
+	"chat.tool_search.defer_builtin_tools": true,
+	"chat.tool_search.always_loaded": [
+		"get_environment",
+		"run_command",
+		"get_process_status",
+		"read_file",
+		"write_file",
+		"apply_patch",
+		"display_file",
+		"ask_user",
+		"get_current_timestamp",
+		"search_web",
+		"search_knowledge_files",
+		"grep_knowledge_files",
+		"query_knowledge_files",
+		"view_knowledge_file"
+	]
 }

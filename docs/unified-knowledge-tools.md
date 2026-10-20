@@ -3,13 +3,13 @@
 The model-facing interface has five functions. Permissions and source selection
 are resolved before file content or evidence is returned.
 
-| Function | Use |
-| --- | --- |
-| `search_knowledge_bases` | Find KBs by name/description; an empty query lists accessible KBs. |
+| Function                 | Use                                                                                                                                 |
+| ------------------------ | ----------------------------------------------------------------------------------------------------------------------------------- |
+| `search_knowledge_bases` | Find KBs by name/description; an empty query lists accessible KBs.                                                                  |
 | `search_knowledge_files` | List files or find filenames within selected KBs and chat attachments. With no source selected, browse authorized KB file metadata. |
-| `grep_knowledge_files` | Find exact text/clauses in selected sources, or narrow to a known file/KB. No implicit all-KB content scan. |
-| `query_knowledge_files` | Text/image semantic retrieval through the unified evidence service; `file_ids` or `knowledge_ids` can narrow the scope. |
-| `view_knowledge_file` | Read parsed file text by offset/line, or explicitly reread a batch of stable `evidence_refs`. |
+| `grep_knowledge_files`   | Find exact text/clauses in selected sources, or narrow to a known file/KB. No implicit all-KB content scan.                         |
+| `query_knowledge_files`  | Text/image semantic retrieval through the unified evidence service; `file_ids` or `knowledge_ids` can narrow the scope.             |
+| `view_knowledge_file`    | Read parsed file text by offset/line, or explicitly reread a batch of stable `evidence_refs`.                                       |
 
 Old names remain executable for saved calls and approval resumes, but their
 definitions are hidden from new requests and Tool Search. `view_file` delegates
