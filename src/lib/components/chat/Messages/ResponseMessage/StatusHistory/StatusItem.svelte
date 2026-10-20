@@ -143,7 +143,15 @@
 					{:else if status?.description === 'Searching the web'}
 						{$i18n.t('Searching the web')}
 					{:else if status?.action === 'terminal_startup'}
-						{$i18n.t(status.description)}
+						{#if status.description === 'Preparing terminal'}
+							{$i18n.t('Preparing terminal')}
+						{:else if status.description === 'Terminal ready'}
+							{$i18n.t('Terminal ready')}
+						{:else if status.description === 'Terminal preparation failed'}
+							{$i18n.t('Terminal preparation failed')}
+						{:else}
+							{status.description}
+						{/if}
 					{:else}
 						{status?.description}
 					{/if}
