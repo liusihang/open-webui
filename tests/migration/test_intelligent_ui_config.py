@@ -1,6 +1,7 @@
 """Real admin form/routes and config-response seams, with in-memory storage only."""
 
 import ast
+import importlib.util
 from pathlib import Path
 import re
 from types import SimpleNamespace
@@ -13,6 +14,10 @@ from pydantic import BaseModel, Field, StrictStr, field_validator
 
 ROOT = Path(__file__).resolve().parents[2]
 KEY = 'ui.enable_intelligent_ui'
+PROMPT_KEY = 'ui.intelligent_ui.prompt'
+spec = importlib.util.spec_from_file_location('intelligent_ui', ROOT / 'backend/open_webui/utils/intelligent_ui.py')
+prompt_module = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(prompt_module)
 
 
 def tree(path):
@@ -21,7 +26,7 @@ def tree(path):
 
 class AdminConfigTests(unittest.TestCase):
     def setUp(self):
-        self.values = {KEY: True}
+        self.values = {KEY: True, PROMPT_KEY: None}
 
         async def current_user(request: Request):
             return SimpleNamespace(role=request.headers.get('x-test-role', 'user'))
@@ -41,6 +46,7 @@ class AdminConfigTests(unittest.TestCase):
             'MFA_CONFIG_KEYS': {},
             'Field': Field,
             'StrictStr': StrictStr,
+            'INTELLIGENT_UI_PROMPT': prompt_module.INTELLIGENT_UI_PROMPT,
             'field_validator': field_validator,
             're': re,
             'HTTPException': HTTPException,
@@ -104,6 +110,11 @@ class AdminConfigTests(unittest.TestCase):
             v for k, v in zip(defaults.keys, defaults.values) if isinstance(k, ast.Constant) and k.value == KEY
         )
         self.assertEqual(ast.unparse(value), 'ENABLE_INTELLIGENT_UI')
+        prompt_default = next(
+            v for k, v in zip(defaults.keys, defaults.values)
+            if isinstance(k, ast.Constant) and k.value == PROMPT_KEY
+        )
+        self.assertIsNone(ast.literal_eval(prompt_default))
 
     def test_admin_can_read_and_update_shared_boolean(self):
         headers = {'x-test-role': 'admin'}
@@ -138,12 +149,64 @@ class AdminConfigTests(unittest.TestCase):
             self.assertEqual(self.client.get('/admin/config', headers=headers).status_code, 401)
             self.assertEqual(
                 self.client.post(
-                    '/admin/config', headers=headers, json={**self.payload, 'ENABLE_INTELLIGENT_UI': False}
+                    '/admin/config', headers=headers,
+                    json={**self.payload, 'ENABLE_INTELLIGENT_UI': False, 'INTELLIGENT_UI_PROMPT': 'UNAUTHORIZED'}
                 ).status_code,
                 401,
             )
         self.save.assert_not_awaited()
         self.assertIs(self.values[KEY], True)
+        self.assertIsNone(self.values[PROMPT_KEY])
+
+    def test_admin_prompt_save_read_reset_and_omitted_field(self):
+        headers = {'x-test-role': 'admin'}
+        result = self.client.get('/admin/config', headers=headers).json()
+        self.assertIsNone(result['INTELLIGENT_UI_PROMPT'])
+        self.assertEqual(result['DEFAULT_INTELLIGENT_UI_PROMPT'], prompt_module.INTELLIGENT_UI_PROMPT)
+        custom = 'Custom presentation policy\nKeep whitespace.\n'
+        response = self.client.post(
+            '/admin/config', headers=headers, json={**self.payload, 'INTELLIGENT_UI_PROMPT': custom}
+        )
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertEqual(self.values[PROMPT_KEY], custom)
+        self.assertEqual(response.json()['INTELLIGENT_UI_PROMPT'], custom)
+        self.assertEqual(self.client.get('/admin/config', headers=headers).json()['INTELLIGENT_UI_PROMPT'], custom)
+        response = self.client.post('/admin/config', headers=headers, json=self.payload)
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertEqual(self.values[PROMPT_KEY], custom)
+        self.assertNotIn(PROMPT_KEY, self.save.call_args.args[1])
+        for reset in [None, '', ' \n ']:
+            self.values[PROMPT_KEY] = custom
+            response = self.client.post(
+                '/admin/config', headers=headers, json={**self.payload, 'INTELLIGENT_UI_PROMPT': reset}
+            )
+            self.assertEqual(response.status_code, 200, response.text)
+            self.assertIsNone(self.values[PROMPT_KEY])
+            self.assertIsNone(response.json()['INTELLIGENT_UI_PROMPT'])
+
+    def test_invalid_prompt_cannot_overwrite_saved_value(self):
+        for value in [123, {}, ['text'], 'x' * 32769]:
+            with self.subTest(value_type=type(value).__name__):
+                self.values[PROMPT_KEY] = 'Existing'
+                response = self.client.post(
+                    '/admin/config', headers={'x-test-role': 'admin'},
+                    json={**self.payload, 'INTELLIGENT_UI_PROMPT': value}
+                )
+                self.assertEqual(response.status_code, 422, response.text)
+                self.assertEqual(self.values[PROMPT_KEY], 'Existing')
+        self.save.assert_not_awaited()
+
+    def test_bundled_default_is_read_only_and_maximum_length_is_accepted(self):
+        response = self.client.post(
+            '/admin/config', headers={'x-test-role': 'admin'}, json={
+                **self.payload, 'INTELLIGENT_UI_PROMPT': 'x' * 32768,
+                'DEFAULT_INTELLIGENT_UI_PROMPT': 'CLIENT_DEFAULT',
+            }
+        )
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertEqual(self.values[PROMPT_KEY], 'x' * 32768)
+        self.assertEqual(response.json()['DEFAULT_INTELLIGENT_UI_PROMPT'], prompt_module.INTELLIGENT_UI_PROMPT)
+        self.assertNotIn('DEFAULT_INTELLIGENT_UI_PROMPT', self.save.call_args.args[1])
 
 
 class PublicFeatureTests(unittest.IsolatedAsyncioTestCase):

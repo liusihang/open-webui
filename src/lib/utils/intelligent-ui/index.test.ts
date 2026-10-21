@@ -31,6 +31,23 @@ const rejected = (source: string, done = true) => {
 };
 
 describe('intelligent-ui streaming protocol', () => {
+	it('accepts SVG line coordinates in complete specs and JSONL fences', () => {
+		const line: IntelligentUIElement = {
+			type: 'SVG',
+			props: {
+				label: 'A line between two points',
+				svg: '<svg viewBox="0 0 20 20"><line x1="0" y1="0" x2="20" y2="20" stroke="#000"/></svg>'
+			},
+			children: []
+		};
+		const jsonl = `${root}\n${element('main', line)}`;
+		for (const source of [spec(line), jsonl, `\`\`\`intelligent-ui\n${jsonl}\n\`\`\``]) {
+			const result = parseIntelligentUI(source, true);
+			expect(result.error).toBeNull();
+			expect(result.spec?.elements.main).toEqual(line);
+		}
+	});
+
 	it('accepts complete JSONL without a final newline', () => {
 		const result = parseIntelligentUI(valid, true);
 		expect(result).toEqual({

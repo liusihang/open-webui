@@ -42,6 +42,7 @@
 	let showUserUiDefaults = false;
 	let uiI18nEntries: I18nEntry[] = [];
 	let saving = false;
+	let intelligentUiPrompt = '';
 
 	let banners: Banner[] = [];
 	let bannerLocale = '';
@@ -84,12 +85,18 @@
 			const cleaned = entriesToI18n(uiI18nEntries);
 			const res = await updateAdminConfig(localStorage.token, {
 				...adminConfig,
+				INTELLIGENT_UI_PROMPT:
+					intelligentUiPrompt === adminConfig.DEFAULT_INTELLIGENT_UI_PROMPT
+						? null
+						: intelligentUiPrompt,
 				SKILL_CONTENT_MAX_CHARS: adminConfig.SKILL_CONTENT_MAX_CHARS ?? null,
 				SKILL_PREVIEW_MAX_CHARS: adminConfig.SKILL_PREVIEW_MAX_CHARS ?? null,
 				DEFAULT_INTERFACE_SETTINGS: defaultInterfaceSettings,
 				I18N: cleaned
 			});
 			if (!res) throw new Error($i18n.t('Failed to update settings'));
+			adminConfig = res;
+			intelligentUiPrompt = res.INTELLIGENT_UI_PROMPT ?? res.DEFAULT_INTELLIGENT_UI_PROMPT;
 			if (res.sessions_revoked) {
 				localStorage.removeItem('token');
 				window.location.href = '/auth?state=logout&form=signin';
@@ -114,6 +121,8 @@
 
 	onMount(async () => {
 		adminConfig = await getAdminConfig(localStorage.token);
+		intelligentUiPrompt =
+			adminConfig.INTELLIGENT_UI_PROMPT ?? adminConfig.DEFAULT_INTELLIGENT_UI_PROMPT;
 		defaultInterfaceSettings = getDefaultInterfaceSettings();
 		uiI18nEntries = i18nToEntries(adminConfig.I18N ?? {});
 
@@ -288,6 +297,44 @@
 				>
 					<Switch bind:state={adminConfig.ENABLE_INTELLIGENT_UI} ariaLabelledbyId={labelId} />
 				</AdminSettingRow>
+				<details class="mb-3 rounded-lg border border-gray-100 p-3 dark:border-gray-800">
+					<summary class="cursor-pointer text-xs text-gray-600 dark:text-gray-400">
+						{$i18n.t('Intelligent UI prompt')}
+					</summary>
+					<div class="mt-3">
+						<label for="intelligent-ui-prompt" class="text-xs text-gray-600 dark:text-gray-400">
+							{$i18n.t('System instructions for presentation and components')}
+						</label>
+						<textarea
+							id="intelligent-ui-prompt"
+							aria-describedby="intelligent-ui-prompt-help"
+							class={`${textareaClass} mt-1 font-mono`}
+							rows="14"
+							maxlength="32768"
+							spellcheck="false"
+							disabled={saving}
+							bind:value={intelligentUiPrompt}
+						></textarea>
+						<p
+							id="intelligent-ui-prompt-help"
+							class="mt-1 text-xs text-gray-500 dark:text-gray-400"
+						>
+							{$i18n.t(
+								'Saved changes apply to subsequent requests when Intelligent UI is enabled. No restart or rebuild is needed. Preserve the component syntax; this prompt cannot add new component types. Leave blank to use the bundled default.'
+							)}
+						</p>
+						<button
+							type="button"
+							disabled={saving}
+							class="mt-2 text-xs text-gray-600 underline hover:text-gray-900 dark:text-gray-400 dark:hover:text-white"
+							on:click={() => {
+								intelligentUiPrompt = adminConfig.DEFAULT_INTELLIGENT_UI_PROMPT;
+							}}
+						>
+							{$i18n.t('Restore bundled default (save to apply)')}
+						</button>
+					</div>
+				</details>
 				<AdminSettingRow
 					label={$i18n.t('settings.admin.general.communitySharing.label')}
 					description={$i18n.t('settings.admin.general.communitySharing.description')}

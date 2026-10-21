@@ -169,7 +169,7 @@
 		)}
 		style={appearanceStyle(componentProps.appearance)}
 	>
-		{#if componentProps.title}<h3 class="text-base font-semibold tracking-tight">
+		{#if componentProps.title}<h3 class="text-sm font-semibold tracking-tight">
 				{componentProps.title}
 			</h3>{/if}
 		{#if children}{@render children()}{/if}
@@ -185,7 +185,7 @@
 		)}
 		style={appearanceStyle(componentProps.appearance)}
 	>
-		{#if componentProps.title}<h3 class="text-base font-semibold tracking-tight">
+		{#if componentProps.title}<h3 class="text-sm font-semibold tracking-tight">
 				{componentProps.title}
 			</h3>{/if}
 		<div

@@ -201,9 +201,9 @@ describe('theme-aware native chart colors', () => {
 		expect(viewport?.getAttribute('tabindex')).toBe('0');
 		expect(viewport?.querySelector('svg.chart-plot')).not.toBeNull();
 		for (const label of target.querySelectorAll('svg text'))
-			expect(label.getAttribute('font-size')).toBe('15');
-		for (const label of target.querySelectorAll('svg text[y="230"]'))
-			expect(label.textContent!.length).toBeLessThanOrEqual(4);
+			expect(label.getAttribute('font-size')).toBe('12');
+		for (const [index, label] of [...target.querySelectorAll('[data-axis="x"]')].entries())
+			expect(label.getAttribute('aria-label')).toBe(`Long category ${index}`);
 	});
 
 	it('keeps extreme finite scatter coordinates finite', () => {

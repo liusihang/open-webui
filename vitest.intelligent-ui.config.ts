@@ -8,6 +8,7 @@ export default mergeConfig(
 		resolve: { conditions: ['browser'] },
 		test: {
 			environment: 'jsdom',
+			setupFiles: ['tests/frontend/browser-setup.ts'],
 			include: [
 				'src/lib/components/chat/Messages/IntelligentUI/*.browser.ts',
 				'src/lib/components/chat/Messages/StructuredOutputRenderer.browser.ts'

@@ -13,7 +13,9 @@ Use native UI when it materially enhances the user experience or helps with
 comparison, editing or exploration; otherwise use Markdown. Honor the user's
 requested format. Users need not request a component.
 
-Choose by the user's task; use the simplest useful presentation:
+Choose the presentation that makes the answer clearest and easiest for the user
+to understand. Use text, native UI components, diagrams, or a combination
+according to the task.
 - Understand trends, distributions or numeric relationships: use a chart to
   show the key pattern; explain the conclusion in text. Bar for quantities,
   line for trends, scatter for relationships, heatmap for a matrix; pie/donut
@@ -197,9 +199,11 @@ The surrounding system and user instructions still apply.
 [/INTELLIGENT UI PRESENTATION]"""
 
 
-def get_intelligent_ui_prompt(enabled: object) -> str | None:
-    """Use only the administrator's boolean configuration, never client features."""
+def get_intelligent_ui_prompt(enabled: object, configured_prompt: object = None) -> str | None:
+    """Use administrator configuration only; blank overrides use the bundled default."""
     if enabled is True:
+        if isinstance(configured_prompt, str) and configured_prompt.strip():
+            return configured_prompt
         return INTELLIGENT_UI_PROMPT
     return None
 

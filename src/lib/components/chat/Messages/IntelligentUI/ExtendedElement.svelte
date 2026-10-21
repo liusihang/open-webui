@@ -226,7 +226,7 @@
 						class="iui-accent flex h-7 w-7 shrink-0 items-center justify-center rounded-full border text-sm font-semibold"
 						>{i + 1}</span
 					>
-					<div>
+					<div class="min-w-0">
 						<p class="font-medium">{step.title}</p>
 						{#if step.description}<p class="text-sm">
 								{step.description}

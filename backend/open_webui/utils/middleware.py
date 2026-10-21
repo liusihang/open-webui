@@ -2729,7 +2729,10 @@ async def process_chat_payload(request, form_data, user, metadata, model):
                     append=True,
                 )
 
-    ui_prompt = get_intelligent_ui_prompt(await Config.get('ui.enable_intelligent_ui'))
+    ui_config = await Config.get_many('ui.enable_intelligent_ui', 'ui.intelligent_ui.prompt')
+    ui_prompt = get_intelligent_ui_prompt(
+        ui_config.get('ui.enable_intelligent_ui'), ui_config.get('ui.intelligent_ui.prompt')
+    )
     if ui_prompt:
         form_data['messages'] = add_or_update_system_message(ui_prompt, form_data.get('messages', []), append=True)
 

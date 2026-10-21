@@ -245,7 +245,7 @@ export function sanitizeSvg(input: unknown): string {
 		if (stack.length > 12 || (tag === 'svg' && stack.length)) fail();
 		let pos = 0;
 		const seen = new Set<string>();
-		const re = /\s+([A-Za-z][A-Za-z-]*)\s*=\s*"([^"<>]*)"/g;
+		const re = /\s+([A-Za-z][A-Za-z0-9-]*)\s*=\s*"([^"<>]*)"/g;
 		let a: RegExpExecArray | null;
 		while ((a = re.exec(rest))) {
 			if (rest.slice(pos, a.index).trim()) fail();

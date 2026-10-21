@@ -131,6 +131,25 @@ describe('bounded extended UI protocol', () => {
 		])
 			expect(() => sanitizeSvg(svg)).toThrow();
 	});
+	it.each([
+		'<svg viewBox="0 0 20 20"><line x1="0" y1="0" x2="20" y2="20" stroke="#000"/></svg>',
+		'<svg><line y2="2e1" x2="10.5" y1="-2" x1="0" stroke-width="1" stroke="currentColor"/></svg>'
+	])('accepts allowlisted SVG line endpoint attributes: %s', (svg) => {
+		expect(sanitizeSvg(svg)).toBe(svg);
+		expect(validate(node('SVG', { label: 'Line', svg })).props).toMatchObject({ svg });
+	});
+	it.each([
+		'<svg><line x3="1"/></svg>',
+		'<svg><line data1="1"/></svg>',
+		'<svg><line onload1="alert(1)"/></svg>',
+		'<svg><line href1="https://example.com/a"/></svg>',
+		'<svg><line 1x="0"/></svg>',
+		'<svg><line x1="0" x1="1"/></svg>',
+		"<svg><line x1='0'/></svg>",
+		'<svg><line x1="url(https://example.com/a)"/></svg>'
+	])('rejects unapproved or malformed digit-bearing SVG attributes: %s', (svg) => {
+		expect(() => sanitizeSvg(svg)).toThrow();
+	});
 	it('normalizes persisted shared values to declared controls', () => {
 		const input = validate(
 			node('Input', { title: 'Name', stateKey: 'name', value: 'old', maxLength: 4 })

@@ -1,4 +1,8 @@
 {
+	"Intelligent UI prompt": "Intelligent UI 提示词",
+	"System instructions for presentation and components": "展示方式与组件的系统提示词",
+	"Saved changes apply to subsequent requests when Intelligent UI is enabled. No restart or rebuild is needed. Preserve the component syntax; this prompt cannot add new component types. Leave blank to use the bundled default.": "保存后，在 Intelligent UI 开启时用于后续请求，无需重启或重建。请保留组件格式说明；修改提示词不能新增组件类型。留空则使用内置默认值。",
+	"Restore bundled default (save to apply)": "恢复内置默认值（保存后生效）",
 	"-1 for no limit, or a positive integer for a specific limit": "-1 表示无限制，正整数表示具体限制额度",
 	"(latest)": "（最新版）",
 	"(leave blank for to use commercial endpoint)": "（留空以使用商用端点）",
