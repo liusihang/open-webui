@@ -111,8 +111,7 @@ class AdminConfigTests(unittest.TestCase):
         )
         self.assertEqual(ast.unparse(value), 'ENABLE_INTELLIGENT_UI')
         prompt_default = next(
-            v for k, v in zip(defaults.keys, defaults.values)
-            if isinstance(k, ast.Constant) and k.value == PROMPT_KEY
+            v for k, v in zip(defaults.keys, defaults.values) if isinstance(k, ast.Constant) and k.value == PROMPT_KEY
         )
         self.assertIsNone(ast.literal_eval(prompt_default))
 
@@ -149,8 +148,9 @@ class AdminConfigTests(unittest.TestCase):
             self.assertEqual(self.client.get('/admin/config', headers=headers).status_code, 401)
             self.assertEqual(
                 self.client.post(
-                    '/admin/config', headers=headers,
-                    json={**self.payload, 'ENABLE_INTELLIGENT_UI': False, 'INTELLIGENT_UI_PROMPT': 'UNAUTHORIZED'}
+                    '/admin/config',
+                    headers=headers,
+                    json={**self.payload, 'ENABLE_INTELLIGENT_UI': False, 'INTELLIGENT_UI_PROMPT': 'UNAUTHORIZED'},
                 ).status_code,
                 401,
             )
@@ -189,8 +189,9 @@ class AdminConfigTests(unittest.TestCase):
             with self.subTest(value_type=type(value).__name__):
                 self.values[PROMPT_KEY] = 'Existing'
                 response = self.client.post(
-                    '/admin/config', headers={'x-test-role': 'admin'},
-                    json={**self.payload, 'INTELLIGENT_UI_PROMPT': value}
+                    '/admin/config',
+                    headers={'x-test-role': 'admin'},
+                    json={**self.payload, 'INTELLIGENT_UI_PROMPT': value},
                 )
                 self.assertEqual(response.status_code, 422, response.text)
                 self.assertEqual(self.values[PROMPT_KEY], 'Existing')
@@ -198,10 +199,13 @@ class AdminConfigTests(unittest.TestCase):
 
     def test_bundled_default_is_read_only_and_maximum_length_is_accepted(self):
         response = self.client.post(
-            '/admin/config', headers={'x-test-role': 'admin'}, json={
-                **self.payload, 'INTELLIGENT_UI_PROMPT': 'x' * 32768,
+            '/admin/config',
+            headers={'x-test-role': 'admin'},
+            json={
+                **self.payload,
+                'INTELLIGENT_UI_PROMPT': 'x' * 32768,
                 'DEFAULT_INTELLIGENT_UI_PROMPT': 'CLIENT_DEFAULT',
-            }
+            },
         )
         self.assertEqual(response.status_code, 200, response.text)
         self.assertEqual(self.values[PROMPT_KEY], 'x' * 32768)
