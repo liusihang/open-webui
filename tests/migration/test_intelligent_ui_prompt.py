@@ -21,9 +21,17 @@ class IntelligentUIPromptTests(unittest.TestCase):
         self.assertIn('comparison, editing or exploration; otherwise use Markdown.', opening)
         self.assertIn("Honor the user's\nrequested format.", opening)
 
-    def test_selection_starts_from_the_users_task_without_waiting_for_component_requests(self):
+    def test_selection_prioritizes_user_understanding_without_waiting_for_component_requests(self):
         policy = ' '.join(MODULE.INTELLIGENT_UI_PROMPT.split('\nOUTPUT\n')[0].split())
-        self.assertIn("Choose by the user's task", policy)
+        self.assertIn(
+            'Choose the presentation that makes the answer clearest and easiest for the user to understand.',
+            policy,
+        )
+        self.assertIn(
+            'Use text, native UI components, diagrams, or a combination according to the task.',
+            policy,
+        )
+        self.assertNotIn('simplest useful presentation', policy)
         self.assertIn('Users need not request a component', policy)
         for task in (
             'trends, distributions or numeric relationships',
@@ -113,6 +121,14 @@ class IntelligentUIPromptTests(unittest.TestCase):
         self.assertIn('never calls the model', prompt)
         self.assertIn('multiple UI blocks may alternate', prompt)
 
+    def test_admin_override_and_blank_reset(self):
+        custom = 'Choose a clear display.\nKeep this exact text.\n'
+        self.assertEqual(MODULE.get_intelligent_ui_prompt(True, custom), custom)
+        self.assertIsNone(MODULE.get_intelligent_ui_prompt(False, custom))
+        for value in [None, '', ' \n ', 42, {'prompt': custom}]:
+            with self.subTest(value=value):
+                self.assertEqual(MODULE.get_intelligent_ui_prompt(True, value), MODULE.INTELLIGENT_UI_PROMPT)
+
     def test_request_hook_appends_without_replacing_system_instructions(self):
         root = PATH.parents[2]
         source = (root / 'open_webui/utils/middleware.py').read_text()
@@ -189,9 +205,9 @@ class RequestGatingTests(unittest.IsolatedAsyncioTestCase):
                 'merge_system_messages',
             }
         ]
-        self.config = AsyncMock(return_value=True)
+        self.config = AsyncMock(return_value={'ui.enable_intelligent_ui': True, 'ui.intelligent_ui.prompt': None})
         self.scope = {
-            'Config': SimpleNamespace(get=self.config),
+            'Config': SimpleNamespace(get_many=self.config),
             'extra_params': {},
             'get_intelligent_ui_prompt': MODULE.get_intelligent_ui_prompt,
             'metadata': {},
@@ -221,7 +237,7 @@ class RequestGatingTests(unittest.IsolatedAsyncioTestCase):
                 for personal_value in [False, True]:
                     with self.subTest(enabled=enabled, request=request_features, personal=personal_value):
                         self.config.reset_mock()
-                        self.config.return_value = enabled
+                        self.config.return_value = {'ui.enable_intelligent_ui': enabled}
                         payload = {
                             'messages': [
                                 {'role': 'system', 'content': 'Keep the original instruction.'},
@@ -232,7 +248,7 @@ class RequestGatingTests(unittest.IsolatedAsyncioTestCase):
                         if request_features is not None:
                             payload['features'] = deepcopy(request_features)
                         await self.scope['stage'](payload)
-                        self.config.assert_awaited_once_with('ui.enable_intelligent_ui')
+                        self.config.assert_awaited_once_with('ui.enable_intelligent_ui', 'ui.intelligent_ui.prompt')
                         content = payload['messages'][0]['content']
                         self.assertTrue(content.startswith('Keep the original instruction.'))
                         self.assertEqual(MODULE.INTELLIGENT_UI_PROMPT in content, enabled)
@@ -242,6 +258,25 @@ class RequestGatingTests(unittest.IsolatedAsyncioTestCase):
         payload = {'messages': [{'role': 'user', 'content': 'Explain.'}]}
         await self.scope['stage'](payload)
         self.assertEqual(payload['messages'][0], {'role': 'system', 'content': MODULE.INTELLIGENT_UI_PROMPT})
+
+    async def test_next_request_reads_changed_prompt_and_reset_without_restart(self):
+        original = [{'role': 'system', 'content': 'BASE'}, {'role': 'user', 'content': 'Explain.'}]
+        for configured, expected in [
+            (None, MODULE.INTELLIGENT_UI_PROMPT),
+            ('ADMIN_CUSTOM', 'ADMIN_CUSTOM'),
+            ('ADMIN_UPDATED', 'ADMIN_UPDATED'),
+            (None, MODULE.INTELLIGENT_UI_PROMPT),
+        ]:
+            self.config.return_value = {'ui.enable_intelligent_ui': True, 'ui.intelligent_ui.prompt': configured}
+            payload = {
+                'messages': deepcopy(original),
+                'features': {'intelligent_ui_prompt': 'CLIENT_OVERRIDE'},
+                'ui': {'intelligentUiPrompt': 'PERSONAL_OVERRIDE'},
+            }
+            await self.scope['stage'](payload)
+            self.assertEqual(payload['messages'][0]['content'], 'BASE\n' + expected)
+            self.assertEqual(self.scope['metadata']['_context_summary_prompt']['prefix'], 'BASE\n' + expected)
+            self.assertEqual(payload['messages'][1], original[1])
 
 
 if __name__ == '__main__':

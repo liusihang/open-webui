@@ -3264,6 +3264,7 @@ DEFAULT_CONFIG = {
     'ui.enable_community_sharing': ENABLE_COMMUNITY_SHARING,
     'ui.enable_message_rating': ENABLE_MESSAGE_RATING,
     'ui.enable_intelligent_ui': ENABLE_INTELLIGENT_UI,
+    'ui.intelligent_ui.prompt': None,
     'ui.enable_user_webhooks': ENABLE_USER_WEBHOOKS,
     'ui.banners': WEBUI_BANNERS,
     'auth.admin.show': SHOW_ADMIN_DETAILS,

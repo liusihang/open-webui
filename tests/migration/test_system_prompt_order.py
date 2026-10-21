@@ -82,7 +82,7 @@ class PromptOrderTests(unittest.IsolatedAsyncioTestCase):
             JSONCodec=SimpleNamespace(dumps=json.dumps, loads=json.loads, JSONDecodeError=json.JSONDecodeError),
             Config=SimpleNamespace(
                 get=AsyncMock(side_effect=lambda key, default=None: self.values.get(key, default)),
-                get_many=AsyncMock(return_value={}),
+                get_many=AsyncMock(side_effect=lambda *keys: {k: self.values[k] for k in keys if k in self.values}),
             ),
             Models=SimpleNamespace(
                 get_model_by_id=AsyncMock(
@@ -116,7 +116,7 @@ class PromptOrderTests(unittest.IsolatedAsyncioTestCase):
             ENABLE_TOOL_SERVERS=True,
             DEFAULT_VOICE_MODE_PROMPT_TEMPLATE='DEFAULT_VOICE_TOKEN',
             TOOL_USAGE_PROMPT='TOOL_USAGE_TOKEN',
-            get_intelligent_ui_prompt=lambda enabled: 'UI_TOKEN' if enabled is True else None,
+            get_intelligent_ui_prompt=lambda enabled, override=None: 'UI_TOKEN' if enabled is True else None,
             apply_skills_create_prompt=lambda *args, **kwargs: False,
             has_prior_user_message=lambda msgs: True,
             extract_skill_ids_from_messages=lambda msgs: set(),

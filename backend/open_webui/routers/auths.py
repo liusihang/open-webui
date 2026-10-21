@@ -78,6 +78,7 @@ from open_webui.utils.auth import (
     verify_password,
 )
 from open_webui.utils.groups import apply_default_group_assignment
+from open_webui.utils.intelligent_ui import INTELLIGENT_UI_PROMPT
 from open_webui.utils.json_codec import JSONCodec
 from open_webui.utils.mfa import MFA_CONFIG_KEYS, MfaConfigForm, get_mfa_config, limit_account, update_mfa_config
 from open_webui.utils.misc import parse_duration, validate_email_format
@@ -123,6 +124,7 @@ ADMIN_CONFIG_KEYS = {
     'ENABLE_COMMUNITY_SHARING': 'ui.enable_community_sharing',
     'ENABLE_MESSAGE_RATING': 'ui.enable_message_rating',
     'ENABLE_INTELLIGENT_UI': 'ui.enable_intelligent_ui',
+    'INTELLIGENT_UI_PROMPT': 'ui.intelligent_ui.prompt',
     'ENABLE_FOLDERS': 'folders.enable',
     'FOLDER_MAX_FILE_COUNT': 'folders.max_file_count',
     'AUTOMATION_MAX_COUNT': 'automations.max_count',
@@ -1157,7 +1159,10 @@ async def get_admin_details(
 
 @router.get('/admin/config')
 async def get_admin_config(request: Request, user=Depends(get_admin_user)):
-    return await get_config_values(ADMIN_CONFIG_KEYS)
+    return {
+        **(await get_config_values(ADMIN_CONFIG_KEYS)),
+        'DEFAULT_INTELLIGENT_UI_PROMPT': INTELLIGENT_UI_PROMPT,
+    }
 
 
 class AdminConfig(MfaConfigForm):
@@ -1177,6 +1182,7 @@ class AdminConfig(MfaConfigForm):
     ENABLE_COMMUNITY_SHARING: bool
     ENABLE_MESSAGE_RATING: bool
     ENABLE_INTELLIGENT_UI: bool = True
+    INTELLIGENT_UI_PROMPT: StrictStr | None = Field(default=None, max_length=32768)
     ENABLE_FOLDERS: bool
     FOLDER_MAX_FILE_COUNT: int | str | None = None
     AUTOMATION_MAX_COUNT: int | str | None = None
@@ -1197,6 +1203,11 @@ class AdminConfig(MfaConfigForm):
     PENDING_USER_OVERLAY_TITLE: str | None = None
     PENDING_USER_OVERLAY_CONTENT: str | None = None
     RESPONSE_WATERMARK: str | None = None
+
+    @field_validator('INTELLIGENT_UI_PROMPT')
+    @classmethod
+    def validate_intelligent_ui_prompt(cls, value):
+        return value if value is not None and value.strip() else None
 
     @field_validator('I18N')
     @classmethod
@@ -1235,6 +1246,8 @@ async def update_admin_config(request: Request, form_data: AdminConfig, user=Dep
         updates.pop('ui.enable_login_form', None)
     if 'ENABLE_INTELLIGENT_UI' not in form_data.model_fields_set:
         updates.pop('ui.enable_intelligent_ui', None)
+    if 'INTELLIGENT_UI_PROMPT' not in form_data.model_fields_set:
+        updates.pop('ui.intelligent_ui.prompt', None)
     if 'ENABLE_ENCRYPTED_CHANNELS' not in form_data.model_fields_set:
         updates.pop('channels.encryption.enable', None)
     if 'ENABLE_APPS' not in form_data.model_fields_set:
@@ -1265,7 +1278,7 @@ async def update_admin_config(request: Request, form_data: AdminConfig, user=Dep
         updates.pop('auth.jwt_expiry', None)
 
     changed = await update_mfa_config(request, updates)
-    return {**(await get_config_values(ADMIN_CONFIG_KEYS)), 'sessions_revoked': changed}
+    return {**(await get_admin_config(request, user)), 'sessions_revoked': changed}
 
 
 class LdapServerConfig(BaseModel):

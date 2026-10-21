@@ -55,7 +55,7 @@
 	>
 		<h3 class="text-xs font-medium tracking-wide">{view.title}</h3>
 		<p
-			class={`mt-3 text-3xl font-semibold tracking-tight ${view.appearance?.foreground ? 'iui-ink' : 'iui-accent'}`}
+			class={`mt-3 text-2xl font-semibold tracking-tight ${view.appearance?.foreground ? 'iui-ink' : 'iui-accent'}`}
 			style={appearanceStyle(view.appearance, { surface: true })}
 			aria-live="polite"
 		>

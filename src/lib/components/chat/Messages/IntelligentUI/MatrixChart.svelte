@@ -2,6 +2,11 @@
 	import { getContext } from 'svelte';
 	import type { Readable } from 'svelte/store';
 	import type { i18n as I18n } from 'i18next';
+	import {
+		AXIS_FONT_SIZE,
+		AXIS_LINE_HEIGHT,
+		categoricalChartLayout
+	} from '$lib/utils/intelligent-ui/chart-layout';
 	import { appearanceStyle, colorVariables, isColorValue } from '$lib/utils/intelligent-ui/colors';
 	import {
 		chartMetadata,
@@ -32,6 +37,7 @@
 	} = $props();
 	const tooltipId = $props.id();
 	let active = $state('');
+	let viewportWidth = $state(600);
 	let data = $derived(
 		inputData
 			.slice(0, 128)
@@ -52,13 +58,20 @@
 	let maxY = $derived(Math.max(0, ...data.map((point) => Number(point.y)).filter(Number.isFinite)));
 	let xLabels = $derived([...new Set<string>(data.map((point) => String(point.x)))]);
 	let yLabels = $derived([...new Set<string>(data.map((point) => String(point.y)))]);
+	let layout = $derived(
+		categoricalChartLayout(
+			view.kind === 'heatmap' ? xLabels : [],
+			viewportWidth,
+			view.kind === 'heatmap' ? yLabels : []
+		)
+	);
 	let minValue = $derived(Math.min(0, ...data.map((point) => point.value ?? 0)));
 	let maxValue = $derived(Math.max(0, ...data.map((point) => point.value ?? 0)));
 	const ratio = (value: number, min: number, max: number) => {
 		const magnitude = Math.max(1, Math.abs(min), Math.abs(max));
 		return (value / magnitude - min / magnitude) / (max / magnitude - min / magnitude || 1);
 	};
-	const x = (value: number) => 72 + ratio(value, minX, maxX) * 498;
+	const x = (value: number) => layout.left + ratio(value, minX, maxX) * layout.plotWidth;
 	const y = (value: number) => 200 - ratio(value, minY, maxY) * 170;
 	const format = (value: number) =>
 		new Intl.NumberFormat(undefined, { maximumFractionDigits: 4 }).format(value);
@@ -68,12 +81,6 @@
 			: new Intl.NumberFormat(undefined, { notation: 'compact', maximumFractionDigits: 1 }).format(
 					value
 				);
-	const axisLabel = (value: string, width: number, maximum = 10) => {
-		const characterWidth = [...value].some((character) => character.codePointAt(0)! > 127) ? 15 : 9;
-		const limit = Math.max(2, Math.min(maximum, Math.floor(width / characterWidth) - 1));
-		const characters = [...value];
-		return characters.length > limit ? characters.slice(0, limit - 1).join('') + '…' : value;
-	};
 	const description = (point: MatrixPoint) =>
 		view.kind === 'scatter'
 			? `${point.label ? point.label + ': ' : ''}${format(Number(point.x))}, ${format(Number(point.y))}${view.unit ? ' ' + view.unit : ''}`
@@ -148,8 +155,22 @@
 	{#if data.length}
 		<!-- The scrollable region must be keyboard reachable. -->
 		<!-- svelte-ignore a11y_no_noninteractive_tabindex -->
-		<div class="chart-viewport" tabindex="0" role="region" aria-label={view.title}>
-			<svg viewBox="0 0 600 245" role="group" aria-label={view.title} class="chart-plot"
+		<div
+			class="chart-viewport"
+			bind:clientWidth={viewportWidth}
+			tabindex="0"
+			role="region"
+			aria-label={view.title}
+		>
+			<svg
+				viewBox={`0 0 ${layout.width} ${layout.height}`}
+				width={layout.width}
+				height={layout.height}
+				style:width={`${layout.width}px`}
+				style:height={`${layout.height}px`}
+				role="group"
+				aria-label={view.title}
+				class="chart-plot"
 				><title>{view.title}</title><desc
 					>{data
 						.map(
@@ -159,7 +180,12 @@
 						.join('; ')}</desc
 				>
 				{#if view.kind === 'scatter'}
-					<path d="M 68 30 V 200 H 575" fill="none" stroke="currentColor" opacity="0.2" />
+					<path
+						d={`M 68 30 V 200 H ${layout.width - 24}`}
+						fill="none"
+						stroke="currentColor"
+						opacity="0.2"
+					/>
 					{#each data as point}<circle
 							tabindex="0"
 							role="button"
@@ -183,15 +209,17 @@
 								)}</title
 							></circle
 						>{/each}
-					<text x="68" y="222" font-size="15" fill="currentColor">{axisFormat(minX)}</text><text
-						x="570"
+					<text x="68" y="222" font-size={AXIS_FONT_SIZE} fill="currentColor"
+						>{axisFormat(minX)}</text
+					><text
+						x={layout.width - 24}
 						y="222"
 						text-anchor="end"
-						font-size="15"
+						font-size={AXIS_FONT_SIZE}
 						fill="currentColor">{axisFormat(maxX)}</text
-					><text x="62" y="35" text-anchor="end" font-size="15" fill="currentColor"
+					><text x="62" y="35" text-anchor="end" font-size={AXIS_FONT_SIZE} fill="currentColor"
 						>{axisFormat(maxY)}</text
-					><text x="62" y="200" text-anchor="end" font-size="15" fill="currentColor"
+					><text x="62" y="200" text-anchor="end" font-size={AXIS_FONT_SIZE} fill="currentColor"
 						>{axisFormat(minY)}</text
 					>
 				{:else}
@@ -207,29 +235,41 @@
 							onpointerleave={() => (active = '')}
 							onclick={() => (active = description(point))}
 							onkeydown={navigate}
-							x={68 + xLabels.indexOf(String(point.x)) * (502 / xLabels.length)}
-							y={25 + yLabels.indexOf(String(point.y)) * (175 / yLabels.length)}
-							width={Math.max(1, 502 / xLabels.length - 2)}
-							height={Math.max(1, 175 / yLabels.length - 2)}
+							x={layout.left + xLabels.indexOf(String(point.x)) * layout.columnWidth}
+							y={25 + yLabels.indexOf(String(point.y)) * (layout.plotHeight / yLabels.length)}
+							width={Math.max(1, layout.columnWidth - 2)}
+							height={Math.max(1, layout.plotHeight / yLabels.length - 2)}
 							rx="2"
 							class="chart-fill"
 							style={pointStyle(point)}
 							><title>{point.x}, {point.y}: {format(point.value ?? 0)}</title></rect
 						>{/each}
-					{#if xLabels.length <= 10}{#each xLabels as label, index}<text
-								x={68 + (index + 0.5) * (502 / xLabels.length)}
-								y="220"
-								text-anchor="middle"
-								font-size="15"
-								fill="currentColor">{axisLabel(label, 502 / xLabels.length)}</text
-							>{/each}{/if}
-					{#if yLabels.length <= 10}{#each yLabels as label, index}<text
-								x="62"
-								y={25 + (index + 0.5) * (175 / yLabels.length)}
-								text-anchor="end"
-								font-size="15"
-								fill="currentColor">{axisLabel(label, 60, 6)}</text
-							>{/each}{/if}
+					{#each xLabels as label, index}<text
+							data-axis="x"
+							aria-label={label}
+							x={layout.left + (index + 0.5) * layout.columnWidth}
+							y={layout.bottom + 20}
+							text-anchor="end"
+							transform={`rotate(-45 ${layout.left + (index + 0.5) * layout.columnWidth} ${layout.bottom + 20})`}
+							font-size={AXIS_FONT_SIZE}
+							fill="currentColor">{label}</text
+						>{/each}
+					{#each yLabels as label, index}<text
+							data-axis="y"
+							aria-label={label}
+							x={layout.left - 8}
+							y={25 +
+								(index + 0.5) * (layout.plotHeight / yLabels.length) -
+								((layout.yLines[index].length - 1) * AXIS_LINE_HEIGHT) / 2 +
+								4}
+							text-anchor="end"
+							font-size={AXIS_FONT_SIZE}
+							fill="currentColor"
+							>{#each layout.yLines[index] as line, lineIndex}<tspan
+									x={layout.left - 8}
+									dy={lineIndex ? AXIS_LINE_HEIGHT : 0}>{line}</tspan
+								>{/each}</text
+						>{/each}
 				{/if}
 			</svg>
 		</div>
@@ -278,6 +318,7 @@
 	.chart-viewport {
 		max-width: 100%;
 		min-width: 0;
+		max-height: 32rem;
 		overflow-x: auto;
 		overscroll-behavior-x: contain;
 		border-radius: 0.5rem;
@@ -288,8 +329,7 @@
 	}
 	.chart-plot {
 		display: block;
-		width: 100%;
-		min-width: 480px;
+		max-width: none;
 	}
 
 	.chart-fill {

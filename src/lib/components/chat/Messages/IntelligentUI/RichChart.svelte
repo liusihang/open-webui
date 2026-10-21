@@ -2,6 +2,7 @@
 	import { getContext } from 'svelte';
 	import type { Readable } from 'svelte/store';
 	import type { i18n as I18n } from 'i18next';
+	import { AXIS_FONT_SIZE, categoricalChartLayout } from '$lib/utils/intelligent-ui/chart-layout';
 	import {
 		normalizeRichSeries,
 		pieSlices,
@@ -39,6 +40,7 @@
 	const tooltipId = $props.id();
 	let hidden = $state<string[]>([]);
 	let active = $state('');
+	let viewportWidth = $state(600);
 	let all = $derived(normalizeRichSeries(data, series, view.title));
 	let visible = $derived(
 		all
@@ -52,6 +54,7 @@
 			: [...new Set(all.flatMap((item) => item.data.map((point) => point.label)))]
 	);
 	let slices = $derived(pieSlices(all[0]?.data ?? []));
+	let layout = $derived(categoricalChartLayout(labels, viewportWidth));
 	const format = (value: number) =>
 		new Intl.NumberFormat(undefined, { maximumFractionDigits: 4 }).format(value);
 	const axisFormat = (value: number) =>
@@ -60,20 +63,10 @@
 			: new Intl.NumberFormat(undefined, { notation: 'compact', maximumFractionDigits: 1 }).format(
 					value
 				);
-	const axisLabel = (value: string) => {
-		const characterWidth = [...value].some((character) => character.codePointAt(0)! > 127) ? 15 : 9;
-		const limit = Math.max(
-			2,
-			Math.min(12, Math.floor(498 / Math.max(1, labels.length) / characterWidth) - 1)
-		);
-		const characters = [...value];
-		return characters.length > limit ? characters.slice(0, limit - 1).join('') + '…' : value;
-	};
 	const label = (name: string, point: RichPoint) =>
 		`${name ? name + ', ' : ''}${point.label}: ${format(point.value)}${view.unit ? ' ' + view.unit : ''}`;
 	const x = (name: string, index = 0) =>
-		72 +
-		((all.length === 1 ? index : labels.indexOf(name)) + 0.5) * (498 / Math.max(1, labels.length));
+		layout.left + ((all.length === 1 ? index : labels.indexOf(name)) + 0.5) * layout.columnWidth;
 	function navigate(event: KeyboardEvent) {
 		if (event.key === 'Enter' || event.key === ' ') {
 			event.preventDefault();
@@ -117,12 +110,17 @@
 		<!-- svelte-ignore a11y_no_noninteractive_tabindex -->
 		<div
 			class="chart-viewport"
+			bind:clientWidth={viewportWidth}
 			tabindex={view.kind === 'pie' ? undefined : 0}
 			role="region"
 			aria-label={view.title}
 		>
 			<svg
-				viewBox="0 0 600 245"
+				viewBox={view.kind === 'pie' ? '0 0 600 245' : `0 0 ${layout.width} ${layout.height}`}
+				width={view.kind === 'pie' ? undefined : layout.width}
+				height={view.kind === 'pie' ? undefined : layout.height}
+				style:width={view.kind === 'pie' ? '100%' : `${layout.width}px`}
+				style:height={view.kind === 'pie' ? undefined : `${layout.height}px`}
 				role="group"
 				aria-label={view.title}
 				class="chart-plot"
@@ -159,22 +157,30 @@
 						/>{/if}
 				{:else}
 					<path
-						d={`M 68 25 V 205 H 575 M 68 ${scale.y(0)} H 575`}
+						d={`M ${layout.left} 25 V 205 H ${layout.width - 24} M ${layout.left} ${scale.y(0)} H ${layout.width - 24}`}
 						fill="none"
 						stroke="currentColor"
 						opacity="0.2"
 					/>
 					{#each [25, 70, 115, 160] as gridY}<path
-							d={`M 68 ${gridY} H 575`}
+							d={`M ${layout.left} ${gridY} H ${layout.width - 24}`}
 							fill="none"
 							stroke="currentColor"
 							opacity="0.07"
 						/>{/each}
-					<text x="62" y="29" text-anchor="end" font-size="15" fill="currentColor"
-						>{axisFormat(scale.max)}</text
+					<text
+						x={layout.left - 6}
+						y="29"
+						text-anchor="end"
+						font-size={AXIS_FONT_SIZE}
+						fill="currentColor">{axisFormat(scale.max)}</text
 					>
-					<text x="62" y="209" text-anchor="end" font-size="15" fill="currentColor"
-						>{axisFormat(scale.min)}</text
+					<text
+						x={layout.left - 6}
+						y="209"
+						text-anchor="end"
+						font-size={AXIS_FONT_SIZE}
+						fill="currentColor">{axisFormat(scale.min)}</text
 					>
 					{#each visible as item, visibleIndex}
 						{#if view.kind === 'line'}<polyline
@@ -212,8 +218,7 @@
 										class="chart-fill"
 										style={colorVariables(pointColor(point, view, item), 'chart')}
 									/>
-								{:else}{@const width =
-										((498 / Math.max(1, labels.length)) * 0.8) / visible.length}<rect
+								{:else}{@const width = (layout.columnWidth * 0.8) / visible.length}<rect
 										x={x(point.label, pointIndex) -
 											(width * visible.length) / 2 +
 											visibleIndex * width}
@@ -227,13 +232,16 @@
 							</g>
 						{/each}
 					{/each}
-					{#if labels.length <= 12}{#each labels as name, labelIndex}<text
-								x={x(name, labelIndex)}
-								y="230"
-								text-anchor="middle"
-								font-size="15"
-								fill="currentColor">{axisLabel(name)}</text
-							>{/each}{/if}
+					{#each labels as name, labelIndex}<text
+							data-axis="x"
+							aria-label={name}
+							x={x(name, labelIndex)}
+							y={layout.bottom + 20}
+							text-anchor="end"
+							transform={`rotate(-45 ${x(name, labelIndex)} ${layout.bottom + 20})`}
+							font-size={AXIS_FONT_SIZE}
+							fill="currentColor">{name}</text
+						>{/each}
 				{/if}
 			</svg>
 		</div>
@@ -329,11 +337,12 @@
 	}
 	.chart-plot {
 		display: block;
-		width: 100%;
-		min-width: 480px;
+		max-width: none;
 	}
 	.chart-pie {
 		min-width: 0;
+		max-width: 600px;
+		margin-inline: auto;
 	}
 
 	.chart-fill {
