@@ -455,7 +455,7 @@ class Loader:
         """
         try:
             with open(file_path, 'rb') as f:
-                raw = f.read()
+                raw = f.read(256 * 1024)
         except OSError:
             return 'utf-8'
 
@@ -464,7 +464,8 @@ class Loader:
 
         # Fast path: most files are UTF-8
         try:
-            raw.decode('utf-8')
+            import codecs
+            codecs.getincrementaldecoder('utf-8')().decode(raw, final=False)
             return 'utf-8'
         except UnicodeDecodeError as e:
             first_non_utf8 = e.start

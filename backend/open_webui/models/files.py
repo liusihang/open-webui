@@ -165,6 +165,27 @@ class FilesTable:
         except Exception:
             return None
 
+    async def get_file_processing_state(self, id: str) -> dict | None:
+        """Project status fields in SQL; polling must not read a legacy full body."""
+        async with get_async_db_context() as db:
+            row = (
+                (
+                    await db.execute(
+                        select(
+                            File.id,
+                            File.user_id,
+                            File.data['status'].as_string().label('status'),
+                            File.data['error'].as_string().label('error'),
+                            File.data['ingestion_job_id'].as_string().label('ingestion_job_id'),
+                            File.data['retrieval_version'].as_integer().label('retrieval_version'),
+                        ).where(File.id == id)
+                    )
+                )
+                .mappings()
+                .one_or_none()
+            )
+            return dict(row) if row else None
+
     async def get_file_by_id_and_user_id(
         self, id: str, user_id: str, db: AsyncSession | None = None
     ) -> FileModel | None:

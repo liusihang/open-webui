@@ -44,6 +44,8 @@ class IndexingService:
         asset_reader=None,
         lexical_enabled=False,
         lexical_factory=None,
+        staged=False,
+        staging_key=None,
     ):
         self.db = db
         self.vector_client = vector_client
@@ -51,6 +53,8 @@ class IndexingService:
         self.asset_reader = asset_reader
         self.lexical_enabled = lexical_enabled
         self.lexical_factory = lexical_factory
+        self.staged = staged
+        self.staging_key = staging_key
 
     async def register_space(
         self,
@@ -116,7 +120,12 @@ class IndexingService:
             return row
 
     async def _latest(self, db, file_id, *, lock=False):
-        stmt = select(State).where(State.state_id == stable_id('file', file_id=file_id))
+        identity = (
+            stable_id('candidate', file_id=file_id, owner=self.staging_key)
+            if self.staged
+            else stable_id('file', file_id=file_id)
+        )
+        stmt = select(State).where(State.state_id == identity)
         if lock:
             stmt = stmt.with_for_update()
         return (await db.execute(stmt)).scalar_one_or_none()
@@ -127,7 +136,11 @@ class IndexingService:
             raise ValueError('stale or deleted file version cannot be republished')
         if row is None:
             row = State(
-                state_id=stable_id('file', file_id=file_id),
+                state_id=(
+                    stable_id('candidate', file_id=file_id, owner=self.staging_key)
+                    if self.staged
+                    else stable_id('file', file_id=file_id)
+                ),
                 index_kind='map_text',
                 file_id=file_id,
                 file_version=version,
@@ -138,11 +151,12 @@ class IndexingService:
             db.add(row)
             await db.flush()
         if version > row.file_version:
-            await db.execute(
-                update(Evidence).where(Evidence.file_id == file_id).values(is_active=False, updated_at=now)
-            )
-            await db.execute(update(Chunk).where(Chunk.file_id == file_id).values(is_active=False, updated_at=now))
-            await db.execute(update(Asset).where(Asset.file_id == file_id).values(status='stale', updated_at=now))
+            if not self.staged:
+                await db.execute(
+                    update(Evidence).where(Evidence.file_id == file_id).values(is_active=False, updated_at=now)
+                )
+                await db.execute(update(Chunk).where(Chunk.file_id == file_id).values(is_active=False, updated_at=now))
+                await db.execute(update(Asset).where(Asset.file_id == file_id).values(status='stale', updated_at=now))
             row.file_version = version
             row.status = 'indexing'
         row.updated_at = now
@@ -206,6 +220,7 @@ class IndexingService:
         space_id=None,
         chunker_config=None,
         source_name=None,
+        chunk_offset=0,
     ):
         """Import *already written* text vector items; never encodes or changes text/vector IDs.
 
@@ -225,7 +240,7 @@ class IndexingService:
         chunks = [dict(c) for c in chunks]
         normalized = []
         config_hash = compute_chunker_config_hash(chunker_config)
-        for index, item in enumerate(chunks):
+        for index, item in enumerate(chunks, start=chunk_offset):
             vector_id = item.get('vector_id') or item.get('id')
             if not isinstance(vector_id, str) or not vector_id:
                 raise ValueError('existing text vector identity is required')
@@ -280,20 +295,26 @@ class IndexingService:
                 payload={'space_id': space_id, 'manifest_hash': canonical_hash([(v[2], v[5]) for v in normalized])},
             )
             prior = (
-                await db.scalars(
-                    select(Job).where(
-                        Job.file_id == file_id,
-                        Job.file_version == file_version,
-                        Job.knowledge_id == knowledge_id,
-                        Job.collection_name == collection_name,
-                        Job.index_kind == 'map_text',
-                        Job.executor_version == EXECUTOR_VERSION,
-                        Job.job_id != job.job_id,
+                []
+                if self.staged
+                else (
+                    await db.scalars(
+                        select(Job).where(
+                            Job.file_id == file_id,
+                            Job.file_version == file_version,
+                            Job.knowledge_id == knowledge_id,
+                            Job.collection_name == collection_name,
+                            Job.index_kind == 'map_text',
+                            Job.executor_version == EXECUTOR_VERSION,
+                            Job.job_id != job.job_id,
+                        )
                     )
-                )
-            ).all()
+                ).all()
+            )
             manifest_hash = canonical_hash([(v[2], v[5]) for v in normalized])
-            if any((row.payload or {}).get('manifest_hash') not in (None, manifest_hash) for row in prior):
+            if not self.staged and any(
+                (row.payload or {}).get('manifest_hash') not in (None, manifest_hash) for row in prior
+            ):
                 await db.rollback()
                 raise ValueError('changed source chunks require a new file version')
             job.status = 'running'
@@ -321,20 +342,20 @@ class IndexingService:
                         chunker_config_hash=config_hash,
                         text=item['text'],
                         metadata_=metadata,
-                        is_active=True,
+                        is_active=not self.staged,
                         created_at=now,
                         updated_at=now,
                     )
                     db.add(old)
                 else:
-                    old.is_active, old.updated_at = True, now
+                    old.is_active, old.updated_at = not self.staged, now
                 evidence = await self._upsert_evidence(
                     db,
                     ref=ref,
                     file_id=file_id,
                     version=file_version,
                     knowledge_id=knowledge_id,
-                    source_name=source_name or file_id,
+                    source_name=item.get('source_name') or source_name or file_id,
                     content_hash=content_hash,
                     modality='text',
                     chunk_uid=uid,
@@ -367,9 +388,11 @@ class IndexingService:
             await self._set_state(
                 db,
                 job,
-                status=('metadata_pending' if job.result['metadata_backfill_ids'] else 'ready')
-                if compatible
-                else 'quarantined',
+                status=(
+                    ('metadata_pending' if job.result['metadata_backfill_ids'] else 'ready')
+                    if compatible
+                    else 'quarantined'
+                ),
                 indexed=sum(v[1].get('file_id') == file_id for v in normalized) if compatible else 0,
             )
             await db.commit()
@@ -392,7 +415,7 @@ class IndexingService:
                 space_id=space_id,
                 source_name=source_name,
             )
-        if self.lexical_enabled:
+        if self.lexical_enabled and not self.staged:
             result['lexical'] = await self.index_lexical(
                 file_id=file_id, file_version=file_version, knowledge_id=knowledge_id, collection_name=collection_name
             )
@@ -424,7 +447,7 @@ class IndexingService:
                 or evidence.knowledge_id != knowledge_id
             ):
                 raise ValueError('evidence reference cannot be reused for different content or scope')
-            evidence.is_active, evidence.updated_at, evidence.deleted_at = True, now, None
+            evidence.is_active, evidence.updated_at, evidence.deleted_at = not self.staged, now, None
             return evidence
         evidence = Evidence(
             id=stable_id('evidence', ref=ref),
@@ -440,7 +463,7 @@ class IndexingService:
             page_index=page_index,
             anchor_json=anchor,
             content_hash=content_hash,
-            is_active=True,
+            is_active=not self.staged,
             created_at=now,
             updated_at=now,
         )
@@ -609,7 +632,9 @@ class IndexingService:
             await db.commit()
         return result
 
-    async def _index_asset(self, *, file_id, version, knowledge_id, collection, space_id, source_name, descriptor):  # noqa: C901
+    async def _index_asset(
+        self, *, file_id, version, knowledge_id, collection, space_id, source_name, descriptor
+    ):  # noqa: C901
         required = ('sha256', 'mime_type')
         if any(not descriptor.get(k) for k in required) or not (
             descriptor.get('storage_uri') or descriptor.get('path')
@@ -703,7 +728,14 @@ class IndexingService:
                     .where(
                         Evidence.asset_id == asset_id,
                         Evidence.file_version == version,
-                        Evidence.is_active.is_(True),
+                        (
+                            (
+                                Evidence.is_active.is_(True)
+                                | ((Evidence.file_id == file_id) & (Evidence.file_version == version))
+                            )
+                            if self.staged
+                            else Evidence.is_active.is_(True)
+                        ),
                         Evidence.deleted_at.is_(None),
                         Embedding.vector_space_id == space.id,
                         Embedding.embedding_status == 'ready',
@@ -773,7 +805,7 @@ class IndexingService:
             evidence = (await db.execute(select(Evidence).where(Evidence.evidence_ref == ref))).scalar_one()
             space = await db.get(Space, space_id)
             await self._map(db, evidence, space, image_collection, vector_id, 'ready')
-            evidence.is_active = True
+            evidence.is_active = not self.staged
             await db.commit()
 
     async def index_lexical(self, *, file_id, file_version, knowledge_id=None, collection_name=None):
@@ -812,9 +844,11 @@ class IndexingService:
                 text = (
                     chunk.text
                     if chunk
-                    else '\n'.join(filter(None, (asset.caption, asset.ocr_text, asset.surrounding_text)))
-                    if asset
-                    else ''
+                    else (
+                        '\n'.join(filter(None, (asset.caption, asset.ocr_text, asset.surrounding_text)))
+                        if asset
+                        else ''
+                    )
                 )
                 if text:
                     documents.append(

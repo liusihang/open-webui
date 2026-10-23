@@ -1572,10 +1572,8 @@ async def update_file_from_knowledge_by_id(
             detail=ERROR_MESSAGES.NOT_FOUND,
         )
 
-    # Remove content from the vector database
-    await ASYNC_VECTOR_DB_CLIENT.delete(collection_name=knowledge.id, filter={'file_id': form_data.file_id})
-
-    # Add content to the vector database
+    # Keep the published vectors available until the worker has completed and
+    # atomically published the replacement/association.
     try:
         await process_file(
             request,

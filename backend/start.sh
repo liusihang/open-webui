@@ -98,6 +98,13 @@ fi
 PYTHON_CMD=$(command -v python3 || command -v python)
 UVICORN_WORKERS="${UVICORN_WORKERS:-1}"
 
+# Migrate once before spawning Web processes, not once concurrently in every
+# child importing config.py. Indexing containers always disable migrations.
+if [[ "$UVICORN_WORKERS" -gt 1 && "${ENABLE_DB_MIGRATIONS:-true}" == "true" ]]; then
+  "$PYTHON_CMD" -c 'import open_webui.config'
+  export ENABLE_DB_MIGRATIONS=false
+fi
+
 if [[ "$#" -gt 0 ]]; then
   ARGS=("$@")
 else

@@ -76,7 +76,7 @@ def validate_chat_pdf_upload(metadata: dict, filename: str, content_type: str | 
 
 
 def should_defer_pdf_processing(
-    metadata: dict, filename: str, content_type: str | None, contents: bytes, models: dict
+    metadata: dict, filename: str, content_type: str | None, contents: bytes, models: dict, *, size: int | None = None
 ) -> bool:
     """Only skip upload parsing when every selected model explicitly supports PDF."""
     model_ids = metadata.get('model_ids')
@@ -86,7 +86,7 @@ def should_defer_pdf_processing(
         and not metadata.get('channel_id')
         and is_pdf(filename, content_type)
         and contents.startswith(b'%PDF-')
-        and len(contents) <= CHAT_NATIVE_PDF_MAX_BYTES
+        and (len(contents) if size is None else size) <= CHAT_NATIVE_PDF_MAX_BYTES
         and isinstance(model_ids, list)
         and model_ids
         and all(isinstance(model_id, str) and supports_native_pdf(models.get(model_id)) for model_id in model_ids)
