@@ -1,6 +1,9 @@
 # Overlay for the existing `webui` service. The environment file must contain
 # the matching private DB/Redis credentials and WEBUI_SECRET_KEY, not test keys.
 # Set all required paths/devices from the inspected deployment, not examples.
+# A cap-drop uid0 worker cannot bypass a uid1000-owned 0700 bind root. Give
+# only uid0 a read/traverse ACL on that root (after saving its original ACL),
+# not world access or a recursive chmod/chown. Verify actual upload/asset access.
 x-indexing: &indexing
   image: ${OPENWEBUI_INDEXING_IMAGE:?set the verified Slim candidate image}
   env_file: ${OPENWEBUI_INDEXING_ENV_FILE:?set the private indexing environment file}
