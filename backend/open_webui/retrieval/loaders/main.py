@@ -465,6 +465,7 @@ class Loader:
         # Fast path: most files are UTF-8
         try:
             import codecs
+
             codecs.getincrementaldecoder('utf-8')().decode(raw, final=False)
             return 'utf-8'
         except UnicodeDecodeError as e:

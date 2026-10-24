@@ -56,7 +56,7 @@ Run additive f64b7a2810ce migration once before launch. Rollback uses the old im
 with migrations disabled; no database downgrade or vector rebuild is required.
 
 Release source: 95527efd15c42691e0215594c7a77ae7f3c1c9a4 (local branch
-codex/bounded-indexing-workers; no GitHub push/Main merge performed in this task).
+codex/bounded-indexing-workers; Live was deployed before GitHub/Main synchronization).
 Running image: open-webui:v0123-indexing-95527efd15c4-20261024-slim,
 sha256:d1a467362592d3d42dd7135ada853cc27ee18a0c14cce0905315308cf2ec04e4.
 Fresh PostgreSQL migration and image imports passed before Live migration. Live

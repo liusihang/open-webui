@@ -632,9 +632,7 @@ class IndexingService:
             await db.commit()
         return result
 
-    async def _index_asset(
-        self, *, file_id, version, knowledge_id, collection, space_id, source_name, descriptor
-    ):  # noqa: C901
+    async def _index_asset(self, *, file_id, version, knowledge_id, collection, space_id, source_name, descriptor):  # noqa: C901
         required = ('sha256', 'mime_type')
         if any(not descriptor.get(k) for k in required) or not (
             descriptor.get('storage_uri') or descriptor.get('path')
