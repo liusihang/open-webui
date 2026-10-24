@@ -1,0 +1,10 @@
+# Backend-only repair. The frontend and dependency pins are unchanged from the
+# verified Slim parent; avoid rebuilding CUDA, ML packages or frontend assets.
+ARG BASE_IMAGE
+FROM ${BASE_IMAGE}
+ARG BUILD_HASH
+COPY backend/open_webui /app/backend/open_webui
+COPY backend/start.sh /app/backend/start.sh
+ENV WEBUI_BUILD_HASH=${BUILD_HASH}
+LABEL org.opencontainers.image.revision=${BUILD_HASH}
+LABEL site.shuofang.profile=slim-indexing

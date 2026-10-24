@@ -693,7 +693,27 @@ async def query_collection(
     embedding_function,
     k: int,
     user: UserModel | None = None,
+    search_options: dict | None = None,
 ) -> dict:
+    # Published evidence mappings, not a guessed file-{id}/KB physical table,
+    # determine which candidate version is visible. Keep the legacy path only
+    # for collections without a local mapping.
+    local_results, remaining = [], []
+    if request is not None and user is not None:
+        from open_webui.retrieval.integration import query_local_collection
+
+        for name in collection_names:
+            handled = False
+            for query in (q for q in queries if q):
+                result = await query_local_collection(request, collection_name=name, query=query, count=k, user=user)
+                if result is not None:
+                    local_results.append(result.model_dump() if hasattr(result, 'model_dump') else result)
+                    handled = True
+            if not handled:
+                remaining.append(name)
+        if not remaining:
+            return merge_and_sort_query_results(local_results, k=k)
+        collection_names = remaining
     config = await Config.get_many(
         'rag.enable_hybrid_search',
         'rag.top_k_reranker',
@@ -701,6 +721,7 @@ async def query_collection(
         'rag.hybrid_bm25_weight',
         'rag.enable_hybrid_search_enriched_texts',
     )
+    config.update({key: value for key, value in (search_options or {}).items() if key in config and value is not None})
     # When request is provided, try hybrid search + reranking if enabled
     if request and config.get('rag.enable_hybrid_search'):
         try:
@@ -709,7 +730,7 @@ async def query_collection(
                 if request.app.state.RERANKING_FUNCTION
                 else None
             )
-            return await query_collection_with_hybrid_search(
+            hybrid = await query_collection_with_hybrid_search(
                 collection_names=collection_names,
                 queries=queries,
                 embedding_function=embedding_function,
@@ -720,10 +741,11 @@ async def query_collection(
                 hybrid_bm25_weight=config.get('rag.hybrid_bm25_weight'),
                 enable_enriched_texts=config.get('rag.enable_hybrid_search_enriched_texts'),
             )
+            return merge_and_sort_query_results([*local_results, hybrid], k=k)
         except Exception as e:
             log.debug('Hybrid search failed, falling back to vector search: %s', e)
 
-    results = []
+    results = list(local_results)
     last_error = None
     failed_collection_names = set()
 
@@ -1348,7 +1370,14 @@ async def filter_accessible_collections(
             # ENABLE_RETRIEVAL_UNSCOPED_COLLECTIONS:
             #   False (default) — deny (closes the unscoped namespace)
             #   True  — allow (preserves legacy behaviour)
-            if await Knowledges.check_access_by_user_id(canonical, user.id, permission=access_type):
+            from open_webui.internal.db import get_async_db
+            from open_webui.models.ingestion_jobs import IngestionCollection
+
+            async with get_async_db() as db:
+                own_alias = await db.get(IngestionCollection, (user.id, name))
+            if own_alias:
+                validated.add(name)
+            elif await Knowledges.check_access_by_user_id(canonical, user.id, permission=access_type):
                 validated.add(name)
             elif ENABLE_RETRIEVAL_UNSCOPED_COLLECTIONS and not await Knowledges.get_knowledge_by_id(canonical):
                 # Not a KB at all — legacy/ephemeral collection, allow

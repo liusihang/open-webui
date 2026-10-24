@@ -11,8 +11,20 @@ class TextLoader:
         self.encoding = encoding
 
     def load(self) -> list[Document]:
+        from open_webui.retrieval.admission import AdmissionError, AdmissionLimits
+
+        limit = AdmissionLimits.from_env().max_text_bytes
         try:
-            text = Path(self.file_path).read_text(encoding=self.encoding)
+            parts, size = [], 0
+            with open(self.file_path, encoding=self.encoding) as stream:
+                while part := stream.read(32768):
+                    size += len(part.encode('utf-8'))
+                    if size > limit:
+                        raise AdmissionError('parsed text exceeds indexing budget; original retained')
+                    parts.append(part)
+            text = ''.join(parts)
+        except AdmissionError:
+            raise
         except Exception as e:
             raise RuntimeError(f'Error loading {self.file_path}') from e
         return [

@@ -15,6 +15,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from typing import Optional
 from unittest.mock import AsyncMock, Mock, patch
+from contextlib import asynccontextmanager
 
 from fastapi import Depends, File, Form, HTTPException, Query, UploadFile, status
 from open_webui.utils import native_pdf
@@ -38,11 +39,23 @@ def pdf_bytes(pages, password=None):
 
 class ChatPdfUploadLimitTests(unittest.IsolatedAsyncioTestCase):
     def setUp(self):
-        self.stored = Mock(side_effect=lambda stream, *_: (stream.read(), '/synthetic/paper.pdf'))
+        disk_budget = patch.dict(os.environ, {'INDEXING_UPLOAD_STORAGE_MIN_FREE_BYTES': '0'})
+        disk_budget.start()
+        self.addCleanup(disk_budget.stop)
+        self.stored = Mock(side_effect=lambda stream, *_, **__: (None, '/synthetic/paper.pdf'))
         self.insert = AsyncMock(
             side_effect=lambda _user, form, **_: SimpleNamespace(**vars(form), model_dump=lambda: vars(form))
         )
         self.process = AsyncMock()
+        self.queued = AsyncMock(return_value={'ingestion_job_id': 'fixture-job'})
+        queue_patch = patch('open_webui.retrieval.ingestion.submit_file', self.queued)
+        queue_patch.start()
+        self.addCleanup(queue_patch.stop)
+
+        @asynccontextmanager
+        async def session(_):
+            yield None
+
         scope = {
             'Request': object,
             'UploadFile': UploadFile,
@@ -69,6 +82,9 @@ class ChatPdfUploadLimitTests(unittest.IsolatedAsyncioTestCase):
             'FileForm': SimpleNamespace,
             'Channels': SimpleNamespace(get_channel_by_id_and_user_id=AsyncMock(return_value=None)),
             'process_uploaded_file': self.process,
+            'get_async_db_context': session,
+            'ProcessFileForm': SimpleNamespace,
+            'strict_match_mime_type': lambda *_: False,
             **vars(native_pdf),
         }
         tree = ast.parse((ROOT / 'backend/open_webui/routers/files.py').read_text())
@@ -136,7 +152,8 @@ class ChatPdfUploadLimitTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_non_gpt_small_pdf_keeps_parser_path(self):
         await self.call(pdf_bytes(20), {'upload_context': 'chat', 'model_ids': ['text']})
-        self.process.assert_awaited_once()
+        self.queued.assert_awaited_once()
+        self.process.assert_not_awaited()
         self.insert.assert_awaited_once()
 
     async def test_knowledge_and_channel_uploads_are_exempt(self):
@@ -152,7 +169,8 @@ class ChatPdfUploadLimitTests(unittest.IsolatedAsyncioTestCase):
                 await self.call(pdf_bytes(21), metadata)
         self.assertEqual(self.stored.call_count, 6)
         self.assertEqual(self.insert.await_count, 6)
-        self.assertEqual(self.process.await_count, 6)
+        self.assertEqual(self.queued.await_count, 6)
+        self.process.assert_not_awaited()
 
     async def test_damaged_or_disguised_non_pdf_is_explained_not_500(self):
         for contents in (b'%PDF-1.7\ninvalid', b'not a PDF'):
@@ -183,7 +201,7 @@ class ChatPdfUploadLimitTests(unittest.IsolatedAsyncioTestCase):
     async def test_non_pdf_chat_file_is_not_read_as_pdf(self):
         await self.call(b'plain text', filename='notes.txt', content_type='text/plain')
         self.stored.assert_called_once()
-        self.process.assert_awaited_once()
+        self.queued.assert_awaited_once()
 
     async def test_validation_rewinds_stream_before_storage(self):
         contents = pdf_bytes(20)

@@ -258,7 +258,7 @@ class Config(Base):
             existing_keys = {row[0] for row in result.all()}
 
             now = int(time.time())
-            new_count = 0
+            pending = []
             for key, value in defaults.items():
                 # Skip keys the DB is not authoritative for (e.g. oauth.* while
                 # ENABLE_OAUTH_PERSISTENT_CONFIG is off), matching the read paths.
@@ -266,13 +266,31 @@ class Config(Base):
                     continue
                 if key not in existing_keys:
                     value = _json_value(value)
-                    db.add(Config(key=key, value=value, updated_at=now))
+                    pending.append(dict(key=key, value=value, updated_at=now))
                     existing_keys.add(key)
-                    new_count += 1
 
-            if new_count:
+            if pending:
+                dialect = db.bind.dialect.name
+                if dialect == 'postgresql':
+                    from sqlalchemy.dialects.postgresql import insert
+                elif dialect == 'sqlite':
+                    from sqlalchemy.dialects.sqlite import insert
+                else:
+                    insert = None
+                if insert:
+                    await db.execute(insert(Config).values(pending).on_conflict_do_nothing(index_elements=['key']))
+                else:
+                    from sqlalchemy.exc import IntegrityError
+
+                    for row in pending:
+                        try:
+                            async with db.begin_nested():
+                                db.add(Config(**row))
+                                await db.flush()
+                        except IntegrityError:
+                            pass  # Another Web worker seeded this key first.
                 await db.commit()
-                log.info('Seeded %d new config defaults', new_count)
+                log.info('Seeded config defaults (at most %d new keys)', len(pending))
 
     @staticmethod
     async def rename_prefix(old_prefix: str, new_prefix: str) -> None:

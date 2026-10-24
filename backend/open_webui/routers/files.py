@@ -147,62 +147,17 @@ async def get_retrieval_status(id: str, user=Depends(get_verified_user)):
 async def retry_file_image_index(
     request: Request, id: str, user=Depends(get_verified_user), db: AsyncSession = Depends(get_async_session)
 ):
-    from sqlalchemy import select
-    from open_webui.models.retrieval_indexes import EXECUTOR_VERSION, RetrievalIndexJob
-    from open_webui.retrieval.integration import complete_images, services, spawn, update_status
+    from open_webui.retrieval.ingestion import submit_file
 
-    file = await Files.get_file_by_id(id, db=db)
-    if not file or not (
-        file.user_id == user.id or user.role == 'admin' or await has_access_to_file(id, 'write', user, db=db)
+    state = await Files.get_file_processing_state(id)
+    if not state or not (
+        state['user_id'] == user.id or user.role == 'admin' or await has_access_to_file(id, 'write', user, db=db)
     ):
         raise HTTPException(404, 'File not found')
-    version = (file.data or {}).get('retrieval_version')
-    jobs = (
-        await db.scalars(
-            select(RetrievalIndexJob)
-            .where(
-                RetrievalIndexJob.file_id == id,
-                RetrievalIndexJob.file_version == version,
-                RetrievalIndexJob.executor_version == EXECUTOR_VERSION,
-                RetrievalIndexJob.index_kind == 'image',
-                RetrievalIndexJob.status.in_(('pending', 'failed')),
-                RetrievalIndexJob.retry_count < RetrievalIndexJob.max_retries,
-            )
-            .limit(100)
-        )
-    ).all()
-    await db.commit()
-    indexer, _, space_id, _ = await services(request)
-    if not space_id:
-        raise HTTPException(409, 'Select a verified encoding space compatible with the current encoder first')
-    if jobs:
-        await update_status(id, version, images='pending')
-    for job in jobs:
-        payload = job.payload or {}
-        job_id = await indexer.enqueue_assets(
-            file_id=id,
-            file_version=version,
-            collection_name=job.collection_name,
-            assets=payload.get('assets', []),
-            knowledge_id=job.knowledge_id,
-            space_id=space_id,
-            source_name=file.filename,
-        )
-        spawn(
-            request,
-            complete_images(
-                request,
-                file_id=id,
-                version=version,
-                collection=job.collection_name,
-                assets=payload.get('assets', []),
-                skipped=(file.data or {}).get('document_image_assets_skipped') or [],
-                knowledge_id=job.knowledge_id,
-                source_name=file.filename,
-                job_id=job_id,
-            ),
-        )
-    return {'scheduled': len(jobs), 'version': version}
+    if not state.get('retrieval_version'):
+        raise HTTPException(409, 'No published source version to retry')
+    queued = await submit_file(request, ProcessFileForm(file_id=id), user=user, db=db, wait=False, retry_images=True)
+    return {'scheduled': 1, 'version': state['retrieval_version'], **queued}
 
 
 @router.get('/{id}/evidence/{ref}')
@@ -564,8 +519,25 @@ async def upload_file_handler(
             'OpenWebUI-User-Name': user.name,
             'OpenWebUI-File-Id': id,
         }
+        from open_webui.retrieval.admission import stream_hash
+
+        file_hash, upload_size = await asyncio.to_thread(stream_hash, file.file)
+        from open_webui.config import UPLOAD_DIR
+        import shutil
+
+        minimum_free = int(os.getenv('INDEXING_UPLOAD_STORAGE_MIN_FREE_BYTES', str(2 * 1024**3)))
+        if shutil.disk_usage(UPLOAD_DIR).free - upload_size < minimum_free:
+            raise HTTPException(507, 'Insufficient upload storage headroom; no file was stored')
+        max_size = await Config.get('rag.file.max_size')
+        if max_size and upload_size > int(max_size) * 1024 * 1024:
+            raise HTTPException(status_code=413, detail=ERROR_MESSAGES.FILE_TOO_LARGE(size=f'{max_size} MB'))
+        file.file.seek(0)
+        header = file.file.read(8)
+        file.file.seek(0)
         try:
-            contents, file_path = await asyncio.to_thread(Storage.upload_file, file.file, filename, tags)
+            _, file_path = await asyncio.to_thread(
+                Storage.upload_file, file.file, filename, tags, return_contents=False
+            )
         except OSError as e:
             if e.errno != errno.ENAMETOOLONG:
                 log.exception(e)
@@ -577,33 +549,23 @@ async def upload_file_handler(
             file.file.seek(0)
             filename = f'{id}.{file_extension}' if file_extension else id
             try:
-                contents, file_path = await asyncio.to_thread(Storage.upload_file, file.file, filename, tags)
+                _, file_path = await asyncio.to_thread(
+                    Storage.upload_file, file.file, filename, tags, return_contents=False
+                )
             except OSError as e:
                 log.exception(e)
                 raise HTTPException(
                     status_code=status.HTTP_400_BAD_REQUEST,
                     detail=ERROR_MESSAGES.DEFAULT(e.strerror or 'Error uploading file'),
                 )
-        max_size = await Config.get('rag.file.max_size')
-        if max_size and len(contents) > int(max_size) * 1024 * 1024:
-            await asyncio.to_thread(Storage.delete_file, file_path)
-            raise HTTPException(
-                status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
-                detail=ERROR_MESSAGES.FILE_TOO_LARGE(size=f'{max_size} MB'),
-            )
-
         native_pdf = should_defer_pdf_processing(
-            file_metadata, name, file.content_type, contents, request.app.state.MODELS
+            file_metadata, name, file.content_type, header, request.app.state.MODELS, size=upload_size
         )
         if native_pdf:
             process = False
             file_metadata['native_model_file'] = True
 
-        # SHA-256 of raw uploaded bytes for incremental sync diffing.
-        # If the client pre-computed and sent file_hash, use that.
-        file_hash = file_metadata.get('file_hash') or await asyncio.to_thread(
-            lambda: hashlib.sha256(contents).hexdigest()
-        )
+        # The server's streamed hash, never a client claim, is used for dedup.
 
         file_item = await Files.insert_new_file(
             user.id,
@@ -618,8 +580,9 @@ async def upload_file_handler(
                     'meta': {
                         'name': name,
                         'content_type': (file.content_type if isinstance(file.content_type, str) else None),
-                        'size': len(contents),
+                        'size': upload_size,
                         'file_hash': file_hash,
+                        'server_hash_verified': True,
                         'data': file_metadata,
                     },
                 }
@@ -633,6 +596,50 @@ async def upload_file_handler(
                 await Channels.add_file_to_channel_by_id(channel.id, file_item.id, user.id, db=db)
 
         if process:
+            # Persist document/image work before returning an upload response.
+            # STT retains its existing transcription path, but its subsequent
+            # document indexing also crosses process_file's durable queue seam.
+            stt_types = await Config.get('audio.stt.supported_content_types', [])
+            is_stt = bool(file.content_type and strict_match_mime_type(stt_types, file.content_type))
+            is_video = bool(file.content_type and file.content_type.startswith('video/'))
+            if not is_stt and not is_video:
+                from open_webui.retrieval.ingestion import submit_file
+
+                knowledge_id = file_metadata.get('knowledge_id')
+                try:
+                    async with get_async_db_context(db) as session:
+                        queued = await submit_file(
+                            request,
+                            ProcessFileForm(file_id=file_item.id, collection_name=knowledge_id),
+                            user=user,
+                            db=session,
+                            wait=not process_in_background,
+                            auto_link={'directory_id': file_metadata.get('directory_id')} if knowledge_id else None,
+                        )
+                except Exception as exc:
+                    from open_webui.retrieval.ingestion_queue import DuplicateIngestion
+
+                    if isinstance(exc, DuplicateIngestion):
+                        await Files.update_file_data_by_id(
+                            file_item.id,
+                            {'status': 'failed', 'error': str(exc), 'duplicate_ingestion_job_id': exc.job_id},
+                        )
+                        raise HTTPException(409, str(exc)) from None
+                    from open_webui.retrieval.admission import AdmissionError
+
+                    await Files.update_file_data_by_id(
+                        file_item.id,
+                        {
+                            'status': 'failed',
+                            'error': (
+                                str(exc)
+                                if isinstance(exc, AdmissionError)
+                                else 'Indexing request not accepted; original retained'
+                            ),
+                        },
+                    )
+                    raise
+                return {'status': True, **file_item.model_dump(), **queued}
             if background_tasks and process_in_background:
                 background_tasks.add_task(
                     process_uploaded_file,
@@ -830,62 +837,42 @@ async def get_file_by_id(id: str, user=Depends(get_verified_user), db: AsyncSess
 
 
 @router.get('/{id}/process/status')
-async def get_file_process_status(
-    id: str,
-    stream: bool = Query(False),
-    user=Depends(get_verified_user),
-):
-    # NOTE: We intentionally do NOT use Depends(get_async_session) here.
-    # Database operations manage their own short-lived sessions internally.
-    # Holding a session here would keep a connection for the entire stream
-    # (up to two hours) and exhaust the connection pool under concurrent load.
-    file = await Files.get_file_by_id(id)
+async def get_file_process_status(id: str, stream: bool = Query(False), user=Depends(get_verified_user)):
+    from open_webui.retrieval.ingestion_queue import expire_jobs
 
-    if not file:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail=ERROR_MESSAGES.NOT_FOUND,
-        )
+    async def current(file_id):
+        state = await Files.get_file_processing_state(file_id)
+        if state and state.get('ingestion_job_id'):
+            if await expire_jobs(job_id=state['ingestion_job_id']):
+                state = await Files.get_file_processing_state(file_id)
+        return state
 
-    if file.user_id == user.id or user.role == 'admin' or await has_access_to_file(id, 'read', user):
-        if stream:
-            MAX_FILE_PROCESSING_DURATION = 3600 * 2
+    file = await current(id)
+    if not file or not (
+        file['user_id'] == user.id or user.role == 'admin' or await has_access_to_file(id, 'read', user)
+    ):
+        raise HTTPException(404, ERROR_MESSAGES.NOT_FOUND)
+    if not stream:
+        return {'status': file.get('status') or 'pending', **({'error': file['error']} if file.get('error') else {})}
 
-            async def event_stream(file_id):
-                for _ in range(MAX_FILE_PROCESSING_DURATION):
-                    file_item = await Files.get_file_by_id(file_id)
-                    if file_item:
-                        data = file_item.model_dump().get('data', {})
-                        status = data.get('status')
+    async def event_stream():
+        for _ in range(7200):
+            state = await current(id)
+            if state is None:
+                yield f'data: {JSONCodec.dumps({"status": "not_found"})}\n\n'
+                break
+            status = state.get('status')
+            if not status:
+                break
+            event = {'status': status}
+            if status == 'failed':
+                event['error'] = state.get('error')
+            yield f'data: {JSONCodec.dumps(event)}\n\n'
+            if status in ('completed', 'failed'):
+                break
+            await asyncio.sleep(1)
 
-                        if status:
-                            event = {'status': status}
-                            if status == 'failed':
-                                event['error'] = data.get('error')
-
-                            yield f'data: {JSONCodec.dumps(event)}\n\n'
-                            if status in ('completed', 'failed'):
-                                break
-                        else:
-                            # Legacy
-                            break
-                    else:
-                        yield f'data: {JSONCodec.dumps({"status": "not_found"})}\n\n'
-                        break
-
-                    await asyncio.sleep(1)
-
-            return StreamingResponse(
-                event_stream(file.id),
-                media_type='text/event-stream',
-            )
-        else:
-            return {'status': file.data.get('status', 'pending')}
-    else:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail=ERROR_MESSAGES.NOT_FOUND,
-        )
+    return StreamingResponse(event_stream(), media_type='text/event-stream')
 
 
 ############################
@@ -961,30 +948,9 @@ async def update_file_data_content_by_id(
                 status_code=500, detail='Failed to process indexed text. Your changes were not fully indexed.'
             ) from e
 
-        # Propagate content change to all knowledge collections referencing
-        # this file.  Without this the old embeddings remain in the knowledge
-        # collection and RAG returns both stale and current data (#20558).
-        knowledges = await Knowledges.get_knowledges_by_file_id(id, db=db)
-        failed_collections = []
-        for knowledge in knowledges:
-            try:
-                old_vectors = await ASYNC_VECTOR_DB_CLIENT.query(collection_name=knowledge.id, filter={'file_id': id})
-                old_vector_ids = old_vectors.ids[0] if old_vectors and old_vectors.ids else []
-
-                # Re-add from the now-updated file-{file_id} collection before
-                # removing old vectors, so a failed reindex keeps the KB usable.
-                await process_file(
-                    request,
-                    ProcessFileForm(file_id=id, collection_name=knowledge.id),
-                    user=user,
-                    db=db,
-                )
-                if old_vector_ids:
-                    await ASYNC_VECTOR_DB_CLIENT.delete(collection_name=knowledge.id, ids=old_vector_ids)
-            except Exception as e:
-                log.warning(f'Failed to update knowledge {knowledge.id} after content change for file {id}: {e}')
-                failed_collections.append(knowledge.id)
-
+        # The indexing worker publishes the file and every attached knowledge
+        # scope atomically. Do not fetch/rewrite whole legacy vector collections
+        # here or schedule a second index pass after publication.
         await publish_event(
             request,
             EVENTS.FILE_CONTENT_UPDATED,
@@ -992,11 +958,6 @@ async def update_file_data_content_by_id(
             subject_id=id,
             data={'content_preview': form_data.content[:300]},
         )
-        if failed_collections:
-            raise HTTPException(
-                status_code=500,
-                detail='Indexed text was saved, but some knowledge collections could not be reindexed. Retry saving to complete indexing.',
-            )
         return {'content': file.data.get('content', '')}
     else:
         raise HTTPException(

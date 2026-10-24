@@ -471,10 +471,27 @@ async def query_local_collection(request, *, collection_name, query, count, user
     """The public query/doc and Native knowledge tools share local-space routing."""
     from open_webui.models.knowledge import Knowledges
 
-    knowledge = await Knowledges.get_knowledge_by_id(collection_name)
-    if not knowledge or (knowledge.meta or {}).get('source') == 'external':
-        return None  # Preserve the official nonlocal/external route.
-    scope = await resolve_scope(user, knowledge_ids=(collection_name,))
+    if collection_name.startswith('file-'):
+        file_id = collection_name[len('file-') :]
+        async with get_async_db() as db:
+            current = await db.get(State, stable_id('file', file_id=file_id))
+        if not current:
+            return None  # Preserve unmapped legacy file vectors.
+        scope = await resolve_scope(user, file_ids=(file_id,))
+    else:
+        knowledge = await Knowledges.get_knowledge_by_id(collection_name)
+        if not knowledge:
+            from open_webui.models.ingestion_jobs import IngestionCollection
+
+            async with get_async_db() as db:
+                alias = await db.get(IngestionCollection, (user.id, collection_name))
+            if not alias:
+                return None
+            scope = await resolve_scope(user, file_ids=(alias.file_id,))
+        elif (knowledge.meta or {}).get('source') == 'external':
+            return None  # Preserve the official nonlocal/external route.
+        else:
+            scope = await resolve_scope(user, knowledge_ids=(collection_name,))
     _, evidence, _, _ = await services(request, user=user)
     result = await evidence.search(
         query_text=query,
@@ -620,6 +637,13 @@ async def start_recovery(app):
     import fcntl
 
     from open_webui.env import UVICORN_WORKERS
+
+    # Full ingestion recovery/leases belong to the two isolated containers.
+    # Do not replay historical image jobs in any of the four Web processes.
+    import os
+
+    if os.getenv('INDEXING_QUEUE_ENABLED', 'true').lower() == 'true':
+        return
 
     config = await Config.get_many('rag.document_image_asset_root')
     root = asset_root(config)
