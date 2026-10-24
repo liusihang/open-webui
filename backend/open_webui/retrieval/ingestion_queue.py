@@ -16,7 +16,7 @@ QUEUE_SECONDS = 7200
 TERMINAL = frozenset(('succeeded', 'failed', 'cancelled', 'rejected'))
 
 
-async def patch_file_status(db, file_id, values, *, job_id=None):
+async def patch_file_status(db, file_id, values, *, job_id=None, job_field='ingestion_job_id'):
     """Merge small status fields on the DB side, never fetch a legacy huge body."""
     import json
     from sqlalchemy import cast, func, literal
@@ -24,11 +24,15 @@ async def patch_file_status(db, file_id, values, *, job_id=None):
 
     query = update(File).where(File.id == file_id)
     if job_id:
-        query = query.where(File.data['ingestion_job_id'].as_string() == job_id)
+        query = query.where(File.data[job_field].as_string() == job_id)
     if db.bind.dialect.name == 'postgresql':
-        data = func.coalesce(cast(File.data, JSONB), cast(literal('{}'), JSONB)).op('||')(
-            cast(literal(json.dumps(values)), JSONB)
-        )
+        original = func.coalesce(cast(File.data, JSONB), cast(literal('{}'), JSONB))
+        data = original.op('||')(cast(literal(json.dumps(values)), JSONB))
+        if 'retrieval_status' in values:
+            nested = func.coalesce(original.op('->')('retrieval_status'), cast(literal('{}'), JSONB)).op('||')(
+                cast(literal(json.dumps(values['retrieval_status'])), JSONB)
+            )
+            data = data.op('||')(func.jsonb_build_object('retrieval_status', nested))
     else:
         data = func.json_patch(func.coalesce(File.data, '{}'), json.dumps(values))
     await db.execute(query.values(data=data).execution_options(synchronize_session=False))
@@ -41,16 +45,28 @@ class DuplicateIngestion(ValueError):
         super().__init__('Identical content already being indexed in this permission scope; task ' + job_id)
 
 
+def job_key(*, file_id, user_id, knowledge_id, source_hash, config_hash, payload):
+    identity = dict(
+        user=user_id,
+        knowledge=knowledge_id,
+        source=source_hash,
+        config=config_hash,
+        collection=payload.get('logical_collection'),
+        retry_images=payload.get('retry_images', False),
+    )
+    if payload.get('retry_images'):
+        identity.update(image_file=file_id, source_version=payload.get('source_version'))
+    return canonical_hash(identity)
+
+
 async def enqueue(*, file_id, user_id, knowledge_id, source_hash, config_hash, payload):
-    key = canonical_hash(
-        dict(
-            user=user_id,
-            knowledge=knowledge_id,
-            source=source_hash,
-            config=config_hash,
-            collection=payload.get('logical_collection'),
-            retry_images=payload.get('retry_images', False),
-        )
+    key = job_key(
+        file_id=file_id,
+        user_id=user_id,
+        knowledge_id=knowledge_id,
+        source_hash=source_hash,
+        config_hash=config_hash,
+        payload=payload,
     )
     created, identity = time.time_ns() // 1000, str(uuid.uuid4())
     async with get_async_db_context() as db:
@@ -90,7 +106,12 @@ async def enqueue(*, file_id, user_id, knowledge_id, source_hash, config_hash, p
             )
             db.add(job)
             await db.flush()
-            await patch_file_status(db, file_id, {'status': 'pending', 'error': None, 'ingestion_job_id': identity})
+            values = (
+                {'image_ingestion_job_id': identity, 'retrieval_status': {'images': 'pending'}}
+                if payload.get('retry_images')
+                else {'status': 'pending', 'error': None, 'ingestion_job_id': identity}
+            )
+            await patch_file_status(db, file_id, values)
             await db.commit()
             return identity
         except IntegrityError:
@@ -112,9 +133,29 @@ async def fail_job(job_id, reason, *, token=None, status='failed'):
             return False
         job.status, job.error, job.finished_at = status, reason[:500], int(time.time())
         job.active_key = job.active_file = job.worker_slot = job.lease_until = None
-        await patch_file_status(db, job.file_id, {'status': 'failed', 'error': job.error}, job_id=job_id)
+        await _mark_failure(db, job)
         await db.commit()
         return True
+
+
+async def _mark_failure(db, job):
+    if (job.payload or {}).get('retry_images'):
+        message = job.error
+        if message and message.startswith('Indexing execution time budget exceeded'):
+            message = '图片处理任务超过执行时间上限，已停止；正文和原文件不受影响，可稍后重试图片。'
+        elif message and message.startswith('Indexing child exited'):
+            message = '图片处理进程异常退出或被终止，未自动重试；正文和原文件不受影响。'
+        elif message and message.startswith('Indexing interrupted or queue wait expired'):
+            message = '图片处理任务中断或排队超时，未自动重试；正文和原文件不受影响。'
+        await patch_file_status(
+            db,
+            job.file_id,
+            {'retrieval_status': {'images': 'failed', 'image_error': message, 'image_retryable': True}},
+            job_id=job.job_id,
+            job_field='image_ingestion_job_id',
+        )
+    else:
+        await patch_file_status(db, job.file_id, {'status': 'failed', 'error': job.error}, job_id=job.job_id)
 
 
 async def expire_jobs(*, job_id=None):
@@ -148,7 +189,7 @@ async def expire_jobs(*, job_id=None):
                 now,
             )
             job.active_key = job.active_file = job.worker_slot = job.lease_until = None
-            await patch_file_status(db, job.file_id, {'status': 'failed', 'error': job.error}, job_id=identity)
+            await _mark_failure(db, job)
             await db.commit()
             changed += 1
         await cleanup_inputs(identity)

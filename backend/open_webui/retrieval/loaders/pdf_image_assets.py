@@ -3,6 +3,7 @@
 from pathlib import Path
 
 from open_webui.retrieval.document_image_assets import ImageAssetExtraction, ImageAssetStore
+from open_webui.retrieval.image_errors import image_issue
 
 
 def extract_pdf_image_assets(
@@ -11,9 +12,10 @@ def extract_pdf_image_assets(
     asset_root: str | Path,
     source_id: str | None = None,
     page_text_by_index: dict[int, str] | None = None,
+    defer_conversion: bool = False,
 ) -> ImageAssetExtraction:
     result = ImageAssetExtraction()
-    store = ImageAssetStore(asset_root, source_id or str(Path(file_path).resolve()))
+    store = ImageAssetStore(asset_root, source_id or str(Path(file_path).resolve()), defer_conversion=defer_conversion)
     try:
         from pypdf import PdfReader
 
@@ -33,16 +35,20 @@ def extract_pdf_image_assets(
                                 image.data,
                                 backend='pypdf',
                                 page_index=index,
-                                origin_reference=f'page/{index}/image/{ordinal}',
+                                origin_reference=f'page/{index}/{image.name}',
                                 surrounding_text=(page_text_by_index or {}).get(index, ''),
                             )
                         )
-                    except Exception:
+                    except Exception as exc:
                         result.skipped.append(
-                            {'reason': 'pdf_image_unreadable', 'page_index': index, 'ordinal': ordinal}
+                            {
+                                'page_index': index,
+                                'ordinal': ordinal,
+                                **image_issue(exc, reference=getattr(image, 'name', 'image')),
+                            }
                         )
-            except Exception:
-                result.skipped.append({'reason': 'pdf_page_images_unavailable', 'page_index': index})
-    except Exception:
-        result.skipped.append({'reason': 'pdf_read_failed'})
+            except Exception as exc:
+                result.skipped.append({'page_index': index, **image_issue(exc, reference='page.pdf')})
+    except Exception as exc:
+        result.skipped.append(image_issue(exc, reference='document.pdf'))
     return result

@@ -140,11 +140,12 @@ RUN chown -R $UID:$GID /app $HOME
 RUN if [ "$USE_SLIM" = "true" ] && { [ "$USE_CUDA" = "true" ] || [ "$USE_OLLAMA" = "true" ]; }; then \
     echo "USE_SLIM cannot be combined with USE_CUDA or USE_OLLAMA" >&2; exit 1; fi
 
-# Keep the slim runtime free of local document/audio processing tools.
+# Keep Slim free of local ML/audio stacks. Bounded image conversion supports
+# Office embedded graphics without installing LibreOffice or CUDA.
 # Git-based tool requirements require the standard image.
 RUN apt-get update && \
     apt-get install -y --no-install-recommends \
-    curl jq ca-certificates \
+    curl jq ca-certificates libwmf-bin emf2svg librsvg2-bin ghostscript \
     && if [ "$USE_SLIM" != "true" ]; then \
     apt-get install -y --no-install-recommends \
     git build-essential pandoc gcc libmariadb-dev ffmpeg libsm6 libxext6; \

@@ -426,7 +426,8 @@ def test_docx_xml_entity_and_external_image_not_loaded(tmp_path, png):
         archive.writestr('word/media/a.png', png)
     result = extract_office_image_assets(path, asset_root=tmp_path / 'assets')
     assert result.assets == []
-    assert result.skipped[0]['reason'] == 'office_part_unreadable'
+    assert result.skipped[0]['reason'] == 'office_xml_entities_forbidden'
+    assert '实体声明' in result.skipped[0]['message']
 
 
 def test_loader_attaches_office_and_explicit_local_pdf_only(monkeypatch, tmp_path, source):

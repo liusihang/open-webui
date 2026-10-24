@@ -37,6 +37,7 @@ class PaddleOCRVLLoader:
         extract_images: bool = False,
         asset_root: str | Path | None = None,
         source_id: str | None = None,
+        defer_image_conversion: bool = False,
         allowed_remote_origins: list[str] | tuple[str, ...] = (),
         request_timeout_s: float = 30,
         download_timeout_s: float = 60,
@@ -58,6 +59,7 @@ class PaddleOCRVLLoader:
         self.file_name = Path(file_path).name
         self.optional_payload = dict(optional_payload or {})
         self.extract_images = extract_images
+        self.defer_image_conversion = defer_image_conversion
         if extract_images and asset_root is None:
             raise ValueError('Image extraction requires a private asset root')
         self.asset_root = asset_root
@@ -190,7 +192,11 @@ class PaddleOCRVLLoader:
 
     def _build_documents(self, rows: list, *, resource_base_url: str) -> list[Document]:
         documents = []
-        store = ImageAssetStore(self.asset_root, self.source_id) if self.extract_images else None
+        store = (
+            ImageAssetStore(self.asset_root, self.source_id, defer_conversion=self.defer_image_conversion)
+            if self.extract_images
+            else None
+        )
         for ordinal, row in enumerate(rows):
             if not isinstance(row, dict):
                 raise RuntimeError('PaddleOCR page schema mismatch')
