@@ -385,7 +385,10 @@ class Loader:
             from open_webui.retrieval.loaders.office_image_assets import extract_office_image_assets
 
             extraction = extract_office_image_assets(
-                file_path, asset_root=self._image_asset_root(), source_id=source_id
+                file_path,
+                asset_root=self._image_asset_root(),
+                source_id=source_id,
+                defer_conversion=self.config.get('rag.defer_image_conversion', False),
             )
         elif suffix == '.pdf' and self.config.get('rag.pdf_image_asset_source', 'parser') == 'local':
             from open_webui.retrieval.loaders.pdf_image_assets import extract_pdf_image_assets
@@ -394,6 +397,7 @@ class Loader:
                 file_path,
                 asset_root=self._image_asset_root(),
                 source_id=source_id,
+                defer_conversion=self.config.get('rag.defer_image_conversion', False),
                 page_text_by_index={
                     doc.metadata['page']: doc.page_content for doc in docs if type(doc.metadata.get('page')) is int
                 },
@@ -746,6 +750,7 @@ class Loader:
                 if self.config.get('rag.extract_document_image_assets', False)
                 else None,
                 source_id=self.metadata.get('file_id'),
+                defer_image_conversion=self.config.get('rag.defer_image_conversion', False),
             )
         elif (
             self.engine == 'mistral_ocr'
@@ -778,6 +783,7 @@ class Loader:
                 if self.config.get('rag.extract_document_image_assets', False)
                 else None,
                 source_id=self.metadata.get('file_id'),
+                defer_image_conversion=self.config.get('rag.defer_image_conversion', False),
                 allowed_remote_origins=tuple(self.config.get('rag.paddleocr_vl_allowed_remote_origins', []))
                 + tuple(self.config.get('rag.document_image_asset_allowed_origins', [])),
                 request_timeout_s=self.config.get('rag.paddleocr_vl_request_timeout', 30),

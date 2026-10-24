@@ -19,7 +19,7 @@ import logging
 import os
 import io
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import patch, AsyncMock, Mock
 
 from sqlalchemy import (
     JSON,
@@ -113,9 +113,17 @@ class QueueSQLTests(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self):
         global session_factory
         self.temp = tempfile.TemporaryDirectory()
-        self.engine = create_async_engine('sqlite+aiosqlite:///' + self.temp.name + '/fixture.db')
+        url = os.getenv('INGESTION_TEST_DB_URL')
+        if url and url not in (
+            'postgresql+asyncpg://fixture:fixture@owui-office-fixture-pg/fixture',
+            'postgresql+psycopg://fixture:fixture@owui-office-fixture-pg/fixture',
+        ):
+            raise ValueError('Only the isolated office fixture PostgreSQL endpoint is allowed')
+        self.engine = create_async_engine(url or 'sqlite+aiosqlite:///' + self.temp.name + '/fixture.db')
         session_factory = async_sessionmaker(self.engine, expire_on_commit=False)
         async with self.engine.begin() as connection:
+            if url:
+                await connection.run_sync(Base.metadata.drop_all)
             await connection.run_sync(Base.metadata.create_all)
         async with sessions() as db:
             for identity in ('a', 'b', 'c'):
@@ -185,7 +193,10 @@ class QueueSQLTests(unittest.IsolatedAsyncioTestCase):
         result = await scope['get_file_processing_state'](None, 'a')
         self.assertEqual(result['status'], 'completed')
         self.assertNotIn('content', result)
-        self.assertTrue(all('JSON_EXTRACT' in sql for sql in statements), statements)
+        if self.engine.dialect.name == 'sqlite':
+            self.assertTrue(all('JSON_EXTRACT' in sql for sql in statements), statements)
+        else:
+            self.assertTrue(all('->>' in sql for sql in statements), statements)
         for sql in statements:
             self.assertNotRegex(sql, r'(?:SELECT|,)\s+file\.data(?:\s|,)')
 
@@ -390,6 +401,220 @@ class QueueSQLTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(target.vector_backend_collection, 'original-collection')
             self.assertEqual(target.embedding_status, 'quarantined')
             self.assertEqual((await db.get(Job, identity)).status, 'succeeded')
+
+    async def stage_text(self):
+        identity = await self.enqueue()
+        _, token = await queue.claim(0)
+        candidate = IndexingService(staged=True, staging_key=identity)
+        space = await candidate.register_space(
+            embedding_model='fixture',
+            embedding_dim=2048,
+            model_revision='fixture',
+            verified=True,
+            encoding_config={
+                'distance_metric': 'cosine',
+                'query_prefix': None,
+                'document_prefix': None,
+                'normalization': 'fixture',
+            },
+        )
+        await candidate.accept_file_version('a', 2)
+        await candidate.index_file(
+            file_id='a',
+            file_version=2,
+            collection_name='candidate',
+            chunks=[{'id': 'new', 'text': 'usable body', 'metadata': {'file_id': 'a'}}],
+            space_id=space.id,
+        )
+        return identity, token, space.id
+
+    async def test_unreadable_image_does_not_reject_usable_text(self):
+        identity, token, space = await self.stage_text()
+        await ingestion.publish_candidate(
+            identity,
+            token,
+            file_id='a',
+            version=2,
+            collection='candidate',
+            content='usable body',
+            assets=[],
+            skipped=[{'reason': 'unsupported_image_format', 'format': 'WMF', 'message': '不支持 WMF 图片格式'}],
+            chunk_count=1,
+            space_id=space,
+            scopes=[None],
+        )
+        async with sessions() as db:
+            file = await db.get(File, 'a')
+            self.assertEqual(file.data['status'], 'completed')
+            self.assertEqual(file.data['content'], 'usable body')
+            self.assertEqual(file.data['retrieval_status']['text'], 'ready')
+            self.assertEqual(file.data['retrieval_status']['images'], 'failed')
+            self.assertIn('WMF', file.data['retrieval_status']['warnings'][0]['message'])
+            self.assertEqual((await db.get(Job, identity)).status, 'succeeded')
+
+    async def test_images_are_durably_queued_after_text_publication(self):
+        identity, token, space = await self.stage_text()
+        await ingestion.publish_candidate(
+            identity,
+            token,
+            file_id='a',
+            version=2,
+            collection='candidate',
+            content='usable body',
+            assets=[{'sha256': 'image-hash', 'mime_type': 'image/png', 'storage_uri': '/private/image.png'}],
+            chunk_count=1,
+            space_id=space,
+            scopes=[None],
+        )
+        async with sessions() as db:
+            file = await db.get(File, 'a')
+            self.assertEqual(file.data['status'], 'completed')
+            self.assertEqual(file.data['retrieval_status']['images'], 'pending')
+            child = await db.get(Job, file.data['image_ingestion_job_id'])
+            self.assertEqual(child.status, 'queued')
+            self.assertTrue(child.payload['retry_images'])
+            self.assertEqual(child.payload['source_version'], 2)
+            self.assertEqual(file.data['ingestion_job_id'], identity)
+            self.assertEqual((await db.get(Job, identity)).status, 'succeeded')
+
+    async def test_auxiliary_image_failure_preserves_completed_file(self):
+        async with sessions() as db:
+            file = await db.get(File, 'a')
+            file.data = {
+                'status': 'completed',
+                'content': 'usable body',
+                'retrieval_version': 1,
+                'ingestion_job_id': 'published-text',
+                'retrieval_status': {'version': 1, 'text': 'ready', 'images': 'pending'},
+            }
+            await db.commit()
+        identity = await queue.enqueue(
+            file_id='a',
+            user_id='owner',
+            knowledge_id=None,
+            source_hash='source',
+            config_hash='config',
+            payload={'retry_images': True, 'source_version': 1},
+        )
+        _, token = await queue.claim(0)
+        await queue.fail_job(identity, '图片编码超时，正文仍可使用', token=token)
+        async with sessions() as db:
+            file = await db.get(File, 'a')
+            self.assertEqual(file.data['status'], 'completed')
+            self.assertEqual(file.data['ingestion_job_id'], 'published-text')
+            self.assertEqual(file.data['retrieval_status']['text'], 'ready')
+            self.assertEqual(file.data['retrieval_status']['images'], 'failed')
+            self.assertEqual((await db.get(Job, identity)).status, 'failed')
+
+    async def test_auxiliary_image_expiry_preserves_text_and_version(self):
+        async with sessions() as db:
+            file = await db.get(File, 'a')
+            file.data = {
+                'status': 'completed',
+                'content': 'published body',
+                'retrieval_version': 7,
+                'retrieval_status': {'version': 7, 'text': 'ready', 'images': 'pending'},
+            }
+            await db.commit()
+        identity = await queue.enqueue(
+            file_id='a',
+            user_id='owner',
+            knowledge_id=None,
+            source_hash='source',
+            config_hash='config',
+            payload={'retry_images': True, 'source_version': 7},
+        )
+        await queue.claim(0)
+        async with sessions() as db:
+            job = await db.get(Job, identity)
+            job.lease_until = int(time.time()) - 1
+            await db.commit()
+        self.assertEqual(await queue.expire_jobs(job_id=identity), 1)
+        async with sessions() as db:
+            data = (await db.get(File, 'a')).data
+            self.assertEqual(data['status'], 'completed')
+            self.assertEqual(data['content'], 'published body')
+            self.assertEqual(data['retrieval_status']['version'], 7)
+            self.assertEqual(data['retrieval_status']['text'], 'ready')
+            self.assertEqual(data['retrieval_status']['images'], 'failed')
+
+    async def test_old_image_job_failure_cannot_overwrite_new_image_job(self):
+        async with sessions() as db:
+            file = await db.get(File, 'a')
+            file.data = {
+                'status': 'completed',
+                'image_ingestion_job_id': 'new',
+                'retrieval_status': {'text': 'ready', 'images': 'ready'},
+            }
+            db.add(
+                Job(
+                    job_id='old',
+                    file_id='a',
+                    user_id='owner',
+                    source_hash='s',
+                    config_hash='c',
+                    status='running',
+                    payload={'retry_images': True},
+                    lease_token='token',
+                    lease_until=int(time.time()) + 45,
+                    created_at=time.time_ns() // 1000,
+                )
+            )
+            await db.commit()
+        await queue.fail_job('old', 'old failure', token='token')
+        async with sessions() as db:
+            data = (await db.get(File, 'a')).data
+            self.assertEqual(data['retrieval_status']['images'], 'ready')
+            self.assertEqual(data['status'], 'completed')
+
+    async def test_incomplete_image_service_result_is_not_reported_ready(self):
+        data = {
+            'status': 'completed',
+            'content': 'published body',
+            'retrieval_version': 1,
+            'document_image_assets': [
+                {'sha256': 'asset', 'storage_uri': '/unused/image.png', 'mime_type': 'image/png'}
+            ],
+            'retrieval_status': {'text': 'ready', 'images': 'pending'},
+        }
+        async with sessions() as db:
+            file = await db.get(File, 'a')
+            file.data = data
+            await db.commit()
+        identity = await queue.enqueue(
+            file_id='a',
+            user_id='owner',
+            knowledge_id=None,
+            source_hash='s',
+            config_hash='c',
+            payload={'retry_images': True, 'source_version': 1},
+        )
+        _, token = await queue.claim(0)
+        documents = ModuleType('open_webui.retrieval.document_image_assets')
+        documents.ImageAssetStore, documents.MAX_IMAGE_BYTES = Mock(), 20 * 1024**2
+        knowledge = sys.modules['open_webui.models.knowledge']
+        with (
+            patch.object(
+                knowledge,
+                'Knowledges',
+                SimpleNamespace(get_knowledges_by_file_id=AsyncMock(return_value=[])),
+                create=True,
+            ),
+            patch.dict(sys.modules, {documents.__name__: documents}),
+        ):
+            await ingestion._retry_images(
+                SimpleNamespace(job_id=identity, payload={'source_version': 1}),
+                token,
+                SimpleNamespace(id='a', filename='image.png', data=data, meta={}),
+                SimpleNamespace(index_assets=AsyncMock(return_value={'status': 'indexing', 'indexed': 0})),
+                'space',
+            )
+        async with sessions() as db:
+            data = (await db.get(File, 'a')).data
+            self.assertEqual(data['status'], 'completed')
+            self.assertEqual(data['retrieval_status']['text'], 'ready')
+            self.assertEqual(data['retrieval_status']['images'], 'failed')
+            self.assertTrue(data['retrieval_status']['image_retryable'])
 
 
 if __name__ == '__main__':

@@ -16,6 +16,7 @@ from open_webui.retrieval.document_image_assets import (
     ImageAssetStore,
     safe_relative_reference,
 )
+from open_webui.retrieval.image_errors import image_issue
 
 MAX_ZIP_ENTRIES = 3000
 MAX_XML_BYTES = 2 * 1024 * 1024
@@ -164,17 +165,23 @@ def _extract_part(archive, owner, *, store, slides, drawings, result):
                     surrounding_text=text,
                 )
             )
-        except Exception:
-            result.skipped.append({'reason': 'office_image_unreadable', 'anchor': anchor})
-        if store.count >= store.max_images:
+        except Exception as exc:
+            result.skipped.append({'anchor': anchor, **image_issue(exc, reference=target)})
+        store.attempts += 1
+        if store.attempts >= store.max_images:
             return
 
 
 def extract_office_image_assets(
-    file_path: str | Path, *, asset_root: str | Path, source_id: str | None = None, document_text: str | None = None
+    file_path: str | Path,
+    *,
+    asset_root: str | Path,
+    source_id: str | None = None,
+    document_text: str | None = None,
+    defer_conversion: bool = False,
 ) -> ImageAssetExtraction:
     result = ImageAssetExtraction()
-    store = ImageAssetStore(asset_root, source_id or str(Path(file_path).resolve()))
+    store = ImageAssetStore(asset_root, source_id or str(Path(file_path).resolve()), defer_conversion=defer_conversion)
     try:
         with zipfile.ZipFile(file_path) as archive:
             entries = archive.infolist()
@@ -195,12 +202,11 @@ def extract_office_image_assets(
             for owner in owners:
                 try:
                     _extract_part(archive, owner, store=store, slides=slides, drawings=drawings, result=result)
-                    if store.count >= store.max_images:
+                    if store.attempts >= store.max_images:
                         result.skipped.append({'reason': 'document_image_budget_exceeded'})
                         return result
-                except Exception:
-                    result.skipped.append({'reason': 'office_part_unreadable', 'anchor': {'part': owner}})
+                except Exception as exc:
+                    result.skipped.append({'anchor': {'part': owner}, **image_issue(exc, reference=owner)})
     except Exception as exc:
-        reason = str(exc) if isinstance(exc, ValueError) and str(exc).isidentifier() else 'office_archive_unreadable'
-        result.skipped.append({'reason': reason})
+        result.skipped.append(image_issue(exc, reference=str(file_path)))
     return result

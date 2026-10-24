@@ -9,7 +9,6 @@ from __future__ import annotations
 
 import base64
 import hashlib
-import io
 import os
 import re
 import tempfile
@@ -22,19 +21,14 @@ from urllib.parse import unquote, urljoin, urlsplit
 import requests
 from PIL import Image
 
+from open_webui.retrieval.image_errors import image_issue, format_hint
+from open_webui.retrieval.image_normalization import normalize_image
+
 DocumentImageAssetPayload = dict[str, Any]
 MAX_IMAGE_BYTES = 20 * 1024 * 1024
 MAX_DOCUMENT_BYTES = 100 * 1024 * 1024
 MAX_DOCUMENT_IMAGES = 200
 MAX_IMAGE_PIXELS = 40_000_000
-_FORMATS = {
-    'PNG': ('png', 'image/png'),
-    'JPEG': ('jpg', 'image/jpeg'),
-    'WEBP': ('webp', 'image/webp'),
-    'GIF': ('gif', 'image/gif'),
-    'TIFF': ('tiff', 'image/tiff'),
-    'BMP': ('bmp', 'image/bmp'),
-}
 
 
 @dataclass
@@ -98,6 +92,7 @@ class ImageAssetStore:
         max_image_bytes: int = MAX_IMAGE_BYTES,
         max_document_bytes: int = MAX_DOCUMENT_BYTES,
         max_images: int = MAX_DOCUMENT_IMAGES,
+        defer_conversion: bool = False,
     ):
         # Hash file identity rather than accepting path components from callers.
         self.root = Path(root).resolve() / hashlib.sha256(source_id.encode()).hexdigest()[:32]
@@ -107,6 +102,7 @@ class ImageAssetStore:
         self.count = 0
         self.attempts = 0
         self.bytes = 0
+        self.defer_conversion = defer_conversion
 
     def put(
         self,
@@ -124,14 +120,19 @@ class ImageAssetStore:
             raise ValueError('document_image_budget_exceeded')
         if not data or len(data) > self.max_image_bytes:
             raise ValueError('image_size_exceeded')
-        with warnings.catch_warnings():
-            warnings.simplefilter('error', Image.DecompressionBombWarning)
-            with Image.open(io.BytesIO(data)) as image:
-                width, height = image.size
-                if width * height > MAX_IMAGE_PIXELS or image.format not in _FORMATS:
-                    raise ValueError('unsupported_image_or_pixel_limit')
-                suffix, mime = _FORMATS[image.format]
-                image.verify()
+        if self.defer_conversion:
+            # Only retain bounded opaque source bytes during text ingestion.
+            # Decoding/rendering belongs to the separate optional image job.
+            suffix, mime, width, height = 'source', 'application/octet-stream', None, None
+            original_format = format_hint(origin_reference)
+        else:
+            with warnings.catch_warnings():
+                warnings.simplefilter('error', Image.DecompressionBombWarning)
+                data, suffix, mime, width, height, original_format = normalize_image(
+                    data, origin_reference, max_bytes=self.max_image_bytes, max_pixels=MAX_IMAGE_PIXELS
+                )
+            if self.bytes + len(data) > self.max_document_bytes:
+                raise ValueError('document_image_budget_exceeded')
         if page_index is not None and (type(page_index) is not int or page_index < 0):
             raise ValueError('invalid_page_index')
         digest = hashlib.sha256(data).hexdigest()
@@ -160,6 +161,8 @@ class ImageAssetStore:
             'mime_type': mime,
             'width': width,
             'height': height,
+            'original_format': original_format,
+            'needs_conversion': self.defer_conversion,
             'page_index': page_index,
             'anchor': anchor,
             'caption': caption[:4096],
@@ -167,7 +170,7 @@ class ImageAssetStore:
             'surrounding_text': surrounding_text[:8192],
             'backend': backend,
             'origin_reference': origin_reference,
-            'status': 'ready',
+            'status': 'pending' if self.defer_conversion else 'ready',
         }
 
 
@@ -242,8 +245,7 @@ def extract_markdown_image_assets(
             result.assets.append(asset)
         except Exception as exc:
             # Do not persist signed resource URLs or service response bodies.
-            reason = (
-                str(exc) if isinstance(exc, ValueError) and str(exc).isidentifier() else 'image_materialization_failed'
+            result.skipped.append(
+                {'page_index': page_index, 'ordinal': ordinal, **image_issue(exc, reference=reference)}
             )
-            result.skipped.append({'page_index': page_index, 'reason': reason, 'ordinal': ordinal})
     return result

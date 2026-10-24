@@ -263,9 +263,27 @@
 	{#if retrievalStatus && retrievalStatus.text !== 'unindexed'}
 		<div role="status" class="border-b px-3 py-2 text-xs text-gray-500 dark:border-gray-800">
 			索引版本 {retrievalStatus.version} · 文字：{retrievalStatus.text} · 图片：{retrievalStatus.images}
-			{#if ['failed', 'partial'].includes(retrievalStatus.images)}（文字可独立使用；图片尚未全部就绪）{/if}
+			{#if ['failed', 'partial'].includes(retrievalStatus.images)}（{retrievalStatus.text ===
+				'ready'
+					? '文字可独立使用'
+					: '原文件已保留'}；图片尚未全部就绪）{/if}
 			{#if writeAccess && retrievalStatus.image_retryable !== false && ['failed', 'partial'].includes(retrievalStatus.images)}
 				<button type="button" class="ml-2 underline" on:click={retryImages}>重试图片索引</button>
+			{/if}
+			{#if retrievalStatus.image_error || retrievalStatus.warnings?.length}
+				<details class="mt-1">
+					<summary class="cursor-pointer">查看图片处理说明</summary>
+					{#if retrievalStatus.image_error}<p class="mt-1">{retrievalStatus.image_error}</p>{/if}
+					<ul class="mt-1 list-inside list-disc">
+						{#each retrievalStatus.warnings?.slice(0, 20) ?? [] as warning}
+							<li>
+								{warning.message ??
+									`${warning.format ?? ''} 图片处理未完成（${warning.reason ?? '原因未记录'}）`}{#if warning.page_index != null}
+									· 第 {warning.page_index + 1} 页{/if}
+							</li>
+						{/each}
+					</ul>
+				</details>
 			{/if}
 		</div>
 	{/if}

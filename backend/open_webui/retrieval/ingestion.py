@@ -26,7 +26,13 @@ async def submit_file(request, form, *, user, db, wait=True, auto_link=None, ret
     from open_webui.utils.access_control.files import has_access_to_file
 
     # Select descriptors only: old file.data may contain a huge legacy body.
-    row = (await db.execute(select(File.id, File.user_id, File.meta).where(File.id == form.file_id))).one_or_none()
+    row = (
+        await db.execute(
+            select(
+                File.id, File.user_id, File.meta, File.data['retrieval_version'].as_integer().label('retrieval_version')
+            ).where(File.id == form.file_id)
+        )
+    ).one_or_none()
     if not row:
         raise HTTPException(404, 'File not found')
     if row.user_id != user.id and user.role != 'admin' and not await has_access_to_file(row.id, 'write', user, db=db):
@@ -38,6 +44,7 @@ async def submit_file(request, form, *, user, db, wait=True, auto_link=None, ret
     payload = {'auto_link': auto_link} if auto_link else {}
     if retry_images:
         payload['retry_images'] = True
+        payload['source_version'] = row.retrieval_version
     input_path = None
     if form.content is not None:
         content = form.content.replace('<br/>', '\n').encode()
@@ -263,6 +270,7 @@ async def _descriptors(request, job, file, config, *, version):
 
     limits = AdmissionLimits.from_env()
     config['rag.document_image_asset_root'] = job.payload['asset_root']
+    config['rag.defer_image_conversion'] = True
     content_path = (job.payload or {}).get('content_path')
     documents_path = (job.payload or {}).get('documents_path')
     if (job.payload or {}).get('url'):
@@ -311,8 +319,8 @@ async def _descriptors(request, job, file, config, *, version):
             with path.open('rb') as stream:
                 image = stream.read(MAX_IMAGE_BYTES + 1)
             assets = [
-                ImageAssetStore(config['rag.document_image_asset_root'], file.id).put(
-                    image, backend='upload', origin_reference='uploaded-image'
+                ImageAssetStore(config['rag.document_image_asset_root'], file.id, defer_conversion=True).put(
+                    image, backend='upload', origin_reference=file.filename
                 )
             ]
             docs, skipped = [], []
@@ -327,24 +335,60 @@ async def _descriptors(request, job, file, config, *, version):
             try:
                 docs = await loader.aload(file.filename, (file.meta or {}).get('content_type'), str(path))
             except Exception as exc:
+                from open_webui.retrieval.image_errors import format_hint
+                import zipfile
+
+                kind = format_hint(file.filename)
                 if getattr(exc, 'status_code', None) == 503:
                     raise AdmissionError(
-                        'No usable document parser for this format in the Slim deployment; original retained'
+                        f'当前 Slim 服务未配置支持 {Path(file.filename).suffix.upper() or "此格式"} 的正文解析器；'
+                        '原文件已保留，但无法建立正文检索。请转换为 PDF/DOCX/PPTX/XLSX/TXT，或配置兼容解析服务。'
                     ) from exc
+                cause = exc.__cause__ or exc
+                if isinstance(cause, zipfile.BadZipFile):
+                    raise AdmissionError(f'{kind} 文件的压缩包结构损坏，无法解析正文；原文件已保留。') from exc
+                if isinstance(cause, UnicodeDecodeError):
+                    raise AdmissionError(
+                        f'{kind} 文件的文字编码无法识别，无法解析正文；请转换为 UTF-8 后重试。原文件已保留。'
+                    ) from exc
+                if isinstance(cause, TimeoutError) or 'Timeout' in type(cause).__name__:
+                    raise AdmissionError(f'{kind} 文件的正文解析服务超时；原文件已保留，未自动重试。') from exc
+                status = getattr(getattr(cause, 'response', None), 'status_code', None)
+                if isinstance(status, int):
+                    raise AdmissionError(f'{kind} 文件的正文解析服务返回 HTTP {status}；原文件已保留。') from exc
                 raise
             assets, skipped = collect_assets(docs)
     else:
         # Legacy inline sources are read only inside the capped worker.
         text = (file.data or {}).get('content', '')
         docs, assets, skipped = [Document(page_content=text, metadata={})], [], []
-    if len(assets) > limits.max_assets:
-        raise AdmissionError('document image count exceeds indexing budget')
-    asset_bytes = sum(Path(a.get('storage_uri') or a.get('path')).stat().st_size for a in assets)
-    if asset_bytes > limits.max_asset_bytes:
-        raise AdmissionError('document image bytes exceed indexing budget')
-    if skipped:
-        raise AdmissionError('required document images could not be extracted; previous version retained')
-    return docs, assets
+    # Images are optional supplements. Their budgets and individual I/O errors
+    # cannot discard otherwise usable parsed text.
+    accepted, asset_bytes = [], 0
+    for asset in assets:
+        try:
+            size = Path(asset.get('storage_uri') or asset.get('path')).stat().st_size
+            if len(accepted) >= limits.max_assets or asset_bytes + size > limits.max_asset_bytes:
+                skipped.append(
+                    {
+                        'reason': 'document_image_budget_exceeded',
+                        'message': '图片数量或总大小超过处理上限，正文仍可使用。',
+                    }
+                )
+                continue
+            accepted.append(asset)
+            asset_bytes += size
+        except (OSError, TypeError):
+            skipped.append({'reason': 'image_asset_unavailable', 'message': '图片文件暂时无法读取，正文仍可使用。'})
+    from open_webui.retrieval.image_errors import image_issue
+
+    skipped = [
+        {**image_issue(ValueError(issue.get('reason', 'image_extraction_failed')), reference=file.filename), **issue}
+        if not issue.get('message')
+        else issue
+        for issue in skipped
+    ]
+    return docs, accepted, skipped
 
 
 async def execute(job_id, token):
@@ -423,9 +467,9 @@ async def execute(job_id, token):
             raise ValueError('indexing lease expired before parsing')
         stored.payload = job.payload
         await db.commit()
-    docs, assets = await _descriptors(request, job, file, config, version=version)
+    docs, assets, skipped = await _descriptors(request, job, file, config, version=version)
     # Admission is complete BEFORE a candidate state or any business text/vector write.
-    await _write_candidate(request, job, token, file, config, indexer, space_id, version, docs, assets)
+    await _write_candidate(request, job, token, file, config, indexer, space_id, version, docs, assets, skipped)
 
 
 async def _retry_images(job, token, file, indexer, space_id):
@@ -438,25 +482,80 @@ async def _retry_images(job, token, file, indexer, space_id):
 
     version = (file.data or {}).get('retrieval_version')
     assets = (file.data or {}).get('document_image_assets') or []
+    skipped = list((file.data or {}).get('document_image_assets_skipped') or [])
     limits = AdmissionLimits.from_env()
     scopes = [None, *(k.id for k in await Knowledges.get_knowledges_by_file_id(file.id))]
     if not version or not assets or len(assets) * len(scopes) > limits.max_assets:
         raise AdmissionError('no current extracted images within the retry budget; original retained')
+    if (job.payload or {}).get('source_version', version) != version:
+        raise AdmissionError('文件版本已更新，旧版本的图片任务已停止；当前正文不受影响。')
+    # Rendering and decoding run ONLY after the text version has committed.
+    # If this child is killed or times out, the published text remains usable.
+    from open_webui.retrieval.document_image_assets import ImageAssetStore, MAX_IMAGE_BYTES
+    from open_webui.retrieval.image_errors import image_issue
+
+    normalized = []
+    source = next((asset for asset in assets if asset.get('needs_conversion')), None)
+    store = (
+        ImageAssetStore(
+            Path(source['storage_uri']).parent / 'normalized',
+            file.id,
+            max_document_bytes=limits.max_asset_bytes,
+            max_images=limits.max_assets,
+        )
+        if source
+        else None
+    )
+    for asset in assets:
+        if not asset.get('needs_conversion'):
+            normalized.append(asset)
+            continue
+        if not await lease_is_current(job.job_id, token):
+            raise ValueError('image conversion lease ended')
+        try:
+            path = Path(asset['storage_uri'])
+            with path.open('rb') as stream:
+                data = stream.read(MAX_IMAGE_BYTES + 1)
+            normalized.append(
+                store.put(
+                    data,
+                    backend=asset.get('backend', 'upload'),
+                    origin_reference=asset.get('origin_reference', file.filename),
+                    page_index=asset.get('page_index'),
+                    anchor=asset.get('anchor'),
+                    caption=asset.get('caption', ''),
+                    ocr_text=asset.get('ocr_text', ''),
+                    surrounding_text=asset.get('surrounding_text', ''),
+                )
+            )
+        except Exception as exc:
+            skipped.append(
+                {
+                    **image_issue(exc, reference=asset.get('origin_reference', file.filename)),
+                    'page_index': asset.get('page_index'),
+                    'anchor': asset.get('anchor'),
+                }
+            )
+    assets = normalized
     collection = (file.meta or {}).get('vector_collection') or f'file-{file.id}'
+    results = []
     for scope in scopes:
         if not await lease_is_current(job.job_id, token):
             raise ValueError('image retry lease ended')
-        result = await indexer.index_assets(
-            file_id=file.id,
-            file_version=version,
-            collection_name=collection,
-            assets=assets,
-            knowledge_id=scope,
-            space_id=space_id,
-            source_name=file.filename,
+        result = (
+            await indexer.index_assets(
+                file_id=file.id,
+                file_version=version,
+                collection_name=collection,
+                assets=assets,
+                knowledge_id=scope,
+                space_id=space_id,
+                source_name=file.filename,
+            )
+            if assets
+            else {'status': 'ready', 'indexed': 0, 'failed': 0}
         )
-        if result['status'] != 'ready':
-            raise ValueError('image retry did not complete; text source version retained')
+        results.append(result)
     now = int(time.time())
     async with get_async_db_context() as db:
         current_job = (await db.execute(select(Job).where(Job.job_id == job.job_id).with_for_update())).scalar_one()
@@ -465,29 +564,41 @@ async def _retry_images(job, token, file, indexer, space_id):
         row = (await db.execute(select(File).where(File.id == file.id).with_for_update())).scalar_one()
         if (row.data or {}).get('retrieval_version') != version:
             raise ValueError('source changed before image retry completion')
+        failures = sum(max(result.get('failed', 0), len(assets) - result.get('indexed', 0)) for result in results)
+        indexed = max((result.get('indexed', 0) for result in results), default=0)
+        image_status = 'partial' if indexed and (failures or skipped) else 'failed' if failures or skipped else 'ready'
+        warnings = [*skipped, *(issue for result in results for issue in result.get('errors', []))][:100]
         row.data = {
             **row.data,
             'status': 'completed',
             'error': None,
+            'document_image_assets': assets,
+            'document_image_assets_skipped': skipped[:100],
             'retrieval_status': {
                 **(row.data.get('retrieval_status') or {}),
-                'images': 'ready',
-                'image_count': len(assets),
-                'image_retryable': False,
+                'images': image_status,
+                'image_count': indexed,
+                'skipped': len(skipped),
+                'image_retryable': bool(failures),
+                'warnings': warnings,
+                'image_error': '部分图片索引失败，正文已完成且仍可使用。' if failures else None,
             },
         }
-        current_job.status, current_job.finished_at = 'succeeded', now
+        current_job.status, current_job.finished_at = 'failed' if failures else 'succeeded', now
+        current_job.error = '部分图片索引失败，正文不受影响。' if failures else None
         current_job.active_key = current_job.active_file = current_job.worker_slot = current_job.lease_until = None
         current_job.result = {
             'file_id': file.id,
             'file_version': version,
-            'images': len(assets),
+            'images': indexed,
+            'image_status': image_status,
+            'warnings': warnings,
             'text_reembedded': False,
         }
         await db.commit()
 
 
-async def _write_candidate(request, job, token, file, config, indexer, space_id, version, docs, assets):
+async def _write_candidate(request, job, token, file, config, indexer, space_id, version, docs, assets, skipped=()):
     import tempfile
     from langchain_text_splitters import RecursiveCharacterTextSplitter, TokenTextSplitter, MarkdownHeaderTextSplitter
     from open_webui.retrieval.vector.async_client import ASYNC_VECTOR_DB_CLIENT
@@ -550,7 +661,7 @@ async def _write_candidate(request, job, token, file, config, indexer, space_id,
                         markdown_splitter=markdown_splitter,
                         merge_sections=merge_sections,
                     ),
-                    allow_empty=bool(assets),
+                    allow_empty=bool(assets or skipped),
                 )
             if spool.count * len(scopes) > limits.max_chunks:
                 raise AdmissionError('document plus knowledge-scope mappings exceed indexing budget')
@@ -621,19 +732,8 @@ async def _write_candidate(request, job, token, file, config, indexer, space_id,
                 del vectors, items, mappings, texts, batch
                 # Bound logical write rate; this does not claim to throttle PG's physical device.
                 await asyncio.sleep(0.1)
-            for scope in scopes:
-                if assets:
-                    result = await indexer.index_assets(
-                        file_id=file.id,
-                        file_version=version,
-                        collection_name=collection,
-                        assets=assets,
-                        knowledge_id=scope,
-                        space_id=space_id,
-                        source_name=file.filename,
-                    )
-                    if result['status'] != 'ready':
-                        raise ValueError('required image indexing did not complete')
+            # Publish usable text first. Image encoding runs as its own durable
+            # task, so an image timeout/OOM cannot undo this completed upload.
             _, _, current_space, _ = await services(request)
             if current_space != space_id:
                 raise ValueError('embedding configuration changed during indexing')
@@ -652,6 +752,7 @@ async def _write_candidate(request, job, token, file, config, indexer, space_id,
                 collection=collection,
                 content=body_path.read_text(),
                 assets=assets,
+                skipped=skipped,
                 chunk_count=offset,
                 space_id=space_id,
                 scopes=scopes,
@@ -807,21 +908,6 @@ async def _reuse_for_knowledge(job, token, file, indexer, space_id):
                     await db.commit()
                 count += len(group)
             cursor = rows[-1].row_id
-        assets = (file.data or {}).get('document_image_assets') or []
-        if assets:
-            result = await indexer.index_assets(
-                file_id=file.id,
-                file_version=version,
-                collection_name=(file.meta or {}).get('vector_collection')
-                or (file.meta or {}).get('collection_name')
-                or f'file-{file.id}',
-                assets=assets,
-                knowledge_id=job.knowledge_id,
-                space_id=space_id,
-                source_name=file.filename,
-            )
-            if result['status'] != 'ready':
-                raise ValueError('required image association did not complete')
     await publish_association(
         job.job_id, token, file_id=file.id, version=version, knowledge_id=job.knowledge_id, expected_text_count=present
     )
@@ -875,7 +961,7 @@ async def publish_association(job_id, token, *, file_id, version, knowledge_id, 
         job = (await db.execute(select(Job).where(Job.job_id == job_id).with_for_update())).scalar_one()
         if job.status != 'running' or job.lease_token != token or (job.lease_until or 0) < now:
             raise ValueError('indexing lease expired/cancelled')
-        await db.scalar(select(File.id).where(File.id == file_id).with_for_update())
+        file = await db.scalar(select(File).where(File.id == file_id).with_for_update())
         state = await db.get(State, stable_id('file', file_id=file_id))
         if not state or state.status != 'ready' or state.file_version != version:
             raise ValueError('source changed before knowledge association')
@@ -903,7 +989,7 @@ async def publish_association(job_id, token, *, file_id, version, knowledge_id, 
                 .values(is_active=True, updated_at=now)
             )
         await _link_upload(db, job)
-        await patch_file_status(db, file_id, {'status': 'completed', 'error': None}, job_id=job_id)
+        file.data = {**file.data, 'status': 'completed', 'error': None}
         job.status, job.finished_at = 'succeeded', now
         job.active_key = job.active_file = job.worker_slot = job.lease_until = None
         job.result = {
@@ -912,11 +998,12 @@ async def publish_association(job_id, token, *, file_id, version, knowledge_id, 
             'file_version': version,
             'reused_vectors': True,
         }
+        await _schedule_images(db, job, file)
         await db.commit()
 
 
 async def publish_candidate(
-    job_id, token, *, file_id, version, collection, content, assets, chunk_count, space_id, scopes
+    job_id, token, *, file_id, version, collection, content, assets, chunk_count, space_id, scopes, skipped=()
 ):
     """One short atomic SQL publication, fenced against expired/cancelled jobs."""
     from sqlalchemy import select, update, func
@@ -957,12 +1044,13 @@ async def publish_candidate(
             .where(
                 Evidence.file_id == file_id,
                 Evidence.file_version == version,
+                Evidence.modality == 'text',
                 Mapping.vector_space_id == space_id,
                 Mapping.embedding_status == 'ready',
             )
         )
-        if actual_chunks != chunk_count * len(scopes) or actual_mappings != (chunk_count + len(assets)) * len(scopes):
-            raise ValueError('candidate text/image mapping count is incomplete; previous version retained')
+        if actual_chunks != chunk_count * len(scopes) or actual_mappings != chunk_count * len(scopes):
+            raise ValueError('candidate text mapping count is incomplete; previous version retained')
         for model in (Evidence, Chunk):
             await db.execute(update(model).where(model.file_id == file_id).values(is_active=False, updated_at=now))
             await db.execute(
@@ -1001,8 +1089,15 @@ async def publish_candidate(
             'error': None,
             'retrieval_version': version,
             'document_image_assets': assets,
-            'document_image_assets_skipped': [],
-            'retrieval_status': {'version': version, 'text': 'ready', 'images': 'ready' if assets else 'none'},
+            'document_image_assets_skipped': list(skipped)[:100],
+            'retrieval_status': {
+                'version': version,
+                'text': 'ready' if chunk_count else 'none',
+                'images': 'pending' if assets else 'failed' if skipped else 'none',
+                'skipped': len(skipped),
+                'warnings': list(skipped)[:100],
+                'image_retryable': False,
+            },
         }
         logical_collection = (job.payload or {}).get('logical_collection') or f'file-{file_id}'
         file.meta = {**(file.meta or {}), 'collection_name': logical_collection, 'vector_collection': collection}
@@ -1033,4 +1128,65 @@ async def publish_candidate(
         peak = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
         job.result['worker_peak_rss_bytes'] = int(peak * (1 if sys.platform == 'darwin' else 1024))
         await _link_upload(db, job)
+        await _schedule_images(db, job, file)
         await db.commit()
+
+
+async def _schedule_images(db, parent, file):
+    """Commit optional image work with the published text; never lose its queue entry."""
+    from sqlalchemy import select, func
+    from open_webui.models.ingestion_jobs import IngestionJob as Job
+    from open_webui.retrieval.ingestion_queue import job_key
+
+    assets = (file.data or {}).get('document_image_assets') or []
+    if not assets:
+        return
+    queued = await db.scalar(select(func.count()).select_from(Job).where(Job.status == 'queued'))
+    own = await db.scalar(
+        select(func.count()).select_from(Job).where(Job.status == 'queued', Job.user_id == parent.user_id)
+    )
+    if queued >= int(os.getenv('INDEXING_MAX_QUEUED', '200')) or own >= int(
+        os.getenv('INDEXING_MAX_QUEUED_PER_USER', '20')
+    ):
+        file.data = {
+            **file.data,
+            'retrieval_status': {
+                **file.data['retrieval_status'],
+                'images': 'failed',
+                'image_retryable': True,
+                'image_error': '图片索引队列已满，正文已完成；可稍后重试图片。',
+            },
+        }
+        return
+    # Release the primary task's unique file/key slot before inserting its child.
+    await db.flush()
+    identity = str(uuid.uuid4())
+    payload = {'retry_images': True, 'source_version': file.data['retrieval_version']}
+    db.add(
+        Job(
+            job_id=identity,
+            file_id=file.id,
+            user_id=parent.user_id,
+            knowledge_id=None,
+            source_hash=parent.source_hash,
+            config_hash=parent.config_hash,
+            payload=payload,
+            active_key=job_key(
+                file_id=file.id,
+                user_id=parent.user_id,
+                knowledge_id=None,
+                source_hash=parent.source_hash,
+                config_hash=parent.config_hash,
+                payload=payload,
+            ),
+            active_file=file.id,
+            status='queued',
+            created_at=time.time_ns() // 1000,
+        )
+    )
+    file.data = {
+        **file.data,
+        'image_ingestion_job_id': identity,
+        'retrieval_status': {**file.data['retrieval_status'], 'images': 'pending'},
+    }
+    parent.result = {**parent.result, 'image_job_id': identity}

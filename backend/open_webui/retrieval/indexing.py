@@ -594,7 +594,9 @@ class IndexingService:
                 indexed += 1
             except Exception as exc:
                 # The error is classified without persisting remote response bodies/credentials.
-                failed.append(type(exc).__name__)
+                from open_webui.retrieval.image_errors import image_issue
+
+                failed.append(image_issue(exc, reference=descriptor.get('storage_uri', ''), stage='encoding'))
                 async with core_db(self.db) as db:
                     await db.rollback()
                     # A usable original image is distinct from a failed derived embedding.
@@ -621,12 +623,13 @@ class IndexingService:
             'status': 'partial' if failed and indexed else 'failed' if failed else 'ready',
             'indexed': indexed,
             'failed': len(failed),
+            'errors': failed,
             'job_id': job_id,
         }
         async with core_db(self.db) as db:
             job = await db.get(Job, job_id)
             job.status = 'failed' if failed else 'succeeded'
-            job.error = ', '.join(failed) or None
+            job.error = '; '.join(issue['message'] for issue in failed) or None
             job.result, job.finished_at, job.updated_at = result, int(time.time()), int(time.time())
             await self._set_state(db, job, status=result['status'], indexed=indexed, error=job.error)
             await db.commit()

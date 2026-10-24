@@ -88,6 +88,7 @@ sentencepiece==0.2.1
 soundfile==0.13.1
 
 pillow==12.3.0
+pillow-heif==1.8.1
 opencv-python-headless==4.13.0.92
 rapidocr==3.10.0
 rank-bm25==0.2.2

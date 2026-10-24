@@ -47,6 +47,7 @@ class MinerULoader:
         extract_images: bool = False,
         asset_root: str | Path | None = None,
         source_id: str | None = None,
+        defer_image_conversion: bool = False,
     ):
         self.file_path = file_path
         self.api_mode = api_mode.lower()
@@ -55,6 +56,7 @@ class MinerULoader:
         self.timeout = timeout
         self.max_markdown_bytes = max_markdown_bytes
         self.extract_images = extract_images
+        self.defer_image_conversion = defer_image_conversion
         self.asset_root = asset_root
         self.source_id = source_id or str(Path(file_path).resolve())
         self.image_extraction = ImageAssetExtraction()
@@ -742,7 +744,7 @@ class MinerULoader:
             if isinstance(content_list, str):
                 content_list = json.loads(content_list)
             rows = content_list if isinstance(content_list, list) else []
-            store = ImageAssetStore(self.asset_root, self.source_id)
+            store = ImageAssetStore(self.asset_root, self.source_id, defer_conversion=self.defer_image_conversion)
             for reference, value in images.items() if isinstance(images, dict) else []:
                 matching = next(
                     (
