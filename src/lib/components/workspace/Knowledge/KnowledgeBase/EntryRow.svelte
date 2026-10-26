@@ -29,7 +29,24 @@
 	$: file = item as KnowledgeFile;
 	$: name = directory ? (item as KnowledgeDirectory).name : fileName(file);
 	$: status = file.status || file.data?.status;
-	$: pending = ['uploading', 'pending', 'processing'].includes(status || '');
+	$: pending = [
+		'pending_upload',
+		'uploading',
+		'waiting',
+		'queued',
+		'pending',
+		'processing'
+	].includes(status || '');
+	$: statusLabel =
+		status === 'pending_upload'
+			? $i18n.t('Waiting to upload')
+			: status === 'uploading'
+				? $i18n.t('Uploading')
+				: ['waiting', 'queued', 'pending'].includes(status || '')
+					? $i18n.t('Received; waiting to process')
+					: status === 'processing'
+						? $i18n.t('Processing')
+						: $i18n.t('Failed');
 	$: details = [
 		file.directory_path,
 		file.user?.name || file.user?.email,
@@ -102,7 +119,7 @@
 		type="button"
 		data-knowledge-entry
 		class="flex h-full min-w-0 flex-1 items-center gap-1.5 pr-1 text-left text-xs"
-		title={details || name}
+		title={file.error || file.data?.error || details || name}
 		aria-expanded={directory ? expanded : undefined}
 		on:keydown={(event) => {
 			if (renaming || !directory) return;
@@ -118,7 +135,7 @@
 				JSON.stringify(directory ? { dirId: item.id } : { fileId: item.id })
 			)}
 		on:click={() => {
-			if (!renaming && item.id && status !== 'uploading') onOpen();
+			if (!renaming && item.id && !['uploading', 'pending_upload'].includes(status || '')) onOpen();
 		}}
 	>
 		{#if directory}<Icon name={expanded ? 'chevron-down' : 'chevron-right'} size={12} />{:else}<span
@@ -155,17 +172,21 @@
 					>{/if}</span
 			>{/if}
 		{#if !directory && !renaming}<span class="shrink-0 text-[0.6875rem] text-gray-400"
-				>{pending
-					? status === 'uploading'
-						? $i18n.t('Uploading')
-						: $i18n.t('Processing')
-					: status === 'failed'
-						? $i18n.t('Failed')
-						: file.meta?.size != null
-							? formatFileSize(file.meta.size)
-							: ''}</span
+				>{pending || status === 'failed'
+					? statusLabel
+					: file.meta?.size != null
+						? formatFileSize(file.meta.size)
+						: ''}</span
 			>{/if}
 	</button>
+	{#if status === 'failed' && (file.error || file.data?.error)}
+		<span
+			class="max-w-[45%] truncate px-1 text-[0.6875rem] text-red-500"
+			title={file.error || file.data?.error}
+		>
+			{file.error || file.data?.error}
+		</span>
+	{/if}
 	{#if item.id && !pending}<Dropdown closeOnSelect align="end"
 			><button
 				type="button"

@@ -175,6 +175,7 @@ class FilesTable:
                             File.id,
                             File.user_id,
                             File.data['status'].as_string().label('status'),
+                            File.data['processing_status'].as_string().label('processing_status'),
                             File.data['error'].as_string().label('error'),
                             File.data['ingestion_job_id'].as_string().label('ingestion_job_id'),
                             File.data['retrieval_version'].as_integer().label('retrieval_version'),
@@ -428,10 +429,10 @@ class FilesTable:
     async def get_pending_files_for_knowledge(
         self, knowledge_id: str, db: AsyncSession | None = None
     ) -> list[FileModelResponse]:
-        """Return files still being processed for this knowledge base.
+        """Return unlinked upload receipts, including failures, without document bodies.
 
         These are files uploaded with ``meta.data.knowledge_id`` set, whose
-        ``data.status`` is still ``pending`` or ``processing``, and which
+        ``data.status`` is ``pending``, ``processing`` or ``failed``, and which
         have not yet been added to the ``knowledge_file`` join table.
 
         The JSON subscript syntax (``Column['key']['subkey'].as_string()``)
@@ -449,19 +450,44 @@ class FilesTable:
                 )
 
                 stmt = (
-                    select(File)
+                    select(
+                        File.id,
+                        File.user_id,
+                        File.filename,
+                        File.meta,
+                        File.created_at,
+                        File.updated_at,
+                        File.data['status'].as_string().label('status'),
+                        File.data['processing_status'].as_string().label('processing_status'),
+                        File.data['error'].as_string().label('error'),
+                        File.data['ingestion_job_id'].as_string().label('ingestion_job_id'),
+                    )
                     .filter(
                         File.meta['data']['knowledge_id'].as_string() == knowledge_id,
-                        File.data['status'].as_string().in_(['pending', 'processing']),
+                        File.data['status'].as_string().in_(['pending', 'processing', 'failed']),
                         File.id.notin_(linked_ids),
                     )
                     .order_by(File.created_at.desc())
                 )
                 result = await db.execute(stmt)
-                return [FileModelResponse.model_validate(f, from_attributes=True) for f in result.scalars().all()]
+                return [
+                    FileModelResponse(
+                        id=row.id,
+                        user_id=row.user_id,
+                        filename=row.filename,
+                        meta=row.meta,
+                        created_at=row.created_at,
+                        updated_at=row.updated_at,
+                        data={
+                            key: getattr(row, key)
+                            for key in ('status', 'processing_status', 'error', 'ingestion_job_id')
+                        },
+                    )
+                    for row in result.all()
+                ]
             except Exception as e:
                 log.warning(f'Error fetching pending files for knowledge {knowledge_id}: {e}')
-                return []
+                raise
 
     async def delete_file_by_id(self, id: str, db: AsyncSession | None = None) -> bool:
         async with get_async_db_context(db) as db:

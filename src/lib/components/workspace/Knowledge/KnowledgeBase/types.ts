@@ -7,6 +7,7 @@ export type KnowledgeFile = {
 	directory_path?: string;
 	has_original?: boolean;
 	status?: string;
+	error?: string;
 	updated_at?: number;
 	meta?: {
 		name?: string;
@@ -15,7 +16,7 @@ export type KnowledgeFile = {
 		data?: { directory_id?: string | null };
 		[key: string]: unknown;
 	};
-	data?: { status?: string; error?: string };
+	data?: { status?: string; processing_status?: string; error?: string };
 	user?: { name?: string; email?: string };
 };
 export type KnowledgeDirectory = {

@@ -12,6 +12,11 @@ class IngestionSQLRegression(unittest.TestCase):
         result = subprocess.run([sys.executable, str(source)], capture_output=True, text=True, timeout=60)
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
 
+    def test_bulk_multipart_receipts_without_running_workers(self):
+        source = Path(__file__).resolve().parents[1] / 'ingestion/upload_api_case.py'
+        result = subprocess.run([sys.executable, str(source)], capture_output=True, text=True, timeout=60)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
 
 if __name__ == '__main__':
     unittest.main()

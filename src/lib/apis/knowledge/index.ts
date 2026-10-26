@@ -576,7 +576,7 @@ export const getPendingKnowledgeFiles = async (token: string, id: string) => {
 			return res.json();
 		})
 		.catch((err) => {
-			error = err.detail;
+			error = err.detail || err.message || 'Unable to refresh file processing status';
 			console.error(err);
 			return [];
 		});
