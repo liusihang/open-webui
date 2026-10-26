@@ -59,7 +59,13 @@ def job_key(*, file_id, user_id, knowledge_id, source_hash, config_hash, payload
     return canonical_hash(identity)
 
 
-async def enqueue(*, file_id, user_id, knowledge_id, source_hash, config_hash, payload):
+async def enqueue(*, file_id, user_id, knowledge_id, source_hash, config_hash, payload, received=False):
+    """A received upload is a durable receipt, independent of processing capacity.
+
+    Waiting receipts contain descriptors only. Storage admission bounds original
+    files; the two worker slots bound execution. They do not expire merely
+    because a large batch takes longer than the interactive queue's lifetime.
+    """
     key = job_key(
         file_id=file_id,
         user_id=user_id,
@@ -81,16 +87,17 @@ async def enqueue(*, file_id, user_id, knowledge_id, source_hash, config_hash, p
             duplicate = await db.scalar(select(Job).where(Job.active_key == key))
             if duplicate:
                 raise DuplicateIngestion(duplicate.job_id, duplicate.file_id)
-            queued = await db.scalar(select(func.count()).select_from(Job).where(Job.status == 'queued'))
-            own = await db.scalar(
-                select(func.count()).select_from(Job).where(Job.status == 'queued', Job.user_id == user_id)
-            )
-            if queued >= int(os.getenv('INDEXING_MAX_QUEUED', '200')) or own >= int(
-                os.getenv('INDEXING_MAX_QUEUED_PER_USER', '20')
-            ):
-                raise AdmissionError(
-                    'Indexing queue budget reached; original retained. Wait for existing tasks to finish.'
+            if not received:
+                queued = await db.scalar(select(func.count()).select_from(Job).where(Job.status == 'queued'))
+                own = await db.scalar(
+                    select(func.count()).select_from(Job).where(Job.status == 'queued', Job.user_id == user_id)
                 )
+                if queued >= int(os.getenv('INDEXING_MAX_QUEUED', '200')) or own >= int(
+                    os.getenv('INDEXING_MAX_QUEUED_PER_USER', '20')
+                ):
+                    raise AdmissionError(
+                        'Indexing queue budget reached; original retained. Wait for existing tasks to finish.'
+                    )
             job = Job(
                 job_id=identity,
                 file_id=file_id,
@@ -101,7 +108,7 @@ async def enqueue(*, file_id, user_id, knowledge_id, source_hash, config_hash, p
                 active_key=key,
                 active_file=file_id,
                 payload=payload,
-                status='queued',
+                status='waiting' if received else 'queued',
                 created_at=created,
             )
             db.add(job)
@@ -109,7 +116,7 @@ async def enqueue(*, file_id, user_id, knowledge_id, source_hash, config_hash, p
             values = (
                 {'image_ingestion_job_id': identity, 'retrieval_status': {'images': 'pending'}}
                 if payload.get('retry_images')
-                else {'status': 'pending', 'error': None, 'ingestion_job_id': identity}
+                else {'status': 'pending', 'processing_status': job.status, 'error': None, 'ingestion_job_id': identity}
             )
             await patch_file_status(db, file_id, values)
             await db.commit()
@@ -155,7 +162,9 @@ async def _mark_failure(db, job):
             job_field='image_ingestion_job_id',
         )
     else:
-        await patch_file_status(db, job.file_id, {'status': 'failed', 'error': job.error}, job_id=job.job_id)
+        await patch_file_status(
+            db, job.file_id, {'status': 'failed', 'processing_status': 'failed', 'error': job.error}, job_id=job.job_id
+        )
 
 
 async def expire_jobs(*, job_id=None):
@@ -244,7 +253,9 @@ async def claim(slot):
         busy_files = select(Job.file_id).where(Job.status == 'running')
         query = (
             select(Job)
-            .where(Job.status == 'queued', Job.user_id.not_in(busy_users), Job.file_id.not_in(busy_files))
+            .where(
+                Job.status.in_(('waiting', 'queued')), Job.user_id.not_in(busy_users), Job.file_id.not_in(busy_files)
+            )
             .order_by(Job.created_at, Job.job_id)
         )
         # A short transaction-wide PG lock serializes the two claimers. Without
@@ -261,6 +272,10 @@ async def claim(slot):
         job.status, job.started_at = 'running', now
         job.worker_slot, job.lease_token = slot, str(uuid.uuid4())
         job.lease_until = now + LEASE_SECONDS
+        if not (job.payload or {}).get('retry_images'):
+            await patch_file_status(
+                db, job.file_id, {'status': 'processing', 'processing_status': 'processing'}, job_id=job.job_id
+            )
         result = (job.job_id, job.lease_token)
         await db.commit()
         return result

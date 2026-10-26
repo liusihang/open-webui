@@ -4132,5 +4132,14 @@
 	"YouTube": "YouTube",
 	"YouTube video player": "YouTube 视频播放器",
 	"Zoom in": "放大",
-	"Zoom out": "缩小"
+	"Zoom out": "缩小",
+	"Waiting to upload": "待上传",
+	"Received; waiting to process": "已上传，等待处理",
+	"Files received: {{received}} / {{total}}": "已接收文件：{{received}} / {{total}}",
+	"Upload failures: {{count}}": "上传失败：{{count}}",
+	"File receipt was not confirmed. Refresh the file list before retrying.": "尚未确认文件接收结果，请刷新文件列表确认后再重试。",
+	"Keep this page open until all files are received. Indexing runs separately on the server.": "全部文件上传完成前请保持页面打开；解析和索引由服务器独立排队处理。",
+	"All files received. Processing will continue on the server; you can close this page.": "全部文件已接收。服务器将继续处理，可以关闭此页面。",
+	"Received files will continue processing. Check failed transfers before uploading them again.": "已接收的文件将继续处理。请先核对失败项目，再决定是否重新上传。",
+	"Some files have not finished uploading. Leaving will stop the remaining transfers. Files already received will continue processing on the server.": "还有文件尚未上传完成。离开将停止剩余传输；服务器已接收的文件会继续处理。"
 }

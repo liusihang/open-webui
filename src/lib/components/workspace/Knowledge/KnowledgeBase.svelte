@@ -9,7 +9,7 @@
 
 	const i18n = getContext<Writable<i18nType>>('i18n');
 
-	import { goto } from '$app/navigation';
+	import { beforeNavigate, goto } from '$app/navigation';
 	import { page } from '$app/stores';
 	import { config, user, settings } from '$lib/stores';
 
@@ -29,6 +29,7 @@
 
 	import { blobToFile, copyToClipboard } from '$lib/utils';
 	import { computeFileHash } from '$lib/utils/hash';
+	import { receiveUploadBatch } from '$lib/utils/upload-batch';
 
 	import Spinner from '$lib/components/common/Spinner.svelte';
 
@@ -73,6 +74,33 @@
 
 	let inputFiles = null;
 	let fileItems: any[] = [];
+	let uploadBatches: { total: number; received: number; failed: number; remaining: number }[] = [];
+	let destroyed = false;
+	let uploadRefreshTimer: ReturnType<typeof setTimeout>;
+	$: remainingUploads = uploadBatches.reduce((sum, batch) => sum + batch.remaining, 0);
+	$: receivedUploads = uploadBatches.reduce((sum, batch) => sum + batch.received, 0);
+	$: failedUploads = uploadBatches.reduce((sum, batch) => sum + batch.failed, 0);
+	$: totalUploads = uploadBatches.reduce((sum, batch) => sum + batch.total, 0);
+	const leaveUploadWarning = () =>
+		$i18n.t(
+			'Some files have not finished uploading. Leaving will stop the remaining transfers. Files already received will continue processing on the server.'
+		);
+	beforeNavigate((navigation) => {
+		if (remainingUploads && !navigation.willUnload && !confirm(leaveUploadWarning()))
+			navigation.cancel();
+	});
+	const warnBeforeUnload = (event: BeforeUnloadEvent) => {
+		if (!remainingUploads) return;
+		event.preventDefault();
+		event.returnValue = '';
+	};
+	const refreshUploadsSoon = () => {
+		if (destroyed || uploadRefreshTimer) return;
+		uploadRefreshTimer = setTimeout(() => {
+			uploadRefreshTimer = undefined;
+			if (!destroyed) init();
+		}, 1000);
+	};
 	let currentDirectoryId: string | null = null;
 	let breadcrumbs: any[] = [];
 
@@ -227,90 +255,92 @@
 		}
 	};
 
-	const uploadFileHandler = async (file) => {
-		const targetDirectoryId = currentDirectoryId;
-		console.log(file);
-
-		const fileItem = {
-			type: 'file',
-			file: '',
-			id: null,
-			url: '',
-			name: file.name,
-			size: file.size,
-			status: 'uploading',
-			error: '',
-			directory_id: targetDirectoryId,
-			itemId: uuidv4()
-		};
-
-		if (fileItem.size == 0) {
-			toast.error($i18n.t('You cannot upload an empty file.'));
-			return null;
-		}
-
-		if (
-			($config?.file?.max_size ?? null) !== null &&
-			file.size > ($config?.file?.max_size ?? 0) * 1024 * 1024
-		) {
-			console.log('File exceeds max size limit:', {
-				fileSize: file.size,
-				maxSize: ($config?.file?.max_size ?? 0) * 1024 * 1024
-			});
-			toast.error(
-				$i18n.t(`File size should not exceed {{maxSize}} MB.`, {
-					maxSize: $config?.file?.max_size
-				})
+	const uploadEntries = async (
+		entries: { file: File; directory_id: string | null; checksum?: string }[],
+		knowledgeId: string
+	) => {
+		if (destroyed) return entries.length;
+		const batch = { total: entries.length, received: 0, failed: 0, remaining: entries.length };
+		uploadBatches = [...uploadBatches, batch];
+		const items = entries.map((entry) => ({
+			...entry,
+			itemId: uuidv4(),
+			name: entry.file.name,
+			status: 'pending_upload',
+			size: entry.file.size
+		}));
+		fileItems = [...items.map(({ file, ...item }) => item), ...fileItems];
+		await receiveUploadBatch(items, async (item) => {
+			if (destroyed) throw new Error('Upload page closed');
+			fileItems = fileItems.map((row) =>
+				row.itemId === item.itemId ? { ...row, status: 'uploading' } : row
 			);
-			return;
-		}
-
-		fileItems = [fileItem, ...(fileItems ?? [])];
-		try {
-			let metadata = {
-				knowledge_id: knowledge.id,
-				directory_id: targetDirectoryId,
-				// If the file is an audio file, provide the language for STT.
-				...((file.type.startsWith('audio/') || file.type.startsWith('video/')) &&
-				$settings?.audio?.stt?.language
-					? {
-							language: $settings?.audio?.stt?.language
-						}
-					: {})
-			};
-
-			const uploadedFile = await uploadFile(localStorage.token, file, metadata).catch((e) => {
-				toast.error(`${e}`);
-				return null;
-			});
-
-			if (uploadedFile) {
-				console.log(uploadedFile);
-				fileItems = fileItems.map((item) => {
-					if (item.itemId === fileItem.itemId) {
-						item.id = uploadedFile.id;
-					}
-					return item;
-				});
-
-				if (uploadedFile.error) {
-					console.warn('File upload warning:', uploadedFile.error);
-					toast.warning(uploadedFile.error);
-					fileItems = fileItems.filter((file) => file.id !== uploadedFile.id);
-				} else {
-					toast.success($i18n.t('File added successfully.'));
-					init();
-				}
-			} else {
-				toast.error($i18n.t('Failed to upload file.'));
+			try {
+				if (!item.file.size) throw new Error($i18n.t('You cannot upload an empty file.'));
+				if ($config?.file?.max_size != null && item.file.size > $config.file.max_size * 1024 * 1024)
+					throw new Error(
+						$i18n.t('File size should not exceed {{maxSize}} MB.', {
+							maxSize: $config.file.max_size
+						})
+					);
+				const receipt = await uploadFile(
+					localStorage.token,
+					item.file,
+					{
+						knowledge_id: knowledgeId,
+						directory_id: item.directory_id,
+						...(item.checksum ? { file_hash: item.checksum } : {}),
+						...((item.file.type.startsWith('audio/') || item.file.type.startsWith('video/')) &&
+						$settings?.audio?.stt?.language
+							? { language: $settings.audio.stt.language }
+							: {})
+					},
+					undefined,
+					false
+				);
+				if (!receipt?.id)
+					throw new Error(
+						$i18n.t('File receipt was not confirmed. Refresh the file list before retrying.')
+					);
+				batch.received++;
+				fileItems = fileItems.filter((row) => row.itemId !== item.itemId);
+				refreshUploadsSoon();
+			} catch (error) {
+				batch.failed++;
+				fileItems = fileItems.map((row) =>
+					row.itemId === item.itemId ? { ...row, status: 'failed', error: String(error) } : row
+				);
+			} finally {
+				batch.remaining--;
+				uploadBatches = [...uploadBatches];
 			}
-		} catch (e) {
-			toast.error(`${e}`);
-		} finally {
-			fileItems = fileItems.filter((item) => item.itemId !== fileItem.itemId);
+		});
+		if (!destroyed) {
+			if (batch.failed)
+				toast.error(
+					$i18n.t('Upload failed for {{failed}} of {{total}} files.', {
+						failed: batch.failed,
+						total: batch.total
+					})
+				);
+			else
+				toast.success(
+					$i18n.t(
+						'All files received. Processing will continue on the server; you can close this page.'
+					)
+				);
 			await init();
 		}
+		return batch.failed;
 	};
+	const uploadFilesHandler = (files: File[]) => {
+		const target = { knowledgeId: knowledge.id, directoryId: currentDirectoryId };
+		return uploadEntries(
+			files.map((file) => ({ file, directory_id: target.directoryId })),
+			target.knowledgeId
+		);
+	};
+	const uploadFileHandler = (file: File) => uploadFilesHandler([file]);
 
 	const uploadDirectoryHandler = async () => {
 		const entries = await collectDirectoryFiles();
@@ -414,16 +444,20 @@
 	const buildDirectoryManifest = async (
 		entries: DirectoryFileEntry[]
 	): Promise<DirectoryManifestEntry[]> => {
-		return Promise.all(
-			entries.map(async (entry) => ({
+		const manifest: DirectoryManifestEntry[] = new Array(entries.length);
+		const failures = await receiveUploadBatch(entries, async (entry, index) => {
+			if (destroyed) throw new Error('Upload page closed');
+			manifest[index] = {
 				...entry,
 				checksum: await computeFileHash(entry.file),
 				size: entry.file.size
-			}))
-		);
+			};
+		});
+		if (failures.length) throw failures[0].error;
+		return manifest;
 	};
 
-	const createMissingDirectories = async (diff: any) => {
+	const createMissingDirectories = async (diff: any, knowledgeId = knowledge.id) => {
 		if (!knowledge) return {};
 
 		const directoryIdByPath: Record<string, string> = { ...(diff.directory_map || {}) };
@@ -436,7 +470,7 @@
 
 			const directory = await createKnowledgeDirectory(
 				localStorage.token,
-				knowledge.id,
+				knowledgeId,
 				name,
 				parentId
 			);
@@ -450,51 +484,22 @@
 
 	const uploadManifestEntries = async (
 		entries: DirectoryManifestEntry[],
-		resolveDirectoryId: (entry: DirectoryManifestEntry) => string | null | undefined
+		resolveDirectoryId: (entry: DirectoryManifestEntry) => string | null | undefined,
+		knowledgeId: string
 	) => {
-		let failedCount = 0;
-
-		for (const [index, entry] of entries.entries()) {
-			const displayPath = entry.path ? `${entry.path}/${entry.filename}` : entry.filename;
-			syncing = $i18n.t('Uploading {{current}}/{{total}}: {{file}}', {
-				current: index + 1,
-				total: entries.length,
-				file: displayPath
-			});
-
-			const fileObject = new File([entry.file], entry.filename, { type: entry.file.type });
-			const uploadedFile = await uploadFile(localStorage.token, fileObject, {
-				knowledge_id: knowledge.id,
-				file_hash: entry.checksum,
-				directory_id: resolveDirectoryId(entry)
-			}).catch((error) => ({ error }));
-
-			if (!uploadedFile || uploadedFile.error) {
-				const error = uploadedFile?.error;
-				const reason =
-					typeof error === 'string'
-						? error
-						: (error?.detail ?? error?.message ?? $i18n.t('Failed to upload file.'));
-
-				failedCount++;
-				console.error('Upload failed:', displayPath, reason);
-			}
-		}
-
-		if (failedCount > 0) {
-			toast.error(
-				$i18n.t('Upload failed for {{failed}} of {{total}} files.', {
-					failed: failedCount,
-					total: entries.length
-				})
-			);
-		}
-
-		return failedCount;
+		return uploadEntries(
+			entries.map((entry) => ({
+				file: new File([entry.file], entry.filename, { type: entry.file.type }),
+				directory_id: resolveDirectoryId(entry) ?? null,
+				checksum: entry.checksum
+			})),
+			knowledgeId
+		);
 	};
 
 	const uploadDirectoryEntries = async (entries: DirectoryFileEntry[]) => {
 		if (!knowledge) return;
+		const knowledgeId = knowledge.id;
 		const targetDirectoryId = currentDirectoryId;
 		const targetPath = breadcrumbs.map((crumb) => crumb.name).join('/');
 		const getDirectoryUploadPath = (path: string) =>
@@ -507,7 +512,7 @@
 			syncing = $i18n.t('Comparing with knowledge base...');
 			const diff = await syncKnowledgeDiff(
 				localStorage.token,
-				id,
+				knowledgeId,
 				manifest.map(({ filename, path, checksum, size }) => ({
 					filename,
 					path: getDirectoryUploadPath(path),
@@ -521,10 +526,13 @@
 				return;
 			}
 
-			const directoryIdByPath = await createMissingDirectories(diff);
+			const directoryIdByPath = await createMissingDirectories(diff, knowledgeId);
 
-			const failedCount = await uploadManifestEntries(manifest, (entry) =>
-				entry.path ? directoryIdByPath[getDirectoryUploadPath(entry.path)] : targetDirectoryId
+			const failedCount = await uploadManifestEntries(
+				manifest,
+				(entry) =>
+					entry.path ? directoryIdByPath[getDirectoryUploadPath(entry.path)] : targetDirectoryId,
+				knowledgeId
 			);
 
 			if (failedCount === 0) {
@@ -542,6 +550,7 @@
 	// Incremental sync: hash locally → diff on server → upload only what changed
 	const syncDirectoryHandler = async () => {
 		if (!pendingSyncFiles?.length) return;
+		const knowledgeId = knowledge.id;
 
 		try {
 			// ── 2. Compute checksums ──
@@ -555,7 +564,7 @@
 			syncing = $i18n.t('Comparing with knowledge base...');
 			const diff = await syncKnowledgeDiff(
 				localStorage.token,
-				id,
+				knowledgeId,
 				manifest.map(({ filename, path, checksum, size }) => ({ filename, path, checksum, size }))
 			);
 
@@ -572,12 +581,12 @@
 
 			if (staleFileIds.length > 0 || diff.rmdir.length > 0) {
 				syncing = $i18n.t('Removing {{count}} stale files...', { count: staleFileIds.length });
-				await syncKnowledgeCleanup(localStorage.token, id, staleFileIds, diff.rmdir);
+				await syncKnowledgeCleanup(localStorage.token, knowledgeId, staleFileIds, diff.rmdir);
 				browser?.clearRemovedSelection(staleFileIds);
 			}
 
 			// ── 5. mkdir — create missing directories (parents first) ──
-			const directoryIdByPath = await createMissingDirectories(diff);
+			const directoryIdByPath = await createMissingDirectories(diff, knowledgeId);
 
 			// ── 6. Upload added + modified files ──
 			const filesToUpload = manifest.filter(
@@ -586,8 +595,10 @@
 					diff.modified.some((m: any) => m.filename === entry.filename && m.path === entry.path)
 			);
 
-			const failedCount = await uploadManifestEntries(filesToUpload, (entry) =>
-				entry.path ? directoryIdByPath[entry.path] : null
+			const failedCount = await uploadManifestEntries(
+				filesToUpload,
+				(entry) => (entry.path ? directoryIdByPath[entry.path] : null),
+				knowledgeId
 			);
 
 			// ── 7. Report ──
@@ -746,9 +757,7 @@
 						}
 					}
 
-					for (const file of looseFiles) {
-						await uploadFileHandler(file);
-					}
+					if (looseFiles.length) await uploadFilesHandler(looseFiles);
 
 					if (directoryEntries.length > 0) {
 						await uploadDirectoryEntries(directoryEntries);
@@ -761,6 +770,7 @@
 	};
 
 	onMount(async () => {
+		window.addEventListener('beforeunload', warnBeforeUnload);
 		id = $page.params.id;
 		const res = await getKnowledgeById(localStorage.token, id).catch((e) => {
 			toast.error(`${e}`);
@@ -783,6 +793,9 @@
 	});
 
 	onDestroy(() => {
+		destroyed = true;
+		window.removeEventListener('beforeunload', warnBeforeUnload);
+		clearTimeout(uploadRefreshTimer);
 		clearTimeout(debounceTimeout);
 		const dropZone = document.querySelector('body');
 		dropZone?.removeEventListener('dragover', onDragOver);
@@ -829,9 +842,7 @@
 	hidden
 	on:change={async () => {
 		if (inputFiles && inputFiles.length > 0) {
-			for (const file of inputFiles) {
-				await uploadFileHandler(file);
-			}
+			await uploadFilesHandler(Array.from(inputFiles));
 
 			inputFiles = null;
 			const fileInputElement = document.getElementById('files-input');
@@ -907,6 +918,29 @@
 				>
 			</div>
 		</div>
+		{#if totalUploads}
+			<div role="status" class="mb-2 rounded-xl bg-gray-50 px-3 py-2 text-xs dark:bg-gray-850">
+				{$i18n.t('Files received: {{received}} / {{total}}', {
+					received: receivedUploads,
+					total: totalUploads
+				})}
+				{#if failedUploads}
+					· {$i18n.t('Upload failures: {{count}}', { count: failedUploads })}{/if}
+				<div class="mt-1 text-gray-500">
+					{remainingUploads
+						? $i18n.t(
+								'Keep this page open until all files are received. Indexing runs separately on the server.'
+							)
+						: failedUploads
+							? $i18n.t(
+									'Received files will continue processing. Check failed transfers before uploading them again.'
+								)
+							: $i18n.t(
+									'All files received. Processing will continue on the server; you can close this page.'
+								)}
+				</div>
+			</div>
+		{/if}
 		<div class="mb-2 min-h-0 flex-1">
 			{#if isExternalKnowledge}<div
 					class="h-full overflow-auto rounded-2xl border border-gray-100/80 dark:border-white/[0.04]"

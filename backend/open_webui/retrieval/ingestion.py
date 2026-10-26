@@ -15,7 +15,7 @@ from types import SimpleNamespace
 from open_webui.retrieval.admission import AdmissionError, AdmissionLimits, ChunkSpool
 
 
-async def submit_file(request, form, *, user, db, wait=True, auto_link=None, retry_images=False):
+async def submit_file(request, form, *, user, db, wait=True, auto_link=None, retry_images=False, received=False):
     from fastapi import HTTPException
     from sqlalchemy import select
     from open_webui.config import Config, UPLOAD_DIR
@@ -68,6 +68,7 @@ async def submit_file(request, form, *, user, db, wait=True, auto_link=None, ret
             source_hash=source_hash,
             config_hash=canonical_hash(config),
             payload=payload,
+            received=received,
         )
     except DuplicateIngestion as exc:
         if input_path:
@@ -419,7 +420,18 @@ async def execute(job_id, token):
     ):
         raise PermissionError('indexing authorization no longer valid')
     if job.knowledge_id:
-        await _validate_collection_access([job.knowledge_id], user, access_type='write')
+        from open_webui.models.knowledge import Knowledges
+
+        if not await Knowledges.get_knowledge_by_id(job.knowledge_id):
+            raise AdmissionError('目标知识库已删除，无法处理此文件；原文件已保留。')
+        from fastapi import HTTPException
+
+        try:
+            await _validate_collection_access([job.knowledge_id], user, access_type='write')
+        except HTTPException as exc:
+            if exc.status_code == 403:
+                raise AdmissionError('处理时已无目标知识库的写入权限；原文件已保留。') from None
+            raise
     request = SimpleNamespace(
         app=SimpleNamespace(
             state=SimpleNamespace(
@@ -989,7 +1001,7 @@ async def publish_association(job_id, token, *, file_id, version, knowledge_id, 
                 .values(is_active=True, updated_at=now)
             )
         await _link_upload(db, job)
-        file.data = {**file.data, 'status': 'completed', 'error': None}
+        file.data = {**file.data, 'status': 'completed', 'processing_status': 'completed', 'error': None}
         job.status, job.finished_at = 'succeeded', now
         job.active_key = job.active_file = job.worker_slot = job.lease_until = None
         job.result = {
@@ -1086,6 +1098,7 @@ async def publish_candidate(
             **(file.data or {}),
             'content': content,
             'status': 'completed',
+            'processing_status': 'completed',
             'error': None,
             'retrieval_version': version,
             'document_image_assets': assets,
@@ -1134,29 +1147,11 @@ async def publish_candidate(
 
 async def _schedule_images(db, parent, file):
     """Commit optional image work with the published text; never lose its queue entry."""
-    from sqlalchemy import select, func
     from open_webui.models.ingestion_jobs import IngestionJob as Job
     from open_webui.retrieval.ingestion_queue import job_key
 
     assets = (file.data or {}).get('document_image_assets') or []
     if not assets:
-        return
-    queued = await db.scalar(select(func.count()).select_from(Job).where(Job.status == 'queued'))
-    own = await db.scalar(
-        select(func.count()).select_from(Job).where(Job.status == 'queued', Job.user_id == parent.user_id)
-    )
-    if queued >= int(os.getenv('INDEXING_MAX_QUEUED', '200')) or own >= int(
-        os.getenv('INDEXING_MAX_QUEUED_PER_USER', '20')
-    ):
-        file.data = {
-            **file.data,
-            'retrieval_status': {
-                **file.data['retrieval_status'],
-                'images': 'failed',
-                'image_retryable': True,
-                'image_error': '图片索引队列已满，正文已完成；可稍后重试图片。',
-            },
-        }
         return
     # Release the primary task's unique file/key slot before inserting its child.
     await db.flush()
@@ -1180,7 +1175,7 @@ async def _schedule_images(db, parent, file):
                 payload=payload,
             ),
             active_file=file.id,
-            status='queued',
+            status='waiting',
             created_at=time.time_ns() // 1000,
         )
     )

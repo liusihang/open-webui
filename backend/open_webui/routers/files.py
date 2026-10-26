@@ -462,6 +462,29 @@ async def upload_file(
     return result
 
 
+async def validate_knowledge_upload_target(metadata, user, db=None):
+    """Reject stale targets before storing bytes, then recheck in the worker."""
+    knowledge_id = metadata.get('knowledge_id')
+    if not knowledge_id:
+        return
+    knowledge = await Knowledges.get_knowledge_by_id(knowledge_id, db=db)
+    if not knowledge:
+        raise HTTPException(404, '目标知识库已删除或不存在，请重新选择上传位置。')
+    if not (
+        user.role == 'admin'
+        or knowledge.user_id == user.id
+        or await AccessGrants.has_access(
+            user_id=user.id, resource_type='knowledge', resource_id=knowledge_id, permission='write', db=db
+        )
+    ):
+        raise HTTPException(403, '没有此知识库的写入权限，请重新选择上传位置。')
+    directory_id = metadata.get('directory_id')
+    if directory_id:
+        directory = await Knowledges.get_directory_by_id(directory_id, db=db)
+        if not directory or directory.knowledge_id != knowledge_id:
+            raise HTTPException(404, '目标文件夹已删除或不属于此知识库，请重新选择上传位置。')
+
+
 async def upload_file_handler(
     request: Request,
     file: UploadFile = File(...),
@@ -487,6 +510,7 @@ async def upload_file_handler(
     file_metadata.pop('native_model_file', None)
 
     try:
+        await validate_knowledge_upload_target(file_metadata, user, db=db)
         unsanitized_filename = file.filename
         filename = os.path.basename(unsanitized_filename)
 
@@ -615,6 +639,7 @@ async def upload_file_handler(
                             db=session,
                             wait=not process_in_background,
                             auto_link={'directory_id': file_metadata.get('directory_id')} if knowledge_id else None,
+                            received=True,
                         )
                 except Exception as exc:
                     from open_webui.retrieval.ingestion_queue import DuplicateIngestion
@@ -627,19 +652,28 @@ async def upload_file_handler(
                         raise HTTPException(409, str(exc)) from None
                     from open_webui.retrieval.admission import AdmissionError
 
+                    reason = (
+                        str(exc.detail)
+                        if isinstance(exc, HTTPException)
+                        else str(exc)
+                        if isinstance(exc, AdmissionError)
+                        else 'Indexing request not accepted; original retained'
+                    )
                     await Files.update_file_data_by_id(
                         file_item.id,
-                        {
-                            'status': 'failed',
-                            'error': (
-                                str(exc)
-                                if isinstance(exc, AdmissionError)
-                                else 'Indexing request not accepted; original retained'
-                            ),
-                        },
+                        {'status': 'failed', 'error': reason},
                     )
                     raise
-                return {'status': True, **file_item.model_dump(), **queued}
+                state = await Files.get_file_processing_state(file_item.id) or {}
+                return {
+                    'status': True,
+                    **file_item.model_dump(),
+                    **queued,
+                    'data': {
+                        **(file_item.data or {}),
+                        **{key: state.get(key) for key in ('status', 'processing_status', 'error', 'ingestion_job_id')},
+                    },
+                }
             if background_tasks and process_in_background:
                 background_tasks.add_task(
                     process_uploaded_file,

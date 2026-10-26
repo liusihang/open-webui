@@ -133,6 +133,7 @@
 	};
 	const poll = async () => {
 		clearTimeout(timer);
+		let retry = false;
 		try {
 			const previous = pending;
 			const response = await getPendingKnowledgeFiles(localStorage.token, knowledge.id);
@@ -140,14 +141,19 @@
 			pending = response.map((file: KnowledgeFile) => ({
 				...file,
 				directory_id: file.meta?.data?.directory_id ?? null,
-				status: file.data?.status || 'processing'
+				status:
+					file.data?.status === 'failed'
+						? 'failed'
+						: file.data?.processing_status || file.data?.status || 'processing'
 			}));
 			const completed = previous.filter((file) => !pending.some((item) => item.id === file.id));
 			if (completed.length) await reload(completed.map((file) => file.directory_id ?? null));
 		} catch (error) {
+			retry = true;
 			console.warn('Unable to refresh processing files', error);
 		}
-		if (mounted && pending.length) timer = setTimeout(poll, 5000);
+		if (mounted && (retry || pending.some((file) => file.status !== 'failed')))
+			timer = setTimeout(poll, 5000);
 	};
 	export const refresh = async () => {
 		await reload();

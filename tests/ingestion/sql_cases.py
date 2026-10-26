@@ -169,6 +169,88 @@ class QueueSQLTests(unittest.IsolatedAsyncioTestCase):
         async with sessions() as db:
             self.assertEqual((await db.get(File, 'b')).data['content'], 'old body')
 
+    async def test_150_received_uploads_survive_full_execution_queue_and_restart(self):
+        with patch.dict(os.environ, {'INDEXING_MAX_QUEUED_PER_USER': '1', 'INDEXING_MAX_QUEUED': '1'}):
+            first = await self.enqueue()  # The ordinary processing queue is full.
+            identities = []
+            for number in range(150):
+                file_id = f'upload-{number}'
+                async with sessions() as db:
+                    db.add(File(id=file_id, user_id='batch', filename='paper.txt', data={}, meta={}))
+                    await db.commit()
+                identities.append(
+                    await queue.enqueue(
+                        file_id=file_id,
+                        user_id='batch',
+                        knowledge_id='kb',
+                        source_hash=file_id,
+                        config_hash='config',
+                        payload={},
+                        received=True,
+                    )
+                )
+        # A new DB session (not a browser/in-memory queue) sees all receipts.
+        async with sessions() as db:
+            jobs = list(await db.scalars(select(Job).where(Job.user_id == 'batch')))
+            self.assertEqual(len(jobs), 150)
+            self.assertEqual({job.status for job in jobs}, {'waiting'})
+            file = await db.get(File, 'upload-149')
+            self.assertEqual(file.data['ingestion_job_id'], identities[-1])
+        self.assertEqual((await queue.claim(0))[0], first)
+        self.assertEqual((await queue.claim(1))[0], identities[0])
+        self.assertIsNone(await queue.claim(1))
+
+    async def test_received_backlog_does_not_expire_while_waiting(self):
+        identity = await queue.enqueue(
+            file_id='a',
+            user_id='owner',
+            knowledge_id='kb',
+            source_hash='a',
+            config_hash='config',
+            payload={},
+            received=True,
+        )
+        async with sessions() as db:
+            job = await db.get(Job, identity)
+            job.created_at = (int(time.time()) - 24 * 3600) * 1_000_000
+            await db.commit()
+        self.assertEqual(await queue.expire_jobs(job_id=identity), 0)
+        self.assertEqual((await queue.claim(0))[0], identity)
+
+    async def test_upload_receipts_restore_waiting_and_failed_without_document_body(self):
+        source = ROOT / 'models/files.py'
+        table = next(
+            n for n in ast.parse(source.read_text()).body if isinstance(n, ast.ClassDef) and n.name == 'FilesTable'
+        )
+        method = next(
+            n for n in table.body if isinstance(n, ast.AsyncFunctionDef) and n.name == 'get_pending_files_for_knowledge'
+        )
+        scope = dict(
+            File=File,
+            FileModelResponse=SimpleNamespace,
+            AsyncSession=Any,
+            get_async_db_context=sessions,
+            select=select,
+            log=logging.getLogger(__name__),
+        )
+        exec(compile(ast.Module(body=[method], type_ignores=[]), str(source), 'exec'), scope)
+        async with sessions() as db:
+            for identity, status in [('a', 'pending'), ('b', 'failed'), ('c', 'completed')]:
+                file = await db.get(File, identity)
+                file.meta = {'data': {'knowledge_id': 'kb'}}
+                file.data = {
+                    'status': status,
+                    'processing_status': 'waiting' if status == 'pending' else status,
+                    'error': 'specific format error' if status == 'failed' else None,
+                    'content': 'PRIVATE BODY' * 1000,
+                }
+            await db.commit()
+        receipts = await scope['get_pending_files_for_knowledge'](None, 'kb')
+        self.assertEqual({r.id for r in receipts}, {'a', 'b'})
+        self.assertEqual(next(r.data['processing_status'] for r in receipts if r.id == 'a'), 'waiting')
+        self.assertEqual(next(r.data['error'] for r in receipts if r.id == 'b'), 'specific format error')
+        self.assertTrue(all('content' not in r.data for r in receipts))
+
     async def test_status_projection_does_not_select_document_body(self):
         from sqlalchemy import event
 
@@ -471,7 +553,7 @@ class QueueSQLTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(file.data['status'], 'completed')
             self.assertEqual(file.data['retrieval_status']['images'], 'pending')
             child = await db.get(Job, file.data['image_ingestion_job_id'])
-            self.assertEqual(child.status, 'queued')
+            self.assertEqual(child.status, 'waiting')
             self.assertTrue(child.payload['retry_images'])
             self.assertEqual(child.payload['source_version'], 2)
             self.assertEqual(file.data['ingestion_job_id'], identity)

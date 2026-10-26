@@ -1291,13 +1291,14 @@ async def get_pending_knowledge_files(
     stream: bool = Query(False),
     user=Depends(get_verified_user),
 ):
-    """Return files that are being processed for this knowledge base but not yet linked.
+    """Return unlinked received uploads, including processing failures.
 
     After a file is uploaded with ``knowledge_id`` in its metadata, the backend
     processes it in a background task before linking it to the ``knowledge_file``
     join table.  During this window the file is invisible to the normal file
     list endpoint.  This endpoint exposes those in-flight files so the frontend
-    can show them with a processing indicator even after a page reload.
+    can restore waiting/running/error states after a page reload. Responses
+    contain status descriptors, never extracted document bodies.
 
     When ``stream=true``, returns an SSE stream that polls every 3 seconds
     and emits the current pending file list.  Closes when no files remain.
@@ -1337,7 +1338,7 @@ async def get_pending_knowledge_files(
             pending = await Files.get_pending_files_for_knowledge(knowledge_id)
             data = [f.model_dump() for f in pending]
             yield f'data: {JSONCodec.dumps(data)}\n\n'
-            if len(pending) == 0:
+            if not any((file.data or {}).get('status') in ('pending', 'processing') for file in pending):
                 break
             await asyncio.sleep(3)
 
@@ -1922,15 +1923,17 @@ async def sync_knowledge_diff(
         directory_path_by_id[directory.id] = full_path
         directory_id_by_path[full_path] = directory.id
 
-    # Retry uploads left pending by a restart after an hour.
+    # Durable receipts can wait for a large batch for hours. Only legacy
+    # uploads without a task receipt become eligible for resubmission by age.
     pending_files = {
         (
-            directory_path_by_id.get(file.meta.data.get('directory_id'), ''),
+            directory_path_by_id.get((getattr(file.meta, 'data', None) or {}).get('directory_id'), ''),
             file.filename,
             file.meta.model_dump().get('file_hash'),
         )
         for file in await Files.get_pending_files_for_knowledge(id, db=db)
-        if file.created_at >= int(time.time()) - 3600
+        if (file.data or {}).get('status') in ('pending', 'processing')
+        and ((file.data or {}).get('ingestion_job_id') or file.created_at >= int(time.time()) - 3600)
     }
     knowledge_files = await Knowledges.get_files_with_directory_ids(id, db=db)
 
