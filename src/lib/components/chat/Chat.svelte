@@ -1295,7 +1295,7 @@
 		}
 		if (type === 'terminal:display_file') {
 			if (!data?.path) return;
-			if ($settings?.terminalFileDisplay === 'inline') return;
+			if ($mobile || $settings?.terminalFileDisplay !== 'sidebar') return;
 			displayFileHandler(data.path, { showControls, showFileNavPath }, { page: data?.page });
 		} else if (type === 'terminal:write_file' || type === 'terminal:replace_file_content') {
 			if (!data?.path) return;

@@ -1,8 +1,17 @@
 // @vitest-environment jsdom
-import { afterEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { flushSync, mount, tick, unmount } from 'svelte';
 import StructuredOutputHarness from './StructuredOutputHarness.svelte';
 import { applyResponseStreamEvent, type OutputItem } from './structuredOutput';
+import {
+	config,
+	selectedTerminalId,
+	settings,
+	terminalServers,
+	showControls,
+	showFileNavPath
+} from '$lib/stores';
+import { downloadFileBlob, downloadFilePreview, readFile } from '$lib/apis/terminal';
 
 // Editor/document providers are unrelated to commentary; keep real Markdown and Collapsible.
 vi.mock('$lib/components/chat/Messages/CodeBlock.svelte', async () => ({
@@ -10,6 +19,15 @@ vi.mock('$lib/components/chat/Messages/CodeBlock.svelte', async () => ({
 }));
 // jsdom has no Web Animations API; test real collapse state without transition timing.
 vi.mock('svelte/transition', () => ({ slide: () => ({ duration: 0 }) }));
+vi.mock('$lib/components/chat/FileNav/FilePreview.svelte', async () => ({
+	default: (await import('./IntelligentUI/CodeFallbackHarness.svelte')).default
+}));
+vi.mock('$lib/apis/terminal', async (importOriginal) => ({
+	...(await importOriginal<Record<string, unknown>>()),
+	downloadFileBlob: vi.fn(),
+	downloadFilePreview: vi.fn(),
+	readFile: vi.fn()
+}));
 
 const message = (id: string, text: string, phase?: string): OutputItem => ({
 	id,
@@ -27,6 +45,14 @@ afterEach(async () => {
 	app = undefined;
 	document.body.innerHTML = '';
 	vi.unstubAllGlobals();
+	vi.restoreAllMocks();
+	settings.set({});
+	terminalServers.set([]);
+	selectedTerminalId.set(null);
+	showControls.set(false);
+	showFileNavPath.set(null);
+	localStorage.removeItem('token');
+	config.set(undefined);
 });
 
 function setup(props: Record<string, unknown> = {}) {
@@ -54,6 +80,172 @@ const text = (target: HTMLElement) =>
 
 const toggle = (target: HTMLElement) =>
 	target.querySelector<HTMLButtonElement>('[data-commentary] button')!;
+
+describe('terminal file cards mounted rendering', () => {
+	beforeEach(() => {
+		localStorage.setItem('token', 'fixture-session-token');
+		config.set({ features: { enable_tool_servers: true } } as any);
+	});
+	function fileOutput(paths: string[]): OutputItem[] {
+		return paths.flatMap((path, index) => [
+			{
+				type: 'function_call',
+				name: 'display_file',
+				call_id: `file-${index}`,
+				arguments: JSON.stringify({ path })
+			},
+			{
+				type: 'function_call_output',
+				call_id: `file-${index}`,
+				status: 'completed',
+				output: [
+					{
+						type: 'input_text',
+						text: JSON.stringify({
+							type: 'file',
+							source: 'open_terminal',
+							exists: true,
+							path,
+							terminal_selector: 'terminals',
+							session_id: 'original-session'
+						})
+					}
+				]
+			}
+		]);
+	}
+	const servers = [
+		{
+			id: 'terminals',
+			url: '/api/v1/terminals/terminals',
+			contexts: { chat: { context_id: 'chat_id' } }
+		}
+	];
+	const download = (target: HTMLElement) =>
+		target.querySelector<HTMLButtonElement>('[aria-label="Download"]')!;
+
+	it.each([{}, { terminalFileDisplay: 'sidebar' as const }])(
+		'shows three historical path-only cards with settings %o',
+		(preference) => {
+			settings.set(preference);
+			const target = setup({
+				initialOutput: fileOutput(['/report.docx', '/progress.docx', '/package.zip']),
+				initialDone: true
+			});
+			expect(target.querySelectorAll('[data-terminal-file]')).toHaveLength(3);
+			expect(target.textContent).toContain('package.zip');
+		}
+	);
+
+	it('uses the recorded terminal even when another terminal is selected, and keeps ZIP download-only', async () => {
+		vi.mocked(readFile).mockClear();
+		vi.mocked(downloadFileBlob).mockReset();
+		terminalServers.set(servers);
+		selectedTerminalId.set('another-terminal');
+		const target = setup({ initialOutput: fileOutput(['/package.zip']), initialDone: true });
+		expect(download(target).disabled).toBe(false);
+		expect(target.textContent).toContain('No preview available');
+		expect(readFile).not.toHaveBeenCalled();
+		expect(downloadFileBlob).not.toHaveBeenCalled();
+		const NativeURL = URL;
+		vi.stubGlobal(
+			'URL',
+			class extends NativeURL {
+				static createObjectURL = vi.fn(() => 'blob:download');
+				static revokeObjectURL = vi.fn();
+			}
+		);
+		const click = vi.spyOn(HTMLAnchorElement.prototype, 'click').mockImplementation(() => {});
+		vi.mocked(downloadFileBlob).mockResolvedValue({
+			blob: new Blob(['zip']),
+			filename: 'package.zip'
+		});
+		download(target).click();
+		await tick();
+		expect(downloadFileBlob).toHaveBeenCalledWith(
+			'/api/v1/terminals/terminals',
+			expect.any(String),
+			'/package.zip',
+			'original-session'
+		);
+		await vi.waitFor(() => expect(click).toHaveBeenCalledOnce());
+		expect(URL.revokeObjectURL).not.toHaveBeenCalled();
+		await vi.waitFor(() => expect(URL.revokeObjectURL).toHaveBeenCalledWith('blob:download'), {
+			timeout: 2000
+		});
+	});
+
+	it('becomes downloadable when terminal discovery finishes after the message renders', async () => {
+		terminalServers.set([]);
+		const target = setup({ initialOutput: fileOutput(['/package.zip']), initialDone: true });
+		expect(download(target).disabled).toBe(true);
+		terminalServers.set(servers);
+		await tick();
+		expect(download(target).disabled).toBe(false);
+	});
+
+	it.each([{ initialServers: null }, { initialServers: [] }])(
+		'can download a recorded system file without waiting for tool discovery: $initialServers',
+		({ initialServers }) => {
+			terminalServers.set(initialServers);
+			const output = fileOutput(['/package.zip']);
+			const result = JSON.parse(String(output[1].output?.[0].text));
+			output[1].output![0].text = JSON.stringify({ ...result, terminal_id: 'terminals' });
+			const target = setup({ initialOutput: output, initialDone: true });
+			expect(download(target).disabled).toBe(false);
+		}
+	);
+
+	it('waits for application configuration before starting a preview, then loads automatically', async () => {
+		config.set(undefined);
+		terminalServers.set(null);
+		vi.mocked(downloadFilePreview)
+			.mockReset()
+			.mockResolvedValue({
+				blob: { arrayBuffer: async () => new ArrayBuffer(4) } as Blob,
+				filename: 'report.pdf'
+			});
+		const output = fileOutput(['/report.docx']);
+		const result = JSON.parse(String(output[1].output?.[0].text));
+		output[1].output![0].text = JSON.stringify({ ...result, terminal_id: 'terminals' });
+		const target = setup({ initialOutput: output, initialDone: true });
+		expect(download(target).disabled).toBe(true);
+		expect(downloadFilePreview).not.toHaveBeenCalled();
+		config.set({ features: { enable_tool_servers: true } } as any);
+		await tick();
+		expect(download(target).disabled).toBe(false);
+		await vi.waitFor(() => expect(downloadFilePreview).toHaveBeenCalledOnce());
+		expect(target.textContent).not.toContain('Tool servers are disabled');
+	});
+
+	it('loads DOCX previews from the original file session without requiring terminal selection', async () => {
+		terminalServers.set(servers);
+		vi.mocked(downloadFilePreview).mockReset().mockResolvedValue(null);
+		vi.mocked(downloadFileBlob)
+			.mockReset()
+			.mockResolvedValue({
+				blob: { arrayBuffer: async () => new ArrayBuffer(4) } as Blob,
+				filename: 'report.docx'
+			});
+		const target = setup({ initialOutput: fileOutput(['/report.docx']), initialDone: true });
+		await tick();
+		expect(download(target).disabled).toBe(false);
+		expect(downloadFilePreview).toHaveBeenCalledWith(
+			'/api/v1/terminals/terminals',
+			expect.any(String),
+			'/report.docx',
+			'original-session'
+		);
+		await vi.waitFor(() =>
+			expect(downloadFileBlob).toHaveBeenCalledWith(
+				'/api/v1/terminals/terminals',
+				expect.any(String),
+				'/report.docx',
+				'original-session'
+			)
+		);
+	});
+});
 
 describe('native commentary mounted rendering', () => {
 	it('shows real streaming commentary and collapses only after the answer completes', async () => {

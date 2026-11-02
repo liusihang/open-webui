@@ -1092,24 +1092,23 @@ def clean_openai_tool_schema(spec: dict) -> dict:
     return cleaned_spec
 
 
-def add_terminal_display_file_inline_param(spec: dict) -> dict:
+def configure_terminal_display_file_spec(spec: dict) -> dict:
     spec = copy.deepcopy(spec)
     if spec.get('name') != 'display_file':
         return spec
 
     spec['description'] = (
         f'{spec.get("description", "")} '
-        'Set inline=true when the file should be shown inline in the chat message instead of opening the file viewer. '
+        'The client automatically shows the file as an inline chat card with download and supported previews; '
+        'no display-mode parameter is needed. The sidebar preview may also open according to user preferences. '
         'Set page for PDF, DOCX, and PPTX files when you want the preview to open at a specific 1-based page or slide. '
-        'After display_file succeeds, do not display the same file again or emit Markdown for it.'
+        'A successful result confirms the file exists, not that the user has viewed it. '
+        'Do not display the same file again or emit Markdown for it.'
     ).strip()
     parameters = spec.setdefault('parameters', {'type': 'object', 'properties': {}, 'required': []})
     parameters.setdefault('type', 'object')
     properties = parameters.setdefault('properties', {})
-    properties['inline'] = {
-        'type': 'boolean',
-        'description': 'Show the file inline in the chat message instead of opening the file viewer.',
-    }
+    properties.pop('inline', None)
     properties['page'] = {
         'type': 'integer',
         'minimum': 1,
@@ -1635,7 +1634,7 @@ async def get_terminal_tools(
     tools_dict = {}
     for spec in specs:
         function_name = spec['name']
-        tool_spec = clean_openai_tool_schema(add_terminal_display_file_inline_param(spec))
+        tool_spec = clean_openai_tool_schema(configure_terminal_display_file_spec(spec))
 
         if function_name == 'run_command' and terminal_cwd:
             tool_spec['description'] = (
@@ -1653,6 +1652,7 @@ async def get_terminal_tools(
                 params = dict(kwargs)
                 if fn_name == 'display_file':
                     params.pop('page', None)
+                    params.pop('inline', None)
                 response = await execute_tool_server(
                     url=srv_data['url'],
                     headers=hdrs,
@@ -1845,7 +1845,7 @@ async def get_tool_servers_data(servers: list[dict[str, Any]]) -> list[dict[str,
             'openapi': response,
             'info': response.get('info', {}),
             'specs': [
-                add_terminal_display_file_inline_param(spec) for spec in convert_openapi_to_tool_payload(response)
+                configure_terminal_display_file_spec(spec) for spec in convert_openapi_to_tool_payload(response)
             ],
         }
 

@@ -3466,7 +3466,7 @@
 	"settings.personal.interface.stylizedPdfExport.label": "Stylized PDF Export",
 	"settings.personal.interface.temporaryChatByDefault.description": "Start new chats as temporary unless changed.",
 	"settings.personal.interface.temporaryChatByDefault.label": "Temporary Chat by Default",
-	"settings.personal.interface.terminalFileDisplay.description": "Choose where terminal display_file results appear by default.",
+	"settings.personal.interface.terminalFileDisplay.description": "Files always appear as cards in chat. Choose Sidebar to also open the file preview on desktop.",
 	"settings.personal.interface.terminalFileDisplay.label": "Terminal File Display",
 	"settings.personal.interface.terminalPreviewAllowSameOrigin.description": "Allow terminal previews to access same-origin browser APIs.",
 	"settings.personal.interface.terminalPreviewAllowSameOrigin.label": "Terminal Preview Allow Same Origin",

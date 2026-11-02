@@ -38,7 +38,7 @@
 	let scrollOnBranchChange = true;
 	let scrollOnResponseGeneration = true;
 	let showFilesOnTerminalSelect = true;
-	let terminalFileDisplay: 'sidebar' | 'inline' = 'sidebar';
+	let terminalFileDisplay: 'sidebar' | 'inline' = 'inline';
 	let userLocation = false;
 
 	// Interface
@@ -362,7 +362,7 @@
 		scrollOnBranchChange = currentSettings?.scrollOnBranchChange ?? true;
 		scrollOnResponseGeneration = currentSettings?.scrollOnResponseGeneration ?? true;
 		showFilesOnTerminalSelect = currentSettings?.showFilesOnTerminalSelect ?? true;
-		terminalFileDisplay = currentSettings?.terminalFileDisplay === 'inline' ? 'inline' : 'sidebar';
+		terminalFileDisplay = currentSettings?.terminalFileDisplay === 'sidebar' ? 'sidebar' : 'inline';
 
 		temporaryChatByDefault = currentSettings?.temporaryChatByDefault ?? false;
 		chatDirection = currentSettings?.chatDirection ?? 'auto';

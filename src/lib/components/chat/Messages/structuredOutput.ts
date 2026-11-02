@@ -188,7 +188,9 @@ function getInlineFileFromToolOutput(callItem?: OutputItem, resultItem?: OutputI
 		typeof result !== 'object' ||
 		result.type !== 'file' ||
 		result.source !== 'open_terminal' ||
-		result.exists === false ||
+		result.exists !== true ||
+		resultItem.status === 'failed' ||
+		resultItem.status === 'incomplete' ||
 		!result.path ||
 		!result.terminal_selector
 	) {

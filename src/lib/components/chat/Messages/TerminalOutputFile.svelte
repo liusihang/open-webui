@@ -8,6 +8,7 @@
 	import type { i18n as i18nType } from 'i18next';
 	import { toast } from 'svelte-sonner';
 	import {
+		config,
 		settings,
 		selectedTerminalId,
 		showControls,
@@ -19,6 +20,7 @@
 	import Icon from '$lib/components/chat/FileNav/Icon.svelte';
 	import { fileIconName } from '$lib/components/chat/FileNav/fileIcon';
 	import { normalizeDocumentTargetPage } from '$lib/utils/documentPreview';
+	import { WEBUI_API_BASE_URL } from '$lib/constants';
 
 	export let item: any;
 	export let chatId = '';
@@ -50,20 +52,29 @@
 	const AUDIO_EXTS = new Set(['mp3', 'wav', 'ogg', 'oga', 'flac', 'm4a', 'aac', 'wma', 'opus']);
 	const SQLITE_EXTS = new Set(['db', 'sqlite', 'sqlite3', 'db3']);
 	const OFFICE_EXTS = new Set(['docx', 'xlsx', 'xls', 'pptx']);
+	const DOWNLOAD_ONLY_EXTS = new Set(['zip', '7z', 'rar', 'tar', 'gz', 'bz2', 'xz', 'bin']);
 
 	$: path = String(item?.full_path || item?.path || '');
 	$: name = String(item?.name || path.split('/').filter(Boolean).at(-1) || 'file');
 	$: targetPage = normalizeDocumentTargetPage(item?.page);
 	$: selector = item?.terminal_selector;
-	$: terminal = resolveTerminal();
+	$: sessionId = String(item?.session_id || chatId || '');
+	$: terminal = $config?.features?.enable_tool_servers
+		? resolveTerminal(
+				selector,
+				item?.terminal_id,
+				$terminalServers,
+				($settings as any)?.terminalServers ?? []
+			)
+		: null;
 	$: unavailable = !terminal;
-	$: previewKey = terminal ? `${terminal.url}|${terminal.key}|${path}|${chatId}` : '';
+	$: previewKey = terminal ? `${terminal.url}|${terminal.key}|${path}|${sessionId}` : '';
 	$: isPerChatTerminal =
 		($terminalServers ?? []).find((server: any) => server.id === selector)?.contexts?.chat
 			?.context_id === 'chat_id';
 	$: previewBaseUrl =
-		terminal && isPerChatTerminal && chatId
-			? `${terminal.url}/chats/${encodeURIComponent(chatId)}`
+		terminal && isPerChatTerminal && sessionId
+			? `${terminal.url}/chats/${encodeURIComponent(sessionId)}`
 			: (terminal?.url ?? '');
 	$: previewClass = isImage(path)
 		? 'h-[22rem]'
@@ -74,7 +85,14 @@
 			  getExt(path) === 'svg'
 			? 'h-96'
 			: 'h-72';
-	$: if (expanded && terminal && path && previewKey !== loadedKey && !loading) {
+	$: if (
+		expanded &&
+		terminal &&
+		path &&
+		!isDownloadOnly(path) &&
+		previewKey !== loadedKey &&
+		!loading
+	) {
 		void loadPreview(previewKey);
 	}
 
@@ -85,18 +103,32 @@
 	const isSqlite = (value: string) => SQLITE_EXTS.has(getExt(value));
 	const isPdf = (value: string) => getExt(value) === 'pdf';
 	const isOffice = (value: string) => OFFICE_EXTS.has(getExt(value));
+	const isDownloadOnly = (value: string) => DOWNLOAD_ONLY_EXTS.has(getExt(value));
 
 	const t = (key: string, vars?: Record<string, unknown>) => $i18n?.t?.(key, vars) ?? key;
 
-	function resolveTerminal(): { url: string; key: string } | null {
-		if (!selector || $selectedTerminalId !== selector) return null;
+	function resolveTerminal(
+		selector: string,
+		terminalId: string | undefined,
+		servers: any[] | null,
+		directServers: any[]
+	): { url: string; key: string } | null {
+		if (!selector) return null;
 
-		const systemTerminal = ($terminalServers ?? []).find((server: any) => server.id === selector);
+		const systemTerminal = servers?.find((server: any) => server.id === selector);
 		if (systemTerminal?.url) {
 			return { url: systemTerminal.url, key: localStorage.token };
 		}
+		// Saved file references already identify their system terminal. Its same-origin
+		// proxy enforces access; downloads need not wait for unrelated tool discovery.
+		if (terminalId && terminalId === selector) {
+			return {
+				url: `${WEBUI_API_BASE_URL}/terminals/${encodeURIComponent(terminalId)}`,
+				key: localStorage.token
+			};
+		}
 
-		const directTerminal = (($settings as any)?.terminalServers ?? []).find(
+		const directTerminal = directServers.find(
 			(server: any) => server.url === selector && server.enabled
 		);
 		if (directTerminal?.url) {
@@ -126,7 +158,7 @@
 
 	async function blobForPreview() {
 		if (!terminal) return null;
-		return downloadFileBlob(terminal.url, terminal.key, path, chatId || undefined);
+		return downloadFileBlob(terminal.url, terminal.key, path, sessionId || undefined);
 	}
 
 	async function loadExcelSheet(sheet: string) {
@@ -171,7 +203,7 @@
 						terminal.url,
 						terminal.key,
 						path,
-						chatId || undefined
+						sessionId || undefined
 					);
 					if (preview) {
 						filePdfData = await preview.blob.arrayBuffer();
@@ -195,7 +227,7 @@
 						terminal.url,
 						terminal.key,
 						path,
-						chatId || undefined
+						sessionId || undefined
 					);
 					if (preview) {
 						filePdfData = await preview.blob.arrayBuffer();
@@ -208,8 +240,8 @@
 						fileOfficeSlides = resultImages.images;
 					}
 				}
-			} else if (terminal) {
-				fileContent = await readFile(terminal.url, terminal.key, path, chatId || undefined);
+			} else if (terminal && !isDownloadOnly(path)) {
+				fileContent = await readFile(terminal.url, terminal.key, path, sessionId || undefined);
 			}
 		} catch (e) {
 			error = e instanceof Error ? e.message : t('Preview failed');
@@ -220,13 +252,14 @@
 
 	function openInFiles() {
 		if (unavailable || !path) return;
+		selectedTerminalId.set(selector);
 		showControls.set(true);
 		showFileNavPath.set(targetPage ? { path, page: targetPage } : path);
 	}
 
 	async function downloadFile() {
 		if (!terminal || !path) return;
-		const result = await downloadFileBlob(terminal.url, terminal.key, path, chatId || undefined);
+		const result = await downloadFileBlob(terminal.url, terminal.key, path, sessionId || undefined);
 		if (!result) {
 			toast.error(t('Download failed'));
 			return;
@@ -236,22 +269,28 @@
 		const a = document.createElement('a');
 		a.href = url;
 		a.download = result.filename;
+		document.body.appendChild(a);
 		a.click();
-		URL.revokeObjectURL(url);
+		a.remove();
+		// Keep the object URL alive until the browser starts the download, including on mobile.
+		setTimeout(() => URL.revokeObjectURL(url), 1000);
 	}
 
 	onDestroy(clearPreview);
 </script>
 
 <div
-	class="my-2 w-full overflow-hidden rounded-xl border border-gray-200 bg-white dark:border-white/8 dark:bg-gray-950/20"
+	data-terminal-file={path}
+	class="my-2 w-full min-w-0 max-w-full overflow-hidden rounded-xl border border-gray-200 bg-white dark:border-white/8 dark:bg-gray-950/20"
 >
 	<div
-		class="flex h-8 items-center {expanded ? 'border-b border-gray-100 dark:border-white/8' : ''}"
+		class="flex min-h-11 items-center sm:min-h-8 {expanded
+			? 'border-b border-gray-100 dark:border-white/8'
+			: ''}"
 	>
 		<button
 			type="button"
-			class="flex h-full min-w-0 flex-1 items-center gap-2 px-2.5 text-left"
+			class="flex min-h-11 min-w-0 flex-1 items-center gap-2 px-2.5 text-left sm:min-h-8"
 			on:click={() => (expanded = !expanded)}
 			aria-expanded={expanded}
 		>
@@ -260,14 +299,17 @@
 			>
 				<Icon name={fileIconName(name || path || '', 'file')} size={14} />
 			</div>
-			<div class="min-w-0 flex-1 truncate text-xs font-medium text-gray-800 dark:text-gray-100">
+			<div
+				title={name}
+				class="min-w-0 flex-1 truncate text-xs font-medium text-gray-800 dark:text-gray-100"
+			>
 				{name}
 			</div>
 		</button>
 
 		<button
 			type="button"
-			class="mr-1 flex size-6 shrink-0 items-center justify-center rounded text-gray-400 transition-colors hover:text-gray-700 disabled:opacity-40 disabled:hover:text-gray-400 dark:text-gray-500 dark:hover:text-gray-200 dark:disabled:hover:text-gray-500"
+			class="mr-1 flex size-9 shrink-0 items-center justify-center rounded text-gray-400 transition-colors hover:text-gray-700 disabled:opacity-40 disabled:hover:text-gray-400 dark:text-gray-500 dark:hover:text-gray-200 dark:disabled:hover:text-gray-500 sm:size-6"
 			disabled={unavailable}
 			on:click|stopPropagation={downloadFile}
 			aria-label={t('Download')}
@@ -276,7 +318,7 @@
 		</button>
 		<button
 			type="button"
-			class="mr-1 flex size-6 shrink-0 items-center justify-center rounded text-gray-400 transition-colors hover:text-gray-700 disabled:opacity-40 disabled:hover:text-gray-400 dark:text-gray-500 dark:hover:text-gray-200 dark:disabled:hover:text-gray-500"
+			class="mr-1 flex size-9 shrink-0 items-center justify-center rounded text-gray-400 transition-colors hover:text-gray-700 disabled:opacity-40 disabled:hover:text-gray-400 dark:text-gray-500 dark:hover:text-gray-200 dark:disabled:hover:text-gray-500 sm:size-6"
 			disabled={unavailable}
 			on:click|stopPropagation={openInFiles}
 			aria-label={t('Open')}
@@ -292,6 +334,10 @@
 			</div>
 		{:else if error}
 			<div class="px-4 py-3 text-xs text-red-500 dark:text-red-400">{error}</div>
+		{:else if isDownloadOnly(path)}
+			<div class="px-4 py-3 text-xs text-gray-500 dark:text-gray-400">
+				{t('No preview available')}
+			</div>
 		{:else}
 			<div
 				class="{previewClass} max-h-[75vh] min-h-24 resize-y overflow-hidden bg-gray-50 dark:bg-gray-950"

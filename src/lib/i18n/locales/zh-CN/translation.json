@@ -3461,7 +3461,7 @@
 	"settings.personal.interface.stylizedPdfExport.label": "美化 PDF 导出",
 	"settings.personal.interface.temporaryChatByDefault.description": "默认创建临时对话，除非更改设置。",
 	"settings.personal.interface.temporaryChatByDefault.label": "默认使用临时对话",
-	"settings.personal.interface.terminalFileDisplay.description": "选择终端 display_file 结果的默认显示位置。",
+	"settings.personal.interface.terminalFileDisplay.description": "文件始终以卡片显示在聊天中。选择侧边栏可在桌面端同时打开文件预览。",
 	"settings.personal.interface.terminalFileDisplay.label": "终端文件显示",
 	"settings.personal.interface.terminalPreviewAllowSameOrigin.description": "允许终端预览访问同源浏览器 API。",
 	"settings.personal.interface.terminalPreviewAllowSameOrigin.label": "终端预览允许同源",

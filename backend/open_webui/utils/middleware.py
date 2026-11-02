@@ -358,7 +358,7 @@ def build_terminal_file_tool_result(
     if isinstance(tool_result, (list, tuple)) and tool_result and isinstance(tool_result[0], dict):
         tool_result = tool_result[0]
 
-    if tool_function_name != 'display_file' or not isinstance(tool_result, dict) or tool_result.get('exists') is False:
+    if tool_function_name != 'display_file' or not isinstance(tool_result, dict) or tool_result.get('exists') is not True:
         return None
 
     tool_id = (tool or {}).get('tool_id', '')
@@ -371,15 +371,26 @@ def build_terminal_file_tool_result(
     path = tool_result.get('path') or tool_function_params.get('path')
     if not terminal_selector or not path:
         return None
-    mime_type, _ = mimetypes.guess_type(path)
-    mime_type = mime_type or 'application/octet-stream'
+    mime_type = tool_result.get('mime_type') or tool_result.get('content_type')
+    if not mime_type or mime_type == 'application/octet-stream':
+        # Slim runtimes may not have /etc/mime.types or the Office registrations.
+        mime_type = (
+            {
+                '.docx': 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+                '.xlsx': 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+                '.xls': 'application/vnd.ms-excel',
+                '.pptx': 'application/vnd.openxmlformats-officedocument.presentationml.presentation',
+            }.get(os.path.splitext(path)[1].lower())
+            or mimetypes.guess_type(path)[0]
+            or 'application/octet-stream'
+        )
     page = tool_result.get('page') or tool_function_params.get('page')
 
     return {
         **tool_result,
         'type': 'file',
         'source': 'open_terminal',
-        **({'displayed': True} if tool_function_params.get('inline') is True else {}),
+        'displayed': True,
         'terminal_selector': terminal_selector,
         **({'terminal_id': terminal_id} if terminal_id else {}),
         **({'terminal_url': server_url} if server_url and not terminal_id else {}),
@@ -387,8 +398,8 @@ def build_terminal_file_tool_result(
         'path': path,
         'full_path': tool_result.get('full_path') or path,
         'name': tool_result.get('name') or os.path.basename(path),
-        'mime_type': tool_result.get('mime_type') or tool_result.get('content_type') or mime_type,
-        'content_type': tool_result.get('content_type') or tool_result.get('mime_type') or mime_type,
+        'mime_type': mime_type,
+        'content_type': mime_type,
         **({'page': page} if page else {}),
     }
 
@@ -1075,15 +1086,13 @@ async def terminal_event_handler(
         return
 
     if tool_function_name == 'display_file':
-        if tool_function_params.get('inline') is True:
-            return
         result = parse_terminal_tool_result(tool_result)
         # Open Terminal resolves the argument against the session cwd, so prefer its resolved path
         path = result.get('path') or tool_function_params.get('path', '')
         if not path:
             return
         # Only emit if the file actually exists
-        if result.get('exists') is False:
+        if result.get('exists') is not True:
             return
         page = tool_function_params.get('page')
 

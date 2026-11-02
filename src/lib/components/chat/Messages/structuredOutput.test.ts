@@ -14,6 +14,61 @@ const message = (id: string, text: string, phase?: string): OutputItem => ({
 	content: [{ type: 'output_text', text }]
 });
 
+describe('terminal file display conversion', () => {
+	const file = {
+		type: 'file',
+		source: 'open_terminal',
+		exists: true,
+		path: '/home/user/report.docx',
+		terminal_selector: 'terminals',
+		session_id: 'source-session'
+	};
+	const output = (result: unknown, args: Record<string, unknown> = {}): OutputItem[] => [
+		{
+			type: 'function_call',
+			name: 'display_file',
+			call_id: 'file-call',
+			arguments: JSON.stringify({ path: file.path, ...args })
+		},
+		{
+			type: 'function_call_output',
+			call_id: 'file-call',
+			status: 'completed',
+			output: [{ type: 'input_text', text: JSON.stringify(result) }]
+		}
+	];
+	it.each([{}, { inline: false }, { inline: true }])(
+		'keeps old and new file results visible without a mode requirement: %o',
+		(args) => {
+			const files = buildOutputDisplayItems(output(file, args)).filter(
+				(item) => item.type === 'file'
+			);
+			expect(files).toHaveLength(1);
+			expect(files[0]).toMatchObject({ item: file });
+		}
+	);
+	it('retains the requested document page and handles nested JSON results', () => {
+		const files = buildOutputDisplayItems(output(JSON.stringify(file), { page: 3 })).filter(
+			(item) => item.type === 'file'
+		);
+		expect(files[0]).toMatchObject({ item: { ...file, page: 3 } });
+	});
+	it.each([
+		{ ...file, exists: false },
+		{ ...file, exists: undefined },
+		{ error: 'File not found' }
+	])('does not promote invalid results: %o', (result) => {
+		expect(
+			buildOutputDisplayItems(output(result)).filter((item) => item.type === 'file')
+		).toHaveLength(0);
+	});
+	it.each(['failed', 'incomplete'])('does not promote a %s result', (status) => {
+		const items = output(file);
+		items[1].status = status;
+		expect(buildOutputDisplayItems(items).filter((item) => item.type === 'file')).toHaveLength(0);
+	});
+});
+
 describe('native commentary display conversion', () => {
 	it('distinguishes commentary from final answers without changing raw output or copy text', () => {
 		const output = [

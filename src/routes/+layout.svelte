@@ -519,16 +519,11 @@
 			return;
 		}
 		const { toolServer, toolServerData, token } = resolveToolServer(data.server?.url);
-		const defaultInline =
-			data?.name === 'display_file' &&
-			data?.params?.path &&
-			data?.params?.inline === undefined &&
-			$settings?.terminalFileDisplay === 'inline' &&
-			isDirectTerminalServer(data.server?.url);
-		const params = defaultInline ? { ...data.params, inline: true } : data?.params;
+		const params = data?.params;
 		const serverParams = data?.name === 'display_file' && params ? { ...params } : params;
 		if (serverParams && data?.name === 'display_file') {
 			delete serverParams.page;
+			delete serverParams.inline;
 		}
 
 		console.log('executeTool', data, toolServer);
@@ -545,23 +540,28 @@
 
 			console.log('executeToolServer', res);
 			const result = Array.isArray(res) ? res[0] : res;
-			const inlineDisplayFile =
-				data?.name === 'display_file' && params?.path && params?.inline === true;
-			const output =
-				inlineDisplayFile && result?.exists !== false
-					? Array.isArray(res)
-						? [terminalFileResult(result, params, toolServer.url, chatId)]
-						: terminalFileResult(result, params, toolServer.url, chatId)
-					: res;
+			const displayTerminalFile =
+				data?.name === 'display_file' &&
+				params?.path &&
+				isDirectTerminalServer(toolServer.url) &&
+				result?.exists === true;
+			const output = displayTerminalFile
+				? Array.isArray(res)
+					? [terminalFileResult(result, params, toolServer.url, chatId)]
+					: terminalFileResult(result, params, toolServer.url, chatId)
+				: res;
 
-			if (data?.name === 'display_file' && params?.path && !inlineDisplayFile && !chatId) {
-				if (result?.exists !== false) {
-					displayFileHandler(
-						result?.path ?? params.path,
-						{ showControls, showFileNavPath },
-						{ page: params?.page }
-					);
-				}
+			if (
+				displayTerminalFile &&
+				!chatId &&
+				!$mobile &&
+				$settings?.terminalFileDisplay === 'sidebar'
+			) {
+				displayFileHandler(
+					result?.path ?? params.path,
+					{ showControls, showFileNavPath },
+					{ page: params?.page }
+				);
 			}
 
 			if (['write_file'].includes(data?.name) && params?.path) {
