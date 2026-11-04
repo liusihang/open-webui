@@ -1,21 +1,24 @@
 <script lang="ts">
+	import AdminSettingRow from './AdminSettingRow.svelte';
 	import { getContext, onMount } from 'svelte';
 	import { toast } from 'svelte-sonner';
 
+	import { config as appConfig } from '$lib/stores';
+	import { getBackendConfig } from '$lib/apis';
 	import { getSubagentsConfig, setSubagentsConfig } from '$lib/apis/configs';
 	import Spinner from '$lib/components/common/Spinner.svelte';
 	import Switch from '$lib/components/common/Switch.svelte';
 
-	const i18n = getContext('i18n');
+	const i18n = getContext<typeof import('$lib/i18n').default>('i18n');
 
 	let loading = true;
 	let saving = false;
 	let enabled = false;
 	let backgroundEnabled = false;
-	let maxConcurrent = 20;
-	let maxAsync = 20;
-	let maxIterations = 30;
-	let maxOutput = 30000;
+	let maxConcurrent: number | null = 20;
+	let maxAsync: number | null = 20;
+	let maxIterations: number | null = 30;
+	let maxOutput: number | null = 30000;
 	let systemPrompt = '';
 
 	onMount(async () => {
@@ -41,12 +44,13 @@
 			await setSubagentsConfig(localStorage.token, {
 				ENABLE_SUBAGENTS: enabled,
 				SUBAGENTS_BACKGROUND_ENABLED: backgroundEnabled,
-				SUBAGENTS_MAX_CONCURRENT: maxConcurrent,
-				SUBAGENTS_MAX_ASYNC: maxAsync,
-				SUBAGENTS_MAX_ITERATIONS: maxIterations,
-				SUBAGENTS_MAX_OUTPUT: maxOutput,
+				SUBAGENTS_MAX_CONCURRENT: Number(maxConcurrent) || 20,
+				SUBAGENTS_MAX_ASYNC: Number(maxAsync) || 20,
+				SUBAGENTS_MAX_ITERATIONS: Number(maxIterations) || 30,
+				SUBAGENTS_MAX_OUTPUT: Number(maxOutput) || 30000,
 				SUBAGENTS_SYSTEM_PROMPT: systemPrompt
 			});
+			await appConfig.set(await getBackendConfig());
 			toast.success($i18n.t('Settings saved successfully!'));
 		} catch (error) {
 			toast.error(`${error}`);
@@ -66,12 +70,12 @@
 			<div class="flex justify-center py-8"><Spinner className="size-6" /></div>
 		{:else}
 			<div class="flex flex-col gap-2.5">
-				<label class="flex cursor-pointer items-center justify-between">
-					<span class="text-xs text-gray-600 dark:text-gray-400">
+				<AdminSettingRow let:labelId>
+					<span slot="label">
 						{$i18n.t('settings.admin.subagents.enableSubAgents.label')}
 					</span>
-					<Switch bind:state={enabled} />
-				</label>
+					<Switch ariaLabelledbyId={labelId} bind:state={enabled} />
+				</AdminSettingRow>
 				<p class="-mt-1 text-[0.6875rem] text-gray-400 dark:text-gray-600">
 					{$i18n.t(
 						'Allow the AI to delegate tasks to sub-agents. Each sub-agent creates a real chat with full tool access. Uses additional LLM calls.'
@@ -89,21 +93,30 @@
 								type="number"
 								bind:value={maxConcurrent}
 								min="-1"
+								step="1"
+								aria-describedby="sa-concurrent-help"
 								class="h-7 w-16 rounded-lg border border-gray-100/50 bg-gray-50/40 px-2 text-xs text-gray-700 outline-hidden transition-colors focus:border-blue-400 dark:border-white/[0.04] dark:bg-white/[0.03] dark:text-gray-300 dark:focus:border-blue-500"
 							/>
 							<span class="text-[0.6875rem] text-gray-400 dark:text-gray-600">
 								{$i18n.t('simultaneous sub-agents')}
 							</span>
 						</div>
+						<p
+							id="sa-concurrent-help"
+							class="mt-1 text-[0.6875rem] text-gray-400 dark:text-gray-600"
+						>
+							{$i18n.t('Leave empty to use the default: {{value}}.', { value: 20 })}
+							{$i18n.t('Use -1 for unlimited.')}
+						</p>
 					</div>
 
 					<div>
-						<label class="flex cursor-pointer items-center justify-between">
-							<span class="text-xs text-gray-600 dark:text-gray-400">
+						<AdminSettingRow let:labelId>
+							<span slot="label">
 								{$i18n.t('settings.admin.subagents.enableBackgroundSubAgents.label')}
 							</span>
-							<Switch bind:state={backgroundEnabled} />
-						</label>
+							<Switch ariaLabelledbyId={labelId} bind:state={backgroundEnabled} />
+						</AdminSettingRow>
 						<p class="mt-1 text-[0.6875rem] text-gray-400 dark:text-gray-600">
 							{$i18n.t('settings.admin.subagents.enableBackgroundSubAgents.description')}
 						</p>
@@ -120,12 +133,18 @@
 									type="number"
 									bind:value={maxAsync}
 									min="-1"
+									step="1"
+									aria-describedby="sa-async-help"
 									class="h-7 w-16 rounded-lg border border-gray-100/50 bg-gray-50/40 px-2 text-xs text-gray-700 outline-hidden transition-colors focus:border-blue-400 dark:border-white/[0.04] dark:bg-white/[0.03] dark:text-gray-300 dark:focus:border-blue-500"
 								/>
 								<span class="text-[0.6875rem] text-gray-400 dark:text-gray-600">
 									{$i18n.t('background sub-agents')}
 								</span>
 							</div>
+							<p id="sa-async-help" class="mt-1 text-[0.6875rem] text-gray-400 dark:text-gray-600">
+								{$i18n.t('Leave empty to use the default: {{value}}.', { value: 20 })}
+								{$i18n.t('Use -1 for unlimited.')}
+							</p>
 						</div>
 					{/if}
 
@@ -139,13 +158,20 @@
 								type="number"
 								bind:value={maxIterations}
 								min="1"
-								max="100"
+								step="1"
+								aria-describedby="sa-iterations-help"
 								class="h-7 w-16 rounded-lg border border-gray-100/50 bg-gray-50/40 px-2 text-xs text-gray-700 outline-hidden transition-colors focus:border-blue-400 dark:border-white/[0.04] dark:bg-white/[0.03] dark:text-gray-300 dark:focus:border-blue-500"
 							/>
 							<span class="text-[0.6875rem] text-gray-400 dark:text-gray-600">
 								{$i18n.t('tool loops per sub-agent')}
 							</span>
 						</div>
+						<p
+							id="sa-iterations-help"
+							class="mt-1 text-[0.6875rem] text-gray-400 dark:text-gray-600"
+						>
+							{$i18n.t('Leave empty to use the default: {{value}}.', { value: 30 })}
+						</p>
 					</div>
 
 					<div>
@@ -157,13 +183,16 @@
 								id="sa-output"
 								type="number"
 								bind:value={maxOutput}
-								min="1000"
-								max="100000"
-								step="1000"
+								min="1"
+								step="1"
+								aria-describedby="sa-output-help"
 								class="h-7 w-20 rounded-lg border border-gray-100/50 bg-gray-50/40 px-2 text-xs text-gray-700 outline-hidden transition-colors focus:border-blue-400 dark:border-white/[0.04] dark:bg-white/[0.03] dark:text-gray-300 dark:focus:border-blue-500"
 							/>
 							<span class="text-[0.6875rem] text-gray-400 dark:text-gray-600">chars</span>
 						</div>
+						<p id="sa-output-help" class="mt-1 text-[0.6875rem] text-gray-400 dark:text-gray-600">
+							{$i18n.t('Leave empty to use the default: {{value}}.', { value: 30000 })}
+						</p>
 					</div>
 
 					<div>

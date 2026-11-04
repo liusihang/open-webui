@@ -39,6 +39,19 @@ async def submit_file(request, form, *, user, db, wait=True, auto_link=None, ret
         raise HTTPException(403, 'File access prohibited')
     if form.collection_name:
         await _validate_collection_access([form.collection_name], user, access_type='write')
+        from open_webui.models.knowledge import Knowledges
+        from open_webui.routers.knowledge import check_knowledge_upload_limits
+
+        linked = await Knowledges.has_file(form.collection_name, row.id, db=db)
+        await check_knowledge_upload_limits(
+            form.collection_name,
+            0 if linked else 1,
+            file_size=(row.meta or {}).get('size'),
+            exclude_file_ids=[row.id],
+            db=db,
+        )
+        if auto_link is None:
+            auto_link = {'directory_id': getattr(form, 'directory_id', None)}
     config = await Config.get_many(*RETRIEVAL_CONFIG_KEYS.values())
     source_hash = (row.meta or {}).get('file_hash') if (row.meta or {}).get('server_hash_verified') else None
     payload = {'auto_link': auto_link} if auto_link else {}
@@ -432,6 +445,12 @@ async def execute(job_id, token):
             if exc.status_code == 403:
                 raise AdmissionError('处理时已无目标知识库的写入权限；原文件已保留。') from None
             raise
+    if job.knowledge_id:
+        from open_webui.routers.knowledge import check_knowledge_upload_limits
+
+        # Recheck mutable size limits before extracting or encoding. Capacity is
+        # authoritatively checked under the publication's knowledge write lock.
+        await check_knowledge_upload_limits(job.knowledge_id, 0, file_size=(file.meta or {}).get('size'))
     request = SimpleNamespace(
         app=SimpleNamespace(
             state=SimpleNamespace(
@@ -615,7 +634,6 @@ async def _write_candidate(request, job, token, file, config, indexer, space_id,
     from langchain_text_splitters import RecursiveCharacterTextSplitter, TokenTextSplitter, MarkdownHeaderTextSplitter
     from open_webui.retrieval.vector.async_client import ASYNC_VECTOR_DB_CLIENT
     from open_webui.retrieval.utils import get_embedding_function
-    from open_webui.config import RAG_EMBEDDING_CONTENT_PREFIX
     from open_webui.retrieval.integration import services
     from open_webui.models.knowledge import Knowledges
     from open_webui.utils.misc import sanitize_text_for_db
@@ -685,7 +703,9 @@ async def _write_candidate(request, job, token, file, config, indexer, space_id,
                 texts = [sanitize_text_for_db(item['text']) for item in batch]
                 vectors = await asyncio.wait_for(
                     embedding(
-                        [t.replace('\n', ' ') for t in texts], prefix=RAG_EMBEDDING_CONTENT_PREFIX, user=request.user
+                        [t.replace('\n', ' ') for t in texts],
+                        prefix=config.get('rag.embedding_content_prefix'),
+                        user=request.user,
                     ),
                     timeout=180,
                 )
@@ -927,12 +947,49 @@ async def _reuse_for_knowledge(job, token, file, indexer, space_id):
 
 
 async def _link_upload(db, job):
-    link = (job.payload or {}).get('auto_link')
-    if not link or not job.knowledge_id:
+    """Link only inside the caller's publication transaction; never commit here."""
+    if not job.knowledge_id:
         return
-    from sqlalchemy import select
-    from open_webui.models.knowledge import KnowledgeFile, KnowledgeDirectory
+    from sqlalchemy import select, update, func
+    from open_webui.models.knowledge import Knowledge, KnowledgeFile, KnowledgeDirectory
+    from open_webui.models.config import Config
+    from open_webui.models.files import File
+    from open_webui.models.users import Users
+    from open_webui.models.access_grants import AccessGrants
 
+    # An UPDATE also serializes SQLite writers; SELECT FOR UPDATE alone does not.
+    locked = await db.execute(
+        update(Knowledge).where(Knowledge.id == job.knowledge_id).values(updated_at=Knowledge.updated_at)
+    )
+    if locked.rowcount != 1:
+        raise ValueError('target knowledge base no longer exists')
+    knowledge = await db.get(Knowledge, job.knowledge_id, populate_existing=True)
+    user = await Users.get_user_by_id(job.user_id, db=db)
+    if (
+        not user
+        or user.role not in ('user', 'admin')
+        or not (
+            user.role == 'admin'
+            or knowledge.user_id == user.id
+            or await AccessGrants.has_access(
+                user_id=user.id, resource_type='knowledge', resource_id=job.knowledge_id, permission='write', db=db
+            )
+        )
+    ):
+        raise PermissionError('knowledge write access no longer valid at publication')
+    file = await db.get(File, job.file_id)
+    local = knowledge.meta or {}
+    size = (file.meta or {}).get('size')
+    for maximum in (
+        await Config.get('rag.file.max_size'),
+        await Config.get('knowledge.max_file_size'),
+        local.get('max_file_size'),
+    ):
+        if maximum and size is not None and size > int(maximum) * 1024 * 1024:
+            raise ValueError(f'File exceeds knowledge upload size limit ({maximum} MB)')
+    link = (job.payload or {}).get('auto_link')
+    if link is None:
+        return
     directory = link.get('directory_id')
     if directory:
         row = await db.get(KnowledgeDirectory, directory)
@@ -943,19 +1000,50 @@ async def _link_upload(db, job):
         .where(KnowledgeFile.knowledge_id == job.knowledge_id, KnowledgeFile.file_id == job.file_id)
         .limit(1)
     )
-    if not existing:
-        now = int(time.time())
-        db.add(
-            KnowledgeFile(
-                id=str(uuid.uuid4()),
-                knowledge_id=job.knowledge_id,
-                file_id=job.file_id,
-                user_id=job.user_id,
-                directory_id=directory,
-                created_at=now,
-                updated_at=now,
-            )
+    if existing:
+        return
+    limit = min(
+        (int(value) for value in (await Config.get('knowledge.max_file_count'), local.get('max_file_count')) if value),
+        default=None,
+    )
+    if limit is not None:
+        count = await db.scalar(
+            select(func.count()).select_from(KnowledgeFile).where(KnowledgeFile.knowledge_id == job.knowledge_id)
         )
+        if count >= limit:
+            raise ValueError(f'Knowledge base file limit exceeded ({limit} files maximum).')
+    now = int(time.time())
+    db.add(
+        KnowledgeFile(
+            id=str(uuid.uuid4()),
+            knowledge_id=job.knowledge_id,
+            file_id=job.file_id,
+            user_id=job.user_id,
+            directory_id=directory,
+            created_at=now,
+            updated_at=now,
+        )
+    )
+
+
+async def link_stored_upload(file_id, user, metadata):
+    """Complete a deliberately unparsed video and its knowledge link atomically."""
+    from open_webui.internal.db import get_async_db_context
+    from open_webui.models.files import File
+
+    async with get_async_db_context() as db:
+        file = await db.get(File, file_id)
+        if not file or (file.user_id != user.id and user.role != 'admin'):
+            raise PermissionError('file access prohibited')
+        job = SimpleNamespace(
+            file_id=file_id,
+            user_id=user.id,
+            knowledge_id=metadata.get('knowledge_id'),
+            payload={'auto_link': {'directory_id': metadata.get('directory_id')}},
+        )
+        await _link_upload(db, job)
+        file.data = {**(file.data or {}), 'status': 'completed', 'processing_status': 'completed', 'error': None}
+        await db.commit()
 
 
 async def publish_association(job_id, token, *, file_id, version, knowledge_id, expected_text_count):

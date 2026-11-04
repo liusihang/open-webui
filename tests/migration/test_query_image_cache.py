@@ -58,6 +58,7 @@ def tool_scope():
         convert_pydantic_model_to_openai_function_spec=convert_pydantic_model_to_openai_function_spec,
         Config=SimpleNamespace(get_many=AsyncMock(return_value={}), get=AsyncMock(return_value={})),
         is_native_pdf_attachment=lambda *args: False,
+        ENABLE_TOOLS=False,
     )
     helper_spec = importlib.util.spec_from_file_location(
         'query_cache_knowledge_helpers', BUILTIN.with_name('knowledge_tools.py')
@@ -66,6 +67,7 @@ def tool_scope():
     helper_spec.loader.exec_module(helper)
     scope.update(knowledge_entries=helper.knowledge_entries, model_evidence_result=helper.model_evidence_result)
     for name in (
+        'display_file',
         'list_knowledge',
         'search_knowledge_files',
         'grep_knowledge_files',
@@ -152,12 +154,13 @@ class QueryImageCacheTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn(IMAGE_A, specs[0])
         self.assertNotIn(IMAGE_B, specs[1])
 
-    async def test_only_five_canonical_knowledge_interfaces_are_advertised(self):
+    async def test_canonical_knowledge_interfaces_and_file_display_are_advertised(self):
         tools = await self.resolve([])
         visible = {name for name, tool in tools.items() if not tool.get('hidden')}
         self.assertEqual(
             visible,
             {
+                'display_file',
                 'search_knowledge_bases',
                 'search_knowledge_files',
                 'grep_knowledge_files',
@@ -198,7 +201,13 @@ class QueryImageCacheTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(
             {name for name, tool in tools.items() if not tool.get('hidden')},
-            {'search_knowledge_files', 'grep_knowledge_files', 'query_knowledge_files', 'view_knowledge_file'},
+            {
+                'display_file',
+                'search_knowledge_files',
+                'grep_knowledge_files',
+                'query_knowledge_files',
+                'view_knowledge_file',
+            },
         )
         for name in ('query_knowledge_files', 'view_knowledge_file', 'view_file'):
             self.assertFalse(tools[name]['callable'].__extra_params__['__knowledge_enabled__'])
@@ -214,6 +223,7 @@ class QueryImageCacheTests(unittest.IsolatedAsyncioTestCase):
             tools=False, folder=False, voice=False, summary=False, memory=False, rag=False
         )
         expected = {
+            'display_file',
             'search_knowledge_bases',
             'search_knowledge_files',
             'grep_knowledge_files',

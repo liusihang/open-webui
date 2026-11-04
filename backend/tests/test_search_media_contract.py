@@ -27,6 +27,7 @@ def media_functions():
     scope = {
         'Any': Any,
         'HTMLResponse': type('HTMLResponse', (), {}),
+        'MCPAppResult': type('MCPAppResult', (), {}),
         'json': json,
         're': re,
         'urlsplit': urlsplit,

@@ -3,6 +3,7 @@ import time
 import uuid
 from typing import Optional
 
+from open_webui.models.notifications import emit_changes
 from open_webui.internal.db import Base, JSONField, get_async_db_context
 from open_webui.models.access_grants import (
     AccessGrantModel,
@@ -16,8 +17,8 @@ from sqlalchemy import (
     JSON,
     BigInteger,
     Boolean,
-    Column,
     CheckConstraint,
+    Column,
     ForeignKey,
     String,
     Text,
@@ -33,9 +34,7 @@ from sqlalchemy import (
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.ext.asyncio import AsyncSession
 
-####################
 # Channel DB Schema
-####################
 
 
 class Channel(Base):
@@ -225,9 +224,7 @@ class ChannelWebhookModel(BaseModel):
     updated_at: int  # timestamp in epoch (time_ns)
 
 
-####################
 # Forms
-####################
 
 
 class ChannelResponse(ChannelModel):
@@ -243,12 +240,12 @@ class ChannelForm(BaseModel):
     is_private: Optional[bool] = None
     data: Optional[dict] = None
     meta: Optional[dict] = None
-    access_grants: Optional[list[dict]] = None
     group_ids: Optional[list[str]] = None
     user_ids: Optional[list[str]] = None
 
 
 class CreateChannelForm(ChannelForm):
+    access_grants: Optional[list[dict]] = None
     type: Optional[str] = None
 
 
@@ -793,7 +790,7 @@ class ChannelTable:
             allowed_channels = []
 
             for channel in channels:
-                # --- Case A: group or dm => user must be an active member ---
+                # Case a: group or dm => user must be an active member
                 if channel.type in ['group', 'dm']:
                     result = await db.execute(
                         select(ChannelMember)
@@ -809,7 +806,7 @@ class ChannelTable:
                         allowed_channels.append(await self._to_channel_model(channel, db=db))
                     continue
 
-                # --- Case B: standard channel => rely on ACL permissions ---
+                # Case b: standard channel => rely on acl permissions
                 stmt = select(Channel).filter(Channel.id == channel.id)
 
                 stmt = self._has_permission(
@@ -896,8 +893,6 @@ class ChannelTable:
             channel.data = form_data.data
             channel.meta = form_data.meta
 
-            if form_data.access_grants is not None:
-                await AccessGrants.set_access_grants('channel', id, form_data.access_grants, db=db)
             channel.updated_at = int(time.time_ns())
 
             await db.commit()
@@ -965,13 +960,15 @@ class ChannelTable:
     async def delete_channel_by_id(self, id: str, db: Optional[AsyncSession] = None) -> bool:
         async with get_async_db_context(db) as db:
             await AccessGrants.revoke_all_access('channel', id, db=db)
+            from open_webui.models.notifications import delete_notifications
+
+            recipients = await delete_notifications(resource_type='channel', resource_ids=[id], db=db)
             await db.execute(delete(Channel).filter(Channel.id == id))
             await db.commit()
+            await emit_changes(recipients)
             return True
 
-    ####################
     # Webhook Methods
-    ####################
 
     async def insert_webhook(
         self,

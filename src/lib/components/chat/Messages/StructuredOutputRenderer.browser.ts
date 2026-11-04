@@ -8,10 +8,17 @@ import {
 	selectedTerminalId,
 	settings,
 	terminalServers,
-	showControls,
+	showTabs,
 	showFileNavPath
 } from '$lib/stores';
+import { getCommentSurfaces } from '$lib/components/comments/anchors';
+import { getFileContentById } from '$lib/apis/files';
 import { downloadFileBlob, downloadFilePreview, readFile } from '$lib/apis/terminal';
+
+vi.mock('$lib/apis/files', async (importOriginal) => ({
+	...(await importOriginal<Record<string, unknown>>()),
+	getFileContentById: vi.fn()
+}));
 
 // Editor/document providers are unrelated to commentary; keep real Markdown and Collapsible.
 vi.mock('$lib/components/chat/Messages/CodeBlock.svelte', async () => ({
@@ -49,7 +56,7 @@ afterEach(async () => {
 	settings.set({});
 	terminalServers.set([]);
 	selectedTerminalId.set(null);
-	showControls.set(false);
+	showTabs.set(false);
 	showFileNavPath.set(null);
 	localStorage.removeItem('token');
 	config.set(undefined);
@@ -84,6 +91,7 @@ const toggle = (target: HTMLElement) =>
 describe('terminal file cards mounted rendering', () => {
 	beforeEach(() => {
 		localStorage.setItem('token', 'fixture-session-token');
+		vi.mocked(downloadFileBlob).mockReset();
 		config.set({ features: { enable_tool_servers: true } } as any);
 	});
 	function fileOutput(paths: string[]): OutputItem[] {
@@ -175,6 +183,40 @@ describe('terminal file cards mounted rendering', () => {
 		});
 	});
 
+	it('downloads uploaded files through the authorized file API without terminal discovery', async () => {
+		config.set(undefined);
+		terminalServers.set(null);
+		const output = fileOutput(['/package.zip']);
+		output[1].output![0].text = JSON.stringify({
+			type: 'file',
+			source: 'open_webui',
+			exists: true,
+			displayed: true,
+			path: '/api/v1/files/upload-id/content',
+			name: 'package.zip'
+		});
+		const target = setup({ initialOutput: output, initialDone: true });
+		expect(download(target).disabled).toBe(false);
+		expect(target.querySelector('[aria-label="Open"]')).toBeNull();
+		const NativeURL = URL;
+		vi.stubGlobal(
+			'URL',
+			class extends NativeURL {
+				static createObjectURL = vi.fn(() => 'blob:uploaded');
+				static revokeObjectURL = vi.fn();
+			}
+		);
+		const click = vi.spyOn(HTMLAnchorElement.prototype, 'click').mockImplementation(() => {});
+		vi.mocked(getFileContentById).mockResolvedValue(new Uint8Array([1, 2, 3]) as any);
+		download(target).click();
+		await vi.waitFor(() => expect(click).toHaveBeenCalledOnce());
+		expect(getFileContentById).toHaveBeenCalledWith('upload-id');
+		expect(downloadFileBlob).not.toHaveBeenCalled();
+		await vi.waitFor(() => expect(URL.revokeObjectURL).toHaveBeenCalledWith('blob:uploaded'), {
+			timeout: 2000
+		});
+	});
+
 	it('becomes downloadable when terminal discovery finishes after the message renders', async () => {
 		terminalServers.set([]);
 		const target = setup({ initialOutput: fileOutput(['/package.zip']), initialDone: true });
@@ -248,6 +290,29 @@ describe('terminal file cards mounted rendering', () => {
 });
 
 describe('native commentary mounted rendering', () => {
+	it('keeps separate comment anchors on answer and expanded commentary', async () => {
+		const target = setup({
+			initialOutput: [progress, answer],
+			initialDone: true,
+			chatId: 'saved-chat',
+			messageId: 'assistant-id'
+		});
+		toggle(target).click();
+		await tick();
+		const surfaces = [...getCommentSurfaces().entries()].filter(([node]) => target.contains(node));
+		expect(surfaces.map(([, options]) => options.surface_id).sort()).toEqual([
+			'answer',
+			'progress'
+		]);
+		for (const [, options] of surfaces) {
+			expect(options).toMatchObject({
+				resource_id: 'saved-chat',
+				target_id: 'assistant-id',
+				enabled: true
+			});
+		}
+	});
+
 	it('shows real streaming commentary and collapses only after the answer completes', async () => {
 		let output = applyResponseStreamEvent([], {
 			type: 'response.output_item.added',

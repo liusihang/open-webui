@@ -100,7 +100,14 @@ async def main():
             async def verified_user():
                 return user
 
-            knowledges = SimpleNamespace(get_knowledge_by_id=AsyncMock(return_value=SimpleNamespace(user_id=user.id)))
+            knowledges = SimpleNamespace(
+                get_knowledge_by_id=AsyncMock(return_value=SimpleNamespace(user_id=user.id)),
+                has_file=AsyncMock(return_value=False),
+            )
+            knowledge_router = ModuleType('open_webui.routers.knowledge')
+            knowledge_router.check_knowledge_upload_limits = AsyncMock()
+            knowledge_model = ModuleType('open_webui.models.knowledge')
+            knowledge_model.Knowledges = knowledges
             scope = dict(
                 APIRouter=APIRouter,
                 BackgroundTasks=BackgroundTasks,
@@ -123,6 +130,7 @@ async def main():
                 FileModelResponse=dict,
                 Files=repository,
                 Knowledges=knowledges,
+                check_knowledge_upload_limits=knowledge_router.check_knowledge_upload_limits,
                 AccessGrants=SimpleNamespace(has_access=AsyncMock(return_value=False)),
                 Config=config.Config,
                 Storage=SimpleNamespace(upload_file=store),
@@ -150,7 +158,9 @@ async def main():
             app = FastAPI()
             app.state.MODELS = {}
             app.include_router(scope['router'], prefix='/files')
-            modules = {module.__name__: module for module in (config, retrieval, access)}
+            modules = {
+                module.__name__: module for module in (config, retrieval, access, knowledge_router, knowledge_model)
+            }
             with (
                 patch.dict(sys.modules, modules),
                 patch.dict(

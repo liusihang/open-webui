@@ -89,6 +89,7 @@ class TerminalReadinessTests(unittest.IsolatedAsyncioTestCase):
             'asyncio': asyncio,
             'quote': quote,
             'ENABLE_TOOL_SERVERS': True,
+            'AIOHTTP_CLIENT_TIMEOUT_TERMINAL': 0.02,
             'is_saved_chat_id': lambda chat_id: bool(chat_id),
             'log': SimpleNamespace(warning=Mock()),
         }

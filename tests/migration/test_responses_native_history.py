@@ -76,7 +76,7 @@ def scope():
         'get_output_text',
     ):
         load_function(MISC, name, result)
-    for name in ('process_messages_with_output', 'sanitize_tool_pairs', 'normalize_messages_for_model'):
+    for name in ('process_messages_with_output', 'sanitize_tool_pairs', 'normalize_messages_for_model', 'strip_tool_images', 'apply_context_summary', 'context_summary_message'):
         load_function(MIDDLEWARE, name, result)
     tree = ast.parse(ROUTER.read_text())
     assignment = next(
@@ -350,12 +350,13 @@ class NativeHistoryTests(unittest.TestCase):
         )
         self.s.update(
             {
-                'form_data': {'messages': [{'role': 'user', 'content': 'original context'}]},
+                'form_data': {'model': 'm', 'messages': [{'role': 'user', 'content': 'original context'}]},
                 'messages': messages,
                 'output': output,
                 'full_output': lambda: output,
                 'responses_api': True,
-                'response_usage': {},
+                'current_usage': {},
+                'filter_functions': [],
                 'model': {},
                 'metadata': {},
                 'new_form_data': {},
@@ -363,7 +364,7 @@ class NativeHistoryTests(unittest.TestCase):
                 'user': None,
                 'model_id': 'm',
                 'log': SimpleNamespace(exception=lambda *a: None),
-                'compact_messages_for_request': AsyncMock(side_effect=lambda req, user, msgs, *a: (msgs, None, False)),
+                'compact_messages_for_request': AsyncMock(side_effect=lambda req, form, user, msgs, *a, **kwargs: (msgs, None, [])),
                 'get_reasoning_format': lambda model: None,
                 'get_last_user_message_item': lambda msgs: msgs[0],
             }

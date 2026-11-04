@@ -41,6 +41,7 @@ from open_webui.models.knowledge import Knowledges
 from open_webui.models.users import Users
 from open_webui.retrieval.vector.async_client import ASYNC_VECTOR_DB_CLIENT
 from open_webui.routers.audio import transcribe
+from open_webui.routers.knowledge import check_knowledge_upload_limits
 from open_webui.routers.retrieval import ProcessFileForm, process_file
 from open_webui.storage.provider import Storage
 from open_webui.utils.auth import get_admin_user, get_verified_user
@@ -196,11 +197,9 @@ async def get_file_evidence_image(request: Request, id: str, ref: str, user=Depe
         raise HTTPException(404, 'Image evidence is unavailable')
 
 
-############################
 # Upload File
 # What was entrusted here was given in good faith. Let it
 # be returned the same way, whole and undiminished.
-############################
 
 
 def _is_text_file(file_path: str, chunk_size: int = 8192) -> bool:
@@ -275,137 +274,46 @@ async def process_uploaded_file(
     db: Optional[AsyncSession] = None,
 ):
     async def _process_handler(db_session):
+        from open_webui.retrieval.ingestion import submit_file, link_stored_upload
+
         try:
+            await validate_knowledge_upload_target(file_metadata, user, db=db_session)
             content_type = file.content_type
-
-            # Detect mis-labeled text files (e.g. .ts → video/mp2t)
-            if content_type and content_type.startswith(('image/', 'video/')):
-                if _is_text_file(file_path):
-                    content_type = 'text/plain'
-
+            if content_type and content_type.startswith(('image/', 'video/')) and _is_text_file(file_path):
+                content_type = 'text/plain'
             stt_supported = await Config.get('audio.stt.supported_content_types', [])
-            content_extraction_engine = await Config.get('rag.content_extraction_engine')
-            content_extraction_supported_media_mime_types = await Config.get(
-                'rag.content_extraction.supported_media_mime_types'
-            )
-
+            extraction = await Config.get('rag.content_extraction_engine')
+            supported_media = await Config.get('rag.content_extraction.supported_media_mime_types')
+            content = None
             if content_type and strict_match_mime_type(stt_supported, content_type):
-                # Audio / STT-supported files → transcribe then index
-                file_path_processed = await asyncio.to_thread(Storage.get_file, file_path)
                 result = await transcribe(
-                    request,
-                    file_path_processed,
-                    file_metadata,
-                    user,
+                    request, await asyncio.to_thread(Storage.get_file, file_path), file_metadata, user
                 )
-                await process_file(
-                    request,
-                    ProcessFileForm(file_id=file_item.id, content=result.get('text', '')),
-                    user=user,
-                    db=db_session,
-                )
-
+                content = result.get('text', '')
             elif (
                 content_type
-                and content_type.startswith(('image/', 'video/'))
-                and not _media_supported_for_extraction(
-                    content_extraction_engine, content_extraction_supported_media_mime_types, content_type
-                )
+                and content_type.startswith('video/')
+                and not _media_supported_for_extraction(extraction, supported_media, content_type)
             ):
-                if content_type.startswith('video/'):
-                    # Videos are stored as-is for downstream multimodal
-                    # processing (Tools, vision models). Attempting text
-                    # extraction causes "Timeout reached while detecting
-                    # encoding" errors.
-                    log.info('Video file detected (%s), skipping text extraction', content_type)
-                    await Files.update_file_data_by_id(
-                        file_item.id,
-                        {'status': 'completed'},
-                        db=db_session,
-                    )
-                else:
-                    # Image evidence uses the uploaded image itself; no second OCR.
-                    await process_file(request, ProcessFileForm(file_id=file_item.id), user=user, db=db_session)
-
-            else:
-                # Documents, or media files explicitly enabled for the
-                # configured content extraction engine.
-                if not content_type:
-                    log.info('File type %s is not provided, but trying to process anyway', file.content_type)
-                await process_file(
-                    request,
-                    ProcessFileForm(file_id=file_item.id),
-                    user=user,
-                    db=db_session,
-                )
-
-            # Auto-link to Knowledge Collection when uploaded from one (#24807).
-            # Mirrors POST /knowledge/{id}/file/add so linking doesn't depend
-            # on the frontend staying connected after upload.
+                # Non-extracted video has no index candidate. Link and complete atomically.
+                await link_stored_upload(file_item.id, user, file_metadata)
+                return
             knowledge_id = file_metadata.get('knowledge_id')
-            if knowledge_id:
-                try:
-                    # Gate like POST /knowledge/{id}/file/add: a client-supplied
-                    # metadata.knowledge_id must not let a non-writer attach files (CWE-862/863).
-                    knowledge = await Knowledges.get_knowledge_by_id(id=knowledge_id, db=db_session)
-                    can_write = bool(knowledge) and (
-                        knowledge.user_id == user.id
-                        or user.role == 'admin'
-                        or await AccessGrants.has_access(
-                            user_id=user.id,
-                            resource_type='knowledge',
-                            resource_id=knowledge.id,
-                            permission='write',
-                            db=db_session,
-                        )
-                    )
-                    if not can_write:
-                        log.warning(
-                            f'Refusing to auto-link file {file_item.id} to knowledge '
-                            f'{knowledge_id}: user {user.id} lacks write access'
-                        )
-                    else:
-                        directory_id = file_metadata.get('directory_id') or None
-                        if directory_id:
-                            directory = await Knowledges.get_directory_by_id(directory_id, db=db_session)
-                            if not directory or directory.knowledge_id != knowledge_id:
-                                log.warning(
-                                    'Ignoring directory %s: not a directory of knowledge %s', directory_id, knowledge_id
-                                )
-                                directory_id = None
-
-                        # Keep the generic file status stream open until the
-                        # KB-specific vector write and durable link both finish.
-                        await Files.update_file_data_by_id(file_item.id, {'status': 'processing'}, db=db_session)
-                        await process_file(
-                            request,
-                            ProcessFileForm(file_id=file_item.id, collection_name=knowledge_id),
-                            user=user,
-                            db=db_session,
-                        )
-                        knowledge_file = await Knowledges.add_file_to_knowledge_by_id(
-                            knowledge_id=knowledge_id,
-                            file_id=file_item.id,
-                            user_id=user.id,
-                            directory_id=directory_id,
-                            db=db_session,
-                        )
-                        if not knowledge_file:
-                            raise Exception(f'Failed to link file {file_item.id} to knowledge {knowledge_id}')
-                        log.info('Linked file %s to knowledge %s', file_item.id, knowledge_id)
-                except Exception as e:
-                    log.warning(f'Failed to link file {file_item.id} to knowledge {knowledge_id}: {e}')
-                    raise
-
+            await submit_file(
+                request,
+                ProcessFileForm(file_id=file_item.id, content=content, collection_name=knowledge_id),
+                user=user,
+                db=db_session,
+                auto_link={'directory_id': file_metadata.get('directory_id')} if knowledge_id else None,
+            )
         except Exception as e:
-            log.error(f'Error processing file: {file_item.id}')
+            log.exception('Error processing file: %s', file_item.id)
             await Files.update_file_data_by_id(
                 file_item.id,
                 {
                     'status': 'failed',
                     'error': str(e.detail) if hasattr(e, 'detail') else str(e),
                 },
-                db=db_session,
             )
 
     try:
@@ -532,6 +440,18 @@ async def upload_file_handler(
         # applies to all chat models, even when processing was disabled by the
         # caller; knowledge/channel uploads are intentionally exempt.
         await asyncio.to_thread(validate_chat_pdf_upload, file_metadata, filename, file.content_type, file.file)
+        knowledge_id = file_metadata.get('knowledge_id')
+        if knowledge_id:
+            knowledge = await Knowledges.get_knowledge_by_id(knowledge_id, db=db)
+            if not knowledge or not (
+                knowledge.user_id == user.id
+                or user.role == 'admin'
+                or await AccessGrants.has_access(
+                    user_id=user.id, resource_type='knowledge', resource_id=knowledge_id, permission='write', db=db
+                )
+            ):
+                raise HTTPException(403, ERROR_MESSAGES.ACCESS_PROHIBITED)
+            await check_knowledge_upload_limits(knowledge_id, 1, batch=True, file_size=file.size, db=db)
 
         # Prefer readable storage names for admins, but fall back if the filesystem rejects it.
         id = str(uuid.uuid4())
@@ -546,6 +466,8 @@ async def upload_file_handler(
         from open_webui.retrieval.admission import stream_hash
 
         file_hash, upload_size = await asyncio.to_thread(stream_hash, file.file)
+        if knowledge_id:
+            await check_knowledge_upload_limits(knowledge_id, 1, batch=True, file_size=upload_size, db=db)
         from open_webui.config import UPLOAD_DIR
         import shutil
 
@@ -719,9 +641,7 @@ async def upload_file_handler(
         )
 
 
-############################
 # List Files
-############################
 
 
 PAGE_SIZE = 50
@@ -747,9 +667,16 @@ async def list_files(
     return result
 
 
-############################
 # Search Files
-############################
+
+
+async def _search_files(filename: str, content: bool, skip: int, limit: int, user_id: str | None, db: AsyncSession):
+    files = await Files.search_files(user_id=user_id, filename=filename, skip=skip, limit=limit, db=db)
+    if not content:
+        for file in files:
+            if file.data and 'content' in file.data:
+                del file.data['content']
+    return files
 
 
 @router.get('/search', response_model=list[FileModelResponse])
@@ -764,39 +691,29 @@ async def search_files(
     user=Depends(get_verified_user),
     db: AsyncSession = Depends(get_async_session),
 ):
-    """
-    Search for files by filename with support for wildcard patterns.
-    Uses SQL-based filtering with pagination for better performance.
-    """
-    # Determine user_id: null for admin with bypass (search all), user.id otherwise
     user_id = None if (user.role == 'admin' and BYPASS_ADMIN_ACCESS_CONTROL) else user.id
-
-    # Use optimized database query with pagination
-    files = await Files.search_files(
-        user_id=user_id,
-        filename=filename,
-        skip=skip,
-        limit=limit,
-        db=db,
-    )
-
+    files = await _search_files(filename, content, skip, limit, user_id, db)
     if not files:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail='No files found matching the pattern.',
         )
-
-    if not content:
-        for file in files:
-            if file.data and 'content' in file.data:
-                del file.data['content']
-
     return files
 
 
-############################
+@router.get('/user/search', response_model=list[FileModelResponse])
+async def search_user_files(
+    filename: str = Query('*'),
+    content: bool = Query(False),
+    skip: int = Query(0, ge=0),
+    limit: int = Query(50, ge=1, le=1000),
+    user=Depends(get_verified_user),
+    db: AsyncSession = Depends(get_async_session),
+):
+    return await _search_files(filename, content, skip, limit, user.id, db)
+
+
 # Count Files
-############################
 
 
 @router.get('/count', response_model=int)
@@ -808,9 +725,15 @@ async def count_files(
     return await Files.count_files_by_user_id(user_id=user_id, db=db)
 
 
-############################
+@router.get('/user/count', response_model=int)
+async def count_user_files(
+    user=Depends(get_verified_user),
+    db: AsyncSession = Depends(get_async_session),
+):
+    return await Files.count_files_by_user_id(user_id=user.id, db=db)
+
+
 # Delete All Files
-############################
 
 
 @router.delete('/all')
@@ -846,9 +769,7 @@ async def delete_all_files(
         )
 
 
-############################
 # Get File By Id
-############################
 
 
 @router.get('/{id}', response_model=Optional[FileModel])
@@ -909,9 +830,7 @@ async def get_file_process_status(id: str, stream: bool = Query(False), user=Dep
     return StreamingResponse(event_stream(), media_type='text/event-stream')
 
 
-############################
 # Get File Data Content By Id
-############################
 
 
 @router.get('/{id}/data/content')
@@ -935,9 +854,7 @@ async def get_file_data_content_by_id(
         )
 
 
-############################
 # Update File Data Content By Id
-############################
 
 
 class ContentForm(BaseModel):
@@ -961,6 +878,9 @@ async def update_file_data_content_by_id(
         )
 
     if file.user_id == user.id or user.role == 'admin' or await has_access_to_file(id, 'write', user, db=db):
+        if not form_data.content.strip():
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=ERROR_MESSAGES.EMPTY_CONTENT)
+
         max_size = await Config.get('rag.file.max_size')
         if max_size and len(form_data.content.encode('utf-8')) > int(max_size) * 1024 * 1024:
             raise HTTPException(
@@ -1000,9 +920,7 @@ async def update_file_data_content_by_id(
         )
 
 
-############################
 # Get File Content By Id
-############################
 
 
 @router.get('/{id}/content')
@@ -1170,9 +1088,7 @@ async def get_file_content_by_id(
         )
 
 
-############################
 # Rename File By Id
-############################
 
 
 class FileRenameForm(BaseModel):
@@ -1218,9 +1134,7 @@ async def rename_file_by_id(
         )
 
 
-############################
 # Delete File By Id
-############################
 
 
 @router.delete('/{id}')

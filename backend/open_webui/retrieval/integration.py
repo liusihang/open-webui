@@ -11,7 +11,7 @@ from contextlib import asynccontextmanager
 from functools import wraps
 from pathlib import Path
 
-from open_webui.config import RAG_EMBEDDING_CONTENT_PREFIX, RAG_EMBEDDING_QUERY_PREFIX, UPLOAD_DIR, Config
+from open_webui.config import UPLOAD_DIR, Config
 from open_webui.internal.db import get_async_db
 from open_webui.models.evidence import KnowledgeVectorSpace as Space
 from open_webui.models.evidence import stable_id
@@ -76,6 +76,8 @@ SERVICE_CONFIG_KEYS = (
     'rag.embedding_concurrent_requests',
     'rag.embedding_engine',
     'rag.embedding_model',
+    'rag.embedding_query_prefix',
+    'rag.embedding_content_prefix',
     'rag.openai.api_base_url',
     'rag.openai.api_key',
     'rag.enable_hybrid_search',
@@ -183,8 +185,8 @@ async def services(request, *, db=None, user=None):
             and config.get('rag.embedding_engine') == 'openai'
             and space.embedding_model == config.get('rag.embedding_model')
             and encoding.get('text_api_base_url') == config.get('rag.openai.api_base_url')
-            and encoding.get('query_prefix') == RAG_EMBEDDING_QUERY_PREFIX
-            and encoding.get('document_prefix') == RAG_EMBEDDING_CONTENT_PREFIX
+            and encoding.get('query_prefix') == config.get('rag.embedding_query_prefix')
+            and encoding.get('document_prefix') == config.get('rag.embedding_content_prefix')
         )
         if compatible:
             from open_webui.config import PGVECTOR_INITIALIZE_MAX_VECTOR_LENGTH

@@ -56,7 +56,9 @@
 	<PinnedMessagesModal bind:show={showChannelPinnedMessagesModal} {channel} {onPin} />
 	<ChannelInfoModal bind:show={showChannelInfoModal} {channel} {onUpdate} />
 {/if}
-<nav class="sticky top-0 z-30 w-full px-3 py-1 -mb-8 flex items-center drag-region flex-col">
+<nav
+	class="sticky top-0 z-30 w-full px-1.5 md:px-3 py-1 -mb-8 flex items-center drag-region flex-col"
+>
 	<div
 		id="navbar-bg-gradient-to-b"
 		class=" bg-linear-to-b via-50% from-white via-white to-transparent dark:from-gray-900 dark:via-gray-900 dark:to-transparent pointer-events-none absolute inset-0 -bottom-7 z-[-1]"
@@ -68,7 +70,7 @@
 				<div
 					class="{$showSidebar
 						? 'md:hidden'
-						: ''} col-start-1 row-start-1 mr-1.5 mt-0.5 self-center flex flex-none items-center text-gray-600 dark:text-gray-400"
+						: ''} col-start-1 row-start-1 mr-1.5 self-start flex flex-none items-center text-gray-600 dark:text-gray-400"
 				>
 					<Tooltip
 						content={$showSidebar ? $i18n.t('Close Sidebar') : $i18n.t('Open Sidebar')}
@@ -77,6 +79,7 @@
 						<button
 							id="sidebar-toggle-button"
 							class=" cursor-pointer flex rounded-lg hover:bg-gray-100 dark:hover:bg-gray-850 transition cursor-"
+							aria-label={$showSidebar ? $i18n.t('Close Sidebar') : $i18n.t('Open Sidebar')}
 							on:click={() => {
 								showSidebar.set(!$showSidebar);
 							}}
@@ -178,7 +181,6 @@
 							<Tooltip content={$i18n.t('Users')}>
 								<button
 									class=" flex h-7 items-center cursor-pointer shrink-0 px-1.5 rounded-lg text-gray-500 dark:text-gray-400 hover:bg-gray-50/60 dark:hover:bg-gray-800/60 transition-colors"
-									aria-label={$i18n.t('User Count')}
 									type="button"
 									on:click={() => {
 										showChannelInfoModal = true;
@@ -187,6 +189,7 @@
 									<div class=" flex items-center gap-1 m-auto self-center shrink-0">
 										<UserAlt className=" size-4" strokeWidth="1.5" />
 
+										<span class="sr-only">{$i18n.t('User Count')}</span>
 										<div class="text-xs tabular-nums shrink-0">
 											{channel.user_count}
 										</div>

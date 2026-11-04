@@ -10,7 +10,9 @@
 		renderMarkdown = true,
 		preview = false,
 		compactPreview = false,
-		locale = 'en-US'
+		locale = 'en-US',
+		chatId = '',
+		messageId = ''
 	}: {
 		initialOutput?: OutputItem[];
 		initialDone?: boolean;
@@ -18,6 +20,8 @@
 		preview?: boolean;
 		compactPreview?: boolean;
 		locale?: string;
+		chatId?: string;
+		messageId?: string;
 	} = $props();
 	let output = $state(untrack(() => initialOutput));
 	let done = $state(untrack(() => initialDone));
@@ -30,6 +34,8 @@
 
 <StructuredOutputRenderer
 	id="commentary-test"
+	{chatId}
+	{messageId}
 	{output}
 	{done}
 	{renderMarkdown}

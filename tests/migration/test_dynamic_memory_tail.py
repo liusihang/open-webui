@@ -321,7 +321,7 @@ class DynamicMemoryTests(unittest.IsolatedAsyncioTestCase):
         scope = self.case.continuation(again, again_meta, rebuild=False)
         scope['new_form_data'] = {**scope['form_data'], 'metadata': scope['metadata']}
         scope['compact_messages_for_request'] = AsyncMock(
-            side_effect=lambda req, user, messages, *args: (messages, None, False)
+            side_effect=lambda req, form, user, messages, *args, **kwargs: (messages, None, False)
         )
         followup = await scope['run']()
         follow_wire = await wire(followup)
@@ -428,9 +428,9 @@ class DynamicMemoryTests(unittest.IsolatedAsyncioTestCase):
             get_event_call=AsyncMock(return_value=direct_call),
             generate_ollama_chat_completion=ollama_call,
             generate_function_chat_completion=pipe_call,
-            convert_response_ollama_to_openai=lambda response: response,
+            convert_ollama_response_to_chat_completions=lambda response: response,
         )
-        for name in ['convert_messages_openai_to_ollama', 'convert_payload_openai_to_ollama']:
+        for name in ['convert_chat_completions_messages_to_ollama', 'convert_chat_completions_payload_to_ollama']:
             PROMPT.FIXTURE.load_function(PROMPT.UTILS / 'payload.py', name, scope)
         for name in ['generate_direct_chat_completion', 'generate_chat_completion']:
             PROMPT.FIXTURE.load_function(PROMPT.UTILS / 'chat.py', name, scope)

@@ -103,6 +103,10 @@ class PromptOrderTests(unittest.IsolatedAsyncioTestCase):
             ),
             get_owner_accessible_folder_files=AsyncMock(return_value=[]),
             is_saved_chat_id=lambda cid: cid == 'saved',
+            is_temporary_chat_id=lambda cid: str(cid).startswith('local:'),
+            filter_user_terminal_tools=AsyncMock(),
+            get_filter_functions=AsyncMock(return_value=[]),
+            get_sorted_filters=lambda *args: [],
             load_messages_from_db=AsyncMock(side_effect=lambda *args: copy.deepcopy(self.db_messages)),
             uses_responses_api=AsyncMock(return_value=True),
             prepare_native_pdf_attachments=AsyncMock(return_value=[]),
@@ -185,6 +189,7 @@ class PromptOrderTests(unittest.IsolatedAsyncioTestCase):
             'get_source_context',
             'apply_source_context_to_messages',
             'get_tool_loop_output_messages',
+            'strip_tool_images',
             'get_reasoning_format',
             'add_file_context',
         ):
@@ -197,6 +202,9 @@ class PromptOrderTests(unittest.IsolatedAsyncioTestCase):
         )
         for name in (
             '_apply_latest_summary_checkpoint',
+            'text_summary_allowed',
+            'clear_text_summary_checkpoints',
+            'apply_summary_checkpoint',
             '_parse_positive_int',
             '_resolve_token_threshold',
             'compact_messages_for_request',
@@ -206,14 +214,21 @@ class PromptOrderTests(unittest.IsolatedAsyncioTestCase):
         # Execute the real pure admission helpers without importing FastAPI or
         # the full backend, just as the other payload helpers above are loaded.
         pdf_scope = {}
-        for name in ('attachment_file_id', 'is_knowledge_attachment', 'chat_pdf_admission_ids'):
+        for name in (
+            'attachment_file_id',
+            'is_knowledge_attachment',
+            'chat_pdf_admission_ids',
+            'is_native_pdf_attachment',
+        ):
             FIXTURE.load_function(UTILS / 'native_pdf.py', name, pdf_scope)
         self.native = AsyncMock(return_value=False)
         self.modules = patch.dict(
             sys.modules,
             {
                 'open_webui.utils.native_pdf': module(
-                    'open_webui.utils.native_pdf', chat_pdf_admission_ids=pdf_scope['chat_pdf_admission_ids']
+                    'open_webui.utils.native_pdf',
+                    chat_pdf_admission_ids=pdf_scope['chat_pdf_admission_ids'],
+                    is_native_pdf_attachment=pdf_scope['is_native_pdf_attachment'],
                 ),
                 'open_webui.utils.native_compaction': module(
                     'open_webui.utils.native_compaction', uses_native_compaction=self.native
@@ -585,7 +600,7 @@ class PromptOrderTests(unittest.IsolatedAsyncioTestCase):
                     [m['content'] for m in body['messages'] if m['role'] != 'system'], ['HISTORY_4', 'HISTORY_5']
                 )
                 call = self.s['_generate_summary'].await_args.args
-                self.assertEqual(call[6], 'OLDER_SUMMARY' if previous else None)
+                self.assertEqual(call[7], 'OLDER_SUMMARY' if previous else None)
                 stored = self.s['Chats'].upsert_message_to_chat_by_id_and_message_id.await_args
                 self.assertEqual(
                     stored.args[2],
@@ -654,7 +669,8 @@ class PromptOrderTests(unittest.IsolatedAsyncioTestCase):
             event_emitter=self.emitter,
             new_form_data={},
             responses_api=responses,
-            response_usage={},
+            current_usage={},
+            filter_functions=[],
             model=self.model,
             request=self.request,
             user=self.user,
@@ -666,7 +682,11 @@ class PromptOrderTests(unittest.IsolatedAsyncioTestCase):
             last_response_id='resp_fixture' if stateful else None,
         )
         scope['compact_messages_for_request'] = AsyncMock(
-            side_effect=lambda req, user, messages, *args: (messages, scope['latest_summary'], True)
+            side_effect=lambda req, form, user, messages, *args, **kwargs: (
+                messages,
+                scope['latest_summary'],
+                messages[:1],
+            )
         )
         run = ast.parse('async def run():\n    pass').body[0]
         run.body = [ast.Global(names=['messages', 'new_form_data'])] + copy.deepcopy([citation, branch])

@@ -11,6 +11,8 @@ import logging
 import os
 import unittest
 import uuid
+import sys
+from types import ModuleType
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Optional
@@ -56,7 +58,17 @@ class ChatPdfUploadLimitTests(unittest.IsolatedAsyncioTestCase):
         async def session(_):
             yield None
 
+        config_module = ModuleType('open_webui.config')
+        config_module.UPLOAD_DIR = '/tmp'
+        config_module.Config = SimpleNamespace(get=AsyncMock(return_value=None))
+        config_patch = patch.dict(sys.modules, {'open_webui.config': config_module})
+        config_patch.start()
+        self.addCleanup(config_patch.stop)
+
         scope = {
+            'validate_knowledge_upload_target': AsyncMock(),
+            'check_knowledge_upload_limits': AsyncMock(),
+            'Knowledges': SimpleNamespace(get_knowledge_by_id=AsyncMock(return_value=SimpleNamespace(user_id='owner'))),
             'Request': object,
             'UploadFile': UploadFile,
             'File': File,
@@ -78,7 +90,7 @@ class ChatPdfUploadLimitTests(unittest.IsolatedAsyncioTestCase):
             'ERROR_MESSAGES': SimpleNamespace(DEFAULT=lambda message: message),
             'Config': SimpleNamespace(get=AsyncMock(return_value=None)),
             'Storage': SimpleNamespace(upload_file=self.stored),
-            'Files': SimpleNamespace(insert_new_file=self.insert),
+            'Files': SimpleNamespace(insert_new_file=self.insert, get_file_processing_state=AsyncMock(return_value={})),
             'FileForm': SimpleNamespace,
             'Channels': SimpleNamespace(get_channel_by_id_and_user_id=AsyncMock(return_value=None)),
             'process_uploaded_file': self.process,

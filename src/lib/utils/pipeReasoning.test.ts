@@ -68,7 +68,15 @@ describe('retained Pipe reasoning controls', () => {
 			new URL('../components/chat/MessageInput.svelte', import.meta.url),
 			'utf8'
 		);
-		expect(input).toContain('<ModelControls selectedModels={selectedModelIds} />');
+		const modelControls = input.match(/<ModelControls\b[^>]*>/)?.[0] ?? '';
+		for (const prop of [
+			'selectedModels={selectedModelIds}',
+			'bind:chatFiles',
+			'bind:params',
+			'{onParamChange}'
+		]) {
+			expect(modelControls).toContain(prop);
+		}
 		expect(input).toContain('<PipeReasoningControls selectedModels={selectedModelIds} />');
 		const chat = readFileSync(new URL('../components/chat/Chat.svelte', import.meta.url), 'utf8');
 		expect(chat).toContain(

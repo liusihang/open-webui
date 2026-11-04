@@ -47,6 +47,28 @@ describe('terminal file display conversion', () => {
 			expect(files[0]).toMatchObject({ item: file });
 		}
 	);
+	it('supports authorized uploaded-file results without a terminal selector', () => {
+		const uploaded = {
+			type: 'file',
+			source: 'open_webui',
+			exists: true,
+			displayed: true,
+			path: '/api/v1/files/file-id/content',
+			name: 'report.pdf'
+		};
+		expect(
+			buildOutputDisplayItems(output(uploaded)).filter((item) => item.type === 'file')
+		).toEqual([expect.objectContaining({ item: uploaded })]);
+		for (const result of [
+			{ ...uploaded, exists: false },
+			{ ...uploaded, exists: undefined }
+		]) {
+			expect(
+				buildOutputDisplayItems(output(result)).filter((item) => item.type === 'file')
+			).toEqual([]);
+		}
+	});
+
 	it('retains the requested document page and handles nested JSON results', () => {
 		const files = buildOutputDisplayItems(output(JSON.stringify(file), { page: 3 })).filter(
 			(item) => item.type === 'file'
@@ -188,6 +210,23 @@ describe('native commentary display conversion', () => {
 		});
 		expect(buildOutputDisplayItems(output)).toEqual([
 			{ type: 'message', id: 'revised', text: 'Answer.' }
+		]);
+	});
+});
+
+describe('upstream display items alongside commentary', () => {
+	it('keeps generated images and context compaction in output order', () => {
+		const output = [
+			message('progress', 'Making an image.', 'commentary'),
+			{ id: 'image', type: 'image_generation_call', result: 'aW1hZ2U=', output_format: 'webp' },
+			{ id: 'compact', type: 'open_webui:context_compaction', summary: 'Earlier context' },
+			message('answer', 'Done.', 'final_answer')
+		];
+		expect(buildOutputDisplayItems(output)).toEqual([
+			{ type: 'commentary', id: 'progress', text: 'Making an image.' },
+			{ type: 'image', id: 'image', src: 'data:image/webp;base64,aW1hZ2U=' },
+			{ type: 'context_compaction', id: 'compact', summary: 'Earlier context' },
+			{ type: 'message', id: 'answer', text: 'Done.' }
 		]);
 	});
 });

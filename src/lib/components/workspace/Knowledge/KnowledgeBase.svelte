@@ -1,8 +1,13 @@
 <script lang="ts">
+	import Comments from '$lib/components/comments/Comments.svelte';
+	import type { CommentsRequest } from '$lib/components/comments/CommentsPanel.svelte';
+	let comments: CommentsRequest | null = null;
+	import CommentButton from '$lib/components/comments/CommentButton.svelte';
 	import { toast } from 'svelte-sonner';
 	import { v4 as uuidv4 } from 'uuid';
 
 	import { onMount, getContext, onDestroy } from 'svelte';
+	import KnowledgeEditor from './KnowledgeEditor.svelte';
 	import KnowledgeBrowser from './KnowledgeBase/Browser.svelte';
 	import type { Writable } from 'svelte/store';
 	import type { i18n as i18nType } from 'i18next';
@@ -16,6 +21,7 @@
 	import { uploadFile } from '$lib/apis/files';
 	import {
 		addFileToKnowledgeById,
+		validateKnowledgeUpload,
 		getKnowledgeById,
 		resetKnowledgeById,
 		updateKnowledgeById,
@@ -32,6 +38,11 @@
 	import { receiveUploadBatch } from '$lib/utils/upload-batch';
 
 	import Spinner from '$lib/components/common/Spinner.svelte';
+	import Modal from '$lib/components/common/Modal.svelte';
+	import Dropdown from '$lib/components/common/Dropdown.svelte';
+	import DropdownMenu from '$lib/components/common/DropdownMenu.svelte';
+	import EllipsisHorizontal from '$lib/components/icons/EllipsisHorizontal.svelte';
+	import Cog6 from '$lib/components/icons/Cog6.svelte';
 
 	import AddTextContentModal from './KnowledgeBase/AddTextContentModal.svelte';
 
@@ -50,13 +61,16 @@
 	let pendingSyncFiles: Array<{ path: string; filename: string; file: File }> | null = null;
 	let syncing: string | null = null;
 	let showAccessControlModal = false;
+	let savedAccessGrants = [];
 	let showResetConfirm = false;
+	let showSettings = false;
 
 	type DirectoryFileEntry = { path: string; filename: string; file: File };
 	type DirectoryManifestEntry = DirectoryFileEntry & { checksum: string; size: number };
 
 	type Knowledge = {
 		id: string;
+		user_id: string;
 		name: string;
 		description: string;
 		data: {
@@ -152,6 +166,31 @@
 		return file;
 	};
 
+	const validateUpload = async (
+		count: number,
+		removedFileIds: string[] = [],
+		fileSize?: number,
+		knowledgeId = knowledge?.id
+	) => {
+		if (!knowledgeId) return false;
+		if (count === 0) return true;
+		// Preserve the previous upload limit message for i18n extraction.
+		// $i18n.t('You can only upload a maximum of {{maxCount}} file(s) per batch.')
+		try {
+			await validateKnowledgeUpload(
+				localStorage.token,
+				knowledgeId,
+				count,
+				removedFileIds,
+				fileSize
+			);
+			return true;
+		} catch (error) {
+			toast.error(`${error}`);
+			return false;
+		}
+	};
+
 	const uploadWeb = async (urls) => {
 		const targetDirectoryId = currentDirectoryId;
 		if (!knowledge) {
@@ -162,6 +201,7 @@
 		if (!Array.isArray(urls)) {
 			urls = [urls];
 		}
+		if (!(await validateUpload(urls.length))) return;
 
 		const newFileItems = urls.map((url) => ({
 			type: 'file',
@@ -333,8 +373,19 @@
 		}
 		return batch.failed;
 	};
-	const uploadFilesHandler = (files: File[]) => {
-		const target = { knowledgeId: knowledge.id, directoryId: currentDirectoryId };
+	const uploadFilesHandler = async (
+		files: File[],
+		target = { knowledgeId: knowledge?.id ?? '', directoryId: currentDirectoryId }
+	) => {
+		if (
+			!(await validateUpload(
+				files.length,
+				[],
+				files.reduce((size, file) => Math.max(size, file.size), 0),
+				target.knowledgeId
+			))
+		)
+			return;
 		return uploadEntries(
 			files.map((file) => ({ file, directory_id: target.directoryId })),
 			target.knowledgeId
@@ -497,11 +548,28 @@
 		);
 	};
 
-	const uploadDirectoryEntries = async (entries: DirectoryFileEntry[]) => {
-		if (!knowledge) return;
-		const knowledgeId = knowledge.id;
-		const targetDirectoryId = currentDirectoryId;
-		const targetPath = breadcrumbs.map((crumb) => crumb.name).join('/');
+	const uploadDirectoryEntries = async (
+		entries: DirectoryFileEntry[],
+		looseFiles: File[] = [],
+		target = {
+			knowledgeId: knowledge?.id ?? '',
+			directoryId: currentDirectoryId,
+			path: breadcrumbs.map((crumb) => crumb.name).join('/')
+		}
+	) => {
+		const { knowledgeId, directoryId: targetDirectoryId, path: targetPath } = target;
+		if (
+			!(await validateUpload(
+				entries.length + looseFiles.length,
+				[],
+				[...looseFiles, ...entries.map((entry) => entry.file)].reduce(
+					(size, file) => Math.max(size, file.size),
+					0
+				),
+				knowledgeId
+			))
+		)
+			return;
 		const getDirectoryUploadPath = (path: string) =>
 			targetPath && path ? `${targetPath}/${path}` : targetPath || path;
 
@@ -528,10 +596,17 @@
 
 			const directoryIdByPath = await createMissingDirectories(diff, knowledgeId);
 
-			const failedCount = await uploadManifestEntries(
-				manifest,
-				(entry) =>
-					entry.path ? directoryIdByPath[getDirectoryUploadPath(entry.path)] : targetDirectoryId,
+			const failedCount = await uploadEntries(
+				[
+					...looseFiles.map((file) => ({ file, directory_id: targetDirectoryId })),
+					...manifest.map((entry) => ({
+						file: new File([entry.file], entry.filename, { type: entry.file.type }),
+						directory_id: entry.path
+							? directoryIdByPath[getDirectoryUploadPath(entry.path)]
+							: targetDirectoryId,
+						checksum: entry.checksum
+					}))
+				],
 				knowledgeId
 			);
 
@@ -553,14 +628,14 @@
 		const knowledgeId = knowledge.id;
 
 		try {
-			// ── 2. Compute checksums ──
+			// 2. Compute checksums
 			syncing = $i18n.t('Computing checksums ({{count}} files)', {
 				count: pendingSyncFiles.length
 			});
 			const manifest = await buildDirectoryManifest(pendingSyncFiles);
 			pendingSyncFiles = null;
 
-			// ── 3. Diff against knowledge base ──
+			// 3. Diff against knowledge base
 			syncing = $i18n.t('Comparing with knowledge base...');
 			const diff = await syncKnowledgeDiff(
 				localStorage.token,
@@ -573,11 +648,25 @@
 				return;
 			}
 
-			// ── 4. Cleanup — remove deleted + stale modified files first ──
+			// 4. Cleanup — remove deleted + stale modified files first
 			const staleFileIds = [
 				...diff.deleted.map((d: any) => d.file_id),
 				...diff.modified.map((m: any) => m.stale_file_id)
 			];
+			const filesToUpload = manifest.filter(
+				(entry) =>
+					diff.added.some((a: any) => a.filename === entry.filename && a.path === entry.path) ||
+					diff.modified.some((m: any) => m.filename === entry.filename && m.path === entry.path)
+			);
+			if (
+				!(await validateUpload(
+					filesToUpload.length,
+					staleFileIds,
+					filesToUpload.reduce((size, entry) => Math.max(size, entry.file.size), 0),
+					knowledgeId
+				))
+			)
+				return;
 
 			if (staleFileIds.length > 0 || diff.rmdir.length > 0) {
 				syncing = $i18n.t('Removing {{count}} stale files...', { count: staleFileIds.length });
@@ -588,12 +677,7 @@
 			// ── 5. mkdir — create missing directories (parents first) ──
 			const directoryIdByPath = await createMissingDirectories(diff, knowledgeId);
 
-			// ── 6. Upload added + modified files ──
-			const filesToUpload = manifest.filter(
-				(entry) =>
-					diff.added.some((a: any) => a.filename === entry.filename && a.path === entry.path) ||
-					diff.modified.some((m: any) => m.filename === entry.filename && m.path === entry.path)
-			);
+			// 6. Upload added + modified files
 
 			const failedCount = await uploadManifestEntries(
 				filesToUpload,
@@ -601,7 +685,7 @@
 				knowledgeId
 			);
 
-			// ── 7. Report ──
+			// 7. Report
 			if (failedCount === 0) {
 				toast.success(
 					$i18n.t(
@@ -731,6 +815,7 @@
 		if (e.dataTransfer?.types?.includes('Files')) {
 			currentDirectoryId = null;
 			breadcrumbs = [];
+			const target = { knowledgeId: knowledge.id, directoryId: null, path: '' };
 			if (e.dataTransfer?.files) {
 				const inputItems = e.dataTransfer?.items;
 
@@ -738,10 +823,12 @@
 					const directoryEntries: DirectoryFileEntry[] = [];
 					const looseFiles: File[] = [];
 
-					for (const rawItem of Array.from(inputItems)) {
+					const droppedItems = Array.from(inputItems).map((rawItem) => {
 						const item = rawItem as DataTransferItem & { webkitGetAsEntry?: () => any };
-						const entry = item.webkitGetAsEntry?.();
+						return { entry: item.webkitGetAsEntry?.(), file: item.getAsFile() };
+					});
 
+					for (const { entry, file } of droppedItems) {
 						if (entry?.isDirectory) {
 							try {
 								directoryEntries.push(...(await collectDroppedEntryFiles(entry)));
@@ -749,18 +836,16 @@
 								handleUploadError(error);
 								return;
 							}
-						} else {
-							const file = item.getAsFile();
-							if (file) {
-								looseFiles.push(file);
-							}
+						} else if (file) {
+							looseFiles.push(file);
 						}
 					}
 
-					if (looseFiles.length) await uploadFilesHandler(looseFiles);
-
+					// Validate and receive a mixed drop as one batch.
 					if (directoryEntries.length > 0) {
-						await uploadDirectoryEntries(directoryEntries);
+						await uploadDirectoryEntries(directoryEntries, looseFiles, target);
+					} else if (looseFiles.length) {
+						await uploadFilesHandler(looseFiles, target);
 					}
 				} else {
 					toast.error($i18n.t(`File not found.`));
@@ -856,183 +941,256 @@
 	}}
 />
 
-<div class="flex h-full min-h-0 w-full flex-col overflow-hidden" id="collection-container">
-	{#if id && knowledge}
-		<AccessControlModal
-			bind:show={showAccessControlModal}
-			bind:accessGrants={knowledge.access_grants}
-			share={$user?.permissions?.sharing?.knowledge || $user?.role === 'admin'}
-			sharePublic={$user?.permissions?.sharing?.public_knowledge || $user?.role === 'admin'}
-			shareUsers={($user?.permissions?.access_grants?.allow_users ?? true) ||
-				$user?.role === 'admin'}
-			allowGroups={($user?.permissions?.access_grants?.allow_groups ?? true) ||
-				$user?.role === 'admin'}
-			onChange={async () => {
-				try {
-					await updateKnowledgeAccessGrants(localStorage.token, id, knowledge.access_grants ?? []);
-					toast.success($i18n.t('Saved'));
-				} catch (error) {
-					toast.error(`${error}`);
-				}
-			}}
-			accessRoles={['read', 'write']}
-		/>
-		<div class="flex min-h-7 shrink-0 items-center justify-between gap-2 pr-0.5">
-			<button
-				type="button"
-				class="flex h-6 w-fit shrink-0 items-center gap-1 whitespace-nowrap rounded-md text-xs text-gray-400 hover:text-gray-700 dark:text-gray-600 dark:hover:text-gray-300"
-				on:click={() => goto('/workspace/knowledge')}
-				><ChevronLeft className="size-3" strokeWidth="2" />{$i18n.t('Back')}</button
-			>
-			<!-- Previous file count label: {$i18n.t('{{COUNT}} files')} -->
-			{#if knowledge.write_access}<AccessButton
-					on:click={() => (showAccessControlModal = true)}
-				/>{:else}<span class="text-xs text-gray-500">{$i18n.t('Read Only')}</span>{/if}
-		</div>
-		<div class="shrink-0 px-1 pb-2.5">
-			<input
-				class="w-full bg-transparent text-sm outline-hidden"
-				bind:value={knowledge.name}
-				aria-label={$i18n.t('Knowledge Name')}
-				placeholder={$i18n.t('Knowledge Name')}
-				disabled={!knowledge.write_access}
-				on:input={changeDebounceHandler}
+<Comments bind:view={comments} resourceType="knowledge">
+	<div class="flex h-full min-h-0 w-full flex-col overflow-hidden" id="collection-container">
+		{#if id && knowledge}
+			<AccessControlModal
+				bind:show={showAccessControlModal}
+				bind:accessGrants={knowledge.access_grants}
+				share={$user?.permissions?.sharing?.knowledge || $user?.role === 'admin'}
+				sharePublic={$user?.permissions?.sharing?.public_knowledge || $user?.role === 'admin'}
+				shareUsers={($user?.permissions?.access_grants?.allow_users ?? true) ||
+					$user?.role === 'admin'}
+				allowGroups={($user?.permissions?.access_grants?.allow_groups ?? true) ||
+					$user?.role === 'admin'}
+				onChange={async () => {
+					try {
+						const saved = await updateKnowledgeAccessGrants(
+							localStorage.token,
+							id,
+							knowledge.access_grants ?? []
+						);
+						savedAccessGrants = structuredClone(saved.access_grants);
+						toast.success($i18n.t('Saved'));
+					} catch (error) {
+						knowledge.access_grants = structuredClone(savedAccessGrants);
+						toast.error(`${error}`);
+					}
+				}}
+				accessRoles={['read', 'write']}
 			/>
-			<div class="mt-0.5 flex min-w-0 items-center gap-2 text-xs text-gray-500">
+			<div class="flex min-h-7 shrink-0 items-center justify-between gap-2 pr-0.5">
+				<button
+					type="button"
+					class="flex h-6 w-fit shrink-0 items-center gap-1 whitespace-nowrap rounded-md text-xs text-gray-400 hover:text-gray-700 dark:text-gray-600 dark:hover:text-gray-300"
+					on:click={() => goto('/workspace/knowledge')}
+					><ChevronLeft className="size-3" strokeWidth="2" />{$i18n.t('Back')}</button
+				>
+				<!-- Previous file count label: {$i18n.t('{{COUNT}} files')} -->
+				<div class="flex items-center gap-2">
+					{#if !isExternalKnowledge && knowledge?.id}<CommentButton
+							onComment={(request) => (comments = request)}
+							wrapperClassName="me-1"
+							resource={{ resource_type: 'knowledge', resource_id: knowledge.id }}
+						/>{/if}
+					{#if !isExternalKnowledge && (knowledge.user_id === $user?.id || $user?.role === 'admin')}
+						<Dropdown closeOnSelect align="end">
+							<button
+								type="button"
+								aria-label={$i18n.t('More Options')}
+								class="flex size-6 items-center justify-center rounded-lg text-gray-500 hover:bg-gray-100 dark:hover:bg-gray-800"
+							>
+								<EllipsisHorizontal className="size-4" />
+							</button>
+							<div slot="content">
+								<DropdownMenu className="min-w-36">
+									<button
+										type="button"
+										class="flex h-[1.6875rem] w-full items-center gap-2 rounded-xl px-2 text-xs hover:text-gray-900 dark:hover:text-gray-100"
+										on:click={() => {
+											showSettings = true;
+										}}
+									>
+										<Cog6 className="size-3.5" />
+										{$i18n.t('Settings')}
+									</button>
+								</DropdownMenu>
+							</div>
+						</Dropdown>
+					{/if}
+					{#if knowledge.write_access}
+						{#if $user?.permissions?.sharing?.knowledge || $user?.role === 'admin'}
+							<AccessButton
+								on:click={() => {
+									savedAccessGrants = structuredClone(knowledge.access_grants ?? []);
+									showAccessControlModal = true;
+								}}
+							/>
+						{/if}
+					{:else}
+						<span class="text-xs text-gray-500">{$i18n.t('Read Only')}</span>
+					{/if}
+				</div>
+			</div>
+			<div class="shrink-0 px-1 pb-2.5">
 				<input
-					class="min-w-0 flex-1 bg-transparent outline-hidden"
-					bind:value={knowledge.description}
-					aria-label={$i18n.t('Knowledge Description')}
-					placeholder={$i18n.t('Knowledge Description')}
+					class="w-full bg-transparent text-sm outline-hidden"
+					bind:value={knowledge.name}
+					aria-label={$i18n.t('Knowledge Name')}
+					placeholder={$i18n.t('Knowledge Name')}
 					disabled={!knowledge.write_access}
 					on:input={changeDebounceHandler}
 				/>
-				<button
-					type="button"
-					title={$i18n.t('Click to copy ID')}
-					class="max-w-[40%] shrink-0 truncate font-mono"
-					on:click={() => {
-						copyToClipboard(id);
-						toast.success($i18n.t('ID copied to clipboard'));
-					}}>{id}</button
-				>
-			</div>
-		</div>
-		{#if totalUploads}
-			<div role="status" class="mb-2 rounded-xl bg-gray-50 px-3 py-2 text-xs dark:bg-gray-850">
-				{$i18n.t('Files received: {{received}} / {{total}}', {
-					received: receivedUploads,
-					total: totalUploads
-				})}
-				{#if failedUploads}
-					· {$i18n.t('Upload failures: {{count}}', { count: failedUploads })}{/if}
-				<div class="mt-1 text-gray-500">
-					{remainingUploads
-						? $i18n.t(
-								'Keep this page open until all files are received. Indexing runs separately on the server.'
-							)
-						: failedUploads
-							? $i18n.t(
-									'Received files will continue processing. Check failed transfers before uploading them again.'
-								)
-							: $i18n.t(
-									'All files received. Processing will continue on the server; you can close this page.'
-								)}
+				<div class="mt-0.5 flex min-w-0 items-center gap-2 text-xs text-gray-500">
+					<input
+						class="min-w-0 flex-1 bg-transparent outline-hidden"
+						bind:value={knowledge.description}
+						aria-label={$i18n.t('Knowledge Description')}
+						placeholder={$i18n.t('Knowledge Description')}
+						disabled={!knowledge.write_access}
+						on:input={changeDebounceHandler}
+					/>
+					<button
+						type="button"
+						title={$i18n.t('Click to copy ID')}
+						class="max-w-[40%] shrink-0 truncate font-mono"
+						on:click={() => {
+							copyToClipboard(id);
+							toast.success($i18n.t('ID copied to clipboard'));
+						}}>{id}</button
+					>
 				</div>
 			</div>
-		{/if}
-		<div class="mb-2 min-h-0 flex-1">
-			{#if isExternalKnowledge}<div
-					class="h-full overflow-auto rounded-2xl border border-gray-100/80 dark:border-white/[0.04]"
-				>
-					<div class="p-5 flex flex-col gap-4">
-						<div class="flex flex-wrap gap-2 text-xs">
-							<div class="px-2 py-1 rounded-lg bg-gray-50 dark:bg-gray-850">
-								{$i18n.t('Connected')}
-							</div>
-							<div class="px-2 py-1 rounded-lg bg-gray-50 dark:bg-gray-850">
-								{$i18n.t('Read Only')}
-							</div>
-							<div class="px-2 py-1 rounded-lg bg-gray-50 dark:bg-gray-850">
-								{knowledge?.meta?.external?.provider ?? $i18n.t('Provider')}
-							</div>
-							<div class="px-2 py-1 rounded-lg bg-gray-50 dark:bg-gray-850">
-								{$i18n.t('Service Account')}
-							</div>
-						</div>
-
-						<div class="grid grid-cols-1 md:grid-cols-2 gap-3 text-sm">
-							<div>
-								<div class="text-xs text-gray-500 mb-1">{$i18n.t('Mapped Source')}</div>
-								<div class="rounded-xl bg-gray-50 dark:bg-gray-850 px-3 py-2">
-									{knowledge?.meta?.external?.source?.name ?? $i18n.t('Not configured')}
+			{#if totalUploads}
+				<div role="status" class="mb-2 rounded-xl bg-gray-50 px-3 py-2 text-xs dark:bg-gray-850">
+					{$i18n.t('Files received: {{received}} / {{total}}', {
+						received: receivedUploads,
+						total: totalUploads
+					})}
+					{#if failedUploads}
+						· {$i18n.t('Upload failures: {{count}}', { count: failedUploads })}{/if}
+					<div class="mt-1 text-gray-500">
+						{remainingUploads
+							? $i18n.t(
+									'Keep this page open until all files are received. Indexing runs separately on the server.'
+								)
+							: failedUploads
+								? $i18n.t(
+										'Received files will continue processing. Check failed transfers before uploading them again.'
+									)
+								: $i18n.t(
+										'All files received. Processing will continue on the server; you can close this page.'
+									)}
+					</div>
+				</div>
+			{/if}
+			<div class="mb-2 min-h-0 flex-1">
+				{#if isExternalKnowledge}<div
+						class="h-full overflow-auto rounded-2xl border border-gray-100/80 dark:border-white/[0.04]"
+					>
+						<div class="p-5 flex flex-col gap-4">
+							<div class="flex flex-wrap gap-2 text-xs">
+								<div class="px-2 py-1 rounded-lg bg-gray-50 dark:bg-gray-850">
+									{$i18n.t('Connected')}
+								</div>
+								<div class="px-2 py-1 rounded-lg bg-gray-50 dark:bg-gray-850">
+									{$i18n.t('Read Only')}
+								</div>
+								<div class="px-2 py-1 rounded-lg bg-gray-50 dark:bg-gray-850">
+									{knowledge?.meta?.external?.provider ?? $i18n.t('Provider')}
+								</div>
+								<div class="px-2 py-1 rounded-lg bg-gray-50 dark:bg-gray-850">
+									{$i18n.t('Service Account')}
 								</div>
 							</div>
-							<div>
-								<div class="text-xs text-gray-500 mb-1">{$i18n.t('Auth Mode')}</div>
-								<div class="rounded-xl bg-gray-50 dark:bg-gray-850 px-3 py-2">
-									{$i18n.t('Admin-managed service account')}
+
+							<div class="grid grid-cols-1 md:grid-cols-2 gap-3 text-sm">
+								<div>
+									<div class="text-xs text-gray-500 mb-1">{$i18n.t('Mapped Source')}</div>
+									<div class="rounded-xl bg-gray-50 dark:bg-gray-850 px-3 py-2">
+										{knowledge?.meta?.external?.source?.name ?? $i18n.t('Not configured')}
+									</div>
+								</div>
+								<div>
+									<div class="text-xs text-gray-500 mb-1">{$i18n.t('Auth Mode')}</div>
+									<div class="rounded-xl bg-gray-50 dark:bg-gray-850 px-3 py-2">
+										{$i18n.t('Admin-managed service account')}
+									</div>
 								</div>
 							</div>
-						</div>
 
-						<div class="text-xs text-gray-500">
-							<!-- LICENSE covers this Open WebUI wordmark.
+							<div class="text-xs text-gray-500">
+								<!-- LICENSE covers this Open WebUI wordmark.
 						Do not alter, remove, obscure, or replace it except as LICENSE permits:
 						https://docs.openwebui.com/license. -->
-							{$i18n.t(
-								'This knowledge base retrieves from a connected source. Open WebUI can query it, but cannot upload, sync, edit, delete, reset, or reindex its source data.'
-							)}
-						</div>
-
-						<div class="flex flex-col gap-2">
-							<div class="text-xs">{$i18n.t('Test Query')}</div>
-							<div class="flex gap-2">
-								<input
-									class="w-full text-xs rounded-xl bg-gray-50 dark:bg-gray-850 px-3 py-2 outline-hidden"
-									bind:value={externalTestQuery}
-									placeholder={$i18n.t('Ask this knowledge source a test question')}
-								/>
-								<button
-									class="flex h-7 shrink-0 items-center justify-center gap-1.5 rounded-lg bg-gray-900 px-2.5 text-xs font-normal text-white transition hover:bg-black disabled:opacity-60 dark:bg-gray-100 dark:text-gray-900 dark:hover:bg-white"
-									on:click={externalTestHandler}
-								>
-									{$i18n.t('Test')}
-								</button>
+								{$i18n.t(
+									'This knowledge base retrieves from a connected source. Open WebUI can query it, but cannot upload, sync, edit, delete, reset, or reindex its source data.'
+								)}
 							</div>
-						</div>
 
-						{#if externalTestResult}
-							<div class="rounded-xl bg-gray-50 dark:bg-gray-850 p-3 text-xs">
-								<div class="mb-2">{$i18n.t('Preview')}</div>
-								{#each externalTestResult.documents ?? [] as document, idx}
-									<div class="border-t border-gray-100 dark:border-gray-800 py-2">
-										<div class="line-clamp-4">{document}</div>
-										<div class="text-gray-500 mt-1">
-											{externalTestResult.metadatas?.[idx]?.source ?? ''}
+							<div class="flex flex-col gap-2">
+								<div class="text-xs">{$i18n.t('Test Query')}</div>
+								<div class="flex gap-2">
+									<input
+										aria-label={$i18n.t('Test Query')}
+										class="w-full text-xs rounded-xl bg-gray-50 dark:bg-gray-850 px-3 py-2 outline-hidden"
+										bind:value={externalTestQuery}
+										placeholder={$i18n.t('Ask this knowledge source a test question')}
+									/>
+									<button
+										class="flex h-7 shrink-0 items-center justify-center gap-1.5 rounded-lg bg-gray-900 px-2.5 text-xs font-normal text-white transition hover:bg-black disabled:opacity-60 dark:bg-gray-100 dark:text-gray-900 dark:hover:bg-white"
+										on:click={externalTestHandler}
+									>
+										{$i18n.t('Test')}
+									</button>
+								</div>
+							</div>
+
+							{#if externalTestResult}
+								<div class="rounded-xl bg-gray-50 dark:bg-gray-850 p-3 text-xs">
+									<div class="mb-2">{$i18n.t('Preview')}</div>
+									{#each externalTestResult.documents ?? [] as document, idx}
+										<div class="border-t border-gray-100 dark:border-gray-800 py-2">
+											<div class="line-clamp-4">{document}</div>
+											<div class="text-gray-500 mt-1">
+												{externalTestResult.metadatas?.[idx]?.source ?? ''}
+											</div>
 										</div>
-									</div>
-								{/each}
-							</div>
-						{/if}
-					</div>
-				</div>{:else}
-				<KnowledgeBrowser
-					bind:this={browser}
-					{knowledge}
-					transfers={fileItems}
-					{syncing}
-					onUpload={requestUpload}
-					onSync={async () => {
-						pendingSyncFiles = await collectDirectoryFiles();
-						if (pendingSyncFiles?.length) showSyncConfirmModal = true;
-					}}
-					onReset={() => (showResetConfirm = true)}
-				/>
-			{/if}
-		</div>
-	{:else}<Spinner className="size-5" />{/if}
-</div>
+									{/each}
+								</div>
+							{/if}
+						</div>
+					</div>{:else}
+					<KnowledgeBrowser
+						bind:this={browser}
+						{knowledge}
+						transfers={fileItems}
+						{syncing}
+						onUpload={requestUpload}
+						onSync={async () => {
+							pendingSyncFiles = await collectDirectoryFiles();
+							if (pendingSyncFiles?.length) showSyncConfirmModal = true;
+						}}
+						onReset={() => (showResetConfirm = true)}
+					/>
+				{/if}
+			</div>
+		{:else}<Spinner className="size-5" />{/if}
+	</div>
+</Comments>
+
+<Modal bind:show={showSettings} size="md" ariaLabel={$i18n.t('Settings')}>
+	{#if knowledge}
+		<KnowledgeEditor
+			modal
+			edit
+			{knowledge}
+			onBack={() => {
+				showSettings = false;
+			}}
+			onSaved={(saved) => {
+				if (!knowledge) return;
+				knowledge = {
+					...knowledge,
+					name: saved.name,
+					description: saved.description,
+					meta: saved.meta
+				};
+				showSettings = false;
+			}}
+		/>
+	{/if}
+</Modal>
 
 <ConfirmDialog
 	bind:show={showResetConfirm}

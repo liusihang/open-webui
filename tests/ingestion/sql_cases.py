@@ -107,11 +107,23 @@ namespace = {
 }
 exec(compile(ast.Module(body=nodes, type_ignores=[]), str(source), 'exec'), namespace)
 Config = namespace['Config']
+config_module = ModuleType('open_webui.models.config')
+config_module.Config = Config
+sys.modules[config_module.__name__] = config_module
+users_module = ModuleType('open_webui.models.users')
+users_module.Users = SimpleNamespace(
+    get_user_by_id=AsyncMock(side_effect=lambda user_id, **kwargs: SimpleNamespace(id=user_id, role='user'))
+)
+sys.modules[users_module.__name__] = users_module
+access_module = ModuleType('open_webui.models.access_grants')
+access_module.AccessGrants = SimpleNamespace(has_access=AsyncMock(return_value=False))
+sys.modules[access_module.__name__] = access_module
 
 
 class QueueSQLTests(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self):
         global session_factory
+        Config.configure(defaults={})
         self.temp = tempfile.TemporaryDirectory()
         url = os.getenv('INGESTION_TEST_DB_URL')
         if url and url not in (
@@ -126,6 +138,9 @@ class QueueSQLTests(unittest.IsolatedAsyncioTestCase):
                 await connection.run_sync(Base.metadata.drop_all)
             await connection.run_sync(Base.metadata.create_all)
         async with sessions() as db:
+            from open_webui.models.knowledge import Knowledge
+
+            db.add(Knowledge(id='kb', user_id='owner', name='Fixture KB', meta={}, created_at=1, updated_at=1))
             for identity in ('a', 'b', 'c'):
                 db.add(
                     File(
@@ -152,6 +167,167 @@ class QueueSQLTests(unittest.IsolatedAsyncioTestCase):
             config_hash='config',
             payload={},
         )
+
+    async def test_queued_job_detects_dynamic_prefix_change_before_encoder_or_parser(self):
+        from open_webui.models.retrieval_chunks import canonical_hash
+
+        tree = ast.parse((ROOT / 'routers/retrieval.py').read_text())
+        assignment = next(
+            node
+            for node in tree.body
+            if isinstance(node, ast.Assign)
+            and any(isinstance(target, ast.Name) and target.id == 'RETRIEVAL_CONFIG_KEYS' for target in node.targets)
+        )
+        keys = ast.literal_eval(assignment.value)
+        config = dict.fromkeys(keys.values())
+        config.update({'rag.embedding_query_prefix': 'old-query', 'rag.embedding_content_prefix': 'old-document'})
+        identity = await queue.enqueue(
+            file_id='a',
+            user_id='owner',
+            knowledge_id=None,
+            source_hash='a',
+            config_hash=canonical_hash(config),
+            payload={},
+        )
+        _, token = await queue.claim(0)
+        Config.configure(defaults={**config, 'rag.embedding_query_prefix': 'new-query'})
+        integration = ModuleType('open_webui.retrieval.integration')
+        integration.ASSET_CONFIG_KEYS, integration.SERVICE_CONFIG_KEYS = (), ()
+        integration.services = AsyncMock()
+        retrieval = ModuleType('open_webui.routers.retrieval')
+        retrieval.RETRIEVAL_CONFIG_KEYS, retrieval._validate_collection_access = keys, AsyncMock()
+        config_module = ModuleType('open_webui.config')
+        config_module.Config = Config
+        async with sessions() as db:
+            file = await db.get(File, 'a')
+        files_module = sys.modules['open_webui.models.files']
+        access = ModuleType('open_webui.utils.access_control.files')
+        access.has_access_to_file = AsyncMock(return_value=False)
+        modules = {module.__name__: module for module in (integration, retrieval, config_module, access)}
+        with (
+            patch.dict(sys.modules, modules),
+            patch.object(
+                files_module, 'Files', SimpleNamespace(get_file_by_id=AsyncMock(return_value=file)), create=True
+            ),
+        ):
+            with self.assertRaisesRegex(ValueError, 'configuration changed while queued'):
+                await ingestion.execute(identity, token)
+        integration.services.assert_not_awaited()
+
+    async def test_pending_knowledge_count_deduplicates_links_and_excludes_current_file(self):
+        from open_webui.models.knowledge import KnowledgeFile
+
+        tree = ast.parse((ROOT / 'models/knowledge.py').read_text())
+        table = next(node for node in tree.body if isinstance(node, ast.ClassDef) and node.name == 'KnowledgeTable')
+        method = next(node for node in table.body if getattr(node, 'name', '') == 'get_file_count_by_id')
+        from sqlalchemy import func
+
+        scope = dict(
+            File=File,
+            KnowledgeFile=KnowledgeFile,
+            select=select,
+            func=func,
+            Optional=__import__('typing').Optional,
+            AsyncSession=Any,
+            get_async_db_context=sessions,
+        )
+        exec(compile(ast.Module(body=[method], type_ignores=[]), '<production-pending-count>', 'exec'), scope)
+        async with sessions() as db:
+            for identity in ('a', 'b'):
+                file = await db.get(File, identity)
+                file.meta, file.data = {'data': {'knowledge_id': 'kb'}}, {'status': 'pending'}
+            db.add(
+                KnowledgeFile(
+                    id='linked-a', knowledge_id='kb', file_id='a', user_id='owner', created_at=1, updated_at=1
+                )
+            )
+            await db.commit()
+        self.assertEqual(await scope['get_file_count_by_id'](None, 'kb', include_pending=True), 2)
+        self.assertEqual(
+            await scope['get_file_count_by_id'](None, 'kb', include_pending=True, exclude_file_ids=['b']), 1
+        )
+        self.assertEqual(await scope['get_file_count_by_id'](None, 'kb'), 1)
+
+    async def test_final_knowledge_slot_is_serialized_and_retry_is_idempotent(self):
+        from open_webui.models.knowledge import KnowledgeFile
+
+        Config.configure(defaults={'knowledge.max_file_count': 1})
+
+        async def publish(file_id):
+            try:
+                async with sessions() as db:
+                    await ingestion._link_upload(
+                        db,
+                        SimpleNamespace(file_id=file_id, user_id='owner', knowledge_id='kb', payload={'auto_link': {}}),
+                    )
+                    await db.commit()
+                return True
+            except ValueError as error:
+                self.assertIn('limit', str(error))
+                return False
+
+        results = await asyncio.gather(publish('a'), publish('b'))
+        self.assertEqual(sum(results), 1)
+        winner = 'a' if results[0] else 'b'
+        self.assertTrue(await publish(winner))
+        async with sessions() as db:
+            self.assertEqual(len(list(await db.scalars(select(KnowledgeFile)))), 1)
+
+    async def test_quota_rejection_rolls_back_index_and_link_publication(self):
+        from open_webui.models.knowledge import KnowledgeFile
+
+        await self.seed_old_index()
+        identity, token, space = await self.stage_text()
+        async with sessions() as db:
+            job = await db.get(Job, identity)
+            job.knowledge_id, job.payload = 'kb', {'auto_link': {}}
+            db.add(
+                KnowledgeFile(
+                    id='occupied', knowledge_id='kb', file_id='b', user_id='owner', created_at=1, updated_at=1
+                )
+            )
+            await db.commit()
+        Config.configure(defaults={'knowledge.max_file_count': 1})
+        with self.assertRaisesRegex(ValueError, 'limit'):
+            await ingestion.publish_candidate(
+                identity,
+                token,
+                file_id='a',
+                version=2,
+                collection='candidate',
+                content='must not publish',
+                assets=[],
+                chunk_count=1,
+                space_id=space,
+                scopes=[None],
+            )
+        async with sessions() as db:
+            self.assertEqual((await db.get(File, 'a')).data['content'], 'old body')
+            self.assertEqual((await db.get(State, stable_id('file', file_id='a'))).file_version, 1)
+            self.assertEqual(list(await db.scalars(select(Chunk.text).where(Chunk.is_active.is_(True)))), ['old body'])
+            self.assertEqual(list(await db.scalars(select(KnowledgeFile.file_id))), ['b'])
+            self.assertEqual((await db.get(Job, identity)).status, 'running')
+
+    async def test_publication_rechecks_size_and_current_write_access(self):
+        from open_webui.models.knowledge import Knowledge
+
+        job = SimpleNamespace(file_id='a', user_id='owner', knowledge_id='kb', payload={'auto_link': {}})
+        Config.configure(defaults={'knowledge.max_file_size': 1})
+        async with sessions() as db:
+            file = await db.get(File, 'a')
+            file.meta = {'size': 2 * 1024 * 1024}
+            await db.commit()
+        async with sessions() as db:
+            with self.assertRaisesRegex(ValueError, 'size limit'):
+                await ingestion._link_upload(db, job)
+        Config.configure(defaults={})
+        async with sessions() as db:
+            knowledge = await db.get(Knowledge, 'kb')
+            knowledge.user_id = 'someone-else'
+            await db.commit()
+        async with sessions() as db:
+            with self.assertRaises(PermissionError):
+                await ingestion._link_upload(db, job)
 
     async def test_same_scope_duplicate_is_not_executed_twice(self):
         identity = await self.enqueue(source='same')

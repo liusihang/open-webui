@@ -139,6 +139,8 @@ class TerminalSessionDiscoveryTests(unittest.IsolatedAsyncioTestCase):
             get_terminal_cwd=AsyncMock(side_effect=cwd),
             get_terminal_system_prompt=AsyncMock(side_effect=prompt),
             configure_terminal_display_file_spec=lambda spec: copy.deepcopy(spec),
+            display_file=object(),
+            get_builtin_tool_spec=lambda function: {'name': 'display_file', 'description': 'Display a file', 'parameters': {'type': 'object', 'properties': {'path': {'type': 'string'}, 'page': {'type': 'integer'}}}},
             clean_openai_tool_schema=lambda spec: spec,
             get_async_tool_function_and_apply_extra_params=AsyncMock(side_effect=wrap),
             execute_tool_server=AsyncMock(side_effect=execute),

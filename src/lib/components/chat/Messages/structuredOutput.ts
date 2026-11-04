@@ -16,7 +16,7 @@ export type OutputItem = {
 	status?: string;
 	arguments?: unknown;
 	content?: OutputContentPart[];
-	summary?: OutputContentPart[];
+	summary?: OutputContentPart[] | string;
 	output?: OutputContentPart[];
 	files?: unknown;
 	embeds?: unknown;
@@ -58,6 +58,11 @@ export type OutputDisplayItem =
 			text: string;
 	  }
 	| {
+			type: 'image';
+			id: string;
+			src: string;
+	  }
+	| {
 			type: 'detail_single';
 			id: string;
 			token: OutputDetailToken;
@@ -71,6 +76,11 @@ export type OutputDisplayItem =
 			type: 'file';
 			id: string;
 			item: Record<string, unknown>;
+	  }
+	| {
+			type: 'context_compaction';
+			id: string;
+			summary: string;
 	  };
 
 type ResponseStreamEvent = {
@@ -183,16 +193,17 @@ function getInlineFileFromToolOutput(callItem?: OutputItem, resultItem?: OutputI
 	}
 
 	const result = parseJSONStringValue(getToolResultText(resultItem)) as Record<string, unknown>;
+	const isTerminalFile = result?.source === 'open_terminal' && !!result.terminal_selector;
+	const isOpenWebUIFile = result?.source === 'open_webui';
 	if (
 		!result ||
 		typeof result !== 'object' ||
 		result.type !== 'file' ||
-		result.source !== 'open_terminal' ||
 		result.exists !== true ||
 		resultItem.status === 'failed' ||
 		resultItem.status === 'incomplete' ||
 		!result.path ||
-		!result.terminal_selector
+		!(isTerminalFile || isOpenWebUIFile)
 	) {
 		return null;
 	}
@@ -418,6 +429,16 @@ export function buildOutputDisplayItems(output: OutputItem[] = []): OutputDispla
 			return;
 		}
 
+		if (item.type === 'open_webui:context_compaction') {
+			flushDetails();
+			displayItems.push({
+				type: 'context_compaction',
+				id: item.id ?? `context-compaction-${index}`,
+				summary: typeof item.summary === 'string' ? item.summary : ''
+			});
+			return;
+		}
+
 		if (item.type === 'message') {
 			const text = getMessageText(item);
 			if (text.trim()) {
@@ -426,6 +447,20 @@ export function buildOutputDisplayItems(output: OutputItem[] = []): OutputDispla
 					type: item.role === 'assistant' && item.phase === 'commentary' ? 'commentary' : 'message',
 					id: item.id ?? `message-${index}`,
 					text
+				});
+			}
+			return;
+		}
+
+		if (item.type === 'image_generation_call') {
+			if (typeof item.result === 'string' && item.result) {
+				flushDetails();
+				displayItems.push({
+					type: 'image',
+					id: item.id ?? `image-${index}`,
+					src: item.result.startsWith('data:')
+						? item.result
+						: `data:image/${item.output_format || 'png'};base64,${item.result}`
 				});
 			}
 			return;
@@ -627,7 +662,7 @@ export function applyResponseStreamEvent(
 		if (!event.part) {
 			return nextOutput;
 		}
-		item.summary = [...(item.summary ?? [])];
+		item.summary = Array.isArray(item.summary) ? [...item.summary] : [];
 		const summaryIndex = event.summary_index ?? item.summary.length;
 		setPart(item.summary, summaryIndex, { ...event.part }, { type: 'summary_text', text: '' });
 		return nextOutput;
@@ -642,7 +677,7 @@ export function applyResponseStreamEvent(
 
 		if (deltaType === 'reasoning_summary_text') {
 			const summaryIndex = event.summary_index ?? 0;
-			item.summary = [...(item.summary ?? [])];
+			item.summary = Array.isArray(item.summary) ? [...item.summary] : [];
 			const part = ensurePart(item.summary, summaryIndex, { type: 'summary_text', text: '' });
 			part.text = appendDelta(part.text ?? '', event.delta);
 			return nextOutput;

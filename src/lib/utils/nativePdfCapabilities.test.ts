@@ -1,9 +1,18 @@
 import { describe, expect, it } from 'vitest';
 import { readFileSync } from 'node:fs';
 import { compile } from 'svelte/compiler';
+import { CONTROL_LABELS, isControlVisible } from './ui-visibility';
 import { DEFAULT_CAPABILITIES } from '../constants';
 
 describe('native PDF capability configuration', () => {
+	it('registers native PDF for the same visibility policy as other model controls', () => {
+		const id = 'model_editor.capabilities.native_pdf';
+		expect(CONTROL_LABELS[id]).toBe('Native PDF input');
+		expect(isControlVisible(id, { user: { role: 'user' } })).toBe(true);
+		const config = { ui: { visibility: { [id]: false } } };
+		expect(isControlVisible(id, { user: { role: 'user' }, config })).toBe(false);
+		expect(isControlVisible(id, { user: { role: 'admin' }, config })).toBe(true);
+	});
 	it('is opt-in independently of upstream vision and file context defaults', () => {
 		expect(DEFAULT_CAPABILITIES.native_pdf).toBe(false);
 		expect(DEFAULT_CAPABILITIES.vision).toBe(true);

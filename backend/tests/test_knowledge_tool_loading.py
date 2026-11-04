@@ -70,8 +70,10 @@ async def test_discovery_hides_aliases_and_does_not_change_provider_definitions(
             return function
 
         monkeypatch.setattr(middleware, 'get_updated_tool_function', updated)
+        assert tool_search.resolve_tool_call(tool_call, tools) is None
+        staged = {'call_id': tool_call['id'], **tool_call['function'], 'provider_function': tool_call['provider_function']}
         result = await middleware.execute_tool_call(
-            {'messages': []}, {**metadata, 'params': {'tool_approval_mode': 'ask'}}, caller, tool_call
+            {'messages': []}, {**metadata, 'params': {'tool_approval_mode': 'ask'}}, caller, staged
         )
         assert result[1] == ('done' if approved else 'Error: tool call was not approved.')
         assert caller.await_args.args[0]['data']['tool_call']['name'] == 'search_knowledge_bases'
@@ -96,7 +98,7 @@ def test_dispatch_rejects_non_object_or_invalid_arguments(params):
 @pytest.mark.asyncio
 async def test_legacy_hidden_call_still_executes_through_normal_dispatch():
     tools = tools_fixture()
-    call = {'function': {'name': 'view_file', 'arguments': '{}'}}
+    call = {'type': 'function_call', 'call_id': 'legacy', 'name': 'view_file', 'arguments': '{}'}
     result = await middleware.execute_tool_call({'messages': []}, {'tools': tools}, None, call)
     assert result[1] == 'done'
     tools['view_file']['callable'].assert_awaited_once()

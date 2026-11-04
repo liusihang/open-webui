@@ -347,7 +347,7 @@ class TextCompactionRoutingTests(unittest.TestCase):
 
     def run_text(self, model='non-gpt'):
         return asyncio.run(
-            self.scope['compact_messages_for_request'](SimpleNamespace(), None, self.messages, {}, model, {})
+            self.scope['compact_messages_for_request'](SimpleNamespace(), None, None, self.messages, {}, model, {})
         )
 
     def test_non_gpt_keeps_existing_summary_pipeline_and_system(self):
@@ -374,7 +374,7 @@ class TextCompactionRoutingTests(unittest.TestCase):
 
     def test_disabled_global_keeps_existing_history(self):
         self.config['enable'] = False
-        self.assertEqual(self.run_text(), (self.messages, None, False))
+        self.assertEqual(self.run_text(), (self.messages, None, []))
         self.scope['_generate_summary'].assert_not_awaited()
 
 

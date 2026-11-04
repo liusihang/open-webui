@@ -5,6 +5,8 @@ import asyncio
 import copy
 import json
 import sys
+import time
+from contextlib import asynccontextmanager
 from pathlib import Path
 from types import SimpleNamespace
 import unittest
@@ -51,7 +53,12 @@ class ChatTaskErrorTests(unittest.IsolatedAsyncioTestCase):
         emitter = AsyncMock()
         save = AsyncMock()
         log = SimpleNamespace(info=Mock(), error=Mock(), exception=Mock(), debug=Mock())
+        @asynccontextmanager
+        async def edit(*args):
+            yield {}
+
         scope = {
+            'time': time,
             'asyncio': asyncio,
             'copy': copy,
             'model_id': 'fixture-model',
@@ -62,7 +69,7 @@ class ChatTaskErrorTests(unittest.IsolatedAsyncioTestCase):
             'process_chat_payload': AsyncMock(side_effect=TimeoutError()),
             'is_saved_chat_id': lambda chat_id: chat_id == 'saved',
             'get_event_emitter': AsyncMock(return_value=emitter),
-            'Chats': SimpleNamespace(upsert_message_to_chat_by_id_and_message_id=save),
+            'Chats': SimpleNamespace(upsert_message_to_chat_by_id_and_message_id=save, edit_message_output=edit),
             'publish_chat_failed_event': AsyncMock(),
             'log': log,
         }

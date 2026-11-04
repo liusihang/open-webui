@@ -126,7 +126,7 @@ class PruningTextCoexistTests(unittest.TestCase):
     def run_text(self, messages=None):
         return asyncio.run(
             self.f.scope['compact_messages_for_request'](
-                SimpleNamespace(), None, messages or self.f.messages, self.metadata, 'non-gpt', {}
+                SimpleNamespace(), None, None, messages or self.f.messages, self.metadata, 'non-gpt', {}
             )
         )
 

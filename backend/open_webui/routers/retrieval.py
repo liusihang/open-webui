@@ -7,6 +7,7 @@ import mimetypes
 import os
 import re
 import shutil
+import time
 import uuid
 from datetime import datetime
 from pathlib import Path
@@ -37,11 +38,8 @@ from langchain_text_splitters import (
 from open_webui.config import (
     Config,
     DEFAULT_LOCALE,
-    ENV,
-    RAG_EMBEDDING_CONTENT_PREFIX,
     RAG_EMBEDDING_MODEL_AUTO_UPDATE,
     RAG_EMBEDDING_MODEL_TRUST_REMOTE_CODE,
-    RAG_EMBEDDING_QUERY_PREFIX,
     RAG_RERANKING_MODEL_AUTO_UPDATE,
     RAG_RERANKING_MODEL_TRUST_REMOTE_CODE,
     UPLOAD_DIR,
@@ -52,6 +50,7 @@ from open_webui.env import (
     AIOHTTP_CLIENT_SESSION_SSL,
     DEVICE_TYPE,
     DOCKER,
+    RAG_EMBEDDING_BUFFER_SIZE,
     RAG_EMBEDDING_TIMEOUT,
     SENTENCE_TRANSFORMERS_BACKEND,
     SENTENCE_TRANSFORMERS_CROSS_ENCODER_BACKEND,
@@ -108,7 +107,7 @@ from open_webui.retrieval.web.firecrawl import search_firecrawl
 from open_webui.retrieval.web.google_pse import search_google_pse
 from open_webui.retrieval.web.jina_search import search_jina
 from open_webui.retrieval.web.kagi import search_kagi
-from open_webui.retrieval.web.utils import get_ssrf_safe_session, validate_url
+from open_webui.retrieval.web.utils import assert_identity_encoding, get_ssrf_safe_session, validate_url
 
 # Web search engines
 from open_webui.retrieval.web.main import SearchResult
@@ -148,13 +147,9 @@ log = logging.getLogger(__name__)
 
 TIKTOKEN_DISALLOWED_SPECIAL = ()
 
-##########################################
-#
 # Utility functions
-# Give us this day our relevant chunks, and lead us
-# not into hallucination, but deliver us from noise.
-#
-##########################################
+# Let us find what is true among the many voices,
+# and let us not mistake the loudest answer for the wisest.
 
 
 def get_ef(
@@ -253,11 +248,7 @@ def get_rf(
     return rf
 
 
-##########################################
-#
 # API routes
-#
-##########################################
 
 
 RETRIEVAL_CONFIG_KEYS = {
@@ -318,6 +309,9 @@ RETRIEVAL_CONFIG_KEYS = {
     'FILE_IMAGE_COMPRESSION_HEIGHT': 'file.image_compression_height',
     'FILE_IMAGE_COMPRESSION_WIDTH': 'file.image_compression_width',
     'FILE_MAX_COUNT': 'rag.file.max_count',
+    'KNOWLEDGE_MAX_UPLOAD_COUNT': 'knowledge.max_upload_count',
+    'KNOWLEDGE_MAX_FILE_COUNT': 'knowledge.max_file_count',
+    'KNOWLEDGE_MAX_FILE_SIZE': 'knowledge.max_file_size',
     'FILE_MAX_SIZE': 'rag.file.max_size',
     'FIRECRAWL_API_BASE_URL': 'web.loader.firecrawl_api_url',
     'FIRECRAWL_API_KEY': 'web.loader.firecrawl_api_key',
@@ -341,6 +335,7 @@ RETRIEVAL_CONFIG_KEYS = {
     'MICROSOFT_WEB_IQ_LANGUAGE': 'web.search.microsoft_web_iq_language',
     'MISTRAL_OCR_API_BASE_URL': 'rag.mistral_ocr_api_base_url',
     'MISTRAL_OCR_API_KEY': 'rag.mistral_ocr_api_key',
+    'MISTRAL_OCR_PARAMS': 'rag.mistral_ocr_params',
     'MISTRAL_OCR_USE_BASE64': 'rag.mistral_ocr_use_base64',
     'MOJEEK_SEARCH_API_KEY': 'web.search.mojeek_search_api_key',
     'OLLAMA_CLOUD_WEB_SEARCH_API_KEY': 'web.search.ollama_cloud_api_key',
@@ -360,6 +355,8 @@ RETRIEVAL_CONFIG_KEYS = {
     'RAG_EMBEDDING_BATCH_SIZE': 'rag.embedding_batch_size',
     'RAG_EMBEDDING_CONCURRENT_REQUESTS': 'rag.embedding_concurrent_requests',
     'RAG_EMBEDDING_ENGINE': 'rag.embedding_engine',
+    'RAG_EMBEDDING_QUERY_PREFIX': 'rag.embedding_query_prefix',
+    'RAG_EMBEDDING_CONTENT_PREFIX': 'rag.embedding_content_prefix',
     'RAG_EMBEDDING_MODEL': 'rag.embedding_model',
     'RAG_TOKENIZER_MODEL': 'rag.tokenizer_model',
     'RAG_EXTERNAL_RERANKER_API_KEY': 'rag.external_reranker_api_key',
@@ -545,13 +542,19 @@ class EvidenceSpaceForm(BaseModel):
 async def register_evidence_space(request: Request, form_data: EvidenceSpaceForm, user=Depends(get_admin_user)):
     """Explicit operator provenance step. No auto-verification or embedding request."""
     if form_data.verified:
-        config = await Config.get_many('rag.embedding_engine', 'rag.embedding_model', 'rag.openai.api_base_url')
+        config = await Config.get_many(
+            'rag.embedding_engine',
+            'rag.embedding_model',
+            'rag.openai.api_base_url',
+            'rag.embedding_query_prefix',
+            'rag.embedding_content_prefix',
+        )
         if (
             config['rag.embedding_engine'] != 'openai'
             or form_data.embedding_model != config['rag.embedding_model']
             or form_data.encoding_config.get('text_api_base_url') != config['rag.openai.api_base_url']
-            or form_data.encoding_config.get('query_prefix') != RAG_EMBEDDING_QUERY_PREFIX
-            or form_data.encoding_config.get('document_prefix') != RAG_EMBEDDING_CONTENT_PREFIX
+            or form_data.encoding_config.get('query_prefix') != config.get('rag.embedding_query_prefix')
+            or form_data.encoding_config.get('document_prefix') != config.get('rag.embedding_content_prefix')
         ):
             raise HTTPException(400, 'Verified space must match the configured text encoder and its provenance')
     try:
@@ -574,6 +577,8 @@ async def get_embedding_config(request: Request, user=Depends(get_admin_user)):
     return {
         'status': True,
         'RAG_EMBEDDING_ENGINE': config['rag.embedding_engine'],
+        'RAG_EMBEDDING_QUERY_PREFIX': config['rag.embedding_query_prefix'],
+        'RAG_EMBEDDING_CONTENT_PREFIX': config['rag.embedding_content_prefix'],
         'RAG_EMBEDDING_MODEL': config['rag.embedding_model'],
         'RAG_EMBEDDING_BATCH_SIZE': config['rag.embedding_batch_size'],
         'ENABLE_ASYNC_EMBEDDING': config['rag.enable_async_embedding'],
@@ -615,6 +620,8 @@ class EmbeddingModelUpdateForm(BaseModel):
     ollama_config: OllamaConfigForm | None = None
     azure_openai_config: AzureOpenAIConfigForm | None = None
     RAG_EMBEDDING_ENGINE: str
+    RAG_EMBEDDING_QUERY_PREFIX: str | None = None
+    RAG_EMBEDDING_CONTENT_PREFIX: str | None = None
     RAG_EMBEDDING_MODEL: str
     RAG_EMBEDDING_BATCH_SIZE: int | None = 1
     ENABLE_ASYNC_EMBEDDING: bool | None = True
@@ -648,10 +655,14 @@ async def update_embedding_config(request: Request, form_data: EmbeddingModelUpd
         updates = {
             'rag.embedding_engine': form_data.RAG_EMBEDDING_ENGINE,
             'rag.embedding_model': form_data.RAG_EMBEDDING_MODEL.strip(),
-            'rag.embedding_batch_size': form_data.RAG_EMBEDDING_BATCH_SIZE,
+            'rag.embedding_batch_size': form_data.RAG_EMBEDDING_BATCH_SIZE or 1,
             'rag.enable_async_embedding': form_data.ENABLE_ASYNC_EMBEDDING,
             'rag.embedding_concurrent_requests': form_data.RAG_EMBEDDING_CONCURRENT_REQUESTS,
         }
+        if 'RAG_EMBEDDING_QUERY_PREFIX' in form_data.model_fields_set:
+            updates['rag.embedding_query_prefix'] = form_data.RAG_EMBEDDING_QUERY_PREFIX or None
+        if 'RAG_EMBEDDING_CONTENT_PREFIX' in form_data.model_fields_set:
+            updates['rag.embedding_content_prefix'] = form_data.RAG_EMBEDDING_CONTENT_PREFIX or None
         if form_data.RAG_EMBEDDING_ENGINE == 'openai' and form_data.openai_config is not None:
             updates['rag.openai.api_base_url'] = form_data.openai_config.url or ''
             updates['rag.openai.api_key'] = form_data.openai_config.key or ''
@@ -703,6 +714,8 @@ async def update_embedding_config(request: Request, form_data: EmbeddingModelUpd
         return {
             'status': True,
             'RAG_EMBEDDING_ENGINE': config['rag.embedding_engine'],
+            'RAG_EMBEDDING_QUERY_PREFIX': config['rag.embedding_query_prefix'],
+            'RAG_EMBEDDING_CONTENT_PREFIX': config['rag.embedding_content_prefix'],
             'RAG_EMBEDDING_MODEL': config['rag.embedding_model'],
             'RAG_EMBEDDING_BATCH_SIZE': config['rag.embedding_batch_size'],
             'ENABLE_ASYNC_EMBEDDING': config['rag.enable_async_embedding'],
@@ -775,6 +788,7 @@ async def get_rag_config(request: Request, user=Depends(get_admin_user)):
         'MISTRAL_OCR_API_BASE_URL': config['rag.mistral_ocr_api_base_url'],
         'MISTRAL_OCR_API_KEY': config['rag.mistral_ocr_api_key'],
         'MISTRAL_OCR_USE_BASE64': config['rag.mistral_ocr_use_base64'],
+        'MISTRAL_OCR_PARAMS': config['rag.mistral_ocr_params'],
         'PADDLEOCR_VL_BASE_URL': config['rag.paddleocr_vl_base_url'],
         'PADDLEOCR_VL_TOKEN': config['rag.paddleocr_vl_token'],
         # MinerU settings
@@ -801,6 +815,9 @@ async def get_rag_config(request: Request, user=Depends(get_admin_user)):
         # File upload settings
         'FILE_MAX_SIZE': config['rag.file.max_size'],
         'FILE_MAX_COUNT': config['rag.file.max_count'],
+        'KNOWLEDGE_MAX_UPLOAD_COUNT': config['knowledge.max_upload_count'],
+        'KNOWLEDGE_MAX_FILE_COUNT': config['knowledge.max_file_count'],
+        'KNOWLEDGE_MAX_FILE_SIZE': config['knowledge.max_file_size'],
         'FILE_IMAGE_COMPRESSION_WIDTH': config['file.image_compression_width'],
         'FILE_IMAGE_COMPRESSION_HEIGHT': config['file.image_compression_height'],
         'ALLOWED_FILE_EXTENSIONS': config['rag.file.allowed_extensions'],
@@ -1021,6 +1038,7 @@ class ConfigForm(BaseModel):
     MISTRAL_OCR_API_BASE_URL: str | None = None
     MISTRAL_OCR_API_KEY: str | None = None
     MISTRAL_OCR_USE_BASE64: bool | None = None
+    MISTRAL_OCR_PARAMS: dict | None = None
     PADDLEOCR_VL_BASE_URL: str | None = None
     PADDLEOCR_VL_TOKEN: str | None = None
 
@@ -1051,6 +1069,9 @@ class ConfigForm(BaseModel):
     # File upload settings
     FILE_MAX_SIZE: Union[int, str | None] = None
     FILE_MAX_COUNT: Union[int, str | None] = None
+    KNOWLEDGE_MAX_UPLOAD_COUNT: Union[int, str | None] = None
+    KNOWLEDGE_MAX_FILE_COUNT: Union[int, str | None] = None
+    KNOWLEDGE_MAX_FILE_SIZE: Union[int, str | None] = None
     FILE_IMAGE_COMPRESSION_WIDTH: Union[int, str | None] = None
     FILE_IMAGE_COMPRESSION_HEIGHT: Union[int, str | None] = None
     ALLOWED_FILE_EXTENSIONS: list[str] | None = None
@@ -1114,9 +1135,34 @@ async def update_rag_config(request: Request, form_data: ConfigForm, user=Depend
     }
     if form_data.RAG_TOKENIZER_MODEL is not None:
         updates['rag.tokenizer_model'] = form_data.RAG_TOKENIZER_MODEL.strip()
-    for field in ('FILE_MAX_SIZE', 'FILE_MAX_COUNT', 'FILE_IMAGE_COMPRESSION_WIDTH', 'FILE_IMAGE_COMPRESSION_HEIGHT'):
+    for field in (
+        'FILE_MAX_SIZE',
+        'FILE_MAX_COUNT',
+        'KNOWLEDGE_MAX_UPLOAD_COUNT',
+        'KNOWLEDGE_MAX_FILE_COUNT',
+        'KNOWLEDGE_MAX_FILE_SIZE',
+        'FILE_IMAGE_COMPRESSION_WIDTH',
+        'FILE_IMAGE_COMPRESSION_HEIGHT',
+    ):
         if getattr(form_data, field) == '':
             updates[RETRIEVAL_CONFIG_KEYS[field]] = None
+
+    for field, label in (
+        ('KNOWLEDGE_MAX_UPLOAD_COUNT', 'Knowledge batch upload limit'),
+        ('KNOWLEDGE_MAX_FILE_COUNT', 'Knowledge file count limit'),
+        ('KNOWLEDGE_MAX_FILE_SIZE', 'Knowledge file size limit'),
+    ):
+        value = getattr(form_data, field)
+        if field in form_data.model_fields_set and value is None:
+            updates[RETRIEVAL_CONFIG_KEYS[field]] = None
+        if value not in (None, ''):
+            try:
+                value = int(value)
+                if value <= 0:
+                    raise ValueError
+            except (TypeError, ValueError):
+                raise HTTPException(400, f'{label} must be a positive integer.')
+            updates[RETRIEVAL_CONFIG_KEYS[field]] = value
 
     # Unload the previous internal reranker before applying its new settings.
     if config['rag.reranking_engine'] == '':
@@ -1207,6 +1253,7 @@ async def update_rag_config(request: Request, form_data: ConfigForm, user=Depend
         'MISTRAL_OCR_API_BASE_URL': config['rag.mistral_ocr_api_base_url'],
         'MISTRAL_OCR_API_KEY': config['rag.mistral_ocr_api_key'],
         'MISTRAL_OCR_USE_BASE64': config['rag.mistral_ocr_use_base64'],
+        'MISTRAL_OCR_PARAMS': config['rag.mistral_ocr_params'],
         'PADDLEOCR_VL_BASE_URL': config['rag.paddleocr_vl_base_url'],
         'PADDLEOCR_VL_TOKEN': config['rag.paddleocr_vl_token'],
         # MinerU settings
@@ -1231,6 +1278,9 @@ async def update_rag_config(request: Request, form_data: ConfigForm, user=Depend
         # File upload settings
         'FILE_MAX_SIZE': config['rag.file.max_size'],
         'FILE_MAX_COUNT': config['rag.file.max_count'],
+        'KNOWLEDGE_MAX_UPLOAD_COUNT': config['knowledge.max_upload_count'],
+        'KNOWLEDGE_MAX_FILE_COUNT': config['knowledge.max_file_count'],
+        'KNOWLEDGE_MAX_FILE_SIZE': config['knowledge.max_file_size'],
         'FILE_IMAGE_COMPRESSION_WIDTH': config['file.image_compression_width'],
         'FILE_IMAGE_COMPRESSION_HEIGHT': config['file.image_compression_height'],
         'ALLOWED_FILE_EXTENSIONS': config['rag.file.allowed_extensions'],
@@ -1321,11 +1371,7 @@ async def update_rag_config(request: Request, form_data: ConfigForm, user=Depend
     }
 
 
-####################################
-#
 # Document process and retrieval
-#
-####################################
 
 
 def can_merge_chunks(a: Document, b: Document) -> bool:
@@ -1524,6 +1570,7 @@ class ProcessFileForm(BaseModel):
     file_id: str
     content: str | None = None
     collection_name: str | None = None
+    directory_id: str | None = None
 
 
 def has_vector_results(result) -> bool:
@@ -1638,13 +1685,14 @@ async def _fetch_url(url: str, max_size_mb: int | str | None) -> dict:
         except (TypeError, ValueError):
             max_bytes = None
 
-    headers = {'User-Agent': USER_AGENT} if USER_AGENT else None
+    headers = {'Accept-Encoding': 'identity'} | ({'User-Agent': USER_AGENT} if USER_AGENT else {})
 
     async with get_ssrf_safe_session() as session:
         async with session.get(
             url, headers=headers, ssl=AIOHTTP_CLIENT_SESSION_SSL, allow_redirects=AIOHTTP_CLIENT_ALLOW_REDIRECTS
         ) as response:
             response.raise_for_status()
+            assert_identity_encoding(response.headers.getall('Content-Encoding', ()))
 
             content_type = response.headers.get('Content-Type', '')
             content_disposition = response.headers.get('Content-Disposition', '')
@@ -2549,7 +2597,7 @@ async def query_doc_handler(
             )
         else:
             query_embedding = await request.app.state.EMBEDDING_FUNCTION(
-                form_data.query, prefix=RAG_EMBEDDING_QUERY_PREFIX, user=user
+                form_data.query, prefix=config['rag.embedding_query_prefix'], user=user
             )
             # query_doc wraps a blocking get_vector_db_client().search call;
             # offload so the request's event loop stays responsive.
@@ -2614,11 +2662,7 @@ async def query_collection_handler(
         raise HTTPException(400, ERROR_MESSAGES.DEFAULT(exc, 'Error querying knowledge base')) from exc
 
 
-####################################
-#
 # Vector DB operations
-#
-####################################
 
 
 class DeleteForm(BaseModel):
@@ -2656,13 +2700,7 @@ async def delete_entries_from_collection(
                     detail=ERROR_MESSAGES.DEFAULT('File has no hash; cannot delete vector entries by hash.'),
                 )
 
-            # Pre-existing bug: this used `metadata=` which is not a
-            # parameter on `VectorDBBase.delete` nor on any backend
-            # implementation, so the call always raised TypeError that
-            # was silently swallowed by the surrounding `except
-            # Exception` and the endpoint reported `{'status': False}`
-            # for every request. Use `filter` to actually do what the
-            # endpoint name promises.
+            # Vector deletion accepts filter, not metadata; passing the wrong keyword raises TypeError.
             await ASYNC_VECTOR_DB_CLIENT.delete(
                 collection_name=form_data.collection_name,
                 filter={'hash': hash},
@@ -2733,13 +2771,6 @@ async def reset_upload_dir(request: Request, user=Depends(get_admin_user)) -> bo
         subject_type='file.uploads',
     )
     return True
-
-
-if ENV == 'dev':
-
-    @router.get('/ef/{text}')
-    async def get_embeddings(request: Request, text: str | None = 'Hello World!'):
-        return {'result': await request.app.state.EMBEDDING_FUNCTION(text, prefix=RAG_EMBEDDING_QUERY_PREFIX)}
 
 
 class BatchProcessFilesForm(BaseModel):

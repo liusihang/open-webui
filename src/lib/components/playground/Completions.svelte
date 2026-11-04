@@ -130,6 +130,7 @@
 							class="w-full h-full p-3 bg-transparent border border-gray-100/30 dark:border-gray-850/30 outline-hidden resize-none rounded-lg text-sm"
 							bind:value={text}
 							placeholder={$i18n.t("You're a helpful assistant.")}
+							aria-label={$i18n.t('Completions')}
 						/>
 					</div>
 				</div>
@@ -139,6 +140,7 @@
 				<div class="flex-1">
 					<select
 						class="bg-transparent border border-gray-100/30 dark:border-gray-850/30 rounded-lg py-1 px-2 -mx-0.5 text-sm outline-hidden w-full"
+						aria-label={$i18n.t('Model')}
 						bind:value={selectedModelId}
 					>
 						{#each $models as model}

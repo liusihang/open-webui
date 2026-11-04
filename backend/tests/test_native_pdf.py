@@ -162,7 +162,7 @@ def test_upload_pdf_size_header_and_non_pdf_rules():
         ({}, False),
     ],
 )
-async def test_actual_upload_handler_status_and_parse_branch(environment, metadata, native):
+async def test_actual_upload_handler_status_and_parse_branch(environment, metadata, native, monkeypatch):
     inserted = []
 
     async def insert(user_id, form, *, db):
@@ -173,6 +173,14 @@ async def test_actual_upload_handler_status_and_parse_branch(environment, metada
         return environment.record
 
     parser = AsyncMock()
+    queued = AsyncMock(return_value={'ingestion_job_id': 'upload-job'})
+    monkeypatch.setitem(sys.modules, 'open_webui.retrieval.ingestion', SimpleNamespace(submit_file=queued))
+    monkeypatch.setitem(sys.modules, 'open_webui.config', SimpleNamespace(UPLOAD_DIR=str(environment.path.parent)))
+
+    @asynccontextmanager
+    async def sessions(db):
+        yield db
+
     handler = source_function(
         'routers/files.py',
         'upload_file_handler',
@@ -197,9 +205,15 @@ async def test_actual_upload_handler_status_and_parse_branch(environment, metada
             'log': SimpleNamespace(info=lambda *args: None, exception=lambda *args: None),
             'Config': SimpleNamespace(get=AsyncMock(return_value=None)),
             'Storage': SimpleNamespace(
-                upload_file=lambda stream, filename, tags: (stream.read(), str(environment.path))
+                upload_file=lambda stream, filename, tags, **kwargs: (None, str(environment.path))
             ),
-            'Files': SimpleNamespace(insert_new_file=insert),
+            'Files': SimpleNamespace(insert_new_file=insert, get_file_processing_state=AsyncMock(return_value={})),
+            'validate_knowledge_upload_target': AsyncMock(),
+            'check_knowledge_upload_limits': AsyncMock(),
+            'Knowledges': SimpleNamespace(get_knowledge_by_id=AsyncMock(return_value=SimpleNamespace(user_id='owner'))),
+            'get_async_db_context': sessions,
+            'ProcessFileForm': SimpleNamespace,
+            'strict_match_mime_type': lambda *args: False,
             'FileForm': SimpleNamespace,
             'should_defer_pdf_processing': should_defer_pdf_processing,
             'validate_chat_pdf_upload': validate_chat_pdf_upload,
@@ -226,7 +240,8 @@ async def test_actual_upload_handler_status_and_parse_branch(environment, metada
     )
     assert inserted[0].data['status'] == ('completed' if native else 'pending')
     assert inserted[0].meta['data'].get('native_model_file') is (True if native else None)
-    assert parser.await_count == (0 if native else 1)
+    parser.assert_not_awaited()
+    assert queued.await_count == (0 if native else 1)
 
 
 @pytest.mark.asyncio

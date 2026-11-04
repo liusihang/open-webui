@@ -32,6 +32,10 @@ class TextCompactionContinuationTests(unittest.TestCase):
         FIXTURE.load_function(FIXTURE.MISC, 'get_system_message', scope)
         FIXTURE.load_function(FIXTURE.MIDDLEWARE, 'context_summary_message', scope)
         FIXTURE.load_function(FIXTURE.MIDDLEWARE, 'apply_context_summary', scope)
+        scope['copy'] = copy
+        scope['normalize_messages_for_model'] = lambda value: value
+        async def images(value, **kwargs): return value
+        scope['convert_url_images_to_base64'] = images
         system = {'role': 'system', 'content': 'BASE INSTRUCTIONS\nINTELLIGENT UI INSTRUCTIONS'}
         original_system = copy.deepcopy(system)
         output = FIXTURE.history()
@@ -46,12 +50,13 @@ class TextCompactionContinuationTests(unittest.TestCase):
         errors = Mock()
         emitted = AsyncMock()
         scope.update(
-            form_data={'messages': [system]},
+            form_data={'model': 'm', 'messages': [system]},
             messages=[system],
             output=output,
             full_output=lambda: output,
             responses_api=responses_api,
-            response_usage={},
+            current_usage={},
+            filter_functions=[],
             model={},
             metadata=metadata,
             new_form_data={},
@@ -62,7 +67,7 @@ class TextCompactionContinuationTests(unittest.TestCase):
             output_id=lambda prefix: 'cc-id',
             emit_output=emitted,
             compact_messages_for_request=AsyncMock(
-                side_effect=lambda req, user, messages, *args: (messages, 'Retained summary', True)
+                side_effect=lambda req, form, user, messages, *args, **kwargs: (messages, 'Retained summary', True)
             ),
             get_reasoning_format=lambda model: None,
             get_last_user_message_item=lambda messages: None,

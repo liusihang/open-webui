@@ -31,7 +31,7 @@ class UpgradeMergeTests(unittest.TestCase):
             for parent in (value if isinstance(value, tuple) else [value])
             if parent
         }
-        self.assertEqual(set(revisions) - parents, {'72c3a9d1e5b0'})
+        self.assertEqual(set(revisions) - parents, {'a13f0d42b9ce'})
         self.assertEqual(revisions['72c3a9d1e5b0'], 'd41e823f01ac')
         self.assertEqual(revisions['c92e41b7d630'], 'b8f2c6d91a04')
         self.assertEqual(set(revisions['d41e823f01ac']), {'0bd252b206fb', 'c92e41b7d630'})
