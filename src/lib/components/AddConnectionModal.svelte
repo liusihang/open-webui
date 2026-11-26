@@ -42,6 +42,7 @@
 	let enable = true;
 	let apiVersion = '';
 	let apiType = ''; // '' = chat completions (default), 'responses' = Responses API
+	let responsesTransport = 'http';
 
 	let headers = '';
 	let passthroughParams = '';
@@ -251,7 +252,9 @@
 				provider: provider || undefined,
 				azure: !ollama && azure ? true : undefined,
 				api_version: azure ? apiVersion : undefined,
-				api_type: apiType || undefined
+				api_type: apiType || undefined,
+				responses_transport:
+					showResponsesTransport && responsesTransport === 'websocket' ? 'websocket' : undefined
 			}
 		};
 
@@ -275,10 +278,13 @@
 		provider = '';
 		apiVersion = '';
 		apiType = '';
+		responsesTransport = 'http';
 	};
 
 	const init = () => {
 		availableModelIds = [];
+		responsesTransport =
+			connection?.config?.responses_transport === 'websocket' ? 'websocket' : 'http';
 		forwardCookies = connection?.config?.forward_cookies ?? false;
 		if (connection) {
 			url = connection.url;
@@ -318,6 +324,7 @@
 			!direct &&
 			provider === '' &&
 			!/\/openai\/v1(\/|$)/.test(url));
+	$: showResponsesTransport = !ollama && !direct && !azure && apiType === 'responses';
 
 	onMount(() => {
 		init();
@@ -531,6 +538,22 @@
 										{/if}
 									</button>
 								</div>
+							</div>
+						{/if}
+
+						{#if showResponsesTransport}
+							<div class="flex justify-between items-center gap-2 mt-1">
+								<label for="responses-transport" class="text-xs text-gray-500">
+									{$i18n.t('Responses transport')}
+								</label>
+								<select
+									id="responses-transport"
+									class={`text-xs ${selectClass}`}
+									bind:value={responsesTransport}
+								>
+									<option value="http">HTTP</option>
+									<option value="websocket">WebSocket</option>
+								</select>
 							</div>
 						{/if}
 

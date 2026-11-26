@@ -2458,6 +2458,7 @@
 	"Response errors": "",
 	"Response notifications cannot be activated as the website permissions have been denied. Please visit your browser settings to grant the necessary access.": "无法启用生成结果通知。请检查浏览器设置，并授予必要的访问权限。",
 	"Responses": "Responses",
+	"Responses transport": "Responses 传输方式",
 	"responses with recorded usage": "",
 	"Restart": "重启",
 	"Restart all Open WebUI instances to apply changes to the provider connection settings.": "",

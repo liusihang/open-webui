@@ -53,6 +53,11 @@ from open_webui.utils.payload import (
 )
 from open_webui.utils.prompt_cache import apply_default_prompt_cache_key
 from open_webui.utils.response import convert_responses_usage_to_chat_completions, get_responses_finish_reason
+from open_webui.utils.responses_websocket import (
+    ResponsesWebSocketError,
+    send_responses_websocket,
+    uses_responses_websocket,
+)
 from open_webui.utils.session_pool import (
     cleanup_response,
     get_client_timeout,
@@ -1420,6 +1425,28 @@ def convert_responses_result(response: dict) -> dict:
     }
 
 
+async def forward_responses_websocket(
+    request, user, url, key, request_url, payload, headers, cookies, *, include_event_names=False
+):
+    try:
+        return await send_responses_websocket(
+            request_url, payload, headers, cookies, include_event_names=include_event_names
+        )
+    except ResponsesWebSocketError as exc:
+        error = {'error': exc.error}
+        await publish_model_provider_request_failed(
+            request,
+            actor=user,
+            provider='openai-compatible',
+            base_url=url,
+            api_key=key,
+            status=exc.status,
+            requested_model=payload.get('model'),
+            upstream_error=error,
+        )
+        return JSONResponse(status_code=exc.status, content=error)
+
+
 @router.post('/chat/completions')
 async def generate_chat_completion(
     request: Request,
@@ -1627,6 +1654,16 @@ async def generate_chat_completion(
     if not is_streaming_request:
         payload.pop('stream_options', None)
 
+    if uses_responses_websocket(api_config):
+        result = await forward_responses_websocket(request, user, url, key, request_url, payload, headers, cookies)
+        if isinstance(result, StreamingResponse) and isinstance(metadata, dict):
+            result._native_token_usage_metadata = metadata
+        elif isinstance(result, dict):
+            from open_webui.utils.native_compaction import save_native_token_usage
+
+            await save_native_token_usage(user, metadata or {}, result)
+            result = convert_responses_result(result)
+        return result
     payload = JSONCodec.dumps(payload)
 
     r = None
@@ -1904,7 +1941,6 @@ async def responses(
     url, key, api_config = await get_openai_connection(idx)
 
     payload['model'] = strip_provider_model_prefix(payload['model'], api_config.get('prefix_id'))
-    body = JSONCodec.dumps(payload)
 
     r = None
     streaming = False
@@ -1929,11 +1965,16 @@ async def responses(
         else:
             request_url = f'{url}/responses'
 
+        if uses_responses_websocket(api_config):
+            return await forward_responses_websocket(
+                request, user, url, key, request_url, payload, headers, cookies, include_event_names=True
+            )
+
         session = await get_session()
         r = await session.request(
             method='POST',
             url=request_url,
-            data=body,
+            data=JSONCodec.dumps(payload),
             headers=headers,
             cookies=cookies,
             ssl=AIOHTTP_CLIENT_SESSION_SSL,
