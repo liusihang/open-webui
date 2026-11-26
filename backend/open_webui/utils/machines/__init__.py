@@ -230,6 +230,19 @@ def template_machine_id(connection_id, template_id):
     return f'template:{connection_id}:{quote(template_id, safe="")}'
 
 
+async def configured_machine_id(machine_id):
+    """An old orchestrator selection referred to its explicitly configured policy."""
+    if not machine_id or machine_id.startswith('template:'):
+        return machine_id
+    from open_webui.models.config import Config
+
+    for connection in await Config.get('machines.connections', []) or []:
+        policy = connection.get('policy_id')
+        if connection.get('id') == machine_id and is_terminal_orchestrator(connection) and isinstance(policy, str) and policy.strip():
+            return template_machine_id(machine_id, policy.strip())
+    return machine_id
+
+
 async def has_machine_write_access(user, machine_id):
     """Write access to a terminal's connection, the right that lists, restarts and deletes its instances."""
     if not machine_id.startswith('template:'):
@@ -411,6 +424,7 @@ async def find_machine_connection(user, machine_id, metadata=None, request=None)
     if not isinstance(user, UserModel):
         user = UserModel(**user)
     metadata = dict(metadata or {})
+    machine_id = await configured_machine_id(machine_id)
 
     async def find_instance_user_connection(instance_user_id):
         # Another person's instance is reached as they would reach it, by whoever manages the machine.
@@ -450,7 +464,7 @@ async def find_machine_connection(user, machine_id, metadata=None, request=None)
         if folder_id and await get_folder_machine_mismatch(folder_id, machine_id):
             # A chat that was on another machine before keeps it.
             full_chat = await Chats.get_chat_by_id(chat_id)
-            if full_chat is None or machine_id_of(full_chat.chat) != machine_id:
+            if full_chat is None or await configured_machine_id(machine_id_of(full_chat.chat)) != machine_id:
                 raise HTTPException(409, 'Chats in this folder run on its machine')
         if not chat.current_message_id:
             # Only the full chat knows where the history ends.
@@ -458,7 +472,7 @@ async def find_machine_connection(user, machine_id, metadata=None, request=None)
             if chat is None:
                 raise HTTPException(403, 'Chat access denied')
         shared_session = await get_session(chat)
-        if shared_session and shared_session['machine_id'] != machine_id:
+        if shared_session and await configured_machine_id(shared_session['machine_id']) != machine_id:
             shared_session = None
         if shared_session:
             metadata['model_id'] = model_id(shared_session)
@@ -506,7 +520,7 @@ async def find_machine_connection(user, machine_id, metadata=None, request=None)
         full_chat = await Chats.get_chat_by_id(chat_id)
         if full_chat is None:
             raise HTTPException(403, 'Chat access denied')
-        stored = machine_id_of(full_chat.chat)
+        stored = await configured_machine_id(machine_id_of(full_chat.chat))
         if chat.user_id != user.id and stored != machine_id:
             raise HTTPException(403, 'Use the machine selected by the chat owner')
         if stored and stored != machine_id:
