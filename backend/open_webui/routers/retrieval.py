@@ -1814,6 +1814,8 @@ async def index_file(
     The session is committed before external API calls, and updates use a fresh session.
     """
     config = await Config.get_many(*RETRIEVAL_CONFIG_KEYS.values(), *ASSET_CONFIG_KEYS)
+    if rebuild_text:
+        config['rag.extract_document_image_assets'] = False
     file = await Files.get_file_by_id(form_data.file_id, db=db)
     if file and file.user_id != user.id and user.role != 'admin':
         if not await has_access_to_file(file.id, 'write', user, db=db):

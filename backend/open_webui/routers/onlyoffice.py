@@ -24,6 +24,7 @@ from open_webui.storage.provider import Storage
 from open_webui.utils.access_control import has_connection_access
 from open_webui.utils.access_control.files import has_access_to_file
 from open_webui.utils.auth import create_token, decode_token, get_verified_user
+from open_webui.utils.machines import configured_machine_id, find_machine_connection, get_machine_url, machine_headers
 from open_webui.utils.misc import parse_duration
 from open_webui.utils.terminals import (
     TERMINAL_CONTEXT_HEADER,
@@ -374,7 +375,15 @@ def _expand_callback_payload_without_jwt_secret(payload: dict[str, Any]) -> dict
     return expanded
 
 
-async def _get_terminal_connection(request: Request, terminal_server_id: str, user):
+async def _get_terminal_connection(request: Request, terminal_server_id: str, user, chat_id=None):
+    if user.role not in ('admin', 'user'):
+        raise HTTPException(403, detail=ERROR_MESSAGES.ACCESS_PROHIBITED)
+    machine_id = await configured_machine_id(terminal_server_id)
+    if machine_id.startswith('template:'):
+        connection = await find_machine_connection(user, machine_id, {'chat_id': chat_id}, request=request)
+        if not connection or not connection.get('template_id'):
+            raise HTTPException(404, 'Machine template not found')
+        return connection
     connections = await Config.get('machines.connections', []) or []
     connection = next((c for c in connections if c.get('id') == terminal_server_id), None)
     if user.role not in ('admin', 'user'):
@@ -402,6 +411,9 @@ async def _get_terminal_connection(request: Request, terminal_server_id: str, us
 
 
 def _resolve_terminal_context(connection: dict, chat_id: str | None) -> str | None:
+    if connection.get('template_id'):
+        # Bind the document token to the resolved instance. Recheck before fetching or writing the file.
+        return hashlib.sha256(json.dumps(machine_headers(connection), sort_keys=True).encode()).hexdigest()
     if not terminal_context_available(connection, 'chat'):
         raise HTTPException(status_code=403, detail='Terminal is not available in chats.')
     context_id = terminal_context_id(connection, {'chat_id': chat_id}, 'chat')
@@ -419,7 +431,7 @@ def _validate_session_context(connection: dict, claims: dict) -> str | None:
 
 
 def _get_terminal_target_base_url(connection: dict[str, Any]) -> str:
-    base_url = get_terminal_server_url(connection)
+    base_url = get_machine_url(connection) if connection.get('template_id') else get_terminal_server_url(connection)
     if not base_url:
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
@@ -432,7 +444,7 @@ def _get_terminal_target_base_url(connection: dict[str, Any]) -> str:
 def _get_terminal_proxy_headers(
     connection: dict[str, Any], user_id: str, session_proxy_token: str | None
 ) -> dict[str, str]:
-    headers = {'X-User-Id': user_id}
+    headers = {'X-User-Id': user_id, **machine_headers(connection)}
     auth_type = connection.get('auth_type', 'bearer')
     if auth_type == 'bearer':
         headers['Authorization'] = f'Bearer {connection.get("key", "")}'
@@ -548,7 +560,7 @@ async def _replace_terminal_file_via_temp_upload(
 ) -> None:
     target_base_url = _get_terminal_target_base_url(connection)
     headers = _get_terminal_proxy_headers(connection, user_id, session_proxy_token)
-    if context_id:
+    if context_id and not connection.get('template_id'):
         headers[TERMINAL_CONTEXT_HEADER] = context_id
 
     directory = posixpath.dirname(terminal_file_path) or '/'
@@ -673,7 +685,7 @@ async def _terminal_session_document(form_data, request, user, file_token_ttl, p
         )
 
     terminal_file_path = _normalize_terminal_file_path(form_data.terminal_file_path)
-    connection = await _get_terminal_connection(request, form_data.terminal_server_id, user)
+    connection = await _get_terminal_connection(request, form_data.terminal_server_id, user, form_data.chat_id)
     context_id = _resolve_terminal_context(connection, form_data.chat_id)
     file_ext = Path(terminal_file_path).suffix.lower().lstrip('.')
     if file_ext not in SUPPORTED_OFFICE_FILE_TYPES:
@@ -900,14 +912,14 @@ async def get_onlyoffice_terminal_file_content(
         )
 
     terminal_file_path = _normalize_terminal_file_path(terminal_file_path)
-    connection = await _get_terminal_connection(request, terminal_server_id, token_user)
+    connection = await _get_terminal_connection(request, terminal_server_id, token_user, decoded.get('chat_id'))
 
     target_base_url = _get_terminal_target_base_url(connection)
     target_url = f'{target_base_url}/files/view?path={quote(terminal_file_path, safe="/")}'
 
     headers = _get_terminal_proxy_headers(connection, token_user.id, session_proxy_token)
     context_id = _validate_session_context(connection, decoded)
-    if context_id:
+    if context_id and not connection.get('template_id'):
         headers[TERMINAL_CONTEXT_HEADER] = context_id
 
     timeout = aiohttp.ClientTimeout(total=300, connect=10)
@@ -1088,7 +1100,7 @@ async def handle_onlyoffice_terminal_callback(
     token_user = await Users.get_user_by_id(user_id)
     if not token_user or token_user.role not in ('admin', 'user'):
         raise HTTPException(status_code=401, detail='Invalid OnlyOffice callback user context.')
-    connection = await _get_terminal_connection(request, terminal_server_id, token_user)
+    connection = await _get_terminal_connection(request, terminal_server_id, token_user, callback_context.get('chat_id'))
     context_id = _validate_session_context(connection, callback_context)
     try:
         content, content_type = await _download_onlyoffice_callback_blob(callback_url)

@@ -48,7 +48,7 @@ def route(monkeypatch, tmp_path):
         'onlyoffice.edit_callback_token_expires_in': '8h',
         'onlyoffice.callback_allowed_hosts': ['docs.example'],
         'webui.url': '',
-        'terminal_server.connections': [
+        'machines.connections': [
             {
                 'id': 'terminal',
                 'url': 'https://terminal.example',
@@ -144,6 +144,13 @@ def route(monkeypatch, tmp_path):
         TERMINAL_CONTEXT_HEADER='X-Terminal-Context-Id',
         **{name: value for name, value in terminals.items() if callable(value) and name != 'is_saved_chat_id'},
     )
+    machines = source_functions(
+        'utils/machines/__init__.py',
+        {'configured_machine_id', 'template_machine_id', 'is_terminal_orchestrator', 'get_machine_url', 'machine_headers'},
+        {'quote': quote},
+    )
+    stub('open_webui.utils.machines', find_machine_connection=AsyncMock(),
+         **{key: machines[key] for key in ('configured_machine_id', 'get_machine_url', 'machine_headers')})
     spec = importlib.util.spec_from_file_location('onlyoffice_offline', BACKEND / 'routers/onlyoffice.py')
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
@@ -278,7 +285,7 @@ def test_permission_revocation_after_file_session(route):
 
 @pytest.mark.parametrize('mode', ['view', 'edit'])
 def test_terminal_session_embeds_official_context_and_separate_ttl(route, mode):
-    route.config['terminal_server.connections'][0]['config'] = {'contexts': {'chat': {'context_id': 'chat_id'}}}
+    route.config['machines.connections'][0]['config'] = {'contexts': {'chat': {'context_id': 'chat_id'}}}
     chat_id = '11111111-1111-1111-1111-111111111111'
     response = run(
         route.mod.create_onlyoffice_session(
@@ -314,13 +321,13 @@ def test_terminal_session_embeds_official_context_and_separate_ttl(route, mode):
 @pytest.mark.parametrize('reason,status', [('disabled', 404), ('denied', 403), ('pending', 403), ('missing_chat', 409)])
 def test_terminal_session_access_checks(route, reason, status):
     if reason == 'disabled':
-        route.config['terminal_server.connections'][0]['enabled'] = False
+        route.config['machines.connections'][0]['enabled'] = False
     elif reason == 'denied':
         route.connection_access.return_value = False
     elif reason == 'pending':
         route.user.role = 'pending'
     else:
-        route.config['terminal_server.connections'][0]['config'] = {'contexts': {'chat': {'context_id': 'chat_id'}}}
+        route.config['machines.connections'][0]['config'] = {'contexts': {'chat': {'context_id': 'chat_id'}}}
     with pytest.raises(HTTPException) as error:
         run(
             route.mod.create_onlyoffice_session(
@@ -380,7 +387,7 @@ def test_save_callback_rejects_expiry_key_and_revoked_access(route, reason, stat
 
 
 def test_save_callback_passes_validated_identity_and_context(route, monkeypatch):
-    route.config['terminal_server.connections'][0]['config'] = {'contexts': {'chat': {'context_id': 'chat_id'}}}
+    route.config['machines.connections'][0]['config'] = {'contexts': {'chat': {'context_id': 'chat_id'}}}
     chat_id = '11111111-1111-1111-1111-111111111111'
     token = context_token(route, chat_id=chat_id, context_id=f'chat:{chat_id}')
     download = AsyncMock(return_value=(b'edited', 'application/octet-stream'))
@@ -395,7 +402,7 @@ def test_save_callback_passes_validated_identity_and_context(route, monkeypatch)
 
 
 def test_changed_terminal_context_rejected(route):
-    route.config['terminal_server.connections'][0]['config'] = {'contexts': {'chat': {'context_id': 'chat_id'}}}
+    route.config['machines.connections'][0]['config'] = {'contexts': {'chat': {'context_id': 'chat_id'}}}
     with pytest.raises(HTTPException) as error:
         run(save_callback(route))
     assert error.value.status_code == 409
@@ -515,7 +522,7 @@ def test_temp_upload_writeback_preserves_identity_and_context(route, monkeypatch
     monkeypatch.setattr(route.mod.aiohttp, 'ClientSession', lambda **kwargs: session)
     run(
         route.mod._replace_terminal_file_via_temp_upload(
-            route.config['terminal_server.connections'][0],
+            route.config['machines.connections'][0],
             '/workspace/demo.docx',
             'user-1',
             'synthetic-proxy',
@@ -546,7 +553,7 @@ def test_temp_install_failure_restores_original(route, monkeypatch, install_resp
     with pytest.raises(HTTPException) as error:
         run(
             route.mod._replace_terminal_file_via_temp_upload(
-                route.config['terminal_server.connections'][0],
+                route.config['machines.connections'][0],
                 '/workspace/demo.docx',
                 'user-1',
                 'synthetic-proxy',
@@ -624,7 +631,7 @@ def test_non_positive_or_invalid_file_ttl_is_rejected(route, ttl):
 
 def test_terminal_download_uses_official_context_and_no_redirects(route, monkeypatch):
     chat_id = '11111111-1111-1111-1111-111111111111'
-    route.config['terminal_server.connections'][0]['config'] = {'contexts': {'chat': {'context_id': 'chat_id'}}}
+    route.config['machines.connections'][0]['config'] = {'contexts': {'chat': {'context_id': 'chat_id'}}}
     token = route.mod.create_token(
         {
             'scope': 'onlyoffice:terminal_file',
