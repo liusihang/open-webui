@@ -360,6 +360,7 @@ def test_mineru_archive_images_persist_after_zip_closes(tmp_path, source, png):
 
 
 def test_mineru_local_load_keeps_text_when_image_is_broken(monkeypatch, tmp_path, source):
+    monkeypatch.setattr(MinerULoader, '_is_tasks_api', lambda self: False)
     monkeypatch.setattr(MinerULoader, '_is_v1_api', lambda self: False)
     post = Mock(
         return_value=response(
@@ -475,6 +476,7 @@ def test_mineru_v1_materializes_inline_images_before_stripping(monkeypatch, tmp_
             downloaded,
         ]
     )
+    monkeypatch.setattr(MinerULoader, '_is_tasks_api', lambda self: False)
     monkeypatch.setattr(MinerULoader, '_is_v1_api', lambda self: True)
     monkeypatch.setattr(MinerULoader, '_request_v1_api', request)
     loader = MinerULoader(str(source), extract_images=True, asset_root=tmp_path / 'assets')

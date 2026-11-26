@@ -1833,7 +1833,13 @@ async def index_file(
                 await _validate_collection_access([collection_name], user, access_type='write')
             collection_names = [collection_name]
 
-            if form_data.collection_name and (file.meta or {}).get('content_type', '').startswith('image/') and (file.data or {}).get('document_image_assets') and not (file.data or {}).get('content'):
+            mime_type = (file.meta or {}).get('content_type') or ''
+            if (
+                form_data.collection_name
+                and mime_type.startswith('image/')
+                and (file.data or {}).get('document_image_assets')
+                and not (file.data or {}).get('content')
+            ):
                 # Image-only files have no text chunks; their KB membership grants access to the image evidence.
                 return {'status': True, 'filename': file.filename, 'collection_name': collection_name, 'content': ''}
 
