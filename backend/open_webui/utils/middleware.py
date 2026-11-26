@@ -2297,6 +2297,8 @@ def process_messages_with_output(
                 flatten_tool_images=True,
             )
             if output_messages:
+                for converted in output_messages:
+                    converted.pop('reasoning_items', None)  # Only the Responses protocol accepts these opaque items.
                 processed.extend(output_messages)
                 processed.extend(speech)
                 continue
