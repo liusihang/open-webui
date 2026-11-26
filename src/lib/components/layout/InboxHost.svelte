@@ -2,7 +2,7 @@
 	import { onMount, onDestroy } from 'svelte';
 	import { goto, replaceState } from '$app/navigation';
 	import { page } from '$app/stores';
-	import { mobile, showTabs, showSidebar, socket, user } from '$lib/stores';
+	import { mobile, showTabs, showSidebar, socket, onSocketRestored, user } from '$lib/stores';
 	import { commentLink } from '$lib/utils';
 	import { refreshInboxCount, setInboxCount } from '$lib/stores/inbox';
 	import { inboxRequest, type InboxItem } from '$lib/apis/notifications/inbox';
@@ -23,12 +23,13 @@
 		clearTimeout(timer);
 		timer = setTimeout(refresh, 150);
 	};
+	const eventHandler = (event: { data?: { type?: string } }) => {
+		if (event?.data?.type === 'notifications:changed') changed();
+	};
 	$: if ($socket !== connection) {
-		connection?.off('notifications:changed', changed);
-		connection?.off('connect', changed);
+		connection?.off('events', eventHandler);
 		connection = $socket;
-		connection?.on('notifications:changed', changed);
-		connection?.on('connect', changed);
+		connection?.on('events', eventHandler);
 	}
 	export const close = () => {
 		if (!$page.state.inbox) return;
@@ -61,6 +62,9 @@
 				resource_id: current.resource_id!,
 				comment_id: current.object_id!
 			};
+		} else if (current.object_type === 'chat_message' && current.resource_type === 'chat') {
+			const query = new URLSearchParams({ message: current.data.message_id! });
+			await goto(`/c/${encodeURIComponent(current.resource_id!)}?${query}`, { state });
 		} else if (current.resource_type === 'channel') {
 			const query = new URLSearchParams({
 				message: current.object_id!,
@@ -80,12 +84,12 @@
 		if ($page.state.inbox && $page.state.inboxUserId !== $user?.id)
 			replaceState('', { ...$page.state, inbox: false, inboxUserId: undefined });
 		void refresh();
+		return onSocketRestored(changed);
 	});
 	onDestroy(() => {
 		alive = false;
 		clearTimeout(timer);
-		connection?.off('notifications:changed', changed);
-		connection?.off('connect', changed);
+		connection?.off('events', eventHandler);
 		setInboxCount(0);
 	});
 </script>

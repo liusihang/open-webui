@@ -3,29 +3,31 @@
 	import { toast } from 'svelte-sonner';
 
 	import type { Token, Tokens } from 'marked';
+	import type { AppLayoutContext } from '$lib/types';
 	import { getContext } from 'svelte';
 	import { goto } from '$app/navigation';
+	import { pageTabKey } from '$lib/components/chat/Tabs/tabs';
 
 	const i18n = getContext('i18n');
-	const terminalDocument = getContext<
+	const appLayout = getContext<AppLayoutContext | undefined>('appLayout');
+	const machineDocument = getContext<
 		| {
 				localPath: (ref: string) => string | null;
 				resolveImage: (ref: string) => Promise<string | null>;
 		  }
 		| undefined
-	>('terminal-document');
+	>('machine-document');
 	const markdown = getContext<
 		| { allowRemoteContent: boolean; document?: boolean; parseInline?: (tokens: Token[]) => string }
 		| undefined
 	>('markdown');
 
 	import { WEBUI_BASE_URL } from '$lib/constants';
-	import { skills, terminalSkills } from '$lib/stores';
+	import { skills, machineSkills } from '$lib/stores';
 	import { copyToClipboard, safeLinkUrl, unescapeHtml } from '$lib/utils';
 
 	import Image from '$lib/components/common/Image.svelte';
 	import KatexRenderer from './KatexRenderer.svelte';
-	import Source from './Source.svelte';
 	import HtmlToken from './HTMLToken.svelte';
 	import TextToken from './MarkdownInlineTokens/TextToken.svelte';
 	import CodespanToken from './MarkdownInlineTokens/CodespanToken.svelte';
@@ -76,17 +78,16 @@
 	 * Handle link clicks - intercept same-origin app URLs for in-app navigation
 	 */
 	const handleLinkClick = (e: MouseEvent, href: string) => {
+		if (e.button !== 0 || e.metaKey || e.ctrlKey || e.shiftKey || e.altKey) return;
 		try {
 			const url = new URL(href, window.location.origin);
+			const folderId = url.pathname.match(/^\/folders\/([^/]+)\/?$/)?.[1];
 			// Check if same origin and an in-app route
-			if (
-				url.origin === window.location.origin &&
-				(url.pathname.startsWith('/notes/') ||
-					url.pathname.startsWith('/c/') ||
-					url.pathname.startsWith('/channels/'))
-			) {
+			if (url.origin === window.location.origin && (folderId || pageTabKey(url))) {
 				e.preventDefault();
-				goto(url.pathname + url.search + url.hash);
+				if (!folderId && appLayout?.openPageTab && !url.pathname.startsWith('/c/'))
+					appLayout.openPageTab({ href: url.pathname + url.search + url.hash, label: '' });
+				else goto(url.pathname + url.search + url.hash);
 			}
 		} catch {
 			// Invalid URL, let browser handle it
@@ -130,12 +131,12 @@
 			>
 		{/if}
 	{:else if token.type === 'image'}
-		{#if terminalDocument?.localPath(token.href)}
-			{#await terminalDocument.resolveImage(token.href)}
-				<span class="text-xs text-gray-400">{token.text}</span>
+		{#if machineDocument?.localPath(token.href)}
+			{#await machineDocument.resolveImage(token.href)}
+				<span class="text-xs text-base-400">{token.text}</span>
 			{:then url}
-				{#if url}<img src={url} alt={token.text} data-terminal-resolved="true" />{:else}<span
-						class="text-xs text-gray-400">Image unavailable: {token.text}</span
+				{#if url}<img src={url} alt={token.text} data-machine-resolved="true" />{:else}<span
+						class="text-xs text-base-400">Image unavailable: {token.text}</span
 					>{/if}
 			{/await}
 		{:else}<Image src={token.href} alt={token.text} allowExternal={true} />{/if}
@@ -171,7 +172,7 @@
 			}}
 		></iframe>
 	{:else if token.type === 'mention'}
-		{#if token.triggerChar === '$' && ![...($skills ?? []), ...($terminalSkills ?? [])].some((skill) => skill.id === token.id && skill.is_active)}
+		{#if token.triggerChar === '$' && ![...($skills ?? []), ...($machineSkills ?? [])].some((skill) => skill.id === token.id && skill.is_active)}
 			{token.raw}
 		{:else}
 			<MentionToken {token} />
@@ -182,7 +183,7 @@
 		) || ''}
 	{:else if token.type === 'citation'}
 		{#if (sourceIds ?? []).length > 0}
-			<SourceToken {id} {token} {sourceIds} onClick={onSourceClick} />
+			<SourceToken {token} onClick={onSourceClick} />
 		{:else}
 			<TextToken {token} {done} />
 		{/if}

@@ -203,13 +203,30 @@ export const getChatList = async (
 	token: string = '',
 	page: number | null = null,
 	include_pinned: boolean = false,
-	include_folders: boolean = false
+	include_folders: boolean = false,
+	view: {
+		sortBy?: 'updated_at' | 'created_at';
+		status?: 'active' | 'archived' | 'all';
+		limit?: number;
+	} = {}
 ) => {
 	let error = null;
 	const searchParams = new URLSearchParams();
 
 	if (page !== null) {
 		searchParams.append('page', `${page}`);
+	}
+
+	if (view.limit) {
+		searchParams.append('limit', `${view.limit}`);
+	}
+
+	if (view.sortBy) {
+		searchParams.append('sort_by', view.sortBy);
+	}
+
+	if (view.status) {
+		searchParams.append('status', view.status);
 	}
 
 	if (include_folders) {
@@ -249,9 +266,10 @@ export const getChatList = async (
 		return [];
 	}
 
+	// Date headings follow the date the list is sorted by.
 	return res.map((chat) => ({
 		...chat,
-		time_range: getTimeRange(chat.updated_at)
+		time_range: getTimeRange(view.sortBy === 'created_at' ? chat.created_at : chat.updated_at)
 	}));
 };
 
@@ -312,7 +330,8 @@ export const getChatListByUserId = async (
 export const getArchivedChatList = async (
 	token: string = '',
 	page: number = 1,
-	filter?: object
+	filter?: object,
+	signal?: AbortSignal
 ) => {
 	let error = null;
 
@@ -329,6 +348,7 @@ export const getArchivedChatList = async (
 
 	const res = await fetch(`${WEBUI_API_BASE_URL}/chats/archived?${searchParams.toString()}`, {
 		method: 'GET',
+		signal,
 		headers: {
 			Accept: 'application/json',
 			'Content-Type': 'application/json',
@@ -343,10 +363,13 @@ export const getArchivedChatList = async (
 			return json;
 		})
 		.catch((err) => {
+			if (signal?.aborted) return null;
 			error = getErrorDetail(err);
 			console.error(err);
 			return null;
 		});
+
+	if (signal?.aborted) return null;
 
 	if (error) {
 		throw error;
@@ -386,7 +409,12 @@ export const getArchivedChatCount = async (token: string = '') => {
 	return res;
 };
 
-export const getSharedChatList = async (token: string = '', page: number = 1, filter?: object) => {
+export const getSharedChatList = async (
+	token: string = '',
+	page: number = 1,
+	filter?: object,
+	signal?: AbortSignal
+) => {
 	let error = null;
 
 	const searchParams = new URLSearchParams();
@@ -402,6 +430,7 @@ export const getSharedChatList = async (token: string = '', page: number = 1, fi
 
 	const res = await fetch(`${WEBUI_API_BASE_URL}/chats/shared?${searchParams.toString()}`, {
 		method: 'GET',
+		signal,
 		headers: {
 			Accept: 'application/json',
 			'Content-Type': 'application/json',
@@ -416,10 +445,13 @@ export const getSharedChatList = async (token: string = '', page: number = 1, fi
 			return json;
 		})
 		.catch((err) => {
+			if (signal?.aborted) return null;
 			error = getErrorDetail(err);
 			console.error(err);
 			return null;
 		});
+
+	if (signal?.aborted) return null;
 
 	if (error) {
 		throw error;
@@ -1470,6 +1502,26 @@ export const resolveChatMessageToolCall = async (
 	return res;
 };
 
+export type ChatChild = {
+	id: string;
+	title: string;
+	type: 'subagent' | 'timer';
+	status: 'waiting' | 'running' | 'scheduled' | 'done';
+	created_at: number;
+	due_at: number | null;
+};
+
+export const getChatChildren = async (token: string, id: string): Promise<ChatChild[]> => {
+	const res = await fetch(`${WEBUI_API_BASE_URL}/chats/${id}/children`, {
+		headers: {
+			Accept: 'application/json',
+			authorization: `Bearer ${token}`
+		}
+	});
+	if (!res.ok) throw getErrorDetail(await res.json());
+	return res.json();
+};
+
 export const deleteChatById = async (token: string, id: string) => {
 	let error = null;
 
@@ -1559,6 +1611,44 @@ export const addTagById = async (token: string, id: string, tagName: string) => 
 		})
 		.catch((err) => {
 			error = err.detail;
+			console.error(err);
+			return null;
+		});
+
+	if (error) {
+		throw error;
+	}
+
+	return res;
+};
+
+export const updateTagColorById = async (
+	token: string,
+	id: string,
+	tagName: string,
+	color: string
+) => {
+	let error = null;
+
+	const res = await fetch(`${WEBUI_API_BASE_URL}/chats/${id}/tags`, {
+		method: 'PATCH',
+		headers: {
+			Accept: 'application/json',
+			'Content-Type': 'application/json',
+			...(token && { authorization: `Bearer ${token}` })
+		},
+		body: JSON.stringify({
+			name: tagName,
+			color
+		})
+	})
+		.then(async (res) => {
+			if (!res.ok) throw await res.json();
+			return res.json();
+		})
+		.catch((err) => {
+			error = getErrorDetail(err);
+
 			console.error(err);
 			return null;
 		});

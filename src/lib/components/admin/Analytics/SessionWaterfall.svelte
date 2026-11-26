@@ -5,6 +5,7 @@
 
 	export let items: TraceItem[];
 	export let page: number;
+	export let modelNames: Record<string, string> = {};
 	export let label: (item: TraceItem) => string;
 	export let status: (item: TraceItem) => string;
 	const i18n = getContext<typeof import('$lib/i18n').default>('i18n');
@@ -57,18 +58,19 @@
 		<!-- Keyboard users must be able to scroll the bounded chart. -->
 		<!-- svelte-ignore a11y_no_noninteractive_tabindex -->
 		<div
-			class="max-h-48 overflow-y-auto scrollbar-hover focus-visible:outline focus-visible:outline-1 focus-visible:outline-gray-400"
+			class="max-h-48 overflow-y-auto scrollbar-hover focus-visible:outline focus-visible:outline-1 focus-visible:outline-base-400"
 			tabindex="0"
 			role="region"
 			aria-label={$i18n.t('Execution timeline')}
 		>
 			<div
-				class="grid grid-cols-[6rem_minmax(0,1fr)_3rem] sm:grid-cols-[10rem_minmax(0,1fr)_3.5rem] gap-x-2 sticky top-0 z-10 bg-white dark:bg-gray-900 pb-1 text-[0.625rem] tabular-nums"
+				class="grid grid-cols-[6rem_minmax(0,1fr)_3rem] sm:grid-cols-[10rem_minmax(0,1fr)_3.5rem] gap-x-2 sticky top-0 z-10 bg-base-0 dark:bg-base-900 pb-1 text-[0.625rem] tabular-nums"
 				aria-hidden="true"
 			>
 				<span></span>
 				<div class="flex justify-between">
 					{#if sequence}
+						<!-- {$i18n.t('Saved order')} -->
 						<span>1</span><span>{$i18n.t('Saved order')}</span><span>{bars.length}</span>
 					{:else}
 						<span>0s</span><span>{duration(span / 2)}</span><span>{duration(span)}</span>
@@ -83,14 +85,14 @@
 					class="grid grid-cols-[6rem_minmax(0,1fr)_3rem] sm:grid-cols-[10rem_minmax(0,1fr)_3.5rem] gap-x-2 items-center min-h-7 text-[0.6875rem]"
 					title={sequence
 						? lane.name
-						: `${item.model_id || ''} · ${label(item)} · ${status(item)}${waterfall ? ` · ${duration(item.started_at! - start)}–${duration(item.ended_at! - start)}` : ''}`}
+						: `${modelNames[item.model_id || ''] || item.model_id || ''} · ${label(item)} · ${status(item)}${waterfall ? ` · ${duration(item.started_at! - start)}–${duration(item.ended_at! - start)}` : ''}`}
 				>
 					<span class="truncate"
 						>{lane.name}{!sequence && item.status === 'failed' ? ` · ${status(item)}` : ''}</span
 					>
 					<div class="relative h-7" aria-hidden="true">
 						{#each [0, 50, 100] as tick}<span
-								class="absolute inset-y-0 w-px bg-gray-100 dark:bg-gray-850/50"
+								class="absolute inset-y-0 w-px bg-base-100 dark:bg-base-850/50"
 								style:left={`${tick}%`}
 							></span>{/each}
 						{#each lane.entries as entry (entry.index)}
@@ -107,11 +109,11 @@
 									? `min(0.5rem, ${80 / bars.length}%)`
 									: `${span > 0 ? (100 * elapsed(item)) / span : 0}%`}
 								title={sequence
-									? `#${entry.index + 1} · ${entry.item.model_id || ''} · ${status(entry.item)}`
+									? `#${entry.index + 1} · ${modelNames[entry.item.model_id || ''] || entry.item.model_id || ''} · ${status(entry.item)}`
 									: undefined}
 								style:background={entry.item.model_id
 									? modelColor(entry.item.model_id)
-									: 'var(--color-gray-400)'}
+									: 'var(--color-base-400)'}
 							></span>
 						{/each}
 					</div>
@@ -121,7 +123,7 @@
 				</div>
 			{/each}
 		</div>
-		<p class="mt-2 text-[0.625rem] text-gray-400 dark:text-gray-500">
+		<p class="mt-2 text-[0.625rem] text-base-400 dark:text-base-500">
 			{sequence
 				? $i18n.t('Saved order only; spacing does not represent elapsed time.')
 				: waterfall
@@ -133,7 +135,7 @@
 					: $i18n.t('items without recorded durations')}{/if}
 		</p>
 	{:else}
-		<p class="text-[0.6875rem] text-gray-400 dark:text-gray-500">
+		<p class="text-[0.6875rem] text-base-400 dark:text-base-500">
 			{$i18n.t('No saved items match this filter.')}
 		</p>
 	{/if}

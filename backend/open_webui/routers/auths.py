@@ -10,7 +10,7 @@ import uuid
 from ssl import CERT_NONE, CERT_REQUIRED, PROTOCOL_TLS
 
 import jwt
-from aiohttp import BasicAuth, ClientSession
+from aiohttp import ClientSession, encode_basic_auth
 from fastapi import APIRouter, Depends, HTTPException, Request, status
 from fastapi.responses import JSONResponse, Response
 from ldap3 import NONE, Connection, Server, Tls
@@ -88,7 +88,10 @@ from pydantic import BaseModel, Field, StrictStr, field_validator
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from open_webui.routers import sessions
+
 router = APIRouter(route_class=MfaRoute)
+router.include_router(sessions.router, prefix='/sessions')
 
 log = logging.getLogger(__name__)
 
@@ -130,7 +133,9 @@ ADMIN_CONFIG_KEYS = {
     'FOLDER_MAX_FILE_COUNT': 'folders.max_file_count',
     'AUTOMATION_MAX_COUNT': 'automations.max_count',
     'AUTOMATION_MIN_INTERVAL': 'automations.min_interval',
+    'AUTOMATION_MAX_CONCURRENT': 'automations.max_concurrent',
     'ENABLE_AUTOMATIONS': 'automations.enable',
+    'ENABLE_AUTOMATION_WEBHOOKS': 'automations.webhooks.enable',
     'ENABLE_CHANNELS': 'channels.enable',
     'ENABLE_COMMENTS': 'comments.enable',
     'ENABLE_NOTIFICATIONS': 'notifications.enable',
@@ -143,6 +148,8 @@ ADMIN_CONFIG_KEYS = {
     'ENABLE_SKILL_LAZY_LOADING': 'skills.lazy_loading.enable',
     'SKILL_CONTENT_MAX_CHARS': 'skills.content_max_chars',
     'SKILL_PREVIEW_MAX_CHARS': 'skills.preview_max_chars',
+    'VIEW_CHAT_MAX_CHARS': 'chats.view_max_chars',
+    'TOOL_OUTPUT_MAX_CHARS': 'tools.output_max_chars',
     'ENABLE_NOTES': 'notes.enable',
     'ENABLE_USER_WEBHOOKS': 'ui.enable_user_webhooks',
     'ENABLE_USER_STATUS': 'users.enable_status',
@@ -292,6 +299,8 @@ async def update_timezone(
     db: AsyncSession = Depends(get_async_session),
 ):
     if session_user:
+        if form_data.timezone == session_user.timezone:
+            return {'status': True}
         await Users.update_user_by_id(
             session_user.id,
             {'timezone': form_data.timezone},
@@ -921,6 +930,15 @@ async def signout(request: Request, response: Response, db: AsyncSession = Depen
         data = decode_token(token)
         if data and data.get('id'):
             actor = await Users.get_user_by_id(data['id'], db=db)
+        if data and data.get('typ', 'session') == 'session' and data.get('sid') and data.get('id'):
+            from open_webui.models.auth_sessions import AuthSessions
+
+            await AuthSessions.revoke(data['sid'], data['id'])
+        if session and data and session.user_id == data.get('id'):
+            sessions = await OAuthSessions.get_sessions_by_user_id(session.user_id, db=db)
+            # Keep the only session for this provider: automations and API key calls use it
+            if any(other.provider == session.provider and other.id != session.id for other in sessions):
+                await OAuthSessions.delete_session_by_id(session.id, db=db)
         await invalidate_token(request, token)
         await publish_event(
             request,
@@ -1177,7 +1195,9 @@ class AdminConfig(MfaConfigForm):
     FOLDER_MAX_FILE_COUNT: int | str | None = None
     AUTOMATION_MAX_COUNT: int | str | None = None
     AUTOMATION_MIN_INTERVAL: int | str | None = None
+    AUTOMATION_MAX_CONCURRENT: int | None = Field(default=None, gt=0)
     ENABLE_AUTOMATIONS: bool
+    ENABLE_AUTOMATION_WEBHOOKS: bool = True
     ENABLE_CHANNELS: bool
     ENABLE_COMMENTS: bool = False
     ENABLE_NOTIFICATIONS: bool = True
@@ -1190,6 +1210,8 @@ class AdminConfig(MfaConfigForm):
     ENABLE_SKILL_LAZY_LOADING: bool = False
     SKILL_CONTENT_MAX_CHARS: int | None = Field(default=None, gt=0, strict=True)
     SKILL_PREVIEW_MAX_CHARS: int | None = Field(default=None, gt=0, strict=True)
+    VIEW_CHAT_MAX_CHARS: int | None = Field(default=None, gt=0, strict=True)
+    TOOL_OUTPUT_MAX_CHARS: int | None = Field(default=None, gt=0, strict=True)
     ENABLE_NOTES: bool
     ENABLE_USER_WEBHOOKS: bool
     ENABLE_USER_STATUS: bool
@@ -1257,12 +1279,18 @@ async def update_admin_config(request: Request, form_data: AdminConfig, user=Dep
         updates.pop('skills.content_max_chars', None)
     if 'SKILL_PREVIEW_MAX_CHARS' not in form_data.model_fields_set:
         updates.pop('skills.preview_max_chars', None)
+    if 'VIEW_CHAT_MAX_CHARS' not in form_data.model_fields_set:
+        updates.pop('chats.view_max_chars', None)
+    if 'TOOL_OUTPUT_MAX_CHARS' not in form_data.model_fields_set:
+        updates.pop('tools.output_max_chars', None)
     updates['ui.default_interface_settings'] = form_data.DEFAULT_INTERFACE_SETTINGS or {}
     updates['folders.max_file_count'] = int(form_data.FOLDER_MAX_FILE_COUNT) if form_data.FOLDER_MAX_FILE_COUNT else ''
     updates['automations.max_count'] = int(form_data.AUTOMATION_MAX_COUNT) if form_data.AUTOMATION_MAX_COUNT else ''
     updates['automations.min_interval'] = (
         int(form_data.AUTOMATION_MIN_INTERVAL) if form_data.AUTOMATION_MIN_INTERVAL else ''
     )
+    if 'AUTOMATION_MAX_CONCURRENT' not in form_data.model_fields_set:
+        updates.pop('automations.max_concurrent', None)
 
     if form_data.DEFAULT_USER_ROLE not in ['pending', 'user', 'admin']:
         updates.pop('ui.default_user_role', None)
@@ -1588,7 +1616,9 @@ async def get_token_client_id(client, token: str) -> str | None:
             async with session.post(
                 introspection_endpoint,
                 data={'token': token, 'token_type_hint': 'access_token'},
-                auth=BasicAuth(client.client_id, client.client_secret or ''),
+                headers={
+                    'Authorization': encode_basic_auth(client.client_id, client.client_secret or '', encoding='latin1')
+                },
                 ssl=AIOHTTP_CLIENT_SESSION_SSL,
             ) as r:
                 if r.status != 200:

@@ -9,12 +9,15 @@
 	const i18n: any = getContext('i18n');
 
 	import {
+		baseModels,
 		channelRequestQueues,
 		channels,
 		models,
 		config,
 		mobile,
 		settings,
+		selectedMachineId,
+		machineSkills,
 		socket,
 		user
 	} from '$lib/stores';
@@ -61,11 +64,15 @@
 	import MentionList from './MessageInput/MentionList.svelte';
 	import Skeleton from '../chat/Messages/Skeleton.svelte';
 	import XMark from '../icons/XMark.svelte';
+	import Mic from '../icons/Mic.svelte';
+	import PlusAlt from '../icons/PlusAlt.svelte';
 
 	export let placeholder: string | undefined = undefined;
 	export let chatInputElement: any;
 
 	export let id: string | null = null;
+	let inputRoot: HTMLDivElement;
+	$: inputId = `channel-input-${channel?.id ?? ''}-${parentId ?? 'main'}`;
 	export let channel: any = null;
 	export let messages: any[] | null = [];
 
@@ -88,7 +95,7 @@
 
 	export let replyToMessage: any = null;
 
-	export let typingUsersClassName = 'from-white dark:from-gray-900';
+	export let typingUsersClassName = 'from-base-0 dark:from-base-900';
 
 	let loaded = false;
 	let draggedOver = false;
@@ -133,12 +140,20 @@
 
 	const textVariableHandler = async (text: string) => {
 		if (text.includes('{{CLIPBOARD}}')) {
-			const clipboardText = await navigator.clipboard.readText().catch((err) => {
+			let clipboardText: string;
+			try {
+				clipboardText = await navigator.clipboard.readText();
+			} catch (error) {
 				toast.error($i18n.t('Failed to read clipboard contents'));
-				return '{{CLIPBOARD}}';
-			});
+				clipboardText = '{{CLIPBOARD}}';
+			}
 
-			const clipboardItems = await navigator.clipboard.read();
+			let clipboardItems: ClipboardItem[] = [];
+			try {
+				clipboardItems = await navigator.clipboard.read();
+			} catch (error) {
+				console.error('Failed to read clipboard items:', error);
+			}
 
 			for (const item of clipboardItems) {
 				// Check for known image types
@@ -261,7 +276,7 @@
 	const replaceVariables = (variables: Record<string, any>) => {
 		console.log('Replacing variables:', variables);
 
-		const chatInput = document.getElementById('chat-input');
+		const chatInput = inputRoot?.querySelector<HTMLElement>(`[id="${inputId}"]`);
 
 		if (chatInput) {
 			chatInputElement.replaceVariables(variables);
@@ -270,7 +285,7 @@
 	};
 
 	export const setText = async (text?: string, cb?: (text: string) => void) => {
-		const chatInput = document.getElementById('chat-input');
+		const chatInput = inputRoot?.querySelector<HTMLElement>(`[id="${inputId}"]`);
 
 		if (chatInput) {
 			if (text !== '') {
@@ -290,7 +305,7 @@
 	};
 
 	const getCommand = () => {
-		const chatInput = document.getElementById('chat-input');
+		const chatInput = inputRoot?.querySelector<HTMLElement>(`[id="${inputId}"]`);
 		let word = '';
 
 		if (chatInput) {
@@ -301,14 +316,14 @@
 	};
 
 	const replaceCommandWithText = (text) => {
-		const chatInput = document.getElementById('chat-input');
+		const chatInput = inputRoot?.querySelector<HTMLElement>(`[id="${inputId}"]`);
 		if (!chatInput) return;
 
 		chatInputElement?.replaceCommandWithText(text);
 	};
 
 	const insertTextAtCursor = async (text: string) => {
-		const chatInput = document.getElementById('chat-input');
+		const chatInput = inputRoot?.querySelector<HTMLElement>(`[id="${inputId}"]`);
 		if (!chatInput) return;
 
 		text = await textVariableHandler(text);
@@ -323,7 +338,7 @@
 		text = await inputVariableHandler(text);
 		await tick();
 
-		const chatInputContainer = document.getElementById('chat-input-container');
+		const chatInputContainer = inputRoot?.querySelector<HTMLElement>('[id="chat-input-container"]');
 		if (chatInputContainer) {
 			chatInputContainer.scrollTop = chatInputContainer.scrollHeight;
 		}
@@ -554,6 +569,7 @@
 	};
 
 	const handleKeyDown = (event: KeyboardEvent) => {
+		if (!inputRoot?.contains(event.target as Node)) return;
 		if (event.key === 'Shift') {
 			shiftKey = true;
 		}
@@ -635,7 +651,7 @@
 					{
 						users: userSuggestions,
 						apps: $config?.features?.enable_apps ?? false,
-						models: $models,
+						models: $baseModels,
 						channels: channelSuggestions ? $channels : []
 					}
 				);
@@ -686,13 +702,22 @@
 		} else {
 			processingQueueChannels.add(targetQueueKey);
 			try {
-				await onSubmit({
+				const res = await onSubmit({
 					content: entry.prompt,
 					data: { files: entry.files },
 					channel_id: entry.channel_id,
 					parent_id: entry.parent_id,
 					reply_to_message: entry.reply_to_message
 				});
+				if (!res) {
+					channelRequestQueues.update((q) => ({
+						...q,
+						[targetQueueKey]: [
+							{ ...entry, error: 'Failed to send message' },
+							...(q[targetQueueKey] ?? [])
+						]
+					}));
+				}
 			} finally {
 				processingQueueChannels.delete(targetQueueKey);
 				void processNextInQueue(targetQueueKey);
@@ -756,6 +781,8 @@
 						.run();
 				},
 				render: getSuggestionRenderer(CommandSuggestionList, {
+					selectedMachineId,
+					machineSkills,
 					i18n,
 					onSelect: (e) => {
 						const { type, data } = e;
@@ -764,7 +791,7 @@
 							console.log('Selected model:', data);
 						}
 
-						document.getElementById('chat-input')?.focus();
+						inputRoot?.querySelector<HTMLElement>(`[id="${inputId}"]`)?.focus();
 					},
 
 					insertTextHandler: insertTextAtCursor,
@@ -799,9 +826,11 @@
 					editor.chain().focus().deleteRange(range).insertContent(emoji).run();
 				},
 				render: getSuggestionRenderer(CommandSuggestionList, {
+					selectedMachineId,
+					machineSkills,
 					i18n,
 					onSelect: (e) => {
-						document.getElementById('chat-input')?.focus();
+						inputRoot?.querySelector<HTMLElement>(`[id="${inputId}"]`)?.focus();
 					},
 
 					insertTextHandler: insertTextAtCursor,
@@ -826,7 +855,7 @@
 			await tick();
 			if (isDestroyed) return;
 
-			dropzoneElement = document.getElementById('channel-container');
+			dropzoneElement = inputRoot?.closest<HTMLElement>('[id="channel-container"]') ?? null;
 			if (dropzoneElement) {
 				dropzoneElement.addEventListener('dragover', onDragOver);
 				dropzoneElement.addEventListener('drop', onDrop);
@@ -880,7 +909,7 @@
 		onSave={inputVariablesModalCallback}
 	/>
 
-	<div class="bg-transparent">
+	<div bind:this={inputRoot} data-composer-id={inputId} class="bg-transparent">
 		<div class="max-w-full mx-auto inset-x-0 relative">
 			<div
 				class="absolute top-0 left-0 right-0 mx-auto inset-x-0 bg-transparent flex justify-center"
@@ -893,7 +922,7 @@
 							>
 								<button
 									aria-label={$i18n.t('Scroll to bottom')}
-									class=" bg-white border border-gray-100 dark:border-none dark:bg-white/20 p-1.5 rounded-full pointer-events-auto"
+									class=" bg-base-0 border border-base-100 dark:border-none dark:bg-base-0/20 p-1.5 rounded-full pointer-events-auto"
 									on:click={() => {
 										scrollEnd = true;
 										scrollToBottom();
@@ -924,7 +953,7 @@
 								<Skeleton size="xs" />
 
 								<div>
-									<span class=" font-normal text-black dark:text-white">
+									<span class=" font-normal text-base-1000 dark:text-base-0">
 										{typingUsers.map((user) => user.name).join(', ')}
 									</span>
 									{$i18n.t('is typing...')}
@@ -973,7 +1002,7 @@
 					>
 						{#if messageQueue.length > 0}
 							<div
-								class="mb-1 mx-2 py-0.5 px-1.5 rounded-2xl bg-white dark:bg-gray-900/60 border border-gray-100 dark:border-gray-800/50 overflow-x-hidden overflow-y-auto max-h-[25vh]"
+								class="mb-1 mx-2 py-0.5 px-1.5 rounded-2xl bg-base-0 dark:bg-base-900/60 border border-base-100 dark:border-base-800/50 overflow-x-hidden overflow-y-auto max-h-[25vh]"
 							>
 								{#each messageQueue as entry (entry.id)}
 									<QueuedMessageItem
@@ -996,7 +1025,7 @@
 								<div class="px-3 pt-2 text-left w-full flex flex-col z-10">
 									<div class="flex items-center justify-between w-full">
 										<div
-											class="min-w-0 flex items-center gap-2 text-xs text-gray-500 dark:text-gray-400"
+											class="min-w-0 flex items-center gap-2 text-xs text-base-500 dark:text-base-400"
 										>
 											<div class="translate-y-[0.5px]">
 												<span class=""
@@ -1008,7 +1037,7 @@
 										</div>
 										<div>
 											<button
-												class="flex h-6 shrink-0 items-center justify-center rounded-md text-gray-500 dark:text-gray-400 hover:text-gray-900 dark:hover:text-gray-100 px-0"
+												class="flex h-6 shrink-0 items-center justify-center rounded-md text-base-500 dark:text-base-400 hover:text-base-900 dark:hover:text-base-100 px-0"
 												aria-label={$i18n.t('Cancel')}
 												type="button"
 												on:click={() => {
@@ -1040,7 +1069,7 @@
 												</div>
 												<div class=" absolute -top-1 -right-1">
 													<button
-														class=" bg-white text-black border border-white rounded-full hover-reveal transition"
+														class=" bg-base-0 text-base-1000 border border-base-0 rounded-full hover-reveal transition"
 														type="button"
 														aria-label={$i18n.t('Remove file')}
 														on:click={() => {
@@ -1086,11 +1115,11 @@
 
 							<div class="px-2">
 								<div
-									class="scrollbar-hidden rtl:text-right ltr:text-left bg-transparent dark:text-gray-100 outline-hidden w-full pt-2 pb-0.5 px-1 resize-none h-fit max-h-96 overflow-auto"
+									class="scrollbar-hidden rtl:text-right ltr:text-left bg-transparent dark:text-base-100 outline-hidden w-full pt-2 pb-0.5 px-1 resize-none h-fit max-h-96 overflow-auto"
 								>
 									{#key $settings?.richTextInput && $settings?.showFormattingToolbar}
 										<RichTextInput
-											id="chat-input"
+											id={inputId}
 											className="input-prose min-h-fit h-full text-sm!"
 											bind:this={chatInputElement}
 											bind:editor={inputEditor}
@@ -1217,8 +1246,8 @@
 								</div>
 							</div>
 
-							<div class=" flex items-center justify-between gap-2 p-1.5 pt-0.5 max-w-full">
-								<div class="flex items-center flex-1 min-w-0">
+							<div class="flex items-center justify-between gap-2 mt-0.5 mb-2 mx-0.5 max-w-full">
+								<div class="ml-1 flex items-center flex-1 min-w-0">
 									<slot name="menu">
 										{#if acceptFiles}
 											<InputMenu
@@ -1229,32 +1258,23 @@
 											>
 												<button
 													id="input-menu-button"
-													class="bg-transparent hover:bg-gray-100 text-gray-500 dark:text-gray-400 dark:hover:bg-gray-800 rounded-lg size-7 flex justify-center items-center outline-hidden focus:outline-hidden shrink-0"
+													class="bg-transparent hover:bg-base-100/40 text-base-700 dark:text-base-0 dark:hover:bg-base-800/40 rounded-full size-[1.875rem] flex justify-center items-center outline-hidden focus:outline-hidden shrink-0"
 													type="button"
 													aria-label={$i18n.t('More')}
 												>
-													<svg
-														xmlns="http://www.w3.org/2000/svg"
-														viewBox="0 0 20 20"
-														fill="currentColor"
-														class="size-4"
-													>
-														<path
-															d="M10.75 4.75a.75.75 0 0 0-1.5 0v4.5h-4.5a.75.75 0 0 0 0 1.5h4.5v4.5a.75.75 0 0 0 1.5 0v-4.5h4.5a.75.75 0 0 0 0-1.5h-4.5v-4.5Z"
-														/>
-													</svg>
+													<PlusAlt className="size-5" />
 												</button>
 											</InputMenu>
 										{/if}
 									</slot>
 								</div>
 
-								<div class="flex items-center gap-1 shrink-0">
+								<div class="mr-1 flex items-center gap-1 shrink-0">
 									{#if content === ''}
 										<Tooltip content={$i18n.t('Record voice')}>
 											<button
 												id="voice-input-button"
-												class=" text-gray-600 dark:text-gray-300 hover:text-gray-700 dark:hover:text-gray-200 transition rounded-lg size-7 flex items-center justify-center"
+												class=" text-base-600 dark:text-base-300 hover:text-base-700 dark:hover:text-base-200 transition rounded-full p-1.5 self-center mr-0.5"
 												type="button"
 												on:click={async () => {
 													try {
@@ -1284,17 +1304,7 @@
 												}}
 												aria-label={$i18n.t('Voice Input')}
 											>
-												<svg
-													xmlns="http://www.w3.org/2000/svg"
-													viewBox="0 0 20 20"
-													fill="currentColor"
-													class="size-4"
-												>
-													<path d="M7 4a3 3 0 016 0v6a3 3 0 11-6 0V4z" />
-													<path
-														d="M5.5 9.643a.75.75 0 00-1.5 0V10c0 3.06 2.29 5.585 5.25 5.954V17.5h-1.5a.75.75 0 000 1.5h4.5a.75.75 0 000-1.5h-1.5v-1.546A6.001 6.001 0 0016 10v-.357a.75.75 0 00-1.5 0V10a4.5 4.5 0 01-9 0v-.357z"
-													/>
-												</svg>
+												<Mic className="size-[1.125rem]" />
 											</button>
 										</Tooltip>
 									{/if}
@@ -1305,7 +1315,7 @@
 												<Tooltip content={$i18n.t('Stop')}>
 													<button
 														aria-label={$i18n.t('Stop')}
-														class="bg-white hover:bg-gray-100 text-gray-800 dark:bg-gray-700 dark:text-white dark:hover:bg-gray-800 transition rounded-full size-7 flex items-center justify-center"
+														class="bg-base-0 hover:bg-base-100 text-base-800 dark:bg-base-700 dark:text-base-0 dark:hover:bg-base-800 transition rounded-full p-[0.3125rem]"
 														on:click={() => {
 															onStop();
 														}}
@@ -1314,7 +1324,7 @@
 															xmlns="http://www.w3.org/2000/svg"
 															viewBox="0 0 24 24"
 															fill="currentColor"
-															class="size-4"
+															class="size-5"
 														>
 															<path
 																fill-rule="evenodd"
@@ -1332,8 +1342,8 @@
 														id="send-message-button"
 														aria-label={$i18n.t('Send message')}
 														class="{content !== '' || files.length !== 0
-															? 'bg-black text-white hover:bg-gray-900 dark:bg-white dark:text-black dark:hover:bg-gray-100 '
-															: 'text-white bg-gray-200 dark:text-gray-900 dark:bg-gray-700 disabled'} transition rounded-full size-7 flex items-center justify-center self-center"
+															? 'bg-base-1000 text-base-0 hover:bg-base-900 dark:bg-base-0 dark:text-base-1000 dark:hover:bg-base-100 '
+															: 'text-base-0 bg-base-200 dark:text-base-900 dark:bg-base-700 disabled'} transition rounded-full p-[0.3125rem] self-center"
 														type="submit"
 														disabled={content === '' && files.length === 0}
 													>
@@ -1341,7 +1351,7 @@
 															xmlns="http://www.w3.org/2000/svg"
 															viewBox="0 0 16 16"
 															fill="currentColor"
-															class="size-4"
+															class="size-5"
 														>
 															<path
 																fill-rule="evenodd"

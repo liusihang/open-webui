@@ -72,6 +72,17 @@
 
 		params.top_k = value;
 	};
+
+	// Reject a fraction in a step="1" field instead of keeping or rounding it ("32.767" is usually 32767).
+	const setNumber = (key: RangeParamKey, event: Event) => {
+		const input = event.currentTarget as HTMLInputElement;
+		if (input.validity.stepMismatch || input.validity.badInput) {
+			input.value = `${params[key] ?? ''}`;
+			return;
+		}
+		params[key] = input.value === '' ? null : input.valueAsNumber;
+		onParamChange(key, params[key]);
+	};
 </script>
 
 {#snippet rangeParam(
@@ -93,13 +104,13 @@
 				step={rangeStep}
 				bind:value={params[key]}
 				on:change={() => onParamChange(key, params[key] ?? null)}
-				class="w-full h-2 rounded-lg appearance-none cursor-pointer dark:bg-gray-700"
+				class="w-full h-2 rounded-lg appearance-none cursor-pointer dark:bg-base-700"
 			/>
 		</div>
 		<div>
 			<input
-				bind:value={params[key]}
-				on:change={() => onParamChange(key, params[key] ?? null)}
+				value={params[key]}
+				on:change={(event) => setNumber(key, event)}
 				type="number"
 				aria-label={label}
 				class=" bg-transparent text-center w-14"
@@ -113,8 +124,8 @@
 
 <div
 	class={layout === 'grid'
-		? 'grid grid-cols-1 gap-x-5 gap-y-1 pb-safe-bottom text-xs text-gray-900 dark:text-gray-100 sm:grid-cols-2 lg:grid-cols-3'
-		: 'space-y-1 pb-safe-bottom text-xs text-gray-900 dark:text-gray-100'}
+		? 'grid grid-cols-1 gap-x-5 gap-y-1 pb-safe-bottom text-xs text-base-900 dark:text-base-100 sm:grid-cols-2 lg:grid-cols-3'
+		: 'space-y-1 pb-safe-bottom text-xs text-base-900 dark:text-base-100'}
 >
 	<div>
 		<Tooltip
@@ -125,14 +136,14 @@
 			<UserSettingRow
 				let:labelId
 				className="w-full py-0.5"
-				labelClassName="self-center font-normal underline decoration-dotted decoration-gray-400/70 underline-offset-4 dark:decoration-gray-500"
+				labelClassName="self-center font-normal underline decoration-dotted decoration-base-400/70 underline-offset-4 dark:decoration-base-500"
 			>
 				<span slot="label">
 					{$i18n.t('settings.personal.general.parameters.streamChatResponse.label')}
 				</span>
 				<button
 					id={`${labelId}-control`}
-					class="p-1 px-3 text-xs flex rounded-sm transition font-normal text-gray-900 dark:text-gray-100"
+					class="p-1 px-3 text-xs flex rounded-sm transition font-normal text-base-900 dark:text-base-100"
 					on:click={() => {
 						params.stream_response =
 							(params?.stream_response ?? null) === null
@@ -166,14 +177,14 @@
 				<UserSettingRow
 					let:labelId
 					className="w-full py-0.5"
-					labelClassName="self-center font-normal underline decoration-dotted decoration-gray-400/70 underline-offset-4 dark:decoration-gray-500"
+					labelClassName="self-center font-normal underline decoration-dotted decoration-base-400/70 underline-offset-4 dark:decoration-base-500"
 				>
 					<span slot="label">
 						{$i18n.t('settings.personal.general.parameters.streamDeltaChunkSize.label')}
 					</span>
 					<button
 						id={`${labelId}-control`}
-						class="p-1 px-3 text-xs flex rounded-sm transition shrink-0 outline-hidden font-normal text-gray-900 dark:text-gray-100"
+						class="p-1 px-3 text-xs flex rounded-sm transition shrink-0 outline-hidden font-normal text-base-900 dark:text-base-100"
 						type="button"
 						on:click={() => {
 							params.stream_delta_chunk_size =
@@ -197,7 +208,7 @@
 					1,
 					128,
 					1,
-					'any',
+					1,
 					undefined
 				)}
 			{/if}
@@ -216,14 +227,14 @@
 				<UserSettingRow
 					let:labelId
 					className="w-full py-0.5"
-					labelClassName="self-center font-normal underline decoration-dotted decoration-gray-400/70 underline-offset-4 dark:decoration-gray-500"
+					labelClassName="self-center font-normal underline decoration-dotted decoration-base-400/70 underline-offset-4 dark:decoration-base-500"
 				>
 					<span slot="label">
 						{$i18n.t('settings.personal.general.parameters.contextCompactionThreshold.label')}
 					</span>
 					<button
 						id={`${labelId}-control`}
-						class="p-1 px-3 text-xs flex rounded-sm transition shrink-0 outline-hidden font-normal text-gray-900 dark:text-gray-100"
+						class="p-1 px-3 text-xs flex rounded-sm transition shrink-0 outline-hidden font-normal text-base-900 dark:text-base-100"
 						type="button"
 						on:click={() => {
 							params.compact_token_threshold =
@@ -244,15 +255,14 @@
 				<div class="flex mt-0.5 space-x-2">
 					<div class=" flex-1">
 						<input
-							class="text-sm w-full bg-transparent outline-hidden outline-none font-normal text-gray-900 dark:text-gray-100"
+							class="text-sm w-full bg-transparent outline-hidden outline-none font-normal text-base-900 dark:text-base-100"
 							type="number"
 							aria-label={$i18n.t(
 								'settings.personal.general.parameters.contextCompactionThreshold.label'
 							)}
 							placeholder={$i18n.t('Enter token threshold')}
-							bind:value={params.compact_token_threshold}
-							on:change={() =>
-								onParamChange('compact_token_threshold', params.compact_token_threshold ?? null)}
+							value={params.compact_token_threshold}
+							on:change={(event) => setNumber('compact_token_threshold', event)}
 							autocomplete="off"
 							min="1"
 							step="1"
@@ -272,14 +282,14 @@
 			<UserSettingRow
 				let:labelId
 				className="w-full py-0.5"
-				labelClassName="self-center font-normal underline decoration-dotted decoration-gray-400/70 underline-offset-4 dark:decoration-gray-500"
+				labelClassName="self-center font-normal underline decoration-dotted decoration-base-400/70 underline-offset-4 dark:decoration-base-500"
 			>
 				<span slot="label">
 					{$i18n.t('settings.personal.general.parameters.functionCalling.label')}
 				</span>
 				<button
 					id={`${labelId}-control`}
-					class="p-1 px-3 text-xs flex rounded-sm transition font-normal text-gray-900 dark:text-gray-100"
+					class="p-1 px-3 text-xs flex rounded-sm transition font-normal text-base-900 dark:text-base-100"
 					on:click={() => {
 						if ((params?.function_calling ?? null) === null) {
 							params.function_calling = 'native';
@@ -313,14 +323,14 @@
 			<UserSettingRow
 				let:labelId
 				className="w-full py-0.5"
-				labelClassName="self-center font-normal underline decoration-dotted decoration-gray-400/70 underline-offset-4 dark:decoration-gray-500"
+				labelClassName="self-center font-normal underline decoration-dotted decoration-base-400/70 underline-offset-4 dark:decoration-base-500"
 			>
 				<span slot="label">
 					{$i18n.t('settings.personal.general.parameters.reasoningTags.label')}
 				</span>
 				<button
 					id={`${labelId}-control`}
-					class="p-1 px-3 text-xs flex rounded-sm transition shrink-0 outline-hidden font-normal text-gray-900 dark:text-gray-100"
+					class="p-1 px-3 text-xs flex rounded-sm transition shrink-0 outline-hidden font-normal text-base-900 dark:text-base-100"
 					type="button"
 					on:click={() => {
 						if ((params?.reasoning_tags ?? null) === null) {
@@ -352,7 +362,7 @@
 			<div class="flex mt-0.5 space-x-2">
 				<div class=" flex-1">
 					<input
-						class="text-sm w-full bg-transparent outline-hidden outline-none font-normal text-gray-900 dark:text-gray-100"
+						class="text-sm w-full bg-transparent outline-hidden outline-none font-normal text-base-900 dark:text-base-100"
 						type="text"
 						aria-label={$i18n.t('Start Tag')}
 						placeholder={$i18n.t('Start Tag')}
@@ -364,7 +374,7 @@
 
 				<div class=" flex-1">
 					<input
-						class="text-sm w-full bg-transparent outline-hidden outline-none font-normal text-gray-900 dark:text-gray-100"
+						class="text-sm w-full bg-transparent outline-hidden outline-none font-normal text-base-900 dark:text-base-100"
 						type="text"
 						aria-label={$i18n.t('End Tag')}
 						placeholder={$i18n.t('End Tag')}
@@ -386,7 +396,7 @@
 			<UserSettingRow
 				let:labelId
 				className="w-full py-0.5"
-				labelClassName="self-center font-normal underline decoration-dotted decoration-gray-400/70 underline-offset-4 dark:decoration-gray-500"
+				labelClassName="self-center font-normal underline decoration-dotted decoration-base-400/70 underline-offset-4 dark:decoration-base-500"
 			>
 				<span slot="label">
 					{$i18n.t('settings.personal.general.parameters.seed.label')}
@@ -394,7 +404,7 @@
 
 				<button
 					id={`${labelId}-control`}
-					class="p-1 px-3 text-xs flex rounded-sm transition shrink-0 outline-hidden font-normal text-gray-900 dark:text-gray-100"
+					class="p-1 px-3 text-xs flex rounded-sm transition shrink-0 outline-hidden font-normal text-base-900 dark:text-base-100"
 					type="button"
 					on:click={() => {
 						params.seed = (params?.seed ?? null) === null ? 0 : null;
@@ -414,12 +424,12 @@
 			<div class="flex mt-0.5 space-x-2">
 				<div class=" flex-1">
 					<input
-						class="text-sm w-full bg-transparent outline-hidden outline-none font-normal text-gray-900 dark:text-gray-100"
+						class="text-sm w-full bg-transparent outline-hidden outline-none font-normal text-base-900 dark:text-base-100"
 						type="number"
 						aria-label={$i18n.t('settings.personal.general.parameters.seed.label')}
 						placeholder={$i18n.t('Enter Seed')}
-						bind:value={params.seed}
-						on:change={() => onParamChange('seed', params.seed ?? null)}
+						value={params.seed}
+						on:change={(event) => setNumber('seed', event)}
 						autocomplete="off"
 						min="0"
 					/>
@@ -437,7 +447,7 @@
 			<UserSettingRow
 				let:labelId
 				className="w-full py-0.5"
-				labelClassName="self-center font-normal underline decoration-dotted decoration-gray-400/70 underline-offset-4 dark:decoration-gray-500"
+				labelClassName="self-center font-normal underline decoration-dotted decoration-base-400/70 underline-offset-4 dark:decoration-base-500"
 			>
 				<span slot="label">
 					{$i18n.t('settings.personal.general.parameters.stopSequence.label')}
@@ -445,7 +455,7 @@
 
 				<button
 					id={`${labelId}-control`}
-					class="p-1 px-3 text-xs flex rounded-sm transition shrink-0 outline-hidden font-normal text-gray-900 dark:text-gray-100"
+					class="p-1 px-3 text-xs flex rounded-sm transition shrink-0 outline-hidden font-normal text-base-900 dark:text-base-100"
 					type="button"
 					on:click={() => {
 						params.stop = (params?.stop ?? null) === null ? '' : null;
@@ -465,7 +475,7 @@
 			<div class="flex mt-0.5 space-x-2">
 				<div class=" flex-1">
 					<input
-						class="text-sm w-full bg-transparent outline-hidden outline-none font-normal text-gray-900 dark:text-gray-100"
+						class="text-sm w-full bg-transparent outline-hidden outline-none font-normal text-base-900 dark:text-base-100"
 						type="text"
 						aria-label={$i18n.t('settings.personal.general.parameters.stopSequence.label')}
 						placeholder={$i18n.t('Enter stop sequence')}
@@ -487,14 +497,14 @@
 			<UserSettingRow
 				let:labelId
 				className="w-full py-0.5"
-				labelClassName="self-center font-normal underline decoration-dotted decoration-gray-400/70 underline-offset-4 dark:decoration-gray-500"
+				labelClassName="self-center font-normal underline decoration-dotted decoration-base-400/70 underline-offset-4 dark:decoration-base-500"
 			>
 				<span slot="label">
 					{$i18n.t('settings.personal.general.parameters.temperature.label')}
 				</span>
 				<button
 					id={`${labelId}-control`}
-					class="p-1 px-3 text-xs flex rounded-sm transition shrink-0 outline-hidden font-normal text-gray-900 dark:text-gray-100"
+					class="p-1 px-3 text-xs flex rounded-sm transition shrink-0 outline-hidden font-normal text-base-900 dark:text-base-100"
 					type="button"
 					on:click={() => {
 						params.temperature = (params?.temperature ?? null) === null ? 0.8 : null;
@@ -530,14 +540,14 @@
 			<UserSettingRow
 				let:labelId
 				className="w-full py-0.5"
-				labelClassName="self-center font-normal underline decoration-dotted decoration-gray-400/70 underline-offset-4 dark:decoration-gray-500"
+				labelClassName="self-center font-normal underline decoration-dotted decoration-base-400/70 underline-offset-4 dark:decoration-base-500"
 			>
 				<span slot="label">
 					{$i18n.t('settings.personal.general.parameters.reasoningEffort.label')}
 				</span>
 				<button
 					id={`${labelId}-control`}
-					class="p-1 px-3 text-xs flex rounded-sm transition shrink-0 outline-hidden font-normal text-gray-900 dark:text-gray-100"
+					class="p-1 px-3 text-xs flex rounded-sm transition shrink-0 outline-hidden font-normal text-base-900 dark:text-base-100"
 					type="button"
 					on:click={() => {
 						params.reasoning_effort = (params?.reasoning_effort ?? null) === null ? 'medium' : null;
@@ -557,7 +567,7 @@
 			<div class="flex mt-0.5 space-x-2">
 				<div class=" flex-1">
 					<input
-						class="text-sm w-full bg-transparent outline-hidden outline-none font-normal text-gray-900 dark:text-gray-100"
+						class="text-sm w-full bg-transparent outline-hidden outline-none font-normal text-base-900 dark:text-base-100"
 						type="text"
 						aria-label={$i18n.t('settings.personal.general.parameters.reasoningEffort.label')}
 						placeholder={$i18n.t('Enter reasoning effort')}
@@ -581,14 +591,14 @@
 			<UserSettingRow
 				let:labelId
 				className="w-full py-0.5"
-				labelClassName="self-center font-normal underline decoration-dotted decoration-gray-400/70 underline-offset-4 dark:decoration-gray-500"
+				labelClassName="self-center font-normal underline decoration-dotted decoration-base-400/70 underline-offset-4 dark:decoration-base-500"
 			>
 				<span slot="label">
 					{$i18n.t('settings.personal.general.parameters.logitBias.label')}
 				</span>
 				<button
 					id={`${labelId}-control`}
-					class="p-1 px-3 text-xs flex rounded-sm transition shrink-0 outline-hidden font-normal text-gray-900 dark:text-gray-100"
+					class="p-1 px-3 text-xs flex rounded-sm transition shrink-0 outline-hidden font-normal text-base-900 dark:text-base-100"
 					type="button"
 					on:click={() => {
 						params.logit_bias = (params?.logit_bias ?? null) === null ? '' : null;
@@ -608,7 +618,7 @@
 			<div class="flex mt-0.5 space-x-2">
 				<div class=" flex-1">
 					<input
-						class="text-sm w-full bg-transparent outline-hidden outline-none font-normal text-gray-900 dark:text-gray-100"
+						class="text-sm w-full bg-transparent outline-hidden outline-none font-normal text-base-900 dark:text-base-100"
 						type="text"
 						aria-label={$i18n.t('settings.personal.general.parameters.logitBias.label')}
 						placeholder={$i18n.t(
@@ -634,7 +644,7 @@
 			<UserSettingRow
 				let:labelId
 				className="w-full py-0.5"
-				labelClassName="self-center font-normal underline decoration-dotted decoration-gray-400/70 underline-offset-4 dark:decoration-gray-500"
+				labelClassName="self-center font-normal underline decoration-dotted decoration-base-400/70 underline-offset-4 dark:decoration-base-500"
 			>
 				<span slot="label">
 					{$i18n.t('settings.personal.general.parameters.maxTokens.label')}
@@ -642,7 +652,7 @@
 
 				<button
 					id={`${labelId}-control`}
-					class="p-1 px-3 text-xs flex rounded-sm transition shrink-0 outline-hidden font-normal text-gray-900 dark:text-gray-100"
+					class="p-1 px-3 text-xs flex rounded-sm transition shrink-0 outline-hidden font-normal text-base-900 dark:text-base-100"
 					type="button"
 					on:click={() => {
 						params.max_tokens = (params?.max_tokens ?? null) === null ? 128 : null;
@@ -682,14 +692,14 @@
 			<UserSettingRow
 				let:labelId
 				className="w-full py-0.5"
-				labelClassName="self-center font-normal underline decoration-dotted decoration-gray-400/70 underline-offset-4 dark:decoration-gray-500"
+				labelClassName="self-center font-normal underline decoration-dotted decoration-base-400/70 underline-offset-4 dark:decoration-base-500"
 			>
 				<span slot="label">
 					{$i18n.t('settings.personal.general.parameters.topK.label')}
 				</span>
 				<button
 					id={`${labelId}-control`}
-					class="p-1 px-3 text-xs flex rounded-sm transition shrink-0 outline-hidden font-normal text-gray-900 dark:text-gray-100"
+					class="p-1 px-3 text-xs flex rounded-sm transition shrink-0 outline-hidden font-normal text-base-900 dark:text-base-100"
 					type="button"
 					on:click={() => {
 						params.top_k = (params?.top_k ?? null) === null ? 40 : null;
@@ -717,7 +727,7 @@
 						value={params.top_k}
 						on:input={setTopK}
 						on:change={() => onParamChange('top_k', params.top_k ?? null)}
-						class="w-full h-2 rounded-lg appearance-none cursor-pointer dark:bg-gray-700"
+						class="w-full h-2 rounded-lg appearance-none cursor-pointer dark:bg-base-700"
 					/>
 				</div>
 				<div>
@@ -748,7 +758,7 @@
 			<UserSettingRow
 				let:labelId
 				className="w-full py-0.5"
-				labelClassName="self-center font-normal underline decoration-dotted decoration-gray-400/70 underline-offset-4 dark:decoration-gray-500"
+				labelClassName="self-center font-normal underline decoration-dotted decoration-base-400/70 underline-offset-4 dark:decoration-base-500"
 			>
 				<span slot="label">
 					{$i18n.t('settings.personal.general.parameters.topP.label')}
@@ -756,7 +766,7 @@
 
 				<button
 					id={`${labelId}-control`}
-					class="p-1 px-3 text-xs flex rounded-sm transition shrink-0 outline-hidden font-normal text-gray-900 dark:text-gray-100"
+					class="p-1 px-3 text-xs flex rounded-sm transition shrink-0 outline-hidden font-normal text-base-900 dark:text-base-100"
 					type="button"
 					on:click={() => {
 						params.top_p = (params?.top_p ?? null) === null ? 0.9 : null;
@@ -794,14 +804,14 @@
 			<UserSettingRow
 				let:labelId
 				className="w-full py-0.5"
-				labelClassName="self-center font-normal underline decoration-dotted decoration-gray-400/70 underline-offset-4 dark:decoration-gray-500"
+				labelClassName="self-center font-normal underline decoration-dotted decoration-base-400/70 underline-offset-4 dark:decoration-base-500"
 			>
 				<span slot="label">
 					{$i18n.t('settings.personal.general.parameters.minP.label')}
 				</span>
 				<button
 					id={`${labelId}-control`}
-					class="p-1 px-3 text-xs flex rounded-sm transition shrink-0 outline-hidden font-normal text-gray-900 dark:text-gray-100"
+					class="p-1 px-3 text-xs flex rounded-sm transition shrink-0 outline-hidden font-normal text-base-900 dark:text-base-100"
 					type="button"
 					on:click={() => {
 						params.min_p = (params?.min_p ?? null) === null ? 0.0 : null;
@@ -839,7 +849,7 @@
 			<UserSettingRow
 				let:labelId
 				className="w-full py-0.5"
-				labelClassName="self-center font-normal underline decoration-dotted decoration-gray-400/70 underline-offset-4 dark:decoration-gray-500"
+				labelClassName="self-center font-normal underline decoration-dotted decoration-base-400/70 underline-offset-4 dark:decoration-base-500"
 			>
 				<span slot="label">
 					{$i18n.t('settings.personal.general.parameters.frequencyPenalty.label')}
@@ -847,7 +857,7 @@
 
 				<button
 					id={`${labelId}-control`}
-					class="p-1 px-3 text-xs flex rounded-sm transition shrink-0 outline-hidden font-normal text-gray-900 dark:text-gray-100"
+					class="p-1 px-3 text-xs flex rounded-sm transition shrink-0 outline-hidden font-normal text-base-900 dark:text-base-100"
 					type="button"
 					on:click={() => {
 						params.frequency_penalty = (params?.frequency_penalty ?? null) === null ? 1.1 : null;
@@ -885,7 +895,7 @@
 			<UserSettingRow
 				let:labelId
 				className="w-full py-0.5"
-				labelClassName="self-center font-normal underline decoration-dotted decoration-gray-400/70 underline-offset-4 dark:decoration-gray-500"
+				labelClassName="self-center font-normal underline decoration-dotted decoration-base-400/70 underline-offset-4 dark:decoration-base-500"
 			>
 				<span slot="label">
 					{$i18n.t('settings.personal.general.parameters.presencePenalty.label')}
@@ -893,7 +903,7 @@
 
 				<button
 					id={`${labelId}-control`}
-					class="p-1 px-3 text-xs flex rounded transition flex-shrink-0 outline-none font-normal text-gray-900 dark:text-gray-100"
+					class="p-1 px-3 text-xs flex rounded transition flex-shrink-0 outline-none font-normal text-base-900 dark:text-base-100"
 					type="button"
 					on:click={() => {
 						params.presence_penalty = (params?.presence_penalty ?? null) === null ? 0.0 : null;
@@ -929,14 +939,14 @@
 			<UserSettingRow
 				let:labelId
 				className="w-full py-0.5"
-				labelClassName="self-center font-normal underline decoration-dotted decoration-gray-400/70 underline-offset-4 dark:decoration-gray-500"
+				labelClassName="self-center font-normal underline decoration-dotted decoration-base-400/70 underline-offset-4 dark:decoration-base-500"
 			>
 				<span slot="label">
 					{$i18n.t('settings.personal.general.parameters.mirostat.label')}
 				</span>
 				<button
 					id={`${labelId}-control`}
-					class="p-1 px-3 text-xs flex rounded-sm transition shrink-0 outline-hidden font-normal text-gray-900 dark:text-gray-100"
+					class="p-1 px-3 text-xs flex rounded-sm transition shrink-0 outline-hidden font-normal text-base-900 dark:text-base-100"
 					type="button"
 					on:click={() => {
 						params.mirostat = (params?.mirostat ?? null) === null ? 0 : null;
@@ -975,14 +985,14 @@
 			<UserSettingRow
 				let:labelId
 				className="w-full py-0.5"
-				labelClassName="self-center font-normal underline decoration-dotted decoration-gray-400/70 underline-offset-4 dark:decoration-gray-500"
+				labelClassName="self-center font-normal underline decoration-dotted decoration-base-400/70 underline-offset-4 dark:decoration-base-500"
 			>
 				<span slot="label">
 					{$i18n.t('settings.personal.general.parameters.mirostatEta.label')}
 				</span>
 				<button
 					id={`${labelId}-control`}
-					class="p-1 px-3 text-xs flex rounded-sm transition shrink-0 outline-hidden font-normal text-gray-900 dark:text-gray-100"
+					class="p-1 px-3 text-xs flex rounded-sm transition shrink-0 outline-hidden font-normal text-base-900 dark:text-base-100"
 					type="button"
 					on:click={() => {
 						params.mirostat_eta = (params?.mirostat_eta ?? null) === null ? 0.1 : null;
@@ -1020,7 +1030,7 @@
 			<UserSettingRow
 				let:labelId
 				className="w-full py-0.5"
-				labelClassName="self-center font-normal underline decoration-dotted decoration-gray-400/70 underline-offset-4 dark:decoration-gray-500"
+				labelClassName="self-center font-normal underline decoration-dotted decoration-base-400/70 underline-offset-4 dark:decoration-base-500"
 			>
 				<span slot="label">
 					{$i18n.t('settings.personal.general.parameters.mirostatTau.label')}
@@ -1028,7 +1038,7 @@
 
 				<button
 					id={`${labelId}-control`}
-					class="p-1 px-3 text-xs flex rounded-sm transition shrink-0 outline-hidden font-normal text-gray-900 dark:text-gray-100"
+					class="p-1 px-3 text-xs flex rounded-sm transition shrink-0 outline-hidden font-normal text-base-900 dark:text-base-100"
 					type="button"
 					on:click={() => {
 						params.mirostat_tau = (params?.mirostat_tau ?? null) === null ? 5.0 : null;
@@ -1064,7 +1074,7 @@
 			<UserSettingRow
 				let:labelId
 				className="w-full py-0.5"
-				labelClassName="self-center font-normal underline decoration-dotted decoration-gray-400/70 underline-offset-4 dark:decoration-gray-500"
+				labelClassName="self-center font-normal underline decoration-dotted decoration-base-400/70 underline-offset-4 dark:decoration-base-500"
 			>
 				<span slot="label">
 					{$i18n.t('settings.personal.general.parameters.repeatLastN.label')}
@@ -1072,7 +1082,7 @@
 
 				<button
 					id={`${labelId}-control`}
-					class="p-1 px-3 text-xs flex rounded-sm transition shrink-0 outline-hidden font-normal text-gray-900 dark:text-gray-100"
+					class="p-1 px-3 text-xs flex rounded-sm transition shrink-0 outline-hidden font-normal text-base-900 dark:text-base-100"
 					type="button"
 					on:click={() => {
 						params.repeat_last_n = (params?.repeat_last_n ?? null) === null ? 64 : null;
@@ -1111,7 +1121,7 @@
 			<UserSettingRow
 				let:labelId
 				className="w-full py-0.5"
-				labelClassName="self-center font-normal underline decoration-dotted decoration-gray-400/70 underline-offset-4 dark:decoration-gray-500"
+				labelClassName="self-center font-normal underline decoration-dotted decoration-base-400/70 underline-offset-4 dark:decoration-base-500"
 			>
 				<span slot="label">
 					{$i18n.t('settings.personal.general.parameters.tfsZ.label')}
@@ -1119,7 +1129,7 @@
 
 				<button
 					id={`${labelId}-control`}
-					class="p-1 px-3 text-xs flex rounded-sm transition shrink-0 outline-hidden font-normal text-gray-900 dark:text-gray-100"
+					class="p-1 px-3 text-xs flex rounded-sm transition shrink-0 outline-hidden font-normal text-base-900 dark:text-base-100"
 					type="button"
 					on:click={() => {
 						params.tfs_z = (params?.tfs_z ?? null) === null ? 1 : null;
@@ -1157,7 +1167,7 @@
 			<UserSettingRow
 				let:labelId
 				className="w-full py-0.5"
-				labelClassName="self-center font-normal underline decoration-dotted decoration-gray-400/70 underline-offset-4 dark:decoration-gray-500"
+				labelClassName="self-center font-normal underline decoration-dotted decoration-base-400/70 underline-offset-4 dark:decoration-base-500"
 			>
 				<span slot="label">
 					{$i18n.t('settings.personal.general.parameters.repeatPenalty.label')}
@@ -1165,7 +1175,7 @@
 
 				<button
 					id={`${labelId}-control`}
-					class="p-1 px-3 text-xs flex rounded transition flex-shrink-0 outline-none font-normal text-gray-900 dark:text-gray-100"
+					class="p-1 px-3 text-xs flex rounded transition flex-shrink-0 outline-none font-normal text-base-900 dark:text-base-100"
 					type="button"
 					on:click={() => {
 						params.repeat_penalty = (params?.repeat_penalty ?? null) === null ? 1.1 : null;
@@ -1204,14 +1214,14 @@
 				<UserSettingRow
 					let:labelId
 					className="w-full py-0.5"
-					labelClassName="self-center font-normal underline decoration-dotted decoration-gray-400/70 underline-offset-4 dark:decoration-gray-500"
+					labelClassName="self-center font-normal underline decoration-dotted decoration-base-400/70 underline-offset-4 dark:decoration-base-500"
 				>
 					<span slot="label">
 						{$i18n.t('settings.personal.general.parameters.useMmap.label')}
 					</span>
 					<button
 						id={`${labelId}-control`}
-						class="p-1 px-3 text-xs flex rounded-sm transition shrink-0 outline-hidden font-normal text-gray-900 dark:text-gray-100"
+						class="p-1 px-3 text-xs flex rounded-sm transition shrink-0 outline-hidden font-normal text-base-900 dark:text-base-100"
 						type="button"
 						on:click={() => {
 							params.use_mmap = (params?.use_mmap ?? null) === null ? true : null;
@@ -1255,7 +1265,7 @@
 				<UserSettingRow
 					let:labelId
 					className="w-full py-0.5"
-					labelClassName="self-center font-normal underline decoration-dotted decoration-gray-400/70 underline-offset-4 dark:decoration-gray-500"
+					labelClassName="self-center font-normal underline decoration-dotted decoration-base-400/70 underline-offset-4 dark:decoration-base-500"
 				>
 					<span slot="label">
 						{$i18n.t('settings.personal.general.parameters.useMlock.label')}
@@ -1263,7 +1273,7 @@
 
 					<button
 						id={`${labelId}-control`}
-						class="p-1 px-3 text-xs flex rounded-sm transition shrink-0 outline-hidden font-normal text-gray-900 dark:text-gray-100"
+						class="p-1 px-3 text-xs flex rounded-sm transition shrink-0 outline-hidden font-normal text-base-900 dark:text-base-100"
 						type="button"
 						on:click={() => {
 							params.use_mlock = (params?.use_mlock ?? null) === null ? true : null;
@@ -1307,7 +1317,7 @@
 			<UserSettingRow
 				let:labelId
 				className="w-full py-0.5"
-				labelClassName="self-center font-normal underline decoration-dotted decoration-gray-400/70 underline-offset-4 dark:decoration-gray-500"
+				labelClassName="self-center font-normal underline decoration-dotted decoration-base-400/70 underline-offset-4 dark:decoration-base-500"
 			>
 				<span slot="label">
 					{$i18n.t('settings.personal.general.parameters.think.label')} ({$i18n.t(
@@ -1316,7 +1326,7 @@
 				</span>
 				<button
 					id={`${labelId}-control`}
-					class="p-1 px-3 text-xs flex rounded-sm transition font-normal text-gray-900 dark:text-gray-100"
+					class="p-1 px-3 text-xs flex rounded-sm transition font-normal text-base-900 dark:text-base-100"
 					on:click={() => {
 						if ((params?.think ?? null) === null) {
 							params.think = true;
@@ -1348,7 +1358,7 @@
 			<div class="flex mt-0.5 space-x-2">
 				<div class=" flex-1">
 					<input
-						class="text-sm w-full bg-transparent outline-hidden outline-none font-normal text-gray-900 dark:text-gray-100"
+						class="text-sm w-full bg-transparent outline-hidden outline-none font-normal text-base-900 dark:text-base-100"
 						type="text"
 						aria-label={`${$i18n.t('settings.personal.general.parameters.think.label')} (${$i18n.t('settings.personal.general.parameters.ollama.label')})`}
 						placeholder={$i18n.t("e.g. 'low', 'medium', 'high'")}
@@ -1370,7 +1380,7 @@
 			<UserSettingRow
 				let:labelId
 				className="w-full py-0.5"
-				labelClassName="self-center font-normal underline decoration-dotted decoration-gray-400/70 underline-offset-4 dark:decoration-gray-500"
+				labelClassName="self-center font-normal underline decoration-dotted decoration-base-400/70 underline-offset-4 dark:decoration-base-500"
 			>
 				<span slot="label">
 					{$i18n.t('settings.personal.general.parameters.format.label')} ({$i18n.t(
@@ -1379,7 +1389,7 @@
 				</span>
 				<button
 					id={`${labelId}-control`}
-					class="p-1 px-3 text-xs flex rounded-sm transition font-normal text-gray-900 dark:text-gray-100"
+					class="p-1 px-3 text-xs flex rounded-sm transition font-normal text-base-900 dark:text-base-100"
 					on:click={() => {
 						params.format = (params?.format ?? null) === null ? 'json' : null;
 						onParamChange('format', params.format);
@@ -1419,7 +1429,7 @@
 			<UserSettingRow
 				let:labelId
 				className="w-full py-0.5"
-				labelClassName="self-center font-normal underline decoration-dotted decoration-gray-400/70 underline-offset-4 dark:decoration-gray-500"
+				labelClassName="self-center font-normal underline decoration-dotted decoration-base-400/70 underline-offset-4 dark:decoration-base-500"
 			>
 				<span slot="label">
 					{$i18n.t('settings.personal.general.parameters.numKeep.label')} ({$i18n.t(
@@ -1429,7 +1439,7 @@
 
 				<button
 					id={`${labelId}-control`}
-					class="p-1 px-3 text-xs flex rounded-sm transition shrink-0 outline-hidden font-normal text-gray-900 dark:text-gray-100"
+					class="p-1 px-3 text-xs flex rounded-sm transition shrink-0 outline-hidden font-normal text-base-900 dark:text-base-100"
 					type="button"
 					on:click={() => {
 						params.num_keep = (params?.num_keep ?? null) === null ? 24 : null;
@@ -1467,7 +1477,7 @@
 			<UserSettingRow
 				let:labelId
 				className="w-full py-0.5"
-				labelClassName="self-center font-normal underline decoration-dotted decoration-gray-400/70 underline-offset-4 dark:decoration-gray-500"
+				labelClassName="self-center font-normal underline decoration-dotted decoration-base-400/70 underline-offset-4 dark:decoration-base-500"
 			>
 				<span slot="label">
 					{$i18n.t('settings.personal.general.parameters.numCtx.label')} ({$i18n.t(
@@ -1477,7 +1487,7 @@
 
 				<button
 					id={`${labelId}-control`}
-					class="p-1 px-3 text-xs flex rounded-sm transition shrink-0 outline-hidden font-normal text-gray-900 dark:text-gray-100"
+					class="p-1 px-3 text-xs flex rounded-sm transition shrink-0 outline-hidden font-normal text-base-900 dark:text-base-100"
 					type="button"
 					on:click={() => {
 						params.num_ctx = (params?.num_ctx ?? null) === null ? 2048 : null;
@@ -1517,7 +1527,7 @@
 			<UserSettingRow
 				let:labelId
 				className="w-full py-0.5"
-				labelClassName="self-center font-normal underline decoration-dotted decoration-gray-400/70 underline-offset-4 dark:decoration-gray-500"
+				labelClassName="self-center font-normal underline decoration-dotted decoration-base-400/70 underline-offset-4 dark:decoration-base-500"
 			>
 				<span slot="label">
 					{$i18n.t('settings.personal.general.parameters.numBatch.label')} ({$i18n.t(
@@ -1527,7 +1537,7 @@
 
 				<button
 					id={`${labelId}-control`}
-					class="p-1 px-3 text-xs flex rounded-sm transition shrink-0 outline-hidden font-normal text-gray-900 dark:text-gray-100"
+					class="p-1 px-3 text-xs flex rounded-sm transition shrink-0 outline-hidden font-normal text-base-900 dark:text-base-100"
 					type="button"
 					on:click={() => {
 						params.num_batch = (params?.num_batch ?? null) === null ? 512 : null;
@@ -1550,7 +1560,7 @@
 				256,
 				8192,
 				256,
-				256,
+				1,
 				undefined
 			)}
 		{/if}
@@ -1568,7 +1578,7 @@
 				<UserSettingRow
 					let:labelId
 					className="w-full py-0.5"
-					labelClassName="self-center font-normal underline decoration-dotted decoration-gray-400/70 underline-offset-4 dark:decoration-gray-500"
+					labelClassName="self-center font-normal underline decoration-dotted decoration-base-400/70 underline-offset-4 dark:decoration-base-500"
 				>
 					<span slot="label">
 						{$i18n.t('settings.personal.general.parameters.numThread.label')} ({$i18n.t(
@@ -1578,7 +1588,7 @@
 
 					<button
 						id={`${labelId}-control`}
-						class="p-1 px-3 text-xs flex rounded-sm transition shrink-0 outline-hidden font-normal text-gray-900 dark:text-gray-100"
+						class="p-1 px-3 text-xs flex rounded-sm transition shrink-0 outline-hidden font-normal text-base-900 dark:text-base-100"
 						type="button"
 						on:click={() => {
 							params.num_thread = (params?.num_thread ?? null) === null ? 2 : null;
@@ -1617,7 +1627,7 @@
 				<UserSettingRow
 					let:labelId
 					className="w-full py-0.5"
-					labelClassName="self-center font-normal underline decoration-dotted decoration-gray-400/70 underline-offset-4 dark:decoration-gray-500"
+					labelClassName="self-center font-normal underline decoration-dotted decoration-base-400/70 underline-offset-4 dark:decoration-base-500"
 				>
 					<span slot="label">
 						{$i18n.t('settings.personal.general.parameters.numGpu.label')} ({$i18n.t(
@@ -1627,7 +1637,7 @@
 
 					<button
 						id={`${labelId}-control`}
-						class="p-1 px-3 text-xs flex rounded-sm transition shrink-0 outline-hidden font-normal text-gray-900 dark:text-gray-100"
+						class="p-1 px-3 text-xs flex rounded-sm transition shrink-0 outline-hidden font-normal text-base-900 dark:text-base-100"
 						type="button"
 						on:click={() => {
 							params.num_gpu = (params?.num_gpu ?? null) === null ? 0 : null;
@@ -1666,7 +1676,7 @@
 				<UserSettingRow
 					let:labelId
 					className="w-full py-0.5"
-					labelClassName="self-center font-normal underline decoration-dotted decoration-gray-400/70 underline-offset-4 dark:decoration-gray-500"
+					labelClassName="self-center font-normal underline decoration-dotted decoration-base-400/70 underline-offset-4 dark:decoration-base-500"
 				>
 					<span slot="label">
 						{$i18n.t('settings.personal.general.parameters.keepAlive.label')} ({$i18n.t(
@@ -1675,7 +1685,7 @@
 					</span>
 					<button
 						id={`${labelId}-control`}
-						class="p-1 px-3 text-xs flex rounded-sm transition font-normal text-gray-900 dark:text-gray-100"
+						class="p-1 px-3 text-xs flex rounded-sm transition font-normal text-base-900 dark:text-base-100"
 						on:click={() => {
 							params.keep_alive = (params?.keep_alive ?? null) === null ? '5m' : null;
 							onParamChange('keep_alive', params.keep_alive);
@@ -1694,7 +1704,7 @@
 			{#if (params?.keep_alive ?? null) !== null}
 				<div class="flex mt-0.5 space-x-2">
 					<input
-						class="w-full text-sm bg-transparent outline-hidden font-normal text-gray-900 dark:text-gray-100"
+						class="w-full text-sm bg-transparent outline-hidden font-normal text-base-900 dark:text-base-100"
 						type="text"
 						aria-label={`${$i18n.t('settings.personal.general.parameters.keepAlive.label')} (${$i18n.t('settings.personal.general.parameters.ollama.label')})`}
 						placeholder={$i18n.t("e.g. '30s','10m'. Valid time units are 's', 'm', 'h'.")}

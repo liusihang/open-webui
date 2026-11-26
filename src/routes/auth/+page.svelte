@@ -1,4 +1,6 @@
 <script lang="ts">
+	import { applyTetherToken } from '$lib/utils/tether';
+
 	import DOMPurify from 'dompurify';
 	import MfaChallengeForm from '$lib/components/auth/MfaChallenge.svelte';
 	import { mfaRequest, type MfaChallenge } from '$lib/apis/auths/mfa';
@@ -60,6 +62,16 @@
 				confirmPassword = '';
 				return;
 			}
+			if (window.tether && sessionUser.token) {
+				try {
+					const access = await window.tether.signedIn(sessionUser.token);
+					sessionUser = { ...sessionUser, token: access.token, expires_at: access.expiresAt };
+					await applyTetherToken(access);
+				} catch (error) {
+					toast.error(String(error));
+					return;
+				}
+			}
 			toast.success($i18n.t(`You're now logged in.`));
 			if (sessionUser.token) {
 				localStorage.token = sessionUser.token;
@@ -75,7 +87,8 @@
 			}
 
 			if (!redirectPath) {
-				redirectPath = $page.url.searchParams.get('redirect') || '/';
+				redirectPath =
+					sessionStorage.getItem('auth:continue') || $page.url.searchParams.get('redirect') || '/';
 			}
 
 			await goto(redirectPath);
@@ -161,7 +174,10 @@
 		}
 
 		localStorage.token = token;
-		await setSessionUser(sessionUser, localStorage.getItem('redirectPath') || null);
+		await setSessionUser(
+			sessionUser,
+			sessionStorage.getItem('auth:continue') || localStorage.getItem('redirectPath') || null
+		);
 	};
 
 	let onboarding = false;
@@ -250,13 +266,14 @@
 />
 
 <div class="w-full h-dvh text-white relative" id="auth-page">
-	<div class="w-full h-full absolute top-0 left-0 bg-white dark:bg-black"></div>
+	<div id="main-content" tabindex="-1" class="sr-only left-0 top-0"></div>
+	<div class="w-full h-full absolute top-0 left-0 bg-base-0 dark:bg-base-1000"></div>
 
 	<div class="w-full absolute top-0 left-0 right-0 h-8 drag-region" />
 
 	{#if loaded && !onboarding}
 		<div
-			class="fixed inset-0 h-dvh overflow-y-auto bg-transparent w-full z-50 text-black dark:text-white"
+			class="fixed inset-0 h-dvh overflow-y-auto bg-transparent w-full z-50 text-base-1000 dark:text-base-0"
 			id="auth-container"
 		>
 			<div class="w-full p-6 min-h-full flex flex-col text-center">
@@ -272,13 +289,13 @@
 						/>
 					</div>
 				{:else if pendingApproval}
-					<p class="my-auto text-sm text-gray-500 dark:text-gray-400">
+					<p class="my-auto text-sm text-base-500 dark:text-base-400">
 						{$i18n.t('Your account is awaiting administrator approval.')}
 					</p>
 				{:else if ($config?.features.auth_trusted_header ?? false) || $config?.features.auth === false}
 					<div class=" my-auto pb-10 w-full sm:max-w-md">
 						<div
-							class="flex items-center justify-center gap-3 text-xl sm:text-2xl text-center font-normal dark:text-gray-200"
+							class="flex items-center justify-center gap-3 text-xl sm:text-2xl text-center font-normal dark:text-base-200"
 						>
 							<div>
 								{$i18n.t('Signing in to {{WEBUI_NAME}}', { WEBUI_NAME: $WEBUI_NAME })}
@@ -293,7 +310,7 @@
 					<div class="my-auto flex flex-col justify-center items-center">
 						<div
 							id="auth-login-card"
-							class=" sm:max-w-md my-auto sm:pb-10 w-full dark:text-gray-100"
+							class=" sm:max-w-md my-auto sm:pb-10 w-full dark:text-base-100"
 						>
 							{#if $config?.metadata?.auth_logo_position === 'center'}
 								<div class="flex justify-center mb-6">
@@ -330,7 +347,7 @@
 									</div>
 
 									{#if $config?.onboarding ?? false}
-										<div class="mt-1 text-xs font-normal text-gray-600 dark:text-gray-500">
+										<div class="mt-1 text-xs font-normal text-base-600 dark:text-base-500">
 											ⓘ {$WEBUI_NAME}
 											{$i18n.t(
 												'does not make any external connections, and your data stays securely on your locally hosted server.'
@@ -352,7 +369,7 @@
 													bind:value={name}
 													type="text"
 													id="name"
-													class="my-0.5 w-full text-[0.8125rem] leading-5 outline-hidden bg-transparent placeholder:text-gray-300 dark:placeholder:text-gray-600"
+													class="my-0.5 w-full text-[0.8125rem] leading-5 outline-hidden bg-transparent placeholder:text-base-300 dark:placeholder:text-base-600"
 													autocomplete="name"
 													placeholder={$i18n.t('Enter Your Full Name')}
 													required
@@ -370,7 +387,7 @@
 												<input
 													bind:value={ldapUsername}
 													type="text"
-													class="my-0.5 w-full text-[0.8125rem] leading-5 outline-hidden bg-transparent placeholder:text-gray-300 dark:placeholder:text-gray-600"
+													class="my-0.5 w-full text-[0.8125rem] leading-5 outline-hidden bg-transparent placeholder:text-base-300 dark:placeholder:text-base-600"
 													autocomplete="username"
 													name="username"
 													id="username"
@@ -387,9 +404,10 @@
 												>
 												<input
 													bind:value={email}
-													type="email"
+													type="text"
+													inputmode="email"
 													id="email"
-													class="my-0.5 w-full text-[0.8125rem] leading-5 outline-hidden bg-transparent placeholder:text-gray-300 dark:placeholder:text-gray-600"
+													class="my-0.5 w-full text-[0.8125rem] leading-5 outline-hidden bg-transparent placeholder:text-base-300 dark:placeholder:text-base-600"
 													autocomplete="email"
 													name="email"
 													placeholder={$i18n.t('Enter Your Email')}
@@ -408,7 +426,7 @@
 												bind:value={password}
 												type="password"
 												id="password"
-												class="my-0.5 w-full text-[0.8125rem] leading-5 outline-hidden bg-transparent placeholder:text-gray-300 dark:placeholder:text-gray-600"
+												class="my-0.5 w-full text-[0.8125rem] leading-5 outline-hidden bg-transparent placeholder:text-base-300 dark:placeholder:text-base-600"
 												placeholder={$i18n.t('Enter Your Password')}
 												autocomplete={mode === 'signup' ? 'new-password' : 'current-password'}
 												name="password"
@@ -443,9 +461,9 @@
 									{#if $config?.features.enable_login_form || $config?.features.enable_ldap || form}
 										{#if mode === 'ldap'}
 											<button
-												class="bg-gray-700/5 hover:bg-gray-700/10 dark:bg-gray-100/5 dark:hover:bg-gray-100/10 dark:text-gray-300 dark:hover:text-white transition w-full rounded-full font-normal text-[0.8125rem] leading-5 py-2.5 disabled:opacity-50 flex justify-center"
+												class="bg-base-700/5 hover:bg-base-700/10 dark:bg-base-100/5 dark:hover:bg-base-100/10 dark:text-base-300 dark:hover:text-base-0 transition w-full rounded-full font-normal text-[0.8125rem] leading-5 py-2.5 aria-disabled:opacity-50 flex justify-center"
 												type="submit"
-												disabled={submitting}
+												aria-disabled={submitting}
 											>
 												<div class="self-center">{$i18n.t('Authenticate')}</div>
 
@@ -457,9 +475,9 @@
 											</button>
 										{:else}
 											<button
-												class="bg-gray-700/5 hover:bg-gray-700/10 dark:bg-gray-100/5 dark:hover:bg-gray-100/10 dark:text-gray-300 dark:hover:text-white transition w-full rounded-full font-normal text-[0.8125rem] leading-5 py-2.5 disabled:opacity-50 flex justify-center"
+												class="bg-base-700/5 hover:bg-base-700/10 dark:bg-base-100/5 dark:hover:bg-base-100/10 dark:text-base-300 dark:hover:text-base-0 transition w-full rounded-full font-normal text-[0.8125rem] leading-5 py-2.5 aria-disabled:opacity-50 flex justify-center"
 												type="submit"
-												disabled={submitting}
+												aria-disabled={submitting}
 											>
 												<div class="self-center">
 													{mode === 'signin'
@@ -504,20 +522,20 @@
 
 							{#if Object.keys($config?.oauth?.providers ?? {}).length > 0}
 								<div class="inline-flex items-center justify-center w-full">
-									<hr class="w-32 h-px my-4 border-0 dark:bg-gray-100/10 bg-gray-700/10" />
+									<hr class="w-32 h-px my-4 border-0 dark:bg-base-100/10 bg-base-700/10" />
 									{#if $config?.features.enable_login_form || $config?.features.enable_ldap || form}
 										<span
-											class="px-3 text-sm font-normal text-gray-900 dark:text-white bg-transparent"
+											class="px-3 text-sm font-normal text-base-900 dark:text-base-0 bg-transparent"
 											>{$i18n.t('or')}</span
 										>
 									{/if}
 
-									<hr class="w-32 h-px my-4 border-0 dark:bg-gray-100/10 bg-gray-700/10" />
+									<hr class="w-32 h-px my-4 border-0 dark:bg-base-100/10 bg-base-700/10" />
 								</div>
 								<div class="flex flex-col space-y-2">
 									{#if $config?.oauth?.providers?.google}
 										<button
-											class="flex justify-center items-center bg-gray-700/5 hover:bg-gray-700/10 dark:bg-gray-100/5 dark:hover:bg-gray-100/10 dark:text-gray-300 dark:hover:text-white transition w-full rounded-full font-normal text-[0.8125rem] leading-5 py-2.5"
+											class="flex justify-center items-center bg-base-700/5 hover:bg-base-700/10 dark:bg-base-100/5 dark:hover:bg-base-100/10 dark:text-base-300 dark:hover:text-base-0 transition w-full rounded-full font-normal text-[0.8125rem] leading-5 py-2.5"
 											on:click={() => {
 												window.location.href = `${WEBUI_BASE_URL}/oauth/google/login`;
 											}}
@@ -547,7 +565,7 @@
 									{/if}
 									{#if $config?.oauth?.providers?.microsoft}
 										<button
-											class="flex justify-center items-center bg-gray-700/5 hover:bg-gray-700/10 dark:bg-gray-100/5 dark:hover:bg-gray-100/10 dark:text-gray-300 dark:hover:text-white transition w-full rounded-full font-normal text-[0.8125rem] leading-5 py-2.5"
+											class="flex justify-center items-center bg-base-700/5 hover:bg-base-700/10 dark:bg-base-100/5 dark:hover:bg-base-100/10 dark:text-base-300 dark:hover:text-base-0 transition w-full rounded-full font-normal text-[0.8125rem] leading-5 py-2.5"
 											on:click={() => {
 												window.location.href = `${WEBUI_BASE_URL}/oauth/microsoft/login`;
 											}}
@@ -578,7 +596,7 @@
 									{/if}
 									{#if $config?.oauth?.providers?.github}
 										<button
-											class="flex justify-center items-center bg-gray-700/5 hover:bg-gray-700/10 dark:bg-gray-100/5 dark:hover:bg-gray-100/10 dark:text-gray-300 dark:hover:text-white transition w-full rounded-full font-normal text-[0.8125rem] leading-5 py-2.5"
+											class="flex justify-center items-center bg-base-700/5 hover:bg-base-700/10 dark:bg-base-100/5 dark:hover:bg-base-100/10 dark:text-base-300 dark:hover:text-base-0 transition w-full rounded-full font-normal text-[0.8125rem] leading-5 py-2.5"
 											on:click={() => {
 												window.location.href = `${WEBUI_BASE_URL}/oauth/github/login`;
 											}}
@@ -599,7 +617,7 @@
 									{/if}
 									{#if $config?.oauth?.providers?.oidc}
 										<button
-											class="flex justify-center items-center bg-gray-700/5 hover:bg-gray-700/10 dark:bg-gray-100/5 dark:hover:bg-gray-100/10 dark:text-gray-300 dark:hover:text-white transition w-full rounded-full font-normal text-[0.8125rem] leading-5 py-2.5"
+											class="flex justify-center items-center bg-base-700/5 hover:bg-base-700/10 dark:bg-base-100/5 dark:hover:bg-base-100/10 dark:text-base-300 dark:hover:text-base-0 transition w-full rounded-full font-normal text-[0.8125rem] leading-5 py-2.5"
 											on:click={() => {
 												window.location.href = `${WEBUI_BASE_URL}/oauth/oidc/login`;
 											}}
@@ -629,7 +647,7 @@
 									{/if}
 									{#if $config?.oauth?.providers?.feishu}
 										<button
-											class="flex justify-center items-center bg-gray-700/5 hover:bg-gray-700/10 dark:bg-gray-100/5 dark:hover:bg-gray-100/10 dark:text-gray-300 dark:hover:text-white transition w-full rounded-full font-normal text-[0.8125rem] leading-5 py-2.5"
+											class="flex justify-center items-center bg-base-700/5 hover:bg-base-700/10 dark:bg-base-100/5 dark:hover:bg-base-100/10 dark:text-base-300 dark:hover:text-base-0 transition w-full rounded-full font-normal text-[0.8125rem] leading-5 py-2.5"
 											on:click={() => {
 												window.location.href = `${WEBUI_BASE_URL}/oauth/feishu/login`;
 											}}
@@ -662,7 +680,7 @@
 						</div>
 						{#if $config?.metadata?.login_footer}
 							<div class="max-w-3xl mx-auto">
-								<div class="mt-2 text-[0.7rem] text-gray-500 dark:text-gray-400 marked">
+								<div class="mt-2 text-[0.7rem] text-base-500 dark:text-base-400 marked">
 									{@html DOMPurify.sanitize(marked($config?.metadata?.login_footer))}
 								</div>
 							</div>

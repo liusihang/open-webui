@@ -1,5 +1,5 @@
 <script lang="ts">
-	import { config, models, settings, showCallOverlay, TTSWorker } from '$lib/stores';
+	import { config, settings, voiceCall, TTSWorker } from '$lib/stores';
 	import { onMount, tick, getContext, onDestroy, createEventDispatcher } from 'svelte';
 
 	const dispatch = createEventDispatcher();
@@ -18,6 +18,9 @@
 	import type { RealtimeCall } from '$lib/utils/realtime';
 	import VoiceAvatar from './CallOverlay/VoiceAvatar.svelte';
 	import type { AvatarAnimationCommand } from '$lib/utils/voice-avatar';
+	import { getChatContext } from '$lib/components/chat/context';
+
+	const { models } = getChatContext();
 
 	const i18n: any = getContext('i18n');
 
@@ -59,7 +62,7 @@
 	let playbackSource: MediaElementAudioSourceNode | undefined;
 	let playbackAnalyser: AnalyserNode | undefined;
 	let playbackFrame = 0;
-	$: avatar = $models.find((m) => m.id === modelId)?.info?.meta?.voice_avatar;
+	$: avatar = ($models ?? []).find((m) => m.id === modelId)?.info?.meta?.voice_avatar;
 	$: showAvatar = !!avatar?.file_id && failedAvatar !== avatar.file_id;
 	$: if (camera) {
 		avatarView?.cancelAnimation();
@@ -82,7 +85,7 @@
 			command.result = { status: 'cancelled' };
 		} else if (
 			!destroyed &&
-			$showCallOverlay &&
+			$voiceCall &&
 			showAvatar &&
 			!camera &&
 			readyAvatar === avatar?.file_id
@@ -135,7 +138,7 @@
 		assistantSpeaking = bridge.speaking;
 		muted = bridge.muted;
 		loading = bridge.connecting || (bridge.working && !bridge.speaking);
-		model = $models.find((m) => m.id === modelId);
+		model = ($models ?? []).find((m) => m.id === modelId);
 	}
 
 	const getVideoInputDevices = async () => {
@@ -274,8 +277,8 @@
 	};
 
 	const stopRecordingCallback = async (_continue = true) => {
-		// $showCallOverlay stays true when the chat page unmounts
-		if ($showCallOverlay && !destroyed) {
+		// $voiceCall stays true when the chat page unmounts
+		if ($voiceCall && !destroyed) {
 			console.log('%c%s', 'color: red; font-size: 20px;', '🚨 stopRecordingCallback 🚨');
 
 			// deep copy the audioChunks array
@@ -322,7 +325,7 @@
 	};
 
 	const startRecording = async () => {
-		if ($showCallOverlay && !destroyed) {
+		if ($voiceCall && !destroyed) {
 			if (!audioStream) {
 				audioStream = await navigator.mediaDevices.getUserMedia({
 					audio: {
@@ -416,7 +419,7 @@
 
 		const detectSound = () => {
 			const processFrame = () => {
-				if (!mediaRecorder || !$showCallOverlay) {
+				if (!mediaRecorder || !$voiceCall) {
 					return;
 				}
 
@@ -497,7 +500,7 @@
 	};
 
 	const speakSpeechSynthesisHandler = (content) => {
-		if (!$showCallOverlay) return Promise.resolve();
+		if (!$voiceCall) return Promise.resolve();
 		const signal = audioAbortController.signal;
 		return new Promise<void>((resolve) => {
 			let utterance: SpeechSynthesisUtterance | null = null;
@@ -534,7 +537,7 @@
 	};
 
 	const playAudio = (audio: HTMLAudioElement) => {
-		if ($showCallOverlay) {
+		if ($voiceCall) {
 			return new Promise((resolve) => {
 				const audioElement = callAudioElement;
 				if (!audioElement) {
@@ -835,7 +838,7 @@
 			document.addEventListener('keydown', handleKeydown);
 			return;
 		}
-		model = $models.find((m) => m.id === modelId);
+		model = ($models ?? []).find((m) => m.id === modelId);
 
 		if ($settings.audio?.tts?.engine === 'browser-kokoro' && !$TTSWorker) {
 			try {
@@ -910,7 +913,7 @@
 	});
 </script>
 
-{#if $showCallOverlay}
+{#if $voiceCall}
 	<!-- A media element can only have one Web Audio source, even after its context closes. -->
 	<audio bind:this={callAudioElement} class="hidden"></audio>
 	<div
@@ -941,7 +944,7 @@
 					</div>
 				{:else if loading || assistantSpeaking}
 					<svg
-						class="size-12 text-gray-900 dark:text-gray-400"
+						class="size-12 text-base-900 dark:text-base-400"
 						viewBox="0 0 24 24"
 						fill="currentColor"
 						xmlns="http://www.w3.org/2000/svg"
@@ -985,7 +988,7 @@
 								: rmsLevel * 100 > 1
 									? 'size-14'
 									: 'size-12'}  transition-all rounded-full bg-cover bg-center bg-no-repeat"
-						style={`background-image: url('${WEBUI_API_BASE_URL}/models/model/profile/image?id=${model?.id}&lang=${$i18n.language}&voice=true');`}
+						style={`background-image: url('${WEBUI_API_BASE_URL}/models/model/profile/image?id=${model?.id}&lang=${$i18n.language}&voice=true&v=${model?.info?.updated_at}');`}
 					/>
 				{/if}
 				<!-- navbar -->
@@ -1019,7 +1022,7 @@
 									speaking={avatarSpeaking}
 									listening={hasStartedSpeaking && !muted && !avatarSpeaking}
 									level={outputLevel}
-									active={!destroyed && $showCallOverlay}
+									active={!destroyed && $voiceCall}
 									on:ready={() => {
 										readyAvatar = selectedAvatar.file_id;
 									}}
@@ -1032,7 +1035,7 @@
 					{/if}
 					{#if showAvatar && readyAvatar !== avatar?.file_id}
 						<div class="absolute inset-0 grid place-items-center" role="status">
-							<Spinner className="size-6 text-gray-400 dark:text-gray-500" />
+							<Spinner className="size-6 text-base-400 dark:text-base-500" />
 							<span class="sr-only">{$i18n.t('Loading avatar...')}</span>
 						</div>
 					{:else if !showAvatar}
@@ -1051,7 +1054,7 @@
 							</div>
 						{:else if loading || assistantSpeaking}
 							<svg
-								class="size-44 text-gray-900 dark:text-gray-400"
+								class="size-44 text-base-900 dark:text-base-400"
 								viewBox="0 0 24 24"
 								fill="currentColor"
 								xmlns="http://www.w3.org/2000/svg"
@@ -1095,7 +1098,7 @@
 										: rmsLevel * 100 > 1
 											? 'size-44'
 											: 'size-40'} transition-all rounded-full bg-cover bg-center bg-no-repeat"
-								style={`background-image: url('${WEBUI_API_BASE_URL}/models/model/profile/image?id=${model?.id}&lang=${$i18n.language}&voice=true');`}
+								style={`background-image: url('${WEBUI_API_BASE_URL}/models/model/profile/image?id=${model?.id}&lang=${$i18n.language}&voice=true&v=${model?.info?.updated_at}');`}
 							/>
 						{/if}
 					{/if}
@@ -1116,7 +1119,7 @@
 						<button
 							type="button"
 							aria-label={$i18n.t('Stop camera')}
-							class="p-1.5 text-white cursor-pointer backdrop-blur-xl bg-black/10 rounded-full"
+							class="p-1.5 text-white cursor-pointer backdrop-blur-xl bg-base-1000/10 rounded-full"
 							on:click={() => {
 								stopCamera();
 							}}
@@ -1179,7 +1182,7 @@
 					>
 						<button
 							aria-label={$i18n.t('Switch camera')}
-							class="p-3 rounded-full bg-gray-50 dark:bg-gray-900"
+							class="p-3 rounded-full bg-base-50 dark:bg-base-900"
 							type="button"
 						>
 							<svg
@@ -1200,7 +1203,7 @@
 					<Tooltip content={$i18n.t('Camera')}>
 						<button
 							aria-label={$i18n.t('Camera')}
-							class="p-3 rounded-full bg-gray-50 dark:bg-gray-900"
+							class="p-3 rounded-full bg-base-50 dark:bg-base-900"
 							type="button"
 							on:click={async () => {
 								await navigator.mediaDevices.getUserMedia({ video: true });
@@ -1234,7 +1237,7 @@
 					<button
 						class="p-3 rounded-full transition-colors duration-200 {muted
 							? 'bg-red-500 text-white'
-							: 'bg-gray-50 dark:bg-gray-900'}"
+							: 'bg-base-50 dark:bg-base-900'}"
 						type="button"
 						aria-label={muted ? $i18n.t('Unmute') : $i18n.t('Mute')}
 						on:click={toggleMute}
@@ -1289,7 +1292,7 @@
 						<button
 							type="button"
 							aria-label={$i18n.t('Stop')}
-							class="p-3 rounded-full bg-gray-50 dark:bg-gray-900"
+							class="p-3 rounded-full bg-base-50 dark:bg-base-900"
 							on:click={() => bridge?.stopBackend()}
 						>
 							<svg class="size-5" viewBox="0 0 20 20" fill="currentColor" aria-hidden="true">
@@ -1301,7 +1304,7 @@
 
 				<button
 					aria-label={$i18n.t('End call')}
-					class="p-3 rounded-full bg-gray-50 dark:bg-gray-900"
+					class="p-3 rounded-full bg-base-50 dark:bg-base-900"
 					on:click={async () => {
 						if (bridge) bridge.end();
 						else {
@@ -1309,7 +1312,7 @@
 							await stopVideoStream();
 						}
 
-						showCallOverlay.set(false);
+						voiceCall.set(false);
 						dispatch('close');
 					}}
 					type="button"

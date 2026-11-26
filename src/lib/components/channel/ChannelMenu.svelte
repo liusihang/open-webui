@@ -1,8 +1,11 @@
 <script lang="ts">
+	import { getPageContext } from '$lib/utils/page';
+	const { goto } = getPageContext();
+
 	import { getContext } from 'svelte';
 	import { toast } from 'svelte-sonner';
 	import { channels, config, user } from '$lib/stores';
-	import { goto } from '$app/navigation';
+
 	import { canUseEncryption, enter } from '$lib/encryption/client';
 	import { updateChannelMemberMuteStatusById } from '$lib/apis/channels';
 	import Dropdown from '$lib/components/common/Dropdown.svelte';
@@ -64,7 +67,7 @@
 			type="button"
 			class="flex {sidebar
 				? 'size-4.5'
-				: 'size-7'} items-center justify-center rounded-lg text-gray-500 dark:text-gray-400 hover:bg-gray-100 dark:hover:bg-gray-800 touch-auto"
+				: 'size-6'} items-center justify-center rounded-lg text-base-500 transition hover:bg-base-50/40 hover:text-base-700 dark:text-base-400 dark:hover:bg-base-800/40 dark:hover:text-base-200 touch-auto"
 			aria-label={$i18n.t(channel.type === 'dm' ? 'Conversation options' : 'Channel options')}
 			aria-haspopup="menu"
 			aria-expanded={show}
@@ -72,7 +75,7 @@
 			<EllipsisHorizontal className="size-3.5" />
 		</button>
 		<div slot="content">
-			<DropdownMenu className="w-44 border-gray-200/30! dark:border-gray-700/30!">
+			<DropdownMenu className="w-44 border-base-200/30! dark:border-base-700/30!">
 				{#if canUseEncryption($user, $config?.features) && (channel.type === 'dm' || (channel.type === 'group' && channel.is_private === true))}
 					<button
 						type="button"
@@ -87,17 +90,17 @@
 						<LockClosed className="size-3.5 shrink-0" />
 						<span>{$i18n.t('Encrypted Chat')}</span>
 					</button>
-					<hr class="border-gray-200/30 dark:border-gray-700/30" />
+					<hr class="border-base-200/30 dark:border-base-700/30" />
 				{/if}
-				<div class="px-2 pt-1 pb-0.5 text-[0.6875rem] text-gray-500 dark:text-gray-400">
+				<div class="px-2 pt-1 pb-0.5 text-[0.6875rem] text-base-500 dark:text-base-400">
 					{$i18n.t('Notifications')}
 				</div>
 				<button
 					type="button"
 					role="menuitemradio"
 					aria-checked={!isMuted}
-					disabled={saving}
-					class="disabled:opacity-50"
+					aria-disabled={saving}
+					class="aria-disabled:opacity-50"
 					on:click={() => setMuted(false)}
 				>
 					<AppNotification className="size-3.5 shrink-0" />
@@ -110,8 +113,8 @@
 					type="button"
 					role="menuitemradio"
 					aria-checked={isMuted}
-					disabled={saving}
-					class="disabled:opacity-50"
+					aria-disabled={saving}
+					class="aria-disabled:opacity-50"
 					on:click={() => setMuted(true)}
 				>
 					<BellSlash className="size-3.5 shrink-0" />
@@ -120,7 +123,7 @@
 						>{#if isMuted}<Check className="size-3.5" />{/if}</span
 					>
 				</button>
-				{#if onEdit || onHide}<hr class="border-gray-200/30 dark:border-gray-700/30" />{/if}
+				{#if onEdit || onHide}<hr class="border-base-200/30 dark:border-base-700/30" />{/if}
 				{#if onEdit}
 					<button
 						type="button"

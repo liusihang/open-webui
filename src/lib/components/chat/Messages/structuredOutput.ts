@@ -1,4 +1,6 @@
 import { encode } from 'html-entities';
+import { getDispatchedVisualizationPreviews } from '$lib/utils/visualizations/dispatch';
+import { agentView, terminalView, type AgentView } from './agentViews';
 
 export type OutputContentPart = {
 	type?: string;
@@ -13,7 +15,13 @@ export type OutputItem = {
 	id?: string;
 	call_id?: string;
 	name?: string;
+	display_label?: string;
+	display_labels?: { running?: string; completed?: string };
 	status?: string;
+	hidden?: boolean;
+	tool_id?: string;
+	tool_type?: string;
+	tool_targets?: Record<string, { tool_id: string; tool_type: string }>;
 	arguments?: unknown;
 	content?: OutputContentPart[];
 	summary?: OutputContentPart[] | string;
@@ -32,10 +40,14 @@ export type OutputItem = {
 export type OutputDetailToken = {
 	summary: string;
 	text: string;
+	view?: AgentView | null;
 	attributes: {
 		type: string;
 		id?: string;
 		name?: string;
+		tool_id?: string;
+		display_label?: string;
+		running_label?: string;
 		done?: string;
 		duration?: string;
 		arguments?: string;
@@ -47,6 +59,7 @@ export type OutputDetailToken = {
 };
 
 export type OutputDisplayItem =
+	| { type: 'visualization'; id: string; call: OutputItem; result?: OutputItem }
 	| {
 			type: 'message';
 			id: string;
@@ -81,6 +94,7 @@ export type OutputDisplayItem =
 			type: 'context_compaction';
 			id: string;
 			summary: string;
+			status?: 'in_progress' | 'failed';
 	  };
 
 type ResponseStreamEvent = {
@@ -154,7 +168,7 @@ function getReasoningText(item: OutputItem): string {
 	return getTextFromParts(summary ?? item.content ?? []);
 }
 
-function getToolResultText(item?: OutputItem): string {
+export function getToolResultText(item?: OutputItem): string {
 	return (item?.output ?? [])
 		.filter((part) => part?.type !== 'input_image')
 		.map((part) => {
@@ -193,7 +207,10 @@ function getInlineFileFromToolOutput(callItem?: OutputItem, resultItem?: OutputI
 	}
 
 	const result = parseJSONStringValue(getToolResultText(resultItem)) as Record<string, unknown>;
-	const isTerminalFile = result?.source === 'open_terminal' && !!result.terminal_selector;
+	if (result && result.machine_selector === undefined && result.terminal_selector !== undefined) {
+		result.machine_selector = result.terminal_selector; // saved before the rename
+	}
+	const isMachineFile = result?.source === 'open_terminal' && !!result.machine_selector;
 	const isOpenWebUIFile = result?.source === 'open_webui';
 	if (
 		!result ||
@@ -203,7 +220,8 @@ function getInlineFileFromToolOutput(callItem?: OutputItem, resultItem?: OutputI
 		resultItem.status === 'failed' ||
 		resultItem.status === 'incomplete' ||
 		!result.path ||
-		!(isTerminalFile || isOpenWebUIFile)
+		result.exists === false ||
+		!(isMachineFile || isOpenWebUIFile)
 	) {
 		return null;
 	}
@@ -213,7 +231,10 @@ function getInlineFileFromToolOutput(callItem?: OutputItem, resultItem?: OutputI
 		: result;
 }
 
-function buildToolCallToken(item: OutputItem, toolOutputByCallId: Record<string, OutputItem>) {
+export function buildToolCallToken(
+	item: OutputItem,
+	toolOutputByCallId: Record<string, OutputItem>
+) {
 	const callId = item.call_id ?? item.id ?? '';
 	const resultItem = toolOutputByCallId[callId];
 	const status = String(item.status ?? '');
@@ -227,14 +248,13 @@ function buildToolCallToken(item: OutputItem, toolOutputByCallId: Record<string,
 				typeof item.arguments === 'string'
 					? JSON.parse(item.arguments || '{}')
 					: (item.arguments ?? {});
-			const task = typeof args.task === 'string' && args.task ? args.task : '?';
-			const label = args.background ? 'Background sub-agent' : 'Sub-agent';
-			name = `${label}: "${task.length > 60 ? `${task.slice(0, 60)}...` : task}"`;
+			name = String(args.title || args.task || 'Sub-agent').slice(0, 60);
 		} catch {
 			name = 'Sub-agent';
 		}
 	}
 
+	const text = getToolResultText(resultItem);
 	return {
 		summary: isPending
 			? 'Tool Approval Needed'
@@ -243,11 +263,22 @@ function buildToolCallToken(item: OutputItem, toolOutputByCallId: Record<string,
 				: isExecuting
 					? 'Executing...'
 					: 'Preparing...',
-		text: getToolResultText(resultItem),
+		text,
+		view: agentView(item, text) ?? terminalView(item, text),
 		attributes: {
 			type: 'tool_calls',
 			id: callId,
 			name,
+			// Only server-set builtin ids get fixed labels; a user tool may share a builtin's name.
+			tool_id: item.tool_type === 'builtin' ? item.tool_id : undefined,
+			running_label:
+				typeof item.display_labels?.running === 'string' ? item.display_labels.running : '',
+			display_label:
+				typeof item.display_labels?.completed === 'string'
+					? item.display_labels.completed
+					: typeof item.display_label === 'string'
+						? item.display_label
+						: '',
 			done: isDone ? 'true' : 'false',
 			status,
 			// ToolCallDisplay HTML-decodes these, like legacy <details> attributes.
@@ -364,6 +395,14 @@ function buildDetailToken(
 	return null;
 }
 
+export function isHiddenToolCall(item: OutputItem): boolean {
+	return (
+		item.type === 'function_call' &&
+		item.hidden === true &&
+		!['pending', 'queued', 'requires_approval'].includes(item.status ?? '')
+	);
+}
+
 export function buildOutputDisplayItems(output: OutputItem[] = []): OutputDisplayItem[] {
 	const displayItems: OutputDisplayItem[] = [];
 	const currentDetailTokens: OutputDetailToken[] = [];
@@ -400,8 +439,19 @@ export function buildOutputDisplayItems(output: OutputItem[] = []): OutputDispla
 			return;
 		}
 
+		for (const call of getDispatchedVisualizationPreviews(item)) {
+			flushDetails();
+			displayItems.push({ type: 'visualization', id: `visualization:${call.call_id}`, call });
+		}
+
+		if (isHiddenToolCall(item)) {
+			return;
+		}
+
 		if (item.type === 'function_call_output') {
-			const inlineFile = getInlineFileFromToolOutput(toolCallByCallId[item.call_id ?? ''], item);
+			const call = toolCallByCallId[item.call_id ?? ''];
+			if (call && isHiddenToolCall(call)) return;
+			const inlineFile = getInlineFileFromToolOutput(call, item);
 			if (inlineFile) {
 				flushDetails();
 				displayItems.push({
@@ -421,6 +471,23 @@ export function buildOutputDisplayItems(output: OutputItem[] = []): OutputDispla
 			return;
 		}
 
+		if (
+			item.type === 'function_call' &&
+			item.tool_type === 'builtin' &&
+			item.tool_id === 'builtin:render_visualization' &&
+			(item.call_id || item.id)
+		) {
+			flushDetails();
+			const callId = item.call_id ?? item.id!;
+			displayItems.push({
+				type: 'visualization',
+				id: `visualization:${callId}`,
+				call: item,
+				result: toolOutputByCallId[callId]
+			});
+			return;
+		}
+
 		if (item.type && GROUPABLE_OUTPUT_TYPES.has(item.type)) {
 			const token = buildDetailToken(item, index === output.length - 1, toolOutputByCallId);
 			if (token) {
@@ -434,7 +501,8 @@ export function buildOutputDisplayItems(output: OutputItem[] = []): OutputDispla
 			displayItems.push({
 				type: 'context_compaction',
 				id: item.id ?? `context-compaction-${index}`,
-				summary: typeof item.summary === 'string' ? item.summary : ''
+				summary: typeof item.summary === 'string' ? item.summary : '',
+				status: item.status === 'in_progress' || item.status === 'failed' ? item.status : undefined
 			});
 			return;
 		}
@@ -773,4 +841,43 @@ export function setOutputText(output: OutputItem[], text: string): OutputItem[] 
 			? { ...item, content: item === lastMessage ? [{ type: 'output_text', text }] : [] }
 			: item
 	);
+}
+
+function parseToolArguments(args: unknown): Record<string, unknown> {
+	if (!args) {
+		return {};
+	}
+	let value = args;
+	while (typeof value === 'string') {
+		try {
+			value = JSON.parse(value);
+		} catch {
+			break;
+		}
+	}
+	return typeof value === 'object' && value !== null && !Array.isArray(value)
+		? (value as Record<string, unknown>)
+		: {};
+}
+
+export function getPendingAskUserFromMessage<T extends { role?: string; output?: unknown }>(
+	message: T
+) {
+	if (message?.role !== 'assistant' || !Array.isArray(message.output)) {
+		return null;
+	}
+
+	const call = message.output.find(
+		(item: OutputItem) =>
+			item?.type === 'function_call' &&
+			item?.name === 'ask_user' &&
+			item?.status === 'pending' &&
+			(item?.call_id || item?.id)
+	);
+
+	if (call) {
+		return { message, call, args: parseToolArguments(call.arguments) };
+	}
+
+	return null;
 }

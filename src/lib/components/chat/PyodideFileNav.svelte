@@ -6,9 +6,10 @@
 	import { getContext, onMount, onDestroy, tick } from 'svelte';
 	import { pyodideWorker } from '$lib/stores';
 	import { createPyodideWorker } from '$lib/pyodide/createPyodideWorker';
-	import type { FileEntry } from '$lib/apis/terminal';
+	import type { FileEntry } from '$lib/apis/machines';
 
 	import FileNavToolbar from './FileNav/FileNavToolbar.svelte';
+	import FilesOverlay from './MessageInput/FilesOverlay.svelte';
 	import FileEntryRow from './FileNav/FileEntryRow.svelte';
 	import FilePreview from './FileNav/FilePreview.svelte';
 	import ConfirmDialog from '../common/ConfirmDialog.svelte';
@@ -363,27 +364,8 @@
 	role="region"
 	aria-label={$i18n.t('Pyodide file browser')}
 >
-	{#if isDragOver}
-		<div
-			class="absolute inset-0 z-10 flex flex-col items-center justify-center bg-white/80 dark:bg-gray-850/80 backdrop-blur-sm pointer-events-none gap-1.5"
-		>
-			<svg
-				xmlns="http://www.w3.org/2000/svg"
-				viewBox="0 0 24 24"
-				fill="none"
-				stroke="currentColor"
-				stroke-width="1.5"
-				class="size-5 text-gray-400 dark:text-gray-500"
-			>
-				<path
-					stroke-linecap="round"
-					stroke-linejoin="round"
-					d="M3 16.5v2.25A2.25 2.25 0 0 0 5.25 21h13.5A2.25 2.25 0 0 0 21 18.75V16.5m-13.5-9L12 3m0 0 4.5 4.5M12 3v13.5"
-				/>
-			</svg>
-			<span class="text-xs text-gray-400 dark:text-gray-500">{$i18n.t('Drop files here')}</span>
-		</div>
-	{/if}
+	<!-- Retired upload hint: keep its translation. {$i18n.t('Drop files here')} -->
+	<FilesOverlay show={isDragOver} />
 
 	{#if overlay}
 		<div class="absolute inset-0 z-10 pointer-events-none" />
@@ -399,6 +381,19 @@
 		onGoBack={goBack}
 		onGoForward={goForward}
 		onNavigate={(path) => loadDir(path)}
+		listFolders={async (path) => {
+			try {
+				const res = await sendWorkerMessage({
+					type: 'fs:list',
+					path: path.replace(/\/$/, '') || '/'
+				});
+				return (res.entries || [])
+					.filter((entry: FileEntry) => entry.type === 'directory')
+					.map((entry: FileEntry) => entry.name);
+			} catch {
+				return [];
+			}
+		}}
 		onRefresh={async () => {
 			try {
 				await sendWorkerMessage({ type: 'fs:sync' });
@@ -417,7 +412,7 @@
 	>
 		<!-- File action buttons when a file is selected (slot content) -->
 		<button
-			class="shrink-0 p-1 rounded hover:bg-gray-100 dark:hover:bg-gray-800 transition text-gray-400 dark:text-gray-500 hover:text-gray-600 dark:hover:text-gray-400"
+			class="shrink-0 p-1 rounded hover:bg-base-100 dark:hover:bg-base-800 transition text-base-400 dark:text-base-500 hover:text-base-600 dark:hover:text-base-400"
 			on:click={() => selectedFile && downloadFile(selectedFile)}
 			aria-label={$i18n.t('Download')}
 		>
@@ -446,14 +441,16 @@
 				<Spinner className="size-4" />
 			</div>
 		{:else if error}
-			<div class="flex items-center justify-center flex-1 p-6">
-				<div class="text-xs text-gray-500 dark:text-gray-400">{error}</div>
+			<div class="flex items-center justify-center flex-1 p-6 text-center">
+				<div class="text-xs text-base-500 dark:text-base-400">{error}</div>
 			</div>
 		{:else if entries.length === 0 && !creatingFolder && !creatingFile}
-			<div class="flex flex-col items-center justify-center flex-1 p-6 text-center gap-2">
-				<Folder className="size-5 text-gray-300 dark:text-gray-600" />
-				<div class="text-xs text-gray-400 dark:text-gray-500">
+			<div class="flex flex-1 items-center justify-center p-6 text-center">
+				<div class="text-xs text-base-400 dark:text-base-500">
+					<!-- Retired empty state: keep its translation.
 					{$i18n.t('No files yet. Upload files or run Python code to create them.')}
+					-->
+					{$i18n.t('This folder is empty')}
 				</div>
 			</div>
 		{/if}
@@ -480,7 +477,7 @@
 			{/if}
 			{#if creatingFile}
 				<div class="flex items-center gap-2 px-3 py-1.5">
-					<Document className="size-4 shrink-0 text-gray-400 dark:text-gray-500" />
+					<Document className="size-4 shrink-0 text-base-400 dark:text-base-500" />
 					<input
 						bind:this={newFileInput}
 						bind:value={newFileName}

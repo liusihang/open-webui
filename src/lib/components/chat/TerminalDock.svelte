@@ -1,20 +1,21 @@
 <script lang="ts">
+	export let modelId: string | null = null;
 	import { getContext, onMount, tick } from 'svelte';
 	import type { Readable } from 'svelte/store';
-	import { settings, terminalServers, selectedTerminalId } from '$lib/stores';
+	import { settings, machines, selectedMachineId } from '$lib/stores';
 	import {
-		resolveTerminalConnection,
-		terminalRequest,
-		type TerminalConnection,
-		type TerminalProcess,
-		type TerminalProcessOutput
-	} from '$lib/apis/terminal';
-	import { readTerminalStream } from '$lib/apis/terminal/socket';
+		resolveMachineTarget,
+		machineRequest,
+		type MachineTarget,
+		type MachineProcess,
+		type MachineProcessOutput
+	} from '$lib/apis/machines';
+	import { readTerminalStream } from '$lib/apis/machines/socket';
 	import XTerminal from './XTerminal.svelte';
 	import Icon from './FileNav/Icon.svelte';
 
 	export let chatId: string | null = null;
-	export let terminalId: string | null = null;
+	export let machineId: string | null = null;
 	export let active = true;
 	export let expanded = false;
 	export let height = 200;
@@ -29,13 +30,13 @@
 	// t('Open terminal')
 	// t('Collapse terminal')
 	// t('Expand terminal')
-	type Tab = TerminalProcess & {
+	type Tab = MachineProcess & {
 		offset: number;
 		loaded: boolean;
 		available: boolean;
 		finished: boolean;
 	};
-	let connection: TerminalConnection | null = null;
+	let target: MachineTarget | null = null;
 	let tabs: Tab[] = [];
 	let activeId = '';
 	let error = '';
@@ -61,10 +62,9 @@
 		outputContext = id;
 		stopOutput?.();
 		stopOutput = undefined;
-		if (id && connection) {
-			stopOutput = readTerminalStream<TerminalProcessOutput>(
-				connection,
-				chatId,
+		if (id && target) {
+			stopOutput = readTerminalStream<MachineProcessOutput>(
+				target,
 				() =>
 					`/execute/${encodeURIComponent(id)}/status?offset=${tabs.find((tab) => tab.id === id)?.offset ?? 0}&tail=1000`,
 				writeOutput,
@@ -80,7 +80,7 @@
 	$: hasSessions = tabs.length > 0;
 	$: running = tabs.filter((tab) => tab.status === 'running' && tab.available).length;
 
-	function updateProcesses(processes: TerminalProcess[]) {
+	function updateProcesses(processes: MachineProcess[]) {
 		const live = new Map(processes.map((process) => [process.id, process]));
 		tabs = tabs.map((tab) => ({ ...tab, ...live.get(tab.id), available: live.has(tab.id) }));
 		const known = new Set(tabs.map((tab) => tab.id));
@@ -95,7 +95,7 @@
 		if (!tabs.some((tab) => tab.id === activeId)) activeId = tabs[0]?.id ?? '';
 	}
 
-	async function writeOutput(result: TerminalProcessOutput) {
+	async function writeOutput(result: MachineProcessOutput) {
 		await tick();
 		const tab = tabs.find((item) => item.id === result.id);
 		if (!tab) return;
@@ -120,10 +120,10 @@
 	}
 
 	async function poll() {
-		if (!connection || streaming || !active || polling || disposed || document.hidden) return;
+		if (!target || streaming || !active || polling || disposed || document.hidden) return;
 		polling = true;
 		try {
-			const processes = await terminalRequest<TerminalProcess[]>(connection, chatId, '/execute', {
+			const processes = await machineRequest<MachineProcess[]>(target, '/execute', {
 				signal: controller.signal
 			});
 			if (disposed) return;
@@ -133,9 +133,8 @@
 			if (expanded && tab?.available && !tab.finished) {
 				await tick();
 				if (!panes[tab.id]) return;
-				const result = await terminalRequest<TerminalProcessOutput>(
-					connection,
-					chatId,
+				const result = await machineRequest<MachineProcessOutput>(
+					target,
 					`/execute/${encodeURIComponent(tab.id)}/status?wait=0&offset=${tab.offset}&tail=1000`,
 					{ signal: controller.signal }
 				);
@@ -180,16 +179,15 @@
 	}
 
 	onMount(() => {
-		connection = resolveTerminalConnection(
-			terminalId ?? $selectedTerminalId,
-			$terminalServers ?? [],
-			($settings as { terminalServers?: { url: string; key?: string }[] })?.terminalServers ?? [],
-			localStorage.getItem('token') ?? ''
+		target = resolveMachineTarget(
+			machineId ?? $selectedMachineId,
+			$machines ?? [],
+			localStorage.getItem('token') ?? '',
+			{ chatId: chatId, modelId: modelId }
 		);
-		if (connection) {
-			stopList = readTerminalStream<TerminalProcess[]>(
-				connection,
-				chatId,
+		if (target) {
+			stopList = readTerminalStream<MachineProcess[]>(
+				target,
 				() => '/execute',
 				updateProcesses,
 				(message) => {
@@ -218,16 +216,17 @@
 
 <div class="terminal-dock min-h-0">
 	<div
-		class="flex h-7 min-w-0 items-center border-b border-black/5 text-[11px] text-gray-500 dark:border-white/5 dark:text-gray-400"
+		class="flex h-7 min-w-0 items-center border-base-1000/5 text-[11px] text-base-500 dark:border-base-0/5 dark:text-base-400"
+		class:border-b={expanded}
 	>
 		{#if !expanded}
 			<button
 				on:click={() => select(activeId)}
-				class="flex h-full min-w-0 flex-1 items-center gap-1.5 px-2 text-left hover:text-gray-900 dark:hover:text-gray-100"
+				class="flex h-full min-w-0 flex-1 items-center gap-1.5 pl-3 pr-2 text-left hover:text-base-900 dark:hover:text-base-100"
 			>
-				<Icon name="terminal" size={13} />
+				<Icon name="terminal" size={12} class="text-base-400 dark:text-base-600" />
 				<span>{$i18n.t('Sessions')}</span>
-				{#if running}<span class="tabular-nums text-gray-400">{running}</span>{/if}
+				{#if running}<span class="tabular-nums text-base-400">{running}</span>{/if}
 			</button>
 		{:else}
 			<div
@@ -256,7 +255,7 @@
 								class="h-[5px] w-[5px] shrink-0 rounded-full border {tab.available &&
 								tab.status === 'running'
 									? 'border-emerald-500 bg-emerald-500'
-									: 'border-gray-400'}"
+									: 'border-base-400'}"
 							></span>
 							<span class="max-w-28 truncate">{tab.command}</span>
 						</button>
@@ -280,13 +279,13 @@
 			aria-label={expanded ? $i18n.t('Collapse sessions') : $i18n.t('Expand sessions')}
 		>
 			<span class="flex h-7 w-7 items-center justify-center">
-				<Icon name={expanded ? 'chevron-down' : 'chevron-up'} size={12} />
+				<Icon name={expanded ? 'chevron-down' : 'chevron-up'} size={14} />
 			</span>
 		</button>
 	</div>
 	<div
 		style:height={`${height}px`}
-		class="flex min-h-0 flex-col bg-white dark:bg-transparent"
+		class="flex min-h-0 flex-col bg-transparent"
 		class:hidden={!expanded}
 	>
 		{#if error}<div
@@ -296,14 +295,13 @@
 				{error}
 			</div>{/if}
 		<div class="relative min-h-0 flex-1">
-			{#if connection}
+			{#if target}
 				{#each tabs as tab (tab.id)}
 					{#if tab.loaded || activeId === tab.id}
 						<div class="absolute inset-0" class:hidden={activeId !== tab.id}>
 							<XTerminal
 								bind:this={panes[tab.id]}
-								{connection}
-								{chatId}
+								{target}
 								{overlay}
 								readOnly
 								active={active && expanded && activeId === tab.id}
@@ -328,10 +326,10 @@
 	}
 	.terminal-tab.selected {
 		border-color: currentColor;
-		color: var(--color-gray-900, #171717);
+		color: var(--color-base-900, #171717);
 	}
 	:global(.dark) .terminal-tab.selected {
-		color: #e5e5e5;
+		color: var(--color-base-200);
 	}
 	.tab-button,
 	.tab-close {
@@ -344,11 +342,11 @@
 	}
 	.tab-button:hover,
 	.tab-close:hover {
-		color: var(--color-gray-900, #171717);
+		color: var(--color-base-900, #171717);
 	}
 	:global(.dark) .tab-button:hover,
 	:global(.dark) .tab-close:hover {
-		color: #f5f5f5;
+		color: var(--color-base-100);
 	}
 	.tab-close {
 		opacity: 0;

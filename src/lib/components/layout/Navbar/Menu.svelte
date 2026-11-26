@@ -1,26 +1,21 @@
 <script lang="ts">
-	import CommentButton from '$lib/components/comments/CommentButton.svelte';
 	import { toast } from 'svelte-sonner';
-	import { getContext, tick } from 'svelte';
+	import { getContext, setContext, tick } from 'svelte';
 
 	import fileSaver from 'file-saver';
 	const { saveAs } = fileSaver;
 
 	import { copyToClipboard, createMessagesList } from '$lib/utils';
+	import { saveChatPdf, saveTextPdf } from '$lib/utils/pdf';
 	import { getOutputText } from '$lib/components/chat/Messages/structuredOutput';
 
 	import {
-		showTabs,
-		showOverview,
-		showArtifacts,
 		mobile,
-		temporaryChatEnabled,
+		temporaryChat,
 		theme,
 		user,
 		settings,
 		folders,
-		showEmbeds,
-		artifactContents,
 		visibleControls
 	} from '$lib/stores';
 
@@ -29,11 +24,11 @@
 	import Dropdown from '$lib/components/common/Dropdown.svelte';
 	import DropdownMenu from '$lib/components/common/DropdownMenu.svelte';
 	import DropdownSub from '$lib/components/common/DropdownSub.svelte';
-	import Tags from '$lib/components/chat/Tags.svelte';
+	import ChevronRight from '$lib/components/icons/ChevronRight.svelte';
+	import TagPicker from '$lib/components/chat/TagPicker.svelte';
+	import Tag from '$lib/components/icons/Tag.svelte';
 	import Clipboard from '$lib/components/icons/Clipboard.svelte';
 	import AdjustmentsHorizontal from '$lib/components/icons/AdjustmentsHorizontal.svelte';
-	import Cube from '$lib/components/icons/Cube.svelte';
-	import Map from '$lib/components/icons/Map.svelte';
 	import Folder from '$lib/components/icons/Folder.svelte';
 	import Share from '$lib/components/icons/Share.svelte';
 	import ArchiveBox from '$lib/components/icons/ArchiveBox.svelte';
@@ -43,6 +38,7 @@
 	import EditPencilIcon from '$lib/components/layout/Sidebar/icons/EditPencil.svelte';
 
 	const i18n = getContext('i18n');
+	setContext('exporting', true);
 
 	export let shareEnabled: boolean = false;
 	export let readOnly: boolean = false;
@@ -59,6 +55,9 @@
 	export let chat;
 	export let onClose: Function = () => {};
 	export let scrollToTop: (() => void) | null = null;
+	/** Overrides the global temporary chat state for chats with their own (side chats). */
+	export let temporary: boolean | null = null;
+	$: isTemporary = temporary ?? $temporaryChat;
 
 	let showFullMessages = false;
 	let show = false;
@@ -85,204 +84,18 @@
 	};
 
 	const downloadPdf = async () => {
-		const [{ default: jsPDF }, { default: html2canvas }] = await Promise.all([
-			import('jspdf'),
-			import('html2canvas-pro')
-		]);
+		const filename = `chat-${chat.chat.title}.pdf`;
+		if (!($settings?.stylizedPdfExport ?? true)) {
+			await saveTextPdf(await getChatAsText(), filename);
+			return;
+		}
 
-		if ($settings?.stylizedPdfExport ?? true) {
-			showFullMessages = true;
-			await tick();
-
-			const containerElement = document.getElementById('full-messages-container');
-			if (containerElement) {
-				try {
-					const isDarkMode = document.documentElement.classList.contains('dark');
-					const virtualWidth = 800; // px, fixed width for cloned element
-
-					// Clone and style
-					const clonedElement = containerElement.cloneNode(true);
-					clonedElement.classList.add('text-black');
-					clonedElement.classList.add('dark:text-white');
-					clonedElement.style.width = `${virtualWidth}px`;
-					clonedElement.style.position = 'absolute';
-					clonedElement.style.left = '-9999px';
-					clonedElement.style.height = 'auto';
-					document.body.appendChild(clonedElement);
-
-					// Override content-visibility so html2canvas can capture all messages
-					clonedElement.querySelectorAll('.message-virtualized').forEach((el) => {
-						el.style.contentVisibility = 'visible';
-					});
-
-					// Let the browser compute layout for the cloned element
-					await new Promise((r) => requestAnimationFrame(r));
-
-					const pdf = new jsPDF('p', 'mm', 'a4');
-					const pageWidthMM = 210;
-					const pageHeightMM = 297;
-
-					const pagePixelHeight = Math.floor((virtualWidth * pageHeightMM) / pageWidthMM);
-					const rootTop = clonedElement.getBoundingClientRect().top;
-					const contentHeight = Math.ceil(clonedElement.getBoundingClientRect().height);
-
-					const blocks = [];
-					const trackedElements = new Set();
-					const collectBlocks = (element) => {
-						const children = Array.from(element.children);
-						const splittable =
-							children.length > 0 &&
-							(getComputedStyle(element).display === 'contents' ||
-								(element.getBoundingClientRect().height > pagePixelHeight / 4 &&
-									!Array.from(element.childNodes).some(
-										(childNode) =>
-											childNode.nodeType === Node.TEXT_NODE && childNode.textContent?.trim()
-									) &&
-									children.every(
-										(child) => !getComputedStyle(child).display.startsWith('inline')
-									)));
-
-						if (element !== clonedElement) trackedElements.add(element);
-
-						if (splittable) {
-							children.forEach(collectBlocks);
-						} else {
-							const { top, bottom } = element.getBoundingClientRect();
-							blocks.push({ element, top: top - rootTop, bottom: bottom - rootTop });
-						}
-					};
-					collectBlocks(clonedElement);
-
-					clonedElement.setAttribute('data-pdf-root', '');
-
-					let offsetY = 0;
-					let page = 0;
-
-					while (offsetY < contentHeight) {
-						const sliceHeight = Math.min(pagePixelHeight, contentHeight - offsetY);
-						const sliceBlocks = blocks.filter(
-							(block) => block.bottom > offsetY && block.top < offsetY + sliceHeight
-						);
-
-						const keptElements = new Set();
-						for (const { element } of sliceBlocks) {
-							for (
-								let current = element;
-								current && current !== clonedElement;
-								current = current.parentElement
-							) {
-								keptElements.add(current);
-							}
-						}
-
-						const anchor = sliceBlocks.find((block) => block.bottom > block.top);
-						anchor?.element.setAttribute('data-pdf-anchor', '');
-
-						const canvas = await html2canvas(clonedElement, {
-							backgroundColor: isDarkMode ? '#000' : '#fff',
-							useCORS: true,
-							logging: false,
-							scale: 2, // increase resolution
-							width: virtualWidth,
-							height: sliceHeight,
-							y: offsetY,
-							ignoreElements: (element) =>
-								(element.parentElement === document.body &&
-									element !== clonedElement &&
-									!['STYLE', 'LINK'].includes(element.tagName)) ||
-								(trackedElements.has(element) && !keptElements.has(element)),
-							onclone: (clonedDocument) => {
-								const clonedRoot = clonedDocument.querySelector('[data-pdf-root]');
-								const clonedAnchor = clonedDocument.querySelector('[data-pdf-anchor]');
-								if (!clonedRoot || !clonedAnchor) return;
-
-								const spacer = clonedDocument.createElement('div');
-								clonedRoot.prepend(spacer);
-
-								let spacerHeight = 0;
-								for (let pass = 0; pass < 2; pass++) {
-									spacerHeight +=
-										anchor.top -
-										(clonedAnchor.getBoundingClientRect().top -
-											clonedRoot.getBoundingClientRect().top);
-									spacer.style.height = `${spacerHeight}px`;
-								}
-							}
-						});
-
-						anchor?.element.removeAttribute('data-pdf-anchor');
-
-						const imgData = canvas.toDataURL('image/jpeg', 0.7);
-						const imgHeightMM = (sliceHeight * pageWidthMM) / virtualWidth;
-
-						if (page > 0) pdf.addPage();
-
-						if (isDarkMode) {
-							pdf.setFillColor(0, 0, 0);
-							pdf.rect(0, 0, pageWidthMM, pageHeightMM, 'F'); // black bg
-						}
-
-						pdf.addImage(imgData, 'JPEG', 0, 0, pageWidthMM, imgHeightMM);
-
-						offsetY += sliceHeight;
-						page++;
-					}
-
-					document.body.removeChild(clonedElement);
-
-					pdf.save(`chat-${chat.chat.title}.pdf`);
-
-					showFullMessages = false;
-				} catch (error) {
-					console.error('Error generating PDF', error);
-				}
-			}
-		} else {
-			console.log('Downloading PDF');
-
-			const chatText = await getChatAsText();
-
-			const doc = new jsPDF();
-
-			// Margins
-			const left = 15;
-			const top = 20;
-			const right = 15;
-			const bottom = 20;
-
-			const pageWidth = doc.internal.pageSize.getWidth();
-			const pageHeight = doc.internal.pageSize.getHeight();
-			const usableWidth = pageWidth - left - right;
-			const usableHeight = pageHeight - top - bottom;
-
-			// Font size and line height
-			const fontSize = 8;
-			doc.setFontSize(fontSize);
-			const lineHeight = fontSize * 1; // adjust if needed
-
-			// Split the markdown into lines (handles \n)
-			const paragraphs = chatText.split('\n');
-
-			let y = top;
-
-			for (let paragraph of paragraphs) {
-				// Wrap each paragraph to fit the width
-				const lines = doc.splitTextToSize(paragraph, usableWidth);
-
-				for (let line of lines) {
-					// If the line would overflow the bottom, add a new page
-					if (y + lineHeight > pageHeight - bottom) {
-						doc.addPage();
-						y = top;
-					}
-					doc.text(line, left, y);
-					y += lineHeight * 0.5;
-				}
-				// Add empty line at paragraph breaks
-				y += lineHeight * 0.1;
-			}
-
-			doc.save(`chat-${chat.chat.title}.pdf`);
+		showFullMessages = true;
+		await tick();
+		try {
+			await saveChatPdf(document.getElementById('full-messages-container')!, filename);
+		} finally {
+			showFullMessages = false;
 		}
 	};
 
@@ -290,7 +103,7 @@
 		if (chat.id) {
 			let chatObj = null;
 
-			if ((chat?.id ?? '').startsWith('local') || $temporaryChatEnabled) {
+			if ((chat?.id ?? '').startsWith('local') || isTemporary) {
 				chatObj = chat;
 			} else {
 				chatObj = await getChatById(localStorage.token, chat.id);
@@ -341,7 +154,7 @@
 	<div slot="content">
 		<DropdownMenu className="select-none min-w-[12.5rem] max-w-[12.5rem] transition">
 			<!-- <DropdownMenu.Item draggable="false"
-				class="flex gap-2 items-center h-[1.6875rem] px-2 text-[0.8125rem] font-normal  cursor-pointer dark:hover:bg-gray-800 rounded-xl"
+				class="flex gap-2 items-center h-[1.6875rem] px-2 text-[0.8125rem] font-normal  cursor-pointer dark:hover:bg-base-800 rounded-xl"
 				on:click={async () => {
 					await showSettings.set(!$showSettings);
 				}}
@@ -372,7 +185,7 @@
 			{#if scrollToTop}
 				<button
 					draggable="false"
-					class="flex h-[1.6875rem] w-full items-center gap-2 rounded-xl px-2 text-[0.8125rem] cursor-pointer select-none hover:bg-gray-50/40 dark:hover:bg-gray-800/40"
+					class="flex h-[1.6875rem] w-full items-center gap-2 rounded-xl px-2 text-[0.8125rem] cursor-pointer select-none hover:bg-base-50/40 dark:hover:bg-base-800/40"
 					on:click={() => {
 						scrollToTop();
 					}}
@@ -395,44 +208,14 @@
 				</button>
 			{/if}
 
-			{#if Object.keys(chat?.chat?.history?.messages ?? {}).length > 0}
-				<button
-					draggable="false"
-					class="flex h-[1.6875rem] w-full items-center gap-2 rounded-xl px-2 text-[0.8125rem] cursor-pointer select-none hover:bg-gray-50/40 dark:hover:bg-gray-800/40"
-					aria-haspopup="dialog"
-					on:click={() => showOverview.set(true)}
-				>
-					<Map className="size-3.5" strokeWidth="1.5" />
-					<div class="flex items-center">{$i18n.t('Overview')}</div>
-				</button>
-			{/if}
-
 			{#if scrollToTop}
-				<hr class="border-gray-50/30 dark:border-gray-800/30 mx-1 my-0.5" />
+				<hr class="border-base-50/30 dark:border-base-800/30 mx-1 my-0.5" />
 			{/if}
 
-			{#if ($artifactContents ?? []).length > 0 && $visibleControls['chat.artifacts']}
+			{#if !readOnly && !isTemporary && ($user?.role === 'admin' || ($user.permissions?.chat?.share ?? true))}
 				<button
 					draggable="false"
-					class="flex h-[1.6875rem] w-full items-center gap-2 rounded-xl px-2 text-[0.8125rem] cursor-pointer select-none hover:bg-gray-50/40 dark:hover:bg-gray-800/40"
-					id="chat-artifacts-button"
-					on:click={async () => {
-						await showTabs.set(true);
-						await showArtifacts.set(true);
-						await showEmbeds.set(false);
-					}}
-				>
-					<Cube className="size-3.5" strokeWidth="1.5" />
-					<div class="flex items-center">{$i18n.t('Artifacts')}</div>
-				</button>
-
-				<hr class="border-gray-50/30 dark:border-gray-800/30 mx-1 my-0.5" />
-			{/if}
-
-			{#if !readOnly && !$temporaryChatEnabled && ($user?.role === 'admin' || ($user.permissions?.chat?.share ?? true))}
-				<button
-					draggable="false"
-					class="flex h-[1.6875rem] w-full items-center gap-2 rounded-xl px-2 text-[0.8125rem] cursor-pointer select-none hover:bg-gray-50/40 dark:hover:bg-gray-800/40"
+					class="flex h-[1.6875rem] w-full items-center gap-2 rounded-xl px-2 text-[0.8125rem] cursor-pointer select-none hover:bg-base-50/40 dark:hover:bg-base-800/40"
 					id="chat-share-button"
 					on:click={() => {
 						shareHandler();
@@ -443,22 +226,12 @@
 				</button>
 			{/if}
 
-			{#if chat?.id && !$temporaryChatEnabled}
-				<CommentButton
-					onComment={() => showTabs.set('comments')}
-					menu
-					resource={{ resource_type: 'chat', resource_id: chat.id }}
-					onOpen={() => (show = false)}
-					className="flex h-[1.6875rem] w-full items-center gap-2 rounded-xl px-2 text-[0.8125rem] cursor-pointer select-none hover:bg-gray-50/40 dark:hover:bg-gray-800/40"
-				/>
-			{/if}
-
 			{#if $user?.role === 'admin' || ($user.permissions?.chat?.export ?? true)}
 				<DropdownSub contentClass="select-none z-50">
 					<button
 						slot="trigger"
 						draggable="false"
-						class="flex h-[1.6875rem] w-full items-center gap-2 rounded-xl px-2 text-[0.8125rem] cursor-pointer select-none hover:bg-gray-50/40 dark:hover:bg-gray-800/40"
+						class="flex h-[1.6875rem] w-full items-center gap-2 rounded-xl px-2 text-[0.8125rem] cursor-pointer select-none hover:bg-base-50/40 dark:hover:bg-base-800/40"
 					>
 						<Download className="size-3.5" strokeWidth="1.5" />
 
@@ -467,7 +240,7 @@
 
 					<button
 						draggable="false"
-						class="flex h-[1.6875rem] w-full items-center gap-2 rounded-xl px-2 text-[0.8125rem] cursor-pointer select-none hover:bg-gray-50/40 dark:hover:bg-gray-800/40"
+						class="flex h-[1.6875rem] w-full items-center gap-2 rounded-xl px-2 text-[0.8125rem] cursor-pointer select-none hover:bg-base-50/40 dark:hover:bg-base-800/40"
 						on:click={() => {
 							downloadJSONExport();
 						}}
@@ -477,7 +250,7 @@
 
 					<button
 						draggable="false"
-						class="flex h-[1.6875rem] w-full items-center gap-2 rounded-xl px-2 text-[0.8125rem] cursor-pointer select-none hover:bg-gray-50/40 dark:hover:bg-gray-800/40"
+						class="flex h-[1.6875rem] w-full items-center gap-2 rounded-xl px-2 text-[0.8125rem] cursor-pointer select-none hover:bg-base-50/40 dark:hover:bg-base-800/40"
 						on:click={() => {
 							downloadTxt();
 						}}
@@ -487,9 +260,12 @@
 
 					<button
 						draggable="false"
-						class="flex h-[1.6875rem] w-full items-center gap-2 rounded-xl px-2 text-[0.8125rem] cursor-pointer select-none hover:bg-gray-50/40 dark:hover:bg-gray-800/40"
+						class="flex h-[1.6875rem] w-full items-center gap-2 rounded-xl px-2 text-[0.8125rem] cursor-pointer select-none hover:bg-base-50/40 dark:hover:bg-base-800/40"
 						on:click={() => {
-							downloadPdf();
+							toast.promise(downloadPdf(), {
+								loading: $i18n.t('Preparing download...'),
+								error: $i18n.t('Download failed')
+							});
 						}}
 					>
 						<div class="flex items-center line-clamp-1">{$i18n.t('PDF document (.pdf)')}</div>
@@ -497,10 +273,10 @@
 				</DropdownSub>
 			{/if}
 
-			{#if (!readOnly || $folders.find((folder) => folder.id === chat?.folder_id)?.user_id === $user?.id) && !$temporaryChatEnabled && chat?.id}
+			{#if (!readOnly || $folders.find((folder) => folder.id === chat?.folder_id)?.user_id === $user?.id) && !isTemporary && chat?.id}
 				<button
 					draggable="false"
-					class="flex h-[1.6875rem] w-full items-center gap-2 rounded-xl px-2 text-[0.8125rem] cursor-pointer select-none hover:bg-gray-50/40 dark:hover:bg-gray-800/40"
+					class="flex h-[1.6875rem] w-full items-center gap-2 rounded-xl px-2 text-[0.8125rem] cursor-pointer select-none hover:bg-base-50/40 dark:hover:bg-base-800/40"
 					on:click={() => {
 						renameHandler();
 					}}
@@ -513,7 +289,7 @@
 			{#if $user?.role === 'admin' || ($user.permissions?.chat?.export ?? true)}
 				<button
 					draggable="false"
-					class="flex h-[1.6875rem] w-full items-center gap-2 rounded-xl px-2 text-[0.8125rem] cursor-pointer select-none hover:bg-gray-50/40 dark:hover:bg-gray-800/40"
+					class="flex h-[1.6875rem] w-full items-center gap-2 rounded-xl px-2 text-[0.8125rem] cursor-pointer select-none hover:bg-base-50/40 dark:hover:bg-base-800/40"
 					id="chat-copy-button"
 					on:click={async () => {
 						const res = await copyToClipboard(await getChatAsText()).catch((e) => {
@@ -530,15 +306,15 @@
 				</button>
 			{/if}
 
-			{#if !readOnly && !$temporaryChatEnabled && chat?.id}
-				<hr class="border-gray-50/30 dark:border-gray-800/30 mx-1 my-0.5" />
+			{#if !readOnly && !isTemporary && chat?.id}
+				<hr class="border-base-50/30 dark:border-base-800/30 mx-1 my-0.5" />
 
 				{#if $folders.length > 0}
 					<DropdownSub contentClass="select-none z-50" maxWidth={200}>
 						<button
 							slot="trigger"
 							draggable="false"
-							class="flex h-[1.6875rem] w-full items-center gap-2 rounded-xl px-2 text-[0.8125rem] cursor-pointer select-none hover:bg-gray-50/40 dark:hover:bg-gray-800/40"
+							class="flex h-[1.6875rem] w-full items-center gap-2 rounded-xl px-2 text-[0.8125rem] cursor-pointer select-none hover:bg-base-50/40 dark:hover:bg-base-800/40"
 						>
 							<Folder className="size-3.5" strokeWidth="1.5" />
 
@@ -548,7 +324,7 @@
 							{#if folder?.id}
 								<button
 									draggable="false"
-									class="flex h-[1.6875rem] w-full items-center gap-2 overflow-hidden rounded-xl px-2 text-[0.8125rem] cursor-pointer hover:bg-gray-50/40 dark:hover:bg-gray-800/40"
+									class="flex h-[1.6875rem] w-full items-center gap-2 overflow-hidden rounded-xl px-2 text-[0.8125rem] cursor-pointer hover:bg-base-50/40 dark:hover:bg-base-800/40"
 									on:click={() => {
 										moveChatHandler(chat.id, folder.id);
 									}}
@@ -567,7 +343,7 @@
 				{#if $visibleControls['chat.archive']}
 					<button
 						draggable="false"
-						class="flex h-[1.6875rem] w-full items-center gap-2 rounded-xl px-2 text-[0.8125rem] cursor-pointer select-none hover:bg-gray-50/40 dark:hover:bg-gray-800/40"
+						class="flex h-[1.6875rem] w-full items-center gap-2 rounded-xl px-2 text-[0.8125rem] cursor-pointer select-none hover:bg-base-50/40 dark:hover:bg-base-800/40"
 						on:click={() => {
 							archiveChatHandler();
 						}}
@@ -582,7 +358,7 @@
 				{#if $user?.role === 'admin' || ($user?.permissions?.chat?.delete ?? true)}
 					<button
 						draggable="false"
-						class="flex h-[1.6875rem] w-full items-center gap-2 rounded-xl px-2 text-[0.8125rem] cursor-pointer select-none hover:bg-gray-50/40 dark:hover:bg-gray-800/40"
+						class="flex h-[1.6875rem] w-full items-center gap-2 rounded-xl px-2 text-[0.8125rem] cursor-pointer select-none hover:bg-base-50/40 dark:hover:bg-base-800/40"
 						on:click={() => {
 							deleteChatHandler();
 						}}
@@ -593,12 +369,29 @@
 				{/if}
 
 				{#if $visibleControls['chat.tags']}
-					<hr class="border-gray-50/30 dark:border-gray-800/30 mx-1 my-0.5" />
+					<hr class="border-base-50/30 dark:border-base-800/30 mx-1 my-0.5" />
 
-					<!-- svelte-ignore a11y-click-events-have-key-events a11y-no-static-element-interactions -->
-					<div class="flex max-h-28 overflow-y-auto px-2 py-1" on:click={(e) => e.preventDefault()}>
-						<Tags chatId={chat.id} />
-					</div>
+					<!-- Same picker as folder chats. -->
+					<DropdownSub contentClass="select-none z-50 w-52" maxWidth={240}>
+						<button
+							slot="trigger"
+							draggable="false"
+							class="flex h-[1.6875rem] w-full items-center gap-2 rounded-xl px-2 text-[0.8125rem] cursor-pointer select-none hover:bg-base-50/40 dark:hover:bg-base-800/40"
+						>
+							<Tag className="size-3.5" strokeWidth="1.5" />
+							<div class="flex flex-1 items-center">{$i18n.t('Tags')}</div>
+							{#if chat?.meta?.tags?.length}<span class="text-xs tabular-nums text-base-400"
+									>{chat.meta.tags.length}</span
+								>{/if}
+							<ChevronRight className="size-3.5 shrink-0 text-base-400 rtl:rotate-180" />
+						</button>
+						<TagPicker
+							id={chat.id}
+							onChange={(next) => {
+								if (chat?.meta) chat.meta.tags = next.map((tag) => tag.id);
+							}}
+						/>
+					</DropdownSub>
 				{/if}
 			{/if}
 		</DropdownMenu>

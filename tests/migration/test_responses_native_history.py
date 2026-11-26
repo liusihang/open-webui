@@ -65,8 +65,11 @@ def history():
 
 
 def scope():
-    result = {'copy': copy, 'Optional': Optional, 'JSONCodec': SimpleNamespace(dumps=json.dumps)}
+    from open_webui.utils.tool_calling import prepare_tool_call
+    result = {'prepare_tool_call': prepare_tool_call, 'copy': copy, 'Optional': Optional, 'JSONCodec': json}
     for name in (
+        'merge_tool_call_batches',
+        'is_empty_reply',
         'get_provider_function',
         'get_paired_tool_call_ids',
         'reconcile_tool_pairs',

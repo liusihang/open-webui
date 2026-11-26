@@ -12,6 +12,7 @@ from urllib.parse import quote
 import aiohttp
 import numpy as np
 import requests
+import tiktoken
 from fastapi import HTTPException
 from langchain_classic.retrievers import (
     ContextualCompressionRetriever,
@@ -52,8 +53,9 @@ from open_webui.retrieval.vector.main import GetResult, SearchResult
 from open_webui.retrieval.web.utils import get_web_loader
 from open_webui.utils.access_control.files import get_owner_accessible_folder_files, has_access_to_file
 from open_webui.utils.access_control.folders import has_folder_access
+from open_webui.utils.access_control.notes import has_note_access
 from open_webui.utils.headers import get_json_bearer_headers, include_user_info_headers
-from open_webui.utils.misc import get_content_from_message, get_message_list
+from open_webui.utils.misc import get_content_from_message, get_message_list, strict_match_mime_type
 
 log = logging.getLogger(__name__)
 
@@ -76,6 +78,12 @@ class BM25Retriever(BaseRetriever):
 def is_youtube_url(url: str) -> bool:
     youtube_regex = r'^(https?://)?(www\.)?(youtube\.com|youtu\.be)/.+$'
     return re.match(youtube_regex, url) is not None
+
+
+async def is_media_content_type(content_type: str | None) -> bool:
+    content_type = content_type or ''
+    stt_supported = await Config.get('audio.stt.supported_content_types', [])
+    return content_type.startswith(('image/', 'video/')) or bool(strict_match_mime_type(stt_supported, content_type))
 
 
 def get_loader(request, url: str, config: dict):
@@ -334,7 +342,7 @@ def query_doc(collection_name: str, query_embedding: list[float], k: int, user: 
     )
 
     if result:
-        log.info('query_doc:result %s %s', result.ids, result.metadatas)
+        log.debug('query_doc:result %s %s', result.ids, result.metadatas)
 
     return result
 
@@ -345,7 +353,7 @@ def get_doc(collection_name: str, user: UserModel = None):
         result = get_vector_db_client().get(collection_name=collection_name)
 
         if result:
-            log.info('query_doc:result %s %s', result.ids, result.metadatas)
+            log.debug('query_doc:result %s %s', result.ids, result.metadatas)
 
         return result
     except Exception as e:
@@ -595,7 +603,7 @@ async def query_doc_with_hybrid_search(
         'metadatas': [metadatas],
     }
 
-    log.info('query_doc_with_hybrid_search:result %s %s', result['metadatas'], result['distances'])
+    log.debug('query_doc_with_hybrid_search:result %s %s', result['metadatas'], result['distances'])
     return result
 
 
@@ -687,27 +695,7 @@ async def query_collection(
     embedding_function,
     k: int,
     user: UserModel | None = None,
-    search_options: dict | None = None,
 ) -> dict:
-    # Published evidence mappings, not a guessed file-{id}/KB physical table,
-    # determine which candidate version is visible. Keep the legacy path only
-    # for collections without a local mapping.
-    local_results, remaining = [], []
-    if request is not None and user is not None:
-        from open_webui.retrieval.integration import query_local_collection
-
-        for name in collection_names:
-            handled = False
-            for query in (q for q in queries if q):
-                result = await query_local_collection(request, collection_name=name, query=query, count=k, user=user)
-                if result is not None:
-                    local_results.append(result.model_dump() if hasattr(result, 'model_dump') else result)
-                    handled = True
-            if not handled:
-                remaining.append(name)
-        if not remaining:
-            return merge_and_sort_query_results(local_results, k=k)
-        collection_names = remaining
     config = await Config.get_many(
         'rag.enable_hybrid_search',
         'rag.embedding_query_prefix',
@@ -716,7 +704,6 @@ async def query_collection(
         'rag.hybrid_bm25_weight',
         'rag.enable_hybrid_search_enriched_texts',
     )
-    config.update({key: value for key, value in (search_options or {}).items() if key in config and value is not None})
     # When request is provided, try hybrid search + reranking if enabled
     if request and config.get('rag.enable_hybrid_search'):
         try:
@@ -725,7 +712,7 @@ async def query_collection(
                 if request.app.state.RERANKING_FUNCTION
                 else None
             )
-            hybrid = await query_collection_with_hybrid_search(
+            return await query_collection_with_hybrid_search(
                 collection_names=collection_names,
                 queries=queries,
                 embedding_function=embedding_function,
@@ -736,11 +723,10 @@ async def query_collection(
                 hybrid_bm25_weight=config.get('rag.hybrid_bm25_weight'),
                 enable_enriched_texts=config.get('rag.enable_hybrid_search_enriched_texts'),
             )
-            return merge_and_sort_query_results([*local_results, hybrid], k=k)
         except Exception as e:
             log.debug('Hybrid search failed, falling back to vector search: %s', e)
 
-    results = list(local_results)
+    results = []
     last_error = None
     failed_collection_names = set()
 
@@ -1330,13 +1316,6 @@ async def has_access_to_collection(collection_name: str, user: UserModel, access
         else:
             has_access = await Knowledges.check_access_by_user_id(resolved_name, user.id, permission=access_type)
             if not has_access and not await Knowledges.get_knowledge_by_id(resolved_name):
-                from open_webui.internal.db import get_async_db
-                from open_webui.models.ingestion_jobs import IngestionCollection
-
-                async with get_async_db() as db:
-                    own_alias = await db.get(IngestionCollection, (user.id, collection_name))
-                if own_alias:
-                    has_authorized_collection = True
                 continue
 
         # A denied collection must win even when another name is authorized or unscoped names are enabled.
@@ -1384,9 +1363,9 @@ async def filter_accessible_collections(
         return safe_names
 
     validated = set()
-    for name in safe_names:
-        if await has_access_to_collection(name, user, access_type):
-            validated.add(name)
+    for collection_name in safe_names:
+        if await has_access_to_collection(collection_name, user, access_type):
+            validated.add(collection_name)
     return validated
 
 
@@ -1400,6 +1379,17 @@ def filter_source_metadata(metadata: dict) -> dict:
         if type(page) is int and page >= 0:
             result['page'] = page + 1
     return result
+
+
+TIKTOKEN_DISALLOWED_SPECIAL = ()
+
+
+def is_full_text(content: str, config: dict) -> bool:
+    threshold = config.get('rag.full_context_char_threshold') or 0
+    if threshold and config.get('rag.full_text_threshold_type') == 'token':
+        encoding = tiktoken.get_encoding(config['rag.tiktoken_encoding_name'])
+        return 0 < len(encoding.encode(content, disallowed_special=TIKTOKEN_DISALLOWED_SPECIAL)) <= threshold
+    return 0 < len(content) <= threshold
 
 
 async def get_sources_from_items(
@@ -1418,7 +1408,13 @@ async def get_sources_from_items(
 ):
     log.debug('items: %s %s %s %s %s', items, queries, embedding_function, reranking_function, full_context)
 
-    bypass_embedding_and_retrieval = await Config.get('rag.bypass_embedding_and_retrieval')
+    context_config = await Config.get_many(
+        'rag.bypass_embedding_and_retrieval',
+        'rag.full_context_char_threshold',
+        'rag.full_text_threshold_type',
+        'rag.tiktoken_encoding_name',
+    )
+    bypass_embedding_and_retrieval = context_config.get('rag.bypass_embedding_and_retrieval')
     extracted_collections = []
     query_results = []
     folder_items = set()
@@ -1447,7 +1443,8 @@ async def get_sources_from_items(
             # Raw Text
             # Used during temporary chat file uploads or web page & youtube attachements
 
-            if item.get('context') == 'full':
+            content = (item.get('file') or {}).get('data', {}).get('content') or ''
+            if item.get('context') == 'full' or await asyncio.to_thread(is_full_text, content, context_config):
                 if item.get('file'):
                     # if item has file data, use it
                     query_result = {
@@ -1477,16 +1474,7 @@ async def get_sources_from_items(
             # Note Attached
             note = await Notes.get_note_by_id(item.get('id'))
 
-            if note and (
-                user.role == 'admin'
-                or note.user_id == user.id
-                or await AccessGrants.has_access(
-                    user_id=user.id,
-                    resource_type='note',
-                    resource_id=note.id,
-                    permission='read',
-                )
-            ):
+            if note and (user.role == 'admin' or await has_note_access(user.id, note, 'read')):
                 # User has access to the note
                 query_result = {
                     'documents': [[page['content'].get('md', '') for page in note.data['pages']]],
@@ -1594,23 +1582,34 @@ async def get_sources_from_items(
                 # full-context branch above).
                 file_id = item.get('id')
                 if file_id:
-                    if BYPASS_RETRIEVAL_ACCESS_CONTROL:
-                        if item.get('legacy'):
-                            collection_names.append(f'{file_id}')
-                        else:
-                            collection_names.append(f'file-{file_id}')
-                    else:
-                        file_object = await Files.get_file_by_id(file_id)
-                        if file_object and (
+                    file_object = await Files.get_file_by_id(file_id)
+                    if BYPASS_RETRIEVAL_ACCESS_CONTROL or (
+                        file_object
+                        and (
                             user.role == 'admin'
                             or file_object.user_id == user.id
                             or await has_access_to_file(file_id, 'read', user)
                             or ('file', file_id) in folder_items
-                        ):
-                            if item.get('legacy'):
-                                collection_names.append(f'{file_id}')
-                            else:
-                                collection_names.append(f'file-{file_id}')
+                        )
+                    ):
+                        content = (file_object.data or {}).get('content') or '' if file_object else ''
+                        if await asyncio.to_thread(is_full_text, content, context_config):
+                            query_result = {
+                                'documents': [[content]],
+                                'metadatas': [
+                                    [
+                                        {
+                                            'file_id': file_id,
+                                            'name': file_object.filename,
+                                            'source': file_object.filename,
+                                        }
+                                    ]
+                                ],
+                            }
+                        elif item.get('legacy'):
+                            collection_names.append(f'{file_id}')
+                        else:
+                            collection_names.append(f'file-{file_id}')
 
         elif item.get('type') == 'collection':
             # Manual Full Mode Toggle for Collection
@@ -1639,35 +1638,14 @@ async def get_sources_from_items(
 
                 else:
                     if item.get('context') == 'full' or bypass_embedding_and_retrieval:
-                        if knowledge_base and (
-                            user.role == 'admin'
-                            or knowledge_base.user_id == user.id
-                            or await AccessGrants.has_access(
-                                user_id=user.id,
-                                resource_type='knowledge',
-                                resource_id=knowledge_base.id,
-                                permission='read',
-                            )
-                            or ('collection', item.get('id')) in folder_items
-                        ):
-                            files = await Knowledges.get_files_by_id(knowledge_base.id)
-
-                            documents = []
-                            metadatas = []
-                            for file in files:
-                                documents.append(file.data.get('content', ''))
-                                metadatas.append(
-                                    {
-                                        'file_id': file.id,
-                                        'name': file.filename,
-                                        'source': file.filename,
-                                    }
-                                )
-
-                            query_result = {
-                                'documents': [documents],
-                                'metadatas': [metadatas],
-                            }
+                        files = await Knowledges.get_files_by_id(knowledge_base.id)
+                        documents = [(file.data or {}).get('content') or '' for file in files]
+                        query_result = {
+                            'documents': [documents],
+                            'metadatas': [
+                                [{'file_id': file.id, 'name': file.filename, 'source': file.filename} for file in files]
+                            ],
+                        }
                     else:
                         if item.get('legacy'):
                             if BYPASS_RETRIEVAL_ACCESS_CONTROL:

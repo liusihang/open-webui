@@ -14,7 +14,7 @@
 	import { banners as _banners, config, showChangelog } from '$lib/stores';
 	import type { Banner } from '$lib/types';
 	import { compareVersion } from '$lib/utils';
-	import { onMount, getContext } from 'svelte';
+	import { onMount, getContext, tick } from 'svelte';
 	import { toast } from 'svelte-sonner';
 	import Textarea from '$lib/components/common/Textarea.svelte';
 	import Banners from './Interface/Banners.svelte';
@@ -22,6 +22,7 @@
 	import AdminSettingField from './AdminSettingField.svelte';
 	import AdminSettingRow from './AdminSettingRow.svelte';
 	import AdminSettingSection from './AdminSettingSection.svelte';
+	import AdminSettingSaveButton from './AdminSettingSaveButton.svelte';
 	import Plus from '$lib/components/icons/Plus.svelte';
 	import I18nSettings from './I18nSettings.svelte';
 	import { updateI18n } from '$lib/i18n';
@@ -46,10 +47,48 @@
 
 	let banners: Banner[] = [];
 	let bannerLocale = '';
+
+	let savedConfig: Record<string, any> | null = null;
+	$: settings = {
+		...adminConfig,
+		DEFAULT_INTERFACE_SETTINGS: defaultInterfaceSettings,
+		I18N: uiI18nEntries,
+		BANNERS: banners
+	};
+	$: settingLabels = {
+		ENABLE_COMMUNITY_SHARING: $i18n.t('settings.admin.general.communitySharing.label'),
+		ENABLE_MESSAGE_RATING: $i18n.t('settings.admin.general.messageRating.label'),
+		ENABLE_FOLDERS: $i18n.t('settings.admin.general.folders.label'),
+		FOLDER_MAX_FILE_COUNT: $i18n.t('settings.admin.general.folderMaxFileCount.label'),
+		ENABLE_MEMORIES: $i18n.t('settings.admin.general.memories.label'),
+		ENABLE_MEMORY_SYSTEM_CONTEXT: $i18n.t('settings.admin.general.memorySystemContext.label'),
+		ENABLE_SKILL_LAZY_LOADING: $i18n.t('settings.admin.general.skillLazyLoading.label'),
+		SKILL_CONTENT_MAX_CHARS: $i18n.t('settings.admin.general.skillContentMaxChars.label'),
+		SKILL_PREVIEW_MAX_CHARS: $i18n.t('settings.admin.general.skillPreviewMaxChars.label'),
+		VIEW_CHAT_MAX_CHARS: $i18n.t('settings.admin.general.viewChatMaxChars.label'),
+		TOOL_OUTPUT_MAX_CHARS: $i18n.t('settings.admin.general.toolOutputMaxChars.label'),
+		ENABLE_NOTES: $i18n.t('settings.admin.general.notes.label'),
+		ENABLE_COMMENTS: $i18n.t('settings.admin.general.comments.label'),
+		ENABLE_NOTIFICATIONS: $i18n.t('settings.admin.general.notifications.label'),
+		ENABLE_CHANNELS: $i18n.t('settings.admin.general.channels.label'),
+		ENABLE_ENCRYPTED_CHANNELS: $i18n.t('settings.admin.general.encryptedChannels.label'),
+		CHANNEL_MODEL_RESPONSE_MODE: $i18n.t('settings.admin.general.modelResponseMode.label'),
+		ENABLE_APPS: $i18n.t('settings.admin.general.apps.label'),
+		ENABLE_CALENDAR: $i18n.t('settings.admin.general.calendar.label'),
+		ENABLE_AUTOMATIONS: $i18n.t('settings.admin.general.automations.label'),
+		ENABLE_AUTOMATION_WEBHOOKS: $i18n.t('settings.admin.general.automationWebhooks.label'),
+		ENABLE_USER_WEBHOOKS: $i18n.t('settings.admin.general.userWebhooks.label'),
+		ENABLE_USER_STATUS: $i18n.t('settings.admin.general.userStatus.label'),
+		RESPONSE_WATERMARK: $i18n.t('settings.admin.general.responseWatermark.label'),
+		WEBUI_URL: $i18n.t('settings.admin.general.webuiUrl.label'),
+		I18N: $i18n.t('settings.admin.general.translations.uiTranslations.label'),
+		DEFAULT_INTERFACE_SETTINGS: $i18n.t('Default Interface Settings'),
+		BANNERS: $i18n.t('settings.admin.general.banners.label')
+	};
 	const inputClass =
-		'w-full h-7 rounded-lg border border-gray-100/50 bg-gray-50/40 px-2 text-xs text-gray-700 outline-hidden transition-colors placeholder:text-gray-300 focus:border-blue-400 dark:border-white/[0.04] dark:bg-white/[0.03] dark:text-gray-300 dark:placeholder:text-gray-700 dark:focus:border-blue-500';
+		'w-full h-7 rounded-lg border border-base-100/50 bg-base-50/40 px-2 text-xs text-base-700 outline-hidden transition-colors placeholder:text-base-300 focus:border-blue-400 dark:border-base-0/[0.04] dark:bg-base-0/[0.03] dark:text-base-300 dark:placeholder:text-base-700 dark:focus:border-blue-500';
 	const textareaClass =
-		'w-full rounded-lg border border-gray-100/50 bg-gray-50/40 px-2 py-1.5 text-xs text-gray-700 outline-hidden transition-colors placeholder:text-gray-300 focus:border-blue-400 dark:border-white/[0.04] dark:bg-white/[0.03] dark:text-gray-300 dark:placeholder:text-gray-700 dark:focus:border-blue-500';
+		'w-full rounded-lg border border-base-100/50 bg-base-50/40 px-2 py-1.5 text-xs text-base-700 outline-hidden transition-colors placeholder:text-base-300 focus:border-blue-400 dark:border-base-0/[0.04] dark:bg-base-0/[0.03] dark:text-base-300 dark:placeholder:text-base-700 dark:focus:border-blue-500';
 	const checkForVersionUpdates = async () => {
 		updateAvailable = null;
 		version = await getVersionUpdates(localStorage.token).catch((error) => {
@@ -91,6 +130,8 @@
 						: intelligentUiPrompt,
 				SKILL_CONTENT_MAX_CHARS: adminConfig.SKILL_CONTENT_MAX_CHARS ?? null,
 				SKILL_PREVIEW_MAX_CHARS: adminConfig.SKILL_PREVIEW_MAX_CHARS ?? null,
+				VIEW_CHAT_MAX_CHARS: adminConfig.VIEW_CHAT_MAX_CHARS ?? null,
+				TOOL_OUTPUT_MAX_CHARS: adminConfig.TOOL_OUTPUT_MAX_CHARS ?? null,
 				DEFAULT_INTERFACE_SETTINGS: defaultInterfaceSettings,
 				I18N: cleaned
 			});
@@ -104,6 +145,7 @@
 			}
 			await updateI18n(res.I18N ?? cleaned);
 			await updateBanners();
+			savedConfig = structuredClone(settings);
 			await config.set(await getBackendConfig());
 			saveHandler();
 		} catch (error) {
@@ -128,6 +170,9 @@
 
 		banners = [...$_banners];
 
+		await tick();
+		savedConfig = structuredClone(settings);
+
 		if (WEBUI_BUILD_CHANNEL === 'main' && $config?.features?.enable_version_update_check) {
 			checkForVersionUpdates();
 		}
@@ -140,7 +185,7 @@
 		updateHandler();
 	}}
 >
-	<h2 class="text-sm font-medium text-gray-900 dark:text-white mb-4">
+	<h2 class="text-sm font-medium text-base-900 dark:text-base-0 mb-4">
 		{$i18n.t('settings.admin.general.title')}
 	</h2>
 
@@ -149,22 +194,22 @@
 			<AdminSettingSection first>
 				<div class="flex items-start justify-between gap-4">
 					<div class="min-w-0 text-xs">
-						<div class="text-gray-600 dark:text-gray-400">
+						<div class="text-base-600 dark:text-base-400">
 							{$i18n.t('settings.admin.general.version.label')}
 						</div>
-						<div class="mt-1 flex flex-wrap gap-x-1 text-gray-700 dark:text-gray-200">
+						<div class="mt-1 flex flex-wrap gap-x-1 text-base-700 dark:text-base-200">
 							<BuildVersion />
 
 							{#if WEBUI_BUILD_CHANNEL === 'main' && $config?.features?.enable_version_update_check}
 								{#if version.latest === null}
-									<span class="text-gray-500 dark:text-gray-500"
+									<span class="text-base-500 dark:text-base-500"
 										>{$i18n.t('Could not check for updates')}</span
 									>
 								{:else}
 									<a
 										href="https://github.com/open-webui/open-webui/releases/tag/v{version.latest}"
 										target="_blank"
-										class="text-gray-500 hover:text-gray-700 dark:text-gray-500 dark:hover:text-gray-300"
+										class="text-base-500 hover:text-base-700 dark:text-base-500 dark:hover:text-base-300"
 									>
 										{updateAvailable === null
 											? $i18n.t('Checking for updates...')
@@ -177,7 +222,7 @@
 						</div>
 
 						<button
-							class="mt-0.5 text-xs text-gray-400 transition-colors hover:text-gray-700 dark:text-gray-600 dark:hover:text-gray-300"
+							class="mt-0.5 text-xs text-base-400 transition-colors hover:text-base-700 dark:text-base-600 dark:hover:text-base-300"
 							type="button"
 							on:click={() => {
 								showChangelog.set(true);
@@ -189,7 +234,7 @@
 
 					{#if WEBUI_BUILD_CHANNEL === 'main' && $config?.features?.enable_version_update_check}
 						<button
-							class="shrink-0 text-xs text-gray-500 transition-colors hover:text-gray-900 dark:text-gray-500 dark:hover:text-white"
+							class="shrink-0 text-xs text-base-500 transition-colors hover:text-base-900 dark:text-base-500 dark:hover:text-base-0"
 							type="button"
 							on:click={() => {
 								checkForVersionUpdates();
@@ -203,10 +248,10 @@
 				<div class="text-xs">
 					<div class="flex items-start justify-between gap-4">
 						<div class="min-w-0">
-							<div class="text-gray-600 dark:text-gray-400">
+							<div class="text-base-600 dark:text-base-400">
 								{$i18n.t('settings.admin.general.help.label')}
 							</div>
-							<div class="mt-0.5 text-gray-400 dark:text-gray-600">
+							<div class="mt-0.5 text-base-400 dark:text-base-600">
 								<!-- LICENSE covers this Open WebUI wordmark.
 								Do not alter, remove, obscure, or replace it except as LICENSE permits:
 								https://docs.openwebui.com/license. -->
@@ -215,7 +260,7 @@
 						</div>
 
 						<a
-							class="shrink-0 text-gray-500 transition-colors hover:text-gray-900 dark:text-gray-500 dark:hover:text-white"
+							class="shrink-0 text-base-500 transition-colors hover:text-base-900 dark:text-base-500 dark:hover:text-base-0"
 							href="https://docs.openwebui.com/"
 							target="_blank"
 						>
@@ -223,19 +268,19 @@
 						</a>
 					</div>
 
-					<div class="mt-1 flex flex-wrap gap-x-3 gap-y-1 text-gray-400 dark:text-gray-600">
+					<div class="mt-1 flex flex-wrap gap-x-3 gap-y-1 text-base-400 dark:text-base-600">
 						<a
-							class="hover:text-gray-700 dark:hover:text-gray-300"
+							class="hover:text-base-700 dark:hover:text-base-300"
 							href="https://discord.gg/5rJgQTnV4s"
 							target="_blank">Discord</a
 						>
 						<a
-							class="hover:text-gray-700 dark:hover:text-gray-300"
+							class="hover:text-base-700 dark:hover:text-base-300"
 							href="https://twitter.com/OpenWebUI"
 							target="_blank">X</a
 						>
 						<a
-							class="hover:text-gray-700 dark:hover:text-gray-300"
+							class="hover:text-base-700 dark:hover:text-base-300"
 							href="https://github.com/open-webui/open-webui"
 							target="_blank">GitHub</a
 						>
@@ -246,7 +291,7 @@
 					<!-- LICENSE covers this Open WebUI license attribution.
 					Do not alter, remove, obscure, or replace it except as LICENSE permits:
 					https://docs.openwebui.com/license. -->
-					<div class="text-gray-600 dark:text-gray-400">
+					<div class="text-base-600 dark:text-base-400">
 						{$i18n.t('settings.admin.general.license.label')}
 					</div>
 
@@ -254,28 +299,28 @@
 						<a
 							href="https://docs.openwebui.com/enterprise"
 							target="_blank"
-							class="mt-0.5 block text-gray-500"
+							class="mt-0.5 block text-base-500"
 						>
-							<span class="capitalize text-black dark:text-white"
+							<span class="capitalize text-base-1000 dark:text-base-0"
 								>{$config?.license_metadata?.type} license</span
 							>
 							{$i18n.t('registered to')}
-							<span class="capitalize text-black dark:text-white"
+							<span class="capitalize text-base-1000 dark:text-base-0"
 								>{$config?.license_metadata?.organization_name}</span
 							>
 							for
-							<span class="text-black dark:text-white"
+							<span class="text-base-1000 dark:text-base-0"
 								>{$config?.license_metadata?.seats ?? 'Unlimited'} users.</span
 							>
 						</a>
 						{#if $config?.license_metadata?.html}
-							<div class="mt-0.5 text-gray-500">
+							<div class="mt-0.5 text-base-500">
 								{@html DOMPurify.sanitize($config?.license_metadata?.html)}
 							</div>
 						{/if}
 					{:else}
 						<a
-							class="mt-0.5 block text-gray-400 transition-colors hover:text-gray-700 dark:text-gray-600 dark:hover:text-gray-300"
+							class="mt-0.5 block text-base-400 transition-colors hover:text-base-700 dark:text-base-600 dark:hover:text-base-300"
 							href="https://docs.openwebui.com/enterprise"
 							target="_blank"
 						>
@@ -388,7 +433,7 @@
 					<AdminSettingRow
 						label={$i18n.t('settings.admin.general.memorySystemContext.label')}
 						description={$i18n.t('settings.admin.general.memorySystemContext.description')}
-						labelClassName="text-gray-500 dark:text-gray-500"
+						labelClassName="text-base-500 dark:text-base-500"
 						let:labelId
 					>
 						<Switch
@@ -434,6 +479,36 @@
 						bind:value={adminConfig.SKILL_PREVIEW_MAX_CHARS}
 					/>
 				</AdminSettingField>
+				<AdminSettingField
+					forId="view-chat-max-chars"
+					label={$i18n.t('settings.admin.general.viewChatMaxChars.label')}
+					description={$i18n.t('settings.admin.general.viewChatMaxChars.description')}
+				>
+					<input
+						id="view-chat-max-chars"
+						class={inputClass}
+						type="number"
+						min="1"
+						step="1"
+						placeholder={$i18n.t('No limit')}
+						bind:value={adminConfig.VIEW_CHAT_MAX_CHARS}
+					/>
+				</AdminSettingField>
+				<AdminSettingField
+					forId="tool-output-max-chars"
+					label={$i18n.t('settings.admin.general.toolOutputMaxChars.label')}
+					description={$i18n.t('settings.admin.general.toolOutputMaxChars.description')}
+				>
+					<input
+						id="tool-output-max-chars"
+						class={inputClass}
+						type="number"
+						min="1"
+						step="1"
+						placeholder={$i18n.t('No limit')}
+						bind:value={adminConfig.TOOL_OUTPUT_MAX_CHARS}
+					/>
+				</AdminSettingField>
 				<AdminSettingRow
 					label={$i18n.t('settings.admin.general.notes.label')}
 					description={$i18n.t('settings.admin.general.notes.description')}
@@ -466,7 +541,7 @@
 					<AdminSettingRow
 						label={$i18n.t('settings.admin.general.encryptedChannels.label')}
 						description={$i18n.t('settings.admin.general.encryptedChannels.description')}
-						labelClassName="text-gray-500 dark:text-gray-500"
+						labelClassName="text-base-500 dark:text-base-500"
 						let:labelId
 					>
 						<Switch bind:state={adminConfig.ENABLE_ENCRYPTED_CHANNELS} ariaLabelledbyId={labelId} />
@@ -474,7 +549,7 @@
 					<AdminSettingRow
 						label={$i18n.t('settings.admin.general.modelResponseMode.label')}
 						description={$i18n.t('settings.admin.general.modelResponseMode.description')}
-						labelClassName="text-gray-500 dark:text-gray-500"
+						labelClassName="text-base-500 dark:text-base-500"
 						let:labelId
 					>
 						<SettingsSelect
@@ -507,6 +582,18 @@
 				>
 					<Switch bind:state={adminConfig.ENABLE_AUTOMATIONS} ariaLabelledbyId={labelId} />
 				</AdminSettingRow>
+				{#if adminConfig.ENABLE_AUTOMATIONS}
+					<AdminSettingRow
+						label={$i18n.t('settings.admin.general.automationWebhooks.label')}
+						description={$i18n.t('settings.admin.general.automationWebhooks.description')}
+						let:labelId
+					>
+						<Switch
+							bind:state={adminConfig.ENABLE_AUTOMATION_WEBHOOKS}
+							ariaLabelledbyId={labelId}
+						/>
+					</AdminSettingRow>
+				{/if}
 				<AdminSettingRow
 					label={$i18n.t('settings.admin.general.userWebhooks.label')}
 					description={$i18n.t('settings.admin.general.userWebhooks.description')}
@@ -530,6 +617,7 @@
 						className={textareaClass}
 						placeholder={$i18n.t('Enter a watermark for the response. Leave empty for none.')}
 						bind:value={adminConfig.RESPONSE_WATERMARK}
+						maxSize={200}
 					/>
 				</AdminSettingField>
 
@@ -557,14 +645,14 @@
 				<div class="shrink-0">
 					<div class="flex items-center justify-between gap-4 py-0.5">
 						<button
-							class="min-w-0 flex-1 text-left text-xs text-gray-600 transition hover:text-gray-900 dark:text-gray-400 dark:hover:text-gray-100"
+							class="min-w-0 flex-1 text-left text-xs text-base-600 transition hover:text-base-900 dark:text-base-400 dark:hover:text-base-100"
 							type="button"
 							on:click={() => {
 								showUserUiDefaults = !showUserUiDefaults;
 							}}
 						>
 							<div>{$i18n.t('Default Interface Settings')}</div>
-							<div class="mt-1.5 text-[0.6875rem] text-gray-400 dark:text-gray-600">
+							<div class="mt-1.5 text-[0.6875rem] text-base-400 dark:text-base-600">
 								{$i18n.t(
 									'Set system-wide interface defaults for every account. Personal settings override these defaults.'
 								)}
@@ -572,7 +660,7 @@
 						</button>
 
 						<button
-							class="shrink-0 text-[0.6875rem] text-gray-400 transition hover:text-gray-700 dark:text-gray-600 dark:hover:text-gray-300"
+							class="shrink-0 text-[0.6875rem] text-base-400 transition hover:text-base-700 dark:text-base-600 dark:hover:text-base-300"
 							type="button"
 							on:click={() => {
 								showUserUiDefaults = !showUserUiDefaults;
@@ -585,14 +673,14 @@
 					{#if showUserUiDefaults}
 						<div class="mt-0.5 space-y-2">
 							<div class="flex items-center justify-between gap-4 py-0.5">
-								<div class="text-[0.6875rem] text-gray-400 dark:text-gray-600">
+								<div class="text-[0.6875rem] text-base-400 dark:text-base-600">
 									{Object.keys(defaultInterfaceSettings).length}
 									{$i18n.t('settings configured')}
 								</div>
 
 								{#if Object.keys(defaultInterfaceSettings).length > 0}
 									<button
-										class="shrink-0 text-[0.6875rem] text-gray-400 transition hover:text-gray-700 dark:text-gray-600 dark:hover:text-gray-300"
+										class="shrink-0 text-[0.6875rem] text-base-400 transition hover:text-base-700 dark:text-base-600 dark:hover:text-base-300"
 										type="button"
 										on:click={() => {
 											defaultInterfaceSettings = {};
@@ -615,7 +703,7 @@
 
 				<div>
 					<div class="mb-1 flex min-h-7 w-full items-center justify-between gap-2">
-						<div class="min-w-0 text-xs text-gray-600 dark:text-gray-400">
+						<div class="min-w-0 text-xs text-base-600 dark:text-base-400">
 							{$i18n.t('settings.admin.general.banners.label')}
 						</div>
 						<div class="flex shrink-0 items-center gap-1">
@@ -623,7 +711,7 @@
 								<LanguageModeSelect bind:value={bannerLocale} className="w-fit" />
 							{/if}
 							<button
-								class="flex size-6 items-center justify-center text-gray-400 dark:text-gray-600"
+								class="flex size-6 items-center justify-center text-base-400 dark:text-base-600"
 								type="button"
 								aria-label={$i18n.t('settings.admin.general.addBanner.label')}
 								on:click={() => {
@@ -646,7 +734,7 @@
 							</button>
 						</div>
 					</div>
-					<div class="mb-2 text-[0.6875rem] text-gray-400 dark:text-gray-600">
+					<div class="mb-2 text-[0.6875rem] text-base-400 dark:text-base-600">
 						{$i18n.t('Create announcements shown to users in the app.')}
 					</div>
 					<Banners bind:banners locale={bannerLocale} />
@@ -656,12 +744,6 @@
 	</div>
 
 	<div class="flex justify-end pt-6 text-sm font-normal">
-		<button
-			class="flex h-7 shrink-0 items-center justify-center gap-1.5 rounded-lg bg-gray-900 px-2.5 text-xs font-normal text-white transition hover:bg-black disabled:opacity-60 dark:bg-gray-100 dark:text-gray-900 dark:hover:bg-white"
-			type="submit"
-			disabled={saving}
-		>
-			{$i18n.t('Save')}
-		</button>
+		<AdminSettingSaveButton {settings} {savedConfig} labels={settingLabels} disabled={saving} />
 	</div>
 </form>

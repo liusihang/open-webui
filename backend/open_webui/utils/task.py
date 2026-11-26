@@ -15,6 +15,16 @@ log = logging.getLogger(__name__)
 # Let the right tool be given for the work at hand,
 # not the one that flatters, but the one that serves.
 def get_task_model_id(default_model_id: str, task_model: str, task_model_external: str, models) -> str:
+    if default_model_id.startswith('agent:'):
+        # Agent sessions cannot serve ordinary completion requests for background tasks.
+        return next(
+            (
+                model
+                for model in (task_model_external, task_model)
+                if model and model in models and not model.startswith('agent:')
+            ),
+            default_model_id,
+        )
     task_model_id = default_model_id
     # Use an available task model override for the local or external connection.
     if models.get(task_model_id, {}).get('connection_type') == 'local':
@@ -303,14 +313,15 @@ async def rag_template(template: str, context: str, query: str):
     return template
 
 
-async def title_generation_template(template: str, messages: list[dict], user: Optional[Any] = None) -> str:
-    prompt = get_last_user_message(messages)
-    template = replace_prompt_variable(template, prompt)
+async def render_template(template: str, messages: list[dict], user: Optional[Any] = None) -> str:
+    """Fill {{prompt}}, {{MESSAGES}} and user variables in a task template."""
+    template = replace_prompt_variable(template, get_last_user_message(messages) or '')
     template = replace_messages_variable(template, messages)
+    return await prompt_template(template, user)
 
-    template = await prompt_template(template, user)
 
-    return template
+async def title_generation_template(template: str, messages: list[dict], user: Optional[Any] = None) -> str:
+    return await render_template(template, messages, user)
 
 
 async def follow_up_generation_template(
@@ -367,21 +378,11 @@ def parse_follow_ups(content: str, max_count: int = 5) -> list[str]:
 
 
 async def tags_generation_template(template: str, messages: list[dict], user: Optional[Any] = None) -> str:
-    prompt = get_last_user_message(messages)
-    template = replace_prompt_variable(template, prompt)
-    template = replace_messages_variable(template, messages)
-
-    template = await prompt_template(template, user)
-    return template
+    return await render_template(template, messages, user)
 
 
 async def image_prompt_generation_template(template: str, messages: list[dict], user: Optional[Any] = None) -> str:
-    prompt = get_last_user_message(messages)
-    template = replace_prompt_variable(template, prompt)
-    template = replace_messages_variable(template, messages)
-
-    template = await prompt_template(template, user)
-    return template
+    return await render_template(template, messages, user)
 
 
 async def emoji_generation_template(template: str, prompt: str, user: Optional[Any] = None) -> str:
@@ -407,12 +408,7 @@ async def autocomplete_generation_template(
 
 
 async def query_generation_template(template: str, messages: list[dict], user: Optional[Any] = None) -> str:
-    prompt = get_last_user_message(messages)
-    template = replace_prompt_variable(template, prompt)
-    template = replace_messages_variable(template, messages)
-
-    template = await prompt_template(template, user)
-    return template
+    return await render_template(template, messages, user)
 
 
 def moa_response_generation_template(template: str, prompt: str, responses: list[str]) -> str:

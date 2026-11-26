@@ -49,7 +49,7 @@
 		appReplies = {};
 	}
 
-	const receiveAppChannelReply = (event) => {
+	const receiveAppChannelReply = (event: Record<string, any>) => {
 		if (event.reply?.type === 'ack') return;
 		if (event.channel_id !== channel?.id || (event.parent_id ?? null) !== (thread ? id : null))
 			return;
@@ -57,16 +57,21 @@
 		appReplies = { ...appReplies, [key]: event };
 	};
 
+	const appEventHandler = (message: { data?: { type?: string; data?: Record<string, any> } }) => {
+		if (message?.data?.type !== 'channel:app' || !message.data.data) return;
+		receiveAppChannelReply(message.data.data);
+	};
+
 	onMount(() => {
 		const appSocket = $socket;
-		appSocket?.on('events:app', receiveAppChannelReply);
-		return () => appSocket?.off('events:app', receiveAppChannelReply);
+		appSocket?.on('events', appEventHandler);
+		return () => appSocket?.off('events', appEventHandler);
 	});
 
 	const loadMoreMessages = async () => {
 		// scroll slightly down to disable continuous loading
-		const element = document.getElementById('messages-container');
-		element.scrollTop = element.scrollTop + 100;
+		const element = listElement?.closest<HTMLElement>('[id="messages-container"]');
+		if (element) element.scrollTop = element.scrollTop + 100;
 
 		messagesLoading = true;
 
@@ -75,11 +80,12 @@
 		await tick();
 		messagesLoading = false;
 	};
+	let listElement: HTMLDivElement;
 </script>
 
 {#if messages}
 	{@const messageList = messages.slice().reverse()}
-	<div>
+	<div bind:this={listElement}>
 		{#if !top}
 			<Loader
 				on:visible={(e) => {
@@ -104,7 +110,7 @@
 									<img
 										src={`${WEBUI_API_BASE_URL}/users/${u.id}/profile/image`}
 										alt={u.name}
-										class=" size-7 rounded-full object-cover border-2 border-white dark:border-gray-900 {index ===
+										class=" size-7 rounded-full object-cover border-2 border-base-0 dark:border-base-900 {index ===
 										1
 											? '-ml-2.5'
 											: ''}"
@@ -124,7 +130,7 @@
 							{/if}
 						</div>
 
-						<div class="text-xs leading-5 text-gray-500 dark:text-gray-400">
+						<div class="text-xs leading-5 text-base-500 dark:text-base-400">
 							{$i18n.t(
 								'This channel was created on {{createdAt}}. This is the very beginning of the {{channelName}} channel.',
 								{
@@ -143,7 +149,7 @@
 				{/if}
 
 				{#if messageList.length > 0}
-					<hr class=" border-gray-100/60 dark:border-gray-800/40 mb-2 w-full" />
+					<hr class=" border-base-100/60 dark:border-base-800/40 mb-2 w-full" />
 				{/if}
 			</div>
 		{/if}
@@ -218,9 +224,7 @@
 						}
 					);
 				}}
-				onThread={(id) => {
-					onThread(id);
-				}}
+				{onThread}
 				onReaction={(name) => {
 					if (
 						(message?.reactions ?? [])
@@ -290,28 +294,28 @@
 					dir={$settings.chatDirection}
 				>
 					<span
-						class="mt-0.5 flex size-6 shrink-0 items-center justify-center rounded-lg bg-gray-100 dark:bg-gray-800"
+						class="mt-0.5 flex size-6 shrink-0 items-center justify-center rounded-lg bg-base-100 dark:bg-base-800"
 						role="img"
 						aria-label={$i18n.t('App')}><Grid className="size-4" /></span
 					>
 					<div class="min-w-0 flex-1">
 						<div class="mb-0.5 flex items-baseline gap-1.5 leading-5">
-							<span class="truncate text-[0.8125rem] font-medium text-gray-900 dark:text-gray-100"
+							<span class="truncate text-[0.8125rem] font-medium text-base-900 dark:text-base-100"
 								>{event.app_name ?? $i18n.t('App')}</span
 							>
-							<span class="text-[0.65rem] text-gray-500">{$i18n.t('App')}</span>
+							<span class="text-[0.65rem] text-base-500">{$i18n.t('App')}</span>
 						</div>
 						<div class="[&_.markdown-prose]:text-sm! [&_.markdown-prose]:leading-[1.375rem]!">
 							{#key event.reply}
 								<AppChannelReply appId={event.app_id} channelId={channel.id} reply={event.reply} />
 							{/key}
 						</div>
-						<div class="mt-1.5 flex items-center gap-1.5 text-xs text-gray-500 dark:text-gray-400">
+						<div class="mt-1.5 flex items-center gap-1.5 text-xs text-base-500 dark:text-base-400">
 							<span>{$i18n.t('Only visible to you')}</span>
 							<span aria-hidden="true">·</span>
 							<button
 								type="button"
-								class="focus-ring rounded hover:text-gray-800 hover:underline dark:hover:text-gray-200"
+								class="focus-ring rounded hover:text-base-800 hover:underline dark:hover:text-base-200"
 								on:click={() => {
 									delete appReplies[key];
 									appReplies = { ...appReplies };

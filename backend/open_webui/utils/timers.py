@@ -12,6 +12,7 @@ from typing import Literal
 from uuid import uuid4
 
 from fastapi import HTTPException, Request
+from open_webui.utils.machines import machine_id_of
 from open_webui.internal.db import get_async_db
 from open_webui.models.chat_messages import ChatMessages
 from open_webui.models.chats import Chat, ChatForm, Chats
@@ -20,6 +21,7 @@ from open_webui.tasks import has_active_tasks
 from open_webui.utils.auth import VERIFIED_USER_ROLES
 from open_webui.utils.json_codec import JSONCodec
 from open_webui.utils.misc import get_message_list
+from open_webui.utils.tool_calling import strip_tool_approval_prompt
 from open_webui.utils.tool_search import strip_deferred_tools_manifest
 from sqlalchemy import select
 from starlette.datastructures import Headers
@@ -98,8 +100,6 @@ async def create_timer(
     model_id = metadata.get('model_id') or (metadata.get('model') or {}).get('id')
     if not model_id:
         return 'Error: model context is required.'
-    if metadata.get('direct'):
-        return 'Error: timers are unavailable for direct connections.'
 
     chat_id = str(uuid4())
     user_message_id = str(uuid4())
@@ -111,7 +111,7 @@ async def create_timer(
         'skill_ids': copy.deepcopy(metadata.get('skill_ids') or []),
         'chat_context': copy.deepcopy(metadata.get('chat_context') or {}),
         'filter_ids': copy.deepcopy(metadata.get('filter_ids') or []),
-        'terminal_id': metadata.get('terminal_id'),
+        'machine_id': metadata.get('machine_id'),
         'features': copy.deepcopy(metadata.get('features') or {}),
         'files': copy.deepcopy(metadata.get('files') or []),
         'variables': copy.deepcopy(metadata.get('variables') or {}),
@@ -308,9 +308,7 @@ async def execute_due_timer(app, timer_id: str, claim_id: str | None = None) -> 
                     await db.commit()
                     return
 
-                parent_chat = copy.deepcopy(parent.chat or {})
-                history = parent_chat.setdefault('history', {})
-                messages = history.setdefault('messages', {})
+                messages = await ChatMessages.get_messages_map_by_chat_id(parent_chat_id, db=db) or {}
                 done_assistants = [
                     message
                     for message in messages.values()
@@ -350,8 +348,11 @@ async def execute_due_timer(app, timer_id: str, claim_id: str | None = None) -> 
                     if user_message_id not in children:
                         children.append(user_message_id)
 
-                parent.chat = parent_chat
-                history['currentId'] = assistant_message_id
+                for message_id in (parent_id, user_message_id, assistant_message_id):
+                    if message_id in messages:
+                        await ChatMessages.upsert_message(
+                            message_id, parent_chat_id, timer.user_id, messages[message_id], db=db
+                        )
                 parent.current_message_id = assistant_message_id
                 parent.updated_at = int(time.time())
                 timer_row = await db.get(Chat, timer_id)
@@ -363,8 +364,6 @@ async def execute_due_timer(app, timer_id: str, claim_id: str | None = None) -> 
                     }
                     timer_row.updated_at = int(time.time())
                 await db.commit()
-            await ChatMessages.upsert_message(user_message_id, parent_chat_id, timer.user_id, user_message)
-            await ChatMessages.upsert_message(assistant_message_id, parent_chat_id, timer.user_id, assistant_message)
 
         await sio.emit(
             'events',
@@ -379,7 +378,10 @@ async def execute_due_timer(app, timer_id: str, claim_id: str | None = None) -> 
         # Timers saved before chat_context was introduced only have the assembled prompt.
         if run.get('chat_context') is None and run.get('system_prompt'):
             chat_context['messages'] = [
-                {'role': 'system', 'content': strip_deferred_tools_manifest(run['system_prompt'])}
+                {
+                    'role': 'system',
+                    'content': strip_tool_approval_prompt(strip_deferred_tools_manifest(run['system_prompt'])),
+                }
             ]
         form_data = {
             'model': model_id,
@@ -404,8 +406,8 @@ async def execute_due_timer(app, timer_id: str, claim_id: str | None = None) -> 
             'variables': run.get('variables') or {},
             'chat_variables': chat_context.get('chat_variables'),
         }
-        if run.get('terminal_id'):
-            form_data['terminal_id'] = run['terminal_id']
+        if machine_id_of(run):
+            form_data['machine_id'] = machine_id_of(run)
         request = Request(
             {
                 'type': 'http',
@@ -414,7 +416,7 @@ async def execute_due_timer(app, timer_id: str, claim_id: str | None = None) -> 
                 'path': '/api/v1/timers/internal',
                 'query_string': b'',
                 'headers': Headers({}).raw,
-                'client': ('127.0.0.1', 0),
+                'client': ('', 0),
                 'server': ('127.0.0.1', 80),
                 'scheme': 'http',
                 'app': app,

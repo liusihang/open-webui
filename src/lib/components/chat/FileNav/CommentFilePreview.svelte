@@ -1,5 +1,7 @@
 <script lang="ts">
-	import { getContext, onMount, onDestroy } from 'svelte';
+	import type { MachineTarget } from '$lib/apis/machines';
+	export let target: MachineTarget;
+	import { getContext, onMount, onDestroy, tick } from 'svelte';
 	import type { WorkBook } from 'xlsx';
 	export let onReady = () => {};
 	export let currentSlide = 0;
@@ -13,7 +15,7 @@
 	};
 	$: (loading, previewError, reportReady());
 
-	import { downloadFileBlob, downloadFilePreview } from '$lib/apis/terminal';
+	import { downloadFileBlob, downloadFilePreview, uploadToMachine } from '$lib/apis/machines';
 	import { readOfficeComments } from '$lib/utils/comments/office';
 	import {
 		commentThreads,
@@ -21,7 +23,8 @@
 		type CommentResult,
 		type CommentState
 	} from '$lib/utils/comments/types';
-	import FilePreview from './FilePreview.svelte';
+	import ExcelPreview from '$lib/components/common/ExcelPreview.svelte';
+	import { ExcelWorkbookEditor } from '$lib/utils/excelToTable';
 	import Icon from './Icon.svelte';
 	import DocxPreview from '$lib/components/common/DocxPreview.svelte';
 	import PdfPagesPreview from '$lib/components/common/PdfPagesPreview.svelte';
@@ -29,10 +32,78 @@
 	import Spinner from '$lib/components/common/Spinner.svelte';
 	const i18n: any = getContext('i18n');
 	export let path: string;
-	export let baseUrl: string;
-	export let apiKey: string;
-	export let chatId: string | null = null;
+
 	export let targetPage: number | null = null;
+	export let readOnly = true;
+	export let dirty = false;
+	export let saving = false;
+	export let onSaved: (preview: any) => void = () => {};
+	let editor: ExcelWorkbookEditor | null = null;
+	let excelPreview: ExcelPreview;
+	let loadingTask: Promise<void>;
+	let editingError = '';
+	export const captureView = () => {
+		return editor
+			? { ...editor.capture(), dirty, sheet, draft: excelPreview?.captureEdit() }
+			: null;
+	};
+	export async function restoreView(view: any) {
+		await loadingTask;
+		if (!alive || view?.kind !== 'xlsx') return;
+		const { readExcelWorkbook } = await import('$lib/utils/excelToTable');
+		workbook = await readExcelWorkbook(view.original);
+		editor = await ExcelWorkbookEditor.open(workbook, view.original);
+		editor.restore(view);
+		dirty = editor.dirty;
+		setSheet(workbook.Sheets[view.sheet] ? view.sheet : workbook.SheetNames[0]);
+		await tick();
+		await excelPreview?.restoreEdit(view.draft);
+	}
+	export async function save() {
+		if (excelPreview && !excelPreview.flushEdit())
+			throw new Error('Finish or cancel the cell edit before saving.');
+		if (!editor || !editor.dirty) return;
+		if (readOnly || saving) throw new Error('File is not writable right now.');
+		saving = true;
+		try {
+			const bytes = await editor.bytes();
+			const current = await downloadFileBlob(target, path);
+			if (!current)
+				throw new Error('Could not check the current file. Your changes are still in the editor.');
+			if (!editor.matches(await current.blob.arrayBuffer()))
+				throw new Error(
+					'The workbook changed on disk. Your edits are preserved. Reload the file before saving.'
+				);
+			// shortcut: the machine upload API has no conditional write; it cannot prevent a concurrent write after this check.
+			const result = await uploadToMachine(
+				target,
+				path.slice(0, path.lastIndexOf('/') + 1) || '/',
+				new File([bytes], path.split('/').pop()!, {
+					type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
+				})
+			);
+			if (!result)
+				throw new Error('Failed to save workbook. Your changes are still in the editor.');
+			editor.markSaved(bytes);
+			original = bytes;
+			dirty = editor.dirty;
+			onSaved(captureView());
+		} finally {
+			saving = false;
+		}
+	}
+	export async function discard() {
+		excelPreview?.cancelEdit();
+		dirty = false;
+		if (!original || !editor) return;
+		const { readExcelWorkbook } = await import('$lib/utils/excelToTable');
+		const fresh = await readExcelWorkbook(original);
+		if (!alive) return;
+		workbook = fresh;
+		editor = await ExcelWorkbookEditor.open(fresh, original);
+		setSheet(sheet);
+	}
+
 	let comments: FileComment[] = [];
 	let warnings: string[] = [];
 	let commentState: CommentState = 'loading';
@@ -50,11 +121,9 @@
 	let slides: string[] = [];
 	let workbook: WorkBook | null = null;
 	export let sheet = '';
-	let table: string | null = null;
 	let root: HTMLDivElement;
 	let popover: HTMLDivElement;
 	let alive = true;
-	let sheetToken = 0;
 	let anchoredIds: string[] = [];
 	const abort = new AbortController();
 	const ext = path.split('.').pop()!.toLowerCase();
@@ -74,18 +143,12 @@
 		warnings = result.warnings;
 		commentState = warnings.length ? 'partial' : 'ready';
 	};
-	const setSheet = async (name: string) => {
+	const setSheet = (name: string) => {
 		if (!workbook?.Sheets[name]) return;
-		const token = ++sheetToken;
 		sheet = name;
-		const { excelToTable } = await import('$lib/utils/excelToTable');
-		const result = await excelToTable(workbook.Sheets[name]);
-		if (alive && token === sheetToken) {
-			table = result.html;
-			anchoredIds = comments
-				.filter((c) => c.location?.kind === 'cell' && c.location.sheet === sheet)
-				.map((c) => c.id);
-		}
+		anchoredIds = comments
+			.filter((c) => c.location?.kind === 'cell' && c.location.sheet === sheet)
+			.map((c) => c.id);
 	};
 	const keepOpen = () => clearTimeout(closeTimer);
 	const closeLater = (event?: MouseEvent | FocusEvent) => {
@@ -182,7 +245,7 @@
 	};
 	async function load() {
 		const previewPromise = ['docx', 'pptx'].includes(ext)
-			? downloadFilePreview(baseUrl, apiKey, path, chatId ?? undefined, abort.signal)
+			? downloadFilePreview(target, path, abort.signal)
 					.then(async (r) => {
 						if (r) {
 							const bytes = await r.blob.arrayBuffer();
@@ -195,7 +258,7 @@
 					.catch(() => undefined)
 			: Promise.resolve();
 		try {
-			const raw = await downloadFileBlob(baseUrl, apiKey, path, chatId ?? undefined, abort.signal);
+			const raw = await downloadFileBlob(target, path, abort.signal);
 			if (!raw) throw new Error('Original file unavailable');
 			const bytes = await raw.blob.arrayBuffer();
 			if (!alive) return;
@@ -206,10 +269,17 @@
 				return;
 			}
 			if (ext === 'xlsx' || ext === 'xls') {
-				const XLSX = await import('xlsx');
+				const { readExcelWorkbook } = await import('$lib/utils/excelToTable');
 				if (!alive) return;
-				workbook = XLSX.read(bytes, { type: 'array' });
-				await setSheet(workbook.Sheets[initialSheet] ? initialSheet : workbook.SheetNames[0]);
+				workbook = await readExcelWorkbook(bytes);
+				if (ext === 'xlsx' && !readOnly) {
+					try {
+						editor = await ExcelWorkbookEditor.open(workbook, bytes);
+					} catch (error) {
+						editingError = String(error).replace(/^Error: /, '');
+					}
+				}
+				setSheet(workbook.Sheets[initialSheet] ? initialSheet : workbook.SheetNames[0]);
 				loading = false;
 			}
 			void readOfficeComments(bytes, ext, workbook ?? undefined)
@@ -241,7 +311,7 @@
 		}
 	}
 	onMount(() => {
-		void load();
+		loadingTask = load();
 	});
 	onDestroy(() => {
 		alive = false;
@@ -287,7 +357,9 @@
 	}}
 	on:click={(e) => reveal(e, touchInteraction || e.detail === 0)}
 >
-	{#if loading}<div class="flex h-full items-center justify-center"><Spinner /></div>
+	{#if loading}<div class="flex h-full items-center justify-center">
+			<Spinner className="size-3.5 text-base-400 dark:text-base-500" />
+		</div>
 	{:else if pdf}
 		<PdfPagesPreview
 			bind:currentSlide
@@ -310,22 +382,30 @@
 		/>
 	{:else if ext === 'pptx' && slides.length}
 		<PptxPreview bind:currentSlide {slides} {targetPage} className="h-full" {comments} />
-	{:else if table !== null}
-		<FilePreview
-			selectedFile={path}
-			fileOfficeHtml={table}
-			excelSheetNames={workbook?.SheetNames ?? []}
-			selectedExcelSheet={sheet}
+	{:else if workbook}
+		{#if editingError}<p role="status" class="px-2 py-1 text-xs text-base-500">
+				{editingError}
+			</p>{/if}
+		<ExcelPreview
+			bind:this={excelPreview}
+			{workbook}
+			selectedSheet={sheet}
 			onSheetChange={setSheet}
+			editor={readOnly ? null : editor}
+			{saving}
+			onDirtyChange={(value) => (dirty = value)}
+			onSave={save}
 		/>
-	{:else if previewError}<p class="p-4 text-sm text-gray-500 dark:text-gray-400">
+	{:else if previewError}<p
+			class="flex h-full items-center justify-center p-4 text-center text-sm text-base-500 dark:text-base-400"
+		>
 			{$i18n.t('Preview failed')}
 		</p>{/if}
 	{#if unplaced.length || commentState === 'error' || commentState === 'partial'}
 		<button
 			type="button"
 			data-file-comment-id="__unplaced"
-			class="absolute right-3 top-3 z-10 flex h-6 items-center gap-1 rounded px-1.5 text-xs text-gray-400 dark:text-gray-500 bg-white/95 dark:bg-gray-850/95 hover:text-gray-600 dark:hover:text-gray-300 focus-visible:outline focus-visible:outline-2"
+			class="absolute right-3 top-3 z-10 flex h-6 items-center gap-1 rounded px-1.5 text-xs text-base-400 dark:text-base-500 bg-base-0/95 dark:bg-base-850/95 hover:text-base-600 dark:hover:text-base-300 focus-visible:outline focus-visible:outline-2"
 			aria-label={$i18n.t('Document comments')}
 			aria-haspopup="dialog"
 			><Icon name="chat-bubble" size={12} strokeWidth={1.5} />{unplaced.length || '!'}</button
@@ -340,7 +420,7 @@
 		role="dialog"
 		aria-label={$i18n.t('Comment')}
 		tabindex="-1"
-		class="file-comment-popover fixed z-[9999] w-72 max-w-[calc(100vw-1rem)] max-h-[50vh] overflow-y-auto rounded-2xl bg-white px-3 py-2 text-[0.8125rem] font-normal leading-5 text-gray-900 shadow-[0_16px_40px_-28px_rgba(0,0,0,0.55)] ring-1 ring-black/5 dark:bg-gray-850 dark:text-gray-100 dark:ring-white/10"
+		class="file-comment-popover fixed z-[9999] w-72 max-w-[calc(100vw-1rem)] max-h-[50vh] overflow-y-auto rounded-2xl bg-base-0 px-3 py-2 text-[0.8125rem] font-normal leading-5 text-base-900 shadow-[0_16px_40px_-28px_rgba(0,0,0,0.55)] ring-1 ring-base-1000/5 dark:bg-base-850 dark:text-base-100 dark:ring-base-0/10"
 		style:left={`${popoverX}px`}
 		style:top={`${popoverY}px`}
 		on:mouseenter={keepOpen}
@@ -350,7 +430,7 @@
 	>
 		<button
 			type="button"
-			class="absolute right-2 top-2 flex h-5 w-5 items-center justify-center rounded text-gray-400 transition-colors duration-100 hover:text-gray-600 dark:text-gray-500 dark:hover:text-gray-300 focus-visible:outline focus-visible:outline-2"
+			class="absolute right-2 top-2 flex h-5 w-5 items-center justify-center rounded text-base-400 transition-colors duration-100 hover:text-base-600 dark:text-base-500 dark:hover:text-base-300 focus-visible:outline focus-visible:outline-2"
 			aria-label={$i18n.t('Close comment')}
 			on:click={() => {
 				hoveredId = null;
@@ -363,21 +443,21 @@
 		{#each warnings as warning}<p class="text-xs text-amber-700">{warning}</p>{/each}
 		{#each hoveredThreads as thread (thread[0].id)}
 			<div class="comment-thread">
-				{#if thread[0].status === 'resolved'}<span class="text-xs text-gray-500"
+				{#if thread[0].status === 'resolved'}<span class="text-xs text-base-500"
 						>{$i18n.t('Resolved')}</span
 					>{/if}
 				{#each thread as comment (comment.id)}
 					<div class="comment-message">
-						<div class="pr-6 text-xs font-medium text-gray-900 dark:text-gray-100">
+						<div class="pr-6 text-xs font-medium text-base-900 dark:text-base-100">
 							{comment.author || $i18n.t('Unknown author')}
 						</div>
-						{#if comment.date}<div class="text-[11px] leading-4 text-gray-500 dark:text-gray-400">
+						{#if comment.date}<div class="text-[11px] leading-4 text-base-500 dark:text-base-400">
 								{displayDate(comment.date)}
 							</div>{/if}
 						<p class="mt-1.5 whitespace-pre-wrap break-words text-[0.8125rem] leading-5">
 							{comment.text || $i18n.t('Annotation without text')}
 						</p>
-						{#if hoveredId === '__unplaced'}<p class="mt-1 text-xs text-gray-500">
+						{#if hoveredId === '__unplaced'}<p class="mt-1 text-xs text-base-500">
 								{comment.location?.kind === 'cell'
 									? `${comment.location.sheet}!${comment.location.cell}`
 									: comment.location?.kind === 'slide'

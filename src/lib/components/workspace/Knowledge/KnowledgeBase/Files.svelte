@@ -133,7 +133,6 @@
 	};
 	const poll = async () => {
 		clearTimeout(timer);
-		let retry = false;
 		try {
 			const previous = pending;
 			const response = await getPendingKnowledgeFiles(localStorage.token, knowledge.id);
@@ -141,19 +140,14 @@
 			pending = response.map((file: KnowledgeFile) => ({
 				...file,
 				directory_id: file.meta?.data?.directory_id ?? null,
-				status:
-					file.data?.status === 'failed'
-						? 'failed'
-						: file.data?.processing_status || file.data?.status || 'processing'
+				status: file.data?.status || 'processing'
 			}));
 			const completed = previous.filter((file) => !pending.some((item) => item.id === file.id));
 			if (completed.length) await reload(completed.map((file) => file.directory_id ?? null));
 		} catch (error) {
-			retry = true;
 			console.warn('Unable to refresh processing files', error);
 		}
-		if (mounted && (retry || pending.some((file) => file.status !== 'failed')))
-			timer = setTimeout(poll, 5000);
+		if (mounted && pending.length) timer = setTimeout(poll, 5000);
 	};
 	export const refresh = async () => {
 		await reload();
@@ -378,7 +372,7 @@
 >
 	<!-- svelte-ignore a11y_no_static_element_interactions -->
 	<div
-		class="mb-1 px-2 py-1 text-xs text-gray-400"
+		class="mb-1 px-2 py-1 text-xs text-base-400"
 		on:dragover={(event) => {
 			if (
 				knowledge.write_access &&
@@ -465,11 +459,11 @@
 		</div>
 	{:else if data.items.length < data.total}<button
 			type="button"
-			class="px-2 py-1 text-xs text-gray-500"
+			class="px-2 py-1 text-xs text-base-500"
 			on:click={() => load(id, true, search)}>{$i18n.t('Load more')}</button
 		>
 	{:else if !data.items.length && (search || !data.directories.length)}<p
-			class="px-2 py-1 text-xs text-gray-400"
+			class="px-2 py-1 text-xs text-base-400"
 		>
 			{search ? $i18n.t('No results found') : $i18n.t('No files')}
 		</p>{/if}

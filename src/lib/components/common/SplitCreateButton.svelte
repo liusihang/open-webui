@@ -1,7 +1,8 @@
 <script lang="ts">
 	import { getContext } from 'svelte';
 	import { settings } from '$lib/stores';
-	import { goto } from '$app/navigation';
+	import { getPageContext } from '$lib/utils/page';
+	const { goto } = getPageContext();
 	import type { Writable } from 'svelte/store';
 	import type { i18n as i18nType } from 'i18next';
 
@@ -51,7 +52,7 @@
 
 {#if visibleActions.length === 1}
 	<button
-		class="focus-ring ml-1 rounded-lg bg-gray-50 px-2.5 py-1 text-xs text-gray-900 transition ring-1 ring-gray-200 hover:bg-gray-100 dark:bg-gray-850 dark:text-gray-100 dark:ring-gray-800 dark:hover:bg-gray-800"
+		class="focus-ring ml-1 rounded-lg bg-base-50 px-2.5 py-1 text-xs text-base-900 transition ring-1 ring-base-200 hover:bg-base-100 dark:bg-base-850 dark:text-base-100 dark:ring-base-800 dark:hover:bg-base-800"
 		type="button"
 		on:click={() => {
 			runAction(primaryAction);
@@ -61,10 +62,10 @@
 	</button>
 {:else if visibleActions.length > 1}
 	<div
-		class="ml-1 flex overflow-hidden rounded-lg bg-gray-50 text-xs text-gray-900 transition ring-1 ring-gray-200 dark:bg-gray-850 dark:text-gray-100 dark:ring-gray-800"
+		class="ml-1 flex overflow-hidden rounded-lg bg-base-50 text-xs text-base-900 transition ring-1 ring-base-200 dark:bg-base-850 dark:text-base-100 dark:ring-base-800"
 	>
 		<button
-			class="focus-ring px-2.5 py-1 transition hover:bg-gray-100 dark:hover:bg-gray-800"
+			class="focus-ring px-2.5 py-1 transition hover:bg-base-100 dark:hover:bg-base-800"
 			on:click={() => {
 				runAction(primaryAction);
 			}}
@@ -76,7 +77,7 @@
 			<button
 				class="focus-ring flex items-center {($settings?.highContrastMode ?? false)
 					? 'min-w-6 justify-center'
-					: ''} border-l border-gray-200 px-1.5 py-1 transition hover:bg-gray-100 dark:border-gray-800 dark:hover:bg-gray-800"
+					: ''} border-l border-base-200 px-1.5 py-1 transition hover:bg-base-100 dark:border-base-800 dark:hover:bg-base-800"
 				aria-label={$i18n.t('Open create menu')}
 			>
 				<ChevronDown className="size-2.5" strokeWidth="2.5" />

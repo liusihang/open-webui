@@ -62,18 +62,18 @@
 	aria-selected={isSelected}
 	aria-label={$i18n.t('Select {{modelName}} model', { modelName: item.label })}
 	aria-describedby={localizedDescription ? `model-description-${index}` : undefined}
-	class="focus-ring group/item relative flex h-8 w-full cursor-pointer select-none items-center rounded-xl px-2 text-left text-[0.8125rem] font-normal text-gray-700 outline-hidden transition-colors duration-75 dark:text-gray-100 {($settings?.highContrastMode ??
+	class="focus-ring group/item relative flex h-8 w-full cursor-pointer select-none items-center rounded-xl px-2 text-left text-[0.8125rem] font-normal text-base-700 outline-hidden transition-colors duration-75 dark:text-base-100 {($settings?.highContrastMode ??
 	false)
-		? 'hover:bg-gray-200 dark:hover:bg-gray-800'
-		: 'hover:bg-gray-50/40 dark:hover:bg-gray-800/40'} {index === selectedModelIdx &&
+		? 'hover:bg-base-200 dark:hover:bg-base-800'
+		: 'hover:bg-base-50/40 dark:hover:bg-base-800/40'} {index === selectedModelIdx &&
 	!compareEnabled
 		? ($settings?.highContrastMode ?? false)
-			? 'bg-gray-200 dark:bg-gray-800'
-			: 'bg-gray-50/70 dark:bg-gray-800/60'
+			? 'bg-base-200 dark:bg-base-800'
+			: 'bg-base-50/70 dark:bg-base-800/60'
 		: ''} {isSelected
 		? ($settings?.highContrastMode ?? false)
-			? 'bg-gray-200 dark:bg-gray-800'
-			: 'bg-gray-50/70 dark:bg-gray-800/60'
+			? 'bg-base-200 dark:bg-base-800'
+			: 'bg-base-50/70 dark:bg-base-800/60'
 		: ''}"
 	data-arrow-selected={index === selectedModelIdx}
 	data-value={item.value}
@@ -92,7 +92,7 @@
 				{#each item.model?.tags.sort((a, b) => a.name.localeCompare(b.name)) as tag}
 					<Tooltip content={tag.name} className="flex-shrink-0">
 						<div
-							class=" text-xs font-normal px-1 rounded-sm uppercase bg-gray-500/20 text-gray-700 dark:text-gray-200"
+							class=" text-xs font-normal px-1 rounded-sm uppercase bg-base-500/20 text-base-700 dark:text-base-200"
 						>
 							{tag.name}
 						</div>
@@ -105,7 +105,7 @@
 			<div class="flex items-center min-w-fit">
 				<Tooltip content={$user?.role === 'admin' ? (item?.value ?? '') : ''} placement="top-start">
 					<img
-						src={`${WEBUI_API_BASE_URL}/models/model/profile/image?id=${item.model.id}&lang=${$i18n.language}`}
+						src={`${WEBUI_API_BASE_URL}/models/model/profile/image?id=${item.model.id}&lang=${$i18n.language}&v=${item.model.info?.updated_at}`}
 						alt={$i18n.t('{{modelName}} profile image', { modelName: item.label })}
 						class="flex size-4 items-center rounded-full"
 						loading="lazy"
@@ -144,7 +144,7 @@
 								className="self-end"
 							>
 								<span
-									class="line-clamp-1 text-[0.6875rem] font-normal text-gray-500 dark:text-gray-400"
+									class="line-clamp-1 text-[0.6875rem] font-normal text-base-500 dark:text-base-400"
 									>{item.model.ollama?.details?.parameter_size ?? ''}</span
 								>
 							</Tooltip>
@@ -163,7 +163,7 @@
 								className="self-end"
 							>
 								<span
-									class="line-clamp-1 text-[0.6875rem] font-normal text-gray-500 dark:text-gray-400"
+									class="line-clamp-1 text-[0.6875rem] font-normal text-base-500 dark:text-base-400"
 								>
 									{parameterSize || quantization || formatSize(size)}
 								</span>
@@ -217,47 +217,6 @@
 							</div>
 						</Tooltip>
 					{/key}
-				{/if}
-
-				{#if item.model?.direct}
-					<Tooltip content={`${$i18n.t('Direct')}`}>
-						<div class="translate-y-[1px]">
-							<svg
-								xmlns="http://www.w3.org/2000/svg"
-								viewBox="0 0 16 16"
-								fill="currentColor"
-								class="size-3"
-							>
-								<path
-									fill-rule="evenodd"
-									d="M2 2.75A.75.75 0 0 1 2.75 2C8.963 2 14 7.037 14 13.25a.75.75 0 0 1-1.5 0c0-5.385-4.365-9.75-9.75-9.75A.75.75 0 0 1 2 2.75Zm0 4.5a.75.75 0 0 1 .75-.75 6.75 6.75 0 0 1 6.75 6.75.75.75 0 0 1-1.5 0C8 10.35 5.65 8 2.75 8A.75.75 0 0 1 2 7.25ZM3.5 11a1.5 1.5 0 1 0 0 3 1.5 1.5 0 0 0 0-3Z"
-									clip-rule="evenodd"
-								/>
-							</svg>
-						</div>
-					</Tooltip>
-				{:else if item.model.connection_type === 'external'}
-					<Tooltip content={`${$i18n.t('External')}`}>
-						<div class="translate-y-[1px]">
-							<svg
-								xmlns="http://www.w3.org/2000/svg"
-								viewBox="0 0 16 16"
-								fill="currentColor"
-								class="size-3"
-							>
-								<path
-									fill-rule="evenodd"
-									d="M8.914 6.025a.75.75 0 0 1 1.06 0 3.5 3.5 0 0 1 0 4.95l-2 2a3.5 3.5 0 0 1-5.396-4.402.75.75 0 0 1 1.251.827 2 2 0 0 0 3.085 2.514l2-2a2 2 0 0 0 0-2.828.75.75 0 0 1 0-1.06Z"
-									clip-rule="evenodd"
-								/>
-								<path
-									fill-rule="evenodd"
-									d="M7.086 9.975a.75.75 0 0 1-1.06 0 3.5 3.5 0 0 1 0-4.95l2-2a3.5 3.5 0 0 1 5.396 4.402.75.75 0 0 1-1.251-.827 2 2 0 0 0-3.085-2.514l-2 2a2 2 0 0 0 0 2.828.75.75 0 0 1 0 1.06Z"
-									clip-rule="evenodd"
-								/>
-							</svg>
-						</div>
-					</Tooltip>
 				{/if}
 
 				{#if localizedDescription}

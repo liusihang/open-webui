@@ -1,6 +1,6 @@
 <script lang="ts">
 	import type { WorkBook } from 'xlsx';
-	import DOMPurify from 'dompurify';
+	import ExcelPreview from './ExcelPreview.svelte';
 
 	import { getContext, onMount, tick } from 'svelte';
 
@@ -22,7 +22,7 @@
 
 	import Modal from './Modal.svelte';
 	import XMark from '../icons/XMark.svelte';
-	import Switch from './Switch.svelte';
+	import FileContextSwitch from './FileContextSwitch.svelte';
 	import Tooltip from './Tooltip.svelte';
 	import dayjs from 'dayjs';
 	import Spinner from './Spinner.svelte';
@@ -32,12 +32,12 @@
 	import PptxPreview from './PptxPreview.svelte';
 	import Reset from '../icons/Reset.svelte';
 
-	export let item;
+	export let item: any;
 	export let show = false;
 	export let edit = false;
 
-	let enableFullContent = false;
 	let loading = false;
+	let externalKnowledge = false;
 
 	let isPDF = false;
 	let isAudio = false;
@@ -53,9 +53,7 @@
 		!!item?.id &&
 		isOnlyOfficePreviewFile(item);
 	let excelWorkbook: WorkBook | null = null;
-	let excelSheetNames: string[] = [];
 	let selectedSheet = '';
-	let excelHtml = '';
 	let excelError = false;
 	let rowCount = 0;
 
@@ -148,35 +146,18 @@
 	const loadExcelContent = async () => {
 		try {
 			excelError = false;
-			const [arrayBuffer, { read }] = await Promise.all([
+			const [arrayBuffer, { readExcelWorkbook }] = await Promise.all([
 				getFileContentById(item.id),
-				import('xlsx')
+				import('$lib/utils/excelToTable')
 			]);
-			excelWorkbook = read(arrayBuffer, { type: 'array' });
-			excelSheetNames = excelWorkbook.SheetNames;
-
-			if (excelSheetNames.length > 0) {
-				selectedSheet = excelSheetNames[0];
-				await renderExcelSheet();
-			}
+			const workbook = await readExcelWorkbook(arrayBuffer);
+			selectedSheet = workbook.SheetNames[0] ?? '';
+			excelWorkbook = workbook;
 		} catch (error) {
 			console.error('Error loading Excel/CSV file:', error);
 			excelError = true;
 		}
 	};
-
-	const renderExcelSheet = async () => {
-		if (!excelWorkbook || !selectedSheet) return;
-		const { excelToTable } = await import('$lib/utils/excelToTable');
-		const worksheet = excelWorkbook.Sheets[selectedSheet];
-		const result = await excelToTable(worksheet);
-		excelHtml = DOMPurify.sanitize(result.html);
-		rowCount = result.rowCount;
-	};
-
-	$: if (selectedSheet && excelWorkbook) {
-		renderExcelSheet();
-	}
 
 	const loadDocxContent = async () => {
 		try {
@@ -208,6 +189,7 @@
 		selectedTab = '';
 		expandedContent = false;
 		docxData = null;
+		externalKnowledge = false;
 		if (item?.type === 'collection') {
 			loading = true;
 
@@ -218,6 +200,7 @@
 
 			if (knowledge) {
 				item.files = knowledge.files || [];
+				externalKnowledge = knowledge.meta?.source === 'external';
 			}
 			loading = false;
 		} else if (item?.type === 'file') {
@@ -253,19 +236,17 @@
 		loadContent();
 	}
 
-	$: enableFullContent = item?.context === 'full';
-
 	onMount(() => {
 		console.log(item);
 	});
 </script>
 
 <Modal ariaLabel={item?.name ?? $i18n.t('File')} bind:show size="lg">
-	<div class=" px-4.5 py-3.5 w-full flex flex-col justify-center dark:text-gray-400">
+	<div class=" px-4 py-3 w-full flex flex-col justify-center dark:text-base-400">
 		<div class=" pb-2">
 			<div class="flex items-start justify-between">
 				<div>
-					<div class=" font-normal text-lg dark:text-gray-100">
+					<div class="text-sm font-medium dark:text-base-100">
 						<a
 							href={item?.type === 'file'
 								? item?.url?.startsWith('http')
@@ -297,10 +278,10 @@
 
 			<div>
 				<div class="flex flex-col items-center md:flex-row gap-1 justify-between w-full">
-					<div class=" flex flex-wrap text-xs gap-1 text-gray-500">
+					<div class=" flex flex-wrap text-xs gap-1 text-base-500">
 						{#if item?.type === 'collection'}
 							{#if item?.type}
-								<div class="capitalize shrink-0">{item.type}</div>
+								<div class="capitalize shrink-0">{$i18n.t('Knowledge Base')}</div>
 								•
 							{/if}
 
@@ -348,31 +329,9 @@
 						{/if}
 					</div>
 
-					{#if edit}
+					{#if edit && !loading}
 						<div class=" self-end">
-							<Tooltip
-								content={enableFullContent
-									? $i18n.t(
-											'Inject the entire content as context for comprehensive processing, this is recommended for complex queries.'
-										)
-									: $i18n.t(
-											'Default to segmented retrieval for focused and relevant content extraction, this is recommended for most cases.'
-										)}
-							>
-								<div class="flex items-center gap-1.5 text-xs">
-									{#if enableFullContent}
-										{$i18n.t('Using Entire Document')}
-									{:else}
-										{$i18n.t('Using Focused Retrieval')}
-									{/if}
-									<Switch
-										bind:state={enableFullContent}
-										on:change={(e) => {
-											item.context = e.detail ? 'full' : undefined;
-										}}
-									/>
-								</div>
-							</Tooltip>
+							<FileContextSwitch bind:item {externalKnowledge} />
 						</div>
 					{/if}
 				</div>
@@ -395,12 +354,12 @@
 
 				{#if isAudio || isPDF || isExcel || isCode || isMarkdown || isDocx || isPptx || onlyOfficeAvailable}
 					<div
-						class="flex mb-2.5 scrollbar-none overflow-x-auto w-full border-b border-gray-50 dark:border-gray-850/30 text-center text-sm font-normal bg-transparent dark:text-gray-200"
+						class="flex mb-2.5 scrollbar-none overflow-x-auto w-full border-b border-base-50 dark:border-base-850/30 text-center text-sm font-normal bg-transparent dark:text-base-200"
 					>
 						<button
 							class="min-w-fit py-1.5 px-4 border-b {selectedTab === ''
 								? ' '
-								: ' border-transparent text-gray-300 dark:text-gray-600 hover:text-gray-700 dark:hover:text-white'} transition"
+								: ' border-transparent text-base-300 dark:text-base-600 hover:text-base-700 dark:hover:text-base-0'} transition"
 							type="button"
 							on:click={() => {
 								selectedTab = '';
@@ -410,7 +369,7 @@
 						<button
 							class="min-w-fit py-1.5 px-4 border-b {selectedTab === 'preview'
 								? ' '
-								: ' border-transparent text-gray-300 dark:text-gray-600 hover:text-gray-700 dark:hover:text-white'} transition"
+								: ' border-transparent text-base-300 dark:text-base-600 hover:text-base-700 dark:hover:text-base-0'} transition"
 							type="button"
 							on:click={() => {
 								selectedTab = 'preview';
@@ -436,7 +395,7 @@
 							<Tooltip content={$i18n.t('Reset view')}>
 								<button
 									aria-label={$i18n.t('Reset view')}
-									class="p-1.5 rounded-lg bg-white/80 dark:bg-gray-850/80 backdrop-blur-sm shadow-sm hover:bg-gray-100 dark:hover:bg-gray-800 transition text-gray-500 dark:text-gray-400"
+									class="p-1.5 rounded-lg bg-base-0/80 dark:bg-base-850/80 backdrop-blur-sm shadow-sm hover:bg-base-100 dark:hover:bg-base-800 transition text-base-500 dark:text-base-400"
 									on:click={resetImageView}
 								>
 									<Reset className="size-4" />
@@ -469,7 +428,7 @@
 							</div>
 							{#if isTruncated}
 								<button
-									class="mt-1 text-xs text-gray-500 hover:text-gray-700 dark:hover:text-gray-300 transition"
+									class="mt-1 text-xs text-base-500 hover:text-base-700 dark:hover:text-base-300 transition"
 									on:click={() => {
 										expandedContent = true;
 									}}
@@ -499,7 +458,7 @@
 							</div>
 							{#if isTruncated}
 								<button
-									class="mt-1 text-xs text-gray-500 hover:text-gray-700 dark:hover:text-gray-300 transition"
+									class="mt-1 text-xs text-base-500 hover:text-base-700 dark:hover:text-base-300 transition"
 									on:click={() => {
 										expandedContent = true;
 									}}
@@ -534,31 +493,11 @@
 								{$i18n.t('Failed to load Excel/CSV file. Please try downloading it instead.')}
 							</div>
 						{:else}
-							{#if excelSheetNames.length > 1}
-								<div
-									class="flex mb-2.5 scrollbar-none overflow-x-auto w-full border-b border-gray-50 dark:border-gray-850/30 text-center text-sm font-normal bg-transparent dark:text-gray-200"
-								>
-									{#each excelSheetNames as sheetName}
-										<button
-											class="min-w-fit py-1.5 px-4 border-b {selectedSheet === sheetName
-												? ' '
-												: ' border-transparent text-gray-300 dark:text-gray-600 hover:text-gray-700 dark:hover:text-white'} transition"
-											type="button"
-											on:click={() => {
-												selectedSheet = sheetName;
-											}}>{sheetName}</button
-										>
-									{/each}
-								</div>
-							{/if}
-
-							{#if excelHtml}
-								<div class="office-preview overflow-auto max-h-[60vh]">
-									{@html excelHtml}
-								</div>
-							{:else}
-								<div class="text-gray-500 text-sm p-4">{$i18n.t('No content available')}</div>
-							{/if}
+							<div class="h-[60vh]">
+								{#if excelWorkbook}
+									<ExcelPreview workbook={excelWorkbook} bind:selectedSheet bind:rowCount />
+								{/if}
+							</div>
 						{/if}
 					{:else if isCode}
 						<div class="max-h-[60vh] overflow-scroll scrollbar-hidden text-sm relative">
@@ -583,7 +522,7 @@
 						{:else if docxData}
 							<DocxPreview data={docxData} className="h-[60vh]" />
 						{:else}
-							<div class="text-gray-500 text-sm p-4">{$i18n.t('No content available')}</div>
+							<div class="text-base-500 text-sm p-4">{$i18n.t('No content available')}</div>
 						{/if}
 					{:else if isPptx}
 						{#if pptxError}
@@ -597,7 +536,7 @@
 								className="h-[60vh]"
 							/>
 						{:else}
-							<div class="text-gray-500 text-sm p-4">{$i18n.t('No content available')}</div>
+							<div class="text-base-500 text-sm p-4">{$i18n.t('No content available')}</div>
 						{/if}
 					{:else}
 						<div class="max-h-96 overflow-scroll scrollbar-hidden text-xs whitespace-pre-wrap">
@@ -613,3 +552,10 @@
 		</div>
 	</div>
 </Modal>
+
+<style>
+	audio::-webkit-media-controls-enclosure,
+	audio::-webkit-media-controls-panel {
+		background-color: transparent;
+	}
+</style>

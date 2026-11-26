@@ -9,7 +9,7 @@
 	import { getContext, tick } from 'svelte';
 	import type { Writable } from 'svelte/store';
 	import { toast } from 'svelte-sonner';
-	import { config, mobile, models, settings, user, visibleControls } from '$lib/stores';
+	import { config, mobile, settings, user, visibleControls } from '$lib/stores';
 	import type { SettingsModalRequest } from '$lib/stores';
 	import { getUserSettings, updateUserSettings } from '$lib/apis/users';
 	import { getBackendConfig, getModels as _getModels } from '$lib/apis';
@@ -27,15 +27,12 @@
 	import ArchivedChats from './Settings/ArchivedChats.svelte';
 	import Personalization from './Settings/Personalization.svelte';
 	import Search from '../icons/Search.svelte';
-	import Connections from './Settings/Connections.svelte';
-	import Integrations from './Settings/Integrations.svelte';
+	import ChevronRight from '../icons/ChevronRight.svelte';
 	import DatabaseSettings from '../icons/DatabaseSettings.svelte';
 	import SettingsAlt from '../icons/SettingsAlt.svelte';
-	import Link from '../icons/Link.svelte';
 	import UserCircle from '../icons/UserCircle.svelte';
 	import SoundHigh from '../icons/SoundHigh.svelte';
 	import InfoCircle from '../icons/InfoCircle.svelte';
-	import WrenchAlt from '../icons/WrenchAlt.svelte';
 	import Face from '../icons/Face.svelte';
 	import AppNotification from '../icons/AppNotification.svelte';
 	import AdjustmentsHorizontal from '../icons/AdjustmentsHorizontal.svelte';
@@ -49,17 +46,15 @@
 	import AdminConnections from '$lib/components/admin/Settings/Connections.svelte';
 	import AdminModels from '$lib/components/admin/Settings/Models.svelte';
 	import AdminSubagents from '$lib/components/admin/Settings/Subagents.svelte';
-	import AdminEvaluations from '$lib/components/admin/Settings/Evaluations.svelte';
 	import AdminAnalytics from '$lib/components/admin/Analytics.svelte';
 	import AdminIntegrations from '$lib/components/admin/Settings/Integrations.svelte';
-	import AdminApps from '$lib/components/admin/Settings/Apps.svelte';
 	import AdminDocuments from '$lib/components/admin/Settings/Documents.svelte';
 	import AdminWebSearch from '$lib/components/admin/Settings/WebSearch.svelte';
 	import AdminCodeExecution from '$lib/components/admin/Settings/CodeExecution.svelte';
+	import AdminPipelines from '$lib/components/admin/Settings/Pipelines.svelte';
 	import AdminInterface from '$lib/components/admin/Settings/Interface.svelte';
 	import AdminAudio from '$lib/components/admin/Settings/Audio.svelte';
 	import AdminImages from '$lib/components/admin/Settings/Images.svelte';
-	import AdminPipelines from '$lib/components/admin/Settings/Pipelines.svelte';
 	import AdminDatabase from '$lib/components/admin/Settings/Database.svelte';
 
 	const i18n: Writable<any> = getContext('i18n');
@@ -166,14 +161,12 @@
 		'admin:models': $i18n.t('AI'),
 		'admin:subagents': $i18n.t('AI'),
 		'admin:integrations': $i18n.t('Tools'),
-		'admin:apps': $i18n.t('Tools'),
 		'admin:documents': $i18n.t('Tools'),
 		'admin:audio': $i18n.t('Tools'),
 		'admin:images': $i18n.t('Tools'),
 		'admin:web': $i18n.t('Tools'),
 		'admin:code-execution': $i18n.t('Tools'),
 		'admin:pipelines': $i18n.t('Tools'),
-		'admin:evaluations': $i18n.t('Quality'),
 		'admin:analytics': $i18n.t('Quality'),
 		'admin:db': $i18n.t('Data')
 	};
@@ -182,8 +175,16 @@
 		$i18n.t('General');
 	const shouldShowSettingGroup = (tabIds: string[], index: number) =>
 		index === 0 || settingGroupTitle(tabIds[index]) !== settingGroupTitle(tabIds[index - 1]);
+	// Code Execution and Pipelines are kept for existing setups, so they sit behind a closed
+	// "Legacy" row at the end of Tools. It opens on click, when one of them gets selected, or
+	// while searching.
+	const legacyAdminTabs = ['admin:code-execution', 'admin:pipelines'];
+	let showLegacyTabs = false;
+	// Open once when a legacy tab becomes selected, but leave it collapsible afterwards.
+	$: if (legacyAdminTabs.includes(selectedTab)) showLegacyTabs = true;
+	$: legacyTabsOpen = showLegacyTabs || search.trim() !== '';
 	const settingGroupHeadingClass = (first: boolean) =>
-		`hidden md:block shrink-0 text-[0.625rem] text-gray-600 dark:text-gray-500 px-2 ${
+		`hidden md:block shrink-0 text-[0.625rem] text-base-600 dark:text-base-500 px-2 ${
 			first ? 'mt-0.5' : 'mt-2'
 		} mb-0.5`;
 
@@ -212,18 +213,6 @@
 			titleKey: 'settings.personal.shortcuts.title',
 			title: $i18n.t('settings.personal.shortcuts.title'),
 			searchPrefixes: ['settings.personal.shortcuts.']
-		},
-		{
-			id: 'connections',
-			titleKey: 'settings.personal.connections.title',
-			title: $i18n.t('settings.personal.connections.title'),
-			searchPrefixes: ['settings.personal.connections.']
-		},
-		{
-			id: 'tools',
-			titleKey: 'settings.personal.tools.title',
-			title: $i18n.t('settings.personal.tools.title'),
-			searchPrefixes: ['settings.personal.tools.']
 		},
 		{
 			id: 'personalization',
@@ -310,19 +299,19 @@
 			id: 'admin:integrations',
 			titleKey: 'settings.admin.integrations.title',
 			title: $i18n.t('settings.admin.integrations.title'),
-			searchPrefixes: ['settings.admin.integrations.']
-		},
-		{
-			id: 'admin:apps',
-			titleKey: 'Apps',
-			title: $i18n.t('Apps'),
-			searchPrefixes: []
+			searchPrefixes: ['settings.admin.integrations.', 'settings.admin.general.apps.']
 		},
 		{
 			id: 'admin:documents',
 			titleKey: 'settings.admin.documents.title',
 			title: $i18n.t('settings.admin.documents.title'),
 			searchPrefixes: ['settings.admin.documents.']
+		},
+		{
+			id: 'admin:web',
+			titleKey: 'settings.admin.web.title',
+			title: $i18n.t('settings.admin.web.title'),
+			searchPrefixes: ['settings.admin.web.']
 		},
 		{
 			id: 'admin:audio',
@@ -332,15 +321,9 @@
 		},
 		{
 			id: 'admin:images',
-			titleKey: 'settings.admin.images.title',
-			title: $i18n.t('settings.admin.images.title'),
-			searchPrefixes: ['settings.admin.images.']
-		},
-		{
-			id: 'admin:web',
-			titleKey: 'settings.admin.web.title',
-			title: $i18n.t('settings.admin.web.title'),
-			searchPrefixes: ['settings.admin.web.']
+			titleKey: 'Images & Videos',
+			title: $i18n.t('Images & Videos'),
+			searchPrefixes: ['settings.admin.images.', 'settings.admin.videos.']
 		},
 		{
 			id: 'admin:code-execution',
@@ -359,12 +342,6 @@
 			titleKey: 'settings.admin.analytics.title',
 			title: $i18n.t('settings.admin.analytics.title'),
 			searchPrefixes: ['settings.admin.analytics.']
-		},
-		{
-			id: 'admin:evaluations',
-			titleKey: 'settings.admin.evaluations.title',
-			title: $i18n.t('settings.admin.evaluations.title'),
-			searchPrefixes: ['settings.admin.evaluations.']
 		},
 		{
 			id: 'admin:db',
@@ -392,18 +369,6 @@
 
 	const getAvailableSettings = (personalTabs: SettingsTab[], administratorTabs: SettingsTab[]) => {
 		const personalSettings = personalTabs.filter((tab) => {
-			if (tab.id === 'connections') {
-				return $config?.features?.enable_direct_connections;
-			}
-
-			if (tab.id === 'tools') {
-				return (
-					$config?.features?.enable_direct_integrations === true &&
-					($user?.role === 'admin' ||
-						($user?.role === 'user' && $user?.permissions?.features?.direct_tool_servers))
-				);
-			}
-
 			if (tab.id === 'interface') {
 				return $user?.role === 'admin' || ($user?.permissions?.settings?.interface ?? true);
 			}
@@ -434,9 +399,7 @@
 		return (
 			$user?.role === 'admin' ? [...personalSettings, ...administratorTabs] : personalSettings
 		).filter(
-			(tab) =>
-				(tab.id !== 'admin:analytics' || ($config?.features?.enable_admin_analytics ?? true)) &&
-				(tab.id !== 'admin:apps' || $config?.features?.enable_apps)
+			(tab) => tab.id !== 'admin:analytics' || ($config?.features?.enable_admin_analytics ?? true)
 		);
 	};
 
@@ -484,14 +447,10 @@
 		await settings.set(
 			mergeUiSettings($config?.ui?.default_interface_settings ?? {}, personalUiSettings)
 		);
-		await models.set(await getModels());
 	};
 
 	const getModels = async () => {
-		return await _getModels(
-			localStorage.token,
-			$config?.features?.enable_direct_connections ? ($settings?.directConnections ?? null) : null
-		);
+		return await _getModels(localStorage.token);
 	};
 
 	const adminConfigSaveHandler = async () => {
@@ -503,8 +462,8 @@
 	const tabButtonClass = (active: boolean) =>
 		`flex items-center gap-1.5 h-7 px-2 md:w-full shrink-0 rounded-lg text-xs text-left transition-colors duration-75 ${
 			active
-				? 'font-medium text-gray-900 dark:text-white bg-gray-50 dark:bg-white/[0.04]'
-				: 'text-gray-600 hover:text-gray-700 dark:text-gray-400 dark:hover:text-gray-300'
+				? 'font-medium text-base-900 dark:text-base-0 bg-base-50 dark:bg-base-0/[0.04]'
+				: 'text-base-600 hover:text-base-700 dark:text-base-400 dark:hover:text-base-300'
 		}`;
 
 	let selectedTab = 'general';
@@ -544,18 +503,18 @@
 
 <Modal
 	size="full"
-	containerClassName="p-4 sm:p-6 lg:p-8"
-	className="!w-[calc(100vw-2rem)] sm:!w-[calc(100vw-3rem)] lg:!w-[calc(100vw-4rem)] h-[calc(100dvh-4rem)] max-h-[calc(100dvh-4rem)] flex flex-col md:flex-row bg-white dark:bg-gray-900 rounded-4xl overflow-hidden"
+	containerClassName="p-3 sm:p-4 lg:p-6"
+	className="h-[calc(100dvh-1.5rem)] sm:h-[calc(100dvh-2rem)] lg:h-[calc(100dvh-3rem)] flex flex-col md:flex-row bg-base-0 dark:bg-base-900 rounded-4xl overflow-hidden"
 	ariaLabel={$i18n.t('Settings')}
 	bind:show={modalShow}
 >
 	<nav
 		id="settings-tabs-container"
-		class="shrink-0 min-w-0 md:min-h-0 flex flex-col border-b md:border-b-0 md:border-r border-gray-100/30 dark:border-white/[0.02] md:w-[15rem]"
+		class="shrink-0 min-w-0 md:min-h-0 flex flex-col border-b md:border-b-0 md:border-r border-base-100/30 dark:border-base-0/[0.02] md:w-[15rem]"
 	>
 		<div class="flex items-center gap-1 m-1 md:mb-0 shrink-0">
 			<button
-				class="flex flex-1 items-center gap-1.5 h-7 px-2 rounded-lg text-xs text-gray-600 dark:text-gray-500 hover:text-gray-700 dark:hover:text-gray-300 transition-colors duration-75"
+				class="flex flex-1 items-center gap-1.5 h-7 px-2 rounded-lg text-xs text-base-600 dark:text-base-500 hover:text-base-700 dark:hover:text-base-300 transition-colors duration-75"
 				type="button"
 				on:click={() => {
 					show = false;
@@ -567,7 +526,7 @@
 			<button
 				bind:this={searchButton}
 				type="button"
-				class="flex md:hidden size-7 shrink-0 items-center justify-center rounded-lg text-gray-600 hover:bg-gray-50 hover:text-gray-700 dark:text-gray-500 dark:hover:bg-white/[0.04] dark:hover:text-gray-300"
+				class="flex md:hidden size-7 shrink-0 items-center justify-center rounded-lg text-base-600 hover:bg-base-50 hover:text-base-700 dark:text-base-500 dark:hover:bg-base-0/[0.04] dark:hover:text-base-300"
 				aria-label={$i18n.t('Search')}
 				aria-expanded={showSearch || !!search}
 				aria-controls="search-input-settings-modal"
@@ -579,7 +538,7 @@
 
 		{#if !$mobile || showSearch || search}
 			<div
-				class="flex items-center gap-1.5 h-7 px-2 mx-1 md:mt-1 mb-0.5 shrink-0 rounded-lg text-xs bg-gray-50/70 dark:bg-white/[0.03]"
+				class="flex items-center gap-1.5 h-7 px-2 mx-1 md:mt-1 mb-0.5 shrink-0 rounded-lg text-xs bg-base-50/70 dark:bg-base-0/[0.03]"
 			>
 				<div class="self-center rounded-l-xl bg-transparent">
 					<Search className="size-3.5" strokeWidth="1.5" />
@@ -588,7 +547,7 @@
 				<input
 					bind:this={searchInput}
 					data-settings-search
-					class="w-full text-xs bg-transparent py-1 outline-hidden placeholder:text-gray-600 dark:text-gray-300 dark:placeholder:text-gray-500"
+					class="w-full text-xs bg-transparent py-1 outline-hidden placeholder:text-base-600 dark:text-base-300 dark:placeholder:text-base-500"
 					bind:value={search}
 					id="search-input-settings-modal"
 					on:keydown={searchKeydown}
@@ -609,7 +568,7 @@
 			class="tabs scrollbar-none max-h-32 md:max-h-none flex min-w-0 flex-1 min-h-0 overflow-x-auto md:overflow-x-hidden md:overflow-y-auto md:flex-col p-1 pl-0 md:pl-1 gap-px"
 		>
 			<span
-				class="hidden md:block text-[0.625rem] text-gray-600 dark:text-gray-500 px-2 mt-1.5 mb-0.5"
+				class="hidden md:block text-[0.625rem] text-base-600 dark:text-base-500 px-2 mt-1.5 mb-0.5"
 			>
 				{$i18n.t('Personal')}
 			</span>
@@ -675,36 +634,6 @@
 								<Keyboard className="size-3.5" strokeWidth="2" />
 								<span>{$i18n.t('settings.personal.shortcuts.title')}</span>
 							</button>
-						{:else if tabId === 'connections'}
-							{#if $user?.role === 'admin' || ($user?.role === 'user' && $config?.features?.enable_direct_connections)}
-								<button
-									role="tab"
-									aria-controls="tab-connections"
-									aria-selected={selectedTab === 'connections'}
-									class={tabButtonClass(selectedTab === 'connections')}
-									on:click={() => {
-										selectTab('connections');
-									}}
-								>
-									<Link className="size-3.5" strokeWidth="2" />
-									<span>{$i18n.t('settings.personal.connections.title')}</span>
-								</button>
-							{/if}
-						{:else if tabId === 'tools'}
-							{#if $user?.role === 'admin' || ($user?.role === 'user' && $user?.permissions?.features?.direct_tool_servers)}
-								<button
-									role="tab"
-									aria-controls="tab-tools"
-									aria-selected={selectedTab === 'tools'}
-									class={tabButtonClass(selectedTab === 'tools')}
-									on:click={() => {
-										selectTab('tools');
-									}}
-								>
-									<WrenchAlt className="size-3.5" strokeWidth="2" />
-									<span>{$i18n.t('settings.personal.tools.title')}</span>
-								</button>
-							{/if}
 						{:else if tabId === 'personalization'}
 							<button
 								role="tab"
@@ -803,9 +732,9 @@
 
 			{#if $user?.role === 'admin' && filteredAdminSettings.length > 0}
 				<div
-					class="hidden md:block shrink-0 self-stretch h-px mx-1 my-2 bg-gray-100/40 dark:bg-white/[0.025]"
+					class="hidden md:block shrink-0 self-stretch h-px mx-1 my-2 bg-base-100/40 dark:bg-base-0/[0.025]"
 				></div>
-				<span class="hidden md:block text-[0.625rem] text-gray-600 dark:text-gray-500 px-2 mb-0.5">
+				<span class="hidden md:block text-[0.625rem] text-base-600 dark:text-base-500 px-2 mb-0.5">
 					{$i18n.t('Admin')}
 				</span>
 
@@ -818,12 +747,34 @@
 						{/if}
 
 						{@const tab = adminSettings.find((setting) => setting.id === tabId)}
-						{#if tab}
+						{@const legacy = legacyAdminTabs.includes(tabId)}
+						{#if legacy && tabId === filteredAdminSettings.find( (id) => legacyAdminTabs.includes(id) )}
+							<button
+								type="button"
+								aria-expanded={legacyTabsOpen}
+								class="flex items-center gap-1.5 h-7 px-2 md:w-full shrink-0 rounded-lg text-xs text-left text-base-500 hover:text-base-700 dark:text-base-500 dark:hover:text-base-300 transition-colors duration-75"
+								on:click={() => {
+									showLegacyTabs = !showLegacyTabs;
+								}}
+							>
+								<!-- Small chevron in an icon-sized slot, so the label lines up with the tabs. -->
+								<span class="flex size-3.5 shrink-0 items-center justify-center">
+									<ChevronRight
+										className="size-2.5 transition-transform duration-75 {legacyTabsOpen
+											? 'rotate-90'
+											: ''}"
+										strokeWidth="2.5"
+									/>
+								</span>
+								<span>{$i18n.t('Legacy')}</span>
+							</button>
+						{/if}
+						{#if tab && (!legacy || legacyTabsOpen)}
 							<button
 								role="tab"
 								aria-controls={adminTabPanelId(tab.id)}
 								aria-selected={selectedTab === tab.id}
-								class={tabButtonClass(selectedTab === tab.id)}
+								class="{tabButtonClass(selectedTab === tab.id)} {legacy ? 'md:pl-4' : ''}"
 								on:click={() => {
 									selectTab(tab.id);
 								}}
@@ -837,7 +788,7 @@
 			{/if}
 
 			{#if filteredSettings.length === 0}
-				<div class="px-2 py-1 text-xs text-gray-600 dark:text-gray-500">
+				<div class="px-2 py-1 text-xs text-base-600 dark:text-base-500">
 					{$i18n.t('No matches')}
 				</div>
 			{/if}
@@ -869,20 +820,6 @@
 				<Notifications {saveSettings} />
 			{:else if selectedTab === 'shortcuts'}
 				<Shortcuts {saveSettings} />
-			{:else if selectedTab === 'connections'}
-				<Connections
-					saveSettings={async (updated: Record<string, any>) => {
-						await saveSettings(updated);
-						toast.success($i18n.t('Settings saved successfully!'));
-					}}
-				/>
-			{:else if selectedTab === 'tools'}
-				<Integrations
-					saveSettings={async (updated: Record<string, any>) => {
-						await saveSettings(updated);
-						toast.success($i18n.t('Settings saved successfully!'));
-					}}
-				/>
 			{:else if selectedTab === 'personalization'}
 				<Personalization
 					{saveSettings}
@@ -925,20 +862,22 @@
 				<AdminModels bind:tabState />
 			{:else if selectedTab === 'admin:subagents'}
 				<AdminSubagents />
-			{:else if selectedTab === 'admin:evaluations'}
-				<AdminEvaluations />
 			{:else if selectedTab === 'admin:analytics'}
 				<AdminAnalytics />
 			{:else if selectedTab === 'admin:integrations'}
 				<AdminIntegrations {saveSettings} />
-			{:else if selectedTab === 'admin:apps'}
-				<AdminApps />
 			{:else if selectedTab === 'admin:documents'}
 				<AdminDocuments on:save={adminConfigSaveHandler} />
 			{:else if selectedTab === 'admin:web'}
 				<AdminWebSearch saveHandler={adminConfigSaveHandler} />
 			{:else if selectedTab === 'admin:code-execution'}
 				<AdminCodeExecution saveHandler={adminConfigSaveHandler} />
+			{:else if selectedTab === 'admin:pipelines'}
+				<AdminPipelines
+					saveHandler={() => {
+						toast.success($i18n.t('Settings saved successfully!'));
+					}}
+				/>
 			{:else if selectedTab === 'admin:interface'}
 				<AdminInterface
 					saveHandler={() => {
@@ -959,12 +898,6 @@
 				/>
 			{:else if selectedTab === 'admin:db'}
 				<AdminDatabase
-					saveHandler={() => {
-						toast.success($i18n.t('Settings saved successfully!'));
-					}}
-				/>
-			{:else if selectedTab === 'admin:pipelines'}
-				<AdminPipelines
 					saveHandler={() => {
 						toast.success($i18n.t('Settings saved successfully!'));
 					}}

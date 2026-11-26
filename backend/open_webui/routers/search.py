@@ -1,12 +1,14 @@
 """Permission-scoped workspace search. Shared snapshots never read the live chat."""
 
+import logging
 from typing import Literal
 from urllib.parse import urlencode
 
 from fastapi import APIRouter, Depends, Query
-from open_webui.internal.db import get_async_session
+from open_webui.internal.db import get_async_session, strip_nul_from_json
 from open_webui.models.access_grants import AccessGrant, AccessGrants
 from open_webui.models.channels import ChannelMember, Channels
+from open_webui.models.chat_messages import ChatMessage
 from open_webui.models.chats import Chat, chat_message_list, chat_search_content_query
 from open_webui.models.config import Config
 from open_webui.models.folders import Folder, Folders
@@ -14,13 +16,16 @@ from open_webui.models.groups import Groups
 from open_webui.models.messages import Message
 from open_webui.models.notes import Note, PinnedNote, matching_page
 from open_webui.models.shared_chats import SharedChat
+from open_webui.models.tags import resource_tag_filter
 from open_webui.models.users import User
 from open_webui.utils.access_control import has_permission
 from open_webui.utils.auth import get_verified_user
 from pydantic import BaseModel, Field
 from sqlalchemy import BigInteger, and_, case, cast, func, literal, or_, select, text, union_all
+from sqlalchemy.exc import DBAPIError
 from sqlalchemy.ext.asyncio import AsyncSession
 
+log = logging.getLogger(__name__)
 router = APIRouter()
 PAGE_SIZE = 24
 
@@ -92,31 +97,30 @@ def message_match_sql(table: str, dialect: str, key: str):
     # Identifiers are internal constants; all user input remains bound parameters.
     if dialect == 'sqlite':
         sources = [f"json_each({table}.chat, '$.history.messages')", f"json_each({table}.chat, '$.messages')"]
-        return text(
-            '('
-            + ' OR '.join(
-                f"EXISTS (SELECT 1 FROM {source} AS m WHERE lower(CASE WHEN m.type = 'object' "
-                f"AND json_type(m.value, '$.content') = 'text' THEN m.value ->> 'content' END) "
-                f"LIKE :{key} ESCAPE '\\')"
-                for source in sources
-            )
-            + ')'
+        legacy_content = (
+            "CASE WHEN m.type = 'object' AND json_type(m.value, '$.content') = 'text' THEN m.value ->> 'content' END"
         )
-    sources = [
-        f"json_each(CASE WHEN json_typeof({table}.chat->'history'->'messages') = 'object' "
-        f"THEN {table}.chat->'history'->'messages' ELSE '{{}}'::json END)",
-        f"json_array_elements(CASE WHEN json_typeof({table}.chat->'messages') = 'array' "
-        f"THEN {table}.chat->'messages' ELSE '[]'::json END)",
-    ]
-    return text(
-        '('
-        + ' OR '.join(
-            f"EXISTS (SELECT 1 FROM {source} AS m WHERE json_typeof(m.value->'content') = 'string' "
-            f"AND lower(m.value->>'content') LIKE :{key} ESCAPE '\\')"
-            for source in sources
-        )
-        + ')'
+        row_content = "CASE WHEN json_type(m.content) = 'text' THEN json_extract(m.content, '$') END"
+    else:
+        sources = [
+            f"json_each(CASE WHEN json_typeof({table}.chat->'history'->'messages') = 'object' "
+            f"THEN {table}.chat->'history'->'messages' ELSE '{{}}'::json END)",
+            f"json_array_elements(CASE WHEN json_typeof({table}.chat->'messages') = 'array' "
+            f"THEN {table}.chat->'messages' ELSE '[]'::json END)",
+        ]
+        legacy_content = "CASE WHEN json_typeof(m.value->'content') = 'string' THEN m.value->>'content' END"
+        row_content = "CASE WHEN json_typeof(m.content) = 'string' THEN m.content #>> '{}' END"
+
+    legacy_match = ' OR '.join(
+        f"EXISTS (SELECT 1 FROM {source} AS m WHERE lower({legacy_content}) LIKE :{key} ESCAPE '\\')"
+        for source in sources
     )
+    if table == 'chat':
+        return text(
+            'EXISTS (SELECT 1 FROM chat_message AS m WHERE m.chat_id = chat.id '
+            f"AND lower({row_content}) LIKE :{key} ESCAPE '\\')"
+        )
+    return text(f'({legacy_match})')
 
 
 async def search_workspace(  # noqa: C901 — keep permission scoping and source dispatch together
@@ -272,12 +276,17 @@ async def search_workspace(  # noqa: C901 — keep permission scoping and source
 
     sources = {}
     if 'chat' in enabled and kind in ('all', 'chat') and not scope.startswith('channel:'):
-        continue_shared = select(SharedChat.chat_id).where(
-            SharedChat.chat['share_mode'].as_string() == 'continue', granted('shared_chat', SharedChat.chat_id)
-        )
-        live_access = or_(
-            Chat.user_id == user.id, Chat.folder_id.in_(select(folders.c.id)), Chat.id.in_(continue_shared)
-        )
+        shared_chats = []
+        if not scope and sharing != 'mine' and not chat_filtered:
+            shared_chats = (
+                await db.execute(
+                    select(
+                        SharedChat.id, SharedChat.chat_id, SharedChat.chat['share_mode'].as_string().label('share_mode')
+                    ).where(granted('shared_chat', SharedChat.chat_id))
+                )
+            ).all()
+        continue_shared = [shared_chat.chat_id for shared_chat in shared_chats if shared_chat.share_mode == 'continue']
+        live_access = or_(Chat.user_id == user.id, Chat.folder_id.in_(folder_map), Chat.id.in_(continue_shared))
         live_ids = select(Chat.id).where(live_access)
         rank = (
             title_rank(Chat.title, query)
@@ -301,22 +310,12 @@ async def search_workspace(  # noqa: C901 — keep permission scoping and source
         if folder_names:
             matched_folders = await Folders.search_folders_by_names(user.id, folder_names, db=db)
             stmt = stmt.where(Chat.folder_id.in_([folder.id for folder in matched_folders]))
-        tags, tag = (
-            ("json_each(chat.meta, '$.tags') AS tag", 'tag.value')
-            if dialect == 'sqlite'
-            else ("json_array_elements_text(chat.meta->'tags') AS tag", 'tag')
-        )
-        for index, tag_id in enumerate(tag_ids):
-            key = f'tag_{index}'
-            stmt = stmt.where(
-                text(f'NOT EXISTS (SELECT 1 FROM {tags})')
-                if tag_id == 'none'
-                else text(f'EXISTS (SELECT 1 FROM {tags} WHERE {tag} = :{key})').bindparams(**{key: tag_id})
-            )
+        for tag_id in tag_ids:
+            stmt = stmt.where(resource_tag_filter('chat', Chat.id, [tag_id]))
         sources['chat'] = (Chat, apply_match(stmt, Chat), rank, Chat.updated_at)
         if not scope and sharing != 'mine' and not chat_filtered:
             stmt = select(SharedChat).where(
-                granted('shared_chat', SharedChat.chat_id), ~SharedChat.chat_id.in_(live_ids)
+                SharedChat.id.in_([shared_chat.id for shared_chat in shared_chats]), ~SharedChat.chat_id.in_(live_ids)
             )
             if sharing == 'shared':
                 stmt = stmt.where(SharedChat.user_id != user.id)
@@ -327,7 +326,7 @@ async def search_workspace(  # noqa: C901 — keep permission scoping and source
                 SharedChat.updated_at,
             )
 
-    if 'note' in enabled and kind in ('all', 'note') and not scope and not chat_filtered:
+    if 'note' in enabled and kind in ('all', 'note') and not scope.startswith('channel:') and not chat_filtered:
         pinned = select(PinnedNote.id).where(PinnedNote.note_id == Note.id, PinnedNote.user_id == user.id).exists()
         note_shared = (
             select(AccessGrant.id)
@@ -338,10 +337,16 @@ async def search_workspace(  # noqa: C901 — keep permission scoping and source
             )
             .exists()
         )
-        stmt = AccessGrants.has_permission_filter(
-            select(Note, pinned, note_shared), Note, {'user_id': user.id, 'group_ids': groups}, 'note', 'read', db=db
+        stmt = select(Note, pinned, note_shared).where(
+            or_(
+                Note.user_id == user.id,
+                AccessGrants.has_grant_expression(user.id, 'note', Note.id, 'read', groups),
+                Note.folder_id.in_(select(folders.c.id)),
+            ),
+            sharing_filter(Note.user_id),
         )
-        stmt = stmt.where(sharing_filter(Note.user_id))
+        if scope:
+            stmt = stmt.where(Note.folder_id.in_(scoped_folders))
         stmt = apply_match(
             stmt, Note, func.coalesce(Note.data['search_text'].as_string(), Note.data['content']['md'].as_string())
         )
@@ -394,14 +399,29 @@ async def search_workspace(  # noqa: C901 — keep permission scoping and source
         if ids:
             hydrated[source] = {row[0].id: row for row in (await db.execute(stmt.where(model.id.in_(ids)))).all()}
 
+    chat_messages = {}
+    if hydrated.get('chat'):
+        rows = await db.execute(
+            select(ChatMessage.chat_id, ChatMessage.id, ChatMessage.content)
+            .where(ChatMessage.chat_id.in_(hydrated['chat']))
+            .order_by(ChatMessage.created_at, ChatMessage.id)
+        )
+        for row in rows:
+            chat_messages.setdefault(row.chat_id, []).append(
+                {'id': row.id.removeprefix(f'{row.chat_id}-'), 'content': row.content}
+            )
+
     for match in matches:
         row = hydrated.get(match.source, {}).get(match.id)
         if row is None:
             continue  # Access may have been revoked between selecting IDs and hydrating.
         item = row[0]
         if match.source in ('chat', 'shared'):
-            content, message_id = chat_passage(item.chat or {}, query)
             snapshot = match.source == 'shared'
+            data = (
+                {'messages': chat_messages[item.id]} if not snapshot and item.id in chat_messages else item.chat or {}
+            )
+            content, message_id = chat_passage(data, query)
             folder = None if snapshot else folder_map.get(item.folder_id)
             context = (
                 'Shared snapshot'
@@ -429,15 +449,17 @@ async def search_workspace(  # noqa: C901 — keep permission scoping and source
         elif match.source == 'note':
             page = matching_page(item.data, query)
             content = page['content'].get('md', '')
+            folder = folder_map.get(item.folder_id)
+            is_shared = item.user_id != user.id or row[2] or item.folder_id in shared_folder_ids
             append_result(
                 'note:' + item.id,
                 'note',
                 item.title,
-                'Shared note' if item.user_id != user.id or row[2] else 'Personal note',
+                folder.name if folder else ('Shared note' if is_shared else 'Personal note'),
                 content if isinstance(content, str) else '',
                 '/notes/' + item.id + '?' + urlencode({'page': page['id'], 'search': query}),
                 match.updated_at,
-                item.user_id != user.id or row[2],
+                is_shared,
                 row[1],
                 match.rank,
             )
@@ -476,4 +498,13 @@ async def search(
             user.role == 'admin' or await has_permission(user.id, 'features.' + feature, permissions, db=db)
         ):
             enabled.append(result_kind)
-    return await search_workspace(db, user, q, kind, sharing, scope, page, tuple(enabled))
+    try:
+        return await search_workspace(db, user, q, kind, sharing, scope, page, tuple(enabled))
+    except DBAPIError as e:
+        # PostgreSQL can't read \u0000 out of json; rows stored before writes stripped it get cleaned once.
+        if getattr(e.orig, 'sqlstate', None) != '22P05':
+            raise
+        log.warning('Stripping \\u0000 from stored JSON so search can read it')
+        await db.rollback()
+        await strip_nul_from_json(db)
+        return await search_workspace(db, user, q, kind, sharing, scope, page, tuple(enabled))

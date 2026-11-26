@@ -275,6 +275,35 @@ export const testExternalKnowledgeSource = async (token: string, payload: object
 	return res;
 };
 
+export const listExternalKnowledgeStores = async (token: string, payload: object) => {
+	let error = null;
+
+	const res = await fetch(`${WEBUI_API_BASE_URL}/knowledge/external/source/stores`, {
+		method: 'POST',
+		headers: {
+			Accept: 'application/json',
+			'Content-Type': 'application/json',
+			authorization: `Bearer ${token}`
+		},
+		body: JSON.stringify(payload)
+	})
+		.then(async (res) => {
+			if (!res.ok) throw await res.json();
+			return res.json();
+		})
+		.catch((err) => {
+			error = err.detail;
+			console.error(err);
+			return null;
+		});
+
+	if (error) {
+		throw error;
+	}
+
+	return res;
+};
+
 export const createExternalKnowledgeSource = async (token: string, payload: object) => {
 	let error = null;
 
@@ -453,7 +482,8 @@ export const searchKnowledgeFiles = async (
 	orderBy?: string | null,
 	direction?: string | null,
 	page: number = 1,
-	includeContent: boolean = false
+	includeContent: boolean = false,
+	signal?: AbortSignal
 ) => {
 	let error = null;
 
@@ -469,6 +499,7 @@ export const searchKnowledgeFiles = async (
 		`${WEBUI_API_BASE_URL}/knowledge/search/files?${searchParams.toString()}`,
 		{
 			method: 'GET',
+			signal,
 			headers: {
 				Accept: 'application/json',
 				'Content-Type': 'application/json',
@@ -484,6 +515,7 @@ export const searchKnowledgeFiles = async (
 			return json;
 		})
 		.catch((err) => {
+			if (signal?.aborted) return null;
 			error = err.detail;
 
 			console.error(err);
@@ -602,7 +634,7 @@ export const getPendingKnowledgeFiles = async (token: string, id: string) => {
 			return res.json();
 		})
 		.catch((err) => {
-			error = err.detail || err.message || 'Unable to refresh file processing status';
+			error = err.detail;
 			console.error(err);
 			return [];
 		});

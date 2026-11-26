@@ -1,4 +1,6 @@
 <script lang="ts">
+	import { getPageContext } from '$lib/utils/page';
+	const { active } = getPageContext();
 	import { v4 as uuidv4 } from 'uuid';
 	import { onDestroy, getContext, tick, type Snippet } from 'svelte';
 	import { toast } from 'svelte-sonner';
@@ -31,7 +33,9 @@
 		type SkillFileSummary,
 		type SkillFileOperation
 	} from '$lib/apis/skills';
-	import type { FileEntry } from '$lib/apis/terminal';
+	import type { FileEntry } from '$lib/apis/machines';
+	import { readDroppedFiles, type DroppedEntry } from '$lib/utils/drop';
+	import FilesOverlay from '$lib/components/chat/MessageInput/FilesOverlay.svelte';
 
 	export let version: Snippet;
 	export let exports: Snippet;
@@ -415,14 +419,16 @@
 		dirty = true;
 		if (!files.some((f) => f.path === selected)) open('SKILL.md');
 	};
-	const upload = async (uploads: File[]) => {
+	/** Adds files at their paths under the open folder; a folder without `file` is kept even if empty. */
+	const upload = async (uploads: DroppedEntry[]) => {
 		if (readOnly) return;
 		flush();
 		try {
 			const drafts: Draft[] = [];
-			for (const file of uploads) {
+			for (const { path: relativePath, file } of uploads) {
+				if (!file) continue;
 				if (file.size > 10 * 1024 * 1024) throw new Error('Files must be at most 10 MiB');
-				const path = currentPath + (file.webkitRelativePath || file.name);
+				const path = currentPath + relativePath;
 				const bytes = new Uint8Array(await file.arrayBuffer());
 				let text: string | undefined;
 				try {
@@ -440,12 +446,53 @@
 				});
 			}
 			validatePaths([...files.map((f) => f.path), ...drafts.map((f) => f.path)]);
+			// Only dropped folders that end up empty need keeping; the rest show through their files.
+			const dropped = uploads
+				.filter((entry) => !entry.file)
+				.map((entry) => currentPath + entry.path);
+			const paths = [...files, ...drafts].map((f) => f.path).concat(dropped, emptyFolders);
+			const folders = dropped.filter(
+				(folder) => !emptyFolders.includes(folder) && !paths.some((p) => p.startsWith(folder + '/'))
+			);
+			if (!drafts.length && !folders.length) return;
 			files = [...files, ...drafts];
+			emptyFolders = [...emptyFolders, ...folders];
 			dirty = true;
 		} catch (error) {
 			toast.error(skillError(error));
 		}
 	};
+	const fromInput = (list: FileList | null): DroppedEntry[] =>
+		Array.from(list ?? []).map((file) => ({ path: file.webkitRelativePath || file.name, file }));
+
+	// Files and folders dropped anywhere on the skill upload into the open folder, like the buttons.
+	let dragging = false;
+	const isFileDrag = (event: DragEvent) =>
+		!readOnly && (event.dataTransfer?.types.includes('Files') ?? false);
+	const dragOver = (event: DragEvent) => {
+		if (!isFileDrag(event)) return;
+		// Capture phase, so the code editor doesn't paste the file's text instead.
+		event.preventDefault();
+		event.stopPropagation();
+		if (event.dataTransfer) event.dataTransfer.dropEffect = 'copy';
+		dragging = true;
+	};
+	const dragLeave = (event: DragEvent) => {
+		if (!(event.currentTarget as HTMLElement).contains(event.relatedTarget as Node))
+			dragging = false;
+	};
+	const drop = async (event: DragEvent) => {
+		dragging = false;
+		if (!isFileDrag(event) || !event.dataTransfer) return;
+		event.preventDefault();
+		event.stopPropagation();
+		try {
+			await upload(await readDroppedFiles(event.dataTransfer));
+		} catch (error) {
+			toast.error(skillError(error));
+		}
+	};
+
 	const download = async (path: string) => {
 		flush();
 		const file = files.find((f) => f.path === path);
@@ -501,6 +548,18 @@
 	});
 </script>
 
+<svelte:window
+	on:keydown={(event) => {
+		if (
+			$active &&
+			event.key === 'Escape' &&
+			!event.defaultPrevented &&
+			!document.querySelector('.modal, [role="menu"]')
+		)
+			selectedPaths = new Set();
+	}}
+/>
+
 <DiffEditorModal
 	bind:show={showComparison}
 	initialContent={comparison?.content ?? ''}
@@ -523,7 +582,7 @@
 	bind:this={folderInput}
 	hidden
 	on:change={() => {
-		upload(Array.from(folderInput.files || []));
+		upload(fromInput(folderInput.files));
 		folderInput.value = '';
 	}}
 />
@@ -533,11 +592,19 @@
 	hidden
 	bind:this={uploadInput}
 	on:change={() => {
-		if (!readOnly) upload(Array.from(uploadInput.files || []));
+		if (!readOnly) upload(fromInput(uploadInput.files));
 		uploadInput.value = '';
 	}}
 />
-<div class="flex h-full min-h-0 flex-col">
+<div
+	class="relative flex h-full min-h-0 flex-col"
+	role="region"
+	aria-label={$i18n.t('Files')}
+	on:dragover|capture={dragOver}
+	on:dragleave={dragLeave}
+	on:drop|capture={drop}
+>
+	<FilesOverlay show={dragging} />
 	<div class="flex min-h-0 flex-1 flex-col md:flex-row">
 		{#if $mobile}
 			{@render fileList()}
@@ -569,14 +636,14 @@
 
 {#snippet fileContent()}
 	<div
-		class="flex h-full min-h-0 min-w-0 flex-1 flex-col overflow-hidden bg-white dark:bg-gray-900"
+		class="flex h-full min-h-0 min-w-0 flex-1 flex-col overflow-hidden bg-base-0 dark:bg-base-900"
 	>
-		<div class="flex shrink-0 items-center gap-1 px-2.5 py-1.5 text-xs dark:bg-black">
+		<div class="flex shrink-0 items-center gap-1 px-2.5 py-1.5 text-xs">
 			{#if $mobile}
 				<button
 					type="button"
 					aria-label={$i18n.t('Back to files')}
-					class="flex shrink-0 items-center gap-1 whitespace-nowrap py-0.5 pr-1 text-gray-500 hover:text-gray-900 dark:hover:text-gray-100"
+					class="flex shrink-0 items-center gap-1 whitespace-nowrap py-0.5 pr-1 text-base-500 hover:text-base-900 dark:hover:text-base-100"
 					on:click={() => {
 						flush();
 						showFileDrawer = false;
@@ -585,17 +652,17 @@
 					<ChevronLeft className="size-3.5" />{$i18n.t('Back')}
 				</button>
 			{/if}
-			<span class="min-w-0 flex-1 truncate text-gray-500" title={selected}>{selected}</span>
+			<span class="min-w-0 flex-1 truncate text-base-500" title={selected}>{selected}</span>
 			{#if !readOnly && loadedPath && !objectUrl && !loading && !loadError}
 				<button
 					type="button"
-					class="rounded-lg px-1.5 py-0.5 text-gray-500 transition hover:text-gray-900 dark:hover:text-gray-100"
+					class="rounded-lg px-1.5 py-0.5 text-base-500 transition hover:text-base-900 dark:hover:text-base-100"
 					on:click={compareRevision}>{$i18n.t('Compare revision')}</button
 				>
 			{/if}
 			{#if /\.md$/i.test(selected) && !loading}<button
 					type="button"
-					class="rounded-lg px-1.5 py-0.5 text-gray-500 transition hover:text-gray-900 dark:hover:text-gray-100"
+					class="rounded-lg px-1.5 py-0.5 text-base-500 transition hover:text-base-900 dark:hover:text-base-100"
 					on:click={async () => {
 						preview = !preview;
 						if (preview) await renderPreview();
@@ -605,13 +672,13 @@
 				<button
 					type="button"
 					aria-label={$i18n.t('Copy content')}
-					class="shrink-0 rounded-lg px-1.5 py-0.5 text-gray-500 transition hover:text-gray-900 dark:hover:text-gray-100"
+					class="shrink-0 rounded-lg px-1.5 py-0.5 text-base-500 transition hover:text-base-900 dark:hover:text-base-100"
 					on:click={copyContent}>{$i18n.t('Copy')}</button
 				>
 			{/if}
 			<button
 				type="button"
-				class="rounded-lg px-1.5 py-0.5 text-gray-500 transition hover:text-gray-900 dark:hover:text-gray-100"
+				class="rounded-lg px-1.5 py-0.5 text-base-500 transition hover:text-base-900 dark:hover:text-base-100"
 				on:click={() => download(selected)}>{$i18n.t('Download')}</button
 			>
 		</div>
@@ -629,7 +696,7 @@
 					sandbox=""
 					class="min-h-0 flex-1"
 				></iframe>
-			{:else}<p class="p-3 text-xs text-gray-500">
+			{:else}<p class="p-3 text-xs text-base-500">
 					{$i18n.t('Binary file. Download to open.')}
 				</p>{/if}
 		{:else if preview}
@@ -699,13 +766,19 @@
 {/snippet}
 
 {#snippet fileList()}
-	<div class="h-full min-h-0 w-full overflow-auto p-1.5">
+	<!-- svelte-ignore a11y-click-events-have-key-events a11y-no-static-element-interactions -->
+	<div
+		class="h-full min-h-0 w-full overflow-auto p-1.5"
+		on:click={(event) => {
+			if (event.target === event.currentTarget) selectedPaths = new Set();
+		}}
+	>
 		<div class="mb-1 flex w-full items-center">
 			<div class="min-w-0 flex-1">{@render version()}</div>
 			{#if readOnly}
 				<Tooltip content={$i18n.t('Read Only')}>
 					<span
-						class="flex items-center px-0.5 text-gray-400"
+						class="flex items-center px-0.5 text-base-400"
 						role="img"
 						aria-label={$i18n.t('Read Only')}><LockClosed className="size-3" /></span
 					>
@@ -717,7 +790,7 @@
 					<button
 						type="button"
 						aria-label={$i18n.t('Actions')}
-						class="flex h-7 w-6 shrink-0 items-center justify-center rounded-xl px-1 text-gray-500 transition hover:text-gray-900 dark:hover:text-gray-100"
+						class="flex h-7 w-6 shrink-0 items-center justify-center rounded-xl px-1 text-base-500 transition hover:text-base-900 dark:hover:text-base-100"
 					>
 						<EllipsisHorizontal className="size-4" />
 					</button>
@@ -726,31 +799,31 @@
 							{#if !readOnly}
 								<button
 									type="button"
-									class="select-none flex h-[1.6875rem] w-full cursor-pointer items-center gap-2 rounded-xl bg-transparent px-2 text-xs hover:text-gray-900 dark:hover:text-gray-100"
+									class="select-none flex h-[1.6875rem] w-full cursor-pointer items-center gap-2 rounded-xl bg-transparent px-2 text-xs hover:text-base-900 dark:hover:text-base-100"
 									on:click={() => startCreate('file')}
 									><Plus className="size-3.5" />{$i18n.t('New File')}</button
 								>
 								<button
 									type="button"
-									class="select-none flex h-[1.6875rem] w-full cursor-pointer items-center gap-2 rounded-xl bg-transparent px-2 text-xs hover:text-gray-900 dark:hover:text-gray-100"
+									class="select-none flex h-[1.6875rem] w-full cursor-pointer items-center gap-2 rounded-xl bg-transparent px-2 text-xs hover:text-base-900 dark:hover:text-base-100"
 									on:click={() => startCreate('directory')}
 									><Folder className="size-3.5" />{$i18n.t('New Folder')}</button
 								>
 								<button
 									type="button"
-									class="select-none flex h-[1.6875rem] w-full cursor-pointer items-center gap-2 rounded-xl bg-transparent px-2 text-xs hover:text-gray-900 dark:hover:text-gray-100"
+									class="select-none flex h-[1.6875rem] w-full cursor-pointer items-center gap-2 rounded-xl bg-transparent px-2 text-xs hover:text-base-900 dark:hover:text-base-100"
 									on:click={() => uploadInput.click()}
 									><ArrowUpTray className="size-3.5" />{$i18n.t('Upload')}</button
 								>
 								<button
 									type="button"
-									class="select-none flex h-[1.6875rem] w-full cursor-pointer items-center gap-2 rounded-xl bg-transparent px-2 text-xs hover:text-gray-900 dark:hover:text-gray-100"
+									class="select-none flex h-[1.6875rem] w-full cursor-pointer items-center gap-2 rounded-xl bg-transparent px-2 text-xs hover:text-base-900 dark:hover:text-base-100"
 									on:click={() => folderInput.click()}
 									><Folder className="size-3.5" />{$i18n.t('Upload Folder')}</button
 								>
 							{/if}
 							{#if canExport}
-								{#if !readOnly}<hr class="border-gray-100 dark:border-gray-800" />{/if}
+								{#if !readOnly}<hr class="border-base-100 dark:border-base-800" />{/if}
 								{@render exports()}
 							{/if}
 						</DropdownMenu>
@@ -762,7 +835,7 @@
 					<button
 						type="button"
 						aria-label={$i18n.t('New File')}
-						class="px-1 py-1.5 rounded-xl bg-transparent transition text-xs flex items-center text-gray-500 hover:text-gray-900 dark:hover:text-gray-100"
+						class="px-1 py-1.5 rounded-xl bg-transparent transition text-xs flex items-center text-base-500 hover:text-base-900 dark:hover:text-base-100"
 						on:click={() => startCreate('file')}
 					>
 						<svg
@@ -832,7 +905,7 @@
 				{/if}
 			{/each}
 		</ul>
-		{#if !rows.length}<p class="p-3 text-xs text-gray-500">
+		{#if !rows.length}<p class="p-3 text-xs text-base-500">
 				{$i18n.t('Empty folders are saved when they contain files.')}
 			</p>{/if}
 	</div>

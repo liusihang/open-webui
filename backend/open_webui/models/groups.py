@@ -123,6 +123,14 @@ class GroupForm(BaseModel):
     permissions: Optional[dict] = None
     data: Optional[dict] = None
 
+    @field_validator('name')
+    @classmethod
+    def validate_name(cls, name: str) -> str:
+        name = name.strip()
+        if not name:
+            raise ValueError('Group name cannot be empty.')
+        return name
+
     @field_validator('data')
     @classmethod
     def validate_default_models(cls, data):
@@ -350,6 +358,10 @@ class GroupTable:
                             stmt = stmt.filter(anyone_can_share)
                     else:
                         stmt = stmt.filter(and_(Group.data.isnot(None), json_share_lower == 'false'))
+                        if member_id:
+                            stmt = stmt.filter(
+                                Group.id.in_(select(user_group_memberships([member_id], True).c.group_id))
+                            )
 
                 else:
                     # Only apply member_id filter when share filter is NOT present

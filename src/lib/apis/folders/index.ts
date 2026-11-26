@@ -35,6 +35,30 @@ export const createNewFolder = async (token: string, folderForm: FolderForm) => 
 	return res;
 };
 
+export type ActiveFolder = {
+	id: string;
+	name: string;
+	machine_id?: string | null;
+	directory?: string | null;
+	waiting: boolean;
+	running: boolean;
+	terminals: number;
+	ports: number[];
+	tabs: string[];
+	updated_at: number;
+};
+
+export const getActiveFolders = async (token: string = ''): Promise<ActiveFolder[]> => {
+	const res = await fetch(`${WEBUI_API_BASE_URL}/folders/active`, {
+		headers: {
+			Accept: 'application/json',
+			authorization: `Bearer ${token}`
+		}
+	});
+	if (!res.ok) throw await res.json();
+	return res.json();
+};
+
 export const getFolders = async (token: string = '') => {
 	let error = null;
 
@@ -78,14 +102,17 @@ export const getFolderById = async (token: string, id: string) => {
 		}
 	})
 		.then(async (res) => {
-			if (!res.ok) throw await res.json();
+			if (!res.ok) {
+				const body = await res.json().catch(() => ({}));
+				throw Object.assign(new Error(body.detail ?? res.statusText), { status: res.status });
+			}
 			return res.json();
 		})
 		.then((json) => {
 			return json;
 		})
 		.catch((err) => {
-			error = err.detail;
+			error = err;
 			console.error(err);
 			return null;
 		});
@@ -331,10 +358,8 @@ export type ChatParticipant = {
 export const getSharedFolderChats = async (
 	token: string,
 	folderId: string,
-	params: {
+	params: Omit<import('$lib/stores/folderStates').FolderChatQuery, 'page'> & {
 		page?: number | null;
-		sortBy?: 'title' | 'updated_at';
-		sortDir?: 'asc' | 'desc';
 	} = {}
 ) => {
 	let error = null;
@@ -349,10 +374,82 @@ export const getSharedFolderChats = async (
 	if (params.sortDir) {
 		searchParams.append('sort_dir', params.sortDir);
 	}
+	if (params.workspace) searchParams.set('workspace', 'true');
+	if (params.search?.trim()) searchParams.set('search', params.search.trim());
+	for (const tag of params.tagIds ?? []) searchParams.append('tag_ids', tag);
+	for (const id of params.userIds ?? []) searchParams.append('user_ids', id);
+	for (const status of [params.status ?? []].flat()) searchParams.append('status', status);
+	for (const priority of [params.priority ?? []].flat()) searchParams.append('priority', priority);
+	if (params.activity) searchParams.set('activity', params.activity);
+	if (params.updatedAtGte !== undefined)
+		searchParams.set('updated_at_gte', String(params.updatedAtGte));
 	const query = searchParams.toString();
 
 	const res = await fetch(
 		`${WEBUI_API_BASE_URL}/folders/${folderId}/shared/chats${query ? `?${query}` : ''}`,
+		{
+			method: 'GET',
+			headers: {
+				Accept: 'application/json',
+				'Content-Type': 'application/json',
+				authorization: `Bearer ${token}`
+			}
+		}
+	)
+		.then(async (res) => {
+			if (!res.ok) {
+				const body = await res.json().catch(() => ({}));
+				throw Object.assign(new Error(body.detail ?? res.statusText), { status: res.status });
+			}
+			return res.json();
+		})
+		.catch((err) => {
+			error = err;
+			return null;
+		});
+
+	if (error) {
+		throw error;
+	}
+
+	return res;
+};
+
+export const getFolderUsers = async (token: string, id: string, signal?: AbortSignal) => {
+	let error = null;
+
+	const res = await fetch(`${WEBUI_API_BASE_URL}/folders/${encodeURIComponent(id)}/users`, {
+		signal,
+		method: 'GET',
+		headers: {
+			Accept: 'application/json',
+			'Content-Type': 'application/json',
+			authorization: `Bearer ${token}`
+		}
+	})
+		.then(async (res) => {
+			if (!res.ok) throw await res.json();
+			return res.json();
+		})
+		.catch((err) => {
+			if (signal?.aborted) return null;
+			error = err.detail;
+			console.error(err);
+			return null;
+		});
+
+	if (error) {
+		throw error;
+	}
+
+	return res;
+};
+
+export const getFolderNotes = async (token: string, id: string, page: number = 1) => {
+	let error = null;
+
+	const res = await fetch(
+		`${WEBUI_API_BASE_URL}/folders/${encodeURIComponent(id)}/notes?page=${page}`,
 		{
 			method: 'GET',
 			headers: {
@@ -368,6 +465,111 @@ export const getSharedFolderChats = async (
 		})
 		.catch((err) => {
 			error = err.detail;
+			console.error(err);
+			return null;
+		});
+
+	if (error) {
+		throw error;
+	}
+
+	return res;
+};
+
+export const getFolderTags = async (token: string, id: string, signal?: AbortSignal) => {
+	let error = null;
+
+	const res = await fetch(`${WEBUI_API_BASE_URL}/folders/${encodeURIComponent(id)}/tags`, {
+		signal,
+		method: 'GET',
+		headers: {
+			Accept: 'application/json',
+			'Content-Type': 'application/json',
+			authorization: `Bearer ${token}`
+		}
+	})
+		.then(async (res) => {
+			if (!res.ok) throw await res.json();
+			return res.json();
+		})
+		.catch((err) => {
+			if (signal?.aborted) return null;
+			error = err.detail;
+			console.error(err);
+			return null;
+		});
+
+	if (error) {
+		throw error;
+	}
+
+	return res;
+};
+
+export const updateFolderChatPriority = async (
+	token: string,
+	folderId: string,
+	chatId: string,
+	priority: string | null
+) => {
+	let error = null;
+
+	const res = await fetch(
+		`${WEBUI_API_BASE_URL}/folders/${encodeURIComponent(folderId)}/chats/${encodeURIComponent(chatId)}/priority`,
+		{
+			method: 'PATCH',
+			headers: {
+				Accept: 'application/json',
+				'Content-Type': 'application/json',
+				authorization: `Bearer ${token}`
+			},
+			body: JSON.stringify({ priority })
+		}
+	)
+		.then(async (res) => {
+			if (!res.ok) throw await res.json();
+			return res.json();
+		})
+		.catch((err) => {
+			error = err.detail;
+			console.error(err);
+			return null;
+		});
+
+	if (error) {
+		throw error;
+	}
+
+	return res;
+};
+
+export const updateFolderChatStatus = async (
+	token: string,
+	folderId: string,
+	chatId: string,
+	status: string | null
+) => {
+	let error = null;
+
+	const res = await fetch(
+		`${WEBUI_API_BASE_URL}/folders/${encodeURIComponent(folderId)}/chats/${encodeURIComponent(chatId)}/status`,
+		{
+			method: 'PATCH',
+			headers: {
+				Accept: 'application/json',
+				'Content-Type': 'application/json',
+				authorization: `Bearer ${token}`
+			},
+			body: JSON.stringify({ status })
+		}
+	)
+		.then(async (res) => {
+			if (!res.ok) throw await res.json();
+			return res.json();
+		})
+		.catch((err) => {
+			error = err.detail;
+			console.error(err);
 			return null;
 		});
 

@@ -18,16 +18,14 @@
 	export let onClear: () => void = () => {};
 </script>
 
-<div
-	class="flex h-8 items-center gap-2 px-2 bg-gray-50 dark:bg-white/[0.03] shrink-0 border-t border-gray-50 dark:border-gray-850/30"
->
-	<span class="text-[0.6875rem] font-normal text-gray-600 dark:text-gray-400 flex-1 truncate">
+<div class="flex h-6 shrink-0 items-center gap-1 pl-3 pr-2">
+	<span class="text-[0.6875rem] font-normal text-base-600 dark:text-base-400 flex-1 truncate">
 		{$i18n.t('{{count}} selected', { count })}
 	</span>
 
 	<Tooltip content={$i18n.t('Compare')}>
 		<button
-			class="flex h-5 w-5 items-center justify-center rounded transition-colors duration-100 text-gray-400 dark:text-gray-500 hover:text-gray-600 dark:hover:text-gray-300 disabled:opacity-30"
+			class="flex h-5 w-5 items-center justify-center rounded transition-colors duration-100 text-base-400 dark:text-base-500 hover:text-base-600 dark:hover:text-base-300 disabled:opacity-30"
 			disabled={!canCompare}
 			on:click={onCompare}
 			aria-label={$i18n.t('Compare')}
@@ -38,7 +36,7 @@
 
 	<Tooltip content={$i18n.t('Select All')}>
 		<button
-			class="flex h-5 w-5 items-center justify-center rounded transition-colors duration-100 text-gray-400 dark:text-gray-500 hover:text-gray-600 dark:hover:text-gray-300"
+			class="flex h-5 w-5 items-center justify-center rounded transition-colors duration-100 text-base-400 dark:text-base-500 hover:text-base-600 dark:hover:text-base-300"
 			on:click={onSelectAll}
 			aria-label={$i18n.t('Select All')}
 		>
@@ -48,7 +46,7 @@
 
 	<Tooltip content={$i18n.t('Download')}>
 		<button
-			class="flex h-5 w-5 items-center justify-center rounded transition-colors duration-100 text-gray-400 dark:text-gray-500 hover:text-gray-600 dark:hover:text-gray-300"
+			class="flex h-5 w-5 items-center justify-center rounded transition-colors duration-100 text-base-400 dark:text-base-500 hover:text-base-600 dark:hover:text-base-300"
 			on:click={onDownload}
 			aria-label={$i18n.t('Download')}
 		>
@@ -58,7 +56,7 @@
 
 	<Tooltip content={$i18n.t('Delete')}>
 		<button
-			class="flex h-5 w-5 items-center justify-center rounded transition-colors duration-100 text-gray-400 dark:text-gray-500 hover:text-gray-600 dark:hover:text-gray-300 disabled:opacity-30 disabled:hover:text-gray-400"
+			class="flex h-5 w-5 items-center justify-center rounded transition-colors duration-100 text-base-400 dark:text-base-500 hover:text-base-600 dark:hover:text-base-300 disabled:opacity-30 disabled:hover:text-base-400"
 			on:click={onDelete}
 			disabled={!canDelete}
 			aria-label={$i18n.t('Delete')}
@@ -69,7 +67,7 @@
 
 	<Tooltip content={$i18n.t('Deselect')}>
 		<button
-			class="flex h-5 w-5 items-center justify-center rounded transition-colors duration-100 text-gray-400 dark:text-gray-500 hover:text-gray-600 dark:hover:text-gray-300"
+			class="flex h-5 w-5 items-center justify-center rounded transition-colors duration-100 text-base-400 dark:text-base-500 hover:text-base-600 dark:hover:text-base-300"
 			on:click={onClear}
 			aria-label={$i18n.t('Deselect')}
 		>

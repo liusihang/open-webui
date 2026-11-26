@@ -1,8 +1,9 @@
 <script lang="ts">
 	import { config } from '$lib/stores';
+	import { getBackendConfig } from '$lib/apis';
 	import { toast } from 'svelte-sonner';
 
-	import { onMount, getContext, createEventDispatcher } from 'svelte';
+	import { onMount, getContext, createEventDispatcher, tick } from 'svelte';
 
 	const dispatch = createEventDispatcher();
 
@@ -36,6 +37,7 @@
 	import AdminSettingRow from './AdminSettingRow.svelte';
 	import AdminSettingSection from './AdminSettingSection.svelte';
 	import EvidenceSettings from './EvidenceSettings.svelte';
+	import AdminSettingSaveButton from './AdminSettingSaveButton.svelte';
 
 	const i18n: any = getContext('i18n');
 
@@ -77,22 +79,154 @@
 	};
 
 	let RAGConfig: any = null;
+
+	let savedConfig: Record<string, any> | null = null;
+	$: embeddingSettings = {
+		RAG_EMBEDDING_ENGINE,
+		RAG_EMBEDDING_MODEL,
+		RAG_EMBEDDING_QUERY_PREFIX,
+		RAG_EMBEDDING_CONTENT_PREFIX,
+		RAG_EMBEDDING_BATCH_SIZE,
+		ENABLE_ASYNC_EMBEDDING,
+		RAG_EMBEDDING_CONCURRENT_REQUESTS,
+		RAG_OPENAI_API_BASE_URL: OpenAIUrl,
+		RAG_OPENAI_API_KEY: OpenAIKey,
+		RAG_OLLAMA_BASE_URL: OllamaUrl,
+		RAG_OLLAMA_API_KEY: OllamaKey,
+		RAG_AZURE_OPENAI_BASE_URL: AzureOpenAIUrl,
+		RAG_AZURE_OPENAI_API_KEY: AzureOpenAIKey,
+		RAG_AZURE_OPENAI_API_VERSION: AzureOpenAIVersion
+	};
+	$: settings = { ...RAGConfig, ...embeddingSettings };
+	$: settingLabels = {
+		CONTENT_EXTRACTION_ENGINE: $i18n.t('settings.admin.documents.contentExtractionEngine.label'),
+		CONTENT_EXTRACTION_SUPPORTED_MEDIA_MIME_TYPES: $i18n.t(
+			'settings.admin.documents.supportedMediaMimeTypes.label'
+		),
+		PDF_EXTRACT_IMAGES: $i18n.t('settings.admin.documents.pdfExtractImagesOcr.label'),
+		PDF_LOADER_MODE: $i18n.t('settings.admin.documents.pdfLoaderMode.label'),
+		DATALAB_MARKER_API_BASE_URL: $i18n.t('settings.admin.documents.datalabMarkerApiBaseUrl.label'),
+		DATALAB_MARKER_API_KEY: $i18n.t('settings.admin.documents.datalabMarkerApiKey.label'),
+		DATALAB_MARKER_ADDITIONAL_CONFIG: $i18n.t('settings.admin.documents.additionalConfig.label'),
+		DATALAB_MARKER_USE_LLM: $i18n.t('settings.admin.documents.useLlm.label'),
+		DATALAB_MARKER_SKIP_CACHE: $i18n.t('settings.admin.documents.skipCache.label'),
+		DATALAB_MARKER_FORCE_OCR: $i18n.t('settings.admin.documents.forceOcr.label'),
+		DATALAB_MARKER_PAGINATE: $i18n.t('settings.admin.documents.paginate.label'),
+		DATALAB_MARKER_STRIP_EXISTING_OCR: $i18n.t('settings.admin.documents.stripExistingOcr.label'),
+		DATALAB_MARKER_DISABLE_IMAGE_EXTRACTION: $i18n.t(
+			'settings.admin.documents.disableImageExtraction.label'
+		),
+		DATALAB_MARKER_FORMAT_LINES: $i18n.t('settings.admin.documents.formatLines.label'),
+		DATALAB_MARKER_OUTPUT_FORMAT: $i18n.t('settings.admin.documents.outputFormat.label'),
+		EXTERNAL_DOCUMENT_LOADER_URL: $i18n.t('settings.admin.documents.documentLoaderUrl.label'),
+		EXTERNAL_DOCUMENT_LOADER_API_KEY: $i18n.t(
+			'settings.admin.documents.externalDocumentLoaderApiKey.label'
+		),
+		EXTERNAL_DOCUMENT_LOADER_HEADERS: $i18n.t('settings.admin.documents.headers.label'),
+		TIKA_SERVER_URL: $i18n.t('settings.admin.documents.tikaServerUrl.label'),
+		TIKA_SERVER_VERSION: $i18n.t('settings.admin.documents.tikaServerVersion.label'),
+		DOCLING_SERVER_URL: $i18n.t('settings.admin.documents.doclingServerUrl.label'),
+		DOCLING_API_KEY: $i18n.t('settings.admin.documents.doclingApiKey.label'),
+		DOCLING_PARAMS: $i18n.t('settings.admin.documents.doclingParams.label'),
+		DOCUMENT_INTELLIGENCE_ENDPOINT: $i18n.t('settings.admin.documents.endpoint.label'),
+		DOCUMENT_INTELLIGENCE_KEY: $i18n.t('settings.admin.documents.documentIntelligenceKey.label'),
+		DOCUMENT_INTELLIGENCE_MODEL: $i18n.t(
+			'settings.admin.documents.documentIntelligenceModel.label'
+		),
+		MISTRAL_OCR_API_BASE_URL: $i18n.t('settings.admin.documents.mistralOcrApiBaseUrl.label'),
+		MISTRAL_OCR_API_KEY: $i18n.t('settings.admin.documents.mistralOcrApiKey.label'),
+		MISTRAL_OCR_USE_BASE64: $i18n.t('settings.admin.documents.useBase64.label'),
+		MISTRAL_OCR_PARAMS: $i18n.t('settings.admin.documents.mistralOcrParams.label'),
+		PADDLEOCR_VL_BASE_URL: $i18n.t('settings.admin.documents.paddleocrVlBaseUrl.label'),
+		PADDLEOCR_VL_TOKEN: $i18n.t('settings.admin.documents.apiToken.label'),
+		MINERU_API_MODE: $i18n.t('settings.admin.documents.apiMode.label'),
+		MINERU_API_URL: $i18n.t('settings.admin.documents.apiUrl.label'),
+		MINERU_API_KEY: $i18n.t('settings.admin.documents.mineruApiKey.label'),
+		MINERU_API_TIMEOUT: $i18n.t('settings.admin.documents.apiTimeout.label'),
+		MINERU_PARAMS: $i18n.t('settings.admin.documents.mineruParams.label'),
+		MINERU_FILE_EXTENSIONS: $i18n.t('settings.admin.documents.fileExtensions.label'),
+		BYPASS_EMBEDDING_AND_RETRIEVAL: $i18n.t(
+			'settings.admin.documents.bypassEmbeddingAndRetrieval.label'
+		),
+		TEXT_SPLITTER: $i18n.t('settings.admin.documents.textSplitter.label'),
+		RAG_TOKENIZER_MODEL: $i18n.t('settings.admin.documents.tokenizerModel.label'),
+		ENABLE_MARKDOWN_HEADER_TEXT_SPLITTER: $i18n.t(
+			'settings.admin.documents.markdownHeaderTextSplitter.label'
+		),
+		CHUNK_SIZE: $i18n.t('settings.admin.documents.chunkSize.label'),
+		CHUNK_OVERLAP: $i18n.t('settings.admin.documents.chunkOverlap.label'),
+		CHUNK_MIN_SIZE_TARGET: $i18n.t('settings.admin.documents.chunkMinSizeTarget.label'),
+		RAG_EMBEDDING_ENGINE: $i18n.t('settings.admin.documents.embeddingModelEngine.label'),
+		RAG_OPENAI_API_BASE_URL: $i18n.t('settings.admin.documents.openaiurl.label'),
+		RAG_OPENAI_API_KEY: $i18n.t('settings.admin.documents.openaikey.label'),
+		RAG_OLLAMA_BASE_URL: $i18n.t('settings.admin.documents.ollamaurl.label'),
+		RAG_OLLAMA_API_KEY: $i18n.t('settings.admin.documents.ollamakey.label'),
+		RAG_AZURE_OPENAI_BASE_URL: $i18n.t('settings.admin.documents.azureopenaiurl.label'),
+		RAG_AZURE_OPENAI_API_KEY: $i18n.t('settings.admin.documents.azureopenaikey.label'),
+		RAG_AZURE_OPENAI_API_VERSION: $i18n.t('settings.admin.documents.version.label'),
+		RAG_EMBEDDING_MODEL: $i18n.t('settings.admin.documents.embeddingModel.label'),
+		RAG_EMBEDDING_BATCH_SIZE: $i18n.t('settings.admin.documents.embeddingBatchSize.label'),
+		ENABLE_ASYNC_EMBEDDING: $i18n.t('settings.admin.documents.asyncEmbeddingProcessing.label'),
+		RAG_EMBEDDING_CONCURRENT_REQUESTS: $i18n.t(
+			'settings.admin.documents.embeddingConcurrentRequests.label'
+		),
+		RAG_EMBEDDING_QUERY_PREFIX: $i18n.t('settings.admin.documents.embeddingQueryPrefix.label'),
+		RAG_EMBEDDING_CONTENT_PREFIX: $i18n.t('settings.admin.documents.embeddingContentPrefix.label'),
+		RAG_FULL_TEXT_THRESHOLD_TYPE: $i18n.t('settings.admin.documents.fullTextThresholdType.label'),
+		RAG_FULL_TEXT_THRESHOLD:
+			RAGConfig?.RAG_FULL_TEXT_THRESHOLD_TYPE === 'token'
+				? $i18n.t('settings.admin.documents.fullTextTokenThreshold.label')
+				: $i18n.t('settings.admin.documents.fullTextCharThreshold.label'),
+		RAG_FULL_CONTEXT: $i18n.t('settings.admin.documents.fullContextMode.label'),
+		ENABLE_RAG_HYBRID_SEARCH: $i18n.t('settings.admin.documents.hybridSearch.label'),
+		ENABLE_RAG_HYBRID_SEARCH_ENRICHED_TEXTS: $i18n.t(
+			'settings.admin.documents.enrichHybridSearchText.label'
+		),
+		RAG_RERANKING_ENGINE: $i18n.t('settings.admin.documents.rerankingEngine.label'),
+		RAG_EXTERNAL_RERANKER_URL: $i18n.t('settings.admin.documents.ragExternalRerankerUrl.label'),
+		RAG_EXTERNAL_RERANKER_API_KEY: $i18n.t(
+			'settings.admin.documents.ragExternalRerankerApiKey.label'
+		),
+		RAG_RERANKING_MODEL: $i18n.t('settings.admin.documents.rerankingModel.label'),
+		RAG_RERANKING_BATCH_SIZE: $i18n.t('settings.admin.documents.rerankingBatchSize.label'),
+		TOP_K: $i18n.t('settings.admin.documents.topK.label'),
+		TOP_K_RERANKER: $i18n.t('settings.admin.documents.topKReranker.label'),
+		RELEVANCE_THRESHOLD: $i18n.t('settings.admin.documents.relevanceThreshold.label'),
+		HYBRID_BM25_WEIGHT: $i18n.t('settings.admin.documents.bm25Weight.label'),
+		RAG_TEMPLATE: $i18n.t('settings.admin.documents.ragTemplate.label'),
+		ALLOWED_FILE_EXTENSIONS: $i18n.t('settings.admin.documents.allowedFileExtensions.label'),
+		FILE_MAX_SIZE: $i18n.t('settings.admin.documents.maxUploadSize.label'),
+		FILE_MAX_COUNT: $i18n.t('settings.admin.documents.maxUploadCount.label'),
+		KNOWLEDGE_MAX_UPLOAD_COUNT: $i18n.t('settings.admin.documents.knowledgeMaxUploadCount.label'),
+		KNOWLEDGE_MAX_FILE_SIZE: $i18n.t('settings.admin.documents.knowledgeMaxSize.label'),
+		KNOWLEDGE_MAX_FILE_COUNT: $i18n.t('settings.admin.documents.knowledgeMaxCount.label'),
+		FILE_IMAGE_COMPRESSION_WIDTH: $i18n.t('settings.admin.documents.imageCompressionWidth.label'),
+		FILE_IMAGE_COMPRESSION_HEIGHT: $i18n.t('settings.admin.documents.imageCompressionHeight.label'),
+		ENABLE_GOOGLE_DRIVE_INTEGRATION: $i18n.t('settings.admin.documents.googleDrive.label'),
+		ENABLE_ONEDRIVE_INTEGRATION: $i18n.t('settings.admin.documents.onedrive.label')
+	};
+	const sensitiveKeys = [
+		'DATALAB_MARKER_API_KEY',
+		'EXTERNAL_DOCUMENT_LOADER_API_KEY',
+		'DOCLING_API_KEY',
+		'DOCUMENT_INTELLIGENCE_KEY',
+		'MISTRAL_OCR_API_KEY',
+		'PADDLEOCR_VL_TOKEN',
+		'MINERU_API_KEY',
+		'RAG_OPENAI_API_KEY',
+		'RAG_OLLAMA_API_KEY',
+		'RAG_AZURE_OPENAI_API_KEY',
+		'RAG_EXTERNAL_RERANKER_API_KEY'
+	];
 	const inputClass =
-		'w-full h-7 rounded-lg border border-gray-100/50 bg-gray-50/40 px-2 text-xs text-gray-700 outline-hidden transition-colors placeholder:text-gray-300 focus:border-blue-400 dark:border-white/[0.04] dark:bg-white/[0.03] dark:text-gray-300 dark:placeholder:text-gray-700 dark:focus:border-blue-500';
+		'w-full h-7 rounded-lg border border-base-100/50 bg-base-50/40 px-2 text-xs text-base-700 outline-hidden transition-colors placeholder:text-base-300 focus:border-blue-400 dark:border-base-0/[0.04] dark:bg-base-0/[0.03] dark:text-base-300 dark:placeholder:text-base-700 dark:focus:border-blue-500';
 	const actionButtonClass =
-		'shrink-0 text-xs text-gray-500 transition-colors hover:text-gray-900 dark:text-gray-500 dark:hover:text-white';
+		'shrink-0 text-xs text-base-500 transition-colors hover:text-base-900 dark:text-base-500 dark:hover:text-base-0';
 	const textareaClass =
-		'w-full rounded-lg border border-gray-100/50 bg-gray-50/40 px-2 py-1.5 text-xs text-gray-700 outline-hidden transition-colors placeholder:text-gray-300 focus:border-blue-400 dark:border-white/[0.04] dark:bg-white/[0.03] dark:text-gray-300 dark:placeholder:text-gray-700 dark:focus:border-blue-500';
+		'w-full rounded-lg border border-base-100/50 bg-base-50/40 px-2 py-1.5 text-xs text-base-700 outline-hidden transition-colors placeholder:text-base-300 focus:border-blue-400 dark:border-base-0/[0.04] dark:bg-base-0/[0.03] dark:text-base-300 dark:placeholder:text-base-700 dark:focus:border-blue-500';
 
 	const embeddingModelUpdateHandler = async () => {
-		if (RAG_EMBEDDING_ENGINE === '' && RAG_EMBEDDING_MODEL.split('/').length - 1 > 1) {
-			toast.error(
-				$i18n.t(
-					'Model filesystem path detected. Model shortname is required for update, cannot continue.'
-				)
-			);
-			return;
-		}
+		if (updateEmbeddingModelLoading) return;
 		if (RAG_EMBEDDING_ENGINE === 'ollama' && RAG_EMBEDDING_MODEL === '') {
 			toast.error(
 				$i18n.t(
@@ -165,6 +299,7 @@
 
 		if (res) {
 			console.debug('embeddingModelUpdateHandler:', res);
+			savedConfig = { ...savedConfig, ...structuredClone(embeddingSettings) };
 		}
 	};
 
@@ -319,6 +454,10 @@
 				.map((ext) => ext.trim())
 				.filter((ext) => ext !== '')
 		});
+		if (res) {
+			config.set(await getBackendConfig());
+			savedConfig = { ...savedConfig, ...structuredClone(RAGConfig) };
+		}
 		dispatch('save');
 	};
 
@@ -380,6 +519,9 @@
 		config.RAG_TOKENIZER_MODEL = config?.RAG_TOKENIZER_MODEL ?? '';
 
 		RAGConfig = config;
+
+		await tick();
+		savedConfig = structuredClone(settings);
 	});
 </script>
 
@@ -454,11 +596,11 @@
 		submitHandler();
 	}}
 >
-	<h2 class="text-sm font-medium text-gray-900 dark:text-white mb-4">
+	<h2 class="text-sm font-medium text-base-900 dark:text-base-0 mb-4">
 		{$i18n.t('settings.admin.documents.title')}
 	</h2>
 	{#if $config?.features?.slim === true}
-		<p class="mb-4 text-xs text-gray-500">
+		<p class="mb-4 text-xs text-base-500">
 			{$i18n.t(
 				'Slim requires external services for embeddings, vector storage, and document extraction. Basic text files can be read locally.'
 			)}
@@ -570,6 +712,7 @@
 								id="datalab-marker-additional-config"
 								className={textareaClass}
 								bind:value={RAGConfig.DATALAB_MARKER_ADDITIONAL_CONFIG}
+								maxSize={200}
 								placeholder={$i18n.t('Enter JSON config (e.g., {"disable_links": true})')}
 							/>
 						</Tooltip>
@@ -687,32 +830,33 @@
 								id="external-document-loader-headers"
 								className={textareaClass}
 								bind:value={RAGConfig.EXTERNAL_DOCUMENT_LOADER_HEADERS}
+								maxSize={200}
 								placeholder={$i18n.t('Enter additional headers in JSON format')}
 								required={false}
 							/>
 						</Tooltip>
 						<button
 							type="button"
-							class="mt-1 text-[0.6875rem] text-gray-400 transition-colors hover:text-gray-700 dark:text-gray-600 dark:hover:text-gray-300"
+							class="mt-1 text-[0.6875rem] text-base-400 transition-colors hover:text-base-700 dark:text-base-600 dark:hover:text-base-300"
 							on:click={() =>
 								(showExternalDocumentLoaderHeadersHint = !showExternalDocumentLoaderHeadersHint)}
 						>
 							{$i18n.t('settings.admin.documents.headerVariables.label')}
 						</button>
 						{#if showExternalDocumentLoaderHeadersHint}
-							<div class="mt-1 text-[0.6875rem] leading-5 text-gray-500 dark:text-gray-400">
+							<div class="mt-1 text-[0.6875rem] leading-5 text-base-500 dark:text-base-400">
 								<div>{$i18n.t('No additional headers are sent unless configured.')}</div>
 								<div>
 									{$i18n.t('Example')}:
-									<code class="text-gray-700 dark:text-gray-300"
+									<code class="text-base-700 dark:text-base-300"
 										>{'{"X-OpenWebUI-File-Id": "{{FILE_ID}}"}'}</code
 									>
 								</div>
 								<div>
 									{$i18n.t('Available variables')}:
-									<code class="text-gray-700 dark:text-gray-300">{'{{FILE_ID}}'}</code>,
-									<code class="text-gray-700 dark:text-gray-300">{'{{FILE_NAME}}'}</code>,
-									<code class="text-gray-700 dark:text-gray-300">{'{{FILE_CONTENT_TYPE}}'}</code>
+									<code class="text-base-700 dark:text-base-300">{'{{FILE_ID}}'}</code>,
+									<code class="text-base-700 dark:text-base-300">{'{{FILE_NAME}}'}</code>,
+									<code class="text-base-700 dark:text-base-300">{'{{FILE_CONTENT_TYPE}}'}</code>
 								</div>
 							</div>
 						{/if}
@@ -778,6 +922,7 @@
 							id="docling-params"
 							className={textareaClass}
 							bind:value={RAGConfig.DOCLING_PARAMS}
+							maxSize={200}
 							placeholder={$i18n.t('Enter additional parameters in JSON format')}
 							minSize={100}
 						/>
@@ -862,6 +1007,7 @@
 							id="mistral-ocr-params"
 							className={textareaClass}
 							bind:value={RAGConfig.MISTRAL_OCR_PARAMS}
+							maxSize={200}
 							placeholder={$i18n.t('Enter additional parameters in JSON format')}
 							minSize={100}
 						/>
@@ -955,7 +1101,7 @@
 					>
 						<input
 							id={`${labelId}-control`}
-							class="w-16 rounded-lg border border-gray-100/50 bg-gray-50/40 px-2 text-right text-xs text-gray-700 outline-hidden transition-colors focus:border-blue-400 dark:border-white/[0.04] dark:bg-white/[0.03] dark:text-gray-300 dark:focus:border-blue-500"
+							class="w-16 rounded-lg border border-base-100/50 bg-base-50/40 px-2 text-right text-xs text-base-700 outline-hidden transition-colors focus:border-blue-400 dark:border-base-0/[0.04] dark:bg-base-0/[0.03] dark:text-base-300 dark:focus:border-blue-500"
 							type="number"
 							min="1"
 							bind:value={RAGConfig.MINERU_API_TIMEOUT}
@@ -972,6 +1118,7 @@
 							id="mineru-params"
 							className={textareaClass}
 							bind:value={RAGConfig.MINERU_PARAMS}
+							maxSize={200}
 							placeholder={`{\n  "enable_ocr": false,\n  "enable_formula": true,\n  "enable_table": true,\n  "language": "en",\n  "model_version": "pipeline",\n  "page_ranges": ""\n}`}
 							minSize={100}
 						/>
@@ -991,6 +1138,9 @@
 					</AdminSettingField>
 				{/if}
 
+				<!-- Retired retrieval hint: keep its translation.
+				{$i18n.t('Use segmented retrieval for focused context.')}
+				-->
 				<AdminSettingRow
 					label={$i18n.t('settings.admin.documents.bypassEmbeddingAndRetrieval.label')}
 					description={RAGConfig.BYPASS_EMBEDDING_AND_RETRIEVAL
@@ -1247,12 +1397,12 @@
 
 							{#if RAG_EMBEDDING_ENGINE === ''}
 								<button
-									class="flex size-7 shrink-0 items-center justify-center rounded-lg text-gray-500 transition-colors hover:bg-black/5 hover:text-gray-900 dark:text-gray-500 dark:hover:bg-white/5 dark:hover:text-white"
+									class="flex size-7 shrink-0 items-center justify-center rounded-lg text-base-500 transition-colors hover:bg-base-1000/5 hover:text-base-900 dark:text-base-500 dark:hover:bg-base-0/5 dark:hover:text-base-0"
 									type="button"
 									on:click={() => {
 										embeddingModelUpdateHandler();
 									}}
-									disabled={updateEmbeddingModelLoading}
+									aria-disabled={updateEmbeddingModelLoading}
 									aria-label={$i18n.t('settings.admin.documents.updateEmbeddingModel.label')}
 								>
 									{#if updateEmbeddingModelLoading}
@@ -1275,7 +1425,7 @@
 								</button>
 							{/if}
 						</div>
-						<div class="mt-1 text-[0.6875rem] text-gray-400 dark:text-gray-600">
+						<div class="mt-1 text-[0.6875rem] text-base-400 dark:text-base-600">
 							{$i18n.t(
 								'After changing the embedding model, reindex knowledge, knowledge search, and memory vectors for changes to take effect.'
 							)}
@@ -1327,7 +1477,7 @@
 					<Collapsible
 						title={$i18n.t('Advanced')}
 						bind:open={showEmbeddingAdvanced}
-						buttonClassName="w-full py-1 text-xs text-gray-600 hover:text-gray-900 dark:text-gray-400 dark:hover:text-white transition-colors"
+						buttonClassName="w-full py-1 text-xs text-base-600 hover:text-base-900 dark:text-base-400 dark:hover:text-base-0 transition-colors"
 					>
 						<div slot="content" class="flex flex-col gap-2.5 pt-2.5">
 							<AdminSettingField
@@ -1363,10 +1513,44 @@
 			<AdminSettingSection title={$i18n.t('settings.admin.documents.sections.retrieval.title')}>
 				{#if !RAGConfig.BYPASS_EMBEDDING_AND_RETRIEVAL}
 					<AdminSettingRow
+						label={$i18n.t('settings.admin.documents.fullTextThresholdType.label')}
+						description={$i18n.t('settings.admin.documents.fullTextThresholdType.description')}
+						let:labelId
+					>
+						<SettingsSelect
+							id={`${labelId}-control`}
+							bind:value={RAGConfig.RAG_FULL_TEXT_THRESHOLD_TYPE}
+							disabled={RAGConfig.RAG_FULL_CONTEXT}
+						>
+							<option value="">{$i18n.t('Default')} ({$i18n.t('Character')})</option>
+							<option value="token">{$i18n.t('Token')} ({$i18n.t('Tiktoken')})</option>
+						</SettingsSelect>
+					</AdminSettingRow>
+
+					<AdminSettingField
+						label={RAGConfig.RAG_FULL_TEXT_THRESHOLD_TYPE === 'token'
+							? $i18n.t('settings.admin.documents.fullTextTokenThreshold.label')
+							: $i18n.t('settings.admin.documents.fullTextCharThreshold.label')}
+						description={RAGConfig.RAG_FULL_TEXT_THRESHOLD_TYPE === 'token'
+							? $i18n.t('settings.admin.documents.fullTextTokenThreshold.description')
+							: $i18n.t('settings.admin.documents.fullTextCharThreshold.description')}
+						forId="full-text-threshold"
+					>
+						<input
+							id="full-text-threshold"
+							class={inputClass}
+							type="number"
+							bind:value={RAGConfig.RAG_FULL_TEXT_THRESHOLD}
+							disabled={RAGConfig.RAG_FULL_CONTEXT}
+							min="0"
+							step="1"
+							required
+						/>
+					</AdminSettingField>
+
+					<AdminSettingRow
 						label={$i18n.t('settings.admin.documents.fullContextMode.label')}
-						description={RAGConfig.RAG_FULL_CONTEXT
-							? $i18n.t('settings.admin.documents.fullContextMode.description')
-							: $i18n.t('Use segmented retrieval for focused context.')}
+						description={$i18n.t('settings.admin.documents.fullContextMode.description')}
 						let:labelId
 					>
 						<Switch bind:state={RAGConfig.RAG_FULL_CONTEXT} ariaLabelledbyId={labelId} />
@@ -1564,10 +1748,10 @@
 											max="1"
 											step="0.05"
 											bind:value={RAGConfig.HYBRID_BM25_WEIGHT}
-											class="h-2 w-full cursor-pointer appearance-none rounded-lg dark:bg-gray-700"
+											class="h-2 w-full cursor-pointer appearance-none rounded-lg dark:bg-base-700"
 										/>
 										<div
-											class="flex justify-between py-0.5 text-[0.6875rem] text-gray-400 dark:text-gray-600"
+											class="flex justify-between py-0.5 text-[0.6875rem] text-base-400 dark:text-base-600"
 										>
 											<div>{$i18n.t('semantic')}</div>
 											<div>{$i18n.t('lexical')}</div>
@@ -1602,6 +1786,7 @@
 							id="rag-template"
 							className={textareaClass}
 							bind:value={RAGConfig.RAG_TEMPLATE}
+							maxSize={300}
 							placeholder={$i18n.t(
 								'Leave empty to use the default prompt, or enter a custom prompt'
 							)}
@@ -1609,7 +1794,7 @@
 					</Tooltip>
 
 					{#if RAGConfig.RAG_TEMPLATE && (RAGConfig.RAG_TEMPLATE.match(/\[context\]/g) || []).length + (RAGConfig.RAG_TEMPLATE.match(/\{\{CONTEXT\}\}/g) || []).length > 1}
-						<div class="mt-1 text-[0.6875rem] text-gray-400 dark:text-gray-600">
+						<div class="mt-1 text-[0.6875rem] text-base-400 dark:text-base-600">
 							{$i18n.t(
 								'This template contains multiple context placeholders ([context] or {{CONTEXT}}). Context will be injected at each occurrence.'
 							)}
@@ -1828,12 +2013,7 @@
 		</div>
 
 		<div class="flex justify-end pt-6 text-sm font-normal">
-			<button
-				class="flex h-7 shrink-0 items-center justify-center gap-1.5 rounded-lg bg-gray-900 px-2.5 text-xs font-normal text-white transition hover:bg-black disabled:opacity-60 dark:bg-gray-100 dark:text-gray-900 dark:hover:bg-white"
-				type="submit"
-			>
-				{$i18n.t('Save')}
-			</button>
+			<AdminSettingSaveButton {settings} {savedConfig} labels={settingLabels} {sensitiveKeys} />
 		</div>
 	{:else}
 		<div class="flex items-center justify-center h-full">

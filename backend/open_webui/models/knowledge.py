@@ -371,7 +371,18 @@ class KnowledgeTable:
                         )
                     )
 
-                return KnowledgeListResponse(items=knowledge_bases, total=total)
+            # Stores from connections are listed live, so they join the first page, not the query.
+            filter = filter or {}
+            if not skip and filter.get('view_option') != 'created' and filter.get('source') != 'local':
+                from open_webui.retrieval.external import list_virtual_knowledge
+
+                virtual = await list_virtual_knowledge(filter.get('user_id'), filter.get('query'))
+                knowledge_bases.extend(
+                    KnowledgeUserModel.model_validate({**item.model_dump(), 'file_count': 0}) for item in virtual
+                )
+                total += len(virtual)
+
+            return KnowledgeListResponse(items=knowledge_bases, total=total)
         except Exception as e:
             print(e)
             return KnowledgeListResponse(items=[], total=0)
@@ -502,6 +513,10 @@ class KnowledgeTable:
         )
 
     async def get_knowledge_by_id(self, id: str, db: Optional[AsyncSession] = None) -> Optional[KnowledgeModel]:
+        from open_webui.retrieval.external import get_virtual_knowledge, is_virtual_knowledge_id
+
+        if is_virtual_knowledge_id(id):
+            return await get_virtual_knowledge(id)
         try:
             async with get_async_db_context(db) as db:
                 result = await db.execute(select(Knowledge).filter_by(id=id))
@@ -1054,6 +1069,12 @@ class KnowledgeTable:
                 # Cycle detection: walk up from new_parent_id to ensure
                 # we don't encounter directory_id
                 if new_parent_id:
+                    # Lock the knowledge base so concurrent moves cannot both pass the cycle check
+                    knowledge_id = await db.scalar(select(KnowledgeDirectory.knowledge_id).filter_by(id=directory_id))
+                    await db.execute(
+                        update(Knowledge).where(Knowledge.id == knowledge_id).values(updated_at=Knowledge.updated_at)
+                    )
+
                     current = new_parent_id
                     seen = set()
                     while current and current not in seen:

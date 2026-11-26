@@ -14,6 +14,7 @@ from open_webui.models.access_grants import AccessGrant, AccessGrantModel, Acces
 from open_webui.models.groups import Groups
 from open_webui.models.model_history import ModelHistories, ModelHistory, model_snapshot
 from open_webui.models.users import User, UserModel, UserResponse, Users
+from open_webui.utils.chat_variables import is_nested_too_deep
 from open_webui.utils.misc import json_text_variants
 from open_webui.utils.validate import validate_image_url
 from pydantic import BaseModel, ConfigDict, Field, JsonValue, ValidationInfo, field_validator, model_validator
@@ -167,7 +168,9 @@ class ModelMeta(BaseModel):
         if v is None:
             return v
         try:
-            return validate_image_url(v, file_only=info.field_name == 'background_image_url')
+            return validate_image_url(
+                v, file_only=info.field_name == 'background_image_url' or str(v).startswith('/api/v1/files/')
+            )
         except ValueError:
             if info.field_name == 'background_image_url':
                 raise
@@ -259,6 +262,13 @@ class ModelForm(BaseModel):
     access_grants: list[dict] | None = None
     is_active: bool = True
 
+    @field_validator('id', 'base_model_id')
+    @classmethod
+    def exclude_agent_models(cls, value: str | None) -> str | None:
+        if value and value.startswith('agent:'):
+            raise ValueError('Agent models cannot be saved or used as base models.')
+        return value
+
 
 class ModelsTable:
     async def _get_access_grants(self, model_id: str, db: AsyncSession | None = None) -> list[AccessGrantModel]:
@@ -279,6 +289,8 @@ class ModelsTable:
     async def _write_model(self, session, form, user_id, current=None, production_version_id=None):
         """Write configuration, history, and grants in the caller's transaction."""
         data = form.model_dump(exclude={'access_grants', 'commit_message'})
+        if is_nested_too_deep(data['meta']) or is_nested_too_deep(data['params']):
+            raise HTTPException(400, 'Model meta and params are nested too deeply')
         data['meta'].pop('chat_variables_schema', None)
         snapshot = model_snapshot(data)
         if current is None:
@@ -419,7 +431,7 @@ class ModelsTable:
     async def get_model_owner_ids_by_file_id(
         self, file_id: str, db: AsyncSession | None = None, include_background: bool = False
     ) -> dict[str, str]:
-        """Find file references; include_background adds read-only background/avatar assets."""
+        """Find file references; include_background adds read-only background/profile/avatar assets."""
         async with get_async_db_context(db) as db:
             # File ids are server-generated uuids, so the text match can only over-match.
             result = await db.execute(
@@ -438,7 +450,8 @@ class ModelsTable:
                 or (
                     include_background
                     and (
-                        meta.get('background_image_url') == f'/api/v1/files/{file_id}/content'
+                        f'/api/v1/files/{file_id}/content'
+                        in (meta.get('background_image_url'), meta.get('profile_image_url'))
                         or (meta.get('voice_avatar') or {}).get('file_id') == file_id
                         or any(
                             asset.get('file_id') == file_id

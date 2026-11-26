@@ -375,7 +375,7 @@ def _expand_callback_payload_without_jwt_secret(payload: dict[str, Any]) -> dict
 
 
 async def _get_terminal_connection(request: Request, terminal_server_id: str, user):
-    connections = await Config.get('terminal_server.connections', []) or []
+    connections = await Config.get('machines.connections', []) or []
     connection = next((c for c in connections if c.get('id') == terminal_server_id), None)
     if user.role not in ('admin', 'user'):
         raise HTTPException(status_code=403, detail=ERROR_MESSAGES.ACCESS_PROHIBITED)

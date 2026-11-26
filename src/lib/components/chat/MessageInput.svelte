@@ -1,5 +1,6 @@
 <script lang="ts">
-	import type { TerminalContext } from '$lib/types';
+	import { resolveMachineTarget } from '$lib/apis/machines';
+	import type { MachineContext } from '$lib/types';
 	import {
 		estimateTokens,
 		estimateMessagesTokens,
@@ -21,10 +22,12 @@
 	dayjs.extend(duration);
 	dayjs.extend(relativeTime);
 
-	import { onMount, tick, getContext, createEventDispatcher } from 'svelte';
+	import { onDestroy, onMount, tick, getContext, createEventDispatcher } from 'svelte';
+	import { writable } from 'svelte/store';
+	import type { Writable } from 'svelte/store';
 
 	import { createPicker, getAuthToken } from '$lib/utils/google-drive-picker';
-	import { pickAndDownloadFile } from '$lib/utils/onedrive-file-picker';
+	import { pickAndDownloadFiles } from '$lib/utils/onedrive-file-picker';
 	import { KokoroWorker } from '$lib/workers/KokoroWorker';
 
 	const dispatch = createEventDispatcher();
@@ -33,23 +36,21 @@
 		type Model,
 		mobile,
 		settings,
-		models,
 		config,
-		showCallOverlay,
+		voiceCall,
 		tools,
 		skills,
-		terminalSkills,
-		toolServers,
-		terminalServers,
+		machines,
 		user as _user,
+		embed,
 		showTabs,
 		showSettings,
 		showFileNavDir,
-		selectedTerminalId,
 		TTSWorker,
-		temporaryChatEnabled,
-		sideChatRequest,
-		visibleControls
+		chatTabRequest,
+		visibleControls,
+		imageModels,
+		videoModels
 	} from '$lib/stores';
 
 	import {
@@ -72,7 +73,7 @@
 		isRasterImageContentType
 	} from '$lib/utils';
 	import { uploadFile } from '$lib/apis/files';
-	import { getCwd, uploadNewFileToTerminal } from '$lib/apis/terminal';
+	import { filesystemFile, getCwd, templatesApi, uploadNewFileToMachine } from '$lib/apis/machines';
 	import { isSavedChatId } from '$lib/utils/chatId';
 	import { generateAutoCompletion } from '$lib/apis';
 	import { deleteFileById } from '$lib/apis/files';
@@ -107,6 +108,7 @@
 	import XMark from '../icons/XMark.svelte';
 	import GlobeAlt from '../icons/GlobeAlt.svelte';
 	import Photo from '../icons/Photo.svelte';
+	import VideoCamera from '../icons/VideoCamera.svelte';
 	import Wrench from '../icons/Wrench.svelte';
 	import ArrowUpLeft from '../icons/ArrowUpLeft.svelte';
 	import Cube from '../icons/Cube.svelte';
@@ -117,8 +119,7 @@
 	import Voice from '../icons/Voice.svelte';
 	import Terminal from '../icons/Terminal.svelte';
 	import IntegrationsMenu from './MessageInput/IntegrationsMenu.svelte';
-	import TerminalMenu from './MessageInput/TerminalMenu.svelte';
-	import Component from '../icons/Component.svelte';
+	import MachineMenu from './MessageInput/MachineMenu.svelte';
 	import PlusAlt from '../icons/PlusAlt.svelte';
 	import Dropdown from '../common/Dropdown.svelte';
 
@@ -134,8 +135,15 @@
 	import Expand from '../icons/Expand.svelte';
 	import QueuedMessageItem from './MessageInput/QueuedMessageItem.svelte';
 	import TaskList from './Messages/ResponseMessage/TaskList.svelte';
+	import StatusDetails from './StatusDetails.svelte';
+	import { getChatContext } from '$lib/components/chat/context';
+	import { machineIdOf } from '$lib/utils/machines';
+
+	const { models, temporary, getCurrentDirectory } = getChatContext();
 
 	const i18n: any = getContext('i18n');
+	export let selectedMachineId: Pick<Writable<string | null>, 'subscribe' | 'set'>;
+	export let machineSkills: Writable<any[]>;
 
 	type AskUserPrompt = {
 		id?: string;
@@ -165,13 +173,16 @@
 	export let chatId = '';
 	export let inputId = 'chat-input';
 	export let messagesContainerId = 'messages-container';
-	export let temporary: boolean | undefined = undefined;
-	$: isTemporary = temporary ?? $temporaryChatEnabled;
-	export let terminalContext: TerminalContext | null = null;
-	export let terminalSelectionEnabled = true;
+	export let onTemporaryChange: ((value: boolean) => void) | null = null;
+	export let machineContext: MachineContext | null = null;
+	export let machineSelectionEnabled = true;
+	export let disabled = false;
 	export let contextUsage = null;
 	export let contextCompactionEnabled = false;
 	export let embedded = false;
+	export let autofocus = true;
+	// Recorded audio goes to the host when given (note chats), otherwise it is attached to the message.
+	export let onRecordedAudio: ((file: File) => unknown) | null = null;
 	export let callActive = false;
 	export let callEnabled = true;
 
@@ -190,8 +201,8 @@
 	$: selectedModelIds = atSelectedModel !== undefined ? [atSelectedModel.id] : selectedModels;
 	$: hasChatVariables = selectedModelIds.some(
 		(modelId) =>
-			($models.find((model) => model.id === modelId)?.info?.meta?.chat_variables_schema?.fields
-				?.length ?? 0) > 0
+			(($models ?? []).find((model) => model.id === modelId)?.info?.meta?.chat_variables_schema
+				?.fields?.length ?? 0) > 0
 	);
 
 	export let history;
@@ -210,12 +221,12 @@
 		((taskIds && taskIds.length > 0) ||
 			(history.currentId && history.messages[history.currentId]?.done != true) ||
 			generating);
+	const isActiveStore = writable(false);
+	$: isActiveStore.set(isActive);
 	$: canCompact = !!history?.currentId;
 	$: canSide =
 		($_user?.role === 'admin' ||
-			($_user?.role === 'user' &&
-				($_user.permissions?.chat?.temporary ?? true) &&
-				($_user.permissions?.chat?.side_chat ?? false))) &&
+			($_user?.role === 'user' && ($_user.permissions?.chat?.side_chat ?? false))) &&
 		!embedded &&
 		selectedModels.length === 1 &&
 		!!selectedModelIds[0] &&
@@ -226,7 +237,7 @@
 		$config?.features?.enable_comments &&
 		$_user &&
 		isSavedChatId(chatId) &&
-		!isTemporary
+		!$temporary
 	);
 	export const openComments = () => {
 		if (canComments) showTabs.set('comments');
@@ -238,7 +249,7 @@
 			)
 		: false;
 	$: canToggleTemporary =
-		!embedded &&
+		(!embedded || onTemporaryChange !== null) &&
 		!chatId &&
 		($_user?.role === 'admin' ||
 			($_user?.role === 'user' &&
@@ -253,6 +264,9 @@
 	export let selectedFilterIds: string[] = [];
 
 	export let imageGenerationEnabled = false;
+	export let selectedImageModelId = '';
+	export let videoGenerationEnabled = false;
+	export let selectedVideoModelId = '';
 	export let webSearchEnabled = false;
 	export let codeInterpreterEnabled = false;
 	export let toolApprovalMode = 'full';
@@ -266,7 +280,47 @@
 	}[] = [];
 	export let oauthRedirectHandler: Function = () => {};
 
-	let showTerminalMenu = false;
+	let showMachineMenu = false;
+	let machineControlsInMenu = false;
+
+	function fitControlLabels(controls: HTMLElement) {
+		let frame: number;
+		const scheduleMeasure = () => {
+			cancelAnimationFrame(frame);
+			frame = requestAnimationFrame(() => {
+				const labels = controls.querySelectorAll<HTMLElement>('[data-input-label]');
+				const directoryControl = controls.querySelector<HTMLElement>(
+					'[data-working-directory-control]'
+				);
+				// Measure all labels together so separate controls cannot compete for the same space.
+				for (const label of labels) label.style.display = '';
+				if (directoryControl) directoryControl.style.display = '';
+				machineControlsInMenu = controls.scrollWidth > controls.clientWidth;
+				if (machineControlsInMenu) {
+					for (const label of labels) label.style.display = 'none';
+					if (directoryControl) directoryControl.style.display = 'none';
+				}
+			});
+		};
+		const observer = new ResizeObserver(scheduleMeasure);
+		const observeControls = () => {
+			observer.disconnect();
+			observer.observe(controls);
+			for (const child of controls.children) observer.observe(child);
+			scheduleMeasure();
+		};
+		const mutations = new MutationObserver(observeControls);
+		mutations.observe(controls, { childList: true, subtree: true, characterData: true });
+		observeControls();
+
+		return {
+			destroy() {
+				cancelAnimationFrame(frame);
+				observer.disconnect();
+				mutations.disconnect();
+			}
+		};
+	}
 
 	export let messageQueue: { id: string; prompt: string; files: any[]; error?: string }[] = [];
 	export let onQueueSendNow: (id: string) => void = () => {};
@@ -284,13 +338,14 @@
 
 	let showValvesModal = false;
 	let showStatusPanel = false;
-	let copiedStatusChatId = false;
 	let selectedValvesType = 'tool'; // 'tool' or 'function'
 	let selectedValvesItemId = null;
-	let integrationsMenuCloseOnOutsideClick = true;
+	let showInputMenu = false;
+	let inputMenuTab = '';
+	let inputMenuCloseOnOutsideClick = true;
 
 	$: if (!showValvesModal) {
-		integrationsMenuCloseOnOutsideClick = true;
+		inputMenuCloseOnOutsideClick = true;
 	}
 
 	let chatInputDraft: any;
@@ -298,7 +353,10 @@
 	$: chatInputDraft = {
 		prompt,
 		files: files
-			.filter((file) => file.type !== 'image' && !(file.file instanceof File))
+			.filter(
+				(file) =>
+					file.type !== 'image' && !(file.file instanceof File) && file.status !== 'uploading'
+			)
 			.map((file) => {
 				return {
 					...file,
@@ -310,6 +368,9 @@
 		selectedSkillIds,
 		selectedFilterIds,
 		imageGenerationEnabled,
+		selectedImageModelId,
+		videoGenerationEnabled,
+		selectedVideoModelId,
 		webSearchEnabled,
 		codeInterpreterEnabled
 	};
@@ -338,15 +399,20 @@
 
 	const textVariableHandler = async (text: string) => {
 		if (text.includes('{{CLIPBOARD}}')) {
-			const clipboardText = await navigator.clipboard.readText().catch((err) => {
+			let clipboardText: string;
+			try {
+				clipboardText = await navigator.clipboard.readText();
+			} catch (error) {
 				toast.error($i18n.t('Failed to read clipboard contents'));
-				return '{{CLIPBOARD}}';
-			});
+				clipboardText = '{{CLIPBOARD}}';
+			}
 
-			const clipboardItems = await navigator.clipboard.read().catch((err) => {
-				console.error('Failed to read clipboard items:', err);
-				return [];
-			});
+			let clipboardItems: ClipboardItem[] = [];
+			try {
+				clipboardItems = await navigator.clipboard.read();
+			} catch (error) {
+				console.error('Failed to read clipboard items:', error);
+			}
 
 			for (const item of clipboardItems) {
 				for (const type of item.types) {
@@ -482,7 +548,7 @@
 
 	export const setText = (text: string = '') => {
 		chatInputElement?.setText(text);
-		if (!$showCallOverlay) {
+		if (!$mobile && !$voiceCall) {
 			focus();
 		}
 	};
@@ -511,15 +577,6 @@
 		await tick();
 		focus({ preventScroll: true });
 	};
-
-	const formatTokenCount = (value: number) => {
-		if (value >= 1_000_000) return `${trimNumber(value / 1_000_000)}m`;
-		if (value >= 1_000) return `${trimNumber(value / 1_000)}k`;
-		return String(value ?? 0);
-	};
-
-	const trimNumber = (value: number) =>
-		value >= 10 ? String(Math.round(value)) : value.toFixed(1).replace(/\.0$/, '');
 
 	const getLocalContextUsage = (chatHistory: typeof history, system: string) => {
 		if (!chatHistory?.currentId) {
@@ -571,30 +628,8 @@
 		};
 	};
 
-	const copyStatusChatId = async () => {
-		if (!chatId) return;
-		await navigator.clipboard.writeText(chatId);
-		copiedStatusChatId = true;
-		setTimeout(() => {
-			copiedStatusChatId = false;
-		}, 1600);
-	};
-
-	$: statusContextUsage = contextUsage ?? getLocalContextUsage(history, $settings?.system ?? '');
-	$: contextHasThreshold = Number(statusContextUsage?.threshold) > 0;
-	$: contextPercent = contextHasThreshold
-		? Math.max(0, Math.round(statusContextUsage?.percent ?? 0))
-		: null;
-	$: contextTokens = formatTokenCount(
-		statusContextUsage?.estimated_tokens || statusContextUsage?.tokens || 0
-	);
-	$: contextValue = statusContextUsage
-		? contextHasThreshold
-			? `${contextPercent}% ${contextTokens}/${formatTokenCount(statusContextUsage.threshold)}`
-			: `${contextTokens} ${$i18n.t('tokens')}`
-		: $i18n.t('unknown');
-	$: contextBarPercent = contextHasThreshold ? Math.min(contextPercent, 100) : 0;
-
+	const statusContextUsage = writable<any>(null);
+	$: statusContextUsage.set(contextUsage ?? getLocalContextUsage(history, $settings?.system ?? ''));
 	const getCommand = () => {
 		const chatInput = document.getElementById(inputId);
 		let word = '';
@@ -613,24 +648,8 @@
 		chatInputElement?.replaceCommandWithText(text);
 	};
 
-	const temporaryHandler = async () => {
-		if (!canToggleTemporary) return;
-
-		if (($settings?.temporaryChatByDefault ?? false) && isTemporary) {
-			await temporaryChatEnabled.set(null);
-		} else {
-			await temporaryChatEnabled.set(!isTemporary);
-		}
-
-		if (location.pathname !== '/' && !location.pathname.startsWith('/folders/')) {
-			await goto('/');
-		}
-
-		if (isTemporary) {
-			window.history.replaceState(window.history.state, '', '?temporary-chat=true');
-		} else {
-			window.history.replaceState(window.history.state, '', location.pathname);
-		}
+	const temporaryHandler = () => {
+		if (canToggleTemporary) onTemporaryChange?.(!$temporary);
 	};
 
 	const createSkillHandler = async () => {
@@ -745,6 +764,8 @@
 
 	let loaded = false;
 	let recording = false;
+	let audioRecording = false;
+	let audioRecordingDisplayMedia = false;
 
 	let isComposing = false;
 	// Safari has a bug where compositionend is not triggered correctly #16615
@@ -826,6 +847,7 @@
 		| 'file_upload'
 		| 'web_search'
 		| 'image_generation'
+		| 'video_generation'
 		| 'code_interpreter'
 		| 'terminal'
 		| 'builtin_tools';
@@ -854,7 +876,7 @@
 
 	let fileUploadEnabled: boolean = true;
 	$: fileUploadEnabled =
-		(getFilesystemUploadTerminal($selectedTerminalId, $terminalServers, $settings) ||
+		(getFilesystemUploadMachine($selectedMachineId, $machines) ||
 			fileUploadCapableModels.length === selectedModelIds.length) &&
 		($_user?.role === 'admin' || $_user?.permissions?.chat?.file_upload);
 
@@ -872,6 +894,13 @@
 		modelCapabilitiesById
 	);
 
+	let videoGenerationCapableModels = [];
+	$: videoGenerationCapableModels = getCapableModelIds(
+		selectedModelIds,
+		'video_generation',
+		modelCapabilitiesById
+	);
+
 	let codeInterpreterCapableModels = [];
 	$: codeInterpreterCapableModels = getCapableModelIds(
 		selectedModelIds,
@@ -879,43 +908,37 @@
 		modelCapabilitiesById
 	);
 
-	let terminalCapableModels = [];
-	$: terminalCapableModels = getCapableModelIds(
-		selectedModelIds,
-		'terminal',
-		modelCapabilitiesById
-	);
-	$: hasDirectToolServerAccess =
-		$config?.features?.enable_direct_integrations &&
-		($_user?.role === 'admin' || ($_user?.permissions?.features?.direct_tool_servers ?? true));
-	$: showTerminalSelector =
-		terminalSelectionEnabled &&
+	// With no machine yet, the menu still shows when the user may create one: it holds New machine.
+	let canCreateMachine = false;
+	$: if ($config?.features?.enable_tool_servers && $machines && !$machines.some((t) => t.id))
+		templatesApi('/connections')
+			.then((rows) => (canCreateMachine = rows.length > 0))
+			.catch(() => (canCreateMachine = false));
+	$: showMachineSelector =
 		$config?.features?.enable_tool_servers &&
-		terminalCapableModels.length > 0 &&
-		(($terminalServers ?? []).some((t) => t.id) ||
-			(hasDirectToolServerAccess &&
-				(($terminalServers ?? []).some((t) => !t.id) ||
-					($settings?.terminalServers ?? []).some((s) => s.url))));
+		(($machines ?? []).some((t) => t.id) || canCreateMachine || !!$selectedMachineId);
 
 	let canCreateSkill: boolean = false;
 	$: canCreateSkill = selectedModelIds.every(
 		(id) =>
 			(modelCapabilitiesById[id]?.builtin_tools ?? true) &&
-			($models.find((model) => model.id === id)?.info?.meta?.builtinTools?.skills ?? true)
+			(($models ?? []).find((model) => model.id === id)?.info?.meta?.builtinTools?.skills ?? true)
 	);
 
 	let toggleFilters = [];
 	$: toggleFilters = (atSelectedModel?.id ? [atSelectedModel.id] : selectedModels)
-		.map((id) => ($models.find((model) => model.id === id) || {})?.filters ?? [])
+		.map((id) => (($models ?? []).find((model) => model.id === id) || {})?.filters ?? [])
 		.reduce((acc, filters) => acc.filter((f1) => filters.some((f2) => f2.id === f1.id)));
 
+	$: showInputSelections = $settings?.showInputSelections ?? false;
+
 	let showToolsButton = false;
-	$: showToolsButton = ($tools ?? []).length > 0 || ($toolServers ?? []).length > 0;
+	$: showToolsButton = ($tools ?? []).length > 0;
 
 	let showSkillsButton = false;
 	$: showSkillsButton =
 		($skills ?? []).some((skill) => skill.is_active) ||
-		($terminalSkills ?? []).some((skill) => skill.is_active);
+		($machineSkills ?? []).some((skill) => skill.is_active);
 
 	let showWebSearchButton = false;
 	$: showWebSearchButton =
@@ -929,9 +952,15 @@
 		$config?.features?.enable_image_generation &&
 		($_user.role === 'admin' || $_user?.permissions?.features?.image_generation);
 
+	let showVideoGenerationButton = false;
+	$: showVideoGenerationButton =
+		selectedModelIds.length === videoGenerationCapableModels.length &&
+		$config?.features?.enable_video_generation &&
+		($_user.role === 'admin' || $_user?.permissions?.features?.video_generation);
+
 	let showCodeInterpreterButton = false;
 	$: showCodeInterpreterButton =
-		!$selectedTerminalId &&
+		!$selectedMachineId &&
 		selectedModelIds.length === codeInterpreterCapableModels.length &&
 		$config?.features?.enable_code_interpreter &&
 		($_user.role === 'admin' || $_user?.permissions?.features?.code_interpreter);
@@ -947,6 +976,8 @@
 	$: if (webSearchCapableModels.length < selectedModelIds.length) webSearchEnabled = false;
 	$: if (imageGenerationCapableModels.length < selectedModelIds.length)
 		imageGenerationEnabled = false;
+	$: if (videoGenerationCapableModels.length < selectedModelIds.length)
+		videoGenerationEnabled = false;
 	$: if (codeInterpreterCapableModels.length < selectedModelIds.length)
 		codeInterpreterEnabled = false;
 	$: {
@@ -956,20 +987,9 @@
 		if (filterIds.length !== selectedFilterIds.length) selectedFilterIds = filterIds;
 	}
 
-	// Disable code interpreter when terminal is active (mutually exclusive)
-	$: if ($selectedTerminalId && codeInterpreterEnabled) {
+	// Disable code interpreter when a machine is active (mutually exclusive)
+	$: if ($selectedMachineId && codeInterpreterEnabled) {
 		codeInterpreterEnabled = false;
-	}
-
-	// Clear selected terminal when model doesn't support terminal
-	$: if (
-		terminalSelectionEnabled &&
-		inputId === 'chat-input' &&
-		$selectedTerminalId &&
-		selectedModelIds.length > 0 &&
-		terminalCapableModels.length === 0
-	) {
-		selectedTerminalId.set(null);
 	}
 
 	const scrollToBottom = () => {
@@ -1018,49 +1038,44 @@
 		}
 	};
 
-	const getFilesystemUploadTerminal = (
-		selectedId = $selectedTerminalId,
-		servers: any[] | null = $terminalServers,
-		settingsValue: any = $settings
+	const getFilesystemUploadMachine = (
+		selectedId = $selectedMachineId,
+		servers: any[] | null = $machines
 	) => {
 		if (!selectedId) return null;
-
-		const systemTerminal = (servers ?? []).find(
-			(t: any) => t.id && t.id === selectedId && t.config?.chat_uploads === 'filesystem'
-		);
-		if (systemTerminal) return systemTerminal;
-
 		return (
-			(settingsValue?.terminalServers ?? []).find(
-				(t: any) => t.url === selectedId && t.enabled && t.config?.chat_uploads === 'filesystem'
+			(servers ?? []).find(
+				(t: any) => t.id && t.id === selectedId && t.config?.chat_uploads === 'filesystem'
 			) ?? null
 		);
 	};
 
-	const uploadTerminalFile = async (fileItem, sessionId: string | null) => {
+	const uploadMachineFile = async (fileItem, sessionId: string | null) => {
 		fileItem.status = 'uploading';
 		fileItem.error = '';
 		files = files;
 		try {
-			const terminal = getFilesystemUploadTerminal(fileItem.terminal_id);
-			if (!terminal) throw new Error('The attached file’s terminal is unavailable.');
+			const server = getFilesystemUploadMachine(machineIdOf(fileItem));
+			const machine = server
+				? resolveMachineTarget(machineIdOf(fileItem), $machines ?? [], localStorage.token, {
+						chatId: sessionId,
+						modelId: selectedModels[0] ?? null
+					})
+				: null;
+			if (!machine) throw new Error('The attached file’s machine is unavailable.');
 			if (fileItem.session_id && fileItem.session_id !== sessionId)
 				throw new Error('Attached files must belong to this chat.');
-			if (terminal.contexts?.chat?.context_id === 'chat_id' && !isSavedChatId(sessionId))
-				throw new Error('A saved chat is required for this terminal');
+			if (server.scope === 'chat' && !isSavedChatId(sessionId))
+				throw new Error('A saved chat is required for this machine');
 
 			const cwd =
-				(terminalContext?.terminalId === fileItem.terminal_id
-					? terminalContext?.currentDirectory
-					: null) || (await getCwd(terminal.url, terminal.key, sessionId || undefined))?.cwd;
+				getCurrentDirectory?.(machineIdOf(fileItem)) ||
+				(machineContext?.machineId === machineIdOf(fileItem)
+					? machineContext?.currentDirectory
+					: null) ||
+				(await getCwd(machine))?.cwd;
 			if (!cwd) throw new Error($i18n.t('Could not determine the upload folder.'));
-			const uploadedFile = await uploadNewFileToTerminal(
-				terminal.url,
-				terminal.key,
-				cwd,
-				fileItem.file,
-				sessionId || undefined
-			);
+			const uploadedFile = await uploadNewFileToMachine(machine, cwd, fileItem.file);
 			if (!uploadedFile) throw new Error($i18n.t('Failed to upload file.'));
 
 			fileItem.status = 'uploaded';
@@ -1089,7 +1104,7 @@
 			(item) => item.status === 'pending' && item.file instanceof File
 		)) {
 			if (chatId !== sessionId) return false;
-			if (!(await uploadTerminalFile(fileItem, sessionId))) {
+			if (!(await uploadMachineFile(fileItem, sessionId))) {
 				fileItem.status = 'pending';
 				files = files;
 				return false;
@@ -1098,15 +1113,53 @@
 		return !files.some((item) => item.status === 'pending' && item.file instanceof File);
 	};
 
+	const recordedAudioHandler = async (file: File) => {
+		if (onRecordedAudio) await onRecordedAudio(file);
+		else await uploadFileHandler(file);
+	};
+
+	const recordActions = {
+		record: async () => {
+			try {
+				let stream = await navigator.mediaDevices.getUserMedia({ audio: true }).catch((err) => {
+					toast.error(
+						$i18n.t(`Permission denied when accessing microphone: {{error}}`, { error: err })
+					);
+					return null;
+				});
+				if (stream) {
+					stream.getTracks().forEach((track) => track.stop());
+					audioRecordingDisplayMedia = false;
+					audioRecording = true;
+				}
+				stream = null;
+			} catch {
+				toast.error($i18n.t('Permission denied when accessing microphone'));
+			}
+		},
+		captureAudio: () => {
+			audioRecordingDisplayMedia = true;
+			audioRecording = true;
+		}
+	};
+
+	// A file's tab offers its context only while the file is still here to be sent
+	const attachedFiles = writable<any[]>([]);
+	$: attachedFiles.set(files);
+	onDestroy(() => {
+		attachedFiles.set([]);
+		if ($embed?.file?.attachedFiles === attachedFiles) embed.set(null);
+	});
+
 	const uploadFileHandler = async (file, process = true, itemData = {}) => {
 		if ($_user?.role !== 'admin' && !($_user?.permissions?.chat?.file_upload ?? true)) {
 			toast.error($i18n.t('You do not have permission to upload files.'));
 			return null;
 		}
 
-		const filesystemUploadTerminal = getFilesystemUploadTerminal();
+		const filesystemUploadMachine = getFilesystemUploadMachine();
 
-		if (!filesystemUploadTerminal && fileUploadCapableModels.length !== selectedModelIds.length) {
+		if (!filesystemUploadMachine && fileUploadCapableModels.length !== selectedModelIds.length) {
 			toast.error($i18n.t('Model(s) do not support file upload'));
 			return null;
 		}
@@ -1124,7 +1177,7 @@
 			error: '',
 			itemId: tempItemId,
 			// Stamp the user's default upload mode so the sent payload carries it;
-			// the per-file toggle in FileItemModal can still override it afterwards.
+			// the per-file toggle in FileContextSwitch can still override it afterwards.
 			...($settings?.defaultUploadContext === 'full' ? { context: 'full' } : {}),
 			...itemData
 		};
@@ -1136,25 +1189,25 @@
 
 		files = [...files, fileItem];
 
-		if (filesystemUploadTerminal) {
+		if (filesystemUploadMachine) {
 			fileItem.type = 'filesystem';
 			fileItem.file = file;
-			fileItem.terminal_id = $selectedTerminalId;
+			fileItem.machine_id = $selectedMachineId;
 			fileItem.session_id = chatId || null;
-			if (!chatId && filesystemUploadTerminal.contexts?.chat?.context_id === 'chat_id') {
+			if (!chatId && filesystemUploadMachine.scope === 'chat') {
 				fileItem.status = 'pending';
 				files = files;
 				return;
 			}
 
-			if (!(await uploadTerminalFile(fileItem, fileItem.session_id))) {
+			if (!(await uploadMachineFile(fileItem, fileItem.session_id))) {
 				files = files.filter((item) => item?.itemId !== tempItemId);
 			}
 			onUpdate({ file: fileItem });
 			return;
 		}
 
-		if (!isTemporary) {
+		if (!$temporary) {
 			try {
 				// If the file is an audio file, provide the language for STT.
 				let metadata = chatUploadMetadata(selectedModelIds);
@@ -1333,7 +1386,7 @@
 					// Compress the image if settings or config require it
 					imageUrl = await compressImageHandler(imageUrl, $settings, $config);
 
-					if (isTemporary) {
+					if ($temporary) {
 						files = [
 							...files,
 							{
@@ -1375,7 +1428,21 @@
 		}
 	};
 
+	const isAttachmentDrop = (event: DragEvent) => {
+		if (!(event.target instanceof Element)) return false;
+		// Areas with their own file drop, like a folder's Knowledge list, keep what lands on them.
+		if (event.target.closest('[data-file-drop-target]')) return false;
+		const composer = event.target.closest('[data-composer-id]');
+		if (composer) return composer.getAttribute('data-composer-id') === inputId;
+		// Files can land anywhere in this chat's dropzone. Sidebar items still target
+		// the composer so dragging a chat into a split panel keeps working.
+		return event.dataTransfer?.types.includes('Files') ?? false;
+	};
 	const onDragOver = (e: DragEvent) => {
+		if (!isAttachmentDrop(e)) {
+			dragged = false;
+			return;
+		}
 		e.preventDefault();
 
 		// Check if a file or a sidebar chat/folder item is being dragged.
@@ -1383,9 +1450,12 @@
 		// (e.g. Notes, Workspace, pinned Models), which also set 'text/plain'.
 		if (
 			e.dataTransfer?.types?.includes('Files') ||
+			e.dataTransfer?.types?.includes('application/x-machine-file') ||
 			e.dataTransfer?.types?.includes('application/x-open-webui-drag')
 		) {
 			dragged = true;
+			if (e.dataTransfer?.types.includes('application/x-machine-file'))
+				e.dataTransfer.dropEffect = 'copy';
 		} else {
 			dragged = false;
 		}
@@ -1399,8 +1469,62 @@
 	};
 
 	const onDrop = async (e: DragEvent) => {
+		if (!isAttachmentDrop(e)) return;
 		e.preventDefault();
-		console.log(e);
+		const machineFiles = e.dataTransfer?.getData('application/x-machine-file');
+		if (machineFiles) {
+			e.stopPropagation();
+			dragged = false;
+			try {
+				if ($_user?.role !== 'admin' && !($_user?.permissions?.chat?.file_upload ?? true))
+					throw new Error($i18n.t('You do not have permission to upload files.'));
+				const entries = JSON.parse(machineFiles);
+				if (
+					!Array.isArray(entries) ||
+					entries.some(
+						(entry) =>
+							!entry ||
+							typeof entry.path !== 'string' ||
+							!entry.path ||
+							typeof entry.name !== 'string' ||
+							typeof machineIdOf(entry) !== 'string' ||
+							!machineIdOf(entry) ||
+							(entry.session_id !== null && typeof entry.session_id !== 'string')
+					)
+				)
+					throw new Error($i18n.t('Invalid file attachment.'));
+				const attachments = entries.map((entry) =>
+					filesystemFile(entry, machineIdOf(entry)!, entry.session_id)
+				);
+				const existing = files.filter((file) => file.type === 'filesystem');
+				const machineId = machineIdOf(existing[0]) ?? machineIdOf(attachments[0]);
+				if (
+					attachments.some(
+						(file) =>
+							machineIdOf(file) !== machineId || (file.session_id && file.session_id !== chatId)
+					)
+				)
+					throw new Error($i18n.t('Attached files must belong to this chat and the same machine.'));
+				const additions = attachments.filter(
+					(file, index) =>
+						!existing.some((item) => (item.path ?? item.url ?? item.id) === file.path) &&
+						attachments.findIndex((item) => item.path === file.path) === index
+				);
+				if (
+					$config?.file?.max_count != null &&
+					files.length + additions.length > $config.file.max_count
+				)
+					throw new Error(
+						$i18n.t('You can only chat with a maximum of {{maxCount}} file(s) at a time.', {
+							maxCount: $config.file.max_count
+						})
+					);
+				files = [...files, ...additions];
+			} catch (error) {
+				toast.error(error instanceof Error ? error.message : String(error));
+			}
+			return;
+		}
 
 		// Check if the dropped data is a sidebar chat, folder, note, or model item
 		const textData = e.dataTransfer?.getData('text/plain');
@@ -1461,7 +1585,7 @@
 					return;
 				} else if (data.type === 'model' && data.id) {
 					// Find the model from the store and set as @-selected model
-					const model = $models.find((m) => m.id === data.id);
+					const model = ($models ?? []).find((m) => m.id === data.id);
 					if (model) {
 						atSelectedModel = model;
 					}
@@ -1541,7 +1665,10 @@
 			{
 				char: '@',
 				render: getSuggestionRenderer(CommandSuggestionList, {
+					modelId: () => selectedModels[0] ?? null,
 					i18n,
+					selectedMachineId,
+					machineSkills,
 					fileUploadEnabled: () => fileUploadEnabled,
 					onSelect: (e) => {
 						const { type, data } = e;
@@ -1612,6 +1739,7 @@
 							'fork',
 							'status',
 							'comments',
+							'record',
 							'side',
 							'model',
 							'compare',
@@ -1637,29 +1765,33 @@
 						.run();
 				},
 				render: getSuggestionRenderer(CommandSuggestionList, {
+					modelId: () => selectedModels[0] ?? null,
 					i18n,
+					selectedMachineId,
+					machineSkills,
 					canCompact: () => !!history?.currentId && contextCompactionEnabled,
-					compactDisabled: () => isActive,
+					compactDisabled: isActiveStore,
 					canStatus: () => !!history?.currentId,
 					canComments: () => canComments,
 					canSide: () => canSide,
 					canFork: () =>
 						!!history?.currentId &&
-						!isTemporary &&
+						!$temporary &&
 						($_user?.role === 'admin' || ($_user?.permissions?.chat?.import ?? true)),
-					forkDisabled: () => isActive,
+					forkDisabled: isActiveStore,
 					canTemporary: () => canToggleTemporary,
 					hasChatContent: hasChatContent,
 					canCreateSkill: () => canCreateSkill,
-					temporaryEnabled: () => isTemporary === true,
-					contextUsage: () => statusContextUsage,
+					temporaryEnabled: () => $temporary === true,
+					contextUsage: statusContextUsage,
 					onCompact: compactHandler,
 					onStatus: statusHandler,
 					onComments: openComments,
+					onRecord: () => recordActions.record(),
 					onSide: () => {
 						if (!canSide) return;
-						sideChatRequest.set({ parentId: chatId, prompt: '' });
-						showTabs.set('side');
+						chatTabRequest.set({ parentChatId: chatId, prompt: '' });
+						showTabs.set('chat');
 					},
 					onFork: forkHandler,
 					onModel: () => modelSelector?.open(),
@@ -1704,7 +1836,10 @@
 			{
 				char: '#',
 				render: getSuggestionRenderer(CommandSuggestionList, {
+					modelId: () => selectedModels[0] ?? null,
 					i18n,
+					selectedMachineId,
+					machineSkills,
 					fileUploadEnabled: () => fileUploadEnabled,
 					onSelect: (e) => {
 						const { type, data } = e;
@@ -1743,7 +1878,10 @@
 			{
 				char: '$',
 				render: getSuggestionRenderer(CommandSuggestionList, {
+					modelId: () => selectedModels[0] ?? null,
 					i18n,
+					selectedMachineId,
+					machineSkills,
 					onSelect: (e) => {
 						focus({ preventScroll: true });
 					},
@@ -1765,7 +1903,10 @@
 					editor.chain().focus().deleteRange(range).insertContent(emoji).run();
 				},
 				render: getSuggestionRenderer(CommandSuggestionList, {
+					modelId: () => selectedModels[0] ?? null,
 					i18n,
+					selectedMachineId,
+					machineSkills,
 					onSelect: (e) => {
 						focus({ preventScroll: true });
 					},
@@ -1778,7 +1919,7 @@
 		loaded = true;
 
 		window.setTimeout(() => {
-			if (!$showCallOverlay) {
+			if (autofocus && !$mobile && !$voiceCall) {
 				const chatInput = document.getElementById(inputId);
 				chatInput?.focus();
 			}
@@ -1844,7 +1985,7 @@
 	onConnect={(id) =>
 		oauthRedirectHandler({ id, serverId: id.split(':').at(-1), authType: 'mcp' }, chatInputDraft)}
 />
-<SkillsModal bind:show={showSkills} {selectedSkillIds} />
+<SkillsModal bind:show={showSkills} {selectedSkillIds} {machineSkills} />
 
 <InputVariablesModal
 	bind:show={showInputVariablesModal}
@@ -1861,7 +2002,7 @@
 		await tick();
 	}}
 	on:close={() => {
-		integrationsMenuCloseOnOutsideClick = true;
+		inputMenuCloseOnOutsideClick = true;
 	}}
 />
 
@@ -1891,12 +2032,12 @@
 				<div class="relative">
 					{#if typingUsers.length > 0}
 						<div
-							class="absolute -top-7 inset-x-0 pointer-events-none select-none bg-linear-to-t from-white dark:from-gray-900 to-transparent pb-2.5"
+							class="absolute -top-7 inset-x-0 pointer-events-none select-none bg-linear-to-t from-base-0 dark:from-base-900 to-transparent pb-2.5"
 						>
 							<div class="text-xs px-1 mt-1.5 flex items-center gap-1.5">
 								<Skeleton size="xs" />
 								<div class="min-w-0 truncate">
-									<span class="font-normal text-black dark:text-white">
+									<span class="font-normal text-base-1000 dark:text-base-0">
 										{typingUsers.map((user) => user.name).join(', ')}
 									</span>
 									{typingUsers.length === 1 ? $i18n.t('is typing...') : $i18n.t('are typing...')}
@@ -1910,7 +2051,7 @@
 						>
 							<button
 								aria-label={$i18n.t('Scroll to bottom')}
-								class=" bg-white border border-gray-100 dark:border-none dark:bg-white/20 p-1.5 rounded-full pointer-events-auto"
+								class=" bg-base-0 border border-base-100 dark:border-none dark:bg-base-0/20 p-1.5 rounded-full pointer-events-auto"
 								on:click={() => {
 									autoScroll = true;
 									scrollToBottom();
@@ -1960,36 +2101,56 @@
 						}}
 					/>
 
-					<div class={recording ? '' : 'hidden'}>
-						<VoiceRecording
-							confirmButtonId={inputId === 'chat-input'
-								? 'confirm-recording-button'
-								: `${inputId}-confirm-recording-button`}
-							bind:recording
-							onCancel={async () => {
-								recording = false;
+					<!-- pb-2 matches the form's gap-1.5 + mb-0.5 below the composer card. -->
+					<div class={recording || audioRecording ? 'pb-2' : 'hidden'}>
+						<div class={recording ? '' : 'hidden'}>
+							<VoiceRecording
+								confirmButtonId={inputId === 'chat-input'
+									? 'confirm-recording-button'
+									: `${inputId}-confirm-recording-button`}
+								bind:recording
+								onCancel={async () => {
+									recording = false;
 
-								await tick();
-								focus({ preventScroll: true });
-							}}
-							onConfirm={async (data) => {
-								const { text, filename } = data;
+									await tick();
+									focus({ preventScroll: true });
+								}}
+								onConfirm={async (data) => {
+									const { text, filename } = data;
 
-								recording = false;
+									recording = false;
 
-								await tick();
-								await insertTextAtCursor(`${text}`);
-								await tick();
-								focus({ preventScroll: true });
+									await tick();
+									await insertTextAtCursor(`${text}`);
+									await tick();
+									focus({ preventScroll: true });
 
-								if ($settings?.speechAutoSend ?? false) {
-									dispatch('submit', prompt);
-								}
-							}}
-						/>
+									if ($settings?.speechAutoSend ?? false) {
+										dispatch('submit', prompt);
+									}
+								}}
+							/>
+						</div>
+						{#if audioRecording}
+							<VoiceRecording
+								confirmButtonId={`${inputId}-confirm-audio-recording-button`}
+								bind:recording={audioRecording}
+								transcribe={false}
+								displayMedia={audioRecordingDisplayMedia}
+								echoCancellation={false}
+								noiseSuppression={false}
+								onCancel={() => {
+									audioRecording = false;
+								}}
+								onConfirm={async (data) => {
+									audioRecording = false;
+									if (data?.file) await recordedAudioHandler(data.file);
+								}}
+							/>
+						{/if}
 					</div>
 					<form
-						class="w-full flex flex-col gap-1.5 {recording ? 'hidden' : ''}"
+						class="w-full flex flex-col gap-1.5 {recording || audioRecording ? 'hidden' : ''}"
 						on:submit|preventDefault={() => {
 							dispatch('submit', prompt);
 						}}
@@ -2000,7 +2161,7 @@
 								: `${inputId}-generate-message-pair-button`}
 							type="button"
 							aria-label={$i18n.t('Generate message pair')}
-							class="hidden"
+							class="hidden generate-message-pair-button"
 							on:click={() => createMessagePair(prompt)}
 						/>
 
@@ -2034,7 +2195,7 @@
 						<!-- Queued messages display -->
 						{#if messageQueue.length > 0}
 							<div
-								class="mb-1 mx-2 py-0.5 px-1.5 rounded-2xl bg-white dark:bg-gray-900/60 border border-gray-100 dark:border-gray-800/50 overflow-x-hidden overflow-y-auto max-h-[25vh]"
+								class="mb-1 mx-2 py-0.5 px-1.5 rounded-2xl bg-base-0 dark:bg-base-900/60 border border-base-100 dark:border-base-800/50 overflow-x-hidden overflow-y-auto max-h-[25vh]"
 							>
 								{#each messageQueue as queuedMessage (queuedMessage.id)}
 									<QueuedMessageItem
@@ -2051,15 +2212,15 @@
 						{/if}
 
 						{#if showStatusPanel}
-							<div class="mx-1 rounded-2xl bg-white text-xs dark:bg-gray-900">
+							<div class="mx-1 rounded-2xl bg-base-0 text-xs dark:bg-base-900">
 								<div class="flex items-center justify-between px-3 py-1.5">
-									<div class="flex items-center gap-1.5 text-xs text-gray-700 dark:text-gray-300">
+									<div class="flex items-center gap-1.5 text-xs text-base-700 dark:text-base-300">
 										<span>{$i18n.t('Status')}</span>
 									</div>
 
 									<button
 										type="button"
-										class="text-xs text-gray-400 transition-colors hover:text-gray-600 dark:hover:text-gray-300"
+										class="text-xs text-base-400 transition-colors hover:text-base-600 dark:hover:text-base-300"
 										on:click={() => {
 											showStatusPanel = false;
 										}}
@@ -2068,84 +2229,39 @@
 									</button>
 								</div>
 
-								<div class="space-y-0.5 px-3 pb-2">
-									<div class="rounded-xl py-0.5 text-gray-600 dark:text-gray-400">
-										<div class="flex min-h-4 items-center gap-3">
-											<span class="min-w-0 flex-1 truncate">{$i18n.t('Context usage')}</span>
-											<span
-												class="shrink-0 font-mono text-[0.625rem] text-gray-400 dark:text-gray-600"
-											>
-												{contextValue}
-											</span>
-										</div>
-										{#if contextHasThreshold}
-											<div
-												class="mt-1.5 h-0.5 overflow-hidden rounded-full bg-gray-100 dark:bg-white/8"
-											>
-												<div
-													class="h-full rounded-full bg-gray-300 dark:bg-white/20"
-													style={`width: ${contextBarPercent}%`}
-												></div>
-											</div>
-										{/if}
-									</div>
-
-									{#if messageQueue.length}
-										<div class="flex min-h-5 items-center gap-3 text-gray-600 dark:text-gray-400">
-											<span class="min-w-0 flex-1 truncate">{$i18n.t('Queued messages')}</span>
-											<span class="font-mono text-[0.625rem] text-gray-400 dark:text-gray-600">
-												{messageQueue.length}
-											</span>
-										</div>
-									{/if}
-
-									{#if chatTasks.length}
-										<div class="flex min-h-5 items-center gap-3 text-gray-600 dark:text-gray-400">
-											<span class="min-w-0 flex-1 truncate">{$i18n.t('Tasks')}</span>
-											<span class="font-mono text-[0.625rem] text-gray-400 dark:text-gray-600">
-												{chatTasks.length}
-											</span>
-										</div>
-									{/if}
-
-									<div class="flex min-h-5 items-center gap-3 text-gray-600 dark:text-gray-400">
-										<span class="min-w-0 flex-1 truncate">{$i18n.t('Chat ID')}</span>
-										{#if chatId}
-											<button
-												type="button"
-												class="min-w-0 max-w-[18rem] truncate font-mono text-[0.625rem] text-gray-400 underline-offset-2 transition-colors duration-75 hover:text-gray-700 hover:underline dark:text-gray-600 dark:hover:text-gray-200"
-												on:click={copyStatusChatId}
-											>
-												{copiedStatusChatId ? $i18n.t('Copied') : chatId}
-											</button>
-										{:else}
-											<span class="font-mono text-[0.625rem] text-gray-400 dark:text-gray-600">
-												none
-											</span>
-										{/if}
-									</div>
+								<div class="px-3 pb-2">
+									<StatusDetails
+										contextUsage={$statusContextUsage}
+										queuedCount={messageQueue.length}
+										taskCount={chatTasks.length}
+										{chatId}
+									/>
 								</div>
 							</div>
 						{/if}
 
 						<div
 							id={inputId === 'chat-input' ? 'message-input-container' : `${inputId}-wrapper`}
-							class="flex-1 flex flex-col relative w-full shadow-lg rounded-3xl border {isTemporary
-								? 'border-dashed border-gray-100 dark:border-gray-800 hover:border-gray-200 focus-within:border-gray-200 hover:dark:border-gray-700 focus-within:dark:border-gray-700'
-								: ' border-gray-100/50 dark:border-gray-850/50 hover:border-gray-200 focus-within:border-gray-100 hover:dark:border-gray-800 focus-within:dark:border-gray-800'} {($settings?.highContrastMode ??
+							data-composer-id={inputId}
+							inert={disabled && !isActive}
+							class="flex-1 flex flex-col relative w-full shadow-[0_6px_24px_-4px_rgba(0,0,0,0.1)] rounded-3xl border {$temporary
+								? 'border-dashed border-base-300/70 dark:border-base-700/70'
+								: ' border-base-200/60 dark:border-base-800/40'} {($settings?.highContrastMode ??
 							false)
 								? 'focus-within:outline focus-within:outline-2 focus-within:-outline-offset-2 focus-within:outline-blue-500 [&_.ProseMirror:focus-visible]:outline-none!'
-								: ''}  transition px-0.5 bg-white/5 dark:bg-gray-500/5 backdrop-blur-sm dark:text-gray-100"
+								: ''} {disabled && !isActive
+								? 'opacity-60'
+								: ''} transition px-0.5 bg-base-0/80 dark:bg-[color-mix(in_oklab,var(--color-base-850)_55%,var(--color-base-900))]/90 backdrop-blur-md dark:text-base-100"
 							dir={$settings?.chatDirection ?? 'auto'}
 						>
 							{#if atSelectedModel !== undefined}
 								<div class="px-2.5 pt-2.5 text-left w-full flex flex-col z-10">
 									<div class="flex items-center justify-between w-full">
-										<div class="pl-[0.0625rem] flex items-center gap-2 text-sm dark:text-gray-500">
+										<div class="pl-[0.0625rem] flex items-center gap-2 text-sm dark:text-base-500">
 											<img
 												alt={$i18n.t('model profile')}
 												class="size-3.5 max-w-[1.75rem] object-cover rounded-full"
-												src={`${WEBUI_API_BASE_URL}/models/model/profile/image?id=${$models.find((model) => model.id === atSelectedModel.id).id}&lang=${$i18n.language}`}
+												src={`${WEBUI_API_BASE_URL}/models/model/profile/image?id=${($models ?? []).find((model) => model.id === atSelectedModel.id).id}&lang=${$i18n.language}&v=${($models ?? []).find((model) => model.id === atSelectedModel.id)?.info?.updated_at}`}
 											/>
 											<div class="translate-y-[0.5px]">
 												<span class="">{atSelectedModelName}</span>
@@ -2153,7 +2269,7 @@
 										</div>
 										<div>
 											<button
-												class="flex items-center dark:text-gray-500"
+												class="flex items-center dark:text-base-500"
 												aria-label={$i18n.t('Remove Selected Model')}
 												on:click={() => {
 													atSelectedModel = undefined;
@@ -2211,7 +2327,7 @@
 												</div>
 												<div class=" absolute -top-1 -right-1">
 													<button
-														class=" bg-white text-black border border-white rounded-full {($settings?.highContrastMode ??
+														class=" bg-base-0 text-base-1000 border border-base-0 rounded-full {($settings?.highContrastMode ??
 														false)
 															? ''
 															: 'hover-reveal transition'}"
@@ -2237,6 +2353,7 @@
 												</div>
 											</div>
 										{:else}
+											<!-- A chat tab that has not started has no tab of its own to open beside -->
 											<FileItem
 												item={file}
 												name={file.name}
@@ -2247,6 +2364,11 @@
 												edit={true}
 												small={true}
 												modal={['file', 'collection'].includes(file?.type)}
+												chatId={embedded && !chatId ? null : chatId}
+												tabOptions={{
+													attachedFiles,
+													onAttachmentChange: () => (files = files)
+												}}
 												on:dismiss={async () => {
 													// Remove from UI state
 													files.splice(fileIdx, 1);
@@ -2265,7 +2387,7 @@
 								{#if prompt.split('\n').length > 2}
 									<button
 										type="button"
-										class="absolute top-2.5 right-3 z-20 p-1 rounded-lg hover:bg-gray-100/50 dark:hover:bg-gray-800/50"
+										class="absolute top-2.5 right-3 z-20 p-1 rounded-lg hover:bg-base-100/50 dark:hover:bg-base-800/50"
 										aria-label={$i18n.t('Expand input')}
 										on:click={() => {
 											showInputModal = true;
@@ -2276,14 +2398,13 @@
 								{/if}
 
 								<div
-									class="scrollbar-hidden rtl:text-right ltr:text-left bg-transparent dark:text-gray-100 outline-hidden w-full pb-0.5 px-1 resize-none h-fit max-h-96 overflow-auto {files.length ===
+									class="scrollbar-hidden rtl:text-right ltr:text-left bg-transparent dark:text-base-100 outline-hidden w-full pb-0.5 px-1 resize-none h-fit max-h-96 overflow-auto {files.length ===
 									0
 										? atSelectedModel !== undefined
 											? 'pt-1'
 											: 'pt-2'
 										: ''}"
 									id={`${inputId}-container`}
-									data-composer-id={inputId}
 									on:input={handleTypingInput}
 								>
 									{#if suggestions}
@@ -2301,6 +2422,7 @@
 													json={true}
 													richText={$settings?.richTextInput ?? true}
 													messageInput={true}
+													{autofocus}
 													followUpSuggestion={!generating &&
 													history?.messages?.[history?.currentId]?.role === 'assistant' &&
 													history?.messages?.[history?.currentId]?.done
@@ -2424,6 +2546,7 @@
 
 															webSearchEnabled = false;
 															imageGenerationEnabled = false;
+															videoGenerationEnabled = false;
 															codeInterpreterEnabled = false;
 														}
 													}}
@@ -2473,19 +2596,22 @@
 							<div class=" flex justify-between mt-0.5 mb-2 mx-0.5 max-w-full" dir="ltr">
 								<div class="ml-1 self-end flex items-center">
 									<InputMenu
-										onCompare={openComparison}
+										bind:show={showInputMenu}
+										bind:tab={inputMenuTab}
+										closeOnOutsideClick={inputMenuCloseOnOutsideClick}
+										{chatId}
 										bind:files
 										selectedModels={selectedModelIds}
-										fileUploadCapableModels={getFilesystemUploadTerminal(
-											$selectedTerminalId,
-											$terminalServers,
-											$settings
+										fileUploadCapableModels={getFilesystemUploadMachine(
+											$selectedMachineId,
+											$machines
 										)
 											? selectedModelIds
 											: fileUploadCapableModels}
 										{visionCapableModels}
 										{toolApprovalMode}
 										{onToolApprovalModeChange}
+										{recordActions}
 										{screenCaptureHandler}
 										{inputFilesHandler}
 										uploadFilesHandler={() => {
@@ -2493,14 +2619,19 @@
 										}}
 										uploadGoogleDriveHandler={async () => {
 											try {
-												const fileData = await createPicker();
-												if (fileData) {
-													const file = new File([fileData.blob], fileData.name, {
-														type: fileData.blob.type
-													});
-													await uploadFileHandler(file);
+												const maxCount = $config?.file?.max_count ?? null;
+												const filesData = await createPicker(
+													maxCount !== null ? Math.max(1, maxCount - files.length) : undefined
+												);
+												if (filesData) {
+													await inputFilesHandler(filesData.files);
+													for (const error of filesData.errors) {
+														toast.error(
+															$i18n.t('Error accessing Google Drive: {{error}}', { error })
+														);
+													}
 												} else {
-													console.log('No file was selected from Google Drive');
+													console.log('No files were selected from Google Drive');
 												}
 											} catch (error) {
 												console.error('Google Drive Error:', error);
@@ -2513,94 +2644,116 @@
 										}}
 										uploadOneDriveHandler={async (authorityType) => {
 											try {
-												const fileData = await pickAndDownloadFile(authorityType);
-												if (fileData) {
-													const file = new File([fileData.blob], fileData.name, {
-														type: fileData.blob.type || 'application/octet-stream'
-													});
-													await uploadFileHandler(file);
+												const maxCount = $config?.file?.max_count ?? null;
+												const filesData = await pickAndDownloadFiles(
+													authorityType,
+													maxCount !== null ? Math.max(1, maxCount - files.length) : undefined
+												);
+												if (filesData) {
+													await inputFilesHandler(filesData.files);
+													for (const error of filesData.errors) {
+														toast.error($i18n.t('Error accessing OneDrive: {{error}}', { error }));
+													}
 												} else {
-													console.log('No file was selected from OneDrive');
+													console.log('No files were selected from OneDrive');
 												}
 											} catch (error) {
 												console.error('OneDrive Error:', error);
+												toast.error(
+													$i18n.t('Error accessing OneDrive: {{error}}', {
+														error: error.message
+													})
+												);
 											}
 										}}
 										{onUpload}
 										onClose={async () => {
 											await tick();
 
-											const chatInput = document.getElementById(inputId);
-											chatInput?.focus();
+											if (!$mobile) {
+												const chatInput = document.getElementById(inputId);
+												chatInput?.focus();
+											}
 										}}
 									>
 										<button
 											type="button"
 											id="input-menu-button"
-											class="bg-transparent hover:bg-gray-100/40 text-gray-700 dark:text-white dark:hover:bg-gray-800/40 rounded-full size-[1.875rem] flex justify-center items-center outline-hidden focus:outline-hidden shrink-0"
+											class="bg-transparent hover:bg-base-100/40 text-base-700 dark:text-base-0 dark:hover:bg-base-800/40 rounded-full size-[1.875rem] flex justify-center items-center outline-hidden focus:outline-hidden shrink-0"
 											aria-label={$i18n.t('More')}
 										>
 											<PlusAlt className="size-5" />
 										</button>
+
+										<svelte:fragment slot="terminal">
+											{#if showMachineSelector && machineControlsInMenu}
+												<MachineMenu
+													{selectedMachineId}
+													modelId={selectedModels[0] ?? null}
+													inMenu
+													bind:tab={inputMenuTab}
+													{chatId}
+													bind:machineContext
+													disabled={isActive || !machineSelectionEnabled}
+												/>
+												{#if inputMenuTab === ''}
+													<div class="h-px mx-1 my-1 bg-base-100 dark:bg-base-800"></div>
+												{/if}
+											{/if}
+										</svelte:fragment>
+
+										<!-- Retired menu label: keep its translation. {$i18n.t('Integrations')} -->
+										<svelte:fragment slot="integrations">
+											{#if showWebSearchButton || showImageGenerationButton || showVideoGenerationButton || showCodeInterpreterButton || showToolsButton || showSkillsButton || (toggleFilters && toggleFilters.length > 0)}
+												<IntegrationsMenu
+													{selectedMachineId}
+													{machineSkills}
+													bind:show={showInputMenu}
+													bind:tab={inputMenuTab}
+													selectedModels={selectedModelIds}
+													{toggleFilters}
+													{showWebSearchButton}
+													{showImageGenerationButton}
+													{showVideoGenerationButton}
+													{showCodeInterpreterButton}
+													bind:selectedToolIds
+													bind:selectedSkillIds
+													bind:selectedFilterIds
+													bind:webSearchEnabled
+													bind:imageGenerationEnabled
+													bind:selectedImageModelId
+													bind:videoGenerationEnabled
+													bind:selectedVideoModelId
+													bind:codeInterpreterEnabled
+													oauthRedirectHandler={(tool: {
+														id: string;
+														serverId: string;
+														authType?: string | null;
+													}) => oauthRedirectHandler(tool, chatInputDraft)}
+													{onWebSearchToggle}
+													onShowValves={(e) => {
+														const { type, id } = e;
+														selectedValvesType = type;
+														selectedValvesItemId = id;
+														showValvesModal = true;
+														inputMenuCloseOnOutsideClick = false;
+													}}
+												/>
+											{/if}
+										</svelte:fragment>
 									</InputMenu>
 
-									{#if showWebSearchButton || showImageGenerationButton || showCodeInterpreterButton || showToolsButton || showSkillsButton || (toggleFilters && toggleFilters.length > 0)}
-										<div
-											class="flex self-center w-[0.0625rem] h-4 mx-1 bg-gray-200/50 dark:bg-gray-800/50 shrink-0"
-										/>
-
-										<IntegrationsMenu
-											selectedModels={selectedModelIds}
-											{toggleFilters}
-											{showWebSearchButton}
-											{showImageGenerationButton}
-											{showCodeInterpreterButton}
-											bind:selectedToolIds
-											bind:selectedSkillIds
-											bind:selectedFilterIds
-											bind:webSearchEnabled
-											bind:imageGenerationEnabled
-											bind:codeInterpreterEnabled
-											oauthRedirectHandler={(tool: {
-												id: string;
-												serverId: string;
-												authType?: string | null;
-											}) => oauthRedirectHandler(tool, chatInputDraft)}
-											{onWebSearchToggle}
-											closeOnOutsideClick={integrationsMenuCloseOnOutsideClick}
-											onShowValves={(e) => {
-												const { type, id } = e;
-												selectedValvesType = type;
-												selectedValvesItemId = id;
-												showValvesModal = true;
-												integrationsMenuCloseOnOutsideClick = false;
-											}}
-											onClose={async () => {
-												await tick();
-
-												if (!$mobile) {
-													const chatInput = document.getElementById(inputId);
-													chatInput?.focus();
-												}
-											}}
-										>
-											<button
-												type="button"
-												id="integration-menu-button"
-												class="bg-transparent hover:bg-gray-100/40 text-gray-700 dark:text-white dark:hover:bg-gray-800/40 rounded-full size-[1.875rem] flex justify-center items-center outline-hidden focus:outline-hidden shrink-0"
-												aria-label={$i18n.t('Integrations')}
-											>
-												<Component className="size-4.5" strokeWidth="1.5" />
-											</button>
-										</IntegrationsMenu>
-									{/if}
+									<div
+										aria-hidden="true"
+										class="flex self-center w-[0.0625rem] h-4 mx-1 bg-base-200/50 dark:bg-base-800/50 shrink-0"
+									></div>
 
 									{#if hasChatVariables}
 										<Tooltip content={$i18n.t('Chat Variables')} placement="top">
 											<button
 												type="button"
 												id="chat-variables-button"
-												class="bg-transparent hover:bg-gray-100 text-gray-700 dark:text-white dark:hover:bg-gray-800 rounded-full size-[1.875rem] flex justify-center items-center outline-hidden focus:outline-hidden shrink-0"
+												class="bg-transparent hover:bg-base-100 text-base-700 dark:text-base-0 dark:hover:bg-base-800 rounded-full size-[1.875rem] flex justify-center items-center outline-hidden focus:outline-hidden shrink-0"
 												aria-label={$i18n.t('Chat Variables')}
 												on:click={() => {
 													dispatch('chatVariables');
@@ -2612,15 +2765,18 @@
 									{/if}
 								</div>
 
-								<div class="flex flex-1 items-center min-w-0 overflow-x-auto scrollbar-none">
-									{#if selectedModelIds.length === 1 && $models.find((m) => m.id === selectedModelIds[0])?.has_user_valves && ($_user?.role === 'admin' || ($_user?.permissions?.chat?.valves ?? true))}
+								<div
+									use:fitControlLabels
+									class="flex flex-1 items-center min-w-0 overflow-x-auto scrollbar-none"
+								>
+									{#if selectedModelIds.length === 1 && ($models ?? []).find((m) => m.id === selectedModelIds[0])?.has_user_valves && ($_user?.role === 'admin' || ($_user?.permissions?.chat?.valves ?? true))}
 										<div class="ml-1 flex gap-1.5 shrink-0">
 											<Tooltip content={$i18n.t('Valves')} placement="top">
 												<button
 													type="button"
 													id="model-valves-button"
 													aria-label={$i18n.t('Valves')}
-													class="bg-transparent hover:bg-gray-100 text-gray-700 dark:text-white dark:hover:bg-gray-800 rounded-full size-[1.875rem] flex justify-center items-center outline-hidden focus:outline-hidden"
+													class="bg-transparent hover:bg-base-100 text-base-700 dark:text-base-0 dark:hover:bg-base-800 rounded-full size-[1.875rem] flex justify-center items-center outline-hidden focus:outline-hidden"
 													on:click={() => {
 														selectedValvesType = 'function';
 														selectedValvesItemId = selectedModelIds[0]?.split('.')[0];
@@ -2634,14 +2790,14 @@
 									{/if}
 
 									<div class="ml-1 flex gap-1.5 shrink-0">
-										{#if (selectedToolIds ?? []).length > 0 && $visibleControls['chat.selected_tools']}
+										{#if showInputSelections && (selectedToolIds ?? []).length > 0 && $visibleControls['chat.selected_tools']}
 											<Tooltip
 												content={$i18n.t('{{COUNT}} Available Tools', {
 													COUNT: (selectedToolIds ?? []).length
 												})}
 											>
 												<button
-													class="translate-y-[0.5px] px-1 flex gap-1 items-center text-gray-600 dark:text-gray-300 hover:text-gray-700 dark:hover:text-gray-200 rounded-lg self-center transition"
+													class="translate-y-[0.5px] px-1 flex gap-1 items-center text-base-600 dark:text-base-300 hover:text-base-700 dark:hover:text-base-200 rounded-lg self-center transition"
 													aria-label={$i18n.t('Available Tools')}
 													type="button"
 													on:click={() => {
@@ -2650,21 +2806,21 @@
 												>
 													<Wrench className="size-4" strokeWidth="1.75" />
 
-													<span class="text-sm">
+													<span data-input-label class="text-sm">
 														{(selectedToolIds ?? []).length}
 													</span>
 												</button>
 											</Tooltip>
 										{/if}
 
-										{#if (selectedSkillIds ?? []).length > 0 && $visibleControls['chat.selected_skills']}
+										{#if showInputSelections && (selectedSkillIds ?? []).length > 0 && $visibleControls['chat.selected_skills']}
 											<Tooltip
 												content={$i18n.t('{{COUNT}} Available Skills', {
 													COUNT: (selectedSkillIds ?? []).length
 												})}
 											>
 												<button
-													class="translate-y-[0.5px] px-1 flex gap-1 items-center text-gray-600 dark:text-gray-300 hover:text-gray-700 dark:hover:text-gray-200 rounded-lg self-center transition"
+													class="translate-y-[0.5px] px-1 flex gap-1 items-center text-base-600 dark:text-base-300 hover:text-base-700 dark:hover:text-base-200 rounded-lg self-center transition"
 													aria-label={$i18n.t('Available Skills')}
 													type="button"
 													on:click={() => {
@@ -2673,7 +2829,7 @@
 												>
 													<Cube className="size-4" strokeWidth="1.75" />
 
-													<span class="text-sm">
+													<span data-input-label class="text-sm">
 														{(selectedSkillIds ?? []).length}
 													</span>
 												</button>
@@ -2682,7 +2838,7 @@
 
 										{#each selectedFilterIds as filterId (filterId)}
 											{@const filter = toggleFilters.find((f) => f.id === filterId)}
-											{#if filter && $visibleControls['chat.selected_filters']}
+											{#if showInputSelections && filter && $visibleControls['chat.selected_filters']}
 												<Tooltip
 													content={resolveLocalizedFunction(
 														filter,
@@ -2712,7 +2868,7 @@
 															filterId
 														)
 															? 'text-sky-500 dark:text-sky-300 bg-sky-50 hover:bg-sky-100 dark:bg-sky-400/10 dark:hover:bg-sky-600/10 border border-sky-200/40 dark:border-sky-500/20'
-															: 'bg-transparent text-gray-600 dark:text-gray-300 hover:bg-gray-50 dark:hover:bg-gray-800 '} capitalize"
+															: 'bg-transparent text-base-600 dark:text-base-300 hover:bg-base-50 dark:hover:bg-base-800 '} capitalize"
 													>
 														{#if filter?.icon}
 															<div class="size-4 items-center flex justify-center">
@@ -2751,7 +2907,7 @@
 											{/if}
 										{/each}
 
-										{#if webSearchEnabled && showWebSearchButton && $visibleControls['chat.selected_web_search']}
+										{#if showInputSelections && webSearchEnabled && showWebSearchButton && $visibleControls['chat.selected_web_search']}
 											<Tooltip content={$i18n.t('Web Search')} placement="top">
 												<button
 													aria-label={$i18n.t('Web Search')}
@@ -2761,18 +2917,19 @@
 													class="group p-[0.375rem] flex gap-1.5 items-center text-sm rounded-full transition-colors duration-300 focus:outline-hidden max-w-full overflow-hidden {webSearchEnabled ||
 													($settings?.webSearch ?? false) === 'always'
 														? ' text-sky-500 dark:text-sky-300 bg-sky-50 hover:bg-sky-100 dark:bg-sky-400/10 dark:hover:bg-sky-600/10 border border-sky-200/40 dark:border-sky-500/20'
-														: 'bg-transparent text-gray-600 dark:text-gray-300 hover:bg-gray-50 dark:hover:bg-gray-800 '}"
+														: 'bg-transparent text-base-600 dark:text-base-300 hover:bg-base-50 dark:hover:bg-base-800 '}"
 												>
 													<GlobeAlt className="size-4" strokeWidth="1.75" />
-													<div class="hidden group-hover:block">
-														<XMark className="size-4" strokeWidth="1.75" />
-													</div>
 												</button>
 											</Tooltip>
 										{/if}
 
-										{#if imageGenerationEnabled && showImageGenerationButton && $visibleControls['chat.selected_image_generation']}
-											<Tooltip content={$i18n.t('Image')} placement="top">
+										{#if showInputSelections && imageGenerationEnabled && showImageGenerationButton && $visibleControls['chat.selected_image_generation']}
+											<Tooltip
+												content={$imageModels?.find((model) => model.id === selectedImageModelId)
+													?.name ?? $i18n.t('Image')}
+												placement="top"
+											>
 												<button
 													aria-label={$i18n.t('Image')}
 													aria-pressed={imageGenerationEnabled}
@@ -2781,17 +2938,35 @@
 													type="button"
 													class="group p-[0.375rem] flex gap-1.5 items-center text-sm rounded-full transition-colors duration-300 focus:outline-hidden max-w-full overflow-hidden {imageGenerationEnabled
 														? ' text-sky-500 dark:text-sky-300 bg-sky-50 hover:bg-sky-100 dark:bg-sky-400/10 dark:hover:bg-sky-700/10 border border-sky-200/40 dark:border-sky-500/20'
-														: 'bg-transparent text-gray-600 dark:text-gray-300 hover:bg-gray-50 dark:hover:bg-gray-800 '}"
+														: 'bg-transparent text-base-600 dark:text-base-300 hover:bg-base-50 dark:hover:bg-base-800 '}"
 												>
 													<Photo className="size-4" strokeWidth="1.75" />
-													<div class="hidden group-hover:block">
-														<XMark className="size-4" strokeWidth="1.75" />
-													</div>
 												</button>
 											</Tooltip>
 										{/if}
 
-										{#if codeInterpreterEnabled && showCodeInterpreterButton && $visibleControls['chat.selected_code_interpreter']}
+										{#if showInputSelections && videoGenerationEnabled && showVideoGenerationButton && $visibleControls['chat.selected_video_generation']}
+											<Tooltip
+												content={$videoModels?.find((model) => model.id === selectedVideoModelId)
+													?.name ?? $i18n.t('Video')}
+												placement="top"
+											>
+												<button
+													aria-label={$i18n.t('Video')}
+													aria-pressed={videoGenerationEnabled}
+													on:click|preventDefault={() =>
+														(videoGenerationEnabled = !videoGenerationEnabled)}
+													type="button"
+													class="group p-[0.375rem] flex gap-1.5 items-center text-sm rounded-full transition-colors duration-300 focus:outline-hidden max-w-full overflow-hidden {videoGenerationEnabled
+														? ' text-sky-500 dark:text-sky-300 bg-sky-50 hover:bg-sky-100 dark:bg-sky-400/10 dark:hover:bg-sky-700/10 border border-sky-200/40 dark:border-sky-500/20'
+														: 'bg-transparent text-base-600 dark:text-base-300 hover:bg-base-50 dark:hover:bg-base-800 '}"
+												>
+													<VideoCamera className="size-4" strokeWidth="1.75" />
+												</button>
+											</Tooltip>
+										{/if}
+
+										{#if showInputSelections && codeInterpreterEnabled && showCodeInterpreterButton && $visibleControls['chat.selected_code_interpreter']}
 											<Tooltip content={$i18n.t('Code Interpreter')} placement="top">
 												<button
 													aria-label={codeInterpreterEnabled
@@ -2803,28 +2978,28 @@
 													type="button"
 													class=" group p-[0.375rem] flex gap-1.5 items-center text-sm transition-colors duration-300 max-w-full overflow-hidden {codeInterpreterEnabled
 														? ' text-sky-500 dark:text-sky-300 bg-sky-50 hover:bg-sky-100 dark:bg-sky-400/10 dark:hover:bg-sky-700/10 border border-sky-200/40 dark:border-sky-500/20'
-														: 'bg-transparent text-gray-600 dark:text-gray-300 hover:bg-gray-50 dark:hover:bg-gray-800 '} {($settings?.highContrastMode ??
+														: 'bg-transparent text-base-600 dark:text-base-300 hover:bg-base-50 dark:hover:bg-base-800 '} {($settings?.highContrastMode ??
 													false)
 														? 'm-1'
 														: 'focus:outline-hidden rounded-full'}"
 												>
 													<Terminal className="size-3.5" strokeWidth="2" />
-
-													<div class="hidden group-hover:block">
-														<XMark className="size-4" strokeWidth="1.75" />
-													</div>
 												</button>
 											</Tooltip>
 										{/if}
 
-										<!-- Terminal Server Selector -->
-										{#if showTerminalSelector}
-											<TerminalMenu
-												bind:show={showTerminalMenu}
-												disabled={generating ||
-													(!!history?.currentId &&
-														history.messages[history.currentId]?.done != true)}
-											/>
+										<!-- Keep this instance mounted to measure the full labels even while the controls are in the menu. -->
+										{#if showMachineSelector}
+											<div data-machine-controls class="flex items-center gap-1.5 shrink-0">
+												<MachineMenu
+													{selectedMachineId}
+													modelId={selectedModels[0] ?? null}
+													bind:show={showMachineMenu}
+													{chatId}
+													bind:machineContext
+													disabled={isActive || !machineSelectionEnabled}
+												/>
+											</div>
 										{/if}
 
 										{#each pendingOAuthTools as pendingTool (pendingTool.id)}
@@ -2835,7 +3010,7 @@
 														oauthRedirectHandler(pendingTool, chatInputDraft);
 													}}
 													type="button"
-													class="flex h-[1.875rem] min-w-0 max-w-full translate-y-[0.0625rem] items-center self-center gap-1 bg-transparent px-1 text-[0.8125rem] leading-none text-gray-600 transition-colors duration-150 hover:text-gray-900 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-gray-400 dark:text-gray-300 dark:hover:text-gray-100 dark:focus-visible:outline-gray-500"
+													class="flex h-[1.875rem] min-w-0 max-w-full translate-y-[0.0625rem] items-center self-center gap-1 bg-transparent px-1 text-[0.8125rem] leading-none text-base-600 transition-colors duration-150 hover:text-base-900 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-base-400 dark:text-base-300 dark:hover:text-base-100 dark:focus-visible:outline-base-500"
 												>
 													<span class="truncate">{pendingTool.name}</span>
 													<ArrowUpLeft className="size-3 shrink-0 rotate-90" strokeWidth="1.5" />
@@ -2846,18 +3021,20 @@
 								</div>
 
 								<div class="self-end flex space-x-1 mr-1 min-w-0 gap-[0.03125rem]">
-									<div class="flex min-w-0 max-w-[10rem] items-center sm:max-w-[13rem]">
-										<ModelSelector
-											bind:this={modelSelector}
-											multipleEnabled={multipleModels}
-											bind:selectedModels
-											{onModelSelect}
-											showSetDefault={!history?.currentId}
-											placement="auto"
-											align="end"
-											triggerClassName="items-center gap-1.5 rounded-lg pl-2 pr-1.5 py-1 text-[0.8125rem] font-normal text-gray-600 transition-colors duration-100 hover:bg-gray-50/40 hover:text-gray-700 dark:text-gray-300 dark:hover:bg-gray-800/40 dark:hover:text-gray-200"
-										/>
-									</div>
+									{#if $models !== null}
+										<div class="flex min-w-0 max-w-[10rem] items-center sm:max-w-[13rem]">
+											<ModelSelector
+												bind:this={modelSelector}
+												multipleEnabled={multipleModels}
+												bind:selectedModels
+												{onModelSelect}
+												showSetDefault={!history?.currentId}
+												placement="auto"
+												align="end"
+												triggerClassName="items-center gap-1.5 rounded-lg pl-2 pr-1.5 py-1 text-[0.8125rem] font-normal text-base-600 transition-colors duration-100 hover:bg-base-50/40 hover:text-base-700 dark:text-base-300 dark:hover:bg-base-800/40 dark:hover:text-base-200"
+											/>
+										</div>
+									{/if}
 									<ModelControls
 										selectedModels={selectedModelIds}
 										bind:chatFiles
@@ -2871,7 +3048,7 @@
 											<Tooltip content={$i18n.t('Stop')}>
 												<button
 													aria-label={$i18n.t('Stop')}
-													class="bg-white hover:bg-gray-100 text-gray-800 dark:bg-gray-700 dark:text-white dark:hover:bg-gray-800 transition rounded-full p-[0.3125rem]"
+													class="bg-base-0 hover:bg-base-100 text-base-800 dark:bg-base-700 dark:text-base-0 dark:hover:bg-base-800 transition rounded-full p-[0.3125rem]"
 													on:click={() => {
 														stopResponse();
 													}}
@@ -2900,7 +3077,7 @@
 														id={inputId === 'chat-input'
 															? 'voice-input-button'
 															: `${inputId}-voice-input-button`}
-														class=" text-gray-600 dark:text-gray-300 hover:text-gray-700 dark:hover:text-gray-200 transition rounded-full p-1.5 self-center mr-0.5"
+														class=" text-base-600 dark:text-base-300 hover:text-base-700 dark:hover:text-base-200 transition rounded-full p-1.5 self-center mr-0.5"
 														type="button"
 														on:click={async () => {
 															try {
@@ -2943,13 +3120,13 @@
 													content={callActive ? $i18n.t('Call in progress') : $i18n.t('Voice mode')}
 												>
 													<button
-														class=" bg-black text-white hover:bg-gray-900 dark:bg-white dark:text-black dark:hover:bg-gray-100 transition rounded-full p-[0.3125rem] self-center"
+														class=" bg-base-1000 text-base-0 hover:bg-base-900 dark:bg-base-0 dark:text-base-1000 dark:hover:bg-base-100 transition rounded-full p-[0.3125rem] self-center"
 														class:call-active={callActive}
 														type="button"
 														on:click={async () => {
 															if (callActive) {
-																showCallOverlay.set(true);
-																showTabs.set(true);
+																voiceCall.set(true);
+																showTabs.set('voice');
 																return;
 															}
 															if (selectedModels.length > 1) {
@@ -2959,7 +3136,7 @@
 															}
 
 															if ($config?.audio?.realtime?.enabled) {
-																showCallOverlay.set(true);
+																voiceCall.set(true);
 																showTabs.set(true);
 																return;
 															}
@@ -2991,7 +3168,7 @@
 																	}
 																}
 
-																showCallOverlay.set(true);
+																voiceCall.set(true);
 																showTabs.set(true);
 															} catch (err) {
 																// If the user denies the permission or an error occurs, show an error message
@@ -3018,8 +3195,8 @@
 															: `${inputId}-send-message-button`}
 														aria-label={$i18n.t('Send message')}
 														class="{!(prompt === '' && files.length === 0)
-															? 'bg-black text-white hover:bg-gray-900 dark:bg-white dark:text-black dark:hover:bg-gray-100 '
-															: 'text-white bg-gray-200 dark:text-gray-900 dark:bg-gray-700 disabled'} transition rounded-full p-[0.3125rem] self-center"
+															? 'bg-base-1000 text-base-0 hover:bg-base-900 dark:bg-base-0 dark:text-base-1000 dark:hover:bg-base-100 '
+															: 'text-base-0 bg-base-200 dark:text-base-900 dark:bg-base-700 disabled'} transition rounded-full p-[0.3125rem] self-center"
 														type="submit"
 														disabled={prompt === '' && files.length === 0}
 													>
@@ -3045,7 +3222,7 @@
 						</div>
 
 						{#if $config?.license_metadata?.input_footer}
-							<div class=" text-xs text-gray-500 text-center line-clamp-1 marked">
+							<div class=" text-xs text-base-500 text-center line-clamp-1 marked">
 								{@html DOMPurify.sanitize(marked($config?.license_metadata?.input_footer))}
 							</div>
 						{:else}

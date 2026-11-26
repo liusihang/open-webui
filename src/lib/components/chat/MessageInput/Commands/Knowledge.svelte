@@ -27,6 +27,7 @@
 	let selectedIdx = 0;
 	let items = [];
 	let searchDebounceTimer: ReturnType<typeof setTimeout>;
+	let searchController: AbortController;
 
 	export let filteredItems = [];
 	let webUploadEnabled: boolean = true;
@@ -74,20 +75,31 @@
 
 	$: items = [...folderItems, ...knowledgeItems, ...fileItems];
 
-	$: if (query !== undefined) {
+	const handleSearchInput = () => {
+		searchController?.abort();
+		knowledgeItems = [];
+		fileItems = [];
 		clearTimeout(searchDebounceTimer);
 		searchDebounceTimer = setTimeout(() => {
 			getItems();
 		}, 200);
+	};
+
+	$: if (query !== undefined) {
+		handleSearchInput();
 	}
 
 	onDestroy(() => {
+		searchController?.abort();
 		clearTimeout(searchDebounceTimer);
 	});
 
 	const getItems = () => {
-		getKnowledgeItems();
-		getKnowledgeFileItems();
+		searchController?.abort();
+		searchController = new AbortController();
+		const { signal } = searchController;
+		getKnowledgeItems(signal);
+		getKnowledgeFileItems(signal);
 	};
 
 	$: folderItems = $folders
@@ -99,12 +111,21 @@
 		}))
 		.filter((folder) => folder.name.toLowerCase().includes(query.toLowerCase()));
 
-	const getKnowledgeItems = async () => {
-		const res = await searchKnowledgeBases(localStorage.token, query).catch(() => {
+	const getKnowledgeItems = async (signal: AbortSignal) => {
+		const res = await searchKnowledgeBases(
+			localStorage.token,
+			query,
+			null,
+			null,
+			null,
+			null,
+			null,
+			signal
+		).catch(() => {
 			return null;
 		});
 
-		if (res) {
+		if (res && !signal.aborted) {
 			knowledgeItems = res.items.map((item) => {
 				return {
 					...item,
@@ -114,12 +135,21 @@
 		}
 	};
 
-	const getKnowledgeFileItems = async () => {
-		const res = await searchKnowledgeFiles(localStorage.token, query).catch(() => {
+	const getKnowledgeFileItems = async (signal: AbortSignal) => {
+		const res = await searchKnowledgeFiles(
+			localStorage.token,
+			query,
+			null,
+			null,
+			null,
+			1,
+			false,
+			signal
+		).catch(() => {
 			return null;
 		});
 
-		if (res) {
+		if (res && !signal.aborted) {
 			fileItems = res.items.map((item) => {
 				return {
 					...item,
@@ -147,7 +177,7 @@
 				{#if item?.type === 'folder'}
 					{$i18n.t('Folders')}
 				{:else if item?.type === 'collection'}
-					{$i18n.t('Collections')}
+					{$i18n.t('Knowledge')}
 				{:else if item?.type === 'file'}
 					{$i18n.t('Files')}
 				{/if}
@@ -156,7 +186,7 @@
 
 		{#if !['youtube', 'web'].includes(item.type)}
 			<button
-				class="flex h-6 w-full items-center justify-between rounded-xl px-2 text-left text-[0.8125rem] transition-colors duration-75 hover:bg-gray-50/40 dark:hover:bg-gray-800/40 {idx ===
+				class="flex h-6 w-full items-center justify-between rounded-xl px-2 text-left text-[0.8125rem] transition-colors duration-75 hover:bg-base-50/40 dark:hover:bg-base-800/40 {idx ===
 				selectedIdx
 					? 'app-interactive-active selected-command-option-button'
 					: ''}"
@@ -181,7 +211,7 @@
 							: item?.type === 'file'
 								? `${item?.collection?.name} > ${$i18n.t('File')}`
 								: item?.type === 'collection'
-									? $i18n.t('Collection')
+									? $i18n.t('Knowledge Base')
 									: ''}
 						placement="top"
 					>

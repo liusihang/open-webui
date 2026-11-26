@@ -1,10 +1,13 @@
 <script lang="ts">
-	import { getContext, tick } from 'svelte';
-	import { downloadFileBlob } from '$lib/apis/terminal';
+	import type { MachineTarget } from '$lib/apis/machines';
+	export let target: MachineTarget | null = null;
+	import ExcelPreview from '$lib/components/common/ExcelPreview.svelte';
+	import { getContext, tick, onDestroy } from 'svelte';
+	import { downloadFileBlob, machineRequest } from '$lib/apis/machines';
+	import MarkdownFileEditor from './MarkdownFileEditor.svelte';
 	import MarkdownDocument from './MarkdownDocument.svelte';
 	import { settings, config } from '$lib/stores';
 	import { injectCsp } from '$lib/utils/csp';
-	import { isCodeFile } from '$lib/utils/codeHighlight';
 	import { sanitizeSvg } from '$lib/utils';
 	import Spinner from '../../common/Spinner.svelte';
 	import PdfPagesPreview from '../../common/PdfPagesPreview.svelte';
@@ -18,6 +21,7 @@
 
 	let pdfPagesPreviewRef: PdfPagesPreview;
 	let fileCodeEditorRef: FileCodeEditor;
+	let markdownEditorRef: MarkdownFileEditor;
 
 	const i18n: any = getContext('i18n');
 
@@ -31,10 +35,9 @@
 	export let fileModelData: ArrayBuffer | null = null;
 	export let fileDocxData: ArrayBuffer | null = null;
 	export let fileContent: string | null = null;
+	export let gitBaseContent: string | null = null;
 
-	// Terminal connection for notebook execution
-	export let baseUrl: string = '';
-	export let apiKey: string = '';
+	// Machine connection for notebook execution
 	export let chatId: string | null = null;
 	export let resourceVersion = 0;
 	export let onLocalLink: (path: string) => void = () => {};
@@ -48,24 +51,36 @@
 		lastLoaded = content;
 	};
 	$: syncContent(fileContent, selectedFile);
-	$: dirty = editing ? editContent !== (fileContent ?? '') : codeValue !== (fileContent ?? '');
+	$: dirty = codeValue !== (fileContent ?? '');
 	export const getSelection = () =>
-		editing && editTextarea?.selectionStart !== editTextarea?.selectionEnd
-			? {
-					text: editContent.slice(editTextarea.selectionStart, editTextarea.selectionEnd),
-					location: ''
-				}
+		isMarkdown && !showRaw && !searchTarget
+			? markdownEditorRef?.getSelection()
 			: fileCodeEditorRef?.getSelection();
-	export const save = () => (editing ? saveEdit() : saveCodeFile());
+	export const save = () => saveCodeFile();
+
+	export const captureView = () => ({
+		baseText: fileContent ?? '',
+		text: codeValue,
+		dirty,
+		showRaw,
+		editor: fileCodeEditorRef?.captureView()
+	});
+	export async function restoreView(view: any) {
+		if (!view) return;
+		showRaw = view.showRaw;
+		codeValue = view.text;
+		lastLoaded = fileContent;
+		bufferPath = selectedFile;
+		await tick();
+		fileCodeEditorRef?.restoreView(view.editor);
+	}
 
 	// Office preview props
-	export let fileOfficeHtml: string | null = null;
+	export let excelWorkbook: import('xlsx').WorkBook | null = null;
 	export let fileOfficeSlides: string[] | null = null;
 	export let currentSlide = 0;
 	export let targetPage: number | null = null;
-	export let excelSheetNames: string[] = [];
 	export let selectedExcelSheet = '';
-	export let onSheetChange: ((sheet: string) => void) | null = null;
 
 	export let overlay = false;
 	export let readOnly = false;
@@ -79,60 +94,25 @@
 		requestId: number;
 	} | null = null;
 
-	export let editing = false;
-	let editContent = '';
+	export let wrapLines = false;
 	export let saving = false;
-	let editTextarea: HTMLTextAreaElement;
-
-	// Reset edit state when switching files
-	$: (selectedFile, resetEdit());
-
-	const resetEdit = () => {
-		editing = false;
-		editContent = '';
-		saving = false;
-		codeValue = fileContent ?? '';
-	};
-
-	export const startEdit = async () => {
-		if (readOnly) return;
-		editContent = fileContent ?? '';
-		editing = true;
-		showRaw = true;
-		await tick();
-		editTextarea?.focus();
-	};
-
-	export const saveEdit = async () => {
-		if (!onSave || readOnly) return;
-		saving = true;
-		const target = selectedFile,
-			content = editContent;
-		try {
-			await onSave(content);
-			if (selectedFile === target && editContent === content) editing = false;
-		} finally {
-			saving = false;
-		}
-	};
 
 	export const discard = () => {
 		codeValue = fileContent ?? '';
-		editContent = fileContent ?? '';
 		fileCodeEditorRef?.setValue(codeValue);
 		dirty = false;
-	};
-	export const cancelEdit = () => {
-		editing = false;
-		editContent = '';
 	};
 
 	/** Save code file directly from CodeMirror */
 	export const saveCodeFile = async () => {
 		if (!onSave || readOnly) return;
 		saving = true;
-		const content = fileCodeEditorRef?.getValue() ?? codeValue;
 		try {
+			if (isMarkdown && !showRaw && !searchTarget) await markdownEditorRef?.flushUploads();
+			const content =
+				isMarkdown && !showRaw && !searchTarget
+					? codeValue
+					: (fileCodeEditorRef?.getValue() ?? codeValue);
 			await onSave(content);
 		} finally {
 			saving = false;
@@ -153,16 +133,40 @@
 	$: isJson = JSON_EXTS.has(getExt(selectedFile));
 	$: isSvg = getExt(selectedFile) === 'svg';
 	$: isNotebook = getExt(selectedFile) === 'ipynb';
-	$: isCode = isCodeFile(selectedFile);
 	$: csvDelimiter = getExt(selectedFile) === 'tsv' ? '\t' : ',';
 	$: isPptx = getExt(selectedFile) === 'pptx';
 
-	// For HTML files on system terminals (proxy URL), use path-based serving
-	// so the iframe can resolve relative CSS/JS/image references via cookie auth.
-	$: serveUrl =
-		isHtml && selectedFile && baseUrl && baseUrl.includes('/api/v1/terminals/')
-			? `${baseUrl}/files/serve/${selectedFile.replace(/^\//, '')}`
-			: null;
+	let serveUrl: string | null = null;
+	let previewError = '';
+	let previewPending = false;
+	let previewGeneration = 0;
+	const configurePreview = async (_key: string) => {
+		const generation = ++previewGeneration;
+		serveUrl = null;
+		previewError = '';
+		previewPending = false;
+		if (!isHtml || !selectedFile || !target?.system) return;
+		const path = selectedFile.replace(/^\//, '').split('/').map(encodeURIComponent).join('/');
+		if (!target.selector.startsWith('template:')) {
+			serveUrl = `${target.baseUrl}${target.context.chatId ? `/chats/${encodeURIComponent(target.context.chatId)}` : ''}/files/serve/${path}`;
+			return;
+		}
+		previewPending = true;
+		try {
+			const result = await machineRequest<{ url: string }>(target, '/files/preview', {
+				method: 'POST'
+			});
+			if (generation === previewGeneration) serveUrl = result.url + path;
+		} catch (error) {
+			if (generation === previewGeneration) previewError = String(error);
+		} finally {
+			if (generation === previewGeneration) previewPending = false;
+		}
+	};
+	$: void configurePreview(
+		JSON.stringify([isHtml, selectedFile, target?.baseUrl, target?.context])
+	);
+	onDestroy(() => previewGeneration++);
 	// Simple CSV parser that handles quoted fields
 	const parseCsv = (text: string, delimiter: string): string[][] => {
 		const rows: string[][] = [];
@@ -206,46 +210,20 @@
 	$: csvHeader = csvRows.length > 0 ? csvRows[0] : [];
 	$: csvBody = csvRows.length > 1 ? csvRows.slice(1) : [];
 
-	// Shiki code highlighting (SVG only)
-	let highlightedHtml: string | null = null;
-	let highlightingFile: string | null = null;
-
-	$: if (isSvg && fileContent !== null && selectedFile) {
-		const currentFile = selectedFile;
-		highlightingFile = currentFile;
-		import('shiki')
-			.then(({ codeToHtml }) =>
-				codeToHtml(fileContent!, {
-					lang: 'xml',
-					themes: { light: 'github-light', dark: 'github-dark' },
-					defaultColor: 'light'
-				})
-			)
-			.then((html) => {
-				if (highlightingFile === currentFile) highlightedHtml = html;
-			})
-			.catch(() => {
-				if (highlightingFile === currentFile) highlightedHtml = null;
-			});
-	} else {
-		highlightedHtml = null;
-	}
-
+	// Retired errors: keep their translations.
+	// $i18n.t('Invalid JSON')
+	// $i18n.t('JSON parse error: {{error}}')
 	// JSON parsing
 	let parsedJson: unknown = undefined;
-	let jsonError: string | null = null;
 
 	$: if (isJson && fileContent !== null) {
 		try {
 			parsedJson = JSON.parse(fileContent);
-			jsonError = null;
 		} catch (e) {
 			parsedJson = undefined;
-			jsonError = e instanceof Error ? e.message : $i18n.t('Invalid JSON');
 		}
 	} else {
 		parsedJson = undefined;
-		jsonError = null;
 	}
 
 	// Notebook parsing
@@ -266,13 +244,14 @@
 
 	// Auto-switch to raw/editor mode for empty previewable files so the user
 	// can start editing immediately instead of seeing a blank preview.
-	$: if (fileContent !== null && fileContent.trim() === '' && (isMarkdown || isCsv || isJson)) {
+	$: if (fileContent !== null && fileContent.trim() === '' && (isCsv || isJson)) {
 		showRaw = true;
 	}
 
 	let panzoomRef: PanzoomContainer;
 	let pptxPreviewRef: PptxPreview;
 	let imageZoomLevel = 1;
+	$: svgPreview = isSvg && !showRaw && !searchTarget && !!fileContent;
 	export const resetImageView = () => {
 		panzoomRef?.reset();
 		pptxPreviewRef?.resetView();
@@ -285,6 +264,8 @@
 
 <div
 	class="flex-1 {fileImageUrl !== null ||
+	svgPreview ||
+	fileVideoUrl !== null ||
 	fileDocxData !== null ||
 	fileModelData !== null ||
 	filePdfData !== null ||
@@ -294,7 +275,9 @@
 >
 	<!-- File preview -->
 	{#if fileLoading}
-		<div class="flex items-center justify-center h-full"><Spinner className="size-4" /></div>
+		<div class="flex items-center justify-center h-full">
+			<Spinner className="size-3.5 text-base-400 dark:text-base-500" />
+		</div>
 	{:else if fileImageUrl !== null}
 		<PanzoomContainer
 			bind:this={panzoomRef}
@@ -310,9 +293,9 @@
 			/>
 		</PanzoomContainer>
 	{:else if fileVideoUrl !== null}
-		<div class="w-full h-full flex items-center justify-center bg-black">
+		<div class="w-full h-full flex items-center justify-center bg-base-1000">
 			<!-- svelte-ignore a11y-media-has-caption -->
-			<video src={fileVideoUrl} controls class="max-w-full max-h-full">
+			<video src={fileVideoUrl} controls class="w-full h-full object-contain">
 				{$i18n.t('Your browser does not support the video tag.')}
 			</video>
 		</div>
@@ -336,56 +319,39 @@
 	{:else if fileModelData !== null}
 		{#key fileModelData}
 			{#await import('../../common/ModelPreview.svelte')}
-				<div class="flex h-full items-center justify-center"><Spinner className="size-4" /></div>
+				<div class="flex h-full items-center justify-center">
+					<Spinner className="size-3.5 text-base-400 dark:text-base-500" />
+				</div>
 			{:then { default: ModelPreview }}
 				<ModelPreview
 					data={fileModelData}
 					path={selectedFile ?? ''}
-					loadResource={baseUrl
+					loadResource={target?.baseUrl
 						? async (path, signal) => {
-								const result = await downloadFileBlob(
-									baseUrl,
-									apiKey,
-									path,
-									chatId ?? undefined,
-									signal
-								);
+								const result = await downloadFileBlob(target, path, signal);
 								if (!result) throw new Error('Could not load model resource.');
 								return result.blob;
 							}
 						: undefined}
 				/>
 			{:catch}
-				<div class="p-4 text-sm text-gray-500 dark:text-gray-400">{$i18n.t('Preview failed')}</div>
+				<div
+					class="flex h-full items-center justify-center p-4 text-center text-sm text-base-500 dark:text-base-400"
+				>
+					{$i18n.t('Preview failed')}
+				</div>
 			{/await}
 		{/key}
 	{:else if fileSqliteData !== null}
 		<SqliteView data={fileSqliteData} />
 	{:else if fileDocxData !== null}
-		<DocxPreview data={fileDocxData} {targetPage} className="w-full h-full" />
-	{:else if fileOfficeHtml !== null}
-		<div class="flex flex-col h-full">
-			<div class="office-preview overflow-auto flex-1 min-h-0">
-				{@html fileOfficeHtml}
-			</div>
-			{#if excelSheetNames.length > 1}
-				<div
-					class="flex items-center gap-1 py-1.5 px-1.5 border-t border-gray-100/40 dark:border-gray-800/25 overflow-x-auto"
-				>
-					{#each excelSheetNames as sheet}
-						<button
-							class="shrink-0 px-2 py-1 text-xs rounded-md transition-colors
-								{selectedExcelSheet === sheet
-								? 'bg-gray-100/40 dark:bg-gray-800/25 text-gray-700 dark:text-gray-200 font-normal'
-								: 'text-gray-500 dark:text-gray-400 hover:bg-gray-100/30 dark:hover:bg-gray-800/20 hover:text-gray-600 dark:hover:text-gray-300'}"
-							on:click={() => onSheetChange?.(sheet)}
-						>
-							{sheet}
-						</button>
-					{/each}
-				</div>
-			{/if}
-		</div>
+		<DocxPreview data={fileDocxData} {targetPage} className="w-full h-full">
+			<slot name="toolbar" slot="toolbar" />
+		</DocxPreview>
+	{:else if excelWorkbook !== null}
+		<ExcelPreview workbook={excelWorkbook} bind:selectedSheet={selectedExcelSheet}>
+			<slot name="toolbar" slot="toolbar" />
+		</ExcelPreview>
 	{:else if fileOfficeSlides !== null && fileOfficeSlides.length > 0}
 		<PptxPreview
 			bind:this={pptxPreviewRef}
@@ -393,12 +359,16 @@
 			bind:currentSlide
 			{targetPage}
 			className="w-full h-full"
-		/>
+		>
+			<slot name="toolbar" slot="toolbar" />
+		</PptxPreview>
 	{:else if fileContent !== null}
-		{#if searchTarget}
+		{#if searchTarget || showRaw}
 			<div class="absolute inset-0">
 				<FileCodeEditor
-					{readOnly}
+					{gitBaseContent}
+					readOnly={readOnly || !onSave}
+					{wrapLines}
 					bind:this={fileCodeEditorRef}
 					bind:value={codeValue}
 					filePath={selectedFile}
@@ -406,6 +376,8 @@
 					{searchTarget}
 				/>
 			</div>
+		{:else if isHtml && !showRaw && (previewPending || previewError)}
+			{#if previewError}<p role="alert">{previewError}</p>{:else}<Spinner />{/if}
 		{:else if isHtml && !showRaw && serveUrl}
 			{#if overlay}
 				<div class="absolute top-0 left-0 right-0 bottom-0 z-10"></div>
@@ -419,7 +391,7 @@
 					: ''}{($settings?.iframeSandboxAllowForms ?? true)
 					? ' allow-forms'
 					: ''}{($settings?.iframeSandboxAllowSameOrigin ?? false) ? ' allow-same-origin' : ''}"
-				class="w-full h-full border-none bg-white"
+				class="w-full h-full border-none bg-base-0"
 				title={$i18n.t('HTML Preview')}
 			/>
 		{:else if isHtml && !showRaw}
@@ -435,44 +407,33 @@
 					: ''}{($settings?.iframeSandboxAllowForms ?? true)
 					? ' allow-forms'
 					: ''}{($settings?.iframeSandboxAllowSameOrigin ?? false) ? ' allow-same-origin' : ''}"
-				class="w-full h-full border-none bg-white"
+				class="w-full h-full border-none bg-base-0"
 				title={$i18n.t('HTML Preview')}
 			/>
-		{:else if isHtml && showRaw}
-			<div class="absolute inset-0">
-				<FileCodeEditor
-					{readOnly}
-					bind:this={fileCodeEditorRef}
+		{:else if isMarkdown && !showRaw && onSave && !readOnly}
+			{#key selectedFile}
+				<MarkdownFileEditor
+					bind:this={markdownEditorRef}
 					bind:value={codeValue}
-					filePath={selectedFile}
+					path={selectedFile ?? ''}
+					{target}
+					{chatId}
+					{readOnly}
 					onSave={readOnly ? null : saveCodeFile}
 				/>
-			</div>
+			{/key}
 		{:else if isMarkdown && !showRaw}
 			{#key selectedFile}
 				<MarkdownDocument
-					content={fileContent}
-					onSave={readOnly ? null : onSave}
-					bind:saving
+					content={codeValue}
 					id={`file-${selectedFile}`}
 					path={selectedFile ?? ''}
-					{baseUrl}
-					{apiKey}
+					{target}
 					{chatId}
 					{resourceVersion}
 					{onLocalLink}
 				/>
 			{/key}
-		{:else if isMarkdown && showRaw}
-			<div class="absolute inset-0">
-				<FileCodeEditor
-					{readOnly}
-					bind:this={fileCodeEditorRef}
-					bind:value={codeValue}
-					filePath={selectedFile}
-					onSave={readOnly ? null : saveCodeFile}
-				/>
-			</div>
 		{:else if isCsv && !showRaw && csvRows.length > 0}
 			<div class="absolute inset-0 overflow-auto px-3 pb-3">
 				<table class="csv-table text-xs font-mono border-collapse">
@@ -502,70 +463,50 @@
 			</div>
 		{:else if isNotebook && !showRaw && parsedNotebook}
 			<div class="overflow-auto h-full">
-				<NotebookView
-					notebook={parsedNotebook}
-					filePath={selectedFile ?? ''}
-					{baseUrl}
-					{apiKey}
-					{readOnly}
-				/>
+				<NotebookView notebook={parsedNotebook} filePath={selectedFile ?? ''} {target} {readOnly} />
 			</div>
 		{:else if isJson && !showRaw && parsedJson !== undefined}
 			<div class="overflow-auto h-full">
 				<JsonTreeView data={parsedJson} />
 			</div>
-		{:else if isJson && !showRaw && jsonError}
-			<div class="p-3 text-xs">
-				<div class="text-gray-500 dark:text-gray-400 mb-2">
-					{$i18n.t('JSON parse error: {{error}}', { error: jsonError })}
-				</div>
-				<pre
-					class="text-xs font-mono text-gray-800 dark:text-gray-200 whitespace-pre-wrap break-all leading-relaxed">{fileContent}</pre>
-			</div>
 		{:else if isSvg && !showRaw && fileContent}
-			<div class="svg-preview w-full h-full flex items-center justify-center overflow-auto p-3">
-				{@html sanitizeSvg(fileContent)}
-			</div>
-		{:else if isCode && !showRaw}
+			{#key selectedFile}
+				<PanzoomContainer
+					bind:this={panzoomRef}
+					bind:zoomLevel={imageZoomLevel}
+					className="svg-preview w-full h-full flex items-center justify-center p-3"
+					options={{ zoomDoubleClickSpeed: 1 }}
+				>
+					{@html sanitizeSvg(fileContent)}
+				</PanzoomContainer>
+			{/key}
+		{:else}
 			<div class="absolute inset-0">
 				<FileCodeEditor
-					{readOnly}
+					{gitBaseContent}
+					readOnly={readOnly || !onSave}
+					{wrapLines}
 					bind:this={fileCodeEditorRef}
 					bind:value={codeValue}
 					filePath={selectedFile}
 					onSave={readOnly ? null : saveCodeFile}
 				/>
 			</div>
-		{:else if isSvg && highlightedHtml && !showRaw}
-			<div class="shiki-preview overflow-auto h-full text-xs">
-				{@html highlightedHtml}
-			</div>
-		{:else if editing}
-			<textarea
-				aria-label={$i18n.t('File content')}
-				bind:this={editTextarea}
-				bind:value={editContent}
-				class="w-full h-full text-xs font-mono text-gray-800 dark:text-gray-200 whitespace-pre break-all leading-relaxed p-3 bg-transparent border-none outline-none resize-none"
-				spellcheck="false"
-			/>
-		{:else}
-			<pre
-				class="text-xs font-mono text-gray-800 dark:text-gray-200 whitespace-pre-wrap break-all leading-relaxed p-3">{fileContent}</pre>
 		{/if}
 	{:else}
-		<div class="text-xs text-gray-400 text-center pt-8">
+		<div class="flex h-full items-center justify-center p-4 text-center text-xs text-base-400">
 			{$i18n.t('Could not read file.')}
 		</div>
 	{/if}
 
-	{#if !fileLoading && fileImageUrl !== null}
+	{#if !fileLoading && (fileImageUrl !== null || svgPreview)}
 		<div
-			class="absolute bottom-3 left-1/2 z-10 flex -translate-x-1/2 items-center gap-0.5 rounded-lg border border-gray-200/60 bg-white/90 px-1 py-0.5 shadow-lg backdrop-blur-sm dark:border-gray-700/60 dark:bg-gray-850/90"
+			class="absolute bottom-3 left-1/2 z-10 flex -translate-x-1/2 items-center gap-0.5 rounded-lg border border-base-200/60 bg-base-0/90 px-1 py-0.5 shadow-lg backdrop-blur-sm dark:border-base-700/60 dark:bg-base-850/90"
 		>
 			<!-- Pinch covers in/out on coarse pointers; reset has no gesture, so it stays -->
 			<button
 				type="button"
-				class="inline-flex h-7 min-w-7 shrink-0 items-center justify-center rounded-md p-1.5 text-gray-500 transition hover:bg-gray-100 dark:text-gray-400 dark:hover:bg-gray-800 pointer-coarse:hidden"
+				class="inline-flex h-7 min-w-7 shrink-0 items-center justify-center rounded-md p-1.5 text-base-500 transition hover:bg-base-100 dark:text-base-400 dark:hover:bg-base-800 pointer-coarse:hidden"
 				on:click={() => panzoomRef?.zoomOut()}
 				aria-label={$i18n.t('Zoom out')}
 			>
@@ -584,7 +525,7 @@
 			</button>
 			<button
 				type="button"
-				class="h-7 min-w-12 shrink-0 rounded-md px-1.5 py-1 text-center text-[0.6875rem] font-normal tabular-nums text-gray-500 transition hover:bg-gray-100 dark:text-gray-400 dark:hover:bg-gray-800"
+				class="h-7 min-w-12 shrink-0 rounded-md px-1.5 py-1 text-center text-[0.6875rem] font-normal tabular-nums text-base-500 transition hover:bg-base-100 dark:text-base-400 dark:hover:bg-base-800"
 				on:click={() => panzoomRef?.reset()}
 				aria-label={$i18n.t('Reset zoom')}
 			>
@@ -592,7 +533,7 @@
 			</button>
 			<button
 				type="button"
-				class="inline-flex h-7 min-w-7 shrink-0 items-center justify-center rounded-md p-1.5 text-gray-500 transition hover:bg-gray-100 dark:text-gray-400 dark:hover:bg-gray-800 pointer-coarse:hidden"
+				class="inline-flex h-7 min-w-7 shrink-0 items-center justify-center rounded-md p-1.5 text-base-500 transition hover:bg-base-100 dark:text-base-400 dark:hover:bg-base-800 pointer-coarse:hidden"
 				on:click={() => panzoomRef?.zoomIn()}
 				aria-label={$i18n.t('Zoom in')}
 			>
@@ -607,6 +548,7 @@
 					/>
 				</svg>
 			</button>
+			<slot name="toolbar" />
 		</div>
 	{/if}
 </div>
@@ -626,16 +568,16 @@
 	.csv-table thead th {
 		position: sticky;
 		top: 0;
-		background: rgba(243, 244, 246, 0.95);
+		background: color-mix(in oklab, var(--color-base-100) 95%, transparent);
 		backdrop-filter: blur(4px);
 		font-weight: 600;
-		color: #374151;
+		color: var(--color-base-700);
 		border-bottom: 2px solid rgba(128, 128, 128, 0.25);
 		z-index: 1;
 	}
 	:global(.dark) .csv-table thead th {
-		background: rgba(31, 41, 55, 0.95);
-		color: #d1d5db;
+		background: color-mix(in oklab, var(--color-base-800) 95%, transparent);
+		color: var(--color-base-300);
 	}
 	.csv-table tbody tr:nth-child(even) {
 		background: rgba(128, 128, 128, 0.04);
@@ -647,13 +589,13 @@
 		background: rgba(59, 130, 246, 0.1);
 	}
 	.csv-table td {
-		color: #374151;
+		color: var(--color-base-700);
 	}
 	:global(.dark) .csv-table td {
-		color: #d1d5db;
+		color: var(--color-base-300);
 	}
 	.csv-row-num {
-		color: #9ca3af;
+		color: var(--color-base-500);
 		font-size: 0.6rem;
 		text-align: right !important;
 		user-select: none;
@@ -661,7 +603,7 @@
 		padding-right: 0.375rem !important;
 	}
 	:global(.dark) .csv-row-num {
-		color: #6b7280;
+		color: var(--color-base-600);
 	}
 	/* DOCX / generic office styles */
 	:global(.office-preview img) {
@@ -690,46 +632,5 @@
 	:global(.office-preview ol) {
 		padding-left: 1.5em;
 		margin: 0.5em 0;
-	}
-	/* Shiki code highlighting */
-	.shiki-preview :global(pre.shiki) {
-		margin: 0;
-		padding: 0.75rem 1rem;
-		font-size: 0.75rem;
-		line-height: 1.6;
-		border-radius: 0;
-		overflow-x: auto;
-		min-height: 100%;
-	}
-	.shiki-preview :global(pre.shiki code) {
-		counter-reset: line;
-	}
-	.shiki-preview :global(pre.shiki code > .line) {
-		counter-increment: line;
-		display: inline-block;
-		width: 100%;
-		white-space: pre;
-	}
-	.shiki-preview :global(pre.shiki code > .line::before) {
-		content: counter(line);
-		display: inline-block;
-		width: 2.5em;
-		text-align: right;
-		margin-right: 1em;
-		color: #9ca3af;
-		user-select: none;
-		font-size: 0.65rem;
-	}
-	:global(.dark) .shiki-preview :global(pre.shiki code > .line::before) {
-		color: #4b5563;
-	}
-	/* Shiki dual-theme: swap CSS variables in dark mode */
-	:global(.dark) .shiki-preview :global(.shiki),
-	:global(.dark) .shiki-preview :global(.shiki span) {
-		color: var(--shiki-dark) !important;
-		background-color: var(--shiki-dark-bg) !important;
-		font-style: var(--shiki-dark-font-style) !important;
-		font-weight: var(--shiki-dark-font-weight) !important;
-		text-decoration: var(--shiki-dark-text-decoration) !important;
 	}
 </style>

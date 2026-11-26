@@ -2,7 +2,7 @@
 	import { resolveLocalizedResource } from '$lib/utils/localizedContent';
 	import { toast } from 'svelte-sonner';
 
-	import { config, functions, models, settings, tools, user } from '$lib/stores';
+	import { config, functions, settings, tools, user } from '$lib/stores';
 	import { createEventDispatcher, onMount, getContext, tick } from 'svelte';
 
 	import {
@@ -21,6 +21,9 @@
 	import Tooltip from '$lib/components/common/Tooltip.svelte';
 	import Spinner from '$lib/components/common/Spinner.svelte';
 	import Valves from '$lib/components/common/Valves.svelte';
+	import { getChatContext } from '$lib/components/chat/context';
+
+	const { models } = getChatContext();
 
 	const dispatch = createEventDispatcher();
 
@@ -89,6 +92,11 @@
 							.map((v) => v.trim())
 							.filter((v) => v.length > 0);
 					} else if (valves[property] == null) {
+						valves[property] = null;
+					}
+				} else if (valves[property] === '') {
+					const types = (valvesSpec.properties[property]?.anyOf ?? []).map((inner) => inner.type);
+					if (types.includes('null') && !types.includes('string')) {
 						valves[property] = null;
 					}
 				}
@@ -169,12 +177,12 @@
 							placeholder={$i18n.t('Select')}
 						>
 							{#if $config?.features?.enable_tools}
-								<option value="tools" class="bg-gray-100 dark:bg-gray-800"
+								<option value="tools" class="bg-base-100 dark:bg-base-800"
 									>{$i18n.t('Tools')}</option
 								>
 							{/if}
 							{#if $config?.features?.enable_functions}
-								<option value="functions" class="bg-gray-100 dark:bg-gray-800"
+								<option value="functions" class="bg-base-100 dark:bg-base-800"
 									>{$i18n.t('Functions')}</option
 								>
 							{/if}
@@ -191,24 +199,24 @@
 							}}
 						>
 							{#if tab === 'tools'}
-								<option value="" selected disabled class="bg-gray-100 dark:bg-gray-800"
+								<option value="" selected disabled class="bg-base-100 dark:bg-base-800"
 									>{$i18n.t('Select a tool')}</option
 								>
 
 								{#each $tools
 									.filter((tool) => !tool?.id?.startsWith('server:'))
 									.sort((a, b) => (a.name ?? '').localeCompare(b.name ?? '')) as tool, toolIdx}
-									<option value={tool.id} class="bg-gray-100 dark:bg-gray-800"
+									<option value={tool.id} class="bg-base-100 dark:bg-base-800"
 										>{resolveLocalizedResource(tool, $i18n.language)}</option
 									>
 								{/each}
 							{:else if tab === 'functions'}
-								<option value="" selected disabled class="bg-gray-100 dark:bg-gray-800"
+								<option value="" selected disabled class="bg-base-100 dark:bg-base-800"
 									>{$i18n.t('Select a function')}</option
 								>
 
 								{#each $functions.sort( (a, b) => (a.name ?? '').localeCompare(b.name ?? '') ) as func, funcIdx}
-									<option value={func.id} class="bg-gray-100 dark:bg-gray-800"
+									<option value={func.id} class="bg-base-100 dark:bg-base-800"
 										>{resolveLocalizedResource(func, $i18n.language)}</option
 									>
 								{/each}

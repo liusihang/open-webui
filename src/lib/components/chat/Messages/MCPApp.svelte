@@ -1,5 +1,5 @@
 <script context="module" lang="ts">
-	import type { CallToolResult } from '@modelcontextprotocol/client';
+	import type { CallToolResult, EmbeddedResource } from '@modelcontextprotocol/client';
 
 	export type MCPAppEmbed = {
 		type: 'mcp_app';
@@ -13,14 +13,18 @@
 
 <script lang="ts">
 	import { getContext, onDestroy, onMount } from 'svelte';
+	import fileSaver from 'file-saver';
 	import { AppBridge, PostMessageTransport } from '@modelcontextprotocol/ext-apps/app-bridge';
 	import { WEBUI_API_BASE_URL, WEBUI_VERSION } from '$lib/constants';
 	import ConfirmDialog from '$lib/components/common/ConfirmDialog.svelte';
 	import Spinner from '$lib/components/common/Spinner.svelte';
 	import { injectCsp } from '$lib/utils/csp';
+	import { getChatContext } from '$lib/components/chat/context';
 
 	export let app: MCPAppEmbed;
+	const { saveAs } = fileSaver;
 	const i18n = getContext<typeof import('$lib/i18n').default>('i18n');
+	const { submitPrompt } = getChatContext();
 	const lifetime = new AbortController();
 	let iframe: HTMLIFrameElement;
 	let bridge: AppBridge | undefined;
@@ -29,6 +33,7 @@
 	let status = '';
 	let link = '';
 	let showConfirmation = false;
+	let confirmationTitle = '';
 	let confirmationText = '';
 	let confirmCall: ((accept: boolean) => void) | undefined;
 	let observer: ResizeObserver | undefined;
@@ -61,7 +66,7 @@
 		return response.json();
 	}
 
-	function confirmTool(name: string, args: object, signal: AbortSignal): Promise<boolean> {
+	function requestConfirmation(title: string, text: string, signal: AbortSignal): Promise<boolean> {
 		return new Promise((resolve) => {
 			if (confirmCall || closing || signal.aborted) return resolve(false);
 			const abort = () => finish(false);
@@ -72,10 +77,36 @@
 				resolve(accept);
 			};
 			signal.addEventListener('abort', abort, { once: true });
-			confirmationText = `${app.server_id}: ${name}\n${JSON.stringify(args, null, 2)}`;
+			confirmationTitle = title;
+			confirmationText = text;
 			confirmCall = finish;
 			showConfirmation = true;
 		});
+	}
+
+	function openLink(url: string) {
+		const parsed = new URL(url);
+		if (!['http:', 'https:'].includes(parsed.protocol) || parsed.username || parsed.password)
+			throw new Error('Invalid link');
+		link = parsed.href;
+		window.open(link, '_blank', 'noopener,noreferrer');
+	}
+
+	function resourceName(uri: string) {
+		const name = uri.split(/[?#]/)[0].split('/').pop() || 'download';
+		try {
+			return decodeURIComponent(name);
+		} catch {
+			return name;
+		}
+	}
+
+	function saveResource(resource: EmbeddedResource['resource']) {
+		const data =
+			'blob' in resource
+				? Uint8Array.from(atob(resource.blob), (c) => c.charCodeAt(0))
+				: resource.text;
+		saveAs(new Blob([data], { type: resource.mimeType }), resourceName(resource.uri));
 	}
 
 	async function start() {
@@ -86,6 +117,8 @@
 			{ name: 'Open WebUI', version: WEBUI_VERSION },
 			{
 				openLinks: {},
+				downloadFile: {},
+				message: { text: {} },
 				serverTools: {},
 				serverResources: {},
 				sandbox: { csp: resource.ui.csp ?? {} }
@@ -109,19 +142,50 @@
 				extra.mcpReq.signal,
 				AbortSignal.timeout(120000)
 			]);
-			if (!(await confirmTool(name, args ?? {}, signal))) throw new Error('Tool call cancelled');
+			const text = `${app.server_id}: ${name}\n${JSON.stringify(args ?? {}, null, 2)}`;
+			if (!(await requestConfirmation($i18n.t('Tool call'), text, signal)))
+				throw new Error('Tool call cancelled');
 			return rpc('tools/call', { name, arguments: args ?? {} }, signal);
 		};
 		bridge.onreadresource = (params, extra) =>
 			rpc('resources/read', { uri: params.uri }, extra.mcpReq.signal);
 		bridge.onlistresources = (params, extra) =>
 			rpc('resources/list', params?.cursor ? { cursor: params.cursor } : {}, extra.mcpReq.signal);
+		bridge.onmessage = async ({ content }, extra) => {
+			const text = content
+				.flatMap((block) => (block.type === 'text' ? [block.text] : []))
+				.join('\n\n');
+			const signal = AbortSignal.any([lifetime.signal, extra.mcpReq.signal]);
+			if (
+				!text ||
+				!submitPrompt ||
+				!(await requestConfirmation($i18n.t('Confirm Prompt from Embed'), text, signal))
+			)
+				throw new Error('Message cancelled');
+			submitPrompt(text);
+			return {};
+		};
 		bridge.onopenlink = async ({ url }) => {
-			const parsed = new URL(url);
-			if (!['http:', 'https:'].includes(parsed.protocol) || parsed.username || parsed.password)
-				throw new Error('Invalid link');
-			link = parsed.href;
-			window.open(link, '_blank', 'noopener,noreferrer');
+			openLink(url);
+			return {};
+		};
+		bridge.ondownloadfile = async ({ contents }, extra) => {
+			const signal = AbortSignal.any([lifetime.signal, extra.mcpReq.signal]);
+			const text = contents
+				.map((item) => (item.type === 'resource' ? resourceName(item.resource.uri) : item.uri))
+				.join('\n');
+			if (!text || !(await requestConfirmation($i18n.t('Download'), text, signal)))
+				return { isError: true };
+			for (const item of contents) {
+				if (item.type === 'resource') {
+					saveResource(item.resource);
+				} else if (/^https?:/i.test(item.uri)) {
+					openLink(item.uri);
+				} else {
+					const result = await rpc('resources/read', { uri: item.uri }, signal);
+					result.contents.forEach(saveResource);
+				}
+			}
 			return {};
 		};
 		bridge.onrequestdisplaymode = async () => ({ mode: 'inline' });
@@ -200,7 +264,7 @@
 
 <div class="relative" out:teardown|global>
 	{#if status}
-		<p role="status" class="text-sm text-gray-500">{$i18n.t(status)}</p>
+		<p role="status" class="text-sm text-base-500">{$i18n.t(status)}</p>
 	{:else if !initialized && !closing}
 		<div
 			class="absolute inset-0 grid place-items-center pointer-events-none"
@@ -225,7 +289,7 @@
 {#if showConfirmation}
 	<ConfirmDialog
 		bind:show={showConfirmation}
-		title={$i18n.t('Tool call')}
+		title={confirmationTitle}
 		on:confirm={() => confirmCall?.(true)}
 		on:cancel={() => confirmCall?.(false)}
 	>
