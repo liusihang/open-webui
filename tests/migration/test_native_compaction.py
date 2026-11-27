@@ -331,7 +331,14 @@ class TextCompactionRoutingTests(unittest.TestCase):
             is_saved_chat_id=lambda cid: False,
             get_content_from_message=lambda m: m.get('content', ''),
         )
+        from dataclasses import dataclass
+        from itertools import takewhile
+        self.scope.update(dataclass=dataclass, takewhile=takewhile, is_empty_reply=lambda m: m.get('role') == 'assistant' and not m.get('content') and not m.get('output'))
         load(TEXT, self.scope)
+        async def compact_request(request, form, user, messages, metadata, model, models):
+            split = await self.scope['split_messages'](messages, metadata, request=request, model_id=model, models=models)
+            return await self.scope['compact_messages'](request, form, user, split, metadata, model, models)
+        self.scope['compact_messages_for_request'] = compact_request
         self.scope['_load_config'] = AsyncMock(side_effect=lambda: self.config)
         self.scope['_generate_summary'] = AsyncMock(return_value='facts preserved')
         self.native = AsyncMock(return_value=False)

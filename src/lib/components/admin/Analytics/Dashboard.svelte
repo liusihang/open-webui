@@ -39,8 +39,8 @@
 	let compare = false;
 	$: comparing = compare && chartView === 'volume' && selectedPeriod !== 'all' && validRange;
 	$: modelNames = Object.fromEntries([
-		...$models.map((model) => [model.id, model.name || model.id]),
-		...modelStats.map((model) => [model.model_id, model.name])
+		...modelStats.map((model) => [model.model_id, model.name || model.model_id]),
+		...($models ?? []).map((model) => [model.id, model.name || model.id])
 	]);
 
 	// Custom date range (YYYY-MM-DD) - persist in localStorage
@@ -132,7 +132,7 @@
 		count: number;
 		unique_users?: number;
 		unique_chats?: number;
-		name: string;
+		name?: string | null;
 	}> = [];
 	let userStats: Array<
 		{ user_id: string; name?: string; email?: string; count: number } & Partial<TokenUsage>
@@ -186,6 +186,12 @@
 		loadError = false;
 		try {
 			const { start, end } = getDateRange(selectedPeriod);
+			if (analyticsView === 'sessions') {
+				const result = await getModelAnalytics(localStorage.token, start, end, selectedGroupId);
+				if (!result) throw new Error('Incomplete analytics response');
+				if (id === loadId) modelStats = result.models ?? [];
+				return;
+			}
 			const [summaryRes, modelsRes, usersRes, dailyRes, tokensRes] = await Promise.all([
 				getSummary(localStorage.token, start, end, selectedGroupId),
 				getModelAnalytics(localStorage.token, start, end, selectedGroupId),
@@ -211,13 +217,7 @@
 			}
 			summary = summaryRes;
 
-			const modelsMap = new Map($models.map((m) => [m.id, m.name || m.id]));
-			modelStats = (modelsRes?.models ?? []).map(
-				(entry: Omit<(typeof modelStats)[number], 'name'>) => ({
-					...entry,
-					name: modelsMap.get(entry.model_id) || entry.model_id
-				})
-			);
+			modelStats = modelsRes.models ?? [];
 
 			userStats = usersRes?.users ?? [];
 			dailyStats = dailyRes?.data ?? [];
@@ -246,7 +246,8 @@
 		}
 	};
 
-	$: if (mounted && analyticsView === 'overview') {
+	$: if (mounted) {
+		analyticsView;
 		selectedPeriod;
 		customStart;
 		customEnd;
@@ -272,7 +273,8 @@
 		}
 	});
 
-	$: sortedModels = [...modelStats].sort((a, b) => {
+	$: namedModelStats = modelStats.map((model) => ({ ...model, name: modelNames[model.model_id] }));
+	$: sortedModels = [...namedModelStats].sort((a, b) => {
 		if (modelOrderBy === 'name') {
 			return modelDirection === 'asc' ? a.name.localeCompare(b.name) : b.name.localeCompare(a.name);
 		}
@@ -346,7 +348,7 @@
 </script>
 
 <div class="flex flex-wrap items-center justify-between mb-3 gap-x-4 gap-y-2">
-	<h2 class="text-sm font-normal text-gray-900 dark:text-white shrink-0">
+	<h2 class="text-sm font-normal text-base-900 dark:text-base-0 shrink-0">
 		{$i18n.t('Analytics')}
 	</h2>
 	<div class="flex items-center gap-2 flex-wrap justify-end min-w-0">
@@ -370,7 +372,7 @@
 				max={customEnd || undefined}
 				class="w-fit rounded-sm px-2 text-xs bg-transparent outline-none dark:scheme-dark"
 			/>
-			<span class="text-xs text-gray-400">–</span>
+			<span class="text-xs text-base-400">–</span>
 			<input
 				type="date"
 				bind:value={customEnd}
@@ -413,7 +415,7 @@
 {#if analyticsView === 'sessions'}
 	{#if validRange && $config?.features?.enable_admin_chat_access}
 		<SessionExplorer scope={sessionScope} {modelNames} />
-	{:else if !validRange}<p class="py-10 text-center text-xs text-gray-500">
+	{:else if !validRange}<p class="py-10 text-center text-xs text-base-500">
 			{$i18n.t('Choose a valid start and end date.')}
 		</p>{/if}
 {:else}
@@ -428,13 +430,13 @@
 
 	{#if !loading && !loadError && validRange}
 		<dl
-			class="flex flex-wrap items-baseline gap-x-4 gap-y-1 text-xs text-gray-500 dark:text-gray-400"
+			class="flex flex-wrap items-baseline gap-x-4 gap-y-1 text-xs text-base-500 dark:text-base-400"
 		>
 			{#each [{ label: $i18n.t('Tokens'), value: formatNumber(totalTokens.total), exact: totalTokens.total }, { label: $i18n.t('Input'), value: formatNumber(totalTokens.input), exact: totalTokens.input }, { label: $i18n.t('Output'), value: formatNumber(totalTokens.output), exact: totalTokens.output }, { label: $i18n.t('Messages'), value: summary.total_messages.toLocaleString(), exact: summary.total_messages }, { label: $i18n.t('Chats'), value: summary.total_chats.toLocaleString(), exact: summary.total_chats }, { label: $i18n.t('Users'), value: summary.total_users.toLocaleString(), exact: summary.total_users }] as metric}
 				<div class="flex items-baseline gap-1.5 whitespace-nowrap">
 					<dt>{metric.label}</dt>
 					<dd
-						class="tabular-nums text-gray-900 dark:text-gray-200"
+						class="tabular-nums text-base-900 dark:text-base-200"
 						title={metric.exact.toLocaleString()}
 					>
 						{metric.value}
@@ -488,7 +490,7 @@
 					<select
 						bind:value={granularity}
 						aria-label={$i18n.t('Chart interval')}
-						class="w-fit pr-5 py-1 text-xs bg-transparent outline-none text-gray-500 dark:text-gray-400"
+						class="w-fit pr-5 py-1 text-xs bg-transparent outline-none text-base-500 dark:text-base-400"
 					>
 						{#if selectedPeriod === '24h'}<option value="10m">{$i18n.t('10 min')}</option>{/if}
 						{#if ['24h', '7d', '30d'].includes(selectedPeriod)}<option value="hourly"
@@ -513,7 +515,7 @@
 					view={chartView}
 				/>
 			{:else}<div
-					class="h-40 flex items-center justify-center text-xs text-gray-500 dark:text-gray-400"
+					class="h-40 flex items-center justify-center text-xs text-base-500 dark:text-base-400"
 				>
 					{$i18n.t('No activity in this period')}
 				</div>{/if}
@@ -521,11 +523,11 @@
 	{/if}
 
 	{#if !validRange}
-		<div class="my-10 text-center text-xs text-gray-500 dark:text-gray-400">
+		<div class="my-10 text-center text-xs text-base-500 dark:text-base-400">
 			{$i18n.t('Choose a valid start and end date.')}
 		</div>
 	{:else if loadError}
-		<div role="alert" class="my-10 text-center text-xs text-gray-500 dark:text-gray-400">
+		<div role="alert" class="my-10 text-center text-xs text-base-500 dark:text-base-400">
 			{$i18n.t('Unable to load analytics. Please try again.')}
 			<button class="ml-2 underline underline-offset-2" on:click={loadDashboard}
 				>{$i18n.t('Retry')}</button
@@ -557,10 +559,10 @@
 					<div>
 						<div class="scrollbar-hidden relative whitespace-nowrap overflow-x-auto max-w-full">
 							<table
-								class="w-full text-xs tabular-nums text-left text-gray-500 dark:text-gray-400 table-auto"
+								class="w-full text-xs tabular-nums text-left text-base-500 dark:text-base-400 table-auto"
 							>
 								<thead
-									class="text-[0.6875rem] font-normal text-gray-500 bg-transparent dark:text-gray-400"
+									class="text-[0.6875rem] font-normal text-base-500 bg-transparent dark:text-base-400"
 								>
 									<tr>
 										<th scope="col" class="font-normal px-2.5 py-1.5 w-8">#</th>
@@ -711,17 +713,19 @@
 												? (tokenStats[model.model_id]?.total_tokens ?? 0)
 												: model.count}
 										<tr
-											class="text-xs cursor-pointer hover:bg-gray-50 dark:hover:bg-gray-800 transition-colors"
+											class="text-xs cursor-pointer hover:bg-base-50 dark:hover:bg-base-800 transition-colors"
 											on:click={() => {
 												selectedModel = { id: model.model_id, name: model.name };
 												showModelModal = true;
 											}}
 										>
-											<td class="font-normal px-3 py-1.5 text-gray-400">{idx + 1}</td>
-											<td class="font-normal px-3 py-1.5 text-gray-900 dark:text-white">
+											<td class="font-normal px-3 py-1.5 text-base-400">{idx + 1}</td>
+											<td class="font-normal px-3 py-1.5 text-base-900 dark:text-base-0">
 												<div class="flex items-center gap-2">
 													<img
-														src="{WEBUI_API_BASE_URL}/models/model/profile/image?id={model.model_id}"
+														src="{WEBUI_API_BASE_URL}/models/model/profile/image?id={model.model_id}&v={$models.find(
+															(item) => item.id === model.model_id
+														)?.info?.updated_at}"
 														alt={model.name}
 														class="size-5 rounded-full object-cover shrink-0"
 														on:error={(e) => {
@@ -756,10 +760,10 @@
 													>{formatNumber(tokenStats[model.model_id]?.[column.key] ?? 0)}</td
 												>
 											{/each}
-											<td class="font-normal px-3 py-1.5 text-right text-gray-400">
+											<td class="font-normal px-3 py-1.5 text-right text-base-400">
 												<div class="flex items-center justify-end gap-2 tabular-nums">
 													<div
-														class="h-1 w-16 bg-gray-100 dark:bg-gray-800 overflow-hidden"
+														class="h-1 w-16 bg-base-100 dark:bg-base-800 overflow-hidden"
 														aria-hidden="true"
 													>
 														<div
@@ -775,7 +779,7 @@
 									{/each}
 									{#if sortedModels.length === 0}
 										<tr
-											><td colspan="9" class="font-normal px-3 py-1.5 text-center text-gray-400"
+											><td colspan="9" class="font-normal px-3 py-1.5 text-center text-base-400"
 												>{$i18n.t('No data')}</td
 											></tr
 										>
@@ -790,10 +794,10 @@
 					<div>
 						<div class="scrollbar-hidden relative whitespace-nowrap overflow-x-auto max-w-full">
 							<table
-								class="w-full text-xs tabular-nums text-left text-gray-500 dark:text-gray-400 table-auto"
+								class="w-full text-xs tabular-nums text-left text-base-500 dark:text-base-400 table-auto"
 							>
 								<thead
-									class="text-[0.6875rem] font-normal text-gray-500 bg-transparent dark:text-gray-400"
+									class="text-[0.6875rem] font-normal text-base-500 bg-transparent dark:text-base-400"
 								>
 									<tr>
 										<th scope="col" class="font-normal px-2.5 py-1.5 w-8">#</th>
@@ -898,8 +902,8 @@
 										{@const value =
 											selectedMetric === 'tokens' ? (user.total_tokens ?? 0) : user.count}
 										<tr class="text-xs">
-											<td class="font-normal px-3 py-1.5 text-gray-400">{idx + 1}</td>
-											<td class="font-normal px-3 py-1.5 text-gray-900 dark:text-white">
+											<td class="font-normal px-3 py-1.5 text-base-400">{idx + 1}</td>
+											<td class="font-normal px-3 py-1.5 text-base-900 dark:text-base-0">
 												<div class="flex items-center gap-2">
 													<ProfilePreview
 														user={{ id: user.user_id, name: user.name || user.email }}
@@ -931,14 +935,14 @@
 												>
 											{/each}
 
-											<td class="font-normal px-3 py-1.5 text-right text-gray-400">
+											<td class="font-normal px-3 py-1.5 text-right text-base-400">
 												<div class="flex items-center justify-end gap-2 tabular-nums">
 													<div
-														class="h-1 w-16 bg-gray-100 dark:bg-gray-800 overflow-hidden"
+														class="h-1 w-16 bg-base-100 dark:bg-base-800 overflow-hidden"
 														aria-hidden="true"
 													>
 														<div
-															class="h-full bg-gray-400"
+															class="h-full bg-base-400"
 															style:width={`${metricTotal > 0 ? (value / metricTotal) * 100 : 0}%`}
 														></div>
 													</div>
@@ -949,7 +953,7 @@
 									{/each}
 									{#if sortedUsers.length === 0}
 										<tr
-											><td colspan="7" class="font-normal px-3 py-1.5 text-center text-gray-400"
+											><td colspan="7" class="font-normal px-3 py-1.5 text-center text-base-400"
 												>{$i18n.t('No data')}</td
 											></tr
 										>
@@ -961,7 +965,7 @@
 				{/if}
 			</div>
 		</div>
-		<div class="mt-2 text-[0.6875rem] text-gray-400 dark:text-gray-500">
+		<div class="mt-2 text-[0.6875rem] text-base-400 dark:text-base-500">
 			{$i18n.t('Message counts are based on assistant responses.')}
 			{$i18n.t('Token counts are estimates and may not reflect actual API usage')}
 		</div>
@@ -973,20 +977,20 @@
 		padding-block: 0.25rem;
 		font-size: 0.75rem;
 		font-weight: 400;
-		color: var(--color-gray-500);
+		color: var(--color-base-500);
 	}
 	:global(:where(html.high-contrast:not(.dark))) .analytics-tab {
-		color: var(--color-gray-700);
+		color: var(--color-base-700);
 	}
 	.analytics-tab:hover,
 	.tab-selected {
-		color: var(--color-gray-900);
+		color: var(--color-base-900);
 	}
 	:global(.dark) .analytics-tab {
-		color: var(--color-gray-400);
+		color: var(--color-base-400);
 	}
 	:global(.dark) .analytics-tab:hover,
 	:global(.dark) .tab-selected {
-		color: var(--color-gray-100);
+		color: var(--color-base-100);
 	}
 </style>

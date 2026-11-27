@@ -1,22 +1,12 @@
 <script lang="ts">
+	export let modelId: string | null = null;
 	import { resolveLocalizedResource } from '$lib/utils/localizedContent';
 	import { getContext, onDestroy } from 'svelte';
+	import type { Readable, Writable } from 'svelte/store';
 	import { getPrompts } from '$lib/apis/prompts';
 	import { getSkillItems } from '$lib/apis/skills';
-	import {
-		listTerminalSkills,
-		resolveTerminalConnection,
-		type TerminalSkill
-	} from '$lib/apis/terminal';
-	import {
-		user,
-		chatId,
-		selectedTerminalId,
-		settings,
-		terminalServers,
-		terminalSkills,
-		visibleControls
-	} from '$lib/stores';
+	import { listMachineSkills, resolveMachineTarget, type MachineSkill } from '$lib/apis/machines';
+	import { user, settings, machines, visibleControls } from '$lib/stores';
 	import Tooltip from '$lib/components/common/Tooltip.svelte';
 	import ChatBubbleDotted from '$lib/components/icons/ChatBubbleDotted.svelte';
 	import ChatBubbleDottedChecked from '$lib/components/icons/ChatBubbleDottedChecked.svelte';
@@ -26,16 +16,23 @@
 	import Icon from '$lib/components/chat/FileNav/Icon.svelte';
 	import Plus from '$lib/components/icons/Plus.svelte';
 	import Sparkles from '$lib/components/icons/Sparkles.svelte';
+	import Mic from '$lib/components/icons/Mic.svelte';
+	import { getChatContext } from '$lib/components/chat/context';
+
+	const { chatId } = getChatContext();
 
 	const i18n: any = getContext('i18n');
 
 	export let query = '';
+	export let selectedMachineId: Readable<string | null>;
+	export let machineSkills: Writable<any[]>;
 	export let onSelect = (e) => {};
 	export let canCompact = false;
 	export let canCompare = false;
 	export let compactDisabled = false;
 	export let canStatus = false;
 	export let canComments = false;
+	export let canRecord = false;
 	export let canSide = false;
 	export let canFork = false;
 	export let forkDisabled = false;
@@ -76,6 +73,9 @@
 			: []),
 		...(canComments && 'comments'.startsWith(query.toLowerCase())
 			? [{ type: 'command', data: { id: 'comments' } }]
+			: []),
+		...(canRecord && 'record'.startsWith(query.toLowerCase())
+			? [{ type: 'command', data: { id: 'record' } }]
 			: []),
 		...($visibleControls['chat.model_command'] && 'model'.startsWith(query.toLowerCase())
 			? [{ type: 'command', data: { id: 'model' } }]
@@ -121,15 +121,13 @@
 		clearTimeout(searchDebounceTimer);
 	});
 
-	const getTerminalItems = async (query = ''): Promise<TerminalSkill[]> => {
-		const connection = resolveTerminalConnection(
-			$selectedTerminalId,
-			$terminalServers ?? [],
-			$settings?.terminalServers ?? [],
-			localStorage.token
-		);
-		const items = await listTerminalSkills(connection, $chatId || null).catch(() => []);
-		terminalSkills.set(items);
+	const getMachineItems = async (query = ''): Promise<MachineSkill[]> => {
+		const target = resolveMachineTarget($selectedMachineId, $machines ?? [], localStorage.token, {
+			chatId: $chatId || null,
+			modelId: modelId
+		});
+		const items = await listMachineSkills(target).catch(() => []);
+		machineSkills.set(items);
 		const q = query.trim().toLowerCase();
 		return q
 			? items.filter((skill) => `${skill.name} ${skill.description}`.toLowerCase().includes(q))
@@ -137,17 +135,17 @@
 	};
 
 	const getItems = async () => {
-		const [promptRes, skillRes, terminalItems] = await Promise.all([
+		const [promptRes, skillRes, machineItems] = await Promise.all([
 			getPrompts(localStorage.token).catch(() => null),
 			getSkillItems(localStorage.token, query).catch(() => null),
-			getTerminalItems(query)
+			getMachineItems(query)
 		]);
 
 		if (promptRes) {
 			prompts = promptRes;
 		}
 
-		skills = [...(skillRes?.items ?? []), ...terminalItems];
+		skills = [...(skillRes?.items ?? []), ...machineItems];
 	};
 
 	export const selectUp = () => {
@@ -202,7 +200,7 @@
 				<button
 					type="button"
 					aria-label={$i18n.t('Temporary: toggle temporary chat for this new chat.')}
-					class="slash-command-row flex items-center gap-2 w-full h-6 px-2 rounded-xl text-[0.8125rem] text-left transition-colors duration-75 hover:bg-gray-50/40 dark:hover:bg-gray-800/40
+					class="slash-command-row flex items-center gap-2 w-full h-6 px-2 rounded-xl text-[0.8125rem] text-left transition-colors duration-75 hover:bg-base-50/40 dark:hover:bg-base-800/40
 						{commandIdx === selectedIdx ? 'app-interactive-active selected-command-option-button' : ''}"
 					on:mousedown={(e) => e.preventDefault()}
 					on:click={() => {
@@ -237,7 +235,7 @@
 				<button
 					type="button"
 					aria-label={$i18n.t('Compact: shorten older messages so this chat can keep going.')}
-					class="slash-command-row flex items-center gap-2 w-full h-6 px-2 rounded-xl text-[0.8125rem] text-left transition-colors duration-75 hover:bg-gray-50/40 dark:hover:bg-gray-800/40
+					class="slash-command-row flex items-center gap-2 w-full h-6 px-2 rounded-xl text-[0.8125rem] text-left transition-colors duration-75 hover:bg-base-50/40 dark:hover:bg-base-800/40
 						{commandIdx === selectedIdx
 						? 'app-interactive-active selected-command-option-button'
 						: ''} disabled:opacity-50"
@@ -295,7 +293,7 @@
 				<button
 					type="button"
 					aria-label={$i18n.t('Fork: fork the current chat branch into a new chat.')}
-					class="slash-command-row flex items-center gap-2 w-full h-6 px-2 rounded-xl text-[0.8125rem] text-left transition-colors duration-75 hover:bg-gray-50/40 dark:hover:bg-gray-800/40
+					class="slash-command-row flex items-center gap-2 w-full h-6 px-2 rounded-xl text-[0.8125rem] text-left transition-colors duration-75 hover:bg-base-50/40 dark:hover:bg-base-800/40
 						{commandIdx === selectedIdx
 						? 'app-interactive-active selected-command-option-button'
 						: ''} disabled:opacity-50"
@@ -343,7 +341,7 @@
 				<button
 					type="button"
 					aria-label={$i18n.t('Status: check what is running in this chat.')}
-					class="slash-command-row flex items-center gap-2 w-full h-6 px-2 rounded-xl text-[0.8125rem] text-left transition-colors duration-75 hover:bg-gray-50/40 dark:hover:bg-gray-800/40
+					class="slash-command-row flex items-center gap-2 w-full h-6 px-2 rounded-xl text-[0.8125rem] text-left transition-colors duration-75 hover:bg-base-50/40 dark:hover:bg-base-800/40
 						{commandIdx === selectedIdx ? 'app-interactive-active selected-command-option-button' : ''}"
 					on:mousedown={(e) => e.preventDefault()}
 					on:click={() => {
@@ -378,11 +376,15 @@
 					</span>
 				</button>
 			</Tooltip>
-		{:else if item.data.id === 'comments' || item.data.id === 'side'}
+		{:else if item.data.id === 'comments' || item.data.id === 'side' || item.data.id === 'record'}
 			<button
 				type="button"
-				aria-label={$i18n.t(item.data.id === 'side' ? 'Side chat' : 'Comments')}
-				class="slash-command-row flex items-center gap-2 w-full h-6 px-2 rounded-xl text-[0.8125rem] text-left transition-colors duration-75 hover:bg-gray-50/40 dark:hover:bg-gray-800/40
+				aria-label={item.data.id === 'side'
+					? $i18n.t('Side chat')
+					: item.data.id === 'record'
+						? $i18n.t('Record')
+						: $i18n.t('Comments')}
+				class="slash-command-row flex items-center gap-2 w-full h-6 px-2 rounded-xl text-[0.8125rem] text-left transition-colors duration-75 hover:bg-base-50/40 dark:hover:bg-base-800/40
 					{commandIdx === selectedIdx ? 'app-interactive-active selected-command-option-button' : ''}"
 				on:mousedown={(e) => e.preventDefault()}
 				on:click={() => onSelect(item)}
@@ -393,13 +395,19 @@
 				<span class="app-icon-muted flex items-center justify-center w-4 shrink-0">
 					{#if item.data.id === 'side'}
 						<Icon name="chat-lines" class="size-3.5" />
+					{:else if item.data.id === 'record'}
+						<Mic className="size-3.5" />
 					{:else}
 						<Annotation className="size-3.5" />
 					{/if}
 				</span>
 				<span class="flex-1 min-w-0 flex items-center gap-2 overflow-hidden">
 					<span class="min-w-0 flex-1 truncate"
-						>{$i18n.t(item.data.id === 'side' ? 'Side chat' : 'Comments')}</span
+						>{item.data.id === 'side'
+							? $i18n.t('Side chat')
+							: item.data.id === 'record'
+								? $i18n.t('Record')
+								: $i18n.t('Comments')}</span
 					>
 					<span class="app-muted max-w-24 shrink-0 truncate text-[0.625rem]">/{item.data.id}</span>
 				</span>
@@ -409,7 +417,7 @@
 				<button
 					type="button"
 					aria-label={$i18n.t('Model: show or switch the current model.')}
-					class="slash-command-row flex items-center gap-2 w-full h-6 px-2 rounded-xl text-[0.8125rem] text-left transition-colors duration-75 hover:bg-gray-50/40 dark:hover:bg-gray-800/40
+					class="slash-command-row flex items-center gap-2 w-full h-6 px-2 rounded-xl text-[0.8125rem] text-left transition-colors duration-75 hover:bg-base-50/40 dark:hover:bg-base-800/40
 						{commandIdx === selectedIdx ? 'app-interactive-active selected-command-option-button' : ''}"
 					on:mousedown={(e) => e.preventDefault()}
 					on:click={() => {
@@ -434,7 +442,7 @@
 			<button
 				type="button"
 				aria-label={$i18n.t('Compare text')}
-				class="slash-command-row flex items-center gap-2 w-full h-6 px-2 rounded-xl text-[0.8125rem] text-left transition-colors duration-75 hover:bg-gray-50/40 dark:hover:bg-gray-800/40
+				class="slash-command-row flex items-center gap-2 w-full h-6 px-2 rounded-xl text-[0.8125rem] text-left transition-colors duration-75 hover:bg-base-50/40 dark:hover:bg-base-800/40
 					{commandIdx === selectedIdx ? 'app-interactive-active selected-command-option-button' : ''}"
 				on:mousedown={(e) => e.preventDefault()}
 				on:click={() => onSelect(item)}
@@ -463,14 +471,11 @@
 				</span>
 			</button>
 		{:else if item.data.id === 'skills:create'}
-			<Tooltip
-				content={$i18n.t('Create a reusable terminal skill from this chat.')}
-				placement="top"
-			>
+			<Tooltip content={$i18n.t('Create a reusable machine skill from this chat.')} placement="top">
 				<button
 					type="button"
-					aria-label={$i18n.t('Create skill: create a reusable terminal skill from this chat.')}
-					class="slash-command-row flex items-center gap-2 w-full h-6 px-2 rounded-xl text-[0.8125rem] text-left transition-colors duration-75 hover:bg-gray-50/40 dark:hover:bg-gray-800/40
+					aria-label={$i18n.t('Create skill: create a reusable machine skill from this chat.')}
+					class="slash-command-row flex items-center gap-2 w-full h-6 px-2 rounded-xl text-[0.8125rem] text-left transition-colors duration-75 hover:bg-base-50/40 dark:hover:bg-base-800/40
 						{commandIdx === selectedIdx ? 'app-interactive-active selected-command-option-button' : ''}"
 					on:mousedown={(e) => e.preventDefault()}
 					on:click={() => {
@@ -496,7 +501,7 @@
 				<button
 					type="button"
 					aria-label={$i18n.t('Settings: open settings.')}
-					class="slash-command-row flex items-center gap-2 w-full h-6 px-2 rounded-xl text-[0.8125rem] text-left transition-colors duration-75 hover:bg-gray-50/40 dark:hover:bg-gray-800/40
+					class="slash-command-row flex items-center gap-2 w-full h-6 px-2 rounded-xl text-[0.8125rem] text-left transition-colors duration-75 hover:bg-base-50/40 dark:hover:bg-base-800/40
 						{commandIdx === selectedIdx ? 'app-interactive-active selected-command-option-button' : ''}"
 					on:mousedown={(e) => e.preventDefault()}
 					on:click={() => {
@@ -530,7 +535,7 @@
 		{@const itemIdx = commandItems.length + promptIdx}
 		<Tooltip content={promptItem.name} placement="top-start">
 			<button
-				class="flex h-6 w-full items-center gap-2 rounded-xl px-2 text-left text-[0.8125rem] transition-colors duration-75 hover:bg-gray-50/40 dark:hover:bg-gray-800/40 {itemIdx ===
+				class="flex h-6 w-full items-center gap-2 rounded-xl px-2 text-left text-[0.8125rem] transition-colors duration-75 hover:bg-base-50/40 dark:hover:bg-base-800/40 {itemIdx ===
 				selectedIdx
 					? 'app-interactive-active selected-command-option-button'
 					: ''}"
@@ -570,7 +575,7 @@
 			tippyOptions={{ maxWidth: '20rem' }}
 		>
 			<button
-				class="flex h-6 w-full items-center rounded-xl px-2 text-left text-[0.8125rem] transition-colors duration-75 hover:bg-gray-50/40 dark:hover:bg-gray-800/40 {itemIdx ===
+				class="flex h-6 w-full items-center rounded-xl px-2 text-left text-[0.8125rem] transition-colors duration-75 hover:bg-base-50/40 dark:hover:bg-base-800/40 {itemIdx ===
 				selectedIdx
 					? 'app-interactive-active selected-command-option-button'
 					: ''}"
@@ -592,7 +597,7 @@
 						{resolveLocalizedResource(skill, $i18n.language)}
 					</div>
 					<div class="app-muted max-w-24 shrink-0 truncate text-[0.625rem]">
-						{skill.source === 'terminal' ? $i18n.t('Terminal') : skill.id}
+						{skill.source === 'machine' ? $i18n.t('Machine') : skill.id}
 					</div>
 				</div>
 			</button>

@@ -1,0 +1,79 @@
+"""Models exposed by the selected Open Terminal environment."""
+
+from urllib.parse import urlencode
+
+from open_webui.utils.agents.session import model_id
+from open_webui.utils.machines import MissingMachineContext, get_machine_json
+
+
+def model_controls(model):
+    controls = {}
+    for key, label, values, value_key, label_key, default_key in (
+        (
+            'reasoning_effort',
+            'Reasoning effort',
+            'supportedReasoningEfforts',
+            'reasoningEffort',
+            'label',
+            'defaultReasoningEffort',
+        ),
+        ('service_tier', 'Service tier', 'serviceTiers', 'id', 'name', 'defaultServiceTier'),
+    ):
+        options = {
+            option[value_key]: {
+                'label': option.get(label_key) or option[value_key],
+                'params': {key: option[value_key]},
+            }
+            for option in model.get(values, [])
+        }
+        if options:
+            controls[key] = {'label': label, 'options': options}
+            if model.get(default_key) in options:
+                controls[key]['default'] = model[default_key]
+    return controls
+
+
+async def get_models(request, user, metadata, *, provider=None, cwd=None):
+    machine_id = metadata.get('machine_id')
+    if not machine_id:
+        return []
+    try:
+        if not cwd:
+            directory = await get_machine_json(request, user, metadata, '/files/cwd')
+            cwd = (directory or {}).get('cwd')
+        params = {'provider': provider} if provider else {}
+        if cwd:
+            params['cwd'] = cwd
+        path = '/agents' + ('?' + urlencode(params) if params else '')
+        catalog = await get_machine_json(request, user, metadata, path)
+    except MissingMachineContext:
+        return []
+    if not catalog or catalog.get('protocol_version') != 1:
+        return []
+    models = [
+        {
+            'id': model_id({'machine_id': machine_id, 'provider': agent['id'], 'model': model['id']}),
+            'name': f'{agent["id"]}/{model["id"]}',
+            'owned_by': 'machine',
+            'object': 'model',
+            'agent': {'machine_id': machine_id, 'provider': agent['id'], 'model': model['id']},
+            'info': {
+                'params': {'model_controls': model_controls(model)},
+                'meta': {
+                    'capabilities': {
+                        'vision': True,
+                        'file_upload': True,
+                        'web_search': False,
+                        'image_generation': False,
+                        'video_generation': False,
+                        'code_interpreter': False,
+                        'builtin_tools': False,
+                    }
+                },
+            },
+        }
+        for agent in catalog.get('agents', [])
+        if agent.get('available')
+        for model in agent.get('models', [])
+    ]
+    return list({model['id']: model for model in models}.values())

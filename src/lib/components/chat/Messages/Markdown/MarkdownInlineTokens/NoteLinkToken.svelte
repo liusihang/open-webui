@@ -1,11 +1,13 @@
 <script lang="ts">
 	import { onMount, getContext } from 'svelte';
 	import { goto } from '$app/navigation';
+	import type { AppLayoutContext } from '$lib/types';
 	import { getNoteById } from '$lib/apis/notes';
 	import { getUserInfoById } from '$lib/apis/users';
 	import { capitalizeFirstLetter } from '$lib/utils';
 
 	const i18n = getContext<typeof import('$lib/i18n').default>('i18n');
+	const appLayout = getContext<AppLayoutContext | undefined>('appLayout');
 
 	export let noteId: string;
 	export let href: string;
@@ -45,30 +47,32 @@
 <!-- svelte-ignore a11y-click-events-have-key-events -->
 <!-- svelte-ignore a11y-no-static-element-interactions -->
 <button
-	class="relative group py-2 px-3 w-60 flex flex-col bg-white dark:bg-gray-850 border border-gray-50/30 dark:border-gray-800/30 rounded-xl text-left cursor-pointer"
+	class="relative group py-2 px-3 w-60 flex flex-col bg-base-0 dark:bg-base-850 border border-base-50/30 dark:border-base-800/30 rounded-xl text-left cursor-pointer"
 	type="button"
 	on:click|preventDefault|stopPropagation={() => {
 		try {
 			const url = new URL(href, window.location.origin);
-			goto(url.pathname + url.search + url.hash);
+			if (appLayout?.openPageTab)
+				appLayout.openPageTab({ href: url.pathname + url.search + url.hash, label: '' });
+			else goto(url.pathname + url.search + url.hash);
 		} catch {
 			// fallback
 		}
 	}}
 >
 	<div class="flex flex-col justify-center w-full min-w-0">
-		<div class="dark:text-gray-100 text-sm flex justify-between items-center gap-2">
+		<div class="dark:text-base-100 text-sm flex justify-between items-center gap-2">
 			<div class="font-normal line-clamp-1 flex-1 min-w-0">
 				{#if loading}
-					<span class="text-gray-400">...</span>
+					<span class="text-base-400">...</span>
 				{:else}
 					{title || (titleFallback === 'Note' ? $i18n.t('Note') : $i18n.t('Untitled'))}
 				{/if}
 			</div>
-			<div class="text-gray-500 text-xs shrink-0">{$i18n.t('Note')}</div>
+			<div class="text-base-500 text-xs shrink-0">{$i18n.t('Note')}</div>
 		</div>
 		{#if author}
-			<div class="text-gray-500 text-xs line-clamp-1 mt-0.5">
+			<div class="text-base-500 text-xs line-clamp-1 mt-0.5">
 				{$i18n.t('By {{name}}', { name: author })}
 			</div>
 		{/if}

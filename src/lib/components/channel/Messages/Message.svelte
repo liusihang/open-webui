@@ -15,12 +15,11 @@
 	dayjs.extend(localizedFormat);
 
 	import { getContext, tick } from 'svelte';
-	import { autoUpdate } from '@floating-ui/dom';
 	const i18n = getContext<Writable<i18nType>>('i18n');
 
 	import { formatDate } from '$lib/utils';
 
-	import { settings, user, shortCodesToEmojis } from '$lib/stores';
+	import { settings, user, shortCodesToEmojis, models } from '$lib/stores';
 	import { WEBUI_API_BASE_URL, WEBUI_BASE_URL } from '$lib/constants';
 	import { getMessageData } from '$lib/apis/channels';
 
@@ -71,13 +70,10 @@
 
 	let showButtons = false;
 
-	// The top layer escapes scroll clipping without moving actions out of the message's tab order.
-	const positionActions = (node: HTMLElement, keepOpen: boolean) => {
+	const trackActions = (node: HTMLElement, keepOpen: boolean) => {
 		const anchor = node.parentElement!;
 		const messageElement = anchor.parentElement!;
-		let cleanup: (() => void) | undefined;
 		let destroyed = false;
-		node.showPopover();
 
 		const update = () => {
 			if (destroyed) return;
@@ -89,16 +85,6 @@
 					));
 			node.style.opacity = visible ? '1' : '0';
 			node.style.pointerEvents = visible ? 'auto' : 'none';
-			if (visible && !cleanup) {
-				cleanup = autoUpdate(messageElement, node, () => {
-					const rect = anchor.getBoundingClientRect();
-					node.style.left = `${rect.right - node.offsetWidth}px`;
-					node.style.top = `${rect.top}px`;
-				});
-			} else if (!visible) {
-				cleanup?.();
-				cleanup = undefined;
-			}
 		};
 		const scheduleUpdate = () => requestAnimationFrame(update);
 		const events = ['pointerenter', 'pointerleave', 'focusin', 'focusout'];
@@ -113,7 +99,6 @@
 			},
 			destroy() {
 				destroyed = true;
-				cleanup?.();
 				for (const element of [messageElement, node]) {
 					for (const event of events) element.removeEventListener(event, scheduleUpdate);
 				}
@@ -122,7 +107,22 @@
 	};
 
 	let edit = false;
+	let editButtonElement: HTMLButtonElement;
 	let editedContent = null;
+
+	const editMessageConfirmHandler = () => {
+		onEdit(editedContent);
+		edit = false;
+		editedContent = null;
+	};
+
+	const cancelEditMessage = async () => {
+		edit = false;
+		editedContent = null;
+		await tick();
+		editButtonElement?.focus();
+	};
+
 	let showDeleteConfirmDialog = false;
 	$: renderedMessageId = message ? (id ? `${id}-${message.id}` : message.id) : null;
 	$: contentId = message?.client_id
@@ -251,7 +251,7 @@
 
 		<div
 			id="message-{renderedMessageId}"
-			class="flex flex-col justify-between w-full max-w-full mx-auto group hover:bg-gray-300/5 dark:hover:bg-gray-700/5 relative {className
+			class="flex flex-col justify-between w-full max-w-full mx-auto group hover:bg-base-300/5 dark:hover:bg-base-700/5 relative {className
 				? className
 				: `px-4 ${
 						replyToMessage
@@ -272,10 +272,9 @@
 			{#if !edit && !disabled && !$$slots.header}
 				<div class="absolute right-1 -top-3">
 					<div
-						use:positionActions={showButtons}
-						popover="manual"
-						class="fixed z-9999 flex w-max gap-1 rounded-lg bg-white dark:bg-gray-850 shadow-md p-0.5 border border-gray-100/30 dark:border-gray-850/30"
-						style="inset: auto; margin: 0; color: inherit; opacity: 0; pointer-events: none;"
+						use:trackActions={showButtons}
+						class="absolute right-0 top-0 z-20 flex w-max gap-1 rounded-lg bg-base-0 dark:bg-base-850 shadow-md p-0.5 border border-base-100/30 dark:border-base-850/30"
+						style="opacity: 0; pointer-events: none;"
 					>
 						<slot name="actions">
 							{#if onReaction}
@@ -289,7 +288,7 @@
 									<Tooltip content={$i18n.t('Add Reaction')}>
 										<button
 											aria-label={$i18n.t('Add Reaction')}
-											class="hover:bg-gray-100 dark:hover:bg-gray-800 transition rounded-lg p-1"
+											class="hover:bg-base-100 dark:hover:bg-base-800 transition rounded-lg p-1"
 											on:click={() => {
 												showButtons = true;
 											}}
@@ -304,7 +303,7 @@
 								<Tooltip content={$i18n.t('Reply')}>
 									<button
 										aria-label={$i18n.t('Reply')}
-										class="hover:bg-gray-100 dark:hover:bg-gray-800 transition rounded-lg p-1"
+										class="hover:bg-base-100 dark:hover:bg-base-800 transition rounded-lg p-1"
 										on:click={() => {
 											onReply(message);
 										}}
@@ -317,7 +316,7 @@
 							<Tooltip content={message?.is_pinned ? $i18n.t('Unpin') : $i18n.t('Pin')}>
 								<button
 									aria-label={message?.is_pinned ? $i18n.t('Unpin') : $i18n.t('Pin')}
-									class="hover:bg-gray-100 dark:hover:bg-gray-800 transition rounded-lg p-1"
+									class="hover:bg-base-100 dark:hover:bg-base-800 transition rounded-lg p-1"
 									on:click={() => {
 										onPin(message);
 									}}
@@ -334,9 +333,9 @@
 								<Tooltip content={$i18n.t('Reply in Thread')}>
 									<button
 										aria-label={$i18n.t('Reply in Thread')}
-										class="hover:bg-gray-100 dark:hover:bg-gray-800 transition rounded-lg p-1"
-										on:click={() => {
-											onThread(message.id);
+										class="hover:bg-base-100 dark:hover:bg-base-800 transition rounded-lg p-1"
+										on:click={(event) => {
+											onThread(message.id, event.currentTarget);
 										}}
 									>
 										<ChatBubbleOvalEllipsis />
@@ -348,9 +347,10 @@
 								{#if onEdit}
 									<Tooltip content={$i18n.t('Edit')}>
 										<button
+											bind:this={editButtonElement}
 											aria-label={$i18n.t('Edit')}
 											id="edit-message-{renderedMessageId}"
-											class="hover:bg-gray-100 dark:hover:bg-gray-800 transition rounded-lg p-1"
+											class="hover:bg-base-100 dark:hover:bg-base-800 transition rounded-lg p-1"
 											on:click={async () => {
 												edit = true;
 												editedContent = message.content;
@@ -372,7 +372,7 @@
 									<Tooltip content={$i18n.t('Delete')}>
 										<button
 											aria-label={$i18n.t('Delete')}
-											class="hover:bg-gray-100 dark:hover:bg-gray-800 transition rounded-lg p-1"
+											class="hover:bg-base-100 dark:hover:bg-base-800 transition rounded-lg p-1"
 											on:click={() => (showDeleteConfirmDialog = true)}
 										>
 											<GarbageBin />
@@ -389,7 +389,7 @@
 				<div class="flex {showUserProfile ? 'mb-0.5' : 'mt-0.5'}">
 					<div class="ml-9 flex items-center gap-1 text-[0.6875rem] leading-4">
 						<Pin className="size-3 text-yellow-500 dark:text-yellow-300" />
-						<span class="text-gray-500">{$i18n.t('Pinned')}</span>
+						<span class="text-base-500">{$i18n.t('Pinned')}</span>
 					</div>
 				</div>
 			{/if}
@@ -397,7 +397,7 @@
 			{#if message?.reply_to_message?.user}
 				<div class="relative text-xs mb-1">
 					<div
-						class="absolute h-3 w-6 left-3 top-2 rounded-tl-lg border-t-[1.5px] border-l-[1.5px] border-gray-200 dark:border-gray-700 z-0"
+						class="absolute h-3 w-6 left-3 top-2 rounded-tl-lg border-t-[1.5px] border-l-[1.5px] border-base-200 dark:border-base-700 z-0"
 					></div>
 
 					<button
@@ -416,7 +416,7 @@
 					>
 						{#if message?.reply_to_message?.meta?.model_id}
 							<img
-								src={`${WEBUI_API_BASE_URL}/models/model/profile/image?id=${message.reply_to_message.meta.model_id}`}
+								src={`${WEBUI_API_BASE_URL}/models/model/profile/image?id=${message.reply_to_message.meta.model_id}&v=${$models.find((model) => model.id === message.reply_to_message.meta.model_id)?.info?.updated_at}`}
 								alt={message.reply_to_message.meta.model_name ??
 									message.reply_to_message.meta.model_id}
 								class="size-4 ml-0.5 rounded-full object-cover"
@@ -454,7 +454,7 @@
 						</div>
 
 						<div
-							class="text-xs text-gray-500 dark:text-gray-400 line-clamp-1 min-w-0 flex-1 [&_.markdown-prose]:text-xs!"
+							class="text-xs text-base-500 dark:text-base-400 line-clamp-1 min-w-0 flex-1 [&_.markdown-prose]:text-xs!"
 						>
 							<Markdown
 								id={`${contentId}-reply-to`}
@@ -478,7 +478,7 @@
 						{#if showUserProfile}
 							{#if message?.meta?.model_id}
 								<img
-									src={`${WEBUI_API_BASE_URL}/models/model/profile/image?id=${message.meta.model_id}`}
+									src={`${WEBUI_API_BASE_URL}/models/model/profile/image?id=${message.meta.model_id}&v=${$models.find((model) => model.id === message.meta.model_id)?.info?.updated_at}`}
 									alt={message.meta.model_name ?? message.meta.model_id}
 									class="size-6 mt-0.5 object-cover rounded-full"
 									on:error={(e) => {
@@ -497,7 +497,7 @@
 									/>
 								{:else}
 									<span
-										class="flex size-6 mt-0.5 items-center justify-center rounded-lg bg-gray-100 dark:bg-gray-800"
+										class="flex size-6 mt-0.5 items-center justify-center rounded-lg bg-base-100 dark:bg-base-800"
 										role="img"
 										aria-label={$i18n.t('App')}
 									>
@@ -519,7 +519,7 @@
 							{/if}
 						{:else if message.created_at}
 							<div
-								class="-mx-1 mt-1 translate-y-px flex items-center justify-center text-[0.6875rem] leading-4 tabular-nums hover-reveal text-gray-500 dark:text-gray-400"
+								class="-mx-1 mt-1 translate-y-px flex items-center justify-center text-[0.6875rem] leading-4 tabular-nums hover-reveal text-base-500 dark:text-base-400"
 							>
 								<Tooltip
 									content={dayjs(message.created_at / 1000000)
@@ -538,7 +538,7 @@
 					{#if showUserProfile && !$$slots.header}
 						<div class="flex min-w-0 items-baseline gap-1.5 leading-5">
 							<div
-								class=" min-w-0 truncate text-[0.8125rem] font-medium text-gray-900 dark:text-gray-100"
+								class=" min-w-0 truncate text-[0.8125rem] font-medium text-base-900 dark:text-base-100"
 							>
 								{#if message?.meta?.model_id}
 									{message?.meta?.model_name ?? message?.meta?.model_id}
@@ -547,10 +547,10 @@
 								{/if}
 							</div>
 
-							{#if message.app_id}<span class="text-[0.65rem] text-gray-500">App</span>{/if}
+							{#if message.app_id}<span class="text-[0.65rem] text-base-500">App</span>{/if}
 							{#if message.created_at}
 								<div
-									class=" shrink-0 translate-y-px text-[0.6875rem] leading-4 text-gray-500 dark:text-gray-400 font-normal first-letter:capitalize"
+									class=" shrink-0 translate-y-px text-[0.6875rem] leading-4 text-base-500 dark:text-base-400 font-normal first-letter:capitalize"
 								>
 									<Tooltip
 										content={dayjs(message.created_at / 1000000)
@@ -624,14 +624,14 @@
 								ariaLabel={$i18n.t('Message')}
 								onKeydown={(e) => {
 									if (e.key === 'Escape') {
-										document.getElementById('close-edit-message-button')?.click();
+										cancelEditMessage();
 									}
 
 									const isCmdOrCtrlPressed = e.metaKey || e.ctrlKey;
 									const isEnterPressed = e.key === 'Enter';
 
 									if (isCmdOrCtrlPressed && isEnterPressed) {
-										document.getElementById('confirm-edit-message-button')?.click();
+										editMessageConfirmHandler();
 									}
 								}}
 							/>
@@ -639,10 +639,9 @@
 								<div class="flex space-x-1.5">
 									<button
 										id="close-edit-message-button"
-										class="flex h-7 shrink-0 items-center justify-center gap-1.5 rounded-lg px-2.5 text-xs font-normal text-gray-600 transition hover:bg-gray-100 hover:text-gray-900 disabled:opacity-60 dark:text-gray-400 dark:hover:bg-gray-850 dark:hover:text-white"
+										class="flex h-7 shrink-0 items-center justify-center gap-1.5 rounded-lg px-2.5 text-xs font-normal text-base-600 transition hover:bg-base-100 hover:text-base-900 disabled:opacity-60 dark:text-base-400 dark:hover:bg-base-850 dark:hover:text-base-0"
 										on:click={() => {
-											edit = false;
-											editedContent = null;
+											cancelEditMessage();
 										}}
 									>
 										{$i18n.t('Cancel')}
@@ -650,11 +649,9 @@
 
 									<button
 										id="confirm-edit-message-button"
-										class="flex h-7 shrink-0 items-center justify-center gap-1.5 rounded-lg bg-gray-900 px-2.5 text-xs font-normal text-white transition hover:bg-black disabled:opacity-60 dark:bg-gray-100 dark:text-gray-900 dark:hover:bg-white"
-										on:click={async () => {
-											onEdit(editedContent);
-											edit = false;
-											editedContent = null;
+										class="flex h-7 shrink-0 items-center justify-center gap-1.5 rounded-lg bg-base-900 px-2.5 text-xs font-normal text-base-0 transition hover:bg-base-1000 disabled:opacity-60 dark:bg-base-100 dark:text-base-900 dark:hover:bg-base-0"
+										on:click={() => {
+											editMessageConfirmHandler();
 										}}
 									>
 										{$i18n.t('Save')}
@@ -685,7 +682,7 @@
 										<Markdown id={contentId} content={message.content} allowEmbeds={false} />
 									</div>
 									{#if message.created_at !== message.updated_at && (message?.meta?.model_id ?? null) === null}<span
-											class="text-gray-500 text-[0.625rem] pl-1 self-center"
+											class="text-base-500 text-[0.625rem] pl-1 self-center"
 											>({$i18n.t('edited')})</span
 										>{/if}
 								{/if}
@@ -749,7 +746,7 @@
 												class="flex min-h-6 items-center gap-1.5 text-sm leading-4 transition rounded-lg px-1.5 py-0.5 cursor-pointer {(reaction.reacted ??
 												reaction.users.map((u) => u.id).includes($user?.id))
 													? ' bg-blue-300/10 outline outline-blue-500/50 outline-1'
-													: 'bg-gray-300/10 dark:bg-gray-500/10 hover:outline hover:outline-gray-700/30 dark:hover:outline-gray-300/30 hover:outline-1'}"
+													: 'bg-base-300/10 dark:bg-base-500/10 hover:outline hover:outline-base-700/30 dark:hover:outline-base-300/30 hover:outline-1'}"
 												on:click={() => {
 													if (onReaction) {
 														onReaction(reaction.name);
@@ -760,7 +757,7 @@
 
 												{#if (reaction.count ?? reaction.users.length) > 0}
 													<div
-														class="text-[0.6875rem] font-normal text-gray-500 dark:text-gray-400"
+														class="text-[0.6875rem] font-normal text-base-500 dark:text-base-400"
 													>
 														{reaction.count ?? reaction.users?.length}
 													</div>
@@ -779,7 +776,7 @@
 												<button
 													type="button"
 													aria-label={$i18n.t('Add Reaction')}
-													class="flex items-center gap-1.5 bg-gray-500/10 hover:outline hover:outline-gray-700/30 dark:hover:outline-gray-300/30 hover:outline-1 transition rounded-lg p-1 cursor-pointer text-gray-500 dark:text-gray-400"
+													class="flex items-center gap-1.5 bg-base-500/10 hover:outline hover:outline-base-700/30 dark:hover:outline-base-300/30 hover:outline-1 transition rounded-lg p-1 cursor-pointer text-base-500 dark:text-base-400"
 												>
 													<FaceSmile />
 												</button>
@@ -795,9 +792,9 @@
 						{#if !thread && message.reply_count > 0}
 							<div class="flex items-center gap-1.5 -mt-0.5 mb-1.5">
 								<button
-									class="flex min-w-0 items-center text-[0.6875rem] py-1 text-gray-500 dark:text-gray-400 hover:text-gray-700 dark:hover:text-gray-300 transition"
-									on:click={() => {
-										onThread(message.id);
+									class="flex min-w-0 items-center text-[0.6875rem] py-1 text-base-500 dark:text-base-400 hover:text-base-700 dark:hover:text-base-300 transition"
+									on:click={(event) => {
+										onThread(message.id, event.currentTarget);
 									}}
 								>
 									<span class="shrink-0 font-medium mr-1">

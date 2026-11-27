@@ -6,24 +6,17 @@
 		commentSelectionDraft,
 		selectedComment
 	} from '$lib/components/comments/anchors';
-	import {
-		config,
-		user,
-		artifactCode,
-		chatId as currentChatId,
-		mobile,
-		settings,
-		showArtifacts,
-		showTabs,
-		showEmbeds
-	} from '$lib/stores';
-	import { onDestroy, onMount, tick, getContext } from 'svelte';
+	import { config, user, mobile, settings, showEmbeds } from '$lib/stores';
+	import { onDestroy, onMount, tick, getContext, setContext } from 'svelte';
+	import { writable } from 'svelte/store';
 	const i18n = getContext('i18n');
 
 	import Markdown from './Markdown.svelte';
 	import StructuredOutputRenderer from './StructuredOutputRenderer.svelte';
+	import { getOutputText } from './structuredOutput';
 	import FloatingButtons from '../ContentRenderer/FloatingButtons.svelte';
-	import { createMessagesList } from '$lib/utils';
+	import { createMessagesList, replaceOutsideCode } from '$lib/utils';
+	import { getCitations } from '$lib/utils/citations';
 
 	/**
 	 * Extracts all top-level <details>...</details> blocks from content,
@@ -99,12 +92,16 @@
 	export let editCodeBlock = true;
 	export let topPadding = false;
 	export let allowEmbeds = false;
+	export let allowToolApproval = false;
 
 	export let onSave = (e) => {};
 	export let onSourceClick = (e) => {};
 	export let onTaskClick = (e) => {};
 	export let onToolCallResolved = (e) => {};
 	export let onSetInputText = (text) => {};
+	/** Opens the chat's artifacts; null where messages render outside a chat. */
+	/** @type {((code?: string) => void) | null} */
+	export let onOpenArtifacts = null;
 
 	/** @type {HTMLDivElement | undefined} */
 	let contentContainerElement;
@@ -116,31 +113,19 @@
 	let usingFloatingButtons = false;
 
 	let sourceIds = [];
+	/** @type {import('svelte/store').Writable<any[]>} */
+	const citations = writable([]);
+	setContext('citations', citations);
 	$: getSourceIds(sources);
 
 	const getSourceIds = (sources) => {
+		const showCitations = model?.info?.meta?.capabilities?.citations ?? true;
+		const sourceCitations = getCitations(sources);
+		citations.set(showCitations ? sourceCitations : []);
+		// Titles by citation number; numbers are shared across the chat, so there can be gaps.
 		const result = [];
-		const seenIds = new Set();
-		for (const source of sources ?? []) {
-			for (let index = 0; index < (source.document ?? []).length; index++) {
-				if (model?.info?.meta?.capabilities?.citations == false) {
-					result.push('N/A');
-					continue;
-				}
-				const metadata = source.metadata?.[index];
-				const id = metadata?.source ?? source?.source?.id ?? 'N/A';
-				if (seenIds.has(id)) {
-					continue;
-				}
-				seenIds.add(id);
-				if (metadata?.name) {
-					result.push(metadata.name);
-				} else if (id.startsWith('http://') || id.startsWith('https://')) {
-					result.push(id);
-				} else {
-					result.push(source?.source?.name ?? id);
-				}
-			}
+		for (const citation of sourceCitations) {
+			result[citation.number - 1] = showCitations ? citation.title : 'N/A';
 		}
 		sourceIds = result;
 	};
@@ -153,7 +138,12 @@
 			? removeNativeCitations(searchCitationFormatter(messageContent))
 			: searchCitationFormatter(messageContent);
 
-	let autoOpenedArtifactIds = new Set();
+	const initialContent = content;
+	const initialOutputText = getOutputText(output);
+	// The final code fence can render after the response is marked done.
+	let hasStreamed = !done;
+	$: if (!done) hasStreamed = true;
+	const seenArtifactIds = new Set();
 	/** @type {ReturnType<typeof selectedComment>} */
 	let commentSelection = null;
 
@@ -170,31 +160,28 @@
 				['html', 'svg'].includes(normalizedLang) ||
 				(normalizedLang === 'xml' && code.toLowerCase().includes('<svg'));
 			const artifactId = codeBlockId || `${normalizedLang}:${raw}`;
+			if (!isArtifact || !hasClosingCodeFence(raw) || seenArtifactIds.has(artifactId)) return;
+			// Restored blocks are seen too, so continuing a response cannot reopen them.
+			seenArtifactIds.add(artifactId);
 
 			if (
+				onOpenArtifacts &&
+				hasStreamed &&
+				(content !== initialContent || getOutputText(output) !== initialOutputText) &&
 				($settings?.detectArtifacts ?? true) &&
 				!compactPreview &&
-				isArtifact &&
-				hasClosingCodeFence(raw) &&
-				!autoOpenedArtifactIds.has(artifactId) &&
-				!$mobile &&
-				$currentChatId
+				!$mobile
 			) {
-				autoOpenedArtifactIds.add(artifactId);
 				await tick();
-				showArtifacts.set(true);
-				showTabs.set(true);
+				onOpenArtifacts();
 			}
 		}
 	);
 
 	const previewHandler = /** @type {any} */ (
 		async (/** @type {string} */ value) => {
-			console.log('Preview', value);
-			await artifactCode.set(/** @type {any} */ (value));
-			await showTabs.set(true);
-			await showArtifacts.set(true);
-			await showEmbeds.set(false);
+			showEmbeds.set(false);
+			onOpenArtifacts?.(value);
 		}
 	);
 
@@ -299,6 +286,7 @@
 			{compactPreview}
 			{done}
 			{allowEmbeds}
+			{allowToolApproval}
 			{editCodeBlock}
 			{topPadding}
 			{sourceIds}
@@ -369,7 +357,7 @@
 		{/if}
 		{#if extracted.plainContent}
 			<div
-				class="whitespace-pre-wrap text-[0.9375rem]"
+				class="whitespace-pre-wrap text-[0.90625rem]"
 				use:commentSurface={{
 					resource_type: 'chat',
 					resource_id: chatId,

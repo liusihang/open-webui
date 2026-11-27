@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import collections.abc
+import difflib
 import hashlib
 import ipaddress
 import logging
@@ -15,11 +16,14 @@ from typing import Callable, Optional, Sequence, Union
 
 import aiohttp
 import mimeparse
+from fastapi import HTTPException
 from open_webui.env import CHAT_STREAM_RESPONSE_CHUNK_MAX_BUFFER_SIZE
 from open_webui.utils.json_codec import JSONCodec
+from open_webui.utils.tool_calling import prepare_tool_call
 
 log = logging.getLogger(__name__)
 SURROGATE_RE = re.compile('[\ud800-\udfff]')
+MAX_DIFF_LINES = 5000
 
 
 def deep_update(d, u):
@@ -199,6 +203,11 @@ def is_host_blocked(host: Union[str, Sequence[str]], filter_list: list[str] | No
     return any(_host_matches_pattern(h, blocked) for h in hosts for blocked in block_list)
 
 
+def is_empty_reply(message: dict) -> bool:
+    """An assistant reply with nothing in it, such as a failed one. Requests leave these out."""
+    return message.get('role') == 'assistant' and not message.get('content') and not message.get('output')
+
+
 def get_message_list(messages_map, message_id):
     """
     Reconstructs a list of messages in order up to the specified message_id.
@@ -235,7 +244,7 @@ def get_message_list(messages_map, message_id):
 
 
 def get_messages_content(messages: list[dict]) -> str:
-    return '\n'.join([f'{message["role"].upper()}: {get_content_from_message(message)}' for message in messages])
+    return '\n'.join([f'{message["role"].upper()}: {get_content_from_message(message) or ""}' for message in messages])
 
 
 def get_last_user_message_item(messages: list[dict]) -> dict | None:
@@ -301,6 +310,27 @@ def get_paired_tool_call_ids(messages: list[dict]) -> list[set[str]]:
     return paired_ids_by_message
 
 
+def get_tool_results(messages: list[dict], name: str) -> list[str]:
+    """Everything the named tool returned in these messages, oldest first."""
+    call_ids = {
+        tool_call.get('id')
+        for message in messages
+        for tool_call in message.get('tool_calls') or []
+        if (tool_call.get('function') or {}).get('name') == name
+    }
+    return [
+        get_content_from_message(message) or ''
+        for message in messages
+        if message.get('role') == 'tool' and message.get('tool_call_id') in call_ids
+    ]
+
+
+def get_last_tool_result(messages: list[dict], name: str) -> str | None:
+    """What the named tool last returned in these messages, or None if it never did."""
+    results = get_tool_results(messages, name)
+    return results[-1] if results else None
+
+
 def reconcile_tool_pairs(messages: list[dict]) -> list[dict]:
     """Drop unpaired tool_use / tool_result from a reconstructed conversation.
 
@@ -357,11 +387,89 @@ def get_provider_function(item: dict) -> dict:
     function = item.get('provider_function')
     if not isinstance(function, dict):
         function = item
-    arguments = function.get('arguments', '{}')
+    # Repair only the provider copy; failed calls and their original arguments remain intact.
+    function = dict(function)
+    if 'original_arguments' in function:
+        function['arguments'] = function['original_arguments']
+    original_arguments = function.get('arguments')
+    if error := prepare_tool_call(function):
+        function['arguments'] = JSONCodec.dumps({'error': error})
+    else:
+        try:
+            # A valid JSON object goes back as the model wrote it, so its cached output still matches.
+            if isinstance(JSONCodec.loads(original_arguments), dict):
+                function['arguments'] = original_arguments
+        except (TypeError, ValueError):
+            pass
     return {
         'name': function.get('name', ''),
-        'arguments': arguments if isinstance(arguments, str) else JSONCodec.dumps(arguments),
+        'arguments': function['arguments'],
     }
+
+
+def merge_tool_call_batches(output: list[dict]) -> list[dict]:
+    """Replay each batch under its original provider ID with one ordered, combined result."""
+    batches = {}
+    results = {}
+    for item in output:
+        if item.get('type') == 'function_call' and item.get('provider_batch'):
+            batches.setdefault(item['provider_batch']['call_id'], []).append(item)
+        elif item.get('type') == 'function_call_output':
+            results[item.get('call_id')] = item
+    if not batches:
+        return output
+
+    members = {call['call_id']: batch_id for batch_id, calls in batches.items() for call in calls}
+    replay = []
+    emitted = set()
+    remaining = {batch_id: {call['call_id'] for call in calls} for batch_id, calls in batches.items()}
+    for item in output:
+        batch_id = members.get(item.get('call_id'))
+        if batch_id is None or item.get('type') not in {'function_call', 'function_call_output'}:
+            replay.append(item)
+            continue
+        calls = batches[batch_id]
+        batch = calls[0]['provider_batch']
+        # Approval pauses can leave only part of a batch complete. Never replay an unpaired call.
+        if len(calls) != batch['size'] or any(call['call_id'] not in results for call in calls):
+            continue
+        if item['type'] == 'function_call':
+            if batch_id not in emitted:
+                replay.append(
+                    {
+                        'type': 'function_call',
+                        'id': calls[0].get('id', batch_id),
+                        'call_id': batch_id,
+                        **batch['function'],
+                        'status': 'completed',
+                    }
+                )
+                emitted.add(batch_id)
+            continue
+        remaining[batch_id].discard(item['call_id'])
+        if remaining[batch_id]:
+            continue
+        entries, images = [], []
+        for call in calls:
+            result = results[call['call_id']]
+            parts = result.get('output', [])
+            entries.append(
+                {
+                    'tool_name': call['provider_batch']['tool_name'],
+                    'status': result.get('status', call.get('status')),
+                    'output': [part for part in parts if part.get('type') != 'input_image'],
+                }
+            )
+            images.extend(part for part in parts if part.get('type') == 'input_image')
+        replay.append(
+            {
+                'type': 'function_call_output',
+                'call_id': batch_id,
+                'output': [{'type': 'input_text', 'text': JSONCodec.dumps({'results': entries})}, *images],
+                'status': 'completed',
+            }
+        )
+    return replay
 
 
 def convert_output_to_messages(
@@ -389,45 +497,44 @@ def convert_output_to_messages(
               (for legacy providers that expect reasoning as tagged content).
             - ``'reasoning_content'``: set as ``reasoning_content`` top-level field
               (for llama.cpp, which routes it via the chat template).
+            - ``'reasoning'``: set as ``reasoning`` top-level field
+              (for vLLM and OpenRouter).
         flatten_tool_images: Move tool output images into a following user
             message for Chat Completions providers.
     """
     if not output or not isinstance(output, list):
         return []
 
+    output = merge_tool_call_batches(output)
     messages = []
     pending_tool_calls = []
     pending_content = []
-    pending_reasoning = []  # Only populated for top-level structured reasoning fields.
-    pending_reasoning_details = []
+    pending_reasoning = {}  # Reasoning fields for the next assistant message.
     pending_tool_image_urls = []
     pending_tool_outputs = []
 
     def flush_pending():
-        nonlocal pending_content, pending_tool_calls, pending_reasoning, pending_reasoning_details
-        if not pending_content and not pending_tool_calls and not pending_reasoning and not pending_reasoning_details:
+        nonlocal pending_content, pending_tool_calls, pending_reasoning
+        if not pending_content and not pending_tool_calls and not pending_reasoning:
             return
 
         message = {
             'role': 'assistant',
-            'content': '\n'.join(pending_content) if pending_content else '',
+            'content': '\n'.join(pending_content) if pending_content else (None if pending_tool_calls else ''),
             **({'tool_calls': pending_tool_calls} if pending_tool_calls else {}),
+            **pending_reasoning,
         }
 
-        if pending_reasoning:
-            if reasoning_format == 'thinking':
-                message['thinking'] = '\n'.join(pending_reasoning)
-            else:
-                message['reasoning_content'] = '\n'.join(pending_reasoning)
-
-        if pending_reasoning_details:
-            message['reasoning_details'] = pending_reasoning_details
+        if reasoning_format in pending_reasoning:
+            message[reasoning_format] = '\n'.join(pending_reasoning[reasoning_format])
+        elif pending_tool_calls and reasoning_format == 'reasoning_content':
+            # DeepSeek rejects a tool call turn without reasoning_content.
+            message['reasoning_content'] = ''
 
         messages.append(message)
         pending_content = []
         pending_tool_calls = []
-        pending_reasoning = []
-        pending_reasoning_details = []
+        pending_reasoning = {}
 
     def flush_tool_images():
         nonlocal pending_tool_image_urls
@@ -536,6 +643,10 @@ def convert_output_to_messages(
             pending_tool_outputs.append(item)
 
         elif item_type == 'reasoning':
+            # Encrypted reasoning only helps the provider if it gets the item back whole.
+            if raw and item.get('encrypted_content'):
+                pending_reasoning.setdefault('reasoning_items', []).append(item)
+
             reasoning_details = item.get('reasoning_details') if raw else None
             if reasoning_details:
                 reasoning_details = reasoning_details if isinstance(reasoning_details, list) else [reasoning_details]
@@ -562,12 +673,12 @@ def convert_output_to_messages(
                     start_tag = item.get('start_tag', '<think>')
                     end_tag = item.get('end_tag', '</think>')
                     pending_content.append(f'{start_tag}{reasoning_text}{end_tag}')
-                elif reasoning_format in {'thinking', 'reasoning_content'}:
+                elif reasoning_format in {'thinking', 'reasoning_content', 'reasoning'}:
                     # Native providers: collect for their top-level reasoning field.
-                    pending_reasoning.append(reasoning_text)
+                    pending_reasoning.setdefault(reasoning_format, []).append(reasoning_text)
 
             if reasoning_details:
-                pending_reasoning_details.extend(reasoning_details)
+                pending_reasoning.setdefault('reasoning_details', []).extend(reasoning_details)
 
         elif item_type == 'open_webui:code_interpreter':
             # Always include code interpreter content so the LLM knows
@@ -951,26 +1062,38 @@ def _strip_null_bytes_deep(obj):
     return obj
 
 
+def _has_null_bytes_or_surrogates(obj) -> bool:
+    """True if any string, key or value, has a null byte or surrogate."""
+    if isinstance(obj, str):
+        if '\x00' in obj:
+            return True
+        # O(1) in CPython, so ASCII strings such as base64 images skip the surrogate scan.
+        if obj.isascii():
+            return False
+        try:
+            obj.encode('utf-8')
+            return False
+        except UnicodeEncodeError:
+            return True
+    elif isinstance(obj, dict):
+        return any(_has_null_bytes_or_surrogates(k) or _has_null_bytes_or_surrogates(v) for k, v in obj.items())
+    elif isinstance(obj, list):
+        return any(_has_null_bytes_or_surrogates(v) for v in obj)
+    return False
+
+
 def sanitize_data_for_db(obj):
     """Recursively sanitize all strings in a data structure for database storage.
 
-    Performs a fast pre-check: serializes the structure once and scans for
+    Performs a fast pre-check: scans every string once for
     null bytes or invalid UTF-8 surrogates. If none are found, the
     original object is returned immediately, skipping the expensive
     recursive walk.
     """
     if isinstance(obj, str):
         return sanitize_text_for_db(obj)
-    # Fast path: check for null bytes and surrogate code points in the serialized form.
-    # json.dumps is implemented in C and much faster than a Python-level
-    # recursive walk over every leaf string.
-    try:
-        serialized = JSONCodec.dumps(obj, ensure_ascii=False)
-        if '\\u0000' not in serialized:
-            serialized.encode('utf-8')
-            return obj
-    except (TypeError, ValueError, UnicodeEncodeError):
-        pass
+    if not _has_null_bytes_or_surrogates(obj):
+        return obj
     return _strip_null_bytes_deep(obj)
 
 
@@ -1344,3 +1467,11 @@ def stream_chunks_handler(stream: aiohttp.StreamReader):
             yield bytes(buffer)
 
     return yield_safe_stream_chunks()
+
+
+def unified_text_diff(old: str, new: str, fromfile: str, tofile: str) -> list[str]:
+    # splitlines handles a missing final newline and CRLF without breaking the renderer.
+    old_lines, new_lines = old.splitlines(), new.splitlines()
+    if max(len(old_lines), len(new_lines)) > MAX_DIFF_LINES:
+        raise HTTPException(status_code=413, detail=f'Diff is limited to {MAX_DIFF_LINES} lines per version')
+    return list(difflib.unified_diff(old_lines, new_lines, fromfile=fromfile, tofile=tofile, lineterm=''))

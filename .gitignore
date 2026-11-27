@@ -311,6 +311,8 @@ cypress/videos
 cypress/screenshots
 .vscode/settings.json
 .cptr
+/evals/
 
-# Generated native UI browser verification output
-/artifacts/intelligent-ui-colors/
+# Local temporary fixtures and screenshots
+/tmp/
+/artifacts/

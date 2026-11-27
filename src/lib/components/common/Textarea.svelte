@@ -16,7 +16,7 @@
 	export let autocapitalize: HTMLTextareaAttributes['autocapitalize'] = undefined;
 	export let onKeydown: (event: KeyboardEvent) => void = () => {};
 	export let className =
-		'w-full rounded-lg px-3.5 py-2 text-sm bg-gray-50 dark:text-gray-300 dark:bg-gray-850 outline-hidden  h-full';
+		'w-full rounded-lg px-3.5 py-2 text-sm bg-base-50 dark:text-base-300 dark:bg-base-850 outline-hidden  h-full';
 	export let ariaLabel: string | null = null;
 
 	export let onInput: (event: Event) => void = () => {};
@@ -46,7 +46,9 @@
 
 			textareaElement.style.height = '';
 
+			// A hidden textarea (e.g. in a background tab) measures 0; leave sizing to field-sizing.
 			let height = textareaElement.scrollHeight;
+			if (height === 0) return;
 			if (maxSize && height > maxSize) {
 				height = maxSize;
 			}
@@ -73,7 +75,7 @@
 	{placeholder}
 	aria-label={ariaLabel || placeholder}
 	class={className}
-	style="field-sizing: content;"
+	style="field-sizing: content;{maxSize ? ` max-height: ${maxSize}px;` : ''}"
 	{rows}
 	{required}
 	{readonly}

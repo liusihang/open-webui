@@ -334,12 +334,19 @@ def convert_chat_completions_messages_to_ollama(messages: list[dict]) -> list[di
             # If tool calls are present, add them to the message
             ollama_tool_calls = []
             for tool_call in tool_calls:
+                arguments = tool_call.get('function', {}).get('arguments')
+                if isinstance(arguments, str):
+                    try:
+                        arguments = JSONCodec.loads(arguments)
+                    except JSONCodec.JSONDecodeError:
+                        arguments = {}
+
                 ollama_tool_call = {
                     'index': tool_call.get('index', 0),
                     'id': tool_call.get('id', None),
                     'function': {
                         'name': tool_call.get('function', {}).get('name', ''),
-                        'arguments': JSONCodec.loads(tool_call.get('function', {}).get('arguments', {})),
+                        'arguments': arguments if isinstance(arguments, dict) else {},
                     },
                 }
                 ollama_tool_calls.append(ollama_tool_call)
@@ -404,7 +411,7 @@ def convert_chat_completions_payload_to_ollama(openai_payload: dict) -> dict:
     ollama_payload['model'] = openai_payload.get('model')
     ollama_payload['messages'] = convert_chat_completions_messages_to_ollama(openai_payload.get('messages'))
     ollama_payload['stream'] = openai_payload.get('stream', False)
-    if 'tools' in openai_payload:
+    if 'tools' in openai_payload and openai_payload.get('tool_choice') != 'none':
         ollama_payload['tools'] = openai_payload['tools']
 
     # If there are advanced parameters in the payload, format them in Ollama's options field

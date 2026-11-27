@@ -1,0 +1,125 @@
+<script lang="ts">
+	import { getContext, onMount } from 'svelte';
+	import { goto } from '$app/navigation';
+	import type { AppLayoutContext } from '$lib/types';
+	import { toast } from 'svelte-sonner';
+	import { socket } from '$lib/stores';
+	import { toggleAutomationById, type FolderAutomation } from '$lib/apis/automations';
+	import { formatShortDate } from '$lib/utils';
+	import { formatTrigger } from '$lib/utils/schedule';
+	import AutomationModal from '$lib/components/AutomationModal.svelte';
+	import Switch from '$lib/components/common/Switch.svelte';
+	import Spinner from '$lib/components/common/Spinner.svelte';
+	import Icon from '$lib/components/chat/FileNav/Icon.svelte';
+	import ChatParticipants from '$lib/components/common/ChatParticipants.svelte';
+
+	const i18n = getContext<typeof import('$lib/i18n').default>('i18n');
+	const appLayout = getContext<AppLayoutContext | undefined>('appLayout');
+
+	/** The folder's automations as a list; new ones use the automation modal, existing ones open their page. */
+	export let folderId: string;
+	export let automations: FolderAutomation[] = [];
+	export let loading = false;
+	export let canCreate = false;
+	export let onReload: () => Promise<void>;
+
+	let showModal = false;
+	let busy = '';
+
+	export function startNew() {
+		showModal = true;
+	}
+
+	// An existing automation opens as its own page, in a tab beside the folder like chats do.
+	// Anyone who can see the folder can open it; the page is read-only for what they can't change.
+	function edit(automation: FolderAutomation) {
+		const href = `/automations/${automation.id}`;
+		if (appLayout?.openPageTab) appLayout.openPageTab({ href, label: automation.name });
+		else void goto(href);
+	}
+
+	async function toggle(automation: FolderAutomation) {
+		busy = automation.id;
+		try {
+			await toggleAutomationById(localStorage.token, automation.id);
+			await onReload();
+		} catch (error: any) {
+			toast.error(error?.detail ?? String(error));
+		} finally {
+			busy = '';
+		}
+	}
+
+	const lastRun = (automation: FolderAutomation) =>
+		!automation.is_active
+			? $i18n.t('Paused')
+			: automation.last_run
+				? formatShortDate(automation.last_run.created_at / 1e9, $i18n.language)
+				: $i18n.t('Not run yet');
+
+	onMount(() => {
+		// A finished run updates the list's last-run times.
+		const refresh = () => void onReload();
+		$socket?.on('automation:result', refresh);
+		return () => $socket?.off('automation:result', refresh);
+	});
+</script>
+
+<AutomationModal bind:show={showModal} {folderId} on:save={onReload} />
+
+{#if loading && !automations.length}
+	<div class="flex h-full items-center justify-center"><Spinner className="size-4" /></div>
+{:else if !automations.length}
+	<div class="flex h-full flex-col items-center justify-center gap-1 px-6 pb-16 text-center">
+		<div class="text-sm text-base-800 dark:text-base-100">{$i18n.t('No automations yet')}</div>
+		<div class="text-xs text-base-500 dark:text-base-400">
+			{$i18n.t('Run a prompt in this folder on a schedule. Each run lands here as a chat.')}
+		</div>
+		{#if canCreate}
+			<button
+				type="button"
+				class="mt-2 text-xs text-base-400 transition-colors hover:text-base-600 dark:text-base-500 dark:hover:text-base-300"
+				on:click={startNew}>{$i18n.t('New automation')}</button
+			>
+		{/if}
+	</div>
+{:else}
+	<ul class="scrollbar-hidden h-full overflow-y-auto px-3" aria-label={$i18n.t('Automations')}>
+		{#each automations as automation (automation.id)}
+			<!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_noninteractive_element_interactions -->
+			<li
+				class="flex cursor-pointer items-center gap-2.5 rounded-xl px-3 py-1.5 transition-colors hover:bg-base-50 dark:hover:bg-base-850/50"
+				on:click={() => edit(automation)}
+			>
+				<Icon name="clock" size={14} class="text-base-400 dark:text-base-500" />
+				<span
+					class="min-w-0 shrink truncate text-[0.8125rem] leading-5 text-base-700 dark:text-base-200"
+					>{automation.name}</span
+				>
+				<span class="hidden min-w-0 truncate text-xs text-base-400 @md:block dark:text-base-500"
+					>{formatTrigger(automation.data, $i18n)}</span
+				>
+				<span class="flex-1"></span>
+				<!-- The owner's avatar beside the last run, as on the automations page. -->
+				<div class="flex w-28 shrink-0 items-center justify-end gap-2">
+					<!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_static_element_interactions -->
+					<div class="hidden shrink-0 @sm:flex" on:click|stopPropagation>
+						<ChatParticipants owner={{ id: automation.user_id, name: automation.user_name }} />
+					</div>
+					<span class="truncate text-[0.6875rem] tabular-nums text-base-400 dark:text-base-500"
+						>{lastRun(automation)}</span
+					>
+				</div>
+				<!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_static_element_interactions -->
+				<div on:click|stopPropagation>
+					<Switch
+						state={automation.is_active}
+						disabled={!automation.can_manage || busy === automation.id}
+						ariaLabel={$i18n.t('Active')}
+						on:change={() => toggle(automation)}
+					/>
+				</div>
+			</li>
+		{/each}
+	</ul>
+{/if}

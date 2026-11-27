@@ -1,7 +1,10 @@
 <script lang="ts">
+	import ConfirmDialog from '$lib/components/common/ConfirmDialog.svelte';
+	import HotkeyHint from '$lib/components/common/HotkeyHint.svelte';
 	import { createEventDispatcher, getContext, onMount, tick } from 'svelte';
 
 	import { goto } from '$app/navigation';
+	import type { AppLayoutContext } from '$lib/types';
 	import { fade, slide } from 'svelte/transition';
 
 	import { getUsage } from '$lib/apis';
@@ -35,8 +38,16 @@
 	import { toast } from 'svelte-sonner';
 
 	const i18n = getContext('i18n');
+	const appLayout = getContext<AppLayoutContext | undefined>('appLayout');
 
 	export let show = false;
+	let confirmSignOut = false;
+	const signOut = async () => {
+		const res = await userSignOut();
+		localStorage.removeItem('token');
+		location.href = getLogoutRedirectUrl(res?.redirect_url);
+		show = false;
+	};
 	export let role = '';
 
 	export let profile = false;
@@ -122,7 +133,7 @@
 				<div>
 					<button
 						role="menuitem"
-						class="flex h-[1.6875rem] items-center gap-2 rounded-xl px-2 text-xs w-full hover:bg-gray-50/60 dark:hover:bg-gray-800/60 transition cursor-pointer select-none text-left"
+						class="flex h-[1.6875rem] items-center gap-2 rounded-xl px-2 text-xs w-full hover:bg-base-50/60 dark:hover:bg-base-800/60 transition cursor-pointer select-none text-left"
 						type="button"
 						on:click={async () => {
 							show = false;
@@ -150,7 +161,7 @@
 									: $i18n.t('Active Users')}
 							>
 								<div
-									class="ml-auto flex shrink-0 items-center justify-end gap-1 rounded-full px-1.5 py-0.5 text-[0.6875rem] leading-none text-gray-500 dark:text-gray-400"
+									class="ml-auto flex shrink-0 items-center justify-end gap-1 rounded-full px-1.5 py-0.5 text-[0.6875rem] leading-none text-base-500 dark:text-base-400"
 									on:mouseenter={() => {
 										if ($config?.features?.enable_public_active_users_count || role === 'admin') {
 											getUsageInfo();
@@ -170,7 +181,7 @@
 				{#if $user?.status_emoji || $user?.status_message}
 					<div class="user-menu-status">
 						<div
-							class="user-menu-row flex items-center w-full rounded-xl hover:bg-gray-50/60 dark:hover:bg-gray-800/60 transition-colors"
+							class="user-menu-row flex items-center w-full rounded-xl hover:bg-base-50/60 dark:hover:bg-base-800/60 transition-colors"
 						>
 							<button
 								role="menuitem"
@@ -230,7 +241,7 @@
 					<div class="user-menu-status">
 						<button
 							role="menuitem"
-							class="w-full h-[1.6875rem] gap-2 rounded-xl px-2 hover:bg-gray-50/60 dark:hover:bg-gray-800/60 transition cursor-pointer select-none text-xs flex items-center text-left"
+							class="w-full h-[1.6875rem] gap-2 rounded-xl px-2 hover:bg-base-50/60 dark:hover:bg-base-800/60 transition cursor-pointer select-none text-xs flex items-center text-left"
 							type="button"
 							on:click={() => {
 								show = false;
@@ -247,12 +258,12 @@
 			{/if}
 
 			{#if profile}
-				<hr class="border-gray-50/30 dark:border-gray-800/30 my-0.5 mx-1 p-0" />
+				<hr class="border-base-50/30 dark:border-base-800/30 my-0.5 mx-1 p-0" />
 			{/if}
 
 			{#if $user?.role === 'admin' || $user?.permissions?.workspace?.models || $user?.permissions?.workspace?.knowledge || $user?.permissions?.workspace?.prompts || $user?.permissions?.workspace?.tools || $user?.permissions?.workspace?.skills}
 				<div
-					class="user-menu-row flex items-center w-full rounded-xl hover:bg-gray-50/60 dark:hover:bg-gray-800/60 transition-colors"
+					class="user-menu-row flex items-center w-full rounded-xl hover:bg-base-50/60 dark:hover:bg-base-800/60 transition-colors"
 				>
 					<a
 						role="menuitem"
@@ -263,7 +274,9 @@
 							if (e.metaKey || e.ctrlKey || e.shiftKey || e.button === 1) return;
 							e.preventDefault();
 							show = false;
-							goto('/workspace');
+							if (appLayout?.openPageTab)
+								appLayout.openPageTab({ href: '/workspace', label: $i18n.t('Workspace') });
+							else goto('/workspace');
 							if ($mobile) {
 								await tick();
 								showSidebar.set(false);
@@ -287,7 +300,7 @@
 									: $i18n.t('Pin to Sidebar')}
 								role="menuitem"
 								type="button"
-								class="p-1 mr-1 rounded-lg hover:bg-gray-100/60 dark:hover:bg-gray-700/60 transition"
+								class="p-1 mr-1 rounded-lg hover:bg-base-100/60 dark:hover:bg-base-700/60 transition"
 								on:click|preventDefault|stopPropagation={() => togglePin('workspace')}
 							>
 								{#if pinnedItems.includes('workspace')}
@@ -303,7 +316,7 @@
 
 			{#if ($config?.features?.enable_notes ?? false) && ($user?.role === 'admin' || ($user?.permissions?.features?.notes ?? true))}
 				<div
-					class="user-menu-row flex items-center w-full rounded-xl hover:bg-gray-50/60 dark:hover:bg-gray-800/60 transition-colors"
+					class="user-menu-row flex items-center w-full rounded-xl hover:bg-base-50/60 dark:hover:bg-base-800/60 transition-colors"
 				>
 					<a
 						role="menuitem"
@@ -314,7 +327,9 @@
 							if (e.metaKey || e.ctrlKey || e.shiftKey || e.button === 1) return;
 							e.preventDefault();
 							show = false;
-							goto('/notes');
+							if (appLayout?.openPageTab)
+								appLayout.openPageTab({ href: '/notes', label: $i18n.t('Notes') });
+							else goto('/notes');
 							if ($mobile) {
 								await tick();
 								showSidebar.set(false);
@@ -338,7 +353,7 @@
 									: $i18n.t('Pin to Sidebar')}
 								role="menuitem"
 								type="button"
-								class="p-1 mr-1 rounded-lg hover:bg-gray-100/60 dark:hover:bg-gray-700/60 transition"
+								class="p-1 mr-1 rounded-lg hover:bg-base-100/60 dark:hover:bg-base-700/60 transition"
 								on:click|preventDefault|stopPropagation={() => togglePin('notes')}
 							>
 								{#if pinnedItems.includes('notes')}
@@ -354,7 +369,7 @@
 
 			{#if $config?.features?.enable_calendar && ($user?.role === 'admin' || $user?.permissions?.features?.calendar)}
 				<div
-					class="user-menu-row flex items-center w-full rounded-xl hover:bg-gray-50/60 dark:hover:bg-gray-800/60 transition-colors"
+					class="user-menu-row flex items-center w-full rounded-xl hover:bg-base-50/60 dark:hover:bg-base-800/60 transition-colors"
 				>
 					<a
 						role="menuitem"
@@ -365,7 +380,9 @@
 							if (e.metaKey || e.ctrlKey || e.shiftKey || e.button === 1) return;
 							e.preventDefault();
 							show = false;
-							goto('/calendar');
+							if (appLayout?.openPageTab)
+								appLayout.openPageTab({ href: '/calendar', label: $i18n.t('Calendar') });
+							else goto('/calendar');
 							if ($mobile) {
 								await tick();
 								showSidebar.set(false);
@@ -389,7 +406,7 @@
 									: $i18n.t('Pin to Sidebar')}
 								role="menuitem"
 								type="button"
-								class="p-1 mr-1 rounded-lg hover:bg-gray-100/60 dark:hover:bg-gray-700/60 transition"
+								class="p-1 mr-1 rounded-lg hover:bg-base-100/60 dark:hover:bg-base-700/60 transition"
 								on:click|preventDefault|stopPropagation={() => togglePin('calendar')}
 							>
 								{#if pinnedItems.includes('calendar')}
@@ -405,7 +422,7 @@
 
 			{#if $config?.features?.enable_automations && ($user?.role === 'admin' || $user?.permissions?.features?.automations)}
 				<div
-					class="user-menu-row flex items-center w-full rounded-xl hover:bg-gray-50/60 dark:hover:bg-gray-800/60 transition-colors"
+					class="user-menu-row flex items-center w-full rounded-xl hover:bg-base-50/60 dark:hover:bg-base-800/60 transition-colors"
 				>
 					<a
 						role="menuitem"
@@ -416,7 +433,9 @@
 							if (e.metaKey || e.ctrlKey || e.shiftKey || e.button === 1) return;
 							e.preventDefault();
 							show = false;
-							goto('/automations');
+							if (appLayout?.openPageTab)
+								appLayout.openPageTab({ href: '/automations', label: $i18n.t('Automations') });
+							else goto('/automations');
 							if ($mobile) {
 								await tick();
 								showSidebar.set(false);
@@ -440,7 +459,7 @@
 									: $i18n.t('Pin to Sidebar')}
 								role="menuitem"
 								type="button"
-								class="p-1 mr-1 rounded-lg hover:bg-gray-100/60 dark:hover:bg-gray-700/60 transition"
+								class="p-1 mr-1 rounded-lg hover:bg-base-100/60 dark:hover:bg-base-700/60 transition"
 								on:click|preventDefault|stopPropagation={() => togglePin('automations')}
 							>
 								{#if pinnedItems.includes('automations')}
@@ -456,7 +475,7 @@
 
 			{#if role === 'admin'}
 				<div
-					class="user-menu-row flex items-center w-full rounded-xl hover:bg-gray-50/60 dark:hover:bg-gray-800/60 transition-colors"
+					class="user-menu-row flex items-center w-full rounded-xl hover:bg-base-50/60 dark:hover:bg-base-800/60 transition-colors"
 				>
 					<a
 						role="menuitem"
@@ -467,7 +486,9 @@
 							if (e.metaKey || e.ctrlKey || e.shiftKey || e.button === 1) return;
 							e.preventDefault();
 							show = false;
-							goto('/playground');
+							if (appLayout?.openPageTab)
+								appLayout.openPageTab({ href: '/playground', label: $i18n.t('Playground') });
+							else goto('/playground');
 							if ($mobile) {
 								await tick();
 								showSidebar.set(false);
@@ -491,7 +512,7 @@
 									: $i18n.t('Pin to Sidebar')}
 								role="menuitem"
 								type="button"
-								class="p-1 mr-1 rounded-lg hover:bg-gray-100/60 dark:hover:bg-gray-700/60 transition"
+								class="p-1 mr-1 rounded-lg hover:bg-base-100/60 dark:hover:bg-base-700/60 transition"
 								on:click|preventDefault|stopPropagation={() => togglePin('playground')}
 							>
 								{#if pinnedItems.includes('playground')}
@@ -506,7 +527,7 @@
 			{/if}
 
 			{#if help}
-				<hr class="border-gray-50/30 dark:border-gray-800/30 my-0.5 mx-1 p-0" />
+				<hr class="border-base-50/30 dark:border-base-800/30 my-0.5 mx-1 p-0" />
 
 				<!-- {$i18n.t('Help')} -->
 
@@ -516,7 +537,7 @@
 						href="https://docs.openwebui.com"
 						target="_blank"
 						draggable="false"
-						class="flex h-[1.6875rem] items-center gap-2 rounded-xl px-2 text-[0.8125rem] w-full hover:bg-gray-50/60 dark:hover:bg-gray-800/60 transition cursor-pointer select-none"
+						class="flex h-[1.6875rem] items-center gap-2 rounded-xl px-2 text-[0.8125rem] w-full hover:bg-base-50/60 dark:hover:bg-base-800/60 transition cursor-pointer select-none"
 						id="chat-share-button"
 						on:click={() => {
 							show = false;
@@ -534,7 +555,7 @@
 						href="https://github.com/open-webui/open-webui/releases"
 						target="_blank"
 						draggable="false"
-						class="flex h-[1.6875rem] items-center gap-2 rounded-xl px-2 text-[0.8125rem] w-full hover:bg-gray-50/60 dark:hover:bg-gray-800/60 transition cursor-pointer select-none"
+						class="flex h-[1.6875rem] items-center gap-2 rounded-xl px-2 text-[0.8125rem] w-full hover:bg-base-50/60 dark:hover:bg-base-800/60 transition cursor-pointer select-none"
 						id="chat-share-button"
 						on:click={() => {
 							show = false;
@@ -549,7 +570,7 @@
 
 				<button
 					role="menuitem"
-					class="flex h-[1.6875rem] items-center gap-2 rounded-xl px-2 text-[0.8125rem] w-full hover:bg-gray-50/60 dark:hover:bg-gray-800/60 transition cursor-pointer select-none"
+					class="flex h-[1.6875rem] items-center gap-2 rounded-xl px-2 text-[0.8125rem] w-full hover:bg-base-50/60 dark:hover:bg-base-800/60 transition cursor-pointer select-none"
 					type="button"
 					id="chat-share-button"
 					on:click={async () => {
@@ -566,17 +587,18 @@
 						<KeyIcon className="size-3.5" />
 					</div>
 					<div class=" self-center truncate">{$i18n.t('Keyboard')}</div>
+					<HotkeyHint name="showShortcuts" className="ms-auto" />
 				</button>
 			{/if}
 
-			<hr class="border-gray-50/30 dark:border-gray-800/30 my-0.5 mx-1 p-0" />
+			<hr class="border-base-50/30 dark:border-base-800/30 my-0.5 mx-1 p-0" />
 
 			{#if role === 'admin'}
 				<a
 					role="menuitem"
 					href="/admin"
 					draggable="false"
-					class="flex h-[1.6875rem] items-center gap-2 rounded-xl px-2 text-[0.8125rem] w-full hover:bg-gray-50/60 dark:hover:bg-gray-800/60 transition cursor-pointer select-none"
+					class="flex h-[1.6875rem] items-center gap-2 rounded-xl px-2 text-[0.8125rem] w-full hover:bg-base-50/60 dark:hover:bg-base-800/60 transition cursor-pointer select-none"
 					on:click={async (e) => {
 						if (e.metaKey || e.ctrlKey || e.shiftKey || e.button === 1) {
 							return;
@@ -599,7 +621,7 @@
 
 			<button
 				role="menuitem"
-				class="flex h-[1.6875rem] items-center gap-2 rounded-xl px-2 text-[0.8125rem] w-full hover:bg-gray-50/60 dark:hover:bg-gray-800/60 transition cursor-pointer select-none"
+				class="flex h-[1.6875rem] items-center gap-2 rounded-xl px-2 text-[0.8125rem] w-full hover:bg-base-50/60 dark:hover:bg-base-800/60 transition cursor-pointer select-none"
 				type="button"
 				on:click={async () => {
 					show = false;
@@ -616,18 +638,17 @@
 					<Settings className="size-3.5" strokeWidth="1.5" />
 				</div>
 				<div class=" self-center truncate">{$i18n.t('Settings')}</div>
+				<HotkeyHint name="openSettings" className="ms-auto" />
 			</button>
 
 			<button
 				role="menuitem"
-				class="flex h-[1.6875rem] items-center gap-2 rounded-xl px-2 text-[0.8125rem] w-full hover:bg-gray-50/60 dark:hover:bg-gray-800/60 transition cursor-pointer select-none"
+				class="flex h-[1.6875rem] items-center gap-2 rounded-xl px-2 text-[0.8125rem] w-full hover:bg-base-50/60 dark:hover:bg-base-800/60 transition cursor-pointer select-none"
 				type="button"
 				on:click={async () => {
-					const res = await userSignOut();
-					localStorage.removeItem('token');
-
-					location.href = getLogoutRedirectUrl(res?.redirect_url);
-					show = false;
+					const { hasChatViewDrafts } = await import('$lib/stores/chatViewStates');
+					if (hasChatViewDrafts()) confirmSignOut = true;
+					else await signOut();
 				}}
 			>
 				<div class="self-center">
@@ -638,3 +659,11 @@
 		</DropdownMenu>
 	</div>
 </Dropdown>
+
+<ConfirmDialog
+	bind:show={confirmSignOut}
+	title={$i18n.t('Unsaved changes')}
+	message={$i18n.t('Discard unsaved file edits and sign out?')}
+	confirmLabel={$i18n.t('Sign Out')}
+	on:confirm={signOut}
+/>

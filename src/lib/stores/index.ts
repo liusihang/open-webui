@@ -9,11 +9,13 @@ import { type Writable, derived, get, writable } from 'svelte/store';
 import type { CommentTarget } from '$lib/apis/comments';
 import type { ModelConfig } from '$lib/apis';
 import type { Banner } from '$lib/types';
+import type { FolderDetails } from './folderStates';
 import type { Socket } from 'socket.io-client';
-import type { AudioQueue } from '$lib/utils/audio';
+import type { AudioQueue, NotificationSoundStyle } from '$lib/utils/audio';
 import type { I18nOverrides } from '$lib/utils/translationDictionary';
 
 import emojiShortCodes from '$lib/emoji-shortcodes.json';
+import { isMachine } from '$lib/utils/machines';
 
 // Backend identity and session state
 export const WEBUI_NAME = writable(APP_NAME);
@@ -35,7 +37,17 @@ export const MODEL_DOWNLOAD_POOL = writable({});
 export const mobile = writable(false);
 
 export const socket: Writable<null | Socket> = writable(null);
-export const socketConnected: Writable<boolean> = writable(true);
+export const socketLost: Writable<boolean> = writable(false);
+
+// Runs when a lost connection comes back, not when it is first made.
+export const onSocketRestored = (callback: () => void) => {
+	let lost = false;
+	return socketLost.subscribe((value) => {
+		if (lost && !value) callback();
+		lost = value;
+	});
+};
+
 export const activeUserIds: Writable<null | string[]> = writable(null);
 export const USAGE_POOL: Writable<null | string[]> = writable(null);
 
@@ -72,20 +84,52 @@ type ChannelListItem = {
 export const channels = writable<ChannelListItem[]>([]);
 export const channelId = writable(null);
 
-export { chats, pinnedChats } from './chatList';
+export {
+	chats,
+	pinnedChats,
+	recentChats,
+	refreshRecentChats,
+	activeFolders,
+	refreshActiveFolders
+} from './chatList';
 export const pinnedNotes = writable([]);
 export const tags = writable([]);
 export const folders = writable([]);
 
-export const selectedFolder = writable(null);
+export const selectedFolder = writable<FolderDetails | null>(null);
 
-export const models: Writable<Model[]> = writable([]);
+// null until the first list has loaded; an empty list means there are no models
+export const models: Writable<Model[] | null> = writable(null);
+
+export const baseModels = derived(models, ($models) =>
+	($models ?? []).filter((model) => !isMachine(model.owned_by))
+);
 
 export const knowledge: Writable<null | Document[]> = writable(null);
 export const tools = writable(null);
 export const skills: Writable<null | any[]> = writable(null);
-export const terminalSkills: Writable<any[]> = writable([]);
+export const machineSkills: Writable<any[]> = writable([]);
 export const functions = writable(null);
+
+export type ImageModel = {
+	id: string;
+	name: string;
+	model: string;
+	connection_id: string;
+	connection_name: string;
+	image_generation: boolean;
+	image_edit: boolean;
+};
+export const imageModels: Writable<null | ImageModel[]> = writable(null);
+
+export type VideoModel = {
+	id: string;
+	name: string;
+	model: string;
+	connection_id: string;
+	connection_name: string;
+};
+export const videoModels: Writable<null | VideoModel[]> = writable(null);
 
 export type WorkspaceSection = 'models' | 'knowledge' | 'prompts' | 'skills' | 'tools';
 export type WorkspaceAction = {
@@ -96,21 +140,12 @@ export type WorkspaceAction = {
 	visible?: boolean;
 };
 
-export const workspaceCounts: Writable<Record<WorkspaceSection, number | null>> = writable({
-	models: null,
-	knowledge: null,
-	prompts: null,
-	skills: null,
-	tools: null
-});
-export const workspaceActions: Writable<WorkspaceAction[]> = writable([]);
 export const adminUserCount: Writable<number | null> = writable(null);
 export const adminGroupCount: Writable<number | null> = writable(null);
 export const adminLeaderboardCount: Writable<number | null> = writable(null);
 export const adminFeedbackCount: Writable<number | null> = writable(null);
 
-export const toolServers = writable([]);
-export const terminalServers: Writable<any[] | null> = writable(null);
+export const machines: Writable<any[] | null> = writable(null);
 
 // Persistent Pyodide worker for code interpreter FS
 export const pyodideWorker: Writable<Worker | null> = writable(null);
@@ -129,7 +164,7 @@ export const pinnedModels = derived([settings, config], ([$settings, $config]) =
 // Pins for models the user cannot see are kept in their settings but left out of the sidebar
 export const visiblePinnedModels = derived([pinnedModels, models], ([$pinnedModels, $models]) =>
 	$pinnedModels.filter((id) =>
-		$models.some((model) => model.id === id && !model.info?.meta?.hidden)
+		($models ?? []).some((model) => model.id === id && !model.info?.meta?.hidden)
 	)
 );
 
@@ -176,55 +211,81 @@ export const showChangelog = writable(false);
 
 export const showTabs = writable<
 	| boolean
-	| 'files'
 	| 'comments'
-	| 'side'
+	| 'chat'
+	| 'voice'
 	| (CommentTarget & { tab: 'comments'; comment_id?: string })
 >(false);
 export const showEmbeds = writable(false);
-export const showOverview = writable(false);
-export const showArtifacts = writable(false);
-export const showCallOverlay = writable(false);
-export const showFileNav = writable(false);
+/** A voice call is open in the main chat's voice tab. */
+export const voiceCall = writable(false);
+export const showFileNav = writable<{
+	machineId: string;
+	directory: string;
+	chatId: string | null;
+} | null>(null);
 export type FileNavOpenRequest = string | { path: string; page?: number | null };
 export const showFileNavPath: Writable<FileNavOpenRequest | null> = writable(null);
 export const showFileNavDir: Writable<string | null> = writable(null);
-export const selectedTerminalId: Writable<string | null> = writable(null);
+export const selectedMachineId: Writable<string | null> = writable(null);
 
-export const artifactCode = writable(null);
-export const artifactContents = writable(null);
+export const embed = writable<any>(null);
 
-export const embed = writable(null);
+/** Whether the main chat is temporary, or for a new chat, whether it starts as one. */
+export const temporaryChat = writable(false);
+export const openEmbeddedChatIds = writable<Set<string>>(new Set());
+/** The saved chat whose tab is in front, when it is not the main chat. */
+export const activeChatTabId = writable<string | null>(null);
+export const chatTabRequest = writable<
+	{ parentChatId: string; prompt: string } | { folderId: string } | null
+>(null);
 
-export const temporaryChatEnabled = writable(false);
-export const openTemporaryChatIds = writable<Set<string>>(new Set());
-export const sideChatRequest = writable<{ parentId: string; prompt: string } | null>(null);
-
-// Transient one-shot event from the desktop shell (Spotlight, drag-and-drop, etc.).
-// Set by +layout.svelte, consumed and cleared by Chat.svelte.
-export type DesktopEventFile = { name: string; mimeType: string; dataUrl: string };
-export type DesktopEvent = {
-	type: string;
-	data?: any;
+export type QueryData = {
+	query: string;
+	files: { name: string; mimeType: string; dataUrl: string }[];
 };
+export type TetherEvent = { type: 'query'; data: QueryData } | { type: 'voice' };
+// The legacy call shortcut is separate from acknowledged Tether events.
+export type DesktopEvent =
+	| { type: 'call'; handoff?: never }
+	| (TetherEvent & {
+			handoff: { isCurrent: () => boolean; complete: (error?: string) => void };
+	  });
 export const desktopEvent: Writable<DesktopEvent | null> = writable(null);
 
 export const isLastActiveTab = writable(true);
-export const playingNotificationSound = writable(false);
 
-export type Model = OpenAIModel | OllamaModel;
+export type Model = OpenAIModel | OllamaModel | AgentModel | RouterModel;
+
+export interface AgentModel extends BaseModel {
+	owned_by: 'machine' | 'terminal'; // 'terminal' from older servers
+	agent: {
+		machine_id: string;
+		// Built-in ids such as 'codex' or 'claude-code', or 'acp-<id>' for agents configured in Open Terminal.
+		provider: string;
+		model: string;
+	};
+}
 
 type BaseModel = {
 	id: string;
 	name: string;
 	info?: ModelConfig;
-	owned_by: 'ollama' | 'openai' | 'arena';
+	owned_by: 'ollama' | 'openai' | 'router' | 'machine' | 'terminal';
 };
 
 export interface OpenAIModel extends BaseModel {
 	owned_by: 'openai';
 	external: boolean;
 	source?: string;
+	// Set on the user's own connections, which the server reaches through their Tether.
+	owner_id?: string;
+	base_url?: string;
+}
+
+export interface RouterModel extends BaseModel {
+	owned_by: 'router';
+	router: true;
 }
 
 export interface OllamaModel extends BaseModel {
@@ -265,7 +326,7 @@ type OllamaModelDetails = {
 type Settings = {
 	pipeReasoningEfforts?: Record<string, string>;
 	pinnedModels?: string[];
-	toolServers?: never[];
+	temporaryChatByDefault?: boolean;
 	detectArtifacts?: boolean;
 	showUpdateToast?: boolean;
 	showChangelog?: boolean;
@@ -274,6 +335,7 @@ type Settings = {
 	collapseCodeBlocks?: boolean;
 	expandDetails?: boolean;
 	notificationSound?: boolean;
+	notificationSoundType?: NotificationSoundStyle;
 	notificationSoundAlways?: boolean;
 	stylizedPdfExport?: boolean;
 	notifications?: any;
@@ -288,6 +350,7 @@ type Settings = {
 	responseAutoCopy?: any;
 	richTextInput?: boolean;
 	showFormattingToolbar?: boolean;
+	showInputSelections?: boolean;
 	params?: any;
 	userLocation?: any;
 	webSearch?: any;
@@ -301,12 +364,12 @@ type Settings = {
 	iframeSandboxAllowForms?: boolean;
 	iframeSandboxAllowSameOrigin?: boolean;
 	iframeSandboxAllowDownloads?: boolean;
-	terminalPreviewAllowSameOrigin?: boolean;
+	machinePreviewAllowSameOrigin?: boolean;
+	terminalPreviewAllowSameOrigin?: boolean; // former name
 	scrollOnBranchChange?: boolean;
 	scrollOnResponseGeneration?: boolean;
-	showFilesOnTerminalSelect?: boolean;
-	terminalFileDisplay?: 'sidebar' | 'inline';
-	directConnections?: null;
+	machineFileDisplay?: 'sidebar' | 'inline';
+	terminalFileDisplay?: 'sidebar' | 'inline'; // former name
 	chatBubble?: boolean;
 	copyFormatted?: boolean;
 	models?: string[];
@@ -330,6 +393,8 @@ type Settings = {
 	recentEmojis?: string[];
 	pinnedMenuItems?: string[];
 	pinnedNotesOrder?: string[];
+	/** Folder ids in display order, by parent folder id ('root' for top-level folders). */
+	folderOrder?: Record<string, string[]>;
 
 	defaultUploadContext?: 'full' | 'focused';
 
@@ -374,6 +439,18 @@ type Document = {
 };
 
 type Config = {
+	file?: {
+		max_size?: number | null;
+		max_count?: number | null;
+		full_context?: boolean;
+		full_text_threshold?: number;
+		full_text_threshold_type?: string;
+		image_compression?: { width?: number | null; height?: number | null };
+	};
+	metadata?: {
+		auth_logo_position?: 'center' | 'top-right';
+		login_footer?: string;
+	};
 	audio?: {
 		realtime?: { enabled: boolean; model: string; voice: string };
 		stt: { engine: string };
@@ -386,6 +463,7 @@ type Config = {
 	default_locale: string;
 	i18n?: I18nOverrides;
 	default_models: string;
+	fallback_default_models?: string | null;
 	default_pinned_models?: string | null;
 	default_prompt_suggestions: PromptSuggestion[] | null;
 	default_prompt_suggestions_i18n?: Record<string, { suggestion_prompts: PromptSuggestion[] }>;
@@ -404,6 +482,7 @@ type Config = {
 		enable_google_drive_integration: boolean;
 		enable_onedrive_integration: boolean;
 		enable_image_generation: boolean;
+		enable_video_generation: boolean;
 		enable_code_interpreter: boolean;
 		enable_admin_export: boolean;
 		enable_admin_chat_access: boolean;
@@ -411,6 +490,7 @@ type Config = {
 		enable_context_compaction?: boolean;
 		enable_tool_permissions?: boolean;
 		enable_onlyoffice_preview?: boolean;
+		enable_tool_permissions_auto?: boolean;
 		enable_community_sharing: boolean;
 		enable_memories: boolean;
 		enable_notes?: boolean;
@@ -419,20 +499,21 @@ type Config = {
 		enable_channels?: boolean;
 		enable_user_webhooks?: boolean;
 		enable_automations?: boolean;
+		enable_automation_webhooks?: boolean;
 		enable_calendar?: boolean;
 		enable_subagents?: boolean;
 		enable_plugins?: boolean;
 		enable_tools?: boolean;
 		enable_functions?: boolean;
 		enable_tool_servers?: boolean;
-		enable_terminal_servers?: boolean;
+		enable_machines?: boolean;
+		// The user's own machines, models and tool servers come from their Tether.
+		tether?: boolean;
 		enable_apps?: boolean;
 		enable_autocomplete_generation: boolean;
 		enable_title_generation: boolean;
 		enable_follow_up_generation: boolean;
 		enable_tags_generation: boolean;
-		enable_direct_connections: boolean;
-		enable_direct_integrations?: boolean;
 		enable_version_update_check: boolean;
 		enable_pyodide_file_persistence?: boolean;
 		folder_max_file_count?: number;

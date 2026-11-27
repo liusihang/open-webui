@@ -4,6 +4,7 @@ import hashlib
 import logging
 import os
 import uuid
+from contextlib import nullcontext
 from pathlib import Path
 from typing import Optional
 from urllib.parse import quote
@@ -21,7 +22,13 @@ from fastapi import (
     status,
 )
 from fastapi.responses import FileResponse, Response, StreamingResponse
-from open_webui.config import BYPASS_ADMIN_ACCESS_CONTROL, STORAGE_LOCAL_CACHE, STORAGE_PROVIDER, UPLOAD_DIR
+from open_webui.config import (
+    BYPASS_ADMIN_ACCESS_CONTROL,
+    STORAGE_LOCAL_CACHE,
+    STORAGE_PROVIDER,
+    THREAD_POOL_SIZE,
+    UPLOAD_DIR,
+)
 from open_webui.constants import ERROR_MESSAGES
 from open_webui.events import EVENTS, publish_event
 from open_webui.internal.db import get_async_db_context, get_async_session
@@ -32,29 +39,30 @@ from open_webui.models.config import Config
 from open_webui.models.files import (
     FileForm,
     FileListResponse,
-    FileModel,
     FileModelResponse,
     Files,
 )
 from open_webui.models.groups import Groups
 from open_webui.models.knowledge import Knowledges
 from open_webui.models.users import Users
+from open_webui.retrieval.utils import is_full_text
 from open_webui.retrieval.vector.async_client import ASYNC_VECTOR_DB_CLIENT
 from open_webui.routers.audio import transcribe
 from open_webui.routers.knowledge import check_knowledge_upload_limits
-from open_webui.routers.retrieval import ProcessFileForm, process_file
+from open_webui.routers.retrieval import ProcessFileForm, index_file, process_file
 from open_webui.storage.provider import Storage
 from open_webui.utils.auth import get_admin_user, get_verified_user
 from open_webui.utils.misc import strict_match_mime_type
-from open_webui.utils.native_pdf import should_defer_pdf_processing, validate_chat_pdf_upload
-from open_webui.utils.access_control.files import has_access_to_file
-from open_webui.utils.json_codec import JSONCodec
 from pydantic import BaseModel
 from sqlalchemy.ext.asyncio import AsyncSession
 
-router = APIRouter()
 log = logging.getLogger(__name__)
 
+router = APIRouter()
+
+
+from open_webui.utils.access_control.files import has_access_to_file
+from open_webui.utils.json_codec import JSONCodec
 
 async def _evidence_for_file(request, file_id, ref, user):
     from open_webui.retrieval.integration import services
@@ -148,17 +156,17 @@ async def get_retrieval_status(id: str, user=Depends(get_verified_user)):
 async def retry_file_image_index(
     request: Request, id: str, user=Depends(get_verified_user), db: AsyncSession = Depends(get_async_session)
 ):
-    from open_webui.retrieval.ingestion import submit_file
+    from open_webui.retrieval.integration import index_document_images
 
-    state = await Files.get_file_processing_state(id)
-    if not state or not (
-        state['user_id'] == user.id or user.role == 'admin' or await has_access_to_file(id, 'write', user, db=db)
-    ):
+    file = await Files.get_file_by_id(id, db=db)
+    if not file or not (file.user_id == user.id or user.role == 'admin' or await has_access_to_file(id, 'write', user, db=db)):
         raise HTTPException(404, 'File not found')
-    if not state.get('retrieval_version'):
-        raise HTTPException(409, 'No published source version to retry')
-    queued = await submit_file(request, ProcessFileForm(file_id=id), user=user, db=db, wait=False, retry_images=True)
-    return {'scheduled': 1, 'version': state['retrieval_version'], **queued}
+    data = file.data or {}
+    assets = data.get('document_image_assets') or []
+    if not assets:
+        raise HTTPException(409, 'No saved images to index')
+    await index_document_images(request, file, assets, data.get('document_image_assets_skipped') or [], user=user)
+    return {'version': data.get('retrieval_version'), 'scheduled': 0}
 
 
 @router.get('/{id}/evidence/{ref}')
@@ -196,6 +204,13 @@ async def get_file_evidence_image(request: Request, id: str, ref: str, user=Depe
     except (ValueError, PermissionError, OSError):
         raise HTTPException(404, 'Image evidence is unavailable')
 
+
+
+
+# Leave half of the worker threads free for uploads while knowledge base syncs queue up.
+_knowledge_processing_semaphore: asyncio.Semaphore = asyncio.Semaphore(
+    max((THREAD_POOL_SIZE if THREAD_POOL_SIZE and THREAD_POOL_SIZE > 0 else min(32, (os.cpu_count() or 1) + 4)) // 2, 1)
+)
 
 # Upload File
 # What was entrusted here was given in good faith. Let it
@@ -274,46 +289,152 @@ async def process_uploaded_file(
     db: Optional[AsyncSession] = None,
 ):
     async def _process_handler(db_session):
-        from open_webui.retrieval.ingestion import submit_file, link_stored_upload
-
         try:
-            await validate_knowledge_upload_target(file_metadata, user, db=db_session)
-            content_type = file.content_type
-            if content_type and content_type.startswith(('image/', 'video/')) and _is_text_file(file_path):
-                content_type = 'text/plain'
-            stt_supported = await Config.get('audio.stt.supported_content_types', [])
-            extraction = await Config.get('rag.content_extraction_engine')
-            supported_media = await Config.get('rag.content_extraction.supported_media_mime_types')
-            content = None
-            if content_type and strict_match_mime_type(stt_supported, content_type):
-                result = await transcribe(
-                    request, await asyncio.to_thread(Storage.get_file, file_path), file_metadata, user
+            if file_metadata.get('knowledge_id'):
+                await check_knowledge_upload_limits(
+                    file_metadata['knowledge_id'],
+                    1,
+                    file_size=(file_item.meta or {}).get('size'),
+                    exclude_file_ids=[file_item.id],
+                    db=db_session,
                 )
-                content = result.get('text', '')
+            await Files.update_file_data_by_id(file_item.id, {'status': 'processing'}, db=db_session)
+            content_type = file.content_type
+
+            # Detect mis-labeled text files (e.g. .ts → video/mp2t)
+            if content_type and content_type.startswith(('image/', 'video/')):
+                if _is_text_file(file_path):
+                    content_type = 'text/plain'
+
+            stt_supported = await Config.get('audio.stt.supported_content_types', [])
+            content_extraction_engine = await Config.get('rag.content_extraction_engine')
+            content_extraction_supported_media_mime_types = await Config.get(
+                'rag.content_extraction.supported_media_mime_types'
+            )
+
+            if content_type and strict_match_mime_type(stt_supported, content_type):
+                # Audio / STT-supported files → transcribe then index
+                file_path_processed = await asyncio.to_thread(Storage.get_file, file_path)
+                result = await transcribe(
+                    request,
+                    file_path_processed,
+                    file_metadata,
+                    user,
+                )
+                await index_file(
+                    request,
+                    ProcessFileForm(file_id=file_item.id, content=result.get('text', '')),
+                    user=user,
+                    db=db_session,
+                )
+
             elif (
                 content_type
-                and content_type.startswith('video/')
-                and not _media_supported_for_extraction(extraction, supported_media, content_type)
+                and content_type.startswith(('image/', 'video/'))
+                and not _media_supported_for_extraction(
+                    content_extraction_engine, content_extraction_supported_media_mime_types, content_type
+                )
             ):
-                # Non-extracted video has no index candidate. Link and complete atomically.
-                await link_stored_upload(file_item.id, user, file_metadata)
-                return
+                if content_type.startswith('video/'):
+                    # Keep videos for multimodal processing; text extraction can time out detecting their encoding.
+                    log.info('Video file detected (%s), skipping text extraction', content_type)
+                else:
+                    from open_webui.retrieval.document_image_assets import ImageAssetStore, MAX_IMAGE_BYTES
+                    from open_webui.retrieval.integration import asset_root, index_document_images
+
+                    local_path = await asyncio.to_thread(Storage.get_file, file_item.path)
+                    root = asset_root(await Config.get_many('rag.document_image_asset_root'))
+                    def read_asset():
+                        with open(local_path, 'rb') as stream:
+                            return ImageAssetStore(root, file_item.id).put(
+                                stream.read(MAX_IMAGE_BYTES + 1), backend='upload', origin_reference=file_item.filename
+                            )
+                    asset = await asyncio.to_thread(read_asset)
+                    await index_document_images(request, file_item, [asset], [], user=user)
+
+            else:
+                # Documents, or media files explicitly enabled for the
+                # configured content extraction engine.
+                if not content_type:
+                    log.info('File type %s is not provided, but trying to process anyway', file.content_type)
+                await index_file(
+                    request,
+                    ProcessFileForm(file_id=file_item.id),
+                    user=user,
+                    db=db_session,
+                )
+
+            # Auto-link to Knowledge Collection when uploaded from one (#24807).
+            # Mirrors POST /knowledge/{id}/file/add so linking doesn't depend
+            # on the frontend staying connected after upload.
             knowledge_id = file_metadata.get('knowledge_id')
-            await submit_file(
-                request,
-                ProcessFileForm(file_id=file_item.id, content=content, collection_name=knowledge_id),
-                user=user,
-                db=db_session,
-                auto_link={'directory_id': file_metadata.get('directory_id')} if knowledge_id else None,
-            )
+            if knowledge_id:
+                try:
+                    # Gate like POST /knowledge/{id}/file/add: a client-supplied
+                    # metadata.knowledge_id must not let a non-writer attach files (CWE-862/863).
+                    knowledge = await Knowledges.get_knowledge_by_id(id=knowledge_id, db=db_session)
+                    can_write = bool(knowledge) and (
+                        knowledge.user_id == user.id
+                        or user.role == 'admin'
+                        or await AccessGrants.has_access(
+                            user_id=user.id,
+                            resource_type='knowledge',
+                            resource_id=knowledge.id,
+                            permission='write',
+                            db=db_session,
+                        )
+                    )
+                    if not can_write:
+                        log.warning(
+                            f'Refusing to auto-link file {file_item.id} to knowledge '
+                            f'{knowledge_id}: user {user.id} lacks write access'
+                        )
+                    else:
+                        directory_id = file_metadata.get('directory_id') or None
+                        if directory_id:
+                            directory = await Knowledges.get_directory_by_id(directory_id, db=db_session)
+                            if not directory or directory.knowledge_id != knowledge_id:
+                                log.warning(
+                                    'Ignoring directory %s: not a directory of knowledge %s', directory_id, knowledge_id
+                                )
+                                directory_id = None
+
+                        knowledge_file = await Knowledges.add_file_to_knowledge_by_id(
+                            knowledge_id=knowledge_id,
+                            file_id=file_item.id,
+                            user_id=user.id,
+                            directory_id=directory_id,
+                            db=db_session,
+                        )
+                        if not knowledge_file:
+                            raise Exception(f'Failed to link file {file_item.id} to knowledge {knowledge_id}')
+                        try:
+                            await index_file(
+                                request,
+                                ProcessFileForm(file_id=file_item.id, collection_name=knowledge_id),
+                                user=user,
+                                db=db_session,
+                            )
+                        except Exception:
+                            await Knowledges.remove_file_from_knowledge_by_id(knowledge_id, file_item.id, db=db_session)
+                            raise
+                        log.info('Linked file %s to knowledge %s', file_item.id, knowledge_id)
+                except Exception as e:
+                    log.warning(f'Failed to link file {file_item.id} to knowledge {knowledge_id}: {e}')
+                    raise
+
+            # Completion includes the durable knowledge link, when requested.
+            await Files.update_file_data_by_id(file_item.id, {'status': 'completed', 'error': None}, db=db_session)
+
         except Exception as e:
-            log.exception('Error processing file: %s', file_item.id)
+            log.error(f'Error processing file: {file_item.id}')
             await Files.update_file_data_by_id(
                 file_item.id,
                 {
                     'status': 'failed',
                     'error': str(e.detail) if hasattr(e, 'detail') else str(e),
                 },
+                db=db_session,
             )
 
     try:
@@ -370,29 +491,6 @@ async def upload_file(
     return result
 
 
-async def validate_knowledge_upload_target(metadata, user, db=None):
-    """Reject stale targets before storing bytes, then recheck in the worker."""
-    knowledge_id = metadata.get('knowledge_id')
-    if not knowledge_id:
-        return
-    knowledge = await Knowledges.get_knowledge_by_id(knowledge_id, db=db)
-    if not knowledge:
-        raise HTTPException(404, '目标知识库已删除或不存在，请重新选择上传位置。')
-    if not (
-        user.role == 'admin'
-        or knowledge.user_id == user.id
-        or await AccessGrants.has_access(
-            user_id=user.id, resource_type='knowledge', resource_id=knowledge_id, permission='write', db=db
-        )
-    ):
-        raise HTTPException(403, '没有此知识库的写入权限，请重新选择上传位置。')
-    directory_id = metadata.get('directory_id')
-    if directory_id:
-        directory = await Knowledges.get_directory_by_id(directory_id, db=db)
-        if not directory or directory.knowledge_id != knowledge_id:
-            raise HTTPException(404, '目标文件夹已删除或不属于此知识库，请重新选择上传位置。')
-
-
 async def upload_file_handler(
     request: Request,
     file: UploadFile = File(...),
@@ -413,12 +511,9 @@ async def upload_file_handler(
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail=ERROR_MESSAGES.DEFAULT('Invalid metadata format'),
             )
-    file_metadata = dict(metadata) if isinstance(metadata, dict) else {}
-    # Only the backend may decide whether a file was stored without parsing.
-    file_metadata.pop('native_model_file', None)
+    file_metadata = metadata if metadata else {}
 
     try:
-        await validate_knowledge_upload_target(file_metadata, user, db=db)
         unsanitized_filename = file.filename
         filename = os.path.basename(unsanitized_filename)
 
@@ -436,10 +531,6 @@ async def upload_file_handler(
                     detail=ERROR_MESSAGES.DEFAULT(f'File type {file_extension} is not allowed'),
                 )
 
-        # Admission precedes durable storage, DB insertion and extraction. This
-        # applies to all chat models, even when processing was disabled by the
-        # caller; knowledge/channel uploads are intentionally exempt.
-        await asyncio.to_thread(validate_chat_pdf_upload, file_metadata, filename, file.content_type, file.file)
         knowledge_id = file_metadata.get('knowledge_id')
         if knowledge_id:
             knowledge = await Knowledges.get_knowledge_by_id(knowledge_id, db=db)
@@ -463,27 +554,8 @@ async def upload_file_handler(
             'OpenWebUI-User-Name': user.name,
             'OpenWebUI-File-Id': id,
         }
-        from open_webui.retrieval.admission import stream_hash
-
-        file_hash, upload_size = await asyncio.to_thread(stream_hash, file.file)
-        if knowledge_id:
-            await check_knowledge_upload_limits(knowledge_id, 1, batch=True, file_size=upload_size, db=db)
-        from open_webui.config import UPLOAD_DIR
-        import shutil
-
-        minimum_free = int(os.getenv('INDEXING_UPLOAD_STORAGE_MIN_FREE_BYTES', str(2 * 1024**3)))
-        if shutil.disk_usage(UPLOAD_DIR).free - upload_size < minimum_free:
-            raise HTTPException(507, 'Insufficient upload storage headroom; no file was stored')
-        max_size = await Config.get('rag.file.max_size')
-        if max_size and upload_size > int(max_size) * 1024 * 1024:
-            raise HTTPException(status_code=413, detail=ERROR_MESSAGES.FILE_TOO_LARGE(size=f'{max_size} MB'))
-        file.file.seek(0)
-        header = file.file.read(8)
-        file.file.seek(0)
         try:
-            _, file_path = await asyncio.to_thread(
-                Storage.upload_file, file.file, filename, tags, return_contents=False
-            )
+            contents, file_path = await asyncio.to_thread(Storage.upload_file, file.file, filename, tags)
         except OSError as e:
             if e.errno != errno.ENAMETOOLONG:
                 log.exception(e)
@@ -495,23 +567,33 @@ async def upload_file_handler(
             file.file.seek(0)
             filename = f'{id}.{file_extension}' if file_extension else id
             try:
-                _, file_path = await asyncio.to_thread(
-                    Storage.upload_file, file.file, filename, tags, return_contents=False
-                )
+                contents, file_path = await asyncio.to_thread(Storage.upload_file, file.file, filename, tags)
             except OSError as e:
                 log.exception(e)
                 raise HTTPException(
                     status_code=status.HTTP_400_BAD_REQUEST,
                     detail=ERROR_MESSAGES.DEFAULT(e.strerror or 'Error uploading file'),
                 )
-        native_pdf = should_defer_pdf_processing(
-            file_metadata, name, file.content_type, header, request.app.state.MODELS, size=upload_size
-        )
-        if native_pdf:
-            process = False
-            file_metadata['native_model_file'] = True
+        max_size = await Config.get('rag.file.max_size')
+        if max_size and len(contents) > int(max_size) * 1024 * 1024:
+            await asyncio.to_thread(Storage.delete_file, file_path)
+            raise HTTPException(
+                status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
+                detail=ERROR_MESSAGES.FILE_TOO_LARGE(size=f'{max_size} MB'),
+            )
 
-        # The server's streamed hash, never a client claim, is used for dedup.
+        if knowledge_id:
+            try:
+                await check_knowledge_upload_limits(knowledge_id, 0, file_size=len(contents), db=db)
+            except HTTPException:
+                await asyncio.to_thread(Storage.delete_file, file_path)
+                raise
+
+        # SHA-256 of raw uploaded bytes for incremental sync diffing.
+        # If the client pre-computed and sent file_hash, use that.
+        file_hash = file_metadata.get('file_hash') or await asyncio.to_thread(
+            lambda: hashlib.sha256(contents).hexdigest()
+        )
 
         file_item = await Files.insert_new_file(
             user.id,
@@ -521,14 +603,13 @@ async def upload_file_handler(
                     'filename': name,
                     'path': file_path,
                     'data': {
-                        **({'status': 'pending'} if process else {'status': 'completed'} if native_pdf else {}),
+                        **({'status': 'pending'} if process else {}),
                     },
                     'meta': {
                         'name': name,
                         'content_type': (file.content_type if isinstance(file.content_type, str) else None),
-                        'size': upload_size,
+                        'size': len(contents),
                         'file_hash': file_hash,
-                        'server_hash_verified': True,
                         'data': file_metadata,
                     },
                 }
@@ -542,70 +623,20 @@ async def upload_file_handler(
                 await Channels.add_file_to_channel_by_id(channel.id, file_item.id, user.id, db=db)
 
         if process:
-            # Persist document/image work before returning an upload response.
-            # STT retains its existing transcription path, but its subsequent
-            # document indexing also crosses process_file's durable queue seam.
-            stt_types = await Config.get('audio.stt.supported_content_types', [])
-            is_stt = bool(file.content_type and strict_match_mime_type(stt_types, file.content_type))
-            is_video = bool(file.content_type and file.content_type.startswith('video/'))
-            if not is_stt and not is_video:
-                from open_webui.retrieval.ingestion import submit_file
-
-                knowledge_id = file_metadata.get('knowledge_id')
-                try:
-                    async with get_async_db_context(db) as session:
-                        queued = await submit_file(
-                            request,
-                            ProcessFileForm(file_id=file_item.id, collection_name=knowledge_id),
-                            user=user,
-                            db=session,
-                            wait=not process_in_background,
-                            auto_link={'directory_id': file_metadata.get('directory_id')} if knowledge_id else None,
-                            received=True,
-                        )
-                except Exception as exc:
-                    from open_webui.retrieval.ingestion_queue import DuplicateIngestion
-
-                    if isinstance(exc, DuplicateIngestion):
-                        await Files.update_file_data_by_id(
-                            file_item.id,
-                            {'status': 'failed', 'error': str(exc), 'duplicate_ingestion_job_id': exc.job_id},
-                        )
-                        raise HTTPException(409, str(exc)) from None
-                    from open_webui.retrieval.admission import AdmissionError
-
-                    reason = (
-                        str(exc.detail)
-                        if isinstance(exc, HTTPException)
-                        else str(exc)
-                        if isinstance(exc, AdmissionError)
-                        else 'Indexing request not accepted; original retained'
-                    )
-                    await Files.update_file_data_by_id(
-                        file_item.id,
-                        {'status': 'failed', 'error': reason},
-                    )
-                    raise
-                state = await Files.get_file_processing_state(file_item.id) or {}
-                return {
-                    'status': True,
-                    **file_item.model_dump(),
-                    **queued,
-                    'data': {
-                        **(file_item.data or {}),
-                        **{key: state.get(key) for key in ('status', 'processing_status', 'error', 'ingestion_job_id')},
-                    },
-                }
             if background_tasks and process_in_background:
-                background_tasks.add_task(
-                    process_uploaded_file,
-                    request,
-                    file,
-                    file_path,
-                    file_item,
-                    file_metadata,
-                    user,
-                )
+
+                async def _background_handler():
+                    async with _knowledge_processing_semaphore if knowledge_id else nullcontext():
+                        await process_uploaded_file(
+                            request,
+                            file,
+                            file_path,
+                            file_item,
+                            file_metadata,
+                            user,
+                        )
+
+                background_tasks.add_task(_background_handler)
                 return {'status': True, **file_item.model_dump()}
             else:
                 await process_uploaded_file(
@@ -740,14 +771,6 @@ async def count_user_files(
 async def delete_all_files(
     request: Request, user=Depends(get_admin_user), db: AsyncSession = Depends(get_async_session)
 ):
-    from sqlalchemy import select
-    from open_webui.models.files import File as FileRow
-    from open_webui.retrieval.integration import deactivate
-
-    identities = list(await db.scalars(select(FileRow.id)))
-    await db.commit()
-    for identity in identities:
-        await deactivate(request, identity)
     result = await Files.delete_all_files(db=db)
     if result:
         try:
@@ -772,7 +795,7 @@ async def delete_all_files(
 # Get File By Id
 
 
-@router.get('/{id}', response_model=Optional[FileModel])
+@router.get('/{id}', response_model=Optional[dict])
 async def get_file_by_id(id: str, user=Depends(get_verified_user), db: AsyncSession = Depends(get_async_session)):
     file = await Files.get_file_by_id(id, db=db)
 
@@ -783,7 +806,12 @@ async def get_file_by_id(id: str, user=Depends(get_verified_user), db: AsyncSess
         )
 
     if file.user_id == user.id or user.role == 'admin' or await has_access_to_file(id, 'read', user, db=db):
-        return file
+        config = await Config.get_many(
+            'rag.full_context_char_threshold', 'rag.full_text_threshold_type', 'rag.tiktoken_encoding_name', db=db
+        )
+        content = (file.data or {}).get('content') or ''
+        full_text = await asyncio.to_thread(is_full_text, content, config)
+        return {**file.model_dump(), 'full_text': full_text}
     else:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
@@ -792,42 +820,59 @@ async def get_file_by_id(id: str, user=Depends(get_verified_user), db: AsyncSess
 
 
 @router.get('/{id}/process/status')
-async def get_file_process_status(id: str, stream: bool = Query(False), user=Depends(get_verified_user)):
-    from open_webui.retrieval.ingestion_queue import expire_jobs
+async def get_file_process_status(
+    id: str,
+    stream: bool = Query(False),
+    user=Depends(get_verified_user),
+):
+    # Let DB helpers own short-lived sessions so remote calls and streams do not hold pool connections.
+    file = await Files.get_file_by_id(id)
 
-    async def current(file_id):
-        state = await Files.get_file_processing_state(file_id)
-        if state and state.get('ingestion_job_id'):
-            if await expire_jobs(job_id=state['ingestion_job_id']):
-                state = await Files.get_file_processing_state(file_id)
-        return state
+    if not file:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=ERROR_MESSAGES.NOT_FOUND,
+        )
 
-    file = await current(id)
-    if not file or not (
-        file['user_id'] == user.id or user.role == 'admin' or await has_access_to_file(id, 'read', user)
-    ):
-        raise HTTPException(404, ERROR_MESSAGES.NOT_FOUND)
-    if not stream:
-        return {'status': file.get('status') or 'pending', **({'error': file['error']} if file.get('error') else {})}
+    if file.user_id == user.id or user.role == 'admin' or await has_access_to_file(id, 'read', user):
+        if stream:
+            MAX_FILE_PROCESSING_DURATION = 3600 * 2
 
-    async def event_stream():
-        for _ in range(7200):
-            state = await current(id)
-            if state is None:
-                yield f'data: {JSONCodec.dumps({"status": "not_found"})}\n\n'
-                break
-            status = state.get('status')
-            if not status:
-                break
-            event = {'status': status}
-            if status == 'failed':
-                event['error'] = state.get('error')
-            yield f'data: {JSONCodec.dumps(event)}\n\n'
-            if status in ('completed', 'failed'):
-                break
-            await asyncio.sleep(1)
+            async def event_stream(file_id):
+                for _ in range(MAX_FILE_PROCESSING_DURATION):
+                    file_item = await Files.get_file_by_id(file_id)
+                    if file_item:
+                        data = file_item.model_dump().get('data', {})
+                        status = data.get('status')
 
-    return StreamingResponse(event_stream(), media_type='text/event-stream')
+                        if status:
+                            event = {'status': status}
+                            if status == 'failed':
+                                event['error'] = data.get('error')
+
+                            yield f'data: {JSONCodec.dumps(event)}\n\n'
+                            if status in ('completed', 'failed'):
+                                break
+                        else:
+                            # Legacy
+                            break
+                    else:
+                        yield f'data: {JSONCodec.dumps({"status": "not_found"})}\n\n'
+                        break
+
+                    await asyncio.sleep(1)
+
+            return StreamingResponse(
+                event_stream(file.id),
+                media_type='text/event-stream',
+            )
+        else:
+            return {'status': file.data.get('status', 'pending')}
+    else:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=ERROR_MESSAGES.NOT_FOUND,
+        )
 
 
 # Get File Data Content By Id
@@ -902,9 +947,30 @@ async def update_file_data_content_by_id(
                 status_code=500, detail='Failed to process indexed text. Your changes were not fully indexed.'
             ) from e
 
-        # The indexing worker publishes the file and every attached knowledge
-        # scope atomically. Do not fetch/rewrite whole legacy vector collections
-        # here or schedule a second index pass after publication.
+        # Propagate content change to all knowledge collections referencing
+        # this file.  Without this the old embeddings remain in the knowledge
+        # collection and RAG returns both stale and current data (#20558).
+        knowledges = await Knowledges.get_knowledges_by_file_id(id, db=db)
+        failed_collections = []
+        for knowledge in knowledges:
+            try:
+                old_vectors = await ASYNC_VECTOR_DB_CLIENT.query(collection_name=knowledge.id, filter={'file_id': id})
+                old_vector_ids = old_vectors.ids[0] if old_vectors and old_vectors.ids else []
+
+                # Re-add from the now-updated file-{file_id} collection before
+                # removing old vectors, so a failed reindex keeps the KB usable.
+                await process_file(
+                    request,
+                    ProcessFileForm(file_id=id, collection_name=knowledge.id),
+                    user=user,
+                    db=db,
+                )
+                if old_vector_ids:
+                    await ASYNC_VECTOR_DB_CLIENT.delete(collection_name=knowledge.id, ids=old_vector_ids)
+            except Exception as e:
+                log.warning(f'Failed to update knowledge {knowledge.id} after content change for file {id}: {e}')
+                failed_collections.append(knowledge.id)
+
         await publish_event(
             request,
             EVENTS.FILE_CONTENT_UPDATED,
@@ -912,6 +978,11 @@ async def update_file_data_content_by_id(
             subject_id=id,
             data={'content_preview': form_data.content[:300]},
         )
+        if failed_collections:
+            raise HTTPException(
+                status_code=500,
+                detail='Indexed text was saved, but some knowledge collections could not be reindexed. Retry saving to complete indexing.',
+            )
         return {'content': file.data.get('content', '')}
     else:
         raise HTTPException(
@@ -1151,10 +1222,6 @@ async def delete_file_by_id(
 
     if file.user_id == user.id or user.role == 'admin' or await has_access_to_file(id, 'write', user, db=db):
         # Clean up KB associations and embeddings before deleting
-        from open_webui.retrieval.integration import deactivate
-
-        await db.commit()
-        await deactivate(request, id)
         knowledges = await Knowledges.get_knowledges_by_file_id(id, db=db)
         for knowledge in knowledges:
             # Remove KB-file relationship

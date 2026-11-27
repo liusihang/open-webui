@@ -64,10 +64,12 @@ from open_webui.events import EVENTS, publish_event
 from open_webui.internal.db import get_async_db, get_async_session
 from open_webui.models.files import FileModel, Files, FileUpdateForm
 from open_webui.models.knowledge import Knowledges
+from open_webui.models.users import UserModel
 
 # Document loaders
 from open_webui.retrieval.loaders.youtube import YoutubeLoader, YoutubeTranscriptError
 from open_webui.retrieval.utils import (
+    TIKTOKEN_DISALLOWED_SPECIAL,
     build_loader_from_config,
     filter_accessible_collections,
     get_content_from_url,
@@ -82,19 +84,8 @@ from open_webui.retrieval.utils import (
 )
 from open_webui.retrieval.vector.async_client import ASYNC_VECTOR_DB_CLIENT
 from open_webui.retrieval.vector.factory import get_vector_db_client
+from open_webui.retrieval.integration import ASSET_CONFIG_KEYS, services, collect_assets, index_document_images
 from open_webui.retrieval.vector.utils import filter_metadata
-from open_webui.retrieval.integration import (
-    ASSET_CONFIG_KEYS,
-    SERVICE_CONFIG_KEYS,
-    accept_version,
-    collect_assets,
-    complete_images,
-    services,
-    spawn,
-    update_status,
-    version_asset_root,
-    serialize_file_processing,
-)
 from open_webui.retrieval.web.azure import search_azure
 from open_webui.retrieval.web.bing import search_bing
 from open_webui.retrieval.web.bocha import search_bocha
@@ -144,8 +135,6 @@ from pydantic import BaseModel, Field
 from sqlalchemy.ext.asyncio import AsyncSession
 
 log = logging.getLogger(__name__)
-
-TIKTOKEN_DISALLOWED_SPECIAL = ()
 
 # Utility functions
 # Let us find what is true among the many voices,
@@ -363,6 +352,8 @@ RETRIEVAL_CONFIG_KEYS = {
     'RAG_EXTERNAL_RERANKER_TIMEOUT': 'rag.external_reranker_timeout',
     'RAG_EXTERNAL_RERANKER_URL': 'rag.external_reranker_url',
     'RAG_FULL_CONTEXT': 'rag.full_context',
+    'RAG_FULL_TEXT_THRESHOLD': 'rag.full_context_char_threshold',
+    'RAG_FULL_TEXT_THRESHOLD_TYPE': 'rag.full_text_threshold_type',
     'RAG_OLLAMA_API_KEY': 'rag.ollama.api_key',
     'RAG_OLLAMA_BASE_URL': 'rag.ollama.base_url',
     'RAG_OPENAI_API_BASE_URL': 'rag.openai.api_base_url',
@@ -571,6 +562,8 @@ async def register_evidence_space(request: Request, form_data: EvidenceSpaceForm
     }
 
 
+
+
 @router.get('/embedding')
 async def get_embedding_config(request: Request, user=Depends(get_admin_user)):
     config = await Config.get_many(*RETRIEVAL_CONFIG_KEYS.values())
@@ -752,6 +745,8 @@ async def get_rag_config(request: Request, user=Depends(get_admin_user)):
         'TOP_K': config['rag.top_k'],
         'BYPASS_EMBEDDING_AND_RETRIEVAL': config['rag.bypass_embedding_and_retrieval'],
         'RAG_FULL_CONTEXT': config['rag.full_context'],
+        'RAG_FULL_TEXT_THRESHOLD': config['rag.full_context_char_threshold'],
+        'RAG_FULL_TEXT_THRESHOLD_TYPE': config['rag.full_text_threshold_type'],
         # Hybrid search settings
         'ENABLE_RAG_HYBRID_SEARCH': config['rag.enable_hybrid_search'],
         'ENABLE_RAG_HYBRID_SEARCH_ENRICHED_TEXTS': config['rag.enable_hybrid_search_enriched_texts'],
@@ -997,6 +992,8 @@ class ConfigForm(BaseModel):
     TOP_K: int | None = None
     BYPASS_EMBEDDING_AND_RETRIEVAL: bool | None = None
     RAG_FULL_CONTEXT: bool | None = None
+    RAG_FULL_TEXT_THRESHOLD: int | None = Field(default=None, ge=0)
+    RAG_FULL_TEXT_THRESHOLD_TYPE: str | None = None
 
     # Hybrid search settings
     ENABLE_RAG_HYBRID_SEARCH: bool | None = None
@@ -1219,6 +1216,8 @@ async def update_rag_config(request: Request, form_data: ConfigForm, user=Depend
         'TOP_K': config['rag.top_k'],
         'BYPASS_EMBEDDING_AND_RETRIEVAL': config['rag.bypass_embedding_and_retrieval'],
         'RAG_FULL_CONTEXT': config['rag.full_context'],
+        'RAG_FULL_TEXT_THRESHOLD': config['rag.full_context_char_threshold'],
+        'RAG_FULL_TEXT_THRESHOLD_TYPE': config['rag.full_text_threshold_type'],
         # Hybrid search settings
         'ENABLE_RAG_HYBRID_SEARCH': config['rag.enable_hybrid_search'],
         'TOP_K_RERANKER': config['rag.top_k_reranker'],
@@ -1376,9 +1375,6 @@ async def update_rag_config(request: Request, form_data: ConfigForm, user=Depend
 
 def can_merge_chunks(a: Document, b: Document) -> bool:
     if a.metadata.get('source') != b.metadata.get('source'):
-        return False
-
-    if a.metadata.get('anchor') != b.metadata.get('anchor'):
         return False
 
     a_file_id = a.metadata.get('file_id')
@@ -1542,35 +1538,244 @@ def has_duplicate_content(collection_name: str, hash: str, file_id: str | None) 
     return False
 
 
-def save_docs_to_vector_db(
+def _chunk_docs(
     request: Request,
-    docs,
-    collection_name,
+    docs: list[Document],
+    collection_name: str,
+    config: dict,
+    metadata: dict | None = None,
+    split: bool = True,
+) -> tuple[list[str], list[dict]]:
+    def _get_docs_info(docs: list[Document]) -> str:
+        docs_info = set()
+
+        # Trying to select relevant metadata identifying the document.
+        for doc in docs:
+            metadata = getattr(doc, 'metadata', {})
+            doc_name = metadata.get('name', '')
+            if not doc_name:
+                doc_name = metadata.get('title', '')
+            if not doc_name:
+                doc_name = metadata.get('source', '')
+            if doc_name:
+                docs_info.add(doc_name)
+
+        return ', '.join(docs_info)
+
+    log.debug('save_docs_to_vector_db: document %s %s', _get_docs_info(docs), collection_name)
+
+    # Check if entries with the same hash (metadata.hash) already exist
+    if metadata and 'hash' in metadata:
+        if has_duplicate_content(collection_name, metadata['hash'], metadata.get('file_id')):
+            log.info('Document with hash %s already exists', metadata['hash'])
+            raise ValueError(ERROR_MESSAGES.DUPLICATE_CONTENT)
+
+    if split:
+        if config['rag.enable_markdown_header_text_splitter']:
+            log.info('Using markdown header text splitter')
+            # Define headers to split on - covering most common markdown header levels
+            markdown_splitter = MarkdownHeaderTextSplitter(
+                headers_to_split_on=[
+                    ('#', 'Header 1'),
+                    ('##', 'Header 2'),
+                    ('###', 'Header 3'),
+                    ('####', 'Header 4'),
+                    ('#####', 'Header 5'),
+                    ('######', 'Header 6'),
+                ],
+                strip_headers=False,  # Keep headers in content for context
+            )
+
+            split_docs = []
+            for doc in docs:
+                split_docs.extend(
+                    [
+                        Document(
+                            page_content=split_chunk.page_content,
+                            metadata={**doc.metadata},
+                        )
+                        for split_chunk in markdown_splitter.split_text(doc.page_content)
+                    ]
+                )
+
+            docs = split_docs
+            if config['rag.chunk_min_size_target'] > 0:
+                docs = merge_docs_to_target_size(request, docs, config)
+
+        if config['rag.text_splitter'] in ['', 'character']:
+            text_splitter = RecursiveCharacterTextSplitter(
+                chunk_size=config['rag.chunk_size'],
+                chunk_overlap=config['rag.chunk_overlap'],
+                add_start_index=True,
+            )
+            docs = text_splitter.split_documents(docs)
+        elif config['rag.text_splitter'] == 'token':
+            log.info('Using token text splitter: %s', config['rag.tiktoken_encoding_name'])
+
+            tiktoken.get_encoding(str(config['rag.tiktoken_encoding_name']))
+            text_splitter = TokenTextSplitter(
+                encoding_name=str(config['rag.tiktoken_encoding_name']),
+                chunk_size=config['rag.chunk_size'],
+                chunk_overlap=config['rag.chunk_overlap'],
+                add_start_index=True,
+                disallowed_special=TIKTOKEN_DISALLOWED_SPECIAL,
+            )
+            docs = text_splitter.split_documents(docs)
+        elif config['rag.text_splitter'] == 'token_transformers':
+            log.info('Using transformers token text splitter')
+
+            text_splitter = RecursiveCharacterTextSplitter(
+                chunk_size=config['rag.chunk_size'],
+                chunk_overlap=config['rag.chunk_overlap'],
+                length_function=get_splitter_length_function(request, config),
+                add_start_index=True,
+            )
+            docs = text_splitter.split_documents(docs)
+        else:
+            raise ValueError(ERROR_MESSAGES.DEFAULT('Invalid text splitter'))
+
+    if len(docs) == 0:
+        raise ValueError(ERROR_MESSAGES.EMPTY_CONTENT)
+
+    texts = [sanitize_text_for_db(doc.page_content) for doc in docs]
+    metadatas = [
+        {
+            **doc.metadata,
+            **(metadata if metadata else {}),
+            'embedding_config': {
+                'engine': config['rag.embedding_engine'],
+                'model': config['rag.embedding_model'],
+            },
+        }
+        for doc in docs
+    ]
+    return texts, metadatas
+
+
+async def save_docs_to_vector_db(
+    request: Request,
+    docs: list[Document],
+    collection_name: str,
     config: dict,
     metadata: dict | None = None,
     overwrite: bool = False,
     split: bool = True,
     add: bool = False,
-    user=None,
-    saved_items: list | None = None,
+    user: UserModel | None = None,
 ) -> bool:
-    """Compatibility for sync text/web callers: heavy work belongs to the queue."""
-    from open_webui.retrieval.ingestion import submit_documents
-
-    if user is None or saved_items is not None:
-        raise ValueError('indexing requires a user and cannot collect whole-file vector results')
-    future = asyncio.run_coroutine_threadsafe(
-        submit_documents(request, docs, collection_name, config, user=user), request.app.state.main_loop
+    texts, metadatas = await run_in_threadpool(
+        _chunk_docs, request, docs, collection_name, config, metadata=metadata, split=split
     )
-    future.result(timeout=9000)
-    return True
+
+    try:
+        if await ASYNC_VECTOR_DB_CLIENT.has_collection(collection_name=collection_name):
+            log.info('collection %s already exists', collection_name)
+
+            if overwrite:
+                await ASYNC_VECTOR_DB_CLIENT.delete_collection(collection_name=collection_name)
+                log.info('deleting existing collection %s', collection_name)
+            elif add is False:
+                log.info('collection %s already exists, overwrite is False and add is False', collection_name)
+                return True
+
+        log.info('generating embeddings for %s', collection_name)
+        embedding_function = get_embedding_function(
+            config['rag.embedding_engine'],
+            config['rag.embedding_model'],
+            request.app.state.ef,
+            (
+                config['rag.openai.api_base_url']
+                if config['rag.embedding_engine'] == 'openai'
+                else (
+                    config['rag.ollama.base_url']
+                    if config['rag.embedding_engine'] == 'ollama'
+                    else config['rag.azure_openai.base_url']
+                )
+            ),
+            (
+                config['rag.openai.api_key']
+                if config['rag.embedding_engine'] == 'openai'
+                else (
+                    config['rag.ollama.api_key']
+                    if config['rag.embedding_engine'] == 'ollama'
+                    else config['rag.azure_openai.api_key']
+                )
+            ),
+            config['rag.embedding_batch_size'],
+            azure_api_version=(
+                config['rag.azure_openai.api_version'] if config['rag.embedding_engine'] == 'azure_openai' else None
+            ),
+            enable_async=config['rag.enable_async_embedding'],
+            concurrent_requests=config['rag.embedding_concurrent_requests'],
+        )
+
+        batch_size = config['rag.embedding_batch_size']
+        buffer_size = RAG_EMBEDDING_BUFFER_SIZE
+        if isinstance(batch_size, int) and batch_size > 0:
+            # Round up to whole provider batches to preserve request boundaries.
+            buffer_size = batch_size * ((buffer_size + batch_size - 1) // batch_size)
+
+        embedding_timeout = RAG_EMBEDDING_TIMEOUT
+
+        log.info('adding to collection %s', collection_name)
+        inserted_ids = []
+        try:
+            for start in range(0, len(texts), buffer_size):
+                buffer_texts = texts[start : start + buffer_size]
+                started_at = time.monotonic()
+                embeddings = await asyncio.wait_for(
+                    embedding_function(
+                        [text.replace('\n', ' ') for text in buffer_texts],
+                        prefix=config['rag.embedding_content_prefix'],
+                        user=user,
+                    ),
+                    timeout=embedding_timeout,
+                )
+                if embedding_timeout is not None:
+                    embedding_timeout = max(embedding_timeout - (time.monotonic() - started_at), 0)
+                log.info('embeddings generated %s for %s items', len(embeddings), len(buffer_texts))
+
+                items = [
+                    {
+                        'id': str(uuid.uuid4()),
+                        'text': text,
+                        'vector': embeddings[idx],
+                        'metadata': metadatas[start + idx],
+                    }
+                    for idx, text in enumerate(buffer_texts)
+                ]
+
+                inserted_ids.extend(item['id'] for item in items)
+                await ASYNC_VECTOR_DB_CLIENT.insert(
+                    collection_name=collection_name,
+                    items=items,
+                )
+                del items, embeddings
+        except BaseException:
+            # Also on cancellation: a partial collection would make retries skip indexing.
+            if inserted_ids:
+                try:
+                    if add:
+                        await asyncio.shield(
+                            ASYNC_VECTOR_DB_CLIENT.delete(collection_name=collection_name, ids=inserted_ids)
+                        )
+                    else:
+                        await asyncio.shield(ASYNC_VECTOR_DB_CLIENT.delete_collection(collection_name=collection_name))
+                except Exception:
+                    log.exception('failed to remove partially added items from collection %s', collection_name)
+            raise
+
+        log.info('added %s items to collection %s', len(texts), collection_name)
+        return True
+    except Exception as e:
+        log.exception(e)
+        raise e
 
 
 class ProcessFileForm(BaseModel):
     file_id: str
     content: str | None = None
     collection_name: str | None = None
-    directory_id: str | None = None
 
 
 def has_vector_results(result) -> bool:
@@ -1584,46 +1789,288 @@ async def process_file(
     user=Depends(get_verified_user),
     db: AsyncSession = Depends(get_async_session),
 ):
-    """Authorize and queue; parsing/embedding never executes in a Web process."""
-    from open_webui.retrieval.ingestion import submit_file
+    """Standalone processing endpoint: index the file, then mark it completed.
 
-    return await submit_file(request, form_data, user=user, db=db)
-
-
-@router.get('/process/jobs/{job_id}')
-async def ingestion_job_status(job_id: str, user=Depends(get_verified_user)):
-    from sqlalchemy import select
-    from open_webui.models.ingestion_jobs import IngestionJob
-    from open_webui.retrieval.ingestion_queue import expire_jobs
-
-    # This endpoint also closes abandoned leases if both indexing containers
-    # are stopped. It never retries or performs heavy cleanup in Web.
+    Uploads call index_file directly so they can finish knowledge linking before
+    reporting completion.
+    """
+    result = await index_file(request, form_data, user, db)
     async with get_async_db() as session:
-        owner = await session.scalar(select(IngestionJob.user_id).where(IngestionJob.job_id == job_id))
-    if not owner or (owner != user.id and user.role != 'admin'):
-        raise HTTPException(404, 'Indexing task not found')
-    await expire_jobs(job_id=job_id)
-
-    async with get_async_db() as db:
-        job = await db.get(IngestionJob, job_id)
-        if not job or (job.user_id != user.id and user.role != 'admin'):
-            raise HTTPException(404, 'Indexing task not found')
-        return {
-            'job_id': job.job_id,
-            'file_id': job.file_id,
-            'status': job.status,
-            'error': job.error,
-            'result': job.result,
-        }
+        await Files.update_file_data_by_id(form_data.file_id, {'status': 'completed', 'error': None}, db=session)
+    return result
 
 
-@router.post('/process/jobs/{job_id}/cancel')
-async def cancel_ingestion_job(job_id: str, user=Depends(get_verified_user)):
-    await ingestion_job_status(job_id, user=user)
-    from open_webui.retrieval.ingestion_queue import fail_job
+async def index_file(
+    request: Request,
+    form_data: ProcessFileForm,
+    user,
+    db: AsyncSession,
+    *, rebuild_text: bool = False,
+):
+    """Extract or reuse file content and index it without marking completion.
 
-    await fail_job(job_id, 'Indexing cancelled by user; previous version retained', status='cancelled')
-    return await ingestion_job_status(job_id, user=user)
+    The caller marks completion after all its work, including any knowledge linking.
+    Note: granular session management is used to prevent connection pool exhaustion.
+    The session is committed before external API calls, and updates use a fresh session.
+    """
+    config = await Config.get_many(*RETRIEVAL_CONFIG_KEYS.values(), *ASSET_CONFIG_KEYS)
+    if rebuild_text:
+        config['rag.extract_document_image_assets'] = False
+    file = await Files.get_file_by_id(form_data.file_id, db=db)
+    if file and file.user_id != user.id and user.role != 'admin':
+        if not await has_access_to_file(file.id, 'write', user, db=db):
+            file = None
+
+    if file:
+        try:
+            assets, skipped_images = [], []
+            collection_name = form_data.collection_name
+            file_collection_name = f'file-{file.id}'
+
+            if collection_name is None:
+                collection_name = file_collection_name
+            else:
+                await _validate_collection_access([collection_name], user, access_type='write')
+            collection_names = [collection_name]
+
+            mime_type = (file.meta or {}).get('content_type') or ''
+            if (
+                form_data.collection_name
+                and mime_type.startswith('image/')
+                and (file.data or {}).get('document_image_assets')
+                and not (file.data or {}).get('content')
+            ):
+                # Image-only files have no text chunks; their KB membership grants access to the image evidence.
+                return {'status': True, 'filename': file.filename, 'collection_name': collection_name, 'content': ''}
+
+            if form_data.content:
+                # Update the content in the file
+                # Usage: /files/{file_id}/data/content/update, /files/ (audio file upload pipeline)
+
+                try:
+                    # /files/{file_id}/data/content/update
+                    await ASYNC_VECTOR_DB_CLIENT.delete_collection(collection_name=file_collection_name)
+                except Exception:
+                    # Audio file upload pipeline
+                    pass
+
+                docs = [
+                    Document(
+                        page_content=form_data.content.replace('<br/>', '\n'),
+                        metadata={
+                            **filter_file_metadata(file.meta),
+                            'name': file.filename,
+                            'created_by': file.user_id,
+                            'file_id': file.id,
+                            'source': file.filename,
+                        },
+                    )
+                ]
+
+                text_content = form_data.content
+            elif form_data.collection_name:
+                # Add this file to a knowledge collection.
+                # Usage: /knowledge/{id}/file/add, /knowledge/{id}/file/update
+                # Reuse file-{id} chunks when they exist; otherwise restore file-{id}
+                # from stored file content while adding the file to the knowledge collection.
+
+                file_result = await ASYNC_VECTOR_DB_CLIENT.query(
+                    collection_name=file_collection_name, filter={'file_id': file.id}
+                )
+                stored_content = (file.data or {}).get('content')
+
+                if has_vector_results(file_result):
+                    # Normal path: reuse the already-processed per-file chunks.
+                    docs = [
+                        Document(
+                            page_content=file_result.documents[0][idx],
+                            metadata=file_result.metadatas[0][idx],
+                        )
+                        for idx, id in enumerate(file_result.ids[0])
+                    ]
+                elif stored_content is not None:
+                    # Repair path: vector chunks are missing, but SQL still has the file text.
+                    docs = [
+                        Document(
+                            page_content=stored_content,
+                            metadata={
+                                **filter_file_metadata(file.meta),
+                                'name': file.filename,
+                                'created_by': file.user_id,
+                                'file_id': file.id,
+                                'source': file.filename,
+                            },
+                        )
+                    ]
+                    collection_names.append(file_collection_name)
+                else:
+                    raise ValueError(ERROR_MESSAGES.EMPTY_CONTENT)
+
+                text_content = stored_content or ''
+            else:
+                # Process the file and save the content
+                # Usage: /files/
+                file_path = file.path
+                if file_path:
+                    file_path = await asyncio.to_thread(Storage.get_file, file_path)
+                    loader = build_loader_from_config(config)
+                    loader.user = user
+                    loader.metadata = {
+                        'file_id': file.id,
+                        'file_name': file.filename,
+                        'file_content_type': file.meta.get('content_type'),
+                        'client_ip': request.client.host if request.client else '',
+                    }
+                    docs = await loader.aload(file.filename, file.meta.get('content_type'), file_path)
+                    assets, skipped_images = collect_assets(docs)
+
+                    docs = [
+                        Document(
+                            page_content=doc.page_content,
+                            metadata={
+                                **filter_file_metadata(file.meta),
+                                **filter_metadata(doc.metadata),
+                                'name': file.filename,
+                                'created_by': file.user_id,
+                                'file_id': file.id,
+                                'source': file.filename,
+                            },
+                        )
+                        for doc in docs
+                    ]
+                else:
+                    docs = [
+                        Document(
+                            page_content=file.data.get('content', ''),
+                            metadata={
+                                **filter_file_metadata(file.meta),
+                                'name': file.filename,
+                                'created_by': file.user_id,
+                                'file_id': file.id,
+                                'source': file.filename,
+                            },
+                        )
+                    ]
+                text_content = ' '.join([doc.page_content for doc in docs])
+
+            log.debug('text_content: %s', text_content)
+            await Files.update_file_data_by_id(
+                file.id,
+                {'content': text_content},
+                db=db,
+            )
+            hash = calculate_sha256_string(text_content)
+
+            await db.commit()
+            if not rebuild_text and (assets or skipped_images):
+                await index_document_images(request, file, assets, skipped_images, user=user)
+
+            if config['rag.bypass_embedding_and_retrieval'] or (assets and not text_content.strip()):
+                await Files.update_file_hash_by_id(file.id, hash, db=db)
+                await publish_event(
+                    request,
+                    EVENTS.RETRIEVAL_CONTENT_PROCESSED,
+                    actor=user,
+                    subject_id=file.id,
+                    subject_type='file',
+                    data={'collection_name': None, 'filename': file.filename},
+                )
+                return {
+                    'status': True,
+                    'collection_name': None,
+                    'filename': file.filename,
+                    'content': text_content,
+                }
+            else:
+                try:
+                    # Commit any pending changes before the slow embedding step.
+                    # Note: file is already a Pydantic model (not ORM), so no expunge needed.
+                    await db.commit()
+
+                    # External embedding API takes time (5-60s+).
+                    # Subsequent updates use fresh async sessions.
+                    result = True
+                    for name in collection_names:
+                        result = await save_docs_to_vector_db(
+                            request,
+                            docs=docs,
+                            collection_name=name,
+                            config=config,
+                            metadata={
+                                'file_id': file.id,
+                                'name': file.filename,
+                                'hash': hash,
+                            },
+                            add=(True if form_data.collection_name else False),
+                            user=user,
+                        )
+                    log.info('added %s items to collection %s', len(docs), collection_name)
+
+                    if result:
+                        # Fresh session for the final update.
+                        async with get_async_db() as session:
+                            await Files.update_file_metadata_by_id(
+                                file.id,
+                                {
+                                    'collection_name': collection_name,
+                                },
+                                db=session,
+                            )
+
+                            await Files.update_file_hash_by_id(file.id, hash, db=session)
+
+                            await publish_event(
+                                request,
+                                EVENTS.RETRIEVAL_CONTENT_PROCESSED,
+                                actor=user,
+                                subject_id=file.id,
+                                subject_type='file',
+                                data={'collection_name': collection_name, 'filename': file.filename},
+                            )
+                            return {
+                                'status': True,
+                                'collection_name': collection_name,
+                                'filename': file.filename,
+                                'content': text_content,
+                            }
+                    else:
+                        raise Exception('Error saving document to vector database')
+                except Exception as e:
+                    raise e
+
+        except Exception as e:
+            log.exception(e)
+            error = ERROR_MESSAGES.PANDOC_NOT_INSTALLED if 'No pandoc was found' in str(e) else str(e)
+            # Fresh session for error status update.
+            async with get_async_db() as session:
+                await Files.update_file_data_by_id(
+                    file.id,
+                    {'status': 'failed', 'error': error},
+                    db=session,
+                )
+                # Clear the hash so the file can be re-uploaded after fixing the issue
+                await Files.update_file_hash_by_id(file.id, None, db=session)
+
+            await publish_event(
+                request,
+                EVENTS.RETRIEVAL_CONTENT_PROCESS_FAILED,
+                actor=user,
+                subject_id=file.id,
+                subject_type='file',
+                data={
+                    'collection_name': collection_name,
+                    'filename': file.filename,
+                    'message': f'{file.filename}: {e}',
+                },
+            )
+
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=error,
+            )
+
+    else:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=ERROR_MESSAGES.NOT_FOUND)
 
 
 class ProcessTextForm(BaseModel):
@@ -1654,7 +2101,7 @@ async def process_text(
     log.debug('text_content: %s', text_content)
 
     config = await Config.get_many(*RETRIEVAL_CONFIG_KEYS.values())
-    result = await run_in_threadpool(save_docs_to_vector_db, request, docs, collection_name, config, user=user)
+    result = await save_docs_to_vector_db(request, docs, collection_name, config, user=user)
     if result:
         await publish_event(
             request,
@@ -1883,23 +2330,6 @@ async def process_web(
 ):
     config = await Config.get_many(*RETRIEVAL_CONFIG_KEYS.values())
 
-    if process and not config['web.search.bypass_embedding_and_retrieval']:
-        from open_webui.retrieval.ingestion import submit_url
-
-        collection_name = form_data.collection_name or calculate_sha256_string(form_data.url)[:63]
-        if form_data.collection_name:
-            await _validate_collection_access([collection_name], user, access_type='write')
-        result = await submit_url(request, form_data.url, collection_name, config, user=user)
-        file = await Files.get_file_by_id(result['file_id'])
-        content = (file.data or {}).get('content', '') if file else ''
-        return {
-            'status': True,
-            'collection_name': collection_name,
-            'filename': form_data.url,
-            'content': content,
-            'file': {'data': {'content': content}, 'meta': {'name': form_data.url, 'source': form_data.url}},
-        }
-
     try:
         content, docs = await get_content_from_url(request, form_data.url, config=config)
     except HTTPException:
@@ -1935,8 +2365,7 @@ async def process_web(
                 await _validate_collection_access([collection_name], user, access_type='write')
 
             if not config['web.search.bypass_embedding_and_retrieval']:
-                await run_in_threadpool(
-                    save_docs_to_vector_db,
+                await save_docs_to_vector_db(
                     request,
                     docs,
                     collection_name,
@@ -2492,8 +2921,7 @@ async def process_web_search(request: Request, form_data: SearchForm, user=Depen
             collection_name = f'web-search-{user.id}-{calculate_sha256_string("-".join(form_data.queries))}'[:63]
 
             try:
-                await run_in_threadpool(
-                    save_docs_to_vector_db,
+                await save_docs_to_vector_db(
                     request,
                     docs,
                     collection_name,
@@ -2562,17 +2990,6 @@ async def query_doc_handler(
     await _validate_collection_access([form_data.collection_name], user)
 
     try:
-        from open_webui.retrieval.integration import query_local_collection
-
-        local_result = await query_local_collection(
-            request,
-            collection_name=form_data.collection_name,
-            query=form_data.query,
-            count=form_data.k or config['rag.top_k'],
-            user=user,
-        )
-        if local_result is not None:
-            return local_result
         if config['rag.enable_hybrid_search'] and (form_data.hybrid is None or form_data.hybrid):
             return await query_doc_with_hybrid_search(
                 collection_name=form_data.collection_name,
@@ -2637,29 +3054,54 @@ async def query_collection_handler(
 ):
     config = await Config.get_many(*RETRIEVAL_CONFIG_KEYS.values())
     await _validate_collection_access(form_data.collection_names, user)
+
     try:
-        return await query_collection(
-            request,
-            collection_names=form_data.collection_names,
-            queries=[form_data.query],
-            embedding_function=lambda query, prefix: request.app.state.EMBEDDING_FUNCTION(
-                query, prefix=prefix, user=user
-            ),
-            k=form_data.k if form_data.k else config['rag.top_k'],
-            user=user,
-            search_options={
-                'rag.enable_hybrid_search': form_data.hybrid,
-                'rag.top_k_reranker': form_data.k_reranker,
-                'rag.relevance_threshold': form_data.r,
-                'rag.hybrid_bm25_weight': form_data.hybrid_bm25_weight,
-                'rag.enable_hybrid_search_enriched_texts': form_data.enable_enriched_texts,
-            },
-        )
+        if config['rag.enable_hybrid_search'] and (form_data.hybrid is None or form_data.hybrid):
+            return await query_collection_with_hybrid_search(
+                collection_names=form_data.collection_names,
+                queries=[form_data.query],
+                embedding_function=lambda query, prefix: request.app.state.EMBEDDING_FUNCTION(
+                    query, prefix=prefix, user=user
+                ),
+                k=form_data.k if form_data.k else config['rag.top_k'],
+                reranking_function=(
+                    (lambda query, documents: request.app.state.RERANKING_FUNCTION(query, documents, user=user))
+                    if request.app.state.RERANKING_FUNCTION
+                    else None
+                ),
+                k_reranker=form_data.k_reranker or config['rag.top_k_reranker'],
+                r=(form_data.r if form_data.r else config['rag.relevance_threshold']),
+                hybrid_bm25_weight=(
+                    form_data.hybrid_bm25_weight
+                    if form_data.hybrid_bm25_weight is not None
+                    else config['rag.hybrid_bm25_weight']
+                ),
+                enable_enriched_texts=(
+                    form_data.enable_enriched_texts
+                    if form_data.enable_enriched_texts is not None
+                    else config['rag.enable_hybrid_search_enriched_texts']
+                ),
+            )
+        else:
+            return await query_collection(
+                request,
+                collection_names=form_data.collection_names,
+                queries=[form_data.query],
+                embedding_function=lambda query, prefix: request.app.state.EMBEDDING_FUNCTION(
+                    query, prefix=prefix, user=user
+                ),
+                k=form_data.k if form_data.k else config['rag.top_k'],
+                user=user,
+            )
+
     except HTTPException:
         raise
-    except Exception as exc:
-        log.exception(exc)
-        raise HTTPException(400, ERROR_MESSAGES.DEFAULT(exc, 'Error querying knowledge base')) from exc
+    except Exception as e:
+        log.exception(e)
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=ERROR_MESSAGES.DEFAULT(e, 'Error querying knowledge base'),
+        )
 
 
 # Vector DB operations
@@ -2796,21 +3238,128 @@ async def process_files_batch(
     user=Depends(get_verified_user),
     db=None,
 ) -> BatchProcessFilesResponse:
-    results, errors = [], []
-    for entry in form_data.files:
+    """
+    Process a batch of files and save them to the vector database.
+
+    NOTE: We intentionally do NOT use Depends(get_async_session) here.
+    The save_docs_to_vector_db() call makes external embedding API calls which
+    can take 5-60+ seconds for batch operations. Database operations after
+    embedding (Files.update_file_by_id) manage their own short-lived sessions.
+    """
+
+    config = await Config.get_many(*RETRIEVAL_CONFIG_KEYS.values())
+    collection_name = form_data.collection_name
+
+    if collection_name:
+        await _validate_collection_access([collection_name], user, access_type='write')
+
+    file_results: list[BatchProcessFilesResult] = []
+    file_errors: list[BatchProcessFilesResult] = []
+    file_updates: list[FileUpdateForm] = []
+    seen_hashes: set[str] = set()
+
+    # Prepare all documents first
+    all_docs: list[Document] = []
+
+    for file in form_data.files:
         try:
-            async with get_async_db() as session:
-                await process_file(
-                    request,
-                    ProcessFileForm(
-                        file_id=entry.id,
-                        collection_name=form_data.collection_name or None,
-                        content=(entry.data or {}).get('content') if not form_data.collection_name else None,
-                    ),
-                    user=user,
-                    db=session,
+            # Ownership check: verify the requesting user owns the file or is an admin
+            db_file = await Files.get_file_by_id(file.id, db=db)
+            if not db_file:
+                file_errors.append(
+                    BatchProcessFilesResult(
+                        file_id=file.id,
+                        status='failed',
+                        error='File not found',
+                    )
                 )
-            results.append(BatchProcessFilesResult(file_id=entry.id, status='completed'))
-        except Exception as exc:
-            errors.append(BatchProcessFilesResult(file_id=entry.id, status='failed', error=type(exc).__name__))
-    return BatchProcessFilesResponse(results=results, errors=errors)
+                continue
+            if db_file.user_id != user.id and user.role != 'admin':
+                file_errors.append(
+                    BatchProcessFilesResult(
+                        file_id=file.id,
+                        status='failed',
+                        error='Permission denied: not file owner',
+                    )
+                )
+                continue
+
+            text_content = file.data.get('content', '')
+            hash = calculate_sha256_string(text_content)
+            if hash in seen_hashes or await run_in_threadpool(has_duplicate_content, collection_name, hash, file.id):
+                raise ValueError(ERROR_MESSAGES.DUPLICATE_CONTENT)
+            seen_hashes.add(hash)
+
+            docs: list[Document] = [
+                Document(
+                    page_content=text_content.replace('<br/>', '\n'),
+                    metadata={
+                        **filter_file_metadata(file.meta),
+                        'name': file.filename,
+                        'created_by': file.user_id,
+                        'file_id': file.id,
+                        'source': file.filename,
+                        'hash': hash,
+                    },
+                )
+            ]
+            # Reuse file-{id} chunks so loader metadata like PDF pages survives
+            file_result = await ASYNC_VECTOR_DB_CLIENT.query(
+                collection_name=f'file-{file.id}', filter={'file_id': file.id}
+            )
+            if has_vector_results(file_result):
+                docs = [
+                    Document(page_content=text, metadata={**metadata, 'name': file.filename, 'hash': hash})
+                    for text, metadata in zip(file_result.documents[0], file_result.metadatas[0])
+                ]
+
+            all_docs.extend(docs)
+
+            file_updates.append(
+                FileUpdateForm(
+                    hash=hash,
+                    data={'content': text_content},
+                )
+            )
+            file_results.append(BatchProcessFilesResult(file_id=file.id, status='prepared'))
+
+        except Exception as e:
+            log.error(f'process_files_batch: Error processing file {file.id}: {str(e)}')
+            file_errors.append(BatchProcessFilesResult(file_id=file.id, status='failed', error=str(e)))
+
+    # Save all documents in one batch
+    if all_docs:
+        try:
+            await save_docs_to_vector_db(
+                request,
+                all_docs,
+                collection_name,
+                config,
+                add=True,
+                user=user,
+            )
+
+            # Update all files with collection name
+            for file_update, file_result in zip(file_updates, file_results):
+                await Files.update_file_by_id(id=file_result.file_id, form_data=file_update, db=db)
+                file_result.status = 'completed'
+
+        except Exception as e:
+            log.error(f'process_files_batch: Error saving documents to vector DB: {str(e)}')
+            for file_result in file_results:
+                file_result.status = 'failed'
+                file_errors.append(BatchProcessFilesResult(file_id=file_result.file_id, status='failed', error=str(e)))
+
+    response = BatchProcessFilesResponse(results=file_results, errors=file_errors)
+    await publish_event(
+        request,
+        EVENTS.RETRIEVAL_CONTENT_PROCESSED,
+        actor=user,
+        subject_id=collection_name,
+        subject_type='retrieval.collection',
+        data={
+            'count': len([item for item in file_results if item.status == 'completed']),
+            'errors': len(file_errors),
+        },
+    )
+    return response

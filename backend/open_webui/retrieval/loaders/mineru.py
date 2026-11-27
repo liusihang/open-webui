@@ -26,6 +26,74 @@ log = logging.getLogger(__name__)
 MARKDOWN_IMAGE = re.compile(r'!\[([^\[\]\n]*)\]\(data:[^()\s]*\)')
 HTML_IMAGE = re.compile(r'<img\b[^<>]*>', re.IGNORECASE)
 
+# Page data arrives beside the markdown: a content list (3.x, cloud) or a middle JSON (4.x)
+PAGE_DATA_FILES = ('content_list.json', 'middle_json.json', 'layout.json')
+MAX_PAGE_DATA_BYTES = 64 * 1024 * 1024
+MIN_PAGE_ANCHOR_CHARS = 16
+
+
+def page_texts(data) -> list[tuple[int, list[str]]]:
+    """List each page's text in reading order from MinerU's content list or middle JSON."""
+
+    def strings(node):
+        if isinstance(node, str):
+            line = node.strip().split('\n', 1)[0].strip()
+            if len(line) >= MIN_PAGE_ANCHOR_CHARS:
+                yield line[:80]
+        elif isinstance(node, list):
+            for item in node:
+                yield from strings(item)
+        elif isinstance(node, dict):
+            for key, value in node.items():
+                # Headers and footers are left out of the markdown
+                if 'discard' not in key:
+                    yield from strings(value)
+
+    if isinstance(data, str):
+        data = json.loads(data)
+    if isinstance(data, dict):
+        data = data.get('pages') or data.get('pdf_info') or []
+    pages: dict[int, list[str]] = {}
+    for item in data if isinstance(data, list) else []:
+        index = item.get('page_idx') if isinstance(item, dict) else None
+        if type(index) is int and index >= 0:
+            pages.setdefault(index, []).extend(strings(item))
+    return sorted(pages.items())
+
+
+def split_pages(markdown: str, metadata: dict, page_data) -> List[Document]:
+    """Split the markdown where each page's first matching text begins, or keep it whole."""
+    try:
+        pages = page_texts(page_data) if page_data else []
+    except (ValueError, AttributeError) as e:
+        log.warning('Ignoring unreadable MinerU page data: %s', e)
+        pages = []
+
+    starts = []
+    cursor = 0
+    for index, texts in pages:
+        for text in texts:
+            found = markdown.find(text, cursor)
+            if found != -1:
+                # Keep the heading or list marker in front of the text with its page
+                start = markdown.rfind('\n', cursor, found) + 1 or cursor
+                starts.append((index, start))
+                cursor = found + len(text)
+                break
+    if not starts:
+        return [Document(page_content=markdown, metadata=metadata)]
+
+    # Text ahead of the first match belongs to the first page found
+    starts[0] = (starts[0][0], 0)
+    documents = []
+    for (index, start), (_, end) in zip(starts, [*starts[1:], (None, len(markdown))]):
+        content = markdown[start:end].strip()
+        if content:
+            documents.append(
+                Document(page_content=content, metadata={**metadata, 'page': index, 'page_label': index + 1})
+            )
+    return documents
+
 
 class MinerULoader:
     """
@@ -62,6 +130,7 @@ class MinerULoader:
         self.image_extraction = ImageAssetExtraction()
         if extract_images and asset_root is None:
             raise ValueError('MinerU image extraction requires a private asset root')
+        self.page_data = None
 
         # Parse params dict with defaults
         self.params = dict(params or {})
@@ -91,6 +160,8 @@ class MinerULoader:
             self.image_extraction = ImageAssetExtraction()
             if self.api_mode == 'cloud':
                 return self._load_cloud_api()
+            elif self._is_tasks_api():
+                return self._load_tasks_api()
             elif self._is_v1_api():
                 return self._load_v1_api()
             else:
@@ -112,7 +183,8 @@ class MinerULoader:
         form_data = {
             **self.params,
             'return_md': 'true',
-            **({'return_images': 'true', 'return_content_list': 'true'} if self.extract_images else {}),
+            'return_content_list': 'true',
+            **({'return_images': 'true'} if self.extract_images else {}),
         }
 
         # Page ranges (Local API uses start_page_id and end_page_id)
@@ -208,7 +280,7 @@ class MinerULoader:
             self._materialize_images(file_result.get('images'), file_result.get('content_list'), markdown_content)
             metadata.update(self._asset_metadata())
 
-        return [Document(page_content=markdown_content, metadata=metadata)]
+        return split_pages(markdown_content, metadata, file_result.get('content_list'))
 
     def _is_v1_api(self) -> bool:
         """
@@ -217,6 +289,13 @@ class MinerULoader:
         try:
             return requests.get(f'{self.api_url}/v1/health', timeout=10).ok
         except requests.RequestException:
+            return False
+
+    def _is_tasks_api(self) -> bool:
+        """Detect MinerU 4.1, whose Tasks API replaced the upload and parse job routes of 4.0."""
+        try:
+            return 'task_output_formats' in requests.get(f'{self.api_url}/v1/health', timeout=10).json()['features']
+        except (requests.RequestException, ValueError, KeyError):
             return False
 
     def _load_v1_api(self) -> List[Document]:
@@ -303,16 +382,75 @@ class MinerULoader:
 
         return [Document(page_content=markdown_content, metadata=metadata)]
 
-    def _request_v1_api(self, method: str, path: str, **kwargs) -> requests.Response:
+    def _load_tasks_api(self) -> List[Document]:
+        """Load document using the MinerU 4.1 Tasks API (asynchronous)."""
+        log.info('Using MinerU Tasks API at %s', self.api_url)
+
+        filename = os.path.basename(self.file_path)
+
+        file_entry = {'file_name': filename, 'bytes': os.path.getsize(self.file_path)}
+        if self.page_ranges and filename.lower().endswith('.pdf'):
+            file_entry['page_range'] = self.page_ranges
+
+        task = self._request_v1_api(
+            'POST',
+            '/v1/tasks',
+            json={
+                'files': [file_entry],
+                'tier': self.tier,
+                'ocr_mode': 'ocr' if self.enable_ocr else 'auto',
+            },
+        ).json()
+
+        upload = task['files'][0]['upload']
+        with open(self.file_path, 'rb') as f:
+            self._request_v1_api('PUT', upload['url'], headers=upload['headers'], data=f)
+
+        log.info('Polling MinerU task: %s', task['task_id'])
+        deadline = time.monotonic() + self.timeout if self.timeout else None
+        while True:
+            task = self._request_v1_api('GET', f'/v1/tasks/{task["task_id"]}').json()
+            if task['status'] not in ['waiting-file', 'pending', 'running']:
+                break
+            if deadline and time.monotonic() > deadline:
+                raise HTTPException(
+                    status.HTTP_504_GATEWAY_TIMEOUT,
+                    detail=f'MinerU processing timed out after {self.timeout} seconds',
+                )
+            time.sleep(2)
+
+        file_result = task['files'][0]
+        if task['status'] != 'completed':
+            error = file_result.get('error') or task.get('error') or {}
+            raise HTTPException(
+                status.HTTP_400_BAD_REQUEST,
+                detail=f'MinerU processing {task["status"]}: {error.get("message", "Unknown error")}',
+            )
+
+        markdown_content = self._download_and_extract_zip(file_result['result_url'], filename)
+
+        log.info('Successfully parsed document with MinerU Tasks API: %s', filename)
+
+        metadata = {
+            'source': filename,
+            'api_mode': 'local',
+            'tier': file_result['parse']['tier'],
+            'version': file_result['parse'].get('parser_version', 'unknown'),
+        }
+
+        return split_pages(markdown_content, metadata, self.page_data)
+
+    def _request_v1_api(self, method: str, path: str, headers: Optional[dict] = None, **kwargs) -> requests.Response:
         """
         Send one request to the MinerU V1 API and raise an HTTPException on failure.
         """
+        url = path if path.startswith('http') else f'{self.api_url}{path}'
         # A 4.x server started with --api-key rejects every V1 request without it
-        headers = {'Authorization': f'Bearer {self.api_key}'} if self.api_key else None
+        # The key stays off storage URLs returned by the server
+        if self.api_key and url.startswith(f'{self.api_url}/'):
+            headers = {**(headers or {}), 'Authorization': f'Bearer {self.api_key}'}
         try:
-            response = requests.request(
-                method, f'{self.api_url}{path}', headers=headers, timeout=self.timeout, **kwargs
-            )
+            response = requests.request(method, url, headers=headers, timeout=self.timeout, **kwargs)
             response.raise_for_status()
         except requests.Timeout:
             raise HTTPException(
@@ -363,7 +501,7 @@ class MinerULoader:
         if self.extract_images:
             metadata.update(self._asset_metadata())
 
-        return [Document(page_content=markdown_content, metadata=metadata)]
+        return split_pages(markdown_content, metadata, self.page_data)
 
     def _request_upload_url(self, filename: str) -> tuple:
         """
@@ -582,7 +720,12 @@ class MinerULoader:
         log.info('Downloading MinerU result archive')
 
         try:
-            response = requests.get(zip_url, timeout=60)
+            headers = (
+                {'Authorization': f'Bearer {self.api_key}'}
+                if self.api_key and zip_url.startswith(f'{self.api_url}/')
+                else None
+            )
+            response = requests.get(zip_url, headers=headers, timeout=60)
             response.raise_for_status()
         except requests.HTTPError as e:
             raise HTTPException(
@@ -635,6 +778,15 @@ class MinerULoader:
                         continue
                     if markdown_content:
                         break
+
+                for suffix in PAGE_DATA_FILES:
+                    member = next((m for m in members if m.filename.endswith(suffix)), None)
+                    if member and member.file_size <= MAX_PAGE_DATA_BYTES:
+                        try:
+                            self.page_data = json.loads(zip_ref.read(member))
+                            break
+                        except ValueError as e:
+                            log.warning(f'Failed to read {member.filename}: {e}')
 
                 if markdown_content is None:
                     log.error(f'Available files in ZIP: {all_files}')

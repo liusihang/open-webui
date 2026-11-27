@@ -1,18 +1,20 @@
 <script lang="ts">
 	import { toast } from 'svelte-sonner';
-	import { onMount, tick, getContext } from 'svelte';
+	import { onMount, tick, getContext, setContext } from 'svelte';
+	import type { AppLayoutContext } from '$lib/types';
 
 	import { goto } from '$app/navigation';
 	import { page } from '$app/stores';
 	import { fade } from 'svelte/transition';
 
-	import { getBackendConfig, getModels, getToolServersData, getVersionUpdates } from '$lib/apis';
+	import { getBackendConfig, getModels, getVersionUpdates } from '$lib/apis';
 	import { getTools } from '$lib/apis/tools';
 	import { getSkills } from '$lib/apis/skills';
+	import { getFunctions } from '$lib/apis/functions';
+	import { getFolders } from '$lib/apis/folders';
 	import { getSessionUser } from '$lib/apis/auths';
 	import { getBanners } from '$lib/apis/configs';
-	import { getTerminalServers } from '$lib/apis/terminal';
-	import { getUserSettings } from '$lib/apis/users';
+	import { getMachines } from '$lib/apis/machines';
 	import { setAppFontFamily, setTextScale } from '$lib/utils/text-scale';
 
 	import { WEBUI_VERSION, WEBUI_API_BASE_URL, WEBUI_BUILD_CHANNEL } from '$lib/constants';
@@ -27,35 +29,50 @@
 		tools,
 		skills,
 		socket,
+		onSocketRestored,
 		functions,
 		tags,
 		banners,
 		showSettings,
 		showChangelog,
-		temporaryChatEnabled,
-		toolServers,
-		terminalServers,
-		selectedTerminalId,
+		temporaryChat,
+		machines,
+		selectedMachineId,
 		showSearch,
 		showSidebar,
 		showTabs,
 		mobile,
 		chatId,
-		chats
+		chats,
+		folders,
+		refreshRecentChats,
+		refreshActiveFolders
 	} from '$lib/stores';
 
 	import Sidebar from '$lib/components/layout/Sidebar.svelte';
-	import SettingsModal from '$lib/components/chat/SettingsModal.svelte';
+	import Chat from '$lib/components/chat/Chat.svelte';
+	import { pageTabKey } from '$lib/components/chat/Tabs/tabs';
 	import ChangelogModal from '$lib/components/ChangelogModal.svelte';
 	import AccountPending from '$lib/components/layout/Overlay/AccountPending.svelte';
 	import UpdateInfoToast from '$lib/components/layout/UpdateInfoToast.svelte';
+	import Modal from '$lib/components/common/Modal.svelte';
 	import Spinner from '$lib/components/common/Spinner.svelte';
+	import ChevronLeft from '$lib/components/icons/ChevronLeft.svelte';
 	import { loadKeybindings, matchKeybinding, Shortcut } from '$lib/shortcuts';
 	import { canUseTemporaryChats } from '$lib/utils/settings-access';
 
 	const i18n = getContext('i18n');
+	const getUserSettings = getContext<(token: string) => Promise<any>>('getUserSettings');
+	const appLayout = setContext<AppLayoutContext>('appLayout', {});
 
 	let loaded = false;
+	// Settings (including the admin panels) load on first open, then stay mounted.
+	let settingsRequested = false;
+	$: if ($showSettings) settingsRequested = true;
+	$: routeHasTabs = ['/(app)', '/(app)/c/[id]', '/(app)/folders/[folderId]'].includes(
+		$page.route.id ?? ''
+	);
+	$: usePageTabs = !routeHasTabs && !!pageTabKey($page.url);
 
 	let version;
 	let handledSettingsUrl = '';
@@ -86,85 +103,25 @@
 	};
 
 	const setModels = async () => {
-		models.set(
-			await getModels(
-				localStorage.token,
-				$config?.features?.enable_direct_connections ? ($settings?.directConnections ?? null) : null
-			)
-		);
+		models.set(await getModels(localStorage.token));
 	};
 
-	const setToolServers = async () => {
+	const refreshMachines = async () => {
 		if (!$config?.features?.enable_tool_servers) {
-			toolServers.set([]);
-			terminalServers.set([]);
+			machines.set([]);
 			return;
 		}
-		let toolServersData = await getToolServersData(
-			$config?.features?.enable_direct_integrations ? ($settings?.toolServers ?? []) : []
-		);
-		toolServersData = toolServersData.filter((data) => {
-			if (!data || data.error) {
-				toast.error(
-					$i18n.t(`Failed to connect to {{URL}} OpenAPI tool server`, {
-						URL: data?.url
-					})
-				);
-				return false;
-			}
-			return true;
-		});
-		toolServers.set(toolServersData);
-
-		// Inject enabled terminal servers as always-on tool servers
-		const enabledTerminals = (
-			$config?.features?.enable_direct_integrations
-				? (($settings as any)?.terminalServers ?? [])
-				: []
-		).filter((s: any) => s.enabled || s.url === $selectedTerminalId);
-
-		// Fetch terminal servers the user has access to (for FileNav + terminal_id)
-		const systemTerminals = await getTerminalServers(localStorage.token);
-		terminalServers.set([
-			...(enabledTerminals.length > 0
-				? (
-						await getToolServersData(
-							enabledTerminals.map((t: any) => ({
-								url: t.url,
-								auth_type: t.auth_type ?? 'bearer',
-								key: t.key ?? '',
-								path: t.path ?? '/openapi.json',
-								config: { enable: true }
-							}))
-						)
-					)
-						.filter((data) => {
-							if (!data || data.error) {
-								toast.error(
-									$i18n.t(`Failed to connect to {{URL}} terminal server`, {
-										URL: data?.url
-									})
-								);
-								return false;
-							}
-							return true;
-						})
-						.map((data, i) => ({
-							...data,
-							key: enabledTerminals[i]?.key ?? '',
-							config: enabledTerminals[i]?.config ?? data?.config ?? {}
-						}))
-				: []),
-			// Store with proxy URL and session key for FileNav file browsing
-			...systemTerminals.map((t) => ({
-				id: t.id,
-				url: `${WEBUI_API_BASE_URL}/terminals/${t.id}`,
-				name: t.name,
-				key: localStorage.token,
-				contexts: t.contexts ?? {},
-				config: t.config ?? {}
+		const userId = $user?.id;
+		if (!userId || !localStorage.token) return;
+		const systemMachines = await getMachines(localStorage.token);
+		if ($user?.id !== userId || !$config?.features?.enable_tool_servers) return;
+		machines.set(
+			systemMachines.map((machine) => ({
+				...machine,
+				url: `${WEBUI_API_BASE_URL}/machines/${machine.id}`,
+				key: localStorage.token
 			}))
-		]);
+		);
 	};
 
 	const setBanners = async () => {
@@ -181,12 +138,23 @@
 		if (!localStorage.token) return;
 		try {
 			user.set(await getSessionUser(localStorage.token));
+			if (
+				$user?.role !== 'admin' &&
+				$user?.permissions?.chat?.temporary &&
+				$user?.permissions?.chat?.temporary_enforced &&
+				!$chatId
+			) {
+				temporaryChat.set(true);
+			}
 			const results = await Promise.allSettled([
 				getBackendConfig().then((value) => config.set(value)),
 				setModels(),
 				setTools(),
-				setToolServers(),
-				getSkills(localStorage.token).then((value) => skills.set(value))
+				refreshMachines(),
+				getSkills(localStorage.token).then((value) => skills.set(value)),
+				getFolders(localStorage.token)
+					.catch(() => [])
+					.then((value) => folders.set(value))
 			]);
 			for (const result of results) {
 				if (result.status === 'rejected') console.error('Unable to refresh access', result.reason);
@@ -198,9 +166,22 @@
 
 	onMount(() => {
 		const socketInstance = $socket;
-		socketInstance?.on('access:updated', refreshAccess);
+		const changed = () => {
+			void refreshMachines().catch((error) => console.error('Unable to refresh terminals', error));
+		};
+		const eventHandler = (event: { data?: { type?: string } }) => {
+			if (event?.data?.type === 'machines:changed') {
+				changed();
+				// Tether devices also bring the user's own models and tool servers.
+				void setModels().catch((error) => console.error('Unable to refresh models', error));
+				void setTools().catch((error) => console.error('Unable to refresh tools', error));
+			} else if (event?.data?.type === 'access:updated') void refreshAccess();
+		};
+		socketInstance?.on('events', eventHandler);
+		const unsubscribe = onSocketRestored(changed);
 		return () => {
-			socketInstance?.off('access:updated', refreshAccess);
+			socketInstance?.off('events', eventHandler);
+			unsubscribe();
 		};
 	});
 
@@ -240,6 +221,23 @@
 		await goto(`/auth?redirect=${encodeURIComponent(currentUrl)}`);
 	};
 
+	// Chat shortcuts act on the chat that has focus, otherwise the main chat. Chat tabs sit
+	// inside the main chat, so an element belongs to the nearest [data-chat] around it.
+	const chatElements = <T extends HTMLElement = HTMLElement>(selector: string): T[] => {
+		const chat =
+			document.activeElement?.closest('[data-chat]') ??
+			document.querySelector('[data-chat="main"]');
+		if (chat?.querySelector('[data-main-chat-pane]')?.classList.contains('hidden')) return [];
+		return [...document.querySelectorAll<T>(selector)].filter(
+			(el) => !chat || el.closest('[data-chat]') === chat
+		);
+	};
+
+	const chatInput = () => {
+		const id = chatElements('[data-composer-id]')[0]?.dataset.composerId;
+		return id ? document.getElementById(id) : null;
+	};
+
 	const navigateChat = async (direction: -1 | 1) => {
 		if (!$chats?.length) return;
 
@@ -261,28 +259,36 @@
 		}
 
 		clearChatInputStorage();
+		// Requested beside settings. The page is drawn once settings are in;
+		// each of these shows up when it arrives.
+		void setBanners().catch((e) => console.error('Failed to load banners:', e));
+		// The new-chat page lists these under the composer; started now so they're in before it draws.
+		void refreshRecentChats(localStorage.token);
+		void refreshActiveFolders(localStorage.token);
+		const lists = Promise.all([
+			setTools().catch((e) => console.error('Failed to load tools:', e)),
+			refreshMachines().catch((e) => console.error('Failed to load machines:', e)),
+			// The chat needs these to apply a model's defaults; without them here it
+			// fetches them one after the other during set-up.
+			getFunctions(localStorage.token)
+				.then((value) => functions.set(value))
+				.catch((e) => console.error('Failed to load functions:', e)),
+			getSkills(localStorage.token)
+				.then((value) => skills.set(value))
+				.catch((e) => console.error('Failed to load skills:', e))
+		]);
+		const modelList = getModels(localStorage.token).catch((e) => {
+			console.error('Failed to load models:', e);
+			// Loaded, with nothing to list: null would mean the list is still on its way.
+			return [];
+		});
 		try {
-			await Promise.all([
-				setBanners().catch((e) => console.error('Failed to load banners:', e)),
-				setTools().catch((e) => console.error('Failed to load tools:', e)),
-				setUserSettings(async () => {
-					await setModels().catch((e) => console.error('Failed to load models:', e));
-				})
-			]);
+			await setUserSettings();
 		} catch (e) {
 			console.error('Failed to load user settings:', e);
 			toast.error($i18n.t('Failed to load Interface settings'));
 			return;
 		}
-
-		selectedTerminalId.set(
-			$config?.features?.enable_tool_servers ? (localStorage.selectedTerminalId ?? null) : null
-		);
-
-		setToolServers().catch((e) => {
-			console.error('Failed to load tool servers:', e);
-			terminalServers.set([]);
-		});
 
 		const setupKeyboardShortcuts = () => {
 			document.addEventListener('keydown', async (event) => {
@@ -302,15 +308,19 @@
 				} else if (shortcut === Shortcut.FOCUS_INPUT) {
 					console.log('Shortcut triggered: FOCUS_INPUT');
 					event.preventDefault();
-					document.getElementById('chat-input')?.focus();
+					(
+						chatElements('[data-composer-id]')
+							.map((el) => document.getElementById(el.dataset.composerId ?? ''))
+							.find((el) => el?.offsetParent) ?? chatInput()
+					)?.focus();
 				} else if (shortcut === Shortcut.COPY_LAST_CODE_BLOCK) {
 					console.log('Shortcut triggered: COPY_LAST_CODE_BLOCK');
 					event.preventDefault();
-					[...document.getElementsByClassName('copy-code-button')]?.at(-1)?.click();
+					chatElements('.copy-code-button').at(-1)?.click();
 				} else if (shortcut === Shortcut.COPY_LAST_RESPONSE) {
 					console.log('Shortcut triggered: COPY_LAST_RESPONSE');
 					event.preventDefault();
-					[...document.getElementsByClassName('copy-response-button')]?.at(-1)?.click();
+					chatElements('.copy-response-button').at(-1)?.click();
 				} else if (shortcut === Shortcut.TOGGLE_SIDEBAR) {
 					console.log('Shortcut triggered: TOGGLE_SIDEBAR');
 					event.preventDefault();
@@ -330,7 +340,7 @@
 				} else if (shortcut === Shortcut.DELETE_CHAT) {
 					console.log('Shortcut triggered: DELETE_CHAT');
 					event.preventDefault();
-					document.getElementById('delete-chat-button')?.click();
+					chatElements('#delete-chat-button')[0]?.click();
 				} else if (shortcut === Shortcut.OPEN_SETTINGS) {
 					console.log('Shortcut triggered: OPEN_SETTINGS');
 					event.preventDefault();
@@ -342,39 +352,33 @@
 				} else if (shortcut === Shortcut.OPEN_MODEL_SELECTOR) {
 					console.log('Shortcut triggered: OPEN_MODEL_SELECTOR');
 					event.preventDefault();
-					document.getElementById('model-selector-model-button')?.click();
+					chatElements('#model-selector-model-button')[0]?.click();
 				} else if (shortcut === Shortcut.NEW_TEMPORARY_CHAT) {
 					console.log('Shortcut triggered: NEW_TEMPORARY_CHAT');
 					event.preventDefault();
 					if (!canUseTemporaryChats({ user: $user, config: null })) {
 						return;
 					}
-					if ($user?.role !== 'admin' && $user?.permissions?.chat?.temporary_enforced) {
-						temporaryChatEnabled.set(true);
-					} else {
-						temporaryChatEnabled.set(!$temporaryChatEnabled);
-					}
+					const temporary = !$temporaryChat;
 					await goto('/');
-					setTimeout(() => {
-						document.getElementById('new-chat-button')?.click();
-					}, 0);
+					setTimeout(() => appLayout.initNewChat?.({ temporary }), 0);
 				} else if (shortcut === Shortcut.GENERATE_MESSAGE_PAIR) {
 					console.log('Shortcut triggered: GENERATE_MESSAGE_PAIR');
 					event.preventDefault();
-					document.getElementById('generate-message-pair-button')?.click();
+					chatElements('.generate-message-pair-button')[0]?.click();
 				} else if (shortcut === Shortcut.ALLOW_TOOL_CALL) {
-					const button = [...document.getElementsByClassName('tool-call-allow-button')]
+					const button = chatElements<HTMLButtonElement>('.tool-call-allow-button')
 						.reverse()
-						.find((el) => !(el as HTMLButtonElement).disabled) as HTMLButtonElement | undefined;
+						.find((el) => !el.disabled);
 					if (button) {
 						console.log('Shortcut triggered: ALLOW_TOOL_CALL');
 						event.preventDefault();
 						button.click();
 					}
 				} else if (shortcut === Shortcut.DENY_TOOL_CALL) {
-					const button = [...document.getElementsByClassName('tool-call-deny-button')]
+					const button = chatElements<HTMLButtonElement>('.tool-call-deny-button')
 						.reverse()
-						.find((el) => !(el as HTMLButtonElement).disabled) as HTMLButtonElement | undefined;
+						.find((el) => !el.disabled);
 					if (button) {
 						console.log('Shortcut triggered: DENY_TOOL_CALL');
 						event.preventDefault();
@@ -382,11 +386,11 @@
 					}
 				} else if (
 					shortcut === Shortcut.REGENERATE_RESPONSE &&
-					document.activeElement?.id === 'chat-input'
+					document.activeElement === chatInput()
 				) {
 					console.log('Shortcut triggered: REGENERATE_RESPONSE');
 					event.preventDefault();
-					[...document.getElementsByClassName('regenerate-response-button')]?.at(-1)?.click();
+					chatElements('.regenerate-response-button').at(-1)?.click();
 				}
 			});
 		};
@@ -394,16 +398,6 @@
 
 		if ($user?.role === 'admin' && ($settings?.showChangelog ?? true)) {
 			showChangelog.set($settings?.version !== $config.version);
-		}
-
-		if ($user?.role === 'admin' || ($user?.permissions?.chat?.temporary ?? true)) {
-			if ($page.url.searchParams.get('temporary-chat') === 'true') {
-				temporaryChatEnabled.set(true);
-			}
-
-			if ($user?.role !== 'admin' && $user?.permissions?.chat?.temporary_enforced) {
-				temporaryChatEnabled.set(true);
-			}
 		}
 
 		// Check for version updates
@@ -431,19 +425,22 @@
 			localStorage.showTabs = value ? 'true' : 'false';
 		});
 
-		// Persist selectedTerminalId across page loads
-		selectedTerminalId.subscribe((value) => {
-			if (!$config?.features?.enable_tool_servers) return;
-			if (value === null) {
-				delete localStorage.selectedTerminalId;
-			} else {
-				localStorage.selectedTerminalId = value;
-			}
-		});
-
 		await tick();
 
 		loaded = true;
+
+		await lists;
+		// selectedTerminalId is the former key.
+		const storedMachineId = localStorage.selectedMachineId ?? localStorage.selectedTerminalId;
+		delete localStorage.selectedTerminalId;
+		if (storedMachineId) localStorage.selectedMachineId = storedMachineId;
+		selectedMachineId.set(
+			$config?.features?.enable_tool_servers ? (storedMachineId ?? null) : null
+		);
+
+		// Set last: the chat sets itself up once the model list is in, and that set-up
+		// reads tools, machines and the selected machine as well.
+		models.set(await modelList);
 	});
 
 	// `$page.url` must be referenced here: `$:` only tracks variables used in
@@ -467,7 +464,39 @@
 	};
 </script>
 
-<SettingsModal bind:show={$showSettings} />
+{#if settingsRequested}
+	{#await import('$lib/components/chat/SettingsModal.svelte')}
+		<Modal
+			show={!!$showSettings}
+			size="full"
+			containerClassName="p-3 sm:p-4 lg:p-6"
+			className="h-[calc(100dvh-1.5rem)] sm:h-[calc(100dvh-2rem)] lg:h-[calc(100dvh-3rem)] flex flex-col md:flex-row bg-base-0 dark:bg-base-900 rounded-4xl overflow-hidden"
+			ariaLabel={$i18n.t('Settings')}
+			onRequestClose={() => showSettings.set(false)}
+		>
+			<!-- Laid out like SettingsModal so the spinner stays in place when a panel takes over. -->
+			<div
+				class="shrink-0 border-b md:border-b-0 md:border-r border-base-100/30 dark:border-base-0/[0.02] md:w-[15rem]"
+			>
+				<div class="flex m-1 md:mb-0">
+					<button
+						type="button"
+						class="flex flex-1 items-center gap-1.5 h-7 px-2 rounded-lg text-xs text-base-600 dark:text-base-500 hover:text-base-700 dark:hover:text-base-300 transition-colors duration-75"
+						on:click={() => showSettings.set(false)}
+					>
+						<ChevronLeft className="size-3" strokeWidth="2" />
+						<span>{$i18n.t('Back')}</span>
+					</button>
+				</div>
+			</div>
+			<div class="flex flex-1 items-center justify-center pb-4 pr-1.5">
+				<Spinner className="size-6" />
+			</div>
+		</Modal>
+	{:then { default: SettingsModal }}
+		<SettingsModal bind:show={$showSettings} />
+	{/await}
+{/if}
 <ChangelogModal bind:show={$showChangelog} />
 
 {#if WEBUI_BUILD_CHANNEL === 'main' && version && compareVersion(version.latest, version.current) && ($settings?.showUpdateToast ?? true)}
@@ -485,7 +514,7 @@
 {#if $user}
 	<div class="app relative">
 		<div
-			class=" text-gray-700 dark:text-gray-100 bg-white dark:bg-gray-900 h-screen max-h-[100dvh] overflow-auto flex flex-row justify-end"
+			class=" text-base-700 dark:text-base-100 bg-base-0 dark:bg-base-900 h-screen max-h-[100dvh] overflow-auto flex flex-row justify-end"
 		>
 			{#if !['user', 'admin'].includes($user?.role)}
 				<AccountPending />
@@ -495,7 +524,14 @@
 				{#if loaded}
 					<main class="contents">
 						<div id="main-content" tabindex="-1" class="sr-only left-0 top-0"></div>
-						<slot />
+						{#if routeHasTabs || usePageTabs}
+							<Chat
+								initialPage={usePageTabs
+									? $page.url.pathname + $page.url.search + $page.url.hash
+									: ''}
+							/>
+						{/if}
+						{#if !usePageTabs}<slot />{/if}
 					</main>
 				{:else}
 					<div

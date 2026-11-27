@@ -6,7 +6,7 @@
 
 	/** CSS classes for the sub-content container */
 	export let contentClass =
-		'select-none rounded-2xl p-1 z-50 bg-white dark:bg-gray-850 dark:text-white shadow-lg border border-gray-100 dark:border-gray-800';
+		'select-none rounded-2xl p-1 z-50 bg-base-0 dark:bg-base-850 dark:text-base-0 shadow-lg border border-base-100 dark:border-base-800';
 
 	/** Max width at the default 16px root size; scales with the interface. */
 	export let maxWidth = 200;
@@ -66,7 +66,7 @@
 		if (parentContainer && innerContent) {
 			const parentWidth = parentContainer.offsetWidth;
 			if (parentWidth > 0) {
-				innerContent.style.minWidth = `${parentWidth}px`;
+				innerContent.style.minWidth = `min(${parentWidth}px, ${maxWidth / 16}rem)`;
 			}
 		}
 
@@ -134,7 +134,12 @@
 		await openSub();
 	}
 
+	const isTextField = (element: EventTarget | null) =>
+		element instanceof HTMLElement && element.matches('input, textarea, [contenteditable="true"]');
+
 	function handleContentKeydown(event: KeyboardEvent) {
+		if (['ArrowLeft', 'Home', 'End'].includes(event.key) && isTextField(event.target)) return;
+
 		if (['ArrowDown', 'ArrowUp', 'Home', 'End'].includes(event.key) && contentEl) {
 			const items = [
 				...contentEl.querySelectorAll<HTMLElement>('[role^="menuitem"]:not([disabled])')
@@ -166,6 +171,7 @@
 		// Don't close if moving to the sub-content (including its bridge padding)
 		if (relatedTarget && contentEl?.contains(relatedTarget)) return;
 		if (relatedTarget && triggerEl?.contains(relatedTarget)) return;
+		if (contentEl?.contains(document.activeElement) && isTextField(document.activeElement)) return;
 		open = false;
 	}
 
@@ -174,6 +180,7 @@
 
 		if (relatedTarget && triggerEl?.contains(relatedTarget)) return;
 		if (relatedTarget && contentEl?.contains(relatedTarget)) return;
+		if (contentEl?.contains(document.activeElement) && isTextField(document.activeElement)) return;
 		open = false;
 	}
 
@@ -200,8 +207,8 @@
 <div
 	use:trigger={open}
 	class="w-full {($settings?.highContrastMode ?? false)
-		? '[&>button:hover]:bg-gray-200! dark:[&>button:hover]:bg-gray-800!'
-		: '[&>button:hover]:bg-gray-50/60 dark:[&>button:hover]:bg-gray-800/60'}"
+		? '[&>button:hover]:bg-base-200! dark:[&>button:hover]:bg-base-800!'
+		: '[&>button:hover]:bg-base-50/60 dark:[&>button:hover]:bg-base-800/60'}"
 	on:mouseenter={handleMouseEnter}
 	on:mouseleave={handleMouseLeave}
 >
@@ -214,6 +221,7 @@
 	<div
 		use:portal
 		bind:this={contentEl}
+		class="no-drag-region"
 		role="menu"
 		tabindex="-1"
 		on:mouseleave={handleContentMouseLeave}

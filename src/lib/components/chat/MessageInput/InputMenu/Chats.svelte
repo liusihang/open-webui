@@ -8,11 +8,11 @@
 	import Tooltip from '$lib/components/common/Tooltip.svelte';
 	import Spinner from '$lib/components/common/Spinner.svelte';
 	import Loader from '$lib/components/common/Loader.svelte';
-	import { chatId } from '$lib/stores';
 	import SearchInput from './SearchInput.svelte';
 
 	const i18n = getContext<typeof import('$lib/i18n').default>('i18n');
 
+	export let chatId: string = '';
 	export let onSelect = (e) => {};
 
 	let loaded = false;
@@ -90,7 +90,7 @@
 		items = [
 			...items,
 			...res
-				.filter((item) => item?.id !== $chatId)
+				.filter((item) => item?.id !== chatId)
 				.map((item) => {
 					return {
 						...item,
@@ -128,14 +128,14 @@
 					<Spinner />
 				</div>
 			{:else if items.length === 0}
-				<div class="text-center text-xs text-gray-500 py-3">{$i18n.t('No chats found')}</div>
+				<div class="text-center text-xs text-base-500 py-3">{$i18n.t('No chats found')}</div>
 			{:else}
 				<div class="flex flex-col gap-0.5">
 					{#each items as item, idx}
 						<button
 							class=" h-[1.6875rem] px-2 rounded-xl w-full text-left flex justify-between items-center text-[0.8125rem] font-normal {idx ===
 							selectedIdx
-								? ' bg-gray-50/40 dark:bg-gray-800/40 dark:text-gray-100 selected-command-option-button'
+								? ' bg-base-50/40 dark:bg-base-800/40 dark:text-base-100 selected-command-option-button'
 								: ''}"
 							type="button"
 							on:click={() => {
@@ -151,7 +151,7 @@
 							}}
 							data-selected={idx === selectedIdx}
 						>
-							<div class="text-black dark:text-gray-100 flex items-center gap-1.5">
+							<div class="text-base-1000 dark:text-base-100 flex items-center gap-1.5">
 								<Tooltip
 									content={item.snippet ||
 										dayjs(item.updated_at * 1000)

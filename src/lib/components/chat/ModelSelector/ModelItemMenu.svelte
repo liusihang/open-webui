@@ -14,6 +14,7 @@
 	import Pencil from '$lib/components/icons/Pencil.svelte';
 	import { config, pinnedModels, settings, showSettings, user, visibleControls } from '$lib/stores';
 	import GlobeAlt from '$lib/components/icons/GlobeAlt.svelte';
+	import { isMachine } from '$lib/utils/machines';
 
 	const i18n = getContext('i18n');
 
@@ -28,16 +29,17 @@
 	export let onClose: Function = () => {};
 
 	$: canEdit =
-		model?.preset || model?.info?.base_model_id
+		!isMachine(model?.owned_by) &&
+		(model?.preset || model?.info?.base_model_id
 			? model?.info?.user_id === $user?.id
-			: $user?.role === 'admin';
+			: $user?.role === 'admin');
 	const providerSupportsDelete = (provider = '') => provider === 'llama.cpp';
 	$: showComments =
 		$config?.features?.enable_comments &&
 		$user &&
 		model?.id &&
-		!model?.direct &&
-		!model?.arena &&
+		!model?.owner_id &&
+		!model?.router &&
 		(model?.info || $user?.role === 'admin');
 </script>
 
@@ -66,7 +68,7 @@
 			{#if canEdit}
 				<button
 					type="button"
-					class="select-none flex h-[1.6875rem] w-full items-center gap-2 rounded-xl px-2 text-[0.8125rem] hover:bg-gray-50/40 dark:hover:bg-gray-800/40 transition"
+					class="select-none flex h-[1.6875rem] w-full items-center gap-2 rounded-xl px-2 text-[0.8125rem] hover:bg-base-50/40 dark:hover:bg-base-800/40 transition"
 					on:click={(e) => {
 						e.stopPropagation();
 						e.preventDefault();
@@ -91,7 +93,7 @@
 					{onComment}
 					menu
 					resource={{ resource_type: 'model', resource_id: model?.id }}
-					className="select-none flex h-[1.6875rem] w-full items-center gap-2 rounded-xl px-2 text-[0.8125rem] hover:bg-gray-50/40 dark:hover:bg-gray-800/40 transition"
+					className="select-none flex h-[1.6875rem] w-full items-center gap-2 rounded-xl px-2 text-[0.8125rem] hover:bg-base-50/40 dark:hover:bg-base-800/40 transition"
 					onOpen={() => {
 						show = false;
 						onEdit();
@@ -103,7 +105,7 @@
 				{#if $user?.role === 'admin' && (model?.owned_by === 'ollama' || providerSupportsDelete(model?.provider))}
 					<button
 						type="button"
-						class="select-none flex h-[1.6875rem] w-full items-center gap-2 rounded-xl px-2 text-[0.8125rem] hover:bg-gray-50/40 dark:hover:bg-gray-800/40 transition"
+						class="select-none flex h-[1.6875rem] w-full items-center gap-2 rounded-xl px-2 text-[0.8125rem] hover:bg-base-50/40 dark:hover:bg-base-800/40 transition"
 						on:click={(e) => {
 							e.stopPropagation();
 							e.preventDefault();
@@ -131,14 +133,14 @@
 					</button>
 				{/if}
 
-				<hr class="border-gray-50 dark:border-gray-800/30 mx-1 my-0.5" />
+				<hr class="border-base-50 dark:border-base-800/30 mx-1 my-0.5" />
 			{/if}
 
 			{#if $visibleControls['models.pin']}
 				<button
 					type="button"
 					aria-pressed={$pinnedModels.includes(model?.id)}
-					class="select-none flex h-[1.6875rem] w-full items-center gap-2 rounded-xl px-2 text-[0.8125rem] hover:bg-gray-50/40 dark:hover:bg-gray-800/40 transition"
+					class="select-none flex h-[1.6875rem] w-full items-center gap-2 rounded-xl px-2 text-[0.8125rem] hover:bg-base-50/40 dark:hover:bg-base-800/40 transition"
 					on:click={(e) => {
 						e.stopPropagation();
 						e.preventDefault();
@@ -165,7 +167,7 @@
 
 			<button
 				type="button"
-				class="select-none flex h-[1.6875rem] w-full items-center gap-2 rounded-xl px-2 text-[0.8125rem] hover:bg-gray-50/40 dark:hover:bg-gray-800/40 transition"
+				class="select-none flex h-[1.6875rem] w-full items-center gap-2 rounded-xl px-2 text-[0.8125rem] hover:bg-base-50/40 dark:hover:bg-base-800/40 transition"
 				on:click={(e) => {
 					e.stopPropagation();
 					e.preventDefault();
@@ -180,13 +182,13 @@
 			</button>
 
 			{#if $config?.features.enable_community_sharing}
-				<hr class="border-gray-50 dark:border-gray-800/30 mx-1 my-0.5" />
+				<hr class="border-base-50 dark:border-base-800/30 mx-1 my-0.5" />
 			{/if}
 
 			{#if $config?.features.enable_community_sharing}
 				<button
 					type="button"
-					class="select-none flex h-[1.6875rem] w-full items-center gap-2 rounded-xl px-2 text-[0.8125rem] hover:bg-gray-50/40 dark:hover:bg-gray-800/40 transition"
+					class="select-none flex h-[1.6875rem] w-full items-center gap-2 rounded-xl px-2 text-[0.8125rem] hover:bg-base-50/40 dark:hover:bg-base-800/40 transition"
 					on:click={(e) => {
 						e.stopPropagation();
 						e.preventDefault();

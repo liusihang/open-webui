@@ -4,7 +4,7 @@
 	import { toast } from 'svelte-sonner';
 	import { copyToClipboard } from '$lib/utils';
 	import { equalEditorJSON } from '$lib/utils/editorJson';
-	import { showCallOverlay, skills, terminalSkills } from '$lib/stores';
+	import { mobile, voiceCall, skills, machineSkills } from '$lib/stores';
 
 	marked.use({
 		breaks: true,
@@ -214,7 +214,7 @@
 				button.type = 'button';
 				button.contentEditable = 'false';
 				button.className =
-					'not-prose absolute end-2 top-2 rounded-lg px-2.5 py-1 text-xs font-normal text-gray-600 hover:bg-gray-100 dark:text-gray-400 dark:hover:bg-gray-850';
+					'not-prose absolute end-2 top-2 rounded-lg px-2.5 py-1 text-xs font-normal text-base-600 hover:bg-base-100 dark:text-base-400 dark:hover:bg-base-850';
 				button.textContent = $i18n.t('Copy');
 				button.onclick = async () => {
 					const pos = getPos();
@@ -266,7 +266,8 @@
 
 	import { PASTED_TEXT_CHARACTER_LIMIT } from '$lib/constants';
 	import { createLowlight } from 'lowlight';
-	import hljs from 'highlight.js';
+	import plaintext from 'highlight.js/lib/languages/plaintext';
+	import type { HLJSApi } from 'highlight.js';
 
 	import type { SocketIOCollaborationProvider } from './RichTextInput/Collaboration';
 
@@ -274,16 +275,17 @@
 	export let oncompositionend = (e) => {};
 	export let onChange = (e) => {};
 
-	// create a lowlight instance with all languages loaded
-	const lowlight = createLowlight(
-		hljs.listLanguages().reduce(
-			(obj, lang) => {
-				obj[lang] = () => hljs.getLanguage(lang);
-				return obj;
-			},
-			{} as Record<string, any>
-		)
-	);
+	const lowlight = createLowlight({ plaintext });
+	const registerLanguages = (hljs: HLJSApi) =>
+		lowlight.register(
+			hljs.listLanguages().reduce(
+				(obj, lang) => {
+					obj[lang] = () => hljs.getLanguage(lang);
+					return obj;
+				},
+				{} as Record<string, any>
+			)
+		);
 
 	export let editor: Editor | null = null;
 	$: eventDispatch('editor', editor);
@@ -314,6 +316,7 @@
 	export let dragHandle = false;
 	export let link = false;
 	export let image = false;
+	export let allowExternalImages = false;
 	export let fileHandler = false;
 	export let attachments = false;
 	export let suggestions: Partial<import('@tiptap/suggestion').SuggestionOptions>[] | null = null;
@@ -403,9 +406,12 @@
 	export let json = false;
 	export let raw = false;
 	export let editable = true;
+	export let extensions: import('@tiptap/core').AnyExtension[] = [];
 	export let collaboration = false;
 
 	export let showFormattingToolbar = true;
+	/** Adds a comment action to the selection toolbar. */
+	export let onComment: (() => void) | null = null;
 
 	export let preserveBreaks = false;
 	export let generateAutoCompletion: Function = async () => null;
@@ -417,13 +423,14 @@
 	}
 
 	export let messageInput = false;
+	export let autofocus = true;
 	export let shiftEnter = false;
 	export let largeTextAsFile = false;
 	export let insertPromptAsRichText = false;
 	export let floatingMenuPlacement = 'bottom-start';
 
-	// Keep focus off the chat input during a call so the call overlay's M shortcut works
-	$: suppressAutoFocus = messageInput && $showCallOverlay;
+	// Avoid opening the mobile keyboard or stealing focus from the call overlay.
+	$: suppressAutoFocus = messageInput && ($mobile || $voiceCall);
 
 	let content = null;
 	let htmlValue = '';
@@ -478,6 +485,8 @@
 
 	let floatingMenuElement: Element | null = null;
 	let bubbleMenuElement: Element | null = null;
+	let formattingMenuContainer: HTMLElement | undefined;
+	let formattingDismissed = false;
 	let element: Element | null = null;
 
 	let pendingUpdate = null;
@@ -651,7 +660,7 @@
 							const mentionId = id || slashSkillId;
 							if (
 								mentionChar === '$' &&
-								![...($skills ?? []), ...($terminalSkills ?? [])].some(
+								![...($skills ?? []), ...($machineSkills ?? [])].some(
 									(skill) => skill.id === mentionId && skill.is_active
 								)
 							) {
@@ -945,15 +954,26 @@
 			}
 		}
 
+		if (richText && !messageInput) {
+			const { default: hljs } = await import('highlight.js');
+			registerLanguages(hljs);
+		}
+
 		if (collaboration && editable && documentId && socket && user) {
 			const { SocketIOCollaborationProvider } = await import('./RichTextInput/Collaboration');
 			if (destroyed) return;
 			provider = new SocketIOCollaborationProvider(documentId, socket, user, content);
 		}
 		if (destroyed) return;
+		if (richText && showFormattingToolbar) {
+			formattingMenuContainer = document.body.appendChild(document.createElement('div'));
+			bubbleMenuElement?.remove();
+			floatingMenuElement?.remove();
+		}
 		editor = new Editor({
 			element: element,
 			extensions: [
+				...extensions,
 				StarterKit.configure({
 					link: link ? { autolink: autoFormat, linkOnPaste: autoFormat } : false,
 					code: false, // Disabled in favor of FixedCode (see workaround above)
@@ -984,7 +1004,17 @@
 				...(richText
 					? [
 							CopyableCodeBlock.configure({
-								lowlight
+								// Auto-detecting the language freezes long documents.
+								lowlight: {
+									...lowlight,
+									// tiptap checks highlight.js's global registry, which may list languages this lowlight lacks.
+									highlight: (language: string, code: string) =>
+										lowlight.highlight(
+											lowlight.registered(language) ? language : 'plaintext',
+											code
+										),
+									highlightAuto: (code: string) => lowlight.highlight('plaintext', code)
+								}
 							}),
 							Typography,
 							TableKit.configure({
@@ -1013,7 +1043,9 @@
 					: []),
 
 				CharacterCount.configure({}),
-				...(image ? [Image.configure({ allowBase64: attachments })] : []),
+				...(image
+					? [Image.configure({ allowBase64: attachments, allowExternal: allowExternalImages })]
+					: []),
 				...(attachments ? [FileAttachment.configure({ context: componentContext })] : []),
 				...(fileHandler
 					? [
@@ -1045,7 +1077,7 @@
 					? [
 							BubbleMenu.configure({
 								element: bubbleMenuElement,
-								appendTo: () => document.body,
+								appendTo: formattingMenuContainer,
 								options: {
 									strategy: 'fixed',
 									placement: 'top',
@@ -1062,7 +1094,7 @@
 							}),
 							MountedFloatingMenu.configure({
 								element: floatingMenuElement,
-								appendTo: () => document.body,
+								appendTo: formattingMenuContainer,
 								options: {
 									strategy: 'fixed',
 									placement: floatingMenuPlacement,
@@ -1094,7 +1126,7 @@
 			],
 			content: provider ? undefined : content,
 			editable,
-			autofocus: messageInput && !$showCallOverlay,
+			autofocus: autofocus && messageInput && !$mobile && !$voiceCall,
 			onTransaction: ({ transaction }) => {
 				if (!editor) return;
 
@@ -1326,8 +1358,8 @@
 
 								const { state } = view;
 								const { $from } = state.selection;
-								const lineStart = $from.before($from.depth);
-								const lineEnd = $from.after($from.depth);
+								const lineStart = $from.start();
+								const lineEnd = $from.end();
 								const lineText = state.doc.textBetween(lineStart, lineEnd, '\n', '\0').trim();
 								if (event.shiftKey && !isCtrlPressed) {
 									if (lineText.startsWith('```')) {
@@ -1470,18 +1502,9 @@
 					editor.storage.files = files;
 				}
 			},
-			onSelectionUpdate: onSelectionUpdate,
-			onBlur: () => {
-				// Force-hide floating menus when editor loses focus.
-				// shouldShow alone isn't enough because it only runs on transactions.
-				if (bubbleMenuElement) {
-					bubbleMenuElement.style.visibility = 'hidden';
-					bubbleMenuElement.style.opacity = '0';
-				}
-				if (floatingMenuElement) {
-					floatingMenuElement.style.visibility = 'hidden';
-					floatingMenuElement.style.opacity = '0';
-				}
+			onSelectionUpdate: (event) => {
+				formattingDismissed = false;
+				onSelectionUpdate(event);
 			},
 			enableInputRules: richText && autoFormat,
 			enablePasteRules: richText && autoFormat
@@ -1491,6 +1514,17 @@
 
 		if (messageInput) {
 			selectTemplate();
+		}
+
+		if (richText && messageInput) {
+			const { default: hljs } = await import('highlight.js');
+			if (destroyed) return;
+			registerLanguages(hljs);
+			const { tr } = editor.state;
+			editor.state.doc.descendants((node, pos) => {
+				if (node.type.name === 'codeBlock') tr.setNodeMarkup(pos, undefined, node.attrs);
+			});
+			if (tr.docChanged) editor.view.dispatch(tr.setMeta('addToHistory', false));
 		}
 	});
 
@@ -1508,6 +1542,7 @@
 			editor.destroy();
 			editor = null;
 		}
+		formattingMenuContainer?.remove();
 	});
 
 	$: if (value !== null && editor && !collaboration) {
@@ -1565,18 +1600,28 @@
 	};
 </script>
 
+<svelte:window
+	on:scroll|capture={(event) => {
+		const target = event.target;
+		if (element && target instanceof Node && (target.contains(element) || element.contains(target)))
+			formattingDismissed = true;
+	}}
+/>
+
 {#if richText && showFormattingToolbar}
 	<div
 		bind:this={bubbleMenuElement}
+		hidden={formattingDismissed}
 		id="bubble-menu"
 		class="p-0"
 		style="visibility: hidden; opacity: 0; position: absolute; z-index: 9999;"
 	>
-		<FormattingButtons {editor} />
+		<FormattingButtons {editor} {onComment} />
 	</div>
 
 	<div
 		bind:this={floatingMenuElement}
+		hidden={formattingDismissed}
 		id="floating-menu"
 		class="p-0"
 		style="visibility: hidden; opacity: 0; position: absolute; z-index: 9999;"

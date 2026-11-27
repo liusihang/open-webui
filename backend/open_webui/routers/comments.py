@@ -44,8 +44,13 @@ async def changed(resource_type, resource_id):
     # No comment text, author, or activity IDs are sent to possibly stale subscribers.
     try:
         await sio.emit(
-            'comments:changed',
-            {'resource_type': resource_type, 'resource_id': resource_id},
+            'events',
+            {
+                'data': {
+                    'type': 'comments:changed',
+                    'data': {'resource_type': resource_type, 'resource_id': resource_id},
+                }
+            },
             room=comment_room(resource_type, resource_id),
         )
     except Exception:
@@ -194,7 +199,7 @@ async def create_comment(
         ):
             raise HTTPException(409, 'Comment ID already used')
         return (await comment_responses(db, [previous], user, resource.user_id))[0]
-    validate_comment_target(form.resource_type, resource, form)
+    await validate_comment_target(form.resource_type, resource, form)
     db.add(comment)
     await db.flush()
     response = (await comment_responses(db, [comment], user, resource.user_id))[0]

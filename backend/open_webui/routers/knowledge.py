@@ -10,7 +10,7 @@ from typing import List, Optional
 from urllib.parse import quote
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
-from fastapi.responses import StreamingResponse
+from fastapi.responses import Response, StreamingResponse
 from open_webui.config import (
     BYPASS_ADMIN_ACCESS_CONTROL,
     ENABLE_KNOWLEDGE_FILE_RETENTION,
@@ -33,13 +33,19 @@ from open_webui.models.knowledge import (
     KnowledgeUserResponse,
 )
 from open_webui.models.models import ModelForm, Models
-from open_webui.retrieval.external import retrieve_external_knowledge, retrieve_external_knowledge_for_connection
+from open_webui.retrieval.external import (
+    get_vector_store_ids,
+    is_virtual_knowledge_id,
+    list_openai_vector_stores,
+    retrieve_external_knowledge,
+    retrieve_external_knowledge_for_connection,
+)
+from open_webui.retrieval.utils import is_media_content_type
 from open_webui.retrieval.vector.async_client import ASYNC_VECTOR_DB_CLIENT
 from open_webui.routers.retrieval import (
-    BatchProcessFilesResult,
-    BatchProcessFilesResponse,
     BatchProcessFilesForm,
     ProcessFileForm,
+    index_file,
     process_file,
     process_files_batch,
 )
@@ -61,10 +67,6 @@ PAGE_ITEM_COUNT = 30
 
 
 async def delete_file_resource(file: FileModel, db: AsyncSession) -> bool:
-    from open_webui.retrieval.integration import deactivate
-
-    await db.commit()
-    await deactivate(None, file.id)
     try:
         file_collection = f'file-{file.id}'
         if await ASYNC_VECTOR_DB_CLIENT.has_collection(collection_name=file_collection):
@@ -387,6 +389,7 @@ async def reindex_knowledge_files(
     total_files = sum(len(files) for _, files in knowledge_base_files)
     processed_files = 0
     failed_files = []
+    extracted_file_ids = set()
     start_time = time.monotonic()
 
     log.info('Starting reindexing for %s knowledge bases (%s files)', len(knowledge_bases), total_files)
@@ -419,11 +422,28 @@ async def reindex_knowledge_files(
                 )
 
                 try:
-                    # Force the KB add path to use stored SQL content instead of stale file-{id} chunks.
-                    # process_file recreates file-{id} only when that stored content exists.
-                    file_collection = f'file-{file.id}'
-                    if await ASYNC_VECTOR_DB_CLIENT.has_collection(collection_name=file_collection):
-                        await ASYNC_VECTOR_DB_CLIENT.delete_collection(collection_name=file_collection)
+                    if file.id not in extracted_file_ids:
+                        extracted_file_ids.add(file.id)
+                        file_collection = f'file-{file.id}'
+                        if await ASYNC_VECTOR_DB_CLIENT.has_collection(collection_name=file_collection):
+                            await ASYNC_VECTOR_DB_CLIENT.delete_collection(collection_name=file_collection)
+
+                        # PDF page numbers only come from extraction; media keeps its stored content.
+                        if file.path and not await is_media_content_type(file.meta.get('content_type')):
+                            try:
+                                await index_file(request, ProcessFileForm(file_id=file.id), user, db, rebuild_text=True)
+                            except Exception as e:
+                                log.warning(
+                                    'Error re-extracting file %s (ID: %s), using stored content: %s',
+                                    file.filename,
+                                    file.id,
+                                    e,
+                                )
+                                await Files.update_file_data_by_id(
+                                    file.id, {'content': file.data.get('content')}, db=db
+                                )
+                                if await ASYNC_VECTOR_DB_CLIENT.has_collection(collection_name=file_collection):
+                                    await ASYNC_VECTOR_DB_CLIENT.delete_collection(collection_name=file_collection)
 
                     await process_file(
                         request,
@@ -548,8 +568,15 @@ class ExternalKnowledgeConnectionListResponse(BaseModel):
     total: int
 
 
+class ExternalKnowledgeStoreListForm(BaseModel):
+    connection_id: Optional[str] = None
+    connection: ExternalKnowledgeConnectionForm
+
+
 EXTERNAL_KNOWLEDGE_CONNECTIONS_CONFIG_KEY = 'external_knowledge.connections'
-EXTERNAL_KNOWLEDGE_PROVIDERS = {'qdrant', 'milvus', 'pgvector'}
+EXTERNAL_KNOWLEDGE_PROVIDERS = {'qdrant', 'milvus', 'pgvector', 'openai'}
+# Providers that search server-side by text, so a source needs no field mapping.
+EXTERNAL_KNOWLEDGE_TEXT_SEARCH_PROVIDERS = {'openai'}
 
 
 def _get_external_connection_provider_and_config(form_data: ExternalKnowledgeConnectionForm) -> tuple[str, dict]:
@@ -570,8 +597,16 @@ def _get_external_connection_provider_and_config(form_data: ExternalKnowledgeCon
     allowed_config_keys = {'timeout'}
     if provider == 'milvus':
         allowed_config_keys.add('db_name')
+    normalized = {key: value for key, value in config.items() if key in allowed_config_keys}
 
-    return provider, {key: value for key, value in config.items() if key in allowed_config_keys}
+    # Like model_ids on provider connections: a store_ids list (empty means all) lists the stores as
+    # knowledge bases, readable by whoever access_grants allows.
+    if provider in EXTERNAL_KNOWLEDGE_TEXT_SEARCH_PROVIDERS and isinstance(config.get('store_ids'), list):
+        normalized['store_ids'] = list(dict.fromkeys(str(i).strip() for i in config['store_ids'] if str(i).strip()))
+        access_grants = config.get('access_grants')
+        normalized['access_grants'] = access_grants if isinstance(access_grants, list) else []
+
+    return provider, normalized
 
 
 def _get_external_auth_config(provider: str, incoming: Optional[dict], existing: Optional[dict] = None) -> dict:
@@ -588,6 +623,14 @@ def _get_normalized_external_source(source: ExternalKnowledgeSourceForm, provide
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail='Only collection sources are supported.')
     if not source.name:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail='Collection name is required.')
+
+    if provider in EXTERNAL_KNOWLEDGE_TEXT_SEARCH_PROVIDERS:
+        vector_store_ids = get_vector_store_ids(source.model_dump())
+        if not vector_store_ids:
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail='Vector store ID is required.')
+        source.name = ', '.join(vector_store_ids)
+        source.config = {'vector_store_ids': vector_store_ids}
+        return source
 
     config = source.config or {}
     allowed_keys = {'content_field', 'metadata_field', 'document_id_field'}
@@ -814,17 +857,7 @@ async def _get_external_source_test_result(
         user_id=user.id,
         name=connection.get('name'),
         description='',
-        meta={
-            'source': 'external',
-            'read_only': True,
-            'external': {
-                'connection_id': connection.get('id'),
-                'source': source.model_dump(),
-                'provider': connection.get('provider'),
-                'auth_mode': 'service_account',
-                'capabilities': {'retrieve': True},
-            },
-        },
+        meta=_get_external_knowledge_meta(connection, source),
         access_grants=[],
         created_at=int(time.time()),
         updated_at=int(time.time()),
@@ -883,6 +916,45 @@ async def test_external_knowledge_retrieval(
     return await _get_external_source_test_result(request, connection, source, form_data.query, form_data.count, user)
 
 
+@router.post('/external/source/stores', response_model=dict)
+async def list_external_knowledge_stores(
+    form_data: ExternalKnowledgeStoreListForm,
+    user=Depends(get_admin_user),
+):
+    if form_data.connection_id:
+        existing_connection = await _get_external_connection_by_id(form_data.connection_id)
+        if not existing_connection:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail='External connection not found.')
+        connection = _get_external_connection_update_from_form(form_data.connection, existing_connection)
+    else:
+        connection = _get_external_connection_from_form(form_data.connection, user.id, id='external-test')
+
+    if connection['provider'] not in EXTERNAL_KNOWLEDGE_TEXT_SEARCH_PROVIDERS:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail='Listing is only supported for OpenAI-compatible sources.',
+        )
+
+    try:
+        return {'items': await list_openai_vector_stores(connection)}
+    except RuntimeError as e:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
+
+
+def _get_external_knowledge_meta(connection: dict, source: ExternalKnowledgeSourceForm) -> dict:
+    return {
+        'source': 'external',
+        'read_only': True,
+        'external': {
+            'connection_id': connection.get('id'),
+            'source': source.model_dump(),
+            'provider': connection.get('provider'),
+            'auth_mode': 'service_account',
+            'capabilities': {'retrieve': True},
+        },
+    }
+
+
 @router.post('/external/knowledge/create', response_model=KnowledgeResponse | None)
 async def create_external_knowledge(
     request: Request,
@@ -917,17 +989,7 @@ async def create_external_knowledge(
     if not knowledge:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=ERROR_MESSAGES.FILE_EXISTS)
 
-    meta = {
-        'source': 'external',
-        'read_only': True,
-        'external': {
-            'connection_id': form_data.connection_id,
-            'source': source.model_dump(),
-            'provider': connection.get('provider'),
-            'auth_mode': 'service_account',
-            'capabilities': {'retrieve': True},
-        },
-    }
+    meta = _get_external_knowledge_meta(connection, source)
     knowledge = await Knowledges.update_knowledge_meta_by_id(knowledge.id, meta, db=db)
     await embed_knowledge_base_metadata(request, knowledge.id, knowledge.name, knowledge.description)
     return knowledge
@@ -982,17 +1044,7 @@ async def create_external_knowledge_source(
         await _set_external_connections(connections)
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=ERROR_MESSAGES.FILE_EXISTS)
 
-    meta = {
-        'source': 'external',
-        'read_only': True,
-        'external': {
-            'connection_id': connection.get('id'),
-            'source': source.model_dump(),
-            'provider': connection.get('provider'),
-            'auth_mode': 'service_account',
-            'capabilities': {'retrieve': True},
-        },
-    }
+    meta = _get_external_knowledge_meta(connection, source)
     knowledge = await Knowledges.update_knowledge_meta_by_id(knowledge.id, meta, db=db)
     await embed_knowledge_base_metadata(request, knowledge.id, knowledge.name, knowledge.description)
     return knowledge
@@ -1049,17 +1101,7 @@ async def update_external_knowledge_source(
         await _set_external_connections(connections)
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=ERROR_MESSAGES.DEFAULT())
 
-    meta = {
-        'source': 'external',
-        'read_only': True,
-        'external': {
-            'connection_id': connection.get('id'),
-            'source': source.model_dump(),
-            'provider': connection.get('provider'),
-            'auth_mode': 'service_account',
-            'capabilities': {'retrieve': True},
-        },
-    }
+    meta = _get_external_knowledge_meta(connection, source)
     updated = await Knowledges.update_knowledge_meta_by_id(id, meta, db=db)
     if not updated:
         connections[idx] = existing_connection
@@ -1258,14 +1300,13 @@ async def get_pending_knowledge_files(
     stream: bool = Query(False),
     user=Depends(get_verified_user),
 ):
-    """Return unlinked received uploads, including processing failures.
+    """Return files that are being processed for this knowledge base but not yet linked.
 
     After a file is uploaded with ``knowledge_id`` in its metadata, the backend
     processes it in a background task before linking it to the ``knowledge_file``
     join table.  During this window the file is invisible to the normal file
     list endpoint.  This endpoint exposes those in-flight files so the frontend
-    can restore waiting/running/error states after a page reload. Responses
-    contain status descriptors, never extracted document bodies.
+    can show them with a processing indicator even after a page reload.
 
     When ``stream=true``, returns an SSE stream that polls every 3 seconds
     and emits the current pending file list.  Closes when no files remain.
@@ -1302,7 +1343,7 @@ async def get_pending_knowledge_files(
             pending = await Files.get_pending_files_for_knowledge(knowledge_id)
             data = [f.model_dump() for f in pending]
             yield f'data: {JSONCodec.dumps(data)}\n\n'
-            if not any((file.data or {}).get('status') in ('pending', 'processing') for file in pending):
+            if len(pending) == 0:
                 break
             await asyncio.sleep(3)
 
@@ -1523,17 +1564,33 @@ async def add_file_to_knowledge_by_id(
             id, 1, batch=True, file_size=(file.meta or {}).get('size', 0), exclude_file_ids=[form_data.file_id], db=db
         )
 
+    linked = None
     try:
-        # The worker publishes the index and link together, with a locked quota check.
+        # Claim capacity atomically before indexing into the knowledge collection.
+        if not already_linked:
+            linked = await Knowledges.add_file_to_knowledge_by_id(
+                knowledge_id=id,
+                file_id=form_data.file_id,
+                user_id=user.id,
+                directory_id=form_data.directory_id,
+                db=db,
+            )
+            if not linked:
+                raise ValueError(f'Failed to link file {form_data.file_id} to knowledge {id}')
         await process_file(
             request,
-            ProcessFileForm(file_id=form_data.file_id, collection_name=id, directory_id=form_data.directory_id),
+            ProcessFileForm(file_id=form_data.file_id, collection_name=id),
             user=user,
             db=db,
         )
     except Exception as e:
+        if linked:
+            await Knowledges.remove_file_from_knowledge_by_id(id, form_data.file_id, db=db)
         log.debug(e)
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=str(e),
+        )
 
     if knowledge:
         response = KnowledgeFilesResponse(
@@ -1602,8 +1659,10 @@ async def update_file_from_knowledge_by_id(
             detail=ERROR_MESSAGES.NOT_FOUND,
         )
 
-    # Keep the published vectors available until the worker has completed and
-    # atomically published the replacement/association.
+    # Remove content from the vector database
+    await ASYNC_VECTOR_DB_CLIENT.delete(collection_name=knowledge.id, filter={'file_id': form_data.file_id})
+
+    # Add content to the vector database
     try:
         await process_file(
             request,
@@ -1688,10 +1747,6 @@ async def remove_file_from_knowledge_by_id(
             detail=ERROR_MESSAGES.NOT_FOUND,
         )
 
-    from open_webui.retrieval.integration import deactivate
-
-    await db.commit()
-    await deactivate(request, form_data.file_id, knowledge_id=id)
     await Knowledges.remove_file_from_knowledge_by_id(knowledge_id=id, file_id=form_data.file_id, db=db)
 
     # Remove content from the vector database
@@ -1744,6 +1799,8 @@ async def delete_knowledge_by_id(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail=ERROR_MESSAGES.NOT_FOUND,
         )
+    if is_virtual_knowledge_id(id):
+        external_knowledge_error()
 
     if (
         knowledge.user_id != user.id
@@ -1762,12 +1819,6 @@ async def delete_knowledge_by_id(
         )
 
     log.info('Deleting knowledge base: %s (name: %s)', id, knowledge.name)
-    from open_webui.retrieval.integration import deactivate
-
-    linked_files = await Knowledges.get_files_by_id(id, db=db)
-    await db.commit()
-    for linked_file in linked_files:
-        await deactivate(request, linked_file.id, knowledge_id=id)
 
     # Get all models
     models = await Models.get_all_models(db=db)
@@ -1858,13 +1909,7 @@ async def reset_knowledge_by_id(
             detail=ERROR_MESSAGES.ACCESS_PROHIBITED,
         )
 
-    from open_webui.retrieval.integration import deactivate
-
-    linked_files = await Knowledges.get_files_by_id(id, db=db)
-    await db.commit()
-    for linked_file in linked_files:
-        await deactivate(request, linked_file.id, knowledge_id=id)
-    files = linked_files if not ENABLE_KNOWLEDGE_FILE_RETENTION else []
+    files = await Knowledges.get_files_by_id(id, db=db) if not ENABLE_KNOWLEDGE_FILE_RETENTION else []
 
     try:
         await ASYNC_VECTOR_DB_CLIENT.delete_collection(collection_name=id)
@@ -1944,17 +1989,15 @@ async def sync_knowledge_diff(
         directory_path_by_id[directory.id] = full_path
         directory_id_by_path[full_path] = directory.id
 
-    # Durable receipts can wait for a large batch for hours. Only legacy
-    # uploads without a task receipt become eligible for resubmission by age.
+    # Retry uploads left pending by a restart after an hour.
     pending_files = {
         (
-            directory_path_by_id.get((getattr(file.meta, 'data', None) or {}).get('directory_id'), ''),
+            directory_path_by_id.get(file.meta.data.get('directory_id'), ''),
             file.filename,
             file.meta.model_dump().get('file_hash'),
         )
         for file in await Files.get_pending_files_for_knowledge(id, db=db)
-        if (file.data or {}).get('status') in ('pending', 'processing')
-        and ((file.data or {}).get('ingestion_job_id') or file.created_at >= int(time.time()) - 3600)
+        if file.created_at >= int(time.time()) - 3600
     }
     knowledge_files = await Knowledges.get_files_with_directory_ids(id, db=db)
 
@@ -2067,10 +2110,6 @@ async def sync_knowledge_cleanup(
         if not await Knowledges.has_file(id, file_id, db=db):
             continue
 
-        from open_webui.retrieval.integration import deactivate
-
-        await db.commit()
-        await deactivate(None, file_id, knowledge_id=id)
         await Knowledges.remove_file_from_knowledge_by_id(id, file_id, db=db)
 
         try:
@@ -2188,27 +2227,41 @@ async def add_files_to_knowledge_batch(
     await check_knowledge_upload_limits(
         id,
         len(files),
-        batch=True,
         file_size=max(((file.meta or {}).get('size', 0) or 0 for file in files), default=0),
         exclude_file_ids=list(new_file_ids),
         db=db,
     )
 
-    # Each worker owns the association and quota check in its publication transaction.
-    results, errors = [], []
-    for form in new_entries:
-        try:
-            await process_file(
-                request,
-                ProcessFileForm(file_id=form.file_id, collection_name=id, directory_id=form.directory_id),
-                user=user,
+    # Claim slots before embedding; release them if processing fails.
+    reserved_ids = []
+    dir_map = {form.file_id: form.directory_id for form in new_entries}
+    try:
+        for file in files:
+            linked = await Knowledges.add_file_to_knowledge_by_id(
+                knowledge_id=id,
+                file_id=file.id,
+                user_id=user.id,
+                directory_id=dir_map.get(file.id),
                 db=db,
             )
-            results.append(BatchProcessFilesResult(file_id=form.file_id, status='completed'))
-        except Exception as e:
-            errors.append(BatchProcessFilesResult(file_id=form.file_id, status='failed', error=str(e)))
-    result = BatchProcessFilesResponse(results=results, errors=errors)
-    successful_file_ids = [entry.file_id for entry in results]
+            if not linked:
+                raise ValueError(f'Failed to link file {file.id} to knowledge {id}')
+            reserved_ids.append(file.id)
+        result = await process_files_batch(
+            request=request,
+            form_data=BatchProcessFilesForm(files=files, collection_name=id),
+            user=user,
+            db=db,
+        )
+    except Exception as e:
+        for file_id in reserved_ids:
+            await Knowledges.remove_file_from_knowledge_by_id(id, file_id, db=db)
+        log.error(f'add_files_to_knowledge_batch: Exception occurred: {e}', exc_info=True)
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
+
+    successful_file_ids = [r.file_id for r in result.results if r.status == 'completed']
+    for file_id in set(reserved_ids) - set(successful_file_ids):
+        await Knowledges.remove_file_from_knowledge_by_id(id, file_id, db=db)
 
     # If there were any errors, include them in the response
     if result.errors:
@@ -2251,24 +2304,26 @@ async def export_knowledge_by_id(id: str, user=Depends(get_admin_user), db: Asyn
 
     # Create zip file in memory
     zip_buffer = io.BytesIO()
-    with zipfile.ZipFile(zip_buffer, 'w', zipfile.ZIP_DEFLATED) as zf:
-        for file in files:
-            content = file.data.get('content', '') if file.data else ''
-            if content:
-                # Use original filename with .txt extension
-                filename = file.filename
-                if not filename.endswith('.txt'):
-                    filename = f'{filename}.txt'
-                zf.writestr(filename, content)
 
-    zip_buffer.seek(0)
+    def write_zip():
+        with zipfile.ZipFile(zip_buffer, 'w', zipfile.ZIP_DEFLATED) as zf:
+            for file in files:
+                content = file.data.get('content', '') if file.data else ''
+                if content:
+                    # Use original filename with .txt extension
+                    filename = file.filename
+                    if not filename.endswith('.txt'):
+                        filename = f'{filename}.txt'
+                    zf.writestr(filename, content)
+
+    await asyncio.to_thread(write_zip)
 
     # Sanitize knowledge name for filename
     safe_name = ''.join(c if c.isalnum() or c in ' -_' else '_' for c in knowledge.name)
     zip_filename = f'{safe_name}.zip'
 
-    return StreamingResponse(
-        zip_buffer,
+    return Response(
+        content=zip_buffer.getvalue(),
         media_type='application/zip',
         headers={'Content-Disposition': f"attachment; filename*=UTF-8''{quote(zip_filename, safe='')}"},
     )
@@ -2405,11 +2460,6 @@ async def delete_knowledge_directory(
 
     # Collect before delete_directory drops the KnowledgeFile rows
     files = [] if move_files else await Knowledges.get_files_by_id_and_directory_id(id, dir_id, db=db)
-    from open_webui.retrieval.integration import deactivate
-
-    await db.commit()
-    for file in files:
-        await deactivate(request, file.id, knowledge_id=id)
 
     success = await Knowledges.delete_directory(
         directory_id=dir_id,

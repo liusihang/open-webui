@@ -6,10 +6,13 @@
 	import dayjs from 'dayjs';
 	import calendar from 'dayjs/plugin/calendar';
 	import localizedFormat from 'dayjs/plugin/localizedFormat';
-	import { getContext, onMount, tick } from 'svelte';
+	import { withListFocus } from '$lib/utils/listFocus';
+	import { getContext, onMount, onDestroy } from 'svelte';
 	import type { Writable } from 'svelte/store';
 	import { goto } from '$app/navigation';
 	import { toast } from 'svelte-sonner';
+	import { updateFolderChatLists } from '$lib/stores/folderStates';
+	import { closeChatTabs } from '$lib/stores/chatViewStates';
 
 	import {
 		archiveChatById,
@@ -55,6 +58,7 @@
 	let allChatsLoaded = false;
 	let chatListLoading = false;
 	let searchDebounceTimeout: ReturnType<typeof setTimeout> | null = null;
+	let searchController: AbortController;
 
 	let selectedChatId: string | null = null;
 	let showDeleteConfirmDialog = false;
@@ -67,14 +71,22 @@
 	});
 
 	const loadChats = async () => {
+		searchController?.abort();
+		searchController = new AbortController();
+		const { signal } = searchController;
+		chatListLoading = false;
 		page = 1;
 		chatList = null;
-		chatList = await getArchivedChatList(localStorage.token, page, getFilter());
+		const res = await getArchivedChatList(localStorage.token, page, getFilter(), signal);
+		if (signal.aborted) return;
+		chatList = res;
 		allChatsLoaded = (chatList ?? []).length === 0;
-		chatCount = await getArchivedChatCount(localStorage.token);
+		const count = await getArchivedChatCount(localStorage.token);
+		if (!signal.aborted) chatCount = count;
 	};
 
 	const searchHandler = () => {
+		searchController?.abort();
 		chatList = null;
 		if (searchDebounceTimeout) {
 			clearTimeout(searchDebounceTimeout);
@@ -88,10 +100,13 @@
 	};
 
 	const loadMoreChats = async () => {
+		if (chatListLoading || !chatList || allChatsLoaded || searchController.signal.aborted) return;
+		const { signal } = searchController;
 		chatListLoading = true;
 		page += 1;
 
-		const newChatList = await getArchivedChatList(localStorage.token, page, getFilter());
+		const newChatList = await getArchivedChatList(localStorage.token, page, getFilter(), signal);
+		if (signal.aborted) return;
 		allChatsLoaded = newChatList.length === 0;
 
 		if (newChatList.length > 0) {
@@ -121,17 +136,14 @@
 	};
 
 	const unarchiveHandler = async (id: string) => {
-		const index = chatList?.findIndex((chat) => chat.id === id) ?? -1;
-		await archiveChatById(localStorage.token, id).catch((error) => {
+		const restored = await archiveChatById(localStorage.token, id).catch((error) => {
 			toast.error(`${error}`);
 		});
+		if (!restored) return;
+		updateFolderChatLists(restored, restored.folder_id);
 
 		chatList = chatList?.filter((chat) => chat.id !== id) ?? null;
 		if (chatCount !== null) chatCount -= 1;
-
-		await tick();
-		const rows = chatListElement?.children ?? [];
-		(rows[Math.min(index, rows.length - 1)]?.querySelector('button') ?? searchInput)?.focus();
 
 		await refreshChatList(localStorage.token, { refreshPinned: true });
 	};
@@ -140,9 +152,12 @@
 		if (!selectedChatId) return;
 
 		const id = selectedChatId;
-		await deleteChatById(localStorage.token, id).catch((error) => {
+		const deleted = await deleteChatById(localStorage.token, id).catch((error) => {
 			toast.error(`${error}`);
 		});
+		if (!deleted) return;
+		updateFolderChatLists({ id }, undefined, true);
+		closeChatTabs(id);
 
 		chatList = chatList?.filter((chat) => chat.id !== id) ?? null;
 		if (chatCount !== null) chatCount -= 1;
@@ -172,12 +187,16 @@
 	};
 
 	onMount(loadChats);
+	onDestroy(() => {
+		searchController?.abort();
+		if (searchDebounceTimeout) clearTimeout(searchDebounceTimeout);
+	});
 </script>
 
 <ConfirmDialog
 	bind:show={showDeleteConfirmDialog}
 	on:confirm={() => {
-		deleteHandler();
+		if (selectedChatId) withListFocus(chatListElement, selectedChatId, deleteHandler, searchInput);
 	}}
 />
 
@@ -190,12 +209,16 @@
 	}}
 />
 
-<div id="tab-archived-chats" class="flex flex-col h-full overflow-y-auto text-sm">
+<div
+	bind:this={chatListElement}
+	id="tab-archived-chats"
+	class="flex flex-col h-full overflow-y-auto text-sm"
+>
 	<div class="mb-3 flex items-center justify-between">
-		<h2 class="text-sm font-medium text-gray-900 dark:text-white">
+		<h2 class="text-sm font-medium text-base-900 dark:text-base-0">
 			{$i18n.t('settings.personal.archivedChats.title')}
 			{#if chatCount !== null}
-				<span class="ml-2 font-normal text-gray-500 dark:text-gray-500">
+				<span class="ml-2 font-normal text-base-500 dark:text-base-500">
 					{formatNumber(chatCount)}
 				</span>
 			{/if}
@@ -204,11 +227,11 @@
 
 	<div class="flex h-7 shrink-0 items-center w-full gap-2">
 		<div class="flex min-w-0 flex-1 items-center gap-2">
-			<Search className="size-3.5 shrink-0 text-gray-400 dark:text-gray-600" />
+			<Search className="size-3.5 shrink-0 text-base-400 dark:text-base-600" />
 			<input
 				bind:this={searchInput}
 				data-settings-search
-				class="min-w-0 flex-1 bg-transparent py-0.5 text-xs text-gray-700 outline-hidden placeholder:text-gray-300 dark:text-gray-300 dark:placeholder:text-gray-700"
+				class="min-w-0 flex-1 bg-transparent py-0.5 text-xs text-base-700 outline-hidden placeholder:text-base-300 dark:text-base-300 dark:placeholder:text-base-700"
 				bind:value={query}
 				on:input={searchHandler}
 				aria-label={$i18n.t('Search Chats')}
@@ -218,7 +241,7 @@
 			{#if query}
 				<div class="shrink-0">
 					<button
-						class="rounded-lg p-0.5 text-gray-400 transition-colors hover:text-gray-700 dark:text-gray-600 dark:hover:text-gray-300"
+						class="rounded-lg p-0.5 text-base-400 transition-colors hover:text-base-700 dark:text-base-600 dark:hover:text-base-300"
 						type="button"
 						aria-label={$i18n.t('Clear search')}
 						on:click={() => {
@@ -235,7 +258,7 @@
 		<Dropdown closeOnSelect align="end">
 			<Tooltip content={$i18n.t('Actions')}>
 				<button
-					class="flex h-7 items-center gap-1.5 rounded-lg bg-transparent px-1.5 text-xs text-gray-500 transition-colors hover:text-gray-900 dark:text-gray-500 dark:hover:text-white"
+					class="flex h-7 items-center gap-1.5 rounded-lg bg-transparent px-1.5 text-xs text-base-500 transition-colors hover:text-base-900 dark:text-base-500 dark:hover:text-base-0"
 					type="button"
 				>
 					<span>{$i18n.t('Actions')}</span>
@@ -247,7 +270,7 @@
 				<DropdownMenu className="min-w-[10.625rem] shadow-sm">
 					{#if $visibleControls['chat.archive']}
 						<button
-							class="flex h-[1.6875rem] w-full cursor-pointer select-none items-center gap-2 rounded-lg bg-transparent px-2 text-xs hover:text-gray-900 disabled:cursor-default disabled:opacity-30 dark:hover:text-gray-100"
+							class="flex h-[1.6875rem] w-full cursor-pointer select-none items-center gap-2 rounded-lg bg-transparent px-2 text-xs hover:text-base-900 disabled:cursor-default disabled:opacity-30 dark:hover:text-base-100"
 							disabled={loading || chatCount === 0}
 							type="button"
 							on:click={() => {
@@ -267,7 +290,7 @@
 
 					{#if $user?.role === 'admin' || ($user?.permissions?.chat?.export ?? true)}
 						<button
-							class="flex h-[1.6875rem] w-full cursor-pointer select-none items-center gap-2 rounded-lg bg-transparent px-2 text-xs hover:text-gray-900 disabled:cursor-default disabled:opacity-30 dark:hover:text-gray-100"
+							class="flex h-[1.6875rem] w-full cursor-pointer select-none items-center gap-2 rounded-lg bg-transparent px-2 text-xs hover:text-base-900 disabled:cursor-default disabled:opacity-30 dark:hover:text-base-100"
 							disabled={loading || chatCount === 0}
 							type="button"
 							on:click={exportChatsHandler}
@@ -302,13 +325,13 @@
 			</div>
 		{:else if chatList.length === 0}
 			<div
-				class="flex min-h-20 items-center justify-center px-4 text-center text-xs text-gray-500 dark:text-gray-400"
+				class="flex min-h-20 items-center justify-center px-4 text-center text-xs text-base-500 dark:text-base-400"
 			>
 				{$i18n.t('You have no archived conversations.')}
 			</div>
 		{:else}
 			<div role="table" aria-label={$i18n.t('settings.personal.archivedChats.title')}>
-				<div class="flex items-center px-1 text-xs text-gray-400 dark:text-gray-600" role="row">
+				<div class="flex items-center px-1 text-xs text-base-400 dark:text-base-600" role="row">
 					<div
 						class="flex flex-1"
 						role="columnheader"
@@ -360,12 +383,12 @@
 					<div role="columnheader" aria-label={$i18n.t('Actions')}></div>
 				</div>
 
-				<div bind:this={chatListElement} role="rowgroup">
+				<div role="rowgroup">
 					{#each chatList as chat (chat.id)}
 						<div class="flex w-full justify-between gap-2 px-1 py-1 text-xs" role="row">
 							<div class="mr-auto min-w-0 max-w-xl flex-1 self-center" role="cell">
 								<a
-									class="block truncate text-gray-800 hover:text-black dark:text-gray-200 dark:hover:text-white"
+									class="block truncate text-base-800 hover:text-base-1000 dark:text-base-200 dark:hover:text-base-0"
 									href={`/c/${chat.id}`}
 									title={chat?.title}
 									on:click={(event) => {
@@ -378,7 +401,7 @@
 								</a>
 							</div>
 							<div
-								class="hidden w-24 shrink-0 self-center justify-end text-gray-600 dark:text-gray-500 sm:flex"
+								class="hidden w-24 shrink-0 self-center justify-end text-base-600 dark:text-base-500 sm:flex"
 								role="cell"
 							>
 								{$i18n.t(
@@ -395,17 +418,18 @@
 								)}
 							</div>
 							<div
-								class="flex shrink-0 items-center justify-end text-gray-500 dark:text-gray-500"
+								class="flex shrink-0 items-center justify-end text-base-500 dark:text-base-500"
 								role="cell"
 							>
 								{#if $visibleControls['chat.archive']}
 									<Tooltip content={$i18n.t('Unarchive Chat')}>
 										<button
-											class="rounded-lg p-1 text-gray-400 transition-colors hover:text-gray-700 dark:text-gray-600 dark:hover:text-gray-300"
+											class="rounded-lg p-1 text-base-400 transition-colors hover:text-base-700 dark:text-base-600 dark:hover:text-base-300"
 											type="button"
+											data-focus-row={chat.id}
 											aria-label={$i18n.t('Unarchive Chat')}
 											on:click={() => {
-												unarchiveHandler(chat.id);
+												withListFocus(chatListElement, chat.id, unarchiveHandler, searchInput);
 											}}
 										>
 											<UndoAction className="size-3.5" strokeWidth="1.5" />
@@ -415,8 +439,9 @@
 								{#if $user?.role === 'admin' || ($user?.permissions?.chat?.delete ?? true)}
 									<Tooltip content={$i18n.t('Delete Chat')}>
 										<button
-											class="rounded-lg p-1 text-gray-400 transition-colors hover:text-gray-700 dark:text-gray-600 dark:hover:text-gray-300"
+											class="rounded-lg p-1 text-base-400 transition-colors hover:text-base-700 dark:text-base-600 dark:hover:text-base-300"
 											type="button"
+											data-focus-row={$visibleControls['chat.archive'] ? undefined : chat.id}
 											aria-label={$i18n.t('Delete Chat')}
 											on:click={() => {
 												selectedChatId = chat.id;

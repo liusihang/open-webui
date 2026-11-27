@@ -189,10 +189,10 @@ export const setToolServerConnections = async (token: string, connections: objec
 	return res;
 };
 
-export const getTerminalServerConnections = async (token: string) => {
+export const getMachineConnections = async (token: string) => {
 	let error = null;
 
-	const res = await fetch(`${WEBUI_API_BASE_URL}/configs/terminal_servers`, {
+	const res = await fetch(`${WEBUI_API_BASE_URL}/configs/machines`, {
 		method: 'GET',
 		headers: {
 			'Content-Type': 'application/json',
@@ -216,10 +216,10 @@ export const getTerminalServerConnections = async (token: string) => {
 	return res;
 };
 
-export const setTerminalServerConnections = async (token: string, connections: object) => {
+export const setMachineConnections = async (token: string, connections: object) => {
 	let error = null;
 
-	const res = await fetch(`${WEBUI_API_BASE_URL}/configs/terminal_servers`, {
+	const res = await fetch(`${WEBUI_API_BASE_URL}/configs/machines`, {
 		method: 'POST',
 		headers: {
 			'Content-Type': 'application/json',
@@ -247,236 +247,13 @@ export const setTerminalServerConnections = async (token: string, connections: o
 };
 
 /**
- * Detect whether a terminal server URL points to an Orchestrator or a direct
- * Open Terminal instance.
- *
- * - GET {url}/api/v1/policies → 200 → "orchestrator"
- * - GET {url}/api/config      → 200 → "terminal"
- * - Neither                         → null
- */
-export const detectTerminalServerType = async (
-	url: string,
-	key: string
-): Promise<'orchestrator' | 'terminal' | null> => {
-	const baseUrl = url.replace(/\/$/, '');
-	const headers: Record<string, string> = {};
-	if (key) {
-		headers['Authorization'] = `Bearer ${key}`;
-	}
-
-	// Orchestrators expose a policies API; plain terminals don't.
-	try {
-		const res = await fetch(`${baseUrl}/api/v1/policies`, { headers });
-		if (res.ok) return 'orchestrator';
-	} catch {
-		// ignore
-	}
-
-	// Fall back to open-terminal config endpoint.
-	try {
-		const res = await fetch(`${baseUrl}/api/config`, { headers });
-		if (res.ok) return 'terminal';
-	} catch {
-		// ignore
-	}
-
-	return null;
-};
-
-/**
- * Create or update a policy on the orchestrator.
- * Proxied through the Open WebUI backend to keep API keys server-side.
- */
-export const putOrchestratorPolicy = async (
-	token: string,
-	url: string,
-	key: string,
-	policyId: string,
-	policyData: object,
-	authType: string = 'bearer'
-): Promise<object | null> => {
-	let error = null;
-
-	const res = await fetch(`${WEBUI_API_BASE_URL}/configs/terminal_servers/policy`, {
-		method: 'POST',
-		headers: {
-			'Content-Type': 'application/json',
-			Authorization: `Bearer ${token}`
-		},
-		body: JSON.stringify({
-			url: url.replace(/\/$/, ''),
-			key,
-			auth_type: authType,
-			policy_id: policyId,
-			policy_data: policyData
-		})
-	})
-		.then(async (res) => {
-			if (!res.ok) throw await res.json();
-			return res.json();
-		})
-		.catch((err) => {
-			console.error(err);
-			error = err.detail;
-			return null;
-		});
-
-	if (error) {
-		throw error;
-	}
-
-	return res;
-};
-
-export const getOrchestratorPolicy = async (
-	token: string,
-	url: string,
-	key: string,
-	policyId: string,
-	authType: string = 'bearer'
-): Promise<any> => {
-	const res = await fetch(`${WEBUI_API_BASE_URL}/configs/terminal_servers/policy`, {
-		method: 'POST',
-		headers: {
-			'Content-Type': 'application/json',
-			Authorization: `Bearer ${token}`
-		},
-		body: JSON.stringify({
-			url: url.replace(/\/$/, ''),
-			key,
-			auth_type: authType,
-			policy_id: policyId
-		})
-	});
-	if (!res.ok) {
-		const body = await res.json();
-		throw Object.assign(new Error(body.detail || 'Failed to read policy'), { status: res.status });
-	}
-	return res.json();
-};
-
-export const putOrchestratorLifecycle = async (
-	token: string,
-	url: string,
-	key: string,
-	policyId: string,
-	lifecycleData: object,
-	authType: string = 'bearer'
-): Promise<object | null> => {
-	let error = null;
-
-	const res = await fetch(`${WEBUI_API_BASE_URL}/configs/terminal_servers/lifecycle`, {
-		method: 'POST',
-		headers: {
-			'Content-Type': 'application/json',
-			Authorization: `Bearer ${token}`
-		},
-		body: JSON.stringify({
-			url: url.replace(/\/$/, ''),
-			key,
-			auth_type: authType,
-			policy_id: policyId,
-			lifecycle_data: lifecycleData
-		})
-	})
-		.then(async (res) => {
-			if (!res.ok) throw await res.json();
-			return res.json();
-		})
-		.catch((err) => {
-			console.error(err);
-			error = err.detail;
-			return null;
-		});
-
-	if (error) {
-		throw error;
-	}
-
-	return res;
-};
-
-export const getOrchestratorLifecycle = async (
-	token: string,
-	url: string,
-	key: string,
-	policyId: string,
-	authType: string = 'bearer'
-): Promise<any> => {
-	const res = await fetch(`${WEBUI_API_BASE_URL}/configs/terminal_servers/lifecycle`, {
-		method: 'POST',
-		headers: {
-			'Content-Type': 'application/json',
-			Authorization: `Bearer ${token}`
-		},
-		body: JSON.stringify({
-			url: url.replace(/\/$/, ''),
-			key,
-			auth_type: authType,
-			policy_id: policyId
-		})
-	});
-	if (!res.ok) {
-		const body = await res.json();
-		throw Object.assign(new Error(body.detail || 'Failed to read lifecycle'), {
-			status: res.status
-		});
-	}
-	return res.json();
-};
-
-export const refreshOrchestratorTerminals = async (
-	token: string,
-	url: string,
-	key: string,
-	body: {
-		user_id?: string;
-		policy_id?: string;
-		only_idle?: boolean;
-		reset?: boolean;
-	},
-	authType: string = 'bearer'
-): Promise<object | null> => {
-	let error = null;
-
-	const res = await fetch(`${WEBUI_API_BASE_URL}/configs/terminal_servers/refresh`, {
-		method: 'POST',
-		headers: {
-			'Content-Type': 'application/json',
-			Authorization: `Bearer ${token}`
-		},
-		body: JSON.stringify({
-			url: url.replace(/\/$/, ''),
-			key,
-			auth_type: authType,
-			...body
-		})
-	})
-		.then(async (res) => {
-			if (!res.ok) throw await res.json();
-			return res.json();
-		})
-		.catch((err) => {
-			console.error(err);
-			error = err.detail;
-			return null;
-		});
-
-	if (error) {
-		throw error;
-	}
-
-	return res;
-};
-
-/**
- * Verify a terminal server connection via the backend proxy.
+ * Verify a machine connection via the backend proxy.
  * Used for system/admin connections to avoid CORS issues and API key exposure.
  */
-export const verifyTerminalServerConnection = async (token: string, connection: object) => {
+export const verifyMachineConnection = async (token: string, connection: object) => {
 	let error = null;
 
-	const res = await fetch(`${WEBUI_API_BASE_URL}/configs/terminal_servers/verify`, {
+	const res = await fetch(`${WEBUI_API_BASE_URL}/configs/machines/verify`, {
 		method: 'POST',
 		headers: {
 			'Content-Type': 'application/json',
@@ -748,6 +525,31 @@ export const getSubagentsConfig = async (token: string) => {
 
 export const setSubagentsConfig = async (token: string, config: object) => {
 	const res = await fetch(`${WEBUI_API_BASE_URL}/configs/subagents`, {
+		method: 'POST',
+		headers: {
+			'Content-Type': 'application/json',
+			Authorization: `Bearer ${token}`
+		},
+		body: JSON.stringify(config)
+	});
+	if (!res.ok) throw await res.json();
+	return res.json();
+};
+
+export const getRouterModelsConfig = async (token: string) => {
+	const res = await fetch(`${WEBUI_API_BASE_URL}/configs/router_models`, {
+		method: 'GET',
+		headers: {
+			'Content-Type': 'application/json',
+			Authorization: `Bearer ${token}`
+		}
+	});
+	if (!res.ok) throw await res.json();
+	return res.json();
+};
+
+export const setRouterModelsConfig = async (token: string, config: object) => {
+	const res = await fetch(`${WEBUI_API_BASE_URL}/configs/router_models`, {
 		method: 'POST',
 		headers: {
 			'Content-Type': 'application/json',

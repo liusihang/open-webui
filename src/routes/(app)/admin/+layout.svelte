@@ -40,7 +40,7 @@
 			? 'md:max-w-[calc(100%-var(--sidebar-width))]'
 			: 'md:max-w-[calc(100%-42px)]'}  w-full max-w-full"
 	>
-		<nav class="pb-1 px-1.5 pt-1.5 md:px-2.5 md:pt-2 backdrop-blur-xl drag-region select-none">
+		<nav class="pb-1 px-1.5 pt-1.5 md:px-2.5 md:pt-2 drag-region select-none">
 			<div class=" flex items-center gap-0.5 md:gap-1">
 				{#if $mobile}
 					<div class="{$showSidebar ? 'md:hidden' : ''} self-center flex flex-none items-center">
@@ -50,7 +50,7 @@
 						>
 							<button
 								id="sidebar-toggle-button"
-								class=" cursor-pointer flex rounded-lg hover:bg-gray-100 dark:hover:bg-gray-850 transition cursor-"
+								class=" cursor-pointer flex rounded-lg hover:bg-base-100 dark:hover:bg-base-850 transition cursor-"
 								aria-label={$showSidebar ? $i18n.t('Close Sidebar') : $i18n.t('Open Sidebar')}
 								on:click={() => {
 									showSidebar.set(!$showSidebar);
@@ -72,7 +72,7 @@
 							draggable="false"
 							class="min-w-fit px-1 text-sm {$page.url.pathname.includes('/admin/users')
 								? ''
-								: 'text-gray-300 dark:text-gray-600 hover:text-gray-700 dark:hover:text-white'} transition select-none"
+								: 'text-base-300 dark:text-base-600 hover:text-base-700 dark:hover:text-base-0'} transition select-none"
 							href="/admin">{$i18n.t('Users')}</a
 						>
 
@@ -80,7 +80,7 @@
 							draggable="false"
 							class="min-w-fit px-1 text-sm {$page.url.pathname.includes('/admin/evaluations')
 								? ''
-								: 'text-gray-300 dark:text-gray-600 hover:text-gray-700 dark:hover:text-white'} transition select-none"
+								: 'text-base-300 dark:text-base-600 hover:text-base-700 dark:hover:text-base-0'} transition select-none"
 							href="/admin/evaluations">{$i18n.t('Evaluations')}</a
 						>
 
@@ -89,7 +89,7 @@
 								draggable="false"
 								class="min-w-fit px-1 text-sm {$page.url.pathname.includes('/admin/functions')
 									? ''
-									: 'text-gray-300 dark:text-gray-600 hover:text-gray-700 dark:hover:text-white'} transition select-none"
+									: 'text-base-300 dark:text-base-600 hover:text-base-700 dark:hover:text-base-0'} transition select-none"
 								href="/admin/functions">{$i18n.t('Functions')}</a
 							>
 						{/if}
@@ -98,7 +98,7 @@
 							draggable="false"
 							class="min-w-fit px-1 text-sm {$page.url.pathname.includes('/admin/settings')
 								? ''
-								: 'text-gray-300 dark:text-gray-600 hover:text-gray-700 dark:hover:text-white'} transition select-none"
+								: 'text-base-300 dark:text-base-600 hover:text-base-700 dark:hover:text-base-0'} transition select-none"
 							href="/admin/settings"
 							on:click={(event) => {
 								event.preventDefault();

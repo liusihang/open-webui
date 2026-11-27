@@ -19,6 +19,8 @@
 
 	export let side: 'top' | 'bottom' = 'top';
 	export let align: 'start' | 'end' = 'start';
+	/** Render the trigger as a bare value, for label | value rows. */
+	export let plain = false;
 
 	/** Optional callback when any value changes */
 	export let onChange: () => void = () => {};
@@ -26,6 +28,7 @@
 	let showDropdown = false;
 
 	$: FREQUENCIES = [
+		{ key: 'NONE', label: $i18n.t('None') },
 		{ key: 'ONCE', label: $i18n.t('Once') },
 		{ key: 'HOURLY', label: $i18n.t('Hourly') },
 		{ key: 'DAILY', label: $i18n.t('Daily') },
@@ -47,7 +50,7 @@
 	let lastVisualFrequency = 'DAILY';
 	let prevFrequency = 'DAILY';
 
-	$: if (frequency !== 'CUSTOM') {
+	$: if (frequency !== 'CUSTOM' && frequency !== 'NONE') {
 		lastVisualFrequency = frequency;
 	}
 
@@ -85,6 +88,7 @@
 	};
 
 	export const buildRrule = (): string => {
+		if (frequency === 'NONE') return '';
 		if (frequency === 'CUSTOM') return customRrule;
 		if (frequency === 'ONCE') {
 			const dt = onceDate.replace(/-/g, '') + 'T' + onceTime.replace(/:/g, '') + '00';
@@ -106,6 +110,11 @@
 	};
 
 	export const parseRrule = (s: string) => {
+		if (!s.trim()) {
+			frequency = 'NONE';
+			prevFrequency = 'NONE';
+			return;
+		}
 		const match = s.match(/DTSTART[^:]*:(\d{4})(\d{2})(\d{2})T(\d{2})(\d{2})/i);
 		// Detect ONCE (COUNT=1 with DTSTART)
 		if (/COUNT=1(?!\d)/.test(s)) {
@@ -151,55 +160,54 @@
 		return 'Schedule';
 	};
 
-	$: scheduleLabel = (() => {
-		if (frequency === 'ONCE') return 'Once';
-		if (frequency === 'HOURLY') return 'Hourly';
-		if (frequency === 'DAILY') return 'Daily';
-		if (frequency === 'WEEKLY') return 'Weekly';
-		if (frequency === 'MONTHLY') return 'Monthly';
-		if (frequency === 'CUSTOM') return 'Custom';
-		return 'Schedule';
-	})();
+	$: scheduleLabel =
+		FREQUENCIES.find((option) => option.key === frequency)?.label ?? $i18n.t('Schedule');
 </script>
 
 <Dropdown bind:show={showDropdown} {side} {align}>
 	<button
 		type="button"
-		class="flex items-center gap-1.5 px-2.5 py-1.5 rounded-2xl text-xs transition
-			text-gray-600 hover:text-gray-900 dark:text-gray-400 dark:hover:text-gray-100"
+		class={plain
+			? 'flex w-full min-w-0 items-center text-left text-xs font-normal leading-6 text-base-700 dark:text-base-300'
+			: 'flex items-center gap-1.5 px-2.5 py-1.5 rounded-2xl text-xs transition text-base-600 hover:text-base-900 dark:text-base-400 dark:hover:text-base-100'}
 	>
-		<svg
-			xmlns="http://www.w3.org/2000/svg"
-			fill="none"
-			viewBox="0 0 24 24"
-			stroke-width="1.5"
-			stroke="currentColor"
-			class="size-3.5"
+		{#if !plain}<svg
+				xmlns="http://www.w3.org/2000/svg"
+				fill="none"
+				viewBox="0 0 24 24"
+				stroke-width="1.5"
+				stroke="currentColor"
+				class="size-3.5"
+			>
+				<path
+					stroke-linecap="round"
+					stroke-linejoin="round"
+					d="M12 6v6h4.5m4.5 0a9 9 0 1 1-18 0 9 9 0 0 1 18 0Z"
+				/>
+			</svg>{/if}
+		<span
+			class:sr-only={!plain && frequency === 'NONE'}
+			class={plain ? 'truncate' : 'whitespace-nowrap'}
 		>
-			<path
-				stroke-linecap="round"
-				stroke-linejoin="round"
-				d="M12 6v6h4.5m4.5 0a9 9 0 1 1-18 0 9 9 0 0 1 18 0Z"
-			/>
-		</svg>
-		<span class="whitespace-nowrap">{scheduleLabel}</span>
-		<svg
-			xmlns="http://www.w3.org/2000/svg"
-			fill="none"
-			viewBox="0 0 24 24"
-			stroke-width="2"
-			stroke="currentColor"
-			class="size-2.5"
-		>
-			<path stroke-linecap="round" stroke-linejoin="round" d="m19.5 8.25-7.5 7.5-7.5-7.5" />
-		</svg>
+			{!plain && frequency === 'NONE' ? $i18n.t('Schedule') : scheduleLabel}
+		</span>
+		{#if !plain}<svg
+				xmlns="http://www.w3.org/2000/svg"
+				fill="none"
+				viewBox="0 0 24 24"
+				stroke-width="2"
+				stroke="currentColor"
+				class="size-2.5"
+			>
+				<path stroke-linecap="round" stroke-linejoin="round" d="m19.5 8.25-7.5 7.5-7.5-7.5" />
+			</svg>{/if}
 	</button>
 
 	<div
 		slot="content"
-		class="rounded-xl shadow-lg border border-gray-200 dark:border-gray-800 flex flex-col bg-white dark:bg-gray-850 w-48 p-0.5"
+		class="rounded-xl shadow-lg border border-base-200 dark:border-base-800 flex flex-col bg-base-0 dark:bg-base-850 w-48 p-0.5"
 	>
-		<div class="px-2 text-[0.6875rem] text-gray-500 pt-0.5">
+		<div class="px-2 text-[0.6875rem] text-base-500 pt-0.5">
 			{$i18n.t('Schedule')}
 		</div>
 
@@ -224,12 +232,12 @@
 					type="text"
 					bind:value={customRrule}
 					placeholder="RRULE:FREQ=DAILY;BYHOUR=9;BYMINUTE=0"
-					class="w-full bg-transparent outline-hidden text-[0.8125rem] placeholder:text-gray-400 dark:placeholder:text-gray-600"
+					class="w-full bg-transparent outline-hidden text-[0.8125rem] placeholder:text-base-400 dark:placeholder:text-base-600"
 					on:click={(e) => e.stopPropagation()}
 					on:input={onChange}
 				/>
 			</div>
-		{:else if frequency !== 'HOURLY'}
+		{:else if frequency !== 'HOURLY' && frequency !== 'NONE'}
 			<div class="flex gap-2 flex-wrap items-center px-3 pb-2 text-[0.8125rem]">
 				{#if frequency === 'ONCE'}
 					<div class="flex items-center gap-1.5">
@@ -255,7 +263,7 @@
 					</div>
 				{:else}
 					<div class="flex items-center gap-1.5">
-						<span class="text-xs text-gray-500 mr-0.5">{$i18n.t('Time')}</span>
+						<span class="text-xs text-base-500 mr-0.5">{$i18n.t('Time')}</span>
 						<input
 							aria-label={$i18n.t('Time')}
 							type="time"
@@ -274,7 +282,7 @@
 
 				{#if frequency === 'MONTHLY'}
 					<div class="flex items-center gap-1.5">
-						<span class="text-xs text-gray-500">{$i18n.t('Day')}</span>
+						<span class="text-xs text-base-500">{$i18n.t('Day')}</span>
 						<input
 							aria-label={$i18n.t('Day')}
 							type="number"
@@ -295,8 +303,8 @@
 						<button
 							type="button"
 							class="flex-1 py-1 text-xs rounded-xl transition {selectedDays.includes(d.key)
-								? 'text-black dark:text-gray-100'
-								: 'text-gray-400 dark:text-gray-500 hover:text-gray-700 dark:hover:text-gray-200'}"
+								? 'text-base-1000 dark:text-base-100'
+								: 'text-base-400 dark:text-base-500 hover:text-base-700 dark:hover:text-base-200'}"
 							on:click={() => {
 								if (selectedDays.includes(d.key)) {
 									selectedDays = selectedDays.filter((x) => x !== d.key);

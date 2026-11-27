@@ -8,6 +8,7 @@
 	const dispatch = createEventDispatcher();
 
 	import { config, models, settings, theme, user } from '$lib/stores';
+	import { DEFAULT_THEME_COLORS, getThemeColors, setTheme, setThemeColors } from '$lib/utils/theme';
 
 	const i18n: any = getContext('i18n');
 
@@ -21,8 +22,20 @@
 	export let getModels: Function;
 
 	// General
-	let themes = ['dark', 'light', 'oled-dark'];
 	let selectedTheme = 'system';
+	$: selectedTheme = $theme;
+
+	// Background and text colour for the current mode; the rest of the palette is mixed from them.
+	let themeColors = getThemeColors();
+	$: mode = ($theme, document.documentElement.classList.contains('dark') ? 'dark' : 'light') as
+		| 'light'
+		| 'dark';
+	$: modeColors = themeColors[mode] ?? DEFAULT_THEME_COLORS[mode];
+
+	const setModeColor = (key: 'bg' | 'fg', value: string) => {
+		themeColors = { ...themeColors, [mode]: { ...modeColors, [key]: value } };
+		setThemeColors(themeColors);
+	};
 
 	let languages: Awaited<ReturnType<typeof getLanguages>> = [];
 	let lang = $i18n.language;
@@ -31,9 +44,9 @@
 	let showAdvanced = false;
 
 	const systemPromptTextareaClass =
-		'w-full resize-y rounded-lg border border-gray-100/50 bg-gray-50/40 px-2 py-1.5 text-xs text-gray-700 outline-hidden transition-colors placeholder:text-gray-300 focus:border-blue-400 dark:border-white/[0.04] dark:bg-white/[0.03] dark:text-gray-300 dark:placeholder:text-gray-700 dark:focus:border-blue-500';
+		'w-full resize-y rounded-lg border border-base-100/50 bg-base-50/40 px-2 py-1.5 text-xs text-base-700 outline-hidden transition-colors placeholder:text-base-300 focus:border-blue-400 dark:border-base-0/[0.04] dark:bg-base-0/[0.03] dark:text-base-300 dark:placeholder:text-base-700 dark:focus:border-blue-500';
 	const actionButtonClass =
-		'text-xs text-gray-500 transition-colors hover:text-gray-900 dark:text-gray-500 dark:hover:text-white';
+		'text-xs text-base-500 transition-colors hover:text-base-900 dark:text-base-500 dark:hover:text-base-0';
 
 	let params = {
 		// Advanced
@@ -131,8 +144,6 @@
 	};
 
 	onMount(async () => {
-		selectedTheme = localStorage.theme ?? 'system';
-
 		languages = await getLanguages();
 
 		if (!$config?.features?.enable_easter_eggs) {
@@ -144,80 +155,10 @@
 		params = { ...params, ...$settings.params };
 		params.stop = $settings?.params?.stop ? ($settings?.params?.stop ?? []).join(',') : null;
 	});
-
-	const applyTheme = (_theme: string) => {
-		let themeToApply = _theme === 'oled-dark' ? 'dark' : _theme === 'her' ? 'light' : _theme;
-
-		if (_theme === 'system') {
-			themeToApply = window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light';
-		}
-
-		if (themeToApply === 'dark' && !_theme.includes('oled')) {
-			document.documentElement.style.setProperty('--color-gray-800', '#333');
-			document.documentElement.style.setProperty('--color-gray-850', '#262626');
-			document.documentElement.style.setProperty('--color-gray-900', '#171717');
-			document.documentElement.style.setProperty('--color-gray-950', '#0d0d0d');
-		}
-
-		themes
-			.filter((e) => e !== themeToApply)
-			.forEach((e) => {
-				e.split(' ').forEach((e) => {
-					document.documentElement.classList.remove(e);
-				});
-			});
-
-		themeToApply.split(' ').forEach((e) => {
-			document.documentElement.classList.add(e);
-		});
-
-		const metaThemeColor = document.querySelector('meta[name="theme-color"]');
-		if (metaThemeColor) {
-			if (_theme.includes('system')) {
-				const systemTheme = window.matchMedia('(prefers-color-scheme: dark)').matches
-					? 'dark'
-					: 'light';
-				console.log('Setting system meta theme color: ' + systemTheme);
-				metaThemeColor.setAttribute('content', systemTheme === 'light' ? '#ffffff' : '#171717');
-			} else {
-				console.log('Setting meta theme color: ' + _theme);
-				metaThemeColor.setAttribute(
-					'content',
-					_theme === 'dark'
-						? '#171717'
-						: _theme === 'oled-dark'
-							? '#000000'
-							: _theme === 'her'
-								? '#983724'
-								: '#ffffff'
-				);
-			}
-		}
-
-		if (typeof window !== 'undefined' && window.applyTheme) {
-			window.applyTheme();
-		}
-
-		if (_theme.includes('oled')) {
-			document.documentElement.style.setProperty('--color-gray-800', '#101010');
-			document.documentElement.style.setProperty('--color-gray-850', '#050505');
-			document.documentElement.style.setProperty('--color-gray-900', '#000000');
-			document.documentElement.style.setProperty('--color-gray-950', '#000000');
-			document.documentElement.classList.add('dark');
-		}
-
-		console.log(_theme);
-	};
-
-	const themeChangeHandler = (_theme: string) => {
-		theme.set(_theme);
-		localStorage.setItem('theme', _theme);
-		applyTheme(_theme);
-	};
 </script>
 
 <div class="flex flex-col h-full justify-between text-sm" id="tab-general">
-	<h2 class="text-sm font-medium text-gray-900 dark:text-white mb-4">
+	<h2 class="text-sm font-medium text-base-900 dark:text-base-0 mb-4">
 		{$i18n.t('settings.personal.general.title')}
 	</h2>
 
@@ -234,17 +175,48 @@
 					bind:value={selectedTheme}
 					ariaLabel={$i18n.t('settings.personal.general.theme.label')}
 					placeholder={$i18n.t('Select a theme')}
-					on:change={() => themeChangeHandler(selectedTheme)}
+					on:change={() => setTheme(selectedTheme)}
 				>
 					<option value="system">⚙️ {$i18n.t('System')}</option>
 					<option value="dark">🌑 {$i18n.t('Dark')}</option>
-					<option value="oled-dark">🌃 {$i18n.t('OLED Dark')}</option>
 					<option value="light">☀️ {$i18n.t('Light')}</option>
 					{#if $config?.features?.enable_easter_eggs}
 						<option value="her">🌷 Her</option>
 					{/if}
 				</SettingsSelect>
 			</UserSettingRow>
+
+			{#if selectedTheme !== 'her'}
+				<UserSettingRow
+					label={$i18n.t('settings.personal.general.themeColors.label')}
+					description={$i18n.t('settings.personal.general.themeColors.description')}
+				>
+					<div class="flex items-center gap-2">
+						{#if themeColors[mode]}
+							<button
+								type="button"
+								class="text-xs text-base-500 transition-colors hover:text-base-900 dark:hover:text-base-0"
+								on:click={() => {
+									themeColors = { ...themeColors, [mode]: undefined };
+									setThemeColors(themeColors);
+								}}
+							>
+								{$i18n.t('Reset')}
+							</button>
+						{/if}
+						{#each [{ key: 'bg', label: $i18n.t('settings.personal.general.themeColors.background') }, { key: 'fg', label: $i18n.t('settings.personal.general.themeColors.text') }] as item (item.key)}
+							<input
+								type="color"
+								class="size-5 cursor-pointer appearance-none rounded-full border border-base-200 bg-transparent p-0 dark:border-base-700 [&::-webkit-color-swatch]:rounded-full [&::-webkit-color-swatch]:border-none [&::-webkit-color-swatch-wrapper]:p-0 [&::-moz-color-swatch]:rounded-full [&::-moz-color-swatch]:border-none"
+								title={item.label}
+								aria-label={item.label}
+								value={modeColors[item.key]}
+								on:input={(e) => setModeColor(item.key, e.currentTarget.value)}
+							/>
+						{/each}
+					</div>
+				</UserSettingRow>
+			{/if}
 
 			<UserSettingRow
 				label={$i18n.t('settings.personal.general.language.label')}
@@ -264,10 +236,10 @@
 				</SettingsSelect>
 			</UserSettingRow>
 			{#if $i18n.language === 'en-US' && !($config?.license_metadata ?? false)}
-				<div class="-mt-1 text-[0.6875rem] text-gray-400 dark:text-gray-600">
+				<div class="-mt-1 text-[0.6875rem] text-base-400 dark:text-base-600">
 					{$i18n.t("Couldn't find your language?")}
 					<a
-						class="font-normal underline text-gray-400 dark:text-gray-600"
+						class="font-normal underline text-base-400 dark:text-base-600"
 						href="https://github.com/open-webui/open-webui/blob/main/docs/CONTRIBUTING.md#-translations-and-internationalization"
 						target="_blank"
 					>
@@ -324,7 +296,7 @@
 
 	<div class="shrink-0 flex justify-end pt-3 text-sm font-normal">
 		<button
-			class="flex h-7 shrink-0 items-center justify-center gap-1.5 rounded-lg bg-gray-900 px-2.5 text-xs font-normal text-white transition hover:bg-black disabled:opacity-60 dark:bg-gray-100 dark:text-gray-900 dark:hover:bg-white"
+			class="flex h-7 shrink-0 items-center justify-center gap-1.5 rounded-lg bg-base-900 px-2.5 text-xs font-normal text-base-0 transition hover:bg-base-1000 disabled:opacity-60 dark:bg-base-100 dark:text-base-900 dark:hover:bg-base-0"
 			on:click={() => {
 				saveHandler();
 			}}

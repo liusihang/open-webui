@@ -304,6 +304,35 @@ def collect_assets(docs):
     return assets, skipped
 
 
+async def index_document_images(request, file, assets, skipped, *, user):
+    """Index only embedded figures. Leave official text vectors and published evidence versions intact."""
+    from open_webui.models.files import Files
+    if not assets and not skipped:
+        return
+    async with get_async_db() as db:
+        state = await db.get(State, stable_id('file', file_id=file.id))
+        if state and state.status == 'deleted':
+            return
+        version = state.file_version if state else (file.data or {}).get('retrieval_version') or 1
+    await Files.update_file_data_by_id(file.id, {
+        'retrieval_version': version, 'document_image_assets': assets,
+        'document_image_assets_skipped': skipped[:100],
+        'retrieval_status': {'version': version, 'text': 'ready', 'images': 'pending', 'warnings': skipped[:100]},
+    })
+    try:
+        indexer, _, space_id, _ = await services(request, user=user)
+        await indexer.accept_file_version(file.id, version)
+        result = await indexer.index_assets(
+            file_id=file.id, file_version=version, collection_name=f'file-{file.id}', assets=assets,
+            space_id=space_id, source_name=file.filename,
+        ) if assets else {'status': 'failed', 'indexed': 0}
+        await update_status(file.id, version, images='partial' if skipped and result.get('indexed') else result['status'],
+                            image_count=result.get('indexed', 0), image_retryable=result['status'] != 'ready' or bool(skipped))
+    except Exception as exc:
+        log.warning('Image supplement failed for file %s: %s', file.id, type(exc).__name__)
+        await update_status(file.id, version, images='failed', image_error=type(exc).__name__, image_retryable=True)
+
+
 async def authorized_query_images(user, entries):
     """Resolve at most one stored upload ID; never a message image URL/base64."""
     from open_webui.models.files import Files

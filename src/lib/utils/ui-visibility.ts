@@ -7,6 +7,8 @@ export const CONTROL_LABELS = {
 	'model_editor.capabilities.web_search': 'settings.admin.models.capabilities.webSearch.label',
 	'model_editor.capabilities.image_generation':
 		'settings.admin.models.capabilities.imageGeneration.label',
+	'model_editor.capabilities.video_generation':
+		'settings.admin.models.capabilities.videoGeneration.label',
 	'model_editor.capabilities.code_interpreter':
 		'settings.admin.models.capabilities.codeInterpreter.label',
 	'model_editor.capabilities.terminal': 'settings.admin.models.capabilities.terminal.label',
@@ -20,12 +22,15 @@ export const CONTROL_LABELS = {
 	'model_editor.defaults.web_search': 'settings.admin.models.capabilities.webSearch.label',
 	'model_editor.defaults.image_generation':
 		'settings.admin.models.capabilities.imageGeneration.label',
+	'model_editor.defaults.video_generation':
+		'settings.admin.models.capabilities.videoGeneration.label',
 	'model_editor.defaults.code_interpreter':
 		'settings.admin.models.capabilities.codeInterpreter.label',
 	'model_editor.tools.time': 'settings.admin.models.builtinTools.time.label',
 	'model_editor.tools.user_input': 'settings.admin.models.builtinTools.userInput.label',
 	'model_editor.tools.memory': 'settings.admin.models.builtinTools.memory.label',
 	'model_editor.tools.chats': 'settings.admin.models.builtinTools.chats.label',
+	'model_editor.tools.users': 'settings.admin.models.builtinTools.users.label',
 	'model_editor.tools.notes': 'settings.admin.models.builtinTools.notes.label',
 	'model_editor.tools.knowledge': 'settings.admin.models.builtinTools.knowledge.label',
 	'model_editor.tools.files': 'settings.admin.models.builtinTools.files.label',
@@ -33,11 +38,13 @@ export const CONTROL_LABELS = {
 	'model_editor.tools.notifications': 'settings.admin.models.builtinTools.notifications.label',
 	'model_editor.tools.web_search': 'settings.admin.models.builtinTools.webSearch.label',
 	'model_editor.tools.image_generation': 'settings.admin.models.builtinTools.imageGeneration.label',
+	'model_editor.tools.video_generation': 'settings.admin.models.builtinTools.videoGeneration.label',
 	'model_editor.tools.code_interpreter': 'settings.admin.models.builtinTools.codeInterpreter.label',
 	'model_editor.tools.tasks': 'settings.admin.models.builtinTools.tasks.label',
 	'model_editor.tools.automations': 'settings.admin.models.builtinTools.automations.label',
 	'model_editor.tools.calendar': 'settings.admin.models.builtinTools.calendar.label',
 	'model_editor.tools.subagents': 'settings.admin.models.builtinTools.subagents.label',
+	'model_editor.tools.visualizations': 'settings.admin.models.builtinTools.visualizations.label',
 	'model_editor.tools.skills': 'settings.admin.models.builtinTools.skills.label',
 	'model_editor.tools.tools': 'settings.admin.models.builtinTools.tools.label',
 	'chat.capture': 'Capture',
@@ -47,12 +54,22 @@ export const CONTROL_LABELS = {
 	'chat.attach_notes': 'Attach Notes',
 	'chat.attach_knowledge': 'Attach Knowledge',
 	'chat.reference_chats': 'Reference Chats',
+	// Extraction hints: these keys are translated through CONTROL_LABELS[id].
+	// t('settings.admin.interface.visibility.selectedTools.label')
+	// t('settings.admin.interface.visibility.selectedSkills.label')
+	// t('settings.admin.interface.visibility.selectedFilters.label')
+	// t('settings.admin.interface.visibility.selectedWebSearch.label')
+	// t('settings.admin.interface.visibility.selectedImageGeneration.label')
+	// t('settings.admin.interface.visibility.selectedVideoGeneration.label')
+	// t('settings.admin.interface.visibility.selectedCodeInterpreter.label')
 	'chat.selected_tools': 'settings.admin.interface.visibility.selectedTools.label',
 	'chat.selected_skills': 'settings.admin.interface.visibility.selectedSkills.label',
 	'chat.selected_filters': 'settings.admin.interface.visibility.selectedFilters.label',
 	'chat.selected_web_search': 'settings.admin.interface.visibility.selectedWebSearch.label',
 	'chat.selected_image_generation':
 		'settings.admin.interface.visibility.selectedImageGeneration.label',
+	'chat.selected_video_generation':
+		'settings.admin.interface.visibility.selectedVideoGeneration.label',
 	'chat.selected_code_interpreter':
 		'settings.admin.interface.visibility.selectedCodeInterpreter.label',
 	'chat.status': '/status',

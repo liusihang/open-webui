@@ -1,12 +1,12 @@
 <script lang="ts">
 	import { getContext, onDestroy } from 'svelte';
-	import type { TerminalConnection } from '$lib/apis/terminal';
-	import { gitRequest, type GitFile } from '$lib/apis/terminal/git';
-	import GitDiff from '../ChatTabs/GitDiff.svelte';
+	import type { MachineTarget } from '$lib/apis/machines';
+	import { gitRequest, type GitFile } from '$lib/apis/machines/git';
+	import GitDiff from '../Tabs/GitDiff.svelte';
 	import Spinner from '../../common/Spinner.svelte';
 
-	export let connection: TerminalConnection | null;
-	export let chatId: string | null;
+	export let target: MachineTarget | null;
+
 	export let root: string;
 	export let file: GitFile | null;
 	export let active = true;
@@ -20,8 +20,7 @@
 	let generation = 0;
 
 	const load = async (
-		server: TerminalConnection | null,
-		session: string | null,
+		server: MachineTarget | null,
 		directory: string,
 		entry: GitFile | null,
 		enabled: boolean,
@@ -38,7 +37,7 @@
 		}
 		loading = true;
 		try {
-			const result = await gitRequest<{ diff: string }>(server, session, directory, 'diff', {
+			const result = await gitRequest<{ diff: string }>(server, directory, 'diff', {
 				file: entry.path,
 				staged: String(entry.staged && !entry.unstaged),
 				untracked: String(entry.status === 'untracked'),
@@ -54,7 +53,7 @@
 			if (current === generation) loading = false;
 		}
 	};
-	$: void load(connection, chatId, root, file, active, hideWhitespace, resourceVersion);
+	$: void load(target, root, file, active, hideWhitespace, resourceVersion);
 	onDestroy(() => {
 		++generation;
 	});
@@ -66,11 +65,13 @@
 	aria-label={$i18n.t('File changes')}
 	aria-busy={loading}
 >
-	{#if error}<div role="alert" class="p-3 text-xs text-gray-500 dark:text-gray-400">
+	{#if error}<div
+			role="alert"
+			class="flex h-full flex-col items-center justify-center gap-2 p-3 text-center text-xs text-base-500 dark:text-base-400"
+		>
 			{error}<button
-				class="ml-2 underline"
-				on:click={() =>
-					load(connection, chatId, root, file, active, hideWhitespace, resourceVersion)}
+				class="underline"
+				on:click={() => load(target, root, file, active, hideWhitespace, resourceVersion)}
 				>{$i18n.t('Retry')}</button
 			>
 		</div>
@@ -78,12 +79,12 @@
 			<Spinner className="size-4" />
 		</div>
 	{:else if file?.binary}<div
-			class="flex h-full items-center justify-center p-3 text-xs text-gray-400"
+			class="flex h-full items-center justify-center p-3 text-center text-xs text-base-400"
 		>
 			{$i18n.t('Binary file changed')}
 		</div>
 	{:else if diff}<GitDiff code={diff} {mode} {hideWhitespace} />
-	{:else}<div class="flex h-full items-center justify-center p-3 text-xs text-gray-400">
+	{:else}<div class="flex h-full items-center justify-center p-3 text-center text-xs text-base-400">
 			{$i18n.t('No changes')}
 		</div>{/if}
 </div>

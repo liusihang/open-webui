@@ -29,24 +29,7 @@
 	$: file = item as KnowledgeFile;
 	$: name = directory ? (item as KnowledgeDirectory).name : fileName(file);
 	$: status = file.status || file.data?.status;
-	$: pending = [
-		'pending_upload',
-		'uploading',
-		'waiting',
-		'queued',
-		'pending',
-		'processing'
-	].includes(status || '');
-	$: statusLabel =
-		status === 'pending_upload'
-			? $i18n.t('Waiting to upload')
-			: status === 'uploading'
-				? $i18n.t('Uploading')
-				: ['waiting', 'queued', 'pending'].includes(status || '')
-					? $i18n.t('Received; waiting to process')
-					: status === 'processing'
-						? $i18n.t('Processing')
-						: $i18n.t('Failed');
+	$: pending = ['uploading', 'pending', 'processing'].includes(status || '');
 	$: details = [
 		file.directory_path,
 		file.user?.name || file.user?.email,
@@ -87,7 +70,7 @@
 <div
 	data-knowledge-row={item.id || file.itemId}
 	class="flex h-7 min-w-0 items-center rounded-xl {active || dragOver
-		? 'bg-gray-100 dark:bg-white/8'
+		? 'bg-base-100 dark:bg-base-0/8'
 		: ''}"
 	style:padding-left={`${8 + depth * 16}px`}
 	role="presentation"
@@ -119,7 +102,7 @@
 		type="button"
 		data-knowledge-entry
 		class="flex h-full min-w-0 flex-1 items-center gap-1.5 pr-1 text-left text-xs"
-		title={file.error || file.data?.error || details || name}
+		title={details || name}
 		aria-expanded={directory ? expanded : undefined}
 		on:keydown={(event) => {
 			if (renaming || !directory) return;
@@ -135,7 +118,7 @@
 				JSON.stringify(directory ? { dirId: item.id } : { fileId: item.id })
 			)}
 		on:click={() => {
-			if (!renaming && item.id && !['uploading', 'pending_upload'].includes(status || '')) onOpen();
+			if (!renaming && item.id && status !== 'uploading') onOpen();
 		}}
 	>
 		{#if directory}<Icon name={expanded ? 'chevron-down' : 'chevron-right'} size={12} />{:else}<span
@@ -167,31 +150,27 @@
 				on:blur={rename}
 			/>
 		{:else}<span class="min-w-0 flex-1 truncate"
-				>{name}{#if search && file.directory_path}<span class="ml-1 text-gray-400"
+				>{name}{#if search && file.directory_path}<span class="ml-1 text-base-400"
 						>{file.directory_path}</span
 					>{/if}</span
 			>{/if}
-		{#if !directory && !renaming}<span class="shrink-0 text-[0.6875rem] text-gray-400"
-				>{pending || status === 'failed'
-					? statusLabel
-					: file.meta?.size != null
-						? formatFileSize(file.meta.size)
-						: ''}</span
+		{#if !directory && !renaming}<span class="shrink-0 text-[0.6875rem] text-base-400"
+				>{pending
+					? status === 'uploading'
+						? $i18n.t('Uploading')
+						: $i18n.t('Processing')
+					: status === 'failed'
+						? $i18n.t('Failed')
+						: file.meta?.size != null
+							? formatFileSize(file.meta.size)
+							: ''}</span
 			>{/if}
 	</button>
-	{#if status === 'failed' && (file.error || file.data?.error)}
-		<span
-			class="max-w-[45%] truncate px-1 text-[0.6875rem] text-red-500"
-			title={file.error || file.data?.error}
-		>
-			{file.error || file.data?.error}
-		</span>
-	{/if}
 	{#if item.id && !pending}<Dropdown closeOnSelect align="end"
 			><button
 				type="button"
 				aria-label={$i18n.t('More')}
-				class="mr-1 flex size-5 shrink-0 items-center justify-center text-gray-400"
+				class="mr-1 flex size-5 shrink-0 items-center justify-center text-base-400"
 				><Icon name="three-dots" size={12} /></button
 			>
 			<div slot="content">
@@ -200,7 +179,7 @@
 							>{expanded ? $i18n.t('Collapse') : $i18n.t('Expand')}</button
 						>{:else}<button type="button" on:click={onDownload}>{$i18n.t('Download')}</button>{/if}
 					{#if writeAccess}
-						{#if directory}<hr class="border-gray-100 dark:border-gray-800" />
+						{#if directory}<hr class="border-base-100 dark:border-base-800" />
 							<button type="button" on:click={() => onAdd('new_directory')}
 								>{$i18n.t('New folder')}</button
 							><button type="button" on:click={() => onAdd('files')}
@@ -211,7 +190,7 @@
 								>{$i18n.t('Add text content')}</button
 							><button type="button" on:click={() => onAdd('web')}>{$i18n.t('Add webpage')}</button
 							>{/if}
-						<hr class="border-gray-100 dark:border-gray-800" />
+						<hr class="border-base-100 dark:border-base-800" />
 						<button type="button" on:click={startRename}>{$i18n.t('Rename')}</button><button
 							type="button"
 							on:click={onDelete}

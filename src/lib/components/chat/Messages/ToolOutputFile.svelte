@@ -1,4 +1,5 @@
 <script lang="ts">
+	import { resolveMachineTarget } from '$lib/apis/machines';
 	// Keep keys in nested template expressions visible to i18next-parser.
 	// $i18n.t("Terminal unavailable");
 	// $i18n.t("No preview available");
@@ -7,15 +8,8 @@
 	import type { Writable } from 'svelte/store';
 	import type { i18n as i18nType } from 'i18next';
 	import { toast } from 'svelte-sonner';
-	import {
-		config,
-		settings,
-		selectedTerminalId,
-		showTabs,
-		showFileNavPath,
-		terminalServers
-	} from '$lib/stores';
-	import { downloadFileBlob, downloadFilePreview, readFile } from '$lib/apis/terminal';
+	import { config, settings, selectedMachineId, showTabs, showFileNavPath, machines } from '$lib/stores';
+	import { downloadFileBlob, downloadFilePreview, readFile } from '$lib/apis/machines';
 	import { getFileContentById } from '$lib/apis/files';
 	import FilePreview from '$lib/components/chat/FileNav/FilePreview.svelte';
 	import Icon from '$lib/components/chat/FileNav/Icon.svelte';
@@ -25,6 +19,7 @@
 
 	export let item: any;
 	export let chatId = '';
+	export let modelId: string | null = null;
 
 	const i18n = getContext<Writable<i18nType>>('i18n');
 
@@ -42,12 +37,10 @@
 	let fileModelData: ArrayBuffer | null = null;
 	let fileDocxData: ArrayBuffer | null = null;
 	let fileContent: string | null = null;
-	let fileOfficeHtml: string | null = null;
 	let fileOfficeSlides: string[] | null = null;
 	let currentSlide = 0;
-	let excelSheetNames: string[] = [];
 	let selectedExcelSheet = '';
-	let excelWorkbook: any = null;
+	let excelWorkbook: import('xlsx').WorkBook | null = null;
 
 	const IMAGE_EXTS = new Set(['jpg', 'jpeg', 'png', 'gif', 'webp', 'bmp', 'ico', 'avif']);
 	const VIDEO_EXTS = new Set(['mp4', 'webm', 'mov', 'ogv', 'avi', 'mkv']);
@@ -64,26 +57,18 @@
 	$: path = String(fileId ? item.name : item?.full_path || item?.path || '');
 	$: name = String(item?.name || path.split('/').filter(Boolean).at(-1) || 'file');
 	$: targetPage = normalizeDocumentTargetPage(item?.page);
-	$: selector = item?.terminal_selector;
-	$: sessionId = String(item?.session_id || chatId || '');
-	$: terminal = $config?.features?.enable_tool_servers
-		? resolveTerminal(
-				selector,
-				item?.terminal_id,
-				$terminalServers,
-				($settings as any)?.terminalServers ?? []
-			)
+	$: selector = item?.machine_selector ?? item?.terminal_selector; // terminal_selector: saved before the rename
+	// Historical results carry their own machine and session. The proxy authorizes every file request.
+	$: savedId = item?.machine_id ?? item?.terminal_id;
+	$: machine = $config?.features?.enable_tool_servers && selector
+		? resolveMachineTarget(selector, ($machines ?? []).some((entry) => entry.id === selector) || savedId !== selector
+			? $machines ?? [] : [{id: savedId}], localStorage.token, {
+				chatId: item?.session_id || chatId, modelId: item?.model_id ?? modelId
+			})
 		: null;
-	$: unavailable = !terminal && !fileId;
-	$: previewKey =
-		fileId || (terminal ? `${terminal.url}|${terminal.key}|${path}|${sessionId}` : '');
-	$: isPerChatTerminal =
-		($terminalServers ?? []).find((server: any) => server.id === selector)?.contexts?.chat
-			?.context_id === 'chat_id';
-	$: previewBaseUrl =
-		terminal && isPerChatTerminal && sessionId
-			? `${terminal.url}/chats/${encodeURIComponent(sessionId)}`
-			: (terminal?.url ?? '');
+	$: unavailable = !machine && !fileId;
+	$: previewKey = fileId || (machine ? `${machine.baseUrl}|${machine.key}|${path}|${chatId}` : '');
+
 	$: previewClass = isImage(path)
 		? 'h-[22rem]'
 		: isPdf(path) ||
@@ -116,37 +101,6 @@
 
 	const t = (key: string, vars?: Record<string, unknown>) => $i18n?.t?.(key, vars) ?? key;
 
-	function resolveTerminal(
-		selector: string,
-		terminalId: string | undefined,
-		servers: any[] | null,
-		directServers: any[]
-	): { url: string; key: string } | null {
-		if (!selector) return null;
-
-		const systemTerminal = servers?.find((server: any) => server.id === selector);
-		if (systemTerminal?.url) {
-			return { url: systemTerminal.url, key: localStorage.token };
-		}
-		// Saved file references already identify their system terminal. Its same-origin
-		// proxy enforces access; downloads need not wait for unrelated tool discovery.
-		if (terminalId && terminalId === selector) {
-			return {
-				url: `${WEBUI_API_BASE_URL}/terminals/${encodeURIComponent(terminalId)}`,
-				key: localStorage.token
-			};
-		}
-
-		const directTerminal = directServers.find(
-			(server: any) => server.url === selector && server.enabled
-		);
-		if (directTerminal?.url) {
-			return { url: directTerminal.url, key: directTerminal.key ?? '' };
-		}
-
-		return null;
-	}
-
 	function clearPreview() {
 		for (const url of objectUrls) URL.revokeObjectURL(url);
 		objectUrls = [];
@@ -158,10 +112,8 @@
 		fileModelData = null;
 		fileDocxData = null;
 		fileContent = null;
-		fileOfficeHtml = null;
 		fileOfficeSlides = null;
 		currentSlide = 0;
-		excelSheetNames = [];
 		selectedExcelSheet = '';
 		excelWorkbook = null;
 	}
@@ -173,17 +125,8 @@
 				? { blob: new Blob([data], { type: item?.content_type ?? '' }), filename: name }
 				: null;
 		}
-		if (!terminal) return null;
-		return downloadFileBlob(terminal.url, terminal.key, path, sessionId || undefined);
-	}
-
-	async function loadExcelSheet(sheet: string) {
-		if (!excelWorkbook) return;
-		selectedExcelSheet = sheet;
-		const { excelToTable } = await import('$lib/utils/excelToTable');
-		const result = await excelToTable(excelWorkbook.Sheets[selectedExcelSheet]);
-		const DOMPurify = (await import('dompurify')).default;
-		fileOfficeHtml = DOMPurify.sanitize(result.html);
+		if (!machine) return null;
+		return downloadFileBlob(machine, path);
 	}
 
 	async function loadPreview(key: string) {
@@ -219,9 +162,7 @@
 					const arrayBuffer = await result.blob.arrayBuffer();
 					fileSqliteData = arrayBuffer;
 				} else if (ext === 'docx') {
-					const preview = terminal
-						? await downloadFilePreview(terminal.url, terminal.key, path, sessionId || undefined)
-						: null;
+					const preview = machine ? await downloadFilePreview(machine, path) : null;
 					if (preview) {
 						filePdfData = await preview.blob.arrayBuffer();
 					} else {
@@ -233,16 +174,14 @@
 					const result = await blobForPreview();
 					if (!result) throw new Error(t('Preview failed'));
 					const arrayBuffer = await result.blob.arrayBuffer();
-					const XLSX = await import('xlsx');
-					excelWorkbook = XLSX.read(new Uint8Array(arrayBuffer), { type: 'array' });
-					excelSheetNames = excelWorkbook.SheetNames;
-					if (excelSheetNames.length > 0) {
-						await loadExcelSheet(excelSheetNames[0]);
+					const { readExcelWorkbook } = await import('$lib/utils/excelToTable');
+					const workbook = await readExcelWorkbook(arrayBuffer);
+					if (workbook.SheetNames.length > 0) {
+						selectedExcelSheet = workbook.SheetNames[0];
+						excelWorkbook = workbook;
 					}
 				} else if (ext === 'pptx') {
-					const preview = terminal
-						? await downloadFilePreview(terminal.url, terminal.key, path, sessionId || undefined)
-						: null;
+					const preview = machine ? await downloadFilePreview(machine, path) : null;
 					if (preview) {
 						filePdfData = await preview.blob.arrayBuffer();
 					} else {
@@ -258,8 +197,8 @@
 				const result = await blobForPreview();
 				if (!result) throw new Error(t('Preview failed'));
 				fileContent = await result.blob.text();
-			} else if (terminal && !isDownloadOnly(path)) {
-				fileContent = await readFile(terminal.url, terminal.key, path, sessionId || undefined);
+			} else if (machine) {
+				fileContent = await readFile(machine, path);
 			}
 		} catch (e) {
 			error = e instanceof Error ? e.message : t('Preview failed');
@@ -270,7 +209,7 @@
 
 	function openInFiles() {
 		if (unavailable || !path) return;
-		selectedTerminalId.set(selector);
+		selectedMachineId.set(selector);
 		showTabs.set(true);
 		showFileNavPath.set(targetPage ? { path, page: targetPage } : path);
 	}
@@ -313,7 +252,7 @@
 			aria-expanded={expanded}
 		>
 			<div
-				class="flex size-5 shrink-0 items-center justify-center text-gray-500 dark:text-gray-400"
+				class="flex size-5 shrink-0 items-center justify-center text-base-500 dark:text-base-400"
 			>
 				<Icon name={fileIconName(name || path || '', 'file')} size={14} />
 			</div>
@@ -349,8 +288,8 @@
 
 	{#if expanded}
 		{#if unavailable}
-			<div class="px-4 py-3 text-xs text-gray-500 dark:text-gray-400">
-				{t('Terminal unavailable')}
+			<div class="px-4 py-3 text-xs text-base-500 dark:text-base-400">
+				{t('Machine unavailable')}
 			</div>
 		{:else if error}
 			<div class="px-4 py-3 text-xs text-red-500 dark:text-red-400">{error}</div>
@@ -360,7 +299,7 @@
 			</div>
 		{:else}
 			<div
-				class="{previewClass} max-h-[75vh] min-h-24 resize-y overflow-hidden bg-gray-50 dark:bg-gray-950"
+				class="{previewClass} max-h-[75vh] min-h-24 resize-y overflow-hidden bg-base-50 dark:bg-base-950"
 			>
 				<FilePreview
 					selectedFile={path}
@@ -373,21 +312,18 @@
 					{fileModelData}
 					{fileDocxData}
 					{fileContent}
-					baseUrl={fileId ? '' : previewBaseUrl}
-					chatId={sessionId}
-					apiKey={terminal?.key ?? ''}
-					{fileOfficeHtml}
+					target={fileId ? null : machine}
+					{chatId}
+					{excelWorkbook}
 					{fileOfficeSlides}
 					{currentSlide}
 					{targetPage}
-					{excelSheetNames}
-					{selectedExcelSheet}
-					onSheetChange={loadExcelSheet}
+					bind:selectedExcelSheet
 					readOnly={true}
 				/>
-				{#if !loading && fileImageUrl === null && fileVideoUrl === null && fileAudioUrl === null && filePdfData === null && fileSqliteData === null && fileModelData === null && fileDocxData === null && fileContent === null && fileOfficeHtml === null && fileOfficeSlides === null}
+				{#if !loading && fileImageUrl === null && fileVideoUrl === null && fileAudioUrl === null && filePdfData === null && fileSqliteData === null && fileModelData === null && fileDocxData === null && fileContent === null && excelWorkbook === null && fileOfficeSlides === null}
 					<div
-						class="flex h-full items-center justify-center px-3 text-xs text-gray-500 dark:text-gray-400"
+						class="flex h-full items-center justify-center px-3 text-xs text-base-500 dark:text-base-400"
 					>
 						{t('No preview available')}
 					</div>

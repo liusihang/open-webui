@@ -17,7 +17,7 @@
 	export let collapsible = true;
 
 	export let className = '';
-	export let buttonClassName = 'text-gray-600 dark:text-gray-400';
+	export let buttonClassName = 'text-base-600 dark:text-base-400';
 
 	export let chevron = true;
 	export let onAddLabel: string = '';
@@ -137,7 +137,7 @@
 	{#if loaded}
 		{#if draggedOver}
 			<div
-				class="absolute top-0 left-0 w-full h-full rounded-xs bg-gray-100/50 dark:bg-gray-700/20 bg-opacity-50 dark:bg-opacity-10 z-50 pointer-events-none touch-none"
+				class="pointer-events-none absolute inset-0 z-50 touch-none bg-base-1000/[0.02] ring-1 ring-inset ring-base-1000/10 dark:bg-base-0/[0.02] dark:ring-base-0/10"
 			></div>
 		{/if}
 
@@ -154,10 +154,13 @@
 				<!-- svelte-ignore a11y-no-static-element-interactions -->
 				<div
 					id="sidebar-folder-button"
-					class=" w-full group rounded-xl relative flex items-center justify-between hover:bg-gray-100 dark:hover:bg-gray-900 transition {buttonClassName}"
+					class=" w-full group rounded-xl relative flex items-center justify-between hover:bg-base-100 dark:hover:bg-base-900 transition {buttonClassName}"
 				>
 					<h3 class="w-full">
-						<button class="w-full py-1.5 pl-2 flex items-center gap-1.5 text-xs font-normal">
+						<button
+							id={id ? `${id}-button` : undefined}
+							class="w-full py-1.5 pl-2 flex items-center gap-1.5 text-xs font-normal"
+						>
 							{#if chevron}
 								<div class=" p-[0.0625rem]">
 									{#if open}
@@ -176,7 +179,7 @@
 
 					{#if onAdd}
 						<button
-							class="absolute z-10 right-2 hover-reveal self-center flex items-center dark:text-gray-300"
+							class="absolute z-10 right-2 hover-reveal self-center flex items-center dark:text-base-300"
 							on:pointerup={(e) => {
 								e.stopPropagation();
 							}}
@@ -187,7 +190,7 @@
 						>
 							<Tooltip content={onAddLabel}>
 								<button
-									class="p-0.5 dark:hover:bg-gray-850 rounded-lg touch-auto"
+									class="p-0.5 dark:hover:bg-base-850 rounded-lg touch-auto"
 									on:click={(e) => {}}
 								>
 									<Plus className=" size-3" strokeWidth="2.5" />

@@ -1,7 +1,9 @@
 <script lang="ts">
+	import type { MachineTarget } from '$lib/apis/machines';
+	export let target: MachineTarget;
 	import { getContext, onMount, onDestroy } from 'svelte';
 	import { LinkPreview } from 'bits-ui';
-	import { readFile, downloadFileBlob, type FileEntry } from '$lib/apis/terminal';
+	import { readFile, downloadFileBlob, type FileEntry } from '$lib/apis/machines';
 	import { formatFileSize } from '$lib/utils';
 	import { supportsComments } from '$lib/utils/comments/types';
 	import FilePreview from './FilePreview.svelte';
@@ -11,9 +13,8 @@
 	const i18n: any = getContext('i18n');
 	export let entry: FileEntry;
 	export let path: string;
-	export let terminalUrl: string;
-	export let terminalKey: string;
 	export let sessionId: string | undefined = undefined;
+	export let sideOffset = 12;
 
 	let loading = true;
 	let fileContent: string | null = null;
@@ -43,13 +44,7 @@
 		const isSqlite = ['db', 'sqlite', 'sqlite3', 'db3'].includes(extension);
 		try {
 			if (isImage || isVideo || isAudio || isSqlite || isModel) {
-				const result = await downloadFileBlob(
-					terminalUrl,
-					terminalKey,
-					path,
-					sessionId,
-					controller.signal
-				);
+				const result = await downloadFileBlob(target, path, controller.signal);
 				if (!result || disposed) return;
 				if (isSqlite || isModel) {
 					const bytes = await result.blob.arrayBuffer();
@@ -64,7 +59,7 @@
 					else fileAudioUrl = url;
 				}
 			} else if (entry.size! <= 1024 * 1024) {
-				const text = await readFile(terminalUrl, terminalKey, path, sessionId);
+				const text = await readFile(target, path);
 				if (!disposed && text !== null && !text.startsWith('[Binary file:')) fileContent = text;
 			}
 		} catch {
@@ -85,35 +80,30 @@
 
 <LinkPreview.Portal>
 	<LinkPreview.Content
-		class="z-[9999] hidden w-[20rem] max-w-[calc(100vw-1.5rem)] overflow-hidden rounded-2xl bg-white shadow-[0_16px_40px_-28px_rgba(0,0,0,0.55)] ring-1 ring-black/5 md:block dark:bg-gray-850 dark:text-white dark:ring-white/10"
+		class="z-[9999] hidden w-[20rem] max-w-[calc(100vw-1.5rem)] overflow-hidden rounded-2xl bg-base-0 shadow-[0_16px_40px_-28px_rgba(0,0,0,0.55)] ring-1 ring-base-1000/5 md:block dark:bg-base-850 dark:text-base-0 dark:ring-base-0/10"
 		side="top"
 		align="center"
-		sideOffset={12}
+		{sideOffset}
 		aria-label={$i18n.t('File preview')}
 	>
 		<div
-			class="flex items-center gap-1.5 border-b border-gray-50/60 px-2 py-1.5 dark:border-gray-800/25"
+			class="flex items-center gap-1.5 border-b border-base-50/60 px-2 py-1.5 dark:border-base-800/25"
 		>
 			<FileTypeIcon name={entry.name} size={12} />
 			<div class="min-w-0 flex-1 truncate text-xs font-normal leading-4" title={path}>
 				{entry.name}
 			</div>
 			{#if entry.size !== undefined}
-				<span class="shrink-0 text-[0.625rem] text-gray-500 dark:text-gray-400"
+				<span class="shrink-0 text-[0.625rem] text-base-500 dark:text-base-400"
 					>{formatFileSize(entry.size)}</span
 				>
 			{/if}
 		</div>
 		<div
-			class="h-60 max-h-[calc(100dvh-6rem)] overflow-hidden text-xs [&_.document-markdown]:!p-2 [&_.document-markdown_h1]:!text-sm [&_.document-markdown_h2]:!text-xs [&_.document-markdown_h3]:!text-xs [&_.document-markdown]:!text-xs [&_.cm-editor]:!text-[0.6875rem] [&_pre]:!text-[0.6875rem]"
+			class="h-60 max-h-[calc(100dvh-6rem)] overflow-hidden text-xs [&_.document-markdown]:!p-2 [&_.document-markdown_h1]:!text-sm [&_.document-markdown_h2]:!text-xs [&_.document-markdown_h3]:!text-xs [&_.document-markdown]:!text-[0.8125rem] [&_.cm-editor]:!text-[0.6875rem] [&_pre]:!text-[0.6875rem]"
 		>
 			{#if documentPreview && withinPreviewLimit}
-				<CommentFilePreview
-					{path}
-					baseUrl={terminalUrl}
-					apiKey={terminalKey}
-					chatId={sessionId ?? null}
-				/>
+				<CommentFilePreview {path} {target} />
 			{:else if loading || fileContent !== null || fileImageUrl || fileVideoUrl || fileAudioUrl || fileSqliteData || fileModelData}
 				<FilePreview
 					selectedFile={path}
@@ -124,14 +114,13 @@
 					{fileAudioUrl}
 					{fileSqliteData}
 					{fileModelData}
-					baseUrl={terminalUrl}
-					apiKey={terminalKey}
+					{target}
 					chatId={sessionId ?? null}
 					readOnly={true}
 					allowScripts={false}
 				/>
 			{:else}
-				<div class="px-3 py-4 text-xs text-gray-500 dark:text-gray-400">
+				<div class="px-3 py-4 text-xs text-base-500 dark:text-base-400">
 					{$i18n.t('Preview not available')}
 				</div>
 			{/if}

@@ -5,15 +5,15 @@ import StructuredOutputHarness from './StructuredOutputHarness.svelte';
 import { applyResponseStreamEvent, type OutputItem } from './structuredOutput';
 import {
 	config,
-	selectedTerminalId,
+	selectedMachineId,
 	settings,
-	terminalServers,
+	machines,
 	showTabs,
 	showFileNavPath
 } from '$lib/stores';
 import { getCommentSurfaces } from '$lib/components/comments/anchors';
 import { getFileContentById } from '$lib/apis/files';
-import { downloadFileBlob, downloadFilePreview, readFile } from '$lib/apis/terminal';
+import { downloadFileBlob, downloadFilePreview, readFile } from '$lib/apis/machines';
 
 vi.mock('$lib/apis/files', async (importOriginal) => ({
 	...(await importOriginal<Record<string, unknown>>()),
@@ -29,7 +29,7 @@ vi.mock('svelte/transition', () => ({ slide: () => ({ duration: 0 }) }));
 vi.mock('$lib/components/chat/FileNav/FilePreview.svelte', async () => ({
 	default: (await import('./IntelligentUI/CodeFallbackHarness.svelte')).default
 }));
-vi.mock('$lib/apis/terminal', async (importOriginal) => ({
+vi.mock('$lib/apis/machines', async (importOriginal) => ({
 	...(await importOriginal<Record<string, unknown>>()),
 	downloadFileBlob: vi.fn(),
 	downloadFilePreview: vi.fn(),
@@ -54,8 +54,8 @@ afterEach(async () => {
 	vi.unstubAllGlobals();
 	vi.restoreAllMocks();
 	settings.set({});
-	terminalServers.set([]);
-	selectedTerminalId.set(null);
+	machines.set([]);
+	selectedMachineId.set(null);
 	showTabs.set(false);
 	showFileNavPath.set(null);
 	localStorage.removeItem('token');
@@ -148,8 +148,8 @@ describe('terminal file cards mounted rendering', () => {
 	it('uses the recorded terminal even when another terminal is selected, and keeps ZIP download-only', async () => {
 		vi.mocked(readFile).mockClear();
 		vi.mocked(downloadFileBlob).mockReset();
-		terminalServers.set(servers);
-		selectedTerminalId.set('another-terminal');
+		machines.set(servers);
+		selectedMachineId.set('another-terminal');
 		const target = setup({ initialOutput: fileOutput(['/package.zip']), initialDone: true });
 		expect(download(target).disabled).toBe(false);
 		expect(target.textContent).toContain('No preview available');
@@ -171,10 +171,8 @@ describe('terminal file cards mounted rendering', () => {
 		download(target).click();
 		await tick();
 		expect(downloadFileBlob).toHaveBeenCalledWith(
-			'/api/v1/terminals/terminals',
-			expect.any(String),
-			'/package.zip',
-			'original-session'
+			expect.objectContaining({ selector: 'terminals', context: expect.objectContaining({chatId: 'original-session'}) }),
+			'/package.zip'
 		);
 		await vi.waitFor(() => expect(click).toHaveBeenCalledOnce());
 		expect(URL.revokeObjectURL).not.toHaveBeenCalled();
@@ -185,7 +183,7 @@ describe('terminal file cards mounted rendering', () => {
 
 	it('downloads uploaded files through the authorized file API without terminal discovery', async () => {
 		config.set(undefined);
-		terminalServers.set(null);
+		machines.set(null);
 		const output = fileOutput(['/package.zip']);
 		output[1].output![0].text = JSON.stringify({
 			type: 'file',
@@ -218,10 +216,10 @@ describe('terminal file cards mounted rendering', () => {
 	});
 
 	it('becomes downloadable when terminal discovery finishes after the message renders', async () => {
-		terminalServers.set([]);
+		machines.set([]);
 		const target = setup({ initialOutput: fileOutput(['/package.zip']), initialDone: true });
 		expect(download(target).disabled).toBe(true);
-		terminalServers.set(servers);
+		machines.set(servers);
 		await tick();
 		expect(download(target).disabled).toBe(false);
 	});
@@ -229,7 +227,7 @@ describe('terminal file cards mounted rendering', () => {
 	it.each([{ initialServers: null }, { initialServers: [] }])(
 		'can download a recorded system file without waiting for tool discovery: $initialServers',
 		({ initialServers }) => {
-			terminalServers.set(initialServers);
+			machines.set(initialServers);
 			const output = fileOutput(['/package.zip']);
 			const result = JSON.parse(String(output[1].output?.[0].text));
 			output[1].output![0].text = JSON.stringify({ ...result, terminal_id: 'terminals' });
@@ -240,7 +238,7 @@ describe('terminal file cards mounted rendering', () => {
 
 	it('waits for application configuration before starting a preview, then loads automatically', async () => {
 		config.set(undefined);
-		terminalServers.set(null);
+		machines.set(null);
 		vi.mocked(downloadFilePreview)
 			.mockReset()
 			.mockResolvedValue({
@@ -261,7 +259,7 @@ describe('terminal file cards mounted rendering', () => {
 	});
 
 	it('loads DOCX previews from the original file session without requiring terminal selection', async () => {
-		terminalServers.set(servers);
+		machines.set(servers);
 		vi.mocked(downloadFilePreview).mockReset().mockResolvedValue(null);
 		vi.mocked(downloadFileBlob)
 			.mockReset()
@@ -273,17 +271,13 @@ describe('terminal file cards mounted rendering', () => {
 		await tick();
 		expect(download(target).disabled).toBe(false);
 		expect(downloadFilePreview).toHaveBeenCalledWith(
-			'/api/v1/terminals/terminals',
-			expect.any(String),
-			'/report.docx',
-			'original-session'
+			expect.objectContaining({ selector: 'terminals', context: expect.objectContaining({chatId: 'original-session'}) }),
+			'/report.docx'
 		);
 		await vi.waitFor(() =>
 			expect(downloadFileBlob).toHaveBeenCalledWith(
-				'/api/v1/terminals/terminals',
-				expect.any(String),
-				'/report.docx',
-				'original-session'
+				expect.objectContaining({ selector: 'terminals', context: expect.objectContaining({chatId: 'original-session'}) }),
+			'/report.docx'
 			)
 		);
 	});

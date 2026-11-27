@@ -103,6 +103,13 @@ class EvidenceService:
                 )
             ),
         )
+        # New image rows belong to a file once. Resolve KB membership at read time.
+        by_kb = or_(by_kb, and_(
+            Evidence.modality == 'image', Evidence.knowledge_id.is_(None),
+            exists(select(KnowledgeFile.id).where(
+                KnowledgeFile.file_id == Evidence.file_id, KnowledgeFile.knowledge_id.in_(scope.knowledge_ids)
+            )),
+        ))
         by_file = Evidence.file_id.in_(scope.file_ids)
         current = exists(
             select(State.state_id).where(

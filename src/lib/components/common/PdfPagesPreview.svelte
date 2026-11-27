@@ -17,6 +17,8 @@
 	export let onCommentSelect: ((comment: FileComment) => void) | null = null;
 	export let selectedComment: FileComment | null = null;
 	export let sourceComments: FileComment[] | null = null;
+	export let highlightQuotes: string[] | null = null;
+	export let onQuoteHover: ((index: number | null, rect: DOMRect | null) => void) | null = null;
 	export let onAnchors: ((ids: string[]) => void) | null = null;
 
 	type PdfDocument = import('pdfjs-dist').PDFDocumentProxy;
@@ -40,6 +42,7 @@
 		pdfData instanceof Uint8Array ? pdfData.slice() : pdfData.slice(0);
 
 	const updateLayout = () => {
+		if (rootEl && !rootEl.clientWidth) return;
 		hideThumbs = (rootEl?.clientWidth ?? window.innerWidth) < 720;
 	};
 
@@ -75,7 +78,7 @@
 			pdfjs.GlobalWorkerOptions.workerSrc = pdfWorkerUrl;
 
 			pdfDoc?.destroy();
-			pdfDoc = await pdfjs.getDocument({ data: pdfData }).promise;
+			pdfDoc = await pdfjs.getDocument({ data: pdfData, wasmUrl: '/wasm/' }).promise;
 
 			const rendered: string[] = [];
 			for (let i = 1; i <= pdfDoc.numPages; i++) {
@@ -92,6 +95,7 @@
 
 				await page.render({ canvas, canvasContext: ctx, viewport }).promise;
 				rendered.push(canvas.toDataURL('image/png'));
+				page.cleanup();
 			}
 
 			if (token === loadToken) thumbnails = rendered;
@@ -149,12 +153,12 @@
 	bind:this={rootEl}
 	class="relative grid {hideThumbs
 		? 'grid-cols-[minmax(0,1fr)]'
-		: 'grid-cols-[144px_minmax(0,1fr)]'} min-h-0 bg-transparent text-gray-900 dark:text-gray-100 {className}"
+		: 'grid-cols-[144px_minmax(0,1fr)]'} min-h-0 bg-transparent text-base-900 dark:text-base-100 {className}"
 >
 	<aside
 		class={hideThumbs
 			? 'hidden'
-			: 'thumbnail-sidebar overflow-y-auto px-2 pt-3 pb-16 border-r border-gray-50 dark:border-gray-850/30 bg-transparent'}
+			: 'thumbnail-sidebar overflow-y-auto px-2 pt-3 pb-16 border-r border-base-50 dark:border-base-850/30 bg-transparent'}
 		aria-label={listLabel}
 	>
 		{#if thumbsLoading && thumbnails.length === 0}
@@ -166,15 +170,15 @@
 				<button
 					use:trackThumbnail={index}
 					type="button"
-					class="grid grid-cols-[20px_minmax(0,1fr)] items-start gap-2 w-full mb-3 p-0 text-left text-gray-900 dark:text-gray-100"
+					class="grid grid-cols-[20px_minmax(0,1fr)] items-start gap-2 w-full mb-3 p-0 text-left text-base-900 dark:text-base-100"
 					on:click={() => selectPage(index)}
 					aria-label="{itemLabel} {index + 1}"
 					aria-current={safePage === index ? 'true' : undefined}
 				>
 					<span
 						class="pt-1.5 text-[0.6875rem] font-medium text-right {safePage === index
-							? 'text-gray-400 dark:text-gray-500'
-							: 'text-gray-300/70 dark:text-gray-700'}">{index + 1}</span
+							? 'text-base-400 dark:text-base-500'
+							: 'text-base-300/70 dark:text-base-700'}">{index + 1}</span
 					>
 					<span
 						class="block overflow-hidden rounded-md bg-transparent {safePage === index
@@ -207,9 +211,13 @@
 				{onCommentSelect}
 				{selectedComment}
 				{sourceComments}
+				{highlightQuotes}
+				{onQuoteHover}
 				{onAnchors}
 				className="w-full h-full"
-			/>
+			>
+				<slot name="toolbar" slot="toolbar" />
+			</PDFViewer>
 		{:else}
 			<div class="flex h-full items-center justify-center">
 				<Spinner className="size-5" />
@@ -227,14 +235,14 @@
 	:global(:where(html:not(.native-scrollbars))) .thumbnail-sidebar:focus,
 	:global(:where(html:not(.native-scrollbars))) .thumbnail-sidebar:focus-within,
 	:global(:where(html:not(.native-scrollbars))) .thumbnail-sidebar:active {
-		scrollbar-color: rgba(215, 215, 215, 0.6) transparent;
+		scrollbar-color: color-mix(in oklab, var(--color-base-300) 60%, transparent) transparent;
 	}
 
 	:global(:where(html:not(.native-scrollbars)).dark) .thumbnail-sidebar:hover,
 	:global(:where(html:not(.native-scrollbars)).dark) .thumbnail-sidebar:focus,
 	:global(:where(html:not(.native-scrollbars)).dark) .thumbnail-sidebar:focus-within,
 	:global(:where(html:not(.native-scrollbars)).dark) .thumbnail-sidebar:active {
-		scrollbar-color: rgba(67, 67, 67, 0.6) transparent;
+		scrollbar-color: color-mix(in oklab, var(--color-base-700) 60%, transparent) transparent;
 	}
 
 	:global(:where(html:not(.native-scrollbars))) .thumbnail-sidebar::-webkit-scrollbar-thumb {

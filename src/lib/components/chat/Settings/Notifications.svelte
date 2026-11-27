@@ -2,13 +2,22 @@
 	import UserSettingRow from './UserSettingRow.svelte';
 	import { canUseNotificationTargets } from '$lib/utils/settings-access';
 	import { getContext, onMount } from 'svelte';
+	import {
+		playNotificationSound,
+		setNotificationSoundEnabled,
+		notificationSoundStyles,
+		unlockNotificationAudio,
+		type NotificationSoundStyle
+	} from '$lib/utils/audio';
 	import type { Writable } from 'svelte/store';
 	import { toast } from 'svelte-sonner';
 
 	import { config, settings, user } from '$lib/stores';
 	import Modal from '$lib/components/common/Modal.svelte';
 	import Switch from '$lib/components/common/Switch.svelte';
+	import SettingsSelect from '$lib/components/common/SettingsSelect.svelte';
 	import Plus from '$lib/components/icons/Plus.svelte';
+	import Play from '$lib/components/icons/Play.svelte';
 	import {
 		createNotificationTarget,
 		deleteNotificationTarget,
@@ -26,6 +35,15 @@
 
 	let notificationEnabled = false;
 	let notificationSound = true;
+	let notificationSoundType: NotificationSoundStyle = 'chime';
+	const previewSound = async () => {
+		if (!notificationSound) return;
+		setNotificationSoundEnabled(true);
+		if (!(await playNotificationSound(notificationSoundType))) {
+			toast.error($i18n.t('Unable to play notification sound.'));
+			return;
+		}
+	};
 	let targets: NotificationTarget[] = [];
 	// Keep dynamically translated event keys visible to i18next-parser.
 	// $i18n.t('Chat finished'); $i18n.t('A chat run finished successfully.');
@@ -188,12 +206,14 @@
 	onMount(async () => {
 		notificationEnabled = $settings.notificationEnabled ?? false;
 		notificationSound = $settings?.notificationSound ?? true;
+		const savedSound = $settings?.notificationSoundType ?? 'chime';
+		notificationSoundType = notificationSoundStyles.includes(savedSound) ? savedSound : 'chime';
 	});
 </script>
 
 <div id="tab-notifications" class="flex h-full flex-col text-sm">
 	<div class="flex-1 min-h-0 w-full overflow-y-auto scrollbar-hover pr-1.5">
-		<h2 class="mb-4 text-sm font-medium text-gray-900 dark:text-white">
+		<h2 class="mb-4 text-sm font-medium text-base-900 dark:text-base-0">
 			{$i18n.t('settings.personal.notifications.title')}
 		</h2>
 
@@ -209,11 +229,14 @@
 					on:change={toggleNotifications}
 				/>
 			</UserSettingRow>
-			<p class="-mt-1 text-[0.6875rem] text-gray-400 dark:text-gray-600">
+			<p class="-mt-1 text-[0.6875rem] text-base-400 dark:text-base-600">
 				{$i18n.t('Allow browser notifications for completed responses.')}
 			</p>
 
-			<UserSettingRow let:labelId>
+			<UserSettingRow
+				description={$i18n.t('settings.personal.notifications.notificationSound.description')}
+				let:labelId
+			>
 				<span slot="label">
 					{$i18n.t('settings.personal.notifications.notificationSound.label')}
 				</span>
@@ -222,18 +245,53 @@
 					bind:state={notificationSound}
 					ariaLabel={$i18n.t('settings.personal.notifications.notificationSound.label')}
 					on:change={() => {
+						setNotificationSoundEnabled(notificationSound);
+						if (notificationSound) void unlockNotificationAudio();
 						saveSettings({ notificationSound });
 					}}
 				/>
 			</UserSettingRow>
 
+			{#if notificationSound}
+				<UserSettingRow
+					label={$i18n.t('settings.personal.notifications.soundStyle.label')}
+					description={$i18n.t('settings.personal.notifications.soundStyle.description')}
+					let:labelId
+				>
+					<div class="flex items-center gap-2">
+						<SettingsSelect
+							id={`${labelId}-control`}
+							aria-labelledby={labelId}
+							bind:value={notificationSoundType}
+							on:change={() => {
+								saveSettings({ notificationSoundType });
+							}}
+						>
+							<option value="chime">{$i18n.t('Chime')}</option>
+							<option value="soft">{$i18n.t('Soft')}</option>
+							<option value="bell">{$i18n.t('Bell')}</option>
+							<option value="tap">{$i18n.t('Tap')}</option>
+						</SettingsSelect>
+						<button
+							type="button"
+							class="flex h-6 w-6 shrink-0 items-center justify-center rounded-lg text-base-400 transition-colors duration-75 hover:text-base-700 dark:text-base-600 dark:hover:text-base-300"
+							aria-label={$i18n.t('Preview notification sound')}
+							title={$i18n.t('Preview notification sound')}
+							on:click={previewSound}
+						>
+							<Play className="size-3.5" strokeWidth="2" />
+						</button>
+					</div>
+				</UserSettingRow>
+			{/if}
+
 			{#if canUseWebhooks}
 				<div class="mt-3 flex items-center justify-between">
-					<span class="text-xs font-medium text-gray-700 dark:text-gray-300">
+					<span class="text-xs font-medium text-base-700 dark:text-base-300">
 						{$i18n.t('settings.personal.notifications.notificationTargets.label')}
 					</span>
 					<button
-						class="flex h-6 w-6 items-center justify-center rounded-lg text-gray-400 transition-colors duration-75 hover:text-gray-700 dark:text-gray-600 dark:hover:text-gray-300"
+						class="flex h-6 w-6 items-center justify-center rounded-lg text-base-400 transition-colors duration-75 hover:text-base-700 dark:text-base-600 dark:hover:text-base-300"
 						type="button"
 						on:click={openNewTarget}
 						title={$i18n.t('settings.personal.notifications.addNotificationTarget.label')}
@@ -244,9 +302,9 @@
 				</div>
 
 				{#if loadingTargets}
-					<p class="text-[0.6875rem] text-gray-400 dark:text-gray-600">{$i18n.t('Loading...')}</p>
+					<p class="text-[0.6875rem] text-base-400 dark:text-base-600">{$i18n.t('Loading...')}</p>
 				{:else if !targets.length}
-					<p class="text-[0.6875rem] text-gray-400 dark:text-gray-600">
+					<p class="text-[0.6875rem] text-base-400 dark:text-base-600">
 						{$i18n.t('No notification targets configured.')}
 					</p>
 				{:else}
@@ -261,26 +319,26 @@
 									<div class="flex min-w-0 items-center gap-2">
 										<label
 											for={`notification-${target.id}-control`}
-											class="truncate text-[0.71875rem] text-gray-600 dark:text-gray-400 transition-colors duration-150 group-hover/setting-row:text-gray-900 group-focus-within/setting-row:text-gray-900 dark:group-hover/setting-row:text-white dark:group-focus-within/setting-row:text-white group-has-[button[id$=-control]:enabled]/setting-row:cursor-pointer group-has-[button[id$=-control]:disabled]/setting-row:cursor-not-allowed"
+											class="truncate text-[0.71875rem] text-base-600 dark:text-base-400 transition-colors duration-150 group-hover/setting-row:text-base-900 group-focus-within/setting-row:text-base-900 dark:group-hover/setting-row:text-white dark:group-focus-within/setting-row:text-white group-has-[button[id$=-control]:enabled]/setting-row:cursor-pointer group-has-[button[id$=-control]:disabled]/setting-row:cursor-not-allowed"
 										>
 											{target.id}
 										</label>
-										<span class="shrink-0 text-[0.625rem] text-gray-400 dark:text-gray-600">
+										<span class="shrink-0 text-[0.625rem] text-base-400 dark:text-base-600">
 											{$i18n.t('Webhook')}
 										</span>
 										{#if target.is_default}
-											<span class="shrink-0 text-[0.625rem] text-gray-400 dark:text-gray-600">
+											<span class="shrink-0 text-[0.625rem] text-base-400 dark:text-base-600">
 												{$i18n.t('Default')}
 											</span>
 										{/if}
 									</div>
 									<div
-										class="truncate text-[0.625rem] leading-tight text-gray-400 dark:text-gray-600"
+										class="truncate text-[0.625rem] leading-tight text-base-400 dark:text-base-600"
 									>
 										{target.config?.url_masked}
 									</div>
 									<div
-										class="truncate text-[0.625rem] leading-tight text-gray-400 dark:text-gray-600"
+										class="truncate text-[0.625rem] leading-tight text-base-400 dark:text-base-600"
 									>
 										{alertLabels || $i18n.t('No chat alerts')}
 										{#if target.events.length}
@@ -293,7 +351,7 @@
 
 								<div class="flex shrink-0 items-center gap-2">
 									<button
-										class="text-[0.625rem] text-gray-400 transition-colors duration-100 hover:text-gray-600 dark:hover:text-gray-300"
+										class="text-[0.625rem] text-base-400 transition-colors duration-100 hover:text-base-600 dark:hover:text-base-300"
 										type="button"
 										on:click={() => sendTest(target)}
 									>
@@ -301,7 +359,7 @@
 									</button>
 									{#if !target.is_default}
 										<button
-											class="text-[0.625rem] text-gray-400 transition-colors duration-100 hover:text-gray-600 dark:hover:text-gray-300"
+											class="text-[0.625rem] text-base-400 transition-colors duration-100 hover:text-base-600 dark:hover:text-base-300"
 											type="button"
 											on:click={async () => {
 												await setDefaultNotificationTarget(localStorage.token, target.id);
@@ -312,14 +370,14 @@
 										</button>
 									{/if}
 									<button
-										class="text-[0.625rem] text-gray-400 transition-colors duration-100 hover:text-gray-600 dark:hover:text-gray-300"
+										class="text-[0.625rem] text-base-400 transition-colors duration-100 hover:text-base-600 dark:hover:text-base-300"
 										type="button"
 										on:click={() => openEditTarget(target)}
 									>
 										{$i18n.t('Edit')}
 									</button>
 									<button
-										class="text-[0.625rem] text-gray-400 transition-colors duration-100 hover:text-gray-600 dark:hover:text-gray-300"
+										class="text-[0.625rem] text-base-400 transition-colors duration-100 hover:text-base-600 dark:hover:text-base-300"
 										type="button"
 										on:click={async () => {
 											await deleteNotificationTarget(localStorage.token, target.id);
@@ -340,7 +398,7 @@
 								</div>
 							</div>
 							{#if index < targets.length - 1}
-								<hr class="my-1 h-px border-0 bg-gray-100/50 dark:bg-white/[0.03]" />
+								<hr class="my-1 h-px border-0 bg-base-100/50 dark:bg-base-0/[0.03]" />
 							{/if}
 						{/each}
 					</div>
@@ -358,7 +416,7 @@
 	bind:show={formOpen}
 >
 	<div class="p-4">
-		<h2 class="mb-3 text-sm font-medium text-gray-900 dark:text-white">
+		<h2 class="mb-3 text-sm font-medium text-base-900 dark:text-base-0">
 			{editingId
 				? $i18n.t('Edit')
 				: $i18n.t('settings.personal.notifications.addNotificationTarget.label')}
@@ -366,7 +424,7 @@
 
 		<label
 			for="notification-form-id"
-			class="block text-[0.625rem] text-gray-400 dark:text-gray-600"
+			class="block text-[0.625rem] text-base-400 dark:text-base-600"
 		>
 			{$i18n.t('Target ID for notify')}
 		</label>
@@ -376,12 +434,12 @@
 			placeholder={$i18n.t('Target ID')}
 			autocomplete="off"
 			spellcheck="false"
-			class="block w-full bg-transparent py-0.5 font-mono text-[0.8125rem] text-gray-700 outline-none placeholder:text-gray-300 dark:text-gray-300 dark:placeholder:text-gray-700"
+			class="block w-full bg-transparent py-0.5 font-mono text-[0.8125rem] text-base-700 outline-none placeholder:text-base-300 dark:text-base-300 dark:placeholder:text-base-700"
 		/>
 
 		<label
 			for="notification-form-url"
-			class="block mt-2 text-[0.625rem] text-gray-400 dark:text-gray-600"
+			class="block mt-2 text-[0.625rem] text-base-400 dark:text-base-600"
 		>
 			{$i18n.t('Webhook')}
 		</label>
@@ -394,10 +452,10 @@
 				: 'https://hooks.slack.com/services/...'}
 			autocomplete="off"
 			spellcheck="false"
-			class="block w-full bg-transparent py-0.5 font-mono text-[0.8125rem] text-gray-700 outline-none placeholder:text-gray-300 dark:text-gray-300 dark:placeholder:text-gray-700"
+			class="block w-full bg-transparent py-0.5 font-mono text-[0.8125rem] text-base-700 outline-none placeholder:text-base-300 dark:text-base-300 dark:placeholder:text-base-700"
 		/>
 
-		<div class="mt-3 mb-1 text-[0.625rem] text-gray-400 dark:text-gray-600">
+		<div class="mt-3 mb-1 text-[0.625rem] text-base-400 dark:text-base-600">
 			{$i18n.t('Automatic Events')}
 		</div>
 		<div class="flex flex-wrap gap-1">
@@ -406,8 +464,8 @@
 					class="h-6 rounded-md px-2 text-[0.6875rem] transition-colors {form.events.includes(
 						event.event
 					)
-						? 'bg-gray-200/60 text-gray-900 dark:bg-white/10 dark:text-white'
-						: 'text-gray-500 hover:text-gray-800 dark:hover:text-gray-300'}"
+						? 'bg-base-200/60 text-base-900 dark:bg-base-0/10 dark:text-base-0'
+						: 'text-base-500 hover:text-base-800 dark:hover:text-base-300'}"
 					type="button"
 					on:click={() => toggleFormEvent(event.event)}
 				>
@@ -417,15 +475,15 @@
 		</div>
 
 		{#if form.events.length}
-			<div class="mt-3 mb-1 text-[0.625rem] text-gray-400 dark:text-gray-600">
+			<div class="mt-3 mb-1 text-[0.625rem] text-base-400 dark:text-base-600">
 				{$i18n.t('Automatic Delivery')}
 			</div>
 			<div class="flex gap-1">
 				{#each ['away', 'always'] as mode}
 					<button
 						class="h-6 rounded-md px-2 text-[0.6875rem] transition-colors {form.delivery === mode
-							? 'bg-gray-200/60 text-gray-900 dark:bg-white/10 dark:text-white'
-							: 'text-gray-500 hover:text-gray-800 dark:hover:text-gray-300'}"
+							? 'bg-base-200/60 text-base-900 dark:bg-base-0/10 dark:text-base-0'
+							: 'text-base-500 hover:text-base-800 dark:hover:text-base-300'}"
 						type="button"
 						on:click={() => (form.delivery = mode as 'away' | 'always')}
 					>
@@ -435,7 +493,7 @@
 			</div>
 		{/if}
 
-		<p class="mt-3 text-[0.625rem] text-gray-400 dark:text-gray-600">
+		<p class="mt-3 text-[0.625rem] text-base-400 dark:text-base-600">
 			{$i18n.t(
 				'The notify tool always sends to an enabled target, regardless of automatic event settings.'
 			)}
@@ -443,14 +501,14 @@
 
 		<div class="mt-4 flex justify-end gap-3">
 			<button
-				class="text-[0.8125rem] text-gray-400 transition-colors duration-100 hover:text-gray-600 dark:hover:text-gray-300"
+				class="text-[0.8125rem] text-base-400 transition-colors duration-100 hover:text-base-600 dark:hover:text-base-300"
 				type="button"
 				on:click={() => (formOpen = false)}
 			>
 				{$i18n.t('Cancel')}
 			</button>
 			<button
-				class="flex h-7 shrink-0 items-center justify-center gap-1.5 rounded-lg bg-gray-900 px-2.5 text-xs font-normal text-white transition hover:bg-black disabled:opacity-60 dark:bg-gray-100 dark:text-gray-900 dark:hover:bg-white"
+				class="flex h-7 shrink-0 items-center justify-center gap-1.5 rounded-lg bg-base-900 px-2.5 text-xs font-normal text-base-0 transition hover:bg-base-1000 disabled:opacity-60 dark:bg-base-100 dark:text-base-900 dark:hover:bg-base-0"
 				type="button"
 				on:click={saveTarget}
 				disabled={savingTarget || (!editingId && !form.url.trim())}

@@ -19,8 +19,6 @@
 	import type { i18n as i18nType, t } from 'i18next';
 
 	const i18n = getContext<Writable<i18nType>>('i18n');
-	const contextCompactions =
-		getContext<Writable<Record<string, 'in_progress' | { error: string }>>>('contextCompactions');
 
 	const dispatch = createEventDispatcher();
 
@@ -31,12 +29,8 @@
 	import { generateTags } from '$lib/apis';
 
 	import {
-		chatId as activeChatId,
-		audioQueue,
 		config,
-		models,
 		settings,
-		temporaryChatEnabled,
 		TTSWorker,
 		user,
 		visibleControls
@@ -52,10 +46,13 @@
 		formatMessageTimestamp,
 		formatMessageTimestampFull,
 		removeDetails,
-		removeAllDetails
+		removeAllDetails,
+		isInternalMessage
 	} from '$lib/utils';
 	import { WEBUI_API_BASE_URL, WEBUI_BASE_URL } from '$lib/constants';
 	import { resolveLocalizedModelName } from '$lib/utils/localizedContent';
+	import { isTemporaryChatId } from '$lib/utils/chatId';
+	import { getCarriedSources } from '$lib/utils/citations';
 	import equal from 'fast-deep-equal';
 
 	import Name from './Name.svelte';
@@ -73,6 +70,9 @@
 	import CodeExecutions from './CodeExecutions.svelte';
 	import ContentRenderer from './ContentRenderer.svelte';
 	import ContextCompactionLabel from './ContextCompactionLabel.svelte';
+	import SubagentResultRow from './SubagentResultRow.svelte';
+	import ChatMessageRow from './ChatMessageRow.svelte';
+	import TimerRow from './TimerRow.svelte';
 	import { KokoroWorker } from '$lib/workers/KokoroWorker';
 	import FileItem from '$lib/components/common/FileItem.svelte';
 	import FollowUps from './ResponseMessage/FollowUps.svelte';
@@ -81,14 +81,17 @@
 	import RegenerateMenu from './ResponseMessage/RegenerateMenu.svelte';
 	import StatusHistory from './ResponseMessage/StatusHistory.svelte';
 	import FullHeightIframe from '$lib/components/common/FullHeightIframe.svelte';
-	import MCPApp from '$lib/components/chat/Messages/MCPApp.svelte';
 	import OutputEditView from './OutputEditView.svelte';
 	import { getOutputText, replaceOutputMessageText, type OutputItem } from './structuredOutput';
+	import { getChatContext } from '$lib/components/chat/context';
+
+	const { audioQueue, models, chatId: activeChatId, temporary: temporaryChatEnabled } = getChatContext();
 
 	interface MessageType {
 		user_id?: string;
 		id: string;
 		model: string;
+		modelName?: string;
 		content: string;
 		output?: OutputItem[];
 		meta?: {
@@ -141,16 +144,25 @@
 			usage?: unknown;
 		};
 		annotation?: { type: string; rating: number };
+		meta?: { response_ended_at?: number };
 	}
 
 	export let chatId = '';
 	export let history;
 	export let messageId;
-	$: compactionStatus = $contextCompactions?.[messageId];
+	$: compacting =
+		!message.done &&
+		(message.output ?? []).some(
+			(item) => item?.type === 'open_webui:context_compaction' && item.status === 'in_progress'
+		);
 	export let selectedModels = [];
 
 	let messageSource = history.messages[messageId];
 	let message: MessageType = structuredClone(messageSource);
+	$: isAgent =
+		message.model?.startsWith('agent:') || selectedModels.some((id) => id.startsWith('agent:'));
+	// Agents regenerate on a fork of their own conversation; continuing or copying a reply has no turn to fork.
+	$: canBranch = !isAgent;
 	$: if (history.messages) {
 		const source = history.messages[messageId];
 		if (source) {
@@ -171,6 +183,14 @@
 			}
 		}
 	}
+
+	// The message's own sources, plus any from earlier turns that it cites.
+	const getCitationSources = (message: any) => {
+		const sources = message?.sources ?? message?.citations;
+		const carriedSources = getCarriedSources(history.messages, message);
+		return carriedSources.length > 0 ? [...(sources ?? []), ...carriedSources] : sources;
+	};
+	$: citationSources = getCitationSources(message);
 
 	export let siblings;
 
@@ -196,12 +216,14 @@
 
 	export let isLastMessage = true;
 	export let readOnly = false;
-	export let shareMode: 'continue' | null = null;
+	export let writeAccess = false;
 	export let allowDelete = true;
+	export let allowToolApproval: boolean = false;
 	export let compactPreview = false;
 	export let editCodeBlock = true;
 	export let topPadding = false;
 	export let onInsertToNote: ((content: string) => void) | null = null;
+	export let onOpenArtifacts: ((code?: string) => void) | null = null;
 
 	let intelligentUIFollowUpPending = false;
 	const canWriteIntelligentUI = () => canPersistIntelligentUI(message, readOnly, $user?.id);
@@ -287,9 +309,20 @@
 	let showDeleteConfirm = false;
 
 	let model = null;
-	$: localizedModelName = model ? resolveLocalizedModelName(model, $i18n.language) : message.model;
-	$: model = $models.find((m) => m.id === message.model);
+	$: localizedModelName = model
+		? resolveLocalizedModelName(model, $i18n.language)
+		: message.modelName || message.model;
+	$: model = ($models ?? []).find((m) => m.id === message.model);
+	$: selectedModel = message?.selectedModelId
+		? ($models ?? []).find((m) => m.id === message.selectedModelId)
+		: null;
+	$: selectedModelName = selectedModel
+		? resolveLocalizedModelName(selectedModel, $i18n.language)
+		: message?.selectedModelId;
+	$: showSelectedModel = !!message?.selectedModelId && message?.strategy !== 'random';
+	$: responseTimestamp = message?.meta?.response_ended_at ?? message?.timestamp;
 
+	$: parentMessage = history.messages[message?.parentId];
 	$: statusEntries = message?.statusHistory ?? [...(message?.status ? [message?.status] : [])];
 	$: hasVisibleStatus =
 		(model?.info?.meta?.capabilities?.status_updates ?? true) &&
@@ -300,6 +333,7 @@
 	$: hasResponseContent = Boolean((message.content ?? '').trim() || message.output?.length);
 
 	let edit = false;
+	let editButtonElement: HTMLButtonElement;
 	let editedContent = '';
 	let editedOutput: any[] | null = null;
 	let editTextAreaElement: HTMLTextAreaElement;
@@ -547,6 +581,7 @@
 	};
 
 	const saveAsCopyHandler = async () => {
+		if (!canBranch) return;
 		if (editedOutput) {
 			editMessage(message.id, { output: editedOutput });
 		} else {
@@ -566,11 +601,13 @@
 		editedContent = '';
 		editedOutput = null;
 		await tick();
+		editButtonElement?.focus();
 	};
 
 	let feedbackLoading = false;
 
 	const feedbackHandler = async (rating: number | null = null, details: object | null = null) => {
+		if (feedbackLoading && rating !== null) return;
 		feedbackLoading = true;
 		console.log('Feedback', rating, details);
 
@@ -609,7 +646,7 @@
 					: {})
 			},
 			meta: {
-				arena: message ? message.arena : false,
+				strategy: message?.strategy ?? null,
 				model_id: message.model,
 				message_id: message.id,
 				message_index: messages.length,
@@ -624,7 +661,7 @@
 			feedbackItem.data.model_id,
 			...(feedbackItem.data.sibling_model_ids ?? [])
 		].reduce((acc, modelId) => {
-			const model = $models.find((m) => m.id === modelId);
+			const model = ($models ?? []).find((m) => m.id === modelId);
 			if (model) {
 				acc[model.id] = model?.info?.base_model_id ?? null;
 			} else {
@@ -667,12 +704,15 @@
 
 			if (!updatedMessage.annotation?.tags && (message?.content ?? '') !== '') {
 				// attempt to generate tags
-				const tags = await generateTags(localStorage.token, message.model, messages, chatId).catch(
-					(error) => {
-						console.error(error);
-						return [];
-					}
-				);
+				const tags = await generateTags(
+					localStorage.token,
+					message?.selectedModelId ?? message.model,
+					messages,
+					chatId
+				).catch((error) => {
+					console.error(error);
+					return [];
+				});
 				console.log(tags);
 
 				if (tags) {
@@ -731,8 +771,25 @@
 			const range = selection.getRangeAt(0);
 			const tempDiv = document.createElement('div');
 
+			// Copy formulas as TeX source, rendered KaTeX pastes garbled
+			const katexElements = [...document.querySelectorAll('.katex')].filter((katex) =>
+				selection.containsNode(katex, true)
+			);
+			const texNodes = katexElements.map((katex) => {
+				const tex = katex.querySelector('annotation[encoding="application/x-tex"]').textContent;
+				const texNode = document.createTextNode(
+					katex.closest('.katex-display') ? `$$${tex}$$` : `$${tex}$`
+				);
+				if (katex.contains(range.startContainer)) range.setStartBefore(katex);
+				if (katex.contains(range.endContainer)) range.setEndAfter(katex);
+				katex.before(texNode);
+				katex.style.display = 'none';
+				return texNode;
+			});
+
 			// Remove background, color, and font styles
 			tempDiv.appendChild(range.cloneContents());
+			tempDiv.querySelectorAll('.katex').forEach((katex) => katex.remove());
 
 			tempDiv.querySelectorAll('table').forEach((table) => {
 				table.style.borderCollapse = 'collapse';
@@ -748,6 +805,9 @@
 			// Put cleaned HTML + plain text into clipboard
 			e.clipboardData.setData('text/html', tempDiv.innerHTML);
 			e.clipboardData.setData('text/plain', selection.toString());
+
+			katexElements.forEach((katex) => (katex.style.display = ''));
+			texNodes.forEach((texNode) => texNode.remove());
 		}
 	};
 
@@ -793,7 +853,7 @@
 	>
 		<div class={`shrink-0 ltr:mr-2 rtl:ml-2 hidden @lg:flex mt-0.5 `}>
 			<ProfileImage
-				src={`${WEBUI_API_BASE_URL}/models/model/profile/image?id=${model?.id ?? message.model}&lang=${$i18n.language}`}
+				src={`${WEBUI_API_BASE_URL}/models/model/profile/image?id=${model?.id ?? message.model}&lang=${$i18n.language}&v=${model?.info?.updated_at}`}
 				className={'size-7 assistant-message-profile-image'}
 			/>
 		</div>
@@ -802,14 +862,30 @@
 			{#if !compactPreview}
 				<Name>
 					<Tooltip content={localizedModelName} placement="top-start">
-						<span id="response-message-model-name" class="line-clamp-1 text-black dark:text-white">
+						<span
+							id="response-message-model-name"
+							class="line-clamp-1 text-base-1000 dark:text-base-0"
+						>
 							{localizedModelName}
 						</span>
 					</Tooltip>
+					{#if showSelectedModel}
+						<span class="truncate text-base-500">{selectedModelName}</span>
+					{/if}
 				</Name>
 			{/if}
 
-			{#if message.contextSummary && !compactionStatus}
+			{#if isInternalMessage(parentMessage)}
+				{#if parentMessage.meta.type === 'timer'}
+					<TimerRow content={parentMessage.content} />
+				{:else if parentMessage.meta.type === 'message'}
+					<ChatMessageRow content={parentMessage.content} />
+				{:else}
+					<SubagentResultRow content={parentMessage.content} />
+				{/if}
+			{/if}
+
+			{#if message.contextSummary}
 				<ContextCompactionLabel summary={message.contextSummary} {compactPreview} />
 			{/if}
 
@@ -820,15 +896,24 @@
 							<StatusHistory statusHistory={message?.statusHistory} />
 						{/if}
 
-						{#if message?.files && message.files?.filter( (f) => ['image', 'file'].includes(f.type) ).length > 0}
+						{#if message?.files && message.files?.filter( (f) => ['image', 'video', 'file'].includes(f.type) ).length > 0}
 							<div
 								class="my-1 w-full flex overflow-x-auto gap-2 flex-wrap"
 								dir={$settings?.chatDirection ?? 'auto'}
 							>
-								{#each message.files.filter((f) => ['image', 'file'].includes(f.type)) as file}
+								{#each message.files.filter( (f) => ['image', 'video', 'file'].includes(f.type) ) as file}
 									<div>
 										{#if file.type === 'image' || (file?.content_type ?? '').startsWith('image/')}
 											<Image src={file.url} alt={file.name || $i18n.t('Generated Image')} />
+										{:else if file.type === 'video' || (file?.content_type ?? '').startsWith('video/')}
+											<!-- svelte-ignore a11y-media-has-caption -->
+											<video
+												src={file.url}
+												controls
+												preload="metadata"
+												class="max-h-96 max-w-full rounded-xl"
+												aria-label={file.name || $i18n.t('Generated Video')}
+											></video>
 										{:else}
 											<FileItem
 												item={file}
@@ -852,7 +937,9 @@
 								{#each message.embeds as embed, idx}
 									<div class="my-2 w-full" id={`${message.id}-embeds-${idx}`}>
 										{#if typeof embed === 'object' && embed?.type === 'mcp_app'}
-											{#key embed}<MCPApp app={embed} />{/key}
+											{#key JSON.stringify(embed)}{#await import('$lib/components/chat/Messages/MCPApp.svelte') then { default: MCPApp }}<MCPApp
+														app={embed}
+													/>{/await}{/key}
 										{:else if typeof embed === 'string'}
 											<FullHeightIframe
 												src={embed}
@@ -869,7 +956,7 @@
 
 						{#if edit === true}
 							<div
-								class="w-full bg-gray-50 dark:bg-gray-800 rounded-3xl px-3 py-3 my-2 {($settings?.highContrastMode ??
+								class="w-full bg-base-50 dark:bg-base-800 rounded-3xl px-3 py-3 my-2 {($settings?.highContrastMode ??
 								false)
 									? 'focus-within:outline focus-within:outline-2 focus-within:-outline-offset-2 focus-within:outline-blue-500'
 									: ''}"
@@ -888,7 +975,7 @@
 										aria-label={$i18n.t('Message')}
 										id="message-edit-{message.id}"
 										bind:this={editTextAreaElement}
-										class=" bg-transparent outline-hidden focus-visible:outline-none! w-full resize-none text-[0.9375rem]"
+										class=" bg-transparent outline-hidden focus-visible:outline-none! w-full resize-none text-[0.90625rem]"
 										bind:value={editedContent}
 										on:input={(e) => {
 											const messagesContainer = document.getElementById('messages-container');
@@ -902,14 +989,18 @@
 										}}
 										on:keydown={(e) => {
 											if (e.key === 'Escape') {
-												document.getElementById('close-edit-message-button')?.click();
+												cancelEditMessage();
 											}
 
 											const isCmdOrCtrlPressed = e.metaKey || e.ctrlKey;
 											const isEnterPressed = e.key === 'Enter';
 
-											if (isCmdOrCtrlPressed && isEnterPressed) {
-												document.getElementById('confirm-edit-message-button')?.click();
+											if (
+												isCmdOrCtrlPressed &&
+												isEnterPressed &&
+												(!message.user_id || message.user_id === $user?.id)
+											) {
+												editMessageConfirmHandler();
 											}
 										}}
 									></textarea>
@@ -917,21 +1008,23 @@
 
 								<div class=" mt-2 flex justify-between text-sm font-normal">
 									<div>
-										<button
-											id="save-new-message-button"
-											class="flex h-7 shrink-0 items-center justify-center gap-1.5 rounded-lg bg-gray-100 px-2.5 text-xs font-normal text-gray-800 transition hover:bg-gray-100/70 disabled:opacity-60 dark:bg-gray-850 dark:text-white dark:hover:bg-gray-850/60"
-											on:click={() => {
-												saveAsCopyHandler();
-											}}
-										>
-											{$i18n.t('Save As Copy')}
-										</button>
+										{#if canBranch}
+											<button
+												id="save-new-message-button"
+												class="flex h-7 shrink-0 items-center justify-center gap-1.5 rounded-lg bg-base-100 px-2.5 text-xs font-normal text-base-800 transition hover:bg-base-100/70 disabled:opacity-60 dark:bg-base-850 dark:text-base-0 dark:hover:bg-base-850/60"
+												on:click={() => {
+													saveAsCopyHandler();
+												}}
+											>
+												{$i18n.t('Save As Copy')}
+											</button>
+										{/if}
 									</div>
 
 									<div class="flex space-x-1.5">
 										<button
 											id="close-edit-message-button"
-											class="flex h-7 shrink-0 items-center justify-center gap-1.5 rounded-lg px-2.5 text-xs font-normal text-gray-600 transition hover:bg-gray-100 hover:text-gray-900 disabled:opacity-60 dark:text-gray-400 dark:hover:bg-gray-850 dark:hover:text-white"
+											class="flex h-7 shrink-0 items-center justify-center gap-1.5 rounded-lg px-2.5 text-xs font-normal text-base-600 transition hover:bg-base-100 hover:text-base-900 disabled:opacity-60 dark:text-base-400 dark:hover:bg-base-850 dark:hover:text-base-0"
 											on:click={() => {
 												cancelEditMessage();
 											}}
@@ -942,7 +1035,7 @@
 										{#if !message.user_id || message.user_id === $user?.id}
 											<button
 												id="confirm-edit-message-button"
-												class="flex h-7 shrink-0 items-center justify-center gap-1.5 rounded-lg bg-gray-900 px-2.5 text-xs font-normal text-white transition hover:bg-black disabled:opacity-60 dark:bg-gray-100 dark:text-gray-900 dark:hover:bg-white"
+												class="flex h-7 shrink-0 items-center justify-center gap-1.5 rounded-lg bg-base-900 px-2.5 text-xs font-normal text-base-0 transition hover:bg-base-1000 disabled:opacity-60 dark:bg-base-100 dark:text-base-900 dark:hover:bg-base-0"
 												on:click={() => {
 													editMessageConfirmHandler();
 												}}
@@ -960,27 +1053,31 @@
 							class="w-full flex flex-col relative {edit ? 'hidden' : ''}"
 							id="response-content-container"
 						>
-							{#if hasResponseContent && message.error !== true}
+							{#if message.error !== true}
+								<!-- Mount before the first chunk so artifact detection can recognize new content. -->
 								<!-- always show message contents even if there's an error -->
 								<!-- unless message.error === true which is legacy error handling, where the error message is stored in message.content -->
 								<ContentRenderer
 									id={`${chatId}-${message.id}`}
 									{chatId}
+									{onOpenArtifacts}
 									messageId={message.id}
-									content={message.content}
+									content={message.content ?? ''}
 									output={message.output}
-									sources={message.sources}
+									sources={citationSources}
 									floatingButtons={message?.done &&
 										!readOnly &&
 										($settings?.showFloatingActionButtons ?? true)}
 									save={(!readOnly && (!message.user_id || message.user_id === $user?.id)) ||
-										(shareMode === 'continue' && message.user_id === $user?.id)}
+										(writeAccess && message.user_id === $user?.id)}
 									preview={!readOnly}
 									{compactPreview}
 									editCodeBlock={!readOnly && editCodeBlock}
 									{topPadding}
 									done={message?.done ?? false}
 									allowEmbeds={!readOnly}
+									allowToolApproval={allowToolApproval &&
+										(!message.user_id || message.user_id === $user?.id)}
 									{model}
 									onTaskClick={async (e) => {
 										console.log(e);
@@ -1022,14 +1119,10 @@
 								/>
 							{/if}
 
-							{#if compactionStatus}
-								<ContextCompactionLabel status={compactionStatus} {compactPreview} />
-							{/if}
-
-							{#if !compactionStatus && !message.done && !message.error && (hasResponseContent || !hasVisibleStatus)}
-								<div class="text-[0.9375rem] leading-relaxed">
+							{#if !compacting && !message.done && !message.error && (hasResponseContent || !hasVisibleStatus)}
+								<div class="text-[0.90625rem] leading-relaxed">
 									<span
-										class="inline-block w-[0.125rem] h-3.5 bg-gray-400 dark:bg-gray-500 ml-0.5 animate-cursor-pulse align-text-bottom"
+										class="inline-block w-[0.125rem] h-3.5 bg-base-400 dark:bg-base-500 ml-0.5 animate-cursor-pulse align-text-bottom"
 									></span>
 								</div>
 							{/if}
@@ -1038,12 +1131,12 @@
 								<Error content={message?.error?.content ?? message.content} />
 							{/if}
 
-							{#if (message?.sources || message?.citations) && (model?.info?.meta?.capabilities?.citations ?? true)}
+							{#if citationSources && (model?.info?.meta?.capabilities?.citations ?? true)}
 								<Citations
 									bind:this={citationsElement}
 									id={message?.id}
 									{chatId}
-									sources={message?.sources ?? message?.citations}
+									sources={citationSources}
 									{readOnly}
 								/>
 							{/if}
@@ -1055,18 +1148,18 @@
 					</div>
 				</div>
 
-				{#if compactPreview && message.timestamp}
-					<div class="mt-0.5 flex justify-start whitespace-nowrap text-gray-600 dark:text-gray-500">
+				{#if compactPreview && responseTimestamp}
+					<div class="mt-0.5 flex justify-start whitespace-nowrap text-base-600 dark:text-base-500">
 						<Tooltip
 							className="flex self-center"
-							content={formatMessageTimestampFull(message.timestamp * 1000, $i18n.language)}
+							content={formatMessageTimestampFull(responseTimestamp * 1000, $i18n.language)}
 							placement="bottom"
 						>
 							<time
-								datetime={new Date(message.timestamp * 1000).toISOString()}
-								class="ml-1 shrink-0 whitespace-nowrap text-[0.6875rem] tabular-nums text-gray-400 dark:text-gray-600 select-none"
+								datetime={new Date(responseTimestamp * 1000).toISOString()}
+								class="ml-1 shrink-0 whitespace-nowrap text-[0.6875rem] tabular-nums text-base-400 dark:text-base-600 select-none"
 							>
-								{formatMessageTimestamp(message.timestamp * 1000, $i18n.language)}
+								{formatMessageTimestamp(responseTimestamp * 1000, $i18n.language)}
 							</time>
 						</Tooltip>
 					</div>
@@ -1075,8 +1168,8 @@
 						bind:this={buttonsContainerElement}
 						class="flex items-center justify-start overflow-x-auto whitespace-nowrap buttons {($settings?.highContrastMode ??
 						false)
-							? 'text-gray-600 dark:text-gray-500'
-							: 'text-gray-600/80 dark:text-gray-500/70'} mt-0.5 [&>*]:shrink-0"
+							? 'text-base-600 dark:text-base-500'
+							: 'text-base-600/80 dark:text-base-500/70'} mt-0.5 [&>*]:shrink-0"
 					>
 						{#if message.done || siblings.length > 1}
 							{#if message.done && onInsertToNote && visibleResponseContent}
@@ -1085,7 +1178,7 @@
 										aria-label={$i18n.t('Insert into note')}
 										class="{isLastMessage || ($settings?.highContrastMode ?? false)
 											? 'visible'
-											: 'hover-reveal'} inline-flex size-7 shrink-0 items-center justify-center p-1.5 hover:bg-black/5 dark:hover:bg-white/5 rounded-lg dark:hover:text-gray-400 hover:text-gray-600 transition"
+											: 'hover-reveal'} inline-flex size-7 shrink-0 items-center justify-center p-1.5 hover:bg-base-1000/5 dark:hover:bg-base-0/5 rounded-lg dark:hover:text-base-400 hover:text-base-600 transition"
 										on:click={() => {
 											onInsertToNote?.(visibleResponseContent);
 										}}
@@ -1113,7 +1206,7 @@
 								<div class="flex self-center min-w-fit" dir="ltr">
 									<button
 										aria-label={$i18n.t('Previous message')}
-										class="self-center inline-flex size-7 shrink-0 items-center justify-center p-1.5 hover:bg-black/5 dark:hover:bg-white/5 dark:hover:text-gray-400 hover:text-gray-600 rounded-md transition"
+										class="self-center inline-flex size-7 shrink-0 items-center justify-center p-1.5 hover:bg-base-1000/5 dark:hover:bg-base-0/5 dark:hover:text-base-400 hover:text-base-600 rounded-md transition previous-message-button"
 										on:click={() => {
 											showPreviousMessage(message);
 										}}
@@ -1123,7 +1216,7 @@
 
 									{#if messageIndexEdit}
 										<div
-											class="text-sm flex justify-center font-normal self-center dark:text-gray-500 min-w-fit"
+											class="text-sm flex justify-center font-normal self-center dark:text-base-500 min-w-fit"
 										>
 											<input
 												aria-label={$i18n.t('Message number')}
@@ -1145,13 +1238,13 @@
 														messageIndexEdit = false;
 													}
 												}}
-												class="bg-transparent font-normal self-center dark:text-gray-500 min-w-fit outline-hidden"
+												class="bg-transparent font-normal self-center dark:text-base-500 min-w-fit outline-hidden"
 											/>/{siblings.length}
 										</div>
 									{:else}
 										<!-- svelte-ignore a11y-no-static-element-interactions -->
 										<div
-											class="text-sm tracking-widest font-normal self-center dark:text-gray-500 min-w-fit"
+											class="text-sm tracking-widest font-normal self-center dark:text-base-500 min-w-fit"
 											on:dblclick={async () => {
 												messageIndexEdit = true;
 
@@ -1168,7 +1261,7 @@
 									{/if}
 
 									<button
-										class="self-center inline-flex size-7 shrink-0 items-center justify-center p-1.5 hover:bg-black/5 dark:hover:bg-white/5 dark:hover:text-gray-400 hover:text-gray-600 rounded-md transition"
+										class="self-center inline-flex size-7 shrink-0 items-center justify-center p-1.5 hover:bg-base-1000/5 dark:hover:bg-base-0/5 dark:hover:text-base-400 hover:text-base-600 rounded-md transition next-message-button"
 										on:click={() => {
 											showNextMessage(message);
 										}}
@@ -1185,9 +1278,10 @@
 										<Tooltip content={$i18n.t('Edit')} placement="bottom">
 											<button
 												aria-label={$i18n.t('Edit')}
+												bind:this={editButtonElement}
 												class="{isLastMessage || ($settings?.highContrastMode ?? false)
 													? 'visible'
-													: 'hover-reveal'} inline-flex size-7 shrink-0 items-center justify-center p-1.5 hover:bg-black/5 dark:hover:bg-white/5 rounded-lg dark:hover:text-gray-400 hover:text-gray-600 transition"
+													: 'hover-reveal'} inline-flex size-7 shrink-0 items-center justify-center p-1.5 hover:bg-base-1000/5 dark:hover:bg-base-0/5 rounded-lg dark:hover:text-base-400 hover:text-base-600 transition"
 												on:click={() => {
 													editMessageHandler();
 												}}
@@ -1203,7 +1297,7 @@
 										aria-label={$i18n.t('Copy')}
 										class="{isLastMessage || ($settings?.highContrastMode ?? false)
 											? 'visible'
-											: 'hover-reveal'} inline-flex size-7 shrink-0 items-center justify-center p-1.5 hover:bg-black/5 dark:hover:bg-white/5 rounded-lg dark:hover:text-gray-400 hover:text-gray-600 transition copy-response-button"
+											: 'hover-reveal'} inline-flex size-7 shrink-0 items-center justify-center p-1.5 hover:bg-base-1000/5 dark:hover:bg-base-0/5 rounded-lg dark:hover:text-base-400 hover:text-base-600 transition copy-response-button"
 										on:click={() => {
 											copyToClipboard(visibleResponseContent);
 										}}
@@ -1219,7 +1313,7 @@
 											id="speak-button-{message.id}"
 											class="{isLastMessage || ($settings?.highContrastMode ?? false)
 												? 'visible'
-												: 'hover-reveal'} inline-flex size-7 shrink-0 items-center justify-center p-1.5 hover:bg-black/5 dark:hover:bg-white/5 rounded-lg dark:hover:text-gray-400 hover:text-gray-600 transition"
+												: 'hover-reveal'} inline-flex size-7 shrink-0 items-center justify-center p-1.5 hover:bg-base-1000/5 dark:hover:bg-base-0/5 rounded-lg dark:hover:text-base-400 hover:text-base-600 transition"
 											on:click={() => {
 												if (!loadingSpeech) {
 													if (speaking) {
@@ -1310,6 +1404,12 @@
 										.split('\n')
 										.map((line) => line.slice(2))
 										.map((line) => (line.endsWith(',') ? line.slice(0, -1) : line))
+										.map((line) =>
+											line.replace(
+												/: (\d+)$/,
+												(_, count) => `: ${Number(count).toLocaleString($i18n.language)}`
+											)
+										)
 										.join('\n')}
 									<span id="usage-{message.id}" hidden>{usage}</span>
 									<Tooltip
@@ -1322,7 +1422,7 @@
 											aria-describedby="usage-{message.id}"
 											class=" {isLastMessage || ($settings?.highContrastMode ?? false)
 												? 'visible'
-												: 'hover-reveal'} inline-flex size-7 shrink-0 items-center justify-center p-1.5 hover:bg-black/5 dark:hover:bg-white/5 rounded-lg dark:hover:text-gray-400 hover:text-gray-600 transition whitespace-pre-wrap"
+												: 'hover-reveal'} inline-flex size-7 shrink-0 items-center justify-center p-1.5 hover:bg-base-1000/5 dark:hover:bg-base-0/5 rounded-lg dark:hover:text-base-400 hover:text-base-600 transition whitespace-pre-wrap"
 											on:click={() => {
 												console.log(message);
 											}}
@@ -1365,7 +1465,7 @@
 											aria-label={$i18n.t('Fork chat')}
 											class="{isLastMessage || ($settings?.highContrastMode ?? false)
 												? 'visible'
-												: 'hover-reveal'} inline-flex size-7 shrink-0 items-center justify-center p-1.5 hover:bg-black/5 dark:hover:bg-white/5 rounded-lg dark:hover:text-gray-400 hover:text-gray-600 transition"
+												: 'hover-reveal'} inline-flex size-7 shrink-0 items-center justify-center p-1.5 hover:bg-base-1000/5 dark:hover:bg-base-0/5 rounded-lg dark:hover:text-base-400 hover:text-base-600 transition"
 											on:click={() => {
 												forkHandler?.(message.id);
 											}}
@@ -1413,19 +1513,19 @@
 									</Tooltip>
 								{/if}
 
-								{#if (!readOnly && (!message.user_id || message.user_id === $user?.id)) || (shareMode === 'continue' && message.user_id === $user?.id)}
-									{#if !readOnly && !$temporaryChatEnabled && ($config?.features.enable_message_rating ?? true) && ($user?.role === 'admin' || ($user?.permissions?.chat?.rate_response ?? true))}
+								{#if (!readOnly && (!message.user_id || message.user_id === $user?.id)) || (writeAccess && message.user_id === $user?.id)}
+									{#if !readOnly && !isTemporaryChatId(chatId) && ($config?.features.enable_message_rating ?? true) && ($user?.role === 'admin' || ($user?.permissions?.chat?.rate_response ?? true))}
 										<Tooltip content={$i18n.t('Good Response')} placement="bottom">
 											<button
 												aria-label={$i18n.t('Good Response')}
 												class="{isLastMessage || ($settings?.highContrastMode ?? false)
 													? 'visible'
-													: 'hover-reveal'} inline-flex size-7 shrink-0 items-center justify-center p-1.5 hover:bg-black/5 dark:hover:bg-white/5 rounded-lg {(
+													: 'hover-reveal'} inline-flex size-7 shrink-0 items-center justify-center p-1.5 hover:bg-base-1000/5 dark:hover:bg-base-0/5 rounded-lg {(
 													message?.annotation?.rating ?? ''
 												).toString() === '1'
-													? 'bg-gray-100 dark:bg-gray-800'
-													: ''} dark:hover:text-gray-400 hover:text-gray-600 transition disabled:cursor-progress disabled:hover:bg-transparent"
-												disabled={feedbackLoading}
+													? 'bg-base-100 dark:bg-base-800'
+													: ''} dark:hover:text-base-400 hover:text-base-600 transition aria-disabled:cursor-progress aria-disabled:hover:bg-transparent"
+												aria-disabled={feedbackLoading}
 												on:click={async (e) => {
 													e.stopPropagation();
 													await feedbackHandler(1);
@@ -1464,12 +1564,12 @@
 												aria-label={$i18n.t('Bad Response')}
 												class="{isLastMessage || ($settings?.highContrastMode ?? false)
 													? 'visible'
-													: 'hover-reveal'} inline-flex size-7 shrink-0 items-center justify-center p-1.5 hover:bg-black/5 dark:hover:bg-white/5 rounded-lg {(
+													: 'hover-reveal'} inline-flex size-7 shrink-0 items-center justify-center p-1.5 hover:bg-base-1000/5 dark:hover:bg-base-0/5 rounded-lg {(
 													message?.annotation?.rating ?? ''
 												).toString() === '-1'
-													? 'bg-gray-100 dark:bg-gray-800'
-													: ''} dark:hover:text-gray-400 hover:text-gray-600 transition disabled:cursor-progress disabled:hover:bg-transparent"
-												disabled={feedbackLoading}
+													? 'bg-base-100 dark:bg-base-800'
+													: ''} dark:hover:text-base-400 hover:text-base-600 transition aria-disabled:cursor-progress aria-disabled:hover:bg-transparent"
+												aria-disabled={feedbackLoading}
 												on:click={async (e) => {
 													e.stopPropagation();
 													await feedbackHandler(-1);
@@ -1504,7 +1604,7 @@
 										</Tooltip>
 									{/if}
 
-									{#if isLastMessage && ($user?.role === 'admin' || ($user?.permissions?.chat?.continue_response ?? true))}
+									{#if canBranch && isLastMessage && ($user?.role === 'admin' || ($user?.permissions?.chat?.continue_response ?? true))}
 										<Tooltip content={$i18n.t('Continue Response')} placement="bottom">
 											<button
 												aria-label={$i18n.t('Continue Response')}
@@ -1512,7 +1612,7 @@
 												id="continue-response-button"
 												class="{isLastMessage || ($settings?.highContrastMode ?? false)
 													? 'visible'
-													: 'hover-reveal'} inline-flex size-7 shrink-0 items-center justify-center p-1.5 hover:bg-black/5 dark:hover:bg-white/5 rounded-lg dark:hover:text-gray-400 hover:text-gray-600 transition"
+													: 'hover-reveal'} inline-flex size-7 shrink-0 items-center justify-center p-1.5 hover:bg-base-1000/5 dark:hover:bg-base-0/5 rounded-lg dark:hover:text-base-400 hover:text-base-600 transition"
 												on:click={() => {
 													continueResponse(message);
 												}}
@@ -1537,7 +1637,7 @@
 									{/if}
 								{/if}
 
-								{#if (!readOnly && (!message.user_id || message.user_id === $user?.id)) || shareMode === 'continue'}
+								{#if (!readOnly && (!message.user_id || message.user_id === $user?.id)) || writeAccess}
 									{#if $user?.role === 'admin' || ($user?.permissions?.chat?.regenerate_response ?? true)}
 										{#if $settings?.regenerateMenu ?? true}
 											<button
@@ -1579,13 +1679,18 @@
 													});
 												}}
 											>
-												<Tooltip content={$i18n.t('Regenerate')} placement="bottom">
+												<Tooltip
+													content={isAgent
+														? $i18n.t('Regenerate (file changes are not undone)')
+														: $i18n.t('Regenerate')}
+													placement="bottom"
+												>
 													<button
 														type="button"
 														aria-label={$i18n.t('Regenerate')}
 														class="{isLastMessage || ($settings?.highContrastMode ?? false)
 															? 'visible'
-															: 'hover-reveal'} inline-flex size-7 shrink-0 items-center justify-center p-1.5 hover:bg-black/5 dark:hover:bg-white/5 rounded-lg dark:hover:text-gray-400 hover:text-gray-600 transition"
+															: 'hover-reveal'} inline-flex size-7 shrink-0 items-center justify-center p-1.5 hover:bg-base-1000/5 dark:hover:bg-base-0/5 rounded-lg dark:hover:text-base-400 hover:text-base-600 transition"
 													>
 														<svg
 															class="size-4"
@@ -1624,13 +1729,18 @@
 												</Tooltip>
 											</RegenerateMenu>
 										{:else}
-											<Tooltip content={$i18n.t('Regenerate')} placement="bottom">
+											<Tooltip
+												content={isAgent
+													? $i18n.t('Regenerate (file changes are not undone)')
+													: $i18n.t('Regenerate')}
+												placement="bottom"
+											>
 												<button
 													type="button"
 													aria-label={$i18n.t('Regenerate')}
 													class="{isLastMessage || ($settings?.highContrastMode ?? false)
 														? 'visible'
-														: 'hover-reveal'} inline-flex size-7 shrink-0 items-center justify-center p-1.5 hover:bg-black/5 dark:hover:bg-white/5 rounded-lg dark:hover:text-gray-400 hover:text-gray-600 transition regenerate-response-button"
+														: 'hover-reveal'} inline-flex size-7 shrink-0 items-center justify-center p-1.5 hover:bg-base-1000/5 dark:hover:bg-base-0/5 rounded-lg dark:hover:text-base-400 hover:text-base-600 transition regenerate-response-button"
 													on:click={() => {
 														showRateComment = false;
 														regenerateResponse(message);
@@ -1687,7 +1797,7 @@
 									{/if}
 								{/if}
 
-								{#if (!readOnly && (!message.user_id || message.user_id === $user?.id)) || (shareMode === 'continue' && message.user_id === $user?.id)}
+								{#if (!readOnly && (!message.user_id || message.user_id === $user?.id)) || (writeAccess && message.user_id === $user?.id)}
 									{#each (!readOnly && model?.actions) || [] as action}
 										<Tooltip
 											content={resolveLocalizedFunction(
@@ -1706,7 +1816,7 @@
 												)}
 												class="{isLastMessage || ($settings?.highContrastMode ?? false)
 													? 'visible'
-													: 'hover-reveal'} inline-flex size-7 shrink-0 items-center justify-center p-1.5 hover:bg-black/5 dark:hover:bg-white/5 rounded-lg dark:hover:text-gray-400 hover:text-gray-600 transition"
+													: 'hover-reveal'} inline-flex size-7 shrink-0 items-center justify-center p-1.5 hover:bg-base-1000/5 dark:hover:bg-base-0/5 rounded-lg dark:hover:text-base-400 hover:text-base-600 transition"
 												on:click={() => {
 													actionMessage(action.id, message);
 												}}
@@ -1743,7 +1853,7 @@
 													id="delete-response-button"
 													class="{isLastMessage || ($settings?.highContrastMode ?? false)
 														? 'visible'
-														: 'hover-reveal'} inline-flex size-7 shrink-0 items-center justify-center p-1.5 hover:bg-black/5 dark:hover:bg-white/5 rounded-lg dark:hover:text-gray-400 hover:text-gray-600 transition disabled:opacity-50 disabled:hover:bg-transparent"
+														: 'hover-reveal'} inline-flex size-7 shrink-0 items-center justify-center p-1.5 hover:bg-base-1000/5 dark:hover:bg-base-0/5 rounded-lg dark:hover:text-base-400 hover:text-base-600 transition disabled:opacity-50 disabled:hover:bg-transparent"
 													disabled={!allowDelete}
 													on:click={(e) => {
 														if (!allowDelete) {
@@ -1762,17 +1872,17 @@
 										{/if}
 									{/if}
 
-									{#if message.timestamp}
+									{#if responseTimestamp}
 										<Tooltip
 											className="flex self-center"
-											content={formatMessageTimestampFull(message.timestamp * 1000, $i18n.language)}
+											content={formatMessageTimestampFull(responseTimestamp * 1000, $i18n.language)}
 											placement="bottom"
 										>
 											<time
-												datetime={new Date(message.timestamp * 1000).toISOString()}
-												class="hover-reveal ml-1 shrink-0 whitespace-nowrap text-[0.6875rem] tabular-nums text-gray-400 dark:text-gray-600 select-none"
+												datetime={new Date(responseTimestamp * 1000).toISOString()}
+												class="hover-reveal ml-1 shrink-0 whitespace-nowrap text-[0.6875rem] tabular-nums text-base-400 dark:text-base-600 select-none"
 											>
-												{formatMessageTimestamp(message.timestamp * 1000, $i18n.language)}
+												{formatMessageTimestamp(responseTimestamp * 1000, $i18n.language)}
 											</time>
 										</Tooltip>
 									{/if}
@@ -1795,7 +1905,7 @@
 						{/key}
 					{/if}
 
-					{#if (isLastMessage || ($settings?.keepFollowUpPrompts ?? false)) && message.done && !readOnly && (message?.followUps ?? []).length > 0}
+					{#if (isLastMessage || (canBranch && ($settings?.keepFollowUpPrompts ?? false))) && message.done && !readOnly && (message?.followUps ?? []).length > 0}
 						<div class="my-2.5" in:fade={{ duration: 100 }}>
 							<FollowUps
 								followUps={message?.followUps}

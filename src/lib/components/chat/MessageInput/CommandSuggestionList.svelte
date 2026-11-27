@@ -5,9 +5,14 @@
 	import Skills from './Commands/Skills.svelte';
 	import Emojis from './Commands/Emojis.svelte';
 	import DropdownMenu from '$lib/components/common/DropdownMenu.svelte';
+	import { readable, type Readable, type Writable } from 'svelte/store';
 
 	export let char = '';
 	export let query = '';
+	export let selectedMachineId: Readable<string | null>;
+	export let machineSkills: Writable<any[]>;
+	export let modelId: string | null | (() => string | null) = null;
+	$: selectedModelId = typeof modelId === 'function' ? modelId() : modelId;
 	export let command: (payload: {
 		id: string;
 		label: string;
@@ -20,6 +25,7 @@
 	export let onCompact: () => void = () => {};
 	export let onStatus: () => void = () => {};
 	export let onComments: () => void = () => {};
+	export let onRecord: (() => void) | null = null;
 	export let onSide: () => void = () => {};
 	export let onFork: () => void = () => {};
 	export let onModel: () => void = () => {};
@@ -29,36 +35,32 @@
 	export let onCreateSkill: () => void = () => {};
 	export let insertTextHandler: (text: string) => void = () => {};
 	export let canCompact: boolean | (() => boolean) = false;
-	export let compactDisabled: boolean | (() => boolean) = false;
+	export let compactDisabled: Readable<boolean> = readable(false);
 	export let canStatus: boolean | (() => boolean) = false;
 	export let canComments: boolean | (() => boolean) = false;
 	export let canSide: boolean | (() => boolean) = false;
 	export let canFork: boolean | (() => boolean) = false;
-	export let forkDisabled: boolean | (() => boolean) = false;
+	export let forkDisabled: Readable<boolean> = readable(false);
 	export let canTemporary: boolean | (() => boolean) = false;
 	export let temporaryEnabled: boolean | (() => boolean) = false;
 	export let hasChatContent = false;
 	export let canCreateSkill: boolean | (() => boolean) = false;
-	export let contextUsage = null;
+	export let contextUsage: Readable<any> = readable(null);
 	export let fileUploadEnabled: boolean | (() => boolean) = true;
 
 	$: compactAvailable = typeof canCompact === 'function' ? canCompact() : canCompact;
-	$: isCompactDisabled =
-		typeof compactDisabled === 'function' ? compactDisabled() : compactDisabled;
 	$: statusAvailable = typeof canStatus === 'function' ? canStatus() : canStatus;
 	$: commentsAvailable = typeof canComments === 'function' ? canComments() : canComments;
 	$: sideAvailable = typeof canSide === 'function' ? canSide() : canSide;
 	$: forkAvailable = typeof canFork === 'function' ? canFork() : canFork;
-	$: isForkDisabled = typeof forkDisabled === 'function' ? forkDisabled() : forkDisabled;
 	$: temporaryAvailable = typeof canTemporary === 'function' ? canTemporary() : canTemporary;
 	$: isTemporaryEnabled =
 		typeof temporaryEnabled === 'function' ? temporaryEnabled() : temporaryEnabled;
 	$: createSkillAvailable =
 		typeof canCreateSkill === 'function' ? canCreateSkill() : canCreateSkill;
-	$: resolvedContextUsage = typeof contextUsage === 'function' ? contextUsage() : contextUsage;
-	$: contextHasThreshold = Number(resolvedContextUsage?.threshold) > 0;
+	$: contextHasThreshold = Number($contextUsage?.threshold) > 0;
 	$: contextPercent = contextHasThreshold
-		? Math.max(0, Math.round(resolvedContextUsage?.percent ?? 0))
+		? Math.max(0, Math.round($contextUsage?.percent ?? 0))
 		: null;
 	$: isFileUploadEnabled =
 		typeof fileUploadEnabled === 'function' ? fileUploadEnabled() : fileUploadEnabled;
@@ -111,17 +113,21 @@
 		<div class="max-h-60 overflow-y-auto overflow-x-hidden scrollbar-thin">
 			{#if char === '/'}
 				<SlashCommands
+					{selectedMachineId}
+					{machineSkills}
+					modelId={selectedModelId}
 					bind:this={suggestionElement}
 					{query}
 					canCompare={onCompare !== null}
 					bind:filteredItems
 					canCompact={compactAvailable}
-					compactDisabled={isCompactDisabled}
+					compactDisabled={$compactDisabled}
 					canStatus={statusAvailable}
 					canComments={commentsAvailable}
+					canRecord={onRecord !== null}
 					canSide={sideAvailable}
 					canFork={forkAvailable}
-					forkDisabled={isForkDisabled}
+					forkDisabled={$forkDisabled}
 					canTemporary={temporaryAvailable}
 					temporaryEnabled={isTemporaryEnabled}
 					{contextPercent}
@@ -147,6 +153,9 @@
 						} else if (type === 'command' && data.id === 'comments') {
 							command({ id: data.id, label: data.id });
 							onComments();
+						} else if (type === 'command' && data.id === 'record') {
+							command({ id: data.id, label: data.id });
+							onRecord?.();
 						} else if (type === 'command' && data.id === 'side') {
 							command({ id: data.id, label: data.id });
 							onSide();
@@ -209,6 +218,8 @@
 				/>
 			{:else if char === '@'}
 				<AtCommands
+					{selectedMachineId}
+					modelId={selectedModelId}
 					bind:this={suggestionElement}
 					{query}
 					fileUploadEnabled={isFileUploadEnabled}
@@ -249,6 +260,9 @@
 				/>
 			{:else if char === '$'}
 				<Skills
+					{selectedMachineId}
+					{machineSkills}
+					modelId={selectedModelId}
 					bind:this={suggestionElement}
 					{query}
 					bind:filteredItems
