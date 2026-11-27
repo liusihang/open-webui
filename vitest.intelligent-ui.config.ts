@@ -11,7 +11,8 @@ export default mergeConfig(
 			setupFiles: ['tests/frontend/browser-setup.ts'],
 			include: [
 				'src/lib/components/chat/Messages/IntelligentUI/*.browser.ts',
-				'src/lib/components/chat/Messages/StructuredOutputRenderer.browser.ts'
+				'src/lib/components/chat/Messages/StructuredOutputRenderer.browser.ts',
+				'src/lib/components/chat/MessageInput/PipeReasoningControls.browser.ts'
 			],
 			pool: 'forks',
 			poolOptions: { forks: { singleFork: true } }

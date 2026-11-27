@@ -13,8 +13,9 @@
 	const i18n: any = getContext('i18n');
 	export let selectedModels: string[] = [];
 	let saving = false;
+	// The composer mounts before the model list is available.
 	$: available = selectedModels
-		.map((id) => $models.find((model) => model.id === id))
+		.map((id) => $models?.find((model) => model.id === id))
 		.filter((model): model is Model => !!model && getPipeReasoningEfforts(model).length > 0);
 	$: permitted =
 		$user?.role === 'admin' ||
